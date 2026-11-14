@@ -1,0 +1,1896 @@
+// web/src/pages/Settings.jsx — repo settings, left-sidebar layout (issue #123,
+// §2.9 + 05 §9): the sidebar holds the standard listing (general, scheduled
+// tasks, push policy, effective config & history, access, CI tokens, webhooks,
+// WAL) plus the Danger Zone in its own danger-styled section. WAL moved here from
+// the main repo tab bar and renders inline; the /wal route is kept for old
+// links. Narrow content column: every tab's form is grid/flex-wrap based and
+// every data table scrolls horizontally — nothing assumes full-page width.
+
+import { createSignal, createEffect, onCleanup, For, Show } from "solid-js";
+import { useNavigate } from "@solidjs/router";
+import repos from "../../sdk/src/index.js";
+import { useData, reportError, asList, invalidate, tolerateMissing } from "../lib/data.js";
+import { dangerMatches } from "../lib/danger.js";
+import { transferBody } from "../lib/transfer.js";
+import {
+  SETTINGS_GROUP,
+  DANGER_GROUP,
+  DEFAULT_SETTINGS_TAB,
+  resolveSettingsTab,
+  settingsTabIdFromHash,
+} from "../lib/settingsNav.js";
+import {
+  MAX_DESCRIPTION_LENGTH,
+  extractDescription,
+  withDescription,
+  validateDescription,
+} from "../lib/repoDescription.js";
+import {
+  FEATURE_KEYS,
+  FEATURE_LABELS,
+  FEATURE_HINTS,
+  extractFeatures,
+  withFeatures,
+} from "../lib/repoFeatures.js";
+import {
+  SELF_APPROVAL_LABEL,
+  SELF_APPROVAL_HINT,
+  extractSelfApproval,
+  withSelfApproval,
+} from "../lib/repoReview.js";
+import {
+  MIRROR_PRESETS,
+  DEFAULT_MIRROR_PRESET,
+  formatNextSync,
+  formatLastResult,
+} from "../lib/mirror.js";
+import {
+  PUSHMIRROR_PRESETS,
+  PUSHMIRROR_AUTH_KINDS,
+  formatPushNextSync,
+  formatPushLastResult,
+  formatPushHostKey,
+  credentialFieldsFor,
+} from "../lib/pushmirror.js";
+import { useRepo, fmtBytes } from "./Repo.jsx";
+import DateTime from "../components/DateTime.jsx";
+import VisSelect from "../components/VisSelect.jsx";
+import ToggleSwitch from "../components/ToggleSwitch.jsx";
+import AccessTab from "./Access.jsx";
+import Wal from "./Wal.jsx";
+import { isVisibility } from "../lib/visibility.js";
+import { saveVisibilityOnly, reseedVisibility, friendlyAccessError } from "../lib/accessSave.js";
+import { docVisibility, reseed as reseedVisTrack, rebase as rebaseVisTrack, isDirty as isVisTrackDirty } from "../lib/visibilityReseed.js";
+import { shouldFetchTeams } from "../lib/access.js";
+import { onSubmitKeys } from "../lib/submitKeys.js";
+
+// --- tiny line diff (LCS) for the per-revision "line diff" ----------------------
+
+export function lineDiff(aLines, bLines) {
+  const n = aLines.length;
+  const m = bLines.length;
+  const dp = Array.from({ length: n + 1 }, () => new Uint32Array(m + 1));
+  for (let i = n - 1; i >= 0; i--) {
+    for (let j = m - 1; j >= 0; j--) {
+      dp[i][j] = aLines[i] === bLines[j] ? dp[i + 1][j + 1] + 1 : Math.max(dp[i + 1][j], dp[i][j + 1]);
+    }
+  }
+  const rows = [];
+  let i = 0;
+  let j = 0;
+  while (i < n && j < m) {
+    if (aLines[i] === bLines[j]) { rows.push({ t: " ", text: aLines[i] }); i++; j++; }
+    else if (dp[i + 1][j] >= dp[i][j + 1]) { rows.push({ t: "-", text: aLines[i++] }); }
+    else { rows.push({ t: "+", text: bLines[j++] }); }
+  }
+  while (i < n) rows.push({ t: "-", text: aLines[i++] });
+  while (j < m) rows.push({ t: "+", text: bLines[j++] });
+  return rows;
+}
+
+function debounce(fn, ms) {
+  let t = 0;
+  const d = (...args) => { clearTimeout(t); t = setTimeout(() => fn(...args), ms); };
+  d.cancel = () => clearTimeout(t);
+  onCleanup(d.cancel);
+  return d;
+}
+
+// Tab ids live in lib/settingsNav.js (SETTINGS_GROUP + DANGER_GROUP) — the
+// single source the sidebar and the content switch below both read.
+
+// --- tab 0: general (issue #235: repo description) ------------------------------
+// The description rides the WAL-published settings TOML (`description` key):
+// this tab presents a single input and serializes it into the doc instead of
+// exposing raw TOML. PUT stays admin-gated server-side, like every other
+// settings write — a non-admin save surfaces the 403 in the note, the same
+// read-mostly behavior the other admin-only tabs have.
+function GeneralTab(props) {
+  const [getText, setText] = createSignal(null); // null = not yet prefilled
+  const [getNote, setNote] = createSignal("");
+  // Forgejo #345: visibility rides access.json (same doc the Access tab
+  // edits) — a triage+ GET seeds the select, an admin PUT saves it with
+  // the bindings preserved. Non-privileged saves surface the 403 in the
+  // note, the same read-mostly behavior as the description save.
+  const [getVis, setVis] = createSignal(null); // null = not yet prefilled
+  const [getVisBase, setVisBase] = createSignal(null); // null = unseeded (loading)
+  const [getVisNote, setVisNote] = createSignal("");
+  // Forgejo #522: six feature toggles ride the same WAL-published
+  // settings TOML ([features] section) with the existing General-tab
+  // save path (admin-gated PUT, 403 in the note, settings:* +
+  // repo:{full} invalidations). null = not yet prefilled (renders
+  // checked: the server default is enabled).
+  const [getFlags, setFlags] = createSignal(null);
+  const [getFlagsBase, setFlagsBase] = createSignal(null);
+  const [getFlagsNote, setFlagsNote] = createSignal("");
+  // Forgejo #586: the self-approval toggle rides the same
+  // WAL-published settings TOML ([review] allow_self_approval) with the
+  // existing General-tab save path (admin-gated PUT, 403 in the note,
+  // same invalidations). undefined = not yet seeded (loading);
+  // null = seeded-but-unset (renders checked: the server default is
+  // allowed — Forgejo #605: null can never double as the unseeded
+  // sentinel, or unset docs stick on "loading…" forever).
+  const [getSelf, setSelf] = createSignal(undefined);
+  const [getSelfBase, setSelfBase] = createSignal(undefined);
+  const [getSelfNote, setSelfNote] = createSignal("");
+
+  const [getDoc] = useData(`settings:${props.ctx.full}`, () => props.repo.settings.get(), 5000);
+  const [getAccess] = useData(`access:${props.ctx.full}`, () => props.repo.access.get().catch(() => null), 5000);
+  // Forgejo #374: the visibility select offers the owner-appropriate
+  // options (same owner-kind probe as the Access tab — orgs.get 404s to
+  // null for user-owned repos).
+  const owner = () => String(props.ctx?.owner ?? "").trim();
+  const [getOrg] = useData(`org:${owner().toLowerCase()}`, () => {
+    if (!shouldFetchTeams(owner())) return null;
+    return repos.orgs.get(owner()).then((doc) => doc ?? null, () => null);
+  }, 5000);
+  const isOrg = () => getOrg() != null;
+
+  // Prefill once the settings doc arrives and the editor is still untouched.
+  createEffect(() => {
+    const doc = getDoc();
+    if (doc !== undefined && getText() === null) {
+      setText(extractDescription(typeof doc === "string" ? doc : String(doc?.toml ?? "")));
+    }
+    // Forgejo #522: seed the toggles from the [features] section the
+    // same way — untouched editors follow the doc, user edits are never
+    // clobbered (null sentinel, like the description prefill above).
+    if (doc !== undefined && getFlags() === null) {
+      const seed = extractFeatures(typeof doc === "string" ? doc : String(doc?.toml ?? ""));
+      setFlags(seed);
+      setFlagsBase(seed);
+    }
+    // Forgejo #586: seed the self-approval toggle from the [review]
+    // section the same way (undefined sentinel — Forgejo #605: null
+    // means seeded-but-unset, so only undefined counts as untouched;
+    // user edits are never clobbered).
+    if (doc !== undefined && getSelf() === undefined) {
+      const seed = extractSelfApproval(typeof doc === "string" ? doc : String(doc?.toml ?? ""));
+      setSelf(seed);
+      setSelfBase(seed);
+    }
+  });
+
+  // Forgejo #394: the select follows the shared entry while clean — an
+  // Access-tab save, another tab's save, or poll revalidation delivering
+  // a newer doc reseeds the untouched select; user edits are never
+  // clobbered (lib/visibilityReseed.js — the same baseline/dirty pattern
+  // the Access tab already uses). Sets fire only on actual field
+  // changes, so this effect settles instead of looping.
+  const visTrack = () => ({ value: getVis(), base: getVisBase() });
+  createEffect(() => {
+    const next = reseedVisTrack(visTrack(), docVisibility(getAccess()));
+    if (next.value !== getVis()) setVis(next.value);
+    if (next.base !== getVisBase()) setVisBase(next.base);
+  });
+  const visDirty = () => isVisTrackDirty(visTrack());
+
+  async function save() {
+    const desc = String(getText() ?? "");
+    const why = validateDescription(desc);
+    if (why) {
+      setNote(why);
+      return;
+    }
+    try {
+      const doc = getDoc();
+      const current = typeof doc === "string" ? doc : String(doc?.toml ?? "");
+      await props.repo.settings.put(withDescription(current, desc), "");
+      setNote("saved");
+      // Reflect without a full reload: the header reads the shared summary.
+      invalidate(`repo:${props.ctx.full}`);
+      invalidate(`settings:${props.ctx.full}`);
+      invalidate(`settings-effective:${props.ctx.full}`);
+      invalidate(`settings-history:${props.ctx.full}`);
+    } catch (e) { setNote(String(e.message ?? e)); }
+  }
+
+  async function saveVisibility() {
+    const vis = getVis();
+    if (!isVisibility(vis)) {
+      setVisNote("visibility must be public, authenticated, or private");
+      return;
+    }
+    try {
+      // Forgejo #391: one shared save path (lib/accessSave.js) — the CAS
+      // version comes from a fresh access.get() immediately before the
+      // PUT, with one re-read retry on 409.
+      const next = await saveVisibilityOnly(props.repo, vis);
+      setVisNote(`saved (version ${next.version})`);
+      // Forgejo #381: the select shows the PUT's authoritative echo, not
+      // whatever the post-save refetch returns first — the header badge
+      // (shared summary, no-cache server-side) and this select can never
+      // disagree on one screen. The `access:{full}` invalidations below
+      // refetch both entries (keys verified to match the useData seeds);
+      // the 5 s prefill TTL is kept deliberately — ttl=0 would refetch-loop
+      // against the data layer's signal-subscribed effect.
+      // Forgejo #394: rebase the baseline on the authoritative echo so
+      // the form settles clean at the saved value.
+      const confirmed = rebaseVisTrack(visTrack(), next.visibility ?? vis);
+      setVis(confirmed.value);
+      setVisBase(confirmed.base);
+      // Reflect without a full reload: the header badge reads the shared
+      // summary, the Access tab reads the shared access doc.
+      invalidate(`repo:${props.ctx.full}`);
+      invalidate(`access:${props.ctx.full}`);
+    } catch (e) {
+      // Forgejo #391, authoritative + loud: on ANY failure the select is
+      // reseeded from server truth (never left showing an unsaved value)
+      // and the note names the specific cause (403 = not admin,
+      // 409 = changed elsewhere). The shared entry is invalidated too so
+      // the Access tab converges on the same truth. The baseline
+      // rebases to truth too (Forgejo #394), so the form settles clean
+      // instead of flagging the server value as an unsaved edit.
+      const truth = await reseedVisibility(props.repo);
+      if (truth !== null) {
+        const rebased = rebaseVisTrack(visTrack(), truth);
+        setVis(rebased.value);
+        setVisBase(rebased.base);
+      }
+      invalidate(`access:${props.ctx.full}`);
+      setVisNote(friendlyAccessError(e));
+    }
+  }
+
+  const flagsDirty = () => JSON.stringify(getFlags() ?? {}) !== JSON.stringify(getFlagsBase() ?? {});
+
+  const selfDirty = () => getSelf() !== getSelfBase();
+
+  async function saveSelfApproval() {
+    const allowed = getSelf() !== false; // unset renders checked (default ON)
+    try {
+      const doc = getDoc();
+      const current = typeof doc === "string" ? doc : String(doc?.toml ?? "");
+      // withSelfApproval preserves every other section (description,
+      // features, bundles, …) — only the allow_self_approval line is set.
+      await props.repo.settings.put(withSelfApproval(current, allowed), "");
+      setSelf(allowed);
+      setSelfBase(allowed);
+      setSelfNote("saved");
+      // Same invalidations as the features save: the editors read the
+      // shared settings entries (the summary projects no review knob,
+      // so no ETag work — the setting is enforced read-time, never
+      // rendered from a cache).
+      invalidate(`repo:${props.ctx.full}`);
+      invalidate(`settings:${props.ctx.full}`);
+      invalidate(`settings-effective:${props.ctx.full}`);
+      invalidate(`settings-history:${props.ctx.full}`);
+    } catch (e) {
+      // Authoritative + loud (the visibility-save discipline): on ANY
+      // failure the toggle reseeds from server truth and the note names
+      // the cause (403 = not admin).
+      setSelfNote(String(e.message ?? e));
+      try {
+        const fresh = await props.repo.settings.get();
+        const toml = typeof fresh === "string" ? fresh : String(fresh?.toml ?? "");
+        const seed = extractSelfApproval(toml);
+        setSelf(seed);
+        setSelfBase(seed);
+      } catch {
+        // Keep the attempted value; the note names the cause.
+      }
+      invalidate(`settings:${props.ctx.full}`);
+    }
+  }
+
+  async function saveFeatures() {
+    const flags = getFlags();
+    if (!flags) return;
+    try {
+      const doc = getDoc();
+      const current = typeof doc === "string" ? doc : String(doc?.toml ?? "");
+      // withFeatures preserves every other section (description,
+      // bundles, …) — only the [features] block is set.
+      await props.repo.settings.put(withFeatures(current, flags), "");
+      setFlagsBase({ ...flags });
+      setFlagsNote("saved");
+      // Reflect without a full reload: the tab bar and pills read the
+      // shared summary, the editors read the shared settings entries.
+      invalidate(`repo:${props.ctx.full}`);
+      invalidate(`settings:${props.ctx.full}`);
+      invalidate(`settings-effective:${props.ctx.full}`);
+      invalidate(`settings-history:${props.ctx.full}`);
+    } catch (e) {
+      // Authoritative + loud (the visibility-save discipline): on ANY
+      // failure the toggles reseed from server truth (never left
+      // showing an unsaved value) and the note names the cause
+      // (403 = not admin). The shared entry is invalidated too so the
+      // editors converge on the same truth.
+      setFlagsNote(String(e.message ?? e));
+      try {
+        const fresh = await props.repo.settings.get();
+        const toml = typeof fresh === "string" ? fresh : String(fresh?.toml ?? "");
+        const seed = extractFeatures(toml);
+        setFlags(seed);
+        setFlagsBase(seed);
+      } catch {
+        // Keep the attempted values; the note names the cause.
+      }
+      invalidate(`settings:${props.ctx.full}`);
+    }
+  }
+
+  return (
+    <section class="card p-4">
+      <h3 class="mb-2 font-semibold">General</h3>
+      <label class="mb-1 block text-sm" for="repo-description">Description</label>
+      <input
+        id="repo-description"
+        class="input w-full"
+        type="text"
+        maxLength={MAX_DESCRIPTION_LENGTH}
+        placeholder="A short description of this repository"
+        value={getText() ?? ""}
+        onInput={(e) => setText(e.currentTarget.value)}
+      />
+      <p class="muted mt-1 text-xs">Shown in the repo header next to the name. Empty hides it. Saving requires admin.</p>
+      <div class="mt-2 flex flex-wrap items-center gap-2">
+        <button class="pill !border-emerald-500 cursor-pointer select-none" type="button" onClick={save}>Save</button>
+      </div>
+      <Show when={getNote()}>
+        <p class="mt-2 text-sm text-emerald-700 dark:text-emerald-400">{getNote()}</p>
+      </Show>
+      <hr class="my-4 border-current opacity-10" />
+      <h4 class="mb-2 font-semibold">Visibility</h4>
+      <Show when={getAccess() !== undefined} fallback={<p class="muted text-sm">loading…</p>}>
+        <Show when={getAccess()} fallback={<p class="muted text-sm">Sign in with triage role or higher to view visibility.</p>}>
+          <label class="flex items-center gap-2 text-sm">
+            <span class="muted">Who may read this repository:</span>
+            {/* Forgejo #394: unseeded (loading) is a blank disabled select,
+                never a public-looking default — value "" matches no option.
+                Forgejo #410: the control is the shared VisSelect (real <For>
+                render path over identity-stable options). */}
+            <VisSelect
+              value={getVis()}
+              disabled={getVis() === null}
+              onChange={setVis}
+              isOrg={isOrg()}
+            />
+          </label>
+          <Show when={getVis() === null}>
+            <p class="muted mt-1 text-xs">loading current visibility…</p>
+          </Show>
+          <Show when={visDirty()}>
+            <p class="warn-line !mt-1 !text-sm">unsaved changes</p>
+          </Show>
+          <p class="muted mt-1 text-xs">Public repositories are readable without an account. Saving requires admin.</p>
+          <div class="mt-2 flex flex-wrap items-center gap-2">
+            <button class="pill !border-emerald-500 cursor-pointer select-none" type="button" onClick={saveVisibility} disabled={getVis() === null}>Save visibility</button>
+          </div>
+          <Show when={getVisNote()}>
+            <p class="mt-2 text-sm text-emerald-700 dark:text-emerald-400">{getVisNote()}</p>
+          </Show>
+        </Show>
+      </Show>
+      <hr class="my-4 border-current opacity-10" />
+      {/* Forgejo #522: six per-repo feature toggles. Unchecked hides the
+          tab (Issues/Pulls/Releases) or refuses new stars/watches/forks
+          at the API level; existing content, counts, and watchers stay,
+          and re-enabling restores everything. Unset renders checked (the
+          server default is enabled). Saving requires admin — a
+          non-admin save surfaces the 403 in the note, the same
+          read-mostly behavior as the description save. */}
+      <h4 class="mb-2 font-semibold">Features</h4>
+      <Show when={getFlags()} fallback={<p class="muted text-sm">loading…</p>}>
+        {(flags) => (
+          <div class="grid gap-2">
+            <For each={FEATURE_KEYS}>
+              {(key) => (
+                // Forgejo #533: each row is one aligned flex row — label
+                // (title + muted hint beneath) left, the shared
+                // ToggleSwitch anchored right. The row IS the label, so
+                // clicking anywhere on it toggles the switch natively.
+                // The text-field `input` class never belongs on a
+                // checkbox (it stretched the control full-width).
+                <label class="flex cursor-pointer items-center justify-between gap-4 text-sm">
+                  <span class="min-w-0">
+                    <span class="font-medium">{FEATURE_LABELS[key]}</span>
+                    <span class="muted block text-xs">{FEATURE_HINTS[key]}</span>
+                  </span>
+                  <ToggleSwitch
+                    checked={flags()[key] !== false}
+                    onChange={(e) => setFlags({ ...flags(), [key]: e.currentTarget.checked })}
+                    label={FEATURE_LABELS[key]}
+                  />
+                </label>
+              )}
+            </For>
+          </div>
+        )}
+      </Show>
+      <Show when={flagsDirty()}>
+        <p class="warn-line !mt-1 !text-sm">unsaved changes</p>
+      </Show>
+      <div class="mt-2 flex flex-wrap items-center gap-2">
+        <button class="pill !border-emerald-500 cursor-pointer select-none" type="button" onClick={saveFeatures} disabled={getFlags() === null}>Save features</button>
+      </div>
+      <Show when={getFlagsNote()}>
+        <p class="mt-2 text-sm text-emerald-700 dark:text-emerald-400">{getFlagsNote()}</p>
+      </Show>
+      <hr class="my-4 border-current opacity-10" />
+      {/* Forgejo #586: the per-repo self-approval toggle. Checked lets
+          the author approve or request changes on their own pull request
+          (the GitHub-like default — unset renders checked); unchecked
+          restores the historical 422. A self-approval never counts
+          toward required reviews either way. Saving requires admin — a
+          non-admin save surfaces the 403 in the note, the same
+          read-mostly behavior as the description save. */}
+      <h4 class="mb-2 font-semibold">Code review</h4>
+      <Show when={getSelf() !== undefined} fallback={<p class="muted text-sm">loading…</p>}>
+        {/* Forgejo #533: one aligned flex row — label (title + muted
+            hint beneath) left, the shared ToggleSwitch anchored right.
+            The row IS the label, so clicking anywhere on it toggles the
+            switch natively. */}
+        <label class="flex cursor-pointer items-center justify-between gap-4 text-sm">
+          <span class="min-w-0">
+            <span class="font-medium">{SELF_APPROVAL_LABEL}</span>
+            <span class="muted block text-xs">{SELF_APPROVAL_HINT}</span>
+          </span>
+          <ToggleSwitch
+            checked={getSelf() !== false}
+            onChange={(e) => setSelf(e.currentTarget.checked)}
+            label={SELF_APPROVAL_LABEL}
+          />
+        </label>
+      </Show>
+      <Show when={selfDirty()}>
+        <p class="warn-line !mt-1 !text-sm">unsaved changes</p>
+      </Show>
+      <div class="mt-2 flex flex-wrap items-center gap-2">
+        <button class="pill !border-emerald-500 cursor-pointer select-none" type="button" onClick={saveSelfApproval} disabled={getSelf() === undefined}>Save code review</button>
+      </div>
+      <Show when={getSelfNote()}>
+        <p class="mt-2 text-sm text-emerald-700 dark:text-emerald-400">{getSelfNote()}</p>
+      </Show>
+    </section>
+  );
+}
+
+// --- tab 1: scheduled tasks ------------------------------------------------------
+
+function ScheduledTab(props) {
+  const full = props.ctx.full;   // captured once — no props reads inside the effect
+  const repo = props.repo;
+  const [getDesc] = useData(`settings-describe:${full}`, () => repo.settings.describe(), 5000);
+  const strategies = (d) => d?.sections?.strategies ?? d?.strategies ?? [];
+  const host = (d) => d?.maintenance?.this_host ?? {};
+
+  return (
+    <Show when={getDesc()} fallback={<p class="muted">loading…</p>}>
+      {(d) => (
+        <>
+          <section class="card p-4">
+            <h3 class="mb-2 font-semibold">Bundle strategies</h3>
+            <div class="overflow-x-auto">
+            <table class="data-table">
+              <thead>
+                <tr><th>name</th><th>kind</th><th>base</th><th>schedule</th><th>next</th><th>keep</th><th>filter</th><th>refs</th></tr>
+              </thead>
+              <tbody>
+                <For each={strategies(d())}>
+                  {(s) => (
+                    <tr>
+                      <td>{s.name ?? ""}</td>
+                      <td>{s.kind ?? ""}</td>
+                      <td>{s.base ?? "—"}</td>
+                      <td>{`${s.schedule ?? ""}${s.schedule_human ? ` (${s.schedule_human})` : ""}`}</td>
+                      <td><DateTime value={s.next} /></td>
+                      <td>{String(s.keep ?? "—")}</td>
+                      <td>{s.filter ?? "—"}</td>
+                      <td>{asList(s.refs).join(", ") || "—"}</td>
+                    </tr>
+                  )}
+                </For>
+              </tbody>
+            </table>
+            </div>
+          </section>
+          <section class="card mt-4 p-4">
+            <h3 class="mb-2 font-semibold">Placement &amp; host facts</h3>
+            <table class="data-table kv">
+              <tbody>
+                <tr><th class="w-48 align-top">host</th><td>{host(d()).name ?? d().maintenance?.host ?? "—"}</td></tr>
+                <tr><th class="w-48 align-top">serves</th><td>{host(d()).serves === true ? "yes" : host(d()).serves === false ? "no" : "—"}</td></tr>
+                <tr><th class="w-48 align-top">maintains</th><td>{host(d()).maintains === true ? "yes" : host(d()).maintains === false ? "no" : "—"}</td></tr>
+                <tr><th class="w-48 align-top">disk</th><td>{host(d()).disk ?? "—"}</td></tr>
+                <tr><th class="w-48 align-top">max pack bytes</th><td>{host(d()).max_pack_bytes ? fmtBytes(host(d()).max_pack_bytes) : "—"}</td></tr>
+                <tr><th class="w-48 align-top">cache budget</th><td>{host(d()).cache_budget_bytes ? fmtBytes(host(d()).cache_budget_bytes) : "—"}</td></tr>
+                <tr><th class="w-48 align-top">roles</th><td>{asList(host(d()).roles).join(", ") || "—"}</td></tr>
+              </tbody>
+            </table>
+          </section>
+          <section class="card mt-4 p-4">
+            <h3 class="mb-2 font-semibold">Upstream follow</h3>
+            <p>
+              {d().upstream?.git ? `${d().upstream.git}` : "no upstream configured"}{" "}
+              {d().upstream?.git && d().upstream?.follow
+                ? <span class="chip">{`following every ${d().upstream.follow_interval_secs ?? "?"}s`}</span>
+                : <span class="chip !bg-amber-100 !text-amber-800 dark:!bg-amber-900/60 dark:!text-amber-300">not following</span>}
+              <Show when={d().upstream?.last_round}>
+                <span class="muted">{" · last round "}<DateTime value={d().upstream.last_round} /></span>
+              </Show>
+            </p>
+          </section>
+          <section class="card mt-4 p-4">
+            <h3 class="mb-2 font-semibold">Effective values</h3>
+            <table class="data-table kv">
+              <tbody>
+                <For each={d().fields ?? []}>
+                  {(f) => (
+                    <tr>
+                      <th class="w-40 align-top break-words font-mono text-xs sm:w-64">{f.key}</th>
+                      {/* Issue #275: unbroken values wrap instead of panning the page. */}
+                      <td class="break-words">
+                        {String(f.value ?? "")}{" "}
+                        {f.source === "setting"
+                          ? <span class="chip">repo setting</span>
+                          : <span class="muted">host</span>}
+                      </td>
+                    </tr>
+                  )}
+                </For>
+              </tbody>
+            </table>
+          </section>
+        </>
+      )}
+    </Show>
+  );
+}
+
+// --- mirror tab (Forgejo #240) ---------------------------------------------------
+// Pull-only mirror config: status (upstream, computed next fire, last
+// outcome), schedule preset picker (no freeform cron — the server
+// rejects anything outside the preset list), manual Sync-now with an
+// optional memory-only token + the force rewind escape hatch, and
+// mirror removal (stops the loop). Every mutation is admin-gated
+// server-side; 403s render inline. Non-mirrors get the create form
+// (upstream + preset → PUT spawns the first sync async).
+function MirrorTab(props) {
+  const full = props.ctx.full;
+  const repo = props.repo;
+  const [getDoc] = useData(`mirror:${full}`, () => tolerateMissing(repo.mirror.get(), null), 5000);
+  const [getSchedule, setSchedule] = createSignal(DEFAULT_MIRROR_PRESET);
+  const [getUpstream, setUpstream] = createSignal("");
+  const [getToken, setToken] = createSignal("");
+  const [getForce, setForce] = createSignal(false);
+  const [getSyncId, setSyncId] = createSignal("");
+  const [getSyncState, setSyncState] = createSignal(""); // "" | running | done | error
+  const [getNote, setNote] = createSignal("");
+  const [getBusy, setBusy] = createSignal(false);
+  let poller = 0;
+  onCleanup(() => clearInterval(poller));
+
+  const refresh = () => {
+    invalidate(`mirror:${full}`);
+    invalidate(`repo:${full}`);
+  };
+
+  const pollSync = (id) => {
+    clearInterval(poller);
+    setSyncState("running");
+    poller = setInterval(async () => {
+      try {
+        const st = await repo.mirror.syncStatus(id);
+        if (st?.done) {
+          clearInterval(poller);
+          if (st.error) {
+            setSyncState("error");
+            setNote(String(st.error));
+          } else {
+            setSyncState("done");
+            setNote("sync finished");
+          }
+          refresh();
+        }
+      } catch (e) {
+        clearInterval(poller);
+        setSyncState("error");
+        setNote(String(e.message ?? e));
+      }
+    }, 2000);
+  };
+
+  const save = async (e) => {
+    e?.preventDefault?.();
+    if (getBusy()) return;
+    setBusy(true);
+    setNote("");
+    try {
+      const mirror = getDoc();
+      if (mirror) {
+        await repo.mirror.put({ schedule: getSchedule() });
+        setNote("schedule saved — takes effect on the next fire");
+      } else {
+        const res = await repo.mirror.put({ upstream_url: getUpstream().trim(), schedule: getSchedule() });
+        const id = res?.task?.id;
+        if (id) {
+          setSyncId(id);
+          pollSync(id);
+        }
+        setNote("mirror created — first sync running");
+      }
+      refresh();
+    } catch (err) {
+      setNote(String(err?.message ?? err ?? "save failed"));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const syncNow = async () => {
+    if (getBusy()) return;
+    setBusy(true);
+    setNote("");
+    try {
+      const res = await repo.mirror.syncNow({ token: getToken() || undefined, force: getForce() });
+      const id = res?.task?.id;
+      if (!id) throw new Error("sync did not return a task");
+      setSyncId(id);
+      pollSync(id);
+      setToken(""); // memory-only: drop it from the field once sent
+    } catch (err) {
+      setNote(String(err?.message ?? err ?? "sync failed"));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const remove = async () => {
+    if (getBusy()) return;
+    setBusy(true);
+    setNote("");
+    try {
+      await repo.mirror.remove();
+      setNote("mirror removed — scheduled syncs stopped");
+      refresh();
+    } catch (err) {
+      setNote(String(err?.message ?? err ?? "remove failed"));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  // Prefill the picker from the loaded doc (once per doc).
+  createEffect(() => {
+    const doc = getDoc();
+    if (doc?.schedule) setSchedule(doc.schedule);
+  });
+
+  return (
+    <Show when={getDoc() !== undefined} fallback={<p class="muted">loading…</p>}>
+      <section class="card p-4">
+        <h3 class="mb-2 font-semibold">Mirror</h3>
+        <Show when={getDoc()} fallback={
+          <form class="grid gap-3" onSubmit={save} aria-label="Create mirror">
+            <p class="muted text-sm">
+              This repository is not a mirror. Point it at a public upstream to make it
+              pull-only with scheduled syncs — pushes will be rejected for everyone,
+              including admins.
+            </p>
+            <label class="grid gap-1">
+              <span class="text-sm font-medium">Upstream URL</span>
+              <input
+                class="input font-mono"
+                value={getUpstream()}
+                onInput={(e) => setUpstream(e.currentTarget.value)}
+                placeholder="https://github.com/acme/upstream.git"
+                autocomplete="off"
+                spellcheck={false}
+              />
+            </label>
+            <label class="grid gap-1">
+              <span class="text-sm font-medium">Schedule</span>
+              <select class="input w-auto" value={getSchedule()} onChange={(e) => setSchedule(e.currentTarget.value)} aria-label="Schedule">
+                <For each={MIRROR_PRESETS}>{(p) => <option value={p.id}>{p.label}</option>}</For>
+              </select>
+            </label>
+            <div>
+              <button type="submit" class="btn primary px-3 py-1" disabled={getBusy() || !getUpstream().trim()}>
+                {getBusy() ? "creating…" : "create mirror"}
+              </button>
+            </div>
+          </form>
+        }>
+          {(mirror) => (
+            <div class="grid gap-3">
+              <table class="data-table kv">
+                <tbody>
+                  <tr><th class="w-48 align-top">upstream</th><td class="break-all font-mono text-xs">{mirror().upstream_url}</td></tr>
+                  <tr><th class="w-48 align-top">status</th><td><span class="chip">mirror · pull-only</span></td></tr>
+                  <tr><th class="w-48 align-top">next sync</th><td>{formatNextSync(mirror())}{mirror().next_sync_at ? ` (${mirror().next_sync_at})` : ""}</td></tr>
+                  <tr><th class="w-48 align-top">last synced</th><td>{mirror().last_synced_at ? <DateTime value={mirror().last_synced_at} /> : "never"}</td></tr>
+                  <tr><th class="w-48 align-top">last result</th><td class="break-words">{formatLastResult(mirror())}</td></tr>
+                  <Show when={mirror().consecutive_failures}>
+                    <tr><th class="w-48 align-top">consecutive failures</th><td>{mirror().consecutive_failures} (backing off)</td></tr>
+                  </Show>
+                </tbody>
+              </table>
+              <form class="flex flex-wrap items-end gap-3" onSubmit={save} aria-label="Mirror schedule">
+                <label class="grid gap-1">
+                  <span class="text-sm font-medium">Schedule</span>
+                  <select class="input w-auto" value={getSchedule()} onChange={(e) => setSchedule(e.currentTarget.value)} aria-label="Schedule">
+                    <For each={MIRROR_PRESETS}>{(p) => <option value={p.id}>{p.label}</option>}</For>
+                  </select>
+                </label>
+                <button type="submit" class="btn px-3 py-1" disabled={getBusy()}>
+                  {getBusy() ? "saving…" : "save schedule"}
+                </button>
+              </form>
+              <div class="grid gap-2 rounded-lg border border-zinc-200 p-3 dark:border-zinc-800">
+                <div class="text-sm font-medium">Sync now</div>
+                <label class="grid gap-1">
+                  <span class="text-sm">Token <span class="muted">(optional, memory-only — never stored)</span></span>
+                  <input
+                    class="input font-mono"
+                    type="password"
+                    value={getToken()}
+                    onInput={(e) => setToken(e.currentTarget.value)}
+                    placeholder="first-contact token for a token-requiring upstream"
+                    autocomplete="off"
+                  />
+                </label>
+                <label class="flex items-center gap-1 text-sm">
+                  <input type="checkbox" checked={getForce()} onChange={(e) => setForce(e.currentTarget.checked)} />
+                  force resync (override the fast-forward-only refusal)
+                </label>
+                <div class="flex flex-wrap items-center gap-2">
+                  <button type="button" class="btn px-3 py-1" onClick={syncNow} disabled={getBusy() || getSyncState() === "running"}>
+                    {getSyncState() === "running" ? "syncing…" : "sync now"}
+                  </button>
+                  <Show when={getSyncId()}>
+                    <span class="muted font-mono text-xs">
+                      {getSyncId()} · {getSyncState() || "started"}
+                    </span>
+                  </Show>
+                </div>
+              </div>
+              <div>
+                <button type="button" class="btn danger px-3 py-1" onClick={remove} disabled={getBusy()}>
+                  remove mirror
+                </button>
+                <p class="muted mt-1 text-xs">Removing stops scheduled syncs. Pushes stay possible only for non-mirror repos.</p>
+              </div>
+            </div>
+          )}
+        </Show>
+        <Show when={getNote()}>
+          <p class="mt-2 text-sm">{getNote()}</p>
+        </Show>
+      </section>
+    </Show>
+  );
+}
+
+// --- push-mirror tab (Forgejo #623) ------------------------------------------------
+// Push-mirror config, post-hoc only: upstream URL + auth method (none /
+// password / token / SSH deploy key, user-provided or walhub-generated
+// with the public key shown for upstream install) + schedule (default
+// off — on-push only). Secrets are write-only (presence + last-4 hint,
+// never the value); every mutation is admin-gated server-side. Status
+// (upstream, next fire, last outcome) mirrors the pull-mirror surface;
+// Sync-now and removal stop/start fan-out without touching pull mirrors.
+function PushMirrorTab(props) {
+  const full = props.ctx.full;
+  const repo = props.repo;
+  const [getDoc] = useData(`pushmirror:${full}`, () => tolerateMissing(repo.pushmirror.get(), null), 5000);
+  const [getUpstream, setUpstream] = createSignal("");
+  const [getAuthKind, setAuthKind] = createSignal("none");
+  const [getUsername, setUsername] = createSignal("");
+  const [getPassword, setPassword] = createSignal("");
+  const [getToken, setToken] = createSignal("");
+  const [getPrivateKey, setPrivateKey] = createSignal("");
+  const [getPublicKey, setPublicKey] = createSignal("");
+  const [getKnownHosts, setKnownHosts] = createSignal("");
+  const [getSchedule, setSchedule] = createSignal("");
+  const [getForce, setForce] = createSignal(false);
+  const [getSyncId, setSyncId] = createSignal("");
+  const [getSyncState, setSyncState] = createSignal(""); // "" | running | done | error
+  const [getGenerated, setGenerated] = createSignal(null); // {public_key, key_fingerprint}
+  const [getNote, setNote] = createSignal("");
+  const [getBusy, setBusy] = createSignal(false);
+  let poller = 0;
+  onCleanup(() => clearInterval(poller));
+
+  const refresh = () => {
+    invalidate(`pushmirror:${full}`);
+    invalidate(`repo:${full}`);
+  };
+
+  const pollSync = (id) => {
+    clearInterval(poller);
+    setSyncState("running");
+    poller = setInterval(async () => {
+      try {
+        const st = await repo.pushmirror.syncStatus(id);
+        if (st?.done) {
+          clearInterval(poller);
+          if (st.error) {
+            setSyncState("error");
+            setNote(String(st.error));
+          } else {
+            setSyncState("done");
+            setNote("sync finished — upstream received the push");
+          }
+          refresh();
+        }
+      } catch (e) {
+        clearInterval(poller);
+        setSyncState("error");
+        setNote(String(e.message ?? e));
+      }
+    }, 2000);
+  };
+
+  const save = async (e) => {
+    e?.preventDefault?.();
+    if (getBusy()) return;
+    setBusy(true);
+    setNote("");
+    try {
+      const doc = getDoc();
+      const payload = { schedule: getSchedule() };
+      if (!doc) {
+        payload.upstream_url = getUpstream().trim();
+        payload.auth_kind = getAuthKind();
+        if (getUsername().trim()) payload.username = getUsername().trim();
+      } else if (getUsername().trim()) {
+        payload.username = getUsername().trim();
+      }
+      // Write-only secrets: send only filled fields (omitted = keep).
+      if (getPassword()) payload.password = getPassword();
+      if (getToken()) payload.token = getToken();
+      if (getPrivateKey()) payload.ssh_private_key = getPrivateKey();
+      if (getPublicKey()) payload.ssh_public_key = getPublicKey();
+      if (getKnownHosts()) payload.ssh_known_hosts = getKnownHosts();
+      await repo.pushmirror.put(payload);
+      // Memory-only: drop secrets from the fields once sent.
+      setPassword("");
+      setToken("");
+      setPrivateKey("");
+      setNote(doc ? "push mirror updated" : "push mirror configured — the next push fans out");
+      refresh();
+    } catch (err) {
+      setNote(String(err?.message ?? err ?? "save failed"));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const keygen = async () => {
+    if (getBusy()) return;
+    setBusy(true);
+    setNote("");
+    try {
+      const res = await repo.pushmirror.keygen(getKnownHosts() ? { known_hosts: getKnownHosts() } : {});
+      setGenerated({ public_key: res?.public_key ?? "", key_fingerprint: res?.key_fingerprint ?? "" });
+      setNote("keypair generated — install the public key on the upstream, then push");
+      refresh();
+    } catch (err) {
+      setNote(String(err?.message ?? err ?? "keygen failed"));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const syncNow = async () => {
+    if (getBusy()) return;
+    setBusy(true);
+    setNote("");
+    try {
+      const res = await repo.pushmirror.syncNow({ force: getForce() || undefined });
+      const id = res?.task?.id;
+      if (!id) throw new Error("sync did not return a task");
+      setSyncId(id);
+      pollSync(id);
+    } catch (err) {
+      setNote(String(err?.message ?? err ?? "sync failed"));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const remove = async () => {
+    if (getBusy()) return;
+    setBusy(true);
+    setNote("");
+    try {
+      await repo.pushmirror.remove();
+      setGenerated(null);
+      setNote("push mirror removed — pushes no longer fan out");
+      refresh();
+    } catch (err) {
+      setNote(String(err?.message ?? err ?? "remove failed"));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  // Prefill the picker + kind from the loaded doc (once per doc).
+  createEffect(() => {
+    const doc = getDoc();
+    if (doc) {
+      setSchedule(doc.schedule ?? "");
+      if (doc.auth_kind) setAuthKind(doc.auth_kind);
+      if (doc.username) setUsername(doc.username);
+    }
+  });
+
+  const fields = () => credentialFieldsFor(getAuthKind());
+
+  return (
+    <Show when={getDoc() !== undefined} fallback={<p class="muted">loading…</p>}>
+      {/* Forgejo #629: mt-4 separates this card from the pull-mirror card
+          above it in the merged Mirror tab — the file's stacked-section
+          idiom (card mt-4 p-4), so the two containers read as distinct. */}
+      <section class="card mt-4 p-4">
+        <h3 class="mb-2 font-semibold">Push mirror</h3>
+        <Show when={getDoc()} fallback={
+          <form class="grid gap-3" onSubmit={save} aria-label="Configure push mirror">
+            <p class="muted text-sm">
+              This repository has no push mirror. Point it at an upstream to fan out
+              every push there — refs and objects, after the push lands here.
+              Scheduled re-sync is optional (default: on push only).
+            </p>
+            <label class="grid gap-1">
+              <span class="text-sm font-medium">Upstream URL</span>
+              <input
+                class="input font-mono"
+                value={getUpstream()}
+                onInput={(e) => setUpstream(e.currentTarget.value)}
+                placeholder="https://example.com/backup/repo.git or file:///backup/repo.git"
+                autocomplete="off"
+                spellcheck={false}
+              />
+            </label>
+            <label class="grid gap-1">
+              <span class="text-sm font-medium">Auth method</span>
+              <select class="input w-auto" value={getAuthKind()} onChange={(e) => setAuthKind(e.currentTarget.value)} aria-label="Auth method">
+                <For each={PUSHMIRROR_AUTH_KINDS}>{(k) => <option value={k.id}>{k.label}</option>}</For>
+              </select>
+            </label>
+            <Show when={fields().includes("username")}>
+              <label class="grid gap-1">
+                <span class="text-sm font-medium">Username</span>
+                <input class="input" value={getUsername()} onInput={(e) => setUsername(e.currentTarget.value)} autocomplete="off" />
+              </label>
+            </Show>
+            <Show when={fields().includes("password")}>
+              <label class="grid gap-1">
+                <span class="text-sm font-medium">Password <span class="muted">(write-only — never shown again)</span></span>
+                <input class="input font-mono" type="password" value={getPassword()} onInput={(e) => setPassword(e.currentTarget.value)} autocomplete="new-password" />
+              </label>
+            </Show>
+            <Show when={fields().includes("token")}>
+              <label class="grid gap-1">
+                <span class="text-sm font-medium">Token <span class="muted">(write-only — never shown again)</span></span>
+                <input class="input font-mono" type="password" value={getToken()} onInput={(e) => setToken(e.currentTarget.value)} autocomplete="off" />
+              </label>
+            </Show>
+            <Show when={fields().includes("ssh_private_key")}>
+              <label class="grid gap-1">
+                <span class="text-sm font-medium">Private key <span class="muted">(paste, or generate below after creating with no auth)</span></span>
+                <textarea class="input font-mono" rows="4" value={getPrivateKey()} onInput={(e) => setPrivateKey(e.currentTarget.value)} autocomplete="off" spellcheck={false} />
+              </label>
+              <label class="grid gap-1">
+                <span class="text-sm font-medium">Known hosts <span class="muted">(optional — without it the first connection is trusted on use)</span></span>
+                <textarea class="input font-mono" rows="2" value={getKnownHosts()} onInput={(e) => setKnownHosts(e.currentTarget.value)} autocomplete="off" spellcheck={false} />
+              </label>
+            </Show>
+            <label class="grid gap-1">
+              <span class="text-sm font-medium">Schedule</span>
+              <select class="input w-auto" value={getSchedule()} onChange={(e) => setSchedule(e.currentTarget.value)} aria-label="Schedule">
+                <For each={PUSHMIRROR_PRESETS}>{(p) => <option value={p.id}>{p.label}</option>}</For>
+              </select>
+            </label>
+            <div>
+              <button type="submit" class="btn primary px-3 py-1" disabled={getBusy() || !getUpstream().trim()}>
+                {getBusy() ? "saving…" : "configure push mirror"}
+              </button>
+            </div>
+          </form>
+        }>
+          {(doc) => (
+            <div class="grid gap-3">
+              <table class="data-table kv">
+                <tbody>
+                  <tr><th class="w-48 align-top">upstream</th><td class="break-all font-mono text-xs">{doc().upstream_url}</td></tr>
+                  <tr><th class="w-48 align-top">status</th><td><span class="chip">mirror · push</span></td></tr>
+                  <tr><th class="w-48 align-top">auth</th><td>{doc().auth_kind}{doc().username ? ` · ${doc().username}` : ""}{doc().has_secret ? ` · stored ${doc().secret_hint ?? ""}` : " · no secret stored"}</td></tr>
+                  <Show when={doc().key_fingerprint}>
+                    <tr><th class="w-48 align-top">deploy key</th><td class="break-all font-mono text-xs">{doc().key_fingerprint}</td></tr>
+                  </Show>
+                  <Show when={doc().auth_kind === "ssh"}>
+                    <tr><th class="w-48 align-top">host key</th><td class="break-all font-mono text-xs">{formatPushHostKey(doc())}</td></tr>
+                  </Show>
+                  <tr><th class="w-48 align-top">sync</th><td>{formatPushNextSync(doc())}{doc().next_sync_at ? ` (${doc().next_sync_at})` : ""}</td></tr>
+                  <tr><th class="w-48 align-top">last synced</th><td>{doc().last_synced_at ? <DateTime value={doc().last_synced_at} /> : "never"}</td></tr>
+                  <tr><th class="w-48 align-top">last result</th><td class="break-words">{formatPushLastResult(doc())}</td></tr>
+                </tbody>
+              </table>
+              <form class="flex flex-wrap items-end gap-3" onSubmit={save} aria-label="Push mirror schedule and secrets">
+                <label class="grid gap-1">
+                  <span class="text-sm font-medium">Schedule</span>
+                  <select class="input w-auto" value={getSchedule()} onChange={(e) => setSchedule(e.currentTarget.value)} aria-label="Schedule">
+                    <For each={PUSHMIRROR_PRESETS}>{(p) => <option value={p.id}>{p.label}</option>}</For>
+                  </select>
+                </label>
+                <label class="grid gap-1">
+                  <span class="text-sm font-medium">Username</span>
+                  <input class="input" value={getUsername()} onInput={(e) => setUsername(e.currentTarget.value)} autocomplete="off" />
+                </label>
+                <Show when={getAuthKind() === "password"}>
+                  <label class="grid gap-1">
+                    <span class="text-sm font-medium">New password <span class="muted">(blank = keep)</span></span>
+                    <input class="input font-mono" type="password" value={getPassword()} onInput={(e) => setPassword(e.currentTarget.value)} autocomplete="new-password" />
+                  </label>
+                </Show>
+                <Show when={getAuthKind() === "token"}>
+                  <label class="grid gap-1">
+                    <span class="text-sm font-medium">New token <span class="muted">(blank = keep)</span></span>
+                    <input class="input font-mono" type="password" value={getToken()} onInput={(e) => setToken(e.currentTarget.value)} autocomplete="off" />
+                  </label>
+                </Show>
+                <button type="submit" class="btn px-3 py-1" disabled={getBusy()}>
+                  {getBusy() ? "saving…" : "save"}
+                </button>
+              </form>
+              <Show when={getAuthKind() === "ssh"}>
+                <div class="grid gap-2 rounded-lg border border-zinc-200 p-3 dark:border-zinc-800">
+                  <div class="text-sm font-medium">Deploy key</div>
+                  <p class="muted text-xs">Generate a keypair here, install the public key on the upstream, then push. The private key never leaves the server.</p>
+                  <label class="grid gap-1">
+                    <span class="text-sm">Known hosts <span class="muted">(optional — blank trusts on first use)</span></span>
+                    <textarea class="input font-mono" rows="2" value={getKnownHosts()} onInput={(e) => setKnownHosts(e.currentTarget.value)} autocomplete="off" spellcheck={false} />
+                  </label>
+                  <div>
+                    <button type="button" class="btn px-3 py-1" onClick={keygen} disabled={getBusy()}>
+                      {getBusy() ? "generating…" : "generate keypair"}
+                    </button>
+                  </div>
+                  <Show when={getGenerated()}>
+                    <label class="grid gap-1">
+                      <span class="text-sm font-medium">Public key <span class="muted">({getGenerated().key_fingerprint}) — install this upstream</span></span>
+                      <textarea class="input font-mono" rows="3" readonly value={getGenerated().public_key} spellcheck={false} />
+                    </label>
+                  </Show>
+                  <Show when={!getGenerated() && doc().public_key}>
+                    <label class="grid gap-1">
+                      <span class="text-sm font-medium">Installed public key <span class="muted">({doc().key_fingerprint})</span></span>
+                      <textarea class="input font-mono" rows="3" readonly value={doc().public_key} spellcheck={false} />
+                    </label>
+                  </Show>
+                </div>
+              </Show>
+              <div class="grid gap-2 rounded-lg border border-zinc-200 p-3 dark:border-zinc-800">
+                <div class="text-sm font-medium">Sync now</div>
+                <label class="flex items-center gap-1 text-sm">
+                  <input type="checkbox" checked={getForce()} onChange={(e) => setForce(e.currentTarget.checked)} />
+                  force (retry outside the failure backoff)
+                </label>
+                <div class="flex flex-wrap items-center gap-2">
+                  <button type="button" class="btn px-3 py-1" onClick={syncNow} disabled={getBusy() || getSyncState() === "running"}>
+                    {getSyncState() === "running" ? "syncing…" : "sync now"}
+                  </button>
+                  <Show when={getSyncId()}>
+                    <span class="muted font-mono text-xs">
+                      {getSyncId()} · {getSyncState() || "started"}
+                    </span>
+                  </Show>
+                </div>
+              </div>
+              <div>
+                <button type="button" class="btn danger px-3 py-1" onClick={remove} disabled={getBusy()}>
+                  remove push mirror
+                </button>
+                <p class="muted mt-1 text-xs">Removing stops on-push fan-out and scheduled syncs. The pull mirror (if any) is untouched.</p>
+              </div>
+            </div>
+          )}
+        </Show>
+        <Show when={getNote()}>
+          <p class="mt-2 text-sm">{getNote()}</p>
+        </Show>
+      </section>
+    </Show>
+  );
+}
+
+// --- tab 2: push policy ------------------------------------------------------------
+function PolicyTab(props) {
+  const [getText, setText] = createSignal("");
+  const [getSaved, setSaved] = createSignal("");
+  const [getNote, setNote] = createSignal("");
+  const [getResult, setResult] = createSignal(null); // validate result
+  const [getDry, setDry] = createSignal(null);
+  const [getDryN, setDryN] = createSignal("10");
+  const [getSaving, setSaving] = createSignal(false);
+
+  const validateDebounced = debounce(async () => {
+    try {
+      setResult(await props.repo.policy.validate(getText()));
+    } catch (e) {
+      setResult({ ok: false, errors: [String(e.message ?? e)] });
+    }
+  }, 400);
+
+  const dirty = () => getText() !== getSaved();
+
+  async function reload() {
+    try {
+      const p = await props.repo.policy.get();
+      const text = typeof p === "string" ? p : JSON.stringify(p, null, 2);
+      setText(text);
+      setSaved(text);
+    } catch (e) { reportError(e, "policy"); }
+  }
+  async function save() {
+    if (getSaving()) return; // double-submit guard (#450: Cmd+Enter during save)
+    setSaving(true);
+    try {
+      await props.repo.policy.put(getText());
+      setSaved(getText());
+      setNote("policy saved");
+    } catch (e) { reportError(e, "policy save"); } finally { setSaving(false); }
+  }
+  async function copy() {
+    try { await navigator.clipboard.writeText(getText()); } catch { /* clipboard unavailable */ }
+  }
+  async function dryRun() {
+    try { setDry(await props.repo.policy.dryRun(Number(getDryN()) || 10)); }
+    catch (e) { reportError(e, "policy dry-run"); }
+  }
+
+  void reload();
+
+  return (
+    <>
+      <section class="card p-4">
+        <h3 class="mb-2 font-semibold">Push policy</h3>
+        <p class="muted mb-2 text-sm">validated client-side-free: the server is the gate (400 with reasons, fail closed on the next push)</p>
+        <textarea
+          class="input font-mono text-xs leading-5"
+          rows="14"
+          spellcheck="false"
+          placeholder="policy JSON — empty means allow-all"
+          value={getText()}
+          onInput={(e) => { setText(e.currentTarget.value); validateDebounced(); }}
+          onKeyDown={onSubmitKeys(() => save(), { isBusy: () => getSaving() })}
+        />
+        <div class="mt-2 flex flex-wrap items-center gap-2">
+          <button class="pill !border-emerald-500 cursor-pointer select-none" type="button" disabled={getSaving()} onClick={save}>{getSaving() ? "Saving…" : "Save"}</button>
+          <button class="pill cursor-pointer select-none" type="button" onClick={reload}>Discard</button>
+          <button class="pill cursor-pointer select-none" type="button" onClick={copy}>Copy</button>
+          <span class="flex items-center gap-2">
+            <input
+              class="input w-20 tabular"
+              type="number"
+              min="1"
+              max="100"
+              value={getDryN()}
+              onInput={(e) => setDryN(e.currentTarget.value)}
+              aria-label="Dry-run against the last N pushes"
+            />
+            <button class="pill cursor-pointer select-none" type="button" onClick={dryRun}>Dry-run last N pushes</button>
+          </span>
+        </div>
+        <div class="mt-2 space-y-1 text-sm">
+          <p class="muted">{getNote()}</p>
+          <Show when={getResult()}>
+            {(r) => (
+              <p class={r().ok === false ? "err-line !mt-0 !text-sm" : "!mt-0 text-sm text-emerald-700 dark:text-emerald-400"}>
+                {r().ok === false ? `invalid: ${(r().errors ?? []).join("; ")}` : "valid"}
+              </p>
+            )}
+          </Show>
+          <Show when={dirty()}>
+            <p class="warn-line !mt-0 !text-sm">unsaved changes</p>
+          </Show>
+        </div>
+      </section>
+      <Show when={getDry()}>
+        {(d) => (
+          <section class="card mt-4 p-4">
+            <h3 class="mb-2 font-semibold">{`Dry run: ${d().allowed ?? 0} allowed / ${d().denied ?? 0} denied of ${d().pushes?.length ?? 0}`}</h3>
+            <div class="overflow-x-auto">
+            <table class="data-table">
+              <thead>
+                <tr><th>seq</th><th>principal</th><th>atomic</th><th>refs</th></tr>
+              </thead>
+              <tbody>
+                <For each={d().pushes ?? []}>
+                  {(p) => (
+                    <tr>
+                      <td class="tabular">{String(p.seq ?? "")}</td>
+                      <td>{p.principal ?? ""}</td>
+                      <td class="tabular">{String(p.atomic ?? "")}</td>
+                      <td>{(p.refs ?? []).map((r) => `${r.name}${r.ok ? "" : ` ✗ ${r.reason ?? ""}`}`).join(", ") || "—"}</td>
+                    </tr>
+                  )}
+                </For>
+              </tbody>
+            </table>
+            </div>
+          </section>
+        )}
+      </Show>
+    </>
+  );
+}
+
+// --- tab 3: effective config & history ----------------------------------------------
+
+function ConfigTab(props) {
+  const [getText, setText] = createSignal("");
+  const [getMessage, setMessage] = createSignal("");
+  const [getNote, setNote] = createSignal("");
+  const [getDiff, setDiff] = createSignal(null); // { rev, rows }
+  const [getBusy, setBusy] = createSignal(false);
+
+  const [getEffective] = useData(`settings-effective:${props.ctx.full}`, () => props.repo.settings.effective(), 5000);
+  const [getHistory] = useData(`settings-history:${props.ctx.full}`, () => props.repo.settings.history(), 5000);
+
+  // prefill once the effective config arrives and the editor is still untouched
+  createEffect(() => {
+    const eff = getEffective();
+    if (eff !== undefined && getText() === "") {
+      setText(typeof eff === "string" ? eff : String(eff?.toml ?? ""));
+    }
+  });
+
+  const validateDebounced = debounce(async () => {
+    try {
+      const r = await props.repo.settings.validate(getText());
+      setNote(r.ok === false ? `errors: ${(r.errors ?? []).join("; ")}` : "valid");
+    } catch (e) { setNote(String(e.message ?? e)); }
+  }, 400);
+
+  async function publish() {
+    if (getBusy()) return; // double-submit guard (#450: Cmd+Enter during publish)
+    setBusy(true);
+    try {
+      await props.repo.settings.put(getText(), getMessage());
+      setNote("published");
+      setMessage("");
+    } catch (e) { setNote(String(e.message ?? e)); } finally { setBusy(false); }
+  }
+  async function clearAll() {
+    try {
+      await (props.repo.settings.delete?.() ?? props.repo.settings.put("", ""));
+      setText("");
+      setNote("");
+    } catch (e) { setNote(String(e.message ?? e)); }
+  }
+  function revert(e) {
+    setText(e.toml ?? "");
+    setDiff(null);
+    validateDebounced();
+  }
+  function showDiff(e) {
+    const rows = lineDiff(String(e.toml ?? "").split("\n"), getText().split("\n"));
+    setDiff({ rev: e.revision ?? e.seq, rows });
+  }
+
+  return (
+    <>
+      <section class="card p-4">
+        <h3 class="mb-2 font-semibold">Effective config (TOML)</h3>
+        <textarea
+          class="input font-mono text-xs leading-5"
+          rows="16"
+          spellcheck="false"
+          placeholder={"[bundles]\nmain_only = false"}
+          value={getText()}
+          onInput={(e) => { setText(e.currentTarget.value); validateDebounced(); }}
+          onKeyDown={onSubmitKeys(() => publish(), { isBusy: () => getBusy() })}
+        />
+        <div class="mt-2 flex flex-wrap items-center gap-2">
+          <button class="pill !border-emerald-500 cursor-pointer select-none" type="button" disabled={getBusy()} onClick={publish}>{getBusy() ? "Publishing…" : "Publish"}</button>
+          <button class="pill cursor-pointer select-none" type="button" onClick={clearAll}>Clear</button>
+          <input
+            class="input min-w-0 flex-1 basis-48"
+            type="text"
+            placeholder="publish message (author = $USER)"
+            value={getMessage()}
+            onInput={(e) => setMessage(e.currentTarget.value)}
+            aria-label="Publish message"
+          />
+        </div>
+        <Show when={getNote()}>
+          <p class="mt-2 text-sm text-emerald-700 dark:text-emerald-400">{getNote()}</p>
+        </Show>
+      </section>
+      <section class="card mt-4 p-4">
+        <h3 class="mb-2 font-semibold">History</h3>
+        <Show
+          when={(getHistory()?.entries ?? []).length}
+          fallback={<p class="muted">{getHistory() ? "no revisions published" : "loading…"}</p>}
+        >
+          <div class="space-y-2">
+            <For each={getHistory().entries ?? []}>
+              {(e) => (
+                <div class="rev-row border-b border-zinc-100 pb-2 dark:border-zinc-800/60">
+                  <div class="flex flex-wrap items-center gap-2">
+                    <strong>{`#${e.revision ?? e.seq}`}</strong>
+                    <span class="muted text-sm">{` ${e.author ?? ""} · `}<DateTime value={e.at} />{` · ${e.message ?? ""} `}</span>
+                    <button class="pill cursor-pointer select-none" type="button" onClick={() => revert(e)}>Revert to this</button>
+                    <button class="pill cursor-pointer select-none" type="button" onClick={() => showDiff(e)}>line diff</button>
+                  </div>
+                </div>
+              )}
+            </For>
+          </div>
+        </Show>
+      </section>
+      <Show when={getDiff()}>
+        {(df) => (
+          <section class="card mt-4 p-4">
+            <h3 class="mb-2 font-semibold">{`Diff of #${df().rev} vs editor`}</h3>
+            <pre class="code-view p-3">{df().rows.map((r) => `${r.t === "-" ? "-" : r.t === "+" ? "+" : " "} ${r.text}`).join("\n")}</pre>
+          </section>
+        )}
+      </Show>
+    </>
+  );
+}
+
+// --- tab 5: CI tokens (05 §9, admin-only) ---------------------------------------------
+
+function CITokensTab(props) {
+  const key = () => `ci-tokens:${props.ctx.full}`;
+  const [getTokens, setTokens] = createSignal(null);
+  const [getName, setName] = createSignal("");
+  const [getSecret, setSecret] = createSignal("");
+  const [getNote, setNote] = createSignal("");
+
+  const load = async () => {
+    try {
+      const res = await props.repo.ciTokens.list();
+      setTokens(res.tokens ?? []);
+      setNote("");
+    } catch (e) { setNote(String(e.message ?? e)); }
+  };
+  load();
+
+  const create = async (e) => {
+    e.preventDefault();
+    const name = getName().trim();
+    if (!name) return;
+    try {
+      const res = await props.repo.ciTokens.create({ name });
+      setSecret(res.token ?? "");
+      setName("");
+      setNote(`created ${res.id} — copy the secret now, it is shown once`);
+      load();
+    } catch (err) { setNote(String(err.message ?? err)); }
+  };
+
+  const revoke = async (id) => {
+    try {
+      await props.repo.ciTokens.revoke(id);
+      if (getSecret()) setSecret("");
+      load();
+    } catch (err) { setNote(String(err.message ?? err)); }
+  };
+
+  const copy = async () => {
+    try {
+      await navigator.clipboard.writeText(getSecret());
+      setNote("secret copied");
+    } catch {
+      setNote("copy failed — select the secret manually");
+    }
+  };
+
+  return (
+    <>
+      <section class="card p-4">
+        <h3 class="mb-2 font-semibold">CI tokens</h3>
+        <p class="muted mb-3 text-sm">
+          External CI reports statuses with a <code class="font-mono">wct_</code> token.
+          Tokens grant <code class="font-mono">checks:write</code> on this repo only —
+          never push, merge, or admin.
+        </p>
+        <form class="flex flex-wrap items-center gap-2" onSubmit={create}>
+          <input
+            class="input min-w-0 flex-1 basis-48 sm:max-w-xs"
+            placeholder="token name (e.g. woodpecker)"
+            value={getName()}
+            onInput={(e) => setName(e.target.value)}
+            aria-label="Token name"
+          />
+          <button type="submit" class="btn btn-primary px-3 py-1">
+            create token
+          </button>
+        </form>
+        <Show when={getSecret()}>
+          <div class="mt-3 rounded border border-amber-300 bg-amber-50 p-3 dark:border-amber-700 dark:bg-amber-950">
+            <p class="mb-1 text-sm font-semibold text-amber-800 dark:text-amber-200">Copy now — shown once:</p>
+            <div class="flex flex-wrap items-center gap-2">
+              <code class="break-all font-mono text-xs">{getSecret()}</code>
+              <button type="button" class="pill cursor-pointer select-none" onClick={copy}>
+                copy
+              </button>
+            </div>
+          </div>
+        </Show>
+        <Show when={getNote()}>
+          <p class="mt-2 text-sm text-zinc-600 dark:text-zinc-300">{getNote()}</p>
+        </Show>
+      </section>
+      <section class="card mt-4 p-4">
+        <h3 class="mb-2 font-semibold">Tokens</h3>
+        <Show when={getTokens()} fallback={<p class="muted">loading…</p>}>
+          <div class="overflow-x-auto">
+          <table class="data-table">
+            <thead>
+              <tr><th>id</th><th>name</th><th>scopes</th><th>created by</th><th>created</th><th>status</th><th></th></tr>
+            </thead>
+            <tbody>
+              <For each={getTokens() ?? []} fallback={<tr><td colspan={7} class="muted">no tokens</td></tr>}>
+                {(t) => (
+                  <tr>
+                    <td class="font-mono text-xs">{t.id}</td>
+                    <td>{t.name}</td>
+                    <td class="text-xs">{(t.scopes ?? []).join(", ")}</td>
+                    <td class="text-xs">{t.created_by}</td>
+                    <td class="text-xs"><DateTime value={t.created_at} /></td>
+                    <td class="text-xs">{t.revoked_at ? <>revoked <DateTime value={t.revoked_at} /></> : "active"}</td>
+                    <td>
+                      <Show when={!t.revoked_at}>
+                        <button type="button" class="link text-xs" onClick={() => revoke(t.id)}>
+                          revoke
+                        </button>
+                      </Show>
+                    </td>
+                  </tr>
+                )}
+              </For>
+            </tbody>
+          </table>
+          </div>
+        </Show>
+      </section>
+    </>
+  );
+}
+
+// --- danger zone (issue #39) --------------------------------------------------------
+
+// DangerConfirm is the reusable typed-confirm row for every danger-zone
+// entry: the caller names the exact `owner/name` the user must retype and
+// the async action behind the confirm button. The button arms only on the
+// exact match (dangerMatches — no trimming), and a busy flag guards
+// double-submit while the action is in flight. Failures surface as a
+// plain-text error line; success is the caller's to handle (the repo may
+// no longer exist, so navigating away is the usual move).
+export function DangerConfirm(props) {
+  const [getTyped, setTyped] = createSignal("");
+  const [getBusy, setBusy] = createSignal(false);
+  const [getErr, setErr] = createSignal("");
+
+  const armed = () => !getBusy() && dangerMatches(getTyped(), props.expected);
+
+  async function confirm() {
+    if (!armed()) return;
+    setBusy(true);
+    setErr("");
+    try {
+      await props.onConfirm();
+    } catch (e) {
+      setErr(String(e?.message ?? e));
+      setBusy(false);
+    }
+  }
+
+  return (
+    <div class="mt-2">
+      <p class="mb-2 text-sm text-zinc-600 dark:text-zinc-300">
+        {`Type ${props.expected} to confirm.`}
+      </p>
+      <div class="flex flex-wrap items-center gap-2">
+        <input
+          class="input w-72 max-w-full border-red-300 font-mono text-xs dark:border-red-800"
+          type="text"
+          placeholder={props.expected}
+          value={getTyped()}
+          onInput={(e) => setTyped(e.currentTarget.value)}
+          aria-label={`Type ${props.expected} to confirm`}
+          disabled={getBusy()}
+        />
+        <button
+          type="button"
+          class="rounded border border-red-600 bg-red-600 px-3 py-1 text-sm font-medium text-white disabled:cursor-not-allowed disabled:opacity-40 dark:border-red-500 dark:bg-red-700"
+          disabled={!armed()}
+          onClick={confirm}
+        >
+          {getBusy() ? "working…" : (props.confirmLabel ?? "Confirm")}
+        </button>
+      </div>
+      <Show when={getErr()}>
+        <p class="err-line !mt-2 !text-sm">{getErr()}</p>
+      </Show>
+    </div>
+  );
+}
+
+// DangerZone renders as the sidebar's Danger Zone section content (issue
+// #123 — no longer pinned below every tab). Entries: Transfer Repository
+// (Forgejo #358) and Delete Repository — both admin-only on the server
+// (the 403/409 text lands in the entry's error line); success invalidates
+// the owners, repo-list, and repo entries (issue #200) and navigates
+// because the repo page no longer exists at this address (transfer lands
+// on the new one).
+function DangerZone(props) {
+  const navigate = useNavigate();
+  const full = () => props.ctx.full;
+  const [getDstOwner, setDstOwner] = createSignal("");
+
+  async function transferRepo() {
+    // No reportError here: the throw lands in DangerConfirm's plain-text
+    // error line (tray + inline would surface the same failure twice).
+    const res = await props.repo.transfer(transferBody({ owner: getDstOwner() }));
+    const owner = full().split("/")[0];
+    invalidate("owners");
+    invalidate(`repos:${owner}`);
+    invalidate(`repos:${res.owner}`);
+    invalidate(`repo:${full()}`);
+    invalidate(`social:${full()}`);
+    invalidate(`activity:${full()}`);
+    navigate(`/${res.owner}/${res.repo}`);
+  }
+
+  async function deleteRepo() {
+    // No reportError here: the throw lands in DangerConfirm's plain-text
+    // error line (tray + inline would surface the same failure twice).
+    await props.repo.delete();
+    // Drop every cache entry naming the repo so /explore never renders the
+    // deleted row from stale data (issue #200): the owners list, this
+    // owner's repo list, and this repo's own entries. invalidate() on a key
+    // with no entry is a no-op; entries that exist refetch at once, so the
+    // listings are fresh before the user can reach them.
+    const owner = full().split("/")[0];
+    invalidate("owners");
+    invalidate(`repos:${owner}`);
+    invalidate(`repo:${full()}`);
+    invalidate(`social:${full()}`);
+    invalidate(`activity:${full()}`);
+    navigate("/");
+  }
+
+  return (
+    <section class="card border-red-500/60 p-4" aria-label="Danger Zone">
+      <h3 class="mb-1 font-semibold text-red-700 dark:text-red-400">Danger Zone</h3>
+      <p class="muted mb-3 text-sm">Irreversible actions. Each requires typing the repository name.</p>
+      <div class="mb-3 rounded border border-red-500/40 p-3">
+        <h4 class="font-medium text-red-700 dark:text-red-400">Transfer Repository</h4>
+        <p class="mt-1 text-sm text-zinc-600 dark:text-zinc-300">
+          Moves this repository and all of its data to another owner — your
+          username, an organization you belong to, or (for host admins) any
+          namespace. Access bindings move with it: your owner binding is
+          replaced by the new owner's, collaborators and team grants are kept.
+        </p>
+        <label class="mt-2 block text-sm">
+          <span class="muted block text-xs">new owner</span>
+          <input
+            class="input w-72 max-w-full font-mono text-xs"
+            type="text"
+            placeholder="beta"
+            value={getDstOwner()}
+            onInput={(e) => setDstOwner(e.currentTarget.value)}
+            aria-label="New owner"
+          />
+        </label>
+        <DangerConfirm
+          expected={full()}
+          confirmLabel="Transfer this repository"
+          onConfirm={transferRepo}
+        />
+      </div>
+      <div class="rounded border border-red-500/40 p-3">
+        <h4 class="font-medium text-red-700 dark:text-red-400">Delete Repository</h4>
+        <p class="mt-1 text-sm text-zinc-600 dark:text-zinc-300">
+          Permanently deletes this repository and all of its data. Forks created from it
+          keep their own copies and are unaffected. This cannot be undone.
+        </p>
+        <DangerConfirm
+          expected={full()}
+          confirmLabel="Delete this repository"
+          onConfirm={deleteRepo}
+        />
+      </div>
+    </section>
+  );
+}
+
+// --- shell ---------------------------------------------------------------------------
+
+function WebhooksTab(props) {
+  const [getHooks, setHooks] = createSignal(null);
+  const [getUrl, setUrl] = createSignal("");
+  const [getEvents, setEvents] = createSignal("");
+  const [getSecret, setSecret] = createSignal("");
+  const [getNote, setNote] = createSignal("");
+  const [getDeliveries, setDeliveries] = createSignal({});
+  const [getOpen, setOpen] = createSignal(null);
+
+  const load = async () => {
+    try {
+      const res = await props.repo.webhooks.list();
+      setHooks(res.webhooks ?? []);
+      setNote("");
+    } catch (e) { setNote(String(e.message ?? e)); }
+  };
+  load();
+
+  const create = async (e) => {
+    e.preventDefault();
+    const url = getUrl().trim();
+    if (!url) return;
+    const events = getEvents().split(",").map((s) => s.trim()).filter(Boolean);
+    try {
+      await props.repo.webhooks.create({ url, events, secret: getSecret().trim() || undefined });
+      setUrl("");
+      setEvents("");
+      setSecret("");
+      setNote("webhook created — the secret is never shown again");
+      load();
+    } catch (err) { setNote(String(err.message ?? err)); }
+  };
+
+  const remove = async (id) => {
+    try {
+      await props.repo.webhooks.remove(id);
+      load();
+    } catch (err) { setNote(String(err.message ?? err)); }
+  };
+
+  const ping = async (id) => {
+    try {
+      const res = await props.repo.webhooks.ping(id);
+      setNote(res.delivery ? `ping ${id} delivered` : `ping ${id} queued (delivery pending)`);
+      load();
+    } catch (err) { setNote(String(err.message ?? err)); }
+  };
+
+  const toggleDeliveries = async (id) => {
+    if (getOpen() === id) {
+      setOpen(null);
+      return;
+    }
+    try {
+      const res = await props.repo.webhooks.deliveries(id);
+      setDeliveries((prev) => ({ ...prev, [id]: res.entries ?? [] }));
+      setOpen(id);
+    } catch (err) { setNote(String(err.message ?? err)); }
+  };
+
+  return (
+    <>
+      <section class="card p-4">
+        <h3 class="mb-2 font-semibold">Webhooks</h3>
+        <p class="muted mb-3 text-sm">
+          One POST per collaboration event (comments, reviews, checks, pings) with{" "}
+          <code class="font-mono">X-Walgit-Delivery</code> / <code class="font-mono">X-Walgit-Signature</code> /{" "}
+          <code class="font-mono">X-Walgit-Event</code> headers. HTTPS only (HTTP on loopback for dev).
+          Empty events = all; <code class="font-mono">*</code> matches everything.
+        </p>
+        <form class="grid grid-cols-1 gap-2" onSubmit={create}>
+          <input
+            class="input"
+            placeholder="https://example.com/hook"
+            value={getUrl()}
+            onInput={(e) => setUrl(e.target.value)}
+            aria-label="Webhook URL"
+          />
+          <div class="grid grid-cols-1 gap-2 sm:grid-cols-[minmax(0,1fr)_minmax(0,1fr)_auto] sm:items-center">
+            <input
+              class="input"
+              placeholder="events, comma-list (empty = all)"
+              value={getEvents()}
+              onInput={(e) => setEvents(e.target.value)}
+              aria-label="Events filter"
+            />
+            <input
+              class="input"
+              type="password"
+              placeholder="secret (optional, write-only)"
+              value={getSecret()}
+              onInput={(e) => setSecret(e.target.value)}
+              aria-label="Webhook secret"
+              autocomplete="new-password"
+            />
+            <button type="submit" class="btn btn-primary justify-self-start px-3 py-1 sm:justify-self-auto">
+              add webhook
+            </button>
+          </div>
+        </form>
+        <Show when={getNote()}>
+          <p class="mt-2 text-sm text-zinc-600 dark:text-zinc-300">{getNote()}</p>
+        </Show>
+      </section>
+      <section class="card mt-4 p-4">
+        <h3 class="mb-2 font-semibold">Configured hooks</h3>
+        <Show when={getHooks()} fallback={<p class="muted">loading…</p>}>
+          <div class="overflow-x-auto">
+          <table class="data-table">
+            <thead>
+              <tr><th>url</th><th>events</th><th>active</th><th>secret</th><th></th></tr>
+            </thead>
+            <tbody>
+              <For each={getHooks() ?? []} fallback={<tr><td colspan={5} class="muted">no webhooks</td></tr>}>
+                {(h) => (
+                  <>
+                    <tr>
+                      <td class="break-all font-mono text-xs">{h.url}</td>
+                      <td class="text-xs">{(h.events ?? []).join(", ") || "all"}</td>
+                      <td class="text-xs">{h.active ? "active" : "paused"}</td>
+                      <td class="text-xs">{h.secret_set ? "set" : "—"}</td>
+                      <td class="whitespace-nowrap text-xs">
+                        <button type="button" class="link mr-2" onClick={() => ping(h.id)}>ping</button>
+                        <button type="button" class="link mr-2" onClick={() => toggleDeliveries(h.id)}>
+                          {getOpen() === h.id ? "hide" : "deliveries"}
+                        </button>
+                        <button type="button" class="link" onClick={() => remove(h.id)}>delete</button>
+                      </td>
+                    </tr>
+                    <Show when={getOpen() === h.id}>
+                      <tr>
+                        <td colspan={5}>
+                          <For each={getDeliveries()[h.id] ?? []} fallback={<span class="muted text-xs">no deliveries yet</span>}>
+                            {(d) => (
+                              <div class="font-mono text-xs text-zinc-600 dark:text-zinc-300">
+                                #{d.seq} {d.event} → {d.status}{d.error ? ` (${d.error})` : ""} · <DateTime value={d.at} />
+                              </div>
+                            )}
+                          </For>
+                        </td>
+                      </tr>
+                    </Show>
+                  </>
+                )}
+              </For>
+            </tbody>
+          </table>
+          </div>
+        </Show>
+      </section>
+    </>
+  );
+}
+
+// --- shell: left sidebar + content column ----------------------------------------
+
+// One sidebar entry: a native button (keyboard reachable, focus ring from
+// the global :focus-visible rule) with aria-current="page" on the active
+// entry. Danger entries carry the danger tone via the `danger` flag. The
+// li is flex-none so chips in the narrow horizontal bars keep their
+// content width and scroll inside the bar instead of squeezing (issue
+// #276); in the lg: column the stretch cross-axis still fills the width.
+function SideItem(props) {
+  return (
+    <li class="flex-none">
+      <button
+        type="button"
+        class={props.danger ? "side-nav-item side-nav-item-danger" : "side-nav-item"}
+        aria-current={props.active ? "page" : undefined}
+        onClick={props.onSelect}
+      >
+        {props.label}
+      </button>
+    </li>
+  );
+}
+
+export default function Settings() {
+  const ctx = useRepo();
+  const repo = ctx.repoClient;
+  // Deep-linkable tabs: a bare /settings visit opens the default; #wal,
+  // #danger, … select their entry. Stale hashes fall back, never blank.
+  const initialTab = () =>
+    typeof window === "undefined"
+      ? DEFAULT_SETTINGS_TAB
+      : (resolveSettingsTab(settingsTabIdFromHash(window.location.hash)) ?? DEFAULT_SETTINGS_TAB);
+  const [getTab, setTab] = createSignal(initialTab());
+
+  const select = (id) => {
+    setTab(id);
+    try {
+      // replaceState: no scroll jump, no hashchange loop, back button intact.
+      window.history.replaceState(null, "", `#${id}`);
+    } catch { /* non-browser or denied — the tab still switched */ }
+  };
+
+  // Back/forward across #hashes follows the sidebar instead of stranding it.
+  if (typeof window !== "undefined") {
+    const onHash = () => {
+      const t = settingsTabIdFromHash(window.location.hash);
+      if (t) setTab(t);
+    };
+    window.addEventListener("hashchange", onHash);
+    onCleanup(() => window.removeEventListener("hashchange", onHash));
+  }
+
+  return (
+    <div class="settings-page">
+      {/* Forgejo #631: no visual page heading — the tab bar already reads
+          Settings and the sidebar carries its own SETTINGS micro-heading,
+          so a doc-style h2 here only pushes the nav and content down a
+          row. sr-only keeps the document outline for screen readers. */}
+      <h2 class="sr-only">Settings</h2>
+      <div class="flex flex-col gap-4 lg:flex-row lg:gap-6">
+        <nav class="min-w-0 shrink-0 lg:w-56" aria-label="Settings sections">
+          {/* Issue #276: below sm: the two sections stack full-width, each
+              with its own internally-scrolling chip bar above the content —
+              side-by-side sections squeezed the standard bar to ~230px at
+              390px and could push the pair past the viewport under larger
+              fonts. sm:–lg: keeps the sections side by side (fits); lg:+
+              is the classic sticky sidebar. */}
+          <div class="flex min-w-0 flex-col gap-3 sm:flex-row sm:gap-4 lg:sticky lg:top-4 lg:block lg:space-y-4">
+            <section aria-labelledby="settings-nav-standard" class="min-w-0 flex-1 lg:flex-none">
+              <h3 id="settings-nav-standard" class="side-nav-heading">Settings</h3>
+              <ul class="flex gap-1 overflow-x-auto pb-1 lg:flex-col lg:overflow-visible lg:pb-0">
+                <For each={SETTINGS_GROUP}>
+                  {(t) => (
+                    <SideItem
+                      label={t.label}
+                      active={getTab() === t.id}
+                      onSelect={() => select(t.id)}
+                    />
+                  )}
+                </For>
+              </ul>
+            </section>
+            <section aria-labelledby="settings-nav-danger" class="min-w-0 flex-none">
+              <h3 id="settings-nav-danger" class="side-nav-heading side-nav-heading-danger">Danger Zone</h3>
+              <ul class="flex gap-1 overflow-x-auto pb-1 lg:flex-col lg:overflow-visible lg:pb-0">
+                <For each={DANGER_GROUP}>
+                  {(t) => (
+                    <SideItem
+                      label={t.label}
+                      danger
+                      active={getTab() === t.id}
+                      onSelect={() => select(t.id)}
+                    />
+                  )}
+                </For>
+              </ul>
+            </section>
+          </div>
+        </nav>
+        <div class="min-w-0 flex-1">
+          <Show when={getTab() === "general"}><GeneralTab ctx={ctx} repo={repo} /></Show>
+          <Show when={getTab() === "scheduled"}><ScheduledTab ctx={ctx} repo={repo} /></Show>
+          <Show when={getTab() === "mirror"}><MirrorTab ctx={ctx} repo={repo} /><PushMirrorTab ctx={ctx} repo={repo} /></Show>
+          <Show when={getTab() === "policy"}><PolicyTab ctx={ctx} repo={repo} /></Show>
+          <Show when={getTab() === "config"}><ConfigTab ctx={ctx} repo={repo} /></Show>
+          <Show when={getTab() === "access"}><AccessTab ctx={ctx} repo={repo} /></Show>
+          <Show when={getTab() === "tokens"}><CITokensTab ctx={ctx} repo={repo} /></Show>
+          <Show when={getTab() === "webhooks"}><WebhooksTab ctx={ctx} repo={repo} /></Show>
+          <Show when={getTab() === "wal"}><Wal /></Show>
+          <Show when={getTab() === "danger"}><DangerZone ctx={ctx} repo={repo} /></Show>
+        </div>
+      </div>
+    </div>
+  );
+}

@@ -1,0 +1,129 @@
+// web/src/index.jsx — the SolidJS entry (D-WEB-6): one client, one router,
+// the same route table the vanilla SPA had. The SDK default client is the
+// dogfood data path (§6); initData wires it into the data layer.
+
+import { render } from "solid-js/web";
+import "./ui.css";
+import { Router, Route } from "@solidjs/router";
+
+import repos from "../sdk/src/index.js";
+import App from "./App.jsx";
+import { initData } from "./lib/data.js";
+
+import Owners from "./pages/Owners.jsx";
+import Landing from "./pages/Landing.jsx";
+import HowItWorks from "./pages/HowItWorks.jsx";
+import Import from "./pages/Import.jsx";
+import New from "./pages/New.jsx";
+import Repos, { OwnerRepositories, OwnerOrganizations } from "./pages/Repos.jsx";
+import Repo from "./pages/Repo.jsx";
+import Tree from "./pages/Tree.jsx";
+import Blob from "./pages/Blob.jsx";
+import Commits from "./pages/Commits.jsx";
+import Commit from "./pages/Commit.jsx";
+import Issues from "./pages/Issues.jsx";
+import IssueNew from "./pages/IssueNew.jsx";
+import Issue from "./pages/Issue.jsx";
+import Pulls from "./pages/Pulls.jsx";
+import PullNew from "./pages/PullNew.jsx";
+import Pull from "./pages/Pull.jsx";
+import PullCommits from "./pages/PullCommits.jsx";
+import PullFiles from "./pages/PullFiles.jsx";
+import Fork from "./pages/Fork.jsx";
+import Forks from "./pages/Forks.jsx";
+import Checks from "./pages/Checks.jsx";
+import CheckDetail from "./pages/CheckDetail.jsx";
+import Team from "./pages/Team.jsx";
+import Releases from "./pages/Releases.jsx";
+import Release from "./pages/Release.jsx";
+import ReleaseNew from "./pages/ReleaseNew.jsx";
+import Notifications from "./pages/Notifications.jsx";
+import Labels from "./pages/Labels.jsx";
+import Milestones from "./pages/Milestones.jsx";
+import Wal from "./pages/Wal.jsx";
+import Settings from "./pages/Settings.jsx";
+import Org from "./pages/Org.jsx";
+import OrgNew from "./pages/OrgNew.jsx";
+import Apidocs from "./pages/Apidocs.jsx";
+import Setup from "./pages/Setup.jsx";
+import Keys from "./pages/Keys.jsx";
+import Invitations from "./pages/Invitations.jsx";
+import LoginRequired from "./pages/LoginRequired.jsx";
+
+initData(repos); // the dogfood client, one instance
+
+render(
+  () => (
+    <Router root={App}>
+      <Route path="/" component={Landing} />
+      <Route path="/explore" component={Owners} />
+      <Route path="/how-it-works" component={HowItWorks} />
+      <Route path="/import" component={Import} />
+      <Route path="/new" component={New} />
+      <Route path="/setup" component={Setup} />
+      <Route path="/api" component={Apidocs} />
+      <Route path="/keys" component={Keys} />
+      {/* Static before dynamic (see /orgs/new below): /invitations must not
+          fall into /:owner (Forgejo #362 — the inbox, never an owner named
+          "invitations"). */}
+      <Route path="/invitations" component={Invitations} />
+      <Route path="/notifications" component={Notifications} />
+      {/* Static before dynamic: /login-required must not fall into /:owner
+          (Forgejo #502 — the anonymous write interstitial, never an owner
+          named "login-required"). */}
+      <Route path="/login-required" component={LoginRequired} />
+      {/* Static before dynamic: /orgs/new must not fall into /:owner/:name
+          (Forgejo #348 — the shell serves it either way, but the router
+          must resolve the create form, never a repo named orgs/new). */}
+      <Route path="/orgs/new" component={OrgNew} />
+      {/* Static before dynamic: /:owner/repositories must not fall into
+          /:owner/:name (Forgejo #422 — the owner repositories tab, never a
+          repo named "repositories"; a repo literally named "repositories"
+          loses its UI page — git/API paths unaffected, same reservation
+          class as /orgs/new above). */}
+      <Route path="/:owner/repositories" component={OwnerRepositories} />
+      {/* Static before dynamic: /:owner/organizations must not fall into
+          /:owner/:name (Forgejo #430 — the owner organizations tab, never a
+          repo named "organizations"; an org literally named "organizations"
+          loses its UI page — git/API paths unaffected, same reservation
+          class as /:owner/repositories above and /orgs/new). */}
+      <Route path="/:owner/organizations" component={OwnerOrganizations} />
+      <Route path="/:owner" component={Repos} />
+      <Route path="/:org/settings" component={Org} />
+      <Route path="/:owner/teams/:slug" component={Team} />
+      {/* Top-level composer (Forgejo #438): /:owner/:name/fork renders as a
+          standalone page (site header only, no repo tab strip/sidebar) like
+          GitHub's /fork flow — same URL as before, hoisted out of the Repo
+          shell below. Fork.jsx reads owner/name from params, so no context
+          is lost by leaving the nested layout. */}
+      <Route path="/:owner/:name/fork" component={Fork} />
+      <Route path="/:owner/:name" component={Repo}>
+        <Route path="/" component={Tree} />
+        <Route path="/tree/*rest" component={Tree} />
+        <Route path="/blob/*rest" component={Blob} />
+        <Route path="/commits" component={Commits} />
+        <Route path="/commit/:sha" component={Commit} />
+        <Route path="/issues" component={Issues} />
+        <Route path="/issues/new" component={IssueNew} />
+        <Route path="/issues/:num" component={Issue} />
+        <Route path="/pulls" component={Pulls} />
+        <Route path="/pulls/new" component={PullNew} />
+        <Route path="/forks" component={Forks} />
+        <Route path="/pull/:num" component={Pull} />
+        <Route path="/pull/:num/commits" component={PullCommits} />
+        <Route path="/pull/:num/files" component={PullFiles} />
+        <Route path="/checks" component={Checks} />
+        <Route path="/checks/:sha" component={CheckDetail} />
+        <Route path="/releases" component={Releases} />
+        <Route path="/releases/new" component={ReleaseNew} />
+        <Route path="/releases/:tag" component={Release} />
+        <Route path="/labels" component={Labels} />
+        <Route path="/milestones" component={Milestones} />
+        <Route path="/wal" component={Wal} />
+        <Route path="/settings" component={Settings} />
+      </Route>
+      <Route path="*" component={Landing} />
+    </Router>
+  ),
+  document.getElementById("root"),
+);

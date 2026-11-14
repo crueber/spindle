@@ -1,0 +1,459 @@
+package config
+
+import (
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+	"time"
+)
+
+func errsContain(t *testing.T, errs []error, substr string) {
+	t.Helper()
+	for _, err := range errs {
+		if strings.Contains(err.Error(), substr) {
+			return
+		}
+	}
+	t.Fatalf("errors %v missing %q", errs, substr)
+}
+
+func TestValidateDefaultsPass(t *testing.T) {
+	warnings, errs := Validate(Defaults())
+	if len(errs) != 0 {
+		t.Fatalf("compiled-in defaults must validate clean: %v", errs)
+	}
+	if len(warnings) != 0 {
+		t.Fatalf("loopback default must not warn: %v", warnings)
+	}
+}
+
+// Rule 1 — auth-none loopback is WARN-only (divergence).
+func TestValidateAuthNoneNonLoopbackWarns(t *testing.T) {
+	c := FirstRunDefaults("/data")
+	warnings, errs := Validate(c)
+	if len(errs) != 0 {
+		t.Fatalf("auth-none on 0.0.0.0 must not fail closed: %v", errs)
+	}
+	if len(warnings) != 1 || !strings.Contains(warnings[0], "non-loopback listen 0.0.0.0:8080") {
+		t.Fatalf("warnings = %v, want loud auth warning", warnings)
+	}
+	c2 := Defaults()
+	c2.Server.Listen = "127.0.0.1:8080"
+	c2.Server.Auth.Mode = "none"
+	if warnings, _ := Validate(c2); len(warnings) != 0 {
+		t.Fatalf("loopback auth-none must not warn: %v", warnings)
+	}
+}
+
+// Rule 2 — oidc allowlist.
+func TestValidateOIDC(t *testing.T) {
+	base := func() *Config {
+		c := Defaults()
+		c.Server.Auth.Mode = "oidc"
+		c.Server.Auth.AnonymousRead = false
+		c.Server.Auth.AllowedDomains = []string{"example.com"}
+		c.Server.Auth.OAuthClientID = "id"
+		c.Server.Auth.OAuthClientSecret = "secret"
+		c.Server.Auth.SessionSecret = strings.Repeat("x", 32)
+		return c
+	}
+	if _, errs := Validate(base()); len(errs) != 0 {
+		t.Fatalf("valid oidc config must pass: %v", errs)
+	}
+
+	// Forgejo #371: anonymous_read is allowed in oidc mode either way —
+	// true is the default recommendation (public browsing per #345),
+	// false the everything-requires-login hard-lock.
+	for _, anon := range []bool{true, false} {
+		c := base()
+		c.Server.Auth.AnonymousRead = anon
+		if _, errs := Validate(c); len(errs) != 0 {
+			t.Fatalf("oidc with anonymous_read=%v must pass: %v", anon, errs)
+		}
+	}
+
+	c := base()
+	c.Server.Auth.AllowedDomains = nil
+	c.Server.Auth.AllowedEmails = nil
+	_, errs := Validate(c)
+	errsContain(t, errs, "allowed_domains or server.auth.allowed_emails")
+
+	c = base()
+	c.Server.Auth.OAuthClientSecret = ""
+	_, errs = Validate(c)
+	errsContain(t, errs, "both set or both unset")
+
+	c = base()
+	c.Server.Auth.SessionSecret = "short"
+	_, errs = Validate(c)
+	errsContain(t, errs, "at least 32 bytes")
+
+	c = base()
+	c.Server.Auth.SessionSecret = strings.Repeat("x", 32)
+	if _, errs := Validate(c); len(errs) != 0 {
+		t.Fatalf("32-byte session_secret must pass: %v", errs)
+	}
+}
+
+// Rule 2b — the browser-login trio (#344): mode=oidc with any of
+// session_secret / oauth_client_id / oauth_client_secret missing fails
+// closed and names the missing key(s) — never a silent boot.
+func TestValidateOIDCTrioMissing(t *testing.T) {
+	base := func() *Config {
+		c := Defaults()
+		c.Server.Auth.Mode = "oidc"
+		c.Server.Auth.AnonymousRead = false
+		c.Server.Auth.AllowedDomains = []string{"example.com"}
+		c.Server.Auth.OAuthClientID = "id"
+		c.Server.Auth.OAuthClientSecret = "secret"
+		c.Server.Auth.SessionSecret = strings.Repeat("x", 32)
+		return c
+	}
+	clear := map[string]func(a *Auth){
+		"server.auth.session_secret":      func(a *Auth) { a.SessionSecret = "" },
+		"server.auth.oauth_client_id":     func(a *Auth) { a.OAuthClientID = "" },
+		"server.auth.oauth_client_secret": func(a *Auth) { a.OAuthClientSecret = "" },
+	}
+	for key, drop := range clear {
+		t.Run("missing "+key, func(t *testing.T) {
+			c := base()
+			drop(&c.Server.Auth)
+			_, errs := Validate(c)
+			errsContain(t, errs, key)
+		})
+	}
+	t.Run("missing all three names all three", func(t *testing.T) {
+		c := base()
+		c.Server.Auth.SessionSecret = ""
+		c.Server.Auth.OAuthClientID = ""
+		c.Server.Auth.OAuthClientSecret = ""
+		_, errs := Validate(c)
+		for _, key := range []string{"server.auth.session_secret", "server.auth.oauth_client_id", "server.auth.oauth_client_secret"} {
+			errsContain(t, errs, key)
+		}
+	})
+	t.Run("non-oidc modes do not require the trio", func(t *testing.T) {
+		for _, mode := range []string{"none", "token"} {
+			c := Defaults()
+			c.Server.Auth.Mode = mode
+			c.Server.Auth.SessionSecret = ""
+			c.Server.Auth.OAuthClientID = ""
+			c.Server.Auth.OAuthClientSecret = ""
+			_, errs := Validate(c)
+			for _, err := range errs {
+				if strings.Contains(err.Error(), "browser-login trio") {
+					t.Fatalf("mode %q must not require the trio: %v", mode, errs)
+				}
+			}
+		}
+	})
+}
+
+// Rule 2c — the #371 validation matrix (oidc × anonymous_read ×
+// login-enabled): anonymous_read passes either way in oidc mode; the trio
+// (browser login enabled) is what decides boot, independent of the flag.
+func TestValidateOIDCAnonTrioMatrix(t *testing.T) {
+	base := func() *Config {
+		c := Defaults()
+		c.Server.Auth.Mode = "oidc"
+		c.Server.Auth.AllowedDomains = []string{"example.com"}
+		c.Server.Auth.OAuthClientID = "id"
+		c.Server.Auth.OAuthClientSecret = "secret"
+		c.Server.Auth.SessionSecret = strings.Repeat("x", 32)
+		return c
+	}
+	for _, anon := range []bool{true, false} {
+		for _, trio := range []bool{true, false} {
+			name := ""
+			if anon {
+				name += "anon-read "
+			} else {
+				name += "hard-lock "
+			}
+			if trio {
+				name += "login-enabled"
+			} else {
+				name += "login-disabled"
+			}
+			t.Run(name, func(t *testing.T) {
+				c := base()
+				c.Server.Auth.AnonymousRead = anon
+				if !trio {
+					c.Server.Auth.SessionSecret = ""
+				}
+				_, errs := Validate(c)
+				if trio && len(errs) != 0 {
+					t.Fatalf("oidc anon=%v trio complete must pass: %v", anon, errs)
+				}
+				if !trio {
+					errsContain(t, errs, "server.auth.session_secret")
+					for _, err := range errs {
+						if strings.Contains(err.Error(), "anonymous_read") {
+							t.Fatalf("trio failure must not blame anonymous_read: %v", errs)
+						}
+					}
+				}
+			})
+		}
+	}
+}
+
+// Rule 3 — bundle strategy validation.
+func TestValidateBundleStrategies(t *testing.T) {
+	if _, errs := Validate(Defaults()); len(errs) != 0 {
+		t.Fatalf("default bundle strategies must pass: %v", errs)
+	}
+	mutate := func(f func(s []BundleStrategy)) []error {
+		c := Defaults()
+		f(c.Bundles.Strategy)
+		_, errs := Validate(c)
+		return errs
+	}
+
+	errsContain(t, mutate(func(s []BundleStrategy) { s[1].Base = "" }), "incremental strategy requires base")
+	errsContain(t, mutate(func(s []BundleStrategy) { s[1].Base = "nonexistent" }), "does not name an earlier-declared strategy")
+	errsContain(t, mutate(func(s []BundleStrategy) { s[0].Kind = "incremental"; s[0].Base = "daily" }), "does not name an earlier-declared strategy") // forward ref
+	errsContain(t, mutate(func(s []BundleStrategy) { s[1].Keep = 2 }), "keep is a full-strategy concept")
+	errsContain(t, mutate(func(s []BundleStrategy) { s[0].Schedule = "not a cron" }), "cron")
+	if errs := mutate(func(s []BundleStrategy) { s[0].Schedule = "0 0 23 * * *" }); len(errs) != 0 {
+		t.Fatalf("6-field cron must pass: %v", errs)
+	}
+	errsContain(t, mutate(func(s []BundleStrategy) { s[0].Filter = "blob:something" }), `filter must be "blob:none"`)
+	errsContain(t, mutate(func(s []BundleStrategy) { s[0].BackfillMax = -1 }), "backfill_max must be >= 0")
+	errsContain(t, mutate(func(s []BundleStrategy) { s[0].MinCommits = -1 }), "min_commits must be >= 0")
+	errsContain(t, mutate(func(s []BundleStrategy) { s[0].Refs = []string{"refs/[heads"} }), "does not compile")
+	errsContain(t, mutate(func(s []BundleStrategy) { s[1].Name = "weekly" }), "duplicates")
+	errsContain(t, mutate(func(s []BundleStrategy) { s[2].Kind = "differential" }), `kind must be "full" or "incremental"`)
+}
+
+// Rule 4 — chain-shared filter is all-or-nothing, rejected by name.
+func TestValidateBundleChainFilter(t *testing.T) {
+	c := Defaults()
+	c.Bundles.Strategy[0].Filter = "blob:none" // daily/hourly chain has none
+	_, errs := Validate(c)
+	errsContain(t, errs, "(daily) mixes filter values in its base chain")
+
+	c = Defaults()
+	for i := range c.Bundles.Strategy {
+		c.Bundles.Strategy[i].Filter = "blob:none"
+	}
+	if _, errs := Validate(c); len(errs) != 0 {
+		t.Fatalf("uniform filtered chain must pass: %v", errs)
+	}
+}
+
+// Rule 5 — store.
+func TestValidateStore(t *testing.T) {
+	c := Defaults()
+	c.Store.Backend = "ftp"
+	_, errs := Validate(c)
+	errsContain(t, errs, "store.backend must be one of")
+
+	c = Defaults()
+	c.Store.MultipartThreshold = 1 << 20
+	c.Store.MultipartPartSize = 2 << 20
+	_, errs = Validate(c)
+	errsContain(t, errs, "multipart_part_size")
+
+	c = Defaults()
+	c.Store.MultipartPartSize = 0 // zero = unset, allowed
+	if _, errs := Validate(c); len(errs) != 0 {
+		t.Fatalf("zero part size must pass: %v", errs)
+	}
+
+	c = Defaults()
+	c.Store.Backend = "filesystem"
+	c.Store.Root = "relative/path"
+	_, errs = Validate(c)
+	errsContain(t, errs, "store.root must be an absolute path")
+}
+
+// Rule 6 — sizes/timeouts: negative values nowhere, watermark in (0,1) or 0.
+func TestValidateSizes(t *testing.T) {
+	c := Defaults()
+	c.Store.MultipartThreshold = -1
+	_, errs := Validate(c)
+	errsContain(t, errs, "negative value for store.multipart_threshold")
+
+	c = Defaults()
+	c.Maintenance.Interval = Duration(-time.Second)
+	_, errs = Validate(c)
+	errsContain(t, errs, "negative value for maintenance.interval")
+
+	c = Defaults()
+	c.Cache.DiskHighWatermark = 1.5
+	_, errs = Validate(c)
+	errsContain(t, errs, "disk_high_watermark")
+
+	c = Defaults()
+	c.Cache.DiskHighWatermark = 0
+	if _, errs := Validate(c); len(errs) != 0 {
+		t.Fatalf("watermark 0 must pass: %v", errs)
+	}
+}
+
+// Rule 7 — placement globs.
+func TestValidatePlacementGlobs(t *testing.T) {
+	tests := []struct {
+		glob string
+		ok   bool
+	}{
+		{"*", true}, {"owner/*", true}, {"owner/name", true},
+		{"", false}, {"owner/*/*", false}, {"**", false}, {"a?b", false}, {"a[b", false}, {"/*", false},
+	}
+	for _, tt := range tests {
+		c := Defaults()
+		c.Placement.Serve = []string{tt.glob}
+		_, errs := Validate(c)
+		if tt.ok && len(errs) != 0 {
+			t.Errorf("glob %q: unexpected errors %v", tt.glob, errs)
+		}
+		if !tt.ok {
+			errsContain(t, errs, "placement.serve glob")
+		}
+	}
+}
+
+// Rule 8 — roles.
+func TestValidateRoles(t *testing.T) {
+	c := Defaults()
+	c.Server.Roles = []string{"serve", "maintain", "events", "serve"} // duplicates allowed
+	if _, errs := Validate(c); len(errs) != 0 {
+		t.Fatalf("valid roles must pass: %v", errs)
+	}
+	c.Server.Roles = []string{"admin"}
+	_, errs := Validate(c)
+	errsContain(t, errs, "must be one of serve|maintain|events")
+}
+
+// Rule 9 — paths.
+func TestValidatePaths(t *testing.T) {
+	c := Defaults()
+	c.Cache.Dir = "relative/dir"
+	_, errs := Validate(c)
+	errsContain(t, errs, "cache.dir must be an absolute path")
+
+	c.Store.Backend = "memory"
+	if _, errs := Validate(c); len(errs) != 0 {
+		t.Fatalf("memory backend exempts cache.dir: %v", errs)
+	}
+}
+
+func TestValidCron(t *testing.T) {
+	valid := []string{
+		"@hourly", "@daily", "@weekly", "@monthly", "@yearly",
+		"0 0 23 * * Sun", "0 0 * * * *", "*/5 * * * * *", "0 0 0 1 Jan *", "0 0 23 * * Sun",
+		"0,15,30,45 * * * * *", "0 0 0-12 * * *",
+	}
+	for _, s := range valid {
+		if !validCron(s) {
+			t.Errorf("validCron(%q) = false, want true", s)
+		}
+	}
+	invalid := []string{"", "0 0 23 * *", "0 0 23 * * * *", "not a cron", "0 0 23 * * Sundaylong", "* * * * *"}
+	for _, s := range invalid {
+		if validCron(s) {
+			t.Errorf("validCron(%q) = true, want false", s)
+		}
+	}
+}
+
+func TestValidRefGlobCases(t *testing.T) {
+	for g, want := range map[string]bool{
+		"refs/heads/*": true, "main": true, "[abc]def": true, "": false,
+		"refs/[heads": false, "heads]": false, `refs\heads`: false,
+	} {
+		if got := validRefGlob(g); got != want {
+			t.Errorf("validRefGlob(%q) = %v, want %v", g, got, want)
+		}
+	}
+}
+
+func TestResolveDataDirContainer(t *testing.T) {
+	t.Setenv("WALHUB_DATA_DIR", "")
+	t.Setenv("KUBERNETES_SERVICE_HOST", "10.0.0.1")
+	if got := ResolveDataDir(func(string) string { return "" }); got != "/var/lib/walhub" {
+		t.Fatalf("container data dir = %q, want /var/lib/walhub", got)
+	}
+}
+
+func TestValidateMalformedListen(t *testing.T) {
+	c := Defaults()
+	c.Server.Listen = "no-port-here"
+	warnings, errs := Validate(c)
+	if len(errs) != 0 {
+		t.Fatalf("errs = %v", errs)
+	}
+	if len(warnings) != 1 {
+		t.Fatalf("unparseable listen must not count as loopback: %v", warnings)
+	}
+}
+
+// server.max_tree_log (issue #301): the default validates clean; a
+// non-positive bound fails closed, mirroring the [import] bounds pattern.
+func TestValidateTreeLog(t *testing.T) {
+	if _, errs := Validate(Defaults()); len(errs) != 0 {
+		t.Fatalf("tree-log default must validate clean: %v", errs)
+	}
+	for _, bad := range []int{0, -5} {
+		c := Defaults()
+		c.Server.MaxTreeLog = bad
+		_, errs := Validate(c)
+		errsContain(t, errs, "server.max_tree_log must be >= 1")
+	}
+}
+
+// [import] section: defaults pass; bounds and allowlist shape fail closed.
+func TestValidateImport(t *testing.T) {
+	if _, errs := Validate(Defaults()); len(errs) != 0 {
+		t.Fatalf("import defaults must validate clean: %v", errs)
+	}
+	c := Defaults()
+	c.Import.MaxRefs = 0
+	_, errs := Validate(c)
+	errsContain(t, errs, "import.max_refs must be >= 1")
+	c = Defaults()
+	c.Import.MaxConcurrent = 0
+	_, errs = Validate(c)
+	errsContain(t, errs, "import.max_concurrent must be >= 1")
+	for _, bad := range []string{"https://github.com", "github.com/org", "host:22", "user@host", ""} {
+		c = Defaults()
+		c.Import.URLAllowlist = []string{bad}
+		_, errs = Validate(c)
+		errsContain(t, errs, "must be a plain host")
+	}
+	c = Defaults()
+	c.Import.URLAllowlist = []string{"github.com", "git.example.com"}
+	if _, errs := Validate(c); len(errs) != 0 {
+		t.Fatalf("plain-host allowlist must pass: %v", errs)
+	}
+}
+
+func TestAttachmentsDefaultsAndValidation(t *testing.T) {
+	c := Defaults()
+	if c.Attachments.MaxImageBytes != ByteSize(8<<20) {
+		t.Fatalf("attachments.max_image_bytes = %v, want 8MiB", c.Attachments.MaxImageBytes)
+	}
+	if _, errs := Validate(c); len(errs) != 0 {
+		t.Fatalf("defaults do not validate: %v", errs)
+	}
+	bad := Defaults()
+	bad.Attachments.MaxImageBytes = -1
+	if _, errs := Validate(bad); len(errs) == 0 {
+		t.Fatal("negative attachments.max_image_bytes accepted")
+	}
+	// TOML spelling round-trips through the file loader.
+	dir := t.TempDir()
+	path := filepath.Join(dir, "walhub.toml")
+	if err := os.WriteFile(path, []byte("[attachments]\nmax_image_bytes = \"1MiB\"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	loaded, _, err := LoadExplicit(path, func(string) string { return "" })
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if loaded.Attachments.MaxImageBytes != ByteSize(1<<20) {
+		t.Fatalf("loaded max_image_bytes = %v", loaded.Attachments.MaxImageBytes)
+	}
+}

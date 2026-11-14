@@ -1,0 +1,1624 @@
+// web/src/pages/Pull.jsx — route "/:owner/:name/pull/:num" (03 §9 + 04 §8):
+// the PR conversation (ThreadTimeline, CommentComposer, MergeBox with the
+// 08 §2 state machine + task attach + double-submit guard) plus the
+// code-review surface: review summary bar, reviews list, reviewers panel,
+// finish-review modal, and the diff review surface (line anchors via
+// lib/diff.js anchorContextSha — the ONLY §4 hash implementation
+// client-side). `pull`/`review`/`thread`/`check` frames ride the ONE repo
+// collaboration stream (08 §4) and invalidate coalesced keys; the merge
+// box recomputes on every header fetch.
+
+import { createSignal, For, Show } from "solid-js";
+import { A, useLocation, useNavigate, useParams } from "@solidjs/router";
+import { useRepo } from "./Repo.jsx";
+import repos from "../../sdk/src/index.js";
+import { useData, invalidate, invalidatePullLists, reportError } from "../lib/data.js";
+import { CheckPill, ContextRows, ZeroChecksBlock } from "./Checks.jsx";
+import { isZeroChecks, requiredCheckBlockers } from "../lib/checks-empty.js";
+import { parsePatchFiles, normalizePatchBody } from "../lib/diff.js";
+import {
+  buildAnchor,
+  anchorLabel,
+  freshnessOf,
+  sortThreadsForIndex,
+} from "../lib/review-anchor.js";
+import { lineClass } from "../components/DiffTable.jsx";
+import ThreadTimeline from "../components/ThreadTimeline.jsx";
+import DateTime from "../components/DateTime.jsx";
+import CommentComposer from "../components/CommentComposer.jsx";
+import MergeBox from "../components/MergeBox.jsx";
+import { useCollabStream } from "../components/collab.jsx";
+import { useRole, roleAtLeast } from "../components/perms.jsx";
+import { onSubmitKeys } from "../lib/submitKeys.js";
+import { anonWriteTarget, isAnonymousViewer } from "../lib/writeGate.js";
+import { pullBadgeView, pullCloseVisibility, pullCommentLock, pullDraftVisibility, pullEventText, reviewRequestsEditable, reviewVerdictLabel, mergeabilityDisplay, requiredReviewsApplies, isTerminalPull, terminalMergeDetail } from "../lib/pull-state.js";
+import { chronological } from "../lib/thread-order.js";
+import { renderBody } from "../lib/render-md.js";
+
+/** PR description block (Forgejo #521, the issue-page first-comment
+ *  treatment): the live pr.body editable view with an author/date byline in
+ *  the timeline comment-entry idiom (muted xs header + markdown-body — the
+ *  same classes ThreadTimeline uses, unboxed). Hidden when the PR has no
+ *  description; the timeline's opened row is a one-line system row (see
+ *  pullEventText), so the description renders exactly once and never stale.
+ *  The modal draft preview in FinishReview stays plain text by design. */
+function PRDescription(props) {
+  return (
+    <Show when={String(props.body ?? "").trim()}>
+      <article aria-label="Pull request description" class="mb-3 border-b border-zinc-200 pb-3 dark:border-zinc-800">
+        <p class="mb-1 text-xs text-zinc-500 dark:text-zinc-400">
+          <span class="font-medium text-zinc-700 dark:text-zinc-200">{props.actor}</span>
+          {" · "}
+          <DateTime value={props.at} />
+        </p>
+        <div class="markdown-body" innerHTML={renderBody(props.body ?? "", props.mdCtx)} />
+      </article>
+    </Show>
+  );
+}
+
+/** Sidebar mergeability value (Forgejo #588, #592): the mergeable.state wire
+ *  value renders through the ONE shared mergeabilityDisplay mapping
+ *  (phrase + tone), with the page's checks/review/draft context passed
+ *  through. Since #592 this sidebar section is the ONLY status headline —
+ *  the MergeBox below renders strategy, buttons, and blocking reasons,
+ *  never a second headline. The wire contract stays byte-identical —
+ *  only rendered text changes. */
+function mergeabilityView(m, extra = {}) {
+  return mergeabilityDisplay(m?.state, { mergeable: m, ...extra });
+}
+
+/** Review-verdict chip (Forgejo #545): the ONE state→chip mapping for
+ *  every verdict on the PR page (summary-bar decision, reviewer states,
+ *  review cards). APPROVED rides the emerald chip-open, CHANGES_REQUESTED
+ *  the red chip-closed, COMMENTED + dismissed/requested the neutral
+ *  chip-neutral (ui.css), REVIEW_REQUIRED/unknown the amber chip-draft
+ *  (attention needed). No per-callsite bg overrides — colors live in
+ *  ui.css composition (F2). */
+function reviewVerdictChip(state) {
+  switch (state) {
+    case "APPROVED":
+      return "chip chip-open";
+    case "CHANGES_REQUESTED":
+      return "chip chip-closed";
+    case "COMMENTED":
+      return "chip chip-neutral";
+    default:
+      return "chip chip-draft";
+  }
+}
+
+/** Review summary bar (§8): decision badge + reviewer chips (stale derived
+ *  client-side from commit_sha != head) + requested chips + unresolved.
+ *  Forgejo #531: a section VALUE inside the sidebar's one divide-y panel
+ *  (the Issue.jsx:549 idiom) — no .card wrapper, no heading; the parent
+ *  section owns the uppercase micro-label. */
+function ReviewSummaryBar(props) {
+  const summary = () => props.summary;
+  const latest = () => Object.entries(summary()?.latest ?? {});
+  return (
+    <>
+      <div class="mb-2 flex flex-wrap items-center gap-2">
+        <span class={reviewVerdictChip(summary()?.decision ?? "REVIEW_REQUIRED")}>
+          {reviewVerdictLabel(summary()?.decision ?? "REVIEW_REQUIRED")}
+        </span>
+        <span class="text-xs text-zinc-500 dark:text-zinc-400">
+          {summary()?.approvals ?? 0} approvals · {summary()?.threads_unresolved ?? 0} unresolved threads
+        </span>
+      </div>
+      <div class="flex flex-wrap gap-1.5">
+        <For each={latest()} fallback={<span class="text-xs text-zinc-500 dark:text-zinc-400">no reviews yet</span>}>
+          {([who, r]) => (
+            <span class={reviewVerdictChip(r.state)} title={`${r.state} @ ${String(r.commit_sha ?? "").slice(0, 12)}`}>
+              {who} · {reviewVerdictLabel(r.state)}
+              <Show when={r.state === "APPROVED" && r.commit_sha !== props.head}>
+                <span class="ml-1 font-semibold text-amber-600 dark:text-amber-400">(stale)</span>
+              </Show>
+            </span>
+          )}
+        </For>
+        <For each={summary()?.requested ?? []}>
+          {(who) => <span class="chip chip-neutral opacity-70" title="requested reviewer">{who} · requested</span>}
+        </For>
+      </div>
+    </>
+  );
+}
+
+/** Reviews list (Forgejo #545, padded Forgejo #554): ONE .card panel with
+ *  the card-header title (the #521/#531 conversation-column idiom) holding
+ *  an unstyled flat list — the old wrapper class carried zero CSS rules
+ *  and each item was itself a .card, i.e. bordered chrome inside bordered
+ *  chrome. The panel composes the sibling card padding (card p-3, the
+ *  CommentComposer idiom) so review rows and the empty state sit inside
+ *  the border instead of touching its edges. Items are plain divider rows
+ *  (first row flush, like the flat PR-list rows); each reads author + chip
+ *  verdict + timestamp in the .card-meta language, with the stale marker
+ *  and dismiss affordance unchanged. */
+function ReviewsList(props) {
+  const submitDismiss = async (seq) => {
+    const reason = window.prompt("Dismissal reason (recorded on the compensating event):", "stale");
+    if (!reason || !reason.trim()) return;
+    try {
+      await props.client.pulls.reviews.dismiss(props.num, seq, { reason: reason.trim() });
+      props.reload();
+    } catch (err) {
+      reportError(err, "review-dismiss");
+    }
+  };
+  return (
+    <div class="card p-3" aria-label="Reviews">
+      <h2 class="card-header">Reviews</h2>
+      <ul class="divide-y divide-zinc-200 dark:divide-zinc-800">
+        <For each={props.reviews ?? []} fallback={<li class="text-sm text-zinc-500 dark:text-zinc-400">No reviews yet.</li>}>
+          {(rv) => (
+            <li class="py-2 first:pt-0 last:pb-0">
+              <div class="card-meta">
+                <span>{rv.by}</span>
+                {" · "}
+                <span class={rv.kind === "review_dismissed" ? "chip chip-neutral" : reviewVerdictChip(rv.state ?? rv.kind)}>{rv.kind === "review_dismissed" ? `dismissed #${rv.dismisses}` : reviewVerdictLabel(rv.state)}</span>
+                {" · "}
+                <span><DateTime value={rv.at} /></span>
+              </div>
+              <Show when={rv.kind === "review_dismissed"}>
+                <p class="text-sm italic">dismissed review #{rv.dismisses}: {rv.reason}</p>
+              </Show>
+              <Show when={rv.body}>
+                {/* Review bodies render markdown like the timeline (Forgejo
+                    #521) — same renderBody + repo mdCtx, not raw pre-wrap. */}
+                <div class="markdown-body" innerHTML={renderBody(rv.body ?? "", props.mdCtx)} />
+              </Show>
+              <p class="mt-1 text-xs text-zinc-500 dark:text-zinc-400">
+                {(rv.commit_sha ?? "").slice(0, 12)}
+                <Show when={rv.commit_sha && rv.commit_sha !== props.head}>
+                  <span class="ml-1 font-semibold text-amber-600 dark:text-amber-400">stale</span>
+                </Show>
+                <Show when={props.canDismiss && rv.kind === "review"}>
+                  <button type="button" class="link ml-2" onClick={() => submitDismiss(rv.seq)}>
+                    dismiss
+                  </button>
+                </Show>
+              </p>
+            </li>
+          )}
+        </For>
+      </ul>
+    </div>
+  );
+}
+
+/** Reviewers panel: picker fed by review-suggest (150 ms debounce,
+ *  abort-on-keystroke per the §2.6 ref-picker pattern). Forgejo #531: a
+ *  section VALUE inside the sidebar's one divide-y panel — no .card
+ *  wrapper, no heading; the parent section owns the micro-label. */
+function ReviewersPanel(props) {
+  const [getQuery, setQuery] = createSignal("");
+  const [getOptions, setOptions] = createSignal([]);
+  const [getOpen, setOpen] = createSignal(false);
+  let debounce = 0;
+  let ctrl = null;
+
+  const search = (q) => {
+    setQuery(q);
+    clearTimeout(debounce);
+    if (ctrl) ctrl.abort();
+    debounce = setTimeout(async () => {
+      ctrl = new AbortController();
+      try {
+        const { suggestions } = await props.client.pulls.suggest(props.num, q, { signal: ctrl.signal });
+        setOptions(suggestions ?? []);
+        setOpen(true);
+      } catch (err) {
+        if (String(err?.message ?? err).toLowerCase().includes("abort")) return;
+        reportError(err, "review-suggest");
+      }
+    }, 150);
+  };
+
+  const add = async (who) => {
+    setOpen(false);
+    try {
+      await props.client.pulls.requests.add(props.num, [who]);
+      setQuery("");
+      setOptions([]);
+      props.reload();
+    } catch (err) {
+      reportError(err, "review-request");
+    }
+  };
+
+  const remove = async (who) => {
+    try {
+      await props.client.pulls.requests.remove(props.num, [who]);
+      props.reload();
+    } catch (err) {
+      reportError(err, "review-request");
+    }
+  };
+
+  // Forgejo #599: the picker affordance gates on role AND open PR via the
+  // headless reviewRequestsEditable helper (role first, then the #594
+  // live-state lock over the same thread/pr fetch the page's commentLock
+  // reads — a reopen restores the picker with no reload).
+  // Requested-reviewer chips always render; the × remove affordance
+  // follows the same gate, so terminal PRs read read-only instead of
+  // hiding who was requested.
+  const editable = () => reviewRequestsEditable(props.canEdit, props.thread, props.pr);
+  const gateNote = () =>
+    !props.canEdit
+      ? "requesting reviewers needs the write role"
+      : (props.lockReason ?? "This conversation is closed");
+
+  return (
+    <>
+      <Show when={editable()} fallback={
+        <p class="text-xs text-zinc-500 dark:text-zinc-400">{gateNote()}</p>
+      }>
+      <div class="relative">
+        <input
+          class="input w-full"
+          placeholder="request a reviewer…"
+          value={getQuery()}
+          onInput={(e) => search(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.key === "Escape") setOpen(false);
+          }}
+          aria-label="Request a reviewer"
+          aria-expanded={getOpen()}
+        />
+        <Show when={getOpen() && getOptions().length > 0}>
+          <ul class="ref-list ref-drop card scroll-slim absolute z-10 mt-1 max-h-48 w-full overflow-y-auto p-1 shadow-lg">
+            <For each={getOptions()}>
+              {(who) => (
+                <li>
+                  <button type="button" class="ref-item flex w-full items-center rounded px-2 py-1 text-left text-sm text-zinc-800 hover:bg-zinc-100 dark:text-zinc-200 dark:hover:bg-zinc-800" onClick={() => add(who)}>
+                    {who}
+                  </button>
+                </li>
+              )}
+            </For>
+          </ul>
+        </Show>
+      </div>
+      </Show>
+      <ul class="mt-2 flex flex-wrap gap-1.5">
+        <For each={props.requested ?? []} fallback={<li class="text-xs text-zinc-500 dark:text-zinc-400">none requested</li>}>
+          {(who) => (
+            <li class="pill">
+              {who}
+              <Show when={editable()}>
+                <button type="button" class="link ml-1" onClick={() => remove(who)} aria-label={`Remove ${who}`}>
+                  ×
+                </button>
+              </Show>
+            </li>
+          )}
+        </For>
+      </ul>
+    </>
+  );
+}
+
+/** Number the display lines of one parsed hunk (hunk.newStart/oldStart
+ *  counters over the parsed rows). Returns [{line, t, text, oldNo, newNo}]. */
+function numberedLines(hunk) {
+  let o = hunk.oldStart;
+  let n = hunk.newStart;
+  return (hunk.lines ?? []).map((l, i) => {
+    const row = { line: l, idx: i, oldNo: null, newNo: null };
+    if (l.t === " ") {
+      row.oldNo = o++;
+      row.newNo = n++;
+    } else if (l.t === "-") {
+      row.oldNo = o++;
+    } else if (l.t === "+") {
+      row.newNo = n++;
+    }
+    return row;
+  });
+}
+
+/** Derive freshness for one thread against the CURRENT diff: recompute the
+ *  §4 hash from the diff — mismatch (or an unlocatable anchor) renders the
+ *  thread outdated (collapsed, original line shown), never relocated.
+ *  Delegates to freshnessOf (lib/review-anchor.js): single-line anchors hash
+ *  {start: idx, count: 1} exactly as before (pinned vectors hold); range
+ *  anchors hash their own span. */
+function threadFreshness(thread, files) {
+  const r = freshnessOf(thread.anchor, files);
+  if (r.hunkIndex < 0) return { fresh: false, hunk: null, idx: -1 };
+  const f = (files ?? []).find((x) => x.path === thread.anchor?.path);
+  return { fresh: r.fresh, hunk: f?.hunks?.[r.hunkIndex] ?? null, idx: r.startIdx };
+}
+
+/** One file's hunks with line comment affordances + inline thread cards
+ *  (unresolved-first; unlocatable/drifted anchors render once, collapsed,
+ *  at the file end — never relocated). Added/removed rows carry the shared
+ *  lineClass() background on the row div (issue #544 — the same .diff-add /
+ *  .diff-del tokens DiffBody uses, so the conversation diff matches the
+ *  Files tab and commit diffs in both themes). */
+function DiffFile(props) {
+  // Inline review composers (Forgejo #560, reworked by #598): the row
+  // itself is the staging surface — clicking anywhere on a diff row
+  // stages a composer immediately below THAT line (never one <Show>
+  // at the file end). The #560 left-gutter "+" button is gone (#598):
+  // every row leads with its +/-/space sign (ahead of the line numbers,
+  // themed with the row — add/del inherit the row text, context muted),
+  // and the row hover tint (ui.css .diff-row rules, the same amber +
+  // emerald tokens as selection) is the interactivity affordance, so no
+  // per-line trigger needs to exist. Inline cards (composer, staged,
+  // threads) share the ml-8 mt-1 slot — re-derived from the row layout:
+  // the removed w-6 gutter (1.5rem) shifts row content left by 6 spacing
+  // units, so the old ml-14 slot follows by the same 6 (ml-8), keeping
+  // cards aligned under their row. Drafts are a keyed Map (`${hunkIdx}:${rowIdx}`) so
+  // unlimited composers coexist per file with text preserved — each
+  // CommentComposer instance stays mounted under its own row and submits
+  // independently (staging into onStage, closing only its own key) in any
+  // order. Anchor construction is unchanged: stageLine builds via
+  // lib/review-anchor.js and submit hands {anchor, body} to onStage (the
+  // finish-review modal); cancel drops only that draft. Plain click stages
+  // one line; Shift+click on another row in the same file + side
+  // + hunk extends a range (the DiffTable clamp convention), staged as
+  // new_lines/old_lines > 1. Staged entries stay visible in-thread
+  // (Forgejo #567): the page-level pending list locates per row into
+  // StagedCards below the same anchor line (edit re-opens the keyed
+  // composer pre-filled, remove unstages through the shared mutation),
+  // and the ThreadIndex lists them marked staged. The #502 gate covers
+  // all three entry points
+  // (row click, composer render, staged cards — canComment !== false;
+  // commentLocked additionally blocks staging while merged/closed).
+  // Row clicks never fight interactive content: the row handler
+  // ignores clicks landing on buttons/links/inputs (closest() check), so
+  // clicks inside an open composer or thread card — siblings BELOW the
+  // row, never inside it — spawn nothing. Rows are tabindex="-1" (never
+  // in tab order) so Escape dismissal can return focus to the staging
+  // row. No touch handlers: a tap
+  // arrives as click and rows are full-width targets by construction,
+  // with the row hover tint as the visible affordance.
+  const [getDrafts, setDrafts] = createSignal(new Map());
+  const [getLast, setLast] = createSignal(null);
+
+  const draftKey = (hunkIdx, rowIdx) => `${hunkIdx}:${rowIdx}`;
+  const draftAt = (hunkIdx, rowIdx) => getDrafts().get(draftKey(hunkIdx, rowIdx)) ?? null;
+  const closeDraft = (key) => {
+    setDrafts((prev) => {
+      if (!prev.has(key)) return prev;
+      const next = new Map(prev);
+      next.delete(key);
+      return next;
+    });
+  };
+  // Dismissal refocus (Forgejo #566, the SplitCloseMenu convention in
+  // CommentComposer.jsx:38-43): Escape closes the composer and returns
+  // focus to the row that staged it (rows carry tabindex="-1" + ref, so
+  // they accept programmatic focus without joining tab order). Rows
+  // register here by draft key; focus() never fires click, so refocus
+  // cannot re-stage (no toggle-fight). A stale entry is harmless —
+  // focus() on a detached node is a no-op.
+  const triggerRefs = new Map();
+  const refocusTrigger = (key) => triggerRefs.get(key)?.focus?.();
+
+  // Staged inline comments (Forgejo #567): the page-level pending list
+  // (the SAME signal feeding the finish-review modal list + button count
+  // — one source of truth, no forked state) located per row, exactly like
+  // posted threads: entries whose anchor names this file + a current line
+  // render below that line; entries whose anchor no longer locates render
+  // once at the file end. Each entry carries its page-level pending index
+  // ({p, i}) so the card's edit/remove hit the same positions the
+  // finish-review modal lists.
+  const stagedByKey = () => {
+    const byKey = new Map();
+    const unplaced = [];
+    (props.pending ?? []).forEach((p, i) => {
+      if ((p.anchor?.path ?? "") !== props.file.path) return;
+      const a = p.anchor ?? {};
+      const no = a.side === "NEW" ? a.new_start : a.old_start;
+      let found = null;
+      (props.file.hunks ?? []).forEach((hunk, hi) => {
+        if (found) return;
+        numberedLines(hunk).forEach((row, ri) => {
+          if (found) return;
+          if ((row.newNo === no && a.side === "NEW") || (row.oldNo === no && a.side === "OLD")) {
+            found = `${hi}:${ri}`;
+          }
+        });
+      });
+      if (found) {
+        if (!byKey.has(found)) byKey.set(found, []);
+        byKey.get(found).push({ p, i });
+      } else {
+        unplaced.push({ p, i });
+      }
+    });
+    return { byKey, unplaced };
+  };
+
+  const stagedAt = (hi, ri) => stagedByKey().byKey.get(`${hi}:${ri}`) ?? [];
+
+  // Edit round-trip (Forgejo #567): the card's edit control stages a keyed
+  // draft over the same anchor pre-filled with the staged body (the
+  // composer mounts with initialValue). Submitting resolves the pending
+  // position fresh (resolveStagedEdit) so a removal that shifted indices
+  // mid-edit still updates the right entry; a vanished entry falls back
+  // to staging anew instead of clobbering a stranger. Cancelling the
+  // composer drops only the draft (closeDraft) — the staged entry stays.
+  const editStaged = (hunkIdx, rowIdx, s) => {
+    setDrafts((prev) =>
+      new Map(prev).set(draftKey(hunkIdx, rowIdx), {
+        anchor: s.p.anchor,
+        editIndex: s.i,
+        initialBody: s.p.body,
+      }),
+    );
+  };
+
+  const resolveStagedEdit = (dd) => {
+    if (dd?.editIndex == null) return -1;
+    const list = props.pending ?? [];
+    const cur = list[dd.editIndex];
+    if (cur && anchorLabel(cur.anchor) === anchorLabel(dd.anchor)) return dd.editIndex;
+    return list.findIndex((p) => anchorLabel(p.anchor) === anchorLabel(dd.anchor) && p.body === dd.initialBody);
+  };
+
+  const stageLine = (file, hunk, hunkIdx, row, rowIdx, ev) => {
+    const isNew = row.line.t !== "-";
+    const side = isNew ? "NEW" : "OLD";
+    const no = isNew ? row.newNo : row.oldNo;
+    if (no == null) return;
+    const key = draftKey(hunkIdx, rowIdx);
+    const last = getLast();
+    if (ev?.shiftKey && last && last.file === file.path && last.side === side && last.hunkIdx === hunkIdx) {
+      const anchor = buildAnchor({
+        file,
+        hunk,
+        side,
+        startNo: Math.min(last.no, no),
+        endNo: Math.max(last.no, no),
+        head: props.head,
+      });
+      if (anchor) {
+        setDrafts((prev) => new Map(prev).set(key, { anchor }));
+        return;
+      }
+    }
+    const anchor = buildAnchor({ file, hunk, side, startNo: no, endNo: no, head: props.head });
+    if (!anchor) return;
+    setLast({ file: file.path, side, no, hunkIdx });
+    setDrafts((prev) => new Map(prev).set(key, { anchor }));
+  };
+
+  // Row click stages a composer below that line. Guards: the #502 gate,
+  // the #594 lock (no new threads while merged/closed — the composer
+  // below renders the reason on already-staged drafts), plus the
+  // isolation check — clicks on interactive content (links/buttons/inputs
+  // any other way) never stage.
+  const onRowClick = (file, hunk, hunkIdx, row, rowIdx, ev) => {
+    if (props.canComment === false) return;
+    if (props.commentLocked) return;
+    if (ev?.target?.closest?.("button, a, input, textarea, select, [data-no-row-comment]")) return;
+    stageLine(file, hunk, hunkIdx, row, rowIdx, ev);
+  };
+
+  // Placement is derived fresh every render: locate each thread's anchor
+  // line in the CURRENT file hunks (inline, unresolved-first); anchors
+  // that no longer locate fall to the file end, collapsed (outdated).
+  const placement = () => {
+    const mine = (props.threads ?? []).filter((t) => (t.anchor?.path ?? "") === props.file.path);
+    const byKey = new Map();
+    const unplaced = [];
+    for (const t of mine) {
+      const a = t.anchor ?? {};
+      const no = a.side === "NEW" ? a.new_start : a.old_start;
+      let found = null;
+      (props.file.hunks ?? []).forEach((hunk, hi) => {
+        if (found) return;
+        numberedLines(hunk).forEach((row, ri) => {
+          if (found) return;
+          if ((row.newNo === no && a.side === "NEW") || (row.oldNo === no && a.side === "OLD")) {
+            found = `${hi}:${ri}`;
+          }
+        });
+      });
+      const f = threadFreshness(t, props.files);
+      t._fresh = f.fresh;
+      if (found) {
+        if (!byKey.has(found)) byKey.set(found, []);
+        byKey.get(found).push(t);
+      } else {
+        unplaced.push(t);
+      }
+    }
+    for (const list of byKey.values()) list.sort((x, y) => Number(x.resolved) - Number(y.resolved));
+    unplaced.sort((x, y) => Number(x.resolved) - Number(y.resolved));
+    return { byKey, unplaced };
+  };
+
+  const threadsAt = (hi, ri) => placement().byKey.get(`${hi}:${ri}`) ?? [];
+
+  return (
+    <div class="card" aria-label={`Diff ${props.file.path}`}>
+      <h3 class="mb-2 font-mono text-sm font-semibold">{props.file.path}</h3>
+      <For each={props.file.hunks ?? []}>
+        {(hunk, hi) => {
+          const rows = numberedLines(hunk);
+          return (
+            <div class="mb-3 overflow-x-auto">
+              <div class="font-mono text-xs text-zinc-500 dark:text-zinc-400">
+                @@ -{hunk.oldStart},{hunk.oldLines} +{hunk.newStart},{hunk.newLines} @@
+              </div>
+              <For each={rows}>
+                {(row, ri) => (
+                  <div>
+                    <div
+                      class={`diff-row flex font-mono text-xs ${lineClass(row.line.t)}${props.canComment !== false && !props.commentLocked ? " cursor-pointer" : ""}`}
+                      tabindex="-1"
+                      ref={(el) => el && triggerRefs.set(draftKey(hi(), ri()), el)}
+                      onClick={(ev) => onRowClick(props.file, hunk, hi(), row, ri(), ev)}
+                    >
+                      {/* Sign column (Forgejo #598): the +/-/space sign FIRST
+                          on every row, ahead of the line numbers, themed
+                          with the row (add/del inherit the row text, context
+                          muted) — replacing the removed left-gutter "+"
+                          button. Row click (with the closest() isolation in
+                          onRowClick) is the staging entry point; the
+                          .diff-row hover tint is the affordance. */}
+                      <span class={`w-4 shrink-0 select-none text-center${row.line.t === " " ? " text-zinc-400" : ""}`}>{row.line.t}</span>
+                      <span class="w-10 shrink-0 select-none text-right text-zinc-400">{row.oldNo ?? ""}</span>
+                      <span class="w-10 shrink-0 select-none text-right text-zinc-400">{row.newNo ?? ""}</span>
+                      <span class="whitespace-pre">{row.line.text}</span>
+                    </div>
+                    {/* Inline staged draft (#560): the shared
+                        CommentComposer rendered immediately below its row
+                        (never one <Show> at the file end); each keyed draft
+                        submits independently into the finish-review modal.
+                        #502 gate: no composers for anonymous viewers. */}
+                    <Show when={props.canComment !== false && draftAt(hi(), ri())}>
+                      {(d) => (
+                        // Dismissable draft composer (Forgejo #566, Cancel
+                        // moved to the bottom row by #587): the composer
+                        // takes an onCancel prop rendering Cancel at the
+                        // LEFT of its bottom action row (opposite the
+                        // right-aligned submit cluster — the canonical
+                        // .btn treatment, guideline §2 Controls, readable
+                        // in both themes). Escape anywhere inside the panel
+                        // (the CommentComposer textarea bubbles its keydown
+                        // up here — no document listener, so no onCleanup)
+                        // drops ONLY this keyed draft and refocuses the
+                        // row that staged it. Dismissal calls
+                        // nothing: no onStage, no POST.
+                        <div
+                          class="ml-8 mt-1 rounded border border-zinc-200 p-2 dark:border-zinc-700"
+                          aria-label={`Draft comment on ${anchorLabel(d().anchor)}`}
+                          onKeyDown={(e) => {
+                            if (e.key !== "Escape") return;
+                            e.preventDefault();
+                            e.stopPropagation();
+                            const key = draftKey(hi(), ri());
+                            closeDraft(key);
+                            refocusTrigger(key);
+                          }}
+                        >
+                          <p class="mb-1 text-xs text-zinc-500 dark:text-zinc-400">
+                            commenting on <span class="font-mono">{anchorLabel(d().anchor)}</span>
+                          </p>
+                          <CommentComposer
+                            onSubmit={async (body) => {
+                              const idx = resolveStagedEdit(d());
+                              if (idx >= 0) props.onUpdate(idx, body);
+                              else props.onStage({ anchor: d().anchor, body });
+                              closeDraft(draftKey(hi(), ri()));
+                            }}
+                            submitLabel={d().editIndex != null ? "Save" : "Stage comment"}
+                            onCancel={() => closeDraft(draftKey(hi(), ri()))}
+                            initialValue={d().initialBody}
+                            disabled={props.commentLocked}
+                            disabledReason={props.commentLockReason}
+                            placeholder={`Comment on ${anchorLabel(d().anchor)}… (staged into the finish-review modal)`}
+                            errorKey="line-comment-stage"
+                            label={`Comment on ${anchorLabel(d().anchor)}`}
+                          />
+                        </div>
+                      )}
+                    </Show>
+                    {/* Staged inline comments (Forgejo #567, slot re-derived
+                        by #598): every staged pending entry for this line
+                        renders in-thread below it (the same ml-8 mt-1 card
+                        slot the composer + ThreadCard share, so the scroll
+                        width never exceeds what the composer already
+                        takes) — no invisible moment between staging and
+                        Finish review. #502 gate: anonymous viewers (empty
+                        pending by
+                        construction) see nothing new. */}
+                    <Show when={props.canComment !== false}>
+                      <For each={stagedAt(hi(), ri())}>
+                        {(s) => (
+                          <StagedCard
+                            entry={s.p}
+                            index={s.i}
+                            stagedBy={props.stagedBy}
+                            flashed={props.flashStaged?.() === s.i}
+                            onFlash={props.onFlashStaged}
+                            onEdit={() => editStaged(hi(), ri(), s)}
+                            onUnstage={() => props.onUnstage(s.i)}
+                          />
+                        )}
+                      </For>
+                    </Show>
+                    <For each={threadsAt(hi(), ri())}>
+                      {(t) => <ThreadCard thread={t} client={props.client} num={props.num} reload={props.reload} canResolve={props.canResolve} commentLocked={props.commentLocked} commentLockReason={props.commentLockReason} mdCtx={props.mdCtx} flashTid={props.flashTid} onCollapse={props.onCollapse} onFlash={props.onFlashTid} />}
+                    </For>
+                  </div>
+                )}
+              </For>
+            </div>
+          );
+        }}
+      </For>
+      {/* Anchors that no longer locate (drifted head, deleted lines)
+          render once, collapsed, at the file end — never relocated.
+          Staged entries whose anchor no longer locates join them (same
+          slot, marked staged) so a staged comment is never silently
+          homeless before submit. */}
+      <Show when={props.canComment !== false}>
+        <For each={stagedByKey().unplaced}>
+          {(s) => (
+            <StagedCard
+              entry={s.p}
+              index={s.i}
+              stagedBy={props.stagedBy}
+              flashed={props.flashStaged?.() === s.i}
+              onFlash={props.onFlashStaged}
+              onEdit={null}
+              onUnstage={() => props.onUnstage(s.i)}
+            />
+          )}
+        </For>
+      </Show>
+      <For each={placement().unplaced}>
+        {(t) => <ThreadCard thread={t} client={props.client} num={props.num} reload={props.reload} canResolve={props.canResolve} commentLocked={props.commentLocked} commentLockReason={props.commentLockReason} mdCtx={props.mdCtx} flashTid={props.flashTid} onCollapse={props.onCollapse} onFlash={props.onFlashTid} />}
+      </For>
+    </div>
+  );
+}
+
+/** Card-root click-to-flash guard (Forgejo #575): a click anywhere on a
+ *  ThreadCard/StagedCard body highlights the card through the SAME
+ *  page-level flash signals the ThreadIndex pill jump uses (no second
+ *  highlight mechanism — the #573 flashTid/flashStaged lifecycle is
+ *  consumed, not forked). Two ignores keep the gesture unsurprising:
+ *  clicks originating from interactive controls (buttons/links/inputs —
+ *  the closest() check, the same convention the DiffFile row handler
+ *  uses) never flash, so the #573 collapse click still ends collapsed +
+ *  unhighlighted (the collapse control additionally stopPropagations —
+ *  belt and braces on the clear-before-toggle ordering); and a click
+ *  that leaves selected text (window.getSelection — a selection drag
+ *  ending on the card) never re-flashes, so selecting comment text to
+ *  copy it does not jarringly highlight the card. */
+const cardFlashClick = (e, fire) => {
+  if (e.target.closest?.("button, a, input, textarea, select, form")) return;
+  if (window.getSelection?.()?.toString()) return;
+  fire();
+};
+
+/** One staged inline comment card (Forgejo #567, the ThreadCard idiom;
+ *  slot re-derived by #598 — ml-8, following the removed w-6 gutter):
+ *  the staged pending entry rendered in-thread below its anchor line
+ *  until review submit — same ml-8 mt-1 card slot as the composer +
+ *  ThreadCard, author + plain-text body (the FinishReview list renders
+ *  p.body plain, kept consistent — staged text is a draft, never
+ *  markdown), and the canonical amber chip-draft pill (both themes via
+ *  ui.css, no per-callsite bg override per the #545 F2 rule —
+ *  visually distinct from the resolved/outdated pills). The card carries id `staged-<i>`
+ *  (page-level pending index) so the ThreadIndex jumps + flashes it like
+ *  a thread card. Edit re-opens the keyed composer in place pre-filled;
+ *  remove unstages through the same pending-list mutation the
+ *  finish-review modal uses. Unplaced cards (anchor no longer locates)
+  *  render at the file end with no edit control — there is no row to
+  *  reopen under. Flashed geometry (Forgejo #574): the emerald outline is
+  *  INSET (`outline-offset-[-2px]`, shared byte-identically with ThreadCard
+  *  below — pinned by flash-ring-574.test.js) so the ring paints inside the
+  *  border box and the hunk scroll wrapper never clips it. Forgejo #575:
+ *  a click on the card body sets the same page-level staged flash (new
+ *  `onFlash` prop — the page passes setFlashStaged directly, same
+ *  overwrite-no-scroll terms as the thread card). */
+function StagedCard(props) {
+  const label = () => anchorLabel(props.entry?.anchor);
+  return (
+    <div
+      id={`staged-${props.index}`}
+      class={`ml-8 mt-1 rounded border border-zinc-200 p-2 dark:border-zinc-700${props.flashed ? " outline outline-2 outline-emerald-500 outline-offset-[-2px]" : ""}`}
+      aria-label={`Staged comment on ${label()}`}
+      onClick={(e) => cardFlashClick(e, () => props.onFlash?.(props.index))}
+    >
+      <div class="mb-1 flex flex-wrap items-center gap-2 text-xs">
+        <Show when={props.stagedBy}>
+          <span class="font-semibold">{props.stagedBy}</span>
+        </Show>
+        <span class="chip chip-draft" title="staged in your review — submits with Finish review">
+          staged
+        </span>
+        <span class="font-mono text-zinc-500 dark:text-zinc-400">{label()}</span>
+        <Show when={props.onEdit}>
+          <button type="button" class="btn ml-2 px-2 py-0.5 text-xs" onClick={props.onEdit}>
+            edit
+          </button>
+        </Show>
+        <button type="button" class="btn ml-2 px-2 py-0.5 text-xs" onClick={props.onUnstage}>
+          remove
+        </button>
+      </div>
+      <p class="whitespace-pre-wrap text-sm">{props.entry?.body}</p>
+    </div>
+  );
+}
+
+/** One thread card: comments, resolve toggle, outdated collapse. The card
+ *  carries id `thread-<tid>` so the jump-to-comments index can scroll to
+  *  it; a flashed (just-jumped-to) card draws an inset emerald outline
+  *  (Forgejo #574: `outline-offset-[-2px]` — the ring paints inside the
+  *  border box, hugging the rounded corners, so the hunk scroll wrapper
+  *  never clips it; byte-identical with the StagedCard fragment)
+  *  and expands, so the target reads in both themes. Forgejo #573: the
+  *  collapse/expand toggle clears the page-level flash for this tid first
+ *  (the shared clearFlash(tid) lifecycle — the same mechanics #575's
+ *  collapse-click case reuses), so open() and the outline return to
+ *  tracking getOpen() and collapse never looks dead. Forgejo #575: a
+ *  click on the card body sets the same page-level flash (new `onFlash`
+ *  prop — the page passes setFlashTid directly, so card click overwrites
+ *  exactly like a pill jump and never scrolls; the cardFlashClick guard
+ *  above keeps control clicks and selection drags from flashing).
+ *  Forgejo #581: the header renders no visible tid — the zero-padded
+ *  %08x id is an opaque internal key, so the mono tid span is gone
+ *  (plain removal, no tooltip); the card root id, aria-label, flashTid
+ *  mechanics, and the ThreadIndex anchorLabel pills are untouched. */
+function ThreadCard(props) {
+  const t = () => props.thread;
+  const [getBody, setBody] = createSignal("");
+  const [getOpen, setOpen] = createSignal(!t().resolved);
+  const flashed = () => props.flashTid?.() === t().tid;
+  const open = () => getOpen() || flashed();
+
+  const comment = async (e) => {
+    e.preventDefault();
+    if (props.commentLocked) return; // #594: the write never fires while locked
+    if (!getBody().trim()) return;
+    try {
+      await props.client.pulls.threads.comment(props.num, t().tid, getBody().trim());
+      setBody("");
+      props.reload();
+    } catch (err) {
+      reportError(err, "thread-comment");
+    }
+  };
+
+  const toggle = async () => {
+    try {
+      if (t().resolved) await props.client.pulls.threads.unresolve(props.num, t().tid);
+      else await props.client.pulls.threads.resolve(props.num, t().tid);
+      props.reload();
+    } catch (err) {
+      reportError(err, "thread-resolve");
+    }
+  };
+
+  return (
+    <div
+      id={`thread-${t().tid}`}
+      class={`ml-8 mt-1 rounded border border-zinc-200 p-2 dark:border-zinc-700${flashed() ? " outline outline-2 outline-emerald-500 outline-offset-[-2px]" : ""}`}
+      aria-label={`Thread ${t().tid}`}
+      onClick={(e) => cardFlashClick(e, () => props.onFlash?.(t().tid))}
+    >
+      <div class="mb-1 flex flex-wrap items-center gap-2 text-xs">
+        <Show when={t()._fresh === false}>
+          <span class="pill bg-zinc-200 text-zinc-700 dark:bg-zinc-700 dark:text-zinc-300" title="anchor drifted past the current diff">
+            outdated · {(t().anchor?.path ?? "")}:{(t().anchor?.side === "NEW" ? t().anchor?.new_start : t().anchor?.old_start) ?? ""}
+          </span>
+        </Show>
+        <Show when={t().resolved}>
+          <span class="pill">resolved{t().resolved_by ? ` by ${t().resolved_by}` : ""}</span>
+        </Show>
+        <Show when={props.canResolve}>
+          <button type="button" class="link" onClick={toggle}>
+            {t().resolved ? "unresolve" : "resolve"}
+          </button>
+        </Show>
+        <button type="button" class="link" onClick={(e) => { e.stopPropagation(); props.onCollapse?.(t().tid); setOpen(!getOpen()); }}>
+          {open() ? "collapse" : "expand"}
+        </button>
+      </div>
+      <Show when={open()}>
+        <ThreadComments tid={t().tid} client={props.client} num={props.num} mdCtx={props.mdCtx} />
+        {/* Forgejo #594: the reply locks with the PR (disabled-with-reason,
+            the composer idiom — a 409 here would only toast on submit). */}
+        <form class="mt-1 flex gap-2" onSubmit={comment}>
+          <input
+            class="input flex-1 disabled:cursor-not-allowed disabled:opacity-50"
+            value={getBody()}
+            onInput={(e) => setBody(e.target.value)}
+            placeholder={props.commentLocked ? (props.commentLockReason ?? "This conversation is closed") : "reply…"}
+            aria-label="Reply"
+            title={props.commentLocked ? (props.commentLockReason ?? "This conversation is closed") : undefined}
+            aria-disabled={props.commentLocked || undefined}
+            disabled={props.commentLocked}
+          />
+          <button
+            type="submit"
+            class="btn px-2 py-0.5 disabled:cursor-not-allowed disabled:opacity-50"
+            title={props.commentLocked ? (props.commentLockReason ?? "This conversation is closed") : undefined}
+            aria-disabled={props.commentLocked || undefined}
+            disabled={props.commentLocked}
+          >
+            reply
+          </button>
+        </form>
+      </Show>
+    </div>
+  );
+}
+
+/** Jump-to-comments index (Forgejo #546, padded Forgejo #557, staged
+ *  Forgejo #567): one entry per anchored thread — path:line (or
+ *  path:start-end for ranges) + resolved/outdated state — plus one entry
+ *  per staged pending comment, marked staged, atop the conversation.
+ *  Clicking scrolls to the inline ThreadCard / staged card and flashes
+ *  it. The panel composes the sibling card padding (card p-3, the
+ *  ReviewsList #554 / CommentComposer idiom) so the pill entries sit
+ *  inside the border instead of touching its edges; the mb-4
+ *  conversation spacing stays. Entries reflect the same placement truth
+ *  the cards render: drifted/outdated anchors are marked and jump to
+ *  their collapsed card at the file end (never to a line that no longer
+ *  exists); threads whose file left the current diff render marked with
+ *  no jump target. Order is unresolved-first, matching the inline cards;
+ *  staged entries follow the posted threads in pending order. */
+function ThreadIndex(props) {
+  const entries = () =>
+    sortThreadsForIndex(props.threads ?? []).map((t) => {
+      const filePresent = (props.files ?? []).some((f) => f?.path === t.anchor?.path);
+      const { fresh } = freshnessOf(t.anchor, props.files ?? []);
+      return { t, fresh, target: filePresent ? t.tid : null };
+    });
+
+  return (
+    <Show when={(props.threads ?? []).length > 0 || (props.pending ?? []).length > 0}>
+      <nav class="card mb-4 p-3" aria-label="Comments index">
+        <h2 class="card-header">
+          Comments
+        </h2>
+        <ul class="flex flex-wrap gap-1.5">
+          <For each={entries()}>
+            {(e) => (
+              <li>
+                <Show
+                  when={e.target}
+                  fallback={
+                    <span
+                      class="pill opacity-60"
+                      title={`${anchorLabel(e.t.anchor)} is not in the current diff`}
+                    >
+                      {anchorLabel(e.t.anchor)} · gone
+                    </span>
+                  }
+                >
+                  <button
+                    type="button"
+                    class="pill cursor-pointer"
+                    onClick={() => props.onJump(e.target)}
+                    title={`${anchorLabel(e.t.anchor)}${e.t.resolved ? " · resolved" : ""}${e.fresh ? "" : " · outdated"}`}
+                  >
+                    <span class="font-mono">{anchorLabel(e.t.anchor)}</span>
+                    <Show when={e.t.resolved}>
+                      <span> · resolved</span>
+                    </Show>
+                    <Show when={!e.fresh}>
+                      <span> · outdated</span>
+                    </Show>
+                  </button>
+                </Show>
+              </li>
+            )}
+          </For>
+          {/* Staged pending comments (Forgejo #567): one pill per staged
+              entry in pending order, marked staged, jumping to the inline
+              staged card (the staged-<i> / flashStaged idiom mirroring the
+              thread-<tid> / flashTid one). Anonymous viewers hold an empty
+              pending list, so they see nothing new (#502). */}
+          <For each={props.pending ?? []}>
+            {(p, i) => (
+              <li>
+                <button
+                  type="button"
+                  class="pill cursor-pointer"
+                  onClick={() => props.onJumpStaged(i())}
+                  title={`${anchorLabel(p.anchor)} · staged (submits with Finish review)`}
+                >
+                  <span class="font-mono">{anchorLabel(p.anchor)}</span>
+                  <span> · staged</span>
+                </button>
+              </li>
+            )}
+          </For>
+        </ul>
+      </nav>
+    </Show>
+  );
+}
+
+/** Lazily loaded comments for one thread card (Forgejo #597): the wire
+ *  GET …/pulls/{num}/threads/{tid} returns comments newest-first by spec
+ *  design (internal/review/threads.go GetThread, 02 §7 Decisions — MUST
+ *  NOT CHANGE), but the card reads oldest-first (chronological), matching
+ *  the #225 issue-timeline convention, so the newest reply sits directly
+ *  above the reply textbox. The render goes through the shared
+ *  chronological() helper (web/src/lib/thread-order.js) — NO inline sort
+ *  re-implementation. Windowing caveat: with more:true the window is the
+ *  newest n; reversing is correct within the window; any future older-pager
+ *  must use appendOlderWindow + chronological assembly. */
+function ThreadComments(props) {
+  const key = () => `thread:${props.num}:${props.tid}`;
+  const [getView] = useData(key, () => props.client.pulls.threads.get(props.num, props.tid));
+  return (
+    <ul class="space-y-1">
+      <For each={chronological(getView()?.comments)} fallback={<li class="text-xs text-zinc-500 dark:text-zinc-400">loading…</li>}>
+        {(c) => (
+          <li class="text-xs">
+            <span class="font-semibold">{c.by}</span> <span class="text-zinc-500 dark:text-zinc-400"><DateTime value={c.at} /></span>
+            {/* Thread comments render markdown like the timeline (Forgejo
+                #521) — same renderBody + repo mdCtx, not raw pre-wrap. */}
+            <div class="markdown-body" innerHTML={renderBody(c.body ?? "", props.mdCtx)} />
+          </li>
+        )}
+      </For>
+    </ul>
+  );
+}
+
+/** Finish-review modal (padded Forgejo #557): pending staged line
+ *  comments + top-level body + verdict, one POST reviews (threads open
+ *  atomically with the review). The form composes the sibling card
+ *  padding (card p-3, the ReviewsList #554 / CommentComposer idiom) so
+ *  the staged list, fields, and buttons sit inside the border instead of
+ *  touching its edges. */
+function FinishReview(props) {
+  const [getBody, setBody] = createSignal("");
+  const [getVerdict, setVerdict] = createSignal("COMMENTED");
+  const [getBusy, setBusy] = createSignal(false);
+
+  const submit = async (e) => {
+    e.preventDefault();
+    if (props.commentLocked) return; // #594: the write never fires while locked
+    setBusy(true);
+    try {
+      await props.client.pulls.reviews.submit(props.num, {
+        state: getVerdict(),
+        body: getBody(),
+        commit_sha: props.head,
+        threads: props.pending,
+      });
+      props.onDone();
+    } catch (err) {
+      reportError(err, "review-submit");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <form class="card p-3" aria-label="Finish review" onSubmit={submit}>
+      <h2 class="card-header">Finish review</h2>
+      <Show when={(props.pending ?? []).length > 0} fallback={<p class="text-xs text-zinc-500 dark:text-zinc-400">no staged line comments</p>}>
+        <ul class="mb-2 space-y-1">
+          <For each={props.pending}>
+            {(p, i) => (
+              <li class="flex items-start gap-2 text-xs">
+                <span class="font-mono">
+                  {anchorLabel(p.anchor)}
+                </span>
+                <span class="flex-1 whitespace-pre-wrap">{p.body}</span>
+                <button type="button" class="link" onClick={() => props.onUnstage(i())}>
+                  remove
+                </button>
+              </li>
+            )}
+          </For>
+        </ul>
+      </Show>
+      {/* Forgejo #545: the #479 canonical form shape (IssueNew.jsx) —
+          label.grid.gap-1 + text-sm font-medium span + .input control,
+          help scoped to its fields via id + aria-describedby. */}
+      <label class="grid gap-1">
+        <span class="text-sm font-medium">Body (optional)</span>
+        <textarea id="finish-review-body" class="input w-full" value={getBody()} onInput={(e) => setBody(e.target.value)} rows="3" onKeyDown={onSubmitKeys(submit, { isBusy: () => getBusy() })} aria-describedby="finish-review-head-help" />
+      </label>
+      <label class="grid gap-1 mt-2">
+        <span class="text-sm font-medium">Verdict</span>
+        <select id="finish-review-verdict" class="input w-full" value={getVerdict()} onInput={(e) => setVerdict(e.target.value)} aria-describedby="finish-review-head-help">
+          <option value="COMMENTED">comment</option>
+          <option value="APPROVED">approve</option>
+          <option value="CHANGES_REQUESTED">request changes</option>
+        </select>
+      </label>
+      <p id="finish-review-head-help" class="muted mt-1 text-xs">reviewing {(props.head ?? "").slice(0, 12)}</p>
+      {/* Forgejo #594: review submits ride the comment lock (the server
+          409s them on merged/closed PRs) — disabled-with-reason here so
+          the modal never accepts a submit that only fails. */}
+      <Show when={props.commentLocked}>
+        <p class="muted mt-1 text-xs" role="note">{props.commentLockReason ?? "This conversation is closed"}</p>
+      </Show>
+      <div class="mt-2 flex gap-2">
+        <button
+          type="submit"
+          class="btn primary px-3 py-1 disabled:cursor-not-allowed disabled:opacity-50"
+          disabled={getBusy() || props.commentLocked}
+          title={props.commentLocked ? (props.commentLockReason ?? "This conversation is closed") : undefined}
+          aria-disabled={props.commentLocked || undefined}
+        >
+          {getBusy() ? "submitting…" : "submit review"}
+        </button>
+        <button type="button" class="btn px-3 py-1" onClick={props.onDone}>
+          cancel
+        </button>
+      </div>
+    </form>
+  );
+}
+
+export default function Pull() {
+  const ctx = useRepo();
+  const params = useParams();
+  const num = () => params.num;
+  const key = () => `pull:${ctx.full}:${num()}`;
+  const reviewsKey = () => `reviews:${ctx.full}:${num()}`;
+  const threadsKey = () => `threads:${ctx.full}:${num()}`;
+  const requestsKey = () => `requests:${ctx.full}:${num()}`;
+  const diffKey = () => `pulldiff:${ctx.full}:${num()}`;
+  const [getView] = useData(key, () => ctx.repoClient.pulls.get(num()));
+  const [getReviews] = useData(reviewsKey, () => ctx.repoClient.pulls.reviews.list(num(), { n: 50 }));
+  const [getThreads] = useData(threadsKey, () => ctx.repoClient.pulls.threads.list(num(), { n: 100 }));
+  const [getRequests] = useData(requestsKey, () => ctx.repoClient.pulls.requests.list(num()));
+  // Issue #520: the inline diff tracks its own fetch error for the
+  // error state + Retry below — useData reports failures only to the
+  // global tray, otherwise this section sits on "loading diff…" forever.
+  const [getDiffError, setDiffError] = createSignal(null);
+  const [getDiff] = useData(diffKey, async () => {
+    setDiffError(null);
+    try {
+      const res = await ctx.repoClient.pulls.diff(num());
+      return parsePatchFiles(normalizePatchBody(res));
+    } catch (err) {
+      setDiffError(err);
+      throw err;
+    }
+  });
+  const retryDiff = () => {
+    setDiffError(null);
+    invalidate(diffKey());
+  };
+  // Honest count (issue #520): renders only once loaded — never (0) for
+  // a diff that never arrived.
+  const diffCount = () => {
+    const v = getDiff();
+    if (v) return String((v.files ?? []).length);
+    return getDiffError() ? "failed to load" : "…";
+  };
+  const { role } = useRole(ctx.full, ctx.repoClient);
+  const navigate = useNavigate();
+  const location = useLocation();
+  // Forgejo #502: anonymous viewers execute zero writes — the PR composer
+  // routes to the log-in interstitial (shared identity cache keys — zero
+  // new requests). Review/merge affordances already hide below write.
+  const [getMe] = useData("me", () => repos.me().catch(() => null));
+  const [getDiscovery] = useData("discovery", () => repos.discovery().catch(() => null));
+  const anon = () => isAnonymousViewer(getMe(), getDiscovery());
+  const here = () => location.pathname + location.search;
+  const writeGateHref = (action) => anonWriteTarget({ me: getMe(), discovery: getDiscovery() }, here(), action);
+  const canComment = () => role() !== null && !anon();
+  const canReview = () => roleAtLeast(role(), "write");
+  const canResolve = () => roleAtLeast(role(), "triage");
+  const canDismiss = () => roleAtLeast(role(), "maintain");
+  const canUpdateBranch = () => roleAtLeast(role(), "write");
+  const [getPending, setPending] = createSignal([]);
+  const [getFinishing, setFinishing] = createSignal(false);
+  // Jump-to-comments target (Forgejo #546): the index sets this tid and
+  // scrolls to `thread-<tid>`; the matching card flashes + expands.
+  // Staged twin (Forgejo #567): the index sets this pending position and
+  // scrolls to `staged-<i>`; the matching staged card flashes.
+  const [getFlashTid, setFlashTid] = createSignal(null);
+  const [getFlashStaged, setFlashStaged] = createSignal(null);
+  const jumpToThread = (tid) => {
+    setFlashTid(tid);
+    document.getElementById(`thread-${tid}`)?.scrollIntoView({ block: "center" });
+  };
+  // Shared flash lifecycle (Forgejo #573, reused by #575): jump sets the
+  // flash tid (force-revealing the card); the card's collapse/expand toggle
+  // clears it back via this targeted clear — collapsing a jumped-to card
+  // returns open() and the outline to tracking getOpen(). Targeted
+  // (cur === tid ? null : cur) so collapsing an unflashed card never steals
+  // another card's flash. Set paths (jumpToThread/jumpToStaged) unchanged;
+  // resolve/unresolve + collab-stream thread frames deliberately do NOT
+  // clear (minimal bar is collapse — a resolve-triggered reload keeps the
+  // highlight on the acted card). StagedCard has no collapse control, so it
+  // takes no clear wiring — the same clearFlash pattern applies when one
+  // lands. Forgejo #575 reuses the SAME signals for card-root click-to-flash:
+  // the page passes the raw setters (onFlashTid/onFlashStaged) into DiffFile,
+  // so a body click overwrites exactly like a pill jump (single-flash model)
+  // but never scrolls — pill jumps keep their set + scrollIntoView idiom
+  // byte-identical.
+  const clearFlashTid = (tid) => setFlashTid((cur) => (cur === tid ? null : cur));
+  const jumpToStaged = (i) => {
+    setFlashStaged(i);
+    document.getElementById(`staged-${i}`)?.scrollIntoView({ block: "center" });
+  };
+
+  // Cross-page reconcile (issue #319, the #318 pattern for PRs): a merge
+  // or close/reopen moves the open_pulls badge numerator with no ref
+  // move, so the shell's shared `repo:{full}` summary entry reconciles at
+  // the mutation site — the mutation's own `pull` frame may arrive at a
+  // page that already unmounted.
+  const reload = () => {
+    invalidate(key());
+    invalidate(reviewsKey());
+    invalidate(threadsKey());
+    invalidate(requestsKey());
+    invalidate(diffKey());
+    invalidate(checksKey());
+    invalidate(`repo:${ctx.full}`);
+  };
+  const reloadReview = () => {
+    invalidate(key());
+    invalidate(reviewsKey());
+    invalidate(threadsKey());
+    invalidate(requestsKey());
+  };
+
+  const thread = () => getView()?.thread;
+  const pr = () => getView()?.pr;
+  const mergeable = () => getView()?.mergeable;
+  // Forgejo #602: terminal PRs (merged, or closed unmerged) swap the
+  // sidebar's Review summary slot for a Status section and hide the moot
+  // Mergeability section. Merged wins (merge stamps StateClosed too).
+  // Everything here is already in the page payload — no new fetch.
+  const isTerminal = () => isTerminalPull(thread(), pr());
+  const mergedDetail = () => terminalMergeDetail(pr(), getView()?.events);
+  const head = () => getView()?.head_live_sha ?? pr()?.head?.sha ?? "";
+  // Head checks (05 §9): the combined view + per-context rows for the
+  // live head sha, and the required-checks advisory (union of
+  // require_checks over policy rules matching the base branch — exact-ref
+  // match client-side; the merge task decides server-side). The pill
+  // updates on reload; live `check` frames will refresh it once the repo
+  // collaboration stream lands (06/08 own that endpoint).
+  const checksKey = () => `checks:${ctx.full}:${head()}`;
+  const [getCombined] = useData(checksKey, () => (head() ? ctx.repoClient.checks.combined(head()) : Promise.resolve(null)));
+  const [getPolicy] = useData(`policy:${ctx.full}`, () => ctx.repoClient.policy.get().catch(() => null));
+  const requiredChecks = () => {
+    const base = pr()?.base?.ref ?? "";
+    const rules = getPolicy()?.rules ?? [];
+    const out = new Set();
+    for (const r of rules) {
+      const refs = r?.match?.refs ?? [];
+      if (refs.length && !refs.includes(base)) continue;
+      for (const c of r?.effect?.protect?.require_checks ?? []) out.add(c);
+    }
+    return [...out].sort();
+  };
+  const checksBlockers = () => requiredCheckBlockers(requiredChecks(), getCombined()?.statuses);
+  // Reviews gate (Forgejo #612): CHANGES_REQUESTED blocks the merge box
+  // ONLY when a required-reviews rule selects the PR base — the same
+  // policy list the requiredChecks() walk above reads (any rule whose
+  // effect carries `required-reviews` with match.refs empty or
+  // exact-including the base). No rule ⇒ the #588 "Changes requested"
+  // headline stays as information but the merge button enables (the
+  // server merges it — GitHub-like, no rule → no block). The sidebar
+  // headline keeps the raw reviewDecision (informational either way);
+  // only the MergeBox gate takes this signal.
+  const requiresReviews = () => requiredReviewsApplies(getPolicy(), pr()?.base?.ref ?? "");
+  // Zero-contexts empty state (Forgejo #518): the combined view's wire
+  // state reads pending when nothing reported, so the card keys off the
+  // statuses array it already fetches — never the state string.
+  const zeroChecks = () => isZeroChecks(getCombined());
+  const summary = () => thread()?.review_summary;
+  const threads = () => getThreads()?.threads ?? [];
+
+  const stage = (draft) => setPending((list) => [...list, draft]);
+  const unstage = (i) => setPending((list) => list.filter((_, j) => j !== i));
+  // Staged edit round-trip (Forgejo #567): replace the body of pending
+  // entry i — the same pending-list signal the inline staged cards, the
+  // finish-review modal list, and the review button count all read.
+  const updatePending = (i, body) => setPending((list) => list.map((p, j) => (j === i ? { ...p, body } : p)));
+
+  const comment = async (body) => {
+    await ctx.repoClient.pulls.comment(num(), body, { noPopupAuth: true });
+    reload();
+  };
+
+  // PR close/reopen (Forgejo #517): plain state flips via
+  // repo.pulls.update(num, {state}) — no reason (PR state is open|closed
+  // only), no review, no merge. Auth mirrors the server (author or triage;
+  // UpdatePR 403s anyone else and 409s a merged close). Errors propagate to
+  // the composer's tray path (toast, never silent); the reconcile runs only
+  // on success. Cross-page reconcile is the #318 pattern: the own thread
+  // key reloads NOW (so the badge flips + the timeline entry lands with no
+  // full-page reload) while pulls windows + the repo summary (open_pulls
+  // numerator) invalidate at the mutation site; other tabs follow the
+  // closed/reopened `pull` frames on the repo stream (the accept filter in
+  // useCollabStream below runs before invalidateCollab).
+  const afterPRMutation = (n, ck) => {
+    if (num() === n) reload();
+    else invalidate(ck);
+    invalidatePullLists(ctx.full);
+  };
+  const closePR = async () => {
+    const n = num();
+    const ck = key();
+    await ctx.repoClient.pulls.update(n, { state: "closed" }, { noPopupAuth: true });
+    afterPRMutation(n, ck);
+  };
+  const reopenPR = async () => {
+    const n = num();
+    const ck = key();
+    await ctx.repoClient.pulls.update(n, { state: "open" }, { noPopupAuth: true });
+    afterPRMutation(n, ck);
+  };
+  const commentAndClosePR = async (body) => {
+    const n = num();
+    const ck = key();
+    // GitHub semantics (the issue-page shape): post the body first when
+    // non-empty (empty body just closes), then close. Either step throwing
+    // keeps the composer text; after a comment-posted / close-failed split
+    // the plain Close button finishes the job.
+    if (String(body ?? "").trim()) {
+      await ctx.repoClient.pulls.comment(n, body, { noPopupAuth: true });
+    }
+    await ctx.repoClient.pulls.update(n, { state: "closed" }, { noPopupAuth: true });
+    afterPRMutation(n, ck);
+  };
+  // Header badge + Close/Reopen visibility read the live thread/pr fetch
+  // (the page's state source of truth, like the issue page) — never the
+  // repo-level summary (ref/state-blind by design). No closeChooser: PR
+  // closes carry no reason, so both controls stay plain buttons.
+  const badge = () => pullBadgeView(thread(), pr());
+  // Draft toggle (Forgejo #613): mark-ready / convert-to-draft via
+  // repo.pulls.update(num, {draft}) — the pullDraftVisibility gate mirrors
+  // close/reopen (author or triage, unmerged only; draft is orthogonal to
+  // open/closed so the thread state is not consulted), and the reconcile
+  // is the same #318 pattern. Errors toast via reportError, never silent.
+  const draftVis = () =>
+    pullDraftVisibility({ thread: thread(), pr: pr(), mePrincipal: getMe()?.principal, role: role() });
+  const markReady = async () => {
+    const n = num();
+    const ck = key();
+    try {
+      await ctx.repoClient.pulls.update(n, { draft: false }, { noPopupAuth: true });
+      afterPRMutation(n, ck);
+    } catch (err) {
+      reportError(err, "pull-draft");
+    }
+  };
+  const convertDraft = async () => {
+    const n = num();
+    const ck = key();
+    try {
+      await ctx.repoClient.pulls.update(n, { draft: true }, { noPopupAuth: true });
+      afterPRMutation(n, ck);
+    } catch (err) {
+      reportError(err, "pull-draft");
+    }
+  };
+  // Repo mdCtx for every renderBody call site on this page (the #340
+  // contract: thread bodies carry no file coordinates, so relative URLs
+  // stay verbatim; owner/repo feeds the #N/PRN autolinker). One object —
+  // the timeline, description block, reviews, and thread comments share it.
+  const mdCtx = { owner: ctx.owner, repo: ctx.name };
+  // Attribution for the description block: the opened event's actor/at
+  // (the history record), falling back to the live thread while loading.
+  const openedEvent = () => (getView()?.events ?? []).find((ev) => ev?.type === "opened");
+  const closeVis = () =>
+    pullCloseVisibility({ thread: thread(), pr: pr(), mePrincipal: getMe()?.principal, role: role() });
+  // Forgejo #594: the comment lock keys off the live thread/pr fetch
+  // (the page's state source of truth) — pull stream frames invalidate
+  // the key, so a reopen unlocks with no reload. Merged is terminal:
+  // closeVis already exposes no control, and the lock reason names it.
+  const commentLock = () => pullCommentLock(thread(), pr());
+  const closeAction = () => {
+    const v = closeVis();
+    if (v.showClose) return closePR;
+    if (v.showReopen) return reopenPR;
+    return undefined;
+  };
+
+  // The ONE repo collaboration stream (08 §4): pull/review/thread/check
+  // frames for this PR invalidate coalesced keys; the header refetch
+  // recomputes the MergeBox machine.
+  useCollabStream(() => ctx.full, ctx.repoClient, ["pull", "review", "thread", "check"], (frame) => Number(frame.num) === Number(num()));
+
+  return (
+    <div class="issue-page grid gap-4 md:grid-cols-[1fr_16rem]">
+      <section aria-label="Conversation" class="min-w-0">
+        {/* Header block (Forgejo #517, the Issue.jsx convention, #521
+            sibling read): title left, state badge right — the badge is the
+            state surface (open/closed/merged via pullBadgeView), so the
+            byline carries author + time only (no bare state token). The
+            number rides the muted span like the issue heading; h1 stays —
+            it is the page title above the h2 card titles. */}
+        <header class="mb-4 border-b border-zinc-200 pb-3 dark:border-zinc-800">
+          <div class="flex flex-wrap items-start justify-between gap-2">
+            <h1 class="min-w-0 flex-1 text-xl font-semibold">
+              <span class="text-zinc-500 dark:text-zinc-400">#{num()}</span> {thread()?.title}
+            </h1>
+            <Show when={thread()}>
+              {/* Forgejo #613: the draft toggle sits beside the badge (the
+                  row wraps at 390px — flex-wrap on the parent, shrink-0
+                  here — so the buttons drop below the title, never clip). */}
+              <span class="mt-1 flex shrink-0 items-center gap-2">
+                <span class={badge().cls}>{badge().text}</span>
+                <Show when={draftVis().showReady}>
+                  <button type="button" class="btn px-2 py-0.5 text-xs" onClick={markReady}>
+                    Mark ready
+                  </button>
+                </Show>
+                <Show when={draftVis().showDraft}>
+                  <button type="button" class="btn px-2 py-0.5 text-xs" onClick={convertDraft}>
+                    Convert to draft
+                  </button>
+                </Show>
+              </span>
+            </Show>
+          </div>
+          <p class="mt-1 text-xs text-zinc-500 dark:text-zinc-400">
+            {thread()?.author} · <DateTime value={thread()?.updated_at} />
+          </p>
+        </header>
+        <PRDescription
+          body={pr()?.body}
+          actor={openedEvent()?.actor ?? thread()?.author}
+          at={openedEvent()?.at ?? thread()?.updated_at}
+          mdCtx={mdCtx}
+        />
+        {/* #340: thread bodies have no file coordinates (relative URLs stay
+            verbatim) but carry the repo — owner/repo feeds the #N/PRN autolinker. */}
+        <ThreadTimeline events={getView()?.events ?? []} textFor={pullEventText} mdCtx={mdCtx} />
+        <ThreadIndex threads={threads()} files={getDiff()?.files ?? []} onJump={jumpToThread} pending={getPending()} onJumpStaged={jumpToStaged} />
+        <Show
+          when={canComment()}
+          fallback={
+            <Show when={anon()}>
+              <p class="muted text-sm">
+                <A class="hover:underline" href={writeGateHref("Comment on this pull request") ?? here()}>
+                  Sign in to comment
+                </A>
+              </p>
+            </Show>
+          }
+        >
+          <CommentComposer
+            onSubmit={comment}
+            onCommentAndClose={closeVis().showClose ? commentAndClosePR : undefined}
+            commentAndCloseLabel="Comment and Close"
+            disabled={commentLock().locked}
+            disabledReason={commentLock().reason}
+            closeLabel={thread()?.state === "open" ? "Close" : "Reopen"}
+            onClose={closeAction()}
+            errorKey="pull-comment"
+            mentionId="mention-pull-comment"
+            mentionNames={thread()?.participants}
+          />
+        </Show>
+        <div class="mt-4 space-y-4">
+          <ReviewsList
+            num={num()}
+            client={ctx.repoClient}
+            reviews={getReviews()?.reviews}
+            head={head()}
+            canDismiss={canDismiss()}
+            reload={reloadReview}
+            mdCtx={mdCtx}
+          />
+          <Show when={canReview()}>
+            <Show when={getFinishing()} fallback={
+              <button type="button" class="btn px-3 py-1" onClick={() => setFinishing(true)}>
+                Finish review{(getPending().length ? ` (${getPending().length} staged)` : "")}
+              </button>
+            }>
+              <FinishReview
+                num={num()}
+                client={ctx.repoClient}
+                head={head()}
+                pending={getPending()}
+                commentLocked={commentLock().locked}
+                commentLockReason={commentLock().reason}
+                onUnstage={unstage}
+                onDone={() => {
+                  setFinishing(false);
+                  setPending([]);
+                  reloadReview();
+                }}
+              />
+            </Show>
+          </Show>
+          <div aria-label="Files">
+            <h2 class="card-header">Files ({diffCount()})</h2>
+            <Show when={getDiff()} fallback={
+              <Show when={getDiffError()} fallback={<p class="text-sm text-zinc-500 dark:text-zinc-400">loading diff…</p>}>
+                <div class="card" role="alert">
+                  <p class="text-sm">Couldn't load the diff: {String(getDiffError()?.message ?? getDiffError())}</p>
+                  <button type="button" class="btn mt-2" onClick={retryDiff}>
+                    Retry
+                  </button>
+                </div>
+              </Show>
+            }>
+              <For each={getDiff().files ?? []} fallback={<p class="text-sm text-zinc-500 dark:text-zinc-400">empty diff</p>}>
+                {(file) => (
+                  <div class="mb-4">
+                    <DiffFile
+                      file={file}
+                      files={getDiff()?.files ?? []}
+                      threads={threads()}
+                      num={num()}
+                      client={ctx.repoClient}
+                      head={head()}
+                      onStage={stage}
+                      pending={getPending()}
+                      onUnstage={unstage}
+                      onUpdate={updatePending}
+                      stagedBy={getMe()?.principal}
+                      flashStaged={getFlashStaged}
+                      reload={reloadReview}
+                      canResolve={canResolve()}
+                      canComment={canComment()}
+                      commentLocked={commentLock().locked}
+                      commentLockReason={commentLock().reason}
+                      mdCtx={mdCtx}
+                      flashTid={getFlashTid}
+                      onCollapse={clearFlashTid}
+                      onFlashTid={setFlashTid}
+                      onFlashStaged={setFlashStaged}
+                    />
+                  </div>
+                )}
+              </For>
+            </Show>
+          </div>
+        </div>
+      </section>
+      {/* Sidebar (Forgejo #531, the Issue.jsx:549 one-container idiom):
+          ONE card divide-y panel — review summary first, then
+          mergeability / reviewers / checks / merge as divided sections.
+          Each section is a p-3 block with an uppercase micro-label above
+          its value, so a "none" reads as that section's value. No
+          stacked sibling .card blocks, no card-header headings.
+          Forgejo #602: terminal PRs (merged, or closed unmerged) swap
+          the first slot for a Status section and hide the moot
+          Mergeability section; Reviewers / Checks / Merge keep
+          rendering. */}
+      <aside aria-label="Details" class="grid content-start gap-3">
+        <section class="card divide-y divide-zinc-200 text-sm dark:divide-zinc-800" aria-label="Pull request metadata">
+          {/* Forgejo #602: the terminal Status section REPLACES the Review
+              summary slot (same p-3 shape, same micro-label idiom) — one
+              slot, never both. */}
+          <Show when={isTerminal()} fallback={
+            <div class="p-3">
+              <span class="mb-1 block text-xs font-medium uppercase text-zinc-500 dark:text-zinc-400">Review summary</span>
+              <ReviewSummaryBar summary={summary()} head={head()} />
+            </div>
+          }>
+            <div class="p-3">
+              <span class="mb-1 block text-xs font-medium uppercase text-zinc-500 dark:text-zinc-400">Status</span>
+              <Show when={pr()?.merged} fallback={<span class="chip chip-closed">Closed</span>}>
+                <span class="chip chip-merged">Merged</span>
+              </Show>
+              <Show when={pr()?.merged && mergedDetail().sha}>
+                <p class="mt-1 text-xs text-zinc-500 dark:text-zinc-400">
+                  merged as{" "}
+                  {/* Forgejo #595 idiom reused: the merge SHA links to the
+                      commit page (full SHA in href, 12-char text). */}
+                  <A class="link font-mono" href={`/${ctx.full}/commit/${mergedDetail().sha}`}>
+                    {mergedDetail().sha.slice(0, 12)}
+                  </A>
+                  <Show when={mergedDetail().strategy}>
+                    {" "}({mergedDetail().strategy})
+                  </Show>
+                  <Show when={mergedDetail().by}>
+                    {" "}by {mergedDetail().by}
+                  </Show>
+                </p>
+              </Show>
+            </div>
+          </Show>
+          {/* Forgejo #602: Mergeability is moot once terminal — the whole
+              section hides. Reviewers / Checks below stay outside the
+              gate (out of scope, still rendered). */}
+          <Show when={!isTerminal()}>
+          <div class="grid gap-1 p-3">
+            {/* Mergeability is a VALUE, not a heading: the micro-label
+                above, the mergeabilityView display phrase as the value
+                line, the base/head branches, pending-branch warning, and
+                commits/files links as secondary value detail in the same
+                section. */}
+            <span class="text-xs font-medium uppercase text-zinc-500 dark:text-zinc-400">Mergeability</span>
+            {(() => {
+              const v = mergeabilityView(mergeable(), {
+                draft: pr()?.draft,
+                checksBlockers: checksBlockers(),
+                reviewDecision: summary()?.decision,
+                zeroChecks: zeroChecks(),
+              });
+              return (
+                <>
+                  <p class={`text-sm ${v.cls}`}>{v.text}</p>
+                  <Show when={v.sub}>
+                    <p class="text-xs text-zinc-500 dark:text-zinc-400">{v.sub}</p>
+                  </Show>
+                </>
+              );
+            })()}
+            <Show when={!getView()?.head_ref_ok}>
+              <p class="text-xs text-amber-600 dark:text-amber-400">From branch pending — push first.</p>
+            </Show>
+            <p class="text-xs text-zinc-500 dark:text-zinc-400">
+              base {pr()?.base?.ref} @ {(pr()?.base?.sha ?? "").slice(0, 12)}
+              <br />
+              head {pr()?.head?.ref} @ {(pr()?.head?.sha ?? "").slice(0, 12)}
+              {/* Forgejo #328: cross-repo PRs name the fork holding the head. */}
+              <Show when={pr()?.fork?.repo}>
+                <br />
+                from {pr()?.fork?.repo}
+              </Show>
+            </p>
+            <div class="flex gap-2 text-xs">
+              <A href={`/${ctx.owner}/${ctx.name}/pull/${num()}/commits`}>commits</A>
+              <A href={`/${ctx.owner}/${ctx.name}/pull/${num()}/files`}>files</A>
+            </div>
+          </div>
+          </Show>
+          <div class="grid gap-1 p-3">
+            <span class="text-xs font-medium uppercase text-zinc-500 dark:text-zinc-400">Reviewers</span>
+            <ReviewersPanel num={num()} client={ctx.repoClient} requested={getRequests()?.reviewers?.map((r) => r.principal)} reload={reloadReview} canEdit={canReview()} thread={thread()} pr={pr()} lockReason={commentLock().reason} />
+          </div>
+          <Show when={head()}>
+            <div class="grid gap-1 p-3" aria-label="Checks">
+              <div class="mb-1 flex items-center justify-between gap-2">
+                <span class="text-xs font-medium uppercase text-zinc-500 dark:text-zinc-400">Checks</span>
+                <CheckPill full={ctx.full} sha={head()} client={ctx.repoClient} verbose />
+              </div>
+              <Show
+                when={zeroChecks()}
+                fallback={<ContextRows full={ctx.full} sha={head()} client={ctx.repoClient} />}
+              >
+                <ZeroChecksBlock full={ctx.full} required={requiredChecks()} />
+              </Show>
+              <Show when={requiredChecks().length > 0}>
+                <p class="text-xs text-zinc-500 dark:text-zinc-400">
+                  required: {requiredChecks().join(", ")}
+                </p>
+              </Show>
+              <Show when={checksBlockers().length > 0}>
+                <p class="text-xs text-amber-600 dark:text-amber-400">
+                  blocking merge: {checksBlockers().join(", ")}
+                </p>
+              </Show>
+            </div>
+          </Show>
+          <Show when={thread()?.state === "open" || pr()?.merged}>
+            <div class="grid gap-1 p-3">
+              <span class="text-xs font-medium uppercase text-zinc-500 dark:text-zinc-400">Merge</span>
+              <MergeBox
+                client={ctx.repoClient}
+                num={num()}
+                full={ctx.full}
+                pr={pr()}
+                mergeable={mergeable()}
+                checksBlockers={checksBlockers}
+                reviewDecision={() => summary()?.decision}
+                requiresReviews={requiresReviews}
+                role={role}
+                canUpdate={canUpdateBranch}
+                onSettled={() => reload()}
+                reload={() => reload()}
+              />
+            </div>
+          </Show>
+        </section>
+      </aside>
+    </div>
+  );
+}

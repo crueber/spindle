@@ -1,0 +1,812 @@
+# 06 — Notifications, subscriptions, mentions, and webhook fan-out
+
+> Depends on: 01 (identity, teams), 02 (issues), 03 (PRs), 04 (review). Shared primitives P1–P9 are defined in
+> [`README.md`](README.md); wire conventions in `docs/go/07_api.md`; lock/race rules in `docs/go/13_concurrency.md`;
+> seams in `docs/go/14_extensibility.md`. Status: normative for walhub.
+
+Notifications are the **fan-out layer** of the collaboration family: every mutating collaboration handler
+(comment, assign, review request, check report, release publish) computes recipients and writes
+notification objects **synchronously in the same request** (P8). Delivery surfaces: **in-UI** (v1: per-user
+SSE stream + tray), **webhooks** (v1: repo-level configs + per-hook delivery loop), **email = OUT** (§5.2
+seam; no SMTP client in v1). The WAL stays git-only: everything here is a parallel object family under
+`users/` and `repos/<o>/<r>/`, its own CAS discipline, no WAL entries, no manifest touches (P1).
+
+## 1. Object families
+
+### 1.1 Notifications — `users/<principal>/notifications/<id>.json`
+
+One object per (recipient, triggering event). **`<id>` is deterministic** so emission is idempotent:
+
+```
+id = hex(sha256("notification\x00" + principal + "\x00" + <owner>/<repo> + "\x00"
+                + num + "\x00" + reason + "\x00" + event_seq))[0:32]     // 32 lowercase hex
+```
+
+A retried fan-out (crash between CAS commit and fan-out, or a replayed backfill) re-derives the same key;
+the `Create` 412s and the retry treats "already exists" as success. Ids sort by the ULID-derived event
+ordering, so LIST scans are newest-first without an extra sort field.
+
+| Field | Type | Notes |
+|---|---|---|
+| `id` | string | 32-hex, as above |
+| `repo` | string | `"owner/repo"` |
+| `num` | int | shared issue/PR number (P2); 0 for repo-level events (e.g. release published) |
+| `kind` | string | `"issue"\|"pull"\|"release"\|"repo"` |
+| `reason` | enum | `mentioned\|assigned\|review_requested\|subscribed\|author\|team_mention` |
+| `title` | string | thread title at emission time (denormalized; never rewritten) |
+| `actor` | string | principal who caused the event; `""` for system |
+| `state` | enum | `unread \| read` |
+| `created_at` | string | RFC 3339 UTC (07 §2) |
+
+Ops: **Create** on emission; **CAS'd** (`Update(version)`) for the ONLY mutable field, `state`
+(`read`/`unread`); `Delete` on retention (§9). `id`/`num`/`reason` are immutable — a "read" marker is a
+state flip, never a rewrite of history.
+
+### 1.2 Per-user unread index — `users/<principal>/notifications/index.json`
+
+P4 pattern. CAS'd, carried in the same two-step as the notification Creates:
+
+| Field | Type |
+|---|---|
+| `unread_count` | int |
+| `entries` | `[{id, repo, num, kind, reason, title, state, at}]` — hot window only, newest-first |
+| `compacted_through` | string — oldest `id` still represented in `entries` |
+
+The index is the tray's O(1) default read; older pages LIST `…/notifications/<id>.json` (P4/P5 —
+paginated, page size 50). Compaction is the retention task (§9).
+
+### 1.3 Watches
+
+F7 (07_releases_stars) owns the records: `users/<principal>/watching/<o>/<r>.json` (CAS Create/Delete,
+`{"repo","watched_at"}`) and `repos/<o>/<r>/meta/social.json`. 06 owns **nothing** here: fan-out reads the
+`watching/` records as one subscription source (§2) and NEVER writes `social.json`. The SDK/UI watch
+toggle belongs to 07/08; this doc only consumes it.
+
+### 1.4 Webhook configs — `repos/<o>/<r>/webhooks/<id>.json`
+
+`<id>` = 24-char lowercase ULID (time-ordered; lexical sort = creation order). CAS'd after Create (only
+`url`, `events`, `active`, `insecure_tls`, `updated_at` are mutable); Delete removes it.
+
+| Field | Type | Notes |
+|---|---|---|
+| `id` | string | 24-char ULID |
+| `url` | string | https only (`http` allowed on loopback for dev) |
+| `secret` | string | write-only: set via POST/PATCH body, NEVER returned; response carries `secret_set: bool` |
+| `events` | array | filter list of activity `action`s, `[]` = all; see §5.3 |
+| `active` | bool | `false` = config kept, delivery skipped |
+| `insecure_tls` | bool | default `false` |
+| `created_by`, `created_at`, `updated_at` | | RFC 3339 |
+
+Cap: at most `DefaultMaxHooksPerRepo` (20) hook configs per repo (service override
+`MaxHooks`, zero/negative selects the default; no config key in v1). Creates beyond
+the cap are refused with `409` plain-text. The cap is also the per-repo sweep bound:
+one repo's minute pass never scans more than the cap's worth of hooks (issue #156).
+Repos that already hold more hooks than the cap (created before it) are grandfathered:
+delivery still scans all their hooks and only new creates are refused.
+
+Delivery records: `repos/<o>/<r>/webhooks/<id>/deliveries/recent.json` — one CAS'd last-25 ring
+`{updated_at, entries:[{seq, event, status, at, error?, duration_ms}]}` (debugging surface only, not
+a durability mechanism).
+
+### 1.5 Org webhook configs — `orgs/<org>/webhooks/<id>.json` (Forgejo #363)
+
+Same wire shape as §1.4 (ULID id, write-only secret → `secret_set`, `events` filter, `active`,
+`insecure_tls`, same caps — `MaxHooks` per org, 409 past it). One config fans out across the
+whole org: the org's own membership/team/invite event log (§5.4) plus every member repo's
+`collab-events/` log. Delivery state per hook is two cursor families (same
+`{"published_seq", "updated_at"}` CAS'd body as §5.3):
+
+- `orgs/<org>/webhooks/cursors/<id>.json` — the org-log cursor;
+- `orgs/<org>/webhooks/cursors/<id>/repos/<repo>.json` — one cursor per member repo over that
+  repo's activity log (read, never written — the repo log stays the repo's).
+
+Deliveries land on the same last-25 ring shape at
+`orgs/<org>/webhooks/<id>/deliveries/recent.json`. Delete removes the config, both cursor
+families, and the ring. The org event objects (`orgs/<org>/orgevents/<seq:012x>.json`,
+Create-only) and the org-log allocator (`orgs/<org>/meta/orghook_state.json`, CAS'd
+`{"next_seq": N}`) join the frozen overwritable family alongside the §1.4 keys (14 §14.11
+rule 2, in the same revision that adopts the feature).
+
+### Concurrency
+
+Hazard: a fan-out touching N notifications races concurrent emissions on the same thread. Avoidance:
+**CAS loops are the only tool** — no cross-feature locks, no new repo locks (13_concurrency.md §2; the
+three repo locks are closed). Each notification Create is independent and idempotent (§1.1); the unread
+index is a single CAS retry loop; a lost index race is retried, a lost Create is a no-op (412). The
+webhook delivery loop and cursor are CAS'd per hook (§5.3). A crash mid-fan-out loses at most one
+notification, never data — the thread timeline is the backfill source (P8 contract).
+
+## 2. Subscription model — who gets notified
+
+For an event `E` on thread `T` of repo `R` by actor `A` (the actor NEVER receives a self-notification):
+
+| Source | Resolution | Reason emitted |
+|---|---|---|
+| Thread author | `thread.json.author` | `author` |
+| Commenters / participants | `thread.json.participants[]` — confirmed by 02/03: denormalized principal array maintained by the SAME header CAS that reserves event seqs; 06 reads `thread.json` alone, no event scans | `subscribed` |
+| Assignees | `thread.json.assignees[]` on `assigned` events | `assigned` |
+| Requested reviewers | review-request event payload (04) | `review_requested` |
+| Repo watchers | `repos/<o>/<r>/meta/social.json` `watchers[]` (07-owned; see below) | `subscribed` |
+| Check failure on an open PR's head (05) | PR participants from `thread.json.participants[]`; only on `failure\|error` state transitions | `subscribed` |
+| `@principal` in the new event body | §3 | `mentioned` |
+| `@org/team` in the new event body | F1 team membership | `team_mention` |
+
+Watcher enumeration is the one non-trivial resolution: watching records live user-side and there is no
+reverse index that avoids a users LIST. DECISION: `social.json` (07) MUST carry `watchers: []` (cap
+1 000, `truncated: bool`); fan-out reads that array — 07 owns it, 06 only reads. Beyond the cap, watch
+subscriptions notify no one (`walhub_watchers_truncated_total{repo}`). Watches notify `subscribed`.
+
+Dedup precedence: one notification per (user, thread, reason). If an **unread** notification with the
+same (user, thread, reason) already exists, the emitter MUST skip the Create (checked via the unread
+index) — one live notification per thread per user. The id still includes `event_seq`, so the skip is
+an optimization; the idempotent Create is the backstop. A **read** notification does not block a new one.
+
+## 3. Mention parsing
+
+Runs **once, at event write time**, inside the mutating handler (P8) on the new event's text body:
+
+- Token grammar: `@<username>` (bare username, the ValidUsername shape:
+  lowercase `[a-z0-9._-]`, 1..64 chars, no leading dot), `@<email>`
+  (legacy email-shaped principal) and `@<org>/<team>`, matched only at
+  word boundaries (`(?:^|[^A-Za-z0-9_@-])@(…)` — so `a@b.com`, `@@x`,
+  `x@bob` never match), case-insensitive match, canonical lowercase
+  keys. Email is tried first so `@bob@example.com` matches whole, team
+  before bare so `@org/team` matches whole. A bare-username token glued
+  directly to `/` (a team spelling or its malformed tail) or `@` (a
+  broken email), or with a leading dot, is never a mention; trailing
+  sentence punctuation (`.,;:!?"')]}`, the same strip set the renderer
+  uses) is trimmed. Fenced code blocks and inline code spans are
+  skipped — the same stance as the renderer's code exemption.
+- Validation is a bucket probe, per 01's contract: a plain GET of `users/<principal>/profile.json`
+  (404/NotFound = no such principal — mention invalid); teams via `orgs/<org>/teams/<slug>.json`,
+  whose `members` is an array of principal strings read directly (no API hop). An unresolvable
+  mention is silently ignored — never a 400, never an error; the text is stored verbatim regardless.
+- Bounded: at most 50 mention tokens per event; beyond that, ignored (counter
+  `walhub_mentions_dropped_total{repo}`).
+- `@org/team` fans out to team members with reason `team_mention`; if the team has > 100 members the
+  emitter caps the batch at 100 recipients (sorted, stable order) — a mention of a 10 000-member team
+  is the operator's misconfiguration, not a fan-out DoS vector.
+- Mention parsing happens on EVERY comment/review/issue-body event, including the issue/PR body itself
+  (`opened` events).
+
+## 4. Emission contract (P8 — synchronous in the mutating handler)
+
+The mutating handler that owns the CAS commit (comment posted, assignee changed, review requested, check
+reported, thread closed with a comment, release published) performs, **in the same request, after the CAS
+commits**, exactly this sequence:
+
+1. Compute the recipient set: mentions (§3) ∪ participants ∪ assignees/reviewers per event kind ∪
+   repo watchers (§2), minus the actor, deduped.
+2. For each recipient, `Create` `users/<p>/notifications/<id>.json` (deterministic id, §1.1). A 412
+   means "already emitted" (retry/backfill) and is success.
+3. CAS the user's `notifications/index.json` (unread_count, entries) — retry loop, own version.
+4. Append the immutable activity event for webhooks (§5.3).
+5. Publish one SSE `notification` frame to the recipient's stream (§5.1) — non-blocking (07 §6:
+   never a blocking send; drop-oldest).
+
+Order 2→3→4→5 is normative (notifications before index before stream): a crash leaves at most a missing
+tray entry, never a phantom index entry. Crash before step 2 loses one notification — the thread
+timeline is the backfill source of truth (same contract as the events bridge, 09_events §2).
+
+### Concurrency
+
+Hazard: fan-out is N sequential CAS rounds on the request path (a 100-recipient team mention would stall
+the commenter's request). Avoidance: the Creates and index CAS are bounded (`errgroup.SetLimit(8)` —
+13_concurrency.md §4, no raw `go func()` over store I/O) and the whole fan-out carries a 5 s budget;
+overflow recipients (> 100 per event) fall back to a `notify-fanout` task (Seam 5) instead of extending
+the request. No cross-feature locks: dedup is CAS-Create arbitration, not a lock. Hazard: two instances
+emitting the same event concurrently (retry after ambiguous failure). Avoidance: deterministic id +
+Create semantics — exactly one copy survives; both losers read "exists".
+
+## 5. Delivery surfaces
+
+### 5.1 In-UI: per-user SSE stream + tray
+
+New top-level route `GET /api/v1/notifications/stream` (Seam 1, `api.RouteProvider`, both `/api/v1` and
+`/api-browser/v1` twins), SSE envelope per 07 §6 verbatim (opener `: walgit`, 10 s keepalive, `no-store`,
+15 s packet deadline). Frames:
+
+| event | data |
+|---|---|
+| `notification` | one notification object (§1.1 shape) on emission |
+| `result` | terminal, unused for streams — the stream runs until client cancel |
+| `error` | `{"status": 503, "message": "…"}` |
+
+The tray page (§7) opens this stream; a `notification` frame prepends to the tray signal and bumps the
+chrome badge. The per-user stream is the only per-user SSE; repo streams stay repo-keyed and unchanged.
+
+### 5.2 Email — explicitly out (the seam note)
+
+No SMTP client, no email address storage in v1. The seam: the §5.3 activity log is an ordinary event
+stream; an email sink is a future `Sink`/delivery-loop registration (Seam 4/5 pattern) that reads the
+same cursor family. A future agent needs: a hand-rolled SMTP client, a user email-verified flag (01),
+and per-user email preference keys — nothing in this doc's objects precludes that; nothing implements it.
+
+### 5.3 Repo webhooks — v1 decision
+
+The question "extend the 09_events WAL bridge with collaboration events?" is decided: **v1 webhooks are
+repo-level configs delivered from a collaboration activity log, NOT from the WAL bridge.** The WAL bridge
+stays git-only (P1 law); the events-bridge loop is frozen and gains no collaboration awareness. Instead:
+
+- **Activity log:** every fanned-out mutation appends one immutable event at
+  `repos/<o>/<r>/collab-events/<seq:012x>.json` (`Create`; seq reserved by CAS on
+  `repos/<o>/<r>/meta/collab_state.json` `{"next_seq": N}` — the P3 two-step). Body:
+  `{seq, repo, action, num?, kind, actor, title, at, payload}`; `action` ∈
+  `commented\|opened\|closed\|reopened\|assigned\|review_requested\|review_posted\|check_reported\|release_published\|mentioned\|ping`.
+  Also the notification backfill source (§4). `check_reported` (05's emission point, `state: failure\|error`
+  only) carries `{sha, context, state, description?, pr?, target_url?}` → PR participants get `subscribed`.
+- **Config objects:** §1.4. `events` filter matches on `action` (with `*` wildcard).
+- **Delivery loop:** new maintain task kind `webhooks` (Seam 5, `internal/notifications` package),
+  single-flight `(repo, "webhooks")` per §6.8. One loop pass per repo: for each active hook, scan
+  `collab-events/` from the hook's cursor, POST each matching event, CAS-advance the cursor.
+  The minute sweep that schedules these passes is incremental (issue #156): a repo costs one
+  `collab_state` GET per pass unless its allocator advanced since the last scheduled pass or
+  its last pass left cursors behind the head (POST failure or a 256-event backlog — the
+  at-least-once retry contract is unchanged, only lagging repos re-pass). Repos without an
+  activity log never reach the hook LIST; wake-ups after each fanned-out event stay the fast
+  path and the sweep is the backstop. A new or newly-activated hook arms its repo explicitly,
+  so a hook created onto a quiet repo's backlog does not wait for the next emission.
+- **Per-hook cursor:** `repos/<o>/<r>/webhooks/cursors/<hook-id>.json`,
+  `{"published_seq": N, "updated_at": RFC3339}` — CAS'd, a direct analog of the per-sink
+  `events/cursors/<sink>.json` family (14 §14.6); proposed for the frozen overwritable list (the D-EXT-2
+  amendment class).
+- **Wire shape (per 09_events §12.2, keepers intact):** one POST per event, JSON body = the activity event,
+  headers `Content-Type: application/json`, `X-Walgit-Delivery: <hex(sha256(event body+seq))>`,
+  `X-Walgit-Signature: sha256=<hex HMAC-SHA256(body, secret)>` (omitted if no secret),
+  `X-Walgit-Event: <action>`. 10 s timeout; 2xx = delivered; anything else = not advanced (at-least-once;
+  consumers dedup on `X-Walgit-Delivery`).
+- **Ping:** `POST …/webhooks/{id}/ping` synthesizes activity event `action: "ping"` (num 0),
+  appends it to the activity log, and POSTs exactly that event through the same `postEvent`
+  path (wire shape, keeper headers, HMAC, client, deliveries ring), so ping success proves
+  the URL + secret end to end. The backlog is NOT replayed on the ping request (issue #155):
+  a deep backlog is delivered by the background `webhooks` task on its own pass (the ping
+  event bypasses the events filter there); the ping request performs exactly one bounded
+  POST and returns promptly regardless of backlog depth. With no backlog the ping advances
+  the hook cursor past the ping event so the loop does not redeliver it.
+
+### Concurrency
+
+Hazard: the delivery loop re-scanning `collab-events/` while new events land, or two instances delivering
+the same hook. Avoidance: the task table's `(repo, kind)` single-flight guarantees one `webhooks` worker
+per repo per process (§6.8 join semantics); the per-hook cursor CAS arbitrates multi-instance races (a
+lost cursor CAS = redelivery = at-least-once, never a skip — the cursor advances only after a successful
+POST batch). Per hook, delivery is sequential; hooks on one repo run in parallel under
+`errgroup.SetLimit(8)`. A slow webhook holds back only its own cursor — exactly the per-sink isolation
+of 14 §14.6. Cursor below a compacted/gap window: count `walhub_webhook_gap_total{repo}` and continue
+from the oldest readable event (09 §12.3's honest-gap semantics). The loop body never runs under any
+repo lock (13 §2 rule 4); it is a maintainer-pass unit with a 10 s-per-POST context budget.
+
+### 5.4 Org webhooks (Forgejo #363)
+
+GitHub/Forgejo parity for org owners: one hook config observes every repo the org owns plus the
+org's membership lifecycle, instead of one per-repo hook per repo. Scope decisions, stated plainly:
+
+- **Member-repo half:** every member repo's `collab-events/` log (§5.3) is delivered through the
+  per-(hook, repo) cursor. This is the collab activity family (issues, PRs, reviews, checks,
+  releases, pings) — NOT git pushes, which stay on the WAL events-bridge TOML sinks (Seam 4;
+  the bridge is git-only by law). Repo creation IS covered, but not from this half: births
+  append `repo_created` to the org log itself (Forgejo #364 — the wal registry manifest
+  commit is the single seam §5.4 originally missed; see the Decisions entry), so a new repo
+  surfaces even before its first activity event.
+- **Org-log half:** `orgs/<org>/orgevents/<seq:012x>.json` carries `member_added`,
+  `member_removed`, `member_role_changed`, `team_created`, `team_updated`, `team_deleted`,
+  `team_member_added`, `team_member_removed`, `invite_created`, `invite_accepted`,
+  `invite_cancelled`, plus the lifecycle transitions `org_created` (fresh `CreateOrg` only —
+  idempotent re-creates and 409 losers stay silent), `org_updated` (`PutOrg`), `org_deleted`
+  (emitted before the deletes; the `orgevents/` prefix survives the org), and `repo_created`
+  (Forgejo #364 — every birth through the wal registry: API creates, push auto-creates,
+  imports; user-owned births emit nothing) (`Kind: "org"`, `Repo` = the org name). The identity
+  mutations append through a nil-safe `OrgEvent` observer after their CAS commits (P8 — the
+  members/teams/invitation docs stay the backfill truth; composition wires it to
+  `EmitOrgEvent`, which reserves, appends, and wakes but never blocks on delivery).
+  Actor is best-effort: invite paths carry the inviter/invitee the service method knows;
+  member/team methods report the system actor with the subject in the title; `org_created`
+  carries the creator. Repo births bypass the identity observer: composition injects a
+  nil-safe `OnCreate` hook on the wal registry (law 8 — core never imports notify) that
+  probes org existence once per birth (one exact-key GET, cold path, once per repo
+  lifetime — the warm push path never births) and emits `repo_created` only for org-owned
+  repos; the registry choke carries no principal, so the actor is system with the repo in
+  the title. Owner-cancel
+  of an org invite runs through `DeleteOrgInvite` (read + delete + inbox drop + emit) so
+  both cancel paths — invitee decline and owner cancel — emit; repo-invite cancels stay
+  silent (not org scope).
+- **Delivery:** task kind `org-webhooks`, single-flight `(orgs/<org>, "org-webhooks")`,
+  started by the explicit wake after each org emission and by the minute org sweep. One
+  pass delivers the org-log window then each member repo's window per active hook (org-log
+  and repo scopes each bounded to 256 events; hooks parallel under the pre-acquired
+  `FanoutParallel` semaphore, repos sequential inside one hook). Wire bytes reuse
+  `postEvent` verbatim — same keepers, same HMAC, same 10 s lane — so an org-hook POST is
+  indistinguishable from a repo-hook POST except for the org-action bodies. Ping
+  (`POST …/webhooks/{id}/ping`) synthesizes an org-log `ping` that bypasses the filter,
+  same contract as §5.3.
+- **Sweep gate (the §5.3 incremental discipline, per org):** an org costs one hooks LIST
+  plus one org-state GET per minute pass unless its allocator advanced, its last pass left
+  any cursor behind a head, or a member repo's `collab_state` advanced past the per-org
+  gate watermark (one GET per member repo, only for orgs with active hooks). In-memory
+  watermarks (`orgHookSeen`/`orgRepoSeen`/`orgHookPending`, `hookMu`-guarded, never held
+  across I/O) rebuild after a restart with one re-pass. Member enumeration reuses the
+  shared repo enumeration filtered to the org (cold path only — never a git hot path).
+- **Retention:** the §9 activity sweep folds each active org hook's per-(hook, repo)
+  cursor into the minimum-cursor floor, so events an org pass has not delivered yet are
+  never compacted; a freshly created (undelivered, cursor 0) org hook holds the floor
+  only until its first pass advances every member cursor.
+
+### Concurrency
+
+Hazard: concurrent org passes (wake + sweep) racing on one hook's cursors, and the sweep
+racing member-repo emissions. Avoidance: cursors CAS-advance monotonically (a lost CAS
+redelivers, never skips — the §5.3 at-least-once contract per scope); the gate watermarks
+are map-only under `hookMu`, never held across a store or network call; hooks run in
+parallel under the pre-acquired semaphore while repos inside one hook stay sequential, so
+one hook's burst is one goroutine wide. A dedicated org wake channel (not the repo one)
+keeps a repo owned by `orgs` from ever misrouting. No new locks, no lock held across I/O.
+
+### 5.5 Org activity surface (Forgejo #364)
+
+The org audit log owners asked for: the §5.4 org log paged as newest-first JSON plus a live
+tail, served owner-gated on both lanes and rendered as the org-settings Activity tab.
+
+- **Read:** `GET /api/v1/orgs/{org}/activity?n=&after=` → `{events: [ActivityEvent], more}`
+  (owner; `n` default 50, max 200 — the tray page convention; `after` is an exclusive seq
+  cursor). Cost is one `orghook_state` GET for the head plus one exact-key GET per probed
+  seq — never a LIST (law 6): pages walk downward from the head (or `after - 1`) collecting
+  up to `n`, skipping gaps (crash-reserved seqs, retention-deleted prefixes). A page walks
+  at most `n + 64` probes, so a deep page into a retention-deleted prefix comes back short
+  with `more: true` instead of burning GETs to the floor — the client keeps paging and
+  converges. Member-repo `collab-events/` are deliberately NOT merged here: fanning N
+  repo logs per read would cost a LIST + N probes on every page, and the per-repo surfaces
+  plus org webhooks already cover that half (the read stays O(page)).
+- **Live:** `GET /api/v1/orgs/{org}/activity/stream` (SSE, the §5.1 envelope verbatim:
+  keepalives, no-store). `EmitOrgEvent` publishes one `org_activity` frame per committed
+  event on the existing repo frame bus — keyed by the bare org name (repo keys always carry
+  a slash, so the namespaces are disjoint), with the bus's recent-ring replay for late
+  attachers. The stream is live-only cache: a restart drops the ring and the client
+  backfills via the read. No new bus, no new task kind.
+- **Retention/caps (§9):** the `notify-retention` pass compacts the org log with the repo
+  floor contract — events below the minimum active org-hook cursor AND older than 7 days
+  are deleted (same 500-delete/600-scan per-pass caps); hookless orgs compact everything
+  past the floor, keeping the head. The member-repo floor already folds org cursors in
+  (§5.4), so the two compactions never delete under an undelivered org pass.
+
+## 6. API endpoints
+
+Auth levels per P6. User notification routes are top-level (`/api/v1/…` + `/api-browser/v1` twins); webhook
+and watch routes are repo-scoped via `api.Lanes`. Wire conventions per 07 §2: plain-text errors, `[]`
+never null, RFC 3339, no-store on user-private reads. All registered by the `internal/notifications`
+RouteProvider (Seam 1).
+
+| METHOD + path | Auth | Request → response | Notes |
+|---|---|---|---|
+| `GET /api/v1/notifications?state=&after=&n=` | authenticated (self only) | → `{notifications: [Notification], more}` (n default 50, max 200) | no-store; index-first (P4), LIST overflow |
+| `GET /api/v1/notifications/unread_count` | authenticated (self only) | → `{count}` | no-store; O(1) from index |
+| `POST /api/v1/notifications/{id}/read` | authenticated (self only) | → `Notification` | CAS state flip; 404 if not owner's |
+| `POST /api/v1/notifications/{id}/unread` | authenticated (self only) | → `Notification` | |
+| `POST /api/v1/notifications/read_all` | authenticated (self only) | → `{updated: N}` | one index CAS + per-object state writes bounded to the index window |
+| `GET /api/v1/notifications/stream` | authenticated (self only) | SSE (§5.1) | no-store |
+| `PUT /{o}/{r}/api/watch` | read | → `{watching: true, watchers}` | 07 owns the record; this is its API |
+| `DELETE /{o}/{r}/api/watch` | read (self only) | → `{watching: false, watchers}` | |
+| `GET /{o}/{r}/api/watch` | authenticated (self only) | → `{watching: bool}` | no-store |
+| `GET /{o}/{r}/api/webhooks` | admin | → `{webhooks: [Hook (no secret)]}` | |
+| `POST /{o}/{r}/api/webhooks` | admin | `{url, events[], secret?, insecure_tls?}` → `Hook` | 400 on bad URL/events; 409 plain-text past the per-repo cap (§1.4) |
+| `GET /{o}/{r}/api/webhooks/{id}` | admin | → `Hook` (`secret_set`, never `secret`) | |
+| `PATCH /{o}/{r}/api/webhooks/{id}` | admin | partial → `Hook` | CAS'd |
+| `DELETE /{o}/{r}/api/webhooks/{id}` | admin | → 204 | also deletes cursor + deliveries |
+| `POST /{o}/{r}/api/webhooks/{id}/ping` | admin | → `{delivery: true}` | enqueues `ping` activity event |
+| `GET /{o}/{r}/api/webhooks/{id}/deliveries` | admin | → `{updated_at, entries: [...]}` | no-store |
+| `GET /api/v1/orgs/{org}/webhooks` | org owner | → `{webhooks: [Hook (no secret)]}` | both lanes; 401 anon, 403 non-owner |
+| `POST /api/v1/orgs/{org}/webhooks` | org owner | `{url, events[], secret?, insecure_tls?}` → `Hook` | filter accepts org actions (§5.4) + repo actions + `*`; 409 past the per-org cap (§1.5) |
+| `GET /api/v1/orgs/{org}/webhooks/{id}` | org owner | → `Hook` (`secret_set`, never `secret`) | 404 on unknown id (never 403) |
+| `PATCH /api/v1/orgs/{org}/webhooks/{id}` | org owner | partial → `Hook` | CAS'd |
+| `DELETE /api/v1/orgs/{org}/webhooks/{id}` | org owner | → 204 | also deletes both cursor families + deliveries |
+| `POST /api/v1/orgs/{org}/webhooks/{id}/ping` | org owner | → `{delivery: true}` | enqueues org-log `ping` (§5.4) |
+| `GET /api/v1/orgs/{org}/webhooks/{id}/deliveries` | org owner | → `{updated_at, entries: [...]}` | no-store |
+| `GET /api/v1/orgs/{org}/activity?n=&after=` | org owner | → `{events: [ActivityEvent], more}` (n default 50, max 200) | both lanes; 401 anon, 403 non-owner; no-store; newest-first, gaps skipped (§5.5) |
+| `GET /api/v1/orgs/{org}/activity/stream` | org owner | SSE `org_activity` frames (§5.5) | no-store; recent-ring replay, then live |
+
+`Notification` (wire) = the §1.1 object; `Hook` = the §1.4 object minus `secret` plus `secret_set`. Auth
+detail: `{id}` routes resolve only for the owning principal — a foreign `id` is `404` (never `403`,
+which would leak existence). Webhook secrets are never logged.
+
+## 7. UI and SDK
+
+UI surfaces (full SPA patterns in 08/12_web_ui; these are the notification-specific pages):
+
+| Page / component | Route | Behavior |
+|---|---|---|
+| Notification tray | `/notifications` | Paged tray from `GET /api/v1/notifications`; state filter tabs (all/unread); row click navigates to `/{repo}/issues/{num}` (or PR view) and marks read; mounts the per-user SSE stream to prepend live items |
+| Chrome badge | every page | Unread count from `unread_count`, refreshed on stream frames; badge links to the tray |
+| Watch toggle | repo header | `PUT/DELETE /{o}/{r}/api/watch`; optimistic flip, reconcile on error |
+| Webhooks settings | `/{o}/{r}/settings/webhooks` (admin only) | CRUD table + `ping` button + recent deliveries expander; secret shown once at creation |
+| Org activity | `/:org/settings` → Activity (owner only) | newest-first org-event table (member/team/repo/invite) with an "older" cursor; live rows prepend over the `org_activity` stream (one connection per mount, capped reconnect) |
+| Mention autocomplete | comment composer | suggests `@principal` from F1 user search and `@org/team` from F1 teams; purely advisory — the server re-parses |
+| Rendered mention links | every thread body (issue/PR/review via `renderBody`) | `@username` and legacy `@email` tokens link to `/{principal}` at render time (client-side `linkifyMentions` in `web/src/lib/render-md.js`, beside the #340 ref pass): same left-boundary + trailing-punct rules as §3, code spans/fences/links skipped, `@org/team` NOT linked (team URLs live under settings/teams, out of scope); ALL grammar-valid tokens link with no existence probe (dead links acceptable, GitHub behavior — decision (a)), href lowercased, display as typed; plain relative anchors, zero sanitizer changes |
+
+SDK additions (`web/sdk/src/notifications.js`, bundled by esbuild into `repos.js` per 12 §1.0):
+
+```js
+client.notifications.list({state, after, n})             // GET tray
+client.notifications.unreadCount()                       // GET unread_count
+client.notifications.markRead(id) / markUnread(id) / markAllRead()
+client.notifications.stream(onNotification)              // fetch-based SSE reader, cancel fn returned
+client.watch.get(o, r) / client.watch.set(o, r, on)      // PUT/DELETE watch
+client.webhooks.list(o, r) / create(o, r, spec) / update(o, r, id, patch) / remove(o, r, id) / ping(o, r, id) / deliveries(o, r, id)
+client.orgs.webhooks.list(org) / create(org, spec) / get(org, id) / update(org, id, patch) / remove(org, id) / ping(org, id) / deliveries(org, id)
+client.orgs.activity.list(org, {n, after}) / stream(org, onEvent)   // GET …/activity + fetch-based SSE reader, cancel fn returned
+```
+
+Streaming uses the SDK's fetch-based reader (never `EventSource`; 12 §2.5 lane/auth rules apply — the
+per-user stream is a browser-lane, credentials-included stream).
+
+## 8. Tasks
+
+| Kind | Key | Startable | Work |
+|---|---|---|---|
+| `webhooks` | `(repo, "webhooks")` | via sweep + wake-up after each fanned-out event | delivery loop, §5.3 |
+| `org-webhooks` | `("orgs/<org>", "org-webhooks")` | via org sweep + wake-up after each org emission | org delivery loop (org log + member repos), §5.4 |
+| `notify-fanout` | `(repo, "notify-fanout")` | internal (overflow fallback, §4) + redrain sweep (§8.1) | bulk notification Create burst for > 100 recipients; per-seq `collab-fanout/` completion record on drain |
+| `notify-retention` | global (maintainer pass unit, `Ops: nil`) | no | §9 retention + index compaction |
+
+## 8.1 Fan-out redrain (restart safety, issue #77)
+
+The §4 overflow contract ("the activity payload is the only queue that survives a restart") was
+aspirational: the `(repo, kind)` task table is in-memory, so a `notify-fanout` task in flight at
+process death left its seqs attached to a table that no longer exists. The redrain closes it with
+two durable pieces and one sweep — no new task kind, no new global LIST:
+
+- **Pending flag:** overflow/shortfall emissions set `fanout_pending: true` in the activity payload.
+  Sync-complete emissions omit it (`omitempty`, zero byte change on the common path and on their
+  webhook bodies).
+- **Completion records:** `repos/<o>/<r>/collab-fanout/<seq:012x>.json` (Create-only `{"seq","at"}`,
+  412-tolerant), written by the drain after `fanoutOne` completes a seq. Retention (§9) deletes the
+  record alongside its activity event.
+- **Sweep:** `Run` executes one redrain pass at startup (before serving wake-ups), then every minute
+  beside the webhooks sweep. Discovery reuses the webhooks repo enumeration (no new LIST dimension;
+  hookless repos are covered — pending fan-out exists independently of webhooks). Per repo the sweep
+  reads `collab_state` (quiet repos cost exactly one GET per pass) and probes only the unprobed
+  window `(seen, next_seq]` capped at 32 seqs/pass (deeper backlogs converge across passes; gaps are
+  skipped with honest-gap semantics, but a transient store failure stops the window instead of
+  skipping — the high-water never advances past an unprobed seq, so the next pass retries it). An in-memory high-water per repo bounds repeat work; it is
+  rebuilt every restart, which is exactly what makes the restart pass complete. Pending seqs without
+  a completion record re-enqueue onto the existing `notify-fanout` single-flight.
+
+### Concurrency
+
+Hazard: the sweep racing a live drain on the same seq (double drain), or two instances sweeping
+concurrently. Avoidance: no coordination at all — both paths are idempotent (deterministic ids +
+Create-412 + index dedup) and the completion Create arbitrates; a lost write re-drains on the next
+pass, never skipping (at-least-once, the webhooks cursor discipline). The high-water lock guards
+only the map and is never held across a store or network call.
+
+## 9. Retention and compaction
+
+- The `notify-retention` maintenance unit (Seam 5, maintainer pass, not user-startable) runs once per pass:
+  for each principal with a `notifications/index.json` older than its `swept_at`, compact — drop `read`
+  entries older than `notifications.retention_days` (default 30), `Delete` their objects, advance
+  `compacted_through`, reconcile `unread_count` against actual unreads (drift repair); unread never swept.
+- Repo-deleted rows (issue #63): the same pass drops index entries naming a deleted repo in ANY state
+  (their objects go too — a deleted repo never returns the same threads, so the rows are garbage) plus a
+  bounded overflow sweep (prefix LIST, cap 1 000 scanned / shared 200-delete budget) for dead-repo
+  objects past the hot window, which have no index row. Live-repo overflow is never touched.
+- The webhook `deliveries/recent.json` ring self-trims to 25; no separate task.
+- Repo activity events (`collab-events/`) are compacted by the same pass once the newest webhook cursor is
+  ≥ 1 000 seqs ahead: events below the minimum webhook cursor AND older than 7 days are deleted; the
+  cursor honesty rule (§5.3) covers the gaps. The minimum-cursor check spans hooks — still one sweep, no locks.
+  Org hooks (§5.4) hold the same floor through their per-(hook, repo) cursors: an org pass that has not
+  delivered an event yet keeps it, and a brand-new org hook (cursor 0) holds member-repo compaction
+  only until its first pass advances every member cursor.
+- Org event logs (`orgevents/`, §5.5) are compacted by the same pass with the same floor contract:
+  events below the minimum active org-hook org cursor AND older than 7 days are deleted (same
+  500-delete/600-scan per-pass caps, same stop-at-first-new scan, same never-delete-unseen rule).
+  Hookless orgs compact everything past the floor — the audit read needs no cursor, but the
+  floor and the caps keep the growth bounded; the head event always survives either way.
+
+### Concurrency
+
+Hazard: the sweep racing a live fan-out on the same user's index. Avoidance: the sweep's index CAS uses
+the same version-stamped retry as any writer; a lost race defers that user to the next pass. Deletion of
+a read notification while its tray page is open is harmless (404 → UI drops the row).
+
+## Decisions
+
+- **Webhooks v1 are repo-level configs delivered from a collaboration activity log, not from the WAL events bridge** — the WAL stays git-only (P1), and collaboration mutations are single-handler (P8) so no bridge changes are needed.
+- **Per-hook cursor family `repos/<o>/<r>/webhooks/cursors/<id>.json`** mirrors 14 §14.6's per-sink cursors; one slow webhook cannot stall another.
+- **Deterministic notification id = sha256(principal, thread, reason, event_seq)[0:32]** — CAS Create makes retries and backfill idempotent for free; no "sent" ledger object needed.
+- **Repo-side `watchers[]` array in `social.json` (07-owned)** — fan-out must resolve watchers without listing users; the embedded list is the boring choice, capped and `truncated`-flagged.
+- **Thread participants come from `thread.json.participants[]`** (02/03 confirmed: same header CAS as event seq), not from event scans at emission time — one CAS owner per header.
+- **Mention validity = plain GET of `users/<p>/profile.json`**; teams read `orgs/<org>/teams/<slug>.json` `members[]` (array of principal strings) directly (01's contract).
+- **Email is out; the activity log is the named seam** — a future email sink needs no schema change here.
+- **`X-Walgit-*` header keepers on collaboration webhooks** — wire identifiers are contracts, not branding (D-NAME-1).
+- **User notification SSE stream is a new top-level route**, not a repo-stream extension: notifications are user-scoped and must not require per-repo subscriptions.
+- **Hooks are capped per repo (20, issue #156) and the minute sweep is incremental** — the
+  pre-fix sweep LISTed + GET every hook of every repo every minute (O(total hooks) forever,
+  uncapped). The cap bounds one repo's pass; the sweep gate (one `collab_state` GET, pass
+  only on allocator advance or a lagging cursor, armed explicitly by create/activate) bounds
+  the quiet steady state independent of hook count. Failed deliveries still retry on the
+  next pass (pending mark, not a full rescan of every repo). No config key in v1 (service
+  field override, same convention as the retention window).
+- **Bounded ping (issue #155):** `PingHook` no longer runs `deliverHook` (up to 256 events ×
+  10 s POST in the admin's request goroutine, racing background delivery for the same hook).
+  It appends the synthetic `ping` event and POSTs exactly that event via the same `postEvent`
+  path, leaving backlog and cursor to the background `webhooks` task (no-backlog case still
+  advances the cursor past the ping). One bounded POST per ping request; the URL + secret
+  proof is unchanged.
+- **Fan-out slots are acquired before spawning (issue #153)** — `resolve`, `createAll`, `fanoutOne`,
+  and `DeliverRepo` take the cap-8 semaphore in the parent loop before `go`, so in-flight fan-out
+  goroutines are bounded by construction no matter how large the recipient/hook set is. Budget
+  accounting is unchanged (a recipient never launched before expiry counts failed, as a
+  semaphore-stranded worker did before); the §4 `errgroup.SetLimit(8)` bound now holds literally.
+- **Emission failures are logged and never arm phantom fan-out (issue #92)** — every `emit` drop path
+  (`reserveSeq` failure, overflow/shortfall/sync `appendActivity` failure) logs a `notify: emission …`
+  Warn with repo/num/class/actor (+seq once reserved — the reserve path has none yet) and cause (Service.Logger, nil → discard, the events-bridge
+  convention). An `appendActivity` failure arms NO `notify-fanout` task: there is no event to drain
+  (`fanoutOne` would probe a gap and do nothing), so arming would lose every recipient with zero trace.
+  The sync path still publishes its landed tray entries and wakes webhooks; overflow/shortfall drops
+  leave the thread timeline as the backfill source (P8).
+
+## Decisions (Feature 06 implementation wave, 2026-09-04)
+
+- **Package name is `internal/notify`** — 09 §2's dispatch table wins over this doc's `internal/notifications` text. Rationale: one package per feature, and the rollout table is the dispatch authority agents branch from.
+- **Activity seq is reserved BEFORE the notification Creates** (the ids embed the seq), while the activity object itself is still written at step 4 — the normative 2→3→4→5 order governs the WRITES. Rationale: ids must be computable before step 2; a crash between reservation and step 4 leaves a gap, which the honest-gap rule already covers.
+- **§1.1 sort sentence corrected**: sha256-hex ids do NOT sort by event time, so LIST overflow pages sort by `(created_at desc, id)` — the index (newest-first entries) is still the O(1) default read. Rationale: the formula is normative; the sentence described a different id scheme.
+- **Watch endpoints live in `internal/notify` until 07 lands** (`PUT/DELETE/GET /{o}/{r}/api/watch` writing the 07 §5 record shape verbatim), and the watcher array field is **`watcher_list`** (capped, `watchers_truncated`), NOT `watchers` — 07 defines `watchers` as the COUNT. Rationale: 06 must resolve watchers without listing users, and the count/array names must not collide when 07 adopts `social.json`.
+- **Thread author receives `author` INSTEAD of `subscribed`** on activity classes (never both). Rationale: the §2 table names three distinct reasons; doubling the author's tray for one event is noise, and the dedup key keeps both representable if a future dial wants both.
+- **Repo StreamEvent frames land on notify's in-process repo bus** (drop-oldest, 64-frame ring, `SubscribeRepo` seam) with NO v1 HTTP reader — 08's collab stream subscribes there. Rationale: no repo broadcast bus exists yet; the normative live proof (notification object + `notification` frame) rides Emit, and inventing a second stream endpoint here would preempt 08's stream design.
+- **Overflow (> 100 recipients) writes the activity event FIRST** (recipients in the payload as the durable queue) and returns; `notify-fanout` drains it. Dedup-skips never arm the task (a task racing a later read-flip could otherwise mint a duplicate live entry). Rationale: the request never extends past the 5 s budget; the activity payload is the only queue that survives a restart.
+- **No config key**: retention window is a `RetentionDays` field defaulting to 30, no `notifications.*` TOML. Rationale: one scalar does not justify a config surface + validation + schema churn; composition can set it from env later without a wire change.
+- **Issues `NotifyEvent` gains additive `Action`** (opened|commented|closed|reopened; "" = commented) so the activity log records the true action behind the coarse `subscribed` class; pulls/review/checks classes were already precise. `mentioned`-emission added to pulls (opened body, PR comments) and review (submitted reviews, thread comments) via the shared `identity.ParseMentions` §3 parser (email principals + `@org/team`, code-span stripping, 50-token cap); issues additionally passes team spellings through (`/` cannot appear in a principal, so the spelling is self-describing). Rationale: §3 mandates parsing on EVERY comment/review/body event, and the parser belongs to 01 (the principal authority) so all emitters share one grammar.
+- **PR #17 review fixes (2026-09-04):** `insecure_tls` is honored per hook (dedicated insecure lane cloned from the default transport — the field was stored but never selected); the retention activity sweep is read-bounded (600 seqs/pass, converging across daily passes — the loop was O(minCursor) reads); the §6 watch rows now spell the key `watchers` (matching 07 §5 and the implementation); E7's replay row now reports the measured (3+n) GETs (writes were and are flat at 2 PUTs). Rationale: a stored-but-dead TLS flag fails closed against the wrong party (self-signed dev hooks never deliver); maintainer passes must stay bounded; wire tables must match the owned shape.
+- **Repo-delete userspace hygiene (issue #63, 2026-09-04):** the tray skips entries naming a deleted
+  repo (lazy liveness probe, memoized to one manifest HEAD per distinct repo in the examined window
+  since #157; probe errors and malformed repos keep the entry) while
+  `unread_count` stays O(1) off the index — the retention pass (§9) drops the dead rows and reconciles
+  the count, so badge and tray reconverge daily. Watch writes fail closed on ghosts (`PUT` → 404;
+  `DELETE` still removes the record but skips the counter CAS so no `social.json` is resurrected);
+  `GET` reports not-watching. Emission is deliberately NOT gated: handlers reach fan-out only after a
+  live commit (a delete racing the fan-out is a millisecond window), and the droppings are
+  self-cleaning through the tray filter + retention. No users LIST anywhere (enumerating people stays
+  a non-feature); no tombstones (per-repo state dies with the prefix).
+- **Fan-out drain/end race closed (issue #72, 2026-09-05):** the `notify-fanout` leader saw an empty
+  drain while a concurrent `enqueueFanout` still found the running entry, joined it, and attached —
+  then the leader's `end()` removed the task while the joiner (already returned) started no worker,
+  orphaning the seq with no worker left to drain it (silent notification loss; Run sweeps
+  webhooks/retention only, never unprocessed fan-out). Close is two-sided, both in `tasks.go`:
+  (a) the leader ends ONLY via `endIfQuiescent`, which re-checks the attachment and removes the task
+  atomically — the table lock nests the entry lock, the ONLY place both are held (lock order is
+  always table → entry; no lock is held across store/network calls); a refusal means "seqs pending,
+  drain again". (b) a joiner re-checks `current()` after attaching and re-enqueues onto the live
+  entry on a miss (the seq is re-attached there, so the orphaned copy on the detached entry is never
+  drained twice — and any double drain is idempotent anyway via deterministic ids + Create-412).
+  Rationale: neither half alone closes it (a re-checking end still loses an attach landing between the
+   check and the removal; a re-verifying joiner still loses to a bare end that never re-checks).
+- **SSE keepalive goroutine lifecycle (issue #73, 2026-09-05):** the per-user stream's keepalive
+  goroutine ranged over `ka.C`, and `close()` only called `Ticker.Stop()` — which never closes the
+  channel — so every disconnected stream leaked one goroutine. The writer now carries a sender-owned
+  `done` channel (closed exactly once under the `ended` guard) plus the request context, and the
+  goroutine selects on both instead of ranging the ticker (13 channel rule: sender owns and closes;
+  every goroutine exits via context). Same latent shape fixed in the sibling `internal/api` SSE
+  envelope (`Close()` now ends the stream, not just the ticker); the 10 s keepalive wire contract is
+  unchanged. Rationale: Stop-without-close cannot terminate a range; teardown must signal the waiter.
+- **Undrained fan-out is restart-safe (issue #77, 2026-09-05):** the §4 claim ("the activity payload
+  is the only queue that survives a restart") is now true — previously nothing re-drained events
+  whose `notify-fanout` task was in flight at process death. Overflow/shortfall emissions set
+  `fanout_pending` in the payload; the drain writes a Create-only per-seq completion record
+  (`repos/<o>/<r>/collab-fanout/<seq>.json`, deleted by retention alongside its event); `Run`
+  redrains at startup and every minute via `sweepFanout`, which reuses the webhooks repo enumeration
+  (no new global LIST) and probes at most 32 unprobed seqs per repo per pass (1 GET for quiet
+  repos). Per-seq records instead of a per-repo cursor because sync emissions must not pay a cursor
+  CAS on the hot path (law 6); sweep/worker races and multi-instance sweeps collapse in the
+  idempotent Creates (at-least-once, the webhooks cursor discipline). Rationale: the durable queue
+  was write-only without a reader — the sweep is that reader, scoped to recent activity so a restart
+  never scans the bucket.
+- **Tenant webhook egress hardening — no redirects, delivery-time IP screen (issue #78, 2026-09-05):**
+  `validateHookURL` (https-only except loopback-http) was bypassable: both delivery clients followed
+  up to 10 redirects across schemes/hosts, and Go forwards custom headers cross-host (only
+  Authorization/Cookie are stripped), so a validated `https://…` hook could 302/307/308 the
+  `X-Walgit-Signature` + body onto `http://169.254.169.254/` or any private IP. The fix hardens BOTH
+  lanes (`hookClient` and `hookClientInsecure`): `CheckRedirect` refuses ALL redirects (a 3xx is a
+  delivery failure, cursor untouched, replay next pass) and every dial resolves, screens, and dials
+  only public survivors with check and connect pinned to one resolution (no TOCTOU; literal private
+  IPs fail pre-SYN; unresolvable fails closed). Refuse-all rather than same-host-only because
+  same-host still permits an https→http plaintext downgrade of secret+body, and "same host" is
+  DNS-defined anyway. Trade-off, stated plainly: benign redirects fail too — a trailing-slash
+  normalization hop or an http→https upgrade is a delivery error, not a silent follow, so hook URLs
+  must be configured in canonical (final, https) form. The screen lives in the shared stdlib-only
+  `internal/egress` package (one range table — RFC1918, link-local incl. 169.254.169.254, CGNAT,
+  benchmark 198.18/15, TEST-NETs, ULA, multicast, unspecified, reserved, incl. mapped-v6 — reused
+  verbatim by the events bridge, which keeps its existing names as thin wrappers), so the two sinks
+  cannot drift apart. Loopback stays allowed on both validation and dial (tenant dev hooks target
+  localhost; contract tests deliver to httptest servers). Screening runs at every delivery (DNS can
+  change between config and POST), not just at config time. No new goroutines or locks, so no new
+  concurrency hazard (the shared transports are goroutine-safe, dials are sequential).
+- **Atomic unread dedup under concurrency (issue #91, 2026-09-05):** `createOne` checked
+  `hasUnread` then Created, but the id embeds the reserved activity seq — so two emissions for the
+  same (user, thread, reason) racing past the check Created distinct objects AND two unread index
+  rows (the index CAS could not save them: different ids never collide). The fix re-checks the
+  triple INSIDE the unread-index CAS loop (`indexClaim`, shared body `indexUpsert`): the `hasUnread`
+  pre-check stays as a fast path only, and the CAS-serialized re-check is the arbitration — a loser
+  deletes its just-Created orphan object (best-effort; a 412-replayed Create made no object, so it
+  deletes nothing) and reports `createSkipped`, converging tray AND bucket to one row and one
+  object. `indexAdd` keeps id-only semantics (retention/tests must not inherit emission
+  arbitration); the `notify-fanout` backfill (`fanoutOne`, same race shape) delegates to `createOne`
+  instead of duplicating the sequence. Entry-level discipline, no new locks (CAS loops stay the only
+  tool, 13 §2); the Create→index→activity→stream order (§4) is unchanged, and a crash between the
+  Create and the loser-delete leaves the same orphan class the pre-fix crash window already had.
+  Rationale: a reason-keyed reservation object would need read-path and retention lifecycle to honor
+  "a read does not block a new one"; the index row IS the live set, so arbitrating there adds no new
+  object family and no new lifecycle.
+- **Bounded repoBus ring (issue #93, 2026-09-05):** `repoBus.ring` grew one entry per repo ever
+  published and was never deleted (subscriber cleanup existed; ring cleanup did not). The fix pairs
+  evict-on-last-subscriber (unsubscribe drops the repo's ring alongside its subs entry — the same
+  discipline the subs map already had) with an LRU cap of `RepoBusMaxRepos` (256) retained repos for
+  the publish-with-no-subscribers path, which publish-then-subscribe replay (kept: existing tests
+  assert it) would otherwise leave unbounded. Eviction prefers idle repos, drops replay rings only
+  (live channels are never closed by it; the ring rebuilds on the next publish), and all recency
+  state rides the pre-existing bus mutex — no new locks, no timers, no goroutines. Behavior nuance:
+  a subscriber attaching after a fully idle period, or to an LRU-evicted repo, replays nothing and
+  starts from the live tail; durable history is the feature timeline/API (08: frames invalidate
+  caches, the timeline is the backfill truth), never this ring. Worst case is now 256 repos × 64
+   frames.
+- **Unwatch order is list-CAS-then-record-delete (issue #94, 2026-09-05):** `SetWatch(off)` deleted
+  the userspace record BEFORE the `social.json` watcher_list CAS, so a CAS failure (or a crash
+  between the two) stranded a phantom — record gone while `watcher_list` still held the principal,
+  who kept receiving subscribed-class fan-out with no record to delete (repair only via a deliberate
+  re-PUT+DELETE). The order is reversed: the CAS lands first, then the record delete. A failure or
+  crash between now leaves a record WITHOUT list membership — fail-closed (fan-out consumes the
+  list, so the stale record notifies no one) and self-healing (the next toggle's CAS reconciles,
+  then the record write lands; the ghost-repo path still deletes-then-skips-CAS so no `social.json`
+  is resurrected). Regression: `TestSetWatchUnwatchCASFailureNoPhantom` (fault-injected 412 CAS
+  failure asserts no phantom + retry convergence; verified it fails on the old order). Rationale:
+  the manifest CAS is the only commit point (law 4) — the list is the commit, the record is the
+  cache.
+- **Unmarshalable `Emission.Detail` fails the emission, never the handler (issue #98, 2026-09-05):**
+  `Detail` is composition-supplied (`map[string]any`), so the old "shapes are fixed, marshal cannot
+  fail" claim did not hold — a chan/func value panicked the synchronous mutating handler inside
+  `encode`. `encode` now returns an error (CAS closures return it; emission paths log-drop it; a
+  `recover` converts even a panicking `MarshalJSON` into an error, so no panic path remains), and
+  `emit` screens `Detail` marshalability at entry, BEFORE the activity seq reservation, so a
+  poisoned emission leaves no seq gap and no partial tray. The screen lives at the `emit` entry —
+  NOT validated per composer in each feature package — because `Emission` is the boundary: notify
+  never imports the feature packages and they never import notify, so the untyped map is checked
+  where it crosses into the fan-out contract. Regression: `TestEmitPoisonDetailDropsLogged`
+  (chan/func/nested/panicking-marshaler Details → logged drop, zero store writes, handler intact;
+  valid Details unaffected) + `TestEncodeRejectsUnmarshalable` + `TestAppendActivityPoisonReturnsError`.
+  Rationale: fail the emission with a log (issue #92 convention), never the request; screening
+  before the reservation keeps the honest-gap log clean of self-inflicted gaps.
+- **Overflow-drain completion is honest (issue #152, 2026-09-05):** `fanoutOne` returned "event
+  existed", not "recipients done" — the 5 s budget stranded recipients at the precheck/slot
+  select and `createFailed` was swallowed, yet the drain still wrote the per-seq completion
+  marker, so the #77 redrain sweep skipped the seq forever (silent notification loss).
+  `fanoutOne` now reports `(existed, complete)`: budget-stranded and `createFailed` recipients
+  count as incomplete (dedup-skips stay complete — the live entry covers them), the shortfall is
+  logged (`notify: fanout incomplete …` with repo/seq/recipients/failed), and the drain skips
+  the marker on incomplete so the sweep re-drives the seq — re-drain is idempotent
+  (deterministic ids + Create-412 + index dedup), so the retry converges without duplicates.
+   No new locks (one counter mutex held only around the increment, never across a store call, 13
+   §2); no signature change beyond the second return (existing callers ignore it as a statement).
+   Regression: `TestFanoutDrainSkipsDoneMarkerOnIncomplete` (fault-injected recipient failure →
+   no marker; healed sweep converges exactly-once; verified FAILING pre-fix) +
+   `TestFanoutOneExpiredBudgetIsIncomplete` (canceled budget → `(true, false)`; live redrain
+   converges + marks). Rationale: the marker is a completion claim — writing it on a partial
+   drain is the lie that orphans the remainder.
+- **Notify task leaders observe phase-1 drain (issue #154, 2026-09-05):** `StartWebhooks`
+   detached its work with `WithoutCancel` and `drainFanout` used `Background()` — neither ran
+   in a tracked WaitGroup, so a wedged store call hung them forever, immune to drain/shutdown.
+   Same shape as the #74 import fix: the service owns a `drainCtx` (cancelled by the new
+   `Service.Drain`, wired into serve.go phase 1 beside `importSvc.Drain`), both leaders derive
+   their store/network work from it and are tracked in `Service.wg`, and new tasks refuse fast
+   once draining (`StartWebhooks` → nil, `enqueueFanout` → drop — every such seq is durable
+   via `fanout_pending` with no completion record, so the redrain sweep re-drives it). A leader
+   observing a dead drainCtx force-ends via `tasks.end` — the deliberate exception to the
+   #72 endIfQuiescent-only rule, safe because no worker will ever be needed again in this
+   process — and `drainFanout` re-checks ctx between seqs so drain short-circuits a deep
+   backlog. No new locks (one drain mutex around a bool, never across a store call, 13 §2);
+   `StartWebhooks` keeps its signature (caller ctx ignored, documented). Regression:
+   `TestDrainInterruptsWedgedWebhooks` + `TestDrainInterruptsWedgedFanout` (wedged store +
+   drain → prompt end; verified HANGING pre-fix with the task stuck `running`) +
+    `TestDrainRefusesNewTasks`. Rationale: every goroutine exits via context (13 §8) — a
+    task immune to drain is a shutdown hang.
+- **Index-first tray reads (issue #157, 2026-09-05):** `Tray` LISTed the user prefix and GET every
+  overflow object (up to 1000) on EVERY read even when the index window covered the page, probed
+  one manifest HEAD per merged entry (up to ~1050), and sorted with an O(n²) insertion sort.
+  The read is now index-first: a page covered by the hot window is served from the single index
+  GET with no LIST; the LIST+GET overflow merge runs only for pages reaching past the window
+  (overflow cursor, or a page the live index rows cannot fill). Liveness stays lazy — collection
+  stops at n+1 live rows — and memoized per repo for the request, so the hot path probes one
+  HEAD per distinct repo in the examined window. The sort is `sort.Slice` on (at desc, id).
+  Trade-off, stated plainly: a first page served from a readable-but-short index skips the LIST
+  merge, so a live-repo crash orphan (object Created but index CAS never landed) stays hidden
+  until its page is reached via overflow (paging past the window); retention reaps dead-repo
+  overflow but never reindexes live orphans — the old code surfaced it
+  immediately at the price of a LIST per read. No new locks or goroutines (the memo is
+  request-local). Regression: `tray_cost_test.go` counting-store tests pin the covered cost
+  (1 GET + ≤ distinct-repo HEADs, 0 LISTs; verified LIST+80-HEADs pre-fix) and the overflow
+  contract (exactly 1 LIST). Rationale: law 4 (no LIST on hot paths, P5) and law 6 (round
+  trips are the cost model) — the tray is the highest-frequency user-private read.
+
+- **Org activity surface (Forgejo #364, 2026-09-12):** the §5.4 org log becomes a readable
+  audit surface (§5.5): owner-gated `GET …/activity` (newest-first `{events, more}`, seq
+  cursor, n default 50 / max 200 — the tray convention; head GET + exact-key probes, never
+  a LIST; at most n+64 probes per page so deep pages into retention-deleted prefixes come
+  back short with `more` instead of burning GETs) plus `GET …/activity/stream` (the §5.1
+  SSE envelope verbatim; `EmitOrgEvent` publishes one `org_activity` frame per committed
+  event on the existing repo frame bus, keyed by the bare org — disjoint from `owner/repo`
+  keys — with ring replay; no new bus, no new task kind). The log gains the missing
+  org-object transitions — `org_created` (fresh `CreateOrg` only), `org_updated` (`PutOrg`),
+  `org_deleted` (pre-delete; the prefix survives), `team_updated` (`PutTeam`) — and
+  `repo_created`, which reverses the #363 "no single seam" clause: the wal registry manifest
+  commit IS the single birth choke (API creates, push auto-creates, imports), observed
+  through a nil-safe `OnCreate` hook injected by composition (law 8 — core never imports
+  notify) that probes org existence once per birth (cold path; warm pushes never birth —
+  the push-budget test sanctions exactly that GET shape, ≤ 1) and stays silent for
+  user-owned repos. Retention compacts the log on the `notify-retention` pass with the repo
+  floor contract (min active org cursor + 7 days, same per-pass caps; hookless compacts past
+  the floor, head survives). The org-settings Activity tab (owner-only, like Danger —
+  the API 403s non-owners) pages with an "older" cursor and prepends live frames deduped
+  by seq. Rationale: owners get member/team/repo/invite history in one place over the
+  substrate #363 already pays for (same objects feed webhooks, reads, and the stream).
+  No new dependencies; pushes stay out (events-bridge TOML sinks remain git-only).
+
+- **Org-level webhook configs (Forgejo #363, 2026-09-12):** one owner-gated config per org
+  (`orgs/<org>/webhooks/`, §1.5) fans out over the org-log (§5.4: member/team/invite transitions
+  appended post-commit through the nil-safe identity `OrgEvent` observer) plus every member repo's
+  activity log through per-(hook, repo) cursors. Delivery reuses `postEvent` verbatim (keepers,
+  HMAC, lane); the minute sweep gates per org (hooks LIST + org-state GET, member
+  `collab_state` probes only for orgs with active hooks); retention folds org cursors into the
+  compaction floor. Deliberately out of scope: git pushes (events-bridge TOML sinks stay
+  git-only) and repo creation (no synthetic record — the first activity event is the signal;
+  AMENDED by #364 below, which found the single birth seam). Owner-cancel of org invites runs through `DeleteOrgInvite` so both cancel paths emit.
+  No new dependencies; API + SDK only (no org-settings hooks tab — deferred). Rationale:
+  owners should not register N per-repo hooks to watch membership; the per-scope cursor keeps
+  the §5.3 at-least-once contract without a second delivery implementation.
+
+- **Rendered mention profile links (Forgejo #440, 2026-09-13):** `linkifyMentions` in
+  `web/src/lib/render-md.js` autolinks `@username` + legacy `@email` tokens to `/{principal}`
+  (§7 row) beside the #340 ref pass — same left-boundary + trailing-punct rules as §3, code
+  spans/fences/links skipped (marked-autolinked `@email` arrives as `@` + mailto anchor and is
+  folded; bare addresses keep mailto, never a mention). `@org/team` NOT linked (team URLs live
+  under settings/teams, out of scope); ALL grammar-valid tokens link with no existence probe
+  (decision (a) — dead links acceptable, GitHub behavior; the server still drops unresolvable
+  mentions from fan-out silently). Renderer-only: no server change, no sanitizer change, no new
+  dependencies; every `renderBody` consumer (issue/PR/review threads) inherits it. Rationale:
+  the notification half already lands mentioned/team_mention with tray deep links — the thread
+  body must link the handle it notifies about, deterministically and headless-testable.
+
+- **Bare-username mentions notify (Forgejo #444, 2026-09-13):** decision (a) — extend the
+  server grammar to bare `@username` tokens (notification parity is the coherent end-state;
+  narrowing the #440 renderer would remove useful links). Both server parsers grow the same
+  bare-username alternative (`identity.ParseMentions` mentionTok and the issues-local
+  `mentionRe`, which feeds the issues emitter while pulls/review read the identity parser),
+  with the renderer's guards mirrored cell-by-cell: same left boundary (the issues parser
+  additionally gains the `-` the identity parser and renderer already excluded, so `x-@bob`
+  stays plain everywhere), `/`- or `@`-glued tokens never match, leading-dot tokens never
+  match, same trailing-punct strip, same code exemptions. Emitters are unchanged in shape:
+  bare names flow through the existing ValidPrincipal probe + team expansion + silent-drop
+  contract. Verified parity battery (every class below renders AND notifies identically, or
+  is a documented residual): `@bob`, `@BOB` (href lowercased, display as typed), bounds,
+  trailing punct, `@bob` + `@bob@example.com` side by side, `@bob/!`, `@bob@x`, `@.bob`,
+  `@..`, `@@x` / `a@b.com` / `x@bob`, bare `jane@example.com` (mailto only). Deliberate
+  residuals (all pre-existing shapes the bare extension inherits, never introduces):
+  `@org/team` notifies (team_mention) but never renders as a link (team URLs out of scope,
+  #440); the parser reads source text so markdown-link interiors (`[see @bob](x)`) and
+  autolinked URLs notify while the renderer skips them; the glued-email corner `@a@b.com@c`
+  renders plain but still parses as an email mention. Rationale: no render-without-notify
+  and no notify-without-render for any bare-username token class; unresolvable bare names
+  render as (dead, GitHub-style) profile links and drop silently from fan-out, exactly the
+  #440 decision-(a) contract.
+- **Watch-disable refuses new watches at the service boundary (Forgejo #522).**
+  `SetWatch(on)` refuses with `ErrForbidden` (→ 403 + reason) when the repo's
+  `[features] watch` flag is off — behind a nil-safe `Features` hook wired in
+  `buildCollab` (unreadable settings fail open). Unwatch always works (even on
+  ghosts, per #63); existing watchers, counts, and fan-out are untouched;
+  re-enabling restores. The Watch pill disables with a reason while off (a
+  retained watch keeps its working Unwatch button). Rationale: the pill is an
+  affordance, the API check is the rule (07_api.md Decisions).
+
+## Explicitly out of scope
+
+- Email delivery (§5.2 seam), push notifications, mobile.
+- Per-thread mute/snooze and per-repo notification settings UI (GitHub's "participating vs all" dial) — v1 emits for participants + watchers; a preference object is the natural extension.
+- An org-settings webhooks tab in the SPA (the API + SDK surface in §6/§7 is the v1 contract; the tab is a pure UI follow-up). The org-settings Activity tab (§5.5/§7) is NOT covered by this exclusion — it landed with #364.
+- Notification digest batching, threading/grouping rules beyond the (user, thread, reason) dedup.
+- Webhook retry-with-backoff schedules (v1 is at-least-once via cursor; a failed delivery retries on the next pass), delivery payload customization/templates, and bot signatures.
+- In-repo "notifications" for git events (pushes) — those stay on the WAL events bridge (09).

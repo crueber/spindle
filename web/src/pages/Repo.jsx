@@ -1,0 +1,941 @@
+// web/src/pages/Repo.jsx — the repository chrome (§2.6): header (title, head
+// pill, clone menu, ref picker, tasks overlay) + tabs + nested route content.
+// The repo context (owner/name/repoClient) flows to tab pages via context so
+// every tab shares one client and one summary fetch.
+
+import repos from "../../sdk/src/index.js";
+import { createContext, useContext, createSignal, createEffect, createMemo, onCleanup, For, Show, Switch, Match } from "solid-js";
+import { useParams, A, useLocation, useNavigate } from "@solidjs/router";
+import { useData, reportError, REPO_TTL, tolerateMissing, isDegradedSummary } from "../lib/data.js";
+import { httpsCloneUrl, httpProtoLabel, sshCloneUrlFrom, cloneCommand, copyText } from "../lib/clone.js";
+import { formatNextSync } from "../lib/mirror.js";
+import { formatPushNextSync } from "../lib/pushmirror.js";
+import { visibilityBadge } from "../lib/visibility.js";
+import { activeTab, tabBadge, showChecksTab, showFeatureTab } from "../lib/tabs.js";
+import { isFeatureDisabled } from "../lib/repoFeatures.js";
+import { mountStream } from "../lib/sse.js";
+import { useCollabStream } from "../components/collab.jsx";
+import Icon from "../lib/icons.jsx";
+import { shortRef, pillHead, pillLabel, pinnedDefault, dedupeRefs } from "../lib/ref-pill.js";
+import { anonWriteTarget, write401Target } from "../lib/writeGate.js";
+export { shortRef };
+
+export const BUSY_MS = 5000; // poll cadence while something runs (Forgejo #396: 1.5 s hammered …/tasks — the hottest endpoint — while maintenance/follow tasks ran; progress percentages stay live at 5 s)
+export const IDLE_MS = 15000; // poll cadence when idle
+export const LINGER_MS = 20000; // finished tasks stay listed this long
+
+const RepoCtx = createContext();
+export function useRepo() {
+  return useContext(RepoCtx);
+}
+
+export function fmtBytes(n) {
+  if (n === undefined || n === null || n < 0) return "—";
+  if (n < 1024) return `${n} B`;
+  const units = ["KiB", "MiB", "GiB", "TiB"];
+  let v = n;
+  let u = -1;
+  while (v >= 1024 && u < units.length - 1) { v /= 1024; u++; }
+  return `${v >= 100 ? Math.round(v) : v.toFixed(1)} ${units[u]}`;
+}
+
+// --- clone menu (recipes from the server, never a local copy) ------------------
+
+async function fetchRecipes() {
+  const res = await fetch("/services/setup.json", { credentials: "same-origin" });
+  if (!res.ok) throw new Error(`setup recipes: ${res.status}`);
+  return res.json();
+}
+
+function CloneMenu(props) {
+  // Dogfood exception (§2.6): the recipe payload is server-rendered JSON.
+  const [getRecipes, setRecipes] = createSignal(null);
+  const [getOpen, setOpen] = createSignal(false);
+  const [getProto, setProto] = createSignal("http"); // issue #37 protocol toggle (#124: "http" = the server's HTTP(S) transport, labeled by scheme)
+  const [getCopied, setCopied] = createSignal(""); // "", "copied", "failed"
+  let root; // the <details> popover
+  let box; // the clone-command textbox
+  let timer = 0;
+  // Outside-click close (issue #255, mirrors the TasksOverlay onDoc
+  // pattern below): a click outside the <details> dismisses the popover.
+  // The <summary> trigger lives inside root, so its native toggle still
+  // fires and never fights this handler.
+  const onDoc = (e) => { if (root && !root.contains(e.target)) root.open = false; };
+  document.addEventListener("click", onDoc);
+  onCleanup(() => { clearTimeout(timer); document.removeEventListener("click", onDoc); });
+  const load = () => {
+    if (getRecipes()) return;
+    fetchRecipes()
+      .then(setRecipes)
+      .catch((e) => { setRecipes([]); reportError(e, "recipes"); });
+  };
+  // URL-building logic is unchanged (§2.6): the HTTP(S) URL is the server's
+  // clone_url (origin fallback), shown VERBATIM so the command always works
+  // (issue #124: never upgrade http→https for display — a plain-http server
+  // terminates no TLS itself; the pill label below derives from this URL's scheme so pill
+  // and text always agree). The SSH URL is the server-advertised
+  // ssh_clone_url verbatim when present (external host and port,
+  // lib/clone.js) with the hostname derivation as fallback.
+  const https = () => httpsCloneUrl(props.summary, props.full, location.origin);
+  const httpLabel = () => httpProtoLabel(https());
+  const url = () => (getProto() === "ssh" ? sshCloneUrlFrom(props.summary, https(), props.full, location.hostname) : https());
+  const cmd = () => cloneCommand(url());
+  const flag = (msg) => {
+    clearTimeout(timer);
+    setCopied(msg);
+    timer = setTimeout(() => setCopied(""), 2000);
+  };
+  const copy = async () => {
+    box?.focus();
+    box?.select();
+    flag((await copyText(cmd())) ? "copied" : "failed");
+  };
+  // Esc dismisses the popover and returns focus to the trigger. The <details>
+  // element is the keyboard baseline otherwise: <summary> toggles on
+  // Enter/Space natively and Tab walks the dialog controls.
+  const onKey = (e) => {
+    if (e.key === "Escape" && root?.open) {
+      root.open = false;
+      root.querySelector("summary")?.focus();
+    }
+  };
+  return (
+    <details ref={root} class="clone-menu relative" onToggle={(e) => { setOpen(e.target.open); if (e.target.open) load(); }} onKeyDown={onKey}>
+      <summary class="btn cursor-pointer px-2 py-1 text-sm select-none"><Icon name="clone" /> Clone</summary>
+      <div class="clone-body card absolute right-0 z-30 mt-2 w-96 space-y-3 p-3">
+        <div class="flex items-center gap-2">
+          <div role="group" aria-label="Clone protocol" class="flex gap-1">
+            <For each={["http", "ssh"]}>
+              {(p) => (
+                <button
+                  type="button"
+                  class="btn px-2 py-1 text-xs"
+                  classList={{ "btn-active": getProto() === p }}
+                  aria-pressed={getProto() === p}
+                  onClick={() => { setProto(p); setCopied(""); }}
+                >
+                  {p === "http" ? httpLabel() : "SSH"}
+                </button>
+              )}
+            </For>
+          </div>
+          <span role="status" aria-live="polite" class="muted text-xs">
+            {getCopied() === "copied" ? "copied" : getCopied() === "failed" ? "copy failed — press Ctrl+C" : ""}
+          </span>
+        </div>
+        <div class="flex items-center gap-2">
+          <input
+            ref={box}
+            class="input font-mono text-xs"
+            readOnly
+            value={cmd()}
+            aria-label="Clone command. Activate to copy."
+            onFocus={(e) => e.currentTarget.select()}
+            onClick={copy}
+            onKeyDown={(e) => { if (e.key === "Enter") void copy(); }}
+          />
+          <button type="button" class="btn shrink-0 px-2 py-1 text-xs" onClick={copy}>
+            Copy
+          </button>
+        </div>
+        <Show when={getRecipes()} fallback={<p class="muted">loading recipes…</p>}>
+          <For each={getRecipes() ?? []}>
+            {(r) => (
+              <div class="clone-recipe">
+                <strong>{r.name ?? r.kind ?? "clone"}</strong>
+                <Show when={r.doc}>
+                  <p class="muted text-xs">{r.doc}</p>
+                </Show>
+                {/* Recipes stay on the HTTP(S) URL: their bodies are https-only
+                    commands (bundle-URI https URLs, http.extraHeader), so an
+                    ssh:// substitution would break them. */}
+                <code class="clone-cmd block overflow-x-auto rounded bg-zinc-100 px-2 py-1 font-mono text-xs dark:bg-zinc-800">
+                  {String(r.command ?? r.cmd ?? "").replaceAll("{url}", https()).replaceAll("URL", https())}
+                </code>
+              </div>
+            )}
+          </For>
+        </Show>
+      </div>
+    </details>
+  );
+}
+
+// --- tabs -----------------------------------------------------------------------
+
+const TABS = [
+  { id: "code", label: "Code", href: (full) => `/${full}` },
+  { id: "commits", label: "Commits", href: (full) => `/${full}/commits` },
+  { id: "issues", label: "Issues", href: (full) => `/${full}/issues` },
+  { id: "pulls", label: "Pulls", href: (full) => `/${full}/pulls` },
+  { id: "checks", label: "Checks", href: (full) => `/${full}/checks` },
+  { id: "releases", label: "Releases", href: (full) => `/${full}/releases` },
+  // WAL lives in the settings sidebar, not the tab bar (issue #123); the
+  // /wal route itself is kept, so old links still render the WAL page.
+  { id: "settings", label: "Settings", href: (full) => `/${full}/settings` },
+];
+
+// The tab matcher lives in lib/tabs.js (pure, unit-tested): the active tab
+// derives from the first path segment after /:owner/:name, so blob/tree
+// paths with tab-word filenames (checks.go, …) still highlight Code.
+
+// --- watch toggle (06 §7): optimistic flip, reconcile on error -------------
+
+function WatchToggle(props) {
+  const navigate = useNavigate();
+  const location = useLocation();
+  // Shared identity cache keys (App.jsx seeds them — zero new requests):
+  // Forgejo #502 pre-flights the write for anonymous viewers.
+  const [getMe] = useData("me", () => repos.me().catch(() => null));
+  const [getDiscovery] = useData("discovery", () => repos.discovery().catch(() => null));
+  const gate = () => ({ me: getMe(), discovery: getDiscovery() });
+  const [getWatch, setWatch] = createSignal(null);
+  const load = async () => {
+    try {
+      const res = await props.repo.watch.get();
+      setWatch(res);
+    } catch {
+      setWatch(null); // anonymous or unreadable: hide the toggle
+    }
+  };
+  load();
+  const flip = async () => {
+    const cur = getWatch();
+    if (!cur) return;
+    // Forgejo #522: watching is disabled and the viewer isn't watching —
+    // the button renders disabled with a reason; the write never fires
+    // either (unwatch always stays enabled).
+    if (isFeatureDisabled(props.summary?.(), "watch") && !cur.watching) return;
+    const here = location.pathname + location.search;
+    const gateHref = anonWriteTarget(gate(), here, "Watch this repository");
+    if (gateHref) {
+      navigate(gateHref);
+      return;
+    }
+    setWatch({ watching: !cur.watching, watchers: cur.watchers }); // optimistic
+    try {
+      const res = await props.repo.watch.set(!cur.watching, { noPopupAuth: true });
+      setWatch(res);
+    } catch (e) {
+      setWatch(cur); // reconcile on error
+      const target = write401Target(e, gate(), here, "Watch this repository");
+      if (target) navigate(target);
+      else reportError(e, "watch");
+    }
+  };
+  return (
+    <Show when={getWatch()}>
+      {(w) => {
+        // Forgejo #522: same disabled affordance as the star pill —
+        // muted, reason on hover/focus — while watching is off and the
+        // viewer isn't watching. A retained watch keeps the enabled
+        // Unwatch button (unwatch always works, fan-out untouched).
+        const off = () => isFeatureDisabled(props.summary?.(), "watch") && !w().watching;
+        return (
+          <button
+            type="button"
+            class="btn px-2 py-1 text-sm"
+            classList={{ primary: w().watching }}
+            onClick={flip}
+            disabled={off()}
+            title={off() ? "Watching is disabled for this repository" : w().watching ? "Unwatch this repo" : "Watch this repo"}
+            aria-pressed={w().watching}
+            aria-disabled={off() || undefined}
+            aria-label={off() ? "Watching is disabled for this repository" : w().watching ? "Unwatch this repo" : "Watch this repo"}
+          >
+            <Icon name={w().watching ? "watch-on" : "watch-off"} /> {w().watchers ?? 0} Watch
+          </button>
+        );
+      }}
+    </Show>
+  );
+}
+
+// --- ref picker (SSE stream, one live stream per picker) -------------------------
+
+function RefPicker(props) {
+  const repo = props.repo;
+  const navigate = useNavigate();
+  // The trigger is the head pill (issue #214): `head` arrives as a getter so a
+  // background summary refresh moves the pill without remounting the picker.
+  // Issue #252: the getter is context-first (viewed ref) with the summary
+  // head as fallback — the pill follows the Code tab, not always HEAD.
+  const head = () => (typeof props.head === "function" ? props.head() : props.head);
+  const label = () => pillLabel(head());
+  // Forgejo #482: the pin needs the SUMMARY head (the default-branch target
+  // — HeadTarget), not the context-first pill head above. head() follows the
+  // viewed ref (#252), so deriving the pin from it would badge whatever
+  // branch is on screen (e.g. fix/…) as "default" and leave the real default
+  // unreachable past the 50-ref page window. The shell passes s().head
+  // straight through as summaryHead; viewed/tag/sha-addressed states never
+  // leak into the pin.
+  const summaryHead = () => (typeof props.summaryHead === "function" ? props.summaryHead() : props.summaryHead);
+  const [getRefs, setRefs] = createSignal([]);
+  const [getKind, setKind] = createSignal("branches");
+  const [getQuery, setQuery] = createSignal("");
+  const [getOpen, setOpen] = createSignal(false);
+  let root;
+  let trigger;
+
+  const stream = mountStream(
+    (signal, emit) => repo.refStream(getKind(), { q: getQuery(), n: 50 }, emit, { signal }),
+    (ref) => setRefs((list) => [...list.filter((r) => r.name !== ref.name), ref]), // keyed by name
+  );
+
+  let debounce = 0;
+  const search = () => {
+    clearTimeout(debounce);
+    debounce = setTimeout(() => { setRefs([]); stream.run(); }, 150);
+  };
+  onCleanup(() => { clearTimeout(debounce); stream.cancel(); document.removeEventListener("click", close); });
+
+  const close = (e) => { if (root && !root.contains(e.target)) { setOpen(false); stream.cancel(); } };
+  document.addEventListener("click", close);
+
+  const pick = (r) => {
+    setOpen(false);
+    stream.cancel();
+    const kind = r.name.startsWith("refs/tags/") ? "tag" : "branch";
+    navigate(`/${props.full}/tree/${kind === "tag" ? r.name : shortRef(r.name)}`);
+  };
+
+  // Forgejo #482: the kind pills share the old dropdown behavior exactly —
+  // setKind + clear + re-stream, query untouched so the typed filter follows
+  // the user between Branches and Tags.
+  const switchKind = (kind) => {
+    if (getKind() === kind) return;
+    setKind(kind);
+    setRefs([]);
+    stream.run();
+  };
+
+  // Forgejo #482: the pinned default-branch row derives from the summary
+  // head (the default-branch target — HeadTarget), which the picker already
+  // holds via the summaryHead prop. The server pages refs name-sorted at
+  // n=50 with no default hoist, so a default sorting late (main at ~115 on
+  // walhub itself) is otherwise structurally unreachable. Pins branches
+  // only; dedupes vs the stream.
+  const pinned = () => pinnedDefault(summaryHead(), getKind());
+  const visibleRefs = () => dedupeRefs(pinned(), getRefs());
+
+  // Esc dismisses the picker and returns focus to the pill trigger. The
+  // trigger button is the keyboard baseline otherwise: it toggles on
+  // Enter/Space natively and Tab walks the dialog controls.
+  const onKey = (e) => {
+    if (e.key === "Escape" && getOpen()) {
+      setOpen(false);
+      stream.cancel();
+      trigger?.focus();
+    }
+  };
+
+  return (
+    <div class="ref-picker relative" ref={root} onKeyDown={onKey}>
+      <button
+        ref={trigger}
+        type="button"
+        class="pill cursor-pointer select-none"
+        aria-haspopup="listbox"
+        aria-expanded={getOpen()}
+        title={head() ? "Switch branch or tag" : "Browse branches and tags"}
+        onClick={() => {
+          const next = !getOpen();
+          setOpen(next);
+          if (next && getRefs().length === 0) stream.run();
+          if (!next) stream.cancel();
+        }}
+      >
+        {label()} ▾
+      </button>
+      <Show when={getOpen()}>
+        <div class="ref-drop card absolute left-0 z-30 mt-2 w-80 p-2" role="listbox" aria-label="Branches and tags">
+          {/* Forgejo #482: the kind dropdown becomes a two-pill segmented
+              toggle above the filter input (.ref-controls is a column —
+              pills row on top, input full width below). Each pill is a real
+              button with aria-pressed in a role="group"; Tab walks pill 1 →
+              pill 2 → filter input → rows natively. Esc/outside-click close
+              (the onKey/document handlers above) are untouched. */}
+          <div class="ref-controls mb-2 flex flex-col gap-2">
+            <div class="flex gap-2" role="group" aria-label="Ref type">
+              <button
+                type="button"
+                class="btn px-2 py-1 text-sm"
+                classList={{ primary: getKind() === "branches" }}
+                aria-pressed={getKind() === "branches"}
+                onClick={() => switchKind("branches")}
+              >
+                Branches
+              </button>
+              <button
+                type="button"
+                class="btn px-2 py-1 text-sm"
+                classList={{ primary: getKind() === "tags" }}
+                aria-pressed={getKind() === "tags"}
+                onClick={() => switchKind("tags")}
+              >
+                Tags
+              </button>
+            </div>
+            <input
+              class="input w-full"
+              type="search"
+              placeholder="filter refs…"
+              autocomplete="off"
+              aria-label="Filter branches and tags"
+              ref={(el) => el?.focus()}
+              onInput={(e) => { setQuery(e.currentTarget.value.trim()); search(); }}
+            />
+          </div>
+          <div class="ref-list scroll-slim max-h-72 space-y-0.5 overflow-y-auto" classList={{ "stream-error": stream.state() === "error" }}>
+            {/* Forgejo #482: pinned default row — first in .ref-list under a
+                one-line "default" group label, badged with the .pill chip
+                idiom, clicking through the same pick() tree path. Renders
+                from the summary head even when the 50-ref streamed page
+                cannot contain it; dedupeRefs drops the streamed duplicate. */}
+            <Show when={pinned()}>
+              {(p) => (
+                <>
+                  <div class="ref-default-label text-xs">default</div>
+                  <button
+                    type="button"
+                    class="ref-row ref-pinned flex w-full items-center justify-between rounded px-2 py-1 text-left text-sm hover:bg-zinc-100 dark:hover:bg-zinc-800"
+                    onClick={() => pick(p())}
+                  >
+                    <span class="ref-name font-mono">{shortRef(p().name)} <span class="pill ml-1">default</span></span>
+                    <span class="ref-sha muted font-mono text-xs">{String(p().sha ?? "").slice(0, 10)}</span>
+                  </button>
+                  <div class="ref-divider my-1 border-t border-zinc-200 dark:border-zinc-700" aria-hidden="true" />
+                </>
+              )}
+            </Show>
+            <For each={visibleRefs()}>
+              {(r) => (
+                <button
+                  type="button"
+                  class="ref-row flex w-full items-center justify-between rounded px-2 py-1 text-left text-sm hover:bg-zinc-100 dark:hover:bg-zinc-800"
+                  onClick={() => pick(r)}
+                >
+                  <span class="ref-name font-mono">{shortRef(r.name)}</span>
+                  <span class="ref-sha muted font-mono text-xs">{String(r.sha ?? "").slice(0, 10)}</span>
+                </button>
+              )}
+            </For>
+          </div>
+        </div>
+      </Show>
+    </div>
+  );
+}
+
+// --- star toggle (07 §8): optimistic flip, reconcile on error -------------
+
+function StarToggle(props) {
+  const navigate = useNavigate();
+  const location = useLocation();
+  // Shared identity cache keys (App.jsx seeds them — zero new requests):
+  // Forgejo #502 pre-flights the write for anonymous viewers.
+  const [getMe] = useData("me", () => repos.me().catch(() => null));
+  const [getDiscovery] = useData("discovery", () => repos.discovery().catch(() => null));
+  const gate = () => ({ me: getMe(), discovery: getDiscovery() });
+  const [getSocial, setSocial] = createSignal(null);
+  const load = async () => {
+    try {
+      const res = await props.repo.social.get();
+      setSocial(res);
+    } catch {
+      setSocial(null); // anonymous or unreadable: hide the toggle
+    }
+  };
+  load();
+  const flip = async () => {
+    const cur = getSocial();
+    if (!cur) return;
+    // Forgejo #522: starring is disabled and the viewer hasn't starred —
+    // the button renders disabled with a reason, but belt-and-braces the
+    // write never fires either (unstar always stays enabled so a
+    // retained star can still be removed while disabled).
+    if (isFeatureDisabled(props.summary?.(), "star") && !cur.viewer?.starred) return;
+    const here = location.pathname + location.search;
+    const gateHref = anonWriteTarget(gate(), here, "Star this repository");
+    if (gateHref) {
+      navigate(gateHref);
+      return;
+    }
+    const starred = !cur.viewer?.starred;
+    setSocial({ ...cur, stars: (cur.stars ?? 0) + (starred ? 1 : -1), viewer: { ...cur.viewer, starred } }); // optimistic
+    try {
+      const res = starred ? await props.repo.star.set({ noPopupAuth: true }) : await props.repo.star.remove({ noPopupAuth: true });
+      setSocial({ ...cur, stars: res.stars ?? cur.stars, viewer: { ...cur.viewer, starred } });
+    } catch (e) {
+      setSocial(cur); // reconcile on error
+      const target = write401Target(e, gate(), here, "Star this repository");
+      if (target) navigate(target);
+      else reportError(e, "star");
+    }
+  };
+  return (
+    <Show when={getSocial()}>
+      {(s) => {
+        // Forgejo #522: the star pill follows the #447 idiom (count left
+        // of label) with a disabled affordance — same metrics, muted,
+        // reason on hover/focus — while starring is off and the viewer
+        // hasn't starred. A retained star keeps the enabled Unstar button
+        // (unstar always works, counts stay).
+        const off = () => isFeatureDisabled(props.summary?.(), "star") && !s().viewer?.starred;
+        return (
+          <button
+            type="button"
+            class="btn px-2 py-1 text-sm"
+            classList={{ primary: s().viewer?.starred }}
+            onClick={flip}
+            disabled={off()}
+            title={off() ? "Starring is disabled for this repository" : s().viewer?.starred ? "Unstar this repo" : "Star this repo"}
+            aria-pressed={s().viewer?.starred}
+            aria-disabled={off() || undefined}
+            aria-label={off() ? "Starring is disabled for this repository" : s().viewer?.starred ? "Unstar this repo" : "Star this repo"}
+          >
+            <Icon name={s().viewer?.starred ? "star-on" : "star-off"} /> {s().stars ?? 0} Star
+          </button>
+        );
+      }}
+    </Show>
+  );
+}
+
+// --- tasks overlay -----------------------------------------------------------------
+
+function percentOf(task) {
+  const p = task.progress;
+  if (!p) return undefined;
+  if (typeof p.percent === "number") return p.percent;
+  if (p.total > 0) return (100 * (p.done ?? 0)) / p.total;
+  return undefined;
+}
+
+function TasksOverlay(props) {
+  const repo = props.repo;
+  const [getRunning, setRunning] = createSignal([]);
+  const [getDone, setDone] = createSignal([]);
+  const [getOpen, setOpen] = createSignal(false);
+  let alive = true;
+  let timer = 0;
+  let seenHost = "";
+  let seen = new Map();
+  let root;
+
+  const tick = async () => {
+    try {
+      const t = await repo.tasks();
+      if (!alive) return;
+      const now = new Map((t.running ?? []).map((r) => [r.id, r]));
+      const done = [];
+      for (const [id, prev] of seen) {
+        if (now.has(id)) continue;
+        const rec = (t.recent ?? []).find((r) => r.id === id);
+        if (rec) done.push(rec);
+        else if (t.hostname === seenHost) done.push({ ...prev, ok: prev.ok ?? true, finished: prev.finished ?? new Date().toISOString(), summary: prev.summary || "done" });
+        // a different instance answered: keep waiting for the owner instance
+      }
+      for (const rec of done) if (rec.ok === false) reportError(new Error(rec.summary ?? "task failed"), `${String(rec.kind).replaceAll(/[-_]/g, " ")} task`);
+      seenHost = t.hostname;
+      seen = now;
+      setRunning(t.running ?? []);
+      if (done.length) {
+        const ids = new Set(done.map((d) => d.id));
+        setDone((d) => [...d.filter((x) => !ids.has(x.id)), ...done].slice(-5));
+        setTimeout(() => alive && setDone((d) => d.filter((x) => !ids.has(x.id))), LINGER_MS);
+      }
+      timer = setTimeout(tick, (t.running ?? []).length ? BUSY_MS : IDLE_MS);
+    } catch (e) {
+      if (!alive) return;
+      if (e?.status !== 404) reportError(e, "tasks");
+      timer = setTimeout(tick, IDLE_MS);
+    }
+  };
+  void tick();
+  onCleanup(() => { alive = false; clearTimeout(timer); document.removeEventListener("click", onDoc); });
+
+  const onDoc = (e) => { if (root && !root.contains(e.target)) setOpen(false); };
+  document.addEventListener("click", onDoc);
+
+  const kind = (s) => String(s ?? "").replaceAll(/[-_]/g, " ");
+  // Forgejo #463: idle renders NOTHING — the <Show> sits ABOVE the wrapper
+  // div so the flex row holds only real pills and its gap-2 owns every gap
+  // (an unconditional wrapper would be an empty flex item doubling one gap
+  // to 2× gap-2). The relative wrapper exists only with the pill and still
+  // anchors the absolute tasks-drop popover when tasks run.
+  return (
+    <Show when={getRunning().length || getDone().length}>
+      {() => {
+        const head = getRunning().find((t) => t.progress) ?? getRunning()[0] ?? getDone()[getDone().length - 1];
+        const pct = percentOf(head);
+        const others = getRunning().length > 1 ? getRunning().length - 1 : 0;
+        const failed = getDone().some((t) => t.ok === false);
+        return (
+          <div class="tasks-indicator relative" ref={root}>
+            <button type="button" class="pill cursor-pointer" classList={{ "!border-amber-500": getRunning().length > 0, "!border-red-500": failed }} onClick={() => setOpen(!getOpen())}>
+              <Show when={getRunning().length > 0} fallback={<span class={`inline-block h-1.5 w-1.5 rounded-full ${failed ? "bg-red-500" : "bg-emerald-500"}`} aria-hidden="true" />}>
+                <span class="inline-block h-1.5 w-1.5 animate-pulse rounded-full bg-amber-500" aria-hidden="true" />
+              </Show>
+              <span>{kind(head.kind)}</span>
+              <Show when={others > 0}>
+                <span class="muted">+{others}</span>
+              </Show>
+              <Show when={pct !== undefined}>
+                <span class="muted tabular">{pct.toFixed(0)}%</span>
+              </Show>
+            </button>
+            <Show when={getOpen()}>
+              <div class="tasks-drop card absolute right-0 z-30 mt-2 w-96 space-y-1 p-3 text-sm">
+                <strong>{head.hostname ?? ""}</strong>
+                <For each={getRunning()}>
+                  {(t) => (
+                    <div class="task-row flex items-center gap-2">
+                      <code class="font-mono text-xs">{t.id?.slice(0, 8) ?? ""}</code>
+                      <span>{kind(t.kind)}</span>
+                      <Show when={percentOf(t) !== undefined}>
+                        <span class="muted tabular">{percentOf(t).toFixed(0)}%</span>
+                      </Show>
+                      <Show when={t.summary}>
+                        <span class="muted">{t.summary}</span>
+                      </Show>
+                    </div>
+                  )}
+                </For>
+                <For each={getDone()}>
+                  {(t) => (
+                    <div class="task-row flex items-center gap-2" classList={{ "text-red-600 dark:text-red-400": t.ok === false }}>
+                      <code class="font-mono text-xs">{t.id?.slice(0, 8) ?? ""}</code>
+                      <span>{kind(t.kind)}</span>
+                      <span class="muted"> — {t.summary ?? (t.ok === false ? "failed" : "done")}</span>
+                    </div>
+                  )}
+                </For>
+              </div>
+            </Show>
+          </div>
+        );
+      }}
+    </Show>
+  );
+}
+
+// --- shell ---------------------------------------------------------------------
+
+export default function Repo(props) {
+  const params = useParams();
+  const location = useLocation();
+  const full = () => `${params.owner}/${params.name}`;
+  const repoClient = repos.repo(full());
+  // A 404 summary is an expected state, not a failure (issue #200: the repo
+  // was deleted, or never existed) — it resolves to null so the header
+  // renders "not found" instead of "loading…" forever. Any other error keeps
+  // the data-layer contract (tray, value stays undefined → still loading).
+  // Issue #513: an explicit 401 is ALSO an expected steady state (gated
+  // repo + anonymous viewer — the server correctly refuses the summary),
+  // but fail-open would then pin the Checks tab visible forever since the
+  // summary never loads. The 401 resolves to undefined (still "loading",
+  // never "not found" — 401 is not deletion) while recording the denial
+  // in summaryDenied, which the Checks-tab gate reads to hide the tab;
+  // every other error still throws into the tray path unchanged. The flag
+  // resets at each fetch start so a repo switch (or a later sign-in)
+  // never inherits a stale denial.
+  const [summaryDenied, setSummaryDenied] = createSignal(false);
+  const [getSummary] = useData(() => `repo:${full()}`, () => {
+    setSummaryDenied(false);
+    return tolerateMissing(repoClient.get(), null).catch((err) => {
+      if (err?.unauthorized) {
+        setSummaryDenied(true);
+        return undefined;
+      }
+      throw err;
+    });
+  }, REPO_TTL);
+  // Forgejo #502: the Fork pill label routes anonymous viewers to the
+  // log-in interstitial (shared identity cache keys — zero new requests).
+  const [getMe] = useData("me", () => repos.me().catch(() => null));
+  const [getDiscovery] = useData("discovery", () => repos.discovery().catch(() => null));
+  const forkHref = () => {
+    const dest = `/${full()}/fork`;
+    return anonWriteTarget({ me: getMe(), discovery: getDiscovery() }, dest, "Fork this repository") ?? dest;
+  };
+  // Issue #252: the currently viewed ref ({name, sha} — full ref name, commit
+  // sha), published by ref-addressed tabs (Tree/Blob/Commits/Commit/
+  // CheckDetail) via createEffect + onCleanup (cleared on unmount so non-ref
+  // tabs fall back to the summary head). Null = no ref in view.
+  const [getViewed, setViewed] = createSignal(null);
+
+  // Issue #274: keep the active tab visible in the internally-scrolling
+  // strip below. Tracks location.pathname reactively (via activeTab);
+  // scrolls the [aria-current="page"] link to the strip center without
+  // moving the page vertically (block: "nearest"). Guarded for non-DOM
+  // (headless-test) environments where the ref is unset.
+  let tabsNav;
+  createEffect(() => {
+    const id = activeTab(location.pathname, getSummary());
+    const el = tabsNav?.querySelector?.('[aria-current="page"]');
+    if (id && el && typeof el.scrollIntoView === "function") {
+      el.scrollIntoView({ block: "nearest", inline: "center" });
+    }
+  });
+
+  // Issue #505: while the Checks tab is hidden (summary loaded, no
+  // checks yet), hold one "check"-frame subscription at the shell so the
+  // first external-CI report invalidates the shared summary entry
+  // (collabKeys maps check frames onto repo:{full}) and the tab
+  // reappears without a reload. Mounted only in the hidden state —
+  // check-ful repos, pre-#505 servers (no field → tab shown), and
+  // loading/deleted summaries hold no extra stream. The boolean memo
+  // keeps the stream effect from reconnecting on every summary refresh
+  // (object identity changes; the flag flips only on transitions).
+  const checksHidden = createMemo(() => !!getSummary() && !showChecksTab(getSummary()));
+  useCollabStream(() => (checksHidden() ? full() : null), repoClient, ["check"]);
+
+  const ctx = {
+    get owner() { return params.owner; },
+    get name() { return params.name; },
+    get full() { return full(); },
+    get rest() { return (params.rest ?? "").replace(/^\//, ""); },
+    get sha() { return params.sha ?? ""; },
+    repoClient,
+    params,
+    // The shared summary signal (issue #209): tab pages read the shell's
+    // entry through the context — no second subscription, no extra fetch.
+    // undefined = loading, null = missing/deleted (tolerateMissing, #200).
+    summary: getSummary,
+    viewed: getViewed,
+    setViewed,
+  };
+
+  return (
+    <RepoCtx.Provider value={ctx}>
+      <div class="repo-shell">
+        <div class="repo-header mb-3 flex flex-wrap items-center gap-3">
+          <Show when={getSummary() !== undefined} fallback={<span class="muted">loading…</span>}>
+            <Show when={getSummary()} fallback={<span class="muted">repository not found — it may have been deleted</span>}>
+            {(s) => (
+              <div class="repo-title">
+                <div class="flex flex-wrap items-baseline gap-x-3">
+                  <h1 class="text-xl font-semibold">
+                    {/* Forgejo #445: the owner segment links to the owner's
+                        repositories list (/:owner/repositories), not the
+                        profile — the OwnerTabs derivation lands the viewer
+                        on the Repositories tab with correct active state. */}
+                    <A class="hover:underline" href={`/${params.owner}/repositories`}>{params.owner}</A>
+                    {" / "}
+                    <A class="hover:underline" href={`/${full()}`}>{params.name}</A>
+                  </h1>
+                  {/* Issue #235: short description right of the title, muted;
+                      omitted entirely when unset. Text is escaped by Solid. */}
+                  <Show when={s().description}>
+                    <span class="repo-description muted text-sm">{s().description}</span>
+                  </Show>
+                  {/* Forgejo #345: public/private badge from the summary
+                      visibility (same payload, no extra fetch — the mirror
+                      badge pattern). Unknown renders nothing. */}
+                  <Show when={visibilityBadge(s()).show}>
+                    <span
+                      class="pill visibility-badge"
+                      title={visibilityBadge(s()).title}
+                    >
+                      {visibilityBadge(s()).label}
+                    </span>
+                  </Show>
+                  {/* Issue #424: forked-from indication — the parent pointer
+                      renders in the identity block, linking to the parent. */}
+                  <Show when={s().fork_parent}>
+                    <span class="muted text-sm">
+                      forked from <A class="hover:underline" href={`/${s().fork_parent}`}>{s().fork_parent}</A>
+                    </span>
+                  </Show>
+                  {/* Forgejo #240: pull-only mirror badge + next sync. The
+                      summary `mirror` view is the single source (same shape
+                      the settings Mirror tab polls); nothing here fetches. */}
+                  <Show when={s().mirror}>
+                    <span
+                      class="pill mirror-badge"
+                      title={`${s().mirror.upstream_url ?? ""} · ${formatNextSync(s().mirror)}`}
+                    >
+                      mirror · pull-only
+                    </span>
+                    <Show when={s().mirror.next_sync_at && !s().mirror.due}>
+                      <span class="muted text-xs">next sync {formatNextSync(s().mirror).replace(/^next sync /, "")}</span>
+                    </Show>
+                    <Show when={s().mirror.due}>
+                      <span class="muted text-xs">sync due</span>
+                    </Show>
+                  </Show>
+                  {/* Forgejo #623: push-mirror badge. The summary
+                      `push_mirror` view is the single source (same shape
+                      the settings Push mirror tab polls); nothing here
+                      fetches. Independent of the pull badge above. */}
+                  <Show when={s().push_mirror}>
+                    <span
+                      class="pill mirror-badge"
+                      title={`${s().push_mirror.upstream_url ?? ""} · ${formatPushNextSync(s().push_mirror)}`}
+                    >
+                      mirror · push
+                    </span>
+                    <Show when={s().push_mirror.next_sync_at && !s().push_mirror.due}>
+                      <span class="muted text-xs">next sync {formatPushNextSync(s().push_mirror).replace(/^next sync /, "")}</span>
+                    </Show>
+                  </Show>
+                </div>
+                <div class="repo-meta mt-1 flex items-center gap-2 text-xs">
+                  <Show when={s().head} fallback={<span class="pill">empty</span>}>
+                    <RefPicker full={full()} repo={repoClient} head={() => pillHead(getViewed(), s().head)} summaryHead={() => s().head} />
+                  </Show>
+                  <span class="muted">{s().branches ?? 0} branches · {s().tags ?? 0} tags</span>
+                  {/* Forgejo #464: the #424 fork-network rail lived here — it
+                      now lives on the header Fork pill count, so the metadata
+                      line keeps branches · tags only. */}
+                </div>
+              </div>
+            )}
+            </Show>
+          </Show>
+          <div class="ml-auto flex items-center gap-2">
+            {/* Forgejo #522: the toggles read the shared summary for the
+                star/watch flags (zero new requests) — the disabled
+                affordance gates on it, the write guards live server-side. */}
+            <StarToggle repo={repoClient} summary={getSummary} />
+            <WatchToggle repo={repoClient} summary={getSummary} />
+            <TasksOverlay repo={repoClient} />
+            <Show when={getSummary()}>
+              {(s) => (
+                <>
+                  {/* Forgejo #447: the header action strip speaks ONE idiom —
+                      the Star/Watch btn shape (btn px-2 py-1 text-sm) as
+                      canonical. Fork stays links (<A>, split count/label
+                      destinations since #464) and Clone's <summary>
+                      its popover trigger, both styled to the same metrics;
+                      every count sits LEFT of its label ({n} Star, {n} Watch,
+                      {n} Fork; Clone is label-only). The Fork count always
+                      renders — including 0, like Star/Watch show 0 — so the
+                      group reads consistently (the #446 hidden-at-zero badge
+                      direction is absorbed/superseded here, not adopted: a
+                      tab-badge circle would add a second count idiom where
+                      the header needs one). Counts ride data already in hand
+                      (toggles' social/watch payloads, summary.forks) — no new
+                      requests. Toggle behavior and the Clone
+                      popover are untouched; Fork navigation is split
+                      per #464 below.
+                      Forgejo #463 extends the idiom to SPACING: the row's
+                      gap-2 owns every gap — no child adds, removes, or doubles
+                      spacing. TasksOverlay renders nothing when idle (its
+                      relative wrapper exists only with the pill, still
+                      anchoring the tasks-drop popover when tasks run), so the
+                      row holds only real pills. Audited siblings: Star/Watch
+                      return their <button> straight out of <Show> (no
+                      wrapper), Fork is a single <span> pill shell (not a
+                      link itself), Clone's <details> IS the
+                      pill — no other empty flex items in this row. Clone
+                      details-metrics unchanged.
+                      Forgejo #464 splits the Fork pill navigation WITHOUT
+                      splitting its look: the pill shell keeps the canonical
+                      btn px-2 py-1 text-sm metrics (ONE pill visually —
+                      single container, count left of label, one
+                      whitespace-nowrap row), while the count links to the
+                      fork-network page (/{full}/forks, the #424 route) and
+                      the "Fork" label keeps the create navigation
+                      (/{full()}/fork). Sibling links, not a nested anchor
+                      (anchors cannot nest). The count still always renders —
+                      including 0, like Star/Watch — so at zero forks the
+                      count still lands on the (empty) network page. Counts
+                      still ride summary.forks — no new requests. */}
+                  <span class="btn px-2 py-1 text-sm whitespace-nowrap" title={`Fork ${full()}`}>
+                    <Icon name="fork" />
+                    <A class="hover:underline" href={`/${full()}/forks`} title={`View forks of ${full()}`}>
+                      {s().forks ?? 0}
+                    </A>
+                    {" "}
+                    {/* Forgejo #522: the Fork CTA is hidden-or-disabled —
+                        the count link (network page) stays — with the
+                        reason on hover/focus. POST …/forks refuses
+                        server-side; the pill is the affordance. */}
+                    <Show when={!isFeatureDisabled(s(), "forks")} fallback={
+                      <span class="muted" title="Forking is disabled for this repository" aria-disabled="true">Fork</span>
+                    }>
+                      <A class="hover:underline" href={forkHref()} title="Fork this repository">
+                        Fork
+                      </A>
+                    </Show>
+                  </span>
+                  <CloneMenu full={full()} summary={s()} />
+                </>
+              )}
+            </Show>
+          </div>
+        </div>
+
+        {/* Narrow widths (issue #274): the tab row never grows past the
+            viewport. The nav scrolls internally (overflow-x-auto,
+            whitespace-nowrap — the same treatment as the #273 site-nav
+            strip) instead of pushing the page sideways; tab links never
+            shrink to unreadability (.repo-tabs a in ui.css). The strip is
+            a labelled landmark and follows keyboard focus natively; the
+            createEffect above keeps the active tab scrolled into view on
+            navigation. The truncated peek of the next tab is the scroll
+            affordance on touch layouts. */}
+        <nav ref={tabsNav} class="repo-tabs mb-4 flex max-w-full gap-1 overflow-x-auto whitespace-nowrap border-b border-zinc-200 dark:border-zinc-800" aria-label="repository sections">
+          <For each={TABS}>
+            {(t) => {
+              // Open-count badges (issue #319): the shared summary carries
+              // the numerators, so the tab bar needs no new requests. The
+              // badge renders only when the count is > 0 (tabBadge maps
+              // everything else — other tabs, loading, pre-#319 servers —
+              // to 0).
+              // Issue #505: the Checks tab hides on check-less repos
+              // (has_checks from the same shared summary — still zero new
+              // requests). Issue #513: it also hides while the summary is
+              // explicitly auth-denied (gated repo + anonymous viewer —
+              // the summary never loads, so fail-open would pin it
+              // forever); plain loading still fails open (no flicker).
+              // The <Show> gates the tab only: the route keeps
+              // rendering its empty state, so deep links never 404.
+              // Forgejo #522: Issues/Pulls/Releases hide the same way when
+              // their feature flag is explicitly off (fail-open on unknown
+              // — loading and pre-#522 servers keep every tab).
+              const n = () => tabBadge(getSummary(), t.id);
+              return (
+                <Show when={(t.id !== "checks" || showChecksTab(getSummary(), { denied: summaryDenied() })) && showFeatureTab(getSummary(), t.id)}>
+                <A
+                  href={t.href(full())}
+                  end={t.id === "code"}
+                  class="rounded-t px-3 py-1.5 text-sm text-zinc-500 hover:bg-zinc-100 hover:text-zinc-900 dark:text-zinc-400 dark:hover:bg-zinc-900 dark:hover:text-zinc-100"
+                  classList={{ "!border-b-2 !border-emerald-500 !font-medium !text-zinc-900 dark:!text-zinc-100": activeTab(location.pathname, getSummary()) === t.id }}
+                  aria-current={activeTab(location.pathname, getSummary()) === t.id ? "page" : undefined}
+                >
+                  {t.label}
+                  <Show when={n() > 0}>
+                    <span class="tab-badge" aria-label={`${n()} open`}>{n()}</span>
+                  </Show>
+                </A>
+                </Show>
+              );
+            }}
+          </For>
+        </nav>
+
+        {/* Degraded banner (issue #209): amber, never a toast, never blocks
+            navigation. Pushes of new refs still work; reads of missing
+            objects 404 inline on their pages. */}
+        <Show when={isDegradedSummary(getSummary())}>
+          <div
+            class="degraded-banner mb-4 rounded border border-amber-500 bg-amber-100 p-3 text-sm text-amber-800 dark:bg-amber-900/60 dark:text-amber-300"
+            role="status"
+          >
+            Some objects are missing (fsck: {getSummary()?.missing_total ?? "?"} missing). Reads may fail;
+            pushes of new refs still work. Details in{" "}
+            <A class="hover:underline" href={`/${full()}/settings#wal`}>
+              Settings → WAL
+            </A>
+            .
+          </div>
+        </Show>
+
+        <div class="repo-content">{props.children}</div>
+      </div>
+    </RepoCtx.Provider>
+  );
+}

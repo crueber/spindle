@@ -1,0 +1,738 @@
+# 02 — Issues: threads, comments, labels, milestones, assignees, close/reopen
+
+> Depends on: [`01_identity_permissions.md`](01_identity_permissions.md) (roles, access.json). Consumes primitives P1–P9 from
+> [`README.md`](README.md); wire conventions from `docs/go/07_api.md`; lock/race rules from `docs/go/13_concurrency.md` (CAS loops
+> are the primary tool — no cross-feature locks); seams from `docs/go/14_extensibility.md`; UI patterns from `docs/go/12_web_ui.md`.
+> Package: `internal/issues` (one route provider + one task kind). A reader must implement issues end to end from this file alone.
+
+## 1. Object family
+
+Bucket keys (all under the repo prefix; lowercase, `/`-delimited per P1):
+
+| Key | Kind of object | Write mode |
+|---|---|---|
+| `repos/<o>/<r>/meta/next_num` | shared counter `{"next": N}` (P2) | CAS'd (`Update(version)`) |
+| `repos/<o>/<r>/issues/<num:06x>/thread.json` | thread header (P3) | CAS'd |
+| `repos/<o>/<r>/issues/<num:06x>/events/<seq:012x>.json` | immutable event (P3) | `Create` only |
+| `repos/<o>/<r>/issues/index.json` | list index (P4) | CAS'd; **in the frozen overwritable list** (D-EXT-2) |
+| `repos/<o>/<r>/meta/labels.json` | repo label set | CAS'd |
+| `repos/<o>/<r>/meta/milestones/<id:06x>.json` | milestone | `Create` + CAS'd update |
+| `repos/<o>/<r>/meta/milestones/index.json` | milestone id allocator `{"next": N}` | CAS'd |
+
+`<num:06x>`/`<id:06x>` are lowercase hex, zero-padded to 6 digits, so LIST scans return numeric order (same idiom as P3's 12-hex
+seqs). Threads for **both** kinds (`"issue"`/`"pr"`) live in this one family (P2 shared numbering); PR state lives in 03's
+`pulls/<num>/pr.json` sidecar — no PR fields leak into `thread.json`. This doc's schemas cover the `kind: "issue"` variant and
+the events a PR thread also uses (comments, references, reactions).
+
+### 1.1 thread.json (issue variant — CAS'd header, P3)
+
+```json
+{
+  "num": 7,
+  "kind": "issue",
+  "title": "Publish fails on empty tree",
+  "state": "open",
+  "state_reason": null,
+  "author": "jane",
+  "created_at": "2026-09-01T10:00:00Z",
+  "updated_at": "2026-09-01T12:30:00Z",
+  "labels": ["bug", "storage"],
+  "assignees": ["alice"],
+  "milestone": "000003",
+  "participants": ["jane", "alice", "bob"],
+  "next_event_seq": 14,
+  "comment_count": 9,
+  "reaction_summary": {"000003": {"+1": 3, "heart": 1}},
+  "version": 11
+}
+```
+
+| Field | Type | Notes |
+|---|---|---|
+| `num` | int | allocated from P2; equals the `<num:06x>` key value |
+| `kind` | `"issue"` | `"pr"` threads share this schema; 03 owns the PR sidecar |
+| `title` | string | 1–256 chars after trimming; never empty |
+| `state` | `"open" \| "closed"` | |
+| `state_reason` | `"completed" \| "not_planned" \| null` | `null` while open; cleared on reopen |
+| `labels` | `[]string` | sorted, unique; names must exist in `meta/labels.json` at write time |
+| `assignees` | `[]string` | sorted, unique, ≤ 10; each must resolve ≥ triage per P6 |
+| `milestone` | string \| null | milestone id (`<id:06x>`) or `null` |
+| `participants` | `[]string` | denormalized: author + every commenter + every assignee (06 fans out from this — do not scan events) |
+| `next_event_seq` | int | the reservation counter of the P3 two-step |
+| `comment_count` | int | denormalized counter of `commented` events |
+| `reaction_summary` | map | key = target event seq, value = emoji name → count (see §8) |
+| `version` | int | opaque CAS version; server-managed, echo never required |
+
+Immutability (P3): `num`, `author`, `created_at` never change after `Create`; everything else is CAS-mutable through the two-step.
+
+### 1.2 Event objects (immutable, `PutMode::Create`, P3)
+
+Common envelope on every event object; `seq` matches the key digits:
+
+```json
+{"seq": 14, "type": "commented", "actor": "bob", "at": "2026-09-01T12:30:00Z"}
+```
+
+Exact payload per type (extra fields only; unknown fields on read are ignored, on write rejected 400 —
+fail closed, same rule as policy effects):
+
+| `type` | Payload fields | Semantics |
+|---|---|---|
+| `opened` | `body: string` (≤ 64 KiB) | first event of every thread; never after the fact |
+| `commented` | `body: string` (≤ 64 KiB) | linear discussion; no replies/edits — corrections are new comments |
+| `title_changed` | `from, to: string` | |
+| `labels_changed` | `added: []string, removed: []string` | delta; `thread.labels` is authoritative |
+| `assignees_changed` | `added: []string, removed: []string` | delta |
+| `state_changed` | `from, to: "open"\|"closed"`, `reason: "completed"\|"not_planned"\|null` | close/reopen; `to:"closed"` with reason `not_planned` is the "won't fix" path |
+| `milestone_changed` | `from, to: string\|null` | milestone ids |
+| `referenced` | `source: {kind, …}` | same-repo reference INTO this thread (§6) |
+| `cross_referenced` | `source: {repo, kind, num}` | reference from a DIFFERENT repo (§6) |
+| `reaction_changed` | `target_event_seq: int`, `content: string`, `op: "add"\|"remove"` | reactions (§8) |
+| `closed_by_pr` | `pr_num: int`, `keyword: string` | written by the merge task via `ApplyClosingReferences` (§5) |
+
+`source.kind` ∈ `"commit"` (`sha`), `"comment"` (`event_seq`), `"thread"` (`num`). Every payload carries `actor` in the envelope;
+`at` is RFC 3339 UTC; bodies are raw text — markdown-lite rendering + sanitization are client concerns per `12_web_ui.md`.
+
+### Concurrency
+
+The P3 two-step is THE write discipline: CAS the header (`Update(version)` reserves `next_event_seq`), then `Create` the event.
+A `412` on the Create is a bug signal — retry the loop, never leak a reserved seq; seq gaps from a crash between the two steps
+are allowed and harmless. CAS loops are the only coordination tool (`13_concurrency.md` §3/§5) — **no cross-feature or
+cross-thread locks exist**. A reference write into ANOTHER thread's log (§6) runs the same two-step on that thread; no ordering
+between two threads' CAS targets is promised anywhere.
+
+## 2. The index (P4)
+
+`repos/<o>/<r>/issues/index.json` — CAS'd, in the frozen overwritable list (D-EXT-2):
+
+```json
+{
+  "version": 42,
+  "compacted_through": "00003a",
+  "open": [ {card} ],
+  "closed_recent": [ {card} ]
+}
+```
+
+```json
+{"num": 7, "kind": "issue", "title": "Publish fails on empty tree", "state": "open",
+ "state_reason": null, "labels": ["bug"], "assignees": ["alice"], "milestone": null,
+ "author": "jane", "created_at": "…", "updated_at": "2026-09-01T12:30:00Z",
+ "comment_count": 9}
+```
+
+- Cards are the P3 header minus `version`/`next_event_seq`/`reaction_summary` — a projection, never an authority; the header wins.
+- `open` = every `kind: "issue"` thread with `state: "open"`, newest-activity-first; `closed_recent` = closed threads newer than
+  `compacted_through`. **Compaction rule:** when the object exceeds ~256 KiB, the `issue-index-compact` task (§9) evicts the oldest
+  `closed_recent` entries and advances `compacted_through` in the same CAS; compacted threads are served by paginated LIST over
+  `…/<num>/thread.json` (acceptable per P5).
+- The `after=` cursor is `<num:06x>` byte-order over the index page; exhausted cursors fall through to the LIST scan (`n` default 50, max 200).
+- The index is updated in the same handler after the header CAS commits, by its own CAS loop (P4). A lost update is repaired by
+  the next thread mutation (handlers re-read, diff, repair) and by compaction — LIST fallback makes staleness a performance gap, never a correctness gap.
+
+### Concurrency
+
+Hazard: two handlers CAS the index concurrently → one bounded CAS-retry loop (10 attempts, then proceed without index update —
+the repair path covers it). No lock spans the header CAS and the index CAS; they are separate objects, ordered header-then-index,
+and a failure between them is tolerated by repair. The index is performance scaffolding, never authoritative.
+
+## 3. Labels and milestones
+
+### 3.1 Labels — `repos/<o>/<r>/meta/labels.json` (CAS'd)
+
+```json
+{"version": 3, "labels": [
+  {"name": "bug", "color": "d73a4a", "description": "Something isn't working"}
+]}
+```
+
+- `name` 1–64 chars, unique case-insensitively; `color` = 6-hex RGB without `#`; `description` ≤ 200 chars; validation rejects
+  duplicates and unknown colors (400). All edits CAS the whole object.
+- **Label names are immutable identities — no rename endpoint.** Rename = delete + create: headers keep the old name string, a
+  compensating `labels_changed` event is emitted per affected open thread in the index hot window (older threads self-heal when
+  next touched — a nonexistent label renders as the bare string). Deleting a referenced label is allowed; the response reports
+  `{"threads_affected": N}` (index count, best-effort).
+
+### 3.2 Milestones — `repos/<o>/<r>/meta/milestones/<id:06x>.json` (Create + CAS'd)
+
+```json
+{"id": "000001", "title": "v1.1", "description": "", "due_on": "2026-10-01T00:00:00Z",
+ "state": "open", "open_issues": 4, "closed_issues": 11,
+ "created_by": "jane", "created_at": "…", "updated_at": "…"}
+```
+
+- `id` allocated from `meta/milestones/index.json` `{"next": N}` (the P2 CAS-counter pattern).
+- `due_on` RFC 3339 or `null`. `open_issues`/`closed_issues` are **denormalized counters** updated by the issue-mutation
+  handlers that add/remove/close/reopen an issue on the milestone; progress (percent complete) is DERIVED on read, never stored.
+  Closing a milestone is metadata-only; issues keep their own state.
+- DELETE requires `open_issues = 0` (else 409) and clears `milestone` from affected open threads via compensating `milestone_changed` events.
+
+### Concurrency
+
+Both families are plain CAS loops (P2 reasoning applies: human-rate mutations). Milestone counters add
+one CAS per affected milestone inside the issue mutation — a lost counter update is repaired by the
+next issue event touching that milestone; the counter is display state, thread headers are the truth.
+
+## 4. Assignees
+
+- An assignee MUST resolve to role ≥ **triage** on the repo per the P6 order (access.json → org ownership → principal flags);
+  unresolvable/below-triage names are rejected 400 (the plain-text error names the offending principal). The ACTOR changing
+  assignees also needs ≥ triage (self-assignment included). Stored as sorted principal names, ≤ 10; adding emits
+  `assignees_changed` + an `assigned` notification (§10).
+
+## 5. State: close/reopen and closing keywords
+
+- `PATCH {state: "closed", state_reason: "completed"|"not_planned"}` → `state_changed` event; reopen clears `state_reason` to
+  `null`. Author may close/reopen own thread; others' need triage (P6).
+- **Comment lock (Forgejo #594):** a closed issue is read-only for conversation writes — `AddComment` and `AddReaction`
+  refuse `409` (`ErrLocked`, human-readable toast text) while `state != open`. The lock keys on CURRENT state, never a
+  one-way latch: reopening restores commenting. Reaction REMOVAL stays available on locked threads (personal undo, not
+  conversation activity). No maintainer/admin override in v1 (named decision, Decisions).
+- **Closing keywords (`fixes #N`) — decided: parsed at PR MERGE time, never at push.** The receive-pack path is git-only (README
+  law; a push may contain commits that never merge), the merge task is the single place where "landed on the default branch" is a
+  fact, and P8 wants exactly one mutating handler per mutation. The push path stays untouched.
+- Keyword grammar (owned HERE, triggered by 03's merge task): case-insensitive
+  `(close|closes|closed|fix|fixes|fixed|resolve|resolves|resolved)\s+#(\d+)`, matched against the PR body and every merged commit
+  message, outside code spans/fences (same skipper as §6); one issue matches at most once per merge.
+- The merge task calls the 02-provided seam `ApplyClosingReferences(repo, pr_num, merged_sha, texts…)`: 02 parses `texts` (PR body
+  + commit messages), and per matched num writes a `referenced` event (`source: {kind: "thread", num: pr_num}`) and a
+  `state_changed` close (reason `completed`) through the normal P3 two-step. Already-closed issues are skipped.
+
+## 6. Cross-references (`#N` mentions) and the ReferenceEvent
+
+**Decided: `#N` mentions are parsed at WRITE TIME in the commenting handler** (`opened`/`commented` bodies) — not at render time,
+not by background scan: the event log is the backfill source of truth (P8), so references must be durable events. Parser (raw
+body, pre-markdown):
+
+1. Skip fenced code blocks (``` / ~~~) and inline code spans — same tokenizer stance as `12_web_ui.md` markdown-lite.
+2. Match `#(\d{1,7})` at word boundaries; self-references ARE recorded; cap 100 refs per body, over-cap stops parsing silently.
+3. Dedup per (source event seq, target num); each surviving ref produces one event on the TARGET thread: `referenced` (same repo)
+   or `cross_referenced` (different repo), `source: {kind: "comment"|"thread", event_seq?/num, repo: "<o>/<r>"}`.
+4. The reference write is a P3 two-step on the TARGET thread inside the commenting request (P8: one handler). The commenting actor
+   needs **read** on the target repo (mentioning is not moderating); `actor` is the commenting principal. A missing target
+   (unknown num / 404 repo) is silently skipped — mentions are best-effort, never a 4xx for the commenter.
+5. References do NOT subscribe the source author (subscription is 06's; only `@mention` does, §10).
+
+### Concurrency
+
+Hazard: one comment fans out to K target threads — K independent CAS two-steps in one request. Avoidance: each is the standard P3
+two-step against its own header; partial failure loses some references, which is acceptable (the comment body is the durable
+record). No ordering between targets is promised; a request retry may duplicate a reference — dedup at read is (source event seq,
+target num), making replays idempotent. Cross-repo targets MUST be bounded by `context.WithTimeout` (10 s).
+
+## 7. API endpoints
+
+Registered by `internal/issues` as an `api.RouteProvider` (Seam 1) via `api.Lanes` — every route exists on BOTH `/{o}/{r}/api/…`
+and `/{o}/{r}/api-browser/…`. Wire conventions per `07_api.md`: JSON success, **plain-text errors**, arrays `[]` never `null`,
+RFC 3339, cache class per route. `num` matches `[1-9][0-9]{0,8}` (decimal on the wire; 06x is storage-only).
+
+| METHOD + path | Auth (P6) | Request → Response |
+|---|---|---|
+| `GET …/api/issues?state=&labels=&assignee=&milestone=&since=&after=&n=` | read | → `{issues:[card], more:bool}`; index-first, LIST fallback; `labels` comma-list AND, `assignee` login or `*none`, `milestone` id or `none`, `since` RFC3339 on `updated_at`, `after` num cursor, `n` ≤ 100 default 50. no-store |
+| `POST …/api/issues` | read (authenticated) | `{title, body?}` → `201 {thread, events:[opened]}`; allocates num via P2 |
+| `GET …/api/issues/{num}` | read | → `{thread, events:[last 50], events_more:bool}`; `?after_seq=&n=` windows the log; `Cache-Control: private, no-cache` (revalidate every read — never a stale window, issue #259), `ETag: "v<version>"`, 304 on If-None-Match |
+| `GET …/api/issues/{num}/events?after_seq=&n=` | read | → `{events:[], more:bool}`; seq-window pagination, newest-last |
+| `PATCH …/api/issues/{num}` | title/state: author or triage; labels/assignees/milestone keys: triage | `{title?, state?, state_reason?, labels?, assignees?, milestone?}` → `{thread}`; unknown keys 400; no-op fields omitted; `milestone: null` clears (absent key = no change) |
+| `POST …/api/issues/{num}/comments` | read (authenticated) | `{body}` → `201 {event}` |
+| `POST …/api/issues/{num}/reactions` | read (authenticated) | `{target_event_seq, content}` → `{event}` |
+| `DELETE …/api/issues/{num}/reactions/{target_event_seq}/{content}` | own reaction only | → `204` |
+| `GET …/api/labels` | read | → `{labels:[]}` |
+| `POST …/api/labels` | triage | `{name, color, description?}` → `201 {label}` |
+| `PATCH …/api/labels/{name}` | triage | `{color?, description?}` → `{label}` |
+| `DELETE …/api/labels/{name}` | triage | → `204`; see §3.1 rename/delete semantics |
+| `GET …/api/milestones?state=` | read | → `{milestones:[]}` with derived progress |
+| `POST …/api/milestones` | triage | `{title, description?, due_on?}` → `201 {milestone}` |
+| `GET …/api/milestones/{id}` | read | → `{milestone}` |
+| `PATCH …/api/milestones/{id}` | triage | `{title?, description?, due_on?, state?}` → `{milestone}` |
+| `DELETE …/api/milestones/{id}` | triage | → `204`; 409 while issues reference it |
+
+Attachments (§12) ride the same lanes with two extra rows:
+
+| METHOD + path | Auth (P6) | Request → Response |
+|---|---|---|
+| `POST …/api/attachments?name=` | read (authenticated) | raw image bytes + optional `X-Walgit-Attachment-Sha256` → `201 {name, size, sha256, content_type, url}`; over `attachments.max_image_bytes` → `413`; non-image/SVG magic → `415`; no-store |
+| `GET\|HEAD /{o}/{r}/attachments/{sha}/{name}` | read | raw bytes under the in-package static contract: `ETag`/`If-None-Match` → `304`, `Range`/`If-Range` → `206`/`416`, sniffed `Content-Type`, `Cache-Control: private, max-age=31536000, immutable`, `nosniff` |
+
+Auth per P6: `read` = role ≥ read (or `anonymous_read`); `authenticated` = any principal; `triage` = role ≥ triage. Errors are
+plain text (`404` "unknown issue", `409` "milestone has open issues"); every LIST-backed route states its page size (P5).
+
+### Concurrency
+
+One header read + one header CAS + one event Create inline — sub-second bucket ops, the Seam 1 rule; nothing here is task-worthy
+except compaction (§9). GET-by-num revalidates on every read (`private, no-cache` keyed on the header version — issue #259
+retired the 60 s `stale-while-revalidate` window, which served pre-mutation threads across refreshes while the no-store
+events tail already showed the mutation); list endpoints are no-store. Neither class serves stale, so the thread summary
+and the events tail cannot disagree.
+
+## 8. Reactions
+
+**Decided: reactions are EVENTS with `target_event_seq`** — `reaction_changed {target_event_seq, content, op}` appended to the
+thread log — **plus a denormalized `reaction_summary` in the CAS'd header** (P3's denormalized view counters): the event log stays
+the backfill truth (a buggy header can be recomputed from events); the summary gives O(1) counts without scanning the log.
+
+- `content` ∈ GitHub emoji names (`+1`, `-1`, `laugh`, `hooray`, `confused`, `heart`, `rocket`, `eyes`); unknown → 400. One
+  reaction (principal, target_event_seq, content) is UNIQUE — a duplicate add is a no-op returning the summary, not an event.
+- Targets: `commented` and `opened` events only (400 otherwise); DELETE removes only the actor's own reaction (§7).
+- Summary maintenance: the handler adjusts `reaction_summary` ± 1 in the SAME header CAS that reserves the event seq (one CAS, no
+  extra round trip); a lost CAS retries from the fresh header.
+
+### Concurrency
+
+Hazard: a hot thread takes many concurrent reactions — every one CASes the same header. Accepted per the P2 reasoning
+(human-rate); losers retry via the standard CAS loop, and the append is idempotent per (actor, target, content).
+
+## 9. Tasks
+
+| Kind | Trigger | Work |
+|---|---|---|
+| `issue-index-compact` | `issues/index.json` > ~256 KiB, checked opportunistically by handlers (1-in-N sampling) and by the maintainer pass | CAS-compaction per §2; `(repo, kind)` single-flight per 13_concurrency §3; SSE-attachable. No other task kinds: issue mutations are synchronous (P8) |
+
+## 10. Notifications (contract with 06)
+
+Per P8, emitted **synchronously in the mutating handler after the CAS commits** (a crash after CAS
+loses one notification, never data). 06 owns the subscription model; 02 emits:
+
+| Trigger (event) | Notification class | Recipients resolved from |
+|---|---|---|
+| `assignees_changed` (added) | `assigned` | the added principal |
+| `@name` mention parsed in `opened`/`commented` bodies (same parser rules as §6, `@`-form) | `mentioned` | the named principal if resolvable |
+| `opened` / `commented` / state or label changes by a non-participant | `subscribed` (participation) | new `participants[]` members (thread.json, §1.1 — maintained by the header CAS) |
+
+Fan-out resolves targets from `participants[]` + parsed mentions — 06 MUST NOT scan the event log; `referenced` events do not
+subscribe the source author.
+
+## 11. UI and SDK
+
+Pages (SolidJS SPA per `12_web_ui.md`, D-WEB-6; `.jsx` route components, `useData`):
+
+| Route | Page | Live behavior |
+|---|---|---|
+| `/:o/:r/issues` | list: filter bar (state/assignee/labels/milestone/since, #415), paged cards from the index | SSE `issue` upserts/patches cards in place |
+| `/:o/:r/issues/new` | create form (title, markdown-lite body, preview toggle) | — |
+| `/:o/:r/issues/:num` | thread: header (`#N` state badge — the single source of state), timeline (seq-window, older on demand; renders oldest → newest, #225), comment composer, one sidebar metadata card (labels + `+` dropdown / assignees / milestone with a linked title to the filtered issue list; triage sees the `+` dropdown when unset and a direct `−` clear button when set — issue #148) | `issue_event` appends timeline frames; `issue` updates the header |
+| | Forgejo #594: the composer keys `disabled` off the live thread (`issueCommentLock` in `lib/issue-events.js`) — a closed thread renders disabled-with-reason ("This conversation is closed") while the Reopen control stays live, so a reopen unlocks with no reload. The add-reaction `+` menu disables the same way; summary chips stay live (removal-only on locked threads). A raced 409 toasts verbatim through the tray path (no raw TypeError). | |
+| `/:o/:r/labels` | label CRUD (triage-gated UI) | on save, refetch |
+| `/:o/:r/milestones` | milestone CRUD + progress bars + per-milestone linked issues (each milestone lists/links its issues via the server-side `milestone=` list filter; the title links to the filtered issue list) | on save, refetch |
+
+SDK additions (`web/sdk/src/issues.js`, esbuild-bundled into `repos.js` per D-WEB-2; full shapes in 08):
+`repo.issues.{list,get,create,patch,comment,events,reactions.add,reactions.remove}`, `repo.labels.{list,create,update,delete}`,
+`repo.milestones.{list,get,create,update,delete}` — thin fetch wrappers over §7 with the SDK's lane/401 rules; thread pages use
+`mountStream` (`12_web_ui.md` §2.5) to follow `issue`/`issue_event` on the repo's existing SSE stream.
+`repo.attachments.upload(file|Blob|Uint8Array, {name?, sha256?, contentType?})` (§12) posts raw bytes with an optional
+`X-Walgit-Attachment-Sha256` (computed via `crypto.subtle.digest` when available, omitted on non-secure origins where
+`crypto.subtle` is undefined — the server verifies the header only when present) and resolves the 201 record.
+
+## 12. Attachments (paste/drop images, issue #120)
+
+Bodies stay raw text ≤ 64 KiB (§1.2) — images are stored objects referenced by `![name](url)` markdown links, never inline
+`data:` URIs (the sanitizer drops `data:` URLs, so inline paste could never render).
+
+New bucket family (content-addressed, `Create`-only immutable — no frozen-overwritable-list entry, which covers overwritable
+keys only):
+
+| Key | Kind of object | Write mode |
+|---|---|---|
+| `repos/<o>/<r>/attachments/<sha256hex>/<name>` | raw image bytes | `Create` only |
+
+`<name>` is the sanitized original filename (single segment, 1–200 bytes, no `/`, no leading `.`) for readable alt text;
+the sha segment makes collisions harmless. Upload and comment-submit are decoupled (the upload references no issue number,
+so the new-issue form and thread comments share the path).
+
+Upload flow (single-step — images are ≤ 8 MiB, bounded, human-rate; not the release two-step):
+`io.LimitReader(max+1)` bound → `413` over `attachments.max_image_bytes` (default 8 MiB; no `Content-Length` requirement, so
+chunked clients work) → spool to `<cache.dir>/attachments-spool` hashing sha256 in the copy loop (never buffered) → the
+optional client sha is verified only when sent → magic-byte sniff (PNG/JPEG/GIF/WebP allowlist; **SVG → 415 rejected**, never
+sanitized — same-origin SVG is script execution and the dependency budget forbids an XML sanitizer; extension and client
+`Content-Type` are ignored for the verdict) → `Create` with the sniffed type (a 412 under the same key is same-bytes by
+construction → idempotent `201`, no re-read) → `201 {name, size, sha256, content_type, url}` (`no-store`; plain-text errors).
+
+Byte reads gate at read level (private-repo screenshots must not leak via URL guessing) and otherwise follow the static
+contract reimplemented in-package (`internal/issues` cannot import `server` — upward import, law 8): strong `ETag` from the
+store version, `304`/`206`/`416`/`HEAD`, `Accept-Ranges`, sniffed `Content-Type` re-sniffed from the stored prefix (the store
+contract exposes no content type on read; the bytes are immutable so the sniff is deterministic), `nosniff`, with one
+deliberate token deviation from 06 §5: `Cache-Control: private, max-age=31536000, immutable` (authenticated reads must not
+sit in shared caches). Warm GET/HEAD costs 1 store Get; a satisfiable byte range costs one follow-up ranged Get.
+
+Frontend: `web/sdk/src/attachments.js` (`uploadAttachment` precedent shape) + shared `web/src/lib/attachUpload.js` (alt
+escaping per S1, cursor splice, placeholder → `![name](url)` replace, 64 KiB pre-check before each upload so an over-cap
+body fails client-side instead of orphaning bytes; headless-tested via `node --test`) + thin `onPaste`/`onDrop` glue in
+`IssueNew.jsx` and the thread comment composer (`CommentComposer` gains an optional `uploader` prop, wired by `Issue.jsx`
+only). Sequential uploads, one request each; failures swap a failure line and `reportError` verbatim. `.markdown-body img`
+is `max-w-full h-auto`. PR-body adoption is out of scope and NOT free: it additionally requires switching `Pull.jsx`
+rendering to `renderMarkdown`+`sanitize` (it renders plain text today).
+
+### Concurrency
+
+Hazard: concurrent identical uploads racing on one content-addressed key. Avoidance: the store's create-if-absent
+arbitrates; losers take the 412 as idempotent 201 (same key ⇒ same bytes). No locks, no single-flight, no task kinds; the
+handler holds no repo locks across store calls (13 §2 rule 4).
+
+## Decisions
+
+- **Attachments for pasted/dropped issue images (issue #120, 2026-09-05).** New `repos/<o>/<r>/attachments/<sha>/<name>`
+  family (§12), `POST …/api/attachments` (authenticated + read, 8 MiB cap → 413, magic allowlist PNG/JPEG/GIF/WebP,
+  SVG → 415, client sha optional-when-present) + `GET|HEAD /{o}/{r}/attachments/<sha>/<name>` (read-gated, in-package
+  static contract with `private, immutable`). Package home is `internal/issues` (auth-gate affinity, one coverage gate).
+  Config `[attachments] max_image_bytes` (default `8MiB`) is struct + default + validation + docs in this change and is
+  recorded as setup-schema-pending (no `internal/setup` in code yet). Repo-scoped ExtraRoutes features are EXEMPT from
+  the 14 §14.12 discovery sentence (existing issue routes are already absent from `endpoints[]`; the SDK builds
+  repo-scoped paths statically) — no discovery-seam amendment. The byte route rides `ChainRepo`/`HandleRepo`
+  (`internal/server/repo_extra.go`, same as release asset bytes), NOT the `Handle` ExtraRoutes chain: the core router
+  only sends lane paths to the api seam, so a non-lane `Handle` branch would be dead code (verified against the live
+  server during implementation). Orphans are kept in v1 (Upload and comment-submit are
+  decoupled); ceiling: even 100 abandoned uploads/day ≤ 800 MiB/day worst case, human-rate reality orders of magnitude
+  less — a future `attachment-sweep` maintainer kind may reconcile bodies against attachments when the family grows.
+  Dedup oracle accepted: keys are repo-scoped, so probing reveals existence-only to already-authorized readers. An
+  EVIDENCE entry is not needed (collaboration surface, human-rate, sim budgets untouched).
+
+- **Frontend idiom is the SolidJS SPA (D-WEB-6; docs fix for issue #76).** The §11 page sketches read in the shipped idiom: `.jsx` route components, `useData` on Solid primitives, SSE refetch over the SDK readers. Routes, live behavior, and wire shapes are unchanged.
+- **Milestone sidebar minus-button + linked title (issue #148, 2026-09-05).** Set state hides the `+` dropdown and shows a triage-gated `−` button that clears via the existing `selectMilestone(null)` path (explicit-null PATCH, pinned key, busy guard — #143/#145 discipline unchanged); unset state keeps the `+` dropdown with its "No milestone" clear row. The milestone title links to the canonical per-milestone view (`/{o}/{r}/issues?milestone=<id>`, same href as the milestones-page title links from #119).
+- **Thread freshness + id→name render gating (issue #259, 2026-09-10).**
+  The thread GET's `private, max-age=0, stale-while-revalidate=60` window served pre-mutation bodies across refreshes
+  (reactions flip-flopping while the no-store events tail already showed the mutation) — threads are interactive,
+  mutation-heavy state, so the route now answers `private, no-cache` with the same version-keyed `ETag`
+  (`304` when unchanged, so revalidation stays cheap; refresh cost is still one conditional GET — no new round
+  trips, law 6). Mutation-triggered refetches already bypassed the HTTP cache (`withNoStore` + the #41 guarded
+  `invalidate`), so no client invalidation change was needed. Milestone/label id flashes came from the thread
+  (ids) racing the 30 s page-owned side-caches: the sidebar chip and milestone event rows now wait on the
+  `milestones:{o}/{r}` set (`milestoneDisplay` pending state + the honest generic "changed the milestone"
+  interim in `issueEventText`) instead of rendering bare ids; deleted ids keep the bare-id self-heal.
+  Label chips needed no gate (label names ride the thread payload; only the color dot resolves late).
+
+- **Comment lock on closed issues (Forgejo #594, 2026-09-15).** Service-layer gate (`threadLocked`, checked inside the
+  `AddComment` CAS mutator and against the already-loaded header in `AddReaction` — zero new store reads, law 6; no new
+  locks, law 3; no schema change, law 5) refusing with typed `ErrLocked` → `409`. Two named sub-decisions: (a) reaction
+  REMOVAL stays allowed on locked threads (personal undo, not conversation activity — blank-block would have been cheaper
+  but less correct); (b) NO maintainer/admin override in v1 (simplest contract — a closed thread is closed for everyone;
+  revisit only with a real use case). `referenced`/`cross_referenced` fan-out onto closed TARGET threads is untouched
+  (system bookkeeping, not user commenting).
+
+- Issue nums are `<num:06x>` hex keys (decimal on the wire) — numeric order from byte-order LIST scans, same idiom as P3's `012x` seqs.
+- `issues/index.json` carries cards for BOTH kinds; issue endpoints filter `kind: "issue"` — one index for one numbering space (03 lists PRs from the same object).
+- Label names are immutable; rename = delete + create (no header rewriting, compensating events only).
+- Closing keywords parse at PR-merge time (03's merge task calls `ApplyClosingReferences(repo, pr_num, merged_sha, texts…)`), never at push — the push path must stay git-only.
+- `#N` references parse at write time and write immutable events into the TARGET thread (best-effort, deduped by (source seq, target num)).
+- Reactions are events + a denormalized `reaction_summary` in the header — log stays the truth, header gives O(1) reads (P3).
+- `participants[]` lives in the header, maintained by the same CAS as the event seq — one owner (06 depends on this).
+- Milestone progress is denormalized counters, derived-for-display, never authoritative.
+- Auth gates per P6: label/milestone CRUD and moderation at triage; issue create/comment at read.
+- **Unified issue sidebar + labels dropdown (issue #107).** The thread page
+  sidebar is ONE metadata card (labels / assignees / milestone in divided
+  sections, each value directly under its header); the old state card is
+  gone — the header `#N Open/Closed` badge is the single source of state.
+  Labels keep their applied chips plus a triage-gated `+` button opening a
+  dropdown with ALL repo label options (menuitemcheckbox rows, one PATCH
+  per toggle; Esc/outside-click close, focus returns to the trigger).
+- Compaction task kind `issue-index-compact`, trigger sampled — no timer goroutine invented.
+- **List render is number-descending (issue #48, 2026-09-04):** every list
+  read (`GET …/api/issues` under any state filter) renders newest-first by
+  issue number descending — the merged `open` + `closed_recent` pool is
+  re-sorted by num at read time, so activity recency never reorders the
+  combined list. The index object itself is UNCHANGED (still
+  newest-activity-first per §2); only the render sorts by num, and the SPA
+  re-sorts at display (`web/src/lib/sort.js`) so stale cache windows and
+  SSE refetches agree. The `after=` cursor stays positional in this
+  number-desc display order.
+
+### Wave B implementation notes (2026-09-04, `internal/issues` landed)
+
+- **Notify seam is a synchronous emitter, nil until 06 lands.** `Service.Notify`
+  (`NotifyEvent{repo, class, actor, issue_num, recipients, at}`) fires in the
+  mutating handler after the CAS commits (P8); with no `internal/notify` wired
+  it is a documented no-op. All durable inputs 06 needs (`participants[]`,
+  mention bodies) are in the bucket regardless, so the timeline stays the
+  backfill truth. Same for `Service.Stream` (`issue`/`issue_event` names are
+  reserved for the repo SSE bus).
+- **Seam 1 in code is the `server.ExtraRoutes` chain**, not `api.Lanes` — the
+  package fronts the core mux via `Handle(w, r) bool` on both lanes, exactly
+  like `internal/identity` (see the Wave A amendment in 14_extensibility.md
+  Decisions). Route-for-route the §7 table is implemented verbatim.
+- **`DELETE …/labels/{name}` answers 200 `{"threads_affected": N}`, not 204.**
+  §3.1 mandates the report and a 204 cannot carry it; the table's 204 is
+  superseded by the report requirement.
+- **Cursor semantics pinned:** `after=` is positional in display order
+  (newest-first; unknown cursor pages from the top); `after_seq=` is an
+  exclusive upper bound (seqs strictly below, newest-last — older on demand).
+  `n` clamps at 100 (list) / 200 (events); over-max list `n` is 400, over-max
+  event `n` clamps (list bounds the merge work, events bound a single thread).
+- **Completeness is checked, not hoped for.** `ListIssues` reads the index
+  plus the P2 counter (2 GETs, O(1)) and serves index-only when every
+  allocated number has a card; otherwise it LIST-merges with the header
+  winning. A lost index update therefore degrades to LIST instead of hiding
+  an issue (E3 in `docs/EVIDENCE.md` measures 2/0 at every population).
+- **Compaction trigger is size-checked, not sampled.** Handlers hold the
+  written bytes, so `updateIndex` compacts inline past ~256 KiB —
+  observationally identical to 1-in-N sampling with no timer and no extra
+  read. `compacted_through` advances monotonically (max evicted num).
+- **`reaction_summary` keys are `%06x` event seqs** (minimum width 6, growing
+  naturally) — matches the §1.1 example for small seqs, unambiguous, sortable.
+- **Opened-body refs source from the thread** (`source.kind: "thread"`); only
+  comment bodies source `kind: "comment"` with `event_seq`. Cross-repo sources
+  always carry `repo` + `num`.
+- **Milestone DELETE clears every referencing thread**, not just open ones
+  (a superset of §3.2: a dangling id on a closed header helps nothing, and
+  the clear is one CAS per thread).
+- **PR-kind threads are invisible to issue endpoints** (GET/PATCH/comment/
+  react → 404 `unknown issue`): 03 owns those timelines; the shared family
+  never leaks across kinds at the API. The index still carries both kinds'
+  cards (one numbering space) and issue reads filter `kind: "issue"`.
+- **Close without a reason defaults to `completed`** (reopen still clears to
+  `null`); duplicate reaction adds answer 200 with the summary (not an
+  event); milestone `due_on: ""` clears.
+- **Milestone ids ride the wire as stored** (`<id:06x>` hex) — no decimal
+  twin, unlike issue nums.
+- **PATCH `milestone: null` clears; an absent `milestone` key is a
+  no-op** (issue #119). The HTTP layer decodes the key as a value
+  `json.RawMessage` because encoding/json maps an explicit null onto a
+  nil `**string`, indistinguishable from absent — null must reach the
+  service's clear path, absent must not.
+- **Milestone system lines render titles, never ids** (issue #132).
+  `milestone_changed` events carry ids only (the §7 shape is unchanged);
+  the thread page resolves `from`/`to` through its page-owned
+  `milestones:{o}/{r}` cache (the same source as the sidebar) at render
+  time, so `anon added this to the "v1.1" milestone` reads the title. A
+  deleted milestone (id absent from the cache) renders as the bare id —
+  the §3.1 self-heal stance, shared with the sidebar's `milestoneTitle`.
+  Removal needs no new affordance: the sidebar `+` dropdown's "No
+  milestone" row PATCHes the explicit null above (verified end to end in
+  the browser drive for this change).
+- **Sidebar mutations are pinned to their issue** (issue #143, 2026-09-05).
+  The thread route reuses one component instance across issue numbers, so
+  the label toggle and milestone select capture `num()`/`key()` before
+  the PATCH: the optimistic paint, the PATCH, and the reconcile all name
+  the clicked issue even when the view navigates mid-flight (the old tail
+  would `reload()` the NEW issue's key and strand the mutated issue on
+  its optimistic guess until an SSE frame arrived). The per-issue busy
+  guards reset on navigation for the same reason — an in-flight mutation
+  on the previous issue must never silently swallow a click on the new
+  one (the busy early-return fires no PATCH and posts no tray entry, so
+  the menu just closes). No-op selects still skip the round trip
+  silently by design (`milestonePatch` returns null); every real click
+  either PATCHes or reports.
+- **Reaction and comment/close tails are pinned to their issue**
+  (issue #146, 2026-09-05). Same stale-key shape as #143, same treatment:
+  `react`/`toggleReaction` (add, remove, and the remove-404 fallback add),
+  `comment`, `commentAndClose`, `close`, and the reopen `patch` capture
+  `num()`/`key()` before the first await. Single-step tails only
+  reconciled the wrong key (the old `reload()` invalidated the NEW
+  issue's key and stranded the mutated issue on its optimistic guess
+  until an SSE frame arrived); the two-step `commentAndClose` was worse
+  — its close PATCH evaluated `num()` after the comment POST resolved,
+  so a mid-flight navigation closed the NEW issue instead. The reaction
+  `seq:content` busy guards reset on navigation with the sidebar guards,
+  so an in-flight reaction on the previous issue never disables or
+  swallows clicks on the new issue's chips. No behavior change when the
+  view does not move: same issue still takes the `reload()` branch.
+- **Default close-reason + `*none`/`none` filter spellings** (`assignee=*none`,
+  `milestone=none`) are implemented exactly as §7 rows state.
+- **Event windows return arrays newest-first** (most recent event at index
+  0; `after_seq=` pages strictly below toward older). The §2/P3 phrase
+  "newest-last" names the pagination direction (older on demand), not the
+  array order — code, tests, and the thread page all agree on newest-first.
+- **Threads render chronologically, oldest → newest (issue #225,
+  2026-09-09).** The wire is UNCHANGED (newest-first windows above); the
+  shared ThreadTimeline sorts stable-by-seq at render, so the opened event
+  is first and the newest comment lands last by the composer, with system
+  rows staying seq-ordered in place. Pagination composes above ("Older
+  events" sits atop the thread; the cursor reads the unfiltered assembly
+  tail, so no overlap and no visible duplication), SSE refetches append
+  below, and the UI never autoscrolls (a reading user is never yanked;
+  older-window prepends pin the viewport via `anchorScrollTop`). PR
+  conversations inherit the same convention through the shared component
+  (03 Decisions).
+- **SSE refetches reconcile pinned older windows instead of dropping
+  them (issue #227, 2026-09-09).** A remote event refetches only the
+  newest-50 view, which slides forward while pinned extras stay put —
+  the evicted boundary row(s) would hole the assembly (and the
+  extras-tail `more` flag would lie until reload). Own mutations keep
+  taking `reload()` (drop extras); the live path instead carries the
+  evicted tail onto the extras head (`reconcilePinnedWindow` in
+  `web/src/lib/thread-order.js`, wired by a view-tracking effect in
+  `Issue.jsx`): history preserved, viewport untouched, zero extra
+  round trips, assembly contiguous with no duplication. Pinned by
+  `node --test` in `web/test/unit/thread-order.test.js`.
+- **Duplicate-reaction dedup is best-effort under true concurrency.** The
+  (actor, target, content) check reads the log before the reserving CAS, so
+  sequential double-submits (the real double-click case) are no-ops while
+  two truly-simultaneous duplicate adds could both commit and double-count
+  the summary; the event log stays the truth (a remove still resolves the
+  live set). Fully CAS-atomic dedup would need the live set in the header
+  schema — deferred as human-rate over-engineering.
+- **Reaction buttons render unicode emoji, never the wire words** (issue
+  #31: 👍 👎 😄 🎉 😕 ❤️ 🚀 👀 with the content spelling kept in
+  `aria-label`/`title`; no emoji library per the frontend budget). Each
+  commented/opened event carries its own emoji+count summary row sourced
+  from `reaction_summary`; summary chips toggle (remove-404 falls back to
+  add, GitHub semantics; any other remove failure only reports — issues
+  #36/#42). `reaction_changed` events fold into the summary entirely
+  (GitHub-style): they never render as timeline rows. Clicks paint
+  optimistically (immutable `adjustSummary` step committed via the
+  generation-safe `patchCached` path, which retires pre-mutation in-flight
+  bodies under the #41 ordering guard) and the guarded refetch reconciles
+  the guess; one in-flight mutation per (seq, content) disables its
+  buttons, so double-clicks never double-fire.
+- **Repo-level open counts are index-first, not list-derived (issue
+  #319).** `OpenCounts` counts open cards by kind (`issue`/`pr`) from the
+  shared P4 index in one exact-key GET — no LIST scan (the caller is the
+  per-page-view summary) and no windowed-list counting (capped at 100).
+  Open cards are never compacted, so the read is exact under the same
+  envelope the lists read under; the returned index version is the summary
+  ETag basis (07 §9.1 `~c` suffix). No read gate: the counts are
+  aggregates and the only caller runs behind the summary's AuthRead gate.
+- **Reactions add through a "+" menu, never an always-visible picker**
+  (issue #113): each commented/opened event shows one reaction row where
+  its chips appear — summary chips plus a plain "+" trigger (issue #134:
+  NOT a chip — no chip background or border, a larger glyph, vertically
+  centered on the row exactly like the chips) opening a
+  dropdown with exactly the addable set (`addableReactions`: REACTIONS
+  minus whatever the summary already shows for that seq, in wire order;
+  the optimistic add bump drops the content from the menu). Contents
+  already on the comment toggle off via their chips only. The menu is a
+  native-button `menu` sibling of the LabelPicker "+" idiom (Esc/outside
+  click close, ArrowUp/Down/Home/End move, global :focus-visible ring,
+  dark+light zinc trigger tones with the menu rows on the shared
+  chip/card classes); the thread timeline keeps its generic `actionsFor`
+   slot for other surfaces.
+- **Issues list defaults to open-only (issue #323, 2026-09-11).** A bare
+  visit to `/:o/:r/issues` (no `?state=`) shows open issues only; the State
+  select binds the RESOLVED value so it visibly reads "open". The explicit
+  both-choice is `?state=all` in the URL (shareable/refreshable) and is
+  sent on the wire as an OMITTED state param — the issues list endpoint
+  accepts only `open|closed|absent` (absent = both), so `all` never reaches
+  the server and no backend change was needed (contrast the milestones
+  endpoint, which accepts `all` natively). A legacy empty `?state=` still
+  reads as both. Resolution lives in `web/src/lib/issueState.js`
+  (`resolveIssueState`/`issueListState`, `node --test`). Milestone-filtered
+  landings (`?milestone=`, #314) inherit the open default — deliberate,
+  matching GitHub. `Pulls.jsx` is intentionally untouched (flagged as a
+  follow-up decision, not an oversight).
+- **Empty-labels pack chooser (issue #324, 2026-09-11).** A repo with zero
+  labels offers two one-click packs on `/:o/:r/labels` — GitHub defaults
+  (8 labels, live-verified against the GitHub labels API; the classic
+  `documentation` entry is NOT among GitHub's current defaults, so the pack
+  omits it rather than shipping a stale memory) and GitLab's "Generate a
+  default set of labels" set (8 labels — names from the GitLab docs, colors
+  from `lib/gitlab/issues_labels.rb` @ master; GitLab generates no
+  descriptions, so those entries carry none). Pack constants live in
+  `web/src/lib/label-packs.js` (pure constants + `missingFromPack`,
+  `node --test`). One click fires sequential `labels.create` calls through
+  the existing one-per-request endpoint (option (a) from the issue: 8
+  requests, human-rate, triage enforced per request server-side — no bulk
+  endpoint, no backend change, law 6 unaffected); existing names are skipped
+  case-insensitively, per-label failures report into the error tray while
+  the rest of the pack keeps going, and the reload shows what landed. The
+  chooser renders only when `labels.length === 0` (a repo that deletes all
+  its labels sees it again — accepted) and the buttons render for everyone
+  exactly like the create form (no new client gating invented — the server
+  403s non-triage per request). No route-provider seam touched (law 8).
+- **Label color picker (issue #325, 2026-09-11).** The `/:o/:r/labels` create
+  form's bare 6-hex input is a `LabelColorPicker` (`web/src/components/`,
+  reusable by a future edit flow): a trigger button (current-color swatch +
+  hex, `.input` styling) opens a preset popover — 8 swatches from
+  `LABEL_COLOR_PRESETS` in `web/src/lib/label-colors.js` (classic GitHub
+  hues, `d73a4a` first preserving the form's default; pure helpers
+  `isValidLabelColor`/`isPresetLabelColor`, `node --test`) — plus a
+  "Custom hex…" row revealing the original pattern-validated free-text
+  input. A live preview dot beside the input reuses the exact list-row
+  swatch rendering (inline `background-color`, neutral while invalid —
+  never a broken preview); presets fill the same parent color signal, so
+  submit posts the resolved 6-hex unchanged (no backend change, law 6
+  unaffected). The popover reuses the audited `.label-drop` panel class
+  (opaque + 390px viewport-bound per #278 — no new CSS) with LabelPicker
+   idioms (native buttons, outside-click/Esc close, `onCleanup`); dark +
+   light share the treatment, dark default.
+- **Label picker row grid (issue #334, 2026-09-11).** The #324 pack names
+  ("good first issue", "help wanted") wrapped mid-name in the picker's flat
+  flex rows and descriptions truncated at ragged widths. Rows are now a
+  three-column grid `[check+dot] [name] [description]`
+  (`grid-cols-[auto_minmax(0,1fr)_minmax(0,1fr)]`): the name never wraps
+  (nowrap, ellipsis past its half) and the description truncates at a
+  consistent width (`min-w-0`), so every row aligns; the row title carries
+  the full name + description. The panel widens `w-64` → `w-80` (320px —
+  inside the #278 `100vw - 1rem` bound, so 390px needs no shrink) with the
+  `label-drop card` hook untouched (opaque + viewport-bound, no new CSS).
+  Menu semantics unchanged (menuitemcheckbox, aria-checked, busy-disable,
+  outside-click/Esc, native-button keyboard); no backend, SDK, or API
+  change; no new deps. Headless cover: `web/test/unit/label-picker-rows.test.js`
+  (source assertions + 390px arithmetic); `vite build` green. The
+  MilestonePicker was checked for the same fragility: its rows are a single
+  text span (no description column), so wrapped titles cannot ragged-shift a
+  sibling column — left as is, no change. Browser proof (both themes, 390px,
+  zero console errors) is open: the shared-daemon network guard blocks
+  private/loopback targets, no private daemon per workspace rules.
+- **Issues-list Milestone/Labels filters are dropdowns fed from the repo
+  caches (issue #416, 2026-09-12).** The filter bar's two free-text inputs
+  are gone: Milestone is a native single-select (State-field consistency —
+  the implementer's call the issue left open, decided native) with options
+  from the page-owned `milestones:{o}/{r}` set plus "All milestones"
+  (clear) and "No milestone" (→ `none`); Labels is a multi-select popover
+  in the LabelPicker idiom (outside-click/Esc close, focus restore,
+  `onCleanup`, w-80 grid rows, `label-drop` hook) mapping to the same
+  comma-separated `labels` param, with "All labels"/Clear and bare rows
+  for selected-but-unknown names. Deep links (`?milestone=<id>/none`,
+  `?labels=a,b`, unknown ids) hydrate via `web/src/lib/issueFilters.js`
+  (`parseLabelsParam`/`serializeLabelsParam`/`resolveMilestoneFilter`,
+  `node --test`): unknown milestone ids render as a raw-value option,
+  unknown label names as removable bare rows — filters are shown, never
+  silently dropped. Pending caches disable (never bare-id flashes); the
+  panel anchors left (mid-grid cell — right-0 would hang past a phone
+  viewport's left edge) under the same #278 viewport bound. No backend,
+  SDK, or API change; no new deps; shared SWR caches, no new invalidation.
+  Headless cover: `web/test/unit/issues-filter-dropdowns.test.js`; `vite
+  build` green; live-browser proof open per the same shared-daemon guard
+  as #334.
+- **Issues-tab disable is display-only (Forgejo #522).** When the repo's
+  `[features] issues` flag is off, the client hides the Issues tab and the
+  creation affordances (list button, empty-state action, thread-page action,
+  the `/issues/new` composer shows an explainer) — but existing threads stay
+  readable at their URLs and no issue API is refused. Rationale: Forgejo's
+  semantics; the tab-disable and the write-guards (star/watch/fork) are
+  different failure modes (07_api.md Decisions).
+- **FIXED (Forgejo #564) — stale index cards can no longer suppress the
+  milestone-filtered list forever.** Symptom: milestone cards showed correct
+  denormalized counts but "no issues on this milestone", because the
+  milestone-filtered list is served index-first and `indexComplete` checked
+  coverage only (every num < counter has a card), never freshness — a card
+  written before the `Milestone` field existed in the Card projection, or
+  one whose update was lost, won the fast path indefinitely while the
+  thread-header truth (sidebar) stayed right. Fix: (1) the persisted
+  `issues/index.json` carries `card_version` (additive `omitempty` JSON
+  field — unknown-field-tolerant readers round-trip older fixtures
+  unchanged, law 5); `indexComplete` returns false when it is absent or
+  older than `CardProjectionVersion`, so the LIST fallback heals the window
+  (header wins). Only `RepairIndex` (which diffs every card against its
+  header) and fresh-index creation may stamp the current version — a single
+  `updateIndex` upsert preserves the existing stamp (one fresh card cannot
+  vouch for the rest), and `CompactIndex` preserves it (eviction cannot
+  vouch for survivors). (2) `updateIndex`/`bumpMilestone` failures are
+  logged (optional `Service.Log`, nil-safe) and counted
+  (`IndexDrops()`/`MilestoneDrops()`), never swallowed silently. (3) New
+  one-shot backfill `RepairIndex`: rebuilds every card disagreeing with its
+  header (PR-kind cards ride through untouched — one numbering space, one
+  index; threads at/below `compacted_through` stay evicted for LIST),
+  stamps the current version, returns the repaired count (0 + stamp when
+  only the version was stale; second run is a no-op). Review follow-up
+  (same issue): the backfill is reachable — `ListIssues` heals a
+  version-stale index best-effort while the header truth is in hand
+  (`healStaleIndex`: small repos only, `next-1 <= headerScanCap`, so one
+  scan provably covers every number; empty scans never stamp; failures
+  reuse the drop channel, never surface — the served window is already
+  healed), and production wires `Service.Log = slog.Default()` in
+  `newIssuesService` (notify.go precedent) so the counters are logs, not
+  just numbers. Concurrency per the
+  package contract (13 §3/§5): bounded CAS loops only, no in-process lock,
+  no lock spans the header scan and the index write. Tests:
+  `internal/issues/indexfresh_test.go` (gate matrix, fallback heals,
+  repair + stamp + no-op rerun, PR preservation, watermark, drop
+  counters/logging, fresh-index stamp, diff predicate, read-path
+  self-heal, no stamp on issue-less reads); `go test
+  ./internal/issues/ -race` green.
+
+## Explicitly out of scope
+
+- Conversation locking/pinning, issue templates, saved replies, issue transfer between repos.
+- Sub-issues, tasklists, projects/boards (P9), Discussions (P9).
+- Cross-repo closing keywords (`fixes owner/repo#N`) — the parser records them as `cross_referenced` only.
+- Full-text issue search (P9: index-format decision deferred); label rename propagation beyond the index hot window.
+- Editing/deleting comments after write (corrections are compensating events, P3); reactions on labels/milestones.
+- Editing/deleting attachments after upload, thumbnailing, EXIF stripping, per-repo quotas beyond the per-file cap (§12).

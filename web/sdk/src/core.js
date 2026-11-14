@@ -1,0 +1,585 @@
+/**
+ * ReposClient core (12_web_ui.md §1.0–§1.4, §1.6).
+ *
+ * Base URL resolution (§1.3), lane selection (§1.2), the fetch wrapper, SSE
+ * envelope handling (§1.4) and the 401→popup single-flight retry (§1.2).
+ * Plain `fetch` everywhere — never `EventSource` (the server streams only when
+ * Accept carries `text/event-stream`, and only fetch can set that header plus
+ * auth).
+ *
+ * Every method derives its own AbortController from the caller's signal (§1.6:
+ * the caller owns the signal, the SDK owns the reader and closes it).
+ */
+import { ReposError, NOT_MODIFIED } from "./errors.js";
+import { readSse } from "./sse.js";
+import { RepoClient } from "./repo.js";
+import { attachAdmin } from "./admin.js";
+import { attachAccess } from "./access.js";
+import { attachCollab } from "./collab.js";
+import { attachInvites, attachRepoInvites } from "./invites.js";
+import { attachIssues } from "./issues.js";
+import { attachAttachments } from "./attachments.js";
+import { attachPulls } from "./pulls.js";
+import { attachReviews } from "./reviews.js";
+import { attachChecks } from "./checks.js";
+import { attachNotifications, attachNotifyRepo } from "./notifications.js";
+import { attachReleases } from "./releases.js";
+import { attachTags } from "./tags.js";
+import { attachSocial, attachSocialTop } from "./social.js";
+import { attachOrgs } from "./orgs.js";
+import { attachTransfer } from "./transfer.js";
+import { attachUsers } from "./users.js";
+import { attachImports } from "./import.js";
+import { attachMirrors, attachMirror } from "./mirror.js";
+import { attachPushMirror } from "./pushmirror.js";
+import { attachCreate } from "./create.js";
+import { openAuthPopup, canAuthenticate } from "./auth.js";
+
+/** Off-DOM default base, tests only (§1.3). */
+export const DEFAULT_BASE = "http://127.0.0.1:8080";
+
+/** Client-side convention code for an aborted call (never sent by the server). */
+export const STATUS_ABORTED = 499;
+
+/**
+ * Lane selection (§1.2, order fixed):
+ *  1. explicit `token` option → "bearer"      (Authorization: Bearer, credentials: omit)
+ *  2. page origin == API base → "same-origin" (session cookie, credentials: same-origin)
+ *  3. else                    → "browser"     (/{o}/{r}/api-browser/…, credentials: include,
+ *                                               redirect: manual)
+ *
+ * @param {{token?: string}} opts
+ * @param {string} base resolved API base
+ * @returns {"bearer"|"same-origin"|"browser"}
+ */
+export function selectLane(opts, base) {
+  if (opts?.token) return "bearer";
+  let pageOrigin = "";
+  try {
+    pageOrigin = globalThis.location?.origin ?? "";
+  } catch {
+    pageOrigin = ""; // off-DOM
+  }
+  if (pageOrigin && pageOrigin === new URL(base).origin) return "same-origin";
+  return "browser";
+}
+
+/**
+ * Resolve the API base URL (§1.3, first wins):
+ * `configure({base})` → `<script data-base>` → `import.meta.url` origin → page
+ * origin → off-DOM default (tests only).
+ *
+ * @param {{base?: string}} [opts]
+ * @returns {string} origin, no trailing slash
+ */
+export function resolveBase(opts = {}) {
+  if (opts.base) return stripTrailingSlash(opts.base);
+  const doc = globalThis.document;
+  if (doc) {
+    const el = doc.querySelector("script[data-base]");
+    const fromAttr = el?.getAttribute?.("data-base");
+    if (fromAttr) return stripTrailingSlash(fromAttr);
+  }
+  // The SDK is a module, so import.meta.url always works in the browser (§1.3);
+  // file:/test: URLs (Node) are skipped so the off-DOM default survives tests.
+  const metaOrigin = httpOrigin(new URL(".", import.meta.url).href);
+  if (metaOrigin) return metaOrigin;
+  const pageOrigin = httpOrigin(globalThis.location?.origin ?? "");
+  if (pageOrigin) return pageOrigin;
+  return DEFAULT_BASE;
+}
+
+/** Origin of an http(s) URL; "" for file:/test:/opaque or unparseable. */
+function httpOrigin(url) {
+  try {
+    const u = new URL(url);
+    return u.protocol === "http:" || u.protocol === "https:" ? u.origin : "";
+  } catch {
+    return "";
+  }
+}
+
+function stripTrailingSlash(url) {
+  return url.endsWith("/") ? url.slice(0, -1) : url;
+}
+
+
+/** Repo-scoped paths ride the browser lane rewrite; `/api/v1/…` does not. */
+function isRepoScoped(path) {
+  return !path.startsWith("/api/");
+}
+
+/**
+ * Wire URL for a path under the resolved lane (§1.2): browser lane rewrites
+ * `/{o}/{r}/api/…` → `/{o}/{r}/api-browser/…`.
+ */
+export function laneUrl(base, lane, path) {
+  if (lane === "browser" && isRepoScoped(path)) {
+    const m = path.match(/^(\/[^/]+\/[^/]+)\/api(\/.*)?$/);
+    if (m) return `${base}${m[1]}/api-browser${m[2] ?? ""}`;
+  }
+  return `${base}${path}`;
+}
+
+/**
+ * Request init for a lane (§1.2): credentials/redirect/Authorization rules.
+ * Caller `headers` merge first; the Accept default (sse) merges after.
+ */
+export function laneInit(lane, token, headers, sse) {
+  /** @type {Record<string,string>} */
+  const h = { ...headers };
+  if (sse && !h["Accept"]) h["Accept"] = "application/json, text/event-stream";
+  let credentials = "same-origin";
+  let redirect;
+  if (lane === "bearer") {
+    h["Authorization"] = `Bearer ${token}`;
+    credentials = "omit";
+  } else if (lane === "browser") {
+    credentials = "include";
+    redirect = "manual";
+  }
+  const init = { credentials, headers: h };
+  if (redirect) init.redirect = redirect;
+  return init;
+}
+
+/**
+ * One client instance: base URL + lane + fetch + single-flight popup auth.
+ * Injectable `fetch` (constructor or configure) for tests (§5).
+ */
+export class ReposClient {
+  /**
+   * @param {{base?: string, token?: string, fetch?: typeof fetch,
+   *          onProgress?: (p: Object) => void, authenticate?: () => Promise<void>} | string} [opts]
+   *   string form = base URL shorthand.
+   */
+  constructor(opts = {}) {
+    if (typeof opts === "string") opts = { base: opts };
+    this._base = resolveBase(opts);
+    this._token = opts.token ?? "";
+    this._fetch = opts.fetch ?? globalThis.fetch.bind(globalThis);
+    /** Client-global progress handler (configure-set), §1.4 step 3. */
+    this.onProgress = opts.onProgress ?? null;
+    /** Popup auth step; overridable for tests. @type {(() => Promise<void>) | null} */
+    this.authenticate = opts.authenticate ?? (canAuthenticate() ? () => openAuthPopup(this._base) : null);
+    /** Single-flight popup promise — at most one per client (§1.2). @type {Promise<void>|null} */
+    this._popupAuth = null;
+    /** HTTP-cache bypass nesting depth for withNoStore() (mutation refetches). */
+    this._noStoreDepth = 0;
+    attachUsers(this);
+    attachOrgs(this);
+    attachInvites(this);
+    attachNotifications(this);
+    attachSocialTop(this);
+    attachImports(this);
+    attachMirrors(this);
+    attachCreate(this);
+  }
+
+  /**
+   * Re-configure (§1.1): base URL and lane are re-evaluated on the next call.
+   * @param {{base?: string, token?: string, onProgress?: Function, fetch?: typeof fetch}} opts
+   * @returns {ReposClient} this, for chaining
+   */
+  configure(opts = {}) {
+    if (opts.base !== undefined) this._base = stripTrailingSlash(opts.base);
+    if (opts.token !== undefined) this._token = opts.token;
+    if (opts.onProgress !== undefined) this.onProgress = opts.onProgress;
+    if (opts.fetch !== undefined) this._fetch = opts.fetch;
+    return this;
+  }
+
+  /** Resolved base (diagnostics/tests). */
+  get base() {
+    return this._base;
+  }
+
+  /** Current lane (diagnostics/tests). */
+  get lane() {
+    return selectLane({ token: this._token }, this._base);
+  }
+
+  /**
+   * Repo-scoped client group (§1.1).
+   * @param {string} fullName "owner/name" (trailing ".git" tolerated)
+   */
+  repo(fullName) {
+    const r = new RepoClient(this, fullName);
+    attachAdmin(r);
+    attachAccess(r);
+    attachTransfer(r);
+    attachCollab(r);
+    attachRepoInvites(r);
+    attachIssues(r);
+    attachAttachments(r);
+    attachPulls(r);
+    attachReviews(r);
+    attachChecks(r);
+    attachNotifyRepo(r);
+    attachReleases(r);
+    attachTags(r);
+    attachSocial(r);
+    attachMirror(r);
+    attachPushMirror(r);
+    return r;
+  }
+
+  // ── non-repo surface (§1.1: /api/v1/…) ──────────────────────────────────
+
+  /** @returns {Promise<import("./types.js").Discovery>} */
+  discovery() {
+    return this._call("/api/v1", { method: "GET" });
+  }
+
+  /** @returns {Promise<import("./types.js").Me>} */
+  me() {
+    return this._call("/api/v1/me", { method: "GET" });
+  }
+
+  /**
+   * Popup sign-in: opens `<base>/api-browser/v1/authenticate`, awaits the
+   * authenticated postMessage (single-flight like any other 401 path).
+   * @returns {Promise<void>}
+   */
+  signIn() {
+    return this._authenticate();
+  }
+
+  /**
+   * @param {{sort?: "name"|"activity", order?: "asc"|"desc"}} [query]
+   * @returns {Promise<string[]>}
+   *
+   * Always `cache: "no-store"` (issue #200): the server answers SWR
+   * (`max-age=0, stale-while-revalidate=60`), and a stale-while-revalidate
+   * hit would resurrect a just-deleted repo in /explore for up to 60 s. The
+   * data-layer TTL still bounds repeat reads; this only skips the HTTP cache.
+   *
+   * `sort=activity&order=desc` (Forgejo #283) returns the frozen name list
+   * ordered by the server-side per-owner max-commit rollup (newest first,
+   * unknowns last) — the server ranks over ALL owners before the client's
+   * MAX_OWNERS slice, so an active owner past the name cap still surfaces.
+   * Default (no query) is the legacy store order.
+   */
+  ownersList(query = {}) {
+    const qs = Object.entries(query)
+      .filter(([, v]) => v !== undefined && v !== null && v !== "")
+      .map(([k, v]) => `${encodeURIComponent(k)}=${encodeURIComponent(String(v))}`)
+      .join("&");
+    const suffix = qs ? `?${qs}` : "";
+    return this._call(`/api/v1/owners${suffix}`, { method: "GET", cache: "no-store" });
+  }
+
+  /**
+   * Per-owner activity rows (Forgejo #283, counts Forgejo #307):
+   * `GET /api/v1/owners/detailed?sort=&order=` →
+   * `{owners: [{name, repo_count, last_commit_sha|null, last_commit_time|null}]}`
+   * (activity is the max over each owner's repos; null when the owner has no
+   * commits. `repo_count` is the owner's manifest-gated live-repo count —
+   * always present; the instance repo total is the sum over the uncapped
+   * payload, never a capped slice).
+   * Same no-store rationale as ownersList (issue #200).
+   *
+   * @param {{sort?: "name"|"activity", order?: "asc"|"desc"}} [query]
+   */
+  ownersListDetailed(query = {}) {
+    const qs = Object.entries(query)
+      .filter(([, v]) => v !== undefined && v !== null && v !== "")
+      .map(([k, v]) => `${encodeURIComponent(k)}=${encodeURIComponent(String(v))}`)
+      .join("&");
+    const suffix = qs ? `?${qs}` : "";
+    return this._call(`/api/v1/owners/detailed${suffix}`, { method: "GET", cache: "no-store" });
+  }
+
+  /**
+   * @param {string} owner @returns {Promise<string[]>}
+   *
+   * Same no-store rationale as ownersList (issue #200).
+   */
+  ownerRepos(owner) {
+    return this._call(`/api/v1/owners/${encodeURIComponent(owner)}/repos`, { method: "GET", cache: "no-store" });
+  }
+
+  /** `owners.list()` / `owners.repos(o)` per the §1.1 table naming. */
+  get owners() {
+    const self = this;
+    return {
+      list: (query) => self.ownersList(query),
+      listDetailed: (query) => self.ownersListDetailed(query),
+      repos: (owner) => self.ownerRepos(owner),
+      detailed: (owner, query) => self.ownerReposDetailed(owner, query),
+      profile: (owner) => self.ownerProfile(owner),
+      updateProfile: (owner, doc) => self.ownerProfilePut(owner, doc),
+    };
+  }
+
+  /**
+   * Owner profile (Forgejo #234):
+   * `GET /api/v1/owners/{owner}/profile` →
+   * `{owner, display_name, location, timezone, bio_markdown, updated_at?,
+   * can_edit?}` (all strings, `""` = unset; unknown owners read as an empty
+   * profile, never 404). Same no-store rationale as ownerRepos (issue #200):
+   * a post-PUT refetch must never read a pre-mutation body.
+   *
+   * @param {string} owner @returns {Promise<import("./types.js").OwnerProfile>}
+   */
+  ownerProfile(owner) {
+    return this._call(`/api/v1/owners/${encodeURIComponent(owner)}/profile`, {
+      method: "GET",
+      cache: "no-store",
+    });
+  }
+
+  /**
+   * Owner profile replace (Forgejo #234):
+   * `PUT /api/v1/owners/{owner}/profile` with
+   * `{display_name, location, timezone, bio_markdown}` → the stored profile.
+   * Owner-only (host admin, name-matched principal, or org-owner role —
+   * others get 401/403); unknown fields and over-budget values get 400.
+   *
+   * @param {string} owner
+   * @param {{display_name?: string, location?: string, timezone?: string, bio_markdown?: string}} doc
+   * @returns {Promise<import("./types.js").OwnerProfile>}
+   */
+  ownerProfilePut(owner, doc) {
+    return this._call(`/api/v1/owners/${encodeURIComponent(owner)}/profile`, {
+      method: "PUT",
+      body: JSON.stringify(doc ?? {}),
+      headers: { "Content-Type": "application/json" },
+      cache: "no-store",
+    });
+  }
+
+  /**
+   * Object-row listing with size + activity state (Forgejo #248, extended
+   * #247):
+   * `GET /api/v1/owners/{owner}/repos/detailed?sort=&order=&min_bytes=&max_bytes=`
+   * → `{repos: [{name, size_bytes|null, object_count?, head_seq?, updated_at?, last_commit_sha|null, last_commit_time|null, last_push_at|null, mirror, mirror_upstream?}]}`.
+   * `size_bytes: null` = unknown/unbackfilled (UI hides); `0` = verified-empty.
+   * Activity nulls = unknown (stamps fall back to the per-row fetch), except
+   * verified-empty repos which render "no commits yet" without a fetch.
+   * `mirror` (Forgejo #281) = a mirror sidecar exists; `mirror_upstream` =
+   * its canonical upstream URL when the sidecar parses — the listing-row
+   * badge rides this payload, never a per-row summary fetch.
+   * `sort=activity&order=desc` orders by most recent commit (explore page).
+   * Same no-store rationale as ownerRepos (issue #200).
+   *
+   * @param {string} owner
+   * @param {{sort?: "name"|"size"|"activity", order?: "asc"|"desc", min_bytes?: number, max_bytes?: number}} [query]
+   */
+  ownerReposDetailed(owner, query = {}) {
+    const qs = Object.entries(query)
+      .filter(([, v]) => v !== undefined && v !== null && v !== "")
+      .map(([k, v]) => `${encodeURIComponent(k)}=${encodeURIComponent(String(v))}`)
+      .join("&");
+    const suffix = qs ? `?${qs}` : "";
+    return this._call(`/api/v1/owners/${encodeURIComponent(owner)}/repos/detailed${suffix}`, {
+      method: "GET",
+      cache: "no-store",
+    });
+  }
+
+  // ── internals ───────────────────────────────────────────────────────────
+
+  /**
+   * Single-flight popup auth (§1.2): a second 401 while a popup is open MUST
+   * reuse the in-flight promise, never open a second window. A rejected
+   * promise clears the slot so a later call can retry.
+   */
+  _authenticate() {
+    if (this._popupAuth) return this._popupAuth;
+    if (!this.authenticate) {
+      return Promise.reject(new ReposError(501, "popup auth unavailable in this environment"));
+    }
+    const p = Promise.resolve().then(() => this.authenticate());
+    this._popupAuth = p;
+    const clear = () => {
+      if (this._popupAuth === p) this._popupAuth = null;
+    };
+    p.then(clear, clear);
+    return p;
+  }
+
+  /**
+   * Run fn with HTTP-cache bypass armed: every SDK call whose fetch is
+   * initiated synchronously inside fn sends `cache: "no-store"` plus
+   * `Cache-Control: no-cache` / `Pragma: no-cache`, so a
+   * mutation-triggered refetch can never read a pre-mutation body from the
+   * browser HTTP cache. The arming is a synchronous nesting counter around
+   * fn() — it is exact because `_call` → `_request` → fetch-invocation runs
+   * synchronously to the first await; SDK calls first awaited on something
+   * else inside fn lose the bypass (fail-open to cached reads) but stay
+   * correct. Returns fn()'s result; the counter restores on throw.
+   */
+  withNoStore(fn) {
+    this._noStoreDepth = (this._noStoreDepth ?? 0) + 1;
+    try {
+      return fn();
+    } finally {
+      this._noStoreDepth--;
+    }
+  }
+
+  /** Derive an AbortController from the caller's signal (§1.6). */
+  _controller(signal) {
+    const c = new AbortController();
+    if (signal) {
+      if (signal.aborted) c.abort();
+      else signal.addEventListener("abort", () => c.abort(), { once: true });
+    }
+    return c;
+  }
+
+  /** Build {url, init} for one call under the current lane. */
+  _request(path, { method = "GET", headers, body, sse = true, cache } = {}) {
+    const lane = selectLane({ token: this._token }, this._base);
+    const h = { ...headers };
+    let mode = cache;
+    if ((this._noStoreDepth ?? 0) > 0) {
+      // withNoStore() armed: skip the HTTP cache entirely so a
+      // mutation-triggered refetch can never read a pre-mutation body.
+      mode = "no-store";
+      h["Cache-Control"] ??= "no-cache";
+      h["Pragma"] ??= "no-cache";
+    }
+    const init = { ...laneInit(lane, this._token, h, sse), method };
+    if (mode !== undefined) init.cache = mode;
+    return {
+      url: laneUrl(this._base, lane, path),
+      init,
+      body,
+    };
+  }
+
+  /** Opaque redirect: browser lane `redirect: "manual"` → type "opaqueredirect"/status 0 (§1.2). */
+  _isOpaqueRedirect(res) {
+    return res.status === 0 && res.type === "opaqueredirect";
+  }
+
+  /** Fetch + error normalization (abort → ReposError(499)). */
+  async _send(req, controller) {
+    try {
+      const init = { ...req.init, signal: controller.signal };
+      if (req.body !== undefined) init.body = req.body;
+      return await this._fetch(req.url, init);
+    } catch (err) {
+      if (err?.name === "AbortError" || controller.signal.aborted) {
+        throw new ReposError(STATUS_ABORTED, "aborted", req.url);
+      }
+      throw err instanceof ReposError ? err : new ReposError(0, String(err?.message ?? err), req.url);
+    }
+  }
+
+  /**
+   * The fetch wrapper proper (§1.2): send → on 401 or opaque redirect,
+   * single-flight popup auth → retry exactly once → dispatch by content type.
+   *
+   * `noPopupAuth` (Forgejo #502): the anonymous write-interstitial flow
+   * pre-flights writes client-side, but a stale identity can still 401
+   * server-side — those calls pass `noPopupAuth: true` so the 401 surfaces
+   * as a ReposError (the page routes it to /login-required) instead of
+   * opening the sign-in popup and re-running the write.
+   */
+  async _call(path, { method = "GET", headers, body, signal, onProgress, sse = true, raw = false, cache, noPopupAuth = false } = {}) {
+    const req = this._request(path, { method, headers, body, sse, cache });
+    const controller = this._controller(signal);
+    let res = await this._send(req, controller);
+    if (res.status === 401 || this._isOpaqueRedirect(res)) {
+      if (!noPopupAuth) {
+        try {
+          await this._authenticate();
+        } catch (authErr) {
+          if (authErr instanceof ReposError) throw authErr;
+          throw new ReposError(res.status, "authentication failed", req.url);
+        }
+        controller.abort();
+        const retryController = this._controller(signal);
+        res = await this._send(req, retryController);
+        return raw ? this._textResponse(res, req.url) : this._dispatch(res, { url: req.url, onProgress, signal: retryController.signal });
+      }
+      return raw ? this._textResponse(res, req.url) : this._dispatch(res, { url: req.url, onProgress, signal: controller.signal });
+    }
+    return raw ? this._textResponse(res, req.url) : this._dispatch(res, { url: req.url, onProgress, signal: controller.signal });
+  }
+
+  /** Route a response by content type (§1.4); non-2xx → ReposError. */
+  async _dispatch(res, { url, onProgress, signal }) {
+    if (res.status === 304) return NOT_MODIFIED; // revalidated: keep current, never an error
+    if (!res.ok && res.status !== 0) {
+      let text = "";
+      try {
+        text = await res.text();
+      } catch {
+        /* body unreadable; fall back to the status line */
+      }
+      throw new ReposError(res.status, text.trim() || `HTTP ${res.status}`, url);
+    }
+    const ct = (res.headers.get("content-type") ?? "").toLowerCase();
+    if (ct.includes("text/event-stream")) {
+      return this._envelope(res, { url, onProgress, signal });
+    }
+    return this._jsonResponse(res, url);
+  }
+
+  /** Raw-text path (application/toml endpoints): resolve the body as text. */
+  async _textResponse(res, url) {
+    if (res.status === 304) return NOT_MODIFIED; // revalidated: keep current, never an error
+    if (!res.ok && res.status !== 0) {
+      let text = "";
+      try { text = await res.text(); } catch { /* unreadable */ }
+      throw new ReposError(res.status, text.trim() || `HTTP ${res.status}`, url);
+    }
+    return res.text();
+  }
+
+  /** Plain-JSON path: parse and resolve; empty body → null. */
+  async _jsonResponse(res, url) {
+    const text = await res.text();
+    if (text === "") return null;
+    try {
+      return JSON.parse(text);
+    } catch {
+      throw new ReposError(res.status, `invalid JSON from ${url}: ${text.slice(0, 200)}`, url);
+    }
+  }
+
+  /**
+   * SSE envelope handling (§1.4). notice/progress/task surface through the
+   * per-call onProgress AND the client-global handler; `result` resolves;
+   * `error` throws ReposError(status, message); end-of-stream without result
+   * → ReposError(502, "stream ended without a result").
+   */
+  async _envelope(res, { url, onProgress, signal }) {
+    const notify = (p) => {
+      if (onProgress) onProgress(p);
+      if (this.onProgress) this.onProgress(p);
+    };
+    let outcome = null;
+    await readSse(res, (frame) => {
+      switch (frame.event) {
+        case "notice":
+          notify({ event: "notice", text: frame.data?.text ?? "" });
+          break;
+        case "progress":
+          notify({ event: "progress", ...frame.data });
+          break;
+        case "task":
+          notify({ event: "task", ...frame.data });
+          break;
+        case "result":
+          outcome = { value: frame.data };
+          break;
+        case "error":
+          outcome = {
+            error: new ReposError(frame.data?.status ?? 502, frame.data?.message ?? "stream error", url),
+          };
+          break;
+        default:
+          break; // unknown event: ignore (forward compatible)
+      }
+    }, { signal });
+    if (outcome?.error) throw outcome.error;
+    if (outcome) return outcome.value;
+    throw new ReposError(502, "stream ended without a result", url);
+  }
+}
+

@@ -1,0 +1,866 @@
+# 03 — Pull requests: opens, `refs/pull/N`, mergeability, merge tasks, forks
+
+> Status: planning for the walhub collaboration layer. Depends on 01 (identity/permissions), 02
+> (issues — shared numbering via P2), and the frozen architecture in
+> [`README.md`](README.md) (primitives P1–P9). Seams: `docs/go/14_extensibility.md` (§14.3 routes,
+> §14.7 task kinds, §14.10 roadmap). Git argv per `docs/go/04_git.md`; wire conventions per
+> `docs/go/07_api.md`; concurrency per `docs/go/13_concurrency.md`. Doc 04 owns review/merge-base
+> helper signatures; this doc owns PR state, the merge task, and forks.
+
+## 1. Scope and the one architectural law
+
+A pull request is a **collaboration object** (never a WAL entry) that points at ordinary git state: a
+base ref and a head ref in the same repo (or in a fork of the same object network). Its commits are git
+objects already in the store; its conversation is a P3 thread; its merge is a Seam-5 task kind that
+publishes a ref update through the normal WAL publish path. Core (`internal/store`, `internal/wal`,
+`internal/git`) never learns the word "pull"; everything registers via `internal/pulls` as a
+`RouteProvider` (Seam 1), task kinds `pull-merge` / `pull-fork` / `pull-mergeable` (Seam 5), and an
+event sink `pulls` (Seam 4).
+
+## 2. Object family (buckets + schemas)
+
+Bucket keys (all under the P1 `repos/<o>/<r>/` prefix; JSON bodies, UTF-8, `[]`-not-null, RFC 3339):
+
+| Key | Kind | Create vs CAS'd |
+|---|---|---|
+| `repos/<o>/<r>/issues/<num>/thread.json` | P3 header, `kind:"pr"` | CAS'd (`Update(version)`) |
+| `repos/<o>/<r>/issues/<num>/events/<seq:012x>.json` | P3 immutable events | Create only |
+| `repos/<o>/<r>/pulls/<num>/pr.json` | PR-sidecar snapshot (refs + shas at open, merge outcome) | CAS'd |
+| `repos/<o>/<r>/pulls/<num>/mergeable.json` | mergeability cache (derived; stamp-invalidated) | Create-then-CAS overwrite |
+| `repos/<o>/<r>/issues/index.json` | P4 list index — SHARED with issues (02 owns the schema; cards carry `kind`); PR lists/sink lookups filter `kind:"pr"` | CAS'd; compaction per P4 |
+| `repos/<o>/<r>/meta/forks.json` | parent-side fork index (children) | CAS'd |
+| `repos/<o2>/<r2>/fork.json` | fork-side provenance | Create once, then CAS'd for `merged_upstream_at` |
+
+`issues/index.json` (shared), `pulls/<n>/mergeable.json`, `meta/forks.json` join the frozen
+overwritable-key family (D-EXT-2). The `refs/pull/<num>/head` ref is ordinary WAL ref state — no bucket
+object, it lives in the ref snapshot/manifest like any branch.
+
+### 2.1 `pulls/<num>/pr.json`
+
+```json
+{ "num": 42, "kind": "pr",
+  "base": { "ref": "refs/heads/main", "sha": "<40hex at open>", "repo": "o/r" },
+  "head": { "ref": "refs/heads/topic", "sha": "<40hex at open>", "repo": "o/r" },
+  "fork": null, "body": "",
+  "draft": false,
+  "merged": false, "merged_at": null, "merged_by": null,
+  "merge_commit_sha": null, "head_force_pushed_at": null }
+```
+
+Written in the open handler (Create) and updated by CAS on: head sha change (force-push or the `pulls`
+sink observing head-branch movement), merge outcome, base rename, draft flips. `thread.json` stays the P3 header
+exactly (02 owns its shape); PR-specific fields MUST NOT leak into it — 02's list/card rendering reads
+the header alone.
+
+### 2.2 `pulls/<num>/mergeable.json` (the cache)
+
+```json
+{ "base_ref": "refs/heads/main", "base_sha": "<40hex>", "head_sha": "<40hex>",
+  "merge_base": "<40hex>", "state": "clean" | "dirty" | "behind" | "up_to_date" | "unknown",
+  "conflicts": [], "rebaseable": true, "computed_at": "RFC3339" }
+```
+
+The stamp triple `(base_ref, base_sha, head_sha)` IS the invalidation key: a reader compares it against
+the live ref shas; any mismatch ⇒ the cache is stale. `conflicts[]` is populated only when
+`state:"dirty"` (paths from the trial merge). Writers MUST write with CAS (read-modify-write); the
+object is derived state — losing it only costs a recompute, so a 412 loser simply re-runs after the
+winner and converges.
+
+### 2.3 Write discipline
+
+Numbering, thread, index, and events all reuse their primitives verbatim: number from `meta/next_num`
+(P2, CAS loop), events via the P3 two-step, index in the same transaction shape as P4, notifications
+synchronously in the mutating handler (P8). No new locking primitives are introduced by this doc; every
+concurrent mechanism below is a CAS loop or the canonical single-flight (`13_concurrency.md` §3).
+
+`pr.json` writers own disjoint field sets and re-apply only their delta onto
+the fresh doc (read-modify-write touches owned fields, never a wholesale
+struct copy): `UpdatePR` owns `body` + `draft`, `refreshHead` owns `head.sha` /
+`head_force_pushed_at`, the merge task owns the outcome fields
+(`merged`, `merged_at`, `merged_by`, `merge_commit_sha`, `merge_strategy`).
+The outcome is write-once/monotonic — once `merged:true`, no writer unsets
+it — and the `savePR` CAS retry field-merges instead of overwriting (fresh
+outcome always wins; a merge-completion retry keeps the fresh
+editorial/head fields). See the Decisions entry for issue #64.
+
+## 3. Opening a PR
+
+`POST …/pulls` with `{title, base_ref, head_ref, body?, fork?, draft?}`. The handler MUST:
+
+1. **Resolve + verify.** Resolve `base_ref` (must be an existing ref in the base repo) and `head_ref`
+   (any branch, tag, or `refs/pull/N/head` in the base repo or — for cross-fork PRs — in
+   `fork.repo`). Resolve both to SHAs. An unresolvable head is `404 unknown revision`.
+2. **Allocate the number** via the P2 CAS loop on `meta/next_num` (shared with issues; human-rate ⇒
+   CAS contention is a non-issue — do not add a lock).
+3. **Create the thread** (`kind:"pr"`) + the `opened` event per P3, Create `pr.json`, update the shared
+   `issues/index.json` (P4, card `kind:"pr"`), then fan out notifications/webhooks (P8) with the
+   `pull_opened` action.
+4. **Publish `refs/pull/<num>/head`** — a server-side ref create through the WAL publish path (doc 05
+   CAS ladder), meta `{principal: <creator>, correlation_id: <request id>, agent: "pulls"}`. The server
+   acts as the creator's principal: the ref create is attributed to the creator in events and audit,
+   but performed by the server, so the creator needs only `write` on the base repo — not on whatever
+   branch the head happens to live on.
+   - The create is performed **only when the head commit is already reachable** (it was pushed through
+     any branch/topic ref, or is an ancestor of an existing ref). Reachability check =
+     `git rev-list --objects --stdin --not --all | git cat-file --batch-check` empty (doc 04 §D-ENG-2
+     pipeline). Unreachable head ⇒ `422 head commit not reachable` — the client must push first. No
+     PR ever publishes git objects; it only publishes a ref to objects that already arrived.
+   - The ref is created even when the head equals another branch's sha (an unmerged topic ref with no
+     commits of its own still gets `refs/pull/<num>/head`).
+   - Server-side publishes bypass receive-pack/policy by construction (they never enter receive-pack);
+     `refs/pull/*` is otherwise SERVER-MANAGED: client pushes to `refs/pull/**` are rejected by a
+     built-in policy default (`protect` effect on the namespace, no bypass) — an operator may not
+     hand-edit PR refs through git. The merge task's base-ref publish is the only other non-receive-pack
+     writer, and it publishes through the identical path.
+
+### Concurrency
+
+Hazards: (a) two opens race `meta/next_num` — avoided by the P2 CAS loop, the loser retries with the
+next number; a lost race never skips a number. (b) The ref create races a concurrent delete of the head
+branch — harmless: `refs/pull/<num>/head` pins the sha; the PR head snapshot records the sha, and a
+deleted branch is reported as `head.ref: null` + `head.sha` retained. (c) The ref publish fails after
+the thread CAS committed (crash, WAL publish failure): the PR exists with `refs/pull/<num>/head`
+absent. Recovery is a named repair: `GET …/pulls/{num}` re-verifies reachability and re-publishes
+idempotently (ref create is a no-op when the ref already matches); the UI shows `head_ref: null` until
+then. No cross-feature lock is introduced anywhere in this flow.
+
+### 3.1 Draft PRs (issue #613, option a)
+
+`draft: true` on open records a draft PR (`pr.json` `draft`, additive — omitted reads `false`,
+ready for review). `PUT …/pulls/{num}` `{draft: bool}` flips ready↔draft thereafter. Auth for
+both is author-or-triage — the same rule as title/state flips. Draft is orthogonal to
+open/closed (a closed-but-unmerged PR may flip either way); merged is terminal (a flip on a
+merged PR is `409`, mirroring the state flips).
+
+A flip appends a `draft_changed` P3 event (`from`/`to` are the `"draft"`/`"ready"` labels) plus
+the P8 fan-out: notify classes `ready_for_review` / `converted_to_draft` (unknown to older
+notify maps, which fall through to the subscribed/activity default) and the `pull` stream
+actions of the same names. A no-op flip (same value) writes nothing. The merge task refuses
+drafts (see §5 step 1); the list/detail payloads already carry `draft` (`PROut.draft`, always
+present per the law-5 discipline), and the UI gates the merge box on it.
+
+## 4. Mergeability
+
+Computed server-side with the doc-04 machinery, as part of the thread fetch, cached in
+`mergeable.json`:
+
+- **Ancestry:** `git merge-base --is-ancestor <base_sha> <head_sha>` (exit 0 ⇒ base already contained —
+  `up_to_date`, nothing to merge; exit 1 ⇒ not merged) and
+  `git merge-base --is-ancestor <head_sha> <base_sha>` (exit 0 ⇒ head fully merged into base).
+- **Trial merge:** `git merge-tree --write-tree --name-only <merge_base> <base_sha> <head_sha>` —
+  exit 0 = clean (capture the would-be tree for the merge task), exit 1 = conflicts (capture the
+  conflict paths). `behind` = `git rev-list --count <head>..<base>`.
+- All git runs go through the git subprocess layer's bounded per-repo pool — never on the request
+  goroutine without the semaphore.
+
+**Invalidation seam (the mechanism this doc specs):** a `pulls` **event sink** (Seam 4,
+`internal/events` — per-sink cursor `repos/<o>/<r>/events/cursors/pulls.json`) consumes WAL ref events.
+For each event whose `ref_name` matches an open PR's `base.ref` or `head.ref` (looked up from the
+shared `issues/index.json` filtered to `kind:"pr"` — the index is authoritative for open items per
+P4), the sink enqueues the PR num onto a recompute batch.
+The recompute runs as task kind `pull-mergeable` (Seam 5; `(repo, kind)`
+single-flight batches all dirty PRs of the repo into one pass), recomputes and CAS-writes each
+`mergeable.json` with the fresh stamp. The thread fetch is the second line of defense: it compares the
+stamp against the live head/base shas and, on mismatch, serves `state:"unknown"` + enqueues
+`pull-mergeable` for that PR. Both paths converge; neither blocks a read on git.
+
+### Concurrency
+
+Hazard: N readers of a just-pushed PR head trigger N concurrent `merge-tree` runs (git-pool exhaustion,
+13 §4). Avoidance: recompute goes through the in-process single-flight keyed `"mergeable:" + repo + "/" + num`
+(13 §3 — joiners get the same result, bounded join); the sink's per-repo catch-up is already serialized
+(§14.6). Hazard: recompute races the merge task's own base-ref publish — the stamp comparison (recompute
+reads the ref AFTER the merge publishes) makes stale computes harmless; the sink sees the merge's own
+ref event and recomputes once more, converging to `up_to_date`/`merged`. No lock is held across any
+store call or git subprocess (13 §2 rule 4).
+
+## 5. The merge task (task kind `pull-merge`)
+
+Started by `POST …/pulls/{num}/merge` with `{strategy, commit_title?, commit_message?, delete_head?}`.
+Auth: `maintain` or above (P6). It is a narrated task (P7: unique id, progress packets, SSE attach,
+`(repo, kind)` single-flight — a second start of a merge on the same repo JOINS the running one and
+reuses its outcome, `13_concurrency.md` §3). `params`: `num`, `strategy`.
+
+Steps (git is always the subprocess with exact argv, `docs/go/04_git.md`):
+
+1. **Re-verify under the task:** re-resolve base/head SHAs from the live refs; if either moved since
+   `pr.json`, refresh the mergeability stamp first (the stamp check of §4); refuse `dirty`/`up_to_date`
+   with a narrated reason. Refuse drafts the same way (narrated `409 pull request #<num> is a draft` —
+   mark-ready first, then merge).
+2. **Strategy argv** (stock git only; all plumbing — no worktree is created):
+
+| Strategy | Git argv (exact) | Result |
+|---|---|---|
+| `merge` | `git merge-tree --write-tree --name-only <base_sha> <head_sha>` → tree `T` (exit 1 ⇒ abort, narrate conflict paths) | merge commit |
+| `merge` (commit) | `git commit-tree T -p <base_sha> -p <head_sha> -m <message>` with `GIT_AUTHOR_NAME/EMAIL/DATE` = merging principal, `GIT_COMMITTER_NAME/EMAIL` = server identity (`walhub <server.identity_email>`, default `walhub@localhost`), committer date = now | the merge commit sha |
+| `squash` | same trial `merge-tree`, then `git commit-tree T -p <base_sha> -m <title>\n\n<flattened body>` (author = principal, committer = server) | single-parent commit |
+| `rebase` | plant temp branch `refs/heads/walhub-tmp-replay-<pid>-<nanos>` at `<head_sha>` (`git update-ref`, unique per call, deleted on every exit path), then `git replay --onto <base_sha> --ref-action=print <merge_base>..<tmpref>` → parse the `update <tmpref> <new> <old>` line for tip `R` (plumbing, no worktree); then `git commit-tree` is NOT used — `R` is published as-is | replayed tip; original authorship preserved per commit, committer = server identity |
+
+> Rebase argv rationale (verified live against stock git 2.53): `git replay`
+> (experimental) only tracks *branches* named in the revision range — a
+> pure-SHA range is a silent no-op (exit 0, empty stdout), so the bare
+> `<merge_base>..<head_sha>` form can never yield a tip. `--ref-action=print`
+> is load-bearing: default update mode moves refs on disk directly, behind
+> the WAL's back; print mode emits `update` lines and touches nothing (the
+> temp branch create/delete are the only serving-repo writes, and no
+> user-visible ref is ever moved except through the WAL publish in step 5).
+
+3. **Message templates.** Default titles: merge — `Merge pull request #<num> from <head-ref-shorthand>`;
+   squash/rebase — the head's subject (+ body = squashed head messages or the request's
+   `commit_message`). `commit_title`/`commit_message` overrides win. Default-branch merges of protected
+   refs append `(<full sha>)` per GitHub convention — the UI renders the sha link.
+4. **Protected-ref gate (policy interplay).** The base-ref publish is NOT a receive-pack push, so the
+   merge task MUST explicitly evaluate `policy.json` for `(principal = merger, ref = base.ref,
+   op = create-or-update)`: `protect` rules deny the merge exactly as they would deny a push
+   (plain-text reason `rejected by rule '<name>'`), and the required-checks gate (doc 05) MUST be
+   consulted when the rule carries it — unmet required checks on the head sha reject the merge with the
+   named checks in the narration. Bypass lists (e.g. `svc:merge-queue`) apply unchanged. Evaluation is
+   pure and local (already-loaded policy per `14_extensibility.md` Seam 3); no network in eval.
+5. **Publish:** one WAL entry moving `refs/heads/<base>`: `old = <base_sha at start of publish>,
+   new = <merge commit>`, carrying the server-made objects with it (issue #424 amendment below: the
+   merge commit (+ its tree) exist only in the serving copy, so the task packs `tip --not --all`
+   (the PackTip argv, `docs/go/04_git.md`) and uploads txn+pack atomically — a PUSH entry when a
+   pack rides along, REF_UPDATE when the tip is fully contained). The WAL publish CAS (doc 05)
+   arbitrates against concurrent pushes: if the live base sha moved between step 4 and publish
+   (409 on the CAS), re-verify §4 once and either recompute or fail with narration — the merge
+   task NEVER force-publishes (a non-ff base outcome is a task failure, never a rewrite of
+   history). A merged ref without its objects bricks clones and fork children (found live).
+6. **Commit (P3/P4/P8):** append `merged` event to the thread (state → `closed`, `merged:true`),
+   CAS-update `pr.json` (`merged`, `merge_commit_sha`, `merged_by`, `merged_at`), update the shared
+   `issues/index.json`, fan out notifications + the PR-closing cross-ref event per 02's contract: the
+   merge task calls 02's `ApplyClosingReferences` seam (keyword list + event shapes owned there) with
+   the merged head sha and PR title/body — 02 owns resolution mechanics; 03 only supplies the inputs.
+7. **Head cleanup:** if `delete_head`, delete `refs/heads/<head-ref>` via the same WAL publish path
+   (delete op, same policy evaluation against the head ref's rules). Fork heads are never deleted by
+   the base repo.
+
+### Concurrency
+
+Merge arbitration is exactly two mechanisms, no cross-feature locks: **(a) task single-flight** —
+`(repo, "pull-merge")` serializes merges per repo (a second `POST …/merge` for a different PR joins the
+running task and then re-verifies its own stamp — serialization is per-repo, matching the git-pool
+granularity, and merge volume is human-rate); **(b) the protected-ref CAS** — the final REF_UPDATE is
+subject to the manifest CAS ladder (doc 05 publish path); a base sha that moved underneath loses the CAS
+and the task re-plans or fails loudly. No repo lock is held across the git subprocesses (13 §2 rule 4);
+the task holds no `syncMu`/`packMu`/`rw` — it goes through the same `RepoHandle` sync/read-guard path as
+any reader.
+
+## 6. Force-push to the PR head branch
+
+Force-pushing the head branch is ALLOWED (subject to that ref's own policy rules). Review threads
+survive: review comments anchor to (path, blob-sha-of-line-content) diff anchors per doc 04 — an
+outdated anchor renders as "outdated" and never blocks. On a forced update the `pulls` sink recomputes
+mergeability (the head stamp changed) and the thread records a `head_force_pushed` event (compensating
+evidence, never an edit). The base side can never be force-pushed by a PR: merges publish only
+fast-forward outcomes (§5 step 5).
+
+## 7. Forks
+
+`POST /api/v1/repos/{owner}/{repo}/forks` (top-level; see §8) creates `repos/<o2>/<r2>/` as a fork:
+
+- **Fork = new repo prefix sharing the SAME `wal/<checksum>` objects by construction.** The fork's
+  `manifest.pb` references the parent's pack set verbatim (same pack checksums, same side files) plus a
+  **fresh refs snapshot** copied from the parent's current ref state. No pack bytes are copied or
+  re-uploaded: dedup is a property of content addressing, not a step.
+- Execution: task kind `pull-fork` (`(repo, kind)` single-flight) reusing the `import --direct`
+  machinery (doc 11) in its "already-on-bucket" mode: skip pack uploads entirely (HEAD-skip treats
+  shared packs as existing), verify closure of the referenced pack set, write fork-side state, ref
+  snapshot + checkpoint, then `Create` the fork's `manifest.pb` (`min_seq = seq+1`, `first_state_at`
+  fresh). A `Create` conflict on the new repo's manifest = the target name is taken (the CAS decides
+  ownership, exactly like repo create, 13 §3 `"create:"` key).
+- The fork gets its own refs namespace, own `policy.json`, own `access.json` (creator = admin), own
+  collaboration families (issues/PRs numbering starts fresh). Only `wal/<checksum>` objects (packs,
+  bitmaps, commit-graph) and the eventual side files are shared; `refs.pb`/checkpoints/manifest are
+  per-repo by definition.
+- **GC rule (load-bearing for forks):** pack removal (maintain's `removeSuperseded`) deletes a pack only
+  when NO manifest in the fork network still references it. The parent's `meta/forks.json` lists
+  children (`[{repo: "o2/r2", forked_at: RFC3339}]`); before deleting superseded packs, the maintain
+  unit consults the children's manifests' pack sets (bounded: two exact-key GETs per
+  child — manifest + own index — capped at 512 probes per pass, parent index extra;
+  grand-children discovered transitively in the same breadth-first pass; cap
+  exhaustion defers the sweep fail-closed and the next pass retries from scratch).
+  A pack whose
+  removal is blocked stays pending per the existing TryLock-or-defer protocol (13 §2.1).
+- **Deleting a fork parent with live children converts it to a meta repository (issue #451) —
+  never a wipe.** The parent prefix survives as storage-only: the `wal/` pack set is preserved
+  verbatim, `meta/forks.json` and the parent's own `fork.json` are kept (chain resolution and the
+  GC walk above work untouched — the walk never probes the parent manifest), and
+  `meta/tombstone.json` records the conversion (`{repo, reason: "fork-parent", children}`). All
+  servable state (manifest, refs, checkpoints, issues, pulls, policy, access) is deleted, so the
+  meta prefix is invisible to listings and unopenable — but the parent id never changes, so every
+  child's `fork.json` Parent/Root pointers stay correct with no child write. Re-creating the name
+  absorbs the prefix (planner's call): the manifest key is absent, so a fresh manifest lands with
+  no probe on the create path (the push fast-path budget forbids any tombstone check there, and
+  Open=NotFound + Create=412 cannot coexist on one key) — the absorbed repo serves fresh while
+  old children keep reading the preserved packs, and the stale tombstone waits for the next
+  childless delete to wipe it with the prefix. Deleting a repo with no live fork
+  children is the historical full wipe, unchanged. A corrupt fork index (or any probe doubt)
+  aborts the delete before the manifest goes — doubt keeps packs.
+- Cross-fork PRs: the PR's `head.repo` names the fork; diff/commits endpoints read objects through the
+  fork's manifest (they share the packs, so reads are as cheap as same-repo); the head ref lives in the
+  fork's ref namespace and `refs/pull/<num>/head` is published in the BASE repo only when the head
+  commit is reachable in the base's object set — cross-fork heads that are not yet merged-reachable are
+  spec'd as: publish `refs/pull/<num>/head` in the base only if reachable; otherwise the PR records the
+  fork-local head ref. Base-side git work (open's reachability verdict, mergeability, merge, diff) runs
+  against a §7 fork→base object bridge (issue #456): the head sha is fetched from the fork serving copy
+  into the base serving copy on demand (local disk-to-disk, zero bucket trips, no ref touched, base
+  manifest untouched) and reachability is re-probed — a missing-object rev-list failure is bridged, not
+  503'd. `refs/pull/<num>/head` stays publish-only-for-pre-bridge-reachable heads (bucket-backed rule:
+  bridged objects are serving-copy warmth, and a base-side ref to them would dangle after eviction).
+- **Deleting a fork child sweeps its parent provenance (issue #457).** After the child's manifest
+  delete linearizes, the serving layer unlists the child from the parent's `meta/forks.json`
+  (CAS row-removal, `Version++` only on an actual removal — misses write nothing, so the list ETag
+  is stable) and decrements the parent's `social.json` forks counter exactly when a row was removed
+  (CAS loop, floored at zero, absent object stays absent). The order is load-bearing for GC safety:
+  the row goes second, so a maintain pass either probes a 404 it already skips or never probes at
+  all. Both steps are best-effort — a shortfall keeps the pre-#457 ghost, never fails the delete.
+- **Cross-fork merges stamp `fork.json` `merged_upstream_at` (issue #457).** The merge task CAS-writes
+  the merge instant onto the head repo's `fork.json` next to the merged event (same instant as
+  `pr.json` `merged_at`); same-repo merges are gated to zero trips. A missing child doc (deleted
+  mid-merge) is a narrated no-op; a store failure never fails the landed merge.
+
+### Concurrency
+
+Fork creation is `(repo, "pull-fork")` single-flight plus the `Create`-on-manifest arbitration (two
+forks to the same target name: one Create wins, the other reports 409 with the winner's URL). Compaction
+vs fork GC: pack deletion stays under the existing try-lock-or-defer protocol; the fork-network liveness
+check runs before the TryLock attempt and re-reads manifests — it never holds locks across store calls
+(13 §2 rule 4).
+
+## 8. API endpoints
+
+Registered by the `pulls` RouteProvider via `api.Lanes` (both lanes). Wire conventions per
+`docs/go/07_api.md` §2: plain-text errors, `[]` never null, RFC 3339 UTC, full SHAs, no-store on task
+starts. Auth levels are P6 roles resolved per P6 §1–4.
+
+| METHOD + path (repo-scoped `/{o}/{r}/api/…`) | Auth | Request → response | Seam |
+|---|---|---|---|
+| `GET …/pulls?state=&base=&head=&sort=&n=&after=` | read | → `{pulls:[{num, title, state, author, base_ref, head_ref, head_sha, draft, merged, updated_at}], more}` (index-first per P4; `merged` always present — Forgejo #530) | RouteProvider |
+| `POST …/pulls` | write | `{title, base_ref, head_ref, body?, fork?, draft?}` → `201` PR header (`409` if an OPEN pr already pairs base+head; `422` unresolvable refs; omitted `draft` = ready) | RouteProvider |
+| `GET …/pulls/{num}` | read | → header + `pr.json` + live `mergeable` (stamped; §4) — mutable-collab class (issue #280: `private, no-cache`) + folded ETag (live head/base shas + thread/pr versions + mergeable stamp) | RouteProvider |
+| `GET …/pulls/{num}/diff` | read | → `text/plain` unified diff `base…head` (one well-formed `git diff` patch per spec §9.5; the 12_web_ui.md parser's exact input; ref-dependent SWR, no ETag) | RouteProvider |
+| `GET …/pulls/{num}/commits` | read | → `{commits:[Commit], more}` (doc 07 `Commit` shape; skip/n pagination) | RouteProvider |
+| `PUT …/pulls/{num}` | write | `{title, body?, state?, draft?}` — title/state/draft edits; close/reopen append state events, draft flips (§3.1) append `draft_changed` events; triage may close others' or flip others' draft. `state:"open"` on a merged PR → `409` (merged is terminal — Forgejo #594); `state:"closed"` on merged stays `409` as before; any `draft` flip on merged → `409` (Forgejo #613) | RouteProvider |
+| `POST …/pulls/{num}/merge` | maintain | `{strategy, commit_title?, commit_message?, delete_head?}` → SSE task attach (`pull-merge`) | RouteProvider + task kind `pull-merge` |
+| `POST …/pulls/{num}/update-branch` | write | `{expected_head_sha?}` → task `pull-update-branch` (merge base→head; 409 if dirty or sha mismatch) | task kind |
+| `DELETE …/pulls/{num}/head` | maintain | delete the head branch post-merge (policy-checked like any ref delete) | RouteProvider |
+| `POST /api/v1/repos/{owner}/{repo}/forks` | write (+create rights on target) | `{target_owner?, name?, visibility?, branch?, description?}` → `202` + `TaskRecord` (`pull-fork`; sync 409 when taken) | RouteProvider (top-level) + task kind `pull-fork` |
+| `GET /api/v1/repos/{owner}/{repo}/forks?n=&after=` | read | → `{forks:[{repo, forked_at}], more}` (the live index, mutable-collab class + version ETag) | RouteProvider (top-level) |
+
+SSE: long work (`pull-merge`, `pull-fork`, `pull-mergeable` cold recompute) is a task with the §9.3
+envelope; live PR events ride the repo collaboration SSE stream (the single stream endpoint named by
+06/08) with event name `pull` — data `{action:"opened"|"closed"|"reopened"|"merged"|"head_force_pushed"|"ready_for_review"|"converted_to_draft",
+num, title, state, author, base_ref, head_ref, head_sha}`; comment events arrive as 02's `comment`
+event; check results as 05's `check` event. Errors map per 07 §2 (unknown PR → `404`, unmet protection
+→ `409` with the rule-named reason).
+
+## 9. UI and SDK
+
+Pages (SolidJS SPA, `12_web_ui.md` patterns — `useData` two-step, SSE via the SDK readers, `.jsx`
+route components; exact-shape coordination with 08):
+
+| Route | Page | Notes |
+|---|---|---|
+| `/:o/:r/pulls` | PR list (state tabs open/closed/merged, index-first, SSE-refreshing cards) | extends the repo shell tabs |
+| `/:o/:r/pull/{num}` | Conversation: timeline (P3 events), comment box, merge box (strategy select, mergeable state, task progress via SSE). Forgejo #594: the conversation is read-only while merged/closed — `AddComment` refuses `409` (`ErrLocked`); the composer (`pullCommentLock` in `lib/pull-state.js`, merged wins with "Merged — commenting is locked") and thread replies render disabled-with-reason, new line-thread staging hides, and no reopen control renders for merged PRs. Reopening a closed-but-unmerged PR restores everything with no reload (stream-invalidated live state). | |
+| `/:o/:r/pull/{num}/commits` | commits of `base…head` (reuses `commits` page) | |
+| `/:o/:r/pull/{num}/files` | diff view: `parsePatchFiles` on the diff endpoint's patch (12 §2.8 grammar), per-file unified/split toggle, anchors for review threads | |
+
+SDK (`web/sdk/src/` submodule additions, esbuild-bundled into `repos.js` per 12 §1.0): `pulls.js` —
+`list/open/get/diff/commits/merge/updateBranch/deleteHead`, plus `forks.js` (`fork(repo, opts)`) and a
+`pulls` group on the repo client; diff rendering reuses `lib/diff.js` unchanged (dogfood rule:
+every call goes through the SDK).
+
+## Decisions
+
+- **Frontend idiom is the SolidJS SPA (D-WEB-6; docs fix for issue #76).** The §9 page sketches read in the shipped idiom: `.jsx` route components, `useData` two-step on Solid primitives, SSE via the SDK readers. Routes, notes, and wire shapes are unchanged.
+- PR threads reuse the issue thread pattern and numbering wholesale (P2/P3) — one conversation
+  implementation, `kind` is the only difference. The conversation renders oldest → newest through
+  the shared ThreadTimeline (issue #225; 02/08 Decisions own the convention) — no PR-side order
+  code exists to drift.
+- PR list state lives in the shared `issues/index.json` (kind-filtered per 02's contract) — one index,
+  one compaction story; `pulls/` holds only PR-sidecar state.
+- `refs/pull/<num>/head` is published server-side ONLY for already-reachable heads; the PR is a
+  ref-publisher, never an object publisher (WAL stays git-only, README law).
+- `refs/pull/**` is server-managed via a built-in policy default, not a new receive-pack branch.
+- Mergeability is a stamped derived cache (CAS'd), invalidated by a `pulls` event sink — no polling, no
+  cross-feature locks.
+- Merge = task kind with per-repo single-flight + publish-time CAS; strategies are pure-plumbing git
+  argv (`merge-tree`/`commit-tree`/`replay`) — no worktree, no index state.
+- **Comment lock + merged-terminal (Forgejo #594, 2026-09-15).** Service-layer gate (`threadLocked(th, pr)`:
+  `state != open` OR `pr.Merged` — merge stamps `StateClosed` alongside `Merged` in one header CAS, so the state arm
+  covers merged and the sidecar arm covers a stamp still in flight). `AddComment` consults the hoisted sidecar read
+  (the post-CAS `loadPR` it replaces was result-discarded — same read count, law 6; no new locks, law 3; no schema
+  change, law 5) and refuses with typed `ErrLocked` → `409`. `UpdatePR state:"open"` on a merged PR is refused `409`
+  (`ErrConflict`, mirroring the existing merged-close refusal — the reopen gap is closed server-side, not just by
+  hiding the button). Closed-but-unmerged PRs still reopen (author/triage, unchanged), which restores commenting.
+  No maintainer/admin override in v1 (same simplest-contract rationale as 02). Client mirrors in
+  `lib/pull-state.js` (`pullCommentLock`; `pullCloseVisibility` merged → no controls stays, now test-pinned).
+- Fork = fresh manifest referencing the parent's packs; sharing is by construction, and compaction's
+  pack removal consults fork-network manifests before deleting.
+- Closing keywords ride 02's cross-ref contract; `merged` events are the PR-side trigger.
+- **PR list render is number-descending (issue #48 scope, 2026-09-04):**
+  `GET …/pulls` renders newest-first by PR number descending under any
+  state filter — the same rule as 02's issue list (merged `open` +
+  `closed_recent` re-sorted by num at read time). The shared index object
+  is UNCHANGED (still newest-activity-first); only the render sorts by
+  num, and the SPA re-sorts at display (`web/src/lib/sort.js`).
+- **Task-table lock rule (09 audit fix): the `Finished` stamp in `taskTable.end`
+  takes the RECORD mutex, not just the table mutex** (`internal/pulls/tasks.go`):  production paths snapshot the live record directly (`StartMerge`/`UpdateBranch`
+  return `entry.rec.snapshot()`; `GET …/merge/task` reads it), so the table-only
+  write raced a poll landing during completion (caught by `-race` under full-suite
+  parallel load; pinned by `TestCoverTaskEndSnapshotRace`). Lock order is table →
+  record everywhere; no path takes record → table. Rationale: the record mutex is
+  the one all readers share — the table mutex only serializes leaders.
+- **Mutable-collab cache class on the pull view (issue #280).** `GET …/pulls/{num}` was SWR +
+  `ETag <head sha>` — doubly wrong for a thread: the stale window licensed pre-mutation paints,
+  and the token never moved on comments/title/state patches (only pushes move the head), so even
+  revalidation 304'd a changed thread. The view now serves `private, no-cache` with a folded ETag
+  (live head/base shas + thread/pr versions + mergeable stamp; 07_api.md §4 third class). The diff
+  stays SWR with no ETag (patch bytes change only via ref movement). Rationale: mutability, not
+  addressability, decides the class.
+- **Pulls list defaults to open-only (issue #332, 2026-09-11).** A bare
+  visit to `/:o/:r/pulls` (no `?state=`) shows open pull requests only; the
+  tab bar binds the RESOLVED value so it visibly highlights "open". The
+  explicit both-choice is `?state=all` in the URL (shareable/refreshable,
+  third "all" tab) and is sent on the wire as an OMITTED state param — the
+  pulls list endpoint accepts only `open|closed|absent` (absent = both), so
+  `all` never reaches the server and no backend change was needed
+  (`ListPRs` empty-state still returns both by contract, which is exactly
+  what the wire-omitted both-choice relies on). A legacy empty `?state=`
+  still reads as both. Resolution lives in `web/src/lib/pullState.js`
+  (`resolvePullState`/`pullListState`, `node --test`) — a mirror of 02's
+  `issueState.js` (issue #323).
+- **Merge commits upload their objects (issue #424, 2026-09-13).**
+  `commit-tree`/`replay` mint objects only the serving copy holds, and the
+  merge task published the ref alone — the merged ref dangled
+  bucket-missing objects (found live: a merged parent failed
+  `upload-pack: not our ref`, unclonable; the fork of such a parent
+  inherited the break and its first push failed connectivity). The task
+  now packs `tip --not --all` (the `PackTip` argv, `docs/go/04_git.md`)
+  and publishes txn+pack in ONE entry through the new `RefPublisher`
+  seam (`UpdateRefWithPack`; nil pack = the old ref-only path). A pack
+  failure fails the task LOUD — a ref without its objects is never
+  published. The same treatment covers `update-branch` (identical
+  commit-tree shape). Pre-fix merges stay dangling (their objects were
+  never uploaded anywhere recoverable — operators can inject them with
+  `wal add-pack`); the fix is self-sustaining going forward
+  (`--not --all` is exact once every merge uploads).
+- **Fork operation completed (issue #424, 2026-09-13).** The §7
+  manifest-sharing step is implemented (`internal/pulls/forkexec.go` +
+  the `ForkExecutor` seam, wired at composition over the WAL registry):
+  parent manifest copied with the pack set verbatim, fresh refs snapshot
+  (+ branch override) + checkpoint under the child prefix, child
+  `manifest.pb` Created with `min_seq = seq+1` (empty parents fork to a
+  fresh empty manifest). Commit order is share → access → provenance →
+  index → counter: everything before the `fork.json` commit is retryable
+  (share adopts when the occupying manifest is ours, access adopts
+  unconditionally), everything after is committed-or-narrated. A taken
+  name fails fast (sync 409 on `fork.json` or child manifest — the form
+  renders it inline); the CAS steps still arbitrate true races. Inputs
+  `visibility` (threaded to `EnsureRepoAccess`, fail-loud pre-commit),
+  `branch` (shape-checked sync, existence-checked under the task, tags
+  rejected explicitly), and `description` (threaded into the child
+  manifest's inline settings TOML atomically at Create — the same store
+  the summary reads, so no post-create write exists to fail) close the
+  input gaps. Target admission rides the #346 owner gate (self or member
+  org, admin bypass; the #328 scope rule). `fork.json` gains additive
+  `root` (immediate parent + network root at every node); the parent
+  index is listable (`GET …/forks`, index-first pagination). The summary
+  carries `fork_parent` (omitempty) + `forks` (index-derived, always
+  present) with a `~f<version>.<count>.<parent-hash>` ETag suffix under
+  the mutable-collab class (#382); the UI shows "forked from", the Fork
+  pill with count, and a `/forks` list page.
+- **Fork pack sharing is by read fallback, not by key magic (issue #424,
+  same change — law 12 amendment to §7).** As written, §7's "verbatim
+  pack set" cannot serve: pack objects live under repo-prefixed keys
+  (`repos/<o>/<r>/wal/…`), so a child manifest referencing the parent's
+  checksums finds nothing under its own prefix. Copying bytes at fork
+  time would honor the letter ("servable child") but kill the intent
+  (the GC rule would be vacuous — a copy can never be "collected out
+  from under a live fork"). Instead the WAL read path falls back across
+  the fork ancestry (`internal/wal/forkread.go`): own prefix first with
+  byte-identical non-fork semantics, then each ancestor outward (Parent
+  + Root pointers at every level, depth-capped, visited-set) —
+  materialization fetches, side files, the remote-index build, and the
+  remote block reader. The fallback runs on the failure path only (law
+  6: hot paths are unchanged when the object is where it says it is),
+  and a total miss keeps the degraded/fsck contract. The fork-network
+  GC rule (`internal/maintain/forknet.go`, transitive walk, probe cap)
+  is therefore genuinely load-bearing. The sweep is fail-closed: a
+  deleted child (manifest 404) pins nothing and skips its subtree, but
+  any other doubt — transport error, corrupt manifest/index, or probe-cap
+  exhaustion with unvisited children remaining — aborts the sweep with
+  nothing deleted (deleted packs are unrecoverable; a deferred sweep just
+  retries). Known hole, documented not
+  fixed: deleting a fork-network member strands descendants the
+  transitive walk can no longer reach (delete-guard is follow-up work).
+- **Failed forks roll back the share reservation (issue #432, 2026-09-13).**
+  Chosen remediation is (1) reserve-then-commit with rollback: the share
+  Create already IS the reservation (it arbitrates the target name exactly
+  like repo create), and a share that succeeds but is followed by a
+  pre-commit failure (access bootstrap, provenance write) now deletes
+  exactly the keys this attempt Created — child `manifest.pb`, its
+  checkpoint pair, and the bootstrapped `access.json` — so the name is
+  immediately reusable and a retry runs the full order again. Adopt-or-fail
+  (2) was rejected: with no marker before the provenance commit, an
+  unprovenanced manifest is indistinguishable from a racing repo create
+  (the empty-parent fork manifest is byte-identical to a fresh repo
+  manifest), so adopting risks hijacking a live repo's prefix. A
+  strand-and-report sweeper (3) was rejected: same ownership-detection
+  problem for the sweeper, plus delayed reuse and new background
+  machinery. Safety shape (law 4): the rollback runs only when THIS
+  attempt won the Creates (never on adopted shares), and the executor
+  re-verifies by fresh GET (Repo == child, Revision == 1 — any WAL advance
+  aborts, nothing deleted; doubt keeps objects). Never packs (shared packs
+  live under the parent prefix), never parent keys, never the parent index
+  — and a `fork.json` on the prefix downgrades the rollback to share keys
+  only (adopted access.json is hands-off). GC coordination (#424
+  fail-closed review): a rolled-back child was never listed in any parent
+  index, so the `forknet.go` walk cannot reference it; a racing pass reads
+  manifest-404 and skips the subtree. Failure-path only (law 6: no
+  hot-path trip — the rollback issues zero store calls on success), and a
+  rollback shortfall is narrated, never masking the root error. Companion
+  change: a provenance-412 whose occupying `fork.json` is already ours
+  (stale reservation from a deleted fork) adopts and continues — ownership
+   there is certain (Parent == parent), foreign stays 409. Known residual,
+   documented not fixed: a process crash between the share and the
+   rollback still strands the prefix (same crash-window class as the merge
+   publish-then-event); repair is deleting the ≤ 4 exact child keys, and a
+   retry 409s loudly (fail-closed, never hijacks).
+- **Fork failure-path residue fixed (issue #458, 2026-09-13 — child of
+  audit #449, F4+F5).** Closes the #432 known residual above for the
+  checkpoint case, and hardens the rollback's access.json handling. (1)
+  Crash-safe retry: a crashed attempt's orphan checkpoint pair no longer
+  wedges the name — `ShareManifest` adopts an occupying checkpoint key
+  when its bytes are semantically identical to this parent's (timestamps
+  and writer ignored; a retry re-stamps), and adopts an occupying child
+  manifest with no `fork.json` on the prefix when it provably tracks the
+  just-read parent (Repo == child, Revision == 1, HeadSeq/MinSeq/packs/
+  checkpoint-ref verbatim — the checkpoint pair was just
+  adopted-or-created, so it matches too). A present `fork.json` still
+  defers to the service's ours-vs-theirs adopt check (unchanged). Sweeping
+  (delete + recreate) was rejected: an unmanifested occupant is unowned
+  garbage to us but a live reservation to a racing rival — deleting it
+  would corrupt the rival's retry, which adopts by the same rule (law 4;
+  doubt keeps objects, the loser 409s). Fail-closed residuals, documented
+  not fixed: an empty-parent orphan (HeadSeq 0, byte-identical to a fresh
+  repo manifest — the #432 hijack case) still 409s, and an orphan from an
+  older parent state (parent moved under the crash) 409s naming the stale
+  seq — replacing either would need a delete this layer must not issue on
+  doubt; repair stays the documented exact-key delete. (2) Rollback
+  access.json ownership: the rollback deletes `access.json` only when this
+  attempt created it — `EnsureRepoAccessCreated` reports created-vs-adopted
+  (the Create result itself is the proof; no probe-before race), threaded
+  through `runFork` into `RollbackShare`; an adopted pre-existing doc
+  survives and the retry re-adopts it. The `fork.json`-disputed downgrade
+  is unchanged (dispute spares access regardless). Failure-path only (law
+  6: the share adds exact-key GETs solely on the 412 path; the
+  created-flag rides existing calls, zero new trips); GC coordination
+  unchanged (pre-commit keys are never indexed, so `forknet.go` still
+  cannot reference them).
+- **Fork→base object bridge (issue #456, 2026-09-13).** Cross-fork PRs whose
+  head holds fork-unique commits had no fork-to-base object bridge: `OpenPR`
+  mapped the missing-object rev-list failure to 503 (missing objects are an
+  error, not unreachable), and mergeability/merge/diff ran git in the base
+  serving copy where fork objects can never appear (the read fallback is
+  child-to-ancestor only — the wrong direction). Only base-contained heads
+  worked end to end. The fix bridges on demand (`internal/pulls/bridge.go` +
+  the `GitRunner.FetchInto` seam, `git -c gc.auto=0 fetch --no-tags
+  --no-write-fetch-head --quiet <forkDir> <sha>` in the base dir — argv in
+  `docs/go/04_git.md` Decisions): open bridges before the reachability
+  verdict (healthy fork-unique PRs open fork-local instead of 503ing; a
+  bridge failure is still 503), diff bridges before the base-vs-fork dir
+  choice (a still-missing head keeps the fork-dir fallback; a bridge failure
+  is 503), mergeability and merge fetch unconditionally for cross-repo heads
+  (their trial/commit/pack steps cannot run without the objects — a bridge
+  failure fails loud, narrated on the task). Design answers to law 4/6:
+  fetch-into-the-serving-copy (not an ephemeral overlay) because the merge's
+  `PackTip` must pack fork objects from the base dir to upload them
+  atomically with the ref move (§5 durability — an alternates overlay would
+  leave the pack step ambiguous about object provenance); zero bucket trips
+  (local disk only) so hot-path budgets are untouched and the pre-probe hit
+  costs nothing extra; the base manifest is never written (eviction just
+  re-bridges). `refs/pull/<num>/head` publishes only for pre-bridge
+  reachable heads — bridged objects are cache warmth, and a base-side ref to
+  them would dangle after eviction. Proven end to end with the real git
+  binary (`bridge_e2e_test.go`: open/diff/commits/mergeable/merge of a
+  fork-unique head, merge verified by ancestry in the base copy plus a
+  pack-carrying publish). Residual, unchanged: update-branch trials the
+  reverse merge in the fork copy and needs no bridge (out of scope).
+- **Draft PRs, option a (issue #613, 2026-09-15).** The binding user
+  decision implements open-as-draft / mark-ready transitions (not the
+  do-nothing or wontfix halves): `POST …/pulls` accepts `draft` (omitted =
+  ready), `PUT …/pulls/{num}` `{draft: bool}` flips either way for
+  author-or-triage (the state-transition roles), `409` on merged (terminal,
+  like state). Flips are thread activity — a `draft_changed` P3 event
+  (`from`/`to` = `"draft"`/`"ready"`) mirroring the `state_changed`
+  convention, not silent pr.json writes (a flip is a lifecycle transition
+  like close/reopen, unlike body edits which append no event), with P8
+  fan-out (`ready_for_review` / `converted_to_draft` notify classes +
+  stream actions). The merge task refuses drafts alongside the other §5
+  step-1 gates (narrated `409`, no publish — the previously dead
+  `mergeState` draft arm / `mergeabilityDisplay` draft headline / "draft
+  PRs cannot merge" tooltip it wires live). Concurrency is the §2.3
+  CAS discipline (`UpdatePR` owns body + draft; the flip re-reads the
+  fresh doc, so a concurrently landed merge still refuses and an already-
+  reached value is a no-op); law 5 holds (the `Draft` field already
+  existed — no schema change); law 6 holds (the flip reuses the body's
+  fresh-load, zero new trips). UI: `PullNew` open-as-draft checkbox (the
+  `ReleaseNew` idiom; the key rides only when true so plain opens stay
+  byte-identical for old servers, which 400 unknown keys), header badge
+  `Draft` on open drafts, mark-ready / convert-to-draft toggle beside the
+  badge gated by `pullDraftVisibility` (the `pullCloseVisibility`
+  precedent). SDK `pulls.open` takes `draft` (undefined omits it),
+  `pulls.update` passes it through.
+
+## Explicitly out of scope
+
+- Merge queues, batch/auto-merge, mergeability of stacked PRs beyond simple ancestry.
+- Draft PRs beyond the `draft` flag itself (no review-gating semantics on draft — doc 04 owns review requirements).
+- Cross-server PRs (heads on unrelated hosts); fork networks are same-store by construction.
+- PR templates, milestone/assignee merge gates, project boards (P9).
+- Automatic conflict resolution, mergeability of secrets/large-file rewrites, rebase-with-merge
+  strategies beyond the three named.
+
+## Wave C1 implementation notes (2026-09-04, `internal/pulls` landed)
+
+- **Seam 1 in code is the `server.ExtraRoutes` chain**, not `api.Lanes` — the
+  package fronts the core mux via `Handle(w, r) bool` on both lanes, exactly
+  like `internal/identity` and `internal/issues` (see the Wave A amendment in
+  14_extensibility.md Decisions). Route-for-route the §8 table is implemented
+  verbatim, plus two additive endpoints (below).
+- **`POST …/pulls/{num}/comments` is additive** (write, authenticated): the
+  conversation box needs it; 02's comment endpoints 404 PR-kind threads by
+  contract, so 03 owns PR comments with the same P3 two-step.
+- **`GET …/pulls/{num}/merge/task` is additive** (read): the SSE-attach poll
+  for the running pull-merge task — the record carries progress packets plus
+  the terminal outcome, so lagged attachers never miss it (13 §6). Finished
+  records stay in a bounded (128) recent cache for late attachers.
+- **`pr.json` carries an additive optional `body`** (editable description;
+  14 §14.12 field rule): the opened event carries the original body (P3
+  immutable), `Body` is the editable view. `GET …/pulls/{num}` also serves
+  the last-K timeline (`events`, newest-first, `after_seq`/`n` windows) —
+  the Conversation page needs it and no separate events endpoint is
+  warranted.
+- **Trial merge uses the two-positional form** `git merge-tree
+  --write-tree --name-only <base_sha> <head_sha>` everywhere (the §5 argv
+  verbatim): the §4 three-positional form (`<merge_base> <base> <head>`) is
+  a usage error (exit 129) on modern git — verified against stock git 2.53
+  in `gitexec_test.go`, which runs every SubprocessGit verb against real
+  repos (clean AND conflicting merges, commit-tree, rev-list counts,
+  reachability, diff, log ranges). The merge base is still computed
+  separately (the mergeable doc needs it; rebase needs it) and conflict
+  paths parse as lines-after-tree up to the first blank line.
+- **Log pagination uses `--skip=N --max-count=M`** (`-n=N` is rejected by
+  stock git).
+- **Required-checks runs as a raw-JSON pre-scan before the strict parse**:
+  `protect` is strict (an unknown `required_checks` key would die at parse),
+  so the gate scan runs first and fails closed (`rule '<name>' requires
+  checks: no checks backend`) only when a rule actually carries the gate;
+  plain protect rules merge fine. Pending Wave 05 (`internal/checks`
+  absent) — the scan is where the head-sha verdict plugs in.
+- **Wave 05 landed (2026-09-04, `internal/checks`):** the pre-scan is
+  gone. `require_checks` is a strict optional field inside `protect`
+  (1–32 validated contexts; the push half ignores it), and the merge
+  task consults 05's stored-combined-view gate at the step-4 call site
+  through pulls' `ChecksGate` seam (next to the 04 gate) — the merge
+  logic is NOT forked. Nil backend fails closed only when a rule
+  actually carries the gate (same rule as the pre-scan kept).
+- **First fetch serves `unknown`** (§4 second line of defense): stamp
+  mismatch (or miss) serves `unknown` + enqueues `pull-mergeable`; the
+  background pass converges the cache and the next fetch serves the stamp
+  (proven by polling tests, never by sleeping).
+- **List enriches from `pr.json` sidecars** (one GET per listed row,
+  page-bounded ≤ 100, never a LIST): the shared card has no base/head
+  fields, and 02's card rendering must keep working header-alone.
+- **Update-branch merges base INTO head** (trial with base=head, head=base;
+  commit parents `[headSHA, baseSHA]`; head publish `old=headSHA`).
+- **Fork lands the collaboration records + task** (`fork.json` Create
+  arbitrates the target name; parent `forks.json` CAS lists the child; the
+  `pulls` stream fans a `forked` notice): the manifest-sharing step
+  (verbatim pack-set reference + fresh refs snapshot + checkpoint) is a
+  `ForkExecutor` seam, nil in this wave — the task narrates the delegation
+  instead of pretending. The fork-network GC rule (§7) is specified now
+  (pack removal consults children's manifests); enforcement lands with the
+  executor. Completion additionally CAS-increments the parent's
+  `social.json` forks counter through pulls' `ForksCounter` seam (07 §6
+  owns the field; nil-safe, best-effort with a task notice — the fork
+  objects are committed either way).
+- **Backend outages propagate as 503, never misreported**: `ResolveRef`
+  maps only genuine git exits to unknown-revision; transport failures
+  (pool, timeout, missing binary) propagate as unavailable — same for
+  `MergeBase` and `IsAncestor` (a missing binary reports an error, never a
+  false non-ancestor). Found by tests, fixed in the same change.
+- **Mergeable single-flight key** `"mergeable:"+repo+"/"+num` (joiners share
+  the leader, bounded wait); **merge arbitration** is the `(repo,
+  "pull-merge")` task join plus the WAL publish CAS (never force).
+- **Folded ETag + `private, no-cache`** on `GET …/pulls/{num}` (issue #280 — was `ETag <head
+  sha>` + SWR); `no-store` on task starts; the diff stays ref-dependent SWR (a patch body changes
+  only via ref movement, which is what that class bounds); plain-text errors with the 07 §2 status mapping (unknown PR →
+  `404`, unmet protection → `409` with the rule-named reason, unreachable head → `422`).
+- **Ancestry correction (found live, 2026-09-04):** §4's first ancestry
+  parenthetical reads "`merge-base --is-ancestor <base> <head>` (exit 0 ⇒
+  … `up_to_date`)". Taken literally, every ordinary PR (head branched off
+  base ⇒ base ⊆ head) reports `up_to_date` and the merge task refuses it —
+  demonstrated against the running stack before the fix. The implementation
+  follows the section's own second clause instead: `up_to_date` ⟺
+  `merge-base --is-ancestor <head> <base>` exit 0 (head fully merged into
+  base, nothing to merge); base-⊆-head is the normal shape and proceeds to
+  the trial merge. Code and doc agree as of this note; the normative fix is
+  recorded here, not silently applied.
+- **Evidence E4** (`docs/EVIDENCE.md`): mergeability recompute and merge
+  task budgets measured on the real code path (memory store + scripted git;
+  git argv proven separately against stock git) — 0 LIST on every path,
+  bounded GETs/PUTs/git calls at 1 and 50 open PRs, 16-reader single-flight
+  collapse to 1 merge-tree.
+- **pr.json CAS retries field-merge; the merge outcome is write-once
+  (issue #64, 2026-09-04):** `savePR`'s 412 retry did wholesale `*cur = *p`
+  from the writer's stale struct, so an `UpdatePR` body/title write racing a
+  landing merge overwrote `merged/*` back to unmerged (unrecoverable — no
+  repair rewrites it). Worse, `refreshHead` and the merge commit step saved a
+  stale struct under a FRESH version, clobbering with no 412 at all. Now each
+  writer re-applies only its owned delta onto the fresh doc (§2.3), and the
+  retry merges field groups with a monotonic guard (landed `merged:true` is
+  never unset; a merge-completion retry keeps fresh editorial/head fields).
+  Rationale: the outcome is not re-derivable from live refs, while head sha
+  self-heals via drift detection — so the outcome gets the hard guarantee.
+
+## Wave #424 implementation notes (2026-09-13, fork operation completed)
+
+- **Seams, all nil-safe:** `Service.ForkExec` (§7 manifest share),
+  `Service.OwnerGate` (#346 target admission), `Service.AccessBoot`
+  (child `access.json`), `api.Env.ForkInfo` (summary projection). Nil
+  every seam and the wave-C1 behavior returns verbatim (narrated
+  delegation, legacy-open, no projection) — the unit suite pins both
+  sides.
+- **Executor shape contract** (`internal/wal/forkread_test.go`
+  `TestForkChildRefsSync`): the executor-produced manifest (HeadSeq P,
+  MinSeq P+1, empty segments, checkpoint-held state) opens and refs-syncs
+  on the real engine path — neither side can drift the shape silently.
+- **Budgets:** fork creation adds no hot-path trip (share verification
+  HEADs ride the rare fork task, never push/sync/checkpoint; the read
+  fallback fires only on a child-prefix miss). The publish path itself
+  is untouched (the executor writes store objects directly; no WAL entry
+  is published by any fork step), and the `sim` tier (fault-injection +
+  round-trip budgets) passes unchanged with the fallback in place.
+- **UI routes** `/fork` (form: owner ∘ name ∘ visibility ∘ branch ∘
+  description, inline taken-name via pre-flight + sync 409, 202 → child
+  poll → navigate) and `/forks` (index-first list) under the repo shell;
+  the Fork pill (with count) sits in the Clone row; "forked from" links
+  the parent from the identity block. SDK `repo.forks.create/list`
+  (dogfood rule); Apidocs rows updated.
+- **Forks-disable refuses at the service boundary; pulls-tab disable is display-only
+  (Forgejo #522).** `StartFork` refuses with `ErrForbidden` (→ 403 + reason) when the
+  source repo's `[features] forks` flag is off — checked after the auth/role gates, before
+  input parsing (policy precedes syntax); the guard is a nil-safe `Features` hook wired in
+  `buildCollab` (unreadable settings fail open — display metadata must never break a write).
+  The `/fork` form hides with an explainer (the fork-network list stays). The pulls-tab flag
+  is display-only like issues (02 Decisions): tab + composer hide, existing PRs stay readable,
+  no PR API is refused.
+
+- **Fork-deletion safety (issue #451, 2026-09-13): delete-with-children converts the parent to a
+  meta repository.** Ruling: deleting a fork parent that still has live fork children must not
+  break the children. `Registry.Delete` (the single delete layer — API and CLI inherit it) probes
+  the parent-side index before the manifest-delete linearization point and converts instead of
+  wiping; the check lives at exactly this layer with tests covering both paths. Deliberate
+  choices: parent id unchanged (re-pointing = verification, no child `fork.json` rewrite); the
+  parent's own `fork.json` preserved (chain logic untouched — the `readForkDoc` "deleted ancestor
+  contributes nothing" comment now means fully-wiped ancestors only); re-create absorbs (no probe
+  on any create path — the push fast-path budget pinned by `TestPushFastPathZeroCollabRoundTrips`
+  forbids it, and one key cannot serve Open=NotFound and Create=412 at once); no-children path
+   byte-identical; maintain's walk unchanged (verified by
+   `TestForkNetworkGCMetaParent` — absent parent manifest + present index still pins). Covers the
+   "parent deletion/GC" item of audit #449 — the audit marks it covered here, not re-reported.
+
+- **Provenance maintenance (issue #457, 2026-09-13 — child of audit #449, F3 + F8).** Decision: write,
+  not remove. `merged_upstream_at` was documented (§2 table, `ForkDoc`) but had zero writers — the
+  stamp now lands on the cross-fork merge path (one conditional PUT, best-effort, next to the merged
+  event), so the §2 "Create once, then CAS'd for `merged_upstream_at`" row is finally true; no reader
+  was added (the forks list serves rows from the parent index — per-child `fork.json` reads would
+  cost N trips — and the summary projection stays index-derived). The child-delete sweep lives in the
+  serving `RepoRegistry.Delete` (composition, not core — law 8): pre-read the parent from the child's
+  `fork.json` before the wipe, `Registry.Delete`, then `pulls.UnlistFork` + `ForksCounter.DecForks`
+  (the counter moves only when a row actually went, so a never-listed child cannot drive it
+  negative; the floor absorbs pre-#457 Inc shortfalls). `wal.Registry` itself is untouched — the only
+  other direct caller (`repoimport` rollback) deletes import targets that were never listed, so no
+  sweep is owed there. Pre-#457 ghosts (rows stranded before this change) are not backfilled; a
+  re-fork of the swept name re-lists exactly one row (adopt path converges, pinned by test).
+
+- **Fork-chain cache revalidates on `fork.json` advance (issue #459, 2026-09-13 — child of
+  audit #449, F6).** The fix, not the documented-window fallback. `wal`'s `forkChain` was a
+  handle-lifetime cache justified by "the parent pointer never moves" — but the adopted-provenance
+  backfill (`runFork`) CAS-moves `Root` under a live handle, and the chain is built from
+  Parent+Root, so a stale cache skipped the Root short-circuit past a dead middle (degraded-only:
+  Parent never moves, so the fallback still terminated). The handle now caches its own
+  Parent+Root+Version alongside the chain and revalidates on every use with one exact-key GET of
+  its own `fork.json` — mismatch (including deletion, which converges the chain to empty)
+  re-resolves, and the revalidation GET doubles as the resolve's own read (no second trip).
+  `fork.json` version semantics, coordinated with #458: Version 1 at create, ++ on a Root-backfill
+  change and on the #457 `merged_upstream_at` stamp (already-correct backfills stay untouched, no
+  churn — a Version-only advance still refreshes the cache). Law 6: the revalidation GET rides the
+  failure path only (`forkChain` runs after an own-prefix NotFound), so push/refs/checkpoint
+  budgets are untouched. Concurrency (`docs/go/13_concurrency.md`): `forkMu` stays a leaf lock —
+  snapshot under lock, GET + compare outside, store under lock; concurrent resolvers stay
+  idempotent, last write wins. Pinned by `TestForkChainRootBackfillInvalidates` (stale chain short
+  of the root, backfill mid-handle, same handle short-circuits via Root).
+
+- **GC probe cap raised 64 → 512 with the fail-closed direction preserved (issue #460,
+  2026-09-13 — child of audit #449, F7).** At two probes per child the old cap exhausted at
+  ~32 direct children and the sweep aborted every pass, so a popular parent's superseded packs
+  accumulated with only a log line — indefinite deferral, not a retry. The walk already runs on
+  the background maintain path only (leased compact unit, TryLock-or-defer, exact-key GETs, no
+  LIST), so 512 probes/pass (~256 direct children plus transitive subtrees) is bounded law-6
+  cost, measured in test (40 leaf children = exactly 81 GETs: 1 parent index + 2 per child).
+  Exhaustion still aborts with nothing deleted (fail closed — an unvisited subtree's pack set is
+  unknown, and deleted packs are unrecoverable while a deferred sweep is merely retried). The
+  stale "one level per pass" comments (forknet.go, pulls model, this §7) are corrected: the walk
+  is breadth-first transitive in the same pass — the cap, not the depth, bounds it. Residual
+  bound, stated not solved: fan-outs beyond ~256 children still defer every pass; a durable
+  paged cursor resuming across passes is the follow-up (it needs bucket-side cursor state, a
+  schema decision — no disk/memory state per law 4). Pinned by `TestForkNetworkGCWideFanout`
+  (40 children compact, cost pinned) and `TestForkNetworkGCCapExceeded` (300 children abort
+  safely).
+
+- **PR Close/Reopen is plain client wiring over PUT state (Forgejo #517,
+  2026-09-14).** No backend change: the PR conversation page drives the
+  long-existing `repo.pulls.update(num, {state})` surface (PUT
+  `…/pulls/{num}`, open|closed). The header renders the Issue.jsx state
+  convention (title left, badge right, `chip-open`/`chip-closed`); merged
+  wins as "Merged" on a new `chip-merged` class because merge stamps
+  StateClosed too, so thread state alone cannot tell merged from
+  plain-closed. Visibility is the server auth mirrored client-side
+  (author-or-triage via `web/src/lib/pull-state.js`, hierarchical ladder
+  so write ⊇ triage; server authoritative, 403/409 surface in the tray):
+  open shows Close + Comment-and-Close, closed-unmerged shows Reopen,
+  merged shows no control. No close-reason chooser — PR state carries no
+  reason (the CommentComposer split-button reason path stays
+  issue-only). Reconcile is the #318 pattern: the mutation site reloads
+  the own thread key (badge flip + timeline entry, no full reload) and
+  invalidates via the new `invalidatePullLists` (`pulls:{full}:*` windows
+  + the `repo:{full}` open_pulls numerator); other tabs follow the
+  closed/reopened `pull` frames on the existing repo stream subscription
+  (no new kinds, no ETag change — no cached-SWR field is added). Rationale:
+  a stale or unwanted PR could previously only be abandoned open or merged
+  away; it now closes like an issue. Pinned by
+   `web/test/unit/pull-state-517.test.js` (badge matrix, visibility matrix,
+   ladder/auth mirror).
+
+- **PROut.merged flag (Forgejo #530, 2026-09-14).** The conversation page
+  rendered the merged chip from the thread payload (`pr.merged`), but
+  `PROut` carried no merged field and `ListPRs` dropped `pr.Merged` — so
+  the pulls list (`Pulls.jsx`, `chip-${state}`) could not tell merged from
+  plain-closed (merge stamps StateClosed too). `PROut` gains `merged`
+  (always present, never omitempty — the PROut/`Draft` discipline; additive
+  per law 5, old clients ignore the unknown field), populated from the
+  already-loaded per-row `pr.json` sidecar: law 6 holds structurally
+  (`ListPRs` adds no `loadPR`/`getJSON` call — the flag rides the
+  enrichment GET each listed row already costs, page-bounded, never a
+  LIST). `Pulls.jsx` renders merged rows via the new headless
+  `pullListChip` (`web/src/lib/pull-state.js`): merged wins as lowercase
+  "merged" on the #517 `chip-merged` class (lowercase matches the list
+  chips; the conversation header keeps its capitalized "Merged" badge).
+  Pinned by `internal/pulls/list_merged_test.go` (unmerged false, merged
+  true, closed-filter keeps the flag, always-present wire shape) and
+  `web/test/unit/pull-list-chip-530.test.js` (chip matrix incl. absent-flag
+  old payloads).

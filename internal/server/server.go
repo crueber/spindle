@@ -1,0 +1,258 @@
+// Package server implements the walhub HTTP server (doc 06_server_http.md):
+// the ordered middleware chain (§2.2), the chi route tree (§3), git smart HTTP
+// (§4), immutable static objects (§5), LFS (§6), auth in all three modes (§8),
+// setup/bootstrap (§3.4), health/metrics/startup (§10), and
+// two-phase drain (§12).
+//
+// The engine (internal/wal), the JSON API (internal/api), and the git
+// subprocess layer (internal/git) are consumed through small seams defined in
+// this package (§2.4): Engine (bind_wal.go) and RouteProvider (bind_api.go).
+package server
+
+import (
+	"context"
+	"os"
+
+	"log/slog"
+
+	"time"
+
+	"github.com/crueber/walhub/internal/api"
+	"github.com/crueber/walhub/internal/config"
+	"github.com/crueber/walhub/internal/git"
+	"github.com/crueber/walhub/internal/store"
+)
+
+// ServerKind is the "<kind>" of the Server header (§2.2 #4).
+type ServerKind string
+
+const (
+	KindServerless ServerKind = "serverless"
+	KindSSD        ServerKind = "ssd"
+	KindDev        ServerKind = "dev"
+)
+
+// Server is the whole HTTP surface. One process serves git smart HTTP, the
+// LFS basic protocol, immutable static objects, the JSON API with SSE, the SPA
+// shell, the setup UI/API, and instance health/metrics (§1).
+type Server struct {
+	cfg    *config.Config
+	store  store.ObjectStore
+	engine Engine // bind_wal.go seam: sync levels, publish, registry open
+	api    RouteProvider
+
+	layer *git.Layer // git subprocess layer machinery (04_git.md)
+
+	authSvc *AuthService
+	sem     *RepoSemaphores
+	notify  func(repo string) // events bridge wake (09_events.md §1)
+	metrics *Registry
+	drain   *DrainState
+
+	// readGate is the identity require_read hook (01 §4.1); nil → legacy.
+	readGate ReadGate
+
+	// pushGate is the identity repo-scoped push hook (Forgejo #347:
+	// CheckPush for existing repos, CheckCreateOwner for auto-create);
+	// nil → legacy host-flag gating (pushgate.go).
+	pushGate PushGate
+
+	// mirrorGuard is the pull-only mirror predicate (Forgejo #240):
+	// non-nil + true → every client push is refused (admins included)
+	// at discovery (403), at the push funnel (per-ref ng), and at the
+	// SSH advertisement. Nil → legacy behavior (no refusals). Wired by
+	// composition over the same store; server never imports the mirror
+	// package (law 8).
+	mirrorGuard func(ctx context.Context, id git.RepoId) bool
+
+	// placeholderHints is the same-process #210 adoption hint set: pushes
+	// consume a hint left by the create path and clear the marker
+	// post-response. Nil → the push path issues no marker ops (budget
+	// default). Shared with api.Env by composition (serveHTTP).
+	placeholderHints *api.PlaceholderHints
+
+	// avatarHook fires after a successful browser-login session mint
+	// (Forgejo #376 — set from Options.AvatarHook); nil → no-op.
+	avatarHook func(username, email string)
+
+	// onPush fires after a successful client push lands (Forgejo #623):
+	// non-nil → called fire-and-forget with the repo id AFTER the
+	// report is on the wire, on both transports (pushPipeline is the
+	// ONE function both land in). Server-side publishes (mirror sync,
+	// merge tasks) never enter pushPipeline, so they never fan out.
+	// Nil → no notification. The hook MUST NOT block — enqueue only
+	// (the callee probes state on its own goroutine). Wired by
+	// composition; server never imports the pushmirror package (law 8).
+	onPush func(id git.RepoId)
+
+	// repoExtras fronts repoDispatch with feature repo-subpath surfaces
+	// (repo_extra.go: the 14.3 routing note for non-lane families like
+	// release asset bytes); nil → core switch only.
+	repoExtras []RepoRoutes
+
+	inflight  Inflight
+	cacheRoot string
+	dataDir   string // cache.dir; the LFS spool lives under it
+
+	version  string // build sha: build-time env → git short sha → "dev"
+	instance string // name[/id] per MASTER_RUST_SPEC §3.4
+	kind     ServerKind
+
+	boot BootState // §3.4 boot decision: normal / defaults / setup-only
+
+	// Now is overridable for tests.
+	Now func() time.Time
+
+	log *slog.Logger
+}
+
+// Options wires the composition (§10.4 step 4: build AppState).
+type Options struct {
+	Config    *config.Config
+	Store     store.ObjectStore
+	Engine    Engine
+	API       RouteProvider // internal/api mount; nil in setup-only/defaults-less tests
+	DataDir   string
+	CacheRoot string // cache.dir; the LFS spool lives under it
+	Version   string
+	Instance  string
+	Kind      ServerKind
+	Boot      BootState
+	// Notifier wakes the events bridge for a repo ("owner/name"); nil when
+	// the instance runs no bridge (09_events.md §1 — notify then answers 202
+	// without a wake).
+	Notifier func(repo string)
+	Log      *slog.Logger
+	Now      func() time.Time
+	// ReadGate is the identity require_read hook (01 §4.1); nil → legacy
+	// flag-only read gating on the git/LFS read paths.
+	ReadGate ReadGate
+	// PushGate is the identity repo-scoped push hook (Forgejo #347);
+	// nil → legacy host-flag gating on the git push paths.
+	PushGate PushGate
+	// MirrorGuard is the pull-only mirror predicate (Forgejo #240);
+	// nil → no mirror refusals (legacy behavior).
+	MirrorGuard func(ctx context.Context, id git.RepoId) bool
+	// PlaceholderHints is the shared #210 adoption hint set (api.Env and
+	// the server point at one instance); nil → no push-path marker ops.
+	PlaceholderHints *api.PlaceholderHints
+	// AvatarHook fires after a successful browser-login session mint
+	// (Forgejo #376): the identity service enqueues a background
+	// avatar generation for users without one. Nil → no generation
+	// (tests, setup-only). The hook MUST NOT block — it only enqueues
+	// (identity.EnsureAvatarAsync); the login response already
+	// answered. Wired by composition (cmd/walhub); server never
+	// imports the identity package (law 8).
+	AvatarHook func(username, email string)
+	// OnPush fires after a successful client push lands (Forgejo #623);
+	// nil → no notification. Wired by composition (cmd/walhub); server
+	// never imports the pushmirror package (law 8).
+	OnPush func(id git.RepoId)
+}
+
+// BootState is the §3.4 boot decision tree outcome.
+type BootState struct {
+	// Mode: "normal" (config valid), "defaults" (no config file), or
+	// "setup_only" (config file present but INVALID).
+	Mode   string // "normal" | "defaults" | "setup_only"
+	Errors []string
+	// ConfigPaths are the candidate config-file paths in boot priority order
+	// (explicit --config / pointer first, then the data-dir files) — the setup
+	// API edits on top of the first existing one (§3.4).
+	ConfigPaths []string
+}
+
+// InSetupOnly reports SETUP-ONLY MODE (§3.4).
+func (b BootState) InSetupOnly() bool { return b.Mode == "setup_only" }
+
+// New builds the AppState.
+func New(o Options) *Server {
+	if o.Now == nil {
+		o.Now = time.Now
+	}
+	if o.Log == nil {
+		o.Log = slog.Default()
+	}
+	if o.Kind == "" {
+		o.Kind = KindDev
+	}
+	if o.Config == nil {
+		o.Config = config.Defaults()
+	}
+	s := &Server{
+		cfg:       o.Config,
+		store:     o.Store,
+		engine:    o.Engine,
+		api:       o.API,
+		layer:     git.NewLayer(),
+		version:   o.Version,
+		instance:  o.Instance,
+		kind:      o.Kind,
+		boot:      o.Boot,
+		log:       o.Log,
+		notify:    o.Notifier,
+		Now:       o.Now,
+		cacheRoot: o.CacheRoot,
+		dataDir:   o.DataDir,
+	}
+	s.inflight.high = int64(o.Config.Server.MaxConcurrentRequests)
+	s.sem = NewRepoSemaphores(o.Config.Server.MaxConcurrentPerRepo)
+	s.drain = NewDrainState()
+	s.metrics = newRegistry()
+	registerInventory(s.metrics)
+	s.authSvc = NewAuthService(&o.Config.Server.Auth, o.Now)
+	s.readGate = o.ReadGate
+	s.pushGate = o.PushGate
+	s.mirrorGuard = o.MirrorGuard
+	s.onPush = o.OnPush
+	s.placeholderHints = o.PlaceholderHints
+	s.avatarHook = o.AvatarHook
+	return s
+}
+
+// Version returns the build identity.
+func (s *Server) Version() string {
+	if s.version == "" {
+		return "dev"
+	}
+	return s.version
+}
+
+// serverHeaderValue is `walgit/<version> (<kind>; <name>[/<instance>])`.
+func (s *Server) serverHeaderValue() string {
+	v := "walgit/" + s.Version() + " (" + string(s.kind) + "; walhub"
+	if s.instance != "" {
+		v += "/" + s.instance
+	}
+	return v + ")"
+}
+
+// cacheDir resolves a directory under the cache root (§6.3 spool);
+// without a configured root it falls back to the OS temp dir (tests/dev).
+func (s *Server) cacheDir(sub string) string {
+	root := s.cacheRoot
+	if root == "" {
+		root = os.TempDir() + "/walgit-cache"
+	}
+	return root + "/" + sub
+}
+
+// Auth exposes the auth service for composition (§10.4 step 4).
+func (s *Server) Auth() *AuthService { return s.authSvc }
+
+// Drain exposes the DrainState for the signal handler (§12).
+func (s *Server) Drain() *DrainState { return s.drain }
+
+// Inflight exposes the global gauge for the drain waiter (§12).
+func (s *Server) Inflight() *Inflight { return &s.inflight }
+
+// Metrics exposes the registry for background loops.
+func (s *Server) Metrics() *Registry { return s.metrics }
+
+// Config exposes the effective config.
+func (s *Server) Config() *config.Config { return s.cfg }
+
+// isGitClient reports whether the UA looks like git (§4.2 condition 1).
+func isGitClient(ua string) bool {
+	return hasPrefixFold(ua, "git/") || hasPrefixFold(ua, "jgit/") || containsFold(ua, "git-lfs")
+}

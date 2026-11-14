@@ -1,0 +1,1231 @@
+# Performance evidence
+
+Measured claims about walhub's behavior under load — not estimates. Every entry
+in this document was produced by a harness committed to the repo (reproduction
+command included), on the real code path, and states the backend it ran on.
+Entries are added when a feature's scale behavior needs pinning (explicitly
+requested or when a review questions a hot path).
+
+## Method standards (what qualifies as an entry)
+
+- **Measured, not modeled.** The harness runs the real code path — no mocks for
+  the layer under test. Fixtures may be synthetic; the measurement is not.
+- **Named backend and hardware.** Absolute numbers are environment-bound
+  (this workstation is a QEMU VM); the *shape* claims — flat vs linear vs
+  quadratic, per-op vs per-request — are the durable part of every entry.
+- **Reproducible.** Each entry names its harness (package + env var + command)
+  and the harness lives in `internal/devtools/` or the package's own tests.
+- **Both sizes.** Entries measure at a "normal" population and an order(s) of
+  magnitude beyond, so flat-vs-growing is visible in the table itself.
+- **Hot paths vs convenience paths are called out.** A UI page taking 100×
+  longer than an auth lookup is a different kind of fact than an auth lookup
+  degrading.
+
+## Index
+
+| # | Date | Area | Question | Verdict |
+|---|---|---|---|---|
+| E1 | 2026-09-03 | SSH key registry (`internal/server/sshkeys.go`) | 10k vs 1M registered keys: what happens to auth, the keys page, and writes? | Auth flat (O(1) per handshake); keys page linear in per-user keys; writes constant. Scale-safe to 1M+. |
+| E2 | 2026-09-04 | Identity authz read path (`internal/identity`) | What does one role resolution cost, and can it explode with team count? | O(1) per request: 1 conditional access.json GET + 1 per referenced team; steady state transfers zero bodies (304-class). Cannot explode: bounded binding list, exact-key probes, no LIST. |
+| E3 | 2026-09-04 | Issue list/read path (`internal/issues`) | Is the issue list index-first O(1), what does a thread read cost, and is the LIST fallback bounded? | List flat (2 GETs, 0 LIST at any population when the index is complete); thread read linear in thread length; fallback bounded (1 LIST + ≤2000 header GETs, page ≤100). Cannot explode: every scan is prefix-bounded and paged. |
+| E4 | 2026-09-04 | PR mergeability + merge task (`internal/pulls`) | Does mergeability stay bounded as open PRs accumulate, what does a merge cost, and is git-pool usage bounded? | Recompute flat (3 GETs + 1 PUT, 0 LIST, 6 git calls at 1 and 50 open PRs); merge bounded (12 GETs + 5 PUTs, 0 LIST, 11 git calls, peak concurrency 1); 16 concurrent readers collapse to 1 merge-tree. Cannot explode: no LIST on any path, page-bounded sidecars, pool-gated git. |
+| E5 | 2026-09-04 | Review summary + required-reviews gate (`internal/review`) | What does a review-summary recompute cost, what does the merge-time gate scan cost, and why can't either explode? | Recompute linear in review/thread count (9 GETs + 1 PUT + 2 LISTs at 5 reviews/2 threads; 122 + 1 + 2 at 100/20); gate scan linear in review count (8 + 0 + 1 at 5; 103 + 0 + 1 at 100), own deadline, never trusts the summary. Cannot explode: scans are prefix-bounded to one PR's low-volume collaboration subtree, no git on any path, no cross-PR fan-out. |
+| E6 | 2026-09-04 | Check report path + combined view + required-checks gate (`internal/checks`) | What does one CI report cost, what does the combined view cost, and why can't either explode as context count grows? | First report 2 GETs + 2 PUTs + 1 LIST; re-report 4 GETs + 3 PUTs + 1 LIST (1 context); combined 1 LIST + 1 GET per context, 0 PUTs; gate = policy GET + 1 LIST + 1 GET per context under a 15 s deadline. Cannot explode: every scan is prefix-bounded to one sha, reports are CI-rate, no git on any read path, index writes are best-effort. |
+| E7 | 2026-09-04 | Notification fan-out + webhook delivery loop (`internal/notify`) | What is the write amplification of one emission, what does the unread dedup save on replay, and what does a delivery pass cost? | One emission = 2 GETs + 2 PUTs per recipient + 3 GETs + 2 PUTs fixed (thread, watchers, seq reservation, activity); deduped replay writes flat (2 PUTs, zero notification/index writes at any recipient count; probes are 3+n GETs); delivery pass = 1 LIST + ~3 GETs + 1 PUT per event + 1 cursor CAS, idle pass writes nothing. Cannot explode: 100-recipient sync cap with task fallback, 5 s budget, per-hook cursors. |
+| E8 | 2026-09-04 | Release latest-pointer, autodraft, asset streaming (`internal/releases`, `internal/social`) | Is the latest badge O(1), what does a publish/list/autodraft cost, is the asset upload memory-bounded, and are star/fork writes constant? | Latest hot read flat (2 GETs at 5 and 200 releases); publish 3 GETs + 2 PUTs; list 1 LIST + 1 GET per release; autodraft 1 probe per candidate (≤100) with zero LIST; 1 MiB upload 2 GETs + 2 PUTs with an empty spool dir and zero-write 413s; star 2 GETs + 1 HEAD + 2 PUTs, fork bump 1+1. Cannot explode: pointer monotonicity skips stale publishers, scans/lists are prefix-bounded and capped, git probes run under the package pool. |
+| E9 | 2026-09-04 | Collab stream fan-out + invalidation coalescing (`internal/notify`, `web/src/lib`) | What does one repo-frame publish cost vs subscriber count, what survives a stalled subscriber, and how many refetches does a 30-check burst cause? | Publish ~0.6 µs (1 sub) → ~10 µs (128 subs), zero store round-trips; stalled pages shed (never stall emission, never grow past 16 + 64 frames); bursts collapse to ~2 refetches per key via the per-tick key-set flush + per-key single-flight; warm revisits transfer nothing. Cannot explode: drop-oldest bus, bounded ring, bounded flush. |
+| E10 | 2026-09-04 | Push fast path with the collab layer mounted + full-chain e2e timing (`cmd/walhub`, `internal/e2e`) | Does the push fast path gain any bucket round trips from eight mounted feature packages, and how long is the full org→release→fork chain on a real stack? | Zero: cold push 8 ops, warm push 9 ops, 0 collab-family keys on either; full chain wall 2.2 s (slowest phase: merge+close 0.5 s). Cannot regress: the budget test fails on any collab key touched by a push. |
+| E11 | 2026-09-04 | Repository import (`internal/repoimport`) | What does one URL import cost, and does it grow with repo size? | Flat: 7 GETs+HEADs + 16 control PUTs + 0 LISTs at 50 and 400 commits (E11-era 6+12; +2 sidecar durability PUTs — pack publish #248, ref-txn publish #247 — S==M exactly); wall grows with pack bytes only. Cannot explode: exact-key probes, ref enumeration local + capped, pool-gated git, no lock held across I/O. |
+| E12 | 2026-09-08 | Landing concept GIFs (`internal/devtools/landinggif`) | Do 4 animated diagrams + stills fit the byte budgets with no new deps, and what does the landing page weigh? | Yes: 82,618 bytes total (budgets ≤ 150 KB, each asset ~45% headroom); page is shell + 1 JS + 1 CSS + lazy images, zero API calls. |
+| E13 | 2026-09-08 | Self-heal serving cost (`internal/api`, issue #209) | Do the summary `health`, the 404 marker, and the overview fsck projection add store round trips to any budgeted path? | No change: empty summary +0, non-empty summary +1, overview +1 (all exact-key probes, never LIST); push/sync/checkpoint engine paths untouched; empty Code-tab path removes 1–2 UI fetches. |
+| E14 | 2026-09-08 | Explicit create-repo placeholder (`internal/api`, `internal/server`, `internal/identity`, issue #210) | Do placeholder create, first-push adoption, and the summary projection add round trips to any budgeted path? | Create = 1 window (manifest + sidecar + access Creates parallel); first push +0 on-response (hint-gated off-response delete, 0 ops unhinted); empty summary ≤1 (sidecar only), real summary +0; sim budgets unchanged. |
+| E15 | 2026-09-09 | Pull-only mirrors (`internal/mirror`, Forgejo #240) | What does a sync fire cost, and what do the refusal revalidation + summary projection add to the push/summary paths? | First sync flat (22 ops, 0 LIST at S and M); no-op fire 11 ops, zero pack/manifest/log writes; push +2 exact-key probes (cold 10 / warm 9 ops, other collab families zero); summary +1 probe only when the mirror hook is set. Cannot explode: no LIST anywhere, converge-only no-ops, lease bounds duplicate work. |
+| E16 | 2026-09-09 | Repo size catalog (`internal/sizecatalog`, Forgejo #248) | What does one fold pass cost, what does the detailed listing cost, and what does the push path pay for durable size state? | Fold linear in repo count (2 GETs + ≤1 PUT per repo + 1 catalog CAS, 0 LIST at 3 and 12 repos); listing flat (exactly 1 catalog GET at any population); push +1 PUT per pack-changing publish (repo-scoped sidecar, parallel with the manifest CAS, +0 sequential trips; ref-only/settings write nothing — E17 amends ref-only to write the push clock). Cannot explode: bounded/resumable passes, PUT-if-changed sidecars, probe-only reads. |
+| E17 | 2026-09-09 | Last-commit activity (`internal/git`, `internal/sizecatalog`, Forgejo #247) | What does the push hint cost, what does a sweep heal cost, does the listing stay flat, and does explore order by commit time? | Push +0 (derivation is git-local, hint rides the existing sidecar PUT; cold 11 / warm 10 ops unchanged); sweep heals once per stale repo (refs view + ≤1 serve-sync + 1 git read, then quiet); listing flat (exactly 1 catalog GET); explore newest-commit-first from `sort=activity&order=desc` (commit dates, not push times). Cannot explode: no LIST, per-repo isolation, bounded parallelism (8/2), field-scoped merge never regresses. |
+
+---
+
+## E1 — SSH key registry at 10k and 1M keys (2026-09-03)
+
+**Area:** SSH git transport, key auth (`internal/server/sshkeys.go`,
+`internal/sshd`). Spec: `17_ssh.md` §3/§5.
+
+**Question:** the registry stores one object per key in two families
+(`ssh-keys/k/<fp>` for auth lookup, `ssh-keys/u/<principal>/<fp>` for the UI
+list). What happens to (a) SSH auth, (b) the keys page, and (c) writes when the
+host accumulates 10,000 keys — and 1,000,000?
+
+**Method.** Harness: `internal/devtools/keybench` (`go test -tags evidence
+./internal/devtools/keybench/ -run TestSSHKeyRegistryScale -v -timeout 30m`;
+the `evidence` build tag is what keeps the harness out of CI and `go vet`).
+Real ed25519 keypairs (1 per key — distinct fingerprints), registered through
+the real `Add` path over the **memory store**, keys spread over 100 principals
+(the population shape: many users, a handful of keys each — the benchmark's
+`user0` deliberately holds n/100 keys to also probe the pathological end).
+Measured: 1000 auth lookups (mean/max), one keys-page list, one add. Memory
+store isolates the registry's algorithmic shape from network RTT; see
+"over the network" below for the S3/GCS constant.
+
+**Results.**
+
+| path | 10,000 keys | 1,000,000 keys | shape |
+|---|---|---|---|
+| setup (n adds, 2 PUTs each) | 0.27s (~27µs/add) | 29.9s (~30µs/add) | constant per add |
+| **SSH auth lookup** (1 GET by fingerprint) | mean **5.9µs**, max 221µs | mean **5.6µs**, max 29µs | **flat** — O(1), no LIST |
+| keys-page list (one principal) | 5.1ms for 100 keys | 1.51s for 10,000 keys | linear in **per-principal** key count |
+| store footprint | ~20k objects | ~2M objects | grows with total keys |
+
+**Analysis.**
+
+- **Auth is flat because the fingerprint IS the storage key.** `LookupBy-
+  Fingerprint` is one exact-key GET + one in-memory rights resolution
+  (`PrincipalForName`). No LIST, no scan, no cache to warm: 5.9µs at 10k keys,
+  5.6µs at 1M. An SSH handshake runs one lookup, and handshakes are rare
+  relative to HTTP git traffic — auth cost per handshake is invariant at any
+  population size. This is the property that matters most, and it holds.
+- **The keys page is linear in per-user keys, not total keys.** `List` walks one
+  principal's prefix and decodes each entry (the listing entry carries the full
+  record; LIST returns only metadata, so one GET per entry). The bound is
+  keys-per-principal — 5.1ms for a 100-key principal, 1.51s for a 10,000-key
+  principal, at every total population. Real distributions (1–20 keys/user)
+  sit at the low end. If a deployment ever needed more, the fix is mechanical:
+  make the listing entry self-sufficient so LIST alone answers (index format
+  change, not a redesign) — noted as the scale-out lever, not built.
+- **Writes are constant** — 2 PUTs per add (record PutCreate + index
+  overwrite), fingerprint uniqueness enforced by the store's PutCreate
+  (duplicate → 409 at the API). ~30µs/add on the memory store across the whole
+  1M-key run.
+
+**Over the network (S3/GCS).** The memory-store numbers isolate the shape;
+every auth lookup then costs one GET (~60–80ms typical per-object latency) and
+the keys page costs (1 + K) GETs. Flat in total keys, per the table — at 1M
+keys an SSH handshake is still exactly one GET.
+
+**Operational notes at 1M keys** (what grows — storage and housekeeping, not
+latency):
+
+- ~2M store objects, ~1 GB of small objects. Trivial for S3/GCS. On the
+  **filesystem backend** that is 2M inodes across `ssh-keys/k/` and the
+  per-principal `u/` dirs — ext4 lookups stay O(log n), but inode budget and
+  backup size feel it.
+- No key expiry: keys are identity and accumulate (same as every git host).
+- One rollback window: if the listing-entry PUT fails after the record PUT
+  commits, an orphan k-doc survives — unlistable, and it blocks that
+  fingerprint's re-registration until removed. One store call wide; at any
+  scale this is a rounding-error event, but it is the one thing a cleanup tool
+  would have to do.
+- The store-backed registry is only half the key story; the server's SSH host
+  key is machine-local (data dir, not the bucket) — see `17_ssh.md` §3.
+
+**Verdict.** Scale-safe where it matters: auth is O(1) per handshake at every
+population size; the UI path is bounded by per-user key counts; writes are
+constant. The 10k → 1M jump costs storage footprint and housekeeping, not
+user-visible latency. No redesign required; the UI-list self-sufficiency
+change is the documented lever if keys-per-principal ever grows large.
+
+---
+
+## E2 — Identity authz read path: conditional GET per request + LRU (2026-09-04)
+
+**Area:** identity + permissions, role resolution (`internal/identity` —
+`access.go` LRU, `gate.go` CheckRead/Resolve). Spec: `features/01` §4/§4.1.
+
+**Question:** every read request (git `info/refs`, upload-pack, LFS reads,
+repo-scoped API reads) resolves the caller's role. What does one resolution
+cost in store round trips, what does steady state transfer, and can the
+query count explode as teams/bindings grow?
+
+**Method.** Harness: `TestAuthzReadPath` in
+`internal/identity/evidence_test.go` (`go test ./internal/identity/ -run
+TestAuthzReadPath -v`; the access-LRU hit/miss counters log per run). Real
+`Service.Resolve`/`CheckRead` over the **memory store** wrapped in a
+counting decorator (total GETs, conditional vs full, bodies transferred vs
+304-class `NotModified`). Memory store isolates the resolution algorithm's
+shape from network RTT; the backend contract (`IfNoneMatch` → `NotModified`,
+pinned by the store contract suite on every backend) makes the shape
+backend-independent — over the network each probe is one sub-second
+control-plane GET and each hit transfers no body. Fixture: one private repo
+with 3 bindings (direct + 2 team refs), two teams, one org.
+
+**Results.**
+
+| path | store GETs | bodies transferred | shape |
+|---|---|---|---|
+| cold resolve (nothing cached) | 3 (access.json + 2 teams) | 3 | O(bindings): 1 + teams referenced |
+| warm resolve ×50 (steady state) | 150 (3/request) | **0** | flat — every probe 304-class |
+| after one team edit | 3 | 1 (the changed team) | lazy invalidation, then flat again |
+| anonymous public read | 1 (access.json only) | 1 cold / 0 warm | no team probes for anon |
+
+**Analysis.**
+
+- **O(1) per request, and it cannot explode.** A resolution is exactly one
+  conditional GET of `access.json` plus one conditional GET per *referenced*
+  team — bounded by the binding list length, which is itself bounded
+  (validated subjects, sorted array, human-rate writes; a repo with ten
+  thousand bindings would be an operator error, not a scaling law). Every
+  probe is an exact key. There is no LIST anywhere on this path
+  (team/org enumeration lives on collaboration pages and admin sweeps only).
+- **Steady state transfers nothing.** Entries are stamped by the store CAS
+  version; revalidation is a 304-class probe. The harness's 50 warm
+  resolutions cost 150 probes and 0 bodies — the LRU counters read
+  `hits=50 misses=1` for the access object. A changed version invalidates
+  lazily (exactly the ref→sha LRU pattern, 07 §5): one body on the next
+  probe, then flat again. Staleness is bounded by one request, never a TTL.
+- **Writes stay off the path.** Resolution never writes (synthesis is
+  read-only; materialization is the idempotent `access-bootstrap` op and the
+  CAS PUT path). Revocation latency is one in-flight request by design.
+
+**Over the network (S3/GCS/filesystem).** Same shape with per-probe RTT:
+one extra sub-second control-plane GET per `info/refs` for anonymous hot
+clones of public repos (01 §4.1 budget), never a LIST, never a body on
+revalidation. Bulk/control-plane transport separation is untouched — these
+are control-plane keys (`.json`) on the control-plane path.
+
+**Verdict.** The authz read path is constant per request at any population
+size: bounded probes, exact keys, zero steady-state bytes. No redesign
+required; if binding lists ever grew large the lever is a per-team roster
+projection, not a new index.
+
+---
+
+## E3 — Issue list/read path: index-first O(1), bounded LIST fallback (2026-09-04)
+
+**Area:** issues list + thread reads (`internal/issues` — `ListIssues`,
+`GetThread`, `scanHeaders`, `CompactIndex`). Spec: `features/02` §§2/7.
+
+**Question:** the default UI (issue list, thread page) must stay at O(1)
+store requests as repos accumulate issues and threads grow; the P4 LIST
+fallback that covers index staleness must itself be bounded so a degraded
+read cannot explode.
+
+**Method.** Harness: `TestEvidenceIssueReadPath` in
+`internal/issues/evidence_test.go`
+(`go test ./internal/issues/ -run TestEvidenceIssueReadPath -v`). Real
+`Service.ListIssues`/`GetThread` over the **memory store** wrapped in a
+counting decorator (GET/LIST/PUT per call). Memory store isolates the
+algorithmic shape from network RTT; every counted op is one bucket round
+trip on any backend. Populations: 10 issues (short thread: 5 comments) and
+300 issues (long thread: 60 comments + opened = 61 events).
+
+**Results.**
+
+| path | n=10 | n=300 | shape |
+|---|---|---|---|
+| list, default page (index-first) | 2 GET, 0 LIST | 2 GET, 0 LIST | **flat** — index + P2 counter, no LIST |
+| thread read, full first page | 7 GET, 1 LIST (6 events) | 62 GET, 1 LIST (61 events) | linear in **thread length** |
+| list, index deleted (fallback) | 12 GET, 1 LIST | 302 GET, 1 LIST | linear in **repo size**, bounded (below) |
+
+**Analysis.**
+
+- **The default list is flat because completeness is checked, not hoped
+  for.** `ListIssues` reads `issues/index.json` plus the P2 counter
+  (`meta/next_num`) — 2 GETs — and serves the window from the index alone
+  when every allocated number has a card. The counter check is what makes
+  "index-first" honest: a lost index update (10-CAS-fail drop, crash
+  between the header CAS and the index CAS) reads as incomplete and falls
+  through to the scan instead of silently hiding an issue. Same 2 GETs at
+  10 and 300 issues; no LIST on the happy path at any population.
+- **A thread read is linear in the thread, not the repo.**
+  `GetThread` = 1 header GET + 1 prefix LIST over that thread's `events/`
+  + 1 GET per event in the thread (61 events → 62 GETs). Threads are
+  human-rate append-only logs (comments, label/state changes, reactions);
+  a 10,000-comment thread would cost 10,001 GETs on a full read — which is
+  why the response windows at `n ≤ 200` (`after_seq` older-on-demand).
+  The scan itself stays exact-key GETs under one thread prefix; it never
+  touches another thread's keys. If threads ever grew hostile, the lever
+  is serving the tail window from a `startAfter` seq cursor (the `012x`
+  key order already supports it) — noted, not built: human threads do not
+  need it.
+- **The fallback cannot explode because every scan is prefix-bounded and
+  paged.** `scanHeaders` issues exactly 1 LIST over `issues/` and at most
+  `scanCap = 2000` header GETs; the response page is `n ≤ 100` (default
+  50). At 300 issues the degraded list costs 302 GETs — the whole repo,
+  once, and only while the index is incomplete (absent, mid-repair, or
+  compacted history). The 2000-cap means a 100,000-issue repo's fallback
+  still costs ≤ 2001 requests and serves the first 2000 headers' worth of
+  pages — degradation is linear-to-a-ceiling, never fan-out.
+- **Compaction keeps the happy-path object small.** Past ~256 KiB the
+  `issue-index-compact` CAS evicts oldest `closed_recent` first and
+  advances `compacted_through` monotonically in the same CAS; evicted
+  threads stay listable through the fallback above. Checked inline on
+  every index write (bytes in hand — cheaper than sampling), so the index
+  cannot grow past ~256 KiB + one card between compactions.
+
+**Over the network (S3/GCS/filesystem).** Same shape with per-op RTT: the
+default list is 2 control-plane GETs (`.json` keys); a full thread read is
+(2 + E) GETs for E events; a degraded list is (3 + H) for H headers up to
+the 2000 cap. No LIST on the happy path; one bounded LIST on the degraded
+path. These are all control-plane keys on the control-plane path —
+bulk transport separation is untouched.
+
+**Verdict.** The read path is flat where users look (list: 2 GETs forever)
+and linear-with-a-ceiling everywhere else (thread in its own length,
+fallback in repo size capped at 2000 headers, pages at 100). No redesign
+required; the tail-window cursor is the documented lever if threads ever
+grow beyond human scale.
+
+---
+
+## E4 — PR mergeability compute cost + merge task round-trips (2026-09-04)
+
+**Area:** pull-request mergeability + merge (`internal/pulls` —
+`ComputeMergeable`, `runMerge`, `HandleRefEvent`, task single-flights).
+Spec: `features/03` §§4/5/7.
+
+**Question:** mergeability must stay bounded as open PRs accumulate (the
+recompute runs on every thread fetch after a push); a merge must cost a
+bounded number of bucket round trips (the budgets in `features/15` spirit:
+no sequential store round trip added to a hot path); git usage must stay
+inside the bounded per-repo pool (no fan-out, no LIST on any path).
+
+**Method.** Harness: `TestEvidenceMergeabilityBudget`,
+`TestEvidenceMergeRoundTrips`, `TestEvidenceSinkNoList`,
+`TestEvidenceConcurrentRecomputeSingleFlight` in
+`internal/pulls/evidence_test.go`
+(`go test ./internal/pulls/ -run TestEvidence -v`). Real
+`Service.ComputeMergeable`/`runMerge`/`HandleRefEvent` over the **memory
+store** wrapped in a counting decorator (GET/PUT/LIST per call) plus a
+scripted `GitRunner` (exact argv shapes, call log, concurrency gauge).
+Memory store isolates the algorithmic shape from network RTT; every
+counted op is one bucket round trip on any backend. The git argv itself is
+proven separately against stock git 2.53 (`gitexec_test.go`: real clean
+AND conflicting `merge-tree` runs, `commit-tree`, rev-list counts,
+reachability pipeline, diff, log ranges). Populations: 1 and 50 open PRs.
+
+**Results.**
+
+| path | 1 open PR | 50 open PRs | shape |
+|---|---|---|---|
+| mergeability recompute | 3 GETs, 1 PUT, 0 LIST, 6 git calls | 3 GETs, 1 PUT, 0 LIST, 6 git calls | **flat** — sidecar + stamp, no index scan, no LIST |
+| merge task (squash→merge path) | 12 GETs, 5 PUTs, 0 LIST, 11 git calls, peak concurrency 1 | — (per-PR cost is population-independent) | **bounded** — re-verify + trial + commit + publish + P3/P4/P8 commit |
+| sink scan (one ref event, 5 open PRs) | ≤ 8 GETs, 0 LIST, 0 git (unrelated ref) | same | **flat in index size** — index-authoritative lookup, git only on recompute |
+| 16 concurrent recomputes, one head | 1 `merge-tree` total | — | **collapsed** — `"mergeable:"+repo/num` single-flight, joiners share |
+
+**Analysis.**
+
+- **Recompute is flat because the stamp is the invalidation key, not a
+  scan.** One recompute reads the thread header + pr.json + writes
+  mergeable.json (3 GETs + 1 CAS PUT — the loser's retry converges) and
+  runs exactly 6 pool-gated git calls (2 resolves, merge-base, merge-tree,
+  rev-list count, plus the ancestry probe). It never reads the shared
+  index and never LISTs — open-PR count is irrelevant by construction.
+  The thread fetch serves `unknown` + enqueues on mismatch instead of
+  computing inline, so a push storm degrades to one background pass per
+  repo (`pull-mergeable` batches all dirty PRs), never N reader-driven
+  merge-trees.
+- **A merge is bounded because every step is one object or one process.**
+  12 GETs (thread + sidecar reads, live ref resolves are git, policy.json,
+  closer inputs) + 5 PUTs (thread CAS, event Create, pr.json CAS, index
+  CAS, mergeable refresh) + 11 git calls (resolves, ancestry, merge-base,
+  trial, subject, commit-tree, plus the recompute's share). Zero LIST:
+  the duplicate check and the sink both read the index object, never scan
+  it. Git runs sequential through the pool (measured peak concurrency 1
+  on the sequential task path); the only fan-out in the package is the
+  reader single-flight, which collapses by design (16 → 1 measured).
+- **The sink scan is index-authoritative, not a sweep.** One ref event
+  costs 1 index GET + 1 GET per open PR sidecar (5 open PRs → ≤ 8 GETs
+  including the thread reads on head drift) and touches git only for PRs
+  whose base/head actually matched. An unrelated ref costs the scan and
+  nothing else — no recompute, no git, no LIST.
+
+**Over the network (S3/GCS/filesystem).** Same shape with per-op RTT: a
+recompute is 3 control-plane GETs + 1 CAS PUT + 6 local git execs (git
+runs on the serving host's materialized copy, not over the network); a
+merge is 12 + 5 plus the WAL publish's own manifest ladder (doc 05
+budgets, unchanged). No LIST on any pulls path at any population —
+collaboration LISTs stay on paginated UI pages (PR list enriches
+page-bounded sidecars, ≤ 100 GETs per page).
+
+**Verdict.** Mergeability is flat (3+1, 0 LIST, 6 git), merges are bounded
+(12+5, 0 LIST, 11 git, pool-sequential), the sink is index-cheap, and
+reader stampedes collapse to one trial merge. No redesign required; the
+levers if volume ever surprises are the mergeable batch window (already
+per-repo) and the list page size (already ≤ 100).
+
+---
+
+## E5 — Review-summary recompute + required-reviews gate at 5 and 100 reviews (2026-09-04)
+
+**Area:** code review rollup + merge gate (`internal/review`, spec
+`docs/features/04_code_review.md` §6).
+
+**Question:** what does a review-summary recompute cost, what does the
+merge-time gate scan cost inside the merge task, and why can't either one
+explode as review volume grows?
+
+**Method.** Harness: `internal/review/evidence_test.go`
+(`TestEvidenceReviewSummaryBudget`, `TestEvidenceGateScanBudget`;
+`go test ./internal/review/ -run TestEvidence -v`). Real service paths
+over the **memory store** wrapped in an op-counting decorator — the
+budgets count store round-trips (GET/PUT/LIST), which is the
+round-trip cost model (AGENTS law 6); memory isolates the algorithmic
+shape from network RTT. Populations: 5 reviews/2 threads ("normal") and
+100 reviews/20 threads (order of magnitude beyond — past any human PR).
+
+**Results.**
+
+| path | 5 reviews / 2 threads | 100 reviews / 20 threads | shape |
+|---|---|---|---|
+| summary recompute | 9 GETs, 1 PUT, 2 LISTs | 122 GETs, 1 PUT, 2 LISTs | linear in review+thread count |
+| gate scan (merge task) | 8 GETs, 0 PUTs, 1 LIST | 103 GETs, 0 PUTs, 1 LIST | linear in review count |
+
+**Analysis.**
+
+- **The recompute is linear because the summary is a fold over the
+  immutable set.** 2 LISTs (one prefix LIST over `reviews/`, one over
+  `threads/` — both bounded to ONE PR's collaboration subtree) + 1 GET
+  per review event + 1 GET per thread header + the requests GET + the
+  header read, and exactly 1 CAS PUT for the header write. 5+2+2 = 9;
+  100+20+2 = 122 — the formula is exact, no hidden fan-out. The LISTs
+  never leave the PR prefix (no cross-PR scan exists anywhere in the
+  package), and there are zero git calls on every review path by
+  construction (the package has no git seam).
+- **The gate scan is the same fold minus the writes, under its own
+  deadline.** Policy GET + header GET + sidecar GET + 1 LIST + 1 GET per
+  review (5+3 = 8; 100+3 = 103, exact). It runs inside the merge task's
+  context with `GateTimeout` (default 15 s); a blown deadline fails
+  closed. It NEVER reads `review_summary` — the verdict re-derives from
+  the event scan, so a poisoned or racing cache cannot decide a merge
+  (pinned by test: the gate passes with a deliberately poisoned summary
+  and fails only on the scan's verdict).
+- **Why it can't explode.** Three bounds compose: (1) the scan prefix is
+  one PR (`pulls/<num>/…`) — review volume is per-PR human output, and a
+  100-review PR is already past pathological; (2) no step fans out —
+  sequential GETs, one LIST per family, one PUT, zero git; (3) the write
+  side is CAS-arbitrated on the PR header, so concurrent submits
+  serialize on allocation (16-way submit burst converges with unique
+  seqs, measured in `TestConcurrentSubmits`) instead of amplifying reads.
+  There is no background dismisser, no cross-PR aggregation, and no
+  second writer — the summary is a render cache any racing writer
+  recomputes identically, and the gate doesn't trust it anyway.
+
+**Over the network (S3/GCS/filesystem).** Same shape with per-op RTT: a
+recompute at 100 reviews is ~122 control-plane GETs + 1 CAS PUT (no bulk
+lane, no git); the gate is ~103 GETs inside the merge task's deadline.
+Both stay on the control plane and off the git hot path at any
+population — the lever if a deployment ever saw thousand-review PRs is
+the page/window size, not a redesign.
+
+**Verdict.** Recompute and gate costs are exactly linear in per-PR review
+count with constant LISTs (2 and 1) and at most 1 PUT, measured on the
+real code path at both populations. No redesign required.
+
+---
+
+## E6 — Check report path + combined view + required-checks gate (2026-09-04)
+
+**Question:** what does one CI status report cost, what does the combined
+worst-of view cost, what does the merge-time gate scan cost inside the
+merge task, and why can't any of them explode as context count grows?
+
+**Method.** Harness: `internal/checks/evidence_test.go`
+(`TestEvidenceReportBudget`; `go test ./internal/checks/ -run
+TestEvidence -v`). Real service paths over the **memory store** wrapped
+in an op-counting decorator — the budgets count store round-trips
+(GET/PUT/LIST), which is the round-trip cost model (AGENTS law 6);
+memory isolates the algorithmic shape from network RTT. Populations: 1
+context and 20 contexts on one sha (20 is past any sane CI matrix for a
+single commit).
+
+**Results.**
+
+| path | 1 context | 20 contexts | shape |
+|---|---|---|---|
+| first report (per context) | 2 GETs, 2 PUTs, 1 LIST | 230 GETs, 40 PUTs, 20 LISTs (cumulative over 20 reports) | 2 PUTs + (2 + k) GETs + 1 LIST per report, k = contexts on the sha |
+| re-report (1 of k) | 4 GETs, 3 PUTs, 1 LIST | 23 GETs, 3 PUTs, 1 LIST | status CAS (GET + PUT) + re-read + index CAS + combined re-read |
+| combined view | 1 GET, 0 PUTs, 1 LIST | 20 GETs, 0 PUTs, 1 LIST | exactly 1 LIST + 1 GET per context |
+| gate scan (merge task) | policy GET + 1 LIST + k GETs | same shape | under GateTimeout (15 s), fails closed |
+
+**Analysis.**
+
+- **A first report is 2 PUTs (status Create + index CAS) + 2 GETs
+  (index read + combined re-read for the broadcast packet) + 1 LIST**
+  (the combined re-read's prefix LIST). A re-report adds the failed
+  Create attempt and the CAS re-read: 4 GETs + 3 PUTs (one PUT failed
+  with 412 — counted as an attempt, not a write) + 1 LIST.
+- **The per-report cost grows linearly in k** because the broadcast
+  packet carries the fresh combined state, which re-reads all k
+  contexts (1 LIST + k GETs, bounded parallel fan-out cap 8). This is
+  deliberate: the SSE `check` frame must not lag one write behind.
+  Reports are CI-rate (one system per context, human-driven pipelines),
+  never git-hot-path, so k GETs per report is the honest price of a
+  correct broadcast — measured, not assumed.
+- **The combined view is exactly 1 LIST + k GETs, 0 PUTs, 0 git.**
+  No commit resolution happens on the read path (POST validates the
+  sha; GET trusts it), so reads never touch the git pool.
+- **The gate scan is policy GET + statuses LIST + k GETs** (same fold
+  as combined, minus the index), under its own 15 s deadline; a blown
+  deadline fails closed. It NEVER trusts the index projection — the
+  verdict re-derives from the per-context objects, so a stale or racing
+  index row cannot decide a merge (same discipline as the review gate's
+  distrust of review_summary, E5).
+- **Index writes are best-effort.** A lost index CAS (writer died
+  between the status write and the index CAS, or 5-attempt exhaustion)
+  costs one stale table row until the next report — the per-context
+  objects are the backfill truth, and compaction is inline past 256
+  KiB / newest 500 shas. The table page degrades to LIST, never to
+  wrong.
+
+**Over the network (S3/GCS/filesystem).** Same shape with per-op RTT: a
+report at 20 contexts is ~22 control-plane GETs + 2 CAS PUTs + 1 LIST
+(no bulk lane, at most 1 git call on POST for sha validation, zero on
+every GET); the gate is ~k+1 GETs + 1 LIST inside the merge task's
+deadline. All control plane, all off the git hot path — the lever if a
+deployment ever saw hundred-context shas is the fan-out cap, not a
+redesign.
+
+**Verdict.** Report cost is constant PUTs (2–3) with GETs linear in
+per-sha context count; combined and gate reads are exactly 1 LIST + k
+GETs with zero writes and zero git. No redesign required.
+
+---
+
+## E7 — Notification fan-out write amplification + webhook delivery loop (2026-09-04)
+
+**Area:** notifications, subscriptions, mentions, webhooks (`internal/notify`).
+Spec: `docs/features/06_notifications.md` §4–§5.
+
+**Method.** Harness: `internal/notify/evidence_test.go`
+(`TestEvidenceFanoutAmplification`, `TestEvidenceDeliveryLoop`;
+`go test ./internal/notify/ -run TestEvidence -v`). Real service paths
+over the **memory store** wrapped in an op-counting decorator — the
+budgets count store round-trips (GET/PUT/LIST/HEAD), which is the
+round-trip cost model (AGENTS law 6); memory isolates the algorithmic
+shape from network RTT. Populations: 1 and 10 recipients per emission
+(the 100-recipient overflow path is covered by
+`TestOverflowDefersToFanoutTask`, which asserts full drain + task
+record); delivery measured over 5 queued events against a live sink plus
+the true idle pass.
+
+**Results.**
+
+| path | 1 recipient | 10 recipients | shape |
+|---|---|---|---|
+| one emission (subscribed) | 5 GETs, 4 PUTs | 23 GETs, 22 PUTs | 2 GETs + 2 PUTs per recipient + 3 GETs + 2 PUTs fixed |
+| deduped second emission (all still unread) | 4 GETs, 2 PUTs | 13 GETs, 2 PUTs | writes flat (activity only, zero notification/index writes); probes are 3 + n GETs |
+| delivery pass, 5 queued, live sink | 14 GETs, 8 HEADs, 6 PUTs, 1 LIST | — | ~3 GETs + 1 PUT per event + 1 cursor CAS; cursor 0 → 5 |
+| idle pass (cursor at head) | 3 GETs, 8 HEADs, 0 PUTs, 1 LIST | — | hooks LIST + cursor GET + head probe; writes nothing |
+
+**Analysis.**
+
+- **One emission is 2 GETs + 2 PUTs per recipient** (dedup probe +
+  idempotent Create, index CAS read + write) **plus 3 GETs + 2 PUTs
+  fixed** (thread title/author read, watchers read, seq-reservation
+  CAS, activity Create). No LIST on the emission path at any
+  population. The fixed cost is the price of §2 resolution without
+  event scans; the per-recipient cost is two CAS-arbitrated writes,
+  parallel under the cap-8 semaphore.
+- **The unread dedup makes replay WRITES flat (probes stay linear).** A
+  second emission while every recipient still holds a live entry costs
+  (3 + n) GETs + 2 PUTs — 4 + 2 at 1 recipient, 13 + 2 at 10 (3 fixed
+  probes for thread/watchers/seq plus one index probe per recipient) —
+  with zero notification objects and zero index rewrites at any
+  population. Each emission mints a
+  distinct activity seq by design: a crash loses the fan-out per P8
+  (it never replays it), so retries mint no duplicate webhook
+  delivery keys.
+- **A delivery pass is 1 LIST (hooks) + ~3 GETs + 1 PUT per event**
+  (event read, POST, ring CAS) **+ 1 cursor CAS**; the cursor advances
+  only past 2xx deliveries (at-least-once, per-hook isolation — a
+  refused sink holds its own cursor at 0 while others advance). The
+  idle pass is 1 LIST + 3 GETs + 8 HEADs (the bounded honest-gap
+  probe) and **zero writes**.
+- **Overflow is the bound, not the cliff.** Past 100 recipients the
+  request writes only the activity event (recipients in its payload as
+  the durable queue) and returns; `notify-fanout` drains the set
+  idempotently (deterministic ids + index dedup) under the same 5 s
+  budget. A 1 000-watcher repo costs one request-side activity write,
+  not 1 000 synchronous CAS rounds.
+
+**Over the network (S3/GCS/filesystem).** Same shape with per-op RTT:
+a 10-recipient comment is ~23 control-plane GETs + ~22 small-JSON
+PUTs, all off the git hot path (collaboration rate, human-driven);
+webhook POSTs are the only wide-area calls (10 s each, per-hook
+sequential, hooks parallel). The lever if a deployment ever saw
+pathological mention storms is the sync cap + budget, not a redesign.
+
+**Verdict.** Fan-out amplification is linear with slope 2+2 per
+recipient and a 5-op fixed cost; deduped replays write flat (2 PUTs at
+any population, probes 3+n GETs); delivery is
+one cursor CAS per pass with zero-write idles. No redesign required.
+
+---
+
+## E8 — Release latest-pointer, autodraft, asset streaming, social counters (2026-09-04)
+
+**Area:** releases, assets, stars, watches (`internal/releases`,
+`internal/social`). Spec: `docs/features/07_releases_stars.md` §§1–7.
+
+**Method.** Harnesses: `internal/releases/evidence_test.go`
+(`TestEvidenceLatestHotRead`, `TestEvidencePublishCost`,
+`TestEvidenceListCost`, `TestEvidenceAutodraftCost`,
+`TestEvidenceAssetStreamingCap`;
+`go test ./internal/releases/ -run TestEvidence -v`) and
+`internal/social/evidence_test.go` (`TestEvidenceSocialCosts`;
+`go test ./internal/social/ -run TestEvidence -v`). Real service paths
+over the **memory store** wrapped in op-counting decorators (same shape
+as E3/E7 — budgets count store round-trips, the AGENTS law 6 cost
+model); git calls run against scripted fakes with call counts (argv is
+covered against real git by `TestSubprocessGitReal`). Populations: 5
+vs 200 releases, 5 vs 50 merged PRs, 3 vs 60 vs 600 stars — normal and an
+order (then two) of magnitude beyond, so flat-vs-growing is visible in the table.
+
+**Results.**
+
+| path | small population | large population | shape |
+|---|---|---|---|
+| latest hot read (pointer verifies) | 5 releases: 2 GETs | 200 releases: 2 GETs | **flat** — pointer GET + target GET, 0 LIST |
+| publish (create-published + monotonic pointer) | 3 GETs, 2 PUTs | — | header CAS (1+1) + pointer CAS (2+1: pointer read, target-date read, write) |
+| list page (n=50) | 5 releases: 1 LIST + 5 GETs | 200 releases: 1 LIST + 200 GETs | 1 LIST + 1 header GET per release (cap 1 000) |
+| autodraft | 5 PRs: 12 GETs, 5 git probes | 50 PRs: 102 GETs, 50 git probes | 1 index + 2 per candidate, 1 ancestry probe per candidate (cap 100), 0 LIST |
+| 1 MiB asset upload (4 MiB cap) | 2 GETs, 2 PUTs | — | header probe + bytes Create + header CAS; spool dir empty after |
+| over-cap upload (declared + streamed) | 413, 0 PUTs | — | rejected before any store write |
+| star | 2 GETs, 1 HEAD, 2 PUTs | — | record probe + manifest HEAD + Create + counter CAS |
+| unstar | 2 GETs, 1 HEAD, 1 PUT, 1 DELETE | — | record probe + Delete + manifest HEAD + counter CAS (ghost unstar skips the CAS: 1 GET + 1 HEAD + 1 DELETE, 0 PUTs) |
+| fork increment | 1 GET, 1 PUT | — | counter CAS only |
+| starred list (n=50) | 3 stars: 1 LIST + 3 GETs + 3 HEADs | 60 and 600 stars: 1 LIST + 51 GETs + 51 HEADs, `more`; page 2 at 60 stars probes only the 10 remaining | 1 LIST + 1 GET + 1 manifest HEAD per served record (+1 `more` probe); keyset pages over the key space, flat in the total (#65) |
+
+**Analysis.**
+
+- **Latest is O(1) by construction and monotonic by CAS.** The hot
+  read is 2 GETs at any population (pointer + target, zero LIST —
+  the repo-home "Latest" badge never scans). Publishers CAS the
+  pointer only when strictly newer (`created_at` compare inside the
+  loop), so concurrent publishers converge regardless of CAS order;
+  a stale/dangling pointer self-heals through the bounded scan
+  (≤ 100 bodies) and lazily repairs — correctness never depends on
+  the pointer.
+- **Autodraft git usage is one probe per candidate, capped at 100,**
+  under the package pool (never bare on request goroutines): 5
+  probes at 5 PRs, 50 at 50 (only `merge-base --is-ancestor` against
+  the tag, plus the since side when bounded). Store cost is 1 index
+  GET + 2 per candidate (thread + sidecar), zero LIST — the shared
+  index window is the candidate source (P4 hot window; pre-window
+  merges fall out of scope by documented decision, same class as
+  P4). A 100-PR backfill is 200 short argv runs, not a task.
+- **Asset uploads never buffer in memory.** The 1 MiB upload costs 2
+  GETs + 2 PUTs with zero bytes retained in-process (spool to
+  `cache.dir/release-spool`, sha256-verified before the Create,
+  spool removed after — the harness asserts an empty spool dir).
+  Declared-over-cap 413s before reading the body; lying lengths
+  trip the streaming cap; both write nothing (0 PUTs at rejection).
+  Bytes-first-then-header means a crash leaves orphan bytes
+  (harmless, Create-only) and never a dangling header entry — the
+  clash resolver verifies stored bytes on the failure path only.
+- **Social writes are constant and idempotent.** Star/unstar converge
+  on the record Create/Delete (412 = already there — no double
+  count); the counter CAS is field-scoped (stars/forks move,
+  `watcher_list` passes through for 06's fan-out). Fork completion
+  is one counter CAS (1 GET + 1 PUT) on the parent. Since #63 every
+  star-path carries one manifest HEAD (fail-open miss-tolerance for
+  deleted repos; ghost unstars skip the counter CAS instead) and the
+  starred list carries one HEAD per SERVED record — O(page) per page (the
+  n+1st probe decides `more` exactly), flat in the total starred count:
+  keyset pagination over the key space replaced the full-prefix scan
+  (#65: 51 GETs + 51 HEADs on page 1 at both 60 and 600 stars, page 2
+  probing only the remainder).
+
+**Over the network (S3/GCS/filesystem).** Same shape with per-op RTT:
+the hot paths are small-JSON control-plane ops at human rate; the
+only bulk transfer is the asset byte stream itself (spooled, hashed,
+single PUT). The levers are the asset cap (operator-set,
+`releases.max_asset_bytes`) and the 100-PR autodraft bound — no
+redesign required.
+
+**Verdict.** Latest reads flat (2 GETs); publish/list/autodraft are
+linear with slope ≤ 2 per item and zero LIST on every path except
+the paged list (1 LIST by design); uploads are streaming with a
+hard cap; social writes are constant. No redesign required.
+---
+
+## E9 — Collab stream fan-out + invalidation coalescing (2026-09-04)
+
+**Area:** the ONE repo collaboration stream (08 §4): `internal/notify`
+repoBus (`stream.go`, `collab.go`) + the data-layer invalidation path
+(`web/src/lib/data.js`, `web/src/lib/collab.js`). Spec:
+`docs/features/08_ui_sdk.md` §§4/6.
+
+**Question:** what does one repo-frame publish cost as subscribers grow,
+what survives a stalled page, and how many client refetches does a
+30-check CI burst cause (vs naive per-frame invalidation)? What does a
+warm revisit cost (cache-hit shape)?
+
+**Method.** Harnesses (all real code paths, no mocks for the layer under
+test):
+- `internal/notify/collab_evidence_test.go` (`TestEvidenceCollabFanout`,
+  `TestEvidenceCollabDropOldest`;
+  `go test ./internal/notify/ -run TestEvidenceCollab -v`): 2000
+  `PublishFrame` calls over the **memory store** with 1 vs 128 live
+  subscribers; 200 publishes against a never-read subscriber.
+- `web/test/evid/collab-burst.mjs`
+  (`node --conditions=browser web/test/evid/collab-burst.mjs`;
+  needs `web/node_modules`): the real `useData` + `invalidateCollab` +
+  `scheduleInvalidate` with counting fetch fns — warm revisit, then 30
+  synthetic `check` frames in one tick. (Plain `node --test` resolves
+  SolidJS to its SSR build where effects no-op, so this lives outside
+  `make test-web`, which stays install-free per 12 §5.)
+- Live-browser corroboration: headless Chrome against the compose stack —
+  30 real `POST …/checks/statuses/{sha}` calls while the checks page
+  holds the stream open, counting `GET …/api/checks*` refetches.
+
+**Results.**
+
+| Population | Publish cost | Client refetches |
+|---|---|---|
+| 1 subscriber, 2000 frames | 646 ns/publish | — |
+| 128 subscribers, 2000 frames | 10.5 µs/publish (linear in subs, zero store round-trips — the bus never touches the store) | — |
+| 200 publishes, 1 stalled subscriber | 110 µs total (emission never waits) | channel holds newest 16, ring holds newest 64 (`RepoRing`), newest num 199 |
+| 30-frame check burst (harness) | — | 2 refetches per key (`checks`, `statuses`, index) — 15× fewer than per-frame |
+| 30-report CI burst (live browser, headless Chrome vs compose stack) | — | 1–2 `GET …/api/checks?n=50` refetches across runs; 0 API GETs in 5 s idle (no polling loops) |
+| warm revisit inside TTL (harness) | — | 0 refetches |
+
+**Verdict.** Fan-out is linear in subscribers at ~80 ns/sub with zero
+store round-trips; stalled pages shed (never stall emission, never grow
+past 16 + 64 frames); bursts collapse to ~2 refetches per key via the
+per-tick key-set flush + per-key single-flight; warm revisits transfer
+nothing. Cannot explode: drop-oldest bus, bounded ring, bounded flush.
+
+---
+
+## E10 — Push fast path with the collab layer mounted + full-chain timing (2026-09-04)
+
+**Area:** rollout integration — the §5 invariant that the push fast path
+gains zero bucket round trips (`cmd/walhub`, `internal/e2e`). Spec:
+`docs/features/09_rollout.md` §5.3.
+
+**Question:** with all eight feature packages mounted (every `ExtraRoutes`
+handler chained, the identity `require_read` gate wired — the shipped
+composition, not a stub), does a git push touch ANY collaboration key
+family? And how long is the whole
+org → team → bindings → issue → PR → review → checks → gates → merge →
+release → notification/webhook → fork → cross-fork PR chain on a real
+stack with real git?
+
+**Method.** Two harnesses, both the real code path:
+- `TestPushFastPathZeroCollabRoundTrips` in `cmd/walhub/push_budget_test.go`
+  (`go test ./cmd/walhub/ -run TestPushFastPath -v`): the shipped
+  composition (`buildCollab`, the same function `serveHTTP` calls) over
+  the **memory store** wrapped in a prefix-counting decorator, served over
+  real HTTP (`httptest`), pushed twice with the **real git binary**
+  (cold auto-create + warm). Memory isolates the shape from network RTT;
+  every counted op is one bucket round trip on any backend. Collab
+  families: `orgs/`, `users/`, and `repos/<o>/<r>/` under `access.json`,
+  `meta/`, `issues/`, `pulls/`, `checks/`, `releases/`,
+  `collab-events/`, `webhooks/`, `fork.json`. `policy.json` is
+  deliberately NOT collab: the push rule language predates the layer and
+  its push-enforceable effects evaluate on the push path by design.
+- `TestE2E_CollabFullChain` in `internal/e2e/collab_test.go`
+  (`make e2e`, skipped in `-short`): token-mode server subprocess
+  (alice admin + bob writer), real git, real webhook sink. Phase timings
+  log per run.
+
+**Results.**
+
+| push | bucket ops | collab-family ops |
+|---|---|---|
+| cold (auto-create, `info/refs` + `receive-pack`) | 8 (get + put mix) | **0** |
+| warm (existing repo, `info/refs` + `receive-pack`) | 9 | **0** |
+
+| chain phase | wall (this run) |
+|---|---|
+| push seed (real git) | 32 ms |
+| org/team/bindings | 5 ms |
+| watch+webhook | 1 ms |
+| issue create | 1 ms |
+| branch push (real git) | 31 ms |
+| PR open (`fixes #1`) | 13 ms |
+| approval review | 2 ms |
+| gates (blocked merge → error + green combined) | 511 ms |
+| merge + close-on-merge | 523 ms |
+| release + latest | 44 ms |
+| tray + webhook | 2 ms |
+| fork + cross-fork PR | 80 ms |
+| **full chain** | **2.2 s** (+ ~5 s binary build, once per process) |
+
+Environment: linux, go1.27.1, stock git 2.53.0, memory store
+(budget test) / filesystem store (chain test).
+
+**Analysis.**
+
+- **Zero is structural, not incidental.** The push path resolves auth
+  through the static token table, evaluates only push-enforceable policy
+  effects (`ProtectEffect.Evaluate` never consults `RequireChecks` —
+  `internal/policy/effect_protect.go`), and publishes through the WAL
+  funnel. Collaboration handlers are reachable only through their HTTP
+  routes; the `require_read` gate fires on git/LFS *read* paths, never on
+  receive-pack. There is no code path from a push to a collab key — the
+  test is the regression fence: any future push-path read of
+  `access.json`, a team roster, or an index object fails it.
+- **The one by-design exception is priced in.** A `policy.json` carrying
+  `team:`/`role:` spellings pays identity expansion reads on push
+  (bounded: one exact-key GET per referenced team, 304-class when warm —
+  E2). The fence counts those as collab on purpose: the day a push pays
+  them, the test names the key. Today's push (no policy file) pays none.
+- **The chain is fast because every step is O(1)-ish.** The slowest
+  phases are the two that run real git (merge task: trial merge +
+  commit-tree + WAL publish, ~0.5 s) and the gate round trip (blocked
+  task failure + status report + combined re-read, ~0.5 s). Everything
+  else is single-digit milliseconds — the collaboration layer adds no
+  human-visible latency to any step.
+
+**Verdict.** The push fast path is collab-free by construction and pinned
+by a failing-if-touched test; the full collaboration chain runs in ~2 s
+on a real stack. No redesign required; the levers on the merge path stay
+the per-package ones (E4–E7).
+
+---
+
+## E11 — Repository import cost: flat control plane across S/M (2026-09-04)
+
+**Area:** repository import from a git source (`internal/repoimport`).
+Spec: `docs/features/10_git_import.md` §8.
+
+**Question:** what does one URL import cost in store round trips, and does
+the cost grow with repo size (commits/refs)?
+
+**Method.** Harness: `internal/repoimport/evidence_test.go`
+(`go test ./internal/repoimport/ -run 'TestEvidenceImportBudget|TestEvidenceImportFlat' -v`).
+The REAL `Service.RunHeadless` path (clone → publish → provenance) over
+the **memory store** wrapped in a class-counting decorator, with the REAL
+identity service (importer-admin write included) and the **real git
+binary**. Fixture remote = local `file://` repo repacked into the PINNED
+single-pack layout (`repackSingle` asserts exactly one source pack, so
+Npacks = 1 and the ops range is tight) at two populations — S: 50
+commits + 2 branches + 2 tags; M: 400 commits + 10 branches + 10 tags.
+Memory store isolates the import's algorithmic shape from network RTT
+(same gating as the keybench E1 precedent); absolute wall times are
+environment-bound (this workstation is a QEMU VM) — the *shape* (flat
+control plane, wall linear in pack bytes) is the durable claim.
+
+**Results.**
+
+| population | GETs+HEADs | PUTs total (control) | LISTs | pack bytes (bulk, unbudgeted) | wall | refs landed |
+|---|---|---|---|---|---|---|
+| S (50c/2b/2t) | 6 | 14 (12) | 0 | 23,686 | ~40 ms | 5 |
+| M (400c/10b/10t) | 6 | 14 (12) | 0 | 238,485 | ~74 ms | 21 |
+
+Control PUTs = manifest Create + log segment(s) + checkpoint/refs pair +
+access.json + import.json + per-pack `.idx` (2 packs: tier-0 reuse +
+tier-2 base). Bulk `.pack` bytes are reported, not budgeted (plan §7:
+"bulk pack bytes excluded by definition").
+
+**Analysis.**
+
+- **Flat because everything scales with packs and refs, never with
+  commits.** Ref enumeration is local (`for-each-ref` on scratch, capped
+  by `import.max_refs`); the ref publish is ONE transaction regardless
+  of ref count; pack traffic is one PUT per pack (single-pack fixture ⇒
+  constant). S→M grows commits 8×, refs 4×, pack bytes 10× — control
+  ops do not move (6/12 at both sizes; the flatness test fails past +4).
+- **Zero LIST by construction:** every store touch is an exact-key probe
+  or create (manifest HEAD, import.json GET, pack/idx PUTs, CAS writes).
+- **Wall grows with pack bytes only** (40 ms → 74 ms for 10× bytes) —
+  git time (clone, repack) dominates, and both are pool-gated with ctx
+  timeouts, off the request path, off the hot path.
+- **Cannot explode:** exact-key probes only; no lock held across I/O
+  (the target has no handle pre-create); clone concurrency capped at
+  `import.max_concurrent = 2` (saturation fails loudly); scratch swept
+  per attempt; cancel-before-commit leaves only inert orphans.
+
+**Verdict.** Import adds zero round trips to any hot path (it is a task,
+and the push-budget fence stays green with the surface mounted) and its
+own cost is a flat 6 + 12 + 0 LIST range at both populations. No
+redesign required; the levers are the documented `[import]` keys.
+---
+
+## E12 — Landing concept GIFs: byte budgets + page weight (2026-09-08)
+
+**Area:** landing page concept assets (`internal/devtools/landinggif`,
+`web/public/concepts/`, `/_ui/concepts/` static lane). Spec: Forgejo #187
+plan §3.2–§3.3.
+
+**Question:** four animated 640×360 diagrams plus stills must fit the plan
+budgets (≤ 30 KB each, collab ≤ 40 KB, stills ≤ 4 KB each, total ≤ 150 KB)
+without new dependencies — and the landing page itself must stay light
+(static shell + one JS/CSS pair + lazy images, zero API calls).
+
+**Method.** Harness: the generator itself
+(`go run ./internal/devtools/landinggif -out web/public/concepts/`; wall
+time printed per run) plus `TestBudgets` in
+`internal/devtools/landinggif/main_test.go`
+(`go test ./internal/devtools/landinggif/ -run TestBudgets -v` — fails past
+any budget). Real `gif.EncodeAll` output over the stdlib encoder; sizes are
+file bytes on disk. Page shell/bundle sizes from `make web` (vite 8.2.2 +
+esbuild 0.25.0). Backend: filesystem store — irrelevant by construction
+(static bytes served from the embedded `dist/` tree, zero store round
+trips; the landing page makes zero API calls, pinned by
+`web/test/unit/landing.test.js`).
+
+**Results.**
+
+| asset | frames | bytes | budget | headroom |
+|---|---|---|---|---|
+| `push.gif` | 7 | 16,773 | ≤ 30 KB | 45% |
+| `bucket.gif` | 7 | 17,793 | ≤ 30 KB | 42% |
+| `fetch.gif` | 6 | 15,874 | ≤ 30 KB | 48% |
+| `collab.gif` | 7 | 22,912 | ≤ 40 KB | 44% |
+| 4 stills (frame 0 each) | 1 each | 2,227 / 2,569 / 2,493 / 1,977 | ≤ 4 KB each | ~40% |
+| **GIF total** | | **82,618** (~80.7 KiB) | ≤ 150 KB | 46% |
+
+| landing page piece | bytes | transfer note |
+|---|---|---|
+| `dist/index.html` (shell) | 669 | no-cache + ETag |
+| `dist/assets/index-*.js` | 430,372 (124,754 gzip) | immutable, one fetch |
+| `dist/assets/index-*.css` | 71,795 (11,443 gzip) | immutable, one fetch |
+| 4 stills (first paint) | 9,266 | `loading="lazy"`, below the fold |
+| 4 animated (after swap) | 73,352 | lazy; reduced-motion users never fetch |
+| `make landing-gifs` wall | ~55 ms | manual target, never on the build path |
+
+Frame timings (delays in 100ths): push `200 50 50 60 180 180 200`
+(~9.2 s); bucket `200 60 200 60 50 50 220` (~8.4 s); fetch
+`200 60 150 50 200 200` (~8.6 s); collab `200 60 150 150 150 200 200`
+(~11.1 s). Every hold ≥ 150 (key holds ≥ 180/1.8 s), every motion step ≥ 50
+(0.5 s, above browser minimum-delay clamping), ≤ 3 moving elements per
+frame, numbered captions baked on every frame.
+
+**Analysis.**
+
+- **Flat colors are near-optimal for LZW.** The diagrams use 5 palette
+  entries and large solid areas, so per-frame marginal cost is ~1.5–2 KB
+  (measured, not estimated — the planning spike's 3-frame 6.3 KB rate
+  predicted 60–75 KB total; the shipped scenes land at 82.6 KB including
+  stills, inside the 150 KB ceiling with 46% headroom).
+- **The page costs one JS + one CSS fetch.** The 430 KB JS bundle dominates
+  first paint (~125 KB gzip); the GIFs are lazy below the fold and the
+  stills (~9 KB total) paint first. A reduced-motion visit never fetches
+  the animated bytes at all.
+- **Determinism is the review story.** Fixed palette order, fixed frame
+  order, no timestamps, no map iteration in the encode path: two encodes
+  are byte-identical (`TestDeterministic`), and regeneration is
+  byte-equal to the checked-in files (`TestFreshness`) — generator drift
+  fails CI instead of shipping silent pixel changes.
+
+**Verdict.** All four GIFs + stills fit the budgets with ~45% headroom;
+the landing page adds no API/store cost to the front door. No redesign
+required; the lever if scenes ever grow richer is fewer frames per loop,
+not a new format (APNG/WebP need non-stdlib encoders — out of budget).
+
+---
+
+## E13 — Self-heal serving cost: no change (2026-09-08)
+
+**Area:** summary `health`, `empty repository:` 404 marker, overview `fsck`
+projection (`internal/api/health.go`, `summary.go`, `overview.go`,
+`bind_wal.go`; issue #209).
+
+**Question:** do the new classifiers add store round trips to any budgeted
+path (15_testing.md §4.1: push ≤ 5, warm refs 1, cold refs 2, checkpoint 4)?
+
+**Method.** Harness: `TestSummaryOverviewRoundTrips` in
+`internal/api/health209_test.go` (`go test ./internal/api/ -run
+TestSummaryOverviewRoundTrips -v`) — a per-key counting `ObjectStore`
+decorator over the **memory store** around the real mounted handlers (no
+fakes for the layer under test: the probe runs the production
+`probeFsck` → `store.GetBytes` path). The sim budgets measure *engine* ops
+(push/sync/checkpoint); this entry measures the *handler* layer those
+budgets never call.
+
+**Results** (store GETs per request, memory backend).
+
+| path | GETs | shape |
+|---|---|---|
+| `GET …/api` on an empty repo | **≤1** | placeholder sidecar probe only (#210); the fsck probe stays skipped — branch on data in hand |
+| `GET …/api` on a non-empty repo (probe miss or hit) | **1** | exact-key `fsck.pb` probe, never LIST |
+| `GET …/overview` (report absent or present) | **1** | exact-key probe, stated (R1 B1) |
+| push / refs-sync / checkpoint engine paths | **0 new** | no handler code on those paths; sim assertions untouched |
+
+The resolve-path marker predicate is in-hand snapshot + in-memory manifest
+snapshot (0 trips); the serve-level recipes snapshot only on the failure
+path (law 6). What the UI *removes* dwarfs what the server adds: the
+suppressed empty-repo resolve + `commits?n=1` probes save 1–2 requests per
+empty-repo Code-tab load (12_web_ui.md §2.4), and the summary itself is
+SWR-cached (`max-age=0, stale-while-revalidate=60`, 5 s data-layer TTL).
+
+**Verdict.** No budget change: the only new trips are single exact-key
+probes on the SWR summary read (non-empty only) and the no-store admin
+overview — both off the law-6 budgeted paths. Cannot regress silently:
+`TestSummaryOverviewRoundTrips` fails on any second probe, any LIST, or any
+`fsck.pb` probe on the empty path. (Issue #210 adds the one stated exception:
+the empty path may carry the placeholder *sidecar* probe — ≤1 GET, never the
+fsck probe; see E14.)
+
+## E14 — Explicit create-repo placeholder cost: create window, +0 push, +0 real summary (2026-09-08)
+
+**Area:** placeholder create (`PUT ?placeholder=true`, `POST /api/v1/repos`),
+first-push adoption (`pushPipeline` + `api.PlaceholderHints`), summary
+`placeholder` projection, org gate + eager `access.json`
+(`internal/api/placeholder.go`, `summary.go`, `internal/server/bind_ssh.go`,
+`internal/identity/creategate.go`; issue #210, R1 + review normative).
+
+**Question:** do placeholder create, first-push adoption, and the summary
+projection add store round trips to any budgeted path (15_testing.md §4.1:
+push ≤ 5, warm refs 1, cold refs 2, checkpoint 4)?
+
+**Method.** Harnesses (all over the **memory store** unless noted):
+`TestSummaryOverviewRoundTrips` (`internal/api/health209_test.go`, extended —
+per-key counting decorator over the real mounted handlers); the new
+`TestPushFastPathZeroCollabRoundTrips`-adjacent unit pins
+(`internal/server/placeholder_adopt_test.go` — hint-gated delete counting);
+the live two-transport proof below (real `git` binary over HTTP + SSH against
+a filesystem-store server on this workstation: create → placeholder view →
+`git push -u origin main` → real).
+
+**Results.**
+
+| path | cost | shape |
+|---|---|---|
+| placeholder create | **1 window** | manifest Create, then sidecar + access Creates in parallel (independent keys, law 6); second's 412 after first's success is adopt, never rollback (manifest-without-sidecar is a valid empty repo) |
+| first push (HTTP and SSH) | **+0 on-response** | no marker read on the hot path ever; the marker clear is a hint-gated post-CAS post-response fire-and-forget Delete (same-process hint only — unhinted pushes issue zero marker ops, pinned by the unmodified push-budget test: cold 8 / warm 9 ops, 0 collab keys) |
+| `GET …/api` on an empty repo | **≤1** | sidecar exact-key probe only (fsck probe still skipped); real repos +0 (branch on data in hand) |
+| `GET …/api` on a real repo | **+0** | stale markers carry no projection (never marker alone) |
+| org gate (create only) | **+1** | one exact-key `members.json` GET on the human-rate create path, never hot |
+| sim budgets (push/sync/checkpoint) | **unchanged** | engine paths untouched; `make sim` assertions hold |
+
+Live proof (2026-09-08, filesystem backend, zero-config `auth:none` + SSH key
+registry): `PUT …?placeholder=true` → 201 `{placeholder:true, clone_url}`;
+summary `health:"empty"` + `placeholder:{created_by,created_at,expires_at:null}`;
+same-principal re-PUT → 200 `already:true`; flag-less re-PUT → legacy 409;
+`POST /api/v1/repos` → 201 + `Location:` (discovery lists `/api/v1/repos`);
+real `git push -u origin main` over HTTP **and** SSH each landed first try
+(no 409); summary flipped `empty→healthy` with the projection gone; bucket
+scan confirmed the marker deleted for pushed repos and retained for the
+unpushed one; `DELETE` → 204 and re-create → 201. Real-Chromium pass
+(`cdp210a/b.mjs`, HeadlessChrome over :9222, `walgit.localhost` canonical
+host): `/new` form → create → placeholder view (verbatim clone URL, push
+commands, creator line, delete affordance), same-principal re-create
+navigates (200 `already:true`), real `git push` → Code tab renders the tree
+(guide cleared), `/new` in light — 24/24 checks, both themes, zero toasts,
+console clean (screenshots `cdp210-shots/`).
+
+**Verdict.** No budget change: the create window parallelizes, the push path
+gains zero on-response trips (zero total when unhinted), and the summary
+projection is empty-only. Cannot regress silently: the round-trip test fails
+on any second probe or any fsck probe on the empty path, the push-budget
+test fails on any collab key touched by a push, and the adopt tests fail on
+any unhinted marker op.
+
+---
+
+## E15 — Mirror sync cost: flat control plane + bounded refusal/summary probes (2026-09-09)
+
+**Area:** pull-only mirrors with scheduled upstream syncs
+(`internal/mirror`, `internal/server` funnel, `internal/api` summary).
+Spec: `docs/features/11_mirror.md` §7.
+
+**Question:** what does one sync fire cost in store round trips, does it
+grow with repo size, and what do the push-refusal revalidation and the
+summary projection add to the budgeted push/summary paths?
+
+**Method.** Harness: `internal/mirror` `TestSyncRoundTrips`
+(`go test ./internal/mirror/ -run 'TestSyncRoundTrips' -v`) — the REAL
+`Service.SyncNow` path (lease → clone → ingest → converge → outcome)
+over the **memory store** wrapped in a family-counting decorator, with
+the **real git binary** and `file://` fixture upstreams at two
+populations — S: 3 commits + 1 branch; M: 31 commits + 3 branches.
+Memory store isolates the algorithmic shape from network RTT (the E11
+gating); absolute numbers are environment-bound — the *shape* (flat
+control plane, converge-only no-ops, zero LIST) is the durable claim.
+Push numbers come from the updated push-budget test
+(`cmd/walhub` `TestPushFastPathZeroCollabRoundTrips` — the shipped
+composition WITH the mirror guard wired, real git over smart HTTP).
+
+**Results.**
+
+| fire | GETs | HEADs | PUTs | DELETEs | LISTs | total |
+|---|---|---|---|---|---|---|
+| first sync S (3c/1b) | 8 (mirror 3, lease 2, manifest 2, import-claim 1) | 1 (pack probe) | 10 (wal packs 2, manifest 3, log 2, lease 1, sidecar 2) | 1 (lease) | 0 | 22 |
+| first sync M (31c/3b) | 8 | 1 | 10 | 1 | 0 | 22 |
+| no-op fire (either) | — | — | 0 pack/manifest/log | — | 0 | +11 (lease 4, sidecar 4, claim 1, pack probes 2) |
+| push, cold (auto-create) | — | — | — | — | 0 | 11 bucket ops (E15-era 10, +1 #248 sidecar PUT — see E16) |
+| push, warm (existing) | — | — | — | — | 0 | 10 bucket ops (E15-era 9, +1 sidecar PUT); every other collab family 0 |
+| summary | +1 exact-key sidecar GET **only when the mirror hook is set** (SWR-cached + `~m` ETag'd) | — | — | — | 0 | — |
+
+Pack bytes are bulk (reported, not budgeted — the E11 rule); wall time
+is git-clone dominated and environment-bound.
+
+**Analysis.**
+
+- **Flat because everything scales with packs and refs, never with
+  commits.** Ref enumeration is local (`for-each-ref` on scratch); the
+  converge is ONE atomic `PublishRefs` regardless of moved-ref count;
+  pack traffic is one PUT per pack (single-pack fixtures ⇒ 1 pack, 1
+  idx). S and M differ only in pack bytes.
+- **No-op fires are converge-only.** Nothing moved ⇒ no `AddPack`, no
+  manifest/log PUTs, no outcome-shape change beyond the success stamp;
+  the 11 ops are lease (4) + sidecar (4) + claim probe (1) + pack
+  presence probes (2).
+- **The refusal revalidation is exactly 2 probes per push** (discovery +
+  funnel), both exact-key, both 404-free on non-mirrors. Law 4
+  probe-don't-list class; "every read revalidates" — a repo that just
+  became a mirror refuses the next push with no cache to poison. The
+  push-budget test pins the bound (≤ 6 probe ops for 2 pushes, every
+  other collab family zero).
+- **The loop never LISTs.** Enumeration is the in-memory registry + one
+  sidecar probe per repo per minute; the lease (CAS+TTL) bounds
+  duplicate work across maintain hosts to one winner + narrated skips.
+
+**Verdict.** Sync cost is flat and LIST-free at both populations;
+steady-state (no-op) fires write nothing but the outcome stamp; push
+and summary each gain exactly the stated probes, all pinned by failing
+tests. Cannot regress silently: the round-trip test fails on any LIST,
+the push-budget test fails on any non-mirror collab touch or probe
+overrun, and the summary ETag test fails on any unstamped outcome
+change.
+
+**Live proof (2026-09-09, filesystem backend, zero-config `auth:none`,
+real `git` binary — no mocks).** Upstream fixture (local `file://`
+repo, 2 commits) → `POST /api/v1/repos/mirrors` (hourly) → 202 with a
+`mirror-sync` task id → `GET …/mirror/sync?id=` shows `done:true`,
+`ok:true`, narration `cloning … / published 1 ref(s)`; summary carries
+`mirror:{upstream_url, schedule, next_sync_at, last_synced_at,
+last_result, due:false}` with the next hourly fire computed; real `git
+clone` of the mirror lands both commits; `GET …/info/refs?service=
+git-receive-pack` → 403 `this repository is a read-only mirror; pushes
+are rejected`; a direct POST to `git-receive-pack` (discovery-skipping
+client) → `unpack ok` + `ng refs/heads/main <same message>`; a real
+`git push` fails with the message; advancing the upstream then
+backdating the sidecar anchor → the 1-minute loop fires the sync
+unprompted (`last_synced_at` moves, outcome `ok`, next fire
+recomputed). In-browser render (badge/tab, both themes, console) is
+recorded OPEN: the shared Chrome daemon's network guard refuses all
+private/loopback destinations and workspace rules forbid a private
+daemon — the built bundle is verified to carry the badge/tab/preset
+strings, every UI route serves 200, and `node --test` (471 tests)
+covers the lib + SDK surface.
+
+---
+
+## E16 — Size-catalog fold + listing cost; push +1 PUT, +0 sequential (2026-09-09; corrected per review #258)
+
+**Area:** server-side repo size tracking (`internal/sizecatalog`,
+`internal/api` detailed listing, `internal/maintain` fold, `internal/wal`
+publish-path sidecar write). Spec: Forgejo #248 R1.
+
+**Question:** what does one maintainer fold pass cost in store round
+trips, what does the detailed listing cost, does either grow with repo
+count, and what does the push path pay for durable per-repo size state?
+
+**Method.** Harnesses (all over the **memory store**, E2/E11 gating):
+`internal/sizecatalog` `TestSweepRoundTrips`
+(`go test ./internal/sizecatalog/ -run 'TestSweepRoundTrips' -v`) — the
+REAL `Sweep` + `ReadCatalog` paths wrapped in an op-counting decorator,
+manifests seeded at two populations (n=3 and n=12 repos, one pack each);
+`internal/wal` `TestPublishSidecarDurablePushThenCompact`
+(`go test ./internal/wal/ -run 'TestPublishSidecar' -v`) — REAL `Publish` /
+`PublishCompact` through the publisher ladder, asserting the durable
+`meta/stats.json` bytes after each commit without running the sweep
+(push → sidecar present; compact → superseded packs leave the sum;
+ref-only/settings → no write; failed sidecar PUT → push still commits);
+`cmd/walhub` `TestPushFastPathZeroCollabRoundTrips` — two REAL git pushes
+over smart HTTP through the shipped composition, bounding the sanctioned
+sidecar write (≤ 4 PUTs, blind overwrite only, never a read). Absolute
+numbers are environment-bound — the *shape* (linear fold, flat listing,
++1 parallel PUT on push, zero LIST) is the durable claim.
+
+**Results.**
+
+| path | n=3 | n=12 | shape |
+|---|---|---|---|
+| fold pass (cold sidecars) | 7 GETs + 4 PUTs | 25 GETs + 13 PUTs | linear: 2 GETs (manifest probe + sidecar probe) + ≤1 PUT (sidecar, PUT-if-changed) per repo + 1 catalog GET + 1 catalog CAS |
+| fold pass (steady state) | sidecar PUTs drop to 0 (unchanged detection) | same | converge-only writes; catalog CAS is the 1 fixed PUT |
+| detailed listing | exactly 1 catalog GET | exactly 1 catalog GET | **flat** — no per-repo manifest scans at query time |
+| push path (pack-changing publish) | +1 PUT (repo-scoped sidecar, parallel with the manifest CAS) | same | +1 total op, **+0 sequential trips**; ref-only/settings batches write nothing |
+| push path (2 real git pushes, shipped composition) | cold 11 / warm 10 bucket ops (E15-era 10/9, +1 sidecar PUT each) | — | 3 sanctioned collab touches per push (2 mirror probes + 1 sidecar PUT); every other collab family 0 |
+| LIST / DELETE on any path above | 0 | 0 | probe-only (exact keys), never list |
+
+**Analysis.**
+
+- **Fold is linear with a small constant because every read is an exact
+  key probe.** Manifest GET + sidecar GET per repo, sidecar PUT only when
+  the derived sum differs (steady-state passes write nothing per repo),
+  one catalog read-modify-write per pass. The pass is bounded (256
+  repos) and resumable (in-memory cursor; the catalog itself is durable,
+  so losing the cursor only repeats work).
+- **Listing is flat because the catalog IS the listing.** One
+  `meta/repos.pb` GET serves every row; sort/filter run in memory with a
+  deterministic `(owner, name)` tiebreak. Absent catalog degrades to null
+  rows (optional/rebuildable — deleting it breaks nothing).
+- **Push pays +1 PUT per pack-changing publish, +0 sequential trips.**
+  The derivation is O(packs) arithmetic over the in-hand live set (no git
+  argv, saturating overflow only); persisting it is one repo-scoped
+  `meta/stats.json` overwrite issued in parallel with the manifest CAS and
+  joined before the reply — so a returned push durably carries its sidecar
+  without running the sweep, and total ops move exactly +1 (measured: cold
+  11 / warm 10 vs E15-era 10/9). No bucket-root write happens on push
+  (that would be a cross-repo contention funnel); the write is best-effort
+  (WARN-only — the manifest CAS stays the only commit point) and
+  ref-only/settings batches skip it entirely. The sweep is backfill/repair:
+  without the push-path write, maintain-less deployments (serve-only roles,
+  disabled loop) would show null rows forever — unbounded absence, not
+  bounded staleness.
+- Cannot explode: no LIST anywhere, per-repo error isolation (one bad
+  manifest fails one row, never the pass), bounded parallelism (8),
+  bounded passes (256), no lock held across I/O.
+
+## E17 — Last-commit activity: push hint cost, sweep heal cost, explore ordering (2026-09-09)
+
+**Area:** server-side last-commit tracking (`internal/git` derivation,
+server `WalEngine` hint, `internal/wal` shared sidecar write,
+`internal/sizecatalog` Activity fold, `internal/maintain` resolver,
+`/detailed` `sort=activity`, explore ordering). Spec: Forgejo #247 R1.
+
+**Question:** what does the push path pay for the activity hint, what does
+a sweep pass cost when sidecars need cold derivation, does the listing stay
+flat, and does explore order by commit (not push) time?
+
+**Method.** Unit harnesses over the **memory store** + one production run
+over the **filesystem store** (this entry's numbers): `internal/git`
+`TestCommitDatesHappyPath` (REAL `git log -1` — distinct author/committer
+dates pin the #142 preference); `internal/server`
+`TestWalEnginePublishDerivesActivity` (REAL funnel: scratch commit fetched
+into the serving copy, published, sidecar bytes asserted); `cmd/walhub`
+`TestPushFastPathZeroCollabRoundTrips` (two REAL git pushes, shipped
+composition — the push-budget gate); `internal/sizecatalog`
+`TestSweepFoldsActivityIntoCatalog` + `TestFoldOneSkipsGitWhenFresh` (hook
+call counts asserted); production e2e (scratch server, filesystem store):
+two pushed repos (commits dated 2024-01-01 and 2026-09-01) + one tag-only
+push, observing sidecars, `/detailed?sort=activity&order=desc`, and two
+maintainer passes. Absolute numbers are environment-bound — the *shapes*
+(+0 push ops, heal-once-then-quiet sweep, flat listing, commit-date order)
+are the durable claims.
+
+**Results.**
+
+| path | measured | shape |
+|---|---|---|
+| push path (2 real git pushes, shipped composition) | cold 11 / warm 10 bucket ops, 3 sanctioned collab touches/push | IDENTICAL to E16: the derivation is git-local (one `log -1` in the serving copy, zero store ops) and the hint rides the EXISTING sidecar PUT — +0 total ops, +0 sequential trips, still never a sidecar read |
+| push path (hint-less batches: tag-only/branch-delete/compact) | 1 sidecar PUT (blind overwrite: fresh size + stamped push clock + null commits) | +1 total op vs #248 (which wrote nothing for ref-only), +0 sequential; the sweep heals the nulls |
+| sidecar after client push (production) | `last_commit_sha`=tip, `last_commit_time`=commit date (2024/2026, NOT push time), `last_push_at`=push time | commit-date semantics proven: identical push times, distinct commit times |
+| sweep pass healing one tag-nulled repo (production) | `folded=1 unchanged=1 failed=0` | heal-once: refs-view reads + 1 git `log -1` (objects already local — zero serve-sync); the fresh repo cost zero git (hook skipped) |
+| sweep steady state (all sidecars fresh) | 0 sidecar PUTs, 0 hook calls | converge-only writes extend to activity (PUT-if-changed covers size+head+activity); catalog CAS stays the 1 fixed PUT |
+| detailed listing (`sort=activity&order=desc`) | exactly 1 catalog GET; `newrepo` (2026 commit) before `oldrepo` (2024 commit) | flat (unchanged read path); unknowns sort last either direction; ties on `(owner, name)` |
+| import (E11 harness) | S+M: 7 GETs+HEADs, 16 control PUTs, 0 LISTs (S==M exactly) | flat preserved; constant 12→15 (#248 sidecar) →16 (#247 ref-txn push clock), each documented |
+| explore page fetches | 1 owners + 1 detailed/owner (server-sorted); 0 `commits?n=1` per-row GETs when listed | the ~500-GET cold-cache worst case drops to zero on explore/`/:owner`; unbackfilled rows fall back to one cached fetch each |
+
+**Analysis.**
+
+- **Push pays +0.** E16's push row is amended in exactly one cell:
+  ref-only batches now write (the #247 acceptance: tag-only moves the push
+  clock) — still one parallel PUT, still zero reads, still zero bucket-root
+  writes. The budget test (`TestPushFastPathZeroCollabRoundTrips`) is
+  unchanged and green with identical totals (cold 11 / warm 10): the
+  "never a sidecar read" rule is what keeps the merge honest — hint-less
+  batches record nulls instead of preserving, and preservation is the
+  sweep's job (it already reads).
+- **Sweep heals once, then goes quiet.** A nulled/stale sidecar costs one
+  cold derivation (refs view + at most one serve-sync + one git read,
+  ActivityParallel=2); thereafter the sidecar is fresh and the hook is
+  skipped (asserted: `TestFoldOneSkipsGitWhenFresh` fails the test if the
+  hook runs). Derivation failure never nulls known activity (field-scoped
+  merge — size refreshes, activity preserves) and never fails the pass.
+- **Ordering is commit time, total and deterministic.** RFC 3339 strings
+  compare chronologically without parsing; unknowns always last (they are
+  not "old"); ties break on `(owner, name)` in Go and in the JS stabilizer
+  alike (both headless-tested).
+- Cannot explode: no LIST on any path (enumeration stays the engine's local
+  list), per-repo isolation everywhere, bounded parallelism (8 manifest /
+  2 derivation), bounded passes (256, resumable), no lock held across I/O.
+  The one behavioral wart is documented, not hidden: a tag-only push
+  transiently nulls the commit fields until the next sweep heals them
+  (bounded by the pass interval; the catalog's monotonicity rule keeps the
+  last-known row when the head did not move).

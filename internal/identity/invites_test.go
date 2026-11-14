@@ -1,0 +1,453 @@
+package identity
+
+import (
+	"context"
+	"errors"
+	"testing"
+	"time"
+
+	"github.com/crueber/walhub/internal/config"
+	"github.com/crueber/walhub/internal/store"
+)
+
+func TestOrgInvites(t *testing.T) {
+	s := testService()
+	ctx := context.Background()
+	if _, err := s.CreateOrgInvite(ctx, "ghost", "x@y.z", "member", "a@b.c", time.Hour); !errors.Is(err, ErrNotFound) {
+		t.Errorf("invite ghost org: %v", err)
+	}
+	if _, err := s.CreateOrg(ctx, "acme", "A", "", "alice@example.com"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.CreateOrgInvite(ctx, "acme", "bad!!principal", "member", "a@b.c", time.Hour); !errors.Is(err, ErrInvalid) {
+		t.Errorf("invite bad email: %v", err)
+	}
+	if _, err := s.CreateOrgInvite(ctx, "acme", "x@y.z", "root", "a@b.c", time.Hour); !errors.Is(err, ErrInvalid) {
+		t.Errorf("invite bad role: %v", err)
+	}
+	inv, err := s.CreateOrgInvite(ctx, "acme", "PAT@example.com", "member", "alice@example.com", time.Hour)
+	if err != nil {
+		t.Fatalf("CreateOrgInvite: %v", err)
+	}
+	if inv.Subject != "pat@example.com" || inv.State != "pending" || inv.Token == "" || inv.ID == "" {
+		t.Errorf("bad invite: %+v", inv)
+	}
+	// Inbox.
+	entries, err := s.MyInvites(ctx, "pat@example.com")
+	if err != nil || len(entries) != 1 || entries[0].Org != "acme" {
+		t.Errorf("MyInvites: %v %+v", err, entries)
+	}
+	// Forgejo #362: expiry rides the inbox row (one read, no preview fan-out).
+	if len(entries) == 1 && entries[0].ExpiresAt != inv.ExpiresAt {
+		t.Errorf("inbox expires_at = %q, want %q", entries[0].ExpiresAt, inv.ExpiresAt)
+	}
+	if entries, err := s.MyInvites(ctx, "nobody@example.com"); err != nil || len(entries) != 0 {
+		t.Errorf("MyInvites empty: %v %+v", err, entries)
+	}
+	// Preview with token redacted.
+	prev, err := s.PreviewInvite(ctx, "pat@example.com", inv.ID, inv.Token)
+	if err != nil {
+		t.Fatalf("PreviewInvite: %v", err)
+	}
+	if prev.Token != "" || prev.Subject != "pat@example.com" {
+		t.Errorf("preview broken: %+v", prev)
+	}
+	// Subject matches: preview works with or without (even a wrong) token.
+	if _, err := s.PreviewInvite(ctx, "pat@example.com", inv.ID, ""); err != nil {
+		t.Errorf("subject preview: %v", err)
+	}
+	if _, err := s.PreviewInvite(ctx, "pat@example.com", inv.ID, "wrong"); err != nil {
+		t.Errorf("subject preview with wrong token: %v", err)
+	}
+	if _, err := s.PreviewInvite(ctx, "other@example.com", inv.ID, ""); !errors.Is(err, ErrConflict) && !errors.Is(err, ErrForbidden) {
+		t.Errorf("wrong subject: %v", err)
+	}
+	// Accept by the wrong subject is forbidden.
+	if _, err := s.AcceptInvite(ctx, "other@example.com", inv.ID); err == nil {
+		t.Error("accept by non-subject must fail")
+	}
+	// Accept binds membership and deletes the invite.
+	bound, err := s.AcceptInvite(ctx, "pat@example.com", inv.ID)
+	if err != nil {
+		t.Fatalf("AcceptInvite: %v", err)
+	}
+	if bound != InviteOrg {
+		t.Errorf("bound = %q", bound)
+	}
+	m, _ := s.GetMembers(ctx, "acme")
+	found := false
+	for _, e := range m.Members {
+		if e.Principal == "pat@example.com" && e.Role == OrgMember {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("membership not bound: %+v", m.Members)
+	}
+	// Second accept is done (invite gone).
+	if _, err := s.AcceptInvite(ctx, "pat@example.com", inv.ID); !errors.Is(err, ErrConflict) {
+		t.Errorf("re-accept must 409: %v", err)
+	}
+	// Inbox entry dropped.
+	if entries, _ := s.MyInvites(ctx, "pat@example.com"); len(entries) != 0 {
+		t.Errorf("inbox not cleaned: %+v", entries)
+	}
+	// Profile lazily created.
+	if p, _ := s.GetProfile(ctx, "pat@example.com"); p == nil {
+		t.Error("accept must ensure the profile")
+	}
+}
+
+func TestRepoInvites(t *testing.T) {
+	s := testService()
+	ctx := context.Background()
+	seedOrg(t, s)
+	seedRepo(t, s, "acme", "repo")
+	if _, err := s.CreateRepoInvite(ctx, "acme", "repo", "bad!!principal", RoleWrite, "a@b.c", time.Hour); !errors.Is(err, ErrInvalid) {
+		t.Errorf("bad subject: %v", err)
+	}
+	if _, err := s.CreateRepoInvite(ctx, "acme", "repo", "x@y.z", "super", "a@b.c", time.Hour); !errors.Is(err, ErrInvalid) {
+		t.Errorf("bad role: %v", err)
+	}
+	inv, err := s.CreateRepoInvite(ctx, "acme", "repo", "dave@example.com", RoleMaintain, "alice@example.com", time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	list, err := s.ListRepoInvites(ctx, "acme", "repo", 100)
+	if err != nil || len(list) != 1 {
+		t.Fatalf("ListRepoInvites: %v %+v", err, list)
+	}
+	// Forgejo #362: repo-kind expiry rides the inbox row too.
+	if entries, err := s.MyInvites(ctx, "dave@example.com"); err != nil || len(entries) != 1 || entries[0].ExpiresAt != inv.ExpiresAt {
+		t.Errorf("repo inbox expires_at: %v %+v want %q", err, entries, inv.ExpiresAt)
+	}
+	if _, err := s.AcceptInvite(ctx, "dave@example.com", inv.ID); err != nil {
+		t.Fatalf("AcceptInvite repo: %v", err)
+	}
+	role, _ := s.Resolve(ctx, "acme", "repo", daveP())
+	if role != RoleMaintain {
+		t.Errorf("repo invite must bind role, got %q", role)
+	}
+	// Cancel path: create then cancel as invitee.
+	inv2, err := s.CreateRepoInvite(ctx, "acme", "repo", "erin@example.com", RoleRead, "alice@example.com", time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cancelled, err := s.CancelInvite(ctx, "erin@example.com", inv2.ID)
+	if err != nil || cancelled.ID != inv2.ID {
+		t.Errorf("CancelInvite: %v %+v", err, cancelled)
+	}
+	if _, err := s.AcceptInvite(ctx, "erin@example.com", inv2.ID); !errors.Is(err, ErrConflict) {
+		t.Errorf("accept after cancel must 409: %v", err)
+	}
+	// Unknown kind rejected.
+	bad := &Invitation{Version: 1, ID: "bad", Token: "t", Kind: "weird", Subject: "erin@example.com", State: "pending", ExpiresAt: time.Now().Add(time.Hour).Format(time.RFC3339)}
+	if _, err := store.PutBytes(ctx, s.Store, OrgInviteKey("acme", "bad"), encodeInvite(bad),
+		store.PutOptions{Mode: store.PutCreate}); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.inboxAdd(ctx, "erin@example.com", InboxEntry{ID: "bad", Org: "acme"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.AcceptInvite(ctx, "erin@example.com", "bad"); !errors.Is(err, ErrInvalid) {
+		t.Errorf("unknown kind: %v", err)
+	}
+	// Bad repo shape in invite: reachable via the org key but unusable.
+	bad2 := &Invitation{Version: 1, ID: "bad2", Token: "t", Kind: InviteRepo, Repo: "noslash", Subject: "erin@example.com", State: "pending", ExpiresAt: time.Now().Add(time.Hour).Format(time.RFC3339)}
+	if _, err := store.PutBytes(ctx, s.Store, OrgInviteKey("acme", "bad2"), encodeInvite(bad2),
+		store.PutOptions{Mode: store.PutCreate}); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.inboxAdd(ctx, "erin@example.com", InboxEntry{ID: "bad2", Org: "acme"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.AcceptInvite(ctx, "erin@example.com", "bad2"); !errors.Is(err, ErrInvalid) {
+		t.Errorf("bad repo shape: %v", err)
+	}
+}
+
+func TestInviteExpiry(t *testing.T) {
+	s := testService()
+	ctx := context.Background()
+	if _, err := s.CreateOrg(ctx, "acme", "A", "", "alice@example.com"); err != nil {
+		t.Fatal(err)
+	}
+	inv, err := s.CreateOrgInvite(ctx, "acme", "old@example.com", "member", "alice@example.com", -time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.PreviewInvite(ctx, "old@example.com", inv.ID, inv.Token); !errors.Is(err, ErrConflict) {
+		t.Errorf("expired preview: %v", err)
+	}
+	if _, err := s.AcceptInvite(ctx, "old@example.com", inv.ID); !errors.Is(err, ErrConflict) {
+		t.Errorf("expired accept: %v", err)
+	}
+}
+
+func TestInboxOps(t *testing.T) {
+	s := testService()
+	ctx := context.Background()
+	// inboxAdd dedups.
+	if err := s.inboxAdd(ctx, "x@y.z", InboxEntry{ID: "1"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.inboxAdd(ctx, "x@y.z", InboxEntry{ID: "1"}); err != nil {
+		t.Errorf("inboxAdd dup: %v", err)
+	}
+	// inboxRemove on missing is a no-op.
+	if err := s.inboxRemove(ctx, "nobody@example.com", "1"); err != nil {
+		t.Errorf("inboxRemove missing: %v", err)
+	}
+	// Corrupt inbox.
+	if _, err := store.PutBytes(ctx, s.Store, InboxKey("bad@x.c"), []byte("{x"),
+		store.PutOptions{Mode: store.PutCreate}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.MyInvites(ctx, "bad@x.c"); !errors.Is(err, ErrInvalid) {
+		t.Errorf("corrupt inbox: %v", err)
+	}
+	if err := s.inboxAdd(ctx, "bad@x.c", InboxEntry{ID: "2"}); !errors.Is(err, ErrInvalid) {
+		t.Errorf("inboxAdd corrupt: %v", err)
+	}
+	if err := s.inboxRemove(ctx, "bad@x.c", "2"); !errors.Is(err, ErrInvalid) {
+		t.Errorf("inboxRemove corrupt: %v", err)
+	}
+	if _, err := s.findInvite(ctx, "bad@x.c", "2"); !errors.Is(err, ErrInvalid) {
+		t.Errorf("findInvite corrupt: %v", err)
+	}
+	sErr := New(&errStore{ObjectStore: store.NewMemory(), getErr: errBoom}, config.Defaults())
+	if _, err := sErr.MyInvites(ctx, "x@y.z"); !errors.Is(err, errBoom) {
+		t.Errorf("MyInvites error: %v", err)
+	}
+	// findInvite with inbox entry but missing object → not pending.
+	s2 := testService()
+	if err := s2.inboxAdd(ctx, "ghost@y.z", InboxEntry{ID: "nope", Org: "acme"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s2.findInvite(ctx, "ghost@y.z", "nope"); !errors.Is(err, ErrConflict) {
+		t.Errorf("dangling inbox entry: %v", err)
+	}
+	// Corrupt invite object.
+	if _, err := store.PutBytes(ctx, s2.Store, OrgInviteKey("acme", "corrupt"), []byte("{x"),
+		store.PutOptions{Mode: store.PutCreate}); err != nil {
+		t.Fatal(err)
+	}
+	if err := s2.inboxAdd(ctx, "ghost@y.z", InboxEntry{ID: "corrupt", Org: "acme"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s2.findInvite(ctx, "ghost@y.z", "corrupt"); !errors.Is(err, ErrInvalid) {
+		t.Errorf("corrupt invite: %v", err)
+	}
+	// findInvite store error (non-NotFound) surfaces.
+	s3 := New(&errStore{ObjectStore: s2.Store, getErr: errBoom}, config.Defaults())
+	if _, err := s3.findInvite(ctx, "ghost@y.z", "corrupt"); !errors.Is(err, errBoom) {
+		t.Errorf("findInvite inbox error: %v", err)
+	}
+}
+
+func TestListInvites(t *testing.T) {
+	s := testService()
+	ctx := context.Background()
+	seedOrg(t, s)
+	seedRepo(t, s, "acme", "r")
+	if _, err := s.CreateOrgInvite(ctx, "acme", "a@x.c", "member", "alice@example.com", time.Hour); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.CreateRepoInvite(ctx, "acme", "r", "b@x.c", RoleRead, "alice@example.com", time.Hour); err != nil {
+		t.Fatal(err)
+	}
+	orgs, err := s.ListOrgInvites(ctx, "acme", 100)
+	if err != nil || len(orgs) != 1 {
+		t.Errorf("ListOrgInvites: %v %+v", err, orgs)
+	}
+	repos, err := s.ListRepoInvites(ctx, "acme", "r", 100)
+	if err != nil || len(repos) != 1 {
+		t.Errorf("ListRepoInvites: %v %+v", err, repos)
+	}
+	if empty, err := s.ListOrgInvites(ctx, "empty", 100); err != nil || len(empty) != 0 {
+		t.Errorf("empty org invites: %v %+v", err, empty)
+	}
+	// Corrupt objects are skipped.
+	if _, err := store.PutBytes(ctx, s.Store, OrgInviteKey("acme", "corrupt"), []byte("{x"),
+		store.PutOptions{Mode: store.PutCreate}); err != nil {
+		t.Fatal(err)
+	}
+	if orgs, err := s.ListOrgInvites(ctx, "acme", 100); err != nil || len(orgs) != 1 {
+		t.Errorf("corrupt invite must be skipped: %v %+v", err, orgs)
+	}
+	sErr := New(&errStore{ObjectStore: store.NewMemory(), listErr: errBoom}, config.Defaults())
+	if _, err := sErr.ListOrgInvites(ctx, "acme", 100); !errors.Is(err, errBoom) {
+		t.Errorf("ListOrgInvites error: %v", err)
+	}
+	if _, err := sErr.ListRepoInvites(ctx, "acme", "r", 100); !errors.Is(err, errBoom) {
+		t.Errorf("ListRepoInvites error: %v", err)
+	}
+	// inviteKeys for repo kind.
+	inv := &Invitation{Kind: InviteRepo, Org: "acme", Repo: "acme/r", ID: "x"}
+	if k := inviteKeys(inv); k != RepoInviteKey("acme", "r", "x") {
+		t.Errorf("inviteKeys repo: %q", k)
+	}
+	// CancelInvite store error.
+	if _, err := sErr.CancelInvite(ctx, "a@x.c", "whatever"); err == nil {
+		t.Error("CancelInvite must surface lookup errors")
+	}
+}
+
+// TestRepoInviteGhostRepo pins the #63 inbox contract: the prefix sweep
+// removes the issuer-side invite object but cannot enumerate inboxes, so
+// readers skip the dead rows and accept/create fail closed instead of
+// binding roles into a ghost repo.
+// TestInviteEmailAliasInbox pins the #370 migration for invitations
+// addressed to a verified email before usernames existed: the username
+// principal carrying that email still lists, previews, and accepts
+// them — and the binding lands under the USERNAME.
+func TestInviteEmailAliasInbox(t *testing.T) {
+	s := testService()
+	ctx := context.Background()
+	seedOrg(t, s)
+	seedRepo(t, s, "acme", "repo")
+	if _, err := s.ResolveUsername(ctx, "dave@example.com"); err != nil {
+		t.Fatal(err)
+	}
+	dave := authPrincipal("dave")
+	dave.Email = "dave@example.com"
+	inv, err := s.CreateRepoInvite(ctx, "acme", "repo", "dave@example.com", RoleWrite, "alice@example.com", time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Listed through the username principal (email-spelled inbox merges).
+	entries, err := s.MyInvitesFor(ctx, dave)
+	if err != nil || len(entries) != 1 || entries[0].ID != inv.ID {
+		t.Fatalf("MyInvitesFor = %+v %v", entries, err)
+	}
+	// Previewed + accepted as the username; binding is username-spelled.
+	if _, err := s.PreviewInviteFor(ctx, dave, inv.ID, ""); err != nil {
+		t.Fatalf("PreviewInviteFor: %v", err)
+	}
+	if _, err := s.AcceptInviteFor(ctx, dave, inv.ID); err != nil {
+		t.Fatalf("AcceptInviteFor: %v", err)
+	}
+	doc, _, err := s.GetAccess(ctx, "acme", "repo")
+	if err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	for _, b := range doc.RoleBindings {
+		if b.Subject == "user:dave" && b.Role == RoleWrite {
+			found = true
+		}
+		if b.Subject == "user:dave@example.com" {
+			t.Errorf("legacy email binding must not be written: %+v", doc.RoleBindings)
+		}
+	}
+	if !found {
+		t.Errorf("username binding missing: %+v", doc.RoleBindings)
+	}
+	// Both inbox rows drain (username + legacy email spelling).
+	if entries, _ := s.MyInvitesFor(ctx, dave); len(entries) != 0 {
+		t.Errorf("inbox must drain: %+v", entries)
+	}
+}
+
+func TestRepoInviteGhostRepo(t *testing.T) {
+	s := testService()
+	ctx := context.Background()
+	seedOrg(t, s)
+	seedRepo(t, s, "acme", "repo")
+	inv, err := s.CreateRepoInvite(ctx, "acme", "repo", "ghost@example.com", RoleRead, "alice@example.com", time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Simulate the registry prefix sweep: manifest + issuer object go, the
+	// inbox row survives.
+	if err := s.Store.Delete(ctx, "repos/acme/repo/manifest.pb", ""); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Store.Delete(ctx, RepoInviteKey("acme", "repo", inv.ID), ""); err != nil {
+		t.Fatal(err)
+	}
+	_ = s.Store.Delete(ctx, AccessKey("acme", "repo"), "")
+	// The inbox skips the dead row (org invites would still list).
+	if entries, err := s.MyInvites(ctx, "ghost@example.com"); err != nil || len(entries) != 0 {
+		t.Fatalf("inbox ghost: %v %+v", err, entries)
+	}
+	// Accepting is 409 (the invite died with the repo) — and binds nothing.
+	if _, err := s.AcceptInvite(ctx, "ghost@example.com", inv.ID); !errors.Is(err, ErrConflict) {
+		t.Fatalf("accept ghost: %v", err)
+	}
+	doc, _, err := s.GetAccess(ctx, "acme", "repo")
+	if err != nil {
+		t.Fatalf("access read: %v", err)
+	}
+	for _, b := range doc.RoleBindings {
+		if b.Subject == "user:ghost@example.com" {
+			t.Fatalf("ghost binding written: %+v", doc.RoleBindings)
+		}
+	}
+	// Inviting to the ghost is 404.
+	if _, err := s.CreateRepoInvite(ctx, "acme", "repo", "new@example.com", RoleRead, "alice@example.com", time.Hour); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("create ghost: %v", err)
+	}
+	// Recreate: the dead row is still skipped until the invite is
+	// re-issued (no phantom pending state).
+	seedRepo(t, s, "acme", "repo")
+	if entries, err := s.MyInvites(ctx, "ghost@example.com"); err != nil || len(entries) != 0 {
+		t.Fatalf("inbox after recreate: %v %+v", err, entries)
+	}
+	inv2, err := s.CreateRepoInvite(ctx, "acme", "repo", "ghost@example.com", RoleRead, "alice@example.com", time.Hour)
+	if err != nil {
+		t.Fatalf("re-invite: %v", err)
+	}
+	if entries, err := s.MyInvites(ctx, "ghost@example.com"); err != nil || len(entries) != 1 || entries[0].ID != inv2.ID {
+		t.Fatalf("inbox re-issued: %v %+v", err, entries)
+	}
+	if _, err := s.AcceptInvite(ctx, "ghost@example.com", inv2.ID); err != nil {
+		t.Fatalf("accept re-issued: %v", err)
+	}
+}
+
+// headFailStore fails HEAD probes only (reads/writes delegate): the
+// existence probe must fail OPEN, never mass-hide inboxes.
+type headFailStore struct {
+	store.ObjectStore
+	err error
+}
+
+func (s *headFailStore) Head(ctx context.Context, key string) (*store.ObjectMeta, error) {
+	return nil, s.err
+}
+
+func TestInviteProbeFailOpen(t *testing.T) {
+	s := testService()
+	ctx := context.Background()
+	seedOrg(t, s)
+	seedRepo(t, s, "acme", "repo")
+	inv, err := s.CreateRepoInvite(ctx, "acme", "repo", "open@example.com", RoleRead, "alice@example.com", time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = inv
+	// Manifest HEAD down: the row still lists (fail open, no hiding).
+	s.Store = &headFailStore{ObjectStore: s.Store, err: errBoom}
+	if entries, err := s.MyInvites(ctx, "open@example.com"); err != nil || len(entries) != 1 {
+		t.Fatalf("fail-open inbox: %v %+v", err, entries)
+	}
+}
+
+func TestInviteIssuerErrorFailOpen(t *testing.T) {
+	s := testService()
+	ctx := context.Background()
+	seedOrg(t, s)
+	seedRepo(t, s, "acme", "repo")
+	inv, err := s.CreateRepoInvite(ctx, "acme", "repo", "kept@example.com", RoleRead, "alice@example.com", time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Issuer GET down (non-NotFound): the row still lists (fail open —
+	// only affirmative absence hides).
+	ks := &keyFailStore{ObjectStore: s.Store, err: errBoom, failGet: []string{RepoInviteKey("acme", "repo", inv.ID)}}
+	s2 := New(ks, config.Defaults())
+	if entries, err := s2.MyInvites(ctx, "kept@example.com"); err != nil || len(entries) != 1 {
+		t.Fatalf("fail-open issuer: %v %+v", err, entries)
+	}
+}

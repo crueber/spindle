@@ -1,0 +1,1051 @@
+package identity
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"io"
+	"regexp"
+	"sort"
+	"strings"
+	"sync"
+	"time"
+	"unicode/utf8"
+
+	"github.com/crueber/walhub/internal/store"
+)
+
+// readBody reads a store object body.
+func readBody(r io.Reader) ([]byte, error) {
+	raw, err := io.ReadAll(r)
+	if err != nil {
+		return nil, store.NewRetryable("", err)
+	}
+	return raw, nil
+}
+
+// Org is orgs/<org>/org.json.
+//
+// Append-only (law 5): location/timezone/bio_markdown (Forgejo #359) and
+// the avatar pointer fields were added after display_name/description.
+// Old readers unmarshal with a smaller struct and ignore the new keys;
+// old writers never emit them, and a new reader sees zero values for
+// orgs last written before the fields existed. Never renumber or reuse
+// a key. No website field: the owner-profile spelling (the parity target)
+// has none, and description stays the tagline (decision recorded in
+// docs/features/01_identity_permissions.md).
+type Org struct {
+	Version     int    `json:"version"`
+	Org         string `json:"org"`
+	DisplayName string `json:"display_name"`
+	Description string `json:"description"`
+	// Location, Timezone, BioMarkdown mirror the owner-profile spelling
+	// and limits (internal/api/profile.go). omitempty keeps bytes
+	// byte-identical for orgs never given a profile until first edit.
+	Location    string `json:"location,omitempty"`
+	Timezone    string `json:"timezone,omitempty"`
+	BioMarkdown string `json:"bio_markdown,omitempty"`
+	// AvatarContentType is the magic-sniffed image type of
+	// orgs/<org>/avatar ("" = no avatar — the render gate, so GET org
+	// answers avatar presence in its single round trip).
+	AvatarContentType string `json:"avatar_content_type,omitempty"`
+	AvatarUpdatedAt   string `json:"avatar_updated_at,omitempty"`
+	CreatedAt         string `json:"created_at"`
+	UpdatedAt         string `json:"updated_at"`
+}
+
+// OrgEdit is the editable org profile surface (PUT
+// /api/v1/orgs/{org}): full-document replace, same as the owner-profile
+// PUT — absent fields clear. Description carries no length budget
+// (pre-existing field, never validated — adding one now could 400
+// long-standing orgs).
+type OrgEdit struct {
+	DisplayName string
+	Description string
+	Location    string
+	Timezone    string
+	BioMarkdown string
+}
+
+// Org profile field budgets: exact mirror of the owner-profile limits
+// (internal/api/profile.go) — same spelling, same numbers, same 400s.
+// Duplicated (not imported) because identity must not import the api
+// package (law 8: no upward imports).
+const (
+	maxOrgName     = 200   // display_name / location, runes
+	maxOrgTimezone = 64    // timezone, bytes
+	maxOrgBio      = 65536 // bio_markdown, bytes
+)
+
+// orgTZShape is the server-side timezone contract, same as the
+// owner-profile tzShape: one to four slash-separated IANA-style segments
+// (shape check, not time.LoadLocation — the runtime image carries no tz
+// database).
+var orgTZShape = regexp.MustCompile(`^[A-Za-z0-9_+\-]{1,32}(/[A-Za-z0-9_+\-]{1,32}){0,3}$`)
+
+// validateOrgEdit enforces the field budgets (400 on overflow, plain-text
+// errors). Empty strings are "unset" — clearing a field is PUTting "".
+func validateOrgEdit(e *OrgEdit) string {
+	if len([]rune(e.DisplayName)) > maxOrgName {
+		return "display_name too long (max 200 characters)"
+	}
+	if len([]rune(e.Location)) > maxOrgName {
+		return "location too long (max 200 characters)"
+	}
+	if len(e.Timezone) > maxOrgTimezone || (e.Timezone != "" && !orgTZShape.MatchString(e.Timezone)) {
+		return "timezone must be an IANA zone name (e.g. Europe/Berlin)"
+	}
+	if len(e.BioMarkdown) > maxOrgBio || !utf8.ValidString(e.BioMarkdown) {
+		return "bio_markdown too long (max 64 KiB)"
+	}
+	return ""
+}
+
+// maxOrgAvatarBytes caps one avatar upload (2 MiB → 413 over cap).
+// Avatars render at a few hundred px; 2 MiB is generous without letting
+// one org's logo become a bulk transfer (attachments allow 8 MiB because
+// issue images are content, not chrome).
+const maxOrgAvatarBytes = int64(2 << 20)
+
+// sniffOrgAvatarType sniffs the PNG/JPEG/GIF/WebP allowlist from magic
+// bytes (never the extension, never the client Content-Type) — the same
+// allowlist and rationale as issue attachments (SVG rejected: same-origin
+// served SVG executes script in our origin).
+func sniffOrgAvatarType(head []byte) (string, bool) {
+	if len(head) >= 8 &&
+		head[0] == 0x89 && head[1] == 0x50 && head[2] == 0x4E && head[3] == 0x47 &&
+		head[4] == 0x0D && head[5] == 0x0A && head[6] == 0x1A && head[7] == 0x0A {
+		return "image/png", true
+	}
+	if len(head) >= 3 && head[0] == 0xFF && head[1] == 0xD8 && head[2] == 0xFF {
+		return "image/jpeg", true
+	}
+	if len(head) >= 6 && head[0] == 'G' && head[1] == 'I' && head[2] == 'F' &&
+		head[3] == '8' && (head[4] == '7' || head[4] == '9') && head[5] == 'a' {
+		return "image/gif", true
+	}
+	if len(head) >= 12 && head[0] == 'R' && head[1] == 'I' && head[2] == 'F' && head[3] == 'F' &&
+		head[8] == 'W' && head[9] == 'E' && head[10] == 'B' && head[11] == 'P' {
+		return "image/webp", true
+	}
+	return "", false
+}
+
+// Member is one roster row.
+type Member struct {
+	Principal string  `json:"principal"`
+	Role      OrgRole `json:"role"`
+	JoinedAt  string  `json:"joined_at"`
+}
+
+// Members is orgs/<org>/members.json: one object, human-rate.
+type Members struct {
+	Version   int      `json:"version"`
+	Members   []Member `json:"members"`
+	UpdatedAt string   `json:"updated_at"`
+}
+
+// Team is orgs/<org>/teams/<slug>.json.
+type Team struct {
+	Version     int      `json:"version"`
+	Org         string   `json:"org"`
+	Slug        string   `json:"slug"`
+	Name        string   `json:"name"`
+	Description string   `json:"description"`
+	Members     []string `json:"members"`
+	CreatedAt   string   `json:"created_at"`
+	UpdatedAt   string   `json:"updated_at"`
+}
+
+// --- orgs ------------------------------------------------------------------
+
+func encodeOrg(o *Org) []byte {
+	raw, _ := json.Marshal(o)
+	return raw
+}
+
+func parseOrg(raw []byte) (*Org, error) {
+	var o Org
+	if err := json.Unmarshal(raw, &o); err != nil {
+		return nil, fmt.Errorf("%w: org.json: %v", ErrInvalid, err)
+	}
+	return &o, nil
+}
+
+// CreateOrg reserves the org namespace (Create of org.json) and seeds
+// members.json with the creator as owner. Creation is atomic-or-recoverable:
+//
+//   - If the members seed fails, the org.json reservation is rolled back
+//     (best-effort version-guarded delete) and the original error is
+//     returned, so a retry starts clean.
+//   - If org.json already exists, the call resumes instead of blindly
+//     409ing: when the existing org is ownerless (members.json missing, or a
+//     roster with no owner — the crash-between-writes residue) the creator
+//     is bound as owner via CAS; when the creator is already an owner the
+//     create is idempotent success; otherwise it is 409 "org already exists"
+//     and the existing roster is untouched.
+//
+// ### Concurrency
+//
+// Hazard: two concurrent creates for one name racing the members seed, or a
+// retry racing the in-flight winner's seed, stealing ownership or double
+// winning. Avoidance: the namespace (org.json Create) admits exactly one
+// reserver; the owner binding is decided by members.json CAS — the seed's
+// 412 path re-reads and succeeds only when the caller is actually the bound
+// owner (else 409), and the resume path adds the caller as owner only to an
+// ownerless roster (CAS loop, bounded per casUpdate) while a roster that
+// already has owners is never rewritten. Exactly one creator observes
+// success with sole ownership; every loser gets a clean 409 and writes
+// nothing. No in-process locks: store CAS is the lock (13 §3).
+func (s *Service) CreateOrg(ctx context.Context, org, displayName, description, creator string) (*Org, error) {
+	if !ValidOrg(org) {
+		return nil, fmt.Errorf("%w: invalid org %q (lowercase [a-z0-9-], 1-39 chars)", ErrInvalid, org)
+	}
+	now := s.nowUTC().Format(time.RFC3339)
+	o := &Org{Version: 1, Org: org, DisplayName: displayName, Description: description, CreatedAt: now, UpdatedAt: now}
+	orgMeta, err := store.PutBytes(ctx, s.Store, OrgKey(org), encodeOrg(o),
+		store.PutOptions{Mode: store.PutCreate, ContentType: "application/json"})
+	if err != nil {
+		if store.IsPreconditionFailed(err) {
+			return s.resumeOrgCreate(ctx, org, creator)
+		}
+		return nil, err
+	}
+	m := &Members{Version: 1, Members: []Member{{Principal: normPrincipal(creator), Role: OrgOwner, JoinedAt: now}}, UpdatedAt: now}
+	if _, err := store.PutBytes(ctx, s.Store, MembersKey(org), encodeMembers(m),
+		store.PutOptions{Mode: store.PutCreate, ContentType: "application/json"}); err != nil {
+		if store.IsPreconditionFailed(err) {
+			return s.confirmOrgOwner(ctx, org, o, creator)
+		}
+		// Roll back the reservation: version-guarded so an org recreated
+		// after a completed rollback is never deleted. Best-effort — a
+		// failed rollback still leaves the resume path to heal the
+		// ownerless reservation, and the original error (never the
+		// rollback's) is returned. A roster already exists only if a
+		// concurrent create healed under this reservation and won the
+		// namespace: never delete under the winner, arbitrate read-only
+		// instead. (A heal landing between this check and the delete can
+		// still orphan the winner's roster; that residue converges through
+		// resumeOrgCreate on retry — cross-object CAS does not exist.)
+		if m, _, merr := s.getMembers(ctx, org); merr == nil && m != nil {
+			return s.confirmOrgOwner(ctx, org, o, creator)
+		}
+		_ = s.Store.Delete(ctx, OrgKey(org), orgMeta.Version)
+		return nil, err
+	}
+	// Org-hook fan-out (Forgejo #364): the fresh-create path only — the
+	// resume/confirm paths re-create an already-reserved org, not a
+	// birth. Post-commit, P8 — org.json + the roster are the backfill
+	// truth.
+	s.emitOrgEvent(ctx, org, "org_created", normPrincipal(creator), "org "+org+" created")
+	return o, nil
+}
+
+// confirmOrgOwner resolves a 412 on the initial members seed: the seed lost
+// a race (a concurrent resume healed first, or a stale members.json predates
+// the reservation). Read-only arbitration — the loser writes nothing:
+// success iff the caller is the bound owner, else 409. Any ownerless residue
+// this leaves behind converges through resumeOrgCreate on retry.
+func (s *Service) confirmOrgOwner(ctx context.Context, org string, o *Org, creator string) (*Org, error) {
+	m, _, err := s.getMembers(ctx, org)
+	if err != nil {
+		return nil, err
+	}
+	if m != nil && isRosterOwner(m, creator) {
+		return o, nil
+	}
+	return nil, fmt.Errorf("%w: org already exists", ErrConflict)
+}
+
+// resumeOrgCreate completes a create whose org.json reservation already
+// exists: idempotent success when the caller is already an owner, a CAS heal
+// binding the caller as owner when the org is ownerless, else 409 leaving
+// the existing roster untouched.
+func (s *Service) resumeOrgCreate(ctx context.Context, org, creator string) (*Org, error) {
+	creator = normPrincipal(creator)
+	now := s.nowUTC().Format(time.RFC3339)
+	_, err := s.casUpdate(ctx, MembersKey(org), func(cur []byte, _ store.Version) ([]byte, bool, error) {
+		if cur == nil {
+			// Crash-between-writes residue (or a rolled-back-then-retried
+			// reservation): bind the creator as owner.
+			m := &Members{Version: 1, Members: []Member{{Principal: creator, Role: OrgOwner, JoinedAt: now}}, UpdatedAt: now}
+			return encodeMembers(m), true, nil
+		}
+		m, perr := parseMembers(cur)
+		if perr != nil {
+			return nil, false, perr
+		}
+		if isRosterOwner(m, creator) {
+			return nil, false, nil
+		}
+		if rosterHasOwner(m) {
+			return nil, false, fmt.Errorf("%w: org already exists", ErrConflict)
+		}
+		m.Members = append(m.Members, Member{Principal: creator, Role: OrgOwner, JoinedAt: now})
+		m.Version++
+		m.UpdatedAt = now
+		sortMembers(m)
+		return encodeMembers(m), true, nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	got, gerr := s.GetOrg(ctx, org)
+	if gerr != nil {
+		return nil, gerr
+	}
+	if got == nil {
+		return nil, fmt.Errorf("%w: unknown org %q", ErrNotFound, org)
+	}
+	return got, nil
+}
+
+// rosterHasOwner reports whether any roster entry holds the owner role.
+func rosterHasOwner(m *Members) bool {
+	for _, e := range m.Members {
+		if e.Role == OrgOwner {
+			return true
+		}
+	}
+	return false
+}
+
+// isRosterOwner reports whether principal holds the owner role.
+func isRosterOwner(m *Members, principal string) bool {
+	principal = normPrincipal(principal)
+	for _, e := range m.Members {
+		if normPrincipal(e.Principal) == principal && e.Role == OrgOwner {
+			return true
+		}
+	}
+	return false
+}
+
+// GetOrg reads org.json; nil when absent.
+func (s *Service) GetOrg(ctx context.Context, org string) (*Org, error) {
+	raw, _, err := store.GetBytes(ctx, s.Store, OrgKey(org), store.GetOptions{})
+	if err != nil {
+		if store.IsNotFound(err) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	return parseOrg(raw)
+}
+
+// PutOrg replaces the org profile (CAS, full-document: absent fields
+// clear). New profile fields are validated against the owner-profile
+// mirror budgets (400 on overflow); description stays unbudgeted.
+func (s *Service) PutOrg(ctx context.Context, org string, e OrgEdit) (*Org, error) {
+	if msg := validateOrgEdit(&e); msg != "" {
+		return nil, fmt.Errorf("%w: %s", ErrInvalid, msg)
+	}
+	var result *Org
+	_, err := s.casUpdate(ctx, OrgKey(org), func(cur []byte, _ store.Version) ([]byte, bool, error) {
+		if cur == nil {
+			return nil, false, fmt.Errorf("%w: unknown org %q", ErrNotFound, org)
+		}
+		prev, perr := parseOrg(cur)
+		if perr != nil {
+			return nil, false, perr
+		}
+		prev.Version++
+		prev.DisplayName = e.DisplayName
+		prev.Description = e.Description
+		prev.Location = e.Location
+		prev.Timezone = e.Timezone
+		prev.BioMarkdown = e.BioMarkdown
+		prev.UpdatedAt = s.nowUTC().Format(time.RFC3339)
+		result = prev
+		return encodeOrg(prev), true, nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	// Org-hook fan-out (Forgejo #364): post-commit, P8. No actor
+	// parameter on this method — the subject (the org) rides the title.
+	s.emitOrgEvent(ctx, org, "org_updated", "", "org "+org+" profile updated")
+	return result, nil
+}
+
+// PutOrgAvatar stores raw avatar bytes at orgs/<org>/avatar and points
+// org.json at them (bytes first, pointer second — the attachments/release
+// philosophy: an orphaned avatar object after a crashed pointer write is
+// inert bytes, while a pointer without bytes can never render). Owner-only
+// (checked by the handler). The upload is size-capped (413) and
+// magic-sniffed (415); the sniffed type (never the client Content-Type)
+// is both the object ContentType and the org.json render gate.
+//
+// Round trips: 1 PUT (bytes) + 1 CAS loop on org.json (human-rate, not a
+// git hot path — law 6 budgets don't cover collab mutations).
+//
+// ### Concurrency
+//
+// Hazard: two concurrent avatar uploads interleaving bytes and pointer
+// writes (A's bytes + B's pointer). Avoidance: last-writer-wins on both
+// objects independently — either pointer always names bytes that exist
+// (each PUT completes before its pointer CAS starts), so the render is
+// always a real image, just possibly the older upload's. No lock is held
+// across any store call.
+func (s *Service) PutOrgAvatar(ctx context.Context, org string, data []byte) (*Org, error) {
+	if !ValidOrg(org) {
+		return nil, fmt.Errorf("%w: invalid org %q", ErrInvalid, org)
+	}
+	if int64(len(data)) > maxOrgAvatarBytes {
+		return nil, fmt.Errorf("%w: avatar exceeds %d bytes", ErrTooLarge, maxOrgAvatarBytes)
+	}
+	ct, ok := sniffOrgAvatarType(data)
+	if !ok {
+		return nil, fmt.Errorf("%w: only PNG, JPEG, GIF, and WebP avatars are accepted", ErrUnsupportedMedia)
+	}
+	got, err := s.GetOrg(ctx, org)
+	if err != nil {
+		return nil, err
+	}
+	if got == nil {
+		return nil, fmt.Errorf("%w: unknown org %q", ErrNotFound, org)
+	}
+	if _, err := store.PutBytes(ctx, s.Store, OrgAvatarKey(org), data,
+		store.PutOptions{Mode: store.PutOverwrite, ContentType: ct}); err != nil {
+		return nil, err
+	}
+	var result *Org
+	_, err = s.casUpdate(ctx, OrgKey(org), func(cur []byte, _ store.Version) ([]byte, bool, error) {
+		if cur == nil {
+			return nil, false, fmt.Errorf("%w: unknown org %q", ErrNotFound, org)
+		}
+		prev, perr := parseOrg(cur)
+		if perr != nil {
+			return nil, false, perr
+		}
+		prev.Version++
+		prev.AvatarContentType = ct
+		prev.AvatarUpdatedAt = s.nowUTC().Format(time.RFC3339)
+		prev.UpdatedAt = prev.AvatarUpdatedAt
+		result = prev
+		return encodeOrg(prev), true, nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return result, nil
+}
+
+// GetOrgAvatar reads the raw avatar bytes plus content type; nil bytes
+// when the org has no avatar (pointer unset or object missing — a missing
+// object under a set pointer is treated as unset, never an error, so a
+// manually pruned bucket still renders the org page).
+func (s *Service) GetOrgAvatar(ctx context.Context, org string) ([]byte, string, error) {
+	if !ValidOrg(org) {
+		return nil, "", fmt.Errorf("%w: invalid org %q", ErrInvalid, org)
+	}
+	got, err := s.GetOrg(ctx, org)
+	if err != nil {
+		return nil, "", err
+	}
+	if got == nil || got.AvatarContentType == "" {
+		return nil, "", nil
+	}
+	raw, _, err := store.GetBytes(ctx, s.Store, OrgAvatarKey(org), store.GetOptions{})
+	if err != nil {
+		if store.IsNotFound(err) {
+			return nil, "", nil
+		}
+		return nil, "", err
+	}
+	return raw, got.AvatarContentType, nil
+}
+
+// DeleteOrgAvatar removes the avatar object and clears the org.json
+// pointer (idempotent: unknown org 404s, missing avatar succeeds).
+// Owner-only (checked by the handler).
+func (s *Service) DeleteOrgAvatar(ctx context.Context, org string) (*Org, error) {
+	if !ValidOrg(org) {
+		return nil, fmt.Errorf("%w: invalid org %q", ErrInvalid, org)
+	}
+	var result *Org
+	_, err := s.casUpdate(ctx, OrgKey(org), func(cur []byte, _ store.Version) ([]byte, bool, error) {
+		if cur == nil {
+			return nil, false, fmt.Errorf("%w: unknown org %q", ErrNotFound, org)
+		}
+		prev, perr := parseOrg(cur)
+		if perr != nil {
+			return nil, false, perr
+		}
+		if prev.AvatarContentType == "" {
+			result = prev
+			return nil, false, nil
+		}
+		prev.Version++
+		prev.AvatarContentType = ""
+		prev.AvatarUpdatedAt = ""
+		prev.UpdatedAt = s.nowUTC().Format(time.RFC3339)
+		result = prev
+		return encodeOrg(prev), true, nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	// Best-effort: the pointer is already clear, so leftover bytes are
+	// inert (GetOrgAvatar gates on the pointer). Unconditional delete of
+	// an absent key is Ok.
+	_ = s.Store.Delete(ctx, OrgAvatarKey(org), "")
+	return result, nil
+}
+
+// ListOrgs returns sorted org names via delimiter listing (collaboration
+// page, not a git hot path; P5).
+func (s *Service) ListOrgs(ctx context.Context) ([]string, error) {
+	var out []string
+	if err := s.Store.ListPrefixes(ctx, "orgs/", func(p string) error {
+		out = append(out, strings.TrimSuffix(strings.TrimPrefix(p, "orgs/"), "/"))
+		return nil
+	}); err != nil {
+		return nil, err
+	}
+	sort.Strings(out)
+	if out == nil {
+		out = []string{}
+	}
+	return out, nil
+}
+
+// --- members ---------------------------------------------------------------
+
+func encodeMembers(m *Members) []byte {
+	raw, _ := json.Marshal(m)
+	return raw
+}
+
+func parseMembers(raw []byte) (*Members, error) {
+	var m Members
+	if err := json.Unmarshal(raw, &m); err != nil {
+		return nil, fmt.Errorf("%w: members.json: %v", ErrInvalid, err)
+	}
+	if m.Members == nil {
+		m.Members = []Member{}
+	}
+	return &m, nil
+}
+
+func sortMembers(m *Members) {
+	sort.Slice(m.Members, func(i, j int) bool { return m.Members[i].Principal < m.Members[j].Principal })
+}
+
+// getMembers reads members.json; nil when the org does not exist.
+func (s *Service) getMembers(ctx context.Context, org string) (*Members, store.Version, error) {
+	raw, meta, err := store.GetBytes(ctx, s.Store, MembersKey(org), store.GetOptions{})
+	if err != nil {
+		if store.IsNotFound(err) {
+			return nil, "", nil
+		}
+		return nil, "", err
+	}
+	m, perr := parseMembers(raw)
+	if perr != nil {
+		return nil, "", perr
+	}
+	return m, meta.Version, nil
+}
+
+// GetMembers reads the roster; nil when the org does not exist.
+func (s *Service) GetMembers(ctx context.Context, org string) (*Members, error) {
+	m, _, err := s.getMembers(ctx, org)
+	return m, err
+}
+
+// SetMember adds or re-roles a roster entry (CAS). Role must be
+// owner|member.
+func (s *Service) SetMember(ctx context.Context, org, principal string, role OrgRole) (*Members, error) {
+	principal = normPrincipal(principal)
+	if !ValidPrincipal(principal) {
+		return nil, fmt.Errorf("%w: invalid principal %q", ErrInvalid, principal)
+	}
+	if !validOrgRole(string(role)) {
+		return nil, fmt.Errorf("%w: invalid org role %q", ErrInvalid, string(role))
+	}
+	var result *Members
+	// added/roleChanged describe the COMMITTED attempt only: every CAS
+	// attempt re-derives them from its own read, so a lost race's
+	// values are overwritten by the retry that wins (the concurrent
+	// winner emits its own event — exactly one emission per
+	// transition). Emission runs after err == nil below.
+	var added, roleChanged bool
+	_, err := s.casUpdate(ctx, MembersKey(org), func(cur []byte, _ store.Version) ([]byte, bool, error) {
+		if cur == nil {
+			return nil, false, fmt.Errorf("%w: unknown org %q", ErrNotFound, org)
+		}
+		m, perr := parseMembers(cur)
+		if perr != nil {
+			return nil, false, perr
+		}
+		found := false
+		for i := range m.Members {
+			if normPrincipal(m.Members[i].Principal) == principal {
+				m.Members[i].Principal = principal
+				roleChanged = m.Members[i].Role != role
+				m.Members[i].Role = role
+				found = true
+			}
+		}
+		added = !found
+		if !found {
+			m.Members = append(m.Members, Member{Principal: principal, Role: role, JoinedAt: s.nowUTC().Format(time.RFC3339)})
+		}
+		m.Version++
+		m.UpdatedAt = s.nowUTC().Format(time.RFC3339)
+		sortMembers(m)
+		result = m
+		return encodeMembers(m), true, nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	// Org-hook fan-out (Forgejo #363): post-commit, P8 — the roster is
+	// the backfill truth. Action spellings match notify's orgActions.
+	if added {
+		s.emitOrgEvent(ctx, org, "member_added", "", principal+" joined "+org)
+	} else if roleChanged {
+		s.emitOrgEvent(ctx, org, "member_role_changed", "", principal+" is now "+string(role)+" in "+org)
+	}
+	return result, nil
+}
+
+// RemoveMember drops a roster entry (CAS); removing the last owner is 409.
+func (s *Service) RemoveMember(ctx context.Context, org, principal string) (*Members, error) {
+	principal = normPrincipal(principal)
+	var result *Members
+	// removed describes the committed attempt (see SetMember).
+	var removed bool
+	_, err := s.casUpdate(ctx, MembersKey(org), func(cur []byte, _ store.Version) ([]byte, bool, error) {
+		if cur == nil {
+			return nil, false, fmt.Errorf("%w: unknown org %q", ErrNotFound, org)
+		}
+		m, perr := parseMembers(cur)
+		if perr != nil {
+			return nil, false, perr
+		}
+		kept := m.Members[:0]
+		removedOwner := false
+		removed = false
+		for _, e := range m.Members {
+			if normPrincipal(e.Principal) == principal {
+				if e.Role == OrgOwner {
+					removedOwner = true
+				}
+				removed = true
+				continue
+			}
+			kept = append(kept, e)
+		}
+		if removedOwner {
+			owners := 0
+			for _, e := range kept {
+				if e.Role == OrgOwner {
+					owners++
+				}
+			}
+			if owners == 0 {
+				return nil, false, fmt.Errorf("%w: cannot remove the last owner", ErrConflict)
+			}
+		}
+		m.Members = kept
+		m.Version++
+		m.UpdatedAt = s.nowUTC().Format(time.RFC3339)
+		sortMembers(m)
+		result = m
+		return encodeMembers(m), true, nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	if removed {
+		s.emitOrgEvent(ctx, org, "member_removed", "", principal+" left "+org)
+	}
+	return result, nil
+}
+
+// --- teams -----------------------------------------------------------------
+
+func encodeTeam(t *Team) []byte {
+	raw, _ := json.Marshal(t)
+	return raw
+}
+
+func parseTeam(raw []byte) (*Team, error) {
+	var t Team
+	if err := json.Unmarshal(raw, &t); err != nil {
+		return nil, fmt.Errorf("%w: team: %v", ErrInvalid, err)
+	}
+	if t.Members == nil {
+		t.Members = []string{}
+	}
+	return &t, nil
+}
+
+// CreateTeam reserves the team slug (Create; lost race is 409).
+func (s *Service) CreateTeam(ctx context.Context, org, slug, name, description string) (*Team, error) {
+	if !ValidSlug(slug) {
+		return nil, fmt.Errorf("%w: invalid team slug %q", ErrInvalid, slug)
+	}
+	if m, _, merr := s.getMembers(ctx, org); merr != nil {
+		return nil, merr
+	} else if m == nil {
+		return nil, fmt.Errorf("%w: unknown org %q", ErrNotFound, org)
+	}
+	now := s.nowUTC().Format(time.RFC3339)
+	t := &Team{Version: 1, Org: org, Slug: slug, Name: name, Description: description, Members: []string{}, CreatedAt: now, UpdatedAt: now}
+	if _, err := store.PutBytes(ctx, s.Store, TeamKey(org, slug), encodeTeam(t),
+		store.PutOptions{Mode: store.PutCreate, ContentType: "application/json"}); err != nil {
+		if store.IsPreconditionFailed(err) {
+			return nil, fmt.Errorf("%w: team already exists", ErrConflict)
+		}
+		return nil, err
+	}
+	s.emitOrgEvent(ctx, org, "team_created", "", "team "+org+"/"+slug+" created")
+	return t, nil
+}
+
+// GetTeam reads a team with the same conditional-GET discipline as
+// access.json: the cached version revalidates per call. Nil when absent.
+func (s *Service) GetTeam(ctx context.Context, org, slug string) (*Team, store.Version, error) {
+	key := TeamKey(org, slug)
+	var known store.Version
+	var cached *Team
+	if e, ok := s.teams.get(org, slug); ok {
+		known, cached = e.ver, e.team
+	}
+	res, err := s.Store.Get(ctx, key, store.GetOptions{IfNoneMatch: known})
+	if err != nil {
+		if store.IsNotFound(err) {
+			// Evict any stale entry: the team is gone and the cached
+			// roster must not survive it (the entry is ignored on this
+			// path, but lingering garbage is a leak, not a cache).
+			s.teams.invalidate(org, slug)
+			return nil, "", nil
+		}
+		return nil, "", err
+	}
+	switch r := res.(type) {
+	case store.NotModified:
+		return cached, known, nil
+	case store.Object:
+		defer r.Body.Close()
+		raw, rerr := readBody(r.Body)
+		if rerr != nil {
+			return nil, "", rerr
+		}
+		t, perr := parseTeam(raw)
+		if perr != nil {
+			return nil, "", perr
+		}
+		s.teams.set(org, slug, r.Meta.Version, t)
+		return t, r.Meta.Version, nil
+	}
+	return nil, "", fmt.Errorf("identity: unknown GetResult for %s", key)
+}
+
+// PutTeam edits name/description (CAS).
+func (s *Service) PutTeam(ctx context.Context, org, slug, name, description string) (*Team, error) {
+	var result *Team
+	_, err := s.casUpdate(ctx, TeamKey(org, slug), func(cur []byte, _ store.Version) ([]byte, bool, error) {
+		if cur == nil {
+			return nil, false, fmt.Errorf("%w: unknown team %q", ErrNotFound, org+"/"+slug)
+		}
+		t, perr := parseTeam(cur)
+		if perr != nil {
+			return nil, false, perr
+		}
+		t.Version++
+		t.Name = name
+		t.Description = description
+		t.UpdatedAt = s.nowUTC().Format(time.RFC3339)
+		result = t
+		return encodeTeam(t), true, nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	s.teams.invalidate(org, slug)
+	// Org-hook fan-out (Forgejo #364): post-commit, P8.
+	s.emitOrgEvent(ctx, org, "team_updated", "", "team "+org+"/"+slug+" updated")
+	return result, nil
+}
+
+// ListTeams returns sorted teams via LIST over orgs/<org>/teams/*.json
+// (collaboration page, not a git hot path; P5). n caps the page.
+func (s *Service) ListTeams(ctx context.Context, org string, n int) ([]*Team, error) {
+	if n <= 0 || n > 1000 {
+		n = 100
+	}
+	var out []*Team
+	var ferr error
+	if err := s.Store.List(ctx, TeamPrefix(org), "", func(m store.ObjectMeta) error {
+		if len(out) >= n || !strings.HasSuffix(m.Key, ".json") {
+			return nil
+		}
+		raw, _, gerr := store.GetBytes(ctx, s.Store, m.Key, store.GetOptions{})
+		if gerr != nil {
+			if store.IsNotFound(gerr) {
+				return nil
+			}
+			// Keep listing past unreadable entries; the error surfaces
+			// after the pass so one corrupt object cannot hide the rest.
+			ferr = gerr
+			return nil
+		}
+		t, perr := parseTeam(raw)
+		if perr != nil {
+			return nil
+		}
+		out = append(out, t)
+		return nil
+	}); err != nil {
+		return nil, err
+	}
+	if ferr != nil {
+		return nil, ferr
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Slug < out[j].Slug })
+	if out == nil {
+		out = []*Team{}
+	}
+	return out, nil
+}
+
+// SetTeamMember adds a principal to a team (CAS).
+func (s *Service) SetTeamMember(ctx context.Context, org, slug, principal string) (*Team, error) {
+	principal = normPrincipal(principal)
+	if !ValidPrincipal(principal) {
+		return nil, fmt.Errorf("%w: invalid principal %q", ErrInvalid, principal)
+	}
+	var result *Team
+	// added describes the committed attempt (see SetMember).
+	var added bool
+	_, err := s.casUpdate(ctx, TeamKey(org, slug), func(cur []byte, _ store.Version) ([]byte, bool, error) {
+		if cur == nil {
+			return nil, false, fmt.Errorf("%w: unknown team %q", ErrNotFound, org+"/"+slug)
+		}
+		t, perr := parseTeam(cur)
+		if perr != nil {
+			return nil, false, perr
+		}
+		for _, m := range t.Members {
+			if normPrincipal(m) == principal {
+				result = t
+				added = false
+				return nil, false, nil
+			}
+		}
+		t.Members = append(t.Members, principal)
+		sort.Strings(t.Members)
+		t.Version++
+		t.UpdatedAt = s.nowUTC().Format(time.RFC3339)
+		result = t
+		added = true
+		return encodeTeam(t), true, nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	s.teams.invalidate(org, slug)
+	if added {
+		s.emitOrgEvent(ctx, org, "team_member_added", "", principal+" joined team "+org+"/"+slug)
+	}
+	return result, nil
+}
+
+// RemoveTeamMember drops a principal from a team (CAS).
+func (s *Service) RemoveTeamMember(ctx context.Context, org, slug, principal string) (*Team, error) {
+	principal = normPrincipal(principal)
+	var result *Team
+	// removed describes the committed attempt (see SetMember).
+	var removed bool
+	_, err := s.casUpdate(ctx, TeamKey(org, slug), func(cur []byte, _ store.Version) ([]byte, bool, error) {
+		if cur == nil {
+			return nil, false, fmt.Errorf("%w: unknown team %q", ErrNotFound, org+"/"+slug)
+		}
+		t, perr := parseTeam(cur)
+		if perr != nil {
+			return nil, false, perr
+		}
+		kept := t.Members[:0]
+		removed = false
+		for _, m := range t.Members {
+			if normPrincipal(m) != principal {
+				kept = append(kept, m)
+				continue
+			}
+			removed = true
+		}
+		t.Members = kept
+		t.Version++
+		t.UpdatedAt = s.nowUTC().Format(time.RFC3339)
+		result = t
+		return encodeTeam(t), true, nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	s.teams.invalidate(org, slug)
+	if removed {
+		s.emitOrgEvent(ctx, org, "team_member_removed", "", principal+" left team "+org+"/"+slug)
+	}
+	return result, nil
+}
+
+// DeleteOrg removes org.json, members.json, the avatar object, teams, and org invitations.
+// Owner-only (checked by the handler). Refuses with 409 + count while any
+// repo is owned by the org.
+func (s *Service) DeleteOrg(ctx context.Context, org string) error {
+	if !ValidOrg(org) {
+		return fmt.Errorf("%w: invalid org %q", ErrInvalid, org)
+	}
+	repos, err := s.Repos(ctx)
+	if err != nil {
+		return err
+	}
+	owned := 0
+	for _, rr := range repos {
+		if rr[0] == org {
+			owned++
+		}
+	}
+	if owned > 0 {
+		return fmt.Errorf("%w: org owns %d repos; transfer or delete them first", ErrConflict, owned)
+	}
+	// List teams BEFORE deleting anything: a LIST failure aborts with the
+	// org intact instead of half-deleted with leaked team objects.
+	teams, terr := s.ListTeams(ctx, org, 1000)
+	if terr != nil {
+		return terr
+	}
+	// Org-hook fan-out (Forgejo #364): emitted BEFORE the deletes so the
+	// record survives the org — the orgevents/ prefix is not removed
+	// below, and members/teams docs stay the backfill truth. A delete
+	// that fails after this point leaves one audit event for a surviving
+	// org (fail-open toward audit, never toward data).
+	s.emitOrgEvent(ctx, org, "org_deleted", "", "org "+org+" deleted")
+	for _, key := range []string{OrgKey(org), MembersKey(org), OrgAvatarKey(org)} {
+		if derr := s.Store.Delete(ctx, key, ""); derr != nil && !store.IsNotFound(derr) {
+			return derr
+		}
+	}
+	for _, t := range teams {
+		_ = s.Store.Delete(ctx, TeamKey(org, t.Slug), "")
+	}
+	var invErr error
+	_ = s.Store.List(ctx, OrgInvitePrefix(org), "", func(m store.ObjectMeta) error {
+		if derr := s.Store.Delete(ctx, m.Key, ""); derr != nil && !store.IsNotFound(derr) && invErr == nil {
+			invErr = derr
+		}
+		return nil
+	})
+	return invErr
+}
+
+// DeleteTeam removes the team object and strips its team:<org>/<slug>
+// bindings from every access.json that references it: repos are enumerated
+// via the registry lister and each access.json is probed by exact key
+// (never a LIST sweep of repo contents); affected repos get one sequential
+// CAS each. Unconditional: a team with no bindings deletes one object.
+func (s *Service) DeleteTeam(ctx context.Context, org, slug string) error {
+	subject := "team:" + org + "/" + slug
+	repos, err := s.Repos(ctx)
+	if err != nil {
+		return err
+	}
+	for _, rr := range repos {
+		owner, repo := rr[0], rr[1]
+		_, cerr := s.casUpdate(ctx, AccessKey(owner, repo), func(cur []byte, _ store.Version) ([]byte, bool, error) {
+			if cur == nil {
+				return nil, false, nil
+			}
+			doc, perr := parseAccess(cur)
+			if perr != nil {
+				// Unreadable access.json: leave it for fsck, keep sweeping.
+				return nil, false, nil
+			}
+			kept := make([]AccessBinding, 0, len(doc.RoleBindings))
+			found := false
+			for _, b := range doc.RoleBindings {
+				if b.Subject == subject {
+					found = true
+					continue
+				}
+				kept = append(kept, b)
+			}
+			if !found {
+				return nil, false, nil
+			}
+			doc.RoleBindings = kept
+			doc.Version++
+			doc.UpdatedAt = s.nowUTC().Format(time.RFC3339)
+			return encodeAccess(doc), true, nil
+		})
+		if cerr != nil {
+			// 412s retry inside casUpdate (bounded, then 409): a concurrent
+			// admin edit surfaces honestly instead of silently dropping the
+			// strip for this repo.
+			return cerr
+		}
+		s.access.invalidate(owner, repo)
+	}
+	if err := s.Store.Delete(ctx, TeamKey(org, slug), ""); err != nil && !store.IsNotFound(err) {
+		return err
+	}
+	s.teams.invalidate(org, slug)
+	s.emitOrgEvent(ctx, org, "team_deleted", "", "team "+org+"/"+slug+" deleted")
+	return nil
+}
+
+// --- team LRU (same version-stamped discipline as access.json) --------------
+
+type teamEntry struct {
+	ver  store.Version
+	team *Team
+}
+
+type teamCache struct {
+	mu   sync.Mutex
+	cap  int
+	data map[string]*teamEntry
+}
+
+func newTeamCache(cap int) *teamCache { return &teamCache{cap: cap, data: map[string]*teamEntry{}} }
+
+func teamCacheKey(org, slug string) string { return org + "/" + slug }
+
+func (c *teamCache) get(org, slug string) (*teamEntry, bool) {
+	if c == nil {
+		return nil, false
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	e, ok := c.data[teamCacheKey(org, slug)]
+	return e, ok
+}
+
+func (c *teamCache) set(org, slug string, ver store.Version, t *Team) {
+	if c == nil {
+		return
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if len(c.data) >= c.cap {
+		for k := range c.data {
+			delete(c.data, k)
+			break
+		}
+	}
+	c.data[teamCacheKey(org, slug)] = &teamEntry{ver: ver, team: t}
+}
+
+func (c *teamCache) invalidate(org, slug string) {
+	if c == nil {
+		return
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	delete(c.data, teamCacheKey(org, slug))
+}
