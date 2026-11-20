@@ -16,11 +16,27 @@ COPY web/package.json web/pnpm-lock.yaml web/pnpm-workspace.yaml ./
 # binary (shipped as an optional dependency); pnpm 11's build-script gate
 # would otherwise fail the fresh install.
 RUN pnpm install --frozen-lockfile --ignore-scripts
+# Tailwind v4 only scans the paths named by `@source` in web/src/app.css. The
+# Go templates live OUTSIDE web/, so they must exist at the path that directive
+# resolves to from this stage — /src/web/src/../../internal/webui/templates.
+# Without them Tailwind silently scans nothing and emits a stylesheet with no
+# utility classes (.brand/.btn survive because they are @apply components), so
+# every page renders unstyled. Copy the template tree only: this stage builds
+# CSS/JS and gets nothing else from the repo.
+COPY internal/webui/templates /src/internal/webui/templates
 COPY web/ ./
+# Guard: a stylesheet without the utilities the templates use means the scan
+# found nothing (a broken @source path), which must fail the image build
+# instead of shipping.
 RUN pnpm run build \
     && test -f dist/app.css \
     && test -f dist/ui.js \
-    && test -f dist/repos.js
+    && test -f dist/repos.js \
+    && if ! grep -q 'max-w-6xl' dist/app.css || ! grep -q '\.flex{' dist/app.css; then \
+         echo "ERROR: dist/app.css is missing the utility classes used by the Go templates" >&2; \
+         echo "       Tailwind scanned no templates — check /src/internal/webui/templates and the @source paths in web/src/app.css." >&2; \
+         exit 1; \
+       fi
 
 # ---- 2. Go build (static, no cgo; embeds the built dist/) ----
 FROM docker.io/library/golang:1.27-alpine AS build

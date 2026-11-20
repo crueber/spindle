@@ -99,7 +99,11 @@ Everything else is additive: new packages, new bucket prefixes, new web/ modules
   `internal/notify/stream.go` buses). The assembly itself was extracted
   from `serveHTTP` into `buildCollab` so the measured composition IS the
   shipped composition — pure move, no behavior change.
-- **Fork manifest-sharing DEFERRED (03 §7 honest boundary):** the
+- **Fork manifest-sharing — LANDED after this record (#424, 2026-09-13; the deferral below is
+  historical).** The executor is wired (`internal/pulls/forkexec.go`, `cmd/spindle/pulls.go`,
+  `cmd/spindle/forkshare.go`) and the manifest copy + GC enforcement ship with it; see 03's
+  "Wave #424 implementation notes". Kept verbatim as the as-built state at land time:
+- **Fork manifest-sharing DEFERRED at land time (03 §7 honest boundary):** the
   pull-fork task records fork objects only (`ForkExecutor` nil —
   `internal/pulls/merge.go:runFork`); the pack-sharing manifest copy and
   its GC enforcement land with the maintain unit. The e2e chain

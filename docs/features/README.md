@@ -37,8 +37,9 @@ commits are ordinary git objects; a PR's *head* is an ordinary ref published thr
 | [`09_rollout.md`](09_rollout.md) | Implementation phasing, agent dispatch plan, API versioning, invariants | all |
 | [`10_git_import.md`](10_git_import.md) | One-shot git import (clone-and-land + provenance) | — |
 | [`11_mirror.md`](11_mirror.md) | Pull-only mirrors with scheduled upstream syncs | 10 (clone/enumerate/refmap/scrub/SSRF reuse) |
-| [`13_push_mirror.md`](13_push_mirror.md) | Push mirroring (on-push fan-out + optional schedule; password/token/SSH-key auth, keypair generation) | 10 (normalize/SSRF/scrub reuse), 11 (preset-cron/lease/task/route patterns) |
 | [`12_runner.md`](12_runner.md) | GitHub-style runners design plan (DRAFT — awaiting review, do not implement) | 05 (checks reporting + merge gate) |
+| [`13_push_mirror.md`](13_push_mirror.md) | Push mirroring (on-push fan-out + optional schedule; password/token/SSH-key auth, keypair generation) | 10 (normalize/SSRF/scrub reuse), 11 (preset-cron/lease/task/route patterns) |
+| [`14_packages.md`](14_packages.md) | Packages: an **OCI registry** (v1, specified — see `docs/PLAN-V1.md` WP1) | 01, 02 |
 
 ## Shared primitives (normative for every feature doc)
 
@@ -135,8 +136,12 @@ data; the timeline is the backfill source of truth (same contract as the events 
 ### P9 — What is explicitly OUT of scope for this layer
 
 Code search (needs an index format decision — deferred), GitHub Actions runners (spindle stores check
-results, it does not run CI), Discussions, Packages, Projects/boards, SAML/SCIM. Each gets a paragraph
-in its nearest doc describing the seam it would plug into.
+results, it does not run CI), Discussions, Projects/boards, SAML/SCIM. Each gets a paragraph in its
+nearest doc describing the seam it would plug into.
+
+**Amended 2026-11-20:** *Packages* is no longer out of scope for the **OCI/container** case — it is a
+v1 requirement (`README.md`) and is specified in [`14_packages.md`](14_packages.md). npm, Maven,
+NuGet, RubyGems and proxy/virtual registries remain out of scope; each is a separate plan.
 
 ## Rollout phasing (summary — details in 09)
 

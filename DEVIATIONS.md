@@ -4,13 +4,23 @@ This file consolidates, deduplicated, every decision recorded in the `## Decisio
 
 **Precedence:** where an entry below contradicts `docs/MASTER_RUST_SPEC.md`, this file wins for spindle. Where two docs contradicted each other, the resolution is recorded under "Rulings" at the end.
 
-**Status values:** `in force` | `superseded by D-…` (chain preserved). Sources use doc numbers (`01`–`16`), `README`, `AGENTS`. Last updated: **2026-09-11**.
+**Status values:** `in force` | `superseded by D-…` (chain preserved). Sources use doc numbers (`01`–`16`), `README`, `AGENTS`. Last updated: **2026-11-20**.
 
 ## 1. Product & UX
 
 - **D-UX-1 — Zero-config first run (Divergence D5).** A missing config file boots on first-run defaults (`listen = 0.0.0.0:8080`, `store.backend = "filesystem"` rooted at `<data-dir>/store`, `auth.mode = "none"` with loud warnings, `auto_create_on_push = true`; other keys per Rust defaults); data dir via `--data-dir`/`SPINDLE_DATA_DIR` (default `~/.local/share/spindle`, `/var/lib/spindle` in containers). A missing *explicitly named* config (`--config`/env pointer) stays fatal (exit 2); `/dev/null` still forces defaults+env. Rationale: user friendliness is a first-class law; supersedes the Rust fail-closed "run `walgit init` first" boot (exit 2 is now bad-argv only). Sources: 01, 03, 06, 11, 15, 16, README L4, AGENTS L10. Status: in force.
 - **D-UX-2 — Setup UI + API first-class (Divergence D6).** `/setup` plus `GET|POST|PUT /api/v1/setup{,/test}` save `<data-dir>/spindle.toml` atomically (tmp + fsync + rename, mode 0600) after full validation, reporting restart-required vs read-live keys. Invalid config ⇒ **setup-only mode** (only `/setup`, `/healthz`, `/readyz` answer; rest 503). Access open while unsecured (no/invalid config or auth none), else admin; optional `SPINDLE_SETUP_TOKEN` gate. Rationale: one-click path from zero-config to real auth; new package `internal/setup`. Sources: 01, 06, 11, 12, 15, 16, README, AGENTS L10. Status: in force.
 - **D-UX-3 — Auth-`none` allowed on any bind.** Rust validation rule 1 (auth `none` requires a loopback listen, fail-closed) is replaced by a loud warning on any bind (logs, setup UI, `readyz`) with zero refused requests. All other validation stays fail-closed. Rationale: the D-UX-1 default (`0.0.0.0:8080` + auth none) depends on it; AGENTS L9 records the supersession. Sources: 01, 06, 11, 16, AGENTS L9. Status: in force.
+
+- **D-UX-4 — Packages is a spindle-only extension (OCI registry).** v1 adds an OCI Distribution
+  registry addressed as `<host>/<owner>/<repo>`, stored under the new prefix
+  `repos/<o>/<r>/packages/`. The Rust implementation (walgit) has no registry, so this is a
+  deliberate divergence: it introduces no shared key and changes no existing field number, wire
+  encoding or file shape — the bucket-compatibility law is untouched for every pre-existing key.
+  Package name = repository name (no GHCR-style free-form names), blobs are content-addressed store
+  objects, tags are CAS pointers, and unreferenced blobs are removed by a maintainer sweep rather
+  than a request-path refcount. Spec: `docs/features/14_packages.md`; plan: `docs/PLAN-V1.md` WP1.
+  Status: proposed for v1, not implemented.
 
 ## 2. Dependency budget
 

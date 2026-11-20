@@ -16,6 +16,11 @@ SPINDLE_TEST_S3_BUCKET     ?= spindle-test
 
 web: ## build the page assets: vite/Tailwind (app.css) + esbuild (islands, SDK) + vendored htmx
 	pnpm --dir web run build
+	@# Tailwind only emits utilities for what `@source` resolves to (web/src/app.css).
+	@# An empty scan still writes a valid stylesheet, so assert the template utilities
+	@# actually landed (the Dockerfile repeats this check for the image build).
+	@grep -q 'max-w-6xl' web/dist/app.css && grep -q '\.flex{' web/dist/app.css \
+	  || { echo "ERROR: web/dist/app.css has no utility classes — Tailwind scanned no templates; check the @source paths in web/src/app.css." >&2; exit 1; }
 
 build: web ## compile everything (the SDK bundle is a build dependency)
 	$(GO) build -trimpath -buildvcs=auto -ldflags "$(LDFLAGS)" -o $(BINARY) ./cmd/spindle

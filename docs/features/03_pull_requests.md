@@ -1,6 +1,7 @@
 # 03 — Pull requests: opens, `refs/pull/N`, mergeability, merge tasks, forks
 
-> Status: planning for the spindle collaboration layer. Depends on 01 (identity/permissions), 02
+> Status: **implemented** (as-built; `internal/pulls` + `internal/review`; see `09_rollout.md` for the
+> landing record and `docs/PLAN-V1.md` §2.1 for the remaining GitHub-parity gaps). Originally: Depends on 01 (identity/permissions), 02
 > (issues — shared numbering via P2), and the frozen architecture in
 > [`README.md`](README.md) (primitives P1–P9). Seams: `docs/go/14_extensibility.md` (§14.3 routes,
 > §14.7 task kinds, §14.10 roadmap). Git argv per `docs/go/04_git.md`; wire conventions per

@@ -4,8 +4,6 @@ A git host in Go: **git over smart HTTP (v0/v2), LFS, bundle-uri, a JSON API wit
 
 It serves repositories whose entire state — refs, packs, config, policy, events, web UI — lives as objects in a bucket (filesystem, S3, or GCS). Instances are disposable; wipe one and you lose nothing but warmth.
 
-> No politics allowed — see our [Code of Conduct](CODE_OF_CONDUCT.md).
-
 ## Inspired by walgit
 
 spindle exists because of **Tobi Lütke's fantastic [walgit](https://github.com/tobi/walgit)**. It proved that a git host can put everything on an object store, and it is the direct inspiration for this project. Thank you, Tobi.
@@ -73,12 +71,14 @@ For an **S3-backed store** (rustfs/MinIO/GCS), see [`compose.yaml`](compose.yaml
 
 ## v1 release requirements
 
+Status of every item, the GitHub-parity bar and the closing work: [`docs/PLAN-V1.md`](docs/PLAN-V1.md).
+
 - [x] [git storage](internal/store)
 - [x] [issues](internal/issues)
-- [ ] [pull requests](internal/pulls)
+- [x] [pull requests](internal/pulls)
 - [x] [tags](internal/tags)
-- [ ] [releases](internal/releases)
-- [ ] packages
+- [x] [releases](internal/releases)
+- [ ] packages — [specified](docs/features/14_packages.md), not yet implemented
 - [x] [fork](internal/social)
 - [x] [webhooks](internal/notify)
 - [x] [oidc](internal/server)
@@ -120,4 +120,6 @@ CI runs on GitHub Actions (`.github/workflows/ci.yml`) on every pull request and
 
 ## License
 
-[MIT](LICENSE) © Christopher Rueber
+[MIT](LICENSE) © 2026 Christopher Rueber
+
+> No politics allowed — see our [Code of Conduct](CODE_OF_CONDUCT.md).

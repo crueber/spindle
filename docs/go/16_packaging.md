@@ -82,11 +82,27 @@ COPY web/package.json web/pnpm-lock.yaml web/pnpm-workspace.yaml ./
 # binary (shipped as an optional dependency); pnpm 11's build-script gate
 # would otherwise fail the fresh install.
 RUN pnpm install --frozen-lockfile --ignore-scripts
+# Tailwind v4 only scans the paths named by `@source` in web/src/app.css. The
+# Go templates live OUTSIDE web/, so they must exist at the path that directive
+# resolves to from this stage — /src/web/src/../../internal/webui/templates.
+# Without them Tailwind silently scans nothing and emits a stylesheet with no
+# utility classes (.brand/.btn survive because they are @apply components), so
+# every page renders unstyled. Copy the template tree only: this stage builds
+# CSS/JS and gets nothing else from the repo.
+COPY internal/webui/templates /src/internal/webui/templates
 COPY web/ ./
+# Guard: a stylesheet without the utilities the templates use means the scan
+# found nothing (a broken @source path), which must fail the image build
+# instead of shipping.
 RUN pnpm run build \
     && test -f dist/app.css \
     && test -f dist/ui.js \
-    && test -f dist/repos.js
+    && test -f dist/repos.js \
+    && if ! grep -q 'max-w-6xl' dist/app.css || ! grep -q '\.flex{' dist/app.css; then \
+         echo "ERROR: dist/app.css is missing the utility classes used by the Go templates" >&2; \
+         echo "       Tailwind scanned no templates — check /src/internal/webui/templates and the @source paths in web/src/app.css." >&2; \
+         exit 1; \
+       fi
 
 # ---- 2. Go build (static, no cgo; embeds the built dist/) ----
 FROM docker.io/library/golang:1.27-alpine AS build
@@ -126,6 +142,14 @@ Rules:
 - `/readyz` reflects real readiness: store open + prewarm done (gated by `cache.prewarm_ready_timeout`) — NOT liveness. `/healthz` is the dumb liveness probe.
 - **No config file is baked**: the image boots zero-config (D5) with `SPINDLE_DATA_DIR=/var/lib/spindle`; that data dir holds `store/`, `cache/`, and the `spindle.toml` that `/setup` writes. Operators who prefer a file mount one and point `SPINDLE_CONFIG` at it, or set `SPINDLE__*` env overrides — the table in §3.1 is unchanged.
 - `SPINDLE_BUILD_SHA` build-arg comes from CI; a locally built image reports `dev`.
+- **The web stage must receive the Tailwind scan inputs, not just `web/`.** `web/src/app.css` declares
+  `@source "../../internal/webui/templates"`, so the image copies that directory to
+  `/src/internal/webui/templates` (the path the directive resolves to from `/src/web`) before the
+  build. A missing scan path is silent: Tailwind still writes a valid, smaller `app.css` (the `@apply`
+  components survive, every utility used directly in templates disappears) and the image ships pages
+  that render unstyled. The post-build `grep` guard (`max-w-6xl` and `.flex{`) fails the build in that
+  state; `make web` asserts the same thing so a local/CI build cannot pass silently either. Any new
+  `@source` outside `web/` needs its own `COPY` in this stage (and ideally its own guarded probe).
 
 ## 3. Configuration for operators
 
