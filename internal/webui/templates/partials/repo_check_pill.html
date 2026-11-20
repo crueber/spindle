@@ -1,0 +1,12 @@
+{{define "repo_check_pill"}}
+{{/* One commit row's check state (Checks.jsx CheckPill, dot-only variant —
+     the SPA's Commits rows are not verbose). Links to the per-sha checks
+     detail; the dot class comes from checkStateDot, and a repo with zero
+     reported contexts renders the neutral #518 pill ("no checks"), never a
+     green/amber guess. */}}
+{{with .}}
+<a class="inline-flex items-center gap-1.5 hover:underline" href="{{.Href}}" title="{{.Title}}">
+  <span class="{{.Dot}}" aria-label="{{.Title}}"></span>
+</a>
+{{end}}
+{{end}}

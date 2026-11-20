@@ -1,0 +1,58 @@
+{{define "content"}}
+<section class="fork-page mx-auto grid max-w-2xl gap-4">
+  <h2 class="text-xl font-semibold">Fork <a class="hover:underline" href="/{{.Data.Full}}">{{.Data.Full}}</a></h2>
+  <p class="muted text-sm">
+    A fork shares the parent's objects and starts from its refs — pushes to
+    either side stay independent. Issues and pull requests start fresh.
+  </p>
+  {{if .Data.ForksOff}}
+  <p class="card p-4 text-sm">
+    Forking is disabled for this repository.
+    <a class="hover:underline" href="/{{.Data.Full}}">Back to {{.Data.Full}}</a>
+  </p>
+  {{else}}
+  <form method="post" action="/{{.Data.Full}}/fork" class="card grid gap-3 p-4" aria-label="Fork repository">
+    <div class="grid grid-cols-1 gap-3 sm:grid-cols-2">
+      <label class="grid gap-1" for="fork-owner">
+        <span class="text-sm font-medium">Owner</span>
+        <select id="fork-owner" name="owner" class="input font-mono" aria-label="Owner">
+          {{range .Data.Owners}}<option value="{{.}}"{{if eq . $.Data.Owner}} selected{{end}}>{{.}}</option>{{end}}
+        </select>
+      </label>
+      <label class="grid gap-1" for="fork-name">
+        <span class="text-sm font-medium">Name</span>
+        <input id="fork-name" name="name" class="input font-mono" value="{{.Data.Name}}" placeholder="{{.Data.DefaultName}}"
+               autocomplete="off" spellcheck="false" aria-label="Name">
+      </label>
+    </div>
+    <div class="grid grid-cols-1 gap-3 sm:grid-cols-2">
+      <label class="grid gap-1" for="fork-visibility">
+        <span class="text-sm font-medium">Visibility</span>
+        <select id="fork-visibility" name="visibility" class="input w-auto" aria-label="Visibility">
+          <option value="public"{{if eq .Data.Visibility "public"}} selected{{end}}>public — anyone may read</option>
+          <option value="authenticated"{{if eq .Data.Visibility "authenticated"}} selected{{end}}>private — logged in only</option>
+          <option value="private"{{if eq .Data.Visibility "private"}} selected{{end}}>private — owner/org only</option>
+        </select>
+      </label>
+      <label class="grid gap-1" for="fork-branch">
+        <span class="text-sm font-medium">Default branch</span>
+        <select id="fork-branch" name="branch" class="input font-mono" aria-label="Default branch">
+          <option value="">parent default</option>
+          {{range .Data.Branches}}<option value="{{.}}"{{if eq . $.Data.Branch}} selected{{end}}>{{.}}</option>{{end}}
+        </select>
+      </label>
+    </div>
+    <label class="grid gap-1" for="fork-description">
+      <span class="text-sm font-medium">Description <span class="muted">(optional)</span></span>
+      <input id="fork-description" name="description" class="input" value="{{.Data.Description}}"
+             placeholder="what this fork is for" maxlength="1024" autocomplete="off" aria-label="Description">
+    </label>
+    {{template "forms_messages" .Data}}
+    <div class="flex flex-wrap gap-2">
+      <button type="submit" class="btn primary px-3 py-1">create fork</button>
+      <a class="btn px-3 py-1" href="/{{.Data.Full}}">cancel</a>
+    </div>
+  </form>
+  {{end}}
+</section>
+{{end}}

@@ -65,51 +65,6 @@ func TestGateRepoReadVisibilityFirst(t *testing.T) {
 	}
 }
 
-func TestRepoPageGatedVisibility(t *testing.T) {
-	// Public (allow-gate): anonymous reaches the shell with the flag off.
-	s, h := newTestServer(t, func(o *Options) { o.ReadGate = &stubGate{} })
-	req := httptest.NewRequest("GET", "http://x/o/r", nil)
-	rec := httptest.NewRecorder()
-	h.ServeHTTP(rec, req)
-	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `id="root"`) {
-		t.Fatalf("public shell anon = %d, want the SPA shell", rec.Code)
-	}
-	// Private (deny-gate): anonymous curl keeps the legacy 401.
-	s.readGate = &stubGate{err: &auth.AuthError{Kind: auth.ErrUnauthorized, Why: "authentication required"}}
-	req = httptest.NewRequest("GET", "http://x/o/r", nil)
-	rec = httptest.NewRecorder()
-	h.ServeHTTP(rec, req)
-	if rec.Code != http.StatusUnauthorized {
-		t.Fatalf("private shell anon curl = %d, want 401", rec.Code)
-	}
-	// ...and an anonymous browser keeps the #344 login page (not a bare
-	// 401, not the shell).
-	req = httptest.NewRequest("GET", "http://x/o/r", nil)
-	req.Header.Set("User-Agent", "Mozilla/5.0")
-	rec = httptest.NewRecorder()
-	h.ServeHTTP(rec, req)
-	if rec.Code != http.StatusUnauthorized || !strings.Contains(rec.Body.String(), "Log in with OIDC") {
-		t.Fatalf("private shell anon browser = %d, want the #344 login page", rec.Code)
-	}
-	// Authenticated callers are unaffected by the visibility branch.
-	req = httptest.NewRequest("GET", "http://x/o/r", nil)
-	req.Header.Set("Authorization", "Bearer tok123")
-	rec = httptest.NewRecorder()
-	h.ServeHTTP(rec, req)
-	if rec.Code != http.StatusOK {
-		t.Fatalf("authed shell = %d, want 200", rec.Code)
-	}
-	// Nil gate: legacy behavior — anonymous stays out with the flag off.
-	s.readGate = nil
-	req = httptest.NewRequest("GET", "http://x/o/r", nil)
-	rec = httptest.NewRecorder()
-	h.ServeHTTP(rec, req)
-	if rec.Code != http.StatusUnauthorized {
-		t.Fatalf("nil-gate shell anon = %d, want 401", rec.Code)
-	}
-	_ = s
-}
-
 func TestSSHUploadReadGate(t *testing.T) {
 	eng := &fakeEngine{exists: true, placement: Placement{Serve: true}}
 	s := sshGateServer(t, eng, nil)

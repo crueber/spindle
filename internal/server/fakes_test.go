@@ -2,10 +2,13 @@ package server
 
 import (
 	"context"
+	"io"
+	"net/http"
 	"testing"
 	"time"
 
 	"github.com/crueber/walhub/internal/git"
+	"github.com/crueber/walhub/internal/pages"
 	"github.com/crueber/walhub/internal/server/auth"
 	"github.com/crueber/walhub/internal/store"
 	"github.com/crueber/walhub/internal/wal"
@@ -82,6 +85,30 @@ func (f *fakeEngine) AutoCreate(ctx context.Context, id git.RepoId) bool { retur
 
 // fakeStore wraps the real memory store (02_storage_protobuf.md contract).
 func newFakeStore() store.ObjectStore { return store.NewMemory() }
+
+// fakeUI is a pages.Provider stub for the server's page seam: it answers the
+// paths it is given (a marker page) and reports false for everything else,
+// exactly like the real provider's sentinel. It records what it was asked, so
+// tests can assert the router reached the page layer.
+type fakeUI struct {
+	paths map[string]bool
+	seen  []string
+	auth  pages.Auth
+}
+
+func (f *fakeUI) BindAuth(a pages.Auth) { f.auth = a }
+
+func (f *fakeUI) Serve(w http.ResponseWriter, r *http.Request) bool {
+	f.seen = append(f.seen, r.URL.Path)
+	if !f.paths[r.URL.Path] || (r.Method != http.MethodGet && r.Method != http.MethodHead) {
+		return false
+	}
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.WriteHeader(http.StatusOK)
+	_, _ = io.WriteString(w, "<!doctype html><html><body><div id=\"page\">rendered page</div></body></html>")
+	return true
+}
 
 var _ = time.Now
 var _ = auth.Anonymous

@@ -1,0 +1,31 @@
+{{define "content"}}
+<section class="issue-new mx-auto max-w-2xl">
+  <h2 class="mb-3 text-lg font-semibold">New issue</h2>
+  {{if .Data.Disabled}}
+  <p class="card p-4 text-sm">
+    Issues are disabled for this repository.
+    <a class="hover:underline" href="/{{.Data.Full}}/issues">Back to issues</a>
+  </p>
+  {{else}}
+  {{template "forms_messages" .Data}}
+  <form method="post" action="/{{.Data.Full}}/issues/new" class="grid gap-3" aria-label="New issue">
+    <label class="grid gap-1" for="issue-title">
+      <span class="text-sm font-medium">Title</span>
+      <input id="issue-title" name="title" class="input" value="{{.Data.Title}}" maxlength="256" placeholder="Publish fails on empty tree">
+    </label>
+    <div class="grid gap-1">
+      <label class="text-sm font-medium" for="issue-body">Body</label>
+      {{if .Data.Preview}}
+      <div id="issue-body-preview" class="card markdown-body p-3">{{.Data.PreviewHTML}}</div>
+      {{else}}
+      <textarea id="issue-body" name="body" class="input min-h-32 font-mono text-sm" placeholder="Steps to reproduce… (markdown; #N links issues)">{{.Data.Body}}</textarea>
+      {{end}}
+    </div>
+    <div class="flex flex-wrap items-center justify-between gap-2">
+      <button type="submit" class="btn primary">Create issue</button>
+      <button type="submit" name="action" value="preview" class="btn px-2 py-0.5 text-xs" aria-pressed="{{if .Data.Preview}}true{{else}}false{{end}}">{{if .Data.Preview}}Edit{{else}}Preview{{end}}</button>
+    </div>
+  </form>
+  {{end}}
+</section>
+{{end}}

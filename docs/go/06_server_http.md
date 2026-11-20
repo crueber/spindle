@@ -5,7 +5,7 @@ Package: `internal/server` (module `github.com/crueber/walhub`). Binary `walhub`
 
 ## 1. What this server is
 
-One process serves: git smart HTTP (v0/v2), the LFS basic transfer protocol, immutable static objects (bundles, LFS bytes), the JSON API with SSE, the SPA shell, the setup UI/API (§3.4), and instance health/metrics. There is **no dumb-HTTP mode** (§20.2: `GET /{o}/{r}/HEAD` and `/objects/info/packs` MUST NOT exist — always 404 via the wildcard catch-all) and **no `/services/git-*` routes** (§20.3: `/services/*` hosts only JSON-UI endpoints, `setup.json`, and `public/*`).
+One process serves: git smart HTTP (v0/v2), the LFS basic transfer protocol, immutable static objects (bundles, LFS bytes), the JSON API with SSE, the server-rendered page tree (`internal/webui` behind the `internal/pages` seam, §3.5), the setup UI/API (§3.4), and instance health/metrics. There is **no dumb-HTTP mode** (§20.2: `GET /{o}/{r}/HEAD` and `/objects/info/packs` MUST NOT exist — always 404 via the wildcard catch-all) and **no `/services/git-*` routes** (§20.3: `/services/*` hosts only JSON-UI endpoints, `setup.json`, and `public/*`).
 
 ## 2. Server core
 
@@ -59,8 +59,8 @@ The ordered list, outermost first, is FIXED (the Rust spec's stack; the code-vs-
 | 5 | `recoverPanic` | `defer recover()` → log with request_id → 500 plain text `internal error` (request_id included). MUST NOT kill the process; MUST NOT swallow the inflight decrement (order matters: recovery inside the inflight-wrapped writer). |
 | 6 | `cors` | path-scoped only. See §2.3. |
 | 7 | `refreshSession` | sliding cookie: if a valid `walgit_session` cookie is older than `session_ttl/4` AND the principal still passes policy, re-issue via `Set-Cookie` on app responses (skip `/_auth/*`). Stateless: age comes from the token's `iat` (§8.5). |
-| 8 | *(gated group only)* `requireAuth` | NOT in the main chain. Attached with `Use` inside the gated route group (SPA shell, `/_ui/*`, `/services/setup.json`, `/metrics`, `/{owner}` UI routes — a `chi.Router` group via `r.Route`/`r.Group`; §3.1). On failure: if the request is a browser-ish GET without an `Authorization` header and browser login is enabled → 307 `/_auth/login?next=<path?query>`; if the request is a browser-ish GET without an `Authorization` header and browser login is DISABLED → 401 (with the `WWW-Authenticate: Bearer` challenge, so API clients see no change) carrying the rendered login page — a working "Log in with OIDC" button (GET `/_auth/login?next=…`) plus the disabled explanation (#344); else emit the mapped status (401 with `WWW-Authenticate: Bearer realm="walgit"`, 403, 503+`Retry-After: 15`) with a plain-text body naming the setup command. All other endpoints authenticate **inside handlers**. |
-| 9 | `compress` | attached with `Use` ONLY to the three web route groups (JSON API `/api*`+`/api-browser*`, repo JSON lanes, UI) — each is a chi sub-router/group so compression stays scoped. brotli+gzip at fastest level. **NEVER** on git smart HTTP, bundles, LFS bytes, or the token page's SSE-adjacent streams; SSE excluded (streamed answers are never compressed); `/_ui` assets arrive precompressed and pass through untouched. Rationale: packs are already compressed and Content-Length/Range must stay exact. |
+| 8 | *(page/static gating — not a middleware layer)* `requireAuth` | NOT in the main chain and no longer mounted as a route group: the page tree gates inside the provider (`internal/pages.Auth`, §3.5), and the read-gated statics that remain (`/services/setup.json`, `/metrics`) are wrapped per route with `s.gated` (§3.1). On failure: if the request is a browser-ish GET without an `Authorization` header and browser login is enabled → 307 `/_auth/login?next=<path?query>`; if the request is a browser-ish GET without an `Authorization` header and browser login is DISABLED → 401 (with the `WWW-Authenticate: Bearer` challenge, so API clients see no change) carrying the rendered login page — a working "Log in with OIDC" button (GET `/_auth/login?next=…`) plus the disabled explanation (#344); else emit the mapped status (401 with `WWW-Authenticate: Bearer realm="walgit"`, 403, 503+`Retry-After: 15`) with a plain-text body naming the setup command. All other endpoints authenticate **inside handlers**. |
+| 9 | `compress` | attached with `Use`/wrapping ONLY to the web lanes (JSON API `/api*`+`/api-browser*`, repo JSON lanes, and the `/_ui/*` page-asset route) — each is a chi sub-router/group or a wrapped handler so compression stays scoped. brotli+gzip at fastest level. **NEVER** on git smart HTTP, bundles, LFS bytes, or the token page's SSE-adjacent streams; SSE excluded (streamed answers are never compressed); `/_ui` assets arrive precompressed and pass through untouched. Rationale: packs are already compressed and Content-Length/Range must stay exact. |
 
 ### 2.3 CORS — exact rules
 
@@ -115,24 +115,27 @@ r.Mount("/api/v1/setup", s.setupAPI)     // internal/setup HTTP surface (§3.4) 
 r.Mount("/api/v1", http.StripPrefix("/api/v1", api.NonRepo)) // me/authenticate/owners + /services/api twins
 r.Mount("/_auth", s.authFlow)            // §8.6
 r.Post("/_events/notify", s.eventsNotify) // handler-authenticated (09_events.md)
-r.Mount("/_ui", gated(s.serveUIAssets))
-r.Get("/services/setup.json", gated(s.setupJSON))
-r.Get("/metrics", gated(s.metrics))
-r.Mount("/setup", s.setupUI)             // setup UI shell + assets (§3.4)
-r.Get("/", gated(s.spaHome))             // landing page shell (static; no text branch)
-r.Get("/explore", gated(s.explorePage)) // owners-list shell; ?format=text → plain owner list
-r.Get("/how-it-works", gated(s.howItWorksPage)) // deep-dive shell (static; no text branch, issue #191)
+r.Route("/_ui", func(g chi.Router) {        // page assets (app.css, ui.js, htmx*, concepts/, assets/)
+    g.Handle("/*", s.compress(http.HandlerFunc(s.serveUIAssets)))
+})
+r.Get("/services/setup.json", s.gated(s.setupJSON))
+r.Get("/metrics", s.gated(s.metricsHandler))
+r.Get("/setup", s.pageOr404)             // setup page: the provider owns the §3.4 rules (§3.5)
+r.Get("/", s.pageOr404)                  // page provider: landing
+r.Get("/explore", s.pageOr404)           // page provider: owners list; ?format=text → plain-text twin
+r.Get("/how-it-works", s.pageOr404)      // page provider: deep-dive (static; no text twin, issue #191)
+r.HandleFunc("/api", s.uiOr(apiLane.ServeHTTP)) // browser API-docs page, else the JSON lane
 r.NotFound(notFound)                     // everything else: deliberate 404 — includes /services/public/* beyond install.sh
 r.MethodNotAllowed(methodNotAllowed)     // 405 + Allow
-r.HandleFunc("/*", s.repoDispatch)       // EVERYTHING repo-scoped, parsed by hand (§3.2)
+r.HandleFunc("/*", s.uiOr(s.repoDispatch)) // pages first, then EVERYTHING repo-scoped (§3.2)
 ```
 
 chi mechanics (normative):
 
 - **Method enforcement** is chi's on the routes above: a `GET`-only route hit with `POST` reaches `MethodNotAllowed` → 405 with `Allow`. Inside the `/*` wildcard the hand dispatch owns the §3.3 table and enforces methods itself: known repo path + unsupported method → 405 with `Allow` + plain-text body; unknown path → 404. Both 404 and 405 bodies are plain text, no HTML error pages (Rust contract).
-- **Gated group** (`requireAuth`, §2.2 #8): `r.Group(func(g chi.Router) { g.Use(s.requireAuth); … })` holds the SPA shell `/`, `/_ui/*`, `/services/setup.json`, and `/metrics`; the `/{owner}` and `/{owner}/{repo}` UI page routes are reached through the wildcard, which applies the same check per §3.3.
-- **Compress groups** (§2.2 #9): the JSON API (`/api*`, `/api-browser*`) and UI lanes are `r.Route`/`r.Group` subtrees with `Use(compress)`; git, bundles, and LFS traffic stays outside them.
-- **Setup-only mode** (§3.4) is a branch at the top of `s.mount`: when active, only `/setup*`, `/api/v1/setup*`, `/healthz`, `/readyz`, and `/services/public/*` are registered (plus a `503` fallback for everything else); the full tree below is never mounted.
+- **Page gating** (§2.2 #8, §3.5): there is no `requireAuth` route group any more. Every page route goes through `pageOr404` (a pure page route) or `uiOr(fallback)` (a path a non-page lane also owns); the page provider applies the server's own authority functions inside each handler (`s.gated` for `anonymous_read`, the identity read gate for repo visibility, per-action role floors), exactly mirroring its API twin. `/_ui/*` assets are public — static filenames, no secrets, and the stylesheet must load so `/setup` can render its access-restricted card; `/services/setup.json` and `/metrics` are wrapped with `s.gated`.
+- **Compress groups** (§2.2 #9): the JSON API (`/api*`, `/api-browser*`) and the `/_ui/*` asset route are wrapped with `compress`; git, bundles, and LFS traffic stays outside them.
+- **Setup-only mode** (§3.4) is a branch at the top of `s.mount`: when active, only `GET /setup`, `POST /setup`, `/api/v1/setup*`, `/_ui/*`, `/healthz`, `/readyz`, and `/services/public/*` are registered (plus a `503` fallback for everything else); the full tree below is never mounted.
 
 ### 3.2 The `{owner}/{repo}` wildcard dispatch
 
@@ -141,7 +144,7 @@ The trailing `r.HandleFunc("/*", s.repoDispatch)` receives every path the explic
 ```
 segments = TrimPrefix(path, "/") split on "/"
 owner, rest = segments[0], segments[1:]
-if len(rest) == 0 → UI page route /{owner} (gated)
+if len(rest) == 0 → UI page route /{owner} (page provider; GET/HEAD only)
 repoSeg, sub = rest[0], rest[1:]
 if strings.HasSuffix(repoSeg, ".git") { repoSeg = trim; hadGit = true }
 repo = wal.ParseRepoRef(owner, repoSeg) or 404
@@ -165,11 +168,11 @@ Then dispatch on `sub[0]` (after `.git`-strip and re-join with "/"): the table i
 | POST | `/_events/notify` | handler-authenticated |
 | OPTIONS | (preflights) | §2.3 |
 
-**Setup (open per the §3.4 access rules; the API is `internal/setup`, the UI is `web/src/setup*`):**
+**Setup (open per the §3.4 access rules; the API is `internal/setup`, the UI is the server-rendered `/setup` page):**
 
 | Method | Path | Notes |
 |---|---|---|
-| GET | `/setup` | setup UI shell (SolidJS SPA route, D-WEB-6); assets at `/_ui/assets/*` |
+| GET | `/setup` | setup page, server-rendered by the page provider (`internal/webui`, D-WEB-14); assets at `/_ui/app.css` + `/_ui/ui.js` |
 | GET | `/api/v1/setup` | full config schema + effective values + file state + validation errors |
 | POST | `/api/v1/setup/test` | validate a proposed config without saving |
 | PUT | `/api/v1/setup` | validate + atomically write `<data-dir>/walhub.toml` |
@@ -212,9 +215,9 @@ Then dispatch on `sub[0]` (after `.git`-strip and re-join with "/"): the table i
 | POST | `{lane}/ops/{op}?params` | require_write | start maintenance op; SSE attach; joins a running same-(repo,kind) task |
 | GET/POST | `/_auth/tokens` | session | token page / mint (CSRF-guarded same-origin) |
 
-**Gated (`require_auth` = read):** SPA shell + `/_ui/*` assets, `/services/setup.json`, `/metrics` (`text/plain; version=0.0.4`), `GET /` (landing page shell, always HTML — the front door makes zero API calls), `GET /explore` (owners-list shell; `?format=text` or text Accept → plain one-per-line owner list), `GET /how-it-works` (deep-dive shell, always HTML — zero API calls, no text twin), `/{owner}`, `/{owner}/{repo}`, `/{owner}/teams/{slug}` UI page routes (tree/blob/commits/commit/wal/settings/issues/labels/milestones/pulls/pull all return `index.html`, `no-cache`). The setup routes above are NOT in this group — their access rule is §3.4 (open exactly while no config file exists, the config is invalid, or auth mode is `none`).
+**Gated (`require_auth` = read):** `/services/setup.json`, `/metrics` (`text/plain; version=0.0.4`). **Page routes** are gated inside the page provider with the same rules (§3.5): `GET /` (landing page, always HTML — the front door makes zero store reads), `GET /explore` (owners list; `?format=text` → one owner per line as `text/plain`), `GET /how-it-works` (deep dive, always HTML — zero store reads, no text twin), `/{owner}`, `/{owner}/{repo}`, `/{owner}/teams/{slug}` page routes (tree/blob/commits/commit/wal/settings/issues/labels/milestones/pulls/pull — every page is a full HTML document with `Cache-Control: no-cache` + a strong ETag; a path the provider does not own is the plain §3 404). The `?format=text` query is the only `/explore` machine twin: there is no `Accept: text/plain` negotiation (that branch lived in the deleted server `explorePage` shell handler and was not carried over, D-WEB-15). The setup routes above are NOT in this group — their access rule is §3.4 (open exactly while no config file exists, the config is invalid, or auth mode is `none`).
 
-**Reserved single-segment UI names** (explicit routes shadow those owner names; an owner literally named `explore` loses its `/:owner` UI page — its section link then points at `/explore`, the list, not its repos — while its git/API paths are unaffected; same precedent as the existing names): `import`, `api`, `keys`, `setup`, `explore`, `how-it-works`, `new` (the `/new` create form, issue #210 — served through the `/:owner` shell shape like `/import`, so no explicit server route was added; an owner literally named `new` loses its `/:owner` UI page only).
+**Reserved single-segment UI names** (explicit routes shadow those owner names; an owner literally named `explore` loses its `/:owner` UI page — its section link then points at `/explore`, the list, not its repos — while its git/API paths are unaffected; same precedent as the existing names): `import`, `api`, `keys`, `setup`, `explore`, `how-it-works`, `new` (the `/new` create form, issue #210 — served through the `/{owner}` page-route shape like `/import`, so no explicit server route was added; an owner literally named `new` loses its `/{owner}` UI page only).
 
 **Both API lanes hit the same handlers.** `/{owner}/{repo}/api/…` (bearer/same-origin) and `/{owner}/{repo}/api-browser/…` (cross-origin browser, `credentials: include`) differ only in the `Lane` value passed to the handler (which changes cache headers and auth-redirect behavior per 07_api.md). Same for `/api/v1` vs `/api-browser/v1` in the non-repo lane.
 
@@ -224,7 +227,7 @@ Hazard: the wildcard dispatch runs on every unmatched request (scanners, probes)
 
 ### 3.4 Bootstrap & setup (zero-config first run)
 
-`internal/setup` owns the schema description for the UI, validate-for-save, the atomic write of `<data-dir>/walhub.toml`, and bootstrap-mode detection; `internal/server` wires its HTTP surface (`s.setupAPI`, `s.setupUI`); `web/src/pages/Setup.jsx` is the frontend page (SolidJS SPA route, D-WEB-6).
+`internal/setup` owns the schema description for the UI, validate-for-save, the atomic write of `<data-dir>/walhub.toml`, and bootstrap-mode detection; `internal/server` wires the JSON surface (`s.setupAPIRouter`) and routes `GET`/`POST /setup` through the page provider; the page itself is `internal/webui`'s settings page (`internal/webui/templates/pages/settings/setup.html` + the `partials/settings_setup.html` blocks), rendered and validated server-side (D-WEB-14).
 
 **Boot flow decision tree (normative):**
 
@@ -233,7 +236,7 @@ locate data dir (--data-dir flag > WALHUB_DATA_DIR env; default ~/.local/share/w
 ├─ no <data-dir>/walhub.toml → boot with the first-run defaults (below) + a LOUD setup banner in the logs on every start
 ├─ config file present, parses + validates → normal boot (§10.4)
 └─ config file present but INVALID (parse or validation errors) → SETUP-ONLY MODE:
-     only /setup, /_ui/*, /api/v1/setup, /api/v1/setup/test, PUT /api/v1/setup,
+     only GET/POST /setup, /_ui/*, /api/v1/setup, /api/v1/setup/test, PUT /api/v1/setup,
      /healthz, /readyz, and /services/public/* answer; everything else → 503 plain text
      with a pointer to /setup. The UI shows the exact errors; a saved fix takes effect
      after a restart (the process stays in setup-only mode until restarted).
@@ -251,7 +254,7 @@ locate data dir (--data-dir flag > WALHUB_DATA_DIR env; default ~/.local/share/w
 
 **Data-dir layout:** `<data-dir>/store/` (object store), `<data-dir>/cache/` (prewarm, LFS spool), `<data-dir>/walhub.toml` (saved by setup Save; the only config file the server reads).
 
-**Setup UI:** `GET /setup` serves the SPA shell; its JS/CSS come from `/_ui/assets/*` (the vite bundle, immutable). The page groups ALL config keys by section with current effective values (merging defaults ← file ← env), validates client-side, and Saves via the API.
+**Setup UI:** `GET /setup` is a server-rendered page; its assets are `/_ui/app.css` + `/_ui/ui.js` (stable names, `no-cache` + ETag). It groups ALL config keys by section with current effective values (merging defaults ← file ← env) and validates on save. The page provider implements `POST /setup` (validate-then-save through the same `internal/setup` path as `PUT /api/v1/setup`, re-rendering with errors or the saved/restart status; `hx-post` swaps the page fragment) and `POST /setup/auth-test` (the OIDC discovery result fragment). `internal/server` currently routes `GET /setup` in both boot modes and `POST /setup` in setup-only mode — the mode where saving is the recovery path (§3.1). The JSON endpoints below remain the programmatic surface.
 
 **Setup API:**
 
@@ -266,6 +269,58 @@ locate data dir (--data-dir flag > WALHUB_DATA_DIR env; default ~/.local/share/w
 #### Concurrency (setup)
 
 Hazard: concurrent Saves racing the file write. Avoidance: `internal/setup` serializes Saves with a process-wide mutex, writes `<data-dir>/walhub.toml.tmp` then `rename`s (same directory, atomic on POSIX); validation reads the in-memory effective config, never the file mid-write.
+
+### 3.5 The page-provider seam and `/_ui` assets (D-WEB-14, D-WEB-15)
+
+The browser UI is **server-rendered pages**, not a shell plus a client app. `internal/pages` is the
+seam and `internal/webui` is the implementation; `internal/server` imports only the seam package and
+carries no page markup, and `internal/webui` never imports the server package (only
+`internal/server/auth` for the principal type — law 8).
+
+```go
+// internal/pages — the seam internal/server mounts
+type Provider interface {
+    Serve(w http.ResponseWriter, r *http.Request) bool // false = not mine, nothing written
+    BindAuth(fns Auth)                                 // once at mount: Authenticate, Refresh, CheckRead
+}
+```
+
+- `Server.SetUI(provider)` + `bindUI()` hand over exactly the authority functions the API's gated
+  handlers use (`Authenticate`, `maybeRefreshSession`, the identity `checkReadGate`), so page gating
+  cannot drift from the JSON lane's. The provider is built in **every** boot mode, including
+  setup-only (§3.4) — `/setup` is the way out of an invalid config.
+- `pageOr404` answers a pure page route (`GET /`, `/explore`, `/how-it-works`, `/setup`, and the
+  owner/repo page routes reached through the `/*` wildcard): provider first; when it writes nothing,
+  the plain §3 404. There is **no SPA shell fallback** — a path the provider does not own is a 404.
+- `uiOr(fallback)` fronts a path a non-page lane also owns (`/api` docs vs the JSON lane, the `/*`
+  repo dispatch): the provider answers first, otherwise the fallback runs. "Not mine" is signalled by
+  `false` **without writing**, so the seam never half-answers.
+- A page response is a full `text/html` document with `Cache-Control: no-cache` + a strong ETag
+  (the deleted shell's caching class, now per rendered page); writes are same-origin-checked forms that
+  answer `303` to the page (or `HX-Redirect` for an htmx post).
+- Presentation, htmx posting, the islands and the server-side markdown/diff/graph/highlight renderers
+  are specified in `12_web_ui.md` §2; this doc owns only *where pages mount* and *how their bytes are
+  served*.
+
+**`/_ui/*` asset classes** (`serveUIAssets`; the route is public — static filenames, no secrets, and
+`app.css` must load so `/setup` can render its access-restricted card):
+
+| Path | Source | Cache / type |
+|---|---|---|
+| `/_ui/app.css` | `web/dist/app.css` (Tailwind v4 via `@tailwindcss/vite`) | `no-cache` + ETag; `text/css` |
+| `/_ui/ui.js` | `web/dist/ui.js` (esbuild island bundle) | `no-cache` + ETag; `text/javascript` |
+| `/_ui/htmx.min.js`, `/_ui/htmx-ext-sse.js` | vendored `web/vendor/` → `dist/` | `no-cache` + ETag; `text/javascript` |
+| `/_ui/concepts/<name>.gif` | `web/dist/concepts/` (checked-in landing GIFs, copied by the stylesheet build) | `no-cache` + ETag; `image/gif` |
+| `/_ui/assets/*` | content-addressed build output | `public, max-age=31536000, immutable` |
+| anything else | — | plain 404 (`/_ui/index.html` is not an asset; traversal-style names are refused) |
+
+Text assets ride the `compress` route (§2.2 #9) and every asset answers `If-None-Match` → `304`. The
+SDK stays at its own path (`/repos.js`, §3.1), not under `/_ui/`.
+
+**Canonical host.** `canonicalBrowserHost` (§2.2 #2) is unchanged: a browser-looking `GET`/`HEAD`
+(browser test) on a loopback host is 302'd to `walgit.localhost[:port]` with the same path+query. Page
+routes are ordinary GETs, so a headless drive must follow the hop; curl fails the browser test and
+never redirects.
 
 ## 4. Git endpoint behaviors (§8.4)
 
@@ -448,8 +503,8 @@ none? → session cookie walgit_session → verify (§8.5) → authenticated pri
 **Checks:** `require_read` on repo-scoped surfaces resolves visibility FIRST (Forgejo #345,
 spec amendment — see Decisions): public ⇒ anonymous admitted even with `anonymous_read=false`;
 private ⇒ 401 anonymous (+ Bearer, so git erases the credential) / 403 authenticated-without-read.
-`anonymous_read` keeps its meaning for NON-repo surfaces (owners listings, `/explore` shell +
-text twin, setup.json, `/` + `/{owner}` shells): anonymous there still needs the flag.
+`anonymous_read` keeps its meaning for NON-repo surfaces (owners listings, `/explore` page +
+text twin, setup.json, `/` + `/{owner}` pages): anonymous there still needs the flag.
 `require_write`/`require_admin`: lacking → 403 (unchanged) — except the git push paths, which
 enforce the repo-scoped push rule (§4.4), not the host flag.
 
@@ -519,7 +574,7 @@ auth-none is unaffected — its principal is never anonymous); (2) the
 `apiServe` lane seam asserts after `Authenticate`: oidc mode + a
 state-changing method (anything but GET/HEAD/OPTIONS) + anonymous principal
 → 401 without invoking the handler, so even a hypothetically-ungated route
-cannot write; (3) the SPA routes every write affordance to
+cannot write; (3) the page layer routes every write affordance to
 `/login-required?next=<action>&action=<label>` (static route, registered
 before `/:owner`), whose Log-in button enters the `/_auth/login?next=`
 flow above and lands the user back on the attempted action after the
@@ -676,19 +731,19 @@ Hazard: keepalive ticker and event writer racing on the same `http.ResponseWrite
 - Go adaptation of the request-id span: the Rust "open the span" becomes the structured log record + trace_id extraction, since Go tracing here is slog-based — same observability surface, no otel dependency.
 - No timeout/body-limit middleware is implemented, matching §20.4's truth about the Rust code; limits stay per-feature (push ingest, settings ≤ 16 KiB, blob ≤ 2 MiB, LFS ≤ `lfs.max_object_bytes`).
 
-- **NEW (2026-09-04) — `issues`/`labels`/`milestones` join the `/{owner}/{repo}` UI page routes** (Wave B, docs/features/02 §11): nested paths (`/issues/new`, `/issues/:num`) ride the `sub[0]` match and return the SPA shell; no wire change, the pages use the issues JSON API.
-- **NEW (2026-09-04) — `pulls`/`pull` join the `/{owner}/{repo}` UI page routes** (Wave C1, docs/features/03 §9): nested paths (`/pulls`, `/pull/:num`) ride the `sub[0]` match and return the SPA shell; no wire change, the pages use the pulls JSON API.
-- **NEW (2026-09-04) — `/{owner}/teams/{slug}` serves the SPA shell** (Feature 08 §1): the 3-segment
-  shape reroutes to the gated shell (GET/HEAD only, 405 otherwise); a repo literally named `teams`
+- **NEW (2026-09-04) — `issues`/`labels`/`milestones` join the `/{owner}/{repo}` UI page routes** (Wave B, docs/features/02 §11): nested paths (`/issues/new`, `/issues/:num`) ride the `sub[0]` match and reach the page provider (the SPA `index.html` shell in the historical shape; D-WEB-15); no wire change, the pages use the issues JSON API.
+- **NEW (2026-09-04) — `pulls`/`pull` join the `/{owner}/{repo}` UI page routes** (Wave C1, docs/features/03 §9): nested paths (`/pulls`, `/pull/:num`) ride the `sub[0]` match and reach the page provider (the SPA shell in the historical shape; D-WEB-15); no wire change, the pages use the pulls JSON API.
+- **NEW (2026-09-04) — `/{owner}/teams/{slug}` serves a page route** (Feature 08 §1): the 3-segment
+  shape reroutes to the page provider (the gated SPA shell in the historical shape; D-WEB-15), GET/HEAD only, 405 otherwise; a repo literally named `teams`
   keeps its 2-segment root and every deeper path. New nested repo pages (`/pulls/new`,
   `/pull/:num/commits`, `/pull/:num/files`, `/checks/:sha`) ride the existing `sub[0]` match —
   no router change for those.
 - **NEW (2026-09-05) — broker forwarding is uniform across core + collab surfaces** (Forgejo #71): the §8.6 rule resolves at the single entry point `AuthService.AuthenticateForwarded`, and every Seam 1 feature surface (all nine `chain*` closures in `cmd/walhub`) resolves through it — bare `Authenticate` in a feature chain is an auth bug (it attributes brokered actions to the broker). Rationale: one forwarding decision point keeps core git/API lanes and collab handlers identical by construction; fail-closed ordering (errors before forwarding) is inherited, not re-implemented per surface.
 - **NEW (2026-09-05) — issue attachment bytes use `private` cache class** (Forgejo #120, docs/features/02 §12): `GET|HEAD /{o}/{r}/attachments/<sha>/<name>` follows the §5 static contract reimplemented in `internal/issues` (ETag/304/206/416/HEAD/nosniff) with one deliberate token deviation — `Cache-Control: private, max-age=31536000, immutable` instead of `public`. Immutable bytes, but authenticated reads must not sit in shared caches.
-- **NEW (2026-09-08) — landing page at `/`, owners list at `/explore`** (Forgejo #187): `GET /` serves the static landing shell (zero API calls); `GET /explore` serves the owners-list shell via the explicit `explorePage` handler (chi static-beats-wildcard ordering; without it `/explore` would fall into the `/*` wildcard's single-segment owner shape). `?format=text` (or a text/plain Accept without text/html) MOVED from `/` to `/explore` — the machine twin follows the page to its canonical home (pre-1.0 no-alias law: one home, no silent alias, no 308); `/` answers the shell unconditionally. `explore` joins the reserved single-segment UI names (an owner literally named `explore` loses its `/:owner` UI page only). Rationale: the front door is marketing (no store round trips); `/explore` is the live page.
-- **NEW (2026-09-08) — developer deep-dive page at `/how-it-works`** (Forgejo #191, R1 B1): `GET /how-it-works` serves the static deep-dive shell via the explicit `howItWorksPage` handler (same single-segment reservation as `/explore` — without it `/how-it-works` would fall into the `/*` wildcard's owner shape). SPA-only, zero API calls, no text twin (the `?format=text` machine twin lives at `/explore` only; `/how-it-works` answers the shell unconditionally). `how-it-works` joins the reserved single-segment UI names (an owner literally named `how-it-works` loses its `/:owner` UI page only). Rationale: the deep-dive is marketing like `/` (no store round trips); the reservation keeps routing unambiguous by construction.
+- **NEW (2026-09-08) — landing page at `/`, owners list at `/explore`** (Forgejo #187): `GET /` serves the static landing page (zero store reads); `GET /explore` serves the owners list via an explicit route (chi static-beats-wildcard ordering; without it `/explore` would fall into the `/*` wildcard's single-segment owner shape, now `pageOr404`). `?format=text` MOVED from `/` to `/explore` — the machine twin follows the page to its canonical home (pre-1.0 no-alias law: one home, no silent alias, no 308); `/` answers the page unconditionally. `explore` joins the reserved single-segment UI names (an owner literally named `explore` loses its `/:owner` UI page only). Rationale: the front door is marketing (no store round trips); `/explore` is the live page. *(2026-11-20, D-WEB-15: both routes go through `pageOr404` and the page provider's `explore` handler serves `?format=text`. The "text/plain Accept without text/html" branch recorded here lived in the deleted server shell handler (`explorePage`), not in the page provider, and was not carried over — the query parameter is the only twin.)*
+- **NEW (2026-09-08) — developer deep-dive page at `/how-it-works`** (Forgejo #191, R1 B1): `GET /how-it-works` serves the static deep-dive page via an explicit route (same single-segment reservation as `/explore` — without it `/how-it-works` would fall into the `/*` wildcard's owner shape; since D-WEB-15 it is `pageOr404`). Static page, zero store reads, no text twin (the `?format=text` machine twin lives at `/explore` only; `/how-it-works` answers HTML unconditionally). `how-it-works` joins the reserved single-segment UI names (an owner literally named `how-it-works` loses its `/:owner` UI page only). Rationale: the deep-dive is marketing like `/` (no store round trips); the reservation keeps routing unambiguous by construction.
 - **NEW (2026-09-08) — compress bypasses `image/*`** (Forgejo #187 B2): the middleware gzipped everything except SSE/precompressed bodies, so `/_ui/concepts/*.gif` responses paid a pointless gzip pass per request (LZW bytes don't shrink). `image/` now bypasses like SSE. Pre-existing doc/code drift noted in the same change: 12 §3's compression paragraph describes a content-type gate the code never had — the code is now the closer of the two, and 12 is updated to say images pass through.
-- **NEW (2026-09-08) — `/_ui/concepts/*.gif` static lane** (Forgejo #187 B1): `uiAsset` maps `concepts/<name>.gif` → `dist/concepts/` (vite copies `web/public/concepts/` → `dist/` verbatim), served as `image/gif` with the no-cache + ETag class (never immutable — stable filenames whose bytes change on regeneration). The served prefix is pinned: `/_ui/concepts/<name>.gif` (vite `base: "/_ui/"`); a bare `/concepts/…` src would 404 into the owner wildcard.
+- **NEW (2026-09-08) — `/_ui/concepts/*.gif` static lane** (Forgejo #187 B1): `uiAsset` maps `concepts/<name>.gif` → `dist/concepts/` (the stylesheet build copies `web/public/concepts/` → `dist/` verbatim), served as `image/gif` with the no-cache + ETag class (never immutable — stable filenames whose bytes change on regeneration). The served prefix is pinned: `/_ui/concepts/<name>.gif` (templates spell it; the SPA-era vite `base: "/_ui/"` is gone); a bare `/concepts/…` src would 404 into the owner wildcard.
 - **NEW (2026-09-08) — push `newLocalPack` records bare-hex checksums (#205):** the freshly
   ingested pack's checksum is `git.PackChecksumFromIdx` of the on-disk idx name (the `pack-`
   infix never reaches `PreparedPack.Checksum`); local paths resolve against the real on-disk
@@ -705,20 +760,20 @@ Hazard: keepalive ticker and event writer racing on the same `http.ResponseWrite
   discovery lists `/api/v1/repos`). First-push adoption lives in `pushPipeline` post-CAS
   post-response (same-process hint-gated `api.PlaceholderHints`, fire-and-forget Delete on the
   control-plane transport; wal/git untouched; push budgets unchanged — the push-budget test passes
-  unmodified). `/new` is a client route served through the `/:owner` shell shape (like `/import`,
+  unmodified). `/new` is a page route served through the `/{owner}` page-route shape (like `/import`,
   no explicit server route) and joins the reserved single-segment UI names (§3). Wire shapes and
   the six Decisions entries live in 07_api.md §9.1.1/§14.
 - **NEW (2026-09-05) — server-side TLS removed; termination belongs on the reverse proxy** (Forgejo #165): `server.tls.*` config, cert/key loading, self-signed generation, the TLS listener wrap, `/services/public/ca.pem`, and the `setup.json` `ca_url`/`trust` fields are all gone — the server listens plain HTTP (h2c retained). Rationale: inbound (UI/API/git/SSH) all work behind a TLS-terminating proxy and outbound HTTPS never used the server cert; one fewer crypto surface to own. Residual `server.tls.*` settings fail closed (file rejected at load, env override fatal) with a reverse-proxy pointer. The same change honors `X-Forwarded-Proto` when building absolute URLs (`requestScheme`: proxy header, else the connection), closing the follow-up noted in 12_web_ui.md — no separate issue needed.
-- **NEW (2026-09-11) — OIDC browser login is fail-closed and always has a login entry** (Forgejo #344): config validation refuses `auth.mode = "oidc"` without the full browser-login trio (`server.auth.session_secret` + `server.auth.oauth_client_id` + `server.auth.oauth_client_secret`), naming the missing keys — the previous pair-only check let a partially-configured instance boot into a dead state (every browser GET a bare 401, `/_auth/login` a 501). The §2.2 #8 precondition gap is closed: a browser-ish GET with login disabled answers 401 carrying the rendered login page (working "Log in with OIDC" button + disabled explanation + the `walhub config check` / `/setup` pointers) instead of the bare string; `GET /_auth/login` itself renders the same page (501) for browsers while API clients keep the plain status. Browser-login availability is advertised as `browser_login` + `login_url` in the discovery auth block (`GET /api/v1`) and in `/services/setup.json`, so the SPA renders the login affordance only when it works and `/setup` (client-side trio check in `web/src/lib/setup.js`) warns before save. Rationale (law 9): refuse-to-start was preferred over a degraded boot — a degraded mode that still serves a login page would need its own gate semantics, and #345 (visibility as read authority) already owns the "what can signed-out users read" question; this change only fixes *how a browser gets an identity* under current semantics. Shared gate chain (`Env.gate`, smart-HTTP, LFS, shell `gated()`) untouched in behavior except the login path; bearer/token paths (static tokens work in oidc mode) unaffected.
+- **NEW (2026-09-11) — OIDC browser login is fail-closed and always has a login entry** (Forgejo #344): config validation refuses `auth.mode = "oidc"` without the full browser-login trio (`server.auth.session_secret` + `server.auth.oauth_client_id` + `server.auth.oauth_client_secret`), naming the missing keys — the previous pair-only check let a partially-configured instance boot into a dead state (every browser GET a bare 401, `/_auth/login` a 501). The §2.2 #8 precondition gap is closed: a browser-ish GET with login disabled answers 401 carrying the rendered login page (working "Log in with OIDC" button + disabled explanation + the `walhub config check` / `/setup` pointers) instead of the bare string; `GET /_auth/login` itself renders the same page (501) for browsers while API clients keep the plain status. Browser-login availability is advertised as `browser_login` + `login_url` in the discovery auth block (`GET /api/v1`) and in `/services/setup.json`, so the page chrome renders the login affordance only when it works and `/setup` refuses an incomplete trio through the same server-side validation on save (the SPA's client-side trio check in `web/src/lib/setup.js` was removed with D-WEB-15). Rationale (law 9): refuse-to-start was preferred over a degraded boot — a degraded mode that still serves a login page would need its own gate semantics, and #345 (visibility as read authority) already owns the "what can signed-out users read" question; this change only fixes *how a browser gets an identity* under current semantics. Shared gate chain (`Env.gate`, smart-HTTP, LFS, page `gated()`) untouched in behavior except the login path; bearer/token paths (static tokens work in oidc mode) unaffected.
 - **NEW (2026-09-11) — visibility is the read authority for repo surfaces** (Forgejo #345):
   §8.3 `require_read` on repo-scoped paths (smart-HTTP upload-pack, LFS reads, bundle lists,
-  the JSON API lanes via 07 §13, SSH fetch via 17.6, repo SPA shells) resolves the identity
+  the JSON API lanes via 07 §13, SSH fetch via 17.6, repo page routes) resolves the identity
   `CheckRead` hook BEFORE the `anonymous_read` flag: public ⇒ anonymous admitted even with
   `anonymous_read=false`; private ⇒ 401 anonymous (+ Bearer, so git erases the credential —
   law 9) / 403 authenticated-without-read. The flag keeps its NON-repo meaning (owners
-  listings, `/explore` shell + text twin, setup.json, `/` + `/{owner}` shells, identity
-  user/org surfaces). The repo shell serves the static SPA to anonymous callers of public
-  repos (its data rides the now-public repo reads); private shells keep the legacy gated
+  listings, `/explore` page + text twin, setup.json, `/` + `/{owner}` pages, identity
+  user/org surfaces). The repo page renders for anonymous callers of public
+  repos (its data rides the now-public repo reads); private pages keep the legacy gated
   outcome, including the #344 login page / 307 hop for browsers — the #344 change is built
   on, not regressed. Nil read gate → legacy flag-only behavior everywhere. 401/403 (not
   404) is deliberate: existence protection for private repos comes from the filtered
@@ -796,7 +851,8 @@ Hazard: keepalive ticker and event writer racing on the same `http.ResponseWrite
 **Divergence (2026-08-31):**
 
 - **D1 — Router is chi.** `github.com/go-chi/chi/v5` (core package ONLY — no `chi/cors`, no `chi/middleware`) replaces Go 1.22 ServeMux patterns (§3.1). Route inventory and handler behavior are unchanged; only registration/matching mechanics moved to chi. CORS stays hand-rolled (§2.3). Backend dependency budget is now exactly: `chi/v5`, `BurntSushi/toml`, `golang.org/x/net` (h2c), `golang.org/x/crypto` (SSH transport, 17_ssh.md), `github.com/dicebear/dicebear-go/v10` + `github.com/dicebear/styles/v10` (user-avatar generation, Forgejo #376 — plus build-required transitives `github.com/dicebear/schema` + `github.com/santhosh-tekuri/jsonschema/v6`; AGENTS.md §1).
-- **D2 — Frontend was standard ECMAScript (SUPERSEDED 2026-09-02 by explicit user request — DEVIATIONS.md D-WEB-6).** Historical: no TypeScript, no framework, no bundler; the SDK was ONE plain-ESM `web/sdk/repos.js`; the `/repos.mjs` route and the esbuild twin were gone (§3.1, §3.3); `web/src/setup*` was a plain-ESM setup page. **Shipped stack:** SolidJS SPA (`solid-js` + `@solidjs/router` runtime, Tailwind v4, vite-built into `web/dist/`; Setup page at `web/src/pages/Setup.jsx`); the SDK stays dependency-free, authored as submodules (`web/sdk/src/*.js`) and esbuild-bundled to `web/dist/repos.js`.
+- **D2 — Frontend was standard ECMAScript (SUPERSEDED 2026-09-02 by explicit user request — DEVIATIONS.md D-WEB-6; SUPERSEDED AGAIN 2026-11-19/20 — D-WEB-14/D-WEB-15).** Historical: no TypeScript, no framework, no bundler; the SDK was ONE plain-ESM `web/sdk/repos.js`; the `/repos.mjs` route and the esbuild twin were gone (§3.1, §3.3); `web/src/setup*` was a plain-ESM setup page. **Second historical shape:** SolidJS SPA (`solid-js` + `@solidjs/router` runtime, Tailwind v4, vite-built into `web/dist/`; Setup page at `web/src/pages/Setup.jsx`). **Shipped stack:** server-rendered pages — Go `html/template` (`internal/webui` behind `internal/pages`) + vendored htmx + vanilla-ES islands, Tailwind v4 as the only stylesheet build, dark by default; the SDK stays dependency-free, authored as submodules (`web/sdk/src/*.js`) and esbuild-bundled to `web/dist/repos.js`.
+- **NEW (2026-11-20) — the SPA shell is deleted; pages are the only UI** (DEVIATIONS.md D-WEB-14/D-WEB-15; §3.5): every page route goes through `pageOr404`/`uiOr` to the `internal/pages` provider, which renders a full HTML document (`no-cache` + strong ETag). A path the provider does not own is the plain §3 404 — there is no client router fallback, no `index.html` shell, and no `Accept: text/plain` twin (the `/explore` machine twin is `?format=text`, served by the page layer's own handler). `/_ui/*` carries exactly the page assets (`app.css`, `ui.js`, the vendored htmx files, `concepts/`, the immutable `assets/` lane) and stays public; `/repos.js` is unchanged. Rationale: server rendering makes the Go renderer the XSS boundary (law 9 style fail-closed), keeps page gating identical to the API's by construction (one authority seam), and drops the client data layer and router from the dependency budget (law 1).
 - **D5 — Zero-config first run.** Missing config boots with built-in defaults (`0.0.0.0:8080`, filesystem store under `<data-dir>/store`, auth `none`, `auto_create_on_push`) instead of fatal exit 2 — the old step-2 "missing config file is a fatal exit 2" of the startup order is superseded by the bootstrap leg (§10.4, §3.4).
 - **D6 — Setup UI + API first-class.** `/setup` + `/api/v1/setup{,/test}` with the open-while-unsecured access rule and the SETUP-ONLY MODE for invalid configs (§3.4, new `internal/setup` package).
 - **Supersession (deliberate, fail-closed):** the Rust rule that auth `mode = "none"` is refused unless the listen address is loopback is REPLACED — auth-none is allowed on any bind with loud warnings (logs, setup UI, `readyz`) and zero refused requests (§3.4, §8.1, §10.4 step 7).

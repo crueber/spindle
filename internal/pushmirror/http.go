@@ -240,157 +240,222 @@ func (h *Handler) put(w http.ResponseWriter, r *http.Request, owner, repo string
 	h.create(ctx, w, owner, repo, &in)
 }
 
-// create writes a fresh config + secret pair on an existing repo.
-func (h *Handler) create(ctx context.Context, w http.ResponseWriter, owner, repo string, in *putBody) {
+// ConfigInput is the push-mirror PUT body for non-HTTP callers (the
+// server-rendered settings page). Write-only credential fields are applied
+// only when non-empty (omitted = keep stored material); a nil Schedule or
+// SSHKnownHosts means "omitted" (keep), while a pointer to "" is the explicit
+// off/clear spelling an absent-vs-present JSON key gets.
+type ConfigInput struct {
+	UpstreamURL   string
+	AuthKind      string
+	Username      string
+	Password      string
+	Token         string
+	SSHPrivateKey string
+	Schedule      *string
+	SSHKnownHosts *string
+	Dangerous     bool
+}
+
+// ConfigError is a rejected push-mirror config write: the HTTP status the
+// JSON handler writes and its plain-text body.
+type ConfigError struct {
+	Status  int
+	Message string
+}
+
+// Error implements error.
+func (e *ConfigError) Error() string { return e.Message }
+
+func configErr(status int, msg string) *ConfigError {
+	return &ConfigError{Status: status, Message: msg}
+}
+
+// Configure applies the PUT semantics (create when absent, update otherwise)
+// and returns the resulting read model. It is the one implementation the JSON
+// handler and the settings page share; the caller has already enforced admin
+// authority, and the page re-reads the view after its 303.
+func (h *Handler) Configure(ctx context.Context, owner, repo string, ci ConfigInput) (View, *ConfigError) {
+	if h.Svc == nil {
+		return View{}, configErr(http.StatusServiceUnavailable, "push-mirror service not configured")
+	}
+	in := &putBody{
+		UpstreamURL: ci.UpstreamURL, AuthKind: ci.AuthKind, Username: ci.Username,
+		Password: ci.Password, Token: ci.Token, SSHPrivateKey: ci.SSHPrivateKey,
+		Dangerous: ci.Dangerous,
+	}
+	if ci.Schedule != nil {
+		in.Schedule = *ci.Schedule
+	}
+	if ci.SSHKnownHosts != nil {
+		in.SSHKnownHosts = *ci.SSHKnownHosts
+	}
+	doc, ver, lerr := Load(ctx, h.Svc.store, owner, repo)
+	if lerr != nil {
+		return View{}, configErr(http.StatusInternalServerError, "pushmirror: "+scrubText(lerr.Error()))
+	}
+	if doc != nil {
+		return h.applyUpdate(ctx, owner, repo, doc, ver, in, ci.Schedule != nil, ci.SSHKnownHosts != nil)
+	}
+	return h.applyCreate(ctx, owner, repo, in)
+}
+
+// applyCreate writes a fresh config + secret pair on an existing repo.
+func (h *Handler) applyCreate(ctx context.Context, owner, repo string, in *putBody) (View, *ConfigError) {
 	if strings.TrimSpace(in.UpstreamURL) == "" {
-		writePlain(w, http.StatusBadRequest, "upstream_url is required to configure a push mirror")
-		return
+		return View{}, configErr(http.StatusBadRequest, "upstream_url is required to configure a push mirror")
 	}
 	kind := in.AuthKind
 	if kind == "" {
 		kind = AuthNone
 	}
 	if !ValidAuthKind(kind) {
-		writePlain(w, http.StatusBadRequest, "unknown auth kind "+strconv.Quote(kind)+": want one of none|password|token|ssh")
-		return
+		return View{}, configErr(http.StatusBadRequest, "unknown auth kind "+strconv.Quote(kind)+": want one of none|password|token|ssh")
 	}
 	schedule := in.Schedule
 	if !ValidSchedule(schedule) {
-		writePlain(w, http.StatusBadRequest, "unknown schedule preset "+strconv.Quote(schedule)+": want one of \"\"|"+strings.Join(Presets, "|"))
-		return
+		return View{}, configErr(http.StatusBadRequest, "unknown schedule preset "+strconv.Quote(schedule)+": want one of \"\"|"+strings.Join(Presets, "|"))
 	}
 	n, nerr := repoimport.NormalizeSource(in.UpstreamURL)
 	if nerr != nil {
-		writeStatusErr(w, nerr)
-		return
+		return View{}, statusConfigErr(nerr)
 	}
 	if verr := ValidateTarget(n, kind, hasInputMaterial(in)); verr != nil {
-		writePlain(w, http.StatusBadRequest, scrubText(verr.Error()))
-		return
+		return View{}, configErr(http.StatusBadRequest, scrubText(verr.Error()))
 	}
 	if serr := h.checkSSRF(n, in.Dangerous); serr != nil {
-		writeStatusErr(w, serr)
-		return
+		return View{}, statusConfigErr(serr)
 	}
 	// PUT is config on a repo, never repo creation. A sidecar on an
 	// unborn repo would strand the name while every sync fails at Open.
 	if meta, herr := h.Svc.store.Head(ctx, store.RepoPrefix(owner, repo)+store.Manifest); herr != nil && !store.IsNotFound(herr) {
-		writePlain(w, http.StatusInternalServerError, "pushmirror: "+scrubText(herr.Error()))
-		return
+		return View{}, configErr(http.StatusInternalServerError, "pushmirror: "+scrubText(herr.Error()))
 	} else if herr != nil || meta == nil {
-		writePlain(w, http.StatusNotFound, "repository not found")
-		return
+		return View{}, configErr(http.StatusNotFound, "repository not found")
 	}
 	sec, serr := secretFromInput(kind, strings.TrimSpace(in.Username), in)
 	if serr != nil {
-		writePlain(w, http.StatusBadRequest, scrubText(serr.Error()))
-		return
+		return View{}, configErr(http.StatusBadRequest, scrubText(serr.Error()))
 	}
 	doc, cerr := Create(ctx, h.Svc.store, owner, repo, n.URL, kind, strings.TrimSpace(in.Username), schedule)
 	if cerr != nil {
 		if isExists(cerr) {
-			writePlain(w, http.StatusConflict, "push mirror already configured")
-			return
+			return View{}, configErr(http.StatusConflict, "push mirror already configured")
 		}
-		writePlain(w, http.StatusInternalServerError, "pushmirror: "+scrubText(cerr.Error()))
-		return
+		return View{}, configErr(http.StatusInternalServerError, "pushmirror: "+scrubText(cerr.Error()))
 	}
 	if sec != nil {
 		if serr := SaveSecret(ctx, h.Svc.store, owner, repo, sec); serr != nil {
-			writePlain(w, http.StatusInternalServerError, "pushmirror: "+scrubText(serr.Error()))
-			return
+			return View{}, configErr(http.StatusInternalServerError, "pushmirror: "+scrubText(serr.Error()))
 		}
 	}
 	// No first-sync fire on create (unlike pull mirrors): the next
 	// client push fans out on its own, and an immediate push-back of
 	// current state is one Sync-now away. Creation stays a pure config
 	// write — cheap and unsurprising.
-	writeJSON(w, http.StatusCreated, ViewOf(doc, sec, h.now()))
+	return ViewOf(doc, sec, h.now()), nil
 }
 
-// update rewrites schedule/auth on an existing config. Upstream changes
-// are 409 (delete-and-recreate). Auth fields replace only when
-// non-empty in the request (omitted = keep stored material); auth_kind
-// changes drop the old material shape for the new one. hasSchedule
-// distinguishes "schedule omitted" (keep) from "schedule: \"\"" (OFF).
-func (h *Handler) update(ctx context.Context, w http.ResponseWriter, body []byte, owner, repo string, doc *Doc, ver store.Version, in *putBody) {
-	hasSchedule := bodyHasKey(body, "schedule")
-	hasKnownHosts := bodyHasKey(body, "ssh_known_hosts")
+// applyUpdate rewrites schedule/auth on an existing config. Upstream changes
+// are 409 (delete-and-recreate). Auth fields replace only when non-empty in
+// the request (omitted = keep stored material); auth_kind changes drop the
+// old material shape for the new one. hasSchedule distinguishes "schedule
+// omitted" (keep) from "schedule: \"\"" (OFF).
+func (h *Handler) applyUpdate(ctx context.Context, owner, repo string, doc *Doc, ver store.Version, in *putBody, hasSchedule, hasKnownHosts bool) (View, *ConfigError) {
 	if strings.TrimSpace(in.UpstreamURL) != "" && strings.TrimSpace(in.UpstreamURL) != doc.UpstreamURL {
 		// Canonical-compare: same source in different spelling is not a change.
 		if n, nerr := repoimport.NormalizeSource(in.UpstreamURL); nerr != nil || n.URL != doc.UpstreamURL {
-			writePlain(w, http.StatusConflict, "push-mirror upstream_url is immutable; delete the push mirror and recreate it to change destinations")
-			return
+			return View{}, configErr(http.StatusConflict, "push-mirror upstream_url is immutable; delete the push mirror and recreate it to change destinations")
 		}
 	}
 	kind := doc.AuthKind
 	if in.AuthKind != "" {
 		if !ValidAuthKind(in.AuthKind) {
-			writePlain(w, http.StatusBadRequest, "unknown auth kind "+strconv.Quote(in.AuthKind)+": want one of none|password|token|ssh")
-			return
+			return View{}, configErr(http.StatusBadRequest, "unknown auth kind "+strconv.Quote(in.AuthKind)+": want one of none|password|token|ssh")
 		}
 		kind = in.AuthKind
 	}
 	if !ValidSchedule(in.Schedule) && hasSchedule {
 		// Explicit unknown preset fails closed ("" is OFF — valid;
 		// anything else unknown is 400).
-		writePlain(w, http.StatusBadRequest, "unknown schedule preset "+strconv.Quote(in.Schedule)+": want one of \"\"|"+strings.Join(Presets, "|"))
-		return
+		return View{}, configErr(http.StatusBadRequest, "unknown schedule preset "+strconv.Quote(in.Schedule)+": want one of \"\"|"+strings.Join(Presets, "|"))
 	}
+	next := *doc
 	if hasSchedule {
-		doc.Schedule = in.Schedule
+		next.Schedule = in.Schedule
 	}
 	// Re-validate the destination against the final kind BEFORE writing
 	// any secret: the kind-change branch below SaveSecrets, and a late
 	// 400 there would leave secret material for a kind the config no
 	// longer names (bricked until repaired by hand).
-	if n, nerr := repoimport.NormalizeSource(doc.UpstreamURL); nerr != nil {
-		writePlain(w, http.StatusInternalServerError, "pushmirror: "+scrubText(nerr.Error()))
-		return
+	if n, nerr := repoimport.NormalizeSource(next.UpstreamURL); nerr != nil {
+		return View{}, configErr(http.StatusInternalServerError, "pushmirror: "+scrubText(nerr.Error()))
 	} else if verr := ValidateTarget(n, kind, true); verr != nil {
-		writePlain(w, http.StatusBadRequest, scrubText(verr.Error()))
-		return
+		return View{}, configErr(http.StatusBadRequest, scrubText(verr.Error()))
 	}
 	if in.AuthKind != "" && in.AuthKind != doc.AuthKind {
-		doc.AuthKind = kind
-		doc.Username = strings.TrimSpace(in.Username)
-		doc.PublicKey = ""
-		doc.KeyFingerprint = ""
+		next.AuthKind = kind
+		next.Username = strings.TrimSpace(in.Username)
+		next.PublicKey = ""
+		next.KeyFingerprint = ""
 		// Old material shape is dropped: loading the stale secret for
 		// a new kind would silently downgrade identity.
 		sec, serr := secretFromInput(kind, strings.TrimSpace(in.Username), in)
 		if serr != nil {
-			writePlain(w, http.StatusBadRequest, scrubText(serr.Error()))
-			return
+			return View{}, configErr(http.StatusBadRequest, scrubText(serr.Error()))
 		}
 		if err := SaveSecret(ctx, h.Svc.store, owner, repo, effectiveSecret(sec, kind)); err != nil {
-			writePlain(w, http.StatusInternalServerError, "pushmirror: "+scrubText(err.Error()))
-			return
+			return View{}, configErr(http.StatusInternalServerError, "pushmirror: "+scrubText(err.Error()))
 		}
 	} else {
 		if strings.TrimSpace(in.Username) != "" {
-			doc.Username = strings.TrimSpace(in.Username)
+			next.Username = strings.TrimSpace(in.Username)
 		}
 		if hasInputMaterial(in) {
 			sec, _, _ := LoadSecret(ctx, h.Svc.store, owner, repo)
-			merged, serr := mergeSecretInput(sec, doc.AuthKind, doc.Username, in, hasKnownHosts)
+			merged, serr := mergeSecretInput(sec, next.AuthKind, next.Username, in, hasKnownHosts)
 			if serr != nil {
-				writePlain(w, http.StatusBadRequest, scrubText(serr.Error()))
-				return
+				return View{}, configErr(http.StatusBadRequest, scrubText(serr.Error()))
 			}
 			if err := SaveSecret(ctx, h.Svc.store, owner, repo, merged); err != nil {
-				writePlain(w, http.StatusInternalServerError, "pushmirror: "+scrubText(err.Error()))
-				return
+				return View{}, configErr(http.StatusInternalServerError, "pushmirror: "+scrubText(err.Error()))
 			}
 		}
 	}
 	// kind is already validated above (validate-before-write).
-	if err := UpdateCAS(ctx, h.Svc.store, owner, repo, doc, ver); err != nil {
-		writePlain(w, http.StatusInternalServerError, "pushmirror: "+scrubText(err.Error()))
-		return
+	if err := UpdateCAS(ctx, h.Svc.store, owner, repo, &next, ver); err != nil {
+		return View{}, configErr(http.StatusInternalServerError, "pushmirror: "+scrubText(err.Error()))
 	}
 	sec, _, _ := LoadSecret(ctx, h.Svc.store, owner, repo)
-	writeJSON(w, http.StatusOK, ViewOf(doc, sec, h.now()))
+	return ViewOf(&next, sec, h.now()), nil
+}
+
+// statusConfigErr maps a repoimport status error onto the write error.
+func statusConfigErr(err error) *ConfigError {
+	if se, ok := err.(*repoimport.StatusError); ok {
+		return configErr(se.Status, se.Message)
+	}
+	return configErr(http.StatusInternalServerError, scrubText(err.Error()))
+}
+
+// create renders the PUT-create answer for HTTP callers.
+func (h *Handler) create(ctx context.Context, w http.ResponseWriter, owner, repo string, in *putBody) {
+	v, cerr := h.applyCreate(ctx, owner, repo, in)
+	if cerr != nil {
+		writePlain(w, cerr.Status, cerr.Message)
+		return
+	}
+	writeJSON(w, http.StatusCreated, v)
+}
+
+// update renders the PUT-update answer for HTTP callers.
+func (h *Handler) update(ctx context.Context, w http.ResponseWriter, body []byte, owner, repo string, doc *Doc, ver store.Version, in *putBody) {
+	v, cerr := h.applyUpdate(ctx, owner, repo, doc, ver, in, bodyHasKey(body, "schedule"), bodyHasKey(body, "ssh_known_hosts"))
+	if cerr != nil {
+		writePlain(w, cerr.Status, cerr.Message)
+		return
+	}
+	writeJSON(w, http.StatusOK, v)
 }
 
 // --- DELETE /{o}/{r}/api/pushmirror -----------------------------------------
@@ -536,14 +601,50 @@ func (h *Handler) syncStatus(w http.ResponseWriter, r *http.Request, owner, repo
 	writeJSON(w, http.StatusOK, map[string]any{"active": active, "recent": recent})
 }
 
-// --- POST /{o}/{r}/api/pushmirror/keygen ------------------------------------
-//
-// Admin-only. Generates a fresh ed25519 deploy keypair, stores the
-// private key in the secret sidecar (auth_kind becomes ssh), and returns
-// the PUBLIC key + fingerprint for upstream install. The private key is
-// NEVER returned (write-only). Requires an existing push-mirror config
-// (404 otherwise — keygen is config on a repo, never repo creation) on
-// an SSH upstream (400 otherwise — keygen would brick an https config).
+// Keygen mints a fresh ed25519 deploy keypair for an existing push mirror
+// whose upstream is SSH, stores the private key in the secret sidecar, and
+// returns the PUBLIC key + fingerprint. It is the keygen endpoint's
+// implementation, shared with the settings page (which re-reads the view).
+func (h *Handler) Keygen(ctx context.Context, owner, repo, knownHosts string) (*GeneratedKey, *ConfigError) {
+	if h.Svc == nil {
+		return nil, configErr(http.StatusServiceUnavailable, "push-mirror service not configured")
+	}
+	doc, ver, lerr := Load(ctx, h.Svc.store, owner, repo)
+	if lerr != nil {
+		return nil, configErr(http.StatusInternalServerError, "pushmirror: "+scrubText(lerr.Error()))
+	}
+	if doc == nil {
+		return nil, configErr(http.StatusNotFound, "no push mirror configured")
+	}
+	// Keygen mints an SSH deploy key: refuse unless the destination is
+	// an SSH upstream (otherwise the config would flip to a kind the
+	// stored URL rejects — https+ssh fails ValidateTarget at sync
+	// time, leaving a bricked config behind a 200).
+	if n, nerr := repoimport.NormalizeSource(doc.UpstreamURL); nerr != nil {
+		return nil, configErr(http.StatusInternalServerError, "pushmirror: "+scrubText(nerr.Error()))
+	} else if n.Scheme != "ssh" && n.Scheme != "scp" {
+		return nil, configErr(http.StatusBadRequest, "pushmirror keygen needs an ssh upstream (this mirror points at "+n.Scheme+")")
+	}
+	key, gerr := GenerateKeypair("")
+	if gerr != nil {
+		return nil, configErr(http.StatusInternalServerError, "pushmirror: "+scrubText(gerr.Error()))
+	}
+	doc.AuthKind = AuthSSH
+	doc.PublicKey = key.PublicKey
+	doc.KeyFingerprint = key.Fingerprint
+	if err := UpdateCAS(ctx, h.Svc.store, owner, repo, doc, ver); err != nil {
+		return nil, configErr(http.StatusInternalServerError, "pushmirror: "+scrubText(err.Error()))
+	}
+	sec := &Secret{AuthKind: AuthSSH, Username: doc.Username, SSHPrivateKey: key.PrivatePEM, SSHKnownHosts: knownHosts}
+	if err := SaveSecret(ctx, h.Svc.store, owner, repo, sec); err != nil {
+		return nil, configErr(http.StatusInternalServerError, "pushmirror: "+scrubText(err.Error()))
+	}
+	return key, nil
+}
+
+// keygen answers POST /{o}/{r}/api/pushmirror/keygen (admin-only): the
+// response carries the PUBLIC key only (install this upstream); the private
+// key stays in the secret sidecar (presence + hint).
 func (h *Handler) keygen(w http.ResponseWriter, r *http.Request, owner, repo string) {
 	p, aerr := h.principal(r)
 	if aerr != nil {
@@ -576,46 +677,13 @@ func (h *Handler) keygen(w http.ResponseWriter, r *http.Request, owner, repo str
 			return
 		}
 	}
-	ctx := r.Context()
-	doc, ver, lerr := Load(ctx, h.Svc.store, owner, repo)
-	if lerr != nil {
-		writePlain(w, http.StatusInternalServerError, "pushmirror: "+scrubText(lerr.Error()))
+	key, cerr := h.Keygen(r.Context(), owner, repo, in.KnownHosts)
+	if cerr != nil {
+		writePlain(w, cerr.Status, cerr.Message)
 		return
 	}
-	if doc == nil {
-		writePlain(w, http.StatusNotFound, "no push mirror configured")
-		return
-	}
-	// Keygen mints an SSH deploy key: refuse unless the destination is
-	// an SSH upstream (otherwise the config would flip to a kind the
-	// stored URL rejects — https+ssh fails ValidateTarget at sync
-	// time, leaving a bricked config behind a 200).
-	if n, nerr := repoimport.NormalizeSource(doc.UpstreamURL); nerr != nil {
-		writePlain(w, http.StatusInternalServerError, "pushmirror: "+scrubText(nerr.Error()))
-		return
-	} else if n.Scheme != "ssh" && n.Scheme != "scp" {
-		writePlain(w, http.StatusBadRequest, "pushmirror keygen needs an ssh upstream (this mirror points at "+n.Scheme+")")
-		return
-	}
-	key, gerr := GenerateKeypair("")
-	if gerr != nil {
-		writePlain(w, http.StatusInternalServerError, "pushmirror: "+scrubText(gerr.Error()))
-		return
-	}
-	doc.AuthKind = AuthSSH
-	doc.PublicKey = key.PublicKey
-	doc.KeyFingerprint = key.Fingerprint
-	if err := UpdateCAS(ctx, h.Svc.store, owner, repo, doc, ver); err != nil {
-		writePlain(w, http.StatusInternalServerError, "pushmirror: "+scrubText(err.Error()))
-		return
-	}
-	sec := &Secret{AuthKind: AuthSSH, Username: doc.Username, SSHPrivateKey: key.PrivatePEM, SSHKnownHosts: in.KnownHosts}
-	if err := SaveSecret(ctx, h.Svc.store, owner, repo, sec); err != nil {
-		writePlain(w, http.StatusInternalServerError, "pushmirror: "+scrubText(err.Error()))
-		return
-	}
-	// The response carries the PUBLIC key only (install this upstream).
-	// The private key stays in the secret sidecar (presence + hint).
+	doc, _, _ := Load(r.Context(), h.Svc.store, owner, repo)
+	sec, _, _ := LoadSecret(r.Context(), h.Svc.store, owner, repo)
 	writeJSON(w, http.StatusOK, map[string]any{
 		"public_key":      key.PublicKey,
 		"key_fingerprint": key.Fingerprint,

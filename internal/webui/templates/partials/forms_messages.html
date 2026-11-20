@@ -1,0 +1,6 @@
+{{define "forms_messages"}}
+{{if .Flash}}<p class="rounded-lg border border-emerald-300 bg-emerald-50 p-3 text-sm text-emerald-800 dark:border-emerald-900 dark:bg-emerald-950/60 dark:text-emerald-200" role="status">{{.Flash}}</p>{{end}}
+{{if .Anonymous}}<p class="text-xs text-amber-700 dark:text-amber-400">You are browsing as a guest — <a class="hover:underline" href="{{.GateHref}}">{{.GateNotice}}</a>.</p>{{end}}
+{{if .NoWrite}}<p class="text-xs text-amber-700 dark:text-amber-400">You are not signed in as a writer — the server will refuse the write (401/403). Sign in first.</p>{{end}}
+{{if .Err}}<div class="rounded-lg border border-red-300 bg-red-50 p-3 text-sm text-red-800 dark:border-red-900 dark:bg-red-950/60 dark:text-red-200" role="alert">{{.Err}}{{if .Winner}} <a class="hover:underline" href="{{.Winner}}">take me there →</a>{{end}}</div>{{end}}
+{{end}}

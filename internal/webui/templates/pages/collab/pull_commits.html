@@ -1,0 +1,21 @@
+{{define "content"}}
+{{with .Data}}
+<div class="mx-auto max-w-3xl">
+  <p class="mb-3 text-sm"><a class="link" href="/{{.Repo.Full}}/pull/{{.Num}}">← back to #{{.Num}}</a></p>
+  <h2 class="mb-3 text-lg font-semibold">Commits on #{{.Num}}</h2>
+  {{if .Error}}<p class="err-line" role="alert">{{.Error}}</p>{{end}}
+  <ul class="grid gap-2">
+    {{range .Rows}}
+    <li class="card p-3">
+      <a class="font-mono text-xs text-emerald-700 hover:underline dark:text-emerald-400" href="/{{$.Data.Repo.Full}}/commit/{{.SHA}}">{{shortsha .SHA}}</a>
+      <p class="text-sm">{{.Subject}}</p>
+      <p class="text-xs text-zinc-500 dark:text-zinc-400">{{.Author}} · {{template "collab_time" .At}}</p>
+    </li>
+    {{else}}
+    <li class="card p-3 text-sm text-zinc-500 dark:text-zinc-400">no commits</li>
+    {{end}}
+  </ul>
+  {{if .More}}{{template "collab_pager" .OlderHref}}{{end}}
+</div>
+{{end}}
+{{end}}

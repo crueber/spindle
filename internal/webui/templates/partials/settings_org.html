@@ -1,0 +1,274 @@
+{{/* partials/settings_org.html — organisation settings panels
+   (specs/settings.md §3). 390px: tab pills wrap, tables scroll in place,
+   the profile form is one column (sm: two), textareas grow to 50vh via the
+   autogrow island (data-autogrow). */}}
+
+{{define "settings-org-profile"}}
+{{with .Profile}}
+<form class="card max-w-2xl p-4" method="post" action="/{{$.Org}}/settings" enctype="multipart/form-data"
+      hx-post="/{{$.Org}}/settings" hx-target="#settings-panel" hx-select="#settings-panel" hx-swap="outerHTML">
+  <input type="hidden" name="org_action" value="profile">
+  <h3 class="card-header">Profile</h3>
+  {{if .ReadOnly}}
+  <dl class="grid grid-cols-1 gap-x-6 gap-y-1 text-sm sm:grid-cols-[minmax(8rem,30%)_1fr]">
+    <dt class="muted">display name</dt><dd>{{.DisplayName}}</dd>
+    <dt class="muted">description</dt><dd class="break-words">{{.Description}}</dd>
+    <dt class="muted">location</dt><dd>{{.Location}}</dd>
+    <dt class="muted">timezone</dt><dd>{{.Timezone}}</dd>
+    <dt class="muted">created</dt><dd>{{.CreatedAt}}</dd>
+    <dt class="muted">updated</dt><dd>{{.UpdatedAt}}</dd>
+  </dl>
+  {{if .BioMarkdown}}<div class="markdown-body mt-3">{{md .BioMarkdown}}</div>{{end}}
+  {{else}}
+  <div class="grid gap-3 sm:grid-cols-2">
+    <div>
+      <label class="mb-1 block text-sm font-medium" for="org-display-name">Display name</label>
+      <input class="input" id="org-display-name" name="display_name" type="text" value="{{.DisplayName}}">
+    </div>
+    <div>
+      <label class="mb-1 block text-sm font-medium" for="org-location">Location</label>
+      <input class="input" id="org-location" name="location" type="text" value="{{.Location}}">
+    </div>
+    <div>
+      <label class="mb-1 block text-sm font-medium" for="org-timezone">Timezone</label>
+      <input class="input" id="org-timezone" name="timezone" type="text" value="{{.Timezone}}" placeholder="UTC">
+    </div>
+    <div>
+      <label class="mb-1 block text-sm font-medium" for="org-avatar">Avatar (PNG/JPEG/GIF/WebP, ≤ 2 MiB)</label>
+      <input class="input" id="org-avatar" name="avatar" type="file" accept="image/png,image/jpeg,image/gif,image/webp">
+    </div>
+  </div>
+  <div class="mt-3">
+    <label class="mb-1 block text-sm font-medium" for="org-description">Description</label>
+    <input class="input" id="org-description" name="description" type="text" value="{{.Description}}">
+  </div>
+  <div class="mt-3">
+    <label class="mb-1 block text-sm font-medium" for="org-bio">Bio (markdown)</label>
+    <textarea class="input" id="org-bio" name="bio_markdown" rows="6" data-autogrow data-preview-for="org-bio">{{.BioMarkdown}}</textarea>
+    <div class="mt-2 flex flex-wrap items-center gap-2">
+      <button type="button" class="btn" hx-post="/{{$.Org}}/settings/preview" hx-include="#org-bio" hx-target="#org-bio-preview" hx-swap="outerHTML">preview</button>
+      <span class="muted text-xs">rendered on the server (no client markdown)</span>
+    </div>
+    <div id="org-bio-preview" class="mt-2"></div>
+  </div>
+  <div class="mt-3 flex flex-wrap items-center gap-2">
+    <button type="submit" class="btn primary">Save</button>
+  </div>
+  <p class="muted mt-2 text-xs">version {{if .UpdatedAt}}updated {{.UpdatedAt}}{{else}}new{{end}}</p>
+  {{end}}
+  {{if $.Error}}<p class="err-line" role="alert">{{$.Error}}</p>{{end}}
+  {{if $.Notice}}<p class="mt-2 text-sm text-emerald-700 dark:text-emerald-400">{{$.Notice}}</p>{{end}}
+</form>
+{{else}}{{template "settings-repo-notwired" .}}{{end}}
+{{end}}
+
+{{define "settings-org-members"}}
+<section class="card p-4">
+  <h3 class="card-header">Members</h3>
+  {{if .Members}}
+  <div class="overflow-x-auto">
+    <table class="data-table">
+      <thead><tr><th>principal</th><th>role</th><th></th></tr></thead>
+      <tbody>
+        {{range $i, $m := .Members}}
+        <tr>
+          <td class="break-all">{{$m.Principal}}</td>
+          <td>
+            {{if $.CanManage}}
+            <form class="flex flex-wrap items-center gap-2" method="post" action="/{{$.Org}}/settings"
+                  hx-post="/{{$.Org}}/settings" hx-target="#settings-panel" hx-select="#settings-panel" hx-swap="outerHTML">
+              <input type="hidden" name="org_action" value="member">
+              <input type="hidden" name="principal" value="{{$m.Principal}}">
+              <select class="input w-auto" name="role" aria-label="Role for {{$m.Principal}}">
+                <option value="member"{{if eq $m.Role "member"}} selected{{end}}>member</option>
+                <option value="owner"{{if eq $m.Role "owner"}} selected{{end}}>owner</option>
+              </select>
+              <button type="submit" class="btn px-2 py-1 text-xs">save</button>
+            </form>
+            {{else}}{{$m.Role}}{{end}}
+          </td>
+          <td>
+            {{if $.CanManage}}
+            <form method="post" action="/{{$.Org}}/settings"
+                  hx-post="/{{$.Org}}/settings" hx-target="#settings-panel" hx-select="#settings-panel" hx-swap="outerHTML">
+              <input type="hidden" name="org_action" value="member-remove">
+              <input type="hidden" name="principal" value="{{$m.Principal}}">
+              <button type="submit" class="btn px-2 py-1 text-xs">remove</button>
+            </form>
+            {{end}}
+          </td>
+        </tr>
+        {{end}}
+      </tbody>
+    </table>
+  </div>
+  {{else}}<p class="muted text-sm">no members.</p>{{end}}
+  {{if .CanManage}}
+  <form class="mt-3 grid gap-2 sm:grid-cols-[1fr_auto_auto]" method="post" action="/{{.Org}}/settings"
+        hx-post="/{{.Org}}/settings" hx-target="#settings-panel" hx-select="#settings-panel" hx-swap="outerHTML">
+    <input type="hidden" name="org_action" value="member">
+    <div>
+      <label class="mb-1 block text-sm font-medium" for="member-add">Add a member</label>
+      <input class="input" id="member-add" name="principal" type="text" placeholder="user:jane@example.com">
+    </div>
+    <div>
+      <label class="mb-1 block text-sm font-medium" for="member-role">Role</label>
+      <select class="input w-auto" id="member-role" name="role"><option value="member">member</option><option value="owner">owner</option></select>
+    </div>
+    <div class="flex items-end"><button type="submit" class="btn">add</button></div>
+  </form>
+  {{end}}
+</section>
+{{end}}
+
+{{define "settings-org-teams"}}
+<section class="card p-4">
+  <h3 class="card-header">Teams</h3>
+  {{if .Teams}}
+  <div class="space-y-3">
+    {{range $i, $t := .Teams}}
+    <div class="rounded-lg border border-zinc-200 p-3 dark:border-zinc-800">
+      <p class="text-sm"><span class="font-medium">{{$t.Name}}</span> <code class="muted font-mono text-xs">{{$t.Slug}}</code></p>
+      {{if $t.Members}}<p class="muted mt-1 text-xs break-all">members: {{range $j, $m := $t.Members}}{{if $j}}, {{end}}{{$m}}{{end}}</p>{{else}}<p class="muted mt-1 text-xs">no members.</p>{{end}}
+      {{if $.CanManage}}
+      <div class="mt-2 flex flex-wrap items-end gap-2">
+        <form class="flex flex-wrap items-end gap-2" method="post" action="/{{$.Org}}/settings"
+              hx-post="/{{$.Org}}/settings" hx-target="#settings-panel" hx-select="#settings-panel" hx-swap="outerHTML">
+          <input type="hidden" name="org_action" value="team-add">
+          <input type="hidden" name="slug" value="{{$t.Slug}}">
+          <div>
+            <label class="mb-1 block text-sm font-medium" for="team-add-{{$i}}">Add member</label>
+            <input class="input" id="team-add-{{$i}}" name="principal" type="text" placeholder="user:jane@example.com">
+          </div>
+          <button type="submit" class="btn px-2 py-1 text-xs">add</button>
+        </form>
+        <form method="post" action="/{{$.Org}}/settings"
+              hx-post="/{{$.Org}}/settings" hx-target="#settings-panel" hx-select="#settings-panel" hx-swap="outerHTML">
+          <input type="hidden" name="org_action" value="team-del">
+          <input type="hidden" name="slug" value="{{$t.Slug}}">
+          <button type="submit" class="btn danger px-2 py-1 text-xs">delete team</button>
+        </form>
+      </div>
+      {{end}}
+    </div>
+    {{end}}
+  </div>
+  {{else}}<p class="muted text-sm">no teams yet.</p>{{end}}
+  {{if .CanManage}}
+  <form class="mt-3 grid gap-2 sm:grid-cols-[auto_1fr_auto]" method="post" action="/{{.Org}}/settings"
+        hx-post="/{{.Org}}/settings" hx-target="#settings-panel" hx-select="#settings-panel" hx-swap="outerHTML">
+    <input type="hidden" name="org_action" value="team">
+    <div>
+      <label class="mb-1 block text-sm font-medium" for="team-slug">Slug</label>
+      <input class="input" id="team-slug" name="slug" type="text" placeholder="platform">
+    </div>
+    <div>
+      <label class="mb-1 block text-sm font-medium" for="team-name">Name</label>
+      <input class="input" id="team-name" name="name" type="text" placeholder="Platform">
+    </div>
+    <div class="flex items-end"><button type="submit" class="btn">create team</button></div>
+  </form>
+  {{end}}
+</section>
+{{end}}
+
+{{define "settings-org-invitations"}}
+<section class="card p-4">
+  <h3 class="card-header">Invitations</h3>
+  {{if .InviteLink}}
+  <div class="mb-3 rounded-lg border border-emerald-300 bg-emerald-50 p-3 text-sm text-emerald-800 dark:border-emerald-900 dark:bg-emerald-950/60 dark:text-emerald-200">
+    <p>Share this link — it is the invitation:</p>
+    <p class="mt-1 break-all font-mono text-xs" id="invite-link">{{.InviteLink}}</p>
+    <button type="button" class="btn mt-2" data-copy="#invite-link">copy</button>
+  </div>
+  {{end}}
+  {{if .Invites}}
+  <div class="overflow-x-auto">
+    <table class="data-table">
+      <thead><tr><th>subject</th><th>role</th><th>invited by</th><th>expires</th><th></th></tr></thead>
+      <tbody>
+        {{range .Invites}}
+        <tr>
+          <td class="break-all">{{.Subject}}</td>
+          <td>{{.Role}}</td>
+          <td>{{.InvitedBy}}</td>
+          <td class="tabular text-xs">{{.ExpiresAt}}{{if .Expired}} <span class="chip-draft">expired</span>{{end}}</td>
+          <td>
+            {{if $.CanManage}}
+            <form method="post" action="/{{$.Org}}/settings"
+                  hx-post="/{{$.Org}}/settings" hx-target="#settings-panel" hx-select="#settings-panel" hx-swap="outerHTML">
+              <input type="hidden" name="org_action" value="invite-remove">
+              <input type="hidden" name="id" value="{{.ID}}">
+              <button type="submit" class="btn px-2 py-1 text-xs">cancel</button>
+            </form>
+            {{end}}
+          </td>
+        </tr>
+        {{end}}
+      </tbody>
+    </table>
+  </div>
+  {{else}}<p class="muted text-sm">no invitations.</p>{{end}}
+  {{if .CanManage}}
+  <form class="mt-3 grid gap-2 sm:grid-cols-[1fr_auto_auto]" method="post" action="/{{.Org}}/settings"
+        hx-post="/{{.Org}}/settings" hx-target="#settings-panel" hx-select="#settings-panel" hx-swap="outerHTML">
+    <input type="hidden" name="org_action" value="invite">
+    <div>
+      <label class="mb-1 block text-sm font-medium" for="invite-email">Email</label>
+      <input class="input" id="invite-email" name="email" type="email" placeholder="jane@example.com">
+    </div>
+    <div>
+      <label class="mb-1 block text-sm font-medium" for="invite-role">Role</label>
+      <select class="input w-auto" id="invite-role" name="role"><option value="member">member</option><option value="owner">owner</option></select>
+    </div>
+    <div class="flex items-end"><button type="submit" class="btn">invite</button></div>
+  </form>
+  {{end}}
+  <p class="muted mt-2 text-xs">The shareable link lives on <a class="link" href="/invitations">/invitations</a>.</p>
+</section>
+{{end}}
+
+{{define "settings-org-activity"}}
+{{/* The live prepend is the islands group's SSE reader; data-sse names the
+     stream kind, and the endpoint lands with the org-activity view. */}}
+<section class="card p-4" aria-label="Organization activity" data-sse="org-activity">
+  <h3 class="card-header">Activity</h3>
+  <p class="muted mb-2 text-sm">member, team, repository, and invitation events — newest first, live.</p>
+  {{if .Activity}}
+  <div class="overflow-x-auto">
+    <table class="data-table">
+      <thead><tr><th>time</th><th>event</th><th>actor</th><th>detail</th></tr></thead>
+      <tbody id="org-activity-rows">
+        {{range .Activity}}
+        <tr data-seq="{{.Seq}}"><td class="tabular text-xs">{{.At}}</td><td><code class="font-mono text-xs">{{.Action}}</code></td><td><code class="font-mono text-xs">{{if .Actor}}{{.Actor}}{{else}}—{{end}}</code></td><td class="text-sm">{{.Title}}</td></tr>
+        {{end}}
+      </tbody>
+    </table>
+  </div>
+  {{if .More}}
+  <form class="mt-3" method="get" action="/{{.Org}}/settings">
+    <input type="hidden" name="tab" value="activity">
+    <button type="submit" class="btn px-3 py-1" data-activity-older>older</button>
+  </form>
+  {{end}}
+  {{else}}<p class="muted text-sm">no org events yet.</p>{{end}}
+</section>
+{{end}}
+
+{{define "settings-org-danger"}}
+<section class="card border-red-500/60 p-4" aria-label="Danger Zone">
+  <h3 class="mb-1 font-semibold text-red-700 dark:text-red-400">Danger Zone</h3>
+  <p class="muted text-sm">Deleting the organization is irreversible. Repositories it owns must be transferred to another owner (repo settings → Danger Zone) or deleted first.</p>
+  <form class="mt-2 grid gap-2" method="post" action="/{{.Org}}/settings"
+        hx-post="/{{.Org}}/settings" hx-target="#settings-panel" hx-select="#settings-panel" hx-swap="outerHTML"
+        data-danger-expected="{{.Org}}">
+    <input type="hidden" name="org_action" value="delete">
+    <div>
+      <label class="mb-1 block text-sm font-medium" for="org-delete-confirm">Type <code class="font-mono text-xs">{{.Org}}</code> to confirm</label>
+      <input class="input md:max-w-sm font-mono text-xs" id="org-delete-confirm" name="confirm" type="text" autocomplete="off" data-danger-arm required>
+    </div>
+    <div><button type="submit" class="btn danger">Delete this organization</button></div>
+    {{if .Error}}<p class="err-line" role="alert">{{.Error}}</p>{{end}}
+  </form>
+</section>
+{{end}}

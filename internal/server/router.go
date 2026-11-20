@@ -86,6 +86,7 @@ func (s *Server) gated(h http.HandlerFunc) http.HandlerFunc {
 // mount registers the §3.1 chi route tree. SETUP-ONLY MODE (§3.4) branches at
 // the top: only the §3.4 subset is registered plus a 503 fallback.
 func (s *Server) mount(r chi.Router) {
+	s.bindUI()
 	if s.boot.InSetupOnly() {
 		s.mountSetupOnly(r)
 		return
@@ -109,7 +110,10 @@ func (s *Server) mount(r chi.Router) {
 		apiLane := s.compress(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			s.apiServe(w, r)
 		}))
-		r.HandleFunc("/api", apiLane.ServeHTTP)
+		// Browser GET /api is the human API-docs page (D-WEB-14): the page
+		// provider answers first and falls through to the JSON lane (which
+		// 404s /api — discovery lives at /api/v1).
+		r.HandleFunc("/api", s.uiOr(apiLane.ServeHTTP))
 		r.HandleFunc("/api/*", apiLane.ServeHTTP)
 		r.HandleFunc("/api-browser", apiLane.ServeHTTP)
 		r.HandleFunc("/api-browser/*", apiLane.ServeHTTP)
@@ -132,35 +136,38 @@ func (s *Server) mount(r chi.Router) {
 
 	r.Post("/_events/notify", s.eventsNotify) // handler-authenticated (09_events.md)
 
-	// SPA assets (D-WEB-6): static, content-hashed, no secrets — auth is the
-	// API's job; the shell must load everywhere so /setup can render its
-	// access-restricted card. gzip applies to the text assets.
+	// Page assets (D-WEB-14/D-WEB-15): /_ui/* carries the server-rendered page
+	// assets only (app.css, ui.js, the vendored htmx files, concepts/). Static
+	// filenames, no secrets — auth is the API's job; the stylesheet must load
+	// everywhere so /setup can render its access-restricted card. gzip applies
+	// to the text assets.
 	r.Route("/_ui", func(g chi.Router) {
 		g.Handle("/*", s.compress(http.HandlerFunc(s.serveUIAssets)))
 	})
 	r.Get("/services/setup.json", s.gated(s.setupJSON))
 	r.Get("/metrics", s.gated(s.metricsHandler))
 
-	// Setup page (§3.4) — a SPA route; the shell loads everywhere.
-	r.Get("/setup", s.setupUI)
+	// Setup page (§3.4) — server-rendered by the page provider (the provider
+	// owns the §3.4 access rules; the setup API keeps its own gating).
+	r.Get("/setup", s.pageOr404)
+	r.Post("/setup", s.pageOr404)
+	r.Post("/setup/auth-test", s.pageOr404)
 
-	// SPA shell: / is the landing page, /explore is the owners list (issue
-	// #187), /how-it-works is the developer deep-dive (issue #191).
+	// Public page tree: / is the landing page, /explore is the owners list
+	// (issue #187), /how-it-works is the developer deep-dive (issue #191).
 	// /explore and /how-it-works MUST be explicit: otherwise they fall into
 	// the /* wildcard → repoDispatch → treated as owner "explore" /
-	// "how-it-works" (single-segment shape serves the same shell today, but
-	// the ?format=text branch lives only on explorePage — and the explicit
-	// routes document the name reservation: an owner literally named
-	// "explore" or "how-it-works" loses its /:owner UI page; its git/API
-	// paths are unaffected).
-	r.Get("/", s.gated(s.spaHome))
-	r.Get("/explore", s.gated(s.explorePage))
-	r.Get("/how-it-works", s.gated(s.howItWorksPage))
+	// "how-it-works" (and the explicit routes document the name reservation:
+	// an owner literally named "explore" or "how-it-works" loses its /:owner
+	// UI page; its git/API paths are unaffected).
+	r.Get("/", s.pageOr404)
+	r.Get("/explore", s.pageOr404)
+	r.Get("/how-it-works", s.pageOr404)
 
 	r.NotFound(notFound)                 // deliberate 404, plain text
 	r.MethodNotAllowed(methodNotAllowed) // 405 + Allow
 
-	r.HandleFunc("/*", s.repoDispatch) // EVERYTHING repo-scoped (§3.2)
+	r.HandleFunc("/*", s.uiOr(s.repoDispatch)) // server-rendered pages first (§3.2)
 }
 
 // mountSetupOnly registers the §3.4 setup-only subset: /setup*, /api/v1/setup*,
@@ -170,7 +177,17 @@ func (s *Server) mountSetupOnly(r chi.Router) {
 	r.Get("/healthz", s.healthz)
 	r.Get("/readyz", s.readyz)
 	r.Mount("/api/v1/setup", s.setupAPIRouter())
-	r.Get("/setup", s.setupUI) // SPA shell; assets below are open
+	// /setup is server-rendered (D-WEB-14): the page provider answers it. The
+	// provider's /setup handler is mode-agnostic and reads internal/setup
+	// directly, so an invalid config can be fixed without a JSON round trip.
+	//
+	// POST matters as much as GET here: the page's Validate/Save buttons submit
+	// the form to /setup, and setup-only mode is exactly the mode where the
+	// config MUST be fixable from the browser. A GET-only route would render a
+	// dead form. Without a page provider the POST keeps the §3.4 503 answer.
+	r.Get("/setup", s.pageOr404)
+	r.Post("/setup", s.uiOr(setupOnlyUnavailable))
+	r.Post("/setup/auth-test", s.uiOr(setupOnlyUnavailable))
 	r.Route("/_ui", func(g chi.Router) {
 		g.Handle("/*", s.compress(http.HandlerFunc(s.serveUIAssets)))
 	})
@@ -184,6 +201,15 @@ func (s *Server) mountSetupOnly(r chi.Router) {
 		plainStatus(w, http.StatusServiceUnavailable,
 			"walgit: configuration is invalid — open /setup to fix it")
 	})
+}
+
+// setupOnlyUnavailable is the POST /setup fallback in setup-only mode when the
+// page provider does not answer (unmigrated build): the §3.4 503, never a
+// dead 405 form.
+func setupOnlyUnavailable(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Retry-After", "15")
+	plainStatus(w, http.StatusServiceUnavailable,
+		"walgit: configuration is invalid — open /setup to fix it")
 }
 
 // setupAPIRouter returns the internal/setup HTTP surface (§3.4) — the server
@@ -226,7 +252,7 @@ func (s *Server) repoDispatch(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	segs := strings.Split(strings.TrimPrefix(path, "/"), "/")
-	if len(segs) < 2 { // "/{owner}" → UI page route (gated, GET/HEAD only)
+	if len(segs) < 2 { // "/{owner}" → UI page route (GET/HEAD only)
 		owner, err := decodeSeg(segs[0])
 		if err != nil || owner == "" || !validOwner(owner) {
 			plainStatus(w, http.StatusNotFound, "not found")
@@ -237,14 +263,14 @@ func (s *Server) repoDispatch(w http.ResponseWriter, r *http.Request) {
 			plainStatus(w, http.StatusMethodNotAllowed, "method not allowed")
 			return
 		}
-		s.gated(s.ownerPage)(w, r)
+		s.pageOr404(w, r)
 		return
 	}
 	if len(segs) == 3 && segs[1] == "teams" {
-		// 08 §1 org team page "/{owner}/teams/{slug}" → SPA shell
-		// (gated, GET/HEAD only). A repo literally named "teams" keeps
-		// its 2-segment root and every deeper git/API path; only the
-		// otherwise-meaningless 3-segment shape reroutes.
+		// 08 §1 org team page "/{owner}/teams/{slug}" (gated, GET/HEAD only).
+		// A repo literally named "teams" keeps its 2-segment root and every
+		// deeper git/API path; only the otherwise-meaningless 3-segment shape
+		// reroutes.
 		owner, err := decodeSeg(segs[0])
 		slug, serr := decodeSeg(segs[2])
 		if err != nil || serr != nil || owner == "" || slug == "" || !validOwner(owner) {
@@ -256,7 +282,7 @@ func (s *Server) repoDispatch(w http.ResponseWriter, r *http.Request) {
 			plainStatus(w, http.StatusMethodNotAllowed, "method not allowed")
 			return
 		}
-		s.gated(s.ownerPage)(w, r)
+		s.pageOr404(w, r)
 		return
 	}
 	owner, rerr := decodeSeg(segs[0])
@@ -303,14 +329,14 @@ func (s *Server) repoDispatch(w http.ResponseWriter, r *http.Request) {
 
 	switch {
 	case len(sub) == 0:
-		// UI page route /{owner}/{repo} (visibility-gated shell, GET/HEAD
-		// only; PUT/DELETE on the bare root went to the api seam above).
+		// UI page route /{owner}/{repo} (GET/HEAD only; PUT/DELETE on the
+		// bare root went to the api seam above).
 		if !isUIPageMethod(r) {
 			w.Header().Set("Allow", "GET, HEAD")
 			plainStatus(w, http.StatusMethodNotAllowed, "method not allowed")
 			return
 		}
-		s.repoPageGated(id)(w, r)
+		s.pageOr404(w, r)
 	case sub[0] == "info" && len(sub) >= 2 && sub[1] == "refs":
 		s.gitInfoRefs(w, r, id)
 	case sub[0] == "git-upload-pack":
@@ -322,12 +348,12 @@ func (s *Server) repoDispatch(w http.ResponseWriter, r *http.Request) {
 	case sub[0] == "bundles":
 		s.bundlesDispatch(w, r, id, sub[1:], hadGit)
 	case len(sub) == 1 && sub[0] == "api" || len(sub) == 1 && sub[0] == "api-browser":
-		// Lane root GET is handled above; fall through to UI check.
-		s.repoPageGated(id)(w, r)
+		// Lane root GET is handled above; fall through to the page check.
+		s.pageOr404(w, r)
 	case uiPageRoute(sub[0]):
 		// A repo-subpath byte family shares the page prefix (releases
 		// pages AND release asset bytes both live under /releases/…):
-		// the byte route wins over the SPA shell on shape match.
+		// the byte route wins over the page on shape match.
 		if s.repoDispatchRepoExtras(w, r, id, sub) {
 			return
 		}
@@ -336,7 +362,7 @@ func (s *Server) repoDispatch(w http.ResponseWriter, r *http.Request) {
 			plainStatus(w, http.StatusMethodNotAllowed, "method not allowed")
 			return
 		}
-		s.repoPageGated(id)(w, r)
+		s.pageOr404(w, r)
 	default:
 		// Feature repo-subpath families (repo_extra.go, 14.3 note):
 		// release asset bytes live here, outside the api lanes and

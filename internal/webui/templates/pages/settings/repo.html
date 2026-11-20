@@ -1,0 +1,54 @@
+{{/* pages/settings/repo.html — GET /{owner}/{name}/settings/{tab}
+   (specs/settings.md §2). Sidebar anatomy: .side-nav-* (guideline §2, issues
+   #123/#276). 390px: the two nav sections stack full-width, each an
+   internally-scrolling chip bar above the content; fields go full width;
+   toggle rows keep label-left/control-right. */}}
+{{define "content"}}
+<div class="settings-page" id="settings-page" data-settings-tab="{{.Data.Tab}}">
+  {{/* Forgejo #631: no visual page heading — the sidebar carries it. */}}
+  <h2 class="sr-only">Settings</h2>
+  <div class="flex flex-col gap-4 lg:flex-row lg:gap-6">
+    <nav class="min-w-0 shrink-0 lg:w-56" aria-label="Settings sections">
+      <div class="flex min-w-0 flex-col gap-3 sm:flex-row sm:gap-4 lg:sticky lg:top-4 lg:block lg:space-y-4">
+        <section aria-labelledby="settings-nav-standard" class="min-w-0 flex-1 lg:flex-none">
+          <h3 id="settings-nav-standard" class="side-nav-heading">Settings</h3>
+          <ul class="flex gap-1 overflow-x-auto pb-1 lg:flex-col lg:overflow-visible lg:pb-0">
+            {{range .Data.Nav}}
+            <li class="flex-none"><a class="side-nav-item" href="{{.Href}}"{{if .Active}} aria-current="page"{{end}}>{{.Label}}</a></li>
+            {{end}}
+          </ul>
+        </section>
+        {{if .Data.Danger}}
+        <section aria-labelledby="settings-nav-danger" class="min-w-0 flex-none">
+          <h3 id="settings-nav-danger" class="side-nav-heading side-nav-heading-danger">Danger Zone</h3>
+          <ul class="flex gap-1 overflow-x-auto pb-1 lg:flex-col lg:overflow-visible lg:pb-0">
+            {{range .Data.Danger}}
+            <li class="flex-none"><a class="side-nav-item side-nav-item-danger" href="{{.Href}}"{{if .Active}} aria-current="page"{{end}}>{{.Label}}</a></li>
+            {{end}}
+          </ul>
+        </section>
+        {{end}}
+      </div>
+    </nav>
+
+    <div class="min-w-0 flex-1">
+      {{if .Data.Saved}}<div class="mb-3 rounded-lg border border-emerald-300 bg-emerald-50 p-3 text-sm text-emerald-800 dark:border-emerald-900 dark:bg-emerald-950/60 dark:text-emerald-200">Saved.</div>{{end}}
+      {{if .Data.Notice}}<div class="mb-3 rounded-lg border border-emerald-300 bg-emerald-50 p-3 text-sm text-emerald-800 dark:border-emerald-900 dark:bg-emerald-950/60 dark:text-emerald-200">{{.Data.Notice}}</div>{{end}}
+      {{if .Data.Error}}<div class="mb-3 rounded-lg border border-red-300 bg-red-50 p-3 text-sm text-red-800 dark:border-red-900 dark:bg-red-950/60 dark:text-red-200" role="alert">{{.Data.Error}}</div>{{end}}
+
+      <div id="settings-panel">
+        {{if eq .Data.Tab "general"}}{{template "settings-repo-general" .Data}}{{end}}
+        {{if eq .Data.Tab "scheduled"}}{{template "settings-repo-scheduled" .Data}}{{end}}
+        {{if eq .Data.Tab "mirror"}}{{template "settings-repo-mirror" .Data}}{{end}}
+        {{if eq .Data.Tab "policy"}}{{template "settings-repo-policy" .Data}}{{end}}
+        {{if eq .Data.Tab "config"}}{{template "settings-repo-config" .Data}}{{end}}
+        {{if eq .Data.Tab "access"}}{{template "settings-repo-access" .Data}}{{end}}
+        {{if eq .Data.Tab "tokens"}}{{template "settings-repo-tokens" .Data}}{{end}}
+        {{if eq .Data.Tab "webhooks"}}{{template "settings-repo-webhooks" .Data}}{{end}}
+        {{if eq .Data.Tab "wal"}}{{template "settings-repo-wal" .Data}}{{end}}
+        {{if eq .Data.Tab "danger"}}{{template "settings-repo-danger" .Data}}{{end}}
+      </div>
+    </div>
+  </div>
+</div>
+{{end}}

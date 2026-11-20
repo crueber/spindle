@@ -1,0 +1,123 @@
+{{define "content"}}
+<div class="repo-shell">
+  {{template "repo_header" .Data.Repo}}
+  {{template "repo_tabs" .Data.Repo}}
+  {{template "repo_degraded" .Data.Repo}}
+
+  {{if .Data.Guide}}
+  {{template "repo_guide" .Data.Guide}}
+  {{else}}
+  <div class="commit-page">
+    <nav class="crumbs mb-2 flex flex-wrap items-center gap-x-1.5 text-sm">
+      <a class="text-emerald-700 hover:underline dark:text-emerald-400" href="/{{.Data.Repo.Full}}/commits">Commits</a>
+      <span class="muted" aria-hidden="true">/</span>
+      <code class="sha font-mono text-xs tabular-nums" title="{{.Data.SHA}}">{{shortsha .Data.SHA}}</code>
+    </nav>
+
+    <section class="commit-head card space-y-2.5 p-4">
+      <h2 class="text-lg font-semibold leading-snug">{{.Data.Subject}}</h2>
+      <p class="commit-meta muted text-xs tabular-nums">
+        <span>{{.Data.Commit.Author}}</span>
+        {{if .Data.Commit.AuthorEmail}}<span> &lt;{{.Data.Commit.AuthorEmail}}&gt;</span>{{end}}
+        {{if .Data.AuthorStamp}}<span> · authored <time datetime="{{.Data.AuthorStamp}}" title="{{.Data.AuthorStamp}}">{{with rel .Data.AuthorStamp}}{{.}}{{else}}—{{end}}</time></span>{{end}}
+        {{if .Data.CommitStamp}}<span> · committed <time datetime="{{.Data.CommitStamp}}" title="{{.Data.CommitStamp}}">{{with rel .Data.CommitStamp}}{{.}}{{else}}—{{end}}</time></span>{{end}}
+      </p>
+      {{if .Data.Parents}}
+      <p class="commit-parents text-xs tabular-nums">
+        <span class="muted">{{if gt (len .Data.Parents) 1}}merge parents ({{len .Data.Parents}}): {{else}}parent: {{end}}</span>
+        {{range $i, $p := .Data.Parents}}{{if $i}}<span class="muted"> · </span>{{end}}<a class="sha font-mono text-emerald-700 hover:underline dark:text-emerald-400" href="/{{$.Data.Repo.Full}}/commit/{{$p}}" title="parent {{$p}}">{{shortsha $p}}</a>{{end}}
+      </p>
+      {{end}}
+      {{if .Data.Commit.Body}}
+      <!-- Linkified body (lib/diff.js linkifyBody port): escape-first, then
+           bare http(s) URLs and 40/64-hex shas become links. -->
+      <div class="commit-body markdown-body mt-3">{{.Data.Body}}</div>
+      {{end}}
+      {{if .Data.Trailers}}
+      <div class="mt-3">
+        <details class="trailers">
+          <summary class="pill cursor-pointer select-none" title="Commit trailers (machine-readable footer lines)">{{.Data.TrailerCount}} trailers</summary>
+          <table class="data-table trailers-table mt-2">
+            <tbody>
+              {{range .Data.Trailers}}
+              <tr class="trailers-group"><td colspan="2"><strong>{{.Name}}</strong></td></tr>
+              {{range .Rows}}
+              <tr>
+                <td class="trailer-key align-top font-mono text-xs">{{.Key}}</td>
+                <td class="trailer-value break-words">
+                  {{if .SHA}}<a class="sha font-mono text-emerald-700 hover:underline dark:text-emerald-400" href="/{{$.Data.Repo.Full}}/commit/{{.SHA}}" title="May not exist here (a CI boundary commit)">{{shortsha .SHA}}</a>{{end}}
+                  {{if .Email}}<span>{{.Name}} <a class="hover:underline" href="mailto:{{.Email}}">&lt;{{.Email}}&gt;</a></span>{{end}}
+                  {{if .Text}}{{.Text}}{{end}}
+                </td>
+              </tr>
+              {{end}}
+              {{end}}
+            </tbody>
+          </table>
+        </details>
+      </div>
+      {{end}}
+      <p class="muted diffstat mt-3 text-xs tabular-nums">
+        <span class="text-emerald-600 dark:text-emerald-400">+{{.Data.Adds}}</span>
+        <span class="text-red-600 dark:text-red-400">−{{.Data.Dels}}</span>
+        across {{.Data.StatN}} {{plural .Data.StatN "file" "files"}} (server stats)
+      </p>
+
+      <!-- Create tag (Forgejo #253/#263): the write-gated form the SPA opened
+           from a button. A native <details> disclosure is the honest no-JS
+           twin; errors re-open it and carry the service text inline. -->
+      {{if .Data.CanCreateTag}}
+      <div class="create-tag mt-3 border-t border-zinc-100 pt-2 dark:border-zinc-800/60">
+        <details{{if .Data.TagErr}} open{{end}}>
+          <summary class="pill cursor-pointer select-none" title="Create a tag at this commit">Create tag</summary>
+          <form class="mt-2 space-y-2" method="post" action="/{{.Data.Repo.Full}}/tag">
+            <input type="hidden" name="sha" value="{{.Data.SHA}}">
+            <div class="grid grid-cols-1 gap-2 sm:grid-cols-2">
+              <div class="min-w-0">
+                <label class="muted mb-0.5 block text-xs" for="tag-name">Tag name</label>
+                <input class="input font-mono text-xs" id="tag-name" name="name" type="text" maxlength="500" value="{{.Data.TagName}}" placeholder="v1.0.0" required aria-label="Tag name">
+              </div>
+              <div class="min-w-0">
+                <label class="muted mb-0.5 block text-xs" for="tag-message">Annotation (optional)</label>
+                <input class="input text-xs" id="tag-message" name="message" type="text" value="{{.Data.TagMessage}}" placeholder="Annotation (optional — annotated tag)" aria-label="Tag annotation (optional)">
+              </div>
+            </div>
+            <button type="submit" class="btn primary px-3 py-1">Create tag</button>
+          </form>
+          <p class="muted mt-1 text-xs">An annotation mints an annotated tag object; leaving it empty creates a lightweight tag at this commit.</p>
+        </details>
+        {{if .Data.TagErr}}<p class="err-line" role="alert">{{.Data.TagErr}}</p>{{end}}
+      </div>
+      {{end}}
+    </section>
+
+    {{if .Data.Files}}
+    <nav class="file-nav mt-3 flex flex-wrap items-center gap-1.5 text-xs">
+      <span class="muted">files: </span>
+      {{range .Data.Files}}<a class="pill cursor-pointer hover:no-underline" href="#{{.Anchor}}">{{.Path}}</a>{{end}}
+    </nav>
+    {{end}}
+
+    <div class="commit-files mt-3">
+      {{range .Data.Files}}
+      <section class="diff-file card mb-3 overflow-hidden" id="{{.Anchor}}">
+        <div class="diff-file-head flex flex-wrap items-baseline gap-2 border-b border-zinc-200 px-3 py-2 dark:border-zinc-800">
+          <h3 class="min-w-0 truncate font-mono text-sm font-semibold">{{.Path}}</h3>
+          {{if .Flags}}<span class="muted text-xs">({{.Flags}})</span>{{end}}
+          <span class="diffstat tabular ml-auto text-xs">
+            <span class="text-emerald-600 dark:text-emerald-400">+{{.Added}}</span>
+            <span class="text-red-600 dark:text-red-400">−{{.Deleted}}</span>
+          </span>
+        </div>
+        <!-- Unified is the server render (Q4): the Split toggle is a fragment
+             the islands group owns; this page never ships the patch as text. -->
+        <div class="diff-holder overflow-x-auto">
+          {{template "repo_diff" .}}
+        </div>
+      </section>
+      {{end}}
+    </div>
+  </div>
+  {{end}}
+</div>
+{{end}}

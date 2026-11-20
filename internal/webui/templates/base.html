@@ -1,0 +1,19 @@
+{{define "base"}}<!doctype html>
+<html lang="en" class="dark">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{{with .Chrome.Title}}{{.}} · {{end}}walhub</title>
+  <link rel="stylesheet" href="/_ui/app.css">
+  <script src="/_ui/htmx.min.js" defer></script>
+  <script src="/_ui/htmx-ext-sse.js" defer></script>
+  <script type="module" src="/_ui/ui.js"></script>
+</head>
+<body class="min-h-screen bg-white text-zinc-900 dark:bg-zinc-950 dark:text-zinc-100">
+  <div class="flex min-h-screen flex-col">
+    {{template "header" .}}
+    <main id="app" class="mx-auto w-full max-w-6xl flex-1 px-4 py-6">{{template "content" .}}</main>
+    {{template "footer" .}}
+  </div>
+</body>
+</html>{{end}}

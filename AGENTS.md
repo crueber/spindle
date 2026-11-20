@@ -9,7 +9,7 @@
 
 ## 1. The laws (violating any of these is a rejected change)
 
-1. **Dependency budget is law.** Backend third-party modules: `github.com/go-chi/chi/v5` (the router), `github.com/BurntSushi/toml` (config), `golang.org/x/net` (h2c), `golang.org/x/crypto` (SSH server transport only — amended 2026-09-02 by explicit user request for SSH git transport; see `docs/go/17_ssh.md` decision 17.1), `github.com/dicebear/dicebear-go/v10` + `github.com/dicebear/styles/v10` (deterministic user-avatar generation only — amended 2026-09-12 by explicit user request for auto-generated avatars, Forgejo #376; see `docs/features/01_identity_permissions.md` Decisions; build-required transitives are `github.com/dicebear/schema` + `github.com/santhosh-tekuri/jsonschema/v6`, verified with `go mod graph` — the issue's "zero sub-dependencies" assumption was wrong, the option-validation path needs both; `golang.org/x/text` was already an indirect dependency). Frontend (amended 2026-09-02 by explicit user request — the user directed the SolidJS SPA + Tailwind replacement of the vanilla-ESM UI; agents must treat this as approved, see `DEVIATIONS.md` D-WEB-6) and amended 2026-09-06 by explicit user request for marked + DOMPurify markdown rendering (see `DEVIATIONS.md` D-WEB-7): runtime npm dependencies are exactly **`solid-js` + `@solidjs/router` + `marked` + `dompurify`** (pinned: `marked@18.0.11` MIT, `dompurify@3.4.15` MPL-2.0-or-Apache-2.0; both zero-dependency); state management is Solid's own signals/stores + context (NO additional state library); styling is **Tailwind CSS v4** (CSS-first `@import "tailwindcss"`, `@tailwindcss/vite` plugin, no config file, no CDN, dark mode by default). Still NO TypeScript (plain JSX/JS). Dev-time tooling: `vite` + `vite-plugin-solid` + `@tailwindcss/vite` build the SPA into `web/dist/`, and `esbuild` (unchanged) bundles the modular SDK (`web/sdk/src/*.js`) into the shipped `web/dist/repos.js` — the SDK itself stays dependency-free. Anything else needs a written amendment in the relevant doc's "Decisions & deviations" section BEFORE the code lands. Hand-roll instead: S3 SigV4, GCS JSON API, protobuf wire codec, JWKS/JWT verification, SSE, Prometheus text exposition, LRU caches, singleflight, CLI dispatch, CORS and all other middleware (chi core only — no chi/cors, no chi/middleware packages).
+1. **Dependency budget is law.** Backend third-party modules: `github.com/go-chi/chi/v5` (the router), `github.com/BurntSushi/toml` (config), `golang.org/x/net` (h2c), `golang.org/x/crypto` (SSH server transport only — amended 2026-09-02 by explicit user request for SSH git transport; see `docs/go/17_ssh.md` decision 17.1), `github.com/dicebear/dicebear-go/v10` + `github.com/dicebear/styles/v10` (deterministic user-avatar generation only — amended 2026-09-12 by explicit user request for auto-generated avatars, Forgejo #376; see `docs/features/01_identity_permissions.md` Decisions; build-required transitives are `github.com/dicebear/schema` + `github.com/santhosh-tekuri/jsonschema/v6`, verified with `go mod graph` — the issue's "zero sub-dependencies" assumption was wrong, the option-validation path needs both; `golang.org/x/text` was already an indirect dependency). Frontend (amended 2026-11-19 by explicit user request — the server-rendered HTMX migration, see `DEVIATIONS.md` D-WEB-14, which supersedes D-WEB-6/D-WEB-7): pages are **Go `html/template`** rendered by `internal/webui`; interactivity is **htmx 2.0.4, vendored** (`web/vendor/`, MIT) plus small vanilla **ES modules** under `web/src/islands/` (no framework, no client data layer, no client-side router). User-authored markdown, unified diffs, commit graphs and syntax highlighting are rendered **server-side in Go** (`internal/webui/{markdown,diff,graph,highlight}.go`: escape everything, allow only http/https/mailto/relative links) — so `marked` and `DOMPurify` are gone and the XSS boundary is the server renderer. The `repos.js` SDK stays dependency-free. Dev-time tooling: `tailwindcss` v4 (CSS-first; the no-config rule and dark-by-default stay) builds `web/dist/app.css` (through `@tailwindcss/vite`, so `vite` stays as the stylesheet build host — amended 2026-11-20, D-WEB-15); `esbuild` bundles the SDK and the island entry. Still NO TypeScript (plain JSX-free JS). Anything else needs a written amendment in the relevant doc's "Decisions & deviations" section BEFORE the code lands. Hand-roll instead: S3 SigV4, GCS JSON API, protobuf wire codec, JWKS/JWT verification, SSE, Prometheus text exposition, LRU caches, singleflight, CLI dispatch, CORS and all other middleware (chi core only — no chi/cors, no chi/middleware packages).
 2. **git is a subprocess, always.** Every git operation shells out to the `git` binary with the exact argv specified in `docs/go/04_git.md`. Never link a Go git library. Never deviate from the specified argv without updating the doc in the same change.
 3. **Concurrency: goroutines yes, deadlocks never.** Every concurrent design carries a `### Concurrency` subsection (hazard + avoidance). The lock rules in `docs/go/13_concurrency.md` are binding:
    - Lock order `syncMu → packMu → rw`; never acquire out of order.
@@ -46,8 +46,8 @@
 - **Implement in waves** (see `docs/go/README.md`): storage → git/WAL → HTTP/API → subsystems. Independent docs can be implemented in parallel by separate agents; the seams between them are the interfaces named in the docs (store.ObjectStore, wal.RepoHandle, api route providers). When two agents meet at a seam, the interface in the doc wins; propose amendments, don't freelance.
 - **Tests are part of the definition of done.** Each package's doc names its tests (contract cases, budget assertions, e2e flows). `-race` is mandatory in CI; concurrency-heavy packages get stress tests (`-count=100`) and the deadlock canary; `make cover` enforces the ≥ 95% per-package gate. Never merge with skipped tests; never weaken a budget assertion to make it pass.
 - **Never run unbounded commands.** Wrap test/build invocations in a timeout. `go test ./...` in this repo is tiered (see `docs/go/15_testing.md`) — run `make test` / `make race` / `make sim` for the tier you need, not the world.
-- **Commit discipline.** One logical change per commit; the commit message states the doc section it implements and any decision it appends. Format with gofmt (`make fmt`); vet clean (`make vet`); the three allowed imports are the only non-stdlib imports a linter should ever flag.
-- **Naming.** Binary `walhub`, module `github.com/crueber/walhub`, packages exactly as in `docs/go/01_overview.md` (cmd/walhub, internal/{store,wal,git,bundle,policy,server,api,setup,events,maintain,config}, web/). Wire/bucket identifiers (header names `X-Walgit-*`, config key names, bucket key paths, protobuf package `walgit.v1`) keep their Rust-era names — they are wire contracts, not branding. Root markdown files are all-uppercase (`AGENTS.md`, `DESIGN.md`, `DEVIATIONS.md`) — except `README.md`, which keeps the universal lowercase spelling (#212).
+- **Commit discipline.** One logical change per commit; the commit message states the doc section it implements and any decision it appends. Format with gofmt (`make fmt`); vet clean (`make vet`); the budgeted modules (law 1) are the only non-stdlib imports a linter should ever flag.
+- **Naming.** Binary `walhub`, module `github.com/crueber/walhub`, packages exactly as in `docs/go/01_overview.md` (cmd/walhub; internal/{store,wal,git,bundle,policy,server,api,setup,events,maintain,config}; the collaboration layer in its own packages; web/). Wire/bucket identifiers (header names `X-Walgit-*`, config key names, bucket key paths, protobuf package `walgit.v1`) keep their Rust-era names — they are wire contracts, not branding. Root markdown files are all-uppercase (`AGENTS.md`, `DESIGN.md`, `DEVIATIONS.md`) — except `README.md`, which keeps the universal lowercase spelling (#212).
 - **Mobile viewport is always checked.** Every browser-facing change is verified at a narrow/mobile viewport (~390px width) as well as desktop — layout, overflow, and tap targets. UI work without a mobile-viewport check is not done.
 - **Tailwind is the only styling language — compose it correctly (Forgejo #533).** No text-field utilities on non-text controls (the `.input` class on a checkbox stretched it full-width and scattered the Settings Features rows); no one-off CSS without shared-pattern justification (a new rule earns its place only as a shared pattern in `web/src/ui.css`, per the #405 opaque-popover precedent); controls align in both themes at desktop and ~390px. **Layout changes are verified rendered before merge** — a screenshot or DOM measurement (row-rect alignment, control positions), never code reading alone; a layout ticket closed without rendered proof is not done.
 - **The style guideline is binding for all UI work (Forgejo #533).** `docs/style-guideline.md` codifies the app's design language with canonical references; it is normative, not advisory. Every change to `web/` composes the shared classes, components, and page-anatomy patterns it names — a new UI element reuses the canonical idiom (naming its reference) instead of re-deciding styling. Deviating from the guideline, or introducing a new pattern where a canonical one exists, requires either (a) extending `docs/style-guideline.md` in the same change with the new canonical reference and rationale, or (b) an amendment in the relevant doc's "Decisions & deviations" section. Reviewers reject UI changes that re-decide what the guideline already settles. The guideline never overrides AGENTS.md law 1 (dependency budget) or the Tailwind-only rule; where they conflict, the law wins and the guideline is corrected.
@@ -65,6 +65,42 @@ Performance claims (scale, latency shape) are **evidence-backed**: measured entr
 - **Tests that spawn git pin their identity.** Annotated tags and `commit-tree` need an author/committer; runners and containers have no global git config. `TestMain` in `internal/git` and `internal/maintain` sets `GIT_AUTHOR_*`/`GIT_COMMITTER_*` for spawned subprocesses only. Reproduce environment gaps with `env -i PATH=… HOME=/tmp/nohome go test …`.
 - **Fresh clones compile.** `web/dist/.keep` is tracked because `go:embed all:dist` fails on a missing directory — never gitignore it away, and build the web BEFORE `go test` in CI (the embed shell is what `/setup` 200s on).
 - **Development builds and publishing are separate steps.** Every pull request and push to `main` runs `.github/workflows/ci.yml` (the full gate) and publishes the image `ghcr.io/crueber/walhub:latest` (plus the commit SHA, and the version on `v*` tags). Keep the package name stable: it is the pull path users have. README "Run with docker compose" documents pulling.
+- **The publish tree is the tracked set — `.gitignore` must not subtract from it.** The published
+  copy is `git archive HEAD` re-committed under a fresh `git init`, so an ignore rule that matches a
+  tracked path silently drops it (the stale `covergate/` rule removed a whole package from a
+  publish, and GitHub CI died at `make cover`). The script stages with `git add -A -f` and refuses
+  when the index is smaller than the export.
+- **S3 ETags are content hashes, not counters.** Writing identical bytes keeps the same version, so
+  CAS and lease tests must change the body to observe a stale token. The contract suite encodes
+  that, and pins the §2.3 quirk (an unparseable Update token skips the precondition).
+- **`buildah run` execs its argv directly.** The image `ENTRYPOINT` is not applied, so the container
+  contract wraps its checks in `/bin/sh -c '…'` (a bare `git --version` string was exec'd as a
+  program name and failed the job).
+- **The gate needs a git newer than any released Debian, and must run unprivileged.** The pull
+  replay path uses `git replay --ref-action` (newer than trixie's 2.47), and several tests assert
+  that an unwritable path fails — which root bypasses. The CI gate is a digest-pinned `debian:sid`
+  running the suite as a normal user; `node:22-trixie` covers the web and S3 jobs.
+- **`html/template` builtins are process-wide — never shadow them.** A FuncMap entry named `eq`
+  replaces the builtin for every template; a string-only `eq` broke every error page
+  (`eq .Data.Status 401`). Do not define `eq/ne/lt/le/gt/ge/len/index/printf/slice`.
+- **Pages vs partials is the template glob.** `templates/pages/<group>/*.html` is parsed as a PAGE
+  (its own `content`); shared blocks belong in `templates/partials/` (parsed into every page set).
+  A `_partial` under `pages/` is a page, and its defines are invisible to its siblings.
+- **`ServeMux` wildcards cannot overlap.** Two patterns of the same shape (`/{a}/{b}/{c}` and
+  `/{owner}/{name}/{tab}`) panic at registration. Literal segments win, so keep literal routes
+  literal and route shape-generic families (e.g. `/{owner}/teams/{slug}`) through ONE dispatcher
+  that writes nothing for non-matches — the page seam then falls through to the next handler.
+- **The htmx SSE extension is not our transport.** It cannot POST, set headers, read JSON payloads,
+  or distinguish a 401 (it retries forever). `web/src/islands/sse.js` keeps a fetch stream
+  (cookies, coalesced invalidation, backoff, `ui:auth-required`); htmx only consumes the effects
+  (`hx-trigger="ui:sse-… from:body"`).
+- **Server rendering IS the XSS boundary.** `internal/webui/markdown.go` escapes all text and
+  allows only http/https/mailto/relative links; `diff.go`/`graph.go`/`highlight.go` escape too.
+  Never pass user-derived bytes through `template.HTML`, and never reintroduce a client sanitizer
+  (marked/DOMPurify are gone by decision, D-WEB-14).
+- **A page gate must mirror the API's gate exactly.** `s.gated` (anonymous_read), `s.repoVisible`
+  (identity require_read, Forgejo #345), per-action role floors, setup-only mode. A page that skips
+  one leaks what the API protects; the URL has no privilege of its own.
 - **Canonical host redirect bites headless UI drives.** `canonicalBrowserHost` (`docs/go/06_server_http.md §2.2 #2`) 302s browser-looking loopback GETs from `127.0.0.1:<port>` to `walgit.localhost:<port>` — curl fails the browser test and never redirects, so "curl says 200" proves nothing about a browser path. Drive the UI against the canonical host (or expect the hop).
 
 ## 3. Quick orientation (what runs where)
@@ -83,12 +119,23 @@ internal/maintain   maintainer loop: checkpoints, bundles, compaction, fsck/repa
 internal/sshd       SSH git transport (x/crypto/ssh): sessions, key auth, command parsing
 internal/config     walhub.toml (optional) + WALHUB__ env overrides, per-repo settings, validation
 internal/policy     push policy rule language (protect/history/size effects)
-web/                SolidJS SPA (JSX, no TypeScript; solid-js + @solidjs/router + marked + dompurify (D-WEB-7); Tailwind v4, dark by
-                    default) built by vite into web/dist/, plus the dependency-free modular SDK esbuild-
-                    bundled to web/dist/repos.js — `make web` runs both builds and `make build` depends
-                    on it. The binary embeds dist/: the SPA shell at / and every UI route, hashed
-                    assets at /_ui/assets/* (immutable), the bundle at /repos.js (module MIME is
-                    load-bearing); /setup is a SPA route (open in setup-only mode too)
+internal/identity,issues,pulls,review,checks,notify,releases,social,tags,mirror,repoimport,pushmirror
+                    the collaboration layer: each package owns its store shapes, routes, tasks and
+                    SDK submodule (docs/features/README.md; seams/registries in 14_extensibility.md)
+internal/e2e,sim,devtools
+                    the harnesses: real-git end-to-end, fault-injection sim, covergate and friends
+internal/pages      the page-provider seam: the server mounts it (internal/server/bind_ui.go) and
+                    internal/webui implements it; a path it does not own is the plain 404
+internal/webui      server-rendered pages: one html/template set per page (templates/base.html +
+                    partials/ + pages/<group>/), render/gating/chrome helpers, and the Go
+                    markdown/diff/commit-graph/highlight renderers
+web/                templates live in internal/webui; web/src carries islands/ (vanilla ES: theme,
+                    menus, copy, autogrow, selection, SSE, danger, submit keys), vendor/ (htmx + its
+                    SSE ext), app.css (Tailwind v4, the design system) and the dependency-free SDK
+                    esbuild-bundled to web/dist/repos.js. `make web` builds css + islands + vendor +
+                    SDK. The binary embeds dist/: /_ui/app.css, /_ui/ui.js, /_ui/htmx*.js,
+                    /_ui/assets/* (immutable), /_ui/concepts/*.gif, /repos.js (module MIME is
+                    load-bearing)
 Dockerfile          three-stage image (web build → static Go binary → alpine+git runtime, nonroot)
 compose*.y(ml)      compose.standalone.yml = walhub alone (filesystem store); compose.yaml = walhub +
                     rustfs + create-bucket (the S3 rig, also `make dev-store`); both build from source
@@ -105,5 +152,5 @@ scripts/ci-s3-bucket.sh  makes the S3 contract bucket exist (curl SigV4, no aws-
 5. `make sim` when you touched `internal/wal` or any publish/sync path (budget assertions included).
 6. `make e2e` with real git when you touched `internal/git` or `internal/server` git routes.
 7. `make test-web` (node --test) when you touched `web/`.
-8. **Real browser when you touched anything browser-facing** (`web/`, static/UI serving, auth flows, setup): load `/`, a repo page, and `/setup` in actual Chromium and check the console. Module scripts are MIME-enforced and import-map driven — "curl says 200" has shipped a blank page before (the uiAsset stub incident, 2026-09-01). A headless-Chrome CDP drive counts; a DOM-level fetch smoke does not. In this workspace the browser daemon is the hub-managed `chrome-cdp` process on :9222 — drive it over the CDP WebSocket (navigate, evaluate, screenshot); remember the canonical host redirect (§2 field lessons) when pointing it at a loopback port.
+8. **Real browser when you touched anything browser-facing** (`internal/webui/templates`, `web/src/islands`, `web/src/app.css`, static/UI serving, auth flows, setup): load `/`, a repo page, the changed page and `/setup` in actual Chromium at desktop **and ~390px**, check the console, and assert `document.documentElement.scrollWidth === clientWidth` (no page-level horizontal pan — the tab strip/sidebar/table wrappers scroll internally by design). The island bundle is a module script (MIME load-bearing) and htmx is a classic script; "curl says 200" and DOM-fetch smokes have both shipped a broken page (the uiAsset stub incident, 2026-09-01), so a rendered check is required. Drive Chromium over CDP (`Emulation.setDeviceMetricsOverride` for 390px; navigate/evaluate/screenshot) or the hub-managed `chrome-cdp` on :9222; remember the canonical host redirect (§2 field lessons) when pointing it at a loopback port.
 9. If you appended a decision: the doc's "Decisions & deviations" section updated in the same commit.

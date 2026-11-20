@@ -1,0 +1,25 @@
+{{define "repo_diff"}}
+<!-- One file's unified diff (issue #244 numbering, #544 per-cell color, #598
+     sign-first column). The selection island's contract is emitted on every
+     row: data-line + data-side on the <tr>, a data-line-no gutter cell, and a
+     table-level data-line-select/data-path. The page works with no JS: the
+     gutter anchors are real #L links. -->
+<table class="diff w-full font-mono text-xs leading-5" data-line-select data-path="{{.Path}}">
+  <tbody>
+    {{if .Binary}}
+    <tr><td class="muted p-3" colspan="3">Binary file not shown</td></tr>
+    {{else}}
+    {{range .Hunks}}
+    <tr><td class="diff-hunk px-3" colspan="3">{{.Header}}</td></tr>
+    {{range .Rows}}
+    <tr class="diff-row" data-line="{{.LineNo}}" data-side="{{.Side}}">
+      <td class="w-6 select-none px-1 text-center align-top {{.Class}}">{{.Sign}}</td>
+      <td class="diff-num {{.Class}}" data-line-no>{{if .GutterNo}}<a href="#L{{.GutterNo}}" aria-label="Line {{.GutterNo}}">{{.GutterNo}}</a>{{end}}</td>
+      <td class="{{.Class}}">{{if .Text}}{{.Text}}{{else}} {{end}}</td>
+    </tr>
+    {{end}}
+    {{end}}
+    {{end}}
+  </tbody>
+</table>
+{{end}}

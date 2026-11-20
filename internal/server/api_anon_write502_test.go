@@ -19,8 +19,6 @@ func (p *countingProvider502) Serve(w http.ResponseWriter, r *http.Request) {
 	plainStatus(w, http.StatusOK, "reached")
 }
 
-func (p *countingProvider502) Owners(r *http.Request) ([]string, error) { return nil, nil }
-
 // oidcServer502 builds a Server in oidc mode with anonymous_read on and a
 // counting provider behind apiServe.
 func oidcServer502(t *testing.T) (*Server, *countingProvider502) {

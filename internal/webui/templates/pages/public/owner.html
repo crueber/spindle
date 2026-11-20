@@ -1,0 +1,157 @@
+{{define "content"}}
+{{/* The owner page in all three views (/:owner, /:owner/repositories,
+     /:owner/organizations; Repos.jsx OwnerPage): one two-column profile
+     layout — main column swaps per view, the right column is the same
+     sidebar shell (vertical tabs first, then gated avatar asides).
+     390px: the grid is one column (sm:grid-cols-[minmax(0,1fr)_12rem] stacks),
+     the listing is one column, min-w-0 columns and wrapping rows mean no
+     horizontal overflow. */}}
+<div class="repos-page">
+  <div class="profile-layout grid grid-cols-1 gap-6 sm:grid-cols-[minmax(0,1fr)_12rem]">
+    <div class="profile-main min-w-0">
+      {{if .Data.Notice}}<p class="mb-3 rounded-lg border border-emerald-300 bg-emerald-50 p-3 text-sm text-emerald-800 dark:border-emerald-900 dark:bg-emerald-950/60 dark:text-emerald-200" role="status">{{.Data.Notice}}</p>{{end}}
+      {{if .Data.Err}}<div class="mb-3 rounded-lg border border-red-300 bg-red-50 p-3 text-sm text-red-800 dark:border-red-900 dark:bg-red-950/60 dark:text-red-200" role="alert">{{.Data.Err}}</div>{{end}}
+      {{/* Forgejo #234/#498: the profile edit form renders in the PROFILE view
+           only, above the identity block, seeded from the stored doc (or the
+           submitted values after a rejected save). Client-only edit state
+           becomes URL state (?edit=1) — no islands, no hidden panels. */}}
+      {{if and (eq .Data.View "profile") .Data.Editing}}
+      <form class="card mb-4 space-y-3 p-4" method="post" action="/{{.Data.Owner}}/profile" aria-label="Edit profile">
+        <h2 class="card-header">Edit profile</h2>
+        <div>
+          <label class="mb-1 block text-sm font-medium" for="profile-name">Display name</label>
+          <input class="input" id="profile-name" name="display_name" type="text" maxlength="200" value="{{.Data.Profile.DisplayName}}" placeholder="{{.Data.Owner}}">
+        </div>
+        <div class="grid grid-cols-1 gap-3 sm:grid-cols-2">
+          <div>
+            <label class="mb-1 block text-sm font-medium" for="profile-loc">Location</label>
+            <input class="input" id="profile-loc" name="location" type="text" maxlength="200" value="{{.Data.Profile.Location}}" placeholder="City, Country">
+          </div>
+          <div>
+            <label class="mb-1 block text-sm font-medium" for="profile-tz">Timezone</label>
+            <input class="input" id="profile-tz" name="timezone" type="text" maxlength="64" value="{{.Data.Profile.Timezone}}" placeholder="Europe/Berlin" aria-describedby="profile-tz-hint">
+            <span class="muted mt-1 block text-xs" id="profile-tz-hint">IANA zone name (e.g. Europe/Berlin, UTC)</span>
+          </div>
+        </div>
+        <div>
+          <label class="mb-1 block text-sm font-medium" for="profile-bio">Bio (markdown)</label>
+          <textarea class="input font-mono text-sm" id="profile-bio" name="bio_markdown" rows="6" placeholder="A few lines about this owner…" data-autogrow>{{.Data.Profile.BioMarkdown}}</textarea>
+          <span class="muted mt-1 block text-xs">Rendered server-side by the same markdown renderer as READMEs.</span>
+        </div>
+        <div class="flex flex-wrap gap-2">
+          <button class="btn primary px-3 py-1" type="submit">Save profile</button>
+          <a class="btn px-3 py-1" href="/{{.Data.Owner}}">Cancel</a>
+        </div>
+      </form>
+      {{end}}
+      {{if eq .Data.View "profile"}}
+        {{if .Data.IsOrg}}
+        <h2 class="mb-1 flex items-center gap-2 text-xl font-semibold">
+          {{.Data.DisplayName}}
+          <span class="pill org-badge ml-2 align-middle text-xs font-normal" role="img" title="organization" aria-label="organization">org</span>
+        </h2>
+        <p class="muted text-sm">@{{.Data.Owner}}</p>
+        {{if .Data.Description}}<p class="mt-1 text-sm">{{.Data.Description}}</p>{{end}}
+        {{if .Data.Where}}<p class="muted mt-1 text-sm">{{.Data.Where}}</p>{{end}}
+        {{if .Data.BioMarkdown}}<div class="markdown-body mt-3">{{md .Data.BioMarkdown}}</div>{{end}}
+        {{else}}
+        <div class="profile-header border-b border-zinc-200 pb-6 dark:border-zinc-700">
+          <h1 class="text-2xl font-semibold">{{.Data.DisplayName}}</h1>
+          {{if .Data.Handle}}<p class="muted mt-0.5 text-sm">@{{.Data.Owner}}</p>{{end}}
+          {{if .Data.Where}}<p class="muted mt-1 text-sm">{{.Data.Where}}</p>{{end}}
+          {{/* Forgejo #420: the rendered bio hides while the edit form is open
+               — the form is the only rendered surface during editing. */}}
+          {{if and .Data.BioMarkdown (not .Data.Editing)}}<div class="markdown-body mt-3">{{md .Data.BioMarkdown}}</div>{{end}}
+        </div>
+        {{end}}
+      {{end}}
+
+      {{if eq .Data.View "repos"}}
+      <div class="repos-toolbar mb-2 mt-6 flex flex-wrap items-center justify-between gap-2">
+        <h3 class="text-base font-semibold">Repositories</h3>
+      </div>
+      <p class="muted mb-4">{{.Data.RepoCount}} {{plural .Data.RepoCount "repository" "repositories"}}</p>
+      {{if .Data.Rows}}
+      <ul class="grid grid-cols-1 gap-x-6 gap-y-1 sm:grid-cols-2">
+        {{range .Data.Rows}}
+        {{template "public_repo_row" (dict "Full" .Full "VisibilityLabel" .VisibilityLabel "VisibilityTitle" .VisibilityTitle "Mirror" .Mirror "MirrorTitle" .MirrorTitle "HasStars" .HasStars "Stars" .Stars "At" .At "Empty" .Empty)}}
+        {{end}}
+      </ul>
+      {{else}}
+      <p class="muted">nothing under {{.Data.Owner}} yet</p>
+      {{end}}
+      <p class="muted mt-4 text-xs">
+        <a class="hover:underline" href="/import?owner={{urlquery .Data.Owner}}">import into {{.Data.Owner}}</a>
+        {{if .Data.CanManage}} · <a class="hover:underline" href="/{{.Data.Owner}}/settings">organization settings</a>{{end}}
+      </p>
+      {{end}}
+
+      {{if eq .Data.View "orgs"}}
+      <section class="orgs-rail mt-6" aria-label="Organizations">
+        <h3 class="text-base font-semibold">Organizations</h3>
+        {{if .Data.MemberOrgs}}
+        <ul class="mt-1 flex flex-wrap gap-x-4 gap-y-1">
+          {{range .Data.MemberOrgs}}
+          <li><a class="text-emerald-700 hover:underline dark:text-emerald-400" href="/{{.}}">{{.}}</a></li>
+          {{end}}
+        </ul>
+        {{else}}
+        <p class="muted mt-1 text-sm">No organizations</p>
+        {{end}}
+      </section>
+      {{end}}
+    </div>
+
+    <div class="profile-sidebar-col flex min-w-0 flex-col gap-4">
+      {{template "public_owner_tabs" (dict "Owner" .Data.Owner "View" .Data.View "Count" .Data.RepoCount "IsOrg" .Data.IsOrg)}}
+      {{if .Data.IsOrg}}
+        {{if or .Data.AvatarURL .Data.CanManage}}
+        <aside class="profile-sidebar flex min-w-0 flex-col items-center gap-3" aria-label="Organization actions">
+          {{if .Data.AvatarURL}}
+          <div class="profile-avatar shrink-0">
+            <img src="{{.Data.AvatarURL}}" alt="" width="96" height="96" class="h-24 w-24 rounded object-cover">
+          </div>
+          {{end}}
+          {{if .Data.CanManage}}
+          <a class="btn w-full justify-center px-3 py-1" href="/{{.Data.Owner}}/settings">Manage organization</a>
+          {{end}}
+        </aside>
+        {{end}}
+      {{else}}
+        {{/* Forgejo #421/#376: the owner-action sidebar for user profiles —
+             Edit profile (can_edit, editors only) and the avatar self-service
+             verbs (self-or-admin). It renders when there is an avatar to show
+             or something the viewer can act on; each action keeps its own
+             gate, so a signed-out viewer only ever sees the avatar. */}}
+        {{if or .Data.AvatarURL .Data.CanEdit .Data.CanRegenAvatar}}
+        <aside class="profile-sidebar flex min-w-0 flex-col items-center gap-3" aria-label="Profile actions">
+          {{if .Data.AvatarURL}}
+          <div class="profile-avatar shrink-0">
+            <img src="{{.Data.AvatarURL}}" alt="" width="96" height="96" class="h-24 w-24 rounded-full ring-1 ring-zinc-300 dark:ring-zinc-600">
+          </div>
+          {{end}}
+          {{if or .Data.CanEdit .Data.CanRegenAvatar}}
+          {{if .Data.AvatarURL}}<hr class="w-full border-zinc-200 dark:border-zinc-700">{{end}}
+          <div class="profile-actions flex w-full flex-col gap-2">
+            {{if and .Data.CanEdit (not .Data.Editing)}}
+            <a class="btn w-full justify-center px-3 py-1" href="/{{.Data.Owner}}?edit=1">Edit profile</a>
+            {{end}}
+            {{if .Data.CanRegenAvatar}}
+            <form method="post" action="/{{.Data.Owner}}/avatar/regenerate" class="w-full">
+              <button type="submit" class="btn w-full justify-center px-3 py-1" title="Install a fresh deterministic avatar">Regenerate avatar</button>
+            </form>
+            {{end}}
+            {{if .Data.CanRemoveAvatar}}
+            <form method="post" action="/{{.Data.Owner}}/avatar/remove" class="w-full">
+              <button type="submit" class="btn w-full justify-center px-3 py-1" title="Remove the avatar and stop auto-generation">Remove avatar</button>
+            </form>
+            {{end}}
+          </div>
+          {{end}}
+        </aside>
+        {{end}}
+      {{end}}
+    </div>
+  </div>
+</div>
+{{end}}

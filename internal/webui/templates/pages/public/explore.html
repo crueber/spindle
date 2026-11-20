@@ -1,0 +1,26 @@
+{{define "content"}}
+<section class="mx-auto max-w-3xl">
+  <h1 class="text-2xl font-semibold tracking-tight">Explore</h1>
+  <p class="muted mt-1 text-sm">
+    {{len .Data.Owners}} {{plural (len .Data.Owners) "owner" "owners"}} ·
+    {{.Data.TotalRepos}} {{plural .Data.TotalRepos "repository" "repositories"}}
+  </p>
+
+  {{if .Data.Owners}}
+  <ul class="mt-4 grid grid-cols-1 gap-x-6 gap-y-2 sm:grid-cols-2">
+    {{range .Data.Owners}}
+    <li class="card px-3 py-2">
+      <a class="font-medium text-emerald-700 hover:underline dark:text-emerald-400" href="/{{.Name}}/repositories">{{.Name}}</a>
+      <span class="muted ml-2 text-xs">
+        {{.Repos}} {{plural .Repos "repository" "repositories"}}
+      </span>
+    </li>
+    {{end}}
+  </ul>
+  {{else}}
+  <div class="card mt-4 p-4">
+    <p class="text-sm">Nothing here yet. The first push creates a repository — <a class="text-emerald-700 hover:underline dark:text-emerald-400" href="/new">create one</a> or <a class="text-emerald-700 hover:underline dark:text-emerald-400" href="/import">import</a>.</p>
+  </div>
+  {{end}}
+</section>
+{{end}}

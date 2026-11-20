@@ -33,10 +33,10 @@ requested or when a review questions a hot path).
 | E6 | 2026-09-04 | Check report path + combined view + required-checks gate (`internal/checks`) | What does one CI report cost, what does the combined view cost, and why can't either explode as context count grows? | First report 2 GETs + 2 PUTs + 1 LIST; re-report 4 GETs + 3 PUTs + 1 LIST (1 context); combined 1 LIST + 1 GET per context, 0 PUTs; gate = policy GET + 1 LIST + 1 GET per context under a 15 s deadline. Cannot explode: every scan is prefix-bounded to one sha, reports are CI-rate, no git on any read path, index writes are best-effort. |
 | E7 | 2026-09-04 | Notification fan-out + webhook delivery loop (`internal/notify`) | What is the write amplification of one emission, what does the unread dedup save on replay, and what does a delivery pass cost? | One emission = 2 GETs + 2 PUTs per recipient + 3 GETs + 2 PUTs fixed (thread, watchers, seq reservation, activity); deduped replay writes flat (2 PUTs, zero notification/index writes at any recipient count; probes are 3+n GETs); delivery pass = 1 LIST + ~3 GETs + 1 PUT per event + 1 cursor CAS, idle pass writes nothing. Cannot explode: 100-recipient sync cap with task fallback, 5 s budget, per-hook cursors. |
 | E8 | 2026-09-04 | Release latest-pointer, autodraft, asset streaming (`internal/releases`, `internal/social`) | Is the latest badge O(1), what does a publish/list/autodraft cost, is the asset upload memory-bounded, and are star/fork writes constant? | Latest hot read flat (2 GETs at 5 and 200 releases); publish 3 GETs + 2 PUTs; list 1 LIST + 1 GET per release; autodraft 1 probe per candidate (≤100) with zero LIST; 1 MiB upload 2 GETs + 2 PUTs with an empty spool dir and zero-write 413s; star 2 GETs + 1 HEAD + 2 PUTs, fork bump 1+1. Cannot explode: pointer monotonicity skips stale publishers, scans/lists are prefix-bounded and capped, git probes run under the package pool. |
-| E9 | 2026-09-04 | Collab stream fan-out + invalidation coalescing (`internal/notify`, `web/src/lib`) | What does one repo-frame publish cost vs subscriber count, what survives a stalled subscriber, and how many refetches does a 30-check burst cause? | Publish ~0.6 µs (1 sub) → ~10 µs (128 subs), zero store round-trips; stalled pages shed (never stall emission, never grow past 16 + 64 frames); bursts collapse to ~2 refetches per key via the per-tick key-set flush + per-key single-flight; warm revisits transfer nothing. Cannot explode: drop-oldest bus, bounded ring, bounded flush. |
+| E9 | 2026-09-04 | Collab stream fan-out + invalidation coalescing (`internal/notify`; the client-coalescing half was measured in the SPA's `web/src/lib`, now historical — D-WEB-15) | What does one repo-frame publish cost vs subscriber count, what survives a stalled subscriber, and how many refetches does a 30-check burst cause? | Publish ~0.6 µs (1 sub) → ~10 µs (128 subs), zero store round-trips; stalled pages shed (never stall emission, never grow past 16 + 64 frames); bursts collapse to ~2 refetches per key via the SPA-era per-tick key-set flush + per-key single-flight (the shipped reader coalesces 250 ms into one invalidation); warm revisits transfer nothing. Cannot explode: drop-oldest bus, bounded ring, bounded flush. |
 | E10 | 2026-09-04 | Push fast path with the collab layer mounted + full-chain e2e timing (`cmd/walhub`, `internal/e2e`) | Does the push fast path gain any bucket round trips from eight mounted feature packages, and how long is the full org→release→fork chain on a real stack? | Zero: cold push 8 ops, warm push 9 ops, 0 collab-family keys on either; full chain wall 2.2 s (slowest phase: merge+close 0.5 s). Cannot regress: the budget test fails on any collab key touched by a push. |
 | E11 | 2026-09-04 | Repository import (`internal/repoimport`) | What does one URL import cost, and does it grow with repo size? | Flat: 7 GETs+HEADs + 16 control PUTs + 0 LISTs at 50 and 400 commits (E11-era 6+12; +2 sidecar durability PUTs — pack publish #248, ref-txn publish #247 — S==M exactly); wall grows with pack bytes only. Cannot explode: exact-key probes, ref enumeration local + capped, pool-gated git, no lock held across I/O. |
-| E12 | 2026-09-08 | Landing concept GIFs (`internal/devtools/landinggif`) | Do 4 animated diagrams + stills fit the byte budgets with no new deps, and what does the landing page weigh? | Yes: 82,618 bytes total (budgets ≤ 150 KB, each asset ~45% headroom); page is shell + 1 JS + 1 CSS + lazy images, zero API calls. |
+| E12 | 2026-09-08 | Landing concept GIFs (`internal/devtools/landinggif`) | Do 4 animated diagrams + stills fit the byte budgets with no new deps, and what does the landing page weigh? | Yes: 82,618 bytes total (budgets ≤ 150 KB, each asset ~45% headroom); page is `app.css` + `ui.js` + the vendored htmx files + lazy images, zero store reads. |
 | E13 | 2026-09-08 | Self-heal serving cost (`internal/api`, issue #209) | Do the summary `health`, the 404 marker, and the overview fsck projection add store round trips to any budgeted path? | No change: empty summary +0, non-empty summary +1, overview +1 (all exact-key probes, never LIST); push/sync/checkpoint engine paths untouched; empty Code-tab path removes 1–2 UI fetches. |
 | E14 | 2026-09-08 | Explicit create-repo placeholder (`internal/api`, `internal/server`, `internal/identity`, issue #210) | Do placeholder create, first-push adoption, and the summary projection add round trips to any budgeted path? | Create = 1 window (manifest + sidecar + access Creates parallel); first push +0 on-response (hint-gated off-response delete, 0 ops unhinted); empty summary ≤1 (sidecar only), real summary +0; sim budgets unchanged. |
 | E15 | 2026-09-09 | Pull-only mirrors (`internal/mirror`, Forgejo #240) | What does a sync fire cost, and what do the refusal revalidation + summary projection add to the push/summary paths? | First sync flat (22 ops, 0 LIST at S and M); no-op fire 11 ops, zero pack/manifest/log writes; push +2 exact-key probes (cold 10 / warm 9 ops, other collab families zero); summary +1 probe only when the mirror hook is set. Cannot explode: no LIST anywhere, converge-only no-ops, lease bounds duplicate work. |
@@ -641,8 +641,11 @@ hard cap; social writes are constant. No redesign required.
 ## E9 — Collab stream fan-out + invalidation coalescing (2026-09-04)
 
 **Area:** the ONE repo collaboration stream (08 §4): `internal/notify`
-repoBus (`stream.go`, `collab.go`) + the data-layer invalidation path
-(`web/src/lib/data.js`, `web/src/lib/collab.js`). Spec:
+repoBus (`stream.go`, `collab.go`) + the client invalidation path. **Historical client half
+(D-WEB-14/D-WEB-15):** the measurements below used the SPA's `web/src/lib/data.js` +
+`web/src/lib/collab.js` (`useData`/`invalidateCollab`/`scheduleInvalidate`). Those modules are deleted;
+the shipped `web/src/islands/sse.js` coalesces frames into one 250 ms invalidation and re-renders a
+fragment, so the *shape* of the result stands but the key-set single-flight no longer exists. Spec:
 `docs/features/08_ui_sdk.md` §§4/6.
 
 **Question:** what does one repo-frame publish cost as subscribers grow,
@@ -657,16 +660,17 @@ test):
   `go test ./internal/notify/ -run TestEvidenceCollab -v`): 2000
   `PublishFrame` calls over the **memory store** with 1 vs 128 live
   subscribers; 200 publishes against a never-read subscriber.
-- `web/test/evid/collab-burst.mjs`
-  (`node --conditions=browser web/test/evid/collab-burst.mjs`;
-  needs `web/node_modules`): the real `useData` + `invalidateCollab` +
-  `scheduleInvalidate` with counting fetch fns — warm revisit, then 30
-  synthetic `check` frames in one tick. (Plain `node --test` resolves
-  SolidJS to its SSR build where effects no-op, so this lives outside
-  `make test-web`, which stays install-free per 12 §5.)
-- Live-browser corroboration: headless Chrome against the compose stack —
-  30 real `POST …/checks/statuses/{sha}` calls while the checks page
-  holds the stream open, counting `GET …/api/checks*` refetches.
+- `web/test/evid/collab-burst.mjs` — **historical, deleted with the SPA (D-WEB-15)**;
+  recorded for reproducibility of the 2026-09-04 numbers: the real `useData` +
+  `invalidateCollab` + `scheduleInvalidate` with counting fetch fns — warm revisit, then 30
+  synthetic `check` frames in one tick. (The SolidJS SSR no-op explanation applied to that
+  harness and retired with it.)
+- Live-browser corroboration — **historical (SPA-era page)**: headless Chrome against the compose
+  stack, 30 real `POST …/checks/statuses/{sha}` calls while the checks page
+  held the stream open, counting `GET …/api/checks*` refetches.
+
+The client-refetch column below is therefore a historical measurement of the removed SPA cache; the
+server-fan-out columns are current (the bus is unchanged).
 
 **Results.**
 

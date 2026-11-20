@@ -1,0 +1,89 @@
+{{define "content"}}
+{{with .Data}}{{$d := .}}
+<div class="grid gap-4 md:grid-cols-[minmax(0,1fr)_16rem]">
+  <div class="min-w-0">
+    <header class="mb-4 flex flex-wrap items-center gap-2 border-b border-zinc-200 pb-3 dark:border-zinc-800">
+      <h2 class="min-w-0 flex-1 text-lg font-semibold"><span class="text-zinc-500 dark:text-zinc-400">#{{.Num}}</span> {{.Title}}</h2>
+      <span class="{{.StateCls}} shrink-0">{{.StateLabel}}</span>
+    </header>
+    <p class="mb-3 text-xs text-zinc-500 dark:text-zinc-400">{{.Author}} opened {{template "collab_time" .CreatedAt}} · {{.CommentCount}} {{plural .CommentCount "comment" "comments"}}</p>
+
+    {{if .Error}}<p class="err-line" role="alert">{{.Error}}</p>{{end}}
+    {{if .Notice}}<p class="warn-line" role="status">{{.Notice}}</p>{{end}}
+
+    {{if .EventsMore}}<a class="btn mb-2" href="?after_seq={{.OlderSeq}}">Older events</a>{{end}}
+    {{template "collab_timeline" .Timeline}}
+
+    {{if .Repo.Anonymous}}
+    <p class="muted mt-3 text-sm"><a class="link" href="{{.Repo.LoginHref}}">Sign in to comment</a></p>
+    {{else}}
+    {{template "collab_composer" .Composer}}
+    {{end}}
+  </div>
+
+  <aside class="grid content-start gap-3">
+    {{if .Repo.NewIssueHref}}<a class="btn primary w-full" href="{{.Repo.NewIssueHref}}">New issue</a>{{end}}
+    <section class="card divide-y divide-zinc-200 text-sm dark:divide-zinc-800" aria-label="Issue metadata">
+      <div class="p-3">
+        <p class="mb-1 text-[11px] font-semibold uppercase tracking-wider text-zinc-500 dark:text-zinc-400">Labels</p>
+        <div class="flex flex-wrap items-center gap-1">
+          {{range .Labels}}{{template "collab_label_chip" .}}{{else}}<span class="muted">none</span>{{end}}
+          {{if .CanTriage}}
+          <details class="relative inline-block" data-popover>
+            <summary class="list-none cursor-pointer rounded border border-zinc-300 px-1.5 py-0 text-xs leading-5 text-zinc-500 hover:text-zinc-900 dark:border-zinc-700 dark:text-zinc-400 dark:hover:text-zinc-100" aria-haspopup="menu" aria-label="Add or remove labels" data-popover-trigger>+</summary>
+            <div class="label-drop scroll-slim card absolute right-0 z-30 mt-1 max-h-72 w-80 overflow-y-auto p-1" role="menu" aria-label="Issue labels" data-popover-panel>
+              {{range .LabelOptions}}
+              <form method="post" action="/{{$d.Repo.Full}}/issues/{{$d.Num}}/labels">
+                <input type="hidden" name="label" value="{{.Name}}">
+                <button type="submit" role="menuitemcheckbox" aria-checked="{{if .Checked}}true{{else}}false{{end}}" aria-label="{{if .Checked}}remove{{else}}apply{{end}} label {{.Name}}" class="grid w-full grid-cols-[auto_minmax(0,1fr)] items-center gap-2 rounded px-2 py-1 text-left text-sm hover:bg-zinc-100 dark:hover:bg-zinc-800">
+                  <span class="flex w-4 shrink-0 items-center justify-center" aria-hidden="true">{{if .Checked}}✓{{end}}</span>
+                  <span class="min-w-0 truncate {{if .Checked}}font-medium{{end}}">{{.Name}}</span>
+                </button>
+              </form>
+              {{else}}
+              <p class="muted px-2 py-1 text-xs">no labels in this repo yet</p>
+              {{end}}
+            </div>
+          </details>
+          {{end}}
+        </div>
+      </div>
+      <div class="p-3">
+        <p class="mb-1 text-[11px] font-semibold uppercase tracking-wider text-zinc-500 dark:text-zinc-400">Assignees</p>
+        <p>{{range .Assignees}}{{.}} {{else}}<span class="muted">none</span>{{end}}</p>
+      </div>
+      <div class="p-3">
+        <p class="mb-1 text-[11px] font-semibold uppercase tracking-wider text-zinc-500 dark:text-zinc-400">Milestone</p>
+        {{with .Milestone}}
+        <div class="flex flex-wrap items-center gap-1">
+          {{template "collab_milestone_chip" .}}
+          {{if $d.CanTriage}}
+          <form method="post" action="/{{$d.Repo.Full}}/issues/{{$d.Num}}/milestone">
+            <input type="hidden" name="milestone" value="">
+            <button type="submit" class="btn px-1.5 py-0 text-xs" aria-label="Clear the milestone">−</button>
+          </form>
+          {{end}}
+        </div>
+        {{else}}
+        {{if .CanTriage}}
+        <details class="relative inline-block" data-popover>
+          <summary class="list-none cursor-pointer rounded border border-zinc-300 px-1.5 py-0 text-xs leading-5 text-zinc-500 hover:text-zinc-900 dark:border-zinc-700 dark:text-zinc-400 dark:hover:text-zinc-100" aria-haspopup="menu" aria-label="Set a milestone" data-popover-trigger>+</summary>
+          <div class="milestone-drop scroll-slim card absolute right-0 z-30 mt-1 max-h-72 w-64 overflow-y-auto p-1" role="menu" aria-label="Milestones" data-popover-panel>
+            {{range .Milestones}}
+            <form method="post" action="/{{$d.Repo.Full}}/issues/{{$d.Num}}/milestone">
+              <input type="hidden" name="milestone" value="{{.ID}}">
+              <button type="submit" role="menuitemradio" aria-checked="false" class="w-full rounded px-2 py-1 text-left text-sm hover:bg-zinc-100 dark:hover:bg-zinc-800">{{.Title}}{{if eq .State "closed"}} (closed){{end}}</button>
+            </form>
+            {{else}}
+            <p class="muted px-2 py-1 text-xs">no milestones yet</p>
+            {{end}}
+          </div>
+        </details>
+        {{else}}<span class="muted">none</span>{{end}}
+        {{end}}
+      </div>
+    </section>
+  </aside>
+</div>
+{{end}}
+{{end}}

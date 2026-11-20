@@ -188,14 +188,14 @@ anonymous is never "insufficient role"; the ssh-keys mutations carry an
 explicit anonymous check; the releases/tags local `requireRole` copies map
 anonymous to 401 like every other package), and the `apiServe` lane seam
 asserts after `Authenticate` (oidc + non-GET/HEAD/OPTIONS + anonymous → 401
-without invoking the handler) as the defense-in-depth catch-all. The UI
-meets the refusal with one pattern (`web/src/lib/writeGate.js`): write
-affordances (star/watch/fork pills, New-issue/New-pull buttons,
-comment/composer forms, reactions, create forms) pre-flight — anonymous
-viewers route to `/login-required?next=<action>&action=<label>` instead of
-firing the SDK call, and the calls pass the SDK's `noPopupAuth` opt-out so
-a stale-identity 401 routes to the same interstitial instead of opening the
-sign-in popup. The interstitial's Log-in button enters `/_auth/login?next=`
+without invoking the handler) as the defense-in-depth catch-all. The page
+layer meets the refusal with one pattern (`collabWriteHref`/`LoginHref` in
+`internal/webui/collab.go`): every write affordance (star/watch/fork pills,
+New-issue/New-pull buttons, comment/composer forms, reactions, create forms)
+renders as `/login-required?next=<action>&action=<label>` for an anonymous
+viewer instead of a button that cannot work, and the write handler still
+answers the API's 401 when identity went stale (the page routes that to the
+same interstitial). The interstitial's Log-in button enters `/_auth/login?next=`
 and lands the user back on the attempted action.
 - Cost: one conditional GET of `access.json` per read request (control-plane, sub-second) with an
   in-process LRU stamped by the CAS version — a changed version invalidates lazily, exactly the
@@ -450,10 +450,12 @@ read surface the owners (`/`) page renders per-owner repo sections from
 (issue #117): `owners.list()` then one `owners.repos(owner)` per shown owner.
 No pagination, no creation timestamps on the listing path — the endpoints return
 sorted plain name lists (per-repo `first_state_at`/first-entry `created_at` proxies exist
-deeper in the bucket but cost a manifest/log GET per repo), so caps and
-newest-first ordering live client-side (`web/src/lib/owners.js`: `MAX_OWNERS`
-50, `MAX_REPOS_PER_OWNER` 10, reverse of server order as the newest-first
-proxy; 08 §6 owns the cache keys, 12 §2.3.1 the page contract).
+deeper in the bucket but cost a manifest/log GET per repo). The shipped `/explore` page
+renders the owners list with per-owner repo counts server-side (`internal/webui/router.go`
+`explore`, reusing `VisibleOwners` + `OwnerRepoCounts`); the SPA's per-owner repo-section
+layout, its `MAX_OWNERS` 50 / `MAX_REPOS_PER_OWNER` 10 caps and the client newest-first
+proxy (`web/src/lib/owners.js`) are historical (D-WEB-15). 08 §6 owns the cache keys,
+12 §2.3.1 the page contract.
 
 ### Repo-scoped `/{o}/{r}/api` (+ `/api-browser` twin via `api.Lanes`)
 
@@ -469,7 +471,8 @@ proxy; 08 §6 owns the cache keys, 12 §2.3.1 the page contract).
 
 ## 9. UI and SDK
 
-Pages (SolidJS SPA per 12_web_ui.md, D-WEB-6; Solid signals, `useData` 5 s TTL):
+Pages (server-rendered by `internal/webui`, `12_web_ui.md` §2; templates under
+`internal/webui/templates/pages/settings/` + `public/`, one handler per route):
 
 - **Org settings** `/:org/settings` — sub-tabs profile / members / teams / invitations, plus an
   owner-only Danger Zone tab (typed-confirm delete-org; non-owners see no affordance, server still
@@ -483,8 +486,8 @@ Pages (SolidJS SPA per 12_web_ui.md, D-WEB-6; Solid signals, `useData` 5 s TTL):
   `orgs.get` probe that 404s to null for users),
   role-binding table (subject, role, remove), add-binding form (user or team autocomplete), CAS version
   in the footer; save = full-doc PUT, 409 renders "changed under you, reload". The settings
-  General tab carries the same owner-aware visibility select (same probe, shared `VisSelect`
-  component — issue #410).
+  General tab carries the same owner-aware visibility select (`partials/settings_repo.html`,
+  the server-side equivalent of the SPA's shared `VisSelect` — issue #410).
 - **Profile** `/:owner` renders user or org profile (existing route gains the org variant).
   User owners additionally render the generated avatar from the user profile's pointer
   (issue #376 — gated on `avatar_content_type`, `?v=` cache-bust, hides on 404), with
@@ -522,7 +525,14 @@ bootstrap's Create. Avoidance: edits to a repo with no `access.json` synthesize 
 
 ## Decisions
 
-- **Frontend idiom is the SolidJS SPA (D-WEB-6; docs fix for issue #76).** The §9 page sketches read in the shipped idiom: Solid components under `@solidjs/router`, state via Solid signals/stores, Tailwind styling. Routes, gating, and wire shapes are unchanged.
+> **Reading note (D-WEB-14/D-WEB-15, 2026-11-20):** entries below that cite `web/src/**`, `.jsx`
+> files, `ui.css`, `solid-js` or SPA components describe the **removed SolidJS SPA** and are
+> historical. The behavior they decide now lives in the Go page layer
+> (`internal/webui/*.go` + `internal/webui/templates/**`) or, for client-only mechanisms
+> (localStorage keys, signal-lifecycle rules), no longer has a client counterpart. The decisions
+> themselves are unchanged.
+
+- **Frontend idiom is the server-rendered page layer (D-WEB-14/D-WEB-15; supersedes the D-WEB-6 SolidJS entry for issue #76).** The §9 page sketches read in the shipped idiom: Go handlers + templates, Tailwind component classes, server-side state. **Historical (D-WEB-6):** Solid components under `@solidjs/router`, state via Solid signals/stores. Routes, gating, and wire shapes are unchanged.
 
 - **Principal = email; profiles are the only identity objects here** — keys/tokens/sessions stay auth-provider territory (Seam 2); this doc owns zero credentials. (SUPERSEDED by the #370 entry below: the principal NAME is now the username; the email rides `Principal.Email` for alias matching only.)
 - **`visibility` lives in `access.json`** — one CAS'd object already admin-write and read at every authz decision; a separate visibility object would double the read.
@@ -648,7 +658,7 @@ bootstrap's Create. Avoidance: edits to a repo with no `access.json` synthesize 
 - **Rings avatars with walhub-green background (issue #525, §8):** the style
   switches from constellation to DiceBear "rings" with
   `backgroundColor: ["059669"]` (emerald-600 #059669, the canonical brand
-  green from `web/src/ui.css`) passed as a core-library option alongside the
+  green from `web/src/app.css`) passed as a core-library option alongside the
   seed. Verified against the vendored sources (not guessed): rings defines no
   per-style options, `backgroundColor` is the core option key (there is no
   `backgroundType` in dicebear-go v10 — a v5-era name), and
@@ -670,7 +680,7 @@ bootstrap's Create. Avoidance: edits to a repo with no `access.json` synthesize 
   `ringColor` core-library option alongside seed/backgroundColor: the
   Tailwind emerald run 300→950 (`6ee7b7 34d399 10b981 059669 047857
   065f46 064e3b 022c22`) plus black (`000000`) — all from the app
-  palette (`web/src/ui.css`) + black. Verified against the vendored
+  palette (`web/src/app.css`) + black. Verified against the vendored
   sources (not guessed): the option key is `<colorName>Color`
   (`internal/render/options.go`), and a user-supplied list overrides
   the style collection (`internal/render/resolver.go`

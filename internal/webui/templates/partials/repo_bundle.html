@@ -1,0 +1,15 @@
+{{define "repo_bundle_nodes"}}
+<ul class="{{if .Nested}}bundle-chain ml-4 border-l border-zinc-200 pl-3 text-sm dark:border-zinc-800{{else}}bundle-chain text-sm{{end}}">
+  {{range .Nodes}}{{template "repo_bundle_node" .}}{{end}}
+</ul>
+{{end}}
+
+{{define "repo_bundle_node"}}
+<li class="bundle-node py-0.5">
+  <code class="font-mono text-xs">{{.Short}}</code>
+  {{.StrategyKind}}
+  {{if .Orphan}}<span class="chip bg-amber-100 text-amber-800 dark:bg-amber-900/60 dark:text-amber-300">base missing</span>{{end}}
+  <span class="muted"> · {{.Size}} · token {{.Token}}</span>
+  {{if .Children}}{{template "repo_bundle_nodes" (dict "Nodes" .Children "Nested" true)}}{{end}}
+</li>
+{{end}}

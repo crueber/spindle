@@ -15,6 +15,7 @@ package api
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"hash/fnv"
 	"net/http"
 	"regexp"
@@ -230,6 +231,59 @@ func profileETag(out OwnerProfile) string {
 // ownerProfilePut replaces the profile (AuthWrite + owner rule). The body is
 // the profile fields; owner/updated_at/can_edit in the body are ignored (the
 // key names the owner, the server stamps the write).
+// ProfileError carries the PUT handler's status alongside its message so
+// non-HTTP callers (the server-rendered owner page) can map a rejection
+// without parsing text.
+type ProfileError struct {
+	Status int
+	Msg    string
+}
+
+func (e *ProfileError) Error() string   { return e.Msg }
+func (e *ProfileError) StatusCode() int { return e.Status }
+
+func profileErrorOf(err error) error {
+	switch {
+	case errors.Is(err, ErrNotFound):
+		return &ProfileError{Status: http.StatusNotFound, Msg: err.Error()}
+	case errors.Is(err, ErrExists):
+		return &ProfileError{Status: http.StatusConflict, Msg: err.Error()}
+	default:
+		return &ProfileError{Status: http.StatusServiceUnavailable, Msg: err.Error()}
+	}
+}
+
+// PutOwnerProfile is the profile PUT minus HTTP: field validation, the bounded
+// CAS loop and the handler's statuses (validation 400, CAS exhaustion 409, a
+// store failure 503). Callers enforce can_edit exactly like the handler.
+func PutOwnerProfile(ctx context.Context, st store.ObjectStore, owner, display, location, tz, bio, updatedAt string) (OwnerProfile, error) {
+	next := OwnerProfile{
+		Owner: owner, DisplayName: display, Location: location,
+		Timezone: tz, BioMarkdown: bio, UpdatedAt: updatedAt,
+	}
+	if msg := validateProfile(&next); msg != "" {
+		return OwnerProfile{}, &ProfileError{Status: http.StatusBadRequest, Msg: msg}
+	}
+	raw, _ := json.Marshal(next)
+	const maxAttempts = 5
+	for attempt := 0; attempt < maxAttempts; attempt++ {
+		_, meta, gerr := store.GetBytes(ctx, st, store.OwnerProfileKey(owner), store.GetOptions{})
+		if gerr != nil && !store.IsNotFound(gerr) {
+			return OwnerProfile{}, profileErrorOf(gerr)
+		}
+		opts := store.PutOptions{Mode: store.PutCreate, ContentType: "application/json"}
+		if gerr == nil {
+			opts = store.PutOptions{Mode: store.PutUpdate, IfVersion: meta.Version, ContentType: "application/json"}
+		}
+		if _, perr := store.PutBytes(ctx, st, store.OwnerProfileKey(owner), raw, opts); perr == nil {
+			return next, nil
+		} else if !store.IsPreconditionFailed(perr) {
+			return OwnerProfile{}, profileErrorOf(perr)
+		}
+	}
+	return OwnerProfile{}, &ProfileError{Status: http.StatusConflict, Msg: "profile changed concurrently; reload and retry"}
+}
+
 func (h *handlers) ownerProfilePut(w http.ResponseWriter, r *http.Request) {
 	owner := r.PathValue("owner")
 	if !validProfileOwner(owner) {
@@ -256,34 +310,17 @@ func (h *handlers) ownerProfilePut(w http.ResponseWriter, r *http.Request) {
 		writePlain(w, http.StatusBadRequest, "invalid profile: "+derr.Error())
 		return
 	}
-	next := OwnerProfile{
-		Owner: owner, DisplayName: body.DisplayName, Location: body.Location,
-		Timezone: body.Timezone, BioMarkdown: body.BioMarkdown,
-		UpdatedAt: h.env.Now().UTC().Format("2006-01-02T15:04:05Z"),
-	}
-	if msg := validateProfile(&next); msg != "" {
-		writePlain(w, http.StatusBadRequest, msg)
+	next, err := PutOwnerProfile(r.Context(), h.env.Store, owner,
+		body.DisplayName, body.Location, body.Timezone, body.BioMarkdown,
+		h.env.Now().UTC().Format("2006-01-02T15:04:05Z"))
+	if err != nil {
+		var pe *ProfileError
+		if errors.As(err, &pe) {
+			writePlain(w, pe.Status, pe.Msg)
+			return
+		}
+		mapViewErr(w, err)
 		return
 	}
-	raw, _ := json.Marshal(next)
-	const maxAttempts = 5
-	for attempt := 0; attempt < maxAttempts; attempt++ {
-		_, meta, gerr := store.GetBytes(r.Context(), h.env.Store, store.OwnerProfileKey(owner), store.GetOptions{})
-		if gerr != nil && !store.IsNotFound(gerr) {
-			mapViewErr(w, gerr)
-			return
-		}
-		opts := store.PutOptions{Mode: store.PutCreate, ContentType: "application/json"}
-		if gerr == nil {
-			opts = store.PutOptions{Mode: store.PutUpdate, IfVersion: meta.Version, ContentType: "application/json"}
-		}
-		if _, perr := store.PutBytes(r.Context(), h.env.Store, store.OwnerProfileKey(owner), raw, opts); perr == nil {
-			writeJSON(w, http.StatusOK, next)
-			return
-		} else if !store.IsPreconditionFailed(perr) {
-			mapViewErr(w, perr)
-			return
-		}
-	}
-	writePlain(w, http.StatusConflict, "profile changed concurrently; reload and retry")
+	writeJSON(w, http.StatusOK, next)
 }

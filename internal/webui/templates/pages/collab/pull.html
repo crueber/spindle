@@ -1,0 +1,208 @@
+{{define "content"}}
+{{with .Data}}{{$d := .}}
+<div class="grid gap-4 md:grid-cols-[minmax(0,1fr)_16rem]">
+  <div class="min-w-0">
+    <header class="mb-4 flex flex-wrap items-start gap-2 border-b border-zinc-200 pb-3 dark:border-zinc-800">
+      <div class="min-w-0 flex-1">
+        <h1 class="min-w-0 text-xl font-semibold"><span class="text-zinc-500 dark:text-zinc-400">#{{.Num}}</span> {{.Title}}</h1>
+        <p class="mt-1 text-xs text-zinc-500 dark:text-zinc-400">{{.Author}} · {{template "collab_time" .UpdatedAt}}</p>
+      </div>
+      <span class="mt-1 flex shrink-0 flex-wrap items-center gap-2">
+        {{template "collab_state_chip" .Badge}}
+        {{if .ShowReady}}
+        <form method="post" action="/{{.Repo.Full}}/pull/{{.Num}}/ready"><button type="submit" class="btn px-2 py-1">Mark ready</button></form>
+        {{end}}
+        {{if .ShowDraft}}
+        <form method="post" action="/{{.Repo.Full}}/pull/{{.Num}}/draft"><button type="submit" class="btn px-2 py-1">Convert to draft</button></form>
+        {{end}}
+      </span>
+    </header>
+
+    {{if .Error}}<p class="err-line" role="alert">{{.Error}}</p>{{end}}
+    {{if .Notice}}<p class="warn-line" role="status">{{.Notice}}</p>{{end}}
+
+    {{if .Body}}
+    <article class="mb-3 border-b border-zinc-200 pb-3 dark:border-zinc-800" aria-label="Pull request description">
+      <p class="mb-1 text-xs text-zinc-500 dark:text-zinc-400">{{.OpenedActor}} · {{template "collab_time" .OpenedAt}}</p>
+      <div class="markdown-body">{{mdrepo .Body .Repo.Owner .Repo.Name}}</div>
+    </article>
+    {{end}}
+
+    {{if .EventsMore}}<a class="btn mb-2" href="?after_seq={{.OlderSeq}}">Older events</a>{{end}}
+    {{template "collab_timeline" .Timeline}}
+
+    {{if .Index}}
+    <nav class="card mb-4 mt-3 p-3" aria-label="Comments index">
+      <h2 class="card-header">Comments</h2>
+      <ul class="flex flex-wrap gap-1.5">
+        {{range .Index}}
+        <li><a class="pill {{if .Resolved}}opacity-60{{end}}" href="#thread-{{.TID}}" data-flash-target="thread-{{.TID}}">{{.Label}}{{if .Resolved}} · resolved{{end}}</a></li>
+        {{end}}
+      </ul>
+    </nav>
+    {{end}}
+
+    {{if .Repo.Anonymous}}
+    <p class="muted mt-3 text-sm"><a class="link" href="{{.Repo.LoginHref}}">Sign in to comment</a></p>
+    {{else}}
+    {{template "collab_composer" .Composer}}
+    {{end}}
+
+    <div class="card mt-4 p-3" id="reviews" aria-label="Reviews">
+      <h2 class="card-header">Reviews</h2>
+      {{range .Reviews}}
+      <div class="border-t border-zinc-200 py-2 first:border-t-0 first:pt-0 dark:border-zinc-800">
+        <p class="flex flex-wrap items-center gap-2 text-xs text-zinc-500 dark:text-zinc-400">
+          <span class="font-medium text-zinc-700 dark:text-zinc-200">{{.By}}</span>
+          {{template "collab_state_chip" .Chip}}
+          · {{template "collab_time" .At}}
+          {{if .Stale}}<span class="warn-line">stale ({{shortsha .CommitSHA}})</span>{{else}}{{with .CommitSHA}}<span class="font-mono">{{shortsha .}}</span>{{end}}{{end}}
+        </p>
+        {{if .Dismissed}}
+        <p class="muted text-sm italic">dismissed #{{.DismissSeq}}: {{.Reason}}</p>
+        {{else}}
+        {{with .Body}}<div class="markdown-body">{{mdrepo . $d.Repo.Owner $d.Repo.Name}}</div>{{end}}
+        {{if .CanDismiss}}
+        <form class="mt-1 flex flex-wrap items-center gap-2" method="post" action="{{.Action}}">
+          <input class="input w-auto flex-1" name="reason" placeholder="dismissal reason (required)" aria-label="dismissal reason">
+          <button type="submit" class="btn px-2 py-1">dismiss</button>
+        </form>
+        {{end}}
+        {{end}}
+      </div>
+      {{else}}
+      <p class="muted text-sm">No reviews yet.</p>
+      {{end}}
+      {{if .ReviewsMore}}<a class="link text-xs" href="#reviews">older reviews…</a>{{end}}
+    </div>
+
+    {{if .CanWrite}}
+    <div class="card mt-4 p-3" aria-label="Finish review">
+      <h2 class="card-header">Finish review</h2>
+      <form class="grid gap-2" method="post" action="/{{.Repo.Full}}/pull/{{.Num}}/reviews">
+        <input type="hidden" name="commit_sha" value="{{.HeadSHA}}">
+        <textarea class="input min-h-16 font-mono text-sm" name="body" rows="3" aria-label="review body" placeholder="Review summary (optional)"></textarea>
+        <label class="grid gap-1">
+          <span class="text-xs text-zinc-500 dark:text-zinc-400">Verdict</span>
+          <select class="input" name="verdict">
+            <option value="COMMENTED" selected>Comment</option>
+            <option value="APPROVED">Approve</option>
+            <option value="CHANGES_REQUESTED">Request changes</option>
+          </select>
+        </label>
+        <p class="muted text-xs">reviewing <span class="font-mono">{{shortsha .HeadSHA}}</span></p>
+        <div class="flex flex-wrap items-center justify-end gap-2">
+          <button type="submit" class="btn primary" {{if .Lock.Locked}}disabled title="{{.Lock.Reason}}"{{end}}>Submit review</button>
+        </div>
+      </form>
+    </div>
+    {{end}}
+
+    <section class="mt-4" aria-label="Files">
+      <h2 class="card-header">Files{{if .FilesCount}} ({{.FilesCount}}){{end}}</h2>
+      {{if .DiffError}}
+      <div class="card p-3" role="alert">
+        <p class="err-line">{{.DiffError}}</p>
+        <a class="btn mt-2" href="/{{.Repo.Full}}/pull/{{.Num}}">Retry</a>
+      </div>
+      {{else if .Diff.Files}}
+      {{template "collab_diff_conv" .Diff}}
+      {{if .Diff.Drifted}}{{template "collab_drifted" .Diff.Drifted}}{{end}}
+      {{else}}
+      <p class="muted text-sm">No changed files.</p>
+      {{end}}
+    </section>
+  </div>
+
+  <aside class="grid content-start gap-3">
+    <section class="card divide-y divide-zinc-200 text-sm dark:divide-zinc-800" aria-label="Pull request status">
+      <div class="p-3">
+        {{if .Terminal}}
+        <h2 class="card-header">Status</h2>
+        <p class="flex flex-wrap items-center gap-2">{{template "collab_state_chip" .Badge}}
+          {{with .MergeState.Detail.SHA}}<a class="link font-mono text-xs" href="/{{$d.Repo.Full}}/commit/{{.}}">{{shortsha .}}</a>{{end}}
+        </p>
+        {{if .Merged}}<p class="muted mt-1 text-xs">merged as {{shortsha .MergeState.Detail.SHA}} ({{.MergeState.Detail.Strategy}}) by {{.MergeState.Detail.By}}</p>{{end}}
+        {{else}}
+        <h2 class="card-header">Review summary</h2>
+        <p class="text-xs text-zinc-500 dark:text-zinc-400">{{if .ReviewDec}}{{.ReviewDec}}{{else}}no reviews yet{{end}} · {{.Approvals}} {{plural .Approvals "approval" "approvals"}} · {{.ThreadsUnresolved}} of {{.ThreadsTotal}} {{plural .ThreadsTotal "thread" "threads"}} unresolved</p>
+        {{end}}
+      </div>
+
+      {{if not .Terminal}}
+      <div class="p-3">
+        <h2 class="card-header">Mergeability</h2>
+        <p class="{{.Mergeability.Cls}} text-sm">{{.Mergeability.Text}}</p>
+        {{with .Mergeability.Sub}}<p class="muted text-xs">{{.}}</p>{{end}}
+        {{if not .HeadRefOK}}<p class="warn-line">From branch pending — push first</p>{{end}}
+        <p class="muted mt-1 text-xs"><span class="font-mono">{{.BaseRef}}</span> {{shortsha .BaseSHA}} ← <span class="font-mono">{{.HeadRef}}</span> {{shortsha .HeadSHA}}</p>
+        {{with .ForkRepo}}<p class="muted text-xs">from {{.}}</p>{{end}}
+        <p class="mt-1 flex flex-wrap gap-2 text-xs"><a class="link" href="/{{.Repo.Full}}/pull/{{.Num}}/commits">commits</a><a class="link" href="/{{.Repo.Full}}/pull/{{.Num}}/files">files</a></p>
+      </div>
+      {{end}}
+
+      <div class="p-3" id="reviewers">
+        <h2 class="card-header">Reviewers</h2>
+        <div class="flex flex-wrap items-center gap-1">
+          {{range .Requests}}<span class="chip chip-neutral">{{.}}</span>{{else}}<span class="muted text-xs">none requested</span>{{end}}
+        </div>
+        {{if .CanEditRequests}}
+        <form class="mt-2 flex flex-wrap items-center gap-2" method="post" action="/{{.Repo.Full}}/pull/{{.Num}}/reviewers">
+          <input class="input w-auto flex-1" name="reviewers" placeholder="reviewer names, comma separated" aria-label="request reviewers">
+          <button type="submit" class="btn px-2 py-1">request</button>
+        </form>
+        {{range .Requests}}
+        <form class="mt-1" method="post" action="/{{$d.Repo.Full}}/pull/{{$d.Num}}/reviewers/remove">
+          <input type="hidden" name="reviewers" value="{{.}}">
+          <button type="submit" class="link text-xs">remove {{.}}</button>
+        </form>
+        {{end}}
+        {{end}}
+      </div>
+
+      <div class="p-3" aria-label="Checks">
+        <h2 class="card-header">Checks</h2>
+        {{template "collab_check_pill" .CheckPill}}
+        {{if .ZeroChecks}}
+        {{template "collab_zero_checks" (dict "title" .ZeroChecksTitle "full" .Repo.Full "sha" .HeadSHA "required" .RequiredText)}}
+        {{else if .Checks}}
+        {{template "collab_check_contexts" .Checks.Statuses}}
+        {{else}}
+        <p class="muted text-xs">checks unavailable</p>
+        {{end}}
+        {{with .RequiredText}}<p class="muted mt-1 text-xs">required: {{.}}</p>{{end}}
+        {{with .CheckBlockersText}}<p class="warn-line">blocking merge: {{.}}</p>{{end}}
+      </div>
+
+      <div class="p-3" aria-label="Merge">
+        <h2 class="card-header">{{if .Merged}}Merged{{else}}Merge{{end}}</h2>
+        {{template "collab_merge_task" (dict "Task" .MergeState.Task "Num" .Num "Full" .Repo.Full)}}
+        {{if not .Terminal}}
+        <form method="post" action="/{{.Repo.Full}}/pull/{{.Num}}/merge" aria-label="Merge">
+          <label class="mt-2 grid gap-1">
+            <span class="text-sm font-medium">Strategy</span>
+            <select class="input w-full" name="strategy">
+              <option value="merge" selected>merge</option>
+              <option value="squash">squash</option>
+              <option value="rebase">rebase</option>
+            </select>
+          </label>
+          <div class="mt-2 flex flex-wrap gap-2">
+            <button type="submit" class="btn primary px-3 py-1" {{if not .MergeState.CanMerge}}disabled title="{{.MergeState.Tooltip}}"{{end}}>{{if eq .MergeState.State "merging"}}merging…{{else}}merge pull request{{end}}</button>
+            {{if .MergeState.CanUpdate}}
+            <button type="submit" class="btn px-3 py-1" formaction="/{{.Repo.Full}}/pull/{{.Num}}/update-branch" formnovalidate title="update the PR branch from base">update branch</button>
+            {{end}}
+          </div>
+          {{if .MergeState.BlockersText}}<p class="mt-2 text-xs text-amber-600 dark:text-amber-400">blocking merge: {{.MergeState.BlockersText}}</p>{{end}}
+        </form>
+        {{else}}
+        <p class="text-sm">merged as
+          {{with .MergeState.Detail.SHA}}<a class="link font-mono" href="/{{$d.Repo.Full}}/commit/{{.}}">{{shortsha .}}</a>{{end}}
+          by {{.MergeState.Detail.By}}</p>
+        {{end}}
+      </div>
+    </section>
+  </aside>
+</div>
+{{end}}
+{{end}}

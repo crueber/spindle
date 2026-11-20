@@ -1,0 +1,46 @@
+{{define "content"}}
+<div class="repo-shell">
+  {{template "repo_header" .Data.Repo}}
+  {{template "repo_tabs" .Data.Repo}}
+  {{template "repo_degraded" .Data.Repo}}
+
+  {{if .Data.Guide}}
+  {{template "repo_guide" .Data.Guide}}
+  {{else}}
+  <div class="tree-page">
+    {{if .Data.Path}}
+    <!-- Breadcrumb (spec §2.2): root then every segment; intermediates keep
+         the SHORT display ref (never refs/heads/… — a slash would split the
+         route; #482) and the last segment is plain text. -->
+    <nav class="crumbs mb-2 text-sm">
+      <a class="text-emerald-700 hover:underline dark:text-emerald-400" href="/{{.Data.Repo.Full}}">root</a>
+      {{range .Data.Crumbs}}{{if .Last}} <span class="muted"> / </span> <strong>{{.Name}}</strong>{{else}} <span class="muted"> / </span> <a class="text-emerald-700 hover:underline dark:text-emerald-400" href="{{.Href}}">{{.Name}}</a>{{end}}{{end}}
+    </nav>
+    {{end}}
+
+    <!-- File listing (issue #223): no header row, no type column; the right
+         columns hug their content and the name absorbs spare width. The
+         wrapper scrolls in place (issue #275) so a 390px page never pans;
+         the mode column hides below sm: — icons carry the kind. -->
+    <div class="overflow-x-auto">
+      <table class="data-table tree-table">
+        <tbody>
+          {{range .Data.Entries}}
+          <tr>
+            <td class="entry-mode muted font-mono text-xs hidden sm:table-cell" title="{{.Mode}}">{{.ModeText}}</td>
+            <td class="entry-size-num muted tabular text-right text-xs"{{if .IsBlob}} title="{{.Size}} bytes"{{end}}>{{.SizeNum}}</td>
+            <td class="entry-size-unit muted text-xs">{{.SizeUnit}}</td>
+            <td class="entry-icon" aria-hidden="true">{{.Icon}}</td>
+            <td class="entry-name"><a class="text-emerald-700 hover:underline dark:text-emerald-400" href="{{.Href}}">{{.Name}}</a></td>
+            <td class="entry-date muted text-right text-xs">{{if .Stamp}}<time datetime="{{.Stamp}}" title="{{.Stamp}}">{{with rel .Stamp}}{{.}}{{else}}—{{end}}</time>{{else}}—{{end}}</td>
+          </tr>
+          {{end}}
+        </tbody>
+      </table>
+    </div>
+
+    {{if .Data.Docs}}{{template "repo_doctabs" .Data}}{{end}}
+  </div>
+  {{end}}
+</div>
+{{end}}

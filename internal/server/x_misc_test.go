@@ -16,6 +16,7 @@ import (
 	"github.com/crueber/walhub/internal/config"
 	"github.com/crueber/walhub/internal/git"
 	"github.com/crueber/walhub/internal/server/auth"
+	"github.com/crueber/walhub/internal/setup"
 	"github.com/crueber/walhub/internal/store"
 	"github.com/crueber/walhub/internal/store/proto"
 	"github.com/crueber/walhub/internal/wal"
@@ -227,13 +228,14 @@ func TestRepoDispatchBranches(t *testing.T) {
 	fe.bundles = BundleList{Fulls: []BundleEntry{{Strategy: "full", Name: "b.bundle"}}}
 	api := &fakeAPI{}
 	s.api = api
+	s.SetUI(&fakeUI{paths: map[string]bool{"/alice": true, "/o/r/tree": true}})
 
-	// /{owner} UI page (gated) → 200 with token.
+	// /{owner} UI page → the page provider answers.
 	req := httptest.NewRequest("GET", "http://x/alice", nil)
 	req.Header.Set("Authorization", "Bearer tok123")
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
-	if rec.Code != http.StatusOK {
+	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `id="page"`) {
 		t.Fatalf("owner page = %d", rec.Code)
 	}
 	// POST /{owner} → 405.
@@ -243,12 +245,12 @@ func TestRepoDispatchBranches(t *testing.T) {
 	if rec.Code != http.StatusMethodNotAllowed {
 		t.Fatalf("owner POST = %d", rec.Code)
 	}
-	// UI page route /o/r/tree → 200.
+	// UI page route /o/r/tree → the page provider answers.
 	req = httptest.NewRequest("GET", "http://x/o/r/tree", nil)
 	req.Header.Set("Authorization", "Bearer tok123")
 	rec = httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
-	if rec.Code != http.StatusOK {
+	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `id="page"`) {
 		t.Fatalf("tree page = %d", rec.Code)
 	}
 	// POST /o/r/tree → 405.
@@ -337,7 +339,7 @@ func TestParseSetupBodyTOMLAndErrors(t *testing.T) {
 listen = "127.0.0.1:9999"
 auto_create_on_push = true
 `))
-	c, err := parseSetupBody(req, config.Defaults())
+	c, err := setup.ParseRequest(req, config.Defaults())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -347,7 +349,7 @@ auto_create_on_push = true
 	// JSON overrides with non-string values.
 	req = httptest.NewRequest("PUT", "/api/v1/setup",
 		strings.NewReader(`{"overrides": {"server.auto_create_on_push": true, "server.max_push_bytes": 1000, "server.cors_origins": "a.com,b.com"}}`))
-	c, err = parseSetupBody(req, config.Defaults())
+	c, err = setup.ParseRequest(req, config.Defaults())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -357,40 +359,40 @@ auto_create_on_push = true
 	}
 	// Section-less key → error.
 	req = httptest.NewRequest("PUT", "/api/v1/setup", strings.NewReader(`{"overrides": {"listen": "x"}}`))
-	if _, err := parseSetupBody(req, config.Defaults()); err == nil {
+	if _, err := setup.ParseRequest(req, config.Defaults()); err == nil {
 		t.Fatal("bare key must fail")
 	}
 	// Unknown section/key → error.
 	req = httptest.NewRequest("PUT", "/api/v1/setup", strings.NewReader(`{"overrides": {"nope.key": "1"}}`))
-	if _, err := parseSetupBody(req, config.Defaults()); err == nil {
+	if _, err := setup.ParseRequest(req, config.Defaults()); err == nil {
 		t.Fatal("unknown section must fail")
 	}
 	req = httptest.NewRequest("PUT", "/api/v1/setup", strings.NewReader(`{"overrides": {"server.nope": "1"}}`))
-	if _, err := parseSetupBody(req, config.Defaults()); err == nil {
+	if _, err := setup.ParseRequest(req, config.Defaults()); err == nil {
 		t.Fatal("unknown key must fail")
 	}
 	// Malformed JSON.
 	req = httptest.NewRequest("PUT", "/api/v1/setup", strings.NewReader(`{"overrides": `))
-	if _, err := parseSetupBody(req, config.Defaults()); err == nil {
+	if _, err := setup.ParseRequest(req, config.Defaults()); err == nil {
 		t.Fatal("bad json must fail")
 	}
 	// A top-level non-table value is rejected.
 	req = httptest.NewRequest("PUT", "/api/v1/setup", strings.NewReader("server = 5\n"))
-	if _, err := parseSetupBody(req, config.Defaults()); err == nil {
+	if _, err := setup.ParseRequest(req, config.Defaults()); err == nil {
 		t.Fatal("non-table section must fail")
 	}
 	// configCoerce errors: bad bool, bad int; string list parses.
 	req = httptest.NewRequest("PUT", "/api/v1/setup", strings.NewReader(`{"overrides": {"server.auto_create_on_push": "notabool"}}`))
-	if _, err := parseSetupBody(req, config.Defaults()); err == nil {
+	if _, err := setup.ParseRequest(req, config.Defaults()); err == nil {
 		t.Fatal("bad bool must fail")
 	}
 	req = httptest.NewRequest("PUT", "/api/v1/setup", strings.NewReader(`{"overrides": {"server.max_push_bytes": "NaN"}}`))
-	if _, err := parseSetupBody(req, config.Defaults()); err == nil {
+	if _, err := setup.ParseRequest(req, config.Defaults()); err == nil {
 		t.Fatal("bad int must fail")
 	}
 	req = httptest.NewRequest("PUT", "/api/v1/setup",
 		strings.NewReader(`{"overrides": {"server.cors_origins": "a.test,b.test"}}`))
-	if _, err := parseSetupBody(req, config.Defaults()); err != nil {
+	if _, err := setup.ParseRequest(req, config.Defaults()); err != nil {
 		t.Fatalf("string list must parse: %v", err)
 	}
 }
@@ -436,18 +438,15 @@ func TestSetupPutRestartKeys(t *testing.T) {
 	if rec.Code != http.StatusForbidden {
 		t.Fatalf("non-admin put = %d", rec.Code)
 	}
-	// restartKeys diff + effectiveValue helpers.
+	// setup.RestartKeys diff + setup.EffectiveValue helpers.
 	cand := config.Defaults()
 	cand.Server.Listen = "1.2.3.4:1"
-	keys := restartKeys(cfg, cand)
+	keys := setup.RestartKeys(cfg, cand)
 	if len(keys) == 0 {
 		t.Fatal("changed key must be reported")
 	}
-	if effectiveValue(cfg, "server.listen") == nil || effectiveValue(cfg, "bogus") != nil {
+	if setup.EffectiveValue(cfg, "server.listen") == nil || setup.EffectiveValue(cfg, "bogus") != nil {
 		t.Fatal("effectiveValue truth table broken")
-	}
-	if anyToString(nil) != "<nil>" || anyToString(true) != "true" || anyToString(int64(7)) != "7" {
-		t.Fatal("anyToString truth table broken")
 	}
 }
 

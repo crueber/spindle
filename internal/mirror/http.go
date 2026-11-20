@@ -189,6 +189,107 @@ func (h *Handler) get(w http.ResponseWriter, r *http.Request, owner, repo string
 	writeJSON(w, http.StatusOK, ViewOf(doc, h.now()))
 }
 
+// ConfigInput is the pull-mirror PUT body for non-HTTP callers (the
+// server-rendered settings page): create when no sidecar exists (upstream +
+// schedule), schedule-update only otherwise (the upstream is immutable).
+type ConfigInput struct {
+	UpstreamURL string
+	Schedule    string
+}
+
+// ConfigError is a rejected mirror config write: the HTTP status the JSON
+// handler writes and its plain-text body.
+type ConfigError struct {
+	Status  int
+	Message string
+}
+
+// Error implements error.
+func (e *ConfigError) Error() string { return e.Message }
+
+func configErr(status int, msg string) *ConfigError {
+	return &ConfigError{Status: status, Message: msg}
+}
+
+// Configure applies the PUT semantics: schedule-update when the sidecar
+// exists, create + first async sync otherwise. It is the one implementation
+// the JSON handler and the settings page share; the caller has already
+// enforced admin authority. created reports a fresh sidecar, taskID the
+// spawned first sync ("" for schedule updates).
+func (h *Handler) Configure(ctx context.Context, owner, repo string, ci ConfigInput) (v *View, created bool, taskID string, cerr *ConfigError) {
+	if h.Svc == nil {
+		return nil, false, "", configErr(http.StatusServiceUnavailable, "mirror service not configured")
+	}
+	schedule := ci.Schedule
+	if schedule == "" {
+		schedule = DefaultPreset
+	}
+	if !ValidPreset(schedule) {
+		return nil, false, "", configErr(http.StatusBadRequest, "unknown schedule preset "+strconv.Quote(schedule)+": want one of "+strings.Join(Presets, "|"))
+	}
+	doc, _, lerr := Load(ctx, h.Svc.store, owner, repo)
+	if lerr != nil {
+		return nil, false, "", configErr(http.StatusInternalServerError, "mirror: "+scrubText(lerr.Error()))
+	}
+	if doc != nil {
+		if ci.UpstreamURL != "" && ci.UpstreamURL != doc.UpstreamURL {
+			return nil, false, "", configErr(http.StatusConflict, "mirror upstream_url is immutable; delete the mirror and recreate it to change sources")
+		}
+		updated, uerr := SetSchedule(ctx, h.Svc.store, owner, repo, schedule)
+		if uerr != nil {
+			return nil, false, "", configErr(http.StatusInternalServerError, "mirror: "+scrubText(uerr.Error()))
+		}
+		out := ViewOf(updated, h.now())
+		return &out, false, "", nil
+	}
+	if strings.TrimSpace(ci.UpstreamURL) == "" {
+		return nil, false, "", configErr(http.StatusBadRequest, "upstream_url is required to create a mirror")
+	}
+	n, nerr := repoimport.NormalizeSource(ci.UpstreamURL)
+	if nerr != nil {
+		return nil, false, "", statusConfigErr(nerr)
+	}
+	if verr := repoimport.ValidateTransport(n, false); verr != nil {
+		return nil, false, "", statusConfigErr(verr)
+	}
+	if serr := h.checkSSRF(n, false); serr != nil {
+		return nil, false, "", statusConfigErr(serr)
+	}
+	// PUT is config on a repo, never repo creation (the create twin
+	// owns that). A sidecar on an unborn repo would 403 every future
+	// push to the name — the guard probes the sidecar, not the
+	// manifest — while every sync fails at Open. Fail fast with 404
+	// instead of stranding the name.
+	if meta, herr := h.Svc.store.Head(ctx, store.RepoPrefix(owner, repo)+store.Manifest); herr != nil && !store.IsNotFound(herr) {
+		return nil, false, "", configErr(http.StatusInternalServerError, "mirror: "+scrubText(herr.Error()))
+	} else if herr != nil || meta == nil {
+		return nil, false, "", configErr(http.StatusNotFound, "repository not found")
+	}
+	if _, cerr := Create(ctx, h.Svc.store, owner, repo, n.URL, schedule); cerr != nil {
+		if isExists(cerr) {
+			return nil, false, "", configErr(http.StatusConflict, "already a mirror")
+		}
+		return nil, false, "", configErr(http.StatusInternalServerError, "mirror: "+scrubText(cerr.Error()))
+	}
+	// The first sync fires async (law 7 — a clone never blocks the
+	// request); the 202 carries the id, GET .../mirror/sync?id=
+	// resolves it, and the sidecar records the outcome.
+	id := h.Svc.SyncAsync(ctx, owner, repo, "", false)
+	if doc, _, _ = Load(ctx, h.Svc.store, owner, repo); doc != nil {
+		out := ViewOf(doc, h.now())
+		return &out, true, id, nil
+	}
+	return nil, true, id, nil
+}
+
+// statusConfigErr maps a repoimport status error onto the write error.
+func statusConfigErr(err error) *ConfigError {
+	if se, ok := err.(*repoimport.StatusError); ok {
+		return configErr(se.Status, se.Message)
+	}
+	return configErr(http.StatusInternalServerError, scrubText(err.Error()))
+}
+
 // --- PUT /{o}/{r}/api/mirror -------------------------------------------------
 //
 // Admin-only. No sidecar yet → create (upstream_url required,
@@ -230,79 +331,19 @@ func (h *Handler) put(w http.ResponseWriter, r *http.Request, owner, repo string
 		writePlain(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	schedule := in.Schedule
-	if schedule == "" {
-		schedule = DefaultPreset
-	}
-	if !ValidPreset(schedule) {
-		writePlain(w, http.StatusBadRequest, "unknown schedule preset "+strconv.Quote(schedule)+": want one of "+strings.Join(Presets, "|"))
+	view, created, taskID, cerr := h.Configure(r.Context(), owner, repo, ConfigInput{UpstreamURL: in.UpstreamURL, Schedule: in.Schedule})
+	if cerr != nil {
+		writePlain(w, cerr.Status, cerr.Message)
 		return
 	}
-	ctx := r.Context()
-	doc, _, lerr := Load(ctx, h.Svc.store, owner, repo)
-	if lerr != nil {
-		writePlain(w, http.StatusInternalServerError, "mirror: "+scrubText(lerr.Error()))
+	if !created {
+		writeJSON(w, http.StatusOK, view)
 		return
 	}
-	if doc != nil {
-		if in.UpstreamURL != "" && in.UpstreamURL != doc.UpstreamURL {
-			writePlain(w, http.StatusConflict, "mirror upstream_url is immutable; delete the mirror and recreate it to change sources")
-			return
-		}
-		updated, uerr := SetSchedule(ctx, h.Svc.store, owner, repo, schedule)
-		if uerr != nil {
-			writePlain(w, http.StatusInternalServerError, "mirror: "+scrubText(uerr.Error()))
-			return
-		}
-		writeJSON(w, http.StatusOK, ViewOf(updated, h.now()))
-		return
-	}
-	if strings.TrimSpace(in.UpstreamURL) == "" {
-		writePlain(w, http.StatusBadRequest, "upstream_url is required to create a mirror")
-		return
-	}
-	n, nerr := repoimport.NormalizeSource(in.UpstreamURL)
-	if nerr != nil {
-		writeStatusErr(w, nerr)
-		return
-	}
-	if verr := repoimport.ValidateTransport(n, false); verr != nil {
-		writeStatusErr(w, verr)
-		return
-	}
-	if serr := h.checkSSRF(n, false); serr != nil {
-		writeStatusErr(w, serr)
-		return
-	}
-	// PUT is config on a repo, never repo creation (the create twin
-	// owns that). A sidecar on an unborn repo would 403 every future
-	// push to the name — the guard probes the sidecar, not the
-	// manifest — while every sync fails at Open. Fail fast with 404
-	// instead of stranding the name.
-	if meta, herr := h.Svc.store.Head(ctx, store.RepoPrefix(owner, repo)+store.Manifest); herr != nil && !store.IsNotFound(herr) {
-		writePlain(w, http.StatusInternalServerError, "mirror: "+scrubText(herr.Error()))
-		return
-	} else if herr != nil || meta == nil {
-		writePlain(w, http.StatusNotFound, "repository not found")
-		return
-	}
-	if _, cerr := Create(ctx, h.Svc.store, owner, repo, n.URL, schedule); cerr != nil {
-		if isExists(cerr) {
-			writePlain(w, http.StatusConflict, "already a mirror")
-			return
-		}
-		writePlain(w, http.StatusInternalServerError, "mirror: "+scrubText(cerr.Error()))
-		return
-	}
-	// The first sync fires async (law 7 — a clone never blocks the
-	// request); the 202 carries the id, GET .../mirror/sync?id=
-	// resolves it, and the sidecar records the outcome.
-	id := h.Svc.SyncAsync(ctx, owner, repo, "", false)
 	w.Header().Set("Cache-Control", "no-store")
-	doc, _, _ = Load(ctx, h.Svc.store, owner, repo)
-	out := map[string]any{"target": owner + "/" + repo, "task": map[string]any{"id": id}}
-	if doc != nil {
-		out["mirror"] = ViewOf(doc, h.now())
+	out := map[string]any{"target": owner + "/" + repo, "task": map[string]any{"id": taskID}}
+	if view != nil {
+		out["mirror"] = view
 	}
 	writeJSON(w, http.StatusAccepted, out)
 }

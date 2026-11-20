@@ -20,6 +20,7 @@ import (
 	"github.com/crueber/walhub/internal/api"
 	"github.com/crueber/walhub/internal/config"
 	"github.com/crueber/walhub/internal/git"
+	"github.com/crueber/walhub/internal/pages"
 	"github.com/crueber/walhub/internal/store"
 )
 
@@ -33,13 +34,15 @@ const (
 )
 
 // Server is the whole HTTP surface. One process serves git smart HTTP, the
-// LFS basic protocol, immutable static objects, the JSON API with SSE, the SPA
-// shell, the setup UI/API, and instance health/metrics (§1).
+// LFS basic protocol, immutable static objects, the JSON API with SSE, the
+// server-rendered page layer, the setup UI/API, and instance health/metrics
+// (§1).
 type Server struct {
 	cfg    *config.Config
 	store  store.ObjectStore
 	engine Engine // bind_wal.go seam: sync levels, publish, registry open
 	api    RouteProvider
+	ui     pages.Provider // bind_ui.go seam: server-rendered pages (nil → page routes 404)
 
 	layer *git.Layer // git subprocess layer machinery (04_git.md)
 

@@ -510,6 +510,20 @@ func (s *Service) CompactIndex(ctx context.Context, owner, repo string) (bool, e
 	return compacted, nil
 }
 
+// ListLabels is the exported read for surfaces outside this package (the
+// server-rendered forms pages need the label set without going through HTTP).
+// It returns the labels only; the CAS version stays internal.
+func (s *Service) ListLabels(ctx context.Context, owner, repo string) ([]Label, error) {
+	set, _, err := s.loadLabels(ctx, owner, repo)
+	if err != nil {
+		return nil, err
+	}
+	if set == nil {
+		return []Label{}, nil
+	}
+	return set.Labels, nil
+}
+
 // --- labels ------------------------------------------------------------------
 
 // loadLabels reads meta/labels.json; (empty set, "", nil) when absent.
@@ -632,6 +646,12 @@ func (s *Service) bumpMilestone(ctx context.Context, owner, repo, id string, dOp
 	if err != nil {
 		s.logMilestoneDrop(owner, repo, id, err)
 	}
+}
+
+// ListMilestones is the exported read for surfaces outside this package (the
+// server-rendered forms pages render the milestone picker/manager).
+func (s *Service) ListMilestones(ctx context.Context, owner, repo string) ([]*Milestone, error) {
+	return s.listMilestones(ctx, owner, repo)
 }
 
 // listMilestones enumerates milestones via delimiter listing (P5:

@@ -1,0 +1,25 @@
+{{define "content"}}
+{{/* /login-required (Forgejo #502): the anonymous write interstitial.
+     ?next= names the attempted action (sanitized to a local path), ?action=
+     names it in the copy. The login button renders only when the OIDC browser
+     flow can start; otherwise the page says so. 390px: card padding, the
+     action row wraps. */}}
+<section class="mx-auto max-w-xl px-4 py-10">
+  <div class="card p-6" aria-labelledby="login-required-title">
+    <h1 id="login-required-title" class="mb-2 text-lg font-semibold">Log in to continue</h1>
+    <p class="mb-4 text-sm">
+      <strong>{{.Data.Action}}</strong> needs an account — you are browsing as a guest. Log in and
+      you will land right back where you were.
+    </p>
+    <div class="flex flex-wrap items-center gap-2">
+      {{if .Data.LoginHref}}
+      <a class="btn primary" href="{{.Data.LoginHref}}">Log in</a>
+      {{else}}
+      <span class="text-sm text-amber-700 dark:text-amber-400">Log in is not enabled on this server.</span>
+      {{end}}
+      <a class="btn" href="{{.Data.Next}}">Back</a>
+    </div>
+    <p class="muted mt-4 text-xs">Continuing to: {{.Data.Next}}</p>
+  </div>
+</section>
+{{end}}

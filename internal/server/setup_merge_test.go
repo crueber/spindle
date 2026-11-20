@@ -8,18 +8,16 @@ package server
 import (
 	"encoding/json"
 	"fmt"
-	"io/fs"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
-	"reflect"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/crueber/walhub/internal/config"
-	"github.com/crueber/walhub/web"
+	"github.com/crueber/walhub/internal/setup"
 )
 
 func setupMergeServer(t *testing.T, dataDir string) (*Server, http.Handler) {
@@ -184,78 +182,17 @@ func TestCORSAllowsSameOriginWrites(t *testing.T) {
 	}
 }
 
-// Coverage for the setup save coercion and merge error paths (the gate is
-// ≥95% per package; these branches guard against silent truncation).
-func TestSetupCoerceErrorPaths(t *testing.T) {
-	c := config.Defaults()
-	rv := reflect.ValueOf(c).Elem()
-
-	server := rv.FieldByName("Server")
-
-	// Duration: bare integer = seconds (§2 parser rule); garbage → error.
-	f := server.FieldByName("RequestTimeout")
-	if err := configCoerce(f, "45", "server.request_timeout"); err != nil || time.Duration(f.Int()) != 45*time.Second {
-		t.Fatalf("bare int duration = %v err=%v", time.Duration(f.Int()), err)
-	}
-	if err := configCoerce(f, "not-a-time", "server.request_timeout"); err == nil {
-		t.Fatal("garbage duration must fail")
-	}
-	// ByteSize: scientific notation from JSON numbers; non-integral → error.
-	b := server.FieldByName("MaxPushBytes")
-	if err := configCoerce(b, "1.073741824e+10", "server.max_push_bytes"); err != nil || b.Int() != 10737418240 {
-		t.Fatalf("byte size = %d err=%v", b.Int(), err)
-	}
-	if err := configCoerce(b, "1.5", "server.max_push_bytes"); err == nil {
-		t.Fatal("fractional size must fail")
-	}
-	// Bool: false is a real value; garbage fails.
-	bv := server.FieldByName("AutoCreateOnPush")
-	if err := configCoerce(bv, "false", "server.auto_create_on_push"); err != nil || bv.Bool() {
-		t.Fatalf("bool false = %v err=%v", bv.Bool(), err)
-	}
-	if err := configCoerce(bv, "maybe", "server.auto_create_on_push"); err == nil {
-		t.Fatal("garbage bool must fail")
-	}
-	// A slice of non-strings is unsupported; a struct is not a value.
-	tokens := server.FieldByName("Auth").FieldByName("Tokens")
-	if err := configCoerce(tokens, "x", "server.auth.tokens"); err == nil {
-		t.Fatal("struct slice must be unsupported")
-	}
-	authStruct := server.FieldByName("Auth")
-	if err := configCoerce(authStruct, "x", "server.auth"); err == nil {
-		t.Fatal("struct coercion must fail")
-	}
-	// Path walking: a section used as a value; a scalar used as a section.
-	if err := configSetPath(c, []string{"server", "auth"}, "x"); err == nil {
-		t.Fatal("section-as-value must fail")
-	}
-	if err := configSetPath(c, []string{"server", "http2", "deep"}, "x"); err == nil {
-		t.Fatal("scalar-as-section must fail")
-	}
-	if err := configSetPath(c, []string{"server"}, "x"); err == nil {
-		t.Fatal("single segment must fail")
-	}
-	// parseSettingInt edge: fractional input.
-	if _, err := parseSettingInt("1.5"); err == nil {
-		t.Fatal("fractional must fail")
-	}
-	// effectiveValue with a malformed key → nil.
-	if v := effectiveValue(c, "nodot"); v != nil {
-		t.Fatalf("malformed key = %v, want nil", v)
-	}
-}
-
 // The TOML decode failure must surface as an error (a nil error with a nil
 // config would crash the caller).
 func TestParseSetupBodyTOMLDecodeError(t *testing.T) {
 	req := httptest.NewRequest("PUT", "/api/v1/setup", strings.NewReader("[server\nbroken"))
-	if _, err := parseSetupBody(req, config.Defaults()); err == nil {
+	if _, err := setup.ParseRequest(req, config.Defaults()); err == nil {
 		t.Fatal("broken TOML must error")
 	}
 	// JSON list values take the default formatting branch.
 	req = httptest.NewRequest("PUT", "/api/v1/setup",
 		strings.NewReader(`{"overrides": {"server.cors_origins": ["a.test", "b.test"]}}`))
-	c, err := parseSetupBody(req, config.Defaults())
+	c, err := setup.ParseRequest(req, config.Defaults())
 	if err != nil || len(c.Server.CorsOrigins) != 2 {
 		t.Fatalf("list override = %v err=%v", c, err)
 	}
@@ -492,12 +429,20 @@ func TestSetupOpenWheneverAuthNone(t *testing.T) {
 			s.cfg.Server.Auth.AnonymousRead = true
 			s.boot.Mode = mode
 
-			for _, path := range []string{"/setup", "/api/v1/setup"} {
-				rec := httptest.NewRecorder()
-				h.ServeHTTP(rec, httptest.NewRequest("GET", "http://x"+path, nil))
-				if rec.Code != http.StatusOK {
-					t.Fatalf("GET %s in %s mode = %d, want open (body %.80s)", path, mode, rec.Code, rec.Body.String())
-				}
+			// The setup JSON API keeps the §3.4 access rule in every mode.
+			rec := httptest.NewRecorder()
+			h.ServeHTTP(rec, httptest.NewRequest("GET", "http://x/api/v1/setup", nil))
+			if rec.Code != http.StatusOK {
+				t.Fatalf("GET /api/v1/setup in %s mode = %d, want open (body %.80s)", mode, rec.Code, rec.Body.String())
+			}
+			// GET /setup is the server-rendered page: it reaches the page
+			// provider in every mode (the provider owns the §3.4 page rule).
+			ui := &fakeUI{paths: map[string]bool{"/setup": true}}
+			s.SetUI(ui)
+			rec = httptest.NewRecorder()
+			h.ServeHTTP(rec, httptest.NewRequest("GET", "http://x/setup", nil))
+			if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `id="page"`) {
+				t.Fatalf("GET /setup in %s mode = %d, want the page provider (body %.80s)", mode, rec.Code, rec.Body.String())
 			}
 			// And the save path answers too (a valid override, no credential).
 			code, body := putSetup(t, s, `{"overrides": {"server.request_timeout": "45m"}}`)
@@ -508,50 +453,45 @@ func TestSetupOpenWheneverAuthNone(t *testing.T) {
 	}
 }
 
-// The built SPA assets must be served with the right caching class: hashed
-// vite bundles immutable, the shell no-cache (D-WEB-6). Regression for the
-// coverage gap after the SolidJS cutover.
+// The page assets must be served with the right caching class: stable names
+// (app.css, the island bundle, the vendored htmx files, the concept GIFs) are
+// no-cache + ETag; an unknown name is a 404. The hashed `assets/` lane stays
+// immutable for content-addressed files if any ship.
 func TestServeUIAssetsCaching(t *testing.T) {
 	s, h := setupMergeServer(t, t.TempDir())
 	s.cfg.Server.Auth.Mode = "none"
 	s.cfg.Server.Auth.AnonymousRead = true
 	s.boot.Mode = "normal"
 
-	// find a real hashed bundle in the embed (make web ran before tests)
-	entries, err := webFilesGlob("dist/assets")
-	if err != nil || len(entries) == 0 {
-		t.Skipf("no built assets (run make web): %v", err)
-	}
-	jsName := ""
-	for _, e := range entries {
-		if strings.HasSuffix(e, ".js") {
-			jsName = strings.TrimPrefix(e, "dist/")
-			break
+	for _, tc := range []struct{ name, ctype string }{
+		{"app.css", "text/css; charset=utf-8"},
+		{"ui.js", "text/javascript; charset=utf-8"},
+		{"htmx.min.js", "text/javascript; charset=utf-8"},
+	} {
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, httptest.NewRequest("GET", "http://x/_ui/"+tc.name, nil))
+		if rec.Code != http.StatusOK {
+			t.Fatalf("%s = %d (run make web)", tc.name, rec.Code)
+		}
+		if cc := rec.Header().Get("Cache-Control"); cc != "no-cache" {
+			t.Fatalf("%s cache-control = %q, want no-cache", tc.name, cc)
+		}
+		if ct := rec.Header().Get("Content-Type"); ct != tc.ctype {
+			t.Fatalf("%s content-type = %q, want %q", tc.name, ct, tc.ctype)
+		}
+		if rec.Header().Get("ETag") == "" {
+			t.Fatalf("%s must carry an ETag", tc.name)
 		}
 	}
-	if jsName == "" {
-		t.Skip("no js asset built")
-	}
 
+	// The landing/how-it-works concept GIFs ride the same stable lane.
 	rec := httptest.NewRecorder()
-	h.ServeHTTP(rec, httptest.NewRequest("GET", "http://x/_ui/"+jsName, nil))
-	if rec.Code != http.StatusOK {
-		t.Fatalf("asset = %d", rec.Code)
-	}
-	if cc := rec.Header().Get("Cache-Control"); cc != "public, max-age=31536000, immutable" {
-		t.Fatalf("hashed asset cache-control = %q, want immutable", cc)
-	}
-	if ct := rec.Header().Get("Content-Type"); ct != "text/javascript; charset=utf-8" {
-		t.Fatalf("hashed asset content-type = %q", ct)
-	}
-
-	rec = httptest.NewRecorder()
-	h.ServeHTTP(rec, httptest.NewRequest("GET", "http://x/_ui/index.html", nil))
-	if rec.Code != http.StatusOK {
-		t.Fatalf("index = %d", rec.Code)
+	h.ServeHTTP(rec, httptest.NewRequest("GET", "http://x/_ui/concepts/push-still.gif", nil))
+	if rec.Code != http.StatusOK || rec.Header().Get("Content-Type") != "image/gif" {
+		t.Fatalf("concept gif = %d %q", rec.Code, rec.Header().Get("Content-Type"))
 	}
 	if cc := rec.Header().Get("Cache-Control"); cc != "no-cache" {
-		t.Fatalf("shell cache-control = %q, want no-cache", cc)
+		t.Fatalf("concept gif cache-control = %q, want no-cache", cc)
 	}
 
 	rec = httptest.NewRecorder()
@@ -559,24 +499,19 @@ func TestServeUIAssetsCaching(t *testing.T) {
 	if rec.Code != http.StatusNotFound {
 		t.Fatalf("unknown asset = %d", rec.Code)
 	}
-}
-
-func webFilesGlob(dir string) ([]string, error) {
-	var out []string
-	err := fs.WalkDir(web.FilesFS(), ".", func(p string, d fs.DirEntry, err error) error {
-		if err == nil && !d.IsDir() && strings.HasPrefix(p, dir+"/") {
-			out = append(out, p)
-		}
-		return nil
-	})
-	return out, err
+	// The SPA shell is gone: /_ui/index.html is not an asset any more.
+	rec = httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest("GET", "http://x/_ui/index.html", nil))
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("index.html = %d, want 404", rec.Code)
+	}
 }
 
 // The auth subsection is its own schema group (the setup page's auth card),
 // immediately after server, and the server group no longer lists auth keys.
 func TestSetupSchemaSplitsAuthGroup(t *testing.T) {
 	s, _ := setupMergeServer(t, t.TempDir())
-	groups := buildSchemaGroups(s.cfg, config.Defaults())
+	groups := setup.BuildSchema(s.cfg, config.Defaults())
 	if len(groups) < 3 || groups[0].Section != "server" || groups[1].Section != "auth" || groups[2].Section != "store" {
 		sections := make([]string, len(groups))
 		for i, g := range groups {

@@ -5,8 +5,9 @@
 # Compose examples: compose.standalone.yml (filesystem store) and
 # compose.yaml (walhub + rustfs, the S3-backed stack).
 
-# ---- 1. Web: the ONE build step — vite builds the SolidJS SPA into dist/,
-#         esbuild bundles web/sdk/src → dist/repos.js (D-WEB-6) ----
+# ---- 1. Web: the ONE build step — vite builds the stylesheet (dist/app.css),
+#         esbuild bundles the islands (dist/ui.js) and web/sdk/src →
+#         dist/repos.js; the vendored htmx files are copied in (D-WEB-14) ----
 FROM docker.io/library/node:22-alpine AS web
 RUN corepack enable && corepack prepare pnpm@11.25.0 --activate
 WORKDIR /src/web
@@ -17,7 +18,8 @@ COPY web/package.json web/pnpm-lock.yaml web/pnpm-workspace.yaml ./
 RUN pnpm install --frozen-lockfile --ignore-scripts
 COPY web/ ./
 RUN pnpm run build \
-    && test -f dist/index.html \
+    && test -f dist/app.css \
+    && test -f dist/ui.js \
     && test -f dist/repos.js
 
 # ---- 2. Go build (static, no cgo; embeds the built dist/) ----
@@ -26,8 +28,8 @@ WORKDIR /src
 COPY go.mod go.sum ./
 RUN go mod download
 COPY . .
-# The web stage's dist/ (vite SPA + SDK bundle) replaces whatever the
-# context carried — the Go build embeds it (web/embed.go all:dist).
+# The web stage's dist/ (stylesheet, islands, SDK bundle) replaces whatever
+# the context carried — the Go build embeds it (web/embed.go all:dist).
 COPY --from=web /src/web/dist /src/web/dist
 ARG WALHUB_BUILD_SHA=dev
 RUN CGO_ENABLED=0 go build -trimpath -buildvcs=auto \

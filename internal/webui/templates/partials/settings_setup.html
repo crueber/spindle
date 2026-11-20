@@ -1,0 +1,75 @@
+{{/* partials/settings_setup.html — /setup rows (specs/settings.md §1).
+   Anatomy: docs/style-guideline.md §7 "Setup rows" (.setup-row / .setup-label
+   / .setup-examples / .setup-callout / .setup-advanced in web/src/app.css).
+   At 390px .setup-row is one column (label above control, app.css md:grid);
+   examples wrap (break-words); every control is w-full. */}}
+
+{{define "settings-setup-section"}}
+<section class="card p-4" data-section="{{.Section}}">
+  <h3 class="mb-2 font-semibold">{{.Section}}</h3>
+  {{range .Essential}}{{template "settings-setup-field" .}}{{end}}
+  {{if .Advanced}}
+  <details class="setup-advanced" data-advanced-for="{{.Section}}">
+    <summary class="setup-advanced-toggle"><span>Advanced</span></summary>
+    {{range .Advanced}}{{template "settings-setup-field" .}}{{end}}
+  </details>
+  {{end}}
+</section>
+{{end}}
+
+{{define "settings-setup-field"}}
+<div class="setup-row" data-key="{{.Key}}">
+  <div class="min-w-0">
+    <label class="setup-label" for="{{.InputID}}">
+      <code class="font-mono text-sm break-all">{{.Key}}</code>
+      {{if .FromFile}}<span class="chip">file</span>{{else}}<span class="muted text-xs">default</span>{{end}}
+    </label>
+    {{if .Example}}
+    <p class="setup-examples"><span class="muted">e.g.</span> <span class="setup-ex">{{.Example}}</span>{{if .Note}}<span class="setup-note">{{.Note}}</span>{{end}}</p>
+    {{else if .Note}}
+    <p class="setup-examples"><span class="setup-note">{{.Note}}</span></p>
+    {{end}}
+  </div>
+  <div class="min-w-0">
+    {{if eq .Control "bool"}}
+      <input type="hidden" name="cfg.{{.Key}}" value="false">
+      <label class="flex cursor-pointer items-center gap-2 text-sm">
+        <input type="checkbox" role="switch" name="cfg.{{.Key}}" value="true" class="h-5 w-5 shrink-0 accent-emerald-600"{{if .Bool}} checked{{end}}>
+        <span class="muted">{{if .Bool}}enabled{{else}}disabled{{end}}</span>
+      </label>
+    {{else if eq .Control "select"}}
+      <select class="input md:max-w-md" id="{{.InputID}}" name="cfg.{{.Key}}">
+        <option value="">(default)</option>
+        {{$f := .}}{{range .Enum}}<option value="{{.}}"{{if eq . $f.Value}} selected{{end}}>{{.}}</option>{{end}}
+      </select>
+    {{else if eq .Control "textarea"}}
+      <textarea class="input font-mono text-xs" id="{{.InputID}}" name="cfg.{{.Key}}" rows="4" spellcheck="false">{{.Value}}</textarea>
+    {{else if eq .Control "number"}}
+      <input class="input md:max-w-md" id="{{.InputID}}" name="cfg.{{.Key}}" type="number" step="any" value="{{.Value}}">
+    {{else if eq .Control "password"}}
+      <input class="input md:max-w-md" id="{{.InputID}}" name="cfg.{{.Key}}" type="password" autocomplete="new-password" value="{{.Value}}">
+    {{else}}
+      <input class="input md:max-w-md" id="{{.InputID}}" name="cfg.{{.Key}}" type="text" value="{{.Value}}">
+    {{end}}
+    {{range .Errors}}<p class="err-line">{{.Message}}</p>{{end}}
+  </div>
+</div>
+{{end}}
+
+{{/* The OIDC discovery result fragment (hx-post /setup/auth-test). Never JSON. */}}
+{{define "settings-setup-authtest"}}
+<div id="setup-auth-test" aria-live="polite">
+  {{if .Errors}}
+    {{range .Errors}}<p class="err-line">{{.Message}}</p>{{end}}
+  {{else}}{{with .Result}}
+    <div class="setup-callout">
+      <p class="text-sm"><strong>Discovery OK</strong> — issuer <code class="font-mono">{{.Issuer}}</code>{{if .ClientIDPresent}}<span class="muted"> · client_id set</span>{{else}}<span class="muted"> · no client_id in the form yet</span>{{end}}</p>
+      <ul class="muted mt-1 space-y-0.5 font-mono text-xs">
+        <li class="break-all">authorization: {{.AuthorizationEndpoint}}</li>
+        <li class="break-all">token: {{.TokenEndpoint}}</li>
+        <li class="break-all">jwks: {{.JWKSURI}}</li>
+      </ul>
+    </div>
+  {{end}}{{end}}
+</div>
+{{end}}

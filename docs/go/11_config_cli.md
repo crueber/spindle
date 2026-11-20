@@ -2,7 +2,7 @@
 
 > Source: MASTER_RUST_SPEC.md §15 (configuration reference, per-repo settings D24), §16 (CLI reference), §19 (porting notes: clap/exit codes) · Status: normative for the walhub Go implementation.
 
-The binary is `walhub` (module `github.com/crueber/walhub`). It reads the same config files, honors the same environment variables, emits the same exit codes, and exposes the same subcommand surface as the Rust `walgit`, so operators' `walgit.toml`, deployment scripts, and shell habits carry over unchanged. Config parsing uses `github.com/BurntSushi/toml` — the only TOML dependency allowed, and one of exactly three backend dependencies in the budget (`go-chi/chi/v5`, `BurntSushi/toml`, `golang.org/x/net`). One deliberate divergence: **a config file is now OPTIONAL** — a first run with no file boots on built-in defaults (§2.3), and the default file location lives under the data dir (§3.1). All other CLI mechanics (dispatch, flag parsing, duration/size parsing) are hand-rolled or stdlib.
+The binary is `walhub` (module `github.com/crueber/walhub`). It reads the same config files, honors the same environment variables, emits the same exit codes, and exposes the same subcommand surface as the Rust `walgit`, so operators' `walgit.toml`, deployment scripts, and shell habits carry over unchanged. Config parsing uses `github.com/BurntSushi/toml` — the only TOML dependency allowed, and one of the six direct backend modules in the budget (AGENTS.md law 1: chi, toml, x/net, x/crypto, dicebear-go + dicebear/styles). One deliberate divergence: **a config file is now OPTIONAL** — a first run with no file boots on built-in defaults (§2.3), and the default file location lives under the data dir (§3.1). All other CLI mechanics (dispatch, flag parsing, duration/size parsing) are hand-rolled or stdlib.
 
 ---
 
@@ -569,7 +569,7 @@ $ WALGIT__STORE__BKUET=x walhub config check --config /etc/walhub/walgit.toml --
   (visibility as the read authority for repo surfaces) and made public repos unbrowsable on
   OIDC instances. `true` is now the default recommendation (visitors browse public repos
   without logging in; the navbar offers Login); `false` stays as the everything-requires-login
-  hard-lock for non-repo surfaces. The `/setup` copy and its client-side mirror
-  (`web/src/lib/setup.js`) describe the trade-off instead of "must be false". Interaction
+  hard-lock for non-repo surfaces. The `/setup` copy and its field metadata
+  (`internal/webui/settings.go`) describe the trade-off instead of "must be false". Interaction
   with #344: the browser-login trio requirement is unchanged — anonymous browsing never
   removes the need for a working login flow.

@@ -1,0 +1,56 @@
+{{define "content"}}
+{{with .Data}}{{$d := .}}
+<div class="releases-page">
+  <div class="mb-3 flex flex-wrap items-center gap-2">
+    <h2 class="text-xl font-semibold tracking-tight">Releases</h2>
+    <div class="ml-auto flex flex-wrap items-center gap-2">
+      <a class="link text-xs" href="{{.RefreshHref}}">Refresh</a>
+      {{if .Repo.NewReleaseHref}}<a class="btn primary" href="{{.Repo.NewReleaseHref}}">New release</a>{{end}}
+    </div>
+  </div>
+
+  {{if .Error}}<p class="err-line" role="alert">{{.Error}}</p>{{end}}
+  {{if .Notice}}<p class="warn-line" role="status">{{.Notice}}</p>{{end}}
+
+  <div class="mb-3 flex flex-wrap gap-1.5" role="group" aria-label="release filters">
+    <a class="pill {{if eq .Filter "all"}}btn-active{{end}}" href="{{.AllHref}}" {{if eq .Filter "all"}}aria-pressed="true"{{end}}>All ({{.Total}})</a>
+    <a class="pill {{if eq .Filter "drafts"}}btn-active{{end}}" href="{{.DraftsHref}}" {{if eq .Filter "drafts"}}aria-pressed="true"{{end}}>Drafts ({{.Drafts}})</a>
+    <a class="pill {{if eq .Filter "prereleases"}}btn-active{{end}}" href="{{.PrereleasesHref}}" {{if eq .Filter "prereleases"}}aria-pressed="true"{{end}}>Prereleases ({{.Prereleases}})</a>
+  </div>
+  {{if and (eq .Filter "drafts") (not .Drafts)}}<p class="muted text-xs" role="status">Drafts are hidden from the release list — publish one to see it here.</p>{{end}}
+
+  {{if .Rows}}
+  <ul>
+    {{range .Rows}}{{$row := .}}
+    <li class="border-t border-zinc-200 py-3 first:border-t-0 first:pt-0 dark:border-zinc-800">
+      <div class="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1">
+        <a class="min-w-0 max-w-full truncate font-medium text-emerald-700 hover:underline dark:text-emerald-400" href="{{.Href}}">{{.Name}}</a>
+        {{if .Latest}}<span class="chip chip-open shrink-0">latest</span>{{end}}
+        {{if .Draft}}<span class="chip chip-draft shrink-0">draft</span>{{end}}
+        {{if .Prerelease}}<span class="chip chip-prerelease shrink-0">prerelease</span>{{end}}
+        <span class="ml-auto shrink-0 text-xs text-zinc-500 dark:text-zinc-400">{{.AssetCount}} {{plural .AssetCount "asset" "assets"}} · {{template "collab_time" .Published}}{{with .Author}} · {{.}}{{end}}</span>
+      </div>
+      <p class="mt-1 flex flex-wrap items-center gap-2 text-xs text-zinc-500 dark:text-zinc-400">
+        {{if not .TagName}}<span class="font-mono">{{.Tag}}</span>{{end}}
+        {{with .Excerpt}}<span class="min-w-0 truncate">{{.}}</span>{{end}}
+      </p>
+      {{if .KeyAssets}}
+      <p class="mt-1 flex flex-wrap items-center gap-x-3 gap-y-1 text-xs">
+        {{range .KeyAssets}}<a class="max-w-64 truncate font-mono text-emerald-700 hover:underline dark:text-emerald-400" href="{{$row.AssetBase}}{{.Name}}" download>{{.Name}}</a>{{end}}
+        {{if .ExtraAssets}}<a class="link" href="{{.Href}}">+{{.ExtraAssets}} more →</a>{{end}}
+      </p>
+      {{end}}
+    </li>
+    {{end}}
+  </ul>
+  {{if .More}}{{template "collab_pager" .OlderHref}}{{end}}
+  {{else if not .Error}}
+  {{if eq .Filter "all"}}
+  {{template "collab_empty" (dict "icon" "tag" "title" "No releases yet" "hint" "Publish a release from a tag to see it here." "href" .Repo.NewReleaseHref "label" "New release")}}
+  {{else}}
+  {{template "collab_empty" (dict "icon" "tag" "title" "No matching releases in this view" "hint" "The filter applies to the loaded page only — try All, or publish a matching release." "href" .AllHref "label" "All releases")}}
+  {{end}}
+  {{end}}
+</div>
+{{end}}
+{{end}}

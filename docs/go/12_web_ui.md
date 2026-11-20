@@ -1,41 +1,32 @@
-# 12 — Web UI and the `repos.js` SDK (SolidJS SPA)
+# 12 — Web UI: server-rendered pages, htmx, vanilla-ES islands, and the `repos.js` SDK (D-WEB-14)
 
 > Source: MASTER_RUST_SPEC.md §10 (web UI + SDK), §8.8/§8.9 (auth flows and setup recipes consumed by the UI), §9 (wire contract) · Status: normative for the walhub Go implementation.
 
-> **SUPERSEDED IN PART (2026-09-02, explicit user request — DEVIATIONS.md D-WEB-6):** the SPA is now
-> **SolidJS + `@solidjs/router`** (plain JSX, no TypeScript) with Tailwind CSS v4 (CSS-first, dark mode
-> by default, no CDN) built by **vite** (`vite-plugin-solid` + `@tailwindcss/vite`) into `web/dist/`.
-> §1.0's import-map/raw-module serving, §2.1's hand-rolled reactive core, §2.3's hand-rolled router and
-> §3's raw-module caching class are superseded; state management is Solid signals/stores + context.
-> Still normative and unchanged: the dogfood rule (§6 — the SDK is the only way the SPA talks to the
-> server), the hand-rolled pure modules (diff parser §2.8, highlighter,
-> §5 testing tier for them — markdown-lite + sanitizer retired by D-WEB-7, issue #174), the SSE ownership/cancellation rules (§2.5), and the `/repos.js` SDK
-> contract (§1.1). The old vanilla sources were deleted in the same change (pre-1.0 rule).
+> **D-WEB-14 (2026-11-19, explicit user request — DEVIATIONS.md):** browser pages are **Go
+> `html/template`** rendered by `internal/webui`, progressively enhanced with **htmx 2.0.4 (vendored)**
+> and small **vanilla-ES islands** (`web/src/islands/`). The SolidJS SPA, `@solidjs/router`, the
+> client data/cache layer and the client-side markdown sanitizer are superseded; user markdown, diffs,
+> commit graphs and highlighting are rendered **server-side in Go**. The JSON API and the dependency-free
+> `repos.js` SDK (§1) are unchanged and remain the programmatic/agent surface.
+>
+> **D-WEB-15 (2026-11-20): the SPA is deleted.** `web/src/{pages,components,lib}`, `web/index.html` and
+> its vite config are gone; vite remains only as the `@tailwindcss/vite` host that builds `app.css`, and
+> `package.json` has no runtime dependencies. `internal/server` no longer has an SPA shell handler, so a
+> page path the provider does not answer is the plain 404.
 
-The UI is two artifacts in `web/`, served by the same Go binary from the **vite-built `web/dist/`**
-— a **SolidJS SPA** (plain JSX, no TypeScript; runtime npm dependencies exactly `solid-js` +
-`@solidjs/router` + `marked` + `dompurify` (D-WEB-7); state via Solid signals/stores + context; Tailwind CSS v4 CSS-first, dark mode by
-default, no CDN) plus the dependency-free SDK bundle. Build tooling is dev-time only: `vite` +
-`vite-plugin-solid` + `@tailwindcss/vite` build the SPA; `esbuild` bundles the SDK from submodules (§1.0):
+The UI is one server-rendered artifact plus the SDK:
 
 | Artifact | Path | Language | Dependencies |
 |---|---|---|---|
-| SDK | source `web/sdk/src/*.js` → bundle `web/dist/repos.js` | plain ES modules, dependency-free | dev: esbuild only |
-| SPA | `web/src/**` (`.jsx`), `web/index.html` → `web/dist/` | SolidJS JSX, plain JS (no TypeScript) | runtime: `solid-js`, `@solidjs/router`, `marked`, `dompurify`; dev: `vite`, `vite-plugin-solid`, `@tailwindcss/vite`, `tailwindcss` |
+| Pages | `internal/webui/templates/**` + `internal/webui/*.go` | Go `html/template` | stdlib only |
+| Islands | `web/src/islands/*.js` → `web/dist/ui.js` | vanilla ES modules | none |
+| htmx | `web/vendor/htmx.min.js`, `web/vendor/htmx-ext-sse.js` | vendored files | MIT (no npm runtime dep) |
+| Styles | `web/src/app.css` → `web/dist/app.css` | Tailwind v4, CSS-first | dev-time |
+| SDK | `web/sdk/src/*.js` → `web/dist/repos.js` | plain ES modules | dependency-free |
 
-The SPA entry is `web/src/index.jsx` (SolidJS router, `<div id="root">` in `web/index.html`); styling is
-a single CSS-first Tailwind entry (`web/src/ui.css`: `@import "tailwindcss"`, class-based dark variant,
-dark as the shipped default). The SDK is the only way the SPA talks to the server (dogfood rule, §10.2).
-
-```html
-<!-- web/index.html (excerpt): vite entry + dark-by-default shell. -->
-<html lang="en" class="dark">
-<script type="module" src="/src/index.jsx"></script>
-<div id="root"></div>
-```
-
-Routing is `@solidjs/router` (`web/src/index.jsx`): the route inventory is
-UNCHANGED from §2.3; pages are static route components (top-level `import`s, one vite bundle — no `lazy()` code-splitting wired up).
+The binary embeds `web/dist/` and serves `/_ui/app.css`, `/_ui/ui.js`, `/_ui/htmx.min.js`,
+`/_ui/htmx-ext-sse.js` (stable names, `no-cache` + ETag), hashed `/_ui/assets/*` (immutable) and
+`/repos.js` (module MIME is load-bearing).
 
 ## 1. Artifact A — the SDK (`web/sdk/`)
 
@@ -62,23 +53,23 @@ web/sdk/src/
 └── types.js      JSDoc @typedef blocks (§1.1) — editor IntelliSense only, no runtime
 ```
 
-Build (SDK leg of `make web`; the SPA leg is `vite build` — devDependencies are `esbuild`, `vite`,
-`vite-plugin-solid`, `@tailwindcss/vite`, `tailwindcss`; runtime budget is `solid-js` + `@solidjs/router` +
-`marked` + `dompurify` (D-WEB-7),
-and the SDK itself stays dependency-free):
+Build (the whole of `make web`: the stylesheet leg is `vite build` with `@tailwindcss/vite`; the SDK and
+island legs are esbuild — devDependencies are `esbuild`, `vite`, `@tailwindcss/vite`, `tailwindcss`; there
+are no runtime npm dependencies since D-WEB-15, and the SDK itself stays dependency-free):
 
 ```sh
-cd web && pnpm install --frozen-lockfile     # devDependencies: vite + esbuild
+cd web && pnpm install --frozen-lockfile     # devDependencies: vite + esbuild + tailwind
+pnpm run build                                # css (vite) → islands (esbuild) → vendor (cp) → sdk (esbuild)
 pnpm run build:sdk                            # esbuild sdk/src/index.js --bundle --format=esm \
                                               #   --target=es2022 --minify --outfile=dist/repos.js
 ```
 
-Rules: `web/dist/` is build output (gitignored; created by `make web`, which runs `vite build` for the
-SPA FIRST and then the SDK bundle — `vite.config.mjs` uses `emptyOutDir`, so the order is load-bearing);
+Rules: `web/dist/` is build output (gitignored; created by `make web`, whose steps are independent —
+`build:css` runs with `emptyOutDir: false` so it never wipes the island/vendor/SDK output);
 `make build` depends on `make web`; tests import the SOURCE modules directly (§5) and need no build; CI runs
-the bundle smoke test only when `dist/repos.js` exists. Content-hashed vite assets under `dist/assets/*`
-are served immutable; `dist/index.html` and `/repos.js` stay `no-cache` + strong ETag so a redeploy is
-picked up on the next fetch.
+the bundle smoke test only when `dist/repos.js` exists. The stable page assets (`app.css`, `ui.js`,
+`htmx*.js`, `concepts/*.gif`) and `/repos.js` stay `no-cache` + strong ETag so a redeploy is picked up on
+the next fetch; the `dist/assets/*` prefix stays the immutable lane for any content-addressed file.
 
 ### 1.1 Public surface
 
@@ -166,359 +157,189 @@ Every GET sends `Accept: application/json, text/event-stream`. If the response `
 Hazard: leaked readers and unbounded parallel streams if callers forget to abort.
 Avoidance: every method derives its own `AbortController` from the caller's `signal` and closes the `ReadableStream` reader in a `finally`; `refStream` and task-attach loops return a cancellation function in addition to honoring the signal; at most one popup auth promise per client. Playbook: `13_concurrency.md` (ownership: the caller owns the signal, the SDK owns the reader, the SDK closes it).
 
-## 2. Artifact B — the SolidJS SPA (`web/src/**`)
+## 2. Server-rendered pages (`internal/webui`)
 
-The §10.2 SPA surface implemented as a **SolidJS SPA** (D-WEB-6 — replaces the earlier vanilla-ESM
-rewrite, which had itself replaced SolidJS; the route inventory and page contracts below are unchanged).
-Reactivity is Solid's own signals/stores + context; routing is `@solidjs/router`; styling is Tailwind v4
-CSS-first (`web/src/ui.css`), dark mode by default; pages are `.jsx` components built by vite.
+### 2.1 The seam and composition
 
-### 2.1 Reactivity — Solid signals/stores + context (normative API)
+`internal/pages.Provider` is the seam: `Serve(w,r) bool` answers a page or reports *false without
+writing* so the caller falls through, and `BindAuth` hands the server's own authority functions
+(`Authenticate`, session refresh, the identity read gate). `internal/server` owns the page shapes:
+`pageOr404` for the pure page routes (`/`, `/explore`, `/how-it-works`, `/setup`, the owner/repo page
+routes) and `uiOr(fallback)` where a non-page lane shares the path (`/api` docs vs the JSON lane, the
+`/*` repo dispatch). A path no provider answers is the plain 404 — the SPA was deleted (D-WEB-15).
+`cmd/walhub/webui.go` (`wireWebUI`) binds every group's deps (`BindPublic`, `BindRepo`, `BindCollab`,
+`BindForms`, `BindSettings`) once at boot — the binders are process-global and any test that builds the
+provider must bind them.
 
-Solid's primitives ARE the app's reactivity (D-WEB-6 — supersedes the earlier ~40-line hand-rolled
-reactive core, which is deleted with the vanilla sources). The contract the app relies on:
+The provider is built in **every boot mode**, including setup-only: `/setup` is the way out of an invalid
+config, and `mountSetupOnly` routes **GET and POST** `/setup` through the provider.
 
-```js
-import { createSignal, createEffect, createMemo, onCleanup, createRoot } from "solid-js";
-import { createStore } from "solid-js/store";
-```
+### 2.2 Templates
 
-**Reactivity contract:**
+One `html/template` set per page: `templates/base.html` (document, header/nav/footer, `{{template
+"content"}}`), every `templates/partials/*.html` (shared blocks), and the page file
+`templates/pages/<group>/<name>.html` defining `content`. Shared blocks must live in `partials/` — the
+page glob parses `pages/*/*.html` as pages, so a partial there is a page and its defines are invisible to
+siblings. The layout model (`PageData.Chrome`: title, path, principal, nav visibility, login href, admin)
+is computed from the principal, mirroring the old `navModel` rules.
 
-- Signals update through the reactive graph: `set` marks dependents dirty and Solid flushes effects in topological order afterward — synchronous `set`s batch, so an effect reading two signals set together runs once, not twice.
-- Dependencies are tracked at read time: any signal read while an effect/memo is running becomes a dependency. No explicit dependency lists.
-- `onCleanup` inside a component registers teardown on unmount; long-lived non-component scopes use `createRoot` with explicit `dispose()` — the lifecycle rule of §2.5.
-- Memos are cached derivations: recomputed when a dependency changes, read cheaply otherwise.
-- UI updates are Solid components + JSX: effects write to DOM nodes (`el.textContent = …`, `el.classList.toggle(…)`) or re-render a list; no VDOM diffing beyond Solid's fine-grained updates.
+Template functions are deliberately small: `md`/`mdrepo` (server markdown), `diff`, `graph`/`graphrows`,
+`hl`, `rel`, `shortsha`, `dict`, `plural`, `hasPrefix`. **Do not shadow `html/template` builtins**
+(`eq/ne/lt/len/index/printf/slice`) — a string-only `eq` once broke every error page that compares an int
+status.
 
-**Components:** pages are Solid components (`web/src/pages/*.jsx`) mounted by the router; shared UI is the
-router root (`web/src/App.jsx`: header, nav, theme toggle). Data fetching composes over the §2.4 cache via Solid primitives.
+### 2.3 Routing and precedence
 
-### 2.2 npm dependency budget (DECIDED — `solid-js` + `@solidjs/router` + `marked` + `dompurify` runtime, D-WEB-6 amended by D-WEB-7)
+Routes are `http.ServeMux` patterns on the provider's mux, registered by each group from an `init()`
+(`registerGroup`). Static-before-dynamic is the SPA's inventory: `/orgs/new`, `/{owner}/repositories`,
+`/{owner}/organizations`, `/login-required`, `/invitations` are literal; `/{owner}/{repo}` is the wildcard
+below them. Patterns with the SAME wildcard shape cannot coexist (`/{a}/{b}/{c}` vs `/{owner}/{name}/{tab}`
+panics), so keep literal routes literal and push shape-generic families through one dispatcher that writes
+nothing on a non-match (the team routes do this). A missing repo/ref/path is a real **404 HTML page**, never
+a 200 with a client-rendered error.
 
-Runtime `package.json` dependencies are exactly **`solid-js`** + **`@solidjs/router`** + **`marked@18.0.11`** (MIT) + **`dompurify@3.4.15`** (MPL-2.0-or-Apache-2.0; both zero-dependency); state management is
-Solid's own signals/stores + context (no additional state library). DevDependencies are `vite`,
-`vite-plugin-solid`, `@tailwindcss/vite`, `tailwindcss` (the SPA build) plus `esbuild` (the §1.0 SDK
-bundle). Everything previous packages provided that is NOT back in the budget stays hand-rolled or native:
+### 2.3.1 Route inventory (as implemented)
 
-- **Markdown: `marked` GFM + `DOMPurify` (D-WEB-7, issue #174 — supersedes the markdown-lite bullet below).** One wrapper module (`web/src/lib/render-md.js`): `marked` (`gfm: true`, `breaks: true` to preserve the `<br>` continuation contract) feeds a DOMPurify `sanitize` with pinned `ALLOWED_TAGS`/`ALLOWED_ATTR` (the old allowlist plus `del/s/input` and `checked/disabled/type/class` for strikethrough, task lists, `language-*` code classes) and `FORBID_CONTENTS` for the old drop-content set; URI gating rides DOMPurify defaults. `renderBody(src)` (browser-only, throws without a DOM) feeds the five call-site `innerHTML`s; `renderMarkdownHtml(src)` is the Node-importable marked layer covered by `node --test`, the DOMPurify layer by the real-Chromium pass. Fenced-code language keeps marked's standard `class="language-<lang>"` (nothing consumed the old `data-lang`). Preview fidelity is preview-level; the code view shows exact text.
-- **Superseded — Markdown: hand-rolled markdown-lite (~150 lines).** Replaced by the marked + DOMPurify pipeline above (D-WEB-7); `markdown.js` + `sanitize.js` deleted in the same change (pre-1.0 rule).
-- **Diff: hand-rolled minimal unified-diff parser in JS (~120 lines).** Unchanged from the previous decision: the server sends a single well-formed `git diff` patch (spec §9.5), so a tiny parser with an explicit grammar (§2.8) is smaller than any library.
-- **Syntax highlighting: none at runtime.** Code blobs render as `<pre><code>` with line numbers via a cheap hand-rolled tokenizer for the common cases (keywords/strings/comments/numbers) driven by a filename-extension → language table; unknown extensions render plain.
-- **Sanitization:** markdown preview renders via DOMPurify with the pinned allowlists in `render-md.js` (old tag/attribute core plus `del/s/input`, `checked/disabled/type/class`; `script/style/iframe/object/embed/noscript` dropped WITH content; `javascript:`/`data:` URIs dropped, `http/https/mailto`/relative kept). Output set via `innerHTML` of the sanitized string. (`innerHTML` of untrusted strings is prohibited everywhere else.)
-- **CSS:** Tailwind CSS v4, CSS-first (`@import "tailwindcss"` in `web/src/ui.css`, `@tailwindcss/vite`
-  plugin, no tailwind.config, no CDN); dark mode is the default theme (class on `<html>`, persisted).
+Read pages (`GET`): `/`, `/explore`, `/how-it-works`, `/api`, `/new`, `/import`, `/orgs/new`, `/keys`,
+`/invitations`, `/notifications`, `/login-required`, `/setup`, `/{owner}`, `/{owner}/repositories`,
+`/{owner}/organizations`, `/{owner}/settings`, `/{owner}/teams/{slug}`, `/{owner}/{repo}` (code),
+`/tree[/{path}]`, `/blob/{path}`, `/commits`, `/commit/{sha}`, `/wal`, `/issues`, `/issues/{num}`,
+`/pulls`, `/pull/{num}` (+ `/commits`, `/files`), `/checks`, `/checks/{sha}`, `/releases`,
+`/releases/{tag}`, `/forks`, `/labels`, `/milestones`, `/settings[/{tab}]`, `/fork`, `/issues/new`,
+`/pulls/new`, `/releases/new`.
 
-### 2.3 Routes (inventory identical to Rust spec §10.2)
+Writes post to sibling paths on the page that owns them (`…/close`, `…/merge`, `…/reviews`,
+`…/threads/{id}`, `…/labels`, `…/milestones/{id}/state`, `…/settings/{tab}`, `…/releases/{tag}/assets`,
+the `star|unstar|watch|unwatch|tag` toggles, owner profile/avatar verbs, notification/invitation state
+changes). Three read fragments serve htmx directly: `/checks/{sha}/contexts`,
+`/pull/{num}/threads/{tid}`, `/pull/{num}/merge/task`. Shape-generic families (teams) go through one
+dispatcher (§2.3).
 
-| Route | Page |
-|---|---|
-| `/` | landing (static marketing + concept GIFs + quickstart; zero API calls) |
-| `/explore` | owners (list of owners; each → their repos) |
-| `/how-it-works` | developer deep-dive (object-store idea + WAL internals; zero API calls) |
-| `/new` | create-repo placeholder form (issue #210 — owner/name/format/visibility → `POST /api/v1/repos` → 201 navigates to `/{o}/{r}`; 409/400 inline, never a tray) |
-| `/api` | API docs page |
-| `/:owner` | owner profile (identity + tab strip + repository-count teaser; the listing and memberships live on the tabs below) |
-| `/:owner/repositories` | owner repositories tab (Forgejo #422 — the toolbar/CTA/grid/import listing, moved verbatim) |
-| `/:owner/organizations` | owner organizations tab (Forgejo #430 — the #423 membership list, moved verbatim from the profile rail) |
-| `/:owner/:repo` | repo shell — tabs Code, Commits, Issues, Pulls, Checks, Releases, Settings + tasks overlay |
-| `/:owner/:repo/tree/*` | tree at ref/path |
-| `/:owner/:repo/blob/*` | blob at ref/path |
-| `/:owner/:repo/commits(/…)` | commit history |
-| `/:owner/:repo/commit/:sha` | commit detail |
-| `/:owner/:repo/wal` | WAL/overview page (kept route; menu entry lives in the settings sidebar) |
-| `/:owner/:repo/settings` | settings (left-sidebar sections, issue #123) |
-| `/:owner/:repo/fork` | fork composer (Forgejo #438 — top-level standalone page: same URL as the old nested route, hoisted out of the Repo shell, so it renders under the site header only) |
-| `/login-required` | log-in interstitial (Forgejo #502 — static route before `/:owner`: `?next=` = attempted action URL + `?action=` = its label; Log-in enters `/_auth/login?next=` and lands back on the action; back/cancel returns; an owner literally named "login-required" loses its UI page — same reservation class as `/orgs/new`) |
-| `/setup` | Setup UI (§2.10) |
+### 2.4 Gates (exact parity with the API)
 
-All deep-linkable; every UI route returns the SPA `index.html` from the server. Pages are static route
-components (`component={Commit}` with a top-level `import` in `web/src/index.jsx`), bundled into the app
-by vite — no code-splitting wired up.
+`s.gated` applies the require-read rule (`anonymous_read`); `s.repoVisible` applies the repo read gate —
+the identity verdict runs **before** the anonymous flag (Forgejo #345), so a public repo stays readable
+under `anonymous_read=false`. Per-action role floors (read/triage/write/maintain) are enforced in the
+handlers, and feature flags hide only creation affordances. A page URL has no privilege of its own: it
+must reproduce the gate its API twin enforces.
 
-### 2.3.0 Landing page (`/`, issue #187)
+### 2.5 Writes
 
-`web/src/pages/Landing.jsx`: static marketing, ZERO API calls (no `useData`, no SDK import, no `fetch` — the front door spends no store round trips; pinned by `web/test/unit/landing.test.js`). Hero (H1 + sub in README L3–5 language + two CTAs only: "Browse repositories" → `/explore`, "Push in 30 seconds" → `#quickstart`; setup lives in the top nav + the quickstart auth line, the walgit object-protocol one-liner lives on `/how-it-works` — both removed from the hero by #229), four alternating concept sections (GIF + caption + 2–3 sentences: push, bucket-as-database, fetch/clone, collaboration-as-objects), and a `#quickstart` strip (the README push block + auth-modes one-liner + SSH one-liner + `/explore` CTA + the "How it works →" deep-dive CTA at the page bottom). `*` fallback renders Landing (safe default: no API calls, no confusing empty state).
+Forms POST/PUT/DELETE to sibling paths (page URLs stay GET/HEAD). Every write: `ParseForm`, a
+**same-origin check** (`Origin`, falling back to `Referer`, fail-closed when both are absent), the
+service call, then **303** back to the page (the SPA's redirects) or `HX-Redirect` for htmx posts.
+Validation errors re-render the page with 400/422 and the submitted values; authority errors keep
+401/403/404; a missing service renders the honest "not wired" card (never a dead button). Destructive
+actions require a typed confirmation (`data-danger-confirm`), re-validated server-side.
 
-`web/src/components/ConceptGif.jsx` renders one concept figure: still-first (`<name>-still.gif` renders immediately and is the `<noscript>` output); JS swaps in the animated `<name>.gif` only when `matchMedia("(prefers-reduced-motion: reduce)")` does NOT match (listens for changes). Served prefix pinned: `/_ui/concepts/<name>.gif` (vite `base: "/_ui/"` copies `web/public/concepts/` → `dist/concepts/`). `loading="lazy"` + `decoding="async"` + explicit `width="640" height="360"`. Accessibility: plain `img alt` per scene (pinned by test; never `role="img"` + `aria-label` on top — that double-announces), adjacent text captions restating every point, nothing GIF-only.
+### 2.6 htmx — and what it is not
 
-Concept assets pipeline: generator `internal/devtools/landinggif/` (stdlib `image/gif` only; hand-authored full-ASCII 5x7 font at 2× on 640×360; deterministic; golden freshness test) writes `web/public/concepts/{push,bucket,fetch,collab}{,-still}.gif` (8 checked-in files). `make landing-gifs` regenerates — a MANUAL target (run only when scenes change; NOT a prerequisite of `make web`, so normal builds just copy the checked-in files; staleness fails loudly in CI via the golden byte-equality test). Frame-timing acceptance: key holds ≥ 1.8 s, motion steps ≥ 0.4 s, ≤ 3 moving elements per frame, numbered captions on every frame (storyboards in the issue plan §3.2; budgets + measured sizes in EVIDENCE.md).
+htmx is vendored and loaded globally; pages use it for partial updates (`hx-post`, `hx-target`,
+`hx-select`), navigation stays plain links (boost is not enabled while the SPA fallback exists), and
+events drive refetches (`hx-trigger="ui:sse-… from:body"`). The **SSE transport is not htmx**: its
+extension cannot POST, set headers, read JSON payloads, or tell a 401 from a drop, so
+`web/src/islands/sse.js` keeps a fetch stream (cookies, coalesced invalidation, 1s→30s backoff,
+`ui:auth-required`).
 
-### 2.3.x Developer deep-dive page (`/how-it-works`, issue #191)
+### 2.7 Islands
 
-`web/src/pages/HowItWorks.jsx`: static deep-dive, ZERO API calls (no `useData`, no SDK import, no `fetch` — pinned by `web/test/unit/how-it-works.test.js`, mirroring `landing.test.js`). Hero (H1 "How walhub works" + README L3–5 thesis + the walgit object-protocol one-liner verbatim + anchor TOC) plus six sections (`#idea` the object-store idea, `#wal` manifest/CAS/single-flight publisher, `#push` the 8-step publish ladder, `#read` sync levels/budgets/bundle-uri/remote reader, `#checkpoints` triggers/2-round write/cold-start fold/settings, `#boundaries` the WAL-stays-git-only law + out-of-scope list) and a closing nav card (`/`, `/explore`, `/setup`, `/api`, WAL tab).
+`web/src/islands/` is the entire client behavior surface: `theme`, `menus` (the popover contract),
+`copy`, `autogrow`, `selection` (line selection + `#L` anchors, toggling the shipped `line-hl` class),
+`sse`, `danger`, `submitkeys`. `index.js` boots them idempotently on `DOMContentLoaded` and after every
+htmx swap (`htmx:afterSwap`/`afterSettle`); each island marks the nodes it owns. No client data layer,
+no router, no framework.
 
-GIF reuse: all four concept scenes reappear with alt text imported verbatim from `Landing.jsx`'s `CONCEPT_ALTS` (one source of truth — no copied strings to drift) and the same captions, through `ConceptGif` (still-first, reduced-motion, `/_ui/concepts/`). The two new figures are static inline SVGs (`web/src/components/HowDiagrams.jsx`: CAS commit-point sequence, checkpoint fold timeline — currentColor strokes, `<details>` text fallback each, no animation, no new assets, no new deps; justified because no GIF covers either claim). Claim honesty: every non-obvious claim carries a trace comment (doc section + `wal.*` config key names: `wal.snapshot_every_entries`, `wal.checkpoint_tail_bytes`, `wal.checkpoint_interval`, `wal.batch_window`, `wal.max_batch`, `wal.cas_max_retries`); budgets are depths (cold refs = depth 2, push 4-if-synced), never latency; creationToken = slot epoch seconds; no EVIDENCE.md entry (the page reports sim budgets, makes no hot-path claim). Route + nav: `/how-it-works` in `web/src/index.jsx` (static route; `*` still falls back to Landing), NO header nav entry (removed by #195 — the deep-dive is linked from the landing bottom instead); cross-links Landing → deep-dive (the quickstart-bottom link next to the Browse repositories CTA — the hero cross-link was removed by #229), deep-dive → `/` + `/setup` + `/explore`, repo WAL tab → `/how-it-works#wal`. Server: explicit `r.Get("/how-it-works", s.gated(s.howItWorksPage))` + `how-it-works` in the reserved single-segment names (06 §3.3 + §14 decision + router comment) with a shell/no-cache test — SPA-only, no text twin (R1 S1).
+### 2.8 Server renderers (the XSS boundary)
 
-### 2.3.1 Owners page (`/explore`, issue #117, moved by #187)
+`internal/webui/{markdown,diff,graph,highlight}.go` replaced the browser libraries. Markdown escapes all
+text and allows only `http`/`https`/`mailto`/relative links; diffs are parsed into typed lines and
+rendered per cell; the commit graph is emitted as SVG; highlighting emits escaped token spans. **Never
+pass user-derived bytes through `template.HTML`**, and never reintroduce a client sanitizer
+(marked/DOMPurify are gone by D-WEB-14).
 
-`web/src/pages/Owners.jsx`: an intro card, then one section per owner with that owner's repos.
+### 2.9 URL state replaces SPA memory
 
-- **Intro card** (`.card`, one short paragraph): what walhub is (git host whose only database is an
-  object store), what it does (push over smart HTTP; browse/manage repos here), how (refs, packs,
-  config, policy as bucket objects; disposable instances).
-- **Data** (dogfood rule intact): `useData("owners", …owners.listDetailed({sort:"activity",order:"desc"}))` (Forgejo #295 over the #283 follow-up — the server ranks ALL owners by the per-owner max-commit rollup before the client slices, so first paint is ordered and active owners past any cap surface; the rows carry each owner's `last_commit_time`, so the page filters to active owners with zero extra GETs), then one `OwnerSection` per
-  shown owner with `useData(`repos:${owner}`, …owners.detailed(owner, {sort:"activity",order:"desc"}))` — the same cache key the
-  `/:owner` page uses, so the two pages share fetches. The object-row owners surface is
-  `owners.listDetailed()` (07 §8 — per-owner `last_commit_time` rows, same sort query). The intro card's owner total is the payload's uncapped row count — never the page's slice. The intro card's repo total (Forgejo #307) is `instanceRepoTotal` over the SAME uncapped payload rows (the sum of the served `repo_count` fields — never the top-5 slice, never a per-owner listing walk).
-- **Order**: owner sections most-recent-commit-first (Forgejo #283 — the
-  server orders the names (`sort=activity&order=desc` over the derived
-  rollup) AND each section reports `ownerActivity` over the detailed doc it
-  already fetches, the page re-ranks via `orderOwnersByActivity` as docs
-  land — the client rank is the fallback/enhancement for missing values
-  and stale catalog data, never contradicting the server (same total
-  order: known desc, unknown/pending last, name tiebreak); unknown/pending
-  sorts last, name tiebreak), repos most-recent-commit-first (Forgejo #247). The listing
-  path now carries commit times (`GET /api/v1/owners/{owner}/repos/detailed`
-  rows carry `last_commit_sha/time` + `last_push_at`), so the server sorts
-  (`sort=activity&order=desc`) and the client stabilizes with
-   `orderByActivity` in `web/src/lib/owners.js` (RFC 3339 desc, unknowns last,
-    ties on `(owner, name)` — the server's key order — headless-tested).
-     (Forgejo #283: owner SECTIONS arrive server-ordered by the rollup and
-    re-rank on commit activity via `orderOwnersByActivity` as section docs
-    land; `newestFirst` is a retained legacy proxy, unused by the page.)
-    (Forgejo #295: the active-only filter (`activeOwnerNames` over the
-    detailed rows — null `last_commit_time` dropped) runs BEFORE the top-5
-    slice, so settled-inactive owners never mount; the re-rank above applies
-    to the shown sections only.)
-- **Caps**: `MAX_OWNERS` 5 owner sections (Forgejo #295 — the top 5 most
-  active owners, not 50 name-sorted), `MAX_REPOS_PER_OWNER` 10 repos per section (constants in
-  `web/src/lib/owners.js`, headless-tested). Owners with no known commit time never mount (fewer than 5 active owners renders fewer sections, no filler); overflow folds behind links, never a spinner: per-owner
-   `+N more →` to `/:owner` (uncapped there), and a "showing top 5 of A active owners" line only when active owners overflow the cap. The intro card carries the instance owner total ("Home to N owners"). The page
-  costs 1 + shown-owners SWR GETs (6 cold, down from ~51); per-owner sections render independently (one slow owner never
-  blocks the rest).
-- **Styling** (issues #137, #142): the intro keeps its `.card`, but owner sections are flat —
-  no cards-in-cards. Sections sit in a `divide-y divide-zinc-200 dark:divide-zinc-800`
-  stack (dividers, not nested containers); the owner heading is a clear section header at
-  `text-base font-bold tracking-tight` (a full step above the `text-sm` rows — #142 promotes
-  the quieter #137 `text-sm`, so the header reads as a header by scale and weight, not just
-  link color). Shared `.muted`/emerald-link classes — correct in dark (default) and light
-  with no page-specific colors. Links stay plain anchors (keyboard flow unchanged).
-- **Star counts** (issue #137): every repo row on `/` and on `/:owner` carries a `<StarCount>`
-  (`web/src/components/StarCount.jsx`) rendering `(3 ⭐)`-style beside the link via
-  `GET …/api/social` under the shared `social:{o}/{r}` 30 s `useData` key (single-flighted,
-  LRU-capped per §2.4) — the two pages share fetches, repeat visits within the TTL cost
-  zero GETs while entries survive under the 400-entry LRU cap (a fully-maxed 500-row
-  cold load evicts the oldest entries, so the absolute worst case refetches some), and the link renders first with a muted `(…)` placeholder, so counts never
-  block page render. Worst case stays bounded by the #117 caps (50 × 10 = 500 GETs cold,
-  each independent). Formatting/TTL constants live in headless-testable `web/src/lib/stars.js`
-  (`web/test/unit/stars.test.js`). Scope note: the org page has no repo listing, starred
-  lists are SDK-only (no listing UI yet), and the repo chrome already shows its count via
-  the star toggle — so `/` + `/:owner` is everywhere a repo list renders.
-- **Two-column rows + last-active stamps** (issue #142): repo rows on `/` and `/:owner` share
-  one `<RepoRow>` (`Repos.jsx`: link + `<StarCount>` + `<ActivityStamp>`) in a responsive
-  `grid grid-cols-1 sm:grid-cols-2` (one column on narrow widths) — newest-first order is
-  preserved (grid fills row-wise in source order) and the #117 caps/overflow links are
-  unchanged. Each row also carries `active <DateTime>` via `<ActivityStamp>`
-  (`web/src/components/ActivityStamp.jsx`, the #133 shared date component — relative text,
-  local-tz hover title). Source decision (Forgejo #247 supersedes the
-  per-row fetch on listing pages): the stamp is the latest COMMIT date from
-  the listing row itself (`last_commit_time` — no per-row GET on `/explore`
-  or `/:owner`, dropping the ~500-GET cold-cache worst case to zero);
-  `<ActivityStamp>` takes `at`/`empty` props for this and keeps the legacy
-  `GET …/commits?n=1` fetch (ref defaults to HEAD server-side, 07 §9.6) for
-  callers without listing data and as the fallback when the listing reports
-  unknown (null `at` on a non-empty repo — until the sweep backfills it).
-  The summary (`GET …/api`, §9.1) carries no date field, so it cannot
-  source a stamp without a new backend field; the overview's `manifest.last_push` is
-  push-time (not commit-time) and the overview is a no-store heavyweight
-  (health/bundles/plan recomputed per call) — more cost per row for a less precise signal.
-  Honest-proxy note: a push that adds no commits (branch delete, tag-only push) does not
-  move the stamp; "last commit" is the documented meaning, hence the `active` label, and
-  empty repos render "no commits yet" (never a fake epoch — listing-verified
-  empty repos skip the fetch via `empty`; otherwise the unborn-HEAD 404 maps to
-  `{commits: []}` in the fetch, so it stays out of the error tray). Cost mirrors star counts
-  (shared `activity:{o}/{r}` 30 s `useData` key for fallback fetches, placeholder-first, tray-on-error, bound by
-  the #117 caps); extraction/date-choice constants live in headless-testable
-  `web/src/lib/activity.js` (`web/test/unit/activity.test.js`); ordering in
-  `web/src/lib/owners.js` (`web/test/unit/owners.test.js`). No new endpoint, no new SDK
-  method (`owners.detailed()`, 07 §8); no new deps.
+Client-only view state is now a query parameter: `?graph=1` (commit graph), `?doc=<name>` (directory
+docs), `?view=code` (markdown code view), `?all=1` (all WAL segments), `?state=`/`?after=` on
+notifications, `?skip=`/`ref`/`path` pagers. Selected lines ride `#L<n>[-L<m>]`. Nothing is persisted
+locally.
 
-### 2.3.2 Create form (`/new`, issue #210)
+### 2.10 Setup-only mode
 
-`web/src/pages/New.jsx`: owner (a dropdown of the signed-in principal + their member orgs
-per Forgejo #346 — resolved via `allowedOwners` in `web/src/lib/orgs.js` over
-`orgs.list()` + per-org `members.get` probes, failing open to self-only; a `?owner=` preset
-outside the admitted set clamps to self; host admins needing a foreign namespace use the
-API — the UI cannot see the admin flag on `me`), name, object_format (advanced, default sha1), visibility toggle (rides the POST body
-into the materialized `access.json`) → `repos.create()` → `201` navigates to `/{o}/{r}`
-(placeholder view); `409` renders "already exists — take me there" (the winner URL parsed from
-the plain-text body, linked inline); `400`s render field errors inline (client-side
-`validateRepoName` prefails fast — the server re-validates; never a tray). Writers-only entry
-buttons on `/` (Owners) and `/:owner` (Repos) mirror `require_write` (hidden for anonymous
-without write, so the button never promises what the POST refuses). `/new` is a client route
-(served through the `/:owner` shell shape like `/import` — no explicit server route) and joins
-the reserved single-segment UI names (06 §3). Headless cover: `web/test/unit/create.test.js`
-(SDK twin paths + lane, flag-ride query, frozen flag-less `repo.create`, naming validation,
-UI-route-collision set, the `refs==0 && marker` view predicate).
+The provider answers `/setup` in setup-only mode with the banner and boot errors, and its **POST**
+(validate/save) is the recovery path: a saved valid file returns the process to a normal boot. Only the
+`setup*` deps are bound there; every other page is outside the setup-only route set (503 by design).
 
-### 2.3.3 Placeholder repo view (issue #210)
+### 2.11 Testing
 
-The Code tab's `EmptyRepoGuide` plus placeholder extras (rendered ONLY when the summary carries
-the `placeholder` projection — `health:"empty"` + marker, never marker alone): creator +
-created-at line, expiry note if set (always null in this change — TTL off), verbatim clone/push
-commands (server `clone_url`, `copyText` parity with `CloneMenu`), and the admin-only Delete
-(existing `repo.delete()` + the danger-zone typed-confirm idiom inline; success invalidates
-`owners`/`repos:{owner}`/`repo:{full}` and navigates to `/:owner`). Stale markers on real repos
-carry no projection, so the guide clears on the first push with no client change.
+Page handlers are tested with `httptest` (status, parsed landmarks, classes, hrefs, form fields, gate
+failures) plus `golang.org/x/net/html` where structure matters; the package holds the same ≥95 % gate as
+every other `internal/...` package. Pure island logic (SSE framing/backoff/coalescing, SDK request
+shaping) stays under `node --test` with `web/test/unit/*.test.js`. Rendered verification (390 px and
+desktop, real server, Chromium) is required for any UI change — a DOM assertion is not a rendered check.
 
-### 2.4 Data layer (hand-rolled)
+## 2b. Historical: the SolidJS SPA (deleted by D-WEB-15)
 
-Implement a module `web/src/lib/data.js` providing:
+The pre-migration UI was a SolidJS SPA (`web/src/**`, `solid-js` + `@solidjs/router` + marked +
+DOMPurify, vite-built shell) whose per-page contracts (landing, owners, create form, repo chrome,
+blob/commit rendering, WAL/settings, setup) were realized as the Go templates and handlers described
+in §2. The app shell, client router, data/cache layer and client markdown sanitizer are gone; the
+route inventory now lives in §2.3.1 and the decisions in DEVIATIONS.md (D-WEB-6/-7 superseded by
+D-WEB-14; D-WEB-15 records the deletion). Do not extend the old shapes.
 
-- **`useData(key, fn, ttl?)`** — a promise-cache: `Map` keyed by a string key, entry `{promise, value, at}`; TTL revalidation with default **5 s**; **sha-addressed payloads cached forever** (`ttl = Infinity`); LRU cap **400** entries; background refresh keeps stale data on screen; errors go to the **global error tray** (max 6, deduped by key+message) rather than throwing into the page. The cache maps are module-level singletons; the value is exposed as a signal so components `createEffect` over it. Every fetch is an **ordering generation** (`entry.seq`): a body or error commits only while its generation is still newest, so a stale disk-cache hit or reordered response resolving after a newer fetch started is dropped and can never overwrite fresh state (#41). **`invalidate(key)` always starts a new generation** — even over an in-flight fetch — and runs the refetch under the SDK's HTTP-cache bypass (`ReposClient.withNoStore`: `cache: "no-store"` + `no-cache` headers), so mutation-triggered refetches always read a post-mutation body; background reads stay ordinary cached reads and still single-flight. An SDK `NOT_MODIFIED` (HTTP 304) resolution is silent keep-current: value untouched, freshness timestamp bumped, no tray entry. Headless tests drive the same path via `prefetchData(key, fn)` (the `ensureEntry → start` path minus reactivity — `useData`'s effect cannot run under the solid-js server build).
-- **`usePending()`** — a global counter of in-flight fetches AND pending dynamic imports; drives the **top progress bar** (a fixed-position bar animating width; 0 → hidden). A module-singleton signal + an effect writing `style.width`.
-- **`useResolved(rev)`** — the two-step resolve→sha-addressed pattern of the spec §9.2: step 1 `repo.resolve(rest)` (ref-dependent, SWR, 5 s TTL, revalidates); step 2 fetches `tree/{sha}/…`, `blob/{sha}/…`, `commits?ref={sha}`, `commit/{sha}` with `ttl = Infinity` (immutable). Implemented as two chained caches keyed `resolve:{rest}` → then `sha:{sha}:…` — the chain IS the idiom; a tiny `useResolved(rest, kind)` helper composes it so pages don't repeat it.
-- **Empty/degraded short-circuit (issue #209):** step 0 peeks the shell's shared `repo:{full}` summary entry (`peekCached` — review S3's named mechanism; no fetch): known-empty settles the `EMPTY_REPO` sentinel with **zero doomed requests** (the selArgs-null pattern — a suppressed fetch, not a filtered error). Fallback when the summary is not yet loaded: a 404 carrying the server's `empty repository:` prefix maps to the same sentinel (damage-404s carry no marker by design, so degraded-as-empty misclassification is impossible). Sha-step 404s on a known-degraded repo settle `DEGRADED_MISSING` for inline notices (`tolerateDegraded` wrapper: 404 + known-degraded → sentinel, everything else rethrows — never a global 404 mute); the sentinel caches under the sha key, so pages offer a retry (invalidate) and the WAL re-audit button invalidates the `sha:` prefix. Predicates (`isEmptySummary` incl. the unborn-shape fallback for old servers, `isDegradedSummary`, `isEmptyError`) live in headless-testable `lib/data.js`.
-- **Error tray:** fixed bottom-right stack, max 6 entries, deduped, dismiss button, auto-fade after 10 s.
-- **Progress:** counts every `useData` fetch start/finish and every dynamic import.
+## 3. Serving from the Go binary (embedding contract)
 
-### 2.5 SSE in the SPA (hand-rolled; never `EventSource`)
-
-`EventSource` cannot set `Accept`/auth headers, so ALL streaming goes through the SDK's fetch-based readers. Stream lifecycle is owned by the page, not a framework — a shared helper `mountStream(open, onFrame)` in `lib/sse.js` (used by every streaming component): holds one `AbortController` in a closure slot; `run()` aborts any previous controller, swaps in a fresh one, sets the state signal (`"open"|"closed"|"error"`), and calls `open(signal)`; it returns a cancel function that aborts and sets `"closed"` (unmount → stream gone). Errors set `"error"`, never throw into the page.
-
-### 2.6 Repo chrome
-
-- **Tabs** computed from the pathname (Code / Commits / WAL / Settings), matching §2.3; the active tab is a memo over a `location` signal updated by the router's `popstate`/`navigate` hooks.
-- **Repo context** (owner/name/refs) fetched **once per visit** via `useData(`repo:${owner}/${name}`, …, 5s)` and stored in a module-level signal consumed by the repo pages.
-- **The repo context also shares the summary signal** (issue #209): tab pages read the shell's entry through `ctx.summary` — no second subscription, no extra fetch. `undefined` = loading, `null` = missing/deleted (the #200 `tolerateMissing` shell).
-- **Degraded banner** (issue #209): when the summary reports `health:"degraded"`, an amber (`border-amber-500`, both themes) `role="status"` banner renders under the tab bar — "Some objects are missing (fsck: N missing). Reads may fail; pushes of new refs still work. Details in Settings → WAL." (link `/{full}/settings#wal`). Never a toast, never blocks navigation.
-- **Clone menu** renders the setup recipes from `GET /services/setup.json` (spec §8.9) — never its own copy. The dogfood rule has the same two exceptions the Rust spec names: this fetch and nothing else bypass the SDK (both fetch server-rendered recipe payloads; use plain `fetch` with same-origin credentials).
-- **Branch/tag picker** streams refs over SSE via `repo.refStream`: 50 per page, **150 ms debounce** on the query input, **aborts the in-flight stream on every keystroke** (controller swapped per keystroke via the §2.5 pattern; previous stream aborted BEFORE the new one opens), paints rows as they arrive (`onRef` → append to a signal array).
-
-### 2.7 Blob rendering
-
-Server returns raw text (spec §9.5). Decision tree:
-
-```text
-too_large (2 MiB cap hit)  → explanatory placeholder
-binary (NUL / invalid UTF-8) → explanatory placeholder ("binary file, {human size}"; exact bytes in title)
-name ends .md/.markdown    → MarkdownBlob   (Preview | Code toggle; marked + DOMPurify in preview,
-                                              raw text in code view)
-otherwise                  → CodeBlob       (per-line <table>, tinted by the mini tokenizer,
-                                              GitHub-style #L12 / #L12-L20 selection — issue #243)
-```
-
-### 2.8 Commit rendering — hand-rolled unified-diff parser
-
-`parsePatchFiles(patch, sha)` runs client-side on the `patch` field of `commit/{sha}` (spec §9.5: unified diff vs first parent, `--no-color`, rename detection). **Grammar it MUST accept** (each state terminal unless noted):
-
-```text
-patch      := header+ body* EOF
-header     := "diff --git a/<path> b/<path>" LF
-            ( "old mode" | "new mode" | "deleted file mode" | "new file mode" | "copy from" | "copy to"
-            | "rename from" | "rename to" | "similarity index" | "dissimilarity index" | "index " )*
-            ( "--- a/<path>" | "--- /dev/null" ) LF
-            ( "+++ b/<path>" | "+++ /dev/null" ) LF
-            ( "@@ -<o>[,<n>] +<p>[,<q>] @@ <ctx>?" LF body )+
-body       := ( " " line | "-" line | "+" line | LF )*
-```
-
-Parse into `{path, oldPath?, added?, deleted?, isBinary?, hunks: [{oldStart, oldLines, newStart, newLines, lines: [{t: " "|"-"|"+", text}]}]}`. File boundaries: the next `diff --git` line; binary files appear as `Binary files … differ` / `GIT binary patch` — mark `isBinary` and skip. Renames come from `rename from/to` (use the NEW path as the display key, matching the server's `stats[]` convention). Diffstat totals = Σ additions/deletions from `stats[]` (authoritative) — the parser's counts are for per-file badges only.
-
-Rendering: per-file unified/split toggle (unified default; split = two columns built by pairing `-`/`+` runs via a 20-line LCS window — hand-rolled, ~60 lines); file anchors by `stats[].path`; commit bodies linkified (sha → `commit/:sha` links, bare URLs → anchors); trailers grouped (People / merge-queue keys / Other) with sha → commit links and `mailto:` rendering. Both modes render line-number gutters derived from the `@@` headers at display time (unified: one column — new-side numbers, old-side for deletions; split: old left, new right) with click/drag/shift-click selection and shareable file-scoped hashes — issue #244 (shared `DiffBody`, same hash in both modes).
-
-### 2.9 WAL page, tasks overlay, settings page
-
-Content requirements are identical to the Rust spec §10.2 (this doc does not restate them; implement exactly there):
-
-- **WAL page** (`/:owner/:repo/wal`): health box (issues, deep fsck result, suggestions — each dispatches its op as a task), ops box (single-flight buttons, boolean/strategy params, live log via SSE, grouped op history), manifest + local-copy boxes, packs/checkpoints boxes, bundle chain tree (roots = fulls; children under `base_id`; sorted by `creation_token`; warning when an incremental's base vanished), bundle slot plan per strategy (built/skipped/too-small/unavailable counts + actionable rows), compactions table, WAL segments table (newest 5 + "all").
-- **Object-health card** (issue #209): renders the overview `fsck` projection when a cached audit report exists (absent otherwise — never-audited repos show no card): `missing_total`, the bounded missing-oid sample (first 20 + "…and N more"), `problems`, `repaired_seq`, last-audit time, the effective repair source (or "none — set `upstream.git` to enable repair"), the amber `repair_stalled` notice, and a "run fsck now" trigger (the existing `fsck` op — single-flight, SSE attach — followed by a `sha:` prefix invalidation so healed objects refetch past cached degraded sentinels).
-- **Tasks overlay:** polls `…/tasks` (5 s busy / 15 s idle — Forgejo #396: 1.5 s busy hammered the hottest endpoint while maintenance/follow tasks ran; progress percentages stay live at 5 s), instance-aware finishing rule, 20 s linger, progress pill + dropdown. Polling via a signal + recursive `setTimeout` chain (NOT `setInterval`, so a slow poll never stacks).
-- **Settings page** (issue #123): left sidebar + content column — a `nav[aria-label="Settings sections"]` with the standard listing (General: repo description editor (issue #235, first tab and default); Scheduled tasks: strategy table + placement/host facts + upstream follow status; Push policy: textarea editor, 400 ms debounced validate, dry-run against last N pushes, save/discard/copy; Effective config & history: TOML editor with debounced validate, publish with a message, clear, per-revision history with "Revert to this" + line diff; Access; CI tokens; Webhooks; WAL rendered inline) plus the Danger Zone in its own danger-styled section. WAL moved here from the repo tab bar (the `/wal` route is kept, highlights Settings now); entries are `#id` deep-linkable with stale-hash fallback, native buttons with `aria-current="page"`, `.side-nav-*` classes in `ui.css` (dark + light); below `lg` the sidebar stacks above the content and each section row scrolls internally. Every tab's form is reworked for the narrower column (grid/flex-wrap rows, no fixed-width inputs that overflow, every data table in an `overflow-x-auto` wrapper). Nav model + hash helpers are the headless-testable `web/src/lib/settingsNav.js`.
-
-### 2.10 Setup UI (`/setup`, D6)
-
-First-class page backed by the Setup API (specified in `05_config.md`): `GET /api/v1/setup` (full schema + effective values + file state), `POST /api/v1/setup/test` (validate without saving), `PUT /api/v1/setup` (validate + write), and `POST /api/v1/setup/auth/test` (OIDC discovery probe).
-
-- **Rendering:** one section card per schema section (`server`, `auth`, `store`, …) listing every key with its type, default, and the **current effective value** (file value if present, else default, flagged as such). Booleans render switches, enums `<select>`, everything else text/number inputs; TOML struct lists (bundles.strategy, server.auth.tokens) render textareas over a `[[name]]` fragment. **Auth is its own card directly after `server`** (keys keep their `server.auth.*` names), and its rows are **mode-conditional**: `lib/setup.js FIELDS[].modes` names the `server.auth.mode` values a row applies to (`token`+`oidc` for `anonymous_read`, `tokens`, `trusted_forwarders`; `oidc` for everything else), and rows outside the effective mode are not rendered. **Sane-default knobs hide in a per-section collapsed Advanced group** (issue #168): FIELDS entries carry an optional `advanced: true` flag (same pattern as `modes`/`backends`); `splitAdvanced` partitions each card's rows and the advanced rows render inside a native `<details>` disclosure (collapsed by default, keyboard-accessible summary, UI-only open state, `.setup-advanced` classes in `ui.css` for dark + light). Collapsed rows stay mounted — like visible rows, unlike mode/backend-gated rows — so `validateSetup`, `normalizeSetup(filterSetupToVisible(values))`, and the Validate/Save payloads are byte-identical expanded or collapsed; the disclosure renders only when at least one advanced row applies under the current mode/backend gates, and inline-hint errors inside it surface as a count on the summary.
-- **Client-side validation mirrors the server rules exactly** (same field checks as the server's validator: ranges, enum membership, URL/listen formats, cross-field rules like auth mode vs listen address). Validation runs per-keystroke (debounced 250 ms) for inline hints and on submit as the gate.
-- **Buttons:** **Validate** → `POST /api/v1/setup/test` with the full normalized payload (unknown keys are a validation error, not a silent drop); **Save** → run validate, then `PUT /api/v1/setup`. On success the server writes `<data-dir>/walhub.toml` atomically (tmp + rename) and returns `{written: true, restart_required: [keys]}`; the UI shows which changed keys need a restart (hint list: keys under `server.*` and `store.backend`/`store.root` always require restart; others only when the server caches them — the response is authoritative, the UI just renders it).
-- **OIDC helpers in the auth card:** the card states the **redirect URI to register at the issuer** — `<public_url or page origin>/_auth/callback`, rendered copyable — and a **Test OIDC setup** button POSTs `{issuer, client_id, redirect_uri}` from the FORM (not the saved config) to `/api/v1/setup/auth/test`, which fetches `<issuer>/.well-known/openid-configuration` (10 s timeout, 1 MiB cap) and fails 422 with the reason: unreachable, not a discovery document, issuer mismatch (an OIDC document must name its own issuer), or a missing `authorization_endpoint`/`token_endpoint`/`jwks_uri`.
-- **Setup-only mode:** when `GET /api/v1/setup` reports the config is invalid, the page renders the exact validation errors at the top (section, key, message, offending value), disables nothing (the operator must be able to fix and re-validate), and shows a banner that the server is serving only `/setup`, `/healthz`, `/readyz` (everything else 503) until a fixed config is saved AND the server restarted.
-- **Access state from the API response** (`open | admin_required | token_required`): open — page renders fully; admin/token required — page renders a 403 explanation with the retry instruction (reload after authenticating; `WALHUB_SETUP_TOKEN` hosts take the token as a query param on the PUT/POST, never stored).
-- **Dogfood exception:** like the recipe fetches, the Setup page may use plain `fetch` for the three `/api/v1/setup*` endpoints because the SDK surface does not include them (§6 dogfood rule).
-
-## 3. Serving from the Go binary (embedding contract, byte-compatible)
-
-The SPA is the **vite-built `web/dist/`**, embedded into the binary. The SDK bundle is embedded alongside:
+The built UI is embedded; pages are rendered by Go at request time (D-WEB-14), so the shell is no longer
+served from disk:
 
 ```go
 //go:embed all:dist
-var web embed.FS            // dist/index.html, dist/assets/*, dist/repos.js — dist/ is build output,
-//                           created by `make web` (vite SPA first, then the esbuild SDK bundle)
+var web embed.FS   // dist/app.css, dist/ui.js, dist/htmx*.js, dist/repos.js, dist/assets/*,
+//                  dist/concepts/*, dist/.keep — dist/ is build output (`make web`)
 ```
 
 | Path | Cache behavior |
 |---|---|
-| `/_ui/assets/*` (content-hashed vite output, immutable) | `Cache-Control: public, max-age=31536000, immutable` |
-| `/_ui/index.html` and every UI route (the SPA shell) | `Cache-Control: no-cache` + ETag |
-| `/repos.js` | `Cache-Control: no-cache` + ETag |
+| `/_ui/assets/*` (content-hashed, immutable) | `Cache-Control: public, max-age=31536000, immutable` |
+| `/_ui/app.css`, `/_ui/ui.js`, `/_ui/htmx.min.js`, `/_ui/htmx-ext-sse.js` (stable names) | `Cache-Control: no-cache` + strong ETag |
+| every rendered page | `Cache-Control: no-cache` + strong ETag (a deploy is visible on the next request) |
+| `/repos.js` (SDK) | `Cache-Control: no-cache` + ETag; module MIME is load-bearing |
 
-Compression: `gzip` via server middleware for text assets (`text/*`, `application/javascript`, `application/json`, `text/css`) when `Accept-Encoding` contains `gzip` and the body is ≥ 1 KiB — on-the-fly `gzip.Writer` with level 6, `Vary: Accept-Encoding` set, no brotli, no precompressed sibling files. `image/*` (the landing concept GIFs) passes through uncompressed — gzipping LZW bytes is pure CPU per request (06 §Decisions, issue #187 B2; note this corrects the older paragraph that implied a content-type gate the code never had). Serving details, route registration under `internal/server`, and the `X-Walgit-Capabilities` edge contract are specified in `06_server_http.md`; the API endpoints themselves in `07_api.md`.
+Compression: `gzip` via server middleware for text assets (`text/*`, `application/javascript`,
+`application/json`, `text/css`) when `Accept-Encoding` contains `gzip` and the body is ≥ 1 KiB —
+on-the-fly `gzip.Writer` level 6, `Vary: Accept-Encoding`, no brotli, no precompressed siblings.
+`image/*` (the landing concept GIFs) passes through uncompressed. The `X-Walgit-Capabilities` edge
+contract and route registration are specified in `06_server_http.md`; API endpoints in `07_api.md`.
 
 ## 4. Repository layout
 
 ```
-web/
-├── index.html          ← SPA shell source: #root, vite entry (built to dist/index.html)
-├── vite.config.mjs     ← SPA build: solid + tailwindcss plugins, base "/_ui/", outDir dist
-├── public/concepts/    ← CHECKED-IN landing concept GIFs + stills (issue #187; vite copies public/ → dist/ verbatim)
-├── sdk/src/            ← artifact A source, SUBMODULES (§1.0): index/core/errors/sse/auth/repo/admin/types
-├── dist/               ← build output, gitignored: index.html, assets/* (hashed), repos.js
-├── package.json        ← runtime: solid-js, @solidjs/router, marked, dompurify; dev: vite, vite-plugin-solid, @tailwindcss/vite, tailwindcss, esbuild. scripts: build:ui, build:sdk, build
-├── src/                ← artifact B: index.jsx router, pages/*.jsx, lib/*.js, ui.css (Tailwind entry)
-└── test/               ← node --test suites (§5): unit/*.test.js (incl. smoke), helpers/fetch.js
+internal/pages/            the page-provider seam (Provider, Auth)
+internal/webui/            env.go server.go render.go router.go helpers.go gates in server.go
+                           markdown.go diff.go graph.go highlight.go   (server renderers)
+                           public.go repo.go collab.go forms.go settings.go parity_*.go (+_test)
+internal/webui/templates/  base.html, partials/*.html, pages/{public,repo,collab,forms,settings}/*.html
+web/src/islands/           theme menus copy autogrow selection sse danger submitkeys (+ index.js)
+web/src/app.css            Tailwind v4 design system (@source'd from the Go templates)
+web/vendor/                htmx.min.js, htmx-ext-sse.js (pinned, vendored)
+web/sdk/src/               the dependency-free SDK submodules → dist/repos.js
+cmd/walhub/webui.go        composition: wireWebUI + the five Bind* binders
 ```
 
-The SPA is vite-built from `web/src/**` into `web/dist/`; the SDK is esbuild-bundled from
-`sdk/src/index.js` to `dist/repos.js` (§1.0); `make web` runs both (`pnpm run build`),
-`make build` depends on it (`16_packaging.md` owns the wiring).
+`make web` builds the stylesheet (Tailwind through the dev toolchain), the island bundle (esbuild), the
+vendored assets and the SDK. That is the whole frontend build: the SolidJS SPA and its vite config are
+deleted (D-WEB-15), so vite is only the `@tailwindcss/vite` host for `app.css`.
 
-## 5. Testing the JS (`node --test`, zero npm test deps)
+## 5. Testing the UI
 
-Runner: Node's built-in test runner — `node --test web/test/unit/*.test.js`. No jest, no vitest, no test-framework dependencies. Logic and DOM are **separated by rule**: every module in `web/src/lib/` except `data.js`'s DOM-adjacent bits must be importable in Node with no `document`/`window` access at module scope (`render-md.js` imports DOMPurify but only touches it behind a `window` guard, so its marked layer stays Node-importable; its `renderBody` throws without a DOM and is covered by the real-Chromium pass instead); DOM wiring lives in `web/src/pages/` and `index.jsx`.
-
-**Pure (headless-testable) modules:** `sdk/src/*.js` (api client groups, injectable `fetch` + stream shim, envelope parser), `lib/sse.js` (frame parser, one parser shared with `sdk/src/sse.js`), `lib/diff.js`, `lib/render-md.js` (marked layer + sanitizer config-shape), `lib/setup.js` (setup form validation rules, mirroring the server), `lib/highlight.js`.
-**DOM-wiring modules (not unit-tested):** `pages/*.jsx`, `index.jsx`, the router glue, anything touching `document`/`location` — exercised by smoke tests instead.
-
-```js
-// web/test/unit/sdk-envelope.test.js (skeleton)
-import { test } from "node:test";
-import assert from "node:assert/strict";
-import { ReposClient } from "../../sdk/src/index.js";
-
-test("SSE envelope → result payload", async () => {
-  const fakeFetch = async () => new Response(
-    `event: progress\ndata: {"n":1}\n\nevent: result\ndata: {"entries":[]}\n\n`,
-    { headers: { "content-type": "text/event-stream" } });
-  const c = new ReposClient({ base: "http://x", fetch: fakeFetch });
-  assert.deepEqual(await c.repo("a/b").tree("main", ""), { entries: [] });
-});
-```
-
-```js
-// web/test/unit/smoke.test.js (skeleton) — real server binary, real fetch.
-// CI serves a build for this file (WALHUB_TEST_WEB_BASE_URL); locally the file
-// skips when no server is up, so `make test` stays green on a cold machine.
-import { test } from "node:test";
-import assert from "node:assert/strict";
-const base = process.env.WALHUB_TEST_WEB_BASE_URL ?? "http://127.0.0.1:8080";
-
-test("pages and SDK serve", async () => {
-  const ui = await fetch(`${base}/`);
-  assert.equal(ui.status, 200);
-  assert.match(await ui.text(), /id="root"/);
-  const sdk = await fetch(`${base}/repos.js`);
-  assert.equal(sdk.status, 200);
-  const mod = await import(sdk.url);                   // the served bytes parse as ESM
-  assert.equal(typeof mod.ReposClient, "function");
-});
-```
-
-Required alongside it: `web/test/unit/setup-api.test.js` (same shape): on a fresh data-dir (D5 defaults boot), `GET /api/v1/setup` → `{access: "open"}`, `POST /api/v1/setup/test` with `{server: {listen: "0.0.0.0:9999"}}` → 200, `PUT /api/v1/setup` → 200 with `restart_required` containing `"server.listen"`. Also required: `web/test/unit/setup-form.test.js` — table-driven cases for the `lib/setup.js` validators mirroring the server (valid values pass; range/enum/format/cross-field violations fail with the server's message).
-
-Make wiring (D3 — all dev/CI targets are Make targets): `test-web:` runs `node --test web/test/unit/*.test.js`.
+- **Go pages**: `httptest` per handler — status, parsed landmarks (`golang.org/x/net/html`),
+  classes/hrefs/form fields, every gate failure (anonymous, invisible repo, role floor), empty/error
+  states, and each write's success/validation/cross-origin path. The package holds the ≥95 % gate.
+- **Pure JS**: `node --test web/test/unit/*.test.js` for logic that stays client-side (SSE framing /
+  backoff / coalescing, SDK request shaping). Counts and diff/markdown behavior are Go tests now.
+- **Rendered checks**: a real browser against the real binary at 390 px and desktop is required for UI
+  changes — `document.scrollWidth == clientWidth`, no overflowing boxes, console clean. A DOM assertion
+  is not a rendered check.
 
 ## 5b. End-to-end: what an operator does
 
@@ -531,14 +352,39 @@ A third-party page embeds the SDK as a module — the only supported integration
 
 ## 6. Dogfood rule
 
-The UI uses the SDK for every server call, without exception except the ones named in §2.6 and §2.10 (both recipe fetches and the three Setup API calls; all fetch server-rendered JSON payloads). No raw `fetch` in `web/src/**` outside the SDK directory and those files. CI grep-checkable: `fetch(` must appear in `web/src/**` only inside those files.
+The JSON API and the `repos.js` SDK are the **programmatic surface** (agents, scripts, integrations) and
+stay exactly as specified in §1; the SDK remains dependency-free and is the only consumer-facing wire
+client. Server-rendered pages do **not** HTTP-loopback: a page handler reads the same service layer the
+API handler reads (repo view, feature services, store seams), so the page and its API twin cannot drift
+on data while neither pays a transport hop. Client-side `fetch` is limited to the island SSE reader
+(§2.6) and the SDK — CI can grep for `fetch(` outside `web/src/islands/sse.js` and `web/sdk/`.
 
 ### Concurrency
 
-Hazard: SSE readers leak when components unmount mid-stream; ref-picker keystrokes stack streams (one per keystroke) and repaint out of order.
-Avoidance (playbook: `13_concurrency.md` — ownership and cancellation rules): every stream is owned by exactly one component-scoped `AbortController`; unmount tears it down via the §2.5 pattern's returned cancel function, and the SDK closes the `ReadableStream` reader in its `finally` (the SDK owns the reader, the component owns the signal — one closer each, no shared mutable reader state). The ref picker swaps its controller per debounced keystroke and aborts the previous one BEFORE opening the new stream, so only one ref stream per picker is ever live; rows are keyed by `name` so late frames from an aborted stream (already cancelled) can never overwrite fresh ones. No unbounded buffering: SSE frames are processed as they are read, appended to bounded signal arrays (cap 1000 rows per picker page); progress callbacks fan out synchronously, never queued.
+Hazard: an SSE reader leaks when its element is swapped out mid-stream, and a reconnect storm can turn
+one dropped stream into a request flood.
+Avoidance (`13_concurrency.md` ownership/cancellation rules): each `[data-sse]` element owns exactly one
+`AbortController`; `htmx:beforeCleanupElement`/`afterSwap` and the island's `cleanup()` cancel it, and
+the fetch reader's loop exits on `signal.aborted` (one closer). Invalidation frames are coalesced with a
+trailing 250 ms window (bursts collapse into one refetch), reconnect uses capped exponential backoff
+(1 s→30 s, reset on the first frame), and a 401 stops the stream and dispatches `ui:auth-required`
+instead of retrying forever. No unbounded buffering: frames are parsed as they arrive and the effects
+are DOM refetches, not client caches.
 
 ## Decisions & deviations from the Rust design
+
+- **D-WEB-14 decisions from the page groups (2026-11-19/20).** A missing or invisible repo is a real
+  404 HTML page (the SPA returned 200 with a client-rendered error); the visibility verdict runs
+  **before** the anonymous_read flag (Forgejo #345), so a public repo stays readable under
+  `anonymous_read=false`. SPA-only view state became URL state (`?graph`, `?doc`, `?view`, `?all`,
+  `?state`/`?after`, pager `ref`/`path`/`skip`) and selection uses `#L<n>[-L<m>]`; nothing is kept in
+  localStorage. The repo tab strip fails **open** (a tab hides only on an explicit `false`). Shape-
+  generic families whose wildcard would collide with `/{owner}/{name}/{tab}` (teams) go through one
+  dispatcher that writes nothing on a non-match, letting the seam fall through. Settings tabs are
+  **path segments** with a 303 from the bare URL (`?tab=` for org settings, where `/{owner}/settings/{tab}`
+  and `/{owner}/{name}/settings` overlap in ServeMux). Writes answer 303 back (HX-Redirect for htmx)
+  except the two bearer-secret answers (CI token, invite link), which answer 200 so the secret never
+  enters a URL. Unwired projections render an honest degraded card, never a dead control.
 
 - **SolidJS + Tailwind v4 SPA (2026-09-02, explicit user request — supersedes the two vanilla decisions above; DEVIATIONS.md D-WEB-6).** The user reversed the vanilla-ESM direction: runtime deps exactly `solid-js` + `@solidjs/router`; state via Solid signals/stores/context; Tailwind v4 CSS-first with `@custom-variant dark` and dark as the default theme (class on `<html>`, persisted, no CDN — system font stack); vite + vite-plugin-solid + @tailwindcss/vite build `web/src/**` (JSX, no TypeScript) into `web/dist/` (hashed assets immutable, `index.html` no-cache + ETag — reverts D-WEB-3's caching class for built assets). The SDK remains dependency-free and esbuild-bundled; `/repos.js`, `/repos.mjs`-absence, and the dogfood rule are untouched. Pure modules (diff, highlighter, setup validation, SSE frame parsing) carried over unchanged — markdown-lite + sanitizer retired by D-WEB-7 (issue #174).
 - **SPA framework: vanilla standard ECMAScript replaces SolidJS** (D2, explicit user decision — itself a supersession of the earlier SolidJS-over-React decision; wire contract untouched — the SDK defines the wire, the framework does not). Native ES modules + import map, `<template>` + a ~40-line hand-rolled reactive core (§2.1), hand-rolled router. No state library, no JSX, no VDOM. **SUPERSEDED 2026-09-02 by explicit user request (DEVIATIONS.md D-WEB-6, first bullet above) — historical only; the shipped stack is SolidJS + Tailwind, vite-built.**

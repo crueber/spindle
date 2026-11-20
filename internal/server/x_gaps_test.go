@@ -21,7 +21,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/crueber/walhub/internal/api"
 	"github.com/crueber/walhub/internal/config"
 	"github.com/crueber/walhub/internal/git"
 	"github.com/crueber/walhub/internal/store"
@@ -827,40 +826,5 @@ func TestSetupTestAndPutFailurePaths(t *testing.T) {
 	s.setupPut(rec, req)
 	if rec.Code != http.StatusInternalServerError {
 		t.Fatalf("save failure = %d %s", rec.Code, rec.Body.String())
-	}
-}
-
-// --- bind_api Owners -----------------------------------------------------------------------
-
-type fakeRegistry struct{}
-
-func (fakeRegistry) Owners(ctx context.Context) ([]string, error) {
-	return []string{"alice"}, nil
-}
-func (fakeRegistry) Repos(ctx context.Context, owner string) ([]string, error) {
-	return nil, nil
-}
-func (fakeRegistry) OwnerRepoCounts(ctx context.Context) (map[string]int, error) {
-	return map[string]int{"alice": 1}, nil
-}
-func (fakeRegistry) Exists(ctx context.Context, id git.RepoId) (bool, error) {
-	return false, nil
-}
-func (fakeRegistry) Create(ctx context.Context, id git.RepoId, format git.ObjectFormat) error {
-	return nil
-}
-func (fakeRegistry) Delete(ctx context.Context, id git.RepoId) error { return nil }
-
-func TestAPIProviderOwners(t *testing.T) {
-	env := api.NewEnv(store.NewMemory(), fakeRegistry{}, config.Defaults(), nil, "v", "h")
-	p := NewAPIProvider(env)
-	owners, err := p.Owners(httptest.NewRequest("GET", "/x", nil))
-	if err != nil || len(owners) != 1 || owners[0] != "alice" {
-		t.Fatalf("owners = %v %v", owners, err)
-	}
-	rec := httptest.NewRecorder()
-	p.Serve(rec, httptest.NewRequest("GET", "/api/v1/repos", nil))
-	if rec.Code == 0 {
-		t.Fatal("mux must answer")
 	}
 }

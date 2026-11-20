@@ -1,0 +1,51 @@
+{{define "content"}}
+{{with .Data}}{{$d := .}}
+<div class="checks-page">
+  <div class="mb-3 flex flex-wrap items-center gap-2">
+    <h2 class="text-lg font-semibold">Checks</h2>
+    <div class="ml-auto flex flex-wrap items-center gap-2">
+      <form class="flex flex-wrap items-center gap-2" method="get" action="/{{.Repo.Full}}/checks" aria-label="check filters">
+        <select class="input w-auto" name="state" aria-label="filter by state">
+          <option value="" {{if eq .State ""}}selected{{end}}>all states</option>
+          <option value="pending" {{if eq .State "pending"}}selected{{end}}>pending</option>
+          <option value="success" {{if eq .State "success"}}selected{{end}}>success</option>
+          <option value="failure" {{if eq .State "failure"}}selected{{end}}>failure</option>
+          <option value="error" {{if eq .State "error"}}selected{{end}}>error</option>
+        </select>
+        <input class="input w-44" name="context" value="{{.Context}}" placeholder="filter by context…" aria-label="filter by context">
+        <button type="submit" class="btn px-2 py-1">Filter</button>
+      </form>
+      <a class="link text-xs" href="{{.RefreshHref}}">refresh</a>
+      <a class="link text-xs" href="/api#checks-ci">reporting API</a>
+    </div>
+  </div>
+
+  {{if .Error}}<p class="err-line" role="alert">{{.Error}}</p>{{end}}
+  {{if .Filtered}}<p class="muted text-xs" role="status">the filter applies to the loaded page only.</p>{{end}}
+
+  {{if .Rows}}
+  <ul class="space-y-2">
+    {{range .Rows}}
+    <li class="card !p-0">
+      <div class="flex flex-wrap items-center gap-2 px-3 py-2">
+        {{template "collab_check_dot" .State}}
+        <a class="font-mono text-xs text-emerald-700 hover:underline dark:text-emerald-400" href="{{.Href}}">{{.Short}}</a>
+        <span class="text-sm">{{.State}}</span>
+        <span class="text-xs text-zinc-500 dark:text-zinc-400">{{.ContextCount}} {{plural .ContextCount "context" "contexts"}} · {{template "collab_time" .UpdatedAt}}</span>
+        <details class="ml-auto" hx-get="/{{$d.Repo.Full}}/checks/{{.SHA}}/contexts" hx-trigger="toggle once" hx-target="find .check-contexts" hx-swap="innerHTML">
+          <summary class="link text-xs list-none cursor-pointer">expand</summary>
+          <div class="check-contexts mt-2">
+            {{if .Expanded}}{{template "collab_check_contexts" .Rows}}{{else}}<p class="muted text-xs">loading…</p>{{end}}
+          </div>
+        </details>
+      </div>
+    </li>
+    {{end}}
+  </ul>
+  {{if .More}}{{template "collab_pager" .OlderHref}}{{end}}
+  {{else if not .Error}}
+  {{template "collab_empty" (dict "icon" "check" "title" "No checks reported yet" "hint" "CI posts check runs for a commit; the reporting API is linked above." "href" "" "label" "")}}
+  {{end}}
+</div>
+{{end}}
+{{end}}

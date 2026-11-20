@@ -975,7 +975,7 @@ listings (§8), never from the status code. Nil `Access` → legacy flag-only ga
 - **Navbar identity signals (Forgejo #371).** `GET /api/v1/me` gains `admin`
   (the navbar gates its Setup menu entry on it — `setupAccess` admits host
   admins outside none mode) and the discovery auth block gains the instance
-  `mode` (`none|token|oidc`), so the SPA knows whether Login/identity apply
+  `mode` (`none|token|oidc`), so the page chrome knows whether Login/identity apply
   at all (never in `none` mode — nothing to log in to — and the Login
   button only when `browser_login` is true per #344). Both ride
   already-fetched payloads (the `me` cache key pages share; one AuthOpen
@@ -986,9 +986,9 @@ listings (§8), never from the status code. Nil `Access` → legacy flag-only ga
 - **Public/private visibility enforced across listings, git, and the UI (Forgejo #345).**
   Spec amendment, stated explicitly: visibility (`access.json`, public-by-default, missing →
   public) is the read authority for every repo-scoped read surface (JSON API lanes,
-  smart-HTTP upload-pack, LFS reads, bundle lists, SSH fetch, repo SPA pages); `anonymous_read`
+  smart-HTTP upload-pack, LFS reads, bundle lists, SSH fetch, repo pages); `anonymous_read`
   keeps only its non-repo meaning (owners/profile/org listings, `/explore`, setup.json,
-  non-repo shells). Rationale: the global flag made every public repo invisible to signed-out
+  non-repo pages). Rationale: the global flag made every public repo invisible to signed-out
   users on OIDC instances (`anonymous_read=false`) — per-repo visibility is the only switch
   with the right granularity. Consequences, all in the same change: (a) listings filter by
   the caller's read role behind the access LRU (admins/writers bypass with +0 probes; the
@@ -1339,8 +1339,8 @@ listings (§8), never from the status code. Nil `Access` → legacy flag-only ga
   is no avatar projection on this route (avatars ride `me.avatar_url`,
   Forgejo #376), so SWR was not kept-and-documented — every field on
   the response mutates via PUT by construction, exactly the mutability
-  rule §4 states. The SPA needs no change: it already invalidates its
-  `profile:{owner}` client entry on save.
+  rule §4 states. The page layer needs no change: the settings handler re-reads on render
+  (the SPA-era `profile:{owner}` client entry was historical, D-WEB-15).
 - **Cache-class-by-mutability law + shared definition + contract guard (Forgejo #382 —
   amends the §4 "two/three cache classes" framing into a LAW, supersedes #259).** #381 proved
   the per-endpoint fix approach cannot close the class: the summary carried a correct
@@ -1359,9 +1359,9 @@ listings (§8), never from the status code. Nil `Access` → legacy flag-only ga
    outside git content is the pull diff (ref-derived patch body — SWR-legit, documented at
    the const) and the SWR listings above (boundary-documented); notify/review/checks/tags
    and all mutation-adjacent reads were already no-store. (e) ETag-suffix simplification
-   explicitly deferred (retention note in §4). Client: no change — the SPA's `invalidate()`
-   + mutation-site reconcile (data.js, #318) already invalidates on mutation; the header
-   contract now backs the reload case it could not fix alone.
+   explicitly deferred (retention note in §4). Client: no change — the SPA-era `invalidate()`
+   + mutation-site reconcile (data.js, #318) were historical (D-WEB-15); server-rendered
+   mutation responses re-read, and the header contract backs external clients.
 - **Checks-tab visibility flag rides the summary (issue #505).** `GET …/api` gains always-present
   `has_checks` (14 §14.12 field rule — no new endpoint, both lanes + SDK passthrough carry it
   for free; a dedicated endpoint would cost an extra request per repo view, rejected). Source

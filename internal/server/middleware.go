@@ -498,8 +498,7 @@ func (s *Server) maybeRefreshSession(w http.ResponseWriter, r *http.Request, p a
 // --- #8 requireAuth (gated group only) -------------------------------------------------
 
 // requireAuth is NOT in the main chain: attached with Use inside the gated
-// route group (SPA shell, /_ui/*, /services/setup.json, /metrics, and the
-// owner/repo UI pages reached through the wildcard; §3.1). On failure: a
+// route group (/_ui/*, /services/setup.json, /metrics; §3.1). On failure: a
 // browser-ish GET without Authorization and browser login enabled → 307
 // /_auth/login?next=…; a browser-ish GET without Authorization with login
 // disabled → 401 carrying the rendered login page (#344); else the mapped

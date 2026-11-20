@@ -1,0 +1,31 @@
+{{/* pages/settings/org.html — GET /{owner}/settings?tab=…
+   (specs/settings.md §3). Tabs are query-selected (?tab=) because
+   /{owner}/settings/{tab} is ambiguous with /{owner}/{name}/settings in
+   http.ServeMux — see settings.go's ROUTE SHAPE note. */}}
+{{define "content"}}
+<div class="settings-page" id="settings-page" data-settings-tab="{{.Data.Tab}}">
+  <h2 class="mb-1 flex items-center gap-2 text-lg font-semibold">
+    <span class="muted font-normal">org</span> {{.Data.Org}}
+  </h2>
+  {{if not .Data.CanManage}}
+  <p class="muted mb-3 text-sm">read-only — org owner required to make changes.</p>
+  {{end}}
+  <nav class="mb-4 flex flex-wrap gap-1.5" aria-label="organization sections">
+    {{range .Data.Nav}}
+    <a class="pill{{if .Active}} btn-active{{end}}" href="{{.Href}}"{{if .Active}} aria-current="page"{{end}}>{{.Label}}</a>
+    {{end}}
+  </nav>
+
+  {{if .Data.Notice}}<div class="mb-3 rounded-lg border border-emerald-300 bg-emerald-50 p-3 text-sm text-emerald-800 dark:border-emerald-900 dark:bg-emerald-950/60 dark:text-emerald-200">{{.Data.Notice}}</div>{{end}}
+  {{if .Data.Error}}<div class="mb-3 rounded-lg border border-red-300 bg-red-50 p-3 text-sm text-red-800 dark:border-red-900 dark:bg-red-950/60 dark:text-red-200" role="alert">{{.Data.Error}}</div>{{end}}
+
+  <div id="settings-panel">
+    {{if eq .Data.Tab "profile"}}{{template "settings-org-profile" .Data}}{{end}}
+    {{if eq .Data.Tab "members"}}{{template "settings-org-members" .Data}}{{end}}
+    {{if eq .Data.Tab "teams"}}{{template "settings-org-teams" .Data}}{{end}}
+    {{if eq .Data.Tab "invitations"}}{{template "settings-org-invitations" .Data}}{{end}}
+    {{if eq .Data.Tab "activity"}}{{template "settings-org-activity" .Data}}{{end}}
+    {{if eq .Data.Tab "danger"}}{{template "settings-org-danger" .Data}}{{end}}
+  </div>
+</div>
+{{end}}

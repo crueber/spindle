@@ -1,0 +1,21 @@
+{{define "content"}}
+{{with .Data}}
+<div class="forks-page grid max-w-2xl gap-4">
+  <h2 class="text-xl font-semibold">Forks of <a class="link" href="/{{.Repo.Full}}">{{.Repo.Full}}</a></h2>
+  {{if .Error}}<p class="err-line" role="alert">{{.Error}}</p>{{end}}
+  {{if .Rows}}
+  <ul class="card divide-y divide-zinc-200 dark:divide-zinc-800">
+    {{range .Rows}}
+    <li class="flex items-baseline justify-between gap-3 px-3 py-2">
+      <a class="min-w-0 truncate font-mono text-sm text-emerald-700 hover:underline dark:text-emerald-400" href="{{.Href}}">{{.Repo}}</a>
+      <span class="shrink-0 text-xs text-zinc-500 dark:text-zinc-400">forked {{.Date}}</span>
+    </li>
+    {{end}}
+  </ul>
+  {{if .More}}{{template "collab_pager" .OlderHref}}{{end}}
+  {{else if not .Error}}
+  <p class="muted text-sm">No forks yet.</p>
+  {{end}}
+</div>
+{{end}}
+{{end}}

@@ -1,0 +1,92 @@
+{{/* collab_diff_files — the files-tab diff: a real table inside an
+     overflow-x-auto wrapper (wide diffs scroll in place, never the page).
+     Each sign cell is the no-JS staging link when the write gate allows. */}}
+{{define "collab_diff_files"}}
+{{range .Files}}{{$file := .}}
+<div class="card mb-4 overflow-hidden" data-diff-file="{{.Path}}">
+  <div class="flex flex-wrap items-center gap-2 border-b border-zinc-200 px-3 py-2 dark:border-zinc-800">
+    <h3 class="min-w-0 truncate font-mono text-sm font-semibold">{{.Path}}</h3>
+    {{if eq .Status "added"}}<span class="chip chip-open">added</span>{{else if eq .Status "deleted"}}<span class="chip chip-closed">deleted</span>{{else if eq .Status "renamed"}}<span class="chip chip-neutral">renamed</span>{{end}}
+    <span class="ml-auto shrink-0 text-xs text-zinc-500 dark:text-zinc-400">+{{.Added}} −{{.Deleted}}</span>
+  </div>
+  {{if .Binary}}
+  <p class="px-3 py-2 text-sm text-zinc-500 dark:text-zinc-400">Binary file not shown</p>
+  {{else}}
+  <div class="overflow-x-auto">
+    <table class="diff w-full border-collapse font-mono text-xs leading-5">
+      {{range $hunk := .Hunks}}
+      <tbody>
+        <tr><td class="diff-hunk px-2 py-0.5" colspan="4">{{$hunk.Header}}</td></tr>
+        {{range $row := $hunk.Rows}}
+        <tr class="diff-row {{$row.LineCls}}" data-diff-row data-path="{{$file.Path}}" data-side="{{$row.Side}}" data-old-no="{{$row.OldNo}}" data-new-no="{{$row.NewNo}}" id="{{$row.ID}}">
+          <td class="diff-num w-6 px-1 text-center select-none {{$row.LineCls}}">{{if $row.StageHref}}<a href="{{$row.StageHref}}" title="comment on line {{$row.LineNo}}" aria-label="comment on line {{$row.LineNo}}">{{$row.Sign}}</a>{{else}}{{$row.Sign}}{{end}}</td>
+          <td class="diff-num {{$row.LineCls}}">{{if $row.OldNo}}{{$row.OldNo}}{{end}}</td>
+          <td class="diff-num {{$row.LineCls}}">{{if $row.NewNo}}{{$row.NewNo}}{{end}}</td>
+          <td class="whitespace-pre px-2 {{$row.LineCls}}">{{$row.Text}}</td>
+        </tr>
+        {{if $row.Staged}}
+        <tr>
+          <td colspan="4" class="border-t border-emerald-300 bg-emerald-50/40 p-2 dark:border-emerald-800 dark:bg-emerald-950/30">
+            <form class="grid gap-2" method="post" action="/{{$.Full}}/pull/{{$.Num}}/threads">
+              <p class="text-xs text-zinc-500 dark:text-zinc-400">commenting on <span class="font-mono">{{$.Sel.Path}}:{{$.Sel.Line}}</span></p>
+              <input type="hidden" name="path" value="{{$.Sel.Path}}">
+              <input type="hidden" name="side" value="{{$.Sel.Side}}">
+              <input type="hidden" name="start" value="{{$.Sel.Line}}">
+              <input type="hidden" name="end" value="{{$.Sel.Line}}">
+              <textarea class="input min-h-16 font-mono text-sm" name="body" rows="3" aria-label="thread comment body" placeholder="Reply…" data-autogrow data-submit-keys></textarea>
+              <div class="flex flex-wrap items-center justify-end gap-2">
+                <a class="btn" href="/{{$.Full}}/pull/{{$.Num}}/files">Cancel</a>
+                <button type="submit" class="btn primary">Start thread</button>
+              </div>
+            </form>
+          </td>
+        </tr>
+        {{end}}
+        {{end}}
+      </tbody>
+      {{end}}
+    </table>
+  </div>
+  {{end}}
+</div>
+{{end}}
+{{end}}
+
+{{/* collab_diff_conv — the conversation diff: div rows (cards interleave
+     between rows), same line classes and hover affordance as the table. */}}
+{{define "collab_diff_conv"}}
+{{range .Files}}{{$file := .}}
+<div class="mb-4" data-diff-file="{{.Path}}">
+  <h3 class="mb-2 min-w-0 truncate font-mono text-sm font-semibold">{{.Path}}</h3>
+  {{if .Binary}}
+  <p class="card px-3 py-2 text-sm text-zinc-500 dark:text-zinc-400">Binary file not shown</p>
+  {{else}}
+  <div class="overflow-x-auto rounded-lg border border-zinc-200 dark:border-zinc-800">
+    {{range .Hunks}}
+    <div class="diff-hunk px-2 py-0.5 font-mono text-xs">{{.Header}}</div>
+    {{range .Rows}}
+    <div class="diff-row flex font-mono text-xs {{.LineCls}}" data-diff-row data-path="{{$file.Path}}" data-side="{{.Side}}" data-old-no="{{.OldNo}}" data-new-no="{{.NewNo}}" id="{{.ID}}">
+      <span class="w-4 shrink-0 select-none text-center">{{.Sign}}</span>
+      <span class="w-10 shrink-0 text-right tabular">{{if .OldNo}}{{.OldNo}}{{end}}</span>
+      <span class="w-10 shrink-0 text-right tabular">{{if .NewNo}}{{.NewNo}}{{end}}</span>
+      <span class="whitespace-pre px-2">{{.Text}}</span>
+    </div>
+    {{range .Threads}}<div class="ml-8 mt-1">{{template "collab_thread" .}}</div>{{end}}
+    {{end}}
+    {{end}}
+  </div>
+  {{end}}
+</div>
+{{end}}
+{{end}}
+
+{{/* collab_drifted: anchors that no longer locate — shown once at the end,
+     marked with their original label, never relocated onto a guessed line. */}}
+{{define "collab_drifted"}}
+{{with .}}
+<div class="mt-3">
+  <p class="muted text-xs">outdated comments (their lines moved):</p>
+  {{range .}}{{template "collab_thread" .}}{{end}}
+</div>
+{{end}}
+{{end}}

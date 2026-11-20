@@ -3,7 +3,8 @@
 The Go rewrite of the walgit design. The behavioral reference is
 [`../MASTER_RUST_SPEC.md`](../MASTER_RUST_SPEC.md) (the Rust implementation's complete specification);
 this directory specifies **how to build walhub in Go** — and where walhub deliberately diverges: a Chi
-router, a SolidJS SPA frontend (D-WEB-6), zero-config first run with a setup UI, a local
+router, a server-rendered Go page frontend with vendored htmx (D-WEB-14/D-WEB-15), zero-config first run
+with a setup UI, a local
 filesystem store backend, and Make-based tooling. Everything not listed as a divergence follows the Rust
 spec exactly.
 
@@ -12,16 +13,18 @@ order that matches your work.
 
 ## The four laws of this rewrite
 
-1. **Minimal dependencies.** The backend allows exactly three third-party modules: `github.com/go-chi/chi/v5`
-   (the router — core only, all middleware hand-rolled), `github.com/BurntSushi/toml` (config), and
-   `golang.org/x/net` (h2c). Everything else is stdlib or hand-rolled (SigV4, GCS JSON API, protobuf wire
-   codec, JWKS, SSE, Prometheus exposition, LRU, singleflight). The frontend budget (amended
-   2026-09-02 by explicit user request — DEVIATIONS.md D-WEB-6): runtime npm dependencies are exactly
-   `solid-js` + `@solidjs/router`; state management is Solid's own signals/stores + context (no additional
-   state library); styling is Tailwind CSS v4 (CSS-first `@import "tailwindcss"` + `@tailwindcss/vite`,
-   no config file, no CDN, dark mode by default); still no TypeScript (plain JSX/JS). Dev-time tooling:
-   `vite` + `vite-plugin-solid` + `@tailwindcss/vite` build the SPA into `web/dist/`, and `esbuild`
-   bundles the modular SDK (`web/sdk/src/*.js`) into the shipped `web/dist/repos.js`. If a design reaches
+1. **Minimal dependencies.** The backend allows six direct third-party modules: `github.com/go-chi/chi/v5`
+   (the router — core only, all middleware hand-rolled), `github.com/BurntSushi/toml` (config),
+   `golang.org/x/net` (h2c), `golang.org/x/crypto` (SSH server transport only), and
+   `github.com/dicebear/dicebear-go/v10` + `github.com/dicebear/styles/v10` (deterministic avatars only).
+   Everything else is stdlib or hand-rolled (SigV4, GCS JSON API, protobuf wire codec, JWKS, SSE,
+   Prometheus exposition, LRU, singleflight). AGENTS.md law 1 is the authority. The frontend budget (amended
+   2026-11-19/20 by explicit user request — DEVIATIONS.md D-WEB-14/D-WEB-15): browser pages are Go
+   `html/template` rendered by `internal/webui`, enhanced with vendored htmx + vanilla-ES islands; styling
+   is Tailwind CSS v4 (CSS-first `@import "tailwindcss"` + `@tailwindcss/vite`, no config file, no CDN,
+   dark mode by default); still no TypeScript; there are **no runtime npm dependencies**. Dev-time tooling:
+   `vite` + `@tailwindcss/vite` build only the stylesheet (`app.css`), and `esbuild` builds the island
+   bundle (`ui.js`) and the modular SDK (`web/sdk/src/*.js` → `web/dist/repos.js`). If a design reaches
    for another dependency, it is a spec bug.
 2. **Goroutines for performance, zero deadlocks.** I/O parallelism everywhere (striped uploads, batch
    workers, SSE fan-out, sweeps); every concurrency recommendation carries a `### Concurrency` subsection
@@ -59,7 +62,7 @@ readable by walhub and vice versa.
 | [`10_maintenance.md`](10_maintenance.md) | Maintainer loop, compaction, base rebuild, follow, fsck/repair | `internal/maintain` |
 | [`17_ssh.md`](17_ssh.md) | SSH git transport: x/crypto/ssh listener, key auth, command framing | `internal/sshd` |
 | [`11_config_cli.md`](11_config_cli.md) | Every config key (optional file), per-repo settings, env overrides, CLI reference | `internal/config`, `cmd/walhub` |
-| [`12_web_ui.md`](12_web_ui.md) | SolidJS SPA + SDK (D-WEB-6), **setup UI**, `node --test` suite | `web/` |
+| [`12_web_ui.md`](12_web_ui.md) | Server-rendered pages + htmx/islands, SDK (D-WEB-14), **setup UI**, `node --test` suite | `internal/webui/`, `web/` |
 | [`13_concurrency.md`](13_concurrency.md) | **The concurrency playbook** — referenced by every other doc | cross-cutting |
 | [`14_extensibility.md`](14_extensibility.md) | Core-vs-extension seams; issues/PRs/multi-user roadmap | cross-cutting |
 | [`15_testing.md`](15_testing.md) | Test pyramid, store contract, FaultStore sim, coverage gate, Make targets | `internal/*/…test` |
@@ -85,8 +88,9 @@ its interfaces, and its tests, and the cross-references are by file name.
 
 ## Decisions & deviations from the Rust design
 
-- **Frontend is a SolidJS + Tailwind v4 SPA (2026-09-02, explicit user request — DEVIATIONS.md D-WEB-6).**
-  Law 1's frontend budget above supersedes the earlier zero-dependency vanilla-ESM reading: runtime npm
-  dependencies are exactly `solid-js` + `@solidjs/router`, styling is Tailwind v4 CSS-first (dark by
-  default, no CDN), still no TypeScript, and the SPA is vite-built into `web/dist/` (the SDK stays
-  dependency-free and esbuild-bundled).
+- **Frontend is server-rendered pages + vendored htmx + vanilla-ES islands (2026-11-19/20, explicit user
+  request — DEVIATIONS.md D-WEB-14/D-WEB-15; supersedes the D-WEB-6 SolidJS entry).**
+  Law 1's frontend budget above supersedes the earlier zero-dependency vanilla-ESM reading and the
+  SolidJS-SPA reading: pages are Go `html/template` in `internal/webui`, behavior is vendored htmx plus
+  small islands, styling is Tailwind v4 CSS-first (dark by default, no CDN), no TypeScript, and there are
+  no runtime npm dependencies (the SDK stays dependency-free and esbuild-bundled).

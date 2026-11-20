@@ -15,11 +15,11 @@ We aim to stay **object-protocol compliant** with walgit: the bucket key layout,
 ## Quick start
 
 ```sh
-make build          # bundles the SDK (esbuild) and compiles the binary — web/ is embedded
+make build          # stylesheet + islands + SDK, then the binary — web/dist is embedded
 ./walhub            # zero-config: 0.0.0.0:8080, filesystem store, auth "none" (loud warning)
 ```
 
-Then open **http://localhost:8080** — the SPA renders, `/setup` configures everything for real use. No config file exists yet, so the first run is deliberately friction-free; save one from `/setup` and restart. An invalid config file puts the server in **setup-only mode** (everything but setup/health answers 503) until you fix it through the same UI.
+Then open **http://localhost:8080** — pages are rendered by the server (no client app shell to boot); `/setup` configures everything for real use. No config file exists yet, so the first run is deliberately friction-free; save one from `/setup` and restart. An invalid config file puts the server in **setup-only mode** (everything but setup/health answers 503) until you fix it through the same UI.
 
 Push something — repositories auto-create on push by default:
 
@@ -110,7 +110,7 @@ make test-web  # node --test over the headless JS modules
 make image     # OCI image
 ```
 
-Backend: Go 1.27 (module `github.com/crueber/walhub`), exactly three third-party modules (chi, BurntSushi/toml, x/net). Frontend: any Node for tests; pnpm 11 for the vite/esbuild build (`pnpm --dir web install`). The container build is `Dockerfile`, with compose examples in `compose.standalone.yml` (filesystem store) and `compose.yaml` (S3-backed via rustfs).
+Backend: Go 1.27 (module `github.com/crueber/walhub`), six direct third-party modules (chi, BurntSushi/toml, x/net, x/crypto for SSH, dicebear-go + dicebear/styles for avatars — the budget is AGENTS.md law 1). Frontend: **server-rendered Go `html/template` pages** enhanced with **htmx (vendored)** and small vanilla-ES islands (`web/src/islands/`); no UI framework and no client data layer. Markdown, diffs, commit graphs and syntax highlighting are rendered server-side in Go, so user text is escaped and sanitized on the server. pnpm 11 builds `web/dist/app.css` (Tailwind v4), `web/dist/ui.js` (esbuild, islands) and the dependency-free `web/dist/repos.js` SDK; any Node runs the headless JS tests. The JSON API and the SDK remain the programmatic surface (browse it at `/api`). The container build is `Dockerfile`, with compose examples in `compose.standalone.yml` (filesystem store) and `compose.yaml` (S3-backed via rustfs).
 
 ## CI and publishing
 

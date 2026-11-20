@@ -234,8 +234,9 @@ interruption).
 
 ## 9. UI & SDK
 
-Pages (SolidJS SPA, `12_web_ui.md` §2 patterns; SSE via `lib/sse.js` `mountStream`, never
-`EventSource`):
+Pages (server-rendered by `internal/webui`, `12_web_ui.md` §2; templates under
+`internal/webui/templates/pages/collab/` + `partials/repo_check_pill.html`; SSE frames through
+`web/src/islands/sse.js`, never the htmx SSE extension):
 
 | Surface | Behavior |
 |---|---|
@@ -251,7 +252,7 @@ re-exports; envelope/SSE parsing reuses `sdk/src/sse.js` — one parser (12_web_
 
 ## Decisions
 
-- **Frontend idiom is the SolidJS SPA (D-WEB-6; docs fix for issue #76).** The §9 surface sketches read in the shipped idiom: Solid components, SSE via `lib/sse.js` `mountStream` (never `EventSource`). Surfaces, behavior, and wire shapes are unchanged.
+- **Frontend idiom is the server-rendered page layer (D-WEB-14/D-WEB-15; supersedes the D-WEB-6 SolidJS entry for issue #76).** The §9 surface sketches read in the shipped idiom: Go handlers + templates, the check-pill partial, and the SSE island. **Historical (D-WEB-6):** Solid components, SSE via `lib/sse.js` `mountStream` (never `EventSource`). Surfaces, behavior, and wire shapes are unchanged.
 
 - **v1 is statuses-only; check runs/suites deferred** — the context model covers required-check gating; suites add grouping, not new gates; the key layout leaves room without a migration.
 - **One mutable record per `(sha, context)`, CAS overwrite** — matches the assignment's contention-free-by-construction model; history-of-attempts is deliberately not kept.
@@ -332,7 +333,8 @@ re-exports; envelope/SSE parsing reuses `sdk/src/sse.js` — one parser (12_web_
   guidance (POST …/checks/statuses/{sha} with a `wct_` token, linking the
   existing `/api#checks-ci` docs and the checks page) instead of the amber
   pending pill, on the PR checks card and the CheckDetail page. The rule
-  is the pure `web/src/lib/checks-empty.js` module (empty means
-  zero-length statuses — a single pending context is still in-flight);
+  is server-side in `internal/webui/collab.go` (empty means zero-length
+  statuses — a single pending context is still in-flight; the SPA's
+  `web/src/lib/checks-empty.js` is historical, D-WEB-15);
   the required-checks blocker strings (`<context> (missing)`) and the
   merge-button tooltip already covered the gated case and are unchanged.

@@ -91,7 +91,7 @@ host_key_env = ""      # env var NAME holding the private key; overrides host_ke
   deliberately unset on the pipeline principal (`bind_ssh.go`): the gate consults repo access,
   never the connection flags.
 - Self-service is `GET|POST|DELETE /api/v1/ssh-keys` (read-gated identity API, `06_api.md`) and
-  the `/keys` page in the SPA: a no-write principal can register a read-only key — its rights
+  the `/keys` page (`internal/webui/templates/pages/settings/keys.html`): a no-write principal can register a read-only key — its rights
   are still whatever its principal has, evaluated per connection at auth time.
 - The transport is disabled unless `listen` is set, and disabled in setup-only mode (no engine).
 

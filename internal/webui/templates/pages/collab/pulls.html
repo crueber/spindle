@@ -1,0 +1,41 @@
+{{define "content"}}
+{{with .Data}}{{$d := .}}
+<section aria-label="Pull requests">
+  <div class="mb-3 flex flex-wrap items-center gap-2">
+    <h2 class="text-xl font-semibold tracking-tight">Pull requests</h2>
+    <div class="ml-auto flex flex-wrap items-center gap-2">
+      <a class="btn px-2 py-1 {{if eq .State "open"}}btn-active{{end}}" href="{{.OpenHref}}" {{if eq .State "open"}}aria-current="page"{{end}}>open</a>
+      <a class="btn px-2 py-1 {{if eq .State "closed"}}btn-active{{end}}" href="{{.ClosedHref}}" {{if eq .State "closed"}}aria-current="page"{{end}}>closed</a>
+      <a class="btn px-2 py-1 {{if eq .State "all"}}btn-active{{end}}" href="{{.AllHref}}" {{if eq .State "all"}}aria-current="page"{{end}}>all</a>
+      <a class="link text-xs" href="{{.RefreshHref}}">refresh</a>
+      {{if .NewPullHref}}<a class="btn primary px-2 py-1" href="{{.NewPullHref}}">New pull request</a>{{end}}
+    </div>
+  </div>
+
+  {{if .Error}}<p class="err-line" role="alert">{{.Error}}</p>{{end}}
+  {{if .Notice}}<p class="warn-line" role="status">{{.Notice}}</p>{{end}}
+
+  {{if .Rows}}
+  <ul>
+    {{range .Rows}}
+    <li class="border-t border-zinc-200 py-3 first:border-t-0 first:pt-0 dark:border-zinc-800">
+      <div class="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1">
+        <a class="min-w-0 max-w-full truncate font-medium text-emerald-700 hover:underline dark:text-emerald-400" href="{{.Href}}">#{{.Num}} {{.Title}}</a>
+        {{template "collab_state_chip" .Chip}}
+        <span class="min-w-0 truncate text-xs text-zinc-500 dark:text-zinc-400">{{.BaseRef}} ← {{.HeadRef}}</span>
+        <span class="ml-auto shrink-0 text-xs text-zinc-500 dark:text-zinc-400">{{.Author}} · {{template "collab_time" .UpdatedAt}}</span>
+      </div>
+    </li>
+    {{end}}
+  </ul>
+  {{if .More}}{{template "collab_pager" .OlderHref}}{{end}}
+  {{else if not .Error}}
+  {{if eq .State "closed"}}
+  {{template "collab_empty" (dict "icon" "pull" "title" "No closed pull requests" "hint" "Closed pull requests appear here once a conversation ends." "href" .NewPullHref "label" "New pull request")}}
+  {{else}}
+  {{template "collab_empty" (dict "icon" "pull" "title" "No pull requests" "hint" "Open a pull request from a pushed branch to start a review conversation." "href" .NewPullHref "label" "New pull request")}}
+  {{end}}
+  {{end}}
+</section>
+{{end}}
+{{end}}

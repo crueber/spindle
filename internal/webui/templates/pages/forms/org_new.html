@@ -1,0 +1,34 @@
+{{define "content"}}
+<section class="new-page mx-auto grid max-w-2xl gap-4">
+  <h2 class="text-xl font-semibold">New organization</h2>
+  <p class="muted text-sm">
+    Reserve an organization namespace. You become its owner and land in its
+    settings, where you can edit the profile and add members.
+  </p>
+  <form method="post" action="/orgs/new" class="card grid gap-3 p-4" aria-label="New organization">
+    <label class="grid gap-1" for="orgnew-name">
+      <span class="text-sm font-medium">Organization name</span>
+      <input id="orgnew-name" name="org" class="input font-mono" value="{{.Data.Org}}"
+             placeholder="acme" autocomplete="off" spellcheck="false"
+             aria-label="Organization name" aria-describedby="orgnew-name-help">
+      <span id="orgnew-name-help" class="muted text-xs">Lowercase letters, digits, and hyphens, 1–39 characters.</span>
+    </label>
+    {{if .Data.NameErr}}<p class="text-xs text-red-700 dark:text-red-400">{{.Data.NameErr}}</p>{{end}}
+    <label class="grid gap-1" for="orgnew-display">
+      <span class="text-sm font-medium">Display name</span>
+      <input id="orgnew-display" name="display_name" class="input" value="{{.Data.Display}}"
+             placeholder="Acme Corp" autocomplete="off" spellcheck="false" aria-label="Display name">
+    </label>
+    <label class="grid gap-1" for="orgnew-desc">
+      <span class="text-sm font-medium">Description</span>
+      <input id="orgnew-desc" name="description" class="input" value="{{.Data.Desc}}"
+             placeholder="What this organization is for…" autocomplete="off" spellcheck="false" aria-label="Description">
+    </label>
+    {{template "forms_messages" .Data}}
+    <div class="flex flex-wrap gap-2">
+      <button type="submit" class="btn primary px-3 py-1">create organization</button>
+      <a class="btn px-3 py-1" href="/explore">cancel</a>
+    </div>
+  </form>
+</section>
+{{end}}

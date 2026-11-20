@@ -19,7 +19,7 @@ package under `internal/{store,wal,git}` changes except for the three touch poin
 | `internal/checks` | 05 | statuses/check-runs store, CI token scope, required-checks evaluation |
 | `internal/notify` | 06 | notifications, subscriptions, mentions, webhook delivery loop |
 | `internal/releases` | 07 | releases, assets, stars, watches |
-| `internal/web` (extensions) | 08 | new SPA pages + SDK submodules (web/sdk/src/) |
+| `internal/webui` (extensions) | 08 | page handlers + templates for the new surfaces + SDK submodules (web/sdk/src/) |
 
 Each package is an `api.RouteProvider` + task kinds + (where relevant) a policy-actor source. Packages
 depend ONLY on `internal/{store,config,git,wal,server}` frozen contracts + `internal/identity`.

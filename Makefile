@@ -14,7 +14,7 @@ WALHUB_TEST_S3_BUCKET     ?= walhub-test
 
 .DEFAULT_GOAL := help
 
-web: ## build the UI: vite (SolidJS+Tailwind → dist/) then esbuild (SDK → dist/repos.js)
+web: ## build the page assets: vite/Tailwind (app.css) + esbuild (islands, SDK) + vendored htmx
 	pnpm --dir web run build
 
 build: web ## compile everything (the SDK bundle is a build dependency)
@@ -87,6 +87,6 @@ clean: ## remove build artifacts
 ci: vet test race cover contract sim e2e ## everything that must be green before a merge (09: contract + e2e gate the collab seams too)
 
 help: ## show targets
-	@grep -E '^[a-zA-Z_-]+:.*## ' $(MAKEFILE_LIST) | awk 'BEGIN{FS=":.*## "}{printf "  \033[36m%-14s\033[0m %s\n", $$1, $$2}'
+	@grep -E '^[a-zA-Z0-9_-]+:.*## ' $(MAKEFILE_LIST) | awk 'BEGIN{FS=":.*## "}{printf "  \033[36m%-14s\033[0m %s\n", $$1, $$2}'
 
 .PHONY: web build fmt vet test test-go test-web race cover sim contract contract-fs contract-s3 contract-gcs e2e image dev-store dev-store-stop clean ci help landing-gifs

@@ -277,16 +277,19 @@ introduced by this feature.
 
 ## 8. UI and SDK (shapes for 08)
 
-Pages (SolidJS SPA, `web/src/pages/*.jsx`, patterns of `12_web_ui.md`; 08 owns the route table):
+Pages (server-rendered by `internal/webui`, `12_web_ui.md` §2; templates
+`internal/webui/templates/pages/collab/releases.html`, `release.html`, `forms/release_new.html`,
+`partials/repo_header.html`; 08 owns the route table):
 
 | Route | Page |
 |---|---|
 | `/{o}/{r}/releases` | Release cards: tag, name, draft/prerelease badges, date, asset count; "New release" button (write+) |
-| `/{o}/{r}/releases/{tag}` | markdown-lite rendered body (allowlist sanitizer, D-WEB-5), assets table (name, size, sha256 short, download), edit/publish/delete per role |
+| `/{o}/{r}/releases/{tag}` | markdown body rendered by the Go renderer (`internal/webui/markdown.go` — escaped, link-allowlisted; the marked/DOMPurify pair is D-WEB-14 history), assets table (name, size, sha256 short, download), edit/publish/delete per role |
 | `/{o}/{r}/releases/new` | tag picker fed by the existing ref stream, autodraft button fills the body, draft/prerelease checkboxes, asset upload (client hashes via `crypto.subtle.digest`, streams `POST …/assets/{name}`) |
 
-Repo chrome gains a star toggle + watch toggle (optimistic update, rollback on error) fed by
-`GET …/api/social`. SSE: pages consume the repo stream's `release` event
+Repo chrome gains a star toggle + watch toggle (plain POST forms; the `303` back re-renders the
+header, so there is no optimistic client state to reconcile) fed by `GET …/api/social`. SSE: pages
+consume the repo stream's `release` event
 (`{tag, action: "published"|"edited"|"deleted"}`, same envelope per 07_api §6) to refresh lists; no new
 stream is opened.
 
@@ -304,7 +307,7 @@ server-side copy (e.g. from a fork parent) lands if ever wanted; v1 does not reg
 
 ## Decisions
 
-- **Frontend idiom is the SolidJS SPA (D-WEB-6; docs fix for issue #76).** The §8 page sketches read in the shipped idiom: `.jsx` pages under `web/src/pages/`, shared components per 08. Routes and wire shapes are unchanged.
+- **Frontend idiom is the server-rendered page layer (D-WEB-14/D-WEB-15; supersedes the D-WEB-6 SolidJS entry for issue #76).** The §8 page sketches read in the shipped idiom: Go handlers + templates under `internal/webui/templates/pages/collab/` + `forms/`, shared partials. **Historical (D-WEB-6):** `.jsx` pages under `web/src/pages/`, shared components per 08. Routes and wire shapes are unchanged.
 
 - Releases are always bound to an existing tag (no tag-less drafts): validation is decidable at
   receive-time via `RepoView.Resolve`; GitHub's claim-a-future-tag drafts need a tag-creation event

@@ -1,0 +1,14 @@
+{{define "public_repo_row"}}
+{{/* One listing row (Repos.jsx RepoRow): link + visibility/mirror pills +
+     optional star count + the listing's last-active stamp (no per-row fetch,
+     Forgejo #247). 390px: the row is flex-wrap, so badges and the stamp drop
+     to the next line instead of overflowing. */}}
+<li class="flex flex-wrap items-baseline gap-x-1.5">
+  <a class="text-emerald-700 hover:underline dark:text-emerald-400" href="/{{.Full}}">{{.Full}}</a>
+  {{if .VisibilityLabel}}<span class="pill visibility-badge" role="img" title="{{.VisibilityTitle}}" aria-label="{{.VisibilityTitle}}">{{.VisibilityLabel}}</span>{{end}}
+  {{if .Mirror}}<span class="pill mirror-badge" role="img" title="{{.MirrorTitle}}" aria-label="{{.MirrorTitle}}">mirror</span>{{end}}
+  {{if .HasStars}}<span class="muted text-xs">({{.Stars}} ⭐)</span>{{end}}
+  {{if .At}}<span class="muted whitespace-nowrap text-xs">active <time datetime="{{.At}}" title="{{.At}}">{{rel .At}}</time></span>
+  {{else if .Empty}}<span class="muted text-xs">no commits yet</span>{{end}}
+</li>
+{{end}}

@@ -303,21 +303,22 @@ subscribe the source author.
 
 ## 11. UI and SDK
 
-Pages (SolidJS SPA per `12_web_ui.md`, D-WEB-6; `.jsx` route components, `useData`):
+Pages (server-rendered by `internal/webui`, `12_web_ui.md` §2; templates
+`internal/webui/templates/pages/collab/` + `forms/`, one Go handler per route; SSE frames are consumed by
+the `web/src/islands/sse.js` reader where a surface subscribes):
 
 | Route | Page | Live behavior |
 |---|---|---|
 | `/:o/:r/issues` | list: filter bar (state/assignee/labels/milestone/since, #415), paged cards from the index | SSE `issue` upserts/patches cards in place |
 | `/:o/:r/issues/new` | create form (title, markdown-lite body, preview toggle) | — |
 | `/:o/:r/issues/:num` | thread: header (`#N` state badge — the single source of state), timeline (seq-window, older on demand; renders oldest → newest, #225), comment composer, one sidebar metadata card (labels + `+` dropdown / assignees / milestone with a linked title to the filtered issue list; triage sees the `+` dropdown when unset and a direct `−` clear button when set — issue #148) | `issue_event` appends timeline frames; `issue` updates the header |
-| | Forgejo #594: the composer keys `disabled` off the live thread (`issueCommentLock` in `lib/issue-events.js`) — a closed thread renders disabled-with-reason ("This conversation is closed") while the Reopen control stays live, so a reopen unlocks with no reload. The add-reaction `+` menu disables the same way; summary chips stay live (removal-only on locked threads). A raced 409 toasts verbatim through the tray path (no raw TypeError). | |
+| | Forgejo #594: a closed thread renders the composer disabled with the server's reason (`lockState` in `internal/webui/collab.go`: "This conversation is closed") while the Reopen control stays live, so a reopen unlocks with no reload. The add-reaction `+` menu disables the same way; summary chips stay live (removal-only on locked threads). A raced 409 renders the API's message verbatim on the page (`.err-line`; no raw TypeError). | |
 | `/:o/:r/labels` | label CRUD (triage-gated UI) | on save, refetch |
 | `/:o/:r/milestones` | milestone CRUD + progress bars + per-milestone linked issues (each milestone lists/links its issues via the server-side `milestone=` list filter; the title links to the filtered issue list) | on save, refetch |
 
 SDK additions (`web/sdk/src/issues.js`, esbuild-bundled into `repos.js` per D-WEB-2; full shapes in 08):
 `repo.issues.{list,get,create,patch,comment,events,reactions.add,reactions.remove}`, `repo.labels.{list,create,update,delete}`,
-`repo.milestones.{list,get,create,update,delete}` — thin fetch wrappers over §7 with the SDK's lane/401 rules; thread pages use
-`mountStream` (`12_web_ui.md` §2.5) to follow `issue`/`issue_event` on the repo's existing SSE stream.
+`repo.milestones.{list,get,create,update,delete}` — thin fetch wrappers over §7 with the SDK's lane/401 rules; a page that subscribes to live updates renders a `data-sse` element and the `web/src/islands/sse.js` reader invalidates on `issue`/`issue_event` frames from the repo's existing SSE stream.
 `repo.attachments.upload(file|Blob|Uint8Array, {name?, sha256?, contentType?})` (§12) posts raw bytes with an optional
 `X-Walgit-Attachment-Sha256` (computed via `crypto.subtle.digest` when available, omitted on non-secure origins where
 `crypto.subtle` is undefined — the server verifies the header only when present) and resolves the 201 record.
@@ -353,13 +354,15 @@ contract exposes no content type on read; the bytes are immutable so the sniff i
 deliberate token deviation from 06 §5: `Cache-Control: private, max-age=31536000, immutable` (authenticated reads must not
 sit in shared caches). Warm GET/HEAD costs 1 store Get; a satisfiable byte range costs one follow-up ranged Get.
 
-Frontend: `web/sdk/src/attachments.js` (`uploadAttachment` precedent shape) + shared `web/src/lib/attachUpload.js` (alt
-escaping per S1, cursor splice, placeholder → `![name](url)` replace, 64 KiB pre-check before each upload so an over-cap
-body fails client-side instead of orphaning bytes; headless-tested via `node --test`) + thin `onPaste`/`onDrop` glue in
-`IssueNew.jsx` and the thread comment composer (`CommentComposer` gains an optional `uploader` prop, wired by `Issue.jsx`
-only). Sequential uploads, one request each; failures swap a failure line and `reportError` verbatim. `.markdown-body img`
-is `max-w-full h-auto`. PR-body adoption is out of scope and NOT free: it additionally requires switching `Pull.jsx`
-rendering to `renderMarkdown`+`sanitize` (it renders plain text today).
+Frontend (planned against the page layer, D-WEB-14): `web/sdk/src/attachments.js` (`uploadAttachment` precedent
+shape) + the composer partials (`internal/webui/templates/partials/collab_composer.html`,
+`pages/forms/issue_new.html`) gain the uploader affordance through an island (alt escaping per S1, cursor splice,
+placeholder → `![name](url)` replace, 64 KiB pre-check before each upload so an over-cap body fails client-side
+instead of orphaning bytes; headless-tested via `node --test`). Sequential uploads, one request each; failures
+render a `.err-line` verbatim. `.markdown-body img` is `max-w-full h-auto`. PR-body adoption is out of scope and
+NOT free: it additionally requires the PR body to render through the Go markdown renderer (it renders plain text
+today). *(The SPA-era sketch — `web/src/lib/attachUpload.js`, `IssueNew.jsx`/`Issue.jsx`/`CommentComposer` props —
+is historical, D-WEB-15.)*
 
 ### Concurrency
 
@@ -369,12 +372,19 @@ handler holds no repo locks across store calls (13 §2 rule 4).
 
 ## Decisions
 
+> **Reading note (D-WEB-14/D-WEB-15, 2026-11-20):** entries below that cite
+> `web/src/**`, `.jsx` files or SPA components describe the **removed SolidJS SPA** and are
+> historical. The behavior they decide now lives in the Go page layer
+> (`internal/webui/*.go` + `internal/webui/templates/**`) or, where the mechanism was
+> client-only (cache windows, view-tracking effects), in the server render; the decisions
+> themselves are unchanged.
+
 - **Attachments for pasted/dropped issue images (issue #120, 2026-09-05).** New `repos/<o>/<r>/attachments/<sha>/<name>`
   family (§12), `POST …/api/attachments` (authenticated + read, 8 MiB cap → 413, magic allowlist PNG/JPEG/GIF/WebP,
   SVG → 415, client sha optional-when-present) + `GET|HEAD /{o}/{r}/attachments/<sha>/<name>` (read-gated, in-package
   static contract with `private, immutable`). Package home is `internal/issues` (auth-gate affinity, one coverage gate).
   Config `[attachments] max_image_bytes` (default `8MiB`) is struct + default + validation + docs in this change and is
-  recorded as setup-schema-pending (no `internal/setup` in code yet). Repo-scoped ExtraRoutes features are EXEMPT from
+  surfaced by the setup schema like every other key (`internal/setup.BuildSchema` walks the config; the package now exists). Repo-scoped ExtraRoutes features are EXEMPT from
   the 14 §14.12 discovery sentence (existing issue routes are already absent from `endpoints[]`; the SDK builds
   repo-scoped paths statically) — no discovery-seam amendment. The byte route rides `ChainRepo`/`HandleRepo`
   (`internal/server/repo_extra.go`, same as release asset bytes), NOT the `Handle` ExtraRoutes chain: the core router
@@ -385,7 +395,7 @@ handler holds no repo locks across store calls (13 §2 rule 4).
   Dedup oracle accepted: keys are repo-scoped, so probing reveals existence-only to already-authorized readers. An
   EVIDENCE entry is not needed (collaboration surface, human-rate, sim budgets untouched).
 
-- **Frontend idiom is the SolidJS SPA (D-WEB-6; docs fix for issue #76).** The §11 page sketches read in the shipped idiom: `.jsx` route components, `useData` on Solid primitives, SSE refetch over the SDK readers. Routes, live behavior, and wire shapes are unchanged.
+- **Frontend idiom is the server-rendered page layer (D-WEB-14/D-WEB-15; supersedes the D-WEB-6 SolidJS entry for issue #76).** The §11 page sketches read in the shipped idiom: Go page handlers in `internal/webui/collab.go`, templates under `internal/webui/templates/pages/collab/` + `forms/`, and the SSE island for live frames. **Historical (D-WEB-6):** `.jsx` route components, `useData` on Solid primitives, SSE refetch over the SDK readers. Routes, live behavior, and wire shapes are unchanged.
 - **Milestone sidebar minus-button + linked title (issue #148, 2026-09-05).** Set state hides the `+` dropdown and shows a triage-gated `−` button that clears via the existing `selectMilestone(null)` path (explicit-null PATCH, pinned key, busy guard — #143/#145 discipline unchanged); unset state keeps the `+` dropdown with its "No milestone" clear row. The milestone title links to the canonical per-milestone view (`/{o}/{r}/issues?milestone=<id>`, same href as the milestones-page title links from #119).
 - **Thread freshness + id→name render gating (issue #259, 2026-09-10).**
   The thread GET's `private, max-age=0, stale-while-revalidate=60` window served pre-mutation bodies across refreshes

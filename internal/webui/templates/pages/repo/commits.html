@@ -1,0 +1,78 @@
+{{define "content"}}
+<div class="repo-shell">
+  {{template "repo_header" .Data.Repo}}
+  {{template "repo_tabs" .Data.Repo}}
+  {{template "repo_degraded" .Data.Repo}}
+
+  {{if .Data.Guide}}
+  {{template "repo_guide" .Data.Guide}}
+  {{else}}
+  <div class="commits-page">
+    <nav class="crumbs mb-2 flex flex-wrap items-baseline gap-x-1.5 text-sm">
+      <a class="text-emerald-700 hover:underline dark:text-emerald-400" href="/{{.Data.Repo.Full}}">{{.Data.RefShort}}</a>
+      {{if .Data.Path}}
+      <span class="muted" aria-hidden="true">/</span>
+      <span>history of <code class="font-mono text-xs">{{.Data.Path}}</code></span>
+      {{end}}
+      <!-- Graph toggle (Q3): a query link — a link is honest, a localStorage
+           preference is impossible without JS, and lanes derive per window
+           server-side either way. -->
+      <span class="ml-auto">
+        {{if .Data.Graph}}
+        <a class="pill btn-active cursor-pointer hover:no-underline" href="{{.Data.GraphOffHref}}" aria-current="page" title="Hide the commit graph">graph</a>
+        {{else}}
+        <a class="pill cursor-pointer hover:no-underline" href="{{.Data.GraphOnHref}}" title="Show the commit graph (lanes derive per page)">graph</a>
+        {{end}}
+      </span>
+    </nav>
+
+    <!-- divide-y only while the graph is OFF (Forgejo #512): a row border
+         would cut the rail column at every boundary. graph-on swaps the grid
+         to auto minmax(0,1fr) auto auto and hides the rail ≤480px. The third
+         column is the row's check pill (Checks.jsx CommitRow) — an empty cell
+         when the checks seam is unbound or the sha is outside the index
+         window, never a guessed state. -->
+    <div class="commit-list card overflow-hidden{{if .Data.Graph}} graph-on{{else}} divide-y divide-zinc-100 dark:divide-zinc-800/60{{end}}">
+      {{$rows := .Data.GraphRows}}
+      {{range $i, $c := .Data.Rows}}
+      <div class="commit-row grid grid-cols-[minmax(0,1fr)_auto_auto] items-center gap-x-2.5 px-3">
+        {{if $.Data.Graph}}{{index $rows $i}}{{end}}
+        <div class="commit-main min-w-0 py-2">
+          <a class="commit-subject block truncate text-sm font-medium text-zinc-900 hover:underline dark:text-zinc-100" href="{{$c.Href}}" title="{{if $c.Subject}}{{$c.Subject}}{{else}}(no message){{end}}">{{if $c.Subject}}{{$c.Subject}}{{else}}(no message){{end}}</a>
+          <p class="commit-meta muted mt-0.5 truncate text-xs tabular-nums">
+            <span>{{$c.Author}}</span>
+            {{if $c.Email}}<span> &lt;{{$c.Email}}&gt;</span>{{end}}
+            {{if $c.Stamp}}<span> · <time datetime="{{$c.Stamp}}" title="{{$c.Stamp}}">{{with rel $c.Stamp}}{{.}}{{else}}—{{end}}</time></span>{{end}}
+            {{if $c.Trailers}}<span class="pill ml-1">{{$c.Trailers}} trailers</span>{{end}}
+          </p>
+          {{if $c.ParentsLabel}}
+          <p class="commit-parents muted mt-0.5 truncate text-xs tabular-nums">
+            <span>{{$c.ParentsLabel}}</span>
+            {{range $j, $p := $c.Parents}}{{if $j}}<span> · </span>{{end}}<a class="sha font-mono text-emerald-700 hover:underline dark:text-emerald-400" href="/{{$.Data.Repo.Full}}/commit/{{$p}}" title="parent {{$p}}">{{shortsha $p}}</a>{{end}}
+          </p>
+          {{end}}
+        </div>
+        <div class="commit-sha-col flex shrink-0 items-center gap-0.5 py-2">
+          <a class="sha block w-28 text-right font-mono text-xs tabular-nums text-emerald-700 hover:underline dark:text-emerald-400" href="{{$c.Href}}" title="{{$c.SHA}}">{{$c.Short}}</a>
+        </div>
+        <span class="commit-check flex shrink-0 items-center py-2">{{if $c.Check}}{{template "repo_check_pill" $c.Check}}{{end}}</span>
+      </div>
+      {{end}}
+      {{if not .Data.Rows}}
+      <p class="commit-empty muted p-4 text-sm">No commits in this view.</p>
+      {{end}}
+    </div>
+
+    {{if .Data.More}}
+    <div class="pager mt-3 flex items-center gap-2">
+      <a class="pill cursor-pointer hover:no-underline" href="{{.Data.OlderHref}}" title="show older commits (showing {{.Data.Total}} so far)">older →</a>
+      <span class="muted text-xs tabular-nums">showing {{.Data.Total}} so far</span>
+    </div>
+    {{end}}
+    {{if .Data.Graph}}
+    <p class="muted mt-2 text-xs">Graph lanes derive per page — crossing “older →” restarts the lane layout.</p>
+    {{end}}
+  </div>
+  {{end}}
+</div>
+{{end}}

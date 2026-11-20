@@ -1,0 +1,15 @@
+{{define "content"}}
+<section class="mx-auto max-w-xl">
+  <h1 class="text-2xl font-semibold tracking-tight">{{.Chrome.Title}}</h1>
+  <div class="card mt-3 p-4">
+    <p class="text-sm">{{.Data.Message}}</p>
+    {{if eq .Data.Status 401}}
+    <p class="muted mt-3 text-sm">
+      <a class="text-emerald-700 hover:underline dark:text-emerald-400" href="{{.Chrome.LoginHref}}">Sign in</a>
+      to continue.
+    </p>
+    {{end}}
+    <p class="mt-3"><a class="text-sm text-emerald-700 hover:underline dark:text-emerald-400" href="/">← back home</a></p>
+  </div>
+</section>
+{{end}}

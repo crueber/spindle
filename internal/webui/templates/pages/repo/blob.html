@@ -1,0 +1,68 @@
+{{define "content"}}
+<div class="repo-shell">
+  {{template "repo_header" .Data.Repo}}
+  {{template "repo_tabs" .Data.Repo}}
+  {{template "repo_degraded" .Data.Repo}}
+
+  {{if .Data.Guide}}
+  {{template "repo_guide" .Data.Guide}}
+  {{else}}
+  <div class="blob-page">
+    <nav class="crumbs mb-2 text-sm">
+      <a class="text-emerald-700 hover:underline dark:text-emerald-400" href="/{{.Data.Repo.Full}}">root</a>
+      {{range .Data.Crumbs}}{{if .Last}} <span class="muted"> / </span> <strong>{{.Name}}</strong>{{else}} <span class="muted"> / </span> <a class="text-emerald-700 hover:underline dark:text-emerald-400" href="{{.Href}}">{{.Name}}</a>{{end}}{{end}}
+    </nav>
+
+    <!-- Header wraps at 390px (name / language chip / size · sha / raw), so
+         the raw pill keeps ml-auto only while it fits. -->
+    <div class="blob-head mb-2 flex flex-wrap items-baseline gap-2">
+      <h2 class="font-semibold">{{.Data.Name}}</h2>
+      {{if .Data.Lang}}<span class="chip">{{.Data.Lang}}</span>{{end}}
+      <span class="muted tabular text-xs">{{.Data.Size}} · {{.Data.SHA}}</span>
+      {{if .Data.RawHref}}<a class="pill ml-auto cursor-pointer hover:no-underline" href="{{.Data.RawHref}}" target="_blank" rel="noopener">raw</a>{{end}}
+    </div>
+
+    <div class="blob-body card overflow-hidden">
+      {{if .Data.TooLarge}}
+      <p class="muted italic p-6 text-center">
+        This file is too large to render ({{.Data.Size}}; the render cap is 2 MiB). Fetch it raw from the API.
+      </p>
+      {{else if .Data.Binary}}
+      <p class="muted italic p-6 text-center">binary file, {{.Data.Size}}</p>
+      {{else if .Data.IsMarkdown}}
+      <!-- Preview | Code is a query link (?view=code): shareable, no JS, one
+           full render per switch (Q4 recommendation). -->
+      <div class="seg flex items-center gap-1.5 border-b border-zinc-200 px-3 py-2 dark:border-zinc-800">
+        <a href="{{.Data.PathLink}}" class="pill cursor-pointer hover:no-underline{{if not .Data.CodeView}} border-emerald-500! text-emerald-600! dark:text-emerald-400!{{end}}">Preview</a>
+        <a href="{{.Data.PathLink}}?view=code" class="pill cursor-pointer hover:no-underline{{if .Data.CodeView}} border-emerald-500! text-emerald-600! dark:text-emerald-400!{{end}}">Code</a>
+      </div>
+      {{if .Data.CodeView}}
+      <pre class="code-view m-0 min-w-0 flex-1 overflow-x-auto rounded-none border-0"><code>{{.Data.Code}}</code></pre>
+      {{else}}
+      <div class="markdown-body p-4">{{.Data.Markdown}}</div>
+      {{end}}
+      {{else}}
+      <!-- Per-line table (issue #243): one <tr> per line keeps the gutter and
+           the code in the same row, so they can never desync. The wrapper
+           scrolls long lines in place — the page never pans at 390px. The
+           data-* hooks are the selection island's contract
+           (web/src/islands/selection.js): table-level data-line-select plus
+           per-row data-line and a data-line-no gutter cell. -->
+      <div class="blob-cols flex overflow-x-auto">
+        <table class="blob-table" aria-label="File content by line" data-line-select data-path="{{.Data.Path}}">
+          <tbody>
+            {{range .Data.Lines}}
+            <tr id="L{{.No}}" class="blob-row" data-line="{{.No}}" data-side="new">
+              <td class="blob-num" data-line-no><a href="#L{{.No}}" aria-label="Line {{.No}}">{{.No}}</a></td>
+              <td class="blob-code"><code>{{if .Blank}}<br />{{else}}{{.Code}}{{end}}</code></td>
+            </tr>
+            {{end}}
+          </tbody>
+        </table>
+      </div>
+      {{end}}
+    </div>
+  </div>
+  {{end}}
+</div>
+{{end}}

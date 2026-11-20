@@ -1,0 +1,20 @@
+{{define "repo_tabs"}}
+<!-- Tab strip (spec §1.2). Visibility rule, matching the JSX and documented
+     here per the group brief: FAIL OPEN — every tab renders unless the repo
+     summary explicitly disables it (features.issues/pulls/releases === false
+     hide those three; has_checks === false hides Checks). Badges render only
+     above zero (#319). The active tab derives from the first path segment;
+     a feature-disabled page re-highlights onto Code (#522). Narrow widths
+     (issue #274): the strip scrolls internally (.repo-tabs hides its own
+     scrollbar) and links never shrink, so 390px never pans the page. The
+     active class carries Tailwind v4's trailing `!` important modifier —
+     the binding spelling in the v4 toolchain this repo builds with. -->
+<nav class="repo-tabs mb-4 flex max-w-full gap-1 overflow-x-auto whitespace-nowrap border-b border-zinc-200 dark:border-zinc-800" aria-label="repository sections">
+  {{range .Tabs}}
+  <a href="{{.Href}}"
+     data-tab="{{.ID}}"
+     class="rounded-t px-3 py-1.5 text-sm text-zinc-500 hover:bg-zinc-100 hover:text-zinc-900 dark:text-zinc-400 dark:hover:bg-zinc-900 dark:hover:text-zinc-100{{if .Active}} border-b-2! border-emerald-500! font-medium! text-zinc-900! dark:text-zinc-100!{{end}}"
+     {{if .Active}}aria-current="page"{{end}}>{{.Label}}{{if .Badge}}<span class="tab-badge" aria-label="{{.Badge}} open">{{.Badge}}</span>{{end}}</a>
+  {{end}}
+</nav>
+{{end}}

@@ -1,0 +1,50 @@
+{{/* collab_timeline — the ONE event renderer (spec §4.1): comment kinds as
+     divider rows with markdown bodies + reaction summaries, everything else
+     as a centered muted system line. Data: timelineData (Owner/Repo/Base/
+     Events/CanReact/Locked/LockReason). Rendered oldest → newest (the
+     handler sorts; a seq-less row sorts first). */}}
+{{define "collab_timeline"}}
+<ol class="timeline" aria-live="polite" aria-label="Discussion timeline">
+  {{range .Events}}
+  {{if .System}}
+  <li class="border-t border-zinc-200 py-2 first:border-t-0 first:pt-0 dark:border-zinc-800" id="event-{{.Seq}}">
+    <p class="text-center text-xs text-zinc-500 dark:text-zinc-400"><span class="font-medium text-zinc-700 dark:text-zinc-200">{{.Actor}}</span> {{.System}} · {{template "collab_time" .At}}</p>
+  </li>
+  {{else}}
+  <li class="border-t border-zinc-200 py-3 first:border-t-0 first:pt-0 dark:border-zinc-800" id="event-{{.Seq}}">
+    <article>
+      <p class="mb-1 text-xs text-zinc-500 dark:text-zinc-400"><span class="font-medium text-zinc-700 dark:text-zinc-200">{{.Actor}}</span> · {{template "collab_time" .At}}</p>
+      <div class="markdown-body">{{mdrepo .Body $.Owner $.Repo}}</div>
+      {{$ev := .}}
+      {{if or .Reactions .Addable}}
+      <div class="reaction-row mt-2 flex flex-wrap items-center gap-1" role="group" aria-label="reactions">
+        {{range .Reactions}}
+        <form method="post" action="{{$.Base}}/reactions/{{$ev.Seq}}/{{.Content}}/delete" class="inline">
+          <button type="submit" class="chip" aria-label="toggle {{.Content}} reaction, {{.Count}} total" title="remove your {{.Content}} reaction">{{.Glyph}} {{.Count}}</button>
+        </form>
+        {{end}}
+        {{if and $.CanReact (not $ev.Locked) (gt (len $ev.Addable) 0)}}
+        <details class="relative inline-block" data-popover>
+          <summary class="list-none cursor-pointer px-1.5 py-0.5 text-sm text-zinc-500 hover:text-zinc-900 dark:text-zinc-400 dark:hover:text-zinc-100" aria-label="add a reaction" title="add a reaction" data-popover-trigger>+</summary>
+          <div class="reaction-drop card absolute left-0 z-30 mt-1 flex gap-1 p-1" role="group" aria-label="add a reaction" data-popover-panel>
+            {{range $ev.Addable}}
+            <form method="post" action="{{$.Base}}/reactions/{{$ev.Seq}}">
+              <input type="hidden" name="content" value="{{.Content}}">
+              <button type="submit" class="chip" aria-label="react {{.Content}}" title="react {{.Content}}">{{.Glyph}}</button>
+            </form>
+            {{end}}
+          </div>
+        </details>
+        {{else if $ev.AddReason}}
+        <span class="muted text-xs" title="{{$ev.AddReason}}">{{$ev.AddReason}}</span>
+        {{end}}
+      </div>
+      {{end}}
+    </article>
+  </li>
+  {{end}}
+  {{else}}
+  <li class="py-3 text-sm text-zinc-500 dark:text-zinc-400">No events yet.</li>
+  {{end}}
+</ol>
+{{end}}

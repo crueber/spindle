@@ -15,6 +15,7 @@ func TestSetupOnlyMode(t *testing.T) {
 	cfg := config.Defaults()
 	s := New(Options{Config: cfg, Store: newFakeStore(), Engine: &fakeEngine{},
 		Boot: BootState{Mode: "setup_only", Errors: []string{"store.backend: unknown backend \"tape\""}}})
+	s.SetUI(&fakeUI{paths: map[string]bool{"/setup": true}})
 	h := s.Handler()
 
 	// The §3.4 subset answers.
@@ -298,10 +299,11 @@ func osStat(p string) (interface{ Size() int64 }, error) {
 }
 
 // TestTeamPageRoute pins the 08 §1 org team page: "/{owner}/teams/{slug}"
-// serves the SPA shell (gated, GET/HEAD only); other methods 405; a repo
-// literally named "teams" keeps its 2-segment root.
+// is a page route the provider answers (GET/HEAD only); other methods 405; a
+// repo literally named "teams" keeps its 2-segment root.
 func TestTeamPageRoute(t *testing.T) {
-	_, h := newTestServer(t, nil)
+	s, h := newTestServer(t, nil)
+	s.SetUI(&fakeUI{paths: map[string]bool{"/acme/teams/dev": true, "/acme/teams": true}})
 	rows := []struct {
 		name   string
 		method string
@@ -309,7 +311,7 @@ func TestTeamPageRoute(t *testing.T) {
 		want   int
 		shell  bool
 	}{
-		{"team page shell", "GET", "http://x/acme/teams/dev", http.StatusOK, true},
+		{"team page", "GET", "http://x/acme/teams/dev", http.StatusOK, true},
 		{"team page head", "HEAD", "http://x/acme/teams/dev", http.StatusOK, false},
 		{"team page post rejected", "POST", "http://x/acme/teams/dev", http.StatusMethodNotAllowed, false},
 		{"empty slug 404", "GET", "http://x/acme/teams/", http.StatusNotFound, false},
@@ -325,8 +327,8 @@ func TestTeamPageRoute(t *testing.T) {
 			if rec.Code != tc.want {
 				t.Fatalf("%s %s = %d, want %d (%s)", tc.method, tc.target, rec.Code, tc.want, rec.Body.String())
 			}
-			if tc.shell && !strings.Contains(rec.Body.String(), "walhub") {
-				t.Fatalf("%s %s missing shell: %q", tc.method, tc.target, rec.Body.String())
+			if tc.shell && !strings.Contains(rec.Body.String(), `id="page"`) {
+				t.Fatalf("%s %s missing the page provider's body: %q", tc.method, tc.target, rec.Body.String())
 			}
 		})
 	}

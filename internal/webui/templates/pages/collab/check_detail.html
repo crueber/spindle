@@ -1,0 +1,25 @@
+{{define "content"}}
+{{with .Data}}
+<div class="mx-auto max-w-3xl">
+  <p class="mb-3 text-sm">
+    <a class="link" href="/{{.Repo.Full}}/checks">← all checks</a> ·
+    <a class="link font-mono" href="{{.Commit}}">{{.Short}}</a>
+  </p>
+  <h2 class="mb-3 flex flex-wrap items-center gap-2 text-lg font-semibold">Checks for <span class="font-mono">{{.Short}}</span>
+    {{if .Combined}}{{template "collab_check_pill" .Pill}}{{end}}
+  </h2>
+
+  {{if .Error}}<p class="err-line" role="alert">{{.Error}}</p>{{end}}
+
+  <div class="card !p-0">
+    {{if .Zero}}
+    <div class="p-3">
+      {{template "collab_zero_checks" (dict "title" "No checks reported yet" "full" .Repo.Full "sha" .SHA "required" "")}}
+    </div>
+    {{else if .Combined}}
+    {{template "collab_check_contexts" .Combined.Statuses}}
+    {{end}}
+  </div>
+</div>
+{{end}}
+{{end}}

@@ -20,7 +20,6 @@ import (
 	"math/big"
 	"net/http"
 	"net/http/httptest"
-	"reflect"
 	"strconv"
 	"strings"
 	"testing"
@@ -28,6 +27,7 @@ import (
 
 	"github.com/crueber/walhub/internal/config"
 	"github.com/crueber/walhub/internal/server/auth"
+	"github.com/crueber/walhub/internal/setup"
 )
 
 // tamperWireMAC returns a wire with a deterministically corrupted MAC:
@@ -441,7 +441,7 @@ func TestSetupAuthTestEdgeCases(t *testing.T) {
 	}
 }
 
-// --- parseSetupBody + configCoerce edges ----------------------------------------
+// --- setup.ParseRequest edges ----------------------------------------------------
 
 type errBody struct{}
 
@@ -450,13 +450,13 @@ func (errBody) Read([]byte) (int, error) { return 0, errors.New("torn body") }
 func parseBody(t *testing.T, body string) (*config.Config, error) {
 	t.Helper()
 	req := httptest.NewRequest("POST", "/api/v1/setup/test", strings.NewReader(body))
-	return parseSetupBody(req, config.Defaults())
+	return setup.ParseRequest(req, config.Defaults())
 }
 
 func TestParseSetupBodyEdges(t *testing.T) {
 	// Torn body → the read error surfaces (never a half-parsed config).
 	req := &http.Request{Body: io.NopCloser(errBody{})}
-	if _, err := parseSetupBody(req, config.Defaults()); err == nil {
+	if _, err := setup.ParseRequest(req, config.Defaults()); err == nil {
 		t.Fatal("torn body must error")
 	}
 	// Raw TOML spellings: bare ints ride the int64 branch, floats the
@@ -493,82 +493,5 @@ func TestParseSetupBodyEdges(t *testing.T) {
 	if _, err := parseBody(t, `{"overrides": {"server.nope": "x"}}`); err == nil ||
 		!strings.Contains(err.Error(), "unknown key") {
 		t.Fatalf("unknown dotted = %v", err)
-	}
-}
-
-func TestConfigCoerceNegatives(t *testing.T) {
-	strategyOf := func() reflect.Value {
-		c := config.Defaults()
-		return reflect.ValueOf(&c.Bundles.Strategy).Elem()
-	}
-	cases := []struct {
-		name string
-		fv   func() reflect.Value
-		raw  string
-		path string
-		want string // "" = success expected
-	}{
-		{"int32 ok", func() reflect.Value { v := int32(0); return reflect.ValueOf(&v).Elem() }, "5", "p.n", ""},
-		{"int32 overflow", func() reflect.Value { v := int32(0); return reflect.ValueOf(&v).Elem() }, "99999999999", "p.n", "out of range"},
-		{"int bad", func() reflect.Value { v := 0; return reflect.ValueOf(&v).Elem() }, "abc", "p.n", "not an int"},
-		{"uint ok", func() reflect.Value { v := uint32(0); return reflect.ValueOf(&v).Elem() }, "7", "p.n", ""},
-		{"uint bad", func() reflect.Value { v := uint32(0); return reflect.ValueOf(&v).Elem() }, "abc", "p.n", "not an int"},
-		{"uint negative", func() reflect.Value { v := uint32(0); return reflect.ValueOf(&v).Elem() }, "-5", "p.n", "not an int"},
-		{"uint overflow", func() reflect.Value { v := uint32(0); return reflect.ValueOf(&v).Elem() }, "4294967296", "p.n", "out of range"},
-		{"float ok", func() reflect.Value { v := 0.0; return reflect.ValueOf(&v).Elem() }, "1.5", "p.f", ""},
-		{"float bad", func() reflect.Value { v := 0.0; return reflect.ValueOf(&v).Elem() }, "abc", "p.f", "not a number"},
-		{"duration ok", func() reflect.Value { v := config.Duration(0); return reflect.ValueOf(&v).Elem() }, "2h", "p.d", ""},
-		{"duration bad", func() reflect.Value { v := config.Duration(0); return reflect.ValueOf(&v).Elem() }, "zzz", "p.d", "not a duration"},
-		{"bytesize bad", func() reflect.Value { v := config.ByteSize(0); return reflect.ValueOf(&v).Elem() }, "zzz", "p.b", "not a size"},
-		{"bool bad", func() reflect.Value { v := false; return reflect.ValueOf(&v).Elem() }, "yes", "p.b", "not a bool"},
-		{"strategy wrong table", strategyOf, "[[wrong]]\nname = \"x\"", "bundles.strategy", "must define [[strategy]]"},
-		{"strategy bad field", strategyOf, "[[strategy]]\nkeep = \"many\"", "bundles.strategy", "bundles.strategy"},
-		{"non-string list", func() reflect.Value { v := []int{}; return reflect.ValueOf(&v).Elem() }, "a,b", "p.l", "unsupported list element"},
-		{"unsupported kind", func() reflect.Value { v := make(chan int); return reflect.ValueOf(&v).Elem() }, "x", "p.c", "unsupported type"},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			err := configCoerce(tc.fv(), tc.raw, tc.path)
-			if tc.want == "" {
-				if err != nil {
-					t.Fatalf("coerce %q = %v, want success", tc.raw, err)
-				}
-				return
-			}
-			if err == nil || !strings.Contains(err.Error(), tc.want) {
-				t.Fatalf("coerce %q = %v, want %q", tc.raw, err, tc.want)
-			}
-		})
-	}
-	// A valid strategy fragment decodes by the field's toml name (§3.4).
-	fv := strategyOf()
-	frag := "[[strategy]]\nname = \"weekly\"\nkind = \"full\"\nschedule = \"0 0 * * * *\"\nkeep = 2"
-	if err := configCoerce(fv, frag, "bundles.strategy"); err != nil {
-		t.Fatalf("valid fragment = %v", err)
-	}
-	if fv.Len() != 1 || fv.Index(0).FieldByName("Keep").Int() != 2 {
-		t.Fatalf("fragment decoded = %+v", fv)
-	}
-}
-
-// --- fmtAny + schema skip -------------------------------------------------------
-
-func TestFmtAnyAndSchemaSkip(t *testing.T) {
-	// Invalid reflection → nil (never a panic on schema edges).
-	if got := fmtAny(reflect.Value{}); got != nil {
-		t.Fatalf("fmtAny(invalid) = %v, want nil", got)
-	}
-	if got := fmtAny(reflect.ValueOf(config.Duration(90 * time.Second))); got != "1m30s" {
-		t.Fatalf("fmtAny(duration) = %v", got)
-	}
-	// Untagged struct fields never become schema keys.
-	type tagged struct {
-		SkipMe string
-		Keep   string `toml:"keep"`
-	}
-	g := &setupSchemaGroup{}
-	appendSchemaKeys(g, "s.", reflect.ValueOf(tagged{}), reflect.ValueOf(tagged{}))
-	if len(g.Keys) != 1 || g.Keys[0].Key != "s.keep" {
-		t.Fatalf("schema keys = %+v, want [s.keep]", g.Keys)
 	}
 }

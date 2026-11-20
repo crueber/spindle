@@ -16,7 +16,9 @@ import (
 // never fires): enabled → 307 to the provider; disabled → a usable page,
 // never a bare 401; non-browsers and credentialed requests keep the plain
 // mapping. Env.gate / smart-HTTP / LFS behavior is untouched — this table
-// covers the gated-shell login path only.
+// covers a gated non-page route (/services/setup.json), the last place the
+// server itself applies the login decision (pages are gated by the page
+// provider).
 func TestGatedBrowserLoginDecisionTable(t *testing.T) {
 	browserGET := func(target string) *http.Request {
 		req := httptest.NewRequest(http.MethodGet, "http://x"+target, nil)
@@ -26,7 +28,7 @@ func TestGatedBrowserLoginDecisionTable(t *testing.T) {
 	t.Run("enabled browser GET 307s to the provider", func(t *testing.T) {
 		_, h := oidcServer(t)
 		rec := httptest.NewRecorder()
-		h.ServeHTTP(rec, browserGET("/acme/widgets"))
+		h.ServeHTTP(rec, browserGET("/services/setup.json"))
 		if rec.Code != http.StatusTemporaryRedirect {
 			t.Fatalf("status = %d, want 307", rec.Code)
 		}
@@ -37,7 +39,7 @@ func TestGatedBrowserLoginDecisionTable(t *testing.T) {
 	t.Run("disabled browser GET renders the login page, not a bare 401", func(t *testing.T) {
 		_, h := newTestServer(t, nil) // token mode: browser login disabled
 		rec := httptest.NewRecorder()
-		h.ServeHTTP(rec, browserGET("/acme/widgets"))
+		h.ServeHTTP(rec, browserGET("/services/setup.json"))
 		if rec.Code != http.StatusUnauthorized {
 			t.Fatalf("status = %d, want 401", rec.Code)
 		}
@@ -57,7 +59,7 @@ func TestGatedBrowserLoginDecisionTable(t *testing.T) {
 	t.Run("disabled plain GET keeps the bare 401", func(t *testing.T) {
 		_, h := newTestServer(t, nil)
 		rec := httptest.NewRecorder()
-		h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "http://x/acme/widgets", nil))
+		h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "http://x/services/setup.json", nil))
 		if rec.Code != http.StatusUnauthorized {
 			t.Fatalf("status = %d, want 401", rec.Code)
 		}
@@ -70,7 +72,7 @@ func TestGatedBrowserLoginDecisionTable(t *testing.T) {
 	})
 	t.Run("credentialed browser GET is never redirected", func(t *testing.T) {
 		_, h := newTestServer(t, nil)
-		req := browserGET("/")
+		req := browserGET("/services/setup.json")
 		req.Header.Set("Authorization", "Bearer junk")
 		rec := httptest.NewRecorder()
 		h.ServeHTTP(rec, req)
@@ -84,7 +86,7 @@ func TestGatedBrowserLoginDecisionTable(t *testing.T) {
 	t.Run("enabled non-browser GET keeps the bare 401", func(t *testing.T) {
 		_, h := oidcServer(t)
 		rec := httptest.NewRecorder()
-		h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "http://x/acme/widgets", nil))
+		h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "http://x/services/setup.json", nil))
 		if rec.Code != http.StatusUnauthorized {
 			t.Fatalf("status = %d, want 401", rec.Code)
 		}

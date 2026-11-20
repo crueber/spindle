@@ -117,12 +117,12 @@ func TestCollaboratorsEndpoint(t *testing.T) {
 		t.Fatalf("status = %d (%s)", w.Code, w.Body.String())
 	}
 	var got struct {
-		Collaborators []collaborator `json:"collaborators"`
+		Collaborators []Collaborator `json:"collaborators"`
 	}
 	if err := json.Unmarshal(w.Body.Bytes(), &got); err != nil {
 		t.Fatal(err)
 	}
-	byPrincipal := map[string]collaborator{}
+	byPrincipal := map[string]Collaborator{}
 	for _, c := range got.Collaborators {
 		byPrincipal[c.Principal] = c
 	}

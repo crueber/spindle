@@ -47,14 +47,3 @@ func subtleMatch(want, got string) bool {
 	}
 	return v == 0
 }
-
-// setupUI answers GET /setup with the SPA shell (D-WEB-6: /setup is a SPA
-// route). The SHELL is gated by the §3.4 access rules; the app then renders
-// the access-restricted card when the API refuses. The API itself keeps its
-// own setupAccess gating (setup_api.go).
-func (s *Server) setupUI(w http.ResponseWriter, r *http.Request) {
-	if !s.setupAccess(w, r) {
-		return
-	}
-	s.serveSPA(w, r)
-}

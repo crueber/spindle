@@ -15,6 +15,7 @@
 package identity
 
 import (
+	"context"
 	"net/http"
 	"sort"
 	"strings"
@@ -67,23 +68,24 @@ func (h *Handler) servePermissions(w http.ResponseWriter, r *http.Request, owner
 	_ = doc
 }
 
-// collaborator is one effective binding with its resolution source.
-type collaborator struct {
+// Collaborator is one effective binding with its resolution source
+// ("direct", "team:org/slug", "org-owner").
+type Collaborator struct {
 	Principal string `json:"principal"`
 	Role      string `json:"role"`
 	Source    string `json:"source"`
 }
 
-// serveCollaborators renders the effective bindings: direct user
-// bindings, team bindings expanded to members, and org owners at admin.
-// []-never-null; sorted by principal.
-func (h *Handler) serveCollaborators(w http.ResponseWriter, r *http.Request, owner, repo string) {
-	ctx := r.Context()
-	doc, _, err := h.Svc.GetAccess(ctx, owner, repo)
+// Collaborators renders the effective bindings: direct user bindings, team
+// bindings expanded to members, and org owners at admin. Sorted by principal
+// then role. Exported so the server-rendered Access tab reads the exact list
+// the JSON API serves.
+func (s *Service) Collaborators(ctx context.Context, owner, repo string) []Collaborator {
+	doc, _, err := s.GetAccess(ctx, owner, repo)
 	if err != nil {
 		doc = SynthesizeDefault(owner)
 	}
-	out := []collaborator{}
+	out := []Collaborator{}
 	seen := map[string]bool{}
 	add := func(principal, role, source string) {
 		principal = normPrincipal(principal)
@@ -91,7 +93,7 @@ func (h *Handler) serveCollaborators(w http.ResponseWriter, r *http.Request, own
 			return
 		}
 		seen[principal+"\x00"+role] = true
-		out = append(out, collaborator{Principal: principal, Role: role, Source: source})
+		out = append(out, Collaborator{Principal: principal, Role: role, Source: source})
 	}
 	for _, b := range doc.RoleBindings {
 		if sub, ok := strings.CutPrefix(b.Subject, "user:"); ok {
@@ -101,7 +103,7 @@ func (h *Handler) serveCollaborators(w http.ResponseWriter, r *http.Request, own
 			if !ok {
 				continue
 			}
-			t, _, terr := h.Svc.GetTeam(ctx, org, slug)
+			t, _, terr := s.GetTeam(ctx, org, slug)
 			if terr != nil || t == nil {
 				continue
 			}
@@ -110,7 +112,7 @@ func (h *Handler) serveCollaborators(w http.ResponseWriter, r *http.Request, own
 			}
 		}
 	}
-	if m, _, merr := h.Svc.getMembers(ctx, owner); merr == nil && m != nil {
+	if m, _, merr := s.getMembers(ctx, owner); merr == nil && m != nil {
 		for _, e := range m.Members {
 			if e.Role == OrgOwner {
 				add(e.Principal, string(RoleAdmin), "org-owner")
@@ -123,6 +125,12 @@ func (h *Handler) serveCollaborators(w http.ResponseWriter, r *http.Request, own
 		}
 		return out[i].Role < out[j].Role
 	})
+	return out
+}
+
+// serveCollaborators renders the effective bindings (the Collaborators list).
+func (h *Handler) serveCollaborators(w http.ResponseWriter, r *http.Request, owner, repo string) {
+	out := h.Svc.Collaborators(r.Context(), owner, repo)
 	writeCached(w, r, ccNoStore, "", http.StatusOK, map[string]any{"collaborators": out})
 }
 

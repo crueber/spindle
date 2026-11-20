@@ -30,6 +30,7 @@ import (
 	"github.com/crueber/walhub/internal/server"
 	"github.com/crueber/walhub/internal/store"
 	"github.com/crueber/walhub/internal/wal"
+	"github.com/crueber/walhub/internal/webui"
 )
 
 // runServe boots the server (§10.4). It returns the process exit code.
@@ -185,6 +186,22 @@ func serveHTTP(ctx context.Context, cfg *config.Config, boot server.BootState, d
 	// point 3: one block per package + the per-user SSE mounts that
 	// ride the notify handler).
 	chainCollab(srv, collab)
+	// D-WEB-14: the server-rendered page layer. It answers migrated UI routes
+	// and falls through to the SPA for the rest during the migration; a
+	// template parse error is a boot error (a broken page must not 500 later).
+	//
+	// Built UNCONDITIONALLY, setup-only included: /setup is a server-rendered
+	// page and an INVALID config has to be fixable from the browser (§3.4), so
+	// the provider must exist in every boot mode. wireWebUI binds the feature
+	// seams; setup-only passes nil services, so only the setup deps bind and
+	// every other page renders its "not wired" card instead of panicking.
+	ui, uerr := webui.New(webui.Env{Cfg: cfg, API: apiEnv, Version: version()})
+	if uerr != nil {
+		log.Error("webui: templates failed to parse", "err", uerr)
+		return 1
+	}
+	wireWebUI(cfg, boot, apiEnv, collab)
+	srv.SetUI(ui)
 	// Forgejo #370: OIDC usernames. The auth service resolves verified
 	// emails to immutable usernames through the identity registry
 	// (users/<username>/user.json, CAS on creation); the reverse

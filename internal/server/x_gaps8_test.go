@@ -19,8 +19,6 @@ import (
 	"testing"
 	"time"
 
-	"reflect"
-
 	"github.com/crueber/walhub/internal/config"
 	"github.com/crueber/walhub/internal/git"
 	"github.com/crueber/walhub/internal/server/auth"
@@ -524,8 +522,9 @@ func TestRepoDispatchLaneRootAndUploadPack(t *testing.T) {
 	fe := s.engine.(*fakeEngine)
 	fe.exists = true
 	fe.placement = Placement{Serve: true}
-	// Lane root GET falls through to the gated repo page.
+	// Lane root GET falls through to the repo page (the page provider).
 	s.api = nil
+	s.SetUI(&fakeUI{paths: map[string]bool{"/o/r/api": true}})
 	req := httptest.NewRequest("GET", "http://x/o/r/api", nil)
 	req.Header.Set("Authorization", "Bearer tok123")
 	req = req.WithContext(context.WithValue(req.Context(), repoRootKey{}, t.TempDir()))
@@ -713,29 +712,6 @@ func TestErrorsAsWrappedNonWal(t *testing.T) {
 
 // --- misc small branches -------------------------------------------------------------------
 
-func TestSetupUIAssetsGone(t *testing.T) {
-	// D-WEB-6: the standalone setup assets died with the vanilla page; /setup
-	// is a SPA route (open in defaults mode, the API keeps its own gating).
-	cfg := config.Defaults()
-	cfg.DataDir = t.TempDir()
-	s := New(Options{Config: cfg, Store: newFakeStore(), Engine: &fakeEngine{},
-		Boot: BootState{Mode: "defaults"}})
-	rec := httptest.NewRecorder()
-	s.setupUI(rec, httptest.NewRequest("GET", "/setup", nil))
-	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), "id=\"root\"") {
-		t.Fatalf("setup page = %d, want the SPA shell", rec.Code)
-	}
-}
-
-func TestSecretKeyAndFmtAnyDirect(t *testing.T) {
-	if !secretKey("key") || !secretKey("my_password") || secretKey("listen") {
-		t.Fatal("secretKey truth table broken")
-	}
-	if fmtAny(reflectFloatValue()) != 3.5 {
-		t.Fatal("fmtAny default branch broken")
-	}
-}
-
 func TestStaticIfRangeMatch(t *testing.T) {
 	s, _ := newTestServer(t, nil)
 	meta := putObj(t, s, "repos/o/r/bundles/full/b.bundle", []byte("BODY123"))
@@ -758,8 +734,4 @@ func TestWriteFileAtomicError(t *testing.T) {
 
 func ecdsaGenerate() (*ecdsa.PrivateKey, error) {
 	return ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
-}
-
-func reflectFloatValue() reflect.Value {
-	return reflect.ValueOf(struct{ V float64 }{V: 3.5}).Field(0)
 }

@@ -3,6 +3,7 @@ package api
 import (
 	"bytes"
 	"context"
+	"errors"
 	"io"
 	"net/http"
 	"reflect"
@@ -50,6 +51,61 @@ func (h *handlers) settingsGet(w http.ResponseWriter, r *http.Request) {
 	writeCached(w, r, ccNoStore, "", http.StatusOK, settingsWire(doc))
 }
 
+// WriteError is one failed API mutation in a form non-HTTP consumers (the
+// server-rendered settings pages) can render: Status is the HTTP status the
+// JSON handler writes and Message is its plain-text body. The JSON handlers
+// and the pages therefore share one mapping.
+type WriteError struct {
+	Status  int
+	Message string
+}
+
+// PublishSettings validates and publishes a repo settings body (the settings
+// PUT semantics): body = TOML ≤ 16 KiB else 413; invalid → 400, nothing
+// published. The caller has already enforced the admin gate.
+func PublishSettings(ctx context.Context, e *Env, id git.RepoId, body []byte, message, author string) (uint64, *WriteError) {
+	if e.Repo == nil {
+		return 0, &WriteError{Status: http.StatusServiceUnavailable, Message: "repo view not configured"}
+	}
+	if len(body) > config.MaxRepoSettingsBytes {
+		return 0, &WriteError{Status: http.StatusRequestEntityTooLarge, Message: "settings body exceeds 16 KiB"}
+	}
+	if _, err := config.ParseRepoSettings(body); err != nil {
+		return 0, &WriteError{Status: http.StatusBadRequest, Message: err.Error()}
+	}
+	rev, err := e.Repo.PublishSettings(ctx, id, body, message, author)
+	if err != nil {
+		return 0, viewError(err)
+	}
+	return rev, nil
+}
+
+// DeleteSettings publishes an empty body (back to host config) at a new
+// revision. The caller has already enforced the admin gate.
+func DeleteSettings(ctx context.Context, e *Env, id git.RepoId, author string) (uint64, *WriteError) {
+	if e.Repo == nil {
+		return 0, &WriteError{Status: http.StatusServiceUnavailable, Message: "repo view not configured"}
+	}
+	rev, err := e.Repo.PublishSettings(ctx, id, nil, "", author)
+	if err != nil {
+		return 0, viewError(err)
+	}
+	return rev, nil
+}
+
+// viewError maps a RepoView error onto the §2 wire status (the mapViewErr
+// rule) for non-HTTP callers.
+func viewError(err error) *WriteError {
+	switch {
+	case errors.Is(err, ErrNotFound):
+		return &WriteError{Status: http.StatusNotFound, Message: err.Error()}
+	case errors.Is(err, ErrExists):
+		return &WriteError{Status: http.StatusConflict, Message: err.Error()}
+	default:
+		return &WriteError{Status: http.StatusServiceUnavailable, Message: err.Error()}
+	}
+}
+
 // settingsPut publishes validated repo settings through the WAL (§11): body
 // = TOML ≤ 16 KiB else 413; validated against THIS host's build; invalid →
 // 400 + reason, nothing published; valid → 200 {"revision":N}.
@@ -58,18 +114,14 @@ func (h *handlers) settingsPut(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, config.MaxRepoSettingsBytes+1))
-	if err != nil || len(body) > config.MaxRepoSettingsBytes {
+	if err != nil {
 		writePlain(w, http.StatusRequestEntityTooLarge, "settings body exceeds 16 KiB")
 		return
 	}
-	if _, err := config.ParseRepoSettings(body); err != nil {
-		writePlain(w, http.StatusBadRequest, err.Error())
-		return
-	}
 	p := h.env.PrincipalOf(r)
-	rev, err := h.env.Repo.PublishSettings(r.Context(), RepoOf(r), body, r.URL.Query().Get("message"), p.Name)
-	if err != nil {
-		mapViewErr(w, err)
+	rev, werr := PublishSettings(r.Context(), h.env, RepoOf(r), body, r.URL.Query().Get("message"), p.Name)
+	if werr != nil {
+		writePlain(w, werr.Status, werr.Message)
 		return
 	}
 	writeCached(w, r, ccNoStore, "", http.StatusOK, struct {
@@ -82,14 +134,10 @@ func (h *handlers) settingsDelete(w http.ResponseWriter, r *http.Request) {
 	if !h.env.gate(w, r, AuthAdmin) {
 		return
 	}
-	if h.env.Repo == nil { // pending surface: a nil engine leaves Repo unwired
-		writePlain(w, http.StatusServiceUnavailable, "repo view not configured")
-		return
-	}
 	p := h.env.PrincipalOf(r)
-	rev, err := h.env.Repo.PublishSettings(r.Context(), RepoOf(r), nil, "", p.Name)
-	if err != nil {
-		mapViewErr(w, err)
+	rev, werr := DeleteSettings(r.Context(), h.env, RepoOf(r), p.Name)
+	if werr != nil {
+		writePlain(w, werr.Status, werr.Message)
 		return
 	}
 	writeCached(w, r, ccNoStore, "", http.StatusOK, struct {
@@ -174,7 +222,7 @@ func (h *handlers) settingsHistory(w http.ResponseWriter, r *http.Request) {
 
 // --- GET …/settings/describe + POST …/settings/validate (§3 shape verbatim) -------------
 
-type strategyBody struct {
+type StrategyBody struct {
 	Name          string   `json:"name"`
 	Kind          string   `json:"kind"`
 	Base          string   `json:"base,omitempty"`
@@ -189,7 +237,9 @@ type strategyBody struct {
 	Filter        string   `json:"filter"`
 }
 
-type hostFacts struct {
+// HostFacts is the this_host block of the describe shape (§3): the host
+// config's placement/disk facts for the machine answering the read.
+type HostFacts struct {
 	Name             string   `json:"name"`
 	Serves           bool     `json:"serves"`
 	Maintains        bool     `json:"maintains"`
@@ -199,13 +249,15 @@ type hostFacts struct {
 	Roles            []string `json:"roles"`
 }
 
-type maintenanceBody struct {
+// MaintenanceBody is the describe shape's [maintenance] block.
+type MaintenanceBody struct {
 	Checkpoints  bool      `json:"checkpoints"`
 	IntervalSecs int64     `json:"interval_secs"`
-	ThisHost     hostFacts `json:"this_host"`
+	ThisHost     HostFacts `json:"this_host"`
 }
 
-type compactionBody struct {
+// CompactionBody is the describe shape's [compaction] block.
+type CompactionBody struct {
 	Enabled                 bool   `json:"enabled"`
 	Factor                  int    `json:"factor"`
 	TriggerPacks            int    `json:"trigger_packs"`
@@ -215,7 +267,8 @@ type compactionBody struct {
 	Engine                  string `json:"engine"`
 }
 
-type upstreamBody struct {
+// UpstreamBody is the describe shape's [upstream] block.
+type UpstreamBody struct {
 	Git                string   `json:"git"`
 	Lfs                string   `json:"lfs"`
 	TokenEnv           bool     `json:"token_env"`
@@ -224,46 +277,61 @@ type upstreamBody struct {
 	LastRound          string   `json:"last_round,omitempty"`
 }
 
-type fieldBody struct {
+// FieldBody is one overridden settings key: the effective value and the
+// host value it replaced.
+type FieldBody struct {
 	Key       string `json:"key"`
 	Value     any    `json:"value"`
 	HostValue any    `json:"host_value"`
 	Source    string `json:"source"` // "host" | "setting"
 }
 
-type describeBody struct {
+// DescribeBody is the §3 describe shape (GET …/settings/describe). It is
+// exported so non-HTTP consumers (the server-rendered settings pages) read
+// the exact same projection the JSON API serves.
+type DescribeBody struct {
 	Settings    settingsBody    `json:"settings"`
 	Sections    []string        `json:"sections"`
-	Strategies  []strategyBody  `json:"strategies"`
+	Strategies  []StrategyBody  `json:"strategies"`
 	Bundles     []BundleInfo    `json:"bundles"`
-	Maintenance maintenanceBody `json:"maintenance"`
-	Compaction  compactionBody  `json:"compaction"`
-	Upstream    upstreamBody    `json:"upstream"`
-	Fields      []fieldBody     `json:"fields"`
+	Maintenance MaintenanceBody `json:"maintenance"`
+	Compaction  CompactionBody  `json:"compaction"`
+	Upstream    UpstreamBody    `json:"upstream"`
+	Fields      []FieldBody     `json:"fields"`
 	HeadSeq     uint64          `json:"head_seq"`
 	OK          *bool           `json:"ok,omitempty"`
 	Errors      []string        `json:"errors,omitempty"`
 }
 
+// describeSections names the settings sections the describe shape reports.
 var describeSections = []string{"bundles", "maintenance", "compaction", "upstream"}
+
+// SettingsDescribe returns the §3 describe shape for non-HTTP consumers (the
+// server-rendered Scheduled tab). It runs the exact projection the JSON
+// handler serves — one code path, so the page and its API twin cannot drift.
+func SettingsDescribe(ctx context.Context, e *Env, id git.RepoId) (DescribeBody, error) {
+	doc, err := e.Repo.Settings(ctx, id)
+	if err != nil {
+		return DescribeBody{}, err
+	}
+	eff, err := e.effectiveWith(e.Cfg, []byte(doc.TOML))
+	if err != nil {
+		return DescribeBody{}, err
+	}
+	return (&handlers{env: e}).describeShape(ctx, id, doc, eff), nil
+}
 
 func (h *handlers) settingsDescribe(w http.ResponseWriter, r *http.Request) {
 	if !h.open(w, r, AuthRead) {
 		return
 	}
-	ctx := r.Context()
-	id := RepoOf(r)
-	doc, err := h.env.Repo.Settings(ctx, id)
+	body, err := SettingsDescribe(r.Context(), h.env, RepoOf(r))
 	if err != nil {
+		// 404/409/503 by the §2 rule (mapViewErr): a broken stored document
+		// is a 503 with its reason, exactly as the pre-seam handler wrote it.
 		mapViewErr(w, err)
 		return
 	}
-	eff, err := h.env.effectiveWith(h.env.Cfg, []byte(doc.TOML))
-	if err != nil {
-		writePlain(w, http.StatusServiceUnavailable, err.Error())
-		return
-	}
-	body := h.describeShape(ctx, id, doc, eff)
 	writeCached(w, r, ccNoStore, "", http.StatusOK, body)
 }
 
@@ -315,17 +383,17 @@ func (h *handlers) settingsValidate(w http.ResponseWriter, r *http.Request) {
 }
 
 // describeShape fills the §3 describe shape for an effective config.
-func (h *handlers) describeShape(ctx context.Context, id git.RepoId, doc SettingsDoc, eff *config.Config) describeBody {
-	body := describeBody{
+func (h *handlers) describeShape(ctx context.Context, id git.RepoId, doc SettingsDoc, eff *config.Config) DescribeBody {
+	body := DescribeBody{
 		Settings:   settingsWire(doc),
 		Sections:   describeSections,
-		Strategies: []strategyBody{},
+		Strategies: []StrategyBody{},
 		Bundles:    []BundleInfo{},
-		Fields:     []fieldBody{},
+		Fields:     []FieldBody{},
 	}
 	now := h.env.Now()
 	for _, s := range eff.Bundles.Strategy {
-		sb := strategyBody{
+		sb := StrategyBody{
 			Name:          s.Name,
 			Kind:          s.Kind,
 			Base:          s.Base,
@@ -361,10 +429,10 @@ func (h *handlers) describeShape(ctx context.Context, id git.RepoId, doc Setting
 	if h.env.Cfg != nil {
 		host = h.env.Cfg
 	}
-	body.Maintenance = maintenanceBody{
+	body.Maintenance = MaintenanceBody{
 		Checkpoints:  eff.Maintenance.Checkpoints,
 		IntervalSecs: int64(time.Duration(eff.Maintenance.Interval) / time.Second),
-		ThisHost: hostFacts{
+		ThisHost: HostFacts{
 			Name:             hostname,
 			Serves:           placementAllows(host.Placement.Serve, host.Placement.ServeExclude, hostname),
 			Maintains:        placementAllows(host.Placement.Maintain, host.Placement.MaintainExclude, hostname),
@@ -374,7 +442,7 @@ func (h *handlers) describeShape(ctx context.Context, id git.RepoId, doc Setting
 			Roles:            roles,
 		},
 	}
-	body.Compaction = compactionBody{
+	body.Compaction = CompactionBody{
 		Enabled:                 eff.Compaction.Enabled,
 		Factor:                  eff.Compaction.Factor,
 		TriggerPacks:            eff.Compaction.TriggerPacks,
@@ -383,7 +451,7 @@ func (h *handlers) describeShape(ctx context.Context, id git.RepoId, doc Setting
 		RetentionSupersededSecs: int64(time.Duration(eff.Compaction.RetentionSuperseded) / time.Second),
 		Engine:                  eff.Compaction.Engine,
 	}
-	body.Upstream = upstreamBody{
+	body.Upstream = UpstreamBody{
 		Git:                eff.Upstream.Git,
 		Lfs:                eff.Upstream.Lfs,
 		TokenEnv:           eff.Upstream.TokenEnv != "",
@@ -418,8 +486,8 @@ func listMatches(list []string, hostname string) bool {
 // diffFields lists every overridden key of the four settings sections with
 // its origin: {key, value, host_value, source:"host"|"setting"} (§11). Only
 // overridden keys appear; durations render as seconds, sizes as bytes.
-func diffFields(host, eff *config.Config) []fieldBody {
-	out := []fieldBody{}
+func diffFields(host, eff *config.Config) []FieldBody {
+	out := []FieldBody{}
 	if host == nil || eff == nil {
 		return out
 	}
@@ -448,7 +516,7 @@ func diffFields(host, eff *config.Config) []fieldBody {
 			if name == "" {
 				name = strings.ToLower(f.Name)
 			}
-			out = append(out, fieldBody{
+			out = append(out, FieldBody{
 				Key:       sec.name + "." + name,
 				Value:     scalarValue(bv, f.Type),
 				HostValue: scalarValue(av, f.Type),

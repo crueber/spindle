@@ -409,7 +409,9 @@ which would leak existence). Webhook secrets are never logged.
 
 ## 7. UI and SDK
 
-UI surfaces (full SPA patterns in 08/12_web_ui; these are the notification-specific pages):
+UI surfaces (page patterns in `12_web_ui.md` §2; templates
+`internal/webui/templates/pages/public/notifications.html`, `pages/settings/org.html`,
+`partials/settings_org.html`, `partials/repo_header.html`; these are the notification-specific pages):
 
 | Page / component | Route | Behavior |
 |---|---|---|
@@ -419,7 +421,7 @@ UI surfaces (full SPA patterns in 08/12_web_ui; these are the notification-speci
 | Webhooks settings | `/{o}/{r}/settings/webhooks` (admin only) | CRUD table + `ping` button + recent deliveries expander; secret shown once at creation |
 | Org activity | `/:org/settings` → Activity (owner only) | newest-first org-event table (member/team/repo/invite) with an "older" cursor; live rows prepend over the `org_activity` stream (one connection per mount, capped reconnect) |
 | Mention autocomplete | comment composer | suggests `@principal` from F1 user search and `@org/team` from F1 teams; purely advisory — the server re-parses |
-| Rendered mention links | every thread body (issue/PR/review via `renderBody`) | `@username` and legacy `@email` tokens link to `/{principal}` at render time (client-side `linkifyMentions` in `web/src/lib/render-md.js`, beside the #340 ref pass): same left-boundary + trailing-punct rules as §3, code spans/fences/links skipped, `@org/team` NOT linked (team URLs live under settings/teams, out of scope); ALL grammar-valid tokens link with no existence probe (dead links acceptable, GitHub behavior — decision (a)), href lowercased, display as typed; plain relative anchors, zero sanitizer changes |
+| Rendered mention links | every thread body (issue/PR/review via the Go markdown renderer) | `@username` and legacy `@email` tokens link to `/{principal}` at render time (`internal/webui/markdown.go`, beside the #340 ref pass): same left-boundary + trailing-punct rules as §3, code spans/fences/links skipped, `@org/team` NOT linked (team URLs live under settings/teams, out of scope); ALL grammar-valid tokens link with no existence probe (dead links acceptable, GitHub behavior — decision (a)), href lowercased, display as typed; plain relative anchors, zero sanitizer changes |
 
 SDK additions (`web/sdk/src/notifications.js`, bundled by esbuild into `repos.js` per 12 §1.0):
 
@@ -759,11 +761,13 @@ a read notification while its tray page is open is harmless (404 → UI drops th
   owners should not register N per-repo hooks to watch membership; the per-scope cursor keeps
   the §5.3 at-least-once contract without a second delivery implementation.
 
-- **Rendered mention profile links (Forgejo #440, 2026-09-13):** `linkifyMentions` in
-  `web/src/lib/render-md.js` autolinks `@username` + legacy `@email` tokens to `/{principal}`
+- **Rendered mention profile links (Forgejo #440, 2026-09-13):** the markdown renderer
+  autolinks `@username` + legacy `@email` tokens to `/{principal}`
   (§7 row) beside the #340 ref pass — same left-boundary + trailing-punct rules as §3, code
-  spans/fences/links skipped (marked-autolinked `@email` arrives as `@` + mailto anchor and is
-  folded; bare addresses keep mailto, never a mention). `@org/team` NOT linked (team URLs live
+  spans/fences/links skipped (a marked-autolinked `@email` arrives as `@` + mailto anchor and is
+  folded; bare addresses keep mailto, never a mention). *(Implementation move, D-WEB-14/D-WEB-15:
+  the rule lives in `internal/webui/markdown.go`; the SPA's `linkifyMentions` in
+  `web/src/lib/render-md.js` is historical.)* `@org/team` NOT linked (team URLs live
   under settings/teams, out of scope); ALL grammar-valid tokens link with no existence probe
   (decision (a) — dead links acceptable, GitHub behavior; the server still drops unresolvable
   mentions from fan-out silently). Renderer-only: no server change, no sanitizer change, no new
@@ -806,7 +810,7 @@ a read notification while its tray page is open is harmless (404 → UI drops th
 
 - Email delivery (§5.2 seam), push notifications, mobile.
 - Per-thread mute/snooze and per-repo notification settings UI (GitHub's "participating vs all" dial) — v1 emits for participants + watchers; a preference object is the natural extension.
-- An org-settings webhooks tab in the SPA (the API + SDK surface in §6/§7 is the v1 contract; the tab is a pure UI follow-up). The org-settings Activity tab (§5.5/§7) is NOT covered by this exclusion — it landed with #364.
+- An org-settings webhooks tab in the web UI (the API + SDK surface in §6/§7 is the v1 contract; the tab is a pure UI follow-up). The org-settings Activity tab (§5.5/§7) is NOT covered by this exclusion — it landed with #364.
 - Notification digest batching, threading/grouping rules beyond the (user, thread, reason) dedup.
 - Webhook retry-with-backoff schedules (v1 is at-least-once via cursor; a failed delivery retries on the next pass), delivery payload customization/templates, and bot signatures.
 - In-repo "notifications" for git events (pushes) — those stay on the WAL events bridge (09).

@@ -38,11 +38,19 @@ func loadPolicy(ctx context.Context, e *Env, id git.RepoId) (*policy.Document, [
 	return doc, raw, meta.Version, nil
 }
 
+// PolicyOf exposes the effective policy document to non-HTTP consumers (the
+// server-rendered merge box, which must treat an absent policy as allow-all
+// and must fail closed on a parse error). The raw bytes/version stay internal.
+func PolicyOf(ctx context.Context, e *Env, id git.RepoId) (*policy.Document, error) {
+	doc, _, _, err := loadPolicy(ctx, e, id)
+	return doc, err
+}
+
 func (h *handlers) policyGet(w http.ResponseWriter, r *http.Request) {
 	if !h.open(w, r, AuthRead) {
 		return
 	}
-	_, raw, _, err := loadPolicy(r.Context(), h.env, RepoOf(r))
+	raw, _, err := PolicyRaw(r.Context(), h.env, RepoOf(r))
 	if err != nil {
 		// Fail closed: surface the parse error as plain text (GET of a
 		// corrupt doc is a 503 so nobody mistakes it for allow-all).
@@ -50,6 +58,43 @@ func (h *handlers) policyGet(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeCached(w, r, ccNoStore, "", http.StatusOK, json.RawMessage(raw))
+}
+
+// PolicyRaw is the stored policy document's raw bytes plus its CAS version
+// (the empty document + "" when never written). The parse error is returned
+// with the raw bytes: the settings page renders the bytes the operator must
+// fix instead of hiding them behind a 503.
+func PolicyRaw(ctx context.Context, e *Env, id git.RepoId) ([]byte, store.Version, error) {
+	_, raw, ver, err := loadPolicy(ctx, e, id)
+	return raw, ver, err
+}
+
+// PutPolicy is the policy PUT semantics for non-HTTP consumers: parse (an
+// unparseable body is 400, nothing written), then CAS-write the raw bytes.
+// A concurrent change is 409. The caller has already enforced the admin gate.
+func PutPolicy(ctx context.Context, e *Env, id git.RepoId, body []byte) *WriteError {
+	if len(body) > 1<<20 {
+		return &WriteError{Status: http.StatusRequestEntityTooLarge, Message: "policy body too large"}
+	}
+	if _, err := policy.Parse(body); err != nil {
+		return &WriteError{Status: http.StatusBadRequest, Message: err.Error()}
+	}
+	_, _, cur, err := loadPolicy(ctx, e, id)
+	if err != nil {
+		return &WriteError{Status: http.StatusServiceUnavailable, Message: err.Error()}
+	}
+	opts := store.PutOptions{Mode: store.PutCreate, ContentType: "application/json"}
+	if cur != "" {
+		opts.Mode = store.PutUpdate
+		opts.IfVersion = cur
+	}
+	if _, err := e.Store.Put(ctx, policyKey(id), store.PutBody{Bytes: body}, opts); err != nil {
+		if store.IsPreconditionFailed(err) {
+			return &WriteError{Status: http.StatusConflict, Message: "policy changed concurrently; retry"}
+		}
+		return &WriteError{Status: http.StatusServiceUnavailable, Message: err.Error()}
+	}
+	return nil
 }
 
 func (h *handlers) policyPut(w http.ResponseWriter, r *http.Request) {
@@ -61,30 +106,8 @@ func (h *handlers) policyPut(w http.ResponseWriter, r *http.Request) {
 		writePlain(w, http.StatusRequestEntityTooLarge, "policy body too large")
 		return
 	}
-	if _, err := policy.Parse(body); err != nil {
-		// Invalid → 400 with a plain-text reason list; nothing written (§10).
-		writePlain(w, http.StatusBadRequest, err.Error())
-		return
-	}
-	id := RepoOf(r)
-	ctx := r.Context()
-	_, _, cur, err := loadPolicy(ctx, h.env, id)
-	if err != nil {
-		writePlain(w, http.StatusServiceUnavailable, err.Error())
-		return
-	}
-	mode := store.PutCreate
-	opts := store.PutOptions{Mode: mode, ContentType: "application/json"}
-	if cur != "" {
-		opts.Mode = store.PutUpdate
-		opts.IfVersion = cur
-	}
-	if _, err := h.env.Store.Put(ctx, policyKey(id), store.PutBody{Bytes: body}, opts); err != nil {
-		if store.IsPreconditionFailed(err) {
-			writePlain(w, http.StatusConflict, "policy changed concurrently; retry")
-			return
-		}
-		writePlain(w, http.StatusServiceUnavailable, err.Error())
+	if werr := PutPolicy(r.Context(), h.env, RepoOf(r), body); werr != nil {
+		writePlain(w, werr.Status, werr.Message)
 		return
 	}
 	writeCached(w, r, ccNoStore, "", http.StatusOK, json.RawMessage(body))
@@ -183,63 +206,59 @@ func loadPolicyBytes(ctx context.Context, e *Env, id git.RepoId, body []byte) (*
 
 // --- POST …/policy/dry-run?last=N (§10) -----------------------------------------------
 
-type dryRunRef struct {
+// DryRunRef is one ref decision of the dry-run wire shape.
+type DryRunRef struct {
 	Name   string `json:"name"`
 	OK     bool   `json:"ok"`
 	Reason string `json:"reason"`
 	Force  bool   `json:"force"`
 }
 
-type dryRunResult struct {
+// DryRunResult is one push of the dry-run wire shape.
+type DryRunResult struct {
 	Seq       uint64      `json:"seq"`
 	At        string      `json:"at"`
 	Principal string      `json:"principal"`
 	Atomic    bool        `json:"atomic"`
-	Refs      []dryRunRef `json:"refs"`
+	Refs      []DryRunRef `json:"refs"`
 }
 
-type dryRunBody struct {
+// DryRunBody is the POST …/policy/dry-run?last=N answer (§10). Exported so
+// the server-rendered policy tab evaluates through the same code path.
+type DryRunBody struct {
 	Pushes   int            `json:"pushes"`
 	Allowed  int            `json:"allowed"`
 	Denied   int            `json:"denied"`
-	Results  []dryRunResult `json:"results"`
+	Results  []DryRunResult `json:"results"`
 	Warnings []string       `json:"warnings,omitempty"`
 }
 
-func (h *handlers) policyDryRun(w http.ResponseWriter, r *http.Request) {
-	if !h.open(w, r, AuthRead) {
-		return
+// DryRunPolicy evaluates a candidate policy (or the stored one when body is
+// empty) against the last `last` pushes — the dry-run endpoint's evaluation,
+// reused by the settings page. An unparseable candidate is 400 (fail closed);
+// a history read failure is 503.
+func DryRunPolicy(ctx context.Context, e *Env, id git.RepoId, body []byte, last int) (*DryRunBody, *WriteError) {
+	if last <= 0 || last > 1000 {
+		last = 10
 	}
-	last := 10
-	if s := r.URL.Query().Get("last"); s != "" {
-		if n, err := strconv.Atoi(s); err == nil && n > 0 && n <= 1000 {
-			last = n
-		}
+	if e.Repo == nil {
+		return nil, &WriteError{Status: http.StatusServiceUnavailable, Message: "repo view not configured"}
 	}
-	body, _ := io.ReadAll(http.MaxBytesReader(w, r.Body, 1<<20))
-	ctx := r.Context()
-	id := RepoOf(r)
-	doc, _, _, err := loadPolicyBytes(ctx, h.env, id, bytes.TrimSpace(body))
+	doc, _, _, err := loadPolicyBytes(ctx, e, id, bytes.TrimSpace(body))
 	if err != nil {
-		// An unparseable candidate policy cannot be evaluated: fail closed.
-		writePlain(w, http.StatusBadRequest, err.Error())
-		return
+		return nil, &WriteError{Status: http.StatusBadRequest, Message: err.Error()}
 	}
-	// Seam 3 load-time expansion (01 §6): team:/role: spellings resolve
-	// against identity state before pure evaluation; unresolvable refs warn
-	// and match nothing (fail-closed for protect bypass semantics).
 	var warnings []string
-	if h.env.GroupExpander != nil {
-		doc, warnings = policy.ExpandDocument(ctx, doc, h.env.GroupExpander)
+	if e.GroupExpander != nil {
+		doc, warnings = policy.ExpandDocument(ctx, doc, e.GroupExpander)
 	}
-	pushes, err := h.env.Repo.PushHistory(ctx, id, last)
+	pushes, err := e.Repo.PushHistory(ctx, id, last)
 	if err != nil {
-		mapViewErr(w, err)
-		return
+		return nil, viewError(err)
 	}
-	out := dryRunBody{Results: []dryRunResult{}, Warnings: warnings}
+	out := &DryRunBody{Results: []DryRunResult{}, Warnings: warnings}
 	for _, p := range pushes {
-		res := dryRunResult{
+		res := DryRunResult{
 			Seq:       p.Seq,
 			Principal: p.Principal,
 			Atomic:    p.Atomic,
@@ -247,7 +266,7 @@ func (h *handlers) policyDryRun(w http.ResponseWriter, r *http.Request) {
 		}
 		allOK := true
 		for _, ref := range p.Refs {
-			dr := dryRunRef{Name: ref.Name, Force: ref.Force}
+			dr := DryRunRef{Name: ref.Name, Force: ref.Force}
 			dr.OK, dr.Reason = evalPushRef(doc, p.Principal, ref)
 			if !dr.OK {
 				allOK = false
@@ -262,7 +281,26 @@ func (h *handlers) policyDryRun(w http.ResponseWriter, r *http.Request) {
 		}
 		out.Results = append(out.Results, res)
 	}
-	writeCached(w, r, ccNoStore, "", http.StatusOK, out)
+	return out, nil
+}
+
+func (h *handlers) policyDryRun(w http.ResponseWriter, r *http.Request) {
+	if !h.open(w, r, AuthRead) {
+		return
+	}
+	last := 10
+	if s := r.URL.Query().Get("last"); s != "" {
+		if n, err := strconv.Atoi(s); err == nil && n > 0 && n <= 1000 {
+			last = n
+		}
+	}
+	body, _ := io.ReadAll(http.MaxBytesReader(w, r.Body, 1<<20))
+	res, werr := DryRunPolicy(r.Context(), h.env, RepoOf(r), body, last)
+	if werr != nil {
+		writePlain(w, werr.Status, werr.Message)
+		return
+	}
+	writeCached(w, r, ccNoStore, "", http.StatusOK, res)
 }
 
 // evalPushRef evaluates one ref update: op derived from the wire triple

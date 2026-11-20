@@ -185,6 +185,21 @@ type releaseWithVer struct {
 	ver store.Version
 }
 
+// ListReleasePage is the exported read for non-HTTP surfaces (the
+// server-rendered releases page). The unexported cursor-version carrier stays
+// inside this package; callers get the release records and the more flag.
+func (s *Service) ListReleasePage(ctx context.Context, owner, repo string, p auth.Principal, n int, after string) ([]*Release, bool, error) {
+	rows, more, err := s.ListReleases(ctx, owner, repo, p, n, after)
+	if err != nil {
+		return nil, false, err
+	}
+	out := make([]*Release, 0, len(rows))
+	for _, r := range rows {
+		out = append(out, r.rel)
+	}
+	return out, more, nil
+}
+
 // ListReleases lists published releases newest-created_at-first (drafts
 // are hidden from the public list). after is the "<created_at>|<tag>"
 // cursor; n is clamped to [1, ListMaxPage].

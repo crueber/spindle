@@ -1,0 +1,25 @@
+{{define "content"}}
+{{with .Data}}
+<div class="mx-auto max-w-4xl">
+  <p class="mb-3 text-sm"><a class="link" href="/{{.Repo.Full}}/pull/{{.Num}}">← back to #{{.Num}}</a></p>
+  <h2 class="mb-3 text-lg font-semibold">Files on #{{.Num}}{{if .FilesCount}} ({{.FilesCount}}){{end}}</h2>
+
+  {{if .Error}}<p class="err-line" role="alert">{{.Error}}</p>{{end}}
+  {{if .SelErr}}<p class="err-line" role="alert">{{.SelErr}}</p>{{end}}
+  {{if .Lock.Locked}}<p class="muted mb-3 text-sm" role="note">{{.Lock.Reason}}</p>{{end}}
+  {{if .Notice}}<p class="warn-line" role="status">{{.Notice}}</p>{{end}}
+
+  {{if .DiffError}}
+  <div class="card p-3" role="alert">
+    <p class="err-line">{{.DiffError}}</p>
+    <a class="btn mt-2" href="/{{.Repo.Full}}/pull/{{.Num}}/files">Retry</a>
+  </div>
+  {{else if .Diff.Files}}
+  {{template "collab_diff_files" .Diff}}
+  {{if .Diff.Drifted}}{{template "collab_drifted" .Diff.Drifted}}{{end}}
+  {{else}}
+  <p class="muted text-sm">No changed files.</p>
+  {{end}}
+</div>
+{{end}}
+{{end}}

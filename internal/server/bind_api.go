@@ -20,8 +20,6 @@ type RouteProvider interface {
 	// Serve answers one request whose path is the full request path
 	// (/api*, /api-browser*, /services/api*, or a repo lane).
 	Serve(w http.ResponseWriter, r *http.Request)
-	// Owners lists owner names for the SPA text home (§3.3 ?format=text).
-	Owners(r *http.Request) ([]string, error)
 }
 
 // apiProvider adapts *api.Env through api.Mount (§14.3 seam).
@@ -39,16 +37,6 @@ func NewAPIProvider(env *api.Env) RouteProvider {
 
 func (p *apiProvider) Serve(w http.ResponseWriter, r *http.Request) {
 	p.mux.ServeHTTP(w, r)
-}
-
-// Owners lists owner names from the registry (07_api.md §8: from the STORE,
-// never a disk directory), visibility-filtered exactly like the
-// /api/v1/owners surface (Forgejo #345): owners with no repo readable by
-// the request caller are omitted, so the /explore text twin never leaks a
-// private-only owner. The principal rides the injected request identity
-// (the explore page is gated, so it is always resolved here).
-func (p *apiProvider) Owners(r *http.Request) ([]string, error) {
-	return p.env.VisibleOwners(r.Context(), p.env.PrincipalOf(r))
 }
 
 // ExtraRoutes is implemented by feature packages' HTTP surfaces
@@ -85,10 +73,6 @@ func (c *chainedAPI) Serve(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	c.primary.Serve(w, r)
-}
-
-func (c *chainedAPI) Owners(r *http.Request) ([]string, error) {
-	return c.primary.Owners(r)
 }
 
 // ChainExtra fronts the api seam with feature surfaces (Seam 1

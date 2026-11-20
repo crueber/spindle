@@ -1,0 +1,39 @@
+{{define "content"}}
+<section class="new-page mx-auto grid max-w-2xl gap-4">
+  <h2 class="text-xl font-semibold">New repository</h2>
+  <p class="muted text-sm">
+    Reserve a name and get push instructions. The first push adopts the
+    placeholder — nothing to approve, never a conflict. Mirroring an existing
+    repository from a URL instead? <a class="hover:underline" href="/import">Import it</a> —
+    Import is the mirror path.
+  </p>
+  <form method="post" action="/new" class="card grid gap-3 p-4" aria-label="New repository">
+    {{template "forms_owner_name" (dict "Prefix" "new" "Owners" .Data.Owners "Owner" .Data.Owner "Name" .Data.Name "Placeholder" "newthing" "NameErr" .Data.NameErr)}}
+    {{if .Data.Collision}}
+    <p class="text-xs text-amber-700 dark:text-amber-400">warning: owner name collides with a UI route — the /:owner page will misroute (git/API unaffected)</p>
+    {{end}}
+    <div class="flex flex-wrap items-center gap-4">
+      <label class="flex items-center gap-1 text-sm" for="new-format">
+        <span>format</span>
+        <select id="new-format" name="format" class="input w-auto" aria-label="Object format">
+          <option value="sha1"{{if eq .Data.Format "sha1"}} selected{{end}}>sha1</option>
+          <option value="sha256"{{if eq .Data.Format "sha256"}} selected{{end}}>sha256</option>
+        </select>
+      </label>
+      <label class="flex items-center gap-1 text-sm" for="new-visibility">
+        <span>visibility</span>
+        <select id="new-visibility" name="visibility" class="input w-auto" aria-label="Visibility">
+          <option value="public"{{if eq .Data.Visibility "public"}} selected{{end}}>public — anyone may read</option>
+          <option value="authenticated"{{if eq .Data.Visibility "authenticated"}} selected{{end}}>private — logged in only</option>
+          <option value="private"{{if eq .Data.Visibility "private"}} selected{{end}}>private — owner/org only</option>
+        </select>
+      </label>
+    </div>
+    {{template "forms_messages" .Data}}
+    <div class="flex flex-wrap gap-2">
+      <button type="submit" class="btn primary px-3 py-1">create repository</button>
+      <a class="btn px-3 py-1" href="/explore">cancel</a>
+    </div>
+  </form>
+</section>
+{{end}}

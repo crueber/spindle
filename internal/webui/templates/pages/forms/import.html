@@ -1,0 +1,133 @@
+{{define "content"}}
+<section class="import-page mx-auto grid max-w-2xl gap-4">
+  <h2 class="text-xl font-semibold">Import repository</h2>
+
+  {{if eq .Data.Phase "running"}}
+  <div class="card grid gap-3 p-4" aria-label="Import progress" aria-live="polite"
+       data-task-id="{{.Data.TaskID}}" data-task-stream="/api/v1/repos/imports/{{.Data.TaskID}}"
+       data-task-labels="importing {{.Data.Owner}}/{{.Data.Name}}">
+    <h3 class="font-semibold">
+      {{if eq .Data.Mode "mirror"}}creating mirror{{else}}importing{{end}} {{.Data.Owner}}/{{.Data.Name}}
+      <span class="muted font-mono text-xs">({{.Data.TaskID}})</span>
+    </h3>
+    <div data-task-bars class="grid gap-2"></div>
+    <pre data-task-log class="max-h-64 overflow-y-auto rounded bg-zinc-100 p-2 font-mono text-xs text-zinc-800 dark:bg-zinc-900 dark:text-zinc-200"></pre>
+    <p class="muted text-xs">The import keeps running if you navigate away — re-open this page via the API task id.</p>
+  </div>
+  {{end}}
+
+  {{if and (eq .Data.Phase "done") .Data.Done}}
+  <div class="card grid gap-3 p-4" aria-label="Import done">
+    <div class="rounded-lg border border-emerald-300 bg-emerald-50 p-3 text-sm text-emerald-800 dark:border-emerald-900 dark:bg-emerald-950/60 dark:text-emerald-200">
+      {{if .Data.Done.Noop}}already imported from this source — no-op{{else}}imported {{.Data.Done.Repo}}{{end}}
+      from <code class="font-mono">{{.Data.Done.SourceURL}}</code>
+    </div>
+    <a class="text-emerald-700 hover:underline dark:text-emerald-400" href="/{{.Data.Done.Repo}}">open {{.Data.Done.Repo}}</a>
+    <div class="flex flex-wrap gap-2">
+      <a class="btn px-3 py-1" href="/import">back to form</a>
+    </div>
+    {{if .Data.Done.Heads}}
+    <details>
+      <summary class="cursor-pointer text-sm">head SHAs ({{len .Data.Done.Heads}})</summary>
+      <ul class="mt-1 space-y-0.5 font-mono text-xs">
+        {{range .Data.Done.Heads}}<li><span class="text-zinc-600 dark:text-zinc-400">{{.Ref}}</span> {{.SHA}}</li>{{end}}
+      </ul>
+    </details>
+    {{end}}
+  </div>
+  {{end}}
+
+  {{if or (eq .Data.Phase "form") (eq .Data.Phase "running")}}
+  {{if ne .Data.Phase "running"}}
+  <form method="post" action="/import" class="card grid gap-3 p-4" aria-label="Import repository">
+    <div class="flex flex-wrap gap-4" role="radiogroup" aria-label="Import kind">
+      <label class="flex items-center gap-1 text-sm">
+        <input type="radio" name="kind" value="import"{{if ne .Data.Mode "mirror"}} checked{{end}}>
+        import once <span class="muted">(one-shot snapshot)</span>
+      </label>
+      <label class="flex items-center gap-1 text-sm">
+        <input type="radio" name="kind" value="mirror"{{if eq .Data.Mode "mirror"}} checked{{end}}>
+        mirror continuously <span class="muted">(recurring pull, pushes rejected)</span>
+      </label>
+    </div>
+    <label class="grid gap-1" for="import-source">
+      <span class="text-sm font-medium">Source URL (owner/repo, GitHub URL, or any git URL)</span>
+      <input id="import-source" name="source_url" class="input font-mono" value="{{.Data.SourceURL}}"
+             placeholder="acme/monorepo or https://github.com/acme/monorepo.git"
+             autocomplete="off" spellcheck="false" aria-describedby="import-source-help">
+      {{if .Data.SourceHint}}
+      <p id="import-source-help" class="muted text-xs">canonical: <code>{{.Data.SourceHint}}</code></p>
+      {{else if .Data.SourceErr}}
+      <p id="import-source-help" class="text-xs text-amber-700 dark:text-amber-400">{{.Data.SourceErr}}</p>
+      {{else}}
+      <p id="import-source-help" class="muted text-xs">The canonical https URL is detected as you type; ssh and git:// are not supported in v1.</p>
+      {{end}}
+    </label>
+    {{template "forms_owner_name" (dict "Prefix" "import" "Owners" .Data.Owners "Owner" .Data.Owner "Name" .Data.Name "Placeholder" "monorepo" "NameErr" "")}}
+    <label class="grid gap-1" for="import-token">
+      <span class="text-sm font-medium">Token</span>
+      <input id="import-token" name="token" class="input font-mono" type="password" value="{{.Data.Token}}"
+             placeholder="contents:read token for a private source" autocomplete="off"
+             aria-label="Token" aria-describedby="import-token-help">
+      <span id="import-token-help" class="muted text-xs">Private sources only — sent once for this import, never stored or logged.</span>
+    </label>
+    <div class="flex flex-wrap gap-4">
+      <label class="flex items-center gap-1 text-sm">
+        <input type="checkbox" name="default_branch_only"{{if .Data.BranchOnly}} checked{{end}}>
+        default branch only
+      </label>
+      <label class="flex items-center gap-1 text-sm" title="refs/pull/N/head only — never /merge">
+        <input type="checkbox" name="include_pull_heads"{{if .Data.PullHeads}} checked{{end}}>
+        include PR heads
+      </label>
+      <label class="flex items-center gap-1 text-sm">
+        <input type="checkbox" name="include_notes"{{if .Data.Notes}} checked{{end}}>
+        include notes
+      </label>
+      <label class="flex items-center gap-1 text-sm" for="import-format">
+        <span>format</span>
+        <select id="import-format" name="format" class="input w-auto" aria-label="Object format">
+          <option value=""{{if eq .Data.Format ""}} selected{{end}}>follow source</option>
+          <option value="sha1"{{if eq .Data.Format "sha1"}} selected{{end}}>sha1</option>
+          <option value="sha256"{{if eq .Data.Format "sha256"}} selected{{end}}>sha256</option>
+        </select>
+      </label>
+      <label class="flex items-center gap-1 text-sm" for="import-schedule">
+        <span>sync schedule</span>
+        <select id="import-schedule" name="schedule" class="input w-auto" aria-label="Sync schedule" aria-describedby="import-mirror-help">
+          {{range .Data.Presets}}<option value="{{.ID}}"{{if eq .ID $.Data.Schedule}} selected{{end}}>{{.Label}}</option>{{end}}
+        </select>
+      </label>
+    </div>
+    <p id="import-mirror-help" class="muted text-xs">
+      Mirrors are pull-only: pushes are rejected for everyone, and the upstream
+      syncs on the schedule. The first sync starts immediately.
+    </p>
+    <details class="text-xs">
+      <summary class="muted cursor-pointer hover:underline">Import limitations: LFS and ssh</summary>
+      <p class="muted mt-1">
+        LFS-tracked files import as pointer blobs (never smudged). Server-side ssh is not
+        supported in v1 — use https with a token for private sources.
+      </p>
+    </details>
+    <label class="flex items-start gap-2 text-sm">
+      <input type="checkbox" name="dangerous" class="mt-0.5"{{if .Data.Dangerous}} checked{{end}}>
+      <span>
+        <span class="font-medium">Allow hosts outside import.url_allowlist (dangerous)</span>
+        <span class="muted block text-xs">
+          Residual risk remains: DNS TOCTOU (check-time vs clone-time resolution can differ) and
+          redirect following (git follows HTTP redirects; the token helper stays host-pinned and
+          redirects never carry it).
+        </span>
+      </span>
+    </label>
+    {{template "forms_messages" .Data}}
+    <div class="flex flex-wrap gap-2">
+      <button type="submit" class="btn primary px-3 py-1">{{if eq .Data.Mode "mirror"}}create mirror{{else}}start import{{end}}</button>
+      <a class="btn px-3 py-1" href="/explore">cancel</a>
+    </div>
+  </form>
+  {{end}}
+  {{end}}
+</section>
+{{end}}

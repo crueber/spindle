@@ -8,7 +8,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/crueber/walhub/internal/git"
 	web "github.com/crueber/walhub/web"
 )
 
@@ -144,110 +143,6 @@ func (s *Server) eventsNotify(w http.ResponseWriter, r *http.Request) {
 	plainStatus(w, http.StatusAccepted, "accepted")
 }
 
-// spaHome answers GET / (the landing page shell — static marketing, zero
-// API calls). The machine-readable owner list moved to /explore (issue #187);
-// / answers the shell unconditionally (no ?format=text branch here).
-func (s *Server) spaHome(w http.ResponseWriter, r *http.Request) {
-	s.serveSPA(w, r)
-}
-
-// explorePage answers GET /explore (the owners-list page shell; ?format=text
-// or text Accept → plain one-per-line owner list) — gated (§3.3). The text
-// branch is the machine twin of the owners page, so it lives here at the
-// page's canonical home (issue #187 moves it from /; pre-1.0 no-alias law:
-// one home, not two).
-func (s *Server) explorePage(w http.ResponseWriter, r *http.Request) {
-	owners, err := s.api.Owners(r)
-	if err != nil {
-		plainStatus(w, http.StatusServiceUnavailable, err.Error())
-		return
-	}
-	accept := r.Header.Get("Accept")
-	if r.URL.Query().Get("format") == "text" ||
-		strings.Contains(accept, "text/plain") && !strings.Contains(accept, "text/html") {
-		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
-		w.Header().Set("Cache-Control", "no-cache")
-		w.WriteHeader(http.StatusOK)
-		for _, o := range owners {
-			_, _ = w.Write([]byte(o + "\n"))
-		}
-		return
-	}
-	s.serveSPA(w, r)
-}
-
-// howItWorksPage answers GET /how-it-works (the developer deep-dive page
-// shell — static marketing, zero API calls, issue #191). Like spaHome: the
-// shell unconditionally, no ?format=text branch (R1 S1 — the text twin lives
-// at /explore only). Gated (§3.3); the explicit route reserves the
-// single-segment name (an owner literally named "how-it-works" loses its
-// /:owner UI page; git/API paths unaffected).
-func (s *Server) howItWorksPage(w http.ResponseWriter, r *http.Request) {
-	s.serveSPA(w, r)
-}
-
-// ownerPage answers /{owner} (gated; index.html, no-cache).
-func (s *Server) ownerPage(w http.ResponseWriter, r *http.Request) {
-	s.serveSPA(w, r)
-}
-
-// repoPage answers /{owner}/{repo} and the UI page routes
-// (tree/blob/commits/commit/wal/settings — index.html, no-cache; §3.3).
-func (s *Server) repoPage(id interface{ String() string }) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		s.serveSPA(w, r)
-	}
-}
-
-// repoPageGated serves the repo SPA shell with visibility authority
-// (Forgejo #345): anonymous callers reach PUBLIC repos' pages even with
-// anonymous_read=false (the shell's data rides the now-public repo API
-// reads). Private repos — and auth errors — keep the legacy gated outcome
-// (401, the #344 login page for browsers, the 307 login hop when the OIDC
-// flow is enabled). Non-repo shells (/, /explore, /{owner}) stay gated:
-// anonymous_read keeps its non-repo meaning there.
-func (s *Server) repoPageGated(id git.RepoId) http.HandlerFunc {
-	inner := s.repoPage(id)
-	gated := s.gated(inner)
-	return func(w http.ResponseWriter, r *http.Request) {
-		if s.readGate != nil && s.authSvc != nil && s.cfg != nil {
-			p, aerr := s.authSvc.Authenticate(r, s.cfg)
-			if aerr == nil {
-				p = s.authSvc.identityForward(r, p)
-				if p.Anonymous && !s.cfg.Server.Auth.AnonymousRead &&
-					s.checkReadGate(r.Context(), id.Owner, id.Name, p) == nil {
-					inner(w, r)
-					return
-				}
-			}
-		}
-		gated(w, r)
-	}
-}
-
-// serveSPA answers every UI route with the built SPA shell (dist/index.html:
-// vite entry loading the hashed SolidJS bundle — no-cache + ETag, D-WEB-6).
-func (s *Server) serveSPA(w http.ResponseWriter, r *http.Request) {
-	b, ok := webAsset("dist/index.html")
-	if !ok {
-		plainStatus(w, http.StatusInternalServerError, "ui shell missing — run make build")
-		return
-	}
-	h := sdkETag(string(b))
-	etag := `"` + h + `"`
-	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	w.Header().Set("Cache-Control", "no-cache")
-	w.Header().Set("ETag", etag)
-	if inm := r.Header.Get("If-None-Match"); inm != "" && etagMatchHeader(inm, h) {
-		w.WriteHeader(http.StatusNotModified)
-		return
-	}
-	w.WriteHeader(http.StatusOK)
-	if r.Method != http.MethodHead {
-		_, _ = w.Write(b)
-	}
-}
-
 // setupJSON answers GET /services/setup.json[?repo=] — read-authed, no-cache
 // (§9.1): exact field names, every UI surface renders recipes from here.
 func (s *Server) setupJSON(w http.ResponseWriter, r *http.Request) {
@@ -319,12 +214,13 @@ func hostSlug(host string) string {
 	return string(b)
 }
 
-// serveUIAssets answers /_ui/* assets (§3.3 + D-WEB-6): content-hashed
-// vite bundles → immutable; anything else → no-cache + ETag.
+// serveUIAssets answers /_ui/* assets (§3.3 + D-WEB-14): the hashed `assets/`
+// lane is immutable; everything else (app.css, ui.js, htmx, concepts) is
+// no-cache + ETag.
 func (s *Server) serveUIAssets(w http.ResponseWriter, r *http.Request) {
 	name := stringsTrimPrefix(r.URL.Path, "/_ui/")
 	if b, ok := uiAsset(name); ok {
-		immutable := strings.HasPrefix(name, "assets/") // vite hashes these filenames
+		immutable := strings.HasPrefix(name, "assets/") // content-addressed lane
 		if immutable {
 			w.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
 		} else {
@@ -335,8 +231,6 @@ func (s *Server) serveUIAssets(w http.ResponseWriter, r *http.Request) {
 			w.Header().Set("Content-Type", "text/javascript; charset=utf-8")
 		case hasSuffixFold(name, ".css"):
 			w.Header().Set("Content-Type", "text/css; charset=utf-8")
-		case hasSuffixFold(name, ".html"):
-			w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		case hasSuffixFold(name, ".gif"):
 			w.Header().Set("Content-Type", "image/gif")
 		default:
@@ -388,9 +282,9 @@ func equalFoldLast(s, suf string) bool {
 	return true
 }
 
-// webAsset reads one path from the embedded UI tree (web/embed.go: index.html,
-// dist/, sdk/, src/, css/). Names are /-separated embed paths; traversal-safe
-// because embed.FS paths cannot escape the tree.
+// webAsset reads one path from the embedded UI tree (web/dist: app.css, ui.js,
+// the vendored htmx files, repos.js, concepts/). Names are /-separated embed
+// paths; traversal-safe because embed.FS paths cannot escape the tree.
 func webAsset(name string) ([]byte, bool) {
 	if name == "" || strings.Contains(name, "..") || strings.HasPrefix(name, "/") {
 		return nil, false
@@ -402,16 +296,20 @@ func webAsset(name string) ([]byte, bool) {
 	return b, true
 }
 
-// uiAsset maps /_ui/<name> to the built UI tree (D-WEB-6: vite output — the
-// shell at dist/index.html, content-hashed bundles under dist/assets/, and
-// the checked-in landing-page concept GIFs under dist/concepts/ copied from
-// web/public/concepts/ by vite — issue #187; stable filenames so they stay
-// no-cache + ETag, never immutable).
+// uiAsset maps /_ui/<name> to the built UI tree (D-WEB-14: the server-rendered
+// page assets — the stylesheet, the island bundle, the vendored htmx files, the
+// immutable `assets/` lane, and the checked-in landing-page concept GIFs under
+// dist/concepts/ which the stylesheet build copies from web/public/concepts/ —
+// issue #187; stable filenames so they stay no-cache + ETag, never immutable).
 func uiAsset(name string) ([]byte, bool) {
 	switch {
-	case name == "index.html" || strings.HasPrefix(name, "assets/"):
+	case strings.HasPrefix(name, "assets/"):
 		return webAsset("dist/" + name)
 	case strings.HasPrefix(name, "concepts/") && hasSuffixFold(name, ".gif"):
+		return webAsset("dist/" + name)
+	// D-WEB-14 stable page assets: the stylesheet, the island bundle, and the
+	// vendored htmx files keep fixed names (no-cache + ETag, never immutable).
+	case name == "app.css", name == "ui.js", name == "htmx.min.js", name == "htmx-ext-sse.js":
 		return webAsset("dist/" + name)
 	}
 	return nil, false

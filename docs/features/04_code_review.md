@@ -253,8 +253,9 @@ No new top-level routes: review lives on 03's PR page (`/:owner/:repo/pull/:num`
   a top-level body + verdict (`COMMENT`/`APPROVE`/`REQUEST_CHANGES`); one `POST reviews`.
 - **Reviewers panel:** picker fed by `review-suggest` (150 ms debounce, abort-on-keystroke per the
   §2.6 ref-picker pattern); Dismiss button visible to `maintain`.
-- **SSE:** `mountStream` (12 §2.5) subscribes the repo stream; `review`/`thread` frames patch the
-  summary/thread signals — no polling loops (P7).
+- **SSE:** the `web/src/islands/sse.js` reader subscribes the repo stream (`data-sse`);
+  `review`/`thread` frames invalidate the page/fragment, which re-reads through the server —
+  no polling loops (P7).
 
 **SDK additions** (new submodule `web/sdk/src/pulls.js`, re-exported by `index.js`; 08 owns the full
 inventory): `repo.pulls.reviews.{list,get,submit,dismiss}`,
@@ -349,10 +350,10 @@ envelope handling; JSDoc `@typedef Review/ThreadAnchor/ThreadHeader` in `types.j
   and commit authors need `CommitAuthors` (pulls' `HeadAuthors` via
   `LogRange`); nil severs contribute nothing, never an error.
 - **Drift-hash twins.** `DriftHash` (Go, `internal/review/model.go`) and
-  `anchorContextSha` (`web/src/lib/diff.js` — the ONLY client implementation,
-  sync hand-rolled SHA-256, no dependency) hash identical bytes; a fixed
-  vector (`src/main.go` + `[a b]`/`[c]`) is pinned in BOTH suites — changing
-  the hash is a wire-level break. The server validates anchor shape only
+  `anchorContextSha` (**historical — the client twin lived in `web/src/lib/diff.js`, deleted with
+  the SPA, D-WEB-15; the Go implementation is now the only one**) hash identical bytes; a fixed
+  vector (`src/main.go` + `[a b]`/`[c]`) is pinned in the Go suite (the client suite retired with
+  the file) — changing the hash is a wire-level break. The server validates anchor shape only
   (no git subprocesses on the review path, §7 Concurrency); correctness of
   the hash is derived at view time by the client.
 - **SSE frames publish through the seam; the UI does not subscribe yet.**
@@ -377,7 +378,10 @@ envelope handling; JSDoc `@typedef Review/ThreadAnchor/ThreadHeader` in `types.j
   sidecar GETs + 1 LIST + 1 GET per review (8+0+1 at 5, 103+0+1 at 100),
   own deadline, never trusts the summary. Zero git on every review path.
   16-way concurrent submits converge with unique seqs (`-race`, in-suite).
-- **Client range anchors + comment index (Forgejo #546).** No backend change: the §4 anchor already admits ranges, and both comment paths now build anchors ONLY through the new headless `web/src/lib/review-anchor.js` (`buildAnchor`/`selectionToAnchor` over the #244 `diff-lines` numbering + `findHunkForSelection`; `freshnessOf` for view-time drift; `anchorLabel`; unresolved-first `sortThreadsForIndex`). Single-line anchors keep the exact `stageLine` shape (zeroed opposite pair, lines === 1); multi-line selections (DiffTable drag, already clamped to one chunk + one side; conversation `+` Shift+click within one file + side + hunk) set `new_lines`/`old_lines` > 1. Hash contract: `context_sha` is ALWAYS `anchorContextSha` fed byte-identically (`{path, lines}` + the contiguous hunk-lines span) — single-line spans hash `{start: idx, count: 1}` exactly as before, so the pinned Go-twin vector is untouched and NOT a pinned-contract change; freshness recomputes over the anchor's own span (which reduces to the old check for count: 1). Files-tab threads post through the existing `pulls.threads.create` SDK surface (OpenThread is authenticated + read, so the affordance gates like the conversation composer); the drift twin, validation, and resolve/unresolve semantics are unchanged.
+- **Client range anchors + comment index (Forgejo #546).** *(Historical: the client builder
+  `web/src/lib/review-anchor.js` and its call sites were deleted with the SPA, D-WEB-15; the
+  server-rendered thread staging in `partials/collab_diff.html` + `internal/webui/collab.go` owns the
+  shipped anchor shape. The decision below records the wire contract, which is unchanged.)* No backend change: the §4 anchor already admits ranges, and both comment paths now build anchors ONLY through the new headless `web/src/lib/review-anchor.js` (`buildAnchor`/`selectionToAnchor` over the #244 `diff-lines` numbering + `findHunkForSelection`; `freshnessOf` for view-time drift; `anchorLabel`; unresolved-first `sortThreadsForIndex`). Single-line anchors keep the exact `stageLine` shape (zeroed opposite pair, lines === 1); multi-line selections (DiffTable drag, already clamped to one chunk + one side; conversation `+` Shift+click within one file + side + hunk) set `new_lines`/`old_lines` > 1. Hash contract: `context_sha` is ALWAYS `anchorContextSha` fed byte-identically (`{path, lines}` + the contiguous hunk-lines span) — single-line spans hash `{start: idx, count: 1}` exactly as before, so the pinned Go-twin vector is untouched and NOT a pinned-contract change; freshness recomputes over the anchor's own span (which reduces to the old check for count: 1). Files-tab threads post through the existing `pulls.threads.create` SDK surface (OpenThread is authenticated + read, so the affordance gates like the conversation composer); the drift twin, validation, and resolve/unresolve semantics are unchanged.
 - **Per-repo self-approval knob, conditional submit rule (Forgejo #586 — deliberate design-rule
   change for user ratification).** `SubmitReview` no longer rejects author `APPROVED` /
   `CHANGES_REQUESTED` unconditionally: it consults the repo's `[review] allow_self_approval`

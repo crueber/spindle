@@ -149,6 +149,11 @@ func New(d Deps) *Service {
 	return s
 }
 
+// Store returns the service's object store: read-only consumers (the
+// server-rendered settings page) load the same sidecars the JSON API serves
+// through the same exported helpers.
+func (s *Service) Store() store.ObjectStore { return s.store }
+
 // SyncNow spawns (or joins, via the (repo,mirror-sync) single-flight)
 // one sync fire and awaits its outcome. Callers with a request ctx
 // that must not block (HTTP handlers) use SyncAsync instead — law 7

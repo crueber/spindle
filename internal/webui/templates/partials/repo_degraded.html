@@ -1,0 +1,11 @@
+{{define "repo_degraded"}}
+{{if .Degraded}}
+<!-- Degraded banner (issue #209): amber, never a toast, never blocks
+     navigation. Pushes of NEW refs still work; reads of missing objects 404
+     inline on their pages. -->
+<div class="degraded-banner mb-4 rounded border border-amber-500 bg-amber-100 p-3 text-sm text-amber-800 dark:bg-amber-900/60 dark:text-amber-300" role="status">
+  Some objects are missing (fsck: {{.MissingTotal}} missing). Reads may fail; pushes of new refs still work. Details in
+  <a class="hover:underline" href="/{{.Full}}/settings#wal">Settings → WAL</a>.
+</div>
+{{end}}
+{{end}}

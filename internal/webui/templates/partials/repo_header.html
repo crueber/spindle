@@ -1,0 +1,100 @@
+{{define "repo_header"}}
+<div class="repo-header mb-3 flex flex-wrap items-center gap-3">
+  <div class="repo-title min-w-0">
+    <div class="flex flex-wrap items-baseline gap-x-3 gap-y-1">
+      <h1 class="text-xl font-semibold">
+        <a class="hover:underline" href="/{{.Owner}}/repositories">{{.Owner}}</a>
+        <span class="muted"> / </span>
+        <a class="hover:underline" href="/{{.Full}}">{{.Name}}</a>
+      </h1>
+      {{if .Description}}<span class="repo-description muted text-sm">{{.Description}}</span>{{end}}
+      {{if .VisLabel}}<span class="pill visibility-badge" title="{{.VisTitle}}">{{.VisLabel}}</span>{{end}}
+      {{if .ForkParent}}<span class="muted text-sm">forked from <a class="hover:underline" href="/{{.ForkParent}}">{{.ForkParent}}</a></span>{{end}}
+      {{if .MirrorBadge}}
+      <span class="pill mirror-badge" title="{{.MirrorTitle}}">{{.MirrorBadge}}</span>
+      <span class="muted text-xs">{{.MirrorNext}}</span>
+      {{end}}
+      {{if .PushMirrorBadge}}
+      <span class="pill mirror-badge" title="{{.PushMirrorTitle}}">{{.PushMirrorBadge}}</span>
+      <span class="muted text-xs">{{.PushMirrorNext}}</span>
+      {{end}}
+    </div>
+    <div class="repo-meta mt-1 flex flex-wrap items-center gap-2 text-xs">
+      {{if .Head}}
+      <span class="pill" title="{{.Head.Name}}">{{.HeadLabel}}</span>
+      {{else}}
+      <span class="pill">empty</span>
+      {{end}}
+      <span class="muted">{{.Branches}} branches · {{.Tags}} tags</span>
+    </div>
+  </div>
+
+  <!-- Header actions (Forgejo #447/#463/#464): ONE idiom, the btn px-2 py-1
+       text-sm shape; the row's gap-2 owns all spacing; counts sit LEFT of
+       their label. The Fork pill is one shell with two sibling links (a
+       count destination and the create destination — anchors cannot nest).
+       Star/Watch (07 §§7–8) are plain POST forms: the counters + viewer state
+       are rendered here, the write flips them, and the 303 back re-reads this
+       header (no optimistic JS). A feature-disabled toggle whose state is not
+       held renders disabled with the reason (#522); a retained star/watch
+       always stays actionable so it can be undone. An unwired seam renders
+       nothing (never a button that cannot write). -->
+  <div class="ml-auto flex items-center gap-2">
+    {{if .ShowStar}}
+      {{if .StarOff}}
+      <button type="button" class="btn px-2 py-1 text-sm" disabled aria-disabled="true" title="Starring is disabled for this repository" aria-pressed="{{.Starred}}">{{.Stars}} Star</button>
+      {{else if .CanStar}}
+      <form method="post" action="/{{.Full}}/{{if .Starred}}unstar{{else}}star{{end}}" class="inline">
+        <input type="hidden" name="next" value="{{.Here}}">
+        <button type="submit" class="btn px-2 py-1 text-sm{{if .Starred}} primary{{end}}" aria-pressed="{{.Starred}}" title="{{if .Starred}}Unstar this repo{{else}}Star this repo{{end}}">{{.Stars}} Star</button>
+      </form>
+      {{else}}
+      <span class="btn px-2 py-1 text-sm" title="{{.Stars}} {{plural .Stars "star" "stars"}}">{{.Stars}} Star</span>
+      {{end}}
+    {{end}}
+    {{if .ShowWatch}}
+      {{if .WatchOff}}
+      <button type="button" class="btn px-2 py-1 text-sm" disabled aria-disabled="true" title="Watching is disabled for this repository" aria-pressed="{{.Watching}}">{{.Watchers}} Watch</button>
+      {{else if .CanWatch}}
+      <form method="post" action="/{{.Full}}/{{if .Watching}}unwatch{{else}}watch{{end}}" class="inline">
+        <input type="hidden" name="next" value="{{.Here}}">
+        <button type="submit" class="btn px-2 py-1 text-sm{{if .Watching}} primary{{end}}" aria-pressed="{{.Watching}}" title="{{if .Watching}}Unwatch this repo{{else}}Watch this repo{{end}}">{{.Watchers}} Watch</button>
+      </form>
+      {{else}}
+      <span class="btn px-2 py-1 text-sm" title="{{.Watchers}} {{plural .Watchers "watcher" "watchers"}}">{{.Watchers}} Watch</span>
+      {{end}}
+    {{end}}
+    <span class="btn px-2 py-1 text-sm whitespace-nowrap" title="Fork {{.Full}}">
+      <a class="hover:underline" href="{{.ForksHref}}" title="View forks of {{.Full}}">{{.Forks}}</a>
+      <a class="hover:underline" href="{{.ForkHref}}" title="Fork this repository">Fork</a>
+    </span>
+
+    <!-- Clone menu: the shared menus.js popover contract (outside-click, Esc,
+         focus return) with the server's advertised URLs VERBATIM — the HTTP
+         label derives from the URL scheme, so pill and command can never
+         disagree (issues #37/#124). Copy is the copy island (data-copy). -->
+    <div data-menu class="relative">
+      <button type="button" class="btn px-2 py-1 text-sm" data-menu-trigger aria-haspopup="menu" aria-expanded="false">Clone</button>
+      <div data-menu-panel role="menu" hidden class="clone-body card absolute right-0 z-30 mt-2 w-96 space-y-3 p-3">
+        <div class="space-y-1">
+          <div class="muted text-xs">{{.HTTPLabel}} clone</div>
+          <div class="flex items-center gap-2">
+            <code id="clone-http" class="clone-cmd block min-w-0 flex-1 overflow-x-auto rounded bg-zinc-100 px-2 py-1 font-mono text-xs dark:bg-zinc-800">{{.CloneURL}}</code>
+            <button type="button" class="btn shrink-0 px-2 py-1 text-xs" data-copy="#clone-http" aria-label="Copy the {{.HTTPLabel}} clone command">Copy</button>
+          </div>
+        </div>
+        {{if .SSHURL}}
+        <div class="space-y-1">
+          <div class="muted text-xs">SSH clone</div>
+          <div class="flex items-center gap-2">
+            <code id="clone-ssh" class="clone-cmd block min-w-0 flex-1 overflow-x-auto rounded bg-zinc-100 px-2 py-1 font-mono text-xs dark:bg-zinc-800">{{.SSHURL}}</code>
+            <button type="button" class="btn shrink-0 px-2 py-1 text-xs" data-copy="#clone-ssh" aria-label="Copy the SSH clone command">Copy</button>
+          </div>
+        </div>
+        {{end}}
+        <p class="muted text-xs">Both URLs are the server's advertisement, shown verbatim.</p>
+      </div>
+    </div>
+  </div>
+</div>
+{{end}}

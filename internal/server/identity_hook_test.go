@@ -99,8 +99,6 @@ func TestChainExtra(t *testing.T) {
 	if rec.Code != http.StatusTeapot || primary.served != 1 {
 		t.Fatalf("fallthrough: code=%d served=%d", rec.Code, primary.served)
 	}
-	owners, _ := chained.Owners(req)
-	_ = owners
 	// Nil api seam: ChainExtra is a no-op.
 	s, _ := newTestServer(t, nil)
 	s.api = nil

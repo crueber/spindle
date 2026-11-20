@@ -356,24 +356,31 @@ event; check results as 05's `check` event. Errors map per 07 §2 (unknown PR �
 
 ## 9. UI and SDK
 
-Pages (SolidJS SPA, `12_web_ui.md` patterns — `useData` two-step, SSE via the SDK readers, `.jsx`
-route components; exact-shape coordination with 08):
+Pages (server-rendered by `internal/webui`, `12_web_ui.md` §2 — templates
+`internal/webui/templates/pages/collab/` + `partials/`, one handler per route, SSE via the
+`web/src/islands/sse.js` reader; exact-shape coordination with 08):
 
 | Route | Page | Notes |
 |---|---|---|
-| `/:o/:r/pulls` | PR list (state tabs open/closed/merged, index-first, SSE-refreshing cards) | extends the repo shell tabs |
-| `/:o/:r/pull/{num}` | Conversation: timeline (P3 events), comment box, merge box (strategy select, mergeable state, task progress via SSE). Forgejo #594: the conversation is read-only while merged/closed — `AddComment` refuses `409` (`ErrLocked`); the composer (`pullCommentLock` in `lib/pull-state.js`, merged wins with "Merged — commenting is locked") and thread replies render disabled-with-reason, new line-thread staging hides, and no reopen control renders for merged PRs. Reopening a closed-but-unmerged PR restores everything with no reload (stream-invalidated live state). | |
+| `/:o/:r/pulls` | PR list (state tabs open/closed/merged, index-first, SSE-invalidating cards) | extends the repo shell tabs |
+| `/:o/:r/pull/{num}` | Conversation: timeline (P3 events), comment box, merge box (strategy select, mergeable state, task progress via htmx/SSE). Forgejo #594: the conversation is read-only while merged/closed — `AddComment` refuses `409` (`ErrLocked`); the composer (`lockState` in `internal/webui/collab.go`, merged wins with "Merged — commenting is locked") and thread replies render disabled-with-reason, new line-thread staging hides, and no reopen control renders for merged PRs. Reopening a closed-but-unmerged PR restores everything with no reload (the page re-reads). | |
 | `/:o/:r/pull/{num}/commits` | commits of `base…head` (reuses `commits` page) | |
-| `/:o/:r/pull/{num}/files` | diff view: `parsePatchFiles` on the diff endpoint's patch (12 §2.8 grammar), per-file unified/split toggle, anchors for review threads | |
+| `/:o/:r/pull/{num}/files` | diff view: the Go diff renderer over the diff endpoint's patch, sign-first rows, anchors for review threads | |
 
 SDK (`web/sdk/src/` submodule additions, esbuild-bundled into `repos.js` per 12 §1.0): `pulls.js` —
 `list/open/get/diff/commits/merge/updateBranch/deleteHead`, plus `forks.js` (`fork(repo, opts)`) and a
-`pulls` group on the repo client; diff rendering reuses `lib/diff.js` unchanged (dogfood rule:
-every call goes through the SDK).
+`pulls` group on the repo client; diff rendering is server-side (`internal/webui/diff.go`) — the page
+sends the patch through the Go renderer, never a client parser (dogfood rule: every data call goes
+through the Go services the SDK wraps).
 
 ## Decisions
 
-- **Frontend idiom is the SolidJS SPA (D-WEB-6; docs fix for issue #76).** The §9 page sketches read in the shipped idiom: `.jsx` route components, `useData` two-step on Solid primitives, SSE via the SDK readers. Routes, notes, and wire shapes are unchanged.
+> **Reading note (D-WEB-14/D-WEB-15, 2026-11-20):** entries below that cite `web/src/**`, `.jsx`
+> files or SPA components describe the **removed SolidJS SPA** and are historical; the behavior now
+> lives in the Go page layer (`internal/webui/*.go` + `internal/webui/templates/**`), and the
+> decision itself is unchanged.
+
+- **Frontend idiom is the server-rendered page layer (D-WEB-14/D-WEB-15; supersedes the D-WEB-6 SolidJS entry for issue #76).** The §9 page sketches read in the shipped idiom: Go page handlers, templates under `internal/webui/templates/pages/collab/`, and the SSE island for live frames. **Historical (D-WEB-6):** `.jsx` route components, `useData` two-step on Solid primitives, SSE via the SDK readers. Routes, notes, and wire shapes are unchanged.
 - PR threads reuse the issue thread pattern and numbering wholesale (P2/P3) — one conversation
   implementation, `kind` is the only difference. The conversation renders oldest → newest through
   the shared ThreadTimeline (issue #225; 02/08 Decisions own the convention) — no PR-side order

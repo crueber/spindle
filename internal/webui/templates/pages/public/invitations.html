@@ -1,0 +1,87 @@
+{{define "content"}}
+{{/* /invitations (Forgejo #362): the invitee inbox. Rows carry kind, scope,
+     role, issuer, expiry; accept/decline are POST forms (303 back with the
+     outcome in ?note=). Shared accept links deep-link as ?id=&token= and
+     preview on top. Expired rows stay listed but accept is disabled (the
+     server still rejects with 409). 390px: rows wrap, the action row wraps. */}}
+<div class="invitations-page mx-auto max-w-3xl">
+  <h2 class="mb-1 text-lg font-semibold">Invitations</h2>
+  <p class="muted mb-3 text-sm">
+    Pending organization and repository invitations addressed to you. Expired
+    invitations stay listed but cannot be accepted — decline clears them.
+  </p>
+
+  {{if .Data.Anonymous}}
+  <div class="card mb-4 p-4">
+    <p class="text-sm">
+      {{if .Chrome.ShowLogin}}<a class="link" href="{{.Chrome.LoginHref}}">Sign in</a> to view your invitations.{{else}}Sign in to view your invitations — this server has no login flow configured.{{end}}
+    </p>
+  </div>
+  {{end}}
+
+  {{if .Data.LinkID}}
+  <section class="card mb-4 p-3" aria-label="Shared invitation">
+    <h3 class="mb-2 font-semibold">Shared invitation</h3>
+    {{if .Data.Link}}
+    <p class="text-sm">
+      <span class="chip mr-1">{{.Data.Link.Kind}}</span>
+      <strong class="font-mono">{{.Data.Link.Scope}}</strong>
+      <span class="muted"> as {{.Data.Link.Role}} · from </span>
+      <code class="font-mono text-xs">{{.Data.Link.InvitedBy}}</code>
+      <span class="muted"> · expires </span>
+      {{if .Data.Link.ExpiresAt}}{{if .Data.Link.Expired}}<span class="chip-closed">expired</span>{{else}}<span title="{{.Data.Link.ExpiresAt}}">{{.Data.Link.ExpiresLabel}}</span>{{end}}{{else}}<span class="muted">—</span>{{end}}
+    </p>
+    <div class="mt-2 flex flex-wrap gap-2">
+      <form method="post" action="/invitations/{{.Data.Link.ID}}/accept">
+        <button type="submit" class="btn primary px-2 py-1 text-xs"{{if .Data.Link.Expired}} disabled title="expired — the server rejects accept with 409"{{end}}>accept</button>
+      </form>
+      <form method="post" action="/invitations/{{.Data.Link.ID}}/decline">
+        <button type="submit" class="btn px-2 py-1 text-xs">decline</button>
+      </form>
+    </div>
+    {{else if .Data.LinkErr}}
+    <p class="text-sm text-amber-700 dark:text-amber-300">{{.Data.LinkErr}}</p>
+    {{else}}
+    <p class="muted text-sm">loading…</p>
+    {{end}}
+  </section>
+  {{end}}
+
+  {{if .Data.Note}}<p class="mb-3 text-sm text-amber-700 dark:text-amber-300">{{.Data.Note}}</p>{{end}}
+
+  {{if not .Data.Anonymous}}
+    {{if .Data.Rows}}
+    <ol class="grid grid-cols-1 gap-2">
+      {{range .Data.Rows}}
+      <li class="card p-3">
+        <div class="flex flex-wrap items-center gap-2 text-sm">
+          <span class="chip">{{.Kind}}</span>
+          {{if .Expired}}<span class="chip-closed">expired</span>{{end}}
+          <strong class="font-mono text-sm">{{.Scope}}</strong>
+          <span class="muted text-xs">as {{.Role}}</span>
+          <span class="muted ml-auto text-xs">
+            from <code class="font-mono text-xs">{{.InvitedBy}}</code> · expires
+            {{if .ExpiresAt}}{{if .Expired}}<span class="chip-closed">expired</span>{{else}}<span title="{{.ExpiresAt}}">{{.ExpiresLabel}}</span>{{end}}{{else}}<span class="muted">—</span>{{end}}
+          </span>
+        </div>
+        <div class="mt-2 flex flex-wrap gap-2">
+          <form method="post" action="/invitations/{{.ID}}/accept">
+            <button type="submit" class="btn primary px-2 py-1 text-xs"{{if .Expired}} disabled title="expired — the server rejects accept with 409"{{else}} title="accept this invitation"{{end}}>accept</button>
+          </form>
+          <form method="post" action="/invitations/{{.ID}}/decline">
+            <button type="submit" class="btn px-2 py-1 text-xs">decline</button>
+          </form>
+        </div>
+      </li>
+      {{end}}
+    </ol>
+    {{else}}
+    <p class="muted text-sm">no pending invitations — new org or repo invites land here.</p>
+    {{end}}
+  {{end}}
+
+  <p class="muted mt-3 text-xs">
+    Managing an organization instead? <a class="link" href="/explore">explore owners</a> to find it.
+  </p>
+</div>
+{{end}}

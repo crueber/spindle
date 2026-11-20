@@ -1,74 +1,95 @@
 # 08 — UI & SDK: the collaboration surfaces (issues, PRs, review, checks, releases, notifications)
 
-> Depends on 01–07 for object shapes and endpoint semantics; **normative for `web/src/**` and `web/sdk/src/**`**.
-> This is the UNIFIED frontend plan: route table, shared components, data-layer cache keys, SDK submodules,
+> Depends on 01–07 for object shapes and endpoint semantics; **normative for the page layer
+> (`internal/webui/**`) and `web/sdk/src/**`**.
+
+> **As-built (2026-11-20, D-WEB-14/D-WEB-15):** the browser surfaces are **server-rendered Go
+> pages** (`internal/webui` `html/template`, vendored htmx, vanilla-ES islands), not a client SPA.
+> The route table's pages are templates under `internal/webui/templates/pages/`, shared blocks are
+> `internal/webui/templates/partials/`, and behavior is the islands under `web/src/islands/`. Client
+> mechanisms named in the contract text below (cache keys, signals, lazy `import()`, optimistic
+> updates) describe the removed D-WEB-6 implementation; the *behavior* contract is unchanged and is
+> enforced server-side. The SDK is per `docs/go/12_web_ui.md` §1.
+> This is the UNIFIED frontend plan: route table, shared surfaces, SDK submodules,
 > SSE wiring, permissions-driven gating. Feature docs sketch their pages; THIS doc owns the routes, the
-> component inventory, and the wire-facing SDK surface. Where a feature doc and this doc disagree on an
+> shared-surface inventory, and the wire-facing SDK surface. Where a feature doc and this doc disagree on an
 > endpoint path, the feature doc owns the wire and this table is corrected in the same change.
 
-Everything reuses the frozen patterns of `docs/go/12_web_ui.md` — Solid signals (§2.1), `useData` TTL cache
-(§2.4), `mountStream` SSE helper (§2.5), unified-diff parser (§2.8), `@solidjs/router` (§2.3) — and the wire
-conventions of `docs/go/07_api.md` §2: plain-text errors shown verbatim, arrays `[]` never null, RFC 3339,
-SSE envelope (§6), SWR/ETag vs no-store cache classes (§4 — plus the mutable-collab
-`private, no-cache` class for version-keyed collab GETs, issue #280). No new npm dependencies beyond the D-WEB-6
-budget (runtime `solid-js` + `@solidjs/router`; SDK dependency-free). No TypeScript.
+Everything reuses the frozen patterns of `docs/go/12_web_ui.md` — server-rendered pages (§2), htmx for
+partial updates (§2.6), islands (§2.7), Go markdown/diff/graph/highlight renderers (§2.8), URL-state
+instead of client memory (§2.9) — and the wire conventions of `docs/go/07_api.md` §2: plain-text errors
+shown verbatim, arrays `[]` never null, RFC 3339, SSE envelope (§6), SWR/ETag vs no-store cache classes
+(§4 — plus the mutable-collab `private, no-cache` class for version-keyed collab GETs, issue #280). No
+runtime npm dependencies (D-WEB-15; the SDK stays dependency-free). No TypeScript.
 
-> **Adaptation (2026-09-04, D-WEB-6 — see Decisions; wording fixed for issue #76):** an earlier revision
-> of the paragraph above described the vanilla-ESM SPA (hand-rolled reactive core, hand-rolled router,
-> "no build"). The repo ships the SolidJS SPA (`solid-js` + `@solidjs/router` runtime; `vite` +
-> `vite-plugin-solid` + `@tailwindcss/vite` dev-only; SDK still dependency-free, still no TypeScript).
-> "Reactive core" = Solid signals, "router" = `@solidjs/router`, "no build" = vite build into
-> `web/dist/`; the contract below (routes, components, cache keys, SDK surface, SSE wiring) is
-> implemented in that idiom. Page/component module names below read `.js` in the vanilla text and
-> are `.jsx` on disk.
+> **Historical adaptation (2026-09-04, D-WEB-6; superseded 2026-11-19/20 by D-WEB-14/D-WEB-15):** an
+> earlier revision of the paragraph above described the vanilla-ESM SPA; D-WEB-6 replaced it with the
+> SolidJS SPA (`solid-js` + `@solidjs/router` runtime; `vite` + `vite-plugin-solid` +
+> `@tailwindcss/vite` dev-only). That implementation and its module names are historical; the
+> contract below is realized in the server-rendered page layer.
 
-## 1. Route table additions (SPA)
+## 1. Route table additions (server-rendered)
 
-Routes are additions to the 12_web_ui.md §2.3 inventory; every route returns the SPA `index.html` and is
-lazy `import()`ed. Repo tabs extend to: **Code, Issues, Pulls, Releases, Commits, WAL, Settings**.
+Routes are additions to the 12_web_ui.md §2.3 inventory; every route is answered by the page provider
+(`pageOr404` through the `/*` dispatch) with its own template. Repo tabs extend to: **Code, Issues,
+Pulls, Releases, Commits, WAL, Settings**.
 
-| Route | Page module (`web/src/pages/`) | Gating (P6 role) | Notes |
+| Route | Template (`internal/webui/templates/pages/`) | Gating (P6 role) | Notes |
 |---|---|---|---|
-| `/:owner` | `owners.js` (extended) | read | Renders an **org profile** when `owner` is an org: repos, members, description; else the existing user page |
-| `/:owner/:repo/issues` | `issues.js` | read | Filterable list (state/assignee/labels/milestone, #415), index-backed, "Load more" by `after` cursor |
-| `/:owner/:repo/issues/new` | `issueNew.js` | authenticated | Title + markdown-lite composer |
-| `/:owner/:repo/issues/:num` | `issue.js` | read | ThreadTimeline + sidebar (labels, assignees, milestone, state) |
-| `/:owner/:repo/labels` | `labels.js` | triage+ | Label CRUD |
-| `/:owner/:repo/milestones` | `milestones.js` | triage+ | Milestone CRUD + progress |
-| `/:owner/:repo/pulls` | `pulls.js` | read | List with open/closed/merged tabs, same card shape as issues (`kind` distinguishes) |
-| `/:owner/:repo/pulls/new` | `PullNew.jsx` | write+ | Head/base pickers via `repo.refStream` (§2.6 pattern) |
-| `/:owner/:repo/pull/:num` | `pull.js` | read | Conversation + MergeBox (per 03; singular `pull` is 03's spelling) |
-| `/:owner/:repo/pull/:num/commits` | `PullCommits.jsx` | read | PR commit list |
-| `/:owner/:repo/pull/:num/files` | `PullFiles.jsx` | read | DiffPage over `parsePatchFiles`; line-thread anchoring lives on the main PR page |
-| `/:owner/:repo/checks` | `checks.js` | read | Paged index of checked shas (state pills, filter, live rows via `check` frames) |
-| `/:owner/:repo/checks/:sha` | `CheckDetail.jsx` | read | Statuses for one commit; linked from commit detail, CheckPill, and MergeBox |
-| `/:owner/:repo/releases` | `releases.js` | read | Per 07: list, latest |
-| `/:owner/:repo/releases/{tag}` | `releases.js` | read | Detail: markdown-lite body, assets table |
-| `/:owner/:repo/releases/new` | `releaseNew.js` | maintain+ | Tag picker (`refStream`), autodraft fill, asset upload with client-side `crypto.subtle` sha256 |
-| `/notifications` | `notifications.js` | authenticated | Full tray page; the dropdown tray (below) is global chrome |
-| `/:owner/:repo/settings/{tab}` | `settings.js` (extended) | varies | Sub-tabs: `access`, `collaborators`, `webhooks`, `ci-tokens` (admin); `labels`, `milestones` (triage+); existing scheduled/policy/config tabs unchanged; the Danger Zone section (red accents, both themes) renders below the tab content on every tab — first entry Delete Repository via `DangerConfirm`, server is the admin gate, success navigates to `/` |
-| `/:owner/settings/{tab}` | `orgSettings.js` | org owner/admin | Org sub-tabs: profile, members, teams, invites, webhooks |
-| `/:owner/teams/:slug` | `Team.jsx` | read | Team page: members, team repos (per 01) |
+| `/:owner` | `public/owner.html` | read | Renders an **org profile** when `owner` is an org: repos, members, description; else the user page |
+| `/:owner/:repo/issues` | `collab/issues.html` | read | Filterable list (state/assignee/labels/milestone, #415), index-backed, "more" by `after` cursor |
+| `/:owner/:repo/issues/new` | `forms/issue_new.html` | authenticated | Title + markdown composer |
+| `/:owner/:repo/issues/:num` | `collab/issue.html` | read | Timeline + sidebar (labels, assignees, milestone, state) |
+| `/:owner/:repo/labels` | `forms/labels.html` | triage+ | Label CRUD |
+| `/:owner/:repo/milestones` | `forms/milestones.html` | triage+ | Milestone CRUD + progress |
+| `/:owner/:repo/pulls` | `collab/pulls.html` | read | List with open/closed/merged tabs, same card shape as issues (`kind` distinguishes) |
+| `/:owner/:repo/pulls/new` | `forms/pull_new.html` | write+ | Head/base pickers via the ref list |
+| `/:owner/:repo/pull/:num` | `collab/pull.html` | read | Conversation + merge box (per 03; singular `pull` is 03's spelling) |
+| `/:owner/:repo/pull/:num/commits` | `collab/pull_commits.html` | read | PR commit list |
+| `/:owner/:repo/pull/:num/files` | `collab/pull_files.html` | read | Go diff renderer; line-thread anchoring lives on the main PR page |
+| `/:owner/:repo/checks` | `collab/checks.html` | read | Paged index of checked shas (state pills, filter, live rows via `check` frames) |
+| `/:owner/:repo/checks/:sha` | `collab/check_detail.html` | read | Statuses for one commit; linked from commit detail, the check pill, and the merge box |
+| `/:owner/:repo/releases` | `collab/releases.html` | read | Per 07: list, latest |
+| `/:owner/:repo/releases/{tag}` | `collab/release.html` | read | Detail: rendered markdown body, assets table |
+| `/:owner/:repo/releases/new` | `forms/release_new.html` | maintain+ | Tag picker (ref list), autodraft fill, asset upload with client-side `crypto.subtle` sha256 |
+| `/notifications` | `public/notifications.html` | authenticated | Full tray page |
+| `/:owner/:repo/settings/{tab}` | `settings/repo.html` + `partials/settings_repo.html` | varies | Sub-tabs: `access`, `collaborators`, `webhooks`, `ci-tokens` (admin); `labels`, `milestones` (triage+); existing scheduled/policy/config tabs unchanged; the Danger Zone section (red accents, both themes) renders below the tab content on every tab — first entry Delete Repository through the typed confirm, server is the admin gate, success redirects to `/` |
+| `/:owner/settings/{tab}` | `settings/org.html` + `partials/settings_org.html` | org owner/admin | Org sub-tabs: profile, members, teams, invites, webhooks |
+| `/:owner/teams/:slug` | `forms/team.html` | read | Team page: members, team repos (per 01) |
 
-Global chrome additions: notification bell + **NotificationTray** dropdown (all pages), star/watch toggles in
-the repo header (07, optimistic update + rollback), "New issue"/"New pull request" buttons in repo tabs.
+Global chrome additions: the notifications link/tray page, star/watch toggles in
+the repo header (07; POST forms, the 303 back re-renders), "New issue"/"New pull request" buttons in repo tabs
+(server-shaped per §5).
 
-## 2. Shared components (`web/src/components/`)
+## 2. Shared surfaces (`internal/webui/templates/partials/`, `pages/`, islands)
+
+`Component` below is the CONTRACT name from the plan; the shipped realization is a Go template
+partial/page plus, where behavior needs it, an island. Client-mechanism words in the contracts
+(`useData` cache key, signals, `innerHTML`, optimistic state) describe the removed D-WEB-6
+implementation — the behavioral contract is what matters and it is enforced server-side.
+Realization map: `ThreadTimeline` → `partials/collab_timeline.html`; `CommentComposer` →
+`partials/collab_composer.html` (+ the `autogrow`/`submitkeys` islands); `LabelPicker`/`AssigneePicker`
+→ `partials/collab_common.html` + `partials/collab_threads.html`; `DiffPage` →
+`partials/repo_diff.html` + `partials/collab_diff.html` (Go `diff.go`); `MergeBox` →
+`partials/collab_threads.html` + `pages/collab/pull.html`; `CheckPill` →
+`partials/repo_check_pill.html`; `ReviewSummaryBar`/`ReviewModal`/`ReviewerPicker` →
+`pages/collab/pull.html`; `NotificationTray` → `pages/public/notifications.html`;
+`DangerConfirm` → `partials/settings_repo.html`/`settings_org.html` + `web/src/islands/danger.js`.
 
 | Component | Purpose | Contract |
 |---|---|---|
-| `ThreadTimeline` | Renders a P3 event log (issue thread, PR conversation, review thread) oldest → newest (chronological, issue #225 — callers pass the newest-first wire order through; the stable by-seq sort happens here, once). Comment kinds (opened/commented, i.e. `textFor` → null) render as divider-separated entries — author/date header, markdown body, reaction rows — with NO per-comment boxes; every other kind renders as a single-line centered muted system row ("{actor} {text}") | Input: header + seq window of events (`{after_seq, n}`); compensating events render as normal rows (never rewrite history); comment bodies via the render-md pipeline (marked GFM + `#N`/`PRN` ref autolinks + `@mention` profile autolinks per 06 §7 + allowlist sanitizer); `aria-live="polite"` region so SSE-appended rows announce; dedup key `(num, event_seq)`; rows carry `event-{seq}` DOM ids |
-| `CommentComposer` | New-comment editor | markdown-lite preview (`lib/markdown.js` + `lib/sanitize.js`); **mentions autocomplete**: `@` opens a popup fed by `useData("assignables:{o}/{r}")` (repo collaborators ∪ org members, endpoint per 01); submits via the feature's comment endpoint → `{event_seq}`; optional close controls (`closeLabel`+`onClose`, `onCommentAndClose`+`commentAndCloseLabel`) share one right-aligned action row — the issue thread uses them for Close/Reopen + Comment-and-Close, the PR page omits them. On an open issue the close controls are SPLIT buttons (`closeChooser`, issue #311): primary segment closes immediately as completed (one click, `CLOSE_COMPLETED` sent explicitly), ▾ segment opens an upward menu with the not-planned alternate only; choice passed as `onClose(reason)` / `onCommentAndClose(body, reason)`; any outside click dismisses the menu (document listener, RefPicker pattern); reopen stays a plain button |
+| `ThreadTimeline` | Renders a P3 event log (issue thread, PR conversation, review thread) oldest → newest (chronological, issue #225 — the handler supplies the stable by-seq order). Comment kinds (opened/commented) render as divider-separated entries — author/date header, rendered markdown body, reaction rows — with NO per-comment boxes; every other kind renders as a single-line centered muted system row ("{actor} {text}") | Input: header + seq window of events (`{after_seq, n}`); compensating events render as normal rows (never rewrite history); comment bodies through the Go markdown renderer (GFM + `#N`/`PRN` ref autolinks + `@mention` profile autolinks per 06 §7, escaped); `aria-live="polite"` region so appended rows announce; rows carry `event-{seq}` DOM ids |
+| `CommentComposer` | New-comment editor | markdown preview through the Go renderer; **mentions autocomplete**: `@` opens a popup fed by the repo collaborators ∪ org members (endpoint per 01); submits via the feature's comment endpoint → `{event_seq}`; optional close controls share one right-aligned action row — the issue thread uses them for Close/Reopen + Comment-and-Close, the PR page omits them. On an open issue the close controls are SPLIT buttons (issue #311): primary segment closes immediately as completed (one click, `CLOSE_COMPLETED` sent explicitly), ▾ segment opens an upward menu with the not-planned alternate only; the reason is a form field (`onClose(reason)` / `onCommentAndClose(body, reason)` become the submitted value); any outside click dismisses the menu (the `menus.js`/`data-popover` contract); reopen stays a plain button |
 | `LabelPicker` | Apply/remove labels on an issue/PR | Source: `labels:{o}/{r}` cache; each toggle = one PATCH (one event per 02); triage+ only |
 | `AssigneePicker` | Same, for assignees | Source: `assignables:{o}/{r}`; triage+ only |
-| `DiffPage` | Renders a PR/commit diff | Feeds `parsePatchFiles` (12 §2.8 grammar) the `text/plain` unified patch; per-file unified/split toggle, file anchors by `stats[].path`; **line-thread anchoring**: anchor key `(path, side: old\|new, line)`; per-line comment forms create threads via `reviews.threadCreate`; threads whose anchor no longer exists on the current head's diff render collapsed with an "outdated" flag |
+| `DiffPage` | Renders a PR/commit diff | The server's typed diff renderer (`internal/webui/diff.go`, 12 §2.8) over the `text/plain` unified patch; sign-first rows, one gutter column (unified only), file anchors by `stats[].path`; **line-thread anchoring**: anchor key `(path, side: old\|new, line)`; per-line comment forms create threads via the review surface; threads whose anchor no longer exists on the current head's diff render collapsed with an "outdated" flag |
 | `MergeBox` | PR merge control | State machine below; renders the required-checks gate (05: `protect.require_checks`, evaluated by 03's `merge` task) and review-requirement state (04); the disabled button's tooltip lists missing/failing contexts |
 | `CheckPill` | Aggregate check state for a sha | Input: `GET …/api/checks/{sha}` combined state (worst-of: error > failure > pending > success, with `total_counts`); pill tooltip lists contexts; links to `/:o/:r/checks/:sha` |
 | `ReviewSummaryBar` | Review rollup on the PR page (approvals / request-changes / states) | Source: `reviews:{o}/{r}:{num}`; updates on `review` SSE frames (04) |
 | `ReviewModal` | "Finish review" — comment / approve / request-changes + pending line comments collected on the diff | Submits `reviews.create(num, {event, body?, commit_sha, threads?})`; dismiss button (maintain+) |
 | `ReviewerPicker` | Request reviewers | Fed by `reviews.suggest(num, q?)` (access.json roles + commit authors) |
-| `NotificationTray` | Bell + dropdown + `/notifications` page | Source: per-user stream + `notifications:me` cache; unread count as a signal; "mark read"/"mark all read" |
-| `DangerConfirm` | Typed-confirm row for every Danger Zone entry (`Settings.jsx`; rule in `lib/danger.js`) | Input + confirm button; the button arms only on the EXACT `owner/name` match (`dangerMatches` — case-sensitive, untrimmed); a busy flag guards double-submit; failures render a plain-text error line, never the tray |
+| `NotificationTray` | Notifications page + header entry | Source: per-user stream; the unread count is rendered by the handler and refreshed on frames; "mark read"/"mark all read" are form posts |
+| `DangerConfirm` | Typed-confirm row for every Danger Zone entry (`partials/settings_repo.html`, `settings_org.html`; arming island `web/src/islands/danger.js`) | Input + confirm button; the button arms on the exact `owner/name` match (case-sensitive; the island may trim to arm, the SERVER requires the untrimmed exact value); a submit guard prevents double-post; failures render a plain-text `.err-line`, never a client tray |
 
 **MergeBox state machine** (per 03/04/05): `draft → ready → blocked{checks, reviews, conflicts} → mergeable
 → merging(task) → merged | failed`. Transitions recompute on: header fetch, `check` SSE frame, `review` SSE
@@ -80,10 +101,11 @@ action (write+) runs the `pull-update-branch` task the same way.
 ### Concurrency — MergeBox task attach
 Hazard: double-clicking merge starts two `merge` tasks on the same PR; unmount mid-merge leaks the attach
 reader. Avoidance: the `(repo, kind)` single-flight of the task table (13_concurrency.md §3) is the
-authoritative dedup — the server joins a running merge; the client additionally disables the button while
-`state === "merging"`. Attach uses the 12 §2.5 `mountStream` pattern: one component-scoped
-`AbortController`, unmount aborts, the SDK closes the reader (12 §1.6 ownership rule). Terminal packet flips
-the state machine exactly once.
+authoritative dedup — the server joins a running merge; the page disables the button while
+`state === "merging"`. Attach is the server-rendered merge-task fragment: while running it carries
+`hx-get="…/merge/task" hx-trigger="every 2s"` (`partials/collab_threads.html`) and the swap stops once
+the state is terminal; alternatively the page renders a `data-sse` element and the island dispatches the
+task frames. Terminal packet flips the state machine exactly once.
 
 ## 3. SDK additions (`web/sdk/src/`)
 
@@ -206,8 +228,8 @@ download via the static `/{o}/{r}/releases/{tag}/assets/{name}` URL (`browser_do
 | `stream(onFrame, {signal?})` | `GET …/api/collab/stream` | SSE, read-gated; `onFrame({kind, num?, seq?, sha?, tag?, actor?, at, …})`; the promise settles on stream end (clean EOF rejects so the page reconnects); abort via `signal` → 499, reader closed in `finally` |
 
 Unlike `notifications.stream` (which resolves with a cancel function), `collab.stream` awaits the
-stream lifetime so `mountStreamRetry` reconnects mid-stream drops with backoff — drive it through
-`useCollabStream`, not directly.
+stream lifetime so the page's `data-sse` reader reconnects mid-stream drops with backoff — drive it
+through the SSE island, not directly.
 
 ### Concurrency — SDK additions
 Same hazard set as 12 §1.6: leaked readers, unbounded parallel streams, popup-auth races. Avoidance is
@@ -236,30 +258,34 @@ truth**; frames invalidate cache keys, they do not carry full state.
 - `GET /api/v1/notifications/stream` — per 06 (authenticated self-only, browser lane credentials); frames
   `event: notification` whose data is the notification object itself; runs until the client cancels.
 
-| Page | Streams | Frame handling |
+| Page (template) | Streams | Frame handling |
 |---|---|---|
-| `issue.js`, `pull.js` | repo stream (filtered by `num`) + per-user stream | matching `issue`/`issue_event`/`pull`/`review`/`thread`/`check` frames: append to ThreadTimeline if `(num, seq)` unseen, invalidate `issue:{o}/{r}:{num}` / `pull:…` / `reviews:…` / `threads:…` keys |
-| `issues.js`, `pulls.js` lists | repo stream | invalidate the list cache key on any `issue`/`pull` frame |
-| `checks.js`, commit detail, CheckPill | repo stream | `check` frames invalidate `checks:{o}/{r}:{sha}` and the `checkindex:{o}/{r}:*` keys |
-| `releases.js` | repo stream | `release` frames invalidate `releases:{o}/{r}` |
-| `MergeBox` | merge task attach (`onEvent`) | `progress`/`result`/`error` packets drive the state machine |
-| NotificationTray (global, `main.js`) | per-user stream, app-lifetime | unread-count signal; frames also invalidate `notifications:me` |
-| Ref/branch pickers | `repo.refStream` (existing §1.5 dialect) | unchanged |
+| `collab/issue.html`, `collab/pull.html` | repo stream (filtered by `num`) + per-user stream | matching `issue`/`issue_event`/`pull`/`review`/`thread`/`check` frames invalidate the page; the page re-reads through the handler (htmx swap or navigation). Timeline rows are keyed by `(num, seq)`, so a late frame from an aborted stream can never duplicate a row |
+| `collab/issues.html`, `collab/pulls.html` | repo stream | invalidate the list view on any `issue`/`pull` frame |
+| `collab/checks.html`, commit detail, check pill | repo stream | `check` frames invalidate the checks view |
+| `collab/releases.html` | repo stream | `release` frames invalidate the list |
+| merge box (`partials/collab_threads.html`) | merge task attach | `progress`/`result`/`error` packets drive the fragment (htmx `every 2s` while running) |
+| notifications page (`public/notifications.html`) | per-user stream | frames invalidate the tray; the unread count re-reads |
+| ref/branch pickers | `repo.refStream` (existing §1.5 dialect) | unchanged |
 
-**Invalidation storm control:** a burst of frames (CI posting 30 check runs) MUST coalesce — cache keys are
-collected into a set and invalidated once per tick, and the promise-cache already single-flights per key
-(one in-flight fetch per key; joiners share it — the client-side analog of 13 §3). The tick alone does
-not bound live traffic (Forgejo #396): frames arriving in separate tasks each flushed a full refetch
-round, so the flush additionally expands prefixes into a set first (one generation per entry per
-flush) and TTL-gates each key (fresh entries skip — sustained frame rates decay to TTL cadence;
-immutable windows never SSE-refetch). Mutation invalidations always refetch (#41). Timeline appends bypass
-refetch entirely (the frame carries `num`+`seq`; the event body arrives via the normal events window fetch).
+**Contract status (2026-11-20):** the transport is the shipped `web/src/islands/sse.js` reader
+(`data-sse` + `data-sse-url`/`data-sse-events`, coalesced 250 ms invalidation, 1 s→30 s backoff,
+`ui:sse-<event>` dispatch that htmx consumes). The repo-scoped collab stream wiring lands per surface;
+a page that does not subscribe renders the same content without live updates (never a broken control).
 
-**Abort patterns:** every stream is owned by exactly one `mountStream` slot (12 §2.5): `run()` aborts the
-previous controller BEFORE opening the new one; unmount cancels; errors set state `"error"` and reconnect
-with capped exponential backoff (1 s → 30 s, reset on open) — the page never throws on stream errors.
-The tray's app-lifetime stream is started once in `main.js` under a `createRoot`; it is never re-opened per
-navigation. Fetch-based readers only (never `EventSource` — 12 §2.5).
+**Invalidation storm control:** a burst of frames (CI posting 30 check runs) MUST coalesce — the island
+coalesces frames into one trailing invalidation per stream element (250 ms), and the page's refresh is a
+single server render (the handler reads current state; there is no client promise cache to join). A
+sustained frame rate therefore decays to one refetch per coalescing window, never one per frame.
+Mutation responses always re-read (#41); timeline appends carry `num`+`seq` and never refetch the
+whole window.
+
+**Abort patterns:** one live reader per `data-sse` element (`WeakMap`-owned, cancelled on
+`cleanup()`); a page that re-renders a subtree re-initializes idempotently (`data-island-ready`), so an
+htmx swap never stacks a second stream. Errors set `data-sse-state="error"` and reconnect with capped
+exponential backoff (1 s → 30 s, reset on open) — the page never throws on stream errors. Fetch-based
+readers only (never `EventSource` — 12 §2.6: it cannot POST, set headers, read JSON payloads, or
+distinguish a 401).
 
 ### Concurrency — SSE lifecycle
 Hazard: leaked readers and stacked streams (one per navigation or keystroke) and out-of-order frames
@@ -271,9 +297,11 @@ backoff prevents a hot-reload loop from stampeding the server.
 
 ## 5. Permissions-driven UI
 
-The server is authoritative (P6); client gating is cosmetic — any 403 surfaces its plain-text body in the
-error tray. The resolved role comes from `repo.permissions()` cached as `perms:{o}/{r}` (30 s TTL;
-`admin`/`write` fallback flags from `GET /api/v1/me` while 01 is in flight).
+The server is authoritative (P6); page gating is the server's own (the page handler applies
+`s.gated`/repo visibility/role floors, 12 §2.4) and every affordance it renders is already
+authorized. A denied write re-renders the page with the honest status (401/403/404) or an inline
+`.err-line`; there is no client tray. The handler resolves the role from the same access read the API
+uses (`repo.permissions()` / the identity gate), then shapes the page.
 
 | Role | UI enables |
 |---|---|
@@ -281,14 +309,20 @@ error tray. The resolved role comes from `repo.permissions()` cached as `perms:{
 | `read` | view everything; comment on issues/PRs; open new issues; star/watch |
 | `triage` | + label/assignee/milestone pickers, close/reopen others' issues, resolve threads, labels & milestones settings tabs |
 | `write` | + new PRs, submit reviews, request reviewers, push |
-| `maintain` | + merge (MergeBox button), releases create/edit/delete, protected-ref operations |
+| `maintain` | + merge (merge box button), releases create/edit/delete, protected-ref operations |
 | `admin` | + settings access/collaborators/webhooks tabs, access.json editor, repo delete |
 
 **Hide vs disable:** hide entirely when the role is absent (anonymous, or below `read`); render disabled
 with a `title` tooltip when the role is present but object state forbids (locked conversation, draft PR,
-missing required checks). Pages resolve gating off the cached role signal — no per-component refetch.
+missing required checks). The handler decides; templates render only what they are given — no template-side
+role guessing.
 
-## 6. Data-layer cache keys (`lib/data.js`)
+## 6. Client cache keys — historical (`web/src/lib/data.js`, deleted with D-WEB-15)
+
+These keys described the SPA's in-memory promise cache; they no longer exist. Kept as the record of
+which endpoints shared data and how much staleness each tolerated. Server-rendered pages re-read the
+same endpoints per request (page responses are `no-cache` + ETag, and the remaining JSON lanes keep
+their 07 §4 cache classes).
 
 | Key | TTL | Endpoint |
 |---|---|---|
@@ -308,7 +342,8 @@ missing required checks). Pages resolve gating off the cached role signal — no
 | `owners` | 5 s | `GET /api/v1/owners` (core, 07 §8) — the `/` page owner list |
 | `repos:{owner}` | 5 s | `GET /api/v1/owners/{owner}/repos` (core, 07 §8) — per-owner sections on `/`, shared with the `/:owner` page |
 
-The LRU cap (400) and error-tray behavior are unchanged (12 §2.4).
+The LRU cap (400) and tray behavior were the SPA's and are historical (12 §2.4's cache section
+applies to the SDK/JSON lane, not to pages).
 
 ## 7. i18n and accessibility
 
@@ -317,15 +352,21 @@ keys, no locale files, no translation layer. A future i18n layer is additive (st
 not need scaffolding now.
 
 **a11y baseline (no new dependencies):** semantic HTML first (`nav`/`main`/`article` per timeline event,
-`form` for composers, `button`/`a` distinctions preserved); modals and pickers (LabelPicker, AssigneePicker,
-mentions popup, tray dropdown) trap focus, close on `Esc`, and restore focus to the opener; live regions
-(`aria-live="polite"`) for SSE-appended timeline rows and the unread badge; diff line anchors are real DOM
-ids so deep links work with keyboard navigation; every action reachable by keyboard; visible focus styles in
-the existing CSS files. This is the floor, not the ceiling — no ARIA beyond what semantics require.
+`form` for composers, `button`/`a` distinctions preserved); popovers/menus follow the `menus.js` contract
+(focus moves into the panel, `Esc` closes and restores focus to the opener, arrow/Home/End walk, Tab out
+dismisses); native `<details>` pickers stay keyboard-native; live regions (`aria-live="polite"`) for
+SSE-updated regions; diff line anchors are real DOM ids so deep links work with keyboard navigation; every
+action reachable by keyboard; visible focus styles in `web/src/app.css`. This is the floor, not the
+ceiling — no ARIA beyond what semantics require.
 
 ## Decisions
 
-- **SolidJS idiom (2026-09-04, D-WEB-6 adaptation — this change).** 08's text describes a vanilla-ESM
+> **Reading note (D-WEB-14/D-WEB-15, 2026-11-20):** entries that cite `web/src/**`, `.jsx` files,
+> `lib/*` helpers or `solid-js` are records of the removed SolidJS SPA and are historical. The
+> contract they decided is realized by the server-rendered page layer
+> (`internal/webui/*.go` + `internal/webui/templates/**`) and the SDK, unless the entry says otherwise.
+
+- **SolidJS idiom (2026-09-04, D-WEB-6 adaptation — SUPERSEDED 2026-11-19/20 by D-WEB-14/D-WEB-15; historical).** 08's text describes a vanilla-ESM
   SPA (hand-rolled reactive core, hand-rolled router, `useData`/`mountStream` in `lib/`); the repo ships
   the SolidJS SPA per the D-WEB-6 amendment. This change implements 08's CONTRACT in the waves A–C
   SolidJS idiom: routes in `web/src/index.jsx` (`@solidjs/router`), state via Solid signals/stores,
@@ -456,9 +497,11 @@ the existing CSS files. This is the floor, not the ceiling — no ARIA beyond wh
   mutation-eager pin).
 
 - **Rendered mention profile links (Forgejo #440, 2026-09-13).** The ThreadTimeline
-  renderer's "comment bodies" contract now names the full render-md pipeline (ref + mention
+  renderer's "comment bodies" contract now names the full markdown pipeline (ref + mention
   autolinks, 06 §7): `@username`/`@email` → `/{principal}`, `@org/team` unlinked, dead links
-  acceptable (decision (a)). Renderer-only, every `renderBody` consumer inherits it; no new deps.
+  acceptable (decision (a)). Renderer-only, every rendered-body consumer inherits it; no new deps.
+  *(Implementation move, D-WEB-14/D-WEB-15: the pipeline is `internal/webui/markdown.go`; the
+  SPA's `renderBody`/render-md path is historical.)*
 
 ## Explicitly out of scope
 
@@ -466,5 +509,5 @@ the existing CSS files. This is the floor, not the ceiling — no ARIA beyond wh
 - i18n, themes beyond the existing CSS, dark-mode variants.
 - Mobile/responsive redesign beyond the existing Tailwind baseline; no additional CSS framework.
 - Real-time collaborative editing (presence, live cursors) — SSE carries state changes, not keystrokes.
-- Offline mode / service workers; the SPA requires a live server for every data layer key.
+- Offline mode / service workers; every page needs a live server (the JSON API and the SDK likewise).
 - Push notification channels (web push, email digests) — 06's per-user stream and webhooks are the only fan-out surfaces in v1.

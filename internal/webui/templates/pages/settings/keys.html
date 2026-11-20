@@ -1,0 +1,68 @@
+{{/* pages/settings/keys.html — GET /keys (specs/settings.md §4,
+   docs/go/17_ssh.md §3). Fully server-rendered: add and remove are form
+   posts; the registry owns the key shape validation (its message renders
+   verbatim — no duplicated regex). 390px: the table scrolls in place,
+   fields are full width. */}}
+{{define "content"}}
+<div class="keys-page space-y-4" id="keys-page">
+  <h2 class="text-xl font-semibold">SSH keys</h2>
+  <p class="muted text-sm">
+    Public keys that may clone, fetch and push over
+    <code class="font-mono text-xs">ssh://</code> as <em>you</em> (your principal, your access).
+    The transport listener itself is configured on the
+    <a class="link" href="/setup">setup</a> page.
+  </p>
+
+  {{if .Data.Error}}<div class="rounded-lg border border-red-300 bg-red-50 p-3 text-sm text-red-800 dark:border-red-900 dark:bg-red-950/60 dark:text-red-200" role="alert">{{.Data.Error}}</div>{{end}}
+  {{if .Data.Notice}}<div class="rounded-lg border border-emerald-300 bg-emerald-50 p-3 text-sm text-emerald-800 dark:border-emerald-900 dark:bg-emerald-950/60 dark:text-emerald-200">{{.Data.Notice}}</div>{{end}}
+
+  {{if .Data.NotWired}}
+  <div class="card p-4"><p class="muted text-sm">The SSH key registry is not configured on this instance.</p></div>
+  {{else}}
+  <section class="card p-4">
+    <h3 class="mb-2 font-semibold">Add a key</h3>
+    <form class="space-y-3" method="post" action="/keys"
+          hx-post="/keys" hx-target="#keys-page" hx-select="#keys-page" hx-swap="outerHTML">
+      <div>
+        <label class="mb-1 block text-sm font-medium" for="key-line">Public key (authorized_keys line)</label>
+        <textarea class="input font-mono text-xs" id="key-line" name="key" rows="3" spellcheck="false"
+                  placeholder="ssh-ed25519 AAAAC3Nza... ada@laptop" data-submit-keys>{{.Data.KeyLine}}</textarea>
+      </div>
+      <div>
+        <label class="mb-1 block text-sm font-medium" for="key-title">Title (optional)</label>
+        <input class="input md:max-w-md" id="key-title" name="title" type="text" value="{{.Data.Title}}" placeholder="work laptop">
+      </div>
+      <button type="submit" class="btn primary">Add key</button>
+    </form>
+  </section>
+
+  <section class="card p-4">
+    <h3 class="mb-2 font-semibold">Your keys</h3>
+    {{if .Data.Keys}}
+    <div class="overflow-x-auto">
+      <table class="data-table">
+        <thead><tr><th>title</th><th>key</th><th>added</th><th></th></tr></thead>
+        <tbody>
+          {{range .Data.Keys}}
+          <tr>
+            <td>{{if .Title}}{{.Title}}{{else}}<span class="muted">(untitled)</span>{{end}}</td>
+            <td><code class="font-mono text-xs">{{.Short}}</code></td>
+            <td class="tabular muted text-xs">{{.Added}}</td>
+            <td>
+              <form method="post" action="/keys/{{.ID}}/delete"
+                    hx-post="/keys/{{.ID}}/delete" hx-target="#keys-page" hx-select="#keys-page" hx-swap="outerHTML">
+                <button type="submit" class="btn px-2 py-1 text-xs">remove</button>
+              </form>
+            </td>
+          </tr>
+          {{end}}
+        </tbody>
+      </table>
+    </div>
+    {{else}}
+    <p class="muted">no keys yet — add one above, then clone over ssh://</p>
+    {{end}}
+  </section>
+  {{end}}
+</div>
+{{end}}

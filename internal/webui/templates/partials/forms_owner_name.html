@@ -1,0 +1,17 @@
+{{define "forms_owner_name"}}
+<div class="owner-name-row">
+  <div class="grid grid-cols-1 items-start gap-3 sm:grid-cols-[minmax(0,1fr)_minmax(0,2fr)]">
+    <label class="grid min-w-0 gap-1" for="{{.Prefix}}-owner">
+      <span class="text-sm font-medium">Owner</span>
+      <select id="{{.Prefix}}-owner" name="owner" class="input h-9 truncate font-mono" aria-label="Owner">
+        {{range .Owners}}<option value="{{.}}"{{if eq . $.Owner}} selected{{end}}>{{.}}</option>{{end}}
+      </select>
+    </label>
+    <label class="grid min-w-0 gap-1" for="{{.Prefix}}-name">
+      <span class="text-sm font-medium">Name</span>
+      <input id="{{.Prefix}}-name" name="name" class="input h-9 font-mono" value="{{.Name}}" placeholder="{{.Placeholder}}" autocomplete="off" spellcheck="false" aria-label="Name"{{if .NameErr}} aria-invalid="true"{{end}} aria-describedby="{{.Prefix}}-name-error">
+    </label>
+  </div>
+  <p id="{{.Prefix}}-name-error" class="mt-1 min-h-[2rem] text-xs text-red-700 dark:text-red-400" aria-live="polite">{{.NameErr}}</p>
+</div>
+{{end}}

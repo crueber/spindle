@@ -5,14 +5,10 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
-
-	"github.com/crueber/walhub/internal/config"
 )
 
-// fakeAPI is a RouteProvider stub for the SPA home and repo lanes.
+// fakeAPI is a RouteProvider stub for the api lanes.
 type fakeAPI struct {
-	owners []string
-	err    error
 	served int
 }
 
@@ -20,8 +16,6 @@ func (f *fakeAPI) Serve(w http.ResponseWriter, r *http.Request) {
 	f.served++
 	w.WriteHeader(http.StatusTeapot)
 }
-
-func (f *fakeAPI) Owners(r *http.Request) ([]string, error) { return f.owners, f.err }
 
 func TestHealthzAndPrewarm(t *testing.T) {
 	s, _ := newTestServer(t, nil)
@@ -78,16 +72,25 @@ func TestSDKReposJS(t *testing.T) {
 	}
 }
 
-// TestUIAssetResolvers: the embedded SPA must actually be reachable — the
-// /repos.js bundle, the /_ui module tree, and the standalone setup page
-// (regression: uiAsset/setupAsset were hardcoded stubs, blanking every page).
+// TestUIAssetResolvers: the embedded page assets must actually be reachable —
+// the /repos.js SDK bundle, the stylesheet, the island bundle, the vendored
+// htmx files and the concept GIFs (regression: uiAsset/webAsset were hardcoded
+// stubs, blanking every page). There is no SPA shell any more (D-WEB-14).
 func TestUIAssetResolvers(t *testing.T) {
-	b, ok := webAsset("dist/index.html")
-	if !ok || !strings.Contains(string(b), `id="root"`) || !strings.Contains(string(b), `/_ui/assets/`) {
-		t.Fatalf("embedded dist/index.html missing or wrong: ok=%v len=%d (run make web)", ok, len(b))
+	for _, name := range []string{"app.css", "ui.js", "htmx.min.js", "htmx-ext-sse.js"} {
+		if b, ok := uiAsset(name); !ok || len(b) == 0 {
+			t.Fatalf("uiAsset(%q) must resolve the built asset (run make web)", name)
+		}
 	}
-	if b, ok := uiAsset("index.html"); !ok || !strings.Contains(string(b), "root") {
-		t.Fatal("uiAsset must serve the built shell")
+	if b, ok := webAsset("dist/repos.js"); !ok || !strings.Contains(string(b), "ReposClient") {
+		t.Fatal("webAsset must resolve the SDK bundle (run make web)")
+	}
+	if b, ok := uiAsset("concepts/push-still.gif"); !ok || len(b) == 0 {
+		t.Fatal("uiAsset must resolve the concept GIFs")
+	}
+	// The SPA shell and its hashed bundle lane are gone.
+	if _, ok := uiAsset("index.html"); ok {
+		t.Fatal("uiAsset must not serve an SPA shell")
 	}
 	if _, ok := uiAsset("../go.mod"); ok {
 		t.Fatal("uiAsset must refuse traversal-style names")
@@ -132,153 +135,90 @@ func TestEventsNotify(t *testing.T) {
 	}
 }
 
-func TestSPAHome(t *testing.T) {
-	api := &fakeAPI{owners: []string{"alice", "bob"}}
-	s, h := newTestServer(t, func(o *Options) { o.API = api })
-	do := func(url string, auth bool) *httptest.ResponseRecorder {
-		req := httptest.NewRequest("GET", url, nil)
-		if auth {
-			req.Header.Set("Authorization", "Bearer tok123")
-		}
+// TestPageRoutesGoToProvider: the browser page tree is answered by the page
+// provider (internal/pages seam) — /, /explore, /how-it-works, /{owner},
+// /{owner}/{repo}, the /{owner}/{repo}/<page> shapes, /{owner}/teams/{slug}
+// and /setup. The server owns the shape (method gates, reservations) and the
+// provider owns the rendering and gating.
+func TestPageRoutesGoToProvider(t *testing.T) {
+	ui := &fakeUI{paths: map[string]bool{
+		"/":                true,
+		"/explore":         true,
+		"/how-it-works":    true,
+		"/setup":           true,
+		"/alice":           true,
+		"/o/r":             true,
+		"/o/r/tree/main":   true,
+		"/acme/teams/core": true,
+		"/api":             true,
+	}}
+	s, h := newTestServer(t, func(o *Options) { o.API = &fakeAPI{} })
+	s.SetUI(ui)
+	do := func(method, url string) *httptest.ResponseRecorder {
+		req := httptest.NewRequest(method, url, nil)
+		req.Header.Set("Authorization", "Bearer tok123")
 		rec := httptest.NewRecorder()
 		h.ServeHTTP(rec, req)
 		return rec
 	}
-	// Anonymous + no anonymous read → gated 401.
-	if rec := do("http://x/", false); rec.Code != http.StatusUnauthorized {
-		t.Fatalf("anon home = %d", rec.Code)
+	for _, url := range []string{
+		"http://x/", "http://x/explore", "http://x/explore?format=text",
+		"http://x/how-it-works", "http://x/setup", "http://x/alice",
+		"http://x/o/r", "http://x/o/r/tree/main", "http://x/acme/teams/core",
+	} {
+		rec := do("GET", url)
+		if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `id="page"`) {
+			t.Fatalf("GET %s must be answered by the page provider: %d %.120s", url, rec.Code, rec.Body.String())
+		}
+		if ct := rec.Header().Get("Content-Type"); !strings.Contains(ct, "text/html") {
+			t.Fatalf("GET %s content-type = %q", url, ct)
+		}
 	}
-	// HTML shell.
-	rec := do("http://x/", true)
-	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `/_ui/assets/`) || !strings.Contains(rec.Body.String(), `id="root"`) {
-		t.Fatalf("html home must serve the built SPA shell: %d %.160s", rec.Code, rec.Body.String())
+	// /api is the page provider first; the JSON lane answers when it declines.
+	if rec := do("GET", "http://x/api"); rec.Code != http.StatusOK {
+		t.Fatalf("api docs page = %d", rec.Code)
 	}
-	if ct := rec.Header().Get("Content-Type"); !strings.Contains(ct, "text/html") {
-		t.Fatalf("home content-type = %q", ct)
+	plain, ph := newTestServer(t, func(o *Options) { o.API = &fakeAPI{} })
+	plain.SetUI(&fakeUI{paths: map[string]bool{"/": true}}) // declines /api
+	rec := httptest.NewRecorder()
+	ph.ServeHTTP(rec, httptest.NewRequest("GET", "http://x/api", nil))
+	if rec.Code != http.StatusTeapot {
+		t.Fatalf("declined /api must reach the JSON lane, got %d", rec.Code)
 	}
-	// ?format=text moved to /explore (issue #187): / answers the shell
-	// unconditionally, even for text requests.
-	if rec := do("http://x/?format=text", true); !strings.Contains(rec.Body.String(), `id="root"`) {
-		t.Fatalf("landing home must serve the shell, got %q", rec.Body.String())
+	// Page shapes are GET/HEAD only.
+	for _, url := range []string{"http://x/alice", "http://x/o/r/tree/main"} {
+		if rec := do("POST", url); rec.Code != http.StatusMethodNotAllowed {
+			t.Fatalf("POST %s = %d, want 405", url, rec.Code)
+		}
 	}
-	// ownerPage / repoPage / serveSPA all render the shell.
-	rec = httptest.NewRecorder()
-	s.ownerPage(rec, httptest.NewRequest("GET", "/o", nil))
-	if rec.Code != http.StatusOK {
-		t.Fatalf("owner page = %d", rec.Code)
+	// A path the provider does not own is the plain 404 — never a shell.
+	if rec := do("GET", "http://x/acme/nope/deeper"); rec.Code != http.StatusNotFound {
+		t.Fatalf("unowned page path = %d, want 404", rec.Code)
 	}
-	hh := s.repoPage(mustRepoID(t, "o/r"))
-	rec = httptest.NewRecorder()
-	hh(rec, httptest.NewRequest("GET", "/o/r", nil))
-	if !strings.Contains(rec.Body.String(), "walhub") {
-		t.Fatal("repo page shell missing")
+	if !strings.Contains(strings.Join(ui.seen, " "), "/acme/nope/deeper") {
+		t.Fatalf("provider must be consulted for page shapes, saw %v", ui.seen)
 	}
 }
 
-type apiErrString struct{ s string }
-
-func (e *apiErrString) Error() string { return e.s }
-
-// TestExplorePage: GET /explore serves the owners shell; ?format=text (or a
-// text/plain Accept without text/html) answers the plain owner list (moved
-// from / by issue #187 — the machine twin follows the page; pre-1.0
-// no-alias: / has no text branch anymore).
-func TestExplorePage(t *testing.T) {
-	api := &fakeAPI{owners: []string{"alice", "bob"}}
-	s, h := newTestServer(t, func(o *Options) { o.API = api })
-	do := func(url string, auth bool) *httptest.ResponseRecorder {
+// TestPageRoutes404WithoutProvider: with no page provider mounted the page
+// routes answer the plain 404. The SPA shell that used to stand in for them is
+// deleted (D-WEB-14) — there is no second page tree.
+func TestPageRoutes404WithoutProvider(t *testing.T) {
+	_, h := newTestServer(t, nil)
+	for _, url := range []string{
+		"http://x/", "http://x/explore", "http://x/how-it-works", "http://x/setup",
+		"http://x/alice", "http://x/o/r", "http://x/o/r/tree",
+	} {
 		req := httptest.NewRequest("GET", url, nil)
-		if auth {
-			req.Header.Set("Authorization", "Bearer tok123")
-		}
+		req.Header.Set("Authorization", "Bearer tok123")
 		rec := httptest.NewRecorder()
 		h.ServeHTTP(rec, req)
-		return rec
-	}
-	// Anonymous + no anonymous read → gated 401.
-	if rec := do("http://x/explore", false); rec.Code != http.StatusUnauthorized {
-		t.Fatalf("anon explore = %d", rec.Code)
-	}
-	// HTML shell.
-	rec := do("http://x/explore", true)
-	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `/_ui/assets/`) || !strings.Contains(rec.Body.String(), `id="root"`) {
-		t.Fatalf("html explore must serve the built SPA shell: %d %.160s", rec.Code, rec.Body.String())
-	}
-	if ct := rec.Header().Get("Content-Type"); !strings.Contains(ct, "text/html") {
-		t.Fatalf("explore content-type = %q", ct)
-	}
-	_ = s
-	// ?format=text → owner list.
-	if rec := do("http://x/explore?format=text", true); rec.Body.String() != "alice\nbob\n" {
-		t.Fatalf("text explore = %q", rec.Body.String())
-	}
-	if rec := do("http://x/explore?format=text", true); !strings.Contains(rec.Header().Get("Content-Type"), "text/plain") {
-		t.Fatalf("text explore content-type = %q", rec.Header().Get("Content-Type"))
-	}
-	// text/plain Accept (without text/html) → owner list too.
-	req := httptest.NewRequest("GET", "http://x/explore", nil)
-	req.Header.Set("Authorization", "Bearer tok123")
-	req.Header.Set("Accept", "text/plain")
-	rec = httptest.NewRecorder()
-	h.ServeHTTP(rec, req)
-	if rec.Body.String() != "alice\nbob\n" {
-		t.Fatalf("accept-text explore = %q", rec.Body.String())
-	}
-	// text/html Accept still gets the shell (query param absent).
-	req = httptest.NewRequest("GET", "http://x/explore", nil)
-	req.Header.Set("Authorization", "Bearer tok123")
-	req.Header.Set("Accept", "text/html, text/plain")
-	rec = httptest.NewRecorder()
-	h.ServeHTTP(rec, req)
-	if !strings.Contains(rec.Body.String(), `id="root"`) {
-		t.Fatalf("html-accept explore must serve the shell, got %q", rec.Body.String())
-	}
-	// API seam failure → 503.
-	api.err = &apiErrString{"boom"}
-	if rec := do("http://x/explore?format=text", true); rec.Code != http.StatusServiceUnavailable {
-		t.Fatalf("api failure = %d", rec.Code)
-	}
-	api.err = nil
-	// /explore must be the explicit route, not the owner wildcard: an owner
-	// literally named "explore" is shadowed (documented reservation).
-	if rec := do("http://x/explore", true); rec.Code != http.StatusOK {
-		t.Fatalf("explore route = %d", rec.Code)
-	}
-}
-
-// TestHowItWorksPage: GET /how-it-works serves the deep-dive shell (issue
-// #191, R1 B1) — gated, unconditional HTML (no ?format=text branch), and the
-// explicit route (an owner literally named "how-it-works" is shadowed).
-func TestHowItWorksPage(t *testing.T) {
-	api := &fakeAPI{owners: []string{"alice", "bob"}}
-	_, h := newTestServer(t, func(o *Options) { o.API = api })
-	do := func(url string, auth bool) *httptest.ResponseRecorder {
-		req := httptest.NewRequest("GET", url, nil)
-		if auth {
-			req.Header.Set("Authorization", "Bearer tok123")
+		if rec.Code != http.StatusNotFound {
+			t.Fatalf("GET %s without a page provider = %d, want 404", url, rec.Code)
 		}
-		rec := httptest.NewRecorder()
-		h.ServeHTTP(rec, req)
-		return rec
-	}
-	// Anonymous + no anonymous read → gated 401.
-	if rec := do("http://x/how-it-works", false); rec.Code != http.StatusUnauthorized {
-		t.Fatalf("anon how-it-works = %d", rec.Code)
-	}
-	// HTML shell, no-cache.
-	rec := do("http://x/how-it-works", true)
-	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `/_ui/assets/`) || !strings.Contains(rec.Body.String(), `id="root"`) {
-		t.Fatalf("html how-it-works must serve the built SPA shell: %d %.160s", rec.Code, rec.Body.String())
-	}
-	if ct := rec.Header().Get("Content-Type"); !strings.Contains(ct, "text/html") {
-		t.Fatalf("how-it-works content-type = %q", ct)
-	}
-	if cc := rec.Header().Get("Cache-Control"); !strings.Contains(cc, "no-cache") {
-		t.Fatalf("how-it-works cache-control = %q", cc)
-	}
-	// No text twin here (R1 S1): ?format=text still serves the shell.
-	if rec := do("http://x/how-it-works?format=text", true); !strings.Contains(rec.Body.String(), `id="root"`) {
-		t.Fatalf("how-it-works must serve the shell unconditionally, got %q", rec.Body.String())
+		if strings.Contains(rec.Body.String(), `id="root"`) {
+			t.Fatalf("GET %s must not answer with an SPA shell", url)
+		}
 	}
 }
 
@@ -428,45 +368,33 @@ func TestCompressBypassesImages(t *testing.T) {
 	}
 }
 
-func TestSetupUIAndAssets(t *testing.T) {
-	// defaults mode → open.
-	cfg := config.Defaults()
-	cfg.DataDir = t.TempDir()
-	s := New(Options{Config: cfg, Store: newFakeStore(), Engine: &fakeEngine{},
-		Boot: BootState{Mode: "defaults"}})
+// TestSetupPageSeam: GET /setup is a page-provider route. The §3.4 access
+// rules for the page live in the page layer (internal/webui + the cmd/walhub
+// wiring); the server owns only the routing, so a mounted provider answers and
+// no provider is the plain 404 (never an SPA shell).
+func TestSetupPageSeam(t *testing.T) {
+	s, h := newTestServer(t, nil)
+	s.SetUI(&fakeUI{paths: map[string]bool{"/setup": true}})
 	rec := httptest.NewRecorder()
-	s.setupUI(rec, httptest.NewRequest("GET", "/setup", nil))
-	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), "id=\"root\"") {
-		t.Fatalf("setup page = %d, want the SPA shell (D-WEB-6)", rec.Code)
+	h.ServeHTTP(rec, httptest.NewRequest("GET", "http://x/setup", nil))
+	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `id="page"`) {
+		t.Fatalf("setup page = %d, want the page provider", rec.Code)
 	}
-	// Gated: normal mode + auth token → admin required. Anonymous is
-	// authenticated-with-no-error in token mode → 403 admin access required.
-	s2, _ := newTestServer(t, nil)
+	// No provider → 404, never a shell.
+	_, h2 := newTestServer(t, nil)
 	rec = httptest.NewRecorder()
-	s2.setupUI(rec, httptest.NewRequest("GET", "/setup", nil))
-	if rec.Code != http.StatusForbidden {
-		t.Fatalf("gated setup = %d", rec.Code)
+	h2.ServeHTTP(rec, httptest.NewRequest("GET", "http://x/setup", nil))
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("setup without a provider = %d, want 404", rec.Code)
 	}
-	req := httptest.NewRequest("GET", "/setup", nil)
-	req.Header.Set("Authorization", "Bearer tok123") // alice is admin
+	// Setup-only mode keeps the POST fallback (§3.4 503) when the page layer
+	// does not answer the submit — never a dead 405.
+	s3, h3 := newTestServer(t, func(o *Options) { o.Boot = BootState{Mode: "setup_only"} })
+	s3.SetUI(&fakeUI{paths: map[string]bool{}})
 	rec = httptest.NewRecorder()
-	s2.setupUI(rec, req)
-	if rec.Code != http.StatusOK {
-		t.Fatalf("admin setup = %d", rec.Code)
-	}
-	// WALHUB_SETUP_TOKEN escape hatch accepts a bearer header.
-	t.Setenv("WALHUB_SETUP_TOKEN", "hatch")
-	rec = httptest.NewRecorder()
-	s2.setupUI(rec, httptest.NewRequest("GET", "/setup", nil))
-	if rec.Code != http.StatusUnauthorized {
-		t.Fatalf("token gate = %d", rec.Code)
-	}
-	req = httptest.NewRequest("GET", "/setup", nil)
-	req.Header.Set("Authorization", "Bearer hatch")
-	rec = httptest.NewRecorder()
-	s2.setupUI(rec, req)
-	if rec.Code != http.StatusOK {
-		t.Fatalf("token access = %d", rec.Code)
+	h3.ServeHTTP(rec, httptest.NewRequest("POST", "http://x/setup", nil))
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("setup-only POST without a page answer = %d, want 503", rec.Code)
 	}
 }
 

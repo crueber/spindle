@@ -1,5 +1,5 @@
 // x_gaps10_test.go — Forgejo #289 (internal/server coverage gate), part 2:
-// handler/engine/misc branches (serveSPA 304, asset MIME types, ChainExtra,
+// handler/engine/misc branches (page-asset MIME/ETag rules, ChainExtra,
 // request scheme/CORS tables, session refresh, atomic-write/listener utils,
 // pkt-ERR writer, broker fallback, LFS/upstream negatives, routing edges,
 // SSH transport errors, metrics exposition, oid tables). Behavioral pins
@@ -31,77 +31,50 @@ import (
 	"github.com/crueber/walhub/internal/sshd"
 	"github.com/crueber/walhub/internal/store"
 	"github.com/crueber/walhub/internal/wal"
-	"github.com/crueber/walhub/web"
 )
 
-// --- health.go: serveSPA 304, CSS MIME, webAsset guards -----------------------
-
-func TestServeSPAConditional(t *testing.T) {
-	s, _ := newTestServer(t, nil)
-	req := httptest.NewRequest("GET", "http://x/", nil)
-	rec := httptest.NewRecorder()
-	s.serveSPA(rec, req)
-	if rec.Code != http.StatusOK {
-		t.Fatalf("shell = %d", rec.Code)
-	}
-	etag := rec.Header().Get("ETag")
-	if etag == "" {
-		t.Fatal("shell must carry an ETag")
-	}
-	if ct := rec.Header().Get("Content-Type"); !strings.Contains(ct, "text/html") {
-		t.Fatalf("shell content-type = %q", ct)
-	}
-	// Matching validator → 304 with an empty body (no-cache revalidation).
-	req = httptest.NewRequest("GET", "http://x/", nil)
-	req.Header.Set("If-None-Match", etag)
-	rec = httptest.NewRecorder()
-	s.serveSPA(rec, req)
-	if rec.Code != http.StatusNotModified || rec.Body.Len() != 0 {
-		t.Fatalf("shell 304 = %d len=%d", rec.Code, rec.Body.Len())
-	}
-	// HEAD → headers, no body.
-	req = httptest.NewRequest("HEAD", "http://x/", nil)
-	rec = httptest.NewRecorder()
-	s.serveSPA(rec, req)
-	if rec.Code != http.StatusOK || rec.Body.Len() != 0 {
-		t.Fatalf("shell head = %d len=%d", rec.Code, rec.Body.Len())
-	}
-}
+// --- health.go: page assets, MIME types, webAsset guards ---------------------
 
 func TestServeUIAssetsCSS(t *testing.T) {
 	s, _ := newTestServer(t, nil)
-	entries, err := web.Files.ReadDir("dist/assets")
-	if err != nil {
-		t.Fatal(err)
-	}
-	css := ""
-	for _, e := range entries {
-		if strings.HasSuffix(e.Name(), ".css") {
-			css = e.Name()
-		}
-	}
-	if css == "" {
-		t.Fatal("built UI must ship a stylesheet (run make web)")
-	}
-	req := httptest.NewRequest("GET", "http://x/_ui/assets/"+css, nil)
+	req := httptest.NewRequest("GET", "http://x/_ui/app.css", nil)
 	rec := httptest.NewRecorder()
 	s.serveUIAssets(rec, req)
-	if rec.Code != http.StatusOK {
-		t.Fatalf("css asset = %d", rec.Code)
+	if rec.Code != http.StatusOK || rec.Body.Len() == 0 {
+		t.Fatalf("app.css = %d len=%d (run make web)", rec.Code, rec.Body.Len())
 	}
 	if ct := rec.Header().Get("Content-Type"); ct != "text/css; charset=utf-8" {
 		t.Fatalf("css content-type = %q", ct)
 	}
-	if cc := rec.Header().Get("Cache-Control"); !strings.Contains(cc, "immutable") {
-		t.Fatalf("hashed bundle must be immutable, got %q", cc)
+	if cc := rec.Header().Get("Cache-Control"); cc != "no-cache" {
+		t.Fatalf("stable asset must be no-cache, got %q", cc)
+	}
+	etag := rec.Header().Get("ETag")
+	if etag == "" {
+		t.Fatal("stable asset must carry an ETag")
+	}
+	req = httptest.NewRequest("GET", "http://x/_ui/app.css", nil)
+	req.Header.Set("If-None-Match", etag)
+	rec = httptest.NewRecorder()
+	s.serveUIAssets(rec, req)
+	if rec.Code != http.StatusNotModified || rec.Body.Len() != 0 {
+		t.Fatalf("revalidated asset = %d len=%d", rec.Code, rec.Body.Len())
+	}
+	// The island bundle and the vendored htmx files share the stable lane.
+	for _, name := range []string{"ui.js", "htmx.min.js", "htmx-ext-sse.js"} {
+		rec := httptest.NewRecorder()
+		s.serveUIAssets(rec, httptest.NewRequest("GET", "http://x/_ui/"+name, nil))
+		if rec.Code != http.StatusOK || rec.Header().Get("Cache-Control") != "no-cache" {
+			t.Fatalf("%s = %d cache=%q", name, rec.Code, rec.Header().Get("Cache-Control"))
+		}
 	}
 }
 
 func TestWebAssetTable(t *testing.T) {
-	if b, ok := webAsset("dist/index.html"); !ok || len(b) == 0 {
-		t.Fatal("built shell must resolve")
+	if b, ok := webAsset("dist/app.css"); !ok || len(b) == 0 {
+		t.Fatal("built stylesheet must resolve")
 	}
-	for _, name := range []string{"", "../go.mod", "/dist/index.html", "dist/no-such-file", "dist/assets/../../go.mod"} {
+	for _, name := range []string{"", "../go.mod", "/dist/app.css", "dist/no-such-file", "dist/assets/../../go.mod", "dist/index.html"} {
 		if _, ok := webAsset(name); ok {
 			t.Fatalf("webAsset(%q) must miss", name)
 		}
@@ -273,15 +246,12 @@ func TestAdoptPlaceholderBranches(t *testing.T) {
 
 type stubProvider struct {
 	served int
-	owners []string
 }
 
 func (p *stubProvider) Serve(w http.ResponseWriter, r *http.Request) {
 	p.served++
 	plainStatus(w, http.StatusOK, "primary")
 }
-
-func (p *stubProvider) Owners(r *http.Request) ([]string, error) { return p.owners, nil }
 
 type stubChainExtra struct {
 	handled int
@@ -299,7 +269,7 @@ func (x *stubChainExtra) Handle(w http.ResponseWriter, r *http.Request) bool {
 
 func TestChainExtraWiresExtras(t *testing.T) {
 	s, _ := newTestServer(t, nil)
-	prim := &stubProvider{owners: []string{"octo"}}
+	prim := &stubProvider{}
 	s.api = prim
 	x1 := &stubChainExtra{claim: true}
 	x2 := &stubChainExtra{}
@@ -316,10 +286,6 @@ func TestChainExtraWiresExtras(t *testing.T) {
 	s.api.Serve(rec, req)
 	if rec.Body.String() != "primary\n" || prim.served != 1 {
 		t.Fatalf("unclaimed serve = %q primary=%d", rec.Body.String(), prim.served)
-	}
-	owners, err := s.api.Owners(req)
-	if err != nil || len(owners) != 1 || owners[0] != "octo" {
-		t.Fatalf("owners delegate = %v %v", owners, err)
 	}
 	// Nil api → ChainExtra is a silent no-op (setup-only boots).
 	s.api = nil

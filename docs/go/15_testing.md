@@ -313,85 +313,45 @@ Mandatory for every PR that touches shared state:
 3. **Deadlock canary** — the test binary runs under `timeout 300` (fast tier); a suite that deadlocks fails the recipe, it does not hang CI silently. Additionally the watchdog pattern from §3.4 of the Rust spec is unit-tested: a stalled-tick detector test asserts the "async runtime stalled" warning fires when a tick is > 2.5 s late (simulated with a fake clock).
 4. **Every goroutine has a shutdown path** — linters cannot check this; review does. The sim's restart machinery is the executable proof that instances shut down on context cancel.
 
-### 6.5 Web/JS test tier (Divergence D2; frontend stack per D-WEB-6)
+### 6.5 Web/JS test tier (Divergence D2; frontend stack per D-WEB-14/D-WEB-15)
 
-The frontend is the SolidJS SPA (12_web_ui.md: `solid-js` + `@solidjs/router` runtime, Tailwind v4,
-vite-built; still no TypeScript) — and its tests still need no test framework: runner is Node's built-in
-`node --test` (Node ≥ 20), invoked by `make test-web`, wired into `make test` and `ci`.
-`web/package.json` carries the runtime (`solid-js`, `@solidjs/router`) plus the build devDependencies
-(`vite`, `vite-plugin-solid`, `@tailwindcss/vite`, `tailwindcss`, `esbuild`); the test files import
+The frontend is server-rendered pages in Go (`internal/webui`), heavily enhanced by the vanilla-ES
+islands (`web/src/islands/`) and the dependency-free SDK — and its JS still needs no test framework:
+runner is Node's built-in `node --test` (Node ≥ 20), invoked by `make test-web`, wired into `make test`
+and `ci`. `web/package.json` carries only build devDependencies (`vite`, `@tailwindcss/vite`,
+`tailwindcss`, `esbuild`); there are no runtime npm dependencies. The test files import
 `node:test`/`node:assert` and the ESM sources directly.
 
-- **Logic/DOM split, normative.** Every testable module — the SDK client groups in `web/sdk/src/*.js` (plain ESM submodules; the shipped `dist/repos.js` is the esbuild bundle of them, §1.0 of 12_web_ui.md), the SSE parser, the diff parser, markdown-lite, the setup-form logic — is a pure ES module with zero DOM access; DOM glue lives in entry modules that import them. This is what makes the tier headless: tests import by relative path (vite aliases are a build-time mechanism and never appear in test imports).
-- **`web/test/unit/*.test.js`** — unit cases with `node:assert` in the Go tier's style: repos.js request shaping and error mapping, SSE event framing, diff parsing, markdown-lite, setup-form validation against the `/api/v1/setup` schema. Same assertion discipline: `if (got !== want) throw`.
+- **Logic/DOM split, normative.** Every testable module — the SDK client groups in `web/sdk/src/*.js`
+  (plain ESM submodules; the shipped `dist/repos.js` is the esbuild bundle of them, §1.0 of
+  12_web_ui.md) and the islands' pure helpers (SSE frame parsing/backoff/coalescing) — is a pure ES
+  module with zero DOM access; DOM wiring lives behind exported `init(root)` functions that the tests
+  do not call. This is what makes the tier headless: tests import by relative path (vite aliases are a
+  build-time mechanism and never appear in test imports). Page rendering, gating, markdown/diff/graph
+  rendering and form handling are Go and covered by `httptest` in `internal/webui` (law 11), not here.
+- **`web/test/unit/*.test.js`** — unit cases with `node:assert` in the Go tier's style: repos.js request
+  shaping and error mapping, SSE frame parsing/backoff/coalescing, the SDK lane/401 rules. Same
+  assertion discipline: `if (got !== want) throw`.
 - **`web/test/unit/smoke.test.js`** — fetch-based server smoke against `WALHUB_TEST_WEB_BASE_URL` (default `http://127.0.0.1:8080`): `/` serves the app, `/setup` serves, `/api/v1/setup` returns the schema JSON, one SDK call round-trips, and — when `web/dist/repos.js` exists (always in CI and after `make web`) — the BUNDLE imports and its exports match `sdk/src/index.js`. Server absent → the smoke cases skip, so `make test` still passes on a cold machine; CI always has a server up for them. Unit tests import the SOURCE modules directly, so testing needs no build; `make web` produces only the shipped artifact.
 
 ---
 
 ## 7. Makefile — every tier is a target
 
-All dev/CI entry points are Make targets (Divergence D3); there is no justfile, no separate task runner, nothing to remember beyond the target list below. The watchdog semantics port unchanged: `T5`/`T15` resolve GNU `timeout` (coreutils), fall back to `gtimeout` (macOS), and run unwrapped with a warning if neither exists — no watchdog is worse than no tests.
+All dev/CI entry points are Make targets (Divergence D3); there is no justfile, no separate task runner, nothing to remember beyond the tier map below. The watchdog semantics port unchanged: `T5`/`T15` resolve GNU `timeout` (coreutils), fall back to `gtimeout` (macOS), and run unwrapped with a warning if neither exists — no watchdog is worse than no tests.
 
-```make
-T5  := $(shell command -v timeout >/dev/null 2>&1 && echo "timeout 300" || command -v gtimeout >/dev/null 2>&1 && echo "gtimeout 300")
-T15 := $(shell command -v timeout >/dev/null 2>&1 && echo "timeout 900" || command -v gtimeout >/dev/null 2>&1 && echo "gtimeout 900")
+| tier | target | what makes it a tier |
+|---|---|---|
+| fast | `make test` | `test-go` (`-short`, watchdog) + `test-web` (`node --test`); hermetic, < 1 min |
+| race | `make race` | the fast tier under `-race` (CGO on for the detector only) |
+| coverage | `make cover` | every `internal/...` package ≥ 95 % (D7); per-package profiles, never merged |
+| contract | `make contract` | memory + filesystem, always; `contract-s3` / `contract-gcs` are env-gated |
+| proof | `make sim` | fault-injection consistency proof + round-trip budgets (`internal/sim`, seeded) |
+| e2e | `make e2e` | smart-HTTP against the real git binary (git ≥ 2.47) |
+| merge gate | `make ci` | `vet test race cover contract sim e2e` |
 
-web: ## build the UI: vite (SPA → dist/) then esbuild (SDK → dist/repos.js) (12_web_ui.md §1.0)
-	pnpm --dir web run build
-
-build: web ## compile everything (the SDK bundle is a build dependency)
-	go build ./...
-
-fmt: ## format Go sources
-	gofmt -w $$(gofmt -l .)
-
-vet: ## the Go "-D warnings" gate: gofmt clean, go vet, go build
-	test -z "$$(gofmt -l .)" || (echo "gofmt needed:" && gofmt -l . && exit 1)
-	go vet ./... && go build ./...
-test: test-go test-web ## fast tier = Go fast tests + web tests
-test-go: ## fast Go tier: hermetic, < 1 min, watchdog-wrapped
-	$(T5) go test -short -count=1 ./...
-test-web: ## headless JS logic tests + fetch smoke (§6.5); tests import source, no build needed
-	node --test web/test/unit/*.test.js
-race: ## full fast tier under the race detector
-	$(T15) go test -race -short -count=1 ./...
-
-cover: ## coverage gate: >= 95% statements, every internal/... package (§7.1)
-	@mkdir -p .cover && rm -f .cover/*.out
-	@pkgs=$$(go list -f '{{if .TestGoFiles}}{{.ImportPath}}{{end}}' ./internal/... | grep -v devtools | grep -v "/e2e"); \
-	for p in $$pkgs; do \
-		name=$$(echo $$p | sed 's|github.com/crueber/walhub/internal/||; s|/|_|g'); \
-		$(GO) test -count=1 -coverprofile=.cover/$$name.out "$$p" || exit 1; \
-	done
-	$(GO) run ./internal/devtools/covergate -dir .cover -min 95
-
-sim: ## the consistency proof (fault injection) + round-trip budgets; seeded
-	$(T15) $(GO) test -count=1 -timeout 15m ./internal/sim/...
-
-contract: ## ONE suite against every always-run backend (memory + filesystem)
-	$(GO) test -count=1 ./internal/store/ -run TestContract
-contract-fs: ## filesystem backend only (D4)
-	$(GO) test -count=1 ./internal/store/ -run TestContract_Filesystem
-
-contract-s3: ## store contract against rustfs (make dev-store first)
-	WALHUB_TEST_S3_ENDPOINT=http://127.0.0.1:9000 $(GO) test -count=1 ./internal/store/ -run TestContractS3
-contract-gcs: ## store contract against a real GCS bucket
-	WALHUB_TEST_GCS_BUCKET=$${WALHUB_TEST_GCS_BUCKET:?set WALHUB_TEST_GCS_BUCKET} $(GO) test -count=1 ./internal/store/ -run TestContractGCS
-
-e2e: ## smart-HTTP end-to-end against the real git binary
-	$(T15) $(GO) test -count=1 ./internal/e2e/...
-image: ## build the OCI image
-	docker build -t walhub .
-
-dev-store: ## start rustfs (S3-compatible) for bucket-contract tests
-	docker compose up -d rustfs
-dev-store-stop:
-	docker compose down
-clean: ## remove build artifacts
-	rm -rf $(BINARY) .cover web/dist
-	mkdir -p web/dist && touch web/dist/.keep
-ci: vet test race cover contract sim e2e ## everything that must be green before a merge
-```
+The command lines live in the `Makefile` (16_packaging.md §7.2 owns the target list); this table is
+the tier contract — a tier that is not here is not a tier.
 
 Normative notes: the old `lint` target is `vet` (same three commands). `test-web` runs `node --test web/test/unit/*.test.js` (§6.5) and is part of `make test` — a Go-only green build is not green. S3/GCS contract targets stay env-gated; memory + filesystem (`contract`) never skip. `cover` discovers packages via `go list ./internal/...`, so every collaboration package (identity, issues, pulls, review, checks, notify, releases, social) is gated at ≥ 95% with no target change — the 09 integration added no new tier, only new suites inside the existing ones (§5.4) plus the `cmd/`-side push fence (outside the gate by §7.1). The `sim` tier landed in `internal/sim` (D8) and runs in `ci` between `contract` and `e2e` — fast first, proof last.
 
@@ -399,7 +359,7 @@ Normative notes: the old `lint` target is `vet` (same three commands). `test-web
 
 CI enforces **≥ 95% statement coverage, per `internal/...` package**; `cmd/` (main glue only) is excluded from the gate. The mechanism is deliberately boring, stdlib-only:
 
-1. `cover` runs one `go test -short -count=1 -coverprofile=<pkg>.out` per package discovered by `go list ./internal/...` — profiles are never merged; each package is judged alone. The checker (`internal/devtools/covergate`, ~40 lines of Go invoked with `go run`; an awk equivalent is acceptable) reads the raw profile (`mode: set`), **skips every block in a `// Code generated` file** (the generated protobuf sources of 02_storage_protobuf.md would otherwise dominate the denominator), computes `Σ numStmts(hit > 0) / Σ numStmts` over the remaining blocks, and exits non-zero below 95.0, naming the package, its percentage, and its five lowest-covered files so the failure is actionable without opening the profile.
+1. `cover` runs one `go test -count=1 -coverprofile=<pkg>.out` per package discovered by `go list ./internal/...` — profiles are never merged; each package is judged alone. The checker (`internal/devtools/covergate`, ~40 lines of Go invoked with `go run`; an awk equivalent is acceptable) reads the raw profile (`mode: set`), **skips every block in a `// Code generated` file** (the generated protobuf sources of 02_storage_protobuf.md would otherwise dominate the denominator), computes `Σ numStmts(hit > 0) / Σ numStmts` over the remaining blocks, and exits non-zero below 95.0, naming the package, its percentage, and its five lowest-covered files so the failure is actionable without opening the profile.
 
 **The rule behind the gate: new code lands with tests.** 95% is the CI floor, not the review bar — the expectation is **near 100%**: every new function lands with table-driven tests (table-driven `httptest` for every handler), and a diff that lowers a package below the floor fails CI before review even starts. An uncovered line needs a named reason in the PR (unreachable defensive branch, `exec`-of-real-git shim); "hard to test" is not a reason, it is a sim scenario waiting to be written.
 
@@ -434,7 +394,7 @@ The rewrite copies CODE behavior (§20); each of these gets an explicit assertio
 - **D3 — Make replaces just.** Every dev/CI entry point is a Make target (§7: `build`, `fmt`, `vet`, `test`, `test-go`, `test-web`, `race`, `cover`, `sim`, `contract`, `contract-fs`, `contract-s3`, `contract-gcs`, `e2e`, `image`, `dev-store`, `dev-store-stop`, `clean`, `ci`, `help`, `web`, `landing-gifs` — exactly the `.PHONY` list in the Makefile); the justfile is deleted. The old `lint` target is renamed `vet` (supersedes the `just lint` wording above; commands unchanged). Rationale: make is ubiquitous — no extra tool to install for a first contribution — and the watchdog/watch-what-you-run semantics port one-to-one.
 - **D7 — Coverage gate.** `make cover` enforces **≥ 95% statement coverage on every `internal/...` package** (`cmd/` excluded), via per-package `-coverprofile` + the `covergate` checker (§7.1), CI-gated. Review bar is near 100%: new code lands with tests — table-driven `httptest` for every handler. This is new (the Rust spec had no coverage gate); it does not supersede any prior decision.
 - **D4 — Filesystem store joins the contract suite as an always-run backend.** `TestContract_Filesystem` runs wherever `TestContract_Memory` runs, no env needed; S3 and GCS stay env-gated (`WALHUB_TEST_S3_ENDPOINT`, `WALHUB_TEST_GCS_BUCKET`) and CI exercises S3 via the rustfs container. Supplements (does not supersede) the `TestContract_LeaseSteal` decision — the suite's "one suite, every backend" rule now has four backends, two of them unconditional.
-- **D2 — Web/JS tests without a test framework (amended; frontend stack per D-WEB-6).** The JS tier is `node --test` over headless pure-ESM logic modules plus fetch-based smoke tests (§6.5), wired into `make test` and `ci`; tests import source (`sdk/src/*.js`, `src/lib/*.js`) and need no build — the builds (`make web`: vite SPA + esbuild `dist/repos.js`) produce only shipped artifacts. Amended when the user directed a build step for the modular SDK (2026-08-31, second pass); the D-WEB-6 SolidJS + Tailwind port (2026-09-02, DEVIATIONS.md) keeps this tier unchanged — no test framework, no TypeScript.
+- **D2 — Web/JS tests without a test framework (amended; frontend stack per D-WEB-14/D-WEB-15).** The JS tier is `node --test` over headless pure-ESM logic modules plus fetch-based smoke tests (§6.5), wired into `make test` and `ci`; tests import source (`sdk/src/*.js`, the islands' pure helpers) and need no build — the builds (`make web`: stylesheet + islands + SDK) produce only shipped artifacts. Amended when the user directed a build step for the modular SDK (2026-08-31, second pass); D-WEB-6's SolidJS + Tailwind port (2026-09-02) kept this tier unchanged, and D-WEB-14/D-WEB-15 (2026-11-19/20) moved page rendering/tests into Go `internal/webui` while keeping this JS tier — no test framework, no TypeScript.
 - **D5/D6 — Bootstrap and setup lifecycle is e2e-tested.** Four scenarios (§5.3: no-config defaults boot; invalid-config setup-only 503s; setup save → restart → normal; setup API auth matrix incl. `WALHUB_SETUP_TOKEN`) run in `make e2e` and CI. New; no prior decision affected.
 - **D8 — Sim tier lands; D3 target list corrected (Forgejo #338, 2026-09-11).**
   `internal/sim` implements the §4 harness and eleven of the twelve scenarios

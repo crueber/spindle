@@ -309,7 +309,7 @@ runner (out-of-tree, documented alongside the protocol) supports bare-subprocess
   retention 30 days (sweeper task `actions-retention`, same pass as the queue sweep). Artifact
   bytes are served with the static/bytes contract (no compression — the 07 byte-family precedent),
   `job:<run>`-or-read-role gated.
-- UI (08-pattern SPA): `/:owner/:repo/actions` (runs list — status pill per run, trigger filter,
+- UI (08-pattern server-rendered pages): `/:owner/:repo/actions` (runs list — status pill per run, trigger filter,
   live rows via SSE), run detail (jobs × steps matrix, log viewer with tail follow, artifact
   download links), commit/PR check pills reuse the 05 surfaces (job contexts render as ordinary
   statuses — zero new pill machinery), settings → Actions (runner list + register-token mint +

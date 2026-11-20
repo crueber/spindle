@@ -181,17 +181,16 @@ sender-owned, receivers never close, every goroutine exits via context
 
 ## 5. UI: pages/flows, SDK, theming, gating
 
-Top-level `/import` route (`Import.jsx`) — the target repo does not exist
-yet, so it cannot live under `/:owner/:name/*`. Linked from `Owners.jsx`
-(global "Import repository" button) and `Repos.jsx` (prefills `owner` via
-`?owner=`). Four states on one page (form → running → done/error; Solid
-signals only): URL field (shorthand/GitHub/any URL, client normalizes +
-suggests owner/name), owner/name fields, private-source token field
-(password, never echoed/persisted), options (default-branch-only, PR
+Top-level `/import` page (`internal/webui/templates/pages/forms/import.html`) — the target repo does not exist
+yet, so it cannot live under `/:owner/:name/*`. Linked from the header create menu
+("Import repository", `partials/header.html`) and the owner repository tab (prefills `owner` via
+`?owner=`). Four states on one page (form → running → done/error; the server renders the state it is
+given): URL field (shorthand/GitHub/any URL, client normalizes + suggests owner/name), owner/name fields,
+private-source token field (password, never echoed/persisted), options (default-branch-only, PR
 heads with help text, notes, format), LFS-as-pointers + SSH-unsupported
 notes. Running: `clone`/`ingest` bars + scrolling log tail from the SSE
-attach (abort stops listening, never the import — the server runs it
-detached). Done: link to `/:owner/:name` + head SHAs + no-op card on
+attach (closing the page stops listening, never the import — the server runs it detached).
+Done: link to `/:owner/:name` + head SHAs + no-op card on
 re-import. Error: plain-text reason + back-to-form.
 
 SDK: `web/sdk/src/import.js` (`start/get/attach`, lane-aware top-level
@@ -508,7 +507,7 @@ clean.
   on the form itself where the inline error already renders in place.
   Rationale: the email-as-owner failure, the owner-as-email leak, and the
   dead button shared one root (the principal name was the raw email).
-- **SPA canonical-hint parity (Forgejo #401).** `normalizeSource`
+- **Canonical-hint parity (Forgejo #401).** `normalizeSource`
   (`web/sdk/src/import.js`) mirrors the server's `canonicalGenericURL`
   (`internal/repoimport/url.go:196-208`) for non-GitHub URLs — lowercase
   host, default-port strip, trailing-slash trim, one trailing `.git`

@@ -1,0 +1,223 @@
+{{define "content"}}
+<div class="repo-shell">
+  {{template "repo_header" .Data.Repo}}
+  {{template "repo_tabs" .Data.Repo}}
+  {{template "repo_degraded" .Data.Repo}}
+
+  <div class="wal-page space-y-4">
+    <p class="muted text-sm">
+      What am I looking at? <a class="hover:underline" href="/how-it-works#wal">How the WAL works →</a>
+    </p>
+
+    <section class="card p-4">
+      <h2 class="mb-2 flex items-center gap-2 font-semibold">
+        Health <span class="{{.Data.HealthTone}}">{{.Data.HealthStatus}}</span>
+      </h2>
+      <p class="mb-2 text-sm">served by {{.Data.Overview.Hostname}} · clone {{.Data.Overview.CloneURL}}</p>
+      {{if .Data.Overview.Health.Issues}}
+      <ul class="issues mb-2 list-disc pl-5 text-sm">{{range .Data.Overview.Health.Issues}}<li>{{.}}</li>{{end}}</ul>
+      {{else}}
+      <p class="muted text-sm">no issues</p>
+      {{end}}
+      <p class="text-sm">
+        deep fsck:
+        {{if .Data.Overview.Health.Deep}}<span class="chip chip-open">ok</span>{{else}}<span class="chip chip-neutral">not reported</span>{{end}}
+      </p>
+      {{if .Data.Overview.Health.Suggestions}}
+      <div class="suggestions mt-2">
+        <h3 class="mb-1 text-sm font-semibold">Suggestions</h3>
+        {{range .Data.Overview.Health.Suggestions}}
+        <!-- Running a suggestion is a POST stream owned by the islands/forms
+             work; the row states the op and its reason instead of rendering a
+             dead button. -->
+        <div class="suggestion flex flex-wrap items-center gap-2 py-0.5 text-sm">
+          <code class="font-mono text-xs">{{.Op}}</code>
+          {{if .Reason}}<span class="muted"> — {{.Reason}}</span>{{end}}
+          {{if .Auto}}<span class="chip">auto</span>{{end}}
+        </div>
+        {{end}}
+      </div>
+      {{end}}
+    </section>
+
+    {{if .Data.Fsck}}
+    {{$f := .Data.Fsck}}
+    <section class="card p-4">
+      <h2 class="mb-2 flex items-center gap-2 font-semibold">Object health</h2>
+      <p class="mb-2 text-sm">
+        {{$f.MissingTotal}} missing objects
+        {{if $f.Problems}} · {{$f.Problems}} problems{{end}}
+        {{if $f.RepairedSeq}} · repaired at seq {{$f.RepairedSeq}}{{end}}
+        {{if .Data.FsckAt}} · last audit <time datetime="{{.Data.FsckAt}}" title="{{.Data.FsckAt}}">{{with rel .Data.FsckAt}}{{.}}{{else}}—{{end}}</time>{{end}}
+      </p>
+      {{if .Data.MissingShown}}
+      <p class="muted mb-1 text-xs">sample of missing oids:</p>
+      <ul class="mb-2 space-y-0.5">{{range .Data.MissingShown}}<li><code class="font-mono text-xs">{{.}}</code></li>{{end}}</ul>
+      {{if .Data.MissingMore}}<p class="muted mb-2 text-xs">…and {{.Data.MissingMore}} more</p>{{end}}
+      {{end}}
+      <p class="text-sm">
+        repair source:
+        {{if $f.Upstream}}<code class="font-mono text-xs">{{$f.Upstream}}</code>
+        {{else}}<span class="muted">none — set <code class="font-mono text-xs">upstream.git</code> to enable repair</span>{{end}}
+      </p>
+      {{if $f.RepairStalled}}
+      <p class="mt-2 rounded border border-amber-500 bg-amber-100 p-2 text-sm text-amber-800 dark:bg-amber-900/60 dark:text-amber-300" role="status">
+        repair stalled: an upstream is configured but no repair has landed for over one audit
+        interval. Re-run the audit, then check recent tasks below for the failure.
+      </p>
+      {{end}}
+    </section>
+    {{end}}
+
+    <section class="card p-4">
+      <h2 class="mb-2 flex items-center gap-2 font-semibold">Ops</h2>
+      <p class="muted mb-1 text-sm">{{.Data.OpsAvailable}} available · {{.Data.OpsRecent}} recent</p>
+      {{range .Data.Ops}}
+      <div class="op-row py-2">
+        <div class="op-head flex flex-wrap items-center gap-2">
+          <code class="font-mono text-xs">{{.Op}}</code>
+          <!-- Params are the wire truth {name,values[]} (there is no kind:
+               spec §6.2 item 3). This page renders the inventory; running an
+               op is POST {repo}/api/ops/{op} (stream), owned by the islands
+               group. -->
+          {{range .Params}}
+          <span class="chip neutral">
+            {{.Name}}{{if .Required}} (required){{end}}
+            {{if eq .Kind "checkbox"}} · flag{{else if eq .Kind "select"}} · one of {{range $i, $v := .Values}}{{if $i}}|{{end}}{{$v}}{{end}}{{else}} · text{{end}}
+          </span>
+          {{end}}
+        </div>
+      </div>
+      {{end}}
+      {{if .Data.Recent}}
+      <details class="mt-2">
+        <summary class="pill cursor-pointer select-none">recent ops</summary>
+        <ul class="recent-ops mt-2 space-y-1 text-sm">
+          {{range .Data.Recent}}
+          <li>
+            {{.Kind}} — {{.State}}
+            {{if .Stamp}} · <time datetime="{{.Stamp}}" title="{{.Stamp}}">{{with rel .Stamp}}{{.}}{{else}}—{{end}}</time>{{end}}
+          </li>
+          {{end}}
+        </ul>
+      </details>
+      {{end}}
+    </section>
+
+    <div class="grid grid-cols-1 gap-4 md:grid-cols-2">
+      <section class="card p-4">
+        <h2 class="mb-2 flex items-center gap-2 font-semibold">Manifest</h2>
+        <div class="overflow-x-auto">
+          <table class="data-table kv">
+            <tbody>
+              {{range .Data.Manifest}}
+              <tr><th class="w-40 align-top">{{.Label}}</th><td>{{if .Stamp}}<time datetime="{{.Stamp}}" title="{{.Stamp}}">{{with rel .Stamp}}{{.}}{{else}}—{{end}}</time>{{else}}{{.Value}}{{end}}</td></tr>
+              {{end}}
+            </tbody>
+          </table>
+        </div>
+      </section>
+      <section class="card p-4">
+        <h2 class="mb-2 flex items-center gap-2 font-semibold">Local copy</h2>
+        <div class="overflow-x-auto">
+          <table class="data-table kv">
+            <tbody>
+              {{range .Data.Local}}
+              <tr><th class="w-40 align-top">{{.Label}}</th><td>{{if .Stamp}}<time datetime="{{.Stamp}}" title="{{.Stamp}}">{{with rel .Stamp}}{{.}}{{else}}—{{end}}</time>{{else}}{{.Value}}{{end}}</td></tr>
+              {{end}}
+            </tbody>
+          </table>
+        </div>
+      </section>
+    </div>
+
+    <section class="card p-4">
+      <h2 class="mb-2 flex items-center gap-2 font-semibold">Packs</h2>
+      <p class="text-sm">{{.Data.Packs}}</p>
+    </section>
+
+    <section class="card p-4">
+      <h2 class="mb-2 flex items-center gap-2 font-semibold">Bundle chain</h2>
+      <p class="muted mb-2 text-sm">roots = full bundles; children under base_id, sorted by creation_token</p>
+      {{if .Data.BundleNone}}
+      <p class="muted text-sm">no bundles yet</p>
+      {{else}}
+      {{template "repo_bundle_nodes" (dict "Nodes" .Data.Bundles "Nested" false)}}
+      {{end}}
+    </section>
+
+    <section class="card p-4">
+      <h2 class="mb-2 flex items-center gap-2 font-semibold">Bundle slot plan</h2>
+      <p class="muted mb-2 text-sm">{{.Data.PlanCounts}}</p>
+      <div class="overflow-x-auto">
+        <table class="data-table plan-table">
+          <thead><tr><th>strategy</th><th>slot</th><th>status</th><th>detail</th><th>bundle</th></tr></thead>
+          <tbody>
+            {{range .Data.PlanRows}}
+            <tr>
+              <td>{{.Strategy}}</td>
+              <td>{{.Slot}}</td>
+              <td><span class="{{.Chip}}">{{.Status}}</span></td>
+              <td class="muted">{{.Detail}}</td>
+              <td><code class="font-mono text-xs">{{.Bundle}}</code></td>
+            </tr>
+            {{end}}
+          </tbody>
+        </table>
+      </div>
+    </section>
+
+    <section class="card p-4">
+      <h2 class="mb-2 flex items-center gap-2 font-semibold">Compactions</h2>
+      {{if .Data.Compactions}}
+      <div class="overflow-x-auto">
+        <table class="data-table">
+          <thead><tr><th>at_seq</th><th>at</th><th>packs</th><th>host</th></tr></thead>
+          <tbody>
+            {{range .Data.Compactions}}
+            <tr>
+              <td>{{.Seq}}</td>
+              <td>{{if .Stamp}}<time datetime="{{.Stamp}}" title="{{.Stamp}}">{{with rel .Stamp}}{{.}}{{else}}{{.At}}{{end}}</time>{{else}}{{.At}}{{end}}</td>
+              <td>{{.Packs}}</td>
+              <td class="muted">{{.Host}}</td>
+            </tr>
+            {{end}}
+          </tbody>
+        </table>
+      </div>
+      {{else}}
+      <p class="muted text-sm">no compactions recorded</p>
+      {{end}}
+    </section>
+
+    <section class="card p-4">
+      <h2 class="mb-2 flex items-center gap-2 font-semibold">WAL segments</h2>
+      {{if .Data.Segments}}
+      <div class="overflow-x-auto">
+        <table class="data-table segments-table">
+          <thead><tr><th>segment</th></tr></thead>
+          <tbody>
+            {{range .Data.Segments}}<tr><td><code class="font-mono text-xs">{{.}}</code></td></tr>{{end}}
+          </tbody>
+        </table>
+      </div>
+      {{else}}
+      <p class="muted text-sm">no segments recorded</p>
+      {{end}}
+      {{if .Data.SegmentMore}}
+      <p class="mt-2"><a class="pill cursor-pointer hover:no-underline" href="?all=1">all</a></p>
+      {{else if .Data.SegmentAll}}
+      <p class="mt-2"><a class="pill cursor-pointer hover:no-underline" href="?">newest 5</a></p>
+      {{end}}
+    </section>
+
+    <section class="card p-4">
+      <h2 class="mb-2 flex items-center gap-2 font-semibold">Live op log</h2>
+      <!-- No stream is opened server-side: the run stream is POST-then-SSE
+           (the islands group's reader). The element is the target the island
+           appends bounded lines to. -->
+      <pre class="code-view max-h-80 overflow-y-auto p-3" data-op-log aria-live="polite"></pre>
+    </section>
+  </div>
+</div>
+{{end}}

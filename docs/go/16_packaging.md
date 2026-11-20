@@ -14,29 +14,44 @@ An operator MUST be able to build, containerize, deploy (one box or a fleet), an
   make build                       # native
   GOOS=linux GOARCH=arm64 CGO_ENABLED=0 make build   # cross, no toolchain changes
   ```
-- Release build flags: `CGO_ENABLED=0 go build -trimpath -buildvcs=stamp -ldflags "-s -w -X main.buildSHA=$(SHA)"`. Go has no LTO and does not need one; `-s -w` + `-trimpath` is the equivalent "thin" profile (smaller, reproducible).
+- Release build flags: `CGO_ENABLED=0 go build -trimpath -buildvcs=auto -ldflags "-s -w -X main.buildSHA=$(SHA)"`. Go has no LTO and does not need one; `-s -w` + `-trimpath` is the equivalent "thin" profile (smaller, reproducible).
 - Exit codes stay 0/1/2/3 (§16): 0 ok, 1 command/config error, 2 bad argv (a missing config file no longer exits — D5 boots on built-in defaults), 3 `config check --strict` with ignored overrides.
 - git is ALWAYS the subprocess `git` binary with exact argv (never go-git or any VCS library). On startup `serve` MUST run `git version`, parse it, and exit 1 with a clear message if it is < 2.47 (server-side needs: `pack.writeReverseIndex`, `--rev-index`, bundle-uri). The `git.binary` config key (unchanged name) selects the executable.
 
-### 1.2 Embedded web assets (`go:embed`; one build: the SDK bundle)
+### 1.2 Embedded web assets (`go:embed`; the built page assets + the SDK bundle)
 
-- File `web/embed.go`:
+- File `web/embed.go` embeds the **built** tree only:
   ```go
   package web
 
   import "embed"
 
-  //go:embed index.html all:dist all:sdk all:src all:css
+  //go:embed all:dist
   var Files embed.FS
   ```
-- `internal/server` serves `web.Files` through `http.FileServerFS`; the browser loads the **vite-built SolidJS bundle** (`web/dist/index.html` + content-hashed `assets/*`, 2026-09-02 user decision, DEVIATIONS.md D-WEB-6 — Tailwind v4 CSS-first, dark mode by default, no CDN). The SDK is **authored as submodules** (`web/sdk/src/*.js`, 12_web_ui.md §1.0) and bundled by esbuild into `web/dist/repos.js`, served at its contract path (see 06_server_http.md / 07_api.md) — the `repos.mjs` twin is gone (D2); `make build` depends on `make web`.
-- The SPA is vite-built (`pnpm run build:ui` → `web/dist/`); the SDK bundle is esbuild-bundled (`pnpm run build:sdk` → `web/dist/repos.js`) — `pnpm run build` runs both. `node --test web/test/unit/*.test.js` runs the headless JS tests (§7.2/§8) but never feeds the build. The binary embeds ONLY the built `web/dist/` (`//go:embed all:dist` in `web/embed.go`), so sources (`web/src/`, `web/sdk/src/`, `web/test/`) and dotfiles stay out of the binary while remaining on disk for dev/tests.
+- `internal/server` serves those bytes through `uiAsset`/`serveUIAssets` (`/_ui/*`, 06_server_http.md
+  §3.5) and `sdkReposJS` (`/repos.js`). The page assets are the stylesheet `app.css`
+  (Tailwind v4, CSS-first, built by `@tailwindcss/vite` through the one remaining vite build),
+  the island bundle `ui.js` (esbuild), the vendored htmx files (`web/vendor/` → `dist/`, copied),
+  `concepts/*.gif` (the checked-in landing GIFs, copied from `web/public/` by that same stylesheet
+  build), and the immutable `assets/` lane. There is **no SPA bundle and no `index.html`** — pages are
+  rendered by `internal/webui` from `html/template` at request time (D-WEB-14/D-WEB-15).
+- The SDK is **authored as submodules** (`web/sdk/src/*.js`, 12_web_ui.md §1.0) and bundled by
+  esbuild into `web/dist/repos.js`, served at its contract path (see 06_server_http.md / 07_api.md) —
+  the `repos.mjs` twin is gone (D2); `make build` depends on `make web`.
+- `pnpm run build` = `build:css` (vite + `@tailwindcss/vite` → `dist/app.css`, `emptyOutDir: false`)
+  → `build:islands` (esbuild `src/islands/index.js` → `dist/ui.js`) → `build:vendor` (copy
+  `vendor/htmx*.js`) → `build:sdk` (esbuild → `dist/repos.js`). Dev dependencies are exactly
+  `vite`, `@tailwindcss/vite`, `tailwindcss`, `esbuild`; there are **no runtime npm dependencies**
+  (D-WEB-15). `node --test web/test/unit/*.test.js` runs the headless JS tests (§7.2/§8) but never
+  feeds the build. Sources (`internal/webui/templates/`, `web/src/`, `web/sdk/src/`, `web/test/`) and
+  dotfiles stay out of the binary while remaining on disk for dev/tests.
 
 ### 1.3 Version identity
 
 - Resolution order for the reported build sha:
   1. `-ldflags -X main.buildSHA=<12-hex>` (set by Makefile/CI/Dockerfile from `git rev-parse --short=12 HEAD`),
-  2. `runtime/debug.ReadBuildInfo` `vcs.revision` (populated by `-buildvcs=stamp`),
+  2. `runtime/debug.ReadBuildInfo` `vcs.revision` (populated by `-buildvcs=auto`),
   3. `"dev"`.
 - `walhub version` prints the sha plus the full `debug.BuildInfo` (module versions, Go version, settings). `serve` logs the same identity once at startup. The exact command table lives in 11_config_cli.md; the mechanism is specified here because it is a build artifact.
 
@@ -46,35 +61,48 @@ Exactly ONE external binary at runtime: `git` (≥ 2.47 server-side, ≥ 2.46 fo
 
 ## 2. Container image
 
-`Dockerfile` at the repo root (three stages): node runs the ONE web build (`pnpm run build` — vite SPA + esbuild SDK, D-WEB-6) → Go builds the static binary (`golang:1.27-alpine` per go.mod) → alpine runtime with git. (Rust used debian-slim + tini; see deviations.)
+`Dockerfile` at the repo root (three stages): node runs the ONE web build (`pnpm run build` — stylesheet + islands + vendored htmx + SDK, D-WEB-14/D-WEB-15) → Go builds the static binary (`golang:1.27-alpine` per go.mod) → alpine runtime with git. (Rust used debian-slim + tini; see deviations.)
 
 ```dockerfile
 # Dockerfile — one binary in front of a store. Zero config by default: filesystem store in the data dir.
 #   docker build -t walhub .
 #   docker run --rm -p 8080:8080 walhub     # → open http://host:8080/setup
-#   podman run --rm -p 8080:8080 walhub     # → open http://host:8080/setup
+#
+# Compose examples: compose.standalone.yml (filesystem store) and
+# compose.yaml (walhub + rustfs, the S3-backed stack).
 
-# ---- 1. Web: the ONE build step — esbuild bundles web/sdk/src → dist/repos.js ----
+# ---- 1. Web: the ONE build step — vite builds the stylesheet (dist/app.css),
+#         esbuild bundles the islands (dist/ui.js) and web/sdk/src →
+#         dist/repos.js; the vendored htmx files are copied in (D-WEB-14) ----
 FROM docker.io/library/node:22-alpine AS web
-RUN corepack enable && corepack prepare pnpm@10 --activate
+RUN corepack enable && corepack prepare pnpm@11.25.0 --activate
 WORKDIR /src/web
-COPY web/package.json web/pnpm-lock.yaml ./
-RUN pnpm install --frozen-lockfile
+COPY web/package.json web/pnpm-lock.yaml web/pnpm-workspace.yaml ./
+# --ignore-scripts: esbuild's postinstall only validates its platform
+# binary (shipped as an optional dependency); pnpm 11's build-script gate
+# would otherwise fail the fresh install.
+RUN pnpm install --frozen-lockfile --ignore-scripts
 COPY web/ ./
-RUN pnpm run build:sdk && test -f dist/repos.js
+RUN pnpm run build \
+    && test -f dist/app.css \
+    && test -f dist/ui.js \
+    && test -f dist/repos.js
 
-# ---- 2. Go build (static, no cgo; embeds the built dist/ + raw src/) ----
-FROM docker.io/library/golang:1.25-alpine AS build
+# ---- 2. Go build (static, no cgo; embeds the built dist/) ----
+FROM docker.io/library/golang:1.27-alpine AS build
 WORKDIR /src
 COPY go.mod go.sum ./
 RUN go mod download
 COPY . .
+# The web stage's dist/ (stylesheet, islands, SDK bundle) replaces whatever
+# the context carried — the Go build embeds it (web/embed.go all:dist).
+COPY --from=web /src/web/dist /src/web/dist
 ARG WALHUB_BUILD_SHA=dev
-RUN CGO_ENABLED=0 go build -trimpath -buildvcs=stamp \
+RUN CGO_ENABLED=0 go build -trimpath -buildvcs=auto \
       -ldflags "-s -w -X main.buildSHA=${WALHUB_BUILD_SHA}" \
       -o /out/bin/walhub ./cmd/walhub
 
-# ---- 2. runtime: git >= 2.47, CA certs, nonroot ----
+# ---- 3. runtime: git >= 2.47, CA certs, nonroot ----
 FROM docker.io/library/alpine:3.22
 RUN apk add --no-cache git ca-certificates \
     && git --version \
@@ -369,76 +397,41 @@ services:
   declares `allowBuilds: { esbuild: true }` (the web stage's `pnpm install`
   fails otherwise).
 
-```## 7.2 `Makefile` (repo root) — the ONLY task runner (D3)
+## 7.2 `Makefile` (repo root) — the ONLY task runner (D3)
 
-```make
-BINARY  := walhub
-SHA     ?= $(shell git rev-parse --short=12 HEAD 2>/dev/null || echo dev)
-GO      := CGO_ENABLED=0 go
-LDFLAGS := -s -w -X main.buildSHA=$(SHA)
+Every dev/CI entry point is a target; `make help` is the authoritative list (the file owns the
+commands, this table owns the intent). The watchdog (`T5`/`T15`) wraps the long tiers in GNU
+`timeout` and degrades to unwrapped with a warning when it is missing.
 
-build: web                      ## static binary; web/ embedded (dist/repos.js built by `make web`)
-	$(GO) build -trimpath -buildvcs=stamp -ldflags "$(LDFLAGS)" -o $(BINARY) ./cmd/walhub
+| target | what it runs |
+|---|---|
+| `web` | `pnpm --dir web run build` — vite/Tailwind (`app.css`) + esbuild (islands → `ui.js`, SDK → `repos.js`) + vendored htmx copy |
+| `build` | `web`, then the static binary (`-trimpath -buildvcs=auto`, the SHA ldflag) |
+| `fmt` / `vet` | `gofmt -w` / the gofmt-clean + `go vet` + `go build` gate |
+| `test` | `test-go` (`-short`, watchdog) + `test-web` (`node --test web/test/unit/*.test.js`) |
+| `race` | `go test -race -short -count=1 ./...` |
+| `cover` | the ≥ 95 % per-`internal/...`-package gate (D7) via `internal/devtools/covergate` |
+| `contract` | store contract: memory + filesystem, always |
+| `contract-fs` / `contract-s3` / `contract-gcs` | one backend; S3/GCS env-gated (`WALHUB_TEST_S3_*`, `WALHUB_TEST_GCS_BUCKET`) |
+| `sim` | `internal/sim` fault-injection consistency proof + round-trip budgets |
+| `e2e` | smart-HTTP end-to-end against the real git binary |
+| `image` | `docker build -t walhub .` |
+| `dev-store` / `dev-store-stop` | the rustfs rig that gives the S3 contract a bucket |
+| `landing-gifs` | regenerate the landing-page concept GIFs (manual; the golden test pins freshness) |
+| `clean` | remove the binary, `.cover/`, and `web/dist` (recreates the tracked `.keep`) |
+| `ci` | `vet test race cover contract sim e2e` — what CI runs; the image build happens there |
 
-vet:
-	go vet ./...
+CI calls these same targets, so a target that is green locally is the target the pipeline runs (the
+containers add the toolchain, not the commands). `dev-store` exists only so the S3 contract has a
+bucket; the zero-config dev loop never touches it.
 
-fmt:
-	gofmt -w .
-
-test:                           ## fast tier; -race needs cgo, so CGO stays on here
-	CGO_ENABLED=1 go test -race ./...
-
-race: test                      ## alias, named for the flag
-
-js-test:                        ## headless JS logic tests — Node's own runner, zero npm deps
-	node --test web/test/unit/*.test.js
-
-e2e:                            ## smart-HTTP end-to-end against the real git binary
-	CGO_ENABLED=1 go test -race -tags e2e ./internal/server/... -run TestE2E
-
-sim:                            ## WAL crash/replay simulation (see 08_wal.md)
-	CGO_ENABLED=1 go test -race -tags sim ./internal/wal/... -run TestSim
-
-contract:                       ## store contract suite; filesystem + memory ALWAYS run (D4)
-	CGO_ENABLED=1 go test -race ./internal/store/...
-
-cover:                          ## D7 gate: >= 95% statements per internal/... package
-	@set -e; for pkg in $$($(GO) list ./internal/...); do \
-	  CGO_ENABLED=1 go test -count=1 -cover $$pkg \
-	    | awk -v p=$$pkg '/coverage:/ { gsub(/[^0-9.]/,"",$$2); \
-	        if ($$2+0 < 95) { print "FAIL " p ": " $$2 "%"; exit 1 } }'; \
-	done
-
-dev: build                      ## zero-config loop: filesystem store, no bucket, /setup on :8080
-	./$(BINARY) serve
-
-dev-store:                      ## rustfs + bucket — ONLY for the bucket-backend contract job
-	docker compose up -d rustfs && docker compose run --rm create-bucket
-
-test-s3:                        ## store contract against local rustfs (needs dev-store)
-	WALHUB_TEST_S3_ENDPOINT=$(WALHUB_TEST_S3_ENDPOINT) \
-	WALHUB_TEST_S3_ACCESS_KEY=$(WALHUB_TEST_S3_ACCESS_KEY) \
-	WALHUB_TEST_S3_SECRET_KEY=$(WALHUB_TEST_S3_SECRET_KEY) \
-	WALHUB_TEST_S3_BUCKET=$(WALHUB_TEST_S3_BUCKET) \
-	go test ./internal/store/... -run TestContractS3
-
-image:                          ## two-stage build with the real sha
-	docker build --build-arg WALHUB_BUILD_SHA=$(SHA) -t walhub .
-
-clean:
-	rm -f $(BINARY) cover.out
-
-ci: vet test js-test cover e2e contract   ## what CI runs; image build happens in CI
-```
-
-(Make is canonical and exclusive — there is no justfile. `dev-store` exists only so `test-s3` and CI's `s3-contract` job have a bucket; the zero-config dev loop never touches it.)
+(Make is canonical and exclusive — there is no justfile. `dev-store` exists only so `contract-s3` and CI's `s3-contract` job have a bucket; the zero-config dev loop never touches it.)
 
 ## 8. CI pipeline
 
 Development happens on Forgejo; GitHub is a distribution channel. The pipeline is expressed as
-GitHub Actions (`.github/workflows/ci.yml`) and is the merge gate: web (vite SPA + SDK bundle) →
-`go vet` → `-race` → js-test (`node --test`) → cover gate (D7) → e2e (real git ≥ 2.47) → store
+GitHub Actions (`.github/workflows/ci.yml`) and is the merge gate: web (stylesheet + islands + SDK) →
+`go vet` → `-race` → the headless JS tests (`node --test`) → cover gate (D7) → e2e (real git ≥ 2.47) → store
 contract (filesystem + memory ALWAYS per D4; S3 against a rustfs service) → image build + container
 contract. `make web` builds both web artifacts; JS tests import source and need no build.
 
@@ -506,8 +499,8 @@ curl -fsSL https://github.com/crueber/walhub/raw/main/scripts/install.sh | sh
 - **`walhub.toml` is the default config name; `walgit.toml` still accepted, `WALHUB__` env prefix primary with `WALGIT__` also stripped** — TOML key names stay identical (the compat surface), while process/env names follow the new binary; honoring legacy prefixes keeps Rust-era ops scripts and compose files working verbatim.
 - **Runtime image is alpine (git ≥ 2.47), not debian-slim + tini** — distroless/static lacks `git`, the one hard runtime dependency; alpine also ships busybox `wget` so HEALTHCHECK needs no curl; zombie reaping is handled by `os/exec` wait + orchestrator init.
 - **git-lfs omitted from the image** — the Rust spec itself notes it is a client-side tool; the server never invokes it.
-- **~~Node 20 (not 24) + pnpm@10 for the web stage~~ — SUPERSEDED twice by divergence D2 (2026-08-31), then again by D-WEB-6 (2026-09-02): first removed entirely (zero-build), then restored in minimal form when the user directed a build step for the modular SDK — a node stage exists ONLY to run esbuild (`pnpm run build:sdk` → `web/dist/repos.js`). Historical:** the frontend was zero-build vanilla ES modules embedded raw from `web/`. **Shipped:** the SolidJS + Tailwind SPA built by vite plus the esbuild SDK bundle (`pnpm run build`), per D-WEB-6.
-- **Go release flags `-trimpath -buildvcs=stamp -ldflags "-s -w"` replace thin LTO + unwind-panic profile** — Go has no LTO; per-request/per-pass `recover` reproduces the "one panic must not kill the instance" guarantee (§6).
+- **~~Node 20 (not 24) + pnpm@10 for the web stage~~ — SUPERSEDED three times: divergence D2 (2026-08-31) removed the build, D-WEB-6 (2026-09-02) restored a node stage for the SolidJS SPA, and D-WEB-14/D-WEB-15 (2026-11-19/20) deleted the SPA. The node stage now exists ONLY to build the page assets (`app.css`, `ui.js`, vendored htmx) and the SDK bundle (`repos.js`). Historical:** the frontend was zero-build vanilla ES modules embedded raw from `web/`. **Second historical shape:** the SolidJS + Tailwind SPA built by vite plus the esbuild SDK bundle (`pnpm run build`), per D-WEB-6.
+- **Go release flags `-trimpath -buildvcs=auto -ldflags "-s -w"` replace thin LTO + unwind-panic profile** — Go has no LTO; per-request/per-pass `recover` reproduces the "one panic must not kill the instance" guarantee (§6).
 - **Startup git version check is fatal (exit 1) below 2.47** — the Rust spec declares ≥ 2.47 required for server features; failing fast with a message beats mysterious wire breakage.
 - **Header names stay `X-Walgit-*` (including the `walgit_session` cookie in the auth cache key) and the token prefix stays `wgt_`** — the nginx contract and users' stored credentials are the edge-compat surface; renaming would silently invalidate deployed edge configs and credential helpers.
 - **Dev-rig rustfs keys/bucket keep the Rust values (`walgit-dev` / `walgit-dev-secret`, bucket `walgit-test`)** — muscle-memory continuity for contributors coming from the Rust rig; local-only credentials.
@@ -516,9 +509,9 @@ curl -fsSL https://github.com/crueber/walhub/raw/main/scripts/install.sh | sh
 - **NEW (2026-09-05) — server-side TLS removed; the proxy terminates it** (Forgejo #165, §3.4): walhub listens plain HTTP (h2c) and never loads a cert — the `server.tls.*` keys, the §3.2/§3.3 `[server.tls]` examples, and the install.sh CA-download step are all gone. The one-box and production shapes put Caddy/nginx in front (minimal snippets in §3.4) with `X-Forwarded-Proto: https` so recipes advertise `https://`; `server.public_url` pins the external origin. Rationale: every inbound flow works behind a terminating proxy and outbound HTTPS (OIDC, webhooks, S3/GCS) validates against the system roots — owning an in-process TLS stack bought nothing.
 - **`install.sh` is served from the Forgejo raw URL** — the Rust edge example leaves the installer out of the open-route set; keeping it repo-hosted avoids inventing a new public server route in the Go rewrite.
 - **Divergence (2026-08-31), applied in this revision:**
-- **D2 — SUPERSEDED 2026-09-02 by explicit user request (DEVIATIONS.md D-WEB-6): the frontend is a SolidJS + Tailwind v4 SPA built by vite into `web/dist/` (plain JSX, no TypeScript; runtime deps exactly solid-js + @solidjs/router; dark by default; no CDN); the node stage runs `pnpm run build` (vite SPA + esbuild SDK bundle). Historical:** the frontend was vanilla ESM (hand-written ES modules with native import map, `<template>`, ~40 lines of reactive helpers, embedded raw — no TypeScript, no framework; SolidJS/vite gone), superseding the "Node 20 + pnpm@10" decision above; the node stage was esbuild-only. The SDK is **authored as submodules** (`web/sdk/src/*.js`) and esbuild-bundled to `web/dist/repos.js` (the `repos.mjs` twin is deleted; `dist/` is gitignored build output); JS tests run on Node's built-in `node --test` and import source, never the build.
-- **D3 — Make is the only task runner.** All dev/CI entry points are Make targets (`build vet fmt test race js-test e2e sim contract cover dev dev-store test-s3 image clean ci`); the "`just` is fine too" note is retracted — there is no justfile.
+- **D2 — SUPERSEDED 2026-09-02 by explicit user request (DEVIATIONS.md D-WEB-6), then again 2026-11-19/20 (D-WEB-14/D-WEB-15).** **Second historical shape:** the SolidJS + Tailwind v4 SPA built by vite into `web/dist/` (plain JSX, no TypeScript; runtime deps exactly solid-js + @solidjs/router; dark by default; no CDN), with the node stage running `pnpm run build` (vite SPA + esbuild SDK bundle). **Third historical shape:** the frontend was vanilla ESM (hand-written ES modules with native import map, `<template>`, ~40 lines of reactive helpers, embedded raw — no TypeScript, no framework; SolidJS/vite gone), superseding the "Node 20 + pnpm@10" decision above; the node stage was esbuild-only. **Shipped:** server-rendered pages (`internal/webui` `html/template` + vendored htmx + vanilla-ES islands) with `@tailwindcss/vite` building only `app.css`; the node stage builds stylesheet + islands + vendored copy + the SDK bundle. The SDK is **authored as submodules** (`web/sdk/src/*.js`) and esbuild-bundled to `web/dist/repos.js` (the `repos.mjs` twin is deleted; `dist/` is gitignored build output); JS tests run on Node's built-in `node --test` and import source, never the build.
+- **D3 — Make is the only task runner.** All dev/CI entry points are Make targets (`build vet fmt test race test-web e2e sim contract contract-s3 cover image dev-store clean ci`; `make help` is authoritative); the "`just` is fine too" note is retracted — there is no justfile.
 - **D4 — filesystem store backend is first-class.** `store.backend = "filesystem"` roots keys under `store.root` with sidecar-`flock` conditional writes, `renameat2(RENAME_NOREPLACE)` create-if-absent (portable fallback), `"<size>:<mtime_ns>"` version tokens/ETags, and no accel/signed URLs. It joins the contract suite as an ALWAYS-run backend beside memory (Make `contract`); the container's default path uses it; rustfs remains only as the bucket-contract fixture.
 - **D5 — zero-config first run (user friendliness is a first-class law).** A missing config boots on built-in defaults — `listen 0.0.0.0:8080`, filesystem store rooted at `<data-dir>/store`, `auth.mode = "none"` on ANY bind with loud warnings (a deliberate reversal of the Rust fail-closed loopback rule), `auto_create_on_push = true`; exit code 2 is now bad-argv only. Data dir = `--data-dir` / `WALHUB_DATA_DIR` (default `~/.local/share/walhub`, containers `/var/lib/walhub`), holding `store/`, `cache/`, and the saved `walhub.toml`.
 - **D6 — setup UI + API are first-class.** `/setup` groups every config key by section with effective values; `GET /api/v1/setup`, `POST /api/v1/setup/test` (validate only), `PUT /api/v1/setup` (validate + atomic write of `<data-dir>/walhub.toml`, reporting restart-needed keys). Invalid config → setup-only mode: only `/setup`, `/healthz`, `/readyz` answer, everything else 503. Access: open while (no config file OR config invalid OR auth.mode = none), else admin principal; optional `WALHUB_SETUP_TOKEN` gate for exposed hosts.
-- **D7 — coverage gate.** CI fails below 95% statement coverage per `internal/...` package (Make `cover`; `cmd/` main glue excluded); the pipeline gains `cover` + `js-test` steps; table-driven httptest for every handler.
+- **D7 — coverage gate.** CI fails below 95% statement coverage per `internal/...` package (Make `cover`; `cmd/` main glue excluded); the pipeline gains the `cover` and web-test steps; table-driven httptest for every handler.

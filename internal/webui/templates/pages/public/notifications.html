@@ -1,0 +1,61 @@
+{{define "content"}}
+{{/* /notifications (06 §7): the per-user tray. Rows link to their thread;
+     unread rows carry the emerald left edge and an "unread" dot. Mark read /
+     unread / all-read are POST forms (303 back with the filter preserved).
+     The per-user SSE stream is an ISLAND: this page emits the contract hooks
+     only (data-sse*) — no EventSource here, no client data layer.
+     390px: rows wrap, the header controls wrap, the row title truncates. */}}
+<section class="notifications-page mx-auto max-w-3xl"{{if not .Data.Anonymous}} data-sse="notifications" data-sse-url="/api/v1/notifications/stream" data-sse-mode="invalidate"{{end}}>
+  <div class="mb-3 flex flex-wrap items-center gap-2">
+    <h2 class="text-lg font-semibold">Notifications</h2>
+    {{if .Data.Unread}}<span class="pill" aria-live="polite">{{.Data.Unread}} unread</span>{{end}}
+    {{if not .Data.Anonymous}}
+    <div class="ml-auto flex flex-wrap gap-2">
+      <a class="btn px-2 py-1 text-sm{{if eq .Data.State ""}} primary{{end}}" href="/notifications">all</a>
+      <a class="btn px-2 py-1 text-sm{{if eq .Data.State "unread"}} primary{{end}}" href="/notifications?state=unread">unread</a>
+      <form method="post" action="/notifications/read-all{{if .Data.State}}?state={{.Data.State}}{{end}}">
+        <button type="submit" class="btn px-2 py-1 text-sm">mark all read</button>
+      </form>
+    </div>
+    {{end}}
+  </div>
+
+  {{if .Data.Anonymous}}
+  <div class="card p-4">
+    <p class="text-sm">
+      {{if .Chrome.ShowLogin}}<a class="link" href="{{.Chrome.LoginHref}}">Sign in</a> to see your notifications.{{else}}Sign in to see your notifications — this server has no login flow configured.{{end}}
+    </p>
+  </div>
+  {{else if .Data.Rows}}
+  <ol class="grid grid-cols-1 gap-2">
+    {{range .Data.Rows}}
+    <li>
+      <div class="card flex w-full items-start gap-3 p-3 text-left{{if eq .State "unread"}} border-l-4 border-l-emerald-500{{else}} opacity-75{{end}}">
+        <div class="min-w-0 flex-1">
+          <div class="flex flex-wrap items-center gap-2 text-sm">
+            <span class="chip{{if .Hot}} chip-open{{end}}">{{.Reason}}</span>
+            <span class="muted font-mono text-xs">{{.Repo}}#{{.Num}}</span>
+            <span class="muted text-xs">{{.Actor}}</span>
+          </div>
+          <a class="mt-0.5 block truncate font-medium hover:underline" href="{{.Href}}">{{if .Title}}{{.Title}}{{else}}(no title){{end}}</a>
+        </div>
+        <div class="flex shrink-0 items-center gap-2">
+          {{if eq .State "unread"}}<span class="mt-1 inline-block h-2 w-2 shrink-0 rounded-full bg-emerald-500" aria-label="unread"></span>{{end}}
+          <form method="post" action="/notifications/{{.ID}}/{{if eq .State "unread"}}read{{else}}unread{{end}}{{if $.Data.State}}?state={{$.Data.State}}{{end}}">
+            <button type="submit" class="link whitespace-nowrap text-xs">{{if eq .State "unread"}}mark read{{else}}mark unread{{end}}</button>
+          </form>
+        </div>
+      </div>
+    </li>
+    {{end}}
+  </ol>
+  {{if .Data.More}}
+  <p class="mt-3">
+    <a class="btn" href="/notifications?after={{.Data.After}}{{if .Data.State}}&state={{.Data.State}}{{end}}">Older</a>
+  </p>
+  {{end}}
+  {{else}}
+  <p class="muted">nothing here — watching a repo or being mentioned lands notifications in this tray.</p>
+  {{end}}
+</section>
+{{end}}

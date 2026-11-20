@@ -1,0 +1,32 @@
+{{define "collab_check_pill"}}
+{{with .}}<a class="inline-flex items-center gap-1.5 text-sm {{if eq .Label "no checks"}}muted{{end}}" href="{{.Href}}" title="{{.Title}}"><span class="{{.Dot}}" aria-hidden="true"></span>{{.Label}}</a>{{end}}
+{{end}}
+
+{{define "collab_check_dot"}}<span class="{{if eq . "success"}}inline-block h-2.5 w-2.5 rounded-full bg-emerald-500{{else if eq . "pending"}}inline-block h-2.5 w-2.5 rounded-full bg-amber-400{{else if eq . "failure"}}inline-block h-2.5 w-2.5 rounded-full bg-red-500{{else if eq . "error"}}inline-block h-2.5 w-2.5 rounded-full bg-red-700{{else}}inline-block h-2.5 w-2.5 rounded-full bg-zinc-400{{end}}" aria-hidden="true"></span>{{end}}
+
+{{/* collab_check_contexts: one sha's per-context rows (<ul.divide-y>). */}}
+{{define "collab_check_contexts"}}
+<ul class="divide-y divide-zinc-200 dark:divide-zinc-800" aria-label="check contexts">
+  {{range .}}
+  <li class="flex flex-wrap items-center gap-x-2 gap-y-1 px-3 py-2 text-sm">
+    {{template "collab_check_dot" .State}}
+    <code class="font-mono text-xs">{{.Context}}</code>
+    <span class="chip chip-neutral">{{.State}}</span>
+    {{with .Description}}<span class="min-w-0 flex-1 truncate text-xs text-zinc-500 dark:text-zinc-400">{{.}}</span>{{end}}
+    {{with .TargetURL}}<a class="link text-xs" href="{{.}}" target="_blank" rel="noreferrer">details</a>{{end}}
+    <span class="ml-auto shrink-0 text-xs text-zinc-500 dark:text-zinc-400">{{.Creator}} · {{template "collab_time" .UpdatedAt}}</span>
+  </li>
+  {{else}}
+  <li class="px-3 py-2 text-sm text-zinc-500 dark:text-zinc-400">No contexts reported.</li>
+  {{end}}
+</ul>
+{{end}}
+
+{{/* collab_zero_checks: the empty-contexts block (spec §4.7). */}}
+{{define "collab_zero_checks"}}
+<div class="rounded-md border border-dashed border-zinc-300 px-3 py-2 dark:border-zinc-700" role="note">
+  <p class="text-sm font-medium">{{.title}}</p>
+  {{with .required}}<p class="warn-line" role="status">waiting on required checks: {{.}} — nothing has reported for this sha yet.</p>{{end}}
+  <p class="muted mt-1 text-xs">Post a status with <code class="font-mono">POST /{{.full}}/api/checks/statuses/{{.sha}}</code> (see the <a class="link" href="/api#checks-ci">reporting API</a>), or read the <a class="link" href="/{{.full}}/checks">repo checks page</a>.</p>
+</div>
+{{end}}
