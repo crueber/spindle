@@ -90,6 +90,13 @@ Performance claims (scale, latency shape) are **evidence-backed**: measured entr
   `.btn.primary` per page); emerald means *state*; links are ink with an underline, never the
   accent. A hex literal or an emerald text-link in a template is a regression —
   `docs/style-guideline.md` §1 is normative.
+- **Never assert on `runtime.NumGoroutine()`.** It is process-global: an
+  unrelated goroutine exiting between the baseline and the check shrinks the
+  delta, and a healthy SSE keepalive set reads as a leak (`expected >= 8
+  goroutines after attach, got 7` — hit in both `internal/notify` and
+  `internal/api`). Count the thing you own: each writer bumps an
+  `activeKeepalives` atomic on start and decrements on exit; the test polls
+  that counter.
 - **`html/template` builtins are process-wide — never shadow them.** A FuncMap entry named `eq`
   replaces the builtin for every template; a string-only `eq` broke every error page
   (`eq .Data.Status 401`). Do not define `eq/ne/lt/le/gt/ge/len/index/printf/slice`.

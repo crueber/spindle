@@ -7,23 +7,22 @@ package api
 import (
 	"context"
 	"net/http/httptest"
-	"runtime"
 	"testing"
 	"time"
 )
 
-func awaitSSEExit(t *testing.T, base int, what string) {
+// awaitSSEKeepalives polls the writer's own counter (the same reason the
+// notify sibling does: runtime.NumGoroutine is process-global and racy).
+func awaitSSEKeepalives(t *testing.T, want int64, what string) {
 	t.Helper()
 	deadline := time.Now().Add(5 * time.Second)
 	for {
-		if runtime.NumGoroutine() <= base {
+		got := activeKeepalives.Load()
+		if got == want {
 			return
 		}
 		if time.Now().After(deadline) {
-			buf := make([]byte, 1<<20)
-			n := runtime.Stack(buf, true)
-			t.Fatalf("%s: goroutines still %d > baseline %d after 5s\n%s",
-				what, runtime.NumGoroutine(), base, buf[:n])
+			t.Fatalf("%s: keepalives %d, want %d after 5s", what, got, want)
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
@@ -31,7 +30,6 @@ func awaitSSEExit(t *testing.T, base int, what string) {
 
 func TestSSEKeepaliveExitsOnClose(t *testing.T) {
 	const streams = 5
-	base := runtime.NumGoroutine()
 	closers := make([]*SSE, 0, streams)
 	for i := 0; i < streams; i++ {
 		s, ok := NewSSE(httptest.NewRecorder(), httptest.NewRequest("GET", "/x", nil))
@@ -40,17 +38,14 @@ func TestSSEKeepaliveExitsOnClose(t *testing.T) {
 		}
 		closers = append(closers, s)
 	}
-	if got := runtime.NumGoroutine(); got < base+streams {
-		t.Fatalf("expected >= %d goroutines after attach, got %d", base+streams, got)
-	}
+	awaitSSEKeepalives(t, streams, "api keepalives after attach")
 	for _, s := range closers {
 		s.Close()
 	}
-	awaitSSEExit(t, base, "api keepalive goroutine leaked after Close")
+	awaitSSEKeepalives(t, 0, "api keepalive goroutine leaked after Close")
 }
 
 func TestSSEKeepaliveExitsOnContextCancel(t *testing.T) {
-	base := runtime.NumGoroutine()
 	ctx, cancel := context.WithCancel(context.Background())
 	r := httptest.NewRequest("GET", "/x", nil).WithContext(ctx)
 	s, ok := NewSSE(httptest.NewRecorder(), r)
@@ -58,9 +53,7 @@ func TestSSEKeepaliveExitsOnContextCancel(t *testing.T) {
 		t.Fatal("recorder must flush")
 	}
 	defer s.Close()
-	if got := runtime.NumGoroutine(); got < base+1 {
-		t.Fatalf("expected >= %d goroutines after attach, got %d", base+1, got)
-	}
+	awaitSSEKeepalives(t, 1, "api keepalive after attach")
 	cancel()
-	awaitSSEExit(t, base, "api keepalive goroutine leaked after ctx cancel")
+	awaitSSEKeepalives(t, 0, "api keepalive goroutine leaked after ctx cancel")
 }

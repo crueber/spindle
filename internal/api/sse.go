@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/crueber/spindle/internal/cachepolicy"
@@ -33,6 +34,13 @@ type SSE struct {
 
 // NewSSE starts the envelope: headers, opener, keepalive ticker. ok=false
 // when the ResponseWriter cannot flush (caller falls back to plain JSON).
+// activeKeepalives counts live keepalive goroutines. The #73 regression test
+// used runtime.NumGoroutine(), which is process-global: an unrelated goroutine
+// exiting shrinks the delta, and the test reads a healthy set as a leak
+// ("expected >= 8 goroutines after attach, got 7"). A counter owned by the
+// writer is exact.
+var activeKeepalives atomic.Int64
+
 func NewSSE(w http.ResponseWriter, r *http.Request) (*SSE, bool) {
 	fl, ok := w.(http.Flusher)
 	if !ok {
@@ -53,7 +61,9 @@ func NewSSE(w http.ResponseWriter, r *http.Request) (*SSE, bool) {
 		done: make(chan struct{}),
 	}
 	s.ka = time.NewTicker(10 * time.Second)
+	activeKeepalives.Add(1)
 	go func() {
+		defer activeKeepalives.Add(-1)
 		defer s.ka.Stop()
 		for {
 			select {
