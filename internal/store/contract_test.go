@@ -24,7 +24,7 @@ import (
 //   - TestContract_Memory / TestContract_Filesystem always run (fast tier,
 //     `make contract`).
 //   - TestContractS3 runs when SPINDLE_TEST_S3_ENDPOINT is set (rustfs from
-//     `make dev-store`); TestContractGCS when SPINDLE_TEST_GCS_BUCKET is set.
+//     `make dev-store`).
 func runContract(t *testing.T, s ObjectStore, prefix string) {
 	t.Helper()
 	ctx := context.Background()
@@ -515,13 +515,6 @@ func TestContractS3(t *testing.T) {
 		t.Fatal(err)
 	}
 	runContract(t, s, contractRunPrefix("test/s3/"))
-}
-
-func TestContractGCS(t *testing.T) {
-	if os.Getenv("SPINDLE_TEST_GCS_BUCKET") == "" {
-		t.Skip("set SPINDLE_TEST_GCS_BUCKET to run the GCS contract")
-	}
-	t.Skip("no GCS backend implemented in this tree yet (03_store_backends.md §3); the wiring lands with it")
 }
 
 // contractRunPrefix isolates concurrent runs on shared backends (§2).

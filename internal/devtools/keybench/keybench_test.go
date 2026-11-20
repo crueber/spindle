@@ -36,7 +36,7 @@ import (
 // population sizes: 10k and 1M registered keys, spread over 100 principals.
 // Paths measured: SSH-auth lookup (LookupByFingerprint — the hot path), the
 // keys-page list (per-principal), and a single add. Memory store: the numbers
-// isolate the registry's algorithmic shape from network RTT; over S3/GCS add
+// isolate the registry's algorithmic shape from network RTT; over S3 add
 // one GET of latency per lookup and per list entry (see E1 in the evidence doc).
 func TestSSHKeyRegistryScale(t *testing.T) {
 	for _, n := range []int{10_000, 1_000_000} {

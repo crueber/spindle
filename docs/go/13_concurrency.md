@@ -124,7 +124,7 @@ Precise rules, each with its incident:
    in-process lock, and is heartbeated.
 5. Lock acquisition on a request path is try-first, then measure: take the non-blocking attempt, and on
    failure measure queue time against `telemetry.lock_wait_warn` and record
-   `walgit_lock_wait_seconds{lock="sync_mu|rw|pack_mu|gcs_bulk_permit"}` (§6.9). For `sync.Mutex` this
+   `walgit_lock_wait_seconds{lock="sync_mu|rw|pack_mu|bulk_permit"}` (§6.9). For `sync.Mutex` this
    means a `TryLock` probe before `Lock`. This is instrumentation, not a correctness mechanism — do not
    skip the blocking acquire afterward.
 
@@ -496,7 +496,7 @@ func withCanary(t *testing.T, d time.Duration, body func()) {
 
 - `rw` try-write (§2: canonical primitive `internal/wal/rw.TryRWMutex`, ruling C-2) replaces `tokio::RwLock::try_write` — same try-or-defer removal protocol; the starvation hazard is identical, so the invariant ports unchanged.
 - Dedicated **bulk worker pool via bounded channel + weighted-semaphore permits** (`internal/store/errgroup.go`) replaces the tokio
-  "bulk runtime 4 workers" — the permit (`gcs_bulk_permit` metric name kept) is acquired inside the pool,
+  "bulk runtime 4 workers" — the permit (`bulk_permit` metric label) is acquired inside the pool,
   never on request goroutines, preserving §4.6 transport separation.
 - **`errgroup.SetLimit` / weighted semaphore (hand-rolled, `internal/store/errgroup.go`, ruling C-1)** replace `buffer_unordered(n)` and
   `Semaphore::acquire` fan-outs.

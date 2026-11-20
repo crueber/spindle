@@ -73,7 +73,7 @@ namespace (`CheckRead` — the task may exist before the repo does).
 | METHOD + path | Auth | Request → response | Seam |
 |---|---|---|---|
 | `POST /api/v1/repos/imports` (+ `/api-browser/v1` twin) | create-on-namespace | `{source_url, owner, name, token?, refs?[], default_branch_only?, include_pull_heads?, include_notes?, format?, dangerous?}` → `202 {task, target}` (+`joined:true` on a B2 join); `200 {repo, import}` on the idempotent no-op | 1 + 5 |
-| `GET /api/v1/repos/imports/{id}` (+ twin) | read-on-namespace | → TaskRecord JSON; with `Accept: text/event-stream` → attach (replay → live → terminal `result`/`error` exactly once) | 1 + 5 |
+| `GET /api/v1/repos/imports/{id}` (+ twin) | read-on-namespace | → TaskRecord JSON (`id` echoes the requested import id — the same key the stream attaches with); with `Accept: text/event-stream` → attach (replay → live → terminal `result`/`error` exactly once) | 1 + 5 |
 
 Wire rules (07 conventions + 14 §14.12): plain-text errors,
 `[]`-never-null, RFC3339 UTC, full SHAs, `no-store` on starts, unknown
@@ -184,14 +184,17 @@ sender-owned, receivers never close, every goroutine exits via context
 Top-level `/import` page (`internal/webui/templates/pages/forms/import.html`) — the target repo does not exist
 yet, so it cannot live under `/:owner/:name/*`. Linked from the header create menu
 ("Import repository", `partials/header.html`) and the owner repository tab (prefills `owner` via
-`?owner=`). Four states on one page (form → running → done/error; the server renders the state it is
+`?owner=`). Four states on one page (form → running → failed → done; the server renders the state it is
 given): URL field (shorthand/GitHub/any URL, client normalizes + suggests owner/name), owner/name fields,
 private-source token field (password, never echoed/persisted), options (default-branch-only, PR
 heads with help text, notes, format), LFS-as-pointers + SSH-unsupported
 notes. Running: `clone`/`ingest` bars + scrolling log tail from the SSE
-attach (closing the page stops listening, never the import — the server runs it detached).
-Done: link to `/:owner/:name` + head SHAs + no-op card on
-re-import. Error: plain-text reason + back-to-form.
+attach (`web/src/islands/tasks.js`; closing the page stops listening, never the import — the server runs
+it detached) plus the task id as a real link to `GET /api/v1/repos/imports/{id}` so the page stays
+usable without JS. Done: link to `/:owner/:name` + head SHAs + no-op card on
+re-import. Failed: the terminal reason + log tail + a prefilled retry form (the source token is dropped,
+never re-echoed). A task that finishes inside the POST's bounded settle window renders done/failed
+immediately instead of a spinner.
 
 SDK: `web/sdk/src/import.js` (`start/get/attach`, lane-aware top-level
 paths, `normalizeSource` pure helper) attached on the client in
@@ -521,6 +524,42 @@ clean.
   server contract (the JS/Go split cannot share code, and the server
   side is intentionally untouched); the headless test pins the exact
   `issue237_test.go:27-35` variant rows on the JS side.
+- **The wire `id` is the service id everywhere — and the page streams it
+  (2026-11-20, fixes the live "empty importing card forever" defect).** The
+  decision above ("HTTP/CLI ids are service ids; the table record id stays
+  internal") was only half-honored: the rings and `GET .../imports/{id}`
+  were keyed by the service id (`i…`), but `taskJSON` rendered the WAL table
+  id (`32-hex`) as `id` inside the record — so a POST 202's `{task:{id}}`
+  named a key that resolved to the record but not to the stream (attach
+  answered JSON, never SSE; a B2 joiner's id could not attach at all). Now
+  `taskView`/`progressView` stamp the accepted id (the one the request came
+  in on) over the record in every body and every `task`/`progress` frame; a
+  pruned record served by its own table id keeps that id, which is the only
+  key that resolves there. The `/import` page passes `Begin`'s TaskID (the
+  service id) to `data-task-id`/`data-task-stream` and links the same id, so
+  the card, the status link and the API agree. Pinned by
+  `repoimport/state_test.go` (`TestWireIDsAreServiceIDs`),
+  `import_test.go` (GET echoes the requested id) and
+  `webui/forms_test.go` (`TestFormsImportTaskIDContract`).
+- **`/import` progress is a stream + a terminal card, never a spinner
+  (2026-11-20).** `web/src/islands/tasks.js` (registered in the island boot
+  list) attaches the shared fetch SSE reader to `[data-task-id]`, paints one
+  bar per progress label into `[data-task-bars]`, mirrors the log tail into
+  `[data-task-log]`, navigates to `/<owner>/<name>` on the terminal `result`,
+  and on `error`/404/401/exhausted retries renders the reason plus a real
+  link (fetch-stream rather than EventSource for the §2.6 reasons: it can
+  read the 401/404 status, stop at a bounded attempt, and keeps `fetch()` in
+  one module). No-JS readers get the same facts as links (task id + status
+  URL + a `<noscript>` note); the import is never restarted by the page.
+  The POST-render race is closed server-side: after `Begin`,
+  `formsImportOnce` waits one bounded `formsImportSettle` window (400 ms) on
+  the new `Service.State` observer (the SAME id key) and renders the done
+  card (repo + heads) or the failed card (summary + log tail + a prefilled
+  retry form, source token deliberately dropped) instead of a progress card
+  for a task that is already over. Pure island logic
+  (`taskBars`/`taskDone`/`taskRedirect`/`taskFailureText`/`taskLogTail`) is
+  covered by `web/test/unit/tasks.test.js`.
+
 
 ## Explicitly out of scope
 

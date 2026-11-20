@@ -71,10 +71,10 @@ func (f *collabFixture) rawPostH(path, contentType string, body []byte, hdr map[
 
 func TestCoverageCollabPureBranches(t *testing.T) {
 	// Repo existence degrades to "missing" without any registry seam.
-	if (&Server{env: Env{}}).collabRepoExists(context.Background(), "a", "b", nil) {
+	if (&Server{env: Env{}}).collabRepoExists(context.Background(), &collabRepo{Owner: "a", Name: "b"}) {
 		t.Fatal("no API must mean no repo")
 	}
-	if (&Server{env: Env{API: &api.Env{}}}).collabRepoExists(context.Background(), "a", "b", nil) {
+	if (&Server{env: Env{API: &api.Env{}}}).collabRepoExists(context.Background(), &collabRepo{Owner: "a", Name: "b"}) {
 		t.Fatal("no registry/view must mean no repo")
 	}
 

@@ -1,6 +1,6 @@
 // notify.go — POST /_events/notify (09 §6.1): the route lives in internal/server
 // (chi, auth: read, 404 when this instance has no bridge); the handler here
-// parses the accepted bodies (GCS Pub/Sub push envelope, S3 event notification,
+// parses the accepted bodies (S3 event notification,
 // {key}/{repo} glue), schedules catch-ups, and answers with the report array.
 // The handler never blocks on the bridge: wakes are non-blocking, and a
 // "dropped" wake is covered by the sweep backstop.
@@ -30,18 +30,6 @@ const (
 )
 
 // ---- accepted body shapes (tolerant of extra fields) ------------------------
-
-// gcsEnvelope is the GCS Pub/Sub push envelope: the trigger is a message whose
-// attributes say eventType == "OBJECT_FINALIZE"; the object key is
-// message.attributes.objectId (also checked directly under message).
-type gcsEnvelope struct {
-	Message *gcsMessage `json:"message"`
-}
-
-type gcsMessage struct {
-	Attributes map[string]string `json:"attributes"`
-	ObjectID   string            `json:"objectId"`
-}
 
 // s3Notification is the S3 bucket-notification shape.
 type s3Notification struct {
@@ -112,21 +100,6 @@ func parseNotify(body []byte) []trigger {
 	var root map[string]json.RawMessage
 	if err := json.Unmarshal(body, &root); err != nil {
 		return nil
-	}
-
-	// GCS Pub/Sub push envelope.
-	if _, ok := root["message"]; ok {
-		var env gcsEnvelope
-		if err := json.Unmarshal(body, &env); err == nil && env.Message != nil {
-			if env.Message.Attributes["eventType"] == "OBJECT_FINALIZE" {
-				key := env.Message.Attributes["objectId"]
-				if key == "" {
-					key = env.Message.ObjectID
-				}
-				return keyTrigger(key)
-			}
-			return nil // other event types: acked and ignored
-		}
 	}
 
 	// S3 event notification.

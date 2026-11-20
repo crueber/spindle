@@ -262,7 +262,7 @@ locate data dir (--data-dir flag > SPINDLE_DATA_DIR env; default ~/.local/share/
 - `POST /api/v1/setup/test` — body: raw TOML (or `{overrides: {key: value}}`); runs the full validator WITHOUT saving → `200 {errors: []}` or `422 {errors: [{key, message}]}`.
 - `PUT /api/v1/setup` — body: same as test. Validate; on success atomically write `<data-dir>/spindle.toml` (tmp + rename in the data dir), then respond `200 {saved: true, requires_restart: [<key>…], errors: []}`. The running process does NOT hot-reload — `requires_restart` lists every key whose effective value differs from the just-saved file (all of them, effectively; the process continues in its current boot mode).
 
-**Access rules:** open while (no config file) OR (config invalid) OR (`server.auth.mode = "none"`); otherwise an admin principal is required (same `require_admin` mapping as §8.3). Optional `SPINDLE_SETUP_TOKEN` env: when set, the setup routes require it (query `?token=` or `Authorization: Bearer <token>`) and skip the admin check — the escape hatch for exposed hosts.
+**Access rules:** open while (no config file) OR (config invalid) OR (`server.auth.mode = "none"`); otherwise an authenticated **admin principal** is required (`p.Admin`; anonymous → 401, authenticated non-admin → 403, same `require_admin` mapping as §8.3). Admin now comes from any of: `server.auth.admin_groups` (default `["spindle-admins"]`) matching the OIDC claim named by `server.auth.groups_claim` (default `"groups"`, case-insensitive), `admin_emails`, or `admin_domains`. **There is no setup token:** `SPINDLE_SETUP_TOKEN` (env) and the `?token=`/Bearer bypass are gone and have no effect. The same rule gates `GET|POST|PUT /api/v1/setup{,/test}`, `POST /setup`, `POST /setup/auth-test`, and the page provider's `SetupAccess` seam.
 
 **auth-none on any bind (supersedes the Rust fail-closed loopback rule):** the Rust rule (refuse auth `none` unless the listen address is loopback) is deliberately dropped for zero-config friendliness. With `mode = "none"` on a non-loopback bind, the server boots but: logs a persistent `WARN auth mode is "none" — anyone on the network has write+admin` at startup AND once per hour thereafter; `/setup` shows a red banner; `readyz` gains `"warnings":["auth_none"]`; and the setup UI pre-selects a real auth mode as the recommended fix. No request is ever refused because of it.
 
@@ -309,7 +309,7 @@ type Provider interface {
 |---|---|---|
 | `/_ui/app.css` | `web/dist/app.css` (Tailwind v4 via `@tailwindcss/vite`) | `no-cache` + ETag; `text/css` |
 | `/_ui/ui.js` | `web/dist/ui.js` (esbuild island bundle) | `no-cache` + ETag; `text/javascript` |
-| `/_ui/htmx.min.js`, `/_ui/htmx-ext-sse.js` | vendored `web/vendor/` → `dist/` | `no-cache` + ETag; `text/javascript` |
+| `/_ui/htmx.min.js` | vendored `web/vendor/` → `dist/` | `no-cache` + ETag; `text/javascript` |
 | `/_ui/concepts/<name>.gif` | `web/dist/concepts/` (checked-in landing GIFs, copied by the stylesheet build) | `no-cache` + ETag; `image/gif` |
 | `/_ui/assets/*` | content-addressed build output | `public, max-age=31536000, immutable` |
 | anything else | — | plain 404 (`/_ui/index.html` is not an asset; traversal-style names are refused) |
@@ -412,7 +412,7 @@ One code path for every immutable byte (bundles, LFS objects, anything immutable
 - `Content-Type` per kind: `application/x-git-bundle` for bundles, the stored/declared type for LFS objects.
 - `X-Content-Type-Options: nosniff`; `Vary: Accept-Encoding` where encoding applies.
 
-**Accel offload (edge contract, §8.6):** when `server.accel_redirect = true` AND the TCP peer (`r.RemoteAddr` host) is loopback AND the method is not HEAD AND the store can produce a URL, the static answer becomes `200` (empty body) + `X-Accel-Redirect: /_store/` + `X-Walgit-Store-Url` (S3: presigned; GCS: path URL) + `X-Walgit-Store-Authorization` (GCS only) + `X-Walgit-Store-Key` (percent-encoded store key = the edge cache key) + `X-Walgit-Etag` (the validator the edge must re-emit). When hit directly (no `X-Walgit-Capabilities`), walgit assumes nothing and streams bytes itself. The reference edge slices ranges (64 MiB), caches by key+range, strips bucket headers, and never forwards client conditionals to the bucket.
+**Accel offload (edge contract, §8.6):** when `server.accel_redirect = true` AND the TCP peer (`r.RemoteAddr` host) is loopback AND the method is not HEAD AND the store can produce a URL, the static answer becomes `200` (empty body) + `X-Accel-Redirect: /_store/` + `X-Walgit-Store-Url` (S3: presigned) + `X-Walgit-Store-Key` (percent-encoded store key = the edge cache key) + `X-Walgit-Etag` (the validator the edge must re-emit). When hit directly (no `X-Walgit-Capabilities`), walgit assumes nothing and streams bytes itself. The reference edge slices ranges (64 MiB), caches by key+range, strips bucket headers, and never forwards client conditionals to the bucket.
 
 ## 6. LFS (§8.7)
 
@@ -518,7 +518,7 @@ Use `crypto/rsa`, `crypto/ecdsa`, `encoding/base64`, `encoding/json` only. Rules
 4. `iss` must equal the configured issuer with trailing slash stripped, **or** its bare host.
 5. `aud` must be in `server.auth.audiences ∪ {oauth_client_id}`; the browser flow pins exactly `oauth_client_id`.
 6. Claims require `email` and `email_verified`.
-7. Email policy: allowed iff domain ∈ `allowed_domains` or address ∈ `allowed_emails` (else 403). `write` = allowed, unless `write_domains` is set: write iff domain ∈ write_domains. `admin` via `admin_emails`/`admin_domains` (lowercased comparisons).
+7. Email policy: allowed iff domain ∈ `allowed_domains` or address ∈ `allowed_emails` (else 403). `write` = allowed, unless `write_domains` is set: write iff domain ∈ write_domains. `admin` via `admin_emails`/`admin_domains` (lowercased comparisons) **or** via the configured group claim: the ID-token claim named by `server.auth.groups_claim` (default `groups`) may be a JSON array of strings or a single string; when any value intersects `server.auth.admin_groups` (default `["spindle-admins"]`, case-insensitive) the principal is admin. An empty `admin_groups` never grants admin, group values never grant `write`, and the email/domain admission check above still runs first (a group cannot admit a disallowed email).
 
 **JWKS cache:** discovery document cached once per process; keys cached honoring the JWKS response's `Cache-Control: max-age` (default 300 s); stale-while-refresh on expiry (serve stale keys while one background refresh runs); inline refresh on unknown `kid`; refresh failure → 503 Unavailable.
 
@@ -539,11 +539,13 @@ Hazard: many request goroutines triggering simultaneous refreshes on unknown kid
 
 ### 8.5 walgit-issued tokens & sessions (stateless)
 
-Payload = `"{kind}\n{exp}\n{iat}\n{email}"` (kind `session` | `token`; exp/iat = unix seconds). MAC = HMAC-SHA256 over the payload with `server.auth.session_secret` (≥ 32 bytes; validated at config load). Wire format:
+Payload = `"{kind}\n{exp}\n{iat}\n{email}\n{groups}"` (kind `session` | `token`; exp/iat = unix seconds; `groups` is a JSON array of the verified OIDC groups, `[]` when none — WP13). MAC = HMAC-SHA256 over the payload with `server.auth.session_secret` (≥ 32 bytes; validated at config load). Wire format:
 
 ```
 wgt_? + base64url_nopad(payload) + "." + base64url_nopad(mac)
 ```
+
+The optional fifth line carries group membership so a browser session (or a minted `wgt_` access token) re-derives the same `admin_groups` result on every request; the list is inside the HMAC payload, so it cannot be forged. Four-line tokens minted before WP13 still verify (no groups). Because group membership is captured at mint time, an IdP group change takes effect at the next sign-in/mint, while a change to `server.auth.admin_groups` itself applies immediately (the policy is re-evaluated per request); rotating `session_secret` revokes every captured group immediately — see Decisions.
 
 Access tokens carry the `wgt_` prefix (kind `token`, TTL `access_token_ttl` = 90 d). Sessions (kind `session`, no prefix) live in the cookie. Rotating the secret revokes everything; nothing can be listed or revoked individually — say so in the token page text.
 
@@ -600,6 +602,8 @@ audiences = ["spindle"]
 allowed_domains = ["example.com"]
 write_domains = ["example.com"]
 admin_emails = ["crueber@example.com"]
+admin_groups = ["spindle-admins"]   # OIDC group claim values granted global admin (+ /setup)
+groups_claim = "groups"             # ID-token claim carrying group membership
 
 [server]
 cors_origins = ["https://app.example.com", "*.localhost"]
@@ -689,7 +693,7 @@ spindle serves plain HTTP (h2c retained: HTTP/2 prior knowledge + HTTP/1.1 via `
 
 - Operators terminate TLS at the reverse proxy in front (Caddy or nginx snippets in 16_packaging.md §4). The proxy forwards plain HTTP to `server.listen` and sets `X-Forwarded-Proto: https` so the server advertises `https://` clone URLs (§9.1); `server.public_url` pins the canonical external origin.
 - Residual `server.tls.*` settings fail closed: a TOML file containing them is rejected at load, and a `SPINDLE__SERVER__TLS__*` env override is a fatal error — both with a message pointing at the reverse proxy (never a silent ignore).
-- Outbound HTTPS (webhook delivery, OIDC discovery, upstream follow, S3/GCS) is unaffected: it validates against the system root CAs and never used `server.tls.cert/key`.
+- Outbound HTTPS (webhook delivery, OIDC discovery, upstream follow, S3) is unaffected: it validates against the system root CAs and never used `server.tls.cert/key`.
 
 ## 12. Graceful shutdown — two-phase drain (Rust spec §3.4)
 
@@ -855,6 +859,7 @@ Hazard: keepalive ticker and event writer racing on the same `http.ResponseWrite
 - **NEW (2026-11-20) — the SPA shell is deleted; pages are the only UI** (DEVIATIONS.md D-WEB-14/D-WEB-15; §3.5): every page route goes through `pageOr404`/`uiOr` to the `internal/pages` provider, which renders a full HTML document (`no-cache` + strong ETag). A path the provider does not own is the plain §3 404 — there is no client router fallback, no `index.html` shell, and no `Accept: text/plain` twin (the `/explore` machine twin is `?format=text`, served by the page layer's own handler). `/_ui/*` carries exactly the page assets (`app.css`, `ui.js`, the vendored htmx files, `concepts/`, the immutable `assets/` lane) and stays public; `/repos.js` is unchanged. Rationale: server rendering makes the Go renderer the XSS boundary (law 9 style fail-closed), keeps page gating identical to the API's by construction (one authority seam), and drops the client data layer and router from the dependency budget (law 1).
 - **D5 — Zero-config first run.** Missing config boots with built-in defaults (`0.0.0.0:8080`, filesystem store under `<data-dir>/store`, auth `none`, `auto_create_on_push`) instead of fatal exit 2 — the old step-2 "missing config file is a fatal exit 2" of the startup order is superseded by the bootstrap leg (§10.4, §3.4).
 - **D6 — Setup UI + API first-class.** `/setup` + `/api/v1/setup{,/test}` with the open-while-unsecured access rule and the SETUP-ONLY MODE for invalid configs (§3.4, new `internal/setup` package).
+- **WP13 (2026-11-20) — OIDC admin groups replace the setup token.** Admin/setup authority is the `admin` flag, now derivable from `server.auth.admin_groups` (default `["spindle-admins"]`) matched against the ID-token claim named by `server.auth.groups_claim` (default `"groups"`, array or single string, case-insensitive). The `SPINDLE_SETUP_TOKEN` env var, its `?token=`/Bearer bypass, and the setup-page token field are DELETED (law: pre-1.0 deletes shapes); setting the env var has no effect. `admin_emails`/`admin_domains` remain (migration path), and group values never grant `write` or bypass the email admission rule. The session/token wire gains the optional fifth `{groups}` line described in §8.5 so a browser session keeps group-derived admin; this deliberately diverges from the Rust payload shape (a session is a spindle-minted wire, not a bucket format), and a 4-line token still verifies. Staleness: IdP membership changes apply at the next sign-in/mint; `admin_groups` edits apply immediately; `session_secret` rotation revokes captured groups immediately. Rationale: an env secret that opens the whole configuration surface to anyone who can read the process environment is a weaker boundary than the signed IdP group claim, and the operator asked for group-based setup access.
 - **Supersession (deliberate, fail-closed):** the Rust rule that auth `mode = "none"` is refused unless the listen address is loopback is REPLACED — auth-none is allowed on any bind with loud warnings (logs, setup UI, `readyz`) and zero refused requests (§3.4, §8.1, §10.4 step 7).
 - **Mirror discovery refusal (Forgejo #240, R1 (c)).** `gitInfoRefs` answers
   receive-pack discovery on a pull-only mirror with 403 plain text (every
@@ -875,3 +880,40 @@ Hazard: keepalive ticker and event writer racing on the same `http.ResponseWrite
   ### Concurrency: hazard is blocking the push response on a sync probe;
   avoidance is the hook's own goroutine + callee-owned probe/task
   lifetime (drain cancels via its own ctx).
+- **NEW (security audit UI-02/UI-03/UI-09, 2026-11-20) — one shared response-security set and one
+  redirect-target rule.** `internal/httpsec` (leaf package) owns both. `httpsec.Apply` sets
+  `Content-Security-Policy: default-src 'self'; script-src 'self'; style-src 'self'
+  'unsafe-inline'; img-src 'self' https: http: data:; frame-ancestors 'none'; base-uri 'none';
+  form-action 'self'; object-src 'none'`, `X-Frame-Options: DENY`, `Referrer-Policy: same-origin`
+  and `X-Content-Type-Options: nosniff`; the `serverHeaders` middleware applies it to every lane
+  (existing values win, so the release-asset byte lane keeps its stricter
+  `default-src 'none'; sandbox`), and `internal/webui/render.go` applies it again at the page
+  boundary (`fail()` included). `'unsafe-inline'` is present for **styles only**: the templates use
+  five `style=` attributes (label swatches, milestone progress width); there are no inline
+  `<script>` blocks, handlers, or `javascript:` URLs, so `script-src 'self'` needs no nonce, and
+  htmx/the SSE island/theme toggle load from `'self'`. Rendered pages and htmx fragments now send
+  `Cache-Control: no-cache, private` (never a shared cache). `httpsec.SafeNext(next, fallback)` is
+  the ONE `next=`/`return` rule (`sanitizeNext`, `sanitizeNextPath`, `formsSanitizeNext`,
+  `repoReturnTarget`, `safeNext` all delegate): only a rooted same-host path survives — scheme,
+  `//host`, `/\host`, control/whitespace characters, percent-encoded backslashes and
+  `%2F%2F` prefixes fall back. Rationale: four copies of the old prefix-only check let
+  `next=/\evil.com` through (browsers read it as an authority); one rule makes the matrix testable
+  in one place.
+- **NEW (security audit UI-07, 2026-11-20) — the forms/parity write preflight fails closed like
+  collab/public.** `formsOriginOK` now refuses a state-changing request carrying neither `Origin`
+  nor `Referer` whenever a cookie-backed session could authenticate it (`auth.mode` token/oidc);
+  the auth-less `none` boot still accepts it (no victim session exists). `cors_origins` switches
+  the session cookie to `SameSite=None`, which is exactly when this guard matters. Also UI-08: the
+  merge-task fragment (`GET …/pull/{n}/merge/task`) now requires the same `maintain` floor the
+  merge POST does, and UI-10: page bodies render a generic sentence for backend/store failures
+  (detail goes to the log; `repoViewError` precedent) instead of `err.Error()`.
+- **NEW (security audit UI-04, 2026-11-20) — `/setup` masks stored secrets (overwrite-only).**
+  The page never renders a secret value: `internal/webui.settingsPrepareField` replaces any
+  `Secret` field whose value is non-empty with `setup.SecretMask` (`•••••• (set)`) before the
+  template runs, so `session_secret`, `oauth_client_secret`, `events.webhook_secret`,
+  `store.s3.secret_key` and the token values are absent from the HTML in every auth mode. Saving
+  is overwrite-only — `setup.ParseValues` skips a secret key whose submitted value is empty or the
+  mask (`setup.IsSecretKey`; `*_env`/`*_file` keys name a location, not a value, so they are not
+  masked), and a rejected form never echoes a typed secret back. The JSON `GET /api/v1/setup`
+  schema still reports effective values (its contract, and it shares the setup access gate); the
+  browser surface is the leak this decision closes.

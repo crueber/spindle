@@ -13,6 +13,7 @@ import (
 	"io"
 	"net/http"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -321,6 +322,12 @@ type sseWriter struct {
 }
 
 // newSSEWriter starts the envelope; ok=false when the writer cannot flush.
+// activeKeepalives counts live keepalive goroutines. The regression test for
+// #73 asserted on runtime.NumGoroutine(), which is process-global and racy
+// under load (an unrelated goroutine exiting shrinks the delta and the test
+// reads a false leak). A counter owned by the thing under test is exact.
+var activeKeepalives atomic.Int64
+
 func newSSEWriter(w http.ResponseWriter, r *http.Request) (*sseWriter, bool) {
 	fl, ok := w.(http.Flusher)
 	if !ok {
@@ -338,7 +345,9 @@ func newSSEWriter(w http.ResponseWriter, r *http.Request) (*sseWriter, bool) {
 	// Keepalive goroutine (#13): exits via done (teardown) or the request
 	// context (client disconnect) — never by ranging over ka.C, whose
 	// channel Stop does not close (13 channel rule: sender owns and closes).
+	activeKeepalives.Add(1)
 	go func() {
+		defer activeKeepalives.Add(-1)
 		defer s.ka.Stop()
 		for {
 			select {

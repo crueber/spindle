@@ -17,7 +17,7 @@ order that matches your work.
    (the router — core only, all middleware hand-rolled), `github.com/BurntSushi/toml` (config),
    `golang.org/x/net` (h2c), `golang.org/x/crypto` (SSH server transport only), and
    `github.com/dicebear/dicebear-go/v10` + `github.com/dicebear/styles/v10` (deterministic avatars only).
-   Everything else is stdlib or hand-rolled (SigV4, GCS JSON API, protobuf wire codec, JWKS, SSE,
+   Everything else is stdlib or hand-rolled (SigV4, protobuf wire codec, JWKS, SSE,
    Prometheus exposition, LRU, singleflight). AGENTS.md law 1 is the authority. The frontend budget (amended
    2026-11-19/20 by explicit user request — DEVIATIONS.md D-WEB-14/D-WEB-15): browser pages are Go
    `html/template` rendered by `internal/webui`, enhanced with vendored htmx + vanilla-ES islands; styling
@@ -52,7 +52,7 @@ readable by spindle and vice versa.
 |---|---|---|
 | [`01_overview.md`](01_overview.md) | Product, principles, package tree, dependency budget, build order | — |
 | [`02_storage_protobuf.md`](02_storage_protobuf.md) | Bucket keys, protobuf wire codec (hand-rolled), log framing, store interface, CAS helper | `internal/store` |
-| [`03_store_backends.md`](03_store_backends.md) | S3 (hand-rolled SigV4), GCS (JSON API), **filesystem**, leases, striped I/O, round-trip budgets | `internal/store` |
+| [`03_store_backends.md`](03_store_backends.md) | S3 (hand-rolled SigV4), **filesystem**, leases, striped I/O, round-trip budgets | `internal/store` |
 | [`04_git.md`](04_git.md) | git subprocess layer: ingest, refs, pkt-line, receive-pack, upload-pack, repack, bundles | `internal/git` |
 | [`05_wal_engine.md`](05_wal_engine.md) | Sync levels, publish/CAS ladder, checkpoints, replay, remote reader, tasks | `internal/wal` |
 | [`06_server_http.md`](06_server_http.md) | Chi routing, middleware, git/LFS/static endpoints, auth (3 modes), **bootstrap + setup UI/API** | `internal/server` |

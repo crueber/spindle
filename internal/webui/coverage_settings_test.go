@@ -101,7 +101,7 @@ func TestCoverageSettingsSetupValidationOutcomes(t *testing.T) {
 		},
 	}})
 	rec = settingsDo(t, s, http.MethodPost, "/setup", url.Values{
-		"op": {"validate"}, "token": {"tok"}, "cfg.server.listen": {"bad"},
+		"op": {"validate"}, "cfg.server.listen": {"bad"},
 	}, nil)
 	if rec.Code != http.StatusUnprocessableEntity {
 		t.Fatalf("validate reject = %d", rec.Code)
@@ -112,12 +112,12 @@ func TestCoverageSettingsSetupValidationOutcomes(t *testing.T) {
 	}
 
 	rec = settingsDo(t, s, http.MethodPost, "/setup", url.Values{
-		"op": {"validate"}, "token": {"tok"}, "cfg.server.listen": {"0.0.0.0:8080"},
+		"op": {"validate"}, "cfg.server.listen": {"0.0.0.0:8080"},
 	}, nil)
 	if rec.Code != http.StatusSeeOther {
 		t.Fatalf("validate ok = %d", rec.Code)
 	}
-	if loc := rec.Header().Get("Location"); !strings.Contains(loc, "validated=1") || !strings.Contains(loc, "token=tok") {
+	if loc := rec.Header().Get("Location"); loc != "/setup?validated=1" {
 		t.Fatalf("validate Location = %q", loc)
 	}
 

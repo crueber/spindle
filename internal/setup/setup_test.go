@@ -71,6 +71,8 @@ func TestBuildSchemaGroupsAndTypes(t *testing.T) {
 		{"server.auto_create_on_push", "bool", c.Server.AutoCreateOnPush},
 		{"server.cors_origins", "list", c.Server.CorsOrigins},
 		{"server.auth.mode", "string", c.Server.Auth.Mode},
+		{"server.auth.admin_groups", "list", c.Server.Auth.AdminGroups},
+		{"server.auth.groups_claim", "string", c.Server.Auth.GroupsClaim},
 		{"server.auth.tokens", "list", c.Server.Auth.Tokens},
 		{"server.auth.session_ttl", "duration", c.Server.Auth.SessionTTL.String()},
 	}
@@ -100,12 +102,13 @@ func TestBuildSchemaSecretFlagsAndFieldJSON(t *testing.T) {
 	c := config.Defaults()
 	groups := BuildSchema(c, c)
 	for key, want := range map[string]bool{
-		"server.auth.tokens":              true,
+		"server.auth.tokens":              false, // a list of token tables, not one value
 		"server.auth.oauth_client_secret": true,
 		"server.auth.session_secret":      true,
+		"server.auth.access_token_ttl":    false, // a duration
 		"server.listen":                   false,
-		"server.ssh.host_key":             false, // "host_key" is not secret-shaped (only a bare "key" is)
-		"store.s3.secret_key_env":         true,
+		"server.ssh.host_key":             false, // a path
+		"store.s3.secret_key_env":         false, // an env var NAME
 		"store.backend":                   false,
 		"cache.disk_high_watermark":       false,
 	} {
@@ -132,10 +135,12 @@ func TestBuildSchemaSecretFlagsAndFieldJSON(t *testing.T) {
 
 func TestSecretKeyTruthTable(t *testing.T) {
 	for name, want := range map[string]bool{
-		"key":            true,
+		"key":            false, // a bare path flag (host_key), never a value
 		"my_password":    true,
 		"session_secret": true,
 		"admin_token":    true,
+		"token":          true,
+		"token_env":      false,
 		"listen":         false,
 		"public_url":     false,
 	} {

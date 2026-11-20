@@ -1,6 +1,6 @@
 # 12 — GitHub-style runners: researched design plan (NO implementation until reviewed)
 
-> Forgejo [`crueber/spindle#288`](https://github.com/crueber/spindle/issues/288) · Status: **DRAFT PLAN — awaiting review, do not implement.**
+> Forgejo [`crueber/spindle#288`](https://github.com/crueber/spindle/issues/288) · Status: **DRAFT — superseded for v1 by [`15_threads.md`](15_threads.md)** (the Threads feature); kept as the earlier design record, do not implement from this file.
 > Reviewer: **Chris (crueber)**. This document is normative on conflict once reviewed (the Feature 11
 > precedent: plan revision + plan review win). Until then it is a proposal and **no code may land**
 > (`internal/`, `web/`, config, CLI — all frozen pending review).

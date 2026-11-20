@@ -35,6 +35,7 @@ import (
 	"net/url"
 	"strings"
 
+	"github.com/crueber/spindle/internal/httpsec"
 	"github.com/crueber/spindle/internal/identity"
 	"github.com/crueber/spindle/internal/notify"
 	"github.com/crueber/spindle/internal/server/auth"
@@ -109,11 +110,7 @@ func parityErrMessage(err error) string {
 // (no scheme, no //host), falling back to the repo page. The redirect is a
 // GET, so the header re-reads the counters — the "refresh by redirect" rule.
 func repoReturnTarget(r *http.Request, full string) string {
-	next := strings.TrimSpace(r.PostFormValue("next"))
-	if next == "" || !strings.HasPrefix(next, "/") || strings.HasPrefix(next, "//") {
-		return "/" + full
-	}
-	return next
+	return httpsec.SafeNext(strings.TrimSpace(r.PostFormValue("next")), "/"+full)
 }
 
 // parityWritePreflight is the shared POST preflight for every parity write
@@ -125,7 +122,7 @@ func repoReturnTarget(r *http.Request, full string) string {
 // a cross-origin write to an invisible repo answers the same 404 as any other
 // invisible read — no state changes either way.
 func (s *Server) parityWritePreflight(w http.ResponseWriter, r *http.Request, p auth.Principal, action string) bool {
-	if !formsOriginOK(r) {
+	if !s.formsOriginOK(r) {
 		s.errorPage(w, r, http.StatusForbidden, "cross-origin request refused")
 		return false
 	}

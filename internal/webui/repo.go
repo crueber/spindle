@@ -44,9 +44,12 @@ package webui
 // boot-time call (composition runs before Serve), never a per-request setter.
 //
 // Templates: templates/pages/repo/{tree,blob,commits,commit,wal}.html and
-// templates/partials/repo_*.html. Other groups' repo pages include
-// {{template "repo_header" .Repo}} / {{template "repo_tabs" .Repo}} with the
-// value from s.RepoChromeFor.
+// templates/partials/repo_*.html. This group's own pages include
+// {{template "repo_header" .Repo}} / {{template "repo_tabs" .Repo}} inside
+// their content; every OTHER repo-scoped page (collab, forms, settings) hands
+// its chrome to s.pageRepo, and the layout (templates/base.html) renders it
+// above the page body — one attach point, so no page can forget the chrome or
+// render it twice (12_web_ui.md §2.2.1).
 //
 // DECISIONS this group makes (for the doc amendments in 12_web_ui.md; the
 // docs are foundation-owned, so they are listed here instead):
@@ -60,6 +63,12 @@ package webui
 //   - The tab strip fails OPEN: a tab hides only on an explicit false from the
 //     summary projections (features.*, has_checks); a feature-disabled page
 //     re-highlights onto Code (#522) so the strip is never blank.
+//   - The chrome attaches STRUCTURALLY (12_web_ui.md §2.2.1): repo-scoped
+//     groups hand s.pageRepo their *RepoChrome and templates/base.html renders
+//     masthead + tabs above {{template "content"}}; this group's own pages
+//     keep theirs inside content and leave PageData.Repo nil, so exactly one
+//     masthead ever renders. The section is derived from the path, never
+//     restated by a handler.
 //   - The empty guide shows BOTH transports as labelled rows (the SPA's
 //     protocol toggle needed JS) and never rewrites an advertised http URL.
 //   - Two-segment reserved paths that are not repositories (/orgs/new,
@@ -314,6 +323,11 @@ func (s *Server) repoOpen(w http.ResponseWriter, r *http.Request, rq repoRequest
 // to render the same header + tab strip (include partials "repo_header" and
 // "repo_tabs" with the returned value). ok=false means the response has
 // already been written (a gate or data failure).
+//
+// Page groups do NOT call this from a handler that already gated the request:
+// it re-runs the principal + visibility gate and the Exists/Sync/Summary pass,
+// so a gated handler would pay for both. Use repoChromeFor (below) — or
+// pageRepo, which renders it — after the page's own gate has passed.
 func (s *Server) RepoChromeFor(w http.ResponseWriter, r *http.Request, owner, name string) (*RepoChrome, bool) {
 	id, err := git.ParseRepoId(owner + "/" + name)
 	if err != nil {
@@ -333,6 +347,38 @@ func (s *Server) RepoChromeFor(w http.ResponseWriter, r *http.Request, owner, na
 		return nil, false
 	}
 	return s.repoOpen(w, r, repoRequest{p: p, id: id, full: id.Owner + "/" + id.Name}, api.SyncRefs)
+}
+
+// repoChromeFor is THE attach path for a repo-scoped page whose READ gate has
+// already passed: ONE Summary read (Summary performs the refs sync itself, so
+// no separate Exists probe or Sync call) and then the in-process projections
+// the masthead needs. Failure yields nil — the chrome is display data and must
+// never turn a page whose own gate passed into an error; the layout simply
+// renders no chrome.
+func (s *Server) repoChromeFor(r *http.Request, p auth.Principal, owner, name string) *RepoChrome {
+	if s.env.API == nil || s.env.API.Repo == nil {
+		return nil
+	}
+	id, err := git.ParseRepoId(owner + "/" + name)
+	if err != nil {
+		return nil
+	}
+	sum, err := s.env.API.Repo.Summary(r.Context(), id)
+	if err != nil {
+		return nil
+	}
+	return s.buildRepoChrome(r, repoRequest{p: p, id: id, full: id.Owner + "/" + id.Name}, sum)
+}
+
+// repoChromeFrom is repoChromeFor for a handler that already read the summary
+// (the collab gate needs it for the feature flags): the model build costs zero
+// extra store round trips. It never writes; a malformed id yields nil.
+func (s *Server) repoChromeFrom(r *http.Request, p auth.Principal, owner, name string, sum api.SummaryData) *RepoChrome {
+	id, err := git.ParseRepoId(owner + "/" + name)
+	if err != nil {
+		return nil
+	}
+	return s.buildRepoChrome(r, repoRequest{p: p, id: id, full: id.Owner + "/" + id.Name}, sum)
 }
 
 // repoViewError maps a RepoView error: not-found → 404, everything else →

@@ -46,26 +46,6 @@ func TestParseNotify(t *testing.T) {
 		want []trigger
 	}{
 		{
-			name: "gcs_finalize_manifest_key",
-			body: `{"message":{"attributes":{"eventType":"OBJECT_FINALIZE","objectId":"` + manifestKey("acme/monorepo") + `","bucketId":"b"}}}`,
-			want: []trigger{{repo: "acme/monorepo", key: manifestKey("acme/monorepo")}},
-		},
-		{
-			name: "gcs_finalize_objectid_under_message",
-			body: `{"message":{"attributes":{"eventType":"OBJECT_FINALIZE"},"objectId":"x/repos/acme/monorepo/manifest.pb"}}`,
-			want: []trigger{{repo: "acme/monorepo", key: "x/repos/acme/monorepo/manifest.pb"}},
-		},
-		{
-			name: "gcs_other_event_type_ignored",
-			body: `{"message":{"attributes":{"eventType":"OBJECT_DELETE","objectId":"` + manifestKey("acme/monorepo") + `"}}}`,
-			want: nil,
-		},
-		{
-			name: "gcs_finalize_non_manifest_key",
-			body: `{"message":{"attributes":{"eventType":"OBJECT_FINALIZE","objectId":"repos/acme/monorepo/wal/x.pack"}}}`,
-			want: []trigger{{key: "repos/acme/monorepo/wal/x.pack"}},
-		},
-		{
 			name: "s3_object_created",
 			body: `{"Records":[{"eventName":"ObjectCreated:Put","s3":{"object":{"key":"` + manifestKey("a/b") + `"}}},
 				{"eventName":"ObjectRemoved:Delete","s3":{"object":{"key":"` + manifestKey("c/d") + `"}}},

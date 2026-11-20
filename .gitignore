@@ -10,6 +10,9 @@
 web/dist/*
 !web/dist/.keep
 web/node_modules/
+# exact path too: a trailing slash never matches a SYMLINK, and a worktree
+# symlink committed by accident breaks pnpm in CI (ENOTDIR).
+web/node_modules
 
 # runtime data
 /data/

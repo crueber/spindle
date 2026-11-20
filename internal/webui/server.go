@@ -129,6 +129,52 @@ func (s *Server) authMode() string {
 	return s.env.Cfg.Server.Auth.Mode
 }
 
+// --- identity-owned pages ----------------------------------------------------
+
+// signedIn reports a real principal for this request: not the anonymous
+// viewer and an auth mode that can mint identities. It is the same test the
+// header uses to choose between the Login button and the identity menu.
+func (s *Server) signedIn(p auth.Principal) bool {
+	mode := s.authMode()
+	return !p.Anonymous && mode != "" && mode != "none"
+}
+
+// identityAccess is the verdict for a page that reads or writes one
+// principal's own data (/keys, /invitations, /notifications).
+type identityAccess int
+
+const (
+	identityOK identityAccess = iota
+	identitySignIn
+	identityDisabled
+)
+
+// identityAccessFor classifies an identity-owned page request.
+//
+//   - signed in → identityOK.
+//   - auth oidc/token, signed out → identitySignIn: the API answers 401 for
+//     these surfaces (ssh-keys, invitations, notifications), and the page must
+//     not answer less.
+//   - auth none/"" → identityDisabled: no identity exists, so there is no
+//     credential to present. The page explains that authentication is off and
+//     links /setup instead of rendering a management form nobody owns; writes
+//     are refused 403 (never a 404, never a silent success).
+func (s *Server) identityAccessFor(p auth.Principal) identityAccess {
+	if s.signedIn(p) {
+		return identityOK
+	}
+	if mode := s.authMode(); mode == "" || mode == "none" {
+		return identityDisabled
+	}
+	return identitySignIn
+}
+
+// IdentityNotice is the shared "no identity owns this page" page data
+// (partials/identity_notice.html): What is the plural noun of the surface.
+type IdentityNotice struct {
+	What string
+}
+
 // repoVisible applies the repo read authority (Forgejo #345): the identity
 // gate decides when wired; otherwise the anonymous_read flag does — the exact
 // order the server uses for git/API reads.

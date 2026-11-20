@@ -412,6 +412,9 @@ func TestPublicOwnerProfileMalformedBody(t *testing.T) {
 	// A body with an invalid percent escape fails ParseForm → 400, not a panic.
 	req := httptest.NewRequest(http.MethodPost, "/alice/profile", strings.NewReader("display_name=%zz"))
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	// A browser form POST carries Origin; cookie-mode writes fail closed
+	// without it (UI-07), so a raw request would 403 before parsing.
+	req.Header.Set("Origin", "http://example.com")
 	rec := httptest.NewRecorder()
 	s.mux.ServeHTTP(rec, req)
 	if rec.Code != http.StatusBadRequest || !strings.Contains(rec.Body.String(), "form parse failed") {
@@ -449,6 +452,10 @@ func publicDoPost(s *Server, target string, form url.Values, hdr map[string]stri
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	for k, v := range hdr {
 		req.Header.Set(k, v)
+	}
+	// Browser-realistic same-origin write (the gate fails closed otherwise).
+	if req.Header.Get("Origin") == "" && req.Header.Get("Referer") == "" {
+		req.Header.Set("Origin", "http://"+req.Host)
 	}
 	rec := httptest.NewRecorder()
 	s.mux.ServeHTTP(rec, req)

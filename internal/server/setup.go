@@ -2,24 +2,18 @@ package server
 
 import (
 	"net/http"
-	"os"
-	"strings"
+
+	"github.com/crueber/spindle/internal/server/auth"
 )
 
 // setupAccess implements the §3.4 access rules: open while (no config file)
-// OR (config invalid) OR (auth mode = none); otherwise an admin principal is
-// required. Optional SPINDLE_SETUP_TOKEN: when set, the routes require it
-// (query ?token= or Bearer) and skip the admin check.
+// OR (config invalid) OR (auth mode = none); otherwise an authenticated admin
+// principal is required. Admin means Principal.Admin — the same flag every
+// other host-admin surface uses — so an OIDC user in one of the configured
+// server.auth.admin_groups qualifies (WP13), as does an admin_email /
+// admin_domain match. There is NO env-token escape hatch: SPINDLE_SETUP_TOKEN
+// has no effect.
 func (s *Server) setupAccess(w http.ResponseWriter, r *http.Request) bool {
-	if tok := os.Getenv("SPINDLE_SETUP_TOKEN"); tok != "" {
-		q := r.URL.Query().Get("token")
-		h := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
-		if subtleMatch(tok, q) || subtleMatch(tok, h) {
-			return true
-		}
-		plainStatus(w, http.StatusUnauthorized, "setup token required")
-		return false
-	}
 	open := s.boot.Mode == "defaults" || s.boot.InSetupOnly() ||
 		s.cfg.Server.Auth.Mode == "none"
 	if open {
@@ -30,20 +24,13 @@ func (s *Server) setupAccess(w http.ResponseWriter, r *http.Request) bool {
 		s.mapAuthStatus(w, aerr)
 		return false
 	}
+	if p.Anonymous {
+		s.mapAuthStatus(w, &auth.AuthError{Kind: auth.ErrUnauthorized, Why: "authentication required"})
+		return false
+	}
 	if aerr := requireAdmin(p); aerr != nil {
 		s.mapAuthStatus(w, aerr)
 		return false
 	}
 	return true
-}
-
-func subtleMatch(want, got string) bool {
-	if got == "" || len(want) != len(got) {
-		return false
-	}
-	v := 0
-	for i := range want {
-		v |= int(want[i] ^ got[i])
-	}
-	return v == 0
 }

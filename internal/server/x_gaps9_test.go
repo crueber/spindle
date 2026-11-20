@@ -434,10 +434,10 @@ func TestSetupAuthTestEdgeCases(t *testing.T) {
 		!strings.Contains(msgOf(out), "not a valid OIDC discovery document") {
 		t.Fatalf("torn discovery = %d %v", code, out)
 	}
-	// Gated: in normal mode with token auth, anonymous callers get 403.
+	// Gated: in normal mode with token auth, anonymous callers get 401.
 	s.cfg.Server.Auth.Mode = "token"
-	if code, _ := post(s, `{"issuer":"https://id.example.com"}`); code != http.StatusForbidden {
-		t.Fatalf("anonymous probe = %d, want 403", code)
+	if code, _ := post(s, `{"issuer":"https://id.example.com"}`); code != http.StatusUnauthorized {
+		t.Fatalf("anonymous probe = %d, want 401", code)
 	}
 }
 

@@ -212,7 +212,7 @@ func (s *AuthService) authOIDC(r *http.Request) (auth.Principal, *auth.AuthError
 	if c, cerr := r.Cookie("walgit_session"); cerr == nil && c.Value != "" {
 		st, terr := s.VerifyToken(c.Value)
 		if terr == nil && st.Kind == "session" {
-			p, aerr := s.principalFromEmail(st.Email)
+			p, aerr := s.principalFromEmailGroups(st.Email, st.Groups)
 			if aerr != nil {
 				return auth.Principal{}, aerr
 			}
@@ -231,7 +231,7 @@ func (s *AuthService) verifyIDToken(ctx context.Context, raw string, browserFlow
 	if err != nil {
 		return auth.Principal{}, err
 	}
-	return s.principalFromEmail(claims.Email)
+	return s.principalFromEmailGroups(claims.Email, claims.Groups)
 }
 
 // wgtPrincipal verifies a wgt_-prefixed token and derives the principal from
@@ -245,7 +245,7 @@ func (s *AuthService) wgtPrincipal(wire string) (auth.Principal, *auth.AuthError
 	if st.Kind != tokenKind {
 		return auth.Principal{}, &auth.AuthError{Kind: auth.ErrInvalid, Why: "wrong token kind"}
 	}
-	return s.principalFromEmail(st.Email)
+	return s.principalFromEmailGroups(st.Email, st.Groups)
 }
 
 // principalFromEmail applies the §8.4 email policy (7) and returns the
@@ -256,6 +256,17 @@ func (s *AuthService) wgtPrincipal(wire string) (auth.Principal, *auth.AuthError
 // rides along on Principal.Email for alias matching and session/token
 // mints (the wire keeps carrying the email).
 func (s *AuthService) principalFromEmail(email string) (auth.Principal, *auth.AuthError) {
+	return s.principalFromEmailGroups(email, nil)
+}
+
+// principalFromEmailGroups is principalFromEmail plus the WP13 group-admin
+// rule: the verified OIDC group list (the configured groups_claim from the
+// signature-checked ID token, carried across session/token wires) grants the
+// global admin flag when it intersects server.auth.admin_groups
+// (case-insensitive). An empty admin_groups list never grants admin, and
+// group membership never upgrades Write — write stays the email policy's
+// business (write_domains), admin is an independent flag per §8.1.
+func (s *AuthService) principalFromEmailGroups(email string, groups []string) (auth.Principal, *auth.AuthError) {
 	email = strings.ToLower(strings.TrimSpace(email))
 	domain := ""
 	if i := strings.LastIndexByte(email, '@'); i >= 0 {
@@ -296,7 +307,21 @@ func (s *AuthService) principalFromEmail(email string) (auth.Principal, *auth.Au
 			admin = true
 		}
 	}
-	return auth.Principal{Name: s.usernameFor(email), Email: email, Write: write, Admin: admin}, nil
+	if !admin && len(s.cfg.AdminGroups) > 0 {
+		for _, g := range groups {
+			g = strings.TrimSpace(g)
+			if g == "" {
+				continue // an empty claim value never matches an admin group
+			}
+			for _, want := range s.cfg.AdminGroups {
+				if strings.EqualFold(g, strings.TrimSpace(want)) {
+					admin = true
+				}
+			}
+		}
+	}
+	return auth.Principal{Name: s.usernameFor(email), Email: email,
+		Groups: groups, Write: write, Admin: admin}, nil
 }
 
 // usernameFor resolves the immutable username for a verified email:
@@ -366,6 +391,7 @@ func (s *AuthService) BrowserLoginEnabled() bool {
 type SessionToken struct {
 	Kind      string // "session" | "token"
 	Email     string
+	Groups    []string // verified OIDC groups captured at mint (WP13; may be nil)
 	ExpiresAt time.Time
 	IssuedAt  time.Time
 	Wire      string // the full wire form (session tokens without prefix)
@@ -382,25 +408,37 @@ func b64url(b []byte) string { return base64.RawURLEncoding.EncodeToString(b) }
 func b64urlDecode(s string) ([]byte, error) { return base64.RawURLEncoding.DecodeString(s) }
 
 // MintToken issues an access token ("wgt_" prefix, kind token, TTL access_token_ttl).
-func (s *AuthService) MintToken(email string) (SessionToken, error) {
-	return s.mint(tokenKind, email, tokenPrefix)
+// The optional groups are the principal's verified OIDC groups (WP13): they
+// ride the wire so a minted access token re-derives the same admin rule.
+func (s *AuthService) MintToken(email string, groups ...string) (SessionToken, error) {
+	return s.mint(tokenKind, email, tokenPrefix, groups)
 }
 
 // MintSession issues a session token (kind session, no prefix).
-func (s *AuthService) MintSession(email string) (SessionToken, error) {
-	return s.mint(sessionKind, email, "")
+func (s *AuthService) MintSession(email string, groups ...string) (SessionToken, error) {
+	return s.mint(sessionKind, email, "", groups)
 }
 
-func (s *AuthService) mint(kind, email, prefix string) (SessionToken, error) {
+// mint writes the §8.5 payload `kind\nexp\ni at\nemail` plus an optional fifth
+// line carrying the verified group list as a JSON array (WP13; law 5 note in
+// 06_server_http.md Decisions). The groups line is part of the HMAC payload, so
+// a client cannot forge membership; it is decoded on every session/token
+// verification and the admin_groups POLICY is re-applied per request.
+func (s *AuthService) mint(kind, email, prefix string, groups []string) (SessionToken, error) {
 	now := s.now()
 	ttl := time.Duration(s.cfg.AccessTokenTTL)
 	if kind == sessionKind {
 		ttl = time.Duration(s.cfg.SessionTTL)
 	}
 	payload := fmt.Sprintf("%s\n%d\n%d\n%s", kind, now.Add(ttl).Unix(), now.Unix(), email)
+	gj := []byte("[]")
+	if len(groups) > 0 {
+		gj, _ = json.Marshal(groups) // []string always marshals
+	}
+	payload += "\n" + string(gj)
 	mac := hmacSHA256([]byte(s.cfg.SessionSecret), []byte(payload))
 	wire := prefix + b64url([]byte(payload)) + "." + b64url(mac)
-	return SessionToken{Kind: kind, Email: email, IssuedAt: now,
+	return SessionToken{Kind: kind, Email: email, Groups: groups, IssuedAt: now,
 		ExpiresAt: now.Add(ttl), Wire: wire}, nil
 }
 
@@ -430,8 +468,8 @@ func (s *AuthService) VerifyToken(wire string) (SessionToken, *auth.AuthError) {
 	if subtle.ConstantTimeCompare(mac, want) != 1 {
 		return fail(auth.ErrInvalid, "invalid token")
 	}
-	lines := strings.SplitN(string(payload), "\n", 4)
-	if len(lines) != 4 {
+	lines := strings.SplitN(string(payload), "\n", 5)
+	if len(lines) != 4 && len(lines) != 5 {
 		return fail(auth.ErrInvalid, "malformed token")
 	}
 	kind := lines[0]
@@ -446,7 +484,18 @@ func (s *AuthService) VerifyToken(wire string) (SessionToken, *auth.AuthError) {
 	if s.now().After(exp) {
 		return fail(auth.ErrInvalid, "token expired")
 	}
-	return SessionToken{Kind: kind, Email: lines[3], IssuedAt: iat, ExpiresAt: exp, Wire: wire}, nil
+	// The fifth line (WP13) is the verified group list. Four-line tokens
+	// minted before groups existed stay valid with no groups.
+	var groups []string
+	if len(lines) == 5 {
+		if g := strings.TrimSpace(lines[4]); g != "" && g != "[]" && g != "null" {
+			if terr := json.Unmarshal([]byte(g), &groups); terr != nil {
+				return fail(auth.ErrInvalid, "malformed token")
+			}
+		}
+	}
+	return SessionToken{Kind: kind, Email: lines[3], Groups: groups, IssuedAt: iat,
+		ExpiresAt: exp, Wire: wire}, nil
 }
 
 func hmacSHA256(key, msg []byte) []byte {
@@ -750,6 +799,11 @@ type idClaims struct {
 	Iat           int64  `json:"iat"`
 	Email         string `json:"email"`
 	EmailVerified *bool  `json:"email_verified"`
+	// Groups is the configured claim (server.auth.groups_claim) decoded from
+	// the SAME signature-verified payload — never a request header. A JSON
+	// array of strings yields every string element; a single string yields
+	// one entry; anything else (absent, number, object) yields none.
+	Groups []string `json:"-"`
 }
 
 // Verify checks alg/key/claims per §8.4 (leeway 30 s; iss with trailing slash
@@ -872,8 +926,63 @@ func (j *JWKS) Verify(ctx context.Context, raw string, a *config.Auth, browserFl
 	if nonce != "" && c.Nonce != nonce {
 		return idClaims{}, &auth.AuthError{Kind: auth.ErrInvalid, Why: "nonce mismatch"}
 	}
-	claims := idClaims{Iss: c.Iss, Email: c.Email, Exp: c.Exp, Nbf: c.Nbf, Iat: c.Iat}
+	// WP13: extract the configured group claim from the verified payload.
+	// A second unmarshal into raw fields is what lets the claim NAME stay
+	// configurable (the typed struct above has fixed keys); the signature
+	// already passed, so these bytes are trustworthy.
+	var rawClaims map[string]json.RawMessage
+	_ = json.Unmarshal(payload, &rawClaims)
+	claims := idClaims{Iss: c.Iss, Email: c.Email, Exp: c.Exp, Nbf: c.Nbf, Iat: c.Iat,
+		Groups: groupsFromClaim(rawClaims, a.GroupsClaim)}
 	return claims, nil
+}
+
+// groupsFromClaim decodes the configured group claim: a JSON array of strings
+// (non-string elements skipped) or a single string. Absent/unknown/empty →
+// nil, never an error — a missing claim simply grants no group-derived admin.
+func groupsFromClaim(raw map[string]json.RawMessage, claim string) []string {
+	claim = strings.TrimSpace(claim)
+	if claim == "" {
+		return nil
+	}
+	v, ok := raw[claim]
+	if !ok {
+		return nil
+	}
+	s := strings.TrimSpace(string(v))
+	if s == "" || s == "null" {
+		return nil
+	}
+	if s[0] == '"' {
+		var one string
+		if json.Unmarshal(v, &one) != nil {
+			return nil
+		}
+		one = strings.TrimSpace(one)
+		if one == "" {
+			return nil
+		}
+		return []string{one}
+	}
+	if s[0] != '[' {
+		return nil
+	}
+	var items []any
+	if json.Unmarshal(v, &items) != nil {
+		return nil
+	}
+	out := make([]string, 0, len(items))
+	for _, it := range items {
+		if g, ok := it.(string); ok {
+			if g = strings.TrimSpace(g); g != "" {
+				out = append(out, g)
+			}
+		}
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
 }
 
 func containsString(list []string, v string) bool {

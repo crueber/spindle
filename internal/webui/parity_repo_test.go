@@ -59,6 +59,11 @@ func parityDo(t *testing.T, s *Server, method, target string, form url.Values, h
 	for k, v := range hdr {
 		req.Header.Set(k, v)
 	}
+	// Browser-realistic same-origin write (the gate fails closed otherwise).
+	if method != http.MethodGet && method != http.MethodHead &&
+		req.Header.Get("Origin") == "" && req.Header.Get("Referer") == "" {
+		req.Header.Set("Origin", "http://"+req.Host)
+	}
 	rec := httptest.NewRecorder()
 	s.mux.ServeHTTP(rec, req)
 	return rec
@@ -672,6 +677,7 @@ func TestRepoCreateTagMalformedBody(t *testing.T) {
 	f, calls := tagFixture(t)
 	req := httptest.NewRequest(http.MethodPost, "/demo/spindle/tag", strings.NewReader("name=%zz"))
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.Header.Set("Origin", "http://"+req.Host)
 	rec := httptest.NewRecorder()
 	f.s.mux.ServeHTTP(rec, req)
 	if rec.Code != http.StatusBadRequest || !strings.Contains(rec.Body.String(), "form parse failed") {

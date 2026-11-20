@@ -111,6 +111,13 @@ func checkOIDC(c *Config) []error {
 	if len(a.AllowedDomains) == 0 && len(a.AllowedEmails) == 0 {
 		errs = append(errs, fmt.Errorf("auth.mode = \"oidc\" requires server.auth.allowed_domains or server.auth.allowed_emails"))
 	}
+	// Group-derived admin (WP13): the claim name is required so an empty
+	// admin_groups cannot silently mean "look up the empty claim" — an
+	// operator who disables group admins sets admin_groups = []. The
+	// allowlist itself may be empty (group admins disabled).
+	if strings.TrimSpace(a.GroupsClaim) == "" {
+		errs = append(errs, fmt.Errorf("auth.mode = \"oidc\" requires a non-empty server.auth.groups_claim (default \"groups\")"))
+	}
 	if (a.OAuthClientID == "") != (a.OAuthClientSecret == "") {
 		errs = append(errs, fmt.Errorf("server.auth.oauth_client_id and server.auth.oauth_client_secret must be both set or both unset"))
 	}
@@ -232,9 +239,9 @@ func checkBundleChainFilters(c *Config) []error {
 func checkStore(c *Config) []error {
 	var errs []error
 	switch c.Store.Backend {
-	case "s3", "gcs", "memory", "filesystem":
+	case "s3", "memory", "filesystem":
 	default:
-		errs = append(errs, fmt.Errorf("store.backend must be one of s3|gcs|memory|filesystem (got %q)", c.Store.Backend))
+		errs = append(errs, fmt.Errorf("store.backend must be one of s3|memory|filesystem (got %q)", c.Store.Backend))
 	}
 	if c.Store.MultipartPartSize > 0 && c.Store.MultipartThreshold > 0 &&
 		c.Store.MultipartPartSize > c.Store.MultipartThreshold {

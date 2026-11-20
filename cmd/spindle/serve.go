@@ -533,15 +533,13 @@ func openStore(cfg *config.Config, dataDir string) (store.ObjectStore, error) {
 		if err := os.MkdirAll(root, 0o755); err != nil {
 			return nil, fmt.Errorf("create store root %s: %w", root, err)
 		}
-		fsStore, err := store.NewFilesystemRoot(root, cfg.Store.GCS.BulkConcurrency)
+		fsStore, err := store.NewFilesystemRoot(root, store.DefaultBulkConcurrency)
 		if err != nil {
 			return nil, err
 		}
 		return fsStore, nil
 	case "s3":
 		return store.NewS3(&cfg.Store)
-	case "gcs":
-		return nil, fmt.Errorf("store.backend = %q: the GCS backend is not part of this build; use filesystem, s3, or memory", cfg.Store.Backend)
 	default:
 		return nil, fmt.Errorf("unknown store.backend %q", cfg.Store.Backend)
 	}

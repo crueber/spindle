@@ -324,7 +324,7 @@ func TestWgtTokenLifecycle(t *testing.T) {
 		t.Fatalf("tampered token must be invalid, got %v", aerr)
 	}
 	// Expired → invalid (drives the real-401 rule).
-	expired, _ := s.authSvc.mint(tokenKind, "alice@example.com", tokenPrefix)
+	expired, _ := s.authSvc.mint(tokenKind, "alice@example.com", tokenPrefix, nil)
 	s.authSvc.now = func() time.Time { return time.Now().Add(200 * 24 * time.Hour) }
 	if _, aerr := s.authSvc.VerifyToken(expired.Wire); aerr == nil {
 		t.Fatal("expired token must be invalid")

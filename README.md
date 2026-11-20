@@ -2,7 +2,7 @@
 
 A git host in Go: **git over smart HTTP (v0/v2), LFS, bundle-uri, a JSON API with SSE, and a web UI — where the object store is the only database.**
 
-It serves repositories whose entire state — refs, packs, config, policy, events, web UI — lives as objects in a bucket (filesystem, S3, or GCS). Instances are disposable; wipe one and you lose nothing but warmth.
+It serves repositories whose entire state — refs, packs, config, policy, events, web UI — lives as objects in a bucket (filesystem or S3). Instances are disposable; wipe one and you lose nothing but warmth.
 
 ## Inspired by walgit
 
@@ -67,7 +67,7 @@ git clone ssh://git@localhost:2222/<owner>/<repo>.git
 
 The host key auto-generates into the data volume, so it is stable across container restarts.
 
-For an **S3-backed store** (rustfs/MinIO/GCS), see [`compose.yaml`](compose.yaml) — the shipped stack builds from source; to run it from the published image instead, replace the `spindle` service's `build: .` with `image: ghcr.io/crueber/spindle:latest` (the rustfs service and the `SPINDLE__STORE__*` env stay as they are). [`compose.standalone.yml`](compose.standalone.yml) is the same standalone shape as above, built from source instead of pulled.
+For an **S3-backed store** (rustfs/MinIO), see [`compose.yaml`](compose.yaml) — the shipped stack builds from source; to run it from the published image instead, replace the `spindle` service's `build: .` with `image: ghcr.io/crueber/spindle:latest` (the rustfs service and the `SPINDLE__STORE__*` env stay as they are). [`compose.standalone.yml`](compose.standalone.yml) is the same standalone shape as above, built from source instead of pulled.
 
 ## v1 release requirements
 
@@ -79,14 +79,11 @@ Status of every item, the GitHub-parity bar and the closing work: [`docs/PLAN-V1
 - [x] [tags](internal/tags)
 - [x] [releases](internal/releases)
 - [ ] packages — [specified](docs/features/14_packages.md), not yet implemented
+- [ ] [cli](cmd/spindle) — every operator action, machine-readable
+- [ ] [threads](docs/features/15_threads.md) — CI: workflow files, container jobs, checks results
 - [x] [fork](internal/social)
 - [x] [webhooks](internal/notify)
 - [x] [oidc](internal/server)
-
-## v1.1
-
-- [ ] [cli](cmd/spindle)
-- [ ] [actions](https://github.com/crueber/spindle/issues/288)
 
 ## Backlog
 

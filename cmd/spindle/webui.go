@@ -25,7 +25,6 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/url"
-	"os"
 	"strconv"
 	"strings"
 	"time"
@@ -368,41 +367,25 @@ func wireSettingsPages(cfg *config.Config, boot server.BootState, apiEnv *api.En
 }
 
 // setupAccessFn mirrors internal/server's setupAccess rule (§3.4) without the
-// write-a-response half: SPINDLE_SETUP_TOKEN wins, else open while the config is
-// invalid/absent or auth.mode == none, else an admin principal is required.
+// write-a-response half: open while the config is invalid/absent or
+// auth.mode == none, else an authenticated admin principal is required.
+// Admin is Principal.Admin, so OIDC users in server.auth.admin_groups qualify
+// (WP13) along with the admin email/domain rules. No env token exists.
 func setupAccessFn(cfg *config.Config, boot server.BootState) func(*http.Request, auth.Principal) *auth.AuthError {
 	return func(r *http.Request, p auth.Principal) *auth.AuthError {
-		if tok := os.Getenv("SPINDLE_SETUP_TOKEN"); tok != "" {
-			q := r.URL.Query().Get("token")
-			h := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
-			if subtleEqual(tok, q) || subtleEqual(tok, h) {
-				return nil
-			}
-			return &auth.AuthError{Kind: auth.ErrUnauthorized, Why: "setup token required"}
-		}
 		open := boot.Mode == "defaults" || boot.InSetupOnly() ||
 			(cfg != nil && cfg.Server.Auth.Mode == "none")
 		if open {
 			return nil
 		}
+		if p.Anonymous {
+			return &auth.AuthError{Kind: auth.ErrUnauthorized, Why: "authentication required for setup"}
+		}
 		if !p.Admin {
-			return &auth.AuthError{Kind: auth.ErrForbidden, Why: "setup requires an admin principal or a setup token"}
+			return &auth.AuthError{Kind: auth.ErrForbidden, Why: "setup requires an admin principal (an OIDC admin group, admin email, or admin domain)"}
 		}
 		return nil
 	}
-}
-
-// subtleEqual is the constant-time token compare (server.subtleMatch is
-// package-private; the rule must not fork in spirit OR timing).
-func subtleEqual(want, got string) bool {
-	if got == "" || len(want) != len(got) {
-		return false
-	}
-	v := 0
-	for i := range want {
-		v |= int(want[i] ^ got[i])
-	}
-	return v == 0
 }
 
 // setupViewFn builds the schema view from the SAME functions GET
@@ -438,6 +421,11 @@ func setupViewFn(cfg *config.Config, boot server.BootState) func(context.Context
 				if k.DisplayType != "" {
 					ftype = k.DisplayType
 				}
+				// Secret rows carry the raw value here; the page layer masks it
+				// before rendering (webui.settingsPrepareSetup), so the real
+				// value never reaches a template. Save is overwrite-only:
+				// setup.ParseValues keeps the stored value when the mask or an
+				// empty field comes back.
 				sec.Essential = append(sec.Essential, webui.SettingsSetupField{
 					Key:     k.Key,
 					Type:    ftype,

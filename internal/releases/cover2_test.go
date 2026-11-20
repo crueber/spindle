@@ -603,7 +603,7 @@ func TestCover2ServeAssetEdges(t *testing.T) {
 	if rec2.Code != 404 {
 		t.Fatalf("header gone: %d", rec2.Code)
 	}
-	// Backend Head 404-error (S3/GCS shape) → 404.
+	// Backend Head 404-error (object-store shape) → 404.
 	x2 := newHarness(t)
 	grantWrite(x2)
 	x2.git.tags["v1"] = strings.Repeat("a", 40)

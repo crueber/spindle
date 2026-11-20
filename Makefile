@@ -67,8 +67,6 @@ contract-s3: ## store contract against rustfs (make dev-store first)
 	SPINDLE_TEST_S3_BUCKET=$(SPINDLE_TEST_S3_BUCKET) \
 	$(GO) test -count=1 ./internal/store/ -run TestContractS3
 
-contract-gcs: ## store contract against a real GCS bucket
-	SPINDLE_TEST_GCS_BUCKET=$${SPINDLE_TEST_GCS_BUCKET:?set SPINDLE_TEST_GCS_BUCKET} $(GO) test -count=1 ./internal/store/ -run TestContractGCS
 
 landing-gifs: ## regenerate the landing-page concept GIFs (MANUAL: run only when scenes change; freshness pinned by the golden test)
 	$(GO) run ./internal/devtools/landinggif -out web/public/concepts/
@@ -94,4 +92,4 @@ ci: vet test race cover contract sim e2e ## everything that must be green before
 help: ## show targets
 	@grep -E '^[a-zA-Z0-9_-]+:.*## ' $(MAKEFILE_LIST) | awk 'BEGIN{FS=":.*## "}{printf "  \033[36m%-14s\033[0m %s\n", $$1, $$2}'
 
-.PHONY: web build fmt vet test test-go test-web race cover sim contract contract-fs contract-s3 contract-gcs e2e image dev-store dev-store-stop clean ci help landing-gifs
+.PHONY: web build fmt vet test test-go test-web race cover sim contract contract-fs contract-s3 e2e image dev-store dev-store-stop clean ci help landing-gifs

@@ -26,6 +26,7 @@ import (
 	"github.com/crueber/spindle/internal/config"
 	"github.com/crueber/spindle/internal/pages"
 	"github.com/crueber/spindle/internal/server/auth"
+	"github.com/crueber/spindle/internal/setup"
 )
 
 // --- harness ---------------------------------------------------------------
@@ -44,7 +45,10 @@ func settingsTestPrincipal() auth.Principal {
 func newSettingsServer(t *testing.T, f *settingsFakes) *Server {
 	t.Helper()
 	cfg := config.Defaults()
-	cfg.Server.Auth.Mode = "none"
+	// A real auth mode: identity-owned pages (/keys) render only for a
+	// signed-in principal, and auth none deliberately shows the shared
+	// "authentication is disabled" notice instead (tested separately).
+	cfg.Server.Auth.Mode = "token"
 	cfg.Server.Auth.AnonymousRead = true
 	p := settingsTestPrincipal()
 	if f != nil && f.principal.Name != "" {
@@ -79,9 +83,17 @@ func settingsTestTemplates(t *testing.T, s *Server) map[string]*template.Templat
 	if err != nil || len(partials) == 0 {
 		t.Fatalf("settings partials: %v (%d)", err, len(partials))
 	}
-	// base.html composes the shared header/footer; they are foundation files,
-	// not another group's.
-	shared := []string{"templates/partials/header.html", "templates/partials/footer.html"}
+	// base.html composes the shared header/footer, the repository chrome
+	// (repo_header/repo_tabs) it renders for a repo-scoped page, and the
+	// identity notice; they are foundation/shared partials, not another
+	// group's.
+	shared := []string{
+		"templates/partials/header.html",
+		"templates/partials/footer.html",
+		"templates/partials/repo_header.html",
+		"templates/partials/repo_tabs.html",
+		"templates/partials/identity_notice.html",
+	}
 	out := map[string]*template.Template{}
 	// The shared error page: a minimal stub rather than templates/pages/
 	// error.html, because that page compares an int with the group-shared
@@ -275,7 +287,6 @@ func TestSettingsSetupSaveSuccessRedirectsWithRestartKeys(t *testing.T) {
 	s := newSettingsServer(t, f)
 	form := url.Values{
 		"op":                  {"save"},
-		"token":               {"s3cr3t"},
 		"cfg.server.listen":   {"0.0.0.0:9090"},
 		"cfg.server.http2":    {"false", "true"}, // hidden false + checked true
 		"cfg.cache.max_bytes": {"32GiB"},
@@ -287,7 +298,7 @@ func TestSettingsSetupSaveSuccessRedirectsWithRestartKeys(t *testing.T) {
 	loc := rec.Header().Get("Location")
 	settingsMustContain(t, loc, "saved=1", "redirect")
 	settingsMustContain(t, loc, "restart=server.listen%2Ccache.max_bytes", "redirect restart keys")
-	settingsMustContain(t, loc, "token=s3cr3t", "redirect keeps the setup token")
+	settingsMustNotContain(t, loc, "token=", "no setup token on the redirect")
 	if got := saved["server.http2"]; got != "true" {
 		t.Fatalf("repeated boolean field resolved to %q, want the last (checkbox) value", got)
 	}
@@ -326,6 +337,65 @@ func TestSettingsSetupValidationErrorReRendersTypedValues(t *testing.T) {
 	settingsMustContain(t, body, `class="err-line"`, "error line class")
 	settingsMustContain(t, body, `value="1 fortnight"`, "typed value preserved")
 	settingsMustContain(t, body, "validation failed — nothing was saved", "error banner")
+}
+
+// TestSettingsSetupMasksStoredSecrets pins UI-04: a stored secret (session,
+// OAuth client, webhook, S3 key) never appears in the page body in any auth
+// mode — the row shows the mask and is editable by overwrite only.
+func TestSettingsSetupMasksStoredSecrets(t *testing.T) {
+	const secret = "s3cr3t-stored-value-do-not-render"
+	for _, mode := range []string{"none", "token", "oidc"} {
+		t.Run(mode, func(t *testing.T) {
+			f := &settingsFakes{deps: SettingsDeps{SetupView: func(context.Context) (*SettingsSetupView, error) {
+				v := settingsFakeView()
+				v.Sections[0].Essential = append(v.Sections[0].Essential,
+					SettingsSetupField{Key: "server.auth.session_secret", Type: "string", Value: secret, Secret: true},
+					SettingsSetupField{Key: "server.auth.issuer", Type: "url", Value: "https://id.example.com"},
+				)
+				return v, nil
+			}}}
+			s := newSettingsServer(t, f)
+			s.env.Cfg.Server.Auth.Mode = mode
+			rec := settingsDo(t, s, http.MethodGet, "/setup", nil, nil)
+			if rec.Code != http.StatusOK {
+				t.Fatalf("GET /setup = %d", rec.Code)
+			}
+			body := rec.Body.String()
+			settingsMustNotContain(t, body, secret, "stored secret in the page body")
+			settingsMustContain(t, body, setup.SecretMask, "masked secret row")
+			settingsMustContain(t, body, `name="cfg.server.auth.session_secret"`, "secret row")
+			settingsMustContain(t, body, `type="password"`, "secret password control")
+			// Non-secret neighbours still render their value.
+			settingsMustContain(t, body, "https://id.example.com", "issuer value")
+		})
+	}
+}
+
+// TestSettingsSetupRejectNeverEchoesSecrets: a rejected save must not bounce a
+// typed secret back into the re-rendered form.
+func TestSettingsSetupRejectNeverEchoesSecrets(t *testing.T) {
+	f := &settingsFakes{deps: SettingsDeps{
+		SetupView: func(context.Context) (*SettingsSetupView, error) {
+			v := settingsFakeView()
+			v.Sections[0].Essential = append(v.Sections[0].Essential,
+				SettingsSetupField{Key: "server.auth.session_secret", Type: "string", Secret: true})
+			return v, nil
+		},
+		SetupSave: func(context.Context, map[string]string) (SettingsSetupResult, []SettingsSetupError, error) {
+			return SettingsSetupResult{}, []SettingsSetupError{{Key: "server.listen", Message: "not a listen address"}}, nil
+		},
+	}}
+	s := newSettingsServer(t, f)
+	rec := settingsDo(t, s, http.MethodPost, "/setup", url.Values{
+		"op":                             {"save"},
+		"cfg.server.auth.session_secret": {"typed-secret-value"},
+	}, nil)
+	if rec.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("rejected save = %d", rec.Code)
+	}
+	body := rec.Body.String()
+	settingsMustNotContain(t, body, "typed-secret-value", "typed secret echoed back")
+	settingsMustContain(t, body, "not a listen address", "error line")
 }
 
 func TestSettingsSetupSaveReportsValidationErrors(t *testing.T) {
@@ -1313,25 +1383,25 @@ func TestSettingsKeysNotWiredWriteAndDeleteError(t *testing.T) {
 }
 
 func TestSettingsSetupExtraBranches(t *testing.T) {
-	// Validated + saved query flags, plus the setup token surviving the form.
+	// Validated + saved query flags render the flashes.
 	clean := &settingsFakes{deps: SettingsDeps{
 		SetupView: func(context.Context) (*SettingsSetupView, error) { return settingsFakeView(), nil },
 	}}
 	s := newSettingsServer(t, clean)
-	rec := settingsDo(t, s, http.MethodGet, "/setup?validated=1&saved=1&token=tok", nil, nil)
+	rec := settingsDo(t, s, http.MethodGet, "/setup?validated=1&saved=1", nil, nil)
 	settingsMustContain(t, rec.Body.String(), "Valid — nothing was saved.", "validate flash")
-	settingsMustContain(t, rec.Body.String(), `name="token" value="tok"`, "token hidden field")
+	settingsMustNotContain(t, rec.Body.String(), `name="token"`, "no setup token field")
 
 	// The access verdict can arrive on the view (the API's spelling).
 	view := settingsFakeView()
-	view.Access = "token_required"
-	view.Detail = "setup token required"
+	view.Access = "admin_required"
+	view.Detail = "admin principal required"
 	s = newSettingsServer(t, &settingsFakes{deps: SettingsDeps{
 		SetupView: func(context.Context) (*SettingsSetupView, error) { return view, nil },
 	}})
 	rec = settingsDo(t, s, http.MethodGet, "/setup", nil, nil)
 	settingsMustContain(t, rec.Body.String(), "Access restricted", "view-denied")
-	settingsMustContain(t, rec.Body.String(), "setup token required", "view-denied detail")
+	settingsMustContain(t, rec.Body.String(), "admin principal required", "view-denied detail")
 
 	// A schema read error is a 503, never a half page.
 	f := &settingsFakes{deps: SettingsDeps{SetupView: func(context.Context) (*SettingsSetupView, error) {
@@ -1391,9 +1461,9 @@ func TestSettingsSetupExtraBranches(t *testing.T) {
 	if rec.Code != http.StatusForbidden {
 		t.Fatalf("cross-origin auth test = %d, want 403", rec.Code)
 	}
-	// And in the setup-token mode the probe is still admin-gated.
+	// And with no admin principal the probe is still admin-gated.
 	f.deps.SetupAccess = func(*http.Request, auth.Principal) *auth.AuthError {
-		return &auth.AuthError{Kind: auth.ErrUnauthorized, Why: "setup token required"}
+		return &auth.AuthError{Kind: auth.ErrUnauthorized, Why: "authentication required"}
 	}
 	s = newSettingsServer(t, f)
 	if rec := settingsDo(t, s, http.MethodPost, "/setup/auth-test", url.Values{"issuer": {"https://id"}}, nil); rec.Code != http.StatusUnauthorized {
@@ -1512,6 +1582,8 @@ func TestSettingsFieldControlsAndQueryHelpers(t *testing.T) {
 		{SettingsSetupField{Key: "a.i", Type: "string", Secret: true}, "password"},
 		{SettingsSetupField{Key: "a.j", Type: "string"}, "text"},
 		{SettingsSetupField{Key: "server.auth.mode"}, "select"}, // metadata supplies enum
+		{SettingsSetupField{Key: "server.auth.admin_groups", Type: "list"}, "list"},
+		{SettingsSetupField{Key: "server.auth.groups_claim", Type: "string"}, "text"},
 		{SettingsSetupField{Key: "server.request_timeout", Value: "1h0m0s"}, "text"},
 		{SettingsSetupField{Key: "cache.max_bytes", Value: "1024"}, "text"},
 	} {
@@ -1523,11 +1595,16 @@ func TestSettingsFieldControlsAndQueryHelpers(t *testing.T) {
 			t.Fatalf("%s input id = %q", tc.field.Key, tc.field.InputID)
 		}
 	}
-	if got := settingsJoinQuery("", "a=1"); got != "?a=1" {
-		t.Fatalf("join empty = %q", got)
-	}
-	if got := settingsJoinQuery("?token=x", "a=1"); got != "?token=x&a=1" {
-		t.Fatalf("join = %q", got)
+	// The WP13 keys render with real examples and notes in the setup page.
+	for _, tc := range []struct{ key, example, note string }{
+		{"server.auth.admin_groups", "spindle-admins", "empty disables group admins"},
+		{"server.auth.groups_claim", "groups", "ID-token claim"},
+	} {
+		f := SettingsSetupField{Key: tc.key}
+		settingsPrepareField(&f)
+		if f.Example != tc.example || !strings.Contains(f.Note, tc.note) {
+			t.Fatalf("%s example/note = %q / %q", tc.key, f.Example, f.Note)
+		}
 	}
 	if got := splitLines(""); got != nil {
 		t.Fatalf("splitLines empty = %v", got)
@@ -1587,6 +1664,26 @@ func TestSettingsSetupAdminFallbackWithoutAccessDep(t *testing.T) {
 	s.auth = pageAuthFor(p)
 	if rec := settingsDo(t, s, http.MethodPost, "/setup", url.Values{"op": {"save"}}, nil); rec.Code != http.StatusSeeOther {
 		t.Fatalf("admin fallback write = %d, want 303", rec.Code)
+	}
+}
+
+func TestSettingsSetupAuthTestAdminFallback(t *testing.T) {
+	s := newSettingsServer(t, &settingsFakes{deps: SettingsDeps{
+		SetupAuthTest: func(context.Context, string, string, string) (*SettingsSetupAuthTest, []SettingsSetupError) {
+			t.Fatal("the discovery probe ran without authority")
+			return nil, nil
+		},
+	}})
+	// The unbound access seam applies the same fallback as GET and save: only
+	// an admin may trigger the outbound OIDC discovery probe.
+	s.env.Cfg.Server.Auth.Mode = "token"
+	p := settingsTestPrincipal()
+	p.Admin = false
+	s.auth = pageAuthFor(p)
+	rec := settingsDo(t, s, http.MethodPost, "/setup/auth-test",
+		url.Values{"issuer": {"https://id.example.com"}}, nil)
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("non-admin auth-test = %d, want 403", rec.Code)
 	}
 }
 
@@ -1665,4 +1762,63 @@ func TestSettingsDumpPages(t *testing.T) {
 		{ID: "k2", Title: "", Key: "ssh-rsa AAAAB3NzaC1yc2EAAAADAQAB ci@build", CreatedAt: time.Now().Add(-30 * 24 * time.Hour)},
 	}}}
 	write("keys.html", settingsDo(t, s, http.MethodGet, "/keys", nil, nil))
+}
+
+// /setup access is the admin flag (WP13): group admins see the form, a
+// signed-in non-admin gets the restricted card + a 403 on writes, and the
+// page names the admin group rather than any setup token.
+func TestSettingsSetupAdminGroupAccess(t *testing.T) {
+	rule := func(_ *http.Request, p auth.Principal) *auth.AuthError {
+		if p.Anonymous {
+			return &auth.AuthError{Kind: auth.ErrUnauthorized, Why: "authentication required for setup"}
+		}
+		if !p.Admin {
+			return &auth.AuthError{Kind: auth.ErrForbidden, Why: "setup requires an admin principal (an OIDC admin group, admin email, or admin domain)"}
+		}
+		return nil
+	}
+	deps := SettingsDeps{
+		SetupAccess: rule,
+		SetupView:   func(context.Context) (*SettingsSetupView, error) { return settingsFakeView(), nil },
+		SetupSave: func(context.Context, map[string]string) (SettingsSetupResult, []SettingsSetupError, error) {
+			return SettingsSetupResult{Saved: true}, nil, nil
+		},
+	}
+
+	// A group admin (Principal.Admin is what the OIDC claim derivation sets)
+	// sees the editable form.
+	s := newSettingsServer(t, &settingsFakes{deps: deps,
+		principal: auth.Principal{Name: "dev", Email: "dev@example.com", Write: true, Admin: true}})
+	rec := settingsDo(t, s, http.MethodGet, "/setup", nil, nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("group admin GET /setup = %d", rec.Code)
+	}
+	body := rec.Body.String()
+	settingsMustContain(t, body, `name="cfg.server.listen"`, "admin sees the form")
+	settingsMustNotContain(t, body, "Access restricted", "admin is not denied")
+
+	// A signed-in non-admin gets the restricted card (200) and a real 403 on
+	// the write path, and the card names the group rule, not a token.
+	s = newSettingsServer(t, &settingsFakes{deps: deps,
+		principal: auth.Principal{Name: "zoe", Email: "zoe@example.com", Write: true}})
+	rec = settingsDo(t, s, http.MethodGet, "/setup", nil, nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("non-admin GET /setup = %d, want the restricted card", rec.Code)
+	}
+	body = rec.Body.String()
+	settingsMustContain(t, body, "Access restricted", "non-admin denied")
+	settingsMustContain(t, body, "spindle-admins", "card names the admin group")
+	settingsMustContain(t, body, "server.auth.admin_groups", "card names the config key")
+	settingsMustNotContain(t, body, "SPINDLE_SETUP_TOKEN", "no setup token text")
+	settingsMustNotContain(t, body, `name="cfg.server.listen"`, "non-admin has no form")
+	if rec := settingsDo(t, s, http.MethodPost, "/setup", url.Values{"op": {"save"}}, nil); rec.Code != http.StatusForbidden {
+		t.Fatalf("non-admin POST /setup = %d, want 403", rec.Code)
+	}
+
+	// Anonymous is a 401 (unauthenticated), not a 403.
+	s = newSettingsServer(t, &settingsFakes{deps: deps,
+		principal: auth.Principal{Name: "anonymous", Anonymous: true}})
+	if rec := settingsDo(t, s, http.MethodPost, "/setup", url.Values{"op": {"save"}}, nil); rec.Code != http.StatusUnauthorized {
+		t.Fatalf("anonymous POST /setup = %d, want 401", rec.Code)
+	}
 }

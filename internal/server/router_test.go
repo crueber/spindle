@@ -120,25 +120,44 @@ func TestSetupAPISaveRoundTrip(t *testing.T) {
 	}
 }
 
-func TestSetupTokenEscapeHatch(t *testing.T) {
+// The setup surface has no env-token escape hatch: SPINDLE_SETUP_TOKEN must
+// have no effect. In token mode (not open) an unauthenticated request is 401
+// even when the env var is set and echoed back as ?token= or Bearer, a static
+// admin token passes, and a non-admin token is 403.
+func TestSetupAccessTokenMode(t *testing.T) {
 	t.Setenv("SPINDLE_SETUP_TOKEN", "sekrit")
 	cfg := config.Defaults()
-	cfg.Server.Auth.Mode = "token" // normally admin-required
+	cfg.Server.Auth.Mode = "token" // not open
+	cfg.Server.Auth.Tokens = []config.StaticToken{
+		{Principal: "admin", Token: "adm", Write: true, Admin: true},
+		{Principal: "user", Token: "usr", Write: true},
+	}
 	s := New(Options{Config: cfg, Store: newFakeStore(), Engine: &fakeEngine{},
 		Boot: BootState{Mode: "normal"}})
 	h := s.Handler()
 
-	req := httptest.NewRequest("GET", "http://x/api/v1/setup", nil)
-	rec := httptest.NewRecorder()
-	h.ServeHTTP(rec, req)
-	if rec.Code != http.StatusUnauthorized {
-		t.Fatalf("without token status = %d, want 401", rec.Code)
+	cases := []struct {
+		name string
+		url  string
+		auth string
+		want int
+	}{
+		{"anonymous", "/api/v1/setup", "", http.StatusUnauthorized},
+		{"env token as query", "/api/v1/setup?token=sekrit", "", http.StatusUnauthorized},
+		{"env token as bearer", "/api/v1/setup", "Bearer sekrit", http.StatusUnauthorized},
+		{"admin static token", "/api/v1/setup", "Bearer adm", http.StatusOK},
+		{"non-admin static token", "/api/v1/setup", "Bearer usr", http.StatusForbidden},
 	}
-	req = httptest.NewRequest("GET", "http://x/api/v1/setup?token=sekrit", nil)
-	rec = httptest.NewRecorder()
-	h.ServeHTTP(rec, req)
-	if rec.Code != http.StatusOK {
-		t.Fatalf("with token status = %d", rec.Code)
+	for _, tc := range cases {
+		req := httptest.NewRequest("GET", "http://x"+tc.url, nil)
+		if tc.auth != "" {
+			req.Header.Set("Authorization", tc.auth)
+		}
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+		if rec.Code != tc.want {
+			t.Fatalf("%s status = %d, want %d (body %s)", tc.name, rec.Code, tc.want, rec.Body.String())
+		}
 	}
 }
 

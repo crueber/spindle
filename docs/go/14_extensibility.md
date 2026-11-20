@@ -309,13 +309,13 @@ Hazard: an extension kind hogging the maintainer pass or colliding with a core u
 
 ## 14.8 Seam 6 — storage backends registry
 
-The store contract (§4.1) is the seam; S3-compatible, GCS (JSON API over plain HTTPS — no gRPC client, per the dependency policy), and in-memory (tests) ship in core. One contract suite runs against every backend (§1.3).
+The store contract (§4.1) is the seam; filesystem, S3-compatible, and in-memory (tests) backends ship in core. One contract suite runs against every backend (§1.3).
 
 ```go
 // internal/store/backend.go
 type Backend interface { /* §4.1: Get/Put(Create|Update(version))/Delete/Compose/List(off-hot-path)/… */ }
 
-func Register(name string, open func(ctx context.Context, cfg config.Store) (Backend, error)) // "s3","gcs","memory",…
+func Register(name string, open func(ctx context.Context, cfg config.Store) (Backend, error)) // "s3","filesystem","memory",…
 ```
 
 The bulk/control-plane transport split (§4.2) is part of the contract: a backend that cannot split transports emulates it internally (separate connection pools, separate bounded channels), because the queue-depth metrics and the no-LIST-on-hot-path rule assume it. New backends MUST pass the contract suite including CAS precondition tests and the ambiguous-CAS re-read rule (§3.2).
@@ -408,7 +408,7 @@ Any violation is a bug even if tests pass:
 
 1. **Never write WAL entries of a new kind without a schema revision.** WAL kinds are a closed enum in append-only protobuf; adding one changes the replay contract for every reader and requires a versioned schema change in core. Extensions NEVER add WAL kinds — that is what sidecar state families (§14.10.2) and events (Seam 4) are for.
 2. **Never bypass the manifest CAS.** No feature may make a ref visible, mutate repo state, or publish settings by any route other than the frozen commit points (P2). A feature that needs an overwritable key MUST add its key family to the frozen overwritable list in a spec revision (as this document does for `events/cursors/<sink>.json` and `issues/index.json`), never write an unprotected mutable object.
-3. **Never add dependencies beyond the budget** (`golang.org/x/net`, `github.com/BurntSushi/toml`). Hand-roll per the policy: SigV4, GCS JSON API, Prometheus text, SSE, JWT/JWKS, singleflight, LRU — each already spec'd in its own doc.
+3. **Never add dependencies beyond the budget** (`golang.org/x/net`, `github.com/BurntSushi/toml`). Hand-roll per the policy: SigV4, Prometheus text, SSE, JWT/JWKS, singleflight, LRU — each already spec'd in its own doc.
 4. **Never put feature state on local disk.** Instance disk/memory are caches (P1). No local queues, flag files, sqlite, or env-encoded state. Durable = bucket, or it does not exist.
 5. **Never block a request goroutine on bulk work; never leave a goroutine without a shutdown path.** Tasks, bounded pools, context deadlines — see `13_concurrency.md`.
 6. **Never LIST on a hot path** and never share bulk bytes with the control-plane lane (P6/P7, §4.2).
@@ -468,7 +468,6 @@ curl -N -H "Authorization: Bearer $SPINDLE_TOKEN" \
 - **Issues/PRs/reviews use sidecar state families, never WAL kinds.** Rationale: WAL kinds are a closed schema (frozen contract #2); the orphan-retry pattern from §6.4 is reused for issues so a crash never corrupts either family.
 - **PRs are a ref-namespace convention (`refs/heads/pull/<n>/{head,merge}`) computed by a maintainer unit, marked DESIGN SKETCH.** Rationale: refs get bundles/events/policy/fsck for free; anything richer would drag merge-queue machinery into core, which the Rust spec explicitly excludes.
 - **Issues index/PR review indexes added to the frozen overwritable-key list** (`issues/index.json`, `pulls/<n>/index.json` if adopted). Rationale: P2 requires overwritable objects to be enumerated; an unlisted mutable key would violate the invariant silently.
-- **GCS stays JSON-API-over-HTTPS (no gRPC client) even though the Rust implementation is a gRPC/JSON hybrid.** Rationale: dependency budget; the store contract and bulk/control split are preserved inside the backend.
 - **Route/auth/task/CLI registries are compiled-in, not plugins.** Rationale: no dynamic loading, no cgo, no reflection-based DI — keeps the binary auditable and the dependency budget intact.
 - **Per-repo private-read ACLs are explicitly deferred** (read gating stays the global `anonymous_read` lever). Rationale: policy evaluates pushes only (§14.4); bolting read checks onto the policy engine would silently change its contract. The seam for it (a `require_read` hook) is named but not spec'd.
 - **Wave A identity amendment (2026-09-04, docs/features/01):** the frozen overwritable-key list gains the identity families — `users/<principal>/profile.json`, `users/<principal>/invitations/index.json`, `orgs/<org>/org.json`, `orgs/<org>/members.json`, `orgs/<org>/teams/<slug>.json`, `repos/<o>/<r>/access.json` (14 §14.11 rule 2, in the same revision that adopts the feature). Invitation objects (`orgs/<org>/invitations/<id>.json`, `repos/<o>/<r>/meta/invitations/<id>.json`) are Create-only immutable, delete-on-transition — not overwritable, no listing needed. The named-but-unspec'd `require_read` hook is now specified and implemented (01 §4.1): `env.Auth.RequireRead` consults the registered read gate after principal resolution; policy.json stays push-only. Two production notes the implementation records: (a) Seam 1 in code is the `server.RouteProvider` chain (`ChainAPI`), not a chi `Register` — feature surfaces implement `Handle(w,r) bool` and front the core mux on both lanes; (b) the api seam now authenticates + injects the principal before dispatch (previously mode-defaults), so token-carrying API calls resolve their configured rights. Rationale: read gating without principal resolution is decoration; the injection closes the gap with no change to anonymous behavior.

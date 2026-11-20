@@ -40,6 +40,7 @@ commits are ordinary git objects; a PR's *head* is an ordinary ref published thr
 | [`12_runner.md`](12_runner.md) | GitHub-style runners design plan (DRAFT — awaiting review, do not implement) | 05 (checks reporting + merge gate) |
 | [`13_push_mirror.md`](13_push_mirror.md) | Push mirroring (on-push fan-out + optional schedule; password/token/SSH-key auth, keypair generation) | 10 (normalize/SSRF/scrub reuse), 11 (preset-cron/lease/task/route patterns) |
 | [`14_packages.md`](14_packages.md) | Packages: an **OCI registry** (v1, specified — see `docs/PLAN-V1.md` WP1) | 01, 02 |
+| [`15_threads.md`](15_threads.md) | Threads: **CI runs** (workflow files, container jobs, checks results; v1, specified — see `docs/PLAN-V1.md` WP10) | 05 |
 
 ## Shared primitives (normative for every feature doc)
 
@@ -135,8 +136,11 @@ data; the timeline is the backfill source of truth (same contract as the events 
 
 ### P9 — What is explicitly OUT of scope for this layer
 
-Code search (needs an index format decision — deferred), GitHub Actions runners (spindle stores check
-results, it does not run CI), Discussions, Projects/boards, SAML/SCIM. Each gets a paragraph in its
+Code search (needs an index format decision — deferred), Discussions, Projects/boards, SAML/SCIM.
+
+**Amended 2026-11-20:** *Threads* (spindle's CI — workflow files, container jobs reported into the
+checks surface) is **in scope for v1**; see [`15_threads.md`](15_threads.md). The earlier DRAFT
+`12_runner.md` remains as the prior design record and is superseded by it. Each gets a paragraph in its
 nearest doc describing the seam it would plug into.
 
 **Amended 2026-11-20:** *Packages* is no longer out of scope for the **OCI/container** case — it is a

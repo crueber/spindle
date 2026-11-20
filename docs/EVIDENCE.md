@@ -64,7 +64,7 @@ the real `Add` path over the **memory store**, keys spread over 100 principals
 `user0` deliberately holds n/100 keys to also probe the pathological end).
 Measured: 1000 auth lookups (mean/max), one keys-page list, one add. Memory
 store isolates the registry's algorithmic shape from network RTT; see
-"over the network" below for the S3/GCS constant.
+"over the network" below for the S3 constant.
 
 **Results.**
 
@@ -96,7 +96,7 @@ store isolates the registry's algorithmic shape from network RTT; see
   (duplicate → 409 at the API). ~30µs/add on the memory store across the whole
   1M-key run.
 
-**Over the network (S3/GCS).** The memory-store numbers isolate the shape;
+**Over the network (S3).** The memory-store numbers isolate the shape;
 every auth lookup then costs one GET (~60–80ms typical per-object latency) and
 the keys page costs (1 + K) GETs. Flat in total keys, per the table — at 1M
 keys an SSH handshake is still exactly one GET.
@@ -104,7 +104,7 @@ keys an SSH handshake is still exactly one GET.
 **Operational notes at 1M keys** (what grows — storage and housekeeping, not
 latency):
 
-- ~2M store objects, ~1 GB of small objects. Trivial for S3/GCS. On the
+- ~2M store objects, ~1 GB of small objects. Trivial for S3. On the
   **filesystem backend** that is 2M inodes across `ssh-keys/k/` and the
   per-principal `u/` dirs — ext4 lookups stay O(log n), but inode budget and
   backup size feel it.
@@ -175,7 +175,7 @@ with 3 bindings (direct + 2 team refs), two teams, one org.
   read-only; materialization is the idempotent `access-bootstrap` op and the
   CAS PUT path). Revocation latency is one in-flight request by design.
 
-**Over the network (S3/GCS/filesystem).** Same shape with per-probe RTT:
+**Over the network (S3/filesystem).** Same shape with per-probe RTT:
 one extra sub-second control-plane GET per `info/refs` for anonymous hot
 clones of public repos (01 §4.1 budget), never a LIST, never a body on
 revalidation. Bulk/control-plane transport separation is untouched — these
@@ -251,7 +251,7 @@ trip on any backend. Populations: 10 issues (short thread: 5 comments) and
   every index write (bytes in hand — cheaper than sampling), so the index
   cannot grow past ~256 KiB + one card between compactions.
 
-**Over the network (S3/GCS/filesystem).** Same shape with per-op RTT: the
+**Over the network (S3/filesystem).** Same shape with per-op RTT: the
 default list is 2 control-plane GETs (`.json` keys); a full thread read is
 (2 + E) GETs for E events; a degraded list is (3 + H) for H headers up to
 the 2000 cap. No LIST on the happy path; one bounded LIST on the degraded
@@ -328,7 +328,7 @@ reachability pipeline, diff, log ranges). Populations: 1 and 50 open PRs.
   whose base/head actually matched. An unrelated ref costs the scan and
   nothing else — no recompute, no git, no LIST.
 
-**Over the network (S3/GCS/filesystem).** Same shape with per-op RTT: a
+**Over the network (S3/filesystem).** Same shape with per-op RTT: a
 recompute is 3 control-plane GETs + 1 CAS PUT + 6 local git execs (git
 runs on the serving host's materialized copy, not over the network); a
 merge is 12 + 5 plus the WAL publish's own manifest ladder (doc 05
@@ -399,7 +399,7 @@ shape from network RTT. Populations: 5 reviews/2 threads ("normal") and
   second writer — the summary is a render cache any racing writer
   recomputes identically, and the gate doesn't trust it anyway.
 
-**Over the network (S3/GCS/filesystem).** Same shape with per-op RTT: a
+**Over the network (S3/filesystem).** Same shape with per-op RTT: a
 recompute at 100 reviews is ~122 control-plane GETs + 1 CAS PUT (no bulk
 lane, no git); the gate is ~103 GETs inside the merge task's deadline.
 Both stay on the control plane and off the git hot path at any
@@ -466,7 +466,7 @@ single commit).
   KiB / newest 500 shas. The table page degrades to LIST, never to
   wrong.
 
-**Over the network (S3/GCS/filesystem).** Same shape with per-op RTT: a
+**Over the network (S3/filesystem).** Same shape with per-op RTT: a
 report at 20 contexts is ~22 control-plane GETs + 2 CAS PUTs + 1 LIST
 (no bulk lane, at most 1 git call on POST for sha validation, zero on
 every GET); the gate is ~k+1 GETs + 1 LIST inside the merge task's
@@ -537,7 +537,7 @@ the true idle pass.
   budget. A 1 000-watcher repo costs one request-side activity write,
   not 1 000 synchronous CAS rounds.
 
-**Over the network (S3/GCS/filesystem).** Same shape with per-op RTT:
+**Over the network (S3/filesystem).** Same shape with per-op RTT:
 a 10-recipient comment is ~23 control-plane GETs + ~22 small-JSON
 PUTs, all off the git hot path (collaboration rate, human-driven);
 webhook POSTs are the only wide-area calls (10 s each, per-hook
@@ -625,7 +625,7 @@ order (then two) of magnitude beyond, so flat-vs-growing is visible in the table
   (#65: 51 GETs + 51 HEADs on page 1 at both 60 and 600 stars, page 2
   probing only the remainder).
 
-**Over the network (S3/GCS/filesystem).** Same shape with per-op RTT:
+**Over the network (S3/filesystem).** Same shape with per-op RTT:
 the hot paths are small-JSON control-plane ops at human rate; the
 only bulk transfer is the asset byte stream itself (spooled, hashed,
 single PUT). The levers are the asset cap (operator-set,

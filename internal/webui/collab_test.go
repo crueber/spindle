@@ -16,7 +16,9 @@ import (
 	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
+	"net/textproto"
 	"net/url"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -1162,6 +1164,114 @@ func TestCollabReleaseWrites(t *testing.T) {
 	if assetDeleted != "sums.txt" {
 		t.Fatalf("asset deleted %q", assetDeleted)
 	}
+}
+
+// TestCollabReleaseAssetUploadBounded pins UI-06: the multipart body is capped
+// while streaming, so an oversized upload is refused before the spool exists
+// and never reaches the service.
+func TestCollabReleaseAssetUploadBounded(t *testing.T) {
+	f := newCollabFixture(t)
+	f.principal = auth.Principal{Name: "alice", Admin: true}
+	reached := false
+	d := releaseDeps()
+	d.AssetUpload = func(_ context.Context, _, _ string, _ auth.Principal, _, name string, _ io.Reader, _ int64, _, _ string) (*releases.AssetEntry, error) {
+		reached = true
+		return &releases.AssetEntry{Name: name}, nil
+	}
+	f.deps(d)
+
+	prev := assetUploadBodyLimit
+	assetUploadBodyLimit = 512
+	t.Cleanup(func() { assetUploadBodyLimit = prev })
+
+	spools := func() int {
+		entries, err := os.ReadDir(os.TempDir())
+		if err != nil {
+			t.Fatal(err)
+		}
+		n := 0
+		for _, e := range entries {
+			if strings.HasPrefix(e.Name(), "spindle-asset-") {
+				n++
+			}
+		}
+		return n
+	}
+	before := spools()
+
+	var buf bytes.Buffer
+	mw := multipart.NewWriter(&buf)
+	_ = mw.WriteField("name", "big.bin")
+	fw, _ := mw.CreateFormFile("file", "big.bin")
+	_, _ = fw.Write(bytes.Repeat([]byte("x"), 4096))
+	_ = mw.Close()
+	req := f.req("POST", "/acme/widgets/releases/v1.2.3/assets", nil)
+	req.Body = io.NopCloser(bytes.NewReader(buf.Bytes()))
+	req.ContentLength = int64(buf.Len())
+	req.Header.Set("Content-Type", mw.FormDataContentType())
+	rec := httptest.NewRecorder()
+	if !f.srv.Serve(rec, req) {
+		t.Fatal("upload not claimed")
+	}
+	wantStatus(t, rec, http.StatusRequestEntityTooLarge)
+	if reached {
+		t.Fatal("oversized upload reached the service")
+	}
+	if after := spools(); after != before {
+		t.Fatalf("spool file left behind: %d → %d", before, after)
+	}
+}
+
+// TestCollabReleaseAssetUploadClampsPartType: the multipart part's declared
+// Content-Type never reaches the service as a serving decision (UI-01).
+func TestCollabReleaseAssetUploadClampsPartType(t *testing.T) {
+	f := newCollabFixture(t)
+	f.principal = auth.Principal{Name: "alice", Admin: true}
+	var gotType string
+	d := releaseDeps()
+	d.AssetUpload = func(_ context.Context, _, _ string, _ auth.Principal, _, name string, _ io.Reader, _ int64, _, contentType string) (*releases.AssetEntry, error) {
+		gotType = contentType
+		return &releases.AssetEntry{Name: name}, nil
+	}
+	f.deps(d)
+
+	var buf bytes.Buffer
+	mw := multipart.NewWriter(&buf)
+	_ = mw.WriteField("name", "x.html")
+	hdr := make(textproto.MIMEHeader)
+	hdr.Set("Content-Disposition", `form-data; name="file"; filename="x.html"`)
+	hdr.Set("Content-Type", "text/html")
+	fw, _ := mw.CreatePart(hdr)
+	_, _ = fw.Write([]byte("<script>alert(1)</script>"))
+	_ = mw.Close()
+	req := f.req("POST", "/acme/widgets/releases/v1.2.3/assets", nil)
+	req.Body = io.NopCloser(bytes.NewReader(buf.Bytes()))
+	req.ContentLength = int64(buf.Len())
+	req.Header.Set("Content-Type", mw.FormDataContentType())
+	rec := httptest.NewRecorder()
+	if !f.srv.Serve(rec, req) {
+		t.Fatal("upload not claimed")
+	}
+	wantStatus(t, rec, http.StatusSeeOther)
+	if gotType != "application/octet-stream" {
+		t.Fatalf("part type reached the service as %q", gotType)
+	}
+}
+
+// TestCollabMergeTaskRequiresMaintain pins UI-08: the merge-task fragment
+// carries the merge's own role floor, not the repo read gate.
+func TestCollabMergeTaskRequiresMaintain(t *testing.T) {
+	f := newCollabFixture(t)
+	f.principal = auth.Principal{Name: "reader"}
+	role := identity.RoleRead
+	f.deps(CollabDeps{RoleOf: func(context.Context, string, string, auth.Principal) identity.Role { return role }})
+
+	rec := f.get("/acme/widgets/pull/1/merge/task")
+	wantStatus(t, rec, http.StatusForbidden)
+
+	role = identity.RoleMaintain
+	rec = f.get("/acme/widgets/pull/1/merge/task")
+	wantStatus(t, rec, http.StatusOK)
 }
 
 // --- helper coverage ---------------------------------------------------------

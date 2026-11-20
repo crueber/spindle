@@ -465,6 +465,39 @@ func (s *Service) Lookup(id string) (*stream, *wal.TaskRecord, bool) {
 	return nil, nil, false
 }
 
+// TaskState is the observer view of one import — the shape a page shell
+// needs to render a task it did not start (the /import progress card).
+// Record is the latest table mirror (nil before the first narration);
+// Outcome is the terminal value and is only set once Finished.
+type TaskState struct {
+	Record   *wal.TaskRecord
+	Outcome  *Outcome
+	Finished bool
+}
+
+// State reports the live/terminal state of an import keyed by the SAME id
+// GET .../imports/{id} accepts (the service id). ok=false means "unknown on
+// this instance" (never started here, or pruned past retention). A pruned
+// ring still answers from the core table (Finished follows rec.Finished);
+// its outcome is not retained, so only Record is populated there.
+func (s *Service) State(id string) (TaskState, bool) {
+	st, rec, ok := s.Lookup(id)
+	if !ok {
+		return TaskState{}, false
+	}
+	if st == nil {
+		if rec == nil {
+			return TaskState{}, true
+		}
+		return TaskState{Record: rec, Finished: rec.Finished != ""}, true
+	}
+	mirror, out, fin := st.snapshot()
+	if rec == nil {
+		rec = mirror
+	}
+	return TaskState{Record: rec, Outcome: out, Finished: fin}, true
+}
+
 // Janitor prunes finished rings past retention (mirrors the wal byID
 // janitor; import.json stays the durable truth). Begin/Lookup already
 // prune lazily on every call, so this is the explicit-sweep entry point

@@ -8,10 +8,12 @@ import (
 	"fmt"
 	"html/template"
 	"io/fs"
+	"log"
 	"net/http"
 	"net/url"
 	"strings"
 
+	"github.com/crueber/spindle/internal/httpsec"
 	"github.com/crueber/spindle/internal/server/auth"
 )
 
@@ -32,15 +34,20 @@ type Chrome struct {
 	ShowLogin  bool
 	LoginHref  string
 	ShowCreate bool
-	ShowKeys   bool
-	ShowInvite bool
 	ShowSetup  bool
 	Initials   string
 }
 
 // PageData is what a page template receives: {{.Chrome}} plus {{.Data}}.
+//
+// Repo is the repository chrome (masthead + tab strip) for a page scoped to a
+// repository, and nil everywhere else. The LAYOUT renders it above the page's
+// own content, so a repo-scoped page can never forget the chrome and a page
+// that already carries one (the repo group's templates) simply leaves it nil
+// (12_web_ui.md §2.2.1).
 type PageData struct {
 	Chrome Chrome
+	Repo   *RepoChrome
 	Data   any
 }
 
@@ -48,7 +55,7 @@ type PageData struct {
 // equivalent of web/src/lib/identity.js navModel).
 func (s *Server) chrome(r *http.Request, p auth.Principal, title string) Chrome {
 	mode := s.authMode()
-	signedIn := !p.Anonymous && mode != "" && mode != "none"
+	signedIn := s.signedIn(p)
 	return Chrome{
 		Title:     title,
 		Path:      r.URL.Path,
@@ -62,13 +69,14 @@ func (s *Server) chrome(r *http.Request, p auth.Principal, title string) Chrome 
 		LoginHref: "/_auth/login?next=" + url.QueryEscape(r.URL.Path),
 		// Forgejo #466: the create button shares the identity gate.
 		ShowCreate: signedIn,
-		// Forgejo #371: keys/invitations move into the identity menu for
-		// signed-in users; setup stays in the nav while signed out and in
-		// none mode (first-run discoverability).
-		ShowKeys:   !signedIn,
-		ShowInvite: !signedIn,
-		ShowSetup:  !signedIn,
-		Initials:   initials(p.Name),
+		// Forgejo #371: keys/invitations are per-principal surfaces and live
+		// ONLY in the identity menu (an anonymous viewer has nothing to manage
+		// there), never in the primary nav. Setup stays in the nav for exactly
+		// the first-run/unsecured case: no signed-in principal and an auth mode
+		// that cannot mint one ("" or "none"), so a fresh instance can be
+		// configured; otherwise a signed-in admin reaches /setup from the menu.
+		ShowSetup: !signedIn && (mode == "" || mode == "none"),
+		Initials:  initials(p.Name),
 	}
 }
 
@@ -120,16 +128,19 @@ func (s *Server) render(w http.ResponseWriter, r *http.Request, status int, name
 	var buf bytes.Buffer
 	if err := t.ExecuteTemplate(&buf, "base", data); err != nil {
 		// A template failure must not recurse into the error page (which is
-		// itself a template): write the minimal document and stop.
-		fail(w, r, http.StatusInternalServerError, "render: "+err.Error())
+		// itself a template): log the detail and write the minimal document.
+		log.Printf("webui render %s: %v", name, err)
+		fail(w, r, http.StatusInternalServerError, "internal error")
 		return
 	}
 	body := buf.Bytes()
 	sum := sha256.Sum256(body)
 	etag := `"` + hex.EncodeToString(sum[:16]) + `"`
 	h := w.Header()
+	httpsec.Apply(h)
 	h.Set("Content-Type", "text/html; charset=utf-8")
-	h.Set("Cache-Control", "no-cache")
+	// Authenticated page bodies must never enter a shared cache.
+	h.Set("Cache-Control", "no-cache, private")
 	h.Set("ETag", etag)
 	if inm := r.Header.Get("If-None-Match"); inm != "" && strings.Contains(inm, etag) {
 		w.WriteHeader(http.StatusNotModified)
@@ -143,7 +154,16 @@ func (s *Server) render(w http.ResponseWriter, r *http.Request, status int, name
 
 // page renders with the layout model built from the principal.
 func (s *Server) page(w http.ResponseWriter, r *http.Request, p auth.Principal, status int, name, title string, data any) {
-	s.render(w, r, status, name, PageData{Chrome: s.chrome(r, p, title), Data: data})
+	s.pageRepo(w, r, p, nil, status, name, title, data)
+}
+
+// pageRepo renders a repo-scoped page: the same layout model plus the shared
+// repository chrome (masthead + tab strip), which the layout places above the
+// page's own content. It is the ONE attach point — a group never re-renders
+// the header itself (12_web_ui.md §2.2.1). chrome must already be gated: build
+// it with repoChromeFor/repoChromeFrom AFTER the handler's own read gate ran.
+func (s *Server) pageRepo(w http.ResponseWriter, r *http.Request, p auth.Principal, chrome *RepoChrome, status int, name, title string, data any) {
+	s.render(w, r, status, name, PageData{Chrome: s.chrome(r, p, title), Repo: chrome, Data: data})
 }
 
 // errorPage renders the shared error page (HTML) or a plain-text body when the
@@ -171,12 +191,13 @@ func (s *Server) errorPage(w http.ResponseWriter, r *http.Request, status int, m
 // involvement. It is the last resort for the renderer itself (a missing or
 // broken template must never turn into a crash or a recursion).
 func fail(w http.ResponseWriter, r *http.Request, status int, msg string) {
+	httpsec.Apply(w.Header())
 	if headerWantsText(r) {
 		http.Error(w, msg, status)
 		return
 	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Cache-Control", "no-cache, private")
 	w.WriteHeader(status)
 	if r.Method == http.MethodHead {
 		return

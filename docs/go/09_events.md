@@ -217,7 +217,7 @@ process exit.
   the loser's publish was a duplicate and its lost CAS is treated as success (step 5). No lease is
   needed (leases, §4.9 of the spec, are deliberately NOT used here).
 - **Hazard:** the notify handler blocking on a full `work` channel couples webhook lag to notifier
-  HTTP latency (and Pub/Sub redelivery). **Avoidance:** `Wake` never blocks — non-blocking send +
+  HTTP latency (and bucket-notification redelivery). **Avoidance:** `Wake` never blocks — non-blocking send +
   coalescing set; when the channel is full or the repo is already pending, the wake is a no-op and
   the **sweep is the backstop**. The handler reports `dropped` (§6.3) so operators can see it.
 - Every goroutine (bridge, sweep ticker) exits on `ctx` cancel; the ticker's `time.Ticker` is
@@ -235,7 +235,6 @@ parsed with `encoding/json` into explicit structs, tolerant of extra fields:
 
 | Body shape | Recognition | Extracted key |
 |---|---|---|
-| GCS Pub/Sub push envelope | `message.attributes.eventType == "OBJECT_FINALIZE"` | `message.attributes.objectId` (also check `objectId` under `message`) |
 | S3 event notification | any `Records[].eventName` with prefix `ObjectCreated:` | `Records[].s3.object.key` |
 | Glue | `{"key": "…"}` | `key` |
 | Glue | `{"repo": "o/r"}` | repo directly |
@@ -255,8 +254,7 @@ Responses:
   failing batch waits for the batch outcome, 10 s timeout.)
 - `404` when no bridge (no `events` role or no `webhook_url`).
 
-Example (notify is how the bucket fires the bridge; GCS Pub/Sub push and S3 notifications point
-here):
+Example (notify is how the bucket fires the bridge; S3 notifications point here):
 
 ```bash
 curl -s -X POST http://127.0.0.1:8080/_events/notify \

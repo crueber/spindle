@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/crueber/spindle/internal/config"
+	"github.com/crueber/spindle/internal/httpsec"
 )
 
 // newBare builds a provider with the real templates and no wired services —
@@ -18,6 +19,46 @@ func newBare(t *testing.T) *Server {
 		t.Fatalf("New: %v", err)
 	}
 	return s
+}
+
+// TestRenderSetsSecurityHeaders pins UI-02 at the page layer: every rendered
+// page carries the shared CSP/XFO/Referrer-Policy/nosniff set and the private
+// cache directive.
+func TestRenderSetsSecurityHeaders(t *testing.T) {
+	s := newBare(t)
+	rec := httptest.NewRecorder()
+	s.errorPage(rec, httptest.NewRequest(http.MethodGet, "/missing", nil), http.StatusNotFound, "detail text")
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("status = %d", rec.Code)
+	}
+	want := map[string]string{
+		"Content-Security-Policy": httpsec.ContentSecurityPolicy,
+		"X-Frame-Options":         "DENY",
+		"Referrer-Policy":         "same-origin",
+		"X-Content-Type-Options":  "nosniff",
+		"Cache-Control":           "no-cache, private",
+	}
+	for name, val := range want {
+		if got := rec.Header().Get(name); got != val {
+			t.Errorf("%s = %q, want %q", name, got, val)
+		}
+	}
+	// The CSP keeps scripts same-origin and forbids framing.
+	csp := rec.Header().Get("Content-Security-Policy")
+	for _, must := range []string{"script-src 'self'", "frame-ancestors 'none'", "object-src 'none'", "base-uri 'none'"} {
+		if !strings.Contains(csp, must) {
+			t.Errorf("CSP missing %q: %q", must, csp)
+		}
+	}
+	// The last-resort document carries the set too.
+	frec := httptest.NewRecorder()
+	fail(frec, httptest.NewRequest(http.MethodGet, "/x", nil), http.StatusInternalServerError, "boom")
+	if frec.Header().Get("Content-Security-Policy") != httpsec.ContentSecurityPolicy {
+		t.Fatalf("fail() CSP = %q", frec.Header().Get("Content-Security-Policy"))
+	}
+	if frec.Header().Get("X-Frame-Options") != "DENY" {
+		t.Fatalf("fail() XFO = %q", frec.Header().Get("X-Frame-Options"))
+	}
 }
 
 func TestErrorPageRendersStatus(t *testing.T) {
@@ -40,7 +81,7 @@ func TestErrorPageRendersStatus(t *testing.T) {
 		if !strings.Contains(body, tc.want) || !strings.Contains(body, "detail text") {
 			t.Fatalf("status %d body missing %q/detail: %.200s", tc.status, tc.want, body)
 		}
-		if got := rec.Header().Get("Cache-Control"); got != "no-cache" {
+		if got := rec.Header().Get("Cache-Control"); got != "no-cache, private" {
 			t.Fatalf("status %d cache-control = %q", tc.status, got)
 		}
 		if rec.Header().Get("ETag") == "" {

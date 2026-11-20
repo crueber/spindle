@@ -1,16 +1,20 @@
 {{define "content"}}
+{{if .Data.Identity}}
+{{template "identity_notice" .Data.Identity}}
+{{else}}
 {{/* /notifications (06 §7): the per-user tray. Rows link to their thread;
      unread rows carry the state edge and an "unread" dot. Mark read / unread /
      all-read are POST forms (303 back with the filter preserved).
      The per-user SSE stream is an ISLAND: this page emits the contract hooks
-     only (data-sse*) — no EventSource here, no client data layer.
-     390px: rows wrap, the header controls wrap, the row title truncates. */}}
-<section class="notifications-page mx-auto max-w-3xl"{{if not .Data.Anonymous}} data-sse="notifications" data-sse-url="/api/v1/notifications/stream" data-sse-mode="invalidate"{{end}}>
+     only (data-sse*) — no EventSource here, no client data layer. A signed-out
+     caller never reaches this branch (the handler answers 401); auth none
+     renders the shared identity notice. 390px: rows wrap, the header controls
+     wrap, the row title truncates. */}}
+<section class="notifications-page mx-auto max-w-3xl" data-sse="notifications" data-sse-url="/api/v1/notifications/stream" data-sse-mode="invalidate">
   <header class="mb-3 flex flex-wrap items-center gap-2 border-b border-[var(--pd-line)] pb-3">
     <p class="eyebrow w-full">inbox</p>
     <h2 class="text-lg font-semibold">Notifications</h2>
     {{if .Data.Unread}}<span class="pill" aria-live="polite">{{.Data.Unread}} unread</span>{{end}}
-    {{if not .Data.Anonymous}}
     <div class="ml-auto flex flex-wrap gap-2">
       <a class="btn px-2 py-1 text-sm{{if eq .Data.State ""}} btn-active{{end}}" href="/notifications">all</a>
       <a class="btn px-2 py-1 text-sm{{if eq .Data.State "unread"}} btn-active{{end}}" href="/notifications?state=unread">unread</a>
@@ -18,16 +22,9 @@
         <button type="submit" class="btn px-2 py-1 text-sm">mark all read</button>
       </form>
     </div>
-    {{end}}
   </header>
 
-  {{if .Data.Anonymous}}
-  <div class="card p-4">
-    <p class="text-sm">
-      {{if .Chrome.ShowLogin}}<a class="link" href="{{.Chrome.LoginHref}}">Sign in</a> to see your notifications.{{else}}Sign in to see your notifications — this server has no login flow configured.{{end}}
-    </p>
-  </div>
-  {{else if .Data.Rows}}
+  {{if .Data.Rows}}
   <ol class="grid grid-cols-1 gap-2">
     {{range .Data.Rows}}
     <li>
@@ -63,4 +60,5 @@
   </div>
   {{end}}
 </section>
+{{end}}
 {{end}}

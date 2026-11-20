@@ -34,6 +34,14 @@ itself. Auth-provider territory — and therefore explicitly OUT of this doc's o
 SSH keys, tokens (`wgt_` minting), sessions, JWKS. Those live with the auth provider (Seam 2) and the
 `/_auth/*` surface; nothing here reads or writes them.
 
+`Principal.Groups` (WP13) is the verified OIDC group list: it is captured from the
+signature-verified ID token (the claim named by `server.auth.groups_claim`, default `groups`), rides
+the walgit session/token wire so the browser path keeps it, and is consumed only to re-derive the
+host **admin** flag from `server.auth.admin_groups` (default `["spindle-admins"]`, case-insensitive).
+Groups never grant `write`, never bypass the `allowed_domains`/`allowed_emails` admission check, and
+an empty `admin_groups` grants nothing. Host admin is what opens `/setup`; repo-scoped `admin` role
+bindings are a separate ladder (§5).
+
 A **user profile** is a bucket object keyed by the principal name:
 
 | Key | Kind | Schema |
@@ -531,6 +539,18 @@ bootstrap's Create. Avoidance: edits to a repo with no `access.json` synthesize 
 > (`internal/webui/*.go` + `internal/webui/templates/**`) or, for client-only mechanisms
 > (localStorage keys, signal-lifecycle rules), no longer has a client counterpart. The decisions
 > themselves are unchanged.
+
+- **Admin comes from an OIDC group claim (WP13, 2026-11-20)** — `server.auth.admin_groups`
+  (default `["spindle-admins"]`) intersects the ID-token claim named by `server.auth.groups_claim`
+  (default `"groups"`; JSON array of strings or a single string; case-insensitive) to set
+  `Principal.Admin`, which is what opens `/setup`. The env `SPINDLE_SETUP_TOKEN` escape hatch and the
+  setup-page token field are deleted and have no effect. `admin_emails`/`admin_domains` still grant
+  admin (the operator's migration path); groups never grant `write` and never bypass the email
+  admission rule; an empty `admin_groups` grants nothing. Group values ride `Principal.Groups` /
+  the session-token wire (06 §8.5) so the signed-in browser keeps admin; IdP membership changes land
+  at the next sign-in, `admin_groups` edits are immediate, and secret rotation revokes captured
+  groups at once. Rationale: the group claim is signature-verified IdP truth, while an env token
+  opened the entire configuration surface to anyone who could read the process environment.
 
 - **Frontend idiom is the server-rendered page layer (D-WEB-14/D-WEB-15; supersedes the D-WEB-6 SolidJS entry for issue #76).** The §9 page sketches read in the shipped idiom: Go handlers + templates, Tailwind component classes, server-side state. **Historical (D-WEB-6):** Solid components under `@solidjs/router`, state via Solid signals/stores. Routes, gating, and wire shapes are unchanged.
 

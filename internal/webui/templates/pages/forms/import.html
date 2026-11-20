@@ -8,11 +8,49 @@
        data-task-labels="importing {{.Data.Owner}}/{{.Data.Name}}">
     <h3 class="card-header">
       {{if eq .Data.Mode "mirror"}}creating mirror{{else}}importing{{end}} <span class="mono">{{.Data.Owner}}/{{.Data.Name}}</span>
-      <span class="muted mono text-xs">({{.Data.TaskID}})</span>
     </h3>
-    <div data-task-bars class="grid gap-2"></div>
-    <pre data-task-log class="code-view max-h-64 overflow-y-auto p-2"></pre>
-    <p class="muted text-[11px]">The import keeps running if you navigate away — re-open this page via the API task id.</p>
+    <div data-task-bars class="grid gap-2">
+      <div class="grid gap-1">
+        <div class="flex flex-wrap items-baseline gap-2 text-sm"><span class="font-medium">starting…</span></div>
+        <div class="h-1.5 overflow-hidden rounded bg-[var(--pd-raised)]" role="progressbar"
+             aria-label="import progress" aria-valuemin="0" aria-valuemax="100">
+          <div class="h-full w-1/6 bg-[var(--pd-accent)]"></div>
+        </div>
+      </div>
+    </div>
+    <pre data-task-log class="code-view max-h-64 min-h-[2rem] overflow-y-auto p-2" aria-label="Import log">{{range .Data.TaskLog}}{{.}}
+{{end}}</pre>
+    <p class="muted text-[11px]">
+      The import keeps running if you navigate away. Task
+      <a class="link mono" href="/api/v1/repos/imports/{{.Data.TaskID}}">{{.Data.TaskID}}</a>
+      — <a class="link" href="/api/v1/repos/imports/{{.Data.TaskID}}">check its status</a>
+      (JSON; the live stream is the same URL with <code class="mono">Accept: text/event-stream</code>).
+    </p>
+    <noscript>
+      <p class="warn-line">
+        Progress needs JavaScript. The import keeps running — reload
+        <a class="link" href="/api/v1/repos/imports/{{.Data.TaskID}}">the task status</a>
+        to see where it got to, or the repository once it lands.
+      </p>
+    </noscript>
+  </div>
+  {{end}}
+
+  {{if eq .Data.Phase "failed"}}
+  <div class="card grid gap-3 p-4" aria-label="Import failed" role="alert">
+    <h3 class="card-header">import failed <span class="mono">{{.Data.Repo}}</span></h3>
+    <p class="warn-line">{{.Data.TaskError}}</p>
+    {{if .Data.TaskLog}}
+    <details open>
+      <summary class="cursor-pointer text-sm">log tail ({{len .Data.TaskLog}})</summary>
+      <pre class="code-view mt-1 max-h-64 overflow-y-auto p-2">{{range .Data.TaskLog}}{{.}}
+{{end}}</pre>
+    </details>
+    {{end}}
+    <div class="flex flex-wrap gap-2">
+      <a class="btn" href="/api/v1/repos/imports/{{.Data.TaskID}}">task status</a>
+      <a class="btn" href="/explore">explore repositories</a>
+    </div>
   </div>
   {{end}}
 
@@ -37,9 +75,10 @@
   </div>
   {{end}}
 
-  {{if or (eq .Data.Phase "form") (eq .Data.Phase "running")}}
+  {{if or (eq .Data.Phase "form") (eq .Data.Phase "running") (eq .Data.Phase "failed")}}
   {{if ne .Data.Phase "running"}}
   <form method="post" action="/import" class="card grid gap-3 p-4" aria-label="Import repository">
+    {{if eq .Data.Phase "failed"}}<h3 class="card-header">try again</h3>{{end}}
     <div class="flex flex-wrap gap-4" role="radiogroup" aria-label="Import kind">
       <label class="flex items-center gap-1 text-sm">
         <input type="radio" name="kind" value="import"{{if ne .Data.Mode "mirror"}} checked{{end}} class="h-4 w-4 accent-amber-500">

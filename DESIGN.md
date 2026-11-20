@@ -24,7 +24,7 @@ internal/pages/seam.go                      the provider seam internal/server mo
 internal/server/bind_ui.go                  pageOr404 / uiOr mounts (no page markup lives here)
 web/src/app.css                             ALL styling: Tailwind import + tokens + component classes
 web/src/islands/*.js                        behavior islands → web/dist/ui.js (esbuild)
-web/vendor/htmx*.js                         vendored htmx 2.0.4 (+ SSE extension), copied to dist/
+web/vendor/htmx.min.js                      vendored htmx 2.0.4, copied to dist/
 web/sdk/src/*.js                            dependency-free SDK → web/dist/repos.js (esbuild)
 web/dist/                                   build output (gitignored except .keep) — embedded by the Go binary
 ```

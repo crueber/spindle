@@ -799,10 +799,10 @@ func TestRunPhase2ShutdownAndSemDefault(t *testing.T) {
 
 func TestSetupTestAndPutFailurePaths(t *testing.T) {
 	s, _ := newTestServer(t, nil)
-	// Unauthenticated → 403 (admin required).
+	// Unauthenticated → 401 (an admin principal is required; no env token).
 	rec := httptest.NewRecorder()
 	s.setupTest(rec, httptest.NewRequest("POST", "/api/v1/setup/test", strings.NewReader("{}")))
-	if rec.Code != http.StatusForbidden {
+	if rec.Code != http.StatusUnauthorized {
 		t.Fatalf("gated test = %d", rec.Code)
 	}
 	// Validation failure → 422 with the key named.

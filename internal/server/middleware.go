@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/crueber/spindle/internal/api"
+	"github.com/crueber/spindle/internal/httpsec"
 	"github.com/crueber/spindle/internal/server/auth"
 )
 
@@ -278,6 +279,10 @@ func (s *Server) serverHeaders(next http.Handler) http.Handler {
 			if h.Get("X-Walgit-Server") == "" {
 				h.Set("X-Walgit-Server", val)
 			}
+			// Shared security header set (06 §8.7). Existing values win, so a
+			// route with a stricter policy (the release-asset byte lane's
+			// sandbox CSP) keeps its own.
+			httpsec.Apply(h)
 		}
 		next.ServeHTTP(rw, r)
 	})
@@ -447,7 +452,7 @@ func (s *Server) refreshSession(next http.Handler) http.Handler {
 		if ttl <= 0 || s.Now().Sub(tok.IssuedAt) <= ttl/4 {
 			return
 		}
-		if fresh, merr := s.authSvc.MintSession(tok.Email); merr == nil {
+		if fresh, merr := s.authSvc.MintSession(tok.Email, tok.Groups...); merr == nil {
 			s.setSessionCookie(w, fresh)
 		}
 	})
@@ -490,7 +495,7 @@ func (s *Server) maybeRefreshSession(w http.ResponseWriter, r *http.Request, p a
 	if ttl <= 0 || s.Now().Sub(tok.IssuedAt) <= ttl/4 {
 		return
 	}
-	if fresh, merr := s.authSvc.MintSession(tok.Email); merr == nil {
+	if fresh, merr := s.authSvc.MintSession(tok.Email, tok.Groups...); merr == nil {
 		s.setSessionCookie(w, fresh)
 	}
 }
@@ -529,7 +534,7 @@ func injectPrincipal(r *http.Request, p auth.Principal) *http.Request {
 func (s *Server) authFailure(w http.ResponseWriter, r *http.Request, aerr *auth.AuthError) {
 	switch aerr.Kind {
 	case auth.ErrForbidden:
-		plainStatus(w, http.StatusForbidden, aerr.Why+" — see: spindle setup tokens")
+		plainStatus(w, http.StatusForbidden, aerr.Why+" — see: spindle config (server.auth: admin_groups, admin_emails)")
 	case auth.ErrUnavailable:
 		w.Header().Set("Retry-After", "15")
 		plainStatus(w, http.StatusServiceUnavailable, aerr.Why)

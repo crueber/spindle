@@ -13,8 +13,8 @@ import (
 	"time"
 )
 
-// Version is an opaque CAS token. GCS = object generation (decimal string);
-// S3 = ETag with quotes stripped; memory = global counter; filesystem = "<size>:<mtime_ns>".
+// Version is an opaque CAS token. S3 = ETag with quotes stripped; memory = global
+// counter; filesystem = "<size>:<mtime_ns>".
 // Callers compare for equality only; NEVER parse it.
 type Version string
 
@@ -81,9 +81,13 @@ type PutBody struct {
 // PutResult is what a successful Put returns.
 type PutResult struct{ Meta ObjectMeta }
 
-// ObjectStore is the bucket abstraction. Backends: gcs, s3, memory, filesystem.
+// DefaultBulkConcurrency is the filesystem backend's bulk-copy concurrency
+// (parallel renames/uploads for large trees).
+const DefaultBulkConcurrency = 32
+
+// ObjectStore is the bucket abstraction. Backends: s3, memory, filesystem.
 type ObjectStore interface {
-	Backend() string // "gcs" | "s3" | "memory" | "filesystem"
+	Backend() string // "s3" | "memory" | "filesystem"
 
 	Get(ctx context.Context, key string, opts GetOptions) (GetResult, error)
 	Head(ctx context.Context, key string) (*ObjectMeta, error) // nil = absent

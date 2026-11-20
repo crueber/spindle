@@ -30,22 +30,31 @@ type StaticToken struct {
 }
 
 type Auth struct {
-	Mode              string        `toml:"mode"` // "none" | "token" | "oidc" (default "none")
-	AnonymousRead     bool          `toml:"anonymous_read"`
-	Tokens            []StaticToken `toml:"tokens"`
-	AdminEmails       []string      `toml:"admin_emails"`
-	AdminDomains      []string      `toml:"admin_domains"`
-	Issuer            string        `toml:"issuer"`
-	AllowedDomains    []string      `toml:"allowed_domains"`
-	AllowedEmails     []string      `toml:"allowed_emails"`
-	WriteDomains      []string      `toml:"write_domains"`
-	OAuthClientID     string        `toml:"oauth_client_id"`
-	OAuthClientSecret string        `toml:"oauth_client_secret"`
-	SessionSecret     string        `toml:"session_secret"`
-	SessionTTL        Duration      `toml:"session_ttl"`      // 30d
-	AccessTokenTTL    Duration      `toml:"access_token_ttl"` // 90d
-	Audiences         []string      `toml:"audiences"`
-	TrustedForwarders []string      `toml:"trusted_forwarders"`
+	Mode          string        `toml:"mode"` // "none" | "token" | "oidc" (default "none")
+	AnonymousRead bool          `toml:"anonymous_read"`
+	Tokens        []StaticToken `toml:"tokens"`
+	AdminEmails   []string      `toml:"admin_emails"`
+	AdminDomains  []string      `toml:"admin_domains"`
+	// AdminGroups lists the OIDC group values (from GroupsClaim) that grant
+	// the global admin flag — and therefore /setup. Empty disables group
+	// admins; the email/domain rules above stay authoritative (migration
+	// path). Compared case-insensitively.
+	AdminGroups []string `toml:"admin_groups"`
+	// GroupsClaim names the ID-token claim carrying group membership. The
+	// claim may be a JSON array of strings or a single string. Required in
+	// oidc mode (it defaults to "groups", the conventional claim).
+	GroupsClaim       string   `toml:"groups_claim"`
+	Issuer            string   `toml:"issuer"`
+	AllowedDomains    []string `toml:"allowed_domains"`
+	AllowedEmails     []string `toml:"allowed_emails"`
+	WriteDomains      []string `toml:"write_domains"`
+	OAuthClientID     string   `toml:"oauth_client_id"`
+	OAuthClientSecret string   `toml:"oauth_client_secret"`
+	SessionSecret     string   `toml:"session_secret"`
+	SessionTTL        Duration `toml:"session_ttl"`      // 30d
+	AccessTokenTTL    Duration `toml:"access_token_ttl"` // 90d
+	Audiences         []string `toml:"audiences"`
+	TrustedForwarders []string `toml:"trusted_forwarders"`
 }
 
 // --- Server ---
@@ -109,15 +118,8 @@ type S3 struct {
 	ForcePathStyle bool   `toml:"force_path_style"`
 }
 
-type GCS struct {
-	Endpoint              string `toml:"endpoint"` // override (emulators)
-	SigningServiceAccount string `toml:"signing_service_account"`
-	BulkClients           int    `toml:"bulk_clients"`
-	BulkConcurrency       int    `toml:"bulk_concurrency"`
-}
-
 type Store struct {
-	Backend            string   `toml:"backend"` // "s3" | "gcs" | "memory" | "filesystem"
+	Backend            string   `toml:"backend"` // "s3" | "memory" | "filesystem"
 	Bucket             string   `toml:"bucket"`
 	Prefix             string   `toml:"prefix"`
 	Root               string   `toml:"root"` // filesystem backend root (D4)
@@ -125,7 +127,6 @@ type Store struct {
 	MultipartThreshold ByteSize `toml:"multipart_threshold"`
 	MultipartPartSize  ByteSize `toml:"multipart_part_size"`
 	S3                 S3       `toml:"s3"`
-	GCS                GCS      `toml:"gcs"`
 }
 
 // --- Cache ---
@@ -338,6 +339,8 @@ func Defaults() *Config {
 			Auth: Auth{
 				Mode:           "none",
 				AnonymousRead:  true,
+				AdminGroups:    []string{"spindle-admins"},
+				GroupsClaim:    "groups",
 				SessionTTL:     Duration(30 * 24 * time.Hour),
 				AccessTokenTTL: Duration(90 * 24 * time.Hour),
 			},
@@ -354,7 +357,6 @@ func Defaults() *Config {
 				AccessKeyEnv: "AWS_ACCESS_KEY_ID",
 				SecretKeyEnv: "AWS_SECRET_ACCESS_KEY",
 			},
-			GCS: GCS{BulkClients: 4, BulkConcurrency: 32},
 		},
 		Cache: Cache{
 			Dir:                "/tmp/walgit",

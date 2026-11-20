@@ -9,9 +9,9 @@
   {{if .Data.Denied}}
   <section class="card space-y-2 p-4">
     <h3 class="card-header">Access restricted</h3>
-    <p class="text-sm">This host requires an admin principal or a setup token to view or change configuration.</p>
+    <p class="text-sm">This host requires an admin principal to view or change configuration.</p>
     {{if .Data.Detail}}<pre class="code-view whitespace-pre-wrap break-words p-3">{{.Data.Detail}}</pre>{{end}}
-    <p class="muted text-sm">Authenticate, then reload this page. Hosts with <code class="mono text-xs">SPINDLE_SETUP_TOKEN</code> take the token as a query parameter (<code class="mono text-xs">?token=…</code>) — it is never stored.</p>
+    <p class="muted text-sm">Sign in with an account in the configured admin group (default <code class="mono text-xs">spindle-admins</code>, set by <code class="mono text-xs">server.auth.admin_groups</code>), or with an address matching <code class="mono text-xs">server.auth.admin_emails</code> / <code class="mono text-xs">admin_domains</code>, then reload this page. There is no setup-token escape hatch.</p>
   </section>
   {{else}}
   {{if eq .Data.View.FileState "invalid"}}
@@ -60,7 +60,6 @@
 
   <form class="space-y-4" method="post" action="/setup"
         hx-post="/setup" hx-target="#setup-page" hx-select="#setup-page" hx-swap="outerHTML">
-    <input type="hidden" name="token" value="{{.Data.Token}}">
     <div class="flex flex-wrap gap-2">
       <button type="submit" class="btn" name="op" value="validate">Validate</button>
       <button type="submit" class="btn primary" name="op" value="save">Save</button>

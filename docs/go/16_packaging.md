@@ -57,7 +57,7 @@ An operator MUST be able to build, containerize, deploy (one box or a fleet), an
 
 ### 1.4 Runtime external dependencies
 
-Exactly ONE external binary at runtime: `git` (≥ 2.47 server-side, ≥ 2.46 for clients using credential `authtype`). git-lfs is a **client** concern and MUST NOT be shipped in the server image. CA certificates are data, and are required (OIDC discovery, upstream follow, S3/GCS over TLS).
+Exactly ONE external binary at runtime: `git` (≥ 2.47 server-side, ≥ 2.46 for clients using credential `authtype`). git-lfs is a **client** concern and MUST NOT be shipped in the server image. CA certificates are data, and are required (OIDC discovery, upstream follow, S3 over TLS).
 
 ## 2. Container image
 
@@ -262,8 +262,6 @@ region = "us-east-1"
 # endpoint / force_path_style omitted = AWS defaults; set them for non-AWS S3.
 ```
 
-GCS is the same shape with `backend = "gcs"` + `store.gcs.signing_service_account` for signed URLs (see 03_store_backends.md for credentials and the JSON-API transport).
-
 ### 3.4 Terminating TLS at the reverse proxy (Caddy / nginx minimal)
 
 spindle serves plain HTTP on `server.listen` (h2c retained); TLS terminates at the proxy in front (Forgejo #165). The proxy forwards plain HTTP to spindle and MUST set `X-Forwarded-Proto: https` so the server advertises `https://` clone URLs (06_server_http.md §9.1); `server.public_url` pins the canonical external origin. Minimal shapes — adapt domains/ports, keep the header:
@@ -306,8 +304,7 @@ The Rust `deploy/nginx.conf.example` is the contract of record; spindle keeps it
 | nginx → spindle | `X-Walgit-Authorization: <client's Authorization>` | the client's credential, preserved even if an intermediate rewrote `Authorization` |
 | nginx → spindle | `X-Walgit-Principal: ""` | cleared; only spindle's own push-broker hop may set it (`server.auth.trusted_forwarders`) |
 | spindle → nginx | `200` + `X-Accel-Redirect: /_store/` | the bytes are nginx's problem now (only when `server.accel_redirect = true`) |
-| spindle → nginx | `X-Walgit-Store-Url` | bucket URL (S3: presigned; GCS: plain) |
-| spindle → nginx | `X-Walgit-Store-Authorization` | `Bearer …` (GCS only; S3 URLs are self-credentialed) |
+| spindle → nginx | `X-Walgit-Store-Url` | bucket URL (S3: presigned) |
 | spindle → nginx | `X-Walgit-Store-Key` | bucket key, percent-encoded — the cache key |
 | spindle → nginx | `X-Walgit-Etag` | spindle's strong validator, re-emitted by nginx |
 
@@ -326,7 +323,7 @@ Repo-prefix routing for a fleet: `location ~ ^/<owner>/<repo>([./?]|$)` blocks p
 | Shape | Config essence | Notes |
 |---|---|---|
 | **Personal / self-hosted (default)** | no config at all: `./spindle serve` — filesystem store under `<data-dir>/store`, cache under `<data-dir>/cache`, `auth.mode = "none"` (loud warnings + setup banner), all roles | one binary, no bucket, no edge; tune later via `/setup` → `<data-dir>/spindle.toml`; add the nginx edge (§4) when it leaves the LAN |
-| **One box** | §3.2 standalone: all roles, one S3/GCS bucket, nothing in front except the §3.4 TLS proxy | `roles = []`; the bucket is the only durable state |
+| **One box** | §3.2 standalone: all roles, one S3 bucket, nothing in front except the §3.4 TLS proxy | `roles = []`; the bucket is the only durable state |
 | **Fleet** | many `spindle serve` hosts behind the nginx edge; the monorepo's host pins `cache.mode = "disk"` + `maintenance.disk = "ssd"`, everyone else budget-mode (`cache.max_bytes`) | placement globs decide who does what (below); the edge does TLS/routing/offload; `server.auth.session_secret` MUST be identical on every host (rotation revokes all sessions+tokens) |
 | **Serverless** | `server.roles = ["serve"]` only, config purely via env (`--config /dev/null` + `SPINDLE__*`), `cache.dir` on the ephemeral FS, bounded prefetch (`wal.prefetch_max_bytes`, set it low; `wal.prefetch_packs = false` under tight CPU) | CPU throttles between requests; a maintain fleet elsewhere holds the maintain role; keep-alives off, cold starts re-warm on demand |
 
@@ -436,7 +433,7 @@ commands, this table owns the intent). The watchdog (`T5`/`T15`) wraps the long 
 | `race` | `go test -race -short -count=1 ./...` |
 | `cover` | the ≥ 95 % per-`internal/...`-package gate (D7) via `internal/devtools/covergate` |
 | `contract` | store contract: memory + filesystem, always |
-| `contract-fs` / `contract-s3` / `contract-gcs` | one backend; S3/GCS env-gated (`SPINDLE_TEST_S3_*`, `SPINDLE_TEST_GCS_BUCKET`) |
+| `contract-fs` / `contract-s3` | one backend; S3 env-gated (`SPINDLE_TEST_S3_*`) |
 | `sim` | `internal/sim` fault-injection consistency proof + round-trip budgets |
 | `e2e` | smart-HTTP end-to-end against the real git binary |
 | `image` | `docker build -t spindle .` |
@@ -530,12 +527,12 @@ curl -fsSL https://github.com/crueber/spindle/raw/main/scripts/install.sh | sh
 - **Dev-rig rustfs keys/bucket keep the Rust values (`walgit-dev` / `walgit-dev-secret`, bucket `walgit-test`)** — muscle-memory continuity for contributors coming from the Rust rig; local-only credentials.
 - **Nix flake packaging not ported** — the flake was a Rust toolchain convenience; Go's static cross-build plus the Dockerfile covers the same ground without a second packaging system (revisit only on demand).
 - **CI is a Makefile + GitHub Actions pipeline, not GitHub Actions** — the repo lives on Forgejo; the Actions service block covers the rustfs contract job, and GitHub only receives the published squash commit (where its own Actions run the same gate and build the image).
-- **NEW (2026-09-05) — server-side TLS removed; the proxy terminates it** (Forgejo #165, §3.4): spindle listens plain HTTP (h2c) and never loads a cert — the `server.tls.*` keys, the §3.2/§3.3 `[server.tls]` examples, and the install.sh CA-download step are all gone. The one-box and production shapes put Caddy/nginx in front (minimal snippets in §3.4) with `X-Forwarded-Proto: https` so recipes advertise `https://`; `server.public_url` pins the external origin. Rationale: every inbound flow works behind a terminating proxy and outbound HTTPS (OIDC, webhooks, S3/GCS) validates against the system roots — owning an in-process TLS stack bought nothing.
+- **NEW (2026-09-05) — server-side TLS removed; the proxy terminates it** (Forgejo #165, §3.4): spindle listens plain HTTP (h2c) and never loads a cert — the `server.tls.*` keys, the §3.2/§3.3 `[server.tls]` examples, and the install.sh CA-download step are all gone. The one-box and production shapes put Caddy/nginx in front (minimal snippets in §3.4) with `X-Forwarded-Proto: https` so recipes advertise `https://`; `server.public_url` pins the external origin. Rationale: every inbound flow works behind a terminating proxy and outbound HTTPS (OIDC, webhooks, S3) validates against the system roots — owning an in-process TLS stack bought nothing.
 - **`install.sh` is served from the Forgejo raw URL** — the Rust edge example leaves the installer out of the open-route set; keeping it repo-hosted avoids inventing a new public server route in the Go rewrite.
 - **Divergence (2026-08-31), applied in this revision:**
 - **D2 — SUPERSEDED 2026-09-02 by explicit user request (DEVIATIONS.md D-WEB-6), then again 2026-11-19/20 (D-WEB-14/D-WEB-15).** **Second historical shape:** the SolidJS + Tailwind v4 SPA built by vite into `web/dist/` (plain JSX, no TypeScript; runtime deps exactly solid-js + @solidjs/router; dark by default; no CDN), with the node stage running `pnpm run build` (vite SPA + esbuild SDK bundle). **Third historical shape:** the frontend was vanilla ESM (hand-written ES modules with native import map, `<template>`, ~40 lines of reactive helpers, embedded raw — no TypeScript, no framework; SolidJS/vite gone), superseding the "Node 20 + pnpm@10" decision above; the node stage was esbuild-only. **Shipped:** server-rendered pages (`internal/webui` `html/template` + vendored htmx + vanilla-ES islands) with `@tailwindcss/vite` building only `app.css`; the node stage builds stylesheet + islands + vendored copy + the SDK bundle. The SDK is **authored as submodules** (`web/sdk/src/*.js`) and esbuild-bundled to `web/dist/repos.js` (the `repos.mjs` twin is deleted; `dist/` is gitignored build output); JS tests run on Node's built-in `node --test` and import source, never the build.
 - **D3 — Make is the only task runner.** All dev/CI entry points are Make targets (`build vet fmt test race test-web e2e sim contract contract-s3 cover image dev-store clean ci`; `make help` is authoritative); the "`just` is fine too" note is retracted — there is no justfile.
 - **D4 — filesystem store backend is first-class.** `store.backend = "filesystem"` roots keys under `store.root` with sidecar-`flock` conditional writes, `renameat2(RENAME_NOREPLACE)` create-if-absent (portable fallback), `"<size>:<mtime_ns>"` version tokens/ETags, and no accel/signed URLs. It joins the contract suite as an ALWAYS-run backend beside memory (Make `contract`); the container's default path uses it; rustfs remains only as the bucket-contract fixture.
 - **D5 — zero-config first run (user friendliness is a first-class law).** A missing config boots on built-in defaults — `listen 0.0.0.0:8080`, filesystem store rooted at `<data-dir>/store`, `auth.mode = "none"` on ANY bind with loud warnings (a deliberate reversal of the Rust fail-closed loopback rule), `auto_create_on_push = true`; exit code 2 is now bad-argv only. Data dir = `--data-dir` / `SPINDLE_DATA_DIR` (default `~/.local/share/spindle`, containers `/var/lib/spindle`), holding `store/`, `cache/`, and the saved `spindle.toml`.
-- **D6 — setup UI + API are first-class.** `/setup` groups every config key by section with effective values; `GET /api/v1/setup`, `POST /api/v1/setup/test` (validate only), `PUT /api/v1/setup` (validate + atomic write of `<data-dir>/spindle.toml`, reporting restart-needed keys). Invalid config → setup-only mode: only `/setup`, `/healthz`, `/readyz` answer, everything else 503. Access: open while (no config file OR config invalid OR auth.mode = none), else admin principal; optional `SPINDLE_SETUP_TOKEN` gate for exposed hosts.
+- **D6 — setup UI + API are first-class.** `/setup` groups every config key by section with effective values; `GET /api/v1/setup`, `POST /api/v1/setup/test` (validate only), `PUT /api/v1/setup` (validate + atomic write of `<data-dir>/spindle.toml`, reporting restart-needed keys). Invalid config → setup-only mode: only `/setup`, `/healthz`, `/readyz` answer, everything else 503. Access: open while (no config file OR config invalid OR auth.mode = none), else an admin principal — OIDC `admin_groups` (default `spindle-admins`), `admin_emails`, or `admin_domains`. There is no setup token (`SPINDLE_SETUP_TOKEN` is gone and has no effect; WP13).
 - **D7 — coverage gate.** CI fails below 95% statement coverage per `internal/...` package (Make `cover`; `cmd/` main glue excluded); the pipeline gains the `cover` and web-test steps; table-driven httptest for every handler.

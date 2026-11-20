@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"io"
+	"mime"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -506,9 +507,18 @@ func (h *Handler) deleteAsset(w http.ResponseWriter, r *http.Request, owner, rep
 
 // serveAsset serves GET|HEAD …/releases/{tag}/assets/{name}: strong ETag
 // from the store version, If-None-Match → 304, Range + If-Range → 206/416,
-// HEAD, immutable caching, nosniff. Content-Type is the declared type from
-// the release header (the byte object itself carries no metadata). Served
-// direct (no compress group wraps repoDispatch; accel offload stays an
+// HEAD, immutable caching, nosniff.
+//
+// Security contract (07 §1.2, security audit UI-01): the uploaded bytes are
+// untrusted and must never become active content on this origin. The declared
+// upload type only selects among an allowlist of inert raster images; every
+// other type — text/html, image/svg+xml, javascript — is served as
+// application/octet-stream. Every response is a download
+// (Content-Disposition: attachment with the validated name), carries
+// nosniff, and is sandboxed by a per-response CSP. Assets are downloaded, not
+// rendered, so Range/ETag behaviour is unchanged.
+//
+// Served direct (no compress group wraps repoDispatch; accel offload stays an
 // edge concern — the object is immutable-addressed either way).
 func (h *Handler) serveAsset(w http.ResponseWriter, r *http.Request, owner, repo string, p auth.Principal, tag, name string) {
 	if err := h.Svc.requireRead(r.Context(), owner, repo, p); err != nil {
@@ -565,8 +575,11 @@ func (h *Handler) serveAsset(w http.ResponseWriter, r *http.Request, owner, repo
 	hdr.Set("ETag", `"`+version+`"`)
 	hdr.Set("Cache-Control", "public, max-age=31536000, immutable")
 	hdr.Set("Accept-Ranges", "bytes")
-	hdr.Set("Content-Type", rel.Assets[i].ContentType)
+	hdr.Set("Content-Type", AssetMediaType(rel.Assets[i].ContentType))
+	hdr.Set("Content-Disposition", assetDisposition(name))
 	hdr.Set("X-Content-Type-Options", "nosniff")
+	hdr.Set("Content-Security-Policy", "default-src 'none'; sandbox")
+	hdr.Set("Cross-Origin-Resource-Policy", "same-site")
 
 	if inm := r.Header.Get("If-None-Match"); inm != "" && matchETag(inm, version) {
 		w.WriteHeader(http.StatusNotModified)
@@ -602,6 +615,45 @@ func (h *Handler) serveAsset(w http.ResponseWriter, r *http.Request, owner, repo
 	hdr.Set("Content-Length", strconv.FormatInt(end-start+1, 10))
 	w.WriteHeader(http.StatusPartialContent)
 	h.streamBytes(w, r, key, store.GetOptions{Range: &[2]int64{start, end + 1}})
+}
+
+// AssetMediaType maps an upload's declared Content-Type onto the inert
+// allowlist (UI-01): only raster images pass through; everything else (HTML,
+// SVG, JS, PDF, unknown) becomes application/octet-stream. Parameters are
+// dropped — a declared type is never echoed verbatim. Used at upload (stored
+// metadata) and at serve (response header).
+func AssetMediaType(declared string) string {
+	mt := strings.ToLower(strings.TrimSpace(declared))
+	if i := strings.IndexByte(mt, ';'); i >= 0 {
+		mt = strings.TrimSpace(mt[:i])
+	}
+	switch mt {
+	case "image/png", "image/jpeg", "image/gif", "image/webp", "image/avif":
+		return mt
+	}
+	return "application/octet-stream"
+}
+
+// assetDisposition builds the attachment disposition for a validated asset
+// name. mime.FormatMediaType quotes/encodes the filename (RFC 6266/2231), so a
+// name can never split the header.
+func assetDisposition(name string) string {
+	if d := mime.FormatMediaType("attachment", map[string]string{"filename": name}); d != "" {
+		return d
+	}
+	// Defensive fallback (invalid UTF-8 in the name): printable ASCII only, so
+	// the header can never be split or malformed.
+	var b strings.Builder
+	b.WriteString(`attachment; filename="`)
+	for _, r := range name {
+		if r >= 0x20 && r < 0x7f && r != '"' && r != '\\' {
+			b.WriteRune(r)
+		} else {
+			b.WriteByte('_')
+		}
+	}
+	b.WriteByte('"')
+	return b.String()
 }
 
 // streamBytes copies the store object body; errors mid-stream are terminal

@@ -183,10 +183,18 @@ func fmtAny(v reflect.Value) any {
 	}
 }
 
+// secretKey reports whether a config field NAME holds a secret VALUE. Suffix
+// matching, not substring: `access_token_ttl` is a duration, `token_env` and
+// `secret_key_env` name where a secret lives, and `host_key` is a path — none
+// of them are values to mask or to treat as overwrite-only.
 func secretKey(name string) bool {
 	l := strings.ToLower(name)
-	return strings.Contains(l, "secret") || strings.Contains(l, "password") ||
-		strings.Contains(l, "token") || l == "key"
+	switch l {
+	case "secret", "password", "token":
+		return true
+	}
+	return strings.HasSuffix(l, "_secret") || strings.HasSuffix(l, "_password") ||
+		strings.HasSuffix(l, "_token")
 }
 
 // ParseRequest applies an HTTP setup body to base: raw TOML or
@@ -235,6 +243,24 @@ func ParseRequest(r *http.Request, base *config.Config) (*config.Config, error) 
 	return c, nil
 }
 
+// SecretMask is the placeholder /setup renders in place of a stored secret.
+// Submitting it back (or an empty value) leaves the stored secret unchanged:
+// the page never receives the real value, and there is no way to echo it back.
+const SecretMask = "•••••• (set)"
+
+// IsSecretKey reports whether key (a dotted schema key) names a secret VALUE.
+// The field name carries the schema's own rule (internal/setup secretKey): a
+// session secret, an OAuth client secret, a webhook secret, or a token.
+func IsSecretKey(key string) bool {
+	i := strings.LastIndexByte(key, '.')
+	name := key[i+1:]
+	// `*_env` / `*_file` keys name where a secret lives, not the secret.
+	if strings.HasSuffix(name, "_env") || strings.HasSuffix(name, "_file") {
+		return false
+	}
+	return secretKey(name)
+}
+
 // ParseValues applies the settings page's form values (key → raw string, the
 // same spellings the TOML file accepts) on top of base. Keys are sorted so a
 // multi-key rejection is deterministic; a repeated key keeps its last value,
@@ -251,7 +277,14 @@ func ParseValues(v url.Values, base *config.Config) (*config.Config, error) {
 		if len(vals) == 0 {
 			continue
 		}
-		if err := setDottedKey(c, k, vals[len(vals)-1]); err != nil {
+		raw := vals[len(vals)-1]
+		// Secrets are overwrite-only: the page renders the mask (never the
+		// stored value), so a round-tripped mask or an empty field means
+		// "keep the current value".
+		if IsSecretKey(k) && (raw == "" || raw == SecretMask) {
+			continue
+		}
+		if err := setDottedKey(c, k, raw); err != nil {
 			return nil, err
 		}
 	}

@@ -124,16 +124,17 @@ func normalizeSHA256(hexSHA string) (string, error) {
 	return s, nil
 }
 
-// normalizeContentType defaults an empty upload content type and bounds it.
+// normalizeContentType bounds an upload's declared content type and clamps it
+// to the inert-media allowlist (assetMediaType): only raster image types are
+// stored, everything else becomes application/octet-stream. The stored header
+// therefore never describes active content, whichever lane uploaded it — the
+// byte route clamps again on the way out (defence in depth for old records).
 func normalizeContentType(ct string) (string, error) {
 	c := strings.TrimSpace(ct)
-	if c == "" {
-		return "application/octet-stream", nil
-	}
 	if len(c) > MaxContentTypeLen {
 		return "", fmt.Errorf("%w: content type exceeds %d bytes", ErrInvalid, MaxContentTypeLen)
 	}
-	return c, nil
+	return AssetMediaType(c), nil
 }
 
 // validateReleaseInput bounds the mutable PUT fields.

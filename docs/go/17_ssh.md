@@ -82,7 +82,8 @@ host_key_env = ""      # env var NAME holding the private key; overrides host_ke
   frees the fingerprint for re-registration. Principals must be a single path segment.
 - Rights are resolved **at SSH-auth time** by `PrincipalForName` (`internal/server/auth.go`),
   mode-aware like every other auth path: `none` → the anon-all principal (anyone may register a
-  key; pushes ride the anon rights); `oidc` → the same admission and write/admin rules browser
+  key; pushes ride the anon rights — via the API or `sshd` tooling, not the /keys page, which
+  requires a signed-in identity); `oidc` → the same admission and write/admin rules browser
   login applies to that email; `token` → the aggregate of the principal's static tokens (a
   principal whose credentials are gone is denied at lookup). The exec dispatch does NOT gate
   receive-pack on the resolved write flag (Forgejo #347 — a host-wide flag is not a repo-scoped
@@ -92,7 +93,11 @@ host_key_env = ""      # env var NAME holding the private key; overrides host_ke
   never the connection flags.
 - Self-service is `GET|POST|DELETE /api/v1/ssh-keys` (read-gated identity API, `06_api.md`) and
   the `/keys` page (`internal/webui/templates/pages/settings/keys.html`): a no-write principal can register a read-only key — its rights
-  are still whatever its principal has, evaluated per connection at auth time.
+  are still whatever its principal has, evaluated per connection at auth time. The **page** requires a
+  signed-in principal (D-WEB-14 amendment, 2026-11-20): auth `oidc`/`token` signed out answers 401 like
+  the API, and auth `none` (no identity exists) renders the shared "authentication is disabled" callout
+  linking `/setup` instead of an add-key form for the synthetic principal. The API keeps its auth-none
+  path (the `None()` principal is not anonymous) for scripted use.
 - The transport is disabled unless `listen` is set, and disabled in setup-only mode (no engine).
 
 ## 4. Transport seam
@@ -161,8 +166,9 @@ both on the wire (band-2 + unpack ng) over SSH, as 413 over HTTP.
 The compose stacks publish 2222 and set `SPINDLE__SERVER__SSH__LISTEN=0.0.0.0:2222` (the transport
 is opt-in per deploy). The host key lives under `<data-dir>/ssh/` — a volume in both stacks — so
 client TOFU pins survive container replacement. Keys are added through the `/keys` page of the
-running instance (auth "none" manages the anon principal's keys; oidc/token principals manage
-their own). The GHCR image is identical: enable SSH by setting the env var, no rebuild.
+running instance when a principal is signed in (oidc/token principals manage their own; an instance
+with auth `none` points the page at `/setup` instead — D-WEB-14 amendment). The GHCR image is
+identical: enable SSH by setting the env var, no rebuild.
 
 ## Decisions & deviations from the Rust design
 
@@ -210,3 +216,10 @@ their own). The GHCR image is identical: enable SSH by setting the env var, no r
 - Avoidance: `MaxSessions` semaphore (default 64) around exec dispatch; connection and session
   goroutines bound to the connection context (canceled on disconnect/shutdown); feed goroutines
   released at child exit and die with the session; heavy execs stay on the blocking pool.
+- **17.x (2026-11-20) — the `/keys` page is identity-owned (D-WEB-14 amendment).** The page previously
+  used the `anonymous_read` gate, so a signed-out visitor on an auth-enabled instance saw a live
+  add-key form and the primary nav carried `keys`/`invitations`/`setup`. The page now requires a
+  signed-in principal (401 signed out, mirroring `GET /api/v1/ssh-keys`, which also refuses the
+  anonymous principal now), and auth `none` — where no identity exists — renders the shared
+  "authentication is disabled, configure it at `/setup`" callout instead of a form shared by every
+  anonymous visitor. The API's auth-none path is unchanged.

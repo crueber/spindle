@@ -397,8 +397,20 @@ func TestOIDCCallbackFailurePaths(t *testing.T) {
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("forged state = %d", rec.Code)
 	}
-	// sanitizeNext truth table.
-	for next, want := range map[string]string{"//evil": "/", "https://x": "/", "/ok?1": "/ok?1"} {
+	// sanitizeNext truth table — the shared httpsec.SafeNext rule refuses
+	// authority forms, schemes and backslashes (UI-03).
+	for next, want := range map[string]string{
+		"//evil":          "/",
+		"https://x":       "/",
+		"/ok?1":           "/ok?1",
+		`/\evil.com`:      "/",
+		`/\\evil.com`:     "/",
+		"/%5Cevil.com":    "/",
+		"/%5cevil.com":    "/",
+		" \\evil.com":     "/",
+		"/ok\r\nX-Pwn: 1": "/",
+		"javascript:1":    "/",
+	} {
 		if got := sanitizeNext(next); got != want {
 			t.Fatalf("sanitizeNext(%q) = %q, want %q", next, got, want)
 		}
@@ -438,6 +450,16 @@ func TestOIDCLogoutTokensPageAndMint(t *testing.T) {
 	h.ServeHTTP(rec, req)
 	if rec.Code != http.StatusFound || rec.Header().Get("Location") != "/settings" {
 		t.Fatalf("logout = %d loc=%q", rec.Code, rec.Header().Get("Location"))
+	}
+	// An open-redirect attempt (`/\evil.com` — browsers read it as an
+	// authority) falls back to the landing page, never the attacker host.
+	for _, hostile := range []string{`/\evil.com`, `/%5Cevil.com`, `//evil.com`, `https://evil.com`} {
+		req := httptest.NewRequest("GET", "http://x/_auth/logout?next="+url.QueryEscape(hostile), nil)
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+		if rec.Code != http.StatusFound || rec.Header().Get("Location") != "/" {
+			t.Fatalf("logout next=%q = %d loc=%q, want /", hostile, rec.Code, rec.Header().Get("Location"))
+		}
 	}
 	var cleared bool
 	for _, c := range rec.Result().Cookies() {

@@ -119,6 +119,12 @@ func TestImportFileEndToEnd(t *testing.T) {
 	if rec.OK == nil || !*rec.OK || len(rec.LogTail) == 0 {
 		t.Fatalf("record = %s", g.Body.String())
 	}
+	// The wire id contract: the record answers with the SAME id that was
+	// requested (the import/service id), never the internal WAL table id —
+	// so a client that reads `task.id` and re-attaches lands on this task.
+	if rec.ID != id {
+		t.Fatalf("GET id = %q, want the requested import id %q", rec.ID, id)
+	}
 	if _, err := time.Parse(time.RFC3339, rec.Finished); err != nil {
 		t.Fatalf("finished not RFC3339: %q", rec.Finished)
 	}

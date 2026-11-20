@@ -309,7 +309,7 @@ func uiAsset(name string) ([]byte, bool) {
 		return webAsset("dist/" + name)
 	// D-WEB-14 stable page assets: the stylesheet, the island bundle, and the
 	// vendored htmx files keep fixed names (no-cache + ETag, never immutable).
-	case name == "app.css", name == "ui.js", name == "htmx.min.js", name == "htmx-ext-sse.js":
+	case name == "app.css", name == "ui.js", name == "htmx.min.js":
 		return webAsset("dist/" + name)
 	}
 	return nil, false

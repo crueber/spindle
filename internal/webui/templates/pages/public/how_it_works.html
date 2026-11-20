@@ -10,7 +10,7 @@
     {{/* Trace: README L3–5; AGENTS.md law 4 ("The bucket is the repository"). */}}
     <p class="muted mx-auto mt-4 max-w-2xl text-sm leading-relaxed">
       spindle is a git host whose only database is an object store. Every repository's state —
-      refs, packs, config, policy — lives as objects in a bucket (filesystem, S3, or GCS).
+      refs, packs, config, policy — lives as objects in a bucket (filesystem or S3).
       Instances are disposable: wipe one and you lose nothing but warmth.
     </p>
     {{/* Wire-compat wording copies Landing/README verbatim — never paraphrased stronger. */}}
@@ -48,11 +48,11 @@
         <p>
           There is no database to run, back up, or scale: anything that must survive a restart is
           an object under <code class="font-mono text-xs">repos/&lt;owner&gt;/&lt;repo&gt;/</code>; disk and memory are
-          caches. Any S3, GCS, or filesystem works behind one <code class="font-mono text-xs">ObjectStore</code> contract
+          caches. Any S3 or filesystem works behind one <code class="font-mono text-xs">ObjectStore</code> contract
           (CAS, conditional GET, compose, leases).
         </p>
         <figure class="overflow-hidden border border-[var(--pd-line)] bg-[var(--pd-canvas)]">
-          <img src="/_ui/concepts/bucket-still.gif" alt="Animation: one bucket holds refs, packs, config, and policy while a server instance above it disappears and a fresh instance connects to the same bucket with nothing lost." width="640" height="360" loading="lazy" decoding="async">
+          <img class="block aspect-[16/9] h-auto w-full" src="/_ui/concepts/bucket-still.gif" alt="Animation: one bucket holds refs, packs, config, and policy while a server instance above it disappears and a fresh instance connects to the same bucket with nothing lost." width="640" height="360" loading="lazy" decoding="async">
           <figcaption class="concept-caption muted px-4 py-2 text-sm">No SQL, no Redis. Kill the instance; the bucket doesn't notice.</figcaption>
         </figure>
         {{/* Trace: 02 §2.6–2.7 (PutCreate/PutUpdate, casUpdate; "the store is the lock"). */}}
@@ -179,7 +179,7 @@
           <li>Sweep burned orphans; fold commit-graph work off the critical path; opportunistic checkpoint check.</li>
         </ol>
         <figure class="overflow-hidden border border-[var(--pd-line)] bg-[var(--pd-canvas)]">
-          <img src="/_ui/concepts/push-still.gif" alt="Animation: a laptop pushes a pack of git objects to a bucket; the bucket writes them, then acknowledges. The client only finishes after the bucket's acknowledgement." width="640" height="360" loading="lazy" decoding="async">
+          <img class="block aspect-[16/9] h-auto w-full" src="/_ui/concepts/push-still.gif" alt="Animation: a laptop pushes a pack of git objects to a bucket; the bucket writes them, then acknowledges. The client only finishes after the bucket's acknowledgement." width="640" height="360" loading="lazy" decoding="async">
           <figcaption class="concept-caption muted px-4 py-2 text-sm">Push over smart HTTP; objects land in the bucket.</figcaption>
         </figure>
       </div>
@@ -213,7 +213,7 @@
           slot epoch seconds; git downloads bundles, then fetches the remainder.
         </p>
         <figure class="overflow-hidden border border-[var(--pd-line)] bg-[var(--pd-canvas)]">
-          <img src="/_ui/concepts/fetch-still.gif" alt="Animation: an empty clone first receives ref names, then pack data, from the bucket until it holds a working copy." width="640" height="360" loading="lazy" decoding="async">
+          <img class="block aspect-[16/9] h-auto w-full" src="/_ui/concepts/fetch-still.gif" alt="Animation: an empty clone first receives ref names, then pack data, from the bucket until it holds a working copy." width="640" height="360" loading="lazy" decoding="async">
           <figcaption class="concept-caption muted px-4 py-2 text-sm">Clone reads objects back.</figcaption>
         </figure>
         <p>
@@ -297,7 +297,7 @@
           (except policy effects that explicitly consult them, e.g. required checks).
         </p>
         <figure class="overflow-hidden border border-[var(--pd-line)] bg-[var(--pd-canvas)]">
-          <img src="/_ui/concepts/collab-still.gif" alt="Animation: alongside the git lane, issue 7 opens, pull request 8 links to it, a green check result stamps the PR — while the write-ahead log stays git-only." width="640" height="360" loading="lazy" decoding="async">
+          <img class="block aspect-[16/9] h-auto w-full" src="/_ui/concepts/collab-still.gif" alt="Animation: alongside the git lane, issue 7 opens, pull request 8 links to it, a green check result stamps the PR — while the write-ahead log stays git-only." width="640" height="360" loading="lazy" decoding="async">
           <figcaption class="concept-caption muted px-4 py-2 text-sm">Issues, PRs, reviews, and checks live next to git data.</figcaption>
         </figure>
         <p>

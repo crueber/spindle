@@ -83,6 +83,7 @@ import (
 
 	"github.com/crueber/spindle/internal/api"
 	"github.com/crueber/spindle/internal/git"
+	"github.com/crueber/spindle/internal/httpsec"
 	"github.com/crueber/spindle/internal/identity"
 	"github.com/crueber/spindle/internal/notify"
 	"github.com/crueber/spindle/internal/server/auth"
@@ -347,13 +348,11 @@ func (s *Server) publicLoginRequired(w http.ResponseWriter, r *http.Request) {
 }
 
 // sanitizeNextPath is the server-side mirror of lib/writeGate.js
-// sanitizeNextClient: a local path starting with exactly one "/"; anything
-// else (scheme, "//host", empty) falls back to "/". No open redirect.
+// sanitizeNextClient and delegates to the one shared rule: a local path
+// starting with exactly one "/"; anything else (scheme, "//host", "/\host",
+// control characters, empty) falls back to "/". No open redirect.
 func sanitizeNextPath(next string) string {
-	if !strings.HasPrefix(next, "/") || strings.HasPrefix(next, "//") {
-		return "/"
-	}
-	return next
+	return httpsec.SafeNext(next, "/")
 }
 
 // authModeOrDefault is the discovery auth mode spelling ("none" for an
@@ -777,10 +776,10 @@ type inviteRowVM struct {
 
 // invitationsData is the /invitations view model.
 type invitationsData struct {
-	Anonymous bool
-	Rows      []inviteRowVM
-	Note      string
-	Err       string
+	Identity *IdentityNotice
+	Rows     []inviteRowVM
+	Note     string
+	Err      string
 
 	LinkID  string
 	Link    *inviteRowVM
@@ -789,57 +788,65 @@ type invitationsData struct {
 
 // publicInvitations answers GET /invitations: the invitee inbox (Forgejo
 // #362). A shared accept link deep-links here as ?id=&token= and previews that
-// invitation on top. Anonymous readers (anonymous_read mode) get the sign-in
-// Empty state, never an error page. 390px: rows wrap (flex-wrap), the action
-// row wraps.
+// invitation on top.
+//
+// This is an identity-owned page: the API answers 401 for an anonymous caller,
+// so the page does too (never the inbox of the synthetic "anonymous"
+// principal). On an unsecured instance (auth none) there is no identity to own
+// an inbox, so the shared notice points at /setup instead of rendering one.
+// 390px: rows wrap (flex-wrap), the action row wraps.
 func (s *Server) publicInvitations(w http.ResponseWriter, r *http.Request) {
-	p, ok := s.gated(w, r)
+	p, ok := s.principal(w, r)
 	if !ok {
 		return
 	}
 	data := invitationsData{
-		Anonymous: p.Anonymous,
-		Note:      r.URL.Query().Get("note"),
+		Note: r.URL.Query().Get("note"),
 	}
-	// A shared deep link previews only for a signed-in subject: an anonymous
-	// caller gets the sign-in card instead (the token is never echoed back).
-	if !p.Anonymous {
-		data.LinkID = r.URL.Query().Get("id")
+	switch s.identityAccessFor(p) {
+	case identitySignIn:
+		s.errorPage(w, r, http.StatusUnauthorized, "sign in to view your invitations")
+		return
+	case identityDisabled:
+		data.Identity = &IdentityNotice{What: "Invitations"}
+		s.page(w, r, p, http.StatusOK, "public/invitations", "Invitations", data)
+		return
 	}
-	if !p.Anonymous {
-		if publicDeps.MyInvites == nil {
-			s.errorPage(w, r, http.StatusServiceUnavailable, "invitations unavailable")
-			return
-		}
-		rows, err := publicDeps.MyInvites(r.Context(), p)
-		if err != nil {
-			s.errorPage(w, r, http.StatusServiceUnavailable, "invitations unavailable")
-			return
-		}
-		now := s.env.now()
-		for _, inv := range rows {
-			data.Rows = append(data.Rows, inviteRow(inv, now))
-		}
-		if data.LinkID != "" && publicDeps.PreviewInvite != nil {
-			pv, perr := publicDeps.PreviewInvite(r.Context(), p, data.LinkID, r.URL.Query().Get("token"))
-			if perr != nil {
-				data.LinkErr = friendlyInviteErr(perr)
-			} else if pv != nil {
-				row := inviteRowVM{
-					ID: pv.ID, Kind: pv.Kind, Role: pv.Role, InvitedBy: pv.InvitedBy,
-					ExpiresAt: pv.ExpiresAt, CreatedAt: pv.CreatedAt, State: pv.State,
-				}
-				if row.Kind == "" {
-					row.Kind = inviteKindOf(pv.Repo)
-				}
-				row.Scope = pv.Repo
-				if row.Scope == "" {
-					row.Scope = pv.Org
-				}
-				row.Expired = inviteExpired(pv.ExpiresAt, now)
-				row.ExpiresLabel = inviteExpiryLabel(pv.ExpiresAt, now)
-				data.Link = &row
+	if publicDeps.MyInvites == nil {
+		s.errorPage(w, r, http.StatusServiceUnavailable, "invitations unavailable")
+		return
+	}
+	// A shared deep link previews for the signed-in subject (the token is
+	// never echoed back).
+	data.LinkID = r.URL.Query().Get("id")
+	rows, err := publicDeps.MyInvites(r.Context(), p)
+	if err != nil {
+		s.errorPage(w, r, http.StatusServiceUnavailable, "invitations unavailable")
+		return
+	}
+	now := s.env.now()
+	for _, inv := range rows {
+		data.Rows = append(data.Rows, inviteRow(inv, now))
+	}
+	if data.LinkID != "" && publicDeps.PreviewInvite != nil {
+		pv, perr := publicDeps.PreviewInvite(r.Context(), p, data.LinkID, r.URL.Query().Get("token"))
+		if perr != nil {
+			data.LinkErr = friendlyInviteErr(perr)
+		} else if pv != nil {
+			row := inviteRowVM{
+				ID: pv.ID, Kind: pv.Kind, Role: pv.Role, InvitedBy: pv.InvitedBy,
+				ExpiresAt: pv.ExpiresAt, CreatedAt: pv.CreatedAt, State: pv.State,
 			}
+			if row.Kind == "" {
+				row.Kind = inviteKindOf(pv.Repo)
+			}
+			row.Scope = pv.Repo
+			if row.Scope == "" {
+				row.Scope = pv.Org
+			}
+			row.Expired = inviteExpired(pv.ExpiresAt, now)
+			row.ExpiresLabel = inviteExpiryLabel(pv.ExpiresAt, now)
+			data.Link = &row
 		}
 	}
 	s.page(w, r, p, http.StatusOK, "public/invitations", "Invitations", data)
@@ -988,22 +995,26 @@ type notifRowVM struct {
 
 // notificationsData is the /notifications view model.
 type notificationsData struct {
-	Anonymous bool
-	State     string
-	Rows      []notifRowVM
-	More      bool
-	After     string
-	Unread    int
+	Identity *IdentityNotice
+	State    string
+	Rows     []notifRowVM
+	More     bool
+	After    string
+	Unread   int
 }
 
 // publicNotifications answers GET /notifications (06 §7): the per-user tray,
 // paged (?state=all|read|unread, ?after= cursor, 50 per page). The live SSE
 // stream is an island (islands group): the page renders the contract hooks
 // (data-sse*) and a placeholder region the island refreshes — no EventSource
-// here. Anonymous readers get the sign-in Empty state. 390px: rows wrap, the
-// header controls wrap, the row body truncates instead of panning.
+// here.
+//
+// Identity-owned, like /invitations: a signed-out caller under oidc/token gets
+// the API's 401 (never the synthetic "anonymous" tray), and auth none renders
+// the shared notice + /setup path instead of a tray with no owner. 390px: rows
+// wrap, the header controls wrap, the row body truncates instead of panning.
 func (s *Server) publicNotifications(w http.ResponseWriter, r *http.Request) {
-	p, ok := s.gated(w, r)
+	p, ok := s.principal(w, r)
 	if !ok {
 		return
 	}
@@ -1012,8 +1023,12 @@ func (s *Server) publicNotifications(w http.ResponseWriter, r *http.Request) {
 		state = ""
 	}
 	data := notificationsData{State: state, After: r.URL.Query().Get("after")}
-	if p.Anonymous {
-		data.Anonymous = true
+	switch s.identityAccessFor(p) {
+	case identitySignIn:
+		s.errorPage(w, r, http.StatusUnauthorized, "sign in to see your notifications")
+		return
+	case identityDisabled:
+		data.Identity = &IdentityNotice{What: "Notifications"}
 		s.page(w, r, p, http.StatusOK, "public/notifications", "Notifications", data)
 		return
 	}
@@ -1104,17 +1119,24 @@ func (s *Server) publicNotificationState(w http.ResponseWriter, r *http.Request)
 // --- write plumbing ----------------------------------------------------------
 
 // writePrincipal resolves an authenticated principal for a mutation: 401 for
-// anonymous callers (the interstitial is a page, not a write target) and 403
-// for a cross-origin POST (the same-origin rule every UI mutation carries). A
-// request with neither Origin nor Referer is allowed: only a browser attaches
-// them, and a cookie-bearing non-browser client is already a deliberate actor.
+// anonymous callers (the interstitial is a page, not a write target), 403 for
+// an instance with authentication disabled (auth none — no identity exists to
+// own the write, so the page-level explanation, not a credential request, is
+// the honest answer), and 403 for a cross-origin POST (the same-origin rule
+// every UI mutation carries). A request with neither Origin nor Referer is
+// refused: only a browser attaches them, and a cookie-bearing non-browser
+// client is already a deliberate actor.
 func (s *Server) writePrincipal(w http.ResponseWriter, r *http.Request) (auth.Principal, bool) {
 	p, ok := s.principal(w, r)
 	if !ok {
 		return p, false
 	}
-	if p.Anonymous {
+	switch s.identityAccessFor(p) {
+	case identitySignIn:
 		s.errorPage(w, r, http.StatusUnauthorized, "authentication required")
+		return p, false
+	case identityDisabled:
+		s.errorPage(w, r, http.StatusForbidden, "authentication is disabled on this instance — configure it at /setup")
 		return p, false
 	}
 	if !publicSameOrigin(r) {

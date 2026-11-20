@@ -13,10 +13,9 @@
 //	webui.BindSettings(webui.SettingsDeps{
 //	    // --- /setup: bind the SAME functions the JSON API uses (§3.4).
 //	    SetupAccess:   func(r, p) *auth.AuthError { ... }        // server.setupAccess's rule:
-//	                                                            // SPINDLE_SETUP_TOKEN ?token=/Bearer,
-//	                                                            // else open while boot.Mode == "defaults"
+//	                                                            // open while boot.Mode == "defaults"
 //	                                                            // || setup-only || auth.mode == "none",
-//	                                                            // else requireAdmin.
+//	                                                            // else requireAdmin (no env token).
 //	    SetupView:     func(ctx) (*webui.SettingsSetupView, error)
 //	                                                            // buildSchemaGroups(effective, config.Defaults())
 //	                                                            // + boot file_state/errors; flatten the API's
@@ -107,6 +106,7 @@ package webui
 
 import (
 	"context"
+	"log"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -114,7 +114,9 @@ import (
 	"time"
 
 	"github.com/crueber/spindle/internal/api"
+	"github.com/crueber/spindle/internal/httpsec"
 	"github.com/crueber/spindle/internal/server/auth"
+	"github.com/crueber/spindle/internal/setup"
 )
 
 // ---------------------------------------------------------------------------
@@ -189,7 +191,7 @@ func (e *SettingsWriteError) status() int {
 // setup API's boot state (file_state / errors) and access verdict.
 type SettingsSetupView struct {
 	FileState string // "absent" | "valid" | "invalid"
-	Access    string // "" (ok) | "denied" | "admin_required" | "token_required"
+	Access    string // "" (ok) | "denied" | "admin_required"
 	Detail    string
 	Errors    []SettingsSetupError
 	Sections  []SettingsSetupSection
@@ -208,14 +210,18 @@ type SettingsSetupSection struct {
 
 // SettingsSetupField is one editable key row.
 type SettingsSetupField struct {
-	Key      string
-	Type     string // string|int|float|bool|duration|size|list|enum|toml|url|listen|path
-	Value    string
-	Default  string
-	Example  string
-	Note     string
-	Enum     []string
-	Secret   bool
+	Key     string
+	Type    string // string|int|float|bool|duration|size|list|enum|toml|url|listen|path
+	Value   string
+	Default string
+	Example string
+	Note    string
+	Enum    []string
+	Secret  bool
+	// Masked is true when Value is the placeholder for a stored secret (the
+	// real value never leaves the server). Masked rows are overwrite-only:
+	// submitting the placeholder (or an empty field) keeps the stored secret.
+	Masked   bool
 	Advanced bool
 	FromFile bool
 	Errors   []SettingsSetupError
@@ -256,7 +262,6 @@ type SettingsSetupPage struct {
 	ClientID        string
 	Denied          bool
 	Detail          string
-	Token           string
 	Saved           bool
 	RequiresRestart []string
 	ValidateOK      bool
@@ -281,16 +286,20 @@ type SettingsNavItem struct {
 
 // SettingsRepoPage is the repo-settings page model.
 type SettingsRepoPage struct {
-	Owner      string
-	Name       string
-	Tab        string
-	Role       string
-	Admin      bool
-	Saved      bool
-	Notice     string
-	Error      string
-	Nav        []SettingsNavItem
-	Danger     []SettingsNavItem
+	Owner  string
+	Name   string
+	Tab    string
+	Role   string
+	Admin  bool
+	Saved  bool
+	Notice string
+	Error  string
+	Nav    []SettingsNavItem
+	Danger []SettingsNavItem
+	// Chrome is the repository masthead + tab strip the layout renders above
+	// the settings page (12_web_ui.md §2.2.1). Built once in settingsRepoPage
+	// after the read gate; nil when the repo read fails (no fabricated chrome).
+	Chrome     *RepoChrome
 	General    *SettingsGeneral
 	Scheduled  *SettingsScheduled
 	Mirror     *SettingsMirror
@@ -627,6 +636,10 @@ type SettingsKeysPage struct {
 	Notice   string
 	Error    string
 	NotWired bool
+	// Identity is set instead of the page body when the instance has no
+	// identity to own SSH keys (auth mode none): the template renders the
+	// shared notice, never a form (docs/go/17_ssh.md §3).
+	Identity *IdentityNotice
 }
 
 // SettingsKeyRow is one key as the table renders it (the middle of the blob is
@@ -785,7 +798,7 @@ func (s *Server) settingsSetupPage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	d := settingsDeps()
-	page := &SettingsSetupPage{Token: r.URL.Query().Get("token")}
+	page := &SettingsSetupPage{}
 	if d.SetupAccess != nil {
 		if aerr := d.SetupAccess(r, p); aerr != nil {
 			page.Denied = true
@@ -795,7 +808,7 @@ func (s *Server) settingsSetupPage(w http.ResponseWriter, r *http.Request) {
 		}
 	} else if s.authMode() != "none" && !p.Admin {
 		page.Denied = true
-		page.Detail = "this host requires an admin principal or a setup token to view or change configuration"
+		page.Detail = "this host requires an admin principal to view or change configuration"
 	}
 	if page.Denied {
 		s.page(w, r, p, http.StatusOK, "settings/setup", "Setup", page)
@@ -808,7 +821,8 @@ func (s *Server) settingsSetupPage(w http.ResponseWriter, r *http.Request) {
 	}
 	view, err := d.SetupView(r.Context())
 	if err != nil {
-		s.errorPage(w, r, http.StatusServiceUnavailable, "configuration schema unavailable: "+err.Error())
+		log.Printf("webui setup view %s: %v", r.URL.Path, err)
+		s.errorPage(w, r, http.StatusServiceUnavailable, "configuration schema unavailable")
 		return
 	}
 	if view == nil {
@@ -819,7 +833,7 @@ func (s *Server) settingsSetupPage(w http.ResponseWriter, r *http.Request) {
 	page.RedirectURI = settingsRedirectURI(r, view.PublicURL)
 	page.Issuer = view.Issuer
 	page.ClientID = view.ClientID
-	if view.Access == "denied" || view.Access == "admin_required" || view.Access == "token_required" {
+	if view.Access == "denied" || view.Access == "admin_required" {
 		page.Denied = true
 		page.Detail = view.Detail
 	}
@@ -849,7 +863,7 @@ func (s *Server) settingsSetupSubmit(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	} else if s.authMode() != "none" && !p.Admin {
-		s.errorPage(w, r, http.StatusForbidden, "setup requires an admin principal or a setup token")
+		s.errorPage(w, r, http.StatusForbidden, "setup requires an admin principal")
 		return
 	}
 	if d.SetupView == nil {
@@ -874,11 +888,6 @@ func (s *Server) settingsSetupSubmit(w http.ResponseWriter, r *http.Request) {
 		s.errorPage(w, r, http.StatusServiceUnavailable, "setup save is not wired on this build")
 		return
 	}
-	token := r.PostFormValue("token")
-	qs := ""
-	if token != "" {
-		qs = "?token=" + url.QueryEscape(token)
-	}
 	// Validate is the API's POST /test; save is the API's PUT — the binding
 	// calls the same coercion + config.Validate for both (never duplicated
 	// here). Save validates before it writes, inside the binding.
@@ -889,31 +898,33 @@ func (s *Server) settingsSetupSubmit(w http.ResponseWriter, r *http.Request) {
 		}
 		errs, err := d.SetupValidate(r.Context(), values)
 		if err != nil {
-			s.errorPage(w, r, http.StatusServiceUnavailable, "validation failed: "+err.Error())
+			log.Printf("webui setup validate %s: %v", r.URL.Path, err)
+			s.errorPage(w, r, http.StatusServiceUnavailable, "validation failed")
 			return
 		}
 		if len(errs) > 0 {
-			s.settingsSetupReject(w, r, p, d, token, values, errs, "validation failed — nothing was saved")
+			s.settingsSetupReject(w, r, p, d, values, errs, "validation failed — nothing was saved")
 			return
 		}
-		http.Redirect(w, r, "/setup"+settingsJoinQuery(qs, "validated=1"), http.StatusSeeOther)
+		http.Redirect(w, r, "/setup?validated=1", http.StatusSeeOther)
 		return
 	}
 	result, errs, err := d.SetupSave(r.Context(), values)
 	if err != nil {
-		s.errorPage(w, r, http.StatusServiceUnavailable, "save failed: "+err.Error())
+		log.Printf("webui setup save %s: %v", r.URL.Path, err)
+		s.errorPage(w, r, http.StatusServiceUnavailable, "save failed")
 		return
 	}
 	if len(errs) > 0 {
-		s.settingsSetupReject(w, r, p, d, token, values, errs, "validation failed — nothing was saved")
+		s.settingsSetupReject(w, r, p, d, values, errs, "validation failed — nothing was saved")
 		return
 	}
-	http.Redirect(w, r, "/setup"+settingsJoinQuery(qs, "saved=1&restart="+url.QueryEscape(strings.Join(result.RequiresRestart, ","))), http.StatusSeeOther)
+	http.Redirect(w, r, "/setup?saved=1&restart="+url.QueryEscape(strings.Join(result.RequiresRestart, ",")), http.StatusSeeOther)
 }
 
 // settingsSetupReject re-renders /setup with the typed values and the
 // server's per-key errors (422; 200 for htmx).
-func (s *Server) settingsSetupReject(w http.ResponseWriter, r *http.Request, p auth.Principal, d SettingsDeps, token string, values map[string]string, errs []SettingsSetupError, msg string) {
+func (s *Server) settingsSetupReject(w http.ResponseWriter, r *http.Request, p auth.Principal, d SettingsDeps, values map[string]string, errs []SettingsSetupError, msg string) {
 	view, verr := d.SetupView(r.Context())
 	if verr != nil || view == nil {
 		view = &SettingsSetupView{}
@@ -922,7 +933,7 @@ func (s *Server) settingsSetupReject(w http.ResponseWriter, r *http.Request, p a
 	view.Errors = errs
 	settingsApplySetupValues(view, values, errs)
 	page := &SettingsSetupPage{
-		View: *view, Token: token, Error: msg,
+		View: *view, Error: msg,
 		RedirectURI: settingsRedirectURI(r, view.PublicURL),
 		Issuer:      view.Issuer, ClientID: view.ClientID,
 	}
@@ -950,15 +961,6 @@ func settingsRedirectURI(r *http.Request, publicURL string) string {
 	return base + "/_auth/callback"
 }
 
-// settingsJoinQuery appends a query fragment to an existing "?token=…" (or
-// starts the query). Kept tiny so the token survives every hop (§1 "token").
-func settingsJoinQuery(existing, add string) string {
-	if existing == "" {
-		return "?" + add
-	}
-	return existing + "&" + add
-}
-
 // settingsSetupAuthTest answers POST /setup/auth-test: an htmx fragment (the
 // discovery probe), never JSON.
 func (s *Server) settingsSetupAuthTest(w http.ResponseWriter, r *http.Request) {
@@ -972,6 +974,11 @@ func (s *Server) settingsSetupAuthTest(w http.ResponseWriter, r *http.Request) {
 			s.errorPage(w, r, authErrorStatus(aerr), aerr.Why)
 			return
 		}
+	} else if s.authMode() != "none" && !p.Admin {
+		// Same fallback as the GET and the save: an unbound access seam must
+		// not leave the outbound OIDC discovery probe open to non-admins.
+		s.errorPage(w, r, http.StatusForbidden, "setup requires an admin principal or a setup token")
+		return
 	}
 	if d.SetupAuthTest == nil {
 		s.errorPage(w, r, http.StatusServiceUnavailable, "OIDC discovery test is not wired on this build")
@@ -1007,6 +1014,13 @@ func settingsPrepareSetup(v *SettingsSetupView) {
 
 // settingsPrepareField derives the template-facing fields of one row.
 func settingsPrepareField(f *SettingsSetupField) {
+	// A secret value never reaches a template: the row renders the mask and is
+	// overwrite-only (the save path keeps the stored value when the mask comes
+	// back — setup.ParseValues).
+	if f.Secret && f.Value != "" && f.Value != setup.SecretMask {
+		f.Value = setup.SecretMask
+		f.Masked = true
+	}
 	f.InputID = "setup-in-" + strings.ReplaceAll(f.Key, ".", "--")
 	f.Bool = strings.EqualFold(strings.TrimSpace(f.Value), "true") || strings.TrimSpace(f.Value) == "1"
 	if meta, ok := settingsFieldMeta[f.Key]; ok {
@@ -1053,7 +1067,13 @@ func settingsPrepareField(f *SettingsSetupField) {
 			f.Control = "password"
 		}
 	}
-	f.FromFile = f.Value != f.Default
+	if f.Masked {
+		// The mask always differs from the default; a live secret means "from
+		// the file".
+		f.FromFile = true
+	} else {
+		f.FromFile = f.Value != f.Default
+	}
 }
 
 // settingsApplySetupValues re-renders a failed submit with the operator's typed
@@ -1061,7 +1081,9 @@ func settingsPrepareField(f *SettingsSetupField) {
 func settingsApplySetupValues(v *SettingsSetupView, values map[string]string, errs []SettingsSetupError) {
 	apply := func(f *SettingsSetupField) {
 		f.Errors = nil
-		if sval, ok := values[f.Key]; ok {
+		if sval, ok := values[f.Key]; ok && !f.Secret {
+			// Never echo a secret back into the rejected form: a submitted
+			// secret is dropped and the row keeps its mask (or stays empty).
 			f.Value = sval
 		}
 		for _, e := range errs {
@@ -1108,9 +1130,11 @@ var settingsFieldMeta = map[string]settingsFieldMetaT{
 	"server.auth.mode":           {Type: "enum", Enum: []string{"none", "token", "oidc"}, Example: "token", Note: "oidc additionally needs issuer, an allowlist, and the browser-login trio"},
 	"server.auth.anonymous_read": {Type: "bool", Example: "true", Note: "oidc: true (public browsing) recommended"},
 	"server.auth.issuer":         {Type: "url", Example: "https://id.example.com", Note: "discovery at <issuer>/.well-known/openid-configuration"},
+	"server.auth.admin_groups":   {Type: "list", Example: "spindle-admins", Note: "OIDC groups granted global admin and /setup; empty disables group admins"},
+	"server.auth.groups_claim":   {Example: "groups", Note: "ID-token claim carrying group membership (array of strings or one string)"},
 	"server.auth.session_secret": {Example: "openssl rand -hex 32", Note: "any random ≥ 32 bytes; rotating revokes sessions"},
-	"store.backend":              {Type: "enum", Enum: []string{"s3", "gcs", "memory", "filesystem"}, Example: "filesystem"},
-	"store.bucket":               {Example: "spindle-test", Note: "s3/gcs only"},
+	"store.backend":              {Type: "enum", Enum: []string{"s3", "memory", "filesystem"}, Example: "filesystem"},
+	"store.bucket":               {Example: "spindle-test", Note: "s3 only"},
 	"store.prefix":               {Example: "spindle/"},
 	"store.root":                 {Example: "/var/lib/spindle/store", Note: "filesystem backend only"},
 	"store.multipart_threshold":  {Type: "size", Example: "64MiB", Advanced: true},
@@ -1148,13 +1172,26 @@ func settingsKeyRows(recs []api.SshKeyRecord) []SettingsKeyRow {
 }
 
 // settingsKeysPage answers GET /keys: the calling principal's SSH keys.
-
+//
+// This is an identity-owned page, so it carries the identity gate rather than
+// the anonymous_read gate: a signed-out caller under a real auth mode gets the
+// API's 401, and an unsecured (auth none) instance gets the shared notice with
+// the /setup path — never an "Add a key" form nobody owns (Forgejo #371).
 func (s *Server) settingsKeysPage(w http.ResponseWriter, r *http.Request) {
-	p, ok := s.gated(w, r)
+	p, ok := s.principal(w, r)
 	if !ok {
 		return
 	}
 	page := &SettingsKeysPage{}
+	switch s.identityAccessFor(p) {
+	case identitySignIn:
+		s.errorPage(w, r, http.StatusUnauthorized, "sign in to manage your SSH keys")
+		return
+	case identityDisabled:
+		page.Identity = &IdentityNotice{What: "SSH keys"}
+		s.page(w, r, p, http.StatusOK, "settings/keys", "SSH keys", page)
+		return
+	}
 	q := r.URL.Query()
 	switch q.Get("notice") {
 	case "added":
@@ -1172,21 +1209,20 @@ func (s *Server) settingsKeysPage(w http.ResponseWriter, r *http.Request) {
 	}
 	keys, err := s.env.API.SSHKeys.List(r.Context(), p.Name)
 	if err != nil {
-		page.Error = "key registry unavailable: " + err.Error()
+		log.Printf("webui keys list %s: %v", r.URL.Path, err)
+		page.Error = "key registry unavailable"
 	}
 	page.Keys = settingsKeyRows(keys)
 	s.page(w, r, p, http.StatusOK, "settings/keys", "SSH keys", page)
 }
 
 // settingsKeyAdd answers POST /keys: the registry owns validation; the page
-// renders its error verbatim (no duplicated shape check).
+// renders its error verbatim (no duplicated shape check). writePrincipal
+// carries the identity gate (401 signed out, 403 when auth is disabled) plus
+// the same-origin rule.
 func (s *Server) settingsKeyAdd(w http.ResponseWriter, r *http.Request) {
-	p, ok := s.gated(w, r)
+	p, ok := s.writePrincipal(w, r)
 	if !ok {
-		return
-	}
-	if !settingsSameOrigin(r) {
-		s.errorPage(w, r, http.StatusForbidden, "cross-origin write refused")
 		return
 	}
 	if s.env.API == nil || s.env.API.SSHKeys == nil {
@@ -1225,14 +1261,11 @@ func (s *Server) settingsKeyReject(w http.ResponseWriter, r *http.Request, p aut
 	s.page(w, r, p, status, "settings/keys", "SSH keys", page)
 }
 
-// settingsKeyDelete answers POST /keys/{id}/delete.
+// settingsKeyDelete answers POST /keys/{id}/delete (the same identity gate as
+// the add: writePrincipal).
 func (s *Server) settingsKeyDelete(w http.ResponseWriter, r *http.Request) {
-	p, ok := s.gated(w, r)
+	p, ok := s.writePrincipal(w, r)
 	if !ok {
-		return
-	}
-	if !settingsSameOrigin(r) {
-		s.errorPage(w, r, http.StatusForbidden, "cross-origin write refused")
 		return
 	}
 	if s.env.API == nil || s.env.API.SSHKeys == nil {
@@ -1287,7 +1320,8 @@ func (s *Server) settingsRepoAccess(w http.ResponseWriter, r *http.Request) (aut
 	if d.RepoRole != nil {
 		got, err := d.RepoRole(r.Context(), owner, name, p)
 		if err != nil {
-			s.errorPage(w, r, http.StatusServiceUnavailable, "access check failed: "+err.Error())
+			log.Printf("webui repo access %s: %v", r.URL.Path, err)
+			s.errorPage(w, r, http.StatusServiceUnavailable, "access check failed")
 			return p, "", false
 		}
 		role = got
@@ -1325,7 +1359,7 @@ func (s *Server) settingsRepoTab(w http.ResponseWriter, r *http.Request) {
 	if tab == "config" {
 		settingsRevert(page, r.URL.Query().Get("rev"))
 	}
-	s.page(w, r, p, http.StatusOK, "settings/repo", "Settings", page)
+	s.pageRepo(w, r, p, page.Chrome, http.StatusOK, "settings/repo", "Settings", page)
 }
 
 // settingsRevert seeds the config editor from a history revision ("revert to
@@ -1363,6 +1397,10 @@ func (s *Server) settingsRepoPage(r *http.Request, p auth.Principal, owner, name
 		}
 	}
 	ctx := r.Context()
+	// Repository chrome above the settings columns: one summary read (the
+	// repo masthead's own read), AFTER the read gate. A failure leaves it nil —
+	// the settings gate already passed, so chrome must not fail the page.
+	page.Chrome = s.repoChromeFor(r, p, owner, name)
 	switch tab {
 	case "general":
 		if d.RepoGeneral != nil {
@@ -1608,7 +1646,7 @@ func (s *Server) settingsRepoWrite(w http.ResponseWriter, r *http.Request) {
 	if d.RepoWrite == nil {
 		page := s.settingsRepoPage(r, p, owner, name, tab, role, true)
 		page.Error = "this settings write is not wired on this build"
-		s.page(w, r, p, http.StatusServiceUnavailable, "settings/repo", "Settings", page)
+		s.pageRepo(w, r, p, page.Chrome, http.StatusServiceUnavailable, "settings/repo", "Settings", page)
 		return
 	}
 	werrRes, werr := d.RepoWrite(r.Context(), owner, name, p, wr)
@@ -1629,7 +1667,7 @@ func (s *Server) settingsRepoWrite(w http.ResponseWriter, r *http.Request) {
 		}
 		page.AdminData.NewToken = werrRes.Secret
 		page.Notice = werrRes.Notice
-		s.page(w, r, p, http.StatusOK, "settings/repo", "Settings", page)
+		s.pageRepo(w, r, p, page.Chrome, http.StatusOK, "settings/repo", "Settings", page)
 		return
 	}
 	// A dry run returns its verdict with the typed document: render it in
@@ -1638,7 +1676,7 @@ func (s *Server) settingsRepoWrite(w http.ResponseWriter, r *http.Request) {
 		page := s.settingsRepoPage(r, p, owner, name, tab, role, true)
 		page.Policy = werrRes.Policy
 		page.Notice = werrRes.Notice
-		s.page(w, r, p, http.StatusOK, "settings/repo", "Settings", page)
+		s.pageRepo(w, r, p, page.Chrome, http.StatusOK, "settings/repo", "Settings", page)
 		return
 	}
 	target := "/" + url.PathEscape(owner) + "/" + url.PathEscape(name) + "/settings/" + tab
@@ -1662,7 +1700,7 @@ func (s *Server) settingsRepoFinish(w http.ResponseWriter, r *http.Request, p au
 	if settingsHTMX(r) {
 		status = http.StatusOK
 	}
-	s.page(w, r, p, status, "settings/repo", "Settings", page)
+	s.pageRepo(w, r, p, page.Chrome, status, "settings/repo", "Settings", page)
 }
 
 // settingsRepoAction maps a tab to its single-shot write action.
@@ -2028,8 +2066,9 @@ func (s *Server) settingsRenderFragment(w http.ResponseWriter, r *http.Request, 
 		s.errorPage(w, r, http.StatusInternalServerError, "render: "+err.Error())
 		return
 	}
+	httpsec.Apply(w.Header())
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Cache-Control", "no-cache, private")
 	_, _ = w.Write([]byte(buf.String()))
 }
 

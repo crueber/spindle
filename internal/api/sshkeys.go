@@ -47,15 +47,26 @@ func (h *handlers) sshKeysNotConfigured(w http.ResponseWriter) {
 }
 
 // GET /api/v1/ssh-keys — the calling principal's keys.
+//
+// The route is AuthRead so a read-only (non-anonymous) principal may see its
+// own keys, but an anonymous principal is never admitted: with anonymous_read
+// on, AuthRead lets anonymous through, and the synthetic "anonymous" principal
+// owns nothing here (the same refusal add/delete already carry — Forgejo #502
+// defect A). Auth-none is unaffected: its principal is auth.None(), never
+// anonymous.
 func (h *handlers) sshKeysList(w http.ResponseWriter, r *http.Request) {
 	if !h.env.gate(w, r, AuthRead) {
+		return
+	}
+	p := h.env.PrincipalOf(r)
+	if p.Anonymous {
+		writePlain(w, http.StatusUnauthorized, "authentication required")
 		return
 	}
 	if h.env.SSHKeys == nil {
 		h.sshKeysNotConfigured(w)
 		return
 	}
-	p := h.env.PrincipalOf(r)
 	keys, err := h.env.SSHKeys.List(r.Context(), p.Name)
 	if err != nil {
 		writePlain(w, http.StatusInternalServerError, err.Error())

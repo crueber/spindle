@@ -94,6 +94,27 @@ func TestValidateOIDC(t *testing.T) {
 	if _, errs := Validate(c); len(errs) != 0 {
 		t.Fatalf("32-byte session_secret must pass: %v", errs)
 	}
+
+	// WP13: groups_claim must be non-empty (the default is "groups");
+	// admin_groups may be empty (group admins disabled).
+	c = base()
+	c.Server.Auth.GroupsClaim = ""
+	_, errs = Validate(c)
+	errsContain(t, errs, "groups_claim")
+
+	c = base()
+	c.Server.Auth.GroupsClaim = "groups"
+	c.Server.Auth.AdminGroups = nil
+	if _, errs := Validate(c); len(errs) != 0 {
+		t.Fatalf("empty admin_groups (group admins disabled) must pass: %v", errs)
+	}
+
+	// The defaults are the documented ones.
+	d := Defaults()
+	if d.Server.Auth.GroupsClaim != "groups" ||
+		len(d.Server.Auth.AdminGroups) != 1 || d.Server.Auth.AdminGroups[0] != "spindle-admins" {
+		t.Fatalf("group defaults = claim %q groups %v", d.Server.Auth.GroupsClaim, d.Server.Auth.AdminGroups)
+	}
 }
 
 // Rule 2b — the browser-login trio (#344): mode=oidc with any of

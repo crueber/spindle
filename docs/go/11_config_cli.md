@@ -68,6 +68,8 @@ Copied from Rust spec §15.1; key names, defaults, and meanings are **normative 
 | `server.auth.anonymous_read` | `true` | oidc: true (public browsing) recommended, false = hard-lock |
 | `server.auth.tokens[]` | — | `{principal, token \| token_env, write, admin}`; robots allowed in oidc mode too |
 | `server.auth.admin_emails / admin_domains` | `[]` | oidc admins |
+| `server.auth.admin_groups` | `["spindle-admins"]` | OIDC groups granted global admin (and `/setup`); empty = group admins disabled (WP13) |
+| `server.auth.groups_claim` | `"groups"` | ID-token claim carrying group membership (array of strings or one string); must be non-empty in oidc mode |
 | `server.auth.issuer` | — | discovery at `<issuer>/.well-known/openid-configuration` |
 | `server.auth.allowed_domains / allowed_emails` | `[]` | admission (email_verified required) |
 | `server.auth.write_domains` | — | omit = every admitted identity writes |
@@ -77,15 +79,12 @@ Copied from Rust spec §15.1; key names, defaults, and meanings are **normative 
 | `server.auth.access_token_ttl` | `"90d"` | `wgt_` token lifetime |
 | `server.auth.audiences` | `[]` | accepted `aud` on bearer ID tokens (∪ oauth_client_id) |
 | `server.auth.trusted_forwarders` | `[]` | principals allowed to set `X-Walgit-Principal` (push broker hop) |
-| `store.backend` | `"s3"` | `s3` \| `gcs` \| `memory` \| `filesystem` (D4, 03_store_backends.md) † |
+| `store.backend` | `"s3"` | `s3` \| `memory` \| `filesystem` (D4, 03_store_backends.md) † |
 | `store.bucket` / `store.prefix` | `"walgit"` / `""` | bucket + key prefix |
 | `store.root` | — | filesystem backend root (D4); first-run default `<data-dir>/store` (§2.3) † |
 | `store.max_retries` | `8` | retryable store errors, jittered backoff |
 | `store.multipart_threshold` / `multipart_part_size` | `"64MiB"` / `"32MiB"` | multipart thresholds |
 | `store.s3.endpoint/region/access_key_env/secret_key_env/force_path_style` | AWS defaults | incl. rustfs/MinIO (path style true) |
-| `store.gcs.endpoint` | Google endpoint | endpoint override (emulators) |
-| `store.gcs.signing_service_account` | — | signer for `signed_url` serving |
-| `store.gcs.bulk_clients` / `bulk_concurrency` | `4` / `32` | bulk transport separation (spec §4.6) |
 | `cache.dir` | `"/tmp/walgit"` | local cache root (`<dir>/<owner>/<name>.git`) † |
 | `cache.mode` | `"auto"` | `budget` \| `disk` \| `auto` (= disk when `maintenance.disk = "ssd"`) |
 | `cache.max_bytes` | `"20GiB"` | budget-mode cap for everything on disk |
@@ -177,7 +176,7 @@ tokens = [
 ]
 
 [store]
-backend = "gcs"
+backend = "s3"
 bucket = "acme-walgit"
 
 [cache]
@@ -350,7 +349,7 @@ Each rule is a named function in `internal/config/validate.go`; the list is the 
    - `filter`, when present, is only `"blob:none"` (Rust accepts nothing else);
    - `backfill_max` ≥ 0; `min_commits` ≥ 0; a strategy's `refs` globs compile as `owner`-free git ref globs.
 4. **chain-shared filter (restated).** A filtered chain is all-or-nothing: mixing `filter = "blob:none"` with a filterless strategy in one lineage is the classic footgun and is rejected by name in the error.
-5. **store**: `store.backend ∈ {s3,gcs,memory,filesystem}`; for s3, `access_key_env`/`secret_key_env` name existing env vars only at use time (not validated at load — the Rust behavior); `multipart_part_size` ≤ `multipart_threshold` when both are non-zero; for filesystem, `store.root` (default `<data-dir>/store`, §2.3) must be an absolute path or empty (empty = first-run default).
+5. **store**: `store.backend ∈ {s3,memory,filesystem}`; for s3, `access_key_env`/`secret_key_env` name existing env vars only at use time (not validated at load — the Rust behavior); `multipart_part_size` ≤ `multipart_threshold` when both are non-zero; for filesystem, `store.root` (default `<data-dir>/store`, §2.3) must be an absolute path or empty (empty = first-run default).
 6. **sizes/timeouts**: every duration/size key parses (§1); `cache.disk_high_watermark ∈ (0,1)` or 0; negative values nowhere.
 7. **placement globs** compile: each entry is `*`, `owner/*`, or `owner/name` (one `/` at most).
 8. **roles**: each role ∈ {serve, maintain, events}; duplicates allowed (idempotent), unknown role → error.
@@ -535,7 +534,7 @@ $ WALGIT__STORE__BKUET=x spindle config check --config /etc/spindle/walgit.toml 
 - **D5 — Config is optional; zero-config first run.** The Rust spec boots fail-closed with no config file ("run `walgit init` first"); spindle boots on the first-run defaults of §2.3 instead: `listen = "0.0.0.0:8080"`, `store.backend = "filesystem"` rooted at `<data-dir>/store`, `auth.mode = "none"` (warned), `auto_create_on_push = true`, everything else per the Rust defaults. User friendliness is a first-class law. A missing file at the DEFAULT location is a first run, not an error; a missing explicitly-named file (`--config`/config-env pointer) remains fatal (exit 2), and `/dev/null` still forces defaults+env (§3.1). Data dir (`--data-dir` / `SPINDLE_DATA_DIR`, default `~/.local/share/spindle`, `/var/lib/spindle` in containers) owns `store/`, `cache/`, and the saved `spindle.toml` (§3.1.1).
 - **D6 — Setup UI + API save semantics (§3.7).** The setup UI writes `<data-dir>/spindle.toml` atomically (tmp + fsync + rename, mode `0600`) after full §5 validation; the save response reports restart-required vs read-live keys; the saved file joins the ordinary ladder so env ⊕ file still holds with env winning. Boot states: config present → validate → boot; absent → defaults + setup banner; INVALID → setup-only mode (only `/setup`, `/healthz`, `/readyz` answer; rest 503) until a fixed config is saved and the process restarted. Endpoint shapes and the setup access rule live in 06_server_http.md.
 - **Auth-none loopback rule superseded.** Rust validation rule 1 (auth `none` requires a loopback listen, fail-closed) is replaced by a loud warning on any bind (§5 rule 1); the first-run default `0.0.0.0:8080` + `auth = "none"` depends on it. All other validation stays fail-closed.
-- **D4 — `filesystem` added to `store.backend`** (`s3|gcs|memory|filesystem`, §2 note † and §5 rule 5): keys map to paths under `store.root`, first-run default `<data-dir>/store`. 03_store_backends.md owns the backend semantics; this doc owns the key, its validation, and the default.
+- **D4 — `filesystem` added to `store.backend`** (`s3|memory|filesystem`, §2 note † and §5 rule 5): keys map to paths under `store.root`, first-run default `<data-dir>/store`. 03_store_backends.md owns the backend semantics; this doc owns the key, its validation, and the default.
 - **Feature 10 amendment (2026-09-04, docs/features/10):** additive `[import]` section (`clone_timeout`, `git_timeout`, `max_bytes`, `max_refs`, `max_concurrent`, `allow_private_networks`, `url_allowlist`, `allow_file_urls`) + the `import --url` CLI row in the §6.2 table (§6.2, same change, law 12). Rationale: 14 §14.12 — new sections/keys are additive; existing keys never change meaning.
 - **D1 — dependency budget** (restated where it touches this doc): exactly `github.com/go-chi/chi/v5`, `github.com/BurntSushi/toml`, `golang.org/x/net`. TOML stays the config file format and BurntSushi/toml stays the parser — no format migration was entertained.
 - **NEW (2026-09-11) — `server.serve_sync_timeout` / `server.serve_materialize_timeout` (#320):**

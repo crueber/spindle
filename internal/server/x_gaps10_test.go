@@ -61,7 +61,7 @@ func TestServeUIAssetsCSS(t *testing.T) {
 		t.Fatalf("revalidated asset = %d len=%d", rec.Code, rec.Body.Len())
 	}
 	// The island bundle and the vendored htmx files share the stable lane.
-	for _, name := range []string{"ui.js", "htmx.min.js", "htmx-ext-sse.js"} {
+	for _, name := range []string{"ui.js", "htmx.min.js"} {
 		rec := httptest.NewRecorder()
 		s.serveUIAssets(rec, httptest.NewRequest("GET", "http://x/_ui/"+name, nil))
 		if rec.Code != http.StatusOK || rec.Header().Get("Cache-Control") != "no-cache" {

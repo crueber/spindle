@@ -19,10 +19,14 @@ package ecosystem in v1; release source archives and asset download counts are v
 user-facing setting and policy must be editable in the UI** — raw JSON is not a v1 surface; the GCS
 backend is removed rather than implemented; "sync fork" is v1; the registry reuses the existing
 token/OIDC identity with repository-role scopes and introduces no second credential type.
+**Amended the same day:** the **CLI** and **Threads** (CI — the feature formerly called Actions) are
+**v1 requirements**, not v1.1; and README rendering must be **GitHub-compatible** (raw HTML that
+GitHub allows must render the same way, safely).
 
-Deliberately **not** v1 (README `v1.1` / `Backlog`, and P9): Actions runners, code search, projects,
-wiki, insights, moderation, sponsorships, forum, ownership transfer, SAML/SCIM, merge queue,
-auto-merge, stacked PRs, Discussions.
+Deliberately **not** v1 (README `Backlog`, and P9): code search, projects, wiki, insights,
+moderation, sponsorships, forum, ownership transfer, SAML/SCIM, merge queue, auto-merge, stacked
+PRs, Discussions, and — inside Threads — a third-party action marketplace, caches and OIDC cloud
+credentials.
 
 ## 1. Audit — README v1 list vs the code (2026-11-20)
 
@@ -37,6 +41,8 @@ auto-merge, stacked PRs, Discussions.
 | 7 | fork | ✅ | **shipped** | `internal/pulls/forks.go`, `forkexec.go` (manifest-sharing landed, #424); no "sync fork" |
 | 8 | webhooks | ✅ | **shipped** | `internal/notify/webhooks.go` (HMAC, SSRF guard, retry, delivery ring); org hooks API-only |
 | 9 | oidc | ✅ | **shipped** | discovery, PKCE, nonce, signed state, ID-token verify; no claim→team mapping |
+| 10 | cli | *(was v1.1)* | **partial** | `cmd/spindle` has serve/compact/bundle/repo/wal/import/mirror/config; no identity, org, issue/PR/release, packages or threads commands, and no machine-readable output contract |
+| 11 | threads (CI) | *(was "actions", v1.1)* | **absent** | no runner, no workflow discovery, no job execution; `docs/features/12_runner.md` was a DRAFT, superseded by `15_threads.md` |
 
 Two README corrections follow from this table: **pull requests and releases are done** (ticked in this
 change), and `packages` is the only unchecked v1 item with no implementation.
@@ -128,8 +134,45 @@ must close. Rows marked **—** are at parity already; they stay in the table as
 |---|---|---|---|
 | Smart HTTP v0/v2, SSH, LFS, bundle-uri | yes | yes | — |
 | Filesystem + S3 backends | — | yes | — |
-| GCS backend | — | **advertised, not built** (`store.backend="gcs"` errors) | **WP7** — remove it (decision 2026-11-20) |
 | Archive download (`/archive/<ref>.tar.gz`) | yes | no | **WP3.1** (shares the archive writer) |
+
+### 2.9 Threads (CI)
+
+| Capability | GitHub Actions | spindle today | Delta |
+|---|---|---|---|
+| Workflow files in the repo, triggered by push/PR/schedule/manual | yes | none | **WP10** |
+| Jobs in containers, steps with `run:`/`uses:`, services, matrix | yes | none | **WP10** |
+| Results reported as checks (required-checks gate) | yes | checks exist, no producer | **WP10** |
+| Fork PR safety: base-branch workflow, no secrets, approval | yes | none | **WP10** (server-side policy) |
+| Runner deployment: Docker-in-Docker, labels, capacity | yes | none | **WP10** (capacity 1 default) |
+| Third-party action marketplace, caches, OIDC cloud creds | yes | none | **non-goal for v1** |
+
+Full specification: `docs/features/15_threads.md`.
+
+### 2.10 CLI
+
+| Capability | GitHub (`gh`) | spindle today | Delta |
+|---|---|---|---|
+| Server lifecycle (serve, config check/dump) | n/a | yes | — |
+| Repository admin (create/list/info, policy, settings, WAL) | `gh repo` | yes | — |
+| Identity, orgs, teams, tokens | `gh api` / `gh auth` | no | **WP11** |
+| Issues, PRs, releases, checks (read + write) | `gh issue/pr/release` | no | **WP11** |
+| Packages and Threads | `gh` + API | no | **WP11** |
+| Machine-readable output (`--json`), stable exit codes, shell completion | yes | no | **WP11** |
+| `spindle api` escape hatch (raw request, token from env) | `gh api` | no | **WP11** |
+
+### 2.11 README rendering
+
+| Capability | GitHub | spindle today | Delta |
+|---|---|---|---|
+| CommonMark + tables, task lists, autolinks, strikethrough | yes | yes | — |
+| Raw HTML: `<details>/<summary>`, `<video>/<source>`, `<picture>`, `<kbd>`, `<sub>/<sup>` | yes (sanitized) | **no** — escaped or dropped | **WP12** |
+| `align="center"` on block elements | yes | **no** | **WP12** |
+| Relative links/images resolved in-repo | yes | yes | — |
+| Safety: script/style/iframe/event handlers stripped, URL scheme allowlist | yes | n/a (no raw HTML) | **WP12** (the sanitizer is the boundary) |
+
+Field evidence (2026-11-20, a live instance): a README using `<div align="center">`,
+`<details>` and a `<video>`-style demo link renders as escaped text — GitHub renders all three.
 
 ## 3. Work packages
 
@@ -183,13 +226,13 @@ machinery (`internal/egress`, `internal/mirror` presets) so SSRF rules are share
 - **WP6.2 Org webhooks tab** (create/ping/deliveries/delete), enable/disable + secret rotation, and
   redeliver — the repo-level surface already does all of this, so this is a UI + one endpoint.
 
-### WP7 — Remove GCS
+### WP7 — Storage surface truth (LANDED 2026-11-20)
 
-GCS is not wanted (decision 2026-11-20); remove it everywhere it is advertised rather than implementing
-it: `store.backend` enum + validation (`internal/config`), the `store.gcs` config struct, the setup
-schema/UI entries, the `case "gcs"` branch in `cmd/spindle/serve.go`, the README and
-`docs/go/03_store_backends.md`, and any test that names it. `DEVIATIONS.md` D-DEP-3's claim of a
-hand-rolled GCS client is corrected in the same change (no `store/gcs.go` exists).
+The inherited project shipped an extra cloud backend that spindle does not build. It is gone:
+`store.backend` (enum + validation), its config struct, the setup schema, the serve branch, its
+event-envelope parser, the contract target and every doc/README reference. Supported backends are
+**filesystem** (the zero-config default), **S3** (rustfs/MinIO) and **memory** (tests).
+`DEVIATIONS.md` records the removal as a divergence from the inherited Rust project.
 
 ### WP9 — UI editability sweep (the "everything does" rule)
 
@@ -198,6 +241,62 @@ and policy for an API-only path and closes what it finds. The audit already name
 labels/milestone/assignees in WP2.2, protection rules in WP2.3, issue assignees in WP6.1, org
 webhooks in WP6.2); this WP verifies there are no others (mirror settings, push-mirror auth, token
 scopes, check defaults, per-repo features) and records the result as a table in this document.
+
+### WP10 — Threads (CI)
+
+Full specification: **`docs/features/15_threads.md`**. Summary: workflow files under
+`.spindle/workflows/`, runs created server-side from push/PR/schedule/dispatch **with the workflow
+revision selected per trust class** (fork PRs run the base branch's file, no secrets, approval gate);
+jobs claimed by runners over a documented JSON protocol with **attempt-scoped tokens**; one container
+per job with steps via `docker exec` and checkout inside the container; Docker-in-Docker deployment
+with **capacity 1 by default**; results written into the existing checks surface so the merge gate
+works unchanged; a Threads tab with live logs, cancel and rerun.
+
+Milestones: **T1** workflow discovery + run/job records + checks integration (no runner yet, manual
+run state); **T2** runner protocol + executor with a fake docker CLI; **T3** real DinD e2e + fork
+trust policy + secrets; **T4** UI/SDK + schedule/cron + capacity controls.
+
+### WP11 — Full CLI
+
+Close the parity gaps in §2.10: `spindle auth`/`token`, `user`, `org`, `team`, `issue`, `pr`,
+`release`, `checks`, `packages`, `threads`, plus `spindle api` (one authenticated request, token from
+env/config). Every command gets `--json` (stable schema, documented), meaningful exit codes (`0 ok`,
+`1 user error`, `2 usage`, `3 not found`, `4 auth`), and shell completion generated from the same
+command table. The CLI is a client of the existing JSON API — no second source of truth, no direct
+store access beyond the operator commands that already exist (WAL/fsck/compact).
+
+### WP12 — GitHub-compatible README rendering
+
+Close the gaps in §2.11 without weakening the XSS boundary. Design: keep the current CommonMark
+pipeline, and add **raw-HTML passthrough through an allowlist sanitizer** built on
+`golang.org/x/net/html` (already a dependency, law 1): parse the HTML fragment, walk the tree, emit
+only allowed tags/attributes and http/https/mailto/relative URLs, drop scripts/styles/iframes/event
+handlers/`javascript:`/`data:` (except `data:image/*` for images), and re-serialize the sanitized tree.
+Allow GitHub's practical set — `details`, `summary`, `video`, `audio`, `source`, `picture`, `kbd`,
+`sub`, `sup`, `mark`, `del`, `ins`, `abbr`, plus `align` (left/center/right) on block elements — and
+keep an explicit test corpus of known-bad inputs the sanitizer must neuter.
+
+Acceptance: the `loom` README renders like GitHub (centered header, `<details>` collapsing, an
+embedded demo video), and the sanitizer corpus passes with no `template.HTML` bypass.
+
+### WP13 — OIDC admin groups (setup access)
+
+`/setup` (and the setup JSON API) must not be unlocked by a CLI/env secret. Global admin — and
+therefore setup access — comes from a **signature-verified OIDC group claim**: `server.auth.admin_groups`
+(default `["spindle-admins"]`) matched case-insensitively against the ID-token claim named by
+`server.auth.groups_claim` (default `"groups"`, a JSON array of strings or a single string). The
+`admin` flag stays independent of `write`; groups never bypass the `allowed_domains`/`allowed_emails`
+admission rule; an empty `admin_groups` disables group admins; `admin_emails`/`admin_domains` keep
+working (migration path). The `SPINDLE_SETUP_TOKEN` env var, the `?token=`/Bearer bypass, and the
+page's token field are **deleted** (setting the env var has no effect). Group membership rides the
+walgit session/token wire so a signed-in browser keeps group-derived admin, and the admin policy is
+re-applied per request.
+
+Acceptance: a signed ID token with an admin group opens `/api/v1/setup` (200) and the `/setup` page;
+`groups: ["other"]` or an absent claim is 403; `groups_claim = "roles"` reads `roles`; case
+differences match; `admin_groups = []` grants nothing; the setup page names the group rule rather
+than a token; the config keys render in the setup schema. Docs: 06 §3.4/§8.4/§8.5/Decisions, 11,
+15 §5.3 matrix, 16 D6, features/01 Decisions.
 
 ### WP8 — Documentation and checklist reconciliation (landed with this plan)
 
@@ -209,9 +308,10 @@ corrected (fork manifest-sharing landed); this plan linked from the README.
 
 | Milestone | Contents | Why this order |
 |---|---|---|
-| **V1-alpha** | WP8 (docs truth), WP7 (decide GCS), WP1 skeleton: `/v2/` ping, blob/manifest PUT/GET, token auth, `docker push/pull` of a single-image repo | Packages is the largest risk; prove the protocol first |
+| **V1-alpha** | WP8 (docs truth), WP7 (storage truth — landed), WP1 skeleton: `/v2/` ping, blob/manifest PUT/GET, token auth, `docker push/pull` of a single-image repo | Packages is the largest risk; prove the protocol first |
 | **V1-beta** | WP1 complete (tags/list, delete, GC, UI page, API/SDK, feature toggle), WP2.1, WP3.1 | A user can push an image, open a fork PR, and download a release tarball |
-| **V1-rc** | WP2.2, WP2.3, WP3.2/3.3, WP4, WP5, WP6, WP9 | Parity gaps that do not gate the headline features; WP9 proves the editability rule |
+| **V1-rc** | WP2.2, WP2.3, WP3.2/3.3, WP4, WP5, WP6, WP9, **WP12** | Parity gaps that do not gate the headline features; WP9 proves the editability rule; WP12 makes READMEs render like GitHub |
+| **V1-rc (large)** | **WP10 T1–T4** (Threads), **WP11** (CLI) | The two items that must ship for v1 per the 2026-11-20 amendment; WP10 is the critical path and should start immediately after V1-alpha |
 | **V1** | Full ladder green, `docs/EVIDENCE.md` entry for the registry hot paths, README all-ticked, release button | Ship |
 
 WP1 and WP3.1 are independent and can run in parallel; WP2 is independent of both; WP5 depends on
@@ -255,6 +355,15 @@ Per WP:
 - **WP5** — fast-forward sync is idempotent and single-flighted; divergence is reported without
   rewriting history; SSRF rules match the mirror path.
 - **WP6** — assignee editing and the org webhook tab pass the same tests as their API twins.
+- **WP10** — the protocol contract, scheduler (including fork trust class), executor argv and the
+  real Docker-in-Docker e2e pass; a fork PR runs with no secrets and a read-only token; a job's
+  results appear as a required check and block the merge when failing; live logs render at 1440 and
+  390 px.
+- **WP11** — every §2.10 row has a command; `--json` output is schema-pinned by tests; `spindle api`
+  works against the local server with a token from env; completion generates for bash/zsh/fish.
+- **WP12** — the loom README's `<div align>`, `<details>` and video render like GitHub; the
+  sanitizer corpus (script, iframe, event handler, `javascript:`, `data:` exfiltration, style
+  injection) is neutralized; no page gains a `template.HTML` path outside the sanitizer.
 
 ## 7. Risks
 
@@ -262,14 +371,20 @@ Per WP:
    ecosystem is a separate plan.
 2. **Registry GC correctness.** Blobs are shared by manifests; deleting a tag must not delete a blob a
    second manifest references. GC runs as a sweep (no refcount LIST on delete) — specify and test it.
-3. **GCS decision drift.** Config, README, setup UI and the store doc must agree (WP7) or the next
-   operator hits a boot error.
+3. **Storage-surface drift.** Config, README, setup UI and the store doc must agree (WP7); a backend
+   name accepted by validation but not buildable is a boot error waiting for the next operator.
 4. **The editability rule expands scope.** "Everything is editable in the UI" can surface settings with
    no form today (WP9); each one costs an endpoint + a page section. The sweep bounds the list before
    the rc milestone, and anything it uncovers that is genuinely rare lands as a named follow-up rather
    than silently shipping as JSON-only.
 5. **Doc truth.** The README checklist had drifted from the code. WP8 makes it the single status source
    and the plan links every claim to evidence.
+6. **Threads runs untrusted code.** A CI runner is the highest-risk surface in the product: root in a
+   container, a Docker daemon behind it, secrets nearby. The non-negotiables in `15_threads.md` §5
+   (capacity 1 by default, base-branch workflow for forks, no secrets on fork runs, attempt-scoped
+   tokens, no host socket by default) are v1 acceptance criteria, not aspirations.
+7. **CLI surface sprawl.** WP11 must stay a client of the API; a command that reaches into the store
+   directly becomes a second behaviour to keep correct.
 
 ## 8. Resolved scope decisions (2026-11-20)
 
@@ -278,9 +393,13 @@ Per WP:
 | 1 | Package ecosystems | **OCI/container only** | WP1 as written; npm/Maven/NuGet/RubyGems stay out |
 | 2 | Release archives + download counts | **In v1** | WP3.1 and WP3.2 are required, not optional |
 | 3 | Branch-protection UI | **In v1 — everything is editable in the UI** | WP2.3 required; new WP9 sweep enforces the rule |
-| 4 | GCS | **Remove it** | WP7 becomes a removal, not an implementation |
+| 4 | Legacy extra storage backend | **Removed** | WP7 landed: filesystem, S3 and memory only |
 | 5 | Fork sync / code search | **Sync fork in v1; search stays deferred (P9)** | WP5 required; search unchanged |
 | 6 | Registry auth | **Reuse existing token/OIDC, repo-role scopes** | WP1 as designed; no second credential type |
+| 7 | CLI | **v1** (moved from v1.1) | new WP11; parity with the API surface + `--json` |
+| 8 | CI | **v1, named Threads** (moved from v1.1 "actions"); Docker-in-Docker like Forgejo, clean-room | new WP10 + `docs/features/15_threads.md` |
+| 9 | README rendering | **GitHub-compatible** (raw HTML through an allowlist sanitizer) | new WP12 |
+| 10 | Setup access | **OIDC admin groups** (`spindle-admins` default), no env setup token | new **WP13**; `SPINDLE_SETUP_TOKEN` deleted |
 
 Consequences worth stating plainly: v1 grows by WP2.3 (protection UI), WP9 (editability sweep) and the
 release-archive work, and shrinks by the GCS backend. The README's "protection rules are backlog" line

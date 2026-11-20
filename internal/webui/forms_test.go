@@ -221,6 +221,8 @@ type formsFakeImport struct {
 	res     *repoimport.BeginResult
 	rec     *wal.TaskRecord
 	err     error
+	state   repoimport.TaskState
+	stateOK bool
 	lastURL string
 }
 
@@ -228,6 +230,8 @@ func (f *formsFakeImport) Begin(_ context.Context, _ auth.Principal, params repo
 	f.lastURL = params.Source.URL
 	return f.res, f.rec, f.err
 }
+
+func (f *formsFakeImport) State(string) (repoimport.TaskState, bool) { return f.state, f.stateOK }
 
 type formsFakeMirror struct{ synced []string }
 
@@ -370,7 +374,15 @@ func formsParseTemplates(t *testing.T, s *Server) {
 	}
 	for _, p := range groupPages {
 		name := strings.TrimSuffix(strings.TrimPrefix(p, "templates/pages/"), ".html")
-		files := append([]string{"templates/base.html", "templates/partials/header.html", "templates/partials/footer.html", p}, parts...)
+		files := append([]string{
+			"templates/base.html",
+			"templates/partials/header.html",
+			"templates/partials/footer.html",
+			// The layout's repository chrome (12_web_ui.md §2.2.1).
+			"templates/partials/repo_header.html",
+			"templates/partials/repo_tabs.html",
+			p,
+		}, parts...)
 		tpl, perr := template.New("base").Funcs(s.funcs()).ParseFS(tplFS, files...)
 		if perr != nil {
 			t.Fatalf("parse %s: %v", name, perr)
@@ -408,6 +420,13 @@ func (h *formsHarness) request(t *testing.T, method, path string, form url.Value
 	}
 	for k, v := range hdr {
 		r.Header.Set(k, v)
+	}
+	// A browser sends Origin on every state-changing request; model that so
+	// the fail-closed same-origin gate is exercised, not bypassed. Tests that
+	// want a cross-origin or headerless post set the header explicitly.
+	if method != http.MethodGet && method != http.MethodHead &&
+		r.Header.Get("Origin") == "" && r.Header.Get("Referer") == "" {
+		r.Header.Set("Origin", "http://"+r.Host)
 	}
 	w := httptest.NewRecorder()
 	h.s.Serve(w, r)
@@ -1252,9 +1271,156 @@ func TestFormsImportStartRendersRunningCard(t *testing.T) {
 	formsExpectContains(t, w, `data-task-id="task-42"`)
 	formsExpectContains(t, w, `data-task-stream="/api/v1/repos/imports/task-42"`)
 	formsExpectContains(t, w, "The import keeps running if you navigate away")
+	// The id on the card IS the id the status endpoint accepts: the page
+	// links to it (requirement: a real, clickable link, not a sentence).
+	formsExpectContains(t, w, `href="/api/v1/repos/imports/task-42"`)
+	// The island is the only consumer of the bars/log hooks — pin both so a
+	// template edit cannot orphan the island again.
+	formsExpectContains(t, w, "data-task-bars")
+	formsExpectContains(t, w, "data-task-log")
+	formsExpectContains(t, w, "<noscript>")
 	if imp.lastURL != "https://github.com/acme/monorepo.git" {
 		t.Fatalf("canonical source = %q", imp.lastURL)
 	}
+}
+
+// TestFormsImportTaskIDContract pins the mapping the page hands the island:
+// data-task-id == the Begin TaskID (the import/service id the API's GET
+// .../imports/{id} accepts) == the id in the stream URL == the id in the
+// status link. The WAL table's own record id is never rendered.
+func TestFormsImportTaskIDContract(t *testing.T) {
+	h := newFormsHarness(t, "none")
+	imp := &formsFakeImport{
+		res: &repoimport.BeginResult{TaskID: "i2f44aa"},
+		// A joined import carries the table record: its id must not leak.
+		rec: &wal.TaskRecord{ID: "e5d892bb", Kind: repoimport.KindRepoImport, Repo: "alice/monorepo"},
+	}
+	formsUse(t, FormsDeps{Identity: &formsFakeIdentity{}, Import: imp, Mirror: &formsFakeMirror{}})
+	w := h.request(t, http.MethodPost, "/import", url.Values{
+		"kind": {"import"}, "source_url": {"acme/monorepo"}, "owner": {"alice"}, "name": {"monorepo"},
+	}, "writer", nil)
+	formsExpectStatus(t, w, http.StatusOK)
+	formsExpectContains(t, w, `data-task-id="i2f44aa"`)
+	formsExpectContains(t, w, `data-task-stream="/api/v1/repos/imports/i2f44aa"`)
+	formsExpectContains(t, w, `href="/api/v1/repos/imports/i2f44aa"`)
+	if strings.Contains(w.Body.String(), "e5d892bb") {
+		t.Fatalf("the table record id leaked into the page: %s", formsTruncate(w.Body.String()))
+	}
+}
+
+// TestFormsImportFastFinishRendersDone covers the POST-render race: an import
+// that reached its terminal state inside formsImportSettle must render the
+// done card (with a real link into the repo), never a spinner.
+func TestFormsImportFastFinishRendersDone(t *testing.T) {
+	h := newFormsHarness(t, "none")
+	imp := &formsFakeImport{
+		res:     &repoimport.BeginResult{TaskID: "i-fast"},
+		stateOK: true,
+		state: repoimport.TaskState{
+			Finished: true,
+			Outcome: &repoimport.Outcome{
+				Repo:      "alice/monorepo",
+				SourceURL: "https://github.com/acme/monorepo.git",
+				HeadSHAs:  map[string]string{"refs/heads/main": "abc123"},
+			},
+		},
+	}
+	formsUse(t, FormsDeps{Identity: &formsFakeIdentity{}, Import: imp, Mirror: &formsFakeMirror{}})
+	w := h.request(t, http.MethodPost, "/import", url.Values{
+		"kind": {"import"}, "source_url": {"acme/monorepo"}, "owner": {"alice"}, "name": {"monorepo"},
+	}, "writer", nil)
+	formsExpectStatus(t, w, http.StatusOK)
+	formsExpectContains(t, w, `href="/alice/monorepo"`)
+	formsExpectContains(t, w, "refs/heads/main")
+	formsExpectContains(t, w, "https://github.com/acme/monorepo.git")
+	if strings.Contains(w.Body.String(), "data-task-id") {
+		t.Fatalf("a finished import still rendered a progress card: %s", formsTruncate(w.Body.String()))
+	}
+}
+
+// TestFormsImportFastFailureRendersFailureCard is the other half of the race:
+// the failure summary + log land on the page, with a retry form and no
+// spinner, and the source token is never echoed back.
+func TestFormsImportFastFailureRendersFailureCard(t *testing.T) {
+	h := newFormsHarness(t, "none")
+	imp := &formsFakeImport{
+		res:     &repoimport.BeginResult{TaskID: "i-bad"},
+		stateOK: true,
+		state: repoimport.TaskState{
+			Finished: true,
+			Record: &wal.TaskRecord{
+				ID: "t-bad", Kind: repoimport.KindRepoImport, Repo: "alice/monorepo",
+				LogTail: []string{"clone start", "fatal: repository not found"},
+			},
+			Outcome: &repoimport.Outcome{Repo: "alice/monorepo", Err: &repoimport.StatusError{
+				Status: 422, Message: "source not reachable: 404",
+			}},
+		},
+	}
+	formsUse(t, FormsDeps{Identity: &formsFakeIdentity{}, Import: imp, Mirror: &formsFakeMirror{}})
+	w := h.request(t, http.MethodPost, "/import", url.Values{
+		"kind": {"import"}, "source_url": {"acme/monorepo"}, "owner": {"alice"}, "name": {"monorepo"},
+		"token": {"ghp-secret"},
+	}, "writer", nil)
+	formsExpectStatus(t, w, http.StatusOK)
+	formsExpectContains(t, w, `aria-label="Import failed"`)
+	formsExpectContains(t, w, "source not reachable: 404")
+	formsExpectContains(t, w, "fatal: repository not found")
+	formsExpectContains(t, w, "try again")
+	if strings.Contains(w.Body.String(), "data-task-id") {
+		t.Fatalf("a failed import still rendered a progress card: %s", formsTruncate(w.Body.String()))
+	}
+	if strings.Contains(w.Body.String(), "ghp-secret") {
+		t.Fatalf("the source token was echoed into the failure page")
+	}
+}
+
+// TestFormsImportTerminalFromRecord covers the branches formsImportTerminal
+// reads when the outcome is absent (a pruned ring): success follows the
+// record's OK, failure follows OK=false + Summary.
+func TestFormsImportTerminalFromRecord(t *testing.T) {
+	h := newFormsHarness(t, "none")
+	ok, bad := true, false
+	for _, tc := range []struct {
+		name string
+		rec  *wal.TaskRecord
+		want string
+	}{
+		{"ok record", &wal.TaskRecord{ID: "t1", Repo: "alice/monorepo", OK: &ok}, `href="/alice/monorepo"`},
+		{"failed record", &wal.TaskRecord{ID: "t2", Repo: "alice/monorepo", OK: &bad, Summary: "clone failed: timeout"}, "clone failed: timeout"},
+	} {
+		imp := &formsFakeImport{
+			res:     &repoimport.BeginResult{TaskID: "i-rec"},
+			stateOK: true,
+			state:   repoimport.TaskState{Finished: true, Record: tc.rec},
+		}
+		formsUse(t, FormsDeps{Identity: &formsFakeIdentity{}, Import: imp, Mirror: &formsFakeMirror{}})
+		w := h.request(t, http.MethodPost, "/import", url.Values{
+			"kind": {"import"}, "source_url": {"acme/monorepo"}, "owner": {"alice"}, "name": {"monorepo"},
+		}, "writer", nil)
+		formsExpectStatus(t, w, http.StatusOK)
+		formsExpectContains(t, w, tc.want)
+	}
+}
+
+// TestFormsImportRunningSeedsLog pins the still-running branch of the settle
+// window: the card is rendered with the log the task already narrated.
+func TestFormsImportRunningSeedsLog(t *testing.T) {
+	h := newFormsHarness(t, "none")
+	imp := &formsFakeImport{
+		res:     &repoimport.BeginResult{TaskID: "i-run"},
+		stateOK: true,
+		state: repoimport.TaskState{Record: &wal.TaskRecord{
+			ID: "t-run", Repo: "alice/monorepo", LogTail: []string{"clone start https://github.com/acme/monorepo.git"},
+		}},
+	}
+	formsUse(t, FormsDeps{Identity: &formsFakeIdentity{}, Import: imp, Mirror: &formsFakeMirror{}})
+	w := h.request(t, http.MethodPost, "/import", url.Values{
+		"kind": {"import"}, "source_url": {"acme/monorepo"}, "owner": {"alice"}, "name": {"monorepo"},
+	}, "writer", nil)
+	formsExpectStatus(t, w, http.StatusOK)
+	formsExpectContains(t, w, `data-task-id="i-run"`)
+	formsExpectContains(t, w, "clone start https://github.com/acme/monorepo.git")
 }
 
 func TestFormsImportNoopRendersDoneCard(t *testing.T) {
@@ -1493,21 +1659,33 @@ func TestFormsCompareHistories(t *testing.T) {
 }
 
 func TestFormsOriginCheck(t *testing.T) {
+	h := newFormsHarness(t, "none")
 	r := httptest.NewRequest(http.MethodPost, "/x", nil)
 	r.Host = "spindle.localhost:8080"
 	r.Header.Set("Origin", "http://spindle.localhost:8080")
-	if !formsOriginOK(r) {
+	if !h.s.formsOriginOK(r) {
 		t.Fatal("same-origin rejected")
 	}
 	r.Header.Set("Origin", "http://evil.example")
-	if formsOriginOK(r) {
+	if h.s.formsOriginOK(r) {
 		t.Fatal("cross-origin accepted")
 	}
 	r.Header.Del("Origin")
 	r.Header.Set("Referer", "//evil.example/x")
-	if formsOriginOK(r) {
+	if h.s.formsOriginOK(r) {
 		t.Fatal("protocol-relative referer accepted")
 	}
+	// Fail closed when neither header is present in a cookie-auth mode; the
+	// auth-less none boot still accepts (no session to abuse).
+	r.Header.Del("Referer")
+	if !h.s.formsOriginOK(r) {
+		t.Fatal("none mode rejected a headerless post")
+	}
+	h.s.env.Cfg.Server.Auth.Mode = "token"
+	if h.s.formsOriginOK(r) {
+		t.Fatal("token mode accepted a headerless post (fail-open)")
+	}
+	h.s.env.Cfg.Server.Auth.Mode = "none"
 }
 
 func TestFormsHXRedirect(t *testing.T) {
@@ -2200,10 +2378,11 @@ func TestFormsAllPagesRequireAuth(t *testing.T) {
 }
 
 func TestFormsSameHostParseError(t *testing.T) {
+	h := newFormsHarness(t, "none")
 	r := httptest.NewRequest(http.MethodPost, "/x", nil)
 	r.Host = "spindle.localhost"
 	r.Header.Set("Origin", "http://[::1")
-	if formsOriginOK(r) {
+	if h.s.formsOriginOK(r) {
 		t.Fatal("unparseable origin accepted")
 	}
 }

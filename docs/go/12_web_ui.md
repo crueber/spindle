@@ -20,13 +20,13 @@ The UI is one server-rendered artifact plus the SDK:
 |---|---|---|---|
 | Pages | `internal/webui/templates/**` + `internal/webui/*.go` | Go `html/template` | stdlib only |
 | Islands | `web/src/islands/*.js` → `web/dist/ui.js` | vanilla ES modules | none |
-| htmx | `web/vendor/htmx.min.js`, `web/vendor/htmx-ext-sse.js` | vendored files | MIT (no npm runtime dep) |
+| htmx | `web/vendor/htmx.min.js` | vendored file | MIT (no npm runtime dep) |
 | Styles | `web/src/app.css` → `web/dist/app.css` | Tailwind v4, CSS-first | dev-time |
 | SDK | `web/sdk/src/*.js` → `web/dist/repos.js` | plain ES modules | dependency-free |
 
-The binary embeds `web/dist/` and serves `/_ui/app.css`, `/_ui/ui.js`, `/_ui/htmx.min.js`,
-`/_ui/htmx-ext-sse.js` (stable names, `no-cache` + ETag), hashed `/_ui/assets/*` (immutable) and
-`/repos.js` (module MIME is load-bearing).
+The binary embeds `web/dist/` and serves `/_ui/app.css`, `/_ui/ui.js`, `/_ui/htmx.min.js`
+(stable names, `no-cache` + ETag), hashed `/_ui/assets/*` (immutable) and `/repos.js` (module MIME is
+load-bearing).
 
 ## 1. Artifact A — the SDK (`web/sdk/`)
 
@@ -188,6 +188,45 @@ Template functions are deliberately small: `md`/`mdrepo` (server markdown), `dif
 (`eq/ne/lt/len/index/printf/slice`) — a string-only `eq` once broke every error page that compares an int
 status.
 
+### 2.2.1 Repository chrome (every repo-scoped page)
+
+**A page scoped to a repository renders the repository chrome — the masthead (`repo_header`:
+owner/name, description, branch/tag counts, stars/watches/forks with their write affordances, Clone) and
+the tab strip (`repo_tabs`: Code, Commits, Issues, Pulls, Checks when the repo ever reported one,
+Releases, Settings) — above its own content.** The chrome is one component with one active-tab rule, so it
+cannot drift page by page: a user moving Commits → Issues → Settings never loses the header.
+
+The attach is structural, not per-template:
+
+- `PageData.Repo` (`*RepoChrome`) carries it and `templates/base.html` renders it above `{{template
+  "content"}}`. `s.pageRepo(w, r, p, chrome, …)` is the ONE render helper; `s.page` is
+  `pageRepo(…, nil, …)`. A repo-scoped template therefore never includes the chrome itself — and can
+  never render it twice.
+- `s.repoChromeFor(r, p, owner, name)` is the attach path for a handler whose **read gate already
+  passed**: ONE `Summary` read (it performs the refs sync itself) plus the boot-bound projections
+  (`CollabCounts`, `ForkInfo`, `ChecksSummary`, `Mirror`, `SocialCounts`, …). `s.repoChromeFrom(…, sum)`
+  is the same build for a handler that already holds the summary (the collab gate reads it for the
+  feature flags — zero extra store round trips). `s.RepoChromeFor` remains the *gated* seam (it runs
+  the principal + visibility gate and the Exists/Sync/Summary pass, and writes the response on failure).
+- **Chrome is display data and never a gate.** Build it only AFTER the page's own gate: a denied request
+  keeps its exact status/redirect and body (no repository name, description or tabs). A failed summary
+  read yields `nil` — the page renders without chrome rather than failing a request that its own gate
+  already admitted.
+- The active tab is derived from the request path by `repoTabSection` (`/{o}/{r}/<first segment>`), so a
+  handler never restates its section: `issues|labels|milestones → Issues`, `pulls|pull → Pulls`,
+  `checks|check → Checks`, `releases|release → Releases`, `wal|settings → Settings`,
+  `tree|blob|commits|commit → Code`. A feature-disabled tab re-highlights onto Code (#522); `/forks` and
+  `/fork` are masthead affordances, not tabs, and keep Code current.
+- Exceptions, by design: the repo group's own six pages (tree/blob/commits/commit/wal) include the
+  partials inside their `content` and leave `PageData.Repo` nil (one masthead, not two), and the collab
+  **error** page (`collab/error`) is a full-page interstitial for gate/role/format failures — it renders
+  no chrome, because a denial is exactly the case that must not surface repository metadata.
+
+Testing: `repo_chrome_test.go` is table-driven over every repo-scoped page family (collab list + detail
+pages, settings tabs, repo forms) asserting exactly one masthead, the tab strip, and the current tab;
+plus the reverse (the Code pages keep exactly one) and the gate (a denied request carries no chrome and
+no repository metadata).
+
 ### 2.3 Routing and precedence
 
 Routes are `http.ServeMux` patterns on the provider's mux, registered by each group from an `init()`
@@ -199,6 +238,16 @@ nothing on a non-match (the team routes do this). A missing repo/ref/path is a r
 a 200 with a client-rendered error.
 
 ### 2.3.1 Route inventory (as implemented)
+
+The **identity-owned** pages — `/keys`, `/invitations`, `/notifications` — are not plain read pages:
+each one reads or writes a single principal's own data, so each requires a **signed-in principal**
+(auth `oidc`/`token`). The gate is `Server.identityAccessFor` (`internal/webui/server.go`), not the
+`anonymous_read` flag: a signed-out caller gets the same 401 the JSON twin answers, and an instance
+with authentication disabled (`mode` `""`/`none` — no identity exists) renders the shared
+`partials/identity_notice.html` callout pointing at `/setup` instead of a management form nobody
+owns; their writes answer 401 (signed out) / 403 (auth disabled) before any service call. The primary
+nav carries `explore` only — plus `setup` while unsecured, for first-run discoverability; for a
+signed-in principal keys/invitations/setup live in the identity menu (setup admin-only).
 
 Read pages (`GET`): `/`, `/explore`, `/how-it-works`, `/api`, `/new`, `/import`, `/orgs/new`, `/keys`,
 `/invitations`, `/notifications`, `/login-required`, `/setup`, `/{owner}`, `/{owner}/repositories`,
@@ -245,7 +294,9 @@ extension cannot POST, set headers, read JSON payloads, or tell a 401 from a dro
 
 `web/src/islands/` is the entire client behavior surface: `theme`, `menus` (the popover contract),
 `copy`, `autogrow`, `selection` (line selection + `#L` anchors, toggling the shipped `line-hl` class),
-`sse`, `danger`, `submitkeys`. `index.js` boots them idempotently on `DOMContentLoaded` and after every
+`sse`, `tasks` (the `/import` progress card: bars + log tail, terminal navigation to the imported
+repo, and an honest failure/no-longer-tracked card — pure helpers under `node --test`), `danger`,
+`submitkeys`. `index.js` boots them idempotently on `DOMContentLoaded` and after every
 htmx swap (`htmx:afterSwap`/`afterSettle`); each island marks the nodes it owns. No client data layer,
 no router, no framework.
 
@@ -301,7 +352,7 @@ var web embed.FS   // dist/app.css, dist/ui.js, dist/htmx*.js, dist/repos.js, di
 | Path | Cache behavior |
 |---|---|
 | `/_ui/assets/*` (content-hashed, immutable) | `Cache-Control: public, max-age=31536000, immutable` |
-| `/_ui/app.css`, `/_ui/ui.js`, `/_ui/htmx.min.js`, `/_ui/htmx-ext-sse.js` (stable names) | `Cache-Control: no-cache` + strong ETag |
+| `/_ui/app.css`, `/_ui/ui.js`, `/_ui/htmx.min.js` (stable names) | `Cache-Control: no-cache` + strong ETag |
 | every rendered page | `Cache-Control: no-cache` + strong ETag (a deploy is visible on the next request) |
 | `/repos.js` (SDK) | `Cache-Control: no-cache` + ETag; module MIME is load-bearing |
 
@@ -319,9 +370,9 @@ internal/webui/            env.go server.go render.go router.go helpers.go gates
                            markdown.go diff.go graph.go highlight.go   (server renderers)
                            public.go repo.go collab.go forms.go settings.go parity_*.go (+_test)
 internal/webui/templates/  base.html, partials/*.html, pages/{public,repo,collab,forms,settings}/*.html
-web/src/islands/           theme menus copy autogrow selection sse danger submitkeys (+ index.js)
+web/src/islands/           theme menus copy autogrow selection sse tasks danger submitkeys (+ index.js)
 web/src/app.css            Tailwind v4 design system (@source'd from the Go templates)
-web/vendor/                htmx.min.js, htmx-ext-sse.js (pinned, vendored)
+web/vendor/                htmx.min.js (pinned, vendored)
 web/sdk/src/               the dependency-free SDK submodules → dist/repos.js
 cmd/spindle/webui.go        composition: wireWebUI + the five Bind* binders
 ```
@@ -364,15 +415,28 @@ on data while neither pays a transport hop. Client-side `fetch` is limited to th
 Hazard: an SSE reader leaks when its element is swapped out mid-stream, and a reconnect storm can turn
 one dropped stream into a request flood.
 Avoidance (`13_concurrency.md` ownership/cancellation rules): each `[data-sse]` element owns exactly one
-`AbortController`; `htmx:beforeCleanupElement`/`afterSwap` and the island's `cleanup()` cancel it, and
-the fetch reader's loop exits on `signal.aborted` (one closer). Invalidation frames are coalesced with a
-trailing 250 ms window (bursts collapse into one refetch), reconnect uses capped exponential backoff
-(1 s→30 s, reset on the first frame), and a 401 stops the stream and dispatches `ui:auth-required`
-instead of retrying forever. No unbounded buffering: frames are parsed as they arrive and the effects
-are DOM refetches, not client caches.
+`AbortController`, and so does each `[data-task-id]` progress card; `htmx:beforeCleanupElement`/
+`afterSwap`, the islands' `cleanup()` and `pagehide` cancel it, and the fetch reader's loop exits on
+`signal.aborted` (one closer). Invalidation frames are coalesced with a trailing 250 ms window (bursts
+collapse into one refetch), reconnect uses capped exponential backoff (1 s→30 s, reset on the first
+frame), and a 401 stops the stream and dispatches `ui:auth-required` instead of retrying forever; the
+task island additionally bounds consecutive errors (5) and treats a 404 as terminal (the ring is pruned
+past retention, so retrying cannot help). No unbounded buffering: frames are parsed as they arrive and
+the effects are DOM refetches, not client caches.
 
 ## Decisions & deviations from the Rust design
 
+- **The task-progress island and the settle window (2026-11-20).** A page that starts a background
+  task must never leave a spinner: `/import` renders `[data-task-id][data-task-stream]` and
+  `web/src/islands/tasks.js` (registered in `index.js`, fetch stream from `sse.js` as §2.6 requires —
+  it can read the 401/404 status, stop after a bounded retry budget and keeps `fetch()` in one module)
+  paints bars/log, navigates to `/<owner>/<name>` on the terminal `result`, and renders the reason plus
+  a link on `error`/404/401/exhaustion. The card is self-sufficient without JS (a real status link and
+  a `<noscript>` note), and the POST handler closes the render race by waiting one bounded
+  `formsImportSettle` (400 ms) on `repoimport.Service.State` — the SAME id the status endpoint accepts
+  — so a fast import renders its done or failed card, never a live card for a finished task. The
+  island's decision logic (`taskBars`, `taskDone`, `taskRedirect`, `taskFailureText`, `taskLogTail`)
+  is DOM-free and pinned by `web/test/unit/tasks.test.js`.
 - **D-WEB-14 decisions from the page groups (2026-11-19/20).** A missing or invisible repo is a real
   404 HTML page (the SPA returned 200 with a client-rendered error); the visibility verdict runs
   **before** the anonymous_read flag (Forgejo #345), so a public repo stays readable under
@@ -415,7 +479,7 @@ are DOM refetches, not client caches.
 - **FIXED (issue #133) — app-wide relative date design:** every timestamp renders through one shared `<DateTime>` (`web/src/components/DateTime.jsx`: `<time dateTime>` + hover `title`) backed by the headless-testable `web/src/lib/format.js` helpers. Three tiers — age < 1 day relative only ("just now" < 60 s, "N minute(s) ago" < 60 min, "N hour(s) ago" < 24 h), 1–30 days relative only ("N day(s) ago"; issue #312 moved the old " - {ordinal} of {Month}" suffix into the hover title), 31+ days "{Month} {ordinal}, {Year}"; the hover title is the user's-local wall time "YYYY-MM-DD HH:MM <zone>" (`fmtDateTitle`), never UTC-suffixed, prepended with "{Month} {ordinal} · " for timestamps in the 1–30-day window (e.g. "September 2nd · 2025-09-02 14:03 CDT" — the < 1 day tier needs no calendar date and the 31+ day tier already shows the full date, so both keep the plain wall-time title). Decisions: "month" is a fixed 31-day boundary (whole-day age ≤ 30 middle tier, ≥ 31 absolute — calendar months vary 28–31 days, which would flip the tier on unknowable days); "just now" covers sub-minute ages (the issue's examples start at minutes — a bare "0 minutes ago" must never render); future timestamps clamp to "just now" (clock skew / optimistic rows must never render "-3 minutes ago"); month names are fixed English (deterministic in every browser locale — only the hover title localizes); fallbacks match the old per-page formatters (falsy → "", unparseable → String(input)). Sweeps all previous `fmtDate`/`toLocaleString`/ISO-slice call sites (issues, pulls, commits, releases, checks, comments, WAL, settings incl. webhook deliveries, keys, orgs); `Repo.jsx`/`Org.jsx` per-page formatters deleted. Display-only — no backend, SDK, or data change; no new deps. Headless cover: `web/test/unit/dates.test.js` (tier boundaries, ordinals incl. 11/12/13, future clamp, fallbacks, title shape/zone, #312 1–30-day title prefix with 1/30/31-day boundary pins, `dateTimeAttr` normalization).
 - **FIXED (issue #142) — owners two-column + last-active + headers:** repo rows on `/` and `/:owner` share one `<RepoRow>` (`Repos.jsx`: link + `<StarCount>` + `<ActivityStamp>`) in a responsive `grid grid-cols-1 sm:grid-cols-2` (one column on narrow widths; grid fills row-wise so newest-first order is preserved; caps/overflow links from #117 unchanged). Each row gains `active <DateTime>` via `<ActivityStamp>` (`web/src/components/ActivityStamp.jsx`, the #133 component). Source decision: latest COMMIT date from `GET …/commits?n=1` (ref defaults to HEAD server-side — one GET per repo, no summary fetch first); the summary carries no date field (a stamp from it would need a new backend field) and the overview's `manifest.last_push` is push-time from a no-store heavyweight — more cost per row for a less precise signal.   Honest-proxy note: pushes that add no commits do not move the stamp; empty repos render "no commits yet", never a fake epoch (the unborn-HEAD 404 maps to `{commits: []}` in the fetch, keeping it out of the error tray). Cost mirrors star counts (shared `activity:{o}/{r}` 30 s key, placeholder-first, tray-on-error, #117-cap-bounded). Owner headers promote from the #137 quiet `text-sm` to `text-base font-bold tracking-tight` (header by scale + weight, not just link color). §2.3.1 documents the grid, the source decision, and the header treatment. No new endpoint, no new SDK method, no new deps; links stay plain anchors (keyboard flow unchanged); `.muted`/emerald-link classes carry dark + light. Headless cover: `web/test/unit/activity.test.js` (commit_date preference, author_date fallback, empty/missing → null, TTL contract).
 - **FIXED (issue #150) — silent 404s on per-row auxiliary fetches:** the owners page spammed `social:{o}/{r}` error toasts for listed repos whose manifest-gated reads 404 — on the reporter's stack, fork children (`o/r-fork`, `e2e/demo2-fork`): a fork writes `repos/<o>/<r>/fork.json` before the child manifest exists, so the prefix listing (`repoRegistry.Repos` via `ListPrefixes`) names the child while `GET …/api/social` (manifest probe `repoAlive`) answers `not found: repo o/r-fork not found`. Root-cause note: there is NO uppercase-key source — the "uppercase" is Pure CSS. The tray chip renders the `useData` key verbatim inside `.chip`, and `.chip` carries Tailwind `uppercase` (`web/src/ui.css`), so key `social:o/r-fork` DISPLAYS as `SOCIAL:O/R-FORK` (verified live: tray `innerText` uppercases a lowercase key). The key shares `full()` with the request URL and the backend 404 message echoes the URL's owner/repo verbatim (`repoName`, no case folding anywhere in `web/` or the social/commit paths), so the fetch itself was always correctly-cased lowercase. The fetches are legitimate per-row probes hitting a real backend state (deleted/private/unborn rows 404 the same way). AMENDS the #137/#142 "tray-on-error" lines: 404 on an auxiliary per-row fetch is missing DATA, not a failure — the tray is for real errors. Mechanism: one shared `tolerateMissing(promise, missing)` helper in `web/src/lib/data.js` (404 → `missing`, everything else rethrows into the unchanged tray path). `<StarCount>` resolves 404 to null and hides the count (placeholder `(…)` only while loading, i.e. value `undefined`); `<ActivityStamp>` keeps its `{commits: []}` mapping ("no commits yet") through the same helper. Audit: `<RepoRow>`'s two probes are the only per-row fetches on `/` and `/:owner` (owner/repo listings are list-level and 200 `[]` for unknown owners). No backend, SDK, or styling change (dark + light untouched); no new deps. Headless cover: `web/test/unit/tolerate-missing.test.js` (404 → missing value incl. the real `start()` path with empty tray; non-404 incl. 401/403/500/network passthrough; resolved-value passthrough).
-- **FIXED (issue #164) — per-backend store fields on the setup page:** the store card showed every backend's fields at once. It now mirrors the auth card's `modes` gating: each store FIELDS entry carries an optional `backends` list (`store.root` → filesystem, `store.s3.*` → s3, `store.gcs.*` → gcs, `store.bucket` → s3+gcs; the selector plus prefix/retries/multipart knobs are shared), `fieldAppliesToBackend` gates rows (combined with the mode gate; hidden rows unmount via `<Show>` so tab order, screen readers, dark + light are unaffected — native select/switch controls unchanged), the effective backend resolves form-first with row fallback then the `filesystem` first-run default, `validateSetup` skips hidden backend fields, and Validate/Save send `normalizeSetup(filterSetupToVisible(values))` so the test endpoint only ever sees the visible backend's fields. Toggles never wipe: hidden values stay in form state (the filter copies) and reappear on revisit. No backend change (the server validator has no per-backend required fields); no new deps. Headless cover: `setup-form.test.js` gains the visibility matrix, default, preservation, and per-backend validation cases.
+- **FIXED (issue #164) — per-backend store fields on the setup page:** the store card showed every backend's fields at once. It now mirrors the auth card's `modes` gating: each store FIELDS entry carries an optional `backends` list (`store.root` → filesystem, `store.s3.*` → s3, `store.bucket` → s3; the selector plus prefix/retries/multipart knobs are shared), `fieldAppliesToBackend` gates rows (combined with the mode gate; hidden rows unmount via `<Show>` so tab order, screen readers, dark + light are unaffected — native select/switch controls unchanged), the effective backend resolves form-first with row fallback then the `filesystem` first-run default, `validateSetup` skips hidden backend fields, and Validate/Save send `normalizeSetup(filterSetupToVisible(values))` so the test endpoint only ever sees the visible backend's fields. Toggles never wipe: hidden values stay in form state (the filter copies) and reappear on revisit. No backend change (the server validator has no per-backend required fields); no new deps. Headless cover: `setup-form.test.js` gains the visibility matrix, default, preservation, and per-backend validation cases.
 - **FIXED (issue #168) — per-section collapsible Advanced on the setup page:** sections with sane-default knobs (`server` incl. `server.ssh.*`, `store`, `cache`, `wal`, `maintenance`, `compaction`, `bundles`, `lfs`, `upstream`, `git`, `telemetry`, `events`, `import`) render those knobs in a collapsed native `<details>` Advanced group; essentials stay visible (e.g. `server.listen`, `store.backend`, cache dir/mode/max_bytes, `wal.checkpoint_interval`, `bundles.strategy`, `upstream.git`). Evaluated to all-visible (no Advanced group): `auth` — every row is mode-gated and either required per mode or security-sensitive, hiding one risks a broken first boot; `placement` — routing globs have no sane default to hide behind. Checks/releases/notifications are not setup-schema sections (no keys in the schema) and are out of scope. Save/test/validate byte-identical by construction (collapsed rows stay mounted; no change to the overrides channel, the test endpoint, or the save path; expanded state is DOM-only); no new deps. Headless cover: `web/test/unit/setup-advanced.test.js` (flag/partition helpers, per-section grouping verdicts, save-payload equivalence expanded vs collapsed, collapsed-field validation).
 - **FIXED (issue #170) — directory markdown files as tabs in the Tree view:** below the file list, the current directory's `*.md`/`*.markdown` blobs render as client-side tabs (README case-insensitive first and default-selected, rest alphabetical; section hidden when empty). Tab bodies reuse the blob MD pipeline (markdown-lite + sanitizer, same `too_large` 2 MiB cap note and binary placeholder as `Blob.jsx`); bodies fetch lazily through the existing blob endpoint on the commit sha (immutable `sha:{sha}:blob:{path}` `useData` key shared with the blob page's cache entry — zero round trips for the pre-filled probed readme, one per newly opened tab), with the tree payload's probed readme pre-filling its tab. Filenames are special-character safe both ways: tab `#` anchors via `encodeURIComponent`, blob fetches via per-segment encoding (`docBlobPath` — a raw `#` would otherwise cut the fetch URL at the fragment; the backend decodes one segment at a time). Keyboard: native buttons with roving tabindex (arrows/Home/End move selection and focus); dark + light via the shared `.pill`/`.card`/`.markdown-body` classes. Ordering/selection/anchor rules live in the headless-testable `web/src/lib/doctabs.js` (`web/test/unit/doctabs.test.js`). No backend or SDK change; no new deps.
 - **FIXED (issue #172) — tab bodies fetch only on the resolved commit sha, never a display string:** `DocTabs` built its blob revision as `t().sha ?? t().ref`, so any tree payload without `sha` interpolated a UI display string (the full ref name, e.g. `refs/heads/main`) into the blob route's single-segment `{rev}` — the router splits it (`rev="refs"`, mangled path), resolve fails, the fetch 404s, and the sha-addressed entry (never revalidated) sits on `loading…` forever on every tab. Root-cause note: the reported `SHA:…:BLOB:…` "revision" is the same misread class as #150 — there is NO uppercase-key source. The tray chip renders the `useData` key (`sha:<sha>:blob:<path>`) verbatim inside `.chip`, and `.chip` carries Tailwind `uppercase` (`web/src/ui.css`), so the key DISPLAYS uppercased; the fetch itself always carried the key's lowercase sha. Mechanism: `Tree.jsx` now passes `rev={t().sha}` (no ref fallback) and both the cache key and the fetcher go through the pure `docFetchArgs(rev, dirPath, name)` gate (`web/src/lib/doctabs.js`) — 40-lowercase-hex sha plus per-segment-encoded path, or null (render loading, no doomed request, no tray spam). Same endpoint, same immutable key shape (still shared with the blob page's entry), lazy-per-tab fetching and #171 path encoding unchanged. No backend, SDK, or styling change (dark + light untouched); no new deps. Headless cover: `web/test/unit/doctabs.test.js` pins the fetch args (40-hex revision + correct path pass through; ref names, short/upper shas, and the literal `SHA:`-prefixed chip text all gate to null).
@@ -608,3 +672,23 @@ are DOM refetches, not client caches.
 - **FIXED (Forgejo #627) — Settings sidebar Mirror + Push mirror merge into ONE entry rendering TWO containers (regroup only):** `SETTINGS_GROUP` drops the `pushmirror` row (single `Mirror` entry); `resolveSettingsTab("pushmirror")` returns "mirror" as an explicit alias so old #pushmirror deep links land on the merged entry instead of falling back to General, and `settingsTabIdFromHash("#pushmirror")` follows. The "mirror" <Show> branch in `Settings.jsx` mounts `<MirrorTab>` (pull) then `<PushMirrorTab>` (push) in that order — the old sidebar order — with both components byte-identical otherwise; the `pushmirror` <Show> branch is deleted. SDK/API (`repo(full).pushmirror.*`, `mirror · push` badge) untouched. No new deps (law 1); Tailwind untouched (regroup only, same containers, both themes + 390px hold by construction); composition only (guideline §2 by reference, no new pattern, law 11 via this amendment). Headless cover: extended `web/test/unit/settings-nav.test.js` (single mirror entry, pushmirror→mirror alias, unknown still falls back) + new `web/test/unit/settings-mirror-merge-627.test.js` (registry + render-structure + alias-explicitness + law-12 pins) + #627-scoped update to the stale `pushmirror.test.js` nav pin (entry assertion becomes the merged-alias assertion); full `node --test` (unit files minus smoke) green; `vite build` + `esbuild` green.
 - **FIXED (Forgejo #629) — Mirror tab cards separated (one class):** the merged Mirror entry stacked the pull-mirror and push-mirror `card p-4` sections with touching borders. The push card takes the file's stacked-section idiom (`card mt-4 p-4`, same as every other stacked section in Settings.jsx) — same cards, content, order, and fetches. Headless cover: new `web/test/unit/mirror-tab-gap-629.test.js` (3 tests); full `node --test` (unit files minus smoke) green; `vite build` + `esbuild` green.
 - **FIXED (Forgejo #631) — Settings page heading goes sr-only (one class):** the page rendered a doc-style `h2` (`text-lg` + `mb-3`) that pushed the sidebar nav and content column a row below the tab bar. The tab bar already reads Settings and the sidebar carries its own SETTINGS micro-heading, so the h2 is now `sr-only` — screen readers keep the outline, sighted layout starts directly with the nav + content row. No other layout change. Headless cover: new `web/test/unit/settings-heading-631.test.js` (3 tests); full `node --test` (unit files minus smoke) green; `vite build` + `esbuild` green.
+- **FIXED (D-WEB-14 amendment, 2026-11-20) — identity-owned pages and the nav matrix (#371 defect):** the
+  `#371` comment stated the intent ("keys/invitations move into the identity menu for signed-in users")
+  while the code inverted it (`ShowKeys/ShowInvite/ShowSetup = !signedIn`), so an auth-enabled instance
+  showed **keys**, **invitations** and **setup** in the primary nav to a signed-out visitor, and `GET /keys`
+  rendered a live "Add a key" form for the synthetic `anonymous` principal. Fix: the Chrome model keeps only
+  `ShowSetup` (true exactly when no principal is signed in AND `auth.mode` is `""`/`none` — the first-run
+  case); keys/invitations are removed from the nav template outright and live only in the identity menu
+  (`Setup` there is gated on `Chrome.Admin`, verified). Page gates: `identityAccessFor` (`signedIn` =
+  `!p.Anonymous && mode != "" && mode != "none"`) — `/keys` GET/POST/DELETE, `/invitations` GET +
+  accept/decline, `/notifications` GET + read/unread/read-all require a signed-in principal: oidc/token
+  signed-out answers the API's 401 (message names the surface), and auth `none`/`""` renders the shared
+  `identity_notice` callout (`/setup` link, no form) with writes 403 — consistent across all three areas,
+  never a 404. The guard lives in `writePrincipal` for every identity mutation (401 anonymous, 403 auth
+  disabled, then same-origin). API parity: `GET /api/v1/ssh-keys` now refuses the anonymous principal (401,
+  the add/delete rule from #502 defect A) — it was the one identity read that still answered with the
+  synthetic principal's (empty) list; pinned by `TestSSHKeysListRefusesAnonymous`. Also fixed while
+  auditing: `POST /setup/auth-test` (the outbound OIDC discovery probe) skipped the admin fallback when no
+  `SetupAccess` seam was bound, unlike GET/save. Webui cover: `TestIdentityNavMatrix`,
+  `TestIdentityMenuOwnsKeysInvitesAndSetup`, `TestIdentityPagesRequireSignedIn`,
+  `TestIdentityWritesRefuseNoIdentity`. Rendered proof (Chromium/@390px) in the commit report.

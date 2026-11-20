@@ -430,7 +430,7 @@ func withLockTiming(name string, repo string, try func() bool, lock func(), unlo
 }
 ```
 
-Histogram `walgit_lock_wait_seconds{lock}` (Prometheus text exposition, hand-rolled per 08; locks: `sync_mutex`, `rw`, `pack_mutex`, `gcs_bulk_permit`). WARN past `telemetry.lock_wait_warn` with (lock, repo, wait_ms). Snapshots feed the watchdog and the ops/overview pages (08, 10_maintenance.md). The try-lock-first requirement is why `syncMu` and the rw lock are custom types, not bare `sync.Mutex`/`RWMutex` — the instrumentation hook is part of their API (`TryLock` + `LockMeasured`).
+Histogram `walgit_lock_wait_seconds{lock}` (Prometheus text exposition, hand-rolled per 08; locks: `sync_mutex`, `rw`, `pack_mutex`, `bulk_permit`). WARN past `telemetry.lock_wait_warn` with (lock, repo, wait_ms). Snapshots feed the watchdog and the ops/overview pages (08, 10_maintenance.md). The try-lock-first requirement is why `syncMu` and the rw lock are custom types, not bare `sync.Mutex`/`RWMutex` — the instrumentation hook is part of their API (`TryLock` + `LockMeasured`).
 
 #### Concurrency
 

@@ -404,6 +404,20 @@ server-side copy (e.g. from a fork parent) lands if ever wanted; v1 does not reg
   readable, no release API is refused. Rationale: the pill is an affordance, the API check is
   the rule (07_api.md Decisions).
 
+- **Asset bytes are inert content, never active content (security audit UI-01, 2026-11-20).** The
+  uploader-declared `Content-Type` no longer decides how the byte route serves a file. A single
+  allowlist (`releases.AssetMediaType`) admits only raster images (`image/png`, `image/jpeg`,
+  `image/gif`, `image/webp`, `image/avif` — **not** `image/svg+xml`); every other declared type
+  (HTML, XHTML, JS, PDF, text, unknown) is stored and served as `application/octet-stream`. Every
+  response is a download — `Content-Disposition: attachment` with the (already validated) asset
+  name, `X-Content-Type-Options: nosniff`, `Content-Security-Policy: default-src 'none'; sandbox`,
+  `Cross-Origin-Resource-Policy: same-site` — so an uploaded `.html` can never execute on the
+  spindle origin. Upload normalization clamps the stored metadata too, and the serve path clamps
+  again (old records). ETag/304, `Range`/`If-Range` → 206/416 and `Content-Length` are unchanged:
+  assets are downloaded, not rendered. The page upload (no-JS multipart) additionally bounds the
+  request body with `http.MaxBytesReader` before the spool (`releases.max_asset_bytes` + 1 MiB
+  multipart overhead), so an unbounded body cannot fill the node's disk before the service cap.
+
 ## Explicitly out of scope
 
 - Release archives (auto-built zip/tar.gz of the tag) — needs a build task + cache policy; seam: a

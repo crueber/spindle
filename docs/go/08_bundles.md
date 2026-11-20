@@ -289,7 +289,7 @@ store.Compose(ctx, "bundles/<s>/<slotUTC>-<sum>.bundle", scratch, basePackKey)  
 store.Delete(ctx, scratch)                                            // best-effort
 ```
 
-- Store-side compose: GCS native `objects.compose` (2 sources); S3 multipart where every non-final part
+- Store-side compose: S3 multipart where every non-final part
   must be ≥ 5 MiB → part 1 = UploadPart(header ∘ first (5 MiB − |header|) bytes read from the **local**
   base pack), part 2 = UploadPartCopy(basePackKey, range from that offset to end) — still zero bytes from
   the bucket through the host. Base pack < 5 MiB → single PUT of the locally concatenated file. (The

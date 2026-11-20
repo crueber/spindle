@@ -53,10 +53,12 @@ import (
 	"net/url"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/crueber/spindle/internal/api"
 	"github.com/crueber/spindle/internal/config"
 	"github.com/crueber/spindle/internal/git"
+	"github.com/crueber/spindle/internal/httpsec"
 	"github.com/crueber/spindle/internal/identity"
 	"github.com/crueber/spindle/internal/issues"
 	"github.com/crueber/spindle/internal/mirror"
@@ -110,9 +112,13 @@ type FormsReleases interface {
 	Autodraft(ctx context.Context, owner, repo string, p auth.Principal, tag, since string) (*releases.Autodraft, error)
 }
 
-// FormsImport is the one-shot import starter.
+// FormsImport is the one-shot import starter + its status observer. State
+// answers the SAME id Begin handed out (the service id the API endpoint
+// accepts), which is what lets the page skip a progress card for an import
+// that already finished before it rendered.
 type FormsImport interface {
 	Begin(ctx context.Context, p auth.Principal, params repoimport.Params, token string) (*repoimport.BeginResult, *wal.TaskRecord, error)
+	State(id string) (repoimport.TaskState, bool)
 }
 
 // FormsMirror is the mirror sync starter (the creation side uses the
@@ -244,16 +250,19 @@ func (s *Server) formsDispatchDelete5(w http.ResponseWriter, r *http.Request) {
 // --- shared mutation plumbing (FOUNDATION GAP: see the file header) ---------
 
 // formsOriginOK rejects a cross-origin write. Origin wins when present;
-// otherwise Referer; a request carrying neither (curl, tests) is allowed —
-// the session cookie is the authority either way.
-func formsOriginOK(r *http.Request) bool {
+// otherwise Referer. A request carrying neither fails closed whenever a
+// cookie-backed session could authenticate it (token/oidc); only the auth-less
+// "none" boot — where there is no victim session to ride — accepts it. This is
+// the same rule the collab and public groups apply.
+func (s *Server) formsOriginOK(r *http.Request) bool {
 	if o := r.Header.Get("Origin"); o != "" {
 		return formsSameHost(r, o)
 	}
 	if ref := r.Header.Get("Referer"); ref != "" {
 		return formsSameHost(r, ref)
 	}
-	return true
+	mode := s.authMode()
+	return mode == "" || mode == "none"
 }
 
 func formsSameHost(r *http.Request, raw string) bool {
@@ -301,13 +310,11 @@ func formsFlash(r *http.Request) string {
 	return msg
 }
 
-// formsSanitizeNext mirrors the login interstitial's server-side rule: a
-// single leading "/" only (no scheme, no //host).
+// formsSanitizeNext mirrors the login interstitial's server-side rule through
+// the shared helper: a rooted same-host path only (no scheme, "//host",
+// "/\host" or control characters).
 func formsSanitizeNext(next string) string {
-	if !strings.HasPrefix(next, "/") || strings.HasPrefix(next, "//") {
-		return "/"
-	}
-	return next
+	return httpsec.SafeNext(next, "/")
 }
 
 // formsLoginRequired builds the anonymous-write interstitial target for the
@@ -382,7 +389,7 @@ func formsLowerFirst(s string) string {
 // formsCheckWrite is the shared POST preflight: same-origin, then the
 // anonymous-write interstitial (a 303, never an in-band 200 — law 9).
 func (s *Server) formsCheckWrite(w http.ResponseWriter, r *http.Request, p auth.Principal, action string) bool {
-	if !formsOriginOK(r) {
+	if !s.formsOriginOK(r) {
 		s.errorPage(w, r, http.StatusForbidden, "cross-origin request refused")
 		return false
 	}
@@ -430,6 +437,18 @@ func (s *Server) formsRepoPage(w http.ResponseWriter, r *http.Request) (auth.Pri
 		return p, "", "", false
 	}
 	return p, owner, name, true
+}
+
+// formsRepoPageChrome is formsRepoPage plus the repository chrome the layout
+// renders above the form (12_web_ui.md §2.2.1). The chrome is built only
+// AFTER the gate passed (never before: a denied request must not build — or
+// leak — repository metadata), and is nil when the repo read fails.
+func (s *Server) formsRepoPageChrome(w http.ResponseWriter, r *http.Request) (auth.Principal, string, string, *RepoChrome, bool) {
+	p, owner, name, ok := s.formsRepoPage(w, r)
+	if !ok {
+		return p, owner, name, nil, false
+	}
+	return p, owner, name, s.repoChromeFor(r, p, owner, name), true
 }
 
 // formsSummary reads the repo summary (features, head, counts); ok=false
@@ -603,15 +622,16 @@ func formsErrMessage(err error) string {
 }
 
 // formsFail re-renders a page with the service error inline, or falls back to
-// the shared error page for an unexpected 5xx.
-func (s *Server) formsFail(w http.ResponseWriter, r *http.Request, p auth.Principal, name, title string, data any, err error) {
+// the shared error page for an unexpected 5xx. chrome is the page's repository
+// chrome (nil for the owner/org-scoped forms).
+func (s *Server) formsFail(w http.ResponseWriter, r *http.Request, p auth.Principal, chrome *RepoChrome, name, title string, data any, err error) {
 	st := formsErrStatus(err)
 	if st >= 500 {
 		s.errorPage(w, r, st, formsErrMessage(err))
 		return
 	}
 	setFormsErr(data, formsErrMessage(err))
-	s.page(w, r, p, st, name, title, data)
+	s.pageRepo(w, r, p, chrome, st, name, title, data)
 }
 
 // setFormsErr writes the inline error into a page model. Every model embeds
@@ -969,10 +989,13 @@ type formsImportData struct {
 	Presets    []formsImportPreset
 	SourceHint string
 	SourceErr  string
-	// Progress phase: form | running | done.
-	Phase  string
-	TaskID string
-	Done   *formsImportDone
+	// Progress phase: form | running | done | failed.
+	Phase     string
+	TaskID    string
+	TaskError string
+	TaskLog   []string
+	Repo      string
+	Done      *formsImportDone
 }
 
 func formsImportPresets() []formsImportPreset {
@@ -1099,7 +1122,7 @@ func formsImportWireBody(data *formsImportData) []byte {
 func (s *Server) formsImportOnce(w http.ResponseWriter, r *http.Request, p auth.Principal, data *formsImportData) {
 	params, token, perr := repoimport.ParseRequest(formsImportWireBody(data), s.env.Cfg)
 	if perr != nil {
-		s.formsFail(w, r, p, "forms/import", "Import repository", data, perr)
+		s.formsFail(w, r, p, nil, "forms/import", "Import repository", data, perr)
 		return
 	}
 	if formsDeps.Import == nil {
@@ -1108,7 +1131,7 @@ func (s *Server) formsImportOnce(w http.ResponseWriter, r *http.Request, p auth.
 	}
 	res, rec, berr := formsDeps.Import.Begin(r.Context(), p, params, token)
 	if berr != nil {
-		s.formsFail(w, r, p, "forms/import", "Import repository", data, berr)
+		s.formsFail(w, r, p, nil, "forms/import", "Import repository", data, berr)
 		return
 	}
 	if res == nil {
@@ -1131,6 +1154,92 @@ func (s *Server) formsImportOnce(w http.ResponseWriter, r *http.Request, p auth.
 	if data.TaskID == "" && rec != nil {
 		data.TaskID = rec.ID
 	}
+	// Fast-import race: a small source can finish between Begin and render,
+	// and a spinner for a task that is over is exactly the silent wait law 7
+	// forbids. One bounded settle window (no polling loop left behind) turns
+	// that into the terminal card — done with its heads, or failed with the
+	// summary + log. A slower import renders the live card and the island
+	// streams it (replay covers anything that already happened).
+	if st, ok := s.formsImportAwait(r.Context(), data.TaskID, formsImportSettle); ok {
+		if st.Finished {
+			s.formsImportTerminal(w, r, p, data, params, st)
+			return
+		}
+		// Still running: seed the card with whatever the task already
+		// narrated so the first paint is not an empty box.
+		if st.Record != nil {
+			data.TaskLog = append([]string{}, st.Record.LogTail...)
+		}
+	}
+	s.page(w, r, p, http.StatusOK, "forms/import", "Import repository", data)
+}
+
+// formsImportSettle is the bounded window in which a just-started import may
+// reach its terminal state before the POST response is rendered. Small enough
+// to stay invisible next to a clone, large enough to catch a tiny source, a
+// resume that converges instantly, or a join of an already-finished task.
+const formsImportSettle = 400 * time.Millisecond
+
+// formsImportAwait waits up to wait for the import to finish. It returns the
+// service's observer view and whether the id is known at all (a nil or
+// non-conforming service answers unknown, so the page degrades to the live
+// card instead of claiming anything).
+func (s *Server) formsImportAwait(ctx context.Context, id string, wait time.Duration) (repoimport.TaskState, bool) {
+	deadline := time.Now().Add(wait)
+	for {
+		st, ok := formsDeps.Import.State(id)
+		if !ok || st.Finished || !time.Now().Before(deadline) || ctx.Err() != nil {
+			return st, ok
+		}
+		select {
+		case <-ctx.Done():
+			return st, ok
+		case <-time.After(25 * time.Millisecond):
+		}
+	}
+}
+
+// formsImportTerminal renders the terminal state of an import the page did
+// not have to stream: the done card (repo + heads + a link into it) on
+// success, the failed card (summary, log tail, retry link) otherwise.
+func (s *Server) formsImportTerminal(w http.ResponseWriter, r *http.Request, p auth.Principal, data *formsImportData, params repoimport.Params, st repoimport.TaskState) {
+	target := params.Owner + "/" + params.Name
+	failed := ""
+	if st.Outcome != nil {
+		if st.Outcome.Err != nil {
+			failed = st.Outcome.Err.Message
+		}
+		if st.Outcome.Repo != "" {
+			target = st.Outcome.Repo
+		}
+	}
+	if failed == "" && st.Record != nil && st.Record.OK != nil && !*st.Record.OK {
+		failed = st.Record.Summary
+	}
+	if failed != "" {
+		data.Phase = "failed"
+		data.Repo = target
+		data.TaskError = failed
+		data.Token = "" // never re-echo a source credential into a page
+		if st.Record != nil {
+			data.TaskLog = append([]string{}, st.Record.LogTail...)
+		}
+		s.page(w, r, p, http.StatusOK, "forms/import", "Import repository", data)
+		return
+	}
+	done := &formsImportDone{Repo: target, SourceURL: data.SourceHint}
+	if st.Outcome != nil {
+		if st.Outcome.SourceURL != "" {
+			done.SourceURL = st.Outcome.SourceURL
+		}
+		done.Heads = formsHeads(st.Outcome.HeadSHAs)
+	}
+	if done.SourceURL == "" && data.SourceURL != "" {
+		done.SourceURL = data.SourceURL
+	}
+	data.Phase = "done"
+	data.Done = done
+	data.TaskID = ""
 	s.page(w, r, p, http.StatusOK, "forms/import", "Import repository", data)
 }
 
@@ -1175,11 +1284,11 @@ func (s *Server) formsImportMirror(w http.ResponseWriter, r *http.Request, p aut
 	}
 	n, nerr := repoimport.NormalizeSource(data.SourceURL)
 	if nerr != nil {
-		s.formsFail(w, r, p, "forms/import", "Import repository", data, nerr)
+		s.formsFail(w, r, p, nil, "forms/import", "Import repository", data, nerr)
 		return
 	}
 	if verr := repoimport.ValidateTransport(n, data.Token != ""); verr != nil {
-		s.formsFail(w, r, p, "forms/import", "Import repository", data, verr)
+		s.formsFail(w, r, p, nil, "forms/import", "Import repository", data, verr)
 		return
 	}
 	if data.Dangerous && !formsDangerousAllowed(s.authMode(), p) {
@@ -1204,7 +1313,7 @@ func (s *Server) formsImportMirror(w http.ResponseWriter, r *http.Request, p aut
 		AllowFile:    cfg.Import.AllowFileURLs,
 		Dangerous:    data.Dangerous,
 	}, nil); serr != nil {
-		s.formsFail(w, r, p, "forms/import", "Import repository", data, serr)
+		s.formsFail(w, r, p, nil, "forms/import", "Import repository", data, serr)
 		return
 	}
 	if cerr := s.env.API.Repos.Create(r.Context(), id, git.Sha1); cerr != nil {
@@ -1367,15 +1476,15 @@ func formsContains(list []string, want string) bool {
 }
 
 func (s *Server) formsFork(w http.ResponseWriter, r *http.Request) {
-	p, owner, name, ok := s.formsRepoPage(w, r)
+	p, owner, name, chrome, ok := s.formsRepoPageChrome(w, r)
 	if !ok {
 		return
 	}
-	s.page(w, r, p, http.StatusOK, "forms/fork", "Fork "+owner+"/"+name, s.formsForkDataFor(r, p, owner, name))
+	s.pageRepo(w, r, p, chrome, http.StatusOK, "forms/fork", "Fork "+owner+"/"+name, s.formsForkDataFor(r, p, owner, name))
 }
 
 func (s *Server) formsForkPost(w http.ResponseWriter, r *http.Request) {
-	p, owner, name, ok := s.formsRepoPage(w, r)
+	p, owner, name, chrome, ok := s.formsRepoPageChrome(w, r)
 	if !ok {
 		return
 	}
@@ -1395,19 +1504,19 @@ func (s *Server) formsForkPost(w http.ResponseWriter, r *http.Request) {
 	data.NameErr = ""
 	if data.ForksOff {
 		data.Err = "Forking is disabled for this repository."
-		s.page(w, r, p, http.StatusForbidden, "forms/fork", "Fork "+owner+"/"+name, data)
+		s.pageRepo(w, r, p, chrome, http.StatusForbidden, "forms/fork", "Fork "+owner+"/"+name, data)
 		return
 	}
 	o, n, msg := formsRepoNameErr(data.Owner, data.Name)
 	data.Owner, data.Name = o, n
 	if msg != "" {
 		data.Err = msg
-		s.page(w, r, p, http.StatusBadRequest, "forms/fork", "Fork "+owner+"/"+name, data)
+		s.pageRepo(w, r, p, chrome, http.StatusBadRequest, "forms/fork", "Fork "+owner+"/"+name, data)
 		return
 	}
 	if len(data.Description) > pulls.MaxForkDescription {
 		data.Err = fmt.Sprintf("description exceeds %d bytes", pulls.MaxForkDescription)
-		s.page(w, r, p, http.StatusBadRequest, "forms/fork", "Fork "+owner+"/"+name, data)
+		s.pageRepo(w, r, p, chrome, http.StatusBadRequest, "forms/fork", "Fork "+owner+"/"+name, data)
 		return
 	}
 	if formsDeps.Pulls == nil {
@@ -1425,7 +1534,7 @@ func (s *Server) formsForkPost(w http.ResponseWriter, r *http.Request) {
 		if formsErrStatus(ferr) == http.StatusConflict {
 			data.Winner = "/" + data.Owner + "/" + data.Name
 		}
-		s.formsFail(w, r, p, "forms/fork", "Fork "+owner+"/"+name, data, ferr)
+		s.formsFail(w, r, p, chrome, "forms/fork", "Fork "+owner+"/"+name, data, ferr)
 		return
 	}
 	if child == "" {
@@ -1462,15 +1571,15 @@ func (s *Server) formsReleaseNewDataFor(r *http.Request, p auth.Principal, owner
 }
 
 func (s *Server) formsReleaseNew(w http.ResponseWriter, r *http.Request) {
-	p, owner, name, ok := s.formsRepoPage(w, r)
+	p, owner, name, chrome, ok := s.formsRepoPageChrome(w, r)
 	if !ok {
 		return
 	}
-	s.page(w, r, p, http.StatusOK, "forms/release_new", "New release", s.formsReleaseNewDataFor(r, p, owner, name))
+	s.pageRepo(w, r, p, chrome, http.StatusOK, "forms/release_new", "New release", s.formsReleaseNewDataFor(r, p, owner, name))
 }
 
 func (s *Server) formsReleaseNewPost(w http.ResponseWriter, r *http.Request) {
-	p, owner, name, ok := s.formsRepoPage(w, r)
+	p, owner, name, chrome, ok := s.formsRepoPageChrome(w, r)
 	if !ok {
 		return
 	}
@@ -1489,12 +1598,12 @@ func (s *Server) formsReleaseNewPost(w http.ResponseWriter, r *http.Request) {
 	data.Prerelease = r.PostFormValue("prerelease") != ""
 	if data.Disabled {
 		data.Err = "Releases are disabled for this repository."
-		s.page(w, r, p, http.StatusForbidden, "forms/release_new", "New release", data)
+		s.pageRepo(w, r, p, chrome, http.StatusForbidden, "forms/release_new", "New release", data)
 		return
 	}
 	if data.Tag == "" {
 		data.Err = "Choose a tag for this release."
-		s.page(w, r, p, http.StatusBadRequest, "forms/release_new", "New release", data)
+		s.pageRepo(w, r, p, chrome, http.StatusBadRequest, "forms/release_new", "New release", data)
 		return
 	}
 	if formsDeps.Releases == nil {
@@ -1504,7 +1613,7 @@ func (s *Server) formsReleaseNewPost(w http.ResponseWriter, r *http.Request) {
 	if r.PostFormValue("action") == "autodraft" {
 		ad, aerr := formsDeps.Releases.Autodraft(r.Context(), owner, name, p, data.Tag, "")
 		if aerr != nil {
-			s.formsFail(w, r, p, "forms/release_new", "New release", data, aerr)
+			s.formsFail(w, r, p, chrome, "forms/release_new", "New release", data, aerr)
 			return
 		}
 		if ad != nil {
@@ -1514,7 +1623,7 @@ func (s *Server) formsReleaseNewPost(w http.ResponseWriter, r *http.Request) {
 				data.Title = data.Tag
 			}
 		}
-		s.page(w, r, p, http.StatusOK, "forms/release_new", "New release", data)
+		s.pageRepo(w, r, p, chrome, http.StatusOK, "forms/release_new", "New release", data)
 		return
 	}
 	in := releases.ReleaseInput{Body: &data.Body, Draft: &data.Draft, Prerelease: &data.Prerelease}
@@ -1523,7 +1632,7 @@ func (s *Server) formsReleaseNewPost(w http.ResponseWriter, r *http.Request) {
 	}
 	rel, _, perr := formsDeps.Releases.PutRelease(r.Context(), owner, name, p, data.Tag, in, "")
 	if perr != nil {
-		s.formsFail(w, r, p, "forms/release_new", "New release", data, perr)
+		s.formsFail(w, r, p, chrome, "forms/release_new", "New release", data, perr)
 		return
 	}
 	tag := data.Tag
@@ -1555,15 +1664,15 @@ func (s *Server) formsIssueNewDataFor(r *http.Request, p auth.Principal, owner, 
 }
 
 func (s *Server) formsIssueNew(w http.ResponseWriter, r *http.Request) {
-	p, owner, name, ok := s.formsRepoPage(w, r)
+	p, owner, name, chrome, ok := s.formsRepoPageChrome(w, r)
 	if !ok {
 		return
 	}
-	s.page(w, r, p, http.StatusOK, "forms/issue_new", "New issue", s.formsIssueNewDataFor(r, p, owner, name))
+	s.pageRepo(w, r, p, chrome, http.StatusOK, "forms/issue_new", "New issue", s.formsIssueNewDataFor(r, p, owner, name))
 }
 
 func (s *Server) formsIssueNewPost(w http.ResponseWriter, r *http.Request) {
-	p, owner, name, ok := s.formsRepoPage(w, r)
+	p, owner, name, chrome, ok := s.formsRepoPageChrome(w, r)
 	if !ok {
 		return
 	}
@@ -1579,13 +1688,13 @@ func (s *Server) formsIssueNewPost(w http.ResponseWriter, r *http.Request) {
 	data.Body = r.PostFormValue("body")
 	if data.Disabled {
 		data.Err = "Issues are disabled for this repository."
-		s.page(w, r, p, http.StatusForbidden, "forms/issue_new", "New issue", data)
+		s.pageRepo(w, r, p, chrome, http.StatusForbidden, "forms/issue_new", "New issue", data)
 		return
 	}
 	if r.PostFormValue("action") == "preview" {
 		data.Preview = true
 		data.PreviewHTML = RenderMarkdownIn(data.Body, owner, name)
-		s.page(w, r, p, http.StatusOK, "forms/issue_new", "New issue", data)
+		s.pageRepo(w, r, p, chrome, http.StatusOK, "forms/issue_new", "New issue", data)
 		return
 	}
 	if formsDeps.Issues == nil {
@@ -1594,7 +1703,7 @@ func (s *Server) formsIssueNewPost(w http.ResponseWriter, r *http.Request) {
 	}
 	th, _, cerr := formsDeps.Issues.CreateIssue(r.Context(), owner, name, p, data.Title, data.Body)
 	if cerr != nil {
-		s.formsFail(w, r, p, "forms/issue_new", "New issue", data, cerr)
+		s.formsFail(w, r, p, chrome, "forms/issue_new", "New issue", data, cerr)
 		return
 	}
 	num := 0
@@ -1721,15 +1830,15 @@ func formsWithCurrent(list []string, current string) []string {
 }
 
 func (s *Server) formsPullNew(w http.ResponseWriter, r *http.Request) {
-	p, owner, name, ok := s.formsRepoPage(w, r)
+	p, owner, name, chrome, ok := s.formsRepoPageChrome(w, r)
 	if !ok {
 		return
 	}
-	s.page(w, r, p, http.StatusOK, "forms/pull_new", "New pull request", s.formsPullNewDataFor(r, p, owner, name))
+	s.pageRepo(w, r, p, chrome, http.StatusOK, "forms/pull_new", "New pull request", s.formsPullNewDataFor(r, p, owner, name))
 }
 
 func (s *Server) formsPullNewPost(w http.ResponseWriter, r *http.Request) {
-	p, owner, name, ok := s.formsRepoPage(w, r)
+	p, owner, name, chrome, ok := s.formsRepoPageChrome(w, r)
 	if !ok {
 		return
 	}
@@ -1758,22 +1867,22 @@ func (s *Server) formsPullNewPost(w http.ResponseWriter, r *http.Request) {
 	data.ToRefs = s.formsBranchesFor(r, data.ToRepo)
 	if data.Disabled {
 		data.Err = "Pull requests are disabled for this repository."
-		s.page(w, r, p, http.StatusForbidden, "forms/pull_new", "New pull request", data)
+		s.pageRepo(w, r, p, chrome, http.StatusForbidden, "forms/pull_new", "New pull request", data)
 		return
 	}
 	if r.PostFormValue("action") == "preview" {
 		data.Preview = s.formsCompare(r, data)
-		s.page(w, r, p, http.StatusOK, "forms/pull_new", "New pull request", data)
+		s.pageRepo(w, r, p, chrome, http.StatusOK, "forms/pull_new", "New pull request", data)
 		return
 	}
 	if data.Title == "" || data.FromRef == "" {
 		data.Err = "a title and a From branch are required"
-		s.page(w, r, p, http.StatusBadRequest, "forms/pull_new", "New pull request", data)
+		s.pageRepo(w, r, p, chrome, http.StatusBadRequest, "forms/pull_new", "New pull request", data)
 		return
 	}
 	if data.FromRepo == data.ToRepo && data.FromRef == data.ToRef {
 		data.Err = "From and To are the same endpoint — pick two different branches."
-		s.page(w, r, p, http.StatusBadRequest, "forms/pull_new", "New pull request", data)
+		s.pageRepo(w, r, p, chrome, http.StatusBadRequest, "forms/pull_new", "New pull request", data)
 		return
 	}
 	if formsDeps.Pulls == nil {
@@ -1782,12 +1891,12 @@ func (s *Server) formsPullNewPost(w http.ResponseWriter, r *http.Request) {
 	}
 	if _, err := git.ParseRepoId(data.FromRepo); err != nil {
 		data.Err = fmt.Sprintf("invalid From repository %q", data.FromRepo)
-		s.page(w, r, p, http.StatusBadRequest, "forms/pull_new", "New pull request", data)
+		s.pageRepo(w, r, p, chrome, http.StatusBadRequest, "forms/pull_new", "New pull request", data)
 		return
 	}
 	if _, err := git.ParseRepoId(data.ToRepo); err != nil {
 		data.Err = fmt.Sprintf("invalid To repository %q", data.ToRepo)
-		s.page(w, r, p, http.StatusBadRequest, "forms/pull_new", "New pull request", data)
+		s.pageRepo(w, r, p, chrome, http.StatusBadRequest, "forms/pull_new", "New pull request", data)
 		return
 	}
 	toOwner, toName, _ := strings.Cut(data.ToRepo, "/")
@@ -1804,7 +1913,7 @@ func (s *Server) formsPullNewPost(w http.ResponseWriter, r *http.Request) {
 	th, _, oerr := formsDeps.Pulls.OpenPR(r.Context(), toOwner, toName, p, in, "")
 	if oerr != nil {
 		data.Err = formsOpenErrorMessage(oerr)
-		s.page(w, r, p, formsErrStatus(oerr), "forms/pull_new", "New pull request", data)
+		s.pageRepo(w, r, p, chrome, formsErrStatus(oerr), "forms/pull_new", "New pull request", data)
 		return
 	}
 	num := 0
@@ -2190,7 +2299,7 @@ func (s *Server) formsLabelsDataFor(r *http.Request, p auth.Principal, owner, na
 }
 
 func (s *Server) formsLabels(w http.ResponseWriter, r *http.Request) {
-	p, owner, name, ok := s.formsRepoPage(w, r)
+	p, owner, name, chrome, ok := s.formsRepoPageChrome(w, r)
 	if !ok {
 		return
 	}
@@ -2199,11 +2308,11 @@ func (s *Server) formsLabels(w http.ResponseWriter, r *http.Request) {
 		s.errorPage(w, r, formsErrStatus(data.LoadErr), formsErrMessage(data.LoadErr))
 		return
 	}
-	s.page(w, r, p, http.StatusOK, "forms/labels", "Labels", data)
+	s.pageRepo(w, r, p, chrome, http.StatusOK, "forms/labels", "Labels", data)
 }
 
 func (s *Server) formsLabelsPost(w http.ResponseWriter, r *http.Request) {
-	p, owner, name, ok := s.formsRepoPage(w, r)
+	p, owner, name, chrome, ok := s.formsRepoPageChrome(w, r)
 	if !ok {
 		return
 	}
@@ -2222,7 +2331,7 @@ func (s *Server) formsLabelsPost(w http.ResponseWriter, r *http.Request) {
 	if packID := r.PostFormValue("pack"); packID != "" {
 		added, err := s.formsAddLabelPack(r, p, owner, name, packID, data.Labels)
 		if err != nil {
-			s.formsFail(w, r, p, "forms/labels", "Labels", data, err)
+			s.formsFail(w, r, p, chrome, "forms/labels", "Labels", data, err)
 			return
 		}
 		s.formsRedirectFlash(w, r, "/"+owner+"/"+name+"/labels", fmt.Sprintf("%d labels added", added))
@@ -2236,7 +2345,7 @@ func (s *Server) formsLabelsPost(w http.ResponseWriter, r *http.Request) {
 		strings.TrimSpace(r.PostFormValue("name")), color,
 		strings.TrimSpace(r.PostFormValue("description")))
 	if err != nil {
-		s.formsFail(w, r, p, "forms/labels", "Labels", data, err)
+		s.formsFail(w, r, p, chrome, "forms/labels", "Labels", data, err)
 		return
 	}
 	msg := "label created"
@@ -2281,7 +2390,7 @@ func (s *Server) formsAddLabelPack(r *http.Request, p auth.Principal, owner, nam
 }
 
 func (s *Server) formsLabelDelete(w http.ResponseWriter, r *http.Request) {
-	p, owner, name, ok := s.formsRepoPage(w, r)
+	p, owner, name, chrome, ok := s.formsRepoPageChrome(w, r)
 	if !ok {
 		return
 	}
@@ -2304,7 +2413,7 @@ func (s *Server) formsLabelDelete(w http.ResponseWriter, r *http.Request) {
 	data := s.formsLabelsDataFor(r, p, owner, name)
 	affected, err := formsDeps.Issues.DeleteLabel(r.Context(), owner, name, p, label)
 	if err != nil {
-		s.formsFail(w, r, p, "forms/labels", "Labels", data, err)
+		s.formsFail(w, r, p, chrome, "forms/labels", "Labels", data, err)
 		return
 	}
 	s.formsRedirectFlash(w, r, "/"+owner+"/"+name+"/labels",
@@ -2379,7 +2488,7 @@ func formsMilestoneFilterHref(full, id string) string {
 }
 
 func (s *Server) formsMilestones(w http.ResponseWriter, r *http.Request) {
-	p, owner, name, ok := s.formsRepoPage(w, r)
+	p, owner, name, chrome, ok := s.formsRepoPageChrome(w, r)
 	if !ok {
 		return
 	}
@@ -2388,11 +2497,11 @@ func (s *Server) formsMilestones(w http.ResponseWriter, r *http.Request) {
 		s.errorPage(w, r, formsErrStatus(data.LoadErr), formsErrMessage(data.LoadErr))
 		return
 	}
-	s.page(w, r, p, http.StatusOK, "forms/milestones", "Milestones", data)
+	s.pageRepo(w, r, p, chrome, http.StatusOK, "forms/milestones", "Milestones", data)
 }
 
 func (s *Server) formsMilestonesPost(w http.ResponseWriter, r *http.Request) {
-	p, owner, name, ok := s.formsRepoPage(w, r)
+	p, owner, name, chrome, ok := s.formsRepoPageChrome(w, r)
 	if !ok {
 		return
 	}
@@ -2410,7 +2519,7 @@ func (s *Server) formsMilestonesPost(w http.ResponseWriter, r *http.Request) {
 	data := s.formsMilestonesDataFor(r, p, owner, name)
 	if _, err := formsDeps.Issues.CreateMilestone(r.Context(), owner, name, p,
 		strings.TrimSpace(r.PostFormValue("title")), strings.TrimSpace(r.PostFormValue("description")), nil); err != nil {
-		s.formsFail(w, r, p, "forms/milestones", "Milestones", data, err)
+		s.formsFail(w, r, p, chrome, "forms/milestones", "Milestones", data, err)
 		return
 	}
 	s.formsRedirectFlash(w, r, "/"+owner+"/"+name+"/milestones", "milestone created")
@@ -2433,7 +2542,7 @@ func formsMilestoneID(id string) string {
 }
 
 func (s *Server) formsMilestoneState(w http.ResponseWriter, r *http.Request) {
-	p, owner, name, ok := s.formsRepoPage(w, r)
+	p, owner, name, chrome, ok := s.formsRepoPageChrome(w, r)
 	if !ok {
 		return
 	}
@@ -2457,11 +2566,11 @@ func (s *Server) formsMilestoneState(w http.ResponseWriter, r *http.Request) {
 	state := strings.ToLower(strings.TrimSpace(r.PostFormValue("state")))
 	if state != issues.StateOpen && state != issues.StateClosed {
 		data.Err = "state must be open|closed"
-		s.page(w, r, p, http.StatusBadRequest, "forms/milestones", "Milestones", data)
+		s.pageRepo(w, r, p, chrome, http.StatusBadRequest, "forms/milestones", "Milestones", data)
 		return
 	}
 	if _, err := formsDeps.Issues.UpdateMilestone(r.Context(), owner, name, p, id, nil, nil, nil, &state); err != nil {
-		s.formsFail(w, r, p, "forms/milestones", "Milestones", data, err)
+		s.formsFail(w, r, p, chrome, "forms/milestones", "Milestones", data, err)
 		return
 	}
 	msg := "milestone closed"
@@ -2472,7 +2581,7 @@ func (s *Server) formsMilestoneState(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) formsMilestoneDelete(w http.ResponseWriter, r *http.Request) {
-	p, owner, name, ok := s.formsRepoPage(w, r)
+	p, owner, name, chrome, ok := s.formsRepoPageChrome(w, r)
 	if !ok {
 		return
 	}
@@ -2495,7 +2604,7 @@ func (s *Server) formsMilestoneDelete(w http.ResponseWriter, r *http.Request) {
 			msg += " — close it instead; open issues still reference it"
 		}
 		data.Err = msg
-		s.page(w, r, p, formsErrStatus(err), "forms/milestones", "Milestones", data)
+		s.pageRepo(w, r, p, chrome, formsErrStatus(err), "forms/milestones", "Milestones", data)
 		return
 	}
 	s.formsRedirectFlash(w, r, "/"+owner+"/"+name+"/milestones", "milestone deleted")

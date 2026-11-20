@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/crueber/spindle/internal/httpsec"
 	"github.com/crueber/spindle/internal/server/auth"
 )
 
@@ -89,13 +90,11 @@ func (s *Server) verifyLoginState(state string) (next, nonce string, ok bool) {
 	return sanitizeNext(raw), nonce, true
 }
 
-// sanitizeNext requires the redirect target to start with a single "/" (no
-// "//host", no scheme).
+// sanitizeNext runs the shared redirect-target rule (httpsec.SafeNext): a
+// rooted path on this host only, so "//host", "/\host", schemes and control
+// characters fall back to "/".
 func sanitizeNext(next string) string {
-	if !strings.HasPrefix(next, "/") || strings.HasPrefix(next, "//") {
-		return "/"
-	}
-	return next
+	return httpsec.SafeNext(next, "/")
 }
 
 // authLogin answers GET /_auth/login?next= (§8.6): fetch discovery → signed
@@ -258,7 +257,7 @@ func (s *Server) authCallback(w http.ResponseWriter, r *http.Request) {
 	// The session wire carries the verified EMAIL (existing sessions
 	// stay valid; law 5) — the username resolves from it on every
 	// request via principalFromEmail.
-	sess, merr := s.authSvc.MintSession(emailOf(p))
+	sess, merr := s.authSvc.MintSession(emailOf(p), p.Groups...)
 	if merr != nil {
 		plainStatus(w, http.StatusServiceUnavailable, "session mint failed")
 		return
@@ -451,7 +450,7 @@ func (s *Server) authTokensMint(w http.ResponseWriter, r *http.Request) {
 	// Mint against the verified email when the principal carries one
 	// (OIDC — the token wire keeps the email, the username resolves
 	// from it); else the name (static-token behavior, unchanged).
-	tok, merr := s.authSvc.MintToken(emailOf(p))
+	tok, merr := s.authSvc.MintToken(emailOf(p), p.Groups...)
 	if merr != nil {
 		plainStatus(w, http.StatusServiceUnavailable, "token mint failed")
 		return

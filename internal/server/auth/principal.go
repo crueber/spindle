@@ -12,7 +12,13 @@ type Principal struct {
 	// spellings) and token/session mints (which keep the email on
 	// the wire) work without another lookup. Never rendered to
 	// other users — Name is the only user-facing identity.
-	Email     string
+	Email string
+	// Groups are the verified OIDC group claim values behind the
+	// principal (WP13). They are captured from the signature-verified ID
+	// token and ride walgit-issued sessions/tokens so the per-request
+	// admin derivation can re-apply the configured admin_groups policy.
+	// Empty for static-token, anonymous, and auth-none principals.
+	Groups    []string
 	Write     bool
 	Admin     bool
 	Anonymous bool

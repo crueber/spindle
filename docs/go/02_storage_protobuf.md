@@ -2,7 +2,7 @@
 > Source: MASTER_RUST_SPEC.md §5.1, §5.2, §5.3, §5.4, §4.1, §4.10 · Status: normative for the spindle Go implementation.
 
 This doc specifies the bucket data model (key layout, protobuf wire encoding, log framing, seq
-semantics) and the Go object-store contract that every backend (GCS, S3, memory) implements behind
+semantics) and the Go object-store contract that every backend (S3, memory, filesystem) implements behind
 one interface. It also specifies the hand-rolled protobuf wire codec in `internal/store/proto` —
 **no `google.golang.org/protobuf`** — and the generic CAS helper.
 
@@ -468,7 +468,7 @@ logic belongs to `internal/wal` (05_wal_engine.md).
 
 ## 2.6 ObjectStore interface (Go)
 
-Direct translation of §4.1. Backends (GCS, S3, memory) implement it exactly once each; callers
+Direct translation of §4.1. Backends (S3, memory, filesystem) implement it exactly once each; callers
 never see backend types.
 
 ```go
@@ -480,8 +480,8 @@ import (
     "time"
 )
 
-// Version is an opaque CAS token. GCS = object generation (decimal string);
-// S3 = ETag with quotes stripped; memory = global counter.
+// Version is an opaque CAS token. S3 = ETag with quotes stripped;
+// memory = global counter; filesystem = "<size>:<mtime_ns>".
 // Callers compare for equality only; NEVER parse it.
 type Version string
 
@@ -546,7 +546,7 @@ type PutBody struct {
 type PutResult struct{ Meta ObjectMeta }
 
 type ObjectStore interface {
-    Backend() string // "gcs" | "s3" | "memory"
+    Backend() string // "s3" | "memory" | "filesystem"
 
     Get(ctx context.Context, key string, opts GetOptions) (GetResult, error)
     Head(ctx context.Context, key string) (*ObjectMeta, error) // nil = absent
@@ -630,7 +630,7 @@ Normative behaviors carried from §4.1:
 - Implements the full interface incl. `Compose` (concat under the lock, honors CAS via `Put`)
   and range clamping (clamp start/end to size; start ≥ size → empty body).
 - Test knobs: `Latency time.Duration` (artificial per-op sleep), `FakeObjectURLs bool`
-  (`AccelTarget` returns a GCS-like URL + bearer for edge tests), `SigningFails bool`
+  (`AccelTarget` returns a bucket-like URL + bearer for edge tests), `SigningFails bool`
   (`SignedGetURL` errors like VPC-SC).
 
 ```go

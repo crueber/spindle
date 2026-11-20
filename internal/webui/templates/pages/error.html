@@ -9,7 +9,7 @@
     </div>
     <div class="p-4">
       <p class="text-sm">{{.Data.Message}}</p>
-      {{if eq .Data.Status 401}}
+      {{if and (eq .Data.Status 401) .Chrome.ShowLogin}}
       <p class="muted mt-3 text-sm">
         <a class="link" href="{{.Chrome.LoginHref}}">Sign in</a>
         to continue.

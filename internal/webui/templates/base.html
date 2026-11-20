@@ -6,13 +6,19 @@
   <title>{{with .Chrome.Title}}{{.}} · {{end}}spindle</title>
   <link rel="stylesheet" href="/_ui/app.css">
   <script src="/_ui/htmx.min.js" defer></script>
-  <script src="/_ui/htmx-ext-sse.js" defer></script>
   <script type="module" src="/_ui/ui.js"></script>
 </head>
 <body class="min-h-screen bg-[var(--pd-canvas)] text-[var(--pd-text)] antialiased">
   <div class="flex min-h-screen flex-col">
     {{template "header" .}}
-    <main id="app" class="mx-auto w-full max-w-6xl flex-1 px-4 py-6">{{template "content" .}}</main>
+    <main id="app" class="mx-auto w-full max-w-6xl flex-1 px-4 py-6">
+      {{/* Repository chrome (12_web_ui.md §2.2.1): every repo-scoped page
+           renders the same masthead + tab strip above its own content. The
+           repo group's own templates carry it inside `content`, so they leave
+           PageData.Repo nil; every other group attaches it here. */}}
+      {{with .Repo}}{{template "repo_header" .}}{{template "repo_tabs" .}}{{end}}
+      {{template "content" .}}
+    </main>
     {{template "footer" .}}
   </div>
 </body>

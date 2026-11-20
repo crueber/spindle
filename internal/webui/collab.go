@@ -92,6 +92,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"net/url"
 	"os"
@@ -103,6 +104,7 @@ import (
 	"github.com/crueber/spindle/internal/checks"
 	"github.com/crueber/spindle/internal/config"
 	"github.com/crueber/spindle/internal/git"
+	"github.com/crueber/spindle/internal/httpsec"
 	"github.com/crueber/spindle/internal/identity"
 	"github.com/crueber/spindle/internal/issues"
 	"github.com/crueber/spindle/internal/policy"
@@ -282,6 +284,13 @@ type collabRepo struct {
 	NewPullHref    string
 	NewReleaseHref string
 	LoginHref      string // /login-required target for generic write affordances
+
+	// summary is the Summary the read gate already fetched (feature flags);
+	// chrome in the LAYOUT is built from it, so every collab page renders the
+	// repository masthead + tab strip with ZERO extra store reads. A failed
+	// summary read leaves summaryOK false and the page renders without chrome.
+	summary   api.SummaryData
+	summaryOK bool
 }
 
 func roleRank(r identity.Role) int {
@@ -331,7 +340,7 @@ func (s *Server) collabEnv(w http.ResponseWriter, r *http.Request) (collabRepo, 
 	if !ok {
 		return rc, p, false
 	}
-	if !s.collabRepoExists(r.Context(), rc.Owner, rc.Name, &rc.Features) {
+	if !s.collabRepoExists(r.Context(), &rc) {
 		s.collabError(w, r, http.StatusNotFound, "unknown repository")
 		return rc, p, false
 	}
@@ -356,14 +365,15 @@ func (s *Server) collabEnv(w http.ResponseWriter, r *http.Request) (collabRepo, 
 	return rc, p, true
 }
 
-// collabRepoExists probes the registry (and reads the summary's feature
-// flags). The summary is the per-repo read the API's own summary handler
-// uses, so the page and the JSON twin agree on feature flags.
-func (s *Server) collabRepoExists(ctx context.Context, owner, name string, feats *config.ResolvedFeatures) bool {
+// collabRepoExists probes the registry AND loads the repo model's feature
+// flags + summary. The summary is the per-repo read the API's own summary
+// handler uses, so the page and the JSON twin agree on feature flags — and the
+// chrome is built from it for free (rc.summary/rc.summaryOK).
+func (s *Server) collabRepoExists(ctx context.Context, rc *collabRepo) bool {
 	if s.env.API == nil {
 		return false
 	}
-	id := git.RepoId{Owner: owner, Name: name}
+	id := git.RepoId{Owner: rc.Owner, Name: rc.Name}
 	if s.env.API.Repo != nil {
 		sum, err := s.env.API.Repo.Summary(ctx, id)
 		if err != nil {
@@ -371,12 +381,14 @@ func (s *Server) collabRepoExists(ctx context.Context, owner, name string, feats
 				return false
 			}
 			// A view outage is not "missing": answer the page body empty so
-			// the inline error can say so.
+			// the inline error can say so. No summary ⇒ no chrome (the page
+			// must not fabricate counts or an "empty" badge).
 			return true
 		}
 		if sum.Features != nil {
-			*feats = *sum.Features
+			rc.Features = *sum.Features
 		}
+		rc.summary, rc.summaryOK = sum, true
 		return true
 	}
 	if s.env.API.Repos != nil {
@@ -384,6 +396,16 @@ func (s *Server) collabRepoExists(ctx context.Context, owner, name string, feats
 		return err == nil && ex
 	}
 	return false
+}
+
+// collabChrome is this page's repository chrome, built from the summary the
+// gate already read (zero extra store reads). nil ⇒ the layout renders no
+// chrome (a summary outage, or a build without a RepoView at all).
+func (s *Server) collabChrome(r *http.Request, rc collabRepo, p auth.Principal) *RepoChrome {
+	if !rc.summaryOK {
+		return nil
+	}
+	return s.repoChromeFrom(r, p, rc.Owner, rc.Name, rc.summary)
 }
 
 // collabRole resolves the P6 role. Without the identity seam it mirrors the
@@ -506,12 +528,14 @@ func (s *Server) collabFragment(w http.ResponseWriter, r *http.Request, page, na
 	}
 	var buf bytes.Buffer
 	if err := t.ExecuteTemplate(&buf, name, data); err != nil {
-		s.collabError(w, r, http.StatusInternalServerError, "render: "+err.Error())
+		log.Printf("webui fragment %s: %v", name, err)
+		s.collabError(w, r, http.StatusInternalServerError, "internal error")
 		return
 	}
 	h := w.Header()
+	httpsec.Apply(h)
 	h.Set("Content-Type", "text/html; charset=utf-8")
-	h.Set("Cache-Control", "no-cache")
+	h.Set("Cache-Control", "no-cache, private")
 	w.WriteHeader(http.StatusOK)
 	if r.Method != http.MethodHead {
 		_, _ = w.Write(buf.Bytes())
@@ -1531,7 +1555,7 @@ func (s *Server) renderIssues(w http.ResponseWriter, r *http.Request, rc collabR
 	}
 	if data.State != "open" && data.State != "closed" && data.State != "all" {
 		data.Error = "invalid state: must be open, closed or all"
-		s.page(w, r, p, http.StatusBadRequest, "collab/issues", "Issues", data)
+		s.pageRepo(w, r, p, s.collabChrome(r, rc, p), http.StatusBadRequest, "collab/issues", "Issues", data)
 		return
 	}
 	data.LabelFilter = splitLabels(q)
@@ -1544,7 +1568,7 @@ func (s *Server) renderIssues(w http.ResponseWriter, r *http.Request, rc collabR
 
 	if collabDeps.IssuesList == nil {
 		data.Error = "issues service not wired"
-		s.page(w, r, p, http.StatusServiceUnavailable, "collab/issues", "Issues", data)
+		s.pageRepo(w, r, p, s.collabChrome(r, rc, p), http.StatusServiceUnavailable, "collab/issues", "Issues", data)
 		return
 	}
 	res, err := collabDeps.IssuesList(r.Context(), rc.Owner, rc.Name, p, issues.ListFilter{
@@ -1561,7 +1585,7 @@ func (s *Server) renderIssues(w http.ResponseWriter, r *http.Request, rc collabR
 			return
 		}
 		data.Error = err.Error()
-		s.page(w, r, p, collabErrStatus(err), "collab/issues", "Issues", data)
+		s.pageRepo(w, r, p, s.collabChrome(r, rc, p), collabErrStatus(err), "collab/issues", "Issues", data)
 		return
 	}
 	data.After = afterParam(r)
@@ -1596,7 +1620,7 @@ func (s *Server) renderIssues(w http.ResponseWriter, r *http.Request, rc collabR
 		data.Rows = append(data.Rows, row)
 	}
 	data.Total = len(data.Rows)
-	s.page(w, r, p, status, "collab/issues", "Issues", data)
+	s.pageRepo(w, r, p, s.collabChrome(r, rc, p), status, "collab/issues", "Issues", data)
 }
 
 // splitLabels accepts both the repeated form-field shape (labels=a&labels=b)
@@ -1746,7 +1770,7 @@ func (s *Server) issuePage(w http.ResponseWriter, r *http.Request) {
 func (s *Server) renderIssue(w http.ResponseWriter, r *http.Request, rc collabRepo, p auth.Principal, num, status int, errMsg, notice string) {
 	afterSeq, _ := strconv.Atoi(r.URL.Query().Get("after_seq"))
 	if collabDeps.IssuesGet == nil {
-		s.page(w, r, p, http.StatusServiceUnavailable, "collab/issue", "Issue", issueData{
+		s.pageRepo(w, r, p, s.collabChrome(r, rc, p), http.StatusServiceUnavailable, "collab/issue", "Issue", issueData{
 			Repo: rc, Num: num, Error: "issues service not wired",
 		})
 		return
@@ -1758,7 +1782,7 @@ func (s *Server) renderIssue(w http.ResponseWriter, r *http.Request, rc collabRe
 			s.collabError(w, r, st, err.Error())
 			return
 		}
-		s.page(w, r, p, st, "collab/issue", "Issue", issueData{Repo: rc, Num: num, Error: err.Error()})
+		s.pageRepo(w, r, p, s.collabChrome(r, rc, p), st, "collab/issue", "Issue", issueData{Repo: rc, Num: num, Error: err.Error()})
 		return
 	}
 	th := view.Thread
@@ -1839,7 +1863,7 @@ func (s *Server) renderIssue(w http.ResponseWriter, r *http.Request, rc collabRe
 		MentionNames:        mentionNames(th.Participants),
 		MentionID:           "mention-issue-" + strconv.Itoa(th.Num),
 	}
-	s.page(w, r, p, status, "collab/issue", data.Title, data)
+	s.pageRepo(w, r, p, s.collabChrome(r, rc, p), status, "collab/issue", data.Title, data)
 }
 
 // --- issue writes ------------------------------------------------------------
@@ -2119,7 +2143,7 @@ func (s *Server) pullList(w http.ResponseWriter, r *http.Request) {
 	}
 	if collabDeps.PullsList == nil {
 		data.Error = "pulls service not wired"
-		s.page(w, r, p, http.StatusServiceUnavailable, "collab/pulls", "Pull requests", data)
+		s.pageRepo(w, r, p, s.collabChrome(r, rc, p), http.StatusServiceUnavailable, "collab/pulls", "Pull requests", data)
 		return
 	}
 	res, err := collabDeps.PullsList(r.Context(), rc.Owner, rc.Name, p, pulls.ListFilter{
@@ -2135,7 +2159,7 @@ func (s *Server) pullList(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		data.Error = err.Error()
-		s.page(w, r, p, collabErrStatus(err), "collab/pulls", "Pull requests", data)
+		s.pageRepo(w, r, p, s.collabChrome(r, rc, p), collabErrStatus(err), "collab/pulls", "Pull requests", data)
 		return
 	}
 	data.After = afterParam(r)
@@ -2172,7 +2196,7 @@ func (s *Server) pullList(w http.ResponseWriter, r *http.Request) {
 			UpdatedAt: row.UpdatedAt,
 		})
 	}
-	s.page(w, r, p, http.StatusOK, "collab/pulls", "Pull requests", data)
+	s.pageRepo(w, r, p, s.collabChrome(r, rc, p), http.StatusOK, "collab/pulls", "Pull requests", data)
 }
 
 // --- pull conversation -------------------------------------------------------
@@ -2548,7 +2572,7 @@ func (s *Server) pullPage(w http.ResponseWriter, r *http.Request) {
 func (s *Server) renderPull(w http.ResponseWriter, r *http.Request, rc collabRepo, p auth.Principal, num, status int, errMsg, notice string) {
 	ctx := r.Context()
 	if collabDeps.PullGet == nil {
-		s.page(w, r, p, http.StatusServiceUnavailable, "collab/pull", "Pull request", pullData{
+		s.pageRepo(w, r, p, s.collabChrome(r, rc, p), http.StatusServiceUnavailable, "collab/pull", "Pull request", pullData{
 			Repo: rc, Num: num, Error: "pulls service not wired",
 		})
 		return
@@ -2561,7 +2585,7 @@ func (s *Server) renderPull(w http.ResponseWriter, r *http.Request, rc collabRep
 			s.collabError(w, r, st, err.Error())
 			return
 		}
-		s.page(w, r, p, st, "collab/pull", "Pull request", pullData{Repo: rc, Num: num, Error: err.Error()})
+		s.pageRepo(w, r, p, s.collabChrome(r, rc, p), st, "collab/pull", "Pull request", pullData{Repo: rc, Num: num, Error: err.Error()})
 		return
 	}
 	th, pr := view.Thread, view.PR
@@ -2740,7 +2764,7 @@ func (s *Server) renderPull(w http.ResponseWriter, r *http.Request, rc collabRep
 	}
 	data.FilesCount = len(data.Diff.Files)
 
-	s.page(w, r, p, status, "collab/pull", data.Title, data)
+	s.pageRepo(w, r, p, s.collabChrome(r, rc, p), status, "collab/pull", data.Title, data)
 }
 
 func sortedThreadIndex(cards []threadCard) []threadCard {
@@ -2830,13 +2854,10 @@ func (s *Server) pullWriteBack(w http.ResponseWriter, r *http.Request, rc collab
 	s.renderPull(w, r, rc, p, num, status, err.Error(), "")
 }
 
-// safeNext accepts only a same-site absolute path (the login-required
-// sanitizeNext rule) — open redirects are refused.
+// safeNext accepts only a same-site absolute path (the shared login-required
+// rule) — open redirects are refused.
 func safeNext(v, fallback string) string {
-	if strings.HasPrefix(v, "/") && !strings.HasPrefix(v, "//") && !strings.Contains(v, "\\") {
-		return v
-	}
-	return fallback
+	return httpsec.SafeNext(v, fallback)
 }
 
 func (s *Server) pullComment(w http.ResponseWriter, r *http.Request) {
@@ -3220,6 +3241,13 @@ func (s *Server) pullMergeTask(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	// The fragment reports merge-task state (including its error text), which
+	// is the same authority the merge POST requires: a plain reader must not
+	// poll it.
+	if !rc.atLeast(identity.RoleMaintain) {
+		s.collabError(w, r, http.StatusForbidden, "merge tasks require maintain access")
+		return
+	}
 	s.collabFragment(w, r, "collab/pull", "collab_merge_task", mergeTaskView{
 		Task: mergeTaskFor(rc.Owner, rc.Name),
 		Num:  num,
@@ -3280,7 +3308,7 @@ func (s *Server) pullCommits(w http.ResponseWriter, r *http.Request) {
 	data := pullCommitsData{Repo: rc, Num: num}
 	if collabDeps.PullGet == nil || collabDeps.PullCommits == nil {
 		data.Error = "pulls service not wired"
-		s.page(w, r, p, http.StatusServiceUnavailable, "collab/pull_commits", "Commits", data)
+		s.pageRepo(w, r, p, s.collabChrome(r, rc, p), http.StatusServiceUnavailable, "collab/pull_commits", "Commits", data)
 		return
 	}
 	view, err := collabDeps.PullGet(r.Context(), rc.Owner, rc.Name, num, p, 0, 1)
@@ -3303,7 +3331,7 @@ func (s *Server) pullCommits(w http.ResponseWriter, r *http.Request) {
 	if more {
 		data.OlderHref = pagerHref(r, "skip", strconv.Itoa(skip+len(commits)))
 	}
-	s.page(w, r, p, http.StatusOK, "collab/pull_commits", "Commits on #"+strconv.Itoa(num), data)
+	s.pageRepo(w, r, p, s.collabChrome(r, rc, p), http.StatusOK, "collab/pull_commits", "Commits on #"+strconv.Itoa(num), data)
 }
 
 // --- pull files --------------------------------------------------------------
@@ -3339,7 +3367,7 @@ func (s *Server) pullFiles(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) renderFiles(w http.ResponseWriter, r *http.Request, rc collabRepo, p auth.Principal, num, status int, errMsg, notice string) {
 	if collabDeps.PullGet == nil || collabDeps.PullDiff == nil {
-		s.page(w, r, p, http.StatusServiceUnavailable, "collab/pull_files", "Files", filesData{
+		s.pageRepo(w, r, p, s.collabChrome(r, rc, p), http.StatusServiceUnavailable, "collab/pull_files", "Files", filesData{
 			Repo: rc, Num: num, Error: "pulls service not wired",
 		})
 		return
@@ -3351,14 +3379,14 @@ func (s *Server) renderFiles(w http.ResponseWriter, r *http.Request, rc collabRe
 			s.collabError(w, r, st, err.Error())
 			return
 		}
-		s.page(w, r, p, st, "collab/pull_files", "Files", filesData{Repo: rc, Num: num, Error: err.Error()})
+		s.pageRepo(w, r, p, s.collabChrome(r, rc, p), st, "collab/pull_files", "Files", filesData{Repo: rc, Num: num, Error: err.Error()})
 		return
 	}
 	data := filesData{Repo: rc, Num: num, Title: view.Thread.Title, Lock: pullCommentLock(view.Thread, view.PR), Error: errMsg, Notice: notice}
 	raw, derr := collabDeps.PullDiff(r.Context(), rc.Owner, rc.Name, num, p)
 	if derr != nil {
 		data.DiffError = derr.Error()
-		s.page(w, r, p, http.StatusOK, "collab/pull_files", "Files", data)
+		s.pageRepo(w, r, p, s.collabChrome(r, rc, p), http.StatusOK, "collab/pull_files", "Files", data)
 		return
 	}
 	parsed := ParseUnifiedDiff(raw)
@@ -3399,7 +3427,7 @@ func (s *Server) renderFiles(w http.ResponseWriter, r *http.Request, rc collabRe
 	data.Diff = buildDiff(parsed, nil, data.Sel, base)
 	data.Diff.Full, data.Diff.Num, data.Diff.Sel = rc.Full, num, data.Sel
 	data.FilesCount = len(data.Diff.Files)
-	s.page(w, r, p, status, "collab/pull_files", "Files on #"+strconv.Itoa(num), data)
+	s.pageRepo(w, r, p, s.collabChrome(r, rc, p), status, "collab/pull_files", "Files on #"+strconv.Itoa(num), data)
 }
 
 // --- checks index ------------------------------------------------------------
@@ -3450,7 +3478,7 @@ func (s *Server) checksList(w http.ResponseWriter, r *http.Request) {
 	}
 	if collabDeps.ChecksList == nil {
 		data.Error = "checks service not wired"
-		s.page(w, r, p, http.StatusServiceUnavailable, "collab/checks", "Checks", data)
+		s.pageRepo(w, r, p, s.collabChrome(r, rc, p), http.StatusServiceUnavailable, "collab/checks", "Checks", data)
 		return
 	}
 	page, err := collabDeps.ChecksList(r.Context(), rc.Owner, rc.Name, p, data.After, 50)
@@ -3460,7 +3488,7 @@ func (s *Server) checksList(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		data.Error = err.Error()
-		s.page(w, r, p, collabErrStatus(err), "collab/checks", "Checks", data)
+		s.pageRepo(w, r, p, s.collabChrome(r, rc, p), collabErrStatus(err), "collab/checks", "Checks", data)
 		return
 	}
 	data.More = page.More
@@ -3503,7 +3531,7 @@ func (s *Server) checksList(w http.ResponseWriter, r *http.Request) {
 	if data.More && len(page.Checks) > 0 {
 		data.OlderHref = pagerHref(r, "after", page.Checks[len(page.Checks)-1].SHA)
 	}
-	s.page(w, r, p, http.StatusOK, "collab/checks", "Checks", data)
+	s.pageRepo(w, r, p, s.collabChrome(r, rc, p), http.StatusOK, "collab/checks", "Checks", data)
 }
 
 // checkContexts is the lazy per-row fragment (htmx target).
@@ -3557,7 +3585,7 @@ func (s *Server) checkDetail(w http.ResponseWriter, r *http.Request) {
 	data := checkDetailData{Repo: rc, SHA: sha, Short: shortSHA(sha), Commit: "/" + rc.Full + "/commit/" + sha}
 	if collabDeps.ChecksCombined == nil {
 		data.Error = "checks service not wired"
-		s.page(w, r, p, http.StatusServiceUnavailable, "collab/check_detail", "Checks", data)
+		s.pageRepo(w, r, p, s.collabChrome(r, rc, p), http.StatusServiceUnavailable, "collab/check_detail", "Checks", data)
 		return
 	}
 	cv, err := collabDeps.ChecksCombined(r.Context(), rc.Owner, rc.Name, sha, p)
@@ -3568,13 +3596,13 @@ func (s *Server) checkDetail(w http.ResponseWriter, r *http.Request) {
 		}
 		st := collabErrStatus(err)
 		data.Error = err.Error()
-		s.page(w, r, p, st, "collab/check_detail", "Checks", data)
+		s.pageRepo(w, r, p, s.collabChrome(r, rc, p), st, "collab/check_detail", "Checks", data)
 		return
 	}
 	data.Combined = cv
 	data.Zero = len(cv.Statuses) == 0
 	data.Pill = checkPillFor(rc.Owner, rc.Name, cv.SHA, cv.State, data.Zero)
-	s.page(w, r, p, http.StatusOK, "collab/check_detail", "Checks for "+data.Short, data)
+	s.pageRepo(w, r, p, s.collabChrome(r, rc, p), http.StatusOK, "collab/check_detail", "Checks for "+data.Short, data)
 }
 
 // --- releases list -----------------------------------------------------------
@@ -3633,7 +3661,7 @@ func (s *Server) releaseList(w http.ResponseWriter, r *http.Request) {
 	}
 	if collabDeps.ReleasesList == nil {
 		data.Error = "releases list not wired (internal/releases ListReleases returns an unexported type — see WIRING)"
-		s.page(w, r, p, http.StatusServiceUnavailable, "collab/releases", "Releases", data)
+		s.pageRepo(w, r, p, s.collabChrome(r, rc, p), http.StatusServiceUnavailable, "collab/releases", "Releases", data)
 		return
 	}
 	list, more, err := collabDeps.ReleasesList(r.Context(), rc.Owner, rc.Name, p, 50, data.After)
@@ -3643,7 +3671,7 @@ func (s *Server) releaseList(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		data.Error = err.Error()
-		s.page(w, r, p, collabErrStatus(err), "collab/releases", "Releases", data)
+		s.pageRepo(w, r, p, s.collabChrome(r, rc, p), collabErrStatus(err), "collab/releases", "Releases", data)
 		return
 	}
 	if collabDeps.ReleaseLatest != nil {
@@ -3706,7 +3734,7 @@ func (s *Server) releaseList(w http.ResponseWriter, r *http.Request) {
 		last := list[len(list)-1]
 		data.OlderHref = pagerHref(r, "after", last.CreatedAt+"|"+last.Tag)
 	}
-	s.page(w, r, p, http.StatusOK, "collab/releases", "Releases", data)
+	s.pageRepo(w, r, p, s.collabChrome(r, rc, p), http.StatusOK, "collab/releases", "Releases", data)
 }
 
 // --- release detail ----------------------------------------------------------
@@ -3790,7 +3818,7 @@ func (s *Server) renderRelease(w http.ResponseWriter, r *http.Request, rc collab
 	data.DeleteAction = base + "/delete"
 	if collabDeps.ReleaseGet == nil {
 		data.Error = "releases service not wired"
-		s.page(w, r, p, http.StatusServiceUnavailable, "collab/release", "Release", data)
+		s.pageRepo(w, r, p, s.collabChrome(r, rc, p), http.StatusServiceUnavailable, "collab/release", "Release", data)
 		return
 	}
 	rel, _, err := collabDeps.ReleaseGet(r.Context(), rc.Owner, rc.Name, p, tag)
@@ -3801,7 +3829,7 @@ func (s *Server) renderRelease(w http.ResponseWriter, r *http.Request, rc collab
 			return
 		}
 		data.Error = err.Error()
-		s.page(w, r, p, st, "collab/release", "Release", data)
+		s.pageRepo(w, r, p, s.collabChrome(r, rc, p), st, "collab/release", "Release", data)
 		return
 	}
 	data.Name, data.Body, data.Author = rel.Name, rel.Body, rel.Author
@@ -3827,7 +3855,7 @@ func (s *Server) renderRelease(w http.ResponseWriter, r *http.Request, rc collab
 	if data.Editing && data.FormName == "" && data.FormBody == "" {
 		data.FormName, data.FormBody = data.Name, data.Body
 	}
-	s.page(w, r, p, status, "collab/release", data.Name, data)
+	s.pageRepo(w, r, p, s.collabChrome(r, rc, p), status, "collab/release", data.Name, data)
 }
 
 func (s *Server) releaseSave(w http.ResponseWriter, r *http.Request) {
@@ -3892,6 +3920,11 @@ func (s *Server) releaseDelete(w http.ResponseWriter, r *http.Request) {
 	redirectPage(w, r, "/"+rc.Full+"/releases")
 }
 
+// assetUploadBodyLimit is the request-body ceiling for the no-JS asset upload:
+// the service's default asset cap plus multipart framing overhead. It is a
+// variable so a test can lower it (a 2 GiB body is not a practical fixture).
+var assetUploadBodyLimit = releases.DefaultMaxAssetBytes + (1 << 20)
+
 // releaseAssetUpload accepts the no-JS multipart upload: the handler hashes
 // the part (the browser never computes the digest) and streams it into the
 // service.
@@ -3905,7 +3938,19 @@ func (s *Server) releaseAssetUpload(w http.ResponseWriter, r *http.Request) {
 		s.collabError(w, r, http.StatusServiceUnavailable, "releases service not wired")
 		return
 	}
+	// Bound the request BEFORE the multipart parser spools anything: without
+	// this, a `write` principal could post an unbounded body and fill the
+	// node's disk (the service's cap only runs after the spool). The ceiling is
+	// the default asset cap plus multipart framing overhead; a smaller
+	// service-configured cap still rejects downstream.
+	r.Body = http.MaxBytesReader(w, r.Body, assetUploadBodyLimit)
 	if err := r.ParseMultipartForm(32 << 20); err != nil {
+		var maxErr *http.MaxBytesError
+		if errors.As(err, &maxErr) {
+			s.renderRelease(w, r, rc, p, tag, http.StatusRequestEntityTooLarge,
+				"asset exceeds the upload size limit", "", false, "", "")
+			return
+		}
 		s.renderRelease(w, r, rc, p, tag, http.StatusBadRequest, "upload must be multipart/form-data", "", false, "", "")
 		return
 	}
@@ -3941,10 +3986,9 @@ func (s *Server) releaseAssetUpload(w http.ResponseWriter, r *http.Request) {
 		s.renderRelease(w, r, rc, p, tag, http.StatusServiceUnavailable, "could not stage the upload", "", false, "", "")
 		return
 	}
-	contentType := hdr.Header.Get("Content-Type")
-	if contentType == "" {
-		contentType = "application/octet-stream"
-	}
+	// The multipart part's declared type is untrusted: clamp it to the inert
+	// allowlist before it reaches the service (which clamps again).
+	contentType := releases.AssetMediaType(hdr.Header.Get("Content-Type"))
 	if _, err := collabDeps.AssetUpload(r.Context(), rc.Owner, rc.Name, p, tag, name, tmp, size, hex.EncodeToString(h.Sum(nil)), contentType); err != nil {
 		s.renderRelease(w, r, rc, p, tag, collabErrStatus(err), err.Error(), "", false, "", "")
 		return
@@ -3989,7 +4033,7 @@ func (s *Server) forkList(w http.ResponseWriter, r *http.Request) {
 	data := forksData{Repo: rc, After: r.URL.Query().Get("after")}
 	if collabDeps.ForksList == nil {
 		data.Error = "forks service not wired"
-		s.page(w, r, p, http.StatusServiceUnavailable, "collab/forks", "Forks", data)
+		s.pageRepo(w, r, p, s.collabChrome(r, rc, p), http.StatusServiceUnavailable, "collab/forks", "Forks", data)
 		return
 	}
 	page, err := collabDeps.ForksList(r.Context(), rc.Owner, rc.Name, p, data.After, 50)
@@ -3999,7 +4043,7 @@ func (s *Server) forkList(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		data.Error = err.Error()
-		s.page(w, r, p, collabErrStatus(err), "collab/forks", "Forks", data)
+		s.pageRepo(w, r, p, s.collabChrome(r, rc, p), collabErrStatus(err), "collab/forks", "Forks", data)
 		return
 	}
 	data.More = page.More
@@ -4014,5 +4058,5 @@ func (s *Server) forkList(w http.ResponseWriter, r *http.Request) {
 			Href:     "/" + f.Repo,
 		})
 	}
-	s.page(w, r, p, http.StatusOK, "collab/forks", "Forks of "+rc.Full, data)
+	s.pageRepo(w, r, p, s.collabChrome(r, rc, p), http.StatusOK, "collab/forks", "Forks of "+rc.Full, data)
 }

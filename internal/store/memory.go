@@ -1,9 +1,9 @@
 // memory.go: the in-memory backend (03_store_backends.md §9). Tests and the
 // simulation use it as the truth store: a BTreeMap-equivalent (map + sorted
 // keys at iteration time), a global monotonic version counter unique across
-// keys (mimics GCS generations), full interface incl. compose (concat under
+// keys (monotonic generations), full interface incl. compose (concat under
 // lock, CAS via Put) and range clamping. Test knobs: per-op latency,
-// fake_object_urls (accel returns a GCS-like URL + bearer for edge tests),
+// fake_object_urls (accel returns a redirect URL + bearer for edge tests),
 // signing_fails (SignedGetURL errors like VPC-SC). The op counter feeds the
 // §7 round-trip budget assertions.
 package store
@@ -32,7 +32,7 @@ type Memory struct {
 
 	// Test knobs (§9).
 	Latency       time.Duration // artificial per-op latency
-	FakeObjectURL bool          // AccelTarget returns a GCS-like URL + bearer
+	FakeObjectURL bool          // AccelTarget returns a redirect URL + bearer
 	SigningFails  bool          // SignedGetURL errors like VPC-SC
 
 	// Ops counts every store operation (get/head/put/delete/list/compose);

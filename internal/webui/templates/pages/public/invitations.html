@@ -1,9 +1,14 @@
 {{define "content"}}
+{{if .Data.Identity}}
+{{template "identity_notice" .Data.Identity}}
+{{else}}
 {{/* /invitations (Forgejo #362): the invitee inbox. Rows carry kind, scope,
      role, issuer, expiry; accept/decline are POST forms (303 back with the
      outcome in ?note=). Shared accept links deep-link as ?id=&token= and
      preview on top. Expired rows stay listed but accept is disabled (the
-     server still rejects with 409). 390px: rows wrap, the action row wraps. */}}
+     server still rejects with 409). A signed-out caller never reaches this
+     branch: the handler answers 401, and auth none renders the shared
+     identity notice. 390px: rows wrap, the action row wraps. */}}
 <div class="invitations-page mx-auto max-w-3xl">
   <header class="mb-3 border-b border-[var(--pd-line)] pb-3">
     <p class="eyebrow">inbox</p>
@@ -13,14 +18,6 @@
       invitations stay listed but cannot be accepted — decline clears them.
     </p>
   </header>
-
-  {{if .Data.Anonymous}}
-  <div class="card mb-4 p-4">
-    <p class="text-sm">
-      {{if .Chrome.ShowLogin}}<a class="link" href="{{.Chrome.LoginHref}}">Sign in</a> to view your invitations.{{else}}Sign in to view your invitations — this server has no login flow configured.{{end}}
-    </p>
-  </div>
-  {{end}}
 
   {{if .Data.LinkID}}
   <section class="card mb-4 p-3" aria-label="Shared invitation">
@@ -52,42 +49,41 @@
 
   {{if .Data.Note}}<p class="mb-3 text-sm text-[var(--pd-warn)]" role="status">{{.Data.Note}}</p>{{end}}
 
-  {{if not .Data.Anonymous}}
-    {{if .Data.Rows}}
-    <ol class="grid grid-cols-1 gap-2">
-      {{range .Data.Rows}}
-      <li class="card p-3">
-        <div class="flex flex-wrap items-center gap-2 text-sm">
-          <span class="chip">{{.Kind}}</span>
-          {{if .Expired}}<span class="chip-closed">expired</span>{{end}}
-          <strong class="font-mono text-sm">{{.Scope}}</strong>
-          <span class="muted text-xs">as {{.Role}}</span>
-          <span class="muted ml-auto flex flex-wrap items-center gap-1 font-mono text-xs">
-            from <code class="font-mono text-xs">{{.InvitedBy}}</code> · expires
-            {{if .ExpiresAt}}{{if .Expired}}<span class="chip-closed">expired</span>{{else}}<span class="font-mono tabular" title="{{.ExpiresAt}}">{{.ExpiresLabel}}</span>{{end}}{{else}}<span class="muted">—</span>{{end}}
-          </span>
-        </div>
-        <div class="mt-2 flex flex-wrap gap-2">
-          <form method="post" action="/invitations/{{.ID}}/accept">
-            <button type="submit" class="btn primary px-2 py-1 text-xs"{{if .Expired}} disabled title="expired — the server rejects accept with 409"{{else}} title="accept this invitation"{{end}}>accept</button>
-          </form>
-          <form method="post" action="/invitations/{{.ID}}/decline">
-            <button type="submit" class="btn px-2 py-1 text-xs">decline</button>
-          </form>
-        </div>
-      </li>
-      {{end}}
-    </ol>
-    {{else}}
-    <div class="empty-state" role="status">
-      <p class="empty-title">No pending invitations</p>
-      <p class="empty-hint">new org or repo invites land here.</p>
-    </div>
+  {{if .Data.Rows}}
+  <ol class="grid grid-cols-1 gap-2">
+    {{range .Data.Rows}}
+    <li class="card p-3">
+      <div class="flex flex-wrap items-center gap-2 text-sm">
+        <span class="chip">{{.Kind}}</span>
+        {{if .Expired}}<span class="chip-closed">expired</span>{{end}}
+        <strong class="font-mono text-sm">{{.Scope}}</strong>
+        <span class="muted text-xs">as {{.Role}}</span>
+        <span class="muted ml-auto flex flex-wrap items-center gap-1 font-mono text-xs">
+          from <code class="font-mono text-xs">{{.InvitedBy}}</code> · expires
+          {{if .ExpiresAt}}{{if .Expired}}<span class="chip-closed">expired</span>{{else}}<span class="font-mono tabular" title="{{.ExpiresAt}}">{{.ExpiresLabel}}</span>{{end}}{{else}}<span class="muted">—</span>{{end}}
+        </span>
+      </div>
+      <div class="mt-2 flex flex-wrap gap-2">
+        <form method="post" action="/invitations/{{.ID}}/accept">
+          <button type="submit" class="btn primary px-2 py-1 text-xs"{{if .Expired}} disabled title="expired — the server rejects accept with 409"{{else}} title="accept this invitation"{{end}}>accept</button>
+        </form>
+        <form method="post" action="/invitations/{{.ID}}/decline">
+          <button type="submit" class="btn px-2 py-1 text-xs">decline</button>
+        </form>
+      </div>
+    </li>
     {{end}}
+  </ol>
+  {{else}}
+  <div class="empty-state" role="status">
+    <p class="empty-title">No pending invitations</p>
+    <p class="empty-hint">new org or repo invites land here.</p>
+  </div>
   {{end}}
 
   <p class="muted mt-3 text-xs">
     Managing an organization instead? <a class="link" href="/explore">explore owners</a> to find it.
   </p>
 </div>
+{{end}}
 {{end}}

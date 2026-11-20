@@ -6,6 +6,7 @@ package api
 import (
 	"context"
 	"errors"
+	"net/http"
 	"strings"
 	"testing"
 
@@ -137,6 +138,36 @@ func TestSSHKeysAPINoneMode(t *testing.T) {
 	}
 	if _, ok := stub.recs["fp-1"]; ok {
 		t.Fatal("record must be gone")
+	}
+}
+
+// TestSSHKeysListRefusesAnonymous pins the read side of the Forgejo #502
+// defect-A rule (the same refusal add/delete already carry): with
+// anonymous_read on, AuthRead admits anonymous, but the synthetic "anonymous"
+// principal owns no keys and must never receive a listing. The /keys page
+// mirrors this refusal with a 401 (internal/webui).
+func TestSSHKeysListRefusesAnonymous(t *testing.T) {
+	f := newFixture(t)
+	f.env.Cfg.Server.Auth.AnonymousRead = true
+	f.env.SSHKeys = &stubSSHKeys{recs: map[string]SshKeyRecord{
+		"fp-1": {ID: "fp-1", Principal: "anonymous", Key: validKeyLine},
+	}}
+
+	w := f.do("GET", "/api/v1/ssh-keys", nil, nil, nil)
+	if w.Code != http.StatusUnauthorized {
+		t.Fatalf("anonymous list = %d, want 401 (%s)", w.Code, w.Body.String())
+	}
+	if h := w.Header().Get("WWW-Authenticate"); h != `Bearer realm="walgit"` {
+		t.Fatalf("anonymous list WWW-Authenticate = %q", h)
+	}
+	if strings.Contains(w.Body.String(), "fp-1") || strings.Contains(w.Body.String(), "AAAAC3") {
+		t.Fatalf("anonymous list leaked a key: %s", w.Body.String())
+	}
+
+	// A named (even read-only) principal keeps its own listing.
+	w = f.do("GET", "/api/v1/ssh-keys", nil, nil, readP())
+	if w.Code != http.StatusOK {
+		t.Fatalf("read-only principal list = %d (%s)", w.Code, w.Body.String())
 	}
 }
 

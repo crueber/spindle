@@ -138,7 +138,9 @@ func TestCoverageRenderExecutionErrorFailsClosed(t *testing.T) {
 	if rec.Code != http.StatusInternalServerError {
 		t.Fatalf("status = %d (%s)", rec.Code, rec.Body.String())
 	}
-	if body := rec.Body.String(); !strings.Contains(body, "render:") {
+	// The template error text stays in the log; the body carries the generic
+	// sentence only (backend detail is not rendered).
+	if body := rec.Body.String(); !strings.Contains(body, "internal error") || strings.Contains(body, "nil pointer") {
 		t.Fatalf("body = %q", body)
 	}
 }

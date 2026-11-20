@@ -138,9 +138,17 @@ func (h *Handler) post(w http.ResponseWriter, r *http.Request) {
 		})
 		return
 	}
+	// The wire id is ALWAYS the import/service id — the key GET
+	// .../imports/{id} attaches with (docs/features/10_git_import.md,
+	// "HTTP/CLI ids are service ids"). The WAL table mints its own id for
+	// the record; rendering that here handed a joiner an id that resolves
+	// to the record but not to the stream (attach answered JSON, and the
+	// page's progress card never attached). taskView stamps the accepted
+	// id over it, so a POST body, a GET body and the SSE task frames all
+	// name the same key.
 	task := map[string]any{"id": res.TaskID}
 	if rec != nil {
-		task = taskJSON(*rec)
+		task = taskView(*rec, res.TaskID)
 	}
 	out := map[string]any{"task": task, "target": params.target()}
 	if res.Joined {
@@ -192,7 +200,7 @@ func (h *Handler) get(w http.ResponseWriter, r *http.Request, id string) {
 		writeJSON(w, http.StatusOK, map[string]any{"id": id})
 		return
 	}
-	writeJSON(w, http.StatusOK, taskJSON(*rec))
+	writeJSON(w, http.StatusOK, taskView(*rec, id))
 }
 
 // namespaceOf resolves the (owner, repo) pair gating a task-status read:
@@ -221,20 +229,21 @@ func acceptsSSE(r *http.Request) bool {
 func (h *Handler) attach(w http.ResponseWriter, r *http.Request, id string, st *stream, rec *wal.TaskRecord) {
 	if st == nil {
 		w.Header().Set("Cache-Control", "no-store")
-		writeJSON(w, http.StatusOK, taskJSON(*rec))
+		writeJSON(w, http.StatusOK, taskView(*rec, id))
 		return
 	}
 	s, ok := newSSE(w, r)
 	if !ok {
 		w.Header().Set("Cache-Control", "no-store")
 		if rec != nil {
-			writeJSON(w, http.StatusOK, taskJSON(*rec))
+			writeJSON(w, http.StatusOK, taskView(*rec, id))
 		} else {
 			writeJSON(w, http.StatusOK, map[string]any{"id": id})
 		}
 		return
 	}
 	defer s.close()
+	s.key = id
 	subID, updates, replay := st.subscribe()
 	defer st.unsubscribe(subID)
 	for _, rp := range replay {
@@ -311,6 +320,18 @@ func taskJSON(t wal.TaskRecord) map[string]any {
 	return out
 }
 
+// taskView is taskJSON with the surface's id contract applied: `id` is the
+// id this endpoint accepts back (the import/service id), never the internal
+// WAL table id. An empty key leaves the record id in place (a pruned record
+// served by its own table id is the only key that resolves there).
+func taskView(t wal.TaskRecord, key string) map[string]any {
+	out := taskJSON(t)
+	if key != "" {
+		out["id"] = key
+	}
+	return out
+}
+
 func progressJSON(p wal.Progress) map[string]any {
 	out := map[string]any{"label": p.Label, "done": p.Done, "unit": p.Unit}
 	if p.Text != "" {
@@ -324,6 +345,18 @@ func progressJSON(p wal.Progress) map[string]any {
 	}
 	if p.Task != nil {
 		out["task"] = taskJSON(*p.Task)
+	}
+	return out
+}
+
+// progressView is progressJSON with the id contract applied to a nested task
+// (nil key leaves the record id, the pruned-record case).
+func progressView(p wal.Progress, key string) map[string]any {
+	out := progressJSON(p)
+	if key != "" && p.Task != nil {
+		if tv, ok := out["task"].(map[string]any); ok {
+			tv["id"] = key
+		}
 	}
 	return out
 }
@@ -404,6 +437,7 @@ type sseWriter struct {
 	fl    http.Flusher
 	ctx   context.Context
 	ka    *time.Ticker
+	key   string     // the import id this attach is keyed by (wire id contract)
 	mu    sync.Mutex // packet writes and keepalives share one mutex so
 	ended bool       // they cannot tear (the api.SSE rule)
 }
@@ -503,12 +537,12 @@ func (s *sseWriter) packet(rp wal.Progress) bool {
 		raw, _ := json.Marshal(map[string]any{"text": rp.Text})
 		return s.event("notice", string(raw))
 	case "progress":
-		return s.event("progress", mustJSON(progressJSON(rp)))
+		return s.event("progress", mustJSON(progressView(rp, s.key)))
 	case "task":
 		if rp.Task == nil {
 			return true
 		}
-		return s.event("task", mustJSON(taskJSON(*rp.Task)))
+		return s.event("task", mustJSON(taskView(*rp.Task, s.key)))
 	default:
 		return true
 	}

@@ -4,6 +4,9 @@
    verbatim — no duplicated regex). 390px: the table scrolls in place,
    fields are full width. */}}
 {{define "content"}}
+{{if .Data.Identity}}
+{{template "identity_notice" .Data.Identity}}
+{{else}}
 <div class="keys-page space-y-4" id="keys-page">
   <h2 class="text-xl font-semibold">SSH keys</h2>
   <p class="muted text-sm">
@@ -65,4 +68,5 @@
   </section>
   {{end}}
 </div>
+{{end}}
 {{end}}

@@ -124,15 +124,18 @@ func TestSetupTestValidatesMergedConfig(t *testing.T) {
 	base.Server.Auth.OAuthClientID = "spindle"
 	base.Server.Auth.OAuthClientSecret = "s3cret"
 	base.Server.Auth.SessionSecret = strings.Repeat("x", 32) // trio complete (#344)
+	// A static admin token: the setup surface requires an admin principal and
+	// there is no env-token escape hatch (WP13).
+	base.Server.Auth.Tokens = []config.StaticToken{{Principal: "admin", Token: "tok123", Write: true, Admin: true}}
 	if err := config.SaveSetup(base, dataDir); err != nil {
 		t.Fatal(err)
 	}
 	s, _ := setupMergeServer(t, dataDir)
-	t.Setenv("SPINDLE_SETUP_TOKEN", "setup-tok")
 
 	// mode=oidc alone is only valid because the FILE supplies the trio.
-	req := httptest.NewRequest("POST", "/api/v1/setup/test?token=setup-tok",
+	req := httptest.NewRequest("POST", "/api/v1/setup/test",
 		strings.NewReader(`{"overrides": {"server.auth.mode": "oidc"}}`))
+	req.Header.Set("Authorization", "Bearer tok123")
 	rec := httptest.NewRecorder()
 	s.setupTest(rec, req)
 	if rec.Code != http.StatusOK {
@@ -141,8 +144,9 @@ func TestSetupTestValidatesMergedConfig(t *testing.T) {
 
 	// Breaking the merge: clearing the file's oauth_client_secret leaves
 	// client_id set — "both set or both unset" fails only against the merge.
-	req = httptest.NewRequest("POST", "/api/v1/setup/test?token=setup-tok",
+	req = httptest.NewRequest("POST", "/api/v1/setup/test",
 		strings.NewReader(`{"overrides": {"server.auth.oauth_client_secret": ""}}`))
+	req.Header.Set("Authorization", "Bearer tok123")
 	rec = httptest.NewRecorder()
 	s.setupTest(rec, req)
 	if rec.Code != http.StatusUnprocessableEntity {

@@ -7,47 +7,25 @@ package notify
 import (
 	"context"
 	"net/http/httptest"
-	"runtime"
 	"testing"
 	"time"
 )
 
-// awaitGoroutines polls until the count returns to base (or the deadline
-// hits — a fixed sleep-then-assert would flake under -race load).
-func awaitGoroutines(t *testing.T, base int, what string) {
+// awaitKeepalives polls the package's own keepalive counter. It replaces the
+// old runtime.NumGoroutine() assertions: the global count is racy under load
+// (an unrelated goroutine exiting shrinks the delta, which reads as a leak —
+// seen on CI as "goroutines still 7, want >= 8"), while this counter is owned
+// by exactly the thing under test.
+func awaitKeepalives(t *testing.T, want int64, what string) {
 	t.Helper()
 	deadline := time.Now().Add(30 * time.Second)
 	for {
-		if runtime.NumGoroutine() <= base {
+		got := activeKeepalives.Load()
+		if got == want {
 			return
 		}
 		if time.Now().After(deadline) {
-			buf := make([]byte, 1<<20)
-			n := runtime.Stack(buf, true)
-			t.Fatalf("%s: goroutines still %d > baseline %d after 30s\n%s",
-				what, runtime.NumGoroutine(), base, buf[:n])
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
-}
-
-// awaitGoroutinesUp polls until at least n goroutines exist (or the
-// deadline hits). A `go` statement's goroutine is not guaranteed
-// countable the instant the statement returns, so an immediate
-// NumGoroutine assertion pins scheduling, not behavior — under CI load
-// the spawned keepalives had not all started when counted (Forgejo
-// #397: "expected >= 8 goroutines after attach, got 7"). Same
-// poll-don't-sleep treatment as #178.
-func awaitGoroutinesUp(t *testing.T, n int, what string) {
-	t.Helper()
-	deadline := time.Now().Add(30 * time.Second)
-	for {
-		if got := runtime.NumGoroutine(); got >= n {
-			return
-		}
-		if time.Now().After(deadline) {
-			t.Fatalf("%s: goroutines still %d, want >= %d after 30s",
-				what, runtime.NumGoroutine(), n)
+			t.Fatalf("%s: keepalives %d, want %d after 30s", what, got, want)
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
@@ -55,7 +33,6 @@ func awaitGoroutinesUp(t *testing.T, n int, what string) {
 
 func TestSSEWriterKeepaliveExitsOnClose(t *testing.T) {
 	const streams = 5
-	base := runtime.NumGoroutine()
 	writers := make([]*sseWriter, 0, streams)
 	for i := 0; i < streams; i++ {
 		r := httptest.NewRequest("GET", "/api/v1/notifications/stream", nil)
@@ -65,16 +42,15 @@ func TestSSEWriterKeepaliveExitsOnClose(t *testing.T) {
 		}
 		writers = append(writers, w)
 	}
-	awaitGoroutinesUp(t, base+streams, "keepalive goroutines after attach")
+	awaitKeepalives(t, streams, "keepalive goroutines after attach")
 	// The handler path: defer s.close() on disconnect.
 	for _, w := range writers {
 		w.close()
 	}
-	awaitGoroutines(t, base, "keepalive goroutine leaked after close")
+	awaitKeepalives(t, 0, "keepalive goroutine leaked after close")
 }
 
 func TestSSEWriterKeepaliveExitsOnContextCancel(t *testing.T) {
-	base := runtime.NumGoroutine()
 	ctx, cancel := context.WithCancel(context.Background())
 	r := httptest.NewRequest("GET", "/api/v1/notifications/stream", nil).WithContext(ctx)
 	w, ok := newSSEWriter(httptest.NewRecorder(), r)
@@ -82,7 +58,7 @@ func TestSSEWriterKeepaliveExitsOnContextCancel(t *testing.T) {
 		t.Fatal("recorder must flush")
 	}
 	defer w.close()
-	awaitGoroutinesUp(t, base+1, "keepalive goroutine after attach")
+	awaitKeepalives(t, 1, "keepalive goroutine after attach")
 	cancel()
-	awaitGoroutines(t, base, "keepalive goroutine leaked after ctx cancel")
+	awaitKeepalives(t, 0, "keepalive goroutine leaked after ctx cancel")
 }

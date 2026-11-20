@@ -12,7 +12,7 @@
       </h1>
       <p class="muted mt-3 max-w-2xl text-sm leading-relaxed">
         It serves repositories whose entire state — refs, packs, config, policy, events, web UI —
-        lives as objects in a bucket (filesystem, S3, or GCS). Instances are disposable; wipe one
+        lives as objects in a bucket (filesystem or S3). Instances are disposable; wipe one
         and you lose nothing but warmth.
       </p>
       <p class="mt-5 flex flex-wrap items-center gap-3">
@@ -24,7 +24,7 @@
     <aside class="card p-3" aria-label="At a glance">
       <p class="eyebrow">at a glance</p>
       <dl class="kv mt-2">
-        <div class="kv-row"><dt class="kv-key">store</dt><dd class="kv-val">fs · s3 · gcs</dd></div>
+        <div class="kv-row"><dt class="kv-key">store</dt><dd class="kv-val">fs · s3</dd></div>
         <div class="kv-row"><dt class="kv-key">push budget</dt><dd class="kv-val">≤ 5 round trips</dd></div>
         <div class="kv-row"><dt class="kv-key">commit point</dt><dd class="kv-val">manifest cas</dd></div>
         <div class="kv-row"><dt class="kv-key">instances</dt><dd class="kv-val">disposable</dd></div>
@@ -37,7 +37,7 @@
     <section class="grid grid-cols-1 items-center gap-6 border-b border-[var(--pd-line)] py-8 md:grid-cols-2">
       <div class="min-w-0">
         <figure class="overflow-hidden border border-[var(--pd-line)] bg-[var(--pd-canvas)]">
-          <img class="block h-auto w-full" src="/_ui/concepts/push-still.gif" alt="Animation: a laptop pushes a pack of git objects to a bucket; the bucket writes them, then acknowledges. The client only finishes after the bucket's acknowledgement." width="640" height="360" loading="lazy" decoding="async">
+          <img class="block aspect-[16/9] h-auto w-full" src="/_ui/concepts/push-still.gif" alt="Animation: a laptop pushes a pack of git objects to a bucket; the bucket writes them, then acknowledges. The client only finishes after the bucket's acknowledgement." width="640" height="360" loading="lazy" decoding="async">
           <figcaption class="muted border-t border-[var(--pd-line)] px-3 py-1.5 text-xs">Push over smart HTTP; objects land in the bucket.</figcaption>
         </figure>
       </div>
@@ -64,7 +64,7 @@
       </div>
       <div class="order-1 min-w-0 md:order-2">
         <figure class="overflow-hidden border border-[var(--pd-line)] bg-[var(--pd-canvas)]">
-          <img class="block h-auto w-full" src="/_ui/concepts/bucket-still.gif" alt="Animation: one bucket holds refs, packs, config, and policy while a server instance above it disappears and a fresh instance connects to the same bucket with nothing lost." width="640" height="360" loading="lazy" decoding="async">
+          <img class="block aspect-[16/9] h-auto w-full" src="/_ui/concepts/bucket-still.gif" alt="Animation: one bucket holds refs, packs, config, and policy while a server instance above it disappears and a fresh instance connects to the same bucket with nothing lost." width="640" height="360" loading="lazy" decoding="async">
           <figcaption class="muted border-t border-[var(--pd-line)] px-3 py-1.5 text-xs">No SQL, no Redis. Kill the instance; the bucket doesn't notice.</figcaption>
         </figure>
       </div>
@@ -73,7 +73,7 @@
     <section class="grid grid-cols-1 items-center gap-6 border-b border-[var(--pd-line)] py-8 md:grid-cols-2">
       <div class="min-w-0">
         <figure class="overflow-hidden border border-[var(--pd-line)] bg-[var(--pd-canvas)]">
-          <img class="block h-auto w-full" src="/_ui/concepts/fetch-still.gif" alt="Animation: an empty clone first receives ref names, then pack data, from the bucket until it holds a working copy." width="640" height="360" loading="lazy" decoding="async">
+          <img class="block aspect-[16/9] h-auto w-full" src="/_ui/concepts/fetch-still.gif" alt="Animation: an empty clone first receives ref names, then pack data, from the bucket until it holds a working copy." width="640" height="360" loading="lazy" decoding="async">
           <figcaption class="muted border-t border-[var(--pd-line)] px-3 py-1.5 text-xs">Clone reads objects back.</figcaption>
         </figure>
       </div>
@@ -101,7 +101,7 @@
       </div>
       <div class="order-1 min-w-0 md:order-2">
         <figure class="overflow-hidden border border-[var(--pd-line)] bg-[var(--pd-canvas)]">
-          <img class="block h-auto w-full" src="/_ui/concepts/collab-still.gif" alt="Animation: alongside the git lane, issue 7 opens, pull request 8 links to it, a green check result stamps the PR — while the write-ahead log stays git-only." width="640" height="360" loading="lazy" decoding="async">
+          <img class="block aspect-[16/9] h-auto w-full" src="/_ui/concepts/collab-still.gif" alt="Animation: alongside the git lane, issue 7 opens, pull request 8 links to it, a green check result stamps the PR — while the write-ahead log stays git-only." width="640" height="360" loading="lazy" decoding="async">
           <figcaption class="muted border-t border-[var(--pd-line)] px-3 py-1.5 text-xs">Issues, PRs, reviews, and checks live next to git data.</figcaption>
         </figure>
       </div>

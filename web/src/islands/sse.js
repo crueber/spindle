@@ -111,7 +111,13 @@ export function connect({ url, signal, onFrame, onError, events, retryBase = 100
           document.body.dispatchEvent(new CustomEvent("ui:auth-required"));
           return;
         }
-        if (!res.ok || !res.body) throw new Error(`stream ${res.status}`);
+        if (!res.ok || !res.body) {
+          // The status rides the error so a caller can tell "unknown id"
+          // (404 — nothing to retry) from a transport drop (tasks.js).
+          const err = new Error(`stream ${res.status}`);
+          err.status = res.status;
+          throw err;
+        }
         attempt = 0;
         const reader = res.body.getReader();
         const dec = new TextDecoder();

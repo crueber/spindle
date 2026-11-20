@@ -77,7 +77,7 @@ func TestSDKReposJS(t *testing.T) {
 // htmx files and the concept GIFs (regression: uiAsset/webAsset were hardcoded
 // stubs, blanking every page). There is no SPA shell any more (D-WEB-14).
 func TestUIAssetResolvers(t *testing.T) {
-	for _, name := range []string{"app.css", "ui.js", "htmx.min.js", "htmx-ext-sse.js"} {
+	for _, name := range []string{"app.css", "ui.js", "htmx.min.js"} {
 		if b, ok := uiAsset(name); !ok || len(b) == 0 {
 			t.Fatalf("uiAsset(%q) must resolve the built asset (run make web)", name)
 		}

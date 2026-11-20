@@ -17,8 +17,9 @@ import { initSelection } from "./selection.js";
 import { init as initSSE } from "./sse.js";
 import { initDanger } from "./danger.js";
 import { initSubmitKeys } from "./submitkeys.js";
+import { initTasks } from "./tasks.js";
 
-const islands = [initTheme, initMenus, initCopy, initFilter, initAutogrow, initSelection, initDanger, initSubmitKeys, initSSE];
+const islands = [initTheme, initMenus, initCopy, initFilter, initAutogrow, initSelection, initDanger, initSubmitKeys, initSSE, initTasks];
 
 export function boot(root = document) {
   for (const init of islands) {

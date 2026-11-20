@@ -183,7 +183,9 @@ func alicePublicEnv(t *testing.T) (Env, *publicFakeRegistry) {
 		"alice": {"hello", "notes"},
 		"acme":  {"widget"},
 	}}
-	env := publicEnv(publicCfg("none", true), reg)
+	// token (not none): a signed-in instance, so identity-owned pages
+	// (/invitations, /notifications) render instead of the auth-none notice.
+	env := publicEnv(publicCfg("token", true), reg)
 	env.API.RepoVisibility = func(_ context.Context, owner, repo string) (string, bool) {
 		if owner == "alice" && repo == "notes" {
 			return "private", true
@@ -211,8 +213,8 @@ func TestPublicLanding(t *testing.T) {
 		"/_ui/concepts/push-still.gif",
 		`href="/how-it-works"`,
 	)
-	if cc := rec.Header().Get("Cache-Control"); cc != "no-cache" {
-		t.Fatalf("Cache-Control = %q, want no-cache", cc)
+	if cc := rec.Header().Get("Cache-Control"); cc != "no-cache, private" {
+		t.Fatalf("Cache-Control = %q, want no-cache, private", cc)
 	}
 	if et := rec.Header().Get("ETag"); et == "" {
 		t.Fatal("missing ETag")
@@ -305,6 +307,12 @@ func TestPublicGateRequiresRead(t *testing.T) {
 	env.Cfg = publicCfg("oidc", false) // anonymous_read off
 	s := newPublicServer(t, env, auth.Anonymous(), PublicDeps{})
 
+	// The identity-owned pages carry the sharper message (their API twins
+	// answer the same 401); every other read page uses the shared one.
+	denial := map[string]string{
+		"/invitations":   "sign in to view your invitations",
+		"/notifications": "sign in to see your notifications",
+	}
 	for _, path := range []string{
 		"/", "/how-it-works", "/api", "/login-required",
 		"/invitations", "/notifications",
@@ -314,8 +322,12 @@ func TestPublicGateRequiresRead(t *testing.T) {
 		if rec.Code != http.StatusUnauthorized {
 			t.Fatalf("%s: status = %d, want 401 (body %.160q)", path, rec.Code, rec.Body.String())
 		}
-		if !strings.Contains(rec.Body.String(), "authentication required") {
-			t.Fatalf("%s: missing denial message: %.160q", path, rec.Body.String())
+		want := denial[path]
+		if want == "" {
+			want = "authentication required"
+		}
+		if !strings.Contains(rec.Body.String(), want) {
+			t.Fatalf("%s: missing denial message %q: %.160q", path, want, rec.Body.String())
 		}
 		if !strings.HasPrefix(rec.Header().Get("Content-Type"), "text/plain") {
 			t.Fatalf("%s: text twin content-type = %q", path, rec.Header().Get("Content-Type"))
@@ -325,7 +337,7 @@ func TestPublicGateRequiresRead(t *testing.T) {
 	// The browser twin is the shared HTML error page (401 + a sign-in path).
 	rec := publicGet(s, "/notifications")
 	publicWantStatus(t, rec, http.StatusUnauthorized)
-	publicWantContains(t, rec, "Sign in required", "authentication required", `href="/"`)
+	publicWantContains(t, rec, "Sign in required", "sign in to see your notifications", `href="/"`)
 	if ct := rec.Header().Get("Content-Type"); !strings.HasPrefix(ct, "text/html") {
 		t.Fatalf("html twin content-type = %q", ct)
 	}
@@ -503,18 +515,23 @@ func publicInviteDeps(rows []identity.InboxEntry) PublicDeps {
 	}
 }
 
+// TestInvitationsAnonymous pins the identity gate: the API answers 401 to an
+// anonymous caller (internal/identity/http_invites.go), so the page does too —
+// never an inbox with management buttons for the synthetic "anonymous"
+// principal, and a shared deep link previews nothing until sign-in.
 func TestInvitationsAnonymous(t *testing.T) {
 	env, _ := alicePublicEnv(t)
+	env.Cfg = publicCfg("oidc", true) // signed-out viewer, browser login available
 	s := newPublicServer(t, env, auth.Anonymous(), PublicDeps{})
 	rec := publicGet(s, "/invitations")
-	publicWantStatus(t, rec, http.StatusOK)
-	publicWantContains(t, rec, "Sign in to view your invitations")
-	publicWantNotContains(t, rec, "accept</button>")
+	publicWantStatus(t, rec, http.StatusUnauthorized)
+	publicWantContains(t, rec, "Sign in required", "sign in to view your invitations")
+	publicWantNotContains(t, rec, "accept</button>", "decline</button>", "No pending invitations")
 	// A shared deep link does not preview for a signed-out caller (no token
-	// echo, no empty "loading" card).
+	// echo, no form).
 	rec = publicGet(s, "/invitations?id=inv-shared&token=tok")
-	publicWantStatus(t, rec, http.StatusOK)
-	publicWantNotContains(t, rec, "Shared invitation", "loading…")
+	publicWantStatus(t, rec, http.StatusUnauthorized)
+	publicWantNotContains(t, rec, "Shared invitation", "loading…", "accept</button>")
 }
 
 func TestInvitationsInbox(t *testing.T) {
@@ -637,13 +654,17 @@ func publicNotifDeps(t *testing.T) PublicDeps {
 	}
 }
 
+// TestNotificationsAnonymous pins the identity gate: the API tray answers 401
+// to an anonymous caller (internal/notify/http.go requireAuth), so the page
+// does too — no tray shell, no SSE hook, no write forms.
 func TestNotificationsAnonymous(t *testing.T) {
 	env, _ := alicePublicEnv(t)
+	env.Cfg = publicCfg("oidc", true)
 	s := newPublicServer(t, env, auth.Anonymous(), PublicDeps{})
 	rec := publicGet(s, "/notifications")
-	publicWantStatus(t, rec, http.StatusOK)
-	publicWantContains(t, rec, "Sign in to see your notifications")
-	publicWantNotContains(t, rec, "data-sse-url")
+	publicWantStatus(t, rec, http.StatusUnauthorized)
+	publicWantContains(t, rec, "Sign in required", "sign in to see your notifications")
+	publicWantNotContains(t, rec, "data-sse-url", "mark all read", `action="/notifications/read-all"`)
 }
 
 func TestNotificationsTray(t *testing.T) {

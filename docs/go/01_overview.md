@@ -17,7 +17,7 @@ binary anyone can run against a bucket, predictable enough that tooling can buil
 verbatim; the product does not change with the language.)
 
 spindle serves git over smart HTTP (protocol v0 and v2) plus bundle-uri, LFS, a browsing web UI and a JSON API with a
-dependency-free SDK. Durable state lives in one store backend: an object-store bucket (S3-compatible or GCS) or, for
+dependency-free SDK. Durable state lives in one store backend: an S3-compatible object store or, for
 zero-config/self-hosted runs, the local filesystem (D4, §9.5). Every process instance is a disposable cache: wipe all
 instances and you lose warmth, nothing else. There is no database, no queue, no Redis, no node identity, no leader
 election, no gossip. Coordination happens only through store primitives: compare-and-swap on one tiny manifest object,
@@ -51,7 +51,7 @@ contract").
 | events | A bridge (its own role) tails the WAL from a durable cursor and POSTs `ref` events (create/update/delete) to a webhook, at-least-once per batch, dedup key `(repo, seq, ref_name)`, HMAC signature, bucket-notification wake-up + periodic sweep |
 | maintenance | One self-healing loop per maintainer: checkpoints, object repair from upstream, weekly full bundle (base rebuild on SSD hosts, then bucket-side compose), chained dailies/hourlies, geometric compaction, rev-index retrofit, periodic connectivity audit (`fsck`); placement-driven assignment; resumable base rebuilds and imports |
 | CLI | `serve`, `compact`, `bundle run/plan/compose/rm`, `repo create/list/info/policy/settings`, `wal ls/show/materialize/add-pack/annotate-pack/rev-index`, `synth`, `import` (two modes, resumable), `mirror`, `config check/dump`. Binary name: `spindle`; `spindle serve` is the server (Rust: `walgit` / `walgit-server`) |
-| stores | S3 + S3-compatible (AWS, MinIO, rustfs, R2, Ceph), GCS (JSON API over HTTPS — Rust uses a gRPC+JSON hybrid, see §9.1), local filesystem (`store.backend = "filesystem"`, keys under `store.root`), in-memory (tests) — one contract suite runs against all, with filesystem + memory ALWAYS in it |
+| stores | S3 + S3-compatible (AWS, MinIO, rustfs, R2, Ceph), local filesystem (`store.backend = "filesystem"`, keys under `store.root`), in-memory (tests) — one contract suite runs against all, with filesystem + memory ALWAYS in it |
 | ops | `/healthz`, `/readyz` (prewarm/drain aware), Prometheus `/metrics`, structured logs (pretty/JSON) with request ids and trace correlation, lock-wait instrumentation, runtime watchdog, graceful two-phase drain |
 
 Explicitly **not** in scope (Rust spec §1.3): code review, merge queues, CI, issues, fork networks, PRs.
@@ -229,7 +229,7 @@ flowchart LR
 
 - Instance = a few vCPU, tens of GiB RAM, disk ≈ RAM (tmpfs), CPU may be throttled between requests.
   `cache.max_bytes` (default 20 GiB) is the budget for everything on disk in **budget** mode.
-- Object store facts (GCS-class): GET/PUT small object 60–80 ms; conditional GET → 304 ≈ 15 ms; 404 free; LIST slow/paged
+- Object store facts (S3-class): GET/PUT small object 60–80 ms; conditional GET → 304 ≈ 15 ms; 404 free; LIST slow/paged
   (never hot path); CAS overwrite serialized ~1 write/s per object; range read ~100 MB/s per connection (stripe for more);
   compose = 1 request, ≤ 32 sources.
 - Operations needing real disk or hours of CPU (full `repack -adb` of a monorepo, weekly 30 GB bundle) run on the **SSD
@@ -329,7 +329,7 @@ Go module: `github.com/crueber/spindle`. These paths are normative; every other 
 |---|---|
 | `cmd/spindle` | The single binary: subcommand dispatch (serve, compact, bundle, repo, wal, synth, import, mirror, config), signal handling, exit codes 0/1/2/3 |
 | `internal/config` | `spindle.toml` loading (`github.com/BurntSushi/toml`), env overrides (`SPINDLE_*`), defaults, validation, per-repo settings parsing; owns the zero-config default set and `<data-dir>` resolution (§9.5) |
-| `internal/store` | The object store interface + backends (memory, S3 via hand-rolled SigV4, GCS via JSON API), CAS helper, bucket key layout, the hand-rolled protobuf wire codec, log framing |
+| `internal/store` | The object store interface + backends (memory, S3 via hand-rolled SigV4, filesystem), CAS helper, bucket key layout, the hand-rolled protobuf wire codec, log framing |
 | `internal/wal` | The WAL engine: per-repo handles, sync levels, publish/CAS ladder, group commit, checkpoints, replay, remote reader, narrated tasks |
 | `internal/git` | The git subprocess layer: exact-argv `os/exec` calls — ingest/index-pack, refs, connectivity, receive-pack, upload-pack, repack/bitmaps, bundle creation |
 | `internal/bundle` | The bundle-uri subsystem: strategies, calendar slots, backfill, chained incrementals, blobless family, `bundles/list` + `bundles/catchup` |
@@ -365,7 +365,6 @@ The entire Go backend allows exactly **three** third-party modules — no except
 Everything else is stdlib or hand-rolled:
 
 - S3 SigV4 signing (`crypto/hmac`, `crypto/sha256`) — validated against AWS official test vectors (03_store_backends.md).
-- GCS via the JSON API over plain HTTPS — **no gRPC client** (the Rust gRPC+JSON hybrid collapses to JSON API only).
 - Prometheus text exposition, SSE encoding, JWT/JWKS verification (`crypto/rsa`, `crypto/ecdsa`,
   `encoding/base64`), protobuf-wire-compatible encoding (02_storage_protobuf.md; **no**
   `google.golang.org/protobuf`), singleflight/errgroup equivalents, CLI subcommand dispatch, weighted LRU
@@ -432,7 +431,7 @@ wave; arrows are hard dependencies.
 
 | Wave | Docs (implement in this order within the wave) | Needs |
 |---|---|---|
-| 1 | 02_storage_protobuf.md (store interface + proto codec + keys) ∥ 11_config_cli.md (config + CLI skeleton); then 03_store_backends.md (S3/GCS) and 15_testing.md's store contract suite | — |
+| 1 | 02_storage_protobuf.md (store interface + proto codec + keys) ∥ 11_config_cli.md (config + CLI skeleton); then 03_store_backends.md (S3) and 15_testing.md's store contract suite | — |
 | 2 | 04_git.md (git subprocess layer) ∥ 05_wal_engine.md (sync refs, publish with group commit, checkpoints); then 13_concurrency.md rules are already in force from the first goroutine | 02 + 03 |
 | 3 | 06_server_http.md (HTTP + auth + setup), then 07_api.md (JSON API + SSE); 08_bundles.md, 09_events.md, 10_maintenance.md can start as soon as 05 is done | 04 + 05 |
 | 4 | 12_web_ui.md (pages + SDK; the SDK can start in wave 1 — it only needs 07's shapes on paper) | 06 |
@@ -463,7 +462,8 @@ The Rust spec's fail-closed boot rule is superseded in one direction: **warn, do
   config INVALID → **setup-only mode**: only `/setup`, `/healthz`, `/readyz` answer (everything else 503 with
   a pointer to `/setup`), the UI shows the exact errors, and saving a fixed config requires a restart.
 - **Setup access rule.** Open while (no config file OR config invalid OR `auth.mode = none`); otherwise an
-  admin principal is required; `SPINDLE_SETUP_TOKEN` optionally gates it on exposed hosts.
+  admin principal is required (OIDC `admin_groups` — default `spindle-admins` —, `admin_emails`, or
+  `admin_domains`); there is no setup token (WP13).
 
 ---
 
@@ -494,7 +494,7 @@ $ git clone http://localhost:8080/alice/my-repo.git
 # browse http://localhost:8080/alice/my-repo — UI, API, and WAL health on the same prefix
 ```
 
-For a real deployment (S3/GCS bucket, token/OIDC auth), edit the config through the setup UI or
+For a real deployment (S3 bucket, token/OIDC auth), edit the config through the setup UI or
 `spindle config check --config spindle.toml` to validate before serving (exit codes: 0 ok, 1 error, 2 usage,
 3 crash). Full key reference: 11_config_cli.md; auth modes, the OIDC flow, and the setup spec: 06_server_http.md.
 
@@ -532,7 +532,6 @@ For a real deployment (S3/GCS bucket, token/OIDC auth), edit the config through 
 - HTTP header names `X-Walgit-Capabilities`, `X-Walgit-Principal`, `X-Walgit-Store-Url/-Authorization/-Key` are kept **verbatim** — they are part of the edge↔app contract and the nginx example; renaming would strand mixed walgit/spindle fleets and existing edge configs.
 - `Server` header becomes `spindle/<version> (<kind>; <name>[/<instance>])` — cosmetic identity; kind taxonomy unchanged.
 - OIDC access-token prefix stays `wgt_` — tokens are config-issued (not bucket state) and the SDK/docs reference the prefix; renaming buys nothing and breaks recognition.
-- GCS backend is JSON-API-over-HTTPS only (the Rust gRPC+JSON hybrid drops gRPC) — honors the dependency budget (now three modules; see Divergence D1 below); the store interface (§4.1 semantics) is unchanged, and conditional-GET/CAS map to `If-None-Match`/generation preconditions.
 - Protobuf is encoded by a hand-rolled wire codec on the same field numbers (no `google.golang.org/protobuf`) — dependency budget; wire format is frozen and tested against fixtures (02_storage_protobuf.md).
 - Prometheus exposition is a hand-rolled text renderer with the metric names of Rust spec §8.10 kept exactly — dashboards/alerts depend on the names (07_api.md).
 - Package layout fixed to the §8 tree — `internal/wal` exists as its own package (Rust spread WAL code across crates) so the engine has one seam; consumers never import git internals directly.
@@ -540,9 +539,9 @@ For a real deployment (S3/GCS bucket, token/OIDC auth), edit the config through 
 - **Divergence (2026-08-31, D1):** the HTTP router is `github.com/go-chi/chi/v5` — chi core only; `chi/cors`, `chi/middleware`, and every other subpackage stay hand-rolled, with the ordered middleware chain adapted to `func(http.Handler) http.Handler` (supersedes Go 1.22 `ServeMux` routing; route inventory and handler behavior are unchanged). The backend dependency budget becomes exactly three modules — chi, `github.com/BurntSushi/toml`, `golang.org/x/net` (h2c, wrapped around chi) — superseding the earlier two-module budget. *(Later superseded: `golang.org/x/crypto` for the SSH transport and dicebear + styles for avatars; AGENTS.md law 1 is the live budget.)*
 - **Divergence (2026-08-31, D2) — SUPERSEDED 2026-09-02 by explicit user request (DEVIATIONS.md D-WEB-6), then again 2026-11-19/20 by D-WEB-14/D-WEB-15:** the frontend was standard ECMAScript (vanilla ES modules served directly from `web/`, zero npm runtime dependencies, no SPA build step; the SDK authored as submodules and esbuild-bundled). **Historical shapes:** (1) vanilla ESM; (2) a SolidJS SPA (runtime exactly `solid-js` + `@solidjs/router`; Solid signals/stores + context; Tailwind v4 CSS-first, dark by default, no CDN; plain JSX/JS, no TypeScript) built by vite (`vite-plugin-solid` + `@tailwindcss/vite`) into `web/dist/`. **Shipped stack:** server-rendered Go `html/template` pages (`internal/webui`) + vendored htmx + vanilla-ES islands; `vite` + `@tailwindcss/vite` build only `app.css` and `esbuild` builds `ui.js` + the dependency-free SDK `web/dist/repos.js`; no runtime npm dependencies. JS tests run on Node's built-in `node --test` against the sources plus server-smoke tests over fetch.
 - **Divergence (2026-08-31, D3):** all dev/CI targets are Make targets (build, test, race, cover, sim, e2e, contract, vet, fmt, image, dev, clean) — no `just`file.
-- **Divergence (2026-08-31, D4):** a local-filesystem store backend (`store.backend = "filesystem"`) joins S3/GCS/memory: keys map to paths under `store.root`; conditional writes via sidecar `.lock` + flock + stat-compare + atomic rename (residual TOCTOU vs S3 documented); `renameat2(RENAME_NOREPLACE)` for create-if-absent with a portable fallback; version token/ETag = `"<size>:<mtime_ns>"`; compose = stream-concat temp + rename; range reads via `os.File.ReadAt`; no accel/signed URLs. It joins the contract suite as an ALWAYS-run backend. See 03_store_backends.md.
+- **Divergence (2026-08-31, D4):** a local-filesystem store backend (`store.backend = "filesystem"`) joins S3/memory: keys map to paths under `store.root`; conditional writes via sidecar `.lock` + flock + stat-compare + atomic rename (residual TOCTOU vs S3 documented); `renameat2(RENAME_NOREPLACE)` for create-if-absent with a portable fallback; version token/ETag = `"<size>:<mtime_ns>"`; compose = stream-concat temp + rename; range reads via `os.File.ReadAt`; no accel/signed URLs. It joins the contract suite as an ALWAYS-run backend. See 03_store_backends.md.
 - **Divergence (2026-08-31, D5):** zero-config first run is a first-class law (§9.5) — missing config boots with defaults (`0.0.0.0:8080`, filesystem store under `<data-dir>`, auth `none` + loud warnings, `auto_create_on_push = true`); data dir via `--data-dir`/`SPINDLE_DATA_DIR` (default `~/.local/share/spindle`, containers `/var/lib/spindle`). Supersedes the Rust fail-closed boot rule and the auth-`none`-loopback-only rule (warn-don't-refuse instead).
-- **Divergence (2026-08-31, D6):** `/setup` web UI + `/api/v1/setup` API are first-class (§9.5; full spec in 06_server_http.md), including the setup-only recovery mode for invalid configs and the optional `SPINDLE_SETUP_TOKEN` gate for exposed hosts.
+- **Divergence (2026-08-31, D6):** `/setup` web UI + `/api/v1/setup` API are first-class (§9.5; full spec in 06_server_http.md), including the setup-only recovery mode for invalid configs. (The setup token this entry once carried is REMOVED by WP13: setup access is the admin flag, now including OIDC `admin_groups`.)
 - **Divergence (2026-08-31, D7):** CI enforces ≥ 95% statement coverage per `internal/...` package (Make `cover` target with per-package fail-under; `cmd/` main glue excluded); table-driven httptest for every handler.
 - **Shared webhook egress package (2026-09-05, issue #78):** `internal/egress` joins the §8 tree — stdlib-only refuse-all redirect policy + delivery-time non-public IP screen with pinned dialing, reused verbatim by `internal/events` (09_events.md §4.2) and tenant repo webhooks (docs/features/06_notifications.md §5.3) so the two sinks cannot drift apart. No new third-party module (dependency budget unchanged).
 - **Server-side TLS removed (2026-09-05, Forgejo #165):** the server listens plain HTTP (h2c retained via `golang.org/x/net`); `server.tls.*`, cert/key loading, self-signed generation, and `/services/public/ca.pem` are gone, and `X-Forwarded-Proto` is honored when building absolute URLs. TLS terminates at the reverse proxy (16_packaging.md §3.4). `golang.org/x/crypto` stays for the SSH transport only; no new module.
