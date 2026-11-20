@@ -1,6 +1,6 @@
 # 13 — Concurrency: the canonical Go playbook
 
-> Source: MASTER_RUST_SPEC.md §6.1 (lock discipline), §6.8 (tasks), §3.4 (process inventory), §8.1 item 9 + §4.6 (transport separation), §19 (porting table — RWMutex hazard row) · Status: normative for the walhub Go implementation.
+> Source: MASTER_RUST_SPEC.md §6.1 (lock discipline), §6.8 (tasks), §3.4 (process inventory), §8.1 item 9 + §4.6 (transport separation), §19 (porting table — RWMutex hazard row) · Status: normative for the spindle Go implementation.
 
 Every other doc defers its `### Concurrency` questions here. This file is the single authority on goroutine
 inventory, lock ordering, single-flight, bounded parallelism, channel ownership, fan-out, drain, and the
@@ -490,7 +490,7 @@ func withCanary(t *testing.T, d time.Duration, body func()) {
    missing exit path (§1 table column 4).
 6. **Determinism:** no `time.Sleep`-based synchronization in concurrency tests — use channels, the
    canary, or the sim harness's delay injection (§17 FaultStore: pre-op delay, error-after, stale-304,
-   black hole). Randomized seeds via `WALHUB_SIM_SEED(S)` mirror the Rust sim.
+   black hole). Randomized seeds via `SPINDLE_SIM_SEED(S)` mirror the Rust sim.
 
 ## Decisions & deviations from the Rust design
 

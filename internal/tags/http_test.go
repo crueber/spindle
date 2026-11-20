@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/crueber/walhub/internal/server/auth"
+	"github.com/crueber/spindle/internal/server/auth"
 )
 
 func doReq(t *testing.T, x *harness, method, target, body string, headers map[string]string) *httptest.ResponseRecorder {
@@ -136,7 +136,7 @@ func TestHandleAnnotatedRecords(t *testing.T) {
 		t.Fatalf("mktag bodies = %d, want 1", len(x.git.tagBodies))
 	}
 	body := string(x.git.tagBodies[0])
-	for _, want := range []string{"object " + testSHA, "type commit", "tag v2", "tagger jane <jane@walhub.local>", "release two"} {
+	for _, want := range []string{"object " + testSHA, "type commit", "tag v2", "tagger jane <jane@spindle.local>", "release two"} {
 		if !strings.Contains(body, want) {
 			t.Fatalf("mktag body %q lacks %q", body, want)
 		}

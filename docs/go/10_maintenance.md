@@ -1,6 +1,6 @@
 # 10 — Maintenance (internal/maintain)
 
-> Source: MASTER_RUST_SPEC.md §13 (13.1–13.5), §7.9, §4.9, §6.5, §6.8, §15.1 (maintenance.*, compaction.*, maintenance.disk, placement.*) · Status: normative for the walhub Go implementation.
+> Source: MASTER_RUST_SPEC.md §13 (13.1–13.5), §7.9, §4.9, §6.5, §6.8, §15.1 (maintenance.*, compaction.*, maintenance.disk, placement.*) · Status: normative for the spindle Go implementation.
 
 The maintainer is a self-healing background engine: every 60 s it looks at each repo it is assigned to and performs exactly one bounded unit of work — or none. It repairs integrity before building anything, folds packs geometrically, rebuilds weekly bases, audits connectivity, and follows an upstream mirror. Everything it does is narrated as a task, lease-guarded against other instances, and observed via heartbeats and Prometheus metrics. In Go this is a goroutine tree in `internal/maintain` with no third-party dependencies beyond the project-wide allowance.
 
@@ -271,7 +271,7 @@ Avoidance: (a) the `started_head_seq` resume rule converts staleness into a clea
 4. **Policy is NOT evaluated** for follow publishes (follow is configuration, not a principal). The only way to stop following a ref is to remove it from `upstream.follow`.
 5. **Status per instance** (in-memory, guarded by a mutex; NOT the WAL): `upstream.last_round = {at, outcome: in-sync|published|refused|failed, detail, upstream: {ref→oid}, ours: {ref→oid}}`, surfaced by `GET …/settings/describe`. Metrics: `walgit_follow_rounds_total{repo,outcome}`, `walgit_follow_refs_total{repo}`.
 
-Example operator flow (mirror a GitHub repo into walhub):
+Example operator flow (mirror a GitHub repo into spindle):
 
 ```toml
 [upstream]
@@ -280,7 +280,7 @@ token_env = "WALGIT_UPSTREAM_TOKEN"        # export WALGIT_UPSTREAM_TOKEN=ghp_�
 follow    = ["refs/heads/main"]
 ```
 
-`curl -s https://walhub.example.com/api/repos/acme/widget/settings/describe | jq .upstream.last_round`
+`curl -s https://spindle.example.com/api/repos/acme/widget/settings/describe | jq .upstream.last_round`
 → `{"at":"2026-09-01T10:04:30Z","outcome":"published","detail":"refs/heads/main 8c1f→9d2a", …}`.
 
 #### Concurrency
@@ -377,7 +377,7 @@ Thin wrapper: evaluate the §6.5 triggers; when fired, call `internal/wal`'s che
 
 ## 13. End-to-end example
 
-Operator view of one pass on an ssd host (`walhub serve --config walgit.toml`):
+Operator view of one pass on an ssd host (`spindle serve --config walgit.toml`):
 
 ```
 12:00:00 pass start host=ip-10-0-4-9 assigned=142 repos

@@ -18,7 +18,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/crueber/walhub/internal/git"
+	"github.com/crueber/spindle/internal/git"
 	gossh "golang.org/x/crypto/ssh"
 )
 

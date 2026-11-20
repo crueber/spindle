@@ -35,7 +35,7 @@ func ErrPkt(msg string) []byte {
 //	git -c uploadpack.allowSidebandAll=true upload-pack --stateless-rpc .
 //
 // with GIT_DIR=<repo>, GIT_PROTOCOL=version=2|0, GIT_TERMINAL_PROMPT=0, on
-// Pool.Run. The body is passed through byte-for-byte — walhub never re-encodes
+// Pool.Run. The body is passed through byte-for-byte — spindle never re-encodes
 // client pkt-lines. stderr on non-zero exit → Subprocess error. HTTP only:
 // stateless-rpc waits for stdin EOF, which HTTP framing provides.
 func (l *Layer) UploadPack(ctx context.Context, repo *LocalRepo, body io.Reader, out io.Writer, protocol string) error {
@@ -218,6 +218,6 @@ func containsRepo(list []string, name string) bool {
 // mount): pkt ERR + HTTP 503/Retry-After at the HTTP layer.
 func RemoteServedRefusal(repo *LocalRepo) *Refusal {
 	return &Refusal{Message: fmt.Sprintf(
-		"walgit: %s is served through a remote base that is not mounted on this host; fetch from the serving host, or set cache.store_mount so the base is local (this walhub build has no remote-reader fetch engine)",
+		"walgit: %s is served through a remote base that is not mounted on this host; fetch from the serving host, or set cache.store_mount so the base is local (this spindle build has no remote-reader fetch engine)",
 		repo.ID.String())}
 }

@@ -7,7 +7,7 @@ import (
 	"encoding/json"
 	"testing"
 
-	"github.com/crueber/walhub/internal/store"
+	"github.com/crueber/spindle/internal/store"
 )
 
 func TestOpenCountsEmpty(t *testing.T) {

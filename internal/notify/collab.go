@@ -24,7 +24,7 @@ import (
 	"encoding/json"
 	"net/http"
 
-	"github.com/crueber/walhub/internal/server/auth"
+	"github.com/crueber/spindle/internal/server/auth"
 )
 
 // collabKinds is the 08 §4 kind set. Frames with other names are dropped

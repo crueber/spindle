@@ -14,28 +14,28 @@ import (
 	"testing"
 	"time"
 
-	"github.com/crueber/walhub/internal/config"
-	"github.com/crueber/walhub/internal/git"
-	"github.com/crueber/walhub/internal/store"
-	"github.com/crueber/walhub/internal/store/fault"
-	"github.com/crueber/walhub/internal/store/proto"
-	"github.com/crueber/walhub/internal/wal"
+	"github.com/crueber/spindle/internal/config"
+	"github.com/crueber/spindle/internal/git"
+	"github.com/crueber/spindle/internal/store"
+	"github.com/crueber/spindle/internal/store/fault"
+	"github.com/crueber/spindle/internal/store/proto"
+	"github.com/crueber/spindle/internal/wal"
 )
 
 // defaultRepo is the one repo every sim cluster shares.
 const defaultRepo = "acme/api"
 
-// defaultSeeds is the seed set when neither WALHUB_SIM_SEED nor
-// WALHUB_SIM_SEEDS is set: 22 and neighbors (15_testing.md §4 row 12).
+// defaultSeeds is the seed set when neither SPINDLE_SIM_SEED nor
+// SPINDLE_SIM_SEEDS is set: 22 and neighbors (15_testing.md §4 row 12).
 var defaultSeeds = []uint64{22, 21, 23}
 
 // maxPushAttempts bounds the pusher's conflict/transient retry loop; hitting
 // it means the core is not converging and the test must fail, not spin.
 const maxPushAttempts = 200
 
-// simVerbose enables per-attempt pusher logging (WALHUB_SIM_VERBOSE=1): the
+// simVerbose enables per-attempt pusher logging (SPINDLE_SIM_VERBOSE=1): the
 // failure artifact for a starved pusher. Off by default (hot loop).
-func simVerbose() bool { return os.Getenv("WALHUB_SIM_VERBOSE") != "" }
+func simVerbose() bool { return os.Getenv("SPINDLE_SIM_VERBOSE") != "" }
 
 // unwrapAll renders the full causal chain of an error (WalError.Error hides
 // the wrapped store fault, which is what a starvation diagnosis needs).
@@ -52,13 +52,13 @@ func unwrapAll(err error) string {
 	return strings.Join(parts, " <- ")
 }
 
-// simSeeds resolves the seed list: WALHUB_SIM_SEEDS (comma-separated) wins
-// over WALHUB_SIM_SEED (single), which wins over the default set.
+// simSeeds resolves the seed list: SPINDLE_SIM_SEEDS (comma-separated) wins
+// over SPINDLE_SIM_SEED (single), which wins over the default set.
 func simSeeds() ([]uint64, error) {
-	if s := os.Getenv("WALHUB_SIM_SEEDS"); s != "" {
+	if s := os.Getenv("SPINDLE_SIM_SEEDS"); s != "" {
 		return parseSeedList(s)
 	}
-	if s := os.Getenv("WALHUB_SIM_SEED"); s != "" {
+	if s := os.Getenv("SPINDLE_SIM_SEED"); s != "" {
 		return parseSeedList(s)
 	}
 	return append([]uint64{}, defaultSeeds...), nil
@@ -172,7 +172,7 @@ func (c *Cluster) AddInstance(name string, seed uint64) *Instance {
 	return in
 }
 
-// Instance is one simulated walhub process: a FaultStore link, a Registry
+// Instance is one simulated spindle process: a FaultStore link, a Registry
 // over it, and the open repo handle.
 type Instance struct {
 	name     string

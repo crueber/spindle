@@ -4,31 +4,36 @@
      the route table scrolls inside overflow-x-auto (issue #275); code samples
      scroll inside .code-view. */}}
 <div class="apidocs-page">
-  <h2 class="mb-1 text-xl font-semibold">API</h2>
-  <p class="muted mb-4">
-    JSON API with the SSE envelope; every GET accepts application/json,
-    text/event-stream. Errors are plain text. Null-safe: empty arrays, never
-    null (except a repo's head).
-  </p>
+  <header class="mb-4 border-b border-[var(--pd-line)] pb-3">
+    <p class="eyebrow">reference</p>
+    <h2 class="mt-1 text-xl font-semibold tracking-tight">API</h2>
+    <p class="muted mt-1">
+      JSON API with the SSE envelope; every GET accepts application/json,
+      text/event-stream. Errors are plain text. Null-safe: empty arrays, never
+      null (except a repo's head).
+    </p>
+  </header>
 
   <section class="card mb-4 p-4">
-    <h3 class="mb-2 font-semibold">Discovery (GET /api/v1)</h3>
+    <h3 class="card-header">Discovery (GET /api/v1)</h3>
     <div class="space-y-2 text-sm">
       <p>
-        <strong>walhub</strong> · API version
+        <strong>spindle</strong> · API version
         <span class="pill">{{.Data.APIVersion}}</span>
       </p>
-      <table class="data-table">
-        <tbody>
-          <tr><td class="w-32">base</td><td><code class="font-mono text-xs">{{.Data.Base}}</code></td></tr>
-          <tr><td>sdk</td><td><code class="font-mono text-xs">{{.Data.SDK}}</code></td></tr>
-          <tr><td>bearer</td><td class="muted"><code class="font-mono text-xs">true</code></td></tr>
-          <tr><td>setup recipes</td><td><code class="font-mono text-xs">{{.Data.AuthSetup}}</code></td></tr>
-          <tr><td>browser lane</td><td class="muted"><code class="font-mono text-xs">{{.Data.AuthBrowser}}</code></td></tr>
-          <tr><td>mode</td><td><code class="font-mono text-xs">{{.Data.Mode}}</code></td></tr>
-          <tr><td>browser login</td><td class="muted"><code class="font-mono text-xs">{{if .Data.BrowserLogin}}{{.Data.LoginURL}}{{else}}disabled{{end}}</code></td></tr>
-        </tbody>
-      </table>
+      <div class="overflow-x-auto">
+        <table class="data-table">
+          <tbody>
+            <tr><td class="w-32 font-mono text-xs">base</td><td><code class="font-mono text-xs">{{.Data.Base}}</code></td></tr>
+            <tr><td class="font-mono text-xs">sdk</td><td><code class="font-mono text-xs">{{.Data.SDK}}</code></td></tr>
+            <tr><td class="font-mono text-xs">bearer</td><td class="muted"><code class="font-mono text-xs">true</code></td></tr>
+            <tr><td class="font-mono text-xs">setup recipes</td><td><code class="font-mono text-xs">{{.Data.AuthSetup}}</code></td></tr>
+            <tr><td class="font-mono text-xs">browser lane</td><td class="muted"><code class="font-mono text-xs">{{.Data.AuthBrowser}}</code></td></tr>
+            <tr><td class="font-mono text-xs">mode</td><td><code class="font-mono text-xs">{{.Data.Mode}}</code></td></tr>
+            <tr><td class="font-mono text-xs">browser login</td><td class="muted"><code class="font-mono text-xs">{{if .Data.BrowserLogin}}{{.Data.LoginURL}}{{else}}disabled{{end}}</code></td></tr>
+          </tbody>
+        </table>
+      </div>
       {{if .Data.Endpoints}}
       <ul class="flex flex-wrap gap-1">
         {{range .Data.Endpoints}}<li class="chip font-mono">{{.}}</li>{{end}}
@@ -38,21 +43,24 @@
   </section>
 
   <section class="card mb-4 p-4">
-    <h3 class="mb-2 font-semibold">Cache classes (§9.2)</h3>
+    <h3 class="card-header">Cache classes (§9.2)</h3>
     <ul class="list-disc space-y-1 pl-6 text-sm">
       <li>
-        <strong>sha-addressed</strong> — full 40/64-hex in <code>{rev}</code>: private,
+        <strong class="font-mono text-xs">sha-addressed</strong> — full 40/64-hex in <code>{rev}</code>: private,
         immutable, cache forever.
       </li>
       <li>
-        <strong>ref-dependent</strong> — owners/refs/resolve and name-addressed
+        <strong class="font-mono text-xs">ref-dependent</strong> — owners/refs/resolve and name-addressed
         reads: max-age=0 + stale-while-revalidate + ETag = resolved sha.
       </li>
     </ul>
   </section>
 
   <section class="card mb-4 p-4">
-    <h3 class="mb-2 font-semibold">Routes</h3>
+    <div class="mb-2 flex flex-wrap items-baseline gap-2">
+      <h3 class="card-header mb-0">Routes</h3>
+      <span class="eyebrow ml-auto">{{len .Data.Routes}} routes</span>
+    </div>
     <div class="overflow-x-auto">
       <table class="data-table">
         <thead>
@@ -61,7 +69,7 @@
         <tbody>
           {{range .Data.Routes}}
           <tr>
-            <td class="font-mono text-xs">{{.Method}}</td>
+            <td><span class="chip-neutral font-mono">{{.Method}}</span></td>
             <td><code class="font-mono text-xs">{{.Path}}</code></td>
             <td class="muted">{{.What}}</td>
           </tr>
@@ -72,7 +80,7 @@
   </section>
 
   <section id="checks-ci" class="card mb-4 p-4">
-    <h3 class="mb-2 font-semibold">Checks — reporting from external CI</h3>
+    <h3 class="card-header">Checks — reporting from external CI</h3>
     <div class="space-y-2 text-sm">
       <p class="muted">
         External CI posts per-commit results without a user credential: a repo
@@ -135,7 +143,7 @@
   </section>
 
   <section id="issues" class="card mb-4 p-4">
-    <h3 class="mb-2 font-semibold">Issues, labels, milestones</h3>
+    <h3 class="card-header">Issues, labels, milestones</h3>
     <div class="space-y-2 text-sm">
       <p class="muted">
         Threads with an immutable event tail. Reads need read access;
@@ -176,7 +184,7 @@
   </section>
 
   <section id="pulls" class="card mb-4 p-4">
-    <h3 class="mb-2 font-semibold">Pulls and review</h3>
+    <h3 class="card-header">Pulls and review</h3>
     <div class="space-y-2 text-sm">
       <p class="muted">
         PRs ride the same numbering/thread/index family as issues. Reads
@@ -220,7 +228,7 @@
   </section>
 
   <section id="releases" class="card mb-4 p-4">
-    <h3 class="mb-2 font-semibold">Releases and assets</h3>
+    <h3 class="card-header">Releases and assets</h3>
     <div class="space-y-2 text-sm">
       <p class="muted">
         Release headers mutate by direct user action, so every
@@ -247,7 +255,7 @@
   </section>
 
   <section id="social" class="card mb-4 p-4">
-    <h3 class="mb-2 font-semibold">Social: stars, watchers, forks</h3>
+    <h3 class="card-header">Social: stars, watchers, forks</h3>
     <div class="space-y-2 text-sm">
       <p class="muted">
         Counters mutate on every star/watch/fork, so
@@ -271,7 +279,7 @@
   </section>
 
   <section id="streams" class="card mb-4 p-4">
-    <h3 class="mb-2 font-semibold">Streams: notifications, collab, tasks</h3>
+    <h3 class="card-header">Streams: notifications, collab, tasks</h3>
     <div class="space-y-2 text-sm">
       <p class="muted">
         Three SSE surfaces share one envelope: send
@@ -302,7 +310,7 @@
   </section>
 
   <section id="identity" class="card mb-4 p-4">
-    <h3 class="mb-2 font-semibold">Identity: profiles, orgs, access</h3>
+    <h3 class="card-header">Identity: profiles, orgs, access</h3>
     <div class="space-y-2 text-sm">
       <p class="muted">
         Profiles are self-or-admin writes; org reads admit anonymous on
@@ -329,7 +337,7 @@
   </section>
 
   <section class="card p-4">
-    <h3 class="mb-2 font-semibold">SDK</h3>
+    <h3 class="card-header">SDK</h3>
     <p class="mb-2 text-sm">
       Third-party integrations import <code>/repos.js</code> as an ES module —
       the same wire surface this UI dogfoods:

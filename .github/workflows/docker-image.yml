@@ -1,9 +1,9 @@
 name: docker image
 # Installed by the publish flow (scripts/publish/docker-image.yml). Builds the server
 # image and publishes it to GHCR — the package name is the pull path users already have:
-#   ghcr.io/crueber/walhub:latest        (default branch)
-#   ghcr.io/crueber/walhub:sha-<short>   (every push)
-#   ghcr.io/crueber/walhub:<semver>      (tags v*)
+#   ghcr.io/crueber/spindle:latest        (default branch)
+#   ghcr.io/crueber/spindle:sha-<short>   (every push)
+#   ghcr.io/crueber/spindle:<semver>      (tags v*)
 on:
   push:
     branches: [main]
@@ -24,7 +24,7 @@ jobs:
         id: meta
         uses: docker/metadata-action@v5
         with:
-          images: ghcr.io/crueber/walhub
+          images: ghcr.io/crueber/spindle
           tags: |
             type=raw,value=latest,enable={{is_default_branch}}
             type=ref,event=branch
@@ -45,4 +45,4 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
           build-args: |
-            WALHUB_BUILD_SHA=${{ github.sha }}
+            SPINDLE_BUILD_SHA=${{ github.sha }}

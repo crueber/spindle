@@ -18,7 +18,7 @@ package**. It registers:
 | 2 — none | principals stay minted by auth providers; this package never authenticates (§2) |
 | 3 — policy effect/group sources | `team:`/`role:` group-member expansion (§6) |
 | 5 — task kind | `access-bootstrap` migration (§10) |
-| 7 — CLI | `walhub access get/put` (thin store client over the same CAS path) |
+| 7 — CLI | `spindle access get/put` (thin store client over the same CAS path) |
 
 The overwritable-key families introduced here (`access.json`, profile/org/members/team objects,
 invitation objects, the invitation inbox index) MUST be added to the frozen overwritable list in the
@@ -598,7 +598,7 @@ bootstrap's Create. Avoidance: edits to a repo with no `access.json` synthesize 
 - **Auto-generated user avatars (issue #376, §8 — law-1 exception, user-authorized
   2026-09-12, AGENTS.md §1):** `github.com/dicebear/dicebear-go/v10` +
   `github.com/dicebear/styles/v10` render the deterministic avatar (DiceBear
-  "rings" on a solid walhub-green background since #525 — "constellation"
+  "rings" on a solid spindle-green background since #525 — "constellation"
   before; seed = verified email) in-process on first login. Verified
   deviations from the issue's assumptions: (a) the library carries two
   build-required transitives (`github.com/dicebear/schema` +
@@ -655,7 +655,7 @@ bootstrap's Create. Avoidance: edits to a repo with no `access.json` synthesize 
   circular preview reused, SDK `users.avatar.upload`, `?v=` busting preserved.
   Rationale: custom avatars without a new dependency, one raster shape to
   serve, and the regenerate/opt-out contract unchanged for both kinds.
-- **Rings avatars with walhub-green background (issue #525, §8):** the style
+- **Rings avatars with spindle-green background (issue #525, §8):** the style
   switches from constellation to DiceBear "rings" with
   `backgroundColor: ["059669"]` (emerald-600 #059669, the canonical brand
   green from `web/src/app.css`) passed as a core-library option alongside the
@@ -729,7 +729,7 @@ bootstrap's Create. Avoidance: edits to a repo with no `access.json` synthesize 
   GET, human-rate; probe errors fail closed with 503, never 403-as-404 — the creategate
   rule). Rationale: principals are emails while owner slugs are namespaces, so no pure core rule
   can express "org owner" — but core must not import identity (law 8), hence the seam (the
-  CreateOwnerGate/AccessBoot shape, wired in `cmd/walhub` composition). Org `member` (non-owner) and
+  CreateOwnerGate/AccessBoot shape, wired in `cmd/spindle` composition). Org `member` (non-owner) and
   team membership grant nothing: the profile speaks for the namespace, so only namespace owners
   (plus host admins) write it. The GET carries request-scoped `can_edit` (same rule, probe
   failure degrades to false) so the UI affordance never guesses — client gating stays cosmetic.
@@ -763,7 +763,7 @@ bootstrap's Create. Avoidance: edits to a repo with no `access.json` synthesize 
   `owners/detailed` rows gain `is_org` from `Env.Orgs.ListOrgs` (one call per listing —
   law 6; nil seam → all false; list error fails open to all-false, display metadata never
   fails the listing). `*identity.Service` satisfies the seam with its existing `ListOrgs`
-  (compiler-checked in `cmd/walhub` composition, no new service method). Rationale: the
+  (compiler-checked in `cmd/spindle` composition, no new service method). Rationale: the
   explore page must distinguish org namespaces from users without a per-owner probe
   fan-out — same law-8 hook shape as `OwnerEdit`/`RepoVisibility` (core never imports
   identity). Server mutation gates are untouched (`CheckOrgOwner` still 403s non-owners);

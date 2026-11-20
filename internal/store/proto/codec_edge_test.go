@@ -8,7 +8,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/crueber/walhub/internal/store"
+	"github.com/crueber/spindle/internal/store"
 )
 
 // unmarshaler is the exported decode entry point every message type offers.

@@ -247,7 +247,7 @@ func (m *Memory) SignedGetURL(ctx context.Context, key string, ttl time.Duration
 		// VPC-SC-style: the bucket refuses to mint direct URLs.
 		return nil, NewOther(key, fmt.Errorf("signing unavailable (VPC Service Controls)"))
 	}
-	u := fmt.Sprintf("https://memory.walhub.invalid/%s?sig=mem&expires=%d", key, time.Now().Add(ttl).Unix())
+	u := fmt.Sprintf("https://memory.spindle.invalid/%s?sig=mem&expires=%d", key, time.Now().Add(ttl).Unix())
 	return &u, nil
 }
 

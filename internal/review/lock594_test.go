@@ -6,7 +6,7 @@ import (
 	"errors"
 	"testing"
 
-	"github.com/crueber/walhub/internal/store"
+	"github.com/crueber/spindle/internal/store"
 )
 
 // Forgejo #594: inline-thread writes (open/reply/submit) lock on merged or

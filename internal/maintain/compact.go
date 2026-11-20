@@ -8,8 +8,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/crueber/walhub/internal/store"
-	"github.com/crueber/walhub/internal/store/proto"
+	"github.com/crueber/spindle/internal/store"
+	"github.com/crueber/spindle/internal/store/proto"
 )
 
 // runCompact folds tier-0 packs geometrically. The §6.1 exact argv lives in

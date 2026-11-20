@@ -35,7 +35,7 @@ func TestMain(m *testing.M) {
 // own data dir and port; both are cleaned up by t.Cleanup.
 func newServer(t *testing.T) *e2eServer {
 	t.Helper()
-	bin := buildWALHub(t)
+	bin := buildSpindle(t)
 	dataDir := t.TempDir()
 	s := startServer(t, bin, dataDir, freePort(t))
 	t.Cleanup(s.stop)
@@ -67,7 +67,7 @@ func TestE2E_PushCloneFetchRoundTrip(t *testing.T) {
 	// Seed repo: commit + push main.
 	dir1 := filepath.Join(t.TempDir(), "origin")
 	g.initRepo(dir1)
-	sha1 := g.commitFile(dir1, "hello.txt", "hello walhub\n", "first commit")
+	sha1 := g.commitFile(dir1, "hello.txt", "hello spindle\n", "first commit")
 	g.run(dir1, "remote", "add", "origin", url)
 	g.run(dir1, "push", "-u", "origin", "main")
 
@@ -83,8 +83,8 @@ func TestE2E_PushCloneFetchRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatalf("cloned file missing: %v", err)
 	}
-	if string(got) != "hello walhub\n" {
-		t.Fatalf("cloned content = %q, want %q", got, "hello walhub\n")
+	if string(got) != "hello spindle\n" {
+		t.Fatalf("cloned content = %q, want %q", got, "hello spindle\n")
 	}
 
 	// Push a second branch from the clone.
@@ -253,17 +253,17 @@ func TestE2E_BootDefaults(t *testing.T) {
 		t.Fatalf("readyz config = %v, want \"defaults\"", ready["config"])
 	}
 
-	if _, err := os.Stat(filepath.Join(s.dataDir, "walhub.toml")); !os.IsNotExist(err) {
-		t.Fatalf("walhub.toml exists after defaults boot (err=%v)", err)
+	if _, err := os.Stat(filepath.Join(s.dataDir, "spindle.toml")); !os.IsNotExist(err) {
+		t.Fatalf("spindle.toml exists after defaults boot (err=%v)", err)
 	}
 }
 
 // ---- (d) invalid config → setup-only mode ---------------------------------------
 
 func TestE2E_InvalidConfigSetupOnly(t *testing.T) {
-	bin := buildWALHub(t)
+	bin := buildSpindle(t)
 	dataDir := t.TempDir()
-	writeWALHubConfig(t, dataDir, "bogus_key = 1\n")
+	writeSpindleConfig(t, dataDir, "bogus_key = 1\n")
 	s := startServer(t, bin, dataDir, freePort(t))
 	t.Cleanup(s.stop)
 
@@ -321,9 +321,9 @@ func jsonHasKey(body []byte, key, want string) bool {
 // ---- (e) setup save → restart → normal ------------------------------------------
 
 func TestE2E_SetupSaveRestart(t *testing.T) {
-	bin := buildWALHub(t)
+	bin := buildSpindle(t)
 	dataDir := t.TempDir()
-	writeWALHubConfig(t, dataDir, "bogus_key = 1\n")
+	writeSpindleConfig(t, dataDir, "bogus_key = 1\n")
 	port := freePort(t)
 	s := startServer(t, bin, dataDir, port)
 	t.Cleanup(s.stop)
@@ -353,7 +353,7 @@ func TestE2E_SetupSaveRestart(t *testing.T) {
 	}
 
 	// The file now exists and is byte-valid TOML.
-	cfgPath := filepath.Join(dataDir, "walhub.toml")
+	cfgPath := filepath.Join(dataDir, "spindle.toml")
 	raw, err := os.ReadFile(cfgPath)
 	if err != nil {
 		t.Fatalf("saved config missing: %v", err)
@@ -394,11 +394,11 @@ type delivery struct {
 
 // TestE2E_SetupEditsExistingFile: setup is open without credentials while
 // auth is none — INCLUDING normal running mode — and a save EDITS the
-// current walhub.toml instead of replacing it with defaults.
+// current spindle.toml instead of replacing it with defaults.
 func TestE2E_SetupEditsExistingFile(t *testing.T) {
-	bin := buildWALHub(t)
+	bin := buildSpindle(t)
 	dataDir := t.TempDir()
-	writeWALHubConfig(t, dataDir, "bogus_key = 1\n")
+	writeSpindleConfig(t, dataDir, "bogus_key = 1\n")
 	port := freePort(t)
 	s := startServer(t, bin, dataDir, port)
 	t.Cleanup(s.stop)
@@ -432,7 +432,7 @@ func TestE2E_SetupEditsExistingFile(t *testing.T) {
 	}
 
 	// The file kept every untouched key and gained the edited one.
-	raw, err := os.ReadFile(filepath.Join(dataDir, "walhub.toml"))
+	raw, err := os.ReadFile(filepath.Join(dataDir, "spindle.toml"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -478,7 +478,7 @@ func TestE2E_SetupEditsExistingFile(t *testing.T) {
 func TestE2E_EventsWebhookDelivery(t *testing.T) {
 	requireModernGit(t)
 	g := newGitClient(t)
-	bin := buildWALHub(t)
+	bin := buildSpindle(t)
 	dataDir := t.TempDir()
 
 	deliveries := make(chan delivery, 16)
@@ -500,7 +500,7 @@ func TestE2E_EventsWebhookDelivery(t *testing.T) {
 	defer sink.Close()
 
 	const secret = "e2e-webhook-secret"
-	writeWALHubConfig(t, dataDir, fmt.Sprintf(`
+	writeSpindleConfig(t, dataDir, fmt.Sprintf(`
 [server]
 auto_create_on_push = true
 
@@ -642,11 +642,11 @@ func verifySignature(t *testing.T, d delivery, secret string) {
 	}
 }
 
-// writeWALHubConfig writes <dataDir>/walhub.toml with the given content.
-func writeWALHubConfig(t *testing.T, dataDir, content string) {
+// writeSpindleConfig writes <dataDir>/spindle.toml with the given content.
+func writeSpindleConfig(t *testing.T, dataDir, content string) {
 	t.Helper()
-	if err := os.WriteFile(filepath.Join(dataDir, "walhub.toml"), []byte(content), 0o600); err != nil {
-		t.Fatalf("write walhub.toml: %v", err)
+	if err := os.WriteFile(filepath.Join(dataDir, "spindle.toml"), []byte(content), 0o600); err != nil {
+		t.Fatalf("write spindle.toml: %v", err)
 	}
 }
 

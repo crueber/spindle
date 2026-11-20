@@ -29,8 +29,8 @@ import (
 	"net/http"
 	"strings"
 
-	"github.com/crueber/walhub/internal/sizecatalog"
-	"github.com/crueber/walhub/internal/store/proto"
+	"github.com/crueber/spindle/internal/sizecatalog"
+	"github.com/crueber/spindle/internal/store/proto"
 )
 
 // splitRepoID cuts a catalog "owner/name" id (the catalog never invents

@@ -18,14 +18,14 @@ func TestVerifyNonceMismatch(t *testing.T) {
 	tSrv, _ := newTestServer(t, nil)
 	tSrv.cfg.Server.Auth.Mode = "oidc"
 	tSrv.cfg.Server.Auth.Issuer = iss.srvURL()
-	tSrv.cfg.Server.Auth.OAuthClientID = "walhub"
+	tSrv.cfg.Server.Auth.OAuthClientID = "spindle"
 	tSrv.cfg.Server.Auth.AllowedDomains = []string{"example.com"}
 	a := &tSrv.cfg.Server.Auth
 	j := NewJWKS(iss.srvURL())
 	mint := func(nonce string) string {
 		tv := true
 		return iss.mint(t, map[string]any{
-			"aud": "walhub", "exp": time.Now().Add(time.Hour).Unix(),
+			"aud": "spindle", "exp": time.Now().Add(time.Hour).Unix(),
 			"email": "alice@example.com", "email_verified": tv, "nonce": nonce,
 		})
 	}
@@ -69,7 +69,7 @@ func TestOIDCCallbackNonceMismatch(t *testing.T) {
 	}
 	tv := true
 	iss.idTokens <- iss.mint(t, map[string]any{
-		"aud": "walhub", "exp": time.Now().Add(time.Hour).Unix(),
+		"aud": "spindle", "exp": time.Now().Add(time.Hour).Unix(),
 		"email": "alice@example.com", "email_verified": tv, "nonce": "wrong-nonce",
 	})
 	cb := httptest.NewRequest("GET", "http://x/_auth/callback?code=good&state="+url.QueryEscape(state), nil)

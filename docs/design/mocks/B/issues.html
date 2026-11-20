@@ -1,0 +1,378 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Issues — acme/demo — spindle</title>
+<style>
+  :root{
+    --canvas:#FAF8F5;
+    --surface:#FFFFFF;
+    --surface-2:#FCFAF7;
+    --line:#E8E1D7;
+    --line-soft:#F1ECE4;
+    --ink:#1E1B18;
+    --ink-2:#463F39;
+    --muted:#6E675F;
+    --faint:#9C948B;
+    --accent:#1D3B47;
+    --open:#2F7A55;
+    --merged:#6A4C93;
+    --draft:#9C6C18;
+    --bug:#9E4634;
+    --r1:4px; --r2:8px; --r3:12px;
+  }
+  *{box-sizing:border-box}
+  html,body{margin:0;padding:0}
+  body{
+    background:var(--canvas);
+    color:var(--ink);
+    font:400 15px/1.6 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,"Helvetica Neue",Arial,sans-serif;
+    -webkit-font-smoothing:antialiased;
+    text-rendering:optimizeLegibility;
+  }
+  a{color:inherit;text-decoration:none}
+  svg{display:block}
+  .mono{font-family:ui-monospace,"SF Mono",Menlo,Consolas,monospace}
+  .wrap{max-width:1160px;margin:0 auto;padding:0 40px}
+
+  /* ── top bar ───────────────────────────────────────────── */
+  .topbar{border-bottom:1px solid var(--line);background:var(--canvas)}
+  .topbar .wrap{height:64px;display:flex;align-items:center;gap:32px}
+  .brand{display:flex;align-items:baseline;gap:8px;flex:none}
+  .brand .word{font-size:19px;font-weight:600;letter-spacing:-.025em}
+  .brand .dot{width:5px;height:5px;border-radius:50%;background:var(--accent);transform:translateY(-2px)}
+  .search{
+    flex:1 1 auto;max-width:440px;height:38px;display:flex;align-items:center;gap:10px;
+    padding:0 12px;background:var(--surface);border:1px solid var(--line);border-radius:var(--r2);
+    color:var(--faint);font-size:14px;
+  }
+  .search .kbd{
+    margin-left:auto;font-size:11px;color:var(--faint);border:1px solid var(--line);
+    border-radius:3px;padding:1px 5px;line-height:1.5;
+  }
+  .toputils{margin-left:auto;display:flex;align-items:center;gap:6px;color:var(--ink-2)}
+  .iconbtn{
+    width:34px;height:34px;display:flex;align-items:center;justify-content:center;
+    border-radius:var(--r1);color:var(--ink-2);position:relative;
+  }
+  .iconbtn .ping{
+    position:absolute;top:7px;right:7px;width:5px;height:5px;border-radius:50%;
+    background:var(--accent);box-shadow:0 0 0 2px var(--canvas);
+  }
+  .avatar{
+    width:32px;height:32px;border-radius:50%;background:#EFE9DE;color:#4B4238;
+    display:flex;align-items:center;justify-content:center;font-size:12px;font-weight:600;
+    letter-spacing:.02em;margin-left:6px;
+  }
+
+  /* ── repo header ───────────────────────────────────────── */
+  .repohead{padding:40px 0 0}
+  .crumb{font-size:15px;color:var(--faint);display:flex;align-items:center;gap:9px}
+  .crumb .name{font-size:30px;font-weight:600;letter-spacing:-.028em;color:var(--ink);line-height:1.15}
+  .chip{
+    display:inline-flex;align-items:center;height:22px;padding:0 9px;border:1px solid var(--line);
+    border-radius:999px;font-size:11.5px;letter-spacing:.02em;color:var(--muted);
+    background:var(--surface);font-weight:500;vertical-align:3px;
+  }
+  .desc{margin:12px 0 0;max-width:62ch;color:var(--muted);font-size:15.5px;line-height:1.6}
+  .metaline{margin-top:14px;display:flex;align-items:center;gap:16px;color:var(--muted);font-size:13.5px}
+  .metaline span{display:flex;align-items:center;gap:6px}
+  .metaline svg{color:var(--faint)}
+  .metaline .sep{color:#CFC7BC}
+
+  /* ── tabs ──────────────────────────────────────────────── */
+  .tabs{display:flex;align-items:center;gap:30px;margin-top:26px;border-bottom:1px solid var(--line)}
+  .tab{
+    padding:0 0 13px;font-size:14.5px;color:var(--muted);display:flex;align-items:center;gap:7px;
+    border-bottom:2px solid transparent;margin-bottom:-1px;white-space:nowrap;
+  }
+  .tab .count{
+    font-size:11.5px;color:var(--faint);background:var(--surface-2);border:1px solid var(--line-soft);
+    border-radius:999px;padding:0 6px;line-height:17px;font-weight:500;
+  }
+  .tab.on{color:var(--ink);font-weight:550;border-bottom-color:var(--accent)}
+  .tab.on .count{color:var(--ink-2);border-color:var(--line)}
+
+  /* ── layout ────────────────────────────────────────────── */
+  .cols{display:grid;grid-template-columns:minmax(0,1fr) 292px;gap:56px;padding:34px 0 72px}
+  .card{background:var(--surface);border:1px solid var(--line);border-radius:var(--r3);overflow:hidden}
+
+  /* ── page header ────────────────────────────────────────── */
+  .pagehead{display:flex;align-items:center;gap:18px;margin-bottom:22px}
+  .pagehead h1{
+    font-size:30px;font-weight:600;letter-spacing:-.028em;line-height:1.2;margin:0;
+  }
+  .pagehead .sub{font-size:13.5px;color:var(--faint);margin-left:2px;transform:translateY(2px)}
+  .pagehead .right{margin-left:auto;display:flex;align-items:center;gap:12px}
+  .filter{
+    height:36px;width:236px;display:flex;align-items:center;gap:9px;padding:0 12px;
+    background:var(--surface);border:1px solid var(--line);border-radius:var(--r2);
+    color:var(--faint);font-size:13.5px;
+  }
+  .btn{
+    display:inline-flex;align-items:center;gap:8px;height:36px;padding:0 15px;border-radius:var(--r2);
+    font-size:13.5px;font-weight:500;border:1px solid var(--line);background:var(--surface);color:var(--ink-2);
+    white-space:nowrap;
+  }
+  .btn.solid{background:var(--accent);border-color:var(--accent);color:#FDFCFA}
+  .btn.solid svg{color:#CFE0E5}
+
+  /* ── filter chips ──────────────────────────────────────── */
+  .chips{display:flex;align-items:center;gap:6px;margin-bottom:18px}
+  .pill{
+    display:inline-flex;align-items:center;gap:7px;height:32px;padding:0 12px;border-radius:var(--r2);
+    font-size:13.5px;color:var(--muted);border:1px solid transparent;white-space:nowrap;
+  }
+  .pill .n{font-size:12px;color:var(--faint)}
+  .pill.on{background:#F3EEE6;border-color:var(--line);color:var(--ink);font-weight:500}
+  .pill.on .n{color:var(--ink-2)}
+  .pill.menu{gap:6px;color:var(--ink-2)}
+  .pill.menu svg{color:var(--faint)}
+  .chips .spacer{flex:1}
+
+  /* ── issue rows ────────────────────────────────────────── */
+  .irow{
+    display:grid;grid-template-columns:22px minmax(0,1fr);gap:15px;
+    padding:16px 24px 17px;border-bottom:1px solid var(--line-soft);
+  }
+  .irow:last-child{border-bottom:none}
+  .irow:hover{background:var(--surface-2)}
+  .state{color:var(--open);margin-top:3px}
+  .top{display:flex;align-items:baseline;gap:12px;flex-wrap:wrap}
+  .title{
+    font-size:17px;font-weight:500;letter-spacing:-.008em;line-height:1.45;color:var(--ink);
+    max-width:52ch;
+  }
+  .labels{display:flex;align-items:center;gap:6px;flex-wrap:wrap}
+  .lbl{
+    display:inline-flex;align-items:center;gap:6px;height:21px;padding:0 8px;border-radius:999px;
+    border:1px solid var(--line);background:var(--surface);font-size:11.5px;color:var(--ink-2);
+    letter-spacing:.005em;line-height:1;
+  }
+  .lbl i{width:6px;height:6px;border-radius:50%;display:block;flex:none}
+  .meta{margin-top:6px;display:flex;align-items:center;gap:6px;font-size:13px;color:var(--muted)}
+  .meta .num{font-size:12.5px;color:var(--faint)}
+  .meta .who{color:var(--ink-2)}
+  .meta .dot{color:#CBC3B8;margin:0 2px}
+  .meta .cm{color:var(--faint)}
+
+  /* ── rail ──────────────────────────────────────────────── */
+  .rail h3{
+    font-size:11px;letter-spacing:.11em;text-transform:uppercase;color:var(--faint);
+    font-weight:550;margin:0 0 16px;
+  }
+  .rail-sec{padding:0 0 24px;margin-bottom:24px;border-bottom:1px solid var(--line-soft)}
+  .rail-sec:last-child{border-bottom:none;margin-bottom:0}
+  .lab-row{display:flex;align-items:center;gap:10px;font-size:14px;color:var(--ink-2);padding:5px 0}
+  .lab-row i{width:8px;height:8px;border-radius:50%;flex:none}
+  .lab-row .c{margin-left:auto;font-size:12.5px;color:var(--faint)}
+  .ms-title{display:flex;align-items:center;gap:9px;font-size:14px;color:var(--ink);font-weight:500}
+  .ms-title .tag{
+    font-family:ui-monospace,"SF Mono",Menlo,monospace;font-size:11.5px;font-weight:400;
+    color:var(--ink-2);border:1px solid var(--line);border-radius:var(--r1);padding:1px 7px;background:var(--surface);
+  }
+  .ms-sub{margin-top:8px;font-size:12.5px;color:var(--muted)}
+  .track{height:5px;border-radius:3px;background:#EFE9E0;margin-top:12px;overflow:hidden}
+  .track i{display:block;height:100%;width:44.4%;background:var(--accent);border-radius:3px}
+  .assignee{
+    display:flex;align-items:center;gap:10px;height:34px;padding:0 10px;border:1px dashed var(--line);
+    border-radius:var(--r2);font-size:13px;color:var(--muted);
+  }
+  .assignee .ghost{width:20px;height:20px;border-radius:50%;border:1px solid var(--line);flex:none}
+  .assignee svg{margin-left:auto;color:var(--faint)}
+</style>
+</head>
+<body>
+
+<header class="topbar">
+  <div class="wrap">
+    <a class="brand" href="#"><span class="word">spindle</span><span class="dot"></span></a>
+    <div class="search">
+      <svg width="15" height="15" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><circle cx="7" cy="7" r="4.6"/><path d="m10.6 10.6 3 3" stroke-linecap="round"/></svg>
+      <span>Search repositories, issues, code…</span>
+      <span class="kbd">⌘K</span>
+    </div>
+    <div class="toputils">
+      <button class="iconbtn" aria-label="Notifications">
+        <svg width="17" height="17" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.4"><path d="M10 3.2a4.6 4.6 0 0 0-4.6 4.6c0 3.4-1.2 4.6-1.2 4.6h11.6s-1.2-1.2-1.2-4.6A4.6 4.6 0 0 0 10 3.2Z" stroke-linejoin="round"/><path d="M8.4 15.2a1.7 1.7 0 0 0 3.2 0" stroke-linecap="round"/></svg>
+        <span class="ping"></span>
+      </button>
+      <button class="iconbtn" aria-label="Create">
+        <svg width="17" height="17" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><path d="M10 4.5v11M4.5 10h11"/></svg>
+      </button>
+      <div class="avatar">AD</div>
+    </div>
+  </div>
+</header>
+
+<main class="wrap">
+  <div class="repohead">
+    <div class="crumb">
+      <span>acme</span><span>/</span><span class="name">demo</span>
+      <span class="chip">Public</span>
+    </div>
+    <p class="desc">A demonstration repository for design review.</p>
+    <div class="metaline">
+      <span><svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linejoin="round"><path d="m8 1.8 1.9 3.9 4.3.6-3.1 3 .7 4.3L8 11.6l-3.8 2 .7-4.3-3.1-3 4.3-.6L8 1.8Z"/></svg> 12 stars</span>
+      <span class="sep">·</span>
+      <span><svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"><circle cx="4" cy="3.6" r="1.9"/><circle cx="12" cy="3.6" r="1.9"/><circle cx="8" cy="12.6" r="1.9"/><path d="M4 5.6v1.2a2 2 0 0 0 2 2h4a2 2 0 0 0 2-2V5.6M8 8.8v1.8"/></svg> 3 forks</span>
+      <span class="sep">·</span>
+      <span><svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4"><path d="M1.8 8s2.3-3.9 6.2-3.9S14.2 8 14.2 8s-2.3 3.9-6.2 3.9S1.8 8 1.8 8Z" stroke-linejoin="round"/><circle cx="8" cy="8" r="1.6"/></svg> 1 watching</span>
+    </div>
+  </div>
+
+  <nav class="tabs">
+    <a class="tab" href="#">Code</a>
+    <a class="tab on" href="#">Issues <span class="count">4</span></a>
+    <a class="tab" href="#">Pull requests <span class="count">1</span></a>
+    <a class="tab" href="#">Actions</a>
+    <a class="tab" href="#">Releases</a>
+    <a class="tab" href="#">Settings</a>
+  </nav>
+
+  <div class="cols">
+    <div>
+      <div class="pagehead">
+        <h1>Issues</h1>
+        <span class="sub">4 open</span>
+        <div class="right">
+          <div class="filter">
+            <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><circle cx="7" cy="7" r="4.6"/><path d="m10.6 10.6 3 3" stroke-linecap="round"/></svg>
+            <span>Filter issues…</span>
+          </div>
+          <button class="btn solid">
+            <svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><path d="M8 3.2v9.6M3.2 8h9.6"/></svg>
+            New issue
+          </button>
+        </div>
+      </div>
+
+      <div class="chips">
+        <a class="pill on" href="#">Open <span class="n">4</span></a>
+        <a class="pill" href="#">Closed <span class="n">11</span></a>
+        <a class="pill menu" href="#">Author
+          <svg width="10" height="10" viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="m2.5 4.5 3.5 3.5 3.5-3.5"/></svg>
+        </a>
+        <a class="pill menu" href="#">Label
+          <svg width="10" height="10" viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="m2.5 4.5 3.5 3.5 3.5-3.5"/></svg>
+        </a>
+        <span class="spacer"></span>
+        <a class="pill menu" href="#">Sort
+          <svg width="10" height="10" viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="m2.5 4.5 3.5 3.5 3.5-3.5"/></svg>
+        </a>
+      </div>
+
+      <div class="card">
+        <a class="irow" href="#">
+          <span class="state">
+            <svg width="17" height="17" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.5"><circle cx="10" cy="10" r="7"/><circle cx="10" cy="10" r="2" fill="currentColor" stroke="none"/></svg>
+          </span>
+          <span>
+            <span class="top">
+              <span class="title">Incremental push with thin packs is rejected</span>
+              <span class="labels">
+                <span class="lbl"><i style="background:var(--bug)"></i>bug</span>
+                <span class="lbl"><i style="background:var(--bug)"></i>p1</span>
+              </span>
+            </span>
+            <span class="meta">
+              <span class="num mono">#42</span>
+              <span>opened 3 hours ago by</span><span class="who">mira</span>
+              <span class="dot">·</span><span class="cm">5 comments</span>
+            </span>
+          </span>
+        </a>
+
+        <a class="irow" href="#">
+          <span class="state">
+            <svg width="17" height="17" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.5"><circle cx="10" cy="10" r="7"/><circle cx="10" cy="10" r="2" fill="currentColor" stroke="none"/></svg>
+          </span>
+          <span>
+            <span class="top">
+              <span class="title">Add keyboard navigation to the file tree</span>
+              <span class="labels">
+                <span class="lbl"><i style="background:var(--merged)"></i>enhancement</span>
+                <span class="lbl"><i style="background:#8C857C"></i>ui</span>
+              </span>
+            </span>
+            <span class="meta">
+              <span class="num mono">#41</span>
+              <span>opened 1 day ago by</span><span class="who">jane</span>
+              <span class="dot">·</span><span class="cm">2 comments</span>
+            </span>
+          </span>
+        </a>
+
+        <a class="irow" href="#">
+          <span class="state">
+            <svg width="17" height="17" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.5"><circle cx="10" cy="10" r="7"/><circle cx="10" cy="10" r="2" fill="currentColor" stroke="none"/></svg>
+          </span>
+          <span>
+            <span class="top">
+              <span class="title">Bundle-uri fallback is slow on cold clone</span>
+              <span class="labels">
+                <span class="lbl"><i style="background:var(--draft)"></i>performance</span>
+                <span class="lbl"><i style="background:var(--draft)"></i>p2</span>
+              </span>
+            </span>
+            <span class="meta">
+              <span class="num mono">#39</span>
+              <span>opened 2 days ago by</span><span class="who">dev</span>
+              <span class="dot">·</span><span class="cm">8 comments</span>
+            </span>
+          </span>
+        </a>
+
+        <a class="irow" href="#">
+          <span class="state">
+            <svg width="17" height="17" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.5"><circle cx="10" cy="10" r="7"/><circle cx="10" cy="10" r="2" fill="currentColor" stroke="none"/></svg>
+          </span>
+          <span>
+            <span class="top">
+              <span class="title">Document the setup wizard in the README</span>
+              <span class="labels">
+                <span class="lbl"><i style="background:var(--open)"></i>docs</span>
+                <span class="lbl"><i style="background:var(--open)"></i>good first issue</span>
+              </span>
+            </span>
+            <span class="meta">
+              <span class="num mono">#38</span>
+              <span>opened 4 days ago by</span><span class="who">sam</span>
+              <span class="dot">·</span><span class="cm">0 comments</span>
+            </span>
+          </span>
+        </a>
+      </div>
+    </div>
+
+    <aside class="rail">
+      <div class="rail-sec">
+        <h3>Labels</h3>
+        <div class="lab-row"><i style="background:var(--bug)"></i>bug<span class="c">3</span></div>
+        <div class="lab-row"><i style="background:var(--merged)"></i>enhancement<span class="c">5</span></div>
+        <div class="lab-row"><i style="background:var(--open)"></i>docs<span class="c">4</span></div>
+        <div class="lab-row"><i style="background:var(--draft)"></i>performance<span class="c">2</span></div>
+      </div>
+
+      <div class="rail-sec">
+        <h3>Milestone</h3>
+        <div class="ms-title"><span class="tag">v0.3.0</span></div>
+        <div class="ms-sub">4 of 9 closed</div>
+        <div class="track"><i></i></div>
+      </div>
+
+      <div class="rail-sec">
+        <h3>Assignee</h3>
+        <div class="assignee">
+          <span class="ghost"></span>
+          Filter by assignee
+          <svg width="10" height="10" viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="m2.5 4.5 3.5 3.5 3.5-3.5"/></svg>
+        </div>
+      </div>
+    </aside>
+  </div>
+</main>
+
+</body>
+</html>

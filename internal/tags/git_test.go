@@ -91,7 +91,7 @@ func TestSubprocessGitBackendFailures(t *testing.T) {
 	dir := gitTestRepo(t)
 	ctx := context.Background()
 	// Missing binary ⇒ unavailable.
-	g := NewSubprocessGit("walhub-no-such-git-binary")
+	g := NewSubprocessGit("spindle-no-such-git-binary")
 	g.Timeout = 5 * time.Second
 	if _, err := g.CommitExists(ctx, dir, strings.Repeat("0", 40)); !isErr(err, errUnavailable) {
 		t.Fatalf("bad binary: %v", err)
@@ -130,7 +130,7 @@ func TestSubprocessGitTagObjectRoundTrip(t *testing.T) {
 		t.Fatalf("HEAD: %v", err)
 	}
 	// Mint via mktag; the tagger line is server-rendered, the message exact.
-	body := renderTagBody("v9", head, "t <t@walhub.local> 1789041600 +0000", "hello\n")
+	body := renderTagBody("v9", head, "t <t@spindle.local> 1789041600 +0000", "hello\n")
 	oid, err := g.CreateTagObject(ctx, dir, body)
 	if err != nil {
 		t.Fatalf("CreateTagObject: %v", err)
@@ -143,7 +143,7 @@ func TestSubprocessGitTagObjectRoundTrip(t *testing.T) {
 		t.Fatalf("cat-file -t = %q %v", typ, err)
 	}
 	if raw, err := g.runCollect(ctx, dir, []string{"cat-file", "tag", oid}); err != nil ||
-		!strings.Contains(raw, "tagger t <t@walhub.local> 1789041600 +0000") ||
+		!strings.Contains(raw, "tagger t <t@spindle.local> 1789041600 +0000") ||
 		!strings.Contains(raw, "hello") {
 		t.Fatalf("cat-file tag = %q %v", raw, err)
 	}
@@ -171,7 +171,7 @@ func TestSubprocessGitTagObjectRoundTrip(t *testing.T) {
 
 func TestTagObjectBackendFailures(t *testing.T) {
 	ctx := context.Background()
-	g := NewSubprocessGit("walhub-no-such-git-binary")
+	g := NewSubprocessGit("spindle-no-such-git-binary")
 	g.Timeout = 5 * time.Second
 	if _, err := g.CreateTagObject(ctx, t.TempDir(), []byte("x")); !isErr(err, errUnavailable) {
 		t.Fatalf("mktag bad binary: %v", err)

@@ -12,8 +12,8 @@ import (
 	"path/filepath"
 	"time"
 
-	"github.com/crueber/walhub/internal/store"
-	"github.com/crueber/walhub/internal/store/proto"
+	"github.com/crueber/spindle/internal/store"
+	"github.com/crueber/spindle/internal/store/proto"
 )
 
 // Primitives are the §7.8 git seams (§8.2; exact argv normative in 08_bundles.md).

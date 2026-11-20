@@ -10,8 +10,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/crueber/walhub/internal/store"
-	"github.com/crueber/walhub/internal/store/proto"
+	"github.com/crueber/spindle/internal/store"
+	"github.com/crueber/spindle/internal/store/proto"
 )
 
 func TestEffectiveConfig_MergeAndErrors(t *testing.T) {
@@ -50,7 +50,8 @@ func TestEffectiveConfig_MergeAndErrors(t *testing.T) {
 func TestCopyFile_PlainAndReflinkAndResume(t *testing.T) {
 	dir := t.TempDir()
 	src := filepath.Join(dir, "src.bin")
-	if err := os.WriteFile(src, []byte(strings.Repeat("walhub", 100)), 0o640); err != nil {
+	payload := []byte(strings.Repeat("spindle", 100))
+	if err := os.WriteFile(src, payload, 0o640); err != nil {
 		t.Fatal(err)
 	}
 	dst := filepath.Join(dir, "dst.bin")
@@ -60,7 +61,7 @@ func TestCopyFile_PlainAndReflinkAndResume(t *testing.T) {
 		t.Fatalf("copy: %v", err)
 	}
 	body, err := os.ReadFile(dst)
-	if err != nil || len(body) != 600 {
+	if err != nil || len(body) != len(payload) {
 		t.Fatalf("copy content: len=%d err=%v", len(body), err)
 	}
 	if info, _ := os.Stat(dst); info.Mode().Perm() != 0o640 {

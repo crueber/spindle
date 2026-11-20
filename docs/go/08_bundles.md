@@ -1,6 +1,6 @@
 # 08 — Bundles (bundle-uri subsystem)
 
-> Source: MASTER_RUST_SPEC.md §11 (bundle subsystem), §7.8 (creation primitives) · Status: normative for the walhub Go implementation.
+> Source: MASTER_RUST_SPEC.md §11 (bundle subsystem), §7.8 (creation primitives) · Status: normative for the spindle Go implementation.
 
 `internal/bundle` turns calendar slots into client-compatible bundle lists: the 6-field UTC cron, as-of
 content resolution, chain math, gates, building (incremental packs, `git bundle create` fulls, store-side
@@ -25,7 +25,7 @@ Everything below exists to make this table true.
 ## 8.2 Package layout and seams
 
 ```
-github.com/crueber/walhub/internal/bundle
+github.com/crueber/spindle/internal/bundle
   cron.go       6-field UTC cron: parse, validate, Next, Between
   strategy.go   Strategy config struct + validation (config check + per-repo settings)
   resolve.go    as-of resolution against the WAL; base_for_incremental chain walk
@@ -228,7 +228,7 @@ loses only this pass's verdicts; they are re-measured idempotently.
 ### 8.9.1 Every build is a task, and takes the strategy lease
 
 - Task kind `bundle`, params `{strategy, slot}`; narrated (notices + progress bars) per 05_wal_engine.md
-  §tasks; join semantics per (repo, kind). `POST …/ops/bundle?strategy=&slot=` and `walhub bundle run`
+  §tasks; join semantics per (repo, kind). `POST …/ops/bundle?strategy=&slot=` and `spindle bundle run`
   both go through it.
 - Cross-instance exclusion: lease `leases/bundle-<strategy>.pb` (repo-scoped), acquired before any work.
   TTL 30 min with a 5 min heartbeat loop for the duration of the build. Heartbeat 412 (`LeaseLost`) → the
@@ -474,19 +474,19 @@ Plan states (gauge `walgit_bundle_plan_slots{repo,strategy,state}`, set after ea
 | unavailable | slot before `first_state_at` |
 | wrong-host | pack set does not fit this host (or base work on a tmpfs host) — never attempted here |
 
-CLI (`cmd/walhub`, dispatch per 11_config_cli.md):
+CLI (`cmd/spindle`, dispatch per 11_config_cli.md):
 
 ```
-walhub bundle run [--repo ID] [--strategy NAME]   # run due builds now (through the task+lease path)
-walhub bundle plan acme/monorepo                  # capacityless slot table + maintainers
-walhub bundle compose acme/monorepo [--strategy weekly]
-walhub bundle rm acme/monorepo <ids…>             # CAS list update + object deletes
+spindle bundle run [--repo ID] [--strategy NAME]   # run due builds now (through the task+lease path)
+spindle bundle plan acme/monorepo                  # capacityless slot table + maintainers
+spindle bundle compose acme/monorepo [--strategy weekly]
+spindle bundle rm acme/monorepo <ids…>             # CAS list update + object deletes
 ```
 
 `bundle plan` prints per strategy the slot table (`slot  kind  status  detail` — detail = bundle id or
 verdict reason), the `next:` upcoming units per maintainer heartbeat (`maintain/<host>.pb`), and the
 maintainers assigned by `[placement] maintain`. `bundle compose` is the manual §8.9.4 form; without a
-resolvable base it errors, pointing at `walhub compact --base`. `bundle rm` removes entries by id and
+resolvable base it errors, pointing at `spindle compact --base`. `bundle rm` removes entries by id and
 deletes their objects via the CAS list update.
 
 ## 8.15 Operator quick reference

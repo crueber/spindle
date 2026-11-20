@@ -18,15 +18,15 @@ import (
 	"testing"
 	"time"
 
-	"github.com/crueber/walhub/internal/git"
-	"github.com/crueber/walhub/internal/store"
-	"github.com/crueber/walhub/internal/store/proto"
+	"github.com/crueber/spindle/internal/git"
+	"github.com/crueber/spindle/internal/store"
+	"github.com/crueber/spindle/internal/store/proto"
 )
 
 // ---- git delta format (normative vectors) --------------------------------------
 
 func TestApplyGitDelta_InsertCopyAndSize0(t *testing.T) {
-	base := []byte("hello world, hello walhub")
+	base := []byte("hello world, hello spindle")
 
 	// varint helpers
 	put := func(v uint64) []byte {
@@ -45,16 +45,16 @@ func TestApplyGitDelta_InsertCopyAndSize0(t *testing.T) {
 	}
 
 	var d []byte
-	d = append(d, put(uint64(len(base)))...)       // base_size
-	result := []byte("HELLO world, hello walhub!") // 13 copy + edits
+	d = append(d, put(uint64(len(base)))...)        // base_size
+	result := []byte("HELLO world, hello spindle!") // 13 copy + edits
 	d = append(d, put(uint64(len(result)))...)
 	// insert "HELLO " first, then copy the tail in order
 	d = append(d, 0x06)
 	d = append(d, []byte("HELLO ")...)
 	// copy [6,13) "world, " : offset=6 (1 byte), size=7 (1 byte)
 	d = append(d, 0x80|0x01|0x10, 6, 7)
-	// copy [13,25) "hello walhub" : offset=13, size=12
-	d = append(d, 0x80|0x01|0x10, 13, 12)
+	// copy [13,26) "hello spindle" : offset=13, size=13
+	d = append(d, 0x80|0x01|0x10, 13, 13)
 	// insert "!"
 	d = append(d, 0x01, '!')
 
@@ -198,7 +198,7 @@ func TestBlockCache_SingleFlightAndLRU(t *testing.T) {
 // buildTestPack writes a two-entry pack: blob base + OFS_DELTA against it.
 func buildTestPack(t *testing.T) (pack []byte, baseOff, deltaOff int64, baseOid, deltaOid string) {
 	t.Helper()
-	base := []byte("hello world, hello walhub!\n")
+	base := []byte("hello world, hello spindle!\n")
 	result := []byte("hello world, hello WALGIT!\n")
 
 	var body bytes.Buffer
@@ -311,8 +311,11 @@ func TestRemoteDecode_EndToEnd(t *testing.T) {
 	if err != nil {
 		t.Fatalf("header: %v", err)
 	}
-	if kind != "blob" || size != int64(len("hello world, hello WALGIT!\n")) {
-		t.Fatalf("header(%q, %d), want blob/27", kind, size)
+	// header() walks the delta chain to the base WITHOUT inflating, so the size
+	// it reports is the base object's (28), not the delta result's (27) — pinned
+	// by TestRemoteEngine_DecodeHeaderAndCache.
+	if kind != "blob" || size != int64(len("hello world, hello spindle!\n")) {
+		t.Fatalf("header(%q, %d), want blob/28", kind, size)
 	}
 
 	// decode the DELTA object: the chain folds to the result blob.
@@ -329,7 +332,7 @@ func TestRemoteDecode_EndToEnd(t *testing.T) {
 	if err != nil {
 		t.Fatalf("decode base: %v", err)
 	}
-	if string(data) != "hello world, hello walhub!\n" {
+	if string(data) != "hello world, hello spindle!\n" {
 		t.Fatalf("base = %q", data)
 	}
 
@@ -369,7 +372,7 @@ func TestFaulter_WritesLooseObjects(t *testing.T) {
 	if err != nil {
 		t.Fatalf("loose object: %v", err)
 	}
-	if string(data) != "hello world, hello walhub!\n" {
+	if string(data) != "hello world, hello spindle!\n" {
 		t.Fatalf("loose content = %q", data)
 	}
 }

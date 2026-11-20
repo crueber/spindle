@@ -13,8 +13,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/crueber/walhub/internal/git"
-	"github.com/crueber/walhub/internal/wal"
+	"github.com/crueber/spindle/internal/git"
+	"github.com/crueber/spindle/internal/wal"
 )
 
 // logTouch is one status→path touch inside a synthetic walk commit.
@@ -189,14 +189,14 @@ func TestAssignTreeCommitMeta(t *testing.T) {
 		bogus := treeLogMarker + " " + strings.Repeat("9", 40) + " 2025-05-05T05:05:05Z"
 		es := []TreeEntry{
 			{Name: bogus, Type: "blob"},
-			{Name: "WALHUBTREE draft", Type: "blob"},
+			{Name: "SPINDLETREE draft", Type: "blob"},
 			{Name: "ok.txt", Type: "blob"},
 		}
 		out := encodeTreeLog(t, []struct {
 			sha, date string
 			touches   []logTouch
 		}{
-			{sha1, d1, []logTouch{{"M", bogus}, {"M", "WALHUBTREE draft"}, {"M", "ok.txt"}}},
+			{sha1, d1, []logTouch{{"M", bogus}, {"M", "SPINDLETREE draft"}, {"M", "ok.txt"}}},
 		})
 		assignTreeCommitMeta(es, "", out)
 		for _, e := range es {

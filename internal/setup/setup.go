@@ -8,7 +8,7 @@
 //     values, {"overrides": …} JSON, or a raw TOML body) ON TOP OF the
 //     file-visible base config, coercing each key into the typed Config.
 //   - Validate runs the same full §5 validator as boot; Save serializes the
-//     candidate atomically to <data-dir>/walhub.toml (tmp + rename, one
+//     candidate atomically to <data-dir>/spindle.toml (tmp + rename, one
 //     process-wide mutex per §3.4 concurrency).
 //   - RestartKeys / EffectiveValue power the requires_restart diff.
 //   - ProbeAuth runs the OIDC discovery probe behind the auth card's Test
@@ -35,7 +35,7 @@ import (
 
 	"github.com/BurntSushi/toml"
 
-	"github.com/crueber/walhub/internal/config"
+	"github.com/crueber/spindle/internal/config"
 )
 
 // saveMu serializes Saves (process-wide mutex, §3.4 concurrency note).
@@ -466,7 +466,7 @@ func Validate(c *config.Config) []Error {
 }
 
 // Save validates (config.SaveSetup fails closed), then atomically writes
-// <data-dir>/walhub.toml, serialized by the process-wide mutex (§3.4), and
+// <data-dir>/spindle.toml, serialized by the process-wide mutex (§3.4), and
 // diffs the candidate against the still-running effective config. The
 // returned keys are the ones whose effective value differs from the file just
 // saved — the process does NOT hot-reload. An empty (non-nil) slice means

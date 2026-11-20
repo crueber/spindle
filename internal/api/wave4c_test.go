@@ -10,9 +10,9 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/crueber/walhub/internal/git"
-	"github.com/crueber/walhub/internal/store"
-	"github.com/crueber/walhub/internal/wal"
+	"github.com/crueber/spindle/internal/git"
+	"github.com/crueber/spindle/internal/store"
+	"github.com/crueber/spindle/internal/wal"
 )
 
 // failingStore delegates to memory but fails selected ops for policy.json.

@@ -12,8 +12,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/crueber/walhub/internal/store"
-	"github.com/crueber/walhub/internal/store/proto"
+	"github.com/crueber/spindle/internal/store"
+	"github.com/crueber/spindle/internal/store/proto"
 )
 
 func TestMaintainer_RunLoopAndDrain(t *testing.T) {

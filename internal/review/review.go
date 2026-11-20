@@ -55,9 +55,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/crueber/walhub/internal/identity"
-	"github.com/crueber/walhub/internal/server/auth"
-	"github.com/crueber/walhub/internal/store"
+	"github.com/crueber/spindle/internal/identity"
+	"github.com/crueber/spindle/internal/server/auth"
+	"github.com/crueber/spindle/internal/store"
 )
 
 // dateTimeFmt is the RFC 3339 UTC wire timestamp (07 §2).

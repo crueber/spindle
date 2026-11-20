@@ -1,4 +1,4 @@
-// issue237_test.go — Forgejo crueber/walhub#237 regressions (SSRF allowlist
+// issue237_test.go — Forgejo crueber/spindle#237 regressions (SSRF allowlist
 // bypass + anonymous dangerous): every bypass row from the issue table is
 // pinned, the clone URL is proven equal to the gated canonical string
 // through the real Begin→drive→CloneMirror path, and dangerous:true from
@@ -19,7 +19,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/crueber/walhub/internal/server/auth"
+	"github.com/crueber/spindle/internal/server/auth"
 )
 
 // issue237Variants are the bypass rows from the issue table plus the
@@ -278,7 +278,7 @@ func TestBeginDangerousGate237(t *testing.T) {
 		if w.Code != 403 {
 			t.Fatalf("status = %d, want 403 (body %q)", w.Code, w.Body.String())
 		}
-		if !strings.Contains(w.Body.String(), "walhub import --dangerous") {
+		if !strings.Contains(w.Body.String(), "spindle import --dangerous") {
 			t.Fatalf("body = %q, want the CLI pointer", w.Body.String())
 		}
 	})

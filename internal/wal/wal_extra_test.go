@@ -14,10 +14,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/crueber/walhub/internal/config"
-	"github.com/crueber/walhub/internal/git"
-	"github.com/crueber/walhub/internal/store"
-	"github.com/crueber/walhub/internal/store/proto"
+	"github.com/crueber/spindle/internal/config"
+	"github.com/crueber/spindle/internal/git"
+	"github.com/crueber/spindle/internal/store"
+	"github.com/crueber/spindle/internal/store/proto"
 )
 
 // ---- fault-injecting store wrapper ----------------------------------------------
@@ -452,7 +452,7 @@ func TestEvictIdle_Modes(t *testing.T) {
 	r.vals.cacheMode = "disk"
 	r.evictIdle()
 	saved := r.vals.cacheDir
-	r.vals.cacheDir = "/nonexistent-walhub-test"
+	r.vals.cacheDir = "/nonexistent-spindle-test"
 	if r.overDiskWatermark() {
 		t.Fatal("statfs error must read as under-watermark")
 	}
@@ -703,7 +703,7 @@ func TestMetricsAndWarnLogger(t *testing.T) {
 }
 
 func TestStatfsError(t *testing.T) {
-	if _, err := statfs("/nonexistent-walhub-test"); err == nil {
+	if _, err := statfs("/nonexistent-spindle-test"); err == nil {
 		t.Fatal("statfs on missing path succeeded")
 	}
 }

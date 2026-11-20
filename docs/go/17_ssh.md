@@ -1,5 +1,5 @@
 # 17 — SSH transport (`internal/sshd`)
-> Source: walgit parity goal (issue #1) with Gitea/Forgejo prior art (`modules/ssh/ssh.go`) · Status: normative for the walhub Go implementation.
+> Source: walgit parity goal (issue #1) with Gitea/Forgejo prior art (`modules/ssh/ssh.go`) · Status: normative for the spindle Go implementation.
 
 `internal/sshd` serves git over SSH: the standard transport in both directions —
 `git-upload-pack` for clone/fetch (out) and `git-receive-pack` for push (in). It is built
@@ -158,7 +158,7 @@ both on the wire (band-2 + unpack ng) over SSH, as 413 over HTTP.
 
 ## 8. Deployment
 
-The compose stacks publish 2222 and set `WALHUB__SERVER__SSH__LISTEN=0.0.0.0:2222` (the transport
+The compose stacks publish 2222 and set `SPINDLE__SERVER__SSH__LISTEN=0.0.0.0:2222` (the transport
 is opt-in per deploy). The host key lives under `<data-dir>/ssh/` — a volume in both stacks — so
 client TOFU pins survive container replacement. Keys are added through the `/keys` page of the
 running instance (auth "none" manages the anon principal's keys; oidc/token principals manage

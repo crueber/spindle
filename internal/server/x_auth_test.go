@@ -16,7 +16,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/crueber/walhub/internal/server/auth"
+	"github.com/crueber/spindle/internal/server/auth"
 )
 
 // stubIssuer is a full OIDC issuer: discovery + JWKS + token endpoint.
@@ -128,7 +128,7 @@ func oidcFull(t *testing.T) (*Server, http.Handler, *stubIssuer) {
 	s, h := newTestServer(t, nil)
 	s.cfg.Server.Auth.Mode = "oidc"
 	s.cfg.Server.Auth.Issuer = iss.srvURL()
-	s.cfg.Server.Auth.OAuthClientID = "walhub"
+	s.cfg.Server.Auth.OAuthClientID = "spindle"
 	s.cfg.Server.Auth.OAuthClientSecret = "sekrit"
 	s.cfg.Server.Auth.AllowedDomains = []string{"example.com"}
 	svc := NewAuthService(&s.cfg.Server.Auth, s.Now)
@@ -316,7 +316,7 @@ func TestOIDCCallbackFullFlow(t *testing.T) {
 	// nonce (F1).
 	tv := true
 	iss.idTokens <- iss.mint(t, map[string]any{
-		"aud": "walhub", "exp": time.Now().Add(time.Hour).Unix(),
+		"aud": "spindle", "exp": time.Now().Add(time.Hour).Unix(),
 		"email": "alice@example.com", "email_verified": tv, "nonce": loginNonce,
 	})
 	// Callback on the loopback host bounces through /_auth/claimed.
@@ -517,7 +517,7 @@ func TestExchangeCodeRetriesOnce(t *testing.T) {
 	s, _, iss := oidcFull(t)
 	tv := true
 	iss.idTokens <- iss.mint(t, map[string]any{
-		"aud": "walhub", "exp": time.Now().Add(time.Hour).Unix(),
+		"aud": "spindle", "exp": time.Now().Add(time.Hour).Unix(),
 		"email": "alice@example.com", "email_verified": tv,
 	})
 	tok := s.exchangeCode(context.Background(), iss.srvURL()+"/token", "c", "http://localhost/cb", "")

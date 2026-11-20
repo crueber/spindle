@@ -415,7 +415,7 @@ func (g *SubprocessGit) Replay(ctx context.Context, dir, onto, base, head, commi
 	if mb == head {
 		return head, nil // empty range: nothing to replay
 	}
-	tmpRef := fmt.Sprintf("refs/heads/walhub-tmp-replay-%d-%d", osGetpid(), time.Now().UnixNano())
+	tmpRef := fmt.Sprintf("refs/heads/spindle-tmp-replay-%d-%d", osGetpid(), time.Now().UnixNano())
 	if _, err := g.runCollect(ctx, dir, []string{"update-ref", tmpRef, head}, "", nil); err != nil {
 		return "", fmt.Errorf("replay temp branch: %w", err)
 	}
@@ -590,7 +590,7 @@ func (g *SubprocessGit) PackTip(ctx context.Context, dir, tip string) (*TipPack,
 	if len(raw) == 0 {
 		return nil, nil // fully contained — nothing new to upload
 	}
-	scratch, err := os.MkdirTemp("", "walhub-packtip-*")
+	scratch, err := os.MkdirTemp("", "spindle-packtip-*")
 	if err != nil {
 		return nil, fmt.Errorf("%w: pack scratch: %v", ErrUnavailable, err)
 	}

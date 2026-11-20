@@ -5,7 +5,7 @@ import (
 	"net/http"
 	"testing"
 
-	"github.com/crueber/walhub/internal/server/auth"
+	"github.com/crueber/spindle/internal/server/auth"
 )
 
 // Forgejo #594: commenting locks on closed issues (current thread state,

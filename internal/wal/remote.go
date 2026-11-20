@@ -18,9 +18,9 @@ import (
 	"sync"
 	"sync/atomic"
 
-	"github.com/crueber/walhub/internal/git"
-	"github.com/crueber/walhub/internal/store"
-	"github.com/crueber/walhub/internal/store/proto"
+	"github.com/crueber/spindle/internal/git"
+	"github.com/crueber/spindle/internal/store"
+	"github.com/crueber/spindle/internal/store/proto"
 )
 
 // ---- object type constants ----------------------------------------------------

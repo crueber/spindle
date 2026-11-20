@@ -26,7 +26,7 @@ type Override struct {
 }
 
 const (
-	envPrefixPrimary = "WALHUB__"
+	envPrefixPrimary = "SPINDLE__"
 	envPrefixLegacy  = "WALGIT__"
 )
 
@@ -35,10 +35,10 @@ var indexPartRe = regexp.MustCompile(`^[0-9]+$`)
 type envEntry struct {
 	name    string
 	raw     string
-	primary bool // WALHUB__ spelling (wins over WALGIT__)
+	primary bool // SPINDLE__ spelling (wins over WALGIT__)
 }
 
-// applyEnv overlays WALHUB__SECTION__KEY=value (legacy WALGIT__ alias; primary
+// applyEnv overlays SPINDLE__SECTION__KEY=value (legacy WALGIT__ alias; primary
 // wins on conflict) onto c and returns the ignored overrides (11_config_cli.md
 // §3.2). getenv backs known special vars; environ is the full environment.
 func applyEnv(c *Config, getenv func(string) string, environ []string) ([]Override, error) {
@@ -114,7 +114,7 @@ func applyEnv(c *Config, getenv func(string) string, environ []string) ([]Overri
 		return nil
 	}
 
-	// §3.4 placement all-or-nothing: any WALHUB__PLACEMENT__* override takes
+	// §3.4 placement all-or-nothing: any SPINDLE__PLACEMENT__* override takes
 	// the whole section from the environment — the file's table is discarded,
 	// the four keys are defaulted, then only env-provided keys are assigned.
 	if placementTouched {
@@ -146,12 +146,12 @@ func applyEnv(c *Config, getenv func(string) string, environ []string) ([]Overri
 		}
 	}
 
-	// RUST_LOG (kept) overrides telemetry.log_filter; WALHUB_LOG is the
+	// RUST_LOG (kept) overrides telemetry.log_filter; SPINDLE_LOG is the
 	// new-style spelling. RUST_LOG wins when both are set. These are raw
 	// strings, not TOML values.
 	if v := getenv("RUST_LOG"); v != "" {
 		c.Telemetry.LogFilter = v
-	} else if v := getenv("WALHUB_LOG"); v != "" {
+	} else if v := getenv("SPINDLE_LOG"); v != "" {
 		c.Telemetry.LogFilter = v
 	}
 

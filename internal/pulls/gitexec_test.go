@@ -146,7 +146,7 @@ func TestSubprocessGitReal(t *testing.T) {
 	}
 	// CommitTree with explicit identity (author = merger, committer = server).
 	now := time.Date(2026, 9, 4, 12, 0, 0, 0, time.UTC)
-	sha, err = g.CommitTree(ctx, dir, tree, []string{base, head}, "Merge it", "merger", "merger@x", "walhub", "walhub@localhost", now)
+	sha, err = g.CommitTree(ctx, dir, tree, []string{base, head}, "Merge it", "merger", "merger@x", "spindle", "spindle@localhost", now)
 	if err != nil || len(sha) != 40 {
 		t.Fatalf("commit-tree = %q %v", sha, err)
 	}
@@ -182,7 +182,7 @@ func TestSubprocessGitReal(t *testing.T) {
 	// --ref-action=print (print mode never updates serving refs). Success
 	// shape: the replayed tip differs from head, sits on base, the temp
 	// branch is gone, and user refs are untouched.
-	tip, err := g.Replay(ctx, dir, base, base, head, "walhub", "walhub@localhost")
+	tip, err := g.Replay(ctx, dir, base, base, head, "spindle", "spindle@localhost")
 	if err != nil {
 		t.Fatalf("replay: %v", err)
 	}
@@ -196,7 +196,7 @@ func TestSubprocessGitReal(t *testing.T) {
 	if err != nil || tipSubj != "head tip" {
 		t.Fatalf("replay tip subject = %q %v", tipSubj, err)
 	}
-	left, err := g.runCollect(ctx, dir, []string{"for-each-ref", "--format=%(refname)", "refs/heads/walhub-tmp-replay-"}, "", nil)
+	left, err := g.runCollect(ctx, dir, []string{"for-each-ref", "--format=%(refname)", "refs/heads/spindle-tmp-replay-"}, "", nil)
 	if err != nil || strings.TrimSpace(left) != "" {
 		t.Fatalf("temp branches leaked: %q %v", left, err)
 	}

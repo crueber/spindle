@@ -32,7 +32,7 @@ import (
 	"net"
 	"sync"
 
-	"github.com/crueber/walhub/internal/git"
+	"github.com/crueber/spindle/internal/git"
 	gossh "golang.org/x/crypto/ssh"
 )
 
@@ -165,7 +165,7 @@ func (s *Server) ListenAndServe(ctx context.Context) error {
 			entry, err := s.cfg.KeyLookup(ctx, fp)
 			if err != nil || entry.Principal == "" {
 				s.log.Warn("ssh key refused", "fingerprint", fp, "remote", meta.RemoteAddr())
-				return nil, fmt.Errorf("walhub: unknown public key %s", fp)
+				return nil, fmt.Errorf("spindle: unknown public key %s", fp)
 			}
 			ext := map[string]string{"principal": entry.Principal}
 			if entry.Write {
@@ -235,7 +235,7 @@ func (s *Server) handleConn(ctx context.Context, sshCfg *gossh.ServerConfig, c n
 	for newCh := range chans {
 		if newCh.ChannelType() != "session" {
 			// No tcpip forwarding, no sftp subsystem channel, nothing else.
-			_ = newCh.Reject(gossh.UnknownChannelType, "walhub serves git only")
+			_ = newCh.Reject(gossh.UnknownChannelType, "spindle serves git only")
 			continue
 		}
 		go s.handleSession(ctx, sconn, newCh)
@@ -257,7 +257,7 @@ func (s *Server) handleSession(ctx context.Context, sconn *gossh.ServerConn, new
 	if s.live[sconn] > maxSessionsPerConn {
 		s.live[sconn]--
 		s.mu.Unlock()
-		_ = newCh.Reject(gossh.Prohibited, "walhub: too many sessions on this connection")
+		_ = newCh.Reject(gossh.Prohibited, "spindle: too many sessions on this connection")
 		return
 	}
 	s.mu.Unlock()
@@ -302,7 +302,7 @@ func (s *Server) handleSession(ctx context.Context, sconn *gossh.ServerConn, new
 			s.exec(ctx, principal, ch, payload.Command)
 			return // one command per session, then the channel closes
 		case "pty-req", "shell", "subsystem":
-			fmt.Fprint(ch.Stderr(), "walhub: interactive shells and subsystems are not served\r\n")
+			fmt.Fprint(ch.Stderr(), "spindle: interactive shells and subsystems are not served\r\n")
 			_, _ = ch.SendRequest("exit-status", false, gossh.Marshal(struct{ Code uint32 }{1}))
 			return
 		default:
@@ -320,7 +320,7 @@ func (s *Server) exec(ctx context.Context, p Principal, ch gossh.Channel, comman
 	}
 	verb, id, err := ParseGitCommand(command)
 	if err != nil {
-		fmt.Fprintf(ch.Stderr(), "walhub: %v\r\n", err)
+		fmt.Fprintf(ch.Stderr(), "spindle: %v\r\n", err)
 		exit(1)
 		return
 	}
@@ -328,7 +328,7 @@ func (s *Server) exec(ctx context.Context, p Principal, ch gossh.Channel, comman
 	case s.sessions <- struct{}{}:
 		defer func() { <-s.sessions }()
 	default:
-		fmt.Fprint(ch.Stderr(), "walhub: too many concurrent sessions\r\n")
+		fmt.Fprint(ch.Stderr(), "spindle: too many concurrent sessions\r\n")
 		exit(1)
 		return
 	}
@@ -352,7 +352,7 @@ func (s *Server) exec(ctx context.Context, p Principal, ch gossh.Channel, comman
 			exit(1) // client went away; nothing to report
 			return
 		}
-		fmt.Fprintf(ch.Stderr(), "walhub: %v\r\n", terr)
+		fmt.Fprintf(ch.Stderr(), "spindle: %v\r\n", terr)
 		exit(1)
 		return
 	}

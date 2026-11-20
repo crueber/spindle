@@ -14,10 +14,10 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/crueber/walhub/internal/git"
-	"github.com/crueber/walhub/internal/store"
-	"github.com/crueber/walhub/internal/store/proto"
-	"github.com/crueber/walhub/internal/wal/rw"
+	"github.com/crueber/spindle/internal/git"
+	"github.com/crueber/spindle/internal/store"
+	"github.com/crueber/spindle/internal/store/proto"
+	"github.com/crueber/spindle/internal/wal/rw"
 )
 
 // RepoHandle is one open repo (05 §5.1.2).

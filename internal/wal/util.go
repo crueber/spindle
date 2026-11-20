@@ -4,10 +4,10 @@ package wal
 import (
 	"time"
 
-	"github.com/crueber/walhub/internal/git"
-	"github.com/crueber/walhub/internal/store/proto"
+	"github.com/crueber/spindle/internal/git"
+	"github.com/crueber/spindle/internal/store/proto"
 
-	"github.com/crueber/walhub/internal/config"
+	"github.com/crueber/spindle/internal/config"
 )
 
 // configVals is the engine's flattened view of the wal/cache config sections

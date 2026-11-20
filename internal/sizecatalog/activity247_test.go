@@ -20,8 +20,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/crueber/walhub/internal/store"
-	"github.com/crueber/walhub/internal/store/proto"
+	"github.com/crueber/spindle/internal/store"
+	"github.com/crueber/spindle/internal/store/proto"
 )
 
 var actTime = time.Date(2026, 9, 9, 12, 0, 0, 0, time.UTC)

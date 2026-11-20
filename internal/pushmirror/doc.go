@@ -2,7 +2,7 @@
 //
 // A repo configured with a push mirror has its refs+objects pushed to an
 // upstream URL (Forgejo/GitHub mirror or personal backup) after pushes land
-// in walhub (on-push trigger) and optionally on a preset schedule. This
+// in spindle (on-push trigger) and optionally on a preset schedule. This
 // complements internal/mirror (pull-only: fetches FROM an upstream and
 // refuses pushes); the two sidecars are fully independent — either may
 // exist alone.
@@ -15,7 +15,7 @@
 //
 // Auth kinds: none (file:// and public https), password (https basic),
 // token (https bearer-style), ssh (ssh/scp deploy-key style: user-provided
-// or walhub-generated ed25519). Credentials are write-only (presence +
+// or spindle-generated ed25519). Credentials are write-only (presence +
 // last-4 hint, never full echo) and scrubbed from every error/last_result
 // surface (the pull-mirror scrub contract).
 //

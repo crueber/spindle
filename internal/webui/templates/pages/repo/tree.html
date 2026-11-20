@@ -7,40 +7,115 @@
   {{if .Data.Guide}}
   {{template "repo_guide" .Data.Guide}}
   {{else}}
-  <div class="tree-page">
-    {{if .Data.Path}}
-    <!-- Breadcrumb (spec §2.2): root then every segment; intermediates keep
-         the SHORT display ref (never refs/heads/… — a slash would split the
-         route; #482) and the last segment is plain text. -->
-    <nav class="crumbs mb-2 text-sm">
-      <a class="text-emerald-700 hover:underline dark:text-emerald-400" href="/{{.Data.Repo.Full}}">root</a>
-      {{range .Data.Crumbs}}{{if .Last}} <span class="muted"> / </span> <strong>{{.Name}}</strong>{{else}} <span class="muted"> / </span> <a class="text-emerald-700 hover:underline dark:text-emerald-400" href="{{.Href}}">{{.Name}}</a>{{end}}{{end}}
-    </nav>
-    {{end}}
+  <div class="grid gap-4 lg:grid-cols-[minmax(0,1fr)_264px]">
+    <div class="min-w-0">
+      <!-- Toolbar: branch selector, path breadcrumb, and a directory filter.
+           The branch picker is the shared menus.js popover (§2), so it needs no
+           new JavaScript; every branch is a link to /tree/<name>. -->
+      <div class="mb-2 flex flex-wrap items-center gap-2">
+        {{if .Data.Branches}}
+        <div data-menu class="relative">
+          <button type="button" class="btn" data-menu-trigger aria-haspopup="menu" aria-expanded="false" title="Switch branch">
+            <svg class="icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true"><circle cx="4.5" cy="3.5" r="1.6"/><circle cx="4.5" cy="12.5" r="1.6"/><circle cx="11.5" cy="6" r="1.6"/><path d="M4.5 5.1v5.8"/><path d="M11.5 7.6a4 4 0 0 1-4 3.4H4.5" fill="none"/></svg>
+            <span class="mono">{{.Data.Branch}}</span>
+            <svg class="icon opacity-60" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true"><path d="M4 6.5 8 10.5l4-4"/></svg>
+          </button>
+          <div data-menu-panel role="menu" hidden class="card absolute left-0 z-30 mt-1 max-h-80 w-72 overflow-auto scroll-slim p-1">
+            <div class="eyebrow px-2 py-1">Branches</div>
+            {{range .Data.Branches}}
+            <a role="menuitem" href="{{.Href}}" class="flex items-center justify-between gap-2 rounded-sm px-2 py-1 font-mono text-[11px] hover:bg-[var(--pd-raised)]{{if .Current}} font-semibold text-[var(--pd-accent)]{{end}}">
+              <span class="truncate">{{.Name}}</span>
+              {{if .Current}}<span aria-hidden="true">✓</span>{{end}}
+            </a>
+            {{end}}
+          </div>
+        </div>
+        {{else}}
+        <span class="pill">{{if .Data.Branch}}{{.Data.Branch}}{{else}}ref{{end}}</span>
+        {{end}}
 
-    <!-- File listing (issue #223): no header row, no type column; the right
-         columns hug their content and the name absorbs spare width. The
-         wrapper scrolls in place (issue #275) so a 390px page never pans;
-         the mode column hides below sm: — icons carry the kind. -->
-    <div class="overflow-x-auto">
-      <table class="data-table tree-table">
-        <tbody>
-          {{range .Data.Entries}}
-          <tr>
-            <td class="entry-mode muted font-mono text-xs hidden sm:table-cell" title="{{.Mode}}">{{.ModeText}}</td>
-            <td class="entry-size-num muted tabular text-right text-xs"{{if .IsBlob}} title="{{.Size}} bytes"{{end}}>{{.SizeNum}}</td>
-            <td class="entry-size-unit muted text-xs">{{.SizeUnit}}</td>
-            <td class="entry-icon" aria-hidden="true">{{.Icon}}</td>
-            <td class="entry-name"><a class="text-emerald-700 hover:underline dark:text-emerald-400" href="{{.Href}}">{{.Name}}</a></td>
-            <td class="entry-date muted text-right text-xs">{{if .Stamp}}<time datetime="{{.Stamp}}" title="{{.Stamp}}">{{with rel .Stamp}}{{.}}{{else}}—{{end}}</time>{{else}}—{{end}}</td>
-          </tr>
-          {{end}}
-        </tbody>
-      </table>
+        {{if .Data.Path}}
+        <nav class="crumbs min-w-0 truncate font-mono text-[11px] text-[var(--pd-muted)]" aria-label="Breadcrumb">
+          <a class="link" href="/{{.Data.Repo.Full}}">{{.Data.Repo.Name}}</a>
+          {{range .Data.Crumbs}}<span aria-hidden="true"> / </span>{{if .Last}}<strong class="font-medium text-[var(--pd-text)]">{{.Name}}</strong>{{else}}<a class="link" href="{{.Href}}">{{.Name}}</a>{{end}}{{end}}
+        </nav>
+        {{end}}
+
+        <div class="ml-auto hidden items-center gap-2 sm:flex">
+          <input type="search" class="input h-[26px] w-40 py-0 font-mono text-[11px] sm:w-52"
+                 placeholder="Filter files" aria-label="Filter files in this directory"
+                 data-filter="#file-rows" autocomplete="off">
+        </div>
+      </div>
+
+      <!-- Commit strip: the newest commit on the current ref, in one 34px line.
+           Data comes from the same Commits call the log page uses. -->
+      {{if .Data.Latest}}
+      <div class="mb-2 flex items-center gap-2 border border-[var(--pd-line)] bg-[var(--pd-surface)] px-3 py-1.5 text-[11px]">
+        <span class="grid h-5 w-5 shrink-0 place-items-center rounded-full bg-[var(--pd-raised)] font-mono text-[10px] text-[var(--pd-text-2)]" aria-hidden="true">{{.Data.Latest.Initial}}</span>
+        <a class="link min-w-0 truncate font-medium" href="{{.Data.Latest.Href}}">{{.Data.Latest.Subject}}</a>
+        <span class="hidden shrink-0 font-mono text-[var(--pd-muted)] sm:inline">{{.Data.Latest.Author}} · <time datetime="{{.Data.Latest.When}}">{{rel .Data.Latest.When}}</time></span>
+        <a class="link ml-auto shrink-0 font-mono" href="{{.Data.Latest.Href}}" title="Commit {{.Data.Latest.SHA}}">{{shortsha .Data.Latest.SHA}}</a>
+      </div>
+      {{end}}
+
+      <!-- File listing (issue #223): the type icon leads, the name absorbs the
+           spare width, size and age hug the right. The wrapper scrolls in
+           place (issue #275) so a 390px page never pans. -->
+      <div class="overflow-x-auto border border-[var(--pd-line)] bg-[var(--pd-surface)]">
+        <table class="data-table tree-table">
+          <thead>
+            <tr>
+              <th class="w-[26px]"><span class="sr-only">Type</span></th>
+              <th>Name</th>
+              <th class="text-right">Size</th>
+              <th class="text-right">Last change</th>
+            </tr>
+          </thead>
+          <tbody id="file-rows">
+            {{range .Data.Entries}}
+            <tr data-name="{{.Name}}">
+              <td class="entry-icon">
+                {{if eq .Icon "dir"}}
+                <svg class="icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><path d="M1.75 4.25h3.8l1.4 1.8h7.3v7.2a1 1 0 0 1-1 1H2.75a1 1 0 0 1-1-1z"/></svg>
+                {{else if eq .Icon "link"}}
+                <svg class="icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><path d="M6.2 9.8a2.6 2.6 0 0 0 3.7 0l1.9-1.9a2.6 2.6 0 1 0-3.7-3.7l-.8.8"/><path d="M9.8 6.2a2.6 2.6 0 0 0-3.7 0L4.2 8.1a2.6 2.6 0 1 0 3.7 3.7l.8-.8"/></svg>
+                {{else}}
+                <svg class="icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><path d="M3.75 1.75h5.1l3.4 3.4v9.1H3.75z"/><path d="M8.85 1.75v3.4h3.4"/></svg>
+                {{end}}
+              </td>
+              <td class="entry-name"><a class="link" href="{{.Href}}">{{.Name}}{{if eq .Icon "dir"}}/{{end}}</a></td>
+              <td class="entry-size-num muted text-right font-mono text-[11px]"{{if .IsBlob}} title="{{.Size}} bytes"{{end}}>{{if .IsBlob}}{{if eq .SizeNum "-"}}-{{else}}{{.SizeNum}} {{.SizeUnit}}{{end}}{{end}}</td>
+              <td class="entry-date muted text-right font-mono text-[11px]">{{if .Stamp}}<time datetime="{{.Stamp}}" title="{{.Stamp}}">{{with rel .Stamp}}{{.}}{{else}}—{{end}}</time>{{else}}—{{end}}</td>
+            </tr>
+            {{end}}
+          </tbody>
+        </table>
+        <p class="hidden px-3 py-2 text-[11px] text-[var(--pd-muted)]" data-filter-empty>No files match.</p>
+      </div>
+
+      {{if .Data.Docs}}{{template "repo_doctabs" .Data}}{{end}}
     </div>
 
-    {{if .Data.Docs}}{{template "repo_doctabs" .Data}}{{end}}
+    <!-- About rail: what the repository is, at a glance. Every value here is
+         already on the chrome — nothing is invented. -->
+    <aside class="min-w-0">
+      <div class="border border-[var(--pd-line)] bg-[var(--pd-surface)] p-3">
+        <div class="eyebrow mb-2">About</div>
+        {{if .Data.Repo.Description}}
+        <p class="mb-2.5 text-[12.5px] leading-snug text-[var(--pd-text-2)]">{{.Data.Repo.Description}}</p>
+        {{end}}
+        <div class="kv">
+          <div class="kv-row"><span class="kv-key">Stars</span><span class="kv-val">{{.Data.Repo.Stars}}</span></div>
+          <div class="kv-row"><span class="kv-key">Forks</span><span class="kv-val">{{.Data.Repo.Forks}}</span></div>
+          <div class="kv-row"><span class="kv-key">Watching</span><span class="kv-val">{{.Data.Repo.Watchers}}</span></div>
+          <div class="kv-row"><span class="kv-key">Branches</span><span class="kv-val">{{.Data.Repo.Branches}}</span></div>
+          <div class="kv-row"><span class="kv-key">Tags</span><span class="kv-val">{{.Data.Repo.Tags}}</span></div>
+        </div>
+      </div>
+    </aside>
   </div>
   {{end}}
 </div>
+{{if not .Data.Guide}}{{template "repo_status" .Data}}{{end}}
 {{end}}

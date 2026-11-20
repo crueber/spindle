@@ -2,7 +2,7 @@
 
 > Depends on: 01 (identity, teams), 02 (issues), 03 (PRs), 04 (review). Shared primitives P1–P9 are defined in
 > [`README.md`](README.md); wire conventions in `docs/go/07_api.md`; lock/race rules in `docs/go/13_concurrency.md`;
-> seams in `docs/go/14_extensibility.md`. Status: normative for walhub.
+> seams in `docs/go/14_extensibility.md`. Status: normative for spindle.
 
 Notifications are the **fan-out layer** of the collaboration family: every mutating collaboration handler
 (comment, assign, review request, check report, release publish) computes recipients and writes
@@ -134,7 +134,7 @@ For an event `E` on thread `T` of repo `R` by actor `A` (the actor NEVER receive
 Watcher enumeration is the one non-trivial resolution: watching records live user-side and there is no
 reverse index that avoids a users LIST. DECISION: `social.json` (07) MUST carry `watchers: []` (cap
 1 000, `truncated: bool`); fan-out reads that array — 07 owns it, 06 only reads. Beyond the cap, watch
-subscriptions notify no one (`walhub_watchers_truncated_total{repo}`). Watches notify `subscribed`.
+subscriptions notify no one (`spindle_watchers_truncated_total{repo}`). Watches notify `subscribed`.
 
 Dedup precedence: one notification per (user, thread, reason). If an **unread** notification with the
 same (user, thread, reason) already exists, the emitter MUST skip the Create (checked via the unread
@@ -162,7 +162,7 @@ Runs **once, at event write time**, inside the mutating handler (P8) on the new 
   whose `members` is an array of principal strings read directly (no API hop). An unresolvable
   mention is silently ignored — never a 400, never an error; the text is stored verbatim regardless.
 - Bounded: at most 50 mention tokens per event; beyond that, ignored (counter
-  `walhub_mentions_dropped_total{repo}`).
+  `spindle_mentions_dropped_total{repo}`).
 - `@org/team` fans out to team members with reason `team_mention`; if the team has > 100 members the
   emitter caps the batch at 100 recipients (sorted, stable order) — a mention of a 10 000-member team
   is the operator's misconfiguration, not a fan-out DoS vector.
@@ -272,7 +272,7 @@ per repo per process (§6.8 join semantics); the per-hook cursor CAS arbitrates 
 lost cursor CAS = redelivery = at-least-once, never a skip — the cursor advances only after a successful
 POST batch). Per hook, delivery is sequential; hooks on one repo run in parallel under
 `errgroup.SetLimit(8)`. A slow webhook holds back only its own cursor — exactly the per-sink isolation
-of 14 §14.6. Cursor below a compacted/gap window: count `walhub_webhook_gap_total{repo}` and continue
+of 14 §14.6. Cursor below a compacted/gap window: count `spindle_webhook_gap_total{repo}` and continue
 from the oldest readable event (09 §12.3's honest-gap semantics). The loop body never runs under any
 repo lock (13 §2 rule 4); it is a maintainer-pass unit with a 10 s-per-POST context budget.
 

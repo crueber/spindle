@@ -3,15 +3,15 @@ package server
 import (
 	"context"
 
-	"github.com/crueber/walhub/internal/git"
-	"github.com/crueber/walhub/internal/server/auth"
-	"github.com/crueber/walhub/internal/wal"
+	"github.com/crueber/spindle/internal/git"
+	"github.com/crueber/spindle/internal/server/auth"
+	"github.com/crueber/spindle/internal/wal"
 )
 
 // PushGate is the repo-scoped push admission hook (Forgejo #347),
 // consulted at receive-pack dispatch on both transports. Implemented by
 // internal/identity; nil → legacy host-flag gating (law 8: the server
-// never imports the feature package — composition in cmd/walhub wires it,
+// never imports the feature package — composition in cmd/spindle wires it,
 // exactly the ReadGate shape in bind_api.go).
 type PushGate interface {
 	// CheckPush enforces the repo-scoped write rule on one EXISTING

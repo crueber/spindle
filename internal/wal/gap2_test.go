@@ -17,9 +17,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/crueber/walhub/internal/git"
-	"github.com/crueber/walhub/internal/store"
-	"github.com/crueber/walhub/internal/store/proto"
+	"github.com/crueber/spindle/internal/git"
+	"github.com/crueber/spindle/internal/store"
+	"github.com/crueber/spindle/internal/store/proto"
 )
 
 // ---- remote engine: object LRU, readRaw/headerAt/inflate faults ---------------------
@@ -115,7 +115,7 @@ func TestRemoteEngine_HeaderAtDeltaFaults(t *testing.T) {
 		byOid: map[string]int64{baseOid: baseOffOf(t)}}
 	rawBase, _ := hex.DecodeString(baseOid)
 	// git delta: base_size, result_size, insert "ok" — zlib-framed payload.
-	base := []byte("hello world, hello walhub!\n")
+	base := []byte("hello world, hello spindle!\n")
 	inst := []byte{}
 	for v := uint64(len(base)); ; {
 		inst = append(inst, byte(v&0x7f))
@@ -145,7 +145,7 @@ func TestRemoteEngine_HeaderAtDeltaFaults(t *testing.T) {
 		repoID: "acme/api", objCap: 0,
 	}
 	kind, size, err := eng3.header(ctx, ix2b, 0)
-	if err != nil || kind != "blob" || size != int64(len("hello world, hello walhub!\n")) {
+	if err != nil || kind != "blob" || size != int64(len("hello world, hello spindle!\n")) {
 		t.Fatalf("cross-pack header = %s %d %v", kind, size, err)
 	}
 	kind, data, err := eng3.decodeAt(ctx, ix2b, 0)

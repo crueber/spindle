@@ -14,7 +14,7 @@ import (
 	"os/exec"
 	"strings"
 
-	"github.com/crueber/walhub/internal/git"
+	"github.com/crueber/spindle/internal/git"
 )
 
 // GitPrimitives binds Primitives to a git.Layer.

@@ -35,7 +35,7 @@
 // repo never leaks through a listing. Writes require a non-anonymous principal
 // and a same-origin request.
 //
-// WIRING (cmd/walhub, once per process, before serving; ident = the identity
+// WIRING (cmd/spindle, once per process, before serving; ident = the identity
 // service, notes = the notify service the composition already builds):
 //
 //	webui.BindPublic(webui.PublicDeps{
@@ -81,19 +81,19 @@ import (
 	"sync"
 	"time"
 
-	"github.com/crueber/walhub/internal/api"
-	"github.com/crueber/walhub/internal/git"
-	"github.com/crueber/walhub/internal/identity"
-	"github.com/crueber/walhub/internal/notify"
-	"github.com/crueber/walhub/internal/server/auth"
-	"github.com/crueber/walhub/internal/sizecatalog"
-	"github.com/crueber/walhub/internal/store"
+	"github.com/crueber/spindle/internal/api"
+	"github.com/crueber/spindle/internal/git"
+	"github.com/crueber/spindle/internal/identity"
+	"github.com/crueber/spindle/internal/notify"
+	"github.com/crueber/spindle/internal/server/auth"
+	"github.com/crueber/spindle/internal/sizecatalog"
+	"github.com/crueber/spindle/internal/store"
 )
 
 // PublicDeps carries the feature services the public pages read that are not
 // on api.Env. Every field is optional: an unwired instance renders the page
 // without that projection instead of failing (display metadata never 500s).
-// The composition (cmd/walhub) binds them once via BindPublic; feature
+// The composition (cmd/spindle) binds them once via BindPublic; feature
 // packages are never imported by the page layer for anything else (law 8).
 type PublicDeps struct {
 	// Org resolves an organization doc (nil, nil for a non-org owner).

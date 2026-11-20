@@ -6,7 +6,7 @@ import (
 	"fmt"
 	"testing"
 
-	"github.com/crueber/walhub/internal/store"
+	"github.com/crueber/spindle/internal/store"
 )
 
 // Index projection (P4): newest-first upserts, paged reads, compaction,

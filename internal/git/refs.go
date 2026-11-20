@@ -15,7 +15,7 @@ import (
 	exec "os/exec"
 	"time"
 
-	"github.com/crueber/walhub/internal/store/proto"
+	"github.com/crueber/spindle/internal/store/proto"
 )
 
 // Refs (04_git.md §4): reading, snapshot cache, apply_ref_txn.

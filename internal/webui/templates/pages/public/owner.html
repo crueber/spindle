@@ -9,8 +9,8 @@
 <div class="repos-page">
   <div class="profile-layout grid grid-cols-1 gap-6 sm:grid-cols-[minmax(0,1fr)_12rem]">
     <div class="profile-main min-w-0">
-      {{if .Data.Notice}}<p class="mb-3 rounded-lg border border-emerald-300 bg-emerald-50 p-3 text-sm text-emerald-800 dark:border-emerald-900 dark:bg-emerald-950/60 dark:text-emerald-200" role="status">{{.Data.Notice}}</p>{{end}}
-      {{if .Data.Err}}<div class="mb-3 rounded-lg border border-red-300 bg-red-50 p-3 text-sm text-red-800 dark:border-red-900 dark:bg-red-950/60 dark:text-red-200" role="alert">{{.Data.Err}}</div>{{end}}
+      {{if .Data.Notice}}<p class="card mb-3 border-l-2 border-l-[var(--pd-ok)] p-3 text-sm" role="status">{{.Data.Notice}}</p>{{end}}
+      {{if .Data.Err}}<p class="card mb-3 border-l-2 border-l-[var(--pd-danger)] p-3 text-sm" role="alert">{{.Data.Err}}</p>{{end}}
       {{/* Forgejo #234/#498: the profile edit form renders in the PROFILE view
            only, above the identity block, seeded from the stored doc (or the
            submitted values after a rejected save). Client-only edit state
@@ -55,7 +55,7 @@
         {{if .Data.Where}}<p class="muted mt-1 text-sm">{{.Data.Where}}</p>{{end}}
         {{if .Data.BioMarkdown}}<div class="markdown-body mt-3">{{md .Data.BioMarkdown}}</div>{{end}}
         {{else}}
-        <div class="profile-header border-b border-zinc-200 pb-6 dark:border-zinc-700">
+        <div class="profile-header border-b border-[var(--pd-line)] pb-6">
           <h1 class="text-2xl font-semibold">{{.Data.DisplayName}}</h1>
           {{if .Data.Handle}}<p class="muted mt-0.5 text-sm">@{{.Data.Owner}}</p>{{end}}
           {{if .Data.Where}}<p class="muted mt-1 text-sm">{{.Data.Where}}</p>{{end}}
@@ -67,22 +67,22 @@
       {{end}}
 
       {{if eq .Data.View "repos"}}
-      <div class="repos-toolbar mb-2 mt-6 flex flex-wrap items-center justify-between gap-2">
+      <div class="repos-toolbar mb-2 mt-6 flex flex-wrap items-baseline justify-between gap-2 border-b border-[var(--pd-line)] pb-2">
         <h3 class="text-base font-semibold">Repositories</h3>
+        <span class="eyebrow tabular">{{.Data.RepoCount}} {{plural .Data.RepoCount "repository" "repositories"}}</span>
       </div>
-      <p class="muted mb-4">{{.Data.RepoCount}} {{plural .Data.RepoCount "repository" "repositories"}}</p>
       {{if .Data.Rows}}
-      <ul class="grid grid-cols-1 gap-x-6 gap-y-1 sm:grid-cols-2">
+      <ul class="grid grid-cols-1 gap-x-6 gap-y-0.5 sm:grid-cols-2">
         {{range .Data.Rows}}
         {{template "public_repo_row" (dict "Full" .Full "VisibilityLabel" .VisibilityLabel "VisibilityTitle" .VisibilityTitle "Mirror" .Mirror "MirrorTitle" .MirrorTitle "HasStars" .HasStars "Stars" .Stars "At" .At "Empty" .Empty)}}
         {{end}}
       </ul>
       {{else}}
-      <p class="muted">nothing under {{.Data.Owner}} yet</p>
+      <p class="muted font-mono text-sm">nothing under {{.Data.Owner}} yet</p>
       {{end}}
       <p class="muted mt-4 text-xs">
-        <a class="hover:underline" href="/import?owner={{urlquery .Data.Owner}}">import into {{.Data.Owner}}</a>
-        {{if .Data.CanManage}} · <a class="hover:underline" href="/{{.Data.Owner}}/settings">organization settings</a>{{end}}
+        <a class="link" href="/import?owner={{urlquery .Data.Owner}}">import into {{.Data.Owner}}</a>
+        {{if .Data.CanManage}} · <a class="link" href="/{{.Data.Owner}}/settings">organization settings</a>{{end}}
       </p>
       {{end}}
 
@@ -92,7 +92,7 @@
         {{if .Data.MemberOrgs}}
         <ul class="mt-1 flex flex-wrap gap-x-4 gap-y-1">
           {{range .Data.MemberOrgs}}
-          <li><a class="text-emerald-700 hover:underline dark:text-emerald-400" href="/{{.}}">{{.}}</a></li>
+          <li><a class="link" href="/{{.}}">{{.}}</a></li>
           {{end}}
         </ul>
         {{else}}
@@ -131,7 +131,7 @@
           </div>
           {{end}}
           {{if or .Data.CanEdit .Data.CanRegenAvatar}}
-          {{if .Data.AvatarURL}}<hr class="w-full border-zinc-200 dark:border-zinc-700">{{end}}
+          {{if .Data.AvatarURL}}<hr class="w-full border-[var(--pd-line)]">{{end}}
           <div class="profile-actions flex w-full flex-col gap-2">
             {{if and .Data.CanEdit (not .Data.Editing)}}
             <a class="btn w-full justify-center px-3 py-1" href="/{{.Data.Owner}}?edit=1">Edit profile</a>

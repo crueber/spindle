@@ -15,7 +15,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/crueber/walhub/internal/server/auth"
+	"github.com/crueber/spindle/internal/server/auth"
 )
 
 // anonWriteRoutes is the inventoried write surface (the #502 table): every

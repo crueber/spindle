@@ -14,9 +14,9 @@ import (
 
 	gossh "golang.org/x/crypto/ssh"
 
-	"github.com/crueber/walhub/internal/api"
-	"github.com/crueber/walhub/internal/config"
-	"github.com/crueber/walhub/internal/store"
+	"github.com/crueber/spindle/internal/api"
+	"github.com/crueber/spindle/internal/config"
+	"github.com/crueber/spindle/internal/store"
 )
 
 const registryTestKey = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAII/VO93dFREgk2CscLYyCKH4ZjDpD8XYGB/X8ReU2QWx ada@laptop"

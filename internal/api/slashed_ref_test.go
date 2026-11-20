@@ -11,7 +11,7 @@ import (
 	"net/http"
 	"testing"
 
-	"github.com/crueber/walhub/internal/wal"
+	"github.com/crueber/spindle/internal/wal"
 )
 
 func TestRefPartOf(t *testing.T) {

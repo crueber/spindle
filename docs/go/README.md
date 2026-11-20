@@ -1,8 +1,8 @@
-# walhub — Go Implementation Specification
+# spindle — Go Implementation Specification
 
 The Go rewrite of the walgit design. The behavioral reference is
 [`../MASTER_RUST_SPEC.md`](../MASTER_RUST_SPEC.md) (the Rust implementation's complete specification);
-this directory specifies **how to build walhub in Go** — and where walhub deliberately diverges: a Chi
+this directory specifies **how to build spindle in Go** — and where spindle deliberately diverges: a Chi
 router, a server-rendered Go page frontend with vendored htmx (D-WEB-14/D-WEB-15), zero-config first run
 with a setup UI, a local
 filesystem store backend, and Make-based tooling. Everything not listed as a divergence follows the Rust
@@ -34,7 +34,7 @@ order that matches your work.
    route registration, policy effects, event sinks, auth providers, task kinds, and CLI subcommands are
    registries. [`14_extensibility.md`](14_extensibility.md) maps future GitHub-like features onto those
    seams without touching core.
-4. **User friendliness is a feature.** `walhub` runs with NO config on sane defaults (`0.0.0.0:8080`, local
+4. **User friendliness is a feature.** `spindle` runs with NO config on sane defaults (`0.0.0.0:8080`, local
    filesystem store, first push creates the repo); the `/setup` UI exposes every option with a validated
    save-to-disk; an invalid config file boots into setup-only recovery instead of refusing to start.
    Backend code ships with near-100% test coverage (≥ 95% per package, CI-enforced); the JS is tested with
@@ -44,7 +44,7 @@ order that matches your work.
 
 Bucket formats (key layout, protobuf wire encoding, JSON files), the git wire protocol, and TOML config
 key names stay **byte-compatible with the Rust implementation**. A bucket written by walgit MUST be
-readable by walhub and vice versa.
+readable by spindle and vice versa.
 
 ## The documents
 
@@ -61,7 +61,7 @@ readable by walhub and vice versa.
 | [`09_events.md`](09_events.md) | WAL → webhook bridge: cursor, delivery, wake-ups | `internal/events` |
 | [`10_maintenance.md`](10_maintenance.md) | Maintainer loop, compaction, base rebuild, follow, fsck/repair | `internal/maintain` |
 | [`17_ssh.md`](17_ssh.md) | SSH git transport: x/crypto/ssh listener, key auth, command framing | `internal/sshd` |
-| [`11_config_cli.md`](11_config_cli.md) | Every config key (optional file), per-repo settings, env overrides, CLI reference | `internal/config`, `cmd/walhub` |
+| [`11_config_cli.md`](11_config_cli.md) | Every config key (optional file), per-repo settings, env overrides, CLI reference | `internal/config`, `cmd/spindle` |
 | [`12_web_ui.md`](12_web_ui.md) | Server-rendered pages + htmx/islands, SDK (D-WEB-14), **setup UI**, `node --test` suite | `internal/webui/`, `web/` |
 | [`13_concurrency.md`](13_concurrency.md) | **The concurrency playbook** — referenced by every other doc | cross-cutting |
 | [`14_extensibility.md`](14_extensibility.md) | Core-vs-extension seams; issues/PRs/multi-user roadmap | cross-cutting |

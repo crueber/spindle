@@ -5,7 +5,7 @@
 //	GET  /{owner}/settings           organisation settings
 //	GET  /keys                       SSH public keys
 //
-// # WIRING (composition owns cmd/walhub/settings.go)
+// # WIRING (composition owns cmd/spindle/settings.go)
 //
 // The feature services are NOT on api.Env, and internal/server's setup
 // helpers are unexported, so this file takes a narrow function seam:
@@ -13,7 +13,7 @@
 //	webui.BindSettings(webui.SettingsDeps{
 //	    // --- /setup: bind the SAME functions the JSON API uses (§3.4).
 //	    SetupAccess:   func(r, p) *auth.AuthError { ... }        // server.setupAccess's rule:
-//	                                                            // WALHUB_SETUP_TOKEN ?token=/Bearer,
+//	                                                            // SPINDLE_SETUP_TOKEN ?token=/Bearer,
 //	                                                            // else open while boot.Mode == "defaults"
 //	                                                            // || setup-only || auth.mode == "none",
 //	                                                            // else requireAdmin.
@@ -79,9 +79,9 @@
 // Admin,Write}. A nil service leaves its field nil and the affected panel keeps
 // its degraded card, so setup-only mode (no store) still renders /setup.
 //
-// # SETUP-ONLY MODE (wired: see cmd/walhub/webui.go)
+// # SETUP-ONLY MODE (wired: see cmd/spindle/webui.go)
 //
-// Status: cmd/walhub/serve.go builds webui.New in EVERY boot mode and calls
+// Status: cmd/spindle/serve.go builds webui.New in EVERY boot mode and calls
 // wireWebUI; internal/server/router.go routes GET and POST /setup through the
 // page provider in mountSetupOnly (POST is how an invalid config is fixed).
 // Only the setup* deps are bound in that mode; every other binder field is nil
@@ -113,8 +113,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/crueber/walhub/internal/api"
-	"github.com/crueber/walhub/internal/server/auth"
+	"github.com/crueber/spindle/internal/api"
+	"github.com/crueber/spindle/internal/server/auth"
 )
 
 // ---------------------------------------------------------------------------
@@ -1110,14 +1110,14 @@ var settingsFieldMeta = map[string]settingsFieldMetaT{
 	"server.auth.issuer":         {Type: "url", Example: "https://id.example.com", Note: "discovery at <issuer>/.well-known/openid-configuration"},
 	"server.auth.session_secret": {Example: "openssl rand -hex 32", Note: "any random ≥ 32 bytes; rotating revokes sessions"},
 	"store.backend":              {Type: "enum", Enum: []string{"s3", "gcs", "memory", "filesystem"}, Example: "filesystem"},
-	"store.bucket":               {Example: "walhub-test", Note: "s3/gcs only"},
-	"store.prefix":               {Example: "walhub/"},
-	"store.root":                 {Example: "/var/lib/walhub/store", Note: "filesystem backend only"},
+	"store.bucket":               {Example: "spindle-test", Note: "s3/gcs only"},
+	"store.prefix":               {Example: "spindle/"},
+	"store.root":                 {Example: "/var/lib/spindle/store", Note: "filesystem backend only"},
 	"store.multipart_threshold":  {Type: "size", Example: "64MiB", Advanced: true},
 	"store.multipart_part_size":  {Type: "size", Example: "16MiB", Advanced: true, Note: "must be ≤ multipart_threshold"},
 	"store.s3.endpoint":          {Example: "http://127.0.0.1:9000", Note: "rustfs/MinIO"},
 	"store.s3.force_path_style":  {Type: "bool", Example: "true", Note: "true for rustfs/MinIO"},
-	"cache.dir":                  {Example: "/var/cache/walhub"},
+	"cache.dir":                  {Example: "/var/cache/spindle"},
 	"cache.mode":                 {Type: "enum", Enum: []string{"budget", "disk", "auto"}, Example: "budget"},
 	"cache.max_bytes":            {Type: "size", Example: "20GiB", Note: "everything on disk must fit this in budget mode"},
 	"wal.freshness_ttl":          {Type: "duration", Example: "30s"},

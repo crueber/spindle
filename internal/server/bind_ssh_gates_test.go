@@ -18,9 +18,9 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/crueber/walhub/internal/config"
-	"github.com/crueber/walhub/internal/git"
-	"github.com/crueber/walhub/internal/sshd"
+	"github.com/crueber/spindle/internal/config"
+	"github.com/crueber/spindle/internal/git"
+	"github.com/crueber/spindle/internal/sshd"
 	gossh "golang.org/x/crypto/ssh"
 )
 
@@ -136,9 +136,9 @@ func TestSSHBuilderBranches(t *testing.T) {
 		t.Fatalf("setup-only SSH = %v %v", got, err)
 	}
 	// host_key_env set but the env var is empty → boot-fatal (line 263)
-	t.Setenv("WALHUB_TEST_MISSING_HOST_KEY", "")
+	t.Setenv("SPINDLE_TEST_MISSING_HOST_KEY", "")
 	s3 := sshGateServer(t, &fakeEngine{exists: true}, func(c *config.Config) {
-		c.Server.SSH.HostKeyEnv = "WALHUB_TEST_MISSING_HOST_KEY"
+		c.Server.SSH.HostKeyEnv = "SPINDLE_TEST_MISSING_HOST_KEY"
 	})
 	if _, err := s3.SSH(); err == nil || !strings.Contains(err.Error(), "host_key_env") {
 		t.Fatalf("unset host_key_env = %v", err)
@@ -146,9 +146,9 @@ func TestSSHBuilderBranches(t *testing.T) {
 	// host_key_env resolves to key material → the env wins over the path
 	_, hk, _ := ed25519.GenerateKey(rand.Reader)
 	hkBlock, _ := gossh.MarshalPrivateKey(hk, "test")
-	t.Setenv("WALHUB_TEST_GOOD_HOST_KEY", string(pem.EncodeToMemory(hkBlock)))
+	t.Setenv("SPINDLE_TEST_GOOD_HOST_KEY", string(pem.EncodeToMemory(hkBlock)))
 	s5 := sshGateServer(t, &fakeEngine{exists: true}, func(c *config.Config) {
-		c.Server.SSH.HostKeyEnv = "WALHUB_TEST_GOOD_HOST_KEY"
+		c.Server.SSH.HostKeyEnv = "SPINDLE_TEST_GOOD_HOST_KEY"
 	})
 	if got, err := s5.SSH(); err != nil || got == nil {
 		t.Fatalf("env host key = %v %v", got, err)
@@ -411,7 +411,7 @@ func TestSSHReceivePackAdvertisementAndCountingPaths(t *testing.T) {
 	}
 
 	// host_key_env unset → SSH() boot-fatal
-	s2 := sshGateServer(t, eng, func(c *config.Config) { c.Server.SSH.HostKeyEnv = "WALHUB_TEST_NO_HOST_KEY" })
+	s2 := sshGateServer(t, eng, func(c *config.Config) { c.Server.SSH.HostKeyEnv = "SPINDLE_TEST_NO_HOST_KEY" })
 	if _, err := s2.SSH(); err == nil || !strings.Contains(err.Error(), "host_key_env") {
 		t.Fatalf("unset host_key_env = %v", err)
 	}

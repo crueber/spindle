@@ -13,7 +13,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/crueber/walhub/internal/store"
+	"github.com/crueber/spindle/internal/store"
 )
 
 // ---- fake inner store (stands in for the memory truth backend) ----

@@ -25,7 +25,7 @@ import (
 	"context"
 	"testing"
 
-	"github.com/crueber/walhub/internal/server/auth"
+	"github.com/crueber/spindle/internal/server/auth"
 )
 
 func seedVisibility374(t *testing.T, s *Service) {

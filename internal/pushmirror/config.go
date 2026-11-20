@@ -9,8 +9,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/crueber/walhub/internal/bundle"
-	"github.com/crueber/walhub/internal/store"
+	"github.com/crueber/spindle/internal/bundle"
+	"github.com/crueber/spindle/internal/store"
 )
 
 // KindPushMirrorSync is the Seam 5 task kind, distinct from pull

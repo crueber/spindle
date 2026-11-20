@@ -28,7 +28,7 @@ import (
 // and fingerprint (shown to the user for upstream install).
 type GeneratedKey struct {
 	PrivatePEM  string // "-----BEGIN OPENSSH PRIVATE KEY-----..." (secret)
-	PublicKey   string // "ssh-ed25519 AAAA... walhub-pushmirror" (public)
+	PublicKey   string // "ssh-ed25519 AAAA... spindle-pushmirror" (public)
 	Fingerprint string // "SHA256:..." (public)
 }
 
@@ -37,7 +37,7 @@ type GeneratedKey struct {
 // upstream-controlled text never reaches key material).
 func GenerateKeypair(comment string) (*GeneratedKey, error) {
 	if strings.TrimSpace(comment) == "" {
-		comment = "walhub-pushmirror"
+		comment = "spindle-pushmirror"
 	}
 	pub, priv, err := ed25519.GenerateKey(rand.Reader)
 	if err != nil {

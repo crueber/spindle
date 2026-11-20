@@ -22,19 +22,19 @@ import (
 
 	"golang.org/x/net/html"
 
-	"github.com/crueber/walhub/internal/api"
-	"github.com/crueber/walhub/internal/config"
-	"github.com/crueber/walhub/internal/git"
-	"github.com/crueber/walhub/internal/identity"
-	"github.com/crueber/walhub/internal/issues"
-	"github.com/crueber/walhub/internal/mirror"
-	"github.com/crueber/walhub/internal/pages"
-	"github.com/crueber/walhub/internal/pulls"
-	"github.com/crueber/walhub/internal/releases"
-	"github.com/crueber/walhub/internal/repoimport"
-	"github.com/crueber/walhub/internal/server/auth"
-	"github.com/crueber/walhub/internal/store"
-	"github.com/crueber/walhub/internal/wal"
+	"github.com/crueber/spindle/internal/api"
+	"github.com/crueber/spindle/internal/config"
+	"github.com/crueber/spindle/internal/git"
+	"github.com/crueber/spindle/internal/identity"
+	"github.com/crueber/spindle/internal/issues"
+	"github.com/crueber/spindle/internal/mirror"
+	"github.com/crueber/spindle/internal/pages"
+	"github.com/crueber/spindle/internal/pulls"
+	"github.com/crueber/spindle/internal/releases"
+	"github.com/crueber/spindle/internal/repoimport"
+	"github.com/crueber/spindle/internal/server/auth"
+	"github.com/crueber/spindle/internal/store"
+	"github.com/crueber/spindle/internal/wal"
 )
 
 // --- fakes -------------------------------------------------------------------
@@ -1494,8 +1494,8 @@ func TestFormsCompareHistories(t *testing.T) {
 
 func TestFormsOriginCheck(t *testing.T) {
 	r := httptest.NewRequest(http.MethodPost, "/x", nil)
-	r.Host = "walhub.localhost:8080"
-	r.Header.Set("Origin", "http://walhub.localhost:8080")
+	r.Host = "spindle.localhost:8080"
+	r.Header.Set("Origin", "http://spindle.localhost:8080")
 	if !formsOriginOK(r) {
 		t.Fatal("same-origin rejected")
 	}
@@ -2201,7 +2201,7 @@ func TestFormsAllPagesRequireAuth(t *testing.T) {
 
 func TestFormsSameHostParseError(t *testing.T) {
 	r := httptest.NewRequest(http.MethodPost, "/x", nil)
-	r.Host = "walhub.localhost"
+	r.Host = "spindle.localhost"
 	r.Header.Set("Origin", "http://[::1")
 	if formsOriginOK(r) {
 		t.Fatal("unparseable origin accepted")

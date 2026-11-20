@@ -8,7 +8,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/crueber/walhub/internal/server/auth"
+	"github.com/crueber/spindle/internal/server/auth"
 )
 
 // testHandler builds a Handler over a seeded service; auth resolves

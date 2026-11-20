@@ -5,11 +5,11 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/crueber/walhub/internal/config"
-	walgit "github.com/crueber/walhub/internal/git"
-	"github.com/crueber/walhub/internal/identity"
-	"github.com/crueber/walhub/internal/policy"
-	"github.com/crueber/walhub/internal/server/auth"
+	"github.com/crueber/spindle/internal/config"
+	walgit "github.com/crueber/spindle/internal/git"
+	"github.com/crueber/spindle/internal/identity"
+	"github.com/crueber/spindle/internal/policy"
+	"github.com/crueber/spindle/internal/server/auth"
 )
 
 // --- role helpers (P6, same ladder as internal/issues) -----------------------

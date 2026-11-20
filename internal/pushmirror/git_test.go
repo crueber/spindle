@@ -66,10 +66,10 @@ func TestPushFileBare(t *testing.T) {
 }
 
 // Forge-internal refs must never leave the serving copy: refs/pull/**
-// (walhub's own PR heads — ordinary WAL ref state, materialized by every
+// (spindle's own PR heads — ordinary WAL ref state, materialized by every
 // Serve sync) plus the S4-dropped namespaces stay out, while user
 // namespaces (heads/tags/custom) ship. A deleted branch prunes upstream
-// (walhub is the primary).
+// (spindle is the primary).
 func TestPushSkipsInternalRefsAndPrunes(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
 	defer cancel()
@@ -169,7 +169,7 @@ func TestSSHCommandMaterialization(t *testing.T) {
 }
 
 func TestCredentialArgvPinned(t *testing.T) {
-	argv := credentialArgv("https", "example.com", "WALHUB_PUSHMIRROR_TOKEN", "WALHUB_PUSHMIRROR_USER")
+	argv := credentialArgv("https", "example.com", "SPINDLE_PUSHMIRROR_TOKEN", "SPINDLE_PUSHMIRROR_USER")
 	joined := strings.Join(argv, " ")
 	if !strings.Contains(joined, "credential.https://example.com.helper") {
 		t.Errorf("helper not host-pinned: %q", joined)
@@ -177,8 +177,8 @@ func TestCredentialArgvPinned(t *testing.T) {
 	if strings.Index(joined, `"="`) < 0 && !strings.Contains(joined, "-c") {
 		t.Errorf("clear-then-set order missing: %q", joined)
 	}
-	if !strings.Contains(joined, "username=$WALHUB_PUSHMIRROR_USER") ||
-		!strings.Contains(joined, "password=$WALHUB_PUSHMIRROR_TOKEN") {
+	if !strings.Contains(joined, "username=$SPINDLE_PUSHMIRROR_USER") ||
+		!strings.Contains(joined, "password=$SPINDLE_PUSHMIRROR_TOKEN") {
 		t.Errorf("credential halves must ride env, not argv: %q", joined)
 	}
 }
@@ -218,10 +218,10 @@ func TestPushHostileUsernameRidesEnvOnly(t *testing.T) {
 			t.Errorf("username reached argv (shell-injection surface): %q", line)
 		}
 	}
-	if !strings.Contains(string(raw), "WALHUB_PUSHMIRROR_USER="+evil) {
+	if !strings.Contains(string(raw), "SPINDLE_PUSHMIRROR_USER="+evil) {
 		t.Errorf("username missing from child env:\n%s", raw)
 	}
-	if !strings.Contains(string(raw), "WALHUB_PUSHMIRROR_TOKEN=s3cret") {
+	if !strings.Contains(string(raw), "SPINDLE_PUSHMIRROR_TOKEN=s3cret") {
 		t.Errorf("secret missing from child env:\n%s", raw)
 	}
 	if !strings.Contains(string(raw), "--prune") ||

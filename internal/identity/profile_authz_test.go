@@ -4,7 +4,7 @@ import (
 	"context"
 	"testing"
 
-	"github.com/crueber/walhub/internal/server/auth"
+	"github.com/crueber/spindle/internal/server/auth"
 )
 
 // The OwnerEditor seam (Forgejo #234): org owners edit the org-namespace

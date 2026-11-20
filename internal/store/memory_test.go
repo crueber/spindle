@@ -282,7 +282,7 @@ func TestMemoryURLsAndKnobs(t *testing.T) {
 	mustPut(t, m, "k", "v", PutOptions{})
 
 	u, err := m.SignedGetURL(ctx, "k", time.Minute)
-	if err != nil || u == nil || !strings.HasPrefix(*u, "https://memory.walhub.invalid/k?") {
+	if err != nil || u == nil || !strings.HasPrefix(*u, "https://memory.spindle.invalid/k?") {
 		t.Fatalf("SignedGetURL: %v %v", u, err)
 	}
 	// Accel off by default.

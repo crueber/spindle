@@ -10,8 +10,8 @@ package webui
 import (
 	"time"
 
-	"github.com/crueber/walhub/internal/api"
-	"github.com/crueber/walhub/internal/config"
+	"github.com/crueber/spindle/internal/api"
+	"github.com/crueber/spindle/internal/config"
 )
 
 // Env is the composition-provided environment. API carries the core seams

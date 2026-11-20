@@ -31,8 +31,8 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/crueber/walhub/internal/store"
-	"github.com/crueber/walhub/internal/wal"
+	"github.com/crueber/spindle/internal/store"
+	"github.com/crueber/spindle/internal/wal"
 )
 
 // KindMirrorHeal is the Seam 5 task kind for heal fires, registered

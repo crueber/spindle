@@ -21,7 +21,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/crueber/walhub/internal/config"
+	"github.com/crueber/spindle/internal/config"
 )
 
 // s3MinCopyPart is the minimum UploadPartCopy part size except for the last

@@ -30,7 +30,7 @@
 //   - Conflict is CAS-decided: create-against-present fails in the publish
 //     verify step and maps to 409, race-safe without a check-then-act.
 //   - Tagger identity is server-rendered from the authed principal
-//     (`<name> <<name>@walhub.local>`, wall-clock + local tz); messages are
+//     (`<name> <<name>@spindle.local>`, wall-clock + local tz); messages are
 //     capped at MaxTagMessageLen and normalized to one trailing newline.
 //
 // ### Concurrency

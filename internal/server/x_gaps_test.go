@@ -21,10 +21,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/crueber/walhub/internal/config"
-	"github.com/crueber/walhub/internal/git"
-	"github.com/crueber/walhub/internal/store"
-	"github.com/crueber/walhub/internal/wal"
+	"github.com/crueber/spindle/internal/config"
+	"github.com/crueber/spindle/internal/git"
+	"github.com/crueber/spindle/internal/store"
+	"github.com/crueber/spindle/internal/wal"
 )
 
 // --- smart.go remaining branches ---------------------------------------------------
@@ -430,7 +430,7 @@ func TestRequireAuthMatrix(t *testing.T) {
 	// honored in oidc mode (§8.3), so flip the mode.
 	s.cfg.Server.Auth.Mode = "oidc"
 	s.cfg.Server.Auth.SessionSecret = "0123456789abcdef0123456789abcdef"
-	s.cfg.Server.Auth.OAuthClientID = "walhub"
+	s.cfg.Server.Auth.OAuthClientID = "spindle"
 	s.cfg.Server.Auth.OAuthClientSecret = "sekrit"
 	s.authSvc = NewAuthService(&s.cfg.Server.Auth, s.Now)
 	svc := s.authSvc
@@ -639,7 +639,7 @@ func TestJWKSVerifyES256AndClaims(t *testing.T) {
 	j.mu.Unlock()
 
 	a := &config.Auth{
-		Issuer: iss.srvURL(), OAuthClientID: "walhub",
+		Issuer: iss.srvURL(), OAuthClientID: "spindle",
 		Audiences: []string{"extra"}, AllowedDomains: []string{"example.com"},
 	}
 	mintES := func(claims map[string]any) string {
@@ -656,7 +656,7 @@ func TestJWKSVerifyES256AndClaims(t *testing.T) {
 	}
 	tv := true
 	base := map[string]any{
-		"iss": iss.srvURL(), "aud": "walhub",
+		"iss": iss.srvURL(), "aud": "spindle",
 		"exp": time.Now().Add(time.Hour).Unix(), "iat": time.Now().Unix(),
 		"email": "alice@example.com", "email_verified": tv,
 	}
@@ -670,7 +670,7 @@ func TestJWKSVerifyES256AndClaims(t *testing.T) {
 	// Tamper the payload → signature no longer matches.
 	parts := strings.Split(tok, ".")
 	parts[1] = b64url(jsonMustMarshal(map[string]any{
-		"iss": iss.srvURL(), "aud": "walhub", "exp": time.Now().Add(time.Hour).Unix(),
+		"iss": iss.srvURL(), "aud": "spindle", "exp": time.Now().Add(time.Hour).Unix(),
 		"iat": time.Now().Unix(), "email": "eve@example.com", "email_verified": tv}))
 	if _, aerr := j.Verify(context.Background(), strings.Join(parts, "."), a, false, ""); aerr == nil {
 		t.Fatal("tampered payload must fail")
@@ -689,7 +689,7 @@ func TestJWKSVerifyES256AndClaims(t *testing.T) {
 	for kk, vv := range base {
 		arr[kk] = vv
 	}
-	arr["aud"] = []string{"walhub", "other"}
+	arr["aud"] = []string{"spindle", "other"}
 	if _, aerr := j.Verify(context.Background(), mintES(arr), a, false, ""); aerr != nil {
 		t.Fatalf("array aud: %v", aerr)
 	}

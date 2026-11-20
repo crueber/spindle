@@ -42,7 +42,7 @@ func TestIntegrationFastImportIngestAndRefs(t *testing.T) {
 		}
 	}
 	mk("init", "-q", "-b", "main", ".")
-	os.WriteFile(filepath.Join(fixture, "f.txt"), []byte("hello walhub\n"), 0o644)
+	os.WriteFile(filepath.Join(fixture, "f.txt"), []byte("hello spindle\n"), 0o644)
 	mk("add", ".")
 	mk("commit", "-q", "-m", "c1")
 	os.WriteFile(filepath.Join(fixture, "g.txt"), []byte("second"), 0o644)

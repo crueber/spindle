@@ -16,8 +16,8 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/crueber/walhub/internal/git"
-	"github.com/crueber/walhub/internal/store"
+	"github.com/crueber/spindle/internal/git"
+	"github.com/crueber/spindle/internal/store"
 )
 
 // ---- pack index parsing ------------------------------------------------------------
@@ -69,7 +69,7 @@ func TestParsePackIndex_ErrorVectors(t *testing.T) {
 		t.Fatalf("bad large offset: err = %v", err)
 	}
 	// openPackIndex on a missing file → IO error.
-	if _, err := openPackIndex("/nonexistent-walhub/x.idx"); err == nil {
+	if _, err := openPackIndex("/nonexistent-spindle/x.idx"); err == nil {
 		t.Fatal("openPackIndex on missing file succeeded")
 	}
 	if trimExt("plain") != "plain" || trimExt("a.pack") != "a" || trimExt("idx") != "idx" {
@@ -267,7 +267,7 @@ func TestRemoteEngine_DecodeHeaderAndCache(t *testing.T) {
 	}
 	// Header walks the delta chain to the base without inflating.
 	hKind, hSize, err := eng.header(ctx, ix, deltaOffOf(t))
-	if err != nil || hKind != "blob" || hSize != int64(len("hello world, hello walhub!\n")) {
+	if err != nil || hKind != "blob" || hSize != int64(len("hello world, hello spindle!\n")) {
 		t.Fatalf("header = %s %d %v", hKind, hSize, err)
 	}
 	// headerAt on a real object.

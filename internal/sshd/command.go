@@ -10,7 +10,7 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/crueber/walhub/internal/git"
+	"github.com/crueber/spindle/internal/git"
 	gossh "golang.org/x/crypto/ssh"
 )
 
@@ -60,7 +60,7 @@ func hostSigner(cfg Config) (gossh.Signer, error) {
 		if err != nil {
 			return nil, fmt.Errorf("server.ssh host key generation: %w", err)
 		}
-		block, err := gossh.MarshalPrivateKey(gen, "walhub ssh host key")
+		block, err := gossh.MarshalPrivateKey(gen, "spindle ssh host key")
 		if err != nil {
 			return nil, fmt.Errorf("server.ssh host key marshal: %w", err)
 		}

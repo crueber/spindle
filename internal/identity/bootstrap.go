@@ -4,7 +4,7 @@ import (
 	"context"
 	"time"
 
-	"github.com/crueber/walhub/internal/store"
+	"github.com/crueber/spindle/internal/store"
 )
 
 // Bootstrap implements the Seam 5 access-bootstrap migration (01 §10):

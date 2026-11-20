@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/crueber/walhub/internal/server/auth"
+	"github.com/crueber/spindle/internal/server/auth"
 )
 
 // Forgejo #613 (option a): draft PRs — open-as-draft plus mark-ready /

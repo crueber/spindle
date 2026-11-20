@@ -5,7 +5,7 @@ import (
 	"sort"
 	"time"
 
-	"github.com/crueber/walhub/internal/store/proto"
+	"github.com/crueber/spindle/internal/store/proto"
 )
 
 // Plan windows (§8.10): what can be missing at all. Fulls — the `keep` newest

@@ -8,8 +8,8 @@ import (
 	"context"
 	"time"
 
-	"github.com/crueber/walhub/internal/git"
-	"github.com/crueber/walhub/internal/wal"
+	"github.com/crueber/spindle/internal/git"
+	"github.com/crueber/spindle/internal/wal"
 )
 
 // WalAdapter adapts a wal.Registry to WalView by opening repo handles.

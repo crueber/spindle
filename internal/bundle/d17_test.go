@@ -4,7 +4,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/crueber/walhub/internal/store/proto"
+	"github.com/crueber/spindle/internal/store/proto"
 )
 
 // TestD17RefusalText pins the exact §8.13 refusal text (pkt ERR).

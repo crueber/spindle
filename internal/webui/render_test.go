@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/crueber/walhub/internal/config"
+	"github.com/crueber/spindle/internal/config"
 )
 
 // newBare builds a provider with the real templates and no wired services —

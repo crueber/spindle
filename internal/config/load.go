@@ -10,21 +10,21 @@ import (
 )
 
 // ConfigFileName / ConfigAliasName are the config file names inside the data
-// dir (divergence D5/D8): walhub.toml is written by setup, walgit.toml is
+// dir (divergence D5/D8): spindle.toml is written by setup, walgit.toml is
 // accepted as an alias (checked second).
 const (
-	ConfigFileName    = "walhub.toml"
+	ConfigFileName    = "spindle.toml"
 	ConfigAliasName   = "walgit.toml"
 	DevNullConfigPath = "/dev/null"
 )
 
 // ConfigFilePointer resolves the config-file pointer when --config is absent:
-// WALHUB_CONFIG primary, WALGIT_CONFIG legacy fallback (§3.1 step 2, §6.1).
+// SPINDLE_CONFIG primary, WALGIT_CONFIG legacy fallback (§3.1 step 2, §6.1).
 func ConfigFilePointer(getenv func(string) string) (path string, ok bool) {
 	if getenv == nil {
 		getenv = os.Getenv
 	}
-	if p := getenv("WALHUB_CONFIG"); p != "" {
+	if p := getenv("SPINDLE_CONFIG"); p != "" {
 		return p, true
 	}
 	if p := getenv("WALGIT_CONFIG"); p != "" {
@@ -37,14 +37,14 @@ func ConfigFilePointer(getenv func(string) string) (path string, ok bool) {
 // location candidates: compiled-in defaults, then the first existing file
 // (a missing default file is the zero-config first run, NOT an error), then
 // the env overlay, then PORT lockstep, then fail-closed validation.
-// filePaths are candidates in priority order — e.g. [<data-dir>/walhub.toml,
+// filePaths are candidates in priority order — e.g. [<data-dir>/spindle.toml,
 // <data-dir>/walgit.toml].
 func Load(filePaths []string, env func(string) string) (*Config, []Override, error) {
 	return load(filePaths, false, env)
 }
 
 // LoadExplicit is the ladder for an explicitly-named config (--config or the
-// WALHUB_CONFIG/WALGIT_CONFIG pointer): a missing file is fatal, and
+// SPINDLE_CONFIG/WALGIT_CONFIG pointer): a missing file is fatal, and
 // /dev/null forces defaults+env only.
 func LoadExplicit(path string, env func(string) string) (*Config, []Override, error) {
 	return load([]string{path}, true, env)

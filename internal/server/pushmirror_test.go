@@ -13,9 +13,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/crueber/walhub/internal/git"
-	"github.com/crueber/walhub/internal/server/auth"
-	"github.com/crueber/walhub/internal/wal"
+	"github.com/crueber/spindle/internal/git"
+	"github.com/crueber/spindle/internal/server/auth"
+	"github.com/crueber/spindle/internal/wal"
 )
 
 func onPushServer(t *testing.T, eng *fakeEngine, hook func(id git.RepoId)) *Server {

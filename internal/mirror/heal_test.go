@@ -14,10 +14,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/crueber/walhub/internal/config"
-	"github.com/crueber/walhub/internal/repoimport"
-	"github.com/crueber/walhub/internal/store"
-	"github.com/crueber/walhub/internal/wal"
+	"github.com/crueber/spindle/internal/config"
+	"github.com/crueber/spindle/internal/repoimport"
+	"github.com/crueber/spindle/internal/store"
+	"github.com/crueber/spindle/internal/wal"
 )
 
 // hangStore hangs pack-file GETs (the /wal/ objects) once armed — the

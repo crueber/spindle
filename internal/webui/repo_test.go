@@ -18,11 +18,11 @@ import (
 
 	"golang.org/x/net/html"
 
-	"github.com/crueber/walhub/internal/api"
-	"github.com/crueber/walhub/internal/config"
-	"github.com/crueber/walhub/internal/git"
-	"github.com/crueber/walhub/internal/pages"
-	"github.com/crueber/walhub/internal/server/auth"
+	"github.com/crueber/spindle/internal/api"
+	"github.com/crueber/spindle/internal/config"
+	"github.com/crueber/spindle/internal/git"
+	"github.com/crueber/spindle/internal/pages"
+	"github.com/crueber/spindle/internal/server/auth"
 )
 
 // --- fakes ------------------------------------------------------------------
@@ -44,6 +44,9 @@ type repoFakeView struct {
 
 	commits    api.CommitPage
 	commitsErr error
+	refs       []api.Ref
+	refsErr    error
+	refsN      int
 
 	detail    api.CommitDetail
 	commitErr error
@@ -111,7 +114,11 @@ func (v *repoFakeView) Head(context.Context, git.RepoId) (api.Ref, bool, error) 
 }
 
 func (v *repoFakeView) RefList(context.Context, git.RepoId, string, api.RefQuery) ([]api.Ref, bool, error) {
-	return nil, false, nil
+	v.refsN++
+	if v.refsErr != nil {
+		return nil, false, v.refsErr
+	}
+	return v.refs, false, nil
 }
 
 func (v *repoFakeView) Tree(_ context.Context, _ git.RepoId, rev, path string) (api.TreeResult, error) {
@@ -249,7 +256,7 @@ func newRepoFixture(t *testing.T, anonRead bool) *repoFixture {
 		t:         t,
 		anonRead:  anonRead,
 		view:      newRepoFake(),
-		reg:       &repoFakeRegistry{exists: map[string]bool{"demo/walhub": true}},
+		reg:       &repoFakeRegistry{exists: map[string]bool{"demo/spindle": true}},
 		principal: auth.Anonymous(),
 	}
 	cfg := &config.Config{}
@@ -420,13 +427,12 @@ func TestRepoTreeRootRendersListing(t *testing.T) {
 		},
 		Readme: &api.Readme{Name: "README.md", Contents: "# Hello\n\nWelcome."},
 	}
-	body := f.mustGet("/demo/walhub", http.StatusOK)
+	body := f.mustGet("/demo/spindle", http.StatusOK)
 
 	for _, want := range []string{
 		`class="repo-header`,
-		`/demo/walhub/blob/main/main.go`,
-		`/demo/walhub/tree/main/pkg`,
-		`.rw-r--r--`,
+		`/demo/spindle/blob/main/main.go`,
+		`/demo/spindle/tree/main/pkg`,
 		`<h1>Hello</h1>`,
 		`Welcome.`,
 		`README.md`,
@@ -435,9 +441,13 @@ func TestRepoTreeRootRendersListing(t *testing.T) {
 			t.Errorf("tree page missing %q", want)
 		}
 	}
-	// The mode cell ships hidden below sm: (phones carry icons instead).
-	if !strings.Contains(body, "hidden sm:table-cell") {
-		t.Error("tree page lost the narrow-width mode column rule")
+	// The Unix mode is no longer a column: the type icon carries the kind and
+	// the wrapper scrolls in place (Precision Dark §1 F5, issue #275).
+	if strings.Contains(body, `.rw-r--r--`) {
+		t.Error("tree page still renders the Unix mode column")
+	}
+	if !strings.Contains(body, "overflow-x-auto") {
+		t.Error("tree page lost the in-place scroll wrapper")
 	}
 	// Tab strip: Code..Settings in order, Code active at the root.
 	if got, want := strings.Join(tabIDs(t, body), ","), "code,commits,issues,pulls,releases,settings"; got != want {
@@ -459,21 +469,21 @@ func TestRepoTreeSubpathBreadcrumbKeepsShortRef(t *testing.T) {
 		Path:    "pkg/inner",
 		Entries: []api.TreeEntry{{Name: "a.go", Type: "blob", Mode: "100644", Size: 12, SHA: strings.Repeat("d", 40)}},
 	}
-	body := f.mustGet("/demo/walhub/tree/main/pkg/inner", http.StatusOK)
+	body := f.mustGet("/demo/spindle/tree/main/pkg/inner", http.StatusOK)
 	for _, want := range []string{
-		`/demo/walhub/tree/main/pkg`,
-		`<strong>inner</strong>`,
-		`/demo/walhub/blob/main/pkg/inner/a.go`,
+		`/demo/spindle/tree/main/pkg`,
+		`>inner</strong>`,
+		`/demo/spindle/blob/main/pkg/inner/a.go`,
 	} {
 		if !strings.Contains(body, want) {
 			t.Errorf("subpath tree missing %q", want)
 		}
 	}
-	if strings.Contains(body, `href="/demo/walhub/tree/refs/heads`) {
+	if strings.Contains(body, `href="/demo/spindle/tree/refs/heads`) {
 		t.Error("breadcrumb links leaked the full ref name")
 	}
 	// /tree (no rest) answers the root listing too.
-	if code, _ := f.get("/demo/walhub/tree"); code != http.StatusOK {
+	if code, _ := f.get("/demo/spindle/tree"); code != http.StatusOK {
 		t.Errorf("/tree = %d, want 200", code)
 	}
 }
@@ -490,7 +500,7 @@ func TestRepoTreeDoctabSelection(t *testing.T) {
 	}
 	// README first, selected by default, rendered from the probed payload
 	// (zero blob reads).
-	body := f.mustGet("/demo/walhub", http.StatusOK)
+	body := f.mustGet("/demo/spindle", http.StatusOK)
 	if !strings.Contains(body, `aria-current="page"`) {
 		t.Error("no selected doc tab")
 	}
@@ -502,7 +512,7 @@ func TestRepoTreeDoctabSelection(t *testing.T) {
 	}
 	// Selecting the other tab fetches the blob and renders markdown.
 	f.view.blob = api.BlobResult{Name: "guide.md", Path: "guide.md", Size: 8, Contents: []byte("## Guide")}
-	body = f.mustGet("/demo/walhub?doc=guide.md", http.StatusOK)
+	body = f.mustGet("/demo/spindle?doc=guide.md", http.StatusOK)
 	if !strings.Contains(body, "<h2>Guide</h2>") {
 		t.Error("selected doc body missing")
 	}
@@ -514,11 +524,11 @@ func TestRepoTreeDoctabSelection(t *testing.T) {
 func TestRepoTreeEmptyRepoIsAGuide(t *testing.T) {
 	f := newRepoFixture(t, true)
 	f.view.summary = api.SummaryData{Health: api.RepoHealthEmpty}
-	body := f.mustGet("/demo/walhub", http.StatusOK)
+	body := f.mustGet("/demo/spindle", http.StatusOK)
 	for _, want := range []string{
 		`This repository is empty`,
-		`git clone http://example.test/demo/walhub.git`,
-		`git remote add origin http://example.test/demo/walhub.git`,
+		`git clone http://example.test/demo/spindle.git`,
+		`git remote add origin http://example.test/demo/spindle.git`,
 		`git push -u origin main`,
 		`data-copy="#cmd-clone"`,
 		`>empty<`,
@@ -542,7 +552,7 @@ func TestRepoEmptyMirrorNeverShowsPushGuide(t *testing.T) {
 			return api.MirrorView{UpstreamURL: "https://upstream.example/x.git", Schedule: "daily"}, true
 		},
 	}
-	body := f.mustGet("/demo/walhub", http.StatusOK)
+	body := f.mustGet("/demo/spindle", http.StatusOK)
 	if !strings.Contains(body, "This repository is a mirror") {
 		t.Error("mirror guide missing")
 	}
@@ -559,7 +569,7 @@ func TestRepoBlobPlainCode(t *testing.T) {
 		Ref: "refs/heads/main", Name: "main.go", Path: "main.go", Size: 25,
 		Contents: []byte("package main\n\nfunc main() {}\n"),
 	}
-	body := f.mustGet("/demo/walhub/blob/main/main.go", http.StatusOK)
+	body := f.mustGet("/demo/spindle/blob/main/main.go", http.StatusOK)
 	for _, want := range []string{
 		`aria-label="File content by line"`,
 		`data-line-select`,
@@ -567,7 +577,7 @@ func TestRepoBlobPlainCode(t *testing.T) {
 		`data-line-no`,
 		`id="L3"`,
 		`tok-kw`,
-		`/demo/walhub/api/blob/main/main.go?raw`,
+		`/demo/spindle/api/blob/main/main.go?raw`,
 		`<span class="chip">go</span>`,
 	} {
 		if !strings.Contains(body, want) {
@@ -588,13 +598,13 @@ func TestRepoBlobPlainCode(t *testing.T) {
 func TestRepoBlobEscapesAndEmptySplit(t *testing.T) {
 	f := newRepoFixture(t, true)
 	f.view.blob = api.BlobResult{Ref: "refs/heads/main", Name: "a.txt", Path: "a.txt", Size: 4, Contents: []byte("a\nb\n")}
-	body := f.mustGet("/demo/walhub/blob/main/a.txt", http.StatusOK)
+	body := f.mustGet("/demo/spindle/blob/main/a.txt", http.StatusOK)
 	if rows := byClass(t, body, "blob-row"); len(rows) != 2 {
 		t.Fatalf("rows = %d, want 2 for \"a\\nb\\n\"", len(rows))
 	}
 
 	f.view.blob = api.BlobResult{Ref: "refs/heads/main", Name: "x.html", Path: "x.html", Size: 20, Contents: []byte("<script>alert(1)</script>")}
-	body = f.mustGet("/demo/walhub/blob/main/x.html", http.StatusOK)
+	body = f.mustGet("/demo/spindle/blob/main/x.html", http.StatusOK)
 	if strings.Contains(body, "<script>alert(1)</script>") {
 		t.Error("blob page rendered raw script markup")
 	}
@@ -609,7 +619,7 @@ func TestRepoBlobEscapesAndEmptySplit(t *testing.T) {
 func TestRepoBlobPlaceholders(t *testing.T) {
 	f := newRepoFixture(t, true)
 	f.view.blob = api.BlobResult{Name: "big.bin", Path: "big.bin", Size: 5 << 20, TooLarge: true}
-	body := f.mustGet("/demo/walhub/blob/main/big.bin", http.StatusOK)
+	body := f.mustGet("/demo/spindle/blob/main/big.bin", http.StatusOK)
 	if !strings.Contains(body, "This file is too large to render") {
 		t.Error("too-large copy missing")
 	}
@@ -618,7 +628,7 @@ func TestRepoBlobPlaceholders(t *testing.T) {
 	}
 
 	f.view.blob = api.BlobResult{Name: "img.png", Path: "img.png", Size: 2048, Binary: true}
-	body = f.mustGet("/demo/walhub/blob/main/img.png", http.StatusOK)
+	body = f.mustGet("/demo/spindle/blob/main/img.png", http.StatusOK)
 	if !strings.Contains(body, "binary file, 2k") {
 		t.Errorf("binary copy missing/wrong: %.400s", body)
 	}
@@ -630,7 +640,7 @@ func TestRepoBlobPlaceholders(t *testing.T) {
 func TestRepoBlobMarkdownPreviewAndCode(t *testing.T) {
 	f := newRepoFixture(t, true)
 	f.view.blob = api.BlobResult{Name: "README.md", Path: "README.md", Size: 20, Contents: []byte("# Title\n\n`x`")}
-	body := f.mustGet("/demo/walhub/blob/main/README.md", http.StatusOK)
+	body := f.mustGet("/demo/spindle/blob/main/README.md", http.StatusOK)
 	if !strings.Contains(body, "<h1>Title</h1>") {
 		t.Error("markdown preview body missing")
 	}
@@ -638,7 +648,7 @@ func TestRepoBlobMarkdownPreviewAndCode(t *testing.T) {
 		t.Error("code-view link missing")
 	}
 
-	body = f.mustGet("/demo/walhub/blob/main/README.md?view=code", http.StatusOK)
+	body = f.mustGet("/demo/spindle/blob/main/README.md?view=code", http.StatusOK)
 	if !strings.Contains(body, "code-view") {
 		t.Error("code view did not render")
 	}
@@ -668,10 +678,10 @@ func TestRepoCommitsListAndPager(t *testing.T) {
 	f := newRepoFixture(t, true)
 	sha := strings.Repeat("a", 40)
 	f.view.commits = api.CommitPage{Ref: "refs/heads/main", SHA: sha, Commits: commitsFixture(sha), More: true}
-	body := f.mustGet("/demo/walhub/commits?path=src&ref=main&skip=35", http.StatusOK)
+	body := f.mustGet("/demo/spindle/commits?path=src&ref=main&skip=35", http.StatusOK)
 	for _, want := range []string{
 		"fix the thing",
-		`/demo/walhub/commit/` + sha,
+		`/demo/spindle/commit/` + sha,
 		"history of <code",
 		"1 trailers",
 		`aria-current="page"`,
@@ -705,7 +715,7 @@ func TestRepoCommitsEmptyWindowAndGraph(t *testing.T) {
 	f := newRepoFixture(t, true)
 	sha := strings.Repeat("a", 40)
 	f.view.commits = api.CommitPage{Ref: "refs/heads/main", SHA: sha}
-	body := f.mustGet("/demo/walhub/commits", http.StatusOK)
+	body := f.mustGet("/demo/spindle/commits", http.StatusOK)
 	if !strings.Contains(body, "No commits in this view.") {
 		t.Error("empty window copy missing")
 	}
@@ -717,7 +727,7 @@ func TestRepoCommitsEmptyWindowAndGraph(t *testing.T) {
 	}
 
 	f.view.commits = api.CommitPage{Ref: "refs/heads/main", SHA: sha, Commits: commitsFixture(sha)}
-	body = f.mustGet("/demo/walhub/commits?graph=1", http.StatusOK)
+	body = f.mustGet("/demo/spindle/commits?graph=1", http.StatusOK)
 	if !strings.Contains(body, "graph-on") {
 		t.Error("?graph=1 did not add graph-on")
 	}
@@ -755,12 +765,12 @@ func TestRepoCommitDetail(t *testing.T) {
 		Stats: []api.Stat{{Path: "a.txt", Additions: 1, Deletions: 1}},
 		Patch: patch,
 	}
-	body := f.mustGet("/demo/walhub/commit/"+sha, http.StatusOK)
+	body := f.mustGet("/demo/spindle/commit/"+sha, http.StatusOK)
 	for _, want := range []string{
 		"fix the thing",
 		"merge parents (2)",
 		`href="https://example.test/x"`,
-		`/demo/walhub/commit/` + strings.Repeat("b", 40),
+		`/demo/spindle/commit/` + strings.Repeat("b", 40),
 		"&lt;b&gt;x&lt;/b&gt;",
 		"3 trailers",
 		"Merge queue",
@@ -797,7 +807,7 @@ func TestRepoCommitBinaryFile(t *testing.T) {
 		Stats:  []api.Stat{{Path: "img.png", Additions: -1, Deletions: -1}},
 		Patch:  "diff --git a/img.png b/img.png\nnew file mode 100644\nindex 000..111\nBinary files /dev/null and b/img.png differ\n",
 	}
-	body := f.mustGet("/demo/walhub/commit/"+sha, http.StatusOK)
+	body := f.mustGet("/demo/spindle/commit/"+sha, http.StatusOK)
 	if !strings.Contains(body, "Binary file not shown") {
 		t.Error("binary file row missing")
 	}
@@ -810,8 +820,8 @@ func TestRepoCommitBinaryFile(t *testing.T) {
 
 func walFixture() api.OverviewData {
 	return api.OverviewData{
-		Repo:     "demo/walhub",
-		CloneURL: "http://example.test/demo/walhub.git",
+		Repo:     "demo/spindle",
+		CloneURL: "http://example.test/demo/spindle.git",
 		Hostname: "node-1",
 		Health: api.Health{
 			Status: "degraded",
@@ -850,7 +860,7 @@ func TestRepoWALRendersCards(t *testing.T) {
 	}
 	f.s = f.newServer(f.cfgForTest())
 	f.view.overview = walFixture()
-	body := f.mustGet("/demo/walhub/wal", http.StatusOK)
+	body := f.mustGet("/demo/spindle/wal", http.StatusOK)
 
 	for _, want := range []string{
 		"node-1",
@@ -886,7 +896,7 @@ func TestRepoWALRendersCards(t *testing.T) {
 		t.Error("segments default should be the newest 5 only")
 	}
 	// ?all=1 widens the segment table.
-	body = f.mustGet("/demo/walhub/wal?all=1", http.StatusOK)
+	body = f.mustGet("/demo/spindle/wal?all=1", http.StatusOK)
 	if !strings.Contains(body, "seg-1") || !strings.Contains(body, "newest 5") {
 		t.Error("?all=1 did not widen the segment table")
 	}
@@ -901,7 +911,7 @@ func TestRepoWALWithoutFsckOrBundles(t *testing.T) {
 		Hostname: "node-1",
 		Health:   api.Health{Status: "ok", Issues: []string{}},
 	}
-	body := f.mustGet("/demo/walhub/wal", http.StatusOK)
+	body := f.mustGet("/demo/spindle/wal", http.StatusOK)
 	if strings.Contains(body, "Object health") {
 		t.Error("fsck card rendered with no report")
 	}
@@ -937,18 +947,18 @@ func TestRepoMissingRepoIs404(t *testing.T) {
 func TestRepoMissingRefOrPathIs404(t *testing.T) {
 	f := newRepoFixture(t, true)
 	f.view.resolveErr = fmt.Errorf("%w: nope", api.ErrNotFound)
-	code, _ := f.get("/demo/walhub/tree/nope")
+	code, _ := f.get("/demo/spindle/tree/nope")
 	if code != http.StatusNotFound {
 		t.Errorf("missing ref = %d, want 404", code)
 	}
 	f.view.resolveErr = nil
 	f.view.treeErr = fmt.Errorf("%w: tree main:missing", api.ErrNotFound)
-	code, _ = f.get("/demo/walhub/tree/main/missing")
+	code, _ = f.get("/demo/spindle/tree/main/missing")
 	if code != http.StatusNotFound {
 		t.Errorf("missing path = %d, want 404", code)
 	}
 	// A bare ref is not a blob.
-	code, _ = f.get("/demo/walhub/blob/main")
+	code, _ = f.get("/demo/spindle/blob/main")
 	if code != http.StatusNotFound {
 		t.Errorf("blob without a path = %d, want 404", code)
 	}
@@ -957,7 +967,7 @@ func TestRepoMissingRefOrPathIs404(t *testing.T) {
 func TestRepoVisibilityGate(t *testing.T) {
 	// No identity surface + anonymous_read=false + anonymous → 401.
 	f := newRepoFixture(t, false)
-	if code, _ := f.get("/demo/walhub"); code != http.StatusUnauthorized {
+	if code, _ := f.get("/demo/spindle"); code != http.StatusUnauthorized {
 		t.Errorf("anonymous with anonymous_read=false = %d, want 401", code)
 	}
 
@@ -967,7 +977,7 @@ func TestRepoVisibilityGate(t *testing.T) {
 		return &auth.AuthError{Kind: auth.ErrForbidden, Why: "no access"}
 	}
 	f.rebind()
-	if code, _ := f.get("/demo/walhub"); code != http.StatusNotFound {
+	if code, _ := f.get("/demo/spindle"); code != http.StatusNotFound {
 		t.Errorf("visibility denial = %d, want 404", code)
 	}
 
@@ -976,7 +986,7 @@ func TestRepoVisibilityGate(t *testing.T) {
 	f = newRepoFixture(t, false)
 	f.checkRead = func(context.Context, string, string, auth.Principal) *auth.AuthError { return nil }
 	f.rebind()
-	if code, _ := f.get("/demo/walhub"); code != http.StatusOK {
+	if code, _ := f.get("/demo/spindle"); code != http.StatusOK {
 		t.Errorf("public repo under anonymous_read=false = %d, want 200", code)
 	}
 }
@@ -995,21 +1005,21 @@ func TestRepoMethodNotAllowed(t *testing.T) {
 	// provider (Serve → false), so the server's repo dispatch keeps answering
 	// 405 + Allow: GET, HEAD — the exact wire contract from before the move.
 	f := newRepoFixture(t, true)
-	req := httptest.NewRequest(http.MethodPost, "/demo/walhub", nil)
+	req := httptest.NewRequest(http.MethodPost, "/demo/spindle", nil)
 	rec := httptest.NewRecorder()
 	if f.s.Serve(rec, req) {
-		t.Fatalf("POST /demo/walhub was answered by the page provider (%d)", rec.Code)
+		t.Fatalf("POST /demo/spindle was answered by the page provider (%d)", rec.Code)
 	}
 }
 
 func TestRepoDotGitPaths(t *testing.T) {
 	f := newRepoFixture(t, true)
 	f.view.tree = api.TreeResult{Ref: "refs/heads/main", Entries: []api.TreeEntry{{Name: "a.go", Type: "blob", Mode: "100644", Size: 3, SHA: strings.Repeat("c", 40)}}}
-	body := f.mustGet("/demo/walhub.git", http.StatusOK)
-	if !strings.Contains(body, "/demo/walhub/blob/main/a.go") {
+	body := f.mustGet("/demo/spindle.git", http.StatusOK)
+	if !strings.Contains(body, "/demo/spindle/blob/main/a.go") {
 		t.Error(".git root did not render the repo (links lost the stripped name)")
 	}
-	if code, _ := f.get("/demo/walhub.git/tree/main"); code != http.StatusOK {
+	if code, _ := f.get("/demo/spindle.git/tree/main"); code != http.StatusOK {
 		t.Errorf("/o/r.git/tree/main = %d, want 200", code)
 	}
 }
@@ -1047,15 +1057,15 @@ func TestRepoTabGating(t *testing.T) {
 	feats.Releases = false
 	f.view.summary.Features = &feats
 	f.view.summary.Health = api.RepoHealthHealthy
-	body := f.mustGet("/demo/walhub", http.StatusOK)
+	body := f.mustGet("/demo/spindle", http.StatusOK)
 	if got := strings.Join(tabIDs(t, body), ","); got != "code,commits,pulls,settings" {
 		t.Errorf("tabs = %s, want code,commits,pulls,settings", got)
 	}
 
 	// A feature-disabled section re-highlights onto Code (#522). The path is
 	// owned by the collab group, so assert on the chrome model directly.
-	req := httptest.NewRequest(http.MethodGet, "/demo/walhub/issues", nil)
-	c := f.s.buildRepoChrome(req, repoRequest{id: git.RepoId{Owner: "demo", Name: "walhub"}, full: "demo/walhub"}, f.view.summary)
+	req := httptest.NewRequest(http.MethodGet, "/demo/spindle/issues", nil)
+	c := f.s.buildRepoChrome(req, repoRequest{id: git.RepoId{Owner: "demo", Name: "spindle"}, full: "demo/spindle"}, f.view.summary)
 	if got := activeTabOfRepoChrome(c); got != "code" {
 		t.Errorf("active tab on disabled /issues = %q, want code", got)
 	}
@@ -1072,7 +1082,7 @@ func TestRepoTabGating(t *testing.T) {
 			return api.CollabCounts{OpenIssues: 3, OpenPulls: 1}, true
 		},
 	}
-	body = f.mustGet("/demo/walhub", http.StatusOK)
+	body = f.mustGet("/demo/spindle", http.StatusOK)
 	ids := strings.Join(tabIDs(t, body), ",")
 	if !strings.Contains(ids, "checks") {
 		t.Errorf("Checks tab missing with has_checks=true: %s", ids)
@@ -1099,17 +1109,17 @@ func TestRepoChromeProjectsHeader(t *testing.T) {
 			return api.FsckInfo{MissingTotal: 9}, true
 		},
 	}
-	body := f.mustGet("/demo/walhub", http.StatusOK)
+	body := f.mustGet("/demo/spindle", http.StatusOK)
 	for _, want := range []string{
 		"a tiny repo",
 		`title="private — owner or organization members only"`,
-		"forked from",
+		"fork of",
 		"/up/parent",
 		"mirror · push",
 		"sync due",
 		"9 missing",
 		"Settings → WAL",
-		"http://example.test/demo/walhub.git",
+		"http://example.test/demo/spindle.git",
 	} {
 		if !strings.Contains(body, want) {
 			t.Errorf("header missing %q", want)
@@ -1117,17 +1127,24 @@ func TestRepoChromeProjectsHeader(t *testing.T) {
 	}
 }
 
-func TestRepoHeadPill(t *testing.T) {
+// The branch is chosen on the Code page toolbar (Precision Dark direction A):
+// the masthead carries no static ref pill — it would compete with the selector
+// that actually changes what you are looking at.
+func TestRepoBranchSelector(t *testing.T) {
 	f := newRepoFixture(t, true)
-	body := f.mustGet("/demo/walhub", http.StatusOK)
-	if !strings.Contains(body, `title="refs/heads/main">main</span>`) {
-		t.Error("head pill did not show the short ref with the full name as title")
+	f.view.refs = []api.Ref{{Name: "refs/heads/main", SHA: strings.Repeat("a", 40)}}
+	body := f.mustGet("/demo/spindle", http.StatusOK)
+	if !strings.Contains(body, `title="Switch branch"`) {
+		t.Error("code page has no branch selector")
 	}
-	// An unborn repo shows the empty pill (and the guide).
+	if !strings.Contains(body, `<span class="mono">main</span>`) {
+		t.Error("branch selector does not show the short ref")
+	}
+	// An unborn repo shows the empty marker (and the guide).
 	f.view.summary = api.SummaryData{Health: api.RepoHealthEmpty}
-	body = f.mustGet("/demo/walhub", http.StatusOK)
-	if !strings.Contains(body, `<span class="pill">empty</span>`) {
-		t.Error("unborn repo did not render the empty pill")
+	body = f.mustGet("/demo/spindle", http.StatusOK)
+	if !strings.Contains(body, `<span class="chip-neutral">empty</span>`) {
+		t.Error("unborn repo did not render the empty marker")
 	}
 }
 
@@ -1273,7 +1290,7 @@ func TestRepoOpenErrorPaths(t *testing.T) {
 		return auth.Anonymous(), nil
 	}})
 	rec := httptest.NewRecorder()
-	s.mux.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/demo/walhub", nil))
+	s.mux.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/demo/spindle", nil))
 	if rec.Code != http.StatusServiceUnavailable {
 		t.Errorf("no RepoView = %d, want 503", rec.Code)
 	}
@@ -1281,23 +1298,23 @@ func TestRepoOpenErrorPaths(t *testing.T) {
 	// Registry failure → 503; Sync failure → 503; Summary not-found → 404.
 	f = newRepoFixture(t, true)
 	f.reg.err = errors.New("store down")
-	if code, _ := f.get("/demo/walhub"); code != http.StatusServiceUnavailable {
+	if code, _ := f.get("/demo/spindle"); code != http.StatusServiceUnavailable {
 		t.Errorf("registry error = %d, want 503", code)
 	}
 	f = newRepoFixture(t, true)
 	f.view.syncErr = fmt.Errorf("%w: sync", api.ErrPending)
-	if code, _ := f.get("/demo/walhub"); code != http.StatusServiceUnavailable {
+	if code, _ := f.get("/demo/spindle"); code != http.StatusServiceUnavailable {
 		t.Errorf("sync error = %d, want 503", code)
 	}
 	f = newRepoFixture(t, true)
 	f.view.summaryErr = fmt.Errorf("%w: gone", api.ErrNotFound)
-	if code, _ := f.get("/demo/walhub"); code != http.StatusNotFound {
+	if code, _ := f.get("/demo/spindle"); code != http.StatusNotFound {
 		t.Errorf("summary not found = %d, want 404", code)
 	}
 	// Overview failure on /wal.
 	f = newRepoFixture(t, true)
 	f.view.overviewErr = errors.New("boom")
-	if code, _ := f.get("/demo/walhub/wal"); code != http.StatusServiceUnavailable {
+	if code, _ := f.get("/demo/spindle/wal"); code != http.StatusServiceUnavailable {
 		t.Errorf("overview error = %d, want 503", code)
 	}
 }
@@ -1321,10 +1338,10 @@ func TestRepoErrorTextTwin(t *testing.T) {
 
 func TestRepoChromeFor(t *testing.T) {
 	f := newRepoFixture(t, true)
-	req := httptest.NewRequest(http.MethodGet, "/demo/walhub/issues", nil)
+	req := httptest.NewRequest(http.MethodGet, "/demo/spindle/issues", nil)
 	rec := httptest.NewRecorder()
-	c, ok := f.s.RepoChromeFor(rec, req, "demo", "walhub")
-	if !ok || c == nil || c.Full != "demo/walhub" {
+	c, ok := f.s.RepoChromeFor(rec, req, "demo", "spindle")
+	if !ok || c == nil || c.Full != "demo/spindle" {
 		t.Fatalf("RepoChromeFor = %+v, %v", c, ok)
 	}
 	if active := activeTabOfRepoChrome(c); active != "code" && active != "issues" {
@@ -1336,7 +1353,7 @@ func TestRepoChromeFor(t *testing.T) {
 	}
 	f.rebind()
 	rec = httptest.NewRecorder()
-	if _, ok := f.s.RepoChromeFor(rec, req, "demo", "walhub"); ok {
+	if _, ok := f.s.RepoChromeFor(rec, req, "demo", "spindle"); ok {
 		t.Error("RepoChromeFor answered for a denied viewer")
 	}
 	if rec.Code != http.StatusNotFound {
@@ -1379,19 +1396,19 @@ func TestRepoBaseAndSSHURL(t *testing.T) {
 	// SSH: no advertised port → no URL; a port → ssh:// with the port; 22
 	// omits the port segment.
 	req.TLS = nil
-	if got := f.s.repoSSHURL(req, "demo/walhub"); got != "" {
+	if got := f.s.repoSSHURL(req, "demo/spindle"); got != "" {
 		t.Errorf("SSH URL without a port = %q", got)
 	}
 	f.s.env.Cfg.Server.SSH.Listen = "0.0.0.0:2222"
-	if got := f.s.repoSSHURL(req, "demo/walhub"); got != "ssh://git@example.test:2222/demo/walhub.git" {
+	if got := f.s.repoSSHURL(req, "demo/spindle"); got != "ssh://git@example.test:2222/demo/spindle.git" {
 		t.Errorf("SSH URL = %s", got)
 	}
 	f.s.env.Cfg.Server.SSH.Listen = "0.0.0.0:22"
-	if got := f.s.repoSSHURL(req, "demo/walhub"); got != "ssh://git@example.test/demo/walhub.git" {
+	if got := f.s.repoSSHURL(req, "demo/spindle"); got != "ssh://git@example.test/demo/spindle.git" {
 		t.Errorf("SSH URL on 22 = %s", got)
 	}
 	f.s.env.Cfg.Server.SSH.ExternalPort = 70000
-	if got := f.s.repoSSHURL(req, "demo/walhub"); got != "" {
+	if got := f.s.repoSSHURL(req, "demo/spindle"); got != "" {
 		t.Errorf("out-of-range port should not advertise: %q", got)
 	}
 }
@@ -1409,7 +1426,7 @@ func TestRepoMirrorGuideWording(t *testing.T) {
 			Due:          true,
 		}, true
 	}}
-	body := f.mustGet("/demo/walhub", http.StatusOK)
+	body := f.mustGet("/demo/spindle", http.StatusOK)
 	if !strings.Contains(body, "Last synced 2026-01-01T00:00:00Z") {
 		t.Error("mirror last-synced line missing")
 	}
@@ -1429,7 +1446,7 @@ func TestRepoPlaceholderGuide(t *testing.T) {
 		},
 		Mirror: func(owner, repo string) (api.MirrorView, bool) { return api.MirrorView{}, false },
 	}
-	body := f.mustGet("/demo/walhub", http.StatusOK)
+	body := f.mustGet("/demo/spindle", http.StatusOK)
 	for _, want := range []string{"reserved by ada", "expires 2026-02-01"} {
 		if !strings.Contains(body, want) {
 			t.Errorf("placeholder guide missing %q", want)
@@ -1440,18 +1457,18 @@ func TestRepoPlaceholderGuide(t *testing.T) {
 func TestRepoBlobErrorAndEmpty(t *testing.T) {
 	f := newRepoFixture(t, true)
 	f.view.blobErr = fmt.Errorf("%w: object", api.ErrNotFound)
-	if code, _ := f.get("/demo/walhub/blob/main/a.txt"); code != http.StatusNotFound {
+	if code, _ := f.get("/demo/spindle/blob/main/a.txt"); code != http.StatusNotFound {
 		t.Errorf("blob not found = %d, want 404", code)
 	}
 	f = newRepoFixture(t, true)
 	f.view.blobErr = errors.New("object store closed")
-	if code, _ := f.get("/demo/walhub/blob/main/a.txt"); code != http.StatusServiceUnavailable {
+	if code, _ := f.get("/demo/spindle/blob/main/a.txt"); code != http.StatusServiceUnavailable {
 		t.Errorf("blob failure = %d, want 503", code)
 	}
 	// Empty repo → the guide, no blob read.
 	f = newRepoFixture(t, true)
 	f.view.summary = api.SummaryData{Health: api.RepoHealthEmpty}
-	body := f.mustGet("/demo/walhub/blob/main/a.txt", http.StatusOK)
+	body := f.mustGet("/demo/spindle/blob/main/a.txt", http.StatusOK)
 	if !strings.Contains(body, "This repository is empty") {
 		t.Error("empty repo blob did not render the guide")
 	}
@@ -1462,15 +1479,15 @@ func TestRepoBlobErrorAndEmpty(t *testing.T) {
 	f = newRepoFixture(t, true)
 	f.view.resolution = api.Resolution{SHA: strings.Repeat("a", 40), Kind: "commit"}
 	f.view.blob = api.BlobResult{Name: "a.txt", Path: "a.txt", Size: 1, Contents: []byte("x")}
-	body = f.mustGet("/demo/walhub/blob/"+strings.Repeat("a", 40)+"/a.txt", http.StatusOK)
+	body = f.mustGet("/demo/spindle/blob/"+strings.Repeat("a", 40)+"/a.txt", http.StatusOK)
 	if strings.Contains(body, "?raw") {
 		t.Error("raw link rendered for an unresolved ref")
 	}
 	// Nested path derives the display name and breadcrumb.
 	f = newRepoFixture(t, true)
 	f.view.blob = api.BlobResult{Ref: "refs/heads/main", Path: "src/deep/a.txt", Size: 1, Contents: []byte("x")}
-	body = f.mustGet("/demo/walhub/blob/main/src/deep/a.txt", http.StatusOK)
-	for _, want := range []string{"<h2 class=\"font-semibold\">a.txt</h2>", "/demo/walhub/tree/main/src/deep"} {
+	body = f.mustGet("/demo/spindle/blob/main/src/deep/a.txt", http.StatusOK)
+	for _, want := range []string{"<h2 class=\"font-semibold\">a.txt</h2>", "/demo/spindle/tree/main/src/deep"} {
 		if !strings.Contains(body, want) {
 			t.Errorf("nested blob missing %q", want)
 		}
@@ -1480,17 +1497,17 @@ func TestRepoBlobErrorAndEmpty(t *testing.T) {
 func TestRepoCommitsErrorAndEmpty(t *testing.T) {
 	f := newRepoFixture(t, true)
 	f.view.commitsErr = fmt.Errorf("%w: no such ref", api.ErrNotFound)
-	if code, _ := f.get("/demo/walhub/commits"); code != http.StatusNotFound {
+	if code, _ := f.get("/demo/spindle/commits"); code != http.StatusNotFound {
 		t.Errorf("commits not found = %d, want 404", code)
 	}
 	f = newRepoFixture(t, true)
 	f.view.commitsErr = errors.New("engine down")
-	if code, _ := f.get("/demo/walhub/commits"); code != http.StatusServiceUnavailable {
+	if code, _ := f.get("/demo/spindle/commits"); code != http.StatusServiceUnavailable {
 		t.Errorf("commits failure = %d, want 503", code)
 	}
 	f = newRepoFixture(t, true)
 	f.view.summary = api.SummaryData{Health: api.RepoHealthEmpty}
-	body := f.mustGet("/demo/walhub/commits", http.StatusOK)
+	body := f.mustGet("/demo/spindle/commits", http.StatusOK)
 	if !strings.Contains(body, "This repository is empty") {
 		t.Error("empty repo commits did not render the guide")
 	}
@@ -1501,7 +1518,7 @@ func TestRepoCommitsErrorAndEmpty(t *testing.T) {
 	// guide, not a 404.
 	f = newRepoFixture(t, true)
 	f.view.resolveErr = fmt.Errorf("%w: %sHEAD", api.ErrNotFound, emptyRepoMarker)
-	body = f.mustGet("/demo/walhub/commits", http.StatusOK)
+	body = f.mustGet("/demo/spindle/commits", http.StatusOK)
 	if !strings.Contains(body, "This repository is empty") {
 		t.Error("unborn marker did not render the guide")
 	}
@@ -1514,7 +1531,7 @@ func TestRepoCommitFlagsAndNoMessage(t *testing.T) {
 		Commit: api.Commit{SHA: sha, Subject: ""},
 		Patch:  "diff --git a/old.txt b/new.txt\nsimilarity index 100%\nrename from old.txt\nrename to new.txt\ndiff --git a/gone.txt b/gone.txt\ndeleted file mode 100644\n--- a/gone.txt\n+++ /dev/null\n@@ -1 +0,0 @@\n-x\ndiff --git a/new.go b/new.go\nnew file mode 100644\n--- /dev/null\n+++ b/new.go\n@@ -0,0 +1 @@\n+y\n",
 	}
-	body := f.mustGet("/demo/walhub/commit/"+sha, http.StatusOK)
+	body := f.mustGet("/demo/spindle/commit/"+sha, http.StatusOK)
 	for _, want := range []string{"(no message)", "renamed from old.txt", "deleted", "added"} {
 		if !strings.Contains(body, want) {
 			t.Errorf("commit flags missing %q", want)
@@ -1522,18 +1539,18 @@ func TestRepoCommitFlagsAndNoMessage(t *testing.T) {
 	}
 	// Resolve / Commit failures map to the shared statuses.
 	f.view.resolveErr = fmt.Errorf("%w: sha", api.ErrNotFound)
-	if code, _ := f.get("/demo/walhub/commit/" + sha); code != http.StatusNotFound {
+	if code, _ := f.get("/demo/spindle/commit/" + sha); code != http.StatusNotFound {
 		t.Errorf("commit resolve failure = %d, want 404", code)
 	}
 	f.view.resolveErr = nil
 	f.view.commitErr = errors.New("engine down")
-	if code, _ := f.get("/demo/walhub/commit/" + sha); code != http.StatusServiceUnavailable {
+	if code, _ := f.get("/demo/spindle/commit/" + sha); code != http.StatusServiceUnavailable {
 		t.Errorf("commit failure = %d, want 503", code)
 	}
 	// Empty repo → guide.
 	f = newRepoFixture(t, true)
 	f.view.summary = api.SummaryData{Health: api.RepoHealthEmpty}
-	body = f.mustGet("/demo/walhub/commit/"+sha, http.StatusOK)
+	body = f.mustGet("/demo/spindle/commit/"+sha, http.StatusOK)
 	if !strings.Contains(body, "This repository is empty") {
 		t.Error("empty repo commit did not render the guide")
 	}
@@ -1631,14 +1648,14 @@ func TestRepoGateAndChromeEdges(t *testing.T) {
 	}
 	// Head with no ref name falls back to the short sha.
 	f.view.summary.Head = &api.Ref{SHA: strings.Repeat("a", 40)}
-	body := f.mustGet("/demo/walhub", http.StatusOK)
+	body := f.mustGet("/demo/spindle", http.StatusOK)
 	if !strings.Contains(body, ">aaaaaaaaaa</span>") {
 		t.Error("head pill did not fall back to the short sha")
 	}
 	// An https advertisement is labelled HTTPS (never rewritten).
 	f.s.env.Cfg.Server.PublicURL = "https://secure.example"
-	body = f.mustGet("/demo/walhub", http.StatusOK)
-	if !strings.Contains(body, "https://secure.example/demo/walhub.git") {
+	body = f.mustGet("/demo/spindle", http.StatusOK)
+	if !strings.Contains(body, "https://secure.example/demo/spindle.git") {
 		t.Error("https clone URL not advertised verbatim")
 	}
 	if !strings.Contains(body, ">HTTPS clone<") {
@@ -1647,7 +1664,7 @@ func TestRepoGateAndChromeEdges(t *testing.T) {
 	// Health "" with no head and zero refs is the empty state.
 	f = newRepoFixture(t, true)
 	f.view.summary = api.SummaryData{}
-	body = f.mustGet("/demo/walhub", http.StatusOK)
+	body = f.mustGet("/demo/spindle", http.StatusOK)
 	if !strings.Contains(body, "This repository is empty") {
 		t.Error("refs==0 health-less summary did not render the guide")
 	}
@@ -1655,8 +1672,8 @@ func TestRepoGateAndChromeEdges(t *testing.T) {
 	// is 401 (the gated rule), not a silent chrome.
 	f = newRepoFixture(t, false)
 	rec := httptest.NewRecorder()
-	req := httptest.NewRequest(http.MethodGet, "/demo/walhub", nil)
-	if _, ok := f.s.RepoChromeFor(rec, req, "demo", "walhub"); ok {
+	req := httptest.NewRequest(http.MethodGet, "/demo/spindle", nil)
+	if _, ok := f.s.RepoChromeFor(rec, req, "demo", "spindle"); ok {
 		t.Error("RepoChromeFor answered for a gated anonymous viewer")
 	}
 	if rec.Code != http.StatusUnauthorized {
@@ -1668,38 +1685,39 @@ func TestRepoTreeAndBlobMoreErrors(t *testing.T) {
 	// Tree failure (generic) → 503; doc blob failure → 404.
 	f := newRepoFixture(t, true)
 	f.view.treeErr = errors.New("engine down")
-	if code, _ := f.get("/demo/walhub"); code != http.StatusServiceUnavailable {
+	if code, _ := f.get("/demo/spindle"); code != http.StatusServiceUnavailable {
 		t.Errorf("tree failure = %d, want 503", code)
 	}
 	f = newRepoFixture(t, true)
 	f.view.tree = api.TreeResult{Entries: []api.TreeEntry{{Name: "README.md", Type: "blob"}}}
 	f.view.blobErr = fmt.Errorf("%w: readme", api.ErrNotFound)
-	if code, _ := f.get("/demo/walhub?doc=README.md"); code != http.StatusNotFound {
+	if code, _ := f.get("/demo/spindle?doc=README.md"); code != http.StatusNotFound {
 		t.Errorf("doc blob failure = %d, want 404", code)
 	}
 	// Unborn marker on resolve/tree still renders the guide.
 	f = newRepoFixture(t, true)
 	f.view.resolveErr = fmt.Errorf("%w: %sHEAD", api.ErrNotFound, emptyRepoMarker)
-	body := f.mustGet("/demo/walhub", http.StatusOK)
+	body := f.mustGet("/demo/spindle", http.StatusOK)
 	if !strings.Contains(body, "This repository is empty") {
 		t.Error("unborn resolve did not render the guide")
 	}
 	f = newRepoFixture(t, true)
 	f.view.treeErr = fmt.Errorf("%w: %stree", api.ErrNotFound, emptyRepoMarker)
-	body = f.mustGet("/demo/walhub", http.StatusOK)
+	body = f.mustGet("/demo/spindle", http.StatusOK)
 	if !strings.Contains(body, "This repository is empty") {
 		t.Error("unborn tree did not render the guide")
 	}
-	// Submodule entry (type commit) renders the arrow and a tree link; a blob
-	// with size -1 renders the "-" placeholder.
+	// Submodule entry (type commit) links to the tree (never the blob route);
+	// a blob with size -1 renders the "-" placeholder. The Unix mode is no
+	// longer a column — the type icon carries the kind (Precision Dark §1 F5).
 	f = newRepoFixture(t, true)
 	f.view.tree = api.TreeResult{Entries: []api.TreeEntry{
 		{Name: "sub", Type: "commit", Mode: "160000", Size: -1},
 		{Name: "weird", Type: "blob", Mode: "100755", Size: -1},
 	}}
-	body = f.mustGet("/demo/walhub", http.StatusOK)
-	if !strings.Contains(body, "↗") || !strings.Contains(body, "m---------") {
-		t.Error("submodule row missing its icon/mode")
+	body = f.mustGet("/demo/spindle", http.StatusOK)
+	if !strings.Contains(body, "/demo/spindle/tree/main/sub") {
+		t.Error("submodule row did not link to a tree")
 	}
 	if !strings.Contains(body, ">-</td>") {
 		t.Error("unknown blob size did not render the - placeholder")
@@ -1708,13 +1726,13 @@ func TestRepoTreeAndBlobMoreErrors(t *testing.T) {
 	// Blob: unborn marker on resolve → guide; generic resolve error → 503.
 	f = newRepoFixture(t, true)
 	f.view.resolveErr = fmt.Errorf("%w: %sHEAD", api.ErrNotFound, emptyRepoMarker)
-	body = f.mustGet("/demo/walhub/blob/main/a.txt", http.StatusOK)
+	body = f.mustGet("/demo/spindle/blob/main/a.txt", http.StatusOK)
 	if !strings.Contains(body, "This repository is empty") {
 		t.Error("unborn blob resolve did not render the guide")
 	}
 	f = newRepoFixture(t, true)
 	f.view.resolveErr = errors.New("engine down")
-	if code, _ := f.get("/demo/walhub/blob/main/a.txt"); code != http.StatusServiceUnavailable {
+	if code, _ := f.get("/demo/spindle/blob/main/a.txt"); code != http.StatusServiceUnavailable {
 		t.Errorf("blob resolve failure = %d, want 503", code)
 	}
 }
@@ -1722,32 +1740,32 @@ func TestRepoTreeAndBlobMoreErrors(t *testing.T) {
 func TestRepoCommitsAndCommitMoreErrors(t *testing.T) {
 	f := newRepoFixture(t, true)
 	f.view.resolveErr = errors.New("engine down")
-	if code, _ := f.get("/demo/walhub/commits"); code != http.StatusServiceUnavailable {
+	if code, _ := f.get("/demo/spindle/commits"); code != http.StatusServiceUnavailable {
 		t.Errorf("commits resolve failure = %d, want 503", code)
 	}
 	f = newRepoFixture(t, true)
 	f.view.resolveErr = fmt.Errorf("%w: %sHEAD", api.ErrNotFound, emptyRepoMarker)
-	body := f.mustGet("/demo/walhub/commits", http.StatusOK)
+	body := f.mustGet("/demo/spindle/commits", http.StatusOK)
 	if !strings.Contains(body, "This repository is empty") {
 		t.Error("commits unborn marker did not render the guide")
 	}
 	// Unknown ref, no marker → 404.
 	f = newRepoFixture(t, true)
 	f.view.resolveErr = fmt.Errorf("%w: nope", api.ErrNotFound)
-	if code, _ := f.get("/demo/walhub/commits"); code != http.StatusNotFound {
+	if code, _ := f.get("/demo/spindle/commits"); code != http.StatusNotFound {
 		t.Errorf("commits missing ref = %d, want 404", code)
 	}
 	// Commit page: unborn marker on resolve and on the detail read.
 	f = newRepoFixture(t, true)
 	sha := strings.Repeat("a", 40)
 	f.view.resolveErr = fmt.Errorf("%w: %sHEAD", api.ErrNotFound, emptyRepoMarker)
-	body = f.mustGet("/demo/walhub/commit/"+sha, http.StatusOK)
+	body = f.mustGet("/demo/spindle/commit/"+sha, http.StatusOK)
 	if !strings.Contains(body, "This repository is empty") {
 		t.Error("commit unborn resolve did not render the guide")
 	}
 	f = newRepoFixture(t, true)
 	f.view.commitErr = fmt.Errorf("%w: %sobject", api.ErrNotFound, emptyRepoMarker)
-	body = f.mustGet("/demo/walhub/commit/"+sha, http.StatusOK)
+	body = f.mustGet("/demo/spindle/commit/"+sha, http.StatusOK)
 	if !strings.Contains(body, "This repository is empty") {
 		t.Error("commit unborn detail did not render the guide")
 	}
@@ -1765,7 +1783,7 @@ func TestRepoWALFsckSampleAndTasks(t *testing.T) {
 	f.view.overview = ov
 	f.tasks = &repoFakeTasks{}
 	f.s = f.newServer(f.cfgForTest())
-	body := f.mustGet("/demo/walhub/wal", http.StatusOK)
+	body := f.mustGet("/demo/spindle/wal", http.StatusOK)
 	if !strings.Contains(body, "…and 20 more") {
 		t.Errorf("missing-oid overflow line absent: %.300s", body)
 	}
@@ -1804,12 +1822,12 @@ func TestRepoHelperRemainders(t *testing.T) {
 	f.s.env.Cfg.Server.PublicURL = "http://"
 	f.s.env.Cfg.Server.SSH.Listen = "0.0.0.0:22"
 	req := httptest.NewRequest(http.MethodGet, "/", nil)
-	if got := f.s.repoSSHURL(req, "demo/walhub"); got != "" {
+	if got := f.s.repoSSHURL(req, "demo/spindle"); got != "" {
 		t.Errorf("host-less SSH URL = %q", got)
 	}
 	f.s.env.Cfg.Server.PublicURL = ""
 	req.Host = "[::1]:8080"
-	if got := f.s.repoSSHURL(req, "demo/walhub"); got != "ssh://git@[::1]/demo/walhub.git" {
+	if got := f.s.repoSSHURL(req, "demo/spindle"); got != "ssh://git@[::1]/demo/spindle.git" {
 		t.Errorf("IPv6 SSH URL = %q", got)
 	}
 }
@@ -1818,18 +1836,18 @@ func TestRepoDocPlaceholders(t *testing.T) {
 	f := newRepoFixture(t, true)
 	f.view.tree = api.TreeResult{Entries: []api.TreeEntry{{Name: "README.md", Type: "blob"}}}
 	f.view.blob = api.BlobResult{Name: "README.md", Path: "README.md", Size: 3 << 20, TooLarge: true}
-	body := f.mustGet("/demo/walhub?doc=README.md", http.StatusOK)
+	body := f.mustGet("/demo/spindle?doc=README.md", http.StatusOK)
 	if !strings.Contains(body, "This file is too large to render") {
 		t.Error("doc too-large placeholder missing")
 	}
 	f.view.blob = api.BlobResult{Name: "README.md", Path: "README.md", Size: 1024, Binary: true}
-	body = f.mustGet("/demo/walhub?doc=README.md", http.StatusOK)
+	body = f.mustGet("/demo/spindle?doc=README.md", http.StatusOK)
 	if !strings.Contains(body, "binary file, 1k") {
 		t.Error("doc binary placeholder missing")
 	}
 	// A blob read that answers the unborn marker renders the guide, not 404.
 	f.view.blobErr = fmt.Errorf("%w: %sreadme", api.ErrNotFound, emptyRepoMarker)
-	body = f.mustGet("/demo/walhub?doc=README.md", http.StatusOK)
+	body = f.mustGet("/demo/spindle?doc=README.md", http.StatusOK)
 	if !strings.Contains(body, "This repository is empty") {
 		t.Error("doc unborn marker did not render the guide")
 	}
@@ -1840,7 +1858,7 @@ func TestRepoCommitsAndWALRemainders(t *testing.T) {
 	sha := strings.Repeat("a", 40)
 	// A page whose Ref is empty falls back to the short sha in the crumb.
 	f.view.commits = api.CommitPage{SHA: sha, Commits: commitsFixture(sha)}
-	body := f.mustGet("/demo/walhub/commits", http.StatusOK)
+	body := f.mustGet("/demo/spindle/commits", http.StatusOK)
 	if !strings.Contains(body, "aaaaaaaaaa") {
 		t.Error("ref-less commits page did not fall back to the short sha")
 	}
@@ -1851,7 +1869,7 @@ func TestRepoCommitsAndWALRemainders(t *testing.T) {
 		Health:   api.Health{Status: "ok"},
 		Manifest: api.ManifestInfo{Segments: []string{"seg-1"}},
 	}
-	body = f.mustGet("/demo/walhub/wal?all=1", http.StatusOK)
+	body = f.mustGet("/demo/spindle/wal?all=1", http.StatusOK)
 	if !strings.Contains(body, "newest 5") {
 		t.Error("all-view toggle missing on a short segment list")
 	}
@@ -1859,10 +1877,10 @@ func TestRepoCommitsAndWALRemainders(t *testing.T) {
 
 func TestRepoRouteDataFailures(t *testing.T) {
 	for _, path := range []string{
-		"/demo/walhub/blob/main/a.txt",
-		"/demo/walhub/commits",
-		"/demo/walhub/commit/" + strings.Repeat("a", 40),
-		"/demo/walhub/wal",
+		"/demo/spindle/blob/main/a.txt",
+		"/demo/spindle/commits",
+		"/demo/spindle/commit/" + strings.Repeat("a", 40),
+		"/demo/spindle/wal",
 	} {
 		f := newRepoFixture(t, true)
 		f.reg.err = errors.New("store down")
@@ -1873,7 +1891,7 @@ func TestRepoRouteDataFailures(t *testing.T) {
 	// Blob resolve answering the unborn marker → guide.
 	f := newRepoFixture(t, true)
 	f.view.resolveErr = fmt.Errorf("%w: %sHEAD", api.ErrNotFound, emptyRepoMarker)
-	body := f.mustGet("/demo/walhub/blob/main/a.txt", http.StatusOK)
+	body := f.mustGet("/demo/spindle/blob/main/a.txt", http.StatusOK)
 	if !strings.Contains(body, "This repository is empty") {
 		t.Error("blob unborn resolve did not render the guide")
 	}
@@ -1883,7 +1901,7 @@ func TestRepoCommitsGraphPagerAndVisibility(t *testing.T) {
 	f := newRepoFixture(t, true)
 	sha := strings.Repeat("a", 40)
 	f.view.commits = api.CommitPage{Ref: "refs/heads/main", SHA: sha, Commits: commitsFixture(sha), More: true}
-	body := f.mustGet("/demo/walhub/commits?graph=1", http.StatusOK)
+	body := f.mustGet("/demo/spindle/commits?graph=1", http.StatusOK)
 	if !strings.Contains(olderHrefOf(t, body), "graph=1") {
 		t.Error("older link dropped the graph flag")
 	}
@@ -1898,7 +1916,7 @@ func TestRepoCommitsGraphPagerAndVisibility(t *testing.T) {
 		v := vis
 		repoDeps = RepoDeps{Visibility: func(owner, repo string) (string, bool) { return v, true }}
 		f = newRepoFixture(t, true)
-		body = f.mustGet("/demo/walhub", http.StatusOK)
+		body = f.mustGet("/demo/spindle", http.StatusOK)
 		if want == "" {
 			if strings.Contains(body, "visibility-badge") {
 				t.Error("unknown visibility rendered a badge")
@@ -1918,7 +1936,7 @@ func TestRepoCommitSHAFallbackAndBinaryStatus(t *testing.T) {
 		Commit: api.Commit{SHA: "", Subject: "no sha"},
 		Patch:  "diff --git a/x.bin b/x.bin\nindex 1..2 100644\nBinary files a/x.bin and b/x.bin differ\n",
 	}
-	body := f.mustGet("/demo/walhub/commit/"+requested, http.StatusOK)
+	body := f.mustGet("/demo/spindle/commit/"+requested, http.StatusOK)
 	if !strings.Contains(body, `title="`+requested+`"`) {
 		t.Error("commit page did not fall back to the resolved sha")
 	}
@@ -1941,7 +1959,7 @@ func TestRepoWALRemainingRows(t *testing.T) {
 		BundlePlan: api.BundlePlanInfo{Slots: []api.PlanSlot{{Status: "skipped"}, {Status: "built"}}},
 	}
 	f.view.overview = ov
-	body := f.mustGet("/demo/walhub/wal", http.StatusOK)
+	body := f.mustGet("/demo/spindle/wal", http.StatusOK)
 	if !strings.Contains(body, "last push") || !strings.Contains(body, "2026-01-02") {
 		t.Error("last-push stamp missing")
 	}
@@ -1964,34 +1982,36 @@ func TestRepoRemainingBranches(t *testing.T) {
 	// resolved path.
 	f := newRepoFixture(t, true)
 	f.view.blob = api.BlobResult{Ref: "refs/heads/main", Size: 1, Contents: []byte("x")}
-	body := f.mustGet("/demo/walhub/blob/main/deep/a.txt", http.StatusOK)
+	body := f.mustGet("/demo/spindle/blob/main/deep/a.txt", http.StatusOK)
 	if !strings.Contains(body, ">a.txt</h2>") {
 		t.Error("blob display name not derived from the resolved path")
 	}
 	// A blob read answering the unborn marker → guide.
 	f = newRepoFixture(t, true)
 	f.view.blobErr = fmt.Errorf("%w: %sobject", api.ErrNotFound, emptyRepoMarker)
-	body = f.mustGet("/demo/walhub/blob/main/a.txt", http.StatusOK)
+	body = f.mustGet("/demo/spindle/blob/main/a.txt", http.StatusOK)
 	if !strings.Contains(body, "This repository is empty") {
 		t.Error("blob unborn marker did not render the guide")
 	}
 	// Empty rest (trailing slash) is a 404, not a directory listing.
-	if code, _ := f.get("/demo/walhub/blob/"); code != http.StatusNotFound {
+	if code, _ := f.get("/demo/spindle/blob/"); code != http.StatusNotFound {
 		t.Errorf("empty blob rest = %d, want 404", code)
 	}
-	// Ref-less tree falls back to the sha for entry links.
+	// Ref-less RESOLVE (the real view's TreeResult never carries the ref —
+	// only the API handler fills it) falls back to the sha for entry links.
 	f = newRepoFixture(t, true)
-	f.view.tree = api.TreeResult{Ref: "", Entries: []api.TreeEntry{{Name: "a.go", Type: "blob", Mode: "100644", Size: 1}}}
-	body = f.mustGet("/demo/walhub", http.StatusOK)
-	if !strings.Contains(body, "/demo/walhub/blob/"+strings.Repeat("a", 40)+"/a.go") {
+	f.view.resolution = api.Resolution{SHA: strings.Repeat("a", 40), Kind: "commit"}
+	f.view.tree = api.TreeResult{Entries: []api.TreeEntry{{Name: "a.go", Type: "blob", Mode: "100644", Size: 1}}}
+	body = f.mustGet("/demo/spindle", http.StatusOK)
+	if !strings.Contains(body, "/demo/spindle/blob/"+strings.Repeat("a", 40)+"/a.go") {
 		t.Error("ref-less tree did not link by sha")
 	}
 	// Empty guide with an advertised SSH URL renders both clone commands.
 	f = newRepoFixture(t, true)
 	f.s.env.Cfg.Server.SSH.Listen = "0.0.0.0:2222"
 	f.view.summary = api.SummaryData{Health: api.RepoHealthEmpty}
-	body = f.mustGet("/demo/walhub", http.StatusOK)
-	if !strings.Contains(body, "git clone ssh://git@example.test:2222/demo/walhub.git") {
+	body = f.mustGet("/demo/spindle", http.StatusOK)
+	if !strings.Contains(body, "git clone ssh://git@example.test:2222/demo/spindle.git") {
 		t.Error("SSH clone command missing from the empty guide")
 	}
 	// A past next-sync stamp without the due flag still reads "sync due".
@@ -2006,9 +2026,9 @@ func TestRepoRemainingBranches(t *testing.T) {
 	// RepoChromeFor propagates a data failure (503), not a silent chrome.
 	f = newRepoFixture(t, true)
 	f.view.syncErr = errors.New("engine down")
-	req := httptest.NewRequest(http.MethodGet, "/demo/walhub", nil)
+	req := httptest.NewRequest(http.MethodGet, "/demo/spindle", nil)
 	rec := httptest.NewRecorder()
-	if _, ok := f.s.RepoChromeFor(rec, req, "demo", "walhub"); ok {
+	if _, ok := f.s.RepoChromeFor(rec, req, "demo", "spindle"); ok {
 		t.Error("RepoChromeFor answered despite a sync failure")
 	}
 	if rec.Code != http.StatusServiceUnavailable {
@@ -2027,7 +2047,7 @@ func TestReservedTwoSegmentPathsDecline(t *testing.T) {
 			t.Errorf("%s was not declined by the repo group", path)
 		}
 	}
-	for _, path := range []string{"/demo/walhub", "/demo/walhub/tree/main", "/demo/repositories.git"} {
+	for _, path := range []string{"/demo/spindle", "/demo/spindle/tree/main", "/demo/repositories.git"} {
 		req := httptest.NewRequest(http.MethodGet, path, nil)
 		if f.s.reservedNonRepoPath(req) {
 			t.Errorf("%s was wrongly declined", path)
@@ -2059,19 +2079,19 @@ func TestRepoAuthFailurePages(t *testing.T) {
 	} {
 		f.authErr = &auth.AuthError{Kind: tc.kind, Why: "credential rejected"}
 		f.rebind()
-		if code, _ := f.get("/demo/walhub"); code != tc.want {
+		if code, _ := f.get("/demo/spindle"); code != tc.want {
 			t.Errorf("auth kind %d = %d, want %d", tc.kind, code, tc.want)
 		}
-		for _, path := range []string{"/demo/walhub/wal", "/demo/walhub/blob/main/a.txt", "/demo/walhub/commits", "/demo/walhub/commit/" + strings.Repeat("a", 40)} {
+		for _, path := range []string{"/demo/spindle/wal", "/demo/spindle/blob/main/a.txt", "/demo/spindle/commits", "/demo/spindle/commit/" + strings.Repeat("a", 40)} {
 			if code, _ := f.get(path); code != tc.want {
 				t.Errorf("%s auth kind %d = %d, want %d", path, tc.kind, code, tc.want)
 			}
 		}
 	}
 	// The cross-group chrome seam propagates the failure, too.
-	req := httptest.NewRequest(http.MethodGet, "/demo/walhub", nil)
+	req := httptest.NewRequest(http.MethodGet, "/demo/spindle", nil)
 	rec := httptest.NewRecorder()
-	if _, ok := f.s.RepoChromeFor(rec, req, "demo", "walhub"); ok {
+	if _, ok := f.s.RepoChromeFor(rec, req, "demo", "spindle"); ok {
 		t.Error("RepoChromeFor answered despite an auth failure")
 	}
 	if rec.Code != http.StatusServiceUnavailable {
@@ -2084,15 +2104,104 @@ func TestRepoBlobPathFallbackAndWALDefaultStatus(t *testing.T) {
 	// raw link and the breadcrumb both use it).
 	f := newRepoFixture(t, true)
 	f.view.blob = api.BlobResult{Ref: "refs/heads/main", Path: "", Name: "a.txt", Size: 1, Contents: []byte("x")}
-	body := f.mustGet("/demo/walhub/blob/main/a.txt", http.StatusOK)
-	if !strings.Contains(body, "/demo/walhub/api/blob/main/a.txt?raw") {
+	body := f.mustGet("/demo/spindle/blob/main/a.txt", http.StatusOK)
+	if !strings.Contains(body, "/demo/spindle/api/blob/main/a.txt?raw") {
 		t.Error("raw link did not fall back to the resolved path")
 	}
 	// A view that omits Health.Status renders the "ok" default, never empty.
 	f = newRepoFixture(t, true)
 	f.view.overview = api.OverviewData{Hostname: "node-1", Health: api.Health{Status: ""}}
-	body = f.mustGet("/demo/walhub/wal", http.StatusOK)
+	body = f.mustGet("/demo/spindle/wal", http.StatusOK)
 	if !strings.Contains(body, ">ok</span>") {
 		t.Error("empty health status did not default to ok")
+	}
+}
+
+// The Code page's Precision Dark chrome: branch selector, commit strip, About
+// rail and status strip all render from data the view already had.
+func TestRepoTreePrecisionDarkChrome(t *testing.T) {
+	f := newRepoFixture(t, true)
+	sha := strings.Repeat("a", 40)
+	f.view.tree = api.TreeResult{Entries: []api.TreeEntry{{Name: "a.go", Type: "blob", Mode: "100644", Size: 12}}}
+	f.view.refs = []api.Ref{
+		{Name: "refs/heads/feature/x", SHA: sha},
+		{Name: "refs/heads/main", SHA: sha},
+	}
+	f.view.commits = api.CommitPage{SHA: sha, Commits: []api.Commit{{
+		SHA: sha, Subject: "precision dark", Author: "ada lovelace",
+		AuthorDate: time.Date(2026, 11, 20, 10, 0, 0, 0, time.UTC),
+	}}}
+	body := f.mustGet("/demo/spindle", http.StatusOK)
+	for _, want := range []string{
+		`data-filter="#file-rows"`,     // directory filter hook
+		"Branches",                     // selector panel label
+		"feature/x",                    // a second branch
+		"precision dark",               // commit strip subject
+		"ada lovelace",                 // commit strip author
+		"A",                            // author initial
+		"About",                        // about rail
+		"status-strip",                 // status strip
+		"healthy",                      // health word
+		"/demo/spindle/tree/feature/x", // branch link target
+		"Stars", "Forks", "Watching",   // about rows
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("code page missing %q", want)
+		}
+	}
+	// The current branch is marked in the selector; the other is not.
+	if !strings.Contains(body, "✓") {
+		t.Error("current branch is not marked in the selector")
+	}
+}
+
+// Chrome failures are not page failures: the table still renders.
+func TestRepoTreeChromeDegrades(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		set  func(*repoFixture)
+	}{
+		{"refs error", func(f *repoFixture) { f.view.refsErr = errors.New("boom") }},
+		{"commits error", func(f *repoFixture) { f.view.commitsErr = errors.New("boom") }},
+		{"no commits", func(f *repoFixture) { f.view.commits = api.CommitPage{} }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newRepoFixture(t, true)
+			f.view.tree = api.TreeResult{Entries: []api.TreeEntry{{Name: "a.go", Type: "blob", Mode: "100644", Size: 1}}}
+			tc.set(f)
+			body := f.mustGet("/demo/spindle", http.StatusOK)
+			if !strings.Contains(body, "a.go") {
+				t.Error("file table did not render")
+			}
+			if !strings.Contains(body, "status-strip") {
+				t.Error("status strip did not render")
+			}
+		})
+	}
+}
+
+func TestCodeHealth(t *testing.T) {
+	cases := []struct {
+		c    *RepoChrome
+		want string
+	}{
+		{nil, "empty"},
+		{&RepoChrome{Empty: true}, "empty"},
+		{&RepoChrome{Degraded: true}, "degraded"},
+		{&RepoChrome{}, "healthy"},
+	}
+	for _, tc := range cases {
+		if got := codeHealth(tc.c); got != tc.want {
+			t.Errorf("codeHealth(%+v) = %q, want %q", tc.c, got, tc.want)
+		}
+	}
+}
+
+func TestInitialOf(t *testing.T) {
+	cases := map[string]string{"": "?", "  ": "?", "ada": "A", "Ada Lovelace": "A", "émile": "É"}
+	for in, want := range cases {
+		if got := initialOf(in); got != want {
+			t.Errorf("initialOf(%q) = %q, want %q", in, got, want)
+		}
 	}
 }

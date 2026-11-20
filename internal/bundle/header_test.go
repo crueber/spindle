@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/crueber/walhub/internal/store/proto"
+	"github.com/crueber/spindle/internal/store/proto"
 )
 
 // TestRenderHeaderGolden is §8.9.4 byte-exact.

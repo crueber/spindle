@@ -3,7 +3,7 @@
   <!-- Narrow widths (Forgejo #273): brand + right cluster pinned, the site nav
        takes the leftover and scrolls internally. -->
   <div class="mx-auto flex max-w-6xl items-center gap-3 px-4 py-2.5 sm:gap-6">
-    <a href="/" class="brand shrink-0 text-lg">walhub</a>
+    <a href="/" class="brand shrink-0 text-[15px]">spindle</a>
     <nav aria-label="Site" class="site-nav flex min-w-0 flex-1 items-center gap-3 overflow-x-auto whitespace-nowrap sm:gap-4">
       <a href="/explore">explore</a>
       {{if .Chrome.ShowKeys}}<a href="/keys">keys</a>{{end}}
@@ -27,23 +27,23 @@
           </svg>
         </button>
         <div data-menu-panel role="menu" hidden class="card popover absolute right-0 mt-1 w-52 py-1">
-          <a role="menuitem" class="block px-3 py-1.5 text-sm hover:bg-zinc-100 dark:hover:bg-zinc-800" href="/new">New repository</a>
-          <a role="menuitem" class="block px-3 py-1.5 text-sm hover:bg-zinc-100 dark:hover:bg-zinc-800" href="/import">Import repository</a>
-          <a role="menuitem" class="block px-3 py-1.5 text-sm hover:bg-zinc-100 dark:hover:bg-zinc-800" href="/orgs/new">New organization</a>
+          <a role="menuitem" class="block px-3 py-1.5 text-sm hover:bg-[var(--pd-raised)]" href="/new">New repository</a>
+          <a role="menuitem" class="block px-3 py-1.5 text-sm hover:bg-[var(--pd-raised)]" href="/import">Import repository</a>
+          <a role="menuitem" class="block px-3 py-1.5 text-sm hover:bg-[var(--pd-raised)]" href="/orgs/new">New organization</a>
         </div>
       </div>
       {{end}}
       {{if .Chrome.SignedIn}}
       <div data-menu class="relative">
-        <button type="button" class="flex h-8 w-8 items-center justify-center rounded-full bg-emerald-600 text-sm font-semibold text-white ring-1 ring-zinc-300 hover:ring-2 hover:ring-emerald-500 dark:ring-zinc-700" data-menu-trigger aria-haspopup="menu" aria-expanded="false" title="{{.Chrome.Principal.Name}}">
+        <button type="button" class="flex h-8 w-8 items-center justify-center rounded-full bg-zinc-700 text-sm font-semibold text-zinc-50 ring-1 ring-zinc-600 hover:ring-2 hover:ring-amber-500" data-menu-trigger aria-haspopup="menu" aria-expanded="false" title="{{.Chrome.Principal.Name}}">
           {{.Chrome.Initials}}
         </button>
         <div data-menu-panel role="menu" hidden class="card popover absolute right-0 mt-1 w-48 py-1">
-          <a role="menuitem" class="block px-3 py-1.5 text-sm hover:bg-zinc-100 dark:hover:bg-zinc-800" href="/{{.Chrome.Principal.Name}}">Your profile</a>
-          <a role="menuitem" class="block px-3 py-1.5 text-sm hover:bg-zinc-100 dark:hover:bg-zinc-800" href="/keys">Keys</a>
-          <a role="menuitem" class="block px-3 py-1.5 text-sm hover:bg-zinc-100 dark:hover:bg-zinc-800" href="/invitations">Invitations</a>
-          {{if .Chrome.Admin}}<a role="menuitem" class="block px-3 py-1.5 text-sm hover:bg-zinc-100 dark:hover:bg-zinc-800" href="/setup">Setup</a>{{end}}
-          <a role="menuitem" class="block px-3 py-1.5 text-sm hover:bg-zinc-100 dark:hover:bg-zinc-800" href="/_auth/logout?next=/">Log out</a>
+          <a role="menuitem" class="block px-3 py-1.5 text-sm hover:bg-[var(--pd-raised)]" href="/{{.Chrome.Principal.Name}}">Your profile</a>
+          <a role="menuitem" class="block px-3 py-1.5 text-sm hover:bg-[var(--pd-raised)]" href="/keys">Keys</a>
+          <a role="menuitem" class="block px-3 py-1.5 text-sm hover:bg-[var(--pd-raised)]" href="/invitations">Invitations</a>
+          {{if .Chrome.Admin}}<a role="menuitem" class="block px-3 py-1.5 text-sm hover:bg-[var(--pd-raised)]" href="/setup">Setup</a>{{end}}
+          <a role="menuitem" class="block px-3 py-1.5 text-sm hover:bg-[var(--pd-raised)]" href="/_auth/logout?next=/">Log out</a>
         </div>
       </div>
       {{end}}

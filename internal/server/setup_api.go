@@ -5,8 +5,8 @@ import (
 	"io"
 	"net/http"
 
-	"github.com/crueber/walhub/internal/config"
-	"github.com/crueber/walhub/internal/setup"
+	"github.com/crueber/spindle/internal/config"
+	"github.com/crueber/spindle/internal/setup"
 )
 
 // The setup surface's logic lives in internal/setup (§3.4): the schema
@@ -113,7 +113,7 @@ func (s *Server) setupAuthTest(w http.ResponseWriter, r *http.Request) {
 }
 
 // setupPut answers PUT /api/v1/setup: validate + atomically write
-// <data-dir>/walhub.toml, then respond 200 {saved, requires_restart, errors}
+// <data-dir>/spindle.toml, then respond 200 {saved, requires_restart, errors}
 // (§3.4).
 func (s *Server) setupPut(w http.ResponseWriter, r *http.Request) {
 	if !s.setupAccess(w, r) {

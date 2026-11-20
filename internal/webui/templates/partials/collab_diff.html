@@ -4,13 +4,13 @@
 {{define "collab_diff_files"}}
 {{range .Files}}{{$file := .}}
 <div class="card mb-4 overflow-hidden" data-diff-file="{{.Path}}">
-  <div class="flex flex-wrap items-center gap-2 border-b border-zinc-200 px-3 py-2 dark:border-zinc-800">
-    <h3 class="min-w-0 truncate font-mono text-sm font-semibold">{{.Path}}</h3>
+  <div class="flex flex-wrap items-center gap-2 border-b border-[var(--pd-line)] px-3 py-2">
+    <h3 class="mono min-w-0 truncate text-sm font-semibold">{{.Path}}</h3>
     {{if eq .Status "added"}}<span class="chip chip-open">added</span>{{else if eq .Status "deleted"}}<span class="chip chip-closed">deleted</span>{{else if eq .Status "renamed"}}<span class="chip chip-neutral">renamed</span>{{end}}
-    <span class="ml-auto shrink-0 text-xs text-zinc-500 dark:text-zinc-400">+{{.Added}} −{{.Deleted}}</span>
+    <span class="mono muted ml-auto shrink-0 text-xs">+{{.Added}} −{{.Deleted}}</span>
   </div>
   {{if .Binary}}
-  <p class="px-3 py-2 text-sm text-zinc-500 dark:text-zinc-400">Binary file not shown</p>
+  <p class="muted px-3 py-2 text-sm">Binary file not shown</p>
   {{else}}
   <div class="overflow-x-auto">
     <table class="diff w-full border-collapse font-mono text-xs leading-5">
@@ -26,14 +26,14 @@
         </tr>
         {{if $row.Staged}}
         <tr>
-          <td colspan="4" class="border-t border-emerald-300 bg-emerald-50/40 p-2 dark:border-emerald-800 dark:bg-emerald-950/30">
+          <td colspan="4" class="border-t border-[var(--pd-line-strong)] bg-[var(--pd-raised)] p-2">
             <form class="grid gap-2" method="post" action="/{{$.Full}}/pull/{{$.Num}}/threads">
-              <p class="text-xs text-zinc-500 dark:text-zinc-400">commenting on <span class="font-mono">{{$.Sel.Path}}:{{$.Sel.Line}}</span></p>
+              <p class="muted text-xs">commenting on <span class="mono">{{$.Sel.Path}}:{{$.Sel.Line}}</span></p>
               <input type="hidden" name="path" value="{{$.Sel.Path}}">
               <input type="hidden" name="side" value="{{$.Sel.Side}}">
               <input type="hidden" name="start" value="{{$.Sel.Line}}">
               <input type="hidden" name="end" value="{{$.Sel.Line}}">
-              <textarea class="input min-h-16 font-mono text-sm" name="body" rows="3" aria-label="thread comment body" placeholder="Reply…" data-autogrow data-submit-keys></textarea>
+              <textarea class="input min-h-16 text-sm leading-relaxed" name="body" rows="3" aria-label="thread comment body" placeholder="Reply…" data-autogrow data-submit-keys></textarea>
               <div class="flex flex-wrap items-center justify-end gap-2">
                 <a class="btn" href="/{{$.Full}}/pull/{{$.Num}}/files">Cancel</a>
                 <button type="submit" class="btn primary">Start thread</button>
@@ -57,11 +57,11 @@
 {{define "collab_diff_conv"}}
 {{range .Files}}{{$file := .}}
 <div class="mb-4" data-diff-file="{{.Path}}">
-  <h3 class="mb-2 min-w-0 truncate font-mono text-sm font-semibold">{{.Path}}</h3>
+  <h3 class="mono mb-2 min-w-0 truncate text-sm font-semibold">{{.Path}}</h3>
   {{if .Binary}}
-  <p class="card px-3 py-2 text-sm text-zinc-500 dark:text-zinc-400">Binary file not shown</p>
+  <p class="card muted px-3 py-2 text-sm">Binary file not shown</p>
   {{else}}
-  <div class="overflow-x-auto rounded-lg border border-zinc-200 dark:border-zinc-800">
+  <div class="overflow-x-auto rounded border border-[var(--pd-line)]">
     {{range .Hunks}}
     <div class="diff-hunk px-2 py-0.5 font-mono text-xs">{{.Header}}</div>
     {{range .Rows}}

@@ -8,33 +8,37 @@
   {{template "repo_guide" .Data.Guide}}
   {{else}}
   <div class="blob-page">
-    <nav class="crumbs mb-2 text-sm">
-      <a class="text-emerald-700 hover:underline dark:text-emerald-400" href="/{{.Data.Repo.Full}}">root</a>
-      {{range .Data.Crumbs}}{{if .Last}} <span class="muted"> / </span> <strong>{{.Name}}</strong>{{else}} <span class="muted"> / </span> <a class="text-emerald-700 hover:underline dark:text-emerald-400" href="{{.Href}}">{{.Name}}</a>{{end}}{{end}}
+    <!-- Breadcrumb: a path is an identifier, so the strip is mono and ends
+         on plain ink; the trailing segment is not a link to itself. -->
+    <nav class="crumbs mb-2 flex flex-wrap items-baseline gap-x-1 font-mono text-[11px]" aria-label="file path">
+      <a class="link" href="/{{.Data.Repo.Full}}">root</a>
+      {{range .Data.Crumbs}}{{if .Last}}<span class="text-[var(--pd-dim)]" aria-hidden="true"> / </span><strong class="font-medium text-[var(--pd-text)]">{{.Name}}</strong>{{else}}<span class="text-[var(--pd-dim)]" aria-hidden="true"> / </span><a class="link" href="{{.Href}}">{{.Name}}</a>{{end}}{{end}}
     </nav>
 
-    <!-- Header wraps at 390px (name / language chip / size · sha / raw), so
-         the raw pill keeps ml-auto only while it fits. -->
-    <div class="blob-head mb-2 flex flex-wrap items-baseline gap-2">
-      <h2 class="font-semibold">{{.Data.Name}}</h2>
-      {{if .Data.Lang}}<span class="chip">{{.Data.Lang}}</span>{{end}}
-      <span class="muted tabular text-xs">{{.Data.Size}} · {{.Data.SHA}}</span>
-      {{if .Data.RawHref}}<a class="pill ml-auto cursor-pointer hover:no-underline" href="{{.Data.RawHref}}" target="_blank" rel="noopener">raw</a>{{end}}
-    </div>
-
     <div class="blob-body card overflow-hidden">
+      <!-- File header is a hairline bar on the pane, not a floating title:
+           the file name in mono, language/state as a chip, size · sha as
+           inventory, and raw as the one text action (.link). Wraps cleanly at
+           390px. -->
+      <div class="blob-head flex flex-wrap items-center gap-x-3 gap-y-1 border-b border-[var(--pd-line)] px-3 py-1.5 font-mono text-xs leading-4">
+        <h2 class="font-semibold">{{.Data.Name}}</h2>
+        {{if .Data.Lang}}<span class="chip">{{.Data.Lang}}</span>{{end}}
+        <span class="mono tabular text-[11px] text-[var(--pd-muted)]">{{.Data.Size}}{{if .Data.SHA}} · {{.Data.SHA}}{{end}}</span>
+        {{if .Data.RawHref}}<a class="link ml-auto font-mono text-[11px]" href="{{.Data.RawHref}}" target="_blank" rel="noopener">raw</a>{{end}}
+      </div>
+
       {{if .Data.TooLarge}}
-      <p class="muted italic p-6 text-center">
+      <p class="muted px-4 py-8 text-center text-sm italic">
         This file is too large to render ({{.Data.Size}}; the render cap is 2 MiB). Fetch it raw from the API.
       </p>
       {{else if .Data.Binary}}
-      <p class="muted italic p-6 text-center">binary file, {{.Data.Size}}</p>
+      <p class="muted px-4 py-8 text-center text-sm italic">binary file, {{.Data.Size}}</p>
       {{else if .Data.IsMarkdown}}
       <!-- Preview | Code is a query link (?view=code): shareable, no JS, one
            full render per switch (Q4 recommendation). -->
-      <div class="seg flex items-center gap-1.5 border-b border-zinc-200 px-3 py-2 dark:border-zinc-800">
-        <a href="{{.Data.PathLink}}" class="pill cursor-pointer hover:no-underline{{if not .Data.CodeView}} border-emerald-500! text-emerald-600! dark:text-emerald-400!{{end}}">Preview</a>
-        <a href="{{.Data.PathLink}}?view=code" class="pill cursor-pointer hover:no-underline{{if .Data.CodeView}} border-emerald-500! text-emerald-600! dark:text-emerald-400!{{end}}">Code</a>
+      <div class="seg flex items-center gap-1.5 border-b border-[var(--pd-line)] px-3 py-1.5">
+        <a href="{{.Data.PathLink}}" class="btn px-2 py-1{{if not .Data.CodeView}} btn-active{{end}}">Preview</a>
+        <a href="{{.Data.PathLink}}?view=code" class="btn px-2 py-1{{if .Data.CodeView}} btn-active{{end}}">Code</a>
       </div>
       {{if .Data.CodeView}}
       <pre class="code-view m-0 min-w-0 flex-1 overflow-x-auto rounded-none border-0"><code>{{.Data.Code}}</code></pre>

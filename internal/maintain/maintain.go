@@ -13,9 +13,9 @@ import (
 	"sync"
 	"time"
 
-	"github.com/crueber/walhub/internal/config"
-	"github.com/crueber/walhub/internal/store"
-	"github.com/crueber/walhub/internal/store/proto"
+	"github.com/crueber/spindle/internal/config"
+	"github.com/crueber/spindle/internal/store"
+	"github.com/crueber/spindle/internal/store/proto"
 )
 
 // defaultInterval is the §2 pass cadence; defaultFollowInterval the §8 cadence.

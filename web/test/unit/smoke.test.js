@@ -1,12 +1,12 @@
 // web/test/unit/smoke.test.js — fetch-based server smoke (D-WEB-4): the BUILT
 // SPA must actually be served — shell, hashed assets with module MIME, SDK
-// bundle. Skips when WALHUB_TEST_WEB_BASE_URL is unreachable, so `make test`
+// bundle. Skips when SPINDLE_TEST_WEB_BASE_URL is unreachable, so `make test`
 // stays green on a cold machine; CI always has a server up.
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
 
-const BASE = process.env.WALHUB_TEST_WEB_BASE_URL ?? "http://127.0.0.1:8080";
+const BASE = process.env.SPINDLE_TEST_WEB_BASE_URL ?? "http://127.0.0.1:8080";
 
 let up = false;
 try {

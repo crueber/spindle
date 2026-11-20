@@ -11,7 +11,7 @@ import (
 	"context"
 	"net/http"
 
-	"github.com/crueber/walhub/internal/server/auth"
+	"github.com/crueber/spindle/internal/server/auth"
 )
 
 // Auth is the authority surface a page provider may use. It is exactly what

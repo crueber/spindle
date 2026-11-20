@@ -9,8 +9,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/crueber/walhub/internal/api"
-	"github.com/crueber/walhub/internal/server/auth"
+	"github.com/crueber/spindle/internal/api"
+	"github.com/crueber/spindle/internal/server/auth"
 )
 
 type (
@@ -529,7 +529,7 @@ func injectPrincipal(r *http.Request, p auth.Principal) *http.Request {
 func (s *Server) authFailure(w http.ResponseWriter, r *http.Request, aerr *auth.AuthError) {
 	switch aerr.Kind {
 	case auth.ErrForbidden:
-		plainStatus(w, http.StatusForbidden, aerr.Why+" — see: walhub setup tokens")
+		plainStatus(w, http.StatusForbidden, aerr.Why+" — see: spindle setup tokens")
 	case auth.ErrUnavailable:
 		w.Header().Set("Retry-After", "15")
 		plainStatus(w, http.StatusServiceUnavailable, aerr.Why)

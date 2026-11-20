@@ -8,12 +8,12 @@
   <form method="post" action="/orgs/new" class="card grid gap-3 p-4" aria-label="New organization">
     <label class="grid gap-1" for="orgnew-name">
       <span class="text-sm font-medium">Organization name</span>
-      <input id="orgnew-name" name="org" class="input font-mono" value="{{.Data.Org}}"
+      <input id="orgnew-name" name="org" class="input mono" value="{{.Data.Org}}"
              placeholder="acme" autocomplete="off" spellcheck="false"
              aria-label="Organization name" aria-describedby="orgnew-name-help">
       <span id="orgnew-name-help" class="muted text-xs">Lowercase letters, digits, and hyphens, 1–39 characters.</span>
     </label>
-    {{if .Data.NameErr}}<p class="text-xs text-red-700 dark:text-red-400">{{.Data.NameErr}}</p>{{end}}
+    {{if .Data.NameErr}}<p class="err-line">{{.Data.NameErr}}</p>{{end}}
     <label class="grid gap-1" for="orgnew-display">
       <span class="text-sm font-medium">Display name</span>
       <input id="orgnew-display" name="display_name" class="input" value="{{.Data.Display}}"
@@ -26,8 +26,8 @@
     </label>
     {{template "forms_messages" .Data}}
     <div class="flex flex-wrap gap-2">
-      <button type="submit" class="btn primary px-3 py-1">create organization</button>
-      <a class="btn px-3 py-1" href="/explore">cancel</a>
+      <button type="submit" class="btn primary">create organization</button>
+      <a class="btn" href="/explore">cancel</a>
     </div>
   </form>
 </section>

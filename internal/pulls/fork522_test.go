@@ -13,7 +13,7 @@ import (
 	"errors"
 	"testing"
 
-	"github.com/crueber/walhub/internal/config"
+	"github.com/crueber/spindle/internal/config"
 )
 
 func TestStartForkDisabledRefuses(t *testing.T) {

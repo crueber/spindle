@@ -8,7 +8,7 @@ import (
 	"strings"
 	"time"
 
-	web "github.com/crueber/walhub/web"
+	web "github.com/crueber/spindle/web"
 )
 
 // writeJSONBody emits a JSON body (server-side; the api seam has its own).

@@ -5,7 +5,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/crueber/walhub/internal/server/auth"
+	"github.com/crueber/spindle/internal/server/auth"
 )
 
 // TestExposedTemplatesExact pins the discovery list for the issues surface

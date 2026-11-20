@@ -11,12 +11,12 @@ import (
 	"strings"
 	"time"
 
-	"github.com/crueber/walhub/internal/config"
-	"github.com/crueber/walhub/internal/git"
-	"github.com/crueber/walhub/internal/identity"
-	"github.com/crueber/walhub/internal/server/auth"
-	"github.com/crueber/walhub/internal/store"
-	"github.com/crueber/walhub/internal/wal"
+	"github.com/crueber/spindle/internal/config"
+	"github.com/crueber/spindle/internal/git"
+	"github.com/crueber/spindle/internal/identity"
+	"github.com/crueber/spindle/internal/server/auth"
+	"github.com/crueber/spindle/internal/store"
+	"github.com/crueber/spindle/internal/wal"
 )
 
 // Params is the validated import request (scrubbed: no token anywhere).
@@ -202,7 +202,7 @@ func (s *Service) Begin(ctx context.Context, p auth.Principal, params Params, to
 	// authenticated admin under a real auth mode (fix #237 — the flag's
 	// authority stays with the operator/CLI, never the untrusted body).
 	if params.Dangerous && !s.dangerousAllowed(p) {
-		return nil, nil, &StatusError{Status: 403, Message: "dangerous:true requires an authenticated admin (server.auth.mode token/oidc); operator hosts use `walhub import --dangerous` instead"}
+		return nil, nil, &StatusError{Status: 403, Message: "dangerous:true requires an authenticated admin (server.auth.mode token/oidc); operator hosts use `spindle import --dangerous` instead"}
 	}
 	params.importer = p.Name
 	target := params.target()

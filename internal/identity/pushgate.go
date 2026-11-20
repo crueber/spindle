@@ -24,7 +24,7 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/crueber/walhub/internal/server/auth"
+	"github.com/crueber/spindle/internal/server/auth"
 )
 
 // CheckPush enforces the repo-scoped push rule for one existing repo: host

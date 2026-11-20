@@ -4,7 +4,7 @@
 // service call the JSON API handler makes, so a page and its API twin cannot
 // drift. The one composition call
 //
-//	d := webui.SettingsDeps{ /* setup* fields from cmd/walhub/webui.go */ }
+//	d := webui.SettingsDeps{ /* setup* fields from cmd/spindle/webui.go */ }
 //	d.BindSettingsServices(webui.SettingsServices{
 //	    API: apiEnv, Ident: c.ident, Checks: c.checksSvc, Notify: c.notifySvc,
 //	    Mirror: c.mirrorHandler, Push: c.pushMirrorHandler, Now: time.Now,
@@ -33,15 +33,15 @@ import (
 	"strings"
 	"time"
 
-	"github.com/crueber/walhub/internal/api"
-	"github.com/crueber/walhub/internal/checks"
-	"github.com/crueber/walhub/internal/config"
-	"github.com/crueber/walhub/internal/git"
-	"github.com/crueber/walhub/internal/identity"
-	"github.com/crueber/walhub/internal/mirror"
-	"github.com/crueber/walhub/internal/notify"
-	"github.com/crueber/walhub/internal/pushmirror"
-	"github.com/crueber/walhub/internal/server/auth"
+	"github.com/crueber/spindle/internal/api"
+	"github.com/crueber/spindle/internal/checks"
+	"github.com/crueber/spindle/internal/config"
+	"github.com/crueber/spindle/internal/git"
+	"github.com/crueber/spindle/internal/identity"
+	"github.com/crueber/spindle/internal/mirror"
+	"github.com/crueber/spindle/internal/notify"
+	"github.com/crueber/spindle/internal/pushmirror"
+	"github.com/crueber/spindle/internal/server/auth"
 )
 
 // SettingsServices is the concrete service set the settings group adapts.

@@ -6,7 +6,7 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/crueber/walhub/internal/store"
+	"github.com/crueber/spindle/internal/store"
 )
 
 // Profile is users/<principal>/profile.json.

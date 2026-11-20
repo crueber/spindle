@@ -1,4 +1,4 @@
-# Style guideline — the walhub UI design language
+# Style guideline — the spindle UI design language
 
 > Status: **normative, not advisory.** This document codifies the app's
 > de-facto design language with canonical references (the file and the
@@ -40,13 +40,23 @@
 - Mobile-viewport check, Tailwind-only composition, rendered-proof rule:
   AGENTS.md §2 working rules (Forgejo #533).
 
-## 1. Foundations
+## 1. Foundations — “Precision Dark”
+
+**Adopted 2026-11-20 (Forgejo: design-language review). Supersedes the
+emerald-on-zinc language.** The comparison document that chose this direction is
+`docs/design/DESIGN-LANGUAGE-PROPOSALS.md` (direction A, “Precision Dark”);
+its wireframe is `docs/design/mocks/A/repo.html`. This section is the normative
+instantiation: if a screen disagrees with it, the screen is wrong.
+
+The language in one sentence: **a dense, flat, terminal-native tool — graphite
+panes, one amber accent that means *action*, monospace for every identifier, and
+colour otherwise reserved for state.**
 
 **F1 — Dark is the shipped default; light is the base layer.**
 `internal/webui/templates/base.html` carries `<html lang="en" class="dark">`;
 the header toggle (`partials/header.html`, `data-theme-toggle`) is driven by
 `web/src/islands/theme.js`, which persists the choice in localStorage
-(`walhub-theme`, dark stays the default when storage is unavailable) and syncs
+(`spindle-theme`, dark stays the default when storage is unavailable) and syncs
 the `.dark` class. `web/src/app.css` wires it: Tailwind v4 CSS-first
 (`@import "tailwindcss"`, no config file, no CDN) with the class-based dark
 variant (`@custom-variant dark`, never `prefers-color-scheme`, because the
@@ -56,30 +66,76 @@ rendered, a swapped fragment inherits the class already on `<html>` — an islan
 must never re-apply the theme to a subtree. (AGENTS.md law 1, D-WEB-6/D-WEB-14;
 `docs/go/12_web_ui.md` §2.2.)
 
-**F2 — Colors are theme tokens, never a hardcoded palette.**
-Component classes use `zinc-*`/`emerald-*`/etc. pairs in both themes
-(e.g. `.card` in `web/src/app.css`); the commit graph carries lane colors in
-`--graph-*` vars for both themes (`web/src/app.css` unlayered graph block,
-Forgejo #506) and the generated SVG carries only `.gl-N` classes, never literals
-(`internal/webui/graph.go`). New UI extends the token families; it never inlines
-a hex/rgb literal for themed surfaces.
+**F2 — One token system, two themes.** Every surface, line and text colour comes
+from the semantic variables below (`web/src/app.css`, `:root` = light,
+`.dark` = dark). Components reference the variables; templates reference the
+component classes or the Tailwind ramps. A hex literal in a template is a bug
+(F2 previously; unchanged in force, retuned in value). Contrast is a gate, not a
+preference: every pair in the table is measured, and the three text-carrying
+pairs hold ≥ 4.5:1 in both themes.
 
-**F3 — The a11y floor: every keyboard-reachable control shows focus.**
-`web/src/app.css` (`@layer base :focus-visible`, emerald outline —
-`docs/go/12_web_ui.md` §8 §7 rule). Popovers keep a native-button keyboard
-baseline (Enter/Space toggle, Tab walks controls, Esc closes and returns focus —
-`web/src/islands/menus.js`, Forgejo #214); decorative glyphs and inline SVG
-icons are `aria-hidden` so accessible names are untouched (e.g.
-`partials/header.html`, Forgejo #495 pattern).
+| Token | Dark (default) | Light | Role |
+|---|---|---|---|
+| `--pd-canvas` | `#0f1113` | `#ffffff` | page background |
+| `--pd-surface` | `#14181b` | `#f7f7f6` | panes, cards, table bodies |
+| `--pd-raised` | `#1c2125` | `#efefed` | inputs, chips, hover rows |
+| `--pd-raised-2` | `#22282c` | `#e6e6e3` | pressed / selected rows |
+| `--pd-line` | `#232a2e` | `#e2e2df` | hairline borders (the default border) |
+| `--pd-line-strong` | `#323a3f` | `#cfcfca` | control borders, dividers that must read |
+| `--pd-text` | `#e6eaec` | `#17181a` | primary text (15.6:1 / 16.6:1) |
+| `--pd-text-2` | `#a3adb4` | `#55585d` | secondary text (7.8:1 / 6.7:1) |
+| `--pd-muted` | `#79838b` | `#6f7378` | metadata (4.6:1 / 4.8:1) |
+| `--pd-dim` | `#525c63` | `#8a8f94` | decorative only — never text a user must read |
+| `--pd-accent` | `#ffb224` | `#9a5b00` | **action**: primary button, focus, active branch |
+| `--pd-accent-hover` | `#ffc862` | `#7a4600` | action hover |
+| `--pd-on-accent` | `#151004` | `#ffffff` | text on the accent (10.5:1 / 5.4:1) |
+| `--pd-ok` | `#4ec9a4` | `#0f7355` | open / passing / healthy |
+| `--pd-warn` | `#e0a95e` | `#8a5a10` | draft / degraded |
+| `--pd-danger` | `#e06c6c` | `#b42323` | closed / failing / destructive |
 
-**F4 — Narrow viewports never pan the page.**
+**F3 — Amber means *action*, never *link*.** Exactly one primary action per
+page owns the accent (`pages/collab/issues.html` toolbar remains the reference).
+Links are ink: `--pd-text` with a 1 px underline at 40 % opacity that goes solid
+on hover and takes the accent on focus. `.link` keeps its role as the one
+text-action treatment but is no longer emerald. Amber on *state* is forbidden:
+an issue is open (`--pd-ok`), merged (violet-free: `--pd-text-2` on
+`--pd-raised`), or closed (`--pd-danger`).
+
+**F4 — Flat panes, hairline depth.** Radius never exceeds 4 px (`--radius-sm:
+2px`, `--radius-md: 3px`, `--radius-lg: 4px`, `--radius-xl: 6px`). Cards carry
+no shadow: a pane is `--pd-surface` + 1 px `--pd-line` on `--pd-canvas`.
+Elevation is reserved for popovers, which are opaque (§4) and may cast
+`0 8px 24px rgb(0 0 0 / .45)` in dark / `0 8px 24px rgb(0 0 0 / .12)` in light.
+
+**F5 — Monospace is the identity.** Refs, branch names, paths, SHAs, counts,
+sizes, timestamps, key/value labels and the status strip are monospace
+(`--font-mono`). Prose — README bodies, issue descriptions, settings copy — is
+sans. A page has exactly these two voices; using mono for prose is a bug, and
+using sans for an identifier is a missed signal.
+
+**F6 — Density with a floor.** The type ramp is retuned (`--text-xs` 11 px,
+`--text-sm` 13.5 px, `--text-base` 15 px, `--text-lg` 16.5 px, `--text-xl`
+19 px, `--text-2xl` 23 px, `--text-3xl` 28 px). Table rows are 34 px, list rows
+44–56 px by content, the top bar is 46 px, the repo status strip 26 px.
+Micro-labels are 10 px uppercase with `0.08em` tracking (`.eyebrow`). Nothing
+carrying information is smaller than 11 px on a touch viewport.
+
+**F7 — The a11y floor: every keyboard-reachable control shows focus.**
+`web/src/app.css` (`@layer base :focus-visible`) paints a 2 px `--pd-accent`
+outline at 1 px offset in both themes — amber on graphite is 10.5:1. Popovers
+keep a native-button keyboard baseline (Enter/Space toggle, Tab walks controls,
+Esc closes and returns focus — `web/src/islands/menus.js`, Forgejo #214);
+decorative glyphs and inline SVG icons are `aria-hidden` so accessible names
+are untouched (e.g. `partials/header.html`, Forgejo #495 pattern).
+
+**F8 — Narrow viewports never pan the page.**
 Layout changes are verified rendered at ~390px as well as desktop
 (AGENTS.md §2). The established repairs: nav strips scroll internally instead of
 wrapping (§2); wide tables scroll in place inside `overflow-x-auto` wrappers
 (issue #275 — `pages/repo/tree.html`, `partials/settings_repo.html` and
 siblings); the graph rail hides at ≤480px (app.css media query; §9);
 `break-words` (not scroll wrappers) contains unbroken strings in wrapping `kv`
-cells (issue #275).
+cells (issue #275). The repo status strip is hidden below `sm:`.
 
 ## 2. Shared vocabulary — `web/src/app.css` component classes
 
@@ -90,11 +146,12 @@ opaque-popover precedent.)
 
 **Panels and chrome.**
 
-- `.card` (`web/src/app.css`) — the panel. Floating `.card`s are opaque by
-  structure (§4).
-- `.card-meta` (issue #277) — meta rows are a flex row with gap + wrap so
-  adjacent spans never concatenate; muted `xs` text in the Issues/Releases
-  row-meta language, with explicit ` · ` separators in the markup. Its SPA
+- `.card` (`web/src/app.css`) — the panel: `--pd-surface`, a 1 px `--pd-line`
+  border and radius 4, no shadow (§1 F4). Floating `.card`s are opaque and are
+  the only elements that carry `--pd-shadow` (§4).
+- `.card-meta` (issue #277, re-tuned 2026-11-20) — meta rows are a flex row
+  with gap + wrap so adjacent spans never concatenate; monospace 11 px in
+  `--pd-muted` (§1 F5), with explicit ` · ` separators in the markup. Its SPA
   consumer (`web/src/pages/Pull.jsx`) is historical (D-WEB-15); the class is the
   shared idiom new list-card meta rows must use. (Note: `web/css/repo.css` is
   dead/unbundled — the live stylesheet is `web/src/app.css`.)
@@ -106,7 +163,9 @@ opaque-popover precedent.)
   Composes with layout utilities; cards MUST NOT
   drift apart into per-card title styles.
 - `.site-header`, `.brand` — header chrome and wordmark
-  (`partials/header.html`).
+  (`partials/header.html`). The wordmark is monospace with the 8 px amber block
+  that gives the product a mark (§1 F5); it is the only place the accent is
+  decorative rather than an action.
 - `.site-nav a`, `.nav-link` (issue #238) — one link treatment for the primary
   nav and for nav-styled links in the right-aligned utility cluster (the API
   link sits `ml-auto`, left of the theme/menu cluster — `partials/header.html`).
@@ -126,15 +185,19 @@ navigation; server-rendered pages arrive with the active tab already marked
 
 **Controls.**
 
-- `.btn` / `.btn.primary` / `.btn.danger` — emerald is the primary action.
-  Exactly ONE primary CTA per page; the issues-list toolbar is the reference
-  (`pages/collab/issues.html`: Labels / Milestones `.btn`, then one
-  `.btn primary` "New issue").
-- `.btn-active` — toggled pill/button state (state filters, the graph toggle,
-  issue #37 clone protocol). References: `pages/collab/pulls.html`,
-  `pages/repo/commits.html`, `pages/settings/org.html`.
-- `.link` (Forgejo #568) — the ONE shared treatment for text-level actions
-  that must read as links, not surrounding text (review dismiss/remove, thread
+- `.btn` / `.btn.primary` / `.btn.danger` — **amber is the primary action**
+  (§1 F3). `.btn` is a 26 px control on `--pd-raised`; `.btn.primary` is the one
+  amber CTA; `.btn.danger` carries `--pd-danger`. Exactly ONE primary CTA per
+  page; the issues-list toolbar is the reference (`pages/collab/issues.html`:
+  Labels / Milestones `.btn`, then one `.btn primary` "New issue").
+- `.btn-active` — toggled control state: amber border + amber text on the
+  raised surface, never a filled button (state filters, the graph toggle, the
+  star/watch on-state). References: `pages/collab/pulls.html`,
+  `pages/repo/commits.html`, `pages/settings/org.html`, `repo_header.html`.
+- `.link` (Forgejo #568, retuned 2026-11-20) — the ONE shared treatment for
+  text-level actions that must read as links, not surrounding text. **Ink, not
+  accent**: `--pd-text` with a 35 %-opacity underline that goes solid on hover
+  (§1 F3); focus takes the amber ring through `:focus-visible`. (review dismiss/remove, thread
   resolve/expand toggles, staged remove, member remove, token revoke, webhook
   ping/deliveries/delete, back-links, check expand toggles, notification
   actions). Accent emerald both themes (the markdown-link language), hover
@@ -143,9 +206,11 @@ navigation; server-rendered pages arrive with the active tab already marked
   precedent). Deliberately a class, never a bare `a` rule — scoped link styles
   and nav treatments keep their contexts. Button-shaped actions (composer
   Cancels, staged edit/remove) stay `.btn`, never `.link` (#566/#567).
-- `.pill` — filter chips, badges, doc-tab idiom.
-- `.tab-badge` (issue #319) — count badges are white-on-emerald-500 (reads in
-  both themes, so no `dark:` variant); a tab omits the badge when it has no
+- `.pill` — filter chips, ref/branch badges, the doc-tab idiom. Monospace by
+  default: a pill holds a ref, a label or a filename (§1 F5).
+- `.tab-badge` (issue #319, retuned 2026-11-20) — a count **chip**, not a
+  bubble: monospace digits on `--pd-raised` with a hairline, so a count never
+  competes with its tab label. A tab omits the badge when it has no
   count to show (`partials/repo_tabs.html` renders it only for a nonzero
   `Badge`; the owner tab's repository count is always meaningful).
 - `.input` — text-field utilities live here AND ONLY here. Never put `.input`
@@ -154,6 +219,17 @@ navigation; server-rendered pages arrive with the active tab already marked
   markup: real `<input type="checkbox">` in a Tailwind peer pattern with
   `role="switch"` + `aria-checked` where it is a setting switch
   (`partials/settings_setup.html`, `partials/settings_repo.html`).
+- `.eyebrow` (2026-11-20) — the micro-caps label (10 px, `0.08em` tracking,
+  monospace, `--pd-muted`). Every sidebar/section label that names a region
+  rather than speaking a sentence uses it (§1 F6).
+- `.mono` (2026-11-20) — the opt-in identifier treatment: refs, SHAs, paths,
+  counts, sizes and key/value labels. Prose never takes it (§1 F5).
+- `.kv` / `.kv-row` / `.kv-key` / `.kv-val` (2026-11-20) — the About-rail
+  key/value stack (`pages/repo/tree.html`): mono keys left, values right.
+- `.status-strip` (2026-11-20) — the repository status strip (§1 F6): fixed to
+  the viewport bottom above `sm:`, 26 px, monospace, carrying branch, rev and
+  health. Pages that render it are padded by
+  `body:has(.status-strip) main`; it is hidden on touch viewports.
 - `.icon` (Forgejo #465) — the one sizing rule for inline SVG: `1em` /
   `currentColor` (`web/src/app.css`); templates inline the glyph with
   `aria-hidden="true"` and no per-icon CSS, no margins — row spacing stays with
@@ -196,15 +272,44 @@ new list pages copy its anatomy and cite it.
   only when set, as a truncating `.chip` link to the filtered list
   (`partials/collab_common.html` `collab_milestone_chip`); the stamp is
   `collab_time` over the shared `rel` helper (`internal/webui/helpers.go`).
-- **Head pill follows the viewed ref** (issue #252): `partials/repo_header.html`
-  renders the head pill from the handler's resolved ref (`{{if .Head}}`), with
-  the short label derived server-side; an empty repo says `empty`. There is no
-  client-side pill signal any more — the resolved value is the one truth.
+- **The branch is chosen where it changes the view** (2026-11-20; supersedes
+  #252's header pill). The repository masthead carries no ref pill — two
+  representations of the same branch competed with each other. The Code page
+  toolbar owns the branch selector (`pages/repo/tree.html`: a `.btn` trigger +
+  the shared `menus.js` popover, one link per head, the current head marked in
+  amber); an empty repository says `empty` in the masthead chips. The handler's
+  resolved ref remains the one truth.
 - **Clone honesty** (issues #37/#124): the clone menu
   (`partials/repo_header.html`) shows the server's advertised URLs verbatim;
   the transport pill label derives from the URL scheme, so pill and text never
   disagree. Copy affordance: readonly textbox + Copy button (`data-copy`, the
   copy island), transient `role="status"` indication.
+
+### 3.1 Repository code page — the canonical repository surface
+
+`internal/webui/templates/pages/repo/tree.html` (handler `repoTree` in
+`internal/webui/repo.go`) is the reference for every repository page. Anatomy,
+top to bottom:
+
+1. **Masthead** (`partials/repo_header.html`): `owner / name`, visibility chip,
+   description, a monospace meta line (branch and tag counts), then the quiet
+   counters and the page's ONE `.btn.primary` (Clone). No ref pill (§3).
+2. **Tab strip** (`partials/repo_tabs.html`): active tab = amber bottom border.
+3. **Toolbar**: branch selector, monospace path breadcrumb (only below the
+   root), and the directory filter (`data-filter` → `web/src/islands/filter.js`,
+   client-side over the rows already on the page — never a fetch).
+4. **Commit strip**: the newest commit on the ref — author initial, subject,
+   author, relative age, short SHA — from the same `Commits` call the log page
+   uses. It is chrome: a failed or empty read renders no strip, never an error.
+5. **File table**: type icon, name (`.link`), monospace size, monospace age.
+   No Unix mode column. The wrapper is `overflow-x-auto` (issue #275).
+6. **Docs panel** (`partials/repo_doctabs.html`): `?doc=` links, README first.
+7. **About rail** (`lg:` only): `.kv` rows built exclusively from data the
+   chrome already carries — stars, forks, watching, branches, tags. Nothing is
+   invented; a value the handler does not have is not rendered.
+8. **Status strip** (`partials/repo_status.html`): branch, rev, health and the
+   branch count, fixed to the viewport bottom above `sm:`. It says only what the
+   page knows — there is no fabricated CI state.
 
 ## 4. Popovers
 
@@ -411,3 +516,17 @@ Tailwind-only rule.
   materially, the rule says so in place (single unified diff gutter, server
   rows/count badges, `?graph=1` instead of client state); SPA paths are marked
   historical rather than silently deleted.
+- **ADOPTED (2026-11-20) — “Precision Dark” replaces the emerald-on-zinc
+  language.** Chosen from the three proposals in
+  `docs/design/DESIGN-LANGUAGE-PROPOSALS.md` (direction A). Rationale: the brief
+  was *functional differentiation*, and A is the direction that makes the
+  product legible as a tool — dense rows, monospace identifiers, one amber
+  action accent, a repo status strip. Two things carried over from the other
+  proposals: B's ~72ch reading measure for rendered markdown (`.markdown-body`)
+  and C's rule that a shared class, not a page, owns shape. The raw Tailwind
+  ramps (`zinc`, `emerald`, `amber`) are retuned in `@theme` so the hundreds of
+  inline utilities in templates adopt the palette without a per-file edit; the
+  semantic `--pd-*` roles are what components use. Nothing in the component
+  vocabulary was removed — `.card`, `.btn`, `.link`, `.chip*`, `.pill`,
+  `.data-table` keep their names and roles, so the migration is a retune, not a
+  rewrite.

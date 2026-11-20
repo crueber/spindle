@@ -23,9 +23,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/crueber/walhub/internal/api"
-	"github.com/crueber/walhub/internal/sshd"
-	"github.com/crueber/walhub/internal/store"
+	"github.com/crueber/spindle/internal/api"
+	"github.com/crueber/spindle/internal/sshd"
+	"github.com/crueber/spindle/internal/store"
 	gossh "golang.org/x/crypto/ssh"
 )
 

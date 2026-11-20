@@ -4,7 +4,7 @@ import (
 	"net/http"
 	"strconv"
 
-	"github.com/crueber/walhub/internal/git"
+	"github.com/crueber/spindle/internal/git"
 )
 
 // --- ops (§12.2) ----------------------------------------------------------------------

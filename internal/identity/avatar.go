@@ -4,7 +4,7 @@
 // Every OIDC login for a user with no avatar enqueues a background
 // generation: the DiceBear "rings" style seeded by the verified
 // email (seed stays the email even though #370 made the username the
-// identity key), over a solid walhub-green (emerald-600 #059669)
+// identity key), over a solid spindle-green (emerald-600 #059669)
 // background in the greyscale-preset treatment (flat, no gradients),
 // with the rings figures drawn from a greens-to-black override
 // palette (emerald/green/teal 300→950 + black, userAvatarRingColors)
@@ -51,7 +51,7 @@ import (
 	dicebear "github.com/dicebear/dicebear-go/v10"
 	"github.com/dicebear/styles/v10"
 
-	"github.com/crueber/walhub/internal/store"
+	"github.com/crueber/spindle/internal/store"
 )
 
 // User avatars are EITHER a generated SVG or an uploaded raster
@@ -157,7 +157,7 @@ var ringsStyle = sync.OnceValues(func() (*dicebear.Style, error) {
 
 // GenerateUserAvatarSVG renders the deterministic avatar for seed
 // (the user's verified email): DiceBear "rings" with a solid
-// walhub-green background (userAvatarBackgroundColor) and
+// spindle-green background (userAvatarBackgroundColor) and
 // greens-to-black figures (userAvatarRingColors via the "ringColor"
 // core-library option — verified against the dicebear-go/v10 render
 // + validation sources: the style defines no per-style options, but

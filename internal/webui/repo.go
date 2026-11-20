@@ -5,7 +5,7 @@ package webui
 // shared repo chrome (header, tab strip, degraded banner, empty guide) that
 // every other group's repo-scoped page reuses.
 //
-// WIRING (composition, cmd/walhub): api.Env already carries everything the
+// WIRING (composition, cmd/spindle): api.Env already carries everything the
 // pages read (RepoView, RepoRegistry, Tasks, Cfg). The projections the JSON
 // summary handler composes from feature hooks are NOT on api.Env, so this
 // group declares them here instead of editing foundation files:
@@ -78,25 +78,27 @@ import (
 	"errors"
 	"fmt"
 	"html/template"
+	"log"
 	"math"
 	"net"
 	"net/http"
 	"net/url"
+	"os"
 	"regexp"
 	"sort"
 	"strconv"
 	"strings"
 	"time"
 
-	"github.com/crueber/walhub/internal/api"
-	"github.com/crueber/walhub/internal/checks"
-	"github.com/crueber/walhub/internal/config"
-	"github.com/crueber/walhub/internal/git"
-	"github.com/crueber/walhub/internal/identity"
-	"github.com/crueber/walhub/internal/notify"
-	"github.com/crueber/walhub/internal/server/auth"
-	"github.com/crueber/walhub/internal/social"
-	"github.com/crueber/walhub/internal/tags"
+	"github.com/crueber/spindle/internal/api"
+	"github.com/crueber/spindle/internal/checks"
+	"github.com/crueber/spindle/internal/config"
+	"github.com/crueber/spindle/internal/git"
+	"github.com/crueber/spindle/internal/identity"
+	"github.com/crueber/spindle/internal/notify"
+	"github.com/crueber/spindle/internal/server/auth"
+	"github.com/crueber/spindle/internal/social"
+	"github.com/crueber/spindle/internal/tags"
 )
 
 // --- bindings ---------------------------------------------------------------
@@ -336,6 +338,9 @@ func (s *Server) RepoChromeFor(w http.ResponseWriter, r *http.Request, owner, na
 // repoViewError maps a RepoView error: not-found → 404, everything else →
 // 503 (the API's mapViewErr rule, with a message safe for a person).
 func (s *Server) repoViewError(w http.ResponseWriter, r *http.Request, err error) {
+	if os.Getenv("SPINDLE_DEBUG_PAGE") != "" {
+		log.Printf("webui repoViewError %s: %v", r.URL.Path, err)
+	}
 	switch {
 	case errors.Is(err, api.ErrNotFound):
 		s.errorPage(w, r, http.StatusNotFound, "not found in this repository")
@@ -891,6 +896,11 @@ type treePage struct {
 	Crumbs    []repoCrumb
 	Entries   []treeRow
 	Ref       string
+	SHA       string
+	Branch    string
+	Branches  []repoBranchRef
+	Latest    *repoCommit
+	Health    string
 	Path      string
 	Docs      []repoDoc
 	DocBase   string
@@ -899,6 +909,45 @@ type treePage struct {
 	DocTooBig bool
 	DocBinary bool
 	DocSize   string
+}
+
+// repoBranchRef is one entry in the Code page's branch selector.
+type repoBranchRef struct {
+	Name    string
+	Href    string
+	Current bool
+}
+
+// repoCommit is the Code page's commit strip (the newest commit on the ref).
+type repoCommit struct {
+	Subject string
+	Author  string
+	Initial string
+	When    string // RFC 3339, rendered through the rel helper
+	SHA     string
+	Href    string
+}
+
+// initialOf is the one-letter author mark in the commit strip.
+func initialOf(name string) string {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return "?"
+	}
+	r := []rune(name)
+	return strings.ToUpper(string(r[0]))
+}
+
+// codeHealth is the status strip's health word (§1 F6): a compact, honest
+// signal the page already knows — never a fabricated CI state.
+func codeHealth(c *RepoChrome) string {
+	switch {
+	case c == nil || c.Empty:
+		return "empty"
+	case c.Degraded:
+		return "degraded"
+	}
+	return "healthy"
 }
 
 func (s *Server) repoTree(w http.ResponseWriter, r *http.Request) {
@@ -939,11 +988,46 @@ func (s *Server) repoTree(w http.ResponseWriter, r *http.Request) {
 		s.repoViewError(w, r, err)
 		return
 	}
-	data.Ref = tree.Ref
+	// Ref/SHA come from the RESOLVE result: the view's TreeResult leaves them
+	// empty (only the API's tree handler fills them for the wire doc), and the
+	// page's docs fetch passed tree.SHA — empty — so the root README 404'd on
+	// every real repo (the test fakes populated the fields; the real view
+	// does not).
+	data.Ref = res.Ref
+	data.SHA = res.SHA
 	data.Path = tree.Path
-	treeRest := shortRefName(tree.Ref)
+	data.Branch = shortRefName(res.Ref)
+	data.Health = codeHealth(c)
+	treeRest := shortRefName(res.Ref)
 	if treeRest == "" {
-		treeRest = tree.SHA
+		treeRest = res.SHA
+	}
+	// Branch selector: one name-sorted page of heads (§9.2). A failure is not
+	// fatal — the selector is chrome, and the page must still render.
+	if refs, _, rerr := s.env.API.Repo.RefList(ctx, rq.id, "heads", api.RefQuery{N: 100}); rerr == nil {
+		for _, rf := range refs {
+			name := shortRefName(rf.Name)
+			if name == "" {
+				continue
+			}
+			data.Branches = append(data.Branches, repoBranchRef{
+				Name:    name,
+				Href:    "/" + c.Full + "/tree/" + escapePath(name),
+				Current: name == data.Branch,
+			})
+		}
+	}
+	// Commit strip: the newest commit on the resolved ref. Same rule — chrome.
+	if cp, cerr := s.env.API.Repo.Commits(ctx, rq.id, res.SHA, "", 0, 1); cerr == nil && len(cp.Commits) > 0 {
+		cm := cp.Commits[0]
+		data.Latest = &repoCommit{
+			Subject: cm.Subject,
+			Author:  cm.Author,
+			Initial: initialOf(cm.Author),
+			When:    cm.AuthorDate.Format(time.RFC3339),
+			SHA:     cm.SHA,
+			Href:    "/" + c.Full + "/commit/" + cm.SHA,
+		}
 	}
 	// Entry links address the file under the DISPLAYED directory: short ref
 	// plus the current path (#482 keeps ref names short so slashes in
@@ -978,13 +1062,13 @@ func (s *Server) repoTree(w http.ResponseWriter, r *http.Request) {
 		row.ModeText = fmtMode(e.Mode, e.Type)
 		switch e.Type {
 		case "tree":
-			row.Icon = "📁"
+			row.Icon = "dir"
 			row.Href = "/" + c.Full + "/tree/" + escapePath(entryBase+"/"+e.Name)
 		case "commit":
-			row.Icon = "↗"
+			row.Icon = "link"
 			row.Href = "/" + c.Full + "/tree/" + escapePath(entryBase+"/"+e.Name)
 		default:
-			row.Icon = "📄"
+			row.Icon = "file"
 			row.Href = "/" + c.Full + "/blob/" + escapePath(entryBase+"/"+e.Name)
 		}
 		if row.IsBlob && e.Size >= 0 {
@@ -1013,7 +1097,7 @@ func (s *Server) repoTree(w http.ResponseWriter, r *http.Request) {
 		if tree.Readme != nil && tree.Readme.Name == selected {
 			data.DocBody = RenderMarkdownIn(tree.Readme.Contents, c.Owner, c.Name)
 		} else {
-			blob, berr := s.env.API.Repo.Blob(ctx, rq.id, tree.SHA, docPath(tree.Path, selected), false)
+			blob, berr := s.env.API.Repo.Blob(ctx, rq.id, res.SHA, docPath(tree.Path, selected), false)
 			if berr != nil {
 				if isEmptyRepoErr(berr) {
 					data.Guide = s.repoGuide(c)

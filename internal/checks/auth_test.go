@@ -7,7 +7,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/crueber/walhub/internal/server/auth"
+	"github.com/crueber/spindle/internal/server/auth"
 )
 
 // Seam 2 shape tests: credential extraction, shape resolution, and the

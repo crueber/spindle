@@ -15,7 +15,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/crueber/walhub/internal/config"
+	"github.com/crueber/spindle/internal/config"
 )
 
 func TestStoreErrorUnwrap(t *testing.T) {

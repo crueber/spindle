@@ -20,7 +20,7 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/crueber/walhub/internal/server/auth"
+	"github.com/crueber/spindle/internal/server/auth"
 )
 
 // routePerms answers the three gating endpoints; false when the path is

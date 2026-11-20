@@ -25,10 +25,10 @@ import (
 	"sync"
 	"time"
 
-	"github.com/crueber/walhub/internal/repoimport"
-	"github.com/crueber/walhub/internal/store"
-	"github.com/crueber/walhub/internal/store/proto"
-	"github.com/crueber/walhub/internal/wal"
+	"github.com/crueber/spindle/internal/repoimport"
+	"github.com/crueber/spindle/internal/store"
+	"github.com/crueber/spindle/internal/store/proto"
+	"github.com/crueber/spindle/internal/wal"
 )
 
 // leaseTTL bounds one sync fire's cross-instance exclusion (push of a
@@ -647,7 +647,7 @@ func splitOnce(s, sep string) (string, string, bool) {
 
 // classifyPushError maps push failures onto task errors (an upstream
 // 401/403 here means the upstream went private or the credential died —
-// backoff + narration cover it; it is never walhub-auth 401).
+// backoff + narration cover it; it is never spindle-auth 401).
 func classifyPushError(ctx context.Context, err error) string {
 	if ctx.Err() != nil {
 		return "push interrupted; safe to retry"

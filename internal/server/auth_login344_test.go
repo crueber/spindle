@@ -8,7 +8,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/crueber/walhub/internal/config"
+	"github.com/crueber/spindle/internal/config"
 )
 
 // TestGatedBrowserLoginDecisionTable pins the #344 login entry through the

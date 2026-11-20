@@ -22,9 +22,9 @@ import (
 	"sync"
 	"time"
 
-	"github.com/crueber/walhub/internal/config"
-	"github.com/crueber/walhub/internal/server/auth"
-	"github.com/crueber/walhub/internal/wal"
+	"github.com/crueber/spindle/internal/config"
+	"github.com/crueber/spindle/internal/server/auth"
+	"github.com/crueber/spindle/internal/wal"
 )
 
 // ExposedTemplates lists the discovery endpoints[] entries this surface

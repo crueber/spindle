@@ -9,8 +9,8 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/crueber/walhub/internal/config"
-	"github.com/crueber/walhub/internal/sizecatalog"
+	"github.com/crueber/spindle/internal/config"
+	"github.com/crueber/spindle/internal/sizecatalog"
 )
 
 // --- GET /api/v1 (§8 discovery; no phantom routes, derived from the table) ----------
@@ -110,7 +110,7 @@ var (
 
 // RegisterExposed appends feature-owned route templates to the discovery
 // endpoints[] (14 §14.12 lane rule). Called once per template from the
-// feature's composition wiring (cmd/walhub); duplicates are dropped at
+// feature's composition wiring (cmd/spindle); duplicates are dropped at
 // render time. Not concurrency-critical (startup-only), but mutex-guarded
 // for -race cleanliness.
 func RegisterExposed(templates ...string) {
@@ -279,7 +279,7 @@ func (h *handlers) instance(w http.ResponseWriter, r *http.Request) {
 	}
 	name := e.Hostname
 	writeCached(w, r, ccNoStore, "", http.StatusOK, instanceBody{
-		Kind:        "walhub",
+		Kind:        "spindle",
 		Name:        name,
 		Revision:    e.Version,
 		Instance:    name,

@@ -100,7 +100,7 @@ func TestCoverGitReplayBranches(t *testing.T) {
 	}
 	// Replay succeeds on stock git (experimental replay + temp branch +
 	// --ref-action=print): the tip lands on base with the server committer.
-	tip, err := g.Replay(ctx, dir, base, base, head, "walhub", "walhub@localhost")
+	tip, err := g.Replay(ctx, dir, base, base, head, "spindle", "spindle@localhost")
 	if err != nil {
 		t.Fatalf("replay: %v", err)
 	}
@@ -108,7 +108,7 @@ func TestCoverGitReplayBranches(t *testing.T) {
 		t.Fatalf("tip %s must sit on base", tip)
 	}
 	out, err := g.runCollect(ctx, dir, []string{"log", "-1", "--format=%cn %ce", tip}, "", nil)
-	if err != nil || strings.TrimSpace(out) != "walhub walhub@localhost" {
+	if err != nil || strings.TrimSpace(out) != "spindle spindle@localhost" {
 		t.Fatalf("tip committer = %q %v", out, err)
 	}
 }

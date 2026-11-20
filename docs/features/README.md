@@ -1,6 +1,6 @@
-# walhub — GitHub-Grade Features: Planning Documentation
+# spindle — GitHub-Grade Features: Planning Documentation
 
-This directory plans the **collaboration layer** on top of the walhub git host: the features that turn
+This directory plans the **collaboration layer** on top of the spindle git host: the features that turn
 "a very good git server" into a place where teams build software together. Everything here is
 **bucket-native** — the object store defined in `docs/go/02_storage_protobuf.md` is the ONLY database.
 No SQL, no Redis, no search engine, no queue. Every feature is a new family of objects under the bucket
@@ -20,7 +20,7 @@ commits are ordinary git objects; a PR's *head* is an ordinary ref published thr
    and the rollout phasing.
 2. Your feature doc (below).
 3. `docs/go/14_extensibility.md` (the seams), `docs/go/13_concurrency.md` (the lock/race rules),
-   `DEVIATIONS.md` (what walhub already decided), `AGENTS.md` (the laws).
+   `DEVIATIONS.md` (what spindle already decided), `AGENTS.md` (the laws).
 
 ## The documents
 
@@ -134,7 +134,7 @@ data; the timeline is the backfill source of truth (same contract as the events 
 
 ### P9 — What is explicitly OUT of scope for this layer
 
-Code search (needs an index format decision — deferred), GitHub Actions runners (walhub stores check
+Code search (needs an index format decision — deferred), GitHub Actions runners (spindle stores check
 results, it does not run CI), Discussions, Packages, Projects/boards, SAML/SCIM. Each gets a paragraph
 in its nearest doc describing the seam it would plug into.
 

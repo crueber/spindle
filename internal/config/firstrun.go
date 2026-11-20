@@ -60,24 +60,24 @@ func LoadSetupBase(dataDir string, candidates []string) (*Config, error) {
 }
 
 // ResolveDataDir resolves the data dir (11_config_cli.md §3.1.1): the
-// WALHUB_DATA_DIR env var, else /var/lib/walhub in a container context
+// SPINDLE_DATA_DIR env var, else /var/lib/spindle in a container context
 // (/.dockerenv present or KUBERNETES_SERVICE_HOST set), else the XDG default
-// ~/.local/share/walhub.
+// ~/.local/share/spindle.
 func ResolveDataDir(getenv func(string) string) string {
 	if getenv == nil {
 		getenv = os.Getenv
 	}
-	if d := getenv("WALHUB_DATA_DIR"); d != "" {
+	if d := getenv("SPINDLE_DATA_DIR"); d != "" {
 		return d
 	}
 	if IsContainer() {
-		return "/var/lib/walhub"
+		return "/var/lib/spindle"
 	}
 	home, err := os.UserHomeDir()
 	if err != nil || home == "" {
-		return "/var/lib/walhub"
+		return "/var/lib/spindle"
 	}
-	return filepath.Join(home, ".local", "share", "walhub")
+	return filepath.Join(home, ".local", "share", "spindle")
 }
 
 // IsContainer reports whether the process appears to run in a container.
@@ -131,7 +131,7 @@ func ValidateForSave(c *Config) error {
 }
 
 // SaveSetup validates c (§5), then atomically serializes it to
-// <data-dir>/walhub.toml: write walhub.toml.tmp (mode 0600), fsync, rename.
+// <data-dir>/spindle.toml: write spindle.toml.tmp (mode 0600), fsync, rename.
 // Readers see either the old or the new file, never a partial one.
 func SaveSetup(c *Config, dataDir string) error {
 	if err := ValidateForSave(c); err != nil {
@@ -144,12 +144,12 @@ func SaveSetup(c *Config, dataDir string) error {
 	if err != nil {
 		return fmt.Errorf("marshal config: %w", err)
 	}
-	tmpPath := filepath.Join(dataDir, "walhub.toml.tmp")
+	tmpPath := filepath.Join(dataDir, "spindle.toml.tmp")
 	if err := writeFileSync(tmpPath, body); err != nil {
 		os.Remove(tmpPath)
 		return fmt.Errorf("write config: %w", err)
 	}
-	if err := os.Rename(tmpPath, filepath.Join(dataDir, "walhub.toml")); err != nil {
+	if err := os.Rename(tmpPath, filepath.Join(dataDir, "spindle.toml")); err != nil {
 		os.Remove(tmpPath)
 		return fmt.Errorf("rename config into place: %w", err)
 	}

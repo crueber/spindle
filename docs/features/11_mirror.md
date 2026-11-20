@@ -1,8 +1,8 @@
 # 11 — Pull-only mirror repos with scheduled upstream syncs
 
-> Forgejo [`crueber/walhub#240`](https://github.com/crueber/walhub/issues/240) · Status: implemented (plan revision R1 + plan review are normative on conflict; R1 wins).
+> Forgejo [`crueber/spindle#240`](https://github.com/crueber/spindle/issues/240) · Status: implemented (plan revision R1 + plan review are normative on conflict; R1 wins).
 
-A repo can be created as a **mirror** of an external git repository: walhub
+A repo can be created as a **mirror** of an external git repository: spindle
 pulls from the upstream on a schedule, the repo is marked read-only
 (pull-only), pushes to it fail for every principal, and the UI shows the
 mirror badge plus the next scheduled sync. Schedules are presets only —
@@ -132,7 +132,7 @@ Repo-level read-only, enforced for every principal (admins included):
    `receivePackLocal` and SSH both land in) → per-ref `ng` lines, no
    ingest/connectivity/publish. Covers clients that skip discovery.
 3. **SSH advertisement**: refusal precedes the v0 advertisement write
-   (client stderr `walhub: <msg>`), else the client hangs.
+   (client stderr `spindle: <msg>`), else the client hangs.
 4. Fetches/clones are unaffected (read paths never consult the guard).
 
 The sync engine publishes via `Publish`/`PublishRefs` directly and never

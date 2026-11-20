@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/crueber/walhub/internal/server/auth"
+	"github.com/crueber/spindle/internal/server/auth"
 )
 
 // doReq issues one request against the Handler (both lanes via lane arg).

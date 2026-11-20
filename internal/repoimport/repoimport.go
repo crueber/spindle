@@ -19,11 +19,11 @@
 //
 // Seams (14_extensibility.md): Seam 1 via Handler (server.ExtraRoutes,
 // both lanes, top-level twins); Seam 5 via KindRepoImport run on the core
-// wal.TaskTable through the cmd/walhub composition (opsTasks-style wiring
+// wal.TaskTable through the cmd/spindle composition (opsTasks-style wiring
 // — Begin subscribes the table-level replay ring, then Tasks().Run on a
 // drain-scoped ctx under `<target>/repo-import`: the leader never sees
 // the request ctx, so client disconnect cannot cancel it, while phase-1
-// Drain cancels it promptly); Seam 7 via the `walhub import --url` CLI. Core
+// Drain cancels it promptly); Seam 7 via the `spindle import --url` CLI. Core
 // (internal/store, internal/wal, internal/git) is never imported upward:
 // this package depends only on seam interfaces + frozen types. Git is
 // always the subprocess binary with pinned argv (docs/go/04_git.md);
@@ -35,11 +35,11 @@ import (
 	"fmt"
 	"sync"
 
-	"github.com/crueber/walhub/internal/config"
-	"github.com/crueber/walhub/internal/identity"
-	"github.com/crueber/walhub/internal/server/auth"
-	"github.com/crueber/walhub/internal/store"
-	"github.com/crueber/walhub/internal/wal"
+	"github.com/crueber/spindle/internal/config"
+	"github.com/crueber/spindle/internal/identity"
+	"github.com/crueber/spindle/internal/server/auth"
+	"github.com/crueber/spindle/internal/store"
+	"github.com/crueber/spindle/internal/wal"
 )
 
 // KindRepoImport is the Seam 5 task kind (single constant, picked once —

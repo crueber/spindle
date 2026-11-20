@@ -371,10 +371,10 @@ func TestValidRefGlobCases(t *testing.T) {
 }
 
 func TestResolveDataDirContainer(t *testing.T) {
-	t.Setenv("WALHUB_DATA_DIR", "")
+	t.Setenv("SPINDLE_DATA_DIR", "")
 	t.Setenv("KUBERNETES_SERVICE_HOST", "10.0.0.1")
-	if got := ResolveDataDir(func(string) string { return "" }); got != "/var/lib/walhub" {
-		t.Fatalf("container data dir = %q, want /var/lib/walhub", got)
+	if got := ResolveDataDir(func(string) string { return "" }); got != "/var/lib/spindle" {
+		t.Fatalf("container data dir = %q, want /var/lib/spindle", got)
 	}
 }
 
@@ -445,7 +445,7 @@ func TestAttachmentsDefaultsAndValidation(t *testing.T) {
 	}
 	// TOML spelling round-trips through the file loader.
 	dir := t.TempDir()
-	path := filepath.Join(dir, "walhub.toml")
+	path := filepath.Join(dir, "spindle.toml")
 	if err := os.WriteFile(path, []byte("[attachments]\nmax_image_bytes = \"1MiB\"\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}

@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/crueber/walhub/internal/store"
+	"github.com/crueber/spindle/internal/store"
 )
 
 // countingStore tallies backend round trips (the E8 evidence harness

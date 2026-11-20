@@ -4,7 +4,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/crueber/walhub/internal/config"
+	"github.com/crueber/spindle/internal/config"
 )
 
 // TestDiscoveryBrowserLoginAdvertisement pins the #344 discovery half: the

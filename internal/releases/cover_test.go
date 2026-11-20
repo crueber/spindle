@@ -9,10 +9,10 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/crueber/walhub/internal/git"
-	"github.com/crueber/walhub/internal/identity"
-	"github.com/crueber/walhub/internal/server/auth"
-	"github.com/crueber/walhub/internal/store"
+	"github.com/crueber/spindle/internal/git"
+	"github.com/crueber/spindle/internal/identity"
+	"github.com/crueber/spindle/internal/server/auth"
+	"github.com/crueber/spindle/internal/store"
 )
 
 // failStore fails configured ops (covers store-error branches without a network).
@@ -347,7 +347,7 @@ func TestUploadEdgeBranches(t *testing.T) {
 		t.Fatalf("bad ct: %v", err)
 	}
 	// Spool dir unusable.
-	x.svc.SpoolDir = "/proc/walhub-nope/spool"
+	x.svc.SpoolDir = "/proc/spindle-nope/spool"
 	if _, err := x.svc.UploadAsset(ctx(), "o", "r", writer(), "v1", "f", strings.NewReader("x"), 1, shaOf([]byte("x")), ""); err == nil {
 		t.Fatal("bad spool dir accepted")
 	}

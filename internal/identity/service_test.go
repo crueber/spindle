@@ -10,9 +10,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/crueber/walhub/internal/config"
-	"github.com/crueber/walhub/internal/server/auth"
-	"github.com/crueber/walhub/internal/store"
+	"github.com/crueber/spindle/internal/config"
+	"github.com/crueber/spindle/internal/server/auth"
+	"github.com/crueber/spindle/internal/store"
 )
 
 func testClock() time.Time { return time.Date(2026, 9, 3, 12, 0, 0, 0, time.UTC) }

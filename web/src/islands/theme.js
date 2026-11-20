@@ -4,7 +4,7 @@
 // flips that class and stores the choice; the button's two icons are CSS
 // swapped on [aria-pressed] so there is no server round trip.
 
-const KEY = "walhub-theme";
+const KEY = "spindle-theme";
 
 function apply(theme) {
   const dark = theme !== "light";

@@ -6,8 +6,8 @@ import (
 	"net/http"
 	"strconv"
 
-	"github.com/crueber/walhub/internal/config"
-	"github.com/crueber/walhub/internal/git"
+	"github.com/crueber/spindle/internal/config"
+	"github.com/crueber/spindle/internal/git"
 )
 
 // --- GET/PUT/DELETE {lane} — repo summary, create, delete (§9.1) ----------------------

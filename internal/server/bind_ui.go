@@ -3,8 +3,8 @@ package server
 import (
 	"net/http"
 
-	"github.com/crueber/walhub/internal/pages"
-	"github.com/crueber/walhub/internal/server/auth"
+	"github.com/crueber/spindle/internal/pages"
+	"github.com/crueber/spindle/internal/server/auth"
 )
 
 // SetUI installs the server-rendered page provider (internal/pages seam).

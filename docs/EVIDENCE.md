@@ -1,6 +1,6 @@
 # Performance evidence
 
-Measured claims about walhub's behavior under load — not estimates. Every entry
+Measured claims about spindle's behavior under load — not estimates. Every entry
 in this document was produced by a harness committed to the repo (reproduction
 command included), on the real code path, and states the backend it ran on.
 Entries are added when a feature's scale behavior needs pinning (explicitly
@@ -34,7 +34,7 @@ requested or when a review questions a hot path).
 | E7 | 2026-09-04 | Notification fan-out + webhook delivery loop (`internal/notify`) | What is the write amplification of one emission, what does the unread dedup save on replay, and what does a delivery pass cost? | One emission = 2 GETs + 2 PUTs per recipient + 3 GETs + 2 PUTs fixed (thread, watchers, seq reservation, activity); deduped replay writes flat (2 PUTs, zero notification/index writes at any recipient count; probes are 3+n GETs); delivery pass = 1 LIST + ~3 GETs + 1 PUT per event + 1 cursor CAS, idle pass writes nothing. Cannot explode: 100-recipient sync cap with task fallback, 5 s budget, per-hook cursors. |
 | E8 | 2026-09-04 | Release latest-pointer, autodraft, asset streaming (`internal/releases`, `internal/social`) | Is the latest badge O(1), what does a publish/list/autodraft cost, is the asset upload memory-bounded, and are star/fork writes constant? | Latest hot read flat (2 GETs at 5 and 200 releases); publish 3 GETs + 2 PUTs; list 1 LIST + 1 GET per release; autodraft 1 probe per candidate (≤100) with zero LIST; 1 MiB upload 2 GETs + 2 PUTs with an empty spool dir and zero-write 413s; star 2 GETs + 1 HEAD + 2 PUTs, fork bump 1+1. Cannot explode: pointer monotonicity skips stale publishers, scans/lists are prefix-bounded and capped, git probes run under the package pool. |
 | E9 | 2026-09-04 | Collab stream fan-out + invalidation coalescing (`internal/notify`; the client-coalescing half was measured in the SPA's `web/src/lib`, now historical — D-WEB-15) | What does one repo-frame publish cost vs subscriber count, what survives a stalled subscriber, and how many refetches does a 30-check burst cause? | Publish ~0.6 µs (1 sub) → ~10 µs (128 subs), zero store round-trips; stalled pages shed (never stall emission, never grow past 16 + 64 frames); bursts collapse to ~2 refetches per key via the SPA-era per-tick key-set flush + per-key single-flight (the shipped reader coalesces 250 ms into one invalidation); warm revisits transfer nothing. Cannot explode: drop-oldest bus, bounded ring, bounded flush. |
-| E10 | 2026-09-04 | Push fast path with the collab layer mounted + full-chain e2e timing (`cmd/walhub`, `internal/e2e`) | Does the push fast path gain any bucket round trips from eight mounted feature packages, and how long is the full org→release→fork chain on a real stack? | Zero: cold push 8 ops, warm push 9 ops, 0 collab-family keys on either; full chain wall 2.2 s (slowest phase: merge+close 0.5 s). Cannot regress: the budget test fails on any collab key touched by a push. |
+| E10 | 2026-09-04 | Push fast path with the collab layer mounted + full-chain e2e timing (`cmd/spindle`, `internal/e2e`) | Does the push fast path gain any bucket round trips from eight mounted feature packages, and how long is the full org→release→fork chain on a real stack? | Zero: cold push 8 ops, warm push 9 ops, 0 collab-family keys on either; full chain wall 2.2 s (slowest phase: merge+close 0.5 s). Cannot regress: the budget test fails on any collab key touched by a push. |
 | E11 | 2026-09-04 | Repository import (`internal/repoimport`) | What does one URL import cost, and does it grow with repo size? | Flat: 7 GETs+HEADs + 16 control PUTs + 0 LISTs at 50 and 400 commits (E11-era 6+12; +2 sidecar durability PUTs — pack publish #248, ref-txn publish #247 — S==M exactly); wall grows with pack bytes only. Cannot explode: exact-key probes, ref enumeration local + capped, pool-gated git, no lock held across I/O. |
 | E12 | 2026-09-08 | Landing concept GIFs (`internal/devtools/landinggif`) | Do 4 animated diagrams + stills fit the byte budgets with no new deps, and what does the landing page weigh? | Yes: 82,618 bytes total (budgets ≤ 150 KB, each asset ~45% headroom); page is `app.css` + `ui.js` + the vendored htmx files + lazy images, zero store reads. |
 | E13 | 2026-09-08 | Self-heal serving cost (`internal/api`, issue #209) | Do the summary `health`, the 404 marker, and the overview fsck projection add store round trips to any budgeted path? | No change: empty summary +0, non-empty summary +1, overview +1 (all exact-key probes, never LIST); push/sync/checkpoint engine paths untouched; empty Code-tab path removes 1–2 UI fetches. |
@@ -694,7 +694,7 @@ nothing. Cannot explode: drop-oldest bus, bounded ring, bounded flush.
 ## E10 — Push fast path with the collab layer mounted + full-chain timing (2026-09-04)
 
 **Area:** rollout integration — the §5 invariant that the push fast path
-gains zero bucket round trips (`cmd/walhub`, `internal/e2e`). Spec:
+gains zero bucket round trips (`cmd/spindle`, `internal/e2e`). Spec:
 `docs/features/09_rollout.md` §5.3.
 
 **Question:** with all eight feature packages mounted (every `ExtraRoutes`
@@ -706,8 +706,8 @@ release → notification/webhook → fork → cross-fork PR chain on a real
 stack with real git?
 
 **Method.** Two harnesses, both the real code path:
-- `TestPushFastPathZeroCollabRoundTrips` in `cmd/walhub/push_budget_test.go`
-  (`go test ./cmd/walhub/ -run TestPushFastPath -v`): the shipped
+- `TestPushFastPathZeroCollabRoundTrips` in `cmd/spindle/push_budget_test.go`
+  (`go test ./cmd/spindle/ -run TestPushFastPath -v`): the shipped
   composition (`buildCollab`, the same function `serveHTTP` calls) over
   the **memory store** wrapped in a prefix-counting decorator, served over
   real HTTP (`httptest`), pushed twice with the **real git binary**
@@ -1030,7 +1030,7 @@ Memory store isolates the algorithmic shape from network RTT (the E11
 gating); absolute numbers are environment-bound — the *shape* (flat
 control plane, converge-only no-ops, zero LIST) is the durable claim.
 Push numbers come from the updated push-budget test
-(`cmd/walhub` `TestPushFastPathZeroCollabRoundTrips` — the shipped
+(`cmd/spindle` `TestPushFastPathZeroCollabRoundTrips` — the shipped
 composition WITH the mirror guard wired, real git over smart HTTP).
 
 **Results.**
@@ -1120,7 +1120,7 @@ manifests seeded at two populations (n=3 and n=12 repos, one pack each);
 `meta/stats.json` bytes after each commit without running the sweep
 (push → sidecar present; compact → superseded packs leave the sum;
 ref-only/settings → no write; failed sidecar PUT → push still commits);
-`cmd/walhub` `TestPushFastPathZeroCollabRoundTrips` — two REAL git pushes
+`cmd/spindle` `TestPushFastPathZeroCollabRoundTrips` — two REAL git pushes
 over smart HTTP through the shipped composition, bounding the sanctioned
 sidecar write (≤ 4 PUTs, blind overwrite only, never a read). Absolute
 numbers are environment-bound — the *shape* (linear fold, flat listing,
@@ -1182,7 +1182,7 @@ over the **filesystem store** (this entry's numbers): `internal/git`
 `TestCommitDatesHappyPath` (REAL `git log -1` — distinct author/committer
 dates pin the #142 preference); `internal/server`
 `TestWalEnginePublishDerivesActivity` (REAL funnel: scratch commit fetched
-into the serving copy, published, sidecar bytes asserted); `cmd/walhub`
+into the serving copy, published, sidecar bytes asserted); `cmd/spindle`
 `TestPushFastPathZeroCollabRoundTrips` (two REAL git pushes, shipped
 composition — the push-budget gate); `internal/sizecatalog`
 `TestSweepFoldsActivityIntoCatalog` + `TestFoldOneSkipsGitWhenFresh` (hook

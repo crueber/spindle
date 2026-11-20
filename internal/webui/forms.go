@@ -4,7 +4,7 @@
 // /{owner}/{name}/issues/new, /{owner}/{name}/pulls/new,
 // /{owner}/teams/{slug}, /{owner}/{name}/labels, /{owner}/{name}/milestones.
 //
-// WIRING (composition, cmd/walhub — this file never edits env.go):
+// WIRING (composition, cmd/spindle — this file never edits env.go):
 //
 //	webui.BindForms(webui.FormsDeps{
 //	    Identity: ident,   // *identity.Service
@@ -54,18 +54,18 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/crueber/walhub/internal/api"
-	"github.com/crueber/walhub/internal/config"
-	"github.com/crueber/walhub/internal/git"
-	"github.com/crueber/walhub/internal/identity"
-	"github.com/crueber/walhub/internal/issues"
-	"github.com/crueber/walhub/internal/mirror"
-	"github.com/crueber/walhub/internal/pulls"
-	"github.com/crueber/walhub/internal/releases"
-	"github.com/crueber/walhub/internal/repoimport"
-	"github.com/crueber/walhub/internal/server/auth"
-	"github.com/crueber/walhub/internal/store"
-	"github.com/crueber/walhub/internal/wal"
+	"github.com/crueber/spindle/internal/api"
+	"github.com/crueber/spindle/internal/config"
+	"github.com/crueber/spindle/internal/git"
+	"github.com/crueber/spindle/internal/identity"
+	"github.com/crueber/spindle/internal/issues"
+	"github.com/crueber/spindle/internal/mirror"
+	"github.com/crueber/spindle/internal/pulls"
+	"github.com/crueber/spindle/internal/releases"
+	"github.com/crueber/spindle/internal/repoimport"
+	"github.com/crueber/spindle/internal/server/auth"
+	"github.com/crueber/spindle/internal/store"
+	"github.com/crueber/spindle/internal/wal"
 )
 
 // --- feature-service seam ----------------------------------------------------

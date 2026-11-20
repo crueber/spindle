@@ -8,9 +8,9 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/crueber/walhub/internal/config"
-	"github.com/crueber/walhub/internal/git"
-	"github.com/crueber/walhub/internal/store/proto"
+	"github.com/crueber/spindle/internal/config"
+	"github.com/crueber/spindle/internal/git"
+	"github.com/crueber/spindle/internal/store/proto"
 )
 
 // runRepair runs after checkpoint (priority 2) when fsck.pb lists missing

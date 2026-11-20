@@ -11,8 +11,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/crueber/walhub/internal/store"
-	"github.com/crueber/walhub/internal/store/proto"
+	"github.com/crueber/spindle/internal/store"
+	"github.com/crueber/spindle/internal/store/proto"
 )
 
 func newTestBridge(t *testing.T, src WalSource, sinks ...Sink) (*Bridge, *recMetrics, store.ObjectStore) {

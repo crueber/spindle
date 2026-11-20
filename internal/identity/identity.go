@@ -2,7 +2,7 @@
 // users, orgs, teams, repo roles (access.json), invitations, and the
 // require_read visibility gate. It registers Seam 1 routes (both lanes),
 // the Seam 3 team:/role: group expansion, the Seam 5 access-bootstrap task
-// kind, and the Seam 7 `walhub access get/put` CLI surface (in cmd/walhub).
+// kind, and the Seam 7 `spindle access get/put` CLI surface (in cmd/spindle).
 //
 // Bucket layout (all keys bucket-relative; the store prefix is applied by
 // the store layer):
@@ -46,9 +46,9 @@ import (
 	"sync"
 	"time"
 
-	"github.com/crueber/walhub/internal/config"
-	"github.com/crueber/walhub/internal/server/auth"
-	"github.com/crueber/walhub/internal/store"
+	"github.com/crueber/spindle/internal/config"
+	"github.com/crueber/spindle/internal/server/auth"
+	"github.com/crueber/spindle/internal/store"
 )
 
 // Role is one rung of the P6 ladder.
@@ -232,7 +232,7 @@ type Service struct {
 
 	// Generate renders one deterministic avatar SVG for a seed (the
 	// verified email). Forgejo #376: production is
-	// GenerateUserAvatarSVG (DiceBear rings on walhub-green, #525); tests stub
+	// GenerateUserAvatarSVG (DiceBear rings on spindle-green, #525); tests stub
 	// counting/blocking renders for the single-flight proof.
 	Generate func(seed string) (string, error)
 

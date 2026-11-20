@@ -5,7 +5,7 @@ import (
 	"net/http"
 	"strings"
 
-	"github.com/crueber/walhub/internal/server/auth"
+	"github.com/crueber/spindle/internal/server/auth"
 )
 
 // This file owns the Seam 2 surface (05 §3, 14_extensibility.md §14.4):

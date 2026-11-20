@@ -25,7 +25,7 @@ func TestAssetUploadDownloadRoundTrip(t *testing.T) {
 	mustPut(t, x, writer(), "v1", ReleaseInput{})
 
 	body := []byte("fake-binary-payload-0123456789")
-	e := upload(t, x, "v1", "walhub-linux-amd64", body)
+	e := upload(t, x, "v1", "spindle-linux-amd64", body)
 	if e.Size != int64(len(body)) || e.SHA256 != shaOf(body) || e.Uploader != "jane" {
 		t.Fatalf("entry: %+v", e)
 	}
@@ -34,7 +34,7 @@ func TestAssetUploadDownloadRoundTrip(t *testing.T) {
 	if len(rel.Assets) != 1 || rel.Assets[0].SHA256 != shaOf(body) {
 		t.Fatalf("header assets: %+v", rel.Assets)
 	}
-	match, err := x.svc.assetBytesMatch(ctx(), AssetKey("o", "r", "v1", "walhub-linux-amd64"), shaOf(body))
+	match, err := x.svc.assetBytesMatch(ctx(), AssetKey("o", "r", "v1", "spindle-linux-amd64"), shaOf(body))
 	if err != nil || !match {
 		t.Fatalf("stored bytes: %v %v", match, err)
 	}

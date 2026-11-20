@@ -5,8 +5,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/crueber/walhub/internal/config"
-	"github.com/crueber/walhub/internal/store/proto"
+	"github.com/crueber/spindle/internal/config"
+	"github.com/crueber/spindle/internal/store/proto"
 )
 
 // TestSelect_ExactPriority walks the EXACT §4 order: for repos assembled in

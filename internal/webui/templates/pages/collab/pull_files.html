@@ -1,8 +1,8 @@
 {{define "content"}}
 {{with .Data}}
 <div class="mx-auto max-w-4xl">
-  <p class="mb-3 text-sm"><a class="link" href="/{{.Repo.Full}}/pull/{{.Num}}">← back to #{{.Num}}</a></p>
-  <h2 class="mb-3 text-lg font-semibold">Files on #{{.Num}}{{if .FilesCount}} ({{.FilesCount}}){{end}}</h2>
+  <p class="mb-3 text-sm"><a class="link" href="/{{.Repo.Full}}/pull/{{.Num}}">← back to <span class="mono">#{{.Num}}</span></a></p>
+  <h2 class="mb-3 text-xl font-semibold tracking-tight">Files on #{{.Num}}{{if .FilesCount}} ({{.FilesCount}}){{end}}</h2>
 
   {{if .Error}}<p class="err-line" role="alert">{{.Error}}</p>{{end}}
   {{if .SelErr}}<p class="err-line" role="alert">{{.SelErr}}</p>{{end}}
@@ -18,7 +18,7 @@
   {{template "collab_diff_files" .Diff}}
   {{if .Diff.Drifted}}{{template "collab_drifted" .Diff.Drifted}}{{end}}
   {{else}}
-  <p class="muted text-sm">No changed files.</p>
+  {{template "collab_empty" (dict "icon" "file" "title" "No changed files" "hint" "The diff appears once the head branch has commits the base does not.")}}
   {{end}}
 </div>
 {{end}}

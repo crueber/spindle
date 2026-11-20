@@ -3,7 +3,7 @@ package server
 import (
 	"net/http"
 
-	"github.com/crueber/walhub/internal/git"
+	"github.com/crueber/spindle/internal/git"
 )
 
 // repo_extra.go — the repo-subpath seam (14_extensibility.md §14.3 routing

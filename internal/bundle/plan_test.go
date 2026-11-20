@@ -4,8 +4,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/crueber/walhub/internal/store"
-	"github.com/crueber/walhub/internal/store/proto"
+	"github.com/crueber/spindle/internal/store"
+	"github.com/crueber/spindle/internal/store/proto"
 )
 
 // TestPlanWindows pins §8.10 plan windows: fulls = keep newest slots ≤ now;

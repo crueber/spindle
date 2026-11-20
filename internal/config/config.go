@@ -1,7 +1,7 @@
-// Package config: the walhub configuration (11_config_cli.md — key names, defaults, and
+// Package config: the spindle configuration (11_config_cli.md — key names, defaults, and
 // meanings are normative and byte-compatible with the Rust spec §15.1).
 // CONTRACT FILE: the Config struct + duration/byte-size scalar types + compiled-in Defaults().
-// Loading (TOML file, WALHUB__/WALGIT__ env overlay, PORT lockstep, validation, per-repo
+// Loading (TOML file, SPINDLE__/WALGIT__ env overlay, PORT lockstep, validation, per-repo
 // settings merge, setup save) is implemented by the config owner in sibling files.
 package config
 
@@ -10,7 +10,7 @@ import "time"
 // removedTLSHint explains the #165 removal wherever a residual server.tls.*
 // setting is rejected (TOML file or env overlay): fail closed with a pointer
 // at the reverse proxy, never a bare "unknown key" or a silent ignore.
-const removedTLSHint = "server.tls.* was removed (issue #165): walhub serves plain HTTP (h2c); terminate TLS at the reverse proxy in front of it"
+const removedTLSHint = "server.tls.* was removed (issue #165): spindle serves plain HTTP (h2c); terminate TLS at the reverse proxy in front of it"
 
 // Duration accepts Rust-spec spellings on the wire/TOML: "5ms", "1h", "30d", "7d", "0s".
 // (time.ParseDuration has no day/week units; this type adds them.)
@@ -313,8 +313,8 @@ type Config struct {
 	Import      Import      `toml:"import"`
 	Attachments Attachments `toml:"attachments"`
 
-	// DataDir is the zero-config root (divergence D5): --data-dir / WALHUB_DATA_DIR,
-	// default ~/.local/share/walhub. Holds store/, cache/, and the saved walhub.toml.
+	// DataDir is the zero-config root (divergence D5): --data-dir / SPINDLE_DATA_DIR,
+	// default ~/.local/share/spindle. Holds store/, cache/, and the saved spindle.toml.
 	// Not a TOML key (never loaded from the file); set by the loader.
 	DataDir string `toml:"-"`
 }

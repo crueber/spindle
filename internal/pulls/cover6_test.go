@@ -9,8 +9,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/crueber/walhub/internal/server/auth"
-	"github.com/crueber/walhub/internal/store"
+	"github.com/crueber/spindle/internal/server/auth"
+	"github.com/crueber/spindle/internal/store"
 )
 
 func TestCover6StartAuth(t *testing.T) {

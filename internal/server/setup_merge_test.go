@@ -16,8 +16,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/crueber/walhub/internal/config"
-	"github.com/crueber/walhub/internal/setup"
+	"github.com/crueber/spindle/internal/config"
+	"github.com/crueber/spindle/internal/setup"
 )
 
 func setupMergeServer(t *testing.T, dataDir string) (*Server, http.Handler) {
@@ -121,14 +121,14 @@ func TestSetupTestValidatesMergedConfig(t *testing.T) {
 	base.Server.Auth.AnonymousRead = false
 	base.Server.Auth.Issuer = "https://id.example.com"
 	base.Server.Auth.AllowedDomains = []string{"example.com"}
-	base.Server.Auth.OAuthClientID = "walhub"
+	base.Server.Auth.OAuthClientID = "spindle"
 	base.Server.Auth.OAuthClientSecret = "s3cret"
 	base.Server.Auth.SessionSecret = strings.Repeat("x", 32) // trio complete (#344)
 	if err := config.SaveSetup(base, dataDir); err != nil {
 		t.Fatal(err)
 	}
 	s, _ := setupMergeServer(t, dataDir)
-	t.Setenv("WALHUB_SETUP_TOKEN", "setup-tok")
+	t.Setenv("SPINDLE_SETUP_TOKEN", "setup-tok")
 
 	// mode=oidc alone is only valid because the FILE supplies the trio.
 	req := httptest.NewRequest("POST", "/api/v1/setup/test?token=setup-tok",
@@ -283,7 +283,7 @@ func TestSetupCoerceDurationsAndSizes(t *testing.T) {
 
 // Fix #23: every new [import] FIELDS example is accepted by
 // POST /api/v1/setup/test in isolation, and the full set round-trips
-// through PUT /api/v1/setup into <data-dir>/walhub.toml with effect.
+// through PUT /api/v1/setup into <data-dir>/spindle.toml with effect.
 func TestSetupImportKeysRoundTrip(t *testing.T) {
 	dataDir := t.TempDir()
 	s, _ := setupMergeServer(t, dataDir)
@@ -581,7 +581,7 @@ func TestSetupAuthTestDiscovery(t *testing.T) {
 	// ok: discovery document whose issuer matches the configured value.
 	served = map[string]any{"issuer": idp.URL, "authorization_endpoint": doc["authorization_endpoint"],
 		"token_endpoint": doc["token_endpoint"], "jwks_uri": doc["jwks_uri"]}
-	code, out := post(s, fmt.Sprintf(`{"issuer": %q, "client_id": "walhub-web", "redirect_uri": "http://localhost:8080/_auth/callback"}`, idp.URL))
+	code, out := post(s, fmt.Sprintf(`{"issuer": %q, "client_id": "spindle-web", "redirect_uri": "http://localhost:8080/_auth/callback"}`, idp.URL))
 	if code != http.StatusOK || out["ok"] != true {
 		t.Fatalf("ok case = %d %v", code, out)
 	}

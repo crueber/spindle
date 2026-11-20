@@ -5,11 +5,14 @@
      preview on top. Expired rows stay listed but accept is disabled (the
      server still rejects with 409). 390px: rows wrap, the action row wraps. */}}
 <div class="invitations-page mx-auto max-w-3xl">
-  <h2 class="mb-1 text-lg font-semibold">Invitations</h2>
-  <p class="muted mb-3 text-sm">
-    Pending organization and repository invitations addressed to you. Expired
-    invitations stay listed but cannot be accepted — decline clears them.
-  </p>
+  <header class="mb-3 border-b border-[var(--pd-line)] pb-3">
+    <p class="eyebrow">inbox</p>
+    <h2 class="mt-1 text-lg font-semibold">Invitations</h2>
+    <p class="muted mt-1 text-sm">
+      Pending organization and repository invitations addressed to you. Expired
+      invitations stay listed but cannot be accepted — decline clears them.
+    </p>
+  </header>
 
   {{if .Data.Anonymous}}
   <div class="card mb-4 p-4">
@@ -21,7 +24,7 @@
 
   {{if .Data.LinkID}}
   <section class="card mb-4 p-3" aria-label="Shared invitation">
-    <h3 class="mb-2 font-semibold">Shared invitation</h3>
+    <p class="eyebrow mb-2">shared invitation</p>
     {{if .Data.Link}}
     <p class="text-sm">
       <span class="chip mr-1">{{.Data.Link.Kind}}</span>
@@ -29,7 +32,7 @@
       <span class="muted"> as {{.Data.Link.Role}} · from </span>
       <code class="font-mono text-xs">{{.Data.Link.InvitedBy}}</code>
       <span class="muted"> · expires </span>
-      {{if .Data.Link.ExpiresAt}}{{if .Data.Link.Expired}}<span class="chip-closed">expired</span>{{else}}<span title="{{.Data.Link.ExpiresAt}}">{{.Data.Link.ExpiresLabel}}</span>{{end}}{{else}}<span class="muted">—</span>{{end}}
+      {{if .Data.Link.ExpiresAt}}{{if .Data.Link.Expired}}<span class="chip-closed">expired</span>{{else}}<span class="font-mono tabular" title="{{.Data.Link.ExpiresAt}}">{{.Data.Link.ExpiresLabel}}</span>{{end}}{{else}}<span class="muted">—</span>{{end}}
     </p>
     <div class="mt-2 flex flex-wrap gap-2">
       <form method="post" action="/invitations/{{.Data.Link.ID}}/accept">
@@ -40,14 +43,14 @@
       </form>
     </div>
     {{else if .Data.LinkErr}}
-    <p class="text-sm text-amber-700 dark:text-amber-300">{{.Data.LinkErr}}</p>
+    <p class="text-sm text-[var(--pd-warn)]">{{.Data.LinkErr}}</p>
     {{else}}
-    <p class="muted text-sm">loading…</p>
+    <p class="muted font-mono text-sm">loading…</p>
     {{end}}
   </section>
   {{end}}
 
-  {{if .Data.Note}}<p class="mb-3 text-sm text-amber-700 dark:text-amber-300">{{.Data.Note}}</p>{{end}}
+  {{if .Data.Note}}<p class="mb-3 text-sm text-[var(--pd-warn)]" role="status">{{.Data.Note}}</p>{{end}}
 
   {{if not .Data.Anonymous}}
     {{if .Data.Rows}}
@@ -59,9 +62,9 @@
           {{if .Expired}}<span class="chip-closed">expired</span>{{end}}
           <strong class="font-mono text-sm">{{.Scope}}</strong>
           <span class="muted text-xs">as {{.Role}}</span>
-          <span class="muted ml-auto text-xs">
+          <span class="muted ml-auto flex flex-wrap items-center gap-1 font-mono text-xs">
             from <code class="font-mono text-xs">{{.InvitedBy}}</code> · expires
-            {{if .ExpiresAt}}{{if .Expired}}<span class="chip-closed">expired</span>{{else}}<span title="{{.ExpiresAt}}">{{.ExpiresLabel}}</span>{{end}}{{else}}<span class="muted">—</span>{{end}}
+            {{if .ExpiresAt}}{{if .Expired}}<span class="chip-closed">expired</span>{{else}}<span class="font-mono tabular" title="{{.ExpiresAt}}">{{.ExpiresLabel}}</span>{{end}}{{else}}<span class="muted">—</span>{{end}}
           </span>
         </div>
         <div class="mt-2 flex flex-wrap gap-2">
@@ -76,7 +79,10 @@
       {{end}}
     </ol>
     {{else}}
-    <p class="muted text-sm">no pending invitations — new org or repo invites land here.</p>
+    <div class="empty-state" role="status">
+      <p class="empty-title">No pending invitations</p>
+      <p class="empty-hint">new org or repo invites land here.</p>
+    </div>
     {{end}}
   {{end}}
 

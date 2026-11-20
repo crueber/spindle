@@ -25,9 +25,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/crueber/walhub/internal/config"
-	"github.com/crueber/walhub/internal/server/auth"
-	"github.com/crueber/walhub/internal/setup"
+	"github.com/crueber/spindle/internal/config"
+	"github.com/crueber/spindle/internal/server/auth"
+	"github.com/crueber/spindle/internal/setup"
 )
 
 // tamperWireMAC returns a wire with a deterministically corrupted MAC:

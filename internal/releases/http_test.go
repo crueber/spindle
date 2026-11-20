@@ -10,8 +10,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/crueber/walhub/internal/git"
-	"github.com/crueber/walhub/internal/server/auth"
+	"github.com/crueber/spindle/internal/git"
+	"github.com/crueber/spindle/internal/server/auth"
 )
 
 // do fires one request through the lane handler with test-principal headers.

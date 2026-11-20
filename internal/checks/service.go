@@ -9,10 +9,10 @@ import (
 	"sync"
 	"time"
 
-	"github.com/crueber/walhub/internal/identity"
-	"github.com/crueber/walhub/internal/policy"
-	"github.com/crueber/walhub/internal/server/auth"
-	"github.com/crueber/walhub/internal/store"
+	"github.com/crueber/spindle/internal/identity"
+	"github.com/crueber/spindle/internal/policy"
+	"github.com/crueber/spindle/internal/server/auth"
+	"github.com/crueber/spindle/internal/store"
 )
 
 // This file owns the read/write checks surface: report, per-sha reads,

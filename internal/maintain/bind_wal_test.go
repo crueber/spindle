@@ -10,12 +10,12 @@ import (
 	"testing"
 	"time"
 
-	"github.com/crueber/walhub/internal/bundle"
-	"github.com/crueber/walhub/internal/config"
-	"github.com/crueber/walhub/internal/git"
-	"github.com/crueber/walhub/internal/store"
-	"github.com/crueber/walhub/internal/store/proto"
-	"github.com/crueber/walhub/internal/wal"
+	"github.com/crueber/spindle/internal/bundle"
+	"github.com/crueber/spindle/internal/config"
+	"github.com/crueber/spindle/internal/git"
+	"github.com/crueber/spindle/internal/store"
+	"github.com/crueber/spindle/internal/store/proto"
+	"github.com/crueber/spindle/internal/wal"
 )
 
 // walMaintRegistry builds a live registry over the memory store with a real

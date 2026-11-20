@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/crueber/walhub/internal/git"
+	"github.com/crueber/spindle/internal/git"
 )
 
 func TestDirSize_HardLinkDedup(t *testing.T) {

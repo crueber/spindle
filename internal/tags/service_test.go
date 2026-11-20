@@ -7,8 +7,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/crueber/walhub/internal/server/auth"
-	"github.com/crueber/walhub/internal/store"
+	"github.com/crueber/spindle/internal/server/auth"
+	"github.com/crueber/spindle/internal/store"
 )
 
 func TestValidateTagName(t *testing.T) {
@@ -195,7 +195,7 @@ func TestCreateAnnotatedHappyPath(t *testing.T) {
 		"object " + testSHA + "\n",
 		"type commit\n",
 		"tag v2\n",
-		"tagger jane <jane@walhub.local>",
+		"tagger jane <jane@spindle.local>",
 		"+0000\n",
 		"\nrelease two\n",
 	} {
@@ -387,7 +387,7 @@ func TestRenderTagger(t *testing.T) {
 	if err != nil {
 		t.Fatalf("renderTagger: %v", err)
 	}
-	want := fmt.Sprintf("jane <jane@walhub.local> %d +0000", nowFixed().Unix())
+	want := fmt.Sprintf("jane <jane@spindle.local> %d +0000", nowFixed().Unix())
 	if tagger != want {
 		t.Fatalf("tagger = %q, want %q", tagger, want)
 	}
@@ -396,7 +396,7 @@ func TestRenderTagger(t *testing.T) {
 	if err != nil {
 		t.Fatalf("sanitized: %v", err)
 	}
-	if !strings.HasPrefix(tagger, "abcd <abcd@walhub.local> ") {
+	if !strings.HasPrefix(tagger, "abcd <abcd@spindle.local> ") {
 		t.Fatalf("sanitized tagger = %q", tagger)
 	}
 	// Empty-after-sanitize is a 400.
@@ -412,7 +412,7 @@ func TestRenderTagger(t *testing.T) {
 	if err != nil {
 		t.Fatalf("negative tz: %v", err)
 	}
-	wantNeg := fmt.Sprintf("jane <jane@walhub.local> %d -0530", neg.Unix())
+	wantNeg := fmt.Sprintf("jane <jane@spindle.local> %d -0530", neg.Unix())
 	if tagger != wantNeg {
 		t.Fatalf("negative-tz tagger = %q, want %q", tagger, wantNeg)
 	}
@@ -426,8 +426,8 @@ func TestNowDefaultsToWallClock(t *testing.T) {
 }
 
 func TestRenderTagBody(t *testing.T) {
-	got := string(renderTagBody("v1", testSHA, "jane <jane@walhub.local> 1 +0000", "hello\n"))
-	want := "object " + testSHA + "\ntype commit\ntag v1\ntagger jane <jane@walhub.local> 1 +0000\n\nhello\n"
+	got := string(renderTagBody("v1", testSHA, "jane <jane@spindle.local> 1 +0000", "hello\n"))
+	want := "object " + testSHA + "\ntype commit\ntag v1\ntagger jane <jane@spindle.local> 1 +0000\n\nhello\n"
 	if got != want {
 		t.Fatalf("body = %q, want %q", got, want)
 	}

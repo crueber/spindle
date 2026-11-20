@@ -21,7 +21,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/crueber/walhub/internal/store/proto"
+	"github.com/crueber/spindle/internal/store/proto"
 )
 
 // OwnerRollup is one owner's derived activity: the max LastCommitTime over

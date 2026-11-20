@@ -14,9 +14,9 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/crueber/walhub/internal/identity"
-	"github.com/crueber/walhub/internal/pages"
-	"github.com/crueber/walhub/internal/server/auth"
+	"github.com/crueber/spindle/internal/identity"
+	"github.com/crueber/spindle/internal/pages"
+	"github.com/crueber/spindle/internal/server/auth"
 )
 
 // parityProfileDeps builds the profile/avatar seams with recording fakes.

@@ -9,7 +9,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/crueber/walhub/internal/git"
+	"github.com/crueber/spindle/internal/git"
 )
 
 // --- fakes (handlers stay independent of internal/wal — 15_testing.md) --------------

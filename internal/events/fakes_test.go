@@ -9,8 +9,8 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/crueber/walhub/internal/git"
-	"github.com/crueber/walhub/internal/store/proto"
+	"github.com/crueber/spindle/internal/git"
+	"github.com/crueber/spindle/internal/store/proto"
 )
 
 // fakeRepo is a RepoView over an in-memory entry list.

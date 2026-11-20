@@ -1,24 +1,25 @@
 {{define "content"}}
 {{/* /notifications (06 §7): the per-user tray. Rows link to their thread;
-     unread rows carry the emerald left edge and an "unread" dot. Mark read /
-     unread / all-read are POST forms (303 back with the filter preserved).
+     unread rows carry the state edge and an "unread" dot. Mark read / unread /
+     all-read are POST forms (303 back with the filter preserved).
      The per-user SSE stream is an ISLAND: this page emits the contract hooks
      only (data-sse*) — no EventSource here, no client data layer.
      390px: rows wrap, the header controls wrap, the row title truncates. */}}
 <section class="notifications-page mx-auto max-w-3xl"{{if not .Data.Anonymous}} data-sse="notifications" data-sse-url="/api/v1/notifications/stream" data-sse-mode="invalidate"{{end}}>
-  <div class="mb-3 flex flex-wrap items-center gap-2">
+  <header class="mb-3 flex flex-wrap items-center gap-2 border-b border-[var(--pd-line)] pb-3">
+    <p class="eyebrow w-full">inbox</p>
     <h2 class="text-lg font-semibold">Notifications</h2>
     {{if .Data.Unread}}<span class="pill" aria-live="polite">{{.Data.Unread}} unread</span>{{end}}
     {{if not .Data.Anonymous}}
     <div class="ml-auto flex flex-wrap gap-2">
-      <a class="btn px-2 py-1 text-sm{{if eq .Data.State ""}} primary{{end}}" href="/notifications">all</a>
-      <a class="btn px-2 py-1 text-sm{{if eq .Data.State "unread"}} primary{{end}}" href="/notifications?state=unread">unread</a>
+      <a class="btn px-2 py-1 text-sm{{if eq .Data.State ""}} btn-active{{end}}" href="/notifications">all</a>
+      <a class="btn px-2 py-1 text-sm{{if eq .Data.State "unread"}} btn-active{{end}}" href="/notifications?state=unread">unread</a>
       <form method="post" action="/notifications/read-all{{if .Data.State}}?state={{.Data.State}}{{end}}">
         <button type="submit" class="btn px-2 py-1 text-sm">mark all read</button>
       </form>
     </div>
     {{end}}
-  </div>
+  </header>
 
   {{if .Data.Anonymous}}
   <div class="card p-4">
@@ -36,8 +37,9 @@
             <span class="chip{{if .Hot}} chip-open{{end}}">{{.Reason}}</span>
             <span class="muted font-mono text-xs">{{.Repo}}#{{.Num}}</span>
             <span class="muted text-xs">{{.Actor}}</span>
+            {{if .CreatedAt}}<span class="muted font-mono text-xs"><time datetime="{{.CreatedAt}}" title="{{.CreatedAt}}">{{rel .CreatedAt}}</time></span>{{end}}
           </div>
-          <a class="mt-0.5 block truncate font-medium hover:underline" href="{{.Href}}">{{if .Title}}{{.Title}}{{else}}(no title){{end}}</a>
+          <a class="mt-0.5 block truncate font-medium link" href="{{.Href}}">{{if .Title}}{{.Title}}{{else}}(no title){{end}}</a>
         </div>
         <div class="flex shrink-0 items-center gap-2">
           {{if eq .State "unread"}}<span class="mt-1 inline-block h-2 w-2 shrink-0 rounded-full bg-emerald-500" aria-label="unread"></span>{{end}}
@@ -55,7 +57,10 @@
   </p>
   {{end}}
   {{else}}
-  <p class="muted">nothing here — watching a repo or being mentioned lands notifications in this tray.</p>
+  <div class="empty-state" role="status">
+    <p class="empty-title">No notifications</p>
+    <p class="empty-hint">nothing here — watching a repo or being mentioned lands notifications in this tray.</p>
+  </div>
   {{end}}
 </section>
 {{end}}

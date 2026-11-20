@@ -369,7 +369,7 @@ func TestCompressBypassesImages(t *testing.T) {
 }
 
 // TestSetupPageSeam: GET /setup is a page-provider route. The §3.4 access
-// rules for the page live in the page layer (internal/webui + the cmd/walhub
+// rules for the page live in the page layer (internal/webui + the cmd/spindle
 // wiring); the server owns only the routing, so a mounted provider answers and
 // no provider is the plain 404 (never an SPA shell).
 func TestSetupPageSeam(t *testing.T) {

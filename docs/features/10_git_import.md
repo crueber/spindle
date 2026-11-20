@@ -6,7 +6,7 @@
 > `docs/go/14_extensibility.md` (§14.3 routes, §14.7 task kinds, §14.12
 > additive rules); git argv per `docs/go/04_git.md` §12; wire conventions
 > per `docs/go/07_api.md`; concurrency per `docs/go/13_concurrency.md`.
-> Plan: Forgejo issue crueber/walhub#21 (body) as revised by R1 (newest
+> Plan: Forgejo issue crueber/spindle#21 (body) as revised by R1 (newest
 > comment) — on any conflict R1 wins; this doc condenses plan+R1 into the
 > repo's doc style and records every R1 resolution in Decisions.
 
@@ -28,7 +28,7 @@ tags by default with `--ref` allowlist / default-branch-only narrowing;
 sha1 + sha256 sources (target follows source, never converts); private
 sources via per-request token (never stored); top-level `POST` + `GET one`
 (+ SSE attach) on both lanes; `/import` UI page + `import.js` SDK;
-`walhub import --url` CLI through the same Service.
+`spindle import --url` CLI through the same Service.
 
 **OUT of scope (v1, explicitly):** LFS content (pointer blobs imported
 as-is with a server-side `Notice` + UI note — clones work, checkouts
@@ -78,7 +78,7 @@ namespace (`CheckRead` — the task may exist before the repo does).
 Wire rules (07 conventions + 14 §14.12): plain-text errors,
 `[]`-never-null, RFC3339 UTC, full SHAs, `no-store` on starts, unknown
 body keys 400 (fail closed). Status mapping: `400` bad URL/options/
-transport, `401` walhub-auth failure (upstream auth failure is a task
+transport, `401` spindle-auth failure (upstream auth failure is a task
 `error`, never HTTP 401) + anonymous, `403` insufficient role, `404`
 unknown task id on this instance, `409` name taken / foreign manifest /
 params-mismatched running import, `422` empty source / no refs after
@@ -213,7 +213,7 @@ by the reflective size check). Env overlay, `config dump`, and the
 reflective setup schema pick the section up with no extra code.
 
 CLI (Seam 7, same Service → same publish/CAS path, 14 §14.9):
-`walhub import --url URL owner/name [--ref …] [--default-branch-only]
+`spindle import --url URL owner/name [--ref …] [--default-branch-only]
 [--include-pull-heads] [--include-notes] [--token-env VAR] [--format
 sha1|sha256] [--dangerous]` (the `--from` classic path and the
 `--direct` spec are untouched). Token arrives via env var, never argv.
@@ -240,7 +240,7 @@ Exit codes 0/1/2 per 11 §6.3.
   same change (prior waves ship no discovery entries; this one must).
 - **B6 in code terms:** no `maintain.RegisterKind` exists (doc sketch
   only) — kind constant `repo-import` + `repoimport.RegisterKind`
-  (panics on duplicate) called once from `cmd/walhub` composition,
+  (panics on duplicate) called once from `cmd/spindle` composition,
   task run through `reg.Tasks().Run(WithoutCancel…)` on the
   Registry-level table under `<target>/repo-import`.
 
@@ -331,7 +331,7 @@ clean.
   cancellation story. Ship: `POST` start + `GET` one (+ SSE attach).
 - **R1 B6 — registration in code terms.** No `maintain.RegisterKind`
   (doc sketch only): kind constant + `repoimport.RegisterKind`
-  (panics on duplicate) from `cmd/walhub` composition; task body via
+  (panics on duplicate) from `cmd/spindle` composition; task body via
   `reg.Tasks().Run(…)` on a drain-scoped ctx (fix #74 — never
   `WithoutCancel`, see below); `opFn`-adjacent dispatch is the
   Service itself (no frozen `opFn` touch).
@@ -451,7 +451,7 @@ clean.
 - **`dangerous:true` requires an authenticated admin (fix #237):** the
   `Begin` gate honors the body flag only when the principal is an
   authenticated admin under `server.auth.mode` token/oidc (403 otherwise,
-  naming `walhub import --dangerous`). The auth-none principal carries
+  naming `spindle import --dangerous`). The auth-none principal carries
   `Admin` for zero-config friendliness but is unauthenticated, so it never
   qualifies over HTTP — the operator path there is CLI-only. Anonymous
   still 401s first via the unchanged S6 order (authenticate → authorize →

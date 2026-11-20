@@ -90,7 +90,7 @@ func (r *Runner) run(ctx context.Context, fn func() error) error {
 // Push transfers the serving copy's refs to the upstream, minus
 // forge-internal namespaces (the pull-mirror FilterRefs discipline,
 // reversed): refs/replace/*, refs/meta/*, refs/keep-around/* always;
-// refs/pull/*, refs/changes/*, refs/review/* (walhub's own PR heads live
+// refs/pull/*, refs/changes/*, refs/review/* (spindle's own PR heads live
 // here — shipping them would leak forge state, and hosts like GitHub
 // refuse writes to refs/pull/*); refs/notes/* by default. Everything
 // else ships verbatim ("drop nothing else").
@@ -98,7 +98,7 @@ func (r *Runner) run(ctx context.Context, fn func() error) error {
 // Transfer shape: the local refs are enumerated (ListRefs, the §12
 // for-each-ref argv), filtered, grouped by top-two-segment namespace,
 // and pushed as forced wildcard refspecs with --prune, so deletions
-// propagate within live namespaces (walhub is the primary) without
+// propagate within live namespaces (spindle is the primary) without
 // ever naming an internal ref:
 //
 //	git [-c credential.<scheme>://<host>.helper= -c credential.<scheme>://<host>.helper=!<helper>] push --prune -- <url> +refs/heads/*:refs/heads/* [...]
@@ -135,8 +135,8 @@ func (r *Runner) Push(ctx context.Context, dir, url string, auth PushAuth) (stri
 
 	switch auth.Kind {
 	case AuthPassword, AuthToken:
-		userEnv := "WALHUB_PUSHMIRROR_USER"
-		secretEnv := "WALHUB_PUSHMIRROR_TOKEN"
+		userEnv := "SPINDLE_PUSHMIRROR_USER"
+		secretEnv := "SPINDLE_PUSHMIRROR_TOKEN"
 		user := auth.Username
 		secret := auth.Password
 		if auth.Kind == AuthToken {

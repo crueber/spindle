@@ -18,10 +18,10 @@ import (
 	"sync"
 	"time"
 
-	"github.com/crueber/walhub/internal/git"
-	"github.com/crueber/walhub/internal/server/auth"
-	"github.com/crueber/walhub/internal/sshd"
-	"github.com/crueber/walhub/internal/wal"
+	"github.com/crueber/spindle/internal/git"
+	"github.com/crueber/spindle/internal/server/auth"
+	"github.com/crueber/spindle/internal/sshd"
+	"github.com/crueber/spindle/internal/wal"
 )
 
 // Pre-pipeline push failures, shared by both transports. The SSH session
@@ -137,7 +137,7 @@ func (s *Server) SSHReceivePack(ctx context.Context, id git.RepoId, sp sshd.Prin
 	// empty ref list, which is what makes the push create them.
 	//
 	// Mirror refusal precedes the advertisement (Forgejo #240, R1 (c)):
-	// the error surfaces on client stderr as "walhub: <msg>". Refusing
+	// the error surfaces on client stderr as "spindle: <msg>". Refusing
 	// after the write would hang the client; the funnel check below is
 	// the backstop for clients that skip discovery.
 	if s.isMirrorRepo(ctx, id) {

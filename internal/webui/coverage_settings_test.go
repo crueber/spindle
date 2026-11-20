@@ -16,8 +16,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/crueber/walhub/internal/api"
-	"github.com/crueber/walhub/internal/server/auth"
+	"github.com/crueber/spindle/internal/api"
+	"github.com/crueber/spindle/internal/server/auth"
 )
 
 // coverageRawPost sends a body verbatim (malformed forms are the point) with a
@@ -411,9 +411,9 @@ func TestCoverageSettingsPureHelpers(t *testing.T) {
 	}
 
 	// The redirect URI follows the request scheme when no public URL is set.
-	req := httptest.NewRequest(http.MethodGet, "https://walhub.example/setup", nil)
+	req := httptest.NewRequest(http.MethodGet, "https://spindle.example/setup", nil)
 	req.TLS = &tls.ConnectionState{}
-	if got := settingsRedirectURI(req, ""); got != "https://walhub.example/_auth/callback" {
+	if got := settingsRedirectURI(req, ""); got != "https://spindle.example/_auth/callback" {
 		t.Fatalf("settingsRedirectURI(tls) = %q", got)
 	}
 	if got := settingsRedirectURI(httptest.NewRequest(http.MethodGet, "http://h/setup", nil), "https://public.example/"); got != "https://public.example/_auth/callback" {

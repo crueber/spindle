@@ -7,10 +7,10 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/crueber/walhub/internal/server/auth"
-	"github.com/crueber/walhub/internal/sizecatalog"
-	"github.com/crueber/walhub/internal/store"
-	"github.com/crueber/walhub/internal/store/proto"
+	"github.com/crueber/spindle/internal/server/auth"
+	"github.com/crueber/spindle/internal/sizecatalog"
+	"github.com/crueber/spindle/internal/store"
+	"github.com/crueber/spindle/internal/store/proto"
 )
 
 func putTestCatalog(t *testing.T, f *fixture) {

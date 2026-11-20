@@ -8,8 +8,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/crueber/walhub/internal/config"
-	"github.com/crueber/walhub/internal/store/proto"
+	"github.com/crueber/spindle/internal/config"
+	"github.com/crueber/spindle/internal/store/proto"
 )
 
 // LocalState is the cheap local-disk view of the serving copy (§3.2 step 6:

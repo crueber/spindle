@@ -1,17 +1,19 @@
-{{define "collab_time"}}{{with .}}<time datetime="{{.}}" title="{{.}}">{{rel .}}</time>{{end}}{{end}}
+{{define "collab_time"}}{{with .}}<time class="mono" datetime="{{.}}" title="{{.}}">{{rel .}}</time>{{end}}{{end}}
 
 {{/* collab_icon draws the four Empty glyphs plus the row-level icons the
      collab pages use (spec §6 F9: drawn, not transcribed; currentColor so
      every theme works with no per-icon CSS). */}}
 {{define "collab_icon"}}{{if eq . "pull"}}<svg width="1em" height="1em" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="18" cy="18" r="3"/><circle cx="6" cy="6" r="3"/><path d="M13 6h3a2 2 0 0 1 2 2v7"/><line x1="6" x2="6" y1="9" y2="21"/></svg>{{else if eq . "check"}}<svg width="1em" height="1em" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="10"/><path d="m9 12 2 2 4-4"/></svg>{{else if eq . "tag"}}<svg width="1em" height="1em" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12.586 2.586A2 2 0 0 0 11.172 2H4a2 2 0 0 0-2 2v7.172a2 2 0 0 0 .586 1.414l8.704 8.704a2.426 2.426 0 0 0 3.42 0l6.58-6.58a2.426 2.426 0 0 0 0-3.42z"/><circle cx="7.5" cy="7.5" r=".5" fill="currentColor"/></svg>{{else if eq . "comment"}}<svg width="1em" height="1em" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>{{else if eq . "label"}}<svg width="1em" height="1em" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20.6 13.4 13.4 20.6a2 2 0 0 1-2.8 0L3 13V3h10l7.6 7.6a2 2 0 0 1 0 2.8z"/><circle cx="7.5" cy="7.5" r="1"/></svg>{{else if eq . "milestone-open"}}<svg width="1em" height="1em" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m12 3 9 9-9 9-9-9z"/></svg>{{else if eq . "milestone-done"}}<svg width="1em" height="1em" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m12 3 9 9-9 9-9-9z"/><path d="m8.5 12 2.5 2.5L16 9.5"/></svg>{{else if eq . "file"}}<svg width="1em" height="1em" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6"/></svg>{{else if eq . "download"}}<svg width="1em" height="1em" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><path d="m7 10 5 5 5-5"/><path d="M12 15V3"/></svg>{{else if eq . "plus"}}<svg width="1em" height="1em" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="true"><path d="M8 3v10M3 8h10"/></svg>{{else}}<svg width="1em" height="1em" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="10"/><circle cx="12" cy="12" r="1" fill="currentColor"/></svg>{{end}}{{end}}
 
-{{/* collab_empty: icon,title,hint,href,label (href+label optional). */}}
+{{/* collab_empty: icon,title,hint,href,label (href+label optional),
+     compact=true for narrow sidebars. The page keeps its one .btn.primary in
+     the toolbar, so the empty action is a plain .btn (§1 F3). */}}
 {{define "collab_empty"}}
-<div class="empty-state" role="status" aria-label="{{.title}}">
+<div class="empty-state{{if .compact}} empty-state-compact{{end}}" role="status" aria-label="{{.title}}">
   <span class="empty-icon">{{template "collab_icon" .icon}}</span>
   <p class="empty-title">{{.title}}</p>
   {{with .hint}}<p class="empty-hint">{{.}}</p>{{end}}
-  {{if and .href .label}}<a class="btn primary mt-1" href="{{.href}}">{{.label}}</a>{{end}}
+  {{if and .href .label}}<a class="btn mt-1" href="{{.href}}">{{.label}}</a>{{end}}
 </div>
 {{end}}
 

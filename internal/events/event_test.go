@@ -7,8 +7,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/crueber/walhub/internal/git"
-	"github.com/crueber/walhub/internal/store/proto"
+	"github.com/crueber/spindle/internal/git"
+	"github.com/crueber/spindle/internal/store/proto"
 )
 
 func TestRefType(t *testing.T) {

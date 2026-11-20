@@ -1,15 +1,22 @@
 {{define "content"}}
-<section class="mx-auto max-w-xl">
-  <h1 class="text-2xl font-semibold tracking-tight">{{.Chrome.Title}}</h1>
-  <div class="card mt-3 p-4">
-    <p class="text-sm">{{.Data.Message}}</p>
-    {{if eq .Data.Status 401}}
-    <p class="muted mt-3 text-sm">
-      <a class="text-emerald-700 hover:underline dark:text-emerald-400" href="{{.Chrome.LoginHref}}">Sign in</a>
-      to continue.
-    </p>
-    {{end}}
-    <p class="mt-3"><a class="text-sm text-emerald-700 hover:underline dark:text-emerald-400" href="/">← back home</a></p>
+<section class="mx-auto max-w-xl py-6">
+  <p class="eyebrow">http {{.Data.Status}}</p>
+  <h1 class="mt-1 text-2xl font-semibold tracking-tight">{{.Chrome.Title}}</h1>
+  <div class="card mt-3 overflow-hidden">
+    <div class="flex flex-wrap items-center gap-2 border-b border-[var(--pd-line)] px-4 py-2">
+      <span class="chip-neutral font-mono">{{.Data.Status}}</span>
+      <span class="muted text-xs">the request did not complete</span>
+    </div>
+    <div class="p-4">
+      <p class="text-sm">{{.Data.Message}}</p>
+      {{if eq .Data.Status 401}}
+      <p class="muted mt-3 text-sm">
+        <a class="link" href="{{.Chrome.LoginHref}}">Sign in</a>
+        to continue.
+      </p>
+      {{end}}
+      <p class="mt-3"><a class="text-sm link" href="/">← back home</a></p>
+    </div>
   </div>
 </section>
 {{end}}

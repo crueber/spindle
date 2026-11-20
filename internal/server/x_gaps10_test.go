@@ -24,13 +24,13 @@ import (
 	"testing"
 	"time"
 
-	"github.com/crueber/walhub/internal/api"
-	"github.com/crueber/walhub/internal/config"
-	"github.com/crueber/walhub/internal/git"
-	"github.com/crueber/walhub/internal/server/auth"
-	"github.com/crueber/walhub/internal/sshd"
-	"github.com/crueber/walhub/internal/store"
-	"github.com/crueber/walhub/internal/wal"
+	"github.com/crueber/spindle/internal/api"
+	"github.com/crueber/spindle/internal/config"
+	"github.com/crueber/spindle/internal/git"
+	"github.com/crueber/spindle/internal/server/auth"
+	"github.com/crueber/spindle/internal/sshd"
+	"github.com/crueber/spindle/internal/store"
+	"github.com/crueber/spindle/internal/wal"
 )
 
 // --- health.go: page assets, MIME types, webAsset guards ---------------------
@@ -404,7 +404,7 @@ func TestMaybeRefreshSessionAged(t *testing.T) {
 func TestWriteFileAtomicBranches(t *testing.T) {
 	dir := t.TempDir()
 	// Happy path: exact bytes, no stray tmp left behind.
-	p := filepath.Join(dir, "walhub.toml")
+	p := filepath.Join(dir, "spindle.toml")
 	if err := writeFileAtomic(p, []byte("x = 1\n")); err != nil {
 		t.Fatal(err)
 	}

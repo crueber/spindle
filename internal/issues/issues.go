@@ -47,9 +47,9 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/crueber/walhub/internal/identity"
-	"github.com/crueber/walhub/internal/server/auth"
-	"github.com/crueber/walhub/internal/store"
+	"github.com/crueber/spindle/internal/identity"
+	"github.com/crueber/spindle/internal/server/auth"
+	"github.com/crueber/spindle/internal/store"
 )
 
 // TaskKindIssueIndexCompact is the §9 task kind: CAS-compaction of

@@ -39,7 +39,7 @@ import (
 	"regexp"
 	"strings"
 
-	"github.com/crueber/walhub/internal/egress"
+	"github.com/crueber/spindle/internal/egress"
 )
 
 // SourceKind classifies the canonical source URL.

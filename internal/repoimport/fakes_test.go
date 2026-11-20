@@ -12,11 +12,11 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/crueber/walhub/internal/config"
-	"github.com/crueber/walhub/internal/identity"
-	"github.com/crueber/walhub/internal/server/auth"
-	"github.com/crueber/walhub/internal/store"
-	"github.com/crueber/walhub/internal/wal"
+	"github.com/crueber/spindle/internal/config"
+	"github.com/crueber/spindle/internal/identity"
+	"github.com/crueber/spindle/internal/server/auth"
+	"github.com/crueber/spindle/internal/store"
+	"github.com/crueber/spindle/internal/wal"
 )
 
 // --- fake roles ------------------------------------------------------------------
@@ -256,20 +256,37 @@ func fixtureRepo(t *testing.T, dir string, n, branches, tags int) string {
 
 // repackSingle packs the fixture into ONE pack (the S10 pinned layout:
 // single-pack => Npacks=1, so the ops RANGE is tight).
+//
+// The pack directory is asked of git, never assumed to be
+// <dir>/.git/objects/pack: where the packs live is git's business (a bare
+// fixture keeps them at <dir>/objects/pack, and a linked worktree, a
+// separate-git-dir clone, or GIT_DIR/GIT_OBJECT_DIRECTORY move them
+// elsewhere). A hard-coded path glob turns that into a false "zero packs"
+// verdict on a correctly packed fixture (CI-only failure, git 2.55).
 func repackSingle(t *testing.T, dir string) {
 	t.Helper()
-	cmd := exec.Command("git", "repack", "-a", "-d")
+	// -f recomputes deltas, so the fixture's pack cannot inherit geometry
+	// from a pre-existing pack; -a -d moves every reachable object into one
+	// pack and drops the now-redundant packs plus the packed loose objects.
+	cmd := exec.Command("git", "repack", "-a", "-d", "-f")
 	cmd.Dir = dir
 	if out, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("repack: %v\n%s", err, out)
 	}
-	packs, err := filepath.Glob(filepath.Join(dir, ".git", "objects", "pack", "*.pack"))
-	if err != nil || len(packs) != 1 {
-		// Bare-layout fallback (a bare fixture keeps packs at top level).
-		packs, err = filepath.Glob(filepath.Join(dir, "objects", "pack", "*.pack"))
+	packDir := gitOutput(t, dir, "rev-parse", "--path-format=absolute", "--git-path", "objects/pack")
+	if !filepath.IsAbs(packDir) {
+		packDir = filepath.Join(dir, packDir)
 	}
-	if err != nil || len(packs) != 1 {
-		t.Fatalf("pinned single-pack layout violated: %v %v", packs, err)
+	packs, err := filepath.Glob(filepath.Join(packDir, "*.pack"))
+	if err != nil {
+		t.Fatalf("single-pack layout: glob %q: %v", packDir, err)
+	}
+	if len(packs) != 1 {
+		// Zero is a failure, not a layout to tolerate: `git repack -a -d`
+		// on a fixture with commits must leave exactly one pack.
+		t.Fatalf("pinned single-pack layout violated: %d pack(s) in %s (%s): %v\n%s",
+			len(packs), packDir, gitOutput(t, dir, "--version"), packs,
+			gitOutput(t, dir, "count-objects", "-v"))
 	}
 }
 

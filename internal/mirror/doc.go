@@ -33,7 +33,7 @@
 // Seams (14_extensibility.md): Seam 1 via Handler (server.ExtraRoutes,
 // both lanes, repo lanes + the create-from-URL top-level twin); Seam 5
 // via KindMirrorSync run on the core wal.TaskTable; Seam 7 via the
-// `walhub mirror` CLI. Core (internal/store, internal/wal,
+// `spindle mirror` CLI. Core (internal/store, internal/wal,
 // internal/git) is never imported upward: this package depends only on
 // seam interfaces + frozen types. Git is always the subprocess binary
 // with pinned argv (docs/go/04_git.md); scheduled fetches carry no

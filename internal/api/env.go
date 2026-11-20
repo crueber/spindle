@@ -20,12 +20,12 @@ import (
 	"time"
 	"unicode/utf8"
 
-	"github.com/crueber/walhub/internal/cachepolicy"
-	"github.com/crueber/walhub/internal/config"
-	"github.com/crueber/walhub/internal/git"
-	"github.com/crueber/walhub/internal/policy"
-	"github.com/crueber/walhub/internal/server/auth"
-	"github.com/crueber/walhub/internal/store"
+	"github.com/crueber/spindle/internal/cachepolicy"
+	"github.com/crueber/spindle/internal/config"
+	"github.com/crueber/spindle/internal/git"
+	"github.com/crueber/spindle/internal/policy"
+	"github.com/crueber/spindle/internal/server/auth"
+	"github.com/crueber/spindle/internal/store"
 )
 
 // SyncLevel mirrors the engine's materialization level (05_wal_engine.md §2).
@@ -547,7 +547,7 @@ type Env struct {
 	// renders is_org=false (instances without the identity surface
 	// wired). A list error fails open to all-false (display metadata
 	// must never fail the listing — the CollabCounts precedent). Wired
-	// by composition (cmd/walhub) so this package never imports the
+	// by composition (cmd/spindle) so this package never imports the
 	// feature (law 8).
 	Orgs OrgLister
 
@@ -556,7 +556,7 @@ type Env struct {
 	// URL, schedule, computed next fire, last outcome). Nil → no
 	// mirror field (instances without the mirror surface wired). The
 	// next fire is COMPUTED at read by the feature; core never stores
-	// it. Wired by composition (cmd/walhub) so this package never
+	// it. Wired by composition (cmd/spindle) so this package never
 	// imports the feature (law 8).
 	MirrorSummary func(ctx context.Context, owner, repo string) (MirrorView, bool)
 
@@ -565,7 +565,7 @@ type Env struct {
 	// (upstream URL, auth-kind presence, computed next fire, last
 	// outcome). Nil → no push_mirror field (instances without the
 	// push-mirror surface wired). Fully independent of MirrorSummary:
-	// either hook may be set alone. Wired by composition (cmd/walhub)
+	// either hook may be set alone. Wired by composition (cmd/spindle)
 	// so this package never imports the feature (law 8).
 	PushMirrorSummary func(ctx context.Context, owner, repo string) (PushMirrorView, bool)
 
@@ -573,7 +573,7 @@ type Env struct {
 	// open issues + open PRs from the shared issues/index.json, read
 	// index-first (one exact-key GET; absent index → ok=false). Nil → the
 	// summary carries zero counts with no ETag suffix (instances without
-	// the collab surface wired). Wired by composition (cmd/walhub) so
+	// the collab surface wired). Wired by composition (cmd/spindle) so
 	// this package never imports the feature (law 8).
 	CollabCounts func(ctx context.Context, owner, repo string) (CollabCounts, bool)
 
@@ -582,7 +582,7 @@ type Env struct {
 	// read index-first (fork.json + meta/forks.json, exact-key GETs;
 	// absent → ok=false). Nil → the summary omits the fields with no
 	// ETag suffix (instances without the collab surface wired). Wired by
-	// composition (cmd/walhub) so this package never imports the feature
+	// composition (cmd/spindle) so this package never imports the feature
 	// (law 8).
 	ForkInfo func(ctx context.Context, owner, repo string) (ForkSummary, bool)
 
@@ -591,7 +591,7 @@ type Env struct {
 	// exact-key GET on the CAS'd hot-window checks index; absent index →
 	// ok=false). Nil → the summary carries has_checks:false with no
 	// ETag suffix (instances without the checks surface wired). Wired by
-	// composition (cmd/walhub) so this package never imports the feature
+	// composition (cmd/spindle) so this package never imports the feature
 	// (law 8).
 	ChecksSummary func(ctx context.Context, owner, repo string) (ChecksSummary, bool)
 
@@ -599,7 +599,7 @@ type Env struct {
 	// "public"|"private" for the summary badge and listing rows, ok=false
 	// when unknown. Nil → the projections omit the field (instances
 	// without the identity surface wired). Wired by composition
-	// (cmd/walhub) so this package never imports the feature (law 8).
+	// (cmd/spindle) so this package never imports the feature (law 8).
 	// Missing access.json resolves public (the §10 legacy default), so
 	// pre-existing repos badge public, never private-by-omission.
 	RepoVisibility func(ctx context.Context, owner, repo string) (vis string, ok bool)
@@ -610,7 +610,7 @@ type Env struct {
 	// avatar_url (instances without the identity surface wired; the
 	// navbar renders the username fallback). "" per user → omitted
 	// (display metadata never fails the me() call). Wired by
-	// composition (cmd/walhub) so this package never imports the
+	// composition (cmd/spindle) so this package never imports the
 	// feature (law 8).
 	Avatars UserAvatar
 

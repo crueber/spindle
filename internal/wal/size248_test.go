@@ -7,8 +7,8 @@ package wal
 import (
 	"testing"
 
-	"github.com/crueber/walhub/internal/sizecatalog"
-	"github.com/crueber/walhub/internal/store/proto"
+	"github.com/crueber/spindle/internal/sizecatalog"
+	"github.com/crueber/spindle/internal/store/proto"
 )
 
 func liveSize(m *proto.Manifest) (uint64, uint64) {

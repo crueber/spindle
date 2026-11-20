@@ -20,7 +20,7 @@
 | `users/<principal>/watching/<o>/<r>.json` | Watch record | **Create** / Delete |
 
 `<tag.json>` means the tag, percent-encoded into one key segment (`%` → `%25`, `/` → `%2F`). Git
-tag names MAY contain `/`, and walhub does NOT lowercase or otherwise normalize them — the encoding
+tag names MAY contain `/`, and spindle does NOT lowercase or otherwise normalize them — the encoding
 is the only transformation. API paths carry the same encoding (clients `encodeURIComponent` the tag
 segment; handlers decode per segment per 07_api §2 and MUST re-encode when building the key).
 The CAS'd JSON objects (`releases/*.json`, `latest.json`, `social.json`) MUST be added to the frozen
@@ -51,7 +51,7 @@ named in §6).
 Asset entries (in `assets[]`, `[]` when empty — never `null`):
 
 ```json
-{"name": "walhub-linux-amd64", "size": 18432, "sha256": "<64-hex>",
+{"name": "spindle-linux-amd64", "size": 18432, "sha256": "<64-hex>",
  "content_type": "application/octet-stream", "uploaded_at": "…", "uploader": "jane"}
 ```
 
@@ -311,7 +311,7 @@ server-side copy (e.g. from a fork parent) lands if ever wanted; v1 does not reg
 
 - Releases are always bound to an existing tag (no tag-less drafts): validation is decidable at
   receive-time via `RepoView.Resolve`; GitHub's claim-a-future-tag drafts need a tag-creation event
-  channel walhub does not have.
+  channel spindle does not have.
 - Latest = CAS'd pointer with monotonic created_at CAS, plus bounded self-healing scan: O(1) hot read,
   correctness never depends on the pointer.
 - Asset bytes are keyed by asset NAME (not sha), immutable Create-only; sha256+size live in the header;

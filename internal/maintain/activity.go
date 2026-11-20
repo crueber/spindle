@@ -35,7 +35,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/crueber/walhub/internal/git"
+	"github.com/crueber/spindle/internal/git"
 )
 
 // resolveActivity cold-derives one repo's HEAD-tip activity for the sweep.

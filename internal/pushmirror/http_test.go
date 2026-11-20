@@ -11,8 +11,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/crueber/walhub/internal/git"
-	"github.com/crueber/walhub/internal/server/auth"
+	"github.com/crueber/spindle/internal/git"
+	"github.com/crueber/spindle/internal/server/auth"
 )
 
 func testHandler(t *testing.T, p auth.Principal) (*Handler, *Service, context.Context) {

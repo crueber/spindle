@@ -8,7 +8,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/crueber/walhub/internal/store"
+	"github.com/crueber/spindle/internal/store"
 )
 
 // failStore fault-injects Put failures for selected keys (transient

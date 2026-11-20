@@ -26,8 +26,8 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/crueber/walhub/internal/sizecatalog"
-	"github.com/crueber/walhub/internal/store"
+	"github.com/crueber/spindle/internal/sizecatalog"
+	"github.com/crueber/spindle/internal/store"
 )
 
 // RepoSizeRow is one detailed listing row (additive shape, 14 §14.12 field

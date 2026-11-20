@@ -10,7 +10,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/crueber/walhub/internal/cachepolicy"
+	"github.com/crueber/spindle/internal/cachepolicy"
 )
 
 // SSE is the §9.3 envelope writer (07_api.md §6, stdlib only): headers first,

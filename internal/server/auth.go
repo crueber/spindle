@@ -22,8 +22,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/crueber/walhub/internal/config"
-	"github.com/crueber/walhub/internal/server/auth"
+	"github.com/crueber/spindle/internal/config"
+	"github.com/crueber/spindle/internal/server/auth"
 )
 
 // AuthService implements §8: credential resolution order (8.2), the per-mode
@@ -57,7 +57,7 @@ type AuthService struct {
 	// username (Forgejo #370): the store-backed registry consulted at
 	// first login (users/<username>/user.json, CAS on creation for
 	// collision-uniqueness) and on every repeat login (one alias
-	// GET). Wired by composition in cmd/walhub (law 8 — the server
+	// GET). Wired by composition in cmd/spindle (law 8 — the server
 	// never imports the identity package); nil (notably in unit
 	// tests) falls back to the pure auth.DeriveUsername base, which
 	// still satisfies "no @ in the principal name". An empty return

@@ -20,7 +20,7 @@ import (
 	"context"
 	"errors"
 
-	"github.com/crueber/walhub/internal/server/auth"
+	"github.com/crueber/spindle/internal/server/auth"
 )
 
 // errNoRegistry maps through mapViewErr to 503 (the §2 unknown → 503 rule

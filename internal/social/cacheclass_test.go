@@ -4,7 +4,7 @@ import (
 	"net/http"
 	"testing"
 
-	"github.com/crueber/walhub/internal/cachepolicy"
+	"github.com/crueber/spindle/internal/cachepolicy"
 )
 
 // TestCacheClassContract is the Forgejo #382 systemic guard for the social

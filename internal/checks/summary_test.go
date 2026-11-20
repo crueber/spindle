@@ -8,7 +8,7 @@ package checks
 import (
 	"testing"
 
-	"github.com/crueber/walhub/internal/store"
+	"github.com/crueber/spindle/internal/store"
 )
 
 func TestHasChecksAbsent(t *testing.T) {

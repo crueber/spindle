@@ -1,12 +1,12 @@
 # 13 — Push mirroring: fan out pushes to an upstream
 
-> Forgejo [`crueber/walhub#623`](https://github.com/crueber/walhub/issues/623) · Status: implemented.
+> Forgejo [`crueber/spindle#623`](https://github.com/crueber/spindle/issues/623) · Status: implemented.
 
 A repo can be configured **post-hoc in Settings** (never at create or
 import time — mirroring a destination is a lifecycle decision made after
 the repo exists) to push its refs+objects to an upstream URL
 (Forgejo/GitHub mirror or personal backup) **after every successful push
-lands in walhub** (on-push trigger), with an **optional scheduled
+lands in spindle** (on-push trigger), with an **optional scheduled
 re-sync** reusing the pull-mirror preset-cron model. This complements
 the pull-only mirror (`11_mirror.md`, which fetches FROM an upstream and
 refuses pushes); the two sidecars are fully independent — either, both,
@@ -73,7 +73,7 @@ Deleting both sidecars stops on-push fan-out and scheduled syncs
    upstreams:
    - **User provides** a private key (+ optional `known_hosts` trust
      lines, + optional public line validated as `ssh-ed25519`); or
-   - **Walhub generates** an ed25519 keypair (stdlib `crypto/ed25519`
+   - **Spindle generates** an ed25519 keypair (stdlib `crypto/ed25519`
      + hand-rolled OpenSSH wire format — no new module, no new binary;
      the runtime image ships no openssh-client, so an `ssh-keygen`
      subprocess would add a runtime dependency for every deployment)
@@ -152,7 +152,7 @@ anonymous push.
   reason + backoff). The push ships user namespaces (heads + tags
   always, other surviving namespaces when populated) and never
   forge-internal refs (`refs/pull/**` and friends stay out — decision
-  (j)); deletions propagate within live namespaces (walhub is the
+  (j)); deletions propagate within live namespaces (spindle is the
   primary).
 
 ## 4. Push refusal interaction
@@ -234,7 +234,7 @@ schedule/off/next-fire/backoff, sidecar/secret CRUD/CAS + redaction
   both lanes, discovery templates both ways. Plus: on-push hook tests in
   `internal/server` (landed fires, refused/failure silent, nil-safe),
   summary wire + `~p` ETag + pull/push independence in `internal/api`,
-  composition mapping + hook wiring in `cmd/walhub`, `node --test` for
+  composition mapping + hook wiring in `cmd/spindle`, `node --test` for
   the lib + SDK surface, live-server proof (push → upstream bare
   receives refs+objects; scheduled fire; server-publish exclusion).
 
@@ -265,13 +265,13 @@ schedule/off/next-fire/backoff, sidecar/secret CRUD/CAS + redaction
 - **(e) `git push --mirror` transfer (2026-09-16, #623).** Refs live in
   the manifest store: `Sync(LevelServe)` materializes what the store
   publishes into the serving copy, and the push ships that copy
-  (ref+object transfer in one argv, deletions included — walhub is the
+  (ref+object transfer in one argv, deletions included — spindle is the
   primary). SSH rides `GIT_SSH_COMMAND` + materialized key files (0600,
   swept per fire); HTTPS rides the host-pinned credential helper (the
   pull-mirror shape). Rationale: law 2 (git is a subprocess, argv
   pinned in 04); no Go SSH client (law 1 sub-point).
   **Superseded in shape (not in rationale) by (j) below:** a bare
-  `--mirror` ships the whole serving copy including walhub's own
+  `--mirror` ships the whole serving copy including spindle's own
   `refs/pull/**` PR heads (ordinary WAL ref state, published server-side
   through the WAL funnel and materialized by every Serve sync) — a
   forge-internal leak, and hosts like GitHub refuse writes to
@@ -309,7 +309,7 @@ schedule/off/next-fire/backoff, sidecar/secret CRUD/CAS + redaction
   cannot exclude — it would ship `refs/pull/**` upstream on every
   PR-carrying repo (leak + GitHub refusal wedge); per-ref refspecs do
   not scale to 500k-ref repos (ARG_MAX), while per-namespace wildcards
-  do; `--prune` keeps the walhub-is-primary deletion semantics within
+  do; `--prune` keeps the spindle-is-primary deletion semantics within
   live namespaces. A fully-deleted custom namespace leaves stale
   upstream refs (no refspec names it) — heads/tags are exempt (always
   ridden). The credential helper change in the same revision (username

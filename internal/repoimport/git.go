@@ -20,7 +20,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/crueber/walhub/internal/config"
+	"github.com/crueber/spindle/internal/config"
 )
 
 // pool is the bounded semaphore of concurrent git processes (04_git.md §2:

@@ -6,7 +6,7 @@ import (
 	"net/url"
 	"strings"
 
-	"github.com/crueber/walhub/internal/git"
+	"github.com/crueber/spindle/internal/git"
 )
 
 // Route is one entry of the table-driven registration consumed by

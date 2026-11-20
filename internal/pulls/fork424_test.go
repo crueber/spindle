@@ -9,7 +9,7 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/crueber/walhub/internal/server/auth"
+	"github.com/crueber/spindle/internal/server/auth"
 )
 
 // fakeForkExec records ShareManifest calls (the §7 manifest step,

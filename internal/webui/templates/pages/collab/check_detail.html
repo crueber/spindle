@@ -3,15 +3,15 @@
 <div class="mx-auto max-w-3xl">
   <p class="mb-3 text-sm">
     <a class="link" href="/{{.Repo.Full}}/checks">← all checks</a> ·
-    <a class="link font-mono" href="{{.Commit}}">{{.Short}}</a>
+    <a class="link mono" href="{{.Commit}}">{{.Short}}</a>
   </p>
-  <h2 class="mb-3 flex flex-wrap items-center gap-2 text-lg font-semibold">Checks for <span class="font-mono">{{.Short}}</span>
+  <h2 class="mb-3 flex flex-wrap items-center gap-2 text-xl font-semibold tracking-tight">Checks for <span class="mono">{{.Short}}</span>
     {{if .Combined}}{{template "collab_check_pill" .Pill}}{{end}}
   </h2>
 
   {{if .Error}}<p class="err-line" role="alert">{{.Error}}</p>{{end}}
 
-  <div class="card !p-0">
+  <div class="card">
     {{if .Zero}}
     <div class="p-3">
       {{template "collab_zero_checks" (dict "title" "No checks reported yet" "full" .Repo.Full "sha" .SHA "required" "")}}

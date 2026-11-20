@@ -4,8 +4,8 @@ import (
 	"context"
 	"strings"
 
-	"github.com/crueber/walhub/internal/policy"
-	"github.com/crueber/walhub/internal/server/auth"
+	"github.com/crueber/spindle/internal/policy"
+	"github.com/crueber/spindle/internal/server/auth"
 )
 
 // principalKey carries the authenticated principal in the request context

@@ -12,7 +12,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/crueber/walhub/internal/store"
+	"github.com/crueber/spindle/internal/store"
 )
 
 // hangingGitBinary installs a git stand-in that hangs forever on clone

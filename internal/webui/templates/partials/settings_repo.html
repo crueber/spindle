@@ -20,39 +20,39 @@
     <label class="mb-1 block text-sm font-medium" for="repo-description">Description</label>
     <input class="input w-full" id="repo-description" name="description" type="text" maxlength="{{.MaxLength}}"
            placeholder="A short description of this repository" value="{{.Description}}">
-    <p class="muted mt-1 text-xs">Shown in the repo header next to the name. Empty hides it. Saving requires admin.</p>
+    <p class="muted mt-1 text-[11px]">Shown in the repo header next to the name. Empty hides it. Saving requires admin.</p>
   </div>
 
   <hr class="border-current opacity-10">
 
-  <h4 class="font-semibold">Features</h4>
-  <p class="muted text-xs">Unchecking hides a tab or refuses new stars/watches/forks. Existing content is kept — re-enabling restores everything.</p>
+  <h4 class="eyebrow">Features</h4>
+  <p class="muted text-[11px]">Unchecking hides a tab or refuses new stars/watches/forks. Existing content is kept — re-enabling restores everything.</p>
   <div class="grid gap-2">
     {{range .Features}}
     <label class="flex cursor-pointer items-center justify-between gap-4 text-sm">
       <span class="min-w-0">
         <span class="font-medium">{{.Label}}</span>
-        <span class="muted block text-xs">{{.Hint}}</span>
+        <span class="muted block text-[11px]">{{.Hint}}</span>
       </span>
       {{/* Forgejo #533: the .input class never goes on a checkbox. */}}
       <input type="hidden" name="feature_{{.Key}}" value="false">
       <input type="checkbox" role="switch" name="feature_{{.Key}}" value="true"
-             class="h-5 w-5 shrink-0 accent-emerald-600"{{if .Enabled}} checked{{end}} aria-label="{{.Label}}">
+             class="h-5 w-5 shrink-0 accent-amber-500"{{if .Enabled}} checked{{end}} aria-label="{{.Label}}">
     </label>
     {{end}}
   </div>
 
   <hr class="border-current opacity-10">
 
-  <h4 class="font-semibold">Code review</h4>
+  <h4 class="eyebrow">Code review</h4>
   <label class="flex cursor-pointer items-center justify-between gap-4 text-sm">
     <span class="min-w-0">
       <span class="font-medium">Allow self-approval</span>
-      <span class="muted block text-xs">Authors may approve or request changes on their own pull requests (a self-approval never counts toward required reviews).</span>
+      <span class="muted block text-[11px]">Authors may approve or request changes on their own pull requests (a self-approval never counts toward required reviews).</span>
     </span>
     <input type="hidden" name="allow_self_approval" value="false">
     <input type="checkbox" role="switch" name="allow_self_approval" value="true"
-           class="h-5 w-5 shrink-0 accent-emerald-600"{{if .SelfApproval}} checked{{end}} aria-label="Allow self-approval">
+           class="h-5 w-5 shrink-0 accent-amber-500"{{if .SelfApproval}} checked{{end}} aria-label="Allow self-approval">
   </label>
 
   <div class="flex flex-wrap items-center gap-2">
@@ -76,9 +76,9 @@
         <tbody>
           {{range .Strategies}}
           <tr>
-            <td class="font-medium">{{.Name}}</td><td>{{.Kind}}</td><td>{{.Base}}</td>
-            <td>{{if .ScheduleHuman}}{{.ScheduleHuman}}{{else}}{{.Schedule}}{{end}}</td>
-            <td>{{.Next}}</td><td>{{.Keep}}</td><td>{{.Filter}}</td><td>{{.Refs}}</td>
+            <td class="mono font-medium">{{.Name}}</td><td class="mono">{{.Kind}}</td><td class="mono">{{.Base}}</td>
+            <td class="mono">{{if .ScheduleHuman}}{{.ScheduleHuman}}{{else}}{{.Schedule}}{{end}}</td>
+            <td class="mono">{{.Next}}</td><td class="mono">{{.Keep}}</td><td class="mono">{{.Filter}}</td><td class="mono">{{.Refs}}</td>
           </tr>
           {{end}}
         </tbody>
@@ -91,15 +91,15 @@
     <h3 class="card-header">Placement &amp; host facts</h3>
     {{if .HostFacts}}
     <dl class="grid grid-cols-1 gap-x-6 gap-y-1 text-sm sm:grid-cols-[minmax(10rem,30%)_1fr]">
-      {{range .HostFacts}}<dt class="muted font-mono text-xs break-all">{{.Key}}</dt><dd class="break-words">{{.Value}}</dd>{{end}}
+      {{range .HostFacts}}<dt class="muted mono text-[11px] break-all">{{.Key}}</dt><dd class="break-words">{{.Value}}</dd>{{end}}
     </dl>
     {{else}}<p class="muted text-sm">no host facts reported.</p>{{end}}
   </section>
 
   <section class="card p-4">
     <h3 class="card-header">Upstream follow</h3>
-    <p class="text-sm">upstream: <code class="font-mono text-xs">{{.UpstreamGit}}</code></p>
-    <p class="muted text-sm">{{.FollowLine}}{{if .LastRound}} · last round {{.LastRound}}{{end}}</p>
+    <p class="text-sm">upstream: <code class="mono text-xs">{{.UpstreamGit}}</code></p>
+    <p class="muted text-[11px]">{{.FollowLine}}{{if .LastRound}} · last round {{.LastRound}}{{end}}</p>
   </section>
 
   <section class="card p-4">
@@ -108,12 +108,12 @@
     <div class="overflow-x-auto">
       <table class="data-table">
         <thead><tr><th>key</th><th>value</th><th>source</th></tr></thead>
-        <tbody>{{range .Effective}}<tr><td class="font-mono text-xs break-all">{{.Key}}</td><td class="break-words">{{.Value}}</td><td class="muted">host</td></tr>{{end}}</tbody>
+        <tbody>{{range .Effective}}<tr><td class="mono text-xs break-all">{{.Key}}</td><td class="break-words">{{.Value}}</td><td class="muted">host</td></tr>{{end}}</tbody>
       </table>
     </div>
     {{else}}<p class="muted text-sm">no effective values reported.</p>{{end}}
   </section>
-  <p class="muted text-xs">Read-only: this tab reports what the maintainer computed; nothing here is editable.</p>
+  <p class="muted text-[11px]">Read-only: this tab reports what the maintainer computed; nothing here is editable.</p>
 </div>
 {{else}}{{template "settings-repo-notwired" .}}{{end}}
 {{end}}
@@ -131,8 +131,8 @@
       <input type="hidden" name="mirror_action" value="put">
       <div>
         <label class="mb-1 block text-sm font-medium" for="mirror-upstream">Upstream URL</label>
-        <input class="input font-mono text-xs" id="mirror-upstream" name="upstream_url" type="text" required placeholder="https://example.com/acme/monorepo.git" value="{{.Upstream}}">
-        <p class="muted mt-1 text-xs">The first sync runs asynchronously once created.</p>
+        <input class="input mono text-xs" id="mirror-upstream" name="upstream_url" type="text" required placeholder="https://example.com/acme/monorepo.git" value="{{.Upstream}}">
+        <p class="muted mt-1 text-[11px]">The first sync runs asynchronously once created.</p>
       </div>
       <div>
         <label class="mb-1 block text-sm font-medium" for="mirror-schedule">Schedule</label>
@@ -145,12 +145,12 @@
     </form>
     {{else}}
     <dl class="grid grid-cols-1 gap-x-6 gap-y-1 text-sm sm:grid-cols-[minmax(10rem,30%)_1fr]">
-      <dt class="muted">upstream</dt><dd class="break-all font-mono text-xs">{{.Upstream}}</dd>
-      <dt class="muted">status</dt><dd><span class="chip">mirror · pull-only</span></dd>
-      <dt class="muted">next sync</dt><dd>{{.NextSync}}</dd>
-      <dt class="muted">last synced</dt><dd>{{.LastSynced}}</dd>
-      <dt class="muted">last result</dt><dd class="break-words">{{.LastResult}}</dd>
-      {{if .Failures}}<dt class="muted">consecutive failures</dt><dd>{{.Failures}} — backing off</dd>{{end}}
+      <dt class="eyebrow">upstream</dt><dd class="break-all mono text-xs">{{.Upstream}}</dd>
+      <dt class="eyebrow">status</dt><dd><span class="chip chip-neutral">mirror · pull-only</span></dd>
+      <dt class="eyebrow">next sync</dt><dd>{{.NextSync}}</dd>
+      <dt class="eyebrow">last synced</dt><dd>{{.LastSynced}}</dd>
+      <dt class="eyebrow">last result</dt><dd class="break-words">{{.LastResult}}</dd>
+      {{if .Failures}}<dt class="eyebrow">consecutive failures</dt><dd>{{.Failures}} — backing off</dd>{{end}}
     </dl>
     <form class="mt-3 flex flex-wrap items-end gap-3" method="post" action="/{{$.Owner}}/{{$.Name}}/settings/mirror"
           hx-post="/{{$.Owner}}/{{$.Name}}/settings/mirror" hx-target="#settings-panel" hx-select="#settings-panel" hx-swap="outerHTML"
@@ -164,17 +164,17 @@
       </div>
       <button type="submit" class="btn">save schedule</button>
     </form>
-    <form class="mt-3 grid gap-3 rounded-lg border border-zinc-200 p-3 dark:border-zinc-800" method="post" action="/{{$.Owner}}/{{$.Name}}/settings/mirror"
+    <form class="mt-3 card grid gap-3 p-3" method="post" action="/{{$.Owner}}/{{$.Name}}/settings/mirror"
           hx-post="/{{$.Owner}}/{{$.Name}}/settings/mirror" hx-target="#settings-panel" hx-select="#settings-panel" hx-swap="outerHTML"
           aria-label="Sync now">
       <input type="hidden" name="mirror_action" value="sync">
-      <h4 class="font-semibold">Sync now</h4>
+      <h4 class="eyebrow">Sync now</h4>
       <div>
         <label class="mb-1 block text-sm font-medium" for="mirror-token">Token (optional)</label>
         <input class="input md:max-w-md" id="mirror-token" name="token" type="password" autocomplete="new-password" value="">
-        <p class="muted mt-1 text-xs">Never stored — used for this sync only.</p>
+        <p class="muted mt-1 text-[11px]">Never stored — used for this sync only.</p>
       </div>
-      <label class="flex items-center gap-2 text-sm"><input type="checkbox" name="force" value="true" class="h-4 w-4 accent-emerald-600"> force resync</label>
+      <label class="flex items-center gap-2 text-sm"><input type="checkbox" name="force" value="true" class="h-4 w-4 accent-amber-500"> force resync</label>
       <div class="flex flex-wrap gap-2">
         <button type="submit" class="btn">sync now</button>
       </div>
@@ -185,7 +185,7 @@
       <button type="submit" class="btn danger">remove mirror</button>
     </form>
     {{end}}
-    {{if .Note}}<p class="mt-2 text-sm text-emerald-700 dark:text-emerald-400">{{.Note}}</p>{{end}}
+    {{if .Note}}<p class="mt-2 text-sm text-[var(--pd-ok)]">{{.Note}}</p>{{end}}
   </section>
   {{end}}
 
@@ -200,7 +200,7 @@
       <input type="hidden" name="push_action" value="put">
       <div>
         <label class="mb-1 block text-sm font-medium" for="push-upstream">Upstream URL</label>
-        <input class="input font-mono text-xs" id="push-upstream" name="upstream_url" type="text" required placeholder="https://example.com/backup/repo.git or ssh://example.com/acme/mirror.git" value="{{.Upstream}}">
+        <input class="input mono text-xs" id="push-upstream" name="upstream_url" type="text" required placeholder="https://example.com/backup/repo.git or ssh://example.com/acme/mirror.git" value="{{.Upstream}}">
       </div>
       <div>
         <label class="mb-1 block text-sm font-medium" for="push-auth">Auth method</label>
@@ -222,11 +222,11 @@
       </div>
       <div>
         <label class="mb-1 block text-sm font-medium" for="push-private-key">SSH private key <span class="muted">(write-only; or generate after creating)</span></label>
-        <textarea class="input font-mono text-xs" id="push-private-key" name="ssh_private_key" rows="3" spellcheck="false" autocomplete="off"></textarea>
+        <textarea class="input mono text-xs" id="push-private-key" name="ssh_private_key" rows="3" spellcheck="false" autocomplete="off"></textarea>
       </div>
       <div>
         <label class="mb-1 block text-sm font-medium" for="push-known-hosts">Known hosts (optional)</label>
-        <textarea class="input font-mono text-xs" id="push-known-hosts" name="ssh_known_hosts" rows="2" spellcheck="false" placeholder="blank = trust on first use">{{.KnownHosts}}</textarea>
+        <textarea class="input mono text-xs" id="push-known-hosts" name="ssh_known_hosts" rows="2" spellcheck="false" placeholder="blank = trust on first use">{{.KnownHosts}}</textarea>
       </div>
       <div>
         <label class="mb-1 block text-sm font-medium" for="push-schedule">Schedule</label>
@@ -234,20 +234,20 @@
           {{$sched := .Schedule}}{{range .Presets}}<option value="{{.ID}}"{{if eq .ID $sched}} selected{{end}}>{{.Label}}</option>{{end}}
         </select>
       </div>
-      <label class="flex items-center gap-2 text-sm"><input type="checkbox" name="dangerous" value="true" class="h-4 w-4 accent-emerald-600"> allow a host outside the import allowlist / private network</label>
-      <div><button type="submit" class="btn primary">configure push mirror</button></div>
+      <label class="flex items-center gap-2 text-sm"><input type="checkbox" name="dangerous" value="true" class="h-4 w-4 accent-amber-500"> allow a host outside the import allowlist / private network</label>
+      <div><button type="submit" class="btn">configure push mirror</button></div>
       {{if .Error}}<p class="err-line" role="alert">{{.Error}}</p>{{end}}
     </form>
     {{else}}
     <dl class="grid grid-cols-1 gap-x-6 gap-y-1 text-sm sm:grid-cols-[minmax(10rem,30%)_1fr]">
-      <dt class="muted">upstream</dt><dd class="break-all font-mono text-xs">{{.Upstream}}</dd>
-      <dt class="muted">status</dt><dd><span class="chip">mirror · push</span></dd>
-      <dt class="muted">auth</dt><dd>{{.AuthLabel}}{{if .Username}} · {{.Username}}{{end}}{{if .HasSecret}} · secret stored ({{.SecretHint}}){{else}} · no secret stored{{end}}</dd>
-      {{if .Fingerprint}}<dt class="muted">deploy key fingerprint</dt><dd class="break-all font-mono text-xs">{{.Fingerprint}}</dd>{{end}}
-      {{if .HostKey}}<dt class="muted">host key</dt><dd class="break-all font-mono text-xs">{{.HostKey}}</dd>{{end}}
-      <dt class="muted">sync</dt><dd>{{.NextSync}}</dd>
-      <dt class="muted">last synced</dt><dd>{{.LastSynced}}</dd>
-      <dt class="muted">last result</dt><dd class="break-words">{{.LastResult}}</dd>
+      <dt class="eyebrow">upstream</dt><dd class="break-all mono text-xs">{{.Upstream}}</dd>
+      <dt class="eyebrow">status</dt><dd><span class="chip chip-neutral">mirror · push</span></dd>
+      <dt class="eyebrow">auth</dt><dd>{{.AuthLabel}}{{if .Username}} · {{.Username}}{{end}}{{if .HasSecret}} · secret stored ({{.SecretHint}}){{else}} · no secret stored{{end}}</dd>
+      {{if .Fingerprint}}<dt class="eyebrow">deploy key fingerprint</dt><dd class="break-all mono text-xs">{{.Fingerprint}}</dd>{{end}}
+      {{if .HostKey}}<dt class="eyebrow">host key</dt><dd class="break-all mono text-xs">{{.HostKey}}</dd>{{end}}
+      <dt class="eyebrow">sync</dt><dd>{{.NextSync}}</dd>
+      <dt class="eyebrow">last synced</dt><dd>{{.LastSynced}}</dd>
+      <dt class="eyebrow">last result</dt><dd class="break-words">{{.LastResult}}</dd>
     </dl>
     <form class="mt-3 grid gap-3" method="post" action="/{{$.Owner}}/{{$.Name}}/settings/mirror"
           hx-post="/{{$.Owner}}/{{$.Name}}/settings/mirror" hx-target="#settings-panel" hx-select="#settings-panel" hx-swap="outerHTML"
@@ -280,23 +280,23 @@
         </div>
         <div>
           <label class="mb-1 block text-sm font-medium" for="push-known-hosts-set">Known hosts</label>
-          <textarea class="input font-mono text-xs" id="push-known-hosts-set" name="ssh_known_hosts" rows="2" spellcheck="false">{{.KnownHosts}}</textarea>
+          <textarea class="input mono text-xs" id="push-known-hosts-set" name="ssh_known_hosts" rows="2" spellcheck="false">{{.KnownHosts}}</textarea>
         </div>
       </div>
       <div><button type="submit" class="btn">save</button></div>
     </form>
-    <div class="mt-4 rounded-lg border border-zinc-200 p-3 dark:border-zinc-800">
-      <h4 class="mb-2 font-semibold">Deploy key</h4>
+    <div class="mt-4 card p-3">
+      <h4 class="eyebrow mb-2">Deploy key</h4>
       {{if .PublicKey}}
       <label class="mb-1 block text-sm font-medium" for="push-public-key">Public key (install it upstream)</label>
-      <textarea class="input font-mono text-xs" id="push-public-key" rows="3" readonly>{{.PublicKey}}</textarea>
+      <textarea class="input mono text-xs" id="push-public-key" rows="3" readonly>{{.PublicKey}}</textarea>
       {{end}}
       <form class="mt-2 flex flex-wrap items-end gap-3" method="post" action="/{{$.Owner}}/{{$.Name}}/settings/mirror"
             hx-post="/{{$.Owner}}/{{$.Name}}/settings/mirror" hx-target="#settings-panel" hx-select="#settings-panel" hx-swap="outerHTML">
         <input type="hidden" name="push_action" value="keygen">
         <div class="min-w-0 flex-1">
           <label class="mb-1 block text-sm font-medium" for="push-keygen-hosts">Known hosts for the generated key (optional)</label>
-          <input class="input font-mono text-xs" id="push-keygen-hosts" name="ssh_known_hosts" type="text" value="{{.KnownHosts}}">
+          <input class="input mono text-xs" id="push-keygen-hosts" name="ssh_known_hosts" type="text" value="{{.KnownHosts}}">
         </div>
         <button type="submit" class="btn">generate keypair</button>
       </form>
@@ -304,7 +304,7 @@
     <form class="mt-3 flex flex-wrap items-end gap-3" method="post" action="/{{$.Owner}}/{{$.Name}}/settings/mirror"
           hx-post="/{{$.Owner}}/{{$.Name}}/settings/mirror" hx-target="#settings-panel" hx-select="#settings-panel" hx-swap="outerHTML">
       <input type="hidden" name="push_action" value="sync">
-      <label class="flex items-center gap-2 text-sm"><input type="checkbox" name="force" value="true" class="h-4 w-4 accent-emerald-600"> force</label>
+      <label class="flex items-center gap-2 text-sm"><input type="checkbox" name="force" value="true" class="h-4 w-4 accent-amber-500"> force</label>
       <button type="submit" class="btn">sync now</button>
     </form>
     <form class="mt-3" method="post" action="/{{$.Owner}}/{{$.Name}}/settings/mirror"
@@ -313,7 +313,7 @@
       <button type="submit" class="btn danger">remove push mirror</button>
     </form>
     {{end}}
-    {{if .Note}}<p class="mt-2 text-sm text-emerald-700 dark:text-emerald-400">{{.Note}}</p>{{end}}
+    {{if .Note}}<p class="mt-2 text-sm text-[var(--pd-ok)]">{{.Note}}</p>{{end}}
   </section>
   {{end}}
   {{if and (not .Mirror) (not .Push)}}{{template "settings-repo-notwired" .}}{{end}}
@@ -327,11 +327,11 @@
       hx-post="/{{$.Owner}}/{{$.Name}}/settings/policy" hx-target="#settings-panel" hx-select="#settings-panel" hx-swap="outerHTML">
   <h3 class="card-header">Push policy</h3>
   <label class="mb-1 block text-sm font-medium" for="policy-text">Policy document (JSON)</label>
-  <textarea class="input font-mono text-xs" id="policy-text" name="policy" rows="14" spellcheck="false" data-submit-keys>{{.Text}}</textarea>
+  <textarea class="input mono text-xs" id="policy-text" name="policy" rows="14" spellcheck="false" data-submit-keys>{{.Text}}</textarea>
   <div class="mt-2 flex flex-wrap items-end gap-3">
     <div class="flex flex-wrap items-center gap-2">
       <button type="submit" class="btn primary">Save</button>
-      <span class="muted text-xs">Ctrl/⌘+Enter saves (island). The server validates on save.</span>
+      <span class="muted text-[11px]">Ctrl/⌘+Enter saves (island). The server validates on save.</span>
     </div>
     <div class="ml-auto flex flex-wrap items-end gap-2">
       <div>
@@ -342,7 +342,7 @@
     </div>
   </div>
   {{if .Error}}<p class="err-line" role="alert">{{.Error}}</p>{{end}}
-  {{if .Note}}<p class="mt-2 text-sm text-emerald-700 dark:text-emerald-400">{{.Note}}</p>{{end}}
+  {{if .Note}}<p class="mt-2 text-sm text-[var(--pd-ok)]">{{.Note}}</p>{{end}}
 
   {{if .DryRunDone}}
   <hr class="my-3 border-current opacity-10">
@@ -351,7 +351,7 @@
   <div class="mt-2 overflow-x-auto">
     <table class="data-table">
       <thead><tr><th>entry</th><th>detail</th></tr></thead>
-      <tbody>{{range .DryRunRefs}}<tr><td class="font-mono text-xs">{{.Key}}</td><td class="break-words">{{.Value}}</td></tr>{{end}}</tbody>
+      <tbody>{{range .DryRunRefs}}<tr><td class="mono text-xs">{{.Key}}</td><td class="break-words">{{.Value}}</td></tr>{{end}}</tbody>
     </table>
   </div>
   {{else}}<p class="muted mt-1 text-sm">no pushes to evaluate.</p>{{end}}
@@ -368,7 +368,7 @@
         hx-post="/{{$.Owner}}/{{$.Name}}/settings/config" hx-target="#settings-panel" hx-select="#settings-panel" hx-swap="outerHTML">
     <h3 class="card-header">Effective config</h3>
     <label class="mb-1 block text-sm font-medium" for="config-text">TOML (published to the WAL)</label>
-    <textarea class="input font-mono text-xs" id="config-text" name="config" rows="16" spellcheck="false">{{.Text}}</textarea>
+    <textarea class="input mono text-xs" id="config-text" name="config" rows="16" spellcheck="false">{{.Text}}</textarea>
     <div class="mt-2 grid gap-2 sm:grid-cols-[1fr_auto]">
       <div>
         <label class="mb-1 block text-sm font-medium" for="config-message">Publish message</label>
@@ -380,7 +380,7 @@
       </div>
     </div>
     {{if .Error}}<p class="err-line" role="alert">{{.Error}}</p>{{end}}
-    {{if .Note}}<p class="mt-2 text-sm text-emerald-700 dark:text-emerald-400">{{.Note}}</p>{{end}}
+    {{if .Note}}<p class="mt-2 text-sm text-[var(--pd-ok)]">{{.Note}}</p>{{end}}
   </form>
 
   <section class="card p-4">
@@ -388,12 +388,12 @@
     {{if .Revisions}}
     <ul class="space-y-3">
       {{range .Revisions}}
-      <li class="rounded-lg border border-zinc-200 p-3 dark:border-zinc-800">
+      <li class="card p-3">
         <p class="text-sm"><span class="chip-neutral">#{{.Rev}}</span> <span class="muted">{{.Author}} · {{.At}}{{if .Message}} · {{.Message}}{{end}}</span></p>
         {{if .Diff}}
         <pre class="code-view mt-2 p-2">{{range .Diff}}{{.Sign}} {{.Text}}
 {{end}}</pre>
-        {{else}}<p class="muted mt-1 text-xs">no textual change against the current document.</p>{{end}}
+        {{else}}<p class="muted mt-1 text-[11px]">no textual change against the current document.</p>{{end}}
         <p class="mt-2"><a class="link text-sm" href="/{{$.Owner}}/{{$.Name}}/settings/config?rev={{.Rev}}">revert to this in the editor</a></p>
       </li>
       {{end}}
@@ -410,12 +410,12 @@
 <div class="space-y-4">
   <section class="card p-4">
     <h3 class="card-header">Effective access</h3>
-    <p class="text-sm">your role: <code class="font-mono text-xs">{{.Role}}</code></p>
+    <p class="text-sm">your role: <code class="mono text-xs">{{.Role}}</code></p>
     {{if .Collaborators}}
     <div class="mt-2 overflow-x-auto">
       <table class="data-table">
         <thead><tr><th>principal</th><th>role</th><th>source</th></tr></thead>
-        <tbody>{{range .Collaborators}}<tr><td class="break-all">{{.Principal}}</td><td>{{.Role}}</td><td class="muted">{{.Source}}</td></tr>{{end}}</tbody>
+        <tbody>{{range .Collaborators}}<tr><td class="mono break-all">{{.Principal}}</td><td>{{.Role}}</td><td class="muted">{{.Source}}</td></tr>{{end}}</tbody>
       </table>
     </div>
     {{else}}<p class="muted mt-1 text-sm">no effective collaborators.</p>{{end}}
@@ -434,11 +434,11 @@
           <option value="authenticated"{{if eq .Visibility "authenticated"}} selected{{end}}>authenticated — signed-in users may read</option>
           <option value="private"{{if eq .Visibility "private"}} selected{{end}}>private — {{if .IsOrg}}org members{{else}}owner{{end}} only</option>
         </select>
-        <p class="muted mt-1 text-xs">Saving requires admin. A concurrent edit is refused (409) and the form reseeds from server truth.</p>
+        <p class="muted mt-1 text-[11px]">Saving requires admin. A concurrent edit is refused (409) and the form reseeds from server truth.</p>
       </div>
 
       <div>
-        <h4 class="mb-1 font-semibold">Role bindings</h4>
+        <h4 class="eyebrow mb-1">Role bindings</h4>
         <input type="hidden" name="binding_count" value="{{len .Bindings}}">
         {{if .Bindings}}
         <div class="overflow-x-auto">
@@ -447,13 +447,13 @@
             <tbody>
               {{range $i, $b := .Bindings}}
               <tr>
-                <td class="break-all"><code class="font-mono text-xs">{{$b.Subject}}</code><input type="hidden" name="binding_subject_{{$i}}" value="{{$b.Subject}}"></td>
+                <td class="break-all"><code class="mono text-xs">{{$b.Subject}}</code><input type="hidden" name="binding_subject_{{$i}}" value="{{$b.Subject}}"></td>
                 <td>
                   <select class="input w-auto" name="binding_role_{{$i}}" aria-label="Role for {{$b.Subject}}">
                     {{range $.Access.Roles}}<option value="{{.}}"{{if eq . $b.Role}} selected{{end}}>{{.}}</option>{{end}}
                   </select>
                 </td>
-                <td><label class="muted flex items-center gap-1 text-xs"><input type="checkbox" name="binding_remove_{{$i}}" value="true" class="h-4 w-4 accent-emerald-600"> remove</label></td>
+                <td><label class="muted flex items-center gap-1 text-[11px]"><input type="checkbox" name="binding_remove_{{$i}}" value="true" class="h-4 w-4 accent-amber-500"> remove</label></td>
               </tr>
               {{end}}
             </tbody>
@@ -462,12 +462,12 @@
         {{else}}<p class="muted text-sm">no bindings — org members, org owners, and host admins still apply.</p>{{end}}
       </div>
 
-      <fieldset class="rounded-lg border border-zinc-200 p-3 dark:border-zinc-800">
-        <legend class="px-1 text-sm font-medium">Add a binding</legend>
+      <fieldset class="card p-3">
+        <legend class="eyebrow px-1">Add a binding</legend>
         <div class="grid gap-2 sm:grid-cols-2">
           <div>
             <label class="mb-1 block text-sm font-medium" for="access-new-subject">Subject</label>
-            <input class="input font-mono text-xs" id="access-new-subject" name="new_subject" type="text" placeholder="user:jane@example.com">
+            <input class="input mono text-xs" id="access-new-subject" name="new_subject" type="text" placeholder="user:jane@example.com">
           </div>
           <div>
             <label class="mb-1 block text-sm font-medium" for="access-new-role">Role</label>
@@ -487,12 +487,12 @@
         {{end}}
       </fieldset>
     </div>
-    <p class="muted mt-2 text-xs">version {{.Version}} · full-document PUT · 409 means someone else saved first.</p>
+    <p class="muted mt-2 text-[11px]">version {{.Version}} · full-document PUT · 409 means someone else saved first.</p>
     <div class="mt-2 flex flex-wrap items-center gap-2">
       <button type="submit" class="btn primary">Save</button>
     </div>
     {{if .Error}}<p class="err-line" role="alert">{{.Error}}</p>{{end}}
-    {{if .Note}}<p class="mt-2 text-sm text-emerald-700 dark:text-emerald-400">{{.Note}}</p>{{end}}
+    {{if .Note}}<p class="mt-2 text-sm text-[var(--pd-ok)]">{{.Note}}</p>{{end}}
   </form>
 </div>
 {{else}}{{template "settings-repo-notwired" .}}{{end}}
@@ -503,9 +503,9 @@
 {{with .AdminData}}
 <div class="space-y-4">
   {{if .NewToken}}
-  <div class="rounded-lg border border-amber-300 bg-amber-50 p-3 text-sm text-amber-900 dark:border-amber-900 dark:bg-amber-950/60 dark:text-amber-200">
+  <div class="card border-l-2 border-l-[var(--pd-warn)] p-3 text-sm">
     <strong class="font-semibold">Copy now — shown once.</strong>
-    <p class="mt-1 break-all font-mono text-xs" id="ci-token-secret">{{.NewToken}}</p>
+    <p class="mt-1 break-all mono text-xs" id="ci-token-secret">{{.NewToken}}</p>
     <button type="button" class="btn mt-2" data-copy="#ci-token-secret">copy</button>
   </div>
   {{end}}
@@ -517,7 +517,7 @@
     <h3 class="card-header">Create a CI token</h3>
     <label class="mb-1 block text-sm font-medium" for="token-name">Name</label>
     <input class="input md:max-w-md" id="token-name" name="name" type="text" required placeholder="ci" value="{{.NewName}}">
-    <p class="muted mt-1 text-xs">Scope <code class="font-mono text-xs">checks:write</code> only — a CI token can report checks, never write the repo.</p>
+    <p class="muted mt-1 text-[11px]">Scope <code class="mono text-xs">checks:write</code> only — a CI token can report checks, never write the repo.</p>
     <div class="mt-2"><button type="submit" class="btn primary">create token</button></div>
     {{if .Error}}<p class="err-line" role="alert">{{.Error}}</p>{{end}}
   </form>
@@ -530,17 +530,17 @@
         <tbody>
           {{range .Tokens}}
           <tr>
-            <td class="font-medium">{{.Name}}</td>
-            <td class="muted">{{.Scopes}}</td>
-            <td>{{.CreatedBy}}</td>
-            <td class="tabular muted text-xs">{{.CreatedAt}}</td>
-            <td>{{if .RevokedAt}}<span class="chip-closed">revoked</span> <span class="muted text-xs">{{.RevokedAt}}</span>{{else}}<span class="chip-open">active</span>{{end}}</td>
+            <td class="mono font-medium">{{.Name}}</td>
+            <td class="muted mono text-xs">{{.Scopes}}</td>
+            <td class="mono">{{.CreatedBy}}</td>
+            <td class="tabular muted text-[11px] mono">{{.CreatedAt}}</td>
+            <td>{{if .RevokedAt}}<span class="chip-closed">revoked</span> <span class="muted text-[11px] mono">{{.RevokedAt}}</span>{{else}}<span class="chip-open">active</span>{{end}}</td>
             <td>
               {{if not .RevokedAt}}
               <form method="post" action="/{{$.Owner}}/{{$.Name}}/settings/tokens/{{.ID}}"
                     hx-post="/{{$.Owner}}/{{$.Name}}/settings/tokens/{{.ID}}" hx-target="#settings-panel" hx-select="#settings-panel" hx-swap="outerHTML">
                 <input type="hidden" name="token_action" value="revoke">
-                <button type="submit" class="btn px-2 py-1 text-xs">revoke</button>
+                <button type="submit" class="link text-xs">revoke</button>
               </form>
               {{end}}
             </td>
@@ -560,7 +560,7 @@
 {{define "settings-repo-webhooks"}}
 {{with .AdminData}}
 <div class="space-y-4">
-  <p class="muted text-sm">One POST per collaboration event, signed with <code class="font-mono text-xs">X-Walgit-Signature</code> and identified by <code class="font-mono text-xs">X-Walgit-Delivery</code> / <code class="font-mono text-xs">X-Walgit-Event</code>. HTTPS only (loopback HTTP in dev).</p>
+  <p class="muted text-sm">One POST per collaboration event, signed with <code class="mono text-xs">X-Walgit-Signature</code> and identified by <code class="mono text-xs">X-Walgit-Delivery</code> / <code class="mono text-xs">X-Walgit-Event</code>. HTTPS only (loopback HTTP in dev).</p>
   {{if not .WebhooksWired}}
   <div class="card p-4"><p class="muted text-sm">The webhook service is not wired on this build.</p></div>
   {{else}}
@@ -570,11 +570,11 @@
     <div class="grid gap-3">
       <div>
         <label class="mb-1 block text-sm font-medium" for="webhook-url">URL</label>
-        <input class="input font-mono text-xs" id="webhook-url" name="url" type="url" required placeholder="https://example.com/hook" value="{{.NewURL}}">
+        <input class="input mono text-xs" id="webhook-url" name="url" type="url" required placeholder="https://example.com/hook" value="{{.NewURL}}">
       </div>
       <div>
         <label class="mb-1 block text-sm font-medium" for="webhook-events">Events</label>
-        <input class="input" id="webhook-events" name="events" type="text" placeholder="empty = all, * = everything, else a comma list" value="{{.NewEvents}}">
+        <input class="input mono" id="webhook-events" name="events" type="text" placeholder="empty = all, * = everything, else a comma list" value="{{.NewEvents}}">
       </div>
       <div>
         <label class="mb-1 block text-sm font-medium" for="webhook-secret">Secret (optional, write-only)</label>
@@ -593,35 +593,35 @@
         <tbody>
           {{range .Webhooks}}
           <tr>
-            <td class="break-all font-mono text-xs">{{.URL}}</td>
-            <td class="muted">{{if .Events}}{{.Events}}{{else}}all{{end}}</td>
+            <td class="break-all mono text-xs">{{.URL}}</td>
+            <td class="muted mono text-xs">{{if .Events}}{{.Events}}{{else}}all{{end}}</td>
             <td>{{if .Active}}<span class="chip-open">active</span>{{else}}<span class="chip-closed">off</span>{{end}}</td>
-            <td>{{if .SecretSet}}<span class="chip">set</span>{{else}}<span class="muted">—</span>{{end}}</td>
+            <td>{{if .SecretSet}}<span class="chip-neutral">set</span>{{else}}<span class="muted">—</span>{{end}}</td>
             <td>
-              <div class="flex flex-wrap gap-1">
+              <div class="flex flex-wrap gap-2">
                 <form method="post" action="/{{$.Owner}}/{{$.Name}}/settings/webhooks/{{.ID}}"
                       hx-post="/{{$.Owner}}/{{$.Name}}/settings/webhooks/{{.ID}}" hx-target="#settings-panel" hx-select="#settings-panel" hx-swap="outerHTML">
                   <input type="hidden" name="webhook_action" value="ping">
-                  <button type="submit" class="btn px-2 py-1 text-xs">ping</button>
+                  <button type="submit" class="link text-xs">ping</button>
                 </form>
                 <form method="post" action="/{{$.Owner}}/{{$.Name}}/settings/webhooks/{{.ID}}"
                       hx-post="/{{$.Owner}}/{{$.Name}}/settings/webhooks/{{.ID}}" hx-target="#settings-panel" hx-select="#settings-panel" hx-swap="outerHTML">
                   <input type="hidden" name="webhook_action" value="delete">
-                  <button type="submit" class="btn px-2 py-1 text-xs">delete</button>
+                  <button type="submit" class="link text-xs">delete</button>
                 </form>
               </div>
             </td>
           </tr>
           {{if .Recent}}
           <tr>
-            <td colspan="5" class="muted text-xs">
+            <td colspan="5" class="muted text-[11px]">
               <span class="font-medium">recent deliveries</span>
               <ul class="mt-1 space-y-0.5">
-                {{range .Recent}}<li><span class="font-mono">#{{.Seq}}</span> {{.Event}} → {{.Status}} · {{.At}}{{if .Error}} · <span class="text-red-700 dark:text-red-300">{{.Error}}</span>{{end}}</li>{{end}}
+                {{range .Recent}}<li><span class="mono">#{{.Seq}}</span> <span class="mono">{{.Event}}</span> → {{.Status}} · {{.At}}{{if .Error}} · <span class="text-[var(--pd-danger)]">{{.Error}}</span>{{end}}</li>{{end}}
               </ul>
             </td>
           </tr>
-          {{else if .LastPing}}<tr><td colspan="5" class="muted text-xs">{{.LastPing}}</td></tr>{{end}}
+          {{else if .LastPing}}<tr><td colspan="5" class="muted text-[11px]">{{.LastPing}}</td></tr>{{end}}
           {{end}}
         </tbody>
       </table>
@@ -637,7 +637,7 @@
 {{define "settings-repo-wal"}}
 <section class="card p-4" data-wal-settings>
   <h3 class="card-header">WAL</h3>
-  <p class="muted text-sm">The WAL panel is the repo group's shared partial (<code class="font-mono text-xs">templates/partials/wal-panel.html</code>); it renders here once that partial lands (specs/settings.md §2.9). WAL data is available at <a class="link" href="/{{.Owner}}/{{.Name}}/wal">the repo WAL view</a>.</p>
+  <p class="muted text-sm">The WAL panel is the repo group's shared partial (<code class="mono text-xs">templates/partials/wal-panel.html</code>); it renders here once that partial lands (specs/settings.md §2.9). WAL data is available at <a class="link" href="/{{.Owner}}/{{.Name}}/wal">the repo WAL view</a>.</p>
 </section>
 {{end}}
 
@@ -645,13 +645,13 @@
 {{define "settings-repo-danger"}}
 {{with .DangerData}}
 <div class="space-y-4">
-  <section class="card border-red-500/60 p-4" aria-label="Danger Zone">
-    <h3 class="mb-1 font-semibold text-red-700 dark:text-red-400">Danger Zone</h3>
+  <section class="card p-4" aria-label="Danger Zone">
+    <h3 class="card-header text-[var(--pd-danger)]">Danger Zone</h3>
     <p class="muted text-sm">These actions are irreversible. Forks are unaffected.</p>
 
-    <div class="mt-4 rounded-lg border border-zinc-200 p-3 dark:border-zinc-800">
-      <h4 class="font-semibold">Transfer repository</h4>
-      <p class="muted mt-1 text-sm">Moves the repository — and its access bindings — to another owner. You lose admin access unless the new owner grants it back.</p>
+    <div class="mt-4 card p-3">
+      <h4 class="eyebrow">Transfer repository</h4>
+      <p class="muted mt-1 text-[11px]">Moves the repository — and its access bindings — to another owner. You lose admin access unless the new owner grants it back.</p>
       <form class="mt-2 grid gap-2" method="post" action="/{{$.Owner}}/{{$.Name}}/settings/danger"
             hx-post="/{{$.Owner}}/{{$.Name}}/settings/danger" hx-target="#settings-panel" hx-select="#settings-panel" hx-swap="outerHTML"
             data-danger-expected="{{.FullName}}">
@@ -661,24 +661,24 @@
           <input class="input md:max-w-sm" id="transfer-owner" name="owner" type="text" required>
         </div>
         <div>
-          <label class="mb-1 block text-sm font-medium" for="transfer-confirm">Type <code class="font-mono text-xs">{{.FullName}}</code> to confirm</label>
-          <input class="input md:max-w-sm font-mono text-xs" id="transfer-confirm" name="confirm" type="text" autocomplete="off" data-danger-arm required>
+          <label class="mb-1 block text-sm font-medium" for="transfer-confirm">Type <code class="mono text-xs">{{.FullName}}</code> to confirm</label>
+          <input class="input md:max-w-sm mono text-xs" id="transfer-confirm" name="confirm" type="text" autocomplete="off" data-danger-arm required>
         </div>
         <div><button type="submit" class="btn danger">Transfer this repository</button></div>
         {{if .Error}}<p class="err-line" role="alert">{{.Error}}</p>{{end}}
       </form>
     </div>
 
-    <div class="mt-4 rounded-lg border border-red-300 p-3 dark:border-red-900">
-      <h4 class="font-semibold text-red-700 dark:text-red-400">Delete repository</h4>
-      <p class="muted mt-1 text-sm">Deletes the repository for everyone. Irreversible; forks are unaffected.</p>
+    <div class="mt-4 card p-3 border-[color-mix(in_srgb,var(--pd-danger)_50%,var(--pd-line))]">
+      <h4 class="eyebrow text-[var(--pd-danger)]">Delete repository</h4>
+      <p class="muted mt-1 text-[11px]">Deletes the repository for everyone. Irreversible; forks are unaffected.</p>
       <form class="mt-2 grid gap-2" method="post" action="/{{$.Owner}}/{{$.Name}}/settings/danger"
             hx-post="/{{$.Owner}}/{{$.Name}}/settings/danger" hx-target="#settings-panel" hx-select="#settings-panel" hx-swap="outerHTML"
             data-danger-expected="{{.FullName}}">
         <input type="hidden" name="danger_action" value="delete">
         <div>
-          <label class="mb-1 block text-sm font-medium" for="delete-confirm">Type <code class="font-mono text-xs">{{.FullName}}</code> to confirm</label>
-          <input class="input md:max-w-sm font-mono text-xs" id="delete-confirm" name="confirm" type="text" autocomplete="off" data-danger-arm required>
+          <label class="mb-1 block text-sm font-medium" for="delete-confirm">Type <code class="mono text-xs">{{.FullName}}</code> to confirm</label>
+          <input class="input md:max-w-sm mono text-xs" id="delete-confirm" name="confirm" type="text" autocomplete="off" data-danger-arm required>
         </div>
         <div><button type="submit" class="btn danger">Delete this repository</button></div>
       </form>

@@ -18,12 +18,12 @@
   {{if .Rows}}
   <ul>
     {{range .Rows}}
-    <li class="border-t border-zinc-200 py-3 first:border-t-0 first:pt-0 dark:border-zinc-800">
+    <li class="border-t border-[var(--pd-line)] py-3 first:border-t-0 first:pt-0">
       <div class="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1">
-        <a class="min-w-0 max-w-full truncate font-medium text-emerald-700 hover:underline dark:text-emerald-400" href="{{.Href}}">#{{.Num}} {{.Title}}</a>
+        <a class="link min-w-0 max-w-full truncate font-medium" href="{{.Href}}">#{{.Num}} {{.Title}}</a>
         {{template "collab_state_chip" .Chip}}
-        <span class="min-w-0 truncate text-xs text-zinc-500 dark:text-zinc-400">{{.BaseRef}} ← {{.HeadRef}}</span>
-        <span class="ml-auto shrink-0 text-xs text-zinc-500 dark:text-zinc-400">{{.Author}} · {{template "collab_time" .UpdatedAt}}</span>
+        <span class="mono muted min-w-0 truncate text-xs">{{.BaseRef}} ← {{.HeadRef}}</span>
+        <span class="card-meta ml-auto mt-0! shrink-0">{{.Author}} · {{template "collab_time" .UpdatedAt}}</span>
       </div>
     </li>
     {{end}}

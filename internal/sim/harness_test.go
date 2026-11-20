@@ -13,10 +13,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/crueber/walhub/internal/store"
-	"github.com/crueber/walhub/internal/store/fault"
-	"github.com/crueber/walhub/internal/store/proto"
-	"github.com/crueber/walhub/internal/wal"
+	"github.com/crueber/spindle/internal/store"
+	"github.com/crueber/spindle/internal/store/fault"
+	"github.com/crueber/spindle/internal/store/proto"
+	"github.com/crueber/spindle/internal/wal"
 )
 
 // newFaultLink builds a throwaway link over a private memory store (no
@@ -66,8 +66,8 @@ func TestParseSeedList(t *testing.T) {
 
 func TestSimSeeds(t *testing.T) {
 	t.Run("defaults", func(t *testing.T) {
-		t.Setenv("WALHUB_SIM_SEED", "")
-		t.Setenv("WALHUB_SIM_SEEDS", "")
+		t.Setenv("SPINDLE_SIM_SEED", "")
+		t.Setenv("SPINDLE_SIM_SEEDS", "")
 		got, err := simSeeds()
 		if err != nil {
 			t.Fatal(err)
@@ -77,24 +77,24 @@ func TestSimSeeds(t *testing.T) {
 		}
 	})
 	t.Run("single", func(t *testing.T) {
-		t.Setenv("WALHUB_SIM_SEED", "99")
-		t.Setenv("WALHUB_SIM_SEEDS", "")
+		t.Setenv("SPINDLE_SIM_SEED", "99")
+		t.Setenv("SPINDLE_SIM_SEEDS", "")
 		got, err := simSeeds()
 		if err != nil || len(got) != 1 || got[0] != 99 {
 			t.Fatalf("single seed = %v err=%v", got, err)
 		}
 	})
 	t.Run("plural wins", func(t *testing.T) {
-		t.Setenv("WALHUB_SIM_SEED", "99")
-		t.Setenv("WALHUB_SIM_SEEDS", "1,2")
+		t.Setenv("SPINDLE_SIM_SEED", "99")
+		t.Setenv("SPINDLE_SIM_SEEDS", "1,2")
 		got, err := simSeeds()
 		if err != nil || fmt.Sprintf("%v", got) != "[1 2]" {
 			t.Fatalf("plural seeds = %v err=%v", got, err)
 		}
 	})
 	t.Run("bad", func(t *testing.T) {
-		t.Setenv("WALHUB_SIM_SEED", "nope")
-		t.Setenv("WALHUB_SIM_SEEDS", "")
+		t.Setenv("SPINDLE_SIM_SEED", "nope")
+		t.Setenv("SPINDLE_SIM_SEEDS", "")
 		if _, err := simSeeds(); err == nil {
 			t.Fatal("bad seed env accepted")
 		}
@@ -480,7 +480,7 @@ func TestPushRefFailures(t *testing.T) {
 	defer cancel()
 
 	t.Run("cap exhausted", func(t *testing.T) {
-		t.Setenv("WALHUB_SIM_VERBOSE", "1")
+		t.Setenv("SPINDLE_SIM_VERBOSE", "1")
 		c := newCluster(t, defaultRepo)
 		a := c.AddInstance("a", 50)
 		wrong, other := strings.Repeat("9", 40), strings.Repeat("8", 40)
@@ -522,7 +522,7 @@ func TestPushRefFailures(t *testing.T) {
 		}
 	})
 	t.Run("verbose transient", func(t *testing.T) {
-		t.Setenv("WALHUB_SIM_VERBOSE", "1")
+		t.Setenv("SPINDLE_SIM_VERBOSE", "1")
 		c := newCluster(t, defaultRepo)
 		a := c.AddInstance("a", 53)
 		a.link.Set(blackHolePlan())

@@ -1,13 +1,13 @@
 # 09 — Events bridge (internal/events)
 
-> Source: MASTER_RUST_SPEC.md §12 (events bridge), with §3.4 (roles), §5.1/5.4 (keys & seq semantics), §8.3 (notify route), §15.1 (config) · Status: normative for the walhub Go implementation.
+> Source: MASTER_RUST_SPEC.md §12 (events bridge), with §3.4 (roles), §5.1/5.4 (keys & seq semantics), §8.3 (notify route), §15.1 (config) · Status: normative for the spindle Go implementation.
 
 ## 1. The principle
 
 Events are produced **FROM THE WAL** by one small service (role `events`) — never by the push path.
 Every writer (serving host, broker, CLI, import) is covered because the bridge reads the log; a
 webhook failure adds lag (a metric), never a push failure. In Go this is package `internal/events`
-(module `github.com/crueber/walhub`), a single long-lived goroutine plus one HTTP handler — no
+(module `github.com/crueber/spindle`), a single long-lived goroutine plus one HTTP handler — no
 part of `internal/git`, `internal/wal` publish, or `internal/api` emits events.
 
 The bridge is instantiated only when **both** hold: the instance's `server.roles` includes `events`

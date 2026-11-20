@@ -10,7 +10,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/crueber/walhub/internal/server/auth"
+	"github.com/crueber/spindle/internal/server/auth"
 )
 
 func ownerHook(allow map[string]bool, unavailable bool) func(context.Context, string, auth.Principal) *auth.AuthError {

@@ -21,9 +21,9 @@ import (
 	"net/http"
 	"testing"
 
-	"github.com/crueber/walhub/internal/sizecatalog"
-	"github.com/crueber/walhub/internal/store"
-	"github.com/crueber/walhub/internal/store/proto"
+	"github.com/crueber/spindle/internal/sizecatalog"
+	"github.com/crueber/spindle/internal/store"
+	"github.com/crueber/spindle/internal/store/proto"
 )
 
 // errFakeOwners injects a registry failure (→ 503 via mapViewErr).

@@ -5,7 +5,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/crueber/walhub/internal/store/proto"
+	"github.com/crueber/spindle/internal/store/proto"
 )
 
 // TestGateMath is §8.7: gates apply to incrementals only; evaluation order is

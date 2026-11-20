@@ -11,7 +11,7 @@
 // the renderer's linkifyMentionText (Forgejo #444: render/notify parity).
 // Fenced code blocks and inline code spans are skipped. Bounded: at most
 // MaxMentionsPerBody tokens per event; beyond that, ignored (the caller
-// counts walhub_mentions_dropped_total{repo}).
+// counts spindle_mentions_dropped_total{repo}).
 //
 // An unresolvable mention is the consumer's (internal/notify) problem:
 // validation is a bucket probe there (profile GET / team doc read) and

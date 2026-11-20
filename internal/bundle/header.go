@@ -8,7 +8,7 @@ import (
 	"os"
 	"sort"
 
-	"github.com/crueber/walhub/internal/store/proto"
+	"github.com/crueber/spindle/internal/store/proto"
 )
 
 // Header rendering is byte-exact (§8.9.4):

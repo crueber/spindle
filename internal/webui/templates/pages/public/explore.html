@@ -1,26 +1,68 @@
 {{define "content"}}
-<section class="mx-auto max-w-3xl">
-  <h1 class="text-2xl font-semibold tracking-tight">Explore</h1>
-  <p class="muted mt-1 text-sm">
-    {{len .Data.Owners}} {{plural (len .Data.Owners) "owner" "owners"}} ·
-    {{.Data.TotalRepos}} {{plural .Data.TotalRepos "repository" "repositories"}}
-  </p>
+{{/* Explore (the foundation reference page): the visible owners and their live
+     readable repo counts. The table is the directory; the aside names the
+     plain-text twin (?format=text, the same VisibleOwners seam). 390px: the
+     grid stacks, the table scrolls inside its wrapper (issue #275). */}}
+<section class="explore-page mx-auto max-w-4xl">
+  <header class="border-b border-[var(--pd-line)] pb-3">
+    <p class="eyebrow">directory</p>
+    <h1 class="mt-1 text-2xl font-semibold tracking-tight">Explore</h1>
+    <p class="muted mt-1 text-sm">
+      Owners with at least one repository you can read. Counts come from the same
+      visibility rule the API applies, so a private repo never appears here.
+    </p>
+  </header>
 
-  {{if .Data.Owners}}
-  <ul class="mt-4 grid grid-cols-1 gap-x-6 gap-y-2 sm:grid-cols-2">
-    {{range .Data.Owners}}
-    <li class="card px-3 py-2">
-      <a class="font-medium text-emerald-700 hover:underline dark:text-emerald-400" href="/{{.Name}}/repositories">{{.Name}}</a>
-      <span class="muted ml-2 text-xs">
-        {{.Repos}} {{plural .Repos "repository" "repositories"}}
-      </span>
-    </li>
-    {{end}}
-  </ul>
-  {{else}}
-  <div class="card mt-4 p-4">
-    <p class="text-sm">Nothing here yet. The first push creates a repository — <a class="text-emerald-700 hover:underline dark:text-emerald-400" href="/new">create one</a> or <a class="text-emerald-700 hover:underline dark:text-emerald-400" href="/import">import</a>.</p>
+  <div class="mt-4 grid grid-cols-1 items-start gap-4 lg:grid-cols-[minmax(0,1fr)_15rem]">
+    <div class="min-w-0">
+      {{if .Data.Owners}}
+      <div class="card overflow-hidden">
+        <div class="overflow-x-auto">
+          <table class="data-table">
+            <thead>
+              <tr><th>owner</th><th class="w-px text-right">repositories</th></tr>
+            </thead>
+            <tbody>
+              {{range .Data.Owners}}
+              <tr>
+                <td><a class="link font-mono" href="/{{.Name}}/repositories">{{.Name}}</a></td>
+                <td class="w-px whitespace-nowrap text-right font-mono tabular">{{.Repos}}</td>
+              </tr>
+              {{end}}
+            </tbody>
+          </table>
+        </div>
+        <p class="muted flex flex-wrap items-center gap-x-3 border-t border-[var(--pd-line)] px-3 py-2 text-xs">
+          <span><span class="font-mono tabular">{{len .Data.Owners}}</span> {{plural (len .Data.Owners) "owner" "owners"}}</span>
+          <span aria-hidden="true">·</span>
+          <span><span class="font-mono tabular">{{.Data.TotalRepos}}</span> {{plural .Data.TotalRepos "repository" "repositories"}}</span>
+        </p>
+      </div>
+      {{else}}
+      <div class="empty-state" role="status">
+        <p class="empty-title">Nothing here yet</p>
+        <p class="empty-hint">
+          The first push creates a repository — <a class="link" href="/new">create one</a> or
+          <a class="link" href="/import">import</a>.
+        </p>
+      </div>
+      {{end}}
+    </div>
+
+    <aside class="card p-3" aria-label="Directory facts">
+      <p class="eyebrow">inventory</p>
+      <dl class="kv mt-2">
+        <div class="kv-row"><dt class="kv-key">owners</dt><dd class="kv-val">{{len .Data.Owners}}</dd></div>
+        <div class="kv-row"><dt class="kv-key">repositories</dt><dd class="kv-val">{{.Data.TotalRepos}}</dd></div>
+      </dl>
+      <p class="eyebrow mt-3 border-t border-[var(--pd-line)] pt-2">text twin</p>
+      <p class="mt-1">
+        <a class="link break-all font-mono text-xs" href="/explore?format=text">/explore?format=text</a>
+      </p>
+      <p class="muted mt-1 text-xs">
+        Plain text for curl and agents — the same owner list, filters off.
+      </p>
+    </aside>
   </div>
-  {{end}}
 </section>
 {{end}}

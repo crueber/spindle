@@ -1,8 +1,8 @@
-# AGENTS.md — operating manual for walhub (humans and agents)
+# AGENTS.md — operating manual for spindle (humans and agents)
 
-**What this repo is:** the implementation workspace for **walhub** — a Go rewrite of the walgit git host. `docs/MASTER_RUST_SPEC.md` specifies the system's behavior completely (it describes the Rust reference implementation and is normative for behavior); `docs/go/*.md` specify how to build it in Go. When you are asked to implement, review, or extend walhub, this file tells you how to work — and the same rules bind human contributors; humans additionally start at [`README.md`](README.md) for setup and day-to-day workflow. Reading order: `docs/go/README.md` → `docs/go/01_overview.md` → your task's doc → `docs/go/13_concurrency.md`. Work on the collaboration layer (issues, PRs, review, checks, notifications, orgs) additionally starts at `docs/features/README.md` — its primitives are frozen contracts, exactly like `14_extensibility.md`.
+**What this repo is:** the implementation workspace for **spindle** — a Go rewrite of the walgit git host. `docs/MASTER_RUST_SPEC.md` specifies the system's behavior completely (it describes the Rust reference implementation and is normative for behavior); `docs/go/*.md` specify how to build it in Go. When you are asked to implement, review, or extend spindle, this file tells you how to work — and the same rules bind human contributors; humans additionally start at [`README.md`](README.md) for setup and day-to-day workflow. Reading order: `docs/go/README.md` → `docs/go/01_overview.md` → your task's doc → `docs/go/13_concurrency.md`. Work on the collaboration layer (issues, PRs, review, checks, notifications, orgs) additionally starts at `docs/features/README.md` — its primitives are frozen contracts, exactly like `14_extensibility.md`.
 
-> **Pre-1.0, no backwards compatibility within walhub.** Change the shape and delete the old shape in the
+> **Pre-1.0, no backwards compatibility within spindle.** Change the shape and delete the old shape in the
 > same change — no aliases, shims, deprecated flags, or "still accepted for" branches. The ONE exception is
 > bucket compatibility with the Rust implementation (below): formats on the bucket are append-only and
 > shared.
@@ -26,11 +26,11 @@
 7. **No silent waiting.** Long work is a task: unique id, `(repo, kind)` single-flight, progress packets, attachable SSE stream. A client must never stare at a silent spinner.
 8. **Modularity seams are contracts.** New capabilities (issues, PRs, review, multi-user) attach ONLY through the registries in `docs/go/14_extensibility.md` (route providers, auth providers, policy effects, event sinks, task kinds, CLI subcommands). Core packages (`internal/store`, `internal/wal`, `internal/git`) must not import upward (`internal/server`, `internal/api`, feature packages), and feature state must never live on local disk or in the WAL without a schema decision.
 9. **Fail closed — with one deliberate exception.** Config validation still refuses oidc without an allowlist and rejects unparseable policies; an invalid credential gets a real 401 (that is what makes git erase it), never a 200 with in-band error — except the exact four-condition case in `docs/go/06_server_http.md §8.4`. **Superseded by divergence:** auth `none` no longer requires a loopback bind — it is allowed anywhere (zero-config friendliness) with loud warnings in logs and the setup UI; the setup UI is the one-click path to real auth.
-10. **Zero-config first run.** `walhub` with no config boots on sane defaults (`0.0.0.0:8080`, filesystem
+10. **Zero-config first run.** `spindle` with no config boots on sane defaults (`0.0.0.0:8080`, filesystem
     store under the data dir, auth `none`, `auto_create_on_push`) and the `/setup` UI configures
     everything. A present config file is validated before boot; an INVALID file puts the server in
     setup-only mode (everything but setup/health answers 503) until the user saves a fixed one. Setup
-    save is validated, written atomically to `<data-dir>/walhub.toml`, and lists restart-required keys.
+    save is validated, written atomically to `<data-dir>/spindle.toml`, and lists restart-required keys.
 11. **Tests are the definition of done.** Backend: near-100% coverage, enforced — every `internal/...`
     package holds ≥ 95% statement coverage in CI (`make cover`), table-driven httptest for every handler,
     `-race` mandatory. Frontend: JS tested with Node's built-in `node --test` (logic modules
@@ -47,7 +47,7 @@
 - **Tests are part of the definition of done.** Each package's doc names its tests (contract cases, budget assertions, e2e flows). `-race` is mandatory in CI; concurrency-heavy packages get stress tests (`-count=100`) and the deadlock canary; `make cover` enforces the ≥ 95% per-package gate. Never merge with skipped tests; never weaken a budget assertion to make it pass.
 - **Never run unbounded commands.** Wrap test/build invocations in a timeout. `go test ./...` in this repo is tiered (see `docs/go/15_testing.md`) — run `make test` / `make race` / `make sim` for the tier you need, not the world.
 - **Commit discipline.** One logical change per commit; the commit message states the doc section it implements and any decision it appends. Format with gofmt (`make fmt`); vet clean (`make vet`); the budgeted modules (law 1) are the only non-stdlib imports a linter should ever flag.
-- **Naming.** Binary `walhub`, module `github.com/crueber/walhub`, packages exactly as in `docs/go/01_overview.md` (cmd/walhub; internal/{store,wal,git,bundle,policy,server,api,setup,events,maintain,config}; the collaboration layer in its own packages; web/). Wire/bucket identifiers (header names `X-Walgit-*`, config key names, bucket key paths, protobuf package `walgit.v1`) keep their Rust-era names — they are wire contracts, not branding. Root markdown files are all-uppercase (`AGENTS.md`, `DESIGN.md`, `DEVIATIONS.md`) — except `README.md`, which keeps the universal lowercase spelling (#212).
+- **Naming.** Binary `spindle`, module `github.com/crueber/spindle`, packages exactly as in `docs/go/01_overview.md` (cmd/spindle; internal/{store,wal,git,bundle,policy,server,api,setup,events,maintain,config}; the collaboration layer in its own packages; web/). Wire/bucket identifiers (header names `X-Walgit-*`, config key names, bucket key paths, protobuf package `walgit.v1`) keep their Rust-era names — they are wire contracts, not branding. Root markdown files are all-uppercase (`AGENTS.md`, `DESIGN.md`, `DEVIATIONS.md`) — except `README.md`, which keeps the universal lowercase spelling (#212).
 - **Mobile viewport is always checked.** Every browser-facing change is verified at a narrow/mobile viewport (~390px width) as well as desktop — layout, overflow, and tap targets. UI work without a mobile-viewport check is not done.
 - **Tailwind is the only styling language — compose it correctly (Forgejo #533).** No text-field utilities on non-text controls (the `.input` class on a checkbox stretched it full-width and scattered the Settings Features rows); no one-off CSS without shared-pattern justification (a new rule earns its place only as a shared pattern in `web/src/app.css`, per the #405 opaque-popover precedent); controls align in both themes at desktop and ~390px. **Layout changes are verified rendered before merge** — a screenshot or DOM measurement (row-rect alignment, control positions), never code reading alone; a layout ticket closed without rendered proof is not done.
 - **The style guideline is binding for all UI work (Forgejo #533).** `docs/style-guideline.md` codifies the app's design language with canonical references; it is normative, not advisory. Every change to `web/` composes the shared classes, components, and page-anatomy patterns it names — a new UI element reuses the canonical idiom (naming its reference) instead of re-deciding styling. Deviating from the guideline, or introducing a new pattern where a canonical one exists, requires either (a) extending `docs/style-guideline.md` in the same change with the new canonical reference and rationale, or (b) an amendment in the relevant doc's "Decisions & deviations" section. Reviewers reject UI changes that re-decide what the guideline already settles. The guideline never overrides AGENTS.md law 1 (dependency budget) or the Tailwind-only rule; where they conflict, the law wins and the guideline is corrected.
@@ -56,15 +56,15 @@ Performance claims (scale, latency shape) are **evidence-backed**: measured entr
 
 ### Field lessons (each one shipped a real failure — do not relearn them)
 
-- **Env overlay keys are exact paths.** `WALHUB__STORE__S3__ENDPOINT`, never `WALHUB__STORE__ENDPOINT` — a missing segment is recorded as an unknown key and silently ignored; `walhub config dump` (or `check`) is how you catch it. rustfs/MinIO need `store.s3.force_path_style = true` (virtual-host addressing 403s); healthchecks pin `127.0.0.1` (busybox `localhost` = `::1`, rustfs binds IPv4); pnpm 11 needs `allowBuilds: { esbuild: true }` in `web/pnpm-workspace.yaml` (the package.json `pnpm` field is dead). The compose examples encode all of this.
-- **`--data-dir` flag syncing must preserve the env overlay.** It re-points only the flag-derived paths (`DataDir`, `Store.Root`, `Cache.Dir`); re-deriving `FirstRunDefaults` there silently discarded every `WALHUB__*` override on zero-config boots (shipped and reverted once).
+- **Env overlay keys are exact paths.** `SPINDLE__STORE__S3__ENDPOINT`, never `SPINDLE__STORE__ENDPOINT` — a missing segment is recorded as an unknown key and silently ignored; `spindle config dump` (or `check`) is how you catch it. rustfs/MinIO need `store.s3.force_path_style = true` (virtual-host addressing 403s); healthchecks pin `127.0.0.1` (busybox `localhost` = `::1`, rustfs binds IPv4); pnpm 11 needs `allowBuilds: { esbuild: true }` in `web/pnpm-workspace.yaml` (the package.json `pnpm` field is dead). The compose examples encode all of this.
+- **`--data-dir` flag syncing must preserve the env overlay.** It re-points only the flag-derived paths (`DataDir`, `Store.Root`, `Cache.Dir`); re-deriving `FirstRunDefaults` there silently discarded every `SPINDLE__*` override on zero-config boots (shipped and reverted once).
 - **Setup values round-trip through the overrides channel.** The setup API accepts exactly the spellings the TOML file accepts: sizes (`64MiB`), `d`/`w` durations, floats, unsigned counters, and `[[name]]` TOML fragments for struct slices (`bundles.strategy`, `server.auth.tokens`) decoded by the field's toml name. `setup.Coerce` must use the shared `config` parsers — a page save failing "not an int"/"unsupported type" means the coerce path regressed.
 - **Schema lookups are by key name, never by section group.** Group layout changes (auth was split out of `server`); `setup.EffectiveValue`/`setup.RestartKeys` and any new schema consumer match keys directly, or `requires_restart` and diffs silently pollute with keys that did not change.
 - **Server values render in the spec spelling** (`64GiB`, `1h` — `fmtSpecSize`/`fmtSpecDuration`); the setup page's editable values and its per-field metadata (`webui.settingsFieldMeta`, the successor of the old FIELDS table) share one spelling, and every example is tested to validate in the page and accepted by `/api/v1/setup/test` (server).
 - **`node --test`: pass files or globs, never a directory.** Node 22 executes a directory positional as a module (`Cannot find module …/web/test`); Node 24 accepts both. All entry points (`make test-web`, the CI workflow, the published GitHub workflow) use `web/test/unit/*.test.js`.
 - **Tests that spawn git pin their identity.** Annotated tags and `commit-tree` need an author/committer; runners and containers have no global git config. `TestMain` in `internal/git` and `internal/maintain` sets `GIT_AUTHOR_*`/`GIT_COMMITTER_*` for spawned subprocesses only. Reproduce environment gaps with `env -i PATH=… HOME=/tmp/nohome go test …`.
 - **Fresh clones compile.** `web/dist/.keep` is tracked because `go:embed all:dist` fails on a missing directory — never gitignore it away, and build the web BEFORE `go test` in CI (the embed shell is what `/setup` 200s on).
-- **Development builds and publishing are separate steps.** Every pull request and push to `main` runs `.github/workflows/ci.yml` (the full gate) and publishes the image `ghcr.io/crueber/walhub:latest` (plus the commit SHA, and the version on `v*` tags). Keep the package name stable: it is the pull path users have. README "Run with docker compose" documents pulling.
+- **Development builds and publishing are separate steps.** Every pull request and push to `main` runs `.github/workflows/ci.yml` (the full gate) and publishes the image `ghcr.io/crueber/spindle:latest` (plus the commit SHA, and the version on `v*` tags). Keep the package name stable: it is the pull path users have. README "Run with docker compose" documents pulling.
   Publishing is the button, not a mirror: `bump` (patch/minor/major) or `bump: none` + an exact `tag`
   (Weave's process); a publish whose exported tree is unchanged produces a tag only, never an empty
   commit.
@@ -83,6 +83,12 @@ Performance claims (scale, latency shape) are **evidence-backed**: measured entr
   replay path uses `git replay --ref-action` (newer than trixie's 2.47), and several tests assert
   that an unwritable path fails — which root bypasses. The CI gate is a digest-pinned `debian:sid`
   running the suite as a normal user; `node:22-trixie` covers the web and S3 jobs.
+- **The UI language is Precision Dark; use the semantic tokens.** `web/src/app.css`
+  retunes the raw zinc/emerald/amber ramps so the utilities already in templates adopt the
+  palette, but new component styles reference `--pd-*`. Amber means *action* (one
+  `.btn.primary` per page); emerald means *state*; links are ink with an underline, never the
+  accent. A hex literal or an emerald text-link in a template is a regression —
+  `docs/style-guideline.md` §1 is normative.
 - **`html/template` builtins are process-wide — never shadow them.** A FuncMap entry named `eq`
   replaces the builtin for every template; a string-only `eq` broke every error page
   (`eq .Data.Status 401`). Do not define `eq/ne/lt/le/gt/ge/len/index/printf/slice`.
@@ -109,7 +115,7 @@ Performance claims (scale, latency shape) are **evidence-backed**: measured entr
 ## 3. Quick orientation (what runs where)
 
 ```
-cmd/walhub          one binary; no subcommand = serve; roles by config (serve/maintain/events)
+cmd/spindle          one binary; no subcommand = serve; roles by config (serve/maintain/events)
 internal/store      ObjectStore interface, protobuf+framing codecs, filesystem/S3/GCS/memory backends, leases
 internal/wal        the WAL engine: sync levels, publish/CAS, checkpoints, replay, remote reader, tasks
 internal/git        the git subprocess layer (ingest, refs, pkt-line, receive/upload-pack, repack)
@@ -121,7 +127,7 @@ internal/bundle     bundle-uri scheduler: slots, chains, lists, D17
 internal/events     WAL → webhook bridge (cursor, delivery, wake-ups)
 internal/maintain   maintainer loop: checkpoints, bundles, compaction, fsck/repair, follow
 internal/sshd       SSH git transport (x/crypto/ssh): sessions, key auth, command parsing
-internal/config     walhub.toml (optional) + WALHUB__ env overrides, per-repo settings, validation
+internal/config     spindle.toml (optional) + SPINDLE__ env overrides, per-repo settings, validation
 internal/policy     push policy rule language (protect/history/size effects)
 internal/identity,issues,pulls,review,checks,notify,releases,social,tags,mirror,repoimport,pushmirror
                     the collaboration layer: each package owns its store shapes, routes, tasks and
@@ -141,9 +147,9 @@ web/                templates live in internal/webui; web/src carries islands/ (
                     /_ui/assets/* (immutable; reserved, nothing hashed ships today), /_ui/concepts/*.gif,
                     /repos.js (module MIME is load-bearing)
 Dockerfile          three-stage image (web build → static Go binary → alpine+git runtime, nonroot)
-compose*.y(ml)      compose.standalone.yml = walhub alone (filesystem store); compose.yaml = walhub +
+compose*.y(ml)      compose.standalone.yml = spindle alone (filesystem store); compose.yaml = spindle +
                     rustfs + create-bucket (the S3 rig, also `make dev-store`); both build from source
-.github/workflows  CI: ci.yml = the merge gate + image to ghcr.io/crueber/walhub:latest
+.github/workflows  CI: ci.yml = the merge gate + image to ghcr.io/crueber/spindle:latest
 scripts/ci-s3-bucket.sh  makes the S3 contract bucket exist (curl SigV4, no aws-cli)
 ```
 

@@ -15,13 +15,126 @@
 
 @theme {
   --font-sans: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
-  --font-mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  --font-mono: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
+
+  /* Precision Dark (docs/style-guideline.md §1). The RAW RAMPS are retuned so
+     the ~350 inline zinc/emerald/amber utilities already in templates adopt the
+     language without a per-template edit; the semantic roles live in the
+     --pd-* block below and are what components must use. */
+  --color-zinc-50:  #f7f7f6;
+  --color-zinc-100: #e8ebec;
+  --color-zinc-200: #e2e2df;
+  --color-zinc-300: #cfcfca;
+  --color-zinc-400: #9aa0a6;
+  --color-zinc-500: #6f7378;
+  --color-zinc-600: #55585d;
+  --color-zinc-700: #323a3f;
+  --color-zinc-800: #232a2e;
+  --color-zinc-900: #14181b;
+  --color-zinc-950: #0f1113;
+
+  /* Green is STATE only (open / passing / healthy / diff-add) — never action. */
+  --color-emerald-50:  #e8f6f0;
+  --color-emerald-100: #d1ece1;
+  --color-emerald-200: #a7d9c6;
+  --color-emerald-300: #6fc0a4;
+  --color-emerald-400: #4ec9a4;
+  --color-emerald-500: #2fae86;
+  --color-emerald-600: #12856a;
+  --color-emerald-700: #0f7355;
+  --color-emerald-800: #0b5a43;
+  --color-emerald-900: #1b3f34;
+  --color-emerald-950: #0c2a22;
+
+  /* Amber is ACTION (dark) and WARN (both) — see --pd-accent. */
+  --color-amber-50:  #fdf7ea;
+  --color-amber-100: #f8ebcd;
+  --color-amber-200: #f2d795;
+  --color-amber-300: #ffd08a;
+  --color-amber-400: #ffc862;
+  --color-amber-500: #ffb224;
+  --color-amber-600: #b26a00;
+  --color-amber-700: #9a5b00;
+  --color-amber-800: #7a4600;
+  --color-amber-900: #3a2a08;
+  --color-amber-950: #241905;
+
+  /* Radius never exceeds 4px on panels/controls (§1 F4). */
+  --radius-sm: 2px;
+  --radius-md: 3px;
+  --radius-lg: 4px;
+  --radius-xl: 6px;
+  --radius-2xl: 8px;
+  --radius-3xl: 10px;
+
+  /* Density ramp (§1 F6). Line heights pair with each step. */
+  --text-xs: 11px;    --text-xs--line-height: 16px;
+  --text-sm: 13.5px;  --text-sm--line-height: 20px;
+  --text-base: 15px;  --text-base--line-height: 24px;
+  --text-lg: 16.5px;  --text-lg--line-height: 24px;
+  --text-xl: 19px;    --text-xl--line-height: 26px;
+  --text-2xl: 23px;   --text-2xl--line-height: 30px;
+  --text-3xl: 28px;   --text-3xl--line-height: 34px;
+}
+
+/* Semantic roles — the ONLY colour tokens components may reference (§1 F2).
+   Measured pairs: text 15.6:1 / 16.6:1, text-2 7.8:1 / 6.7:1, muted 4.6:1 /
+   4.8:1, accent-on-surface 9.9:1, light accent-on-white 5.4:1. */
+:root {
+  --pd-canvas: #ffffff;
+  --pd-surface: #f7f7f6;
+  --pd-raised: #efefed;
+  --pd-raised-2: #e6e6e3;
+  --pd-line: #e2e2df;
+  --pd-line-strong: #cfcfca;
+  --pd-text: #17181a;
+  --pd-text-2: #55585d;
+  --pd-muted: #6f7378;
+  --pd-dim: #8a8f94;
+  --pd-accent: #9a5b00;
+  --pd-accent-hover: #7a4600;
+  --pd-on-accent: #ffffff;
+  --pd-ok: #0f7355;
+  --pd-warn: #8a5a10;
+  --pd-danger: #b42323;
+  --pd-add-bg: #e8f6f0;
+  --pd-add-fg: #0b5a43;
+  --pd-del-bg: #fdf0f0;
+  --pd-del-fg: #8f2020;
+  --pd-sel: #fdf0d0;
+  --pd-sel-edge: #b26a00;
+  --pd-shadow: 0 8px 24px rgb(0 0 0 / 0.12);
+}
+.dark {
+  --pd-canvas: #0f1113;
+  --pd-surface: #14181b;
+  --pd-raised: #1c2125;
+  --pd-raised-2: #22282c;
+  --pd-line: #232a2e;
+  --pd-line-strong: #323a3f;
+  --pd-text: #e6eaec;
+  --pd-text-2: #a3adb4;
+  --pd-muted: #79838b;
+  --pd-dim: #525c63;
+  --pd-accent: #ffb224;
+  --pd-accent-hover: #ffc862;
+  --pd-on-accent: #151004;
+  --pd-ok: #4ec9a4;
+  --pd-warn: #e0a95e;
+  --pd-danger: #e06c6c;
+  --pd-add-bg: rgb(78 201 164 / 0.12);
+  --pd-add-fg: #b7e8d8;
+  --pd-del-bg: rgb(224 108 108 / 0.12);
+  --pd-del-fg: #f2c3c3;
+  --pd-sel: #2a2214;
+  --pd-sel-edge: #ffb224;
+  --pd-shadow: 0 8px 24px rgb(0 0 0 / 0.45);
 }
 
 @layer base {
   /* 08 §7 a11y floor: every keyboard-reachable control shows focus. */
   :focus-visible {
-    outline: 2px solid var(--color-emerald-500);
+    outline: 2px solid var(--pd-accent);
     outline-offset: 1px;
   }
   /* System select idiom (Forgejo #547): the native dropdown panel and
@@ -35,136 +148,187 @@
 }
 
 @layer components {
-  /* Panels and chrome */
-  .card { @apply rounded-lg border border-zinc-200 bg-white shadow-sm dark:border-zinc-800 dark:bg-zinc-900/70; }
-  /* List-card meta rows (pull lists, review cards — issue #277): flex row
-     with gap + wrap so adjacent spans never concatenate ("title9 hours
-     ago1 assets"); muted xs text in the repo-header meta language (the
-     markup carries · separators, same as the Issues/Releases rows). The
-     shipped stylesheet is THIS file — web/css/repo.css is dead/unbundled. */
-  .card-meta { @apply mt-1 flex flex-wrap items-center gap-x-2 gap-y-1 text-xs text-zinc-500 dark:text-zinc-400; }
-  .site-header { @apply border-b border-zinc-200 bg-white/90 backdrop-blur dark:border-zinc-800 dark:bg-zinc-950/80; }
-  .brand { @apply font-semibold tracking-tight text-emerald-700 dark:text-emerald-400; }
-  /* Header nav links — .site-nav a covers the primary nav; .nav-link carries
-     the identical treatment for nav-styled links living in the right-aligned
-     utility cluster (issue #238: the API link sits ml-auto, left of the tray). */
-  .site-nav a, .nav-link { @apply text-sm text-zinc-600 hover:text-zinc-900 dark:text-zinc-400 dark:hover:text-zinc-100; }
-  /* Site header at narrow widths (issue #273): the row is brand + scrolling
-     nav + pinned right cluster (see App.jsx). The nav strip scrolls
-     internally instead of wrapping (single header row, the common git-host
-     pattern); links never shrink to unreadability. The strip's own scrollbar
-     is hidden so the header keeps one stable row height — the links stay
-     keyboard-reachable (Tab moves focus along them and the strip follows
-     focus) and touch-scrollable. Dark + light share it. */
+  /* Panels and chrome — flat panes, hairline depth (§1 F4). No shadows on
+     static surfaces; elevation is popover-only (see the .card.absolute rule). */
+  .card {
+    background: var(--pd-surface);
+    border: 1px solid var(--pd-line);
+    border-radius: var(--radius-lg);
+  }
+  /* List-card meta rows (issue #277): mono metadata is part of the identity
+     (§1 F5) — refs, times and counts read as identifiers. */
+  .card-meta {
+    display: flex; flex-wrap: wrap; align-items: center;
+    gap: 2px 8px; margin-top: 4px;
+    font-family: var(--font-mono); font-size: 11px; line-height: 16px;
+    color: var(--pd-muted);
+  }
+  .site-header {
+    background: color-mix(in srgb, var(--pd-canvas) 92%, transparent);
+    border-bottom: 1px solid var(--pd-line);
+    backdrop-filter: blur(8px);
+  }
+  /* Wordmark: mono, with the amber block that gives the product a mark. */
+  .brand {
+    font-family: var(--font-mono);
+    font-weight: 600; letter-spacing: -0.01em;
+    color: var(--pd-text);
+    display: inline-flex; align-items: center; gap: 7px;
+  }
+  .brand::before {
+    content: "";
+    width: 8px; height: 8px; border-radius: 2px;
+    background: var(--pd-accent);
+    flex: none;
+  }
+  .site-nav a, .nav-link {
+    font-size: 13px; color: var(--pd-muted);
+  }
+  .site-nav a:hover, .nav-link:hover { color: var(--pd-text); }
+  /* Narrow-width strips scroll internally (issues #273/#274) — unchanged. */
   .site-nav { scrollbar-width: none; }
   .site-nav::-webkit-scrollbar { display: none; }
-  .site-nav a { @apply shrink-0; }
-  /* Repo tab bar at narrow widths (issue #274): the same treatment as the
-     #273 site-nav strip — the nav scrolls internally instead of wrapping
-     (single tab row, the common git-host pattern); links never shrink to
-     unreadability. The strip's own scrollbar is hidden so the row keeps one
-     stable height — the tabs stay keyboard-reachable (Tab moves focus along
-     them and the strip follows focus) and touch-scrollable, and the active
-     tab is scrolled into view on navigation (see Repo.jsx). The truncated
-     peek of the next tab is the scroll affordance on touch layouts.
-     Dark + light share it. */
+  .site-nav a { flex: none; }
   .repo-tabs { scrollbar-width: none; }
   .repo-tabs::-webkit-scrollbar { display: none; }
-  .repo-tabs a { @apply shrink-0; }
-  /* Owner tab list (Forgejo #437, supersedes the #435 top strip): a
-     vertical tab list at the top of the profile sidebar (see Repos.jsx
-     OwnerTabs) — stacked full-width links inside a bordered box, no
-     scrolling, no wrapping. The active tab fills its row with the
-     container's selected background (see the component), so no scrollbar
-     or shrink rules apply. */
-  .owner-tabs a { @apply block w-full; }
+  .repo-tabs a { flex: none; }
+  .owner-tabs a { display: block; width: 100%; }
 
-  /* Controls */
-  .btn { @apply inline-flex items-center gap-1.5 rounded-md px-3 py-1.5 text-sm font-medium transition-colors
-         border border-zinc-300 bg-white text-zinc-800 hover:bg-zinc-100
-         dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-200 dark:hover:bg-zinc-700; }
-  .btn.primary { @apply border-emerald-600 bg-emerald-600 text-white hover:bg-emerald-500 dark:border-emerald-500 dark:bg-emerald-600 dark:hover:bg-emerald-500; }
-  .btn.danger { @apply border-red-300 bg-red-50 text-red-700 hover:bg-red-100
-          dark:border-red-800 dark:bg-red-950/60 dark:text-red-300 dark:hover:bg-red-900/60; }
-  .btn-active { @apply border-emerald-600 font-semibold text-emerald-700 dark:border-emerald-500 dark:text-emerald-400; }
-  /* Inline text-link controls (Forgejo #568, systemic sweep of the #566
-     follow-up): .link is the ONE shared treatment for text-level actions
-     and router links that must read as links, not surrounding text — 26
-     call sites across 10 files (review dismiss/remove, thread
-     resolve/expand toggles, staged remove, member remove, token revoke,
-     webhook ping/deliveries/delete, back-links, check expand toggles,
-     notification actions, the #602 terminal-Status merge SHA link). Tailwind v4 preflight resets buttons/links to
-     plain muted text and .link shipped zero CSS rules, so every one of
-     them was invisible until this rule. Accent emerald both themes (the
-     markdown-link language), hover underline + pointer affordance. The
-     #405 opaque-popover precedent: one shared rule fixes all sites
-     including future ones — no per-site composition. Deliberately a
-     class, never a bare `a` rule: the scoped link styles (.markdown-body
-     a, .blob-num a, .diff-num a) and the nav treatments keep their
-     contexts, and <A class="link"> composes with this rule instead of
-     fighting it. */
-  .link { @apply cursor-pointer text-emerald-700 hover:text-emerald-600 hover:underline dark:text-emerald-400 dark:hover:text-emerald-300; }
-  /* Shared icon utility (Forgejo #465): the one sizing rule for the embedded
-     lib/icons.jsx set. The svg already carries width/height 1em, so every
-     mixed viewBox (16/24/1024/1200) renders a 1em box at the caller's font
-     size; this only pins inline-block alignment for non-flex contexts and
-     keeps flex parents (.btn is inline-flex with gap) from shrinking the
-     glyph. No per-icon CSS, no margins — row spacing stays with the
-     caller's gap (#463). */
-  .icon { @apply inline-block h-[1em] w-[1em] shrink-0; vertical-align: -0.125em; }
-  .pill { @apply inline-flex items-center rounded-full border border-zinc-300 bg-zinc-50 px-2.5 py-0.5 text-xs
-          dark:border-zinc-700 dark:bg-zinc-800/80; }
-  /* Tab count badge (issue #319): the open-issues / open-pulls numerator
-     next to the Issues/Pulls tabs. Same count-pill language as the
-     notification tray badge (white on emerald-500 reads in both themes,
-     so no dark: variant — like the tray). Hidden at 0 client-side. */
-  .tab-badge { @apply ml-1.5 inline-block min-w-5 rounded-full bg-emerald-500 px-1 text-center text-[11px] font-semibold leading-5 text-white; }
-  /* Settings sidebar (issue #123): two clear sections — the standard
-     listing plus the Danger Zone in its own danger-styled section. Entries
-     are native buttons; the active one carries aria-current="page" (wired
-     in Settings.jsx), which is the selected style. Narrow widths (issue
-     #276): below sm: the sections stack full-width above the content, each
-     with its own horizontally-scrolling chip bar; sm:–lg: the sections sit
-     side by side with internal bar scroll; lg:+ is the sticky sidebar.
-     Dark + light ship together (dark is default). */
-  .side-nav-heading { @apply mb-1 whitespace-nowrap px-2 text-[11px] font-semibold uppercase tracking-wider text-zinc-500 dark:text-zinc-400; }
-  .side-nav-heading-danger { @apply text-red-600 dark:text-red-400; }
-  .side-nav-item { @apply flex w-full items-center gap-2 whitespace-nowrap rounded-md px-2.5 py-1.5 text-left text-sm
-         text-zinc-600 hover:bg-zinc-100 hover:text-zinc-900
-         dark:text-zinc-400 dark:hover:bg-zinc-800/70 dark:hover:text-zinc-100; }
-  .side-nav-item[aria-current="page"] { @apply bg-emerald-50 font-medium text-emerald-800 dark:bg-emerald-950/60 dark:text-emerald-300; }
-  .side-nav-item-danger { @apply text-red-700 hover:bg-red-50 hover:text-red-800 dark:text-red-400 dark:hover:bg-red-950/40 dark:hover:text-red-300; }
-  .side-nav-item-danger[aria-current="page"] { @apply bg-red-50 font-medium text-red-800 dark:bg-red-950/60 dark:text-red-300; }
-  .chip { @apply inline-flex rounded px-1.5 py-px text-[10px] font-medium uppercase tracking-wide
-          bg-emerald-100 text-emerald-800 dark:bg-emerald-900/60 dark:text-emerald-300; }
-  .chip-open { @apply inline-flex rounded px-1.5 py-px text-[10px] font-medium uppercase tracking-wide
-          bg-emerald-100 text-emerald-800 dark:bg-emerald-900/60 dark:text-emerald-300; }
-  .chip-closed { @apply inline-flex rounded px-1.5 py-px text-[10px] font-medium uppercase tracking-wide
-          bg-red-100 text-red-800 dark:bg-red-900/60 dark:text-red-300; }
-  .chip-merged { @apply inline-flex rounded px-1.5 py-px text-[10px] font-medium uppercase tracking-wide
-          bg-purple-100 text-purple-800 dark:bg-purple-900/60 dark:text-purple-300; }
-  .chip-draft { @apply inline-flex rounded px-1.5 py-px text-[10px] font-medium uppercase tracking-wide
-          bg-amber-100 text-amber-800 dark:bg-amber-900/60 dark:text-amber-300; }
-  .chip-prerelease { @apply inline-flex rounded px-1.5 py-px text-[10px] font-medium uppercase tracking-wide
-          bg-sky-100 text-sky-800 dark:bg-sky-900/60 dark:text-sky-300; }
-  /* Neutral verdict chip (Forgejo #545): COMMENTED / dismissed / requested
-     review states carry no color signal — zinc both themes, composing with
-     .chip like every other state variant (never inline bg overrides). */
-  .chip-neutral { @apply inline-flex rounded px-1.5 py-px text-[10px] font-medium uppercase tracking-wide
-          bg-zinc-200 text-zinc-700 dark:bg-zinc-700/60 dark:text-zinc-300; }
-  /* Card headers (Forgejo #521): the ONE title treatment for sidebar +
-     conversation cards on the PR page (Mergeability, Reviewers, Checks,
-     Merge, Reviews, Review summary, Finish review, Files) — the text-sm
-     semibold idiom the app already uses, now a single class so the cards
-     cannot drift apart. Composes with layout utilities (the Checks h2
-     adds flex items-center gap-2 alongside it). Light is the base,
-     dark: carries the default dark theme (inherited body text colors). */
-  .card-header { @apply mb-2 text-sm font-semibold; }
+  /* Controls. One primary action per page (§1 F3); .btn is a 26px control. */
+  .btn {
+    display: inline-flex; align-items: center; gap: 6px;
+    min-height: 26px; padding: 3px 10px;
+    border: 1px solid var(--pd-line-strong); border-radius: var(--radius-md);
+    background: var(--pd-raised); color: var(--pd-text-2);
+    font-size: 12.5px; line-height: 18px; font-weight: 500;
+    transition: background-color .12s, color .12s, border-color .12s;
+  }
+  .btn:hover { background: var(--pd-raised-2); color: var(--pd-text); }
+  .btn.primary {
+    background: var(--pd-accent); border-color: var(--pd-accent);
+    color: var(--pd-on-accent); font-weight: 600;
+  }
+  .btn.primary:hover {
+    background: var(--pd-accent-hover); border-color: var(--pd-accent-hover);
+    color: var(--pd-on-accent);
+  }
+  .btn.danger {
+    background: transparent; border-color: color-mix(in srgb, var(--pd-danger) 55%, var(--pd-line));
+    color: var(--pd-danger);
+  }
+  .btn.danger:hover {
+    background: color-mix(in srgb, var(--pd-danger) 12%, transparent);
+    color: var(--pd-danger);
+  }
+  .btn-active {
+    border-color: var(--pd-accent); color: var(--pd-accent); font-weight: 600;
+  }
+  /* Text-level actions (Forgejo #568): ink with a quiet underline, never the
+     action accent (§1 F3). Hover solidifies the underline; focus takes amber
+     through the global :focus-visible rule. */
+  .link {
+    cursor: pointer;
+    color: var(--pd-text);
+    text-decoration: underline;
+    text-decoration-color: color-mix(in srgb, var(--pd-text) 35%, transparent);
+    text-underline-offset: 2px;
+  }
+  .link:hover {
+    color: var(--pd-text);
+    text-decoration-color: currentColor;
+  }
+  .icon { display: inline-block; height: 1em; width: 1em; flex: none; vertical-align: -0.125em; }
+  /* Pills hold refs/labels/file names — mono by design (§1 F5). */
+  .pill {
+    display: inline-flex; align-items: center; gap: 4px;
+    border: 1px solid var(--pd-line-strong); border-radius: 999px;
+    background: var(--pd-raised); color: var(--pd-text-2);
+    padding: 1px 8px; font-family: var(--font-mono); font-size: 11px; line-height: 16px;
+  }
+  /* Tab count badge (issue #319): a count chip, not a bubble — mono digits on
+     the raised surface so two counts never compete with the label. */
+  .tab-badge {
+    margin-left: 6px;
+    display: inline-block; min-width: 17px; padding: 0 4px;
+    border: 1px solid var(--pd-line-strong); border-radius: var(--radius-sm);
+    background: var(--pd-raised);
+    font-family: var(--font-mono); font-size: 10.5px; font-weight: 500;
+    line-height: 15px; text-align: center; color: var(--pd-text-2);
+  }
+  /* Selected-state precedence: .pill is declared after .btn-active, so a
+     control composing both (state filters, the graph toggle) would otherwise
+     lose the accent to .pill's own border/colour. One shared rule, both
+     spellings (Precision Dark retune). */
+  .btn.btn-active, .pill.btn-active {
+    border-color: var(--pd-accent);
+    color: var(--pd-accent);
+    font-weight: 600;
+  }
+
+  /* Settings sidebar (issues #123/#276): the active row carries an amber inset
+     edge — the one place a non-action control may show the accent, because it
+     marks position, not a call to action. */
+  .side-nav-heading {
+    margin-bottom: 4px; padding: 0 8px;
+    font-family: var(--font-mono); font-size: 10px; font-weight: 600;
+    letter-spacing: .08em; text-transform: uppercase; white-space: nowrap;
+    color: var(--pd-muted);
+  }
+  .side-nav-heading-danger { color: var(--pd-danger); }
+  .side-nav-item {
+    display: flex; width: 100%; align-items: center; gap: 8px;
+    border-radius: var(--radius-md); padding: 5px 10px;
+    font-size: 13px; text-align: left; white-space: nowrap;
+    color: var(--pd-text-2);
+  }
+  .side-nav-item:hover { background: var(--pd-raised); color: var(--pd-text); }
+  .side-nav-item[aria-current="page"] {
+    background: var(--pd-raised); color: var(--pd-text); font-weight: 600;
+    box-shadow: inset 2px 0 0 var(--pd-accent);
+  }
+  .side-nav-item-danger { color: var(--pd-danger); }
+  .side-nav-item-danger:hover {
+    background: color-mix(in srgb, var(--pd-danger) 10%, transparent);
+    color: var(--pd-danger);
+  }
+  .side-nav-item-danger[aria-current="page"] {
+    background: color-mix(in srgb, var(--pd-danger) 12%, transparent);
+    color: var(--pd-danger); box-shadow: inset 2px 0 0 var(--pd-danger);
+  }
+
+  /* State chips: 10px tracked caps on a tinted ground. Colour is STATE, never
+     action (§1 F3); every variant is one shared shape. */
+  .chip, .chip-open, .chip-closed, .chip-merged, .chip-draft, .chip-prerelease, .chip-neutral {
+    display: inline-flex; align-items: center; gap: 4px;
+    border-radius: var(--radius-sm); padding: 1px 5px;
+    font-family: var(--font-mono); font-size: 10px; font-weight: 500;
+    letter-spacing: .06em; text-transform: uppercase; line-height: 14px;
+  }
+  .chip-open       { background: color-mix(in srgb, var(--pd-ok) 16%, transparent);     color: var(--pd-ok); }
+  .chip-closed     { background: color-mix(in srgb, var(--pd-danger) 16%, transparent); color: var(--pd-danger); }
+  .chip-draft      { background: color-mix(in srgb, var(--pd-warn) 18%, transparent);   color: var(--pd-warn); }
+  .chip-merged     { background: color-mix(in srgb, var(--color-violet-400) 18%, transparent); color: var(--color-violet-400); }
+  .chip-prerelease { background: color-mix(in srgb, var(--color-sky-400) 18%, transparent);    color: var(--color-sky-400); }
+  .chip-neutral    { background: var(--pd-raised); color: var(--pd-text-2); }
+  .chip            { background: var(--pd-raised); color: var(--pd-text-2); }
+
+  /* Card headers (Forgejo #521): one title treatment for sidebar/conversation
+     cards. */
+  .card-header { margin-bottom: 8px; font-size: 13px; font-weight: 600; color: var(--pd-text); }
 
   /* Forms */
-  .input { @apply w-full rounded-md border border-zinc-300 bg-white px-2.5 py-1.5 text-sm text-zinc-900
-           placeholder:text-zinc-400 focus:border-emerald-500 focus:outline-none focus:ring-1 focus:ring-emerald-500
-           dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-100 dark:placeholder:text-zinc-600; }
+  .input {
+    width: 100%;
+    border: 1px solid var(--pd-line-strong); border-radius: var(--radius-md);
+    background: var(--pd-canvas); color: var(--pd-text);
+    padding: 4px 9px; font-size: 13px; line-height: 20px;
+  }
+  .input::placeholder { color: var(--pd-dim); }
+  .input:focus {
+    border-color: var(--pd-accent);
+    outline: none;
+    box-shadow: 0 0 0 1px var(--pd-accent);
+  }
   /* Setup page: label column left, control right, tight gutter so the
      pairing is unambiguous; stacks to one column on phones. */
   .setup-row { @apply grid grid-cols-1 gap-x-5 gap-y-1 border-b border-zinc-100 py-3 last:border-b-0
@@ -182,39 +346,53 @@
                            text-zinc-500 hover:text-zinc-900 dark:text-zinc-400 dark:hover:text-zinc-100; }
 
   /* Tables */
-  .data-table { @apply w-full text-sm; }
+  .data-table { width: 100%; font-size: 13.5px; }
   /* inside a horizontal-scroll wrapper, keep rows single-line */
   .overflow-x-auto .data-table th, .overflow-x-auto .data-table td { @apply whitespace-nowrap; }
-  .data-table th { @apply border-b border-zinc-200 px-3 py-2 text-left font-medium text-zinc-500 dark:border-zinc-800 dark:text-zinc-400; }
-  .data-table td { @apply border-b border-zinc-100 px-3 py-1.5 dark:border-zinc-800/60; }
+  /* Table headers are micro-caps (§1 F6); rows are 34px targets. */
+  .data-table th {
+    border-bottom: 1px solid var(--pd-line); padding: 6px 12px;
+    text-align: left; font-family: var(--font-mono); font-size: 10px;
+    font-weight: 500; letter-spacing: .08em; text-transform: uppercase;
+    color: var(--pd-muted);
+  }
+  .data-table td {
+    border-bottom: 1px solid var(--pd-line);
+    padding: 6px 12px; height: 34px;
+  }
+  .data-table tbody tr:last-child td { border-bottom: 0; }
+  .data-table tbody tr:hover { background: var(--pd-raised); }
   /* File tree (issue #223): no header row, no type column — the mode lead
      char + icons carry the kind. Every column but the name hugs its content
      (w-px + nowrap collapses each column to its widest cell); the name
      column absorbs the spare width. The size number/unit pair reads as one
      column, so their shared edge keeps only a sliver of padding. */
-  .tree-table .entry-icon { @apply w-6 whitespace-nowrap; }
+  .tree-table .entry-icon { width: 22px; white-space: nowrap; color: var(--pd-muted); }
   .tree-table .entry-mode,
   .tree-table .entry-size-num,
   .tree-table .entry-size-unit,
-  .tree-table .entry-date { @apply w-px whitespace-nowrap; }
-  .tree-table .entry-size-num { @apply pr-0.5; }
-  .tree-table .entry-size-unit { @apply pl-0; }
+  .tree-table .entry-date { width: 1px; white-space: nowrap; }
+  .tree-table .entry-size-num { padding-right: 2px; }
+  .tree-table .entry-size-unit { padding-left: 0; }
 
   /* Text helpers */
-  .muted { @apply text-zinc-500 dark:text-zinc-400; }
-  .tabular { @apply tabular-nums; }
-  .err-line { @apply mt-1 text-xs text-red-600 dark:text-red-400; }
-  .warn-line { @apply mt-1 text-xs text-amber-600 dark:text-amber-400; }
+  .muted { color: var(--pd-muted); }
+  .tabular { font-variant-numeric: tabular-nums; }
+  .err-line { margin-top: 4px; font-size: 11px; color: var(--pd-danger); }
+  .warn-line { margin-top: 4px; font-size: 11px; color: var(--pd-warn); }
 
   /* Empty states (issue #34): centered callouts that use the whitespace —
      icon/title/hint composition, generous padding, dashed panel. */
-  .empty-state { @apply mx-auto flex w-full max-w-xl flex-col items-center gap-2 rounded-lg border border-dashed
-                 border-zinc-300 bg-zinc-50/50 px-6 py-12 text-center
-                 dark:border-zinc-700 dark:bg-zinc-900/30; }
-  .empty-icon { @apply text-zinc-400 dark:text-zinc-500; }
+  .empty-state {
+    margin: 0 auto; display: flex; width: 100%; max-width: 36rem;
+    flex-direction: column; align-items: center; gap: 8px;
+    border: 1px dashed var(--pd-line-strong); border-radius: var(--radius-lg);
+    padding: 40px 24px; text-align: center;
+  }
+  .empty-icon { color: var(--pd-dim); }
   .empty-icon svg { @apply h-10 w-10; }
-  .empty-title { @apply text-base font-semibold text-zinc-800 dark:text-zinc-100; }
-  .empty-hint { @apply max-w-md text-sm text-zinc-500 dark:text-zinc-400; }
+  .empty-title { font-size: 14px; font-weight: 600; color: var(--pd-text); }
+  .empty-hint { max-width: 28rem; font-size: 12.5px; color: var(--pd-muted); }
   /* Compact empty-state for narrow sidebars (releases Latest panel, #35):
      tighter padding, smaller icon/title — same dashed callout language. */
   .empty-state-compact { @apply gap-1.5 px-4 py-6; }
@@ -236,7 +414,8 @@
      markers (and keep their viewport-bound rule below) but carry no styling
      role for opacity. */
   .card.absolute, .card.fixed {
-    @apply bg-white dark:bg-zinc-900;
+    background: var(--pd-surface);
+    box-shadow: var(--pd-shadow);
   }
 
   /* Popover viewport bounds (issue #278): fixed-width right-anchored panels
@@ -261,24 +440,35 @@
 
   /* Progress bar + error tray */
   .progress { @apply fixed inset-x-0 top-0 z-50 h-0.5; }
-  .progress-bar { @apply h-full bg-emerald-500 transition-all duration-300; }
+  .progress-bar { height: 100%; background: var(--pd-accent); transition: all .3s; }
   .tray { @apply fixed bottom-4 right-4 z-50 flex w-96 flex-col gap-2; }
-  .tray-entry { @apply flex items-start gap-2 rounded-lg border border-red-300 bg-white p-3 text-sm shadow-sm
-                dark:border-red-900 dark:bg-zinc-900/70; }
+  .tray-entry {
+    display: flex; align-items: flex-start; gap: 8px;
+    border: 1px solid color-mix(in srgb, var(--pd-danger) 45%, var(--pd-line));
+    border-radius: var(--radius-lg); background: var(--pd-surface);
+    padding: 10px 12px; font-size: 12.5px;
+  }
 
   /* Rendered markdown (issue #182): designed prose, not defaults — light is
      the base, dark: carries the default dark theme. Covers everything marked
      emits: headings, code blocks + inline code, tables, blockquotes, lists
      (nested + task checkboxes), hr, images, links. */
-  .markdown-body { @apply text-sm leading-relaxed break-words text-zinc-800 dark:text-zinc-200; }
+  .markdown-body {
+    font-size: 14px; line-height: 1.65; overflow-wrap: break-word;
+    color: var(--pd-text);
+    max-width: 72ch;
+  }
   .markdown-body > :first-child { @apply mt-0; }
   .markdown-body > :last-child { @apply mb-0; }
   .markdown-body h1, .markdown-body h2, .markdown-body h3,
-  .markdown-body h4, .markdown-body h5, .markdown-body h6 { @apply mt-5 mb-2 font-semibold text-zinc-900 dark:text-zinc-100; }
-  .markdown-body h1 { @apply border-b border-zinc-200 pb-1.5 text-xl dark:border-zinc-800; }
-  .markdown-body h2 { @apply border-b border-zinc-200 pb-1 text-lg dark:border-zinc-800; }
-  .markdown-body h3 { @apply text-base; }
-  .markdown-body h4, .markdown-body h5, .markdown-body h6 { @apply text-sm; }
+  .markdown-body h4, .markdown-body h5, .markdown-body h6 {
+    margin: 20px 0 8px; font-weight: 600; color: var(--pd-text);
+    letter-spacing: -0.01em;
+  }
+  .markdown-body h1 { border-bottom: 1px solid var(--pd-line); padding-bottom: 6px; font-size: 22px; }
+  .markdown-body h2 { border-bottom: 1px solid var(--pd-line); padding-bottom: 5px; font-size: 18px; }
+  .markdown-body h3 { font-size: 15.5px; }
+  .markdown-body h4, .markdown-body h5, .markdown-body h6 { font-size: 14px; }
   .markdown-body p { @apply my-2; }
   .markdown-body ul, .markdown-body ol { @apply my-2 space-y-1 pl-6; }
   .markdown-body ul { @apply list-disc; }
@@ -288,26 +478,50 @@
   /* Task lists: marked emits a bare checkbox input with no list class, so
      :has() drops the bullet and aligns the box (Chromium-targeted SPA). */
   .markdown-body li:has(> input[type="checkbox"]) { @apply -ml-6 list-none pl-0; }
-  .markdown-body input[type="checkbox"] { @apply mr-1.5 accent-emerald-600; }
-  .markdown-body a { @apply text-emerald-700 underline decoration-emerald-600/40 underline-offset-2
-    hover:text-emerald-600 dark:text-emerald-400 dark:decoration-emerald-400/40 dark:hover:text-emerald-300; }
-  .markdown-body code { @apply rounded border border-zinc-200 bg-zinc-100 px-1 py-px font-mono text-[0.85em] text-zinc-800
-    dark:border-zinc-700/60 dark:bg-zinc-800 dark:text-zinc-200; }
-  .markdown-body pre { @apply my-3 overflow-x-auto rounded-lg border border-zinc-200 bg-zinc-50 p-3 dark:border-zinc-800 dark:bg-zinc-950; }
+  .markdown-body input[type="checkbox"] { margin-right: 6px; accent-color: var(--pd-accent); }
+  .markdown-body a {
+    color: var(--pd-text);
+    text-decoration: underline;
+    text-decoration-color: color-mix(in srgb, var(--pd-text) 40%, transparent);
+    text-underline-offset: 2px;
+  }
+  .markdown-body a:hover { text-decoration-color: currentColor; }
+  .markdown-body code {
+    border: 1px solid var(--pd-line); border-radius: var(--radius-sm);
+    background: var(--pd-raised); padding: 0 4px;
+    font-family: var(--font-mono); font-size: 0.88em; color: var(--pd-text);
+  }
+  .markdown-body pre {
+    margin: 12px 0; overflow-x: auto;
+    border: 1px solid var(--pd-line); border-radius: var(--radius-lg);
+    background: var(--pd-canvas); padding: 12px;
+  }
   .markdown-body pre code { @apply block rounded-none border-0 bg-transparent p-0 text-xs leading-5 text-inherit dark:bg-transparent dark:text-inherit; }
   .markdown-body blockquote { @apply my-3 rounded-r border-l-4 border-zinc-300 bg-zinc-50/60 py-0.5 pr-3 pl-3 text-zinc-600
     dark:border-zinc-700 dark:bg-zinc-900/40 dark:text-zinc-400; }
   .markdown-body blockquote > :first-child { @apply mt-1; }
   .markdown-body blockquote > :last-child { @apply mb-1; }
   .markdown-body table { @apply my-3 block w-fit max-w-full overflow-x-auto border-collapse text-sm; }
-  .markdown-body th, .markdown-body td { @apply border border-zinc-300 px-3 py-1.5 text-left align-top dark:border-zinc-700; }
-  .markdown-body th { @apply bg-zinc-100 font-semibold dark:bg-zinc-800; }
+  .markdown-body th, .markdown-body td {
+    border: 1px solid var(--pd-line); padding: 6px 12px; text-align: left; vertical-align: top;
+  }
+  .markdown-body th {
+    background: var(--pd-raised); font-family: var(--font-mono);
+    font-size: 11px; font-weight: 500; letter-spacing: .06em; text-transform: uppercase;
+  }
   .markdown-body tbody tr:nth-child(2n) { @apply bg-zinc-50/70 dark:bg-zinc-900/40; }
-  .markdown-body hr { @apply my-5 border-zinc-200 dark:border-zinc-800; }
+  .markdown-body hr { margin: 20px 0; border-color: var(--pd-line); }
   /* Pasted issue images (02 §12) + README screenshots: never overflow the
      prose container; a soft frame reads as designed, not default. */
-  .markdown-body img { @apply my-2 h-auto max-w-full rounded-md border border-zinc-200 dark:border-zinc-800; }
-  .code-view { @apply overflow-x-auto rounded-lg border border-zinc-200 bg-zinc-50 font-mono text-xs leading-5 dark:border-zinc-800 dark:bg-zinc-950; }
+  .markdown-body img {
+    margin: 8px 0; height: auto; max-width: 100%;
+    border: 1px solid var(--pd-line); border-radius: var(--radius-lg);
+  }
+  .code-view {
+    overflow-x: auto; border: 1px solid var(--pd-line);
+    border-radius: var(--radius-lg); background: var(--pd-canvas);
+    font-family: var(--font-mono); font-size: 11.5px; line-height: 18px;
+  }
   /* Blob per-line table (issue #243): each gutter number + code line share a
      <tr> so the columns can never desync; same mono metrics as the old
      two-<pre> layout (text-xs leading-5, 12px block padding via first/last
@@ -316,28 +530,35 @@
   .blob-table > tbody > tr > td { @apply pt-0 pb-0; }
   .blob-table > tbody > tr:first-child > td { @apply pt-3; }
   .blob-table > tbody > tr:last-child > td { @apply pb-3; }
-  .blob-num { @apply w-12 border-r border-zinc-200 bg-zinc-100 px-2.5 text-right tabular-nums select-none
-    dark:border-zinc-800 dark:bg-zinc-900; white-space: nowrap; vertical-align: top; }
-  .blob-num a { @apply block cursor-pointer text-zinc-400 hover:text-emerald-600 hover:no-underline
-    dark:text-zinc-500 dark:hover:text-emerald-400; }
+  .blob-num {
+    width: 48px; border-right: 1px solid var(--pd-line); background: var(--pd-surface);
+    padding: 0 10px; text-align: right; font-variant-numeric: tabular-nums;
+    user-select: none; white-space: nowrap; vertical-align: top; color: var(--pd-dim);
+  }
+  .blob-num a { display: block; cursor: pointer; color: var(--pd-dim); text-decoration: none; }
+  .blob-num a:hover { color: var(--pd-accent); }
   .blob-code { @apply min-w-0 px-3.5 align-top; }
   .blob-code code { white-space: pre; }
   /* highlighter tokens (lib/highlight.js spans) */
-  .tok-kw { @apply text-violet-700 dark:text-violet-400; }
-  .tok-str { @apply text-emerald-700 dark:text-emerald-400; }
-  .tok-com { @apply text-zinc-400 dark:text-zinc-500 italic; }
-  .tok-num { @apply text-amber-700 dark:text-amber-400; }
-  .diff-add { @apply bg-emerald-50 text-emerald-900 dark:bg-emerald-950/60 dark:text-emerald-200; }
-  .diff-del { @apply bg-red-50 text-red-900 dark:bg-red-950/60 dark:text-red-200; }
-  .diff-hunk { @apply bg-zinc-100 text-zinc-500 dark:bg-zinc-900 dark:text-zinc-500; }
+  .tok-kw { color: var(--color-violet-400); }
+  .tok-str { color: var(--pd-ok); }
+  .tok-com { color: var(--pd-muted); font-style: italic; }
+  .tok-num { color: var(--pd-accent); }
+  .diff-add { background: var(--pd-add-bg); color: var(--pd-add-fg); }
+  .diff-del { background: var(--pd-del-bg); color: var(--pd-del-fg); }
+  .diff-hunk { background: var(--pd-raised); color: var(--pd-muted); }
   /* Diff line-number gutters (issue #244): same role as .blob-num, one
      column in unified, two (old left, new right) in split. Narrower than
      the blob gutter — diff numbers are short — same mono metrics
      (text-xs leading-5) as the diff table so rows never desync. */
-  .diff-num { @apply w-10 shrink-0 border-r border-zinc-200 bg-zinc-100 px-1.5 text-right tabular-nums select-none
-    dark:border-zinc-800 dark:bg-zinc-900; white-space: nowrap; vertical-align: top; }
-  .diff-num a { @apply block cursor-pointer text-zinc-400 hover:text-emerald-600 hover:no-underline
-    dark:text-zinc-500 dark:hover:text-emerald-400; }
+  .diff-num {
+    width: 40px; flex: none; border-right: 1px solid var(--pd-line);
+    background: var(--pd-surface); padding: 0 6px; text-align: right;
+    font-variant-numeric: tabular-nums; user-select: none;
+    white-space: nowrap; vertical-align: top; color: var(--pd-dim);
+  }
+  .diff-num a { display: block; cursor: pointer; color: var(--pd-dim); text-decoration: none; }
+  .diff-num a:hover { color: var(--pd-accent); }
   /* Diff add/del gutters (Forgejo #544): gutter cells share their side's
      add/del background — DiffTable.jsx applies lineClass() per cell
      (unified: both cells; split: per side, so a paired change row stays
@@ -346,40 +567,66 @@
      regardless of order, both themes via dark: variants. Line selection
      still wins: the .diff-row.line-hl rules below are deliberately
      UNLAYERED (unlayered beats layered at any specificity). */
-  .diff-num.diff-add { @apply bg-emerald-50 text-emerald-900 dark:bg-emerald-950/60 dark:text-emerald-200; }
-  .diff-num.diff-del { @apply bg-red-50 text-red-900 dark:bg-red-950/60 dark:text-red-200; }
+  .diff-num.diff-add { background: var(--pd-add-bg); color: var(--pd-add-fg); }
+  .diff-num.diff-del { background: var(--pd-del-bg); color: var(--pd-del-fg); }
+
+
+  /* Identity utilities (§1 F5/F6). */
+  .mono { font-family: var(--font-mono); }
+  .eyebrow {
+    font-family: var(--font-mono); font-size: 10px; font-weight: 500;
+    letter-spacing: .08em; text-transform: uppercase; color: var(--pd-muted);
+  }
+  /* About-rail key/value stack: mono keys, reading-order values. */
+  .kv { display: flex; flex-direction: column; gap: 1px; }
+  .kv-row { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; padding: 3px 0; }
+  .kv-key {
+    font-family: var(--font-mono); font-size: 10px; letter-spacing: .08em;
+    text-transform: uppercase; color: var(--pd-muted);
+  }
+  .kv-val { font-family: var(--font-mono); font-size: 11.5px; color: var(--pd-text-2); text-align: right; }
+  /* Repo status strip (§1 F6): the operated-tool signal, hidden on touch. */
+  .status-strip {
+    display: none;
+    position: fixed; inset-inline: 0; bottom: 0; z-index: 30;
+    align-items: center; gap: 14px;
+    border-top: 1px solid var(--pd-line);
+    background: var(--pd-canvas);
+    padding: 0 16px; height: 26px;
+    font-family: var(--font-mono); font-size: 11px; color: var(--pd-muted);
+  }
+  @media (min-width: 640px) { .status-strip { display: flex; } }
+  @media (min-width: 640px) { body:has(.status-strip) main { padding-bottom: 34px; } }
+  .status-strip .key { color: var(--pd-dim); }
+  .status-strip .val { color: var(--pd-text-2); }
+  .status-strip .live { margin-left: auto; display: inline-flex; align-items: center; gap: 6px; }
+  .status-strip .dot { width: 6px; height: 6px; border-radius: 999px; background: var(--pd-ok); }
 }
 
 /* Blob line-selection highlight (issue #243): deliberately UNLAYERED so it
    wins over the .blob-num utility backgrounds above regardless of
-   cascade-layer order. Amber tint both themes (dark: translucent over the
-   dark surface), emerald inset edge on the gutter cell so the row reads as
-   one unit. */
-.blob-row.line-hl > td { background-color: #fef3c7; }
-.blob-row.line-hl > .blob-num { box-shadow: inset 2px 0 0 #10b981; }
-.dark .blob-row.line-hl > td { background-color: rgba(245, 158, 11, 0.16); }
+   cascade-layer order. The selection tokens (--pd-sel / --pd-sel-edge) carry
+   the amber tint and edge in both themes. */
+.blob-row.line-hl > td { background-color: var(--pd-sel); }
+.blob-row.line-hl > .blob-num { box-shadow: inset 2px 0 0 var(--pd-sel-edge); }
 
-/* Diff line-selection highlight (issue #244): same amber tint + emerald
-   gutter edge as the blob rule above, deliberately UNLAYERED for the same
-   cascade reason. Applies to the whole row (number cell + content cells)
+/* Diff line-selection highlight (issue #244): same selection tokens as the
+   blob rule above, deliberately UNLAYERED for the same cascade reason. Applies to the whole row (number cell + content cells)
    in both unified and split modes, both themes. */
-.diff-row.line-hl > td { background-color: #fef3c7; }
-.diff-row.line-hl > .diff-num { box-shadow: inset 2px 0 0 #10b981; }
-.dark .diff-row.line-hl > td { background-color: rgba(245, 158, 11, 0.16); }
+.diff-row.line-hl > td { background-color: var(--pd-sel); }
+.diff-row.line-hl > .diff-num { box-shadow: inset 2px 0 0 var(--pd-sel-edge); }
 
 /* Diff row hover (Forgejo #598): the per-line "+" triggers are gone on
    both renderers, so row hover IS the interactivity affordance — reusing
-   the selection tokens above (same amber tint + emerald edge, both
-   themes, no new colors), deliberately UNLAYERED for the same cascade
+   the selection tokens above (no new colors), deliberately UNLAYERED for
+   the same cascade
    reason. The td rules cover the DiffTable tables (unified + split,
    sign + number + code cells alike); the div rule covers the
    conversation DiffFile rows (Pull.jsx), whose row divs carry diff-row
    for exactly this. */
-.diff-row:hover > td { background-color: #fef3c7; }
-.diff-row:hover > .diff-num { box-shadow: inset 2px 0 0 #10b981; }
-.dark .diff-row:hover > td { background-color: rgba(245, 158, 11, 0.16); }
-div.diff-row:hover { background-color: #fef3c7; box-shadow: inset 2px 0 0 #10b981; }
-.dark div.diff-row:hover { background-color: rgba(245, 158, 11, 0.16); }
+.diff-row:hover > td { background-color: var(--pd-sel); }
+.diff-row:hover > .diff-num { box-shadow: inset 2px 0 0 var(--pd-sel-edge); }
+div.diff-row:hover { background-color: var(--pd-sel); box-shadow: inset 2px 0 0 var(--pd-sel-edge); }
 
 /* Commit graph (Forgejo #506): deliberately UNLAYERED so the graph-on grid
    template wins over the .commit-row Tailwind grid-cols utility above
@@ -398,7 +645,7 @@ div.diff-row:hover { background-color: #fef3c7; box-shadow: inset 2px 0 0 #10b98
   --graph-5: #c2410c;
   --graph-6: #0e7490;
   --graph-7: #4d7c0f;
-  --graph-ring: #ffffff;
+  --graph-ring: #f7f7f6;
 }
 .dark {
   --graph-0: #34d399;
@@ -409,7 +656,7 @@ div.diff-row:hover { background-color: #fef3c7; box-shadow: inset 2px 0 0 #10b98
   --graph-5: #fb923c;
   --graph-6: #22d3ee;
   --graph-7: #a3e635;
-  --graph-ring: #27272a;
+  --graph-ring: #14181b;
 }
 .gl-0 { color: var(--graph-0); }
 .gl-1 { color: var(--graph-1); }
@@ -451,8 +698,7 @@ div.diff-row:hover { background-color: #fef3c7; box-shadow: inset 2px 0 0 #10b98
    so the rail column stays a continuous strip in both themes. The
    empty-list placeholder follows the same margin-free standard. */
 .commit-row, .commit-empty { margin: 0; }
-.graph-on > .commit-row + .commit-row .commit-main { box-shadow: inset 0 1px 0 0 #f4f4f5; }
-.dark .graph-on > .commit-row + .commit-row .commit-main { box-shadow: inset 0 1px 0 0 rgb(39 39 42 / 0.6); }
+.graph-on > .commit-row + .commit-row .commit-main { box-shadow: inset 0 1px 0 0 var(--pd-line); }
 @media (max-width: 480px) {
   .graph-on .commit-row { grid-template-columns: minmax(0, 1fr) auto auto; }
   .graph-on .commit-rail { display: none; }

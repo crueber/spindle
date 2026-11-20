@@ -19,11 +19,11 @@ import (
 	"testing"
 	"time"
 
-	"github.com/crueber/walhub/internal/config"
-	"github.com/crueber/walhub/internal/git"
-	"github.com/crueber/walhub/internal/server/auth"
-	"github.com/crueber/walhub/internal/store"
-	"github.com/crueber/walhub/internal/wal"
+	"github.com/crueber/spindle/internal/config"
+	"github.com/crueber/spindle/internal/git"
+	"github.com/crueber/spindle/internal/server/auth"
+	"github.com/crueber/spindle/internal/store"
+	"github.com/crueber/spindle/internal/wal"
 )
 
 // --- auth.go: JWKS fetch / discover failure branches ---------------------------------
@@ -93,11 +93,11 @@ func TestJWKSVerifyBranches(t *testing.T) {
 	j.keys["ec1"] = ec
 	j.mu.Unlock()
 
-	a := &config.Auth{Issuer: iss.srvURL(), OAuthClientID: "walhub",
+	a := &config.Auth{Issuer: iss.srvURL(), OAuthClientID: "spindle",
 		Audiences: []string{"extra"}, AllowedDomains: []string{"example.com"}}
 	tv := true
 	base := map[string]any{
-		"iss": iss.srvURL(), "aud": "walhub",
+		"iss": iss.srvURL(), "aud": "spindle",
 		"exp": time.Now().Add(time.Hour).Unix(), "iat": time.Now().Unix(),
 		"email": "alice@example.com", "email_verified": tv,
 	}
@@ -125,7 +125,7 @@ func TestJWKSVerifyBranches(t *testing.T) {
 	mustFail("header b64", "!!!.e30.AAAA", inv)
 	// Unsupported alg.
 	hdr := b64url([]byte(`{"alg":"none","kid":"k1"}`))
-	body := b64url([]byte(`{"iss":"` + iss.srvURL() + `","aud":"walhub","email":"a@example.com"}`))
+	body := b64url([]byte(`{"iss":"` + iss.srvURL() + `","aud":"spindle","email":"a@example.com"}`))
 	mustFail("unsupported alg", hdr+"."+body+".AAAA", inv)
 	// Get failure (unknown kid + dead issuer): use a fresh JWKS on a dead issuer.
 	dead := NewJWKS("http://127.0.0.1:1")
@@ -348,10 +348,10 @@ func TestLFSReadThroughWithTokenAndClientError(t *testing.T) {
 	oid := lfsOID(t, body)
 	up := upstreamLFS(t, oid, []byte(body))
 	defer up.Close()
-	t.Setenv("WALHUB_TEST_UPSTREAM_TOKEN", "up-tok")
+	t.Setenv("SPINDLE_TEST_UPSTREAM_TOKEN", "up-tok")
 	s, _ := newTestServer(t, nil)
 	s.cfg.Upstream.Lfs = up.URL
-	s.cfg.Upstream.TokenEnv = "WALHUB_TEST_UPSTREAM_TOKEN"
+	s.cfg.Upstream.TokenEnv = "SPINDLE_TEST_UPSTREAM_TOKEN"
 	s.cacheRoot = t.TempDir()
 	// A client writer that fails on the first write: io.Copy aborts with an
 	// error, so the persist gate (cerr != nil) must NOT persist.

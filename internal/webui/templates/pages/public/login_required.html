@@ -4,22 +4,23 @@
      names it in the copy. The login button renders only when the OIDC browser
      flow can start; otherwise the page says so. 390px: card padding, the
      action row wraps. */}}
-<section class="mx-auto max-w-xl px-4 py-10">
-  <div class="card p-6" aria-labelledby="login-required-title">
-    <h1 id="login-required-title" class="mb-2 text-lg font-semibold">Log in to continue</h1>
-    <p class="mb-4 text-sm">
+<section class="mx-auto max-w-xl py-8">
+  <p class="eyebrow">authentication</p>
+  <div class="card mt-2 p-5" aria-labelledby="login-required-title">
+    <h1 id="login-required-title" class="text-lg font-semibold">Log in to continue</h1>
+    <p class="mt-2 text-sm">
       <strong>{{.Data.Action}}</strong> needs an account — you are browsing as a guest. Log in and
       you will land right back where you were.
     </p>
-    <div class="flex flex-wrap items-center gap-2">
+    <div class="mt-4 flex flex-wrap items-center gap-2">
       {{if .Data.LoginHref}}
       <a class="btn primary" href="{{.Data.LoginHref}}">Log in</a>
       {{else}}
-      <span class="text-sm text-amber-700 dark:text-amber-400">Log in is not enabled on this server.</span>
+      <span class="text-sm text-[var(--pd-warn)]">Log in is not enabled on this server.</span>
       {{end}}
       <a class="btn" href="{{.Data.Next}}">Back</a>
     </div>
-    <p class="muted mt-4 text-xs">Continuing to: {{.Data.Next}}</p>
+    <p class="muted mt-4 border-t border-[var(--pd-line)] pt-2 font-mono text-xs break-all">Continuing to: {{.Data.Next}}</p>
   </div>
 </section>
 {{end}}

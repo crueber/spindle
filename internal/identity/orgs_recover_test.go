@@ -13,8 +13,8 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/crueber/walhub/internal/config"
-	"github.com/crueber/walhub/internal/store"
+	"github.com/crueber/spindle/internal/config"
+	"github.com/crueber/spindle/internal/store"
 )
 
 // membersFailOnce fails the first Put of the given members.json key, then

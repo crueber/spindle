@@ -5,7 +5,7 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/crueber/walhub/internal/store/proto"
+	"github.com/crueber/spindle/internal/store/proto"
 )
 
 // --- GET …/overview (§12.1, no-store) -------------------------------------------------

@@ -9,8 +9,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/crueber/walhub/internal/server/auth"
-	"github.com/crueber/walhub/internal/store"
+	"github.com/crueber/spindle/internal/server/auth"
+	"github.com/crueber/spindle/internal/store"
 )
 
 // flakyStore injects store failures: failGets maps key → error for Get;
@@ -200,11 +200,11 @@ func TestCoverRolesNil(t *testing.T) {
 		name, email string
 	}{
 		{"Boss <boss@x>", "Boss", "boss@x"},
-		{"boss@x", "walhub", "boss@x"},
-		{"custom", "custom", "walhub@localhost"},
-		{"", "walhub", "walhub@localhost"},
-		{"<>", "walhub", "walhub@localhost"},
-		{"<onlymail@x>", "walhub", "onlymail@x"},
+		{"boss@x", "spindle", "boss@x"},
+		{"custom", "custom", "spindle@localhost"},
+		{"", "spindle", "spindle@localhost"},
+		{"<>", "spindle", "spindle@localhost"},
+		{"<onlymail@x>", "spindle", "onlymail@x"},
 	} {
 		svc.ServerID = tc.id
 		if n, em := svc.committer(); n != tc.name || em != tc.email {

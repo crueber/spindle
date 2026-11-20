@@ -6,8 +6,8 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/crueber/walhub/internal/store"
-	"github.com/crueber/walhub/internal/store/proto"
+	"github.com/crueber/spindle/internal/store"
+	"github.com/crueber/spindle/internal/store/proto"
 )
 
 // This file owns the fork-network GC rule (docs/features/03 §7, issue

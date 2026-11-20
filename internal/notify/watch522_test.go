@@ -10,7 +10,7 @@ import (
 	"context"
 	"testing"
 
-	"github.com/crueber/walhub/internal/config"
+	"github.com/crueber/spindle/internal/config"
 )
 
 func TestSetWatchDisabledRefuses(t *testing.T) {

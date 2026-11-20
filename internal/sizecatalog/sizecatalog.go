@@ -34,8 +34,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/crueber/walhub/internal/store"
-	"github.com/crueber/walhub/internal/store/proto"
+	"github.com/crueber/spindle/internal/store"
+	"github.com/crueber/spindle/internal/store/proto"
 )
 
 // StatsVersion is the meta/stats.json version writers emit; readers refuse

@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/crueber/walhub/internal/store"
+	"github.com/crueber/spindle/internal/store"
 )
 
 // fixtureHostLine builds a known_hosts line for host from a fresh

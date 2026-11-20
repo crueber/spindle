@@ -1,0 +1,11 @@
+{{define "repo_status"}}
+<!-- Repository status strip (Precision Dark §1 F6): the operated-tool signal,
+     carrying only what the page already knows — never a fabricated CI state.
+     Hidden below sm: (touch), where it would steal vertical space. -->
+<div class="status-strip" role="contentinfo" aria-label="Repository status">
+  <span><span class="key">branch</span> <span class="val">{{if .Branch}}{{.Branch}}{{else}}—{{end}}</span></span>
+  <span><span class="key">rev</span> <span class="val">{{if .SHA}}{{shortsha .SHA}}{{else}}—{{end}}</span></span>
+  <span><span class="key">health</span> <span class="val">{{.Health}}</span></span>
+  <span class="live"><span class="dot" aria-hidden="true"></span>{{.Repo.Branches}} {{plural .Repo.Branches "branch" "branches"}}</span>
+</div>
+{{end}}

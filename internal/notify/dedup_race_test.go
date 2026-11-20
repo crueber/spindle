@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/crueber/walhub/internal/store"
+	"github.com/crueber/spindle/internal/store"
 )
 
 // TestEmitConcurrentSameTripleDedups (issue #91): concurrent emissions for

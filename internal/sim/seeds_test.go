@@ -1,7 +1,7 @@
 // seeds_test.go — TestSim_LivenessUnderRandomSeeds (15_testing.md §4 row
 // 12): the safety-then-liveness core under every configured seed — the
-// randomized consistency proof. Deterministic per seed; WALHUB_SIM_SEED /
-// WALHUB_SIM_SEEDS override the default set.
+// randomized consistency proof. Deterministic per seed; SPINDLE_SIM_SEED /
+// SPINDLE_SIM_SEEDS override the default set.
 package sim
 
 import (

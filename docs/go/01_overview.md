@@ -1,9 +1,9 @@
 # 01 — Overview
 
-> Source: MASTER_RUST_SPEC.md §1, §2, §3 (incl. §3.5 Continuity lineage), §19, §21 · Status: normative for the walhub Go implementation.
+> Source: MASTER_RUST_SPEC.md §1, §2, §3 (incl. §3.5 Continuity lineage), §19, §21 · Status: normative for the spindle Go implementation.
 
-walhub is the Go rewrite of walgit. The behavioral reference is [`../MASTER_RUST_SPEC.md`](../MASTER_RUST_SPEC.md)
-("the Rust spec"); this document is the entry point of the Go specification. It states what walhub **is**, the
+spindle is the Go rewrite of walgit. The behavioral reference is [`../MASTER_RUST_SPEC.md`](../MASTER_RUST_SPEC.md)
+("the Rust spec"); this document is the entry point of the Go specification. It states what spindle **is**, the
 **laws** it is judged against, the **package layout**, the **dependency budget**, and the **build order** —
 everything a reader needs before opening any other doc. Wherever a Rust/tokio mechanism is translated, the Go
 equivalent is named; every rename or behavior change from the Rust spec is listed in the final section.
@@ -16,7 +16,7 @@ equivalent is named; every rename or behavior change from the Rust spec is liste
 binary anyone can run against a bucket, predictable enough that tooling can build on it.** (Rust spec §1.1,
 verbatim; the product does not change with the language.)
 
-walhub serves git over smart HTTP (protocol v0 and v2) plus bundle-uri, LFS, a browsing web UI and a JSON API with a
+spindle serves git over smart HTTP (protocol v0 and v2) plus bundle-uri, LFS, a browsing web UI and a JSON API with a
 dependency-free SDK. Durable state lives in one store backend: an object-store bucket (S3-compatible or GCS) or, for
 zero-config/self-hosted runs, the local filesystem (D4, §9.5). Every process instance is a disposable cache: wipe all
 instances and you lose warmth, nothing else. There is no database, no queue, no Redis, no node identity, no leader
@@ -41,8 +41,8 @@ contract").
 | git smart HTTP | v0 and v2 (`ls-refs` with prefixes/symrefs/peel/unborn; `fetch` with want/have, `filter`, `shallow`/`deepen`/`deepen-since`/`deepen-not`, `want-ref`, `sideband-all`, `no-progress`, `include-tag`, `wait-for-done`), `receive-pack` (create/delete/update refs, force detection, atomic, deletes, tags incl. peeled, push options, report-status, side-band-64k), `<owner>/<repo>[.git]` namespaces, sha1 and sha256 repositories, gzip request bodies, `object-info`-less (not implemented) |
 | bundle-uri | v2 capability + `bundle-uri` command, static lists `bundles/list` (clones) and `bundles/catchup` (fetch recipes), per-strategy bundle objects with ETag/Range/immutable, calendar-slot scheduling with backfill, chained incrementals, blobless (`blob:none`) family on a filtered list, optional presigned store URLs, `bundles.require` refusal of unbounded zero-have clones with the exact fix in the error |
 | LFS | Batch API (`operation=upload\|download`, transfer `basic`), basic transfer GET/HEAD/PUT + `verify`, sha256-addressed objects in the bucket, size+sha256 verification, `max_object_bytes` cap, optional read-through from an upstream LFS server (stream + persist), presigned or proxied serving |
-| web UI | GitHub-shaped owners/repos pages, tree/blob/commits/commit pages, README rendering, markdown preview, syntax-highlighted blobs, unified diffs, branch/tag picker, clone menu with setup recipes, WAL health dashboard (manifest, packs, bundle chain + plan, compactions, segments, ops), tasks overlay, settings tab (scheduled tasks, push policy editor + validate + dry-run, effective config editor + history + revert). *Rust renders this in React; walhub renders it as server-rendered Go `html/template` pages (`internal/webui`) + vendored htmx + vanilla-ES islands — D-WEB-14, see 12_web_ui.md.* |
-| setup | `/setup` web UI — ALL config keys grouped by section with current effective values, validate + Save; `GET /api/v1/setup` (full schema + effective values + file state), `POST /api/v1/setup/test` (validate without saving), `PUT /api/v1/setup` (validate + write); zero-config bootstrap, atomic save to `<data-dir>/walhub.toml`, restart-needed reporting, setup-only recovery mode. Full spec: 06_server_http.md |
+| web UI | GitHub-shaped owners/repos pages, tree/blob/commits/commit pages, README rendering, markdown preview, syntax-highlighted blobs, unified diffs, branch/tag picker, clone menu with setup recipes, WAL health dashboard (manifest, packs, bundle chain + plan, compactions, segments, ops), tasks overlay, settings tab (scheduled tasks, push policy editor + validate + dry-run, effective config editor + history + revert). *Rust renders this in React; spindle renders it as server-rendered Go `html/template` pages (`internal/webui`) + vendored htmx + vanilla-ES islands — D-WEB-14, see 12_web_ui.md.* |
+| setup | `/setup` web UI — ALL config keys grouped by section with current effective values, validate + Save; `GET /api/v1/setup` (full schema + effective values + file state), `POST /api/v1/setup/test` (validate without saving), `PUT /api/v1/setup` (validate + write); zero-config bootstrap, atomic save to `<data-dir>/spindle.toml`, restart-needed reporting, setup-only recovery mode. Full spec: 06_server_http.md |
 | JSON API | Repository-scoped read API (`refs`, `refs/{branches\|tags}` paged/streamed, `resolve`, `tree`, `blob`, `commits`, `commit`), repo summary/create/delete, per-repo settings (get/put/delete/effective/history/describe/validate), policy (get/put/delete/validate/dry-run), overview (WAL health), tasks + attachable SSE streams, ops (maintenance actions), owner listing, discovery document, `me`; two lanes (bearer/same-origin and cross-origin browser) |
 | SDK | authored as submodules (`web/sdk/src/*.js`) and bundled by esbuild into the shipped `web/dist/repos.js` — dependency-free at runtime; maps the whole API, picks the lane, performs the popup auth flow, unwraps the SSE envelope |
 | auth | `none` (everyone anon+write+admin; allowed on any bind with loud warnings in logs + setup UI — the Rust loopback-only rule is superseded, see §9.5), `token` (static tokens as Bearer or Basic password), `oidc` (any OpenID Connect issuer: browser sign-in, verified ID tokens as bearers, `wgt_` access tokens minted at `/_auth/tokens`, static tokens for robots); admin flags independent of write; trusted-forwarder identity forwarding; real 401 semantics so git erases dead credentials |
@@ -50,12 +50,12 @@ contract").
 | settings | Per-repo TOML overrides (`[bundles]`, `[maintenance]`, `[compaction]`, `[upstream]`, `[integrations]`, ≤ 16 KiB) published **into the WAL** (inline on the manifest + SETTINGS log entries with history) |
 | events | A bridge (its own role) tails the WAL from a durable cursor and POSTs `ref` events (create/update/delete) to a webhook, at-least-once per batch, dedup key `(repo, seq, ref_name)`, HMAC signature, bucket-notification wake-up + periodic sweep |
 | maintenance | One self-healing loop per maintainer: checkpoints, object repair from upstream, weekly full bundle (base rebuild on SSD hosts, then bucket-side compose), chained dailies/hourlies, geometric compaction, rev-index retrofit, periodic connectivity audit (`fsck`); placement-driven assignment; resumable base rebuilds and imports |
-| CLI | `serve`, `compact`, `bundle run/plan/compose/rm`, `repo create/list/info/policy/settings`, `wal ls/show/materialize/add-pack/annotate-pack/rev-index`, `synth`, `import` (two modes, resumable), `mirror`, `config check/dump`. Binary name: `walhub`; `walhub serve` is the server (Rust: `walgit` / `walgit-server`) |
+| CLI | `serve`, `compact`, `bundle run/plan/compose/rm`, `repo create/list/info/policy/settings`, `wal ls/show/materialize/add-pack/annotate-pack/rev-index`, `synth`, `import` (two modes, resumable), `mirror`, `config check/dump`. Binary name: `spindle`; `spindle serve` is the server (Rust: `walgit` / `walgit-server`) |
 | stores | S3 + S3-compatible (AWS, MinIO, rustfs, R2, Ceph), GCS (JSON API over HTTPS — Rust uses a gRPC+JSON hybrid, see §9.1), local filesystem (`store.backend = "filesystem"`, keys under `store.root`), in-memory (tests) — one contract suite runs against all, with filesystem + memory ALWAYS in it |
 | ops | `/healthz`, `/readyz` (prewarm/drain aware), Prometheus `/metrics`, structured logs (pretty/JSON) with request ids and trace correlation, lock-wait instrumentation, runtime watchdog, graceful two-phase drain |
 
 Explicitly **not** in scope (Rust spec §1.3): code review, merge queues, CI, issues, fork networks, PRs.
-(Commit-trailer conventions exist so external merge-queue tools can integrate; walhub only renders trailers.)
+(Commit-trailer conventions exist so external merge-queue tools can integrate; spindle only renders trailers.)
 
 ---
 
@@ -88,14 +88,14 @@ From Rust spec §1.5, unchanged:
 - Forking git or inventing an object format; all weirdness happens *around* git.
 
 One forward-looking caveat: GitHub-like features (multi-user accounts, issues, PRs, review) are **not** a
-non-goal forever — they are explicitly deferred. walhub reserves clean seams for them today so they never
+non-goal forever — they are explicitly deferred. spindle reserves clean seams for them today so they never
 require a core rewrite; see §9.3 and 14_extensibility.md.
 
 ---
 
 ## 5. The principles (restated for Go)
 
-A rewrite MUST preserve the Rust spec's ten principles (§2) — walhub adds an eleventh (D5, zero-config first
+A rewrite MUST preserve the Rust spec's ten principles (§2) — spindle adds an eleventh (D5, zero-config first
 run); every design decision answers to them. The numbering of 1–10 and the law are identical; each entry adds
 the Go mechanism that enforces it.
 
@@ -137,9 +137,9 @@ the Go mechanism that enforces it.
 10. **Keep it small; upstream git does git things.** Stock `git` binary (`os/exec` with exact argv) for
     repack/bitmaps/bundle creation/upload-pack wherever it can read the packs; in-process git engines only
     where measured and correct (the remote-served-base fetch); protobuf wire format is append-only.
-11. **User friendliness is a first-class law.** The zero-config first run is part of the product: `walhub` with
+11. **User friendliness is a first-class law.** The zero-config first run is part of the product: `spindle` with
     no arguments and no config file must boot into a usable server (§9.5). Where the Rust spec fails closed —
-    refusing to boot without config, allowing auth `none` only on loopback — walhub warns loudly and serves
+    refusing to boot without config, allowing auth `none` only on loopback — spindle warns loudly and serves
     instead (warn-don't-refuse); refusal is reserved for an INVALID config, which enters setup-only mode.
 
 ---
@@ -153,7 +153,7 @@ flowchart LR
   subgraph clients
     G["git / git-lfs"] --- B["browsers / SDK / scripts"]
   end
-  subgraph fleet["walhub fleet — one binary (cmd/walhub), roles by config"]
+  subgraph fleet["spindle fleet — one binary (cmd/spindle), roles by config"]
     S["serve role<br/>internal/server + internal/api"]
     M["maintain role<br/>internal/maintain + internal/bundle"]
     S["ssh transport<br/>internal/sshd"]
@@ -182,7 +182,7 @@ flowchart LR
   S -. "push broker forward (optional)" .-> S
 ```
 
-- **One binary**, `walhub` (Go module `github.com/crueber/walhub`), roles by config: `server.roles = ["serve",
+- **One binary**, `spindle` (Go module `github.com/crueber/spindle`), roles by config: `server.roles = ["serve",
   "maintain", "events"]`; empty = all three (one-box shape). Any number of `serve` instances may point at one bucket.
   Per repo, exactly one maintainer (placement globs) performs object work and writes; other hosts serve refs-level reads.
 - **The bucket is the repository.** Layout under `repos/<owner>/<repo>/`: `manifest.pb` (CAS'd), `log/<seq>.pb` segments,
@@ -208,7 +208,7 @@ flowchart LR
   broker is an optimization, never a dependency.
 - **Edge (optional):** TLS, one cached `auth_request` verdict per credential, repo-prefix routing, and byte
   offload via `X-Accel-Redirect` — only when the edge announces `X-Walgit-Capabilities: accel-redirect,
-  client-authorization` per request and walhub answers `X-Walgit-Store-Url/-Authorization/-Key`. An edge's
+  client-authorization` per request and spindle answers `X-Walgit-Store-Url/-Authorization/-Key`. An edge's
   fallback for a placed repo is read-only and refs-level; git RPC and LFS writes have no fallback.
 
 ### 6.2 Consistency model (inherited verbatim)
@@ -250,9 +250,9 @@ root (SIGTERM → `signal.NotifyContext`), so drain cancels everything once.
 | Legacy compact/bundle loops | — | when `maintain` is absent but `compact`/`bundle` role present: 60 s passes calling the respective ops (kept for role decomposition) |
 | Drain (SIGTERM) | all | phase 1: stop starting maintenance units, interrupt the running unit, serving + `/readyz` stay up, bounded 30 s; phase 2: `/readyz` 503 + `Retry-After`, new fetch/push/LFS refused 503, in-flight capped at `server.drain_timeout`, exit |
 
-Instance identity: `WALHUB_INSTANCE_NAME`/`WALHUB_INSTANCE_ID` → `name/id`; else `HOSTNAME/pid`; else UUID
+Instance identity: `SPINDLE_INSTANCE_NAME`/`SPINDLE_INSTANCE_ID` → `name/id`; else `HOSTNAME/pid`; else UUID
 (env prefix changed from `WALGIT_`; see Decisions). Appears as lease holder, manifest `writer`, task `hostname`,
-heartbeat `host`, and the `Server` header (`walhub/<version> (<kind>; <name>[/<instance>])`, kind =
+heartbeat `host`, and the `Server` header (`spindle/<version> (<kind>; <name>[/<instance>])`, kind =
 `serverless|ssd|dev`).
 
 #### Concurrency
@@ -269,9 +269,9 @@ heartbeat `host`, and the `Server` header (`walhub/<version> (<kind>; <name>[/<i
 
 ## 7. Lineage: Continuity, and the 7 deviations
 
-walhub inherits walgit's lineage (Rust spec §3.5); the deltas are **design law**, not notes.
+spindle inherits walgit's lineage (Rust spec §3.5); the deltas are **design law**, not notes.
 
-**What the Continuity post establishes, and walhub keeps as-is:**
+**What the Continuity post establishes, and spindle keeps as-is:**
 
 - *Why packfiles make hosting hard:* repository data is a DAG; every git operation is a random walk over
   gigabytes of delta-compressed packs whose physical layout has no correlation with the logical graph.
@@ -292,7 +292,7 @@ walhub inherits walgit's lineage (Rust spec §3.5); the deltas are **design law*
 
 **The 7 deviations (each is a decision in force; a rewrite MUST keep all of them):**
 
-1. **No gossip.** Continuity gossips UDP hints so replicas can skip the conditional GET after a push; walhub
+1. **No gossip.** Continuity gossips UDP hints so replicas can skip the conditional GET after a push; spindle
    has **no node-to-node networking at all** (share-nothing, no node identity). Every read revalidates via
    one conditional GET — correctness never depends on a lost datagram.
 2. **Placement is configured, not rendezvous-hashed.** Assignment is explicit `[placement]` globs because the
@@ -312,7 +312,7 @@ walhub inherits walgit's lineage (Rust spec §3.5); the deltas are **design law*
    upload-pack only answers the small remainder).
 6. **Leases for cross-instance exclusivity.** CAS is enough for pushes; CAS+TTL leases exist for *maintenance*
    work (compaction, bundle builds) where two workers would duplicate hours of CPU.
-7. **Receive-pack is ours.** walhub implements receive-pack itself (index-pack in a scratch dir, connectivity,
+7. **Receive-pack is ours.** spindle implements receive-pack itself (index-pack in a scratch dir, connectivity,
    policy, report-status) so pushes become WAL entries + group-committed CAS batches rather than a local ref
    update with replication.
 
@@ -323,19 +323,19 @@ linearizable pushes, provenance — is inherited and MUST survive the rewrite.
 
 ## 8. Canonical package tree
 
-Go module: `github.com/crueber/walhub`. These paths are normative; every other doc designs against them.
+Go module: `github.com/crueber/spindle`. These paths are normative; every other doc designs against them.
 
 | Package | Responsibility |
 |---|---|
-| `cmd/walhub` | The single binary: subcommand dispatch (serve, compact, bundle, repo, wal, synth, import, mirror, config), signal handling, exit codes 0/1/2/3 |
-| `internal/config` | `walhub.toml` loading (`github.com/BurntSushi/toml`), env overrides (`WALHUB_*`), defaults, validation, per-repo settings parsing; owns the zero-config default set and `<data-dir>` resolution (§9.5) |
+| `cmd/spindle` | The single binary: subcommand dispatch (serve, compact, bundle, repo, wal, synth, import, mirror, config), signal handling, exit codes 0/1/2/3 |
+| `internal/config` | `spindle.toml` loading (`github.com/BurntSushi/toml`), env overrides (`SPINDLE_*`), defaults, validation, per-repo settings parsing; owns the zero-config default set and `<data-dir>` resolution (§9.5) |
 | `internal/store` | The object store interface + backends (memory, S3 via hand-rolled SigV4, GCS via JSON API), CAS helper, bucket key layout, the hand-rolled protobuf wire codec, log framing |
 | `internal/wal` | The WAL engine: per-repo handles, sync levels, publish/CAS ladder, group commit, checkpoints, replay, remote reader, narrated tasks |
 | `internal/git` | The git subprocess layer: exact-argv `os/exec` calls — ingest/index-pack, refs, connectivity, receive-pack, upload-pack, repack/bitmaps, bundle creation |
 | `internal/bundle` | The bundle-uri subsystem: strategies, calendar slots, backfill, chained incrementals, blobless family, `bundles/list` + `bundles/catchup` |
 | `internal/policy` | The per-repo push policy rule language: parse, validate, evaluate, dry-run |
 | `internal/server` | chi router (`github.com/go-chi/chi/v5`, core only), hand-ordered middleware as `func(http.Handler) http.Handler`, git smart-HTTP + LFS + static endpoints, auth (none/token/oidc), setup recipes, plain-HTTP/h2c listener |
-| `internal/setup` | The setup subsystem (wired into routes by `internal/server`): the config schema description for the UI, validate-for-save, atomic write of `<data-dir>/walhub.toml`, bootstrap-mode detection, the `/setup` UI and `/api/v1/setup` endpoints, and the setup-only mode gate (§9.5, 06_server_http.md) |
+| `internal/setup` | The setup subsystem (wired into routes by `internal/server`): the config schema description for the UI, validate-for-save, atomic write of `<data-dir>/spindle.toml`, bootstrap-mode detection, the `/setup` UI and `/api/v1/setup` endpoints, and the setup-only mode gate (§9.5, 06_server_http.md) |
 | `internal/api` | The JSON API wire contract, SSE envelope, tasks surface, two-lane auth, render caches |
 | `internal/cachepolicy` | The shared HTTP cache-class definition (07 §4 law, Forgejo #382): the five Cache-Control values + the mutability rule + the `Check` guard; stdlib-only leaf aliased by core and feature packages, never redeclared |
 | `internal/events` | The WAL → webhook bridge: durable cursor, delivery + HMAC signing, bucket-notification wake-ups, sweep |
@@ -345,7 +345,7 @@ Go module: `github.com/crueber/walhub`. These paths are normative; every other d
 | `web/` | The page assets (Tailwind v4 `app.css`, the esbuild island bundle `ui.js`, the vendored htmx files) + the dependency-free SDK, authored as submodules in `web/sdk/src/` and esbuild-bundled to `web/dist/repos.js`, embedded into the binary. Pages themselves are Go templates in `internal/webui/templates/` (D-WEB-14/D-WEB-15) |
 
 Cross-cutting: `internal/store`, `internal/wal`, `internal/git` are the frozen core; `internal/server`,
-`internal/api`, `internal/events`, `internal/maintain`, `internal/sshd`, `cmd/walhub` are consumers wired through the
+`internal/api`, `internal/events`, `internal/maintain`, `internal/sshd`, `cmd/spindle` are consumers wired through the
 registries of §9.3.
 
 ---
@@ -420,7 +420,7 @@ NOW so those features land as extensions:
 | Events | `internal/events` consumes WAL tail and posts to **one webhook sink** behind a sink interface (09_events.md) | Multiple sinks, internal queues, notification preferences |
 | API route registration | Every JSON route registers through a single mux-registration function in `internal/api`; git/LFS/static routes likewise in `internal/server` (06_server_http.md, 07_api.md) | `/issues`, `/pulls` route groups register alongside, sharing middleware and principals |
 | Task kinds | Long work is a narrated task with a `(repo, kind)` lock (05_wal_engine.md); kinds are a registry | `merge`, `import-pr` kinds with zero core changes |
-| CLI subcommands | `cmd/walhub` dispatches from a subcommand table (11_config_cli.md) | New operator tooling without touching core packages |
+| CLI subcommands | `cmd/spindle` dispatches from a subcommand table (11_config_cli.md) | New operator tooling without touching core packages |
 
 Rule: core (`store`, `wal`, `git`) never imports `api`, `server`, `events`, or `maintain`; extension features
 may import core and register into seams. 14_extensibility.md maps each feature onto these seams in detail.
@@ -448,22 +448,22 @@ A single binary anyone can run is the product (§1), so ease of use is design la
 The Rust spec's fail-closed boot rule is superseded in one direction: **warn, don't refuse**. Full spec:
 06_server_http.md (setup) and 11_config_cli.md (config, data dir).
 
-- **Zero-config first run.** No `walhub.toml` is needed to start: a missing config boots with built-in
+- **Zero-config first run.** No `spindle.toml` is needed to start: a missing config boots with built-in
   defaults — `server.listen = "0.0.0.0:8080"`, `store.backend = "filesystem"` rooted at `<data-dir>/store`,
   `server.auth.mode = "none"` (allowed on any bind, with loud warnings in the logs and a setup-UI banner — a
   deliberate divergence from the Rust loopback-only rule), `server.auto_create_on_push = true`; every other
   key keeps its Rust-spec default.
-- **Data dir.** `--data-dir` flag / `WALHUB_DATA_DIR` env, default `~/.local/share/walhub` (`/var/lib/walhub`
-  in containers); it holds `store/`, `cache/`, and the saved `walhub.toml`.
+- **Data dir.** `--data-dir` flag / `SPINDLE_DATA_DIR` env, default `~/.local/share/spindle` (`/var/lib/spindle`
+  in containers); it holds `store/`, `cache/`, and the saved `spindle.toml`.
 - **Setup UI + API.** `/setup` groups ALL config keys by section with current effective values and validates +
-  saves (atomic tmp+rename to `<data-dir>/walhub.toml`, reporting which keys need a restart). API:
+  saves (atomic tmp+rename to `<data-dir>/spindle.toml`, reporting which keys need a restart). API:
   `GET /api/v1/setup` (full schema + effective values + file state), `POST /api/v1/setup/test` (validate
   without saving), `PUT /api/v1/setup` (validate + write).
 - **Boot flow.** config present → validate → boot if it all works; config missing → defaults + setup banner;
   config INVALID → **setup-only mode**: only `/setup`, `/healthz`, `/readyz` answer (everything else 503 with
   a pointer to `/setup`), the UI shows the exact errors, and saving a fixed config requires a restart.
 - **Setup access rule.** Open while (no config file OR config invalid OR `auth.mode = none`); otherwise an
-  admin principal is required; `WALHUB_SETUP_TOKEN` optionally gates it on exposed hosts.
+  admin principal is required; `SPINDLE_SETUP_TOKEN` optionally gates it on exposed hosts.
 
 ---
 
@@ -472,14 +472,14 @@ The Rust spec's fail-closed boot rule is superseded in one direction: **warn, do
 Zero config, zero flags, zero TOML required (§9.5):
 
 ```console
-$ walhub
+$ spindle
 # boots with built-in defaults: filesystem store under the default data dir,
 # listening on 0.0.0.0:8080, auth `none` (loudly warned in the logs and in the UI),
 # auto_create_on_push on.
 ```
 
 Open **http://localhost:8080/setup** — every config key grouped by section with its effective value. Review and
-Save (writes `<data-dir>/walhub.toml` atomically and reports which keys need a restart), or just start using the
+Save (writes `<data-dir>/spindle.toml` atomically and reports which keys need a restart), or just start using the
 server as-is.
 
 ```console
@@ -495,7 +495,7 @@ $ git clone http://localhost:8080/alice/my-repo.git
 ```
 
 For a real deployment (S3/GCS bucket, token/OIDC auth), edit the config through the setup UI or
-`walhub config check --config walhub.toml` to validate before serving (exit codes: 0 ok, 1 error, 2 usage,
+`spindle config check --config spindle.toml` to validate before serving (exit codes: 0 ok, 1 error, 2 usage,
 3 crash). Full key reference: 11_config_cli.md; auth modes, the OIDC flow, and the setup spec: 06_server_http.md.
 
 ---
@@ -519,18 +519,18 @@ For a real deployment (S3/GCS bucket, token/OIDC auth), edit the config through 
 | D17 | the bundle-uri forcing policy for unbounded zero-have fetches |
 | bulk pool | the Go translation of the Rust "bulk runtime": 4 dedicated worker goroutines for pack materialization, fed by a bounded channel; never runs on request goroutines |
 | singleflight | hand-rolled in-flight dedup: concurrent fetches of one key collapse into one round trip |
-| h2c | HTTP/2 cleartext; walhub serves it via `golang.org/x/net` when `server.http2 = true` |
+| h2c | HTTP/2 cleartext; spindle serves it via `golang.org/x/net` when `server.http2 = true` |
 | setup-only mode | the recovery state for an INVALID config: only `/setup`, `/healthz`, `/readyz` answer; everything else is 503 with a pointer to `/setup` (`internal/setup`) |
 
 ---
 
 ## Decisions & deviations from the Rust design
 
-- Binary `walhub`, module `github.com/crueber/walhub`, `walhub serve` replaces `walgit-server` — the product name is the only user-visible rename; behavior is identical.
-- Config file primary name is `walhub.toml` with `walgit.toml` still accepted as a fallback alias — keys and semantics stay byte-compatible, so existing buckets and docs keep working (11_config_cli.md owns the alias).
-- Environment prefix becomes `WALHUB_*` (e.g. `WALHUB_INSTANCE_NAME`, overrides `WALHUB__SECTION__KEY=value`) with the legacy `WALGIT_*`/`WALGIT__*` spellings accepted as fallback aliases so walgit-era deploy scripts keep working; when both are set for the same key `WALHUB_` wins. Env vars are not bucket state — no compatibility cost (11_config_cli.md owns the ladder).
-- HTTP header names `X-Walgit-Capabilities`, `X-Walgit-Principal`, `X-Walgit-Store-Url/-Authorization/-Key` are kept **verbatim** — they are part of the edge↔app contract and the nginx example; renaming would strand mixed walgit/walhub fleets and existing edge configs.
-- `Server` header becomes `walhub/<version> (<kind>; <name>[/<instance>])` — cosmetic identity; kind taxonomy unchanged.
+- Binary `spindle`, module `github.com/crueber/spindle`, `spindle serve` replaces `walgit-server` — the product name is the only user-visible rename; behavior is identical.
+- Config file primary name is `spindle.toml` with `walgit.toml` still accepted as a fallback alias — keys and semantics stay byte-compatible, so existing buckets and docs keep working (11_config_cli.md owns the alias).
+- Environment prefix becomes `SPINDLE_*` (e.g. `SPINDLE_INSTANCE_NAME`, overrides `SPINDLE__SECTION__KEY=value`) with the legacy `WALGIT_*`/`WALGIT__*` spellings accepted as fallback aliases so walgit-era deploy scripts keep working; when both are set for the same key `SPINDLE_` wins. Env vars are not bucket state — no compatibility cost (11_config_cli.md owns the ladder).
+- HTTP header names `X-Walgit-Capabilities`, `X-Walgit-Principal`, `X-Walgit-Store-Url/-Authorization/-Key` are kept **verbatim** — they are part of the edge↔app contract and the nginx example; renaming would strand mixed walgit/spindle fleets and existing edge configs.
+- `Server` header becomes `spindle/<version> (<kind>; <name>[/<instance>])` — cosmetic identity; kind taxonomy unchanged.
 - OIDC access-token prefix stays `wgt_` — tokens are config-issued (not bucket state) and the SDK/docs reference the prefix; renaming buys nothing and breaks recognition.
 - GCS backend is JSON-API-over-HTTPS only (the Rust gRPC+JSON hybrid drops gRPC) — honors the dependency budget (now three modules; see Divergence D1 below); the store interface (§4.1 semantics) is unchanged, and conditional-GET/CAS map to `If-None-Match`/generation preconditions.
 - Protobuf is encoded by a hand-rolled wire codec on the same field numbers (no `google.golang.org/protobuf`) — dependency budget; wire format is frozen and tested against fixtures (02_storage_protobuf.md).
@@ -541,8 +541,8 @@ For a real deployment (S3/GCS bucket, token/OIDC auth), edit the config through 
 - **Divergence (2026-08-31, D2) — SUPERSEDED 2026-09-02 by explicit user request (DEVIATIONS.md D-WEB-6), then again 2026-11-19/20 by D-WEB-14/D-WEB-15:** the frontend was standard ECMAScript (vanilla ES modules served directly from `web/`, zero npm runtime dependencies, no SPA build step; the SDK authored as submodules and esbuild-bundled). **Historical shapes:** (1) vanilla ESM; (2) a SolidJS SPA (runtime exactly `solid-js` + `@solidjs/router`; Solid signals/stores + context; Tailwind v4 CSS-first, dark by default, no CDN; plain JSX/JS, no TypeScript) built by vite (`vite-plugin-solid` + `@tailwindcss/vite`) into `web/dist/`. **Shipped stack:** server-rendered Go `html/template` pages (`internal/webui`) + vendored htmx + vanilla-ES islands; `vite` + `@tailwindcss/vite` build only `app.css` and `esbuild` builds `ui.js` + the dependency-free SDK `web/dist/repos.js`; no runtime npm dependencies. JS tests run on Node's built-in `node --test` against the sources plus server-smoke tests over fetch.
 - **Divergence (2026-08-31, D3):** all dev/CI targets are Make targets (build, test, race, cover, sim, e2e, contract, vet, fmt, image, dev, clean) — no `just`file.
 - **Divergence (2026-08-31, D4):** a local-filesystem store backend (`store.backend = "filesystem"`) joins S3/GCS/memory: keys map to paths under `store.root`; conditional writes via sidecar `.lock` + flock + stat-compare + atomic rename (residual TOCTOU vs S3 documented); `renameat2(RENAME_NOREPLACE)` for create-if-absent with a portable fallback; version token/ETag = `"<size>:<mtime_ns>"`; compose = stream-concat temp + rename; range reads via `os.File.ReadAt`; no accel/signed URLs. It joins the contract suite as an ALWAYS-run backend. See 03_store_backends.md.
-- **Divergence (2026-08-31, D5):** zero-config first run is a first-class law (§9.5) — missing config boots with defaults (`0.0.0.0:8080`, filesystem store under `<data-dir>`, auth `none` + loud warnings, `auto_create_on_push = true`); data dir via `--data-dir`/`WALHUB_DATA_DIR` (default `~/.local/share/walhub`, containers `/var/lib/walhub`). Supersedes the Rust fail-closed boot rule and the auth-`none`-loopback-only rule (warn-don't-refuse instead).
-- **Divergence (2026-08-31, D6):** `/setup` web UI + `/api/v1/setup` API are first-class (§9.5; full spec in 06_server_http.md), including the setup-only recovery mode for invalid configs and the optional `WALHUB_SETUP_TOKEN` gate for exposed hosts.
+- **Divergence (2026-08-31, D5):** zero-config first run is a first-class law (§9.5) — missing config boots with defaults (`0.0.0.0:8080`, filesystem store under `<data-dir>`, auth `none` + loud warnings, `auto_create_on_push = true`); data dir via `--data-dir`/`SPINDLE_DATA_DIR` (default `~/.local/share/spindle`, containers `/var/lib/spindle`). Supersedes the Rust fail-closed boot rule and the auth-`none`-loopback-only rule (warn-don't-refuse instead).
+- **Divergence (2026-08-31, D6):** `/setup` web UI + `/api/v1/setup` API are first-class (§9.5; full spec in 06_server_http.md), including the setup-only recovery mode for invalid configs and the optional `SPINDLE_SETUP_TOKEN` gate for exposed hosts.
 - **Divergence (2026-08-31, D7):** CI enforces ≥ 95% statement coverage per `internal/...` package (Make `cover` target with per-package fail-under; `cmd/` main glue excluded); table-driven httptest for every handler.
 - **Shared webhook egress package (2026-09-05, issue #78):** `internal/egress` joins the §8 tree — stdlib-only refuse-all redirect policy + delivery-time non-public IP screen with pinned dialing, reused verbatim by `internal/events` (09_events.md §4.2) and tenant repo webhooks (docs/features/06_notifications.md §5.3) so the two sinks cannot drift apart. No new third-party module (dependency budget unchanged).
 - **Server-side TLS removed (2026-09-05, Forgejo #165):** the server listens plain HTTP (h2c retained via `golang.org/x/net`); `server.tls.*`, cert/key loading, self-signed generation, and `/services/public/ca.pem` are gone, and `X-Forwarded-Proto` is honored when building absolute URLs. TLS terminates at the reverse proxy (16_packaging.md §3.4). `golang.org/x/crypto` stays for the SSH transport only; no new module.

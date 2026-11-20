@@ -4,162 +4,194 @@
   {{template "repo_tabs" .Data.Repo}}
   {{template "repo_degraded" .Data.Repo}}
 
-  <div class="wal-page space-y-4">
-    <p class="muted text-sm">
-      What am I looking at? <a class="hover:underline" href="/how-it-works#wal">How the WAL works →</a>
+  <div class="wal-page space-y-3">
+    <p class="flex flex-wrap items-baseline gap-2 font-mono text-[11px]">
+      <span class="eyebrow">what am I looking at?</span>
+      <a class="link" href="/how-it-works#wal">How the WAL works →</a>
     </p>
 
-    <section class="card p-4">
-      <h2 class="mb-2 flex items-center gap-2 font-semibold">
-        Health <span class="{{.Data.HealthTone}}">{{.Data.HealthStatus}}</span>
-      </h2>
-      <p class="mb-2 text-sm">served by {{.Data.Overview.Hostname}} · clone {{.Data.Overview.CloneURL}}</p>
-      {{if .Data.Overview.Health.Issues}}
-      <ul class="issues mb-2 list-disc pl-5 text-sm">{{range .Data.Overview.Health.Issues}}<li>{{.}}</li>{{end}}</ul>
-      {{else}}
-      <p class="muted text-sm">no issues</p>
-      {{end}}
-      <p class="text-sm">
-        deep fsck:
-        {{if .Data.Overview.Health.Deep}}<span class="chip chip-open">ok</span>{{else}}<span class="chip chip-neutral">not reported</span>{{end}}
-      </p>
-      {{if .Data.Overview.Health.Suggestions}}
-      <div class="suggestions mt-2">
-        <h3 class="mb-1 text-sm font-semibold">Suggestions</h3>
-        {{range .Data.Overview.Health.Suggestions}}
-        <!-- Running a suggestion is a POST stream owned by the islands/forms
-             work; the row states the op and its reason instead of rendering a
-             dead button. -->
-        <div class="suggestion flex flex-wrap items-center gap-2 py-0.5 text-sm">
-          <code class="font-mono text-xs">{{.Op}}</code>
-          {{if .Reason}}<span class="muted"> — {{.Reason}}</span>{{end}}
-          {{if .Auto}}<span class="chip">auto</span>{{end}}
+    <section class="card overflow-hidden">
+      <div class="flex flex-wrap items-center gap-2 border-b border-[var(--pd-line)] px-3 py-1.5">
+        <h2 class="eyebrow">Health</h2>
+        <span class="{{.Data.HealthTone}}">{{.Data.HealthStatus}}</span>
+      </div>
+      <div class="space-y-1.5 px-3 py-2.5">
+        {{if .Data.Overview.Hostname}}
+        <p class="flex flex-wrap items-baseline gap-x-2 font-mono text-[11px]">
+          <span class="eyebrow">served by</span>
+          <span class="text-[var(--pd-text-2)]">{{.Data.Overview.Hostname}}</span>
+        </p>
+        {{end}}
+        {{if .Data.Overview.CloneURL}}
+        <p class="flex flex-wrap items-baseline gap-x-2 font-mono text-[11px]">
+          <span class="eyebrow">clone</span>
+          <span class="break-all text-[var(--pd-text-2)]">{{.Data.Overview.CloneURL}}</span>
+        </p>
+        {{end}}
+        {{if .Data.Overview.Health.Issues}}
+        <ul class="issues list-disc space-y-0.5 pl-5 text-sm text-[var(--pd-warn)]">{{range .Data.Overview.Health.Issues}}<li>{{.}}</li>{{end}}</ul>
+        {{else}}
+        <p class="muted text-sm">no issues</p>
+        {{end}}
+        <p class="flex flex-wrap items-center gap-2 text-sm">
+          <span class="eyebrow">deep fsck:</span>
+          {{if .Data.Overview.Health.Deep}}<span class="chip chip-open">ok</span>{{else}}<span class="chip chip-neutral">not reported</span>{{end}}
+        </p>
+        {{if .Data.Overview.Health.Suggestions}}
+        <div class="suggestions mt-2 border-t border-[var(--pd-line)] pt-2">
+          <h3 class="eyebrow mb-1">Suggestions</h3>
+          {{range .Data.Overview.Health.Suggestions}}
+          <!-- Running a suggestion is a POST stream owned by the islands/forms
+               work; the row states the op and its reason instead of rendering a
+               dead button. -->
+          <div class="suggestion flex flex-wrap items-center gap-2 py-0.5 text-sm">
+            <code class="mono text-xs text-[var(--pd-text)]">{{.Op}}</code>
+            {{if .Reason}}<span class="muted"> — {{.Reason}}</span>{{end}}
+            {{if .Auto}}<span class="chip-neutral">auto</span>{{end}}
+          </div>
+          {{end}}
         </div>
         {{end}}
       </div>
-      {{end}}
     </section>
 
     {{if .Data.Fsck}}
     {{$f := .Data.Fsck}}
-    <section class="card p-4">
-      <h2 class="mb-2 flex items-center gap-2 font-semibold">Object health</h2>
-      <p class="mb-2 text-sm">
-        {{$f.MissingTotal}} missing objects
-        {{if $f.Problems}} · {{$f.Problems}} problems{{end}}
-        {{if $f.RepairedSeq}} · repaired at seq {{$f.RepairedSeq}}{{end}}
-        {{if .Data.FsckAt}} · last audit <time datetime="{{.Data.FsckAt}}" title="{{.Data.FsckAt}}">{{with rel .Data.FsckAt}}{{.}}{{else}}—{{end}}</time>{{end}}
-      </p>
-      {{if .Data.MissingShown}}
-      <p class="muted mb-1 text-xs">sample of missing oids:</p>
-      <ul class="mb-2 space-y-0.5">{{range .Data.MissingShown}}<li><code class="font-mono text-xs">{{.}}</code></li>{{end}}</ul>
-      {{if .Data.MissingMore}}<p class="muted mb-2 text-xs">…and {{.Data.MissingMore}} more</p>{{end}}
-      {{end}}
-      <p class="text-sm">
-        repair source:
-        {{if $f.Upstream}}<code class="font-mono text-xs">{{$f.Upstream}}</code>
-        {{else}}<span class="muted">none — set <code class="font-mono text-xs">upstream.git</code> to enable repair</span>{{end}}
-      </p>
-      {{if $f.RepairStalled}}
-      <p class="mt-2 rounded border border-amber-500 bg-amber-100 p-2 text-sm text-amber-800 dark:bg-amber-900/60 dark:text-amber-300" role="status">
-        repair stalled: an upstream is configured but no repair has landed for over one audit
-        interval. Re-run the audit, then check recent tasks below for the failure.
-      </p>
-      {{end}}
+    <section class="card overflow-hidden">
+      <div class="flex flex-wrap items-center gap-2 border-b border-[var(--pd-line)] px-3 py-1.5">
+        <h2 class="eyebrow">Object health</h2>
+      </div>
+      <div class="space-y-1.5 px-3 py-2.5">
+        <p class="font-mono text-[11px] text-[var(--pd-text-2)]">
+          {{$f.MissingTotal}} missing objects
+          {{if $f.Problems}}<span class="text-[var(--pd-dim)]" aria-hidden="true"> · </span>{{$f.Problems}} problems{{end}}
+          {{if $f.RepairedSeq}}<span class="text-[var(--pd-dim)]" aria-hidden="true"> · </span>repaired at seq {{$f.RepairedSeq}}{{end}}
+          {{if .Data.FsckAt}}<span class="text-[var(--pd-dim)]" aria-hidden="true"> · </span>last audit <time datetime="{{.Data.FsckAt}}" title="{{.Data.FsckAt}}">{{with rel .Data.FsckAt}}{{.}}{{else}}—{{end}}</time>{{end}}
+        </p>
+        {{if .Data.MissingShown}}
+        <p class="eyebrow">sample of missing oids:</p>
+        <ul class="space-y-0.5 font-mono text-[11px] text-[var(--pd-text-2)]">{{range .Data.MissingShown}}<li class="break-all">{{.}}</li>{{end}}</ul>
+        {{if .Data.MissingMore}}<p class="muted font-mono text-[11px]">…and {{.Data.MissingMore}} more</p>{{end}}
+        {{end}}
+        <p class="flex flex-wrap items-center gap-2 font-mono text-[11px] text-[var(--pd-text-2)]">
+          <span class="eyebrow">repair source:</span>
+          {{if $f.Upstream}}<code class="mono break-all text-xs">{{$f.Upstream}}</code>
+          {{else}}<span class="muted">none — set <code class="mono text-xs">upstream.git</code> to enable repair</span>{{end}}
+        </p>
+        {{if $f.RepairStalled}}
+        <p class="mt-2 border border-[var(--pd-warn)] bg-[color-mix(in_srgb,var(--pd-warn)_10%,var(--pd-surface))] px-2.5 py-2 text-sm text-[var(--pd-text-2)]" role="status">
+          <span class="chip chip-draft">repair stalled</span>
+          an upstream is configured but no repair has landed for over one audit
+          interval. Re-run the audit, then check recent tasks below for the failure.
+        </p>
+        {{end}}
+      </div>
     </section>
     {{end}}
 
-    <section class="card p-4">
-      <h2 class="mb-2 flex items-center gap-2 font-semibold">Ops</h2>
-      <p class="muted mb-1 text-sm">{{.Data.OpsAvailable}} available · {{.Data.OpsRecent}} recent</p>
-      {{range .Data.Ops}}
-      <div class="op-row py-2">
-        <div class="op-head flex flex-wrap items-center gap-2">
-          <code class="font-mono text-xs">{{.Op}}</code>
+    <section class="card overflow-hidden">
+      <div class="flex flex-wrap items-center gap-2 border-b border-[var(--pd-line)] px-3 py-1.5">
+        <h2 class="eyebrow">Ops</h2>
+      </div>
+      <p class="muted px-3 pt-2 font-mono text-[11px]">{{.Data.OpsAvailable}} available · {{.Data.OpsRecent}} recent</p>
+      <div class="mt-1 divide-y divide-[var(--pd-line)]">
+        {{range .Data.Ops}}
+        <div class="op-row flex flex-wrap items-center gap-x-2 gap-y-1 px-3 py-1.5">
+          <code class="mono text-xs text-[var(--pd-text)]">{{.Op}}</code>
           <!-- Params are the wire truth {name,values[]} (there is no kind:
                spec §6.2 item 3). This page renders the inventory; running an
                op is POST {repo}/api/ops/{op} (stream), owned by the islands
                group. -->
           {{range .Params}}
-          <span class="chip neutral">
+          <span class="chip max-w-full">
             {{.Name}}{{if .Required}} (required){{end}}
             {{if eq .Kind "checkbox"}} · flag{{else if eq .Kind "select"}} · one of {{range $i, $v := .Values}}{{if $i}}|{{end}}{{$v}}{{end}}{{else}} · text{{end}}
           </span>
           {{end}}
         </div>
+        {{end}}
       </div>
-      {{end}}
       {{if .Data.Recent}}
-      <details class="mt-2">
-        <summary class="pill cursor-pointer select-none">recent ops</summary>
-        <ul class="recent-ops mt-2 space-y-1 text-sm">
-          {{range .Data.Recent}}
-          <li>
-            {{.Kind}} — {{.State}}
-            {{if .Stamp}} · <time datetime="{{.Stamp}}" title="{{.Stamp}}">{{with rel .Stamp}}{{.}}{{else}}—{{end}}</time>{{end}}
-          </li>
-          {{end}}
-        </ul>
-      </details>
+      <div class="border-t border-[var(--pd-line)] px-3 py-2">
+        <details>
+          <summary class="pill cursor-pointer select-none">recent ops</summary>
+          <ul class="recent-ops mt-2 space-y-1 font-mono text-[11px] text-[var(--pd-text-2)]">
+            {{range .Data.Recent}}
+            <li>
+              {{.Kind}} — {{.State}}
+              {{if .Stamp}}<span class="text-[var(--pd-dim)]" aria-hidden="true"> · </span><time datetime="{{.Stamp}}" title="{{.Stamp}}">{{with rel .Stamp}}{{.}}{{else}}—{{end}}</time>{{end}}
+            </li>
+            {{end}}
+          </ul>
+        </details>
+      </div>
       {{end}}
     </section>
 
-    <div class="grid grid-cols-1 gap-4 md:grid-cols-2">
-      <section class="card p-4">
-        <h2 class="mb-2 flex items-center gap-2 font-semibold">Manifest</h2>
-        <div class="overflow-x-auto">
-          <table class="data-table kv">
-            <tbody>
-              {{range .Data.Manifest}}
-              <tr><th class="w-40 align-top">{{.Label}}</th><td>{{if .Stamp}}<time datetime="{{.Stamp}}" title="{{.Stamp}}">{{with rel .Stamp}}{{.}}{{else}}—{{end}}</time>{{else}}{{.Value}}{{end}}</td></tr>
-              {{end}}
-            </tbody>
-          </table>
+    <div class="grid grid-cols-1 gap-3 md:grid-cols-2">
+      <section class="card overflow-hidden">
+        <div class="flex flex-wrap items-center gap-2 border-b border-[var(--pd-line)] px-3 py-1.5">
+          <h2 class="eyebrow">Manifest</h2>
         </div>
+        <table class="data-table kv">
+          <tbody>
+            {{range .Data.Manifest}}
+            <tr><th class="w-32 align-top">{{.Label}}</th><td class="mono break-words text-[11.5px] text-[var(--pd-text-2)]">{{if .Stamp}}<time datetime="{{.Stamp}}" title="{{.Stamp}}">{{with rel .Stamp}}{{.}}{{else}}—{{end}}</time>{{else}}{{.Value}}{{end}}</td></tr>
+            {{end}}
+          </tbody>
+        </table>
       </section>
-      <section class="card p-4">
-        <h2 class="mb-2 flex items-center gap-2 font-semibold">Local copy</h2>
-        <div class="overflow-x-auto">
-          <table class="data-table kv">
-            <tbody>
-              {{range .Data.Local}}
-              <tr><th class="w-40 align-top">{{.Label}}</th><td>{{if .Stamp}}<time datetime="{{.Stamp}}" title="{{.Stamp}}">{{with rel .Stamp}}{{.}}{{else}}—{{end}}</time>{{else}}{{.Value}}{{end}}</td></tr>
-              {{end}}
-            </tbody>
-          </table>
+      <section class="card overflow-hidden">
+        <div class="flex flex-wrap items-center gap-2 border-b border-[var(--pd-line)] px-3 py-1.5">
+          <h2 class="eyebrow">Local copy</h2>
         </div>
+        <table class="data-table kv">
+          <tbody>
+            {{range .Data.Local}}
+            <tr><th class="w-32 align-top">{{.Label}}</th><td class="mono break-words text-[11.5px] text-[var(--pd-text-2)]">{{if .Stamp}}<time datetime="{{.Stamp}}" title="{{.Stamp}}">{{with rel .Stamp}}{{.}}{{else}}—{{end}}</time>{{else}}{{.Value}}{{end}}</td></tr>
+            {{end}}
+          </tbody>
+        </table>
       </section>
     </div>
 
-    <section class="card p-4">
-      <h2 class="mb-2 flex items-center gap-2 font-semibold">Packs</h2>
-      <p class="text-sm">{{.Data.Packs}}</p>
+    <section class="card overflow-hidden">
+      <div class="flex flex-wrap items-center gap-2 border-b border-[var(--pd-line)] px-3 py-1.5">
+        <h2 class="eyebrow">Packs</h2>
+      </div>
+      <p class="px-3 py-2.5 font-mono text-[11px] text-[var(--pd-text-2)]">{{.Data.Packs}}</p>
     </section>
 
-    <section class="card p-4">
-      <h2 class="mb-2 flex items-center gap-2 font-semibold">Bundle chain</h2>
-      <p class="muted mb-2 text-sm">roots = full bundles; children under base_id, sorted by creation_token</p>
-      {{if .Data.BundleNone}}
-      <p class="muted text-sm">no bundles yet</p>
-      {{else}}
-      {{template "repo_bundle_nodes" (dict "Nodes" .Data.Bundles "Nested" false)}}
-      {{end}}
+    <section class="card overflow-hidden">
+      <div class="flex flex-wrap items-center gap-2 border-b border-[var(--pd-line)] px-3 py-1.5">
+        <h2 class="eyebrow">Bundle chain</h2>
+        <span class="muted font-mono text-[10px]">roots = full bundles; children under base_id, sorted by creation_token</span>
+      </div>
+      <div class="px-3 py-2">
+        {{if .Data.BundleNone}}
+        <p class="muted text-sm">no bundles yet</p>
+        {{else}}
+        {{template "repo_bundle_nodes" (dict "Nodes" .Data.Bundles "Nested" false)}}
+        {{end}}
+      </div>
     </section>
 
-    <section class="card p-4">
-      <h2 class="mb-2 flex items-center gap-2 font-semibold">Bundle slot plan</h2>
-      <p class="muted mb-2 text-sm">{{.Data.PlanCounts}}</p>
+    <section class="card overflow-hidden">
+      <div class="flex flex-wrap items-center gap-2 border-b border-[var(--pd-line)] px-3 py-1.5">
+        <h2 class="eyebrow">Bundle slot plan</h2>
+        <span class="muted font-mono text-[11px]">{{.Data.PlanCounts}}</span>
+      </div>
       <div class="overflow-x-auto">
         <table class="data-table plan-table">
           <thead><tr><th>strategy</th><th>slot</th><th>status</th><th>detail</th><th>bundle</th></tr></thead>
           <tbody>
             {{range .Data.PlanRows}}
             <tr>
-              <td>{{.Strategy}}</td>
-              <td>{{.Slot}}</td>
+              <td class="mono text-[11.5px]">{{.Strategy}}</td>
+              <td class="mono tabular-nums text-[11.5px]">{{.Slot}}</td>
               <td><span class="{{.Chip}}">{{.Status}}</span></td>
               <td class="muted">{{.Detail}}</td>
-              <td><code class="font-mono text-xs">{{.Bundle}}</code></td>
+              <td><code class="mono text-[11.5px]">{{.Bundle}}</code></td>
             </tr>
             {{end}}
           </tbody>
@@ -167,8 +199,10 @@
       </div>
     </section>
 
-    <section class="card p-4">
-      <h2 class="mb-2 flex items-center gap-2 font-semibold">Compactions</h2>
+    <section class="card overflow-hidden">
+      <div class="flex flex-wrap items-center gap-2 border-b border-[var(--pd-line)] px-3 py-1.5">
+        <h2 class="eyebrow">Compactions</h2>
+      </div>
       {{if .Data.Compactions}}
       <div class="overflow-x-auto">
         <table class="data-table">
@@ -176,47 +210,51 @@
           <tbody>
             {{range .Data.Compactions}}
             <tr>
-              <td>{{.Seq}}</td>
-              <td>{{if .Stamp}}<time datetime="{{.Stamp}}" title="{{.Stamp}}">{{with rel .Stamp}}{{.}}{{else}}{{.At}}{{end}}</time>{{else}}{{.At}}{{end}}</td>
-              <td>{{.Packs}}</td>
-              <td class="muted">{{.Host}}</td>
+              <td class="mono tabular-nums text-[11.5px]">{{.Seq}}</td>
+              <td class="mono text-[11.5px]">{{if .Stamp}}<time datetime="{{.Stamp}}" title="{{.Stamp}}">{{with rel .Stamp}}{{.}}{{else}}{{.At}}{{end}}</time>{{else}}{{.At}}{{end}}</td>
+              <td class="mono tabular-nums text-[11.5px]">{{.Packs}}</td>
+              <td class="mono text-[11.5px] text-[var(--pd-muted)]">{{.Host}}</td>
             </tr>
             {{end}}
           </tbody>
         </table>
       </div>
       {{else}}
-      <p class="muted text-sm">no compactions recorded</p>
+      <p class="muted px-3 py-2.5 text-sm">no compactions recorded</p>
       {{end}}
     </section>
 
-    <section class="card p-4">
-      <h2 class="mb-2 flex items-center gap-2 font-semibold">WAL segments</h2>
+    <section class="card overflow-hidden">
+      <div class="flex flex-wrap items-center gap-2 border-b border-[var(--pd-line)] px-3 py-1.5">
+        <h2 class="eyebrow">WAL segments</h2>
+      </div>
       {{if .Data.Segments}}
       <div class="overflow-x-auto">
         <table class="data-table segments-table">
           <thead><tr><th>segment</th></tr></thead>
           <tbody>
-            {{range .Data.Segments}}<tr><td><code class="font-mono text-xs">{{.}}</code></td></tr>{{end}}
+            {{range .Data.Segments}}<tr><td><code class="mono text-[11.5px]">{{.}}</code></td></tr>{{end}}
           </tbody>
         </table>
       </div>
       {{else}}
-      <p class="muted text-sm">no segments recorded</p>
+      <p class="muted px-3 py-2.5 text-sm">no segments recorded</p>
       {{end}}
       {{if .Data.SegmentMore}}
-      <p class="mt-2"><a class="pill cursor-pointer hover:no-underline" href="?all=1">all</a></p>
+      <p class="border-t border-[var(--pd-line)] px-3 py-2"><a class="pill cursor-pointer hover:no-underline" href="?all=1">all</a></p>
       {{else if .Data.SegmentAll}}
-      <p class="mt-2"><a class="pill cursor-pointer hover:no-underline" href="?">newest 5</a></p>
+      <p class="border-t border-[var(--pd-line)] px-3 py-2"><a class="pill cursor-pointer hover:no-underline" href="?">newest 5</a></p>
       {{end}}
     </section>
 
-    <section class="card p-4">
-      <h2 class="mb-2 flex items-center gap-2 font-semibold">Live op log</h2>
+    <section class="card overflow-hidden">
+      <div class="flex flex-wrap items-center gap-2 border-b border-[var(--pd-line)] px-3 py-1.5">
+        <h2 class="eyebrow">Live op log</h2>
+      </div>
       <!-- No stream is opened server-side: the run stream is POST-then-SSE
            (the islands group's reader). The element is the target the island
            appends bounded lines to. -->
-      <pre class="code-view max-h-80 overflow-y-auto p-3" data-op-log aria-live="polite"></pre>
+      <pre class="code-view m-3 max-h-80 overflow-y-auto p-3" data-op-log aria-live="polite"></pre>
     </section>
   </div>
 </div>

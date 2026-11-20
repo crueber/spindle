@@ -41,7 +41,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/crueber/walhub/internal/store"
+	"github.com/crueber/spindle/internal/store"
 )
 
 // TaskState is the lifecycle of a task record.

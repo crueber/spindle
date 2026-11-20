@@ -1,4 +1,4 @@
-module github.com/crueber/walhub
+module github.com/crueber/spindle
 
 go 1.27.0
 

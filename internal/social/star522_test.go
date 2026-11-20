@@ -10,8 +10,8 @@ import (
 	"context"
 	"testing"
 
-	"github.com/crueber/walhub/internal/config"
-	"github.com/crueber/walhub/internal/server/auth"
+	"github.com/crueber/spindle/internal/config"
+	"github.com/crueber/spindle/internal/server/auth"
 )
 
 func TestStarDisabledRefuses(t *testing.T) {

@@ -236,7 +236,7 @@ func sortTreeEntries(entries []TreeEntry) {
 // headers split unambiguously from the 1-char status records. The sha and
 // %cI date contain no NUL/space, so a header is exactly three
 // space-separated fields.
-const treeLogMarker = "WALHUBTREE"
+const treeLogMarker = "SPINDLETREE"
 
 // defaultMaxTreeLog bounds the tree-dates walk when the config carries no
 // positive value (zero-value walView in tests, unset key). Mirrors the
@@ -300,7 +300,7 @@ func assignTreeCommitMeta(entries []TreeEntry, dir string, out []byte) {
 	for _, f := range strings.Split(norm, "\x00") {
 		// Headers split positionally: a MARK record is a commit header only
 		// in status position (!expectPath). In path position the record IS
-		// the touched path — even one literally named "WALHUBTREE <sha>
+		// the touched path — even one literally named "SPINDLETREE <sha>
 		// <date>" (a valid-looking header there must not clobber haveCommit
 		// or poison later attributions; --no-renames emits no rename pairs,
 		// so a status is always followed by exactly one path).

@@ -38,7 +38,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/crueber/walhub/internal/store"
+	"github.com/crueber/spindle/internal/store"
 )
 
 // hostKeyLine is one parsed known_hosts trust line.

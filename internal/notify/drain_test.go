@@ -20,7 +20,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/crueber/walhub/internal/store"
+	"github.com/crueber/spindle/internal/store"
 )
 
 // wedgeStore blocks Get on ctx.Done (a wedged-but-ctx-respecting

@@ -62,7 +62,7 @@ Everything else is additive: new packages, new bucket prefixes, new web/ modules
   `CITokenScope` at `internal/checks/model.go:134`). The server chain
   stays shape-only via the Seam 2 `ExtraCredential` hook
   (`internal/server/auth.go:39-54`, registered in
-  `cmd/walhub/checks.go:chainChecks`); `internal/config` `StaticToken`
+  `cmd/spindle/checks.go:chainChecks`); `internal/config` `StaticToken`
   (`internal/config/config.go:28-34`) is unchanged — CI tokens are bucket
   objects, not config. Rationale: capability is per-repo (the token's
   home object lives in the repo), so a global principal flag would be the
@@ -72,14 +72,14 @@ Everything else is additive: new packages, new bucket prefixes, new web/ modules
   anonymous only on public + `anonymous_read`, host flags always allow),
   the server seam (`internal/server/server.go:50-51,95-97`,
   `internal/server/bind_api.go:57-63,99-107` — nil gate = legacy), wired
-  in composition (`cmd/walhub/collab.go:buildCollab`,
-  `cmd/walhub/serve.go:readGateOf`) and consulted on the git read path
+  in composition (`cmd/spindle/collab.go:buildCollab`,
+  `cmd/spindle/serve.go:readGateOf`) and consulted on the git read path
   (`internal/server/smart.go`), LFS reads (`internal/server/lfs.go:53`),
   and every repo-scoped read endpoint (each package's `CheckRead` seam).
 - **Touch 2 LANDED as specified:** `team:`/`role:` expansion at policy
   load (`internal/policy/expansion.go:9-46`,
   `internal/identity/gate.go:94-192`, expander bound at
-  `cmd/walhub/collab.go:buildCollab` via `apiEnv.GroupExpander`);
+  `cmd/spindle/collab.go:buildCollab` via `apiEnv.GroupExpander`);
   `require_checks` strict inside `protect`
   (`internal/policy/effect_protect.go:15,101-118`) and `required-reviews`
   (`internal/policy/effect_required_reviews.go`) evaluated by the merge
@@ -88,10 +88,10 @@ Everything else is additive: new packages, new bucket prefixes, new web/ modules
   call site `internal/pulls/merge.go:159`); push-time policy stays
   push-enforceable-only — `ProtectEffect.Evaluate` never consults
   `RequireChecks` (`internal/policy/effect_protect.go:154-157`), and the
-  push fence (`cmd/walhub/push_budget_test.go`) fails on any collab key
+  push fence (`cmd/spindle/push_budget_test.go`) fails on any collab key
   touched by a push.
 - **Touch 3 LANDED as specified, in composition:** one block per package
-  (`cmd/walhub/collab.go:chainCollab` — identity, issues, pulls, review,
+  (`cmd/spindle/collab.go:chainCollab` — identity, issues, pulls, review,
   checks, releases, social, notify; `social` is the `internal/social`
   package of doc 07 §§4–6) plus the per-user SSE mounts that ride the
   notify handler (`internal/notify/http.go:tray/stream`,
@@ -131,12 +131,12 @@ Everything else is additive: new packages, new bucket prefixes, new web/ modules
   touch. Disk/memory hold caches only (git materializations, LRUs).
 - **WAL git-only:** no collab package imports `internal/wal`
   (composition owns the registry handle); PR heads publish through the
-  normal WAL funnel as ordinary refs (`cmd/walhub/pulls.go`
+  normal WAL funnel as ordinary refs (`cmd/spindle/pulls.go`
   `pullsPublisher`); `refs/pull/**` is server-managed under a built-in
   policy default (03 Decisions).
 - **Push +0 round trips:** measured — cold push 8 ops, warm push 9 ops,
   0 collab-family keys on either
-  (`cmd/walhub/push_budget_test.go`, EVIDENCE.md E10). The one by-design
+  (`cmd/spindle/push_budget_test.go`, EVIDENCE.md E10). The one by-design
   exception is priced: a `policy.json` carrying `team:`/`role:` pays
   bounded expansion reads (E2); the fence counts them as collab so the
   day a push pays them, the test names the key.

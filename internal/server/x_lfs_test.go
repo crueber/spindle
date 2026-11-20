@@ -14,8 +14,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/crueber/walhub/internal/config"
-	"github.com/crueber/walhub/internal/store"
+	"github.com/crueber/spindle/internal/config"
+	"github.com/crueber/spindle/internal/store"
 )
 
 // lfsOID is a valid sha256 hex oid for body.
@@ -355,8 +355,8 @@ func TestLFSBatchUpstreamKnown(t *testing.T) {
 	defer up.Close()
 	s, _ := newTestServer(t, nil)
 	s.cfg.Upstream.Lfs = up.URL
-	s.cfg.Upstream.TokenEnv = "WALHUB_TEST_UPSTREAM_TOKEN"
-	t.Setenv("WALHUB_TEST_UPSTREAM_TOKEN", "tok-up")
+	s.cfg.Upstream.TokenEnv = "SPINDLE_TEST_UPSTREAM_TOKEN"
+	t.Setenv("SPINDLE_TEST_UPSTREAM_TOKEN", "tok-up")
 	req := httptest.NewRequest("POST", "http://x/o/r.git/info/lfs/objects/batch",
 		strings.NewReader(fmt.Sprintf(`{"operation":"download","objects":[{"oid":%q,"size":0}]}`, oid)))
 	req.Header.Set("Authorization", "Bearer tok123")

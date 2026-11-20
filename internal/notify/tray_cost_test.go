@@ -13,7 +13,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/crueber/walhub/internal/store"
+	"github.com/crueber/spindle/internal/store"
 )
 
 // countStore counts raw store calls (Get/Head/List) around a delegate.

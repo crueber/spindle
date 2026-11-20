@@ -69,7 +69,7 @@ func freePort(t *testing.T) int {
 	return l.Addr().(*net.TCPAddr).Port
 }
 
-// e2eServer is one walhub subprocess. The server listens on 0.0.0.0 (or the
+// e2eServer is one spindle subprocess. The server listens on 0.0.0.0 (or the
 // config's listen address); clients always talk to it over 127.0.0.1.
 type e2eServer struct {
 	t       *testing.T
@@ -81,7 +81,7 @@ type e2eServer struct {
 	stopped bool
 }
 
-// startServer boots the built binary with WALHUB_DATA_DIR and PORT set, and
+// startServer boots the built binary with SPINDLE_DATA_DIR and PORT set, and
 // waits until /healthz answers 200. Killing the process on cleanup is the
 // caller's job via stop() (registered as t.Cleanup by the scenario helpers).
 func startServer(t *testing.T, bin, dataDir string, port int) *e2eServer {
@@ -89,7 +89,7 @@ func startServer(t *testing.T, bin, dataDir string, port int) *e2eServer {
 	logs := &bytes.Buffer{}
 	cmd := exec.Command(bin)
 	cmd.Env = []string{
-		"WALHUB_DATA_DIR=" + dataDir,
+		"SPINDLE_DATA_DIR=" + dataDir,
 		"PORT=" + strconv.Itoa(port),
 		"HOME=" + dataDir,
 		"PATH=" + os.Getenv("PATH"),
@@ -97,7 +97,7 @@ func startServer(t *testing.T, bin, dataDir string, port int) *e2eServer {
 	cmd.Stdout = logs
 	cmd.Stderr = logs
 	if err := cmd.Start(); err != nil {
-		t.Fatalf("start walhub: %v\nlogs:\n%s", err, logs.String())
+		t.Fatalf("start spindle: %v\nlogs:\n%s", err, logs.String())
 	}
 	s := &e2eServer{
 		t:       t,

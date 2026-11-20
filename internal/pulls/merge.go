@@ -9,8 +9,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/crueber/walhub/internal/server/auth"
-	"github.com/crueber/walhub/internal/store"
+	"github.com/crueber/spindle/internal/server/auth"
+	"github.com/crueber/spindle/internal/store"
 )
 
 // This file owns §5 (the pull-merge task), §7 (the pull-fork task), and the

@@ -7,11 +7,11 @@ import (
 	"time"
 	"unicode/utf8"
 
-	walgit "github.com/crueber/walhub/internal/git"
-	"github.com/crueber/walhub/internal/identity"
-	"github.com/crueber/walhub/internal/policy"
-	"github.com/crueber/walhub/internal/server/auth"
-	"github.com/crueber/walhub/internal/store"
+	walgit "github.com/crueber/spindle/internal/git"
+	"github.com/crueber/spindle/internal/identity"
+	"github.com/crueber/spindle/internal/policy"
+	"github.com/crueber/spindle/internal/server/auth"
+	"github.com/crueber/spindle/internal/store"
 )
 
 // This file owns mutation policy: the P6 write gate, tag-name validation,
@@ -234,7 +234,7 @@ func normalizeTagMessage(message string) (string, error) {
 
 // renderTagger synthesizes the tagger line from the authed principal (the
 // Principal carries only Name, no email): `<sanitized-name>
-// <<sanitized-name>@walhub.local>` with server wall-clock time + local tz
+// <<sanitized-name>@spindle.local>` with server wall-clock time + local tz
 // offset. The fixed domain marks the tag server-minted rather than claiming
 // a verified external email. Sanitization strips `<`, `>`, `\n`, `\r`;
 // empty-after-sanitize is a 400.
@@ -254,7 +254,7 @@ func renderTagger(p auth.Principal, now time.Time) (string, error) {
 		offset = -offset
 	}
 	tz := fmt.Sprintf("%s%02d%02d", sign, offset/3600, (offset%3600)/60)
-	return fmt.Sprintf("%s <%s@walhub.local> %d %s", name, name, now.Unix(), tz), nil
+	return fmt.Sprintf("%s <%s@spindle.local> %d %s", name, name, now.Unix(), tz), nil
 }
 
 // renderTagBody renders the canonical mktag stdin bytes (LF, trailing

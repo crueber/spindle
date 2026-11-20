@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"testing"
 
-	"github.com/crueber/walhub/internal/store"
+	"github.com/crueber/spindle/internal/store"
 )
 
 // countingStore tallies backend round trips (E8: the social half —

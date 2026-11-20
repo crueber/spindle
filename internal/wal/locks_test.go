@@ -6,7 +6,7 @@ import (
 	"context"
 	"testing"
 
-	"github.com/crueber/walhub/internal/store/proto"
+	"github.com/crueber/spindle/internal/store/proto"
 	"time"
 )
 

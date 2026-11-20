@@ -17,7 +17,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"github.com/crueber/walhub/internal/config"
+	"github.com/crueber/spindle/internal/config"
 	"io"
 	"io/fs"
 	"os"

@@ -3,7 +3,7 @@ package bundle
 import (
 	"testing"
 
-	"github.com/crueber/walhub/internal/store/proto"
+	"github.com/crueber/spindle/internal/store/proto"
 )
 
 // TestBaseForWorkedWeek is the §8.6 worked week (W = weekly bundle of Sunday

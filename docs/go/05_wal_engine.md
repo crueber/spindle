@@ -1,8 +1,8 @@
 # 05 — WAL engine (internal/wal)
 
-> Source: MASTER_RUST_SPEC.md §6 (6.1–6.9), §3.2 (consistency model) · Status: normative for the walhub Go implementation.
+> Source: MASTER_RUST_SPEC.md §6 (6.1–6.9), §3.2 (consistency model) · Status: normative for the spindle Go implementation.
 
-This is the heart of the system. Everything here lives in `internal/wal` (module `github.com/crueber/walhub`), uses only stdlib plus the two allowed third-party modules (`golang.org/x/net`, `github.com/BurntSushi/toml`), and talks to the object store through the `internal/store` interface (see 03_store_backends.md). Git operations are always the `git` binary with exact argv (see 04_git.md). Wire formats — the protobuf messages, the key layout, the framed log segments — are byte-compatible with the Rust implementation; see 02 for the hand-rolled protobuf codec. The concurrency playbook (single-flight, try-lock patterns, bounded channels, shutdown paths) is 13_concurrency.md; this doc references it instead of re-deriving it.
+This is the heart of the system. Everything here lives in `internal/wal` (module `github.com/crueber/spindle`), uses only stdlib plus the two allowed third-party modules (`golang.org/x/net`, `github.com/BurntSushi/toml`), and talks to the object store through the `internal/store` interface (see 03_store_backends.md). Git operations are always the `git` binary with exact argv (see 04_git.md). Wire formats — the protobuf messages, the key layout, the framed log segments — are byte-compatible with the Rust implementation; see 02 for the hand-rolled protobuf codec. The concurrency playbook (single-flight, try-lock patterns, bounded channels, shutdown paths) is 13_concurrency.md; this doc references it instead of re-deriving it.
 
 ## 5.0 The consistency model (from §3.2, restated as Go rules)
 
@@ -330,7 +330,7 @@ The burned list lives in the batch context only; persistence comes from the mani
 
 - `readLog(from, to?)`: manifest via freshness check; overlapping segments fetched **sequentially** (read-only path, not latency-critical), frames filtered to `[from, to]` inclusive, sorted by `seq`. Never mutates anything.
 - `refsAtSeq(seq)` / `refsAsOf(t)`: pure in-memory fold — start from the newest checkpoint usable at the cut (seq-cut: `cp.seq ≤ seq`; time-cut: `checkpoint.as_of ≤ t`), GET its snapshot, then apply entries in order until the cut (per entry: symbolic → `head_target`; zero `new_oid` → remove; else set with `new_peeled`). Time-cut reads to head and breaks by `created_at` (an entry with missing `created_at` never breaks the walk). Error `refs at seq N are not replayable` when the cut predates `min_seq` with no usable checkpoint — the weekly compose needs refs at the base pack's seq, which is why `first_state_at`/`as_of` exist.
-- `walhub wal materialize --at-seq N` builds a standalone repo directory from checkpoint + replayed txns + the pack set at that seq (fetched from the store or copied from the local copy), refs applied LAST.
+- `spindle wal materialize --at-seq N` builds a standalone repo directory from checkpoint + replayed txns + the pack set at that seq (fetched from the store or copied from the local copy), refs applied LAST.
 
 ## 5.7 Remote reader (§6.7)
 

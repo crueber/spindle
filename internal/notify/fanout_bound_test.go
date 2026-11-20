@@ -23,8 +23,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/crueber/walhub/internal/identity"
-	"github.com/crueber/walhub/internal/store"
+	"github.com/crueber/spindle/internal/identity"
+	"github.com/crueber/spindle/internal/store"
 )
 
 // fanoutGoroutineBound caps the process-wide goroutine delta observed

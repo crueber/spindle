@@ -5,8 +5,8 @@ import (
 	"html/template"
 	"net/http"
 
-	"github.com/crueber/walhub/internal/pages"
-	"github.com/crueber/walhub/internal/server/auth"
+	"github.com/crueber/spindle/internal/pages"
+	"github.com/crueber/spindle/internal/server/auth"
 )
 
 // Server is the page provider. One instance per process; routes are registered

@@ -7,7 +7,7 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/crueber/walhub/internal/store"
+	"github.com/crueber/spindle/internal/store"
 )
 
 // fakeForksCounter records IncForks/DecForks calls (the 07 social.json

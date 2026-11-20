@@ -1,13 +1,13 @@
 # 12 — GitHub-style runners: researched design plan (NO implementation until reviewed)
 
-> Forgejo [`crueber/walhub#288`](https://github.com/crueber/walhub/issues/288) · Status: **DRAFT PLAN — awaiting review, do not implement.**
+> Forgejo [`crueber/spindle#288`](https://github.com/crueber/spindle/issues/288) · Status: **DRAFT PLAN — awaiting review, do not implement.**
 > Reviewer: **Chris (crueber)**. This document is normative on conflict once reviewed (the Feature 11
 > precedent: plan revision + plan review win). Until then it is a proposal and **no code may land**
 > (`internal/`, `web/`, config, CLI — all frozen pending review).
 
-walhub today **stores** CI results and gates merges on them; it never runs CI (features README P9,
+spindle today **stores** CI results and gates merges on them; it never runs CI (features README P9,
 doc 05). This plan designs the other half: a GitHub-Actions-shaped **runner system** — builds and
-jobs that execute as part of walhub and report into the existing checks/statuses surface
+jobs that execute as part of spindle and report into the existing checks/statuses surface
 (`internal/checks`). The coordinator state is bucket-native (AGENTS.md law 4); execution happens
 outside the server's trust boundary except for the explicitly trusted R1 slice (§8).
 
@@ -97,19 +97,19 @@ injects them as (masked) env. Observations adopted:
   with hints AND coordinator scrubs stored chunks on read-back), and stuck agents holding jobs
   forever (→ D3 lease expiry + steal, never infinite claim).
 
-### 1.4 What walhub invents (nothing else fits the bucket)
+### 1.4 What spindle invents (nothing else fits the bucket)
 
 The queue, leases, logs, artifacts, and run headers as **bucket objects with CAS discipline**
-(§3–§6). No prior art does exactly this because every prior art has a database; walhub doesn't
+(§3–§6). No prior art does exactly this because every prior art has a database; spindle doesn't
 (law 4). The CAS-claim protocol (D3) and chunked-immutable log layout (D7) are the two invented
-pieces, and both are compositions of already-shipped walhub patterns (mirror lease, P3 immutable
+pieces, and both are compositions of already-shipped spindle patterns (mirror lease, P3 immutable
 events + CAS'd header).
 
 ## 2. Runner model — D1 (pull-based external runners; server coordinates, never dials)
 
-**D1: the coordinator/runner split.** walhub ships a **coordinator** (queue, claims, heartbeats,
+**D1: the coordinator/runner split.** spindle ships a **coordinator** (queue, claims, heartbeats,
 log/artifact intake, checks reporting — all bucket state + HTTP handlers in a new
-`internal/actions` package). **Execution** happens in runner processes that are NOT walhub code in
+`internal/actions` package). **Execution** happens in runner processes that are NOT spindle code in
 v1: an out-of-tree runner agent (documented protocol, §4) plus, for R1 only, operator-triggered
 server-side runs of trusted code (§8). The server never opens a connection to a runner (NAT,
 disposability — §1.1 finding 2). Runners poll; the coordinator answers.
@@ -221,7 +221,7 @@ handler-side capability checks, startup prefix-overlap assertion):
 
 ## 5. Job definition — D5 (in-repo workflows, small schema, label scheduling)
 
-**D5: workflows live in-repo at `.walhub/workflows/*.yml`** (versioned with the code under test,
+**D5: workflows live in-repo at `.spindle/workflows/*.yml`** (versioned with the code under test,
 audited via git history, no store-side workflow config in v1 — the trigger's `head_sha` pins the
 exact file revision; re-runs use the pinned sha, never floating HEAD).
 
@@ -261,7 +261,7 @@ jobs:
 
 **D6: execution environment + secrets.** The coordinator is backend-agnostic: the job plan says
 *what* (steps, env, workdir); the runner decides *how* (bare subprocess minimum viable; containers
-its own choice — §10: no runtime dependency on either side of the walhub repo). The reference
+its own choice — §10: no runtime dependency on either side of the spindle repo). The reference
 runner (out-of-tree, documented alongside the protocol) supports bare-subprocess + Docker backends.
 
 - `checkout` is coordinator-defined: clone URL + `wjt_` token + pinned sha, shallow default
@@ -271,7 +271,7 @@ runner (out-of-tree, documented alongside the protocol) supports bare-subprocess
 - **Secrets** (the object-store-only design problem, not hand-waved): repo secrets are sealed
   envelopes `actions/secrets/<name>.json` = `{name, sealed (secretbox, nonce-prefixed, base64),
   created_by, updated_at, version}`. Sealing key: 32-byte server key from **env
-  `WALHUB_ACTIONS_SECRETS_KEY` or `[actions] secrets_key_file`** (operator-managed, never in the
+  `SPINDLE_ACTIONS_SECRETS_KEY` or `[actions] secrets_key_file`** (operator-managed, never in the
   bucket, never logged); crypto is `golang.org/x/crypto/nacl/secretbox` — **already inside the law-1
   budget** (SSH amendment), so no amendment needed. No key configured → secrets API answers 503
   with "secrets not configured" (fail closed; the mirror public-upstreams-only posture generalized:
@@ -414,7 +414,7 @@ Open questions (need Chris's call before implementation planning):
   secrets passed at dispatch time (works for `workflow_dispatch`, nothing else).
 - **Q3.** Org-shared runners: per-repo-only v1 forces runner-per-repo sprawl for orgs; is the
   added token-scope complexity (`wrt_` bound to org + repo allowlist) worth pulling into R2?
-- **Q4.** Workflow file location: `.walhub/workflows/` (proposed — avoids colliding with a future
+- **Q4.** Workflow file location: `.spindle/workflows/` (proposed — avoids colliding with a future
   GitHub-compat import story for `.github/workflows/`) vs `.github/workflows/` (compat bait).
 - **Q5.** Log/artifacts retention + caps defaults (§6–§7 numbers are proposals, all `[actions]`
   overridable): are 30 d / 64 MiB / 2 GiB sane for this project's own hosting bill?
@@ -437,7 +437,7 @@ EVIDENCE.md entries for queue budgets at both population sizes.
 workflows — hand-rolled minimal parser (the workflow schema is fixed-shape; `BurntSushi/toml`
 precedent shows the house style is vendored-format-parsing, and YAML-subset parsing of a strict
 schema is smaller than a vendored YAML library) or, if review prefers, workflows in TOML
-(`.walhub/workflows/*.toml` — zero parser code, `BurntSushi/toml` already in budget; Q6 for
+(`.spindle/workflows/*.toml` — zero parser code, `BurntSushi/toml` already in budget; Q6 for
 Chris — **Q6.** YAML-subset hand-roll vs TOML workflows?). Secretbox is `golang.org/x/crypto`
 (already amended in). Cron math reuses `internal/bundle` (mirror). Reference runner is out-of-tree
 and may depend on whatever its own README justifies — it is not the server and never enters the
@@ -449,7 +449,7 @@ specified here never trigger it.
 ## Decisions & deviations from the Rust design
 
 - **(D1, 2026-09-10, #288 plan).** Pull-based external runners; coordinator never dials. Rationale:
-  runners live behind NAT on disposable hosts (walhub instances are disposable too); the GitHub +
+  runners live behind NAT on disposable hosts (spindle instances are disposable too); the GitHub +
   act_runner + Woodpecker protocols all independently converged on poll-only — three existence
   proofs beat one theory.
 - **(D2, 2026-09-10, #288 plan).** Bucket-native queue + run headers with CAS discipline (new
@@ -463,7 +463,7 @@ specified here never trigger it.
 - **(D4, 2026-09-10, #288 plan).** `art_`/`wrt_`/`wjt_` token shapes; machine users rejected;
   frozen Principal untouched (05 precedent). Rationale: narrowest blast radius per credential class;
   role-lattice conflation is a worse bug than a third token prefix.
-- **(D5, 2026-09-10, #288 plan).** In-repo `.walhub/workflows/*.yml`, strict small schema,
+- **(D5, 2026-09-10, #288 plan).** In-repo `.spindle/workflows/*.yml`, strict small schema,
   label-subset scheduling; arbitrary `uses:`, matrices, schedules deferred per §8/§9. Rationale:
   the trigger sha pins the workflow revision (auditability); the scheduler stays FIFO+labels
   (act_runner shape) until load proves otherwise.

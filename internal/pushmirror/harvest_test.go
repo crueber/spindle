@@ -20,7 +20,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/crueber/walhub/internal/store"
+	"github.com/crueber/spindle/internal/store"
 )
 
 // stubGitWithLearned installs a stub git binary on svc that answers

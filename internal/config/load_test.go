@@ -13,7 +13,7 @@ import (
 
 func tmpDataDir(t *testing.T) string {
 	t.Helper()
-	dir, err := os.MkdirTemp("", "walhub-data-*")
+	dir, err := os.MkdirTemp("", "spindle-data-*")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -40,7 +40,7 @@ func TestLoadExplicitMissingFileIsFatal(t *testing.T) {
 func TestLoadExplicitDevNullIsDefaultsPlusEnv(t *testing.T) {
 	dir := tmpDataDir(t)
 	env := func(key string) string {
-		if key == "WALHUB_DATA_DIR" {
+		if key == "SPINDLE_DATA_DIR" {
 			return dir
 		}
 		return ""
@@ -62,7 +62,7 @@ func TestLoadExplicitDevNullIsDefaultsPlusEnv(t *testing.T) {
 func TestLoadMissingDefaultFileIsFirstRun(t *testing.T) {
 	dir := tmpDataDir(t)
 	env := func(key string) string {
-		if key == "WALHUB_DATA_DIR" {
+		if key == "SPINDLE_DATA_DIR" {
 			return dir
 		}
 		return ""
@@ -95,7 +95,7 @@ func TestLoadWalgitTomlAlias(t *testing.T) {
 	dir := tmpDataDir(t)
 	writeConfig(t, dir, ConfigAliasName, "[server]\nlisten = \"127.0.0.1:9999\"\n")
 	env := func(key string) string {
-		if key == "WALHUB_DATA_DIR" {
+		if key == "SPINDLE_DATA_DIR" {
 			return dir
 		}
 		return ""
@@ -117,8 +117,8 @@ func TestLoadFilePlusEnvWins(t *testing.T) {
 	dir := tmpDataDir(t)
 	writeConfig(t, dir, ConfigFileName, "[store]\nbucket = \"from-file\"\n")
 	path := filepath.Join(dir, ConfigFileName)
-	t.Setenv("WALHUB__STORE__BUCKET", "from-env")
-	t.Setenv("WALHUB_DATA_DIR", dir)
+	t.Setenv("SPINDLE__STORE__BUCKET", "from-env")
+	t.Setenv("SPINDLE_DATA_DIR", dir)
 	t.Setenv("PORT", "9999")
 	c, _, err := Load([]string{path}, os.Getenv)
 	if err != nil {
@@ -139,7 +139,7 @@ func TestLoadPortLockstepRewritesLoopbackPublicURL(t *testing.T) {
 listen = "127.0.0.1:8080"
 public_url = "http://127.0.0.1:8080"
 `)
-	t.Setenv("WALHUB_DATA_DIR", dir)
+	t.Setenv("SPINDLE_DATA_DIR", dir)
 	t.Setenv("PORT", "9000")
 	c, _, err := Load([]string{filepath.Join(dir, ConfigFileName)}, os.Getenv)
 	if err != nil {
@@ -200,9 +200,9 @@ func TestConfigFilePointer(t *testing.T) {
 		ok      bool
 	}{
 		{name: "none", environ: nil, want: "", ok: false},
-		{name: "primary", environ: []string{"WALHUB_CONFIG=/etc/walhub.toml"}, want: "/etc/walhub.toml", ok: true},
+		{name: "primary", environ: []string{"SPINDLE_CONFIG=/etc/spindle.toml"}, want: "/etc/spindle.toml", ok: true},
 		{name: "legacy fallback", environ: []string{"WALGIT_CONFIG=/etc/walgit.toml"}, want: "/etc/walgit.toml", ok: true},
-		{name: "primary beats legacy", environ: []string{"WALHUB_CONFIG=/a.toml", "WALGIT_CONFIG=/b.toml"}, want: "/a.toml", ok: true},
+		{name: "primary beats legacy", environ: []string{"SPINDLE_CONFIG=/a.toml", "WALGIT_CONFIG=/b.toml"}, want: "/a.toml", ok: true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -215,8 +215,8 @@ func TestConfigFilePointer(t *testing.T) {
 }
 
 func TestResolveDataDir(t *testing.T) {
-	if got := ResolveDataDir(getenvFrom([]string{"WALHUB_DATA_DIR=/data"})); got != "/data" {
-		t.Fatalf("WALHUB_DATA_DIR ignored: %q", got)
+	if got := ResolveDataDir(getenvFrom([]string{"SPINDLE_DATA_DIR=/data"})); got != "/data" {
+		t.Fatalf("SPINDLE_DATA_DIR ignored: %q", got)
 	}
 	got := ResolveDataDir(func(string) string { return "" })
 	if !filepath.IsAbs(got) {
@@ -262,7 +262,7 @@ func TestSaveSetupWritesAtomicallyWith0600(t *testing.T) {
 	if err := SaveSetup(c, dir); err != nil {
 		t.Fatalf("SaveSetup: %v", err)
 	}
-	path := filepath.Join(dir, "walhub.toml")
+	path := filepath.Join(dir, "spindle.toml")
 	fi, err := os.Stat(path)
 	if err != nil {
 		t.Fatalf("saved file missing: %v", err)
@@ -270,7 +270,7 @@ func TestSaveSetupWritesAtomicallyWith0600(t *testing.T) {
 	if perm := fi.Mode().Perm(); perm != 0o600 {
 		t.Fatalf("perm = %v, want 0600", perm)
 	}
-	if _, err := os.Stat(filepath.Join(dir, "walhub.toml.tmp")); !errors.Is(err, os.ErrNotExist) {
+	if _, err := os.Stat(filepath.Join(dir, "spindle.toml.tmp")); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("tmp file left behind: %v", err)
 	}
 	// The saved file joins the ordinary ladder.
@@ -290,7 +290,7 @@ func TestSaveSetupRejectsInvalidConfig(t *testing.T) {
 	if err := SaveSetup(c, dir); err == nil {
 		t.Fatal("SaveSetup must refuse an invalid config")
 	}
-	if _, err := os.Stat(filepath.Join(dir, "walhub.toml")); !errors.Is(err, os.ErrNotExist) {
+	if _, err := os.Stat(filepath.Join(dir, "spindle.toml")); !errors.Is(err, os.ErrNotExist) {
 		t.Fatal("invalid submission must write nothing")
 	}
 }
@@ -562,16 +562,16 @@ func TestSaveSetupIOErrors(t *testing.T) {
 	dir := tmpDataDir(t)
 	c := FirstRunDefaults(dir)
 
-	// walhub.toml.tmp already exists as a directory → write fails.
-	if err := os.Mkdir(filepath.Join(dir, "walhub.toml.tmp"), 0o700); err != nil {
+	// spindle.toml.tmp already exists as a directory → write fails.
+	if err := os.Mkdir(filepath.Join(dir, "spindle.toml.tmp"), 0o700); err != nil {
 		t.Fatal(err)
 	}
 	if err := SaveSetup(c, dir); err == nil || !strings.Contains(err.Error(), "write config") {
 		t.Fatalf("err = %v, want write config error", err)
 	}
 
-	// walhub.toml exists as a directory → rename fails.
-	if err := os.Mkdir(filepath.Join(dir, "walhub.toml"), 0o700); err != nil {
+	// spindle.toml exists as a directory → rename fails.
+	if err := os.Mkdir(filepath.Join(dir, "spindle.toml"), 0o700); err != nil {
 		t.Fatal(err)
 	}
 	if err := SaveSetup(c, dir); err == nil || !strings.Contains(err.Error(), "rename") {
@@ -580,11 +580,11 @@ func TestSaveSetupIOErrors(t *testing.T) {
 }
 
 func TestResolveDataDirNoHome(t *testing.T) {
-	t.Setenv("WALHUB_DATA_DIR", "")
+	t.Setenv("SPINDLE_DATA_DIR", "")
 	t.Setenv("HOME", "")
 	t.Setenv("KUBERNETES_SERVICE_HOST", "")
-	if got := ResolveDataDir(func(string) string { return "" }); got != "/var/lib/walhub" {
-		t.Fatalf("no-home data dir = %q, want /var/lib/walhub", got)
+	if got := ResolveDataDir(func(string) string { return "" }); got != "/var/lib/spindle" {
+		t.Fatalf("no-home data dir = %q, want /var/lib/spindle", got)
 	}
 }
 
@@ -610,12 +610,12 @@ func TestLoadEnvAndPortErrors(t *testing.T) {
 	dir := tmpDataDir(t)
 	path := writeConfig(t, dir, ConfigFileName, "[server]\nlisten = \"127.0.0.1:8080\"\n")
 
-	t.Setenv("WALHUB_DATA_DIR", dir)
-	t.Setenv("WALHUB__SERVER__ROLES", "serve") // bare string into []string → fatal
+	t.Setenv("SPINDLE_DATA_DIR", dir)
+	t.Setenv("SPINDLE__SERVER__ROLES", "serve") // bare string into []string → fatal
 	if _, _, err := Load([]string{path}, os.Getenv); err == nil {
 		t.Fatal("want env override error from Load")
 	}
-	os.Unsetenv("WALHUB__SERVER__ROLES")
+	os.Unsetenv("SPINDLE__SERVER__ROLES")
 
 	t.Setenv("PORT", "notaport")
 	if _, _, err := Load([]string{path}, os.Getenv); err == nil {

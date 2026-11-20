@@ -5,8 +5,8 @@ import (
 	"errors"
 	"time"
 
-	"github.com/crueber/walhub/internal/store"
-	"github.com/crueber/walhub/internal/store/proto"
+	"github.com/crueber/spindle/internal/store"
+	"github.com/crueber/spindle/internal/store/proto"
 )
 
 // Bundle lease semantics (§8.9.1 + doc decisions): cross-instance exclusion on

@@ -22,17 +22,17 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/crueber/walhub/internal/api"
-	"github.com/crueber/walhub/internal/checks"
-	"github.com/crueber/walhub/internal/git"
-	"github.com/crueber/walhub/internal/identity"
-	"github.com/crueber/walhub/internal/issues"
-	"github.com/crueber/walhub/internal/policy"
-	"github.com/crueber/walhub/internal/pulls"
-	"github.com/crueber/walhub/internal/releases"
-	"github.com/crueber/walhub/internal/review"
-	"github.com/crueber/walhub/internal/server/auth"
-	"github.com/crueber/walhub/internal/store"
+	"github.com/crueber/spindle/internal/api"
+	"github.com/crueber/spindle/internal/checks"
+	"github.com/crueber/spindle/internal/git"
+	"github.com/crueber/spindle/internal/identity"
+	"github.com/crueber/spindle/internal/issues"
+	"github.com/crueber/spindle/internal/policy"
+	"github.com/crueber/spindle/internal/pulls"
+	"github.com/crueber/spindle/internal/releases"
+	"github.com/crueber/spindle/internal/review"
+	"github.com/crueber/spindle/internal/server/auth"
+	"github.com/crueber/spindle/internal/store"
 )
 
 // postH sends a form POST with extra headers (Origin overrides included).
@@ -801,7 +801,7 @@ func TestCoverageCollabReleaseBranches(t *testing.T) {
 
 	// An unwritable temp dir means the upload cannot be staged: the page says
 	// so (503) instead of a bare 500.
-	t.Setenv("TMPDIR", "/nonexistent/walhub-tmp")
+	t.Setenv("TMPDIR", "/nonexistent/spindle-tmp")
 	rec = f.rawPostH("/acme/widgets/releases/v1.2.3/assets", mw.FormDataContentType(), buf.Bytes(), nil)
 	wantStatus(t, rec, http.StatusServiceUnavailable)
 	wantContains(t, rec, "could not stage the upload")

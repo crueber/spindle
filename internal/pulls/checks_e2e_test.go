@@ -6,8 +6,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/crueber/walhub/internal/checks"
-	"github.com/crueber/walhub/internal/server/auth"
+	"github.com/crueber/spindle/internal/checks"
+	"github.com/crueber/spindle/internal/server/auth"
 )
 
 // fakeCommits resolves any well-formed sha (the e2e pins the head sha

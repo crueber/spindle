@@ -1,4 +1,4 @@
-// Package server implements the walhub HTTP server (doc 06_server_http.md):
+// Package server implements the spindle HTTP server (doc 06_server_http.md):
 // the ordered middleware chain (§2.2), the chi route tree (§3), git smart HTTP
 // (§4), immutable static objects (§5), LFS (§6), auth in all three modes (§8),
 // setup/bootstrap (§3.4), health/metrics/startup (§10), and
@@ -17,11 +17,11 @@ import (
 
 	"time"
 
-	"github.com/crueber/walhub/internal/api"
-	"github.com/crueber/walhub/internal/config"
-	"github.com/crueber/walhub/internal/git"
-	"github.com/crueber/walhub/internal/pages"
-	"github.com/crueber/walhub/internal/store"
+	"github.com/crueber/spindle/internal/api"
+	"github.com/crueber/spindle/internal/config"
+	"github.com/crueber/spindle/internal/git"
+	"github.com/crueber/spindle/internal/pages"
+	"github.com/crueber/spindle/internal/store"
 )
 
 // ServerKind is the "<kind>" of the Server header (§2.2 #4).
@@ -144,11 +144,11 @@ type Options struct {
 	// avatar generation for users without one. Nil → no generation
 	// (tests, setup-only). The hook MUST NOT block — it only enqueues
 	// (identity.EnsureAvatarAsync); the login response already
-	// answered. Wired by composition (cmd/walhub); server never
+	// answered. Wired by composition (cmd/spindle); server never
 	// imports the identity package (law 8).
 	AvatarHook func(username, email string)
 	// OnPush fires after a successful client push lands (Forgejo #623);
-	// nil → no notification. Wired by composition (cmd/walhub); server
+	// nil → no notification. Wired by composition (cmd/spindle); server
 	// never imports the pushmirror package (law 8).
 	OnPush func(id git.RepoId)
 }
@@ -223,7 +223,7 @@ func (s *Server) Version() string {
 
 // serverHeaderValue is `walgit/<version> (<kind>; <name>[/<instance>])`.
 func (s *Server) serverHeaderValue() string {
-	v := "walgit/" + s.Version() + " (" + string(s.kind) + "; walhub"
+	v := "walgit/" + s.Version() + " (" + string(s.kind) + "; spindle"
 	if s.instance != "" {
 		v += "/" + s.instance
 	}

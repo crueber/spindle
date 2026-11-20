@@ -9,14 +9,14 @@ import (
 	"strings"
 	"time"
 
-	"github.com/crueber/walhub/internal/bundle"
-	"github.com/crueber/walhub/internal/store"
-	"github.com/crueber/walhub/internal/wal"
+	"github.com/crueber/spindle/internal/bundle"
+	"github.com/crueber/spindle/internal/store"
+	"github.com/crueber/spindle/internal/wal"
 )
 
 // KindMirrorSync is the Seam 5 task kind: one value, registered once
 // from composition (the maintain.RegisterKind panic-on-duplicate
-// contract — RegisterKind below, called once from cmd/walhub).
+// contract — RegisterKind below, called once from cmd/spindle).
 const KindMirrorSync = "mirror-sync"
 
 // Schedule presets (R1 (b)/(d)): fixed names only — no freeform cron

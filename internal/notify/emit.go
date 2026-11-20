@@ -37,11 +37,11 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/crueber/walhub/internal/store"
+	"github.com/crueber/spindle/internal/store"
 )
 
 // Emission is one source mutation translated for fan-out. Composition
-// (cmd/walhub/notify.go) builds these from the per-package NotifyEvents
+// (cmd/spindle/notify.go) builds these from the per-package NotifyEvents
 // — notify never imports the feature packages (09 §2), and the feature
 // packages never import notify.
 type Emission struct {

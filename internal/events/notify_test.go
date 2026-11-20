@@ -10,8 +10,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/crueber/walhub/internal/store"
-	"github.com/crueber/walhub/internal/store/proto"
+	"github.com/crueber/spindle/internal/store"
+	"github.com/crueber/spindle/internal/store/proto"
 )
 
 func manifestKey(repo string) string { return "repos/" + repo + "/manifest.pb" }
@@ -23,7 +23,7 @@ func TestRepoFromKey(t *testing.T) {
 		ok   bool
 	}{
 		{"repos/acme/monorepo/manifest.pb", "acme/monorepo", true},
-		{"buckets/walhub/repos/acme/monorepo/manifest.pb", "acme/monorepo", true},
+		{"buckets/spindle/repos/acme/monorepo/manifest.pb", "acme/monorepo", true},
 		{"some/prefix/repos/a/b/manifest.pb", "a/b", true},
 		{"repos/acme/monorepo/other.pb", "", false},
 		{"repos/acme/manifest.pb", "", false},    // missing name

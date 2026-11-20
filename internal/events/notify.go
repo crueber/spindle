@@ -57,7 +57,7 @@ type s3Record struct {
 	} `json:"s3"`
 }
 
-// glueBody is the walhub glue: {"key": "..."} or {"repo": "o/r"}.
+// glueBody is the spindle glue: {"key": "..."} or {"repo": "o/r"}.
 type glueBody struct {
 	Key  string `json:"key"`
 	Repo string `json:"repo"`

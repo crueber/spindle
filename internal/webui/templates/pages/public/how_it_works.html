@@ -4,29 +4,33 @@
      (the two inline SVGs carry a <details> text fallback — never GIF-only).
      390px: single column; SVG figures are fluid (width 100%), code wraps. */}}
 <div class="how-page mx-auto max-w-4xl">
-  <section class="py-10 text-center">
-    <h1 class="text-3xl font-bold tracking-tight">How walhub works</h1>
+  <section class="border-b border-[var(--pd-line)] py-10 text-center">
+    <p class="eyebrow">deep dive</p>
+    <h1 class="mt-2 text-3xl font-semibold tracking-tight">How spindle works</h1>
     {{/* Trace: README L3–5; AGENTS.md law 4 ("The bucket is the repository"). */}}
     <p class="muted mx-auto mt-4 max-w-2xl text-sm leading-relaxed">
-      walhub is a git host whose only database is an object store. Every repository's state —
+      spindle is a git host whose only database is an object store. Every repository's state —
       refs, packs, config, policy — lives as objects in a bucket (filesystem, S3, or GCS).
       Instances are disposable: wipe one and you lose nothing but warmth.
     </p>
     {{/* Wire-compat wording copies Landing/README verbatim — never paraphrased stronger. */}}
-    <p class="muted mt-4 text-xs">
+    <p class="muted mt-4 font-mono text-xs">
       Object-protocol compliant with walgit — bucket layout, protobuf wire encoding, and git wire
       behavior follow walgit's formats.
     </p>
-    <p class="muted mt-3 text-sm">
-      <a class="hover:underline" href="/">← walhub in 30 seconds</a>
+    <p class="mt-3 text-sm">
+      <a class="link" href="/">← spindle in 30 seconds</a>
     </p>
-    <nav class="muted mt-6 flex flex-wrap items-center justify-center gap-x-4 gap-y-2 text-sm" aria-label="On this page">
-      <a class="hover:underline" href="#idea">the idea</a>
-      <a class="hover:underline" href="#wal">the WAL</a>
-      <a class="hover:underline" href="#push">push</a>
-      <a class="hover:underline" href="#read">fetch</a>
-      <a class="hover:underline" href="#checkpoints">checkpoints</a>
-      <a class="hover:underline" href="#boundaries">boundaries</a>
+    <nav class="mt-6 border-t border-[var(--pd-line)] pt-4" aria-label="On this page">
+      <p class="eyebrow">on this page</p>
+      <div class="mt-2 flex flex-wrap items-center justify-center gap-x-4 gap-y-2 font-mono text-xs">
+        <a class="text-[var(--pd-text-2)] hover:text-[var(--pd-text)]" href="#idea">the idea</a>
+        <a class="text-[var(--pd-text-2)] hover:text-[var(--pd-text)]" href="#wal">the WAL</a>
+        <a class="text-[var(--pd-text-2)] hover:text-[var(--pd-text)]" href="#push">push</a>
+        <a class="text-[var(--pd-text-2)] hover:text-[var(--pd-text)]" href="#read">fetch</a>
+        <a class="text-[var(--pd-text-2)] hover:text-[var(--pd-text)]" href="#checkpoints">checkpoints</a>
+        <a class="text-[var(--pd-text-2)] hover:text-[var(--pd-text)]" href="#boundaries">boundaries</a>
+      </div>
     </nav>
   </section>
 
@@ -43,11 +47,11 @@
         {{/* Trace: 02 §2.1 key table (repos/&lt;owner&gt;/&lt;repo&gt;/…) + §2.6 ObjectStore; law 4. */}}
         <p>
           There is no database to run, back up, or scale: anything that must survive a restart is
-          an object under <code>repos/&lt;owner&gt;/&lt;repo&gt;/</code>; disk and memory are
-          caches. Any S3, GCS, or filesystem works behind one <code>ObjectStore</code> contract
+          an object under <code class="font-mono text-xs">repos/&lt;owner&gt;/&lt;repo&gt;/</code>; disk and memory are
+          caches. Any S3, GCS, or filesystem works behind one <code class="font-mono text-xs">ObjectStore</code> contract
           (CAS, conditional GET, compose, leases).
         </p>
-        <figure class="concept-figure overflow-hidden rounded-xl border border-zinc-800 bg-[#09090b]">
+        <figure class="overflow-hidden border border-[var(--pd-line)] bg-[var(--pd-canvas)]">
           <img src="/_ui/concepts/bucket-still.gif" alt="Animation: one bucket holds refs, packs, config, and policy while a server instance above it disappears and a fresh instance connects to the same bucket with nothing lost." width="640" height="360" loading="lazy" decoding="async">
           <figcaption class="concept-caption muted px-4 py-2 text-sm">No SQL, no Redis. Kill the instance; the bucket doesn't notice.</figcaption>
         </figure>
@@ -69,43 +73,42 @@
       <h2 class="text-xl font-semibold tracking-tight">What the WAL is: the log of manifest mutations</h2>
       <div class="mt-3 space-y-3 break-words text-sm leading-relaxed">
         <p>
-          The <strong>manifest</strong> (<code>repos/&lt;o&gt;/&lt;r&gt;/manifest.pb</code>) is the
-          linearization point: <code>head_seq</code>, <code>min_seq</code>, the checkpoint pointer,
-          the <code>log_segments</code> covering [<code>min_seq</code>, <code>head_seq</code>], the
+          The <strong>manifest</strong> (<code class="font-mono text-xs">repos/&lt;o&gt;/&lt;r&gt;/manifest.pb</code>) is the
+          linearization point: <code class="font-mono text-xs">head_seq</code>, <code class="font-mono text-xs">min_seq</code>, the checkpoint pointer,
+          the <code class="font-mono text-xs">log_segments</code> covering [<code class="font-mono text-xs">min_seq</code>, <code class="font-mono text-xs">head_seq</code>], the
           denormalized live pack set, settings, and a monotonic revision.
         </p>
         <p>
-          The <strong>WAL</strong> is the append-only stream of <code>LogEntry</code> frames in
-          <code>log/&lt;seq:016x&gt;.pb</code> segments (uvarint-length-prefixed; a partial
+          The <strong>WAL</strong> is the append-only stream of <code class="font-mono text-xs">LogEntry</code> frames in
+          <code class="font-mono text-xs">log/&lt;seq:016x&gt;.pb</code> segments (uvarint-length-prefixed; a partial
           trailing frame is tolerated on appendable segments). Five entry kinds:
-          <code>PUSH</code> (pack + ref txn), <code>COMPACT</code> (new pack superseding old),
-          <code>REF_UPDATE</code> (ref-only), <code>CHECKPOINT</code> (marker),
-          <code>SETTINGS</code> (history — the latest rides the manifest inline).
+          <code class="font-mono text-xs">PUSH</code> (pack + ref txn), <code class="font-mono text-xs">COMPACT</code> (new pack superseding old),
+          <code class="font-mono text-xs">REF_UPDATE</code> (ref-only), <code class="font-mono text-xs">CHECKPOINT</code> (marker),
+          <code class="font-mono text-xs">SETTINGS</code> (history — the latest rides the manifest inline).
         </p>
         <p>
           <strong>The manifest CAS is the single commit point.</strong> A manifest write is always
-          conditional (<code>PutUpdate(version)</code> / <code>PutCreate</code>); a 412 is the
+          conditional (<code class="font-mono text-xs">PutUpdate(version)</code> / <code class="font-mono text-xs">PutCreate</code>); a 412 is the
           normal contention signal, never an error.
         </p>
 
         {{/* Trace: docs/go/05_wal_engine.md §5.3.2 (publish ladder) + §5.4 (burn protocol);
              02 §2.6 (PutCreate/PutUpdate CAS). */}}
         <figure class="card my-4 p-4">
-          <svg viewBox="0 0 640 236" width="100%" role="img" aria-label="Commit-point sequence: log segment create, then manifest conditional update, then local refs apply, then answer ok">
-            <g font-family="inherit" font-size="12">
-              <rect x="8" y="24" width="146" height="52" rx="8" fill="none" stroke="currentColor" stroke-opacity="0.5" />
+          <svg viewBox="0 0 640 236" width="100%" role="img" aria-label="Commit-point sequence: log segment create, then manifest conditional update, then local refs apply, then answer ok">            <g class="font-mono" font-size="12">
+              <rect x="8" y="24" width="146" height="52" rx="3" fill="none" stroke="currentColor" stroke-opacity="0.5" />
               <text x="20" y="46" fill="currentColor">pack+idx PUT</text>
               <text x="20" y="62" fill="currentColor" opacity="0.65">create-if-absent</text>
-              <rect x="8" y="88" width="146" height="52" rx="8" fill="none" stroke="currentColor" stroke-opacity="0.5" />
+              <rect x="8" y="88" width="146" height="52" rx="3" fill="none" stroke="currentColor" stroke-opacity="0.5" />
               <text x="20" y="110" fill="currentColor">log slot PUT</text>
               <text x="20" y="126" fill="currentColor" opacity="0.65">PutCreate (412 → retry)</text>
               <text x="158" y="88" fill="currentColor" opacity="0.65">∥ in parallel</text>
               <text x="168" y="56" fill="currentColor">→</text>
-              <rect x="252" y="48" width="146" height="52" rx="8" fill="none" stroke="currentColor" />
+              <rect x="252" y="48" width="146" height="52" rx="3" fill="none" stroke="currentColor" />
               <text x="264" y="70" fill="currentColor">manifest CAS</text>
               <text x="264" y="86" fill="currentColor" opacity="0.65">PutUpdate(version)</text>
               <text x="402" y="80" fill="currentColor">→</text>
-              <rect x="426" y="48" width="206" height="52" rx="8" fill="none" stroke="currentColor" stroke-opacity="0.5" />
+              <rect x="426" y="48" width="206" height="52" rx="3" fill="none" stroke="currentColor" stroke-opacity="0.5" />
               <text x="438" y="70" fill="currentColor">local commit, refs first</text>
               <text x="438" y="86" fill="currentColor" opacity="0.65">then advertise → answer ok</text>
               <text x="8" y="168" fill="currentColor" opacity="0.65">412 contention → delete own segment, re-sync, retry</text>
@@ -115,7 +118,7 @@
             </g>
           </svg>
           <details class="muted mt-2 text-sm">
-            <summary class="cursor-pointer hover:underline">Text version of this diagram</summary>
+            <summary class="link cursor-pointer text-xs">Text version of this diagram</summary>
             <p class="mt-2 leading-relaxed">
               The writer uploads pack+idx (create-if-absent) in parallel with claiming its log slot
               (PutCreate). It then commits with one conditional manifest write (PutUpdate on the
@@ -141,7 +144,7 @@
           commit.
         </p>
         <p>
-          Ref updates are old-value-checked transactions (<code>old_oid</code> must equal current
+          Ref updates are old-value-checked transactions (<code class="font-mono text-xs">old_oid</code> must equal current
           unless all-zero creation; symbolic HEAD updates always ok). Rejected pushes are
           transport successes with per-ref errors.
         </p>
@@ -156,7 +159,7 @@
           <li>Sync (refs+serve) unless already fresh — snapshot the manifest + version.</li>
           <li>Verify each ref txn against current refs (old-value check).</li>
           <li>
-            Assign seqs (<code>head_seq+1</code> …), build <code>PUSH</code> entries with pack refs
+            Assign seqs (<code class="font-mono text-xs">head_seq+1</code> …), build <code class="font-mono text-xs">PUSH</code> entries with pack refs
             plus caller meta (principal, request id, push options).
           </li>
           <li>
@@ -175,7 +178,7 @@
           </li>
           <li>Sweep burned orphans; fold commit-graph work off the critical path; opportunistic checkpoint check.</li>
         </ol>
-        <figure class="concept-figure overflow-hidden rounded-xl border border-zinc-800 bg-[#09090b]">
+        <figure class="overflow-hidden border border-[var(--pd-line)] bg-[var(--pd-canvas)]">
           <img src="/_ui/concepts/push-still.gif" alt="Animation: a laptop pushes a pack of git objects to a bucket; the bucket writes them, then acknowledges. The client only finishes after the bucket's acknowledgement." width="640" height="360" loading="lazy" decoding="async">
           <figcaption class="concept-caption muted px-4 py-2 text-sm">Push over smart HTTP; objects land in the bucket.</figcaption>
         </figure>
@@ -195,7 +198,7 @@
         <p>
           Refs apply is an offline full packed-refs rewrite (parse → map → tmp+rename), atomic
           across many refs, and it works before packs exist. Annotated-tag
-          <code>^{"}"}</code> comes from writer-recorded peeled values (max 16 hops), so replicas
+          <code class="font-mono text-xs">^{"}"}</code> comes from writer-recorded peeled values (max 16 hops), so replicas
           advertise without objects.
         </p>
         <p>
@@ -206,10 +209,10 @@
         </p>
         <p>
           At scale, clones ride <strong>bundle-uri</strong>: the CAS'd
-          <code>bundles/list.pb</code> advertises full + incremental bundles with creationToken =
+          <code class="font-mono text-xs">bundles/list.pb</code> advertises full + incremental bundles with creationToken =
           slot epoch seconds; git downloads bundles, then fetches the remainder.
         </p>
-        <figure class="concept-figure overflow-hidden rounded-xl border border-zinc-800 bg-[#09090b]">
+        <figure class="overflow-hidden border border-[var(--pd-line)] bg-[var(--pd-canvas)]">
           <img src="/_ui/concepts/fetch-still.gif" alt="Animation: an empty clone first receives ref names, then pack data, from the bucket until it holds a working copy." width="640" height="360" loading="lazy" decoding="async">
           <figcaption class="concept-caption muted px-4 py-2 text-sm">Clone reads objects back.</figcaption>
         </figure>
@@ -233,14 +236,14 @@
         </p>
         <p>
           The write is refs-level (it works on an instance that could never hold the packs), in 2
-          rounds: <code>checkpoint.pb</code> alongside <code>refs.pb</code> (PutCreate,
+          rounds: <code class="font-mono text-xs">checkpoint.pb</code> alongside <code class="font-mono text-xs">refs.pb</code> (PutCreate,
           deterministic seq-keyed), then the manifest CAS (checkpoint,
-          <code>min_seq = seq+1</code>, trim folded segments, revision+1). Idempotent at equal seq;
+          <code class="font-mono text-xs">min_seq = seq+1</code>, trim folded segments, revision+1). Idempotent at equal seq;
           racing checkpointers resolve benignly via Create-idempotence + CAS.
         </p>
         <figure class="card my-4 p-4">
           <svg viewBox="0 0 640 150" width="100%" role="img" aria-label="Checkpoint timeline: folded prefix before min_seq, checkpoint snapshot at seq N, live tail up to head_seq">
-            <g font-family="inherit" font-size="12">
+            <g class="font-mono" font-size="12">
               <rect x="8" y="48" width="180" height="36" fill="currentColor" opacity="0.12" />
               <text x="16" y="63" fill="currentColor" opacity="0.65">folded away</text>
               <text x="16" y="78" fill="currentColor" opacity="0.65">&lt; min_seq</text>
@@ -256,7 +259,7 @@
             </g>
           </svg>
           <details class="muted mt-2 text-sm">
-            <summary class="cursor-pointer hover:underline">Text version of this diagram</summary>
+            <summary class="link cursor-pointer text-xs">Text version of this diagram</summary>
             <p class="mt-2 leading-relaxed">
               A checkpoint writes a refs snapshot at seq N and advances min_seq to N+1; everything
               below is folded away. A fresh instance loads the snapshot and replays only the live
@@ -265,18 +268,18 @@
           </details>
         </figure>
         <p>
-          <strong>Cold-start fold:</strong> a fresh instance loads <code>refs.pb</code> at the
+          <strong>Cold-start fold:</strong> a fresh instance loads <code class="font-mono text-xs">refs.pb</code> at the
           checkpoint and replays only the tail — it never replays the whole log.
-          <code>min_seq = checkpoint.seq + 1</code>; below is folded away.
+          <code class="font-mono text-xs">min_seq = checkpoint.seq + 1</code>; below is folded away.
         </p>
         <p>
           Point-in-time reads fold from the newest usable checkpoint plus ordered entries; cuts
-          older than <code>min_seq</code> with no usable checkpoint are unreplayable (which is why
+          older than <code class="font-mono text-xs">min_seq</code> with no usable checkpoint are unreplayable (which is why
           provenance timestamps exist).
         </p>
         <p>
-          <code>policy.json</code> is NOT on the WAL (admin API/CLI object); per-repo settings ARE
-          published (manifest-inline + <code>SETTINGS</code> history, ≤ 16 KiB TOML, validated
+          <code class="font-mono text-xs">policy.json</code> is NOT on the WAL (admin API/CLI object); per-repo settings ARE
+          published (manifest-inline + <code class="font-mono text-xs">SETTINGS</code> history, ≤ 16 KiB TOML, validated
           before publish).
         </p>
       </div>
@@ -288,12 +291,12 @@
         <p>
           The WAL stays <strong>git-only</strong>. Issues, PRs, reviews, checks, and notifications
           are a <strong>parallel object family</strong> (
-          <code>orgs/…</code>, <code>users/…</code>,
-          <code>repos/&lt;o&gt;/&lt;r&gt;/{meta,issues,checks,releases,access.json}</code>) with
+          <code class="font-mono text-xs">orgs/…</code>, <code class="font-mono text-xs">users/…</code>,
+          <code class="font-mono text-xs">repos/&lt;o&gt;/&lt;r&gt;/{meta,issues,checks,releases,access.json}</code>) with
           its own CAS discipline — never WAL entries, never the manifest, never gating a push
           (except policy effects that explicitly consult them, e.g. required checks).
         </p>
-        <figure class="concept-figure overflow-hidden rounded-xl border border-zinc-800 bg-[#09090b]">
+        <figure class="overflow-hidden border border-[var(--pd-line)] bg-[var(--pd-canvas)]">
           <img src="/_ui/concepts/collab-still.gif" alt="Animation: alongside the git lane, issue 7 opens, pull request 8 links to it, a green check result stamps the PR — while the write-ahead log stays git-only." width="640" height="360" loading="lazy" decoding="async">
           <figcaption class="concept-caption muted px-4 py-2 text-sm">Issues, PRs, reviews, and checks live next to git data.</figcaption>
         </figure>
@@ -303,7 +306,7 @@
         </p>
         <p>
           Explicitly out of this layer's scope (so readers don't project): code search, CI runners
-          (walhub stores check results, doesn't run CI), Discussions/Packages/Projects, SAML/SCIM.
+          (spindle stores check results, doesn't run CI), Discussions/Packages/Projects, SAML/SCIM.
         </p>
         <p>
           And what the WAL itself doesn't do, stated plainly: no query engine (reads are key probes
@@ -318,10 +321,10 @@
   <section class="card my-8 p-4">
     <h2 class="text-lg font-semibold">Where to go next</h2>
     <p class="muted mt-2 break-words text-sm leading-relaxed">
-      Push something (the 30-second quickstart lives on <a class="hover:underline" href="/">/</a>),
-      browse <a class="hover:underline" href="/explore">/explore</a>, configure
-      <a class="hover:underline" href="/setup">/setup</a>, watch a live manifest on a repo's WAL
-      tab, or read the <a class="hover:underline" href="/api">/api docs</a>.
+      Push something (the 30-second quickstart lives on <a class="link" href="/">/</a>),
+      browse <a class="link" href="/explore">/explore</a>, configure
+      <a class="link" href="/setup">/setup</a>, watch a live manifest on a repo's WAL
+      tab, or read the <a class="link" href="/api">/api docs</a>.
     </p>
     {{/* Trace: issue #206 — external link is a plain <a> with target _blank + rel noopener. */}}
     <div class="mt-4 border-t border-zinc-200 pt-4 dark:border-zinc-800">
@@ -332,7 +335,7 @@
       <p class="mt-3">
         <a class="btn primary px-4 py-2" href="https://cursor.com/blog/git-at-any-scale" target="_blank" rel="noopener">Read &ldquo;Git at any scale&rdquo; &#8599;</a>
       </p>
-      <p class="muted mt-2 text-xs">&#8599; external link &mdash; leaves walhub</p>
+      <p class="muted mt-2 text-xs">&#8599; external link &mdash; leaves spindle</p>
     </div>
   </section>
 </div>

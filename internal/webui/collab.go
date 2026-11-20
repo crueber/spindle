@@ -99,18 +99,18 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/crueber/walhub/internal/api"
-	"github.com/crueber/walhub/internal/checks"
-	"github.com/crueber/walhub/internal/config"
-	"github.com/crueber/walhub/internal/git"
-	"github.com/crueber/walhub/internal/identity"
-	"github.com/crueber/walhub/internal/issues"
-	"github.com/crueber/walhub/internal/policy"
-	"github.com/crueber/walhub/internal/pulls"
-	"github.com/crueber/walhub/internal/releases"
-	"github.com/crueber/walhub/internal/review"
-	"github.com/crueber/walhub/internal/server/auth"
-	"github.com/crueber/walhub/internal/store"
+	"github.com/crueber/spindle/internal/api"
+	"github.com/crueber/spindle/internal/checks"
+	"github.com/crueber/spindle/internal/config"
+	"github.com/crueber/spindle/internal/git"
+	"github.com/crueber/spindle/internal/identity"
+	"github.com/crueber/spindle/internal/issues"
+	"github.com/crueber/spindle/internal/policy"
+	"github.com/crueber/spindle/internal/pulls"
+	"github.com/crueber/spindle/internal/releases"
+	"github.com/crueber/spindle/internal/review"
+	"github.com/crueber/spindle/internal/server/auth"
+	"github.com/crueber/spindle/internal/store"
 )
 
 // CollabDeps is the collaboration service seam. Function fields keep the
@@ -1149,9 +1149,9 @@ func pullMergeState(pr *pulls.PRDoc, mergeable *pulls.MergeableDoc, checksBlocke
 // --- mergeability display (mergeability-display-588 port) -------------------
 
 const (
-	mergeabilityOKCls    = "text-emerald-600 dark:text-emerald-400"
-	mergeabilityBadCls   = "text-red-600 dark:text-red-400"
-	mergeabilityMutedCls = "text-zinc-500 dark:text-zinc-400"
+	mergeabilityOKCls    = "text-[var(--pd-ok)]"
+	mergeabilityBadCls   = "text-[var(--pd-danger)]"
+	mergeabilityMutedCls = "text-[var(--pd-muted)]"
 )
 
 type mergeabilityText struct {
@@ -3922,7 +3922,7 @@ func (s *Server) releaseAssetUpload(w http.ResponseWriter, r *http.Request) {
 	// Hash while spooling to a temp file (never buffer the whole asset in
 	// memory): the content-addressed PUT needs the digest up front, and the
 	// service enforces its own size bound while streaming.
-	tmp, terr := os.CreateTemp("", "walhub-asset-*")
+	tmp, terr := os.CreateTemp("", "spindle-asset-*")
 	if terr != nil {
 		s.renderRelease(w, r, rc, p, tag, http.StatusServiceUnavailable, "could not stage the upload", "", false, "", "")
 		return

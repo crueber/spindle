@@ -11,7 +11,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/crueber/walhub/internal/server/auth"
+	"github.com/crueber/spindle/internal/server/auth"
 )
 
 // seedOrgEvents emits actions in order (seqs 1..N) and returns them.

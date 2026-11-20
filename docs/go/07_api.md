@@ -1,6 +1,6 @@
 # 07 — JSON API, SSE envelope, tasks & caching
 
-> Source: MASTER_RUST_SPEC.md §9 (§9.1–§9.6), §6.8, §8.2–§8.3, §14, §15.2, §20 item 4 · Status: normative for the walhub Go implementation.
+> Source: MASTER_RUST_SPEC.md §9 (§9.1–§9.6), §6.8, §8.2–§8.3, §14, §15.2, §20 item 4 · Status: normative for the spindle Go implementation.
 
 ## 1. Scope and package seams
 
@@ -24,7 +24,7 @@ Seams that keep future GitHub-like features (issues, PRs, review) additive:
   `[{o}/{r}[.git]]`. Parse order: exact
   mux → fallback (`/{o}/{r}[.git]/<sub>`; bad repo id → 404; `.git` accepted everywhere and stripped).
 
-Binary/module identity: `walhub`, module `github.com/crueber/walhub`.
+Binary/module identity: `spindle`, module `github.com/crueber/spindle`.
 
 ## 2. Wire conventions (§9.1 — normative)
 
@@ -87,7 +87,7 @@ GET …/settings/describe        → {settings, sections, strategies:[{name, kin
                                   token_env(bool), follow, follow_interval_secs, last_round?}, fields:
                                   [{key, value, host_value, source:"host"|"setting"}], head_seq}
 POST …/settings/validate       → same shape for the WOULD-BE effective config + {ok, errors[]}
-GET …/overview                 → walhub-specific WAL health (no-store): {repo, clone_url, ssh_clone_url?, hostname,
+GET …/overview                 → spindle-specific WAL health (no-store): {repo, clone_url, ssh_clone_url?, hostname,
                                   health:{status:"ok"|"degraded"|"error", issues[], deep,
                                   suggestions:[{op, params?, reason, auto?}]},
                                   fsck?:{missing_total, missing[] (bounded sample, [] never null),
@@ -402,7 +402,7 @@ The discovery document:
 ```
 
 **Normative fix (§20.4):** the Rust discovery document advertises `…/commit/{sha}/merge-queue`, but no
-such route exists — the walhub Go discovery doc MUST list only routes the router actually serves (the
+such route exists — the spindle Go discovery doc MUST list only routes the router actually serves (the
 list above; keep it mechanically derived from the route table so it cannot drift). Feature-owned
 routes served by `server.ExtraRoutes` append their templates via `api.RegisterExposed` from
 composition in the same change (law 12 — Forgejo #272: EVERY ExtraRoutes surface registers, so
@@ -411,7 +411,7 @@ and mirror (top-level twin AND repo lanes) shapes alongside checks, the `/api/v1
 twin, and the import twins); a registered template for an unserved route is
 the same bug as a missing one. Each surface pins the template↔route correspondence both ways in
 its own `TestExposedCoversRoutes` (plus an exact-shape test), and composition pins the
-registration in `cmd/walhub` (`TestCollabServicesRegisterDiscovery`) — removing a registration
+registration in `cmd/spindle` (`TestCollabServicesRegisterDiscovery`) — removing a registration
 or a template fails CI. Merge-queue data
 arrives as commit trailers; there is no merge-queue endpoint. `endpoints` entries are path templates;
 adding a route without updating this list is a bug. Core admin-only writes stay out of the
@@ -702,7 +702,7 @@ by `path` segments via `git ls-tree -z <tree> <seg>` per segment or a single
 ```text
 git ls-tree -l -z <tree-sha>            # entries of THAT directory
 git log -1 --format=<FMT_COMMIT> --no-color <commit-sha> -- <path>   # commit? newest touching path
-git log <commit-sha> --format=WALHUBTREE\ %H\ %cI --name-status --no-renames --no-color --first-parent -z --max-count=<server.max_tree_log> [-- <dir>]   # per-entry dates (issue #301)
+git log <commit-sha> --format=SPINDLETREE\ %H\ %cI --name-status --no-renames --no-color --first-parent -z --max-count=<server.max_tree_log> [-- <dir>]   # per-entry dates (issue #301)
 ```
 
 - `-z` output lines: `<mode> SP <type> SP <sha> SP <size> TAB <name>` NUL-terminated. `type` ∈

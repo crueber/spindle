@@ -39,4 +39,4 @@ export class ReposError extends Error {
  * untouched, no error-tray entry. `Symbol.for` keeps identity across bundle
  * copies (SPA bundle vs `repos.js`), so compare with `===`, never by shape.
  */
-export const NOT_MODIFIED = Symbol.for("walhub/not-modified");
+export const NOT_MODIFIED = Symbol.for("spindle/not-modified");

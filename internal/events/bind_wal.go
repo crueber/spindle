@@ -6,9 +6,9 @@ package events
 import (
 	"context"
 
-	"github.com/crueber/walhub/internal/git"
-	"github.com/crueber/walhub/internal/store/proto"
-	"github.com/crueber/walhub/internal/wal"
+	"github.com/crueber/spindle/internal/git"
+	"github.com/crueber/spindle/internal/store/proto"
+	"github.com/crueber/spindle/internal/wal"
 )
 
 // Compile-time shape checks against the concrete engine.

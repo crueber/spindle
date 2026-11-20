@@ -7,7 +7,7 @@ import (
 	"sort"
 	"time"
 
-	"github.com/crueber/walhub/internal/store/proto"
+	"github.com/crueber/spindle/internal/store/proto"
 )
 
 // Refs is the tip set of a point-in-time fold (§8.2): []proto.Ref sorted by

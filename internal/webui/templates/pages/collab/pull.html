@@ -2,10 +2,10 @@
 {{with .Data}}{{$d := .}}
 <div class="grid gap-4 md:grid-cols-[minmax(0,1fr)_16rem]">
   <div class="min-w-0">
-    <header class="mb-4 flex flex-wrap items-start gap-2 border-b border-zinc-200 pb-3 dark:border-zinc-800">
+    <header class="mb-4 flex flex-wrap items-start gap-2 border-b border-[var(--pd-line)] pb-3">
       <div class="min-w-0 flex-1">
-        <h1 class="min-w-0 text-xl font-semibold"><span class="text-zinc-500 dark:text-zinc-400">#{{.Num}}</span> {{.Title}}</h1>
-        <p class="mt-1 text-xs text-zinc-500 dark:text-zinc-400">{{.Author}} · {{template "collab_time" .UpdatedAt}}</p>
+        <h1 class="min-w-0 text-xl font-semibold tracking-tight"><span class="mono muted">#{{.Num}}</span> {{.Title}}</h1>
+        <p class="muted mt-1 text-xs">{{.Author}} · {{template "collab_time" .UpdatedAt}}</p>
       </div>
       <span class="mt-1 flex shrink-0 flex-wrap items-center gap-2">
         {{template "collab_state_chip" .Badge}}
@@ -22,8 +22,8 @@
     {{if .Notice}}<p class="warn-line" role="status">{{.Notice}}</p>{{end}}
 
     {{if .Body}}
-    <article class="mb-3 border-b border-zinc-200 pb-3 dark:border-zinc-800" aria-label="Pull request description">
-      <p class="mb-1 text-xs text-zinc-500 dark:text-zinc-400">{{.OpenedActor}} · {{template "collab_time" .OpenedAt}}</p>
+    <article class="mb-3 border-b border-[var(--pd-line)] pb-3" aria-label="Pull request description">
+      <p class="muted mb-1 text-xs">{{.OpenedActor}} · {{template "collab_time" .OpenedAt}}</p>
       <div class="markdown-body">{{mdrepo .Body .Repo.Owner .Repo.Name}}</div>
     </article>
     {{end}}
@@ -51,12 +51,12 @@
     <div class="card mt-4 p-3" id="reviews" aria-label="Reviews">
       <h2 class="card-header">Reviews</h2>
       {{range .Reviews}}
-      <div class="border-t border-zinc-200 py-2 first:border-t-0 first:pt-0 dark:border-zinc-800">
-        <p class="flex flex-wrap items-center gap-2 text-xs text-zinc-500 dark:text-zinc-400">
-          <span class="font-medium text-zinc-700 dark:text-zinc-200">{{.By}}</span>
+      <div class="border-t border-[var(--pd-line)] py-2 first:border-t-0 first:pt-0">
+        <p class="muted flex flex-wrap items-center gap-2 text-xs">
+          <span class="font-medium text-[var(--pd-text)]">{{.By}}</span>
           {{template "collab_state_chip" .Chip}}
           · {{template "collab_time" .At}}
-          {{if .Stale}}<span class="warn-line">stale ({{shortsha .CommitSHA}})</span>{{else}}{{with .CommitSHA}}<span class="font-mono">{{shortsha .}}</span>{{end}}{{end}}
+          {{if .Stale}}<span class="warn-line">stale ({{shortsha .CommitSHA}})</span>{{else}}{{with .CommitSHA}}<span class="mono">{{shortsha .}}</span>{{end}}{{end}}
         </p>
         {{if .Dismissed}}
         <p class="muted text-sm italic">dismissed #{{.DismissSeq}}: {{.Reason}}</p>
@@ -71,7 +71,7 @@
         {{end}}
       </div>
       {{else}}
-      <p class="muted text-sm">No reviews yet.</p>
+      {{template "collab_empty" (dict "compact" true "icon" "comment" "title" "No reviews yet" "hint" "Submit a review to record a verdict on this pull request.")}}
       {{end}}
       {{if .ReviewsMore}}<a class="link text-xs" href="#reviews">older reviews…</a>{{end}}
     </div>
@@ -81,18 +81,18 @@
       <h2 class="card-header">Finish review</h2>
       <form class="grid gap-2" method="post" action="/{{.Repo.Full}}/pull/{{.Num}}/reviews">
         <input type="hidden" name="commit_sha" value="{{.HeadSHA}}">
-        <textarea class="input min-h-16 font-mono text-sm" name="body" rows="3" aria-label="review body" placeholder="Review summary (optional)"></textarea>
+        <textarea class="input min-h-16 text-sm leading-relaxed" name="body" rows="3" aria-label="review body" placeholder="Review summary (optional)"></textarea>
         <label class="grid gap-1">
-          <span class="text-xs text-zinc-500 dark:text-zinc-400">Verdict</span>
+          <span class="eyebrow">Verdict</span>
           <select class="input" name="verdict">
             <option value="COMMENTED" selected>Comment</option>
             <option value="APPROVED">Approve</option>
             <option value="CHANGES_REQUESTED">Request changes</option>
           </select>
         </label>
-        <p class="muted text-xs">reviewing <span class="font-mono">{{shortsha .HeadSHA}}</span></p>
+        <p class="muted text-xs">reviewing <span class="mono">{{shortsha .HeadSHA}}</span></p>
         <div class="flex flex-wrap items-center justify-end gap-2">
-          <button type="submit" class="btn primary" {{if .Lock.Locked}}disabled title="{{.Lock.Reason}}"{{end}}>Submit review</button>
+          <button type="submit" class="btn" {{if .Lock.Locked}}disabled title="{{.Lock.Reason}}"{{end}}>Submit review</button>
         </div>
       </form>
     </div>
@@ -109,23 +109,23 @@
       {{template "collab_diff_conv" .Diff}}
       {{if .Diff.Drifted}}{{template "collab_drifted" .Diff.Drifted}}{{end}}
       {{else}}
-      <p class="muted text-sm">No changed files.</p>
+      {{template "collab_empty" (dict "compact" true "icon" "file" "title" "No changed files" "hint" "The diff appears once the head branch has commits the base does not.")}}
       {{end}}
     </section>
   </div>
 
-  <aside class="grid content-start gap-3">
-    <section class="card divide-y divide-zinc-200 text-sm dark:divide-zinc-800" aria-label="Pull request status">
+  <aside class="grid min-w-0 grid-cols-1 content-start gap-3">
+    <section class="card divide-y divide-[color:var(--pd-line)] text-sm" aria-label="Pull request status">
       <div class="p-3">
         {{if .Terminal}}
         <h2 class="card-header">Status</h2>
         <p class="flex flex-wrap items-center gap-2">{{template "collab_state_chip" .Badge}}
-          {{with .MergeState.Detail.SHA}}<a class="link font-mono text-xs" href="/{{$d.Repo.Full}}/commit/{{.}}">{{shortsha .}}</a>{{end}}
+          {{with .MergeState.Detail.SHA}}<a class="link mono text-xs" href="/{{$d.Repo.Full}}/commit/{{.}}">{{shortsha .}}</a>{{end}}
         </p>
-        {{if .Merged}}<p class="muted mt-1 text-xs">merged as {{shortsha .MergeState.Detail.SHA}} ({{.MergeState.Detail.Strategy}}) by {{.MergeState.Detail.By}}</p>{{end}}
+        {{if .Merged}}<p class="muted mt-1 text-xs">merged as <span class="mono">{{shortsha .MergeState.Detail.SHA}}</span> ({{.MergeState.Detail.Strategy}}) by {{.MergeState.Detail.By}}</p>{{end}}
         {{else}}
         <h2 class="card-header">Review summary</h2>
-        <p class="text-xs text-zinc-500 dark:text-zinc-400">{{if .ReviewDec}}{{.ReviewDec}}{{else}}no reviews yet{{end}} · {{.Approvals}} {{plural .Approvals "approval" "approvals"}} · {{.ThreadsUnresolved}} of {{.ThreadsTotal}} {{plural .ThreadsTotal "thread" "threads"}} unresolved</p>
+        <p class="muted text-xs">{{if .ReviewDec}}{{.ReviewDec}}{{else}}no reviews yet{{end}} · {{.Approvals}} {{plural .Approvals "approval" "approvals"}} · {{.ThreadsUnresolved}} of {{.ThreadsTotal}} {{plural .ThreadsTotal "thread" "threads"}} unresolved</p>
         {{end}}
       </div>
 
@@ -135,8 +135,8 @@
         <p class="{{.Mergeability.Cls}} text-sm">{{.Mergeability.Text}}</p>
         {{with .Mergeability.Sub}}<p class="muted text-xs">{{.}}</p>{{end}}
         {{if not .HeadRefOK}}<p class="warn-line">From branch pending — push first</p>{{end}}
-        <p class="muted mt-1 text-xs"><span class="font-mono">{{.BaseRef}}</span> {{shortsha .BaseSHA}} ← <span class="font-mono">{{.HeadRef}}</span> {{shortsha .HeadSHA}}</p>
-        {{with .ForkRepo}}<p class="muted text-xs">from {{.}}</p>{{end}}
+        <p class="muted mono mt-1 break-words text-xs"><span>{{.BaseRef}}</span> {{shortsha .BaseSHA}} ← <span>{{.HeadRef}}</span> {{shortsha .HeadSHA}}</p>
+        {{with .ForkRepo}}<p class="muted mono text-xs">from {{.}}</p>{{end}}
         <p class="mt-1 flex flex-wrap gap-2 text-xs"><a class="link" href="/{{.Repo.Full}}/pull/{{.Num}}/commits">commits</a><a class="link" href="/{{.Repo.Full}}/pull/{{.Num}}/files">files</a></p>
       </div>
       {{end}}
@@ -188,16 +188,16 @@
             </select>
           </label>
           <div class="mt-2 flex flex-wrap gap-2">
-            <button type="submit" class="btn primary px-3 py-1" {{if not .MergeState.CanMerge}}disabled title="{{.MergeState.Tooltip}}"{{end}}>{{if eq .MergeState.State "merging"}}merging…{{else}}merge pull request{{end}}</button>
+            <button type="submit" class="btn px-3 py-1" {{if not .MergeState.CanMerge}}disabled title="{{.MergeState.Tooltip}}"{{end}}>{{if eq .MergeState.State "merging"}}merging…{{else}}merge pull request{{end}}</button>
             {{if .MergeState.CanUpdate}}
             <button type="submit" class="btn px-3 py-1" formaction="/{{.Repo.Full}}/pull/{{.Num}}/update-branch" formnovalidate title="update the PR branch from base">update branch</button>
             {{end}}
           </div>
-          {{if .MergeState.BlockersText}}<p class="mt-2 text-xs text-amber-600 dark:text-amber-400">blocking merge: {{.MergeState.BlockersText}}</p>{{end}}
+          {{if .MergeState.BlockersText}}<p class="warn-line">blocking merge: {{.MergeState.BlockersText}}</p>{{end}}
         </form>
         {{else}}
         <p class="text-sm">merged as
-          {{with .MergeState.Detail.SHA}}<a class="link font-mono" href="/{{$d.Repo.Full}}/commit/{{.}}">{{shortsha .}}</a>{{end}}
+          {{with .MergeState.Detail.SHA}}<a class="link mono" href="/{{$d.Repo.Full}}/commit/{{.}}">{{shortsha .}}</a>{{end}}
           by {{.MergeState.Detail.By}}</p>
         {{end}}
       </div>

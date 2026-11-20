@@ -8,24 +8,24 @@
   <h2 class="text-xl font-semibold">SSH keys</h2>
   <p class="muted text-sm">
     Public keys that may clone, fetch and push over
-    <code class="font-mono text-xs">ssh://</code> as <em>you</em> (your principal, your access).
+    <code class="mono text-xs">ssh://</code> as <em>you</em> (your principal, your access).
     The transport listener itself is configured on the
     <a class="link" href="/setup">setup</a> page.
   </p>
 
-  {{if .Data.Error}}<div class="rounded-lg border border-red-300 bg-red-50 p-3 text-sm text-red-800 dark:border-red-900 dark:bg-red-950/60 dark:text-red-200" role="alert">{{.Data.Error}}</div>{{end}}
-  {{if .Data.Notice}}<div class="rounded-lg border border-emerald-300 bg-emerald-50 p-3 text-sm text-emerald-800 dark:border-emerald-900 dark:bg-emerald-950/60 dark:text-emerald-200">{{.Data.Notice}}</div>{{end}}
+  {{if .Data.Error}}<div class="card border-l-2 border-l-[var(--pd-danger)] p-3 text-sm" role="alert">{{.Data.Error}}</div>{{end}}
+  {{if .Data.Notice}}<div class="card border-l-2 border-l-[var(--pd-ok)] p-3 text-sm">{{.Data.Notice}}</div>{{end}}
 
   {{if .Data.NotWired}}
   <div class="card p-4"><p class="muted text-sm">The SSH key registry is not configured on this instance.</p></div>
   {{else}}
   <section class="card p-4">
-    <h3 class="mb-2 font-semibold">Add a key</h3>
+    <h3 class="card-header">Add a key</h3>
     <form class="space-y-3" method="post" action="/keys"
           hx-post="/keys" hx-target="#keys-page" hx-select="#keys-page" hx-swap="outerHTML">
       <div>
         <label class="mb-1 block text-sm font-medium" for="key-line">Public key (authorized_keys line)</label>
-        <textarea class="input font-mono text-xs" id="key-line" name="key" rows="3" spellcheck="false"
+        <textarea class="input mono text-xs" id="key-line" name="key" rows="3" spellcheck="false"
                   placeholder="ssh-ed25519 AAAAC3Nza... ada@laptop" data-submit-keys>{{.Data.KeyLine}}</textarea>
       </div>
       <div>
@@ -37,7 +37,7 @@
   </section>
 
   <section class="card p-4">
-    <h3 class="mb-2 font-semibold">Your keys</h3>
+    <h3 class="card-header">Your keys</h3>
     {{if .Data.Keys}}
     <div class="overflow-x-auto">
       <table class="data-table">
@@ -46,12 +46,12 @@
           {{range .Data.Keys}}
           <tr>
             <td>{{if .Title}}{{.Title}}{{else}}<span class="muted">(untitled)</span>{{end}}</td>
-            <td><code class="font-mono text-xs">{{.Short}}</code></td>
-            <td class="tabular muted text-xs">{{.Added}}</td>
+            <td><code class="mono text-xs">{{.Short}}</code></td>
+            <td class="tabular muted text-[11px] mono">{{.Added}}</td>
             <td>
               <form method="post" action="/keys/{{.ID}}/delete"
                     hx-post="/keys/{{.ID}}/delete" hx-target="#keys-page" hx-select="#keys-page" hx-swap="outerHTML">
-                <button type="submit" class="btn px-2 py-1 text-xs">remove</button>
+                <button type="submit" class="link text-xs">remove</button>
               </form>
             </td>
           </tr>
@@ -60,7 +60,7 @@
       </table>
     </div>
     {{else}}
-    <p class="muted">no keys yet — add one above, then clone over ssh://</p>
+    <p class="muted text-sm">no keys yet — add one above, then clone over <code class="mono text-xs">ssh://</code></p>
     {{end}}
   </section>
   {{end}}

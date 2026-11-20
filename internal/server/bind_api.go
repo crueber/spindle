@@ -4,9 +4,9 @@ import (
 	"context"
 	"net/http"
 
-	"github.com/crueber/walhub/internal/api"
-	"github.com/crueber/walhub/internal/git"
-	"github.com/crueber/walhub/internal/server/auth"
+	"github.com/crueber/spindle/internal/api"
+	"github.com/crueber/spindle/internal/git"
+	"github.com/crueber/spindle/internal/server/auth"
 )
 
 // RouteProvider is the internal/api seam (§2.4, 14_extensibility.md §14.3).

@@ -7,7 +7,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/crueber/walhub/internal/store/proto"
+	"github.com/crueber/spindle/internal/store/proto"
 )
 
 // v2 advertisement, band-2 narration, and D17 forcing (§8.12, §8.13).

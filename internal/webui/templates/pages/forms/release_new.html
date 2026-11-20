@@ -1,22 +1,22 @@
 {{define "content"}}
 <section class="mx-auto max-w-2xl">
   <div class="mb-3 flex flex-wrap items-baseline gap-2">
-    <h1 class="text-lg font-semibold">New release</h1>
-    <a class="ml-auto text-sm text-emerald-700 hover:underline dark:text-emerald-400" href="/{{.Data.Full}}/releases">all releases</a>
+    <h1 class="text-xl font-semibold">New release</h1>
+    <a class="ml-auto text-sm link" href="/{{.Data.Full}}/releases">all releases</a>
   </div>
   {{if .Data.Disabled}}
   <p class="card p-4 text-sm">
     Releases are disabled for this repository.
-    <a class="hover:underline" href="/{{.Data.Full}}/releases">Back to releases</a>
+    <a class="link" href="/{{.Data.Full}}/releases">Back to releases</a>
   </p>
   {{else}}
   {{template "forms_messages" .Data}}
   <form method="post" action="/{{.Data.Full}}/releases/new" class="card grid gap-5 p-4" aria-label="New release">
     <fieldset class="grid gap-3">
-      <legend class="text-sm font-medium">Target</legend>
+      <legend class="eyebrow">Target</legend>
       <div class="grid gap-1">
         <label class="text-sm font-medium" for="release-tag">Tag <span class="muted font-normal">· required, must already exist</span></label>
-        <select id="release-tag" name="tag" class="input font-mono" aria-describedby="release-tag-help"{{if not .Data.Tags}} disabled{{end}}>
+        <select id="release-tag" name="tag" class="input mono" aria-describedby="release-tag-help"{{if not .Data.Tags}} disabled{{end}}>
           {{if .Data.Tags}}
           <option value=""{{if eq .Data.Tag ""}} selected{{end}}>Pick a tag…</option>
           {{range .Data.Tags}}<option value="{{.}}"{{if eq . $.Data.Tag}} selected{{end}}>{{.}}</option>{{end}}
@@ -24,50 +24,50 @@
           <option value="">No tags yet</option>
           {{end}}
         </select>
-        <p id="release-tag-help" class="muted text-xs">
+        <p id="release-tag-help" class="muted text-[11px]">
           {{if .Data.Tags}}{{len .Data.Tags}} tags available — pick one from the list.{{else}}No tags yet — create one from a commit page or push one with git.{{end}}
         </p>
       </div>
     </fieldset>
     <fieldset class="grid gap-3">
-      <legend class="text-sm font-medium">Content</legend>
+      <legend class="eyebrow">Content</legend>
       <div class="grid gap-1">
         <label class="text-sm font-medium" for="release-title">Title</label>
         <input id="release-title" name="name" class="input" value="{{.Data.Title}}" placeholder="{{if .Data.Tag}}{{.Data.Tag}}{{else}}Defaults to the tag{{end}}" aria-describedby="release-title-help">
-        <p id="release-title-help" class="muted text-xs">Shown above the tag on the release page — leave blank to use the tag itself.</p>
+        <p id="release-title-help" class="muted text-[11px]">Shown above the tag on the release page — leave blank to use the tag itself.</p>
       </div>
       <div class="grid gap-1">
         <label class="text-sm font-medium" for="release-notes">
           Notes{{if .Data.Since}}<span class="muted font-normal"> (changes since {{.Data.Since}})</span>{{end}}
         </label>
-        <textarea id="release-notes" name="body" class="input font-mono text-sm" rows="10" placeholder="What's new in this release… (markdown-lite)" aria-describedby="release-notes-help">{{.Data.Body}}</textarea>
-        <p id="release-notes-help" class="muted text-xs">
+        <textarea id="release-notes" name="body" class="input" rows="10" placeholder="What's new in this release… (markdown-lite)" aria-describedby="release-notes-help">{{.Data.Body}}</textarea>
+        <p id="release-notes-help" class="muted text-[11px]">
           Markdown-lite, rendered on the release page. Autodraft below summarizes merged pull
           requests into this field.
         </p>
       </div>
     </fieldset>
     <fieldset class="grid gap-2">
-      <legend class="text-sm font-medium">Visibility</legend>
-      <label class="flex cursor-pointer items-start gap-2 rounded-md border border-zinc-200 p-3 dark:border-zinc-800">
-        <input type="checkbox" name="draft" class="mt-0.5"{{if .Data.Draft}} checked{{end}}>
+      <legend class="eyebrow">Visibility</legend>
+      <label class="flex cursor-pointer items-start gap-2 card p-3">
+        <input type="checkbox" name="draft" class="mt-0.5 h-4 w-4 accent-amber-500"{{if .Data.Draft}} checked{{end}}>
         <span>
           <span class="block text-sm font-medium">Draft</span>
-          <span class="muted block text-xs">Keep hidden from the releases list until you publish it from the release page.</span>
+          <span class="muted block text-[11px]">Keep hidden from the releases list until you publish it from the release page.</span>
         </span>
       </label>
-      <label class="flex cursor-pointer items-start gap-2 rounded-md border border-zinc-200 p-3 dark:border-zinc-800">
-        <input type="checkbox" name="prerelease" class="mt-0.5"{{if .Data.Prerelease}} checked{{end}}>
+      <label class="flex cursor-pointer items-start gap-2 card p-3">
+        <input type="checkbox" name="prerelease" class="mt-0.5 h-4 w-4 accent-amber-500"{{if .Data.Prerelease}} checked{{end}}>
         <span>
           <span class="block text-sm font-medium">Prerelease</span>
-          <span class="muted block text-xs">Flag as an early release (alpha, beta, rc) rather than a final one.</span>
+          <span class="muted block text-[11px]">Flag as an early release (alpha, beta, rc) rather than a final one.</span>
         </span>
       </label>
     </fieldset>
-    <div class="flex flex-wrap items-center gap-2 border-t border-zinc-100 pt-4 dark:border-zinc-800/60">
+    <div class="flex flex-wrap items-center gap-2 border-t border-[var(--pd-line)] pt-4">
       <button type="submit" class="btn primary"{{if not .Data.Tag}} disabled{{end}}>Create release</button>
       <button type="submit" name="action" value="autodraft" class="btn"{{if not .Data.Tag}} disabled{{end}} title="Fill the notes from merged pull requests">Autodraft from merged PRs</button>
-      <p class="muted w-full text-xs">Files (binaries, checksums) attach after creation, on the release page.</p>
+      <p class="muted w-full text-[11px]">Files (binaries, checksums) attach after creation, on the release page.</p>
     </div>
   </form>
   {{end}}

@@ -31,7 +31,7 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/crueber/walhub/internal/store"
+	"github.com/crueber/spindle/internal/store"
 )
 
 // Plan holds the probabilities (0..=1 floats) and switches. Zero value = no
@@ -183,7 +183,7 @@ type FaultStore struct {
 }
 
 // New wraps inner under the given link name, with dice seeded from seed
-// (WALHUB_SIM_SEED; deterministic per link given the same op sequence).
+// (SPINDLE_SIM_SEED; deterministic per link given the same op sequence).
 func New(inner store.ObjectStore, name string, seed uint64) *FaultStore {
 	return &FaultStore{
 		inner: inner,

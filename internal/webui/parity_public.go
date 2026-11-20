@@ -31,14 +31,14 @@ import (
 	"strings"
 	"unicode/utf8"
 
-	"github.com/crueber/walhub/internal/server/auth"
+	"github.com/crueber/spindle/internal/server/auth"
 )
 
 // Owner profile field budgets — a verbatim port of api/profile.go's
 // constants and messages (the page must reject exactly what the API rejects;
 // api's validators are package-private, so this is the documented duplicate).
 //
-// PROFILE SAVE SEAM (integration requirement: cmd/walhub + one api export)
+// PROFILE SAVE SEAM (integration requirement: cmd/spindle + one api export)
 //
 // The page cannot call the JSON API over HTTP (law 8) and must not write the
 // bucket by hand (package doc), so PublicDeps.ProfileSave is where composition

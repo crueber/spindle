@@ -64,10 +64,10 @@ import (
 	"sync"
 	"time"
 
-	"github.com/crueber/walhub/internal/config"
-	"github.com/crueber/walhub/internal/identity"
-	"github.com/crueber/walhub/internal/server/auth"
-	"github.com/crueber/walhub/internal/store"
+	"github.com/crueber/spindle/internal/config"
+	"github.com/crueber/spindle/internal/identity"
+	"github.com/crueber/spindle/internal/server/auth"
+	"github.com/crueber/spindle/internal/store"
 )
 
 // Task kinds (Seam 5; 06 §8). (repo, kind) single-flight per
@@ -443,7 +443,7 @@ type Service struct {
 	// watch flag is off. Nil → all enabled; a declining hook (unreadable
 	// settings) also resolves all-on — display metadata must never
 	// break a write on a transient settings read (fail-open, the
-	// CollabCounts precedent). Wired by composition (cmd/walhub) over
+	// CollabCounts precedent). Wired by composition (cmd/spindle) over
 	// the WAL settings doc; tests substitute a fake.
 	Features func(ctx context.Context, owner, repo string) (config.ResolvedFeatures, bool)
 

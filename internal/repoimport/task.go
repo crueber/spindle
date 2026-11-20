@@ -36,11 +36,11 @@ import (
 	"strings"
 	"time"
 
-	"github.com/crueber/walhub/internal/git"
-	"github.com/crueber/walhub/internal/identity"
-	"github.com/crueber/walhub/internal/store"
-	"github.com/crueber/walhub/internal/store/proto"
-	"github.com/crueber/walhub/internal/wal"
+	"github.com/crueber/spindle/internal/git"
+	"github.com/crueber/spindle/internal/identity"
+	"github.com/crueber/spindle/internal/store"
+	"github.com/crueber/spindle/internal/store/proto"
+	"github.com/crueber/spindle/internal/wal"
 )
 
 // runImport executes one import (ctx is the task/command ctx — drain or
@@ -560,7 +560,7 @@ func (s *Service) uploadIdx(ctx context.Context, params Params, h *wal.RepoHandl
 func paramsImporter(params Params) string { return params.importer }
 
 // classifyCloneError maps clone failures onto task statuses (the HTTP 401
-// is only for walhub auth — upstream auth failure is a task error).
+// is only for spindle auth — upstream auth failure is a task error).
 func classifyCloneError(ctx context.Context, err error, cloneTimeout string) *StatusError {
 	if ctx.Err() != nil {
 		return &StatusError{Status: 503, Message: fmt.Sprintf("clone interrupted (import.clone_timeout=%s); safe to retry", cloneTimeout)}
@@ -614,7 +614,7 @@ func dirSize(root string) (int64, error) {
 }
 
 // packTrailerChecksum reads the pack trailer (20 bytes sha1, 32 sha256 —
-// the cmd/walhub packTrailerChecksum shape, format-aware).
+// the cmd/spindle packTrailerChecksum shape, format-aware).
 func packTrailerChecksum(path, format string) (string, error) {
 	size := 20
 	if format == "sha256" {

@@ -18,15 +18,15 @@ import (
 	"testing"
 	"time"
 
-	"github.com/crueber/walhub/internal/api"
-	"github.com/crueber/walhub/internal/config"
-	"github.com/crueber/walhub/internal/git"
-	"github.com/crueber/walhub/internal/identity"
-	"github.com/crueber/walhub/internal/notify"
-	"github.com/crueber/walhub/internal/pages"
-	"github.com/crueber/walhub/internal/server/auth"
-	"github.com/crueber/walhub/internal/sizecatalog"
-	"github.com/crueber/walhub/internal/store"
+	"github.com/crueber/spindle/internal/api"
+	"github.com/crueber/spindle/internal/config"
+	"github.com/crueber/spindle/internal/git"
+	"github.com/crueber/spindle/internal/identity"
+	"github.com/crueber/spindle/internal/notify"
+	"github.com/crueber/spindle/internal/pages"
+	"github.com/crueber/spindle/internal/server/auth"
+	"github.com/crueber/spindle/internal/sizecatalog"
+	"github.com/crueber/spindle/internal/store"
 )
 
 // publicFixedNow is the clock the invite-expiry assertions run against.
@@ -234,7 +234,7 @@ func TestPublicHowItWorks(t *testing.T) {
 	rec := publicGet(s, "/how-it-works")
 	publicWantStatus(t, rec, http.StatusOK)
 	publicWantContains(t, rec,
-		"How walhub works",
+		"How spindle works",
 		`href="#idea"`, `href="#wal"`, `href="#push"`,
 		`href="#read"`, `href="#checkpoints"`, `href="#boundaries"`,
 		`id="checkpoints"`,

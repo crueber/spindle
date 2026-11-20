@@ -380,7 +380,7 @@ func TestForceCheck(t *testing.T) {
 	repo, l := lsRefsFixture(t)
 	_ = repo
 	_ = l
-	// via a real repo with the objects: clone the fixture into a walhub repo
+	// via a real repo with the objects: clone the fixture into a spindle repo
 	root := t.TempDir()
 	wrepo, _ := InitLocalRepo(root, RepoId{Owner: "o", Name: "ff"}, Sha1)
 	cmd2 := func(argv ...string) {

@@ -1,4 +1,4 @@
-# DESIGN.md — working on the walhub UI and CSS
+# DESIGN.md — working on the spindle UI and CSS
 
 > How to build, style, and extend the UI so every page looks like one product.
 > Stack context: **server-rendered pages** (Go `html/template` in `internal/webui`) + **vendored htmx**
@@ -8,7 +8,7 @@
 ## 1. Non-negotiables
 
 1. **No CDN, ever.** No external font, script, or image URLs. Fonts are the system stack; icons are unicode glyphs or inline SVG. Everything ships in the binary (`web/dist/` is embedded).
-2. **Dark mode is the default.** `<html class="dark">` ships in `internal/webui/templates/base.html`. Never use `prefers-color-scheme` for the default — the theme is a deliberate user choice (`web/src/islands/theme.js`, persisted in localStorage under `walhub-theme`). Light styling is the base layer, `dark:` variants carry the dark theme (the custom variant is declared in `web/src/app.css`).
+2. **Dark mode is the default.** `<html class="dark">` ships in `internal/webui/templates/base.html`. Never use `prefers-color-scheme` for the default — the theme is a deliberate user choice (`web/src/islands/theme.js`, persisted in localStorage under `spindle-theme`). Light styling is the base layer, `dark:` variants carry the dark theme (the custom variant is declared in `web/src/app.css`).
 3. **No TypeScript, no framework, no client data layer.** Pages are Go templates; behavior is vanilla-ES islands (`web/src/islands/`); htmx is vendored (`web/vendor/`). No new npm dependencies without a written amendment (AGENTS.md Law 1) — the dev budget is exactly `vite`, `@tailwindcss/vite`, `tailwindcss`, `esbuild`, and there are no runtime npm dependencies.
 4. **The dogfood rule.** A page handler calls the same Go service the JSON API calls (`api.Env` seams), never an HTTP loopback to our own API. The `repos.js` SDK remains for external consumers, agents and app code; pages do not load it.
 5. **User bytes render only through the Go renderers.** `{{template}}`-escaped text by default; markdown, unified diffs, commit graphs and syntax highlighting go through `internal/webui/{markdown,diff,graph,highlight}.go` (`md`, `mdrepo`, `diff`, `graph`, `hl`). Never pass user-derived bytes through `template.HTML`, and never add a client-side sanitizer.

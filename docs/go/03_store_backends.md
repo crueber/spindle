@@ -1,8 +1,8 @@
 # 03 — Store backends (filesystem, S3, GCS, memory) and the lease layer
 
-> Source: MASTER_RUST_SPEC.md §4.1–§4.10 · Status: normative for the walhub Go implementation.
+> Source: MASTER_RUST_SPEC.md §4.1–§4.10 · Status: normative for the spindle Go implementation.
 
-All bucket access in walhub goes through one Go interface in `internal/store`, with four backends behind
+All bucket access in spindle goes through one Go interface in `internal/store`, with four backends behind
 it: `filesystem` (the zero-config default, D5 below), `s3` (covers rustfs/MinIO), `gcs`, and `memory`
 (tests). The interface contract (types,
 semantics, `Prefixed` wrapper) is fixed by the Rust spec §4.1 and is not restated here; this doc specifies
@@ -14,7 +14,7 @@ lease layer. Wire/bucket formats stay byte-compatible with the Rust implementati
 no Google client libraries, no gRPC.
 
 ```go
-package store // github.com/crueber/walhub/internal/store
+package store // github.com/crueber/spindle/internal/store
 
 type Version string // opaque CAS token; compare for equality only, never parse
 
@@ -292,8 +292,8 @@ the precondition, while read/delete paths return PreconditionFailed.
 - Hazard: unbounded bulk concurrency saturates the NIC and inflates queue times invisibly. Avoidance: the
   weighted semaphore of §6.2 gates **every** bulk request (reads and writes) with
   `store.gcs.bulk_concurrency` (default 32) permits; queue time recorded as
-  `walhub_store_bulk_queue_seconds` (histogram) plus an in-flight gauge; WARN past
-  `telemetry.lock_wait_warn`. Metric names are kept Rust-compatible (§8.10 uses `walgit_*`; walhub renames
+  `spindle_store_bulk_queue_seconds` (histogram) plus an in-flight gauge; WARN past
+  `telemetry.lock_wait_warn`. Metric names are kept Rust-compatible (§8.10 uses `walgit_*`; spindle renames
   the prefix — see Decisions).
 
 ## 4. Filesystem backend (`store.backend = "filesystem"`)
@@ -358,7 +358,7 @@ Create has no window, the portable fallback matches Update's. **Registry seam**:
 (`internal/store/registry.go`) switches on `cfg.Backend` (`"filesystem"` → `NewFilesystem(cfg)`;
 `"s3"`/`"gcs"`/`"memory"` likewise; unknown → error naming the key); zero-config first run (D5): no
 config file ⇒ backend `filesystem` rooted at `<data-dir>/store`, and the setup UI writes the choice
-to `<data-dir>/walhub.toml`.
+to `<data-dir>/spindle.toml`.
 
 ## 5. Striped upload and striped download
 
@@ -457,7 +457,7 @@ if err := sem.Acquire(ctx, weight); err != nil { return err }        // ctx-awar
 defer sem.Release(weight)
 start := time.Now()
 // … actual request …
-bulkQueueSeconds.Observe(time.Since(start).Seconds())                 // name: walhub_store_bulk_queue_seconds
+bulkQueueSeconds.Observe(time.Since(start).Seconds())                 // name: spindle_store_bulk_queue_seconds
 if wait := time.Since(start); wait > lockWaitWarn { slog.Warn("bulk permit wait", "wait", wait, "key", key) }
 ```
 
@@ -622,7 +622,7 @@ Memory and filesystem run **unconditionally** in CI; S3/GCS are env-gated integr
   validated against the official AWS test vectors.
 - **Weighted semaphore + errgroup are hand-rolled** (`internal/store`), not `golang.org/x/sync` — dependency
   rule; ~40 lines total, and the ctx-aware Acquire is the piece that matters.
-- **Metric prefix renamed `walgit_*` → `walhub_*`** — product rename; histogram/gauge names and semantics
+- **Metric prefix renamed `walgit_*` → `spindle_*`** — product rename; histogram/gauge names and semantics
   (bulk queue seconds, in-flight, lock-wait WARN) preserved so dashboards port trivially.
 - **Config keys unchanged** (`store.s3.*`, `store.gcs.bulk_clients`, `bulk_concurrency`, `multipart_*`,
   `telemetry.lock_wait_warn`) — compatibility requirement; `bulk_clients` counts HTTP client pools on GCS

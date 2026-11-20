@@ -26,10 +26,10 @@ import (
 	"sync"
 	"time"
 
-	"github.com/crueber/walhub/internal/repoimport"
-	"github.com/crueber/walhub/internal/store"
-	"github.com/crueber/walhub/internal/store/proto"
-	"github.com/crueber/walhub/internal/wal"
+	"github.com/crueber/spindle/internal/repoimport"
+	"github.com/crueber/spindle/internal/store"
+	"github.com/crueber/spindle/internal/store/proto"
+	"github.com/crueber/spindle/internal/wal"
 )
 
 // leaseTTL bounds one sync fire's cross-instance exclusion (clone +
@@ -982,7 +982,7 @@ func shortList(refs []string) string {
 }
 
 // classifySyncError maps clone failures onto task errors (upstream
-// auth failure is a task error, never walhub-auth 401 — v1 scheduled
+// auth failure is a task error, never spindle-auth 401 — v1 scheduled
 // fires are anonymous; a 401/403 here means the upstream went
 // private, which backoff + narration cover).
 func classifySyncError(ctx context.Context, err error) string {

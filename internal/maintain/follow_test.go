@@ -8,8 +8,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/crueber/walhub/internal/config"
-	"github.com/crueber/walhub/internal/store/proto"
+	"github.com/crueber/spindle/internal/config"
+	"github.com/crueber/spindle/internal/store/proto"
 )
 
 // fakeFollow implements FollowFetcher with scripted tips + ancestry.

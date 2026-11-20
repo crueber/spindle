@@ -7,9 +7,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/crueber/walhub/internal/git"
-	"github.com/crueber/walhub/internal/store"
-	"github.com/crueber/walhub/internal/store/proto"
+	"github.com/crueber/spindle/internal/git"
+	"github.com/crueber/spindle/internal/store"
+	"github.com/crueber/spindle/internal/store/proto"
 )
 
 // This file owns the §7 manifest-sharing step: the fork's manifest.pb
@@ -47,7 +47,7 @@ type ForkRefsReader interface {
 }
 
 // ShareExecutor is the production ForkExecutor: store + a refs reader,
-// wired at composition (cmd/walhub) over the WAL registry.
+// wired at composition (cmd/spindle) over the WAL registry.
 type ShareExecutor struct {
 	Store store.ObjectStore
 	Refs  ForkRefsReader
@@ -97,7 +97,7 @@ func (e *ShareExecutor) ShareManifest(ctx context.Context, parent, child string,
 	now := e.nowUTC()
 	host := e.Host
 	if host == "" {
-		host = "walhub"
+		host = "spindle"
 	}
 	settings := childSettings(opt.Description, opt.Creator, parent)
 	// 2. Empty parent (HeadSeq 0): the child is a fresh empty manifest —

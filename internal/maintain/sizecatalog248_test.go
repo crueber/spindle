@@ -7,10 +7,10 @@ import (
 	"context"
 	"testing"
 
-	"github.com/crueber/walhub/internal/config"
-	"github.com/crueber/walhub/internal/sizecatalog"
-	"github.com/crueber/walhub/internal/store"
-	"github.com/crueber/walhub/internal/store/proto"
+	"github.com/crueber/spindle/internal/config"
+	"github.com/crueber/spindle/internal/sizecatalog"
+	"github.com/crueber/spindle/internal/store"
+	"github.com/crueber/spindle/internal/store/proto"
 )
 
 func TestFoldSizeCatalog(t *testing.T) {

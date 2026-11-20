@@ -17,9 +17,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/crueber/walhub/internal/config"
-	"github.com/crueber/walhub/internal/server/auth"
-	"github.com/crueber/walhub/internal/store"
+	"github.com/crueber/spindle/internal/config"
+	"github.com/crueber/spindle/internal/server/auth"
+	"github.com/crueber/spindle/internal/store"
 )
 
 // --- §5 static contract ---------------------------------------------------
@@ -390,7 +390,7 @@ func TestJWKSVerify(t *testing.T) {
 	// cfg issuer is the LOGICAL issuer (the token iss); the JWKS discovery
 	// hits the test server URL. §8.4 rule 4 also accepts the bare host.
 	s.cfg.Server.Auth.Issuer = "https://issuer.test"
-	s.cfg.Server.Auth.OAuthClientID = "walhub"
+	s.cfg.Server.Auth.OAuthClientID = "spindle"
 	s.cfg.Server.Auth.AllowedDomains = []string{"example.com"}
 	s.authSvc.jwks = NewJWKS(issuer.URL)
 
@@ -404,7 +404,7 @@ func TestJWKSVerify(t *testing.T) {
 	}
 	emailVerified := true
 	tok := mint(map[string]any{
-		"iss": "https://issuer.test", "aud": "walhub",
+		"iss": "https://issuer.test", "aud": "spindle",
 		"exp": time.Now().Add(time.Hour).Unix(), "iat": time.Now().Unix(),
 		"email": "alice@example.com", "email_verified": true,
 	})
@@ -422,19 +422,19 @@ func TestJWKSVerify(t *testing.T) {
 		t.Fatal("audience mismatch must fail")
 	}
 	// Unverified email.
-	bad = mint(map[string]any{"iss": "https://issuer.test", "aud": "walhub",
+	bad = mint(map[string]any{"iss": "https://issuer.test", "aud": "spindle",
 		"exp": time.Now().Add(time.Hour).Unix(), "email": "alice@example.com", "email_verified": false})
 	if _, aerr := s.authSvc.jwks.Verify(context.Background(), bad, &s.cfg.Server.Auth, false, ""); aerr == nil {
 		t.Fatal("unverified email must fail")
 	}
 	// Wrong issuer.
-	bad = mint(map[string]any{"iss": "https://evil.test", "aud": "walhub",
+	bad = mint(map[string]any{"iss": "https://evil.test", "aud": "spindle",
 		"exp": time.Now().Add(time.Hour).Unix(), "email": "alice@example.com", "email_verified": true})
 	if _, aerr := s.authSvc.jwks.Verify(context.Background(), bad, &s.cfg.Server.Auth, false, ""); aerr == nil {
 		t.Fatal("issuer mismatch must fail")
 	}
 	// Email policy: not-allowed domain → 403.
-	bad = mint(map[string]any{"iss": "https://issuer.test", "aud": "walhub",
+	bad = mint(map[string]any{"iss": "https://issuer.test", "aud": "spindle",
 		"exp": time.Now().Add(time.Hour).Unix(), "email": "mallory@evil.test", "email_verified": true})
 	_, aerr = s.authSvc.verifyIDToken(context.Background(), bad, false, "")
 	if aerr == nil || aerr.Kind != auth.ErrForbidden {

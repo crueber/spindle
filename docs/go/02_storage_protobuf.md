@@ -1,5 +1,5 @@
 # 02 — Storage & protobuf: bucket keys, wire codec, log framing, ObjectStore, CAS
-> Source: MASTER_RUST_SPEC.md §5.1, §5.2, §5.3, §5.4, §4.1, §4.10 · Status: normative for the walhub Go implementation.
+> Source: MASTER_RUST_SPEC.md §5.1, §5.2, §5.3, §5.4, §4.1, §4.10 · Status: normative for the spindle Go implementation.
 
 This doc specifies the bucket data model (key layout, protobuf wire encoding, log framing, seq
 semantics) and the Go object-store contract that every backend (GCS, S3, memory) implements behind
@@ -7,10 +7,10 @@ one interface. It also specifies the hand-rolled protobuf wire codec in `interna
 **no `google.golang.org/protobuf`** — and the generic CAS helper.
 
 Everything here is byte-compat-critical: a bucket written by the Rust implementation must be
-readable by walhub and vice versa. When this doc and MASTER_RUST_SPEC.md §5 disagree on the *format*,
+readable by spindle and vice versa. When this doc and MASTER_RUST_SPEC.md §5 disagree on the *format*,
 §5 wins and this doc is a spec bug.
 
-Package: `internal/store` (+ `internal/store/proto`). Module: `github.com/crueber/walhub`.
+Package: `internal/store` (+ `internal/store/proto`). Module: `github.com/crueber/spindle`.
 Dependencies used by this package: **stdlib only** (`encoding/binary`, `sort`, `io`, `context`,
 `errors`, `fmt`, `time`, `sync`).
 
@@ -390,7 +390,7 @@ local run of a real protobuf toolchain — e.g. `protoc --encode` piped against 
 
 Normative test (`TestGoldenWireCompat`, see 15_testing.md): decode each `.bin` fixture with this
 codec → assert decoded values match the `.golden.json` → re-encode → assert **byte-identical** to
-the fixture. These fixtures are the proof that walhub objects round-trip byte-identical with the
+the fixture. These fixtures are the proof that spindle objects round-trip byte-identical with the
 Rust implementation. A fixture that fails is a codec bug, never a fixture bug, unless the
 `.golden.json` prose disagrees with the binary — then regenerate the pair offline and re-check in.
 
@@ -730,7 +730,7 @@ if errors.Is(err, store.ErrRetriesExhausted) { /* treat as contention/failure */
 - Same framing (§2.4): uvarint-length-prefixed frames, partial-tail tolerance for appendable
   segments.
 - Same Version semantics per backend (generation string / ETag-without-quotes / counter).
-- A walhub-written bucket and a walgit-written bucket are interchangeable: walhub can adopt a
+- A spindle-written bucket and a walgit-written bucket are interchangeable: spindle can adopt a
   bucket after a walgit crash mid-publish (partial tail) and vice versa.
 
 ---

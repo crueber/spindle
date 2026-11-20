@@ -6,8 +6,8 @@ import (
 	"math/rand"
 	"time"
 
-	"github.com/crueber/walhub/internal/store"
-	"github.com/crueber/walhub/internal/store/proto"
+	"github.com/crueber/spindle/internal/store"
+	"github.com/crueber/spindle/internal/store/proto"
 )
 
 // ErrRetriesExhausted reports a CAS ladder that exceeded maxRetries

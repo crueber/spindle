@@ -83,10 +83,10 @@ jobs:
         ports:
           - 9000:9000
     env:
-      WALHUB_TEST_S3_ENDPOINT: http://127.0.0.1:9000
-      WALHUB_TEST_S3_ACCESS_KEY: walgit-dev
-      WALHUB_TEST_S3_SECRET_KEY: walgit-dev-secret
-      WALHUB_TEST_S3_BUCKET: walhub-test
+      SPINDLE_TEST_S3_ENDPOINT: http://127.0.0.1:9000
+      SPINDLE_TEST_S3_ACCESS_KEY: walgit-dev
+      SPINDLE_TEST_S3_SECRET_KEY: walgit-dev-secret
+      SPINDLE_TEST_S3_BUCKET: spindle-test
     steps:
       - uses: actions/checkout@v4
       - uses: pnpm/action-setup@v4

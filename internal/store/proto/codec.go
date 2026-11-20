@@ -16,7 +16,7 @@ import (
 	"sort"
 	"unicode/utf8"
 
-	"github.com/crueber/walhub/internal/store"
+	"github.com/crueber/spindle/internal/store"
 )
 
 // ErrTruncated: input ended mid-tag, mid-length or mid-value (§2.3.1).

@@ -12,7 +12,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/crueber/walhub/internal/server/auth"
+	"github.com/crueber/spindle/internal/server/auth"
 )
 
 // statePayload is the HMAC-signed anti-forgery state: "{now+600}\n{nonce}\n{next}".
@@ -167,7 +167,7 @@ func loginUnavailableHTML(next string) string {
 		next = "/"
 	}
 	loginURL := "/_auth/login?next=" + url.QueryEscape(next)
-	return `<!doctype html><html><head><title>walhub — log in</title></head><body>
+	return `<!doctype html><html><head><title>spindle — log in</title></head><body>
 <h1>Log in with OIDC</h1>
 <p>Browser login is not enabled on this instance: the server's OIDC
 configuration is incomplete (it needs <code>server.auth.session_secret</code>,
@@ -177,7 +177,7 @@ configuration is incomplete (it needs <code>server.auth.session_secret</code>,
 and works as soon as an administrator completes that configuration and
 restarts the server.</p>
 <p><a href="` + loginURL + `"><button>Log in with OIDC</button></a></p>
-<p>If you are the administrator: run <code>walhub config check</code> (it
+<p>If you are the administrator: run <code>spindle config check</code> (it
 names the missing keys) or open <code>/setup</code> — the OIDC section
 flags the incomplete trio before you save.</p>
 </body></html>`

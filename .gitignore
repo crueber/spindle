@@ -1,6 +1,6 @@
 # build output
-/walhub
-/walhub-server
+/spindle
+/spindle-server
 /bin/
 *.test
 *.out

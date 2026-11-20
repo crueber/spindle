@@ -59,7 +59,7 @@ type ReleaseInput struct {
 }
 
 // encodeTag percent-encodes a tag into one key segment (§1: `%` → `%25`,
-// `/` → `%2F`; walhub does NOT lowercase or otherwise normalize tags).
+// `/` → `%2F`; spindle does NOT lowercase or otherwise normalize tags).
 // `%` is encoded first so the `/` escape never double-encodes.
 func encodeTag(tag string) string {
 	return strings.ReplaceAll(strings.ReplaceAll(tag, "%", "%25"), "/", "%2F")

@@ -11,7 +11,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/crueber/walhub/internal/store"
+	"github.com/crueber/spindle/internal/store"
 )
 
 // countingStore tallies backend calls by key class (no mocks for the
@@ -144,8 +144,8 @@ func TestEvidenceImportBudget(t *testing.T) {
 			cs.reset()
 			start := time.Now()
 			p := fileParams("acme", "ev"+tc.name, srcURL)
-			p.importer = "evidence@walhub.test"
-			o, err := svc.RunHeadless(context.Background(), p, "", "evidence@walhub.test")
+			p.importer = "evidence@spindle.test"
+			o, err := svc.RunHeadless(context.Background(), p, "", "evidence@spindle.test")
 			wall := time.Since(start)
 			if err != nil {
 				t.Fatalf("import: %v", err)
@@ -199,8 +199,8 @@ func TestEvidenceImportFlat(t *testing.T) {
 		svc, _ := testServiceOnStore(t, cfg, realRoles(cs, cfg), cs)
 		cs.reset()
 		p := fileParams("acme", name, srcURL)
-		p.importer = "evidence@walhub.test"
-		if _, err := svc.RunHeadless(context.Background(), p, "", "evidence@walhub.test"); err != nil {
+		p.importer = "evidence@spindle.test"
+		if _, err := svc.RunHeadless(context.Background(), p, "", "evidence@spindle.test"); err != nil {
 			t.Fatalf("%s: %v", name, err)
 		}
 		g, _, _, c := cs.snapshot()

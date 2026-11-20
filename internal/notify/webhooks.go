@@ -37,8 +37,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/crueber/walhub/internal/egress"
-	"github.com/crueber/walhub/internal/store"
+	"github.com/crueber/spindle/internal/egress"
+	"github.com/crueber/spindle/internal/store"
 )
 
 // activityActions is the §5.3 action enum (+ "*" wildcard for filters).

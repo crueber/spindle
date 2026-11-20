@@ -13,7 +13,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/crueber/walhub/internal/store"
+	"github.com/crueber/spindle/internal/store"
 )
 
 // seedHook bypasses CreateHook (pre-cap repos may hold more hooks than

@@ -13,7 +13,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/crueber/walhub/internal/wal"
+	"github.com/crueber/spindle/internal/wal"
 )
 
 const (

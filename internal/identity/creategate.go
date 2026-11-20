@@ -24,8 +24,8 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/crueber/walhub/internal/server/auth"
-	"github.com/crueber/walhub/internal/store"
+	"github.com/crueber/spindle/internal/server/auth"
+	"github.com/crueber/spindle/internal/store"
 )
 
 // CheckCreateOwner is the single creation/import admission rule (Forgejo

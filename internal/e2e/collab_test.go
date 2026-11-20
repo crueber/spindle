@@ -139,9 +139,9 @@ func pollUntil(t *testing.T, timeout time.Duration, what string, cond func() boo
 // writer) on a throwaway data dir; cleaned up by t.Cleanup.
 func chainServer(t *testing.T) *e2eServer {
 	t.Helper()
-	bin := buildWALHub(t)
+	bin := buildSpindle(t)
 	dataDir := t.TempDir()
-	writeWALHubConfig(t, dataDir, fmt.Sprintf(`
+	writeSpindleConfig(t, dataDir, fmt.Sprintf(`
 [server]
 auto_create_on_push = true
 

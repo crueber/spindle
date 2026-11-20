@@ -8,8 +8,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/crueber/walhub/internal/store"
-	"github.com/crueber/walhub/internal/store/proto"
+	"github.com/crueber/spindle/internal/store"
+	"github.com/crueber/spindle/internal/store/proto"
 )
 
 // This file pins Forgejo issue #458 (child of the #449 audit, F4+F5):
@@ -575,7 +575,7 @@ func TestFork458SemanticCompare(t *testing.T) {
 			Seq: 7, ObjectFormat: "sha1",
 			Packs:   []*proto.PackRef{{Checksum: "p1", PackSize: 100}},
 			RefsKey: store.CheckpointRefsKey(7), RefCount: 1,
-			Writer: "walhub",
+			Writer: "spindle",
 		}
 		b := &proto.Checkpoint{
 			Seq: 7, ObjectFormat: "sha1",

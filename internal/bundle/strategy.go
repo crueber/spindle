@@ -5,7 +5,7 @@ import (
 	"path"
 	"sort"
 
-	"github.com/crueber/walhub/internal/config"
+	"github.com/crueber/spindle/internal/config"
 )
 
 // Strategy kinds (§8.5).

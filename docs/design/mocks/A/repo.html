@@ -1,0 +1,357 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>acme/demo — Code · spindle</title>
+<style>
+:root{
+  --bg:#0f1113;
+  --surface:#14181b;
+  --surface-2:#171b1f;
+  --raised:#1c2125;
+  --raised-2:#22282c;
+  --border:#232a2e;
+  --border-2:#323a3f;
+  --text:#e6eaec;
+  --text-2:#a3adb4;
+  --muted:#79838b;
+  --dim:#525c63;
+  --accent:#ffb224;
+  --accent-2:#ffc862;
+  --ink:#151004;
+  --ok:#4ec9a4;
+  --merged:#9d8cff;
+  --danger:#e06c6c;
+  --mono:ui-monospace,"SF Mono",Menlo,Consolas,"Liberation Mono",monospace;
+  --sans:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
+  --r1:2px;
+  --r2:4px;
+}
+*{box-sizing:border-box}
+html,body{margin:0;padding:0}
+body{
+  height:100vh;display:flex;flex-direction:column;overflow:hidden;
+  background:var(--bg);color:var(--text);
+  font:13px/1.45 var(--sans);
+  -webkit-font-smoothing:antialiased;text-rendering:optimizeLegibility;
+}
+a{color:inherit;text-decoration:none}
+button{font:inherit;color:inherit;background:none;border:0;padding:0;cursor:pointer}
+svg{display:block}
+.grow{flex:1 1 auto;min-width:0}
+.mono{font-family:var(--mono)}
+::selection{background:rgba(255,178,36,.24)}
+
+/* ---------- top bar ---------- */
+.top{flex:0 0 46px;display:flex;align-items:center;gap:16px;padding:0 18px;background:#101315;border-bottom:1px solid var(--border)}
+.brand{display:inline-flex;align-items:center;gap:8px;font:600 14px/1 var(--mono);letter-spacing:-.01em;color:#f1f4f5}
+.brand .mark{width:9px;height:9px;background:var(--accent);border-radius:1px}
+.search{flex:0 1 470px;display:flex;align-items:center;gap:9px;height:28px;padding:0 7px 0 9px;background:var(--surface);border:1px solid var(--border);border-radius:var(--r2);color:var(--muted);font-size:12.5px;cursor:text}
+.search:hover{border-color:var(--border-2)}
+.search svg{width:13px;height:13px;flex:0 0 13px;color:var(--dim)}
+.search .ph{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.kb{display:inline-flex;align-items:center;justify-content:center;height:17px;min-width:17px;padding:0 4px;font:10px/1 var(--mono);color:var(--text-2);background:var(--raised);border:1px solid var(--border-2);border-radius:2px}
+.ico{width:28px;height:28px;display:inline-flex;align-items:center;justify-content:center;border:1px solid transparent;border-radius:var(--r2);color:var(--text-2);position:relative}
+.ico:hover{background:var(--raised);border-color:var(--border);color:var(--text)}
+.ico svg{width:15px;height:15px}
+.ico .ping{position:absolute;top:6px;right:6px;width:4px;height:4px;border-radius:50%;background:var(--accent)}
+.btn{display:inline-flex;align-items:center;gap:6px;height:26px;padding:0 9px;border:1px solid var(--border-2);border-radius:var(--r2);background:var(--raised);color:var(--text);font-size:12px;white-space:nowrap}
+.btn:hover{background:var(--raised-2);border-color:#3d464c}
+.btn .chev{font-size:9px;color:var(--muted)}
+.btn .plus{color:var(--muted);font-family:var(--mono)}
+.btn.ghost{background:transparent;border-color:transparent;color:var(--text-2)}
+.btn.ghost:hover{background:var(--raised);border-color:var(--border);color:var(--text)}
+.btn.primary{background:var(--accent);border-color:var(--accent);color:var(--ink);font-weight:600}
+.btn.primary:hover{background:var(--accent-2);border-color:var(--accent-2)}
+.btn.primary .chev{color:var(--ink);opacity:.6}
+.avatar{width:24px;height:24px;display:grid;place-items:center;border-radius:var(--r2);background:var(--raised-2);border:1px solid var(--border-2);font:10px/1 var(--mono);color:var(--text-2)}
+
+/* ---------- repo header ---------- */
+.rhead{padding:13px 22px 11px;border-bottom:1px solid var(--border)}
+.rtitle{display:flex;align-items:center;gap:7px;font:600 19px/1.15 var(--mono);letter-spacing:-.02em}
+.rtitle .own{color:var(--text-2);font-weight:500}
+.rtitle .sl{color:var(--dim);font-weight:400}
+.chip{display:inline-flex;align-items:center;height:17px;margin-left:4px;padding:0 5px;border:1px solid var(--border-2);border-radius:2px;background:var(--surface);color:var(--text-2);font:500 9.5px/1 var(--mono);letter-spacing:.1em;text-transform:uppercase}
+.rdesc{margin:6px 0 0;font-size:12.5px;color:var(--text-2)}
+.rmeta{margin-top:7px;display:flex;align-items:center;gap:7px;font:11px/1 var(--mono);color:var(--muted)}
+.rmeta .num{color:var(--text-2)}
+.rmeta .sep{color:var(--dim)}
+
+/* ---------- tabs ---------- */
+.tabs{flex:0 0 38px;display:flex;align-items:stretch;gap:1px;padding:0 14px;background:#111416;border-bottom:1px solid var(--border)}
+.tab{display:inline-flex;align-items:center;gap:6px;padding:0 9px;font-size:12.5px;color:var(--text-2);border-bottom:2px solid transparent;margin-bottom:-1px}
+.tab:hover{color:var(--text);background:var(--surface)}
+.tab.on{color:#f1f4f5;border-bottom-color:#9aa4ab;font-weight:500}
+.tab .n{min-width:16px;height:15px;display:inline-flex;align-items:center;justify-content:center;padding:0 4px;font:9.5px/1 var(--mono);color:var(--text-2);background:var(--raised);border:1px solid var(--border);border-radius:2px}
+
+/* ---------- code toolbar ---------- */
+.toolbar{flex:0 0 44px;display:flex;align-items:center;gap:8px;padding:0 22px;background:var(--surface);border-bottom:1px solid var(--border)}
+.branch{display:inline-flex;align-items:center;gap:7px;height:26px;padding:0 8px;background:var(--raised);border:1px solid var(--border-2);border-radius:var(--r2);font:11.5px/1 var(--mono);color:var(--text)}
+.branch:hover{border-color:#3d464c}
+.branch .chev{font-size:9px;color:var(--muted)}
+.path{display:flex;align-items:center;gap:6px;font:11.5px/1 var(--mono);color:var(--muted)}
+.path b{color:var(--text-2);font-weight:500}
+.path .sl{color:var(--dim)}
+.toolbar .btn.ghost{font-family:var(--mono);font-size:11.5px}
+
+/* ---------- layout ---------- */
+.wrap{flex:1 1 auto;min-height:0;display:grid;grid-template-columns:minmax(0,1fr) 276px;gap:26px;padding:16px 22px}
+.col{display:flex;flex-direction:column;min-width:0;min-height:0}
+
+/* ---------- commit strip ---------- */
+.cstrip{flex:0 0 34px;display:flex;align-items:center;gap:8px;margin-bottom:12px;padding:0 10px;background:var(--surface);border:1px solid var(--border);border-radius:var(--r2);font:11px/1 var(--mono);color:var(--muted);min-width:0}
+.cstrip .avdot{width:15px;height:15px;flex:0 0 15px;display:grid;place-items:center;border-radius:50%;background:var(--raised-2);border:1px solid var(--border-2);font-size:7.5px;color:var(--text-2)}
+.cstrip .msg{font-family:var(--sans);font-size:12.5px;font-weight:500;color:var(--text);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.cstrip .who{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.cstrip .sha{color:var(--text-2)}
+.cstrip .sep{color:var(--dim)}
+.cstrip .ci{display:inline-flex;align-items:center;gap:5px;white-space:nowrap}
+.cstrip .ci i{width:6px;height:6px;border-radius:50%;background:var(--ok)}
+.cstrip .br{color:var(--text-2)}
+.cstrip .link{color:var(--text-2);text-decoration:underline;text-decoration-color:var(--border-2);text-underline-offset:2px;white-space:nowrap}
+.cstrip .link:hover{color:var(--accent);text-decoration-color:var(--accent)}
+
+/* ---------- panels + file table ---------- */
+.panel{background:var(--surface);border:1px solid var(--border);border-radius:var(--r2);overflow:hidden}
+.ftable .r{display:grid;grid-template-columns:minmax(0,1.15fr) minmax(0,1fr) 52px 94px;align-items:center;gap:12px;height:34px;padding:0 12px;border-top:1px solid #1a2024}
+.ftable .r:first-child{border-top:0}
+.ftable .r.h{height:28px;background:#121619;font:9.5px/1 var(--mono);letter-spacing:.12em;text-transform:uppercase;color:var(--dim)}
+.ftable .r.h .st{text-align:center}
+.ftable .r.h .fa{text-align:right}
+.ftable .r:not(.h):hover{background:var(--raised)}
+.ftable .r:not(.h):hover .fm{color:var(--text-2)}
+.fn{display:flex;align-items:center;gap:8px;min-width:0;font:12.5px/1 var(--mono);color:var(--text)}
+.fn svg{width:13px;height:13px;flex:0 0 13px;color:var(--dim)}
+.fn .nm{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.fn.dir .nm{font-weight:500}
+.fn .sl{color:var(--dim)}
+.fm{font-size:12px;color:var(--muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.st{font:10px/1 var(--mono);text-align:center}
+.st.m{color:var(--text-2)}
+.st.a{color:var(--ok)}
+.st.n{color:var(--dim)}
+.fa{font:11px/1 var(--mono);color:var(--muted);text-align:right;white-space:nowrap}
+
+/* ---------- readme ---------- */
+.readme{margin-top:12px;flex:1 1 auto;display:flex;flex-direction:column;min-height:0}
+.rhead2{flex:0 0 30px;display:flex;align-items:center;gap:10px;padding:0 12px;background:#121619;border-bottom:1px solid var(--border)}
+.rhead2 .f{font:11.5px/1 var(--mono);color:var(--text-2)}
+.seg{display:flex;align-items:center;gap:12px;font:10.5px/1 var(--mono);color:var(--dim)}
+.seg .on{color:var(--text-2);padding-bottom:2px;border-bottom:1px solid var(--border-2)}
+.rbody{flex:1 1 auto;min-height:0;padding:18px 20px 14px;display:flex;flex-direction:column;overflow:hidden}
+.rbody h1{margin:0 0 6px;font-size:20px;font-weight:600;letter-spacing:-.015em}
+.rbody p{margin:0;font-size:12.5px;color:var(--text-2)}
+.rbody h2{margin:20px 0 8px;font-size:12.5px;font-weight:600;letter-spacing:.01em}
+.feats{list-style:none;margin:0;padding:0}
+.feats li{display:flex;gap:8px;font:11.5px/2 var(--mono);color:var(--text-2)}
+.feats li::before{content:"–";color:var(--dim)}
+.eof{margin-top:auto;padding-top:12px;font:9.5px/1 var(--mono);letter-spacing:.16em;color:#3c454b}
+
+/* ---------- about rail ---------- */
+.rail{min-width:0;border-left:1px solid var(--border);padding:2px 0 0 20px}
+.rail h2{margin:0 0 9px;font:500 10px/1 var(--mono);letter-spacing:.14em;text-transform:uppercase;color:var(--muted)}
+.about-desc{margin:0 0 12px;font-size:12px;line-height:1.55;color:var(--text-2)}
+.about-links{display:flex;gap:16px;margin:0 0 12px;font:11px/1 var(--mono);color:var(--muted)}
+.about-links a:hover{color:var(--accent)}
+.kv{border-top:1px solid var(--border)}
+.kv .r{display:flex;align-items:center;justify-content:space-between;gap:10px;height:26px;border-bottom:1px solid var(--border)}
+.kv dt{margin:0;font:10px/1 var(--mono);letter-spacing:.08em;text-transform:uppercase;color:var(--muted)}
+.kv dd{margin:0;font:11px/1 var(--mono);color:var(--text-2)}
+.lang{margin-top:14px}
+.lang .bar{display:flex;height:3px;border-radius:1px;overflow:hidden;background:var(--raised)}
+.lang .bar i{display:block;height:100%}
+.lang .leg{display:flex;gap:16px;margin-top:8px;font:10.5px/1 var(--mono);color:var(--text-2)}
+.sw{display:inline-block;width:6px;height:6px;border-radius:50%;margin-right:5px;vertical-align:1px}
+
+/* ---------- status strip ---------- */
+.status{flex:0 0 26px;display:flex;align-items:center;gap:10px;padding:0 12px;background:#0c0e10;border-top:1px solid var(--border);font:10.5px/1 var(--mono);color:var(--muted);white-space:nowrap;overflow:hidden}
+.hint{display:inline-flex;align-items:center;gap:4px}
+.hint em{font-style:normal;margin-left:2px;color:var(--muted)}
+.status .kb{height:15px;min-width:15px;padding:0 3px;font-size:9.5px;border-color:var(--border)}
+.status .sep{color:#2e363b}
+.status .ref{color:var(--text-2)}
+.live{display:inline-flex;align-items:center;gap:5px;color:var(--text-2)}
+.live i{width:5px;height:5px;border-radius:50%;background:var(--accent)}
+
+@media (max-width:1100px){
+  body{height:auto;overflow:auto}
+  .wrap{grid-template-columns:1fr;padding:16px}
+  .rail{border-left:0;padding-left:0}
+  .search{flex-basis:240px}
+}
+</style>
+</head>
+<body>
+
+<header class="top">
+  <a class="brand" href="#"><span class="mark"></span>spindle</a>
+  <div class="search" role="search">
+    <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" aria-hidden="true"><circle cx="6.8" cy="6.8" r="4.2"/><path d="M10 10l3.2 3.2"/></svg>
+    <span class="ph">Search repositories, issues, code…</span>
+    <span class="kb">⌘K</span>
+  </div>
+  <span class="grow"></span>
+  <button class="ico" aria-label="Notifications">
+    <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3" aria-hidden="true"><path d="M8 2.2a3.6 3.6 0 0 0-3.6 3.6c0 3.2-1.4 4.2-1.4 4.2h10s-1.4-1-1.4-4.2A3.6 3.6 0 0 0 8 2.2Z"/><path d="M6.6 12.4a1.6 1.6 0 0 0 2.8 0"/></svg>
+    <span class="ping"></span>
+  </button>
+  <button class="btn"><span class="plus">+</span>Create</button>
+  <span class="avatar" title="AD">AD</span>
+</header>
+
+<div class="rhead">
+  <div class="rtitle">
+    <a class="own" href="#">acme</a><span class="sl">/</span><a href="#">demo</a>
+    <span class="chip">Public</span>
+  </div>
+  <p class="rdesc">A demonstration repository for design review.</p>
+  <div class="rmeta">
+    <span>★ <span class="num">12</span> stars</span><span class="sep">·</span>
+    <span>⑂ <span class="num">3</span> forks</span><span class="sep">·</span>
+    <span>⚑ <span class="num">1</span> watching</span>
+  </div>
+</div>
+
+<nav class="tabs">
+  <a class="tab on" href="#">Code</a>
+  <a class="tab" href="#">Issues <span class="n">4</span></a>
+  <a class="tab" href="#">Pull requests <span class="n">1</span></a>
+  <a class="tab" href="#">Actions</a>
+  <a class="tab" href="#">Releases</a>
+  <a class="tab" href="#">Settings</a>
+</nav>
+
+<div class="toolbar">
+  <button class="branch">main <span class="chev">▾</span></button>
+  <span class="path"><b>demo</b><span class="sl">/</span><b>src</b></span>
+  <span class="grow"></span>
+  <button class="btn ghost"><span class="kb">/</span>Go to file</button>
+  <button class="btn primary">Code <span class="chev">▾</span></button>
+  <button class="ico" aria-label="More actions">⋯</button>
+</div>
+
+<main class="wrap">
+  <section class="col">
+
+    <div class="cstrip">
+      <span class="avdot">AD</span>
+      <span class="msg">telemetry: add hook stub</span>
+      <span class="who">AD committed 2 hours ago</span>
+      <span class="grow"></span>
+      <span class="br">main</span>
+      <span class="sep">·</span>
+      <span class="sha">53e62df</span>
+      <span class="ci"><i></i>passing</span>
+      <a class="link" href="#">8 commits →</a>
+    </div>
+
+    <div class="panel ftable">
+      <div class="r h">
+        <span>Name</span><span>Last commit</span><span class="st">Status</span><span class="fa">Age</span>
+      </div>
+      <div class="r">
+        <span class="fn dir">
+          <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.2" aria-hidden="true"><path d="M1.9 4.4h4.2l1.2 1.5h6.8v6.4H1.9z"/></svg>
+          <span class="nm">src</span><span class="sl">/</span>
+        </span>
+        <span class="fm">telemetry: add hook stub</span>
+        <span class="st m" title="modified">M</span>
+        <span class="fa">2 hours ago</span>
+      </div>
+      <div class="r">
+        <span class="fn">
+          <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.2" aria-hidden="true"><path d="M3.6 2.2h5.9l3 3v8.6h-8.9z"/><path d="M9.4 2.2v3h3"/></svg>
+          <span class="nm">DESIGN.md</span>
+        </span>
+        <span class="fm">docs: design notes</span>
+        <span class="st m" title="modified">M</span>
+        <span class="fa">1 day ago</span>
+      </div>
+      <div class="r">
+        <span class="fn">
+          <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.2" aria-hidden="true"><path d="M3.6 2.2h5.9l3 3v8.6h-8.9z"/><path d="M9.4 2.2v3h3"/></svg>
+          <span class="nm">README.md</span>
+        </span>
+        <span class="fm">docs: design notes</span>
+        <span class="st m" title="modified">M</span>
+        <span class="fa">1 day ago</span>
+      </div>
+      <div class="r">
+        <span class="fn">
+          <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.2" aria-hidden="true"><path d="M3.6 2.2h5.9l3 3v8.6h-8.9z"/><path d="M9.4 2.2v3h3"/></svg>
+          <span class="nm">go.mod</span>
+        </span>
+        <span class="fm">initial import</span>
+        <span class="st a" title="added">A</span>
+        <span class="fa">3 days ago</span>
+      </div>
+      <div class="r">
+        <span class="fn">
+          <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.2" aria-hidden="true"><path d="M3.6 2.2h5.9l3 3v8.6h-8.9z"/><path d="M9.4 2.2v3h3"/></svg>
+          <span class="nm">telemetry.go</span>
+        </span>
+        <span class="fm">telemetry: add hook stub</span>
+        <span class="st m" title="modified">M</span>
+        <span class="fa">2 hours ago</span>
+      </div>
+    </div>
+
+    <div class="panel readme">
+      <div class="rhead2">
+        <span class="f">README.md</span>
+        <span class="grow"></span>
+        <span class="seg"><span class="on">rendered</span><span>raw</span></span>
+      </div>
+      <div class="rbody">
+        <h1>spindle demo</h1>
+        <p>A demonstration repository for design review.</p>
+        <h2>Features</h2>
+        <ul class="feats">
+          <li>object-store backed git hosting</li>
+          <li>server rendered UI</li>
+          <li>JSON API + SDK</li>
+        </ul>
+        <div class="eof">EOF</div>
+      </div>
+    </div>
+
+  </section>
+
+  <aside class="rail">
+    <h2>About</h2>
+    <p class="about-desc">A demonstration repository for design review.</p>
+    <div class="about-links"><a href="#">Readme</a><a href="#">Activity</a></div>
+    <dl class="kv">
+      <div class="r"><dt>Stars</dt><dd>12</dd></div>
+      <div class="r"><dt>Forks</dt><dd>3</dd></div>
+      <div class="r"><dt>Watching</dt><dd>1</dd></div>
+      <div class="r"><dt>Releases</dt><dd>v0.1.0</dd></div>
+      <div class="r"><dt>Branches</dt><dd>2 · tags 1</dd></div>
+    </dl>
+    <div class="lang">
+      <div class="bar"><i style="width:96.4%;background:#98a2a9"></i><i style="width:3.6%;background:#3c454b"></i></div>
+      <div class="leg"><span><i class="sw" style="background:#98a2a9"></i>Go 96.4%</span><span><i class="sw" style="background:#3c454b"></i>Shell 3.6%</span></div>
+    </div>
+  </aside>
+</main>
+
+<footer class="status">
+  <span class="hint"><span class="kb">g</span><span class="kb">c</span><em>code</em></span>
+  <span class="hint"><span class="kb">g</span><span class="kb">i</span><em>issues</em></span>
+  <span class="hint"><span class="kb">/</span><em>search</em></span>
+  <span class="hint"><span class="kb">?</span><em>help</em></span>
+  <span class="sep">|</span>
+  <span class="ref">main</span>
+  <span class="sep">·</span>
+  <span>53e62df</span>
+  <span class="sep">·</span>
+  <span>clean</span>
+  <span class="grow"></span>
+  <span>8 commits</span>
+  <span class="sep">·</span>
+  <span class="live"><i></i>live</span>
+</footer>
+
+</body>
+</html>

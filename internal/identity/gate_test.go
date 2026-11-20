@@ -4,8 +4,8 @@ import (
 	"context"
 	"testing"
 
-	"github.com/crueber/walhub/internal/server/auth"
-	"github.com/crueber/walhub/internal/store"
+	"github.com/crueber/spindle/internal/server/auth"
+	"github.com/crueber/spindle/internal/store"
 )
 
 func TestCheckRead(t *testing.T) {

@@ -13,7 +13,7 @@ import (
 var durationRe = regexp.MustCompile(`^([0-9]+)\s*(ms|s|m|h|d|w)$`)
 
 // ParseDuration parses a duration in the Rust-spec spelling shared by the TOML
-// file and the WALHUB__/WALGIT__ env overlay: unit suffixes ms|s|m|h|d|w, a
+// file and the SPINDLE__/WALGIT__ env overlay: unit suffixes ms|s|m|h|d|w, a
 // bare integer meaning seconds, "0s" meaning disabled. Compound Go forms
 // ("1h30m", "-20s") are accepted via time.ParseDuration.
 func ParseDuration(s string) (Duration, error) {

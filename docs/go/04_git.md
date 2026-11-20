@@ -1,5 +1,5 @@
 # 04 — Git layer (`internal/git`)
-> Source: MASTER_RUST_SPEC.md §7 (7.1–7.9), with §8.4 gates and §15 config keys · Status: normative for the walhub Go implementation.
+> Source: MASTER_RUST_SPEC.md §7 (7.1–7.9), with §8.4 gates and §15 config keys · Status: normative for the spindle Go implementation.
 
 
 `internal/git` owns every interaction with the `git` binary: pack ingest, ref storage, pkt-line
@@ -474,7 +474,7 @@ band-2 progress chatter, never the report.
 
 ### 8.1 Engine selection — DECISION (Go v1)
 
-| `git.upload_pack_engine` | Rust behavior | walhub Go v1 |
+| `git.upload_pack_engine` | Rust behavior | spindle Go v1 |
 |---|---|---|
 | repo base is remote-served (no store mount) | gix engine + remote-reader faulter | **refuse** (see below) |
 | `auto` (default) | stock git | stock git |
@@ -482,7 +482,7 @@ band-2 progress chatter, never the report.
 | `gix` | gix | stock git + WARN log (config accepted for bucket compatibility; in-process engine deferred) |
 
 **Refusal (remote-served base):** pkt-line
-`ERR walgit: <owner>/<repo> is served through a remote base that is not mounted on this host; fetch from the serving host, or set cache.store_mount so the base is local (this walhub build has no remote-reader fetch engine)`
+`ERR walgit: <owner>/<repo> is served through a remote base that is not mounted on this host; fetch from the serving host, or set cache.store_mount so the base is local (this spindle build has no remote-reader fetch engine)`
 followed by flush, HTTP 503 + `Retry-After: 15`. The engine field is kept in config and surfaced in
 `/services/api/instance` so a future in-process engine slots in without config churn (doc 14).
 
@@ -499,7 +499,7 @@ after EOF, drain stdout to the client writer concurrently, drain stderr to a bou
 stderr content on non-zero exit → `Subprocess error` (500-shaped; doc 06).
 
 For v2 the request body is parsed (pkt-lines) BEFORE spawning for the guards below, but is passed
-through **byte-for-byte** — walhub never re-encodes client pkt-lines (only v0 advertisement and ls-refs
+through **byte-for-byte** — spindle never re-encodes client pkt-lines (only v0 advertisement and ls-refs
 are hand-rendered). If a future need requires building a v2 request, the arg grammar is: `command=fetch`,
 `thin-pack`, `ofs-delta`, `no-progress`, `include-tag`, `sideband-all`, `wait-for-done`, `filter <f>`,
 `want <oid>`, `have <oid>`, `shallow`, `deepen`, `deepen-since`, `deepen-not`, `want-ref <ref>`, `done`.
@@ -740,7 +740,7 @@ listed for doc 11; Rust-compat keys keep their names verbatim.
   only fetch variant is the same argv with a host-pinned credential helper
   for token-bearing first/manual syncs (memory-only, never stored).
 - **Annotated-tag construction argv (Forgejo #263, 2026-09-10, `internal/tags`
-  + the `cmd/walhub` tags composition).** Two new pinned argv, both run in the
+  + the `cmd/spindle` tags composition).** Two new pinned argv, both run in the
   repo git-dir (`GIT_DIR=<repo>`, `GIT_TERMINAL_PROMPT=0`, bounded pool + ctx
   timeout, 8 KiB stderr discipline per §2):
   `git mktag` (server-rendered tag content on stdin — `object/type/tag/tagger`
@@ -757,7 +757,7 @@ listed for doc 11; Rust-compat keys keep their names verbatim.
 - **Per-entry tree-date walk argv (Forgejo #301, 2026-09-10, recipe owned by
   `internal/api` — normative in 07_api.md §9.4, registered here per the
   exact-argv law):**
-  `git log <sha> --format=WALHUBTREE\ %H\ %cI --name-status --no-renames --no-color --first-parent -z --max-count=<server.max_tree_log> [-- <dir>]`
+  `git log <sha> --format=SPINDLETREE\ %H\ %cI --name-status --no-renames --no-color --first-parent -z --max-count=<server.max_tree_log> [-- <dir>]`
   (run in the serving copy, request ctx, no extra pool — it rides the
   per-repo HTTP semaphore like every other §9 recipe). One invocation per
   tree listing, newest-first; `--first-parent` attributes a merge's whole
@@ -789,7 +789,7 @@ listed for doc 11; Rust-compat keys keep their names verbatim.
   bare two-segment names as exact forced refspecs). Dropped before
   rendering (the S4 refmap, pull-direction FilterRefs discipline
   reversed): `refs/replace/*`, `refs/meta/*`, `refs/keep-around/*`
-  always;   `refs/pull/*`, `refs/changes/*`, `refs/review/*` (walhub's
+  always;   `refs/pull/*`, `refs/changes/*`, `refs/review/*` (spindle's
   own PR heads live in `refs/pull/` — shipping them would leak forge
   state, and hosts like GitHub refuse writes there), `refs/notes/*`
   by default. SSH pushes set `GIT_SSH_COMMAND="ssh -i <keyfile> -o
@@ -814,7 +814,7 @@ listed for doc 11; Rust-compat keys keep their names verbatim.
   refspec render reuses the §12 `for-each-ref` argv (one cheap local
   spawn per fire, no store trip). Rationale: law 2 pins exact argv —
   a new spawn needs its doc line in the same change; forced wildcards
-  with `--prune` carry the `--mirror` deletion semantics (walhub is
+  with `--prune` carry the `--mirror` deletion semantics (spindle is
   the primary) over exactly the refs the manifest store publishes
   minus forge-internal namespaces (`Sync(LevelServe)` materializes
   them first, `refs/pull/**` included — a bare `--mirror` would ship

@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/crueber/walhub/internal/config"
+	"github.com/crueber/spindle/internal/config"
 )
 
 // newTestServer builds a Server with a fake engine and a memory store.

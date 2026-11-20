@@ -1,6 +1,6 @@
 # 14 — Extensibility & modularity: seams for GitHub-like growth
 
-> Source: MASTER_RUST_SPEC.md §1.3 (feature surface), §3.1 (roles), §8 (HTTP/auth), §9 (API), §12 (events), §14 (policy) · Status: normative for the walhub Go implementation. This document is NEW — the Rust system has no extensibility layer; it is derived from the frozen contracts the Rust spec already defines.
+> Source: MASTER_RUST_SPEC.md §1.3 (feature surface), §3.1 (roles), §8 (HTTP/auth), §9 (API), §12 (events), §14 (policy) · Status: normative for the spindle Go implementation. This document is NEW — the Rust system has no extensibility layer; it is derived from the frozen contracts the Rust spec already defines.
 
 ## 14.1 Philosophy: a small core that stays small
 
@@ -10,10 +10,10 @@ The Rust spec closes §1.3 with "explicitly not in scope: code review, merge que
 2. Does it fit an extensible seam (§14.3–§14.9)? If yes, it is a registration plus a package, and core does not learn its name.
 3. Does it add durable state anywhere but the bucket? If yes, it violates Principle 1 and is rejected regardless of seam fit.
 
-The package tree is fixed (module `github.com/crueber/walhub`):
+The package tree is fixed (module `github.com/crueber/spindle`):
 
 ```
-cmd/walhub            # binary entry: subcommand dispatch (Seam 7)
+cmd/spindle            # binary entry: subcommand dispatch (Seam 7)
 internal/store        # bucket contract + backends (Seam 6)
 internal/wal          # WAL engine, manifest CAS, log, checkpoints
 internal/git          # smart HTTP, receive/upload-pack, stock git subprocess
@@ -23,7 +23,7 @@ internal/server       # http server, middleware, auth (Seam 2), lanes
 internal/api          # JSON API + SSE + route registry (Seam 1)
 internal/events       # WAL tailing + sinks (Seam 4)
 internal/maintain     # maintainer loop, task kinds (Seam 5), fsck
-internal/config       # walhub.toml + env overrides
+internal/config       # spindle.toml + env overrides
 web/                  # page assets (app.css, islands → ui.js, vendored htmx) + SDK (D-WEB-14; doc 12); pages are Go templates in internal/webui/templates
 ```
 
@@ -35,7 +35,7 @@ Extensions live in their own packages (`internal/issues`, `internal/pulls`, …)
 
 | Contract | Source | Why frozen |
 |---|---|---|
-| Bucket key layout `repos/<o>/<r>/…` and bucket-root keys | §3.1, §5 | Rust/walhub buckets must interoperate |
+| Bucket key layout `repos/<o>/<r>/…` and bucket-root keys | §3.1, §5 | Rust/spindle buckets must interoperate |
 | `manifest.pb` protobuf + CAS semantics (the only commit point) | §3.2, P2 | Every correctness proof stands on it |
 | WAL `LogEntry` kinds: PUSH, COMPACT, REF_UPDATE, CHECKPOINT, SETTINGS; append-only proto, field numbers frozen | §21, P2/P10 | Replay, checkpoints, burn, events all parse it |
 | Overwritable-object list: `manifest.pb`, `bundles/list.pb`, `leases/*`, `maintain/<host>.pb`, `events/cursor(s)/…`, `policy.json`, `fsck.pb`, render cache, the identity families (`users/*/profile.json`, `users/*/invitations/index.json`, `orgs/*/org.json`, `orgs/*/members.json`, `orgs/*/teams/*.json`, `repos/<o>/<r>/access.json` — Wave A amendment, see Decisions), the pulls families (`repos/<o>/<r>/pulls/<num>/pr.json`, `repos/<o>/<r>/pulls/<num>/mergeable.json`, `repos/<o>/<r>/meta/forks.json` — Wave C1 amendment, see Decisions; `repos/<o>/<r>/fork.json` is Create-once-then-CAS'd provenance in the same family), the checks families (`repos/<o>/<r>/checks/<sha>/<context>.json` — Create-then-CAS status records, `repos/<o>/<r>/checks/index.json` — CAS'd P4 projection, `repos/<o>/<r>/meta/ci_tokens/<id>.json` — CAS'd token records, revoked retained — Wave 05 amendment, see Decisions), the import provenance (`repos/<o>/<r>/meta/import.json` — Create-once-then-CAS'd, Feature 10 amendment, see Decisions), the mirror sidecar (`repos/<o>/<r>/meta/mirror.json` — Create-once-then-CAS'd pull-only flag + upstream pointer + schedule + outcome, Feature 11 amendment, see Decisions), the push-mirror sidecars (`repos/<o>/<r>/meta/pushmirror.json` — Create-once-then-CAS'd upstream pointer + auth-kind + schedule + outcome — plus `repos/<o>/<r>/meta/pushmirror-secret.json` — CAS'd auth material, never echoed — Forgejo #623 amendment, see Decisions), the size-catalog families (`repos/<o>/<r>/meta/stats.json` — overwrite per-repo size sidecar written by the publish path with sweep backfill, `meta/repos.pb` field-3 entries — CAS'd aggregate rows, Forgejo #248 amendment, see Decisions; shared rails #247 builds on), the owner-profile sidecar (`owners/<owner>/profile.json` — CAS'd display name/location/timezone/bio, Forgejo #234 amendment, see Decisions) | P2 | Everything else is `Create`-only, forever |
@@ -57,7 +57,7 @@ Extensions live in their own packages (`internal/issues`, `internal/pulls`, …)
 | 4 | Event sinks | `internal/events` | new consumers of WAL events, per-sink cursor |
 | 5 | Task kinds / ops | `internal/maintain` | new long-running narrated units |
 | 6 | Store backends | `internal/store` | new bucket providers |
-| 7 | CLI subcommands | `cmd/walhub` | new operator verbs |
+| 7 | CLI subcommands | `cmd/spindle` | new operator verbs |
 
 A seam change ships with the core (compiled-in registries, not plugins). There is no dynamic plugin loading, no cgo, no embedded interpreters — a registry entry is a Go value added in one `Register*` call.
 
@@ -169,8 +169,8 @@ Operator configuration keeps TOML keys stable and namespaced:
 mode = "token"                      # frozen modes; provider additions extend, never rename
 [auth.providers.ldap]
 domain = "ldaps://ldap.corp.internal"
-bind_dn = "cn=walhub,ou=svc,dc=corp,dc=internal"
-token_env = "WALHUB_LDAP_BIND_PW"
+bind_dn = "cn=spindle,ou=svc,dc=corp,dc=internal"
+token_env = "SPINDLE_LDAP_BIND_PW"
 write_groups = ["git-users"]
 admin_groups = ["git-admins"]
 ```
@@ -230,7 +230,7 @@ Hazard: policy eval is on the push path; a network-backed effect (e.g. one that 
 
 ## 14.6 Seam 4 — event sinks (generalizing the webhook)
 
-§12 is a one-sink bridge. walhub generalizes the *sink*, keeping the bridge loop frozen: events are produced FROM THE WAL (P3), catch-up is serialized per repo, delivery is at-least-once with the dedup key `(repo, _walgit.seq, ref_name)`, and the backfill contract (read the log from your last seq) always remains the correctness path.
+§12 is a one-sink bridge. spindle generalizes the *sink*, keeping the bridge loop frozen: events are produced FROM THE WAL (P3), catch-up is serialized per repo, delivery is at-least-once with the dedup key `(repo, _walgit.seq, ref_name)`, and the backfill contract (read the log from your last seq) always remains the correctness path.
 
 ```go
 // internal/events/sink.go
@@ -265,7 +265,7 @@ sweep_interval = "5m"
 name    = "ci-webhook"
 kind    = "webhook"                    # the §12.2 POST shape, unchanged
 url     = "https://ci.internal/hook"
-secret_env = "WALHUB_HOOK_SECRET"
+secret_env = "SPINDLE_HOOK_SECRET"
 [[events.sinks]]
 name    = "audit-log"
 kind    = "jsonl"                      # append Event JSON lines to a bucket object family
@@ -329,16 +329,16 @@ Hazard: unbounded range-read fan-out against one backend connection limit. Avoid
 `clap`-equivalent without dependencies: a hand-rolled dispatcher (stdlib `flag` per subcommand is sufficient; keep exit codes 0/1/2/3 and `--config` semantics, §19).
 
 ```go
-// cmd/walhub/sub.go
+// cmd/spindle/sub.go
 type Subcommand struct {
     Name string              // "serve", "repo", "issues", …
     Summary string
     Run func(ctx context.Context, args []string, cfg *config.Config) error
 }
-func Register(s Subcommand)  // sorted help output; "walhub help" prints the registry
+func Register(s Subcommand)  // sorted help output; "spindle help" prints the registry
 ```
 
-Core registers the §1.3 CLI surface (renamed to `walhub …`); extensions add verbs (e.g. `walhub issues import`). Subcommands that produce writes go through the same publish/CAS path as the server — the CLI is never a second writer implementation.
+Core registers the §1.3 CLI surface (renamed to `spindle …`); extensions add verbs (e.g. `spindle issues import`). Subcommands that produce writes go through the same publish/CAS path as the server — the CLI is never a second writer implementation.
 
 ## 14.10 Roadmap: GitHub-like features mapped to the seams
 
@@ -360,7 +360,7 @@ Principals (Seam 2) and `groups` rosters (§14.1) already exist. Per-repo ACL = 
   ] }
 ```
 
-`^`-exclusion on principals is legal here because `protect` is most-restrictive (§14.2). What changes for the product: a repo-generation convention (owner-scoped policy templates applied by `walhub repo create --policy-from <file>`, Seam 7) — no engine change. Read-side visibility (private repos) stays the global `anonymous_read` lever; per-repo read ACLs would need a `require_read` hook and are explicitly deferred, not smuggled into policy (policy evaluates pushes only — §14.4).
+`^`-exclusion on principals is legal here because `protect` is most-restrictive (§14.2). What changes for the product: a repo-generation convention (owner-scoped policy templates applied by `spindle repo create --policy-from <file>`, Seam 7) — no engine change. Read-side visibility (private repos) stays the global `anonymous_read` lever; per-repo read ACLs would need a `require_read` hook and are explicitly deferred, not smuggled into policy (policy evaluates pushes only — §14.4).
 
 ### 14.10.2 Issues — sidecar objects, never the WAL
 
@@ -436,17 +436,17 @@ Adding "issues" to a running fleet touches zero core files:
 name = "issues-to-chat"
 kind = "webhook"
 url = "https://chat.example/hook"
-secret_env = "WALHUB_ISSUES_HOOK_SECRET"
+secret_env = "SPINDLE_ISSUES_HOOK_SECRET"
 ```
 
 3. Users create and watch issues:
 
 ```bash
-curl -X POST -H "Authorization: Bearer $WALHUB_TOKEN" \
+curl -X POST -H "Authorization: Bearer $SPINDLE_TOKEN" \
   -d '{"title":"flaky test in ci","body":"see run 1234"}' \
-  https://walhub.example/acme/monorepo/api/issues
-curl -N -H "Authorization: Bearer $WALHUB_TOKEN" \
-  https://walhub.example/acme/monorepo/api-browser/issues/1/stream
+  https://spindle.example/acme/monorepo/api/issues
+curl -N -H "Authorization: Bearer $SPINDLE_TOKEN" \
+  https://spindle.example/acme/monorepo/api-browser/issues/1/stream
 ```
 
 4. Roll back by disabling routes (config flag on the extension) — the bucket objects remain, well-formed and inert.
@@ -460,7 +460,7 @@ curl -N -H "Authorization: Bearer $WALHUB_TOKEN" \
   islands, styling is Tailwind v4 CSS-first (dark by default, no CDN), there are no runtime npm
   dependencies, and only the stylesheet/islands/SDK are built (`web/dist/`). No seam
   or frozen contract is affected — extensions never touch `web/` internals or page templates.
-- **New document, no Rust counterpart:** the Rust codebase hard-codes its webhook sink, three auth modes, and fixed ops; walhub makes the same frozen contracts but registers everything else. Rationale: the user's modularity requirement, without weakening a single frozen contract.
+- **New document, no Rust counterpart:** the Rust codebase hard-codes its webhook sink, three auth modes, and fixed ops; spindle makes the same frozen contracts but registers everything else. Rationale: the user's modularity requirement, without weakening a single frozen contract.
 - **`events/cursor.json` generalizes to `events/cursors/<sink>.json`** (one per sink, same body shape). Rationale: a slow sink must not hold back others; at-least-once and dedup semantics are unchanged, and the key family is explicitly added to the frozen overwritable list here.
 - **Bridge serialization weakens from process-wide to per-repo** (single-flight per repo). Rationale: seq-ordered events plus the CAS'd cursor make cross-repo ordering meaningless (§12.2 already says "nothing across repos"); per-repo parallelism is free correctness-preserving concurrency.
 - **Auth is a provider chain instead of a closed three-mode switch.** Rationale: `none`/`token`/`oidc` semantics are frozen as the first chain members; LDAP/OAuth/SSO become registrations. Resolution order preserves the exact §8.8 decision tree and 401 semantics.
@@ -477,11 +477,11 @@ curl -N -H "Authorization: Bearer $WALHUB_TOKEN" \
 - **Feature 06 notifications amendment (2026-09-04, docs/features/06):** the frozen overwritable-key list gains the notify families — `users/<principal>/notifications/index.json` (CAS'd P4 unread hot window), `users/<principal>/notifications/<id>.json` (Create-only, CAS state-flip read/unread, delete-on-retention), `repos/<o>/<r>/meta/collab_state.json` (CAS'd activity seq allocator), `repos/<o>/<r>/webhooks/<id>.json` (CAS'd hook config), `repos/<o>/<r>/webhooks/cursors/<id>.json` (CAS'd per-hook cursor, the direct analog of the per-sink `events/cursors/<sink>.json` family proposed here for the frozen list: `{"published_seq": N, "updated_at": RFC3339}`, one slow webhook never stalls another), `repos/<o>/<r>/webhooks/<id>/deliveries/recent.json` (CAS'd last-25 ring) — in the same revision that adopts the feature (14 §14.11 rule 2). Activity events (`collab-events/<seq>.json`) and watch records (`users/<principal>/watching/<o>/<r>.json`) are Create-only immutable, delete-on-transition — not overwritable, no listing needed. `social.json` (`repos/<o>/<r>/meta/social.json`, CAS'd counters + `watcher_list`) is WRITTEN here but OWNED by 07: the 07 wave adopts the family and must preserve the `watcher_list`/`watchers_truncated` fields 06 consumes. 06 registers three task kinds (`webhooks` per-repo delivery loop via sweep + wake-up, `notify-fanout` overflow drain, `notify-retention` global pass) as in-process (repo,kind) single-flight + background sweeps started by composition (the events-bridge pattern), NOT in the wal task table or the maintainer registry — no core touch. Seam 1 in code is the `server.ExtraRoutes` chain (`Handle(w,r) bool`, both lanes, top-level twins + repo lanes). No discovery entries (same rule as 01/02/03/C2/05). Rationale: per-hook cursors are the same isolation shape as per-sink cursors (a failed/slow consumer holds back only itself); the activity log is the webhook unit AND the fan-out backfill source, so its seq allocator and cursors need the same CAS protection as the families they mirror.
 - **Wave 05 checks amendment (2026-09-04, docs/features/05):** the frozen overwritable-key list gains the checks families — `repos/<o>/<r>/checks/<sha>/<context>.json` (Create-then-CAS status records, last-write-wins, never deleted), `repos/<o>/<r>/checks/index.json` (CAS'd P4 hot-window projection, newest 500 shas, inline compaction past 256 KiB), `repos/<o>/<r>/meta/ci_tokens/<id>.json` (CAS'd token records; hash-only, revoked retained) — in the same revision that adopts the feature (14 §14.11 rule 2). `require_checks` is NOT a new effect kind: it is an optional strict field inside the existing `protect` effect (1–32 validated context names, `policy.ValidCheckContext` — one grammar shared with the writer), parsed fail-closed but never evaluated on the push path (direct pushes are not gated; the merge task owns the verdict). Combination across matching rules is union over rules the merger does not bypass (03 §5 step 4: bypass lists apply unchanged; 05's "no bypass list" means the field carries no bypass of its own). Seam 2 in code is the `AuthService.ExtraCredential` hook (a func consulted after static tokens in `token`/`oidc` modes — the chain resolves the wct_ SHAPE to an unprivileged `ci:<id>` principal; the secret is verified handler-side per repo, so the chain never blocks on store I/O and `Evaluate` stays pure). Startup panics on prefix overlap (`checks.AssertPrefixDisjoint`, called from composition). The merge-time half is 05's stored-combined-view read, consulted by 03's merge task through pulls' `ChecksGate` seam — the merge logic is NOT forked, the gate is one check at the step-4 call site next to the 04 gate; nil backend fails closed only when a rule actually carries the gate. 05 registers one task kind (`checks-index-compact`, inline-triggered like 02's). No discovery entries (same rule as 01/02/03/C2: `/api/v1` `endpoints[]` derive from the core route table only). Rationale: the gate belongs where the merge decides (statuses cannot exist at receive-pack time — the 14.5 honest note); the hook keeps the frozen `Principal` untouched while scoping a leaked CI token to one repo and one capability.
 - **Forgejo #271 amendment (2026-09-10, docs/features/05):** the "no discovery entries" sentence above is superseded for checks only — the five checks path shapes now appear in `/api/v1` `endpoints[]` via `checks.ExposedTemplates` + `api.RegisterExposed` from composition (the Feature 10 precedent: template + handler land in the same change, law 12; 01/02/03/C2/04/06/07 repo-lane routes stay unlisted). Rationale: the checks surface is the one feature designed for third-party integrators (external CI reporting with `wct_` tokens), and an integrator reading discovery or the `/api` docs page could not find it. A two-way contract test (`TestExposedCoversRoutes` in `internal/checks`: every served route covered, no phantom templates) keeps the list honest.
-- **Forgejo #272 amendment (2026-09-10):** the #271 checks-only exception becomes the rule — registration is now the norm, not opt-in. Every `server.ExtraRoutes` surface exports `ExposedTemplates` (one entry per distinct path shape, both lanes collapsing to one template; byte routes outside the api lanes stay out — the static contract, not the JSON API) and composition registers all of them via `api.RegisterExposed` in the same change (law 12): issues, pulls, releases, review, social, notify, identity, tags, plus mirror's repo lanes (`/{owner}/{repo}/api/mirror`, `…/mirror/sync` — real JSON API routes, so the Feature 11 "top-level twin only" exception is gone). Each package pins its list both ways (`TestExposedTemplatesExact` + `TestExposedCoversRoutes`: every served route covered by its canonical template, every template covering a served route), and `TestCollabServicesRegisterDiscovery` in `cmd/walhub` pins the composition wiring — removing a template or a registration fails CI, which is the actual fix for the drift (three sources, zero enforced agreement). The `/api` docs page renders the live discovery document beside a static route table that is now derived from the same registry. Rationale: discovery must enumerate what the server serves (14 §14.12 lane rule); an integrator reading `/api/v1` can now learn that issues, pulls, releases, stars, notifications, and review threads exist. This supersedes the "no discovery entries" sentences in the Wave C2 review, Feature 06 notifications, and Feature 07 releases/social amendments above (and the "stay unlisted" tail of the #271 amendment) — those described the pre-#272 rule, not the current wiring.
+- **Forgejo #272 amendment (2026-09-10):** the #271 checks-only exception becomes the rule — registration is now the norm, not opt-in. Every `server.ExtraRoutes` surface exports `ExposedTemplates` (one entry per distinct path shape, both lanes collapsing to one template; byte routes outside the api lanes stay out — the static contract, not the JSON API) and composition registers all of them via `api.RegisterExposed` in the same change (law 12): issues, pulls, releases, review, social, notify, identity, tags, plus mirror's repo lanes (`/{owner}/{repo}/api/mirror`, `…/mirror/sync` — real JSON API routes, so the Feature 11 "top-level twin only" exception is gone). Each package pins its list both ways (`TestExposedTemplatesExact` + `TestExposedCoversRoutes`: every served route covered by its canonical template, every template covering a served route), and `TestCollabServicesRegisterDiscovery` in `cmd/spindle` pins the composition wiring — removing a template or a registration fails CI, which is the actual fix for the drift (three sources, zero enforced agreement). The `/api` docs page renders the live discovery document beside a static route table that is now derived from the same registry. Rationale: discovery must enumerate what the server serves (14 §14.12 lane rule); an integrator reading `/api/v1` can now learn that issues, pulls, releases, stars, notifications, and review threads exist. This supersedes the "no discovery entries" sentences in the Wave C2 review, Feature 06 notifications, and Feature 07 releases/social amendments above (and the "stay unlisted" tail of the #271 amendment) — those described the pre-#272 rule, not the current wiring.
 - **Feature 07 releases/social amendment (2026-09-04, docs/features/07):** the frozen overwritable-key list gains the 07 families — `repos/<o>/<r>/releases/<tag.json>` (CAS'd header; tag percent-encoded `%`→`%25` `/`→`%2F`, never lowercased), `repos/<o>/<r>/releases/latest.json` (CAS'd pointer, monotonic `created_at` compare in-loop + bounded self-healing scan), `repos/<o>/<r>/meta/social.json` (CAS'd counters + `watcher_list`; adopted from 06, which keeps writing ONLY the watch fields — dual field-scoped CAS writers converge per 07 §4.1, no cross-feature lock) — in the same revision that adopts the feature (14 §14.11 rule 2). Asset bytes (`releases/assets/<tag>/<name>`, tag segment encoded as on the header — a sibling subtree, never nested under the header file, so header paths stay files on every backend) and star records (`users/<principal>/starred/<o>/<r>.json`) are Create-only immutable, delete-on-endpoint — not overwritable, no listing needed. The `/{o}/{r}/releases/{tag}/assets/{name}` byte family is the 14.3 routing note made concrete: repoDispatch consults a new `server.RepoRoutes` chain (`HandleRepo(w,r,id,sub) bool`) on paths the core switch does not claim, before the page route and the 404 — bytes are never compressed (no compress group wraps repoDispatch) and carry the static contract from the feature handler. Seam 1 in code is the `server.ExtraRoutes` chain for lanes plus `server.ChainRepo` for the byte family (both fronted in composition order). `releases.max_asset_bytes` (default 2 GiB) joins config as a reflective section (setup schema, env overlay, and size validation come for free). 07 registers NO task kinds (the named `release-asset-import` Seam 5 hook stays a name) and no discovery entries (same rule as 01/02/03/C2/05/06). Rationale: lane handlers cannot serve bytes (the api mux owns `/api*` only, and compressing immutable bytes would be pure waste); a chain consulted at the fallback keeps core ignorant of feature families while giving bytes the same first-match-wins discipline as the lane chain.
-- **Feature 10 import amendment (2026-09-04, docs/features/10):** the frozen overwritable-key list gains `repos/<o>/<r>/meta/import.json` (Create-once-then-CAS'd provenance, same family as `fork.json` — 14 §14.11 rule 2, in the same revision that adopts the feature). The `repo-import` task kind runs on the core wal `TaskTable` (Registry-level, `<target>/repo-import`) via `repoimport.RegisterKind` (panics on duplicate — the `maintain.RegisterKind` contract in code terms, called once from `cmd/walhub` composition) + `Tasks().Run(WithoutCancel…)`; there is no `maintain.RegisterKind` in code (doc sketch only) and no `internal/wal` touch. Seam 1 in code is the `server.ExtraRoutes` chain (`Handle(w,r) bool`, both lanes, top-level twins). Discovery departs from the 01/02/03/C2/05/06 rule: the import twins ARE listed in `/api/v1` `endpoints[]` via the additive `api.RegisterExposed` registry (called from composition in the same change — the core route table stays feature-free per law 8, and the templates are real served routes, not phantoms). The additive `[import]` config section rides the reflective section machinery (env overlay, setup schema, size validation come for free). No WAL kind (closed enum — the import rides the ordinary publish path), no feature state on disk (task scratch only, swept per attempt). Rationale: the pre-create task has no `RepoHandle` to broadcast on, so narration fans out to a service-level id-keyed ring with wal.Broadcast semantics; discovery must enumerate what the server serves (14 §14.12 lane rule), and a feature-owned table entry would invert the core/upward dependency.
+- **Feature 10 import amendment (2026-09-04, docs/features/10):** the frozen overwritable-key list gains `repos/<o>/<r>/meta/import.json` (Create-once-then-CAS'd provenance, same family as `fork.json` — 14 §14.11 rule 2, in the same revision that adopts the feature). The `repo-import` task kind runs on the core wal `TaskTable` (Registry-level, `<target>/repo-import`) via `repoimport.RegisterKind` (panics on duplicate — the `maintain.RegisterKind` contract in code terms, called once from `cmd/spindle` composition) + `Tasks().Run(WithoutCancel…)`; there is no `maintain.RegisterKind` in code (doc sketch only) and no `internal/wal` touch. Seam 1 in code is the `server.ExtraRoutes` chain (`Handle(w,r) bool`, both lanes, top-level twins). Discovery departs from the 01/02/03/C2/05/06 rule: the import twins ARE listed in `/api/v1` `endpoints[]` via the additive `api.RegisterExposed` registry (called from composition in the same change — the core route table stays feature-free per law 8, and the templates are real served routes, not phantoms). The additive `[import]` config section rides the reflective section machinery (env overlay, setup schema, size validation come for free). No WAL kind (closed enum — the import rides the ordinary publish path), no feature state on disk (task scratch only, swept per attempt). Rationale: the pre-create task has no `RepoHandle` to broadcast on, so narration fans out to a service-level id-keyed ring with wal.Broadcast semantics; discovery must enumerate what the server serves (14 §14.12 lane rule), and a feature-owned table entry would invert the core/upward dependency.
 - **Issue #77 fan-out redrain amendment (2026-09-05, docs/features/06):** one new bucket family — `repos/<o>/<r>/collab-fanout/<seq>.json` (Create-only per-seq completion record, delete-on-retention alongside its activity event) — same class as activity events (Create-only immutable, not overwritable, no listing needed), so no frozen-list change. No new task kind: the redrain re-enqueues onto the existing `notify-fanout` single-flight; no new global LIST (the sweep reuses the webhooks repo enumeration and probes seqs by key). Rationale: per-seq records instead of a per-repo cursor because sync emissions (the common path) must not pay a cursor CAS on the hot path — only deferred drains write, one tiny Create per drained seq.
-- **Feature 11 mirrors amendment (2026-09-09, Forgejo #240, docs/features/11_mirror.md):** the frozen overwritable-key list gains `repos/<o>/<r>/meta/mirror.json` (Create-once-then-CAS'd sidecar: pull-only flag + canonical upstream URL + schedule preset + last outcome; next_sync_at DERIVED at read via the preset→cron map, never stored — 14 §14.11 rule 2, in the same revision that adopts the feature). The `mirror-sync` task kind runs on the core wal `TaskTable` (Registry-level, `<target>/mirror-sync`) via `mirror.RegisterKind` (panics on duplicate — the `maintain.RegisterKind` contract in code terms, called once from `cmd/walhub` composition); the sync body takes a bucket lease (`leases/mirror-<owner>-<name>.pb`, CAS+TTL, skew 0 — the bundle-lease shape) before cloning, and converges followOnce-shaped (compare + ff-only + atomic `PublishRefs`), never through the import `completeBody` (create-only, 409s on any move). Seam 1 in code is the `server.ExtraRoutes` chain (`Handle(w,r) bool`, repo lanes + the create-from-URL top-level twin); Seam 5 is the task kind + the follow-shaped `RunLoop` (own cadence, registry enumeration + mirror.json probes, no LIST); the push refusal lives in core's push funnel (`pushPipeline` top covers HTTP+SSH pack flow, discovery 403, SSH pre-advertisement refusal) behind an injected `MirrorGuard` predicate — core never imports the feature (law 8), and server-side publishes bypass the funnel by construction so the sync cannot refuse itself. Import-vs-sync exclusion is keyed, not kind-keyed: `Begin` on a mirrored target → 409, and a sync fire under a live `repo-import` claim (`import.json` with `Complete=false`) skips + narrates. Discovery lists ONLY the top-level create twin in `/api/v1` `endpoints[]` via `api.RegisterExposed` (the import precedent); repo-lane routes stay out (the 01/02/03/C2 rule —
+- **Feature 11 mirrors amendment (2026-09-09, Forgejo #240, docs/features/11_mirror.md):** the frozen overwritable-key list gains `repos/<o>/<r>/meta/mirror.json` (Create-once-then-CAS'd sidecar: pull-only flag + canonical upstream URL + schedule preset + last outcome; next_sync_at DERIVED at read via the preset→cron map, never stored — 14 §14.11 rule 2, in the same revision that adopts the feature). The `mirror-sync` task kind runs on the core wal `TaskTable` (Registry-level, `<target>/mirror-sync`) via `mirror.RegisterKind` (panics on duplicate — the `maintain.RegisterKind` contract in code terms, called once from `cmd/spindle` composition); the sync body takes a bucket lease (`leases/mirror-<owner>-<name>.pb`, CAS+TTL, skew 0 — the bundle-lease shape) before cloning, and converges followOnce-shaped (compare + ff-only + atomic `PublishRefs`), never through the import `completeBody` (create-only, 409s on any move). Seam 1 in code is the `server.ExtraRoutes` chain (`Handle(w,r) bool`, repo lanes + the create-from-URL top-level twin); Seam 5 is the task kind + the follow-shaped `RunLoop` (own cadence, registry enumeration + mirror.json probes, no LIST); the push refusal lives in core's push funnel (`pushPipeline` top covers HTTP+SSH pack flow, discovery 403, SSH pre-advertisement refusal) behind an injected `MirrorGuard` predicate — core never imports the feature (law 8), and server-side publishes bypass the funnel by construction so the sync cannot refuse itself. Import-vs-sync exclusion is keyed, not kind-keyed: `Begin` on a mirrored target → 409, and a sync fire under a live `repo-import` claim (`import.json` with `Complete=false`) skips + narrates. Discovery lists ONLY the top-level create twin in `/api/v1` `endpoints[]` via `api.RegisterExposed` (the import precedent); repo-lane routes stay out (the 01/02/03/C2 rule —
 superseded by Forgejo #272, which lists the mirror repo lanes; see the #272 amendment above). The summary projection rides an `api.Env.MirrorSummary` hook (the ReadGate/CreateOwnerGate shape — api never imports the feature); the ETag covers it (`~m` suffix, the #235 `~d` precedent). No WAL kind (closed enum — syncs ride the ordinary publish path), no feature state on disk (task scratch only, swept per attempt), no new config section (the `[import]` section owns SSRF + timeouts + size caps for both flows), no new Go modules, no new npm deps. Rationale: sync state churn (outcome, failure counter) does not belong on the git linearization point (manifest) or in the enforcement-adjacent settings TOML (any settings writer could flip read-only off); a sidecar in the `fork.json`/`import.json` family keeps enforcement (server funnel) and state (CAS'd sidecar) in separate trust domains with one probe each.
 - **Size-catalog amendment (Forgejo #248, R1 B1/B2/B3 — lands first, #247 builds on it).**
   The frozen overwritable-key list gains the size-catalog families:
@@ -579,7 +579,7 @@ superseded by Forgejo #272, which lists the mirror repo lanes; see the #272 amen
   The pack PUT (not the mktag loose object) is the replication unit, so
   replicas materializing from packs alone never advertise a ref whose object
   they lack. Tagger is server-rendered from the authed principal
-  (`<name> <<name>@walhub.local>`, wall-clock + local tz; `<>/\n/\r`
+  (`<name> <<name>@spindle.local>`, wall-clock + local tz; `<>/\n/\r`
   stripped, empty-after-sanitize → 400); messages reject NUL/non-UTF8,
   normalize to one trailing `\n`, cap 64 KiB (400s). Failure semantics:
   mktag rejection → 400, pack/ingest failure → 5xx, existing tag → 409 via

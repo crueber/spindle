@@ -86,7 +86,7 @@ func AcquireBulk(ctx context.Context, w *Weighted, key string) (time.Duration, f
 
 // lockWaitWarn mirrors telemetry.lock_wait_warn's role: past this wait the
 // bulk-permit queue is loudly visible in logs (§3.6, metric
-// walhub_store_bulk_queue_seconds is emitted by the metrics layer).
+// spindle_store_bulk_queue_seconds is emitted by the metrics layer).
 var lockWaitWarn = 30 * time.Second
 
 // Group is the bounded errgroup of §6.3: first error cancels the derived

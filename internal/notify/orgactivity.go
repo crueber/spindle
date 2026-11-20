@@ -47,7 +47,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/crueber/walhub/internal/server/auth"
+	"github.com/crueber/spindle/internal/server/auth"
 )
 
 // Org activity page bounds (the tray page convention, notify.go):

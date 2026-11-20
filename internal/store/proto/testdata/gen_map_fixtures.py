@@ -101,7 +101,7 @@ push = logentry(
         push_options=["atomic", "ci.skip"], atomic=True,
     ),
     created_at=ts(1700000000, 999999999),
-    writer="walhub-7f3a",
+    writer="spindle-7f3a",
     meta={"principal": "user:alice", "request_id": "req-123", "agent": "git/2.43"},
 )
 open("golden/log_entry_all_kinds/entry_push.bin", "wb").write(push)

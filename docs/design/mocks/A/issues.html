@@ -1,0 +1,360 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Issues · acme/demo · spindle</title>
+<style>
+:root{
+  --bg:#0f1113;
+  --surface:#14181b;
+  --surface-2:#171b1f;
+  --raised:#1c2125;
+  --raised-2:#22282c;
+  --border:#232a2e;
+  --border-2:#323a3f;
+  --text:#e6eaec;
+  --text-2:#a3adb4;
+  --muted:#79838b;
+  --dim:#525c63;
+  --accent:#ffb224;
+  --accent-2:#ffc862;
+  --ink:#151004;
+  --ok:#4ec9a4;
+  --merged:#9d8cff;
+  --danger:#e06c6c;
+  --mono:ui-monospace,"SF Mono",Menlo,Consolas,"Liberation Mono",monospace;
+  --sans:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
+  --r1:2px;
+  --r2:4px;
+}
+*{box-sizing:border-box}
+html,body{margin:0;padding:0}
+body{
+  height:100vh;display:flex;flex-direction:column;overflow:hidden;
+  background:var(--bg);color:var(--text);
+  font:13px/1.45 var(--sans);
+  -webkit-font-smoothing:antialiased;text-rendering:optimizeLegibility;
+}
+a{color:inherit;text-decoration:none}
+button{font:inherit;color:inherit;background:none;border:0;padding:0;cursor:pointer}
+svg{display:block}
+.grow{flex:1 1 auto;min-width:0}
+.mono{font-family:var(--mono)}
+::selection{background:rgba(255,178,36,.24)}
+
+/* ---------- top bar ---------- */
+.top{flex:0 0 46px;display:flex;align-items:center;gap:16px;padding:0 18px;background:#101315;border-bottom:1px solid var(--border)}
+.brand{display:inline-flex;align-items:center;gap:8px;font:600 14px/1 var(--mono);letter-spacing:-.01em;color:#f1f4f5}
+.brand .mark{width:9px;height:9px;background:var(--accent);border-radius:1px}
+.search{flex:0 1 470px;display:flex;align-items:center;gap:9px;height:28px;padding:0 7px 0 9px;background:var(--surface);border:1px solid var(--border);border-radius:var(--r2);color:var(--muted);font-size:12.5px;cursor:text}
+.search:hover{border-color:var(--border-2)}
+.search svg{width:13px;height:13px;flex:0 0 13px;color:var(--dim)}
+.search .ph{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.kb{display:inline-flex;align-items:center;justify-content:center;height:17px;min-width:17px;padding:0 4px;font:10px/1 var(--mono);color:var(--text-2);background:var(--raised);border:1px solid var(--border-2);border-radius:2px}
+.ico{width:28px;height:28px;display:inline-flex;align-items:center;justify-content:center;border:1px solid transparent;border-radius:var(--r2);color:var(--text-2);position:relative}
+.ico:hover{background:var(--raised);border-color:var(--border);color:var(--text)}
+.ico svg{width:15px;height:15px}
+.ico .ping{position:absolute;top:6px;right:6px;width:4px;height:4px;border-radius:50%;background:var(--accent)}
+.btn{display:inline-flex;align-items:center;gap:6px;height:26px;padding:0 9px;border:1px solid var(--border-2);border-radius:var(--r2);background:var(--raised);color:var(--text);font-size:12px;white-space:nowrap}
+.btn:hover{background:var(--raised-2);border-color:#3d464c}
+.btn .chev{font-size:9px;color:var(--muted)}
+.btn .plus{color:var(--muted);font-family:var(--mono)}
+.btn.ghost{background:transparent;border-color:transparent;color:var(--text-2)}
+.btn.ghost:hover{background:var(--raised);border-color:var(--border);color:var(--text)}
+.btn.primary{background:var(--accent);border-color:var(--accent);color:var(--ink);font-weight:600;height:28px;padding:0 11px}
+.btn.primary:hover{background:var(--accent-2);border-color:var(--accent-2)}
+.avatar{width:24px;height:24px;display:grid;place-items:center;border-radius:var(--r2);background:var(--raised-2);border:1px solid var(--border-2);font:10px/1 var(--mono);color:var(--text-2)}
+
+/* ---------- repo header ---------- */
+.rhead{padding:13px 22px 11px;border-bottom:1px solid var(--border)}
+.rtitle{display:flex;align-items:center;gap:7px;font:600 19px/1.15 var(--mono);letter-spacing:-.02em}
+.rtitle .own{color:var(--text-2);font-weight:500}
+.rtitle .sl{color:var(--dim);font-weight:400}
+.chip{display:inline-flex;align-items:center;height:17px;margin-left:4px;padding:0 5px;border:1px solid var(--border-2);border-radius:2px;background:var(--surface);color:var(--text-2);font:500 9.5px/1 var(--mono);letter-spacing:.1em;text-transform:uppercase}
+.rdesc{margin:6px 0 0;font-size:12.5px;color:var(--text-2)}
+.rmeta{margin-top:7px;display:flex;align-items:center;gap:7px;font:11px/1 var(--mono);color:var(--muted)}
+.rmeta .num{color:var(--text-2)}
+.rmeta .sep{color:var(--dim)}
+
+/* ---------- tabs ---------- */
+.tabs{flex:0 0 38px;display:flex;align-items:stretch;gap:1px;padding:0 14px;background:#111416;border-bottom:1px solid var(--border)}
+.tab{display:inline-flex;align-items:center;gap:6px;padding:0 9px;font-size:12.5px;color:var(--text-2);border-bottom:2px solid transparent;margin-bottom:-1px}
+.tab:hover{color:var(--text);background:var(--surface)}
+.tab.on{color:#f1f4f5;border-bottom-color:#9aa4ab;font-weight:500}
+.tab .n{min-width:16px;height:15px;display:inline-flex;align-items:center;justify-content:center;padding:0 4px;font:9.5px/1 var(--mono);color:var(--text-2);background:var(--raised);border:1px solid var(--border);border-radius:2px}
+
+/* ---------- issues header ---------- */
+.ihead{flex:0 0 auto;display:flex;align-items:center;gap:14px;padding:15px 22px 12px}
+.ihead h1{margin:0;font-size:19px;font-weight:600;letter-spacing:-.015em}
+.ifield{display:flex;align-items:center;gap:8px;width:300px;height:28px;padding:0 7px 0 9px;background:var(--surface);border:1px solid var(--border);border-radius:var(--r2);font-size:12px;color:var(--muted);cursor:text}
+.ifield svg{width:13px;height:13px;flex:0 0 13px;color:var(--muted)}
+.ifield .caret{width:1px;height:13px;background:var(--accent);flex:0 0 1px}
+.ifield .ph{flex:1;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.ifield .kb{background:transparent;border-color:transparent;color:var(--dim)}
+.ifield:focus-within,.ifield.focus{border-color:var(--accent);outline:1px solid var(--accent);outline-offset:1px}
+.ifield.focus .kb{color:var(--muted)}
+.filters{flex:0 0 auto;display:flex;align-items:center;gap:6px;padding:0 22px 12px}
+.fc{display:inline-flex;align-items:center;gap:6px;height:24px;padding:0 8px;border:1px solid var(--border);border-radius:var(--r2);background:transparent;color:var(--text-2);font-size:11.5px}
+.fc:hover{background:var(--raised);border-color:var(--border-2)}
+.fc.on{background:var(--raised);border-color:var(--border-2);color:var(--text);font-weight:500}
+.fc .n{font:9.5px/1 var(--mono);color:var(--muted);background:#0f1315;border:1px solid var(--border);border-radius:2px;padding:2px 4px;min-width:16px;text-align:center}
+.fc.on .n{color:var(--text-2);border-color:var(--border-2)}
+.fc .chev{font-size:9px;color:var(--dim)}
+.fc.mono{font-family:var(--mono);font-size:11px}
+
+/* ---------- issues layout ---------- */
+.wrap.iss{display:grid;grid-template-columns:236px minmax(0,1fr);gap:24px;padding:0 22px 16px;flex:1 1 auto;min-height:0}
+.irail{min-width:0;border-right:1px solid var(--border);padding-right:18px;overflow:hidden}
+.sect{margin-bottom:22px}
+.sect h3{margin:0 0 8px;font:500 10px/1 var(--mono);letter-spacing:.14em;text-transform:uppercase;color:var(--muted)}
+.lrow{display:flex;align-items:center;gap:8px;height:25px;font-size:12px;color:var(--text-2)}
+.lrow:hover{color:var(--text)}
+.ldot{width:7px;height:7px;flex:0 0 7px;border-radius:1px}
+.lrow .cnt{margin-left:auto;font:10px/1 var(--mono);color:var(--muted)}
+.lrow .cnt::before{content:"";display:inline-block;width:0}
+.ms{display:flex;align-items:baseline;justify-content:space-between;gap:8px;font:11.5px/1 var(--mono);color:var(--text-2)}
+.ms .cnt{font-size:10px;color:var(--muted)}
+.mbar{height:3px;margin-top:8px;background:var(--raised);border-radius:1px;overflow:hidden}
+.mbar i{display:block;height:100%;background:#8a949b}
+.mmeta{margin-top:7px;font:9.5px/1 var(--mono);letter-spacing:.05em;color:var(--dim);text-transform:uppercase}
+.pick{display:flex;align-items:center;gap:8px;width:100%;height:27px;padding:0 8px;background:var(--surface);border:1px solid var(--border);border-radius:var(--r2);font-size:12px;color:var(--text-2)}
+.pick:hover{border-color:var(--border-2);background:var(--raised)}
+.pick .chev{margin-left:auto;font-size:9px;color:var(--dim)}
+.clear{display:inline-block;margin-top:10px;font:10px/1 var(--mono);letter-spacing:.04em;color:var(--muted);text-decoration:underline;text-decoration-color:var(--border-2);text-underline-offset:3px}
+.clear:hover{color:var(--accent);text-decoration-color:var(--accent)}
+
+/* ---------- issue list ---------- */
+.listpane{display:flex;flex-direction:column;min-width:0;min-height:0;background:var(--surface);border:1px solid var(--border);border-radius:var(--r2);overflow:hidden}
+.irow{position:relative;display:grid;grid-template-columns:16px minmax(0,1fr);gap:10px;padding:15px 14px 15px 12px;border-bottom:1px solid var(--border);cursor:pointer}
+.irow:hover{background:#171b1f}
+.irow.sel{background:#171c20}
+.irow.sel::before{content:"";position:absolute;left:0;top:0;bottom:0;width:2px;background:var(--accent)}
+.irow.sel .inum{color:var(--accent)}
+.istate{margin-top:2px;color:var(--ok)}
+.istate svg{width:14px;height:14px}
+.itop{display:flex;align-items:center;gap:8px;min-width:0}
+.inum{font:11px/1 var(--mono);color:var(--muted);flex:0 0 auto}
+.ititle{font-size:13.5px;font-weight:500;color:var(--text);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;min-width:0}
+.itags{display:flex;gap:5px;flex:0 0 auto;margin-left:auto;padding-left:10px}
+.tag{display:inline-flex;align-items:center;height:17px;padding:0 5px;border:1px solid var(--border-2);border-radius:2px;font:9.5px/1 var(--mono);color:var(--text-2);background:transparent;white-space:nowrap}
+.tag.bug{color:#c98a8a;border-color:#493134}
+.tag.p1{color:#e29292;border-color:#53363b;background:#1d1416}
+.tag.ghost{color:var(--dim);border-color:var(--border)}
+.imeta{margin-top:6px;display:flex;align-items:center;gap:6px;font:10.5px/1.35 var(--mono);color:var(--muted);white-space:nowrap;overflow:hidden}
+.imeta .w{color:var(--text-2)}
+.imeta .sep{color:var(--dim)}
+.imeta .cmt{color:var(--text-2)}
+.lfoot{margin-top:auto;flex:0 0 30px;display:flex;align-items:center;gap:8px;padding:0 12px;border-top:1px solid var(--border);background:#121619;font:9.5px/1 var(--mono);letter-spacing:.04em;color:var(--dim);white-space:nowrap}
+.lfoot .kb{height:15px;min-width:15px;padding:0 3px;font-size:9.5px;color:var(--text-2);background:#1a1f23;border-color:var(--border)}
+.lfoot .sep{color:#2b3338}
+.lfoot .ok{color:var(--ok)}
+
+/* ---------- status strip ---------- */
+.status{flex:0 0 26px;display:flex;align-items:center;gap:10px;padding:0 12px;background:#0c0e10;border-top:1px solid var(--border);font:10.5px/1 var(--mono);color:var(--muted);white-space:nowrap;overflow:hidden}
+.hint{display:inline-flex;align-items:center;gap:4px}
+.hint em{font-style:normal;margin-left:2px;color:var(--muted)}
+.status .kb{height:15px;min-width:15px;padding:0 3px;font-size:9.5px;border-color:var(--border)}
+.status .sep{color:#2e363b}
+.status .ref{color:var(--text-2)}
+.live{display:inline-flex;align-items:center;gap:5px;color:var(--text-2)}
+.live i{width:5px;height:5px;border-radius:50%;background:var(--accent)}
+
+@media (max-width:1100px){
+  body{height:auto;overflow:auto}
+  .wrap.iss{grid-template-columns:1fr;padding:0 16px 16px}
+  .irail{border-right:0;padding-right:0}
+  .search{flex-basis:240px}
+  .ihead{padding:15px 16px 12px}
+  .filters{padding:0 16px 12px}
+}
+</style>
+</head>
+<body>
+
+<header class="top">
+  <a class="brand" href="#"><span class="mark"></span>spindle</a>
+  <div class="search" role="search">
+    <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" aria-hidden="true"><circle cx="6.8" cy="6.8" r="4.2"/><path d="M10 10l3.2 3.2"/></svg>
+    <span class="ph">Search repositories, issues, code…</span>
+    <span class="kb">⌘K</span>
+  </div>
+  <span class="grow"></span>
+  <button class="ico" aria-label="Notifications">
+    <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3" aria-hidden="true"><path d="M8 2.2a3.6 3.6 0 0 0-3.6 3.6c0 3.2-1.4 4.2-1.4 4.2h10s-1.4-1-1.4-4.2A3.6 3.6 0 0 0 8 2.2Z"/><path d="M6.6 12.4a1.6 1.6 0 0 0 2.8 0"/></svg>
+    <span class="ping"></span>
+  </button>
+  <button class="btn"><span class="plus">+</span>Create</button>
+  <span class="avatar" title="AD">AD</span>
+</header>
+
+<div class="rhead">
+  <div class="rtitle">
+    <a class="own" href="#">acme</a><span class="sl">/</span><a href="#">demo</a>
+    <span class="chip">Public</span>
+  </div>
+  <p class="rdesc">A demonstration repository for design review.</p>
+  <div class="rmeta">
+    <span>★ <span class="num">12</span> stars</span><span class="sep">·</span>
+    <span>⑂ <span class="num">3</span> forks</span><span class="sep">·</span>
+    <span>⚑ <span class="num">1</span> watching</span>
+  </div>
+</div>
+
+<nav class="tabs">
+  <a class="tab" href="#">Code</a>
+  <a class="tab on" href="#">Issues <span class="n">4</span></a>
+  <a class="tab" href="#">Pull requests <span class="n">1</span></a>
+  <a class="tab" href="#">Actions</a>
+  <a class="tab" href="#">Releases</a>
+  <a class="tab" href="#">Settings</a>
+</nav>
+
+<div class="ihead">
+  <h1>Issues</h1>
+  <span class="grow"></span>
+  <div class="ifield focus" role="search">
+    <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" aria-hidden="true"><circle cx="6.8" cy="6.8" r="4.2"/><path d="M10 10l3.2 3.2"/></svg>
+    <span class="caret"></span>
+    <span class="ph">Filter open issues…</span>
+    <span class="kb">/</span>
+  </div>
+  <button class="btn primary">New issue</button>
+</div>
+
+<div class="filters">
+  <button class="fc on">Open <span class="n">4</span></button>
+  <button class="fc">Closed <span class="n">11</span></button>
+  <button class="fc mono">Author <span class="chev">▾</span></button>
+  <button class="fc mono">Label <span class="chev">▾</span></button>
+  <button class="fc mono">Sort <span class="chev">▾</span></button>
+</div>
+
+<main class="wrap iss">
+  <aside class="irail">
+    <section class="sect">
+      <h3>Labels</h3>
+      <a class="lrow" href="#"><i class="ldot" style="background:#c98a8a"></i>bug<span class="cnt">3</span></a>
+      <a class="lrow" href="#"><i class="ldot" style="background:#9d8cff"></i>enhancement<span class="cnt">5</span></a>
+      <a class="lrow" href="#"><i class="ldot" style="background:#6f7a82"></i>docs<span class="cnt">4</span></a>
+      <a class="lrow" href="#"><i class="ldot" style="background:#8a949b"></i>performance<span class="cnt">2</span></a>
+    </section>
+
+    <section class="sect">
+      <h3>Milestone</h3>
+      <div class="ms"><span>v0.3.0</span><span class="cnt">4 / 9</span></div>
+      <div class="mbar"><i style="width:44.4%"></i></div>
+      <div class="mmeta">5 open · 4 closed</div>
+    </section>
+
+    <section class="sect">
+      <h3>Assignee</h3>
+      <button class="pick">Anyone<span class="chev">▾</span></button>
+      <a class="clear" href="#">Clear filters</a>
+    </section>
+  </aside>
+
+  <section class="listpane">
+    <a class="irow sel" href="#">
+      <span class="istate">
+        <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3" aria-hidden="true"><circle cx="8" cy="8" r="6"/><path d="M5.4 8.2 7.2 10l3.5-3.6"/></svg>
+      </span>
+      <div class="ibody">
+        <div class="itop">
+          <span class="inum">#42</span>
+          <span class="ititle">Incremental push with thin packs is rejected</span>
+          <span class="itags"><span class="tag bug">bug</span><span class="tag p1">p1</span></span>
+        </div>
+        <div class="imeta">
+          <span>opened 3 hours ago by <span class="w">mira</span></span>
+          <span class="sep">·</span>
+          <span class="cmt">5 comments</span>
+        </div>
+      </div>
+    </a>
+
+    <a class="irow" href="#">
+      <span class="istate">
+        <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3" aria-hidden="true"><circle cx="8" cy="8" r="6"/><path d="M5.4 8.2 7.2 10l3.5-3.6"/></svg>
+      </span>
+      <div class="ibody">
+        <div class="itop">
+          <span class="inum">#41</span>
+          <span class="ititle">Add keyboard navigation to the file tree</span>
+          <span class="itags"><span class="tag">enhancement</span><span class="tag">ui</span></span>
+        </div>
+        <div class="imeta">
+          <span>opened 1 day ago by <span class="w">jane</span></span>
+          <span class="sep">·</span>
+          <span class="cmt">2 comments</span>
+        </div>
+      </div>
+    </a>
+
+    <a class="irow" href="#">
+      <span class="istate">
+        <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3" aria-hidden="true"><circle cx="8" cy="8" r="6"/><path d="M5.4 8.2 7.2 10l3.5-3.6"/></svg>
+      </span>
+      <div class="ibody">
+        <div class="itop">
+          <span class="inum">#39</span>
+          <span class="ititle">Bundle-uri fallback is slow on cold clone</span>
+          <span class="itags"><span class="tag">performance</span><span class="tag ghost">p2</span></span>
+        </div>
+        <div class="imeta">
+          <span>opened 2 days ago by <span class="w">dev</span></span>
+          <span class="sep">·</span>
+          <span class="cmt">8 comments</span>
+        </div>
+      </div>
+    </a>
+
+    <a class="irow" href="#">
+      <span class="istate">
+        <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3" aria-hidden="true"><circle cx="8" cy="8" r="6"/><path d="M5.4 8.2 7.2 10l3.5-3.6"/></svg>
+      </span>
+      <div class="ibody">
+        <div class="itop">
+          <span class="inum">#38</span>
+          <span class="ititle">Document the setup wizard in the README</span>
+          <span class="itags"><span class="tag">docs</span><span class="tag">good first issue</span></span>
+        </div>
+        <div class="imeta">
+          <span>opened 4 days ago by <span class="w">sam</span></span>
+          <span class="sep">·</span>
+          <span class="cmt">0 comments</span>
+        </div>
+      </div>
+    </a>
+
+    <div class="lfoot">
+      <span class="ok">4</span><span>of 4 open issues</span>
+      <span class="grow"></span>
+      <span class="kb">j</span><span class="kb">k</span><span>move</span>
+      <span class="sep">·</span>
+      <span class="kb">↵</span><span>open</span>
+      <span class="sep">·</span>
+      <span class="kb">c</span><span>new issue</span>
+    </div>
+  </section>
+</main>
+
+<footer class="status">
+  <span class="hint"><span class="kb">j</span><span class="kb">k</span><em>move</em></span>
+  <span class="hint"><span class="kb">↵</span><em>open</em></span>
+  <span class="hint"><span class="kb">c</span><em>new issue</em></span>
+  <span class="hint"><span class="kb">?</span><em>help</em></span>
+  <span class="sep">|</span>
+  <span>4 open</span>
+  <span class="sep">·</span>
+  <span>11 closed</span>
+  <span class="grow"></span>
+  <span class="ref">main</span>
+  <span class="sep">·</span>
+  <span>53e62df</span>
+  <span class="sep">·</span>
+  <span class="live"><i></i>live</span>
+</footer>
+
+</body>
+</html>

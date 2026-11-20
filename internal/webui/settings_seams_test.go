@@ -15,16 +15,16 @@ import (
 	"testing"
 	"time"
 
-	"github.com/crueber/walhub/internal/api"
-	"github.com/crueber/walhub/internal/checks"
-	"github.com/crueber/walhub/internal/config"
-	"github.com/crueber/walhub/internal/git"
-	"github.com/crueber/walhub/internal/identity"
-	"github.com/crueber/walhub/internal/mirror"
-	"github.com/crueber/walhub/internal/notify"
-	"github.com/crueber/walhub/internal/pushmirror"
-	"github.com/crueber/walhub/internal/server/auth"
-	"github.com/crueber/walhub/internal/store"
+	"github.com/crueber/spindle/internal/api"
+	"github.com/crueber/spindle/internal/checks"
+	"github.com/crueber/spindle/internal/config"
+	"github.com/crueber/spindle/internal/git"
+	"github.com/crueber/spindle/internal/identity"
+	"github.com/crueber/spindle/internal/mirror"
+	"github.com/crueber/spindle/internal/notify"
+	"github.com/crueber/spindle/internal/pushmirror"
+	"github.com/crueber/spindle/internal/server/auth"
+	"github.com/crueber/spindle/internal/store"
 )
 
 // --- api.Env fakes (the composition boundary) -------------------------------

@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/crueber/walhub/internal/store"
+	"github.com/crueber/spindle/internal/store"
 )
 
 func seedPolicy(t *testing.T, svc *Service, doc string) {

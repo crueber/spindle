@@ -1,7 +1,7 @@
 {{define "collab_thread_comments"}}
 {{range .}}
-<div class="mt-1 border-t border-zinc-100 pt-1 text-sm dark:border-zinc-800">
-  <p class="text-xs text-zinc-500 dark:text-zinc-400"><span class="font-medium text-zinc-700 dark:text-zinc-200">{{.By}}</span> · {{template "collab_time" .At}}</p>
+<div class="mt-1 border-t border-[var(--pd-line)] pt-1 text-sm">
+  <p class="muted text-xs"><span class="font-medium text-[var(--pd-text)]">{{.By}}</span> · {{template "collab_time" .At}}</p>
   <div class="markdown-body">{{md .Body}}</div>
 </div>
 {{else}}
@@ -13,17 +13,17 @@
 {{define "collab_thread"}}
 <div class="card mt-2 p-3" id="thread-{{.TID}}" data-thread-id="{{.TID}}">
   <div class="flex flex-wrap items-center gap-2">
-    <span class="font-mono text-xs text-zinc-500 dark:text-zinc-400">{{.Label}}</span>
+    <span class="mono muted text-xs">{{.Label}}</span>
     {{if .Resolved}}<span class="chip chip-neutral">resolved</span>{{else}}<span class="chip chip-draft">open</span>{{end}}
-    <span class="ml-auto text-xs text-zinc-500 dark:text-zinc-400">{{.CommentCount}} {{plural .CommentCount "comment" "comments"}} · {{template "collab_time" .UpdatedAt}}</span>
+    <span class="muted ml-auto text-xs">{{.CommentCount}} {{plural .CommentCount "comment" "comments"}} · {{template "collab_time" .UpdatedAt}}</span>
   </div>
-  <p class="mt-1 text-xs text-zinc-500 dark:text-zinc-400">started by {{.CreatedBy}}{{if .ResolvedBy}} · resolved by {{.ResolvedBy}}{{end}}</p>
+  <p class="muted mt-1 text-xs">started by {{.CreatedBy}}{{if .ResolvedBy}} · resolved by {{.ResolvedBy}}{{end}}</p>
   <details class="mt-1" {{if .CommentsHref}}hx-get="{{.CommentsHref}}" hx-trigger="toggle once" hx-target="find .thread-comments" hx-swap="innerHTML"{{end}}>
     <summary class="link text-xs">show replies</summary>
     <div class="thread-comments"></div>
   </details>
   <form class="mt-2 grid gap-2" method="post" action="{{.ReplyAction}}" data-composer>
-    <textarea class="input min-h-16 font-mono text-sm" name="body" rows="3" aria-label="reply body" placeholder="Reply… (#N links issues, @user mentions)" data-autogrow data-submit-keys></textarea>
+    <textarea class="input min-h-16 text-sm leading-relaxed" name="body" rows="3" aria-label="reply body" placeholder="Reply… (#N links issues, @user mentions)" data-autogrow data-submit-keys></textarea>
     <div class="flex flex-wrap items-center justify-end gap-2">
       {{if .CanResolve}}
       {{if .Resolved}}
@@ -32,7 +32,7 @@
       <button type="submit" class="btn" formaction="{{.ResolveAction}}" formnovalidate>Resolve</button>
       {{end}}
       {{end}}
-      <button type="submit" class="btn primary">Reply</button>
+      <button type="submit" class="btn">Reply</button>
     </div>
   </form>
 </div>
@@ -42,8 +42,8 @@
 {{define "collab_merge_task"}}
 {{with .Task}}
 <div aria-live="polite" aria-label="Merge task" {{if eq (printf "%s" .State) "running"}}hx-get="/{{$.Full}}/pull/{{$.Num}}/merge/task" hx-trigger="every 2s" hx-swap="outerHTML"{{end}}>
-  <p class="text-xs">merge task {{.State}}{{with .Error}}: {{.}}{{end}}</p>
-  {{if .Progress}}<ul class="mt-1 text-xs text-zinc-500 dark:text-zinc-400">{{range .Progress}}<li>{{.}}</li>{{end}}</ul>{{end}}
+  <p class="mono text-xs">merge task {{.State}}{{with .Error}}: {{.}}{{end}}</p>
+  {{if .Progress}}<ul class="muted mt-1 text-xs">{{range .Progress}}<li>{{.}}</li>{{end}}</ul>{{end}}
 </div>
 {{end}}
 {{end}}

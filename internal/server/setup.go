@@ -8,10 +8,10 @@ import (
 
 // setupAccess implements the §3.4 access rules: open while (no config file)
 // OR (config invalid) OR (auth mode = none); otherwise an admin principal is
-// required. Optional WALHUB_SETUP_TOKEN: when set, the routes require it
+// required. Optional SPINDLE_SETUP_TOKEN: when set, the routes require it
 // (query ?token= or Bearer) and skip the admin check.
 func (s *Server) setupAccess(w http.ResponseWriter, r *http.Request) bool {
-	if tok := os.Getenv("WALHUB_SETUP_TOKEN"); tok != "" {
+	if tok := os.Getenv("SPINDLE_SETUP_TOKEN"); tok != "" {
 		q := r.URL.Query().Get("token")
 		h := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
 		if subtleMatch(tok, q) || subtleMatch(tok, h) {

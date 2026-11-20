@@ -14,7 +14,7 @@
 //     then heal and converge (§4 row 1).
 //   - TestSim_HealthyRequestRoundTripBudgets — the §4.1/§4.8 budgets (§4 row 11).
 //   - TestSim_LivenessUnderRandomSeeds — seed loop over the safety core
-//     (WALHUB_SIM_SEED / WALHUB_SIM_SEEDS override; §4 row 12).
+//     (SPINDLE_SIM_SEED / SPINDLE_SIM_SEEDS override; §4 row 12).
 //   - TestSim_ConcurrentPushersExactlyOneWinner (§4 row 5).
 //   - TestSim_OrphanedLogSegmentDoesNotBlockWriters (§4 row 2).
 //   - TestSim_AfterALostCASResponse (§4 row 3).

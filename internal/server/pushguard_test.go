@@ -23,10 +23,10 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/crueber/walhub/internal/config"
-	"github.com/crueber/walhub/internal/identity"
-	"github.com/crueber/walhub/internal/server/auth"
-	"github.com/crueber/walhub/internal/sshd"
+	"github.com/crueber/spindle/internal/config"
+	"github.com/crueber/spindle/internal/identity"
+	"github.com/crueber/spindle/internal/server/auth"
+	"github.com/crueber/spindle/internal/sshd"
 )
 
 var errProbeBoom = errors.New("bucket down")

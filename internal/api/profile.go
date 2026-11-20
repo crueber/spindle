@@ -23,9 +23,9 @@ import (
 	"strings"
 	"unicode/utf8"
 
-	"github.com/crueber/walhub/internal/git"
-	"github.com/crueber/walhub/internal/server/auth"
-	"github.com/crueber/walhub/internal/store"
+	"github.com/crueber/spindle/internal/git"
+	"github.com/crueber/spindle/internal/server/auth"
+	"github.com/crueber/spindle/internal/store"
 )
 
 // Owner profile field budgets (400 on overflow; plain-text errors per §2).

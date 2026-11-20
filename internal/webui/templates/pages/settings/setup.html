@@ -8,53 +8,53 @@
 
   {{if .Data.Denied}}
   <section class="card space-y-2 p-4">
-    <h3 class="font-semibold">Access restricted</h3>
+    <h3 class="card-header">Access restricted</h3>
     <p class="text-sm">This host requires an admin principal or a setup token to view or change configuration.</p>
     {{if .Data.Detail}}<pre class="code-view whitespace-pre-wrap break-words p-3">{{.Data.Detail}}</pre>{{end}}
-    <p class="muted text-sm">Authenticate, then reload this page. Hosts with <code class="font-mono text-xs">WALHUB_SETUP_TOKEN</code> take the token as a query parameter (<code class="font-mono text-xs">?token=…</code>) — it is never stored.</p>
+    <p class="muted text-sm">Authenticate, then reload this page. Hosts with <code class="mono text-xs">SPINDLE_SETUP_TOKEN</code> take the token as a query parameter (<code class="mono text-xs">?token=…</code>) — it is never stored.</p>
   </section>
   {{else}}
   {{if eq .Data.View.FileState "invalid"}}
-  <div class="rounded-lg border border-red-300 bg-red-50 p-3 text-sm text-red-800 dark:border-red-900 dark:bg-red-950/60 dark:text-red-200">
+  <div class="card border-l-2 border-l-[var(--pd-danger)] p-3 text-sm">
     <strong class="font-semibold">Setup-only mode — the config file is invalid.</strong>
     <p class="mt-1">Until a fixed config is saved AND the server restarted, only /setup, /healthz and /readyz answer; everything else returns 503. Fix the errors below, Validate, Save, restart.</p>
   </div>
   {{end}}
 
   {{if .Data.Saved}}
-  <div class="rounded-lg border border-emerald-300 bg-emerald-50 p-3 text-sm text-emerald-800 dark:border-emerald-900 dark:bg-emerald-950/60 dark:text-emerald-200">
-    <strong class="font-semibold">Written to &lt;data-dir&gt;/walhub.toml.</strong>
+  <div class="card border-l-2 border-l-[var(--pd-ok)] p-3 text-sm">
+    <strong class="font-semibold">Written to &lt;data-dir&gt;/spindle.toml.</strong>
     {{if .Data.RequiresRestart}}
-    <p class="mt-1">Restart required for: <span class="font-mono text-xs break-all">{{range $i, $k := .Data.RequiresRestart}}{{if $i}}, {{end}}{{$k}}{{end}}</span> (the server list is authoritative; live keys take effect immediately).</p>
+    <p class="mt-1">Restart required for: <span class="mono text-xs break-all">{{range $i, $k := .Data.RequiresRestart}}{{if $i}}, {{end}}{{$k}}{{end}}</span> (the server list is authoritative; live keys take effect immediately).</p>
     {{else}}<p class="mt-1">No key in this save requires a restart.</p>{{end}}
   </div>
   {{end}}
 
   {{if .Data.ValidateOK}}
-  <div class="rounded-lg border border-emerald-300 bg-emerald-50 p-3 text-sm text-emerald-800 dark:border-emerald-900 dark:bg-emerald-950/60 dark:text-emerald-200">Valid — nothing was saved. Press Save to write the file.</div>
+  <div class="card border-l-2 border-l-[var(--pd-ok)] p-3 text-sm">Valid — nothing was saved. Press Save to write the file.</div>
   {{end}}
 
   {{if .Data.Error}}
-  <div class="rounded-lg border border-red-300 bg-red-50 p-3 text-sm text-red-800 dark:border-red-900 dark:bg-red-950/60 dark:text-red-200" role="alert">{{.Data.Error}}</div>
+  <div class="card border-l-2 border-l-[var(--pd-danger)] p-3 text-sm" role="alert">{{.Data.Error}}</div>
   {{end}}
 
   {{if .Data.View.Errors}}
   <section class="card p-4">
-    <h3 class="mb-2 font-semibold">Current validation errors (from the server)</h3>
+    <h3 class="card-header">Current validation errors (from the server)</h3>
     <div class="overflow-x-auto">
       <table class="data-table">
         <thead><tr><th>key</th><th>message</th></tr></thead>
         <tbody>
           {{range .Data.View.Errors}}
           <tr>
-            <td><code class="font-mono text-xs break-all">{{.Key}}</code></td>
+            <td><code class="mono text-xs break-all">{{.Key}}</code></td>
             <td class="break-words">{{.Message}}</td>
           </tr>
           {{end}}
         </tbody>
       </table>
     </div>
-    <p class="muted mt-2 text-sm">Nothing is disabled — fix the values and re-validate.</p>
+    <p class="muted mt-2 text-[11px]">Nothing is disabled — fix the values and re-validate.</p>
   </section>
   {{end}}
 
@@ -71,7 +71,7 @@
 
   {{if eq .Data.View.AuthMode "oidc"}}
   <section class="card p-4" aria-label="OIDC setup test">
-    <h3 class="mb-2 font-semibold">OIDC discovery</h3>
+    <h3 class="card-header">OIDC discovery</h3>
     <div class="setup-callout">
       <p class="text-sm">Register this <strong>redirect URI</strong> with your OIDC issuer (exact match, no trailing slash) before sign-in will work:</p>
       <p class="mt-1 flex flex-wrap items-center gap-2">
@@ -92,7 +92,7 @@
       <input type="hidden" name="redirect_uri" value="{{.Data.RedirectURI}}">
       <div class="flex flex-wrap items-center gap-2">
         <button type="submit" class="btn">Test OIDC setup</button>
-        <span class="muted text-xs">fetches &lt;issuer&gt;/.well-known/openid-configuration</span>
+        <span class="muted text-[11px]">fetches &lt;issuer&gt;/.well-known/openid-configuration</span>
       </div>
     </form>
     <div id="setup-auth-test" aria-live="polite"></div>

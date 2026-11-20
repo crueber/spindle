@@ -6,8 +6,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/crueber/walhub/internal/git"
-	"github.com/crueber/walhub/internal/sshd"
+	"github.com/crueber/spindle/internal/git"
+	"github.com/crueber/spindle/internal/sshd"
 )
 
 // Server-managed refs (docs/features/03 §3: refs/pull/**) are refused in

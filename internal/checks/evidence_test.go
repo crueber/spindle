@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/crueber/walhub/internal/store"
+	"github.com/crueber/spindle/internal/store"
 )
 
 // countingStore wraps an ObjectStore and counts ops per class (the E6

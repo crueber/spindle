@@ -13,7 +13,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/crueber/walhub/internal/config"
+	"github.com/crueber/spindle/internal/config"
 )
 
 // The store contract suite (15_testing.md §2): ONE suite, every backend.
@@ -23,8 +23,8 @@ import (
 // Wiring:
 //   - TestContract_Memory / TestContract_Filesystem always run (fast tier,
 //     `make contract`).
-//   - TestContractS3 runs when WALHUB_TEST_S3_ENDPOINT is set (rustfs from
-//     `make dev-store`); TestContractGCS when WALHUB_TEST_GCS_BUCKET is set.
+//   - TestContractS3 runs when SPINDLE_TEST_S3_ENDPOINT is set (rustfs from
+//     `make dev-store`); TestContractGCS when SPINDLE_TEST_GCS_BUCKET is set.
 func runContract(t *testing.T, s ObjectStore, prefix string) {
 	t.Helper()
 	ctx := context.Background()
@@ -497,14 +497,14 @@ func TestContract_Filesystem(t *testing.T) {
 }
 
 func TestContractS3(t *testing.T) {
-	endpoint := os.Getenv("WALHUB_TEST_S3_ENDPOINT")
+	endpoint := os.Getenv("SPINDLE_TEST_S3_ENDPOINT")
 	if endpoint == "" {
-		t.Skip("set WALHUB_TEST_S3_ENDPOINT (rustfs from `make dev-store`) to run the S3 contract")
+		t.Skip("set SPINDLE_TEST_S3_ENDPOINT (rustfs from `make dev-store`) to run the S3 contract")
 	}
-	t.Setenv("AWS_ACCESS_KEY_ID", firstNonEmpty(os.Getenv("WALHUB_TEST_S3_ACCESS_KEY"), "walhub"))
-	t.Setenv("AWS_SECRET_ACCESS_KEY", firstNonEmpty(os.Getenv("WALHUB_TEST_S3_SECRET_KEY"), "walhub"))
+	t.Setenv("AWS_ACCESS_KEY_ID", firstNonEmpty(os.Getenv("SPINDLE_TEST_S3_ACCESS_KEY"), "spindle"))
+	t.Setenv("AWS_SECRET_ACCESS_KEY", firstNonEmpty(os.Getenv("SPINDLE_TEST_S3_SECRET_KEY"), "spindle"))
 	s, err := NewS3(&config.Store{
-		Bucket:     firstNonEmpty(os.Getenv("WALHUB_TEST_S3_BUCKET"), "walhub-test"),
+		Bucket:     firstNonEmpty(os.Getenv("SPINDLE_TEST_S3_BUCKET"), "spindle-test"),
 		MaxRetries: 4,
 		S3: config.S3{
 			Endpoint:       endpoint,
@@ -518,8 +518,8 @@ func TestContractS3(t *testing.T) {
 }
 
 func TestContractGCS(t *testing.T) {
-	if os.Getenv("WALHUB_TEST_GCS_BUCKET") == "" {
-		t.Skip("set WALHUB_TEST_GCS_BUCKET to run the GCS contract")
+	if os.Getenv("SPINDLE_TEST_GCS_BUCKET") == "" {
+		t.Skip("set SPINDLE_TEST_GCS_BUCKET to run the GCS contract")
 	}
 	t.Skip("no GCS backend implemented in this tree yet (03_store_backends.md §3); the wiring lands with it")
 }

@@ -33,7 +33,7 @@ import (
 	"net/http"
 	"net/netip"
 
-	"github.com/crueber/walhub/internal/egress"
+	"github.com/crueber/spindle/internal/egress"
 )
 
 // errWebhookRedirect fails every redirect: signature and body must never

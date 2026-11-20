@@ -22,22 +22,22 @@
   {{if .Rows}}
   <ul>
     {{range .Rows}}{{$row := .}}
-    <li class="border-t border-zinc-200 py-3 first:border-t-0 first:pt-0 dark:border-zinc-800">
+    <li class="border-t border-[var(--pd-line)] py-3 first:border-t-0 first:pt-0">
       <div class="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1">
-        <a class="min-w-0 max-w-full truncate font-medium text-emerald-700 hover:underline dark:text-emerald-400" href="{{.Href}}">{{.Name}}</a>
+        <a class="link min-w-0 max-w-full truncate font-medium" href="{{.Href}}">{{.Name}}</a>
         {{if .Latest}}<span class="chip chip-open shrink-0">latest</span>{{end}}
         {{if .Draft}}<span class="chip chip-draft shrink-0">draft</span>{{end}}
         {{if .Prerelease}}<span class="chip chip-prerelease shrink-0">prerelease</span>{{end}}
-        <span class="ml-auto shrink-0 text-xs text-zinc-500 dark:text-zinc-400">{{.AssetCount}} {{plural .AssetCount "asset" "assets"}} · {{template "collab_time" .Published}}{{with .Author}} · {{.}}{{end}}</span>
+        <span class="card-meta ml-auto mt-0! shrink-0">{{.AssetCount}} {{plural .AssetCount "asset" "assets"}} · {{template "collab_time" .Published}}{{with .Author}} · {{.}}{{end}}</span>
       </div>
-      <p class="mt-1 flex flex-wrap items-center gap-2 text-xs text-zinc-500 dark:text-zinc-400">
-        {{if not .TagName}}<span class="font-mono">{{.Tag}}</span>{{end}}
+      <p class="muted mt-1 flex flex-wrap items-center gap-2 text-xs">
+        {{if not .TagName}}<span class="mono">{{.Tag}}</span>{{end}}
         {{with .Excerpt}}<span class="min-w-0 truncate">{{.}}</span>{{end}}
       </p>
       {{if .KeyAssets}}
       <p class="mt-1 flex flex-wrap items-center gap-x-3 gap-y-1 text-xs">
-        {{range .KeyAssets}}<a class="max-w-64 truncate font-mono text-emerald-700 hover:underline dark:text-emerald-400" href="{{$row.AssetBase}}{{.Name}}" download>{{.Name}}</a>{{end}}
-        {{if .ExtraAssets}}<a class="link" href="{{.Href}}">+{{.ExtraAssets}} more →</a>{{end}}
+        {{range .KeyAssets}}<a class="link mono max-w-64 truncate" href="{{$row.AssetBase}}{{.Name}}" download>{{.Name}}</a>{{end}}
+        {{if .ExtraAssets}}<a class="link mono" href="{{.Href}}">+{{.ExtraAssets}} more →</a>{{end}}
       </p>
       {{end}}
     </li>

@@ -6,7 +6,7 @@
 
 {{define "settings-setup-section"}}
 <section class="card p-4" data-section="{{.Section}}">
-  <h3 class="mb-2 font-semibold">{{.Section}}</h3>
+  <h3 class="eyebrow mb-2">{{.Section}}</h3>
   {{range .Essential}}{{template "settings-setup-field" .}}{{end}}
   {{if .Advanced}}
   <details class="setup-advanced" data-advanced-for="{{.Section}}">
@@ -21,8 +21,8 @@
 <div class="setup-row" data-key="{{.Key}}">
   <div class="min-w-0">
     <label class="setup-label" for="{{.InputID}}">
-      <code class="font-mono text-sm break-all">{{.Key}}</code>
-      {{if .FromFile}}<span class="chip">file</span>{{else}}<span class="muted text-xs">default</span>{{end}}
+      <code class="mono text-sm break-all">{{.Key}}</code>
+      {{if .FromFile}}<span class="chip chip-neutral">file</span>{{else}}<span class="muted text-[11px]">default</span>{{end}}
     </label>
     {{if .Example}}
     <p class="setup-examples"><span class="muted">e.g.</span> <span class="setup-ex">{{.Example}}</span>{{if .Note}}<span class="setup-note">{{.Note}}</span>{{end}}</p>
@@ -34,7 +34,7 @@
     {{if eq .Control "bool"}}
       <input type="hidden" name="cfg.{{.Key}}" value="false">
       <label class="flex cursor-pointer items-center gap-2 text-sm">
-        <input type="checkbox" role="switch" name="cfg.{{.Key}}" value="true" class="h-5 w-5 shrink-0 accent-emerald-600"{{if .Bool}} checked{{end}}>
+        <input type="checkbox" role="switch" name="cfg.{{.Key}}" value="true" class="h-5 w-5 shrink-0 accent-amber-500"{{if .Bool}} checked{{end}}>
         <span class="muted">{{if .Bool}}enabled{{else}}disabled{{end}}</span>
       </label>
     {{else if eq .Control "select"}}
@@ -43,7 +43,7 @@
         {{$f := .}}{{range .Enum}}<option value="{{.}}"{{if eq . $f.Value}} selected{{end}}>{{.}}</option>{{end}}
       </select>
     {{else if eq .Control "textarea"}}
-      <textarea class="input font-mono text-xs" id="{{.InputID}}" name="cfg.{{.Key}}" rows="4" spellcheck="false">{{.Value}}</textarea>
+      <textarea class="input mono text-xs" id="{{.InputID}}" name="cfg.{{.Key}}" rows="4" spellcheck="false">{{.Value}}</textarea>
     {{else if eq .Control "number"}}
       <input class="input md:max-w-md" id="{{.InputID}}" name="cfg.{{.Key}}" type="number" step="any" value="{{.Value}}">
     {{else if eq .Control "password"}}
@@ -63,8 +63,8 @@
     {{range .Errors}}<p class="err-line">{{.Message}}</p>{{end}}
   {{else}}{{with .Result}}
     <div class="setup-callout">
-      <p class="text-sm"><strong>Discovery OK</strong> — issuer <code class="font-mono">{{.Issuer}}</code>{{if .ClientIDPresent}}<span class="muted"> · client_id set</span>{{else}}<span class="muted"> · no client_id in the form yet</span>{{end}}</p>
-      <ul class="muted mt-1 space-y-0.5 font-mono text-xs">
+      <p class="text-sm"><strong>Discovery OK</strong> — issuer <code class="mono">{{.Issuer}}</code>{{if .ClientIDPresent}}<span class="muted"> · client_id set</span>{{else}}<span class="muted"> · no client_id in the form yet</span>{{end}}</p>
+      <ul class="muted mt-1 space-y-0.5 mono text-xs">
         <li class="break-all">authorization: {{.AuthorizationEndpoint}}</li>
         <li class="break-all">token: {{.TokenEndpoint}}</li>
         <li class="break-all">jwks: {{.JWKSURI}}</li>

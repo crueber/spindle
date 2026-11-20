@@ -4,7 +4,7 @@
 {{define "collab_composer"}}
 <form class="card mt-3 grid gap-2 p-3" method="post" action="{{.Action}}" aria-label="{{.Label}}" data-composer>
   {{if .Locked}}<p class="muted text-sm" role="note">{{.LockReason}}</p>{{end}}
-  <textarea class="input min-h-24 font-mono text-sm disabled:cursor-not-allowed disabled:opacity-50" name="body" aria-label="comment body" rows="4"
+  <textarea class="input min-h-24 text-sm leading-relaxed disabled:cursor-not-allowed disabled:opacity-50" name="body" aria-label="comment body" rows="4"
     {{if .Locked}}disabled aria-disabled="true" title="{{.LockReason}}"{{end}}
     placeholder="{{.Placeholder}}" {{with .MentionID}}list="{{.}}"{{end}} data-autogrow data-submit-keys>{{.Body}}</textarea>
   {{with .MentionID}}{{if $.MentionNames}}<datalist id="{{.}}">{{range $.MentionNames}}<option value="@{{.}}"></option>{{end}}</datalist>{{end}}{{end}}
@@ -18,7 +18,7 @@
     <details class="relative inline-block">
       <summary class="btn list-none rounded-l-none px-2" aria-haspopup="menu" aria-label="Close options" title="Close options"><span aria-hidden="true">▾</span></summary>
       <div class="close-drop card absolute bottom-full right-0 z-10 mb-1 grid min-w-52 gap-0.5 p-1" role="menu" aria-label="Close options">
-        <button type="submit" role="menuitem" class="rounded-md px-3 py-1.5 text-left text-sm hover:bg-zinc-100 dark:hover:bg-zinc-800" formaction="{{.CloseAction}}" name="reason" value="not_planned" formnovalidate>Close as not planned</button>
+        <button type="submit" role="menuitem" class="rounded px-3 py-1.5 text-left text-sm hover:bg-[var(--pd-raised)]" formaction="{{.CloseAction}}" name="reason" value="not_planned" formnovalidate>Close as not planned</button>
       </div>
     </details>
     {{end}}

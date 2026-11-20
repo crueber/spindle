@@ -1,14 +1,15 @@
 {{define "public_repo_row"}}
 {{/* One listing row (Repos.jsx RepoRow): link + visibility/mirror pills +
      optional star count + the listing's last-active stamp (no per-row fetch,
-     Forgejo #247). 390px: the row is flex-wrap, so badges and the stamp drop
-     to the next line instead of overflowing. */}}
-<li class="flex flex-wrap items-baseline gap-x-1.5">
-  <a class="text-emerald-700 hover:underline dark:text-emerald-400" href="/{{.Full}}">{{.Full}}</a>
+     Forgejo #247). Identifiers and counts are mono (§1 F5). 390px: the row is
+     flex-wrap, so badges and the stamp drop to the next line instead of
+     overflowing; the name can break rather than push the page wide. */}}
+<li class="flex min-w-0 flex-wrap items-baseline gap-x-1.5 gap-y-0.5 py-0.5">
+  <a class="link min-w-0 max-w-full break-all font-mono text-sm" href="/{{.Full}}">{{.Full}}</a>
   {{if .VisibilityLabel}}<span class="pill visibility-badge" role="img" title="{{.VisibilityTitle}}" aria-label="{{.VisibilityTitle}}">{{.VisibilityLabel}}</span>{{end}}
   {{if .Mirror}}<span class="pill mirror-badge" role="img" title="{{.MirrorTitle}}" aria-label="{{.MirrorTitle}}">mirror</span>{{end}}
-  {{if .HasStars}}<span class="muted text-xs">({{.Stars}} ⭐)</span>{{end}}
-  {{if .At}}<span class="muted whitespace-nowrap text-xs">active <time datetime="{{.At}}" title="{{.At}}">{{rel .At}}</time></span>
-  {{else if .Empty}}<span class="muted text-xs">no commits yet</span>{{end}}
+  {{if .HasStars}}<span class="muted font-mono text-xs tabular">({{.Stars}} ⭐)</span>{{end}}
+  {{if .At}}<span class="muted whitespace-nowrap font-mono text-xs">active <time datetime="{{.At}}" title="{{.At}}">{{rel .At}}</time></span>
+  {{else if .Empty}}<span class="muted font-mono text-xs">no commits yet</span>{{end}}
 </li>
 {{end}}

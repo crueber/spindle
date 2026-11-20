@@ -4,7 +4,7 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/crueber/walhub/internal/policy"
+	"github.com/crueber/spindle/internal/policy"
 )
 
 // This file owns the 05 checks coordination surface

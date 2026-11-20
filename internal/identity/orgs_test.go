@@ -6,8 +6,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/crueber/walhub/internal/config"
-	"github.com/crueber/walhub/internal/store"
+	"github.com/crueber/spindle/internal/config"
+	"github.com/crueber/spindle/internal/store"
 )
 
 func TestOrgCRUD(t *testing.T) {

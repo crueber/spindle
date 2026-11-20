@@ -22,10 +22,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/crueber/walhub/internal/api"
-	"github.com/crueber/walhub/internal/config"
-	"github.com/crueber/walhub/internal/pages"
-	"github.com/crueber/walhub/internal/server/auth"
+	"github.com/crueber/spindle/internal/api"
+	"github.com/crueber/spindle/internal/config"
+	"github.com/crueber/spindle/internal/pages"
+	"github.com/crueber/spindle/internal/server/auth"
 )
 
 // --- harness ---------------------------------------------------------------
@@ -381,7 +381,7 @@ func TestSettingsSetupCrossOriginWriteRefused(t *testing.T) {
 func TestSettingsSetupAuthTestFragment(t *testing.T) {
 	f := &settingsFakes{deps: SettingsDeps{
 		SetupAuthTest: func(_ context.Context, issuer, clientID, redirect string) (*SettingsSetupAuthTest, []SettingsSetupError) {
-			if issuer != "https://id.example.com" || clientID != "walhub" {
+			if issuer != "https://id.example.com" || clientID != "spindle" {
 				t.Fatalf("auth test saw %q %q", issuer, clientID)
 			}
 			return &SettingsSetupAuthTest{
@@ -392,7 +392,7 @@ func TestSettingsSetupAuthTestFragment(t *testing.T) {
 	}}
 	s := newSettingsServer(t, f)
 	rec := settingsDo(t, s, http.MethodPost, "/setup/auth-test", url.Values{
-		"issuer": {"https://id.example.com"}, "client_id": {"walhub"},
+		"issuer": {"https://id.example.com"}, "client_id": {"spindle"},
 	}, nil)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("auth test = %d (%s)", rec.Code, rec.Body.String())

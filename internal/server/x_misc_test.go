@@ -12,14 +12,14 @@ import (
 	"testing"
 	"time"
 
-	"github.com/crueber/walhub/internal/api"
-	"github.com/crueber/walhub/internal/config"
-	"github.com/crueber/walhub/internal/git"
-	"github.com/crueber/walhub/internal/server/auth"
-	"github.com/crueber/walhub/internal/setup"
-	"github.com/crueber/walhub/internal/store"
-	"github.com/crueber/walhub/internal/store/proto"
-	"github.com/crueber/walhub/internal/wal"
+	"github.com/crueber/spindle/internal/api"
+	"github.com/crueber/spindle/internal/config"
+	"github.com/crueber/spindle/internal/git"
+	"github.com/crueber/spindle/internal/server/auth"
+	"github.com/crueber/spindle/internal/setup"
+	"github.com/crueber/spindle/internal/store"
+	"github.com/crueber/spindle/internal/store/proto"
+	"github.com/crueber/spindle/internal/wal"
 )
 
 // --- middleware extras ---------------------------------------------------------
@@ -417,8 +417,8 @@ func TestSetupPutRestartKeys(t *testing.T) {
 	if !strings.Contains(rec.Body.String(), "server.listen") {
 		t.Fatalf("restart keys missing: %s", rec.Body.String())
 	}
-	if _, err := os.Stat(dataDir + "/walhub.toml"); err != nil {
-		t.Fatalf("walhub.toml missing: %v", err)
+	if _, err := os.Stat(dataDir + "/spindle.toml"); err != nil {
+		t.Fatalf("spindle.toml missing: %v", err)
 	}
 	// Invalid config → 422.
 	req = httptest.NewRequest("PUT", "http://x/api/v1/setup", strings.NewReader(`{"overrides": {"server.bogus": "1"}}`))
@@ -642,14 +642,14 @@ func TestServerGetters(t *testing.T) {
 	if s.Version() != "v1" {
 		t.Fatalf("version = %q", s.Version())
 	}
-	if got := s.serverHeaderValue(); got != "walgit/v1 (ssd; walhub/host-1)" {
+	if got := s.serverHeaderValue(); got != "walgit/v1 (ssd; spindle/host-1)" {
 		t.Fatalf("server header = %q", got)
 	}
 	s.version = ""
 	if s.Version() != "dev" {
 		t.Fatalf("fallback version = %q", s.Version())
 	}
-	if got := s.serverHeaderValue(); got != "walgit/dev (ssd; walhub/host-1)" {
+	if got := s.serverHeaderValue(); got != "walgit/dev (ssd; spindle/host-1)" {
 		t.Fatalf("server header 2 = %q", got)
 	}
 	s.instance = ""

@@ -27,9 +27,9 @@ import (
 
 	gossh "golang.org/x/crypto/ssh"
 
-	"github.com/crueber/walhub/internal/config"
-	"github.com/crueber/walhub/internal/server"
-	"github.com/crueber/walhub/internal/store"
+	"github.com/crueber/spindle/internal/config"
+	"github.com/crueber/spindle/internal/server"
+	"github.com/crueber/spindle/internal/store"
 )
 
 // TestSSHKeyRegistryScale measures the SSH key registry (17_ssh.md §3) at two

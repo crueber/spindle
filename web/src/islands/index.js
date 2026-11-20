@@ -11,13 +11,14 @@
 import { initTheme } from "./theme.js";
 import { initMenus } from "./menus.js";
 import { initCopy } from "./copy.js";
+import { initFilter } from "./filter.js";
 import { initAutogrow } from "./autogrow.js";
 import { initSelection } from "./selection.js";
 import { init as initSSE } from "./sse.js";
 import { initDanger } from "./danger.js";
 import { initSubmitKeys } from "./submitkeys.js";
 
-const islands = [initTheme, initMenus, initCopy, initAutogrow, initSelection, initDanger, initSubmitKeys, initSSE];
+const islands = [initTheme, initMenus, initCopy, initFilter, initAutogrow, initSelection, initDanger, initSubmitKeys, initSSE];
 
 export function boot(root = document) {
   for (const init of islands) {

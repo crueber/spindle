@@ -10,14 +10,14 @@
 # first step runs. 200 = created, 409 = already ours, 204 = accepted.
 #
 #   scripts/ci-s3-bucket.sh                    # rig defaults
-#   WALHUB_TEST_S3_ENDPOINT=http://rustfs:9000 scripts/ci-s3-bucket.sh
+#   SPINDLE_TEST_S3_ENDPOINT=http://rustfs:9000 scripts/ci-s3-bucket.sh
 set -Eeuo pipefail
 
-endpoint=${WALHUB_TEST_S3_ENDPOINT:-http://127.0.0.1:9000}
-ak=${WALHUB_TEST_S3_ACCESS_KEY:-walgit-dev}
-sk=${WALHUB_TEST_S3_SECRET_KEY:-walgit-dev-secret}
-bucket=${WALHUB_TEST_S3_BUCKET:-walhub-test}
-region=${WALHUB_TEST_S3_REGION:-us-east-1}
+endpoint=${SPINDLE_TEST_S3_ENDPOINT:-http://127.0.0.1:9000}
+ak=${SPINDLE_TEST_S3_ACCESS_KEY:-walgit-dev}
+sk=${SPINDLE_TEST_S3_SECRET_KEY:-walgit-dev-secret}
+bucket=${SPINDLE_TEST_S3_BUCKET:-spindle-test}
+region=${SPINDLE_TEST_S3_REGION:-us-east-1}
 
 url="${endpoint%/}/${bucket}"
 code=""

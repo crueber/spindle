@@ -28,7 +28,7 @@ func applyEnvOn(t *testing.T, base *Config, environ ...string) (*Config, []Overr
 }
 
 func TestApplyEnvPrimaryPrefix(t *testing.T) {
-	c, overrides, err := applyEnvOn(t, nil, "WALHUB__STORE__BUCKET=acme")
+	c, overrides, err := applyEnvOn(t, nil, "SPINDLE__STORE__BUCKET=acme")
 	if err != nil {
 		t.Fatalf("applyEnv: %v", err)
 	}
@@ -51,23 +51,23 @@ func TestApplyEnvLegacyAlias(t *testing.T) {
 }
 
 func TestApplyEnvPrimaryWinsOnConflict(t *testing.T) {
-	c, overrides, err := applyEnvOn(t, nil, "WALGIT__STORE__BUCKET=old", "WALHUB__STORE__BUCKET=new")
+	c, overrides, err := applyEnvOn(t, nil, "WALGIT__STORE__BUCKET=old", "SPINDLE__STORE__BUCKET=new")
 	if err != nil {
 		t.Fatalf("applyEnv: %v", err)
 	}
 	if c.Store.Bucket != "new" {
-		t.Fatalf("store.bucket = %q, want new (WALHUB__ wins)", c.Store.Bucket)
+		t.Fatalf("store.bucket = %q, want new (SPINDLE__ wins)", c.Store.Bucket)
 	}
 	if len(overrides) != 1 {
 		t.Fatalf("overrides = %+v, want 1 ignored legacy override", overrides)
 	}
-	if overrides[0].Name != "WALGIT__STORE__BUCKET" || !strings.Contains(overrides[0].Reason, "overridden by WALHUB__") {
+	if overrides[0].Name != "WALGIT__STORE__BUCKET" || !strings.Contains(overrides[0].Reason, "overridden by SPINDLE__") {
 		t.Fatalf("override = %+v, want legacy ignored with reason", overrides[0])
 	}
 }
 
 func TestApplyEnvNestedSection(t *testing.T) {
-	c, _, err := applyEnvOn(t, nil, "WALHUB__SERVER__AUTH__MODE=oidc")
+	c, _, err := applyEnvOn(t, nil, "SPINDLE__SERVER__AUTH__MODE=oidc")
 	if err != nil {
 		t.Fatalf("applyEnv: %v", err)
 	}
@@ -78,12 +78,12 @@ func TestApplyEnvNestedSection(t *testing.T) {
 
 func TestApplyEnvTypedValues(t *testing.T) {
 	c, overrides, err := applyEnvOn(t, nil,
-		`WALHUB__SERVER__ROLES=["serve", "maintain"]`,
-		"WALHUB__SERVER__MAX_CONCURRENT_REQUESTS=100",
-		"WALHUB__CACHE__MAX_BYTES=64GiB",
-		"WALHUB__WAL__BATCH_WINDOW=5ms",
-		"WALHUB__CACHE__DISK_HIGH_WATERMARK=0.95",
-		"WALHUB__STORE__ACCEL=true", // unknown key: ignored override, never fatal
+		`SPINDLE__SERVER__ROLES=["serve", "maintain"]`,
+		"SPINDLE__SERVER__MAX_CONCURRENT_REQUESTS=100",
+		"SPINDLE__CACHE__MAX_BYTES=64GiB",
+		"SPINDLE__WAL__BATCH_WINDOW=5ms",
+		"SPINDLE__CACHE__DISK_HIGH_WATERMARK=0.95",
+		"SPINDLE__STORE__ACCEL=true", // unknown key: ignored override, never fatal
 	)
 	if err != nil {
 		t.Fatalf("applyEnv: %v", err)
@@ -116,7 +116,7 @@ func TestApplyEnvTypedValues(t *testing.T) {
 }
 
 func TestApplyEnvBareStringForArrayIsError(t *testing.T) {
-	_, _, err := applyEnvOn(t, nil, "WALHUB__SERVER__ROLES=serve")
+	_, _, err := applyEnvOn(t, nil, "SPINDLE__SERVER__ROLES=serve")
 	if err == nil {
 		t.Fatal("want error assigning bare string to []string")
 	}
@@ -130,7 +130,7 @@ func TestApplyEnvBareStringForArrayIsError(t *testing.T) {
 // Residual server.tls.* env settings fail closed (fatal with the
 // reverse-proxy pointer, #165) instead of joining the ignored-override list.
 func TestApplyEnvRemovedTLSIsFatal(t *testing.T) {
-	for _, spell := range []string{"WALHUB__SERVER__TLS__MODE=self_signed", "WALGIT__SERVER__TLS__CERT=/c.pem"} {
+	for _, spell := range []string{"SPINDLE__SERVER__TLS__MODE=self_signed", "WALGIT__SERVER__TLS__CERT=/c.pem"} {
 		_, _, err := applyEnvOn(t, nil, spell)
 		if err == nil {
 			t.Fatalf("%s: want fatal server.tls rejection", spell)
@@ -142,7 +142,7 @@ func TestApplyEnvRemovedTLSIsFatal(t *testing.T) {
 }
 
 func TestApplyEnvInlineTable(t *testing.T) {
-	c, _, err := applyEnvOn(t, nil, `WALHUB__STORE__S3={endpoint = "http://127.0.0.1:9000", region = "eu-central-1"}`)
+	c, _, err := applyEnvOn(t, nil, `SPINDLE__STORE__S3={endpoint = "http://127.0.0.1:9000", region = "eu-central-1"}`)
 	if err != nil {
 		t.Fatalf("applyEnv: %v", err)
 	}
@@ -152,7 +152,7 @@ func TestApplyEnvInlineTable(t *testing.T) {
 }
 
 func TestApplyEnvDateRejected(t *testing.T) {
-	_, _, err := applyEnvOn(t, nil, "WALHUB__SERVER__LISTEN=1979-05-27")
+	_, _, err := applyEnvOn(t, nil, "SPINDLE__SERVER__LISTEN=1979-05-27")
 	if err == nil || !strings.Contains(err.Error(), "dates") {
 		t.Fatalf("want date rejection error, got %v", err)
 	}
@@ -197,21 +197,21 @@ func TestApplyEnvPlacementAllOrNothing(t *testing.T) {
 }
 
 func TestApplyEnvLogFilterOverride(t *testing.T) {
-	c, _, err := applyEnvOn(t, nil, "WALHUB_LOG=debug")
+	c, _, err := applyEnvOn(t, nil, "SPINDLE_LOG=debug")
 	if err != nil {
 		t.Fatalf("applyEnv: %v", err)
 	}
 	if c.Telemetry.LogFilter != "debug" {
 		t.Fatalf("log_filter = %q, want debug", c.Telemetry.LogFilter)
 	}
-	c, _, _ = applyEnvOn(t, nil, "WALHUB_LOG=debug", "RUST_LOG=warn")
+	c, _, _ = applyEnvOn(t, nil, "SPINDLE_LOG=debug", "RUST_LOG=warn")
 	if c.Telemetry.LogFilter != "warn" {
 		t.Fatalf("log_filter = %q, want warn (RUST_LOG wins)", c.Telemetry.LogFilter)
 	}
 }
 
 func TestApplyEnvNonDoubleUnderscoreIgnored(t *testing.T) {
-	c, overrides, err := applyEnvOn(t, nil, "WALGIT_TOKEN_ALICE=secret", "WALHUB_LOG=debug")
+	c, overrides, err := applyEnvOn(t, nil, "WALGIT_TOKEN_ALICE=secret", "SPINDLE_LOG=debug")
 	if err != nil {
 		t.Fatalf("applyEnv: %v", err)
 	}
@@ -296,7 +296,7 @@ func TestApplyEnvCoercionEdges(t *testing.T) {
 	}
 
 	// Unknown key inside an inline table → ignored override, never fatal.
-	c, overrides, err := applyEnvOn(t, nil, `WALHUB__STORE__S3={bogus = 1}`)
+	c, overrides, err := applyEnvOn(t, nil, `SPINDLE__STORE__S3={bogus = 1}`)
 	if err != nil {
 		t.Fatalf("applyEnv: %v", err)
 	}
@@ -344,13 +344,13 @@ func TestApplyEnvFloatTargetRejectsString(t *testing.T) {
 
 func TestApplyEnvEdgePaths(t *testing.T) {
 	c, overrides, err := applyEnvOn(t, nil,
-		"WALHUB__=ignored-empty-name",          // empty path: skipped
-		"WALHUB__STORE__BUCKET=first",          // duplicate primary
-		"WALHUB__STORE__BUCKET=second",         // duplicate primary: first wins
-		"WALHUB__CACHE__MAX_BYTES=123",         // bare int → applyText int64
+		"SPINDLE__=ignored-empty-name",         // empty path: skipped
+		"SPINDLE__STORE__BUCKET=first",         // duplicate primary
+		"SPINDLE__STORE__BUCKET=second",        // duplicate primary: first wins
+		"SPINDLE__CACHE__MAX_BYTES=123",        // bare int → applyText int64
 		"WALGIT__CACHE__DISK_HIGH_WATERMARK=1", // int64 into float
-		"WALHUB__STORE__PREFIX=",               // empty value → empty string
-		"WALHUB__PLACEMENT__BOGUS=1",           // unknown placement key → ignored override
+		"SPINDLE__STORE__PREFIX=",              // empty value → empty string
+		"SPINDLE__PLACEMENT__BOGUS=1",          // unknown placement key → ignored override
 		"WALGIT__WAL__MAX_BATCH=32",            // non-placement key (placement pass skips it)
 	)
 	if err != nil {
@@ -379,8 +379,8 @@ func TestApplyEnvEdgePaths(t *testing.T) {
 
 func TestApplyEnvCoercionErrors(t *testing.T) {
 	fatal := []string{
-		"WALHUB__WAL__CAS_MAX_RETRIES=abc",   // uint target rejects string
-		"WALHUB__SERVER__HTTP2=1",            // bool target rejects integer
+		"SPINDLE__WAL__CAS_MAX_RETRIES=abc",  // uint target rejects string
+		"SPINDLE__SERVER__HTTP2=1",           // bool target rejects integer
 		`WALGIT__SERVER__LISTEN=true`,        // string target rejects bool
 		`WALGIT__SERVER__ROLES=["serve", 1]`, // array element type error
 		"WALGIT__STORE__S3=x",                // struct target rejects scalar
@@ -394,7 +394,7 @@ func TestApplyEnvCoercionErrors(t *testing.T) {
 }
 
 func TestApplyEnvPlacementFatalError(t *testing.T) {
-	if _, _, err := applyEnvOn(t, nil, "WALHUB__PLACEMENT__SERVE=acme"); err == nil {
+	if _, _, err := applyEnvOn(t, nil, "SPINDLE__PLACEMENT__SERVE=acme"); err == nil {
 		t.Fatal("want fatal type error for bare string into []string")
 	}
 }

@@ -3,27 +3,28 @@
      Server-rendered as LINKS (?doc=name) — the no-JS honest form of the SPA's
      client tabs (Q4): one round trip per switch, no hidden panels, and the
      README is selected by default (README first, rest alphabetical). -->
-<section class="doctabs card mt-4" aria-label="directory documentation">
+<section class="doctabs card mt-4 overflow-hidden" aria-label="directory documentation">
   <!-- Links, not [role=tab] buttons: without the SPA there is no arrow-key
        roving tabindex, and roving without the key handler would make the
        unselected docs unreachable by keyboard. A labelled nav of pills with
-       aria-current on the open doc is the honest no-JS shape (Q4). -->
-  <nav class="seg flex flex-wrap items-center gap-1.5 border-b border-zinc-200 px-3 py-2 dark:border-zinc-800" aria-label="markdown files in this directory">
+       aria-current on the open doc is the honest no-JS shape (Q4). The open
+       doc takes .btn-active (toggled state), never an inline accent. -->
+  <nav class="seg flex flex-wrap items-center gap-1.5 border-b border-[var(--pd-line)] px-3 py-1.5" aria-label="markdown files in this directory">
     {{$base := .DocBase}}
     {{range .Docs}}
     <a href="{{$base}}?doc={{.Query}}"
        title="{{.Name}}"
        {{if .Selected}}aria-current="page"{{end}}
-       class="pill cursor-pointer hover:no-underline{{if .Selected}} border-emerald-500! text-emerald-600! dark:text-emerald-400!{{end}}">{{.Name}}</a>
+       class="btn px-2 py-1{{if .Selected}} btn-active{{end}}">{{.Name}}</a>
     {{end}}
   </nav>
   <div class="markdown-body p-4" id="doctab-panel" aria-label="{{.DocName}}">
     {{if .DocTooBig}}
-    <p class="muted italic p-6 text-center">
+    <p class="muted px-4 py-8 text-center text-sm italic">
       This file is too large to render ({{.DocSize}}; the render cap is 2 MiB). Fetch it raw from the API.
     </p>
     {{else if .DocBinary}}
-    <p class="muted italic p-6 text-center">binary file, {{.DocSize}}</p>
+    <p class="muted px-4 py-8 text-center text-sm italic">binary file, {{.DocSize}}</p>
     {{else}}
     {{.DocBody}}
     {{end}}

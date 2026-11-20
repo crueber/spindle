@@ -7,8 +7,8 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/crueber/walhub/internal/git"
-	"github.com/crueber/walhub/internal/store/proto"
+	"github.com/crueber/spindle/internal/git"
+	"github.com/crueber/spindle/internal/store/proto"
 )
 
 // SyncLevel — how much of a repo a request materializes (doc 05 §2).

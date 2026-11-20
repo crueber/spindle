@@ -22,7 +22,7 @@ import (
 	"context"
 	"time"
 
-	"github.com/crueber/walhub/internal/sizecatalog"
+	"github.com/crueber/spindle/internal/sizecatalog"
 )
 
 // sizeSweepMaxRepos bounds one pass's fold (resumable via sizeCursor).

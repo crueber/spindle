@@ -15,7 +15,7 @@
 
   <form class="card mb-3 grid grid-cols-2 gap-x-3 gap-y-2 p-3 sm:grid-cols-4" method="get" action="/{{.Repo.Full}}/issues" aria-label="issue filters" data-filter-form>
     <label class="grid min-w-0 gap-1">
-      <span class="text-xs text-zinc-500 dark:text-zinc-400">State</span>
+      <span class="eyebrow">State</span>
       <select class="input" name="state">
         <option value="all" {{if eq .State "all"}}selected{{end}}>Open and closed</option>
         <option value="open" {{if eq .State "open"}}selected{{end}}>Open</option>
@@ -23,18 +23,18 @@
       </select>
     </label>
     <label class="grid min-w-0 gap-1">
-      <span class="text-xs text-zinc-500 dark:text-zinc-400">Assignee</span>
+      <span class="eyebrow">Assignee</span>
       <input class="input" name="assignee" value="{{.Assignee}}" placeholder="assignee or *none">
     </label>
     <div class="grid min-w-0 gap-1">
-      <span class="text-xs text-zinc-500 dark:text-zinc-400">Labels</span>
+      <span class="eyebrow">Labels</span>
       <details class="relative" data-popover>
         <summary class="input list-none cursor-pointer truncate" aria-haspopup="menu" data-popover-trigger>{{if .LabelFilter}}{{len .LabelFilter}} selected{{else}}any label{{end}}</summary>
         <div class="label-drop scroll-slim card absolute left-0 z-30 mt-1 max-h-72 w-80 overflow-y-auto p-1" role="group" aria-label="label filter" data-popover-panel>
           {{range .LabelOptions}}
-          <label class="flex w-full items-center gap-2 rounded px-2 py-1 text-left text-sm hover:bg-zinc-100 dark:hover:bg-zinc-800">
+          <label class="flex w-full items-center gap-2 rounded px-2 py-1 text-left text-sm hover:bg-[var(--pd-raised)]">
             <input type="checkbox" name="labels" value="{{.Name}}" {{if .Checked}}checked{{end}}>
-            <span class="inline-block h-3 w-3 shrink-0 rounded-full border border-zinc-300 dark:border-zinc-700" style="background-color:#{{.Color}}" aria-hidden="true"></span>
+            <span class="inline-block h-3 w-3 shrink-0 rounded-full border border-[var(--pd-line-strong)]" style="background-color:#{{.Color}}" aria-hidden="true"></span>
             <span class="min-w-0 truncate">{{.Name}}</span>
           </label>
           {{else}}
@@ -44,7 +44,7 @@
       </details>
     </div>
     <label class="grid min-w-0 gap-1">
-      <span class="text-xs text-zinc-500 dark:text-zinc-400">Milestone</span>
+      <span class="eyebrow">Milestone</span>
       <select class="input" name="milestone">
         <option value="">All</option>
         <option value="none" {{if eq .MilestoneParam "none"}}selected{{end}}>No milestone</option>
@@ -60,12 +60,12 @@
   {{if .Rows}}
   <ul>
     {{range .Rows}}
-    <li class="border-t border-zinc-200 py-3 first:border-t-0 first:pt-0 dark:border-zinc-800">
+    <li class="border-t border-[var(--pd-line)] py-3 first:border-t-0 first:pt-0">
       <div class="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1">
-        <a class="min-w-0 max-w-full truncate font-medium text-emerald-700 hover:underline dark:text-emerald-400" href="{{.Href}}">#{{.Num}} {{.Title}}</a>
+        <a class="link min-w-0 max-w-full font-medium leading-snug line-clamp-2 sm:line-clamp-1" href="{{.Href}}">#{{.Num}} {{.Title}}</a>
         {{if .Closed}}<span class="chip chip-closed shrink-0">closed</span>{{end}}
         {{range .Labels}}{{template "collab_label_chip" .}}{{end}}
-        <span class="ml-auto shrink-0 text-xs text-zinc-500 dark:text-zinc-400">
+        <span class="card-meta ml-auto mt-0! shrink-0">
           {{if .CommentCount}}<span aria-label="{{.CommentCount}} comments" title="{{.CommentCount}} comments">{{template "collab_icon" "comment"}} {{.CommentCount}}</span> · {{end}}
           {{with .Milestone}}{{template "collab_milestone_chip" .}} · {{end}}
           {{template "collab_time" .UpdatedAt}}

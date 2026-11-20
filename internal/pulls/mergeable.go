@@ -5,8 +5,8 @@ import (
 	"errors"
 	"fmt"
 
-	"github.com/crueber/walhub/internal/server/auth"
-	"github.com/crueber/walhub/internal/store"
+	"github.com/crueber/spindle/internal/server/auth"
+	"github.com/crueber/spindle/internal/store"
 )
 
 // This file owns §4 (mergeability: the stamped derived cache, the `pulls`

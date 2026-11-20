@@ -13,7 +13,7 @@ func oidcServer(t *testing.T) (*Server, http.Handler) {
 	s, h := newTestServer(t, nil)
 	s.cfg.Server.Auth.Mode = "oidc"
 	s.cfg.Server.Auth.Issuer = "https://issuer.test"
-	s.cfg.Server.Auth.OAuthClientID = "walhub"
+	s.cfg.Server.Auth.OAuthClientID = "spindle"
 	s.cfg.Server.Auth.OAuthClientSecret = "sekrit"
 	s.cfg.Server.Auth.SessionSecret = "0123456789abcdef0123456789abcdef"
 	s.cfg.Server.Auth.AllowedDomains = []string{"example.com"}
@@ -39,7 +39,7 @@ func TestOIDCFlowLoginRedirect(t *testing.T) {
 	}
 	q := loc.Query()
 	if q.Get("response_type") != "code" || q.Get("scope") != "openid email" ||
-		q.Get("prompt") != "select_account" || q.Get("client_id") != "walhub" {
+		q.Get("prompt") != "select_account" || q.Get("client_id") != "spindle" {
 		t.Fatalf("authorization params = %v", q)
 	}
 	if q.Get("hd") != "example.com" {

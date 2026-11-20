@@ -15,8 +15,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/crueber/walhub/internal/server/auth"
-	"github.com/crueber/walhub/internal/store"
+	"github.com/crueber/spindle/internal/server/auth"
+	"github.com/crueber/spindle/internal/store"
 )
 
 // pollProfile waits up to 5 s for fn to report true (background
@@ -73,7 +73,7 @@ func TestGenerateDeterminism(t *testing.T) {
 
 func TestGenerateRingsAvatar(t *testing.T) {
 	// Forgejo #525: the generated avatar is the DiceBear rings style on
-	// a flat walhub-green background. Table-driven over hostile and
+	// a flat spindle-green background. Table-driven over hostile and
 	// ordinary seeds — every row checks the style pin, the solid
 	// background, flatness (no gradients), the seed contract, and the
 	// sanitize gate.
@@ -91,7 +91,7 @@ func TestGenerateRingsAvatar(t *testing.T) {
 			t.Errorf("seed %q: output is not the rings style", seed)
 		}
 		if !strings.Contains(strings.ToLower(svg), "059669") {
-			t.Errorf("seed %q: walhub-green background missing from output", seed)
+			t.Errorf("seed %q: spindle-green background missing from output", seed)
 		}
 		if !strings.Contains(svg, "<rect") {
 			t.Errorf("seed %q: background rect missing (not a solid fill)", seed)

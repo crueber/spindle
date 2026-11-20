@@ -7,8 +7,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/crueber/walhub/internal/server/auth"
-	"github.com/crueber/walhub/internal/store"
+	"github.com/crueber/spindle/internal/server/auth"
+	"github.com/crueber/spindle/internal/store"
 )
 
 func TestTagEncodingRoundTrip(t *testing.T) {
@@ -40,7 +40,7 @@ func TestValidateModel(t *testing.T) {
 			t.Fatalf("bad asset name accepted: %q", bad)
 		}
 	}
-	if _, err := validateAssetName("walhub-linux-amd64.tar.gz"); err != nil {
+	if _, err := validateAssetName("spindle-linux-amd64.tar.gz"); err != nil {
 		t.Fatalf("good asset name rejected: %v", err)
 	}
 	if _, err := normalizeSHA256("xyz"); err == nil {

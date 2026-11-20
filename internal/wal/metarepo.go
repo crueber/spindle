@@ -60,7 +60,7 @@ import (
 	"encoding/json"
 	"time"
 
-	"github.com/crueber/walhub/internal/store"
+	"github.com/crueber/spindle/internal/store"
 )
 
 // Repo-relative keys of the meta-repo bookkeeping (bucket layout; the

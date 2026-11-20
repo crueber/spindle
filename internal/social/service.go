@@ -8,8 +8,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/crueber/walhub/internal/server/auth"
-	"github.com/crueber/walhub/internal/store"
+	"github.com/crueber/spindle/internal/server/auth"
+	"github.com/crueber/spindle/internal/store"
 )
 
 // This file owns the §§4–6 mutation policy: star/unstar idempotency, the

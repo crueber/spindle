@@ -13,7 +13,7 @@ import (
 var sizeRe = regexp.MustCompile(`(?i)^([0-9]+(?:\.[0-9]+)?)\s*(b|kb|kib|mb|mib|gb|gib|tb|tib)$`)
 
 // ParseByteSize parses a byte size in the Rust-spec spelling shared by the
-// TOML file and the WALHUB__/WALGIT__ env overlay: B|KiB|MiB|GiB|TiB
+// TOML file and the SPINDLE__/WALGIT__ env overlay: B|KiB|MiB|GiB|TiB
 // (case-insensitive, binary), a bare integer meaning bytes, "0B" meaning
 // disabled.
 func ParseByteSize(s string) (ByteSize, error) {

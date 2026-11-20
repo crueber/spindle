@@ -1,9 +1,9 @@
 {{define "content"}}
 {{with .Data}}{{$d := .}}
 <div class="release-page">
-  <header class="mb-4 border-b border-zinc-200 pb-3 dark:border-zinc-800">
+  <header class="mb-4 border-b border-[var(--pd-line)] pb-3">
     <div class="flex flex-wrap items-start gap-2">
-      <h1 class="min-w-0 flex-1 text-lg font-semibold">{{if .Name}}{{.Name}}{{else}}{{.Tag}}{{end}}</h1>
+      <h1 class="min-w-0 flex-1 text-xl font-semibold tracking-tight">{{if .Name}}{{.Name}}{{else}}<span class="mono">{{.Tag}}</span>{{end}}</h1>
       <div class="flex flex-wrap gap-2" role="group" aria-label="Release actions">
         {{if .CanWrite}}<a class="btn" href="?edit=1">Edit</a>{{end}}
         {{if and .Draft .CanWrite}}
@@ -13,7 +13,7 @@
         <details class="relative inline-block">
           <summary class="btn danger list-none cursor-pointer" aria-haspopup="menu" role="button">Delete</summary>
           <div class="card absolute right-0 z-30 mt-1 grid w-64 gap-2 p-3" role="menu" aria-label="Delete release">
-            <p class="text-xs text-zinc-500 dark:text-zinc-400">Delete release “{{.Tag}}”? This cannot be undone.</p>
+            <p class="muted text-xs">Delete release “{{.Tag}}”? This cannot be undone.</p>
             <form method="post" action="{{.DeleteAction}}" hx-confirm="Delete this release?">
               <button type="submit" class="btn danger w-full">Delete release</button>
             </form>
@@ -23,13 +23,13 @@
         <a class="btn" href="/{{.Repo.Full}}/releases">Refresh</a>
       </div>
     </div>
-    <p class="mt-1 flex flex-wrap items-center gap-2 text-xs text-zinc-500 dark:text-zinc-400">
-      <span class="font-mono">{{.Tag}}</span>
+    <p class="muted mt-1 flex flex-wrap items-center gap-2 text-xs">
+      <span class="mono">{{.Tag}}</span>
       {{if .Draft}}<span class="chip chip-draft">draft</span>{{end}}
       {{if .Prerelease}}<span class="chip chip-prerelease">prerelease</span>{{end}}
       {{template "collab_time" .Published}}
       {{with .Author}}· by {{.}}{{end}}
-      {{with .TagSHA}}· tag <span class="font-mono">{{shortsha .}}</span>{{end}}
+      {{with .TagSHA}}· tag <span class="mono">{{shortsha .}}</span>{{end}}
     </p>
   </header>
 
@@ -48,12 +48,12 @@
         </label>
         <label class="grid gap-1">
           <span class="text-sm font-medium">Notes</span>
-          <textarea class="input font-mono text-sm" name="body" rows="10" data-autogrow data-submit-keys>{{.FormBody}}</textarea>
+          <textarea class="input text-sm leading-relaxed" name="body" rows="10" data-autogrow data-submit-keys>{{.FormBody}}</textarea>
           <span class="muted text-xs">Markdown-lite, rendered on the release page below.</span>
         </label>
       </fieldset>
-      <div class="mt-3 flex flex-wrap gap-2 border-t border-zinc-200 pt-3 dark:border-zinc-800">
-        <button type="submit" class="btn primary">Save</button>
+      <div class="mt-3 flex flex-wrap gap-2 border-t border-[var(--pd-line)] pt-3">
+        <button type="submit" class="btn">Save</button>
         <a class="btn" href="/{{.Repo.Full}}/releases/{{.Tag}}">Cancel</a>
       </div>
     </form>
@@ -74,9 +74,9 @@
         <tbody>
           {{range .Assets}}
           <tr>
-            <td class="max-w-64"><a class="inline-flex min-w-0 items-center gap-1.5 font-mono text-emerald-700 hover:underline dark:text-emerald-400" href="{{.Href}}" download>{{template "collab_icon" "file"}}<span class="truncate">{{.Name}}</span></a></td>
-            <td class="tabular text-zinc-500 dark:text-zinc-400">{{.Size}}</td>
-            <td class="font-mono text-xs" title="{{.SHA}}">{{.SHA12}}</td>
+            <td class="max-w-64"><a class="link mono inline-flex min-w-0 items-center gap-1.5" href="{{.Href}}" download>{{template "collab_icon" "file"}}<span class="truncate">{{.Name}}</span></a></td>
+            <td class="mono tabular">{{.Size}}</td>
+            <td class="mono text-xs" title="{{.SHA}}">{{.SHA12}}</td>
             <td>
               <div class="flex flex-wrap justify-end gap-1">
                 <a class="btn px-2 py-0.5" href="{{.Href}}" download>{{template "collab_icon" "download"}}<span class="sr-only">download {{.Name}}</span></a>
@@ -93,15 +93,15 @@
       </table>
     </div>
     {{else}}
-    <p class="muted text-sm">No assets. Attach binaries or checksums below.</p>
+    {{template "collab_empty" (dict "compact" true "icon" "file" "title" "No assets yet" "hint" "Attach binaries or checksums below.")}}
     {{end}}
 
     {{if .CanWrite}}
     <form class="mt-3 flex flex-wrap items-center gap-2" method="post" action="{{.UploadAction}}" enctype="multipart/form-data">
       <input class="peer sr-only" type="file" name="file" id="release-asset" aria-label="attach a file">
-      <label for="release-asset" class="btn primary cursor-pointer peer-focus-visible:ring-2 peer-focus-visible:ring-emerald-500">Choose a file</label>
+      <label for="release-asset" class="btn cursor-pointer peer-focus-visible:ring-2 peer-focus-visible:ring-amber-500">Choose a file</label>
       <label class="grid gap-1">
-        <span class="text-xs text-zinc-500 dark:text-zinc-400">asset name (optional — defaults to the file name)</span>
+        <span class="muted text-xs">asset name (optional — defaults to the file name)</span>
         <input class="input" name="name" placeholder="wirehub_1.2.3_checksums.txt">
       </label>
       <button type="submit" class="btn">Upload</button>

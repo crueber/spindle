@@ -18,18 +18,18 @@
 //
 // Core never imports the mirror package (law 8): the guard is an
 // injected predicate over the same store, wired once in composition
-// (cmd/walhub). Nil → legacy behavior (no refusals).
+// (cmd/spindle). Nil → legacy behavior (no refusals).
 package server
 
 import (
 	"context"
 
-	"github.com/crueber/walhub/internal/git"
+	"github.com/crueber/spindle/internal/git"
 )
 
 // MirrorRefusal is the push-refusal text on every transport: the
 // discovery 403 body, the in-pipeline per-ref ng reason, and the SSH
-// pre-advertisement stderr error (surfaced as "walhub: <msg>").
+// pre-advertisement stderr error (surfaced as "spindle: <msg>").
 const MirrorRefusal = "this repository is a read-only mirror; pushes are rejected"
 
 // isMirrorRepo reports whether id is a pull-only mirror (nil guard →

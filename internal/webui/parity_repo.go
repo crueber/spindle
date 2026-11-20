@@ -35,11 +35,11 @@ import (
 	"net/url"
 	"strings"
 
-	"github.com/crueber/walhub/internal/identity"
-	"github.com/crueber/walhub/internal/notify"
-	"github.com/crueber/walhub/internal/server/auth"
-	"github.com/crueber/walhub/internal/social"
-	"github.com/crueber/walhub/internal/tags"
+	"github.com/crueber/spindle/internal/identity"
+	"github.com/crueber/spindle/internal/notify"
+	"github.com/crueber/spindle/internal/server/auth"
+	"github.com/crueber/spindle/internal/social"
+	"github.com/crueber/spindle/internal/tags"
 )
 
 // commitsChecksBatch is the commits page's ONE check-index read: the service

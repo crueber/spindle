@@ -1,6 +1,6 @@
 # 03 — Pull requests: opens, `refs/pull/N`, mergeability, merge tasks, forks
 
-> Status: planning for the walhub collaboration layer. Depends on 01 (identity/permissions), 02
+> Status: planning for the spindle collaboration layer. Depends on 01 (identity/permissions), 02
 > (issues — shared numbering via P2), and the frozen architecture in
 > [`README.md`](README.md) (primitives P1–P9). Seams: `docs/go/14_extensibility.md` (§14.3 routes,
 > §14.7 task kinds, §14.10 roadmap). Git argv per `docs/go/04_git.md`; wire conventions per
@@ -192,9 +192,9 @@ Steps (git is always the subprocess with exact argv, `docs/go/04_git.md`):
 | Strategy | Git argv (exact) | Result |
 |---|---|---|
 | `merge` | `git merge-tree --write-tree --name-only <base_sha> <head_sha>` → tree `T` (exit 1 ⇒ abort, narrate conflict paths) | merge commit |
-| `merge` (commit) | `git commit-tree T -p <base_sha> -p <head_sha> -m <message>` with `GIT_AUTHOR_NAME/EMAIL/DATE` = merging principal, `GIT_COMMITTER_NAME/EMAIL` = server identity (`walhub <server.identity_email>`, default `walhub@localhost`), committer date = now | the merge commit sha |
+| `merge` (commit) | `git commit-tree T -p <base_sha> -p <head_sha> -m <message>` with `GIT_AUTHOR_NAME/EMAIL/DATE` = merging principal, `GIT_COMMITTER_NAME/EMAIL` = server identity (`spindle <server.identity_email>`, default `spindle@localhost`), committer date = now | the merge commit sha |
 | `squash` | same trial `merge-tree`, then `git commit-tree T -p <base_sha> -m <title>\n\n<flattened body>` (author = principal, committer = server) | single-parent commit |
-| `rebase` | plant temp branch `refs/heads/walhub-tmp-replay-<pid>-<nanos>` at `<head_sha>` (`git update-ref`, unique per call, deleted on every exit path), then `git replay --onto <base_sha> --ref-action=print <merge_base>..<tmpref>` → parse the `update <tmpref> <new> <old>` line for tip `R` (plumbing, no worktree); then `git commit-tree` is NOT used — `R` is published as-is | replayed tip; original authorship preserved per commit, committer = server identity |
+| `rebase` | plant temp branch `refs/heads/spindle-tmp-replay-<pid>-<nanos>` at `<head_sha>` (`git update-ref`, unique per call, deleted on every exit path), then `git replay --onto <base_sha> --ref-action=print <merge_base>..<tmpref>` → parse the `update <tmpref> <new> <old>` line for tip `R` (plumbing, no worktree); then `git commit-tree` is NOT used — `R` is published as-is | replayed tip; original authorship preserved per commit, committer = server identity |
 
 > Rebase argv rationale (verified live against stock git 2.53): `git replay`
 > (experimental) only tracks *branches* named in the revision range — a

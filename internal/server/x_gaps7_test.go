@@ -11,21 +11,21 @@ import (
 	"testing"
 	"time"
 
-	"github.com/crueber/walhub/internal/config"
-	"github.com/crueber/walhub/internal/git"
-	"github.com/crueber/walhub/internal/server/auth"
-	"github.com/crueber/walhub/internal/store"
-	"github.com/crueber/walhub/internal/wal"
+	"github.com/crueber/spindle/internal/config"
+	"github.com/crueber/spindle/internal/git"
+	"github.com/crueber/spindle/internal/server/auth"
+	"github.com/crueber/spindle/internal/store"
+	"github.com/crueber/spindle/internal/wal"
 )
 
 func TestNewAuthServiceVariants(t *testing.T) {
 	// nil clock → time.Now; TokenEnv resolution; empty-resolved dropped.
-	t.Setenv("WALHUB_TEST_TOKEN_A", "env-token")
+	t.Setenv("SPINDLE_TEST_TOKEN_A", "env-token")
 	svc := NewAuthService(&config.Auth{
 		Mode: "token",
 		Tokens: []config.StaticToken{
-			{Principal: "env", TokenEnv: "WALHUB_TEST_TOKEN_A", Write: true},
-			{Principal: "dropped", TokenEnv: "WALHUB_TEST_TOKEN_MISSING"},
+			{Principal: "env", TokenEnv: "SPINDLE_TEST_TOKEN_A", Write: true},
+			{Principal: "dropped", TokenEnv: "SPINDLE_TEST_TOKEN_MISSING"},
 			{Principal: "empty"},
 		},
 	}, nil)
@@ -46,8 +46,8 @@ func TestNewAuthServiceVariants(t *testing.T) {
 func (s *AuthService) cfg2() *config.Config {
 	return &config.Config{Server: config.Server{Auth: config.Auth{
 		Mode: "token", Tokens: []config.StaticToken{
-			{Principal: "env", TokenEnv: "WALHUB_TEST_TOKEN_A"},
-			{Principal: "dropped", TokenEnv: "WALHUB_TEST_TOKEN_MISSING"},
+			{Principal: "env", TokenEnv: "SPINDLE_TEST_TOKEN_A"},
+			{Principal: "dropped", TokenEnv: "SPINDLE_TEST_TOKEN_MISSING"},
 			{Principal: "empty"},
 		},
 		SessionSecret: "0123456789abcdef0123456789abcdef"}}}

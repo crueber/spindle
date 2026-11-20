@@ -1,6 +1,6 @@
 {{define "content"}}
 <section class="milestones-page mx-auto max-w-2xl">
-  <h2 class="mb-3 flex items-center gap-2 text-lg font-semibold">
+  <h2 class="mb-3 flex items-center gap-2 text-xl font-semibold">
     <svg xmlns="http://www.w3.org/2000/svg" width="1em" height="1em" viewBox="0 0 16 16" aria-hidden="true" class="icon">
       <path fill="currentColor" fill-rule="evenodd" d="M8.354 2.664a.5.5 0 0 0-.708 0L2.664 7.646a.5.5 0 0 0 0 .708l4.982 4.982a.5.5 0 0 0 .708 0l4.982-4.982a.5.5 0 0 0 0-.708zm-1.768-1.06a2 2 0 0 1 2.828 0l4.982 4.982a2 2 0 0 1 0 2.828l-4.982 4.982a2 2 0 0 1-2.828 0L1.604 9.414a2 2 0 0 1 0-2.828z" clip-rule="evenodd"/>
     </svg>
@@ -13,54 +13,54 @@
     <li class="card grid gap-1 p-3">
       <div class="flex flex-wrap items-baseline gap-2">
         <h3 class="font-medium">{{.M.Title}}</h3>
-        <span class="chip">{{.M.State}}</span>
-        <span class="muted ml-auto text-xs">{{.M.OpenIssues}} open · {{.M.ClosedIssues}} closed</span>
+        <span class="chip {{if eq .M.State "open"}}chip-open{{else}}chip-closed{{end}}">{{.M.State}}</span>
+        <span class="muted ml-auto mono text-[11px]">{{.M.OpenIssues}} open · {{.M.ClosedIssues}} closed</span>
       </div>
-      <div class="h-1.5 overflow-hidden rounded bg-zinc-200 dark:bg-zinc-800" role="progressbar" aria-valuenow="{{.M.Percent}}" aria-valuemin="0" aria-valuemax="100">
-        <div class="h-full bg-emerald-500" style="width: {{.M.Percent}}%"></div>
+      <div class="h-1.5 overflow-hidden rounded bg-[var(--pd-raised)]" role="progressbar" aria-valuenow="{{.M.Percent}}" aria-valuemin="0" aria-valuemax="100">
+        <div class="h-full bg-[var(--pd-accent)]" style="width: {{.M.Percent}}%"></div>
       </div>
       <ul class="grid gap-1">
         {{range .Issues}}
         <li class="flex flex-wrap items-baseline gap-2 px-1 text-sm">
           <span class="chip {{if eq .State "open"}}chip-open{{else}}chip-closed{{end}}">{{.State}}</span>
-          <a class="font-medium text-emerald-700 hover:underline dark:text-emerald-400" href="/{{$.Data.Full}}/issues/{{.Num}}">#{{.Num}} {{.Title}}</a>
+          <a class="font-medium link" href="/{{$.Data.Full}}/issues/{{.Num}}">#{{.Num}} {{.Title}}</a>
         </li>
         {{else}}
-        <li class="muted px-1 text-xs">no issues on this milestone</li>
+        <li class="muted text-[11px]">no issues on this milestone</li>
         {{end}}
       </ul>
       <div class="flex flex-wrap items-center gap-1">
-        <a class="btn px-2 py-0.5 text-xs" href="{{.Href}}" title="issues on milestone {{.M.Title}}">{{.View}}</a>
+        <a class="btn" href="{{.Href}}" title="issues on milestone {{.M.Title}}">{{.View}}</a>
         <span class="ml-auto flex flex-wrap gap-1">
           <form method="post" action="/{{$.Data.Full}}/milestones/{{.M.ID}}/state">
             <input type="hidden" name="state" value="closed">
-            <button type="submit" class="btn px-2 py-0.5 text-xs">Close</button>
+            <button type="submit" class="btn">Close</button>
           </form>
           <form method="post" action="/{{$.Data.Full}}/milestones/{{.M.ID}}/delete">
-            <button type="submit" class="btn danger px-2 py-0.5 text-xs">Delete</button>
+            <button type="submit" class="btn danger">Delete</button>
           </form>
         </span>
       </div>
     </li>
     {{else}}
-    <li class="muted">{{if .Data.HasAny}}no open milestones{{else}}no milestones yet{{end}}</li>
+    <li class="muted text-sm">{{if .Data.HasAny}}no open milestones{{else}}no milestones yet{{end}}</li>
     {{end}}
   </ul>
 
   {{if .Data.Closed}}
-  <h3 class="muted mb-1 text-xs font-semibold uppercase tracking-wide">Closed</h3>
+  <h3 class="eyebrow mb-1">Closed</h3>
   <ul class="mb-4 grid gap-1">
     {{range .Data.Closed}}
     <li class="card flex flex-wrap items-baseline gap-x-2 gap-y-1 px-3 py-2">
       <svg xmlns="http://www.w3.org/2000/svg" width="1em" height="1em" viewBox="0 0 24 24" aria-hidden="true" class="icon">
         <path fill="currentColor" d="m22.115 10.055l-8.17-8.17a2.76 2.76 0 0 0-3.89 0l-8.17 8.17a2.76 2.76 0 0 0 0 3.89l8.17 8.17c.535.535 1.24.805 1.945.805s1.41-.27 1.945-.805l8.17-8.17a2.76 2.76 0 0 0 0-3.89m-10.73 5.12a1.25 1.25 0 0 1-.885.365c-.32 0-.64-.12-.885-.365l-2.27-2.27l1.06-1.06L10.5 13.94l5.47-5.47l1.06 1.06z"/>
       </svg>
-      <a class="min-w-0 flex-1 truncate font-medium text-emerald-700 hover:underline dark:text-emerald-400" href="{{.Href}}" title="issues on milestone {{.M.Title}}">{{.M.Title}}</a>
+      <a class="min-w-0 flex-1 truncate font-medium link" href="{{.Href}}" title="issues on milestone {{.M.Title}}">{{.M.Title}}</a>
       <form method="post" action="/{{$.Data.Full}}/milestones/{{.M.ID}}/state">
         <input type="hidden" name="state" value="open">
-        <button type="submit" class="btn px-2 py-0.5 text-xs">Reopen</button>
+        <button type="submit" class="btn">Reopen</button>
       </form>
-      <span class="muted ml-auto text-xs">{{.M.OpenIssues}} open · {{.M.ClosedIssues}} closed</span>
+      <span class="muted ml-auto mono text-[11px]">{{.M.OpenIssues}} open · {{.M.ClosedIssues}} closed</span>
     </li>
     {{end}}
   </ul>
@@ -70,6 +70,6 @@
     <input name="title" class="input min-w-0 flex-1" maxlength="256" placeholder="v1.1 (triage)" aria-label="milestone title">
     <button type="submit" class="btn primary">Create</button>
   </form>
-  {{if not .Data.CanTriage}}<p class="muted mt-2 text-xs">creating, closing and deleting milestones needs the triage role.</p>{{end}}
+  {{if not .Data.CanTriage}}<p class="muted mt-2 text-[11px]">creating, closing and deleting milestones needs the triage role.</p>{{end}}
 </section>
 {{end}}

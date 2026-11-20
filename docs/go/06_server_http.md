@@ -1,7 +1,7 @@
 # 06 — HTTP server (`internal/server`)
-> Source: MASTER_RUST_SPEC.md §8 (8.1 middleware, 8.2 routing, 8.3 routes, 8.4 git endpoints, 8.5 static objects, 8.6 edge contract, 8.7 LFS, 8.8 auth, 8.9 setup/recipes/installer, 8.10 health/metrics/startup, 8.11 TLS notes), §20 items 2–5 · Status: normative for the walhub Go implementation.
+> Source: MASTER_RUST_SPEC.md §8 (8.1 middleware, 8.2 routing, 8.3 routes, 8.4 git endpoints, 8.5 static objects, 8.6 edge contract, 8.7 LFS, 8.8 auth, 8.9 setup/recipes/installer, 8.10 health/metrics/startup, 8.11 TLS notes), §20 items 2–5 · Status: normative for the spindle Go implementation.
 
-Package: `internal/server` (module `github.com/crueber/walhub`). Binary `walhub`. Dependencies allowed here: `github.com/go-chi/chi/v5` (core only), `github.com/BurntSushi/toml`, `golang.org/x/net` (`h2c`) — nothing else. The router is chi (§3); the git subprocess layer (`internal/git`), WAL engine (`internal/wal`), API handlers (`internal/api`), and the setup module (`internal/setup`, §3.4) are consumed through small interfaces defined in this doc (§2.4) so siblings can land independently. Cross-references: 04_git.md, 07_api.md, 11_config_cli.md, 13_concurrency.md.
+Package: `internal/server` (module `github.com/crueber/spindle`). Binary `spindle`. Dependencies allowed here: `github.com/go-chi/chi/v5` (core only), `github.com/BurntSushi/toml`, `golang.org/x/net` (`h2c`) — nothing else. The router is chi (§3); the git subprocess layer (`internal/git`), WAL engine (`internal/wal`), API handlers (`internal/api`), and the setup module (`internal/setup`, §3.4) are consumed through small interfaces defined in this doc (§2.4) so siblings can land independently. Cross-references: 04_git.md, 07_api.md, 11_config_cli.md, 13_concurrency.md.
 
 ## 1. What this server is
 
@@ -175,7 +175,7 @@ Then dispatch on `sub[0]` (after `.git`-strip and re-join with "/"): the table i
 | GET | `/setup` | setup page, server-rendered by the page provider (`internal/webui`, D-WEB-14); assets at `/_ui/app.css` + `/_ui/ui.js` |
 | GET | `/api/v1/setup` | full config schema + effective values + file state + validation errors |
 | POST | `/api/v1/setup/test` | validate a proposed config without saving |
-| PUT | `/api/v1/setup` | validate + atomically write `<data-dir>/walhub.toml` |
+| PUT | `/api/v1/setup` | validate + atomically write `<data-dir>/spindle.toml` |
 
 **Self-authing (`require_read`/`require_write` in handler):**
 
@@ -227,13 +227,13 @@ Hazard: the wildcard dispatch runs on every unmatched request (scanners, probes)
 
 ### 3.4 Bootstrap & setup (zero-config first run)
 
-`internal/setup` owns the schema description for the UI, validate-for-save, the atomic write of `<data-dir>/walhub.toml`, and bootstrap-mode detection; `internal/server` wires the JSON surface (`s.setupAPIRouter`) and routes `GET`/`POST /setup` through the page provider; the page itself is `internal/webui`'s settings page (`internal/webui/templates/pages/settings/setup.html` + the `partials/settings_setup.html` blocks), rendered and validated server-side (D-WEB-14).
+`internal/setup` owns the schema description for the UI, validate-for-save, the atomic write of `<data-dir>/spindle.toml`, and bootstrap-mode detection; `internal/server` wires the JSON surface (`s.setupAPIRouter`) and routes `GET`/`POST /setup` through the page provider; the page itself is `internal/webui`'s settings page (`internal/webui/templates/pages/settings/setup.html` + the `partials/settings_setup.html` blocks), rendered and validated server-side (D-WEB-14).
 
 **Boot flow decision tree (normative):**
 
 ```
-locate data dir (--data-dir flag > WALHUB_DATA_DIR env; default ~/.local/share/walhub, containers /var/lib/walhub)
-├─ no <data-dir>/walhub.toml → boot with the first-run defaults (below) + a LOUD setup banner in the logs on every start
+locate data dir (--data-dir flag > SPINDLE_DATA_DIR env; default ~/.local/share/spindle, containers /var/lib/spindle)
+├─ no <data-dir>/spindle.toml → boot with the first-run defaults (below) + a LOUD setup banner in the logs on every start
 ├─ config file present, parses + validates → normal boot (§10.4)
 └─ config file present but INVALID (parse or validation errors) → SETUP-ONLY MODE:
      only GET/POST /setup, /_ui/*, /api/v1/setup, /api/v1/setup/test, PUT /api/v1/setup,
@@ -252,7 +252,7 @@ locate data dir (--data-dir flag > WALHUB_DATA_DIR env; default ~/.local/share/w
 | `server.auto_create_on_push` | `true` |
 | everything else | Rust-spec defaults (11_config_cli.md) |
 
-**Data-dir layout:** `<data-dir>/store/` (object store), `<data-dir>/cache/` (prewarm, LFS spool), `<data-dir>/walhub.toml` (saved by setup Save; the only config file the server reads).
+**Data-dir layout:** `<data-dir>/store/` (object store), `<data-dir>/cache/` (prewarm, LFS spool), `<data-dir>/spindle.toml` (saved by setup Save; the only config file the server reads).
 
 **Setup UI:** `GET /setup` is a server-rendered page; its assets are `/_ui/app.css` + `/_ui/ui.js` (stable names, `no-cache` + ETag). It groups ALL config keys by section with current effective values (merging defaults ← file ← env) and validates on save. The page provider implements `POST /setup` (validate-then-save through the same `internal/setup` path as `PUT /api/v1/setup`, re-rendering with errors or the saved/restart status; `hx-post` swaps the page fragment) and `POST /setup/auth-test` (the OIDC discovery result fragment). `internal/server` currently routes `GET /setup` in both boot modes and `POST /setup` in setup-only mode — the mode where saving is the recovery path (§3.1). The JSON endpoints below remain the programmatic surface.
 
@@ -260,15 +260,15 @@ locate data dir (--data-dir flag > WALHUB_DATA_DIR env; default ~/.local/share/w
 
 - `GET /api/v1/setup` → `{ "file_state": "absent"|"valid"|"invalid", "errors": [<validation error>], "requires_restart": [<key>…], "groups": [{ "section": "server", "keys": [{ "key": "server.listen", "value": <effective>, "default": <…>, "type": "string"|"int"|"bool"|"duration"|"list", "secret": bool, "doc": "…" }] }] }`. `no-cache`.
 - `POST /api/v1/setup/test` — body: raw TOML (or `{overrides: {key: value}}`); runs the full validator WITHOUT saving → `200 {errors: []}` or `422 {errors: [{key, message}]}`.
-- `PUT /api/v1/setup` — body: same as test. Validate; on success atomically write `<data-dir>/walhub.toml` (tmp + rename in the data dir), then respond `200 {saved: true, requires_restart: [<key>…], errors: []}`. The running process does NOT hot-reload — `requires_restart` lists every key whose effective value differs from the just-saved file (all of them, effectively; the process continues in its current boot mode).
+- `PUT /api/v1/setup` — body: same as test. Validate; on success atomically write `<data-dir>/spindle.toml` (tmp + rename in the data dir), then respond `200 {saved: true, requires_restart: [<key>…], errors: []}`. The running process does NOT hot-reload — `requires_restart` lists every key whose effective value differs from the just-saved file (all of them, effectively; the process continues in its current boot mode).
 
-**Access rules:** open while (no config file) OR (config invalid) OR (`server.auth.mode = "none"`); otherwise an admin principal is required (same `require_admin` mapping as §8.3). Optional `WALHUB_SETUP_TOKEN` env: when set, the setup routes require it (query `?token=` or `Authorization: Bearer <token>`) and skip the admin check — the escape hatch for exposed hosts.
+**Access rules:** open while (no config file) OR (config invalid) OR (`server.auth.mode = "none"`); otherwise an admin principal is required (same `require_admin` mapping as §8.3). Optional `SPINDLE_SETUP_TOKEN` env: when set, the setup routes require it (query `?token=` or `Authorization: Bearer <token>`) and skip the admin check — the escape hatch for exposed hosts.
 
 **auth-none on any bind (supersedes the Rust fail-closed loopback rule):** the Rust rule (refuse auth `none` unless the listen address is loopback) is deliberately dropped for zero-config friendliness. With `mode = "none"` on a non-loopback bind, the server boots but: logs a persistent `WARN auth mode is "none" — anyone on the network has write+admin` at startup AND once per hour thereafter; `/setup` shows a red banner; `readyz` gains `"warnings":["auth_none"]`; and the setup UI pre-selects a real auth mode as the recommended fix. No request is ever refused because of it.
 
 #### Concurrency (setup)
 
-Hazard: concurrent Saves racing the file write. Avoidance: `internal/setup` serializes Saves with a process-wide mutex, writes `<data-dir>/walhub.toml.tmp` then `rename`s (same directory, atomic on POSIX); validation reads the in-memory effective config, never the file mid-write.
+Hazard: concurrent Saves racing the file write. Avoidance: `internal/setup` serializes Saves with a process-wide mutex, writes `<data-dir>/spindle.toml.tmp` then `rename`s (same directory, atomic on POSIX); validation reads the in-memory effective config, never the file mid-write.
 
 ### 3.5 The page-provider seam and `/_ui` assets (D-WEB-14, D-WEB-15)
 
@@ -367,7 +367,7 @@ The host-wide `write` flag is NOT the push gate. At receive-pack dispatch —
 discovery (`info/refs?service=git-receive-pack`) and body
 (`git-receive-pack`, direct and broker-fallback entries) — the server
 enforces one shared rule via the `PushGate` seam (`internal/server`
-defines it, `internal/identity` implements it, `cmd/walhub` wires it —
+defines it, `internal/identity` implements it, `cmd/spindle` wires it —
 the `ReadGate` shape, law 8):
 
 - **Existing repo:** `CheckPush` — host admin passes (zero store reads,
@@ -466,7 +466,7 @@ type Principal struct {
 var Anonymous = Principal{Name: "anonymous", Anonymous: true} // no write, no admin
 ```
 
-`mode=none`: everyone is `anon` with write+admin. The Rust spec's fail-closed rule (refuse this mode unless the listen address is loopback) is **superseded** by the walhub divergence (§3.4): any bind is allowed, with loud warnings in the logs, the setup UI, and `readyz`.
+`mode=none`: everyone is `anon` with write+admin. The Rust spec's fail-closed rule (refuse this mode unless the listen address is loopback) is **superseded** by the spindle divergence (§3.4): any bind is allowed, with loud warnings in the logs, the setup UI, and `readyz`.
 
 ### 8.2 Client credential resolution order
 
@@ -596,7 +596,7 @@ curl -s https://walgit.example.com/api/v1/me -H "Authorization: Bearer $WALGIT_T
 mode = "oidc"
 anonymous_read = false
 session_secret = "32-bytes-minimum-generated-once"
-audiences = ["walhub"]
+audiences = ["spindle"]
 allowed_domains = ["example.com"]
 write_domains = ["example.com"]
 admin_emails = ["crueber@example.com"]
@@ -672,7 +672,7 @@ curl -s localhost:8442/metrics | grep walgit_http_inflight
 
 ### 10.4 Startup order
 
-1. **Bootstrap leg (§3.4, `internal/setup`):** resolve the data dir (`--data-dir` flag → `WALHUB_DATA_DIR` → default `~/.local/share/walhub`; containers `/var/lib/walhub`), ensure `store/` + `cache/`, load `<data-dir>/walhub.toml` if present. Missing → first-run defaults + loud setup banner; invalid → SETUP-ONLY MODE (log the exact errors, mount only the §3.4 subset, and skip steps 3–7); valid → continue.
+1. **Bootstrap leg (§3.4, `internal/setup`):** resolve the data dir (`--data-dir` flag → `SPINDLE_DATA_DIR` → default `~/.local/share/spindle`; containers `/var/lib/spindle`), ensure `store/` + `cache/`, load `<data-dir>/spindle.toml` if present. Missing → first-run defaults + loud setup banner; invalid → SETUP-ONLY MODE (log the exact errors, mount only the §3.4 subset, and skip steps 3–7); valid → continue.
 2. Tracing init (filter from `RUST_LOG`-equivalent env else `telemetry.log_filter`; pretty or Cloud-Logging JSON).
 3. Open store.
 4. Build AppState (wal registry, bundler, auth service + JWKS, per-repo semaphores, metrics registry).
@@ -685,10 +685,10 @@ Go shape: one `http.Server` with `BaseContext` carrying the app context; `Serve(
 
 ## 11. TLS terminates at the reverse proxy (§8.10–8.11 as diverged)
 
-walhub serves plain HTTP (h2c retained: HTTP/2 prior knowledge + HTTP/1.1 via `golang.org/x/net/http2/h2c`, `TCP_NODELAY` on every connection — set via a wrapped listener's `Accept` loop). There is no in-process TLS: no `server.tls.*` config surface, no cert/key loading, no self-signed generation, no `/services/public/ca.pem`, and no `ca_url`/`trust` fields in `setup.json` (all removed by issue #165).
+spindle serves plain HTTP (h2c retained: HTTP/2 prior knowledge + HTTP/1.1 via `golang.org/x/net/http2/h2c`, `TCP_NODELAY` on every connection — set via a wrapped listener's `Accept` loop). There is no in-process TLS: no `server.tls.*` config surface, no cert/key loading, no self-signed generation, no `/services/public/ca.pem`, and no `ca_url`/`trust` fields in `setup.json` (all removed by issue #165).
 
 - Operators terminate TLS at the reverse proxy in front (Caddy or nginx snippets in 16_packaging.md §4). The proxy forwards plain HTTP to `server.listen` and sets `X-Forwarded-Proto: https` so the server advertises `https://` clone URLs (§9.1); `server.public_url` pins the canonical external origin.
-- Residual `server.tls.*` settings fail closed: a TOML file containing them is rejected at load, and a `WALHUB__SERVER__TLS__*` env override is a fatal error — both with a message pointing at the reverse proxy (never a silent ignore).
+- Residual `server.tls.*` settings fail closed: a TOML file containing them is rejected at load, and a `SPINDLE__SERVER__TLS__*` env override is a fatal error — both with a message pointing at the reverse proxy (never a silent ignore).
 - Outbound HTTPS (webhook delivery, OIDC discovery, upstream follow, S3/GCS) is unaffected: it validates against the system root CAs and never used `server.tls.cert/key`.
 
 ## 12. Graceful shutdown — two-phase drain (Rust spec §3.4)
@@ -738,7 +738,7 @@ Hazard: keepalive ticker and event writer racing on the same `http.ResponseWrite
   keeps its 2-segment root and every deeper path. New nested repo pages (`/pulls/new`,
   `/pull/:num/commits`, `/pull/:num/files`, `/checks/:sha`) ride the existing `sub[0]` match —
   no router change for those.
-- **NEW (2026-09-05) — broker forwarding is uniform across core + collab surfaces** (Forgejo #71): the §8.6 rule resolves at the single entry point `AuthService.AuthenticateForwarded`, and every Seam 1 feature surface (all nine `chain*` closures in `cmd/walhub`) resolves through it — bare `Authenticate` in a feature chain is an auth bug (it attributes brokered actions to the broker). Rationale: one forwarding decision point keeps core git/API lanes and collab handlers identical by construction; fail-closed ordering (errors before forwarding) is inherited, not re-implemented per surface.
+- **NEW (2026-09-05) — broker forwarding is uniform across core + collab surfaces** (Forgejo #71): the §8.6 rule resolves at the single entry point `AuthService.AuthenticateForwarded`, and every Seam 1 feature surface (all nine `chain*` closures in `cmd/spindle`) resolves through it — bare `Authenticate` in a feature chain is an auth bug (it attributes brokered actions to the broker). Rationale: one forwarding decision point keeps core git/API lanes and collab handlers identical by construction; fail-closed ordering (errors before forwarding) is inherited, not re-implemented per surface.
 - **NEW (2026-09-05) — issue attachment bytes use `private` cache class** (Forgejo #120, docs/features/02 §12): `GET|HEAD /{o}/{r}/attachments/<sha>/<name>` follows the §5 static contract reimplemented in `internal/issues` (ETag/304/206/416/HEAD/nosniff) with one deliberate token deviation — `Cache-Control: private, max-age=31536000, immutable` instead of `public`. Immutable bytes, but authenticated reads must not sit in shared caches.
 - **NEW (2026-09-08) — landing page at `/`, owners list at `/explore`** (Forgejo #187): `GET /` serves the static landing page (zero store reads); `GET /explore` serves the owners list via an explicit route (chi static-beats-wildcard ordering; without it `/explore` would fall into the `/*` wildcard's single-segment owner shape, now `pageOr404`). `?format=text` MOVED from `/` to `/explore` — the machine twin follows the page to its canonical home (pre-1.0 no-alias law: one home, no silent alias, no 308); `/` answers the page unconditionally. `explore` joins the reserved single-segment UI names (an owner literally named `explore` loses its `/:owner` UI page only). Rationale: the front door is marketing (no store round trips); `/explore` is the live page. *(2026-11-20, D-WEB-15: both routes go through `pageOr404` and the page provider's `explore` handler serves `?format=text`. The "text/plain Accept without text/html" branch recorded here lived in the deleted server shell handler (`explorePage`), not in the page provider, and was not carried over — the query parameter is the only twin.)*
 - **NEW (2026-09-08) — developer deep-dive page at `/how-it-works`** (Forgejo #191, R1 B1): `GET /how-it-works` serves the static deep-dive page via an explicit route (same single-segment reservation as `/explore` — without it `/how-it-works` would fall into the `/*` wildcard's owner shape; since D-WEB-15 it is `pageOr404`). Static page, zero store reads, no text twin (the `?format=text` machine twin lives at `/explore` only; `/how-it-works` answers HTML unconditionally). `how-it-works` joins the reserved single-segment UI names (an owner literally named `how-it-works` loses its `/:owner` UI page only). Rationale: the deep-dive is marketing like `/` (no store round trips); the reservation keeps routing unambiguous by construction.
@@ -764,7 +764,7 @@ Hazard: keepalive ticker and event writer racing on the same `http.ResponseWrite
   no explicit server route) and joins the reserved single-segment UI names (§3). Wire shapes and
   the six Decisions entries live in 07_api.md §9.1.1/§14.
 - **NEW (2026-09-05) — server-side TLS removed; termination belongs on the reverse proxy** (Forgejo #165): `server.tls.*` config, cert/key loading, self-signed generation, the TLS listener wrap, `/services/public/ca.pem`, and the `setup.json` `ca_url`/`trust` fields are all gone — the server listens plain HTTP (h2c retained). Rationale: inbound (UI/API/git/SSH) all work behind a TLS-terminating proxy and outbound HTTPS never used the server cert; one fewer crypto surface to own. Residual `server.tls.*` settings fail closed (file rejected at load, env override fatal) with a reverse-proxy pointer. The same change honors `X-Forwarded-Proto` when building absolute URLs (`requestScheme`: proxy header, else the connection), closing the follow-up noted in 12_web_ui.md — no separate issue needed.
-- **NEW (2026-09-11) — OIDC browser login is fail-closed and always has a login entry** (Forgejo #344): config validation refuses `auth.mode = "oidc"` without the full browser-login trio (`server.auth.session_secret` + `server.auth.oauth_client_id` + `server.auth.oauth_client_secret`), naming the missing keys — the previous pair-only check let a partially-configured instance boot into a dead state (every browser GET a bare 401, `/_auth/login` a 501). The §2.2 #8 precondition gap is closed: a browser-ish GET with login disabled answers 401 carrying the rendered login page (working "Log in with OIDC" button + disabled explanation + the `walhub config check` / `/setup` pointers) instead of the bare string; `GET /_auth/login` itself renders the same page (501) for browsers while API clients keep the plain status. Browser-login availability is advertised as `browser_login` + `login_url` in the discovery auth block (`GET /api/v1`) and in `/services/setup.json`, so the page chrome renders the login affordance only when it works and `/setup` refuses an incomplete trio through the same server-side validation on save (the SPA's client-side trio check in `web/src/lib/setup.js` was removed with D-WEB-15). Rationale (law 9): refuse-to-start was preferred over a degraded boot — a degraded mode that still serves a login page would need its own gate semantics, and #345 (visibility as read authority) already owns the "what can signed-out users read" question; this change only fixes *how a browser gets an identity* under current semantics. Shared gate chain (`Env.gate`, smart-HTTP, LFS, page `gated()`) untouched in behavior except the login path; bearer/token paths (static tokens work in oidc mode) unaffected.
+- **NEW (2026-09-11) — OIDC browser login is fail-closed and always has a login entry** (Forgejo #344): config validation refuses `auth.mode = "oidc"` without the full browser-login trio (`server.auth.session_secret` + `server.auth.oauth_client_id` + `server.auth.oauth_client_secret`), naming the missing keys — the previous pair-only check let a partially-configured instance boot into a dead state (every browser GET a bare 401, `/_auth/login` a 501). The §2.2 #8 precondition gap is closed: a browser-ish GET with login disabled answers 401 carrying the rendered login page (working "Log in with OIDC" button + disabled explanation + the `spindle config check` / `/setup` pointers) instead of the bare string; `GET /_auth/login` itself renders the same page (501) for browsers while API clients keep the plain status. Browser-login availability is advertised as `browser_login` + `login_url` in the discovery auth block (`GET /api/v1`) and in `/services/setup.json`, so the page chrome renders the login affordance only when it works and `/setup` refuses an incomplete trio through the same server-side validation on save (the SPA's client-side trio check in `web/src/lib/setup.js` was removed with D-WEB-15). Rationale (law 9): refuse-to-start was preferred over a degraded boot — a degraded mode that still serves a login page would need its own gate semantics, and #345 (visibility as read authority) already owns the "what can signed-out users read" question; this change only fixes *how a browser gets an identity* under current semantics. Shared gate chain (`Env.gate`, smart-HTTP, LFS, page `gated()`) untouched in behavior except the login path; bearer/token paths (static tokens work in oidc mode) unaffected.
 - **NEW (2026-09-11) — visibility is the read authority for repo surfaces** (Forgejo #345):
   §8.3 `require_read` on repo-scoped paths (smart-HTTP upload-pack, LFS reads, bundle lists,
   the JSON API lanes via 07 §13, SSH fetch via 17.6, repo page routes) resolves the identity
@@ -793,7 +793,7 @@ Hazard: keepalive ticker and event writer racing on the same `http.ResponseWrite
   `principalFromEmail` (§8.4 email policy) keeps every admission/flag rule on the
   verified email but returns `Principal{Name: <username>, Email: <email>}` — the
   username resolves through the `AuthService.UsernameResolver` hook (wired in
-  `cmd/walhub` to the identity registry; nil falls back to the pure
+  `cmd/spindle` to the identity registry; nil falls back to the pure
   `auth.DeriveUsername` base, which still satisfies "no @ in the name").
   Session/token wires keep carrying the EMAIL (existing sessions stay valid —
   law 5; the username re-resolves per request, stable via the alias), so
@@ -820,9 +820,9 @@ Hazard: keepalive ticker and event writer racing on the same `http.ResponseWrite
 
 - **NEW (2026-09-12) — post-login avatar hook** (Forgejo #376):
   `GET /_auth/callback` fires the `AvatarHook` seam after the session mint
-  (wired in `cmd/walhub` to the identity service's `EnsureAvatarAsync`;
+  (wired in `cmd/spindle` to the identity service's `EnsureAvatarAsync`;
   nil in setup-only/tests). The hook only enqueues — a per-principal
-  single-flight background generation (DiceBear rings on walhub-green since
+  single-flight background generation (DiceBear rings on spindle-green since
   #525 — constellation before; seed =
   email) that installs `users/<username>/avatar.svg` — so the login
   response never waits on rendering. Rationale: generation is local and

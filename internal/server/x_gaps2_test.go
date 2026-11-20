@@ -10,10 +10,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/crueber/walhub/internal/config"
-	"github.com/crueber/walhub/internal/git"
-	"github.com/crueber/walhub/internal/store"
-	"github.com/crueber/walhub/internal/wal"
+	"github.com/crueber/spindle/internal/config"
+	"github.com/crueber/spindle/internal/git"
+	"github.com/crueber/spindle/internal/store"
+	"github.com/crueber/spindle/internal/wal"
 )
 
 // failingStore wraps a store with injected Head/Get failures.
@@ -279,7 +279,7 @@ func TestOIDCCallbackNonLoopbackCookie(t *testing.T) {
 	}
 	tv := true
 	iss.idTokens <- iss.mint(t, map[string]any{
-		"aud": "walhub", "exp": time.Now().Add(time.Hour).Unix(),
+		"aud": "spindle", "exp": time.Now().Add(time.Hour).Unix(),
 		"email": "alice@example.com", "email_verified": tv, "nonce": nonce,
 	})
 	req := httptest.NewRequest("GET", "http://wal.example.com/_auth/callback?code=c&state="+state, nil)

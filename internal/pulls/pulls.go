@@ -59,10 +59,10 @@ import (
 	"sync"
 	"time"
 
-	"github.com/crueber/walhub/internal/config"
-	"github.com/crueber/walhub/internal/identity"
-	"github.com/crueber/walhub/internal/server/auth"
-	"github.com/crueber/walhub/internal/store"
+	"github.com/crueber/spindle/internal/config"
+	"github.com/crueber/spindle/internal/identity"
+	"github.com/crueber/spindle/internal/server/auth"
+	"github.com/crueber/spindle/internal/store"
 )
 
 // Task kinds (Seam 5; §5/§4/§7). (repo, kind) single-flight per
@@ -177,39 +177,39 @@ type Service struct {
 	Refs   RefPublisher
 	Closer IssueCloser
 	// Reviews is the 04-provided merge-time gate (docs/features/04 §6;
-	// see review.go). Wired in composition (cmd/walhub); nil skips it.
+	// see review.go). Wired in composition (cmd/spindle); nil skips it.
 	Reviews ReviewGate
 	// Checks is the 05-provided merge-time gate (docs/features/05 §6;
-	// see checks.go). Wired in composition (cmd/walhub); nil fails
+	// see checks.go). Wired in composition (cmd/spindle); nil fails
 	// closed only when a rule carries require_checks.
 	Checks ChecksGate
 	// Forks is the 07-provided fork counter (docs/features/07 §6).
-	// Wired in composition (cmd/walhub); nil skips the increment.
+	// Wired in composition (cmd/spindle); nil skips the increment.
 	Forks ForksCounter
 	// ForkExec performs the §7 manifest-sharing step (docs/features/03
-	// §7). Wired in composition (cmd/walhub) over the WAL registry;
+	// §7). Wired in composition (cmd/spindle) over the WAL registry;
 	// nil narrates the delegation (pre-#424 behavior, tests).
 	ForkExec ForkExecutor
 	// OwnerGate admits the fork target namespace (Forgejo #346: self or
-	// member org, host admin bypass). Wired in composition (cmd/walhub);
+	// member org, host admin bypass). Wired in composition (cmd/spindle);
 	// nil skips the check (legacy-open, tests).
 	OwnerGate OwnerGate
 	// AccessBoot materializes the child's access.json at fork time (the
 	// placeholder-create EnsureRepoAccess). Wired in composition
-	// (cmd/walhub); nil skips the write.
+	// (cmd/spindle); nil skips the write.
 	AccessBoot AccessBootstrapper
 	// Features reports the repo's resolved feature flags (Forgejo #522):
 	// StartFork refuses with ErrForbidden (→ 403) when the source repo's
 	// forks flag is off. Nil → all enabled; a declining hook (unreadable
 	// settings) also resolves all-on — display metadata must never
 	// break a write on a transient settings read (fail-open, the
-	// CollabCounts precedent). Wired by composition (cmd/walhub) over
+	// CollabCounts precedent). Wired by composition (cmd/spindle) over
 	// the WAL settings doc; tests substitute a fake.
 	Features func(ctx context.Context, owner, repo string) (config.ResolvedFeatures, bool)
 	Now      func() time.Time
 
 	// ServerID is the committer identity for merge commits
-	// ("walhub <server.identity_email>", default "walhub@localhost").
+	// ("spindle <server.identity_email>", default "spindle@localhost").
 	ServerID string
 
 	// Notify receives §8/P8 fan-out synchronously after each committed
@@ -224,7 +224,7 @@ type Service struct {
 
 // New builds a Service over st.
 func New(st store.ObjectStore, roles RoleService) *Service {
-	return &Service{Store: st, Roles: roles, Now: time.Now, ServerID: "walhub@localhost", flight: newFlightGroup(), tasks: newTaskTable()}
+	return &Service{Store: st, Roles: roles, Now: time.Now, ServerID: "spindle@localhost", flight: newFlightGroup(), tasks: newTaskTable()}
 }
 
 // nowUTC is the clock, UTC (RFC 3339 wire timestamps).
@@ -237,25 +237,25 @@ func (s *Service) nowUTC() time.Time {
 
 // committer splits ServerID ("name <email>") for commit-tree env.
 func (s *Service) committer() (name, email string) {
-	name, email = "walhub", s.ServerID
+	name, email = "spindle", s.ServerID
 	if i := strings.Index(s.ServerID, "<"); i >= 0 {
 		name = strings.TrimSpace(s.ServerID[:i])
 		email = strings.TrimSuffix(strings.TrimSpace(s.ServerID[i+1:]), ">")
 		if name == "" {
-			name = "walhub"
+			name = "spindle"
 		}
 		if email == "" {
-			email = "walhub@localhost"
+			email = "spindle@localhost"
 		}
 		return name, email
 	}
 	if strings.Contains(s.ServerID, "@") {
-		return "walhub", s.ServerID
+		return "spindle", s.ServerID
 	}
 	if s.ServerID != "" {
-		return s.ServerID, "walhub@localhost"
+		return s.ServerID, "spindle@localhost"
 	}
-	return "walhub", "walhub@localhost"
+	return "spindle", "spindle@localhost"
 }
 
 // --- key helpers (bucket-relative) -----------------------------------------

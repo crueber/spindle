@@ -10,7 +10,7 @@ import (
 	"regexp"
 	"strings"
 
-	"github.com/crueber/walhub/internal/policy"
+	"github.com/crueber/spindle/internal/policy"
 )
 
 // Sentinel errors (07 §2: mapped to plain-text statuses in http.go).

@@ -4,8 +4,8 @@
    http.ServeMux — see settings.go's ROUTE SHAPE note. */}}
 {{define "content"}}
 <div class="settings-page" id="settings-page" data-settings-tab="{{.Data.Tab}}">
-  <h2 class="mb-1 flex items-center gap-2 text-lg font-semibold">
-    <span class="muted font-normal">org</span> {{.Data.Org}}
+  <h2 class="mb-1 flex items-baseline gap-2 text-xl font-semibold">
+    <span class="eyebrow">org</span> <span class="mono">{{.Data.Org}}</span>
   </h2>
   {{if not .Data.CanManage}}
   <p class="muted mb-3 text-sm">read-only — org owner required to make changes.</p>
@@ -16,8 +16,8 @@
     {{end}}
   </nav>
 
-  {{if .Data.Notice}}<div class="mb-3 rounded-lg border border-emerald-300 bg-emerald-50 p-3 text-sm text-emerald-800 dark:border-emerald-900 dark:bg-emerald-950/60 dark:text-emerald-200">{{.Data.Notice}}</div>{{end}}
-  {{if .Data.Error}}<div class="mb-3 rounded-lg border border-red-300 bg-red-50 p-3 text-sm text-red-800 dark:border-red-900 dark:bg-red-950/60 dark:text-red-200" role="alert">{{.Data.Error}}</div>{{end}}
+  {{if .Data.Notice}}<div class="card mb-3 border-l-2 border-l-[var(--pd-ok)] p-3 text-sm">{{.Data.Notice}}</div>{{end}}
+  {{if .Data.Error}}<div class="card mb-3 border-l-2 border-l-[var(--pd-danger)] p-3 text-sm" role="alert">{{.Data.Error}}</div>{{end}}
 
   <div id="settings-panel">
     {{if eq .Data.Tab "profile"}}{{template "settings-org-profile" .Data}}{{end}}

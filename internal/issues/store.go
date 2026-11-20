@@ -8,7 +8,7 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/crueber/walhub/internal/store"
+	"github.com/crueber/spindle/internal/store"
 )
 
 // This file owns raw bucket I/O: the P2 counter, the P3 two-step, the P4

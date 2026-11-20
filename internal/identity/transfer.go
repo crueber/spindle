@@ -31,8 +31,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/crueber/walhub/internal/git"
-	"github.com/crueber/walhub/internal/store"
+	"github.com/crueber/spindle/internal/git"
+	"github.com/crueber/spindle/internal/store"
 )
 
 // manifestName is the repo-existence signal (the same probe the invite

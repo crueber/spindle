@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/crueber/walhub/internal/store"
+	"github.com/crueber/spindle/internal/store"
 )
 
 // Second edge file: read/index/token/gate failure branches, codec

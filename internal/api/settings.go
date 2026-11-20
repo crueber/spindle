@@ -12,8 +12,8 @@ import (
 
 	"github.com/BurntSushi/toml"
 
-	"github.com/crueber/walhub/internal/config"
-	"github.com/crueber/walhub/internal/git"
+	"github.com/crueber/spindle/internal/config"
+	"github.com/crueber/spindle/internal/git"
 )
 
 // --- settings endpoints (D24, 07_api.md §11) -----------------------------------------

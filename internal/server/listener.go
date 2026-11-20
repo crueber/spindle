@@ -15,7 +15,7 @@ import (
 // This file is the §10.4 listener: plain TCP with TCP_NODELAY per connection
 // plus h2c (HTTP/2 prior knowledge) + HTTP/1.1 via x/net/http2/h2c wrapped
 // around the chi router. TLS termination belongs on the reverse proxy in
-// front of walhub (#165) — the server never wraps the listener.
+// front of spindle (#165) — the server never wraps the listener.
 
 func writeFileAtomic(path string, body []byte) error {
 	tmp := path + ".tmp"

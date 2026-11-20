@@ -12,7 +12,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/crueber/walhub/internal/store"
+	"github.com/crueber/spindle/internal/store"
 )
 
 // Image fixtures: magic bytes only (the sniffer never looks past the

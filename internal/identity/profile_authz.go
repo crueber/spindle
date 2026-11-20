@@ -1,7 +1,7 @@
 // profile_authz.go — the OwnerEditor seam for owner profiles (Forgejo #234).
 //
 // api.OwnerEditor is defined in internal/api (this package never imports api,
-// law 8); the composition wires *Service in as apiEnv.OwnerEdit (cmd/walhub).
+// law 8); the composition wires *Service in as apiEnv.OwnerEdit (cmd/spindle).
 // Core already grants host admins and name-matched principals; this adds the
 // org-owner role: a principal holding role owner in orgs/<org>/members.json
 // may PUT owners/<org>/profile.json.
@@ -21,7 +21,7 @@ package identity
 import (
 	"context"
 
-	"github.com/crueber/walhub/internal/server/auth"
+	"github.com/crueber/spindle/internal/server/auth"
 )
 
 // CanEditOwnerProfile implements the org-owner half of the profile PUT rule.

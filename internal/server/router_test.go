@@ -6,8 +6,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/crueber/walhub/internal/config"
-	"github.com/crueber/walhub/internal/store"
+	"github.com/crueber/spindle/internal/config"
+	"github.com/crueber/spindle/internal/store"
 	"os"
 )
 
@@ -115,13 +115,13 @@ func TestSetupAPISaveRoundTrip(t *testing.T) {
 	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `"saved":true`) {
 		t.Fatalf("put status = %d body = %s", rec.Code, rec.Body.String())
 	}
-	if _, err := osStat(dataDir + "/walhub.toml"); err != nil {
-		t.Fatalf("walhub.toml not written: %v", err)
+	if _, err := osStat(dataDir + "/spindle.toml"); err != nil {
+		t.Fatalf("spindle.toml not written: %v", err)
 	}
 }
 
 func TestSetupTokenEscapeHatch(t *testing.T) {
-	t.Setenv("WALHUB_SETUP_TOKEN", "sekrit")
+	t.Setenv("SPINDLE_SETUP_TOKEN", "sekrit")
 	cfg := config.Defaults()
 	cfg.Server.Auth.Mode = "token" // normally admin-required
 	s := New(Options{Config: cfg, Store: newFakeStore(), Engine: &fakeEngine{},

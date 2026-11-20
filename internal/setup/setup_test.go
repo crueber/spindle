@@ -21,7 +21,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/crueber/walhub/internal/config"
+	"github.com/crueber/spindle/internal/config"
 )
 
 func schemaKey(t *testing.T, groups []Group, key string) Field {
@@ -175,7 +175,7 @@ func TestFmtAnyAndSchemaSkip(t *testing.T) {
 // --- coercion -------------------------------------------------------------
 
 // TestCoerceSpellings pins the operator-facing spellings: the same ones the
-// TOML file and WALHUB__ env overlay accept (sizes with binary units,
+// TOML file and SPINDLE__ env overlay accept (sizes with binary units,
 // durations with d/w, floats, unsigned counters) plus struct-slice TOML
 // fragments.
 func TestCoerceSpellings(t *testing.T) {
@@ -607,7 +607,7 @@ func TestSaveWritesAtomicallyAndDiffsRestart(t *testing.T) {
 	}
 	path := filepath.Join(dataDir, config.ConfigFileName)
 	if _, err := os.Stat(path); err != nil {
-		t.Fatalf("walhub.toml missing: %v", err)
+		t.Fatalf("spindle.toml missing: %v", err)
 	}
 	if _, err := os.Stat(path + ".tmp"); !os.IsNotExist(err) {
 		t.Fatalf("tmp file left behind: %v", err)
@@ -742,7 +742,7 @@ func TestProbeAuth(t *testing.T) {
 		"scopes_supported":                      []string{"openid", "email"},
 		"id_token_signing_alg_values_supported": []string{"RS256"},
 	}
-	probe, errs := ProbeAuth(idp.URL+"/", " walhub-web ", " http://localhost:8080/_auth/callback ")
+	probe, errs := ProbeAuth(idp.URL+"/", " spindle-web ", " http://localhost:8080/_auth/callback ")
 	if len(errs) != 0 {
 		t.Fatalf("ok probe errors = %v", errs)
 	}

@@ -6,8 +6,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/crueber/walhub/internal/cachepolicy"
-	"github.com/crueber/walhub/internal/git"
+	"github.com/crueber/spindle/internal/cachepolicy"
+	"github.com/crueber/spindle/internal/git"
 )
 
 // TestCacheClassContract is the Forgejo #382 systemic guard for the
