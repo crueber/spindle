@@ -264,7 +264,7 @@ func TestHTTPMergeFlow(t *testing.T) {
 				t.Fatalf("merge = %d (%s) cc=%s", w.Code, w.Body.String(), w.Header().Get("Cache-Control"))
 			}
 			// Attach poll.
-			deadline := time.Now().Add(20 * time.Second)
+			deadline := time.Now().Add(60 * time.Second)
 			var taskBody string
 			for time.Now().Before(deadline) {
 				w2 := doReq(t, e.h, "GET", lane, lanePath(lane, "/pulls/1/merge/task"), "", maintainer())

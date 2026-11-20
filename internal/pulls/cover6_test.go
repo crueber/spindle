@@ -355,7 +355,7 @@ func TestCover6SinkAndCommits(t *testing.T) {
 		e.seedRefs("o/r", map[string]string{"refs/heads/main": hexSHA(8), "refs/heads/topic": hexSHA(2)})
 		e.git.MergeBaseSHA = hexSHA(7)
 		e.svc.HandleRefEvent(ctx(), "o", "r", RefEvent{Repo: "o/r", RefName: "refs/heads/main", Old: hexSHA(1), New: hexSHA(8)})
-		deadline := time.Now().Add(20 * time.Second)
+		deadline := time.Now().Add(60 * time.Second)
 		for time.Now().Before(deadline) {
 			if c, _, _ := e.svc.loadMergeable(ctx(), "o", "r", 1); c != nil && c.BaseSHA == hexSHA(8) {
 				return

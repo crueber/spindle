@@ -103,10 +103,12 @@ For an **S3-backed store** (rustfs/MinIO/GCS), see [`compose.yaml`](compose.yaml
 ## Development
 
 ```sh
+make build     # stylesheet + islands + SDK, then the static binary
+make web       # just the UI assets (app.css, ui.js, vendored htmx, repos.js)
 make ci        # vet + fast tests + race + ≥95% coverage per package — the merge gate
 make contract  # store contract suite (memory + filesystem; S3 via `make dev-store`)
 make e2e       # real-git end-to-end flows
-make test-web  # node --test over the headless JS modules
+make test-web  # node --test over the island and SDK logic modules
 make image     # OCI image
 ```
 

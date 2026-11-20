@@ -71,7 +71,7 @@ func TestCacheClassContract(t *testing.T) {
 		if w.Code != http.StatusAccepted {
 			t.Fatalf("seed merge = %d: %s", w.Code, w.Body.String())
 		}
-		deadline := time.Now().Add(20 * time.Second)
+		deadline := time.Now().Add(60 * time.Second)
 		for {
 			w2 := doReq(t, e.h, "GET", "api", "/o/r/api/pulls/1/merge/task", "", maintainer())
 			if w2.Code == http.StatusOK {

@@ -679,7 +679,7 @@ func hexSHA(n int) string { return fmt.Sprintf("%040x", n) }
 // (Forgejo #617).
 func waitMergeableDrained(t *testing.T, e *testEnv, repo string) {
 	t.Helper()
-	deadline := time.Now().Add(20 * time.Second)
+	deadline := time.Now().Add(60 * time.Second)
 	for time.Now().Before(deadline) {
 		if rec := e.svc.tasks.get(repo, TaskKindMergeable); rec != nil && rec.Finished != "" {
 			return

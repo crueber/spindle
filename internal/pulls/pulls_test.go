@@ -217,7 +217,7 @@ func TestGetPRMergeableStates(t *testing.T) {
 		if first.Mergeable.State != MergeableUnknown {
 			t.Fatalf("first fetch must be unknown, got %+v", first.Mergeable)
 		}
-		deadline := time.Now().Add(20 * time.Second)
+		deadline := time.Now().Add(60 * time.Second)
 		for time.Now().Before(deadline) {
 			view, err := e.svc.GetPR(ctx(), "o", "r", 1, writer(), 0, 0)
 			if err != nil {

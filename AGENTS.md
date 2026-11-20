@@ -58,13 +58,16 @@ Performance claims (scale, latency shape) are **evidence-backed**: measured entr
 
 - **Env overlay keys are exact paths.** `WALHUB__STORE__S3__ENDPOINT`, never `WALHUB__STORE__ENDPOINT` — a missing segment is recorded as an unknown key and silently ignored; `walhub config dump` (or `check`) is how you catch it. rustfs/MinIO need `store.s3.force_path_style = true` (virtual-host addressing 403s); healthchecks pin `127.0.0.1` (busybox `localhost` = `::1`, rustfs binds IPv4); pnpm 11 needs `allowBuilds: { esbuild: true }` in `web/pnpm-workspace.yaml` (the package.json `pnpm` field is dead). The compose examples encode all of this.
 - **`--data-dir` flag syncing must preserve the env overlay.** It re-points only the flag-derived paths (`DataDir`, `Store.Root`, `Cache.Dir`); re-deriving `FirstRunDefaults` there silently discarded every `WALHUB__*` override on zero-config boots (shipped and reverted once).
-- **Setup values round-trip through the overrides channel.** The setup API accepts exactly the spellings the TOML file accepts: sizes (`64MiB`), `d`/`w` durations, floats, unsigned counters, and `[[name]]` TOML fragments for struct slices (`bundles.strategy`, `server.auth.tokens`) decoded by the field's toml name. `configCoerce` must use the shared `config` parsers — a UI save failing "not an int"/"unsupported type" means the coerce path regressed.
-- **Schema lookups are by key name, never by section group.** Group layout changes (auth was split out of `server`); `effectiveValue`/`restartKeys` and any new schema consumer match keys directly, or `requires_restart` and diffs silently pollute with keys that did not change.
-- **Server values render in the spec spelling** (`64GiB`, `1h` — `fmtSpecSize`/`fmtSpecDuration`); the setup page's editable values and its per-field examples (`FIELDS[].ex/note`) share one spelling, and every example is tested to validate (client) and accepted by `/api/v1/setup/test` (server).
+- **Setup values round-trip through the overrides channel.** The setup API accepts exactly the spellings the TOML file accepts: sizes (`64MiB`), `d`/`w` durations, floats, unsigned counters, and `[[name]]` TOML fragments for struct slices (`bundles.strategy`, `server.auth.tokens`) decoded by the field's toml name. `setup.Coerce` must use the shared `config` parsers — a page save failing "not an int"/"unsupported type" means the coerce path regressed.
+- **Schema lookups are by key name, never by section group.** Group layout changes (auth was split out of `server`); `setup.EffectiveValue`/`setup.RestartKeys` and any new schema consumer match keys directly, or `requires_restart` and diffs silently pollute with keys that did not change.
+- **Server values render in the spec spelling** (`64GiB`, `1h` — `fmtSpecSize`/`fmtSpecDuration`); the setup page's editable values and its per-field metadata (`webui.settingsFieldMeta`, the successor of the old FIELDS table) share one spelling, and every example is tested to validate in the page and accepted by `/api/v1/setup/test` (server).
 - **`node --test`: pass files or globs, never a directory.** Node 22 executes a directory positional as a module (`Cannot find module …/web/test`); Node 24 accepts both. All entry points (`make test-web`, the CI workflow, the published GitHub workflow) use `web/test/unit/*.test.js`.
 - **Tests that spawn git pin their identity.** Annotated tags and `commit-tree` need an author/committer; runners and containers have no global git config. `TestMain` in `internal/git` and `internal/maintain` sets `GIT_AUTHOR_*`/`GIT_COMMITTER_*` for spawned subprocesses only. Reproduce environment gaps with `env -i PATH=… HOME=/tmp/nohome go test …`.
 - **Fresh clones compile.** `web/dist/.keep` is tracked because `go:embed all:dist` fails on a missing directory — never gitignore it away, and build the web BEFORE `go test` in CI (the embed shell is what `/setup` 200s on).
 - **Development builds and publishing are separate steps.** Every pull request and push to `main` runs `.github/workflows/ci.yml` (the full gate) and publishes the image `ghcr.io/crueber/walhub:latest` (plus the commit SHA, and the version on `v*` tags). Keep the package name stable: it is the pull path users have. README "Run with docker compose" documents pulling.
+  Publishing is the button, not a mirror: `bump` (patch/minor/major) or `bump: none` + an exact `tag`
+  (Weave's process); a publish whose exported tree is unchanged produces a tag only, never an empty
+  commit.
 - **The publish tree is the tracked set — `.gitignore` must not subtract from it.** The published
   copy is `git archive HEAD` re-committed under a fresh `git init`, so an ignore rule that matches a
   tracked path silently drops it (the stale `covergate/` rule removed a whole package from a
@@ -110,7 +113,8 @@ cmd/walhub          one binary; no subcommand = serve; roles by config (serve/ma
 internal/store      ObjectStore interface, protobuf+framing codecs, filesystem/S3/GCS/memory backends, leases
 internal/wal        the WAL engine: sync levels, publish/CAS, checkpoints, replay, remote reader, tasks
 internal/git        the git subprocess layer (ingest, refs, pkt-line, receive/upload-pack, repack)
-internal/server     HTTP (chi): middleware, routing, git/LFS/static endpoints, auth, setup recipes
+internal/server     HTTP (chi): middleware, routing, git/LFS/static endpoints, auth, the setup API shell,
+                    and the page-provider mount (bind_ui.go)
 internal/api        JSON API + SSE envelope + render caches (the /{o}/{r}/api[-browser] surface)
 internal/setup      bootstrap + setup: first-run defaults, config schema for the UI, validated save
 internal/bundle     bundle-uri scheduler: slots, chains, lists, D17
@@ -134,8 +138,8 @@ web/                templates live in internal/webui; web/src carries islands/ (
                     SSE ext), app.css (Tailwind v4, the design system) and the dependency-free SDK
                     esbuild-bundled to web/dist/repos.js. `make web` builds css + islands + vendor +
                     SDK. The binary embeds dist/: /_ui/app.css, /_ui/ui.js, /_ui/htmx*.js,
-                    /_ui/assets/* (immutable), /_ui/concepts/*.gif, /repos.js (module MIME is
-                    load-bearing)
+                    /_ui/assets/* (immutable; reserved, nothing hashed ships today), /_ui/concepts/*.gif,
+                    /repos.js (module MIME is load-bearing)
 Dockerfile          three-stage image (web build → static Go binary → alpine+git runtime, nonroot)
 compose*.y(ml)      compose.standalone.yml = walhub alone (filesystem store); compose.yaml = walhub +
                     rustfs + create-bucket (the S3 rig, also `make dev-store`); both build from source

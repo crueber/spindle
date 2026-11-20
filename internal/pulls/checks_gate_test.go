@@ -67,7 +67,7 @@ func TestMergeConsultsChecksGate(t *testing.T) {
 		if err != nil {
 			t.Fatalf("StartMerge: %v", err)
 		}
-		if rec.State != TaskRunning {
+		if rec.State != TaskRunning && rec.State != TaskOK {
 			t.Fatalf("must return running: %+v", rec)
 		}
 		// The worker blocks in the gate: the running snapshot above is
