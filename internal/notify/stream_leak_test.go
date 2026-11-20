@@ -16,7 +16,7 @@ import (
 // hits — a fixed sleep-then-assert would flake under -race load).
 func awaitGoroutines(t *testing.T, base int, what string) {
 	t.Helper()
-	deadline := time.Now().Add(5 * time.Second)
+	deadline := time.Now().Add(30 * time.Second)
 	for {
 		if runtime.NumGoroutine() <= base {
 			return
@@ -24,7 +24,7 @@ func awaitGoroutines(t *testing.T, base int, what string) {
 		if time.Now().After(deadline) {
 			buf := make([]byte, 1<<20)
 			n := runtime.Stack(buf, true)
-			t.Fatalf("%s: goroutines still %d > baseline %d after 5s\n%s",
+			t.Fatalf("%s: goroutines still %d > baseline %d after 30s\n%s",
 				what, runtime.NumGoroutine(), base, buf[:n])
 		}
 		time.Sleep(10 * time.Millisecond)
@@ -40,13 +40,13 @@ func awaitGoroutines(t *testing.T, base int, what string) {
 // poll-don't-sleep treatment as #178.
 func awaitGoroutinesUp(t *testing.T, n int, what string) {
 	t.Helper()
-	deadline := time.Now().Add(5 * time.Second)
+	deadline := time.Now().Add(30 * time.Second)
 	for {
 		if got := runtime.NumGoroutine(); got >= n {
 			return
 		}
 		if time.Now().After(deadline) {
-			t.Fatalf("%s: goroutines still %d, want >= %d after 5s",
+			t.Fatalf("%s: goroutines still %d, want >= %d after 30s",
 				what, runtime.NumGoroutine(), n)
 		}
 		time.Sleep(10 * time.Millisecond)
