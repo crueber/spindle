@@ -57,6 +57,10 @@ type RepoFeatures struct {
 	Forks    *bool `toml:"forks"`
 	Watch    *bool `toml:"watch"`
 	Star     *bool `toml:"star"`
+	// Packages is the OCI registry toggle (docs/features/14 §7): off ⇒ the
+	// tab disappears and every /v2/<o>/<r>/* route answers 404 (fail closed,
+	// like the other flags). Default on, like its siblings.
+	Packages *bool `toml:"packages"`
 }
 
 // ResolvedFeatures are the effective flags: plain bools, always fully
@@ -70,11 +74,12 @@ type ResolvedFeatures struct {
 	Forks    bool `json:"forks"`
 	Watch    bool `json:"watch"`
 	Star     bool `json:"star"`
+	Packages bool `json:"packages"`
 }
 
 // AllFeatures is the zero-migration default: every feature enabled.
 func AllFeatures() ResolvedFeatures {
-	return ResolvedFeatures{Issues: true, Pulls: true, Releases: true, Forks: true, Watch: true, Star: true}
+	return ResolvedFeatures{Issues: true, Pulls: true, Releases: true, Forks: true, Watch: true, Star: true, Packages: true}
 }
 
 // Resolve maps the [features] section onto effective flags: nil section
@@ -102,16 +107,21 @@ func (f *RepoFeatures) Resolve() ResolvedFeatures {
 	if f.Star != nil {
 		out.Star = *f.Star
 	}
+	if f.Packages != nil {
+		out.Packages = *f.Packages
+	}
 	return out
 }
 
-// ETagBits renders the resolved flags as six fixed-order 0/1 chars
-// (issues, pulls, releases, forks, watch, star): the short summary-ETag
-// suffix covering a settings-only flip with no ref move (the #235/#505
-// suffix discipline). Fixed order and fixed length — always six chars,
-// so the suffix is stable and greppable.
+// ETagBits renders the resolved flags as seven fixed-order 0/1 chars
+// (issues, pulls, releases, forks, watch, star, packages): the short
+// summary-ETag suffix covering a settings-only flip with no ref move (the
+// #235/#505 suffix discipline). Fixed order and fixed length — always seven
+// chars, so the suffix is stable and greppable. Packages joined the set with
+// docs/features/14 (the 2026-11-20 addition): a registry toggle must bust the
+// cache or the tab stays hidden behind the SWR window.
 func (f ResolvedFeatures) ETagBits() string {
-	bits := []byte{'1', '1', '1', '1', '1', '1'}
+	bits := []byte{'1', '1', '1', '1', '1', '1', '1'}
 	if !f.Issues {
 		bits[0] = '0'
 	}
@@ -129,6 +139,9 @@ func (f ResolvedFeatures) ETagBits() string {
 	}
 	if !f.Star {
 		bits[5] = '0'
+	}
+	if !f.Packages {
+		bits[6] = '0'
 	}
 	return string(bits)
 }

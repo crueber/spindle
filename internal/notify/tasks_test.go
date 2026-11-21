@@ -32,8 +32,11 @@ func TestOverflowDefersToFanoutTask(t *testing.T) {
 	if len(payload.Recipients) != MaxSyncRecipients+10 {
 		t.Fatalf("payload recipients = %d", len(payload.Recipients))
 	}
-	// …and the fanout task drains the full set (poll: background task).
+	// …and the fanout task drains the full set and records its terminal state
+	// (poll both: the delivery loop can finish before the background task's
+	// finished-record write lands, so a single post-loop read is a race).
 	deadline := time.Now().Add(10 * time.Second)
+	var rec *TaskRecord
 	for {
 		done := true
 		for _, p := range recips {
@@ -42,17 +45,17 @@ func TestOverflowDefersToFanoutTask(t *testing.T) {
 				break
 			}
 		}
-		if done {
+		rec = x.svc.TaskStatus("acme/repo", TaskKindFanout)
+		if done && rec != nil && rec.State == TaskFinished {
 			break
 		}
 		if time.Now().After(deadline) {
-			t.Fatal("fanout task did not drain the overflow set")
+			if !done {
+				t.Fatal("fanout task did not drain the overflow set")
+			}
+			t.Fatalf("fanout record = %+v", rec)
 		}
 		time.Sleep(10 * time.Millisecond)
-	}
-	rec := x.svc.TaskStatus("acme/repo", TaskKindFanout)
-	if rec == nil || rec.State != TaskFinished {
-		t.Fatalf("fanout record = %+v", rec)
 	}
 	// Tray SSE still published per completed recipient (bus is live-only;
 	// here we assert the objects + index, frames covered in stream tests).

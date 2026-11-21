@@ -607,6 +607,45 @@ Both helpers run under `Pool.Run` with a 900 s timeout per fetch batch; stdin/st
 `credential.helper` argv order is significant (clear-then-set). The follow scratch is shared per repo —
 serialized by the same repo mutex as maintenance (doc 10 owns it).
 
+### 11.3 Source archives (`git archive`, PLAN-V1 WP3.1)
+
+Served by `internal/archive` (`GET|HEAD /{o}/{r}/archive/<ref>.tar.gz|.zip`), one streamed subprocess per
+request under a dedicated bounded pool (never the control-plane pool):
+
+```
+git rev-parse --verify --quiet --end-of-options <ref>^{tree}     # tree id ⇒ ETag
+git archive --format=tar --prefix=<repo>/ <ref>^{tree}           # .tar.gz lane (no flags)
+git archive --format=zip -0 --prefix=<repo>/ <ref>^{tree}        # .zip lane (-0 = store, no deflate)
+```
+
+`<ref>` is a branch, tag, or full 40/64-hex commit; slashes in refs arrive as extra URL path segments and
+are re-joined before resolution; the ref is validated (no leading `-`, no refname metacharacters, no
+`..`/`@{`/`//`) and `--end-of-options` closes the option-injection hole. The ETag is
+`"<tree-id>-<format>"`, so two refs naming the same tree revalidate against each other. Tar output is
+byte-identical to `git archive` run locally against the same tree (commit mtime is the entry mtime). Zip
+output is also byte-identical to `git archive --format=zip -0` locally on the same git build; `-0` is the
+one flag difference from a hand-run `git archive --format=zip` (which deflates), chosen so the bytes do not
+depend on the zlib compressor version and the server spends no CPU compressing an archive that is already
+incompressible at the transfer layer. Streaming means no `Content-Length` and no `Range`: archives are
+generated, not stored (law 4 — a derived stream is not state).
+
+### 11.4 Tag listing (`for-each-ref`, PLAN-V1 WP4.1)
+
+The `/tags` page and `GET …/api/tags` read one spawn per request:
+
+```
+git for-each-ref --sort=-creatordate \
+  --format=%(refname:strip=2)%09%(objectname)%09%(*objectname)%09%(creatordate:iso-strict)%09%(authorname)%09%(taggername) \
+  refs/tags
+```
+
+Fields are tab-separated (refnames cannot contain tabs). `%(*objectname)` is empty for a lightweight tag
+(the target is `%(objectname)`); for an annotated tag it is the peeled commit and `%(objectname)` is the
+tag object. `creatordate` is the tagger date for annotated tags and the commit date for lightweight ones;
+`authorname` follows the same rule (annotated tags carry an empty `authorname`; the `taggername` field is the fallback). Tag deletion is `refs/tags/<name>` old → zero through the ordinary WAL
+REF_UPDATE publish (CAS old-oid; a moved tag is a 409, never a blind delete).
+
+
 ## 12. Import clone + scratch ingest (docs/features/10)
 
 The import task (`internal/repoimport`) clones the source into task
@@ -676,6 +715,25 @@ silent spinners — law 7).
 
 New keys (`git.ingest_timeout`, `git.connectivity_timeout`, `git.max_git_procs`) are Go-only additions —
 listed for doc 11; Rust-compat keys keep their names verbatim.
+
+## 14. Threads workflow reads (docs/features/15, feature-owned)
+
+`internal/threads` reads workflow files at a commit from the repository's serving copy (no
+worktree, no checkout, read-only). Exact argv (run in the synced git dir, `GIT_DIR` set, ctx
+timeout, bounded stdout — 1 MiB + 1, stderr tail 8 KiB, own bounded semaphore of
+`4 × GOMAXPROCS`; a non-zero exit is the not-found class, an exec/timeout failure is 503):
+
+```
+git ls-tree -z --name-only -r <commit> -- .spindle/workflows
+git show <commit>:<path>
+git rev-parse --verify --quiet <ref>^{commit}
+```
+
+`-r` is required: `ls-tree` on a directory prints the directory itself, not its children. Only
+direct children of `.spindle/workflows` with `.yml`/`.yaml` extensions are parsed (nested files
+and other forges' directories are ignored). The `<commit>:<path>` form rejects paths containing
+`:` (ambiguous with the tree-ish separator). These calls are control-plane, event-rate reads —
+never on a git hot path — and they never write a ref, object, or worktree.
 
 ## Decisions & deviations from the Rust design
 

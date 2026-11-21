@@ -314,6 +314,7 @@ type assetWire struct {
 	ContentType        string `json:"content_type"`
 	UploadedAt         string `json:"uploaded_at"`
 	Uploader           string `json:"uploader"`
+	Downloads          int64  `json:"downloads"`
 	BrowserDownloadURL string `json:"browser_download_url"`
 }
 
@@ -337,13 +338,14 @@ func downloadURL(owner, repo, tag, name string) string {
 		url.PathEscape(tag) + "/assets/" + url.PathEscape(name)
 }
 
-func wireRelease(owner, repo string, r *Release) releaseWire {
+func wireRelease(owner, repo string, r *Release, counts map[string]int64) releaseWire {
 	assets := make([]assetWire, 0, len(r.Assets))
 	for _, a := range r.Assets {
 		assets = append(assets, assetWire{
 			Name: a.Name, Size: a.Size, SHA256: a.SHA256,
 			ContentType: a.ContentType, UploadedAt: a.UploadedAt,
 			Uploader:           a.Uploader,
+			Downloads:          counts[a.Name],
 			BrowserDownloadURL: downloadURL(owner, repo, r.Tag, a.Name),
 		})
 	}
@@ -375,9 +377,10 @@ func (h *Handler) listReleases(w http.ResponseWriter, r *http.Request, owner, re
 	}
 	wire := make([]releaseWire, 0, len(rels))
 	var etagParts []string
-	for _, h := range rels {
-		wire = append(wire, wireRelease(owner, repo, h.rel))
-		etagParts = append(etagParts, h.rel.Tag+"/"+string(h.ver))
+	for _, row := range rels {
+		counts := h.Svc.AssetDownloads(r.Context(), owner, repo, row.rel.Tag)
+		wire = append(wire, wireRelease(owner, repo, row.rel, counts))
+		etagParts = append(etagParts, row.rel.Tag+"/"+string(row.ver))
 	}
 	writeCached(w, r, ccMutable, listETag(etagParts), http.StatusOK,
 		map[string]any{"releases": wire, "more": more})
@@ -395,7 +398,7 @@ func (h *Handler) latestRelease(w http.ResponseWriter, r *http.Request, owner, r
 		writeErr(w, err)
 		return
 	}
-	writeCached(w, r, ccMutable, string(ver), http.StatusOK, wireRelease(owner, repo, rel))
+	writeCached(w, r, ccMutable, string(ver), http.StatusOK, wireRelease(owner, repo, rel, h.Svc.AssetDownloads(r.Context(), owner, repo, rel.Tag)))
 }
 
 func (h *Handler) getRelease(w http.ResponseWriter, r *http.Request, owner, repo string, p auth.Principal, tag string) {
@@ -404,10 +407,10 @@ func (h *Handler) getRelease(w http.ResponseWriter, r *http.Request, owner, repo
 		writeErr(w, err)
 		return
 	}
-	writeCached(w, r, ccMutable, string(ver), http.StatusOK, wireRelease(owner, repo, rel))
+	writeCached(w, r, ccMutable, string(ver), http.StatusOK, wireRelease(owner, repo, rel, h.Svc.AssetDownloads(r.Context(), owner, repo, rel.Tag)))
 }
 
-var putReleaseFields = map[string]bool{"name": true, "body": true, "draft": true, "prerelease": true}
+var putReleaseFields = map[string]bool{"name": true, "body": true, "draft": true, "prerelease": true, "target": true}
 
 func (h *Handler) putRelease(w http.ResponseWriter, r *http.Request, owner, repo string, p auth.Principal, tag string) {
 	var in ReleaseInput
@@ -423,7 +426,7 @@ func (h *Handler) putRelease(w http.ResponseWriter, r *http.Request, owner, repo
 	if created {
 		status = http.StatusCreated
 	}
-	writeJSON(w, status, wireRelease(owner, repo, rel))
+	writeJSON(w, status, wireRelease(owner, repo, rel, h.Svc.AssetDownloads(r.Context(), owner, repo, rel.Tag)))
 }
 
 // matchToken unwraps one If-Match token ("" = no constraint; "*" passes
@@ -602,6 +605,10 @@ func (h *Handler) serveAsset(w http.ResponseWriter, r *http.Request, owner, repo
 			return
 		}
 		h.streamBytes(w, r, key, store.GetOptions{})
+		// WP3.2: a full download bumps the per-asset counter (one CAS object
+		// per release), best-effort — never a status change, never on HEAD,
+		// 304, or a range read.
+		_ = h.Svc.BumpDownload(r.Context(), owner, repo, tag, name)
 		return
 	}
 	start, end, ok := parseRange(rng, size)

@@ -40,6 +40,21 @@ type GitRunner interface {
 	// PackObject packs one object via `git pack-objects --stdout`
 	// (failure ⇒ ErrUnavailable-class → 5xx, nothing published).
 	PackObject(ctx context.Context, dir, oid string) ([]byte, error)
+	// ListTagRefs lists tag rows newest-creator-date-first (name, tag
+	// object, peeled commit, creator date, creator name):
+	// `git for-each-ref --sort=-creatordate --format=… refs/tags`
+	// (04_git.md §11.4).
+	ListTagRefs(ctx context.Context, dir string) ([]TagRef, error)
+}
+
+// TagRef is one for-each-ref row (the tags page's data source).
+type TagRef struct {
+	Name      string
+	Object    string // tag object oid for annotated tags, commit oid otherwise
+	Commit    string // peeled commit oid
+	CreatedAt string // %(creatordate:iso-strict)
+	Author    string // %(authorname): tagger for annotated, committer otherwise
+	Annotated bool
 }
 
 // RepoDirs resolves a repo to its synced local git dir (production syncs
@@ -63,6 +78,10 @@ type RefPublisher interface {
 	// carries the tag object to every replica (a REF_UPDATE-only publish
 	// would advertise a ref whose object replicas lack).
 	CreateAnnotatedTag(ctx context.Context, repo, name, tagOid, peeled string, pack []byte, meta map[string]string) error
+	// DeleteTag publishes refs/tags/<name> old → zero (CAS delete: a moved
+	// tag fails the old-oid check, never a blind delete of someone else's
+	// move).
+	DeleteTag(ctx context.Context, repo, name, oldOid string, meta map[string]string) error
 }
 
 // Service is the tags store client: validation, policy, and the publish
@@ -78,6 +97,9 @@ type Service struct {
 	Dirs  RepoDirs
 	Refs  RefPublisher
 	Now   func() time.Time
+	// ReleaseExists gates DeleteTag on the release-backed refusal (WP4.2;
+	// nil skips the check — composition always wires it).
+	ReleaseExists ReleaseExists
 }
 
 // now renders the clock (pinneable in tests).
@@ -391,4 +413,126 @@ func (s *Service) requireRole(ctx context.Context, owner, repo string, p auth.Pr
 		return fmt.Errorf("%w", ErrUnauthorized)
 	}
 	return fmt.Errorf("%w: need %s", ErrForbidden, want)
+}
+
+// --- tags page + delete (PLAN-V1 WP4) ---------------------------------------
+
+// TagEntry is one /tags page row: the tag, its resolved commit, the creator
+// stamp git records, and whether a release backs it (a release-backed tag is
+// refused by DeleteTag — deleting it would strand the release's snapshot).
+type TagEntry struct {
+	Name      string `json:"name"`
+	Commit    string `json:"commit"`
+	Object    string `json:"object,omitempty"`
+	Date      string `json:"date"`
+	Author    string `json:"author"`
+	Annotated bool   `json:"annotated"`
+	Release   bool   `json:"release"`
+}
+
+// ListTagEntries lists refs/tags for the tags page (read gate). A repo with no
+// tags is an empty list, not an error. Git unwired is 503.
+func (s *Service) ListTagEntries(ctx context.Context, owner, repo string, p auth.Principal) ([]TagEntry, error) {
+	if err := s.requireRole(ctx, owner, repo, p, string(identity.RoleRead)); err != nil {
+		return nil, err
+	}
+	if s.Git == nil || s.Dirs == nil {
+		return nil, fmt.Errorf("%w: tag listing unavailable", ErrUnavailable)
+	}
+	dir, err := s.Dirs.Dir(ctx, repoName(owner, repo))
+	if err != nil {
+		return nil, fmt.Errorf("%w: %v", ErrUnavailable, err)
+	}
+	refs, err := s.Git.ListTagRefs(ctx, dir)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]TagEntry, 0, len(refs))
+	for _, r := range refs {
+		entry := TagEntry{Name: r.Name, Commit: r.Commit, Object: r.Object,
+			Date: r.CreatedAt, Author: r.Author, Annotated: r.Annotated}
+		if s.ReleaseExists != nil {
+			if ok, rerr := s.ReleaseExists(ctx, owner, repo, r.Name); rerr == nil {
+				entry.Release = ok
+			}
+		}
+		out = append(out, entry)
+	}
+	return out, nil
+}
+
+// ReleaseExists reports whether owner/repo has a release header for tag. It is
+// a seam (composition binds internal/releases GetRelease) so this package
+// never imports the releases feature; nil skips the release-backed refusal
+// (tests that only exercise policy/CAS).
+type ReleaseExists func(ctx context.Context, owner, repo, tag string) (bool, error)
+
+// SetReleaseExists installs the release-backed check.
+func (s *Service) SetReleaseExists(fn ReleaseExists) { s.ReleaseExists = fn }
+
+// DeleteTag deletes refs/tags/<name> (write role + the protect policy effect
+// for op=delete). A tag that backs a release is refused with a clear 409: the
+// release snapshots tag_sha and keeps serving, so the tag is the release's
+// public address — re-pointing users at nothing is not a delete we perform.
+func (s *Service) DeleteTag(ctx context.Context, owner, repo string, p auth.Principal, name string) error {
+	if err := s.requireRole(ctx, owner, repo, p, string(identity.RoleWrite)); err != nil {
+		return err
+	}
+	name, err := validateTagName(name)
+	if err != nil {
+		return err
+	}
+	if s.ReleaseExists != nil {
+		ok, rerr := s.ReleaseExists(ctx, owner, repo, name)
+		if rerr != nil {
+			return fmt.Errorf("%w: release check: %v", ErrUnavailable, rerr)
+		}
+		if ok {
+			return fmt.Errorf("%w: tag %q backs a release; delete the release first", ErrConflict, name)
+		}
+	}
+	if err := s.checkPolicyOp(ctx, owner, repo, p, "refs/tags/"+name, policy.OpDelete); err != nil {
+		return err
+	}
+	sha, err := s.resolveCommit(ctx, owner, repo, "refs/tags/"+name)
+	if err != nil {
+		return err
+	}
+	if s.Refs == nil {
+		return fmt.Errorf("%w: tag publish unavailable", ErrUnavailable)
+	}
+	if perr := s.Refs.DeleteTag(ctx, repoName(owner, repo), name, sha, map[string]string{"principal": p.Name}); perr != nil {
+		if isErr(perr, errConflict) {
+			return fmt.Errorf("%w: tag %q moved concurrently; reload and retry", ErrConflict, name)
+		}
+		return perr
+	}
+	return nil
+}
+
+// checkPolicyOp evaluates policy.json for (principal, ref, op). Missing
+// policy.json is allow-all; unparseable fails closed.
+func (s *Service) checkPolicyOp(ctx context.Context, owner, repo string, p auth.Principal, ref, op string) error {
+	raw, _, err := store.GetBytes(ctx, s.Store, PolicyKey(owner, repo), store.GetOptions{})
+	if err != nil {
+		if store.IsNotFound(err) {
+			raw = nil
+		} else {
+			return err
+		}
+	}
+	var doc *policy.Document
+	if raw == nil {
+		doc, err = policy.Parse([]byte(`{"version":1,"rules":[]}`))
+	} else {
+		doc, err = policy.Parse(raw)
+	}
+	if err != nil {
+		return fmt.Errorf("%w: policy.json unparseable: %v", ErrCorrupt, err)
+	}
+	v := policy.EvaluateProtect(ctx, doc, policy.Request{Principal: p.Name, Ref: ref, Op: op})
+	if !v.Allow {
+		return fmt.Errorf("%w: rejected by rule '%s'", ErrForbidden, v.Rule)
+	}
+	return nil
 }

@@ -687,3 +687,112 @@
 </div>
 {{else}}{{template "settings-repo-notwired" .}}{{end}}
 {{end}}
+
+{{/* ---- Branch protection (WP2.3) ---------------------------------------- */}}
+{{define "settings-repo-protection"}}
+{{with .Protection}}
+<div class="space-y-4">
+  <form class="card p-4" method="post" action="/{{$.Owner}}/{{$.Name}}/settings/protection"
+        hx-post="/{{$.Owner}}/{{$.Name}}/settings/protection" hx-target="#settings-panel" hx-select="#settings-panel" hx-swap="outerHTML">
+    <h3 class="card-header">Branch protection</h3>
+    <p class="muted mb-3 text-xs">Writes the repository policy document the push and merge gates read. Rules named <code class="mono">protection-push</code> and <code class="mono">protection-reviews</code> are managed here; every other rule is preserved.</p>
+    <label class="mb-3 flex items-start gap-2">
+      <input type="checkbox" name="enabled" value="1" class="mt-0.5 h-4 w-4 accent-amber-500"{{if .Enabled}} checked{{end}}>
+      <span>
+        <span class="block text-sm font-medium">Enable branch protection</span>
+        <span class="muted block text-[11px]">Off removes the two managed rules; nothing else changes.</span>
+      </span>
+    </label>
+
+    <label class="grid gap-1" for="protection-refs">
+      <span class="text-sm font-medium">Protected refs</span>
+      <input class="input mono" id="protection-refs" name="refs" value="{{.Refs}}" placeholder="refs/heads/main, refs/heads/release/*">
+      <span class="muted text-[11px]">Comma or space separated glob patterns (doublestar: <code class="mono">*</code>, <code class="mono">**</code>).</span>
+    </label>
+
+    <div class="mt-3 grid gap-3 sm:grid-cols-2">
+      <label class="grid gap-1" for="protection-approvals">
+        <span class="text-sm font-medium">Required approvals</span>
+        <input class="input w-24" id="protection-approvals" name="approvals" type="number" min="0" max="50" value="{{.Approvals}}">
+        <span class="muted text-[11px]">0 = reviews are not required; direct pushes are still governed by the rows below.</span>
+      </label>
+      <label class="mt-5 flex items-start gap-2 sm:mt-0 sm:self-end">
+        <input type="checkbox" name="dismiss_stale" value="1" class="mt-0.5 h-4 w-4 accent-amber-500"{{if .DismissStale}} checked{{end}}>
+        <span class="text-sm">Dismiss stale approvals when the head moves</span>
+      </label>
+    </div>
+
+    <label class="mt-3 grid gap-1" for="protection-checks">
+      <span class="text-sm font-medium">Required status checks</span>
+      <input class="input mono" id="protection-checks" name="checks" value="{{.Checks}}" placeholder="ci/build, lint">
+      <span class="muted text-[11px]">Context names (1–32) the merge gate requires green on the head. Direct pushes are not blocked by checks.</span>
+    </label>
+
+    <fieldset class="mt-3">
+      <legend class="text-sm font-medium">Who may push directly</legend>
+      <p class="muted mb-1 text-[11px]">Roles that bypass the push restriction. No role selected = nobody (merges still land server-side).</p>
+      <div class="grid gap-1 sm:grid-cols-3">
+        {{range .Roles}}
+        <label class="flex items-center gap-2 text-sm">
+          <input type="checkbox" name="push_roles" value="{{.ID}}" class="h-4 w-4 accent-amber-500"{{if $.Protection.PushRoleChecked .ID}} checked{{end}}>
+          <span>{{.Label}}</span>
+        </label>
+        {{end}}
+      </div>
+    </fieldset>
+
+    <div class="mt-3 grid gap-1 sm:grid-cols-2">
+      <label class="flex items-start gap-2">
+        <input type="checkbox" name="block_force" value="1" class="mt-0.5 h-4 w-4 accent-amber-500"{{if .BlockForce}} checked{{end}}>
+        <span class="text-sm">Block force-pushes</span>
+      </label>
+      <label class="flex items-start gap-2">
+        <input type="checkbox" name="block_delete" value="1" class="mt-0.5 h-4 w-4 accent-amber-500"{{if .BlockDelete}} checked{{end}}>
+        <span class="text-sm">Block branch deletion</span>
+      </label>
+    </div>
+
+    <div class="mt-3 flex flex-wrap items-center gap-2">
+      <button type="submit" class="btn primary">Save branch protection</button>
+      <span class="muted text-[11px]">The server validates the generated policy document before it is stored.</span>
+    </div>
+    {{if .Error}}<p class="err-line" role="alert">{{.Error}}</p>{{end}}
+    {{if .Note}}<p class="mt-2 text-sm text-[var(--pd-ok)]">{{.Note}}</p>{{end}}
+  </form>
+
+  <section class="card p-4" aria-label="Effective policy">
+    <h3 class="card-header">Effective policy</h3>
+    {{if .Rules}}
+    <div class="overflow-x-auto">
+      <table class="data-table">
+        <thead><tr><th>rule</th><th>refs</th><th>effect</th></tr></thead>
+        <tbody>
+          {{range .Rules}}<tr>
+            <td class="mono text-xs">{{.Name}}{{if .Managed}} <span class="chip chip-neutral">managed</span>{{end}}</td>
+            <td class="mono break-words text-xs">{{.Refs}}</td>
+            <td class="break-words">{{.Summary}}</td>
+          </tr>{{end}}
+        </tbody>
+      </table>
+    </div>
+    {{else}}
+    <p class="muted text-sm">No rules — the repository allows every push to every ref (allow-all).</p>
+    {{end}}
+  </section>
+
+  <details class="card p-4">
+    <summary class="cursor-pointer text-sm font-medium">Advanced: edit the full policy JSON</summary>
+    <form class="mt-2" method="post" action="/{{$.Owner}}/{{$.Name}}/settings/protection"
+          hx-post="/{{$.Owner}}/{{$.Name}}/settings/protection" hx-target="#settings-panel" hx-select="#settings-panel" hx-swap="outerHTML">
+      <input type="hidden" name="policy_action" value="raw">
+      <label class="mb-1 block text-sm font-medium" for="protection-raw">Policy document (JSON)</label>
+      <textarea class="input mono text-xs" id="protection-raw" name="policy" rows="14" spellcheck="false" data-submit-keys>{{.Raw}}</textarea>
+      <div class="mt-2 flex flex-wrap items-center gap-2">
+        <button type="submit" class="btn">Save raw document</button>
+        <span class="muted text-[11px]">Ctrl/⌘+Enter saves. Validated by the same parser as the API.</span>
+      </div>
+    </form>
+  </details>
+</div>
+{{else}}{{template "settings-repo-notwired" .}}{{end}}
+{{end}}

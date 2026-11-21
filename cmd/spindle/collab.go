@@ -8,19 +8,23 @@ package main
 
 import (
 	"context"
+	"errors"
 	"log/slog"
 	"net/http"
 	"path/filepath"
 	"strings"
 
 	"github.com/crueber/spindle/internal/api"
+	"github.com/crueber/spindle/internal/archive"
 	"github.com/crueber/spindle/internal/checks"
 	"github.com/crueber/spindle/internal/config"
+	"github.com/crueber/spindle/internal/forksync"
 	"github.com/crueber/spindle/internal/git"
 	"github.com/crueber/spindle/internal/identity"
 	"github.com/crueber/spindle/internal/issues"
 	"github.com/crueber/spindle/internal/mirror"
 	"github.com/crueber/spindle/internal/notify"
+	"github.com/crueber/spindle/internal/packages"
 	"github.com/crueber/spindle/internal/pulls"
 	"github.com/crueber/spindle/internal/pushmirror"
 	"github.com/crueber/spindle/internal/releases"
@@ -31,6 +35,7 @@ import (
 	"github.com/crueber/spindle/internal/social"
 	"github.com/crueber/spindle/internal/store"
 	"github.com/crueber/spindle/internal/tags"
+	"github.com/crueber/spindle/internal/threads"
 	"github.com/crueber/spindle/internal/wal"
 )
 
@@ -48,6 +53,8 @@ type collabWiring struct {
 	reviewHandler     *review.Handler
 	checksSvc         *checks.Service
 	checksHandler     *checks.Handler
+	threadsSvc        *threads.Service
+	threadsHandler    *threads.Handler
 	releasesSvc       *releases.Service
 	releasesHandler   *releases.Handler
 	tagsSvc           *tags.Service
@@ -62,6 +69,11 @@ type collabWiring struct {
 	mirrorHandler     *mirror.Handler
 	pushMirrorSvc     *pushmirror.Service
 	pushMirrorHandler *pushmirror.Handler
+	packagesSvc       *packages.Service
+	packagesHandler   *packages.Handler
+	archiveHandler    *archive.Handler
+	forksyncSvc       *forksync.Service
+	forksyncHandler   *forksync.Handler
 }
 
 // newIdentityService builds the Wave A identity surface (docs/features/01:
@@ -199,6 +211,13 @@ func buildCollab(st store.ObjectStore, cfg *config.Config, reg *wal.Registry, ap
 	// forked). The push-time half needs no wiring: protect ignores
 	// require_checks on the push path by construction.
 	c.checksSvc, c.checksHandler = newChecksService(st, c.ident, c.pullsSvc, reg, cfg.Git.Binary)
+	// Threads T1 (docs/features/15 §2): workflow discovery from the
+	// repository at the trust-selected commit, bucket-native run/job
+	// records, and the checks mirror the merge gate already consumes.
+	// No runner (T2), no executor/secrets/logs (T3). The on-push hook
+	// is wired in serve.go (server.OnPush); the manual dispatch rides
+	// the Seam 1 chain below.
+	c.threadsSvc, c.threadsHandler = newThreadsService(st, c.ident, c.checksSvc, reg, cfg.Git.Binary)
 	// Issue #505: the summary checks-existence projection behind the Env
 	// hook (api renders ChecksSummary without importing the feature, law
 	// 8 — the CollabCounts shape). One exact-key probe on the CAS'd
@@ -224,11 +243,41 @@ func buildCollab(st store.ObjectStore, cfg *config.Config, reg *wal.Registry, ap
 	// latest pointer, and changelog autodraft. Publish fan-out rides
 	// internal/notify through the nil-safe seams bound below (P8).
 	c.releasesSvc, c.releasesHandler = newReleasesService(st, c.ident, reg, cfg.Git.Binary, cfg.Cache.Dir, int64(cfg.Releases.MaxAssetBytes))
+	// Feature 14 packages (docs/features/14): the OCI Distribution
+	// registry at /v2/* (a top-level namespace, not a repo lane), over
+	// the same store and P6 roles. The bucket prefix is spindle-only.
+	c.packagesSvc, c.packagesHandler = newPackagesService(st, c.ident, cfg, apiEnv, cfg.Cache.Dir)
 	// Forgejo #253 tags (create lightweight tag at a commit, server-side
 	// via the WAL ref-update path): the P6 write gate + policy create
 	// check live in the package; ref creates funnel through the WAL
 	// publish path (never force); events ride the existing WAL bridge.
 	c.tagsSvc, c.tagsHandler = newTagsService(st, c.ident, reg, cfg.Git.Binary)
+	if c.ident != nil {
+		_, c.archiveHandler = newArchiveService(c.ident, reg, cfg.Git.Binary)
+	}
+	// WP5: sync fork — the Seam 5 task kind, the lane surface, and the
+	// local pack-sharing fetch (registered once per process).
+	c.forksyncSvc, c.forksyncHandler = newForksyncService(st, c.ident, reg, cfg)
+	// WP3.3/WP4.2 wiring between the two features (composition owns both
+	// sides; neither package imports the other, law 8): a pending-tag draft
+	// publishes its ref through tags' own create path (policy + WAL CAS), and
+	// tag deletion refuses when a release backs the tag.
+	if c.releasesSvc != nil && c.tagsSvc != nil {
+		c.releasesSvc.CreateTag = func(ctx context.Context, owner, repo, name, sha string, p auth.Principal) error {
+			_, err := c.tagsSvc.CreateTag(ctx, owner, repo, p, tags.CreateInput{Name: name, SHA: sha})
+			return err
+		}
+		c.tagsSvc.SetReleaseExists(func(ctx context.Context, owner, repo, tag string) (bool, error) {
+			_, _, err := c.releasesSvc.GetRelease(ctx, owner, repo, auth.Principal{Name: "system", Admin: true}, tag)
+			if err != nil {
+				if errors.Is(err, releases.ErrNotFound) {
+					return false, nil
+				}
+				return false, err
+			}
+			return true, nil
+		})
+	}
 	// Feature 07 social (docs/features/07 §§4–6): stars, watcher
 	// reads, counters, starred lists. Watch mutation stays in
 	// internal/notify (06 §6); the fork counter binds onto pulls
@@ -395,8 +444,17 @@ func chainCollab(srv *server.Server, c *collabWiring) {
 	if c.checksHandler != nil {
 		chainChecks(srv, c.checksHandler)
 	}
+	if c.threadsHandler != nil {
+		chainThreads(srv, c.threadsHandler)
+	}
 	if c.releasesHandler != nil {
 		chainReleases(srv, c.releasesHandler)
+	}
+	if c.archiveHandler != nil {
+		chainArchive(srv, c.archiveHandler)
+	}
+	if c.forksyncHandler != nil {
+		chainForksync(srv, c.forksyncHandler)
 	}
 	if c.tagsHandler != nil {
 		chainTags(srv, c.tagsHandler)
@@ -415,6 +473,9 @@ func chainCollab(srv *server.Server, c *collabWiring) {
 	}
 	if c.pushMirrorHandler != nil {
 		chainPushMirror(srv, c.pushMirrorHandler)
+	}
+	if c.packagesHandler != nil {
+		chainPackages(srv, c.packagesHandler)
 	}
 	if c.createHandler != nil {
 		// #210 create twin: authentication resolves through the server

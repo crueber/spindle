@@ -30,3 +30,92 @@
 {{define "collab_pager"}}
 {{with .}}<a class="btn mt-3" href="{{.}}">Older</a>{{end}}
 {{end}}
+{{/* ---- shared thread metadata cards (issues + pull requests) -----------
+     One anatomy for labels / assignees / milestone on the issue and the PR
+     conversation (02 §7, WP2.2/WP6.1): a .card section of divided rows, a
+     triage-only "+" popover, and one POST per toggle. dict keys:
+     Action, CanTriage, Labels, Options, Assignees, Milestone, Milestones. */}}
+{{define "collab_meta_card"}}
+<section class="card divide-y divide-[color:var(--pd-line)] text-sm" aria-label="{{.Aria}}">
+  <div class="p-3">
+    <p class="eyebrow mb-1">Labels</p>
+    <div class="flex flex-wrap items-center gap-1">
+      {{range .Labels}}{{template "collab_label_chip" .}}{{else}}<span class="muted">none</span>{{end}}
+      {{if .CanTriage}}
+      <details class="relative inline-block" data-popover>
+        <summary class="muted list-none cursor-pointer rounded border border-[var(--pd-line-strong)] px-1.5 py-0 text-xs leading-5 hover:text-[var(--pd-text)]" aria-haspopup="menu" aria-label="Add or remove labels" data-popover-trigger>+</summary>
+        <div class="label-drop scroll-slim card absolute right-0 z-30 mt-1 max-h-72 w-80 overflow-y-auto p-1" role="menu" aria-label="Labels" data-popover-panel>
+          {{range .LabelOptions}}
+          <form method="post" action="{{$.LabelAction}}">
+            <input type="hidden" name="label" value="{{.Name}}">
+            <button type="submit" role="menuitemcheckbox" aria-checked="{{if .Checked}}true{{else}}false{{end}}" aria-label="{{if .Checked}}remove{{else}}apply{{end}} label {{.Name}}" class="grid w-full grid-cols-[auto_minmax(0,1fr)] items-center gap-2 rounded px-2 py-1 text-left text-sm hover:bg-[var(--pd-raised)]">
+              <span class="flex w-4 shrink-0 items-center justify-center" aria-hidden="true">{{if .Checked}}✓{{end}}</span>
+              <span class="min-w-0 truncate {{if .Checked}}font-medium{{end}}">{{.Name}}</span>
+            </button>
+          </form>
+          {{else}}
+          <p class="muted px-2 py-1 text-xs">no labels in this repo yet</p>
+          {{end}}
+        </div>
+      </details>
+      {{end}}
+    </div>
+  </div>
+
+  <div class="p-3">
+    <p class="eyebrow mb-1">Assignees</p>
+    <div class="flex flex-wrap items-center gap-1">
+      {{range .Assignees}}<span class="chip chip-neutral">{{.}}</span>{{else}}<span class="muted">none</span>{{end}}
+      {{if .CanTriage}}
+      <details class="relative inline-block" data-popover>
+        <summary class="muted list-none cursor-pointer rounded border border-[var(--pd-line-strong)] px-1.5 py-0 text-xs leading-5 hover:text-[var(--pd-text)]" aria-haspopup="menu" aria-label="Add or remove assignees" data-popover-trigger>+</summary>
+        <div class="label-drop scroll-slim card absolute right-0 z-30 mt-1 max-h-72 w-64 overflow-y-auto p-1" role="menu" aria-label="Assignees" data-popover-panel>
+          {{range .AssigneeOptions}}
+          <form method="post" action="{{$.AssigneeAction}}">
+            <input type="hidden" name="assignee" value="{{.Name}}">
+            <button type="submit" role="menuitemcheckbox" aria-checked="{{if .Checked}}true{{else}}false{{end}}" aria-label="{{if .Checked}}unassign{{else}}assign{{end}} {{.Name}}" class="grid w-full grid-cols-[auto_minmax(0,1fr)] items-center gap-2 rounded px-2 py-1 text-left text-sm hover:bg-[var(--pd-raised)]">
+              <span class="flex w-4 shrink-0 items-center justify-center" aria-hidden="true">{{if .Checked}}✓{{end}}</span>
+              <span class="min-w-0 truncate {{if .Checked}}font-medium{{end}}">{{.Name}}</span>
+            </button>
+          </form>
+          {{else}}
+          <p class="muted px-2 py-1 text-xs">no eligible assignees</p>
+          {{end}}
+        </div>
+      </details>
+      {{end}}
+    </div>
+  </div>
+
+  <div class="p-3">
+    <p class="eyebrow mb-1">Milestone</p>
+    {{with .Milestone}}
+    <div class="flex flex-wrap items-center gap-1">
+      {{template "collab_milestone_chip" .}}
+      {{if $.CanTriage}}
+      <form method="post" action="{{$.MilestoneAction}}">
+        <input type="hidden" name="milestone" value="">
+        <button type="submit" class="btn px-1.5 py-0 text-xs" aria-label="Clear the milestone">−</button>
+      </form>
+      {{end}}
+    </div>
+    {{else}}
+    {{if .CanTriage}}
+    <details class="relative inline-block" data-popover>
+      <summary class="muted list-none cursor-pointer rounded border border-[var(--pd-line-strong)] px-1.5 py-0 text-xs leading-5 hover:text-[var(--pd-text)]" aria-haspopup="menu" aria-label="Set a milestone" data-popover-trigger>+</summary>
+      <div class="milestone-drop scroll-slim card absolute right-0 z-30 mt-1 max-h-72 w-64 overflow-y-auto p-1" role="menu" aria-label="Milestones" data-popover-panel>
+        {{range .Milestones}}
+        <form method="post" action="{{$.MilestoneAction}}">
+          <input type="hidden" name="milestone" value="{{.ID}}">
+          <button type="submit" role="menuitemradio" aria-checked="false" class="w-full rounded px-2 py-1 text-left text-sm hover:bg-[var(--pd-raised)]">{{.Title}}{{if eq .State "closed"}} (closed){{end}}</button>
+        </form>
+        {{else}}
+        <p class="muted px-2 py-1 text-xs">no milestones yet</p>
+        {{end}}
+      </div>
+    </details>
+    {{else}}<span class="muted">none</span>{{end}}
+    {{end}}
+  </div>
+</section>
+{{end}}

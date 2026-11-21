@@ -10,6 +10,9 @@ const SHA = "0123456789abcdef0123456789abcdef01234567";
 /** Tags surface (Forgejo #253/#263): create a lightweight or annotated tag. */
 const SURFACE = [
   { name: "tagsApi.create", run: (c) => c.repo("o/r").tagsApi.create({ name: "v1", sha: SHA }), method: "POST", path: "/o/r/api/tags" },
+  { name: "tagsApi.list", run: (c) => c.repo("o/r").tagsApi.list(), method: "GET", path: "/o/r/api/tags" },
+  { name: "tagsApi.remove", run: (c) => c.repo("o/r").tagsApi.remove("v1"), method: "DELETE", path: "/o/r/api/refs/tags/v1" },
+  { name: "tagsApi.remove encoded", run: (c) => c.repo("o/r").tagsApi.remove("a/b"), method: "DELETE", path: "/o/r/api/refs/tags/a%2Fb" },
 ];
 
 test("tags surface: create hits its exact endpoint and method", async () => {

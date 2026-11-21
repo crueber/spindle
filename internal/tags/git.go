@@ -280,3 +280,46 @@ func (g *SubprocessGit) CommitExists(ctx context.Context, dir, sha string) (stri
 	}
 	return resolved, nil
 }
+
+// ListTagRefs lists refs/tags via one for-each-ref spawn:
+// `git for-each-ref --sort=-creatordate
+// --format=%(refname:strip=2)%09%(objectname)%09%(*objectname)%09%(creatordate:iso-strict)%09%(authorname)
+// refs/tags`. Fields are tab-separated (refnames cannot contain tabs);
+// `%(*objectname)` is empty for lightweight tags, so Commit falls back to
+// Object there.
+func (g *SubprocessGit) ListTagRefs(ctx context.Context, dir string) ([]TagRef, error) {
+	out, err := g.runCollect(ctx, dir, []string{
+		"for-each-ref", "--sort=-creatordate",
+		"--format=%(refname:strip=2)%09%(objectname)%09%(*objectname)%09%(creatordate:iso-strict)%09%(authorname)%09%(taggername)",
+		"refs/tags",
+	})
+	if err != nil {
+		var ge *gitExitError
+		if errors.As(err, &ge) {
+			return nil, fmt.Errorf("%w: for-each-ref: %v", ErrUnavailable, ge.errText)
+		}
+		return nil, err
+	}
+	refs := make([]TagRef, 0)
+	for _, line := range strings.Split(out, "\n") {
+		line = strings.TrimRight(line, "\r")
+		if line == "" {
+			continue
+		}
+		f := strings.Split(line, "\t")
+		for len(f) < 6 {
+			f = append(f, "")
+		}
+		r := TagRef{Name: f[0], Object: f[1], Commit: f[2], CreatedAt: f[3], Author: f[4]}
+		if r.Author == "" {
+			r.Author = f[5] // annotated tags carry a tagger, not an authorname
+		}
+		if r.Commit == "" {
+			r.Commit = r.Object
+		} else {
+			r.Annotated = true
+		}
+		refs = append(refs, r)
+	}
+	return refs, nil
+}

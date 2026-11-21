@@ -113,6 +113,7 @@ import (
 	"github.com/crueber/spindle/internal/review"
 	"github.com/crueber/spindle/internal/server/auth"
 	"github.com/crueber/spindle/internal/store"
+	"github.com/crueber/spindle/internal/threads"
 )
 
 // CollabDeps is the collaboration service seam. Function fields keep the
@@ -126,10 +127,16 @@ type CollabDeps struct {
 	IssuesGet    func(ctx context.Context, owner, repo string, num int, p auth.Principal, afterSeq, n int) (*issues.ThreadView, error)
 	IssueComment func(ctx context.Context, owner, repo string, num int, actor auth.Principal, body string) (*issues.Event, error)
 	IssuePatch   func(ctx context.Context, owner, repo string, num int, actor auth.Principal, p issues.IssuePatch) (*issues.Thread, error)
+	// IssueMeta is the same 02 patch restricted to thread metadata (labels,
+	// assignees, milestone) and applied to ANY thread kind — PRs reuse it
+	// so there is one implementation of those rules (03 §8).
+	IssueMeta    func(ctx context.Context, owner, repo string, num int, actor auth.Principal, p issues.IssuePatch) (*issues.Thread, error)
 	IssueReact   func(ctx context.Context, owner, repo string, num, target int, actor auth.Principal, content string) (*issues.Thread, *issues.Event, bool, error)
 	IssueUnreact func(ctx context.Context, owner, repo string, num, target int, actor auth.Principal, content string) (*issues.Thread, error)
 	Labels       func(ctx context.Context, owner, repo string) ([]issues.Label, error)      // GAP, see header
 	Milestones   func(ctx context.Context, owner, repo string) ([]*issues.Milestone, error) // GAP, see header
+	// Collaborators supplies the assignee picker (roles ≥ triage per 02 §4).
+	Collaborators func(ctx context.Context, owner, repo string) []identity.Collaborator
 
 	// internal/pulls
 	PullsList    func(ctx context.Context, owner, repo string, p auth.Principal, f pulls.ListFilter) (*pulls.ListResult, error)
@@ -170,6 +177,9 @@ type CollabDeps struct {
 	ReleaseDelete func(ctx context.Context, owner, repo string, p auth.Principal, tag string) error
 	AssetUpload   func(ctx context.Context, owner, repo string, p auth.Principal, tag, name string, body io.Reader, contentLength int64, shaHex, contentType string) (*releases.AssetEntry, error)
 	AssetDelete   func(ctx context.Context, owner, repo string, p auth.Principal, tag, name string) (*releases.AssetEntry, error)
+	// ReleaseDownloads is releases.Service.AssetDownloads (WP3.2): the
+	// per-asset counter map for one release (one bucket GET).
+	ReleaseDownloads func(ctx context.Context, owner, repo, tag string) map[string]int64
 
 	// PolicyOf supplies the merge-box policy document (spec §6 F3).
 	PolicyOf func(ctx context.Context, id git.RepoId) (*policy.Document, error)
@@ -200,6 +210,7 @@ func (s *Server) mountCollab() {
 	m.HandleFunc("POST /{owner}/{repo}/issues/{num}/reopen", s.issueReopen)
 	m.HandleFunc("POST /{owner}/{repo}/issues/{num}/labels", s.issueLabels)
 	m.HandleFunc("POST /{owner}/{repo}/issues/{num}/milestone", s.issueMilestone)
+	m.HandleFunc("POST /{owner}/{repo}/issues/{num}/assignees", s.issueAssignees)
 	m.HandleFunc("POST /{owner}/{repo}/issues/{num}/reactions/{seq}", s.issueReact)
 	m.HandleFunc("POST /{owner}/{repo}/issues/{num}/reactions/{seq}/{content}/delete", s.issueUnreact)
 
@@ -215,6 +226,9 @@ func (s *Server) mountCollab() {
 	m.HandleFunc("POST /{owner}/{repo}/pull/{num}/reopen", s.pullReopen)
 	m.HandleFunc("POST /{owner}/{repo}/pull/{num}/ready", s.pullReady)
 	m.HandleFunc("POST /{owner}/{repo}/pull/{num}/draft", s.pullDraft)
+	m.HandleFunc("POST /{owner}/{repo}/pull/{num}/labels", s.pullLabels)
+	m.HandleFunc("POST /{owner}/{repo}/pull/{num}/milestone", s.pullMilestone)
+	m.HandleFunc("POST /{owner}/{repo}/pull/{num}/assignees", s.pullAssignees)
 	m.HandleFunc("POST /{owner}/{repo}/pull/{num}/reviews", s.pullReview)
 	m.HandleFunc("POST /{owner}/{repo}/pull/{num}/reviews/{seq}/dismiss", s.pullDismiss)
 	m.HandleFunc("POST /{owner}/{repo}/pull/{num}/reviewers", s.pullReviewers)
@@ -270,6 +284,10 @@ type collabRepo struct {
 
 	Features config.ResolvedFeatures
 	Role     identity.Role
+
+	// HeadLabel is the default branch's short name (or SHA); "" when the
+	// summary has no head. Markdown bodies resolve relative URLs at it.
+	HeadLabel string
 
 	SignedIn  bool
 	Anonymous bool
@@ -387,6 +405,12 @@ func (s *Server) collabRepoExists(ctx context.Context, rc *collabRepo) bool {
 		}
 		if sum.Features != nil {
 			rc.Features = *sum.Features
+		}
+		if sum.Head != nil {
+			rc.HeadLabel = shortRefName(sum.Head.Name)
+			if rc.HeadLabel == "" {
+				rc.HeadLabel = shortSHA(sum.Head.SHA)
+			}
 		}
 		rc.summary, rc.summaryOK = sum, true
 		return true
@@ -547,29 +571,29 @@ func collabErrStatus(err error) int {
 	switch {
 	case errors.Is(err, issues.ErrNotFound), errors.Is(err, pulls.ErrNotFound),
 		errors.Is(err, review.ErrNotFound), errors.Is(err, checks.ErrNotFound),
-		errors.Is(err, releases.ErrNotFound):
+		errors.Is(err, releases.ErrNotFound), errors.Is(err, threads.ErrNotFound):
 		return http.StatusNotFound
 	case errors.Is(err, issues.ErrInvalid), errors.Is(err, pulls.ErrInvalid),
 		errors.Is(err, review.ErrInvalid), errors.Is(err, checks.ErrInvalid),
-		errors.Is(err, releases.ErrInvalid):
+		errors.Is(err, releases.ErrInvalid), errors.Is(err, threads.ErrInvalid):
 		return http.StatusBadRequest
 	case errors.Is(err, issues.ErrLocked), errors.Is(err, pulls.ErrLocked),
 		errors.Is(err, review.ErrLocked):
 		return http.StatusConflict
 	case errors.Is(err, issues.ErrConflict), errors.Is(err, pulls.ErrConflict),
 		errors.Is(err, review.ErrConflict), errors.Is(err, checks.ErrConflict),
-		errors.Is(err, releases.ErrConflict):
+		errors.Is(err, releases.ErrConflict), errors.Is(err, threads.ErrConflict):
 		return http.StatusConflict
 	case errors.Is(err, pulls.ErrUnprocessable), errors.Is(err, review.ErrUnprocessable),
-		errors.Is(err, checks.ErrUnprocessable):
+		errors.Is(err, checks.ErrUnprocessable), errors.Is(err, threads.ErrUnprocessable):
 		return http.StatusUnprocessableEntity
 	case errors.Is(err, issues.ErrUnauthorized), errors.Is(err, pulls.ErrUnauthorized),
 		errors.Is(err, review.ErrUnauthorized), errors.Is(err, checks.ErrUnauthorized),
-		errors.Is(err, releases.ErrUnauthorized):
+		errors.Is(err, releases.ErrUnauthorized), errors.Is(err, threads.ErrUnauthorized):
 		return http.StatusUnauthorized
 	case errors.Is(err, issues.ErrForbidden), errors.Is(err, pulls.ErrForbidden),
 		errors.Is(err, review.ErrForbidden), errors.Is(err, checks.ErrForbidden),
-		errors.Is(err, releases.ErrForbidden):
+		errors.Is(err, releases.ErrForbidden), errors.Is(err, threads.ErrForbidden):
 		return http.StatusForbidden
 	default:
 		return http.StatusServiceUnavailable
@@ -772,6 +796,16 @@ func containsStr(list []string, s string) bool {
 		}
 	}
 	return false
+}
+
+// collabCollaborators supplies the assignee picker; an unwired identity
+// service yields an empty option set (the picker says "no eligible
+// assignees"), never a failed page.
+func (s *Server) collabCollaborators(ctx context.Context, rc collabRepo) []identity.Collaborator {
+	if collabDeps.Collaborators == nil {
+		return nil
+	}
+	return collabDeps.Collaborators(ctx, rc.Owner, rc.Name)
 }
 
 // --- issue system-event text (issue-events.js port) -------------------------
@@ -1012,6 +1046,15 @@ func pullEventText(ev *pulls.Event) string {
 			return "marked as ready for review"
 		}
 		return "converted to draft"
+	case pulls.EventLabelsChanged:
+		return "changed the labels"
+	case pulls.EventAssigneesChanged:
+		return "changed the assignees"
+	case pulls.EventMilestoneChanged:
+		if ev.To == nil {
+			return "cleared the milestone"
+		}
+		return "set the milestone"
 	case pulls.EventMerged:
 		return "merged as " + short12(ptrStr(ev.MergeCommitSHA)) + " (" + defaultStr(ptrStr(ev.Strategy), "merge") + ")"
 	case pulls.EventHeadForcePushed:
@@ -1408,6 +1451,7 @@ type collabEvent struct {
 // helper autolinks #N/PRN against the repo).
 type timelineData struct {
 	Owner, Repo string
+	Ref         string // default-branch short name; "" leaves relative URLs unresolved
 	Base        string // "/{owner}/{repo}/issues/{num}" or "/pull/{num}"
 	Events      []collabEvent
 	CanReact    bool
@@ -1475,6 +1519,51 @@ func labelOptions(all []issues.Label, applied []string) []labelOption {
 		out = append(out, labelOption{Name: l.Name, Color: l.Color, Known: true, Checked: checked})
 	}
 	return out
+}
+
+// assigneeOption is one assignee picker row (02 §4: assignees must resolve
+// to role ≥ triage).
+type assigneeOption struct {
+	Name    string
+	Checked bool
+}
+
+// assigneeOptions builds the picker from the repo's effective collaborators
+// at role ≥ triage, plus any name already assigned (so a removed
+// collaborator can still be cleared). Sorted by name.
+func assigneeOptions(all []identity.Collaborator, applied []string) []assigneeOption {
+	seen := map[string]bool{}
+	var names []string
+	for _, c := range all {
+		n := normPrincipal(c.Principal)
+		if n == "" || seen[n] || roleRank(identity.Role(c.Role)) < roleRank(identity.RoleTriage) {
+			continue
+		}
+		seen[n] = true
+		names = append(names, n)
+	}
+	for _, a := range applied {
+		n := normPrincipal(a)
+		if n != "" && !seen[n] {
+			seen[n] = true
+			names = append(names, n)
+		}
+	}
+	sort.Strings(names)
+	out := make([]assigneeOption, 0, len(names))
+	for _, n := range names {
+		out = append(out, assigneeOption{Name: n, Checked: containsStrFold(applied, n)})
+	}
+	return out
+}
+
+func containsStrFold(list []string, s string) bool {
+	for _, v := range list {
+		if strings.EqualFold(v, s) {
+			return true
+		}
+	}
+	return false
 }
 
 func msOptions(all []*issues.Milestone, selected string) []msOption {
@@ -1738,6 +1827,11 @@ type issueData struct {
 	Milestones []*issues.Milestone
 	Milestone  *milestoneChip
 	Assignees  []string
+	// AssigneeOptions/AssigneeAction drive the triage assignee picker (WP6.1).
+	AssigneeOptions []assigneeOption
+	AssigneeAction  string
+	LabelAction     string
+	MilestoneAction string
 
 	Timeline   timelineData
 	EventsMore bool
@@ -1790,23 +1884,24 @@ func (s *Server) renderIssue(w http.ResponseWriter, r *http.Request, rc collabRe
 	labels := s.loadLabels(r.Context(), rc)
 	lock := issueCommentLock(th)
 	data := issueData{
-		Repo:         rc,
-		Num:          th.Num,
-		Title:        th.Title,
-		Closed:       th.State != "open",
-		Author:       th.Author,
-		CreatedAt:    th.CreatedAt,
-		CommentCount: th.CommentCount,
-		Labels:       labelChips(th.Labels, labels),
-		Milestones:   milestones,
-		Milestone:    milestoneFor(th.Milestone, milestones, rc.Owner, rc.Name),
-		Assignees:    th.Assignees,
-		EventsMore:   view.EventsMore,
-		Lock:         lock,
-		CanTriage:    rc.CanTriage,
-		AllLabels:    labels,
-		Error:        errMsg,
-		Notice:       notice,
+		Repo:            rc,
+		Num:             th.Num,
+		Title:           th.Title,
+		Closed:          th.State != "open",
+		Author:          th.Author,
+		CreatedAt:       th.CreatedAt,
+		CommentCount:    th.CommentCount,
+		Labels:          labelChips(th.Labels, labels),
+		Milestones:      milestones,
+		Milestone:       milestoneFor(th.Milestone, milestones, rc.Owner, rc.Name),
+		Assignees:       th.Assignees,
+		AssigneeOptions: assigneeOptions(s.collabCollaborators(r.Context(), rc), th.Assignees),
+		EventsMore:      view.EventsMore,
+		Lock:            lock,
+		CanTriage:       rc.CanTriage,
+		AllLabels:       labels,
+		Error:           errMsg,
+		Notice:          notice,
 	}
 	if data.Closed {
 		data.StateLabel = closedStateLabel(th.StateReason)
@@ -1818,6 +1913,7 @@ func (s *Server) renderIssue(w http.ResponseWriter, r *http.Request, rc collabRe
 	tl := timelineData{
 		Owner:      rc.Owner,
 		Repo:       rc.Name,
+		Ref:        rc.HeadLabel,
 		Base:       "/" + rc.Full + "/issues/" + strconv.Itoa(th.Num),
 		CanReact:   !rc.Anonymous,
 		Locked:     lock.Locked,
@@ -1848,6 +1944,9 @@ func (s *Server) renderIssue(w http.ResponseWriter, r *http.Request, rc collabRe
 	data.CanModify = isPullAuthor(th.Author, p) || rc.CanTriage
 	data.LabelOptions = labelOptions(labels, th.Labels)
 	base := "/" + rc.Full + "/issues/" + strconv.Itoa(th.Num)
+	data.AssigneeAction = base + "/assignees"
+	data.LabelAction = base + "/labels"
+	data.MilestoneAction = base + "/milestone"
 	data.Composer = composerModel{
 		Action:              base + "/comments",
 		CloseAction:         base + "/close",
@@ -2039,6 +2138,59 @@ func (s *Server) issueMilestone(w http.ResponseWriter, r *http.Request) {
 	redirectPage(w, r, "/"+rc.Full+"/issues/"+strconv.Itoa(num))
 }
 
+// issueAssignees toggles one assignee on an issue (02 §4: triage). The form
+// names the principal; the handler sends the full next set (the wire
+// contract, same discipline as the label toggle).
+func (s *Server) issueAssignees(w http.ResponseWriter, r *http.Request) {
+	num, ok := issueNum(r.PathValue("num"))
+	if !ok {
+		s.collabError(w, r, http.StatusNotFound, "unknown issue")
+		return
+	}
+	rc, p, ok := s.collabWrite(w, r, identity.RoleTriage, "Edit issue assignees")
+	if !ok {
+		return
+	}
+	if collabDeps.IssuePatch == nil || collabDeps.IssuesGet == nil {
+		s.collabError(w, r, http.StatusServiceUnavailable, "issues service not wired")
+		return
+	}
+	name := normPrincipal(r.PostFormValue("assignee"))
+	if name == "" {
+		s.issueWriteBack(w, r, rc, p, num, fmt.Errorf("%w: assignee is required", issues.ErrInvalid))
+		return
+	}
+	view, err := collabDeps.IssuesGet(r.Context(), rc.Owner, rc.Name, num, p, 0, 1)
+	if err != nil {
+		s.issueWriteBack(w, r, rc, p, num, err)
+		return
+	}
+	next := togglePrincipal(view.Thread.Assignees, name)
+	if _, err := collabDeps.IssuePatch(r.Context(), rc.Owner, rc.Name, num, p, issues.IssuePatch{Assignees: &next}); err != nil {
+		s.issueWriteBack(w, r, rc, p, num, err)
+		return
+	}
+	redirectPage(w, r, "/"+rc.Full+"/issues/"+strconv.Itoa(num))
+}
+
+// togglePrincipal adds or removes one principal from a sorted set.
+func togglePrincipal(cur []string, name string) []string {
+	next := make([]string, 0, len(cur)+1)
+	found := false
+	for _, v := range cur {
+		if strings.EqualFold(v, name) {
+			found = true
+			continue
+		}
+		next = append(next, v)
+	}
+	if !found {
+		next = append(next, name)
+	}
+	sort.Strings(next)
+	return next
+}
+
 func (s *Server) issueReact(w http.ResponseWriter, r *http.Request) {
 	num, ok := issueNum(r.PathValue("num"))
 	if !ok {
@@ -2101,6 +2253,7 @@ type pullListRow struct {
 	BaseRef   string
 	HeadRef   string
 	Author    string
+	Labels    []labelChip
 	UpdatedAt string
 }
 
@@ -2110,6 +2263,9 @@ type pullsListData struct {
 	StateRaw    string
 	Base        string
 	Head        string
+	LabelFilter []string
+	AllLabels   []issues.Label
+	Labels      []labelOption
 	Rows        []pullListRow
 	More        bool
 	After       int
@@ -2129,7 +2285,10 @@ func (s *Server) pullList(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	q := r.URL.Query()
-	data := pullsListData{Repo: rc, Base: q.Get("base"), Head: q.Get("head")}
+	data := pullsListData{Repo: rc, Base: q.Get("base"), Head: q.Get("head"), LabelFilter: splitLabels(q)}
+	labels := s.loadLabels(r.Context(), rc)
+	data.AllLabels = labels
+	data.Labels = labelOptions(labels, data.LabelFilter)
 	if raw, set := q["state"]; set {
 		data.StateRaw = strings.Join(raw, ",")
 		switch data.StateRaw {
@@ -2147,11 +2306,12 @@ func (s *Server) pullList(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	res, err := collabDeps.PullsList(r.Context(), rc.Owner, rc.Name, p, pulls.ListFilter{
-		State: wireState(data.State),
-		Base:  data.Base,
-		Head:  data.Head,
-		After: afterParam(r),
-		N:     50,
+		State:  wireState(data.State),
+		Labels: data.LabelFilter,
+		Base:   data.Base,
+		Head:   data.Head,
+		After:  afterParam(r),
+		N:      50,
 	})
 	if err != nil {
 		if st := collabErrStatus(err); st == http.StatusNotFound || st == http.StatusUnauthorized || st == http.StatusForbidden {
@@ -2165,9 +2325,25 @@ func (s *Server) pullList(w http.ResponseWriter, r *http.Request) {
 	data.After = afterParam(r)
 	data.More = res.More
 	base := "/" + rc.Full + "/pulls"
-	data.OpenHref = base + "?state=open"
-	data.ClosedHref = base + "?state=closed"
-	data.AllHref = base + "?state=all"
+	// State links keep the label/base/head filters (a filter must not
+	// vanish when the state changes).
+	stateHref := func(state string) string {
+		q := url.Values{}
+		q.Set("state", state)
+		if len(data.LabelFilter) > 0 {
+			q.Set("labels", strings.Join(data.LabelFilter, ","))
+		}
+		if data.Base != "" {
+			q.Set("base", data.Base)
+		}
+		if data.Head != "" {
+			q.Set("head", data.Head)
+		}
+		return base + "?" + q.Encode()
+	}
+	data.OpenHref = stateHref("open")
+	data.ClosedHref = stateHref("closed")
+	data.AllHref = stateHref("all")
 	data.RefreshHref = r.URL.RequestURI()
 	newPull := base + "/new"
 	if data.Base != "" || data.Head != "" {
@@ -2193,6 +2369,7 @@ func (s *Server) pullList(w http.ResponseWriter, r *http.Request) {
 			BaseRef:   row.BaseRef,
 			HeadRef:   row.HeadRef,
 			Author:    row.Author,
+			Labels:    labelChips(row.Labels, labels),
 			UpdatedAt: row.UpdatedAt,
 		})
 	}
@@ -2511,6 +2688,19 @@ type pullData struct {
 	CanTriage  bool
 	CanMaint   bool
 
+	// Thread metadata (WP2.2): the 02-owned labels/assignees/milestone on
+	// the shared PR header, edited through the 02 patch (IssueMeta).
+	Labels          []labelChip
+	AllLabels       []issues.Label
+	LabelOptions    []labelOption
+	LabelAction     string
+	Milestones      []*issues.Milestone
+	Milestone       *milestoneChip
+	MilestoneAction string
+	Assignees       []string
+	AssigneeOptions []assigneeOption
+	AssigneeAction  string
+
 	Reviews           []reviewRow
 	ReviewsMore       bool
 	ReviewDec         string
@@ -2631,9 +2821,23 @@ func (s *Server) renderPull(w http.ResponseWriter, r *http.Request, rc collabRep
 	draftVis := pullDraftVisibility(th, pr, p, rc.Role)
 	data.ShowReady, data.ShowDraft = draftVis[0], draftVis[1]
 
+	// Thread metadata (WP2.2) reads through the same 02 option sets the
+	// issue page uses; the writes go through IssueMeta (one implementation).
+	labels := s.loadLabels(ctx, rc)
+	data.Labels = labelChips(th.Labels, labels)
+	data.AllLabels = labels
+	data.LabelOptions = labelOptions(labels, th.Labels)
+	data.Milestones = s.loadMilestones(ctx, rc)
+	data.Milestone = milestoneFor(th.Milestone, data.Milestones, rc.Owner, rc.Name)
+	data.Assignees = th.Assignees
+	data.AssigneeOptions = assigneeOptions(s.collabCollaborators(ctx, rc), th.Assignees)
+	data.LabelAction = base + "/labels"
+	data.MilestoneAction = base + "/milestone"
+	data.AssigneeAction = base + "/assignees"
+
 	// Timeline (opened/commented are bodies for issues; a PR's opened event
 	// is a system row because the description renders once, above).
-	tl := timelineData{Owner: rc.Owner, Repo: rc.Name, Base: base, CanReact: !rc.Anonymous, Locked: lock.Locked, LockReason: lock.Reason}
+	tl := timelineData{Owner: rc.Owner, Repo: rc.Name, Ref: rc.HeadLabel, Base: base, CanReact: !rc.Anonymous, Locked: lock.Locked, LockReason: lock.Reason}
 	for _, ev := range view.Events {
 		row := collabEvent{Seq: ev.Seq, Actor: ev.Actor, System: pullEventText(ev), At: ev.At}
 		if row.System == "" {
@@ -2942,6 +3146,102 @@ func (s *Server) pullSetDraft(w http.ResponseWriter, r *http.Request, draft bool
 
 func (s *Server) pullReady(w http.ResponseWriter, r *http.Request) { s.pullSetDraft(w, r, false) }
 func (s *Server) pullDraft(w http.ResponseWriter, r *http.Request) { s.pullSetDraft(w, r, true) }
+
+// pullMetaContext resolves the PR page's shared write gate for the 02-owned
+// metadata controls (WP2.2). Labels/assignees/milestone need triage, exactly
+// like the issue page; the service re-checks it.
+func (s *Server) pullMetaContext(w http.ResponseWriter, r *http.Request, action string) (collabRepo, auth.Principal, int, bool) {
+	num, ok := issueNum(r.PathValue("num"))
+	if !ok {
+		s.collabError(w, r, http.StatusNotFound, "unknown pull request")
+		return collabRepo{}, auth.Principal{}, 0, false
+	}
+	rc, p, ok := s.collabWrite(w, r, identity.RoleTriage, action)
+	if !ok {
+		return collabRepo{}, auth.Principal{}, 0, false
+	}
+	if collabDeps.IssueMeta == nil || collabDeps.PullGet == nil {
+		s.collabError(w, r, http.StatusServiceUnavailable, "thread metadata is not wired")
+		return collabRepo{}, auth.Principal{}, 0, false
+	}
+	return rc, p, num, true
+}
+
+// pullLabels is the PR twin of issueLabels: one label toggle, full next set.
+func (s *Server) pullLabels(w http.ResponseWriter, r *http.Request) {
+	rc, p, num, ok := s.pullMetaContext(w, r, "Edit pull request labels")
+	if !ok {
+		return
+	}
+	name := strings.TrimSpace(r.PostFormValue("label"))
+	if name == "" {
+		s.pullWriteBack(w, r, rc, p, num, fmt.Errorf("%w: label is required", issues.ErrInvalid))
+		return
+	}
+	view, err := collabDeps.PullGet(r.Context(), rc.Owner, rc.Name, num, p, 0, 1)
+	if err != nil {
+		s.pullWriteBack(w, r, rc, p, num, err)
+		return
+	}
+	next := make([]string, 0, len(view.Thread.Labels)+1)
+	found := false
+	for _, l := range view.Thread.Labels {
+		if strings.EqualFold(l, name) {
+			found = true
+			continue
+		}
+		next = append(next, l)
+	}
+	if !found {
+		next = append(next, name)
+	}
+	if _, err := collabDeps.IssueMeta(r.Context(), rc.Owner, rc.Name, num, p, issues.IssuePatch{Labels: &next}); err != nil {
+		s.pullWriteBack(w, r, rc, p, num, err)
+		return
+	}
+	redirectPage(w, r, "/"+rc.Full+"/pull/"+strconv.Itoa(num))
+}
+
+// pullMilestone sets or clears the PR milestone (empty value = clear).
+func (s *Server) pullMilestone(w http.ResponseWriter, r *http.Request) {
+	rc, p, num, ok := s.pullMetaContext(w, r, "Set the pull request milestone")
+	if !ok {
+		return
+	}
+	var id *string
+	if v := strings.TrimSpace(r.PostFormValue("milestone")); v != "" {
+		id = &v
+	}
+	if _, err := collabDeps.IssueMeta(r.Context(), rc.Owner, rc.Name, num, p, issues.IssuePatch{Milestone: &id}); err != nil {
+		s.pullWriteBack(w, r, rc, p, num, err)
+		return
+	}
+	redirectPage(w, r, "/"+rc.Full+"/pull/"+strconv.Itoa(num))
+}
+
+// pullAssignees toggles one assignee on the PR (same full-set discipline).
+func (s *Server) pullAssignees(w http.ResponseWriter, r *http.Request) {
+	rc, p, num, ok := s.pullMetaContext(w, r, "Edit pull request assignees")
+	if !ok {
+		return
+	}
+	name := normPrincipal(r.PostFormValue("assignee"))
+	if name == "" {
+		s.pullWriteBack(w, r, rc, p, num, fmt.Errorf("%w: assignee is required", issues.ErrInvalid))
+		return
+	}
+	view, err := collabDeps.PullGet(r.Context(), rc.Owner, rc.Name, num, p, 0, 1)
+	if err != nil {
+		s.pullWriteBack(w, r, rc, p, num, err)
+		return
+	}
+	next := togglePrincipal(view.Thread.Assignees, name)
+	if _, err := collabDeps.IssueMeta(r.Context(), rc.Owner, rc.Name, num, p, issues.IssuePatch{Assignees: &next}); err != nil {
+		s.pullWriteBack(w, r, rc, p, num, err)
+		return
+	}
+	redirectPage(w, r, "/"+rc.Full+"/pull/"+strconv.Itoa(num))
+}
 
 // pullReview submits one review verdict. Staged line comments are an island
 // concern (spec §7 Q4) — the server accepts the verdict and body only.
@@ -3741,6 +4041,7 @@ func (s *Server) releaseList(w http.ResponseWriter, r *http.Request) {
 
 type assetRow struct {
 	Name         string
+	Downloads    int64
 	Href         string
 	Size         string
 	SHA12        string
@@ -3774,6 +4075,9 @@ type releaseDetailData struct {
 	FormBody string
 
 	DownloadBase  string
+	ArchiveTar    string
+	ArchiveZip    string
+	PendingTag    bool
 	UploadAction  string
 	SaveAction    string
 	PublishAction string
@@ -3812,6 +4116,8 @@ func (s *Server) renderRelease(w http.ResponseWriter, r *http.Request, rc collab
 	}
 	base := "/" + rc.Full + "/releases/" + url.PathEscape(tag)
 	data.DownloadBase = base + "/assets/"
+	data.ArchiveTar = "/" + rc.Full + "/archive/" + url.PathEscape(tag) + ".tar.gz"
+	data.ArchiveZip = "/" + rc.Full + "/archive/" + url.PathEscape(tag) + ".zip"
 	data.UploadAction = base + "/assets"
 	data.SaveAction = base + "/save"
 	data.PublishAction = base + "/publish"
@@ -3835,12 +4141,18 @@ func (s *Server) renderRelease(w http.ResponseWriter, r *http.Request, rc collab
 	data.Name, data.Body, data.Author = rel.Name, rel.Body, rel.Author
 	data.TagSHA, data.CreatedAt = rel.TagSHA, rel.CreatedAt
 	data.Draft, data.Prerelease = rel.Draft, rel.Prerelease
+	data.PendingTag = rel.PendingTag
 	if rel.PublishedAt != nil {
 		data.Published = *rel.PublishedAt
+	}
+	counts := map[string]int64{}
+	if collabDeps.ReleaseDownloads != nil {
+		counts = collabDeps.ReleaseDownloads(r.Context(), rc.Owner, rc.Name, rel.Tag)
 	}
 	for _, a := range rel.Assets {
 		data.Assets = append(data.Assets, assetRow{
 			Name:         a.Name,
+			Downloads:    counts[a.Name],
 			Href:         data.DownloadBase + url.PathEscape(a.Name),
 			Size:         fmtAssetSize(a.Size),
 			SHA12:        shortSHA(a.SHA256),

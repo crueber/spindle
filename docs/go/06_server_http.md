@@ -110,6 +110,11 @@ r.Get("/healthz", s.healthz)
 r.Get("/readyz", s.readyz)
 r.Get("/repos.js", s.sdk("repos.js"))    // the esbuild-bundled SDK file (12_web_ui.md §1.0; D-WEB-6)
 r.Get("/services/public/install.sh", s.installSh)
+// feature namespaces outside /api and the repo lanes (bind_top.go; docs/features/14)
+if len(s.topExtras) > 0 {                // /v2: the OCI registry namespace
+    r.HandleFunc("/v2", s.topServe)      // first ExtraRoutes match wins, else 404
+    r.HandleFunc("/v2/*", s.topServe)
+}
 r.Get("/api/v1", api.Discovery)          // public-informational
 r.Mount("/api/v1/setup", s.setupAPI)     // internal/setup HTTP surface (§3.4) — mounted BEFORE the /api/v1 catch
 r.Mount("/api/v1", http.StripPrefix("/api/v1", api.NonRepo)) // me/authenticate/owners + /services/api twins
@@ -218,6 +223,27 @@ Then dispatch on `sub[0]` (after `.git`-strip and re-join with "/"): the table i
 **Gated (`require_auth` = read):** `/services/setup.json`, `/metrics` (`text/plain; version=0.0.4`). **Page routes** are gated inside the page provider with the same rules (§3.5): `GET /` (landing page, always HTML — the front door makes zero store reads), `GET /explore` (owners list; `?format=text` → one owner per line as `text/plain`), `GET /how-it-works` (deep dive, always HTML — zero store reads, no text twin), `/{owner}`, `/{owner}/{repo}`, `/{owner}/teams/{slug}` page routes (tree/blob/commits/commit/wal/settings/issues/labels/milestones/pulls/pull — every page is a full HTML document with `Cache-Control: no-cache` + a strong ETag; a path the provider does not own is the plain §3 404). The `?format=text` query is the only `/explore` machine twin: there is no `Accept: text/plain` negotiation (that branch lived in the deleted server `explorePage` shell handler and was not carried over, D-WEB-15). The setup routes above are NOT in this group — their access rule is §3.4 (open exactly while no config file exists, the config is invalid, or auth mode is `none`).
 
 **Reserved single-segment UI names** (explicit routes shadow those owner names; an owner literally named `explore` loses its `/:owner` UI page — its section link then points at `/explore`, the list, not its repos — while its git/API paths are unaffected; same precedent as the existing names): `import`, `api`, `keys`, `setup`, `explore`, `how-it-works`, `new` (the `/new` create form, issue #210 — served through the `/{owner}` page-route shape like `/import`, so no explicit server route was added; an owner literally named `new` loses its `/{owner}` UI page only).
+
+**OCI registry (`features.packages`; top-level `/v2` namespace, `internal/packages`, docs/features/14):**
+
+| Method | Path | Notes |
+|---|---|---|
+| GET/HEAD | `/v2/` | `200 {}` + `Docker-Distribution-API-Version: registry/2.0`; in a credentialled mode (auth ≠ `none`) the unauthenticated probe is `401` + the Bearer challenge (`realm=<public_url or request>/v2/token`, `service=<host>`) |
+| GET/HEAD | `/v2/{o}/{r}/manifests/{ref}` | tag or digest; `Content-Type` = the manifest's `mediaType`, `Docker-Content-Digest`, `ETag`; tag = 1 pointer read + 1 manifest read |
+| PUT | `/v2/{o}/{r}/manifests/{ref}` | `push` scope → repo `write`; digest refs verified (`DIGEST_INVALID` on mismatch); tag refs CAS the pointer (one retry, then 409); `201` + `Location` + digest |
+| DELETE | `/v2/{o}/{r}/manifests/{ref}` | tag → pointer only; digest → the manifest object; `202`; blobs await the GC sweep |
+| GET/HEAD | `/v2/{o}/{r}/blobs/{digest}` | `pull` scope → repo `read`; single `Range` → `206` + `Content-Range`; `Docker-Content-Digest`; proxied (no redirect) |
+| POST | `/v2/{o}/{r}/blobs/uploads/` | `202` + `Location` + `Docker-Upload-UUID`; zero store writes |
+| PATCH | `/v2/{o}/{r}/blobs/uploads/{id}` | append a chunk; `202` + `Range`; a `Content-Range` start ≠ staged size → `416`; expired/aborted id → `404 BLOB_UPLOAD_UNKNOWN` |
+| PUT | `/v2/{o}/{r}/blobs/uploads/{id}?digest=` | final chunk (optional body) + digest verification; mismatch → `400`, no blob written; `201` |
+| GET | `/v2/{o}/{r}/blobs/uploads/{id}` | upload status (`204` + `Range`/uuid) — the resumable probe |
+| DELETE | `/v2/{o}/{r}/blobs/uploads/{id}` | abort: tombstone + drop staging; `204` |
+| GET | `/v2/{o}/{r}/tags/list?n=&last=` | tag names + `Link: rel="next"`; the ONE user-triggered LIST |
+| GET | `/v2/token`, `/v2/auth` | Docker token endpoint: Basic in, short-lived HMAC-scoped token out (`pull`/`push` granted per the principal's role) |
+
+Every row resolves the principal through the server chain first (Basic password = token, exactly the
+git HTTP path) and verifies `wgp1.` bearer tokens locally; `features.packages = false` makes all
+repo-scoped rows `404`. Setup-only and un-wired builds never register the namespace.
 
 **Both API lanes hit the same handlers.** `/{owner}/{repo}/api/…` (bearer/same-origin) and `/{owner}/{repo}/api-browser/…` (cross-origin browser, `credentials: include`) differ only in the `Lane` value passed to the handler (which changes cache headers and auth-redirect behavior per 07_api.md). Same for `/api/v1` vs `/api-browser/v1` in the non-repo lane.
 

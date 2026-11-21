@@ -63,6 +63,12 @@ func (h *Handler) Handle(w http.ResponseWriter, r *http.Request) bool {
 			h.handleTags(w, r, owner, repo)
 			return true
 		}
+		// WP4.2: ref-scoped tag deletion. Only DELETE is claimed here; the
+		// core api owns GET …/api/refs/{branches|tags} and keeps serving it.
+		if len(segs[3:]) == 3 && segs[3] == "refs" && segs[4] == "tags" && r.Method == http.MethodDelete {
+			h.deleteTag(w, r, owner, repo, segs[5])
+			return true
+		}
 	}
 	return false
 }
@@ -178,16 +184,19 @@ func methodNotAllowed(w http.ResponseWriter, allow ...string) {
 // --- routing ---------------------------------------------------------------
 
 func (h *Handler) handleTags(w http.ResponseWriter, r *http.Request, owner, repo string) {
-	if r.Method != http.MethodPost {
-		methodNotAllowed(w, "POST")
-		return
-	}
 	p, aerr := h.principal(r)
 	if aerr != nil {
 		writeErr(w, aerr)
 		return
 	}
-	h.createTag(w, r, owner, repo, p)
+	switch r.Method {
+	case http.MethodPost:
+		h.createTag(w, r, owner, repo, p)
+	case http.MethodGet:
+		h.listTags(w, r, owner, repo, p)
+	default:
+		methodNotAllowed(w, "GET", "POST")
+	}
 }
 
 // --- endpoints ---------------------------------------------------------------
@@ -221,4 +230,48 @@ func (h *Handler) createTag(w http.ResponseWriter, r *http.Request, owner, repo 
 		return
 	}
 	writeJSON(w, http.StatusCreated, tagWire{Name: t.Name, SHA: t.SHA, Ref: t.Ref})
+}
+
+// tagEntryWire is one /api/tags list row.
+type tagEntryWire struct {
+	Name      string `json:"name"`
+	Commit    string `json:"commit"`
+	Object    string `json:"object,omitempty"`
+	Date      string `json:"date"`
+	Author    string `json:"author"`
+	Annotated bool   `json:"annotated"`
+	Release   bool   `json:"release"`
+}
+
+// listTags answers GET …/api/tags → {tags: [{name, commit, date, author,
+// release}]} (read; [] never null).
+func (h *Handler) listTags(w http.ResponseWriter, r *http.Request, owner, repo string, p auth.Principal) {
+	entries, err := h.Svc.ListTagEntries(r.Context(), owner, repo, p)
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	out := make([]tagEntryWire, 0, len(entries))
+	for _, e := range entries {
+		out = append(out, tagEntryWire{Name: e.Name, Commit: e.Commit, Object: e.Object,
+			Date: e.Date, Author: e.Author, Annotated: e.Annotated, Release: e.Release})
+	}
+	hdr := w.Header()
+	hdr.Set("Cache-Control", "no-store")
+	writeJSON(w, http.StatusOK, map[string]any{"tags": out})
+}
+
+// deleteTag answers DELETE …/api/refs/tags/{tag}: 200 {name, ref}; 404
+// unknown tag; 409 release-backed or a concurrent move; 403 policy/write.
+func (h *Handler) deleteTag(w http.ResponseWriter, r *http.Request, owner, repo, tag string) {
+	p, aerr := h.principal(r)
+	if aerr != nil {
+		writeErr(w, aerr)
+		return
+	}
+	if err := h.Svc.DeleteTag(r.Context(), owner, repo, p, tag); err != nil {
+		writeErr(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"name": tag, "ref": "refs/tags/" + tag})
 }

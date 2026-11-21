@@ -545,9 +545,10 @@ func TestSettingsRepoGeneralTabRenders(t *testing.T) {
 	settingsMustContain(t, body, `name="feature_issues"`, "feature toggle")
 	settingsMustContain(t, body, `name="feature_pulls"`, "feature toggle")
 	settingsMustContain(t, body, `name="allow_self_approval"`, "review toggle")
-	// The six feature keys are always present even when the dep sends a
+	// The seven feature keys are always present even when the dep sends a
 	// partial set (fail-open: absent means enabled).
 	settingsMustContain(t, body, `name="feature_star"`, "feature default")
+	settingsMustContain(t, body, `name="feature_packages"`, "registry toggle")
 	// Nav order is the sidebar contract.
 	navOrder := []string{"General", "Scheduled tasks", "Mirror", "Push policy",
 		"Effective config &amp; history", "Access", "CI tokens", "Webhooks", "WAL", "Danger Zone"}
@@ -1820,5 +1821,49 @@ func TestSettingsSetupAdminGroupAccess(t *testing.T) {
 		principal: auth.Principal{Name: "anonymous", Anonymous: true}})
 	if rec := settingsDo(t, s, http.MethodPost, "/setup", url.Values{"op": {"save"}}, nil); rec.Code != http.StatusUnauthorized {
 		t.Fatalf("anonymous POST /setup = %d, want 401", rec.Code)
+	}
+}
+
+// TestSettingsRepoProtectionTabRenders is the WP2.3 page contract: the
+// Branch protection tab renders the structured form (not raw JSON), the
+// read-only effective view, and the mobile rules (no bare multi-column grid,
+// sidebar nav intact, the panel swaps in place).
+func TestSettingsRepoProtectionTabRenders(t *testing.T) {
+	f := settingsRepoFakes("admin")
+	f.deps.RepoProtection = func(context.Context, string, string) (*SettingsProtection, error) {
+		return &SettingsProtection{
+			Enabled: true, Refs: "refs/heads/main", Approvals: 2, BlockForce: true,
+			PushRoles: []string{"admin"}, Roles: settingsProtectionRoles,
+			Rules: []SettingsPolicyRule{{Name: "protection-push", Refs: "refs/heads/main", Summary: "restricts update", Managed: true}},
+			Raw:   `{"version":1,"rules":[]}`,
+		}, nil
+	}
+	s := newSettingsServer(t, f)
+	rec := settingsDo(t, s, http.MethodGet, "/acme/monorepo/settings/protection", nil, nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET protection = %d (%s)", rec.Code, rec.Body.String())
+	}
+	body := rec.Body.String()
+	settingsMustContain(t, body, "Branch protection", "tab heading")
+	settingsMustContain(t, body, `id="settings-panel"`, "panel")
+	settingsMustContain(t, body, `aria-current="page"`, "active nav")
+	settingsMustContain(t, body, `href="/acme/monorepo/settings/protection"`, "nav link")
+	settingsMustContain(t, body, `name="refs"`, "structured refs")
+	settingsMustContain(t, body, `name="approvals"`, "structured approvals")
+	settingsMustContain(t, body, `name="push_roles" value="admin" class="h-4 w-4 accent-amber-500" checked`, "role bypass")
+	settingsMustContain(t, body, `name="checks"`, "structured checks")
+	settingsMustContain(t, body, `name="block_force"`, "force-push restriction")
+	settingsMustContain(t, body, `name="block_delete"`, "deletion restriction")
+	settingsMustContain(t, body, "Effective policy", "read-only view")
+	settingsMustContain(t, body, "protection-push", "effective rule row")
+	settingsMustContain(t, body, "Advanced: edit the full policy JSON", "advanced editor")
+	// The advanced editor is collapsed: raw JSON is never the primary path.
+	if strings.Contains(body, `<textarea class="input mono text-xs" id="protection-raw" name="policy" rows="14" spellcheck="false" data-submit-keys>`+"\n"+`{"version"`) {
+		t.Fatal("raw JSON rendered expanded as the primary editor")
+	}
+	for _, bad := range []string{`class="grid grid-cols-2"`, `class="grid grid-cols-3"`} {
+		if strings.Contains(body, bad) {
+			t.Fatalf("bare multi-column grid at 390px: %s", bad)
+		}
 	}
 }

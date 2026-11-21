@@ -58,6 +58,7 @@ type fakeGit struct {
 	packBytes []byte
 	packOids  []string
 	errPack   error
+	tagRefs   []TagRef
 }
 
 func newFakeGit() *fakeGit { return &fakeGit{commits: map[string]string{}} }
@@ -86,6 +87,15 @@ func (f *fakeGit) CreateTagObject(_ context.Context, _ string, body []byte) (str
 		return "", fmt.Errorf("%w: mktag unwired in fake", ErrUnavailable)
 	}
 	return f.tagOid, nil
+}
+
+func (f *fakeGit) ListTagRefs(_ context.Context, _ string) ([]TagRef, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.err != nil {
+		return nil, f.err
+	}
+	return append([]TagRef(nil), f.tagRefs...), nil
 }
 
 func (f *fakeGit) PackObject(_ context.Context, _ string, oid string) ([]byte, error) {
@@ -133,6 +143,7 @@ type fakeRefs struct {
 	mu        sync.Mutex
 	created   []refCreate
 	annotated []annotatedCreate
+	deleted   []refCreate
 	existing  map[string]string
 	err       error
 }
@@ -166,6 +177,20 @@ func (f *fakeRefs) CreateTag(_ context.Context, repo, name, sha string, meta map
 	}
 	f.existing[name] = sha
 	f.created = append(f.created, refCreate{repo: repo, name: name, sha: sha, meta: meta})
+	return nil
+}
+
+func (f *fakeRefs) DeleteTag(_ context.Context, repo, name, oldOid string, meta map[string]string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.err != nil {
+		return f.err
+	}
+	if cur, ok := f.existing[name]; !ok || cur != oldOid {
+		return fmt.Errorf("CAS conflict: refs/tags/%s moved", name)
+	}
+	delete(f.existing, name)
+	f.deleted = append(f.deleted, refCreate{repo: repo, name: name, sha: oldOid, meta: meta})
 	return nil
 }
 

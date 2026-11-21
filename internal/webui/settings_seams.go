@@ -79,6 +79,7 @@ func (d *SettingsDeps) BindSettingsServices(s SettingsServices) {
 	d.RepoMirror = s.repoMirror
 	d.RepoPushMirror = s.repoPushMirror
 	d.RepoPolicy = s.repoPolicy
+	d.RepoProtection = s.repoProtection
 	d.RepoConfig = s.repoConfig
 	if s.Ident != nil {
 		d.RepoRole = s.repoRole
@@ -270,6 +271,22 @@ func (s SettingsServices) repoPolicy(ctx context.Context, owner, repo string) (*
 	return out, nil
 }
 
+// repoProtection reads the SAME stored policy the API enforces and projects
+// it into the Branch protection tab (the managed rules seed the form; every
+// rule feeds the read-only effective view).
+func (s SettingsServices) repoProtection(ctx context.Context, owner, repo string) (*SettingsProtection, error) {
+	if s.API == nil || s.API.Store == nil {
+		return nil, nil
+	}
+	raw, _, err := api.PolicyRaw(ctx, s.API, s.repoID(owner, repo))
+	if err != nil {
+		out := &SettingsProtection{Enabled: true, Refs: "refs/heads/main", Roles: settingsProtectionRoles, Raw: string(raw)}
+		out.Error = err.Error()
+		return out, nil
+	}
+	return settingsProtectionView(raw), nil
+}
+
 func (s SettingsServices) repoConfig(ctx context.Context, owner, repo string) (*SettingsConfig, error) {
 	if s.API == nil || s.API.Repo == nil {
 		return nil, nil
@@ -421,6 +438,33 @@ func (s SettingsServices) repoWrite(ctx context.Context, owner, repo string, p a
 			return SettingsWriteResult{}, settingsWriteErr(werr.Status, werr.Message)
 		}
 		return SettingsWriteResult{Notice: "policy saved"}, nil
+	case SettingsActionProtection:
+		if s.API == nil {
+			return SettingsWriteResult{}, settingsWriteErr(http.StatusServiceUnavailable, "policy store not configured")
+		}
+		cur, _, _ := api.PolicyRaw(ctx, s.API, id)
+		in, verr := settingsProtectionInputFrom(SettingsProtection{
+			Enabled:      w.Get("enabled") != "",
+			Refs:         w.Get("refs"),
+			Approvals:    settingsAtoiOr(w.Get("approvals"), 0),
+			DismissStale: w.Get("dismiss_stale") != "",
+			Checks:       w.Get("checks"),
+			PushRoles:    w.Multi["push_roles"],
+			BlockForce:   w.Get("block_force") != "",
+			BlockDelete:  w.Get("block_delete") != "",
+		})
+		if verr != nil {
+			return SettingsWriteResult{}, settingsWriteErr(http.StatusBadRequest, verr.Error())
+		}
+		in.Owner, in.Repo = owner, repo
+		doc, berr := settingsProtectionDocument(cur, in)
+		if berr != nil {
+			return SettingsWriteResult{}, settingsWriteErr(http.StatusBadRequest, berr.Error())
+		}
+		if werr := api.PutPolicy(ctx, s.API, id, doc); werr != nil {
+			return SettingsWriteResult{}, settingsWriteErr(werr.Status, werr.Message)
+		}
+		return SettingsWriteResult{Notice: "branch protection saved"}, nil
 	case SettingsActionPolicyDryRun:
 		if s.API == nil || s.API.Repo == nil {
 			return SettingsWriteResult{}, settingsWriteErr(http.StatusServiceUnavailable, "policy evaluation not configured")
@@ -937,7 +981,7 @@ func settingsNotifyStatus(err error) int {
 // --- TOML passenger editors (ported from web/src/lib/repo*.js) ---------------
 
 // settingsFeatureKeys is the [features] key order (config.ResolvedFeatures).
-var settingsFeatureKeys = []string{"issues", "pulls", "releases", "forks", "watch", "star"}
+var settingsFeatureKeys = []string{"issues", "pulls", "releases", "forks", "watch", "star", "packages"}
 
 // settingsTopLevelRegion is the line index where the first table header
 // starts: a top-level key can only live before it.

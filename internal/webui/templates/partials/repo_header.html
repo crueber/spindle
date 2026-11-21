@@ -12,7 +12,12 @@
         <a class="text-[var(--pd-text)] hover:underline" href="/{{.Full}}">{{.Name}}</a>
       </h1>
       {{if .Empty}}<span class="chip-neutral">empty</span>{{else if .VisLabel}}<span class="chip-neutral" title="{{.VisTitle}}">{{.VisLabel}}</span>{{end}}
-      {{if .ForkParent}}<span class="font-mono text-[11px] text-[var(--pd-muted)]">fork of <a class="link" href="/{{.ForkParent}}">{{.ForkParent}}</a></span>{{end}}
+      {{if .ForkParent}}<span class="font-mono text-[11px] text-[var(--pd-muted)]">fork of <a class="link" href="/{{.ForkParent}}">{{.ForkParent}}</a></span>
+      {{if .CanSyncFork}}
+      <form method="post" action="/{{.Full}}/sync-fork" class="inline">
+        <button type="submit" class="btn px-2 py-0.5 text-[11px]" title="Fetch {{.ForkParent}} and fast-forward this fork's default branch">Sync fork</button>
+      </form>
+      {{end}}{{end}}
       {{if .MirrorBadge}}<span class="chip-neutral" title="{{.MirrorTitle}}">{{.MirrorBadge}}</span>{{end}}
       {{if .PushMirrorBadge}}<span class="chip-neutral" title="{{.PushMirrorTitle}}">{{.PushMirrorBadge}}</span>{{end}}
     </div>

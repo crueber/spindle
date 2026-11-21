@@ -1,0 +1,55 @@
+{{define "content"}}
+{{with .Data}}
+<div class="repo-shell">
+  {{template "repo_header" .Repo}}
+  {{template "repo_tabs" .Repo}}
+  <div class="grid gap-4">
+    <div class="flex flex-wrap items-center gap-2">
+      <h2 class="text-xl font-semibold tracking-tight">Tags</h2>
+      <span class="pill">{{len .Rows}}</span>
+      <a class="btn ml-auto" href="/{{.Repo.Full}}/commits">Commits</a>
+    </div>
+    {{if .Error}}<p class="err-line" role="alert">{{.Error}}</p>{{end}}
+
+    {{if .Rows}}
+    <div class="card overflow-x-auto">
+      <table class="data-table min-w-[44rem]">
+        <thead>
+          <tr><th>Tag</th><th>Target commit</th><th>Created</th><th>Author</th><th>Release</th><th><span class="sr-only">Actions</span></th></tr>
+        </thead>
+        <tbody>
+          {{range .Rows}}
+          <tr>
+            <td class="min-w-0">
+              <span class="mono text-[13px] break-all">{{.Name}}</span>
+              {{if .Annotated}}<span class="chip chip-draft ml-1">annotated</span>{{end}}
+            </td>
+            <td><a class="link mono text-xs" href="{{.CommitHref}}">{{.Short}}</a></td>
+            <td class="muted text-xs" title="{{.Date}}">{{.Date}}</td>
+            <td class="muted text-xs">{{.Author}}</td>
+            <td>
+              {{if .Release}}<a class="link text-xs" href="{{.ReleaseHref}}">release</a>{{else}}<span class="muted text-xs">—</span>{{end}}
+            </td>
+            <td>
+              <div class="flex flex-wrap justify-end gap-1">
+                <a class="btn px-2 py-0.5 text-[11px]" href="{{.ArchiveTar}}" download title="Download tar.gz">tar.gz</a>
+                <a class="btn px-2 py-0.5 text-[11px]" href="{{.ArchiveZip}}" download title="Download zip">zip</a>
+                {{if .DeleteAction}}
+                <form method="post" action="{{.DeleteAction}}" hx-confirm="Delete tag {{.Name}}?">
+                  <button type="submit" class="btn danger px-2 py-0.5 text-[11px]">delete</button>
+                </form>
+                {{end}}
+              </div>
+            </td>
+          </tr>
+          {{end}}
+        </tbody>
+      </table>
+    </div>
+    {{else if not .Error}}
+    {{template "collab_empty" (dict "icon" "tag" "title" "No tags yet." "hint" "Create a tag from a commit page, or push one with git.")}}
+    {{end}}
+  </div>
+</div>
+{{end}}
+{{end}}

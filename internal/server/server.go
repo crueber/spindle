@@ -79,19 +79,24 @@ type Server struct {
 	avatarHook func(username, email string)
 
 	// onPush fires after a successful client push lands (Forgejo #623):
-	// non-nil → called fire-and-forget with the repo id AFTER the
-	// report is on the wire, on both transports (pushPipeline is the
-	// ONE function both land in). Server-side publishes (mirror sync,
+	// non-nil → called fire-and-forget with the repo id and the landed refs
+	// AFTER the report is on the wire, on both transports (pushPipeline is
+	// the ONE function both land in). Server-side publishes (mirror sync,
 	// merge tasks) never enter pushPipeline, so they never fan out.
-	// Nil → no notification. The hook MUST NOT block — enqueue only
-	// (the callee probes state on its own goroutine). Wired by
-	// composition; server never imports the pushmirror package (law 8).
-	onPush func(id git.RepoId)
+	// Nil → no notification. The hook MUST NOT block — enqueue only (the
+	// callee probes state on its own goroutine). Wired by composition;
+	// server never imports the pushmirror/threads packages (law 8).
+	onPush func(id git.RepoId, refs []PushedRef)
 
 	// repoExtras fronts repoDispatch with feature repo-subpath surfaces
 	// (repo_extra.go: the 14.3 routing note for non-lane families like
 	// release asset bytes); nil → core switch only.
 	repoExtras []RepoRoutes
+
+	// topExtras fronts the top-level dispatch with feature namespaces
+	// outside /api and the repo lanes (bind_top.go; first consumer: the
+	// /v2 OCI registry, docs/features/14 §3); nil → catch-all only.
+	topExtras []ExtraRoutes
 
 	inflight  Inflight
 	cacheRoot string
@@ -147,10 +152,20 @@ type Options struct {
 	// answered. Wired by composition (cmd/spindle); server never
 	// imports the identity package (law 8).
 	AvatarHook func(username, email string)
-	// OnPush fires after a successful client push lands (Forgejo #623);
-	// nil → no notification. Wired by composition (cmd/spindle); server
-	// never imports the pushmirror package (law 8).
-	OnPush func(id git.RepoId)
+	// OnPush fires after a successful client push lands (Forgejo #623;
+	// extended for Threads run creation); nil → no notification. Wired by
+	// composition (cmd/spindle); server never imports the feature packages
+	// (law 8).
+	OnPush func(id git.RepoId, refs []PushedRef)
+}
+
+// PushedRef is one ref that landed in a client push. Ref is the full ref name
+// ("refs/heads/main"); New is the new commit sha (all-zero for a delete — the
+// hook decides whether a delete is interesting; Threads does not create runs
+// for one). It is a value copy, safe to hand to a goroutine.
+type PushedRef struct {
+	Ref string
+	New string
 }
 
 // BootState is the §3.4 boot decision tree outcome.

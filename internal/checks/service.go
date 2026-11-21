@@ -138,27 +138,7 @@ func (s *Service) ReportStatus(ctx context.Context, owner, repo, sha string, p a
 	if err := requireAuthenticated(p); err != nil {
 		return nil, err
 	}
-	fullSHA, err := normalizeSHA(sha)
-	if err != nil {
-		return nil, err
-	}
-	if err := ValidContext(in.Context); err != nil {
-		return nil, fmt.Errorf("%w: %v", ErrInvalid, err)
-	}
-	if !validState(in.State) {
-		return nil, fmt.Errorf("%w: state must be one of pending|success|failure|error, got %q", ErrInvalidState, in.State)
-	}
-	if err := validTargetURL(in.TargetURL); err != nil {
-		return nil, err
-	}
-	if err := validDescription(in.Description); err != nil {
-		return nil, err
-	}
-	started, err := parseOptTime(in.StartedAt, "started_at")
-	if err != nil {
-		return nil, err
-	}
-	completed, err := parseOptTime(in.CompletedAt, "completed_at")
+	fullSHA, started, completed, err := validateReportInput(sha, in)
 	if err != nil {
 		return nil, err
 	}
@@ -187,7 +167,61 @@ func (s *Service) ReportStatus(ctx context.Context, owner, repo, sha string, p a
 		}
 		creator = normPrincipal(p.Name)
 	}
-	// Step 1 (tail): the sha must resolve to a commit.
+	return s.recordResolved(ctx, owner, repo, fullSHA, creator, in, started, completed)
+}
+
+// RecordStatus is the trusted in-process reporter (§2's "job state
+// transitions write the same check-run records"): identical validation,
+// storage, index projection and fan-out as ReportStatus, with the credential
+// check omitted because the caller IS the server (internal/threads). It is
+// never reachable over HTTP — the checks Handler always calls ReportStatus, so
+// an unauthenticated request can never mint a status through it.
+//
+// creator names the producer in the stored record ("spindle" when empty).
+func (s *Service) RecordStatus(ctx context.Context, owner, repo, sha, creator string, in ReportInput) (*StatusDoc, error) {
+	fullSHA, started, completed, err := validateReportInput(sha, in)
+	if err != nil {
+		return nil, err
+	}
+	creator = normPrincipal(creator)
+	if creator == "" {
+		creator = "spindle"
+	}
+	return s.recordResolved(ctx, owner, repo, fullSHA, creator, in, started, completed)
+}
+
+// validateReportInput normalizes and validates the report fields (§2 step 1).
+func validateReportInput(sha string, in ReportInput) (fullSHA string, started, completed *string, err error) {
+	fullSHA, err = normalizeSHA(sha)
+	if err != nil {
+		return "", nil, nil, err
+	}
+	if err := ValidContext(in.Context); err != nil {
+		return "", nil, nil, fmt.Errorf("%w: %v", ErrInvalid, err)
+	}
+	if !validState(in.State) {
+		return "", nil, nil, fmt.Errorf("%w: state must be one of pending|success|failure|error, got %q", ErrInvalidState, in.State)
+	}
+	if err := validTargetURL(in.TargetURL); err != nil {
+		return "", nil, nil, err
+	}
+	if err := validDescription(in.Description); err != nil {
+		return "", nil, nil, err
+	}
+	started, err = parseOptTime(in.StartedAt, "started_at")
+	if err != nil {
+		return "", nil, nil, err
+	}
+	completed, err = parseOptTime(in.CompletedAt, "completed_at")
+	if err != nil {
+		return "", nil, nil, err
+	}
+	return fullSHA, started, completed, nil
+}
+
+// recordResolved is the storage half of a report (§2 steps 1-tail–4) shared by
+// ReportStatus and RecordStatus.
+func (s *Service) recordResolved(ctx context.Context, owner, repo, fullSHA, creator string, in ReportInput, started, completed *string) (*StatusDoc, error) {
 	if s.Commits == nil {
 		return nil, fmt.Errorf("%w: git backend not wired", ErrUnavailable)
 	}

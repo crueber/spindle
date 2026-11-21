@@ -433,6 +433,13 @@ func (h *Handler) listPulls(w http.ResponseWriter, r *http.Request, owner, repo 
 	}
 	f.Base = q.Get("base")
 	f.Head = q.Get("head")
+	for _, v := range q["labels"] {
+		for _, l := range strings.Split(v, ",") {
+			if l = strings.TrimSpace(l); l != "" {
+				f.Labels = append(f.Labels, l)
+			}
+		}
+	}
 	if v := q.Get("sort"); v != "" {
 		if v != "updated" && v != "created" {
 			writePlain(w, http.StatusBadRequest, "invalid sort: must be updated|created")
@@ -629,15 +636,42 @@ func (h *Handler) updatePull(w http.ResponseWriter, r *http.Request, owner, repo
 		return
 	}
 	var body struct {
-		Title *string `json:"title"`
-		Body  *string `json:"body"`
-		State *string `json:"state"`
-		Draft *bool   `json:"draft"`
+		Title     *string         `json:"title"`
+		Body      *string         `json:"body"`
+		State     *string         `json:"state"`
+		Draft     *bool           `json:"draft"`
+		Labels    *[]string       `json:"labels"`
+		Assignees *[]string       `json:"assignees"`
+		Milestone json.RawMessage `json:"milestone"`
 	}
-	if !decodeStrict(w, r, 1<<20, map[string]bool{"title": true, "body": true, "state": true, "draft": true}, &body) {
+	if !decodeStrict(w, r, 1<<20, map[string]bool{
+		"title": true, "body": true, "state": true, "draft": true,
+		"labels": true, "assignees": true, "milestone": true,
+	}, &body) {
 		return
 	}
-	th, pr, err := h.Svc.UpdatePR(r.Context(), owner, repo, num, p, PRPatch{Title: body.Title, Body: body.Body, State: body.State, Draft: body.Draft})
+	// Milestone rides as a value RawMessage: absent means "no change" and
+	// an explicit null means "clear" (02 §7 / issue #119) — encoding/json
+	// cannot tell those apart on a **string. Anything but null or a string
+	// is 400.
+	var milestone **string
+	if raw := body.Milestone; raw != nil {
+		var want *string
+		if string(raw) != "null" {
+			var s string
+			if err := json.Unmarshal(raw, &s); err != nil {
+				writePlain(w, http.StatusBadRequest, "invalid milestone: must be an id string or null")
+				return
+			}
+			want = &s
+		}
+		milestone = &want
+	}
+	patch := PRPatch{Title: body.Title, Body: body.Body, State: body.State, Draft: body.Draft}
+	if body.Labels != nil || body.Assignees != nil || milestone != nil {
+		patch.Metadata = &ThreadMetaPatch{Labels: body.Labels, Assignees: body.Assignees, Milestone: milestone}
+	}
+	th, pr, err := h.Svc.UpdatePR(r.Context(), owner, repo, num, p, patch)
 	if err != nil {
 		writeErr(w, err)
 		return

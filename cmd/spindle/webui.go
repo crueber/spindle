@@ -39,6 +39,7 @@ import (
 	"github.com/crueber/spindle/internal/server/auth"
 	"github.com/crueber/spindle/internal/setup"
 	"github.com/crueber/spindle/internal/store"
+	"github.com/crueber/spindle/internal/threads"
 	"github.com/crueber/spindle/internal/webui"
 )
 
@@ -206,6 +207,11 @@ func wireRepoPages(c *collabWiring, apiEnv *api.Env) {
 		}
 		if c.tagsSvc != nil {
 			d.Tags = c.tagsSvc.CreateTag
+			d.TagsList = c.tagsSvc.ListTagEntries
+			d.TagDelete = c.tagsSvc.DeleteTag
+		}
+		if c.forksyncSvc != nil {
+			d.SyncFork = c.forksyncSvc.Start
 		}
 		if c.ident != nil {
 			d.RoleOf = func(ctx context.Context, owner, repo string, p auth.Principal) identity.Role {
@@ -234,12 +240,14 @@ func wireCollabPages(apiEnv *api.Env, c *collabWiring) {
 				role, _ := ident.Resolve(ctx, owner, repo, p)
 				return role
 			}
+			d.Collaborators = ident.Collaborators
 		}
 		if iss := c.issuesSvc; iss != nil {
 			d.IssuesList = iss.ListIssues
 			d.IssuesGet = iss.GetThread
 			d.IssueComment = iss.AddComment
 			d.IssuePatch = iss.PatchIssue
+			d.IssueMeta = iss.PatchThreadMetadata
 			d.IssueReact = iss.AddReaction
 			d.IssueUnreact = iss.RemoveReaction
 			// The header's GAP is closed: internal/issues now exports both
@@ -288,6 +296,7 @@ func wireCollabPages(apiEnv *api.Env, c *collabWiring) {
 			d.ReleaseDelete = rel.DeleteRelease
 			d.AssetUpload = rel.UploadAsset
 			d.AssetDelete = rel.DeleteAsset
+			d.ReleaseDownloads = rel.AssetDownloads
 		}
 	}
 	if apiEnv != nil {
@@ -300,6 +309,17 @@ func wireCollabPages(apiEnv *api.Env, c *collabWiring) {
 		}
 	}
 	webui.BindCollab(d)
+	td := webui.ThreadsDeps{}
+	if c != nil && c.threadsSvc != nil {
+		th := c.threadsSvc
+		td.List = func(ctx context.Context, owner, repo string, p auth.Principal, after string, n int) (*threads.RunPage, error) {
+			return th.ListRuns(ctx, owner+"/"+repo, p, after, n)
+		}
+		td.Get = func(ctx context.Context, owner, repo, runID string, p auth.Principal) (*threads.RunView, error) {
+			return th.GetRun(ctx, owner+"/"+repo, runID, p)
+		}
+	}
+	webui.BindThreads(td)
 }
 
 // ---------------------------------------------------------------------------

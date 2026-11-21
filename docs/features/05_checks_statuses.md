@@ -338,3 +338,11 @@ re-exports; envelope/SSE parsing reuses `sdk/src/sse.js` — one parser (12_web_
   `web/src/lib/checks-empty.js` is historical, D-WEB-15);
   the required-checks blocker strings (`<context> (missing)`) and the
   merge-button tooltip already covered the gated case and are unchanged.
+- **In-process producer (Threads T1, 2026-11-20).** `checks.Service.RecordStatus` is the trusted
+  server-side reporter: the same validation, Create-then-CAS storage, index projection, SSE packet
+  and failure fan-out as `ReportStatus`, with the credential check omitted because the caller is
+  the server itself (the first consumer is `internal/threads`, which mirrors every job as
+  `threads/<workflow>/<job>`). It is **not** reachable over HTTP — the checks handler always calls
+  `ReportStatus`, so an unauthenticated request cannot mint a status through it. The stored
+  `creator` names the producer (`"threads"`). No wire, cache, or gate change: the merge task reads
+  the same combined view either way.

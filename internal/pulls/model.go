@@ -175,15 +175,20 @@ type Thread struct {
 	Kind         string   `json:"kind"`
 	Title        string   `json:"title"`
 	State        string   `json:"state"`
+	StateReason  *string  `json:"state_reason"`
 	Author       string   `json:"author"`
 	CreatedAt    string   `json:"created_at"`
 	UpdatedAt    string   `json:"updated_at"`
 	Labels       []string `json:"labels"`
 	Assignees    []string `json:"assignees"`
+	Milestone    *string  `json:"milestone"`
 	Participants []string `json:"participants"`
 	NextEventSeq int      `json:"next_event_seq"`
 	CommentCount int      `json:"comment_count"`
-	Version      int      `json:"version"`
+	// ReactionSummary is 02's per-event reaction cache; pulls carries it
+	// through header writes verbatim (02 owns the shape, 03 never edits it).
+	ReactionSummary map[string]map[string]int `json:"reaction_summary"`
+	Version         int                       `json:"version"`
 	// NextReviewSeq reserves review seqs (04 §3); NextThreadNum reserves
 	// tids (04 §4); ReviewSummary is 04's denormalized render cache (§6).
 	NextReviewSeq int             `json:"next_review_seq,omitempty"`
@@ -198,8 +203,10 @@ type Card struct {
 	Kind         string   `json:"kind"`
 	Title        string   `json:"title"`
 	State        string   `json:"state"`
+	StateReason  *string  `json:"state_reason"`
 	Labels       []string `json:"labels"`
 	Assignees    []string `json:"assignees"`
+	Milestone    *string  `json:"milestone"`
 	Author       string   `json:"author"`
 	CreatedAt    string   `json:"created_at"`
 	UpdatedAt    string   `json:"updated_at"`
@@ -230,6 +237,8 @@ type Event struct {
 	From    *string        `json:"from,omitempty"`
 	To      *string        `json:"to,omitempty"`
 	Reason  *string        `json:"reason,omitempty"`
+	Added   []string       `json:"added,omitempty"`
+	Removed []string       `json:"removed,omitempty"`
 	Source  map[string]any `json:"source,omitempty"`
 	PRNum   *int           `json:"pr_num,omitempty"`
 	Keyword *string        `json:"keyword,omitempty"`
@@ -238,16 +247,21 @@ type Event struct {
 	Strategy       *string `json:"strategy,omitempty"`
 }
 
-// Event types pulls writes (02's set plus the PR-side trigger).
+// Event types pulls writes (02's set plus the PR-side trigger). The
+// metadata events are written by 02's shared thread patch (PR labels,
+// assignees and milestone reuse that one implementation).
 const (
-	EventOpened          = "opened"
-	EventCommented       = "commented"
-	EventTitleChanged    = "title_changed"
-	EventStateChanged    = "state_changed"
-	EventDraftChanged    = "draft_changed"
-	EventReferenced      = "referenced"
-	EventMerged          = "merged"
-	EventHeadForcePushed = "head_force_pushed"
+	EventOpened           = "opened"
+	EventCommented        = "commented"
+	EventTitleChanged     = "title_changed"
+	EventStateChanged     = "state_changed"
+	EventLabelsChanged    = "labels_changed"
+	EventAssigneesChanged = "assignees_changed"
+	EventMilestoneChanged = "milestone_changed"
+	EventDraftChanged     = "draft_changed"
+	EventReferenced       = "referenced"
+	EventMerged           = "merged"
+	EventHeadForcePushed  = "head_force_pushed"
 )
 
 // Limits (§§2-3,7).

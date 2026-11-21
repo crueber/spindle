@@ -213,8 +213,10 @@ func (s *Service) loadIndex(ctx context.Context, owner, repo string) (*Index, st
 func prCardOf(t *Thread) Card {
 	return Card{
 		Num: t.Num, Kind: "pr", Title: t.Title, State: t.State,
-		Labels: nonNilStr(t.Labels), Assignees: nonNilStr(t.Assignees),
-		Author: t.Author, CreatedAt: t.CreatedAt, UpdatedAt: t.UpdatedAt,
+		StateReason: t.StateReason,
+		Labels:      nonNilStr(t.Labels), Assignees: nonNilStr(t.Assignees),
+		Milestone: t.Milestone,
+		Author:    t.Author, CreatedAt: t.CreatedAt, UpdatedAt: t.UpdatedAt,
 		CommentCount: t.CommentCount,
 	}
 }
@@ -732,26 +734,29 @@ func (s *Service) ensurePullHead(ctx context.Context, pr *PRDoc, headLive string
 // Merged is always present (never omitempty — the PROut/Draft discipline):
 // additive per law 5, old clients ignore the unknown field.
 type PROut struct {
-	Num       int    `json:"num"`
-	Title     string `json:"title"`
-	State     string `json:"state"`
-	Author    string `json:"author"`
-	BaseRef   string `json:"base_ref"`
-	HeadRef   string `json:"head_ref"`
-	HeadSHA   string `json:"head_sha"`
-	Draft     bool   `json:"draft"`
-	Merged    bool   `json:"merged"`
-	UpdatedAt string `json:"updated_at"`
+	Num       int      `json:"num"`
+	Title     string   `json:"title"`
+	State     string   `json:"state"`
+	Labels    []string `json:"labels"`
+	Assignees []string `json:"assignees"`
+	Author    string   `json:"author"`
+	BaseRef   string   `json:"base_ref"`
+	HeadRef   string   `json:"head_ref"`
+	HeadSHA   string   `json:"head_sha"`
+	Draft     bool     `json:"draft"`
+	Merged    bool     `json:"merged"`
+	UpdatedAt string   `json:"updated_at"`
 }
 
-// ListFilter shapes GET …/pulls (§8): state/base/head/sort/n/after.
+// ListFilter shapes GET …/pulls (§8): state/labels/base/head/sort/n/after.
 type ListFilter struct {
-	State string
-	Base  string
-	Head  string
-	Sort  string // updated | created — parsed + validated, but the render is always number-descending (issue #48)
-	After int
-	N     int
+	State  string
+	Labels []string // AND semantics (02 §7)
+	Base   string
+	Head   string
+	Sort   string // updated | created — parsed + validated, but the render is always number-descending (issue #48)
+	After  int
+	N      int
 }
 
 // ListResult is the paged PR list answer.
@@ -794,6 +799,9 @@ func (s *Service) ListPRs(ctx context.Context, owner, repo string, p auth.Princi
 		if f.State != "" && c.State != f.State {
 			continue
 		}
+		if !hasAllLabels(c.Labels, f.Labels) {
+			continue
+		}
 		pr, _, perr := s.loadPR(ctx, owner, repo, c.Num)
 		if perr != nil || pr == nil {
 			continue
@@ -805,7 +813,8 @@ func (s *Service) ListPRs(ctx context.Context, owner, repo string, p auth.Princi
 			continue
 		}
 		rows = append(rows, PROut{
-			Num: pr.Num, Title: c.Title, State: c.State, Author: c.Author,
+			Num: pr.Num, Title: c.Title, State: c.State,
+			Labels: nonNilStr(c.Labels), Assignees: nonNilStr(c.Assignees), Author: c.Author,
 			BaseRef: pr.Base.Ref, HeadRef: pr.Head.Ref, HeadSHA: pr.Head.SHA,
 			Draft: pr.Draft, Merged: pr.Merged, UpdatedAt: c.UpdatedAt,
 		})
@@ -815,6 +824,24 @@ func (s *Service) ListPRs(ctx context.Context, owner, repo string, p auth.Princi
 	}
 	page, more := windowRows(rows, f.After, n)
 	return &ListResult{Pulls: page, More: more}, nil
+}
+
+// hasAllLabels is the shared AND label predicate (02 §7): a PR matches
+// when every requested label is on its index card (case-insensitive).
+func hasAllLabels(have, want []string) bool {
+	for _, w := range want {
+		found := false
+		for _, h := range have {
+			if strings.EqualFold(h, w) {
+				found = true
+				break
+			}
+		}
+		if !found {
+			return false
+		}
+	}
+	return true
 }
 
 // windowRows slices the number-descending rows after the after-num cursor
@@ -858,13 +885,15 @@ func threadLocked(th *Thread, pr *PRDoc) bool {
 
 // --- update + comment ---------------------------------------------------------
 
-// PRPatch carries the PUT fields (§8): title/body/state/draft. Unknown keys are
-// rejected at the HTTP layer before this is built.
+// PRPatch carries the PUT fields (§8): title/body/state/draft plus the
+// 02-owned thread metadata (labels/assignees/milestone) through Metadata.
+// Unknown keys are rejected at the HTTP layer before this is built.
 type PRPatch struct {
-	Title *string
-	Body  *string
-	State *string
-	Draft *bool
+	Title    *string
+	Body     *string
+	State    *string
+	Draft    *bool
+	Metadata *ThreadMetaPatch
 }
 
 // UpdatePR applies title/body/state/draft edits (§8 PUT). Title/state/draft
@@ -1053,6 +1082,21 @@ func (s *Service) UpdatePR(ctx context.Context, owner, repo string, num int, act
 		}
 		s.emit(ctx, NotifyEvent{Repo: repoName(owner, repo), Class: class, Actor: who, PullNum: num, Recipients: prParticipants(th, who)})
 		s.stream(ctx, StreamEvent{Name: "pull", Repo: repoName(owner, repo), Action: action, Num: num, Title: th.Title, State: th.State, Author: th.Author, BaseRef: pr.Base.Ref, HeadRef: pr.Head.Ref, HeadSHA: pr.Head.SHA})
+	}
+	if p.Metadata != nil {
+		// 02 owns the thread-metadata fields: this call is its only writer
+		// (validation, events, milestone counters, index card and
+		// notifications live there). The reload picks up the new header so
+		// the index upsert below cannot write a stale card back.
+		if s.Metadata == nil {
+			return nil, nil, fmt.Errorf("%w: thread metadata is not wired", ErrUnavailable)
+		}
+		if merr := s.Metadata(ctx, owner, repo, num, actor, *p.Metadata); merr != nil {
+			return nil, nil, merr
+		}
+		if nt, _, lerr := s.loadThread(ctx, owner, repo, num); lerr == nil && nt != nil {
+			th = nt
+		}
 	}
 	s.updateIndex(ctx, owner, repo, prCardOf(th))
 	return th, pr, nil

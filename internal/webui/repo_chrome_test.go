@@ -203,8 +203,10 @@ func TestRepoChromeCodePageKeepsItsOwn(t *testing.T) {
 		if got := len(byClass(t, body, "repo-header")); got != 1 {
 			t.Errorf("%s: masthead count = %d, want exactly 1", path, got)
 		}
-		if got := len(tabsOf(t, body)); got != 7 {
-			t.Errorf("%s: tab count = %d, want 7", path, got)
+		// code, commits, tags, issues, pulls, checks (busySummary), threads,
+		// releases, settings — the union of the tabs the feature tracks added.
+		if got := len(tabsOf(t, body)); got != 9 {
+			t.Errorf("%s: tab count = %d, want 9", path, got)
 		}
 	}
 	if got := activeTabOf(t, f.mustGet("/demo/spindle/commits", http.StatusOK)); got != "commits" {

@@ -28,6 +28,10 @@ type Release struct {
 	UpdatedAt   string       `json:"updated_at"`
 	Assets      []AssetEntry `json:"assets"`
 	Version     int          `json:"version"`
+	// PendingTag marks a draft whose tag does not exist yet (WP3.3): the tag
+	// is created at refs/tags/<tag> → TagSHA by the publish transition, never
+	// at draft creation. GitHub's "create a new tag on publish".
+	PendingTag bool `json:"pending_tag,omitempty"`
 }
 
 // AssetEntry is one row of Release.Assets (§1.1): sha256 + size live in the
@@ -56,6 +60,10 @@ type ReleaseInput struct {
 	Body       *string `json:"body"`
 	Draft      *bool   `json:"draft"`
 	Prerelease *bool   `json:"prerelease"`
+	// Target declares a commit (sha or ref) for a tag that does not exist
+	// yet (WP3.3). Only valid with draft=true: the ref is created when the
+	// draft is published, never before.
+	Target *string `json:"target"`
 }
 
 // encodeTag percent-encodes a tag into one key segment (§1: `%` → `%25`,

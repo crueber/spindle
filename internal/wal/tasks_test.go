@@ -155,3 +155,39 @@ func TestTaskTable_DrainInterrupts(t *testing.T) {
 		t.Fatal("start during drain succeeded")
 	}
 }
+
+// TestTaskTable_RunningJoinHint pins the HTTP 202 id hint: Running reports the
+// live record for (repo, kind) while a task runs, nil once it finishes, and a
+// copy (callers cannot mutate the table's record through it).
+func TestTaskTable_RunningJoinHint(t *testing.T) {
+	tt := newTaskTable("test-host", context.Background())
+	if rec := tt.Running("o/r", "sync-fork"); rec != nil {
+		t.Fatalf("idle table reported %+v", rec)
+	}
+	started := make(chan struct{})
+	release := make(chan struct{})
+	go func() {
+		_, _ = tt.Run(context.Background(), "o/r", "sync-fork", nil, func(ctx context.Context, task *Task) error {
+			close(started)
+			<-release
+			return nil
+		})
+	}()
+	<-started
+	rec := tt.Running("o/r", "sync-fork")
+	if rec == nil || rec.ID == "" || rec.Kind != "sync-fork" || rec.Repo != "o/r" {
+		t.Fatalf("running record %+v", rec)
+	}
+	rec.Kind = "mutated"
+	if again := tt.Running("o/r", "sync-fork"); again.Kind != "sync-fork" {
+		t.Fatal("Running returned the live record, not a copy")
+	}
+	close(release)
+	deadline := time.Now().Add(5 * time.Second)
+	for tt.Running("o/r", "sync-fork") != nil {
+		if time.Now().After(deadline) {
+			t.Fatal("running record never cleared")
+		}
+		time.Sleep(time.Millisecond)
+	}
+}

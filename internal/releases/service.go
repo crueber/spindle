@@ -79,8 +79,25 @@ func (s *Service) PutRelease(ctx context.Context, owner, repo string, p auth.Pri
 	if name == "" {
 		name = tag
 	}
+	target, terr := validateTarget(in.Target)
+	if terr != nil {
+		return nil, false, terr
+	}
 
 	key := ReleaseKey(owner, repo, tag)
+	// WP3.3: a pending tag is created on the publish transition, BEFORE the
+	// CAS that flips draft=false (a released-but-untagged state does not
+	// exist). The create is CAS-idempotent: a racing publish resolves the
+	// tag and treats "already at the same commit" as success.
+	if in.Draft != nil && !draft {
+		if raw, _, gerr := s.getJSON(ctx, key); gerr == nil && raw != nil {
+			if cur, perr := parseRelease(raw); perr == nil && cur.Draft && cur.PendingTag {
+				if terr := s.ensurePendingTag(ctx, owner, repo, cur, p); terr != nil {
+					return nil, false, terr
+				}
+			}
+		}
+	}
 	var out *Release
 	var created bool
 	var published bool
@@ -93,9 +110,24 @@ func (s *Service) PutRelease(ctx context.Context, owner, repo string, p auth.Pri
 			if expectedVer == "*" {
 				return nil, false, fmt.Errorf("%w: unknown release %q", ErrNotFound, tag)
 			}
+			if target != "" && !draft {
+				return nil, false, fmt.Errorf("%w: a new tag requires draft=true (the tag is created on publish)", ErrInvalid)
+			}
 			sha, rerr := s.resolveTag(ctx, owner, repo, tag)
+			pending := false
 			if rerr != nil {
-				return nil, false, rerr
+				// WP3.3: a draft may declare a target for a tag that does
+				// not exist yet. The tag is created on publish, so the
+				// target must resolve now (an unknown commit is 404), and
+				// publishing-without-a-tag is refused above.
+				if target == "" || !isErr(rerr, ErrNotFound) {
+					return nil, false, rerr
+				}
+				sha, rerr = s.resolveAnyRef(ctx, owner, repo, target)
+				if rerr != nil {
+					return nil, false, rerr
+				}
+				pending = true
 			}
 			var publishedAt *string
 			if !draft {
@@ -108,6 +140,7 @@ func (s *Service) PutRelease(ctx context.Context, owner, repo string, p auth.Pri
 				Author: normPrincipal(p.Name), CreatedAt: now,
 				PublishedAt: publishedAt, UpdatedAt: now,
 				Assets: []AssetEntry{}, Version: 1,
+				PendingTag: pending,
 			}
 			created = true
 			return encodeRelease(out), true, nil
@@ -115,6 +148,11 @@ func (s *Service) PutRelease(ctx context.Context, owner, repo string, p auth.Pri
 		r, perr := parseRelease(cur)
 		if perr != nil {
 			return nil, false, perr
+		}
+		if target != "" {
+			// The declared target only seeds a not-yet-existing tag; it is
+			// immutable afterwards like tag/tag_sha.
+			return nil, false, fmt.Errorf("%w: target is only valid when the tag does not exist yet", ErrInvalid)
 		}
 		if in.Name != nil {
 			r.Name = name
@@ -129,6 +167,9 @@ func (s *Service) PutRelease(ctx context.Context, owner, repo string, p auth.Pri
 			}
 			if draft {
 				r.PublishedAt = nil
+			}
+			if published && r.PendingTag {
+				r.PendingTag = false
 			}
 			r.Draft = draft
 		}
@@ -151,6 +192,52 @@ func (s *Service) PutRelease(ctx context.Context, owner, repo string, p auth.Pri
 		s.stream(ctx, StreamEvent{Name: "release", Repo: repoName(owner, repo), Action: "edited", Tag: out.Tag})
 	}
 	return out, created, nil
+}
+
+// ensurePendingTag publishes refs/tags/<tag> at the draft's snapshotted
+// TagSHA (WP3.3). Conflict means a concurrent publish won: success only when
+// the live tag peels to the same commit (an operator moving the tag elsewhere
+// is a real conflict, never a silent overwrite).
+func (s *Service) ensurePendingTag(ctx context.Context, owner, repo string, r *Release, p auth.Principal) error {
+	if s.CreateTag == nil {
+		return fmt.Errorf("%w: tag creation unavailable", ErrUnavailable)
+	}
+	err := s.CreateTag(ctx, owner, repo, r.Tag, r.TagSHA, p)
+	if err == nil {
+		return nil
+	}
+	if isErr(err, ErrConflict) {
+		if sha, rerr := s.resolveTag(ctx, owner, repo, r.Tag); rerr == nil && sha == r.TagSHA {
+			return nil
+		}
+		return fmt.Errorf("%w: tag %q already exists at another commit", ErrConflict, r.Tag)
+	}
+	return err
+}
+
+// validateTarget bounds a declared pending-tag target.
+func validateTarget(target *string) (string, error) {
+	if target == nil {
+		return "", nil
+	}
+	t := strings.TrimSpace(*target)
+	if t == "" {
+		return "", fmt.Errorf("%w: target must not be empty", ErrInvalid)
+	}
+	if len(t) > 500 {
+		return "", fmt.Errorf("%w: target too long", ErrInvalid)
+	}
+	if strings.HasPrefix(t, "-") {
+		return "", fmt.Errorf("%w: target must not start with '-'", ErrInvalid)
+	}
+	for i := 0; i < len(t); i++ {
+		c := t[i]
+		if c < 0x20 || c == 0x7f || c == ' ' || c == '~' || c == '^' || c == ':' ||
+			c == '?' || c == '*' || c == '[' || c == '\\' {
+			return "", fmt.Errorf("%w: bad character in target", ErrInvalid)
+		}
+	}
+	return t, nil
 }
 
 // --- reads ------------------------------------------------------------------

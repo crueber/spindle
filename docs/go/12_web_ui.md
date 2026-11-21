@@ -253,9 +253,9 @@ Read pages (`GET`): `/`, `/explore`, `/how-it-works`, `/api`, `/new`, `/import`,
 `/invitations`, `/notifications`, `/login-required`, `/setup`, `/{owner}`, `/{owner}/repositories`,
 `/{owner}/organizations`, `/{owner}/settings`, `/{owner}/teams/{slug}`, `/{owner}/{repo}` (code),
 `/tree[/{path}]`, `/blob/{path}`, `/commits`, `/commit/{sha}`, `/wal`, `/issues`, `/issues/{num}`,
-`/pulls`, `/pull/{num}` (+ `/commits`, `/files`), `/checks`, `/checks/{sha}`, `/releases`,
-`/releases/{tag}`, `/forks`, `/labels`, `/milestones`, `/settings[/{tab}]`, `/fork`, `/issues/new`,
-`/pulls/new`, `/releases/new`.
+`/pulls`, `/pull/{num}` (+ `/commits`, `/files`), `/checks`, `/checks/{sha}`, `/threads`,
+`/threads/{run}`, `/releases`, `/releases/{tag}`, `/forks`, `/labels`, `/milestones`,
+`/settings[/{tab}]`, `/fork`, `/issues/new`, `/pulls/new`, `/releases/new`.
 
 Writes post to sibling paths on the page that owns them (`…/close`, `…/merge`, `…/reviews`,
 `…/threads/{id}`, `…/labels`, `…/milestones/{id}/state`, `…/settings/{tab}`, `…/releases/{tag}/assets`,
@@ -263,6 +263,15 @@ the `star|unstar|watch|unwatch|tag` toggles, owner profile/avatar verbs, notific
 changes). Three read fragments serve htmx directly: `/checks/{sha}/contexts`,
 `/pull/{num}/threads/{tid}`, `/pull/{num}/merge/task`. Shape-generic families (teams) go through one
 dispatcher (§2.3).
+
+The Threads pages (`internal/webui/threads.go`, docs/features/15 §6.1) are read-only in T1: the run
+list renders newest-first with a cursor "Older" link, the run page shows the header and each job's
+check context/runs-on/steps. Both carry the repository chrome and the **Threads** tab, which is
+always present (a workflow-less repo has a legitimate empty run list; the Checks #505
+hide-on-empty rule is about an externally reported surface, not this one). The seam is
+`ThreadsDeps` (`List`/`Get`, bound in composition to `*threads.Service` with the repo id joined),
+and `collabErrStatus` maps the Threads sentinels onto page statuses so a private repo answers its
+real 401/403 rather than a 503 card. Dispatch (write role) is the JSON API only.
 
 ### 2.4 Gates (exact parity with the API)
 
@@ -303,10 +312,17 @@ no router, no framework.
 ### 2.8 Server renderers (the XSS boundary)
 
 `internal/webui/{markdown,diff,graph,highlight}.go` replaced the browser libraries. Markdown escapes all
-text and allows only `http`/`https`/`mailto`/relative links; diffs are parsed into typed lines and
-rendered per cell; the commit graph is emitted as SVG; highlighting emits escaped token spans. **Never
-pass user-derived bytes through `template.HTML`**, and never reintroduce a client sanitizer
-(marked/DOMPurify are gone by D-WEB-14).
+text and allows only `http`/`https`/`mailto`/relative links; raw HTML in markdown passes through the
+allowlist sanitizer (`internal/webui/mdsanitize.go`, WP12) — an `html.Tokenizer` walk that emits only
+GitHub's practical tag/attribute set (`details`/`summary`, `video`/`audio`/`source`/`picture`, `kbd`,
+`sub`/`sup`, tables, `align`, …) and drops scripts, styles, iframes, form controls, foreign content,
+`on*` handlers, `srcset`, `style`, `class`, and every non-http/mailto/relative URL (`data:image/*` is
+the one exception, on `img`). Markdown documents rendered at a repo coordinate carry a `MarkdownCtx`
+(owner/repo/ref/dir) so relative links and images resolve like GitHub: images and non-`.md` links go to
+the raw-byte lane at the same ref, `.md` links to the in-app blob page, with `..` clamped at the repo
+root. Diffs are parsed into typed lines and rendered per cell; the commit graph is emitted as SVG;
+highlighting emits escaped token spans. **Never pass user-derived bytes through `template.HTML`** outside
+these two renderers, and never reintroduce a client sanitizer (marked/DOMPurify are gone by D-WEB-14).
 
 ### 2.9 URL state replaces SPA memory
 
@@ -692,3 +708,36 @@ the effects are DOM refetches, not client caches.
   `SetupAccess` seam was bound, unlike GET/save. Webui cover: `TestIdentityNavMatrix`,
   `TestIdentityMenuOwnsKeysInvitesAndSetup`, `TestIdentityPagesRequireSignedIn`,
   `TestIdentityWritesRefuseNoIdentity`. Rendered proof (Chromium/@390px) in the commit report.
+- **WP12 (2026-11-20) — GitHub-compatible README rendering: relative URLs at a coordinate, raw HTML
+  through an allowlist sanitizer.** Two defects proven against a live `loom` README: `![demo](docs/x.webp)`
+  kept its author-relative URL and 404'd on the page URL, and `<div align="center">`, `<details>`,
+  `<video>`/`<picture>` rendered as literal text. (1) **Resolver:** `MarkdownCtx{Owner,Repo,Ref,Dir}` +
+  `RenderMarkdownCtx` (`mdctx.go`); `RenderMarkdown`/`RenderMarkdownIn` keep their no-coordinate contract
+  (relative URLs pass through). Absolute http(s)/mailto/fragments/`//` are never rewritten; a leading
+  `/` means the repo root; other paths resolve against `Dir`; `.`/`..` normalize with `..` clamped at the
+  root; escapes are never decoded or re-encoded (`%2e` stays `%2e`, `%20` is not double-encoded); the
+  authored `?query`/`#fragment` survive. Images and non-markdown links target
+  `/{o}/{r}/api/blob/{ref}/{path}?raw=1` (query appended with `&`); `*.md`/`*.markdown` links target the
+  in-app `/{o}/{r}/blob/{ref}/{path}`. Path segments are encoded individually and refs are shortened
+  first, so `refs/heads/feat/x` becomes `feat/x`. Wired at the directory-doc/README panel and blob
+  preview (`repo.go`), release notes (`.Tag`), PR descriptions/issue timelines (`.Repo.HeadLabel`),
+  and the issue/PR preview form. (2) **Sanitizer:** `mdsanitize.go` walks an `html.Tokenizer` stream (raw
+  fragments: blank-line-terminated HTML blocks per CommonMark type 6/7, plus balanced inline elements)
+  and emits only constructed markup. Allowed tags are the GitHub practical set (layout/disclosure/media/
+  tables/typography/semantic inline); allowed attrs are `href`/`src`/`poster` (URL-gated and resolved),
+  `alt`/`title`, numeric `width`/`height`/`colspan`/`rowspan`/`start`, `align` on block elements+`img`,
+  media `type`, `controls`/`loop`/`muted`/`playsinline`, `details open`. Dropped with content:
+  `script/style/iframe/object/embed/form/input/button/textarea/select/option/link/meta/base/svg/math/
+  template/noscript/frame`. Never emitted: every `on*`, `style`, `class`, `id`, `srcset`, `srcdoc`,
+  user `target` (links get `rel="nofollow ugc noopener"`, `target="_blank"` for external http(s)), and
+  `javascript:`/`vbscript:`/`data:` (except base64 `data:image/{png,jpeg,gif,webp}` on `img`).
+  Stray close tags survive only for block containers, because HTML blocks end at blank lines — that is
+  what keeps `<details>`/`<div>` spanning markdown balanced. **Deliberate deviations:** protocol-relative
+  markdown links stay *rejected* by `sanitizeURL` (the codebase's one URL policy; they are "untouched" by
+  the resolver only because they never reach it), and raw SVG is dropped (the raw lane serves SVG as
+  text/plain to keep the same-origin XSS surface closed). Raw-lane content type now names passive media
+  (`image/png|jpeg|gif|webp|avif|bmp|x-icon`, `video/*`, `audio/*`) so `nosniff` pages can embed it; text
+  and SVG stay `text/plain`. Tests: `TestRenderMarkdownCtxRelativeURLs`, `…CtxSlashedRef`,
+  `…CtxShortensFullRef`, `TestRenderMarkdownSanitizerNeuters`, `…SanitizerAllows`,
+  `…SanitizerResolvesRelativeURLs`, `TestRenderMarkdownInlineRawHTML`, `TestRenderMarkdownLoomReadme`
+  (golden fixture `testdata/loom-readme.md`), `TestRawContentType`.

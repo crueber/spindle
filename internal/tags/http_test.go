@@ -45,7 +45,7 @@ func TestHandleTable(t *testing.T) {
 		{"happy 201", grantWrite, "POST", "/o/r/api/tags", newBody, writerHeaders(), 201, `"ref":"refs/tags/v1"`},
 		{"browser lane 201", grantWrite, "POST", "/o/r/api-browser/tags", newBody, writerHeaders(), 201, `"name":"v1"`},
 		{"git suffix repo 201", grantWrite, "POST", "/o/r.git/api/tags", newBody, writerHeaders(), 201, `"sha":"` + testSHA + `"`},
-		{"get 405", grantWrite, "GET", "/o/r/api/tags", nil, writerHeaders(), 405, ""},
+		{"get list 200", grantWrite, "GET", "/o/r/api/tags", nil, writerHeaders(), 200, `"tags":[]`},
 		{"put 405", grantWrite, "PUT", "/o/r/api/tags", newBody, writerHeaders(), 405, ""},
 		{"delete 405", grantWrite, "DELETE", "/o/r/api/tags", nil, writerHeaders(), 405, ""},
 		{"anonymous 401", nil, "POST", "/o/r/api/tags", newBody, nil, 401, ""},

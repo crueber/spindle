@@ -204,6 +204,11 @@ type Service struct {
 	Notify Emitter
 	// Stream receives release live updates (nil = no-op).
 	Stream Streamer
+	// CreateTag publishes refs/tags/<tag> for a draft that declared a target
+	// (WP3.3). Composition wires tags.Service.CreateTag (policy + WAL create);
+	// nil makes pending-tag publishing 503 rather than silently dropping the
+	// tag. Called exactly on the draft→publish transition.
+	CreateTag func(ctx context.Context, owner, repo, name, sha string, p auth.Principal) error
 }
 
 // New builds a Service over st.
@@ -415,4 +420,14 @@ func (s *Service) stream(ctx context.Context, ev StreamEvent) {
 		return
 	}
 	s.Stream(ctx, ev)
+}
+
+// DownloadCountsKey returns repos/<o>/<r>/releases/counts/<tag>.json — the
+// per-release asset download counter (WP3.2). One object per release (not per
+// asset) keeps the byte route at ONE CAS bump and every render at ONE GET;
+// the body maps the already-validated single-segment asset name to its count.
+// It is disjoint from the header (`<tag>.json` vs `counts/<tag>.json`) and from
+// the asset byte subtree, so no LIST is polluted by it.
+func DownloadCountsKey(owner, repo, tag string) string {
+	return "repos/" + owner + "/" + repo + "/releases/counts/" + encodeTag(tag) + ".json"
 }

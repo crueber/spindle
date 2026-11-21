@@ -79,7 +79,8 @@ Status of every item, the GitHub-parity bar and the closing work: [`docs/PLAN-V1
 - [x] [tags](internal/tags)
 - [x] [releases](internal/releases)
 - [ ] packages — [specified](docs/features/14_packages.md), not yet implemented
-- [ ] [cli](cmd/spindle) — every operator action, machine-readable
+- [x] [cli](cmd/spindle) — every operator action, machine-readable (API client surface; the
+      `packages`/`threads` commands bind when their server routes land)
 - [ ] [threads](docs/features/15_threads.md) — CI: workflow files, container jobs, checks results
 - [x] [fork](internal/social)
 - [x] [webhooks](internal/notify)
@@ -109,7 +110,7 @@ make test-web  # node --test over the island and SDK logic modules
 make image     # OCI image
 ```
 
-Backend: Go 1.27 (module `github.com/crueber/spindle`), six direct third-party modules (chi, BurntSushi/toml, x/net, x/crypto for SSH, dicebear-go + dicebear/styles for avatars — the budget is AGENTS.md law 1). Frontend: **server-rendered Go `html/template` pages** enhanced with **htmx (vendored)** and small vanilla-ES islands (`web/src/islands/`); no UI framework and no client data layer. Markdown, diffs, commit graphs and syntax highlighting are rendered server-side in Go, so user text is escaped and sanitized on the server. pnpm 11 builds `web/dist/app.css` (Tailwind v4), `web/dist/ui.js` (esbuild, islands) and the dependency-free `web/dist/repos.js` SDK; any Node runs the headless JS tests. The design language is **Precision Dark** — graphite panes, one amber action accent, monospace identifiers, dense 34 px rows — specified normatively in `docs/style-guideline.md` §1. The JSON API and the SDK remain the programmatic surface (browse it at `/api`). The container build is `Dockerfile`, with compose examples in `compose.standalone.yml` (filesystem store) and `compose.yaml` (S3-backed via rustfs).
+Backend: Go 1.27 (module `github.com/crueber/spindle`), seven direct third-party modules (chi, BurntSushi/toml, x/net, x/crypto for SSH, dicebear-go + dicebear/styles for avatars, gopkg.in/yaml.v3 for Threads workflow files — the budget is AGENTS.md law 1). Frontend: **server-rendered Go `html/template` pages** enhanced with **htmx (vendored)** and small vanilla-ES islands (`web/src/islands/`); no UI framework and no client data layer. Markdown, diffs, commit graphs and syntax highlighting are rendered server-side in Go, so user text is escaped and sanitized on the server. pnpm 11 builds `web/dist/app.css` (Tailwind v4), `web/dist/ui.js` (esbuild, islands) and the dependency-free `web/dist/repos.js` SDK; any Node runs the headless JS tests. The design language is **Precision Dark** — graphite panes, one amber action accent, monospace identifiers, dense 34 px rows — specified normatively in `docs/style-guideline.md` §1. The JSON API and the SDK remain the programmatic surface (browse it at `/api`). The container build is `Dockerfile`, with compose examples in `compose.standalone.yml` (filesystem store) and `compose.yaml` (S3-backed via rustfs).
 
 ## CI and publishing
 

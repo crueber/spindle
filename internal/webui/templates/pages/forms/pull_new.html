@@ -20,15 +20,27 @@
            picker existed because the client had no server round trip. -->
       <div class="grid gap-3 sm:grid-cols-[1fr_auto_1fr] sm:items-end">
         <div class="grid gap-1">
-          <label class="text-sm font-medium" for="pull-from-repo">From</label>
+          <label class="text-sm font-medium" for="pull-from-repo">From repository</label>
           <select id="pull-from-repo" name="from_repo" class="input w-full" aria-label="From repository">
-            {{range .Data.FromRepos}}<option value="{{.}}"{{if eq . $.Data.FromRepo}} selected{{end}}>{{.}}</option>{{end}}
+            {{range .Data.FromRepoGroups}}
+            <optgroup label="{{.Label}}">
+              {{range .Repos}}<option value="{{.}}"{{if eq . $.Data.FromRepo}} selected{{end}}>{{.}}</option>{{end}}
+            </optgroup>
+            {{end}}
           </select>
-          <label class="text-sm font-medium" for="pull-from-ref">From branch</label>
-          <select id="pull-from-ref" name="from_ref" class="input w-full mono" aria-label="From branch">
-            <option value="">Pick a branch…</option>
-            {{range .Data.FromRefs}}<option value="{{.}}"{{if eq . $.Data.FromRef}} selected{{end}}>{{.}}</option>{{end}}
-          </select>
+          <div class="flex items-end gap-2">
+            <div class="min-w-0 flex-1">
+              <label class="text-sm font-medium" for="pull-from-ref">From branch</label>
+              <select id="pull-from-ref" name="from_ref" class="input w-full mono" aria-label="From branch">
+                <option value="">Pick a branch…</option>
+                <optgroup label="{{.Data.FromRepo}}">
+                  {{range .Data.FromRefs}}<option value="{{.}}"{{if eq . $.Data.FromRef}} selected{{end}}>{{.}}</option>{{end}}
+                </optgroup>
+              </select>
+            </div>
+            <button type="submit" name="action" value="refs" class="btn px-2 py-1" title="load this repository's branches">branches</button>
+          </div>
+          <p class="muted text-[11px]">Forks are listed under their owner; pick one, then load its branches.</p>
         </div>
         <span class="btn px-2 py-1 text-center" aria-hidden="true">⇄</span>
         <div class="grid gap-1">

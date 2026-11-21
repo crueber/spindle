@@ -2,12 +2,14 @@ package issues
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/crueber/spindle/internal/server/auth"
+	"github.com/crueber/spindle/internal/store"
 )
 
 func TestCreateIssue(t *testing.T) {
@@ -704,5 +706,94 @@ func TestListIssuesNumberDesc(t *testing.T) {
 	}
 	if got := numsOf(rest.Issues); !equalInts(got, []int{1}) || rest.More {
 		t.Fatalf("rest = %v more=%v, want [1]/false", got, rest.More)
+	}
+}
+
+// TestPatchThreadMetadataPRThread pins the shared 02 writer that 03's PR
+// update path reuses: labels/assignees/milestone apply to a kind:"pr"
+// thread with the same validation, events and index card as an issue; the
+// 03-owned fields (title/state) are refused here.
+func TestPatchThreadMetadataPRThread(t *testing.T) {
+	roles := newFakeRoles()
+	s := testService(roles)
+	ctx := reqCtx()
+	th := mustCreate(t, s, "acme", "repo", janeP, "PR stand-in", "")
+	grantTriage(roles, "acme", "repo")
+	roles.grant("acme", "repo", "bob@example.com", "triage")
+	if _, err := s.CreateLabel(ctx, "acme", "repo", aliceP, "bug", "ff0000", ""); err != nil {
+		t.Fatalf("CreateLabel: %v", err)
+	}
+	ms, err := s.CreateMilestone(ctx, "acme", "repo", aliceP, "v1", "", nil)
+	if err != nil {
+		t.Fatalf("CreateMilestone: %v", err)
+	}
+	// Flip the kind to "pr" (the same shared thread header 03 writes).
+	cur, ver, err := s.loadThread(ctx, "acme", "repo", th.Num)
+	if err != nil || cur == nil {
+		t.Fatalf("loadThread: %v", err)
+	}
+	cur.Kind = "pr"
+	if _, err := store.PutBytes(ctx, s.Store, ThreadKey("acme", "repo", th.Num), encodeThread(cur),
+		store.PutOptions{Mode: store.PutUpdate, IfVersion: ver}); err != nil {
+		t.Fatalf("flip kind: %v", err)
+	}
+
+	labels := []string{"bug"}
+	assignees := []string{"bob@example.com"}
+	milestone := &ms.ID
+	got, err := s.PatchThreadMetadata(ctx, "acme", "repo", th.Num, aliceP, IssuePatch{
+		Labels: &labels, Assignees: &assignees, Milestone: &milestone,
+	})
+	if err != nil {
+		t.Fatalf("PatchThreadMetadata: %v", err)
+	}
+	if len(got.Labels) != 1 || got.Labels[0] != "bug" || len(got.Assignees) != 1 ||
+		got.Milestone == nil || *got.Milestone != ms.ID {
+		t.Fatalf("thread = %+v", got)
+	}
+	kinds := map[string]bool{}
+	for seq := 0; seq < got.NextEventSeq; seq++ {
+		raw, _, eerr := s.getJSON(ctx, EventKey("acme", "repo", th.Num, seq))
+		if eerr != nil || raw == nil {
+			continue
+		}
+		var ev Event
+		if json.Unmarshal(raw, &ev) == nil {
+			kinds[ev.Type] = true
+		}
+	}
+	if !kinds[EventLabelsChanged] || !kinds[EventAssigneesChanged] || !kinds[EventMilestoneChanged] {
+		t.Fatalf("metadata events missing: %v", kinds)
+	}
+	ix, _, ierr := s.loadIndex(ctx, "acme", "repo")
+	if ierr != nil || ix == nil {
+		t.Fatalf("loadIndex: %v", ierr)
+	}
+	var card *Card
+	for i := range ix.Open {
+		if ix.Open[i].Num == th.Num {
+			card = &ix.Open[i]
+		}
+	}
+	if card == nil || len(card.Labels) != 1 || card.Milestone == nil {
+		t.Fatalf("index card = %+v", card)
+	}
+
+	// The 03-owned fields are not metadata.
+	if _, err := s.PatchThreadMetadata(ctx, "acme", "repo", th.Num, aliceP, IssuePatch{State: strPtr("closed")}); !errors.Is(err, ErrInvalid) {
+		t.Fatalf("state via metadata = %v", err)
+	}
+	// Triage is still the floor.
+	if _, err := s.PatchThreadMetadata(ctx, "acme", "repo", th.Num, janeP, IssuePatch{Labels: &labels}); !errors.Is(err, ErrForbidden) {
+		t.Fatalf("non-triage labels = %v", err)
+	}
+	// Unknown labels and sub-triage assignees are refused with the same text.
+	bad := []string{"nope"}
+	if _, err := s.PatchThreadMetadata(ctx, "acme", "repo", th.Num, aliceP, IssuePatch{Labels: &bad}); !errors.Is(err, ErrInvalid) {
+		t.Fatalf("unknown label = %v", err)
+	}
+	low := []string{"dave@example.com"}
+	if _, err := s.PatchThreadMetadata(ctx, "acme", "repo", th.Num, aliceP, IssuePatch{Assignees: &low}); !errors.Is(err, ErrInvalid) {
+		t.Fatalf("sub-triage assignee = %v", err)
 	}
 }

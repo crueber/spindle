@@ -13,6 +13,10 @@ func (s *Server) funcs() template.FuncMap {
 	return template.FuncMap{
 		"rel":      relTime,
 		"shortsha": shortSHA,
+		"short":    shortSHA,
+		// runDot maps a Threads run/job state onto the shared check-dot
+		// vocabulary (15 §6; a pure display projection).
+		"runDot": runDotState,
 		// NOTE: html/template's builtin eq/ne/lt… are deliberately NOT shadowed:
 		// the error page compares an int status (eq .Data.Status 401) and a
 		// string-only shadow made every non-200 page fail to render.
@@ -28,6 +32,12 @@ func (s *Server) funcs() template.FuncMap {
 		"md": func(src string) template.HTML { return RenderMarkdown(src) },
 		"mdrepo": func(src, owner, repo string) template.HTML {
 			return RenderMarkdownIn(src, owner, repo)
+		},
+		// mdat renders markdown at a repo coordinate so relative links and
+		// images resolve against the document's ref/dir (release notes, PR
+		// descriptions). An empty ref degrades to plain mdrepo behaviour.
+		"mdat": func(src, owner, repo, ref, dir string) template.HTML {
+			return RenderMarkdownCtx(src, MarkdownCtx{Owner: owner, Repo: repo, Ref: ref, Dir: dir})
 		},
 		"diff":      ParseUnifiedDiff,
 		"graph":     RenderCommitGraph,

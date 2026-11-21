@@ -100,9 +100,11 @@ type FormsIssues interface {
 	DeleteMilestone(ctx context.Context, owner, repo string, actor auth.Principal, id string) error
 }
 
-// FormsPulls is the pulls surface: fork creation and PR opening.
+// FormsPulls is the pulls surface: fork creation, the fork list (the PR
+// form's head picker) and PR opening.
 type FormsPulls interface {
 	StartFork(ctx context.Context, owner, repo string, actor auth.Principal, in pulls.ForkInput) (*pulls.TaskRecord, string, error)
+	ListForks(ctx context.Context, owner, repo string, actor auth.Principal, after string, n int) (*pulls.ForkListPage, error)
 	OpenPR(ctx context.Context, owner, repo string, actor auth.Principal, in pulls.OpenInput, correlationID string) (*pulls.Thread, *pulls.PRDoc, error)
 }
 
@@ -1558,6 +1560,12 @@ type formsReleaseNewData struct {
 	Draft      bool
 	Prerelease bool
 	Disabled   bool
+	// WP3.3: "create tag on publish" — a draft declares a not-yet-existing
+	// tag name + target commit; the ref is published at publish, never at
+	// create.
+	NewTag    string
+	Target    string
+	CreateTag bool
 }
 
 func (s *Server) formsReleaseNewDataFor(r *http.Request, p auth.Principal, owner, name string) *formsReleaseNewData {
@@ -1596,13 +1604,26 @@ func (s *Server) formsReleaseNewPost(w http.ResponseWriter, r *http.Request) {
 	data.Body = r.PostFormValue("body")
 	data.Draft = r.PostFormValue("draft") != ""
 	data.Prerelease = r.PostFormValue("prerelease") != ""
+	data.NewTag = strings.TrimSpace(r.PostFormValue("new_tag"))
+	data.Target = strings.TrimSpace(r.PostFormValue("target"))
+	data.CreateTag = r.PostFormValue("create_tag") != ""
+	tagForAPI := data.Tag
+	if data.CreateTag {
+		tagForAPI = data.NewTag
+		data.Draft = true
+	}
 	if data.Disabled {
 		data.Err = "Releases are disabled for this repository."
 		s.pageRepo(w, r, p, chrome, http.StatusForbidden, "forms/release_new", "New release", data)
 		return
 	}
-	if data.Tag == "" {
+	if tagForAPI == "" {
 		data.Err = "Choose a tag for this release."
+		s.pageRepo(w, r, p, chrome, http.StatusBadRequest, "forms/release_new", "New release", data)
+		return
+	}
+	if data.CreateTag && data.Target == "" {
+		data.Err = "A new tag needs a target commit (sha or ref)."
 		s.pageRepo(w, r, p, chrome, http.StatusBadRequest, "forms/release_new", "New release", data)
 		return
 	}
@@ -1611,6 +1632,11 @@ func (s *Server) formsReleaseNewPost(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if r.PostFormValue("action") == "autodraft" {
+		if data.CreateTag {
+			data.Err = "Autodraft needs an existing tag — create the tag on publish, then edit the notes after publishing."
+			s.pageRepo(w, r, p, chrome, http.StatusBadRequest, "forms/release_new", "New release", data)
+			return
+		}
 		ad, aerr := formsDeps.Releases.Autodraft(r.Context(), owner, name, p, data.Tag, "")
 		if aerr != nil {
 			s.formsFail(w, r, p, chrome, "forms/release_new", "New release", data, aerr)
@@ -1630,7 +1656,11 @@ func (s *Server) formsReleaseNewPost(w http.ResponseWriter, r *http.Request) {
 	if data.Title != "" {
 		in.Name = &data.Title
 	}
-	rel, _, perr := formsDeps.Releases.PutRelease(r.Context(), owner, name, p, data.Tag, in, "")
+	if data.CreateTag {
+		target := data.Target
+		in.Target = &target
+	}
+	rel, _, perr := formsDeps.Releases.PutRelease(r.Context(), owner, name, p, tagForAPI, in, "")
 	if perr != nil {
 		s.formsFail(w, r, p, chrome, "forms/release_new", "New release", data, perr)
 		return
@@ -1693,7 +1723,7 @@ func (s *Server) formsIssueNewPost(w http.ResponseWriter, r *http.Request) {
 	}
 	if r.PostFormValue("action") == "preview" {
 		data.Preview = true
-		data.PreviewHTML = RenderMarkdownIn(data.Body, owner, name)
+		data.PreviewHTML = RenderMarkdownCtx(data.Body, MarkdownCtx{Owner: owner, Repo: name, Ref: chrome.HeadLabel})
 		s.pageRepo(w, r, p, chrome, http.StatusOK, "forms/issue_new", "New issue", data)
 		return
 	}
@@ -1737,21 +1767,32 @@ type formsPullNewData struct {
 	formsBase
 	Full      string
 	FromRepos []string
-	ToRepos   []string
-	FromRepo  string
-	ToRepo    string
-	FromRefs  []string
-	ToRefs    []string
-	FromRef   string
-	ToRef     string
-	Title     string
-	Body      string
-	Draft     bool
-	Role      string
-	RoleOK    bool
-	Disabled  bool
-	Preview   formsPRPreview
-	Window    int
+	// FromRepoGroups renders the head repository picker grouped by owner:
+	// this repository, the base owner's other repos, and the fork network
+	// (WP2.1). The fork list is one index read; each fork's branches load
+	// only after "list branches" selects it (no N-repo scan per render).
+	FromRepoGroups []formsRepoGroup
+	ToRepos        []string
+	FromRepo       string
+	ToRepo         string
+	FromRefs       []string
+	ToRefs         []string
+	FromRef        string
+	ToRef          string
+	Title          string
+	Body           string
+	Draft          bool
+	Role           string
+	RoleOK         bool
+	Disabled       bool
+	Preview        formsPRPreview
+	Window         int
+}
+
+// formsRepoGroup is one <optgroup> of the From repository picker.
+type formsRepoGroup struct {
+	Label string
+	Repos []string
 }
 
 const formsPreviewWindow = 100
@@ -1760,10 +1801,14 @@ func (s *Server) formsPullNewDataFor(r *http.Request, p auth.Principal, owner, n
 	sum, _ := s.formsSummary(r, owner, name)
 	current := owner + "/" + name
 	q := r.URL.Query()
+	headRepo := strings.TrimSpace(q.Get("from_repo"))
+	if headRepo == "" {
+		headRepo = current
+	}
 	data := &formsPullNewData{
 		formsBase: s.formsBase(r, p, "Open a new pull request"),
 		Full:      current,
-		FromRepo:  current,
+		FromRepo:  headRepo,
 		ToRepo:    current,
 		FromRef:   strings.TrimSpace(q.Get("head")),
 		ToRef:     strings.TrimSpace(q.Get("base")),
@@ -1797,6 +1842,18 @@ func (s *Server) formsPullNewDataFor(r *http.Request, p auth.Principal, owner, n
 			data.ToRepos = formsWithCurrent(formsReposByRole(all, roles, identity.RoleWrite), current)
 		}
 	}
+	// WP2.1: the fork network joins the head picker (one index read on the
+	// parent; each fork is shown only when the viewer can read it). The
+	// existing API path already accepts a cross-owner head (OpenInput.Fork).
+	forks := s.formsForks(r, p, owner, name)
+	data.FromRepos = append(data.FromRepos, forks...)
+	if headRepo != current && !formsListContains(data.FromRepos, headRepo) {
+		// A cross-owner head named in ?from_repo= (a fork opened from its
+		// own page, or an old link) stays selectable; the server is the
+		// authority on reachability and role.
+		data.FromRepos = append(data.FromRepos, headRepo)
+	}
+	data.FromRepoGroups = formsReposGrouped(data.FromRepos, current)
 	if formsDeps.Identity != nil {
 		role, _ := formsDeps.Identity.Resolve(r.Context(), owner, name, p)
 		data.Role = string(role)
@@ -1804,9 +1861,90 @@ func (s *Server) formsPullNewDataFor(r *http.Request, p auth.Principal, owner, n
 	} else {
 		data.RoleOK = true
 	}
-	data.FromRefs = s.formsBranches(r, owner, name)
-	data.ToRefs = data.FromRefs
+	data.FromRefs = s.formsBranchesFor(r, data.FromRepo)
+	if data.FromRepo == current || len(data.FromRefs) == 0 {
+		data.FromRefs = s.formsBranches(r, owner, name)
+	}
+	data.ToRefs = s.formsBranches(r, owner, name)
 	return data
+}
+
+// formsForks lists the parent's fork index for the head picker, filtered to
+// forks the viewer can read (a private fork must not leak its existence).
+// Unwired services or unreadable indexes yield no forks — the picker still
+// works for same-repo branches.
+func (s *Server) formsForks(r *http.Request, p auth.Principal, owner, name string) []string {
+	if formsDeps.Pulls == nil {
+		return nil
+	}
+	page, err := formsDeps.Pulls.ListForks(r.Context(), owner, name, p, "", pulls.MaxForkList)
+	if err != nil || page == nil {
+		return nil
+	}
+	out := make([]string, 0, len(page.Forks))
+	for _, f := range page.Forks {
+		if f.Repo == "" {
+			continue
+		}
+		if formsDeps.Identity != nil {
+			fo, fn, ok := strings.Cut(f.Repo, "/")
+			if !ok {
+				continue
+			}
+			role, _ := formsDeps.Identity.Resolve(r.Context(), fo, fn, p)
+			if !formsRoleAtLeast(role, identity.RoleRead) {
+				continue
+			}
+		}
+		out = append(out, f.Repo)
+	}
+	return out
+}
+
+func formsListContains(list []string, v string) bool {
+	for _, x := range list {
+		if x == v {
+			return true
+		}
+	}
+	return false
+}
+
+// formsReposGrouped groups the head repos for <optgroup> rendering: this
+// repository, the base owner's other repos, then the fork network. The
+// selected head's group is not reordered — the picker keeps a stable shape,
+// so a fork selection survives the "list branches" round trip.
+func formsReposGrouped(all []string, current string) []formsRepoGroup {
+	baseOwner, _, _ := strings.Cut(current, "/")
+	groups := []formsRepoGroup{}
+	index := map[string]int{}
+	add := func(label, repo string) {
+		i, ok := index[label]
+		if !ok {
+			i = len(groups)
+			index[label] = i
+			groups = append(groups, formsRepoGroup{Label: label})
+		}
+		groups[i].Repos = append(groups[i].Repos, repo)
+	}
+	for _, full := range all {
+		if full == current {
+			add("This repository", full)
+			continue
+		}
+		o, _, ok := strings.Cut(full, "/")
+		if !ok {
+			continue
+		}
+		label := o
+		if o == baseOwner {
+			label = "Same owner"
+		} else {
+			label = "Forks"
+		}
+		add(label, full)
+	}
+	return groups
 }
 
 func formsReposByRole(all []string, roles map[string]identity.Role, want identity.Role) []string {
@@ -1868,6 +2006,13 @@ func (s *Server) formsPullNewPost(w http.ResponseWriter, r *http.Request) {
 	if data.Disabled {
 		data.Err = "Pull requests are disabled for this repository."
 		s.pageRepo(w, r, p, chrome, http.StatusForbidden, "forms/pull_new", "New pull request", data)
+		return
+	}
+	if r.PostFormValue("action") == "refs" {
+		// No-JS branch discovery: picking a head repository (including a
+		// fork) reloads just that repo's branch options. The POST carries
+		// no PR write, so the feature gate above is the only check.
+		s.pageRepo(w, r, p, chrome, http.StatusOK, "forms/pull_new", "New pull request", data)
 		return
 	}
 	if r.PostFormValue("action") == "preview" {

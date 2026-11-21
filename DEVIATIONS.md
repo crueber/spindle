@@ -20,7 +20,19 @@ This file consolidates, deduplicated, every decision recorded in the `## Decisio
   Package name = repository name (no GHCR-style free-form names), blobs are content-addressed store
   objects, tags are CAS pointers, and unreferenced blobs are removed by a maintainer sweep rather
   than a request-path refcount. Spec: `docs/features/14_packages.md`; plan: `docs/PLAN-V1.md` WP1.
-  Status: proposed for v1, not implemented.
+  Status: in force (skeleton landed 2026-11-20; §7 surfaces and GC pending).
+  **As built (WP1 skeleton):** `internal/packages` implements the protocol, bucket layout, Basic +
+  `/v2/token` Bearer auth, the per-repo `[features] packages` toggle and the three `packages.*`
+  limits; `/v2/*` mounts through the new top-level `ChainTop` seam (`internal/server/bind_top.go`)
+  because the namespace is neither an api lane nor an `{owner}/{repo}` sub-path. The Packages page,
+  JSON API, SDK and the `packages-gc` maintainer sweep are the second pass. The toggle extended
+  `ResolvedFeatures.ETagBits` from six to seven chars.
+
+- **D-DEP-4 — `gopkg.in/yaml.v3` joins the backend budget for CI workflow files only.**
+  Threads parses `.spindle/workflows/*.yml`; YAML is the format CI authors already know and a
+  hand-rolled subset parser was rejected as a failure mode. The import is confined to
+  `internal/threads/workflow`; every other package stays on the stdlib plus the pre-existing modules.
+  Amended 2026-11-20 by explicit user request. Status: in force.
 
 ## 2. Dependency budget
 

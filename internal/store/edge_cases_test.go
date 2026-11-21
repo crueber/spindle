@@ -224,28 +224,28 @@ func TestS3HeadAndListErrorStatuses(t *testing.T) {
 	s := newS3TestBackend(t, f, nil)
 
 	// Head hitting a non-retryable status surfaces the mapped error.
-	f.statusOverride = func(method, key string, r *http.Request) int {
+	f.setStatusOverride(func(method, key string, r *http.Request) int {
 		if method == http.MethodHead {
 			return http.StatusMethodNotAllowed
 		}
 		return 0
-	}
+	})
 	if _, err := s.Head(ctx, "k"); !IsInvalidArgument(err) {
 		t.Fatalf("head 405: %v", err)
 	}
-	f.statusOverride = nil
+	f.setStatusOverride(nil)
 
 	// List page failing with 500 → Retryable after retries.
-	f.statusOverride = func(method, key string, r *http.Request) int {
+	f.setStatusOverride(func(method, key string, r *http.Request) int {
 		if r.Method == http.MethodGet && r.URL.Path == "/bkt/" {
 			return http.StatusBadGateway
 		}
 		return 0
-	}
+	})
 	if err := s.List(ctx, "", "", func(ObjectMeta) error { t.Fatal("unexpected"); return nil }); !IsRetryable(err) {
 		t.Fatalf("list 502: %v", err)
 	}
-	f.statusOverride = nil
+	f.setStatusOverride(nil)
 
 	// ListPrefixes: callback errors propagate; a failing page errors too.
 	s3fakePut(t, s, "a/1", "x", PutOptions{})
@@ -253,16 +253,16 @@ func TestS3HeadAndListErrorStatuses(t *testing.T) {
 	if err := s.ListPrefixes(ctx, "", func(string) error { return sentinel }); err != sentinel {
 		t.Fatalf("listPrefixes callback: %v", err)
 	}
-	f.statusOverride = func(method, key string, r *http.Request) int {
+	f.setStatusOverride(func(method, key string, r *http.Request) int {
 		if r.Method == http.MethodGet && r.URL.Path == "/bkt/" {
 			return http.StatusServiceUnavailable
 		}
 		return 0
-	}
+	})
 	if err := s.ListPrefixes(ctx, "", func(string) error { t.Fatal("unexpected"); return nil }); !IsRetryable(err) {
 		t.Fatalf("listPrefixes 503: %v", err)
 	}
-	f.statusOverride = nil
+	f.setStatusOverride(nil)
 }
 
 func TestS3ComposeCopyPartFailure(t *testing.T) {
@@ -275,16 +275,16 @@ func TestS3ComposeCopyPartFailure(t *testing.T) {
 	s3fakePut(t, s, "s1", strings.Repeat("A", 6<<20), PutOptions{})
 	// The copy part PUT fails: Compose aborts and surfaces the error.
 	abortsBefore := len(f.aborts)
-	f.statusOverride = func(method, key string, r *http.Request) int {
+	f.setStatusOverride(func(method, key string, r *http.Request) int {
 		if r.Method == http.MethodPut && r.URL.Query().Get("partNumber") != "" && r.Header.Get("X-Amz-Copy-Source") != "" {
 			return http.StatusInternalServerError
 		}
 		return 0
-	}
+	})
 	if _, err := s.Compose(ctx, "cat", []string{"s1"}, PutOptions{}); err == nil {
 		t.Fatal("copy-part failure must surface")
 	}
-	f.statusOverride = nil
+	f.setStatusOverride(nil)
 	if len(f.aborts) != abortsBefore+1 {
 		t.Fatal("failed compose did not abort")
 	}
@@ -927,16 +927,16 @@ func TestS3ComposeCreateMultipartFailure(t *testing.T) {
 	defer f.srv.Close()
 	s := newS3TestBackend(t, f, nil)
 	s3fakePut(t, s, "s1", "x", PutOptions{})
-	f.statusOverride = func(method, key string, r *http.Request) int {
+	f.setStatusOverride(func(method, key string, r *http.Request) int {
 		if _, ok := r.URL.Query()["uploads"]; ok {
 			return http.StatusServiceUnavailable
 		}
 		return 0
-	}
+	})
 	if _, err := s.Compose(ctx, "c", []string{"s1"}, PutOptions{}); !IsRetryable(err) {
 		t.Fatalf("compose create failure: %v", err)
 	}
-	f.statusOverride = nil
+	f.setStatusOverride(nil)
 }
 
 func TestS3UploadPartCopyTransportError(t *testing.T) {

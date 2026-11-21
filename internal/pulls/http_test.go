@@ -1,6 +1,7 @@
 package pulls
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -427,5 +428,48 @@ func TestPullViewMutableCacheTable(t *testing.T) {
 				t.Fatalf("post-comment body lacks comment: %s", after.Body.String())
 			}
 		})
+	}
+}
+
+// TestHTTPUpdatePullMetadata pins the PUT field set WP2.2 adds: labels,
+// assignees and an explicit-null milestone reach the shared 02 seam through
+// the same strict decoder (unknown keys stay 400).
+func TestHTTPUpdatePullMetadata(t *testing.T) {
+	e := newTestEnv()
+	seedOpened(t, e)
+	var got ThreadMetaPatch
+	e.svc.Metadata = func(_ context.Context, owner, repo string, num int, actor auth.Principal, p ThreadMetaPatch) error {
+		got = p
+		return nil
+	}
+	w := doReq(t, e.h, http.MethodPut, "api", lanePath("api", "/pulls/1"),
+		`{"labels":["bug"],"assignees":["bob"],"milestone":null}`, writer())
+	if w.Code != http.StatusOK {
+		t.Fatalf("PUT = %d (%s)", w.Code, w.Body.String())
+	}
+	if got.Labels == nil || (*got.Labels)[0] != "bug" || got.Assignees == nil ||
+		got.Milestone == nil || *got.Milestone != nil {
+		t.Fatalf("metadata = %+v", got)
+	}
+	w = doReq(t, e.h, http.MethodPut, "api", lanePath("api", "/pulls/1"), `{"milestone":42}`, writer())
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("numeric milestone = %d", w.Code)
+	}
+	w = doReq(t, e.h, http.MethodPut, "api", lanePath("api", "/pulls/1"), `{"labelzzz":["bug"]}`, writer())
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("unknown key = %d", w.Code)
+	}
+}
+
+// TestHTTPListPullsLabelQuery pins the wire spelling of the new filter.
+func TestHTTPListPullsLabelQuery(t *testing.T) {
+	e := newTestEnv()
+	seedOpened(t, e)
+	w := doReq(t, e.h, http.MethodGet, "api", lanePath("api", "/pulls?labels=bug,docs"), "", writer())
+	if w.Code != http.StatusOK {
+		t.Fatalf("list = %d (%s)", w.Code, w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), `"pulls":[]`) {
+		t.Fatalf("filtered body = %s", w.Body.String())
 	}
 }

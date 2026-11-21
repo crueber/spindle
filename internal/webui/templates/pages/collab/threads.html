@@ -1,0 +1,36 @@
+{{define "content"}}
+{{with .Data}}{{$d := .}}
+<div class="threads-page">
+  <div class="mb-3 flex flex-wrap items-center gap-2">
+    <h2 class="text-xl font-semibold tracking-tight">Threads</h2>
+    <div class="ml-auto flex flex-wrap items-center gap-2">
+      <a class="link text-xs" href="{{.RefreshHref}}">refresh</a>
+      <a class="link text-xs" href="/api#threads">workflow API</a>
+    </div>
+  </div>
+
+  {{if .Error}}<p class="err-line" role="alert">{{.Error}}</p>{{end}}
+
+  {{if .Rows}}
+  <ul class="space-y-2">
+    {{range .Rows}}
+    <li class="card">
+      <div class="flex flex-wrap items-center gap-2 px-3 py-2">
+        {{template "collab_check_dot" (runDot .State)}}
+        <a class="link text-sm font-medium" href="{{.Href}}">{{.Workflow}}</a>
+        <span class="chip chip-neutral">{{.State}}</span>
+        {{if not .Trusted}}<span class="chip chip-draft" title="fork pull request: base-branch workflow, no secrets">untrusted</span>{{end}}
+        <span class="muted text-xs">{{.Event}}{{with .Branch}} · {{.}}{{end}}</span>
+        <a class="link mono text-xs" href="/{{$d.Repo.Full}}/commit/{{.Commit}}">{{.ShortCommit}}</a>
+        <span class="muted ml-auto shrink-0 text-xs">{{template "collab_time" .UpdatedAt}}</span>
+      </div>
+    </li>
+    {{end}}
+  </ul>
+  {{if .More}}{{template "collab_pager" .OlderHref}}{{end}}
+  {{else if not .Error}}
+  {{template "collab_empty" (dict "icon" "check" "title" "No workflow runs yet" "hint" "Add a workflow under .spindle/workflows/ and push, or dispatch one through the workflow API." "href" "/api#threads" "label" "Workflow API")}}
+  {{end}}
+</div>
+{{end}}
+{{end}}

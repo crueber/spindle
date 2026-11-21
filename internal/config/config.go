@@ -280,6 +280,16 @@ type Attachments struct {
 	MaxImageBytes ByteSize `toml:"max_image_bytes"`
 }
 
+// Packages bounds the OCI registry (docs/features/14 §5): one blob upload cap,
+// one manifest cap, and the chunked-upload staging TTL the maintainer sweep
+// honours. Additive section (14_extensibility.md §14.12 — existing keys never
+// change meaning).
+type Packages struct {
+	MaxBlobBytes     ByteSize `toml:"max_blob_bytes"`     // one blob object (default 2 GiB)
+	MaxManifestBytes ByteSize `toml:"max_manifest_bytes"` // one manifest body (default 4 MiB)
+	UploadTTL        Duration `toml:"upload_ttl"`         // abandoned upload staging (default 24h)
+}
+
 // Import bounds the repository-import surface (docs/features/10 §6:
 // additive [import] section, 14_extensibility.md §14.12 — existing keys
 // never change meaning). All timeouts are per-spawn ctx timeouts; sizes
@@ -313,6 +323,7 @@ type Config struct {
 	Releases    Releases    `toml:"releases"`
 	Import      Import      `toml:"import"`
 	Attachments Attachments `toml:"attachments"`
+	Packages    Packages    `toml:"packages"`
 
 	// DataDir is the zero-config root (divergence D5): --data-dir / SPINDLE_DATA_DIR,
 	// default ~/.local/share/spindle. Holds store/, cache/, and the saved spindle.toml.
@@ -448,6 +459,11 @@ func Defaults() *Config {
 		},
 		Attachments: Attachments{
 			MaxImageBytes: 8 << 20,
+		},
+		Packages: Packages{
+			MaxBlobBytes:     2 << 30,
+			MaxManifestBytes: 4 << 20,
+			UploadTTL:        Duration(24 * time.Hour),
 		},
 	}
 }

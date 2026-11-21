@@ -13,6 +13,9 @@ const SURFACE = [
   { name: "pulls.get", run: (c) => c.repo("o/r").pulls.get(7), method: "GET", path: "/o/r/api/pulls/7" },
   { name: "pulls.get window", run: (c) => c.repo("o/r").pulls.get(7, {}), method: "GET", path: "/o/r/api/pulls/7" },
   { name: "pulls.update", run: (c) => c.repo("o/r").pulls.update(7, { title: "x" }), method: "PUT", path: "/o/r/api/pulls/7" },
+  { name: "pulls.setLabels", run: (c) => c.repo("o/r").pulls.setLabels(7, ["bug"]), method: "PUT", path: "/o/r/api/pulls/7" },
+  { name: "pulls.setAssignees", run: (c) => c.repo("o/r").pulls.setAssignees(7, ["bob"]), method: "PUT", path: "/o/r/api/pulls/7" },
+  { name: "pulls.setMilestone", run: (c) => c.repo("o/r").pulls.setMilestone(7, null), method: "PUT", path: "/o/r/api/pulls/7" },
   { name: "pulls.comment", run: (c) => c.repo("o/r").pulls.comment(7, "hi"), method: "POST", path: "/o/r/api/pulls/7/comments" },
   { name: "pulls.diff", run: (c) => c.repo("o/r").pulls.diff(7), method: "GET", path: "/o/r/api/pulls/7/diff" },
   { name: "pulls.commits", run: (c) => c.repo("o/r").pulls.commits(7, { n: 5 }), method: "GET", path: "/o/r/api/pulls/7/commits?n=5" },
@@ -54,4 +57,18 @@ test("pulls.merge sends strategy and delete flag", async () => {
   const sent = JSON.parse(calls[0].init.body);
   assert.equal(sent.strategy, "squash");
   assert.equal(sent.delete_head, true);
+});
+
+test("pulls metadata helpers send the 02-owned fields", async () => {
+  const { fetch, calls } = fakeFetch(() => jsonResponse({ thread: {}, pr: {} }));
+  const client = new ReposClient({ base: BASE, fetch, token: "t" });
+  const pulls = client.repo("o/r").pulls;
+  await pulls.setLabels(7, ["bug", "docs"]);
+  await pulls.setAssignees(7, ["bob"]);
+  await pulls.setMilestone(7, "000001");
+  await pulls.setMilestone(7, null);
+  assert.deepEqual(JSON.parse(calls[0].init.body), { labels: ["bug", "docs"] });
+  assert.deepEqual(JSON.parse(calls[1].init.body), { assignees: ["bob"] });
+  assert.deepEqual(JSON.parse(calls[2].init.body), { milestone: "000001" });
+  assert.deepEqual(JSON.parse(calls[3].init.body), { milestone: null });
 });

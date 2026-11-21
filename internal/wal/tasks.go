@@ -225,10 +225,15 @@ func (t *TaskTable) Run(ctx context.Context, repo, kind string, params map[strin
 		t.publishRecord(task)
 
 		go func() {
-			var ok bool
 			err := fn(runCtx, task)
-			ok = err == nil
+			ok := err == nil
 			fin := time.Now().UTC()
+
+			// Terminal fields, the packet and the table bookkeeping all move
+			// under t.mu: Running() copies the live record under the same lock,
+			// so mutating it outside was a data race (the -race gate caught the
+			// Finish/OK writes against Running's read).
+			t.mu.Lock()
 			rt.rec.Finished = fin.Format(time.RFC3339Nano)
 			rt.rec.OK = &ok
 			if err != nil {
@@ -238,9 +243,6 @@ func (t *TaskTable) Run(ctx context.Context, repo, kind string, params map[strin
 			if st, serr := time.Parse(time.RFC3339Nano, rt.rec.Started); serr == nil {
 				rt.rec.ElapsedMS = fin.Sub(st).Milliseconds()
 			}
-
-			// Terminal packet + table bookkeeping; done closes exactly once.
-			t.mu.Lock()
 			delete(t.running, key)
 			res := *rt.rec
 			t.recent[repo] = append(t.recent[repo], &res)
@@ -280,6 +282,21 @@ func (t *TaskTable) List(repo string) []*TaskRecord {
 	out := append([]*TaskRecord(nil), t.recent[repo]...)
 	sort.Slice(out, func(i, j int) bool { return out[i].Started < out[j].Started })
 	return out
+}
+
+// Running returns a copy of the live record for (repo, kind), or nil when no
+// task of that kind is running. It is the join hint for HTTP surfaces that
+// answer 202 with a task id before the leader's Run returns (a second start
+// would join, but its caller still needs the id to attach).
+func (t *TaskTable) Running(repo, kind string) *TaskRecord {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	rt, ok := t.running[repo+"/"+kind]
+	if !ok {
+		return nil
+	}
+	cp := *rt.rec
+	return &cp
 }
 
 // Get returns a task record by id (janitor evicts finished records after 1h).

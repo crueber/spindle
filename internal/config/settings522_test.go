@@ -44,7 +44,7 @@ func TestParseRepoSettingsFeatures(t *testing.T) {
 		},
 		{
 			name:    "explicit disables resolve off, others stay on",
-			payload: "[features]\nissues = false\npulls = false\nreleases = false\nforks = false\nwatch = false\nstar = false\n",
+			payload: "[features]\nissues = false\npulls = false\nreleases = false\nforks = false\nwatch = false\nstar = false\npackages = false\n",
 			check: func(t *testing.T, rs *RepoSettings) {
 				t.Helper()
 				got := rs.Features.Resolve()
@@ -142,7 +142,7 @@ func TestFeaturesOf(t *testing.T) {
 		},
 		{
 			name: "partial disable",
-			body: "[features]\nissues = false\nstar = false\n",
+			body: "[features]\nissues = false\nstar = false\npackages = false\n",
 			want: ResolvedFeatures{Issues: false, Pulls: true, Releases: true, Forks: true, Watch: true, Star: false},
 		},
 	}
@@ -158,14 +158,14 @@ func TestFeaturesOf(t *testing.T) {
 func TestResolvedFeaturesETagBits(t *testing.T) {
 	// Fixed order (issues, pulls, releases, forks, watch, star), six chars,
 	// always — the summary ETag suffix is stable and greppable.
-	if got := AllFeatures().ETagBits(); got != "111111" {
+	if got := AllFeatures().ETagBits(); got != "1111111" {
 		t.Fatalf("all-on = %q", got)
 	}
-	if got := (ResolvedFeatures{}).ETagBits(); got != "000000" {
+	if got := (ResolvedFeatures{}).ETagBits(); got != "0000000" {
 		t.Fatalf("all-off = %q", got)
 	}
 	got := ResolvedFeatures{Issues: true, Pulls: false, Releases: true, Forks: true, Watch: false, Star: true}.ETagBits()
-	if got != "101101" {
-		t.Fatalf("mixed = %q, want 101101", got)
+	if got != "1011010" {
+		t.Fatalf("mixed = %q, want 1011010", got)
 	}
 }

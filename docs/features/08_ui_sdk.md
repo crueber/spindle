@@ -51,7 +51,10 @@ Pulls, Releases, Commits, WAL, Settings**.
 | `/:owner/:repo/checks/:sha` | `collab/check_detail.html` | read | Statuses for one commit; linked from commit detail, the check pill, and the merge box |
 | `/:owner/:repo/releases` | `collab/releases.html` | read | Per 07: list, latest |
 | `/:owner/:repo/releases/{tag}` | `collab/release.html` | read | Detail: rendered markdown body, assets table |
-| `/:owner/:repo/releases/new` | `forms/release_new.html` | maintain+ | Tag picker (ref list), autodraft fill, asset upload with client-side `crypto.subtle` sha256 |
+| `/:owner/:repo/releases/new` | `forms/release_new.html` | maintain+ | Tag picker (ref list), "create a new tag on publish" (name + target commit, WP3.3), autodraft fill, asset upload with client-side `crypto.subtle` sha256 |
+| `/:owner/:repo/tags` | `repo/tags.html` | read | Tag, target commit, created date, author, backing release; per-row archive links and a delete action (write; hidden for release-backed tags) |
+| `/:owner/:repo/archive/{ref}.{tar.gz,zip}` | — (streamed) | read | Source archive from `git archive`, tree-id ETag; linked from the Code toolbar and the release page |
+| `/:owner/:repo/sync-fork` (POST) | — (303) | write | Starts the WP5 sync-fork task; the header shows **Sync fork** on a fork for writers |
 | `/notifications` | `public/notifications.html` | authenticated | Full tray page |
 | `/:owner/:repo/settings/{tab}` | `settings/repo.html` + `partials/settings_repo.html` | varies | Sub-tabs: `access`, `collaborators`, `webhooks`, `ci-tokens` (admin); `labels`, `milestones` (triage+); existing scheduled/policy/config tabs unchanged; the Danger Zone section (red accents, both themes) renders below the tab content on every tab — first entry Delete Repository through the typed confirm, server is the admin gate, success redirects to `/` |
 | `/:owner/settings/{tab}` | `settings/org.html` + `partials/settings_org.html` | org owner/admin | Org sub-tabs: profile, members, teams, invites, webhooks |
@@ -214,12 +217,15 @@ this section is the client mirror of exactly one provider; auth levels shown per
 ### 3.7 `releases.js` + `social.js` (07)
 
 `repo.releases`: `list({n, after})`, `latest({include_prereleases?})`, `get(tag)`, `put(tag, {body, name?,
+  target?, …})` (a `target` is only valid while the tag does not exist — use with `draft:true`),
 draft?, prerelease?}, ifMatch?)`, `remove(tag)`, `uploadAsset(tag, name, bytes, {sha256})`,
 `deleteAsset(tag, name)`, `autodraft({tag, since})`, `releaseAssetUrl(tag, name)`. `repo.social`: `get()` → `{stars, watchers, forks,
 viewer:{starred, watching}}`, `repo.star.set()/remove()` (watch lives in `repo.watch`, §3.5 — Decisions).
 `client.social.myStarred({n, after})`, `client.social.userStarred(principal)` for the top-level starred lists
 (shipped spellings — 08's `delete/client.starred/userStarred/star/unstar` corrected 2026-09-04). Asset bytes
-download via the static `/{o}/{r}/releases/{tag}/assets/{name}` URL (`browser_download_url`).
+download via the static `/{o}/{r}/releases/{tag}/assets/{name}` URL (`browser_download_url`); each asset
+carries `downloads` (WP3.2). `repo.tagsApi` also exposes `list()` (`GET …/tags`) and `remove(name)`
+(`DELETE …/refs/tags/{name}`; 409 when the tag backs a release or moved concurrently).
 
 ### 3.8 `collab.js` → `repo.collab` (08 §4, new in this change)
 

@@ -41,6 +41,7 @@
         {{if eq .Data.Tab "scheduled"}}{{template "settings-repo-scheduled" .Data}}{{end}}
         {{if eq .Data.Tab "mirror"}}{{template "settings-repo-mirror" .Data}}{{end}}
         {{if eq .Data.Tab "policy"}}{{template "settings-repo-policy" .Data}}{{end}}
+        {{if eq .Data.Tab "protection"}}{{template "settings-repo-protection" .Data}}{{end}}
         {{if eq .Data.Tab "config"}}{{template "settings-repo-config" .Data}}{{end}}
         {{if eq .Data.Tab "access"}}{{template "settings-repo-access" .Data}}{{end}}
         {{if eq .Data.Tab "tokens"}}{{template "settings-repo-tokens" .Data}}{{end}}

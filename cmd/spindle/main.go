@@ -7,6 +7,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"io"
 	"os"
 	"os/signal"
 	"runtime/debug"
@@ -50,35 +51,73 @@ type command struct {
 
 // cli carries the peeled globals to every subcommand.
 type cli struct {
-	configPath string // explicit --config or the env pointer ("" = default location)
-	dataDir    string // explicit --data-dir ("" = resolve from env/defaults)
+	configPath string    // explicit --config or the env pointer ("" = default location)
+	dataDir    string    // explicit --data-dir ("" = resolve from env/defaults)
+	server     string    // explicit --server for the API commands ("" = env/state/default)
+	out        io.Writer // stdout override for tests (nil = os.Stdout)
+	errOut     io.Writer // stderr override for tests (nil = os.Stderr)
 }
 
-var subcommands = []command{
-	{"serve", "run the spindle server (the default)", runServe},
-	{"compact", "run one maintenance pass / loop the maintainer", runCompact},
-	{"bundle run", "run bundle slots due now (--repo ID, --strategy N)", runBundleRun},
-	{"bundle plan", "print the slot table for a repo", runBundlePlan},
-	{"bundle compose", "build one bundle slot now", runBundleCompose},
-	{"bundle rm", "remove bundle entries by id", runBundleRm},
-	{"repo create", "register a new repository", runRepoCreate},
-	{"repo list", "list repositories", runRepoList},
-	{"repo info", "print manifest stats for a repo", runRepoInfo},
-	{"repo policy", "read/save/clear the repo policy document", runRepoPolicy},
-	{"repo settings", "per-repo settings (D24) surface", runRepoSettings},
-	{"access", "read/replace the repo access.json role bindings", runAccess},
-	{"wal ls", "log table for a repo", runWalLs},
-	{"wal show", "one log entry, full", runWalShow},
-	{"wal materialize", "build a standalone repo at a point in time", runWalMaterialize},
-	{"wal add-pack", "publish an existing pack as a COMPACT entry", runWalAddPack},
-	{"wal annotate-pack", "retrofit side files via manifest-only CAS", runWalAnnotatePack},
-	{"wal rev-index", "write a .rev from an .idx", runWalRevIndex},
-	{"synth", "deterministic synthetic repo via git fast-import", runSynth},
-	{"import", "import a git directory (--from) or a git URL (--url)", runImport},
-	{"mirror", "external bridge via a local bare buffer repo", runMirror},
-	{"config check", "validate file ⊕ env, report ignored overrides", runConfigCheck},
-	{"config dump", "print the effective config as TOML", runConfigDump},
-	{"version", "print the build identity", runVersion},
+// stdout/stderr are the command output streams (test-injectable).
+func (c *cli) stdout() io.Writer {
+	if c != nil && c.out != nil {
+		return c.out
+	}
+	return os.Stdout
+}
+
+func (c *cli) stderr() io.Writer {
+	if c != nil && c.errOut != nil {
+		return c.errOut
+	}
+	return os.Stderr
+}
+
+var subcommands []command
+
+// init builds the dispatch table. It is an init (not a var initializer)
+// because the table holds runCompletion, which reads the table back to
+// generate shell completion — a var-initializer cycle.
+func init() {
+	subcommands = []command{
+		{"serve", "run the spindle server (the default)", runServe},
+		{"compact", "run one maintenance pass / loop the maintainer", runCompact},
+		{"bundle run", "run bundle slots due now (--repo ID, --strategy N)", runBundleRun},
+		{"bundle plan", "print the slot table for a repo", runBundlePlan},
+		{"bundle compose", "build one bundle slot now", runBundleCompose},
+		{"bundle rm", "remove bundle entries by id", runBundleRm},
+		{"repo create", "register a new repository", runRepoCreate},
+		{"repo list", "list repositories", runRepoList},
+		{"repo info", "print manifest stats for a repo", runRepoInfo},
+		{"repo policy", "read/save/clear the repo policy document", runRepoPolicy},
+		{"repo settings", "per-repo settings (D24) surface", runRepoSettings},
+		{"access", "read/replace the repo access.json role bindings", runAccess},
+		{"wal ls", "log table for a repo", runWalLs},
+		{"wal show", "one log entry, full", runWalShow},
+		{"wal materialize", "build a standalone repo at a point in time", runWalMaterialize},
+		{"wal add-pack", "publish an existing pack as a COMPACT entry", runWalAddPack},
+		{"wal annotate-pack", "retrofit side files via manifest-only CAS", runWalAnnotatePack},
+		{"wal rev-index", "write a .rev from an .idx", runWalRevIndex},
+		{"synth", "deterministic synthetic repo via git fast-import", runSynth},
+		{"import", "import a git directory (--from) or a git URL (--url)", runImport},
+		{"mirror", "external bridge via a local bare buffer repo", runMirror},
+		{"config check", "validate file ⊕ env, report ignored overrides", runConfigCheck},
+		{"config dump", "print the effective config as TOML", runConfigDump},
+		{"version", "print the build identity", runVersion},
+		// WP11: the API client surface (11_config_cli.md §6.6).
+		{"auth", "log in/out, inspect the stored token", groupRunner(authGroup)},
+		{"user", "users and SSH keys", groupRunner(userGroup)},
+		{"org", "organizations, members, teams", groupRunner(orgGroup)},
+		{"issue", "issues: list/show/create/comment/close/reopen", groupRunner(issueGroup)},
+		{"pr", "pull requests: list/show/create/merge/review/comment/checks", groupRunner(prGroup)},
+		{"release", "releases and assets", groupRunner(releaseGroup)},
+		{"checks", "commit checks and statuses", groupRunner(checksGroup)},
+		{"packages", "OCI packages (WP1)", groupRunner(packagesGroup)},
+		{"threads", "CI runs (WP10)", groupRunner(threadsGroup)},
+		{"api", "one authenticated API request", runAPI},
+		{"completion", "generate shell completion (bash|zsh|fish)", runCompletion},
+		{"help", "print this help", runHelp},
+	}
 }
 
 // main dispatches: peel the globals, resolve the subcommand (two-token
@@ -120,6 +159,12 @@ func runVersion(ctx context.Context, c *cli, args []string) int {
 	return exitOK
 }
 
+// runHelp prints the command table (the "spindle help" the usage text names).
+func runHelp(ctx context.Context, c *cli, args []string) int {
+	fmt.Fprint(c.stdout(), helpText)
+	return exitOK
+}
+
 // usageText mirrors the help table above (kept separate so help stays stable).
 var usageText = `Commands:
   serve | compact | bundle | repo | wal | synth | import | mirror | config | version
@@ -136,15 +181,18 @@ func peelGlobals(argv []string, c *cli) []string {
 		case "--help", "-h":
 			fmt.Print(helpText)
 			os.Exit(exitOK)
-		case "--config", "--data-dir":
+		case "--config", "--data-dir", "--server":
 			if i+1 >= len(argv) {
-				fmt.Fprintf(os.Stderr, "spindle: %s requires a PATH\n", arg)
+				fmt.Fprintf(os.Stderr, "spindle: %s requires a value\n", arg)
 				os.Exit(exitArg)
 			}
-			if arg == "--config" {
+			switch arg {
+			case "--config":
 				c.configPath = argv[i+1]
-			} else {
+			case "--data-dir":
 				c.dataDir = argv[i+1]
+			default:
+				c.server = argv[i+1]
 			}
 			i++
 		default:
@@ -152,6 +200,8 @@ func peelGlobals(argv []string, c *cli) []string {
 				c.configPath = v
 			} else if v, ok := cutFlag(arg, "--data-dir="); ok {
 				c.dataDir = v
+			} else if v, ok := cutFlag(arg, "--server="); ok {
+				c.server = v
 			} else {
 				rest = append(rest, arg)
 			}
@@ -169,7 +219,7 @@ func cutFlag(arg, prefix string) (string, bool) {
 
 const helpText = `spindle — git over HTTP on a WAL engine
 
-Usage: spindle [--config PATH] [--data-dir PATH] <command>
+Usage: spindle [--config PATH] [--data-dir PATH] [--server URL] <command>
 
 Commands:
   serve                                  run the server (default)
@@ -200,6 +250,23 @@ Commands:
   config dump
   version
 
-Exit codes: 0 success · 1 command/config error · 2 argv error or missing
-explicit config file · 3 config check --strict observed ignored overrides.
+API client (WP11; --json everywhere, exit 0 ok · 1 error · 2 usage · 3 not found · 4 auth):
+  auth login|logout|status|token         credential for the JSON API
+  user whoami|list|show|keys list|add|remove
+  org list|show|create · org member list|add|remove · org team list|create|add-repo
+  issue list|show|create|comment|close|reopen
+  pr list|show|create|merge|review|comment|checks
+  release list|show|create|delete|upload
+  checks list|status REPO [REF]
+  packages list|show|delete · threads list|show|run|cancel
+  api [-X METHOD] [-d DATA] [-H 'K: V'] PATH
+  completion bash|zsh|fish
+  help
+
+Server/token: --server URL, SPINDLE_SERVER (default http://127.0.0.1:8080),
+SPINDLE_TOKEN, else the "spindle auth login" state file (0600).
+
+Exit codes: 0 success · 1 command/config/API error · 2 argv error or missing
+explicit config file · 3 config check --strict observed ignored overrides (and,
+for API commands, 3 = not found) · 4 authentication/authorization failed.
 `

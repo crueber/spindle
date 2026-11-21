@@ -450,7 +450,7 @@ func TestRepoTreeRootRendersListing(t *testing.T) {
 		t.Error("tree page lost the in-place scroll wrapper")
 	}
 	// Tab strip: Code..Settings in order, Code active at the root.
-	if got, want := strings.Join(tabIDs(t, body), ","), "code,commits,issues,pulls,releases,settings"; got != want {
+	if got, want := strings.Join(tabIDs(t, body), ","), "code,commits,tags,issues,pulls,threads,releases,settings"; got != want {
 		t.Errorf("tabs = %s, want %s (Checks hidden: has_checks=false)", got, want)
 	}
 	if got := activeTabOf(t, body); got != "code" {
@@ -1038,6 +1038,7 @@ func TestRepoTabSection(t *testing.T) {
 		"/o/r/pulls/2":                 "pulls",
 		"/o/r/pull/2":                  "pulls",
 		"/o/r/checks":                  "checks",
+		"/o/r/threads":                 "threads",
 		"/o/r/releases":                "releases",
 		"/o/r/wal":                     "settings",
 		"/o/r/settings":                "settings",
@@ -1058,8 +1059,8 @@ func TestRepoTabGating(t *testing.T) {
 	f.view.summary.Features = &feats
 	f.view.summary.Health = api.RepoHealthHealthy
 	body := f.mustGet("/demo/spindle", http.StatusOK)
-	if got := strings.Join(tabIDs(t, body), ","); got != "code,commits,pulls,settings" {
-		t.Errorf("tabs = %s, want code,commits,pulls,settings", got)
+	if got := strings.Join(tabIDs(t, body), ","); got != "code,commits,tags,pulls,threads,settings" {
+		t.Errorf("tabs = %s, want code,commits,tags,pulls,threads,settings", got)
 	}
 
 	// A feature-disabled section re-highlights onto Code (#522). The path is

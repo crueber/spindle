@@ -28,6 +28,23 @@
           {{if .Data.Tags}}{{len .Data.Tags}} tags available — pick one from the list.{{else}}No tags yet — create one from a commit page or push one with git.{{end}}
         </p>
       </div>
+      <label class="flex cursor-pointer items-start gap-2 card p-3">
+        <input type="checkbox" name="create_tag" value="1" class="mt-0.5 h-4 w-4 accent-amber-500"{{if .Data.CreateTag}} checked{{end}}>
+        <span>
+          <span class="block text-sm font-medium">Create a new tag on publish</span>
+          <span class="muted block text-[11px]">The tag is created when the draft is published — never before. Requires a draft and a target commit.</span>
+        </span>
+      </label>
+      <div class="grid gap-1">
+        <label class="text-sm font-medium" for="release-new-tag">New tag name <span class="muted font-normal">· only with “create tag on publish”</span></label>
+        <input id="release-new-tag" name="new_tag" class="input mono" value="{{.Data.NewTag}}" placeholder="v1.2.0" aria-describedby="release-new-tag-help">
+        <p id="release-new-tag-help" class="muted text-[11px]">The tag ref that publish will create.</p>
+      </div>
+      <div class="grid gap-1">
+        <label class="text-sm font-medium" for="release-target">Target commit <span class="muted font-normal">· sha or ref</span></label>
+        <input id="release-target" name="target" class="input mono" value="{{.Data.Target}}" placeholder="main or a full commit sha" aria-describedby="release-target-help">
+        <p id="release-target-help" class="muted text-[11px]">The commit the new tag will point at (resolved when the draft is created).</p>
+      </div>
     </fieldset>
     <fieldset class="grid gap-3">
       <legend class="eyebrow">Content</legend>
@@ -65,7 +82,7 @@
       </label>
     </fieldset>
     <div class="flex flex-wrap items-center gap-2 border-t border-[var(--pd-line)] pt-4">
-      <button type="submit" class="btn primary"{{if not .Data.Tag}} disabled{{end}}>Create release</button>
+      <button type="submit" class="btn primary">Create release</button>
       <button type="submit" name="action" value="autodraft" class="btn"{{if not .Data.Tag}} disabled{{end}} title="Fill the notes from merged pull requests">Autodraft from merged PRs</button>
       <p class="muted w-full text-[11px]">Files (binaries, checksums) attach after creation, on the release page.</p>
     </div>

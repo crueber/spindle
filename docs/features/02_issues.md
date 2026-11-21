@@ -311,7 +311,7 @@ the `web/src/islands/sse.js` reader where a surface subscribes):
 |---|---|---|
 | `/:o/:r/issues` | list: filter bar (state/assignee/labels/milestone/since, #415), paged cards from the index | SSE `issue` upserts/patches cards in place |
 | `/:o/:r/issues/new` | create form (title, markdown-lite body, preview toggle) | — |
-| `/:o/:r/issues/:num` | thread: header (`#N` state badge — the single source of state), timeline (seq-window, older on demand; renders oldest → newest, #225), comment composer, one sidebar metadata card (labels + `+` dropdown / assignees / milestone with a linked title to the filtered issue list; triage sees the `+` dropdown when unset and a direct `−` clear button when set — issue #148) | `issue_event` appends timeline frames; `issue` updates the header |
+| `/:o/:r/issues/:num` | thread: header (`#N` state badge — the single source of state), timeline (seq-window, older on demand; renders oldest → newest, #225), comment composer, one sidebar metadata card (labels + `+` dropdown / assignees + `+` dropdown (WP6.1) / milestone with a linked title to the filtered issue list; triage sees the `+` dropdown when unset and a direct `−` clear button when set — issue #148) | `issue_event` appends timeline frames; `issue` updates the header |
 | | Forgejo #594: a closed thread renders the composer disabled with the server's reason (`lockState` in `internal/webui/collab.go`: "This conversation is closed") while the Reopen control stays live, so a reopen unlocks with no reload. The add-reaction `+` menu disables the same way; summary chips stay live (removal-only on locked threads). A raced 409 renders the API's message verbatim on the page (`.err-line`; no raw TypeError). | |
 | `/:o/:r/labels` | label CRUD (triage-gated UI) | on save, refetch |
 | `/:o/:r/milestones` | milestone CRUD + progress bars + per-milestone linked issues (each milestone lists/links its issues via the server-side `milestone=` list filter; the title links to the filtered issue list) | on save, refetch |
@@ -737,6 +737,17 @@ handler holds no repo locks across store calls (13 §2 rule 4).
   counters/logging, fresh-index stamp, diff predicate, read-path
   self-heal, no stamp on issue-less reads); `go test
   ./internal/issues/ -race` green.
+
+- **Assignees in the sidebar + one metadata writer (WP6.1, 2026-11-20).** The
+  issue sidebar now edits assignees with the same `+` popover anatomy as
+  labels/milestones (`assignees` discipline: one POST per toggle, the
+  handler sends the full next sorted set). Candidate principals come from
+  identity's effective collaborator list filtered to role ≥ triage; an
+  already-assigned name stays removable even after its role drops. The card is
+  a shared partial (`collab_meta_card`) used by both the issue and PR pages so
+  the three controls cannot drift. The service side stays `PatchIssue`; 03
+  calls the exported `PatchThreadMetadata` (the same body, kind `pr`, title/state
+  refused) rather than forking label/milestone rules (03 Decisions).
 
 ## Explicitly out of scope
 

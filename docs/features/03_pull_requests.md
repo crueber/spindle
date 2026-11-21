@@ -328,6 +328,38 @@ vs fork GC: pack deletion stays under the existing try-lock-or-defer protocol; t
 check runs before the TryLock attempt and re-reads manifests — it never holds locks across store calls
 (13 §2 rule 4).
 
+### 7.1 Sync fork (PLAN-V1 WP5, landed 2026-11-20)
+
+`POST /{o}/{r}/api/sync-fork` (write) starts the `(repo, kind="sync-fork")` task (Seam 5 single-flight)
+and answers `202 {task:{id}}`; `GET /{o}/{r}/api/sync-fork` returns the last outcome sidecar and, with
+`?task=<id>`, the task record. The repo header renders a **Sync fork** button when `fork.json` names a
+parent and the viewer may write.
+
+The task body (`internal/forksync`, package-owned seam wiring in composition):
+
+1. read `fork.json` → parent (`""` = 400 "not a fork");
+2. read both default branches (the parent's from its WAL refs) — equal tips are **current** and stop
+   BEFORE any fetch;
+3. screen the upstream URL (`server.public_url + "/" + parent + ".git"`) with the shared egress table
+   (`internal/egress.BlockedIP`: RFC1918, link-local/metadata, CGNAT, ULA, TEST-NETs refused; loopback
+   allowed because the parent is this instance) plus the `[import].allow_private_networks` override. The
+   URL is operator-derived, never user input, and the fetch never dials; a denial fails the task before
+   any work;
+4. "fetch" = **local pack-set sharing**, not a clone: the parent lives on this instance, its packs are
+   already in the bucket, so the fork's manifest `AddPack`s every parent pack it does not reference
+   (§7's creation shape). No network, no credentials, no LIST;
+5. `merge-base --is-ancestor forkSHA upstreamSHA` in the fork's materialized serving copy;
+6. strict ancestor ⇒ CAS-publish `refs/heads/<branch>` old → new (fast-forward; a cross-instance race
+   loses the old-oid check and is 409, never a force). Otherwise **diverged**: nothing is published and
+   the outcome links `/{parent}/pulls/new?base=…&head=…`;
+7. CAS the outcome sidecar `repos/<o>/<r>/meta/sync-fork.json` (`result` current|fast-forward|diverged|
+   failed, both shas, message, `pr_url`, `attempted_at`).
+
+Every phase emits a progress packet (`upstream refs`, `fetch`/`ingest`, `ancestry`, `publish`, `done`)
+and a notice (law 7); `failed` records a scrubbed message and returns the error so the task is terminal.
+Idempotent: a second run at the same tips is `current` with zero fetch/publish; a diverged run repeats
+its verdict without mutating anything.
+
 ## 8. API endpoints
 
 Registered by the `pulls` RouteProvider via `api.Lanes` (both lanes). Wire conventions per
@@ -336,12 +368,12 @@ starts. Auth levels are P6 roles resolved per P6 §1–4.
 
 | METHOD + path (repo-scoped `/{o}/{r}/api/…`) | Auth | Request → response | Seam |
 |---|---|---|---|
-| `GET …/pulls?state=&base=&head=&sort=&n=&after=` | read | → `{pulls:[{num, title, state, author, base_ref, head_ref, head_sha, draft, merged, updated_at}], more}` (index-first per P4; `merged` always present — Forgejo #530) | RouteProvider |
+| `GET …/pulls?state=&labels=&base=&head=&sort=&n=&after=` | read | → `{pulls:[{num, title, state, labels, assignees, author, base_ref, head_ref, head_sha, draft, merged, updated_at}], more}` (index-first per P4; `labels` comma-list AND, WP2.2; `merged` always present — Forgejo #530) | RouteProvider |
 | `POST …/pulls` | write | `{title, base_ref, head_ref, body?, fork?, draft?}` → `201` PR header (`409` if an OPEN pr already pairs base+head; `422` unresolvable refs; omitted `draft` = ready) | RouteProvider |
 | `GET …/pulls/{num}` | read | → header + `pr.json` + live `mergeable` (stamped; §4) — mutable-collab class (issue #280: `private, no-cache`) + folded ETag (live head/base shas + thread/pr versions + mergeable stamp) | RouteProvider |
 | `GET …/pulls/{num}/diff` | read | → `text/plain` unified diff `base…head` (one well-formed `git diff` patch per spec §9.5; the 12_web_ui.md parser's exact input; ref-dependent SWR, no ETag) | RouteProvider |
 | `GET …/pulls/{num}/commits` | read | → `{commits:[Commit], more}` (doc 07 `Commit` shape; skip/n pagination) | RouteProvider |
-| `PUT …/pulls/{num}` | write | `{title, body?, state?, draft?}` — title/state/draft edits; close/reopen append state events, draft flips (§3.1) append `draft_changed` events; triage may close others' or flip others' draft. `state:"open"` on a merged PR → `409` (merged is terminal — Forgejo #594); `state:"closed"` on merged stays `409` as before; any `draft` flip on merged → `409` (Forgejo #613) | RouteProvider |
+| `PUT …/pulls/{num}` | write | `{title?, body?, state?, draft?, labels?, assignees?, milestone?}` — title/state/draft edits (author or triage); labels/assignees/milestone are the shared 02 thread fields (triage, `milestone:null` clears, absent = no change) applied by the one 02 patch implementation (WP2.2); close/reopen append state events, draft flips (§3.1) append `draft_changed` events; triage may close others' or flip others' draft. `state:"open"` on a merged PR → `409` (merged is terminal — Forgejo #594); `state:"closed"` on merged stays `409` as before; any `draft` flip on merged → `409` (Forgejo #613) | RouteProvider |
 | `POST …/pulls/{num}/merge` | maintain | `{strategy, commit_title?, commit_message?, delete_head?}` → SSE task attach (`pull-merge`) | RouteProvider + task kind `pull-merge` |
 | `POST …/pulls/{num}/update-branch` | write | `{expected_head_sha?}` → task `pull-update-branch` (merge base→head; 409 if dirty or sha mismatch) | task kind |
 | `DELETE …/pulls/{num}/head` | maintain | delete the head branch post-merge (policy-checked like any ref delete) | RouteProvider |
@@ -621,6 +653,42 @@ through the Go services the SDK wraps).
   badge gated by `pullDraftVisibility` (the `pullCloseVisibility`
   precedent). SDK `pulls.open` takes `draft` (undefined omits it),
   `pulls.update` passes it through.
+
+- **PR metadata reuses the 02 thread patch (WP2.2, 2026-11-20).** Labels,
+  assignees and milestone on a PR are the SAME P3 header fields the issue page
+  edits, so 03 does not re-implement their validation, events
+  (`labels_changed`/`assignees_changed`/`milestone_changed`), milestone counters,
+  index card or notification fan-out. `internal/issues` exports
+  `PatchThreadMetadata` (the `PatchIssue` body with the kind pinned to `pr` and
+  the 03-owned title/state refused); composition binds it to
+  `pulls.Service.Metadata`, which `UpdatePR` calls when the PUT carries metadata.
+  `pulls.Thread`/`Card`/`Event` gained the fields the shared header already
+  carried (`state_reason`, `milestone`, `reaction_summary`, event
+  `added`/`removed`) so a PR header rewrite round-trips them instead of dropping
+  them. UI: the PR sidebar renders the shared `collab_meta_card` partial (one
+  anatomy with the issue page), the list has a label filter (AND, preserving
+  state/base/head links), and the SDK gains
+  `pulls.setLabels/setAssignees/setMilestone` over `pulls.update`. Tests:
+  `internal/issues` (PR-kind patch, triage matrix, index card),
+  `internal/pulls` (seam hand-off, label filter, PUT/query wire),
+  `internal/webui` (sidebar round trips, read-role refusal, page contract).
+- **Fork heads in the PR form (WP2.1, 2026-11-20).** The new-PR head picker
+  lists the parent's live `meta/forks.json` index (one read), filtered to forks
+  the viewer can read, grouped under "Forks"; `?from_repo=`/`?head=` prefill a
+  fork head and the redesign is still no-JS: selecting a repository and posting
+  the `refs` action reloads that repo's branch options (no N-repo branch scan on
+  every render). The POST path is unchanged — `OpenInput.Fork` already opens a
+  cross-owner PR; the form now supplies it from the picker.
+- **Branch protection editor (WP2.3, 2026-11-20).** The repo settings
+  "Branch protection" tab edits the protective rules through the policy grammar
+  itself: it owns exactly the rules named `protection-push` (restricts
+  create/update plus the optional force-push/delete ops, `require_checks`
+  contexts, `role:<owner>/<repo>:<role>` bypass for "who may push") and
+  `protection-reviews` (`required-reviews.min_approvals`/`dismiss_stale`),
+  preserves every other rule and group, and writes through `api.PutPolicy` so
+  the SAME parser validates. The tab shows a read-only effective-policy table;
+  the raw JSON editor survives inside a collapsed "Advanced" disclosure (it is
+  never the only path). Disabling removes only the two managed rules.
 
 ## Explicitly out of scope
 

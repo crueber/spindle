@@ -15,6 +15,7 @@
 | `repos/<o>/<r>/releases/<tag.json>` | Release header | **CAS** (`PutUpdate`; create = CAS against absent), Delete via endpoint only |
 | `repos/<o>/<r>/releases/assets/<tag>/<name>` | Asset bytes | **Create** (immutable); Delete only via the asset DELETE endpoint |
 | `repos/<o>/<r>/releases/latest.json` | Latest-release pointer | **CAS**; repaired lazily |
+| `repos/<o>/<r>/releases/counts/<tag.json>` | Per-asset download counter (`{counts:{name:N}}`) | **CAS** bump on the byte route, best-effort (WP3.2) |
 | `repos/<o>/<r>/meta/social.json` | Star/watch/fork counters | **CAS** |
 | `users/<principal>/starred/<o>/<r>.json` | Star record | **Create** / Delete (CAS Create-Delete family) |
 | `users/<principal>/watching/<o>/<r>.json` | Watch record | **Create** / Delete |
@@ -249,12 +250,13 @@ byte route is registered in the static group (no compress, accel eligible).
 | GET `/{o}/{r}/api/releases?n=&after=` | read | → `{releases: [Release], more}`; created_at desc, `after` = cursor `(created_at,tag)`, n default 50 max 100 | releases |
 | GET `/{o}/{r}/api/releases/latest[?include_prereleases=1]` | read | → Release \| 404 `no releases` | releases |
 | GET `/{o}/{r}/api/releases/{tag}` | read | → Release | releases |
-| PUT `/{o}/{r}/api/releases/{tag}` | write | `{name?, body?, draft?, prerelease?}` → Release; unknown tag 404; duplicate 409 | releases |
+| PUT `/{o}/{r}/api/releases/{tag}` | write | `{name?, body?, draft?, prerelease?, target?}` → Release; unknown tag 404 (unless `target` names a pending-tag draft, WP3.3); duplicate 409 | releases |
 | DELETE `/{o}/{r}/api/releases/{tag}` | maintain | → 200; removes header + asset bytes; repairs latest pointer | releases |
 | GET `/{o}/{r}/api/releases/autodraft?tag=&since=` | read | → `{tag, since, body, prs: [], more}` | releases |
 | POST `/{o}/{r}/api/releases/{tag}/assets/{name}` | write | raw bytes; `Content-Length` + `X-Walgit-Asset-Sha256` → asset entry; 413 over cap, 409 sha clash | releases |
 | DELETE `/{o}/{r}/api/releases/{tag}/assets/{name}` | write | → 200; CAS-removes entry + deletes bytes | releases |
-| GET/HEAD `/{o}/{r}/releases/{tag}/assets/{name}` | read | bytes; static contract (06 §5) | releases |
+| GET/HEAD `/{o}/{r}/releases/{tag}/assets/{name}` | read | bytes; static contract (06 §5); a full GET bumps the asset's download counter (WP3.2) | releases |
+| GET/HEAD `/{o}/{r}/archive/{ref}.tar.gz`, `.zip` | read | streamed `git archive` output, `ETag: "<tree-id>-<format>"` (WP3.1; repo sub-path, not a lane) | archive |
 | PUT `/{o}/{r}/api/star` | authenticated + visible | `{}` → `{stars}`; idempotent | social |
 | DELETE `/{o}/{r}/api/star` | authenticated | `{}` → `{stars}` | social |
 | PUT/DELETE `/{o}/{r}/api/watch` | authenticated + visible | `{}` → `{watching, watchers}` | social |
@@ -262,7 +264,8 @@ byte route is registered in the static group (no compress, accel eligible).
 | GET `/api/v1/me/starred?n=&after=` | authenticated | → `{starred: [{repo, starred_at}], more}`; repo (owner/name) ascending, n default 50 max 100, `after` = `<starred_at>|<repo>` of the previous page's last entry | social |
 | GET `/api/v1/users/{principal}/starred?n=&after=` | read | same shape; entries naming a deleted repo are skipped (miss-tolerant reads, §4.1) | social |
 
-Release JSON on the wire = the §1.1 body + `browser_download_url` per asset + `assets: []` when empty.
+Release JSON on the wire = the §1.1 body + `browser_download_url` and `downloads` per asset +
+`assets: []` when empty.
 Errors are plain text (`unknown revision`, `conflict`, `asset too large`).
 
 #### Concurrency (handlers)
@@ -418,11 +421,32 @@ server-side copy (e.g. from a fork parent) lands if ever wanted; v1 does not reg
   request body with `http.MaxBytesReader` before the spool (`releases.max_asset_bytes` + 1 MiB
   multipart overhead), so an unbounded body cannot fill the node's disk before the service cap.
 
+- **Source archives (WP3.1, PLAN-V1, landed 2026-11-20).** `GET|HEAD /{o}/{r}/archive/{ref}.tar.gz|.zip`
+  streams `git archive` (argv in `docs/go/04_git.md` §11.3) under the archive package's own bounded pool;
+  ETag is the resolved TREE id + format, so a branch, tag, and commit naming one tree share a validator.
+  Nothing is stored: archives are derived on read (law 4), so there is no build task, no cache-key
+  policy, and no bucket key. The zip lane passes `-0` (store) — the one flag difference from a hand-run
+  `git archive` — so bytes do not depend on the zlib build; tar is byte-identical to a local
+  `git archive`. The release page links both formats (published, non-pending releases) and the Code page
+  toolbar links the current ref.
+- **Download counts (WP3.2, landed 2026-11-20).** One CAS'd `releases/counts/<tag>.json` per release
+  (`{counts:{asset: N}}`), bumped from the asset byte route after a full 200 GET (never HEAD, 304, or a
+  Range read). One object per release — not per asset — keeps the hot byte path at ONE CAS and every
+  release render at ONE GET; the CAS loop handles concurrent asset downloads (human-rate). The bump is
+  best-effort: a counter write failure never fails or delays a download response, and the counter is
+  bucket state, so it survives a restart. Shown in the API (`downloads`) and on the release page table.
+- **Draft with a new tag (WP3.3, landed 2026-11-20).** `PUT` accepts `target` (sha or ref) when the tag
+  does not exist yet; the draft snapshots `tag_sha` from `target` and sets `pending_tag`. The publish
+  transition creates `refs/tags/<tag>` through the tags service (policy + WAL CAS) BEFORE flipping
+  `draft=false` — never at draft creation. A racing publish treats "already at the same commit" as
+  success and a moved tag as 409. The composer offers "create a new tag on publish" plus the tag name and
+  target; publishing an untagged draft without the seam wired is 503 rather than a silent release with
+  no tag.
+
 ## Explicitly out of scope
 
-- Release archives (auto-built zip/tar.gz of the tag) — needs a build task + cache policy; seam: a
-  `release-archive` task kind + static-contract serving, same shape as assets.
-- Download counts / per-asset analytics (social.json would grow unbounded).
+- (Removed by WP3.1/WP3.2/WP3.3: release archives, per-asset download counts, and draft-with-new-tag are
+  now v1 requirements and landed — see the Decisions entries above.)
 - Star history graphs, "stargazers" listing page (would need a reverse index over `users/*/starred` —
   a global scan; deferred until a star index format is decided).
 - GitHub-style draft releases with not-yet-existing tags; release notes from commit messages (only

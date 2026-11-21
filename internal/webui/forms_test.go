@@ -175,6 +175,15 @@ type formsFakePulls struct {
 	openErr    error
 	lastOpen   pulls.OpenInput
 	lastBase   string
+	forks      []pulls.ForkListEntry
+	forksErr   error
+}
+
+func (f *formsFakePulls) ListForks(_ context.Context, _, _ string, _ auth.Principal, _ string, _ int) (*pulls.ForkListPage, error) {
+	if f.forksErr != nil {
+		return nil, f.forksErr
+	}
+	return &pulls.ForkListPage{Forks: f.forks}, nil
 }
 
 func (f *formsFakePulls) StartFork(_ context.Context, _, _ string, _ auth.Principal, in pulls.ForkInput) (*pulls.TaskRecord, string, error) {
@@ -535,11 +544,21 @@ func formsOptions(t *testing.T, w *httptest.ResponseRecorder, id string) []strin
 		t.Fatalf("select #%s not found", id)
 	}
 	var out []string
-	for c := sel.FirstChild; c != nil; c = c.NextSibling {
-		if c.Type == html.ElementNode && c.Data == "option" {
-			out = append(out, formsAttr(c, "value"))
+	var walk func(n *html.Node)
+	walk = func(n *html.Node) {
+		for c := n.FirstChild; c != nil; c = c.NextSibling {
+			if c.Type != html.ElementNode {
+				continue
+			}
+			switch c.Data {
+			case "option":
+				out = append(out, formsAttr(c, "value"))
+			case "optgroup":
+				walk(c)
+			}
 		}
 	}
+	walk(sel)
 	return out
 }
 
@@ -2969,3 +2988,66 @@ var (
 	_ FormsImport   = (*repoimport.Service)(nil)
 	_ FormsMirror   = (*mirror.Service)(nil)
 )
+
+// TestFormsPullNewForkPicker covers WP2.1: the head picker lists the live
+// fork index (grouped under "Forks"), only forks the viewer can read, and a
+// fork head posts through the existing cross-owner OpenPR path.
+func TestFormsPullNewForkPicker(t *testing.T) {
+	h := newFormsHarness(t, "none")
+	h.s.env.API = &api.Env{
+		Repos: &formsFakeRegistry{names: []string{"thing"}},
+		Repo: &formsFakeRepoView{
+			summary:  api.SummaryData{Features: formsAllFeatures()},
+			branches: []api.Ref{{Name: "refs/heads/main"}, {Name: "refs/heads/fork-work"}},
+		},
+	}
+	p := &formsFakePulls{
+		openNum: 9,
+		forks: []pulls.ForkListEntry{
+			{Repo: "acme/fork", ForkedAt: "2026-11-18T00:00:00Z"},
+			{Repo: "mallory/private", ForkedAt: "2026-11-18T01:00:00Z"},
+		},
+	}
+	formsUse(t, FormsDeps{Identity: &formsFakeIdentity{roles: map[string]identity.Role{
+		"alice/thing": identity.RoleWrite,
+		"acme/fork":   identity.RoleRead,
+	}}, Pulls: p})
+
+	w := h.request(t, http.MethodGet, "/alice/thing/pulls/new", nil, "writer", nil)
+	formsExpectStatus(t, w, http.StatusOK)
+	formsExpectContains(t, w, "fork-work")
+	opts := formsOptions(t, w, "pull-from-repo")
+	if !formsListContains(opts, "acme/fork") {
+		t.Fatalf("fork missing from picker: %v", opts)
+	}
+	if formsListContains(opts, "mallory/private") {
+		t.Fatalf("unreadable fork leaked into picker: %v", opts)
+	}
+
+	// Selecting the fork (server round trip, no JS) lists ITS branches.
+	w = h.request(t, http.MethodGet, "/alice/thing/pulls/new?from_repo=acme/fork&head=refs/heads/main", nil, "writer", nil)
+	formsExpectStatus(t, w, http.StatusOK)
+	if got := formsOptions(t, w, "pull-from-ref"); !formsListContains(got, "refs/heads/main") {
+		t.Fatalf("fork branches = %v", got)
+	}
+	// The branch-discovery submit is a re-render, not a PR.
+	w = h.request(t, http.MethodPost, "/alice/thing/pulls/new", url.Values{
+		"from_repo": {"acme/fork"}, "action": {"refs"},
+	}, "writer", nil)
+	formsExpectStatus(t, w, http.StatusOK)
+	if p.lastOpen.Title != "" {
+		t.Fatalf("refs submit opened a PR: %+v", p.lastOpen)
+	}
+
+	// Opening from the picker passes the head repo through to OpenPR.
+	w = h.request(t, http.MethodPost, "/alice/thing/pulls/new", url.Values{
+		"from_repo": {"acme/fork"}, "from_ref": {"refs/heads/fork-work"},
+		"to_repo": {"alice/thing"}, "to_ref": {"refs/heads/main"},
+		"title": {"Cross-owner"}, "action": {"open"},
+	}, "writer", nil)
+	formsExpectStatus(t, w, http.StatusSeeOther)
+	formsExpectLocation(t, w, "/alice/thing/pull/9")
+	if p.lastOpen.Fork == nil || p.lastOpen.Fork.Repo != "acme/fork" || p.lastOpen.HeadRef != "refs/heads/fork-work" {
+		t.Fatalf("open input = %+v", p.lastOpen)
+	}
+}

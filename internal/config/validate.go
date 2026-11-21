@@ -26,6 +26,7 @@ func Validate(c *Config) (warnings []string, errs []error) {
 	errs = append(errs, checkPaths(c)...)
 	errs = append(errs, checkSSH(c)...)
 	errs = append(errs, checkImport(c)...)
+	errs = append(errs, checkPackages(c)...)
 	errs = append(errs, checkTreeLog(c)...)
 	return warnings, errs
 }
@@ -48,6 +49,26 @@ func checkSSH(c *Config) []error {
 	}
 	if sc.ExternalPort < 0 || sc.ExternalPort > 65535 {
 		errs = append(errs, fmt.Errorf("server.ssh.external_port %d must be a TCP port 1-65535 (0 = the listen port)", sc.ExternalPort))
+	}
+	return errs
+}
+
+// checkPackages (docs/features/14 §5): the OCI registry limits must be real
+// bounds. A non-positive size or TTL is an error (there is no "unlimited
+// blob" — a 0 would read as the compiled-in default inside the package, and a
+// silently substituted default at boot is exactly the sort of drift the setup
+// page would then show wrong).
+func checkPackages(c *Config) []error {
+	p := c.Packages
+	var errs []error
+	if p.MaxBlobBytes <= 0 {
+		errs = append(errs, fmt.Errorf("packages.max_blob_bytes must be positive (default 2GiB)"))
+	}
+	if p.MaxManifestBytes <= 0 {
+		errs = append(errs, fmt.Errorf("packages.max_manifest_bytes must be positive (default 4MiB)"))
+	}
+	if p.UploadTTL <= 0 {
+		errs = append(errs, fmt.Errorf("packages.upload_ttl must be positive (default 24h)"))
 	}
 	return errs
 }

@@ -307,6 +307,25 @@ type IssuePatch struct {
 // P3 two-step. No-op fields are omitted (no event). Auth: title/state —
 // author or triage; labels/assignees/milestone — triage.
 func (s *Service) PatchIssue(ctx context.Context, owner, repo string, num int, actor auth.Principal, p IssuePatch) (*Thread, error) {
+	return s.patchThread(ctx, owner, repo, num, "issue", actor, p)
+}
+
+// PatchThreadMetadata applies the 02-owned metadata half (labels,
+// assignees, milestone) to ANY thread kind. PR threads (03 §8) share the
+// P3 header and the index card; 03's PR update path calls this through its
+// MetadataApply seam instead of forking the label/milestone validation,
+// the event shapes, the milestone counters or the notification fan-out.
+// Title/state stay 03-owned and are refused here.
+func (s *Service) PatchThreadMetadata(ctx context.Context, owner, repo string, num int, actor auth.Principal, p IssuePatch) (*Thread, error) {
+	if p.Title != nil || p.State != nil || p.StateReason != nil {
+		return nil, fmt.Errorf("%w: title/state are not thread-metadata fields", ErrInvalid)
+	}
+	return s.patchThread(ctx, owner, repo, num, "pr", actor, p)
+}
+
+// patchThread is the one thread PATCH implementation behind PatchIssue and
+// PatchThreadMetadata; kind pins the thread family (02 vs 03).
+func (s *Service) patchThread(ctx context.Context, owner, repo string, num int, kind string, actor auth.Principal, p IssuePatch) (*Thread, error) {
 	if err := requireAuthenticated(actor); err != nil {
 		return nil, err
 	}
@@ -317,7 +336,7 @@ func (s *Service) PatchIssue(ctx context.Context, owner, repo string, num int, a
 	if err != nil {
 		return nil, err
 	}
-	if th == nil || th.Kind != "issue" {
+	if th == nil || th.Kind != kind {
 		return nil, fmt.Errorf("%w: unknown issue", ErrNotFound)
 	}
 	who := normPrincipal(actor.Name)

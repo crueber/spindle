@@ -14,7 +14,7 @@
   <li class="border-t border-[var(--pd-line)] py-3 first:border-t-0 first:pt-0" id="event-{{.Seq}}">
     <article>
       <p class="muted mb-1 text-xs"><span class="font-medium text-[var(--pd-text)]">{{.Actor}}</span> · {{template "collab_time" .At}}</p>
-      <div class="markdown-body">{{mdrepo .Body $.Owner $.Repo}}</div>
+      <div class="markdown-body">{{mdat .Body $.Owner $.Repo $.Ref ""}}</div>
       {{$ev := .}}
       {{if or .Reactions .Addable}}
       <div class="reaction-row mt-2 flex flex-wrap items-center gap-1" role="group" aria-label="reactions">

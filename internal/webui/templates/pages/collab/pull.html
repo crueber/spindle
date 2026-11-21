@@ -24,7 +24,7 @@
     {{if .Body}}
     <article class="mb-3 border-b border-[var(--pd-line)] pb-3" aria-label="Pull request description">
       <p class="muted mb-1 text-xs">{{.OpenedActor}} · {{template "collab_time" .OpenedAt}}</p>
-      <div class="markdown-body">{{mdrepo .Body .Repo.Owner .Repo.Name}}</div>
+      <div class="markdown-body">{{mdat .Body .Repo.Owner .Repo.Name .Repo.HeadLabel ""}}</div>
     </article>
     {{end}}
 
@@ -61,7 +61,7 @@
         {{if .Dismissed}}
         <p class="muted text-sm italic">dismissed #{{.DismissSeq}}: {{.Reason}}</p>
         {{else}}
-        {{with .Body}}<div class="markdown-body">{{mdrepo . $d.Repo.Owner $d.Repo.Name}}</div>{{end}}
+        {{with .Body}}<div class="markdown-body">{{mdat . $d.Repo.Owner $d.Repo.Name $d.Repo.HeadLabel ""}}</div>{{end}}
         {{if .CanDismiss}}
         <form class="mt-1 flex flex-wrap items-center gap-2" method="post" action="{{.Action}}">
           <input class="input w-auto flex-1" name="reason" placeholder="dismissal reason (required)" aria-label="dismissal reason">
@@ -115,6 +115,13 @@
   </div>
 
   <aside class="grid min-w-0 grid-cols-1 content-start gap-3">
+      {{template "collab_meta_card" (dict
+        "Aria" "Pull request metadata"
+        "LabelAction" .LabelAction "AssigneeAction" .AssigneeAction "MilestoneAction" .MilestoneAction
+        "CanTriage" .CanTriage "Labels" .Labels "LabelOptions" .LabelOptions
+        "Assignees" .Assignees "AssigneeOptions" .AssigneeOptions
+        "Milestone" .Milestone "Milestones" .Milestones)}}
+
     <section class="card divide-y divide-[color:var(--pd-line)] text-sm" aria-label="Pull request status">
       <div class="p-3">
         {{if .Terminal}}

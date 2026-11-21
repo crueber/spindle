@@ -4,9 +4,10 @@
 // and code highlighting (web/src/lib/highlight.js).
 //
 // Every exported renderer returns template.HTML that was built exclusively
-// from escaped text (escapeText/escapeAttr) and a closed set of tags. Raw
-// HTML in markdown source is escaped, never passed through, so the output is
-// safe to embed with html/template without a second sanitizer pass.
+// from escaped text (escapeText/escapeAttr), a closed set of tags, and raw HTML
+// that passed the allowlist sanitizer in mdsanitize.go. Raw HTML in markdown
+// source is sanitized, never passed through, so the output is safe to embed
+// with html/template without a second sanitizer pass.
 package webui
 
 import (
@@ -16,10 +17,10 @@ import (
 	"strings"
 )
 
-// RenderMarkdown renders the repo's markdown subset to safe HTML. Raw HTML
-// in the source is ESCAPED, never passed through. Links allow only http,
-// https, mailto and relative URLs, and carry rel="nofollow ugc noopener"
-// (plus target="_blank" for external http(s) links).
+// RenderMarkdown renders the repo's markdown subset to safe HTML. Relative
+// URLs and #N refs pass through unlinked because there is no repo context; use
+// RenderMarkdownIn or RenderMarkdownCtx from a repo page. Raw HTML passes
+// through the allowlist sanitizer (mdsanitize.go).
 //
 // Ported from render-md.js: headings, emphasis/strong, inline code, fenced
 // code (language class), ordered/unordered/task lists, blockquotes, tables,
@@ -44,6 +45,19 @@ func RenderMarkdownIn(src, owner, repo string) template.HTML {
 	return template.HTML(r.blocks(splitMarkdownLines(src)))
 }
 
+// RenderMarkdownCtx renders markdown at a repo coordinate so relative images
+// and links resolve against the document's directory and ref (GitHub parity;
+// see MarkdownCtx.resolveURL). It also carries the #N/PRN ref base, like
+// RenderMarkdownIn.
+func RenderMarkdownCtx(src string, ctx MarkdownCtx) template.HTML {
+	base := ""
+	if ctx.Owner != "" && ctx.Repo != "" {
+		base = "/" + ctx.Owner + "/" + ctx.Repo
+	}
+	r := &mdRenderer{refBase: base, ctx: &ctx}
+	return template.HTML(r.blocks(splitMarkdownLines(src)))
+}
+
 // --- escapers ---------------------------------------------------------------
 
 // escapeText escapes the three characters that can start markup in text
@@ -65,6 +79,9 @@ func escapeAttr(s string) string {
 type mdRenderer struct {
 	// refBase is "/{owner}/{repo}" or "" when refs are not linkable.
 	refBase string
+	// ctx resolves relative URLs; nil means pass them through (no repo
+	// coordinate is known).
+	ctx *MarkdownCtx
 }
 
 func splitMarkdownLines(src string) []string {
@@ -93,6 +110,10 @@ func (r *mdRenderer) blocks(lines []string) string {
 		if isThematicBreak(line) {
 			b.WriteString("<hr>\n")
 			i++
+			continue
+		}
+		if htmlBlockStart(line) {
+			i = r.writeHTMLBlock(&b, lines, i)
 			continue
 		}
 		if _, ok := stripQuote(line); ok {
@@ -137,6 +158,10 @@ func (r *mdRenderer) blocksTight(lines []string) string {
 			i++
 			continue
 		}
+		if htmlBlockStart(line) {
+			i = r.writeHTMLBlock(&b, lines, i)
+			continue
+		}
 		if _, ok := stripQuote(line); ok {
 			i = r.writeBlockquote(&b, lines, i)
 			continue
@@ -161,6 +186,24 @@ func (r *mdRenderer) writeHeading(b *strings.Builder, level int, text string) {
 	b.WriteString("</" + tag + ">\n")
 }
 
+// writeHTMLBlock consumes a raw-HTML block (CommonMark type 6/7: through the
+// next blank line) and emits its sanitized form. GitHub ends these blocks at
+// a blank line too, which is what lets markdown between "<details>" and
+// "</details>" render as markdown; the stray-closing-tag rule in the
+// sanitizer keeps the split document balanced.
+func (r *mdRenderer) writeHTMLBlock(b *strings.Builder, lines []string, i int) int {
+	start := i
+	for i < len(lines) && !isBlankLine(lines[i]) {
+		i++
+	}
+	out := sanitizeHTMLFragment(strings.Join(lines[start:i], "\n"), r.ctx)
+	if out != "" {
+		b.WriteString(out)
+		b.WriteString("\n")
+	}
+	return i
+}
+
 func (r *mdRenderer) writeParagraph(b *strings.Builder, lines []string, i int, tight bool) int {
 	var para []string
 	for i < len(lines) && !isBlankLine(lines[i]) {
@@ -169,7 +212,7 @@ func (r *mdRenderer) writeParagraph(b *strings.Builder, lines []string, i int, t
 				r.writeHeading(b, lvl, strings.Join(para, " "))
 				return i + 1
 			}
-			if isBlockStart(lines[i]) || startsTable(lines, i) {
+			if isBlockStart(lines[i]) || startsTable(lines, i) || htmlBlockStart(lines[i]) {
 				break
 			}
 		}
@@ -681,6 +724,84 @@ func (r *mdRenderer) inline(s string) string {
 	return b.String()
 }
 
+// resolveURL applies the repo context to a validated relative URL (nil ctx
+// leaves it untouched).
+func (r *mdRenderer) resolveURL(u string, image bool) string {
+	if r.ctx == nil {
+		return u
+	}
+	return r.ctx.resolveURL(u, image)
+}
+
+// parseInlineHTML consumes one raw-HTML construct starting at s[i]: a comment
+// (dropped), a single tag, or a balanced element. It returns the sanitized
+// HTML and the index after it. Unbalanced/unterminated markup is not HTML —
+// the caller escapes it, so a stray "<kbd>" can never leak an open tag.
+func (r *mdRenderer) parseInlineHTML(s string, i int) (string, int, bool) {
+	if strings.HasPrefix(s[i:], "<!--") {
+		if end := strings.Index(s[i+4:], "-->"); end >= 0 {
+			return "", i + 4 + end + 3, true
+		}
+		return "", 0, false
+	}
+	name, ok := htmlTagName(s[i:])
+	if !ok {
+		return "", 0, false
+	}
+	openEnd := findHTMLTagEnd(s, i)
+	if openEnd < 0 {
+		return "", 0, false
+	}
+	if strings.HasPrefix(s[i:], "</") {
+		if !htmlAllowedTags[name] || htmlVoidTags[name] {
+			return "", openEnd + 1, true
+		}
+		return "</" + name + ">", openEnd + 1, true
+	}
+	selfClosing := strings.HasSuffix(strings.TrimRight(s[i:openEnd], " \t"), "/")
+	if selfClosing || htmlVoidTags[name] {
+		return sanitizeHTMLFragment(s[i:openEnd+1], r.ctx), openEnd + 1, true
+	}
+	end, ok := matchInlineClose(s, openEnd+1, name)
+	if !ok {
+		return "", 0, false
+	}
+	return sanitizeHTMLFragment(s[i:end], r.ctx), end, true
+}
+
+// matchInlineClose finds the close tag matching an already-consumed open tag
+// of name, counting nested same-name elements. The returned index is just past
+// the closing ">".
+func matchInlineClose(s string, from int, name string) (int, bool) {
+	depth := 1
+	for j := from; j < len(s); {
+		k := strings.IndexByte(s[j:], '<')
+		if k < 0 {
+			return 0, false
+		}
+		k += j
+		nm, ok := htmlTagName(s[k:])
+		if !ok || nm != name {
+			j = k + 1
+			continue
+		}
+		end := findHTMLTagEnd(s, k)
+		if end < 0 {
+			return 0, false
+		}
+		if strings.HasPrefix(s[k:], "</") {
+			depth--
+			if depth == 0 {
+				return end + 1, true
+			}
+		} else if !strings.HasSuffix(strings.TrimRight(s[k:end], " \t"), "/") && !htmlVoidTags[name] {
+			depth++
+		}
+		j = end + 1
+	}
+	return 0, false
+}
+
 // inlineInto renders inline markup. allowLinkify is false inside an anchor
 // (link label), where the JS passes skip #N/@user linkification too.
 func (r *mdRenderer) inlineInto(b *strings.Builder, s string, allowLinkify bool) {
@@ -748,6 +869,11 @@ func (r *mdRenderer) inlineInto(b *strings.Builder, s string, allowLinkify bool)
 			i++
 		case '<':
 			if html, next, ok := angleAutolink(s, i); ok {
+				b.WriteString(html)
+				i = next
+				continue
+			}
+			if html, next, ok := r.parseInlineHTML(s, i); ok {
 				b.WriteString(html)
 				i = next
 				continue
@@ -919,6 +1045,7 @@ found:
 		if !ok {
 			return escapeText(alt), next, true
 		}
+		src = r.resolveURL(src, true)
 		return `<img src="` + escapeAttr(src) + `" alt="` + escapeAttr(alt) + `">`, next, true
 	}
 	var inner strings.Builder
@@ -927,6 +1054,7 @@ found:
 	if !ok {
 		return inner.String(), next, true
 	}
+	href = r.resolveURL(href, false)
 	var b strings.Builder
 	b.WriteString(`<a href="` + escapeAttr(href) + `" rel="nofollow ugc noopener"`)
 	if isExternalHTTP(href) {

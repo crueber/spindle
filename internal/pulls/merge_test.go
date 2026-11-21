@@ -233,8 +233,15 @@ func TestMergeGates(t *testing.T) {
 		if err != nil {
 			t.Fatalf("second: %v", err)
 		}
+		// The fake merge can finish before the second StartMerge runs; a new
+		// id is then correct (there is nothing left to join). The deterministic
+		// join coverage lives at the single-flight owner,
+		// internal/wal TestTaskTable_RunningJoinHint; here we pin the weaker
+		// invariant: a still-running first task must be joined.
 		if first.ID != second.ID {
-			t.Fatalf("join must reuse id: %q vs %q", first.ID, second.ID)
+			if cur := e.svc.MergeTask("o", "r"); cur != nil && cur.ID == first.ID && cur.State == TaskRunning {
+				t.Fatalf("running task was not joined: %q vs %q", first.ID, second.ID)
+			}
 		}
 		done := waitTask(5*time.Second, func() *TaskRecord { return e.svc.MergeTask("o", "r") })
 		if done == nil || done.State != TaskOK {

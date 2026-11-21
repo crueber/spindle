@@ -147,6 +147,20 @@ type IssueCloser interface {
 	ApplyClosingReferences(ctx context.Context, owner, repo string, prNum int, mergedSHA, actor string, texts []string) ([]int, error)
 }
 
+// ThreadMetaPatch is the 02-owned metadata set on a PR thread (§8 PUT:
+// labels/assignees/milestone). A nil field is untouched; Milestone is
+// **string so *nil clears (the absent-vs-null rule 02 §7 pins).
+type ThreadMetaPatch struct {
+	Labels    *[]string
+	Assignees *[]string
+	Milestone **string
+}
+
+// MetadataApply applies ThreadMetaPatch to a PR thread. Composition binds
+// *issues.Service.PatchThreadMetadata; 03 never re-implements label,
+// assignee or milestone validation (one thread model, one writer).
+type MetadataApply func(ctx context.Context, owner, repo string, num int, actor auth.Principal, p ThreadMetaPatch) error
+
 // ForksCounter is the 07-provided seam the fork task calls at completion
 // (and the child-delete sweep calls after unlisting): IncForks
 // CAS-increments the parent's social.json forks counter (07 §6), DecForks
@@ -206,6 +220,13 @@ type Service struct {
 	// CollabCounts precedent). Wired by composition (cmd/spindle) over
 	// the WAL settings doc; tests substitute a fake.
 	Features func(ctx context.Context, owner, repo string) (config.ResolvedFeatures, bool)
+	// Metadata is the 02-provided thread-metadata applier (labels,
+	// assignees, milestone on a PR thread). 03 owns the PR sidecar and
+	// lifecycle; 02 owns the shared header fields, so this seam reuses
+	// 02's validation/events/counters instead of forking them. Wired in
+	// composition to *issues.Service.PatchThreadMetadata; nil makes
+	// metadata edits unavailable (503).
+	Metadata MetadataApply
 	Now      func() time.Time
 
 	// ServerID is the committer identity for merge commits

@@ -57,7 +57,7 @@ must close. Rows marked **—** are at parity already; they stay in the table as
 | Capability | GitHub | spindle today | Delta |
 |---|---|---|---|
 | Open from a branch, same repo | yes | yes | — |
-| Open from a fork (cross-owner) | yes | API/SDK only; UI select limited to the base owner | **WP2.1** UI fork selection |
+| Open from a fork (cross-owner) | yes | yes (UI picker lists the fork network — **WP2.1 landed 2026-11-20**) | — |
 | Draft / ready-for-review | yes | yes | — |
 | Conversation, comments, timeline, reactions | yes | yes | — |
 | Commits / files changed, unified + split, line comments, suggestions | yes | yes | — |
@@ -65,8 +65,8 @@ must close. Rows marked **—** are at parity already; they stay in the table as
 | Required checks gate | yes | yes (policy) | — |
 | Merge: merge commit / squash / rebase; delete branch after | yes | yes | — |
 | Update branch (merge base into head) | yes | yes | — |
-| Labels / milestone / assignees on the PR | yes | thread model has `Labels`; no editing endpoint | **WP2.2** PR metadata UI + API |
-| Branch protection rules UI (required reviews, status checks, who may push) | yes | raw policy JSON only | **WP2.3** (v1 — everything is editable in the UI) |
+| Labels / milestone / assignees on the PR | yes | yes (sidebar + `PUT …/pulls/{num}` + SDK; list filters by label — **WP2.2 landed 2026-11-20**) | — |
+| Branch protection rules UI (required reviews, status checks, who may push) | yes | yes (Settings → Branch protection writes the validated policy — **WP2.3 landed 2026-11-20**) | — |
 | Auto-merge, merge queue, stacked PRs | yes | no | **non-goal** |
 
 ### 2.2 Releases
@@ -77,17 +77,17 @@ must close. Rows marked **—** are at parity already; they stay in the table as
 | Draft / prerelease / latest | yes | yes | — |
 | Assets: upload, download (Range/ETag), delete | yes | yes | — |
 | Auto-generated release notes from merged PRs | yes | yes (autodraft) | — |
-| Auto-built source archives (zip, tar.gz) | yes | no | **WP3.1** |
-| Download counts per asset | yes | no | **WP3.2** |
-| Draft that creates its tag on publish | yes | drafts require an existing tag | **WP3.3** |
+| Auto-built source archives (zip, tar.gz) | yes | yes (2026-11-20) | **WP3.1 landed** |
+| Download counts per asset | yes | yes (2026-11-20) | **WP3.2 landed** |
+| Draft that creates its tag on publish | yes | yes (2026-11-20) | **WP3.3 landed** |
 
 ### 2.3 Tags
 
 | Capability | GitHub | spindle today | Delta |
 |---|---|---|---|
 | Lightweight + annotated tags | yes | yes | — |
-| Tag list page with commit, date, author | yes | count only in the repo header | **WP4.1** |
-| Delete a tag (with policy check) | yes | no | **WP4.2** |
+| Tag list page with commit, date, author | yes | yes (`/tags`, 2026-11-20) | **WP4.1 landed** |
+| Delete a tag (with policy check) | yes | yes (2026-11-20) | **WP4.2 landed** |
 | Tag protection rules | yes | backlog (`protect` policy covers it) | **non-goal for v1** |
 
 ### 2.4 Fork
@@ -96,8 +96,8 @@ must close. Rows marked **—** are at parity already; they stay in the table as
 |---|---|---|---|
 | Fork a repository (manifest-sharing, no copy) | yes | yes | — |
 | Fork network listing | yes | yes | — |
-| PR from a fork | yes | API yes / UI gap in WP2.1 | **WP2.1** |
-| Sync fork from upstream | yes | no (pull + push manually) | **WP5** |
+| PR from a fork | yes | yes (**WP2.1 landed 2026-11-20**) | — |
+| Sync fork from upstream | yes | yes (task, **WP5 landed 2026-11-20**) | — |
 
 ### 2.5 Issues
 
@@ -105,7 +105,7 @@ must close. Rows marked **—** are at parity already; they stay in the table as
 |---|---|---|---|
 | Create/edit/close/reopen, comments, timeline, reactions | yes | yes | — |
 | Labels, milestones | yes | yes | — |
-| Assignees | yes | API-writable, UI read-only | **WP6.1** |
+| Assignees | yes | yes (sidebar control + form post — **WP6.1 landed 2026-11-20**) | — |
 | Cross-references and closing keywords | yes | yes (linkify + refs) | — |
 | Search/filter | yes | list filters (state/assignee/label/milestone) | **non-goal** (code search is P9) |
 
@@ -187,17 +187,19 @@ a maintainer GC pass. No npm/Maven/NuGet in v1 (Q1).
 
 ### WP2 — Pull-request parity gaps
 
-- **WP2.1 Fork PRs from the UI.** The new-PR form's head selector currently offers only the base
-  owner's branches (`forms.go:formsPullNewDataFor`). Add the fork list (existing `forks.json`) to the
-  picker and pass `head_repo` through to the existing API path.
-- **WP2.2 PR metadata.** Labels, milestone and assignees on a PR: extend the thread update endpoint
-  the issues layer already uses, add the sidebar controls to `pull.html`, and cover them in the SDK.
-- **WP2.3 Branch protection rules, in the UI.** A settings tab that edits the policy document for the
-  rules a team actually uses — required approvals, required status checks, who may push (roles), and
-  force-push/deletion restrictions — writing the same policy the API validates. Raw JSON is not
-  offered as the only path (scope decision 2026-11-20).
+- **WP2.1 Fork PRs from the UI (LANDED 2026-11-20).** The new-PR form's head selector offers the
+  parent's live fork index (readable forks, grouped under "Forks") in addition to the base owner's
+  repos; `?from_repo=` prefills, and the existing `OpenInput.Fork` path opens the cross-owner PR.
+- **WP2.2 PR metadata (LANDED 2026-11-20).** `PUT …/pulls/{num}` carries labels/assignees/milestone,
+  applied by the exported 02 `PatchThreadMetadata` (one writer, 03 never forks the rules); the PR
+  sidebar renders the shared metadata card, the list filters by label, and the SDK exposes
+  `pulls.setLabels/setAssignees/setMilestone`.
+- **WP2.3 Branch protection rules, in the UI (LANDED 2026-11-20).** Settings → Branch protection
+  edits required approvals, required status checks, who may push (roles) and force-push/deletion
+  restrictions, writing the same validated policy document; the raw JSON editor is only an advanced
+  disclosure, and the tab shows the read-only effective policy.
 
-### WP3 — Release and archive parity
+### WP3 — Release and archive parity (LANDED 2026-11-20)
 
 - **WP3.1 Source archives.** `GET /{o}/{r}/archive/{ref}.{tar.gz,zip}` — server-rendered from git
   (`git archive` argv added to `docs/go/04_git.md`), streamed, ETag from the tree id, and linked from
@@ -207,13 +209,13 @@ a maintainer GC pass. No npm/Maven/NuGet in v1 (Q1).
 - **WP3.3 Draft with a new tag.** Allow a draft release to declare `target` and create the tag on
   publish, matching GitHub's "choose a tag → create new tag on publish".
 
-### WP4 — Tags
+### WP4 — Tags (LANDED 2026-11-20)
 
 - **WP4.1 `/tags` page** listing tag, target commit, date, author, and the release it backs.
 - **WP4.2 Delete tag** (`DELETE /api/.../refs/tags/<tag>`) gated by the `protect` policy effect, with
   the page action and SDK method.
 
-### WP5 — Sync fork
+### WP5 — Sync fork (LANDED 2026-11-20)
 
 A "Sync fork" action that fetches upstream and fast-forwards the fork's default branch when it is a
 strict ancestor; otherwise it reports divergence and links to a PR. Uses the existing mirror/egress
@@ -222,7 +224,8 @@ machinery (`internal/egress`, `internal/mirror` presets) so SSRF rules are share
 
 ### WP6 — Issues and webhooks UI parity
 
-- **WP6.1 Issue assignees in the UI** (the API and model already support them).
+- **WP6.1 Issue assignees in the UI (LANDED 2026-11-20)** — the sidebar control posts the same
+  full-set PATCH the API accepts (candidates: collaborators at role ≥ triage).
 - **WP6.2 Org webhooks tab** (create/ping/deliveries/delete), enable/disable + secret rotation, and
   redeliver — the repo-level surface already does all of this, so this is a UI + one endpoint.
 
@@ -253,8 +256,10 @@ with **capacity 1 by default**; results written into the existing checks surface
 works unchanged; a Threads tab with live logs, cancel and rerun.
 
 Milestones: **T1** workflow discovery + run/job records + checks integration (no runner yet, manual
-run state); **T2** runner protocol + executor with a fake docker CLI; **T3** real DinD e2e + fork
-trust policy + secrets; **T4** UI/SDK + schedule/cron + capacity controls.
+run state); **T2** runner protocol + executor with a fake docker CLI, including a configurable
+`capacity` and concurrent claims; **T3** real DinD e2e + fork trust policy + secrets; **T4** UI/SDK +
+schedule/cron + capacity controls + a **100-job scale test** (many capacity-1 runners, and one
+capacity-100 runner). Capacity is a runner setting with no server ceiling; default 1.
 
 ### WP11 — Full CLI
 

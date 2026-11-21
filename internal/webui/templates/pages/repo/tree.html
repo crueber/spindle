@@ -41,8 +41,12 @@
         </nav>
         {{end}}
 
-        <div class="ml-auto hidden items-center gap-2 sm:flex">
-          <input type="search" class="input h-[26px] w-40 py-0 font-mono text-[11px] sm:w-52"
+        <div class="ml-auto flex items-center gap-2">
+          {{if .Data.ArchiveTar}}
+          <a class="text-xs link" href="{{.Data.ArchiveTar}}" download title="Download this ref as a tar.gz archive">Download .tar.gz</a>
+          <a class="text-xs link" href="{{.Data.ArchiveZip}}" download title="Download this ref as a zip archive">.zip</a>
+          {{end}}
+          <input type="search" class="input hidden h-[26px] w-40 py-0 font-mono text-[11px] sm:block sm:w-52"
                  placeholder="Filter files" aria-label="Filter files in this directory"
                  data-filter="#file-rows" autocomplete="off">
         </div>

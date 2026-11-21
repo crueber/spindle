@@ -222,16 +222,17 @@ func TestRenderMarkdownLineBreaks(t *testing.T) {
 	}
 }
 
-func TestRenderMarkdownRawHTMLEscaped(t *testing.T) {
+func TestRenderMarkdownRawHTMLSanitized(t *testing.T) {
+	// Raw HTML is allowed through the allowlist sanitizer (WP12): the tag
+	// survives, the event handler never does.
 	out := md(`<div onclick="alert(1)">hi</div>`)
-	if strings.Contains(out, "<div") {
-		t.Fatalf("raw HTML passed through: %q", out)
+	if !strings.Contains(out, "<div>hi</div>") {
+		t.Fatalf("allowed div not sanitized through: %q", out)
 	}
-	if !strings.Contains(out, "&lt;div onclick=&#34;alert(1)&#34;&gt;hi&lt;/div&gt;") &&
-		!strings.Contains(out, `&lt;div onclick="alert(1)"&gt;hi&lt;/div&gt;`) {
-		t.Fatalf("raw HTML not escaped: %q", out)
+	if strings.Contains(strings.ToLower(out), "onclick") || strings.Contains(out, "alert(1)") {
+		t.Fatalf("event handler survived: %q", out)
 	}
-	if out := md("<script>alert(1)</script>"); strings.Contains(out, "<script>") {
+	if out := md("<script>alert(1)</script>"); strings.Contains(out, "<script>") || strings.Contains(out, "alert(1)") {
 		t.Fatalf("script survived: %q", out)
 	}
 }
@@ -283,8 +284,8 @@ func TestRenderMarkdownAutolinks(t *testing.T) {
 	if !strings.Contains(out, `href="mailto:a@x.test"`) || strings.Contains(out, `<mailto:`) {
 		t.Fatalf("mailto autolink = %q", out)
 	}
-	if out = md("<div>"); strings.Contains(out, "<div>") {
-		t.Fatalf("angle HTML escaped: %q", out)
+	if out = md("<div>"); !strings.Contains(out, "<div>") {
+		t.Fatalf("allowed HTML block not rendered: %q", out)
 	}
 }
 

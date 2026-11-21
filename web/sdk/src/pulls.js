@@ -37,11 +37,22 @@ export function attachPulls(repo) {
     /** Thread: `GET …/pulls/{num}` (header + pr.json + live mergeable; folded ETag, `private, no-cache` — issue #280). */
     get: (num, opts) =>
       client._call(p(`/pulls/${num}`), { method: "GET", ...opts }),
-    /** Edit: `PUT …/pulls/{num}` (title/body/state/draft; unknown keys 400).
-     * draft flips ready↔draft (author or triage; 409 on merged). Fields pass
-     * through verbatim — set only what changes. */
+    /** Edit: `PUT …/pulls/{num}` (title/body/state/draft plus the shared
+     * 02-owned labels/assignees/milestone; unknown keys 400). draft flips
+     * ready↔draft (author or triage; 409 on merged). Fields pass through
+     * verbatim — set only what changes; `milestone: null` clears and an
+     * absent key means "no change". */
     update: (num, fields = {}, opts) =>
       client._call(p(`/pulls/${num}`), { method: "PUT", ...json(fields), ...opts }),
+    /** Replace the PR label set (triage; full set, the wire contract). */
+    setLabels: (num, labels, opts) =>
+      repo.pulls.update(num, { labels: labels ?? [] }, opts),
+    /** Replace the PR assignee set (triage; principals must resolve ≥ triage). */
+    setAssignees: (num, assignees, opts) =>
+      repo.pulls.update(num, { assignees: assignees ?? [] }, opts),
+    /** Set one milestone id (triage), or clear it with `null`. */
+    setMilestone: (num, milestone, opts) =>
+      repo.pulls.update(num, { milestone: milestone ?? null }, opts),
     /** Comment: `POST …/pulls/{num}/comments` → `201 {event}`. */
     comment: (num, body, opts) =>
       client._call(p(`/pulls/${num}/comments`), { method: "POST", ...json({ body }), ...opts }),

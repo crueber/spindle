@@ -105,7 +105,10 @@
 package webui
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
+	"errors"
 	"log"
 	"net/http"
 	"net/url"
@@ -115,6 +118,7 @@ import (
 
 	"github.com/crueber/spindle/internal/api"
 	"github.com/crueber/spindle/internal/httpsec"
+	"github.com/crueber/spindle/internal/policy"
 	"github.com/crueber/spindle/internal/server/auth"
 	"github.com/crueber/spindle/internal/setup"
 )
@@ -137,6 +141,7 @@ type SettingsDeps struct {
 	RepoMirror     func(ctx context.Context, owner, repo string) (*SettingsMirror, error)
 	RepoPushMirror func(ctx context.Context, owner, repo string) (*SettingsPushMirror, error)
 	RepoPolicy     func(ctx context.Context, owner, repo string) (*SettingsPolicy, error)
+	RepoProtection func(ctx context.Context, owner, repo string) (*SettingsProtection, error)
 	RepoConfig     func(ctx context.Context, owner, repo string) (*SettingsConfig, error)
 	RepoAccess     func(ctx context.Context, owner, repo string, p auth.Principal) (*SettingsAccess, error)
 	RepoAdmin      func(ctx context.Context, owner, repo string, p auth.Principal) (*SettingsAdmin, error)
@@ -305,6 +310,7 @@ type SettingsRepoPage struct {
 	Mirror     *SettingsMirror
 	Push       *SettingsPushMirror
 	Policy     *SettingsPolicy
+	Protection *SettingsProtection
 	Config     *SettingsConfig
 	Access     *SettingsAccess
 	AdminData  *SettingsAdmin
@@ -404,6 +410,50 @@ type SettingsPolicy struct {
 	DryRunRefs  []SettingsKV
 	Note        string
 	Error       string
+}
+
+// SettingsProtection is the Branch protection tab (WP2.3): the structured
+// editor for the protective rules plus the read-only effective policy.
+// Every field maps onto the SAME policy document the API validates — the
+// form builds rules named "protection-push"/"protection-reviews" and
+// preserves every other rule untouched.
+type SettingsProtection struct {
+	Enabled      bool
+	Refs         string
+	Approvals    int
+	DismissStale bool
+	Checks       string
+	PushRoles    []string
+	Roles        []SettingsOption
+	BlockForce   bool
+	BlockDelete  bool
+	Rules        []SettingsPolicyRule
+	Raw          string
+	HasManaged   bool
+	Error        string
+	Note         string
+}
+
+// SettingsPolicyRule is one row of the read-only effective policy view.
+type SettingsPolicyRule struct {
+	Name    string
+	Refs    string
+	Summary string
+	Managed bool
+}
+
+// PushRoleChecked reports whether a role is part of the bypass set (the
+// template's checkbox arm; no template FuncMap entry needed).
+func (p *SettingsProtection) PushRoleChecked(role string) bool {
+	if p == nil {
+		return false
+	}
+	for _, r := range p.PushRoles {
+		if r == role {
+			return true
+		}
+	}
+	return false
 }
 
 // SettingsDiffLine is one line of the config-history diff.
@@ -508,7 +558,10 @@ type SettingsDanger struct {
 type SettingsRepoWrite struct {
 	Action string
 	Values map[string]string
-	File   []byte
+	// Multi carries the repeatable form keys (checkbox groups such as the
+	// Branch protection push roles); Values keeps the last value.
+	Multi map[string][]string
+	File  []byte
 }
 
 // Get returns a form value ("" when absent).
@@ -519,6 +572,7 @@ const (
 	SettingsActionGeneral        = "general"
 	SettingsActionAccess         = "access"
 	SettingsActionPolicy         = "policy"
+	SettingsActionProtection     = "protection"
 	SettingsActionPolicyDryRun   = "policy-dryrun"
 	SettingsActionConfig         = "config"
 	SettingsActionConfigClear    = "config-clear"
@@ -668,6 +722,7 @@ var settingsRepoTabs = []settingsTab{
 	{ID: "scheduled", Label: "Scheduled tasks", MinRead: "read"},
 	{ID: "mirror", Label: "Mirror", MinRead: "read"},
 	{ID: "policy", Label: "Push policy", MinRead: "admin"},
+	{ID: "protection", Label: "Branch protection", MinRead: "admin"},
 	{ID: "config", Label: "Effective config & history", MinRead: "admin"},
 	{ID: "access", Label: "Access", MinRead: "triage"},
 	{ID: "tokens", Label: "CI tokens", MinRead: "admin"},
@@ -1457,6 +1512,14 @@ func (s *Server) settingsRepoPage(r *http.Request, p auth.Principal, owner, name
 				page.Policy = v
 			}
 		}
+	case "protection":
+		if d.RepoProtection != nil {
+			if v, err := d.RepoProtection(ctx, owner, name); err != nil {
+				page.Error = err.Error()
+			} else {
+				page.Protection = v
+			}
+		}
 	case "config":
 		if d.RepoConfig != nil {
 			if v, err := d.RepoConfig(ctx, owner, name); err != nil {
@@ -1494,7 +1557,7 @@ func (s *Server) settingsRepoPage(r *http.Request, p auth.Principal, owner, name
 	return page
 }
 
-// settingsNormalizeFeatures fills the six feature rows (labels/hints ported
+// settingsNormalizeFeatures fills the seven feature rows (labels/hints ported
 // from web/src/lib/repoFeatures.js) when the dep left them out.
 func settingsNormalizeFeatures(g *SettingsGeneral) {
 	present := map[string]bool{}
@@ -1529,6 +1592,7 @@ var settingsFeatureDefs = []settingsFeatureDef{
 	{"forks", "Forking", "Allow forking this repository"},
 	{"watch", "Watching", "Allow new watchers (existing watchers keep working)"},
 	{"star", "Starring", "Allow new stars (existing stars are kept and counted)"},
+	{"packages", "Packages", "Serve an OCI registry (docker push/pull) for this repository"},
 }
 
 var settingsMirrorPresets = []SettingsOption{
@@ -1589,6 +1653,11 @@ func (s *Server) settingsRepoWrite(w http.ResponseWriter, r *http.Request) {
 	if tab == "policy" && r.PostFormValue("policy_action") == "dryrun" {
 		action = SettingsActionPolicyDryRun
 	}
+	if tab == "protection" && r.PostFormValue("policy_action") == "raw" {
+		// The advanced editor on the Branch protection tab writes the same
+		// raw document through the same validation (never the only path).
+		action = SettingsActionPolicy
+	}
 	if tab == "config" && r.PostFormValue("config_action") == "clear" {
 		action = SettingsActionConfigClear
 	}
@@ -1639,6 +1708,10 @@ func (s *Server) settingsRepoWrite(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	wr := SettingsRepoWrite{Action: action, Values: settingsFormValues(r, "")}
+	wr.Multi = map[string][]string{}
+	for name, vals := range r.PostForm {
+		wr.Multi[name] = append([]string{}, vals...)
+	}
 	if id := r.PathValue("id"); id != "" {
 		wr.Values["id"] = id
 	}
@@ -1712,6 +1785,8 @@ func settingsRepoAction(tab string) string {
 		return SettingsActionAccess
 	case "policy":
 		return SettingsActionPolicy
+	case "protection":
+		return SettingsActionProtection
 	case "config":
 		return SettingsActionConfig
 	}
@@ -1746,6 +1821,22 @@ func settingsRestoreRepoValues(page *SettingsRepoPage, r *http.Request, action s
 			page.Policy = &SettingsPolicy{}
 		}
 		page.Policy.Text = get("policy")
+		if page.Protection != nil {
+			// The advanced editor lives on the protection tab too.
+			page.Protection.Raw = get("policy")
+		}
+	case SettingsActionProtection:
+		if page.Protection == nil {
+			page.Protection = &SettingsProtection{Roles: settingsProtectionRoles}
+		}
+		page.Protection.Enabled = get("enabled") != ""
+		page.Protection.Refs = get("refs")
+		page.Protection.Approvals = settingsAtoiOr(get("approvals"), 0)
+		page.Protection.DismissStale = get("dismiss_stale") != ""
+		page.Protection.Checks = get("checks")
+		page.Protection.BlockForce = get("block_force") != ""
+		page.Protection.BlockDelete = get("block_delete") != ""
+		page.Protection.PushRoles = append([]string{}, r.PostForm["push_roles"]...)
 	case SettingsActionConfig:
 		if page.Config == nil {
 			page.Config = &SettingsConfig{}
@@ -2251,4 +2342,265 @@ func splitLines(s string) []string {
 		return nil
 	}
 	return strings.Split(strings.TrimSuffix(s, "\n"), "\n")
+}
+
+// ---------------------------------------------------------------------------
+// Branch protection (WP2.3)
+//
+// The structured form is one view of the SAME policy document the API
+// validates: it owns exactly two rule names (settingsProtectionPush /
+// settingsProtectionReviews), rebuilds them from the form, and preserves
+// every other rule and group. `api.PutPolicy` re-parses the result, so an
+// invalid form can never store an invalid document.
+
+const (
+	settingsProtectionPush    = "protection-push"
+	settingsProtectionReviews = "protection-reviews"
+)
+
+// settingsProtectionRoles is the "who may push" role set (the repo role
+// ladder, 01 §4).
+var settingsProtectionRoles = []SettingsOption{
+	{"read", "read"}, {"triage", "triage"}, {"write", "write"},
+	{"maintain", "maintain"}, {"admin", "admin"},
+}
+
+// settingsProtectionInput is the validated form payload.
+type settingsProtectionInput struct {
+	Owner        string
+	Repo         string
+	Enabled      bool
+	Refs         []string
+	Approvals    int
+	DismissStale bool
+	Checks       []string
+	PushRoles    []string
+	BlockForce   bool
+	BlockDelete  bool
+}
+
+// settingsSplitList splits a comma/newline/space separated list.
+func settingsSplitList(v string) []string {
+	var out []string
+	for _, part := range strings.FieldsFunc(v, func(r rune) bool {
+		return r == ',' || r == '\n' || r == '\r' || r == ' ' || r == '\t'
+	}) {
+		if part = strings.TrimSpace(part); part != "" {
+			out = append(out, part)
+		}
+	}
+	return out
+}
+
+func settingsProtectionInputFrom(p SettingsProtection) (settingsProtectionInput, error) {
+	in := settingsProtectionInput{
+		Enabled: p.Enabled, Refs: settingsSplitList(p.Refs),
+		Approvals: p.Approvals, DismissStale: p.DismissStale,
+		Checks: settingsSplitList(p.Checks), PushRoles: p.PushRoles,
+		BlockForce: p.BlockForce, BlockDelete: p.BlockDelete,
+	}
+	if in.Approvals < 0 || in.Approvals > 50 {
+		return in, errors.New("required approvals must be between 0 and 50")
+	}
+	if in.Enabled && len(in.Refs) == 0 {
+		return in, errors.New("branch protection needs at least one ref pattern (for example refs/heads/main)")
+	}
+	for _, c := range in.Checks {
+		if err := policy.ValidCheckContext(c); err != nil {
+			return in, err
+		}
+	}
+	for _, r := range in.PushRoles {
+		if !settingsRoleKnown(r) {
+			return in, errors.New("unknown push role " + strconv.Quote(r))
+		}
+	}
+	return in, nil
+}
+
+func settingsRoleKnown(role string) bool {
+	for _, r := range settingsAccessRoles {
+		if r == role {
+			return true
+		}
+	}
+	return false
+}
+
+// settingsAtoiOr parses an optional integer form value (blank = def).
+func settingsAtoiOr(v string, def int) int {
+	if n, err := strconv.Atoi(strings.TrimSpace(v)); err == nil {
+		return n
+	}
+	return def
+}
+
+// settingsProtectionDocument builds the next policy document. current is the
+// stored document (may be nil/empty). Managed rules are replaced; other
+// rules and groups are preserved. Disabled drops the managed rules only.
+func settingsProtectionDocument(current []byte, in settingsProtectionInput) ([]byte, error) {
+	type envelope struct {
+		Version int               `json:"version"`
+		Groups  json.RawMessage   `json:"groups,omitempty"`
+		Rules   []json.RawMessage `json:"rules"`
+	}
+	env := envelope{Version: 1}
+	if len(bytes.TrimSpace(current)) > 0 {
+		if err := json.Unmarshal(current, &env); err != nil {
+			return nil, errors.New("the stored policy is not valid JSON — fix it in the advanced editor first")
+		}
+		if env.Version == 0 {
+			env.Version = 1
+		}
+	}
+	kept := make([]json.RawMessage, 0, len(env.Rules)+2)
+	for _, raw := range env.Rules {
+		var head struct {
+			Name string `json:"name"`
+		}
+		if err := json.Unmarshal(raw, &head); err != nil {
+			return nil, errors.New("the stored policy has an unreadable rule — fix it in the advanced editor first")
+		}
+		if head.Name == settingsProtectionPush || head.Name == settingsProtectionReviews {
+			continue
+		}
+		kept = append(kept, raw)
+	}
+	if in.Enabled {
+		restricts := []string{"create", "update"}
+		if in.BlockForce {
+			restricts = append(restricts, "force-push")
+		}
+		if in.BlockDelete {
+			restricts = append(restricts, "delete")
+		}
+		bypass := make([]string, 0, len(in.PushRoles))
+		for _, role := range in.PushRoles {
+			bypass = append(bypass, "role:"+in.Owner+"/"+in.Repo+":"+role)
+		}
+		protect := map[string]any{
+			"restricts": restricts,
+			"bypass":    bypass,
+		}
+		if len(in.Checks) > 0 {
+			protect["require_checks"] = in.Checks
+		}
+		pushRule := map[string]any{
+			"name":   settingsProtectionPush,
+			"match":  map[string]any{"refs": in.Refs},
+			"effect": map[string]any{"protect": protect},
+		}
+		raw, err := json.Marshal(pushRule)
+		if err != nil {
+			return nil, err
+		}
+		kept = append(kept, raw)
+		if in.Approvals > 0 {
+			reviewsRule := map[string]any{
+				"name":  settingsProtectionReviews,
+				"match": map[string]any{"refs": in.Refs},
+				"effect": map[string]any{"required-reviews": map[string]any{
+					"min_approvals": in.Approvals,
+					"dismiss_stale": in.DismissStale,
+				}},
+			}
+			raw, err := json.Marshal(reviewsRule)
+			if err != nil {
+				return nil, err
+			}
+			kept = append(kept, raw)
+		}
+	}
+	env.Rules = kept
+	if env.Rules == nil {
+		env.Rules = []json.RawMessage{}
+	}
+	out, err := json.Marshal(env)
+	if err != nil {
+		return nil, err
+	}
+	if _, err := policy.Parse(out); err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+// settingsProtectionView parses the stored document into the tab's model:
+// the managed rules seed the form; every rule feeds the read-only effective
+// view. A parse error keeps the raw bytes visible.
+func settingsProtectionView(raw []byte) *SettingsProtection {
+	out := &SettingsProtection{
+		Enabled: true, Refs: "refs/heads/main", Roles: settingsProtectionRoles,
+		BlockForce: true, BlockDelete: true, Raw: string(raw),
+	}
+	doc, err := policy.Parse(raw)
+	if err != nil {
+		out.Error = err.Error()
+		return out
+	}
+	for _, r := range doc.Rules {
+		row := SettingsPolicyRule{
+			Name:    r.Name,
+			Refs:    strings.Join(r.Match.Refs, ", "),
+			Managed: r.Name == settingsProtectionPush || r.Name == settingsProtectionReviews,
+		}
+		if row.Refs == "" {
+			row.Refs = "all refs"
+		}
+		switch e := r.Effect.(type) {
+		case *policy.ProtectEffect:
+			parts := []string{"restricts " + strings.Join(e.RestrictOps, ", ")}
+			if len(e.Bypass) > 0 {
+				parts = append(parts, "bypass "+strings.Join(e.Bypass, ", "))
+			}
+			if len(e.RequireChecks) > 0 {
+				parts = append(parts, "requires checks "+strings.Join(e.RequireChecks, ", "))
+			}
+			row.Summary = strings.Join(parts, "; ")
+		case *policy.RequiredReviewsEffect:
+			row.Summary = "requires " + strconv.Itoa(e.MinApprovals) + " approvals"
+			if e.DismissStale {
+				row.Summary += ", stale approvals dismissed"
+			}
+		default:
+			row.Summary = r.Effect.Kind()
+		}
+		out.Rules = append(out.Rules, row)
+	}
+	if push := doc.RuleByName(settingsProtectionPush); push != nil {
+		if pe := push.Protect(); pe != nil {
+			out.HasManaged = true
+			out.Enabled = true
+			out.Refs = strings.Join(push.Match.Refs, ", ")
+			out.Checks = strings.Join(pe.RequireChecks, ", ")
+			out.BlockForce = containsStr(pe.RestrictOps, "force-push")
+			out.BlockDelete = containsStr(pe.RestrictOps, "delete")
+			out.PushRoles = out.PushRoles[:0]
+			for _, b := range pe.Bypass {
+				ref, ok := strings.CutPrefix(b, "role:")
+				if !ok {
+					continue // principal/tag/group bypasses stay in the raw editor
+				}
+				if i := strings.LastIndex(ref, ":"); i >= 0 {
+					if role := ref[i+1:]; settingsRoleKnown(role) {
+						out.PushRoles = append(out.PushRoles, role)
+					}
+				}
+			}
+		}
+	}
+	if rev := doc.RuleByName(settingsProtectionReviews); rev != nil {
+		if re := rev.RequiredReviews(); re != nil {
+			out.HasManaged = true
+			out.Approvals = re.MinApprovals
+			out.DismissStale = re.DismissStale
+			if out.Refs == "" {
+				out.Refs = strings.Join(rev.Match.Refs, ", ")
+			}
+		}
+	}
+	if !out.HasManaged {
+		out.Enabled = false
+	}
+	return out
 }

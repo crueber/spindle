@@ -98,6 +98,15 @@ func (s *Server) mount(r chi.Router) {
 	r.Get("/repos.js", s.sdkReposJS)
 	r.Get("/services/public/install.sh", s.installSh)
 
+	// Feature namespaces outside /api and the repo lanes (bind_top.go):
+	// the OCI registry lives at /v2/*, whose segments are not an
+	// owner/repo path (docs/features/14 §3). Registered only when a
+	// surface is chained, so un-wired builds keep the plain 404.
+	if len(s.topExtras) > 0 {
+		r.HandleFunc("/v2", s.topServe)
+		r.HandleFunc("/v2/*", s.topServe)
+	}
+
 	// Setup API mounted BEFORE the /api/v1 catch (§3.1).
 	r.Mount("/api/v1/setup", s.setupAPIRouter())
 

@@ -3,6 +3,8 @@ package api
 import (
 	"encoding/json"
 	"net/http"
+	"path"
+	"strings"
 )
 
 // --- GET …/blob/{rest}[?raw] (§9.5: rev may contain slashes — Resolve splits) ---
@@ -43,8 +45,11 @@ func (h *handlers) blob(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if _, raw := r.URL.Query()["raw"]; raw {
-		// ?raw bypasses JSON: full raw bytes, text/plain (§14: the 2 MiB cap
-		// is a JSON-shape rule; raw is the download path).
+		// ?raw bypasses JSON: full raw bytes (§14: the 2 MiB cap
+		// is a JSON-shape rule; raw is the download path). Passive media gets
+		// its real type so a rendered README can embed it (nosniff is on, so
+		// text/plain would refuse to display an image); everything else is
+		// text/plain as before.
 		br, err := h.env.Repo.Blob(ctx, RepoOf(r), res.SHA, path, true)
 		if err != nil {
 			mapViewErr(w, err)
@@ -52,7 +57,7 @@ func (h *handlers) blob(w http.ResponseWriter, r *http.Request) {
 		}
 		w.Header().Set("Cache-Control", class)
 		w.Header().Set("ETag", `"`+res.SHA+`"`)
-		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+		w.Header().Set("Content-Type", rawContentType(path))
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write(br.Contents)
 		return
@@ -92,4 +97,42 @@ func baseName(path string) string {
 		}
 	}
 	return path
+}
+
+// rawContentType is the raw lane's Content-Type. Only passive media gets a
+// real type: text stays text/plain, and SVG is excluded on purpose (SVG can
+// carry script and the raw lane is same-origin — GitHub serves raw SVG as
+// text too).
+func rawContentType(p string) string {
+	switch strings.ToLower(path.Ext(p)) {
+	case ".png":
+		return "image/png"
+	case ".jpg", ".jpeg":
+		return "image/jpeg"
+	case ".gif":
+		return "image/gif"
+	case ".webp":
+		return "image/webp"
+	case ".avif":
+		return "image/avif"
+	case ".bmp":
+		return "image/bmp"
+	case ".ico":
+		return "image/x-icon"
+	case ".mp4", ".m4v":
+		return "video/mp4"
+	case ".webm":
+		return "video/webm"
+	case ".ogv":
+		return "video/ogg"
+	case ".mp3":
+		return "audio/mpeg"
+	case ".wav":
+		return "audio/wav"
+	case ".ogg", ".oga":
+		return "audio/ogg"
+	case ".m4a":
+		return "audio/mp4"
+	}
+	return "text/plain; charset=utf-8"
 }

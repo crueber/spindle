@@ -303,6 +303,11 @@ func (s *Server) pushPipeline(ctx context.Context, id git.RepoId, p auth.Princip
 	}
 	report := git.Report{UnpackOK: true, Sideband: managedReq.Has("side-band-64k")}
 	landed := false
+	newOf := make(map[string]string, len(managedReq.Commands))
+	for _, c := range managedReq.Commands {
+		newOf[c.Ref] = c.New
+	}
+	var landedRefs []PushedRef
 	for _, c := range managed {
 		report.Refs = append(report.Refs, git.RefReport{Ref: c.Ref, OK: false, Reason: git.ManagedRefReason()})
 	}
@@ -312,6 +317,7 @@ func (s *Server) pushPipeline(ctx context.Context, id git.RepoId, p auth.Princip
 		} else {
 			report.Refs = append(report.Refs, git.RefReport{Ref: rr.Name, OK: true})
 			landed = true
+			landedRefs = append(landedRefs, PushedRef{Ref: rr.Name, New: newOf[rr.Name]})
 		}
 	}
 	_, _ = out.Write(report.EncodeReport())
@@ -330,13 +336,14 @@ func (s *Server) pushPipeline(ctx context.Context, id git.RepoId, p auth.Princip
 	if landed {
 		s.adoptPlaceholder(id)
 	}
-	// Push-mirror fan-out (Forgejo #623): after a successful client
-	// push lands and the report is on the wire, notify the hook
-	// fire-and-forget (never gating the response, +0 hot-path round
-	// trips — law 6: the callee probes on its own goroutine). Only
-	// landed pushes (≥1 ok ref) fan out; refusals/failures never do.
-	// Server-side publishes never enter this pipeline (sync.go:434
-	// bypass), so they cannot fan out by construction.
+	// Push-mirror fan-out (Forgejo #623) and Threads run creation
+	// (docs/features/15 §2): after a successful client push lands and the
+	// report is on the wire, notify the hook fire-and-forget (never gating
+	// the response, +0 hot-path round trips — law 6: the callee probes on
+	// its own goroutine). Only landed pushes (≥1 ok ref) fan out;
+	// refusals/failures never do. Server-side publishes never enter this
+	// pipeline (sync.go:434 bypass), so they cannot fan out by
+	// construction.
 	//
 	// ### Concurrency
 	// Hazard: blocking the push response on a sync probe. Avoidance:
@@ -344,7 +351,8 @@ func (s *Server) pushPipeline(ctx context.Context, id git.RepoId, p auth.Princip
 	// its probe/task lifetime (drain cancels via its own ctx).
 	if landed && s.onPush != nil {
 		notify := s.onPush
-		go notify(id)
+		refs := landedRefs
+		go notify(id, refs)
 	}
 	return nil
 }

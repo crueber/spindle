@@ -1,0 +1,54 @@
+{{define "content"}}
+{{with .Data}}{{$d := .}}
+<div class="thread-detail">
+  <div class="mb-3 flex flex-wrap items-center gap-2">
+    <h2 class="text-xl font-semibold tracking-tight">{{.Run.Workflow}}</h2>
+    {{template "collab_check_dot" (runDot .Run.State)}}
+    <span class="chip chip-neutral">{{.Run.State}}</span>
+    {{if not .Run.Trusted}}<span class="chip chip-draft" title="fork pull request: base-branch workflow, no secrets">untrusted</span>{{end}}
+    <span class="muted text-xs">{{.Run.Event}}{{with .Run.Branch}} · {{.}}{{end}}</span>
+    <a class="link mono text-xs" href="{{.CommitHref}}">{{.ShortCommit}}</a>
+    <a class="link ml-auto text-xs" href="/{{.Repo.Full}}/threads">all runs</a>
+  </div>
+
+  <p class="muted mb-3 text-xs">
+    run <span class="mono">{{.ShortRun}}</span>
+    · workflow <code class="mono">{{.Run.WorkflowPath}}</code>
+    @ <span class="mono" title="{{.Run.WorkflowCommit}}">{{short .Run.WorkflowCommit}}</span>
+    · triggered by {{.Run.Actor}}
+    · {{template "collab_time" .Run.CreatedAt}}
+  </p>
+
+  {{if .Jobs}}
+  <ul class="space-y-2">
+    {{range .Jobs}}
+    <li class="card">
+      <div class="flex flex-wrap items-center gap-2 px-3 py-2">
+        {{template "collab_check_dot" (runDot .State)}}
+        <span class="text-sm font-medium">{{.Name}}</span>
+        <code class="mono text-xs">{{.Context}}</code>
+        <span class="chip chip-neutral">{{.State}}</span>
+        <span class="muted text-xs">runs-on {{.RunsOn}}</span>
+        {{with .Container}}<span class="muted text-xs">· {{.}}</span>{{end}}
+        <span class="muted ml-auto text-xs">{{with .StartedAt}}{{template "collab_time" .}}{{else}}not started{{end}}</span>
+      </div>
+      {{if .Steps}}
+      <ul class="divide-y divide-[color:var(--pd-line)] border-t border-[color:var(--pd-line)]">
+        {{range .Steps}}
+        <li class="flex flex-wrap items-center gap-2 px-3 py-1.5 text-xs">
+          {{with .Name}}<span class="font-medium">{{.}}</span>{{end}}
+          {{with .Run}}<code class="mono min-w-0 flex-1 truncate">{{.}}</code>{{end}}
+          {{with .Uses}}<code class="mono min-w-0 flex-1 truncate">{{.}}</code>{{end}}
+        </li>
+        {{end}}
+      </ul>
+      {{end}}
+    </li>
+    {{end}}
+  </ul>
+  {{else if not .Error}}
+  {{template "collab_empty" (dict "icon" "check" "title" "No jobs recorded" "hint" "This run has no job records; the workflow may have been emptied after the run was created." "href" "" "label" "")}}
+  {{end}}
+</div>
+{{end}}
+{{end}}

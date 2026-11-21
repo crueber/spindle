@@ -119,6 +119,18 @@ type Document struct {
 // eval time.
 func (d *Document) Roster() Groups { return d.roster }
 
+// RuleByName returns the rule with that name, or nil. Consumers that edit
+// a named subset of the document (the settings Branch protection tab) use
+// this instead of re-walking Rules.
+func (d *Document) RuleByName(name string) *Rule {
+	for _, r := range d.Rules {
+		if r.Name == name {
+			return r
+		}
+	}
+	return nil
+}
+
 // Histories returns every parsed history effect, in rule order. Parsed and
 // stored, NOT enforced.
 func (d *Document) Histories() []*HistoryEffect {

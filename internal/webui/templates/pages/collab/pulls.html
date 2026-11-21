@@ -12,6 +12,31 @@
     </div>
   </div>
 
+  <form class="card mb-3 flex flex-wrap items-end gap-2 p-3" method="get" action="/{{.Repo.Full}}/pulls" aria-label="pull request filters">
+    <input type="hidden" name="state" value="{{.State}}">
+    <div class="grid min-w-0 gap-1">
+      <span class="eyebrow">Labels</span>
+      <details class="relative" data-popover>
+        <summary class="input list-none cursor-pointer truncate" aria-haspopup="menu" data-popover-trigger>{{if .LabelFilter}}{{len .LabelFilter}} selected{{else}}any label{{end}}</summary>
+        <div class="label-drop scroll-slim card absolute left-0 z-30 mt-1 max-h-72 w-80 overflow-y-auto p-1" role="group" aria-label="label filter" data-popover-panel>
+          {{range .Labels}}
+          <label class="flex w-full items-center gap-2 rounded px-2 py-1 text-left text-sm hover:bg-[var(--pd-raised)]">
+            <input type="checkbox" name="labels" value="{{.Name}}" {{if .Checked}}checked{{end}}>
+            <span class="inline-block h-3 w-3 shrink-0 rounded-full border border-[var(--pd-line-strong)]" style="background-color:#{{.Color}}" aria-hidden="true"></span>
+            <span class="min-w-0 truncate">{{.Name}}</span>
+          </label>
+          {{else}}
+          <p class="muted px-2 py-1 text-xs">no labels in this repo yet</p>
+          {{end}}
+        </div>
+      </details>
+    </div>
+    <div class="flex items-end gap-2">
+      <button type="submit" class="btn px-2 py-1">Filter</button>
+      {{if .LabelFilter}}<a class="link text-xs" href="/{{.Repo.Full}}/pulls?state={{.State}}">clear</a>{{end}}
+    </div>
+  </form>
+
   {{if .Error}}<p class="err-line" role="alert">{{.Error}}</p>{{end}}
   {{if .Notice}}<p class="warn-line" role="status">{{.Notice}}</p>{{end}}
 
@@ -22,6 +47,7 @@
       <div class="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1">
         <a class="link min-w-0 max-w-full truncate font-medium" href="{{.Href}}">#{{.Num}} {{.Title}}</a>
         {{template "collab_state_chip" .Chip}}
+        {{range .Labels}}{{template "collab_label_chip" .}}{{end}}
         <span class="mono muted min-w-0 truncate text-xs">{{.BaseRef}} ← {{.HeadRef}}</span>
         <span class="card-meta ml-auto mt-0! shrink-0">{{.Author}} · {{template "collab_time" .UpdatedAt}}</span>
       </div>

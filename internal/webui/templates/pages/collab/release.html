@@ -27,6 +27,7 @@
       <span class="mono">{{.Tag}}</span>
       {{if .Draft}}<span class="chip chip-draft">draft</span>{{end}}
       {{if .Prerelease}}<span class="chip chip-prerelease">prerelease</span>{{end}}
+      {{if .PendingTag}}<span class="chip chip-draft" title="The tag ref is created when this draft is published">tag on publish</span>{{end}}
       {{template "collab_time" .Published}}
       {{with .Author}}· by {{.}}{{end}}
       {{with .TagSHA}}· tag <span class="mono">{{shortsha .}}</span>{{end}}
@@ -61,21 +62,33 @@
   {{end}}
 
   <section class="card p-4" aria-label="Release notes">
-    {{if .Body}}<div class="markdown-body">{{mdrepo .Body .Repo.Owner .Repo.Name}}</div>
+    {{if .Body}}<div class="markdown-body">{{mdat .Body .Repo.Owner .Repo.Name .Tag ""}}</div>
     {{else}}<p class="muted text-sm">No release notes yet.</p>{{end}}
   </section>
+
+  {{if and (not .Draft) (not .PendingTag)}}
+  <section class="card mt-4 p-4" aria-label="Source code">
+    <h2 class="card-header">Source code</h2>
+    <p class="muted mb-2 text-xs">Built on demand from the tag with <code class="mono">git archive</code>.</p>
+    <div class="flex flex-wrap gap-2">
+      <a class="btn" href="{{.ArchiveTar}}" download>{{template "collab_icon" "download"}} tar.gz</a>
+      <a class="btn" href="{{.ArchiveZip}}" download>{{template "collab_icon" "download"}} zip</a>
+    </div>
+  </section>
+  {{end}}
 
   <section class="card mt-4 p-4" id="assets" aria-label="Assets">
     <h2 class="card-header">Assets ({{.AssetCount}})</h2>
     {{if .Assets}}
     <div class="overflow-x-auto">
       <table class="data-table">
-        <thead><tr><th>Name</th><th>Size</th><th>SHA-256</th><th><span class="sr-only">Actions</span></th></tr></thead>
+        <thead><tr><th>Name</th><th>Size</th><th class="tabular">Downloads</th><th>SHA-256</th><th><span class="sr-only">Actions</span></th></tr></thead>
         <tbody>
           {{range .Assets}}
           <tr>
             <td class="max-w-64"><a class="link mono inline-flex min-w-0 items-center gap-1.5" href="{{.Href}}" download>{{template "collab_icon" "file"}}<span class="truncate">{{.Name}}</span></a></td>
             <td class="mono tabular">{{.Size}}</td>
+            <td class="mono tabular">{{.Downloads}}</td>
             <td class="mono text-xs" title="{{.SHA}}">{{.SHA12}}</td>
             <td>
               <div class="flex flex-wrap justify-end gap-1">

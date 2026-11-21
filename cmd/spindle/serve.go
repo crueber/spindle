@@ -177,10 +177,11 @@ func serveHTTP(ctx context.Context, cfg *config.Config, boot server.BootState, d
 		// generation for users without one; nil in setup-only —
 		// no logins happen there).
 		AvatarHook: avatarHookOf(ident),
-		// Forgejo #623: the on-push push-mirror fan-out (nil in
-		// setup-only — no push paths exist there; nil without the
-		// collab surface — no fan-out).
-		OnPush: pushMirrorHookOf(collab),
+		// Forgejo #623: the on-push push-mirror fan-out, extended for
+		// Threads run creation (docs/features/15 §2) — one hook, both
+		// consumers (nil in setup-only — no push paths exist there; nil
+		// without the collab surface — no fan-out).
+		OnPush: onPushHookOf(collab),
 	})
 	// Features 01–08 mount here (collab.go chainCollab, 09 §4 touch
 	// point 3: one block per package + the per-user SSE mounts that

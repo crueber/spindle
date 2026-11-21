@@ -22,6 +22,7 @@ import (
 	"github.com/crueber/spindle/internal/identity"
 	"github.com/crueber/spindle/internal/mirror"
 	"github.com/crueber/spindle/internal/notify"
+	"github.com/crueber/spindle/internal/policy"
 	"github.com/crueber/spindle/internal/pushmirror"
 	"github.com/crueber/spindle/internal/server/auth"
 	"github.com/crueber/spindle/internal/store"
@@ -978,5 +979,139 @@ func TestSettingsSeamsTokenWebhookErrorsAndTransfer(t *testing.T) {
 	})
 	if code != http.StatusConflict {
 		t.Fatalf("transfer collision = %d (%s)", code, body)
+	}
+}
+
+// --- Branch protection (WP2.3) ---------------------------------------------
+
+// TestSettingsSeamsProtectionRoundTrip is the definition-of-done round trip:
+// UI payload → the SAME validated policy document → the push gate enforces
+// it (the bypass role admits its holder, everyone else is denied).
+func TestSettingsSeamsProtectionRoundTrip(t *testing.T) {
+	h := newSeamsHarness(t)
+	ctx := context.Background()
+	id := git.RepoId{Owner: "acme", Name: "monorepo"}
+	// A hand-written rule the structured form must preserve.
+	const custom = `{"version":1,"rules":[{"name":"release-tags","match":{"refs":["refs/tags/v*"]},"effect":{"protect":{"restricts":["delete"]}}}]}`
+	if werr := api.PutPolicy(ctx, h.apiE, id, []byte(custom)); werr != nil {
+		t.Fatalf("seed policy: %v", werr)
+	}
+	if _, err := h.ident.PutAccess(ctx, "acme", "monorepo", "", identity.Visibility("private"),
+		[]identity.AccessBinding{{Subject: "user:bob@example.com", Role: identity.RoleMaintain}}); err != nil {
+		t.Fatalf("PutAccess: %v", err)
+	}
+
+	code, body := seamsGet(t, h, "/acme/monorepo/settings/protection")
+	if code != http.StatusOK {
+		t.Fatalf("GET protection = %d (%s)", code, body)
+	}
+	settingsMustContain(t, body, "Branch protection", "tab heading")
+	settingsMustContain(t, body, "Effective policy", "effective view")
+	settingsMustContain(t, body, "release-tags", "existing rule listed")
+	settingsMustContain(t, body, `name="refs"`, "structured form")
+	settingsMustContain(t, body, `name="policy"`, "advanced raw editor (not the only path)")
+
+	code, loc, body := seamsPost(t, h, "/acme/monorepo/settings/protection", url.Values{
+		"enabled":       {"1"},
+		"refs":          {"refs/heads/main, refs/heads/release/*"},
+		"approvals":     {"2"},
+		"dismiss_stale": {"1"},
+		"checks":        {"ci/build, lint"},
+		"push_roles":    {"maintain", "admin"},
+		"block_force":   {"1"},
+		"block_delete":  {"1"},
+	})
+	if code != http.StatusSeeOther || !strings.Contains(loc, "/settings/protection") {
+		t.Fatalf("save = %d %q (%s)", code, loc, body)
+	}
+
+	raw, _, err := api.PolicyRaw(ctx, h.apiE, id)
+	if err != nil {
+		t.Fatalf("stored policy unparseable: %v (%s)", err, raw)
+	}
+	doc, perr := policy.Parse(raw)
+	if perr != nil {
+		t.Fatalf("parse: %v (%s)", perr, raw)
+	}
+	if doc.RuleByName("release-tags") == nil {
+		t.Fatalf("custom rule dropped: %s", raw)
+	}
+	push := doc.RuleByName("protection-push")
+	if push == nil || push.Protect() == nil {
+		t.Fatalf("protection-push missing: %s", raw)
+	}
+	pe := push.Protect()
+	if !containsStr(pe.RestrictOps, "force-push") || !containsStr(pe.RestrictOps, "delete") ||
+		!containsStr(pe.RestrictOps, "update") {
+		t.Fatalf("restricts = %v", pe.RestrictOps)
+	}
+	if len(pe.Bypass) != 2 || pe.Bypass[0] != "role:acme/monorepo:maintain" {
+		t.Fatalf("bypass = %v", pe.Bypass)
+	}
+	if len(pe.RequireChecks) != 2 || pe.RequireChecks[0] != "ci/build" {
+		t.Fatalf("checks = %v", pe.RequireChecks)
+	}
+	rev := doc.RuleByName("protection-reviews")
+	if rev == nil || rev.RequiredReviews() == nil || rev.RequiredReviews().MinApprovals != 2 || !rev.RequiredReviews().DismissStale {
+		t.Fatalf("reviews = %+v", rev)
+	}
+
+	// Enforcement: expand the role: bypass through identity, then run the
+	// push half. A maintainer bypasses; a writer does not.
+	exp, warnings := pe.ExpandedCopy(ctx, h.ident.PolicyExpander())
+	if len(warnings) != 0 {
+		t.Fatalf("expansion warnings: %v", warnings)
+	}
+	enforced := &policy.Document{Rules: []*policy.Rule{{Name: push.Name, Match: push.Match, Effect: exp}}}
+	if v := policy.Evaluate(ctx, enforced, policy.Request{Principal: "bob@example.com", Ref: "refs/heads/main", Op: policy.OpUpdate}); !v.Allow {
+		t.Fatalf("maintainer denied: %+v", v)
+	}
+	if v := policy.Evaluate(ctx, enforced, policy.Request{Principal: "carol@example.com", Ref: "refs/heads/main", Op: policy.OpUpdate}); v.Allow {
+		t.Fatal("non-bypass push allowed")
+	}
+
+	// Disabling removes only the managed rules.
+	code, _, body = seamsPost(t, h, "/acme/monorepo/settings/protection", url.Values{"refs": {"refs/heads/main"}})
+	if code != http.StatusSeeOther {
+		t.Fatalf("disable = %d (%s)", code, body)
+	}
+	raw, _, _ = api.PolicyRaw(ctx, h.apiE, id)
+	doc, perr = policy.Parse(raw)
+	if perr != nil {
+		t.Fatalf("parse after disable: %v (%s)", perr, raw)
+	}
+	if doc.RuleByName("protection-push") != nil || doc.RuleByName("protection-reviews") != nil {
+		t.Fatalf("managed rules survived disable: %s", raw)
+	}
+	if doc.RuleByName("release-tags") == nil {
+		t.Fatalf("custom rule dropped on disable: %s", raw)
+	}
+}
+
+// TestSettingsSeamsProtectionValidation pins the inline refusals: an empty
+// ref list, an unknown role and a bad check context never reach the store.
+func TestSettingsSeamsProtectionValidation(t *testing.T) {
+	h := newSeamsHarness(t)
+	ctx := context.Background()
+	id := git.RepoId{Owner: "acme", Name: "monorepo"}
+	for _, tc := range []struct {
+		name string
+		form url.Values
+		want string
+	}{
+		{"no refs", url.Values{"enabled": {"1"}, "refs": {" "}}, "at least one ref pattern"},
+		{"unknown role", url.Values{"enabled": {"1"}, "refs": {"refs/heads/main"}, "push_roles": {"owner"}}, "unknown push role"},
+		{"bad check", url.Values{"enabled": {"1"}, "refs": {"refs/heads/main"}, "checks": {"ci;build"}}, "invalid context"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			code, _, body := seamsPost(t, h, "/acme/monorepo/settings/protection", tc.form)
+			if code != http.StatusBadRequest {
+				t.Fatalf("status = %d, want 400 (%s)", code, body)
+			}
+			settingsMustContain(t, body, tc.want, "inline error")
+		})
+	}
+	if raw, _, _ := api.PolicyRaw(ctx, h.apiE, id); strings.Contains(string(raw), "protection-push") {
+		t.Fatalf("a rejected form wrote the store: %s", raw)
 	}
 }

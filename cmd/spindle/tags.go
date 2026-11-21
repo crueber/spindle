@@ -188,6 +188,42 @@ func (p *tagsPublisher) CreateTag(ctx context.Context, repo, name, sha string, m
 	return nil
 }
 
+// DeleteTag publishes refs/tags/<name> → zero with OldOid = the resolved
+// commit (CAS delete: a concurrent move or delete fails the old-oid check;
+// the service maps it to 409). The WAL txn carries the delete as a normal
+// REF_UPDATE, so the events bridge derives the tag-delete event with no new
+// code.
+func (p *tagsPublisher) DeleteTag(ctx context.Context, repo, name, oldOid string, meta map[string]string) error {
+	h, err := p.reg.Open(ctx, repo)
+	if err != nil {
+		return err
+	}
+	agent := map[string]string{}
+	for k, v := range meta {
+		agent[k] = v
+	}
+	res, err := h.Publish(ctx, wal.PublishRequest{
+		Txn: &proto.RefTransaction{Updates: []*proto.RefUpdate{{
+			Name:   "refs/tags/" + name,
+			OldOid: oldOid,
+			NewOid: strings.Repeat("0", len(oldOid)),
+		}}},
+		Meta: agent,
+	})
+	if err != nil {
+		return err
+	}
+	for _, rr := range res.PerRef {
+		if rr.Err != nil {
+			if rr.Err.Kind == wal.RefErrConflict || rr.Err.Kind == wal.RefErrStale {
+				return fmt.Errorf("CAS conflict: %s", rr.Err.Detail)
+			}
+			return fmt.Errorf("publish %s: %s", rr.Name, rr.Err.Detail)
+		}
+	}
+	return nil
+}
+
 // compile-time seam assertions: composition consumes exactly the narrow
 // interfaces the tags package defines (core never imports tags).
 var (

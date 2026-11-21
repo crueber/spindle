@@ -33,5 +33,20 @@ export function attachTags(repo) {
         ...json(fields),
         ...opts,
       }),
+    /**
+     * List tags (PLAN-V1 WP4): `GET …/tags` →
+     * `{tags:[{name, commit, date, author, annotated, release}]}`.
+     */
+    list: (opts) => client._call(p("/tags"), { method: "GET", ...opts }),
+    /**
+     * Delete a tag: `DELETE …/refs/tags/{tag}` (write + the `protect`
+     * policy effect). 409 when the tag backs a release — delete the
+     * release first; 409 also on a concurrent move (never a blind force).
+     */
+    remove: (name, opts) =>
+      client._call(p(`/refs/tags/${encodeURIComponent(name)}`), {
+        method: "DELETE",
+        ...opts,
+      }),
   };
 }

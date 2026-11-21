@@ -38,6 +38,14 @@ func newPullsService(st store.ObjectStore, ident *identity.Service, issuesSvc *i
 	svc.Refs = &pullsPublisher{reg: reg}
 	if issuesSvc != nil {
 		svc.Closer = issuesSvc
+		// PR labels/assignees/milestone reuse the 02 thread-patch
+		// implementation (one thread model, one writer — 03 §8).
+		svc.Metadata = func(ctx context.Context, owner, repo string, num int, actor auth.Principal, p pulls.ThreadMetaPatch) error {
+			_, err := issuesSvc.PatchThreadMetadata(ctx, owner, repo, num, actor, issues.IssuePatch{
+				Labels: p.Labels, Assignees: p.Assignees, Milestone: p.Milestone,
+			})
+			return err
+		}
 	}
 	// Issue #424: the completed fork operation. The manifest-sharing
 	// executor runs over the WAL registry (already-on-bucket mode —

@@ -563,14 +563,14 @@ func TestS3GetHead(t *testing.T) {
 		t.Fatalf("canceled bulk permit: %v", err)
 	}
 	// Malformed Content-Range from the server → Other.
-	f.statusOverride = func(method, key string, r *http.Request) int {
+	f.setStatusOverride(func(method, key string, r *http.Request) int {
 		if r.Header.Get("Range") != "" {
 			w := struct{}{}
 			_ = w
 		}
 		return 0
-	}
-	f.statusOverride = nil
+	})
+	f.setStatusOverride(nil)
 }
 
 func TestS3MapStatusTable(t *testing.T) {
@@ -699,7 +699,7 @@ func TestS3RetrySemantics(t *testing.T) {
 
 	// Replayable (Bytes) PUT: one transient 503 then success.
 	var transient int
-	f.statusOverride = func(method, key string, r *http.Request) int {
+	f.setStatusOverride(func(method, key string, r *http.Request) int {
 		if method == http.MethodPut && key == "ret" && r.Header.Get("If-None-Match") != "" {
 			f.countsMu.Lock()
 			defer f.countsMu.Unlock()
@@ -709,15 +709,15 @@ func TestS3RetrySemantics(t *testing.T) {
 			}
 		}
 		return 0
-	}
+	})
 	if _, err := s.Put(ctx, "ret", PutBody{Bytes: []byte("x")}, PutOptions{Mode: PutCreate}); err != nil {
 		t.Fatalf("retryable put: %v", err)
 	}
-	f.statusOverride = nil
+	f.setStatusOverride(nil)
 
 	// A Stream PUT that fails is NOT replayed (§2.6).
 	var streamPuts int
-	f.statusOverride = func(method, key string, r *http.Request) int {
+	f.setStatusOverride(func(method, key string, r *http.Request) int {
 		if method == http.MethodPut && key == "streamfail" {
 			f.countsMu.Lock()
 			streamPuts++
@@ -725,12 +725,12 @@ func TestS3RetrySemantics(t *testing.T) {
 			return http.StatusBadGateway
 		}
 		return 0
-	}
+	})
 	_, err := s.Put(ctx, "streamfail", PutBody{Stream: strings.NewReader("abc"), StreamLen: 3}, PutOptions{Mode: PutCreate})
 	if !IsRetryable(err) {
 		t.Fatalf("stream failure kind: %v", err)
 	}
-	f.statusOverride = nil
+	f.setStatusOverride(nil)
 	if streamPuts != 1 {
 		t.Fatalf("non-replayable stream retried %d times", streamPuts)
 	}
@@ -802,17 +802,17 @@ func TestS3MultipartAbortsOnPartFailure(t *testing.T) {
 		c.MultipartThreshold = 2*part - 1
 		c.MultipartPartSize = part
 	})
-	f.statusOverride = func(method, key string, r *http.Request) int {
+	f.setStatusOverride(func(method, key string, r *http.Request) int {
 		if r.Method == http.MethodPut && r.URL.Query().Get("partNumber") != "" {
 			return http.StatusInternalServerError // every part fails
 		}
 		return 0
-	}
+	})
 	_, err := s.Put(ctx, "ab", PutBody{Bytes: make([]byte, 3*part)}, PutOptions{Mode: PutOverwrite})
 	if err == nil {
 		t.Fatal("part failure must surface")
 	}
-	f.statusOverride = nil
+	f.setStatusOverride(nil)
 	if len(f.aborts) == 0 {
 		t.Fatal("upload was never aborted")
 	}
@@ -1195,16 +1195,16 @@ func TestS3MultipartResponseErrors(t *testing.T) {
 	}
 	f.badCompleteXML.Store(false)
 	// CreateMultipartUpload rejected with 500 → Retryable.
-	f.statusOverride = func(method, key string, r *http.Request) int {
+	f.setStatusOverride(func(method, key string, r *http.Request) int {
 		if _, ok := r.URL.Query()["uploads"]; ok {
 			return http.StatusInternalServerError
 		}
 		return 0
-	}
+	})
 	if _, err := s.Put(ctx, "inifail", PutBody{Bytes: big}, PutOptions{Mode: PutOverwrite}); !IsRetryable(err) {
 		t.Fatalf("initiate failure: %v", err)
 	}
-	f.statusOverride = nil
+	f.setStatusOverride(nil)
 	// A failed part read (short stream) aborts with Retryable.
 	_, err := s.Put(ctx, "shortmp", PutBody{Stream: bytes.NewReader(make([]byte, 10)), StreamLen: int64(len(big))}, PutOptions{Mode: PutOverwrite})
 	if !IsRetryable(err) {

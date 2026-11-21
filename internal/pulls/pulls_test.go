@@ -600,3 +600,89 @@ func TestListPRsNumberDesc(t *testing.T) {
 		t.Fatalf("rest = %v, want [1]", got)
 	}
 }
+
+// TestUpdatePRMetadataSeam pins the 03→02 hand-off: the PR PUT carries
+// labels/assignees/milestone to the shared thread patch instead of
+// re-implementing it, and an unwired seam fails closed (503).
+func TestUpdatePRMetadataSeam(t *testing.T) {
+	e := newTestEnv()
+	openBasic(t, e, "o", "r")
+	var calls int
+	var got ThreadMetaPatch
+	e.svc.Metadata = func(_ context.Context, owner, repo string, num int, actor auth.Principal, p ThreadMetaPatch) error {
+		calls++
+		got = p
+		return nil
+	}
+	labels := []string{"bug"}
+	assignees := []string{"bob@example.com"}
+	var milestone *string
+	th, _, err := e.svc.UpdatePR(ctx(), "o", "r", 1, writer(), PRPatch{
+		Metadata: &ThreadMetaPatch{Labels: &labels, Assignees: &assignees, Milestone: &milestone},
+	})
+	if err != nil {
+		t.Fatalf("UpdatePR metadata: %v", err)
+	}
+	if calls != 1 || got.Labels == nil || (*got.Labels)[0] != "bug" || got.Milestone == nil || *got.Milestone != nil {
+		t.Fatalf("seam call = %d %+v", calls, got)
+	}
+	if th == nil || th.Num != 1 {
+		t.Fatalf("thread = %+v", th)
+	}
+
+	e.svc.Metadata = nil
+	if _, _, err := e.svc.UpdatePR(ctx(), "o", "r", 1, writer(), PRPatch{Metadata: &ThreadMetaPatch{Labels: &labels}}); !errors.Is(err, ErrUnavailable) {
+		t.Fatalf("unwired metadata = %v", err)
+	}
+}
+
+// TestListPRsLabelFilter covers the list filter WP2.2 adds (labels AND,
+// case-insensitive, riding the shared index card).
+func TestListPRsLabelFilter(t *testing.T) {
+	e := newTestEnv()
+	openBasic(t, e, "o", "r")
+	setLabels := func(num int, labels []string) {
+		th, ver, err := e.svc.loadThread(ctx(), "o", "r", num)
+		if err != nil || th == nil {
+			t.Fatalf("loadThread: %v", err)
+		}
+		th.Labels = labels
+		th.Version++
+		if _, err := store.PutBytes(ctx(), e.store, ThreadKey("o", "r", num), encodeThread(th),
+			store.PutOptions{Mode: store.PutUpdate, IfVersion: ver}); err != nil {
+			t.Fatalf("store thread: %v", err)
+		}
+		e.svc.updateIndex(ctx(), "o", "r", prCardOf(th))
+	}
+	setLabels(1, []string{"Bug", "docs"})
+	roles := e.roles
+	roles.Roles["jane@example.com"] = "write"
+	e.seedRefs("o/r", map[string]string{"refs/heads/main": hexSHA(1), "refs/heads/other": hexSHA(3)})
+	th2, _, err := e.svc.OpenPR(ctx(), "o", "r", writer(), OpenInput{
+		Title: "Second", BaseRef: "refs/heads/main", HeadRef: "refs/heads/other",
+	}, "")
+	if err != nil {
+		t.Fatalf("second PR: %v", err)
+	}
+	setLabels(th2.Num, []string{"bug"})
+
+	read := writer()
+	res, err := e.svc.ListPRs(ctx(), "o", "r", read, ListFilter{Labels: []string{"bug"}})
+	if err != nil {
+		t.Fatalf("ListPRs: %v", err)
+	}
+	if len(res.Pulls) != 2 {
+		t.Fatalf("bug rows = %+v", res.Pulls)
+	}
+	res, err = e.svc.ListPRs(ctx(), "o", "r", read, ListFilter{Labels: []string{"docs"}})
+	if err != nil || len(res.Pulls) != 1 || res.Pulls[0].Num != 1 {
+		t.Fatalf("docs rows = %+v err=%v", res, err)
+	}
+	if len(res.Pulls[0].Labels) != 2 {
+		t.Fatalf("row labels = %+v", res.Pulls[0])
+	}
+	res, err = e.svc.ListPRs(ctx(), "o", "r", read, ListFilter{Labels: []string{"bug", "missing"}})
+	if err != nil || len(res.Pulls) != 0 {
+		t.Fatalf("AND rows = %+v err=%v", res, err)
+	}
+}

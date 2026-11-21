@@ -30,14 +30,14 @@ func TestSummaryFeaturesWire(t *testing.T) {
 		want       config.ResolvedFeatures
 		wantSuffix string
 	}{
-		{"nil view fails open to all-on", nil, config.AllFeatures(), "~t111111"},
-		{"all-on projects all true", featuresPtr(config.AllFeatures()), config.AllFeatures(), "~t111111"},
-		{"all-off projects all false", featuresPtr(allOff), allOff, "~t000000"},
+		{"nil view fails open to all-on", nil, config.AllFeatures(), "~t1111111"},
+		{"all-on projects all true", featuresPtr(config.AllFeatures()), config.AllFeatures(), "~t1111111"},
+		{"all-off projects all false", featuresPtr(allOff), allOff, "~t0000000"},
 		{"mixed projects per flag", featuresPtr(config.ResolvedFeatures{
-			Issues: false, Pulls: true, Releases: false, Forks: true, Watch: true, Star: false,
+			Issues: false, Pulls: true, Releases: false, Forks: true, Watch: true, Star: false, Packages: false,
 		}), config.ResolvedFeatures{
-			Issues: false, Pulls: true, Releases: false, Forks: true, Watch: true, Star: false,
-		}, "~t010110"},
+			Issues: false, Pulls: true, Releases: false, Forks: true, Watch: true, Star: false, Packages: false,
+		}, "~t0101100"},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -121,8 +121,8 @@ func TestSummaryFeaturesRevalidate(t *testing.T) {
 		t.Fatal("issues flag must project off after the flip")
 	}
 	flipped := w.Header().Get("ETag")
-	if !strings.HasSuffix(flipped, `~t011111"`) {
-		t.Fatalf("etag = %q, want ~t011111 suffix", flipped)
+	if !strings.HasSuffix(flipped, `~t0111110"`) {
+		t.Fatalf("etag = %q, want ~t0111110 suffix", flipped)
 	}
 	// The flipped etag 304s while the flags are current.
 	w = f.do("GET", "/demo/walgit/api", nil, map[string]string{"If-None-Match": flipped}, readP())
@@ -162,7 +162,7 @@ func TestWalSummaryFeatures(t *testing.T) {
 	if s.Features == nil {
 		t.Fatal("features must always be populated by the walView fold")
 	}
-	want := config.ResolvedFeatures{Issues: false, Pulls: true, Releases: true, Forks: true, Watch: true, Star: false}
+	want := config.ResolvedFeatures{Issues: false, Pulls: true, Releases: true, Forks: true, Watch: true, Star: false, Packages: true}
 	if *s.Features != want {
 		t.Fatalf("features = %+v, want %+v", *s.Features, want)
 	}

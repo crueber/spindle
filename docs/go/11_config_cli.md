@@ -10,6 +10,8 @@ The binary is `spindle` (module `github.com/crueber/spindle`). It reads the same
 
 ```
 cmd/spindle/            main.go: build-info version, global --config and --data-dir, dispatcher, exit-code mapping
+cmd/spindle/cli_*.go    the WP11 API client (cli_api.go client/state/table, cli_auth, cli_user, cli_org,
+                        cli_issue, cli_pr, cli_release (releases+checks), cli_misc (packages/threads/api/completion))
 internal/config/       file+env loading, decoding, validation, per-repo settings, effective-config dump
 internal/config/       (files) config.go, env.go, validate.go, size.go, repo_settings.go, check.go
 ```
@@ -120,6 +122,9 @@ Copied from Rust spec §15.1; key names, defaults, and meanings are **normative 
 | `bundles.require` | `[]` | repos whose unbounded zero-have clones must use bundle-uri (D17) |
 | `lfs.enabled` / `serve_via` / `signed_url_ttl` / `max_object_bytes` | `true` / `"proxy"` / `"1h"` / `"16GiB"` | LFS |
 | `attachments.max_image_bytes` | `"8MiB"` | per-file cap for pasted/dropped issue images (02 §12; over cap → 413) |
+| `packages.max_blob_bytes` | `"2GiB"` | one OCI blob object; over cap → 413 `SIZE_INVALID` (14 §5) |
+| `packages.max_manifest_bytes` | `"4MiB"` | one manifest body; over cap → 413 `SIZE_INVALID` (14 §5) |
+| `packages.upload_ttl` | `"24h"` | chunked-upload staging lifetime; expired ids are `BLOB_UPLOAD_UNKNOWN` (14 §5) |
 | `upstream.git` / `upstream.lfs` / `upstream.token_env` / `upstream.follow` | — | repair source; LFS read-through; token env var (never the token); refs kept equal |
 | `git.binary` | `"git"` | path to git binary (spindle always execs it; see 04_git.md) |
 | `git.upload_pack_engine` | `"auto"` | `auto` = stock git wherever packs are local/mounted; remote-served bases per 04_git.md |
@@ -373,7 +378,10 @@ Each rule is a named function in `internal/config/validate.go`; the list is the 
   - `0` — success;
   - `1` — command/config error (bad flag value, validation failure surfaced by a command, strategy not found, …);
   - `2` — a missing **explicitly-named** config file (`--config`/`SPINDLE_CONFIG`/`WALGIT_CONFIG` — never the absent default file, which is the zero-config first run), and argv-level errors (unknown command, malformed `--config`/`--data-dir` use);
-  - `3` — `config check --strict` observed ignored overrides (supervisor pre-start check).
+  - `3` — `config check --strict` observed ignored overrides (supervisor pre-start check). For the
+    API client commands (§6.6) `3` also means "not found" (HTTP 404).
+  - `4` — an API client command failed authentication/authorization (HTTP 401/403, or no credential
+    where one is required); see §6.6.
   - Mapping: Go's `flag` package calls `os.Exit(2)` on flag errors by default — the dispatcher overrides `flag.Usage`/error handling per subcommand so every argv error funnels to exit 2 uniformly (see §6.3).
 - Version: from build info, in order: linker-injected `SPINDLE_BUILD_SHA` (set via `-ldflags "-X main.buildSHA=$(git rev-parse --short=12 HEAD)"` at build time, from `runtime/debug.ReadBuildInfo()` VCS info when present (Go embeds `vcs.revision` with `-buildvcs=true`, default when building from a git checkout; take first 12 hex chars), else `dev`. `spindle version` prints it; `serve` logs it at startup.
 - Legacy compat: `walgit-server` is not shipped; `spindle serve` is the only server entrypoint. (If operators' units reference `walgit-server`, a `cmd/walgit-server` symlink-compatible binary MAY be added later; it is out of scope here.)
@@ -415,6 +423,9 @@ Implementation notes per group (behavioral truth from Rust spec §16; each comma
 | `config check [--env-file PATH]… [--strict]` / `config dump` | validate file ⊕ env, print ignored overrides to stderr; `--strict` exits 3 when any override was ignored (supervisor pre-start check). With NO config file present, `config check` validates the effective defaults (§2.3) ⊕ env — it passes (exit 0) unless an env override breaks a rule; this makes it usable as a pre-flight check on a not-yet-configured host. `config dump` prints the effective config as TOML (defaults ⊕ first-run overrides ⊕ file ⊕ env, post-PORT-lockstep, post-placement-all-or-nothing), reporting `file_state` (present / absent / invalid) so scripts can tell the three boot states apart. `--env-file` loads KEY=VALUE pairs into the override set (does not touch the real environment). | §6.3 |
 
 There are NO `fsck`/`repair` subcommands — those are maintainer units (10_maintenance.md); manual recovery is `spindle wal add-pack --tier 0` + ref-delete pushes.
+
+The collaboration surface (`auth`, `user`, `org`, `issue`, `pr`, `release`, `checks`, `packages`,
+`threads`, `api`, `completion`) is an **HTTP client of the JSON API** and is specified in §6.6.
 
 ### 6.3 Flag parsing and dispatcher mechanics
 
@@ -464,6 +475,113 @@ $ spindle serve
 #   server.auth.mode = "none" (warning logged), server.auto_create_on_push = true
 ```
 
+### 6.6 API client commands (WP11)
+
+The collaboration surface is a client of the shipped JSON API (`docs/go/07_api.md` and the
+feature-package route tables) — **no direct store access and no second source of truth**. The
+operator commands in §6.2 (serve/compact/bundle/WAL/import/mirror) stay store-side; everything
+below is HTTP.
+
+```text
+auth      login|logout|status|token list|create|revoke
+user      whoami|list|show|keys list|keys add|keys remove
+org       list|show|create · member list|add|remove · team list|create|add-repo
+issue     list|show|create|comment|close|reopen
+pr        list|show|create|merge|review|comment|checks
+release   list|show|create|delete|upload
+checks    list|status REPO [REF]
+packages  list|show|delete
+threads   list|show|run|cancel
+api       [-X METHOD] [-d DATA] [-H 'Key: Value'] PATH
+completion bash|zsh|fish
+```
+
+Every command accepts `--json`; list commands accept `--limit`, `--after` where the API paginates;
+mutating commands accept `--quiet`. Flags may appear before or after positionals (gh-style
+permutation) — the CLI reorders argv before `flag.Parse`.
+
+**Server and token (`--server`, `SPINDLE_SERVER`, `SPINDLE_TOKEN`).**
+
+1. Base URL: `--server URL` → `SPINDLE_SERVER` → the server written by the last `spindle auth login`
+   → `http://127.0.0.1:8080`. A bare host gains `http://`; only http/https is accepted; trailing
+   slashes are trimmed (a reverse-proxy path prefix is preserved).
+2. Token: `SPINDLE_TOKEN` → legacy `WALGIT_TOKEN` → the state file entry for the resolved server.
+   There is no `--token` flag: a token on argv is visible in `ps` and shell history.
+3. State file: `${SPINDLE_CONFIG_DIR:-${XDG_CONFIG_HOME:-~/.config}/spindle}/auth.json`, mode
+   **0600**, written atomically (temp + rename). Shape:
+   `{version:1, current:"<server>", servers:{"<server>":{token,principal,write,admin,updated_at}}}`.
+   `spindle auth login` verifies the token against `GET /api/v1/me` before storing it
+   (`--no-verify` skips the call); `--token-file F` or `--stdin` supplies the token. Tokens are
+   **never printed** — not by `auth status`, not in error bodies, and not in a `spindle api` response
+   that echoes them (the client substitutes `[REDACTED]` for the credential in every message and
+   body it writes).
+
+**Output contract.**
+
+- `--json` prints the endpoint's JSON body, pretty-printed (2-space indent) and otherwise
+  **unchanged**: no invented envelope, no field renaming. Where the API returns an array, the CLI
+  prints a JSON array. This keeps the CLI schema stable by construction — the API doc is the schema.
+- Human output is a tab-aligned table (list commands) or a key/value block (show commands). The
+  human text is explicitly NOT a stable contract; scripts use `--json`.
+- `--quiet` suppresses confirmations on mutations; it never suppresses data.
+- Commands that write print the created object's number and a browser URL on the human path.
+
+**Exit codes** (superset of §6.1; the same numeric values, no renumbering):
+
+| code | meaning |
+|---|---|
+| 0 | success |
+| 1 | user/API error (400/409/422/5xx, validation, transport failure) |
+| 2 | usage error (unknown subcommand, missing/unknown flag, missing required argument) |
+| 3 | not found (HTTP 404) — shared with `config check --strict`; the commands are distinct |
+| 4 | authentication/authorization failed (HTTP 401/403, or no credential when one is required) |
+
+The 401/403 path prints one hint naming `spindle auth login` / `SPINDLE_TOKEN`; the message never
+includes the token.
+
+**Deliberate gaps (documented, not invented).**
+
+- `auth token list|create|revoke` is **not available**: the JSON API exposes no token surface.
+  Tokens are minted and revoked in a signed-in browser at `<server>/_auth/tokens`
+  (`06_server_http.md` §8.6). The commands exist and exit 1 with that message.
+- `packages` (WP1, `14_packages.md`) and `threads` (WP10, `15_threads.md`) are bound to their
+  documented paths (`/{o}/{r}/api/packages…`, `/{o}/{r}/api/threads…`). Until those routes ship, a
+  404 is reported as **"feature not enabled on this server"** with exit 1 — not the misleading
+  not-found exit 3. The command surface and the completion entries are shipped now; the day the
+  server registers the route, the CLI starts working with no change.
+- `org team add-repo` targets the documented team→repository binding
+  (`PUT /api/v1/orgs/{org}/teams/{slug}/repos/{owner}/{repo}`); same 404 treatment until it lands.
+- `user list` calls `GET /api/v1/owners` (no users-only listing endpoint exists), so it lists
+  owners — users and organizations alike.
+- `pr merge` starts the documented `pull-merge` task and prints the task id; `--wait` polls
+  `GET …/pulls/{num}/merge/task` until the task leaves `running` (no invented synchronous merge).
+
+**`spindle api`** sends one request, with the resolved bearer token when one exists (anonymous
+otherwise): `-X METHOD` (default GET, POST when `-d` is present), `-d DATA` (literal, `@FILE`, or
+`-` for stdin), `-H 'Key: Value'` (repeatable), `--json` to pretty-print the response. `PATH` may be
+a full URL. Non-2xx maps to the exit codes above and writes the (redacted) error body to stderr.
+
+**Completion** (`spindle completion bash|zsh|fish`) is generated from the same tables dispatch
+reads — top-level commands, two-token operator subcommands, group subcommands, and each command's
+flags. There is no hand-maintained second list.
+
+Examples:
+
+```console
+$ export SPINDLE_SERVER=https://git.example.com
+$ spindle auth login --token-file ~/.config/spindle/token
+Logged in to https://git.example.com as alice (state: ~/.config/spindle/spindle/auth.json)
+
+$ spindle issue list acme/mono --state open --label bug --json | jq '.issues[].num'
+$ spindle issue create acme/mono --title "Crash on clone" --body-file /tmp/report.md --label bug
+$ spindle pr review acme/mono 42 --approve --body "LGTM"
+$ spindle pr merge acme/mono 42 --method squash --wait
+$ spindle release upload acme/mono v1.2.0 dist/app-linux-amd64
+$ spindle api /api/v1/me
+$ spindle api -X POST /api/v1/orgs -d '{"org":"acme","display_name":"Acme"}'
+$ spindle completion bash > /etc/bash_completion.d/spindle
+```
+
 ## 7. Worked end-to-end example
 
 ```console
@@ -511,6 +629,13 @@ $ WALGIT__STORE__BKUET=x spindle config check --config /etc/spindle/walgit.toml 
 - **`gix` as `git.upload_pack_engine` value accepted but treated as `git`**: the Rust gix engine has no Go equivalent and none is wanted (dependency law); file compatibility is preserved.
 - **`walgit-server` binary alias not shipped**: `spindle serve` is the entrypoint; units referencing `walgit-server` are a packaging concern (16_packaging.md MAY add an alias later).
 - **Version env var is `SPINDLE_BUILD_SHA`** (Rust used `WALGIT_BUILD_SHA`): it is build-time, not deployment-facing, so no compat value; VCS build info from the Go toolchain is the primary source anyway.
+- **NEW (2026-11-20, WP11) — the collaboration CLI is an HTTP client, not a second writer.** `auth/user/org/issue/pr/release/checks` (and `api`) call the shipped JSON API; no command in that surface opens the store, and no route shape is duplicated in Go. One `apiClient` helper owns path building, the bearer header, error mapping, and token redaction. Rationale: the API is the single contract, and a CLI that wrote the bucket directly would fork every gate (roles, visibility, policy) it cannot see.
+- **NEW (WP11) — `--json` prints the API body unchanged (re-indented).** No CLI-specific envelope is invented: the API doc *is* the JSON schema, so the CLI cannot drift from it. Human tables are deliberately not a stable contract.
+- **NEW (WP11) — exit 3 is shared by `config check --strict` (ignored overrides) and API "not found".** Renumbering the established exit code would break supervisor scripts; the two commands are disjoint, and the collision is documented in the help text and §6.1.
+- **NEW (WP11) — the login state lives at `${SPINDLE_CONFIG_DIR:-${XDG_CONFIG_HOME:-~/.config}/spindle}/auth.json` (0600, atomic write).** `SPINDLE_CONFIG_DIR` is the CLI-only override (tests and containers need it); it never feeds the server's config ladder (§3.1.1's `SPINDLE_DATA_DIR` is the server's knob). Tokens are never accepted on argv and never printed; `apiClient` redacts the token from every error it renders.
+- **NEW (WP11) — documented-but-unserved surfaces report "feature not enabled" (exit 1).** `packages` (WP1), `threads` (WP10) and `org team add-repo` are bound to their documented paths now; a 404 from them means "the route is not registered", not "your object is missing". This keeps the 404→exit-3 contract honest for routes that *are* served.
+- **NEW (WP11) — `auth token list|create|revoke` is a documented gap.** Minting is a browser-session surface (`/_auth/tokens`, CSRF-guarded), not the public JSON API; the commands exit 1 with a pointer instead of the CLI inventing a token endpoint.
+- **NEW (WP11) — shell completion is generated from the dispatch tables.** `completionWords()` walks `subcommands` plus the `apiGroups` table; `spindle completion bash|zsh|fish` differs only in the shell template. No hand-maintained command list can go stale.
 - **`RUST_LOG` honored (kept) as an override of `telemetry.log_filter`**, and `SPINDLE_LOG` accepted as the new-style spelling: zero-cost compat for existing log-tuning scripts.
 - **Unknown-key env overrides are soft (ignored + reported) rather than fatal**: matches Rust behavior and keeps a stale variable from taking down a fleet; `--strict` makes them fatal for supervisors.
 - **NEW (2026-09-05) — `server.tls.*` removed; TLS terminates at the reverse proxy** (Forgejo #165): the `server.tls.mode/cert/key/hostnames` keys are gone (validation rules renumbered: roles 8, paths 9, ssh 10). A file that still sets them is rejected at load and a `SPINDLE__SERVER__TLS__*` env override is fatal — both with a reverse-proxy pointer. The env fatality is a deliberate exception to the "unknown-key env overrides are soft" rule above: a silently ignored TLS setting would leave the operator believing the server terminates TLS. Absolute-URL building honors `X-Forwarded-Proto` (§9.1 of 06_server_http.md); set `server.public_url` to the canonical external origin behind a proxy.

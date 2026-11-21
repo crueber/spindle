@@ -160,6 +160,16 @@ type RepoDeps struct {
 
 	// Tags is tags.Service.CreateTag (write role + policy re-checked there).
 	Tags func(ctx context.Context, owner, repo string, p auth.Principal, in tags.CreateInput) (*tags.Tag, error)
+	// TagsList and TagDelete back the /tags page (PLAN-V1 WP4): the list
+	// carries the target commit, creator stamp and the release-backed flag;
+	// delete enforces the write role + the protect policy effect + the
+	// release-backed refusal inside internal/tags.
+	TagsList  func(ctx context.Context, owner, repo string, p auth.Principal) ([]tags.TagEntry, error)
+	TagDelete func(ctx context.Context, owner, repo string, p auth.Principal, name string) error
+
+	// SyncFork starts the WP5 sync-fork task (forksync.Service.Start).
+	SyncFork func(ctx context.Context, owner, repo string, p auth.Principal) (string, error)
+
 	// RoleOf resolves the viewer's repo role (identity.Service.Resolve's role
 	// half) — the write gate that decides whether Create tag renders at all.
 	RoleOf func(ctx context.Context, owner, repo string, p auth.Principal) identity.Role
@@ -204,6 +214,8 @@ func (s *Server) registerRepoRoutes() {
 	s.mux.HandleFunc("GET /{owner}/{repo}/commits", s.repoCommits)
 	s.mux.HandleFunc("GET /{owner}/{repo}/commit/{sha}", s.repoCommit)
 	s.mux.HandleFunc("GET /{owner}/{repo}/wal", s.repoWAL)
+	s.mux.HandleFunc("GET /{owner}/{repo}/tags", s.repoTags)
+	s.mux.HandleFunc("POST /{owner}/{repo}/tags/{tag}/delete", s.repoTagDelete)
 
 	// Star/watch toggles (repo header) and Create tag (commit page). These are
 	// the SPA's own affordances, re-homed as plain POSTs: the page renders the
@@ -214,6 +226,7 @@ func (s *Server) registerRepoRoutes() {
 	s.mux.HandleFunc("POST /{owner}/{repo}/watch", s.repoWatch)
 	s.mux.HandleFunc("POST /{owner}/{repo}/unwatch", s.repoUnwatch)
 	s.mux.HandleFunc("POST /{owner}/{repo}/tag", s.repoCreateTag)
+	s.mux.HandleFunc("POST /{owner}/{repo}/sync-fork", s.repoSyncFork)
 }
 
 // --- gate + data pass -------------------------------------------------------
@@ -423,6 +436,7 @@ type RepoChrome struct {
 	VisLabel, VisTitle string
 	ForkParent         string
 	Forks              int
+	CanSyncFork        bool
 
 	MirrorBadge     string
 	MirrorTitle     string
@@ -544,6 +558,12 @@ func (s *Server) buildRepoChrome(r *http.Request, rq repoRequest, sum api.Summar
 			c.ForkParent, c.Forks = v.Parent, v.Count
 		}
 	}
+	// WP5 affordance: a fork's writer may sync it. The action itself is a
+	// task (202 + progress); this only decides whether the button renders.
+	if c.ForkParent != "" && repoDeps.SyncFork != nil &&
+		repoCanWrite(r.Context(), rq.id.Owner, rq.id.Name, rq.p) {
+		c.CanSyncFork = true
+	}
 	hasChecks := false
 	if repoDeps.ChecksSummary != nil {
 		if v, ok := repoDeps.ChecksSummary(c.Owner, c.Name); ok {
@@ -605,6 +625,7 @@ func (s *Server) buildRepoChrome(r *http.Request, rq repoRequest, sum api.Summar
 	c.Tabs = []repoTab{
 		{ID: "code", Label: "Code", Href: "/" + c.Full},
 		{ID: "commits", Label: "Commits", Href: "/" + c.Full + "/commits"},
+		{ID: "tags", Label: "Tags", Href: "/" + c.Full + "/tags", Badge: c.Tags},
 	}
 	if feat.Issues {
 		c.Tabs = append(c.Tabs, repoTab{ID: "issues", Label: "Issues", Href: "/" + c.Full + "/issues", Badge: counts.OpenIssues})
@@ -615,6 +636,11 @@ func (s *Server) buildRepoChrome(r *http.Request, rq repoRequest, sum api.Summar
 	if hasChecks {
 		c.Tabs = append(c.Tabs, repoTab{ID: "checks", Label: "Checks", Href: "/" + c.Full + "/checks"})
 	}
+	// Threads (docs/features/15 §6) always renders: a repo with no workflow
+	// files has a legitimate empty run list, and the tab is where an operator
+	// discovers the workflow location (the Checks #505 hide-on-empty rule is
+	// about an externally reported surface, not this one).
+	c.Tabs = append(c.Tabs, repoTab{ID: "threads", Label: "Threads", Href: "/" + c.Full + "/threads"})
 	if feat.Releases {
 		c.Tabs = append(c.Tabs, repoTab{ID: "releases", Label: "Releases", Href: "/" + c.Full + "/releases"})
 	}
@@ -652,12 +678,16 @@ func repoTabSection(path string) string {
 		return "code"
 	case "commits", "commit":
 		return "commits"
+	case "tags":
+		return "tags"
 	case "issues", "labels", "milestones":
 		return "issues"
 	case "pulls", "pull":
 		return "pulls"
 	case "checks", "check":
 		return "checks"
+	case "threads":
+		return "threads"
 	case "releases", "release":
 		return "releases"
 	case "wal", "settings":
@@ -937,24 +967,26 @@ type repoDoc struct {
 }
 
 type treePage struct {
-	Repo      *RepoChrome
-	Guide     *repoGuide
-	Crumbs    []repoCrumb
-	Entries   []treeRow
-	Ref       string
-	SHA       string
-	Branch    string
-	Branches  []repoBranchRef
-	Latest    *repoCommit
-	Health    string
-	Path      string
-	Docs      []repoDoc
-	DocBase   string
-	DocName   string
-	DocBody   template.HTML
-	DocTooBig bool
-	DocBinary bool
-	DocSize   string
+	Repo       *RepoChrome
+	Guide      *repoGuide
+	Crumbs     []repoCrumb
+	Entries    []treeRow
+	Ref        string
+	SHA        string
+	Branch     string
+	Branches   []repoBranchRef
+	Latest     *repoCommit
+	Health     string
+	Path       string
+	ArchiveTar string
+	ArchiveZip string
+	Docs       []repoDoc
+	DocBase    string
+	DocName    string
+	DocBody    template.HTML
+	DocTooBig  bool
+	DocBinary  bool
+	DocSize    string
 }
 
 // repoBranchRef is one entry in the Code page's branch selector.
@@ -1048,6 +1080,8 @@ func (s *Server) repoTree(w http.ResponseWriter, r *http.Request) {
 	if treeRest == "" {
 		treeRest = res.SHA
 	}
+	data.ArchiveTar = "/" + c.Full + "/archive/" + escapePath(treeRest) + ".tar.gz"
+	data.ArchiveZip = "/" + c.Full + "/archive/" + escapePath(treeRest) + ".zip"
 	// Branch selector: one name-sorted page of heads (§9.2). A failure is not
 	// fatal — the selector is chrome, and the page must still render.
 	if refs, _, rerr := s.env.API.Repo.RefList(ctx, rq.id, "heads", api.RefQuery{N: 100}); rerr == nil {
@@ -1140,8 +1174,12 @@ func (s *Server) repoTree(w http.ResponseWriter, r *http.Request) {
 			data.Docs = append(data.Docs, repoDoc{Name: name, Query: url.QueryEscape(name), Selected: name == selected})
 		}
 		data.DocName = selected
+		docCtx := MarkdownCtx{Owner: c.Owner, Repo: c.Name, Ref: data.Branch, Dir: tree.Path}
+		if docCtx.Ref == "" {
+			docCtx.Ref = res.SHA
+		}
 		if tree.Readme != nil && tree.Readme.Name == selected {
-			data.DocBody = RenderMarkdownIn(tree.Readme.Contents, c.Owner, c.Name)
+			data.DocBody = RenderMarkdownCtx(tree.Readme.Contents, docCtx)
 		} else {
 			blob, berr := s.env.API.Repo.Blob(ctx, rq.id, res.SHA, docPath(tree.Path, selected), false)
 			if berr != nil {
@@ -1162,7 +1200,7 @@ func (s *Server) repoTree(w http.ResponseWriter, r *http.Request) {
 				data.DocBinary = true
 				data.DocSize = fmtSize(blob.Size)
 			default:
-				data.DocBody = RenderMarkdownIn(string(blob.Contents), c.Owner, c.Name)
+				data.DocBody = RenderMarkdownCtx(string(blob.Contents), docCtx)
 			}
 		}
 	}
@@ -1174,6 +1212,14 @@ func docPath(dir, name string) string {
 		return name
 	}
 	return dir + "/" + name
+}
+
+// dirOf returns the directory part of a repo path ("" at the root).
+func dirOf(p string) string {
+	if i := strings.LastIndexByte(p, '/'); i >= 0 {
+		return p[:i]
+	}
+	return ""
 }
 
 func containsString(list []string, want string) bool {
@@ -1404,7 +1450,16 @@ func (s *Server) repoBlob(w http.ResponseWriter, r *http.Request) {
 		// placeholders only
 	case data.IsMarkdown:
 		data.CodeView = r.URL.Query().Get("view") == "code"
-		data.Markdown = RenderMarkdownIn(string(blob.Contents), c.Owner, c.Name)
+		mdRef := shortRefName(blob.Ref)
+		if mdRef == "" {
+			mdRef = shortRefName(res.Ref)
+		}
+		if mdRef == "" {
+			mdRef = res.SHA
+		}
+		data.Markdown = RenderMarkdownCtx(string(blob.Contents), MarkdownCtx{
+			Owner: c.Owner, Repo: c.Name, Ref: mdRef, Dir: dirOf(data.Path),
+		})
 		data.Code = Highlight(name, string(blob.Contents))
 	default:
 		for i, line := range splitFileLines(string(blob.Contents)) {
@@ -2200,4 +2255,141 @@ func bundleNodes(bundles []api.BundleInfo) []bundleNode {
 		}
 	}
 	return out
+}
+
+// --- tags page (PLAN-V1 WP4) -------------------------------------------------
+
+// tagRow is one /tags table row.
+type tagRow struct {
+	Name         string
+	Commit       string
+	Short        string
+	CommitHref   string
+	Date         string
+	Author       string
+	Annotated    bool
+	Release      bool
+	ReleaseHref  string
+	ArchiveTar   string
+	ArchiveZip   string
+	DeleteAction string
+}
+
+type tagsPage struct {
+	Repo     *RepoChrome
+	Rows     []tagRow
+	CanWrite bool
+	Error    string
+}
+
+// repoTags serves GET /{owner}/{repo}/tags: every tag, its target commit
+// (peeled for annotated tags), the creator date/author git records, and the
+// release it backs (WP4.1).
+func (s *Server) repoTags(w http.ResponseWriter, r *http.Request) {
+	rq, ok := s.repoGate(w, r)
+	if !ok {
+		return
+	}
+	c, ok := s.repoOpen(w, r, rq, api.SyncRefs)
+	if !ok {
+		return
+	}
+	data := &tagsPage{Repo: c, CanWrite: repoCanWrite(r.Context(), rq.id.Owner, rq.id.Name, rq.p)}
+	if repoDeps.TagsList == nil {
+		data.Error = "tags service not wired"
+		s.page(w, r, rq.p, http.StatusServiceUnavailable, "repo/tags", "Tags · "+c.Full, data)
+		return
+	}
+	entries, err := repoDeps.TagsList(r.Context(), rq.id.Owner, rq.id.Name, rq.p)
+	if err != nil {
+		data.Error = parityErrMessage(err)
+		s.page(w, r, rq.p, parityErrStatus(err), "repo/tags", "Tags · "+c.Full, data)
+		return
+	}
+	for _, e := range entries {
+		row := tagRow{
+			Name:       e.Name,
+			Commit:     e.Commit,
+			Short:      shortSHA(e.Commit),
+			CommitHref: "/" + c.Full + "/commit/" + url.PathEscape(e.Commit),
+			Date:       e.Date,
+			Author:     e.Author,
+			Annotated:  e.Annotated,
+			Release:    e.Release,
+			ArchiveTar: "/" + c.Full + "/archive/" + url.PathEscape(e.Name) + ".tar.gz",
+			ArchiveZip: "/" + c.Full + "/archive/" + url.PathEscape(e.Name) + ".zip",
+		}
+		if e.Release {
+			row.ReleaseHref = "/" + c.Full + "/releases/" + url.PathEscape(e.Name)
+		}
+		if data.CanWrite && !e.Release && repoDeps.TagDelete != nil {
+			row.DeleteAction = "/" + c.Full + "/tags/" + url.PathEscape(e.Name) + "/delete"
+		}
+		data.Rows = append(data.Rows, row)
+	}
+	s.page(w, r, rq.p, http.StatusOK, "repo/tags", "Tags · "+c.Full, data)
+}
+
+// repoTagDelete serves POST /{owner}/{repo}/tags/{tag}/delete: the write
+// gate mirrors the API (repoCanWrite), the policy effect and the
+// release-backed refusal live in internal/tags. Failures re-render the page
+// with the message (no redirect loop; nothing was deleted).
+func (s *Server) repoTagDelete(w http.ResponseWriter, r *http.Request) {
+	rq, ok := s.repoGate(w, r)
+	if !ok {
+		return
+	}
+	if !s.parityWritePreflight(w, r, rq.p, "Delete a tag") {
+		return
+	}
+	if repoDeps.TagDelete == nil {
+		s.errorPage(w, r, http.StatusServiceUnavailable, "tag deletion is not wired on this build")
+		return
+	}
+	name := r.PathValue("tag")
+	if err := repoDeps.TagDelete(r.Context(), rq.id.Owner, rq.id.Name, rq.p, name); err != nil {
+		c, ok := s.repoOpen(w, r, rq, api.SyncRefs)
+		if !ok {
+			return
+		}
+		data := &tagsPage{Repo: c, CanWrite: repoCanWrite(r.Context(), rq.id.Owner, rq.id.Name, rq.p), Error: parityErrMessage(err)}
+		if repoDeps.TagsList != nil {
+			if entries, lerr := repoDeps.TagsList(r.Context(), rq.id.Owner, rq.id.Name, rq.p); lerr == nil {
+				for _, e := range entries {
+					data.Rows = append(data.Rows, tagRow{Name: e.Name, Commit: e.Commit, Short: shortSHA(e.Commit),
+						CommitHref: "/" + c.Full + "/commit/" + url.PathEscape(e.Commit), Date: e.Date,
+						Author: e.Author, Annotated: e.Annotated, Release: e.Release,
+						ArchiveTar: "/" + c.Full + "/archive/" + url.PathEscape(e.Name) + ".tar.gz",
+						ArchiveZip: "/" + c.Full + "/archive/" + url.PathEscape(e.Name) + ".zip"})
+				}
+			}
+		}
+		s.page(w, r, rq.p, parityErrStatus(err), "repo/tags", "Tags · "+c.Full, data)
+		return
+	}
+	s.formsRedirectFlash(w, r, "/"+rq.full+"/tags", "Tag "+name+" deleted")
+}
+
+// repoSyncFork serves POST /{owner}/{repo}/sync-fork: starts the WP5 task and
+// returns to the repo page with a flash naming the task (law 7 — the buttons
+// never block on the fetch; the task narrates and the next visit shows the
+// outcome sidecar on the page).
+func (s *Server) repoSyncFork(w http.ResponseWriter, r *http.Request) {
+	rq, ok := s.repoGate(w, r)
+	if !ok {
+		return
+	}
+	if !s.parityWritePreflight(w, r, rq.p, "Sync this fork") {
+		return
+	}
+	if repoDeps.SyncFork == nil {
+		s.errorPage(w, r, http.StatusServiceUnavailable, "sync fork is not wired on this build")
+		return
+	}
+	id, err := repoDeps.SyncFork(r.Context(), rq.id.Owner, rq.id.Name, rq.p)
+	if err != nil {
+		s.errorPage(w, r, parityErrStatus(err), parityErrMessage(err))
+		return
+	}
+	s.formsRedirectFlash(w, r, "/"+rq.full, "Sync fork started (task "+shortSHA(id)+")")
 }

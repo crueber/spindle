@@ -23,66 +23,12 @@
 
   <aside class="grid content-start gap-3">
     {{if .Repo.NewIssueHref}}<a class="btn w-full" href="{{.Repo.NewIssueHref}}">New issue</a>{{end}}
-    <section class="card divide-y divide-[color:var(--pd-line)] text-sm" aria-label="Issue metadata">
-      <div class="p-3">
-        <p class="eyebrow mb-1">Labels</p>
-        <div class="flex flex-wrap items-center gap-1">
-          {{range .Labels}}{{template "collab_label_chip" .}}{{else}}<span class="muted">none</span>{{end}}
-          {{if .CanTriage}}
-          <details class="relative inline-block" data-popover>
-            <summary class="muted list-none cursor-pointer rounded border border-[var(--pd-line-strong)] px-1.5 py-0 text-xs leading-5 hover:text-[var(--pd-text)]" aria-haspopup="menu" aria-label="Add or remove labels" data-popover-trigger>+</summary>
-            <div class="label-drop scroll-slim card absolute right-0 z-30 mt-1 max-h-72 w-80 overflow-y-auto p-1" role="menu" aria-label="Issue labels" data-popover-panel>
-              {{range .LabelOptions}}
-              <form method="post" action="/{{$d.Repo.Full}}/issues/{{$d.Num}}/labels">
-                <input type="hidden" name="label" value="{{.Name}}">
-                <button type="submit" role="menuitemcheckbox" aria-checked="{{if .Checked}}true{{else}}false{{end}}" aria-label="{{if .Checked}}remove{{else}}apply{{end}} label {{.Name}}" class="grid w-full grid-cols-[auto_minmax(0,1fr)] items-center gap-2 rounded px-2 py-1 text-left text-sm hover:bg-[var(--pd-raised)]">
-                  <span class="flex w-4 shrink-0 items-center justify-center" aria-hidden="true">{{if .Checked}}✓{{end}}</span>
-                  <span class="min-w-0 truncate {{if .Checked}}font-medium{{end}}">{{.Name}}</span>
-                </button>
-              </form>
-              {{else}}
-              <p class="muted px-2 py-1 text-xs">no labels in this repo yet</p>
-              {{end}}
-            </div>
-          </details>
-          {{end}}
-        </div>
-      </div>
-      <div class="p-3">
-        <p class="eyebrow mb-1">Assignees</p>
-        <p>{{range .Assignees}}{{.}} {{else}}<span class="muted">none</span>{{end}}</p>
-      </div>
-      <div class="p-3">
-        <p class="eyebrow mb-1">Milestone</p>
-        {{with .Milestone}}
-        <div class="flex flex-wrap items-center gap-1">
-          {{template "collab_milestone_chip" .}}
-          {{if $d.CanTriage}}
-          <form method="post" action="/{{$d.Repo.Full}}/issues/{{$d.Num}}/milestone">
-            <input type="hidden" name="milestone" value="">
-            <button type="submit" class="btn px-1.5 py-0 text-xs" aria-label="Clear the milestone">−</button>
-          </form>
-          {{end}}
-        </div>
-        {{else}}
-        {{if .CanTriage}}
-        <details class="relative inline-block" data-popover>
-          <summary class="muted list-none cursor-pointer rounded border border-[var(--pd-line-strong)] px-1.5 py-0 text-xs leading-5 hover:text-[var(--pd-text)]" aria-haspopup="menu" aria-label="Set a milestone" data-popover-trigger>+</summary>
-          <div class="milestone-drop scroll-slim card absolute right-0 z-30 mt-1 max-h-72 w-64 overflow-y-auto p-1" role="menu" aria-label="Milestones" data-popover-panel>
-            {{range .Milestones}}
-            <form method="post" action="/{{$d.Repo.Full}}/issues/{{$d.Num}}/milestone">
-              <input type="hidden" name="milestone" value="{{.ID}}">
-              <button type="submit" role="menuitemradio" aria-checked="false" class="w-full rounded px-2 py-1 text-left text-sm hover:bg-[var(--pd-raised)]">{{.Title}}{{if eq .State "closed"}} (closed){{end}}</button>
-            </form>
-            {{else}}
-            <p class="muted px-2 py-1 text-xs">no milestones yet</p>
-            {{end}}
-          </div>
-        </details>
-        {{else}}<span class="muted">none</span>{{end}}
-        {{end}}
-      </div>
-    </section>
+    {{template "collab_meta_card" (dict
+      "Aria" "Issue metadata"
+      "LabelAction" .LabelAction "AssigneeAction" .AssigneeAction "MilestoneAction" .MilestoneAction
+      "CanTriage" .CanTriage "Labels" .Labels "LabelOptions" .LabelOptions
+      "Assignees" .Assignees "AssigneeOptions" .AssigneeOptions
+      "Milestone" .Milestone "Milestones" .Milestones)}}
   </aside>
 </div>
 {{end}}

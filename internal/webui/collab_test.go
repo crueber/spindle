@@ -879,9 +879,16 @@ func TestCollabMobileContracts(t *testing.T) {
 
 	wantContains(t, f.get("/acme/widgets/pulls"), "flex min-w-0 flex-wrap", "flex-wrap")
 	wantContains(t, f.get("/acme/widgets/pull/5"), "md:grid-cols-[minmax(0,1fr)_16rem]", "flex-wrap items-start")
+	// WP2.2 metadata lives in the same single-column-at-md sidebar; WP6.1
+	// puts the assignee control on the issue card (same shared anatomy).
+	wantContains(t, f.get("/acme/widgets/pull/5"), "Pull request metadata", "Assignees", "Milestone")
+	// The layout supplies the masthead + tab strip at every width.
+	wantContains(t, f.get("/acme/widgets/pull/5"), `aria-label="repository sections"`, "Settings")
 	wantContains(t, f.get("/acme/widgets/pull/5/files"), "overflow-x-auto", "flex flex-wrap items-center gap-2")
 	wantContains(t, f.get("/acme/widgets/forks"), "flex items-baseline justify-between gap-3")
 	wantContains(t, f.get("/acme/widgets/checks"), "flex flex-wrap items-center gap-2")
+	f.deps(issueDeps())
+	wantContains(t, f.get("/acme/widgets/issues/3"), "Issue metadata", "Assignees")
 }
 
 // --- write endpoints ---------------------------------------------------------
@@ -2203,4 +2210,163 @@ func TestCollabNotWired(t *testing.T) {
 	if rec := f.post("/acme/widgets/pull/5/reviews/0/dismiss", nil); rec.Code != http.StatusNotFound {
 		t.Fatalf("bad review seq = %d", rec.Code)
 	}
+}
+
+// TestCollabPullMetadata covers WP2.2: the PR sidebar edits labels,
+// assignees and milestone through the shared 02 thread patch (IssueMeta),
+// gated at triage, and renders the current values.
+func TestCollabPullMetadata(t *testing.T) {
+	f := newCollabFixture(t)
+	f.principal = auth.Principal{Name: "alice", Write: true}
+	var patches []issues.IssuePatch
+	d := pullDeps()
+	d.RoleOf = func(context.Context, string, string, auth.Principal) identity.Role { return identity.RoleTriage }
+	d.IssueMeta = func(_ context.Context, _, _ string, _ int, _ auth.Principal, p issues.IssuePatch) (*issues.Thread, error) {
+		patches = append(patches, p)
+		return nil, nil
+	}
+	d.Labels = func(context.Context, string, string) ([]issues.Label, error) {
+		return []issues.Label{{Name: "bug", Color: "ff0000"}, {Name: "docs", Color: "00ff00"}}, nil
+	}
+	d.Milestones = func(context.Context, string, string) ([]*issues.Milestone, error) {
+		return []*issues.Milestone{{ID: "000001", Title: "v1", State: "open"}}, nil
+	}
+	d.Collaborators = func(context.Context, string, string) []identity.Collaborator {
+		return []identity.Collaborator{
+			{Principal: "bob@example.com", Role: "triage"},
+			{Principal: "carol@example.com", Role: "read"}, // below triage: not offered
+		}
+	}
+	f.deps(d)
+
+	rec := f.get("/acme/widgets/pull/5")
+	wantStatus(t, rec, http.StatusOK)
+	wantContains(t, rec, "Pull request metadata", "Labels", "Assignees", "Milestone",
+		"Add or remove labels", "bob@example.com")
+	if strings.Contains(bodyText(rec), `aria-label="unassign bob@example.com"`) {
+		// bob is not assigned in the fixture: the control must say "assign".
+		t.Fatal("unassigned principal rendered as checked")
+	}
+	if !strings.Contains(bodyText(rec), `aria-label="assign bob@example.com"`) {
+		t.Fatal("assignee option missing")
+	}
+	if strings.Contains(bodyText(rec), "carol@example.com") {
+		t.Fatal("below-triage collaborator offered as an assignee")
+	}
+
+	// Toggle a label: the full next set rides the wire contract.
+	rec = f.post("/acme/widgets/pull/5/labels", url.Values{"label": {"bug"}})
+	wantStatus(t, rec, http.StatusSeeOther)
+	if len(patches) != 1 || patches[0].Labels == nil || len(*patches[0].Labels) != 1 {
+		t.Fatalf("label patch = %+v", patches)
+	}
+
+	// Set then clear the milestone.
+	rec = f.post("/acme/widgets/pull/5/milestone", url.Values{"milestone": {"000001"}})
+	wantStatus(t, rec, http.StatusSeeOther)
+	if len(patches) != 2 || patches[1].Milestone == nil || *patches[1].Milestone == nil || **patches[1].Milestone != "000001" {
+		t.Fatalf("milestone patch = %+v", patches)
+	}
+	rec = f.post("/acme/widgets/pull/5/milestone", url.Values{"milestone": {""}})
+	wantStatus(t, rec, http.StatusSeeOther)
+	if len(patches) != 3 || patches[2].Milestone == nil || *patches[2].Milestone != nil {
+		t.Fatalf("clear patch = %+v", patches)
+	}
+
+	// Add, then remove, an assignee.
+	rec = f.post("/acme/widgets/pull/5/assignees", url.Values{"assignee": {"bob@example.com"}})
+	wantStatus(t, rec, http.StatusSeeOther)
+	if len(patches) != 4 || patches[3].Assignees == nil || len(*patches[3].Assignees) != 1 {
+		t.Fatalf("assignee patch = %+v", patches)
+	}
+	// A below-triage collaborator is not an option, but an authoritative
+	// service refusal re-renders with the inline error.
+	d.IssueMeta = func(context.Context, string, string, int, auth.Principal, issues.IssuePatch) (*issues.Thread, error) {
+		return nil, errors.Join(issues.ErrInvalid, errors.New("assignee resolves below triage"))
+	}
+	f.deps(d)
+	rec = f.post("/acme/widgets/pull/5/assignees", url.Values{"assignee": {"carol@example.com"}})
+	wantStatus(t, rec, http.StatusBadRequest)
+	wantContains(t, rec, "below triage")
+
+	// Read role: metadata writes are refused before the seam.
+	f.principal = auth.Principal{Name: "reader"}
+	d = pullDeps()
+	d.RoleOf = func(context.Context, string, string, auth.Principal) identity.Role { return identity.RoleRead }
+	called := false
+	d.IssueMeta = func(context.Context, string, string, int, auth.Principal, issues.IssuePatch) (*issues.Thread, error) {
+		called = true
+		return nil, nil
+	}
+	f.deps(d)
+	rec = f.post("/acme/widgets/pull/5/labels", url.Values{"label": {"bug"}})
+	wantStatus(t, rec, http.StatusForbidden)
+	if called {
+		t.Fatal("read role reached the metadata seam")
+	}
+}
+
+// TestCollabIssueAssignees covers WP6.1: the issue sidebar edits assignees
+// through PatchIssue with the same triage gate as labels/milestones.
+func TestCollabIssueAssignees(t *testing.T) {
+	f := newCollabFixture(t)
+	f.principal = auth.Principal{Name: "alice", Write: true}
+	var patches []issues.IssuePatch
+	d := issueDeps()
+	d.RoleOf = func(context.Context, string, string, auth.Principal) identity.Role { return identity.RoleTriage }
+	d.IssuePatch = func(_ context.Context, _, _ string, _ int, _ auth.Principal, p issues.IssuePatch) (*issues.Thread, error) {
+		patches = append(patches, p)
+		return nil, nil
+	}
+	d.Collaborators = func(context.Context, string, string) []identity.Collaborator {
+		return []identity.Collaborator{
+			{Principal: "bob@example.com", Role: "triage"},
+			{Principal: "dave@example.com", Role: "maintain"},
+			{Principal: "carol@example.com", Role: "read"},
+		}
+	}
+	f.deps(d)
+	rec := f.get("/acme/widgets/issues/3")
+	wantStatus(t, rec, http.StatusOK)
+	wantContains(t, rec, "Assignees", "Issue metadata", "Add or remove assignees")
+
+	rec = f.post("/acme/widgets/issues/3/assignees", url.Values{"assignee": {"bob@example.com"}})
+	wantStatus(t, rec, http.StatusSeeOther)
+	if len(patches) != 1 || patches[0].Assignees == nil || len(*patches[0].Assignees) != 1 {
+		t.Fatalf("assignee patch = %+v", patches)
+	}
+	// A blank name is a validation error, not a PATCH.
+	rec = f.post("/acme/widgets/issues/3/assignees", url.Values{"assignee": {" "}})
+	wantStatus(t, rec, http.StatusBadRequest)
+	if len(patches) != 1 {
+		t.Fatalf("blank assignee patched: %+v", patches)
+	}
+}
+
+// TestCollabPullsLabelFilter pins the list filter round trip (WP2.2): the
+// query reaches PullsList and the state links keep it.
+func TestCollabPullsLabelFilter(t *testing.T) {
+	f := newCollabFixture(t)
+	f.principal = auth.Principal{Name: "alice", Write: true}
+	var got pulls.ListFilter
+	d := pullDeps()
+	d.PullsList = func(_ context.Context, _, _ string, _ auth.Principal, fl pulls.ListFilter) (*pulls.ListResult, error) {
+		got = fl
+		return &pulls.ListResult{Pulls: []pulls.PROut{{
+			Num: 5, Title: "Add cache", State: "open", Labels: []string{"bug"},
+			BaseRef: "main", HeadRef: "feat", UpdatedAt: "2026-11-18T09:30:00Z",
+		}}}, nil
+	}
+	d.Labels = func(context.Context, string, string) ([]issues.Label, error) {
+		return []issues.Label{{Name: "bug", Color: "ff0000"}}, nil
+	}
+	f.deps(d)
+	rec := f.get("/acme/widgets/pulls?labels=bug")
+	wantStatus(t, rec, http.StatusOK)
+	if len(got.Labels) != 1 || got.Labels[0] != "bug" {
+		t.Fatalf("filter = %+v", got)
+	}
+	wantContains(t, rec, `name="labels" value="bug"`, "1 selected")
+	// State links preserve the filter.
+	wantContains(t, rec, "labels=bug", "state=closed")
 }

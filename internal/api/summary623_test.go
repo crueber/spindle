@@ -25,8 +25,8 @@ func TestSummaryPushMirrorWire(t *testing.T) {
 	if strings.Contains(w.Body.String(), `"push_mirror"`) {
 		t.Fatalf("push_mirror field without hook: %s", w.Body.String())
 	}
-	if etag := w.Header().Get("ETag"); etag != `"`+fakeSHA+`~k0~t111111"` {
-		t.Fatalf("etag = %q, want head sha + ~k0 + ~t111111", etag)
+	if etag := w.Header().Get("ETag"); etag != `"`+fakeSHA+`~k0~t1111111"` {
+		t.Fatalf("etag = %q, want head sha + ~k0 + ~t1111111", etag)
 	}
 
 	// Hook declining → same shape.

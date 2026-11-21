@@ -18,7 +18,7 @@ import (
 	"github.com/crueber/spindle/internal/wal"
 )
 
-func onPushServer(t *testing.T, eng *fakeEngine, hook func(id git.RepoId)) *Server {
+func onPushServer(t *testing.T, eng *fakeEngine, hook func(id git.RepoId, refs []PushedRef)) *Server {
 	t.Helper()
 	s, _ := newTestServer(t, func(o *Options) {
 		o.Engine = eng
@@ -33,9 +33,11 @@ func TestOnPushFiresAfterLandedPush(t *testing.T) {
 	eng := &fakeEngine{}
 	var mu sync.Mutex
 	var got []string
-	s := onPushServer(t, eng, func(id git.RepoId) {
+	var gotRefs []PushedRef
+	s := onPushServer(t, eng, func(id git.RepoId, refs []PushedRef) {
 		mu.Lock()
 		got = append(got, id.String())
+		gotRefs = append(gotRefs, refs...)
 		mu.Unlock()
 	})
 	root := t.TempDir()
@@ -81,12 +83,17 @@ func TestOnPushFiresAfterLandedPush(t *testing.T) {
 	if got[0] != "o/r" {
 		t.Errorf("hook repo = %v", got)
 	}
+	// Threads run creation needs the landed ref's NEW oid: a delete-only
+	// push (zero new oid) must still report the ref and its zero value.
+	if len(gotRefs) != 1 || gotRefs[0].Ref != "refs/heads/main" || strings.Trim(gotRefs[0].New, "0") != "" {
+		t.Fatalf("landed refs = %+v", gotRefs)
+	}
 }
 
 func TestOnPushSilentOnRefusalAndFailure(t *testing.T) {
 	eng := &fakeEngine{}
 	fired := false
-	s := onPushServer(t, eng, func(id git.RepoId) { fired = true })
+	s := onPushServer(t, eng, func(id git.RepoId, refs []PushedRef) { fired = true })
 	root := t.TempDir()
 	ctx := context.WithValue(context.Background(), repoRootKey{}, root)
 	repo, err := eng.Repo(ctx, mustRepoID(t, "o/r"), true, git.Sha1)
