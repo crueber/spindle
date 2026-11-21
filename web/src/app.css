@@ -339,6 +339,12 @@
   .setup-ex { @apply font-mono text-[11px] text-zinc-600 dark:text-zinc-300; }
   .setup-note { @apply block text-[11px] text-zinc-400 dark:text-zinc-500; }
   .setup-callout { @apply mb-3 rounded-lg border border-sky-300 bg-sky-50 p-3 dark:border-sky-900 dark:bg-sky-950/50; }
+  /* Struct-slice row editors (server.auth.tokens, bundles.strategy): one
+     bordered fieldset per element, a caption line, cells in a 1/2-col grid,
+     and a per-row remove control. Reuses .setup-row's label/control anatomy
+     inside the fieldsets (docs/style-guideline.md §7). */
+  .setup-rows { @apply min-w-0 rounded-lg border border-zinc-200 p-3 dark:border-zinc-800; }
+  .setup-rows-legend { @apply px-1 text-xs font-medium text-zinc-600 dark:text-zinc-300; }
   /* Setup page Advanced groups (issue #168): native <details> disclosure,
      collapsed by default; the summary is the keyboard baseline. */
   .setup-advanced { @apply mt-1 border-t border-zinc-100 pt-1 dark:border-zinc-800/60; }
@@ -349,6 +355,11 @@
   .data-table { width: 100%; font-size: 13.5px; }
   /* inside a horizontal-scroll wrapper, keep rows single-line */
   .overflow-x-auto .data-table th, .overflow-x-auto .data-table td { @apply whitespace-nowrap; }
+  /* A wrapping table (the effective-policy view): long prose cells (the
+     Effect summary) fit the card instead of forcing an in-card horizontal
+     scroll at 1440. Same specificity as the nowrap rule above, declared
+     after it so the wrap intent wins. */
+  .data-table.wrap th, .data-table.wrap td { white-space: normal; }
   /* Table headers are micro-caps (§1 F6); rows are 34px targets. */
   .data-table th {
     border-bottom: 1px solid var(--pd-line); padding: 6px 12px;
@@ -450,13 +461,18 @@
   }
 
   /* Rendered markdown (issue #182): designed prose, not defaults — light is
-     the base, dark: carries the default dark theme. Covers everything marked
-     emits: headings, code blocks + inline code, tables, blockquotes, lists
-     (nested + task checkboxes), hr, images, links. */
+     the base, dark: carries the default dark theme. Covers everything the Go
+     renderer emits: headings, code blocks + inline code, tables, blockquotes,
+     lists (nested + task checkboxes), hr, images, links.
+
+     The body FILLS its card (GitHub parity): there is deliberately no
+     max-width/measure cap here. A `max-width: 72ch` used to shrink every
+     markdown surface to ~641px inside a 1120px card, leaving half a README
+     empty. Anything that must not exceed the card (images, tables, code)
+     is contained by its own rule below. */
   .markdown-body {
     font-size: 14px; line-height: 1.65; overflow-wrap: break-word;
     color: var(--pd-text);
-    max-width: 72ch;
   }
   .markdown-body > :first-child { @apply mt-0; }
   .markdown-body > :last-child { @apply mb-0; }

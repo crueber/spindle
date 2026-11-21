@@ -99,7 +99,7 @@ func TestCanonicalBrowserHostRedirect(t *testing.T) {
 			r.Host = "localhost:8080"
 			r.Header.Set("Accept", "text/html")
 			return r
-		}, http.StatusNotImplemented}, // flow disabled → 501, not 302
+		}, http.StatusOK}, // token mode: the token-paste sign-in page, not a canonical-host hop
 		{"healthz skipped", func() *http.Request {
 			r := httptest.NewRequest("GET", "http://localhost:8080/healthz", nil)
 			r.Host = "localhost:8080"

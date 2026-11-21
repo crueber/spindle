@@ -195,6 +195,66 @@ func TestCreateIssueHTTP(t *testing.T) {
 	}
 }
 
+func TestCreateIssueMetadataIsAtomic(t *testing.T) {
+	roles := newFakeRoles()
+	grantTriage(roles, "acme", "repo")
+	s := testService(roles)
+	h := testHandler(s, aliceP)
+	if _, err := s.CreateLabel(reqCtx(), "acme", "repo", aliceP, "bug", "ff0000", ""); err != nil {
+		t.Fatalf("CreateLabel: %v", err)
+	}
+	ms, err := s.CreateMilestone(reqCtx(), "acme", "repo", aliceP, "v1", "", nil)
+	if err != nil {
+		t.Fatalf("CreateMilestone: %v", err)
+	}
+
+	// A rejected label/assignee/milestone is a 400 BEFORE a number is even
+	// allocated: no thread, no counter gap.
+	for _, body := range []string{
+		`{"title":"bad","labels":["nope"]}`,
+		`{"title":"bad","assignees":["stranger@example.com"]}`,
+		`{"title":"bad","milestone":"zzz"}`,
+	} {
+		if w := doReq(h, "POST", "/acme/repo/api/issues", body); w.Code != http.StatusBadRequest {
+			t.Fatalf("%s = %d: %s", body, w.Code, w.Body.String())
+		}
+	}
+	var list struct {
+		Issues []Card `json:"issues"`
+	}
+	w := doReq(h, "GET", "/acme/repo/api/issues", "")
+	if err := json.Unmarshal(w.Body.Bytes(), &list); err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	if len(list.Issues) != 0 {
+		t.Fatalf("rejected creates left %d issue(s) behind", len(list.Issues))
+	}
+
+	// One create carries the metadata; the thread comes back fully labeled
+	// and the next number is 1 (nothing was consumed by the failures).
+	w = doReq(h, "POST", "/acme/repo/api/issues",
+		`{"title":"t","labels":["bug"],"assignees":["alice@example.com"],"milestone":"`+ms.ID+`"}`)
+	if w.Code != http.StatusCreated {
+		t.Fatalf("create with metadata = %d: %s", w.Code, w.Body.String())
+	}
+	var res struct {
+		Thread *Thread `json:"thread"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &res); err != nil {
+		t.Fatal(err)
+	}
+	th := res.Thread
+	if th.Num != 1 || len(th.Labels) != 1 || th.Labels[0] != "bug" ||
+		len(th.Assignees) != 1 || th.Assignees[0] != "alice@example.com" ||
+		th.Milestone == nil || *th.Milestone != ms.ID {
+		t.Fatalf("thread = %+v", th)
+	}
+	// The milestone's open bucket was bumped with the same create.
+	if m, _, _ := s.loadMilestone(reqCtx(), "acme", "repo", ms.ID); m == nil || m.OpenIssues != 1 {
+		t.Fatalf("milestone counters = %+v", m)
+	}
+}
+
 func TestGetIssueHTTP(t *testing.T) {
 	roles := newFakeRoles()
 	s := testService(roles)

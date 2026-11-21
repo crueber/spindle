@@ -49,16 +49,27 @@ Status object schema (`checks/<sha>/<context>.json`):
 {
   "sha": "cb38da1…",                       // full 40/64-hex
   "context": "ci/build",
-  "state": "pending",                      // pending | success | failure | error
+  "state": "pending",                      // pending | in_progress | success | failure | cancelled | skipped | error
   "target_url": "https://ci.example/…",    // optional, ≤ 2 KiB, absolute http(s)
   "description": "Build #123",             // optional, ≤ 256 chars
   "started_at": "2026-09-01T10:00:00Z",    // optional, RFC 3339 UTC
-  "completed_at": "2026-09-01T10:04:31Z",  // optional; cleared on a re-report of pending
+  "completed_at": "2026-09-01T10:04:31Z",  // optional; cleared on a re-report of a live state
   "creator": "ci:t3k9",                    // principal name of the reporter
   "created_at": "2026-09-01T09:58:00Z",    // first report time
   "updated_at": "2026-09-01T10:04:00Z"     // last CAS write
 }
 ```
+
+**`in_progress`, `cancelled` and `skipped` (added 2026-11-21 for Threads check fidelity).** `pending`
+means "nobody has picked it up" and `in_progress` means "a runner is executing it" — Threads' claim
+writes the latter. `cancelled` is a distinct conclusion for an operator cancel (or a fail-fast
+sibling), and `skipped` is a `needs:`-blocked dependent that never ran (round 3: GitHub reads such a
+job as skipped, not cancelled), so neither is reported as a failure. **Only `success` is green**: the
+`require_checks` gate requires `success` and names anything else (`(in_progress)`, `(cancelled)`,
+`(skipped)`), exactly as it names `(pending)`/`(failure)`, so the new values can never unblock a
+merge. `cancelled` does not enqueue a failure notification (the cancel was operator-initiated).
+Combined-state precedence (§5): `error` > `failure` > live (`in_progress` > `pending`) > `cancelled`
+> `skipped` > `success`.
 
 Checks index (`checks/index.json`, P4 discipline): CAS'd, `{"compacted_through":"", "shas":[{"sha",
 "state","contexts":[{"name","state","updated_at"}],"updated_at"}]}` — newest-sha first, hot window
@@ -346,3 +357,17 @@ re-exports; envelope/SSE parsing reuses `sdk/src/sse.js` — one parser (12_web_
   `ReportStatus`, so an unauthenticated request cannot mint a status through it. The stored
   `creator` names the producer (`"threads"`). No wire, cache, or gate change: the merge task reads
   the same combined view either way.
+- **`in_progress` and `cancelled` (Threads round 2, 2026-11-21).** The enum gained two values so a
+  claim is distinguishable from a queued job and a cancel is not reported as a failure. The
+  `require_checks` gate is unchanged in behaviour (it requires `success`, so both new values are
+  non-green by construction) and the refusal message names the state (`(in_progress)`,
+  `(cancelled)`). Combined-state precedence became explicit (`error` > `failure` > live >
+  `cancelled` > `success`) rather than a rank map, because `cancelled` and `failure` must never tie.
+  `cancelled` does not enqueue the failure notification. The stored shape and key layout did not
+  change; a reader that does not know the new values still sees "not success" and blocks.
+- **`skipped` (Threads round 3, 2026-11-21).** A `needs:`-blocked dependent never ran, so reporting it
+  `cancelled` misread an automation decision as an operator action; GitHub reports such a job
+  `skipped`. The enum gained `skipped`, the `require_checks` gate is unchanged (only `success` is
+  green, so a skipped required context still blocks and the refusal names it), and combined-state
+  precedence places it below `cancelled` (`error` > `failure` > live > `cancelled` > `skipped` >
+  `success`). The stored shape and key layout did not change; an older reader sees "not success".

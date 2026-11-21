@@ -34,7 +34,7 @@ func TestParseMinimal(t *testing.T) {
 		t.Fatalf("workflow = %+v", w)
 	}
 	job := w.Jobs["test"]
-	if job.RunsOn != "linux" || job.Container != "golang:1.27" || len(job.Steps) != 2 {
+	if len(job.RunsOn) != 1 || job.RunsOn[0] != "linux" || job.Container == nil || job.Container.Image != "golang:1.27" || len(job.Steps) != 2 {
 		t.Fatalf("job = %+v", job)
 	}
 	if job.Steps[0].Uses != "checkout" || job.Steps[1].Run != "go test ./..." {

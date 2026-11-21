@@ -101,6 +101,17 @@ func (s *Server) checkReadGate(ctx context.Context, owner, repo string, p auth.P
 // — while a nil gate keeps the legacy anonymous_read flag check. Reports
 // through the §4.2 git failure mapping; false = response written.
 func (s *Server) gateRepoRead(w http.ResponseWriter, r *http.Request, svc git.Service, id git.RepoId, p auth.Principal) bool {
+	// A job token (Threads, 15 §5) is a repository-scoped grant: read exactly
+	// its own repository and nothing else, whatever the identity gate says
+	// about the ci:<runner> principal (which is not a member and never will be).
+	if p.JobRepo != "" {
+		if p.JobRepo == id.String() {
+			return true
+		}
+		s.gitAuthFailure(w, r, svc, &auth.AuthError{Kind: auth.ErrForbidden,
+			Why: "the job token is scoped to " + p.JobRepo})
+		return false
+	}
 	if s.readGate != nil {
 		if aerr := s.checkReadGate(r.Context(), id.Owner, id.Name, p); aerr != nil {
 			s.gitAuthFailure(w, r, svc, aerr)

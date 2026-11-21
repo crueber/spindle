@@ -12,6 +12,7 @@ import (
 	"context"
 	"fmt"
 	"net/http"
+	"strconv"
 	"strings"
 
 	"github.com/crueber/spindle/internal/api"
@@ -23,6 +24,7 @@ import (
 	"github.com/crueber/spindle/internal/server/auth"
 	"github.com/crueber/spindle/internal/store"
 	"github.com/crueber/spindle/internal/store/proto"
+	"github.com/crueber/spindle/internal/threads"
 	"github.com/crueber/spindle/internal/wal"
 )
 
@@ -30,12 +32,13 @@ import (
 // Dirs, Refs, and Closer are wired by the caller (serveHTTP); Notify/Stream
 // stay nil until internal/notify lands (documented no-op, P8 backfill via
 // the timeline).
-func newPullsService(st store.ObjectStore, ident *identity.Service, issuesSvc *issues.Service, reg *wal.Registry, gitBinary string) (*pulls.Service, *pulls.Handler) {
+func newPullsService(st store.ObjectStore, ident *identity.Service, issuesSvc *issues.Service, reg *wal.Registry, gitBinary string) (*pulls.Service, *pulls.Handler, *pullsPublisher) {
 	api.RegisterExposed(pulls.ExposedTemplates...)
 	svc := pulls.New(st, ident)
 	svc.Git = pulls.NewSubprocessGit(gitBinary)
 	svc.Dirs = &pullsDirs{reg: reg}
-	svc.Refs = &pullsPublisher{reg: reg}
+	publisher := &pullsPublisher{reg: reg}
+	svc.Refs = publisher
 	if issuesSvc != nil {
 		svc.Closer = issuesSvc
 		// PR labels/assignees/milestone reuse the 02 thread-patch
@@ -62,7 +65,7 @@ func newPullsService(st store.ObjectStore, ident *identity.Service, issuesSvc *i
 		svc.ForkExec = &pulls.ShareExecutor{Store: st, Refs: &forkRefsReader{reg: reg}, Host: reg.InstanceID()}
 	}
 	h := &pulls.Handler{Svc: svc}
-	return svc, h
+	return svc, h, publisher
 }
 
 // chainPulls fronts the core mux with the pulls surface (Seam 1);
@@ -104,6 +107,11 @@ func (d *pullsDirs) Dir(ctx context.Context, repo string) (string, error) {
 // carry the "conflict" wording the merge task re-plans on).
 type pullsPublisher struct {
 	reg *wal.Registry
+	// wake nudges the events bridge after a server-side publish (a merge or
+	// an update-branch head move), so the pulls sink sees the ref event now
+	// instead of on the next sweep (15 §2.1 round 2). Nil = no bridge in this
+	// process; the sweep is the backstop.
+	wake func(repo string)
 }
 
 // zeroOid renders the all-zero absent marker for the repo's object format
@@ -142,6 +150,13 @@ func (p *pullsPublisher) publish(ctx context.Context, repo string, updates []*pr
 			}
 			return fmt.Errorf("publish %s: %s", rr.Name, rr.Err.Detail)
 		}
+	}
+	// The publish committed: wake the bridge (non-blocking coalescing send) so
+	// the `pulls` sink applies the head/base ref event promptly. A merge in
+	// this process already triggers its own run synchronously; this covers the
+	// head-event path (update-branch) and keeps every publish prompt.
+	if p.wake != nil {
+		p.wake(repo)
 	}
 	return nil
 }
@@ -229,6 +244,13 @@ func (p *pullsPublisher) UpdateRefWithPack(ctx context.Context, repo, ref, old, 
 			return fmt.Errorf("publish %s: %s", rr.Name, rr.Err.Detail)
 		}
 	}
+	// The publish committed: wake the bridge (non-blocking coalescing send) so
+	// the `pulls` sink applies the head/base ref event promptly. A merge in
+	// this process already triggers its own run synchronously; this covers the
+	// head-event path (update-branch) and keeps every publish prompt.
+	if p.wake != nil {
+		p.wake(repo)
+	}
 	return nil
 }
 
@@ -268,8 +290,17 @@ func (s *pullsSinkAdapter) Deliver(ctx context.Context, repo string, batch []eve
 		if e.RefName == "" {
 			continue
 		}
+		// The event's WAL sequence is its ordering: the pulls sink uses it
+		// to reject a late/replayed delivery before it can move a PR head
+		// (15 §2.3, the round-2 PR-head rewind). An unparseable seq is 0,
+		// which the head writer treats as "no ordering evidence" and applies
+		// forward-only.
+		seq, _ := strconv.ParseUint(e.Walgit.Seq, 10, 64)
 		s.svc.HandleRefEvent(ctx, owner, name, pulls.RefEvent{
-			Repo: repo, RefName: e.RefName, Old: e.Old, New: e.New,
+			Repo: repo, RefName: e.RefName, Old: e.Old, New: e.New, Seq: seq,
+			// A job token's push refreshes a PR head but never synchronizes
+			// (15 §5: GitHub's GITHUB_TOKEN rule).
+			ByJob: threads.IsJobPrincipal(e.Pusher),
 		})
 	}
 	return nil

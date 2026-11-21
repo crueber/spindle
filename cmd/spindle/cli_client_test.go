@@ -163,9 +163,9 @@ func TestParseAPIAllowsFlagsAfterPositionals(t *testing.T) {
 	var state string
 	fs.Var(&labels, "label", "")
 	fs.StringVar(&state, "state", "", "")
-	pos, ok := parseAPI(fs, []string{"acme/repo", "--state", "open", "--label=bug", "--label", "ui", "--json"})
-	if !ok {
-		t.Fatal("parseAPI failed")
+	pos, exit := parseAPI(fs, []string{"acme/repo", "--state", "open", "--label=bug", "--label", "ui", "--json"})
+	if exit != parseContinue {
+		t.Fatalf("parseAPI exit = %d", exit)
 	}
 	if len(pos) != 1 || pos[0] != "acme/repo" {
 		t.Fatalf("positionals = %v", pos)
@@ -281,6 +281,78 @@ func containsWord(list []string, want string) bool {
 		}
 	}
 	return false
+}
+
+// TestEveryCommandHasFlagHelp walks the command table and asserts that each
+// subcommand's `--help` prints ITS usage and every flag it advertises.
+// Global `-h` still prints the table: a leading help token is peeled before
+// dispatch, a trailing one belongs to the command (TestPeelGlobalsHelpPosition).
+func TestEveryCommandHasFlagHelp(t *testing.T) {
+	for _, g := range apiGroups {
+		var groupOut bytes.Buffer
+		gc := &cli{out: &bytes.Buffer{}, errOut: &groupOut}
+		if code := groupRunner(g)(context.Background(), gc, []string{"--help"}); code != exitOK {
+			t.Errorf("%s --help = %d, want 0", g.name, code)
+		}
+		if !strings.Contains(groupOut.String(), "Usage: spindle "+g.name) {
+			t.Errorf("%s --help does not print the group table: %q", g.name, groupOut.String())
+		}
+		for i := range g.commands {
+			cmd := &g.commands[i]
+			args := append(strings.Fields(cmd.name), "--help")
+			var errOut bytes.Buffer
+			c := &cli{out: &bytes.Buffer{}, errOut: &errOut}
+			code := groupRunner(g)(context.Background(), c, args)
+			if code != exitOK {
+				t.Errorf("spindle %s %s --help = %d, want 0", g.name, cmd.name, code)
+				continue
+			}
+			out := errOut.String()
+			if !strings.Contains(out, "usage: spindle "+g.name+" "+cmd.name) {
+				t.Errorf("spindle %s %s --help: usage line missing\n%s", g.name, cmd.name, out)
+			}
+			for _, fl := range cmd.flags {
+				if !strings.Contains(out, "-"+fl) {
+					t.Errorf("spindle %s %s --help: flag --%s not listed\n%s", g.name, cmd.name, fl, out)
+				}
+			}
+			if len(cmd.flags) > 0 && !strings.Contains(out, "flags:") {
+				t.Errorf("spindle %s %s --help: no flags block", g.name, cmd.name)
+			}
+		}
+	}
+}
+
+// TestPeelGlobalsHelpPosition pins where a help token goes: trailing means
+// "this subcommand's help", and -R is peeled like the other globals.
+func TestPeelGlobalsHelpPosition(t *testing.T) {
+	c := &cli{}
+	rest := peelGlobals([]string{"issue", "list", "--help"}, c)
+	if strings.Join(rest, " ") != "issue list --help" {
+		t.Fatalf("rest = %v, want the subcommand to receive --help", rest)
+	}
+	c = &cli{}
+	rest = peelGlobals([]string{"-R", "acme/mono", "issue", "list"}, c)
+	if c.repo != "acme/mono" || strings.Join(rest, " ") != "issue list" {
+		t.Fatalf("-R peel: repo=%q rest=%v", c.repo, rest)
+	}
+}
+
+// TestRepoSelectorDefault proves -R / SPINDLE_REPO can stand in for the
+// OWNER/REPO positional.
+func TestRepoSelectorDefault(t *testing.T) {
+	c := &cli{repo: "acme/mono", errOut: &bytes.Buffer{}}
+	if owner, repo, ok := oneRepo(c, nil, "issue list OWNER/REPO"); !ok || owner != "acme" || repo != "mono" {
+		t.Fatalf("oneRepo with -R = %q/%q/%v", owner, repo, ok)
+	}
+	if owner, repo, num, ok := repoAndNum(c, []string{"7"}, "issue show OWNER/REPO NUM"); !ok || owner != "acme" || repo != "mono" || num != 7 {
+		t.Fatalf("repoAndNum with -R = %q/%q/%d/%v", owner, repo, num, ok)
+	}
+	c = &cli{errOut: &bytes.Buffer{}}
+	t.Setenv("SPINDLE_REPO", "env/repo")
+	if owner, repo, ok := oneRepo(c, nil, "issue list OWNER/REPO"); !ok || owner != "env" || repo != "repo" {
+		t.Fatalf("oneRepo with SPINDLE_REPO = %q/%q/%v", owner, repo, ok)
+	}
 }
 
 func TestAPICommandRedactsTokenInResponseBody(t *testing.T) {

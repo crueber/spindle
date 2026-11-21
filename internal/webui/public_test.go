@@ -838,12 +838,15 @@ func TestPublicVisibilityBadge(t *testing.T) {
 
 func TestPublicFriendlyInviteErr(t *testing.T) {
 	cases := map[string]string{
-		"invitation expired":           "invitation expired",
-		"invitation no longer pending": "invitation no longer pending",
-		"that invitation is not yours": "not your invitation",
-		"forbidden":                    "not your invitation",
-		"unauthorized":                 "sign in to view your invitations",
-		"bucket unavailable":           "bucket unavailable",
+		"invitation expired": "invitation expired",
+		"invitation is not addressed to your account, or it was already accepted or cancelled":               "invitation is not addressed to your account, or it was already accepted or cancelled",
+		"invitation is no longer valid: it was already accepted or cancelled, or its repository was deleted": "invitation is no longer valid: it was already accepted or cancelled, or its repository was deleted",
+		"invitation was already accepted or cancelled":                                                       "invitation was already accepted or cancelled",
+		"invitation is no longer valid: its repository was deleted":                                          "invitation is no longer valid: its repository was deleted",
+		"that invitation is not yours":                                                                       "not your invitation",
+		"forbidden":                                                                                          "not your invitation",
+		"unauthorized":                                                                                       "sign in to view your invitations",
+		"bucket unavailable":                                                                                 "bucket unavailable",
 	}
 	for in, want := range cases {
 		if got := friendlyInviteErr(errors.New(in)); got != want {
@@ -1083,12 +1086,12 @@ func TestInvitationDeclineErrorRedirects(t *testing.T) {
 	env, _ := alicePublicEnv(t)
 	deps := publicInviteDeps(nil)
 	deps.CancelInvite = func(context.Context, string, string) (*identity.Invitation, error) {
-		return nil, errors.New("invitation no longer pending")
+		return nil, errors.New("conflict: invitation was already accepted or cancelled")
 	}
 	s := newPublicServer(t, env, auth.Principal{Name: "alice"}, deps)
 	rec := publicDo(s, http.MethodPost, "/invitations/inv-9/decline", map[string]string{"Origin": "http://example.com"})
 	publicWantStatus(t, rec, http.StatusSeeOther)
-	if loc := rec.Header().Get("Location"); !strings.Contains(loc, "invitation+no+longer+pending") {
+	if loc := rec.Header().Get("Location"); !strings.Contains(loc, "invitation+was+already+accepted+or+cancelled") {
 		t.Fatalf("decline error Location = %q", loc)
 	}
 }

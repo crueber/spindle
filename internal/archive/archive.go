@@ -31,6 +31,7 @@
 package archive
 
 import (
+	"compress/gzip"
 	"context"
 	"errors"
 	"fmt"
@@ -211,7 +212,25 @@ func (s *Service) serve(w http.ResponseWriter, r *http.Request, owner, repo stri
 		return
 	}
 	w.WriteHeader(http.StatusOK)
-	if s.Git.Stream(r.Context(), dir, ArchiveArgv(ref, format, repo), w) != nil {
+	// The .tar.gz lane is `git archive --format=tar` piped through a
+	// streaming gzip.Writer (docs/go/04_git.md §11.3): git produces the
+	// reproducible tar stream, Go compresses it as it arrives — no whole
+	// archive is buffered, and the tar bytes after decompression are
+	// byte-identical to a local `git archive` run. The .zip lane gets the
+	// archive bytes straight from git.
+	var dst io.Writer = w
+	var gz *gzip.Writer
+	if format == "tar.gz" {
+		gz = gzip.NewWriter(w)
+		dst = gz
+	}
+	streamErr := s.Git.Stream(r.Context(), dir, ArchiveArgv(ref, format, repo), dst)
+	if gz != nil {
+		if cerr := gz.Close(); streamErr == nil {
+			streamErr = cerr
+		}
+	}
+	if streamErr != nil {
 		// Headers are gone; the only honest move is to stop writing.
 		return
 	}
@@ -243,8 +262,10 @@ func (s *Service) requireRead(ctx context.Context, owner, repo string, p auth.Pr
 }
 
 // ArchiveArgv is the exact `git archive` argv (docs/go/04_git.md §11.3).
-// The tar lane adds no flags; the zip lane passes -0 (store, no deflate) so
-// the bytes are reproducible for a given commit and cost no compression CPU.
+// The tar lane produces a plain tar that serve() compresses on the fly (the
+// gzip stage is Go's, not git's); the zip lane passes -0 (store, no deflate)
+// so the bytes are reproducible for a given commit and cost no compression
+// CPU.
 func ArchiveArgv(ref, format, repo string) []string {
 	prefix := sanitizePrefix(repo) + "/"
 	if format == "zip" {

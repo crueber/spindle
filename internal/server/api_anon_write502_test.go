@@ -42,7 +42,7 @@ func TestAPIServeOIDCAnonWriteAssert502(t *testing.T) {
 		if rec.Code != http.StatusUnauthorized {
 			t.Errorf("%s: status = %d, want 401", method, rec.Code)
 		}
-		if h := rec.Header().Get("WWW-Authenticate"); h != `Bearer realm="walgit"` {
+		if h := rec.Header().Get("WWW-Authenticate"); h != `Basic realm="walgit", Bearer realm="walgit"` {
 			t.Errorf("%s: www-authenticate = %q", method, h)
 		}
 		if prim.served != 0 {

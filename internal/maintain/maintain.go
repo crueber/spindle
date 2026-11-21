@@ -49,6 +49,9 @@ type Options struct {
 	Leaser  Leaser
 	Fscker  FsckRunner
 	Follow  FollowFetcher
+	// Sweepers are extra per-repo tasks run after the §4 ladder on their own
+	// cadence gate (docs/features/14 §6 `packages-gc`). Nil = none.
+	Sweepers []Sweeper
 }
 
 // Maintainer owns the loop goroutine (§3.1) and the follow goroutine (§8),
@@ -229,19 +232,27 @@ func (m *Maintainer) RunPass(ctx context.Context) {
 }
 
 // processRepo is §3.2 steps 1–5 for one repo: repeat select→run until Select()
-// returns idle, guarded by the stale-skip cap.
+// returns idle, guarded by the stale-skip cap, then run the out-of-band
+// sweepers (they are not priority rows).
 func (m *Maintainer) processRepo(ctx context.Context, repo string, cfg *config.Config) {
 	defer func() {
 		if r := recover(); r != nil {
 			m.logf("%s: unit panicked: %v\n%s", repo, r, debug.Stack())
 		}
 	}()
-	skips := 0
 	snap, rep, err := m.loadRepo(ctx, repo, cfg)
 	if err != nil {
 		m.logf("%s: snapshot failed: %v", repo, err)
 		return
 	}
+	m.runPriority(ctx, repo, snap, rep)
+	m.runSweepers(ctx, rep)
+}
+
+// runPriority walks the §4 ladder for one repo until it selects idle or the
+// stale-slot cap ends the turn.
+func (m *Maintainer) runPriority(ctx context.Context, repo string, snap *Snapshot, rep Repo) {
+	skips := 0
 	for {
 		if ctx.Err() != nil {
 			return
@@ -277,6 +288,37 @@ func (m *Maintainer) processRepo(ctx context.Context, repo string, cfg *config.C
 		// retention no-op), the loop re-selects so a pending BaseRebuild or
 		// compaction triggered by the same pass is not starved by bundle
 		// bookkeeping (§3.2 step 5).
+	}
+}
+
+// runSweepers runs the out-of-band per-repo sweeps (docs/features/14 §6):
+// each goes through the (repo,kind) TaskRunner, so a manual start joins the
+// pass instead of racing it, and a sweep is bounded by the unit cap (a
+// cancelled sweep is safe — every pass is idempotent). A sweep failure never
+// fails the pass.
+func (m *Maintainer) runSweepers(ctx context.Context, rep Repo) {
+	for _, sw := range m.opt.Sweepers {
+		if sw == nil || ctx.Err() != nil {
+			return
+		}
+		if d, ok := sw.(DueSweeper); ok && !d.Due(rep.ID()) {
+			continue
+		}
+		kind := sw.Kind()
+		start := m.now()
+		sctx, cancel := context.WithTimeout(ctx, m.unitCap)
+		err := m.eng.Tasks().Run(sctx, rep.ID(), kind, nil, func(tctx context.Context, t TaskLogger) error {
+			return sw.Sweep(tctx, rep.ID(), t)
+		})
+		cancel()
+		outcome := OutcomeOK
+		if err != nil {
+			outcome = OutcomeError
+			m.logf("%s sweep=%s outcome=%s (%v)", rep.ID(), kind, outcome, err)
+		} else {
+			m.logf("%s sweep=%s outcome=%s", rep.ID(), kind, outcome)
+		}
+		m.metrics.recordUnit(kind, outcome, int64(m.now().Sub(start)))
 	}
 }
 

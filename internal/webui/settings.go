@@ -145,10 +145,16 @@ type SettingsDeps struct {
 	RepoConfig     func(ctx context.Context, owner, repo string) (*SettingsConfig, error)
 	RepoAccess     func(ctx context.Context, owner, repo string, p auth.Principal) (*SettingsAccess, error)
 	RepoAdmin      func(ctx context.Context, owner, repo string, p auth.Principal) (*SettingsAdmin, error)
+	RepoWAL        func(ctx context.Context, owner, repo string) (*SettingsWAL, error)
 	RepoWrite      func(ctx context.Context, owner, repo string, p auth.Principal, w SettingsRepoWrite) (SettingsWriteResult, *SettingsWriteError)
 
 	OrgView  func(ctx context.Context, org string, p auth.Principal) (*SettingsOrgPage, error)
 	OrgWrite func(ctx context.Context, org string, p auth.Principal, w SettingsOrgWrite) (SettingsWriteResult, *SettingsWriteError)
+	// OrgWebhookWrite handles the org Webhooks tab (WP6.2). It is separate
+	// from OrgWrite because the hook surface is owned by notify while the
+	// rest of the org page is owned by identity; a nil OrgWebhookWrite
+	// renders the Webhooks tab degraded, exactly like a nil service elsewhere.
+	OrgWebhookWrite func(ctx context.Context, org string, p auth.Principal, w SettingsOrgWrite) (SettingsWriteResult, *SettingsWriteError)
 }
 
 // SettingsWriteResult is a successful mutation's one-shot output: the notice
@@ -161,6 +167,12 @@ type SettingsWriteResult struct {
 	Link     string
 	Redirect string
 	Policy   *SettingsPolicy
+	// Invite is the row an org invite-create just minted. It carries the
+	// one-shot accept link into the pending table of the same response: the
+	// org invitation read redacts every token, so only this response can show
+	// the link (repo invitations are different — their admin read is allowed
+	// to return tokens).
+	Invite *SettingsOrgInvite
 }
 
 // settingsBound is the process-wide binding. server.go documents one page
@@ -170,6 +182,11 @@ var settingsBound SettingsDeps
 
 // BindSettings installs the group's service seam (see the WIRING header).
 func BindSettings(d SettingsDeps) { settingsBound = d }
+
+// SettingsBindings returns the installed seam. Composition's wiring guard
+// (cmd/spindle) uses it to prove no rendered settings surface is left nil;
+// callers must treat the result as read-only.
+func SettingsBindings() SettingsDeps { return settingsBound }
 
 func settingsDeps() SettingsDeps { return settingsBound }
 
@@ -213,10 +230,22 @@ type SettingsSetupSection struct {
 	Advanced  []SettingsSetupField
 }
 
+// AdvancedHasErrors reports whether the collapsed Advanced group holds a row
+// with a validation error, so the template opens that disclosure (a rejected
+// advanced key must be visible, not hidden behind a toggle).
+func (s SettingsSetupSection) AdvancedHasErrors() bool {
+	for _, f := range s.Advanced {
+		if len(f.Errors) > 0 {
+			return true
+		}
+	}
+	return false
+}
+
 // SettingsSetupField is one editable key row.
 type SettingsSetupField struct {
 	Key     string
-	Type    string // string|int|float|bool|duration|size|list|enum|toml|url|listen|path
+	Type    string // string|int|float|bool|duration|size|list|enum|toml|url|listen|path|rows
 	Value   string
 	Default string
 	Example string
@@ -230,11 +259,27 @@ type SettingsSetupField struct {
 	Advanced bool
 	FromFile bool
 	Errors   []SettingsSetupError
+	// Rows is a struct slice's repeating-row editor (server.auth.tokens,
+	// bundles.strategy): one row per element plus a blank "add" row, each cell
+	// named by setup.RowCellKey. Empty for scalar keys.
+	Rows []setup.Row
 
 	// Derived for the template (computed once, never in the template).
 	Control string
 	InputID string
 	Bool    bool
+	// Options is a select control's choices (Control == "select"), built from
+	// the schema's enum set and the current value: an empty value renders an
+	// "(unset)" option and a value outside the set renders as a "current: …"
+	// option, so a save never silently rewrites an operator's value.
+	Options []SettingsSetupOption
+}
+
+// SettingsSetupOption is one <option> of an enum control.
+type SettingsSetupOption struct {
+	Value    string
+	Label    string
+	Selected bool
 }
 
 // SettingsSetupError is one server-side validation error.
@@ -248,6 +293,10 @@ type SettingsSetupError struct {
 type SettingsSetupResult struct {
 	Saved           bool
 	RequiresRestart []string
+	// Backup is the spindle.toml.bak-<utc> file kept before the first
+	// canonicalising rewrite of an existing config ("" when none was made:
+	// no file, or a byte-identical save).
+	Backup string
 }
 
 // SettingsSetupAuthTest is a successful OIDC discovery probe.
@@ -261,19 +310,31 @@ type SettingsSetupAuthTest struct {
 
 // SettingsSetupPage is the /setup page model.
 type SettingsSetupPage struct {
-	View            SettingsSetupView
-	RedirectURI     string
-	Issuer          string
-	ClientID        string
-	Denied          bool
-	Detail          string
+	View        SettingsSetupView
+	RedirectURI string
+	Issuer      string
+	ClientID    string
+	Denied      bool
+	Detail      string
+	// AuthMode is the running server.auth.mode. The denied card's recovery
+	// copy is mode-specific (F1): token mode offers the token-paste sign-in
+	// or the file/API path, OIDC points at the browser flow, none is open.
+	AuthMode string
+	// TokenSignIn is true in token mode with a session_secret, i.e. the
+	// POST /_auth/token form can mint a session. SessionSecret is reported
+	// separately so the page can state the exact missing key.
+	TokenSignIn     bool
+	SessionSecret   bool
 	Saved           bool
 	RequiresRestart []string
-	ValidateOK      bool
-	AuthTest        *SettingsSetupAuthTest
-	AuthErrors      []SettingsSetupError
-	Notice          string
-	Error           string
+	// Backup is the spindle.toml.bak-<utc> file the first canonicalising save
+	// kept (the query parameter of the post-save redirect).
+	Backup     string
+	ValidateOK bool
+	AuthTest   *SettingsSetupAuthTest
+	AuthErrors []SettingsSetupError
+	Notice     string
+	Error      string
 }
 
 // ---------------------------------------------------------------------------
@@ -314,7 +375,11 @@ type SettingsRepoPage struct {
 	Config     *SettingsConfig
 	Access     *SettingsAccess
 	AdminData  *SettingsAdmin
-	DangerData *SettingsDanger
+	// WebhookPanel is the shared Webhooks tab payload (the same partial the
+	// org tab renders).
+	WebhookPanel *SettingsWebhookPanel
+	WAL          *SettingsWAL
+	DangerData   *SettingsDanger
 }
 
 // SettingsFeatureRow is one feature toggle.
@@ -335,26 +400,118 @@ type SettingsGeneral struct {
 	Error        string
 }
 
-// SettingsStrategy is one bundle strategy row.
-type SettingsStrategy struct {
-	Name, Kind, Base, Schedule, ScheduleHuman, Next, Keep, Filter, Refs string
-}
-
 // SettingsKV is one key/value row.
 type SettingsKV struct {
 	Key, Value string
 }
 
-// SettingsScheduled is the Scheduled tasks tab.
+// SettingsScheduled is the Scheduled tasks tab: the read-only facts the
+// maintainer computes plus the structured editors for the four per-repo
+// tuning sections (§ WP9 G14). Every edited value round-trips through
+// config.ParseRepoSettings + ValidateAgainst + api.PublishSettings (the
+// settings PUT's parse/publish path plus the /settings/validate rule); the
+// raw TOML editor stays the power-user surface.
 type SettingsScheduled struct {
-	Strategies   []SettingsStrategy
 	HostFacts    []SettingsKV
 	UpstreamGit  string
 	FollowLine   string
 	LastRound    string
 	Effective    []SettingsKV
 	EffectiveSrc []string
-	Error        string
+	// Sections are the editable tuning sections in page order:
+	// bundles, maintenance, compaction, upstream.
+	Sections []SettingsSection
+	Note     string
+	Error    string
+}
+
+// SettingsSection is one structured settings-section editor (a fieldset of
+// scalar rows plus, for bundles, the repeating strategy rows). Override is
+// the section's stored override state: unchecked means the section is absent
+// from the document (host config wins) and its posted fields are ignored, so
+// an untouched page re-publishes the same document.
+type SettingsSection struct {
+	ID        string // "bundles" | "maintenance" | "compaction" | "upstream"
+	Label     string
+	Hint      string
+	Override  bool
+	Inherited bool // section absent from the stored document (values shown are host)
+	Fields    []SettingsField
+	Rows      []SettingsRow // bundles.strategy: stored rows + one blank add row
+	RowPrefix string
+	Error     string
+	// FieldErrors marks a rejected cell by its form name.
+	FieldErrors map[string]string
+}
+
+// SettingsField is one scalar row of a section editor.
+type SettingsField struct {
+	Name  string // form name, e.g. "bundles.min_bytes"
+	Label string
+	Type  string // text|int|bool|size|duration|list|select
+	Value string
+	Enum  []string
+	Hint  string
+}
+
+// Custom reports whether the current value is not one of the enum options
+// (the template renders it as an explicit "current" choice rather than
+// silently selecting the first option).
+func (f SettingsField) Custom() bool { return customEnumValue(f.Value, f.Enum) }
+
+// SettingsRowCell is one cell of a bundle-strategy row.
+type SettingsRowCell struct {
+	Name  string // form name, e.g. "bundles.strategy#0.name"
+	Label string
+	Type  string // text|int|bool|list|select
+	Value string
+	Enum  []string
+}
+
+// Custom reports whether the cell's current value is outside its enum.
+func (c SettingsRowCell) Custom() bool { return customEnumValue(c.Value, c.Enum) }
+
+func customEnumValue(value string, enum []string) bool {
+	if value == "" {
+		return false
+	}
+	for _, v := range enum {
+		if v == value {
+			return false
+		}
+	}
+	return true
+}
+
+// SettingsRow is one bundle strategy exactly as rendered. Base is the stored
+// index the row was rendered from (-1 for the blank add row); the forms post
+// it as __base so an edit can never silently become a different row.
+type SettingsRow struct {
+	Index     int
+	Base      int
+	Caption   string
+	Next      string // next slot from the describe read (display-only)
+	Cells     []SettingsRowCell
+	BaseKey   string
+	RemoveKey string
+}
+
+// SettingsWAL is the Settings → WAL panel (WP9 G16): the page facts the WAL
+// view reports plus the same ops inventory the WAL page runs. The run forms
+// POST the existing …/api/ops/{op} stream endpoint (AuthWrite) — this page
+// never invents a second write path.
+type SettingsWAL struct {
+	Owner      string
+	Name       string
+	Health     string
+	HealthTone string
+	ServedBy   string
+	CloneURL   string
+	Facts      []SettingsKV
+	Packs      string
+	Panel      walOpsPanel
+	Note       string
+	Error      string
 }
 
 // SettingsOption is a select option.
@@ -403,6 +560,7 @@ type SettingsPushMirror struct {
 // SettingsPolicy is the Push policy tab.
 type SettingsPolicy struct {
 	Text        string
+	Exists      bool // a stored policy document exists (Remove is meaningful)
 	DryRunN     int
 	DryRunDone  bool
 	DryRunAllow int
@@ -492,6 +650,29 @@ type SettingsBinding struct {
 	Subject, Role string
 }
 
+// SettingsInvite is one pending collaborator invitation (G9). AcceptURL is
+// the human accept page with the invite's capability token; it is populated
+// for repo admins only — the seam never reads the invite list for a
+// non-admin, so a triage reader cannot learn a capability token.
+type SettingsInvite struct {
+	ID, Subject, Role, InvitedBy, ExpiresAt, AcceptURL string
+	Expired                                            bool
+}
+
+// AcceptLink is the copy control's view of the row (shared with the org tab's
+// pending table through the settings-invite-accept partial).
+func (i SettingsInvite) AcceptLink() SettingsInviteLink {
+	return SettingsInviteLink{ID: i.ID, URL: i.AcceptURL}
+}
+
+// SettingsInviteLink is one pending invitation's accept-link cell: the row id
+// names the copy target, URL is empty for a row whose token the read redacted
+// (the org tab's pending rows), which renders a masked marker instead.
+type SettingsInviteLink struct {
+	ID  string
+	URL string
+}
+
 // SettingsAccess is the Access tab.
 type SettingsAccess struct {
 	Role          string
@@ -501,9 +682,20 @@ type SettingsAccess struct {
 	Bindings      []SettingsBinding
 	Roles         []string
 	Teams         []SettingsOption
-	Version       uint64
-	Note          string
-	Error         string
+	Invites       []SettingsInvite
+	// InvitesWired distinguishes "the identity service is not wired on this
+	InvitesWired bool
+	// InviteLink is the one-shot share card after a create (never seeded
+	InviteLink string
+	// NewSubject / NewRole re-seed the invite form after a rejected write
+	NewSubject string
+	NewRole    string
+	Version    uint64
+	// CanEdit is false for a triage viewer: the tab is readable at triage but
+	// every access write is admin-only, so the form must not render.
+	CanEdit bool
+	Note    string
+	Error   string
 }
 
 // SettingsToken is one CI token row.
@@ -516,15 +708,61 @@ type SettingsWebhook struct {
 	ID, URL, Events, LastPing string
 	Active, SecretSet         bool
 	Recent                    []SettingsDelivery
+	// Edit* re-renders a rejected per-hook edit with the operator's values
+	// (the row opens and carries the inline error; nothing was written).
+	EditOpen   bool
+	EditURL    string
+	EditEvents string
+	EditActive bool
+	EditError  string
+	// RotateError marks a rejected secret rotation on the row.
+	RotateError string
 }
 
 // SettingsDelivery is one recent delivery row (the bounded per-hook ring).
 type SettingsDelivery struct {
-	Seq    string
-	Event  string
-	Status int
-	At     string
-	Error  string
+	Seq        string
+	SeqNum     int
+	Event      string
+	Status     int
+	At         string
+	Error      string
+	DurationMs int64
+	// Redeliverable is true only when the ring retained the exact POST body
+	// (the redeliver row is honest: no control where the payload is gone).
+	Redeliverable bool
+}
+
+// SettingsWebhookPanel is the shared Webhooks tab payload: the repo tab and
+// the org tab render the same canonical table/form with different action
+// plumbing (repo: path-scoped URLs + webhook_action; org: one URL + hidden
+// org_action + id).
+type SettingsWebhookPanel struct {
+	// CanEdit gates the per-hook edit disclosure: the repo surface wires an
+	// update action, the org surface does not (its API has no PATCH), so the
+	// shared panel renders the form only where the action exists.
+	CanEdit      bool
+	Wired        bool
+	CreateAction string
+	CreateFields []SettingsKV
+	NewURL       string
+	NewEvents    string
+	Error        string
+	Rows         []SettingsWebhookRow
+}
+
+// SettingsWebhookRow is one hook plus its form plumbing.
+type SettingsWebhookRow struct {
+	SettingsWebhook
+	ActionURL      string
+	ActionField    string
+	Fields         []SettingsKV
+	ToggleValue    string
+	UpdateValue    string
+	RotateValue    string
+	PingValue      string
+	DeleteValue    string
+	RedeliverValue string
 }
 
 // SettingsAdmin is the CI tokens + Webhooks tabs.
@@ -540,10 +778,28 @@ type SettingsAdmin struct {
 	// "no tokens" for an unwired surface.
 	TokensWired   bool
 	WebhooksWired bool
+	// Runners / Secrets (15 §6): the admin-only Threads surfaces.
+	Runners        []SettingsRunner
+	Secrets        []SettingsSecret
+	RunnersWired   bool
+	SecretsWired   bool
+	SecretsEnabled bool
+	// NewRunnerToken is the one-time registration token (never in a URL).
+	NewRunnerToken string
 	// Draft values re-rendered after a rejected create (never secrets).
 	NewName   string
 	NewURL    string
 	NewEvents string
+}
+
+// SettingsRunner is one registered runner row.
+type SettingsRunner struct {
+	ID, Name, Labels, State, Version, CreatedAt, LastSeenAt string
+}
+
+// SettingsSecret is one write-only secret row (name + timestamps only).
+type SettingsSecret struct {
+	Name, CreatedAt, UpdatedAt string
 }
 
 // SettingsDanger is the Danger Zone tab.
@@ -569,29 +825,41 @@ func (w SettingsRepoWrite) Get(key string) string { return w.Values[key] }
 
 // Write actions (the seam's vocabulary).
 const (
-	SettingsActionGeneral        = "general"
-	SettingsActionAccess         = "access"
-	SettingsActionPolicy         = "policy"
-	SettingsActionProtection     = "protection"
-	SettingsActionPolicyDryRun   = "policy-dryrun"
-	SettingsActionConfig         = "config"
-	SettingsActionConfigClear    = "config-clear"
-	SettingsActionMirrorPut      = "mirror-put"
-	SettingsActionMirrorSchedule = "mirror-schedule"
-	SettingsActionMirrorSync     = "mirror-sync"
-	SettingsActionMirrorRemove   = "mirror-remove"
-	SettingsActionPushPut        = "pushmirror-put"
-	SettingsActionPushSchedule   = "pushmirror-schedule"
-	SettingsActionPushKeygen     = "pushmirror-keygen"
-	SettingsActionPushSync       = "pushmirror-sync"
-	SettingsActionPushRemove     = "pushmirror-remove"
-	SettingsActionTokenCreate    = "token-create"
-	SettingsActionTokenRevoke    = "token-revoke"
-	SettingsActionWebhookCreate  = "webhook-create"
-	SettingsActionWebhookDelete  = "webhook-delete"
-	SettingsActionWebhookPing    = "webhook-ping"
-	SettingsActionTransfer       = "transfer"
-	SettingsActionDelete         = "delete"
+	SettingsActionAccess           = "access"
+	SettingsActionConfig           = "config"
+	SettingsActionConfigClear      = "config-clear"
+	SettingsActionDelete           = "delete"
+	SettingsActionGeneral          = "general"
+	SettingsActionInviteCancel     = "invite-cancel"
+	SettingsActionInviteCreate     = "invite-create"
+	SettingsActionMirrorPut        = "mirror-put"
+	SettingsActionMirrorRemove     = "mirror-remove"
+	SettingsActionMirrorSchedule   = "mirror-schedule"
+	SettingsActionMirrorSync       = "mirror-sync"
+	SettingsActionPolicy           = "policy"
+	SettingsActionPolicyDryRun     = "policy-dryrun"
+	SettingsActionPolicyRemove     = "policy-remove"
+	SettingsActionProtection       = "protection"
+	SettingsActionPushKeygen       = "pushmirror-keygen"
+	SettingsActionPushPut          = "pushmirror-put"
+	SettingsActionPushRemove       = "pushmirror-remove"
+	SettingsActionPushSchedule     = "pushmirror-schedule"
+	SettingsActionPushSync         = "pushmirror-sync"
+	SettingsActionRunnerRevoke     = "runner-revoke"
+	SettingsActionRunnerToken      = "runner-token"
+	SettingsActionScheduled        = "scheduled"
+	SettingsActionSecretDelete     = "secret-delete"
+	SettingsActionSecretPut        = "secret-put"
+	SettingsActionTokenCreate      = "token-create"
+	SettingsActionTokenRevoke      = "token-revoke"
+	SettingsActionTransfer         = "transfer"
+	SettingsActionWebhookCreate    = "webhook-create"
+	SettingsActionWebhookDelete    = "webhook-delete"
+	SettingsActionWebhookPing      = "webhook-ping"
+	SettingsActionWebhookRedeliver = "webhook-redeliver"
+	SettingsActionWebhookRotate    = "webhook-rotate"
+	SettingsActionWebhookToggle    = "webhook-toggle"
+	SettingsActionWebhookUpdate    = "webhook-update"
 )
 
 // ---------------------------------------------------------------------------
@@ -614,6 +882,14 @@ type SettingsOrgPage struct {
 	Activity   []SettingsOrgEvent
 	More       bool
 	InviteLink string
+
+	// Webhooks is the org Webhooks tab (WP6.2); WebhooksWired distinguishes
+	// "not wired on this build" from a genuinely empty list.
+	Webhooks      []SettingsWebhook
+	WebhooksWired bool
+	NewURL        string
+	NewEvents     string
+	WebhookPanel  *SettingsWebhookPanel
 }
 
 // SettingsOrgProfile is the Profile tab.
@@ -637,14 +913,23 @@ type SettingsOrgMember struct {
 
 // SettingsOrgTeam is one team row.
 type SettingsOrgTeam struct {
-	Slug, Name string
-	Members    []string
+	Slug, Name, Description string
+	Members                 []string
 }
 
-// SettingsOrgInvite is one invitation row.
+// SettingsOrgInvite is one invitation row. AcceptURL is set ONLY on the row a
+// create response just minted: org invitation reads redact the token by
+// contract, so a pending row from a read carries no link (the template renders
+// a masked marker where the token was).
 type SettingsOrgInvite struct {
 	ID, Subject, Role, InvitedBy, ExpiresAt string
 	Expired                                 bool
+	AcceptURL                               string
+}
+
+// AcceptLink is the copy control's view of the row (shared partial).
+func (i SettingsOrgInvite) AcceptLink() SettingsInviteLink {
+	return SettingsInviteLink{ID: i.ID, URL: i.AcceptURL}
 }
 
 // SettingsOrgEvent is one activity row.
@@ -668,19 +953,41 @@ func (w SettingsOrgWrite) Get(key string) string { return w.Values[key] }
 
 // Org write actions.
 const (
-	SettingsOrgProfileSave = "profile"
-	SettingsOrgAvatar      = "avatar"
-	SettingsOrgAvatarRm    = "avatar-remove"
-	SettingsOrgMemberSet   = "member"
-	SettingsOrgMemberRm    = "member-remove"
-	SettingsOrgTeamSave    = "team"
-	SettingsOrgTeamRm      = "team-remove"
-	SettingsOrgTeamAdd     = "team-add"
-	SettingsOrgTeamDel     = "team-del"
-	SettingsOrgInviteMake  = "invite"
-	SettingsOrgInviteRm    = "invite-remove"
-	SettingsOrgDelete      = "delete"
+	SettingsOrgProfileSave  = "profile"
+	SettingsOrgAvatar       = "avatar"
+	SettingsOrgAvatarRm     = "avatar-remove"
+	SettingsOrgMemberSet    = "member"
+	SettingsOrgMemberRm     = "member-remove"
+	SettingsOrgTeamSave     = "team"
+	SettingsOrgTeamUpdate   = "team-update"
+	SettingsOrgTeamRm       = "team-remove"
+	SettingsOrgTeamAdd      = "team-add"
+	SettingsOrgTeamDel      = "team-del"
+	SettingsOrgTeamMemberRm = "team-member-remove"
+	SettingsOrgInviteMake   = "invite"
+	SettingsOrgInviteRm     = "invite-remove"
+	SettingsOrgDelete       = "delete"
+
+	// Org Webhooks tab actions (WP6.2) — one hidden org_action value per
+	// operation, the same vocabulary the repo tab's webhook_action uses.
+	SettingsOrgWebhookCreate    = "webhook-create"
+	SettingsOrgWebhookToggle    = "webhook-toggle"
+	SettingsOrgWebhookRotate    = "webhook-rotate"
+	SettingsOrgWebhookPing      = "webhook-ping"
+	SettingsOrgWebhookDelete    = "webhook-delete"
+	SettingsOrgWebhookRedeliver = "webhook-redeliver"
 )
+
+// settingsIsOrgWebhookAction reports whether an org_action belongs to the
+// composition-owned Webhooks tab (the OrgWebhookWrite seam).
+func settingsIsOrgWebhookAction(action string) bool {
+	switch action {
+	case SettingsOrgWebhookCreate, SettingsOrgWebhookToggle, SettingsOrgWebhookRotate,
+		SettingsOrgWebhookPing, SettingsOrgWebhookDelete, SettingsOrgWebhookRedeliver:
+		return true
+	}
+	return false
+}
 
 // SettingsKeysPage is the /keys page model.
 type SettingsKeysPage struct {
@@ -716,33 +1023,99 @@ type settingsTab struct {
 	MinRead string
 }
 
-// settingsRepoTabs is the sidebar order (lib/settingsNav.js).
+// settingsRepoTabs is the sidebar order (lib/settingsNav.js). MinRead is the
+// page gate and must never be weaker than the POST/API gate: General,
+// Scheduled tasks and Mirror are editing surfaces whose writes are admin-only,
+// so they render for admins only (a guest gets the same 403 as the other
+// mutation tabs — never a live form, and never a configured upstream URL).
 var settingsRepoTabs = []settingsTab{
-	{ID: "general", Label: "General", MinRead: "read"},
-	{ID: "scheduled", Label: "Scheduled tasks", MinRead: "read"},
-	{ID: "mirror", Label: "Mirror", MinRead: "read"},
+	{ID: "general", Label: "General", MinRead: "admin"},
+	{ID: "scheduled", Label: "Scheduled tasks", MinRead: "admin"},
+	{ID: "mirror", Label: "Mirror", MinRead: "admin"},
 	{ID: "policy", Label: "Push policy", MinRead: "admin"},
 	{ID: "protection", Label: "Branch protection", MinRead: "admin"},
 	{ID: "config", Label: "Effective config & history", MinRead: "admin"},
 	{ID: "access", Label: "Access", MinRead: "triage"},
 	{ID: "tokens", Label: "CI tokens", MinRead: "admin"},
+	{ID: "runners", Label: "Runners", MinRead: "admin"},
+	{ID: "secrets", Label: "Secrets", MinRead: "admin"},
 	{ID: "webhooks", Label: "Webhooks", MinRead: "admin"},
 	{ID: "wal", Label: "WAL", MinRead: "read"},
 	{ID: "danger", Label: "Danger Zone", Danger: true, MinRead: "admin"},
 }
 
 // settingsOrgTabs is the org tab order (Org.jsx: Profile/Members/Teams/
-// Invitations always, Activity/Danger only for owners).
+// Webhooks/Invitations/Activity/Danger). Invitations is owner-only: the API's
+// collection route (GET/POST /api/v1/orgs/{org}/invitations) is CheckOrgOwner,
+// and the create response carries a capability token, so the page gate must
+// mirror it (a member never sees the tab or a row).
 var settingsOrgTabs = []settingsTab{
 	{ID: "profile", Label: "Profile"},
 	{ID: "members", Label: "Members"},
 	{ID: "teams", Label: "Teams"},
-	{ID: "invitations", Label: "Invitations"},
+	{ID: "invitations", Label: "Invitations", MinRead: "admin"},
+	{ID: "webhooks", Label: "Webhooks", MinRead: "admin"},
 	{ID: "activity", Label: "Activity", MinRead: "admin"},
 	{ID: "danger", Label: "Danger", Danger: true, MinRead: "admin"},
 }
 
-// settingsRoleRank orders the repo roles (identity.Role spellings).
+// settingsRoleRank orders the repo roles (identity.Role spellings). An empty
+// or unknown role ranks 0 — below every tab floor — so the page fails closed.
+// identity.Resolve answers "" for a principal with no binding (an authenticated
+// non-member of a public repo, an unrecognised spelling); ranking that as admin
+// was the round-2 audit defect (every tab 200 with live forms). Only the
+// never-wired identity seam (settingsRepoAccess) assumes admin, and it says so
+// at the assignment because there is no role concept to consult there.
+
+// settingsWebhookPanel builds the shared Webhooks tab payload. Repo and org
+// differ only in the action plumbing: repo rows carry the id in the URL and a
+// webhook_action field; org rows post one URL with org_action + a hidden id.
+func settingsWebhookPanel(rows []SettingsWebhook, wired bool, createAction string, createFields []SettingsKV, actionURL func(id string) string, actionField, prefix, idField string, newURL, newEvents, errText string) *SettingsWebhookPanel {
+	p := &SettingsWebhookPanel{
+		Wired: wired, CreateAction: createAction, CreateFields: createFields,
+		NewURL: newURL, NewEvents: newEvents, Error: errText,
+	}
+	for _, h := range rows {
+		row := SettingsWebhookRow{
+			SettingsWebhook: h,
+			ActionURL:       actionURL(h.ID),
+			ActionField:     actionField,
+			ToggleValue:     prefix + "toggle",
+			RotateValue:     prefix + "rotate",
+			PingValue:       prefix + "ping",
+			DeleteValue:     prefix + "delete",
+			UpdateValue:     prefix + "update",
+			RedeliverValue:  prefix + "redeliver",
+		}
+		if idField != "" {
+			row.Fields = []SettingsKV{{Key: idField, Value: h.ID}}
+		}
+		p.Rows = append(p.Rows, row)
+	}
+	return p
+}
+
+// settingsRepoWebhookPanel adapts the repo admin rows.
+func settingsRepoWebhookPanel(owner, name string, admin *SettingsAdmin, newURL, newEvents, errText string) *SettingsWebhookPanel {
+	if admin == nil {
+		return &SettingsWebhookPanel{Error: errText}
+	}
+	base := "/" + url.PathEscape(owner) + "/" + url.PathEscape(name) + "/settings/webhooks"
+	p := settingsWebhookPanel(admin.Webhooks, admin.WebhooksWired, base, nil,
+		func(id string) string { return base + "/" + url.PathEscape(id) },
+		"webhook_action", "", "", newURL, newEvents, errText)
+	p.CanEdit = true
+	return p
+}
+
+// settingsOrgWebhookPanel adapts the org rows.
+func settingsOrgWebhookPanel(org string, page *SettingsOrgPage) *SettingsWebhookPanel {
+	action := "/" + url.PathEscape(org) + "/settings"
+	return settingsWebhookPanel(page.Webhooks, page.WebhooksWired, action,
+		[]SettingsKV{{Key: "org_action", Value: SettingsOrgWebhookCreate}},
+		func(string) string { return action },
+		"org_action", "webhook-", "id", page.NewURL, page.NewEvents, page.Error)
+}
 func settingsRoleRank(role string) int {
 	switch strings.ToLower(strings.TrimSpace(role)) {
 	case "read":
@@ -755,11 +1128,8 @@ func settingsRoleRank(role string) int {
 		return 4
 	case "admin":
 		return 5
-	case "none":
-		return 0
-	default:
-		return 5 // unwired/unknown: no page-level denial (the server gate already ran)
 	}
+	return 0
 }
 
 func settingsRoleAtLeast(role, want string) bool {
@@ -845,8 +1215,9 @@ func (s *Server) mountSettings() {
 // ---------------------------------------------------------------------------
 
 // settingsSetupPage answers GET /setup. Access is the §3.4 rule, delegated to
-// the binding; a refusal still renders the page (the restricted card), exactly
-// like the SPA — only writes get a bare 403.
+// the binding; a refusal renders the restricted card WITH the JSON API's
+// status (401 unauthenticated / 403 non-admin), so a denial is visible to
+// clients instead of a misleading 200.
 func (s *Server) settingsSetupPage(w http.ResponseWriter, r *http.Request) {
 	p, ok := s.principal(w, r)
 	if !ok {
@@ -854,11 +1225,12 @@ func (s *Server) settingsSetupPage(w http.ResponseWriter, r *http.Request) {
 	}
 	d := settingsDeps()
 	page := &SettingsSetupPage{}
+	page.AuthMode, page.TokenSignIn, page.SessionSecret = s.setupAuthInfo()
 	if d.SetupAccess != nil {
 		if aerr := d.SetupAccess(r, p); aerr != nil {
 			page.Denied = true
 			page.Detail = aerr.Why
-			s.page(w, r, p, http.StatusOK, "settings/setup", "Setup", page)
+			s.page(w, r, p, authErrorStatus(aerr), "settings/setup", "Setup", page)
 			return
 		}
 	} else if s.authMode() != "none" && !p.Admin {
@@ -866,7 +1238,7 @@ func (s *Server) settingsSetupPage(w http.ResponseWriter, r *http.Request) {
 		page.Detail = "this host requires an admin principal to view or change configuration"
 	}
 	if page.Denied {
-		s.page(w, r, p, http.StatusOK, "settings/setup", "Setup", page)
+		s.page(w, r, p, http.StatusForbidden, "settings/setup", "Setup", page)
 		return
 	}
 	if d.SetupView == nil {
@@ -894,6 +1266,7 @@ func (s *Server) settingsSetupPage(w http.ResponseWriter, r *http.Request) {
 	}
 	q := r.URL.Query()
 	page.Saved = q.Get("saved") == "1"
+	page.Backup = q.Get("backup")
 	if rq := q.Get("restart"); rq != "" {
 		page.RequiresRestart = strings.Split(rq, ",")
 	}
@@ -901,6 +1274,20 @@ func (s *Server) settingsSetupPage(w http.ResponseWriter, r *http.Request) {
 		page.ValidateOK = true
 	}
 	s.page(w, r, p, http.StatusOK, "settings/setup", "Setup", page)
+}
+
+// setupAuthInfo reports the running auth mode and whether the token-paste
+// sign-in can mint a session (mode token + session_secret). The denied card and
+// the header sign-in affordance both use it, so their copy cannot disagree with
+// POST /_auth/token's gate.
+func (s *Server) setupAuthInfo() (mode string, tokenSignIn, sessionSecret bool) {
+	mode = s.authMode()
+	if s.env.Cfg != nil {
+		a := s.env.Cfg.Server.Auth
+		sessionSecret = a.SessionSecret != ""
+		tokenSignIn = a.Mode == "token" && sessionSecret
+	}
+	return mode, tokenSignIn, sessionSecret
 }
 
 // settingsSetupSubmit answers POST /setup: op=validate runs the full validator
@@ -974,7 +1361,8 @@ func (s *Server) settingsSetupSubmit(w http.ResponseWriter, r *http.Request) {
 		s.settingsSetupReject(w, r, p, d, values, errs, "validation failed — nothing was saved")
 		return
 	}
-	http.Redirect(w, r, "/setup?saved=1&restart="+url.QueryEscape(strings.Join(result.RequiresRestart, ",")), http.StatusSeeOther)
+	http.Redirect(w, r, "/setup?saved=1&restart="+url.QueryEscape(strings.Join(result.RequiresRestart, ","))+
+		"&backup="+url.QueryEscape(result.Backup), http.StatusSeeOther)
 }
 
 // settingsSetupReject re-renders /setup with the typed values and the
@@ -1055,29 +1443,44 @@ func (s *Server) settingsSetupAuthTest(w http.ResponseWriter, r *http.Request) {
 }
 
 // settingsPrepareSetup fills the per-field derived fields (input id, control
-// kind, boolean value) so templates never do presentation logic.
+// kind, boolean value) so templates never do presentation logic, then
+// partitions each section's rows into the open Essentials and the collapsed
+// Advanced group using the one display-metadata list (settingsFieldMeta via
+// settingsPrepareField). A producer that already partitioned (or a view built
+// by a test) is normalised the same way, so the grouping has a single source
+// of truth and the old "everything is essential" page cannot come back.
 func settingsPrepareSetup(v *SettingsSetupView) {
 	for i := range v.Sections {
-		for j := range v.Sections[i].Essential {
-			settingsPrepareField(&v.Sections[i].Essential[j])
+		sec := &v.Sections[i]
+		for j := range sec.Essential {
+			settingsPrepareField(&sec.Essential[j])
 		}
-		for j := range v.Sections[i].Advanced {
-			settingsPrepareField(&v.Sections[i].Advanced[j])
+		for j := range sec.Advanced {
+			settingsPrepareField(&sec.Advanced[j])
 		}
+		essential := make([]SettingsSetupField, 0, len(sec.Essential)+len(sec.Advanced))
+		advanced := make([]SettingsSetupField, 0, len(sec.Advanced))
+		for _, f := range sec.Essential {
+			if f.Advanced {
+				advanced = append(advanced, f)
+			} else {
+				essential = append(essential, f)
+			}
+		}
+		for _, f := range sec.Advanced {
+			if f.Advanced {
+				advanced = append(advanced, f)
+			} else {
+				essential = append(essential, f)
+			}
+		}
+		sec.Essential, sec.Advanced = essential, advanced
 	}
 }
 
 // settingsPrepareField derives the template-facing fields of one row.
 func settingsPrepareField(f *SettingsSetupField) {
-	// A secret value never reaches a template: the row renders the mask and is
-	// overwrite-only (the save path keeps the stored value when the mask comes
-	// back — setup.ParseValues).
-	if f.Secret && f.Value != "" && f.Value != setup.SecretMask {
-		f.Value = setup.SecretMask
-		f.Masked = true
-	}
 	f.InputID = "setup-in-" + strings.ReplaceAll(f.Key, ".", "--")
-	f.Bool = strings.EqualFold(strings.TrimSpace(f.Value), "true") || strings.TrimSpace(f.Value) == "1"
 	if meta, ok := settingsFieldMeta[f.Key]; ok {
 		if f.Example == "" {
 			f.Example = meta.Example
@@ -1088,13 +1491,35 @@ func settingsPrepareField(f *SettingsSetupField) {
 		if !f.Advanced {
 			f.Advanced = meta.Advanced
 		}
-		if len(f.Enum) == 0 {
-			f.Enum = meta.Enum
-		}
 		if (f.Type == "" || f.Type == "string") && meta.Type != "" {
 			f.Type = meta.Type
 		}
 	}
+	// Enum choices are the schema's (internal/setup), never a page-local copy:
+	// the producer normally carries them on the field, and this fallback keeps
+	// a hand-built view (tests, a future producer) rendering the same set.
+	if len(f.Enum) == 0 {
+		f.Enum = setup.EnumValues(f.Key)
+		if len(f.Enum) > 0 && (f.Type == "" || f.Type == "string") {
+			f.Type = "enum"
+		}
+	}
+	// A struct slice is a row editor, never a scalar text input: its
+	// file/default signal is computed from the rendered rows upstream (a
+	// secret row always renders the mask, which is not comparable to a
+	// default).
+	if f.Rows != nil {
+		f.Control = "rows"
+		return
+	}
+	// A secret value never reaches a template: the row renders the mask and is
+	// overwrite-only (the save path keeps the stored value when the mask comes
+	// back — setup.ParseValues).
+	if f.Secret && f.Value != "" && f.Value != setup.SecretMask {
+		f.Value = setup.SecretMask
+		f.Masked = true
+	}
+	f.Bool = strings.EqualFold(strings.TrimSpace(f.Value), "true") || strings.TrimSpace(f.Value) == "1"
 	switch f.Type {
 	case "duration":
 		// The API's Duration string ("1h0m0s") renders in the spelling the
@@ -1110,6 +1535,7 @@ func settingsPrepareField(f *SettingsSetupField) {
 		f.Control = "bool"
 	case "enum":
 		f.Control = "select"
+		f.Options = settingsSetupOptions(f.Enum, f.Value)
 	case "int", "float":
 		f.Control = "number"
 	case "toml":
@@ -1131,18 +1557,52 @@ func settingsPrepareField(f *SettingsSetupField) {
 	}
 }
 
+// settingsSetupOptions builds a select's choices: the schema enum set, plus an
+// "(unset)" row when the stored value is empty and a "current: …" row when the
+// stored value is outside the set. Those two extra rows make the control
+// truthful (it always shows what is stored) and keep a save from silently
+// rewriting a value the select cannot represent.
+func settingsSetupOptions(enum []string, value string) []SettingsSetupOption {
+	out := make([]SettingsSetupOption, 0, len(enum)+1)
+	known := false
+	for _, v := range enum {
+		opt := SettingsSetupOption{Value: v, Label: v, Selected: v == value}
+		if opt.Selected {
+			known = true
+		}
+		out = append(out, opt)
+	}
+	switch {
+	case value == "":
+		out = append([]SettingsSetupOption{{Value: "", Label: "(unset)", Selected: true}}, out...)
+	case !known:
+		out = append(out, SettingsSetupOption{Value: value, Label: "current: " + value, Selected: true})
+	}
+	return out
+}
+
 // settingsApplySetupValues re-renders a failed submit with the operator's typed
 // values (never the saved ones) and the per-key error lines.
 func settingsApplySetupValues(v *SettingsSetupView, values map[string]string, errs []SettingsSetupError) {
 	apply := func(f *SettingsSetupField) {
 		f.Errors = nil
-		if sval, ok := values[f.Key]; ok && !f.Secret {
+		if f.Rows != nil {
+			settingsApplySetupRows(f, values)
+		} else if sval, ok := values[f.Key]; ok && !f.Secret {
 			// Never echo a secret back into the rejected form: a submitted
 			// secret is dropped and the row keeps its mask (or stays empty).
 			f.Value = sval
 		}
 		for _, e := range errs {
-			if e.Key == f.Key || (e.Key == "" && len(errs) == 1) {
+			// A keyless error belongs to the banner only (the page prints
+			// view.Errors in full); copying it onto every row made a single
+			// unknown failure look like 145 broken keys.
+			//
+			// A struct-slice cell error is keyed by its cell
+			// ("bundles.strategy[0].schedule") and belongs to the field's row
+			// editor, so the row is marked (and an Advanced group opens) even
+			// though the failing cell is one line inside it.
+			if e.Key != "" && (e.Key == f.Key || strings.HasPrefix(e.Key, f.Key+"[")) {
 				f.Errors = append(f.Errors, e)
 			}
 		}
@@ -1158,55 +1618,225 @@ func settingsApplySetupValues(v *SettingsSetupView, values map[string]string, er
 	}
 }
 
+// settingsApplySetupRows rebuilds a row editor from a rejected submit so the
+// operator's edits survive (the cells are the typed values, not the saved
+// ones). A typed secret is NEVER echoed: a non-empty typed secret renders as
+// the mask, and a submitted mask stays the mask (so the next submit keeps the
+// stored value, exactly like the scalar secret rows).
+func settingsApplySetupRows(f *SettingsSetupField, values map[string]string) {
+	edits := setup.ParseRowEdits(f.Key, values)
+	if len(edits) == 0 || len(f.Rows) == 0 {
+		return // the operator removed every row: keep the empty editor
+	}
+	cells := f.Rows[0].Cells
+	rows := make([]setup.Row, 0, len(edits)+1)
+	for _, edit := range edits {
+		if edit.Remove {
+			continue
+		}
+		row := setup.Row{
+			Index: len(rows), Base: edit.Base,
+			BaseKey:   setup.RowBaseKey(f.Key, len(rows)),
+			RemoveKey: setup.RowRemoveKey(f.Key, len(rows)),
+		}
+		for _, cell := range cells {
+			raw := edit.Cells[cell.Name]
+			if cell.Secret && strings.TrimSpace(raw) != "" {
+				raw = setup.SecretMask // never echo a typed secret back
+			}
+			row.Cells = append(row.Cells, setup.RowCell{
+				Name: cell.Name, Key: setup.RowCellKey(f.Key, row.Index, cell.Name),
+				Label: cell.Label, Type: cell.Type, Secret: cell.Secret, Value: raw,
+				Bool: cell.Type == "bool" && strings.EqualFold(raw, "true"),
+			})
+			if row.Caption == "" && (cell.Name == "principal" || cell.Name == "name") {
+				row.Caption = raw
+			}
+		}
+		rows = append(rows, row)
+	}
+	// Always leave the blank add row.
+	if len(rows) == 0 || !settingsRowBlank(rows[len(rows)-1]) {
+		blank := setup.Row{
+			Index: len(rows), Base: -1, Caption: "new row",
+			BaseKey:   setup.RowBaseKey(f.Key, len(rows)),
+			RemoveKey: setup.RowRemoveKey(f.Key, len(rows)),
+		}
+		for _, cell := range cells {
+			blank.Cells = append(blank.Cells, setup.RowCell{
+				Name: cell.Name, Key: setup.RowCellKey(f.Key, blank.Index, cell.Name),
+				Label: cell.Label, Type: cell.Type, Secret: cell.Secret,
+			})
+		}
+		rows = append(rows, blank)
+	}
+	f.Rows = rows
+}
+
+// settingsRowBlank reports whether a typed row carries no value (it is the
+// placeholder add row, not an element).
+func settingsRowBlank(row setup.Row) bool {
+	for _, cell := range row.Cells {
+		v := strings.TrimSpace(cell.Value)
+		if v == "" {
+			continue
+		}
+		if cell.Type == "bool" && (v == "false" || v == "0") {
+			continue
+		}
+		return false
+	}
+	return true
+}
+
 // settingsFieldMeta is the display metadata the schema API does not carry
-// (the `ex`/`note`/`advanced` columns of the former setup.js FIELDS table; internal/setup is the schema authority). It is
-// data, not validation: the Go validator stays authoritative. The full table
-// belongs in internal/setup when §8.2 lands; this covers the keys whose
-// absence makes the form unhelpful.
+// (the `ex`/`note`/`advanced` columns of the former setup.js FIELDS table;
+// internal/setup is the schema authority for types, enums and validation).
+// It is data, not validation: the Go validator stays authoritative.
+//
+// Advanced is the ONLY grouping list: settingsPrepareSetup partitions each
+// section's rows with it into the open essentials and the collapsed
+// <details> group (G18). A key absent from this table is essential. Enum
+// choices do NOT live here — setup.BuildSchema carries them from the one
+// schema table (setup.EnumValues), so the page cannot drift from the loader.
 type settingsFieldMetaT struct {
 	Type     string
 	Example  string
 	Note     string
 	Advanced bool
-	Enum     []string
 }
 
-var settingsFieldMeta = map[string]settingsFieldMetaT{
-	"server.listen":              {Example: "0.0.0.0:8080", Note: "127.0.0.1:8080 = loopback only"},
-	"server.http2":               {Type: "bool", Example: "true", Advanced: true},
-	"server.request_timeout":     {Type: "duration", Example: "1h", Advanced: true},
-	"server.drain_timeout":       {Type: "duration", Example: "30s", Advanced: true},
-	"server.max_push_bytes":      {Type: "size", Example: "2GiB"},
-	"server.roles":               {Type: "list", Example: "serve, maintain"},
-	"server.auto_create_on_push": {Type: "bool", Example: "true"},
-	"server.public_url":          {Type: "url", Example: "https://git.example.com"},
-	"server.ssh.listen":          {Example: "0.0.0.0:2222", Note: "empty = the SSH transport is disabled"},
-	"server.ssh.external_port":   {Type: "int", Example: "12222", Note: "advertised in ssh:// clone URLs"},
-	"server.auth.mode":           {Type: "enum", Enum: []string{"none", "token", "oidc"}, Example: "token", Note: "oidc additionally needs issuer, an allowlist, and the browser-login trio"},
-	"server.auth.anonymous_read": {Type: "bool", Example: "true", Note: "oidc: true (public browsing) recommended"},
-	"server.auth.issuer":         {Type: "url", Example: "https://id.example.com", Note: "discovery at <issuer>/.well-known/openid-configuration"},
-	"server.auth.admin_groups":   {Type: "list", Example: "spindle-admins", Note: "OIDC groups granted global admin and /setup; empty disables group admins"},
-	"server.auth.groups_claim":   {Example: "groups", Note: "ID-token claim carrying group membership (array of strings or one string)"},
-	"server.auth.session_secret": {Example: "openssl rand -hex 32", Note: "any random ≥ 32 bytes; rotating revokes sessions"},
-	"store.backend":              {Type: "enum", Enum: []string{"s3", "memory", "filesystem"}, Example: "filesystem"},
-	"store.bucket":               {Example: "spindle-test", Note: "s3 only"},
-	"store.prefix":               {Example: "spindle/"},
-	"store.root":                 {Example: "/var/lib/spindle/store", Note: "filesystem backend only"},
-	"store.multipart_threshold":  {Type: "size", Example: "64MiB", Advanced: true},
-	"store.multipart_part_size":  {Type: "size", Example: "16MiB", Advanced: true, Note: "must be ≤ multipart_threshold"},
-	"store.s3.endpoint":          {Example: "http://127.0.0.1:9000", Note: "rustfs/MinIO"},
-	"store.s3.force_path_style":  {Type: "bool", Example: "true", Note: "true for rustfs/MinIO"},
-	"cache.dir":                  {Example: "/var/cache/spindle"},
-	"cache.mode":                 {Type: "enum", Enum: []string{"budget", "disk", "auto"}, Example: "budget"},
-	"cache.max_bytes":            {Type: "size", Example: "20GiB", Note: "everything on disk must fit this in budget mode"},
-	"wal.freshness_ttl":          {Type: "duration", Example: "30s"},
-	"maintenance.interval":       {Type: "duration", Example: "5m", Advanced: true},
-	"telemetry.log_format":       {Example: "json", Advanced: true},
-	"telemetry.metrics_listen":   {Example: "127.0.0.1:9090", Advanced: true},
-	"events.webhook_url":         {Type: "url", Example: "https://example.com/hook", Advanced: true},
-	"lfs.enabled":                {Type: "bool", Example: "true"},
-	"git.max_pack_bytes":         {Type: "size", Example: "2GiB", Advanced: true},
-	"upstream.allow_import":      {Type: "bool", Example: "true"},
+var settingsFieldMeta = map[string]settingsFieldMetaT{"server.listen": {Example: "0.0.0.0:8080", Note: "127.0.0.1:8080 = loopback only"},
+	"server.http2":                     {Type: "bool", Example: "true", Advanced: true},
+	"server.max_concurrent_requests":   {Advanced: true},
+	"server.max_concurrent_per_repo":   {Advanced: true},
+	"server.request_timeout":           {Type: "duration", Example: "1h", Advanced: true},
+	"server.drain_timeout":             {Type: "duration", Example: "30s", Advanced: true},
+	"server.serve_sync_timeout":        {Advanced: true},
+	"server.serve_materialize_timeout": {Advanced: true},
+	"server.max_push_bytes":            {Type: "size", Example: "2GiB", Advanced: true},
+	"server.max_tree_log":              {Advanced: true},
+	"server.auto_create_on_push":       {Type: "bool", Example: "true"},
+	"server.accel_redirect":            {Advanced: true},
+	"server.public_url":                {Type: "url", Example: "https://git.example.com"},
+	"server.roles":                     {Type: "list", Example: "serve, maintain"},
+	"server.cors_origins":              {Advanced: true},
+	"server.secrets_key":               {Advanced: true},
+	"server.ssh.listen":                {Example: "0.0.0.0:2222", Note: "empty = the SSH transport is disabled", Advanced: true},
+	"server.ssh.external_port":         {Type: "int", Example: "12222", Note: "advertised in ssh:// clone URLs", Advanced: true},
+	"server.ssh.host_key":              {Advanced: true},
+	"server.ssh.host_key_env":          {Advanced: true},
+	"server.auth.mode":                 {Example: "token", Note: "oidc additionally needs issuer, an allowlist, and the browser-login trio"},
+	"server.auth.tokens":               {Example: "alice@example.com (admin)", Note: "One row per static token: principal (the identity it authenticates); token_env names an env var holding the secret (read at startup) or type a literal token once — it renders masked and is kept unless you type a new one (rotate); write grants push access, admin grants host admin + /setup. To add a token, fill the blank row; tick remove to revoke one."},
+	"server.auth.anonymous_read":       {Type: "bool", Example: "true", Note: "oidc: true (public browsing) recommended"},
+	"server.auth.issuer":               {Type: "url", Example: "https://id.example.com", Note: "discovery at <issuer>/.well-known/openid-configuration"},
+	"server.auth.admin_groups":         {Type: "list", Example: "spindle-admins", Note: "OIDC groups granted global admin and /setup; empty disables group admins"},
+	"server.auth.groups_claim":         {Example: "groups", Note: "ID-token claim carrying group membership (array of strings or one string)"},
+	"server.auth.session_secret":       {Example: "openssl rand -hex 32", Note: "any random ≥ 32 bytes; rotating revokes sessions"},
+	"store.backend":                    {Example: "filesystem"},
+	"store.bucket":                     {Example: "spindle-test", Note: "s3 only"},
+	"store.prefix":                     {Example: "spindle/"},
+	"store.root":                       {Example: "/var/lib/spindle/store", Note: "filesystem backend only"},
+	"store.max_retries":                {Advanced: true},
+	"store.multipart_threshold":        {Type: "size", Example: "64MiB", Advanced: true},
+	"store.multipart_part_size":        {Type: "size", Example: "16MiB", Advanced: true, Note: "must be ≤ multipart_threshold"},
+	"store.s3.endpoint":                {Example: "http://127.0.0.1:9000", Note: "rustfs/MinIO"},
+	"store.s3.region":                  {Example: "us-east-1"},
+	"store.s3.access_key_env":          {Example: "AWS_ACCESS_KEY_ID"},
+	"store.s3.secret_key_env":          {Example: "AWS_SECRET_ACCESS_KEY"},
+	"store.s3.force_path_style":        {Type: "bool", Example: "true", Note: "true for rustfs/MinIO"},
+	"cache.dir":                        {Example: "/var/cache/spindle"},
+	"cache.mode":                       {Example: "budget"},
+	"cache.max_bytes":                  {Type: "size", Example: "20GiB", Note: "everything on disk must fit this in budget mode"},
+	"cache.disk_high_watermark":        {Advanced: true},
+	"cache.evict_idle_after":           {Advanced: true},
+	"cache.prewarm":                    {Advanced: true},
+	"cache.prewarm_parallelism":        {Advanced: true},
+	"cache.prewarm_ready_timeout":      {Advanced: true},
+	"cache.ref_advert_entries":         {Advanced: true},
+	"cache.object_info_entries":        {Advanced: true},
+	"cache.bundle_list_entries":        {Advanced: true},
+	"cache.remote_block_bytes":         {Advanced: true},
+	"cache.remote_object_bytes":        {Advanced: true},
+	"cache.shared_render_cache":        {Advanced: true},
+	"cache.store_mount":                {Advanced: true},
+	"wal.batch_window":                 {Advanced: true},
+	"wal.max_batch":                    {Advanced: true},
+	"wal.push_broker_url":              {Advanced: true},
+	"wal.push_broker_token":            {Advanced: true},
+	"wal.push_broker_buffer_bytes":     {Advanced: true},
+	"wal.snapshot_every_entries":       {Advanced: true},
+	"wal.checkpoint_interval":          {Type: "duration", Example: "1h"},
+	"wal.checkpoint_tail_bytes":        {Advanced: true},
+	"wal.cas_max_retries":              {Advanced: true},
+	"wal.fsck_objects":                 {Advanced: true},
+	"wal.check_connectivity":           {Advanced: true},
+	"wal.freshness_ttl":                {Type: "duration", Example: "30s", Advanced: true},
+	"wal.prefetch_packs":               {Advanced: true},
+	"wal.prefetch_max_bytes":           {Advanced: true},
+	"wal.remote_objects":               {Advanced: true},
+	"maintenance.interval":             {Type: "duration", Example: "5m", Advanced: true},
+	"maintenance.checkpoints":          {Advanced: true},
+	"maintenance.max_pack_bytes":       {Type: "size", Example: "2GiB", Advanced: true},
+	"maintenance.disk":                 {Advanced: true},
+	"maintenance.host":                 {Advanced: true},
+	"maintenance.fsck_interval":        {Advanced: true},
+	"maintenance.follow_interval":      {Advanced: true},
+	"compaction.enabled":               {Advanced: true},
+	"compaction.factor":                {Advanced: true},
+	"compaction.trigger_packs":         {Advanced: true},
+	"compaction.trigger_bytes":         {Advanced: true},
+	"compaction.lease_ttl":             {Advanced: true},
+	"compaction.retention_superseded":  {Advanced: true},
+	"compaction.engine":                {Advanced: true},
+	"bundles.strategy":                 {Example: "daily (incremental, base weekly)", Note: "One row per bundle strategy: name (unique), kind (full|incremental), base (the incremental parent's name), schedule (6-field UTC cron or @macro), keep (full only), backfill_max, chain, filter (blob:none), refs (comma-separated), min_commits. Fill the blank row to add one; tick remove to retire it."},
+	"bundles.min_commits":              {Type: "int", Example: "25"},
+	"bundles.min_bytes":                {Type: "size", Advanced: true},
+	"bundles.main_only":                {Advanced: true},
+	"bundles.extra_refs":               {Advanced: true},
+	"bundles.serve_via":                {Advanced: true},
+	"bundles.signed_url_ttl":           {Advanced: true},
+	"bundles.signed_url_for":           {Advanced: true},
+	"bundles.advertise":                {Advanced: true},
+	"bundles.advertise_filtered":       {Advanced: true},
+	"bundles.require":                  {Advanced: true},
+	"lfs.enabled":                      {Type: "bool", Example: "true"},
+	"lfs.serve_via":                    {Advanced: true},
+	"lfs.signed_url_ttl":               {Advanced: true},
+	"lfs.max_object_bytes":             {Advanced: true},
+	"upstream.git":                     {Example: "https://example.com/upstream.git"},
+	"upstream.lfs":                     {Example: "https://example.com/upstream.git/info/lfs"},
+	"upstream.token_env":               {Example: "UPSTREAM_TOKEN"},
+	"upstream.follow":                  {Advanced: true},
+	"git.binary":                       {Advanced: true},
+	"git.upload_pack_engine":           {Advanced: true},
+	"git.allow_filter":                 {Advanced: true},
+	"git.allow_any_sha1_in_want":       {Advanced: true},
+	"git.object_format":                {Advanced: true},
+	"git.commit_graph":                 {Advanced: true},
+	"git.commit_graph_changed_paths":   {Advanced: true},
+	"git.history_pack":                 {Advanced: true},
+	"git.max_wants":                    {Advanced: true},
+	"telemetry.log_format":             {Advanced: true},
+	"telemetry.log_filter":             {Example: "info,walgit=debug", Advanced: true},
+	"telemetry.metrics":                {Advanced: true},
+	"telemetry.lock_wait_warn":         {Advanced: true},
+	"events.webhook_url":               {Type: "url", Example: "https://example.com/hook", Advanced: true},
+	"events.webhook_secret":            {Advanced: true},
+	"events.sweep_interval":            {Advanced: true},
+	"releases.max_asset_bytes":         {Advanced: true},
+	"import.clone_timeout":             {Advanced: true},
+	"import.git_timeout":               {Advanced: true},
+	"import.max_bytes":                 {Advanced: true},
+	"import.max_refs":                  {Advanced: true},
+	"import.max_concurrent":            {Advanced: true},
+	"import.allow_private_networks":    {Advanced: true},
+	"import.url_allowlist":             {Advanced: true},
+	"import.allow_file_urls":           {Advanced: true},
+	"attachments.max_image_bytes":      {Advanced: true},
+	"packages.max_blob_bytes":          {Advanced: true},
+	"packages.max_manifest_bytes":      {Advanced: true},
+	"packages.upload_ttl":              {Advanced: true},
 }
 
 // ---------------------------------------------------------------------------
@@ -1370,8 +2000,21 @@ func (s *Server) settingsRepoAccess(w http.ResponseWriter, r *http.Request) (aut
 		s.errorPage(w, r, http.StatusNotFound, "repository not found")
 		return p, "", false
 	}
+	// Existence mirrors the JSON surface's 404: a page must never render a
+	// settings shell for a repo the API does not know (audit F3). Probed
+	// after visibility so an unreadable name never reveals more than 404.
+	exists, xerr := s.repoExists(r.Context(), owner, name)
+	if xerr != nil {
+		log.Printf("webui repo existence %s: %v", r.URL.Path, xerr)
+		s.errorPage(w, r, http.StatusServiceUnavailable, "repository lookup failed")
+		return p, "", false
+	}
+	if !exists {
+		s.errorPage(w, r, http.StatusNotFound, "repository not found")
+		return p, "", false
+	}
 	d := settingsDeps()
-	role := "admin" // unwired identity: the server's read gate already ran
+	role := "admin" // identity seam unwired: no role concept exists; the read gate already ran
 	if d.RepoRole != nil {
 		got, err := d.RepoRole(r.Context(), owner, name, p)
 		if err != nil {
@@ -1381,10 +2024,10 @@ func (s *Server) settingsRepoAccess(w http.ResponseWriter, r *http.Request) (aut
 		}
 		role = got
 	}
-	if settingsRoleRank(role) == 0 {
-		s.errorPage(w, r, http.StatusNotFound, "repository not found")
-		return p, "", false
-	}
+	// No rank special-case here: a resolved-but-unknown role ("") is a
+	// visible-repo principal with no role, so the per-tab floor answers 403
+	// (the round-2 audit defect ranked it admin and served every form). A
+	// private repo never reaches this point — repoVisible answered 404 first.
 	return p, role, true
 }
 
@@ -1536,10 +2179,11 @@ func (s *Server) settingsRepoPage(r *http.Request, p auth.Principal, owner, name
 				if len(v.Roles) == 0 {
 					v.Roles = settingsAccessRoles
 				}
+				// CanEdit is stamped from the page's admin verdict below.
 				page.Access = v
 			}
 		}
-	case "tokens", "webhooks":
+	case "tokens", "webhooks", "runners", "secrets":
 		if d.RepoAdmin != nil {
 			if v, err := d.RepoAdmin(ctx, owner, name, p); err != nil {
 				page.Error = err.Error()
@@ -1550,9 +2194,30 @@ func (s *Server) settingsRepoPage(r *http.Request, p auth.Principal, owner, name
 	case "danger":
 		page.DangerData = &SettingsDanger{FullName: owner + "/" + name}
 	case "wal":
-		// GAP: the WAL panel is the repo group's shared partial
-		// (specs/settings.md §2.9 / §8.4); until it lands this tab renders
-		// the placeholder card with the data hook the islands group expects.
+		// WP9 G16: the real panel — the WAL view's facts plus the same ops
+		// inventory. Posting an op uses the existing …/api/ops/{op} stream
+		// (AuthWrite), so this page never carries a second write path.
+		if d.RepoWAL != nil {
+			if v, err := d.RepoWAL(ctx, owner, name); err != nil {
+				page.Error = err.Error()
+			} else if v != nil {
+				v.Panel.CanRun = p.Admin || settingsRoleAtLeast(role, "write")
+				page.WAL = v
+			}
+		}
+	}
+	// The Access panel's editability follows the page's admin verdict, not the
+	// seam: a restore path synthesizes the panel with only the submitted
+	// values, and triage must never regain the form that way.
+	if page.Access != nil {
+		page.Access.CanEdit = admin
+	}
+	if tab == "webhooks" {
+		newURL, newEvents := "", ""
+		if page.AdminData != nil {
+			newURL, newEvents = page.AdminData.NewURL, page.AdminData.NewEvents
+		}
+		page.WebhookPanel = settingsRepoWebhookPanel(owner, name, page.AdminData, newURL, newEvents, "")
 	}
 	return page
 }
@@ -1650,8 +2315,19 @@ func (s *Server) settingsRepoWrite(w http.ResponseWriter, r *http.Request) {
 			action = SettingsActionPushRemove
 		}
 	}
+	if tab == "access" {
+		switch r.PostFormValue("invite_action") {
+		case "create":
+			action = SettingsActionInviteCreate
+		case "cancel":
+			action = SettingsActionInviteCancel
+		}
+	}
 	if tab == "policy" && r.PostFormValue("policy_action") == "dryrun" {
 		action = SettingsActionPolicyDryRun
+	}
+	if tab == "policy" && r.PostFormValue("policy_action") == "remove" {
+		action = SettingsActionPolicyRemove
 	}
 	if tab == "protection" && r.PostFormValue("policy_action") == "raw" {
 		// The advanced editor on the Branch protection tab writes the same
@@ -1667,12 +2343,37 @@ func (s *Server) settingsRepoWrite(w http.ResponseWriter, r *http.Request) {
 			action = SettingsActionTokenRevoke
 		}
 	}
+	if tab == "runners" {
+		action = SettingsActionRunnerToken
+		if r.PathValue("id") != "" {
+			action = SettingsActionRunnerRevoke
+		}
+	}
+	if tab == "secrets" {
+		action = SettingsActionSecretPut
+		if id := r.PathValue("id"); id != "" {
+			action = SettingsActionSecretDelete
+		} else if r.PostFormValue("secret_action") == "delete" {
+			action = SettingsActionSecretDelete
+		}
+	}
 	if tab == "webhooks" {
 		action = SettingsActionWebhookCreate
 		if id := r.PathValue("id"); id != "" {
 			action = SettingsActionWebhookDelete
-			if r.PostFormValue("webhook_action") == "ping" {
+			switch r.PostFormValue("webhook_action") {
+			case "ping":
 				action = SettingsActionWebhookPing
+			case "toggle":
+				action = SettingsActionWebhookToggle
+			case "update":
+				action = SettingsActionWebhookUpdate
+			case "rotate":
+				action = SettingsActionWebhookRotate
+			case "redeliver":
+				action = SettingsActionWebhookRedeliver
+			default:
+				action = SettingsActionWebhookDelete
 			}
 		}
 	}
@@ -1699,10 +2400,32 @@ func (s *Server) settingsRepoWrite(w http.ResponseWriter, r *http.Request) {
 	// Danger actions carry a typed confirmation; the server re-checks it (the
 	// client-side arm state is an affordance, never the gate). Both actions
 	// require the exact `owner/name` (case-sensitive, no trimming — #39).
-	if action == SettingsActionTransfer || action == SettingsActionDelete {
+	// Removing the policy document is equally destructive (fail-open) and uses
+	// the same typed arm.
+	if action == SettingsActionTransfer || action == SettingsActionDelete ||
+		action == SettingsActionPolicyRemove {
 		if r.PostFormValue("confirm") != owner+"/"+name {
-			page := s.settingsRepoPage(r, p, owner, name, "danger", role, true)
-			page.DangerData.Error = "type " + owner + "/" + name + " exactly to confirm"
+			page := s.settingsRepoPage(r, p, owner, name, tab, role, true)
+			if action == SettingsActionPolicyRemove {
+				if page.Policy == nil {
+					page.Policy = &SettingsPolicy{}
+				}
+				page.Policy.Error = "type " + owner + "/" + name + " exactly to confirm removal"
+			} else {
+				page.DangerData.Error = "type " + owner + "/" + name + " exactly to confirm"
+			}
+			s.settingsRepoFinish(w, r, p, page, nil)
+			return
+		}
+	}
+	// Webhook deletion is destructive: the row's typed confirmation names the
+	// hook id, and the server re-checks it (the disabled button is only an
+	// affordance, never the boundary).
+	if action == SettingsActionWebhookDelete {
+		if r.PostFormValue("confirm") != r.PathValue("id") {
+			page := s.settingsRepoPage(r, p, owner, name, "webhooks", role, true)
+			page.Notice = ""
+			page.Error = "type " + r.PathValue("id") + " exactly to confirm"
 			s.settingsRepoFinish(w, r, p, page, nil)
 			return
 		}
@@ -1726,7 +2449,7 @@ func (s *Server) settingsRepoWrite(w http.ResponseWriter, r *http.Request) {
 	if werr != nil {
 		page := s.settingsRepoPage(r, p, owner, name, tab, role, true)
 		page.Error = werr.Message
-		settingsRestoreRepoValues(page, r, action)
+		settingsRestoreRepoValues(page, r, action, werr)
 		s.settingsRepoFinish(w, r, p, page, werr)
 		return
 	}
@@ -1739,6 +2462,10 @@ func (s *Server) settingsRepoWrite(w http.ResponseWriter, r *http.Request) {
 			page.AdminData = &SettingsAdmin{}
 		}
 		page.AdminData.NewToken = werrRes.Secret
+		if tab == "runners" {
+			page.AdminData.NewRunnerToken = werrRes.Secret
+			page.AdminData.NewToken = ""
+		}
 		page.Notice = werrRes.Notice
 		s.pageRepo(w, r, p, page.Chrome, http.StatusOK, "settings/repo", "Settings", page)
 		return
@@ -1748,6 +2475,19 @@ func (s *Server) settingsRepoWrite(w http.ResponseWriter, r *http.Request) {
 	if werrRes.Policy != nil {
 		page := s.settingsRepoPage(r, p, owner, name, tab, role, true)
 		page.Policy = werrRes.Policy
+		page.Notice = werrRes.Notice
+		s.pageRepo(w, r, p, page.Chrome, http.StatusOK, "settings/repo", "Settings", page)
+		return
+	}
+	// A created invitation's accept link carries its capability token; it is
+	// rendered once in the page body (never a redirect/URL) and the pending
+	// list below it also carries the link.
+	if werrRes.Link != "" {
+		page := s.settingsRepoPage(r, p, owner, name, tab, role, true)
+		if page.Access == nil {
+			page.Access = &SettingsAccess{}
+		}
+		page.Access.InviteLink = werrRes.Link
 		page.Notice = werrRes.Notice
 		s.pageRepo(w, r, p, page.Chrome, http.StatusOK, "settings/repo", "Settings", page)
 		return
@@ -1766,6 +2506,11 @@ func (s *Server) settingsRepoWrite(w http.ResponseWriter, r *http.Request) {
 // settingsRepoFinish renders a rejected repo write: 422 (or 409) for a real
 // page load, 200 for htmx so the panel swaps with the inline error.
 func (s *Server) settingsRepoFinish(w http.ResponseWriter, r *http.Request, p auth.Principal, page *SettingsRepoPage, werr *SettingsWriteError) {
+	// The shared webhook panel owns its inline error line (the pre-panel
+	// form did); mirror the page-level error into it on every render path.
+	if page.WebhookPanel != nil && page.Error != "" {
+		page.WebhookPanel.Error = page.Error
+	}
 	status := http.StatusUnprocessableEntity
 	if werr != nil {
 		status = werr.status()
@@ -1795,9 +2540,15 @@ func settingsRepoAction(tab string) string {
 
 // settingsRestoreRepoValues puts the submitted values back on the page after a
 // rejected write, so the operator never loses the edit.
-func settingsRestoreRepoValues(page *SettingsRepoPage, r *http.Request, action string) {
+func settingsRestoreRepoValues(page *SettingsRepoPage, r *http.Request, action string, werr *SettingsWriteError) {
 	get := func(k string) string { return r.PostFormValue(k) }
 	switch action {
+	case SettingsActionScheduled:
+		settingsOverlayScheduledForm(page, SettingsRepoWrite{
+			Action: action,
+			Values: settingsFormValues(r, ""),
+			Multi:  map[string][]string{},
+		}, werr)
 	case SettingsActionGeneral:
 		if page.General == nil {
 			page.General = &SettingsGeneral{}
@@ -1813,9 +2564,18 @@ func settingsRestoreRepoValues(page *SettingsRepoPage, r *http.Request, action s
 		if page.Access == nil {
 			page.Access = &SettingsAccess{}
 		}
+		page.Access.CanEdit = page.Admin
 		if v := get("visibility"); v != "" {
 			page.Access.Visibility = v
 		}
+	case SettingsActionInviteCreate, SettingsActionInviteCancel:
+		// A rejected invite write re-renders the Access tab with the typed
+		// subject/role preserved (the service error is the page error).
+		if page.Access == nil {
+			page.Access = &SettingsAccess{}
+		}
+		page.Access.NewSubject = get("subject")
+		page.Access.NewRole = get("role")
 	case SettingsActionPolicy:
 		if page.Policy == nil {
 			page.Policy = &SettingsPolicy{}
@@ -1868,6 +2628,10 @@ func settingsRestoreRepoValues(page *SettingsRepoPage, r *http.Request, action s
 		}
 		page.AdminData.NewURL = get("url")
 		page.AdminData.NewEvents = get("events")
+		if page.WebhookPanel != nil {
+			page.WebhookPanel.NewURL = get("url")
+			page.WebhookPanel.NewEvents = get("events")
+		}
 	}
 }
 
@@ -1912,6 +2676,7 @@ func (s *Server) settingsOrgPage(w http.ResponseWriter, r *http.Request) {
 	view.Org = org
 	view.Tab = tab
 	view.Nav = settingsOrgNav(org, tab, view.CanManage)
+	view.WebhookPanel = settingsOrgWebhookPanel(org, view)
 	view.Notice = r.URL.Query().Get("notice")
 	if view.Error == "" {
 		view.Error = r.URL.Query().Get("error")
@@ -1959,7 +2724,7 @@ func (s *Server) settingsOrgSubmit(w http.ResponseWriter, r *http.Request) {
 	}
 	org := r.PathValue("owner")
 	d := settingsDeps()
-	if d.OrgView == nil || d.OrgWrite == nil {
+	if d.OrgView == nil {
 		s.errorPage(w, r, http.StatusServiceUnavailable, "organisation settings are not wired on this build")
 		return
 	}
@@ -1972,6 +2737,7 @@ func (s *Server) settingsOrgSubmit(w http.ResponseWriter, r *http.Request) {
 		s.errorPage(w, r, http.StatusForbidden, "organization owner required")
 		return
 	}
+	view.WebhookPanel = settingsOrgWebhookPanel(org, view)
 	if !settingsSameOrigin(r) {
 		s.errorPage(w, r, http.StatusForbidden, "cross-origin write refused")
 		return
@@ -2010,12 +2776,47 @@ func (s *Server) settingsOrgSubmit(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+	// Webhook delete is destructive: the typed confirmation names the hook id
+	// and the server re-checks it (the island only arms the button).
+	if action == SettingsOrgWebhookDelete {
+		id := r.PostFormValue("id")
+		if r.PostFormValue("confirm") != id {
+			view.Tab = "webhooks"
+			view.Nav = settingsOrgNav(org, "webhooks", true)
+			view.Error = "type " + id + " exactly to confirm"
+			if view.WebhookPanel != nil {
+				view.WebhookPanel.Error = view.Error
+			}
+			status := http.StatusUnprocessableEntity
+			if settingsHTMX(r) {
+				status = http.StatusOK
+			}
+			s.page(w, r, p, status, "settings/org", "Organization settings", view)
+			return
+		}
+	}
 	tab := settingsOrgTabForAction(action)
-	res, werr := d.OrgWrite(r.Context(), org, p, wr)
+	var res SettingsWriteResult
+	var werr *SettingsWriteError
+	switch {
+	case settingsIsOrgWebhookAction(action):
+		if d.OrgWebhookWrite == nil {
+			werr = settingsWriteErr(http.StatusServiceUnavailable, "org webhooks are not wired on this build")
+		} else {
+			res, werr = d.OrgWebhookWrite(r.Context(), org, p, wr)
+		}
+	case d.OrgWrite == nil:
+		werr = settingsWriteErr(http.StatusServiceUnavailable, "organisation settings writes are not wired on this build")
+	default:
+		res, werr = d.OrgWrite(r.Context(), org, p, wr)
+	}
 	if werr != nil {
 		view.Tab = tab
 		view.Nav = settingsOrgNav(org, tab, true)
 		view.Error = werr.Message
+		if view.WebhookPanel != nil {
+			view.WebhookPanel.Error = werr.Message
+		}
 		status := werr.status()
 		if settingsHTMX(r) {
 			status = http.StatusOK
@@ -2023,13 +2824,32 @@ func (s *Server) settingsOrgSubmit(w http.ResponseWriter, r *http.Request) {
 		s.page(w, r, p, status, "settings/org", "Organization settings", view)
 		return
 	}
+	if res.Redirect != "" {
+		// Danger actions leave the page (the org no longer exists); the
+		// notice rides a query so the destination can show it.
+		dest := res.Redirect
+		if res.Notice != "" {
+			sep := "?"
+			if strings.Contains(dest, "?") {
+				sep = "&"
+			}
+			dest += sep + "notice=" + url.QueryEscape(res.Notice)
+		}
+		http.Redirect(w, r, dest, http.StatusSeeOther)
+		return
+	}
 	if res.Link != "" {
 		// The shareable invite link is a one-shot response (it is a bearer
-		// token): render it, never put it in the redirect URL.
+		// token): render it, never put it in the redirect URL. The created row
+		// joins the pending table so its copy control sits where the operator
+		// expects it; every later read renders the masked marker instead.
 		view.Tab = tab
 		view.Nav = settingsOrgNav(org, tab, true)
 		view.InviteLink = res.Link
 		view.Notice = res.Notice
+		if res.Invite != nil {
+			view.Invites = append(view.Invites, *res.Invite)
+		}
 		s.page(w, r, p, http.StatusOK, "settings/org", "Organization settings", view)
 		return
 	}
@@ -2046,10 +2866,14 @@ func settingsOrgTabForAction(action string) string {
 	switch action {
 	case SettingsOrgMemberSet, SettingsOrgMemberRm:
 		return "members"
-	case SettingsOrgTeamSave, SettingsOrgTeamRm, SettingsOrgTeamAdd, SettingsOrgTeamDel:
+	case SettingsOrgTeamSave, SettingsOrgTeamUpdate, SettingsOrgTeamRm, SettingsOrgTeamAdd,
+		SettingsOrgTeamDel, SettingsOrgTeamMemberRm:
 		return "teams"
 	case SettingsOrgInviteMake, SettingsOrgInviteRm:
 		return "invitations"
+	case SettingsOrgWebhookCreate, SettingsOrgWebhookToggle, SettingsOrgWebhookRotate,
+		SettingsOrgWebhookPing, SettingsOrgWebhookDelete, SettingsOrgWebhookRedeliver:
+		return "webhooks"
 	case SettingsOrgDelete:
 		return "danger"
 	}

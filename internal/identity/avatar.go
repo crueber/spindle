@@ -43,7 +43,6 @@ import (
 	_ "image/gif"
 	_ "image/jpeg"
 	"image/png"
-	"net/mail"
 	"strings"
 	"sync"
 	"time"
@@ -201,10 +200,42 @@ func checkAvatarSVG(svg, seed string) error {
 	if strings.Contains(strings.ToLower(svg), "<script") {
 		return fmt.Errorf("%w: generated avatar carries a script element", ErrInvalid)
 	}
-	if seed != "" && strings.Contains(svg, seed) {
+	if seed != "" && seedAppears(svg, seed) {
 		return fmt.Errorf("%w: seed leaked into generated avatar", ErrInvalid)
 	}
 	return nil
+}
+
+// seedAppears reports whether seed occurs in svg as a whole token — neither
+// neighbour may be a character that continues a name/address. A plain
+// substring test false-positives on the static skeleton: the username seed
+// "erin" occurs inside the literal attribute "shape-rendering", which is not a
+// leak of the operator's name.
+func seedAppears(svg, seed string) bool {
+	for from := 0; ; {
+		i := strings.Index(svg[from:], seed)
+		if i < 0 {
+			return false
+		}
+		i += from
+		beforeOK := i == 0 || !seedByte(svg[i-1])
+		after := i + len(seed)
+		afterOK := after == len(svg) || !seedByte(svg[after])
+		if beforeOK && afterOK {
+			return true
+		}
+		from = i + 1
+	}
+}
+
+// seedByte continues a principal/address token (so a match glued to one is a
+// substring of a larger word, not the seed itself).
+func seedByte(b byte) bool {
+	switch {
+	case b >= 'a' && b <= 'z', b >= 'A' && b <= 'Z', b >= '0' && b <= '9':
+		return true
+	}
+	return b == '@' || b == '.' || b == '-' || b == '_'
 }
 
 // UserAvatarKey returns users/<username>/avatar.svg. Usernames are
@@ -525,22 +556,27 @@ func (s *Service) DeleteUserAvatar(ctx context.Context, username string) (*Profi
 // while an upload exists would strand the opt-back-in path behind a
 // delete-then-discover flow. The seed resolves through
 // the username registry (EmailForUsername); a legacy email spelling
-// seeds itself. An unmappable principal 404s — generation without a
-// verified email would break the seed=email contract.
+// seeds itself. A principal with NO verified email (a static-token
+// account) seeds from its principal NAME — the same fallback the
+// initials chip renders — so the control the page offers can never
+// answer "no verified email"; only an empty principal is unmappable.
 func (s *Service) RegenerateUserAvatar(ctx context.Context, username string) (*Profile, error) {
 	username = normPrincipal(username)
+	if username == "" {
+		return nil, fmt.Errorf("%w: empty principal", ErrNotFound)
+	}
 	email, err := s.EmailForUsername(ctx, username)
 	if err != nil {
 		return nil, err
 	}
-	if email == "" {
-		if _, merr := mail.ParseAddress(username); merr == nil {
-			email = username
-		} else {
-			return nil, fmt.Errorf("%w: no verified email for %q", ErrNotFound, username)
-		}
+	seed := email
+	if seed == "" {
+		// No verified email (a static-token account): seed from the principal
+		// name — the same fallback the initials chip renders. A legacy
+		// email-spelled principal lands on the same value.
+		seed = username
 	}
-	svg, err := s.generate(email)
+	svg, err := s.generate(seed)
 	if err != nil {
 		return nil, err
 	}

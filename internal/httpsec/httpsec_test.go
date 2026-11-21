@@ -2,6 +2,7 @@ package httpsec
 
 import (
 	"net/http"
+	"strings"
 	"testing"
 )
 
@@ -61,6 +62,14 @@ func TestApplySetsTheSharedHeaderSet(t *testing.T) {
 	for name, val := range want {
 		if got := h.Get(name); got != val {
 			t.Errorf("%s = %q, want %q", name, got, val)
+		}
+	}
+	// External media must be playable: the sanitizer keeps https <video>/
+	// <audio> sources, so the policy has to name media-src or the browser
+	// falls back to default-src 'self' and blocks them (audit FAIL).
+	for _, directive := range []string{"media-src 'self' https:;", "img-src 'self' https: http: data:;"} {
+		if !strings.Contains(ContentSecurityPolicy, directive) {
+			t.Errorf("CSP lacks %q: %s", directive, ContentSecurityPolicy)
 		}
 	}
 	// A route-level policy wins (the release-asset sandbox CSP).

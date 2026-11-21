@@ -44,6 +44,23 @@
         </div>
       </form>
       {{end}}
+      {{if and (eq .Data.View "profile") .Data.Editing .Data.CanUploadAvatar}}
+      {{/* WP9 G10: user-avatar upload beside the profile edit form (the org
+           profile form's twin). The identity verb validates type/size; the
+           accept list is exactly its raster allowlist (no WebP: stdlib cannot
+           decode it, and no SVG: same-origin script execution). */}}
+      <form class="card mb-4 space-y-3 p-4" method="post" action="/{{.Data.Owner}}/avatar/upload" enctype="multipart/form-data" aria-label="Upload avatar">
+        <h2 class="card-header">Avatar</h2>
+        <div>
+          <label class="mb-1 block text-sm font-medium" for="profile-avatar">Upload an avatar (PNG, JPEG or GIF, ≤ 2 MiB)</label>
+          <input class="block w-full text-sm" id="profile-avatar" name="avatar" type="file" accept="image/png,image/jpeg,image/gif" required>
+          <span class="muted mt-1 block text-xs">Uploads are center-cropped to a square PNG. Regenerate and Remove stay available in the sidebar.</span>
+        </div>
+        <div class="flex flex-wrap gap-2">
+          <button class="btn px-3 py-1" type="submit">Upload avatar</button>
+        </div>
+      </form>
+      {{end}}
       {{if eq .Data.View "profile"}}
         {{if .Data.IsOrg}}
         <h2 class="mb-1 flex items-center gap-2 text-xl font-semibold">
@@ -64,6 +81,30 @@
           {{if and .Data.BioMarkdown (not .Data.Editing)}}<div class="markdown-body mt-3">{{md .Data.BioMarkdown}}</div>{{end}}
         </div>
         {{end}}
+      {{end}}
+
+      {{if eq .Data.View "starred"}}
+      {{/* WP9 G17: the owner's starred repositories, the same row anatomy as
+           the repositories listing. Visibility is filtered server-side (a
+           private repo the viewer cannot read never renders); order is the
+           JSON twin's repo-ascending keyset, and ?after= pages onward. */}}
+      <div class="repos-toolbar mb-2 mt-6 flex flex-wrap items-baseline justify-between gap-2 border-b border-[var(--pd-line)] pb-2">
+        <h3 class="text-base font-semibold">Starred repositories</h3>
+        <span class="eyebrow">A → Z</span>
+      </div>
+      {{if .Data.Rows}}
+      <ul class="grid grid-cols-1 gap-x-6 gap-y-0.5 sm:grid-cols-2">
+        {{range .Data.Rows}}
+        {{template "public_repo_row" (dict "Full" .Full "VisibilityLabel" .VisibilityLabel "VisibilityTitle" .VisibilityTitle "Mirror" .Mirror "MirrorTitle" .MirrorTitle "HasStars" .HasStars "Stars" .Stars "At" .At "Empty" .Empty)}}
+        {{end}}
+      </ul>
+      {{if .Data.MoreAfter}}<p class="mt-3 text-sm"><a class="link font-mono text-xs" href="/{{.Data.Owner}}/starred?after={{urlquery .Data.MoreAfter}}">older starred repositories →</a></p>{{end}}
+      {{else}}
+      <div class="empty-state" role="status">
+        <p class="empty-title">No starred repositories</p>
+        <p class="empty-hint">{{if .Data.MoreAfter}}nothing readable on this page — <a class="link" href="/{{.Data.Owner}}/starred?after={{urlquery .Data.MoreAfter}}">continue</a>{{else}}star a repository with the ☆ button to see it here.{{end}}</p>
+      </div>
+      {{end}}
       {{end}}
 
       {{if eq .Data.View "repos"}}
@@ -129,6 +170,11 @@
           <div class="profile-avatar shrink-0">
             <img src="{{.Data.AvatarURL}}" alt="" width="96" height="96" class="h-24 w-24 rounded-full ring-1 ring-zinc-300 dark:ring-zinc-600">
           </div>
+          {{else}}
+          {{/* No avatar installed (or generation has not run yet): the same
+               initials chip the identity menu uses, so the profile keeps its
+               visual anchor and the owner can recognize the surface. */}}
+          <div class="profile-avatar flex h-24 w-24 shrink-0 items-center justify-center rounded-full bg-zinc-700 text-2xl font-semibold text-zinc-50 ring-1 ring-zinc-600" aria-hidden="true">{{.Data.Initials}}</div>
           {{end}}
           {{if or .Data.CanEdit .Data.CanRegenAvatar}}
           {{if .Data.AvatarURL}}<hr class="w-full border-[var(--pd-line)]">{{end}}

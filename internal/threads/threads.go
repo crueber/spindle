@@ -1,24 +1,41 @@
-// Package threads implements the server half of docs/features/15_threads.md
-// (milestone T1): workflow discovery from the repository at a trust-selected
-// commit, bucket-native run/job records, and the checks mirror the existing
-// merge gate already consumes. There is no runner, no container execution, no
-// secrets and no log streaming here — those are T2/T3 and the record shapes
-// below leave room for them without a migration.
+// Package threads implements the server half of docs/features/15_threads.md:
+// workflow discovery from the repository at a trust-selected commit,
+// bucket-native run/job records carrying a versioned execution Spec, the checks
+// mirror the existing merge gate consumes, and pass B1's runner protocol — a
+// bucket queue with CAS claims and leases, per-attempt HMAC tokens, idempotent
+// log frames with an SSE attach, write-only repository secrets sealed with
+// AES-256-GCM, and cancel/rerun. Container execution (the runner's own job) is
+// pass B2 and is not here.
+//
+// Triggers: push (client and the merge task's server-side publish),
+// pull_request (opened/synchronize/reopened; never close) and
+// workflow_dispatch. The pulls service emits the PR edges through its
+// PullEvents seam; composition binds every trigger to one CreateRun path.
+// Parsing is per file, so a broken workflow disables only itself and its error
+// is visible in the UI/API (15 §2.1).
 //
 // Seams (docs/go/14_extensibility.md):
-//   - Seam 1 (routes): Handler.Handle fronts the core mux on both lanes,
-//     exactly like internal/checks and the other feature packages.
+//   - Seam 1 (routes): Handler.Handle fronts the core mux on both lanes for the
+//     repo surface, and claims the top-level /api/v1/threads paths for the
+//     runner protocol (runners are infrastructure, not repo-scoped users).
+//   - Seam 4 (event sinks): the pulls service's PullEvents/BranchPublished
+//     hooks feed run creation from the PR lifecycle and the merge publish.
 //   - Seam 5 (task kinds): KindThreadsGC is registered by composition; its
 //     body (log/record retention) is T3 because log frames do not exist yet.
 //
-// Bucket layout (15 §2; no state outside the object store):
+// Bucket layout (15 §2/§2.2; no state outside the object store):
 //
-//	repos/<o>/<r>/threads/runs/<run_id>.json              run header (commit, event, workflow, state)
-//	repos/<o>/<r>/threads/runs/<run_id>/jobs/<job_id>.json job record (labels, steps, attempt, state)
+//	repos/<o>/<r>/threads/runs/<run_id>.json                  run header (commit, event, workflow, state)
+//	repos/<o>/<r>/threads/runs/<run_id>/jobs/<job_id>.json    job record (labels, spec, attempt, state)
+//	repos/<o>/<r>/threads/runs/<r>/jobs/<j>/log/<a>-<seq>     immutable log frames
+//	repos/<o>/<r>/threads/queue/<seq>.json                    queue entry (CAS-claimed)
+//	repos/<o>/<r>/threads/queue/head.json                     dispatch head (bounded pending window)
+//	repos/<o>/<r>/threads/runners/<id>.json                   runner registry (labels, last seen)
+//	repos/<o>/<r>/threads/secrets/<name>.json                 sealed secret envelopes
+//	users/<principal>/tokens/threads/<id>.json                runner credentials (hash only)
 //
-// The `queue/` and `log/` families from 15 §2 belong to T2/T3 and are not
-// written here. Bucket compatibility with the Rust implementation is not
-// involved (this family is new); the key layout is the spec's.
+// Bucket compatibility with the Rust implementation is not involved (this
+// family is new); the key layout is the spec's.
 //
 // ### Concurrency
 //
@@ -89,12 +106,45 @@ type Service struct {
 	Checks CheckSink
 	// Now is the clock (tests pin it).
 	Now func() time.Time
+	// keys is the protocol keyring (attempt-token HMAC + secret sealing).
+	keys *Keyring
+	// Approvals is the first-time-contributor evidence source (pulls'
+	// merged-author projection, one exact-key GET). Nil holds every gated run
+	// (fail closed) rather than letting an unknown contributor execute.
+	Approvals ApprovalPolicy
+	// ApproveFirstTimeForks enables the gate (threads.approve_first_time_forks;
+	// default true, set by composition from config).
+	ApproveFirstTimeForks bool
+	// DefaultPermissions is the job-token default when a workflow declares no
+	// `permissions:` (threads.default_permissions; "" = read).
+	DefaultPermissions string
+	// Retention is the terminal-run window (threads.retention; default 30d).
+	// The maintainer's threads-gc retention half deletes runs past it (gc.go).
+	Retention time.Duration
 }
 
-// New builds a Service over st.
+// New builds a Service over st. The protocol keys default to a process-local
+// keyring (attempt tokens live exactly as long as the jobs they authorise);
+// composition replaces it with the configured one via SetKeyring.
 func New(st store.ObjectStore, roles RoleService) *Service {
-	return &Service{Store: st, Roles: roles, Now: time.Now}
+	s := &Service{Store: st, Roles: roles, Now: time.Now}
+	if k, err := NewKeyring("", ""); err == nil {
+		s.keys = k
+	}
+	return s
 }
+
+// SetKeyring installs the configured protocol keys and returns the keyring (so
+// composition can log the ephemeral warning once).
+func (s *Service) SetKeyring(k *Keyring) *Keyring {
+	if k != nil {
+		s.keys = k
+	}
+	return s.keys
+}
+
+// Keyring returns the installed keyring (nil before New).
+func (s *Service) Keyring() *Keyring { return s.keys }
 
 // nowUTC is the clock, UTC.
 func (s *Service) nowUTC() time.Time {
@@ -283,7 +333,7 @@ func statusFor(err error) int {
 		return http.StatusUnauthorized
 	case errors.Is(err, ErrForbidden):
 		return http.StatusForbidden
-	case errors.Is(err, ErrConflict):
+	case errors.Is(err, ErrConflict), errors.Is(err, errSuperseded):
 		return http.StatusConflict
 	case errors.Is(err, ErrUnprocessable):
 		return http.StatusUnprocessableEntity

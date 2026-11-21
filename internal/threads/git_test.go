@@ -161,6 +161,32 @@ func TestSubprocessGitFailures(t *testing.T) {
 	}
 }
 
+// TestSubprocessGitDefaultBranch pins the scheduler's branch naming argv
+// (`git symbolic-ref --quiet --short HEAD`): a real checkout names its branch,
+// a detached HEAD reports nothing (never an error).
+func TestSubprocessGitDefaultBranch(t *testing.T) {
+	dir, _ := gitFixture(t)
+	g := newGitReader(t, dir)
+	branch, err := g.DefaultBranch(context.Background(), "o/r")
+	if err != nil || branch != "main" {
+		t.Fatalf("DefaultBranch = %q, %v (want main)", branch, err)
+	}
+	// Detached HEAD: no branch, no error.
+	cmd := exec.Command("git", "checkout", "-q", "--detach", "HEAD")
+	cmd.Dir = dir
+	cmd.Env = append(os.Environ(), "HOME="+t.TempDir())
+	if out, cerr := cmd.CombinedOutput(); cerr != nil {
+		t.Fatalf("detach: %v\n%s", cerr, out)
+	}
+	if branch, err := g.DefaultBranch(context.Background(), "o/r"); err != nil || branch != "" {
+		t.Fatalf("detached DefaultBranch = %q, %v", branch, err)
+	}
+	// Unknown repo: fail closed.
+	if _, err := g.DefaultBranch(context.Background(), "other/repo"); err == nil {
+		t.Fatal("unknown repo accepted")
+	}
+}
+
 func TestSubprocessGitMissingWorkflowDirIsEmpty(t *testing.T) {
 	dir := t.TempDir()
 	runGit := func(argv ...string) string {

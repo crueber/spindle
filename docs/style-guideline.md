@@ -95,11 +95,14 @@ pairs hold ≥ 4.5:1 in both themes.
 
 **F3 — Amber means *action*, never *link*.** Exactly one primary action per
 page owns the accent (`pages/collab/issues.html` toolbar remains the reference).
-Links are ink: `--pd-text` with a 1 px underline at 40 % opacity that goes solid
-on hover and takes the accent on focus. `.link` keeps its role as the one
-text-action treatment but is no longer emerald. Amber on *state* is forbidden:
-an issue is open (`--pd-ok`), merged (violet-free: `--pd-text-2` on
-`--pd-raised`), or closed (`--pd-danger`).
+On repository pages the masthead Clone is that action only when the page body
+has no primary of its own; a page with New issue / New pull request / Save /
+Comment / Create tag demotes Clone to a secondary `.btn` (the audit F1 nit —
+two amber CTAs read as two equal actions). Links are ink: `--pd-text` with a
+1 px underline at 40 % opacity that goes solid on hover and takes the accent on
+focus. `.link` keeps its role as the one text-action treatment but is no longer
+emerald. Amber on *state* is forbidden: an issue is open (`--pd-ok`), merged
+(violet-free: `--pd-text-2` on `--pd-raised`), or closed (`--pd-danger`).
 
 **F4 — Flat panes, hairline depth.** Radius never exceeds 4 px (`--radius-sm:
 2px`, `--radius-md: 3px`, `--radius-lg: 4px`, `--radius-xl: 6px`). Cards carry
@@ -243,6 +246,14 @@ danger-styled section (`partials/settings_repo.html`, `pages/settings/org.html`)
 Stacks full-width above the content below `sm:`, side-by-side rows at `sm:`–`lg:`,
 sticky sidebar at `lg:`+.
 
+**Webhook panel** (`partials/settings_webhooks.html`, WP6.2) — the one canonical
+create-form + hooks table + per-hook deliveries table used by repo settings and
+the org Webhooks tab. One `.primary` (create); row actions are `link text-xs`;
+delete is a `<details>` with the typed-id confirmation (`data-danger-expected`)
+and `.btn danger`; deliveries render in their own `overflow-x-auto` `data-table`
+(status, `duration_ms`, at, redeliver-or-retained-note). Never fork this markup
+per surface — pass the plumbing (`SettingsWebhookPanel`) instead.
+
 ## 3. Page anatomy — the issues list is the canonical reference
 
 `internal/webui/templates/pages/collab/issues.html` is the reference
@@ -293,7 +304,10 @@ top to bottom:
 
 1. **Masthead** (`partials/repo_header.html`): `owner / name`, visibility chip,
    description, a monospace meta line (branch and tag counts), then the quiet
-   counters and the page's ONE `.btn.primary` (Clone). No ref pill (§3).
+   counters and — on pages with no body primary — the page's ONE `.btn.primary`
+   (Clone). A page that owns a primary action (New issue, New pull request,
+   Save, Comment, Create tag) renders Clone as a secondary `.btn` (F3). No ref
+   pill (§3).
 2. **Tab strip** (`partials/repo_tabs.html`): active tab = amber bottom border.
 3. **Toolbar**: branch selector, monospace path breadcrumb (only below the
    root), and the directory filter (`data-filter` → `web/src/islands/filter.js`,
@@ -375,6 +389,14 @@ are never used for state.
   gutter; stacks to one column on phones. Native `<details>` for collapsible
   Advanced groups (issue #168 — `.setup-advanced`; collapsed rows stay mounted
   so the save payload is complete).
+- **Struct-slice row editors** (`.setup-rows` / `.setup-rows-legend`,
+  `partials/settings_setup.html`; `internal/setup/rows.go`): a repeating value
+  (static auth tokens, bundle strategies) is one bordered fieldset per element
+  with the element's name as the legend, its cells in a one/two-column grid of
+  labelled inputs/switch pairs, and a per-row "remove this row" checkbox; a
+  blank "new row" fieldset is always last (fill it to add — no JS required).
+  Secret cells use a `type="password"` input holding the mask; the save path is
+  the same `Coerce` path as a scalar key.
 - **Composers** (issues #34/#49): centered `max-w-2xl` page
   (`pages/forms/issue_new.html`, `pages/forms/release_new.html`), section
   fieldsets with per-field help, inline `role="alert"` error line — no native
@@ -397,7 +419,19 @@ are never used for state.
   wrapper so it scrolls in place (issue #275); rows inside such wrappers stay
   single-line via the `.overflow-x-auto .data-table td` nowrap rule. `kv`
   tables are deliberately unwrapped (cells wrap; `break-words` contains
-  unbroken strings — §F4).
+  unbroken strings — §F4). A table whose cells are prose rather than values
+  opts into `.data-table.wrap` (the effective-policy Effect summary): the
+  shared rule turns nowrap off, declared after the wrapper rule so the wrap
+  intent wins, and the card still carries `min-w-0` + the wrapper for 390 px.
+  A scroll wrapper must live in a `min-w-0` ancestor: a grid/flex item's
+  automatic minimum width is its content, so without `min-w-0` the wrapper
+  stretches to the table and the PAGE pans instead of the table scrolling.
+  A scroll wrapper that contains `.sr-only` (absolutely positioned) must also
+  be `relative` — otherwise the span's containing block is the page, and its
+  static position in a far column keeps `documentElement.scrollWidth` wide
+  even though the table itself is clipped.
+  The combination `relative overflow-x-auto` is the canonical wrapper for any wide table
+  added inside a grid page (docs/features/14 §7).
 - **`.tree-table`** (issue #223, `web/src/app.css`;
   `pages/repo/tree.html`): no header row, no type column — the mode lead char +
   icons carry the kind. Every column but the name hugs its content (`w-px` +
@@ -426,7 +460,16 @@ are never used for state.
   file's coordinates server-side (`internal/webui/markdown.go`) and `#N`/`PRN`
   autolinks to their threads (Forgejo #340), as do `@username` mentions
   (`linkifyMentions` was the SPA helper; the Go renderer owns the rule now,
-  docs/features/06).
+  docs/features/06). **It fills its card** — README/blob preview, issue and PR
+  bodies, comments, release notes, owner bios, commit bodies and doc tabs all
+  use the full width of the column they sit in, the way GitHub's do. The base
+  class carries no `max-width`/`width`/auto-margin measure cap; containment is
+  per-media (images `max-width:100%; height:auto`, wide tables and `<pre>`
+  scroll inside their own box), so the page never pans. A width cap on this
+  class is a regression: `web/test/unit/markdown-width.test.js` pins it, and
+  no template may pair `markdown-body` with a `w-*`/`max-w-*` utility. A parent
+  that is a genuine column (the issue conversation column beside the details
+  sidebar, a `max-w-2xl` form card) constrains the CARD; the body fills it.
 - **Dates** (issues #133/#312): every timestamp renders through the ONE `rel`
   template helper (`internal/webui/helpers.go`) into a real `<time
   datetime="…" title="…">` — compact relative text, exact stamp and local wall
@@ -523,7 +566,9 @@ Tailwind-only rule.
   product legible as a tool — dense rows, monospace identifiers, one amber
   action accent, a repo status strip. Two things carried over from the other
   proposals: B's ~72ch reading measure for rendered markdown (`.markdown-body`)
-  and C's rule that a shared class, not a page, owns shape. The raw Tailwind
+  — **SUPERSEDED 2026-11-21: the cap is removed; the markdown body fills its
+  card (GitHub parity, §2)** — and C's rule that a shared class, not a page,
+  owns shape. The raw Tailwind
   ramps (`zinc`, `emerald`, `amber`) are retuned in `@theme` so the hundreds of
   inline utilities in templates adopt the palette without a per-file edit; the
   semantic `--pd-*` roles are what components use. Nothing in the component

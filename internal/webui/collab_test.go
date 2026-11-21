@@ -281,6 +281,47 @@ func issueDeps() CollabDeps {
 func ptr(s string) *string { return &s }
 func intPtr(n int) *int    { return &n }
 
+// TestListRowsShareAnatomy is the foundations-audit F8 alignment: the issue
+// list and the PR list read the same — number + title, a state chip that is
+// ALWAYS present (open is never implied by absence), labels, and a right-hand
+// meta run of author · age plus the comment count.
+func TestListRowsShareAnatomy(t *testing.T) {
+	bindChromeProjections(t)
+	t.Run("issues", func(t *testing.T) {
+		f := newCollabFixture(t)
+		f.principal = auth.Principal{Name: "alice", Write: true}
+		f.deps(issueDeps())
+		body := bodyText(f.get("/acme/widgets/issues"))
+		for _, want := range []string{
+			`#3 Crash on save</a>`,
+			`<span class="chip chip-open">open</span>`,
+			`aria-label="2 comments"`,
+			"alice · ",
+			"bug", // label chip
+		} {
+			if !strings.Contains(body, want) {
+				t.Fatalf("issue row missing %q", want)
+			}
+		}
+	})
+	t.Run("pulls", func(t *testing.T) {
+		f := newCollabFixture(t)
+		f.principal = auth.Principal{Name: "alice", Write: true}
+		f.deps(pullDeps())
+		body := bodyText(f.get("/acme/widgets/pulls?state=all"))
+		for _, want := range []string{
+			`#5 Add cache</a>`,
+			`<span class="chip chip-merged">merged</span>`,
+			`aria-label="3 comments"`,
+			"alice · ",
+		} {
+			if !strings.Contains(body, want) {
+				t.Fatalf("pull row missing %q", want)
+			}
+		}
+	})
+}
+
 // --- issues list -------------------------------------------------------------
 
 func TestCollabIssuesList(t *testing.T) {
@@ -489,7 +530,8 @@ func pullDeps() CollabDeps {
 		PullsList: func(context.Context, string, string, auth.Principal, pulls.ListFilter) (*pulls.ListResult, error) {
 			return &pulls.ListResult{Pulls: []pulls.PROut{{
 				Num: 5, Title: "Add cache", State: "closed", Author: "alice",
-				BaseRef: "main", HeadRef: "feat", Merged: true, UpdatedAt: "2026-11-18T09:30:00Z",
+				BaseRef: "main", HeadRef: "feat", Merged: true, CommentCount: 3,
+				UpdatedAt: "2026-11-18T09:30:00Z",
 			}}}, nil
 		},
 		PullGet: func(context.Context, string, string, int, auth.Principal, int, int) (*pulls.PullView, error) {

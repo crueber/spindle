@@ -11,7 +11,30 @@
     <h3 class="card-header">Access restricted</h3>
     <p class="text-sm">This host requires an admin principal to view or change configuration.</p>
     {{if .Data.Detail}}<pre class="code-view whitespace-pre-wrap break-words p-3">{{.Data.Detail}}</pre>{{end}}
-    <p class="muted text-sm">Sign in with an account in the configured admin group (default <code class="mono text-xs">spindle-admins</code>, set by <code class="mono text-xs">server.auth.admin_groups</code>), or with an address matching <code class="mono text-xs">server.auth.admin_emails</code> / <code class="mono text-xs">admin_domains</code>, then reload this page. There is no setup-token escape hatch.</p>
+    {{if .Chrome.SignedIn}}
+    <p class="muted text-sm">You are signed in as <strong>{{.Chrome.Principal.Name}}</strong>, but this account is not a host admin. Ask an admin to add you to <code class="mono text-xs">server.auth.admin_groups</code> / <code class="mono text-xs">admin_emails</code>, or to make the change for you.</p>
+    {{else if eq .Data.AuthMode "token"}}
+      {{if .Data.TokenSignIn}}
+      <p class="muted text-sm">This host uses static tokens. Paste an <strong>admin</strong> token (a <code class="mono text-xs">[[server.auth.tokens]]</code> row with <code class="mono text-xs">admin = true</code>) to start a browser session and unlock this page.</p>
+      <form class="flex flex-wrap items-end gap-2" method="post" action="/_auth/token">
+        <input type="hidden" name="next" value="/setup">
+        <label class="grid min-w-0 flex-1 gap-1 text-sm" for="setup-signin-token">
+          <span class="text-sm font-medium">Admin token</span>
+          <input class="input mono w-full" id="setup-signin-token" name="token" type="password" autocomplete="off" required>
+        </label>
+        <button type="submit" class="btn">Sign in</button>
+      </form>
+      <p class="muted text-[11px]">The session is a signed <code class="mono text-xs">walgit_session</code> cookie (<code class="mono text-xs">server.auth.session_secret</code>); removing the token revokes it on the next request. There is no setup-token escape hatch.</p>
+      {{else}}
+      <p class="muted text-sm">This host uses static tokens but has no <code class="mono text-xs">server.auth.session_secret</code>, so browser sign-in cannot mint a session. Two ways forward:</p>
+      <ol class="muted list-decimal space-y-1 pl-5 text-sm">
+        <li>Edit <code class="mono text-xs">spindle.toml</code> on the server: set <code class="mono text-xs">server.auth.session_secret</code> to at least 32 random bytes (<code class="mono text-xs">openssl rand -hex 32</code>) and restart — this page then offers token sign-in.</li>
+        <li>Use the JSON API with an admin token: <code class="mono text-xs">curl -H 'Authorization: Bearer &lt;token&gt;' .../api/v1/setup</code> (or <code class="mono text-xs">PUT /api/v1/setup</code> to validate and save).</li>
+      </ol>
+      {{end}}
+    {{else}}
+    <p class="muted text-sm">Sign in with an account in the configured admin group (default <code class="mono text-xs">spindle-admins</code>, set by <code class="mono text-xs">server.auth.admin_groups</code>), or with an address matching <code class="mono text-xs">server.auth.admin_emails</code> / <code class="mono text-xs">admin_domains</code>, then reload this page. <a class="link" href="/_auth/login?next=%2Fsetup">Sign in</a>. There is no setup-token escape hatch.</p>
+    {{end}}
   </section>
   {{else}}
   {{if eq .Data.View.FileState "invalid"}}
@@ -24,6 +47,7 @@
   {{if .Data.Saved}}
   <div class="card border-l-2 border-l-[var(--pd-ok)] p-3 text-sm">
     <strong class="font-semibold">Written to &lt;data-dir&gt;/spindle.toml.</strong>
+    {{if .Data.Backup}}<p class="mt-1">The previous file was kept beside it as <code class="mono text-xs">{{.Data.Backup}}</code>.</p>{{end}}
     {{if .Data.RequiresRestart}}
     <p class="mt-1">Restart required for: <span class="mono text-xs break-all">{{range $i, $k := .Data.RequiresRestart}}{{if $i}}, {{end}}{{$k}}{{end}}</span> (the server list is authoritative; live keys take effect immediately).</p>
     {{else}}<p class="mt-1">No key in this save requires a restart.</p>{{end}}
@@ -64,6 +88,7 @@
       <button type="submit" class="btn" name="op" value="validate">Validate</button>
       <button type="submit" class="btn primary" name="op" value="save">Save</button>
     </div>
+    <p class="muted text-[11px]">Save writes the <strong>full canonical</strong> <code class="mono text-xs">spindle.toml</code> document — comments in a hand-written file are not preserved by the TOML encoder. The first save that rewrites an existing file keeps the previous text beside it as <code class="mono text-xs">spindle.toml.bak-&lt;utc&gt;</code> (once; a save that changes nothing writes no file).</p>
 
     {{range .Data.View.Sections}}{{template "settings-setup-section" .}}{{end}}
   </form>

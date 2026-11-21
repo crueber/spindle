@@ -400,8 +400,12 @@ URL → pkt-line refusal before any work), takes the per-repo `server.max_concur
 then calls this flow. Request/response may be gzip `Content-Encoding` (handled in doc 06); git responses
 carry the no-cache header triple (doc 06).
 
-1. **Parse the request** from the full body: first pkt-line `<old> <new> <ref>\0<caps>`, then further
-   `<old> <new> <ref>` lines until flush; `shallow <oid>` lines collected (NOT enforced); caps parsed:
+1. **Parse the request** from the full body: a leading `shallow <oid>` section (a push from a shallow
+   clone) is REFUSED with `git.ErrShallowPush` — receive-pack v1 does not advertise `shallow`, so the
+   exchange cannot succeed, and the refusal names the cause and the remedy (`fetch-depth: 0` /
+   `git fetch --unshallow`) instead of a bad-command-line protocol error (closing-audit Observation 2;
+   see the Decisions entry). Otherwise: first pkt-line `<old> <new> <ref>\0<caps>`, then further
+   `<old> <new> <ref>` lines until flush; caps parsed:
    `report-status`, `report-status-v2` (parsed but option lines deliberately never emitted, §7.8 step 8),
    `side-band-64k`, `atomic`, `quiet`, `push-options`, `ofs-delta`, `agent=`, `object-format=` (validate
    against repo format; mismatch → refuse). If the client sent `push-options` (and we advertise it):
@@ -614,20 +618,28 @@ request under a dedicated bounded pool (never the control-plane pool):
 
 ```
 git rev-parse --verify --quiet --end-of-options <ref>^{tree}     # tree id ⇒ ETag
-git archive --format=tar --prefix=<repo>/ <ref>^{tree}           # .tar.gz lane (no flags)
+git archive --format=tar --prefix=<repo>/ <ref>^{tree}           # .tar.gz lane (plain tar; gzipped in-process)
 git archive --format=zip -0 --prefix=<repo>/ <ref>^{tree}        # .zip lane (-0 = store, no deflate)
 ```
+
+The `.tar.gz` lane pipes the tar stream through a `compress/gzip.Writer` as it arrives (no whole
+archive is buffered): git produces the reproducible tar bytes, Go compresses them. The response is a
+real gzip stream (`1f 8b`), and decompressing it yields bytes byte-identical to `git archive
+--format=tar` run locally against the same tree (pinned by `internal/archive`'s test, which also
+compares the tar entry listing). Naming either lane `.tar.gz` without the gzip stage is a bug —
+every archive tool opens the body by extension.
 
 `<ref>` is a branch, tag, or full 40/64-hex commit; slashes in refs arrive as extra URL path segments and
 are re-joined before resolution; the ref is validated (no leading `-`, no refname metacharacters, no
 `..`/`@{`/`//`) and `--end-of-options` closes the option-injection hole. The ETag is
 `"<tree-id>-<format>"`, so two refs naming the same tree revalidate against each other. Tar output is
-byte-identical to `git archive` run locally against the same tree (commit mtime is the entry mtime). Zip
-output is also byte-identical to `git archive --format=zip -0` locally on the same git build; `-0` is the
-one flag difference from a hand-run `git archive --format=zip` (which deflates), chosen so the bytes do not
-depend on the zlib compressor version and the server spends no CPU compressing an archive that is already
-incompressible at the transfer layer. Streaming means no `Content-Length` and no `Range`: archives are
-generated, not stored (law 4 — a derived stream is not state).
+byte-identical to `git archive` run locally against the same tree (commit mtime is the entry mtime) —
+before the gzip stage. Zip output is also byte-identical to `git archive --format=zip -0` locally on the
+same git build; `-0` is the one flag difference from a hand-run `git archive --format=zip` (which
+deflates), chosen so the bytes do not depend on the zlib compressor version and the server spends no CPU
+compressing an archive that is already incompressible at the transfer layer. Streaming means no
+`Content-Length` and no `Range`: archives are generated, not stored (law 4 — a derived stream is not
+state).
 
 ### 11.4 Tag listing (`for-each-ref`, PLAN-V1 WP4.1)
 
@@ -898,3 +910,46 @@ never on a git hot path — and they never write a ref, object, or worktree.
   one entry, never a dangling ref. Rationale: `--not --all` (the
   rev-list spelling) is a usage error in pack-objects (exit 129); caret
   lines are the stdin-native exclusion.
+- **NEW (2026-11-21) — a refused pack terminates the exchange (audit V1
+  open item: "rejected pack left the push client hanging").** Two defects
+  met here; both are closed in `internal/server` and pinned by
+  `internal/e2e/pushreject_test.go` + `internal/server/pushterm_test.go`:
+  1. **`thin=true` is unconditional, exactly as §3.2/§7 step 2 already
+     said.** The code had keyed `--fix-thin` on the client requesting a
+     `thin-pack` capability, but receive-pack never advertises it (the v0
+     cap list is the §6 receive-pack row) and `git send-pack` builds a
+     thin pack by DEFAULT regardless — stock receive-pack therefore always
+     ingests with `--fix-thin`. Keying on the cap rejected every
+     incremental push carrying a cross-pack delta with `pack has N
+     unresolved deltas`; a fresh repo (no external bases) hid it.
+  2. **Every refusal writes the negotiated report** (§7.2): `git push`
+     requests ONLY `report-status-v2` when it is advertised, and the
+     refusal path tested `report-status` alone, so it wrote the band-2
+     message and returned — the client blocked reading a status stream
+     that never ended. `PushRequest.WantsReport` (either cap) is the
+     gate, and the trailer carries one `ng <ref> unpacker error` line per
+     command (stock receive-pack's shape; without it git prints "remote
+     failed to report status" instead of naming the refused ref). The
+     connectivity refusal uses the same trailer with the missing-object
+     reason per ref.
+  3. **The HTTP push exchange is bounded** by `server.request_timeout`
+     (doc 11 §2 — until now an unused "documented cap"): one absolute
+     read+write deadline covers the body read and the result write, so a
+     client that trickles an upload or stops reading the report cannot
+     pin the handler; a ResponseWriter that cannot carry deadlines
+     ignores the call. SSH needs no equivalent: the session channel ends
+     with the handler and the ingest is bounded by `git.ingest_timeout`.
+     The git subprocess is reaped on the error path (`cmd.Run` =
+     start+wait; `TestIngestReapsIndexPack` asserts no child survives).
+- **NEW (2026-11-21) — a shallow push is refused legibly (closing-audit Observation 2).** `git push`
+  from a shallow clone opens the request with a `shallow <oid>` section; the v1 advertisement has no
+  `shallow` capability, so no server-side ingest can make the exchange valid. `parsePushCommands` now
+  returns `git.ErrShallowPush` (whose message names the fix: `git fetch --unshallow`, and
+  `with: fetch-depth: 0` for a Threads workflow checkout) instead of failing the first line as
+  `bad push command line`, and the servers surface it as a refusal, not a generic protocol error:
+  HTTP answers the git wire's ERR packet (status 200, so `git` prints `remote: …` in the job log) and
+  SSH returns the same sentence; both log a Warn with repo and principal. A leading-section-only
+  `git.ParseShallowSection` detects it without reading pack bytes. This is a refusal, not capability
+  support — advertising `shallow` remains a follow-up. Gates: `TestParsePushRequestShallowRefused`,
+  `TestParseShallowSection`, `TestPushFromShallowCloneNamesCauseAndRemedy`,
+  `TestSSHReceivePackShallowCloneNamesRemedy`.

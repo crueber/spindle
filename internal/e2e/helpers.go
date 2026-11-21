@@ -2,7 +2,9 @@ package e2e
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -280,6 +282,41 @@ func (g *gitClient) commitFile(dir, path, content, msg string) string {
 	g.run(dir, "add", path)
 	g.run(dir, "commit", "-m", msg)
 	return strings.TrimSpace(g.run(dir, "rev-parse", "HEAD"))
+}
+
+// cmdDeadline runs one git command under a hard deadline and returns its exit
+// code plus combined output. A command that outlives the deadline fails the
+// test instead of hanging the suite — the shape a protocol regression takes
+// (a client blocked reading a status stream that never ends).
+func (g *gitClient) cmdDeadline(d time.Duration, dir string, args ...string) (int, string) {
+	g.t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), d)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "git", args...)
+	cmd.Dir = dir
+	// Killing git on the deadline leaves its remote helper (git-remote-http)
+	// holding the stdout pipe; without WaitDelay the pipe copy would block on
+	// the orphan and the "deadline" would never return.
+	cmd.WaitDelay = 10 * time.Second
+	cmd.Env = append(os.Environ(),
+		"GIT_TERMINAL_PROMPT=0",
+		"GIT_CONFIG_GLOBAL="+filepath.Join(g.sandbox, "gitconfig"),
+		"GIT_CONFIG_NOSYSTEM=1",
+		"HOME="+g.sandbox,
+		"XDG_CONFIG_HOME="+filepath.Join(g.sandbox, ".config"),
+	)
+	out, err := cmd.CombinedOutput()
+	if ctx.Err() != nil {
+		g.t.Fatalf("git %v exceeded %v (client hang):\n%s", args, d, out)
+	}
+	if err == nil {
+		return 0, string(out)
+	}
+	var ee *exec.ExitError
+	if !errors.As(err, &ee) {
+		g.t.Fatalf("git %v: %v\n%s", args, err, out)
+	}
+	return ee.ExitCode(), string(out)
 }
 
 // lsRemote runs git ls-remote (with extra args such as --tags or a URL) and

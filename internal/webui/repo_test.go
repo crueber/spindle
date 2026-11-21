@@ -19,7 +19,9 @@ import (
 	"golang.org/x/net/html"
 
 	"github.com/crueber/spindle/internal/api"
+	"github.com/crueber/spindle/internal/checks"
 	"github.com/crueber/spindle/internal/config"
+	"github.com/crueber/spindle/internal/forksync"
 	"github.com/crueber/spindle/internal/git"
 	"github.com/crueber/spindle/internal/pages"
 	"github.com/crueber/spindle/internal/server/auth"
@@ -450,7 +452,7 @@ func TestRepoTreeRootRendersListing(t *testing.T) {
 		t.Error("tree page lost the in-place scroll wrapper")
 	}
 	// Tab strip: Code..Settings in order, Code active at the root.
-	if got, want := strings.Join(tabIDs(t, body), ","), "code,commits,tags,issues,pulls,threads,releases,settings"; got != want {
+	if got, want := strings.Join(tabIDs(t, body), ","), "code,commits,tags,packages,issues,pulls,threads,releases,settings"; got != want {
 		t.Errorf("tabs = %s, want %s (Checks hidden: has_checks=false)", got, want)
 	}
 	if got := activeTabOf(t, body); got != "code" {
@@ -739,6 +741,38 @@ func TestRepoCommitsEmptyWindowAndGraph(t *testing.T) {
 	}
 	if !strings.Contains(body, "Graph lanes derive per page") {
 		t.Error("graph note missing")
+	}
+}
+
+// TestCommitPageChecksPanel pins the commit-detail checks panel (round-2 pass
+// 2): the combined state and one row per context render from the SAME combined
+// view the checks page and the PR box use, and a commit nobody reported for
+// shows no panel (the checks page owns the zero state).
+func TestCommitPageChecksPanel(t *testing.T) {
+	f := newRepoFixture(t, true)
+	sha := strings.Repeat("a", 40)
+	f.view.detail = api.CommitDetail{Commit: api.Commit{SHA: sha, Subject: "with checks", Author: "Ada"}}
+	prev := collabDeps.ChecksCombined
+	collabDeps.ChecksCombined = func(context.Context, string, string, string, auth.Principal) (*checks.CombinedView, error) {
+		return &checks.CombinedView{SHA: sha, State: "success", Statuses: []*checks.StatusDoc{{
+			SHA: sha, Context: "threads/ci/lint", State: "success",
+			Description: "CI / lint (run x)", Creator: "threads", UpdatedAt: "2026-11-21T00:00:00Z",
+		}}}, nil
+	}
+	t.Cleanup(func() { collabDeps.ChecksCombined = prev })
+	body := f.mustGet("/demo/spindle/commit/"+sha, http.StatusOK)
+	for _, want := range []string{"Checks", "threads/ci/lint", "CI / lint (run x)", "/demo/spindle/checks/" + sha} {
+		if !strings.Contains(body, want) {
+			t.Errorf("commit page checks panel missing %q", want)
+		}
+	}
+	// No reporter → no panel at all (not an empty card).
+	collabDeps.ChecksCombined = func(context.Context, string, string, string, auth.Principal) (*checks.CombinedView, error) {
+		return &checks.CombinedView{SHA: sha}, nil
+	}
+	body = f.mustGet("/demo/spindle/commit/"+sha, http.StatusOK)
+	if strings.Contains(body, "all contexts") {
+		t.Error("an empty checks view rendered a panel")
 	}
 }
 
@@ -1059,8 +1093,8 @@ func TestRepoTabGating(t *testing.T) {
 	f.view.summary.Features = &feats
 	f.view.summary.Health = api.RepoHealthHealthy
 	body := f.mustGet("/demo/spindle", http.StatusOK)
-	if got := strings.Join(tabIDs(t, body), ","); got != "code,commits,tags,pulls,threads,settings" {
-		t.Errorf("tabs = %s, want code,commits,tags,pulls,threads,settings", got)
+	if got := strings.Join(tabIDs(t, body), ","); got != "code,commits,tags,packages,pulls,threads,settings" {
+		t.Errorf("tabs = %s, want code,commits,tags,packages,pulls,threads,settings", got)
 	}
 
 	// A feature-disabled section re-highlights onto Code (#522). The path is
@@ -2204,5 +2238,62 @@ func TestInitialOf(t *testing.T) {
 		if got := initialOf(in); got != want {
 			t.Errorf("initialOf(%q) = %q, want %q", in, got, want)
 		}
+	}
+}
+
+// TestRepoChromeForkSyncOutcome pins the sync-fork outcome banner (audit
+// FAIL 3): the page reads the outcome sidecar, so a diverged sync shows the
+// upstream message AND the PR link — never just "Sync fork started".
+func TestRepoChromeForkSyncOutcome(t *testing.T) {
+	old := repoDeps
+	t.Cleanup(func() { repoDeps = old })
+	forks := map[string]forksync.Sidecar{
+		"diverged": {Result: forksync.ResultDiverged, Branch: "main",
+			Message: "main has commits that are not in demo/upstream; open a pull request to reconcile.",
+			PRURL:   "/demo/upstream/pulls/new?base=main&head=demo%2Fspindle%3Amain"},
+		"current":      {Result: forksync.ResultCurrent, Message: "Already up to date with demo/upstream."},
+		"fast-forward": {Result: forksync.ResultFastForward, Message: "Fast-forwarded main to abc123."},
+		"failed":       {Result: forksync.ResultFailed, Message: "fetch refused: host not allowed"},
+	}
+	for name, want := range forks {
+		t.Run(name, func(t *testing.T) {
+			repoDeps = RepoDeps{
+				ForkInfo: func(string, string) (api.ForkSummary, bool) {
+					return api.ForkSummary{Parent: "demo/upstream", Count: 1}, true
+				},
+				SyncOutcome: func(context.Context, string, string) (*forksync.Sidecar, error) {
+					doc := want
+					return &doc, nil
+				},
+			}
+			f := newRepoFixture(t, true)
+			body := f.mustGet("/demo/spindle", http.StatusOK)
+			for _, needle := range []string{want.Message, "fork of", "demo/upstream"} {
+				if !strings.Contains(body, needle) {
+					t.Errorf("header lacks %q", needle)
+				}
+			}
+			switch want.Result {
+			case forksync.ResultDiverged:
+				if !strings.Contains(body, "diverged") || !strings.Contains(body, "Open pull request") {
+					t.Error("diverged outcome lost its label or PR link")
+				}
+				if !strings.Contains(body, "/demo/upstream/pulls/new?base=main&amp;head=demo%2Fspindle%3Amain") {
+					t.Errorf("diverged PR link missing: %.1500s", body)
+				}
+			case forksync.ResultFailed:
+				if !strings.Contains(body, "sync failed") {
+					t.Error("failed outcome lost its label")
+				}
+			case forksync.ResultFastForward:
+				if !strings.Contains(body, "fast-forwarded") {
+					t.Error("fast-forward outcome lost its label")
+				}
+			case forksync.ResultCurrent:
+				if !strings.Contains(body, "up to date") {
+					t.Error("current outcome lost its label")
+				}
+			}
+		})
 	}
 }

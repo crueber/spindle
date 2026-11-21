@@ -69,6 +69,7 @@ type AuthService struct {
 	EmailLookup func(username string) (string, bool)
 }
 
+// NewAuthService builds the service and the resolved static-token table.
 func NewAuthService(a *config.Auth, now func() time.Time) *AuthService {
 	if now == nil {
 		now = time.Now
@@ -88,6 +89,28 @@ func NewAuthService(a *config.Auth, now func() time.Time) *AuthService {
 		s.jwks = NewJWKS(a.Issuer)
 	}
 	return s
+}
+
+// authChallenge is the 401 WWW-Authenticate value for this host. Static
+// tokens are also accepted over HTTP Basic (the password is the token, see
+// parseCredential), and git's credential machinery only offers a username/
+// password prompt when the 401 advertises Basic — so Basic joins the
+// challenge whenever static tokens are configured (audit: token-auth git over
+// a plain URL could never authenticate).
+func (s *AuthService) authChallenge() string {
+	if s != nil && len(s.static) > 0 {
+		return `Basic realm="walgit", Bearer realm="walgit"`
+	}
+	return `Bearer realm="walgit"`
+}
+
+// authChallenge is the nil-safe Server wrapper (tests build Servers without
+// an auth service).
+func (s *Server) authChallenge() string {
+	if s.authSvc == nil {
+		return `Bearer realm="walgit"`
+	}
+	return s.authSvc.authChallenge()
 }
 
 // credKind is where the client credential came from (§8.2).
@@ -164,9 +187,21 @@ func (s *AuthService) AuthenticateForwarded(r *http.Request, c *config.Config) (
 }
 
 // authToken is the §8.3 `token` tree.
+//
+// A request without an Authorization credential may still carry the
+// walgit_session cookie minted by the token-paste sign-in (POST /_auth/token,
+// §8.6): the session names a static principal, so the principal's rights are
+// re-derived from the LIVE server.auth.tokens set on every request (removing
+// the token kills the session; nothing is copied into the session wire beyond
+// the principal name). A bad/expired cookie falls through to anonymous exactly
+// like the OIDC tree — an explicit credential still wins, and an invalid one
+// never falls back.
 func (s *AuthService) authToken(r *http.Request) (auth.Principal, *auth.AuthError) {
 	cred, _ := resolveCredential(r)
 	if cred == "" {
+		if p, ok := s.sessionPrincipal(r); ok {
+			return p, nil
+		}
 		return auth.Anonymous(), nil // read gated by server.auth.anonymous_read
 	}
 	tok, basic, perr := parseCredential(cred)
@@ -383,6 +418,42 @@ func requireAdmin(p auth.Principal) *auth.AuthError {
 func (s *AuthService) BrowserLoginEnabled() bool {
 	return s.cfg.Mode == "oidc" && s.cfg.SessionSecret != "" &&
 		s.cfg.OAuthClientID != "" && s.cfg.OAuthClientSecret != ""
+}
+
+// TokenSignInEnabled reports the token-mode browser path: a token-paste form
+// mints a walgit_session, so it needs server.auth.session_secret to sign the
+// wire. Without the secret the page states the file/API recovery instead.
+func (s *AuthService) TokenSignInEnabled() bool {
+	return s.cfg.Mode == "token" && s.cfg.SessionSecret != ""
+}
+
+// StaticPrincipal resolves ONE raw static token exactly as the token-mode
+// credential chain does (server.auth.tokens, token_env resolved at startup).
+// The Seam 2 hook is deliberately not consulted: a CI/feature credential is
+// not a browser identity and must never mint a session.
+func (s *AuthService) StaticPrincipal(raw string) (auth.Principal, bool) {
+	p, ok := s.static[raw]
+	return p, ok
+}
+
+// sessionPrincipal resolves a walgit_session cookie to a token-mode principal:
+// the session carries the static principal NAME, and PrincipalForName re-derives
+// write/admin from the live tokens. Unknown principal / expired / bad MAC →
+// not authenticated (anonymous), never an in-band error.
+func (s *AuthService) sessionPrincipal(r *http.Request) (auth.Principal, bool) {
+	c, err := r.Cookie("walgit_session")
+	if err != nil || c.Value == "" {
+		return auth.Principal{}, false
+	}
+	st, aerr := s.VerifyToken(c.Value)
+	if aerr != nil || st.Kind != sessionKind || st.Email == "" {
+		return auth.Principal{}, false
+	}
+	p, perr := s.PrincipalForName(st.Email)
+	if perr != nil {
+		return auth.Principal{}, false
+	}
+	return p, true
 }
 
 // --- wgt_ tokens & sessions (§8.5) ---------------------------------------------------
@@ -1034,7 +1105,7 @@ func (s *Server) authCheck(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if p.Anonymous && !s.cfg.Server.Auth.AnonymousRead {
-		w.Header().Set("WWW-Authenticate", `Bearer realm="walgit"`)
+		w.Header().Set("WWW-Authenticate", s.authChallenge())
 		plainStatus(w, http.StatusUnauthorized, "authentication required")
 		return
 	}

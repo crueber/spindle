@@ -200,10 +200,14 @@ func TestTrustClassSelection(t *testing.T) {
 
 func TestCreateRunMalformedWorkflowWritesNothing(t *testing.T) {
 	e := newTestEnv(t)
+	e.git.files = map[string]map[string][]byte{}
 	e.git.add(testSHA, ".spindle/workflows/broken.yml", "on: [\n")
-	_, err := e.svc.CreateRun(ctx(), "o/r", testSHA, EventPush, CreateOpts{Branch: "main"})
-	if !errors.Is(err, ErrUnprocessable) {
-		t.Fatalf("err = %v (want ErrUnprocessable)", err)
+	runs, err := e.svc.CreateRun(ctx(), "o/r", testSHA, EventPush, CreateOpts{Branch: "main"})
+	if err != nil {
+		t.Fatalf("one broken file must not fail the call: %v", err)
+	}
+	if len(runs) != 0 {
+		t.Fatalf("a malformed workflow must write no run: %+v", runs)
 	}
 	ids, _ := e.svc.runIDs(ctx(), "o", "r")
 	if len(ids) != 0 {
@@ -211,6 +215,42 @@ func TestCreateRunMalformedWorkflowWritesNothing(t *testing.T) {
 	}
 	if len(e.checks.reports) != 0 {
 		t.Fatalf("a malformed workflow must write no check: %+v", e.checks.reports)
+	}
+}
+
+// TestCreateRunOneBadFileDoesNotDisableOthers pins per-file isolation (15
+// §2.1): the good workflow still creates its run, and the broken file's error
+// is visible through ListWorkflows.
+func TestCreateRunOneBadFileDoesNotDisableOthers(t *testing.T) {
+	e := newTestEnv(t)
+	e.git.files = map[string]map[string][]byte{}
+	e.git.add(testSHA, ".spindle/workflows/ci.yml", workflowYAML)
+	e.git.add(testSHA, ".spindle/workflows/broken.yml", "name: broken\non: [\n")
+	runs, err := e.svc.CreateRun(ctx(), "o/r", testSHA, EventPush, CreateOpts{Branch: "main"})
+	if err != nil {
+		t.Fatalf("CreateRun: %v", err)
+	}
+	if len(runs) != 1 || runs[0].Workflow != "CI" {
+		t.Fatalf("the good workflow must still run: %+v", runs)
+	}
+	list, err := e.svc.ListWorkflows(ctx(), "o/r", testSHA, e.public())
+	if err != nil {
+		t.Fatalf("ListWorkflows: %v", err)
+	}
+	if len(list.Workflows) != 2 {
+		t.Fatalf("workflows = %+v", list.Workflows)
+	}
+	var broken *WorkflowState
+	for _, wf := range list.Workflows {
+		if wf.Path == ".spindle/workflows/broken.yml" {
+			broken = wf
+		}
+	}
+	if broken == nil || broken.Error == "" || broken.Name != "broken" {
+		t.Fatalf("broken workflow state = %+v", broken)
+	}
+	if len(broken.Triggers) != 0 {
+		t.Fatalf("broken workflow triggers = %v", broken.Triggers)
 	}
 }
 
@@ -255,7 +295,7 @@ func TestUpdateJobFoldsRunAndMirrorsChecks(t *testing.T) {
 	if job.State != JobRunning || job.StartedAt == nil || job.CompletedAt != nil || job.Version != 2 {
 		t.Fatalf("running job = %+v", job)
 	}
-	if got := lastReport(t, e); got.State != "pending" || got.StartedAt == nil {
+	if got := lastReport(t, e); got.State != "in_progress" || got.StartedAt == nil {
 		t.Fatalf("running mirror = %+v", got)
 	}
 	if v, _ := e.svc.GetRun(ctx(), "o/r", run.ID, e.public()); v.Run.State != RunRunning || v.Run.StartedAt == nil {
@@ -398,7 +438,7 @@ func TestFoldRunAlreadyFoldedIsNoop(t *testing.T) {
 		}
 	}
 	before, _ := e.svc.loadRun(ctx(), "o", "r", run.ID)
-	if err := e.svc.foldRun(ctx(), "o", "r", run.ID); err != nil {
+	if _, err := e.svc.foldRun(ctx(), "o", "r", run.ID); err != nil {
 		t.Fatalf("fold: %v", err)
 	}
 	after, _ := e.svc.loadRun(ctx(), "o", "r", run.ID)
@@ -468,7 +508,7 @@ func TestGetRunPermissionAndShape(t *testing.T) {
 
 func TestDispatchRun(t *testing.T) {
 	e := newTestEnv(t)
-	runs, err := e.svc.DispatchRun(ctx(), "o/r", "refs/heads/main", "", e.writer())
+	runs, err := e.svc.DispatchRun(ctx(), "o/r", "refs/heads/main", "", nil, e.writer())
 	if err != nil {
 		t.Fatalf("dispatch: %v", err)
 	}
@@ -478,22 +518,22 @@ func TestDispatchRun(t *testing.T) {
 	if !runs[0].Trusted {
 		t.Fatal("a manual dispatch is a trusted run")
 	}
-	if _, err := e.svc.DispatchRun(ctx(), "o/r", "refs/heads/main", "ci.yml", e.writer()); err != nil {
+	if _, err := e.svc.DispatchRun(ctx(), "o/r", "refs/heads/main", "ci.yml", nil, e.writer()); err != nil {
 		t.Fatalf("named dispatch: %v", err)
 	}
-	if _, err := e.svc.DispatchRun(ctx(), "o/r", "refs/heads/main", "ghost.yml", e.writer()); !errors.Is(err, ErrNotFound) {
+	if _, err := e.svc.DispatchRun(ctx(), "o/r", "refs/heads/main", "ghost.yml", nil, e.writer()); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("unknown workflow err = %v", err)
 	}
-	if _, err := e.svc.DispatchRun(ctx(), "o/r", "", "", e.writer()); !errors.Is(err, ErrInvalid) {
+	if _, err := e.svc.DispatchRun(ctx(), "o/r", "", "", nil, e.writer()); !errors.Is(err, ErrInvalid) {
 		t.Fatalf("empty ref err = %v", err)
 	}
-	if _, err := e.svc.DispatchRun(ctx(), "o/r", "refs/heads/gone", "", e.writer()); !errors.Is(err, ErrNotFound) {
+	if _, err := e.svc.DispatchRun(ctx(), "o/r", "refs/heads/gone", "", nil, e.writer()); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("unknown ref err = %v", err)
 	}
-	if _, err := e.svc.DispatchRun(ctx(), "o/r", "refs/heads/main", "", e.reader()); !errors.Is(err, ErrForbidden) {
+	if _, err := e.svc.DispatchRun(ctx(), "o/r", "refs/heads/main", "", nil, e.reader()); !errors.Is(err, ErrForbidden) {
 		t.Fatalf("read role dispatch err = %v", err)
 	}
-	if _, err := e.svc.DispatchRun(ctx(), "o/r", "refs/heads/main", "", e.public()); !errors.Is(err, ErrUnauthorized) {
+	if _, err := e.svc.DispatchRun(ctx(), "o/r", "refs/heads/main", "", nil, e.public()); !errors.Is(err, ErrUnauthorized) {
 		t.Fatalf("anonymous dispatch err = %v", err)
 	}
 }

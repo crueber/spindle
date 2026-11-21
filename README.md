@@ -67,6 +67,33 @@ git clone ssh://git@localhost:2222/<owner>/<repo>.git
 
 The host key auto-generates into the data volume, so it is stable across container restarts.
 
+### Run CI jobs with a Threads runner
+
+CI runs need a runner. Mint a registration token in **Settings → Runners** of the repository (or
+`spindle runner token OWNER/REPO`), then start one runner per job slot — the binary is the runner,
+and it needs a Docker daemon it may drive (a per-runner `docker:dind`, or the host socket with an
+explicit acknowledgement):
+
+```sh
+# one-time: consume a registration token and write the 0600 token file
+spindle runner serve \
+  --server https://spindle.example.com \
+  --register wrg_… \
+  --token-file /srv/spindle/runner.token \
+  --labels linux,docker --capacity 1 \
+  --allow-host-docker   # only when that daemon is the host socket
+
+# afterwards the token file is enough
+spindle runner serve --server https://spindle.example.com \
+  --token-file /srv/spindle/runner.token --labels linux,docker
+```
+
+`--capacity 1` (the default) keeps one job per daemon, which is the isolation-preserving shape for
+untrusted code; scale out with more runners rather than a bigger capacity. SIGTERM cancels the
+in-flight job, removes its containers and reports it cancelled. Job containers are removed on every
+path (success, failure, cancel, timeout). The executor and its settings are specified in
+[`docs/features/15_threads.md`](docs/features/15_threads.md) §4.1.
+
 For an **S3-backed store** (rustfs/MinIO), see [`compose.yaml`](compose.yaml) — the shipped stack builds from source; to run it from the published image instead, replace the `spindle` service's `build: .` with `image: ghcr.io/crueber/spindle:latest` (the rustfs service and the `SPINDLE__STORE__*` env stay as they are). [`compose.standalone.yml`](compose.standalone.yml) is the same standalone shape as above, built from source instead of pulled.
 
 ## v1 release requirements
@@ -79,9 +106,9 @@ Status of every item, the GitHub-parity bar and the closing work: [`docs/PLAN-V1
 - [x] [tags](internal/tags)
 - [x] [releases](internal/releases)
 - [ ] packages — [specified](docs/features/14_packages.md), not yet implemented
-- [x] [cli](cmd/spindle) — every operator action, machine-readable (API client surface; the
-      `packages`/`threads` commands bind when their server routes land)
-- [ ] [threads](docs/features/15_threads.md) — CI: workflow files, container jobs, checks results
+- [x] [cli](cmd/spindle) — every operator action, machine-readable (API client surface plus
+      `spindle runner serve`, the Threads runner itself)
+- [x] [threads](docs/features/15_threads.md) — CI: workflow files, container jobs, checks results
 - [x] [fork](internal/social)
 - [x] [webhooks](internal/notify)
 - [x] [oidc](internal/server)

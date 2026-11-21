@@ -451,3 +451,24 @@ func TestSSHAdvertisementErrorIsUnavailable(t *testing.T) {
 	// stderr + exit 1 — the client sees a clean failure either way.
 	_ = err
 }
+
+// TestSSHReceivePackShallowCloneNamesRemedy pins the SSH twin of closing-audit
+// Observation 2: a shallow push is refused with the actionable sentence, not
+// a generic malformed-request error.
+func TestSSHReceivePackShallowCloneNamesRemedy(t *testing.T) {
+	eng := &fakeEngine{exists: true, placement: Placement{Serve: true}}
+	s := sshGateServer(t, eng, nil)
+	root := t.TempDir()
+	ctx := context.WithValue(context.Background(), repoRootKey{}, root)
+	oid := strings.Repeat("1", 40)
+	body := git.Pkt("shallow " + oid)
+	body = append(body, git.Flush()...)
+	err := s.SSHReceivePack(ctx, mustRepoID(t, "o/r"), sshd.Principal{Name: "ada", Write: true},
+		strings.NewReader(string(body)), io.Discard, io.Discard)
+	if err == nil || !strings.Contains(err.Error(), "fetch-depth: 0") {
+		t.Fatalf("shallow SSH push = %v, want the fetch-depth remedy", err)
+	}
+	if eng.published != 0 {
+		t.Fatalf("shallow SSH push published %d times", eng.published)
+	}
+}

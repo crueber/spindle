@@ -47,6 +47,7 @@ var ExposedTemplates = []string{
 	"/api/v1/orgs/{org}/webhooks/{id}",
 	"/api/v1/orgs/{org}/webhooks/{id}/ping",
 	"/api/v1/orgs/{org}/webhooks/{id}/deliveries",
+	"/api/v1/orgs/{org}/webhooks/{id}/deliveries/{seq}/redeliver",
 	"/api/v1/orgs/{org}/activity",
 	"/api/v1/orgs/{org}/activity/stream",
 	"/{owner}/{repo}/api/watch",
@@ -54,6 +55,7 @@ var ExposedTemplates = []string{
 	"/{owner}/{repo}/api/webhooks/{id}",
 	"/{owner}/{repo}/api/webhooks/{id}/ping",
 	"/{owner}/{repo}/api/webhooks/{id}/deliveries",
+	"/{owner}/{repo}/api/webhooks/{id}/deliveries/{seq}/redeliver",
 	"/{owner}/{repo}/api/collab/stream",
 }
 
@@ -331,6 +333,18 @@ func (h *Handler) handleOrg(w http.ResponseWriter, r *http.Request, org string, 
 		d := h.Svc.ReadOrgDeliveries(r.Context(), org, rest[0])
 		writeNoStore(w)
 		writeJSON(w, http.StatusOK, d)
+	case len(rest) == 4 && rest[1] == "deliveries" && rest[3] == "redeliver" && r.Method == "POST":
+		seq, ok := parseDeliverySeq(rest[2])
+		if !ok {
+			writePlain(w, http.StatusNotFound, "not found")
+			return
+		}
+		entry, err := h.Svc.RedeliverOrgHook(r.Context(), org, rest[0], seq)
+		if err != nil {
+			writePlain(w, statusFor(err), err.Error())
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"delivery": entry.Status >= 200 && entry.Status < 300, "entry": entry})
 	default:
 		writePlain(w, http.StatusNotFound, "not found")
 	}
@@ -426,6 +440,18 @@ func (h *Handler) handleRepo(w http.ResponseWriter, r *http.Request, owner, repo
 		d := h.Svc.ReadDeliveries(r.Context(), owner, repo, rest[1])
 		writeNoStore(w)
 		writeJSON(w, http.StatusOK, d)
+	case rest[0] == "webhooks" && len(rest) == 5 && rest[2] == "deliveries" && rest[4] == "redeliver" && r.Method == "POST":
+		seq, ok := parseDeliverySeq(rest[3])
+		if !ok {
+			writePlain(w, http.StatusNotFound, "not found")
+			return
+		}
+		entry, err := h.Svc.RedeliverHook(r.Context(), owner, repo, rest[1], seq)
+		if err != nil {
+			writePlain(w, statusFor(err), err.Error())
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"delivery": entry.Status >= 200 && entry.Status < 300, "entry": entry})
 	default:
 		writePlain(w, http.StatusNotFound, "not found")
 	}
@@ -458,6 +484,16 @@ func (h *Handler) watch(w http.ResponseWriter, r *http.Request, owner, repo stri
 	default:
 		writePlain(w, http.StatusMethodNotAllowed, "method not allowed")
 	}
+}
+
+// parseDeliverySeq decodes the {seq} redeliver path segment; malformed
+// or negative values are 404 (foreign/missing delivery, never 400 noise).
+func parseDeliverySeq(raw string) (int, bool) {
+	n, err := strconv.Atoi(raw)
+	if err != nil || n < 0 {
+		return 0, false
+	}
+	return n, true
 }
 
 // stripSecret renders the wire Hook (secret write-only → secret_set).

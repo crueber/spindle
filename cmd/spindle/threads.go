@@ -15,6 +15,7 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"strings"
@@ -22,8 +23,10 @@ import (
 
 	"github.com/crueber/spindle/internal/api"
 	"github.com/crueber/spindle/internal/checks"
+	"github.com/crueber/spindle/internal/config"
 	"github.com/crueber/spindle/internal/git"
 	"github.com/crueber/spindle/internal/identity"
+	"github.com/crueber/spindle/internal/pulls"
 	"github.com/crueber/spindle/internal/server"
 	"github.com/crueber/spindle/internal/server/auth"
 	"github.com/crueber/spindle/internal/store"
@@ -40,10 +43,32 @@ const threadsPushTimeout = 60 * time.Second
 // registers its discovery templates + task kind (called once per process from
 // buildCollab). A nil checks service leaves the mirror unwired; a nil registry
 // leaves the git reader unable to resolve a repo (tests only).
-func newThreadsService(st store.ObjectStore, ident *identity.Service, checksSvc *checks.Service, reg *wal.Registry, gitBinary string) (*threads.Service, *threads.Handler) {
+func newThreadsService(st store.ObjectStore, ident *identity.Service, checksSvc *checks.Service, reg *wal.Registry, cfg *config.Config, gitBinary string) (*threads.Service, *threads.Handler) {
 	api.RegisterExposed(threads.ExposedTemplates...)
 	threads.RegisterKind(threads.KindThreadsGC)
+	threads.RegisterKind(threads.KindThreadsSchedule)
 	svc := threads.New(st, ident)
+	if cfg != nil {
+		// Runtime policy (docs/features/15 §8): retention window, the
+		// first-time-fork approval gate and the job-token default.
+		svc.Retention = time.Duration(cfg.Threads.Retention)
+		svc.ApproveFirstTimeForks = cfg.Threads.ApproveFirstTimeForks
+		svc.DefaultPermissions = cfg.Threads.DefaultPermissions
+	}
+	// Protocol keys (15 §5.3): server.secrets_key wins over the session secret;
+	// without either, attempt tokens are process-local and repository secrets
+	// are unavailable (a loud warning, never a silent fallback).
+	if cfg != nil {
+		keyring, kerr := threads.NewKeyring(cfg.Server.Auth.SessionSecret, cfg.Server.SecretsKey)
+		if kerr != nil {
+			slog.Default().Warn("threads: derive protocol keys", "err", kerr)
+		} else {
+			svc.SetKeyring(keyring)
+			if keyring.Ephemeral {
+				slog.Default().Warn("threads: no server.auth.session_secret or server.secrets_key — attempt tokens are process-local and repository secrets are disabled")
+			}
+		}
+	}
 	g := threads.NewSubprocessGit(gitBinary)
 	if reg != nil {
 		g.SetDirs(&pullsDirs{reg: reg})
@@ -53,6 +78,55 @@ func newThreadsService(st store.ObjectStore, ident *identity.Service, checksSvc 
 		svc.Checks = threadsCheckSink{svc: checksSvc}
 	}
 	return svc, &threads.Handler{Svc: svc}
+}
+
+// threadsApprovals adapts the Threads ApprovalPolicy seam onto pulls'
+// merged-author projection (one exact-key GET) and the identity ladder (repo
+// role or configured instance admin), docs/features/15 §5.2. The Threads
+// package never imports pulls or identity (law 8): composition binds both.
+type threadsApprovals struct {
+	svc   *pulls.Service
+	ident *identity.Service
+	cfg   *config.Config
+}
+
+// MergedAuthor reports whether author has a merged PR in the repository.
+func (a threadsApprovals) MergedAuthor(ctx context.Context, owner, repo, author string) (bool, error) {
+	if a.svc == nil {
+		return false, nil
+	}
+	return a.svc.MergedAuthor(ctx, owner, repo, author)
+}
+
+// Maintainer reports whether actor holds maintain/admin in the repository. The
+// answer comes from the identity ladder plus the configured admin principals:
+// the auth chain derives p.Admin per request and the actor here is only a NAME
+// (a PR event carries no principal), so a static token principal flagged admin
+// is recognised by name. An OIDC admin known only by email/domain/group is not
+// resolvable from a name and may be gated once — they can approve it (the gate
+// is not a lockout).
+func (a threadsApprovals) Maintainer(ctx context.Context, owner, repo, actor string) (bool, error) {
+	actor = strings.TrimSpace(actor)
+	if actor == "" {
+		return false, nil
+	}
+	svc, cfg := a.ident, a.cfg
+	if svc == nil {
+		return false, nil
+	}
+	if cfg != nil {
+		for _, tok := range cfg.Server.Auth.Tokens {
+			if tok.Admin && strings.EqualFold(strings.TrimSpace(tok.Principal), actor) {
+				return true, nil
+			}
+		}
+	}
+	role, _ := svc.Resolve(ctx, owner, repo, auth.Principal{Name: actor})
+	switch strings.ToLower(string(role)) {
+	case "maintain", "admin":
+		return true, nil
+	}
+	return false, nil
 }
 
 // threadsCheckSink adapts the Threads CheckSink seam onto checks.RecordStatus.
@@ -78,48 +152,128 @@ func (c threadsCheckSink) Report(ctx context.Context, repo, sha, checkContext, s
 
 // chainThreads fronts the core mux with the threads JSON surface (Seam 1);
 // authentication resolves through the server chain (Seam 2, including the
-// §8.6 broker-forwarding rule).
+// §8.6 broker-forwarding rule). It also registers the job checkout credential
+// (pass B2): a wjt_ attempt token resolves to an unprivileged ci:<runner>
+// principal for git-over-HTTP, so a job container can clone read-only while
+// the checks package's wct_ shape (wired earlier) keeps working.
 func chainThreads(srv *server.Server, h *threads.Handler) {
 	h.Auth = func(r *http.Request) (auth.Principal, *auth.AuthError) {
 		return srv.Auth().AuthenticateForwarded(r, srv.Config())
 	}
+	if a := srv.Auth(); a != nil {
+		prev := a.ExtraCredential
+		a.ExtraCredential = func(token string) (auth.Principal, *auth.AuthError, bool) {
+			if p, aerr, ok := h.Svc.ResolveCloneCredential(token); ok {
+				return p, aerr, ok
+			}
+			if p, aerr, ok := threads.ClaimRunnerCredential(token); ok {
+				return p, aerr, ok
+			}
+			if prev != nil {
+				return prev(token)
+			}
+			return auth.Principal{}, nil, false
+		}
+	}
 	srv.ChainExtra(h)
+}
+
+// threadsRun creates one run off the request path. It is the single
+// run-creation entry point for every server-side trigger — the client push
+// hook, the merge task's server-side base publish, and the pull_request
+// lifecycle edges — so no trigger grows a second implementation. The deadline
+// keeps a hung git/store call from leaking a goroutine forever.
+func threadsRun(svc *threads.Service, repo, sha, event string, opts threads.CreateOpts) {
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), threadsPushTimeout)
+		defer cancel()
+		if _, err := svc.CreateRun(ctx, repo, sha, event, opts); err != nil {
+			slog.Default().Warn("threads: create run", "repo", repo, "event", event, "sha", sha, "err", err)
+		}
+	}()
 }
 
 // threadsOnPushOf builds the on-push run-creation hook (15 §2): each landed
 // branch ref creates the runs its workflow files trigger on. Deletes and
-// non-branch refs are skipped. Nil service → nil hook.
-func threadsOnPushOf(c *collabWiring) func(id git.RepoId, refs []server.PushedRef) {
+// non-branch refs are skipped, and a push authenticated by a Threads job token
+// (byJob) creates nothing at all: GitHub's GITHUB_TOKEN rule — a job's own
+// `git push` must never retrigger workflows, or a `contents: write` workflow
+// rebuilds itself forever (the round-3 audit's loop). Nil service → nil hook.
+func threadsOnPushOf(c *collabWiring) func(id git.RepoId, refs []server.PushedRef, byJob bool) {
 	if c == nil || c.threadsSvc == nil {
 		return nil
 	}
 	svc := c.threadsSvc
-	return func(id git.RepoId, refs []server.PushedRef) {
+	return func(id git.RepoId, refs []server.PushedRef, byJob bool) {
+		if byJob {
+			return // a job token's push never starts a workflow run
+		}
 		for _, ref := range refs {
 			branch, ok := threadsRefTarget(ref)
 			if !ok {
 				continue // tag/other ref or a delete: no run
 			}
-			r, b := ref, branch
-			// The server hook is already off the request path; one
-			// goroutine per ref keeps a slow workflow read for one branch
-			// from delaying another.
-			go func() {
-				ctx, cancel := context.WithTimeout(context.Background(), threadsPushTimeout)
-				defer cancel()
-				if _, err := svc.CreateRun(ctx, id.String(), r.New, threads.EventPush, threads.CreateOpts{
-					Branch: b, Ref: r.Ref, Actor: "push",
-				}); err != nil {
-					slog.Default().Warn("threads: create run", "repo", id.String(), "ref", r.Ref, "err", err)
-				}
-			}()
+			threadsRun(svc, id.String(), ref.New, threads.EventPush, threads.CreateOpts{
+				Branch: branch, Ref: ref.Ref, Actor: "push",
+			})
 		}
+	}
+}
+
+// threadsPullEventOf builds the pull_request trigger sink (15 §1): opened,
+// synchronize and reopened each create runs from the head commit. A fork PR
+// runs the BASE branch's workflow files untrusted — CreateRun owns that
+// selection (BaseBranch/BaseCommit + Fork), so the trust rule is not re-derived
+// here. The pulls service calls the sink synchronously; threadsRun detaches it.
+func threadsPullEventOf(c *collabWiring) pulls.PullEventSink {
+	if c == nil || c.threadsSvc == nil {
+		return nil
+	}
+	svc := c.threadsSvc
+	return func(_ context.Context, ev pulls.PullEvent) {
+		// ev.BaseRef arrives as the PR's base ref ("refs/heads/main"); Branch is
+		// the plain name every trigger filter and the base-branch resolution
+		// expect (a fork run resolves refs/heads/<BaseBranch>).
+		base := threadsBranchName(ev.BaseRef)
+		threadsRun(svc, ev.Repo, ev.HeadSHA, threads.EventPullReq, threads.CreateOpts{
+			Branch: base, Ref: fmt.Sprintf("refs/pull/%d/head", ev.Num),
+			BaseBranch: base, Fork: ev.Fork, Actor: ev.Actor,
+		})
+	}
+}
+
+// threadsBranchName strips a refs/heads/ prefix (the trigger filters and the
+// fork base resolution speak plain branch names).
+func threadsBranchName(ref string) string {
+	if branch, ok := strings.CutPrefix(strings.TrimSpace(ref), "refs/heads/"); ok {
+		return branch
+	}
+	return strings.TrimSpace(ref)
+}
+
+// threadsBranchPublishedOf builds the merge-publish hook (15 §2): the merge
+// task moves the base ref server-side, bypassing the client push pipeline that
+// fires onPush, so the SAME CreateRun path is invoked here for the merge
+// commit. Deletes are skipped like any other push.
+func threadsBranchPublishedOf(c *collabWiring) pulls.BranchPublishedSink {
+	if c == nil || c.threadsSvc == nil {
+		return nil
+	}
+	svc := c.threadsSvc
+	return func(_ context.Context, repo, ref, _, newSHA string) {
+		branch, ok := strings.CutPrefix(ref, "refs/heads/")
+		if !ok || branch == "" || isZeroOID(newSHA) {
+			return
+		}
+		threadsRun(svc, repo, newSHA, threads.EventPush, threads.CreateOpts{
+			Branch: branch, Ref: ref, Actor: "merge",
+		})
 	}
 }
 
 // onPushHookOf combines the post-push fan-outs (Forgejo #623 push mirrors and
 // Threads runs). Nil when neither service exists (setup-only, bare tests).
-func onPushHookOf(c *collabWiring) func(id git.RepoId, refs []server.PushedRef) {
+func onPushHookOf(c *collabWiring) func(id git.RepoId, refs []server.PushedRef, byJob bool) {
 	pm := pushMirrorHookOf(c)
 	th := threadsOnPushOf(c)
 	switch {
@@ -128,9 +282,9 @@ func onPushHookOf(c *collabWiring) func(id git.RepoId, refs []server.PushedRef) 
 	case th == nil:
 		return pm
 	}
-	return func(id git.RepoId, refs []server.PushedRef) {
-		pm(id, refs)
-		th(id, refs)
+	return func(id git.RepoId, refs []server.PushedRef, byJob bool) {
+		pm(id, refs, byJob)
+		th(id, refs, byJob)
 	}
 }
 

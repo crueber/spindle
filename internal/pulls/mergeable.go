@@ -124,7 +124,7 @@ func (s *Service) computeMergeable(ctx context.Context, owner, repo string, num 
 		return m, nil
 	}
 	if headLive != pr.Head.SHA {
-		s.refreshHead(ctx, owner, repo, pr, th, headLive, auth.Principal{})
+		s.reconcileHead(ctx, owner, repo, pr, th, headLive)
 		if npr, _, nerr := s.loadPR(ctx, owner, repo, num); nerr == nil && npr != nil {
 			pr = npr
 		}
@@ -188,66 +188,157 @@ func (s *Service) computeMergeable(ctx context.Context, owner, repo string, num 
 	return m, nil
 }
 
-// refreshHead records head-sha drift (§6): CASes pr.json to the live sha,
-// stamps head_force_pushed_at, and appends a head_force_pushed event when
-// the move is not a fast-forward (old !ancestor-of new). Review threads
-// survive (doc 04 anchors render "outdated", never block). Best-effort:
-// failures degrade the read to unknown, never a 500.
-func (s *Service) refreshHead(ctx context.Context, owner, repo string, pr *PRDoc, th *Thread, headLive string, actor auth.Principal) {
-	if headLive == "" || headLive == pr.Head.SHA {
-		return
-	}
-	// Owned-delta re-apply (§2.3: this writer owns Head.SHA +
-	// HeadForcePushedAt only): work on the fresh doc. The passed-in pr may
-	// predate a landed merge — saving it wholesale with a fresh version
-	// would clobber the write-once outcome with no 412 to stop it.
-	target := pr
-	fresh, prVer, _ := s.loadPR(ctx, owner, repo, pr.Num)
-	if fresh != nil {
-		target = fresh
-	}
-	if headLive == target.Head.SHA {
-		pr.Head.SHA = headLive
-		return // another writer already recorded it
-	}
-	old := target.Head.SHA
-	forced := true
-	if s.Git != nil && s.Dirs != nil && old != "" {
-		if dir, derr := s.Dirs.Dir(ctx, pr.Head.Repo); derr == nil {
-			if ff, ferr := s.Git.IsAncestor(ctx, dir, old, headLive); ferr == nil && ff {
-				forced = false
-			}
-		}
+// HeadMove is one authoritative head transition (§2.3): the sha a path wants
+// to record, and — for a WAL ref event — the event's own ordering evidence.
+// Seq is the log sequence of the event that produced the move; Old is the
+// event's pre-image (the ref value it moved away from); Event marks an ordered
+// delivery (only an event may apply a non-fast-forward rewind). A move with
+// neither ordering signal (a live ref read, or a publish this process just
+// landed) is applied forward-only.
+type HeadMove struct {
+	New   string
+	Old   string
+	Seq   uint64
+	Event bool
+}
+
+// refreshHead records head-sha drift from a publish this process just landed
+// or a live read. It carries no ordering evidence, so it is forward-only.
+func (s *Service) refreshHead(ctx context.Context, owner, repo string, pr *PRDoc, th *Thread, headLive string, actor auth.Principal) bool {
+	return s.refreshHeadFrom(ctx, owner, repo, pr, th, HeadMove{New: headLive}, actor)
+}
+
+// reconcileHead aligns pr.json with a *live ref read* taken during a
+// mergeability recompute. That read is a cache read (a serving copy may lag
+// the WAL event that recorded the current head), so it is applied
+// forward-only: the recorded head is replaced only when the live sha
+// descends from it. A lagging read that points back at an ancestor — or
+// diverges — is ignored; the ordered event path (applyHeadEvent) stays
+// authoritative. Without this, a recompute that read the pre-push sha after
+// the sink recorded the push wrote the head back and every later read served
+// the stale sha (TestSink `head push refreshes sha`).
+func (s *Service) reconcileHead(ctx context.Context, owner, repo string, pr *PRDoc, th *Thread, headLive string) bool {
+	return s.refreshHeadFrom(ctx, owner, repo, pr, th, HeadMove{New: headLive}, auth.Principal{})
+}
+
+// applyHeadEvent applies ONE WAL ref event's head move. The event carries its
+// own ordering, which is what makes a late delivery harmless: a duplicate or
+// an older event (seq at or below the applied watermark) never moves the head,
+// and a move that is not a fast-forward is applied only when the event's
+// pre-image IS the head we hold (a real force-push/rewind — never a replay of
+// an older state). Returns true only when the head actually moved, which is
+// also the gate for the pull_request "synchronize" trigger.
+func (s *Service) applyHeadEvent(ctx context.Context, owner, repo string, pr *PRDoc, th *Thread, mv HeadMove, actor auth.Principal) bool {
+	return s.refreshHeadFrom(ctx, owner, repo, pr, th, mv, actor)
+}
+
+// refreshHeadFrom is the shared owned-delta writer for Head.SHA +
+// HeadForcePushedAt + HeadSeq (§2.3). It applies the delta through updatePR, so
+// the freshest doc is re-loaded and only these fields are set on every
+// attempt: a concurrent merge/body write is never reverted, and two racing
+// head refreshes converge instead of the loser restoring the old sha.
+//
+// Ordering rule (never wall clock): a ref-event move is rejected when its log
+// sequence is not newer than HeadSeq (the watermark of the last applied
+// event); a non-fast-forward move is rejected unless the event's own old sha
+// is the head we hold. A move with neither ordering signal (a live read or a
+// local publish) is accepted only when it descends from the recorded head.
+func (s *Service) refreshHeadFrom(ctx context.Context, owner, repo string, pr *PRDoc, th *Thread, mv HeadMove, actor auth.Principal) bool {
+	headLive := mv.New
+	if headLive == "" {
+		return false
 	}
 	now := s.nowUTC().Format(dateTimeFmt)
-	target.Head.SHA = headLive
-	if forced {
-		target.HeadForcePushedAt = &now
-	}
-	_ = s.savePR(ctx, owner, repo, target, prVer)
-	pr.Head.SHA = headLive
-	if forced {
-		pr.HeadForcePushedAt = target.HeadForcePushedAt
-	}
-	if forced {
-		who := normPrincipal(actor.Name)
-		if who == "" {
-			who = "pulls-sink"
+	var (
+		old    string
+		forced bool
+		wrote  bool
+	)
+	updated, err := s.updatePR(ctx, owner, repo, pr.Num, func(cur *PRDoc) (bool, error) {
+		wrote, forced = false, true
+		if headLive == cur.Head.SHA {
+			// Same head. A newer event still advances the watermark (so an
+			// older delivery can never rewind it later); nothing is narrated.
+			if mv.Seq > cur.HeadSeq {
+				cur.HeadSeq = mv.Seq
+				return true, nil
+			}
+			return false, nil // another writer already recorded it
 		}
-		_, _, _ = s.appendEvent(ctx, owner, repo, pr.Num, func(t *Thread, seq int) (*Event, error) {
-			t.NextEventSeq = seq + 1
-			t.UpdatedAt = now
-			t.Participants = uniqSorted(append(t.Participants, who))
-			t.Version++
-			return &Event{Seq: seq, Type: EventHeadForcePushed, Actor: who, At: now, From: strPtr(old), To: strPtr(headLive)}, nil
-		})
-		if nth, _, nerr := s.loadThread(ctx, owner, repo, pr.Num); nerr == nil && nth != nil {
-			*th = *nth
+		if mv.Seq != 0 && cur.HeadSeq != 0 && mv.Seq <= cur.HeadSeq {
+			return false, nil // a delivery older than the head's applied event
 		}
-		s.stream(ctx, StreamEvent{Name: "pull", Repo: repoName(owner, repo), Action: "head_force_pushed", Num: pr.Num, Title: th.Title, State: th.State, Author: th.Author, BaseRef: pr.Base.Ref, HeadRef: pr.Head.Ref, HeadSHA: headLive})
+		if cur.Head.SHA != "" && s.Git != nil && s.Dirs != nil {
+			forward := false
+			if dir, derr := s.Dirs.Dir(ctx, cur.Head.Repo); derr == nil {
+				if fwd, ferr := s.Git.IsAncestor(ctx, dir, cur.Head.SHA, headLive); ferr == nil && fwd {
+					forward = true
+				}
+			}
+			if !forward {
+				// A rewind/divergence. Only a genuine ordered event may apply
+				// it, and only when its pre-image IS the head we hold (the ref
+				// moved FROM here — the event's own ordering, never a clock),
+				// with a sequence that is not stale (checked above).
+				if !mv.Event || mv.Old == "" || mv.Old != cur.Head.SHA {
+					return false, nil
+				}
+			}
+		}
+		wrote = true
+		old = cur.Head.SHA
+		if s.Git != nil && s.Dirs != nil && old != "" {
+			if dir, derr := s.Dirs.Dir(ctx, cur.Head.Repo); derr == nil {
+				if ff, ferr := s.Git.IsAncestor(ctx, dir, old, headLive); ferr == nil && ff {
+					forced = false
+				}
+			}
+		}
+		cur.Head.SHA = headLive
+		if mv.Seq > cur.HeadSeq {
+			cur.HeadSeq = mv.Seq
+		}
+		if forced {
+			cur.HeadForcePushedAt = &now
+		}
+		return true, nil
+	})
+	if err != nil || updated == nil {
+		return false
 	}
+	// Keep the caller's snapshot in step with what was committed (callers
+	// reload or read head fields from it after this returns).
+	pr.Head.SHA = updated.Head.SHA
+	pr.HeadForcePushedAt = updated.HeadForcePushedAt
+	pr.HeadSeq = updated.HeadSeq
+	if !wrote {
+		return false // converged elsewhere: no delta, nothing to narrate
+	}
+	if !forced {
+		// Fast-forward: no force-push evidence/event, but the recompute is
+		// still owed (the head moved).
+		s.updateIndex(ctx, owner, repo, prCardOf(th))
+		s.enqueueMergeable(ctx, owner, repo, pr.Num)
+		return true
+	}
+	who := normPrincipal(actor.Name)
+	if who == "" {
+		who = "pulls-sink"
+	}
+	_, _, _ = s.appendEvent(ctx, owner, repo, pr.Num, func(t *Thread, seq int) (*Event, error) {
+		t.NextEventSeq = seq + 1
+		t.UpdatedAt = now
+		t.Participants = uniqSorted(append(t.Participants, who))
+		t.Version++
+		return &Event{Seq: seq, Type: EventHeadForcePushed, Actor: who, At: now, From: strPtr(old), To: strPtr(headLive)}, nil
+	})
+	if nth, _, nerr := s.loadThread(ctx, owner, repo, pr.Num); nerr == nil && nth != nil {
+		*th = *nth
+	}
+	s.stream(ctx, StreamEvent{Name: "pull", Repo: repoName(owner, repo), Action: "head_force_pushed", Num: pr.Num, Title: th.Title, State: th.State, Author: th.Author, BaseRef: pr.Base.Ref, HeadRef: pr.Head.Ref, HeadSHA: headLive})
 	s.updateIndex(ctx, owner, repo, prCardOf(th))
 	s.enqueueMergeable(ctx, owner, repo, pr.Num)
+	return true
 }
 
 // enqueueMergeable schedules a `pull-mergeable` recompute for one PR without
@@ -273,12 +364,21 @@ func (s *Service) enqueueMergeable(ctx context.Context, owner, repo string, num 
 // --- the `pulls` event sink (§4 invalidation seam) -----------------------------
 
 // RefEvent is one WAL ref event as the sink consumes it (Seam 4 shape,
-// reduced to the fields the invalidation needs).
+// reduced to the fields the invalidation needs). Seq is the WAL log sequence
+// (`_walgit.seq`) — the event's own ordering, which is what lets a late or
+// replayed delivery be recognised as stale instead of rewinding a PR head.
 type RefEvent struct {
 	Repo    string // "owner/name"
 	RefName string
 	Old     string
 	New     string
+	Seq     uint64
+	// ByJob marks a ref moved by a Threads job token (a `contents: write`
+	// job's own push): the PR head still refreshes, but no `synchronize`
+	// trigger follows — GitHub's GITHUB_TOKEN rule (15 §5). The marker is
+	// derived by composition from the WAL event's pusher ("ci:<runner>"), so
+	// this package never learns the Threads naming convention.
+	ByJob bool
 }
 
 // HandleRefEvent consumes one WAL ref event (Seam 4 `pulls` sink, per-sink
@@ -288,7 +388,9 @@ type RefEvent struct {
 // index is authoritative for open items per P4), the PR num is enqueued onto
 // the recompute batch (task kind pull-mergeable, (repo, kind) single-flight
 // batches all dirty PRs of the repo into one pass). Head drift also runs
-// the §6 refresh (force-push evidence + sha snapshot).
+// the §6 refresh (force-push evidence + sha snapshot), forward-only by the
+// event's own sequence, and only an APPLIED move fires the CI `synchronize`
+// trigger — a duplicate or stale delivery creates no second run.
 //
 // Cost: 1 index GET + 1 GET per open PR sidecar (index-authoritative, no
 // LIST); git only on the recompute path (pool-gated).
@@ -312,10 +414,25 @@ func (s *Service) HandleRefEvent(ctx context.Context, owner, repo string, ev Ref
 		}
 		if pr.Head.Repo == ev.Repo && pr.Head.Ref == ev.RefName {
 			matched = true
-			if ev.New != "" && ev.New != pr.Head.SHA {
+			if ev.New != "" {
 				th, _, terr := s.loadThread(ctx, owner, repo, pr.Num)
 				if terr == nil && th != nil {
-					s.refreshHead(ctx, owner, repo, pr, th, ev.New, auth.Principal{})
+					moved := s.applyHeadEvent(ctx, owner, repo, pr, th,
+						HeadMove{New: ev.New, Old: ev.Old, Seq: ev.Seq, Event: true}, auth.Principal{})
+					// CI trigger (Threads pass A): an APPLIED new head
+					// commit on an open PR is a pull_request
+					// "synchronize". A duplicate delivery (same head) or
+					// a stale one (older seq, or a non-fast-forward whose
+					// pre-image is not our head) moved nothing and must
+					// not start a run for a sha the PR has left behind.
+					// A job-token push (ByJob) never synchronizes.
+					if moved && !ev.ByJob {
+						s.pullEvent(ctx, PullEvent{
+							Repo: repoName(owner, repo), Action: "synchronize", Num: pr.Num,
+							BaseRef: pr.Base.Ref, HeadRef: pr.Head.Ref, HeadSHA: ev.New,
+							HeadRepo: pr.Head.Repo, Fork: pr.Fork != nil, Actor: "push",
+						})
+					}
 				}
 			}
 		}

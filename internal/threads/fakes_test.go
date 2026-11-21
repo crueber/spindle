@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -25,8 +26,12 @@ type fakeGit struct {
 	listErr error
 	readErr error
 	refErr  error
-	lists   int
-	reads   int
+	branch  string // DefaultBranch's answer (the scheduler's branch naming)
+	// mu guards the call counters: the cross-instance scheduler test drives one
+	// fake from two goroutines on purpose (-race).
+	mu    sync.Mutex
+	lists int
+	reads int
 }
 
 func newFakeGit() *fakeGit {
@@ -41,7 +46,9 @@ func (f *fakeGit) add(commit, path string, body string) {
 }
 
 func (f *fakeGit) ListWorkflowFiles(_ context.Context, _ string, commit string) ([]string, error) {
+	f.mu.Lock()
 	f.lists++
+	f.mu.Unlock()
 	if f.listErr != nil {
 		return nil, f.listErr
 	}
@@ -59,7 +66,9 @@ func (f *fakeGit) ListWorkflowFiles(_ context.Context, _ string, commit string) 
 }
 
 func (f *fakeGit) ReadFile(_ context.Context, _ string, commit, path string) ([]byte, error) {
+	f.mu.Lock()
 	f.reads++
+	f.mu.Unlock()
 	if f.readErr != nil {
 		return nil, f.readErr
 	}
@@ -79,6 +88,11 @@ func (f *fakeGit) ResolveRef(_ context.Context, _ string, ref string) (string, e
 		return "", fmt.Errorf("%w: unknown ref %q", ErrNotFound, ref)
 	}
 	return sha, nil
+}
+
+// DefaultBranch is the optional scheduler extension (round-2 pass 2).
+func (f *fakeGit) DefaultBranch(_ context.Context, _ string) (string, error) {
+	return f.branch, nil
 }
 
 // --- fake roles ------------------------------------------------------------
@@ -165,13 +179,42 @@ jobs:
       - run: echo test
 `
 
+// independentWorkflowYAML is a two-job workflow with NO `needs`, for tests
+// whose subject is the queue rather than dependency ordering (the default
+// fixture keeps `test: needs: [build]`, which is what the ordering tests use).
+const independentWorkflowYAML = `name: CI
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo build
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo test
+`
+
 type testEnv struct {
 	store  *store.Memory
 	git    *fakeGit
 	roles  *fakeRoles
 	checks *fakeChecks
 	svc    *Service
-	now    time.Time
+	// clockMu guards now: the claim-race test drives the service from several
+	// goroutines and the fake clock is process state.
+	clockMu sync.Mutex
+	now     time.Time
+}
+
+// advance moves the fake clock forward (the -race-safe way for tests).
+func (e *testEnv) advance(d time.Duration) {
+	e.clockMu.Lock()
+	e.now = e.now.Add(d)
+	e.clockMu.Unlock()
 }
 
 func newTestEnv(t *testing.T) *testEnv {
@@ -186,7 +229,12 @@ func newTestEnv(t *testing.T) *testEnv {
 	e.svc = New(e.store, e.roles)
 	e.svc.Git = e.git
 	e.svc.Checks = e.checks
-	e.svc.Now = func() time.Time { e.now = e.now.Add(time.Second); return e.now }
+	e.svc.Now = func() time.Time {
+		e.clockMu.Lock()
+		defer e.clockMu.Unlock()
+		e.now = e.now.Add(time.Second)
+		return e.now
+	}
 	e.git.add(testSHA, ".spindle/workflows/ci.yml", workflowYAML)
 	e.git.refs["refs/heads/main"] = testSHA
 	return e
@@ -197,6 +245,12 @@ func (e *testEnv) writer() auth.Principal { return auth.Principal{Name: "writer"
 func (e *testEnv) reader() auth.Principal { return auth.Principal{Name: "reader"} }
 
 func ctx() context.Context { return context.Background() }
+
+// useIndependentJobs swaps the fixture workflow for two jobs with no `needs`
+// (queue-focused tests: every enqueued job is immediately claimable).
+func (e *testEnv) useIndependentJobs() {
+	e.git.add(testSHA, ".spindle/workflows/ci.yml", independentWorkflowYAML)
+}
 
 // mustCreate creates the push run for the fake HEAD and returns it.
 func (e *testEnv) mustCreate(t *testing.T) []*Run {

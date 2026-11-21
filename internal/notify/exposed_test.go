@@ -25,6 +25,7 @@ func TestExposedTemplatesExact(t *testing.T) {
 		"/api/v1/orgs/{org}/webhooks/{id}",
 		"/api/v1/orgs/{org}/webhooks/{id}/ping",
 		"/api/v1/orgs/{org}/webhooks/{id}/deliveries",
+		"/api/v1/orgs/{org}/webhooks/{id}/deliveries/{seq}/redeliver",
 		"/api/v1/orgs/{org}/activity",
 		"/api/v1/orgs/{org}/activity/stream",
 		"/{owner}/{repo}/api/watch",
@@ -32,6 +33,7 @@ func TestExposedTemplatesExact(t *testing.T) {
 		"/{owner}/{repo}/api/webhooks/{id}",
 		"/{owner}/{repo}/api/webhooks/{id}/ping",
 		"/{owner}/{repo}/api/webhooks/{id}/deliveries",
+		"/{owner}/{repo}/api/webhooks/{id}/deliveries/{seq}/redeliver",
 		"/{owner}/{repo}/api/collab/stream",
 	}
 	if len(ExposedTemplates) != len(want) {
@@ -112,6 +114,7 @@ func TestExposedCoversRoutes(t *testing.T) {
 		{"org webhook delete", "DELETE", "/api/v1/orgs/acme/webhooks/abc", true, "/api/v1/orgs/{org}/webhooks/{id}", nil},
 		{"org webhook ping", "POST", "/api/v1/orgs/acme/webhooks/abc/ping", true, "/api/v1/orgs/{org}/webhooks/{id}/ping", nil},
 		{"org webhook deliveries", "GET", "/api/v1/orgs/acme/webhooks/abc/deliveries", true, "/api/v1/orgs/{org}/webhooks/{id}/deliveries", nil},
+		{"org webhook redeliver", "POST", "/api/v1/orgs/acme/webhooks/abc/deliveries/3/redeliver", true, "/api/v1/orgs/{org}/webhooks/{id}/deliveries/{seq}/redeliver", nil},
 		{"org activity", "GET", "/api/v1/orgs/acme/activity", true, "/api/v1/orgs/{org}/activity", nil},
 		{"org activity browser lane", "GET", "/api-browser/v1/orgs/acme/activity", true, "/api/v1/orgs/{org}/activity", nil},
 		{"org activity stream", "GET", "/api/v1/orgs/acme/activity/stream", true, "/api/v1/orgs/{org}/activity/stream", cancelled()},
@@ -126,6 +129,7 @@ func TestExposedCoversRoutes(t *testing.T) {
 		{"webhook delete", "DELETE", "/o/r/api/webhooks/abc", true, "/{owner}/{repo}/api/webhooks/{id}", nil},
 		{"webhook ping", "POST", "/o/r/api/webhooks/abc/ping", true, "/{owner}/{repo}/api/webhooks/{id}/ping", nil},
 		{"webhook deliveries", "GET", "/o/r/api/webhooks/abc/deliveries", true, "/{owner}/{repo}/api/webhooks/{id}/deliveries", nil},
+		{"webhook redeliver", "POST", "/o/r/api/webhooks/abc/deliveries/3/redeliver", true, "/{owner}/{repo}/api/webhooks/{id}/deliveries/{seq}/redeliver", nil},
 		{"collab stream", "GET", "/o/r/api/collab/stream", true, "/{owner}/{repo}/api/collab/stream", cancelled()},
 		// Anything else must NOT claim the notify surface (falls through
 		// to the core mux or the social surface): uncovered paths need no

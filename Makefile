@@ -16,6 +16,11 @@ SPINDLE_TEST_S3_BUCKET     ?= spindle-test
 
 web: ## build the page assets: vite/Tailwind (app.css) + esbuild (islands, SDK) + vendored htmx
 	pnpm --dir web run build
+	@# The htmx SSE extension is not our transport and was removed (D-WEB-14). A
+	@# stale ignored dist/htmx-ext-sse.js must never ship: build:vendor deletes
+	@# it, and this guard fails the build if it somehow reappears.
+	@test ! -e web/dist/htmx-ext-sse.js \
+	  || { echo "ERROR: stale web/dist/htmx-ext-sse.js — the htmx SSE extension must not ship (rm it and rebuild)." >&2; exit 1; }
 	@# Tailwind only emits utilities for what `@source` resolves to (web/src/app.css).
 	@# An empty scan still writes a valid stylesheet, so assert the template utilities
 	@# actually landed (the Dockerfile repeats this check for the image build).

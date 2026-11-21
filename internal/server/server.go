@@ -79,14 +79,15 @@ type Server struct {
 	avatarHook func(username, email string)
 
 	// onPush fires after a successful client push lands (Forgejo #623):
-	// non-nil → called fire-and-forget with the repo id and the landed refs
-	// AFTER the report is on the wire, on both transports (pushPipeline is
-	// the ONE function both land in). Server-side publishes (mirror sync,
-	// merge tasks) never enter pushPipeline, so they never fan out.
+	// non-nil → called fire-and-forget with the repo id, the landed refs and
+	// whether the push authenticated as a Threads job token (15 §5) AFTER the
+	// report is on the wire, on both transports (pushPipeline is the ONE
+	// function both land in). Server-side publishes (mirror sync, merge tasks)
+	// never enter pushPipeline, so they never fan out.
 	// Nil → no notification. The hook MUST NOT block — enqueue only (the
 	// callee probes state on its own goroutine). Wired by composition;
 	// server never imports the pushmirror/threads packages (law 8).
-	onPush func(id git.RepoId, refs []PushedRef)
+	onPush func(id git.RepoId, refs []PushedRef, byJob bool)
 
 	// repoExtras fronts repoDispatch with feature repo-subpath surfaces
 	// (repo_extra.go: the 14.3 routing note for non-lane families like
@@ -128,7 +129,9 @@ type Options struct {
 	Boot      BootState
 	// Notifier wakes the events bridge for a repo ("owner/name"); nil when
 	// the instance runs no bridge (09_events.md §1 — notify then answers 202
-	// without a wake).
+	// without a wake). The push pipeline calls it after a landed push
+	// (bind_ssh.go), which is what makes a PR head push's `synchronize`
+	// trigger prompt instead of waiting for the sweep.
 	Notifier func(repo string)
 	Log      *slog.Logger
 	Now      func() time.Time
@@ -153,10 +156,11 @@ type Options struct {
 	// imports the identity package (law 8).
 	AvatarHook func(username, email string)
 	// OnPush fires after a successful client push lands (Forgejo #623;
-	// extended for Threads run creation); nil → no notification. Wired by
-	// composition (cmd/spindle); server never imports the feature packages
-	// (law 8).
-	OnPush func(id git.RepoId, refs []PushedRef)
+	// extended for Threads run creation); nil → no notification. byJob marks a
+	// push authenticated by a Threads job token (contents: write), which never
+	// starts a workflow — GitHub's GITHUB_TOKEN rule. Wired by composition
+	// (cmd/spindle); server never imports the feature packages (law 8).
+	OnPush func(id git.RepoId, refs []PushedRef, byJob bool)
 }
 
 // PushedRef is one ref that landed in a client push. Ref is the full ref name

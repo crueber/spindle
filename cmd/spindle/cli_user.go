@@ -55,8 +55,11 @@ func runUserWhoami(ctx context.Context, c *cli, args []string) int {
 	f := &apiFlags{}
 	fs := newAPIFlagSet(c, "user whoami")
 	f.add(fs)
-	pos, ok := parseAPI(fs, args)
-	if !ok || len(pos) > 0 {
+	pos, exit := parseAPI(fs, args)
+	if exit != parseContinue {
+		return exit
+	}
+	if len(pos) > 0 {
 		return exitArg
 	}
 	a, err := newAPIClient(c, f)
@@ -87,8 +90,11 @@ func runUserList(ctx context.Context, c *cli, args []string) int {
 	f := &apiFlags{}
 	fs := newAPIFlagSet(c, "user list")
 	f.add(fs)
-	pos, ok := parseAPI(fs, args)
-	if !ok || len(pos) > 0 {
+	pos, exit := parseAPI(fs, args)
+	if exit != parseContinue {
+		return exit
+	}
+	if len(pos) > 0 {
 		return exitArg
 	}
 	a, err := newAPIClient(c, f)
@@ -114,9 +120,9 @@ func runUserShow(ctx context.Context, c *cli, args []string) int {
 	f := &apiFlags{}
 	fs := newAPIFlagSet(c, "user show")
 	f.add(fs)
-	pos, ok := parseAPI(fs, args)
-	if !ok {
-		return exitArg
+	pos, exit := parseAPI(fs, args)
+	if exit != parseContinue {
+		return exit
 	}
 	if len(pos) != 1 {
 		fmt.Fprintln(c.stderr(), "usage: spindle user show LOGIN")
@@ -156,8 +162,11 @@ func runKeysList(ctx context.Context, c *cli, args []string) int {
 	f := &apiFlags{}
 	fs := newAPIFlagSet(c, "user keys list")
 	f.add(fs)
-	pos, ok := parseAPI(fs, args)
-	if !ok || len(pos) > 0 {
+	pos, exit := parseAPI(fs, args)
+	if exit != parseContinue {
+		return exit
+	}
+	if len(pos) > 0 {
 		return exitArg
 	}
 	a, err := newAPIClient(c, f)
@@ -188,9 +197,9 @@ func runKeysAdd(ctx context.Context, c *cli, args []string) int {
 	var file, title string
 	fs.StringVar(&file, "file", "", "read the authorized_keys line from FILE (- = stdin)")
 	fs.StringVar(&title, "title", "", "a display title for the key")
-	pos, ok := parseAPI(fs, args)
-	if !ok {
-		return exitArg
+	pos, exit := parseAPI(fs, args)
+	if exit != parseContinue {
+		return exit
 	}
 	var key string
 	switch {
@@ -238,9 +247,9 @@ func runKeysRemove(ctx context.Context, c *cli, args []string) int {
 	f := &apiFlags{}
 	fs := newAPIFlagSet(c, "user keys remove")
 	f.add(fs)
-	pos, ok := parseAPI(fs, args)
-	if !ok {
-		return exitArg
+	pos, exit := parseAPI(fs, args)
+	if exit != parseContinue {
+		return exit
 	}
 	if len(pos) != 1 {
 		fmt.Fprintln(c.stderr(), "usage: spindle user keys remove ID")

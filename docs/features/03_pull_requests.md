@@ -80,9 +80,25 @@ struct copy): `UpdatePR` owns `body` + `draft`, `refreshHead` owns `head.sha` /
 `head_force_pushed_at`, the merge task owns the outcome fields
 (`merged`, `merged_at`, `merged_by`, `merge_commit_sha`, `merge_strategy`).
 The outcome is write-once/monotonic — once `merged:true`, no writer unsets
-it — and the `savePR` CAS retry field-merges instead of overwriting (fresh
-outcome always wins; a merge-completion retry keeps the fresh
-editorial/head fields). See the Decisions entry for issue #64.
+it. See the Decisions entries for issue #64 and the TestSink head-sha flake.
+
+As built, the discipline is one updater (`Service.updatePR`): it loads the
+freshest `pr.json`, runs the caller's `mutate` on that doc (so the writer can
+only change what it explicitly sets), and CAS-writes the result, re-loading
+and re-applying on every 412 up to a bounded attempt count (`ErrConflict` on
+exhaustion; `changed=false` skips the write entirely). `savePR` is the
+**whole-doc** writer and is limited to create paths and hermetic tests: a
+stale version is refused with `ErrConflict`, never merged onto the live doc —
+a stale whole doc has no owned delta, and copying it is exactly the
+field-resurrection defect. `reapplyPR` is gone.
+
+`head.sha` has two write sources with different authority: the ordered WAL
+event (the `pulls` sink, `refreshHead`) records whatever the event says,
+including a legitimate force-push back to an older commit; a live ref read
+taken during a mergeability recompute (`reconcileHead`) is a cache read and
+is applied **forward-only** — it replaces the head only when the live sha
+descends from the recorded one, so a serving copy that lags the event cannot
+move the snapshot backwards.
 
 ## 3. Opening a PR
 
@@ -333,7 +349,9 @@ check runs before the TryLock attempt and re-reads manifests — it never holds 
 `POST /{o}/{r}/api/sync-fork` (write) starts the `(repo, kind="sync-fork")` task (Seam 5 single-flight)
 and answers `202 {task:{id}}`; `GET /{o}/{r}/api/sync-fork` returns the last outcome sidecar and, with
 `?task=<id>`, the task record. The repo header renders a **Sync fork** button when `fork.json` names a
-parent and the viewer may write.
+parent and the viewer may write, and it renders the LAST OUTCOME beside it on every page load (result
+chip, the sidecar's message, and the PR link for divergence) — "Sync fork started" alone is not a result
+(audit: the outcome existed only in the JSON API).
 
 The task body (`internal/forksync`, package-owned seam wiring in composition):
 
@@ -351,7 +369,8 @@ The task body (`internal/forksync`, package-owned seam wiring in composition):
 5. `merge-base --is-ancestor forkSHA upstreamSHA` in the fork's materialized serving copy;
 6. strict ancestor ⇒ CAS-publish `refs/heads/<branch>` old → new (fast-forward; a cross-instance race
    loses the old-oid check and is 409, never a force). Otherwise **diverged**: nothing is published and
-   the outcome links `/{parent}/pulls/new?base=…&head=…`;
+   the outcome links `/{parent}/pulls/new?base=…&head=<owner>/<repo>:<branch>` (the fork's full name plus
+   the branch — the new-PR form splits the colon and preselects both);
 7. CAS the outcome sidecar `repos/<o>/<r>/meta/sync-fork.json` (`result` current|fast-forward|diverged|
    failed, both shas, message, `pr_url`, `attempted_at`).
 
@@ -368,7 +387,7 @@ starts. Auth levels are P6 roles resolved per P6 §1–4.
 
 | METHOD + path (repo-scoped `/{o}/{r}/api/…`) | Auth | Request → response | Seam |
 |---|---|---|---|
-| `GET …/pulls?state=&labels=&base=&head=&sort=&n=&after=` | read | → `{pulls:[{num, title, state, labels, assignees, author, base_ref, head_ref, head_sha, draft, merged, updated_at}], more}` (index-first per P4; `labels` comma-list AND, WP2.2; `merged` always present — Forgejo #530) | RouteProvider |
+| `GET …/pulls?state=&labels=&base=&head=&sort=&n=&after=` | read | → `{pulls:[{num, title, state, labels, assignees, author, comment_count, base_ref, head_ref, head_sha, draft, merged, updated_at}], more}` (index-first per P4; `labels` comma-list AND, WP2.2; `merged` always present — Forgejo #530; `comment_count` from the index card for the shared row anatomy) | RouteProvider |
 | `POST …/pulls` | write | `{title, base_ref, head_ref, body?, fork?, draft?}` → `201` PR header (`409` if an OPEN pr already pairs base+head; `422` unresolvable refs; omitted `draft` = ready) | RouteProvider |
 | `GET …/pulls/{num}` | read | → header + `pr.json` + live `mergeable` (stamped; §4) — mutable-collab class (issue #280: `private, no-cache`) + folded ETag (live head/base shas + thread/pr versions + mergeable stamp) | RouteProvider |
 | `GET …/pulls/{num}/diff` | read | → `text/plain` unified diff `base…head` (one well-formed `git diff` patch per spec §9.5; the 12_web_ui.md parser's exact input; ref-dependent SWR, no ETag) | RouteProvider |
@@ -412,6 +431,22 @@ through the Go services the SDK wraps).
 > files or SPA components describe the **removed SolidJS SPA** and are historical; the behavior now
 > lives in the Go page layer (`internal/webui/*.go` + `internal/webui/templates/**`), and the
 > decision itself is unchanged.
+
+- **One narrow updater owns the `pr.json` write discipline; whole-doc saves are create-only
+  (2026-11-21, supersedes the `reapplyPR` field-merge from issue #64).** Every production writer
+  now goes through `Service.updatePR(num, mutate)`: it loads the freshest sidecar, applies only its
+  owned fields, and CAS-saves, reloading and re-applying on each 412. `savePR` remains the explicit
+  whole-doc writer for the create path (and hermetic tests) and returns `ErrConflict` on a stale
+  version instead of retrying. Rationale: `reapplyPR`'s `*cur = *p` still copied a stale struct on
+  a 412, so two racing `refreshHead` calls let the loser write a pre-refresh `Head.SHA` back over
+  the winner — the store then disagreed with the converged sink forever, flaking `TestSink`
+  (`head push refreshes sha`, CI run 1047: 60 s timeout) and, in production, serving a stale head
+  until the next real push. Mutating the freshest doc removes the resurrected-field class entirely
+  (outcome write-once and `ErrConflict` on exhaustion unchanged). The same defect had a second arm:
+  the recompute's *live* ref read could still write back the pre-push sha when its serving copy
+  lagged the event, so that path is now `reconcileHead` (forward-only, event path stays
+  authoritative). Pinned by `TestStaleWriterCannotResurrectHead`,
+  `TestUpdatePRRetriesReapplyOntoNewest` and `TestReconcileHeadForwardOnly`.
 
 - **Frontend idiom is the server-rendered page layer (D-WEB-14/D-WEB-15; supersedes the D-WEB-6 SolidJS entry for issue #76).** The §9 page sketches read in the shipped idiom: Go page handlers, templates under `internal/webui/templates/pages/collab/`, and the SSE island for live frames. **Historical (D-WEB-6):** `.jsx` route components, `useData` two-step on Solid primitives, SSE via the SDK readers. Routes, notes, and wire shapes are unchanged.
 - PR threads reuse the issue thread pattern and numbering wholesale (P2/P3) — one conversation
@@ -672,10 +707,12 @@ through the Go services the SDK wraps).
   `internal/issues` (PR-kind patch, triage matrix, index card),
   `internal/pulls` (seam hand-off, label filter, PUT/query wire),
   `internal/webui` (sidebar round trips, read-role refusal, page contract).
-- **Fork heads in the PR form (WP2.1, 2026-11-20).** The new-PR head picker
+- **Fork heads in the PR form (WP2.1, 2026-11-20; link shape fixed 2026-11-21).** The new-PR head picker
   lists the parent's live `meta/forks.json` index (one read), filtered to forks
-  the viewer can read, grouped under "Forks"; `?from_repo=`/`?head=` prefill a
-  fork head and the redesign is still no-JS: selecting a repository and posting
+  the viewer can read, grouped under "Forks"; the form accepts `?from_repo=<owner>/<repo>` plus
+  `?head=<branch>`, AND the sync-fork link shape `?head=<owner>/<repo>:<branch>` (split on the colon:
+  the repo prefix fills From repository and the branch fills From branch), so a divergence PR link
+  opens the form fully populated. The redesign is still no-JS: selecting a repository and posting
   the `refs` action reloads that repo's branch options (no N-repo branch scan on
   every render). The POST path is unchanged — `OpenInput.Fork` already opens a
   cross-owner PR; the form now supplies it from the picker.
@@ -689,6 +726,15 @@ through the Go services the SDK wraps).
   the SAME parser validates. The tab shows a read-only effective-policy table;
   the raw JSON editor survives inside a collapsed "Advanced" disclosure (it is
   never the only path). Disabling removes only the two managed rules.
+
+- **NEW (foundations audit F8, 2026-11-21) — PR list rows match the issue list.**
+  `PROut` now carries `comment_count` from the shared index card (the row's
+  existing enrichment read; no extra GET), and the PR list template renders the
+  same anatomy as 02's issue list: `#N title`, the always-present lowercase
+  state chip, labels, then right-hand meta `author · age` + comment count
+  (base ← head refs remain the PR-only extra). Previously the two lists — one
+  scroll apart — disagreed on the chip rule and the comment count, so "open"
+  meant different things in each.
 
 ## Explicitly out of scope
 

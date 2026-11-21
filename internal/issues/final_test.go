@@ -48,7 +48,7 @@ func TestCreateStoreFailures(t *testing.T) {
 			return precond(key)
 		}}
 		s := New(fl, newFakeRoles())
-		if _, _, err := s.CreateIssue(reqCtx(), "acme", "repo", janeP, "t", ""); !errors.Is(err, ErrConflict) {
+		if _, _, err := s.CreateIssue(reqCtx(), "acme", "repo", janeP, "t", "", nil); !errors.Is(err, ErrConflict) {
 			t.Fatalf("err = %v", err)
 		}
 	})
@@ -60,7 +60,7 @@ func TestCreateStoreFailures(t *testing.T) {
 			return nil
 		}}
 		s := New(fl, newFakeRoles())
-		if _, _, err := s.CreateIssue(reqCtx(), "acme", "repo", janeP, "t", ""); err == nil {
+		if _, _, err := s.CreateIssue(reqCtx(), "acme", "repo", janeP, "t", "", nil); err == nil {
 			t.Fatal("want error")
 		}
 	})
@@ -72,7 +72,7 @@ func TestCreateStoreFailures(t *testing.T) {
 			return nil
 		}}
 		s := New(fl, newFakeRoles())
-		if _, _, err := s.CreateIssue(reqCtx(), "acme", "repo", janeP, "t", ""); err == nil {
+		if _, _, err := s.CreateIssue(reqCtx(), "acme", "repo", janeP, "t", "", nil); err == nil {
 			t.Fatal("want error")
 		}
 	})
@@ -175,7 +175,7 @@ func TestIndexReadFailures(t *testing.T) {
 	t.Run("create tolerates corrupt index", func(t *testing.T) {
 		s := testService(newFakeRoles())
 		mustPut(t, s, IndexKey("acme", "repo"), []byte("{bad"))
-		if _, _, err := s.CreateIssue(reqCtx(), "acme", "repo", janeP, "t", ""); err != nil {
+		if _, _, err := s.CreateIssue(reqCtx(), "acme", "repo", janeP, "t", "", nil); err != nil {
 			t.Fatalf("create with corrupt index = %v", err)
 		}
 	})
@@ -187,7 +187,7 @@ func TestIndexReadFailures(t *testing.T) {
 			return nil
 		}}
 		s := New(fl, newFakeRoles())
-		if _, _, err := s.CreateIssue(reqCtx(), "acme", "repo", janeP, "t", ""); err != nil {
+		if _, _, err := s.CreateIssue(reqCtx(), "acme", "repo", janeP, "t", "", nil); err != nil {
 			t.Fatalf("create with failing index = %v", err)
 		}
 	})

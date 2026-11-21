@@ -594,7 +594,7 @@ func TestAuthErrorMapping(t *testing.T) {
 
 func TestBareService(t *testing.T) {
 	s := New(store.NewMemory(), nil) // no roles, no clock, no emitter
-	th, _, err := s.CreateIssue(reqCtx(), "acme", "repo", aliceP, "t", "")
+	th, _, err := s.CreateIssue(reqCtx(), "acme", "repo", aliceP, "t", "", nil)
 	if err != nil {
 		t.Fatal(err)
 	}

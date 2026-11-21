@@ -43,9 +43,16 @@ func TestParseInvalidYAML(t *testing.T) {
 	if _, err := Parse([]byte("jobs: [unclosed\n")); err == nil {
 		t.Fatal("invalid YAML accepted")
 	}
-	// A scalar `on:` is not supported and must be a clear error, not a panic.
-	if _, err := Parse([]byte("on: push\njobs:\n  a:\n    runs-on: l\n    steps:\n      - run: x\n")); err == nil {
-		t.Fatal("scalar on: accepted")
+	// The scalar `on:` spelling is supported; an unknown EVENT name is not.
+	w, err := Parse([]byte("on: push\njobs:\n  a:\n    runs-on: l\n    steps:\n      - run: x\n"))
+	if err != nil {
+		t.Fatalf("scalar on: rejected: %v", err)
+	}
+	if !w.Fires("push", "main") {
+		t.Fatal("scalar on: push did not fire")
+	}
+	if _, err := Parse([]byte("on: teleport\njobs:\n  a:\n    runs-on: l\n    steps:\n      - run: x\n")); err == nil {
+		t.Fatal("unknown scalar event accepted")
 	}
 }
 
@@ -98,7 +105,7 @@ jobs:
 		t.Fatal("dispatch presence not recorded")
 	}
 	job := w.Jobs["build"]
-	if job.Container != "golang:1.27" || job.TimeoutMinutes != 30 || !job.ContinueOnError {
+	if job.Container == nil || job.Container.Image != "golang:1.27" || job.TimeoutMinutes != 30 || !job.ContinueOnError {
 		t.Fatalf("job = %+v", job)
 	}
 	if svc := job.Services["db"]; svc.Image != "postgres:16" || len(svc.Ports) != 1 {
@@ -107,8 +114,8 @@ jobs:
 	if len(job.Steps) != 2 || job.Steps[0].With["fetch-depth"] != "0" || job.Steps[1].Shell != "bash" {
 		t.Fatalf("steps = %+v", job.Steps)
 	}
-	if !w.Fires("schedule", "") == false {
-		t.Fatal("schedule must not match Fires")
+	if !w.Fires("schedule", "") {
+		t.Fatal("schedule must match Fires (round-2 pass 2: the maintainer evaluates it)")
 	}
 }
 

@@ -122,9 +122,12 @@ Copied from Rust spec §15.1; key names, defaults, and meanings are **normative 
 | `bundles.require` | `[]` | repos whose unbounded zero-have clones must use bundle-uri (D17) |
 | `lfs.enabled` / `serve_via` / `signed_url_ttl` / `max_object_bytes` | `true` / `"proxy"` / `"1h"` / `"16GiB"` | LFS |
 | `attachments.max_image_bytes` | `"8MiB"` | per-file cap for pasted/dropped issue images (02 §12; over cap → 413) |
-| `packages.max_blob_bytes` | `"2GiB"` | one OCI blob object; over cap → 413 `SIZE_INVALID` (14 §5) |
+| `packages.max_blob_bytes` | `"10GiB"` | one OCI blob object (GHCR per-layer parity); over cap → 413 `SIZE_INVALID` (14 §5) |
 | `packages.max_manifest_bytes` | `"4MiB"` | one manifest body; over cap → 413 `SIZE_INVALID` (14 §5) |
 | `packages.upload_ttl` | `"24h"` | chunked-upload staging lifetime; expired ids are `BLOB_UPLOAD_UNKNOWN` (14 §5) |
+| `threads.retention` | `"720h"` (30d) | terminal Threads runs (with their job records, log frames and queue entries) older than this are deleted by the maintainer's `threads-gc` pass; non-positive falls back to the default — there is no "keep forever" spelling (15 §8) |
+| `threads.approve_first_time_forks` | `true` | hold a fork pull request from an author with no merged PR in the repository in `pending_approval` until a maintainer approves it (15 §5.2); `false` disables the gate |
+| `threads.default_permissions` | `"read"` | the job token's `contents` level when a workflow declares no `permissions:` (`read` \| `write`); a fork run is always `read` (15 §5) |
 | `upstream.git` / `upstream.lfs` / `upstream.token_env` / `upstream.follow` | — | repair source; LFS read-through; token env var (never the token); refs kept equal |
 | `git.binary` | `"git"` | path to git binary (spindle always execs it; see 04_git.md) |
 | `git.upload_pack_engine` | `"auto"` | `auto` = stock git wherever packs are local/mounted; remote-served bases per 04_git.md |
@@ -287,6 +290,10 @@ The setup UI (`/setup`) and its API (`GET /api/v1/setup`, `POST /api/v1/setup/te
 - **Edits apply to the current file (§3.4).** Submitted overrides merge onto the file-visible config — compiled-in defaults ⊕ the first existing candidate file, or the zero-config first-run shape when no file exists — so a save changes only the keys the operator touched; keys the form does not carry keep their file values. Env overlays are never baked into the file: the file keeps its own values and env still wins at load (see the env-interaction bullet below).
 - **Interaction with env (file ⊕ env, env wins).** The saved file participates in the ordinary ladder (§3.1): env overrides and PORT lockstep still apply on top of it, and an env override of a key the operator just set in the UI will silently win — the setup UI therefore shows the effective value (post-env) for every key and warns when a submitted value is masked by an active `SPINDLE__`/`WALGIT__`/`PORT` override. Setup never writes env vars.
 - **Invalid-config rescue.** When boot landed in setup-only mode (§3.1 step 2), a successful setup save writes a valid file but does NOT swap the running config; the response says `restart_required: true` for every key and the UI tells the operator to restart. (Boot flow: config present → validate → boot if it all works; config missing → defaults + setup banner; config INVALID → setup-only mode.)
+- **Every advertised key round-trips (G1 fix, 2026-11-21).** The page renders each schema key's current effective value in the spec spelling and posts it back through `setup.Coerce` (the shared `config` parsers). Struct slices (`server.auth.tokens`, `bundles.strategy`) are repeating rows over the element's toml fields — the element schema travels in the row so no column is invented — and are rebuilt in posted order, with secrets kept by row identity (`__base`), so deleting row 0 can never hand row 1 the deleted credential. Unsigned counters (`wal.snapshot_every_entries`, `wal.cas_max_retries`) coerce like ints. A blank value for a list field is the empty list; a nil slice stays nil (it encodes to nothing), so an untouched form changes **no value** — the acceptance gate is `TestFormValuesWholeSchemaRoundTrip` (whole schema, `internal/setup`: render → coerce → decode → re-encode identical) plus `TestSetupPageZeroEditFormSavesByteIdentical` (GET /setup → scrape every control → POST it back unmodified → 303 with the effective values unchanged, a second save of the now-canonical file byte-identical, and a rejected change leaving the file untouched while naming its key; `cmd/spindle`). Validation errors carry the schema key their message names (`setup.Validate` → `Error.Key`), so a failure marks the offending row instead of printing one keyless line on every row.
+- **Coercion errors are keyed (round-3 audit fix, 2026-11-21).** `setup.Coerce` returns a `setup.Error{Key, Message}` (the same type `Validate` uses; it implements `error` and is lifted back with `setup.KeyOf`), so a value its parser rejects — duration, size, int, uint, float, bool, list, struct-slice cell, even a nested unknown key — marks its row exactly like a `config.Validate` rejection and opens a collapsed Advanced group. A struct-slice cell is keyed `key[i].field` and the page attaches it to the owning row editor by the bracket prefix. Only a genuinely keyless failure stays in the banner. The acceptance gate is `TestCoerceFailuresCarryTheirKey` (every field type, `internal/setup`), `TestUnknownSetupKeyCannotPassSilently` (negative control), and `TestSetupPageCoercionErrorMarksItsRow` (rendered row + Advanced group + KEY cell, `cmd/spindle`); the JSON 422 body carries the same key.
+- **Numeric coercion never saturates (closing-audit Observation 3, 2026-11-21).** `setup.Coerce` rejects a number outside its field's range — or one its parser cannot represent — as a keyed `setup.Error` that names the key and the accepted range (`setup.parseSettingInt`/`parseSettingUint`), so the page marks the row and `PUT /api/v1/setup` answers 422 with that key instead of persisting a clipped value. Widths are bounded by the Go field (`int8..int64`, `uint8..uint64`, named types: `-2147483648..2147483647`, `0..4294967295`, `0..18446744073709551615`); sizes by `0..9223372036854775807` bytes (the `ByteSize` int64 range, with config.ParseByteSize's 2^63 boundary fixed); durations by `time.Duration`'s maximum (`2562047h47m16.854775807s`); floats must be finite and parse at the field's width. Scientific notation is still accepted for ints (`1.073741824e+09`) but only where float64 represents the integer exactly (|value| < 2^53), so a value like `99999999999999999999` is an error, never `MinInt64` (which is what the pre-fix `int64(f)` conversion produced on amd64 while reporting a successful save). A legitimate boundary value (MinInt64/MaxInt64, MaxUint32, MaxInt64 bytes) still saves. Gates: `TestNumericCoercionNeverSaturates` (every width and spelling), `TestStructSliceCellOverflowIsKeyedAndChangesNothing` (row cell; rejected save leaves the file byte-identical), `TestSetupAPIRejectsOutOfRangeNumbers` (PUT → 422 with the key, file untouched), and `TestNumericBoundaryMessagesNameTheRange` (the range is spelled in the message).
+- **The canonical rewrite keeps the operator's file, once (round-3 audit fix, 2026-11-21).** Save writes the FULL canonical document — BurntSushi/toml decodes comments but cannot re-emit them, and hand-rolling a trivia-preserving TOML editor was rejected in favor of a backup (law 1: no new dependency). Before the first rewrite of an existing file, `config.SaveSetup` copies the previous bytes to `<data-dir>/spindle.toml.bak-<utc>` (`0600`, once — a later save sees it and keeps it), and a save whose bytes already match the file writes nothing at all. The page says both next to Save and names the backup after the save; the API response reports it as `backup` (empty when none was made). A read error on an existing file fails closed rather than overwriting text that could not be preserved. Gates: `TestSaveSetupKeepsOneBackupOfExistingFile` (`internal/config`) and `TestSetupPageCanonicalSaveKeepsOneBackup` (`cmd/spindle`, rendered).
 
 ## 4. Per-repo settings (D24)
 
@@ -430,10 +437,15 @@ The collaboration surface (`auth`, `user`, `org`, `issue`, `pr`, `release`, `che
 ### 6.3 Flag parsing and dispatcher mechanics
 
 - Per-subcommand `flag.NewFlagSet` (stdlib), one instance per invocation. The dispatcher:
-  1. peel `--config PATH` and `--data-dir PATH` (and `--help/-h`) from anywhere in argv before dispatch;
-  2. look up the subcommand (first token; `bundle`/`wal`/`repo`/`import`/`config` consume a second token from a nested table);
-  3. run the subcommand's `run(ctx, remainingArgs)`.
-- Errors: a FlagSet parse error or an unknown subcommand prints usage to stderr and exits 2; a runtime error from `run` prints `spindle: <err>` and exits 1. `ctx` is cancelled on SIGTERM/SIGINT — every subcommand's `run` MUST honor it (interval loops, `git` subprocesses, store retries).
+  1. peel `--config PATH`, `--data-dir PATH`, `--server URL` and `-R OWNER/REPO` from
+     anywhere in argv before dispatch (last wins);
+  2. a `-h`/`--help` **before** the first command token prints the global command table and
+     exits 0. **After** a command token it belongs to that command: the subcommand's FlagSet
+     prints its own usage line and every flag it defines (§6.6). `spindle issue list --help`
+     is therefore the per-command help; `spindle help` / `spindle -h` remain the table.
+  3. look up the subcommand (first token; `bundle`/`wal`/`repo`/`import`/`config` consume a second token from a nested table);
+  4. run the subcommand's `run(ctx, remainingArgs)`.
+- Errors: a FlagSet parse error or an unknown subcommand prints usage to stderr and exits 2; a runtime error from `run` prints `spindle: <err>` and exits 1. A requested `-h`/`--help` (`flag.ErrHelp`) prints usage and exits **0**, never 2. `ctx` is cancelled on SIGTERM/SIGINT — every subcommand's `run` MUST honor it (interval loops, `git` subprocesses, store retries).
 - No hidden flags, no config-in-flags tricks: flags never set config values except `--config` and `--data-dir` themselves (`--data-dir` only relocates the file leg and the first-run root defaults, §3.1.1; the env/PORT layering in §3 is the only other writer). This keeps `config dump` honest.
 - Output formats: table commands (`wal ls`, `repo list`, `repo info`, `bundle plan`) print human tables to stdout; every command accepts `--json` (added for spindle; not in the Rust CLI) emitting one JSON object per line (JSONL), keys stable and snake_case, for scripting. When a Rust command had a documented exact output shape (e.g. `wal ls` columns), the human table keeps those columns in that order.
 
@@ -486,19 +498,57 @@ below is HTTP.
 auth      login|logout|status|token list|create|revoke
 user      whoami|list|show|keys list|keys add|keys remove
 org       list|show|create · member list|add|remove · team list|create|add-repo
+          · webhook list|create|delete|ping|deliveries|redeliver
 issue     list|show|create|comment|close|reopen
-pr        list|show|create|merge|review|comment|checks
+pr        list|show|diff|create|close|merge|review|comment|checks
 release   list|show|create|delete|upload
 checks    list|status REPO [REF]
 packages  list|show|delete
 threads   list|show|run|cancel
+runner    serve [--capacity N] [--labels a,b] [--register TOKEN] · token OWNER/REPO [--labels a,b] [--name N] · list OWNER/REPO · revoke OWNER/REPO ID
 api       [-X METHOD] [-d DATA] [-H 'Key: Value'] PATH
 completion bash|zsh|fish
 ```
 
 Every command accepts `--json`; list commands accept `--limit`, `--after` where the API paginates;
 mutating commands accept `--quiet`. Flags may appear before or after positionals (gh-style
-permutation) — the CLI reorders argv before `flag.Parse`.
+permutation) — the CLI reorders argv before `flag.Parse`. Every subcommand answers `-h`/`--help`
+with **its own** usage line and flag list (a leading help token still prints the global table,
+§6.3); the command table, help and shell completion are generated from one table
+(`cmd/spindle/cli_api.go`), so a flag cannot exist in one and not the others.
+
+**Repo selector.** Commands that take an `OWNER/REPO` positional accept `-R OWNER/REPO` (peeled as
+a global) or `SPINDLE_REPO` as the default, exactly like `gh -R`/`GH_REPO`: `spindle -R acme/mono
+issue list`, `SPINDLE_REPO=acme/mono spindle pr show 42`. The bare `--repo` spelling is not the
+CLI's (it is already `bundle run --repo ID`), so the long form is `-R`.
+
+**Flag table (command-specific flags; each command's `--help` prints the exact set it defines —
+the help and shell completion read the same table).**
+
+Every API command also accepts `--json`; list commands add `--limit` and, where the API paginates,
+`--after`; mutating commands add `--quiet`.
+
+| command | command-specific flags |
+|---|---|
+| `auth login` | `--token-file F`, `--stdin`, `--no-verify` |
+| `auth logout` | `--all` |
+| `auth token …` | none (documented gap, see below) |
+| `issue list` | `--state --label… --assignee --milestone` |
+| `issue show` | `--comments N` |
+| `issue create` | `--title --body --body-file --label… --assignee… --milestone` |
+| `issue comment` / `pr comment` | `--body --body-file` |
+| `issue close` | `--reason completed\|not_planned` |
+| `pr list` | `--state open\|closed\|all --base --head` |
+| `pr show` | `--comments N` |
+| `pr diff` | none (text/plain unified diff on stdout) |
+| `pr create` | `--title --base --head --body --body-file --draft` |
+| `pr merge` | `--method merge\|squash\|rebase --delete-head --title --message --wait` |
+| `pr review` | `--approve\|--request-changes\|--comment --body --body-file --commit` |
+| `release create` | `--name --notes --notes-file --target --draft --prerelease` |
+| `release upload` | `--name` |
+| `packages delete` | `--tag T` (or a `DIGEST` positional) |
+| `threads run` | `--ref REF` (required) |
+| `runner serve` | `--capacity N --labels a,b --name N --register TOKEN --token-file F --docker BIN --image IMG --allow-host-docker --fetch-timeout S` |
 
 **Server and token (`--server`, `SPINDLE_SERVER`, `SPINDLE_TOKEN`).**
 
@@ -544,17 +594,43 @@ includes the token.
 - `auth token list|create|revoke` is **not available**: the JSON API exposes no token surface.
   Tokens are minted and revoked in a signed-in browser at `<server>/_auth/tokens`
   (`06_server_http.md` §8.6). The commands exist and exit 1 with that message.
-- `packages` (WP1, `14_packages.md`) and `threads` (WP10, `15_threads.md`) are bound to their
-  documented paths (`/{o}/{r}/api/packages…`, `/{o}/{r}/api/threads…`). Until those routes ship, a
-  404 is reported as **"feature not enabled on this server"** with exit 1 — not the misleading
-  not-found exit 3. The command surface and the completion entries are shipped now; the day the
-  server registers the route, the CLI starts working with no change.
+- `packages` (WP1, `14_packages.md`) is **served** (`docs/features/14` §7): `list`/`show`/`delete`
+  hit `GET|DELETE /{o}/{r}/api/packages…`, a 404 is the endpoint's own not-found (exit 3), and
+  `packages delete` takes exactly one target — `--tag T` or a `DIGEST` positional (both, or
+  neither, is exit 2). The human table carries PLATFORMS and UPDATED columns.
+- `packages` (WP1, `14_packages.md`) is bound to its documented paths
+  (`/{o}/{r}/api/packages…`). Until those routes ship, a 404 is reported as **"feature not enabled
+  on this server"** with exit 1 — not the misleading not-found exit 3.
+- `threads` (WP10, `15_threads.md`) and `runner` (its pass-B1 protocol surface, `15_threads.md`
+  §6.2) are SERVED: `threads list|show` read the run records, `threads run` dispatches
+  (`POST …/api/threads` with `{ref, workflow}`), `threads cancel` posts to
+  `…/api/threads/{run}/cancel`, and `runner token|list|revoke` drive the runner registry. A 404 from
+  those paths is a real not-found (exit 3).
+
+**`spindle runner serve` is not an API command** (pass B2, `15_threads.md` §4.1): it is the Threads
+runner process — a long-lived protocol client that talks to the runner endpoints with its own
+credential, never the user's API token. It does not read `spindle auth` state and it has no
+`spindle.toml` section (a runner owns no data dir and no store), so its settings are flags ⊕
+environment and are documented in `15_threads.md` §4.1; the token comes from
+`SPINDLE_RUNNER_TOKEN`/`--token-file` or a one-time `--register wrg_…`. `--server` and
+`SPINDLE_SERVER` resolve exactly as for the API commands (`--server`, then the env). It exits 0 on
+SIGTERM and 1 on a rejected credential (re-register); a docker error fails the job, not the runner.
 - `org team add-repo` targets the documented team→repository binding
   (`PUT /api/v1/orgs/{org}/teams/{slug}/repos/{owner}/{repo}`); same 404 treatment until it lands.
 - `user list` calls `GET /api/v1/owners` (no users-only listing endpoint exists), so it lists
   owners — users and organizations alike.
 - `pr merge` starts the documented `pull-merge` task and prints the task id; `--wait` polls
   `GET …/pulls/{num}/merge/task` until the task leaves `running` (no invented synchronous merge).
+- `pr diff` streams `GET …/pulls/{num}/diff` (text/plain) verbatim to stdout; `pr close` is the
+  documented pull PATCH with `{state: "closed"}`; `pr list --state all` omits the filter (the API's
+  default) instead of sending a value the server rejects.
+- `release create` omits `name` when `--name` is unset: the server defaults the title to the tag
+  on create and leaves an existing release's title untouched on update (gh's behaviour without
+  `--name`). `--target REF` seeds a tag that does not exist yet and therefore requires `--draft`
+  — the tag is created on publish (`07_releases_stars.md`, WP3.3), never before.
+- `issue create` sends labels, assignees and milestone **in the create body** (one write): the
+  server validates every name before it allocates a number, so a bad `--label` fails with exit 1
+  and leaves **no issue behind** (no create-then-PATCH).
 
 **`spindle api`** sends one request, with the resolved bearer token when one exists (anonymous
 otherwise): `-X METHOD` (default GET, POST when `-d` is present), `-d DATA` (literal, `@FILE`, or
@@ -574,9 +650,13 @@ Logged in to https://git.example.com as alice (state: ~/.config/spindle/spindle/
 
 $ spindle issue list acme/mono --state open --label bug --json | jq '.issues[].num'
 $ spindle issue create acme/mono --title "Crash on clone" --body-file /tmp/report.md --label bug
+$ spindle pr diff acme/mono 42 | git apply
 $ spindle pr review acme/mono 42 --approve --body "LGTM"
 $ spindle pr merge acme/mono 42 --method squash --wait
+$ spindle release create acme/mono v1.3.0-rc1 --draft --target refs/heads/main
 $ spindle release upload acme/mono v1.2.0 dist/app-linux-amd64
+$ spindle threads run acme/mono ci.yml --ref refs/heads/main
+$ spindle -R acme/mono issue show 1
 $ spindle api /api/v1/me
 $ spindle api -X POST /api/v1/orgs -d '{"org":"acme","display_name":"Acme"}'
 $ spindle completion bash > /etc/bash_completion.d/spindle
@@ -633,7 +713,18 @@ $ WALGIT__STORE__BKUET=x spindle config check --config /etc/spindle/walgit.toml 
 - **NEW (WP11) — `--json` prints the API body unchanged (re-indented).** No CLI-specific envelope is invented: the API doc *is* the JSON schema, so the CLI cannot drift from it. Human tables are deliberately not a stable contract.
 - **NEW (WP11) — exit 3 is shared by `config check --strict` (ignored overrides) and API "not found".** Renumbering the established exit code would break supervisor scripts; the two commands are disjoint, and the collision is documented in the help text and §6.1.
 - **NEW (WP11) — the login state lives at `${SPINDLE_CONFIG_DIR:-${XDG_CONFIG_HOME:-~/.config}/spindle}/auth.json` (0600, atomic write).** `SPINDLE_CONFIG_DIR` is the CLI-only override (tests and containers need it); it never feeds the server's config ladder (§3.1.1's `SPINDLE_DATA_DIR` is the server's knob). Tokens are never accepted on argv and never printed; `apiClient` redacts the token from every error it renders.
-- **NEW (WP11) — documented-but-unserved surfaces report "feature not enabled" (exit 1).** `packages` (WP1), `threads` (WP10) and `org team add-repo` are bound to their documented paths now; a 404 from them means "the route is not registered", not "your object is missing". This keeps the 404→exit-3 contract honest for routes that *are* served.
+- **NEW (WP11) — documented-but-unserved surfaces report "feature not enabled" (exit 1).** `org team add-repo` is bound to their documented paths now; a 404 from it means "the route is not registered", not "your object is missing". This keeps the 404→exit-3 contract honest for routes that *are* served — `threads` and `packages` left this list when their routes landed (see the 2026-11-21 entry).
+- **NEW (2026-11-21) — CLI audit fixes: per-command help, served threads, one-write issue create.**
+  (a) `-h`/`--help` after a command token is the command's own usage + flags (`flag.ErrHelp` →
+  exit 0); only a help token **before** the first command prints the global table (§6.3), because
+  the old blanket peel made every subcommand's flags undiscoverable. (b) `threads` routes are
+  served, so `threads run` dispatches `POST …/api/threads {ref, workflow}` and `threads show`'s
+  404 is a real exit 3; `threads cancel` prints the T2-runner gap and exits 1 rather than calling
+  a path that does not exist. (c) `issue create` carries labels/assignees/milestone in the create
+  body — the server validates them before allocating a number — so a bad label can no longer
+  leave an unlabeled issue behind (the audit's non-atomic create). (d) `-R/--repo` is spelled
+  `-R` (the `--repo` long form is already `bundle run --repo ID`) with `SPINDLE_REPO` as the env
+  default, matching `gh -R`/`GH_REPO`.
 - **NEW (WP11) — `auth token list|create|revoke` is a documented gap.** Minting is a browser-session surface (`/_auth/tokens`, CSRF-guarded), not the public JSON API; the commands exit 1 with a pointer instead of the CLI inventing a token endpoint.
 - **NEW (WP11) — shell completion is generated from the dispatch tables.** `completionWords()` walks `subcommands` plus the `apiGroups` table; `spindle completion bash|zsh|fish` differs only in the shell template. No hand-maintained command list can go stale.
 - **`RUST_LOG` honored (kept) as an override of `telemetry.log_filter`**, and `SPINDLE_LOG` accepted as the new-style spelling: zero-cost compat for existing log-tuning scripts.
@@ -657,6 +748,14 @@ $ WALGIT__STORE__BKUET=x spindle config check --config /etc/spindle/walgit.toml 
 ### Divergence (2026-08-31)
 
 - **D5 — Config is optional; zero-config first run.** The Rust spec boots fail-closed with no config file ("run `walgit init` first"); spindle boots on the first-run defaults of §2.3 instead: `listen = "0.0.0.0:8080"`, `store.backend = "filesystem"` rooted at `<data-dir>/store`, `auth.mode = "none"` (warned), `auto_create_on_push = true`, everything else per the Rust defaults. User friendliness is a first-class law. A missing file at the DEFAULT location is a first run, not an error; a missing explicitly-named file (`--config`/config-env pointer) remains fatal (exit 2), and `/dev/null` still forces defaults+env (§3.1). Data dir (`--data-dir` / `SPINDLE_DATA_DIR`, default `~/.local/share/spindle`, `/var/lib/spindle` in containers) owns `store/`, `cache/`, and the saved `spindle.toml` (§3.1.1).
+- **NEW (2026-11-21) — setup save backs up the first canonical rewrite (round-3 audit).**
+  `SaveSetup` still writes the full canonical document (Toml keeps comments only on decode), but
+  before the first rewrite of an existing file it copies the previous bytes to
+  `spindle.toml.bak-<utc>` beside the config — once, never per save — and a byte-identical save
+  writes nothing. Preserving comments would need a trivia-preserving TOML writer (a new
+  dependency or a hand-rolled parser), rejected under law 1; a backup keeps the operator's text
+  without inventing a format. Rationale: a zero-edit save silently deleting a hand-written comment
+  is data loss, and the alternative (save only changed keys) does not restore comments either.
 - **D6 — Setup UI + API save semantics (§3.7).** The setup UI writes `<data-dir>/spindle.toml` atomically (tmp + fsync + rename, mode `0600`) after full §5 validation; the save response reports restart-required vs read-live keys; the saved file joins the ordinary ladder so env ⊕ file still holds with env winning. Boot states: config present → validate → boot; absent → defaults + setup banner; INVALID → setup-only mode (only `/setup`, `/healthz`, `/readyz` answer; rest 503) until a fixed config is saved and the process restarted. Endpoint shapes and the setup access rule live in 06_server_http.md.
 - **Auth-none loopback rule superseded.** Rust validation rule 1 (auth `none` requires a loopback listen, fail-closed) is replaced by a loud warning on any bind (§5 rule 1); the first-run default `0.0.0.0:8080` + `auth = "none"` depends on it. All other validation stays fail-closed.
 - **D4 — `filesystem` added to `store.backend`** (`s3|memory|filesystem`, §2 note † and §5 rule 5): keys map to paths under `store.root`, first-run default `<data-dir>/store`. 03_store_backends.md owns the backend semantics; this doc owns the key, its validation, and the default.
@@ -674,8 +773,7 @@ $ WALGIT__STORE__BKUET=x spindle config check --config /etc/spindle/walgit.toml 
   the old pair-only check let a partially-configured instance boot into a dead login state
   (browser login disabled ⇒ every browser GET a bare 401, `/_auth/login` a 501); refuse-to-start
   was preferred over a degraded boot (see 06_server_http.md §14 for the login-page half).
-- **NEW (2026-09-15) — `--data-dir` sync lives in the shared CLI path (Forgejo #611):**
-  `resolveConfig` (`cmd/spindle/config.go`, via `syncDataDirFlag`) re-points the flag-derived
+- **NEW (2026-09-15) — `--data-dir` sync lives in the shared CLI path (Forgejo #611):**  `resolveConfig` (`cmd/spindle/config.go`, via `syncDataDirFlag`) re-points the flag-derived
   paths (`DataDir`, `Store.Root`, `Cache.Dir`) to the effective `--data-dir` whenever they
   currently equal the `ResolveDataDir(env)`-derived paths — the exact comparison `serve` always
   performed. Previously only `serve` did this fixup, so every other store-touching subcommand
@@ -697,3 +795,24 @@ $ WALGIT__STORE__BKUET=x spindle config check --config /etc/spindle/walgit.toml 
   (`internal/webui/settings.go`) describe the trade-off instead of "must be false". Interaction
   with #344: the browser-login trio requirement is unchanged — anonymous browsing never
   removes the need for a working login flow.
+- **NEW (2026-11-21) — the setup form is a LOSSLESS editor of the schema (G1/G3/G4, WP9).**
+  `internal/setup` joins every value the schema advertises to a spelling `Coerce` accepts
+  (`setup.DisplayValue`), and `setup.FormValues` renders the whole schema into the map
+  `POST /setup` hands to `ParseValues`. Struct-slice rows live in `internal/setup/rows.go`
+  (form namespace `K#<i>.<tomlname>`, `__base`, `__remove`; `RenderRows` /
+  `ParseRowEdits` / `FormValues`), so the page, the API and the acceptance test share one
+  renderer and one parser. Rationale: the audit measured 21 keys that could not round-trip
+  (two struct slices rendering empty, two unsigned counters blank, 17 empty lists coercing
+  to `[""]`), i.e. the advertised one-click path silently corrupted the file; the fix is
+  structural (one renderer, one parser, one whole-schema gate) rather than 21 special
+  cases. Consequence: `fmtAny` masks secret fields inside a struct slice, so
+  `GET /api/v1/setup` no longer publishes a static token's value either (the row value is
+  a toml-name map with `SecretMask` in place of the secret). A blank numeric/size/duration
+  row cell keeps the row's stored value (type `0` to clear it); blank string cells clear.
+- **NEW (2026-11-21, WP6.2) — `spindle org webhook …`.** Six HTTP-client commands over the
+  owner-gated org webhook API: `list` (table: id/url/events/active/secret-set), `create`
+  (`--url`, `--events`, `--secret`, `--inactive`, `--insecure-tls`), `delete`, `ping`
+  (`{delivery}`; a failed POST exits 1 and points at `deliveries`), `deliveries` (seq, event,
+  status, duration, at, error) and `redeliver ORG ID SEQ` (`{delivery, entry}`; a 410
+  payload-not-retained is exit 1 with the server's reason, a 404 is exit 3 — the standard
+  mapping). Every command accepts `--json`; the JSON is the API body unchanged.

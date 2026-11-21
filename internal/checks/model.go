@@ -61,13 +61,27 @@ func statusFor(err error) int {
 	}
 }
 
-// Status states (the v1 enum; 409 on anything else per the §4 table).
+// Status states (05 §2). in_progress, cancelled and skipped were added for
+// Threads check fidelity: a claimed job must be distinguishable from a queued
+// one, a cancelled job must not read as a failure, and a `needs:`-blocked
+// dependent that never ran reads `skipped` (round 3) — distinct from a
+// cancellation, equally non-green. Only `success` is green — the
+// required-check gate refuses every other state — so adding values can never
+// unblock a merge.
 const (
-	StatePending = "pending"
-	StateSuccess = "success"
-	StateFailure = "failure"
-	StateError   = "error"
+	StatePending    = "pending"
+	StateInProgress = "in_progress"
+	StateSuccess    = "success"
+	StateFailure    = "failure"
+	StateCancelled  = "cancelled"
+	StateSkipped    = "skipped"
+	StateError      = "error"
 )
+
+// LiveState reports a state that has not concluded (pending or in_progress).
+func LiveState(state string) bool {
+	return state == StatePending || state == StateInProgress
+}
 
 // NotifyClass is the 06 §5.3 activity-log action this package emits
 // (transitions into failure or error ONLY).
@@ -149,7 +163,7 @@ func normalizeSHA(sha string) (string, error) {
 // validState reports the v1 state enum.
 func validState(state string) bool {
 	switch state {
-	case StatePending, StateSuccess, StateFailure, StateError:
+	case StatePending, StateInProgress, StateSuccess, StateFailure, StateCancelled, StateSkipped, StateError:
 		return true
 	}
 	return false
@@ -185,22 +199,36 @@ func validDescription(d string) error {
 	return nil
 }
 
-// combinedState aggregates worst-of over contexts: error > failure >
-// pending > success. Zero contexts ⇒ pending (a caller cannot
-// distinguish "not started" from "in flight" — exactly what a gate
-// needs).
+// combinedState aggregates worst-of over contexts, by explicit precedence:
+// error > failure > a live context (in_progress > pending) > cancelled >
+// skipped > success. A cancelled or skipped context mixed with a green one is
+// therefore not green (the gate's rule), while a still-running context reads as
+// in progress. Zero contexts ⇒ pending (a caller cannot distinguish "not
+// started" from "in flight" — exactly what a gate needs).
 func combinedState(states []string) string {
-	worst := StateSuccess
-	rank := map[string]int{StateSuccess: 0, StatePending: 1, StateFailure: 2, StateError: 3}
-	for _, st := range states {
-		if rank[st] > rank[worst] {
-			worst = st
-		}
-	}
 	if len(states) == 0 {
 		return StatePending
 	}
-	return worst
+	seen := make(map[string]bool, len(states))
+	for _, st := range states {
+		seen[st] = true
+	}
+	switch {
+	case seen[StateError]:
+		return StateError
+	case seen[StateFailure]:
+		return StateFailure
+	case seen[StateInProgress]:
+		return StateInProgress
+	case seen[StatePending]:
+		return StatePending
+	case seen[StateCancelled]:
+		return StateCancelled
+	case seen[StateSkipped]:
+		return StateSkipped
+	default:
+		return StateSuccess
+	}
 }
 
 // --- CI tokens (§3) ----------------------------------------------------------

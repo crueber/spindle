@@ -2,7 +2,7 @@
 {{with .}}<a class="inline-flex items-center gap-1.5 text-sm {{if eq .Label "no checks"}}muted{{end}}" href="{{.Href}}" title="{{.Title}}"><span class="{{.Dot}}" aria-hidden="true"></span>{{.Label}}</a>{{end}}
 {{end}}
 
-{{define "collab_check_dot"}}<span class="{{if eq . "success"}}inline-block h-2.5 w-2.5 rounded-full bg-emerald-500{{else if eq . "pending"}}inline-block h-2.5 w-2.5 rounded-full bg-amber-400{{else if eq . "failure"}}inline-block h-2.5 w-2.5 rounded-full bg-red-500{{else if eq . "error"}}inline-block h-2.5 w-2.5 rounded-full bg-red-700{{else}}inline-block h-2.5 w-2.5 rounded-full bg-zinc-400{{end}}" aria-hidden="true"></span>{{end}}
+{{define "collab_check_dot"}}<span class="{{if eq . "success"}}inline-block h-2.5 w-2.5 rounded-full bg-emerald-500{{else if eq . "in_progress"}}inline-block h-2.5 w-2.5 rounded-full bg-amber-400 animate-pulse{{else if eq . "pending"}}inline-block h-2.5 w-2.5 rounded-full bg-amber-400{{else if eq . "failure"}}inline-block h-2.5 w-2.5 rounded-full bg-red-500{{else if eq . "error"}}inline-block h-2.5 w-2.5 rounded-full bg-red-700{{else if eq . "cancelled"}}inline-block h-2.5 w-2.5 rounded-full bg-zinc-400{{else if eq . "skipped"}}inline-block h-2.5 w-2.5 rounded-full bg-zinc-500{{else}}inline-block h-2.5 w-2.5 rounded-full bg-zinc-400{{end}}" aria-hidden="true"></span>{{end}}
 
 {{/* collab_check_contexts: one sha's per-context rows (<ul.divide-y>). */}}
 {{define "collab_check_contexts"}}

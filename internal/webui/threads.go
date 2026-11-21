@@ -14,7 +14,11 @@ package webui
 
 import (
 	"context"
+	"fmt"
 	"net/http"
+	"net/url"
+	"path"
+	"regexp"
 	"strings"
 
 	"github.com/crueber/spindle/internal/server/auth"
@@ -24,8 +28,29 @@ import (
 // ThreadsDeps is the Threads page seam (composition binds the service methods
 // with the repo id joined).
 type ThreadsDeps struct {
-	List func(ctx context.Context, owner, repo string, p auth.Principal, after string, n int) (*threads.RunPage, error)
+	List func(ctx context.Context, owner, repo string, p auth.Principal, after string, n int, filter threads.RunFilter) (*threads.RunPage, error)
 	Get  func(ctx context.Context, owner, repo, runID string, p auth.Principal) (*threads.RunView, error)
+	// Workflows lists the discovered workflow files and their per-file parse
+	// state at commit ("" = the default branch tip). It is the page's error
+	// surface: a broken file is a row with its error, never a silent no-op.
+	Workflows func(ctx context.Context, owner, repo, commit string, p auth.Principal) (*threads.WorkflowList, error)
+	// Cancel/Rerun are the operator verbs (15 §3). The page handler gates on
+	// the repository read role to reach the tab; the service re-checks the
+	// write role, so a reader's POST is a real 403 (the API's own gate).
+	Cancel func(ctx context.Context, owner, repo, runID string, p auth.Principal) error
+	Rerun  func(ctx context.Context, owner, repo, runID string, p auth.Principal) error
+	// Dispatch is the manual trigger (15 §6, round 2): the page's Run workflow
+	// form posts ref + workflow + declared inputs through the SAME service call
+	// as POST …/api/threads. The service re-checks the write role, so the form
+	// is an affordance, not the gate.
+	Dispatch func(ctx context.Context, owner, repo, ref, workflow string, inputs map[string]string, p auth.Principal) ([]*threads.Run, error)
+	// Approve/Deny are the first-time-contributor gate's decisions (15 §5.2).
+	// The service re-checks the maintain role, so the control is an affordance.
+	Approve func(ctx context.Context, owner, repo, runID string, p auth.Principal) error
+	Deny    func(ctx context.Context, owner, repo, runID string, p auth.Principal) error
+	// Role resolves the caller's repo role for the verb affordance (nil =
+	// only a write-capable principal sees the buttons).
+	Role func(ctx context.Context, owner, repo string, p auth.Principal) (string, error)
 }
 
 var threadsDeps ThreadsDeps
@@ -42,7 +67,12 @@ func init() { registerGroup((*Server).mountThreads) }
 func (s *Server) mountThreads() {
 	m := &s.mux
 	m.HandleFunc("GET /{owner}/{repo}/threads", s.threadsList)
+	m.HandleFunc("POST /{owner}/{repo}/threads/dispatch", s.threadsDispatch)
 	m.HandleFunc("GET /{owner}/{repo}/threads/{run}", s.threadRun)
+	m.HandleFunc("POST /{owner}/{repo}/threads/{run}/cancel", s.threadRunCancel)
+	m.HandleFunc("POST /{owner}/{repo}/threads/{run}/rerun", s.threadRunRerun)
+	m.HandleFunc("POST /{owner}/{repo}/threads/{run}/approve", s.threadRunApprove)
+	m.HandleFunc("POST /{owner}/{repo}/threads/{run}/deny", s.threadRunDeny)
 	m.HandleFunc("GET /{owner}/{repo}/threads/{rest...}", s.collabNotFound)
 }
 
@@ -59,6 +89,11 @@ type threadRunRow struct {
 	State       string
 	Trusted     bool
 	UpdatedAt   string
+	// DurationSeconds is the run's derived wall time (0 = not started or too
+	// short to render).
+	DurationSeconds int64
+	// Actor is the trigger principal (the run-list actor filter and column).
+	Actor string
 }
 
 // threadsListData is the run-list page model.
@@ -71,7 +106,68 @@ type threadsListData struct {
 	OlderHref   string
 	RefreshHref string
 
+	// Workflows is the discovered set at the default branch tip, with each
+	// file's parse state (a broken file shows its error and the others still
+	// list). WorkflowsError reports a discovery failure without hiding runs.
+	Workflows      []threadWorkflowRow
+	WorkflowsError string
+
+	// Run workflow (round 2): the manual dispatch control. Dispatch lists the
+	// files that declare `workflow_dispatch`; DispatchSelected is the file whose
+	// declared inputs are rendered (chosen with GET ?dispatch=<path>, default
+	// the first). The form posts ref + workflow + inputs to
+	// POST …/threads/dispatch, the page twin of POST …/api/threads.
+	CanWrite         bool
+	Dispatch         []threadDispatchWorkflow
+	DispatchSelected string
+	DispatchRef      string
+	DispatchInputs   []threadDispatchInput
+	DispatchError    string
+	DispatchNotice   string
+
+	// Run-list filters (round-2 pass 2): workflow · state · actor. The form is
+	// a plain GET, so the filter lives in the URL and a link keeps it.
+	FilterWorkflow string
+	FilterState    string
+	FilterActor    string
+	States         []string
+	FilterActive   bool
+	// FilterWorkflowOptions is the workflow select's option list (the
+	// discovered workflows plus the active value when it is not discovered).
+	FilterWorkflowOptions []string
+
 	Error string
+}
+
+// threadDispatchWorkflow is one option of the Run workflow select.
+type threadDispatchWorkflow struct {
+	Path  string
+	Name  string
+	Label string
+}
+
+// threadDispatchInput is one declared workflow_dispatch input as a form row.
+type threadDispatchInput struct {
+	Name        string
+	Type        string
+	Description string
+	Required    bool
+	Default     string
+	Options     []string
+	Value       string // submitted (or default) value on a re-render
+}
+
+// threadWorkflowRow is one discovered workflow file.
+type threadWorkflowRow struct {
+	Path     string
+	Name     string
+	Anchor   string
+	Triggers []string
+	Error    string
+	// Dispatch marks a file that declares workflow_dispatch; Inputs is its
+	// declared input schema (the Run workflow form renders it).
+	Dispatch bool
+	Inputs   []threads.DispatchInput
 }
 
 // threadsList renders the repository's runs, newest first.
@@ -85,12 +181,26 @@ func (s *Server) threadsList(w http.ResponseWriter, r *http.Request) {
 		RefreshHref: r.URL.RequestURI(),
 		After:       r.URL.Query().Get("after"),
 	}
+	data.Workflows, data.WorkflowsError = threadWorkflowRows(r.Context(), rc, p)
+	data.States = []string{threads.RunQueued, threads.RunRunning, threads.RunPendingApproval, threads.RunSuccess, threads.RunFailure, threads.RunCancelled, threads.RunSkipped}
+	data.FilterWorkflow = strings.TrimSpace(r.URL.Query().Get("workflow"))
+	data.FilterState = strings.TrimSpace(r.URL.Query().Get("state"))
+	data.FilterActor = strings.TrimSpace(r.URL.Query().Get("actor"))
+	data.FilterActive = data.FilterWorkflow != "" || data.FilterState != "" || data.FilterActor != ""
+	for _, wf := range data.Workflows {
+		data.FilterWorkflowOptions = append(data.FilterWorkflowOptions, wf.Name)
+	}
+	data.CanWrite = threadCanWrite(r.Context(), rc, p)
+	data.DispatchRef = threadDispatchDefaultRef(rc)
+	threadDispatchModel(&data, r.URL.Query().Get("dispatch"), nil)
 	if threadsDeps.List == nil {
 		data.Error = "threads service not wired"
 		s.pageRepo(w, r, p, s.collabChrome(r, rc, p), http.StatusServiceUnavailable, "collab/threads", "Threads", data)
 		return
 	}
-	page, err := threadsDeps.List(r.Context(), rc.Owner, rc.Name, p, data.After, 50)
+	page, err := threadsDeps.List(r.Context(), rc.Owner, rc.Name, p, data.After, 50, threads.RunFilter{
+		Workflow: data.FilterWorkflow, State: data.FilterState, Actor: data.FilterActor,
+	})
 	if err != nil {
 		if st := collabErrStatus(err); st == http.StatusNotFound || st == http.StatusUnauthorized || st == http.StatusForbidden {
 			s.collabError(w, r, st, err.Error())
@@ -107,12 +217,168 @@ func (s *Server) threadsList(w http.ResponseWriter, r *http.Request) {
 			Commit: run.Commit, ShortCommit: shortSHA(run.Commit),
 			Event: run.Event, Workflow: run.Workflow, Branch: run.Branch,
 			State: run.State, Trusted: run.Trusted, UpdatedAt: run.UpdatedAt,
+			DurationSeconds: run.DurationSeconds, Actor: run.Actor,
 		})
 	}
 	if data.More && len(page.Runs) > 0 {
 		data.OlderHref = pagerHref(r, "after", page.Runs[len(page.Runs)-1].ID)
 	}
 	s.pageRepo(w, r, p, s.collabChrome(r, rc, p), http.StatusOK, "collab/threads", "Threads", data)
+}
+
+// threadDispatchModel fills the Run workflow model: the dispatchable files, the
+// selected one's declared inputs, and (when submitted != nil) the values the
+// dispatcher posted, so an inline error re-render keeps them.
+func threadDispatchModel(data *threadsListData, selected string, submitted map[string]string) {
+	selected = strings.TrimSpace(selected)
+	var chosen *threadWorkflowRow
+	for i := range data.Workflows {
+		wf := &data.Workflows[i]
+		if !wf.Dispatch {
+			continue
+		}
+		data.Dispatch = append(data.Dispatch, threadDispatchWorkflow{
+			Path: wf.Path, Name: wf.Name, Label: threadDispatchLabel(wf),
+		})
+		if chosen == nil || wf.Path == selected {
+			if chosen == nil {
+				chosen = wf
+			}
+			if wf.Path == selected {
+				chosen = wf
+			}
+		}
+	}
+	if chosen == nil {
+		data.DispatchSelected = ""
+		return
+	}
+	data.DispatchSelected = chosen.Path
+	for _, in := range chosen.Inputs {
+		row := threadDispatchInput{
+			Name: in.Name, Type: in.Type, Description: in.Description,
+			Required: in.Required, Default: in.Default, Options: in.Options,
+			Value: in.Default,
+		}
+		if submitted != nil {
+			row.Value = submitted[in.Name]
+		}
+		data.DispatchInputs = append(data.DispatchInputs, row)
+	}
+}
+
+// threadDispatchLabel is the select option text: the workflow's display name
+// plus its path, or just the path when the name is only the file stem (no
+// duplicated "ci — .spindle/workflows/ci.yml").
+func threadDispatchLabel(wf *threadWorkflowRow) string {
+	stem := strings.TrimSuffix(strings.TrimSuffix(path.Base(wf.Path), ".yml"), ".yaml")
+	if wf.Name != "" && wf.Name != stem {
+		return wf.Name + " — " + wf.Path
+	}
+	return wf.Path
+}
+
+// threadDispatchDefaultRef is the ref the form pre-fills: the default branch's
+// short name when known, else "main".
+func threadDispatchDefaultRef(rc collabRepo) string {
+	if label := strings.TrimSpace(rc.HeadLabel); label != "" && !looksLikeSHA(label) {
+		return label
+	}
+	return "main"
+}
+
+// looksLikeSHA reports a full-ish hex sha (the HeadLabel fallback for a repo
+// whose default branch name is unknown).
+func looksLikeSHA(s string) bool {
+	if len(s) < 7 {
+		return false
+	}
+	for _, r := range s {
+		if (r < '0' || r > '9') && (r < 'a' || r > 'f') {
+			return false
+		}
+	}
+	return true
+}
+
+// threadsDispatch answers POST …/threads/dispatch: the Run workflow form. It
+// calls the same service method as the JSON API, then redirects to the created
+// run. A validation failure re-renders the page with the error (and the
+// submitted values) inline — never a bare error page for a form the user can
+// fix.
+func (s *Server) threadsDispatch(w http.ResponseWriter, r *http.Request) {
+	rc, p, ok := s.collabEnv(w, r)
+	if !ok {
+		return
+	}
+	if !sameOrigin(r) {
+		s.collabError(w, r, http.StatusForbidden, "cross-origin write refused")
+		return
+	}
+	if err := r.ParseForm(); err != nil {
+		s.collabError(w, r, http.StatusBadRequest, "unreadable form")
+		return
+	}
+	if threadsDeps.Dispatch == nil {
+		s.collabError(w, r, http.StatusServiceUnavailable, "threads service not wired")
+		return
+	}
+	workflow := strings.TrimSpace(r.PostForm.Get("workflow"))
+	ref := strings.TrimSpace(r.PostForm.Get("ref"))
+	submitted := map[string]string{}
+	for key, vals := range r.PostForm {
+		name, ok := strings.CutPrefix(key, "input.")
+		if !ok || len(vals) == 0 {
+			continue
+		}
+		submitted[name] = vals[0]
+	}
+	if ref == "" {
+		ref = threadDispatchDefaultRef(rc)
+	}
+	runs, err := threadsDeps.Dispatch(r.Context(), rc.Owner, rc.Name, ref, workflow, submitted, p)
+	if err == nil && len(runs) == 0 {
+		err = fmt.Errorf("%w: no workflow_dispatch workflow matched", threads.ErrNotFound)
+	}
+	if err == nil {
+		http.Redirect(w, r, "/"+rc.Full+"/threads/"+url.PathEscape(runs[0].ID)+"?notice="+url.QueryEscape("workflow dispatched"), http.StatusSeeOther)
+		return
+	}
+	status := collabErrStatus(err)
+	if status == http.StatusUnauthorized || status == http.StatusForbidden || status == http.StatusNotFound {
+		s.collabError(w, r, status, err.Error())
+		return
+	}
+	// A fixable form error: re-render the page with the values and the reason.
+	data := threadsListData{
+		Repo: rc, RefreshHref: "/" + rc.Full + "/threads",
+		CanWrite: true, DispatchError: err.Error(), DispatchRef: ref,
+	}
+	data.Workflows, data.WorkflowsError = threadWorkflowRows(r.Context(), rc, p)
+	data.States = []string{threads.RunQueued, threads.RunRunning, threads.RunPendingApproval, threads.RunSuccess, threads.RunFailure, threads.RunCancelled, threads.RunSkipped}
+	data.FilterWorkflow = strings.TrimSpace(r.URL.Query().Get("workflow"))
+	data.FilterState = strings.TrimSpace(r.URL.Query().Get("state"))
+	data.FilterActor = strings.TrimSpace(r.URL.Query().Get("actor"))
+	data.FilterActive = data.FilterWorkflow != "" || data.FilterState != "" || data.FilterActor != ""
+	for _, wf := range data.Workflows {
+		data.FilterWorkflowOptions = append(data.FilterWorkflowOptions, wf.Name)
+	}
+	threadDispatchModel(&data, workflow, submitted)
+	if threadsDeps.List != nil {
+		if page, lerr := threadsDeps.List(r.Context(), rc.Owner, rc.Name, p, "", 50, threads.RunFilter{}); lerr == nil {
+			data.More = page.More
+			for _, run := range page.Runs {
+				data.Rows = append(data.Rows, threadRunRow{
+					ID: run.ID, Short: shortRunID(run.ID), Href: "/" + rc.Full + "/threads/" + run.ID,
+					Commit: run.Commit, ShortCommit: shortSHA(run.Commit),
+					Event: run.Event, Workflow: run.Workflow, Branch: run.Branch,
+					State: run.State, Trusted: run.Trusted, UpdatedAt: run.UpdatedAt,
+					DurationSeconds: run.DurationSeconds,
+				})
+			}
+		}
+	}
+	s.pageRepo(w, r, p, s.collabChrome(r, rc, p), status, "collab/threads", "Threads", data)
 }
 
 // threadRunData is the run-detail page model.
@@ -125,6 +391,39 @@ type threadRunData struct {
 	ShortCommit string
 	ShortRun    string
 	CommitHref  string
+	// WorkflowError is the parse error the run's workflow file currently
+	// carries (the file may have broken after the run was created); the page
+	// links to the per-file error on the Threads page.
+	WorkflowError     string
+	WorkflowErrorPath string
+	WorkflowErrorHref string
+	// CanWrite enables the operator verbs (cancel/rerun); the service enforces
+	// the role regardless of what the page renders.
+	CanWrite bool
+	// CanApprove enables the first-time-contributor gate's approve/deny
+	// controls (maintain+); the service enforces the role.
+	CanApprove bool
+	// Approval is the run's gate state (pending/approved/denied), rendered so a
+	// held run says why it is held.
+	Approval threads.ApprovalView
+	// Notice is the ?notice= text a verb redirect carries (cancel/rerun/
+	// dispatch feedback).
+	Notice string
+	// JobLogs is one live-log panel per job (the island attaches by URL over
+	// the existing SSE transport — no new transport, 15 §6).
+	JobLogs []threadJobLog
+	// Error is the page-level error text (empty on a clean render); the empty
+	// section uses it to avoid claiming "no jobs" for a failed read.
+	Error string
+}
+
+// threadJobLog is one job's live-log panel state.
+type threadJobLog struct {
+	JobID  string
+	State  string
+	LogURL string
+	// Live is true while the job can still produce frames.
+	Live bool
 }
 
 // threadRun renders one run and its jobs.
@@ -148,8 +447,157 @@ func (s *Server) threadRun(w http.ResponseWriter, r *http.Request) {
 		ShortCommit: shortSHA(view.Run.Commit),
 		ShortRun:    shortRunID(view.Run.ID),
 		CommitHref:  "/" + rc.Full + "/commit/" + view.Run.Commit,
+		Notice:      r.URL.Query().Get("notice"),
+	}
+	data.WorkflowError, data.WorkflowErrorPath = threadWorkflowError(r.Context(), rc, p, view.Run)
+	if data.WorkflowError != "" {
+		data.WorkflowErrorHref = "/" + rc.Full + "/threads#" + workflowAnchor(data.WorkflowErrorPath)
+	}
+	data.CanWrite = threadCanWrite(r.Context(), rc, p)
+	data.CanApprove = data.CanWrite && threadCanMaintain(r.Context(), rc, p)
+	data.Approval = threads.Approval(view.Run)
+	for _, job := range view.Jobs {
+		data.JobLogs = append(data.JobLogs, threadJobLog{
+			JobID:  job.ID,
+			State:  job.State,
+			LogURL: "/" + rc.Full + "/api/threads/" + url.PathEscape(view.Run.ID) + "/jobs/" + url.PathEscape(job.ID) + "/log",
+			Live:   job.State == threads.JobQueued || job.State == threads.JobRunning,
+		})
 	}
 	s.pageRepo(w, r, p, s.collabChrome(r, rc, p), http.StatusOK, "collab/thread_detail", "Run "+data.ShortRun, data)
+}
+
+// threadRunCancel answers POST …/threads/{run}/cancel from the page.
+func (s *Server) threadRunCancel(w http.ResponseWriter, r *http.Request) {
+	s.threadRunVerb(w, r, threadsDeps.Cancel, "cancelled")
+}
+
+// threadRunRerun answers POST …/threads/{run}/rerun from the page.
+func (s *Server) threadRunRerun(w http.ResponseWriter, r *http.Request) {
+	s.threadRunVerb(w, r, threadsDeps.Rerun, "re-run queued")
+}
+
+// threadRunApprove answers POST …/threads/{run}/approve (the gate's release).
+func (s *Server) threadRunApprove(w http.ResponseWriter, r *http.Request) {
+	s.threadRunVerb(w, r, threadsDeps.Approve, "approved — queued")
+}
+
+// threadRunDeny answers POST …/threads/{run}/deny (the gate's refusal).
+func (s *Server) threadRunDeny(w http.ResponseWriter, r *http.Request) {
+	s.threadRunVerb(w, r, threadsDeps.Deny, "denied — cancelled")
+}
+
+// threadRunVerb runs one operator verb and redirects back to the run page. A
+// refusal is a plain error page (never a silent no-op): the service's role
+// check is the gate, the page's read gate only got the caller here.
+func (s *Server) threadRunVerb(w http.ResponseWriter, r *http.Request, verb func(ctx context.Context, owner, repo, runID string, p auth.Principal) error, done string) {
+	rc, p, ok := s.collabEnv(w, r)
+	if !ok {
+		return
+	}
+	if !sameOrigin(r) {
+		s.collabError(w, r, http.StatusForbidden, "cross-origin write refused")
+		return
+	}
+	runID := r.PathValue("run")
+	if verb == nil {
+		s.collabError(w, r, http.StatusServiceUnavailable, "threads service not wired")
+		return
+	}
+	if err := verb(r.Context(), rc.Owner, rc.Name, runID, p); err != nil {
+		s.collabError(w, r, collabErrStatus(err), err.Error())
+		return
+	}
+	http.Redirect(w, r, "/"+rc.Full+"/threads/"+url.PathEscape(runID)+"?notice="+url.QueryEscape(done), http.StatusSeeOther)
+}
+
+// threadCanMaintain reports whether the caller holds maintain+ (the approval
+// gate's floor). One role resolution; the service re-checks on the verb.
+func threadCanMaintain(ctx context.Context, rc collabRepo, p auth.Principal) bool {
+	if p.Admin {
+		return true
+	}
+	if threadsDeps.Role == nil {
+		return p.Write
+	}
+	role, err := threadsDeps.Role(ctx, rc.Owner, rc.Name, p)
+	return err == nil && settingsRoleAtLeast(role, "maintain")
+}
+
+// threadCanWrite reports whether the caller may use the operator verbs. It is
+// an affordance, not the gate: the service re-checks the write role.
+func threadCanWrite(ctx context.Context, rc collabRepo, p auth.Principal) bool {
+	if p.Admin || p.Write {
+		return true
+	}
+	if threadsDeps.Role == nil {
+		return false
+	}
+	role, err := threadsDeps.Role(ctx, rc.Owner, rc.Name, p)
+	return err == nil && settingsRoleAtLeast(role, "write")
+}
+
+// threadWorkflowRows lists the discovered workflows at the default branch tip
+// for the page. A discovery failure is returned as display text (the run list is
+// independent of it); an unwired seam yields no rows.
+func threadWorkflowRows(ctx context.Context, rc collabRepo, p auth.Principal) ([]threadWorkflowRow, string) {
+	if threadsDeps.Workflows == nil {
+		return nil, ""
+	}
+	list, err := threadsDeps.Workflows(ctx, rc.Owner, rc.Name, "", p)
+	if err != nil {
+		return nil, err.Error()
+	}
+	rows := make([]threadWorkflowRow, 0, len(list.Workflows))
+	for _, wf := range list.Workflows {
+		rows = append(rows, threadWorkflowRow{
+			Path: wf.Path, Name: wf.Name, Anchor: workflowAnchor(wf.Path),
+			Triggers: wf.Triggers, Error: wf.Error,
+			Dispatch: threadDeclaresDispatch(wf.Triggers), Inputs: wf.Inputs,
+		})
+	}
+	return rows, ""
+}
+
+// threadDeclaresDispatch reports the manual trigger from the discovery trigger
+// list (the API's own projection, so page and API cannot disagree).
+func threadDeclaresDispatch(triggers []string) bool {
+	for _, t := range triggers {
+		if t == "workflow_dispatch" {
+			return true
+		}
+	}
+	return false
+}
+
+// threadWorkflowError returns the current parse error of the run's workflow
+// file (path and text), or ("", "") when it parses (or the seam is unwired).
+func threadWorkflowError(ctx context.Context, rc collabRepo, p auth.Principal, run *threads.Run) (msg, path string) {
+	if threadsDeps.Workflows == nil || run == nil {
+		return "", ""
+	}
+	list, err := threadsDeps.Workflows(ctx, rc.Owner, rc.Name, "", p)
+	if err != nil {
+		return "", ""
+	}
+	for _, wf := range list.Workflows {
+		if wf.Path == run.WorkflowPath && wf.Error != "" {
+			return wf.Error, wf.Path
+		}
+	}
+	return "", ""
+}
+
+// workflowAnchor is the stable fragment for one workflow row (the run page
+// links a broken workflow to its entry on the Threads page).
+var workflowAnchorInvalid = regexp.MustCompile(`[^a-z0-9]+`)
+
+func workflowAnchor(path string) string {
+	slug := strings.Trim(workflowAnchorInvalid.ReplaceAllString(strings.ToLower(path), "-"), "-")
+	if slug == "" {
+		return "workflow"
+	}
+	return "workflow-" + slug
 }
 
 // shortRunID renders a compact run id: the random tail plus the time's
@@ -163,7 +611,8 @@ func shortRunID(id string) string {
 }
 
 // runDotState maps a run/job state onto the shared check dot vocabulary
-// (success/pending/failure/error; queued and running are in flight).
+// (success/pending/in_progress/failure/cancelled/skipped; queued is pending and
+// running is in progress, matching the checks mirror's own mapping).
 func runDotState(state string) string {
 	switch state {
 	case threads.RunSuccess:
@@ -171,7 +620,11 @@ func runDotState(state string) string {
 	case threads.RunFailure:
 		return "failure"
 	case threads.RunCancelled:
-		return "error"
+		return "cancelled"
+	case threads.RunSkipped:
+		return "skipped"
+	case threads.RunRunning:
+		return "in_progress"
 	default:
 		return "pending"
 	}

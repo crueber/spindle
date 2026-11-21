@@ -2,6 +2,7 @@ package git
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -693,6 +694,24 @@ func TestParsePushRequest(t *testing.T) {
 	}
 	if string(req.Pack) != "RAWPACKBYTES" {
 		t.Errorf("pack = %q", req.Pack)
+	}
+}
+
+func TestParsePushRequestShallowRefused(t *testing.T) {
+	root := t.TempDir()
+	repo, _ := InitLocalRepo(root, RepoId{Owner: "o", Name: "shallowpush"}, Sha1)
+	l := NewLayer()
+	var body bytes.Buffer
+	body.Write(Pkt("shallow " + oidA))
+	body.Write(Flush())
+	body.Write(Pkt(zero40 + " " + oidB + " refs/heads/main\x00report-status\n"))
+	body.Write(Flush())
+	_, err := l.ParsePushRequest(repo, body.Bytes())
+	if !errors.Is(err, ErrShallowPush) {
+		t.Fatalf("shallow push = %v, want ErrShallowPush", err)
+	}
+	if !strings.Contains(err.Error(), "fetch-depth: 0") {
+		t.Fatalf("refusal does not name the remedy: %v", err)
 	}
 }
 

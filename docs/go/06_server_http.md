@@ -231,7 +231,7 @@ Then dispatch on `sub[0]` (after `.git`-strip and re-join with "/"): the table i
 | GET/HEAD | `/v2/` | `200 {}` + `Docker-Distribution-API-Version: registry/2.0`; in a credentialled mode (auth ≠ `none`) the unauthenticated probe is `401` + the Bearer challenge (`realm=<public_url or request>/v2/token`, `service=<host>`) |
 | GET/HEAD | `/v2/{o}/{r}/manifests/{ref}` | tag or digest; `Content-Type` = the manifest's `mediaType`, `Docker-Content-Digest`, `ETag`; tag = 1 pointer read + 1 manifest read |
 | PUT | `/v2/{o}/{r}/manifests/{ref}` | `push` scope → repo `write`; digest refs verified (`DIGEST_INVALID` on mismatch); tag refs CAS the pointer (one retry, then 409); `201` + `Location` + digest |
-| DELETE | `/v2/{o}/{r}/manifests/{ref}` | tag → pointer only; digest → the manifest object; `202`; blobs await the GC sweep |
+| DELETE | `/v2/{o}/{r}/manifests/{ref}` | tag → pointer only (unknown → 404); digest → the version tree (the manifest + an index's direct platform manifests, each kept if another manifest references it) and its tag pointers; `202`; blobs await the GC sweep |
 | GET/HEAD | `/v2/{o}/{r}/blobs/{digest}` | `pull` scope → repo `read`; single `Range` → `206` + `Content-Range`; `Docker-Content-Digest`; proxied (no redirect) |
 | POST | `/v2/{o}/{r}/blobs/uploads/` | `202` + `Location` + `Docker-Upload-UUID`; zero store writes |
 | PATCH | `/v2/{o}/{r}/blobs/uploads/{id}` | append a chunk; `202` + `Range`; a `Content-Range` start ≠ staged size → `416`; expired/aborted id → `404 BLOB_UPLOAD_UNKNOWN` |
@@ -241,9 +241,22 @@ Then dispatch on `sub[0]` (after `.git`-strip and re-join with "/"): the table i
 | GET | `/v2/{o}/{r}/tags/list?n=&last=` | tag names + `Link: rel="next"`; the ONE user-triggered LIST |
 | GET | `/v2/token`, `/v2/auth` | Docker token endpoint: Basic in, short-lived HMAC-scoped token out (`pull`/`push` granted per the principal's role) |
 
-Every row resolves the principal through the server chain first (Basic password = token, exactly the
-git HTTP path) and verifies `wgp1.` bearer tokens locally; `features.packages = false` makes all
-repo-scoped rows `404`. Setup-only and un-wired builds never register the namespace.
+**Packages JSON API** (same feature, `internal/packages/api.go`; registered through `ChainExtra`, so
+both lanes serve it and `api.RegisterExposed` lists the three templates):
+
+| Method | Path | Notes |
+|---|---|---|
+| GET | `/{o}/{r}/api/packages[?n=]` | tag rows + manifest rows; `Cache-Control: no-store`; `pull` commands; read gate = `identity.CheckRead` |
+| GET | `/{o}/{r}/api/packages/{digest}` | one manifest view (tags, platforms, body); 404 unknown; read gate |
+| DELETE | `/{o}/{r}/api/packages/tags/{tag}` | 204; unknown tag 404; delete gate = `identity.CheckPush` (the git rule) |
+| DELETE | `/{o}/{r}/api/packages/{digest}` | 204; deletes the version tree (index + direct platform manifests) and its tag pointers; unknown 404; `CheckPush` |
+
+Error bodies on these rows are plain text (the JSON API convention), never the OCI envelope;
+`features.packages = false` (or an unknown repo) answers 404 on both shapes.
+
+Every row above resolves the principal through the server chain first (Basic password = token,
+exactly the git HTTP path) and verifies `wgp1.` bearer tokens locally; `features.packages = false`
+makes all repo-scoped rows `404`. Setup-only and un-wired builds never register the namespace.
 
 **Both API lanes hit the same handlers.** `/{owner}/{repo}/api/…` (bearer/same-origin) and `/{owner}/{repo}/api-browser/…` (cross-origin browser, `credentials: include`) differ only in the `Lane` value passed to the handler (which changes cache headers and auth-redirect behavior per 07_api.md). Same for `/api/v1` vs `/api-browser/v1` in the non-repo lane.
 
@@ -266,6 +279,13 @@ locate data dir (--data-dir flag > SPINDLE_DATA_DIR env; default ~/.local/share/
      /healthz, /readyz, and /services/public/* answer; everything else → 503 plain text
      with a pointer to /setup. The UI shows the exact errors; a saved fix takes effect
      after a restart (the process stays in setup-only mode until restarted).
+     The boot config is the BEST-EFFORT parse of the file (defaults ⊕ every decodable
+     field ⊕ the valid env overlay/PORT — the overlay still WINS over the file, as on a
+     valid boot), not the first-run defaults: [server].listen is
+     honoured so the recovery page stays where the operator put it, and the setup page
+     pre-fills those effective values with the offending rows marked. Only an unparseable
+     server.listen falls back to the compiled-in default (a bind failure would make
+     /setup unreachable), and the banner names the bad value.
 ```
 
 **First-run defaults (built into the binary; no TOML needed to start):**
@@ -280,15 +300,17 @@ locate data dir (--data-dir flag > SPINDLE_DATA_DIR env; default ~/.local/share/
 
 **Data-dir layout:** `<data-dir>/store/` (object store), `<data-dir>/cache/` (prewarm, LFS spool), `<data-dir>/spindle.toml` (saved by setup Save; the only config file the server reads).
 
-**Setup UI:** `GET /setup` is a server-rendered page; its assets are `/_ui/app.css` + `/_ui/ui.js` (stable names, `no-cache` + ETag). It groups ALL config keys by section with current effective values (merging defaults ← file ← env) and validates on save. The page provider implements `POST /setup` (validate-then-save through the same `internal/setup` path as `PUT /api/v1/setup`, re-rendering with errors or the saved/restart status; `hx-post` swaps the page fragment) and `POST /setup/auth-test` (the OIDC discovery result fragment). `internal/server` currently routes `GET /setup` in both boot modes and `POST /setup` in setup-only mode — the mode where saving is the recovery path (§3.1). The JSON endpoints below remain the programmatic surface.
+**Setup UI:** `GET /setup` is a server-rendered page; its assets are `/_ui/app.css` + `/_ui/ui.js` (stable names, `no-cache` + ETag). It groups ALL config keys by section with current effective values (merging defaults ← file ← env) and validates on save. Every section renders its always-visible Essentials open and its sane-default knobs inside a collapsed native `<details class="setup-advanced">` (the partition comes from `internal/webui`'s one display-metadata table, never a second list; a rejected advanced key opens its group). Enum-valued keys render as `<select>`s over `internal/setup`'s `EnumValues` table (`server.auth.mode`, `store.backend`, `cache.mode`, `bundles.serve_via`, `compaction.engine`, `git.upload_pack_engine`, `telemetry.log_format`); the choices ride `Field.Enum`/`DisplayType`, both excluded from the frozen JSON. Every key round-trips: a struct slice (`server.auth.tokens`, `bundles.strategy`) renders as repeating rows of its element's toml fields (add row / per-row remove / masked secrets), unsigned counters render as their decimal value, and an empty list renders empty — a zero-edit Save writes a byte-identical file (collapsed rows stay mounted). The page provider implements `POST /setup` (validate-then-save through the same `internal/setup` path as `PUT /api/v1/setup`, re-rendering with errors or the saved/restart status; `hx-post` swaps the page fragment) and `POST /setup/auth-test` (the OIDC discovery result fragment). The page's row form namespace is `K#<i>.<tomlname>` per cell with `K#<i>.__base` (the stored row it came from) and `K#<i>.__remove=true`; `setup.ParseRowEdits` is the single parser (`internal/setup/rows.go`). `internal/server` currently routes `GET /setup` in both boot modes and `POST /setup` in setup-only mode — the mode where saving is the recovery path (§3.1). The JSON endpoints below remain the programmatic surface.
 
 **Setup API:**
 
-- `GET /api/v1/setup` → `{ "file_state": "absent"|"valid"|"invalid", "errors": [<validation error>], "requires_restart": [<key>…], "groups": [{ "section": "server", "keys": [{ "key": "server.listen", "value": <effective>, "default": <…>, "type": "string"|"int"|"bool"|"duration"|"list", "secret": bool, "doc": "…" }] }] }`. `no-cache`.
-- `POST /api/v1/setup/test` — body: raw TOML (or `{overrides: {key: value}}`); runs the full validator WITHOUT saving → `200 {errors: []}` or `422 {errors: [{key, message}]}`.
+- `GET /api/v1/setup` → `{ "file_state": "absent"|"valid"|"invalid", "errors": [<validation error>], "requires_restart": [<key>…], "groups": [{ "section": "server", "keys": [{ "key": "server.listen", "value": <effective>, "default": <…>, "type": "string"|"int"|"bool"|"duration"|"list", "secret": bool, "doc": "…", "fields": [<row column schema>] }] }] }`. `no-cache`. `fields` is present only for a struct slice: one column per element toml field (`key` = the field name, `type`, `secret`, `doc`), and the row `value` is the element list rendered as toml-name maps with every secret field replaced by `SecretMask` — a static token's value is never published by the API, exactly as on the page.
+- `POST /api/v1/setup/test` — body: raw TOML (or `{overrides: {key: value}}`); runs the full validator WITHOUT saving → `200 {errors: []}` or `422 {errors: [{key, message}]}`. Each error's `key` is the schema key its message names (`setup.KeyInMessage`), empty only when the message names no key.
 - `PUT /api/v1/setup` — body: same as test. Validate; on success atomically write `<data-dir>/spindle.toml` (tmp + rename in the data dir), then respond `200 {saved: true, requires_restart: [<key>…], errors: []}`. The running process does NOT hot-reload — `requires_restart` lists every key whose effective value differs from the just-saved file (all of them, effectively; the process continues in its current boot mode).
 
 **Access rules:** open while (no config file) OR (config invalid) OR (`server.auth.mode = "none"`); otherwise an authenticated **admin principal** is required (`p.Admin`; anonymous → 401, authenticated non-admin → 403, same `require_admin` mapping as §8.3). Admin now comes from any of: `server.auth.admin_groups` (default `["spindle-admins"]`) matching the OIDC claim named by `server.auth.groups_claim` (default `"groups"`, case-insensitive), `admin_emails`, or `admin_domains`. **There is no setup token:** `SPINDLE_SETUP_TOKEN` (env) and the `?token=`/Bearer bypass are gone and have no effect. The same rule gates `GET|POST|PUT /api/v1/setup{,/test}`, `POST /setup`, `POST /setup/auth-test`, and the page provider's `SetupAccess` seam.
+
+**Token-mode browser recovery (F1):** the rule above is unchanged, but the *path to it* exists in every mode. Under `server.auth.mode = "token"` with `server.auth.session_secret` set, the `/setup` restricted card renders a token-paste form that `POST`s to `/_auth/token` (§8.6): the value is validated against the same `[[server.auth.tokens]]` map the credential chain uses, must belong to an `admin = true` principal, and mints the ordinary HMAC-signed `walgit_session` cookie. The page reloads authenticated (admin → the form; non-admin → the restricted card). Without a session secret the card states the exact file/API recovery (set `session_secret` and restart, or `curl -H 'Authorization: Bearer …' .../api/v1/setup`) and offers no form that cannot mint. No new credential type, no new secret, and `SPINDLE_SETUP_TOKEN` still has no effect.
 
 **auth-none on any bind (supersedes the Rust fail-closed loopback rule):** the Rust rule (refuse auth `none` unless the listen address is loopback) is deliberately dropped for zero-config friendliness. With `mode = "none"` on a non-loopback bind, the server boots but: logs a persistent `WARN auth mode is "none" — anyone on the network has write+admin` at startup AND once per hour thereafter; `/setup` shows a red banner; `readyz` gains `"warnings":["auth_none"]`; and the setup UI pre-selects a real auth mode as the recommended fix. No request is ever refused because of it.
 
@@ -371,7 +393,13 @@ On an `info/refs` auth failure, reply **200 + pkt-line `ERR`** (git prints `fata
 3. the request carried an `Authorization` header;
 4. the auth error is **Forbidden** or **Unavailable** (retrying cannot help).
 
-**Invalid/expired credentials MUST get a real 401** — that is what makes git erase the dead token and re-prompt. The pkt-ERR body is the setup help text (host, where tokens come from). Every 401 carries `WWW-Authenticate: Bearer realm="walgit"` (never Basic); every 503 carries `Retry-After: 15`.
+**Invalid/expired credentials MUST get a real 401** — that is what makes git erase the dead token and re-prompt.
+The pkt-ERR body is the setup help text (host, where tokens come from). Every 401 carries
+`WWW-Authenticate: Bearer realm="walgit"`, and **when static tokens are configured it also advertises
+Basic** (`Basic realm="walgit", Bearer realm="walgit"`): static tokens authenticate over HTTP Basic with the
+token as the password, and git only offers its username/password prompt when the challenge names Basic, so
+`git push http://user:token@…` works without `http.extraHeader`. Never Basic when no static token exists.
+Every 503 carries `Retry-After: 15`.
 
 ### 4.3 Placement/drain gates and the push broker
 
@@ -507,8 +535,11 @@ Then parse: `Bearer <token>` (case-insensitive prefix) or `Basic base64(user:pas
 **`token` mode:**
 ```
 resolved credential?
-├─ none → anonymous (non-repo reads gated by server.auth.anonymous_read;
-│   repo reads gated by per-repo visibility — Forgejo #345, see Decisions)
+├─ none → session cookie walgit_session? (minted by POST /_auth/token, §8.6)
+│         ├─ valid + a live server.auth.tokens principal with that NAME → principal
+│         │   (write/admin re-derived from the CURRENT token list; removing the token
+│         │    invalidates the session on the next request)
+│         └─ invalid/expired/unknown principal → anonymous (explicit credential never falls back)
 └─ bearer/basic token
    ├─ exact match against resolved static tokens → principal with write/admin flags from config
    │   (token_env env var overrides the literal at startup; empty-resolved entries dropped)
@@ -577,9 +608,11 @@ Access tokens carry the `wgt_` prefix (kind `token`, TTL `access_token_ttl` = 90
 
 Session cookie `walgit_session`: `HttpOnly`; `SameSite=None; Secure` when CORS origins are configured, else `SameSite=Lax`; `Max-Age` = `session_ttl` (30 d); sliding re-issue at ttl/4 (§2.1 #7).
 
-### 8.6 Browser OIDC flow (`/_auth/*`; enabled iff mode oidc + session_secret + client id + client secret)
+### 8.6 Browser login (`/_auth/*`; OIDC iff mode oidc + session_secret + client id + client secret; token-paste iff mode token + session_secret)
 
-- `GET /_auth/login?next=` → fetch discovery → HMAC-signed state `"{now+600}\n{nonce}\n{next}"` (`next` sanitized: must start with a single `/`) → 302 to the issuer's authorization endpoint with `response_type=code`, `scope=openid email`, `prompt=select_account`, `&hd=` = first allowed domain; PKCE S256 (`code_challenge` in the request, `code_verifier` via a short-lived `walgit_pkce` HttpOnly cookie, required at the callback); the state-carried nonce is sent as `nonce` and verified against the ID-token claim — the state HMAC is the anti-forgery.
+- `GET /_auth/login?next=` **OIDC** → fetch discovery → HMAC-signed state `"{now+600}\n{nonce}\n{next}"` (`next` sanitized: must start with a single `/`) → 302 to the issuer's authorization endpoint with `response_type=code`, `scope=openid email`, `prompt=select_account`, `&hd=` = first allowed domain; PKCE S256 (`code_challenge` in the request, `code_verifier` via a short-lived `walgit_pkce` HttpOnly cookie, required at the callback); the state-carried nonce is sent as `nonce` and verified against the ID-token claim — the state HMAC is the anti-forgery.
+- `GET /_auth/login?next=` **token mode** → the token-paste sign-in page (200) when `server.auth.session_secret` is set, else an honest 501 explaining the file/API recovery. It never mentions the OIDC trio on a token host. The gated-group 401 path for browser-ish GETs renders the same page (`middleware.go authFailure`), so a signed-out browser always has a real path forward.
+- `POST /_auth/token` (token mode only; 404 in any other mode) → body `{token, next}`. Same-origin enforced (`Origin`/`Sec-Fetch-Site` when present), the value is validated against the static `server.auth.tokens` map (never the Seam 2 extra-credential hook: a CI credential is not a browser identity), the principal must be `admin = true` (401 invalid / 403 non-admin), then `MintSession` sets the ordinary `walgit_session` cookie and 303s to `next`. Rejected values are never echoed back.
 - Redirect URI: `{public_url}/_auth/callback`. Loopback origins use `http(s)://localhost[:port]/_auth/callback` **plus** a `/_auth/claimed?ticket=` hop that sets the cookie on `walgit.localhost` (a 60 s signed ticket) — because `localhost` and `walgit.localhost` are different cookie hosts.
 - `GET /_auth/callback?code&state`: verify state (600 s), exchange the code (one retry on transport errors and 5xx only, 10 s per-attempt timeout), verify the ID token (aud = **exactly** the client id, nonce bound to the login, then domain policy), set the session cookie, redirect to `next`. After the session mint, the server fires the `AvatarHook` seam (Forgejo #376 — composition wires the identity service, which enqueues a background DiceBear generation for users without an avatar; the hook only enqueues, the login response never waits).
 - `/_auth/logout` clears the cookie. `/_auth/me` → `{principal, write}`.
@@ -909,12 +942,14 @@ Hazard: keepalive ticker and event writer racing on the same `http.ResponseWrite
 - **NEW (security audit UI-02/UI-03/UI-09, 2026-11-20) — one shared response-security set and one
   redirect-target rule.** `internal/httpsec` (leaf package) owns both. `httpsec.Apply` sets
   `Content-Security-Policy: default-src 'self'; script-src 'self'; style-src 'self'
-  'unsafe-inline'; img-src 'self' https: http: data:; frame-ancestors 'none'; base-uri 'none';
-  form-action 'self'; object-src 'none'`, `X-Frame-Options: DENY`, `Referrer-Policy: same-origin`
-  and `X-Content-Type-Options: nosniff`; the `serverHeaders` middleware applies it to every lane
-  (existing values win, so the release-asset byte lane keeps its stricter
-  `default-src 'none'; sandbox`), and `internal/webui/render.go` applies it again at the page
-  boundary (`fail()` included). `'unsafe-inline'` is present for **styles only**: the templates use
+  'unsafe-inline'; img-src 'self' https: http: data:; media-src 'self' https:; frame-ancestors 'none';
+  base-uri 'none'; form-action 'self'; object-src 'none'`, `X-Frame-Options: DENY`,
+  `Referrer-Policy: same-origin` and `X-Content-Type-Options: nosniff`; the `serverHeaders` middleware
+  applies it to every lane (existing values win, so the release-asset byte lane and the raw SVG lane keep
+  their stricter `default-src 'none'; sandbox`), and `internal/webui/render.go` applies it again at the
+  page boundary (`fail()` included). `media-src 'self' https:` exists because the markdown sanitizer
+  deliberately keeps external `<video>`/`<audio>` sources (audit: without the directive they fell back to
+  `default-src 'self'` and never played). `'unsafe-inline'` is present for **styles only**: the templates use
   five `style=` attributes (label swatches, milestone progress width); there are no inline
   `<script>` blocks, handlers, or `javascript:` URLs, so `script-src 'self'` needs no nonce, and
   htmx/the SSE island/theme toggle load from `'self'`. Rendered pages and htmx fragments now send
@@ -943,3 +978,37 @@ Hazard: keepalive ticker and event writer racing on the same `http.ResponseWrite
   masked), and a rejected form never echoes a typed secret back. The JSON `GET /api/v1/setup`
   schema still reports effective values (its contract, and it shares the setup access gate); the
   browser surface is the leak this decision closes.
+- **NEW (foundations audit F1, 2026-11-21) — token mode gets a real browser sign-in.**
+  `auth.mode = "token"` had no browser path: `/setup` said "sign in" while
+  `GET /_auth/login` answered 501 blaming the OIDC trio. The token tree now
+  accepts the `walgit_session` cookie (minted only by `POST /_auth/token`,
+  mode-gated, same-origin, admin static token only), and the principal is
+  re-derived from the LIVE static-token list on every request — the session
+  carries the principal NAME, not the token, so rotating/removing the token
+  fails closed on the next request and there is no new credential type or
+  secret. `GET /_auth/login` renders the token-paste page in token mode (200
+  when `session_secret` exists, an honest token-mode 501 otherwise) and the
+  disabled-login page is mode-aware: an OIDC host gets the trio explanation, a
+  token host never sees it. The `/setup` access matrix is unchanged (open for
+  no/invalid config or `auth.mode = "none"`; otherwise admin).
+- **NEW (foundations audit F5, 2026-11-21) — setup-only boot keeps the file's
+  values and still honours the env overlay.** An invalid config previously
+  booted first-run defaults, ignoring `[server].listen` (from the file AND
+  from `SPINDLE__SERVER__LISTEN`), and pre-filled defaults, so fixing one key
+  through the page could silently move the port. `config.LoadSetupOnly` decodes
+  the file best-effort (defaults ⊕ decodable fields) and then applies the env
+  overlay/PORT, which WINS over the file exactly as on a valid boot; the setup
+  view marks the rows named by the validator errors. `config.Validate` now also
+  refuses an unparseable `server.listen` before `net.Listen` can fail, and the
+  setup-only boot falls back to the compiled-in listener only for that
+  unparseable case (the recovery page must stay reachable). Tests:
+  `TestLoadSetupOnlyEnvListenWinsOverInvalidFile`,
+  `TestSetupOnlyBootEnvListenWinsOverFile`, `TestSetupOnlyBootPrefillsFileValues`.
+- **NEW (2026-11-21, WP6.2) — webhook redeliver routes (Seam 1, notify).** Two shapes join the
+  `ExposedTemplates` registry in the same change (never the core inventory — law 8):
+  `POST /{owner}/{repo}/api/webhooks/{id}/deliveries/{seq}/redeliver` (repo admin) and
+  `POST /api/v1/orgs/{org}/webhooks/{id}/deliveries/{seq}/redeliver` (org owner, both lanes).
+  Both answer `{delivery, entry}`; the replay reuses the original retained body (byte-identical
+  delivery id/HMAC) and never advances the cursor. 404 unknown seq, 410 payload-not-retained,
+  400 inactive hook. The org Webhooks tab writes through the page provider (same owner gate as
+  its API twin); it adds no route shape.

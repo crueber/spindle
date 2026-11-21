@@ -36,6 +36,10 @@ func newNotifyService(st store.ObjectStore, ident *identity.Service) (*notify.Se
 	if ident != nil {
 		svc.Profiles = ident
 		svc.Teams = ident
+		// Org webhooks (§5.4): ownership resolution stays owned by identity;
+		// notify only delegates through the narrow OrgOwnerChecker seam. A nil
+		// checker would fail every org-owner write closed (host admin only).
+		svc.OrgOwner = ident
 	}
 	h := &notify.Handler{Svc: svc}
 	return svc, h

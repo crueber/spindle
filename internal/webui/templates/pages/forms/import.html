@@ -105,7 +105,7 @@
     {{template "forms_owner_name" (dict "Prefix" "import" "Owners" .Data.Owners "Owner" .Data.Owner "Name" .Data.Name "Placeholder" "monorepo" "NameErr" "")}}
     <label class="grid gap-1" for="import-token">
       <span class="text-sm font-medium">Token</span>
-      <input id="import-token" name="token" class="input mono" type="password" value="{{.Data.Token}}"
+      <input id="import-token" name="token" class="input mono" type="password"
              placeholder="contents:read token for a private source" autocomplete="off"
              aria-label="Token" aria-describedby="import-token-help">
       <span id="import-token-help" class="muted text-[11px]">Private sources only — sent once for this import, never stored or logged.</span>

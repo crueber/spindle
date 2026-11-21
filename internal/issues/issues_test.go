@@ -118,7 +118,7 @@ func reqCtx() context.Context { return context.Background() }
 // mustCreate creates one issue or fails the test.
 func mustCreate(t *testing.T, s *Service, owner, repo string, p auth.Principal, title, body string) *Thread {
 	t.Helper()
-	th, _, err := s.CreateIssue(reqCtx(), owner, repo, p, title, body)
+	th, _, err := s.CreateIssue(reqCtx(), owner, repo, p, title, body, nil)
 	if err != nil {
 		t.Fatalf("CreateIssue(%q) = %v", title, err)
 	}

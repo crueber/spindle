@@ -327,7 +327,7 @@ Go module: `github.com/crueber/spindle`. These paths are normative; every other 
 
 | Package | Responsibility |
 |---|---|
-| `cmd/spindle` | The single binary: subcommand dispatch (serve, compact, bundle, repo, wal, synth, import, mirror, config), signal handling, exit codes 0/1/2/3 |
+| `cmd/spindle` | The single binary: subcommand dispatch (serve, compact, bundle, repo, wal, synth, import, mirror, config, `runner serve`), signal handling, exit codes 0/1/2/3. `spindle runner serve` is the Threads runner process (15_threads.md §4): same binary, no store access, a client of the runner protocol and of the `docker` CLI |
 | `internal/config` | `spindle.toml` loading (`github.com/BurntSushi/toml`), env overrides (`SPINDLE_*`), defaults, validation, per-repo settings parsing; owns the zero-config default set and `<data-dir>` resolution (§9.5) |
 | `internal/store` | The object store interface + backends (memory, S3 via hand-rolled SigV4, filesystem), CAS helper, bucket key layout, the hand-rolled protobuf wire codec, log framing |
 | `internal/wal` | The WAL engine: per-repo handles, sync levels, publish/CAS ladder, group commit, checkpoints, replay, remote reader, narrated tasks |

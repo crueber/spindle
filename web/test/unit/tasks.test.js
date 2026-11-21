@@ -91,7 +91,7 @@ const source = (p) => readFileSync(new URL(p, import.meta.url), "utf8");
 test("island is registered in the boot list", () => {
   const index = source("../../src/islands/index.js");
   assert.match(index, /import \{ initTasks \} from "\.\/tasks\.js"/);
-  assert.match(index, /initTasks\]/);
+  assert.match(index, /initTasks,\s*initOps,\s*initThreadLog\]/);
 });
 
 test("island reuses the one SSE reader (no second fetch, no EventSource)", () => {

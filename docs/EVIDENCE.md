@@ -41,6 +41,7 @@ requested or when a review questions a hot path).
 | E14 | 2026-09-08 | Explicit create-repo placeholder (`internal/api`, `internal/server`, `internal/identity`, issue #210) | Do placeholder create, first-push adoption, and the summary projection add round trips to any budgeted path? | Create = 1 window (manifest + sidecar + access Creates parallel); first push +0 on-response (hint-gated off-response delete, 0 ops unhinted); empty summary ≤1 (sidecar only), real summary +0; sim budgets unchanged. |
 | E15 | 2026-09-09 | Pull-only mirrors (`internal/mirror`, Forgejo #240) | What does a sync fire cost, and what do the refusal revalidation + summary projection add to the push/summary paths? | First sync flat (22 ops, 0 LIST at S and M); no-op fire 11 ops, zero pack/manifest/log writes; push +2 exact-key probes (cold 10 / warm 9 ops, other collab families zero); summary +1 probe only when the mirror hook is set. Cannot explode: no LIST anywhere, converge-only no-ops, lease bounds duplicate work. |
 | E16 | 2026-09-09 | Repo size catalog (`internal/sizecatalog`, Forgejo #248) | What does one fold pass cost, what does the detailed listing cost, and what does the push path pay for durable size state? | Fold linear in repo count (2 GETs + ≤1 PUT per repo + 1 catalog CAS, 0 LIST at 3 and 12 repos); listing flat (exactly 1 catalog GET at any population); push +1 PUT per pack-changing publish (repo-scoped sidecar, parallel with the manifest CAS, +0 sequential trips; ref-only/settings write nothing — E17 amends ref-only to write the push clock). Cannot explode: bounded/resumable passes, PUT-if-changed sidecars, probe-only reads. |
+| E18 | 2026-11-21 | Threads PR head-push delivery (`internal/server`, `internal/pulls`, `internal/events`) | Does a push to an open PR's head produce its `pull_request` run promptly, or only on the events sweep — and can a late delivery move the head backwards? | Prompt: with `events.sweep_interval = 1h` configured, the run appeared **53 ms** after the push (the wake is a non-blocking in-process signal; +0 store ops on the push path). Head is monotonic: 3 out-of-order/duplicate deliveries created 0 extra runs and 0 backwards head moves. Cannot regress: `internal/e2e/threads_triggers_test.go` fails if the latency exceeds 5 s or any duplicate run/head rewind appears. |
 | E17 | 2026-09-09 | Last-commit activity (`internal/git`, `internal/sizecatalog`, Forgejo #247) | What does the push hint cost, what does a sweep heal cost, does the listing stay flat, and does explore order by commit time? | Push +0 (derivation is git-local, hint rides the existing sidecar PUT; cold 11 / warm 10 ops unchanged); sweep heals once per stale repo (refs view + ≤1 serve-sync + 1 git read, then quiet); listing flat (exactly 1 catalog GET); explore newest-commit-first from `sort=activity&order=desc` (commit dates, not push times). Cannot explode: no LIST, per-repo isolation, bounded parallelism (8/2), field-scoped merge never regresses. |
 
 ---
@@ -1233,3 +1234,71 @@ are the durable claims.
   transiently nulls the commit fields until the next sweep heals them
   (bounded by the pass interval; the catalog's monotonicity rule keeps the
   last-known row when the head did not move).
+
+## E18 — Threads PR head-push delivery: wake latency + forward-only head (2026-11-21)
+
+**Question.** A push to an open pull request's head must start its `pull_request` "synchronize" run
+promptly, and a late/duplicate event delivery must never move the PR head backwards or create a
+second run for a commit the PR has left.
+
+**Harness.** `internal/e2e/threads_triggers_test.go` (`go test -count=1 ./internal/e2e/ -run
+TestE2E_PRHeadPushTriggersImmediately`). A real `spindle` subprocess (token mode, filesystem store,
+real git client) is configured with `[events] sweep_interval = "1h"`, so **the only possible source of
+a prompt run is the push wake-up**. A workflow with `on: [push, pull_request]` is pushed to `main`,
+a `topic` branch is pushed and opened as a PR, then a second commit is pushed to that same head.
+
+**Results (one run on the development host, 2026-11-21).**
+
+| step | measured | shape |
+|---|---|---|
+| head push → `pull_request` run | **53 ms** (push itself 108 ms) with a 1-hour sweep | prompt: the wake is the signal, not a timer |
+| duplicate bridge delivery (`POST /_events/notify`) | `pull_request` runs for the old head: 1 (unchanged); for the new head: 1 (unchanged) | idempotent: an equal head fires no trigger |
+| out-of-order events (newer seq first, older replayed) | head stays at the newer sha, `head_force_pushed_at` nil, exactly 1 `synchronize` | monotonic: ordering is the WAL sequence + the event's own pre-image, never wall clock |
+| lagging mergeability read after the event | head unchanged (forward-only) | a cache read cannot rewind |
+
+**Analysis.** `events.Bridge.Wake` is a non-blocking coalescing send, so the push path gains no store
+round trip and no latency (the push is already answered when the wake runs). The head writer rejects
+a delivery whose `head_seq` watermark is not older than the event's, and accepts a non-fast-forward
+move only when the event's pre-image is the head we hold — so a replay is inert and a genuine
+force-push still lands. Cannot regress: the e2e asserts a 5 s ceiling (75× headroom over the measured
+53 ms) with a one-hour sweep in place, and the pulls unit suite pins the ordering rules directly.
+
+## E19 — Threads round-2 pass 2: schedule watermark, retention bound, job token and the approval gate (2026-11-21)
+
+**Questions.** (a) Does a `schedule:` workflow fire exactly once per tick, with no double fire on a
+restart or from a second instance? (b) Is the retention sweep bounded per pass? (c) Can a job token
+push only with `contents: write`, and does a live runner stay away from a run that is awaiting
+approval?
+
+**Harnesses.**
+- `internal/e2e/threads_runtime_test.go` — three real-server scenarios (filesystem store, real git
+  client, real `spindle runner serve` with docker containers where a job executes):
+  `TestE2E_ThreadsJobTokenScopes`, `TestE2E_ThreadsApprovalGate`, `TestE2E_ThreadsScheduleSweep`.
+- `internal/threads/schedule_test.go` (restart + two concurrent instances + tick math),
+  `internal/threads/gc_test.go` (window rules and the second-pass no-op), `cmd/spindle/threads_sweep_test.go`
+  (the two maintain task kinds through the sweeper the maintainer calls).
+- Rendered: `obscura serve` (CDP, `Emulation.setDeviceMetricsOverride`) against a live token-mode
+  server; every capture asserted `document.documentElement.scrollWidth === clientWidth` at 1440×900
+  and 390×844.
+
+**Results (development host, 2026-11-21).**
+
+| check | measured | shape |
+|---|---|---|
+| schedule, two instances sweeping one tick concurrently (unit) | **1** run total (fired `[1,0]`) | the watermark CAS is the commit point |
+| schedule, fresh Service after a fire (restart) | **0** runs | persisted watermark, not memory |
+| schedule, live server, `*/1` cron, two sweeps in one minute | **1** run, then 0 (3 s apart) | maintainer cadence 1 min; no intra-minute duplicate |
+| retention, one pass with 200+ terminal runs (unit bound) | at most `retentionBatch` = **200** runs deleted per pass | bounded work, progress packets, next pass continues |
+| retention, second sweep over an unchanged repo | **0** deleted | idempotent |
+| job token, `contents: write` (real container) | push landed `refs/heads/ci-output`, job `success` | the token carries the `push` scope end to end |
+| job token, `contents: read` (same run) | push refused, `refs/heads/ci-readonly` absent, job handled the refusal | scope is enforced server-side, not by the script |
+| approval gate, live runner polling throughout, fork PR by a non-maintainer | run stayed `pending_approval`, both jobs `queued`, `started_at` nil, no claim for **12 s** (two full 5 s poll windows) | nothing is enqueued before a decision |
+| approval gate, approve then deny | approved run `success` and logged `gate-ran`; denied run `cancelled`, jobs `cancelled`, later approve `409` | one decision, recorded (`approved_by`/`denied_by`) |
+| rendered pages (Threads list with filters, held run, commit checks panel) | `scrollWidth == clientWidth` at 1440 and 390 | no page-level overflow; the only console error is obscura's `XPathEvaluator` gap in htmx 2 |
+
+**Analysis.** The schedule's bound is one exact-key GET plus one bounded file list per repo per
+minute (no LIST on a hot path); the retention pass is `retentionBatch` runs and `retentionRunners`
+records per hour, each delete an idempotent object delete. The job token is the existing attempt token
+with scopes derived from `permissions:` — one credential type, verified locally, with a single
+job-record GET for completion revocation. The approval gate costs one exact-key projection read at run
+creation and nothing for a non-fork or maintainer-authored run.

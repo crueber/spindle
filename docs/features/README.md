@@ -40,7 +40,7 @@ commits are ordinary git objects; a PR's *head* is an ordinary ref published thr
 | [`12_runner.md`](12_runner.md) | GitHub-style runners design plan (DRAFT — awaiting review, do not implement) | 05 (checks reporting + merge gate) |
 | [`13_push_mirror.md`](13_push_mirror.md) | Push mirroring (on-push fan-out + optional schedule; password/token/SSH-key auth, keypair generation) | 10 (normalize/SSRF/scrub reuse), 11 (preset-cron/lease/task/route patterns) |
 | [`14_packages.md`](14_packages.md) | Packages: an **OCI registry** (v1, specified — see `docs/PLAN-V1.md` WP1) | 01, 02 |
-| [`15_threads.md`](15_threads.md) | Threads: **CI runs** (workflow files, container jobs, checks results; v1, specified — see `docs/PLAN-V1.md` WP10) | 05 |
+| [`15_threads.md`](15_threads.md) | Threads: **CI runs** (workflow files, container jobs, checks results; v1 — pass A triggers/spec and pass B1's runner protocol/queue/secrets/logs landed, the container executor is pass B2) | 05 |
 
 ## Shared primitives (normative for every feature doc)
 

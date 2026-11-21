@@ -203,15 +203,96 @@ func TestRepoChromeCodePageKeepsItsOwn(t *testing.T) {
 		if got := len(byClass(t, body, "repo-header")); got != 1 {
 			t.Errorf("%s: masthead count = %d, want exactly 1", path, got)
 		}
-		// code, commits, tags, issues, pulls, checks (busySummary), threads,
-		// releases, settings — the union of the tabs the feature tracks added.
-		if got := len(tabsOf(t, body)); got != 9 {
-			t.Errorf("%s: tab count = %d, want 9", path, got)
+		// code, commits, tags, packages (docs/features/14 §7), issues, pulls,
+		// checks (busySummary), threads, releases, settings.
+		if got := len(tabsOf(t, body)); got != 10 {
+			t.Errorf("%s: tab count = %d, want 10", path, got)
 		}
 	}
 	if got := activeTabOf(t, f.mustGet("/demo/spindle/commits", http.StatusOK)); got != "commits" {
 		t.Errorf("commits active tab = %q", got)
 	}
+}
+
+// primaryButtons counts .btn.primary nodes in a rendered page.
+func primaryButtons(t *testing.T, body string) int {
+	t.Helper()
+	return len(byClass(t, body, "primary"))
+}
+
+// TestOnePrimaryPerRepoPage is style-guideline F3 / the foundations-audit nit:
+// exactly one amber CTA per repository page. The code page's CTA is the
+// masthead Clone; pages with their own body action (New issue, New pull
+// request, settings Save) demote Clone to a secondary .btn instead of showing
+// two primaries.
+func TestOnePrimaryPerRepoPage(t *testing.T) {
+	t.Run("code page keeps Clone primary", func(t *testing.T) {
+		bindChromeProjections(t)
+		f := newRepoFixture(t, true)
+		f.view.summary = busySummary()
+		f.view.tree = api.TreeResult{Ref: "refs/heads/main"}
+		body := f.mustGet("/demo/spindle", http.StatusOK)
+		if got := primaryButtons(t, body); got != 1 {
+			t.Fatalf("code page primary count = %d, want 1", got)
+		}
+		clones := byClass(t, body, "btn")
+		found := false
+		for _, n := range clones {
+			if hasClass(n, "primary") && strings.Contains(text(n), "Clone") {
+				found = true
+			}
+		}
+		if !found {
+			t.Fatal("the code page's one primary must be the masthead Clone")
+		}
+	})
+
+	t.Run("issues page demotes Clone", func(t *testing.T) {
+		bindChromeProjections(t)
+		f := newCollabFixture(t)
+		f.principal = auth.Principal{Name: "alice", Write: true}
+		f.view.summary = busySummary()
+		f.deps(issueDeps())
+		body := bodyText(f.get("/acme/widgets/issues"))
+		if got := primaryButtons(t, body); got != 1 {
+			t.Fatalf("issues page primary count = %d, want 1 (Clone + New issue drift)", got)
+		}
+		if !strings.Contains(body, "New issue") {
+			t.Fatal("issues page lost its New issue CTA")
+		}
+	})
+
+	t.Run("pulls page demotes Clone", func(t *testing.T) {
+		bindChromeProjections(t)
+		f := newCollabFixture(t)
+		f.principal = auth.Principal{Name: "alice", Write: true}
+		f.view.summary = busySummary()
+		f.deps(pullDeps())
+		body := bodyText(f.get("/acme/widgets/pulls"))
+		if got := primaryButtons(t, body); got != 1 {
+			t.Fatalf("pulls page primary count = %d, want 1 (Clone + New pull request drift)", got)
+		}
+		if !strings.Contains(body, "New pull request") {
+			t.Fatal("pulls page lost its New pull request CTA")
+		}
+	})
+
+	t.Run("settings page demotes Clone", func(t *testing.T) {
+		bindChromeProjections(t)
+		f := settingsRepoFakes("admin")
+		s := newSettingsServer(t, f)
+		s.env.API = &api.Env{
+			Repo:  &collabFakeView{summary: busySummary(), known: map[string]bool{"acme/monorepo": true}},
+			Repos: &collabFakeRegistry{exists: map[string]bool{"acme/monorepo": true}},
+		}
+		rec := settingsDo(t, s, http.MethodGet, "/acme/monorepo/settings/general", nil, nil)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("GET settings = %d: %.400s", rec.Code, rec.Body.String())
+		}
+		if got := primaryButtons(t, rec.Body.String()); got != 1 {
+			t.Fatalf("settings page primary count = %d, want 1 (Clone + Save drift)", got)
+		}
+	})
 }
 
 // TestRepoChromeForDegrades: the post-gate chrome read never writes and never

@@ -2,9 +2,12 @@ package webui
 
 import (
 	"context"
+	"errors"
 	"html/template"
 	"net/http"
 
+	"github.com/crueber/spindle/internal/api"
+	"github.com/crueber/spindle/internal/git"
 	"github.com/crueber/spindle/internal/pages"
 	"github.com/crueber/spindle/internal/server/auth"
 )
@@ -183,4 +186,31 @@ func (s *Server) repoVisible(ctx context.Context, owner, repo string, p auth.Pri
 		return s.auth.CheckRead(ctx, owner, repo, p) == nil
 	}
 	return !p.Anonymous || s.anonymousRead()
+}
+
+// repoExists reports whether the repository is registered, mirroring the JSON
+// API's 404 for an unknown repo. An unwired env (unit fixtures, a build with
+// no API) answers true: the server's own gate is then the only rule. The
+// registry probe is one cheap exists check; without a registry the summary
+// read is the fallback (it carries the same ErrNotFound signal).
+func (s *Server) repoExists(ctx context.Context, owner, name string) (bool, error) {
+	id, err := git.ParseRepoId(owner + "/" + name)
+	if err != nil {
+		return false, nil
+	}
+	if s.env.API == nil {
+		return true, nil
+	}
+	if s.env.API.Repos != nil {
+		return s.env.API.Repos.Exists(ctx, id)
+	}
+	if s.env.API.Repo != nil {
+		if _, err := s.env.API.Repo.Summary(ctx, id); err != nil {
+			if errors.Is(err, api.ErrNotFound) {
+				return false, nil
+			}
+			return false, err
+		}
+	}
+	return true, nil
 }

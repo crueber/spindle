@@ -42,13 +42,16 @@ import (
 // collabWiring holds every collaboration service + handler (never built in
 // setup-only mode, where there is no store).
 type collabWiring struct {
-	ident             *identity.Service
-	identHandler      *identity.Handler
-	createHandler     *api.CreateHandler // #210 POST /api/v1/repos twin (Seam 1)
-	issuesSvc         *issues.Service
-	issuesHandler     *issues.Handler
-	pullsSvc          *pulls.Service
-	pullsHandler      *pulls.Handler
+	ident         *identity.Service
+	identHandler  *identity.Handler
+	createHandler *api.CreateHandler // #210 POST /api/v1/repos twin (Seam 1)
+	issuesSvc     *issues.Service
+	issuesHandler *issues.Handler
+	pullsSvc      *pulls.Service
+	pullsHandler  *pulls.Handler
+	// pullsPub is the WAL ref publisher pulls writes through; serve attaches
+	// the events-bridge wake once the bridge (created later) exists.
+	pullsPub          *pullsPublisher
 	reviewSvc         *review.Service
 	reviewHandler     *review.Handler
 	checksSvc         *checks.Service
@@ -191,7 +194,7 @@ func buildCollab(st store.ObjectStore, cfg *config.Config, reg *wal.Registry, ap
 	// tasks, and the pulls event sink. Ref publishes funnel through
 	// the WAL publish path (never force); the merge task calls 02's
 	// ApplyClosingReferences seam via issuesSvc.
-	c.pullsSvc, c.pullsHandler = newPullsService(st, c.ident, c.issuesSvc, reg, cfg.Git.Binary)
+	c.pullsSvc, c.pullsHandler, c.pullsPub = newPullsService(st, c.ident, c.issuesSvc, reg, cfg.Git.Binary)
 	// Wave C2 review (docs/features/04): immutable reviews, CAS'd
 	// line-anchored threads, the review-requests index, the
 	// review_summary render cache, and the required-reviews
@@ -211,13 +214,29 @@ func buildCollab(st store.ObjectStore, cfg *config.Config, reg *wal.Registry, ap
 	// forked). The push-time half needs no wiring: protect ignores
 	// require_checks on the push path by construction.
 	c.checksSvc, c.checksHandler = newChecksService(st, c.ident, c.pullsSvc, reg, cfg.Git.Binary)
-	// Threads T1 (docs/features/15 §2): workflow discovery from the
+	// Threads (docs/features/15): workflow discovery from the
 	// repository at the trust-selected commit, bucket-native run/job
-	// records, and the checks mirror the merge gate already consumes.
-	// No runner (T2), no executor/secrets/logs (T3). The on-push hook
-	// is wired in serve.go (server.OnPush); the manual dispatch rides
-	// the Seam 1 chain below.
-	c.threadsSvc, c.threadsHandler = newThreadsService(st, c.ident, c.checksSvc, reg, cfg.Git.Binary)
+	// records, the checks mirror the merge gate already consumes, and
+	// pass B1's runner protocol (queue + CAS claims, attempt tokens,
+	// log frames, secrets, cancel/rerun). The on-push hook is wired in
+	// serve.go (server.OnPush); the manual dispatch and the runner
+	// protocol ride the Seam 1 chain below.
+	c.threadsSvc, c.threadsHandler = newThreadsService(st, c.ident, c.checksSvc, reg, cfg, cfg.Git.Binary)
+	// The first-time-contributor gate's evidence (docs/features/15 §5.2): one
+	// exact-key read of pulls' merged-author projection. Bound here because
+	// pulls exists by now and threads must not import it (law 8).
+	if c.threadsSvc != nil && c.pullsSvc != nil {
+		c.threadsSvc.Approvals = threadsApprovals{svc: c.pullsSvc, ident: c.ident, cfg: cfg}
+	}
+	// Threads triggers (pass A, docs/features/15 §1): the PR lifecycle edges
+	// (opened/synchronize/reopened) and the merge task's server-side base
+	// publish feed the SAME run-creation path as a client push. Composition
+	// owns both sides (law 8); the hooks detach their work, so no PR or merge
+	// request waits on a workflow read.
+	if c.pullsSvc != nil {
+		c.pullsSvc.PullEvents = threadsPullEventOf(c)
+		c.pullsSvc.BranchPublished = threadsBranchPublishedOf(c)
+	}
 	// Issue #505: the summary checks-existence projection behind the Env
 	// hook (api renders ChecksSummary without importing the feature, law
 	// 8 — the CollabCounts shape). One exact-key probe on the CAS'd
@@ -247,6 +266,14 @@ func buildCollab(st store.ObjectStore, cfg *config.Config, reg *wal.Registry, ap
 	// registry at /v2/* (a top-level namespace, not a repo lane), over
 	// the same store and P6 roles. The bucket prefix is spindle-only.
 	c.packagesSvc, c.packagesHandler = newPackagesService(st, c.ident, cfg, apiEnv, cfg.Cache.Dir)
+	if c.packagesSvc != nil {
+		// The `packages-gc` op (docs/features/14 §6) rides the same task
+		// table as the maintainer's sweep, so a manual start joins the
+		// running pass instead of racing it.
+		if ot, ok := apiEnv.Tasks.(*opsTasks); ok {
+			ot.packages = c.packagesSvc
+		}
+	}
 	// Forgejo #253 tags (create lightweight tag at a commit, server-side
 	// via the WAL ref-update path): the P6 write gate + policy create
 	// check live in the package; ref creates funnel through the WAL

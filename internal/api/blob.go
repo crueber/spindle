@@ -57,7 +57,18 @@ func (h *handlers) blob(w http.ResponseWriter, r *http.Request) {
 		}
 		w.Header().Set("Cache-Control", class)
 		w.Header().Set("ETag", `"`+res.SHA+`"`)
-		w.Header().Set("Content-Type", rawContentType(path))
+		ct := rawContentType(path)
+		w.Header().Set("Content-Type", ct)
+		if ct == "image/svg+xml" {
+			// SVG can carry script and this lane is same-origin. The
+			// sandboxed, no-external-source policy makes a DIRECT
+			// navigation inert (no script, no network) while an <img>
+			// embed — where CSP does not apply — still renders the
+			// vector. nosniff stays on so the browser never reinterprets
+			// the bytes.
+			w.Header().Set("Content-Security-Policy", "default-src 'none'; sandbox")
+			w.Header().Set("X-Content-Type-Options", "nosniff")
+		}
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write(br.Contents)
 		return
@@ -99,10 +110,11 @@ func baseName(path string) string {
 	return path
 }
 
-// rawContentType is the raw lane's Content-Type. Only passive media gets a
-// real type: text stays text/plain, and SVG is excluded on purpose (SVG can
-// carry script and the raw lane is same-origin — GitHub serves raw SVG as
-// text too).
+// rawContentType is the raw lane's Content-Type. Passive raster media gets its
+// real type so a README can embed it. SVG is served as image/svg+xml WITH a
+// sandboxed CSP (see the raw branch above): an <img> renders it, a direct
+// navigation cannot execute the script it may carry. Every other text-ish
+// type stays text/plain (nosniff is on, so nothing else is displayed).
 func rawContentType(p string) string {
 	switch strings.ToLower(path.Ext(p)) {
 	case ".png":
@@ -119,6 +131,8 @@ func rawContentType(p string) string {
 		return "image/bmp"
 	case ".ico":
 		return "image/x-icon"
+	case ".svg":
+		return "image/svg+xml"
 	case ".mp4", ".m4v":
 		return "video/mp4"
 	case ".webm":

@@ -320,17 +320,23 @@ func TestGetPRHeadDrift(t *testing.T) {
 	// while the GetPR below early-returns as "already recorded" without
 	// streaming — stamp present, stream missing (Forgejo #617).
 	waitMergeableDrained(t, e, "o/r")
-	// Force-push: evidence event + stamp.
+	// A force-push (non-fast-forward) is applied only by the ordered event
+	// path: the event's pre-image is the head we hold, so it is a real
+	// rewind. Evidence event + stamp.
 	e.seedRefs("o/r", map[string]string{
 		"refs/heads/main": hexSHA(1), "refs/heads/topic": hexSHA(4),
 		"refs/pull/1/head": hexSHA(3),
 	})
-	view, err = e.svc.GetPR(ctx(), "o", "r", 1, writer(), 0, 0)
+	e.svc.HandleRefEvent(ctx(), "o", "r", RefEvent{
+		Repo: "o/r", RefName: "refs/heads/topic", Old: hexSHA(3), New: hexSHA(4), Seq: 2,
+	})
+	waitMergeableDrained(t, e, "o/r")
+	pr, _, err := e.svc.loadPR(ctx(), "o", "r", 1)
 	if err != nil {
-		t.Fatalf("GetPR: %v", err)
+		t.Fatalf("loadPR: %v", err)
 	}
-	if view.PR.HeadForcePushedAt == nil {
-		t.Fatal("force-push must stamp head_force_pushed_at")
+	if pr.HeadForcePushedAt == nil || pr.Head.SHA != hexSHA(4) {
+		t.Fatalf("ordered force-push must stamp and apply: %+v", pr)
 	}
 	found := false
 	for _, s := range e.streams() {
@@ -340,6 +346,42 @@ func TestGetPRHeadDrift(t *testing.T) {
 	}
 	if !found {
 		t.Fatalf("no head_force_pushed stream: %+v", e.streams())
+	}
+}
+
+// TestGetPRLaggingReadNeverRewindsHead pins the round-2 defect: a mergeability
+// recompute that reads a serving copy lagging behind the recorded head must not
+// write the old sha back (the audit saw 0bacfe12 → 361812b9 from a late
+// delivery, and every later read served the stale head).
+func TestGetPRLaggingReadNeverRewindsHead(t *testing.T) {
+	e := newTestEnv()
+	openBasic(t, e, "o", "r")
+	e.git.Ancestors[hexSHA(2)+"\x00"+hexSHA(5)] = true
+	// A normal push: the event path records head 5 (fast-forward from 2).
+	e.seedRefs("o/r", map[string]string{
+		"refs/heads/main": hexSHA(1), "refs/heads/topic": hexSHA(5),
+		"refs/pull/1/head": hexSHA(2),
+	})
+	e.svc.HandleRefEvent(ctx(), "o", "r", RefEvent{
+		Repo: "o/r", RefName: "refs/heads/topic", Old: hexSHA(2), New: hexSHA(5), Seq: 7,
+	})
+	waitMergeableDrained(t, e, "o/r")
+	if pr, _, _ := e.svc.loadPR(ctx(), "o", "r", 1); pr == nil || pr.Head.SHA != hexSHA(5) {
+		t.Fatalf("event head = %+v", pr)
+	}
+	// Now a lagging read points back at the ancestor; the read path is
+	// forward-only and must leave the head alone.
+	e.seedRefs("o/r", map[string]string{
+		"refs/heads/main": hexSHA(1), "refs/heads/topic": hexSHA(2),
+		"refs/pull/1/head": hexSHA(2),
+	})
+	if _, err := e.svc.GetPR(ctx(), "o", "r", 1, writer(), 0, 0); err != nil {
+		t.Fatalf("GetPR: %v", err)
+	}
+	waitMergeableDrained(t, e, "o/r")
+	pr, _, _ := e.svc.loadPR(ctx(), "o", "r", 1)
+	if pr == nil || pr.Head.SHA != hexSHA(5) || pr.HeadForcePushedAt != nil {
+		t.Fatalf("lagging read rewound the head: %+v", pr)
 	}
 }
 

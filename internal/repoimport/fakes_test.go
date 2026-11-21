@@ -268,7 +268,11 @@ func repackSingle(t *testing.T, dir string) {
 	// -f recomputes deltas, so the fixture's pack cannot inherit geometry
 	// from a pre-existing pack; -a -d moves every reachable object into one
 	// pack and drops the now-redundant packs plus the packed loose objects.
-	cmd := exec.Command("git", "repack", "-a", "-d", "-f")
+	// --no-cruft and the disabled auto-gc are load-bearing: a git that writes
+	// a cruft pack for unreachable objects (2.55 does, and background auto-gc
+	// can race the fixture) leaves a SECOND .pack here, and the pinned layout
+	// below is the cost model's premise (CI run 1051).
+	cmd := exec.Command("git", "-c", "gc.auto=0", "-c", "maintenance.auto=false", "repack", "-a", "-d", "-f", "--no-cruft")
 	cmd.Dir = dir
 	if out, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("repack: %v\n%s", err, out)

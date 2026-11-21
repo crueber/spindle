@@ -14,7 +14,6 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
-	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -26,6 +25,7 @@ import (
 	"github.com/crueber/spindle/internal/identity"
 	"github.com/crueber/spindle/internal/maintain"
 	"github.com/crueber/spindle/internal/notify"
+	"github.com/crueber/spindle/internal/packages"
 	"github.com/crueber/spindle/internal/pulls"
 	"github.com/crueber/spindle/internal/server"
 	"github.com/crueber/spindle/internal/store"
@@ -50,10 +50,11 @@ func runServe(ctx context.Context, c *cli, args []string) int {
 		}
 		// INVALID config → SETUP-ONLY MODE (§3.4): only /setup, /healthz,
 		// /readyz, /services/public answer; the setup UI displays the errors.
+		// F5: boot on the file's BEST-EFFORT values (not FirstRunDefaults), so
+		// [server].listen is honoured and the page pre-fills from the file.
 		fmt.Fprintf(os.Stderr, "spindle: config invalid — entering setup-only mode: %v\n", err)
-		boot := server.BootState{Mode: "setup_only", Errors: []string{err.Error()}, ConfigPaths: configCandidates(c)}
-		cfg = config.FirstRunDefaults(dataDir)
-		applyPortOverride(cfg) // setup-only still honors the PORT lockstep
+		cfg, msgs := setupOnlyBootConfig(c, dataDir, err)
+		boot := server.BootState{Mode: "setup_only", Errors: msgs, ConfigPaths: configCandidates(c)}
 		return serveHTTP(ctx, cfg, boot, dataDir, nil)
 	}
 	// The --data-dir flag is authoritative over the XDG/env default (§3.1.1):
@@ -88,6 +89,27 @@ func runServe(ctx context.Context, c *cli, args []string) int {
 		return exitErr
 	}
 	return serveHTTP(ctx, cfg, server.BootState{Mode: bootMode, ConfigPaths: configCandidates(c)}, dataDir, st)
+}
+
+// setupOnlyBootConfig builds the F5 setup-only boot config (the file's
+// best-effort values ⊕ the env overlay) plus the banner/readyz error list: the
+// original load error when nothing more specific is available, else every
+// parse and validation finding separately. The returned Config.Server.Listen is
+// exactly the address serveHTTP binds.
+func setupOnlyBootConfig(c *cli, dataDir string, loadErr error) (*config.Config, []string) {
+	cfg, bootErrs := config.LoadSetupOnly(dataDir, configCandidates(c), os.Getenv)
+	_, verrs := config.Validate(cfg)
+	for _, e := range verrs {
+		bootErrs = append(bootErrs, e)
+	}
+	msgs := make([]string, 0, len(bootErrs))
+	for _, e := range bootErrs {
+		msgs = append(msgs, e.Error())
+	}
+	if len(msgs) == 0 && loadErr != nil {
+		msgs = []string{loadErr.Error()}
+	}
+	return cfg, msgs
 }
 
 // serveHTTP assembles AppState and runs the listener until drain completes.
@@ -147,6 +169,13 @@ func serveHTTP(ctx context.Context, cfg *config.Config, boot server.BootState, d
 		})
 		go bridge.Run(ctx)
 		wake = func(repo string) { bridge.Wake(repo) }
+		// Server-side ref publishes (merge, update-branch) wake the bridge too:
+		// they happen after the pull request's own in-process hooks, and the
+		// sink still owes the PR head/base reconciliation a prompt catch-up
+		// (15 §2.1 round 2).
+		if collab != nil && collab.pullsPub != nil {
+			collab.pullsPub.wake = wake
+		}
 	}
 
 	srv := server.New(server.Options{
@@ -244,7 +273,7 @@ func serveHTTP(ctx context.Context, cfg *config.Config, boot server.BootState, d
 	var maintainerDone chan struct{}
 	if !setupOnly {
 		if len(roles) == 0 || roles["maintain"] {
-			m := maintain.NewWalMaintainer(reg, maintain.Options{})
+			m := maintain.NewWalMaintainer(reg, maintain.Options{Sweepers: maintainSweepers(collab)})
 			maintainerDone = make(chan struct{})
 			go func() {
 				defer close(maintainerDone)
@@ -575,24 +604,6 @@ func newLogger(cfg *config.Config) *slog.Logger {
 	return slog.New(slog.NewTextHandler(os.Stderr, opts))
 }
 
-// applyPortOverride re-applies the §3.3 PORT lockstep to a config built
-// outside the loader (the setup-only fallback cfg).
-func applyPortOverride(cfg *config.Config) {
-	p := os.Getenv("PORT")
-	if p == "" {
-		return
-	}
-	port, err := strconv.Atoi(p)
-	if err != nil || port < 1 || port > 65535 {
-		return
-	}
-	host, _, err := net.SplitHostPort(cfg.Server.Listen)
-	if err != nil {
-		return
-	}
-	cfg.Server.Listen = net.JoinHostPort(host, strconv.Itoa(port))
-}
-
 // ---- RepoRegistry adapter (07_api.md §8: answered from the STORE) --------------
 //
 // Owners/Repos are MANIFEST-gated: a prefix without repos/<o>/<r>/manifest.pb
@@ -751,9 +762,10 @@ func (r *repoRegistry) Delete(ctx context.Context, id git.RepoId) error {
 
 // opsTasks binds the api.Tasks seam onto wal.TaskTable and the engine ops.
 type opsTasks struct {
-	reg   *wal.Registry
-	eng   *server.WalEngine
-	ident *identity.Service
+	reg      *wal.Registry
+	eng      *server.WalEngine
+	ident    *identity.Service
+	packages *packages.Service
 }
 
 func (t *opsTasks) Ops() []api.OpSpec {
@@ -764,6 +776,12 @@ func (t *opsTasks) Ops() []api.OpSpec {
 	if t.ident != nil {
 		// Seam 5: the access-bootstrap migration (docs/features/01 §10).
 		ops = append(ops, api.OpSpec{Op: "access-bootstrap"})
+	}
+	if t.packages != nil {
+		// Seam 5: the registry mark/sweep (docs/features/14 §6), normally
+		// driven by the maintainer on its own cadence; this is the manual
+		// force (SSE-attachable, joins a running pass).
+		ops = append(ops, api.OpSpec{Op: packages.TaskKindGC})
 	}
 	return ops
 }
@@ -891,6 +909,14 @@ func (t *opsTasks) opFn(id git.RepoId, op string, params map[string]string) func
 			}
 			task.Notice(bootstrapSummary(id.String(), created))
 			return nil
+		}
+	case packages.TaskKindGC:
+		if t.packages == nil {
+			return nil
+		}
+		return func(ctx context.Context, task *wal.Task) error {
+			_, err := t.packages.GC(ctx, id.Owner, id.Name, task)
+			return err
 		}
 	default:
 		return nil

@@ -115,9 +115,9 @@ must close. Rows marked **—** are at parity already; they stay in the table as
 |---|---|---|---|
 | Repo hooks: create, ping, list deliveries, delete | yes | yes | — |
 | Secret + HMAC signature | yes | yes (`X-Walgit-Signature`) | — |
-| Enable/disable, rotate secret in the UI | yes | API PATCH only | **WP6.2** |
-| Redeliver a delivery | yes | no | **WP6.2** |
-| Org-level hooks in the UI | yes | API only | **WP6.2** |
+| Enable/disable, rotate secret in the UI | yes | yes (repo + org tabs — **WP6.2 landed 2026-11-21**) | — |
+| Redeliver a delivery | yes | yes (repo + org — **WP6.2 landed 2026-11-21**) | — |
+| Org-level hooks in the UI | yes | yes (org Webhooks tab — **WP6.2 landed 2026-11-21**) | — |
 
 ### 2.7 OIDC
 
@@ -226,8 +226,11 @@ machinery (`internal/egress`, `internal/mirror` presets) so SSRF rules are share
 
 - **WP6.1 Issue assignees in the UI (LANDED 2026-11-20)** — the sidebar control posts the same
   full-set PATCH the API accepts (candidates: collaborators at role ≥ triage).
-- **WP6.2 Org webhooks tab** (create/ping/deliveries/delete), enable/disable + secret rotation, and
-  redeliver — the repo-level surface already does all of this, so this is a UI + one endpoint.
+- **WP6.2 Org webhooks tab (LANDED 2026-11-21)** — `/{owner}/settings?tab=webhooks` reuses the repo
+  tab's canonical panel (create/ping/deliveries/delete), adds enable/disable + secret rotation to
+  **both** tabs, and adds `redeliver` to both API surfaces (retained-body replay; a payload-less
+  row answers 410 rather than faking a delivery). CLI: `spindle org webhook list|create|delete|
+  ping|deliveries|redeliver`; SDK: `webhooks.redeliver` / `orgs.webhooks.redeliver`.
 
 ### WP7 — Storage surface truth (LANDED 2026-11-20)
 
@@ -240,10 +243,48 @@ event-envelope parser, the contract target and every doc/README reference. Suppo
 ### WP9 — UI editability sweep (the "everything does" rule)
 
 The scope decision makes UI editability a v1 property, so one pass audits every user-facing setting
-and policy for an API-only path and closes what it finds. The audit already named four (PR
-labels/milestone/assignees in WP2.2, protection rules in WP2.3, issue assignees in WP6.1, org
-webhooks in WP6.2); this WP verifies there are no others (mirror settings, push-mirror auth, token
-scopes, check defaults, per-repo features) and records the result as a table in this document.
+and policy for an API-only path and closes what it finds. Full inventory and evidence:
+`docs/AUDIT-V1.md` (round-2 "UI editability" area) and `/tmp/opencode/aud2-editability.md`.
+
+**Inventory (2026-11-21, `main` @ `5c33f19`):** 145 server-config keys in 18 groups, the per-repo
+settings surface, org settings, account settings and the Threads/runner surface were read from the
+code and sampled in a live browser. **18 gaps: 2 P0, 3 P1, 8 P2, 5 P3.** The two P0s were the most
+severe defects any audit found, because both surfaces *rendered* as if they worked: every org-settings
+write answered 503 (`OrgWrite` was never composed), and `/setup` could not save (21 keys
+unrepresentable, a forced save writing `[""]` into untouched lists).
+
+| # | gap | surface | status |
+|---|---|---|---|
+| G1 | `/setup` could not save; 21 keys unrepresentable (2 struct slices, 2 uints, 17 empty lists); a forced save wrote `[""]` into untouched lists | `/setup` | **CLOSED** — whole-schema round-trip gate (`TestFormValuesWholeSchemaRoundTrip`), byte-identical zero-edit page save (`TestSetupPageZeroEditFormSavesByteIdentical`), unsigned counters, blank list = empty list, validation errors name their key |
+| G2 | every org-settings write answered 503 (`SettingsDeps.OrgWrite` never bound) | org settings | **CLOSED** — `orgWriteFn` binds identity's verbs and re-checks `CheckOrgOwner`; a guard test fails if composition ever leaves a rendered seam nil |
+| G3 | static auth tokens invisible/uneditable | `/setup` auth | **CLOSED** — row editor (principal, `token_env`, write, admin), secret masked and overwrite-only, add/rotate/revoke |
+| G4 | `bundles.strategy` had no editor anywhere | `/setup` bundles | **CLOSED** — the same row editor over the `BundleStrategy` fields |
+| G5 | org webhooks had no UI | org settings | **CLOSED** — Webhooks tab over the shared panel; redeliver on both scopes (retained body, same id/HMAC); `notify.OrgOwner` wired |
+| G6 | repo webhooks could not be edited | repo settings | **CLOSED** — per-hook edit disclosure (URL/events/active) plus a first-class "rotate signing secret" (blank rotation is 422, never a silent keep) on the shared panel |
+| G7 | team membership could not be removed | org Teams | **CLOSED** — per-member remove |
+| G8 | team rename/description was API-only | org Teams | **CLOSED** — rename + description on the team card |
+| G9 | repo collaborator invitations were API-only | repo Access | **CLOSED** — invite form (email or username + role), pending list with copyable accept link and cancel; non-admins never see capability tokens |
+| G10 | user avatar upload was API-only | user profile | **CLOSED** — multipart upload card (type/size validated), initials fallback preserved |
+| G11 | org avatar removal was API-only | org Profile | **CLOSED** — "Remove avatar" on the profile form |
+| G12 | maintenance ops had no run control | repo WAL | **CLOSED** — per-op run form streaming progress over the existing SSE route, terminal task inline, no auto-retry |
+| G13 | Threads dispatch was API-only | Threads | **CLOSED in `fix/threads-triggers`** — Run workflow control (workflow select, ref, typed `workflow_dispatch.inputs`), plus the `inputs` 400 and check-state fidelity fixes |
+| G14 | per-repo `bundles.*`/`maintenance.*`/`compaction.*`/`upstream.*` were raw-TOML-only | repo settings | **CLOSED** — structured Scheduled tab with per-section "override host config" consent, bundle rows on the `/setup` row protocol, shared coercion/validation path |
+| G15 | the policy document could not be removed | repo Push policy | **CLOSED** — typed-confirm Remove policy; an emptied editor removes instead of 400ing |
+| G16 | Settings → WAL was a stub | repo settings | **CLOSED** — the real panel (facts + the shared ops card) |
+| G17 | no page for a user's starred repositories | user | **CLOSED** — `/{user}/starred`, visibility-filtered, keyset paging |
+| G18 | `/setup` UX debt: no essentials/advanced grouping, free-text enums, a keyless error on all 145 rows | `/setup` | **CLOSED** — keyless errors stay in the banner and errors carry their key; every section now splits essentials (open) from a collapsed `<details>` Advanced group driven by the one `settingsFieldMeta` table, the seven enum keys render `<select>`s over `internal/setup`'s `EnumValues` (empty/out-of-set values still representable), and the three dead metadata keys are gone |
+
+**File-only by design** (recorded so the sweep is not re-opened): the data dir (it locates the config
+file it edits), secret *values* behind `*_env` names (the names are editable, the values never enter
+the file), the `SPINDLE__*` env overlay, and write-once Threads runner/job secrets. `server.listen` is
+**not** file-only — it is an ordinary `/setup` row, which is why G1 mattered.
+
+**Deferred, documented:** ~~an accept-link list for *org* invitations (org reads redact the token;
+the small follow-up rides the org settings seam)~~ — **closed 2026-11-21**: the org invitations tab
+is owner-gated like its API, renders the human accept link once on create (and on the created
+pending row), shows the masked marker on later reads, and accepts through the same
+`/invitations` page. ~~and the G18 remainder~~ — **closed 2026-11-21** (essentials/advanced
+grouping + enum selects).
 
 ### WP10 — Threads (CI)
 

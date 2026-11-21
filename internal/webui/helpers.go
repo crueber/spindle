@@ -17,6 +17,10 @@ func (s *Server) funcs() template.FuncMap {
 		// runDot maps a Threads run/job state onto the shared check-dot
 		// vocabulary (15 §6; a pure display projection).
 		"runDot": runDotState,
+		// duration renders a wall time in seconds compactly ("45s", "1m 12s",
+		// "1h 04m"); a zero/negative value renders empty so a never-started run
+		// omits it.
+		"duration": durationText,
 		// NOTE: html/template's builtin eq/ne/lt… are deliberately NOT shadowed:
 		// the error page compares an int status (eq .Data.Status 401) and a
 		// string-only shadow made every non-200 page fail to render.
@@ -52,6 +56,32 @@ func (s *Server) funcs() template.FuncMap {
 			return m
 		},
 	}
+}
+
+// durationText renders a wall time in seconds compactly: "45s", "1m 12s",
+// "1h 04m". Zero (or negative) renders empty so a never-started run omits the
+// field instead of claiming "0s".
+func durationText(seconds int64) string {
+	if seconds <= 0 {
+		return ""
+	}
+	d := time.Duration(seconds) * time.Second
+	switch {
+	case d < time.Minute:
+		return itoa(int(d.Seconds())) + "s"
+	case d < time.Hour:
+		return itoa(int(d.Minutes())) + "m " + pad2(int(d.Seconds())%60) + "s"
+	default:
+		return itoa(int(d.Hours())) + "h " + pad2(int(d.Minutes())%60) + "m"
+	}
+}
+
+// pad2 zero-pads a small non-negative int ("4" → "04").
+func pad2(n int) string {
+	if n < 10 {
+		return "0" + itoa(n)
+	}
+	return itoa(n)
 }
 
 // relTime renders an RFC3339 stamp as a compact relative age ("3d ago"); a

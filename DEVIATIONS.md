@@ -20,13 +20,16 @@ This file consolidates, deduplicated, every decision recorded in the `## Decisio
   Package name = repository name (no GHCR-style free-form names), blobs are content-addressed store
   objects, tags are CAS pointers, and unreferenced blobs are removed by a maintainer sweep rather
   than a request-path refcount. Spec: `docs/features/14_packages.md`; plan: `docs/PLAN-V1.md` WP1.
-  Status: in force (skeleton landed 2026-11-20; §7 surfaces and GC pending).
+  Status: in force (skeleton landed 2026-11-20; §7 surfaces, the git-identical push gate and the
+  `packages-gc` sweep landed 2026-11-21).
   **As built (WP1 skeleton):** `internal/packages` implements the protocol, bucket layout, Basic +
   `/v2/token` Bearer auth, the per-repo `[features] packages` toggle and the three `packages.*`
   limits; `/v2/*` mounts through the new top-level `ChainTop` seam (`internal/server/bind_top.go`)
-  because the namespace is neither an api lane nor an `{owner}/{repo}` sub-path. The Packages page,
-  JSON API, SDK and the `packages-gc` maintainer sweep are the second pass. The toggle extended
-  `ResolvedFeatures.ETagBits` from six to seven chars.
+  because the namespace is neither an api lane nor an `{owner}/{repo}` sub-path. The toggle extended
+  `ResolvedFeatures.ETagBits` from six to seven chars. The second pass (2026-11-21) added the
+  Packages page/tab, the JSON API on `ChainExtra`, the SDK group, the CLI's served endpoints, the
+  git-identical push gate (`identity.CheckPush`), the version-tree delete and the `packages-gc`
+  maintainer sweep — see `docs/features/14_packages.md` §10.
 
 - **D-DEP-4 — `gopkg.in/yaml.v3` joins the backend budget for CI workflow files only.**
   Threads parses `.spindle/workflows/*.yml`; YAML is the format CI authors already know and a

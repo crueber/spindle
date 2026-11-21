@@ -8,8 +8,41 @@
     {{if not .Run.Trusted}}<span class="chip chip-draft" title="fork pull request: base-branch workflow, no secrets">untrusted</span>{{end}}
     <span class="muted text-xs">{{.Run.Event}}{{with .Run.Branch}} · {{.}}{{end}}</span>
     <a class="link mono text-xs" href="{{.CommitHref}}">{{.ShortCommit}}</a>
-    <a class="link ml-auto text-xs" href="/{{.Repo.Full}}/threads">all runs</a>
+    <span class="ml-auto flex flex-wrap items-center justify-end gap-x-4 gap-y-1">
+      {{if and .CanApprove .Approval.Pending}}
+      <form method="post" action="/{{.Repo.Full}}/threads/{{.Run.ID}}/approve">
+        <button type="submit" class="btn primary whitespace-nowrap text-xs">approve run</button>
+      </form>
+      <form method="post" action="/{{.Repo.Full}}/threads/{{.Run.ID}}/deny">
+        <button type="submit" class="link whitespace-nowrap text-xs">deny</button>
+      </form>
+      {{end}}
+      {{if .CanWrite}}
+      {{if or (eq .Run.State "queued") (eq .Run.State "running") (eq .Run.State "pending_approval")}}
+      <form method="post" action="/{{.Repo.Full}}/threads/{{.Run.ID}}/cancel">
+        <button type="submit" class="link whitespace-nowrap text-xs">cancel run</button>
+      </form>
+      {{end}}
+      <form method="post" action="/{{.Repo.Full}}/threads/{{.Run.ID}}/rerun">
+        <button type="submit" class="link whitespace-nowrap text-xs">re-run</button>
+      </form>
+      {{end}}
+      <a class="link whitespace-nowrap text-xs" href="/{{.Repo.Full}}/threads">all runs</a>
+    </span>
   </div>
+
+  {{if .Notice}}<p class="mb-3 text-sm text-[var(--pd-ok)]" role="status">{{.Notice}}</p>{{end}}
+
+  {{if .Approval.Pending}}
+  <p class="warn-line mb-3 text-xs" role="status">
+    waiting for a maintainer: this is a first-time contributor's fork pull request, so the run is held
+    and has not executed. {{if .CanApprove}}Approve it to queue it, or deny it to cancel it.{{end}}
+  </p>
+  {{else if .Approval.ApprovedBy}}
+  <p class="muted mb-3 text-xs">approved by {{.Approval.ApprovedBy}}{{with .Approval.ApprovedAt}} · {{template "collab_time" .}}{{end}}</p>
+  {{else if .Approval.DeniedBy}}
+  <p class="muted mb-3 text-xs">denied by {{.Approval.DeniedBy}}{{with .Approval.DeniedAt}} · {{template "collab_time" .}}{{end}}</p>
+  {{end}}
 
   <p class="muted mb-3 text-xs">
     run <span class="mono">{{.ShortRun}}</span>
@@ -17,7 +50,16 @@
     @ <span class="mono" title="{{.Run.WorkflowCommit}}">{{short .Run.WorkflowCommit}}</span>
     · triggered by {{.Run.Actor}}
     · {{template "collab_time" .Run.CreatedAt}}
+    {{with duration .Run.DurationSeconds}}· took {{.}}{{end}}
   </p>
+
+  {{if .WorkflowError}}
+  <p class="err-line mb-3 text-xs" role="alert">
+    workflow <code class="mono">{{.WorkflowErrorPath}}</code> at HEAD fails to parse —
+    <a class="link" href="{{.WorkflowErrorHref}}">see the error on the Threads page</a>:
+    {{.WorkflowError}}
+  </p>
+  {{end}}
 
   {{if .Jobs}}
   <ul class="space-y-2">
@@ -30,15 +72,28 @@
         <span class="chip chip-neutral">{{.State}}</span>
         <span class="muted text-xs">runs-on {{.RunsOn}}</span>
         {{with .Container}}<span class="muted text-xs">· {{.}}</span>{{end}}
-        <span class="muted ml-auto text-xs">{{with .StartedAt}}{{template "collab_time" .}}{{else}}not started{{end}}</span>
+        {{if .RunnerName}}<span class="muted text-xs">· runner <span class="mono">{{.RunnerName}}</span></span>{{else if .Runner}}<span class="muted text-xs">· runner <span class="mono">{{.Runner}}</span></span>{{end}}
+        {{with .Spec}}{{with .Permissions}}<span class="muted text-xs">· permissions {{range $k, $v := .}}{{$k}}={{$v}} {{end}}</span>{{end}}{{end}}
+        <span class="muted ml-auto text-xs">{{with duration .DurationSeconds}}took {{.}} · {{end}}{{with .StartedAt}}{{template "collab_time" .}}{{else}}not started{{end}}</span>
       </div>
       {{if .Steps}}
       <ul class="divide-y divide-[color:var(--pd-line)] border-t border-[color:var(--pd-line)]">
         {{range .Steps}}
         <li class="flex flex-wrap items-center gap-2 px-3 py-1.5 text-xs">
-          {{with .Name}}<span class="font-medium">{{.}}</span>{{end}}
+          {{with .Name}}<span class="whitespace-nowrap font-medium">{{.}}</span>{{end}}
           {{with .Run}}<code class="mono min-w-0 flex-1 truncate">{{.}}</code>{{end}}
           {{with .Uses}}<code class="mono min-w-0 flex-1 truncate">{{.}}</code>{{end}}
+        </li>
+        {{end}}
+      </ul>
+      {{end}}
+      {{if .StepResults}}
+      <ul class="divide-y divide-[color:var(--pd-line)] border-t border-[color:var(--pd-line)]">
+        {{range .StepResults}}
+        <li class="flex flex-wrap items-center gap-2 px-3 py-1.5 text-xs">
+          {{with .Name}}<span class="font-medium">{{.}}</span>{{end}}
+          <span class="chip chip-neutral">{{.Conclusion}}</span>
+          {{with .Error}}<span class="err-line min-w-0 flex-1 truncate text-[11px]">{{.}}</span>{{end}}
         </li>
         {{end}}
       </ul>
@@ -46,6 +101,18 @@
     </li>
     {{end}}
   </ul>
+  {{if .JobLogs}}
+  <section class="mt-4 space-y-3" aria-label="Job logs">
+    {{range .JobLogs}}
+    <details class="card" {{if .Live}}open{{end}}>
+      <summary class="cursor-pointer px-3 py-2 text-sm font-medium">log · <code class="mono text-xs">{{.JobID}}</code> <span class="muted text-xs">({{.State}})</span></summary>
+      <pre class="mono max-h-96 min-w-0 overflow-auto whitespace-pre-wrap break-words border-t border-[color:var(--pd-line)] p-3 text-[11px] leading-relaxed"
+           data-threadlog="{{.JobID}}" data-threadlog-url="{{.LogURL}}" data-threadlog-live="{{if .Live}}1{{else}}0{{end}}"
+           aria-live="polite">loading log…</pre>
+    </details>
+    {{end}}
+  </section>
+  {{end}}
   {{else if not .Error}}
   {{template "collab_empty" (dict "icon" "check" "title" "No jobs recorded" "hint" "This run has no job records; the workflow may have been emptied after the run was created." "href" "" "label" "")}}
   {{end}}

@@ -408,8 +408,7 @@ func TestCoverLoadPaths(t *testing.T) {
 	_ = pr
 	if pr != nil {
 		if err := e.svc.savePR(ctx(), "o", "r", pr, "stale-version"); !errors.Is(err, ErrConflict) {
-			// savePR retries against the live version; the flaky store 412s
-			// every attempt ⇒ conflict.
+			// A stale whole-doc save is refused outright (no field merge).
 			t.Fatalf("savePR: %v", err)
 		}
 	}

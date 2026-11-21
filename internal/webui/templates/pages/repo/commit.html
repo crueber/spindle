@@ -64,6 +64,19 @@
       <div class="commit-body markdown-body border-t border-[var(--pd-line)] px-4 py-3">{{.Data.Body}}</div>
       {{end}}
 
+      <!-- Checks (round-2 pass 2): the commit detail page carries the same
+           per-context statuses the checks page and the PR panel show, so a
+           commit is self-explanatory without a second click. -->
+      {{with .Data.Checks}}<div class="border-t border-[var(--pd-line)] px-0 py-0">
+        <div class="flex flex-wrap items-center gap-2 px-4 py-2">
+          <span class="text-sm font-medium">Checks</span>
+          {{template "collab_check_dot" .State}}
+          <span class="chip chip-neutral">{{.State}}</span>
+          <a class="link ml-auto text-xs" href="/{{$.Data.Repo.Full}}/checks/{{$.Data.SHA}}">all contexts</a>
+        </div>
+        {{template "collab_check_contexts" .Contexts}}
+      </div>{{end}}
+
       {{if .Data.Trailers}}
       <div class="border-t border-[var(--pd-line)] px-4 py-2">
         <details class="trailers">

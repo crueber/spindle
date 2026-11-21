@@ -22,6 +22,13 @@ type Principal struct {
 	Write     bool
 	Admin     bool
 	Anonymous bool
+	// JobRepo marks a repository-scoped job token (15 §5, Threads): the
+	// credential may READ exactly this repository ("owner/name") and, when
+	// JobPush is set, push to it — nothing else, in no other repository. It is
+	// set only by the wjt_ attempt-token resolver, which derives JobPush from
+	// the workflow's `permissions: contents: write`.
+	JobRepo string
+	JobPush bool
 }
 
 // Anonymous is the unauthenticated principal (name "anonymous", no write, no admin).

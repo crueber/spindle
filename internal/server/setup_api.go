@@ -52,7 +52,7 @@ func (s *Server) parseSetupCandidate(w http.ResponseWriter, r *http.Request) (*c
 	c, err := setup.ParseRequest(r, s.setupBaseConfig())
 	if err != nil {
 		writeJSONBody(w, http.StatusUnprocessableEntity, map[string]any{
-			"errors": []setup.Error{{Message: err.Error()}},
+			"errors": []setup.Error{{Key: setup.KeyOf(err), Message: err.Error()}},
 		})
 		return nil, false
 	}
@@ -123,7 +123,7 @@ func (s *Server) setupPut(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	restart, serr := setup.Save(s.cfg.DataDir, c, s.cfg)
+	restart, backup, serr := setup.Save(s.cfg.DataDir, c, s.cfg)
 	if serr != nil {
 		writeJSONBody(w, http.StatusInternalServerError, map[string]any{
 			"errors": []setup.Error{{Message: serr.Error()}},
@@ -133,6 +133,7 @@ func (s *Server) setupPut(w http.ResponseWriter, r *http.Request) {
 	writeJSONBody(w, http.StatusOK, map[string]any{
 		"saved":            true,
 		"requires_restart": restart,
+		"backup":           backup,
 		"errors":           []setup.Error{},
 	})
 }

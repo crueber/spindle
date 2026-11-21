@@ -306,15 +306,36 @@ type DescribeBody struct {
 // describeSections names the settings sections the describe shape reports.
 var describeSections = []string{"bundles", "maintenance", "compaction", "upstream"}
 
+// SettingsDocument reads the stored settings document together with both
+// projections the settings pages need: the decoded RepoSettings (which
+// sections the repository overrides, exactly as stored) and the merged
+// effective config (the §11 "with_settings" view). One merge path — the page
+// and the JSON API cannot drift — and a corrupt document is the API's error,
+// never a silently-empty section editor.
+func SettingsDocument(ctx context.Context, e *Env, id git.RepoId) (SettingsDoc, *config.RepoSettings, *config.Config, error) {
+	doc, err := e.Repo.Settings(ctx, id)
+	if err != nil {
+		return SettingsDoc{}, nil, nil, err
+	}
+	var stored *config.RepoSettings
+	if len(bytes.TrimSpace([]byte(doc.TOML))) > 0 {
+		stored, err = config.ParseRepoSettings([]byte(doc.TOML))
+		if err != nil {
+			return SettingsDoc{}, nil, nil, err
+		}
+	}
+	eff, err := e.effectiveWith(e.Cfg, []byte(doc.TOML))
+	if err != nil {
+		return SettingsDoc{}, nil, nil, err
+	}
+	return doc, stored, eff, nil
+}
+
 // SettingsDescribe returns the §3 describe shape for non-HTTP consumers (the
 // server-rendered Scheduled tab). It runs the exact projection the JSON
 // handler serves — one code path, so the page and its API twin cannot drift.
 func SettingsDescribe(ctx context.Context, e *Env, id git.RepoId) (DescribeBody, error) {
-	doc, err := e.Repo.Settings(ctx, id)
-	if err != nil {
-		return DescribeBody{}, err
-	}
-	eff, err := e.effectiveWith(e.Cfg, []byte(doc.TOML))
+	doc, _, eff, err := SettingsDocument(ctx, e, id)
 	if err != nil {
 		return DescribeBody{}, err
 	}

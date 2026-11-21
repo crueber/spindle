@@ -1,0 +1,104 @@
+{{define "content"}}
+{{with .Data}}
+<div class="grid gap-4">
+  <div class="flex flex-wrap items-center gap-2">
+    <h2 class="text-xl font-semibold tracking-tight">Packages</h2>
+    <span class="pill">{{.Count}}</span>
+    {{if .TotalSize}}<span class="muted text-xs">{{.TotalSize}} of image layers</span>{{end}}
+  </div>
+
+  {{if .Flash}}<p class="warn-line" role="status">{{.Flash}}</p>{{end}}
+  {{if .Error}}<p class="err-line" role="alert">{{.Error}}</p>{{end}}
+
+  <section class="card space-y-2 p-4" aria-label="pull command">
+    <div class="eyebrow">Pull</div>
+    <div class="flex flex-wrap items-center gap-2">
+      <code id="cmd-pull" class="clone-cmd block min-w-0 flex-1 overflow-x-auto rounded bg-zinc-100 px-2 py-1 font-mono text-xs dark:bg-zinc-800">{{.Pull}}</code>
+      <button type="button" class="btn shrink-0 px-2 py-1 text-xs" data-copy="#cmd-pull">Copy</button>
+    </div>
+    <p class="muted text-xs">The package is this repository: <code class="mono">docker push {{.Repo.Full}}:&lt;tag&gt;</code> needs the same write access as <code class="mono">git push</code>.</p>
+  </section>
+
+  {{if .Rows}}
+  <!-- relative: a static scroll container in a grid item lets Chrome count the
+       table's min-width in the DOCUMENT scroll area (390px check), even though
+       the card scrolls in place. The utility is the shared fix. -->
+  <div class="card relative overflow-x-auto">
+    <table class="data-table min-w-[40rem]">
+      <thead>
+        <tr><th>Tag</th><th>Digest</th><th>Size</th><th>Platforms</th><th>Updated</th><th><span class="sr-only">Actions</span></th></tr>
+      </thead>
+      <tbody>
+        {{range .Rows}}
+        <tr>
+          <td class="min-w-0">
+            <span class="mono text-[13px] break-all">{{.Tag}}</span>
+            <span class="chip chip-draft ml-1">{{.ShortType}}</span>
+          </td>
+          <td><span class="mono text-xs" title="{{.Digest}}">{{.Short}}</span></td>
+          <td class="muted text-xs tabular">{{.Size}}</td>
+          <td class="text-xs">
+            {{range .Platforms}}<span class="chip mr-1">{{.}}</span>{{else}}<span class="muted">—</span>{{end}}
+          </td>
+          <td class="muted text-xs">{{if .Updated}}{{.Updated}}{{else}}—{{end}}</td>
+          <td>
+            <div class="flex flex-wrap justify-end gap-1">
+              <button type="button" class="btn px-2 py-0.5 text-[11px]" data-copy="{{.Pull}}" title="Copy this pull command">pull</button>
+              {{if .DeleteTag}}
+              <details class="inline-block align-middle">
+                <summary class="btn danger cursor-pointer px-2 py-0.5 text-[11px]">delete tag</summary>
+                <form class="mt-1 flex flex-wrap items-center gap-1" method="post" action="{{.DeleteTag}}" data-danger-confirm="{{.Tag}}">
+                  <input class="input w-28 px-1 py-0.5 font-mono text-[11px]" name="confirm" type="text" autocomplete="off" placeholder="{{.Tag}}" data-danger-input required>
+                  <button type="submit" class="btn danger px-2 py-0.5 text-[11px]" data-danger-submit disabled>delete</button>
+                </form>
+              </details>
+              {{end}}
+            </div>
+          </td>
+        </tr>
+        {{end}}
+      </tbody>
+    </table>
+  </div>
+  {{else if not .Error}}
+  {{template "collab_empty" (dict "icon" "tag" "title" "No images yet" "hint" "Push one with docker: tag your image with this repository's address, then docker push.")}}
+  {{end}}
+
+  {{if .Manifest}}
+  <section class="card overflow-hidden" aria-label="manifest versions">
+    <h3 class="card-header">Manifest versions</h3>
+    <div class="relative overflow-x-auto">
+      <table class="data-table min-w-[36rem]">
+        <thead>
+          <tr><th>Digest</th><th>Type</th><th>Tags</th><th>Size</th><th>Platforms</th><th><span class="sr-only">Actions</span></th></tr>
+        </thead>
+        <tbody>
+          {{range .Manifest}}
+          <tr>
+            <td><span class="mono text-xs" title="{{.Digest}}">{{.Short}}</span></td>
+            <td class="muted text-xs">{{.MediaType}}</td>
+            <td class="text-xs">{{range .Tags}}<span class="chip mr-1">{{.}}</span>{{else}}<span class="muted">untagged</span>{{end}}</td>
+            <td class="muted text-xs tabular">{{.Size}}</td>
+            <td class="text-xs">{{range .Platforms}}<span class="chip mr-1">{{.}}</span>{{else}}<span class="muted">—</span>{{end}}</td>
+            <td>
+              {{if .Delete}}
+              <details class="inline-block align-middle">
+                <summary class="btn danger cursor-pointer px-2 py-0.5 text-[11px]">delete version</summary>
+                <form class="mt-1 flex flex-wrap items-center gap-1" method="post" action="{{.Delete}}" data-danger-confirm="{{.Short}}">
+                  <input class="input w-28 px-1 py-0.5 font-mono text-[11px]" name="confirm" type="text" autocomplete="off" placeholder="{{.Short}}" data-danger-input required>
+                  <button type="submit" class="btn danger px-2 py-0.5 text-[11px]" data-danger-submit disabled>delete</button>
+                </form>
+              </details>
+              {{end}}
+            </td>
+          </tr>
+          {{end}}
+        </tbody>
+      </table>
+    </div>
+    <p class="muted border-t border-[var(--pd-line)] p-3 text-xs">Deleting a version removes every tag that points at it. Blobs are reclaimed by the maintainer's <code class="mono">packages-gc</code> sweep, never inline.</p>
+  </section>
+  {{end}}
+</div>
+{{end}}
+{{end}}

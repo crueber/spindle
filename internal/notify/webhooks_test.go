@@ -6,6 +6,8 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"io"
 	"log"
 	"net/http"
@@ -653,4 +655,118 @@ func testReader(i int) io.Reader {
 		b[j] = byte((i*31 + j*7) & 0xff)
 	}
 	return bytes.NewReader(b)
+}
+
+// TestWebhookRedeliverReplaysBody pins the replay contract: the ring keeps
+// the exact POST bytes, a redeliver re-sends them (same delivery id, HMAC,
+// event), appends a fresh attempt row, and never advances the cursor.
+func TestWebhookRedeliverReplaysBody(t *testing.T) {
+	x := newHarness(t)
+	x.addProfile("amy@example.com", "bob@example.com")
+	sink, srv := newSink(t, "s3cr3t")
+	defer srv.Close()
+
+	hk, err := x.svc.CreateHook(ctx(), "acme", "repo", "amy@example.com", HookSpec{
+		URL: strPtr(srv.URL), Events: []string{"commented"}, Secret: strPtr("s3cr3t"),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	x.writeThread(t, "acme", "repo", 7, "T", "amy@example.com")
+	x.svc.EmitIssue(ctx(), "acme/repo", 7, "subscribed", "bob@example.com", "", "commented", []string{})
+	x.svc.DeliverRepo(ctx(), "acme", "repo")
+	if got := sink.count(); got != 1 {
+		t.Fatalf("sink posts = %d, want 1", got)
+	}
+	d := x.svc.ReadDeliveries(ctx(), "acme", "repo", hk.ID)
+	if len(d.Entries) != 1 {
+		t.Fatalf("ring = %+v", d.Entries)
+	}
+	first := d.Entries[0]
+	if len(first.Body) == 0 || first.DurationMs < 0 {
+		t.Fatalf("first row must retain the body + a timing: %+v", first)
+	}
+
+	entry, err := x.svc.RedeliverHook(ctx(), "acme", "repo", hk.ID, first.Seq)
+	if err != nil {
+		t.Fatalf("redeliver: %v", err)
+	}
+	if entry == nil || entry.Status != 200 || entry.Seq != first.Seq {
+		t.Fatalf("entry = %+v", entry)
+	}
+	if got := sink.count(); got != 2 {
+		t.Fatalf("sink posts after redeliver = %d, want 2", got)
+	}
+	sink.mu.Lock()
+	p1, p2 := sink.posts[0], sink.posts[1]
+	sink.mu.Unlock()
+	if p1.delivery != p2.delivery || p1.event != p2.event || p1.signature != p2.signature || !bytes.Equal(p1.body, p2.body) {
+		t.Fatalf("replay bytes differ:\nfirst=%+v\nsecond=%+v", p1, p2)
+	}
+	// The cursor is delivery-loop state: a manual replay never touches it.
+	if cur := x.svc.readCursor(ctx(), "acme", "repo", hk.ID); cur != first.Seq {
+		t.Fatalf("cursor = %d, want %d", cur, first.Seq)
+	}
+	if d := x.svc.ReadDeliveries(ctx(), "acme", "repo", hk.ID); len(d.Entries) != 2 {
+		t.Fatalf("ring after replay = %+v", d.Entries)
+	}
+}
+
+// TestWebhookRedeliverErrors proves the honest failures: unknown seq is 404,
+// a row without a retained body is 410 (never a faked delivery), an oversized
+// body is not retained, and an inactive hook refuses.
+func TestWebhookRedeliverErrors(t *testing.T) {
+	x := newHarness(t)
+	sink, srv := newSink(t, "")
+	defer srv.Close()
+	hk, err := x.svc.CreateHook(ctx(), "acme", "repo", "amy@example.com", HookSpec{URL: strPtr(srv.URL)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := x.svc.RedeliverHook(ctx(), "acme", "repo", hk.ID, 1); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("unknown seq err = %v, want ErrNotFound", err)
+	}
+	if _, err := x.svc.RedeliverHook(ctx(), "acme", "repo", "nope", 1); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("unknown hook err = %v", err)
+	}
+
+	// A bodyless row (pre-retention record, or over the cap).
+	writeRaw(t, x.svc.Store, DeliveriesKey("acme", "repo", hk.ID),
+		mustEncode(t, DeliveriesDoc{Entries: []DeliveryEntry{{Seq: 5, Event: "commented", Status: 200}}}))
+	if _, err := x.svc.RedeliverHook(ctx(), "acme", "repo", hk.ID, 5); !errors.Is(err, ErrGone) {
+		t.Fatalf("bodyless err = %v, want ErrGone", err)
+	}
+	if got := statusFor(fmt.Errorf("%w: x", ErrGone)); got != 410 {
+		t.Fatalf("ErrGone status = %d", got)
+	}
+
+	// Oversized body: delivered, but not retained → replay is refused.
+	x.svc.recordDelivery(ctx(), "acme", "repo", hk.ID,
+		&ActivityEvent{Seq: 9, Action: "commented"}, 200, nil,
+		bytes.Repeat([]byte("x"), MaxDeliveryBody+1), 0)
+	d := x.svc.ReadDeliveries(ctx(), "acme", "repo", hk.ID)
+	var big *DeliveryEntry
+	for i := range d.Entries {
+		if d.Entries[i].Seq == 9 {
+			big = &d.Entries[i]
+		}
+	}
+	if big == nil || len(big.Body) != 0 {
+		t.Fatalf("oversized row = %+v", big)
+	}
+	if _, err := x.svc.RedeliverHook(ctx(), "acme", "repo", hk.ID, 9); !errors.Is(err, ErrGone) {
+		t.Fatalf("oversized replay err = %v", err)
+	}
+
+	// Inactive hooks refuse redelivery (the same rule as ping).
+	active := false
+	if _, err := x.svc.PatchHook(ctx(), "acme", "repo", hk.ID, HookSpec{Active: &active}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := x.svc.RedeliverHook(ctx(), "acme", "repo", hk.ID, 5); !errors.Is(err, ErrInvalid) {
+		t.Fatalf("inactive err = %v", err)
+	}
+	if sink.count() != 0 {
+		t.Fatalf("no POST may happen for a refused replay, got %d", sink.count())
+	}
 }

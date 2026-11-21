@@ -140,15 +140,25 @@ func TestServiceErrorPathMatrix(t *testing.T) {
 		t.Fatalf("get blob repo = %+v", oerr)
 	}
 
-	// Deletes: store error on both ref shapes.
+	// Deletes: store error on both ref shapes. A missing ref is a real 404
+	// now, so seed both shapes first.
+	if _, oerr := f.svc.PutManifest(ctx, "acme", "demo", "tag", []byte(imageManifest), ""); oerr != nil {
+		t.Fatalf("seed tag = %+v", oerr)
+	}
+	if _, oerr := f.svc.PutManifest(ctx, "acme", "demo", DigestBytes([]byte(imageManifest)), []byte(imageManifest), ""); oerr != nil {
+		t.Fatalf("seed manifest = %+v", oerr)
+	}
 	f.st.deleteFn = func(error) error { return boom }
 	if oerr := f.svc.DeleteManifest(ctx, "acme", "demo", "tag"); oerr == nil || oerr.Status != 500 {
 		t.Fatalf("delete tag error = %+v", oerr)
 	}
-	if oerr := f.svc.DeleteManifest(ctx, "acme", "demo", "sha256:"+strings.Repeat("a", 64)); oerr == nil || oerr.Status != 500 {
+	if oerr := f.svc.DeleteManifest(ctx, "acme", "demo", DigestBytes([]byte(imageManifest))); oerr == nil || oerr.Status != 500 {
 		t.Fatalf("delete digest error = %+v", oerr)
 	}
 	f.st.deleteFn = nil
+	if oerr := f.svc.DeleteManifest(ctx, "acme", "demo", "gone"); oerr == nil || oerr.Status != 404 {
+		t.Fatalf("delete unknown tag = %+v", oerr)
+	}
 	if oerr := f.svc.DeleteManifest(ctx, "bad owner", "demo", "x"); oerr == nil || oerr.Code != CodeNameUnknown {
 		t.Fatalf("delete repo = %+v", oerr)
 	}
@@ -259,14 +269,16 @@ func TestServiceErrorPathMatrix(t *testing.T) {
 	}
 	f.st.putFn = nil
 
-	// Role gates with a failing resolver.
+	// Role gates with a failing resolver. A host-wide write flag grants
+	// nothing on the push path (the #347 rule the registry now shares with
+	// git), so the resolver's verdict — here a failure — is the answer.
 	svc := New(f.st, f.roles)
 	f.roles.err = &auth.AuthError{Kind: auth.ErrForbidden, Why: "no"}
 	if err := svc.CanPull(ctx, "acme", "demo", auth.Principal{Name: "z"}); err == nil || err.Status != 403 {
 		t.Fatalf("forbidden pull = %+v", err)
 	}
-	if err := svc.CanPush(ctx, "acme", "demo", auth.Principal{Name: "z", Write: true}); err != nil {
-		t.Fatalf("write pull = %+v", err)
+	if err := svc.CanPush(ctx, "acme", "demo", auth.Principal{Name: "z", Write: true}); err == nil || err.Status != 403 {
+		t.Fatalf("write-flag push = %+v", err)
 	}
 	f.roles.err = nil
 }
@@ -292,12 +304,20 @@ func TestHTTPErrorBranches(t *testing.T) {
 	if w.Code != http.StatusRequestEntityTooLarge {
 		t.Fatalf("body error = %d", w.Code)
 	}
-	// deleteManifest store failure.
+	// deleteManifest store failure (seed the pointer so the failure is the
+	// store's, not a 404).
+	if w := f.as("writer", "PUT", "/v2/acme/demo/manifests/x", []byte(imageManifest)); w.Code != 201 {
+		t.Fatalf("seed delete target = %d", w.Code)
+	}
 	f.st.deleteFn = func(error) error { return errors.New("nope") }
 	if w := f.as("writer", "DELETE", "/v2/acme/demo/manifests/x", nil); w.Code != 500 {
 		t.Fatalf("delete error = %d", w.Code)
 	}
 	f.st.deleteFn = nil
+	// A missing reference is a real 404, never a silent 202.
+	if w := f.as("writer", "DELETE", "/v2/acme/demo/manifests/never", nil); w.Code != 404 {
+		t.Fatalf("delete unknown tag = %d", w.Code)
+	}
 	// abortUpload service failure (tombstone write).
 	f.st.putFn = func(string, error) error { return errors.New("nope") }
 	w = f.as("writer", "POST", "/v2/acme/demo/blobs/uploads/", nil)

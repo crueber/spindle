@@ -74,6 +74,35 @@ func (f *fakeRoles) CheckRead(_ context.Context, owner, repo string, p auth.Prin
 	return &auth.AuthError{Kind: auth.ErrForbidden, Why: "read access required"}
 }
 
+// CheckPush mirrors identity.CheckPush for the fixture: admin bypass, the
+// self-namespace owner rule, then an explicit binding at write or above. The
+// fixture's "writer" principal (the Write flag) stands in for the explicit
+// binding the production rule requires — a host write flag grants nothing
+// there, and TestCanPushReusesGitOwnerRule pins that with the real service.
+func (f *fakeRoles) CheckPush(_ context.Context, owner, repo string, p auth.Principal) *auth.AuthError {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.err != nil {
+		return f.err
+	}
+	if p.Admin {
+		return nil
+	}
+	if p.Anonymous {
+		return &auth.AuthError{Kind: auth.ErrUnauthorized, Why: "authentication required"}
+	}
+	if strings.EqualFold(owner, p.Name) {
+		return nil
+	}
+	if r, ok := f.roles[p.Name+"|"+owner+"/"+repo]; ok && roleRank(string(r)) >= roleRank(string(identity.RoleWrite)) {
+		return nil
+	}
+	if p.Write {
+		return nil
+	}
+	return &auth.AuthError{Kind: auth.ErrForbidden, Why: "write access required"}
+}
+
 // testAuth resolves a principal from X-Test-User (anonymous otherwise); a
 // Basic credential maps password "tok" to the username (the Docker login).
 func testAuth(r *http.Request) (auth.Principal, *auth.AuthError) {
@@ -141,16 +170,19 @@ func newFixture(t *testing.T) *fixture {
 // store failure.
 type countStore struct {
 	*store.Memory
-	mu        sync.Mutex
-	puts      int
-	gets      int
-	lists     int
-	getFn     func(store.GetResult, error) (store.GetResult, error)
-	putFn     func(key string, err error) error
-	headFn    func(*store.ObjectMeta, error) (*store.ObjectMeta, error)
-	deleteFn  func(error) error
-	listFn    func(error) error
-	composeFn func(error) error
+	mu          sync.Mutex
+	puts        int
+	gets        int
+	lists       int
+	getFn       func(store.GetResult, error) (store.GetResult, error)
+	getKeyFn    func(string, store.GetResult, error) (store.GetResult, error)
+	putFn       func(key string, err error) error
+	headFn      func(*store.ObjectMeta, error) (*store.ObjectMeta, error)
+	headKeyFn   func(string, *store.ObjectMeta, error) (*store.ObjectMeta, error)
+	deleteFn    func(error) error
+	deleteKeyFn func(string, error) error
+	listFn      func(error) error
+	composeFn   func(error) error
 }
 
 func (c *countStore) Put(ctx context.Context, key string, body store.PutBody, opts store.PutOptions) (store.ObjectMeta, error) {
@@ -171,6 +203,9 @@ func (c *countStore) Get(ctx context.Context, key string, opts store.GetOptions)
 	c.gets++
 	c.mu.Unlock()
 	res, err := c.Memory.Get(ctx, key, opts)
+	if c.getKeyFn != nil {
+		return c.getKeyFn(key, res, err)
+	}
 	if c.getFn != nil {
 		return c.getFn(res, err)
 	}
@@ -192,6 +227,9 @@ func (c *countStore) List(ctx context.Context, prefix, startAfter string, fn fun
 
 func (c *countStore) Head(ctx context.Context, key string) (*store.ObjectMeta, error) {
 	m, err := c.Memory.Head(ctx, key)
+	if c.headKeyFn != nil {
+		return c.headKeyFn(key, m, err)
+	}
 	if c.headFn != nil {
 		return c.headFn(m, err)
 	}
@@ -210,6 +248,11 @@ func (c *countStore) Compose(ctx context.Context, dst string, sources []string, 
 
 func (c *countStore) Delete(ctx context.Context, key string, ifVersion store.Version) error {
 	err := c.Memory.Delete(ctx, key, ifVersion)
+	if c.deleteKeyFn != nil {
+		if ferr := c.deleteKeyFn(key, err); ferr != nil {
+			return ferr
+		}
+	}
 	if c.deleteFn != nil {
 		if ferr := c.deleteFn(err); ferr != nil {
 			return ferr

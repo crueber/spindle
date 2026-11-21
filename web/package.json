@@ -7,7 +7,7 @@
     "build": "pnpm run build:css && pnpm run build:islands && pnpm run build:vendor && pnpm run build:sdk",
     "build:css": "vite build --config vite.app.config.mjs && rm -f dist/app-entry.js",
     "build:islands": "esbuild src/islands/index.js --bundle --format=esm --target=es2022 --outfile=dist/ui.js",
-    "build:vendor": "cp vendor/htmx.min.js dist/"
+    "build:vendor": "rm -f dist/htmx-ext-sse.js && cp vendor/htmx.min.js dist/"
   },
   "devDependencies": {
     "@tailwindcss/vite": "^4.3.3",

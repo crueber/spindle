@@ -89,44 +89,7 @@
     </section>
     {{end}}
 
-    <section class="card overflow-hidden">
-      <div class="flex flex-wrap items-center gap-2 border-b border-[var(--pd-line)] px-3 py-1.5">
-        <h2 class="eyebrow">Ops</h2>
-      </div>
-      <p class="muted px-3 pt-2 font-mono text-[11px]">{{.Data.OpsAvailable}} available · {{.Data.OpsRecent}} recent</p>
-      <div class="mt-1 divide-y divide-[var(--pd-line)]">
-        {{range .Data.Ops}}
-        <div class="op-row flex flex-wrap items-center gap-x-2 gap-y-1 px-3 py-1.5">
-          <code class="mono text-xs text-[var(--pd-text)]">{{.Op}}</code>
-          <!-- Params are the wire truth {name,values[]} (there is no kind:
-               spec §6.2 item 3). This page renders the inventory; running an
-               op is POST {repo}/api/ops/{op} (stream), owned by the islands
-               group. -->
-          {{range .Params}}
-          <span class="chip max-w-full">
-            {{.Name}}{{if .Required}} (required){{end}}
-            {{if eq .Kind "checkbox"}} · flag{{else if eq .Kind "select"}} · one of {{range $i, $v := .Values}}{{if $i}}|{{end}}{{$v}}{{end}}{{else}} · text{{end}}
-          </span>
-          {{end}}
-        </div>
-        {{end}}
-      </div>
-      {{if .Data.Recent}}
-      <div class="border-t border-[var(--pd-line)] px-3 py-2">
-        <details>
-          <summary class="pill cursor-pointer select-none">recent ops</summary>
-          <ul class="recent-ops mt-2 space-y-1 font-mono text-[11px] text-[var(--pd-text-2)]">
-            {{range .Data.Recent}}
-            <li>
-              {{.Kind}} — {{.State}}
-              {{if .Stamp}}<span class="text-[var(--pd-dim)]" aria-hidden="true"> · </span><time datetime="{{.Stamp}}" title="{{.Stamp}}">{{with rel .Stamp}}{{.}}{{else}}—{{end}}</time>{{end}}
-            </li>
-            {{end}}
-          </ul>
-        </details>
-      </div>
-      {{end}}
-    </section>
+    {{template "repo-wal-ops" .Data.OpsPanel}}
 
     <div class="grid grid-cols-1 gap-3 md:grid-cols-2">
       <section class="card overflow-hidden">
@@ -247,15 +210,6 @@
       {{end}}
     </section>
 
-    <section class="card overflow-hidden">
-      <div class="flex flex-wrap items-center gap-2 border-b border-[var(--pd-line)] px-3 py-1.5">
-        <h2 class="eyebrow">Live op log</h2>
-      </div>
-      <!-- No stream is opened server-side: the run stream is POST-then-SSE
-           (the islands group's reader). The element is the target the island
-           appends bounded lines to. -->
-      <pre class="code-view m-3 max-h-80 overflow-y-auto p-3" data-op-log aria-live="polite"></pre>
-    </section>
   </div>
 </div>
 {{end}}

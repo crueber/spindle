@@ -34,15 +34,15 @@ var authGroup = &apiGroup{
 		{name: "token list", usage: "spindle auth token list",
 			help:  "tokens are session-minted at /_auth/tokens (no JSON API)",
 			flags: []string{},
-			run:   runAuthTokenUnsupported},
+			run:   runAuthTokenUnsupported("token list")},
 		{name: "token create", usage: "spindle auth token create",
 			help:  "tokens are session-minted at /_auth/tokens (no JSON API)",
 			flags: []string{},
-			run:   runAuthTokenUnsupported},
+			run:   runAuthTokenUnsupported("token create")},
 		{name: "token revoke", usage: "spindle auth token revoke",
 			help:  "tokens are session-minted at /_auth/tokens (no JSON API)",
 			flags: []string{},
-			run:   runAuthTokenUnsupported},
+			run:   runAuthTokenUnsupported("token revoke")},
 	},
 }
 
@@ -64,9 +64,9 @@ func runAuthLogin(ctx context.Context, c *cli, args []string) int {
 	fs.StringVar(&tokenFile, "token-file", "", "read the token from FILE (mode 0600)")
 	fs.BoolVar(&stdin, "stdin", false, "read the token from stdin")
 	fs.BoolVar(&noVerify, "no-verify", false, "store the token without calling GET /api/v1/me")
-	pos, ok := parseAPI(fs, args)
-	if !ok {
-		return exitArg
+	pos, exit := parseAPI(fs, args)
+	if exit != parseContinue {
+		return exit
 	}
 	if len(pos) > 0 {
 		fmt.Fprintln(c.stderr(), "spindle: auth login takes no positional arguments")
@@ -153,9 +153,9 @@ func runAuthLogout(ctx context.Context, c *cli, args []string) int {
 	var all, quiet bool
 	fs.BoolVar(&all, "all", false, "forget every stored server credential")
 	fs.BoolVar(&quiet, "quiet", false, "print nothing")
-	pos, ok := parseAPI(fs, args)
-	if !ok {
-		return exitArg
+	pos, exit := parseAPI(fs, args)
+	if exit != parseContinue {
+		return exit
 	}
 	if len(pos) > 0 {
 		fmt.Fprintln(c.stderr(), "spindle: auth logout takes no positional arguments")
@@ -202,9 +202,9 @@ func runAuthStatus(ctx context.Context, c *cli, args []string) int {
 	f := &apiFlags{}
 	fs := newAPIFlagSet(c, "auth status")
 	f.add(fs)
-	pos, ok := parseAPI(fs, args)
-	if !ok {
-		return exitArg
+	pos, exit := parseAPI(fs, args)
+	if exit != parseContinue {
+		return exit
 	}
 	if len(pos) > 0 {
 		fmt.Fprintln(c.stderr(), "spindle: auth status takes no positional arguments")
@@ -248,17 +248,26 @@ func runAuthStatus(ctx context.Context, c *cli, args []string) int {
 
 // runAuthTokenUnsupported explains the deliberate gap: token minting is a
 // browser-session surface (POST /_auth/tokens with a CSRF guard), not the
-// public JSON API, so the CLI cannot list/create/revoke tokens.
-func runAuthTokenUnsupported(ctx context.Context, c *cli, args []string) int {
-	base, _, err := resolveServer(c)
-	if err != nil {
-		fmt.Fprintf(c.stderr(), "spindle: %v\n", err)
+// public JSON API, so the CLI cannot list/create/revoke tokens. `-h`/`--help`
+// prints that command's usage plus the same explanation, exit 0.
+func runAuthTokenUnsupported(name string) func(context.Context, *cli, []string) int {
+	return func(ctx context.Context, c *cli, args []string) int {
+		for _, a := range args {
+			if a == "-h" || a == "--help" {
+				fmt.Fprintf(c.stderr(), "usage: spindle auth %s\n\ntokens are minted and revoked in a signed-in browser at <server>/_auth/tokens; the JSON API exposes no token surface.\n", name)
+				return exitOK
+			}
+		}
+		base, _, err := resolveServer(c)
+		if err != nil {
+			fmt.Fprintf(c.stderr(), "spindle: %v\n", err)
+			return exitErr
+		}
+		fmt.Fprintf(c.stderr(),
+			"spindle: token list/create/revoke is not offered: the JSON API exposes no token surface.\n"+
+				"spindle: mint and revoke tokens in a signed-in browser at %s/_auth/tokens\n", base)
 		return exitErr
 	}
-	fmt.Fprintf(c.stderr(),
-		"spindle: token list/create/revoke is not offered: the JSON API exposes no token surface.\n"+
-			"spindle: mint and revoke tokens in a signed-in browser at %s/_auth/tokens\n", base)
-	return exitErr
 }
 
 // mustJSON marshals a CLI-native value for --json output (the API bodies are

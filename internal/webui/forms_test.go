@@ -123,7 +123,7 @@ type formsFakeIssues struct {
 	lastMSTitle   string
 }
 
-func (f *formsFakeIssues) CreateIssue(_ context.Context, _, _ string, _ auth.Principal, title, body string) (*issues.Thread, *issues.Event, error) {
+func (f *formsFakeIssues) CreateIssue(_ context.Context, _, _ string, _ auth.Principal, title, body string, _ *issues.IssueMeta) (*issues.Thread, *issues.Event, error) {
 	f.lastIssue = [2]string{title, body}
 	if f.issueErr != nil {
 		return nil, nil, f.issueErr
@@ -1391,6 +1391,34 @@ func TestFormsImportFastFailureRendersFailureCard(t *testing.T) {
 	}
 	if strings.Contains(w.Body.String(), "ghp-secret") {
 		t.Fatalf("the source token was echoed into the failure page")
+	}
+}
+
+// TestFormsImportValidationFailureNeverEchoesToken is F4: a rejected form is
+// re-rendered with the operator's other fields, but the submitted source token
+// is cleared (the copy promises "sent once, never stored or logged") and the
+// input renders empty.
+func TestFormsImportValidationFailureNeverEchoesToken(t *testing.T) {
+	h := newFormsHarness(t, "none")
+	formsUse(t, FormsDeps{Identity: &formsFakeIdentity{}, Import: &formsFakeImport{}, Mirror: &formsFakeMirror{}})
+	const secret = "SUPERSECRET-TOKEN-123"
+	w := h.request(t, http.MethodPost, "/import", url.Values{
+		"kind": {"import"}, "source_url": {"ssh://git@example.com/acme/monorepo.git"},
+		"owner": {"alice"}, "name": {"monorepo"}, "token": {secret},
+	}, "writer", nil)
+	// A 4xx validation reject renders the form again (the inline error card).
+	if w.Code >= 500 {
+		t.Fatalf("status = %d, want a rendered form (body: %s)", w.Code, formsTruncate(w.Body.String()))
+	}
+	body := w.Body.String()
+	if strings.Contains(body, secret) {
+		t.Fatalf("the submitted token was echoed into the rejected form")
+	}
+	if !strings.Contains(body, `name="token"`) {
+		t.Fatalf("the form must keep the token field (empty), body: %s", formsTruncate(body))
+	}
+	if !strings.Contains(body, `value="ssh://git@example.com/acme/monorepo.git"`) {
+		t.Fatalf("other form fields must be preserved on error")
 	}
 }
 
@@ -3049,5 +3077,44 @@ func TestFormsPullNewForkPicker(t *testing.T) {
 	formsExpectLocation(t, w, "/alice/thing/pull/9")
 	if p.lastOpen.Fork == nil || p.lastOpen.Fork.Repo != "acme/fork" || p.lastOpen.HeadRef != "refs/heads/fork-work" {
 		t.Fatalf("open input = %+v", p.lastOpen)
+	}
+}
+
+// TestFormsPullNewSplitsForkHeadLink pins the sync-fork PR link (audit
+// FAIL 3): ?head=<owner>/<repo>:<branch> must preselect the fork AND its
+// branch, not land on an empty From branch.
+func TestFormsPullNewSplitsForkHeadLink(t *testing.T) {
+	h := newFormsHarness(t, "none")
+	h.s.env.API = &api.Env{Repo: &formsFakeRepoView{
+		summary:  api.SummaryData{Features: formsAllFeatures()},
+		branches: []api.Ref{{Name: "refs/heads/main"}, {Name: "refs/heads/bob-patch"}},
+	}}
+	formsUse(t, FormsDeps{
+		Identity: &formsFakeIdentity{roles: map[string]identity.Role{
+			"acme/widgets": identity.RoleWrite,
+			"bob/widgets":  identity.RoleRead,
+		}},
+		Pulls: &formsFakePulls{forks: []pulls.ForkListEntry{{Repo: "bob/widgets"}}},
+	})
+	w := h.request(t, http.MethodGet,
+		"/acme/widgets/pulls/new?base=main&head=bob%2Fwidgets%3Amain", nil, "writer", nil)
+	formsExpectStatus(t, w, http.StatusOK)
+	body := w.Body.String()
+	if !strings.Contains(body, `<option value="bob/widgets" selected>`) {
+		t.Fatalf("fork not preselected:\n%.3000s", body)
+	}
+	if !strings.Contains(body, `<option value="refs/heads/main" selected>`) {
+		t.Fatalf("fork branch not preselected:\n%.3000s", body)
+	}
+	if !strings.Contains(body, `value="refs/heads/bob-patch"`) {
+		t.Fatalf("fork branch list missing:\n%.3000s", body)
+	}
+	// from_repo wins over the repo carried inside head, and a bare head stays
+	// a same-repo branch (the pre-existing shape).
+	w = h.request(t, http.MethodGet,
+		"/acme/widgets/pulls/new?from_repo=acme/widgets&head=feature", nil, "writer", nil)
+	formsExpectStatus(t, w, http.StatusOK)
+	if !strings.Contains(w.Body.String(), `<option value="acme/widgets" selected>`) {
+		t.Fatalf("explicit from_repo not selected:\n%.2000s", w.Body.String())
 	}
 }

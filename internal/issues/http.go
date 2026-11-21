@@ -436,13 +436,22 @@ func (h *Handler) createIssue(w http.ResponseWriter, r *http.Request, owner, rep
 		return
 	}
 	var body struct {
-		Title string `json:"title"`
-		Body  string `json:"body"`
+		Title     string   `json:"title"`
+		Body      string   `json:"body"`
+		Labels    []string `json:"labels"`
+		Assignees []string `json:"assignees"`
+		Milestone *string  `json:"milestone"`
 	}
-	if !decodeStrict(w, r, 1<<20, map[string]bool{"title": true, "body": true}, &body) {
+	if !decodeStrict(w, r, 1<<20,
+		map[string]bool{"title": true, "body": true, "labels": true, "assignees": true, "milestone": true},
+		&body) {
 		return
 	}
-	th, ev, err := h.Svc.CreateIssue(r.Context(), owner, repo, p, body.Title, body.Body)
+	var meta *IssueMeta
+	if len(body.Labels) > 0 || len(body.Assignees) > 0 || body.Milestone != nil {
+		meta = &IssueMeta{Labels: body.Labels, Assignees: body.Assignees, Milestone: body.Milestone}
+	}
+	th, ev, err := h.Svc.CreateIssue(r.Context(), owner, repo, p, body.Title, body.Body, meta)
 	if err != nil {
 		writeErr(w, err)
 		return

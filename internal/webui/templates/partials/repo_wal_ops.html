@@ -1,0 +1,84 @@
+{{/* partials/repo_wal_ops.html — the Ops card shared by the WAL page and
+   Settings → WAL (WP9 G12/G16). One inventory row per op; with the write role
+   each row is a form that POSTs the existing …/api/ops/{op} SSE endpoint.
+   The islands/ops.js reader streams progress into [data-op-log] and renders
+   the terminal TaskRecord into [data-op-task] — no second transport, no
+   silently spinning button. */}}
+
+{{define "repo-wal-ops"}}
+<section class="card overflow-hidden" data-ops-panel>
+  <div class="flex flex-wrap items-center gap-2 border-b border-[var(--pd-line)] px-3 py-1.5">
+    <h3 class="eyebrow">Ops</h3>
+    <span class="muted font-mono text-[11px]">{{len .Ops}} available · {{len .Recent}} recent</span>
+  </div>
+  <div class="mt-1 divide-y divide-[var(--pd-line)]">
+    {{range .Ops}}
+    {{if $.CanRun}}
+    <form class="op-row flex flex-wrap items-end gap-x-2 gap-y-2 px-3 py-2"
+          data-op-run data-op-url="{{$.OpsURL}}{{.Op}}">
+      <code class="mono self-center text-xs text-[var(--pd-text)]">{{.Op}}</code>
+      {{range .Params}}
+      {{if eq .Kind "checkbox"}}
+      <label class="flex items-center gap-1 text-xs">
+        <input type="checkbox" name="{{.Name}}" value="{{index .Values 0}}" class="h-4 w-4 accent-amber-500">
+        <span class="mono">{{.Name}}</span>
+      </label>
+      {{else if eq .Kind "select"}}
+      <label class="flex items-center gap-1 text-xs">
+        <span class="mono">{{.Name}}</span>
+        <select class="input w-auto py-1" name="{{.Name}}" aria-label="{{.Name}}">
+          <option value="">(unset)</option>
+          {{range .Values}}<option value="{{.}}">{{.}}</option>{{end}}
+        </select>
+      </label>
+      {{else}}
+      <input class="input w-32 py-1 mono text-xs" name="{{.Name}}" type="text"
+             placeholder="{{.Name}}"{{if .Required}} required{{end}} aria-label="{{.Name}}">
+      {{end}}
+      {{end}}
+      <button type="submit" class="btn py-1 text-xs">run</button>
+    </form>
+    {{else}}
+    <div class="op-row flex flex-wrap items-center gap-x-2 gap-y-1 px-3 py-1.5">
+      <code class="mono text-xs text-[var(--pd-text)]">{{.Op}}</code>
+      {{range .Params}}
+      <span class="chip max-w-full">
+        {{.Name}}{{if .Required}} (required){{end}}
+        {{if eq .Kind "checkbox"}} · flag{{else if eq .Kind "select"}} · one of {{range $i, $v := .Values}}{{if $i}}|{{end}}{{$v}}{{end}}{{else}} · text{{end}}
+      </span>
+      {{end}}
+    </div>
+    {{end}}
+    {{end}}
+    {{if not .Ops}}<p class="muted px-3 py-2 text-sm">no ops are available on this host.</p>{{end}}
+  </div>
+  {{if .CanRun}}
+  <div class="border-t border-[var(--pd-line)] px-3 py-2">
+    <div class="flex flex-wrap items-center gap-2">
+      <h4 class="eyebrow">Progress</h4>
+      <span class="chip chip-neutral" data-op-state hidden></span>
+      <button type="button" class="link ml-auto text-xs" data-op-clear>clear</button>
+    </div>
+    <pre class="code-view mt-2 max-h-80 overflow-y-auto p-3" data-op-log aria-live="polite"></pre>
+    <div class="mt-2 grid gap-1 text-sm" data-op-task></div>
+  </div>
+  {{else}}
+  <p class="muted border-t border-[var(--pd-line)] px-3 py-2 text-[11px]">Running an op requires the write role; the list above is read-only for you.</p>
+  {{end}}
+  {{if .Recent}}
+  <div class="border-t border-[var(--pd-line)] px-3 py-2">
+    <details>
+      <summary class="pill cursor-pointer select-none">recent ops</summary>
+      <ul class="recent-ops mt-2 space-y-1 font-mono text-[11px] text-[var(--pd-text-2)]">
+        {{range .Recent}}
+        <li>
+          {{.Kind}} — {{.State}}
+          {{if .Stamp}}<span class="text-[var(--pd-dim)]" aria-hidden="true"> · </span><time datetime="{{.Stamp}}" title="{{.Stamp}}">{{with rel .Stamp}}{{.}}{{else}}—{{end}}</time>{{end}}
+        </li>
+        {{end}}
+      </ul>
+    </details>
+  </div>
+  {{end}}
+</section>
+{{end}}

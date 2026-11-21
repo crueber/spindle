@@ -46,7 +46,7 @@ func TestDockerPushPull(t *testing.T) {
 	// A credentialed registry (the production shape): the daemon logs in and
 	// exchanges Basic for a scoped token.
 	f.h.AuthRequired = true
-	f.svc.MaxBlobBytes = 0     // 2 GiB default for real layers
+	f.svc.MaxBlobBytes = 0     // 10 GiB default for real layers
 	f.svc.MaxManifestBytes = 0 // 4 MiB default
 	f.roles.roles["alice|acme/demo"] = identity.RoleWrite
 	srv := httptest.NewServer(f.h)

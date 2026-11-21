@@ -53,6 +53,7 @@ import (
 	"fmt"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/crueber/spindle/internal/identity"
 	"github.com/crueber/spindle/internal/server/auth"
@@ -418,6 +419,20 @@ func (s *Service) ReadOrgDeliveries(ctx context.Context, org, id string) *Delive
 	return readDeliveriesAt(ctx, s, OrgHookDeliveriesKey(org, id))
 }
 
+// RedeliverOrgHook re-POSTs one stored org-hook delivery (owner-gated by
+// the handler). Same contract as RedeliverHook: byte-identical replay,
+// no cursor change, inactive hooks refused, no retained body → ErrGone.
+func (s *Service) RedeliverOrgHook(ctx context.Context, org, id string, seq int) (*DeliveryEntry, error) {
+	h := s.GetOrgHook(ctx, org, id)
+	if h == nil {
+		return nil, fmt.Errorf("%w: unknown webhook", ErrNotFound)
+	}
+	if !h.Active {
+		return nil, fmt.Errorf("%w: webhook inactive", ErrInvalid)
+	}
+	return redeliverAt(ctx, s, OrgHookDeliveriesKey(org, id), h, seq)
+}
+
 // --- org event log ------------------------------------------------------------------
 
 // reserveOrgSeq CAS-allocates the next org-log seq (P3 two-step, step 1).
@@ -639,8 +654,10 @@ func (s *Service) deliverOrgLog(ctx context.Context, org string, h *Hook) int {
 			}
 			continue
 		}
+		body, _ := encode(ev)
+		start := time.Now()
 		status, derr := s.postEvent(ctx, h, ev)
-		recordDeliveryAt(ctx, s, OrgHookDeliveriesKey(org, h.ID), ev, status, derr)
+		recordDeliveryAt(ctx, s, OrgHookDeliveriesKey(org, h.ID), ev, status, derr, body, time.Since(start))
 		if derr != nil || status < 200 || status >= 300 {
 			break // cursor stays: retry from here next pass
 		}
@@ -677,8 +694,10 @@ func (s *Service) deliverOrgRepo(ctx context.Context, org string, h *Hook, repo 
 			}
 			continue
 		}
+		body, _ := encode(ev)
+		start := time.Now()
 		status, derr := s.postEvent(ctx, h, ev)
-		recordDeliveryAt(ctx, s, OrgHookDeliveriesKey(org, h.ID), ev, status, derr)
+		recordDeliveryAt(ctx, s, OrgHookDeliveriesKey(org, h.ID), ev, status, derr, body, time.Since(start))
 		if derr != nil || status < 200 || status >= 300 {
 			break
 		}
@@ -786,8 +805,9 @@ func (s *Service) PingOrgHook(ctx context.Context, org, id, actor string) (bool,
 	if err := s.putCreate(ctx, OrgEventKey(org, seq), raw); err != nil && !store.IsPreconditionFailed(err) {
 		return false, err
 	}
+	start := time.Now()
 	status, derr := s.postEvent(ctx, h, &ev)
-	recordDeliveryAt(ctx, s, OrgHookDeliveriesKey(org, h.ID), &ev, status, derr)
+	recordDeliveryAt(ctx, s, OrgHookDeliveriesKey(org, h.ID), &ev, status, derr, raw, time.Since(start))
 	if derr != nil || status < 200 || status >= 300 {
 		return false, nil
 	}
@@ -838,10 +858,19 @@ func advanceCursorAt(ctx context.Context, s *Service, key string, seq int) {
 
 // recordDeliveryAt appends one row to the last-25 ring at key
 // (best-effort CAS; transport errors scrubbed of credential material).
-func recordDeliveryAt(ctx context.Context, s *Service, key string, ev *ActivityEvent, status int, derr error) {
-	entry := DeliveryEntry{Seq: ev.Seq, Event: ev.Action, Status: status, At: s.nowUTC().Format(dateTimeFmt)}
+// The body is retained (bounded by MaxDeliveryBody) so redeliver replays
+// exact bytes; an oversized body is delivered but leaves Body empty, the
+// honest "not retained" marker. The returned row is the entry appended.
+func recordDeliveryAt(ctx context.Context, s *Service, key string, ev *ActivityEvent, status int, derr error, body []byte, dur time.Duration) DeliveryEntry {
+	entry := DeliveryEntry{
+		Seq: ev.Seq, Event: ev.Action, Status: status,
+		At: s.nowUTC().Format(dateTimeFmt), DurationMs: dur.Milliseconds(),
+	}
 	if derr != nil {
 		entry.Error = scrubDeliveryError(derr.Error())
+	}
+	if len(body) > 0 && len(body) <= MaxDeliveryBody {
+		entry.Body = append(json.RawMessage(nil), body...)
 	}
 	_, _ = s.casUpdate(ctx, key, 3, func(cur []byte, _ store.Version) ([]byte, bool, error) {
 		var d DeliveriesDoc
@@ -859,6 +888,7 @@ func recordDeliveryAt(ctx context.Context, s *Service, key string, ev *ActivityE
 		}
 		return raw, true, nil
 	})
+	return entry
 }
 
 // readDeliveriesAt loads a ring (nil entries when absent — wire `[]`).

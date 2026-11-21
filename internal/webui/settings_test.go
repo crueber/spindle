@@ -92,6 +92,7 @@ func settingsTestTemplates(t *testing.T, s *Server) map[string]*template.Templat
 		"templates/partials/footer.html",
 		"templates/partials/repo_header.html",
 		"templates/partials/repo_tabs.html",
+		"templates/partials/repo_wal_ops.html",
 		"templates/partials/identity_notice.html",
 	}
 	out := map[string]*template.Template{}
@@ -266,8 +267,8 @@ func TestSettingsSetupDeniedRendersRestrictedCard(t *testing.T) {
 	}}
 	s := newSettingsServer(t, f)
 	rec := settingsDo(t, s, http.MethodGet, "/setup", nil, nil)
-	if rec.Code != http.StatusOK {
-		t.Fatalf("GET /setup (denied) = %d, want 200 restricted card", rec.Code)
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("GET /setup (denied) = %d, want 403 restricted card", rec.Code)
 	}
 	body := rec.Body.String()
 	settingsMustContain(t, body, "Access restricted", "denied page")
@@ -551,7 +552,7 @@ func TestSettingsRepoGeneralTabRenders(t *testing.T) {
 	settingsMustContain(t, body, `name="feature_packages"`, "registry toggle")
 	// Nav order is the sidebar contract.
 	navOrder := []string{"General", "Scheduled tasks", "Mirror", "Push policy",
-		"Effective config &amp; history", "Access", "CI tokens", "Webhooks", "WAL", "Danger Zone"}
+		"Effective config &amp; history", "Access", "CI tokens", "Runners", "Secrets", "Webhooks", "WAL", "Danger Zone"}
 	pos := -1
 	for _, label := range navOrder {
 		at := strings.Index(body, label)
@@ -603,24 +604,45 @@ func TestSettingsRepoUnknownTabAndPushmirrorAlias(t *testing.T) {
 
 func TestSettingsRepoAdminOnlyTabForbiddenForNonAdmin(t *testing.T) {
 	s := newSettingsServer(t, settingsRepoFakes("read"))
-	for _, tab := range []string{"tokens", "webhooks", "policy", "config", "danger"} {
+	for _, tab := range []string{"tokens", "webhooks", "policy", "config", "danger",
+		"protection", "general", "scheduled", "mirror"} {
 		rec := settingsDo(t, s, http.MethodGet, "/acme/monorepo/settings/"+tab, nil, nil)
 		if rec.Code != http.StatusForbidden {
 			t.Fatalf("GET %s as reader = %d, want 403", tab, rec.Code)
 		}
 	}
-	// Access is triage-gated, general is readable.
+	// Access is triage-gated too.
 	if rec := settingsDo(t, s, http.MethodGet, "/acme/monorepo/settings/access", nil, nil); rec.Code != http.StatusForbidden {
 		t.Fatalf("access as reader = %d, want 403", rec.Code)
 	}
-	if rec := settingsDo(t, s, http.MethodGet, "/acme/monorepo/settings/general", nil, nil); rec.Code != http.StatusOK {
-		t.Fatalf("general as reader = %d, want 200", rec.Code)
-	}
 	// A reader's nav never shows the admin-only entries (hidden, not 403'd).
-	body := settingsDo(t, s, http.MethodGet, "/acme/monorepo/settings/general", nil, nil).Body.String()
+	body := settingsDo(t, s, http.MethodGet, "/acme/monorepo/settings/wal", nil, nil).Body.String()
 	settingsMustNotContain(t, body, "/settings/tokens", "reader nav")
 	settingsMustNotContain(t, body, "/settings/danger", "reader nav")
-	settingsMustContain(t, body, "/settings/mirror", "reader nav")
+	settingsMustNotContain(t, body, "/settings/mirror", "reader nav")
+	settingsMustNotContain(t, body, "/settings/general", "reader nav")
+}
+
+// TestSettingsRepoGuestTabsMirrorAPIGate is the page-contract pin for the
+// audit's gate inconsistency: under token auth with anonymous_read, an
+// anonymous reader must get the SAME 403 on every editing tab the POSTs and
+// the admin tabs answer — never a live form, and never a configured mirror
+// upstream URL.
+func TestSettingsRepoGuestTabsMirrorAPIGate(t *testing.T) {
+	f := settingsRepoFakes("read")
+	f.principal = auth.Principal{Name: "anonymous", Anonymous: true}
+	f.deps.RepoMirror = func(context.Context, string, string) (*SettingsMirror, error) {
+		return &SettingsMirror{Configured: true, Upstream: "https://secret.internal/upstream.git"}, nil
+	}
+	s := newSettingsServer(t, f)
+	for _, tab := range []string{"general", "scheduled", "mirror", "policy", "protection",
+		"config", "access", "tokens", "webhooks", "danger"} {
+		rec := settingsDo(t, s, http.MethodGet, "/acme/monorepo/settings/"+tab, nil, nil)
+		if rec.Code != http.StatusForbidden {
+			t.Fatalf("guest GET %s = %d, want 403", tab, rec.Code)
+		}
+		settingsMustNotContain(t, rec.Body.String(), "secret.internal", "guest body leaks the upstream")
+	}
 }
 
 func TestSettingsRepoWriteForbiddenForNonAdmin(t *testing.T) {
@@ -706,11 +728,17 @@ func TestSettingsRepoRoleErrorIsServiceUnavailable(t *testing.T) {
 	}
 }
 
-func TestSettingsRepoNoRoleIsNotFound(t *testing.T) {
-	s := newSettingsServer(t, settingsRepoFakes("none"))
-	rec := settingsDo(t, s, http.MethodGet, "/acme/monorepo/settings/general", nil, nil)
-	if rec.Code != http.StatusNotFound {
-		t.Fatalf("role none = %d, want 404", rec.Code)
+func TestSettingsRepoNoRoleIsForbidden(t *testing.T) {
+	for _, role := range []string{"none", ""} {
+		s := newSettingsServer(t, settingsRepoFakes(role))
+		rec := settingsDo(t, s, http.MethodGet, "/acme/monorepo/settings/general", nil, nil)
+		if rec.Code != http.StatusForbidden {
+			t.Fatalf("role %q general = %d, want 403", role, rec.Code)
+		}
+		rec = settingsDo(t, s, http.MethodGet, "/acme/monorepo/settings/wal", nil, nil)
+		if rec.Code != http.StatusForbidden {
+			t.Fatalf("role %q wal = %d, want 403", role, rec.Code)
+		}
 	}
 }
 
@@ -749,10 +777,22 @@ func TestSettingsRepoPanelsRenderAndGaps(t *testing.T) {
 	f := settingsRepoFakes("admin")
 	f.deps.RepoScheduled = func(context.Context, string, string) (*SettingsScheduled, error) {
 		return &SettingsScheduled{
-			Strategies:  []SettingsStrategy{{Name: "history", Kind: "history", Schedule: "daily", Next: "2026-11-20T00:00:00Z"}},
+			Sections:    settingsScheduledSections(nil, config.Defaults(), nil),
 			HostFacts:   []SettingsKV{{Key: "host", Value: "node-1"}, {Key: "roles", Value: "serve, maintain"}},
 			UpstreamGit: "https://up.example/acme/mono.git",
 			FollowLine:  "following every 5m",
+		}, nil
+	}
+	f.deps.RepoWAL = func(context.Context, string, string) (*SettingsWAL, error) {
+		return &SettingsWAL{
+			Owner: "acme", Name: "monorepo", Health: "ok", HealthTone: "chip chip-open",
+			ServedBy: "node-1", CloneURL: "https://example.com/acme/monorepo.git",
+			Facts: []SettingsKV{{Key: "entries", Value: "3"}}, Packs: "1 live packs",
+			Panel: walOpsPanel{
+				Ops:    []walOp{{Op: "fsck", Params: []walParam{{Name: "connectivity", Kind: "checkbox", Values: []string{"1"}}}}},
+				OpsURL: "/acme/monorepo/api/ops/",
+				CanRun: true,
+			},
 		}, nil
 	}
 	f.deps.RepoPolicy = func(context.Context, string, string) (*SettingsPolicy, error) {
@@ -787,13 +827,13 @@ func TestSettingsRepoPanelsRenderAndGaps(t *testing.T) {
 		tab  string
 		want []string
 	}{
-		{"scheduled", []string{"Bundle strategies", "history", "Placement &amp; host facts", "node-1", "following every 5m"}},
-		{"policy", []string{"Push policy", "protect default", "Dry run:", "2"}},
+		{"scheduled", []string{"Bundle strategies", "Compaction", "Override host config", "Placement &amp; host facts", "node-1", "following every 5m"}},
+		{"policy", []string{"Push policy", "protect default", "Dry run:", "2", "Remove policy"}},
 		{"config", []string{"Effective config", "Publish message", "History", "#3", "tighten", "- b"}},
 		{"access", []string{"Effective access", "user:alice", "Role bindings", "user:bob", "version 7"}},
 		{"tokens", []string{"Create a CI token", "ci", "revoke"}},
-		{"webhooks", []string{"Add a webhook", "https://example.com/hook", "ping", "delivered"}},
-		{"wal", []string{"WAL", "wal-panel.html"}},
+		{"webhooks", []string{"Add a webhook", "https://example.com/hook", "ping", "delivered", "edit webhook", "Rotate signing secret"}},
+		{"wal", []string{"WAL health", "entries", "fsck", "data-op-run"}},
 		{"danger", []string{"Danger Zone", "Transfer this repository", "Delete this repository", "data-danger-expected"}},
 	} {
 		rec := settingsDo(t, s, http.MethodGet, "/acme/monorepo/settings/"+tc.tab, nil, nil)
@@ -803,6 +843,39 @@ func TestSettingsRepoPanelsRenderAndGaps(t *testing.T) {
 		for _, want := range tc.want {
 			settingsMustContain(t, rec.Body.String(), want, tc.tab+" tab")
 		}
+	}
+}
+
+func TestSettingsRepoAccessReadOnlyCardIsNotNested(t *testing.T) {
+	// Defect 6 (round-3 audit): the read-only branch opened a
+	// data-access-readonly section and never closed it, so the explanatory
+	// card nested inside it and "Visibility & role bindings" rendered twice
+	// for a triage/write principal (the PR tab's read floor is triage; a
+	// "read" principal gets the 403 the API gate gives, by design).
+	for _, role := range []string{"triage", "write"} {
+		f := settingsRepoFakes(role)
+		f.deps.RepoAccess = func(context.Context, string, string, auth.Principal) (*SettingsAccess, error) {
+			return &SettingsAccess{
+				Role: role, Visibility: "private", Version: 4,
+				Bindings: []SettingsBinding{{Subject: "user:alice", Role: "admin"}},
+			}, nil
+		}
+		s := newSettingsServer(t, f)
+		rec := settingsDo(t, s, http.MethodGet, "/acme/monorepo/settings/access", nil, nil)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("%s access page = %d", role, rec.Code)
+		}
+		body := rec.Body.String()
+		if got := strings.Count(body, "data-access-readonly"); got != 1 {
+			t.Fatalf("%s access page renders %d data-access-readonly sections, want exactly one", role, got)
+		}
+		if got := strings.Count(body, "Visibility &amp; role bindings"); got != 1 {
+			t.Fatalf("%s access page renders the heading %d times, want once (nested card)", role, got)
+		}
+		// The read-only view still shows the stored facts and never a form.
+		settingsMustContain(t, body, "user:alice", "read-only bindings")
+		settingsMustContain(t, body, "Only a repository admin can change visibility or role bindings.", "admin-only note")
+		settingsMustNotContain(t, body, `name="binding_count"`, "read-only page has no admin form")
 	}
 }
 
@@ -1017,7 +1090,7 @@ func TestSettingsOrgInviteLinkRenderedNotRedirected(t *testing.T) {
 	}
 	s := newSettingsServer(t, f)
 	rec := settingsDo(t, s, http.MethodPost, "/acme/settings", url.Values{
-		"org_action": {"invite"}, "email": {"jane@example.com"}, "role": {"member"},
+		"org_action": {"invite"}, "subject": {"jane@example.com"}, "role": {"member"},
 	}, nil)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("invite = %d, want 200 (bearer link must not enter a URL)", rec.Code)
@@ -1025,6 +1098,77 @@ func TestSettingsOrgInviteLinkRenderedNotRedirected(t *testing.T) {
 	body := rec.Body.String()
 	settingsMustContain(t, body, "/invitations?token=abc123", "invite link")
 	settingsMustContain(t, body, `id="invite-link"`, "copy target")
+}
+
+// TestSettingsOrgInviteOneShotLinkAndMaskedPending is the org twin of the
+// repo Access contract: the create response renders the human accept link in
+// the page body and on the new pending row (copy control), while every later
+// read — whose token the org invitation collection redacts — renders a masked
+// marker instead. Nothing ever redirects the link into a URL.
+func TestSettingsOrgInviteOneShotLinkAndMaskedPending(t *testing.T) {
+	const link = "/invitations?id=inv2&token=org-token-2"
+	f := settingsOrgFakes(true)
+	f.deps.OrgWrite = func(context.Context, string, auth.Principal, SettingsOrgWrite) (SettingsWriteResult, *SettingsWriteError) {
+		return SettingsWriteResult{
+			Notice: "invitation created — share the link below",
+			Link:   link,
+			Invite: &SettingsOrgInvite{
+				ID: "inv2", Subject: "jane@example.com", Role: "owner",
+				InvitedBy: "alice", ExpiresAt: "2026-12-01T00:00:00Z", AcceptURL: link,
+			},
+		}, nil
+	}
+	s := newSettingsServer(t, f)
+	rec := settingsDo(t, s, http.MethodPost, "/acme/settings", url.Values{
+		"org_action": {"invite"}, "subject": {"jane@example.com"}, "role": {"owner"},
+	}, nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("invite = %d, want 200 (a bearer link must not enter a redirect)", rec.Code)
+	}
+	if loc := rec.Header().Get("Location"); loc != "" {
+		t.Fatalf("invite redirected to %q", loc)
+	}
+	// The form addresses an email OR a username: a static-token principal has
+	// no verified email, so an email-only input would make it uninvitable.
+	settingsMustContain(t, rec.Body.String(), `name="subject" type="text"`, "username-addressed invite form")
+	settingsMustContain(t, rec.Body.String(), "Email or username", "invite form label")
+	settingsMustNotContain(t, rec.Body.String(), `type="email"`, "invite form still email-only")
+	body := rec.Body.String()
+	settingsMustContain(t, body, "/invitations?id=inv2&amp;token=org-token-2", "one-shot share link")
+	settingsMustContain(t, body, `id="invite-link"`, "share card copy target")
+	settingsMustContain(t, body, `id="invite-accept-inv2"`, "new row's copy target")
+	settingsMustContain(t, body, `data-copy="#invite-accept-inv2"`, "new row's copy button")
+
+	// A later read redacts: the fake OrgView row (like orgViewFn) carries no
+	// AcceptURL, so the pending table shows the masked marker and no token.
+	rec = settingsDo(t, s, http.MethodGet, "/acme/settings?tab=invitations", nil, nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("invitations tab = %d", rec.Code)
+	}
+	body = rec.Body.String()
+	settingsMustContain(t, body, "token ••••••••", "masked pending marker")
+	settingsMustContain(t, body, "invite-remove", "cancel control")
+	settingsMustNotContain(t, body, "org-token-2", "a pending read leaks the token")
+	settingsMustNotContain(t, body, "?token=", "a pending read leaks an accept URL")
+	settingsMustNotContain(t, body, `id="invite-link"`, "share card survives a read")
+}
+
+// TestSettingsOrgInvitationsOwnerOnly pins the page gate to the API gate: the
+// org invitation collection is CheckOrgOwner, so a non-owner neither sees the
+// tab nor can fetch it, and never receives a token.
+func TestSettingsOrgInvitationsOwnerOnly(t *testing.T) {
+	s := newSettingsServer(t, settingsOrgFakes(false))
+	rec := settingsDo(t, s, http.MethodGet, "/acme/settings", nil, nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("org page = %d", rec.Code)
+	}
+	settingsMustNotContain(t, rec.Body.String(), `tab=invitations`, "non-owner invitation tab")
+	for _, target := range []string{"/acme/settings?tab=invitations"} {
+		rec = settingsDo(t, s, http.MethodGet, target, nil, nil)
+		if rec.Code != http.StatusForbidden {
+			t.Fatalf("non-owner %s = %d, want 403", target, rec.Code)
+		}
+	}
 }
 
 func TestSettingsOrgWriteErrorRendered(t *testing.T) {
@@ -1151,8 +1295,9 @@ func TestSettingsRoleAndTabHelpers(t *testing.T) {
 	if !settingsRoleAtLeast("admin", "triage") || settingsRoleAtLeast("read", "triage") {
 		t.Fatal("role ordering")
 	}
-	if settingsRoleRank("") != 5 {
-		t.Fatal("unwired role must not deny (the server gate already ran)")
+	if settingsRoleRank("") != 0 || settingsRoleRank("none") != 0 ||
+		settingsRoleRank("bogus") != 0 {
+		t.Fatal("an empty/unknown role must rank below every tab floor (fail closed)")
 	}
 	if settingsTabByID("") != "general" || settingsTabByID("pushmirror") != "mirror" ||
 		settingsTabByID("nope") != "" || settingsTabByID("DANGER") != "danger" {
@@ -1167,10 +1312,10 @@ func TestSettingsRoleAndTabHelpers(t *testing.T) {
 			t.Fatalf("active flag on %q", n.ID)
 		}
 	}
-	if len(nav) != 4 {
-		t.Fatalf("non-owner nav = %d entries, want 4", len(nav))
+	if len(nav) != 3 {
+		t.Fatalf("non-owner nav = %d entries, want 3 (invitation reads are owner-only)", len(nav))
 	}
-	if len(settingsOrgNav("acme", "profile", true)) != 6 {
+	if len(settingsOrgNav("acme", "profile", true)) != 7 {
 		t.Fatal("owner nav")
 	}
 }
@@ -1276,7 +1421,7 @@ func TestSettingsRepoWriteActions(t *testing.T) {
 		want string
 	}{
 		{"tokens/t1", url.Values{"token_action": {"revoke"}}, SettingsActionTokenRevoke},
-		{"webhooks/w1", url.Values{"webhook_action": {"delete"}}, SettingsActionWebhookDelete},
+		{"webhooks/w1", url.Values{"webhook_action": {"delete"}, "confirm": {"w1"}}, SettingsActionWebhookDelete},
 		{"webhooks/w1", url.Values{"webhook_action": {"ping"}}, SettingsActionWebhookPing},
 		{"danger", url.Values{"danger_action": {"transfer"}, "confirm": {"acme/monorepo"}, "owner": {"bob"}}, SettingsActionTransfer},
 	} {
@@ -1615,6 +1760,127 @@ func TestSettingsFieldControlsAndQueryHelpers(t *testing.T) {
 	}
 }
 
+// TestSettingsFieldMetaNamesOnlyRealSchemaKeys pins the display table to the
+// schema: a dead key (the G18 trio telemetry.metrics_listen, git.max_pack_bytes,
+// upstream.allow_import) is gone, and every remaining entry names a key the
+// page actually renders.
+func TestSettingsFieldMetaNamesOnlyRealSchemaKeys(t *testing.T) {
+	keys := map[string]bool{}
+	for _, g := range setup.BuildSchema(config.Defaults(), config.Defaults()) {
+		for _, f := range g.Keys {
+			keys[f.Key] = true
+		}
+	}
+	for key := range settingsFieldMeta {
+		if !keys[key] {
+			t.Fatalf("settingsFieldMeta carries dead key %q", key)
+		}
+	}
+	for _, dead := range []string{"telemetry.metrics_listen", "git.max_pack_bytes", "upstream.allow_import"} {
+		if _, ok := settingsFieldMeta[dead]; ok {
+			t.Fatalf("dead key %q is back in settingsFieldMeta", dead)
+		}
+	}
+}
+
+// TestSettingsSetupPartitionsAdvancedFromMeta pins the G18 grouping: the view
+// partitions on the one display-metadata list, so every advanced key lands in
+// the collapsed group and every other key stays essential — including when a
+// producer puts everything in Essential (the old "0 details" bug).
+func TestSettingsSetupPartitionsAdvancedFromMeta(t *testing.T) {
+	v := &SettingsSetupView{Sections: []SettingsSetupSection{{Section: "telemetry"}, {Section: "server"}}}
+	for _, g := range setup.BuildSchema(config.Defaults(), config.Defaults()) {
+		if g.Section != "telemetry" && g.Section != "server" {
+			continue
+		}
+		for _, k := range g.Keys {
+			f := SettingsSetupField{Key: k.Key, Value: setup.DisplayValue(k)}
+			for i := range v.Sections {
+				if v.Sections[i].Section == g.Section {
+					v.Sections[i].Essential = append(v.Sections[i].Essential, f)
+				}
+			}
+		}
+	}
+	settingsPrepareSetup(v)
+	for _, sec := range v.Sections {
+		for _, f := range sec.Essential {
+			if settingsFieldMeta[f.Key].Advanced {
+				t.Fatalf("%s is advanced but rendered essential", f.Key)
+			}
+		}
+		for _, f := range sec.Advanced {
+			if !settingsFieldMeta[f.Key].Advanced {
+				t.Fatalf("%s is essential but rendered advanced", f.Key)
+			}
+		}
+		switch sec.Section {
+		case "telemetry":
+			if len(sec.Essential) != 0 || len(sec.Advanced) == 0 {
+				t.Fatalf("telemetry partition = %d essential / %d advanced", len(sec.Essential), len(sec.Advanced))
+			}
+		case "server":
+			var essential bool
+			for _, f := range sec.Essential {
+				if f.Key == "server.listen" {
+					essential = true
+				}
+			}
+			if !essential {
+				t.Fatal("server.listen left the essentials")
+			}
+		}
+	}
+	// Idempotent: preparing again must not duplicate rows.
+	before := len(v.Sections[0].Essential) + len(v.Sections[0].Advanced)
+	settingsPrepareSetup(v)
+	if got := len(v.Sections[0].Essential) + len(v.Sections[0].Advanced); got != before {
+		t.Fatalf("re-prepare changed the row count: %d → %d", before, got)
+	}
+	// A producer that pre-seeded the wrong side is normalised too, so the
+	// metadata (not the producer) owns the partition.
+	pre := &SettingsSetupView{Sections: []SettingsSetupSection{{
+		Section:   "x",
+		Essential: []SettingsSetupField{{Key: "server.listen"}},
+		Advanced:  []SettingsSetupField{{Key: "telemetry.log_format"}, {Key: "server.public_url"}},
+	}}}
+	settingsPrepareSetup(pre)
+	if got := len(pre.Sections[0].Essential); got != 2 {
+		t.Fatalf("pre-seeded essential count = %d, want 2", got)
+	}
+	if got := len(pre.Sections[0].Advanced); got != 1 || pre.Sections[0].Advanced[0].Key != "telemetry.log_format" {
+		t.Fatalf("pre-seeded advanced = %+v", pre.Sections[0].Advanced)
+	}
+}
+
+// TestSettingsSetupOptions pins the select builder's three shapes: a stored
+// value in the set selects its row, an empty value renders an "(unset)" row,
+// and a value outside the set renders a "current: …" row so a save cannot
+// silently rewrite it.
+func TestSettingsSetupOptions(t *testing.T) {
+	enum := []string{"proxy", "signed_url"}
+	got := settingsSetupOptions(enum, "signed_url")
+	if len(got) != 2 || !got[1].Selected || got[1].Value != "signed_url" {
+		t.Fatalf("in-set options = %+v", got)
+	}
+	got = settingsSetupOptions(enum, "")
+	if len(got) != 3 || !got[0].Selected || got[0].Value != "" || got[0].Label != "(unset)" {
+		t.Fatalf("unset options = %+v", got)
+	}
+	got = settingsSetupOptions(enum, "future")
+	if len(got) != 3 || !got[2].Selected || got[2].Value != "future" || !strings.Contains(got[2].Label, "current:") {
+		t.Fatalf("custom options = %+v", got)
+	}
+	// The real schema drives the page's four G18 selects.
+	for _, key := range []string{"bundles.serve_via", "compaction.engine", "git.upload_pack_engine", "telemetry.log_format"} {
+		f := SettingsSetupField{Key: key}
+		settingsPrepareField(&f)
+		if f.Control != "select" || len(f.Options) == 0 {
+			t.Fatalf("%s control = %q options = %v", key, f.Control, f.Options)
+		}
+	}
+}
+
 func TestSettingsRepoAccessWriteRestoreAndRedirectGate(t *testing.T) {
 	f := settingsRepoFakes("admin")
 	f.deps.RepoWrite = func(context.Context, string, string, auth.Principal, SettingsRepoWrite) (SettingsWriteResult, *SettingsWriteError) {
@@ -1652,8 +1918,8 @@ func TestSettingsSetupAdminFallbackWithoutAccessDep(t *testing.T) {
 	p := settingsTestPrincipal()
 	p.Admin = false
 	s.auth = pageAuthFor(p)
-	if rec := settingsDo(t, s, http.MethodGet, "/setup", nil, nil); rec.Code != http.StatusOK {
-		t.Fatalf("fallback GET = %d", rec.Code)
+	if rec := settingsDo(t, s, http.MethodGet, "/setup", nil, nil); rec.Code != http.StatusForbidden {
+		t.Fatalf("fallback GET = %d, want 403", rec.Code)
 	} else {
 		settingsMustContain(t, rec.Body.String(), "Access restricted", "fallback restricted")
 	}
@@ -1798,17 +2064,18 @@ func TestSettingsSetupAdminGroupAccess(t *testing.T) {
 	settingsMustContain(t, body, `name="cfg.server.listen"`, "admin sees the form")
 	settingsMustNotContain(t, body, "Access restricted", "admin is not denied")
 
-	// A signed-in non-admin gets the restricted card (200) and a real 403 on
-	// the write path, and the card names the group rule, not a token.
+	// A signed-in non-admin gets the restricted card with a real 403, and the
+	// card names the group rule, not a token.
 	s = newSettingsServer(t, &settingsFakes{deps: deps,
 		principal: auth.Principal{Name: "zoe", Email: "zoe@example.com", Write: true}})
+	s.env.Cfg.Server.Auth.Mode = "oidc" // the group-admin copy is the OIDC mode's
 	rec = settingsDo(t, s, http.MethodGet, "/setup", nil, nil)
-	if rec.Code != http.StatusOK {
-		t.Fatalf("non-admin GET /setup = %d, want the restricted card", rec.Code)
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("non-admin GET /setup = %d, want the restricted card at 403", rec.Code)
 	}
 	body = rec.Body.String()
 	settingsMustContain(t, body, "Access restricted", "non-admin denied")
-	settingsMustContain(t, body, "spindle-admins", "card names the admin group")
+	settingsMustContain(t, body, "not a host admin", "card explains the signed-in account is not an admin")
 	settingsMustContain(t, body, "server.auth.admin_groups", "card names the config key")
 	settingsMustNotContain(t, body, "SPINDLE_SETUP_TOKEN", "no setup token text")
 	settingsMustNotContain(t, body, `name="cfg.server.listen"`, "non-admin has no form")
@@ -1816,12 +2083,66 @@ func TestSettingsSetupAdminGroupAccess(t *testing.T) {
 		t.Fatalf("non-admin POST /setup = %d, want 403", rec.Code)
 	}
 
-	// Anonymous is a 401 (unauthenticated), not a 403.
+	// Anonymous is a 401 (unauthenticated), not a 403 — and the GET carries
+	// the restricted card, not a bare error page.
 	s = newSettingsServer(t, &settingsFakes{deps: deps,
 		principal: auth.Principal{Name: "anonymous", Anonymous: true}})
+	rec = settingsDo(t, s, http.MethodGet, "/setup", nil, nil)
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("anonymous GET /setup = %d, want 401", rec.Code)
+	}
+	settingsMustContain(t, rec.Body.String(), "Access restricted", "anonymous card content")
 	if rec := settingsDo(t, s, http.MethodPost, "/setup", url.Values{"op": {"save"}}, nil); rec.Code != http.StatusUnauthorized {
 		t.Fatalf("anonymous POST /setup = %d, want 401", rec.Code)
 	}
+}
+
+// TestSettingsSetupTokenModeRecoveryCard is F1's page half: in token mode the
+// denied card offers the real token-paste sign-in when a session secret exists,
+// and otherwise states the exact file/API path — never the OIDC-trio blame.
+func TestSettingsSetupTokenModeRecoveryCard(t *testing.T) {
+	deny := func(_ *http.Request, p auth.Principal) *auth.AuthError {
+		if p.Anonymous {
+			return &auth.AuthError{Kind: auth.ErrUnauthorized, Why: "authentication required for setup"}
+		}
+		if !p.Admin {
+			return &auth.AuthError{Kind: auth.ErrForbidden, Why: "setup requires an admin principal"}
+		}
+		return nil
+	}
+	deps := SettingsDeps{SetupAccess: deny}
+	anon := auth.Principal{Name: "anonymous", Anonymous: true}
+
+	t.Run("token mode with a session secret offers the form", func(t *testing.T) {
+		s := newSettingsServer(t, &settingsFakes{deps: deps, principal: anon})
+		s.env.Cfg.Server.Auth.Mode = "token"
+		s.env.Cfg.Server.Auth.SessionSecret = strings.Repeat("x", 32)
+		rec := settingsDo(t, s, http.MethodGet, "/setup", nil, nil)
+		// The denial carries the JSON API's status (401 for anonymous) while
+		// still rendering the restricted card, which is where the form lives.
+		if rec.Code != http.StatusUnauthorized {
+			t.Fatalf("GET /setup = %d, want %d", rec.Code, http.StatusUnauthorized)
+		}
+		body := rec.Body.String()
+		settingsMustContain(t, body, "Access restricted", "denied card")
+		settingsMustContain(t, body, `action="/_auth/token"`, "token sign-in form")
+		settingsMustContain(t, body, `name="token"`, "token field")
+		settingsMustContain(t, body, `name="next" value="/setup"`, "next target")
+		settingsMustNotContain(t, body, "OIDC", "token mode never blames OIDC")
+		settingsMustNotContain(t, body, `name="cfg.server.listen"`, "no config form while denied")
+	})
+
+	t.Run("token mode without a session secret states the file/API path", func(t *testing.T) {
+		s := newSettingsServer(t, &settingsFakes{deps: deps, principal: anon})
+		s.env.Cfg.Server.Auth.Mode = "token"
+		s.env.Cfg.Server.Auth.SessionSecret = ""
+		body := settingsDo(t, s, http.MethodGet, "/setup", nil, nil).Body.String()
+		settingsMustContain(t, body, "server.auth.session_secret", "names the missing key")
+		settingsMustContain(t, body, "spindle.toml", "file recovery")
+		settingsMustContain(t, body, "/api/v1/setup", "API recovery")
+		settingsMustNotContain(t, body, `action="/_auth/token"`, "no form that cannot mint")
+		settingsMustNotContain(t, body, "OIDC", "token mode never blames OIDC")
+	})
 }
 
 // TestSettingsRepoProtectionTabRenders is the WP2.3 page contract: the
@@ -1866,4 +2187,244 @@ func TestSettingsRepoProtectionTabRenders(t *testing.T) {
 			t.Fatalf("bare multi-column grid at 390px: %s", bad)
 		}
 	}
+}
+
+// TestSettingsRepoUnknownRepoIs404 pins audit F3: the settings page mirrors
+// the API's 404 for a repo that does not exist. Before the fix the render
+// returned 200 with a full settings shell and an inline "not found".
+func TestSettingsRepoUnknownRepoIs404(t *testing.T) {
+	s := newSettingsServer(t, settingsRepoFakes("admin"))
+	s.env.API = &api.Env{Repos: &collabFakeRegistry{exists: map[string]bool{"acme/monorepo": true}}}
+	rec := settingsDo(t, s, http.MethodGet, "/nope/nothing/settings/general", nil, nil)
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("unknown repo settings = %d, want 404", rec.Code)
+	}
+	body := rec.Body.String()
+	settingsMustNotContain(t, body, `id="settings-panel"`, "no settings shell")
+	settingsMustNotContain(t, body, `aria-label="Settings sections"`, "no settings nav")
+	// The known repo still renders.
+	if rec := settingsDo(t, s, http.MethodGet, "/acme/monorepo/settings/general", nil, nil); rec.Code != http.StatusOK {
+		t.Fatalf("known repo settings = %d, want 200", rec.Code)
+	}
+	// A registry failure is a 503, never a fabricated 200.
+	s.env.API.Repos = &repoFakeRegistry{err: &settingsTestErr{"registry down"}}
+	if rec := settingsDo(t, s, http.MethodGet, "/acme/monorepo/settings/general", nil, nil); rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("registry failure = %d, want 503", rec.Code)
+	}
+}
+
+// --- org webhooks (WP6.2) ---------------------------------------------------
+
+// TestSettingsOrgWebhooksTab pins the org Webhooks tab: owner-only visibility,
+// the canonical panel (create form, one-time secret state, deliveries with
+// timings, redeliver only when retained, typed-confirm delete).
+func TestSettingsOrgWebhooksTab(t *testing.T) {
+	f := settingsOrgFakes(true)
+	f.deps.OrgView = func(_ context.Context, org string, _ auth.Principal) (*SettingsOrgPage, error) {
+		return &SettingsOrgPage{
+			Org: org, CanManage: true,
+			WebhooksWired: true,
+			Webhooks: []SettingsWebhook{{
+				ID: "h1", URL: "https://h.example/x", Events: "commented", Active: true, SecretSet: true,
+				Recent: []SettingsDelivery{
+					{Seq: "3", SeqNum: 3, Event: "ping", Status: 200, At: "2026-11-01T00:00:00Z", DurationMs: 4, Redeliverable: true},
+					{Seq: "2", SeqNum: 2, Event: "commented", Status: 200, At: "2026-11-01T00:00:00Z"},
+				},
+			}},
+		}, nil
+	}
+	s := newSettingsServer(t, f)
+	rec := settingsDo(t, s, http.MethodGet, "/acme/settings?tab=webhooks", nil, nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("webhooks tab = %d", rec.Code)
+	}
+	body := rec.Body.String()
+	settingsMustContain(t, body, "Add a webhook", "create form")
+	settingsMustContain(t, body, "•••••• (set)", "secret shown once as set")
+	settingsMustContain(t, body, "recent deliveries", "deliveries table")
+	settingsMustContain(t, body, "4ms", "duration")
+	settingsMustContain(t, body, "redeliver", "retained row affordance")
+	settingsMustContain(t, body, "payload not retained", "bodyless row is honest")
+	settingsMustContain(t, body, `name="org_action" value="webhook-create"`, "create plumbing")
+	settingsMustContain(t, body, `name="org_action" value="webhook-toggle"`, "toggle plumbing")
+	settingsMustContain(t, body, `data-danger-expected="h1"`, "typed confirm")
+
+	// A non-owner never sees the tab (and the direct URL is 403).
+	g := settingsOrgFakes(false)
+	gs := newSettingsServer(t, g)
+	rec = settingsDo(t, gs, http.MethodGet, "/acme/settings", nil, nil)
+	settingsMustNotContain(t, rec.Body.String(), "Webhooks", "owner-only tab")
+	if rec := settingsDo(t, gs, http.MethodGet, "/acme/settings?tab=webhooks", nil, nil); rec.Code != http.StatusForbidden {
+		t.Fatalf("non-owner webhooks = %d, want 403", rec.Code)
+	}
+}
+
+// TestSettingsOrgWebhookWrites pins every tab action through the seam,
+// including the delete confirmation and the unwired degrade.
+func TestSettingsOrgWebhookWrites(t *testing.T) {
+	var got SettingsOrgWrite
+	f := settingsOrgFakes(true)
+	f.deps.OrgWebhookWrite = func(_ context.Context, org string, _ auth.Principal, w SettingsOrgWrite) (SettingsWriteResult, *SettingsWriteError) {
+		got = w
+		if org != "acme" {
+			t.Fatalf("org = %q", org)
+		}
+		return SettingsWriteResult{Notice: "redelivered #3 → 200"}, nil
+	}
+	s := newSettingsServer(t, f)
+	for _, tc := range []struct{ action, want string }{
+		{"webhook-create", "webhook-create"},
+		{"webhook-toggle", "webhook-toggle"},
+		{"webhook-rotate", "webhook-rotate"},
+		{"webhook-ping", "webhook-ping"},
+		{"webhook-redeliver", "webhook-redeliver"},
+	} {
+		rec := settingsDo(t, s, http.MethodPost, "/acme/settings", url.Values{
+			"org_action": {tc.action}, "id": {"h1"}, "seq": {"3"},
+		}, nil)
+		if rec.Code != http.StatusSeeOther {
+			t.Fatalf("%s = %d (%s)", tc.action, rec.Code, rec.Body.String())
+		}
+		if got.Action != tc.want || got.Get("id") != "h1" {
+			t.Fatalf("%s write = %+v", tc.action, got)
+		}
+		if loc := rec.Header().Get("Location"); loc != "/acme/settings?tab=webhooks&notice=redelivered+%233+%E2%86%92+200" {
+			t.Fatalf("%s Location = %q", tc.action, loc)
+		}
+	}
+
+	// Delete requires the exact hook id (server-side, not just the island).
+	f.deps.OrgWebhookWrite = func(context.Context, string, auth.Principal, SettingsOrgWrite) (SettingsWriteResult, *SettingsWriteError) {
+		t.Fatal("unconfirmed delete reached the seam")
+		return SettingsWriteResult{}, nil
+	}
+	rec := settingsDo(t, s, http.MethodPost, "/acme/settings", url.Values{
+		"org_action": {"webhook-delete"}, "id": {"h1"}, "confirm": {"h"},
+	}, nil)
+	if rec.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("wrong confirm = %d, want 422", rec.Code)
+	}
+	settingsMustContain(t, rec.Body.String(), "type h1 exactly to confirm", "confirm error")
+
+	// Unwired seam renders the honest 503, never a silent success.
+	g := settingsOrgFakes(true)
+	gs := newSettingsServer(t, g)
+	rec = settingsDo(t, gs, http.MethodPost, "/acme/settings", url.Values{"org_action": {"webhook-create"}}, nil)
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("unwired org webhooks = %d, want 503", rec.Code)
+	}
+}
+
+// TestSettingsRepoWebhookExtraActions pins toggle/rotate/redeliver plumbing
+// on the repo tab (the actions WP6.2 adds to the shared row).
+func TestSettingsRepoWebhookExtraActions(t *testing.T) {
+	for _, tc := range []struct{ action, want string }{
+		{"toggle", SettingsActionWebhookToggle},
+		{"rotate", SettingsActionWebhookRotate},
+		{"redeliver", SettingsActionWebhookRedeliver},
+	} {
+		var got SettingsRepoWrite
+		f := &settingsFakes{deps: SettingsDeps{
+			RepoRole: func(context.Context, string, string, auth.Principal) (string, error) { return "admin", nil },
+			RepoWrite: func(_ context.Context, _, _ string, _ auth.Principal, w SettingsRepoWrite) (SettingsWriteResult, *SettingsWriteError) {
+				got = w
+				return SettingsWriteResult{Notice: "done"}, nil
+			},
+		}}
+		s := newSettingsServer(t, f)
+		rec := settingsDo(t, s, http.MethodPost, "/acme/monorepo/settings/webhooks/h1",
+			url.Values{"webhook_action": {tc.action}, "seq": {"3"}, "secret": {"s"}}, nil)
+		if rec.Code != http.StatusSeeOther {
+			t.Fatalf("%s = %d (%s)", tc.action, rec.Code, rec.Body.String())
+		}
+		if got.Action != tc.want || got.Get("id") != "h1" {
+			t.Fatalf("%s = %+v", tc.action, got)
+		}
+	}
+}
+
+// TestSettingsOrgWriteActionMatrix pins every org form action → seam action
+// and its tab (WP9 G2: the page renders these, so they must round-trip).
+func TestSettingsOrgWriteActionMatrix(t *testing.T) {
+	cases := []struct {
+		action, tab string
+		values      url.Values
+	}{
+		{SettingsOrgProfileSave, "profile", url.Values{"display_name": {"Acme"}}},
+		{SettingsOrgAvatar, "profile", url.Values{}},
+		{SettingsOrgAvatarRm, "profile", url.Values{}},
+		{SettingsOrgMemberSet, "members", url.Values{"principal": {"bob"}, "role": {"member"}}},
+		{SettingsOrgMemberRm, "members", url.Values{"principal": {"bob"}}},
+		{SettingsOrgTeamSave, "teams", url.Values{"slug": {"devs"}, "name": {"Devs"}, "description": {"d"}}},
+		{SettingsOrgTeamUpdate, "teams", url.Values{"slug": {"devs"}, "name": {"Devs2"}}},
+		{SettingsOrgTeamAdd, "teams", url.Values{"slug": {"devs"}, "principal": {"bob"}}},
+		{SettingsOrgTeamMemberRm, "teams", url.Values{"slug": {"devs"}, "principal": {"bob"}}},
+		{SettingsOrgTeamDel, "teams", url.Values{"slug": {"devs"}}},
+		{SettingsOrgInviteMake, "invitations", url.Values{"subject": {"jane@example.com"}, "role": {"member"}}},
+		{SettingsOrgInviteRm, "invitations", url.Values{"id": {"inv1"}}},
+	}
+	for _, tc := range cases {
+		var got SettingsOrgWrite
+		f := settingsOrgFakes(true)
+		f.deps.OrgWrite = func(_ context.Context, org string, _ auth.Principal, w SettingsOrgWrite) (SettingsWriteResult, *SettingsWriteError) {
+			got = w
+			return SettingsWriteResult{Notice: "saved"}, nil
+		}
+		s := newSettingsServer(t, f)
+		form := url.Values{"org_action": {tc.action}}
+		for k, vs := range tc.values {
+			form[k] = vs
+		}
+		rec := settingsDo(t, s, http.MethodPost, "/acme/settings", form, nil)
+		if rec.Code != http.StatusSeeOther {
+			t.Fatalf("%s = %d (%s)", tc.action, rec.Code, rec.Body.String())
+		}
+		if got.Action != tc.action {
+			t.Fatalf("%s seam action = %q", tc.action, got.Action)
+		}
+		if loc := rec.Header().Get("Location"); !strings.Contains(loc, "tab="+tc.tab) {
+			t.Fatalf("%s Location = %q, want tab=%s", tc.action, loc, tc.tab)
+		}
+	}
+}
+
+// TestSettingsOrgDeleteRedirectsHome pins the danger action's exit: the org
+// is gone, so the page must not redirect back into it.
+func TestSettingsOrgDeleteRedirectsHome(t *testing.T) {
+	f := settingsOrgFakes(true)
+	f.deps.OrgWrite = func(context.Context, string, auth.Principal, SettingsOrgWrite) (SettingsWriteResult, *SettingsWriteError) {
+		return SettingsWriteResult{Notice: "organization deleted", Redirect: "/"}, nil
+	}
+	s := newSettingsServer(t, f)
+	rec := settingsDo(t, s, http.MethodPost, "/acme/settings", url.Values{"org_action": {"delete"}, "confirm": {"acme"}}, nil)
+	if rec.Code != http.StatusSeeOther || rec.Header().Get("Location") != "/?notice=organization+deleted" {
+		t.Fatalf("delete = %d %q", rec.Code, rec.Header().Get("Location"))
+	}
+}
+
+// TestSettingsOrgTeamCardsRoundTripForms pins the team card controls the
+// audit named API-only (rename/description, per-member remove) plus the
+// avatar remove control.
+func TestSettingsOrgTeamCardsRoundTripForms(t *testing.T) {
+	f := settingsOrgFakes(true)
+	f.deps.OrgView = func(_ context.Context, org string, _ auth.Principal) (*SettingsOrgPage, error) {
+		return &SettingsOrgPage{
+			Org: org, CanManage: true,
+			Profile: &SettingsOrgProfile{DisplayName: "Acme", AvatarURL: "/api/v1/orgs/acme/avatar"},
+			Teams: []SettingsOrgTeam{{
+				Slug: "devs", Name: "Devs", Description: "builds it", Members: []string{"user:alice", "user:bob"},
+			}},
+		}, nil
+	}
+	s := newSettingsServer(t, f)
+	rec := settingsDo(t, s, http.MethodGet, "/acme/settings?tab=teams", nil, nil)
+	body := rec.Body.String()
+	for _, needle := range []string{
+		`value="team-update"`, `value="team-member-remove"`, "builds it",
+		`name="description"`, "user:bob",
+	} {
+		settingsMustContain(t, body, needle, "team card")
+	}
+	rec = settingsDo(t, s, http.MethodGet, "/acme/settings?tab=profile", nil, nil)
+	settingsMustContain(t, rec.Body.String(), `value="avatar-remove"`, "avatar remove control")
 }

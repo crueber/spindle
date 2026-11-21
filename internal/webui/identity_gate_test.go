@@ -198,8 +198,9 @@ func TestIdentityPagesRequireSignedIn(t *testing.T) {
 }
 
 // TestIdentityDenialSignInLinkOnlyWithBrowserLogin: the 401 page names a
-// sign-in path only when the instance has a browser login (oidc). Token mode
-// has no /_auth/login flow, so the page must not offer a dead button.
+// sign-in path whenever a browser login exists — OIDC, or token mode with a
+// session_secret (F1's token-paste form). Token mode without a secret has no
+// login flow, so the page must not offer a dead button.
 func TestIdentityDenialSignInLinkOnlyWithBrowserLogin(t *testing.T) {
 	oidc := identityServer(t, "oidc", auth.Anonymous())
 	rec := publicGet(oidc, "/keys")
@@ -210,6 +211,12 @@ func TestIdentityDenialSignInLinkOnlyWithBrowserLogin(t *testing.T) {
 	rec = publicGet(token, "/keys")
 	publicWantStatus(t, rec, http.StatusUnauthorized)
 	publicWantContains(t, rec, "sign in to manage your SSH keys")
+	publicWantContains(t, rec, `href="/_auth/login?next=%2Fkeys"`)
+
+	noSecret := identityServer(t, "token", auth.Anonymous())
+	noSecret.env.Cfg.Server.Auth.SessionSecret = ""
+	rec = publicGet(noSecret, "/keys")
+	publicWantStatus(t, rec, http.StatusUnauthorized)
 	publicWantNotContains(t, rec, "/_auth/login")
 }
 

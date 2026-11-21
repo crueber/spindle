@@ -200,7 +200,7 @@ func validateReportInput(sha string, in ReportInput) (fullSHA string, started, c
 		return "", nil, nil, fmt.Errorf("%w: %v", ErrInvalid, err)
 	}
 	if !validState(in.State) {
-		return "", nil, nil, fmt.Errorf("%w: state must be one of pending|success|failure|error, got %q", ErrInvalidState, in.State)
+		return "", nil, nil, fmt.Errorf("%w: state must be one of pending|in_progress|success|failure|cancelled|error, got %q", ErrInvalidState, in.State)
 	}
 	if err := validTargetURL(in.TargetURL); err != nil {
 		return "", nil, nil, err
@@ -242,8 +242,8 @@ func (s *Service) recordResolved(ctx context.Context, owner, repo, fullSHA, crea
 		StartedAt: started, CompletedAt: completed,
 		Creator: creator, CreatedAt: now, UpdatedAt: now, Version: 1,
 	}
-	if in.State == StatePending {
-		fresh.CompletedAt = nil // cleared on a re-report of pending
+	if LiveState(in.State) {
+		fresh.CompletedAt = nil // cleared on a re-report of a live state
 	}
 	var prev *StatusDoc
 	if err := s.putCreate(ctx, key, encodeStatus(fresh)); err != nil {
@@ -266,7 +266,7 @@ func (s *Service) recordResolved(ctx context.Context, owner, repo, fullSHA, crea
 			curDoc.Description = in.Description
 			curDoc.StartedAt = started
 			curDoc.CompletedAt = completed
-			if in.State == StatePending {
+			if LiveState(in.State) {
 				curDoc.CompletedAt = nil
 			}
 			curDoc.UpdatedAt = now
@@ -397,7 +397,10 @@ func (s *Service) Combined(ctx context.Context, owner, repo, sha string, p auth.
 // and the report broadcast path).
 func combineView(sha string, statuses []*StatusDoc) *CombinedView {
 	states := make([]string, 0, len(statuses))
-	counts := map[string]int{StatePending: 0, StateSuccess: 0, StateFailure: 0, StateError: 0}
+	counts := map[string]int{
+		StatePending: 0, StateInProgress: 0, StateSuccess: 0,
+		StateFailure: 0, StateCancelled: 0, StateSkipped: 0, StateError: 0,
+	}
 	for _, st := range statuses {
 		states = append(states, st.State)
 		counts[st.State]++

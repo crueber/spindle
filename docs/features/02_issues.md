@@ -229,7 +229,7 @@ RFC 3339, cache class per route. `num` matches `[1-9][0-9]{0,8}` (decimal on the
 | METHOD + path | Auth (P6) | Request → Response |
 |---|---|---|
 | `GET …/api/issues?state=&labels=&assignee=&milestone=&since=&after=&n=` | read | → `{issues:[card], more:bool}`; index-first, LIST fallback; `labels` comma-list AND, `assignee` login or `*none`, `milestone` id or `none`, `since` RFC3339 on `updated_at`, `after` num cursor, `n` ≤ 100 default 50. no-store |
-| `POST …/api/issues` | read (authenticated) | `{title, body?}` → `201 {thread, events:[opened]}`; allocates num via P2 |
+| `POST …/api/issues` | read (authenticated); labels/assignees/milestone present ⇒ triage | `{title, body?, labels?, assignees?, milestone?}` → `201 {thread, events:[opened]}`; allocates num via P2. Metadata is validated (and refused 400/403) **before** the number is allocated, then stored on the created header in the same write — a bad label leaves no issue and no counter gap (CLI `issue create --label`) |
 | `GET …/api/issues/{num}` | read | → `{thread, events:[last 50], events_more:bool}`; `?after_seq=&n=` windows the log; `Cache-Control: private, no-cache` (revalidate every read — never a stale window, issue #259), `ETag: "v<version>"`, 304 on If-None-Match |
 | `GET …/api/issues/{num}/events?after_seq=&n=` | read | → `{events:[], more:bool}`; seq-window pagination, newest-last |
 | `PATCH …/api/issues/{num}` | title/state: author or triage; labels/assignees/milestone keys: triage | `{title?, state?, state_reason?, labels?, assignees?, milestone?}` → `{thread}`; unknown keys 400; no-op fields omitted; `milestone: null` clears (absent key = no change) |
@@ -378,6 +378,16 @@ handler holds no repo locks across store calls (13 §2 rule 4).
 > (`internal/webui/*.go` + `internal/webui/templates/**`) or, where the mechanism was
 > client-only (cache windows, view-tracking effects), in the server render; the decisions
 > themselves are unchanged.
+
+- **Create carries metadata in ONE write (2026-11-21, CLI audit).** `POST …/api/issues` now accepts
+  `labels`, `assignees` and `milestone` alongside `title`/`body` (same triage gate as the PATCH).
+  Everything is validated — unknown label, assignee below triage, unknown milestone → 400/403 —
+  **before** `allocNum`, then the values land on the created header, so a rejected `--label`
+  leaves no thread, no consumed number and no event behind. Additive body keys; the old
+  `{title, body}` request is unchanged in shape and behaviour. Rationale: the CLI previously
+  created-then-PATCHed, and the audit caught a real partial write (an unlabeled issue left on
+  exit 1); a client-side pre-check would still race the server's label set, so the validation
+  belongs where the write does.
 
 - **Attachments for pasted/dropped issue images (issue #120, 2026-09-05).** New `repos/<o>/<r>/attachments/<sha>/<name>`
   family (§12), `POST …/api/attachments` (authenticated + read, 8 MiB cap → 413, magic allowlist PNG/JPEG/GIF/WebP,
@@ -748,6 +758,18 @@ handler holds no repo locks across store calls (13 §2 rule 4).
   the three controls cannot drift. The service side stays `PatchIssue`; 03
   calls the exported `PatchThreadMetadata` (the same body, kind `pr`, title/state
   refused) rather than forking label/milestone rules (03 Decisions).
+
+- **NEW (foundations audit F8, 2026-11-21) — issue and PR list rows share one
+  anatomy.** The issue list previously showed a state chip only when closed
+  (absence meant open) and had no author; the PR list always showed a chip and
+  the author but no comment count. Both rows now read: `#N title`, an
+  always-present lowercase state chip (open / closed / draft / merged), label
+  chips, and a right-hand meta run of `author · age` plus the comment icon and
+  count (milestone stays an issue-only extra; base/head refs a PR-only extra).
+  The wire gained the one missing value: `pulls.PROut.comment_count` comes from
+  the shared P4 index card the row already reads (no new round trip), mirroring
+  02's `Card.CommentCount`. Pinned by
+  `TestListRowsShareAnatomy` (webui) and the `PROut` shape tests.
 
 ## Explicitly out of scope
 

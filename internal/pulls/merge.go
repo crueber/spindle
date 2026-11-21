@@ -145,7 +145,7 @@ func (s *Service) runMerge(ctx context.Context, owner, repo string, num int, act
 		rec.notice("bridged fork objects for %s", shortSHA(headLive))
 	}
 	if headLive != pr.Head.SHA {
-		s.refreshHead(ctx, owner, repo, pr, th, headLive, actor)
+		s.reconcileHead(ctx, owner, repo, pr, th, headLive)
 		if npr, _, nerr := s.loadPR(ctx, owner, repo, num); nerr == nil && npr != nil {
 			pr = npr
 		}
@@ -276,6 +276,12 @@ func (s *Service) runMerge(ctx context.Context, owner, repo string, num int, act
 		}
 		return nil, perr
 	}
+	// Server-side publish landed (Threads pass A, 15 §2): the merge task's
+	// base-ref move never enters the client push pipeline, so the on-push
+	// consumers get the same landing through this hook (one run-creation path,
+	// not a second implementation). Detached by the consumer; a CI failure
+	// never fails a landed merge.
+	s.branchPublished(ctx, pr.Base.Repo, pr.Base.Ref, baseLive, newSHA)
 	// Step 6: commit (P3/P4/P8) — merged event (state → closed,
 	// merged:true), CAS pr.json, shared index, the PR-closing cross-ref via
 	// 02's ApplyClosingReferences seam (keyword list + event shapes owned
@@ -300,22 +306,31 @@ func (s *Service) runMerge(ctx context.Context, owner, repo string, num int, act
 		th = nt
 	}
 	// Owned-delta re-apply (§2.3: this writer owns the outcome fields
-	// only): record onto the fresh doc. A body edit or head refresh may
-	// have landed while the task ran — saving the task-start snapshot
-	// wholesale with a fresh version would clobber it with no 412.
-	target := pr
-	fresh, prVer, _ := s.loadPR(ctx, owner, repo, num)
-	if fresh != nil {
-		target = fresh
+	// only): record onto the freshest doc through updatePR. A body edit or
+	// head refresh that landed while the task ran is never reverted, and the
+	// outcome is write-once — an already-recorded merged flag is never
+	// rewritten. Best-effort: the ref already published, so a failed record
+	// is narrated by the caller, never rolled back.
+	updated, uerr := s.updatePR(ctx, owner, repo, num, func(cur *PRDoc) (bool, error) {
+		if cur.Merged {
+			return false, nil // write-once: a landed outcome stays as landed
+		}
+		cur.Merged = true
+		cur.MergedAt = &mergedAt
+		cur.MergedBy = &who
+		cur.MergeCommitSHA = &newSHA
+		cur.MergeStrategy = &in.Strategy
+		return true, nil
+	})
+	if uerr == nil && updated != nil {
+		pr = updated
 	}
-	target.Merged = true
-	target.MergedAt = &mergedAt
-	target.MergedBy = &who
-	target.MergeCommitSHA = &newSHA
-	target.MergeStrategy = &in.Strategy
-	_ = s.savePR(ctx, owner, repo, target, prVer)
-	pr = target
 	s.updateIndex(ctx, owner, repo, prCardOf(th))
+	// First-time-contributor projection (15 §5.2): the author of a PR that just
+	// merged is no longer a first-time contributor, and the Threads approval
+	// gate reads this set with one exact-key GET. Best effort: the merge has
+	// landed, so a projection failure only means the gate asks once more.
+	s.noteMergedAuthor(ctx, owner, repo, th.Author)
 	// Upstream-merge provenance (issue #457 — the fork.json
 	// merged_upstream_at the §2 table always promised): a cross-fork merge
 	// stamps the head repo's fork.json next to the merged event above.

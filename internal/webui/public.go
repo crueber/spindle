@@ -88,7 +88,9 @@ import (
 	"github.com/crueber/spindle/internal/notify"
 	"github.com/crueber/spindle/internal/server/auth"
 	"github.com/crueber/spindle/internal/sizecatalog"
+	"github.com/crueber/spindle/internal/social"
 	"github.com/crueber/spindle/internal/store"
+	"github.com/crueber/spindle/internal/store/proto"
 )
 
 // PublicDeps carries the feature services the public pages read that are not
@@ -141,6 +143,21 @@ type PublicDeps struct {
 	// the opt-out flag semantics). Nil hides those actions.
 	RegenerateAvatar func(ctx context.Context, principal string) (*identity.Profile, error)
 	RemoveAvatar     func(ctx context.Context, principal string) (*identity.Profile, error)
+	// UploadAvatar installs an uploaded raster (identity.Service.
+	// PutUserAvatarBytes: PNG/JPEG/GIF, 2 MiB cap, magic-sniff allowlist,
+	// server-side center-crop to a square PNG). Nil hides the upload form.
+	UploadAvatar func(ctx context.Context, principal string, data []byte) (*identity.Profile, error)
+
+	// UserExists is identity.Service.UserExists: the canonical owner page
+	// needs it to answer 404 for an unknown username instead of rendering an
+	// empty profile (the profile read alone cannot tell "no profile yet" from
+	// "no such user"). Nil degrades to rendering the page.
+	UserExists func(ctx context.Context, username string) (bool, error)
+
+	// Starred is social.Service.Starred: the user's starred repositories in
+	// the JSON twin's repo-ascending order, with its cursor contract. Nil
+	// renders the Starred tab as "not wired".
+	Starred func(ctx context.Context, principal string, n int, after string) ([]social.StarEntry, bool, error)
 
 	// ExtraEndpoints appends feature-owned discovery templates
 	// (api.RegisterExposed call sites) to the /api page's live endpoint list.
@@ -202,12 +219,15 @@ func init() {
 		s.mux.HandleFunc("GET /{owner}", s.publicOwnerProfile)
 		s.mux.HandleFunc("GET /{owner}/repositories", s.publicOwnerRepositories)
 		s.mux.HandleFunc("GET /{owner}/organizations", s.publicOwnerOrganizations)
+		s.mux.HandleFunc("GET /{owner}/starred", s.publicOwnerStarred)
 
-		// Owner profile edit + avatar self-service (Forgejo #234/#376). Plain
-		// POSTs, 303 back with a notice; parity_public.go holds the handlers.
+		// Owner profile edit + avatar self-service (Forgejo #234/#376, upload
+		// #601). Plain POSTs, 303 back with a notice; parity_public.go holds
+		// the handlers.
 		s.mux.HandleFunc("POST /{owner}/profile", s.publicOwnerProfileSave)
 		s.mux.HandleFunc("POST /{owner}/avatar/regenerate", s.publicOwnerAvatarRegenerate)
 		s.mux.HandleFunc("POST /{owner}/avatar/remove", s.publicOwnerAvatarRemove)
+		s.mux.HandleFunc("POST /{owner}/avatar/upload", s.publicOwnerAvatarUpload)
 	})
 }
 
@@ -377,10 +397,20 @@ func (s *Server) browserLoginEnabled() bool {
 		a.OAuthClientID != "" && a.OAuthClientSecret != ""
 }
 
+// tokenSignInEnabled reports the F1 token-mode browser path: the setup page's
+// token-paste form can mint a session only with server.auth.session_secret.
+func (s *Server) tokenSignInEnabled() bool {
+	if s.env.Cfg == nil {
+		return false
+	}
+	a := s.env.Cfg.Server.Auth
+	return a.Mode == "token" && a.SessionSecret != ""
+}
+
 // loginURL is the browser login entry the interstitial links to ("" when the
 // flow cannot start).
 func (s *Server) loginURL() string {
-	if !s.browserLoginEnabled() {
+	if !s.browserLoginEnabled() && !s.tokenSignInEnabled() {
 		return ""
 	}
 	return "/_auth/login"
@@ -459,10 +489,18 @@ type ownerData struct {
 	// Avatar self-service (Forgejo #376): Self is the identity service's
 	// self-or-admin rule for the avatar verbs (the page only shows the
 	// controls; the service re-checks). Remove renders only when an avatar is
-	// actually displayed (the JSX Show).
+	// actually displayed (the JSX Show). UploadAvatar is the uploaded-raster
+	// verb (Forgejo #601); Initials is the fallback chip when no avatar is
+	// installed (the shell's identity-menu fallback).
 	Self            bool
 	CanRegenAvatar  bool
 	CanRemoveAvatar bool
+	CanUploadAvatar bool
+	Initials        string
+
+	// Starred view (WP9 G17): MoreAfter is the page cursor for the "Older"
+	// link; empty means the list ended.
+	MoreAfter string
 
 	Notice string
 	Err    string
@@ -478,6 +516,11 @@ func (s *Server) publicOwnerRepositories(w http.ResponseWriter, r *http.Request)
 
 func (s *Server) publicOwnerOrganizations(w http.ResponseWriter, r *http.Request) {
 	s.publicOwner(w, r, "orgs")
+}
+
+// publicOwnerStarred serves GET /{owner}/starred (WP9 G17).
+func (s *Server) publicOwnerStarred(w http.ResponseWriter, r *http.Request) {
+	s.publicOwner(w, r, "starred")
 }
 
 // publicOwner serves the three owner views from one view model so the header,
@@ -575,6 +618,8 @@ func (s *Server) ownerPageData(w http.ResponseWriter, r *http.Request, owner, vi
 		data.Self = !p.Anonymous && (p.Admin || strings.EqualFold(p.Name, owner))
 		data.CanRegenAvatar = data.Self && publicDeps.RegenerateAvatar != nil
 		data.CanRemoveAvatar = data.CanRegenAvatar && publicDeps.RemoveAvatar != nil && data.AvatarURL != ""
+		data.CanUploadAvatar = data.Self && publicDeps.UploadAvatar != nil
+		data.Initials = initials(owner)
 	}
 
 	switch view {
@@ -588,8 +633,119 @@ func (s *Server) ownerPageData(w http.ResponseWriter, r *http.Request, owner, vi
 				data.MemberOrgs = orgs
 			}
 		}
+	case "starred":
+		// Starred is a USER surface (WP9 G17): an org has no star inbox, and
+		// an unknown username is a real 404 — never an empty list that
+		// pretends the user exists.
+		if org != nil || data.IsOrg {
+			s.errorPage(w, r, http.StatusNotFound, "not found")
+			return nil, false
+		}
+		if publicDeps.UserExists != nil {
+			exists, uerr := publicDeps.UserExists(r.Context(), owner)
+			if uerr != nil {
+				s.errorPage(w, r, http.StatusServiceUnavailable, "identity unavailable")
+				return nil, false
+			}
+			if !exists {
+				// A repo owner is an account even without a user.json binding
+				// or a profile doc (a token-mode principal). Only a namespace
+				// with no identity trace AND no repositories is unknown.
+				repos, rerr := s.env.API.Repos.Repos(r.Context(), owner)
+				if rerr != nil {
+					s.errorPage(w, r, http.StatusServiceUnavailable, "repository registry unavailable")
+					return nil, false
+				}
+				if len(repos) == 0 {
+					s.errorPage(w, r, http.StatusNotFound, "not found")
+					return nil, false
+				}
+			}
+		}
+		rows, moreAfter, serr := s.ownerStarredRows(r.Context(), owner, p, r.URL.Query().Get("after"))
+		if serr != nil {
+			s.errorPage(w, r, http.StatusServiceUnavailable, "starred repositories unavailable")
+			return nil, false
+		}
+		data.Rows = rows
+		data.MoreAfter = moreAfter
 	}
 	return data, true
+}
+
+// ownerStarredRows projects the star index into the shared repo-row shape
+// (WP9 G17). Visibility is the API's own rule — VisibleRepos per distinct
+// writer owner — so a private repo the viewer cannot read never appears (the
+// JSON twin deliberately does not filter; the page must). Order is the
+// service's repo-ascending keyset order, preserved verbatim; the cursor is
+// the JSON twin's `<starred_at>|<repo>` of the last returned entry.
+func (s *Server) ownerStarredRows(ctx context.Context, owner string, p auth.Principal, after string) ([]repoRowVM, string, error) {
+	if publicDeps.Starred == nil {
+		return nil, "", nil
+	}
+	entries, more, err := publicDeps.Starred(ctx, owner, 50, after)
+	if err != nil {
+		return nil, "", err
+	}
+	type pick struct{ owner, name, full, at string }
+	picks := make([]pick, 0, len(entries))
+	visible := map[string]map[string]bool{}
+	for _, e := range entries {
+		o, n, ok := strings.Cut(e.Repo, "/")
+		if !ok || o == "" || n == "" || strings.Contains(n, "/") {
+			continue
+		}
+		set, ok := visible[o]
+		if !ok {
+			names, verr := s.env.API.VisibleRepos(ctx, o, p)
+			if verr != nil {
+				return nil, "", verr
+			}
+			set = make(map[string]bool, len(names))
+			for _, name := range names {
+				set[name] = true
+			}
+			visible[o] = set
+		}
+		if set[n] {
+			picks = append(picks, pick{owner: o, name: n, full: e.Repo, at: e.StarredAt})
+		}
+	}
+	// One catalog read supplies the activity stamp / empty flag for every
+	// row (the owner listing's own projection); a corrupt catalog degrades to
+	// null measurements, never to a failed page.
+	var cat *proto.RepoCatalog
+	if s.env.API.Store != nil {
+		if c, cerr := sizecatalog.ReadCatalog(ctx, s.env.API.Store); cerr == nil {
+			cat = c
+		}
+	}
+	rows := make([]repoRowVM, 0, len(picks))
+	for _, pk := range picks {
+		vm := repoRowVM{Owner: pk.owner, Name: pk.name, Full: pk.full}
+		if cat != nil {
+			if pr := sizecatalog.RowsForOwner(pk.owner, []string{pk.name}, cat); len(pr) == 1 {
+				if pr[0].LastCommitTime != nil {
+					vm.At = *pr[0].LastCommitTime
+				}
+				if pr[0].SizeBytes != nil && *pr[0].SizeBytes == 0 {
+					vm.Empty = true
+				}
+			}
+		}
+		rows = append(rows, vm)
+	}
+	s.fillRowFlags(ctx, owner, rows)
+	// The cursor names the last RENDERED entry: resuming after an invisible
+	// key would echo a repo the viewer cannot read into the URL (and the
+	// ?after= link). Without a rendered row there is no safe cursor, so the
+	// page ends rather than leaking one.
+	next := ""
+	if more && len(picks) > 0 {
+		last := picks[len(picks)-1]
+		next = last.at + "|" + last.full
+	}
+	return rows, next, nil
 }
 
 // readOwnerProfile reads owners/<owner>/profile.json; absent or unreadable
@@ -695,13 +851,19 @@ func (s *Server) fillRowFlags(ctx context.Context, owner string, rows []repoRowV
 			defer wg.Done()
 			sem <- struct{}{}
 			defer func() { <-sem }()
+			// rows carry their own owner when a list spans namespaces (the
+			// starred view); the caller's owner is the single-owner default.
+			o := rows[i].Owner
+			if o == "" {
+				o = owner
+			}
 			if s.env.API != nil && s.env.API.RepoVisibility != nil {
-				if vis, ok := s.env.API.RepoVisibility(ctx, owner, rows[i].Name); ok {
+				if vis, ok := s.env.API.RepoVisibility(ctx, o, rows[i].Name); ok {
 					rows[i].VisibilityLabel, rows[i].VisibilityTitle = visibilityBadge(vis)
 				}
 			}
 			if s.env.API != nil && s.env.API.Store != nil {
-				if body, _, err := store.GetBytes(ctx, s.env.API.Store, store.MirrorKey(owner, rows[i].Name), store.GetOptions{}); err == nil && body != nil {
+				if body, _, err := store.GetBytes(ctx, s.env.API.Store, store.MirrorKey(o, rows[i].Name), store.GetOptions{}); err == nil && body != nil {
 					rows[i].Mirror = true
 					rows[i].MirrorTitle = "mirror · pull-only"
 					var doc struct {
@@ -713,7 +875,7 @@ func (s *Server) fillRowFlags(ctx context.Context, owner string, rows []repoRowV
 				}
 			}
 			if publicDeps.StarCount != nil {
-				if n, ok := publicDeps.StarCount(ctx, owner, rows[i].Name); ok && n > 0 {
+				if n, ok := publicDeps.StarCount(ctx, o, rows[i].Name); ok && n > 0 {
 					rows[i].Stars, rows[i].HasStars = n, true
 				}
 			}
@@ -912,11 +1074,22 @@ func inviteExpiryLabel(stamp string, now time.Time) string {
 // friendlyInviteErr is the JSX `friendly` mapping: expired and non-pending
 // 409s, foreign invitations, and 401s read as sentences; everything else keeps
 // the service message (feature errors are user-facing by design).
+//
+// A pending invitation the caller is not addressed by and a spent one are
+// indistinguishable without an id→scope index, so the service names both
+// causes; the page keeps that sentence. A spent invitation the inbox row
+// proves (issuer object gone) gets the narrower one.
 func friendlyInviteErr(err error) string {
 	msg := err.Error()
 	switch {
 	case strings.Contains(msg, "expired"):
 		return "invitation expired"
+	case strings.Contains(msg, "not addressed to your account"):
+		return msg // already the accurate two-cause sentence
+	case strings.Contains(msg, "no longer valid"):
+		return msg // spent, or its repository was deleted — both named
+	case strings.Contains(msg, "already accepted or cancelled"):
+		return "invitation was already accepted or cancelled"
 	case strings.Contains(msg, "not pending"):
 		return "invitation no longer pending"
 	case strings.Contains(msg, "not yours") || strings.Contains(msg, "forbidden"):

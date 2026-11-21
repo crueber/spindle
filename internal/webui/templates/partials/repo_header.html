@@ -21,6 +21,13 @@
       {{if .MirrorBadge}}<span class="chip-neutral" title="{{.MirrorTitle}}">{{.MirrorBadge}}</span>{{end}}
       {{if .PushMirrorBadge}}<span class="chip-neutral" title="{{.PushMirrorTitle}}">{{.PushMirrorBadge}}</span>{{end}}
     </div>
+    {{with .ForkSync}}
+    <div class="mt-1.5 flex flex-wrap items-center gap-2 text-[11px] {{if .Failed}}text-[var(--pd-danger)]{{else if .Diverged}}text-[var(--pd-warn)]{{else}}text-[var(--pd-muted)]{{end}}" role="status">
+      <span class="{{if .Failed}}chip-closed{{else if .Diverged}}chip-draft{{else if eq .Result "fast-forward"}}chip-open{{else}}chip-neutral{{end}}">{{.Label}}</span>
+      <span class="min-w-0">{{.Message}}</span>
+      {{if .PRURL}}<a class="btn px-2 py-0.5 text-[11px]" href="{{.PRURL}}">Open pull request</a>{{end}}
+    </div>
+    {{end}}
     {{if .Description}}<p class="mt-1 max-w-[80ch] text-sm text-[var(--pd-text-2)]">{{.Description}}</p>{{end}}
     <div class="repo-meta mt-1.5 flex flex-wrap items-center gap-x-3 gap-y-1 font-mono text-[11px] text-[var(--pd-muted)]">
       <span>{{.Branches}} {{plural .Branches "branch" "branches"}}</span>
@@ -68,7 +75,7 @@
          focus return) with the server's advertised URLs VERBATIM (issues
          #37/#124). Copy is the copy island (data-copy). -->
     <div data-menu class="relative">
-      <button type="button" class="btn primary" data-menu-trigger aria-haspopup="menu" aria-expanded="false">
+      <button type="button" class="btn{{if .ClonePrimary}} primary{{end}}" data-menu-trigger aria-haspopup="menu" aria-expanded="false">
         <svg class="icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true"><circle cx="4.5" cy="3.5" r="1.75"/><circle cx="11.5" cy="3.5" r="1.75"/><circle cx="8" cy="12.5" r="1.75"/><path d="M4.5 5.25v1a2 2 0 0 0 2 2h3a2 2 0 0 0 2-2v-1"/><path d="M8 8.25v2.5"/></svg>
         Clone
       </button>

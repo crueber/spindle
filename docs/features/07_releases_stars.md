@@ -417,17 +417,24 @@ server-side copy (e.g. from a fork parent) lands if ever wanted; v1 does not reg
   `Cross-Origin-Resource-Policy: same-site` — so an uploaded `.html` can never execute on the
   spindle origin. Upload normalization clamps the stored metadata too, and the serve path clamps
   again (old records). ETag/304, `Range`/`If-Range` → 206/416 and `Content-Length` are unchanged:
-  assets are downloaded, not rendered. The page upload (no-JS multipart) additionally bounds the
+  assets are downloaded, not rendered. Repository SVGs are a DIFFERENT lane: README/release-note
+  images go through `…/api/blob/<rev>/<path>?raw=1`, which serves `image/svg+xml` with the same
+  sandboxed CSP (`default-src 'none'; sandbox`) + nosniff — an `<img>` embed renders, direct
+  navigation cannot execute script (07_api.md §9.5). Uploaded SVG assets stay octet-stream
+  downloads. The page upload (no-JS multipart) additionally bounds the
   request body with `http.MaxBytesReader` before the spool (`releases.max_asset_bytes` + 1 MiB
   multipart overhead), so an unbounded body cannot fill the node's disk before the service cap.
 
-- **Source archives (WP3.1, PLAN-V1, landed 2026-11-20).** `GET|HEAD /{o}/{r}/archive/{ref}.tar.gz|.zip`
-  streams `git archive` (argv in `docs/go/04_git.md` §11.3) under the archive package's own bounded pool;
-  ETag is the resolved TREE id + format, so a branch, tag, and commit naming one tree share a validator.
-  Nothing is stored: archives are derived on read (law 4), so there is no build task, no cache-key
-  policy, and no bucket key. The zip lane passes `-0` (store) — the one flag difference from a hand-run
-  `git archive` — so bytes do not depend on the zlib build; tar is byte-identical to a local
-  `git archive`. The release page links both formats (published, non-pending releases) and the Code page
+- **Source archives (WP3.1, PLAN-V1, landed 2026-11-20; gzip fixed 2026-11-21).**
+  `GET|HEAD /{o}/{r}/archive/{ref}.tar.gz|.zip` streams `git archive` (argv in
+  `docs/go/04_git.md` §11.3) under the archive package's own bounded pool; ETag is the resolved TREE id +
+  format, so a branch, tag, and commit naming one tree share a validator. Nothing is stored: archives are
+  derived on read (law 4), so there is no build task, no cache-key policy, and no bucket key. The tar lane
+  is a plain `git archive --format=tar` piped through a streaming `compress/gzip.Writer` — the response is
+  a real gzip stream (`1f 8b`) whose decompressed bytes are byte-identical to a local `git archive` (the
+  audit caught the old lane serving an uncompressed tar under `application/gzip`). The zip lane passes
+  `-0` (store) — the one flag difference from a hand-run `git archive` — so bytes do not depend on the
+  zlib build. The release page links both formats (published, non-pending releases) and the Code page
   toolbar links the current ref.
 - **Download counts (WP3.2, landed 2026-11-20).** One CAS'd `releases/counts/<tag>.json` per release
   (`{counts:{asset: N}}`), bumped from the asset byte route after a full 200 GET (never HEAD, 304, or a
@@ -453,3 +460,16 @@ server-side copy (e.g. from a fork parent) lands if ever wanted; v1 does not reg
   merged-PR autodraft here).
 - Watching granularities (issues-only, releases-only — one watch flag only); team/org-level watches.
 - Migrating releases from other forges; LFS-backed asset dedup across repos.
+
+- **The starred page is visibility-filtered even though the API twin is not (WP9 G17, 2026-11-21,
+  `feat/identity-ui-parity`).** `/{user}/starred` is a new owner-page tab (users only; an org or an
+  unknown namespace is a real 404) listing the user's starred repositories with the shared repo-row
+  anatomy (link, visibility/mirror badges, activity stamp). The earlier decision above ("no
+  private-read filtering of starred lists") still governs the JSON twin — it is an unfiltered
+  repo-name list by design — but the rendered page must not show a private repo the viewer cannot
+  read, so it filters the star index through the API's own `VisibleRepos` rule (one call per distinct
+  writer owner, host admins unfiltered) before building rows. Order is the service's repo-ascending
+  keyset order (07 §7), paged by the same `<starred_at>|<repo>` cursor; the cursor is taken from the
+  last **rendered** row, so an invisible key never leaks into the `?after=` URL. The page seam is
+  `PublicDeps.Starred` (social.Service.Starred); a visibility probe failure is a 503, never a
+  half-filtered list. Tests: `TestOwnerStarredPageVisibilityAndOrder`, `TestOwnerStarredEdges`.

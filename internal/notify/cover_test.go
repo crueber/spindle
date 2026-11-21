@@ -947,7 +947,7 @@ func TestCursorAndDeliveriesEdges(t *testing.T) {
 	// Ring trims to MaxDeliveries.
 	ev := &ActivityEvent{Seq: 1, Action: "commented"}
 	for i := 0; i < MaxDeliveries+5; i++ {
-		x.svc.recordDelivery(ctx(), "acme", "repo", "r", ev, 200, nil)
+		x.svc.recordDelivery(ctx(), "acme", "repo", "r", ev, 200, nil, nil, 0)
 	}
 	d := x.svc.ReadDeliveries(ctx(), "acme", "repo", "r")
 	if len(d.Entries) != MaxDeliveries {

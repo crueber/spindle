@@ -9,7 +9,7 @@ import (
 // TestPackagesDefaults pins the docs/features/14 §5 defaults.
 func TestPackagesDefaults(t *testing.T) {
 	c := Defaults()
-	if c.Packages.MaxBlobBytes != 2<<30 {
+	if c.Packages.MaxBlobBytes != 10<<30 {
 		t.Fatalf("max_blob_bytes = %d", c.Packages.MaxBlobBytes)
 	}
 	if c.Packages.MaxManifestBytes != 4<<20 {

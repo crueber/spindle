@@ -18,7 +18,7 @@ Test framework: stdlib `testing` only. No testify, no gomock (dependency policy,
 | lint/vet | `make vet` → `go vet ./...` && `gofmt -l` && `go build ./...` | Go equivalent of Rust's `-D warnings`: `go vet` output, any `gofmt -l` line, or any build warning fails the gate | zero findings |
 | race | `make race` → `go test -race -short -count=1 ./...` | full fast tier under the race detector (§6) | zero races |
 | cover | `make cover` | per-package statement coverage of every `internal/...` package, ≥ 95% fail-under (§7) | CI-enforced; new code lands with tests (D7) |
-| web | `make test-web` → `node --test web/test/unit/*.test.js` | headless JS logic tests + fetch-based server smoke (§6.5) | zero npm dependencies; wired into `make test` and CI |
+| web | `make test-web` → `node --test web/test/unit/*.test.js` | headless JS logic tests + opt-in fetch-based server smoke (§6.5; runs only with `SPINDLE_TEST_WEB_BASE_URL`) | zero npm dependencies; wired into `make test` and CI |
 | slow | no recipe yet (no `TestSlow*` soak tests exist; see D8) | `TestSlow*` soaks when they land: 20 k-ref push, 466 k-ref refs render, long bundle chains | nightly-ish; never in fast |
 
 Rules carried over verbatim from §17:
@@ -331,7 +331,7 @@ and `ci`. `web/package.json` carries only build devDependencies (`vite`, `@tailw
 - **`web/test/unit/*.test.js`** — unit cases with `node:assert` in the Go tier's style: repos.js request
   shaping and error mapping, SSE frame parsing/backoff/coalescing, the SDK lane/401 rules. Same
   assertion discipline: `if (got !== want) throw`.
-- **`web/test/unit/smoke.test.js`** — fetch-based server smoke against `SPINDLE_TEST_WEB_BASE_URL` (default `http://127.0.0.1:8080`): `/` serves the app, `/setup` serves, `/api/v1/setup` returns the schema JSON, one SDK call round-trips, and — when `web/dist/repos.js` exists (always in CI and after `make web`) — the BUNDLE imports and its exports match `sdk/src/index.js`. Server absent → the smoke cases skip, so `make test` still passes on a cold machine; CI always has a server up for them. Unit tests import the SOURCE modules directly, so testing needs no build; `make web` produces only the shipped artifact.
+- **`web/test/unit/smoke.test.js`** — fetch-based server smoke, **opt-in**: it only runs when the caller names a server in `SPINDLE_TEST_WEB_BASE_URL` (there is no ambient/default `:8080`, so an unrelated local server cannot break the tier). It asserts the server-rendered contract of D-WEB-14: `/` and `/setup` answer 200 `text/html; charset=utf-8` with the `base.html` shell (doctype, `<html lang="en" class="dark">`, `/_ui/app.css` stylesheet, vendored `/_ui/htmx.min.js` classic script, `/_ui/ui.js` module island, `<main id="app">`, server-rendered header/footer, and no Solid `id="root"`), the landing/setup page markers, the `/_ui/` assets' MIME + `no-cache` (`app.css` must carry the Tailwind utilities the templates use, `/_ui/index.html` is a 404), and `/repos.js` as `text/javascript` with `no-cache`, a strong `sdk-*` ETag, a 304 on revalidation, and the SDK's `ReposClient`/ESM exports. Unset → every case skips with the reason; set but unreachable or setup-only (503 at `/`) → skip with the reason; a reachable server is asserted strictly. Unit tests import the SOURCE modules directly, so testing needs no build; `make web` produces only the shipped artifact (and the smoke needs the server to have been built from one).
 
 ---
 

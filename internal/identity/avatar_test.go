@@ -223,6 +223,22 @@ func TestCheckAvatarSVG(t *testing.T) {
 	if err := checkAvatarSVG(ok, "dave@example.com"); err != nil {
 		t.Errorf("valid SVG rejected: %v", err)
 	}
+	// A short username seed collides with the static skeleton ("erin" inside
+	// "shape-rendering") without being a leak: the gate is token-aware, so a
+	// name-seeded avatar renders instead of failing (round-3 audit).
+	nameSVG, err := GenerateUserAvatarSVG("erin")
+	if err != nil {
+		t.Fatalf("name seed rejected: %v", err)
+	}
+	if err := checkAvatarSVG(nameSVG, "erin"); err != nil {
+		t.Errorf("valid name-seeded SVG rejected: %v", err)
+	}
+	if !seedAppears(`<svg><text>erin</text></svg>`, "erin") {
+		t.Error("a seed embedded as element text was not detected")
+	}
+	if seedAppears(nameSVG, "erin") {
+		t.Error("the static skeleton's 'rendering' counted as a seed leak")
+	}
 	for name, svg := range map[string]string{
 		"not svg":   `<html></html>`,
 		"script":    `<svg xmlns="http://www.w3.org/2000/svg"><script>alert(1)</script></svg>`,
@@ -461,10 +477,18 @@ func TestDeleteRegenerateOptOut(t *testing.T) {
 	if del, err := s.DeleteUserAvatar(ctx, "erin"); err != nil || !del.AvatarDisabled {
 		t.Fatalf("delete-without-avatar must record opt-out: %+v %v", del, err)
 	}
-	// Regeneration without a mappable email fails closed (seed=email
-	// contract — never invent a seed).
-	if _, err := s.RegenerateUserAvatar(ctx, "erin"); err == nil {
-		t.Fatal("regenerate without verified email must fail")
+	// Regeneration without a verified email seeds from the principal NAME (the
+	// initials-chip fallback), so the control the page offers always works and
+	// stays deterministic (same name → same avatar).
+	nameSVG, err := s.RegenerateUserAvatar(ctx, "erin")
+	if err != nil {
+		t.Fatalf("regenerate without verified email must use the name seed: %v", err)
+	}
+	if nameSVG.AvatarDisabled || nameSVG.AvatarContentType == "" {
+		t.Fatalf("name-seeded regenerate did not install an avatar: %+v", nameSVG)
+	}
+	if raw, _, err := s.GetUserAvatar(ctx, "erin"); err != nil || len(raw) == 0 {
+		t.Fatalf("name-seeded avatar missing (err=%v)", err)
 	}
 }
 
@@ -625,8 +649,10 @@ func TestUserAvatarErrorBranches(t *testing.T) {
 	if err != nil || !second.AvatarDisabled {
 		t.Fatalf("repeat delete: %+v %v", second, err)
 	}
-	// Handler error surfaces: authenticator failure, invalid
-	// principal spelling, and POST without a mappable email.
+	// Handler error surfaces: authenticator failure and invalid principal
+	// spelling. A principal with no verified email is NOT an error any more:
+	// the seed falls back to the principal name (the initials-chip fallback),
+	// so the regenerate control the page offers always works.
 	badAuth := &Handler{Svc: s, Auth: func(r *http.Request) (auth.Principal, *auth.AuthError) {
 		return auth.Principal{}, &auth.AuthError{Kind: auth.ErrInvalid, Why: "bad cred"}
 	}}
@@ -637,7 +663,10 @@ func TestUserAvatarErrorBranches(t *testing.T) {
 	if w := doReq(h, "GET", "/api/v1/users/%21%21/avatar", ""); w.Code != http.StatusBadRequest {
 		t.Errorf("invalid-principal GET = %d, want 400", w.Code)
 	}
-	if w := doReq(h, "POST", "/api/v1/users/erin/avatar", ""); w.Code != http.StatusNotFound {
-		t.Errorf("email-less POST = %d, want 404", w.Code)
+	if w := doReq(h, "POST", "/api/v1/users/erin/avatar", ""); w.Code != http.StatusOK {
+		t.Errorf("email-less POST = %d, want 200 (name-seeded regenerate): %s", w.Code, w.Body.String())
+	}
+	if raw, _, _ := s.GetUserAvatar(ctx, "erin"); raw == nil {
+		t.Error("name-seeded regenerate installed nothing")
 	}
 }

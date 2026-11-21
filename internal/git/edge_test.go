@@ -863,3 +863,28 @@ func TestWriteRepoConfigIdempotentAndReadError(t *testing.T) {
 		t.Fatal("directory config must error")
 	}
 }
+
+func TestParseShallowSection(t *testing.T) {
+	// The section is the leading run of `shallow <oid>` pkts, closed by a
+	// flush. A following command must not be read as a shallow line.
+	body := cat(Pkt("shallow "+oidA+"\n"), Pkt("shallow "+oidB+"\n"),
+		[]byte("0000"), Pkt(oidA+" "+oidB+" refs/heads/main\n"), []byte("0000"))
+	if got := ParseShallowSection([]byte(body)); len(got) != 2 || got[0] != oidA || got[1] != oidB {
+		t.Fatalf("shallow section = %v", got)
+	}
+	// A normal push (commands first) has no shallow section.
+	normal := cat(Pkt(oidA+" "+oidB+" refs/heads/main\n"), []byte("0000"))
+	if got := ParseShallowSection([]byte(normal)); got != nil {
+		t.Fatalf("normal push reported shallow: %v", got)
+	}
+	// Pack bytes after the command section are never inspected: a "shallow "
+	// string inside the pack cannot fake the section.
+	packish := cat(Pkt(oidA+" "+oidB+" refs/heads/main\n"), []byte("0000"), []byte("shallow not-a-pkt"))
+	if got := ParseShallowSection([]byte(packish)); got != nil {
+		t.Fatalf("pack content mistaken for a shallow section: %v", got)
+	}
+	// Empty/malformed bodies are not shallow.
+	if got := ParseShallowSection(nil); got != nil {
+		t.Fatalf("nil body = %v", got)
+	}
+}

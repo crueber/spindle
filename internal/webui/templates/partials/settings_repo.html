@@ -63,29 +63,105 @@
 {{else}}{{template "settings-repo-notwired" .}}{{end}}
 {{end}}
 
-{{/* ---- Scheduled tasks (read-only) -------------------------------------- */}}
+{{/* ---- Scheduled tasks (structured editors, WP9 G14) -------------------- */}}
 {{define "settings-repo-scheduled"}}
 {{with .Scheduled}}
 <div class="space-y-4">
-  <section class="card p-4">
-    <h3 class="card-header">Bundle strategies</h3>
-    {{if .Strategies}}
-    <div class="overflow-x-auto">
-      <table class="data-table">
-        <thead><tr><th>name</th><th>kind</th><th>base</th><th>schedule</th><th>next</th><th>keep</th><th>filter</th><th>refs</th></tr></thead>
-        <tbody>
-          {{range .Strategies}}
-          <tr>
-            <td class="mono font-medium">{{.Name}}</td><td class="mono">{{.Kind}}</td><td class="mono">{{.Base}}</td>
-            <td class="mono">{{if .ScheduleHuman}}{{.ScheduleHuman}}{{else}}{{.Schedule}}{{end}}</td>
-            <td class="mono">{{.Next}}</td><td class="mono">{{.Keep}}</td><td class="mono">{{.Filter}}</td><td class="mono">{{.Refs}}</td>
-          </tr>
+  <form class="space-y-4" method="post" action="/{{$.Owner}}/{{$.Name}}/settings/scheduled"
+        hx-post="/{{$.Owner}}/{{$.Name}}/settings/scheduled" hx-target="#settings-panel" hx-select="#settings-panel" hx-swap="outerHTML">
+    <input type="hidden" name="scheduled_form" value="1">
+    {{range .Sections}}
+    {{$sec := .}}
+    <section class="card p-4" aria-label="{{.Label}}">
+      <div class="flex flex-wrap items-center gap-2">
+        <h3 class="card-header">{{.Label}}</h3>
+        {{if .Inherited}}<span class="chip chip-neutral">inherited from host</span>{{else}}<span class="chip chip-neutral">overridden</span>{{end}}
+      </div>
+      <p class="muted text-xs">{{.Hint}}</p>
+      <label class="mt-2 flex items-start gap-2 text-sm">
+        <input type="checkbox" name="{{.ID}}.override" value="true" class="mt-0.5 h-4 w-4 accent-amber-500"{{if .Override}} checked{{end}}>
+        <span>Override host config for this section</span>
+      </label>
+
+      <div class="mt-3 grid grid-cols-1 gap-3 sm:grid-cols-2">
+        {{range .Fields}}
+        {{$f := .}}{{$err := index $sec.FieldErrors .Name}}
+        <div class="grid min-w-0 gap-1">
+          <label class="text-sm font-medium" for="{{.Name}}">{{.Label}}</label>
+          {{if eq .Type "bool"}}
+          <input type="hidden" name="{{.Name}}" value="false">
+          <input type="checkbox" role="switch" name="{{.Name}}" id="{{.Name}}" value="true"
+                 class="h-5 w-5 shrink-0 accent-amber-500"{{if eq .Value "true"}} checked{{end}}>
+          {{else if eq .Type "select"}}
+          <select class="input md:max-w-sm" id="{{.Name}}" name="{{.Name}}">
+            {{if eq $f.Value ""}}<option value="" selected>(unset)</option>{{else if $f.Custom}}<option value="{{$f.Value}}" selected>{{$f.Value}} (current)</option>{{end}}
+            {{range .Enum}}<option value="{{.}}"{{if eq . $f.Value}} selected{{end}}>{{.}}</option>{{end}}
+          </select>
+          {{else if eq .Type "int"}}
+          <input class="input md:max-w-sm" id="{{.Name}}" name="{{.Name}}" type="number" step="1" value="{{.Value}}">
+          {{else}}
+          <input class="input" id="{{.Name}}" name="{{.Name}}" type="text" value="{{.Value}}">
           {{end}}
-        </tbody>
-      </table>
+          {{if .Hint}}<p class="muted text-[11px]">{{.Hint}}</p>{{end}}
+          {{with $err}}<p class="err-line" role="alert">{{.}}</p>{{end}}
+        </div>
+        {{end}}
+      </div>
+
+      {{if .Rows}}
+      <div class="mt-4">
+        <h4 class="eyebrow mb-1">Bundle strategies</h4>
+        <p class="muted text-[11px]">Rows are published in this order. An incremental strategy's base must name an earlier full strategy. Fill a blank row's cells to add one; rows marked remove are dropped.</p>
+        {{range .Rows}}
+        {{$row := .}}
+        <div class="mt-2 rounded border border-[var(--pd-line)] p-3">
+          <div class="flex flex-wrap items-center gap-2">
+            <span class="mono text-xs font-medium">{{if .Caption}}{{.Caption}}{{else}}row {{.Index}}{{end}}</span>
+            {{if ge .Base 0}}<span class="chip-neutral">row {{.Base}}</span>{{end}}
+            {{if .Next}}<span class="muted text-[11px]">next {{.Next}}</span>{{end}}
+            <input type="hidden" name="{{.BaseKey}}" value="{{.Base}}">
+            <label class="ml-auto flex items-center gap-1 text-[11px]">
+              <input type="checkbox" name="{{.RemoveKey}}" value="true" class="h-4 w-4 accent-amber-500"> remove
+            </label>
+          </div>
+          <div class="mt-2 grid grid-cols-1 gap-2 sm:grid-cols-3 lg:grid-cols-4">
+            {{range .Cells}}
+            <div class="grid min-w-0 gap-1">
+              <label class="text-[11px] font-medium" for="{{.Name}}">{{.Label}}</label>
+              {{if eq .Type "bool"}}
+              <input type="hidden" name="{{.Name}}" value="false">
+              <input type="checkbox" name="{{.Name}}" id="{{.Name}}" value="true" class="h-4 w-4 accent-amber-500"{{if eq .Value "true"}} checked{{end}}>
+              {{else if eq .Type "select"}}
+              <select class="input py-1 text-xs" id="{{.Name}}" name="{{.Name}}">
+                {{$c := .}}
+                {{if eq $c.Value ""}}<option value="" selected>(unset)</option>{{else if $c.Custom}}<option value="{{$c.Value}}" selected>{{$c.Value}} (current)</option>{{end}}
+                {{range .Enum}}<option value="{{.}}"{{if eq . $c.Value}} selected{{end}}>{{.}}</option>{{end}}
+              </select>
+              {{else if eq .Type "int"}}
+              <input class="input py-1 text-xs" id="{{.Name}}" name="{{.Name}}" type="number" step="1" value="{{.Value}}">
+              {{else}}
+              <input class="input py-1 text-xs" id="{{.Name}}" name="{{.Name}}" type="text" value="{{.Value}}">
+              {{end}}
+              {{with index $sec.FieldErrors .Name}}<p class="err-line" role="alert">{{.}}</p>{{end}}
+            </div>
+            {{end}}
+          </div>
+        </div>
+        {{end}}
+      </div>
+      {{end}}
+
+      {{if .Error}}<p class="err-line mt-3" role="alert">{{.Error}}</p>{{end}}
+    </section>
+    {{end}}
+
+    <div class="flex flex-wrap items-center gap-2">
+      <button type="submit" class="btn primary">Save scheduled settings</button>
+      <span class="muted text-[11px]">Published to the WAL and validated by the same parser as the settings API. Unchecked sections are removed from the document (host config wins).</span>
     </div>
-    {{else}}<p class="muted text-sm">no bundle strategies configured.</p>{{end}}
-  </section>
+    {{if .Error}}<p class="err-line" role="alert">{{.Error}}</p>{{end}}
+    {{if .Note}}<p class="mt-2 text-sm text-[var(--pd-ok)]">{{.Note}}</p>{{end}}
+  </form>
 
   <section class="card p-4">
     <h3 class="card-header">Placement &amp; host facts</h3>
@@ -113,7 +189,6 @@
     </div>
     {{else}}<p class="muted text-sm">no effective values reported.</p>{{end}}
   </section>
-  <p class="muted text-[11px]">Read-only: this tab reports what the maintainer computed; nothing here is editable.</p>
 </div>
 {{else}}{{template "settings-repo-notwired" .}}{{end}}
 {{end}}
@@ -323,40 +398,62 @@
 {{/* ---- Push policy ------------------------------------------------------ */}}
 {{define "settings-repo-policy"}}
 {{with .Policy}}
-<form class="card p-4" method="post" action="/{{$.Owner}}/{{$.Name}}/settings/policy"
-      hx-post="/{{$.Owner}}/{{$.Name}}/settings/policy" hx-target="#settings-panel" hx-select="#settings-panel" hx-swap="outerHTML">
-  <h3 class="card-header">Push policy</h3>
-  <label class="mb-1 block text-sm font-medium" for="policy-text">Policy document (JSON)</label>
-  <textarea class="input mono text-xs" id="policy-text" name="policy" rows="14" spellcheck="false" data-submit-keys>{{.Text}}</textarea>
-  <div class="mt-2 flex flex-wrap items-end gap-3">
-    <div class="flex flex-wrap items-center gap-2">
-      <button type="submit" class="btn primary">Save</button>
-      <span class="muted text-[11px]">Ctrl/⌘+Enter saves (island). The server validates on save.</span>
-    </div>
-    <div class="ml-auto flex flex-wrap items-end gap-2">
-      <div>
-        <label class="mb-1 block text-sm font-medium" for="policy-n">dry-run against the last N pushes</label>
-        <input class="input w-24" id="policy-n" name="n" type="number" min="1" max="100" value="{{.DryRunN}}">
+<div class="space-y-4">
+  <form class="card p-4" method="post" action="/{{$.Owner}}/{{$.Name}}/settings/policy"
+        hx-post="/{{$.Owner}}/{{$.Name}}/settings/policy" hx-target="#settings-panel" hx-select="#settings-panel" hx-swap="outerHTML">
+    <h3 class="card-header">Push policy</h3>
+    <label class="mb-1 block text-sm font-medium" for="policy-text">Policy document (JSON)</label>
+    <textarea class="input mono text-xs" id="policy-text" name="policy" rows="14" spellcheck="false" data-submit-keys>{{.Text}}</textarea>
+    <p class="muted mt-1 text-[11px]">Clearing the editor and saving removes the policy document (every push is then allowed). Use <strong>Remove policy</strong> below when you want the typed confirmation.</p>
+    <div class="mt-2 flex flex-wrap items-end gap-3">
+      <div class="flex flex-wrap items-center gap-2">
+        <button type="submit" class="btn primary">Save</button>
+        <span class="muted text-[11px]">Ctrl/⌘+Enter saves (island). The server validates on save.</span>
       </div>
-      <button type="submit" class="btn" name="policy_action" value="dryrun">dry-run</button>
+      <div class="ml-auto flex flex-wrap items-end gap-2">
+        <div>
+          <label class="mb-1 block text-sm font-medium" for="policy-n">dry-run against the last N pushes</label>
+          <input class="input w-24" id="policy-n" name="n" type="number" min="1" max="100" value="{{.DryRunN}}">
+        </div>
+        <button type="submit" class="btn" name="policy_action" value="dryrun">dry-run</button>
+      </div>
     </div>
-  </div>
-  {{if .Error}}<p class="err-line" role="alert">{{.Error}}</p>{{end}}
-  {{if .Note}}<p class="mt-2 text-sm text-[var(--pd-ok)]">{{.Note}}</p>{{end}}
+    {{if .Error}}<p class="err-line" role="alert">{{.Error}}</p>{{end}}
+    {{if .Note}}<p class="mt-2 text-sm text-[var(--pd-ok)]">{{.Note}}</p>{{end}}
 
-  {{if .DryRunDone}}
-  <hr class="my-3 border-current opacity-10">
-  <p class="text-sm">Dry run: <strong>{{.DryRunAllow}}</strong> allowed / <strong>{{.DryRunDeny}}</strong> denied.</p>
-  {{if .DryRunRefs}}
-  <div class="mt-2 overflow-x-auto">
-    <table class="data-table">
-      <thead><tr><th>entry</th><th>detail</th></tr></thead>
-      <tbody>{{range .DryRunRefs}}<tr><td class="mono text-xs">{{.Key}}</td><td class="break-words">{{.Value}}</td></tr>{{end}}</tbody>
-    </table>
-  </div>
-  {{else}}<p class="muted mt-1 text-sm">no pushes to evaluate.</p>{{end}}
-  {{end}}
-</form>
+    {{if .DryRunDone}}
+    <hr class="my-3 border-current opacity-10">
+    <p class="text-sm">Dry run: <strong>{{.DryRunAllow}}</strong> allowed / <strong>{{.DryRunDeny}}</strong> denied.</p>
+    {{if .DryRunRefs}}
+    <div class="mt-2 overflow-x-auto">
+      <table class="data-table">
+        <thead><tr><th>entry</th><th>detail</th></tr></thead>
+        <tbody>{{range .DryRunRefs}}<tr><td class="mono text-xs">{{.Key}}</td><td class="break-words">{{.Value}}</td></tr>{{end}}</tbody>
+      </table>
+    </div>
+    {{else}}<p class="muted mt-1 text-sm">no pushes to evaluate.</p>{{end}}
+    {{end}}
+  </form>
+
+  <section class="card p-4" aria-label="Remove policy">
+    <h3 class="card-header">Remove policy</h3>
+    {{if .Exists}}
+    <p class="muted text-sm">Deletes the stored policy document. The repository falls back to allow-all: every push to every ref is permitted until a new policy is saved.</p>
+    <form class="mt-2 grid gap-2" method="post" action="/{{$.Owner}}/{{$.Name}}/settings/policy"
+          hx-post="/{{$.Owner}}/{{$.Name}}/settings/policy" hx-target="#settings-panel" hx-select="#settings-panel" hx-swap="outerHTML"
+          data-danger-expected="{{$.Owner}}/{{$.Name}}">
+      <input type="hidden" name="policy_action" value="remove">
+      <div>
+        <label class="mb-1 block text-sm font-medium" for="policy-remove-confirm">Type <code class="mono text-xs">{{$.Owner}}/{{$.Name}}</code> to confirm</label>
+        <input class="input md:max-w-sm mono text-xs" id="policy-remove-confirm" name="confirm" type="text" autocomplete="off" data-danger-input required>
+      </div>
+      <div><button type="submit" class="btn danger" data-danger-submit disabled>Remove policy</button></div>
+    </form>
+    {{else}}
+    <p class="muted text-sm">No policy document is stored — the repository currently allows every push. Saving a document above creates one.</p>
+    {{end}}
+  </section>
+</div>
 {{else}}{{template "settings-repo-notwired" .}}{{end}}
 {{end}}
 
@@ -421,6 +518,76 @@
     {{else}}<p class="muted mt-1 text-sm">no effective collaborators.</p>{{end}}
   </section>
 
+  {{/* Collaborator invitations (WP9 G9). Admin-only: the pending rows carry
+       each invite's capability token as the accept link, so a triage reader
+       renders only the explanation, never a token. Create posts with
+       invite_action=create; cancel posts to the id path. */}}
+  <section class="card p-4" aria-label="Collaborator invitations">
+    <h3 class="card-header">Invite a collaborator</h3>
+    {{if $.Admin}}
+    {{if .InviteLink}}
+    {{template "settings-invite-share" .InviteLink}}
+    {{end}}
+    <form class="grid gap-2 sm:grid-cols-[minmax(0,1fr)_auto_auto] sm:items-end"
+          method="post" action="/{{$.Owner}}/{{$.Name}}/settings/access"
+          hx-post="/{{$.Owner}}/{{$.Name}}/settings/access" hx-target="#settings-panel" hx-select="#settings-panel" hx-swap="outerHTML">
+      <input type="hidden" name="invite_action" value="create">
+      <div>
+        <label class="mb-1 block text-sm font-medium" for="invite-subject">Email or username</label>
+        <input class="input mono text-xs" id="invite-subject" name="subject" type="text" required
+               placeholder="jane@example.com" value="{{.NewSubject}}">
+      </div>
+      <div>
+        <label class="mb-1 block text-sm font-medium" for="invite-role">Role</label>
+        <select class="input w-auto" id="invite-role" name="role">
+          {{range .Roles}}<option value="{{.}}"{{if eq . $.Access.NewRole}} selected{{end}}>{{.}}</option>{{end}}
+        </select>
+      </div>
+      <div><button type="submit" class="btn">invite</button></div>
+    </form>
+    <p class="muted mt-1 text-[11px]">Inviting grants the chosen repo role once the invitee accepts the link. Invitations expire after 7 days.</p>
+    {{else}}
+    <p class="muted text-sm">Only a repository admin can invite collaborators.</p>
+    {{end}}
+
+    <h4 class="eyebrow mb-1 mt-4">Pending invitations</h4>
+    {{if .InvitesWired}}
+    {{if .Invites}}
+    <div class="overflow-x-auto">
+      <table class="data-table">
+        <thead><tr><th>subject</th><th>role</th><th>invited by</th><th>expires</th><th>accept link</th><th></th></tr></thead>
+        <tbody>
+          {{range .Invites}}
+          <tr>
+            <td class="mono break-all">{{.Subject}}</td>
+            <td>{{.Role}}</td>
+            <td class="mono break-all">{{.InvitedBy}}</td>
+            <td class="whitespace-nowrap font-mono text-xs">
+              {{if .ExpiresAt}}{{if .Expired}}<span class="chip-closed">expired</span>{{else}}<span title="{{.ExpiresAt}}">{{.ExpiresAt}}</span>{{end}}{{else}}<span class="muted">—</span>{{end}}
+            </td>
+            <td class="min-w-0">
+              {{template "settings-invite-accept" .AcceptLink}}
+            </td>
+            <td>
+              {{if $.Admin}}
+              <form method="post" action="/{{$.Owner}}/{{$.Name}}/settings/access/{{.ID}}"
+                    hx-post="/{{$.Owner}}/{{$.Name}}/settings/access/{{.ID}}" hx-target="#settings-panel" hx-select="#settings-panel" hx-swap="outerHTML">
+                <input type="hidden" name="invite_action" value="cancel">
+                <button type="submit" class="btn px-2 py-0.5 text-xs" title="cancel this invitation">cancel</button>
+              </form>
+              {{end}}
+            </td>
+          </tr>
+          {{end}}
+        </tbody>
+      </table>
+    </div>
+    {{else}}<p class="muted text-sm">no pending invitations.</p>{{end}}
+    {{else if $.Admin}}<p class="muted text-sm">The identity service is not wired on this build — invitations unavailable.</p>
+    {{else}}<p class="muted text-sm">Only a repository admin can see pending invitations.</p>{{end}}
+  </section>
+
+  {{if .CanEdit}}
   <form class="card p-4" method="post" action="/{{$.Owner}}/{{$.Name}}/settings/access"
         hx-post="/{{$.Owner}}/{{$.Name}}/settings/access" hx-target="#settings-panel" hx-select="#settings-panel" hx-swap="outerHTML">
     <h3 class="card-header">Visibility &amp; role bindings</h3>
@@ -494,6 +661,29 @@
     {{if .Error}}<p class="err-line" role="alert">{{.Error}}</p>{{end}}
     {{if .Note}}<p class="mt-2 text-sm text-[var(--pd-ok)]">{{.Note}}</p>{{end}}
   </form>
+  {{else}}
+  <section class="card p-4" data-access-readonly>
+    <h3 class="card-header">Visibility &amp; role bindings</h3>
+    <p class="muted text-sm">Read-only — changing access requires the admin role.</p>
+    <p class="mt-2 text-sm">visibility: <code class="mono text-xs">{{.Visibility}}</code></p>
+    {{if .Bindings}}
+    <div class="mt-2 overflow-x-auto">
+      <table class="data-table">
+        <thead><tr><th>subject</th><th>role</th></tr></thead>
+        <tbody>{{range .Bindings}}<tr><td class="mono break-all">{{.Subject}}</td><td>{{.Role}}</td></tr>{{end}}</tbody>
+      </table>
+    </div>
+    {{else}}<p class="muted mt-1 text-sm">no role bindings — org members, org owners, and host admins still apply.</p>{{end}}
+  </section>
+  {{/* The write is admin-only (the POST gate and the seam both re-check);
+       a triage reader gets the read-only view, never a form that 403s. This is
+       a SEPARATE card — the read-only section above must stay closed, or the
+       card nests inside itself and the heading renders twice. */}}
+  <section class="card p-4" aria-label="Changing access">
+    <h3 class="card-header">Changing access</h3>
+    <p class="muted text-sm">Only a repository admin can change visibility or role bindings.</p>
+  </section>
+  {{end}}
 </div>
 {{else}}{{template "settings-repo-notwired" .}}{{end}}
 {{end}}
@@ -556,89 +746,172 @@
 {{else}}{{template "settings-repo-notwired" .}}{{end}}
 {{end}}
 
-{{/* ---- Webhooks --------------------------------------------------------- */}}
-{{define "settings-repo-webhooks"}}
+{{/* ---- Runners (Threads, 15 §6) ----------------------------------------- */}}
+{{define "settings-repo-runners"}}
 {{with .AdminData}}
 <div class="space-y-4">
-  <p class="muted text-sm">One POST per collaboration event, signed with <code class="mono text-xs">X-Walgit-Signature</code> and identified by <code class="mono text-xs">X-Walgit-Delivery</code> / <code class="mono text-xs">X-Walgit-Event</code>. HTTPS only (loopback HTTP in dev).</p>
-  {{if not .WebhooksWired}}
-  <div class="card p-4"><p class="muted text-sm">The webhook service is not wired on this build.</p></div>
+  <p class="muted text-sm">A runner is repository-scoped: it long-polls for jobs whose <code class="mono text-xs">runs-on</code> labels it declares, executes them in containers on its own host, and reports back. Capacity 1 (one job at a time) is the isolation-preserving default.</p>
+  {{with .NewRunnerToken}}
+  <div class="card border-l-2 border-l-[var(--pd-warn)] p-3 text-sm">
+    <strong class="font-semibold">Copy now — shown once and expires.</strong>
+    <p class="mt-1 break-all mono text-xs" id="runner-registration-token">{{.}}</p>
+    <button type="button" class="btn mt-2" data-copy="#runner-registration-token">copy</button>
+    <p class="muted mt-1 text-[11px]">Pass it to the runner's registration call; it cannot be read back.</p>
+  </div>
+  {{end}}
+  {{if not .RunnersWired}}
+  <div class="card p-4"><p class="muted text-sm">The Threads runner service is not wired on this build.</p></div>
   {{else}}
-  <form class="card p-4" method="post" action="/{{$.Owner}}/{{$.Name}}/settings/webhooks"
-        hx-post="/{{$.Owner}}/{{$.Name}}/settings/webhooks" hx-target="#settings-panel" hx-select="#settings-panel" hx-swap="outerHTML">
-    <h3 class="card-header">Add a webhook</h3>
-    <div class="grid gap-3">
-      <div>
-        <label class="mb-1 block text-sm font-medium" for="webhook-url">URL</label>
-        <input class="input mono text-xs" id="webhook-url" name="url" type="url" required placeholder="https://example.com/hook" value="{{.NewURL}}">
-      </div>
-      <div>
-        <label class="mb-1 block text-sm font-medium" for="webhook-events">Events</label>
-        <input class="input mono" id="webhook-events" name="events" type="text" placeholder="empty = all, * = everything, else a comma list" value="{{.NewEvents}}">
-      </div>
-      <div>
-        <label class="mb-1 block text-sm font-medium" for="webhook-secret">Secret (optional, write-only)</label>
-        <input class="input md:max-w-md" id="webhook-secret" name="secret" type="password" autocomplete="new-password">
-      </div>
-    </div>
-    <div class="mt-2"><button type="submit" class="btn primary">create webhook</button></div>
+  <form class="card p-4" method="post" action="/{{$.Owner}}/{{$.Name}}/settings/runners"
+        hx-post="/{{$.Owner}}/{{$.Name}}/settings/runners" hx-target="#settings-panel" hx-select="#settings-panel" hx-swap="outerHTML">
+    <h3 class="card-header">Mint a registration token</h3>
+    <label class="mb-1 block text-sm font-medium" for="runner-token-name">Runner name (optional)</label>
+    <input class="input md:max-w-md" id="runner-token-name" name="name" type="text" placeholder="build-01">
+    <p class="muted mt-1 text-[11px]">Single use, 15 minutes. The runner declares its own labels at registration.</p>
+    <div class="mt-2"><button type="submit" class="btn primary whitespace-nowrap">mint token</button></div>
     {{if .Error}}<p class="err-line" role="alert">{{.Error}}</p>{{end}}
   </form>
   <section class="card p-4">
-    <h3 class="card-header">Webhooks</h3>
-    {{if .Webhooks}}
+    <h3 class="card-header">Runners</h3>
+    {{if .Runners}}
     <div class="overflow-x-auto">
       <table class="data-table">
-        <thead><tr><th>url</th><th>events</th><th>active</th><th>secret</th><th></th></tr></thead>
+        <thead><tr><th>id</th><th>name</th><th>labels</th><th>version</th><th>state</th><th>last seen</th><th></th></tr></thead>
         <tbody>
-          {{range .Webhooks}}
+          {{range .Runners}}
           <tr>
-            <td class="break-all mono text-xs">{{.URL}}</td>
-            <td class="muted mono text-xs">{{if .Events}}{{.Events}}{{else}}all{{end}}</td>
-            <td>{{if .Active}}<span class="chip-open">active</span>{{else}}<span class="chip-closed">off</span>{{end}}</td>
-            <td>{{if .SecretSet}}<span class="chip-neutral">set</span>{{else}}<span class="muted">—</span>{{end}}</td>
+            <td class="mono text-xs">{{.ID}}</td>
+            <td class="mono font-medium">{{if .Name}}{{.Name}}{{else}}—{{end}}</td>
+            <td class="muted mono text-xs">{{if .Labels}}{{.Labels}}{{else}}—{{end}}</td>
+            <td class="muted mono text-xs">{{if .Version}}{{.Version}}{{else}}—{{end}}</td>
+            <td>{{if eq .State "active"}}<span class="chip-open">active</span>{{else if eq .State "revoked"}}<span class="chip-closed">revoked</span>{{else}}<span class="chip chip-neutral">pending</span>{{end}}</td>
+            <td class="tabular muted text-[11px] mono">{{if .LastSeenAt}}{{.LastSeenAt}}{{else}}never{{end}}</td>
             <td>
-              <div class="flex flex-wrap gap-2">
-                <form method="post" action="/{{$.Owner}}/{{$.Name}}/settings/webhooks/{{.ID}}"
-                      hx-post="/{{$.Owner}}/{{$.Name}}/settings/webhooks/{{.ID}}" hx-target="#settings-panel" hx-select="#settings-panel" hx-swap="outerHTML">
-                  <input type="hidden" name="webhook_action" value="ping">
-                  <button type="submit" class="link text-xs">ping</button>
-                </form>
-                <form method="post" action="/{{$.Owner}}/{{$.Name}}/settings/webhooks/{{.ID}}"
-                      hx-post="/{{$.Owner}}/{{$.Name}}/settings/webhooks/{{.ID}}" hx-target="#settings-panel" hx-select="#settings-panel" hx-swap="outerHTML">
-                  <input type="hidden" name="webhook_action" value="delete">
-                  <button type="submit" class="link text-xs">delete</button>
-                </form>
-              </div>
+              {{if ne .State "revoked"}}
+              <form method="post" action="/{{$.Owner}}/{{$.Name}}/settings/runners/{{.ID}}"
+                    hx-post="/{{$.Owner}}/{{$.Name}}/settings/runners/{{.ID}}" hx-target="#settings-panel" hx-select="#settings-panel" hx-swap="outerHTML">
+                <input type="hidden" name="runner_action" value="revoke">
+                <button type="submit" class="link text-xs">revoke</button>
+              </form>
+              {{end}}
             </td>
           </tr>
-          {{if .Recent}}
-          <tr>
-            <td colspan="5" class="muted text-[11px]">
-              <span class="font-medium">recent deliveries</span>
-              <ul class="mt-1 space-y-0.5">
-                {{range .Recent}}<li><span class="mono">#{{.Seq}}</span> <span class="mono">{{.Event}}</span> → {{.Status}} · {{.At}}{{if .Error}} · <span class="text-[var(--pd-danger)]">{{.Error}}</span>{{end}}</li>{{end}}
-              </ul>
-            </td>
-          </tr>
-          {{else if .LastPing}}<tr><td colspan="5" class="muted text-[11px]">{{.LastPing}}</td></tr>{{end}}
           {{end}}
         </tbody>
       </table>
     </div>
-    {{else}}<p class="muted text-sm">no webhooks.</p>{{end}}
+    {{else}}<p class="muted text-sm">no runners registered.</p>{{end}}
   </section>
   {{end}}
 </div>
 {{else}}{{template "settings-repo-notwired" .}}{{end}}
 {{end}}
 
-{{/* ---- WAL (shared partial GAP) ----------------------------------------- */}}
+{{/* ---- Secrets (Threads, 15 §5.3) --------------------------------------- */}}
+{{define "settings-repo-secrets"}}
+{{with .AdminData}}
+<div class="space-y-4">
+  <p class="muted text-sm">Write-only: values are encrypted at rest (AES-GCM) and can never be read back — the list shows names only. A secret reaches a job payload only for a <strong>trusted</strong> run; fork pull requests never receive them. Logs are masked best effort.</p>
+  {{if not .SecretsWired}}
+  <div class="card p-4"><p class="muted text-sm">The Threads secret store is not wired on this build.</p></div>
+  {{else if not .SecretsEnabled}}
+  <div class="card border-l-2 border-l-[var(--pd-warn)] p-4 text-sm">
+    <strong class="font-semibold">Secrets are unavailable.</strong>
+    <p class="muted mt-1 text-xs">Set <code class="mono">server.secrets_key</code> (or <code class="mono">server.auth.session_secret</code>) to enable at-rest encryption.</p>
+  </div>
+  {{else}}
+  <form class="card p-4" method="post" action="/{{$.Owner}}/{{$.Name}}/settings/secrets"
+        hx-post="/{{$.Owner}}/{{$.Name}}/settings/secrets" hx-target="#settings-panel" hx-select="#settings-panel" hx-swap="outerHTML">
+    <h3 class="card-header">Add or replace a secret</h3>
+    <div class="grid gap-3">
+      <div>
+        <label class="mb-1 block text-sm font-medium" for="secret-name">Name</label>
+        <input class="input mono md:max-w-md" id="secret-name" name="secret_name" type="text" required placeholder="DEPLOY_TOKEN" value="{{.NewName}}" pattern="[A-Za-z_][A-Za-z0-9_]{0,63}">
+      </div>
+      <div>
+        <label class="mb-1 block text-sm font-medium" for="secret-value">Value</label>
+        <input class="input md:max-w-md" id="secret-value" name="secret_value" type="password" required autocomplete="new-password">
+        <p class="muted mt-1 text-[11px]">Stored sealed; submitting an existing name replaces its value.</p>
+      </div>
+    </div>
+    <div class="mt-2"><button type="submit" class="btn primary whitespace-nowrap">save secret</button></div>
+    {{if .Error}}<p class="err-line" role="alert">{{.Error}}</p>{{end}}
+  </form>
+  <section class="card p-4">
+    <h3 class="card-header">Secrets</h3>
+    {{if .Secrets}}
+    <div class="overflow-x-auto">
+      <table class="data-table">
+        <thead><tr><th>name</th><th>value</th><th>updated</th><th></th></tr></thead>
+        <tbody>
+          {{range .Secrets}}
+          <tr>
+            <td class="mono font-medium">{{.Name}}</td>
+            <td class="muted mono text-xs">•••••• (set)</td>
+            <td class="tabular muted text-[11px] mono">{{.UpdatedAt}}</td>
+            <td>
+              <form method="post" action="/{{$.Owner}}/{{$.Name}}/settings/secrets/{{.Name}}"
+                    hx-post="/{{$.Owner}}/{{$.Name}}/settings/secrets/{{.Name}}" hx-target="#settings-panel" hx-select="#settings-panel" hx-swap="outerHTML">
+                <input type="hidden" name="secret_action" value="delete">
+                <button type="submit" class="link text-xs">delete</button>
+              </form>
+            </td>
+          </tr>
+          {{end}}
+        </tbody>
+      </table>
+    </div>
+    {{else}}<p class="muted text-sm">no secrets stored.</p>{{end}}
+  </section>
+  {{end}}
+</div>
+{{else}}{{template "settings-repo-notwired" .}}{{end}}
+{{end}}
+
+{{/* ---- Webhooks --------------------------------------------------------- */}}
+{{define "settings-repo-webhooks"}}
+{{template "webhooks-panel" .}}
+{{end}}
+
+{{/* ---- WAL (the real panel, WP9 G16) ------------------------------------ */}}
 {{define "settings-repo-wal"}}
-<section class="card p-4" data-wal-settings>
-  <h3 class="card-header">WAL</h3>
-  <p class="muted text-sm">The WAL panel is the repo group's shared partial (<code class="mono text-xs">templates/partials/wal-panel.html</code>); it renders here once that partial lands (specs/settings.md §2.9). WAL data is available at <a class="link" href="/{{.Owner}}/{{.Name}}/wal">the repo WAL view</a>.</p>
-</section>
+{{with .WAL}}
+<div class="space-y-4">
+  <section class="card overflow-hidden">
+    <div class="flex flex-wrap items-center gap-2 border-b border-[var(--pd-line)] px-3 py-1.5">
+      <h3 class="eyebrow">WAL health</h3>
+      <span class="{{.HealthTone}}">{{.Health}}</span>
+    </div>
+    <div class="space-y-1.5 px-3 py-2.5">
+      {{if .ServedBy}}
+      <p class="flex flex-wrap items-baseline gap-x-2 font-mono text-[11px]">
+        <span class="eyebrow">served by</span>
+        <span class="text-[var(--pd-text-2)]">{{.ServedBy}}</span>
+      </p>
+      {{end}}
+      {{if .CloneURL}}
+      <p class="flex flex-wrap items-baseline gap-x-2 font-mono text-[11px]">
+        <span class="eyebrow">clone</span>
+        <span class="break-all text-[var(--pd-text-2)]">{{.CloneURL}}</span>
+      </p>
+      {{end}}
+      <p class="font-mono text-[11px] text-[var(--pd-text-2)]">{{.Packs}}</p>
+      <p class="font-mono text-[11px]"><a class="link" href="/{{.Owner}}/{{.Name}}/wal">the full WAL view →</a></p>
+    </div>
+  </section>
+
+  <section class="card p-4">
+    <h3 class="card-header">Manifest</h3>
+    {{if .Facts}}
+    <dl class="grid grid-cols-1 gap-x-6 gap-y-1 text-sm sm:grid-cols-[minmax(10rem,30%)_1fr]">
+      {{range .Facts}}<dt class="muted mono text-[11px] break-all">{{.Key}}</dt><dd class="break-words mono text-xs">{{.Value}}</dd>{{end}}
+    </dl>
+    {{else}}<p class="muted text-sm">no manifest facts reported.</p>{{end}}
+  </section>
+
+  {{template "repo-wal-ops" .Panel}}
+</div>
+{{else}}{{template "settings-repo-notwired" .}}{{end}}
 {{end}}
 
 {{/* ---- Danger Zone ------------------------------------------------------ */}}
@@ -760,11 +1033,11 @@
     {{if .Note}}<p class="mt-2 text-sm text-[var(--pd-ok)]">{{.Note}}</p>{{end}}
   </form>
 
-  <section class="card p-4" aria-label="Effective policy">
+  <section class="card min-w-0 p-4" aria-label="Effective policy">
     <h3 class="card-header">Effective policy</h3>
     {{if .Rules}}
-    <div class="overflow-x-auto">
-      <table class="data-table">
+    <div class="min-w-0 overflow-x-auto">
+      <table class="data-table wrap">
         <thead><tr><th>rule</th><th>refs</th><th>effect</th></tr></thead>
         <tbody>
           {{range .Rules}}<tr>

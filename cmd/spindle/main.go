@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/signal"
 	"runtime/debug"
+	"strings"
 	"syscall"
 )
 
@@ -54,6 +55,7 @@ type cli struct {
 	configPath string    // explicit --config or the env pointer ("" = default location)
 	dataDir    string    // explicit --data-dir ("" = resolve from env/defaults)
 	server     string    // explicit --server for the API commands ("" = env/state/default)
+	repo       string    // explicit -R OWNER/REPO ("" = SPINDLE_REPO/env or the positional)
 	out        io.Writer // stdout override for tests (nil = os.Stdout)
 	errOut     io.Writer // stderr override for tests (nil = os.Stderr)
 }
@@ -114,6 +116,7 @@ func init() {
 		{"checks", "commit checks and statuses", groupRunner(checksGroup)},
 		{"packages", "OCI packages (WP1)", groupRunner(packagesGroup)},
 		{"threads", "CI runs (WP10)", groupRunner(threadsGroup)},
+		{"runner", "Threads runners: mint/list/revoke", groupRunner(runnerGroup)},
 		{"api", "one authenticated API request", runAPI},
 		{"completion", "generate shell completion (bash|zsh|fish)", runCompletion},
 		{"help", "print this help", runHelp},
@@ -171,17 +174,23 @@ var usageText = `Commands:
 Run "spindle help" or "spindle <command> -h" for details.
 `
 
-// peelGlobals removes --config PATH / --data-dir PATH / --help / -h from
-// anywhere in argv (both positions accepted, last wins) into c.
+// peelGlobals removes --config PATH / --data-dir PATH / --server URL / -R REPO
+// from anywhere in argv (last wins) into c. A `-h`/`--help` BEFORE the first
+// command token prints the global table; after one it is left for that
+// command's own FlagSet, which prints that command's usage and flags.
 func peelGlobals(argv []string, c *cli) []string {
 	var rest []string
+	seenCommand := false
 	for i := 0; i < len(argv); i++ {
 		arg := argv[i]
 		switch arg {
 		case "--help", "-h":
-			fmt.Print(helpText)
-			os.Exit(exitOK)
-		case "--config", "--data-dir", "--server":
+			if !seenCommand {
+				fmt.Print(helpText)
+				os.Exit(exitOK)
+			}
+			rest = append(rest, arg)
+		case "--config", "--data-dir", "--server", "-R":
 			if i+1 >= len(argv) {
 				fmt.Fprintf(os.Stderr, "spindle: %s requires a value\n", arg)
 				os.Exit(exitArg)
@@ -191,6 +200,8 @@ func peelGlobals(argv []string, c *cli) []string {
 				c.configPath = argv[i+1]
 			case "--data-dir":
 				c.dataDir = argv[i+1]
+			case "-R":
+				c.repo = argv[i+1]
 			default:
 				c.server = argv[i+1]
 			}
@@ -202,8 +213,13 @@ func peelGlobals(argv []string, c *cli) []string {
 				c.dataDir = v
 			} else if v, ok := cutFlag(arg, "--server="); ok {
 				c.server = v
+			} else if v, ok := cutFlag(arg, "-R="); ok {
+				c.repo = v
 			} else {
 				rest = append(rest, arg)
+				if !strings.HasPrefix(arg, "-") {
+					seenCommand = true
+				}
 			}
 		}
 	}
@@ -219,7 +235,7 @@ func cutFlag(arg, prefix string) (string, bool) {
 
 const helpText = `spindle — git over HTTP on a WAL engine
 
-Usage: spindle [--config PATH] [--data-dir PATH] [--server URL] <command>
+Usage: spindle [--config PATH] [--data-dir PATH] [--server URL] [-R OWNER/REPO] <command>
 
 Commands:
   serve                                  run the server (default)
@@ -255,14 +271,16 @@ API client (WP11; --json everywhere, exit 0 ok · 1 error · 2 usage · 3 not fo
   user whoami|list|show|keys list|add|remove
   org list|show|create · org member list|add|remove · org team list|create|add-repo
   issue list|show|create|comment|close|reopen
-  pr list|show|create|merge|review|comment|checks
+  pr list|show|diff|create|close|merge|review|comment|checks
   release list|show|create|delete|upload
   checks list|status REPO [REF]
-  packages list|show|delete · threads list|show|run|cancel
+  packages list|show|delete · threads list|show|run · runner serve|token|list|revoke
   api [-X METHOD] [-d DATA] [-H 'K: V'] PATH
   completion bash|zsh|fish
   help
 
+Every subcommand answers '--help' with its own usage and flags.
+Repo: the OWNER/REPO positional, or -R OWNER/REPO / SPINDLE_REPO.
 Server/token: --server URL, SPINDLE_SERVER (default http://127.0.0.1:8080),
 SPINDLE_TOKEN, else the "spindle auth login" state file (0600).
 

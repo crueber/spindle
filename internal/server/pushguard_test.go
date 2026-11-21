@@ -15,6 +15,7 @@ package server
 // credential (401).
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"io"
@@ -24,6 +25,7 @@ import (
 	"testing"
 
 	"github.com/crueber/spindle/internal/config"
+	"github.com/crueber/spindle/internal/git"
 	"github.com/crueber/spindle/internal/identity"
 	"github.com/crueber/spindle/internal/server/auth"
 	"github.com/crueber/spindle/internal/sshd"
@@ -335,5 +337,36 @@ func TestPushGateNilLegacy(t *testing.T) {
 	}
 	if aerr := s.checkPushCreate(context.Background(), "o", auth.Principal{Name: "w", Write: true}); aerr != nil {
 		t.Errorf("legacy auto-create stays open: %v", aerr)
+	}
+}
+
+// TestPushFromShallowCloneNamesCauseAndRemedy pins closing-audit Observation 2:
+// a push from a shallow clone used to die as "malformed push request"/HTTP 400.
+// It is now refused on the git wire with an ERR pkt naming the cause and the
+// fetch-depth remedy, so a runner job log shows what to fix.
+func TestPushFromShallowCloneNamesCauseAndRemedy(t *testing.T) {
+	fx := pushGuardSetup(t, true)
+	bob := auth.Principal{Name: "bob@example.com", Write: true}
+	oid := strings.Repeat("1", 40)
+	body := git.Pkt("shallow " + oid)
+	body = append(body, git.Flush()...)
+
+	req := pushGuardReq(t, "POST", "http://x/acme/r.git/git-receive-pack", "tok-bob", bytes.NewReader(body))
+	rec := httptest.NewRecorder()
+	fx.srv.receivePack(rec, req, mustRepoID(t, "acme/r"), bob)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("shallow push = %d %s, want 200 + pkt ERR", rec.Code, rec.Body.String())
+	}
+	msg, ok := pktErrOf(rec.Body.String())
+	if !ok {
+		t.Fatalf("shallow refusal is not a pkt ERR: %q", rec.Body.String())
+	}
+	for _, want := range []string{"shallow", "fetch-depth: 0", "git fetch --unshallow"} {
+		if !strings.Contains(msg, want) {
+			t.Fatalf("refusal %q missing %q", msg, want)
+		}
+	}
+	if fx.eng.published != 0 {
+		t.Fatalf("shallow push published %d times", fx.eng.published)
 	}
 }

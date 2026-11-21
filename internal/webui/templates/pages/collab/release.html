@@ -1,7 +1,7 @@
 {{define "content"}}
 {{with .Data}}{{$d := .}}
-<div class="release-page">
-  <header class="mb-4 border-b border-[var(--pd-line)] pb-3">
+<div class="release-page min-w-0">
+  <header class="mb-4 min-w-0 border-b border-[var(--pd-line)] pb-3">
     <div class="flex flex-wrap items-start gap-2">
       <h1 class="min-w-0 flex-1 text-xl font-semibold tracking-tight">{{if .Name}}{{.Name}}{{else}}<span class="mono">{{.Tag}}</span>{{end}}</h1>
       <div class="flex flex-wrap gap-2" role="group" aria-label="Release actions">
@@ -61,7 +61,7 @@
   </section>
   {{end}}
 
-  <section class="card p-4" aria-label="Release notes">
+  <section class="card min-w-0 p-4" aria-label="Release notes">
     {{if .Body}}<div class="markdown-body">{{mdat .Body .Repo.Owner .Repo.Name .Tag ""}}</div>
     {{else}}<p class="muted text-sm">No release notes yet.</p>{{end}}
   </section>
@@ -77,10 +77,10 @@
   </section>
   {{end}}
 
-  <section class="card mt-4 p-4" id="assets" aria-label="Assets">
+  <section class="card mt-4 min-w-0 p-4" id="assets" aria-label="Assets">
     <h2 class="card-header">Assets ({{.AssetCount}})</h2>
     {{if .Assets}}
-    <div class="overflow-x-auto">
+    <div class="relative min-w-0 overflow-x-auto">
       <table class="data-table">
         <thead><tr><th>Name</th><th>Size</th><th class="tabular">Downloads</th><th>SHA-256</th><th><span class="sr-only">Actions</span></th></tr></thead>
         <tbody>

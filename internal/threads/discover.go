@@ -28,29 +28,73 @@ type GitReader interface {
 	ResolveRef(ctx context.Context, repo, ref string) (string, error)
 }
 
-// WorkflowFile is one parsed workflow file at the selected revision.
+// WorkflowFile is one workflow file at the selected revision. A file that does
+// not parse is still a WorkflowFile: Error carries the reason and Workflow is
+// nil. Parsing is per-file, so one bad file never disables the others (15
+// §2.1: the all-or-nothing failure mode is a bug, not a policy).
 type WorkflowFile struct {
 	// Path is repository-relative (".spindle/workflows/ci.yml").
 	Path string
 	// Name is the display name: the YAML `name`, falling back to the
-	// basename without its extension.
+	// basename without its extension (the stem when the file is broken).
 	Name string
 	// Digest is the sha256 of the file bytes (the run header pins it, so a
 	// run can be audited against the exact workflow content).
 	Digest string
-	// Workflow is the parsed, validated document.
+	// Workflow is the parsed, validated document; nil when Error is set.
 	Workflow *workflow.Workflow
+	// Error is the parse error for THIS file ("" when it parsed).
+	Error string
+}
+
+// State projects one file onto its wire/UI shape (path, name, triggers, error,
+// and — for a workflow_dispatch file — the typed input schema the Run workflow
+// form renders).
+func (f *WorkflowFile) State() *WorkflowState {
+	st := &WorkflowState{Path: f.Path, Name: f.Name, Digest: f.Digest, Triggers: []string{}}
+	if f.Workflow != nil {
+		st.Triggers = f.Workflow.Events()
+		if st.Triggers == nil {
+			st.Triggers = []string{}
+		}
+		st.Inputs = dispatchInputs(f)
+	}
+	st.Error = f.Error
+	return st
+}
+
+// WorkflowState is GET …/api/threads/workflows's per-file entry and the Threads
+// page's workflow row: the per-workflow error object the audit asked for.
+type WorkflowState struct {
+	Path     string   `json:"path"`
+	Name     string   `json:"name"`
+	Digest   string   `json:"digest,omitempty"`
+	Triggers []string `json:"triggers"`
+	// Inputs is the declared workflow_dispatch schema (empty for a file
+	// without the manual trigger). The Run workflow control renders its typed
+	// fields from this.
+	Inputs []DispatchInput `json:"inputs,omitempty"`
+	// Error is the parse error for this file; empty when it parsed.
+	Error string `json:"error,omitempty"`
+}
+
+// WorkflowList is GET …/api/threads/workflows: the discovered files at one
+// commit and their parse state (source of truth is git; nothing is persisted).
+type WorkflowList struct {
+	Commit    string           `json:"commit"`
+	Workflows []*WorkflowState `json:"workflows"`
 }
 
 // maxWorkflowBytes bounds one workflow file (a control-plane object, never a
 // build input; 1 MiB is far more than any executable workflow needs).
 const maxWorkflowBytes = 1 << 20
 
-// Discover reads, parses and validates every workflow file at commit. A missing
-// directory is not an error (nil, nil — the no-workflow repo is a silent
-// no-op), but a malformed file IS a visible error: a workflow that cannot
-// execute must never enqueue a job (15 §1). The error names the file and
-// wraps ErrUnprocessable.
+// Discover reads and parses every workflow file at commit, independently. A
+// missing directory is not an error (nil, nil — the no-workflow repo is a
+// silent no-op). A malformed file is recorded on its WorkflowFile.Error and
+// does NOT fail the call: the other workflows stay usable and the Threads page
+// surfaces the error per file (15 §2.1). Only infrastructure failures (unreadable
+// tree/blob, git down) are returned.
 func Discover(ctx context.Context, g GitReader, repo, commit string) ([]*WorkflowFile, error) {
 	if g == nil {
 		return nil, fmt.Errorf("%w: git backend not wired", ErrUnavailable)
@@ -69,22 +113,30 @@ func Discover(ctx context.Context, g GitReader, repo, commit string) ([]*Workflo
 		}
 		raw, rerr := g.ReadFile(ctx, repo, commit, p)
 		if rerr != nil {
+			if errors.Is(rerr, ErrNotFound) {
+				// The tree listed a blob that vanished from the serving
+				// copy: a per-file error, not a repo-wide outage.
+				files = append(files, &WorkflowFile{Path: p, Name: workflowStem(p), Error: rerr.Error()})
+				continue
+			}
 			return nil, fmt.Errorf("%w: read %s: %v", ErrUnavailable, p, rerr)
 		}
+		sum := sha256.Sum256(raw)
+		f := &WorkflowFile{Path: p, Name: workflowStem(p), Digest: hex.EncodeToString(sum[:])}
 		if len(raw) > maxWorkflowBytes {
-			return nil, fmt.Errorf("%w: %s is larger than %d bytes", ErrUnprocessable, p, maxWorkflowBytes)
+			f.Error = fmt.Sprintf("%v: %s is larger than %d bytes", ErrUnprocessable, p, maxWorkflowBytes)
+			files = append(files, f)
+			continue
 		}
 		w, perr := workflow.Parse(raw)
 		if perr != nil {
-			return nil, fmt.Errorf("%w: %s: %v", ErrUnprocessable, p, perr)
+			f.Error = perr.Error()
+			files = append(files, f)
+			continue
 		}
-		sum := sha256.Sum256(raw)
-		files = append(files, &WorkflowFile{
-			Path:     p,
-			Name:     workflowName(p, w),
-			Digest:   hex.EncodeToString(sum[:]),
-			Workflow: w,
-		})
+		f.Name = workflowName(p, w)
+		f.Workflow = w
+		files = append(files, f)
 	}
 	if len(files) == 0 {
 		return nil, nil // no workflow files: the no-workflow repo is a no-op
@@ -108,13 +160,18 @@ func workflowPath(p string) bool {
 	return ext == ".yml" || ext == ".yaml"
 }
 
+// workflowStem is the file name without its YAML extension (the display name
+// of an unparseable file, where the YAML `name` is unavailable).
+func workflowStem(p string) string {
+	return strings.TrimSuffix(strings.TrimSuffix(path.Base(p), ".yml"), ".yaml")
+}
+
 // workflowName prefers the YAML name, then the file stem.
 func workflowName(p string, w *workflow.Workflow) string {
 	if name := strings.TrimSpace(w.Name); name != "" {
 		return name
 	}
-	base := path.Base(p)
-	return strings.TrimSuffix(strings.TrimSuffix(base, ".yml"), ".yaml")
+	return workflowStem(p)
 }
 
 // SelectFiles applies the trigger match (15 §1: push, pull_request,
@@ -122,10 +179,13 @@ func workflowName(p string, w *workflow.Workflow) string {
 // branch is the push branch or the PR target branch; an empty branch makes a
 // branch-filtered trigger match everything (workflow.Fires' documented
 // empty-filter rule). want restricts a dispatch to one file by basename or
-// repository-relative path.
+// repository-relative path. Files that failed to parse never match.
 func SelectFiles(files []*WorkflowFile, event, branch, want string) []*WorkflowFile {
 	out := make([]*WorkflowFile, 0, len(files))
 	for _, f := range files {
+		if f.Workflow == nil {
+			continue // per-file isolation: a broken file creates no run
+		}
 		if !f.Workflow.Fires(event, branch) {
 			continue
 		}
@@ -145,4 +205,21 @@ func matchesWorkflow(f *WorkflowFile, want string) bool {
 		return true
 	}
 	return want == f.Path || want == path.Base(f.Path)
+}
+
+// brokenWorkflowFiles returns the files at the selected revision that failed to
+// parse (want restricts to one dispatch target; empty means every file). They
+// are reported per file and never block the files that did parse.
+func brokenWorkflowFiles(files []*WorkflowFile, want string) []*WorkflowFile {
+	var out []*WorkflowFile
+	for _, f := range files {
+		if f.Error == "" {
+			continue
+		}
+		if want != "" && !matchesWorkflow(f, want) {
+			continue
+		}
+		out = append(out, f)
+	}
+	return out
 }

@@ -32,6 +32,7 @@ RUN pnpm run build \
     && test -f dist/app.css \
     && test -f dist/ui.js \
     && test -f dist/repos.js \
+    && test ! -e dist/htmx-ext-sse.js \
     && if ! grep -q 'max-w-6xl' dist/app.css || ! grep -q '\.flex{' dist/app.css; then \
          echo "ERROR: dist/app.css is missing the utility classes used by the Go templates" >&2; \
          echo "       Tailwind scanned no templates — check /src/internal/webui/templates and the @source paths in web/src/app.css." >&2; \

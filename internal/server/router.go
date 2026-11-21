@@ -47,8 +47,8 @@ func (s *Server) apiServe(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	p = s.authSvc.identityForward(r, p)
-	if p.Anonymous && s.cfg != nil && s.cfg.Server.Auth.Mode == "oidc" && isWriteMethod(r) {
-		w.Header().Set("WWW-Authenticate", `Bearer realm="walgit"`)
+	if p.Anonymous && s.cfg != nil && s.cfg.Server.Auth.Mode == "oidc" && isWriteMethod(r) && !runnerProtocolPath(r.URL.Path) {
+		w.Header().Set("WWW-Authenticate", s.authChallenge())
 		plainStatus(w, http.StatusUnauthorized, "authentication required")
 		return
 	}
@@ -65,6 +65,17 @@ func isWriteMethod(r *http.Request) bool {
 		return false
 	}
 	return true
+}
+
+// runnerProtocolPath reports the Threads runner protocol prefix (15 §3): the
+// machine surface authenticates with its own credentials — a registration token
+// in the body, a runner bearer (wrt_) or an attempt bearer (wjt_) — so the
+// oidc anonymous-write assert must not reject the one call that legitimately
+// carries no bearer (register). Every protocol handler authorises itself; the
+// path grants nothing.
+func runnerProtocolPath(path string) bool {
+	return strings.HasPrefix(path, "/api/v1/threads/runners/") ||
+		strings.HasPrefix(path, "/api/v1/threads/jobs/")
 }
 
 // gated wraps a handler for the gated group (requireAuth = read).
@@ -240,6 +251,7 @@ func (s *Server) authFlow() http.Handler {
 	// URL.Path is NOT stripped under chi Mount, so the mux needs full paths.
 	m := http.NewServeMux()
 	m.HandleFunc("GET /_auth/login", s.authLogin)
+	m.HandleFunc("POST /_auth/token", s.authTokenSignIn)
 	m.HandleFunc("GET /_auth/callback", s.authCallback)
 	m.HandleFunc("GET /_auth/claimed", s.authClaimed)
 	m.HandleFunc("GET /_auth/logout", s.authLogout)

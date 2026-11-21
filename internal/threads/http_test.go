@@ -99,6 +99,61 @@ func TestAPIListAndGet(t *testing.T) {
 	}
 }
 
+// TestAPIWorkflows pins GET …/api/threads/workflows (the per-file parse state
+// and error object) — including the one-bad-file case.
+func TestAPIWorkflows(t *testing.T) {
+	e, h, _ := newHTTP(t)
+	e.git.refs["HEAD"] = testSHA
+	e.git.add(testSHA, ".spindle/workflows/broken.yml", "name: broken\non: [\n")
+	rec := do(h, http.MethodGet, "/o/r/api/threads/workflows", "")
+	if rec.Code != 200 {
+		t.Fatalf("workflows = %d: %s", rec.Code, rec.Body.String())
+	}
+	if rec.Header().Get("Cache-Control") != "no-store" {
+		t.Fatal("workflows GETs must be no-store")
+	}
+	var list WorkflowList
+	if err := json.Unmarshal(rec.Body.Bytes(), &list); err != nil {
+		t.Fatalf("json: %v", err)
+	}
+	if list.Commit != testSHA || len(list.Workflows) != 2 {
+		t.Fatalf("list = %+v", list)
+	}
+	var broken, good *WorkflowState
+	for _, wf := range list.Workflows {
+		if wf.Path == ".spindle/workflows/broken.yml" {
+			broken = wf
+		} else {
+			good = wf
+		}
+	}
+	if broken == nil || broken.Error == "" || broken.Name != "broken" {
+		t.Fatalf("broken = %+v", broken)
+	}
+	if good == nil || good.Error != "" || len(good.Triggers) != 4 || good.Name != "CI" {
+		t.Fatalf("good = %+v", good)
+	}
+	// An explicit commit is honoured; a malformed one is a 400.
+	if rec := do(h, http.MethodGet, "/o/r/api/threads/workflows?commit=nope", ""); rec.Code != 400 {
+		t.Fatalf("bad commit = %d", rec.Code)
+	}
+	if rec := do(h, http.MethodPost, "/o/r/api/threads/workflows", "{}"); rec.Code != 405 {
+		t.Fatalf("POST workflows = %d", rec.Code)
+	}
+	if rec := do(h, http.MethodGet, "/not-a-repo/api/threads/workflows", ""); rec.Code != 404 {
+		t.Fatalf("bad repo = %d", rec.Code)
+	}
+}
+
+func TestAPIListEmptyRepoWorkflows(t *testing.T) {
+	// A repo with no resolvable HEAD lists no workflows (not a 404).
+	e, h, _ := newHTTP(t)
+	e.git.refs = map[string]string{}
+	if rec := do(h, http.MethodGet, "/o/r/api/threads/workflows", ""); rec.Code != 200 {
+		t.Fatalf("empty repo workflows = %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
 func TestAPIPermissionMatrix(t *testing.T) {
 	_, h, cur := newHTTP(t)
 	// public repo: anonymous reads.
@@ -182,25 +237,73 @@ func TestAPIUnavailable(t *testing.T) {
 // TestExposedCoversRoutes pins the template↔route correspondence (no phantom
 // entries, nothing missing) the sibling packages' discovery tests enforce.
 func TestExposedCoversRoutes(t *testing.T) {
-	e, h, _ := newHTTP(t)
+	e, h, cur := newHTTP(t)
+	*cur = auth.Principal{Name: "writer", Admin: true}
 	run := e.mustCreate(t)[0]
-	samples := map[string]string{
-		"/{owner}/{repo}/api/threads":       "/o/r/api/threads",
-		"/{owner}/{repo}/api/threads/{run}": "/o/r/api/threads/" + run.ID,
+	jid := "j-build"
+	minted, merr := e.svc.MintRegistrationToken(ctx(), "o/r", *cur)
+	if merr != nil {
+		t.Fatalf("mint registration token: %v", merr)
+	}
+	type sample struct {
+		method string
+		path   string
+		// claimed-only routes (the runner protocol authenticates with its own
+		// token, so an anonymous probe is a real 401 — the sample only asserts
+		// the surface claims the path).
+		claimedOnly bool
+	}
+	samples := map[string]sample{
+		"/{owner}/{repo}/api/threads":               {http.MethodGet, "/o/r/api/threads", false},
+		"/{owner}/{repo}/api/threads/workflows":     {http.MethodGet, "/o/r/api/threads/workflows", false},
+		"/{owner}/{repo}/api/threads/{run}":         {http.MethodGet, "/o/r/api/threads/" + run.ID, false},
+		"/{owner}/{repo}/api/threads/{run}/cancel":  {http.MethodPost, "/o/r/api/threads/" + run.ID + "/cancel", false},
+		"/{owner}/{repo}/api/threads/{run}/rerun":   {http.MethodPost, "/o/r/api/threads/" + run.ID + "/rerun", false},
+		"/{owner}/{repo}/api/threads/{run}/approve": {http.MethodPost, "/o/r/api/threads/" + run.ID + "/approve", false},
+		"/{owner}/{repo}/api/threads/{run}/deny":    {http.MethodPost, "/o/r/api/threads/" + run.ID + "/deny", false},
+		"/{owner}/{repo}/api/threads/{run}/jobs/{job}/log": {
+			http.MethodGet, "/o/r/api/threads/" + run.ID + "/jobs/" + jid + "/log?accept=json", false},
+		"/{owner}/{repo}/api/threads/runners":             {http.MethodGet, "/o/r/api/threads/runners", false},
+		"/{owner}/{repo}/api/threads/runners/tokens":      {http.MethodPost, "/o/r/api/threads/runners/tokens", false},
+		"/{owner}/{repo}/api/threads/runners/{id}":        {http.MethodDelete, "/o/r/api/threads/runners/" + minted.ID, false},
+		"/{owner}/{repo}/api/threads/secrets":             {http.MethodGet, "/o/r/api/threads/secrets", false},
+		"/{owner}/{repo}/api/threads/secrets/{name}":      {http.MethodPut, "/o/r/api/threads/secrets/TOKEN", false},
+		"/api/v1/threads/runners/register":                {http.MethodPost, "/api/v1/threads/runners/register", true},
+		"/api/v1/threads/runners/declare":                 {http.MethodPost, "/api/v1/threads/runners/declare", true},
+		"/api/v1/threads/runners/fetch":                   {http.MethodPost, "/api/v1/threads/runners/fetch", true},
+		"/api/v1/threads/jobs/{ref}/attempt/{n}/start":    {http.MethodPost, "/api/v1/threads/jobs/jr_x/attempt/1/start", true},
+		"/api/v1/threads/jobs/{ref}/attempt/{n}/log":      {http.MethodPost, "/api/v1/threads/jobs/jr_x/attempt/1/log", true},
+		"/api/v1/threads/jobs/{ref}/attempt/{n}/complete": {http.MethodPost, "/api/v1/threads/jobs/jr_x/attempt/1/complete", true},
+		"/api/v1/threads/jobs/{ref}/attempt/{n}/cancel":   {http.MethodPost, "/api/v1/threads/jobs/jr_x/attempt/1/cancel", true},
 	}
 	if len(samples) != len(ExposedTemplates) {
 		t.Fatalf("ExposedTemplates = %v (samples out of date)", ExposedTemplates)
 	}
 	for _, tmpl := range ExposedTemplates {
-		path, ok := samples[tmpl]
+		s, ok := samples[tmpl]
 		if !ok {
 			t.Fatalf("ExposedTemplates lists %q with no sample", tmpl)
 		}
+		var body *strings.Reader
+		if s.method == http.MethodPut {
+			body = strings.NewReader(`{"value":"x"}`)
+		} else {
+			body = strings.NewReader("")
+		}
 		rec := httptest.NewRecorder()
-		if !h.Handle(rec, httptest.NewRequest(http.MethodGet, path, nil)) {
+		if !h.Handle(rec, httptest.NewRequest(s.method, s.path, body)) {
 			t.Fatalf("%s: Handle returned false (phantom template)", tmpl)
 		}
-		if rec.Code != 200 {
+		if s.claimedOnly {
+			if rec.Code == http.StatusNotFound || rec.Code == http.StatusMethodNotAllowed {
+				t.Fatalf("%s: anonymous protocol probe answered %d", tmpl, rec.Code)
+			}
+			if rec.Header().Get(runnerVersionHeader) != runnerVersion {
+				t.Fatalf("%s: missing %s header", tmpl, runnerVersionHeader)
+			}
+			continue
+		}
+		if rec.Code == http.StatusNotFound || rec.Code == http.StatusMethodNotAllowed {
 			t.Fatalf("%s: sample answered %d", tmpl, rec.Code)
 		}
 	}

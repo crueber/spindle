@@ -1013,6 +1013,16 @@ func pullBadgeView(th *pulls.Thread, pr *pulls.PRDoc) stateChip {
 	return stateChip{"Open", "chip chip-open"}
 }
 
+// issueListChip is the issue list-row state chip (lowercase text convention,
+// same anatomy as pullListChip): open is always shown, so a row never relies on
+// the absence of a chip to mean "open" (F8).
+func issueListChip(state string) stateChip {
+	if state != "open" {
+		return stateChip{"closed", "chip chip-closed"}
+	}
+	return stateChip{"open", "chip chip-open"}
+}
+
 // pullListChip is the list-row chip (lowercase text convention).
 func pullListChip(row pulls.PROut) stateChip {
 	if row.Merged {
@@ -1271,10 +1281,16 @@ func checkStateDot(state string) string {
 	switch state {
 	case checks.StateSuccess:
 		return "inline-block h-2.5 w-2.5 rounded-full bg-emerald-500"
+	case checks.StateInProgress:
+		return "inline-block h-2.5 w-2.5 rounded-full bg-amber-400 animate-pulse"
 	case checks.StatePending:
 		return "inline-block h-2.5 w-2.5 rounded-full bg-amber-400"
 	case checks.StateFailure:
 		return "inline-block h-2.5 w-2.5 rounded-full bg-red-500"
+	case checks.StateCancelled:
+		return "inline-block h-2.5 w-2.5 rounded-full bg-zinc-400"
+	case checks.StateSkipped:
+		return "inline-block h-2.5 w-2.5 rounded-full bg-zinc-500"
 	case checks.StateError:
 		return "inline-block h-2.5 w-2.5 rounded-full bg-red-700"
 	}
@@ -1484,9 +1500,10 @@ type issueListRow struct {
 	Num          int
 	Title        string
 	Href         string
-	Closed       bool
+	Chip         stateChip
 	Labels       []labelChip
 	Milestone    *milestoneChip
+	Author       string
 	CommentCount int
 	UpdatedAt    string
 }
@@ -1700,9 +1717,10 @@ func (s *Server) renderIssues(w http.ResponseWriter, r *http.Request, rc collabR
 			Num:          c.Num,
 			Title:        c.Title,
 			Href:         "/" + rc.Full + "/issues/" + strconv.Itoa(c.Num),
-			Closed:       c.State != "open",
+			Chip:         issueListChip(c.State),
 			Labels:       labelChips(c.Labels, data.Labels),
 			Milestone:    milestoneFor(c.Milestone, data.Milestones, rc.Owner, rc.Name),
+			Author:       c.Author,
 			CommentCount: c.CommentCount,
 			UpdatedAt:    c.UpdatedAt,
 		}
@@ -2246,15 +2264,16 @@ func (s *Server) issueUnreact(w http.ResponseWriter, r *http.Request) {
 // --- pulls list --------------------------------------------------------------
 
 type pullListRow struct {
-	Num       int
-	Title     string
-	Href      string
-	Chip      stateChip
-	BaseRef   string
-	HeadRef   string
-	Author    string
-	Labels    []labelChip
-	UpdatedAt string
+	Num          int
+	Title        string
+	Href         string
+	Chip         stateChip
+	BaseRef      string
+	HeadRef      string
+	Author       string
+	Labels       []labelChip
+	CommentCount int
+	UpdatedAt    string
 }
 
 type pullsListData struct {
@@ -2362,15 +2381,16 @@ func (s *Server) pullList(w http.ResponseWriter, r *http.Request) {
 	}
 	for _, row := range res.Pulls {
 		data.Rows = append(data.Rows, pullListRow{
-			Num:       row.Num,
-			Title:     row.Title,
-			Href:      "/" + rc.Full + "/pull/" + strconv.Itoa(row.Num),
-			Chip:      pullListChip(row),
-			BaseRef:   row.BaseRef,
-			HeadRef:   row.HeadRef,
-			Author:    row.Author,
-			Labels:    labelChips(row.Labels, labels),
-			UpdatedAt: row.UpdatedAt,
+			Num:          row.Num,
+			Title:        row.Title,
+			Href:         "/" + rc.Full + "/pull/" + strconv.Itoa(row.Num),
+			Chip:         pullListChip(row),
+			BaseRef:      row.BaseRef,
+			HeadRef:      row.HeadRef,
+			Author:       row.Author,
+			Labels:       labelChips(row.Labels, labels),
+			CommentCount: row.CommentCount,
+			UpdatedAt:    row.UpdatedAt,
 		})
 	}
 	s.pageRepo(w, r, p, s.collabChrome(r, rc, p), http.StatusOK, "collab/pulls", "Pull requests", data)

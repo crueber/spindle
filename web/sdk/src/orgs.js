@@ -102,6 +102,13 @@ export function attachOrgs(client) {
       /** Deliveries: `GET …/webhooks/{id}/deliveries` → last-25 ring (no-store). */
       deliveries: (org, id, opts) =>
         call(orgPath(org, `/webhooks/${enc(id)}/deliveries`), { method: "GET", ...opts }),
+      /** Redeliver: `POST …/webhooks/{id}/deliveries/{seq}/redeliver` →
+       *  `{delivery, entry}` (owner). 410 when the payload was not retained. */
+      redeliver: (org, id, seq, opts) =>
+        call(orgPath(org, `/webhooks/${enc(id)}/deliveries/${enc(seq)}/redeliver`), {
+          method: "POST",
+          ...opts,
+        }),
     },
 
     members: {      /** Roster. */

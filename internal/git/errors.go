@@ -18,7 +18,16 @@ var (
 	ErrRefConflict = errors.New("ref conflict")
 	// ErrTooManyWants — the fetch exceeded git.max_wants.
 	ErrTooManyWants = errors.New("too many wants")
+	// ErrShallowPush — receive-pack v1 cannot accept a push from a shallow
+	// clone (the request opens with a `shallow <oid>` section). The message
+	// names the cause and the remedy; server layers surface it verbatim.
+	ErrShallowPush = errors.New(ShallowPushReason)
 )
+
+// ShallowPushReason is the operator-facing refusal for a shallow push. It is
+// deliberately actionable: `fetch-depth: 0` is the fix a workflow author
+// needs (docs/features/15_threads.md, checkout/push).
+const ShallowPushReason = "push refused: this clone is shallow, and receive-pack v1 cannot accept a shallow push; fetch the full history first (`git fetch --unshallow`) — in a Threads workflow check out with `with: fetch-depth: 0`"
 
 // RefConflictError carries the CAS detail (04_git.md §4.3): the ref name, the
 // expected old value and the actual current value.

@@ -9,7 +9,6 @@ import (
 	"time"
 
 	"github.com/crueber/spindle/internal/server/auth"
-	"github.com/crueber/spindle/internal/store"
 )
 
 // --- top-level invitations ---------------------------------------------------
@@ -321,25 +320,14 @@ func (h *Handler) routeRepoInvites(w http.ResponseWriter, r *http.Request, owner
 		return true
 	}
 	id := rest[0]
-	raw, _, gerr := store.GetBytes(r.Context(), h.Svc.Store, RepoInviteKey(owner, repo, id), store.GetOptions{})
-	if gerr != nil {
-		if store.IsNotFound(gerr) {
+	if _, derr := h.Svc.DeleteRepoInvite(r.Context(), owner, repo, id); derr != nil {
+		if errors.Is(derr, ErrNotFound) {
 			writePlain(w, http.StatusNotFound, "unknown invitation")
 			return true
 		}
-		writeErr(w, gerr)
-		return true
-	}
-	inv, perr := parseInvite(raw)
-	if perr != nil {
-		writeErr(w, perr)
-		return true
-	}
-	if derr := h.Svc.Store.Delete(r.Context(), RepoInviteKey(owner, repo, id), ""); derr != nil && !store.IsNotFound(derr) {
 		writeErr(w, derr)
 		return true
 	}
-	_ = h.Svc.inboxRemove(r.Context(), normPrincipal(inv.Subject), id)
 	w.WriteHeader(http.StatusNoContent)
 	return true
 }

@@ -89,7 +89,7 @@ type FormsIdentity interface {
 // ListLabels/ListMilestones are the GAP named in the file header: the real
 // *issues.Service answers them only through unexported reads today.
 type FormsIssues interface {
-	CreateIssue(ctx context.Context, owner, repo string, actor auth.Principal, title, body string) (*issues.Thread, *issues.Event, error)
+	CreateIssue(ctx context.Context, owner, repo string, actor auth.Principal, title, body string, meta *issues.IssueMeta) (*issues.Thread, *issues.Event, error)
 	ListIssues(ctx context.Context, owner, repo string, p auth.Principal, f issues.ListFilter) (*issues.ListResult, error)
 	ListLabels(ctx context.Context, owner, repo string) ([]issues.Label, error)
 	CreateLabel(ctx context.Context, owner, repo string, actor auth.Principal, name, color, desc string) (*issues.Label, error)
@@ -603,6 +603,13 @@ func formsErrStatus(err error) int {
 		return http.StatusForbidden
 	case errors.Is(err, issues.ErrUnauthorized), errors.Is(err, pulls.ErrUnauthorized), errors.Is(err, releases.ErrUnauthorized):
 		return http.StatusUnauthorized
+	case errors.Is(err, identity.ErrTooLarge):
+		// The avatar-upload verbs' cap (identity.PutUserAvatarBytes /
+		// PutOrgAvatar) answers 413 like the API twin.
+		return http.StatusRequestEntityTooLarge
+	case errors.Is(err, identity.ErrUnsupportedMedia):
+		// Magic-sniff allowlist miss (415); SVG is rejected by design.
+		return http.StatusUnsupportedMediaType
 	case errors.Is(err, pulls.ErrUnavailable), errors.Is(err, releases.ErrUnavailable):
 		return http.StatusServiceUnavailable
 	}
@@ -637,10 +644,15 @@ func (s *Server) formsFail(w http.ResponseWriter, r *http.Request, p auth.Princi
 }
 
 // setFormsErr writes the inline error into a page model. Every model embeds
-// formsBase, whose setErr method the pointer inherits.
+// formsBase, whose setErr method the pointer inherits. A model that carries a
+// submitted secret (the import source token) also gets scrubSecrets, so a
+// rejected form can never echo it back into HTML.
 func setFormsErr(data any, msg string) {
 	if d, ok := data.(interface{ setErr(string) }); ok {
 		d.setErr(msg)
+	}
+	if d, ok := data.(interface{ scrubSecrets() }); ok {
+		d.scrubSecrets()
 	}
 }
 
@@ -1039,6 +1051,11 @@ func formsSourceHint(raw string) (canonical, errText string) {
 	return n.URL, ""
 }
 
+// scrubSecrets drops the submitted source token before a re-render: the token
+// is request-scoped (sent once, never stored, never echoed), so every failure
+// card and retry form starts from an empty field. The other form fields stay.
+func (d *formsImportData) scrubSecrets() { d.Token = "" }
+
 func (s *Server) formsImportDataFor(r *http.Request, p auth.Principal) *formsImportData {
 	owners := s.formsOwnerOptions(r, p)
 	data := &formsImportData{
@@ -1051,6 +1068,14 @@ func (s *Server) formsImportDataFor(r *http.Request, p auth.Principal) *formsImp
 		Phase:     "form",
 	}
 	return data
+}
+
+// formsImportRender renders the import page after scrubbing the submitted
+// source token: the request's credential lives only long enough to start the
+// task/mirror, never in the HTML that follows (F4).
+func (s *Server) formsImportRender(w http.ResponseWriter, r *http.Request, p auth.Principal, status int, data *formsImportData) {
+	data.scrubSecrets()
+	s.page(w, r, p, status, "forms/import", "Import repository", data)
 }
 
 func (s *Server) formsImport(w http.ResponseWriter, r *http.Request) {
@@ -1148,7 +1173,7 @@ func (s *Server) formsImportOnce(w http.ResponseWriter, r *http.Request, p auth.
 			Noop:      true,
 			Heads:     formsHeads(res.NoOp.HeadSHAs),
 		}
-		s.page(w, r, p, http.StatusOK, "forms/import", "Import repository", data)
+		s.formsImportRender(w, r, p, http.StatusOK, data)
 		return
 	}
 	data.Phase = "running"
@@ -1173,7 +1198,7 @@ func (s *Server) formsImportOnce(w http.ResponseWriter, r *http.Request, p auth.
 			data.TaskLog = append([]string{}, st.Record.LogTail...)
 		}
 	}
-	s.page(w, r, p, http.StatusOK, "forms/import", "Import repository", data)
+	s.formsImportRender(w, r, p, http.StatusOK, data)
 }
 
 // formsImportSettle is the bounded window in which a just-started import may
@@ -1226,7 +1251,7 @@ func (s *Server) formsImportTerminal(w http.ResponseWriter, r *http.Request, p a
 		if st.Record != nil {
 			data.TaskLog = append([]string{}, st.Record.LogTail...)
 		}
-		s.page(w, r, p, http.StatusOK, "forms/import", "Import repository", data)
+		s.formsImportRender(w, r, p, http.StatusOK, data)
 		return
 	}
 	done := &formsImportDone{Repo: target, SourceURL: data.SourceHint}
@@ -1242,7 +1267,7 @@ func (s *Server) formsImportTerminal(w http.ResponseWriter, r *http.Request, p a
 	data.Phase = "done"
 	data.Done = done
 	data.TaskID = ""
-	s.page(w, r, p, http.StatusOK, "forms/import", "Import repository", data)
+	s.formsImportRender(w, r, p, http.StatusOK, data)
 }
 
 func formsHeads(m map[string]string) []formsHead {
@@ -1264,7 +1289,7 @@ func formsHeads(m map[string]string) []formsHead {
 func (s *Server) formsImportMirror(w http.ResponseWriter, r *http.Request, p auth.Principal, data *formsImportData) {
 	if !p.Write && !p.Admin {
 		data.Err = "write access required"
-		s.page(w, r, p, http.StatusForbidden, "forms/import", "Import repository", data)
+		s.formsImportRender(w, r, p, http.StatusForbidden, data)
 		return
 	}
 	if formsDeps.Mirror == nil || s.env.API == nil || s.env.API.Store == nil || s.env.API.Repos == nil {
@@ -1274,14 +1299,14 @@ func (s *Server) formsImportMirror(w http.ResponseWriter, r *http.Request, p aut
 	owner, name, msg := formsRepoNameErr(data.Owner, data.Name)
 	if msg != "" {
 		data.Err = msg
-		s.page(w, r, p, http.StatusBadRequest, "forms/import", "Import repository", data)
+		s.formsImportRender(w, r, p, http.StatusBadRequest, data)
 		return
 	}
 	id, _ := git.ParseRepoId(owner + "/" + name)
 	data.Owner, data.Name = owner, name
 	if !mirror.ValidPreset(data.Schedule) {
 		data.Err = fmt.Sprintf("unknown schedule preset %q: want one of %s", data.Schedule, strings.Join(mirror.Presets, "|"))
-		s.page(w, r, p, http.StatusBadRequest, "forms/import", "Import repository", data)
+		s.formsImportRender(w, r, p, http.StatusBadRequest, data)
 		return
 	}
 	n, nerr := repoimport.NormalizeSource(data.SourceURL)
@@ -1295,13 +1320,13 @@ func (s *Server) formsImportMirror(w http.ResponseWriter, r *http.Request, p aut
 	}
 	if data.Dangerous && !formsDangerousAllowed(s.authMode(), p) {
 		data.Err = "dangerous:true requires an authenticated admin (server.auth.mode token/oidc)"
-		s.page(w, r, p, http.StatusForbidden, "forms/import", "Import repository", data)
+		s.formsImportRender(w, r, p, http.StatusForbidden, data)
 		return
 	}
 	if formsDeps.Identity != nil {
 		if aerr := formsDeps.Identity.CheckCreateOwner(r.Context(), id.Owner, p); aerr != nil {
 			data.Err = aerr.Why
-			s.page(w, r, p, formsAuthStatus(aerr), "forms/import", "Import repository", data)
+			s.formsImportRender(w, r, p, formsAuthStatus(aerr), data)
 			return
 		}
 	}
@@ -1322,7 +1347,7 @@ func (s *Server) formsImportMirror(w http.ResponseWriter, r *http.Request, p aut
 		if errors.Is(cerr, api.ErrExists) || store.IsPreconditionFailed(cerr) {
 			data.Err = "repository already exists"
 			data.Winner = "/" + id.String()
-			s.page(w, r, p, http.StatusConflict, "forms/import", "Import repository", data)
+			s.formsImportRender(w, r, p, http.StatusConflict, data)
 			return
 		}
 		s.errorPage(w, r, http.StatusServiceUnavailable, formsErrMessage(cerr))
@@ -1332,7 +1357,7 @@ func (s *Server) formsImportMirror(w http.ResponseWriter, r *http.Request, p aut
 		if store.IsPreconditionFailed(merr) {
 			data.Err = "already a mirror"
 			data.Winner = "/" + id.String()
-			s.page(w, r, p, http.StatusConflict, "forms/import", "Import repository", data)
+			s.formsImportRender(w, r, p, http.StatusConflict, data)
 			return
 		}
 		s.errorPage(w, r, http.StatusServiceUnavailable, formsErrMessage(merr))
@@ -1731,7 +1756,7 @@ func (s *Server) formsIssueNewPost(w http.ResponseWriter, r *http.Request) {
 		s.errorPage(w, r, http.StatusServiceUnavailable, "issues service not configured")
 		return
 	}
-	th, _, cerr := formsDeps.Issues.CreateIssue(r.Context(), owner, name, p, data.Title, data.Body)
+	th, _, cerr := formsDeps.Issues.CreateIssue(r.Context(), owner, name, p, data.Title, data.Body, nil)
 	if cerr != nil {
 		s.formsFail(w, r, p, chrome, "forms/issue_new", "New issue", data, cerr)
 		return
@@ -1801,7 +1826,25 @@ func (s *Server) formsPullNewDataFor(r *http.Request, p auth.Principal, owner, n
 	sum, _ := s.formsSummary(r, owner, name)
 	current := owner + "/" + name
 	q := r.URL.Query()
+	// The head endpoint arrives in one of two shapes:
+	//   ?from_repo=<owner>/<repo>&head=<branch>      (this form's own keys)
+	//   ?head=<owner>/<repo>:<branch>                (the sync-fork PR link)
+	// The second is GitHub's compare shape with the fork's full name. Split it
+	// so the fork picker preselects the fork AND its branch instead of reading
+	// "bob/widgets:main" as one impossible ref (audit FAIL 3). An explicit
+	// from_repo wins over the repo carried in head.
 	headRepo := strings.TrimSpace(q.Get("from_repo"))
+	headRef := strings.TrimSpace(q.Get("from_ref"))
+	if rawHead := strings.TrimSpace(q.Get("head")); rawHead != "" {
+		if repoPart, branch, ok := strings.Cut(rawHead, ":"); ok && branch != "" {
+			if headRepo == "" && strings.Contains(repoPart, "/") {
+				headRepo = repoPart
+			}
+			headRef = branch
+		} else {
+			headRef = rawHead
+		}
+	}
 	if headRepo == "" {
 		headRepo = current
 	}
@@ -1810,7 +1853,7 @@ func (s *Server) formsPullNewDataFor(r *http.Request, p auth.Principal, owner, n
 		Full:      current,
 		FromRepo:  headRepo,
 		ToRepo:    current,
-		FromRef:   strings.TrimSpace(q.Get("head")),
+		FromRef:   headRef,
 		ToRef:     strings.TrimSpace(q.Get("base")),
 		Disabled:  !formsFeatureEnabled(sum, "pulls"),
 		FromRepos: []string{current},
@@ -1866,7 +1909,34 @@ func (s *Server) formsPullNewDataFor(r *http.Request, p auth.Principal, owner, n
 		data.FromRefs = s.formsBranches(r, owner, name)
 	}
 	data.ToRefs = s.formsBranches(r, owner, name)
+	// Query-supplied branch names are short ("main"); the selects carry full
+	// refs ("refs/heads/main"). Map the name onto the option spelling so a
+	// link preselects its branch instead of landing on "Pick a branch…".
+	data.FromRef = formsMatchRef(data.FromRef, data.FromRefs)
+	data.ToRef = formsMatchRef(data.ToRef, data.ToRefs)
 	return data
+}
+
+// formsMatchRef resolves a display branch name against the option list: an
+// exact ref passes through, a short name matches its refs/heads/<name> (or
+// refs/tags/<name>) sibling, and anything unknown stays as supplied (the
+// server remains the authority on reachability).
+func formsMatchRef(ref string, refs []string) string {
+	ref = strings.TrimSpace(ref)
+	if ref == "" {
+		return ""
+	}
+	for _, r := range refs {
+		if r == ref {
+			return ref
+		}
+	}
+	for _, r := range refs {
+		if shortRefName(r) == ref {
+			return r
+		}
+	}
+	return ref
 }
 
 // formsForks lists the parent's fork index for the head picker, filtered to

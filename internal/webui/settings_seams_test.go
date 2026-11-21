@@ -11,6 +11,7 @@ import (
 	"errors"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -31,12 +32,13 @@ import (
 // --- api.Env fakes (the composition boundary) -------------------------------
 
 type seamsRepo struct {
-	doc        api.SettingsDoc
-	hist       []api.SettingsEntry
-	pushes     []api.PushRecord
-	published  []byte
-	publishMsg string
-	publishErr error
+	doc         api.SettingsDoc
+	hist        []api.SettingsEntry
+	pushes      []api.PushRecord
+	published   []byte
+	publishMsg  string
+	publishErr  error
+	overviewErr error
 }
 
 func (f *seamsRepo) Sync(context.Context, git.RepoId, api.SyncLevel) error { return nil }
@@ -65,6 +67,9 @@ func (f *seamsRepo) Summary(context.Context, git.RepoId) (api.SummaryData, error
 	return api.SummaryData{}, nil
 }
 func (f *seamsRepo) Overview(context.Context, git.RepoId) (api.OverviewData, error) {
+	if f.overviewErr != nil {
+		return api.OverviewData{}, f.overviewErr
+	}
 	return api.OverviewData{}, nil
 }
 func (f *seamsRepo) Settings(context.Context, git.RepoId) (api.SettingsDoc, error) {
@@ -129,7 +134,7 @@ func newSeamsHarness(t *testing.T) *seamsHarness {
 	cmd.Server.Roles = []string{"serve", "maintain"}
 	cmd.Import.URLAllowlist = []string{"example.com"}
 	cmd.Bundles.Strategy = []config.BundleStrategy{{
-		Name: "daily", Kind: "daily", Base: "heads/main",
+		Name: "daily", Kind: "full", Base: "heads/main",
 		Schedule: "0 0 3 * * *", Keep: 3, Filter: "blob:none", Refs: []string{"refs/heads/main"},
 	}}
 
@@ -333,6 +338,11 @@ func TestSettingsSeamsPolicyRawSaveAndDryRun(t *testing.T) {
 	settingsMustContain(t, body, "Dry run:", "dry-run result")
 	settingsMustContain(t, body, "rejected by rule", "dry-run denial")
 	settingsMustContain(t, body, "#12 refs/heads/main", "dry-run row")
+	// The dry run does not change what is stored: the stored-policy facts (and
+	// the typed-confirm removal) must survive the verdict.
+	settingsMustContain(t, body, "Deletes the stored policy document", "remove card after dry run")
+	settingsMustContain(t, body, `data-danger-expected="acme/monorepo"`, "typed-confirm removal after dry run")
+	settingsMustNotContain(t, body, "No policy document is stored", "dry run claims no stored document")
 
 	// An unparseable candidate never evaluates (fail closed).
 	code, _, body = seamsPost(t, h, "/acme/monorepo/settings/policy", url.Values{
@@ -685,9 +695,62 @@ func TestSettingsSeamsWebhooksCreatePingDelete(t *testing.T) {
 	}
 	settingsMustContain(t, body, "recent deliveries", "deliveries")
 	settingsMustContain(t, body, "ping", "delivery event")
+	settingsMustContain(t, body, "redeliver", "retained delivery affordance")
+
+	// Enable/disable is a PATCH on active (never a recreate).
+	code, _, body = seamsPost(t, h, "/acme/monorepo/settings/webhooks/"+hooks[0].ID, url.Values{
+		"webhook_action": {"toggle"},
+	})
+	if code != http.StatusSeeOther {
+		t.Fatalf("toggle = %d (%s)", code, body)
+	}
+	if got := h.notes.GetHook(context.Background(), "acme", "monorepo", hooks[0].ID); got == nil || got.Active {
+		t.Fatalf("toggle did not disable: %+v", got)
+	}
+	code, body = seamsGet(t, h, "/acme/monorepo/settings/webhooks")
+	if code != http.StatusOK {
+		t.Fatalf("GET disabled webhooks = %d", code)
+	}
+	settingsMustContain(t, body, "enable", "disabled row affordance")
+
+	// Rotation replaces the write-only secret; an empty submission is refused.
+	code, _, body = seamsPost(t, h, "/acme/monorepo/settings/webhooks/"+hooks[0].ID, url.Values{
+		"webhook_action": {"rotate"},
+	})
+	if code != http.StatusUnprocessableEntity {
+		t.Fatalf("empty rotate = %d, want 422 (%s)", code, body)
+	}
+	code, _, body = seamsPost(t, h, "/acme/monorepo/settings/webhooks/"+hooks[0].ID, url.Values{
+		"webhook_action": {"rotate"}, "secret": {"rotated"},
+	})
+	if code != http.StatusSeeOther {
+		t.Fatalf("rotate = %d (%s)", code, body)
+	}
+	if got := h.notes.GetHook(context.Background(), "acme", "monorepo", hooks[0].ID); got == nil || got.Secret != "rotated" {
+		t.Fatalf("rotate did not replace the secret: %+v", got)
+	}
+	// Reactivate before replay (a parked hook refuses, like ping).
+	on := true
+	if _, err := h.notes.PatchHook(context.Background(), "acme", "monorepo", hooks[0].ID, notify.HookSpec{Active: &on}); err != nil {
+		t.Fatal(err)
+	}
+	d := h.notes.ReadDeliveries(context.Background(), "acme", "monorepo", hooks[0].ID)
+	if len(d.Entries) == 0 {
+		t.Fatal("ping delivery missing")
+	}
+	code, _, body = seamsPost(t, h, "/acme/monorepo/settings/webhooks/"+hooks[0].ID, url.Values{
+		"webhook_action": {"redeliver"}, "seq": {strconv.Itoa(d.Entries[0].Seq)},
+	})
+	if code != http.StatusSeeOther {
+		t.Fatalf("redeliver = %d (%s)", code, body)
+	}
+	if after := h.notes.ReadDeliveries(context.Background(), "acme", "monorepo", hooks[0].ID); len(after.Entries) != len(d.Entries)+1 {
+		t.Fatalf("redeliver ring = %d rows, want %d", len(after.Entries), len(d.Entries)+1)
+	}
 
 	code, _, body = seamsPost(t, h, "/acme/monorepo/settings/webhooks/"+hooks[0].ID, url.Values{
 		"webhook_action": {"delete"},
+		"confirm":        {hooks[0].ID},
 	})
 	if code != http.StatusSeeOther {
 		t.Fatalf("delete webhook = %d (%s)", code, body)
@@ -956,7 +1019,7 @@ func TestSettingsSeamsTokenWebhookErrorsAndTransfer(t *testing.T) {
 	if code, _, body := seamsPost(t, h, "/acme/monorepo/settings/tokens/nope", url.Values{"token_action": {"revoke"}}); code != http.StatusNotFound {
 		t.Fatalf("revoke unknown = %d (%s)", code, body)
 	}
-	if code, _, body := seamsPost(t, h, "/acme/monorepo/settings/webhooks/nope", url.Values{"webhook_action": {"delete"}}); code != http.StatusNotFound {
+	if code, _, body := seamsPost(t, h, "/acme/monorepo/settings/webhooks/nope", url.Values{"webhook_action": {"delete"}, "confirm": {"nope"}}); code != http.StatusNotFound {
 		t.Fatalf("delete unknown hook = %d (%s)", code, body)
 	}
 	if code, _, body := seamsPost(t, h, "/acme/monorepo/settings/webhooks/nope", url.Values{"webhook_action": {"ping"}}); code != http.StatusNotFound {

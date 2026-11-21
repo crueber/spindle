@@ -77,13 +77,13 @@ func (s *Server) gitAuthFailure(w http.ResponseWriter, r *http.Request, svc git.
 	case auth.ErrForbidden:
 		if !carriedAuth {
 			// No credential at all: a real 401 makes git prompt (§4.2).
-			w.Header().Set("WWW-Authenticate", `Bearer realm="walgit"`)
+			w.Header().Set("WWW-Authenticate", s.authChallenge())
 			plainStatus(w, http.StatusUnauthorized, aerr.Why)
 			return
 		}
 		plainStatus(w, http.StatusForbidden, aerr.Why)
 	default:
-		w.Header().Set("WWW-Authenticate", `Bearer realm="walgit"`)
+		w.Header().Set("WWW-Authenticate", s.authChallenge())
 		plainStatus(w, http.StatusUnauthorized, aerr.Why)
 	}
 }
@@ -299,7 +299,26 @@ func (s *Server) gitService(w http.ResponseWriter, r *http.Request, id git.RepoI
 		s.uploadPack(w, r, id)
 		return
 	}
+	s.boundPush(w)
 	s.receivePack(w, r, id, p)
+}
+
+// boundPush arms the push exchange's absolute deadline: one
+// `server.request_timeout` window (11_config_cli.md §2 — the documented cap)
+// from the request's arrival covers both halves, so neither a client that
+// trickles the pack body nor one that never reads the report can pin the
+// handler. A ResponseWriter that cannot carry deadlines (a recorder, a
+// wrapping middleware that hides Unwrap) keeps its previous behavior — the
+// error is deliberately ignored.
+func (s *Server) boundPush(w http.ResponseWriter) {
+	d := time.Duration(s.cfg.Server.RequestTimeout)
+	if d <= 0 {
+		return
+	}
+	rc := http.NewResponseController(w)
+	at := time.Now().Add(d)
+	_ = rc.SetReadDeadline(at)
+	_ = rc.SetWriteDeadline(at)
 }
 
 // uploadPack streams the v0/v2 fetch: prepare (sync + open), then stream the
@@ -453,6 +472,14 @@ func (s *Server) receivePackLocal(w http.ResponseWriter, r *http.Request, id git
 		plainStatus(w, http.StatusRequestEntityTooLarge, "push exceeds max_push_bytes")
 		return
 	}
+	// A shallow clone's push cannot be accepted (receive-pack v1 does not
+	// advertise `shallow`). Refuse before any repository work, on the git wire
+	// so the client prints the reason — and a Threads job's log shows the
+	// actionable remedy (fetch-depth: 0) instead of a bare HTTP 400.
+	if len(git.ParseShallowSection(all)) > 0 {
+		s.refuseShallowPush(w, r, id, p)
+		return
+	}
 	repo, rerr := s.engine.Repo(r.Context(), id, create, git.Sha1)
 	if rerr != nil {
 		if isNotFound(rerr) {
@@ -475,17 +502,45 @@ func (s *Server) receivePackLocal(w http.ResponseWriter, r *http.Request, id git
 	_ = s.pushPipeline(r.Context(), id, p, repo, req, pack, int64(s.cfg.Server.MaxPushBytes), out)
 }
 
+// refuseShallowPush answers a push from a shallow clone with the git wire's
+// ERR packet: git prints it as `remote: …`, so the runner's job log carries
+// the remedy, and curl/log readers see the same sentence. Logged at Warn
+// because it is an operator/workflow-author mistake, not a server fault.
+func (s *Server) refuseShallowPush(w http.ResponseWriter, r *http.Request, id git.RepoId, p auth.Principal) {
+	s.log.Warn("push refused: shallow clone cannot push",
+		"repo", id.String(), "principal", p.Name,
+		"remedy", "fetch the full history; Threads checkout needs `with: fetch-depth: 0`")
+	s.metrics.Counter("walgit_push_refused_total", "pushes refused").Inc("reason", "shallow")
+	gitHeaders(w, "application/x-git-receive-pack-result")
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write(git.ErrPkt("walgit: " + git.ShallowPushReason))
+}
+
 // band2Failure answers a failed receive-pack the §4.3 way: the band-2
 // message, then the negotiated report-status trailer (unpack ng) — git hangs
 // waiting for the report if only the sideband is written (§7 step 6). The
-// caller supplies the writer: HTTP (through gitResultWriter, which emits the
-// headers on first byte) or an SSH channel.
+// trailer is owed whenever the client negotiated EITHER report-status cap:
+// with report-status-v2 advertised, git requests only `report-status-v2`
+// (WantsReport), and a check for `report-status` alone shipped the hang.
+// Per §7 step 2 every command also carries an `ng <ref>` line — stock
+// receive-pack's "unpacker error" shape; without one the client reports
+// "remote failed to report status" instead of naming the refused ref.
+// The caller supplies the writer: HTTP (through gitResultWriter, which emits
+// the headers on first byte) or an SSH channel.
 func band2Failure(out io.Writer, req *git.PushRequest, msg string) {
+	band2Refusal(out, req, msg, "unpacker error")
+}
+
+// band2Refusal is band2Failure with an explicit per-ref refusal reason.
+func band2Refusal(out io.Writer, req *git.PushRequest, msg, reason string) {
 	_, _ = out.Write(git.Band2(msg))
-	if req == nil || !req.Has("report-status") {
+	if !req.WantsReport() {
 		return
 	}
 	report := git.Report{UnpackOK: false, UnpackMsg: msg, Sideband: req.Has("side-band-64k")}
+	for _, c := range req.Commands {
+		report.Refs = append(report.Refs, git.RefReport{Ref: c.Ref, OK: false, Reason: reason})
+	}
 	_, _ = out.Write(report.EncodeReport())
 }
 

@@ -3,6 +3,7 @@ package identity
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -66,6 +67,12 @@ func TestOrgInvites(t *testing.T) {
 	if _, err := s.AcceptInvite(ctx, "other@example.com", inv.ID); err == nil {
 		t.Error("accept by non-subject must fail")
 	}
+	// A live invite opened by a foreign principal names the accurate cause
+	// (not "no longer pending", which implied it was spent).
+	if _, err := s.PreviewInvite(ctx, "other@example.com", inv.ID, inv.Token); !errors.Is(err, ErrConflict) ||
+		!strings.Contains(err.Error(), "not addressed to your account") {
+		t.Errorf("foreign preview wording: %v", err)
+	}
 	// Accept binds membership and deletes the invite.
 	bound, err := s.AcceptInvite(ctx, "pat@example.com", inv.ID)
 	if err != nil {
@@ -84,9 +91,11 @@ func TestOrgInvites(t *testing.T) {
 	if !found {
 		t.Errorf("membership not bound: %+v", m.Members)
 	}
-	// Second accept is done (invite gone).
-	if _, err := s.AcceptInvite(ctx, "pat@example.com", inv.ID); !errors.Is(err, ErrConflict) {
-		t.Errorf("re-accept must 409: %v", err)
+	// Second accept is done (invite gone); the refusal names the spent cause
+	// among the possible ones instead of asserting it alone.
+	if _, err := s.AcceptInvite(ctx, "pat@example.com", inv.ID); !errors.Is(err, ErrConflict) ||
+		!strings.Contains(err.Error(), "already accepted or cancelled") {
+		t.Errorf("re-accept must 409 with the spent cause named: %v", err)
 	}
 	// Inbox entry dropped.
 	if entries, _ := s.MyInvites(ctx, "pat@example.com"); len(entries) != 0 {
@@ -449,5 +458,140 @@ func TestInviteIssuerErrorFailOpen(t *testing.T) {
 	s2 := New(ks, config.Defaults())
 	if entries, err := s2.MyInvites(ctx, "kept@example.com"); err != nil || len(entries) != 1 {
 		t.Fatalf("fail-open issuer: %v %+v", err, entries)
+	}
+}
+
+// TestRepoInviteAdminCancel pins the issuer-side cancel verb the settings
+// page uses (DeleteRepoInvite): delete-on-transition, scoped key, inbox
+// cleanup, and the API's 404 for a second/foreign delete.
+func TestRepoInviteAdminCancel(t *testing.T) {
+	s := testService()
+	ctx := context.Background()
+	seedOrg(t, s)
+	seedRepo(t, s, "acme", "repo")
+
+	inv, err := s.CreateRepoInvite(ctx, "acme", "repo", "gina@example.com", RoleWrite, "alice@example.com", time.Hour)
+	if err != nil {
+		t.Fatalf("CreateRepoInvite: %v", err)
+	}
+	got, err := s.DeleteRepoInvite(ctx, "acme", "repo", inv.ID)
+	if err != nil || got.ID != inv.ID {
+		t.Fatalf("DeleteRepoInvite = %+v, %v", got, err)
+	}
+	// The invitee's inbox row is gone too (the accept link is dead).
+	if entries, err := s.MyInvites(ctx, "gina@example.com"); err != nil || len(entries) != 0 {
+		t.Fatalf("inbox after cancel = %+v, %v", entries, err)
+	}
+	if _, err := s.AcceptInvite(ctx, "gina@example.com", inv.ID); !errors.Is(err, ErrConflict) {
+		t.Fatalf("accept after cancel = %v, want ErrConflict", err)
+	}
+	// A second cancel is the API's 404; so is an id scoped to another repo.
+	if _, err := s.DeleteRepoInvite(ctx, "acme", "repo", inv.ID); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("re-cancel = %v, want ErrNotFound", err)
+	}
+	keep, err := s.CreateRepoInvite(ctx, "acme", "repo", "hal@example.com", RoleRead, "alice@example.com", time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.DeleteRepoInvite(ctx, "acme", "other", keep.ID); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("foreign repo cancel = %v, want ErrNotFound", err)
+	}
+	if list, err := s.ListRepoInvites(ctx, "acme", "repo", 100); err != nil || len(list) != 1 {
+		t.Fatalf("scoped cancel removed the wrong invite: %+v, %v", list, err)
+	}
+	// A corrupt issuer object is ErrInvalid (never a silent delete).
+	if _, err := store.PutBytes(ctx, s.Store, RepoInviteKey("acme", "repo", "corrupt"), []byte("{"), store.PutOptions{Mode: store.PutOverwrite}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.DeleteRepoInvite(ctx, "acme", "repo", "corrupt"); !errors.Is(err, ErrInvalid) {
+		t.Fatalf("corrupt cancel = %v, want ErrInvalid", err)
+	}
+}
+
+// TestInvitationRefusalWording pins the closing-audit Observation 1 fix: a
+// live invitation opened by a principal it is not addressed to must not claim
+// it is "no longer pending" (that hinted at the wrong cause). The id→scope
+// index does not exist and accept/cancel is delete-on-transition, so the
+// absent-inbox state names both possible causes; a row that outlived its
+// issuer object is provably spent and gets the narrower sentence.
+func TestInvitationRefusalWording(t *testing.T) {
+	s := testService()
+	ctx := context.Background()
+	seedOrg(t, s)
+	seedRepo(t, s, "acme", "repo")
+
+	orgInv, err := s.CreateOrgInvite(ctx, "acme", "alice@example.com", "member", "owner@example.com", time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	repoInv, err := s.CreateRepoInvite(ctx, "acme", "repo", "dave@example.com", RoleRead, "alice@example.com", time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		name string
+		err  error
+	}{
+		{"foreign org preview", func() error { _, e := s.PreviewInviteFor(ctx, bob, orgInv.ID, orgInv.Token); return e }()},
+		{"foreign org accept", func() error { _, e := s.AcceptInviteFor(ctx, bob, orgInv.ID); return e }()},
+		{"foreign repo preview", func() error { _, e := s.PreviewInviteFor(ctx, carol, repoInv.ID, repoInv.Token); return e }()},
+		{"foreign repo accept", func() error { _, e := s.AcceptInviteFor(ctx, carol, repoInv.ID); return e }()},
+	} {
+		if !errors.Is(tc.err, ErrConflict) {
+			t.Fatalf("%s = %v, want 409", tc.name, tc.err)
+		}
+		if !strings.Contains(tc.err.Error(), "invitation is not addressed to your account") {
+			t.Fatalf("%s wording = %q, want the not-addressed cause", tc.name, tc.err)
+		}
+		if strings.Contains(tc.err.Error(), "no longer pending") {
+			t.Fatalf("%s still says no longer pending: %q", tc.name, tc.err)
+		}
+	}
+
+	// The addressed principal still previews and accepts normally.
+	if _, err := s.PreviewInviteFor(ctx, alice, orgInv.ID, orgInv.Token); err != nil {
+		t.Fatalf("addressed preview: %v", err)
+	}
+	if _, err := s.AcceptInviteFor(ctx, alice, orgInv.ID); err != nil {
+		t.Fatalf("addressed accept: %v", err)
+	}
+
+	// A spent invite re-accepted names the spent cause.
+	if _, err := s.AcceptInviteFor(ctx, alice, orgInv.ID); !errors.Is(err, ErrConflict) ||
+		!strings.Contains(err.Error(), "already accepted or cancelled") {
+		t.Fatalf("spent accept wording: %v", err)
+	}
+
+	// An inbox row whose issuer object is gone is provably spent: the narrow
+	// sentence, never the foreign-address alternative.
+	if err := s.inboxAdd(ctx, "stale@example.com", InboxEntry{ID: "gone", Org: "acme"}); err != nil {
+		t.Fatal(err)
+	}
+	_, err = s.AcceptInvite(ctx, "stale@example.com", "gone")
+	if !errors.Is(err, ErrConflict) || !strings.Contains(err.Error(), "invitation is no longer valid") ||
+		!strings.Contains(err.Error(), "its repository was deleted") {
+		t.Fatalf("dangling inbox wording: %v", err)
+	}
+	if strings.Contains(err.Error(), "not addressed to your account") {
+		t.Fatalf("dangling inbox must not suggest a foreign address: %v", err)
+	}
+
+	// A repo invite whose manifest vanished under a surviving issuer object
+	// names the deletion.
+	if _, err := store.PutBytes(ctx, s.Store, RepoInviteKey("acme", "repo", "ghostrepo"),
+		encodeInvite(&Invitation{Version: 1, ID: "ghostrepo", Token: "t", Kind: InviteRepo, Repo: "acme/repo",
+			Role: string(RoleRead), Subject: "ghost@example.com", State: "pending",
+			ExpiresAt: time.Now().Add(time.Hour).Format(time.RFC3339)}), store.PutOptions{Mode: store.PutCreate}); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.inboxAdd(ctx, "ghost@example.com", InboxEntry{ID: "ghostrepo", Repo: "acme/repo"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Store.Delete(ctx, "repos/acme/repo/manifest.pb", ""); err != nil {
+		t.Fatal(err)
+	}
+	_, err = s.AcceptInvite(ctx, "ghost@example.com", "ghostrepo")
+	if !errors.Is(err, ErrConflict) || !strings.Contains(err.Error(), "its repository was deleted") {
+		t.Fatalf("deleted-repo invite wording: %v", err)
 	}
 }

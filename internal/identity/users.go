@@ -203,6 +203,37 @@ func (s *Service) userExists(ctx context.Context, username string) bool {
 	return err == nil && meta != nil
 }
 
+// UserExists reports whether username is a claimed identity: a users/<u>/
+// user.json binding (the OIDC username registry) OR a users/<u>/profile.json
+// (created lazily on first authenticated access / first role grant). Both
+// are account traces; a namespace with neither is unknown, not empty. It is
+// the exported page-side twin of the fail-closed userExists probe: unlike
+// that probe it returns the store error, so an owner-scoped read page can
+// answer 503 for a bucket fault instead of pretending the user does not
+// exist. An invalid/normalising-empty username is (false, nil) — a
+// syntactically impossible identity, not a fault.
+func (s *Service) UserExists(ctx context.Context, username string) (bool, error) {
+	if s == nil || s.Store == nil {
+		return false, nil
+	}
+	username = normPrincipal(username)
+	if !auth.ValidUsername(username) {
+		return false, nil
+	}
+	meta, err := s.Store.Head(ctx, UserKey(username))
+	if err != nil {
+		return false, err
+	}
+	if meta != nil {
+		return true, nil
+	}
+	prof, err := s.GetProfile(ctx, username)
+	if err != nil {
+		return false, err
+	}
+	return prof != nil, nil
+}
+
 // EmailForUsername returns the verified email bound to username, or ""
 // when no binding exists. Powers the "own email on own profile only"
 // surface (the GET /users/{u} self view) without ever exposing other

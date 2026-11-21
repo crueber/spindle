@@ -86,6 +86,28 @@ type TaskRunner interface {
 	Run(ctx context.Context, repo, kind string, params map[string]string, fn func(ctx context.Context, t TaskLogger) error) error
 }
 
+// Sweeper is one extra per-repo task the maintainer runs after the §4
+// priority ladder (docs/features/14 §6, kind `packages-gc`). It is not a
+// priority row: a sweep has no desired-state predicate the plan can read
+// cheaply (that would be a LIST per repo per pass), so it runs on its own
+// cadence gate, through the same (repo,kind) TaskRunner — single-flight,
+// narrated, visible in the task table — and never blocks the ladder.
+type Sweeper interface {
+	// Kind is the task kind recorded in the task table.
+	Kind() string
+	// Sweep runs one idempotent pass for repo (owner/name).
+	Sweep(ctx context.Context, repo string, t TaskLogger) error
+}
+
+// DueSweeper is a Sweeper with its own cadence gate. The maintainer asks
+// before starting the task, so an idle repo costs one in-memory check per pass
+// instead of a task-table record (docs/features/14 §6's per-repo due gate).
+type DueSweeper interface {
+	Sweeper
+	// Due reports whether repo needs a sweep this pass.
+	Due(repo string) bool
+}
+
 // PreparedPack is a pack ready to publish (bound onto wal.PreparedPack).
 type PreparedPack struct {
 	Checksum    string // pack trailing SHA, hex

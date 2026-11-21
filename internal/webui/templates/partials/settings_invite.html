@@ -1,0 +1,23 @@
+{{/* partials/settings_invite.html — the one-shot invitation affordances shared
+   by the repo Access tab and the org Invitations tab (WP9 G9/G18 follow-up).
+   A capability token is a bearer credential: the share card and the per-row
+   copy control render it in the page body, never a redirect/URL. A row whose
+   read redacted the token (every org pending row after the create response)
+   renders a masked marker instead. */}}
+
+{{define "settings-invite-share"}}
+<div class="mb-3 rounded-sm border-l-2 border-l-[var(--pd-warn)] p-3 text-sm">
+  <p><strong class="font-semibold">Share this link with the invitee.</strong> It is the invitation — anyone holding it can accept.</p>
+  <p class="mt-1 break-all mono text-xs" id="invite-link">{{.}}</p>
+  <button type="button" class="btn mt-2" data-copy="#invite-link">copy</button>
+</div>
+{{end}}
+
+{{define "settings-invite-accept"}}
+{{if .URL}}
+<span class="block max-w-[18rem] truncate"><code class="mono text-xs" id="invite-accept-{{.ID}}">{{.URL}}</code></span>
+<button type="button" class="btn mt-1 px-2 py-0.5 text-xs" data-copy="#invite-accept-{{.ID}}">copy</button>
+{{else}}
+<span class="mono text-xs" title="the accept link is only shown when the invitation is created">token ••••••••</span>
+{{end}}
+{{end}}

@@ -99,6 +99,13 @@ export function attachNotifyRepo(repo) {
     /** `GET …/webhooks/{id}/deliveries` → last-25 ring (no-store). */
     deliveries: (id, opts) =>
       client._call(p(`/webhooks/${encodeURIComponent(id)}/deliveries`), { method: "GET", ...opts }),
+    /** `POST …/webhooks/{id}/deliveries/{seq}/redeliver` → `{delivery, entry}`.
+     *  A delivery whose payload the ring did not retain answers 410. */
+    redeliver: (id, seq, opts) =>
+      client._call(
+        p(`/webhooks/${encodeURIComponent(id)}/deliveries/${encodeURIComponent(seq)}/redeliver`),
+        { method: "POST", ...opts },
+      ),
   };
 }
 

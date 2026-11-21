@@ -25,6 +25,8 @@ package webui
 // body (see the WIRING header in public.go). A nil seam hides Edit entirely.
 
 import (
+	"errors"
+	"io"
 	"net/http"
 	"net/url"
 	"regexp"
@@ -192,6 +194,72 @@ func urlPathEscape(s string) string { return url.PathEscape(s) }
 func (s *Server) publicOwnerAvatarRegenerate(w http.ResponseWriter, r *http.Request) {
 	s.publicOwnerAvatar(w, r, true)
 }
+
+// publicOwnerAvatarUpload serves POST /{owner}/avatar/upload (WP9 G10): the
+// page half of identity.Service.PutUserAvatarBytes (PUT
+// /api/v1/users/{principal}/avatar). The multipart body is capped exactly at
+// the verb's 2 MiB (identity.maxUserAvatarUploadBytes, documented duplicate —
+// the page must reject what the API rejects); the service owns the
+// PNG/JPEG/GIF magic-sniff allowlist, the server-side center-crop and the
+// self-or-admin authority. A rejected upload re-renders the error page with
+// the verb's status (413 too large, 415 unsupported type).
+func (s *Server) publicOwnerAvatarUpload(w http.ResponseWriter, r *http.Request) {
+	owner := r.PathValue("owner")
+	if !validOwnerPath(owner) {
+		s.errorPage(w, r, http.StatusNotFound, "not found")
+		return
+	}
+	p, ok := s.principal(w, r)
+	if !ok {
+		return
+	}
+	if !s.parityWritePreflight(w, r, p, "Change this avatar") {
+		return
+	}
+	if !p.Admin && !strings.EqualFold(p.Name, owner) {
+		s.errorPage(w, r, http.StatusForbidden, "self or admin")
+		return
+	}
+	fn := publicDeps.UploadAvatar
+	if fn == nil {
+		s.errorPage(w, r, http.StatusServiceUnavailable, "avatar upload is not wired on this build")
+		return
+	}
+	r.Body = http.MaxBytesReader(w, r.Body, maxUserAvatarUploadBytes+1)
+	if perr := r.ParseMultipartForm(maxUserAvatarUploadBytes + 1); perr != nil {
+		if errors.Is(perr, http.ErrNotMultipart) {
+			s.errorPage(w, r, http.StatusBadRequest, "choose an avatar file (PNG, JPEG or GIF)")
+			return
+		}
+		s.errorPage(w, r, http.StatusRequestEntityTooLarge, "avatar too large (max 2 MiB)")
+		return
+	}
+	f, _, ferr := r.FormFile("avatar")
+	if ferr != nil {
+		s.errorPage(w, r, http.StatusBadRequest, "choose an avatar file (PNG, JPEG or GIF)")
+		return
+	}
+	defer f.Close()
+	data, rerr := io.ReadAll(io.LimitReader(f, maxUserAvatarUploadBytes+1))
+	if rerr != nil || int64(len(data)) > maxUserAvatarUploadBytes {
+		s.errorPage(w, r, http.StatusRequestEntityTooLarge, "avatar too large (max 2 MiB)")
+		return
+	}
+	if len(data) == 0 {
+		s.errorPage(w, r, http.StatusBadRequest, "choose an avatar file (PNG, JPEG or GIF)")
+		return
+	}
+	if _, err := fn(r.Context(), owner, data); err != nil {
+		s.errorPage(w, r, formsErrStatus(err), formsErrMessage(err))
+		return
+	}
+	s.formsRedirectFlash(w, r, "/"+urlPathEscape(owner), "Avatar uploaded")
+}
+
+// maxUserAvatarUploadBytes is identity's upload cap (2 MiB), duplicated here
+// because the multipart reader must bound the body before the service sees
+// it; identity.PutUserAvatarBytes still enforces its own copy.
+const maxUserAvatarUploadBytes = int64(2 << 20)
 
 func (s *Server) publicOwnerAvatarRemove(w http.ResponseWriter, r *http.Request) {
 	s.publicOwnerAvatar(w, r, false)

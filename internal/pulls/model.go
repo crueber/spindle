@@ -114,9 +114,15 @@ type PRDoc struct {
 	MergeCommitSHA    *string   `json:"merge_commit_sha"`
 	MergeStrategy     *string   `json:"merge_strategy"`
 	HeadForcePushedAt *string   `json:"head_force_pushed_at"`
-	HeadPublished     bool      `json:"head_published"`
-	Draft             bool      `json:"draft"`
-	Version           int       `json:"version"`
+	// HeadSeq is the WAL log sequence of the last ref event applied to
+	// Head.SHA (the event-ordering watermark, 15 §2.3): a later delivery with
+	// a lower sequence is stale and must never move the head backwards.
+	// Zero means no event has been applied yet (the head came from the open
+	// snapshot or a live ref read).
+	HeadSeq       uint64 `json:"head_seq,omitempty"`
+	HeadPublished bool   `json:"head_published"`
+	Draft         bool   `json:"draft"`
+	Version       int    `json:"version"`
 }
 
 // MergeableDoc is pulls/<num>/mergeable.json (§2.2, derived

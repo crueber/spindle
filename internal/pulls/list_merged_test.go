@@ -10,14 +10,7 @@ import (
 // git — ListPRs only reads the sidecar, so the flag path needs no merge).
 func markMerged(t *testing.T, e *testEnv, owner, repo string, num int) {
 	t.Helper()
-	pr, ver, err := e.svc.loadPR(ctx(), owner, repo, num)
-	if err != nil || pr == nil {
-		t.Fatalf("loadPR %d: %v", num, err)
-	}
-	pr.Merged = true
-	if err := e.svc.savePR(ctx(), owner, repo, pr, ver); err != nil {
-		t.Fatalf("savePR merged %d: %v", num, err)
-	}
+	markMergedPR(t, e, owner, repo, num)
 }
 
 // TestListPRsMergedFlag pins Forgejo #530: PROut carries the pr.json merge

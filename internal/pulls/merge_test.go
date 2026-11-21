@@ -234,18 +234,31 @@ func TestMergeGates(t *testing.T) {
 			t.Fatalf("second: %v", err)
 		}
 		// The fake merge can finish before the second StartMerge runs; a new
-		// id is then correct (there is nothing left to join). The deterministic
-		// join coverage lives at the single-flight owner,
-		// internal/wal TestTaskTable_RunningJoinHint; here we pin the weaker
-		// invariant: a still-running first task must be joined.
+		// id is then correct (there is nothing left to join), and the only
+		// honest outcome for that new task is the documented "already merged"
+		// conflict. The deterministic join coverage lives at the single-flight
+		// owner, internal/wal TestTaskTable_RunningJoinHint; here we pin the
+		// weaker invariant: a still-running first task must be joined, and a
+		// post-completion start must terminate with a documented reason — never
+		// a silent overwrite of the first task's record. (Under a loaded gate
+		// the fake git finishes in microseconds, so asserting OK only would be
+		// a timing assertion — CI run 1052.)
 		if first.ID != second.ID {
 			if cur := e.svc.MergeTask("o", "r"); cur != nil && cur.ID == first.ID && cur.State == TaskRunning {
 				t.Fatalf("running task was not joined: %q vs %q", first.ID, second.ID)
 			}
 		}
 		done := waitTask(5*time.Second, func() *TaskRecord { return e.svc.MergeTask("o", "r") })
-		if done == nil || done.State != TaskOK {
-			t.Fatalf("task = %+v", done)
+		if done == nil {
+			t.Fatal("no merge task record")
+		}
+		switch {
+		case done.State == TaskOK:
+			// Joined the first task, or a fresh task merged an unmerged PR.
+		case done.State == TaskError && first.ID != second.ID && strings.Contains(done.Error, "already merged"):
+			// The first merge landed first; the second start is a no-op refusal.
+		default:
+			t.Fatalf("task = %+v (first %q, second %q)", done, first.ID, second.ID)
 		}
 	})
 	t.Run("already merged", func(t *testing.T) {
@@ -398,9 +411,7 @@ func TestDeleteHead(t *testing.T) {
 		if err != nil {
 			t.Fatalf("open: %v", err)
 		}
-		pr.Merged = true
-		_, prVer, _ := e.svc.loadPR(ctx(), "o", "r", pr.Num)
-		_ = e.svc.savePR(ctx(), "o", "r", pr, prVer)
+		markMergedPR(t, e, "o", "r", pr.Num)
 		if err := e.svc.DeleteHead(ctx(), "o", "r", 1, maintainer()); !errors.Is(err, ErrForbidden) {
 			t.Fatalf("err = %v", err)
 		}

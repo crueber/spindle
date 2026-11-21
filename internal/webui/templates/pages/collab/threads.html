@@ -5,11 +5,119 @@
     <h2 class="text-xl font-semibold tracking-tight">Threads</h2>
     <div class="ml-auto flex flex-wrap items-center gap-2">
       <a class="link text-xs" href="{{.RefreshHref}}">refresh</a>
-      <a class="link text-xs" href="/api#threads">workflow API</a>
+      {{if .CanWrite}}{{if .Dispatch}}<a class="link text-xs" href="#threads-dispatch">run workflow</a>{{end}}{{end}}
     </div>
   </div>
 
   {{if .Error}}<p class="err-line" role="alert">{{.Error}}</p>{{end}}
+
+  {{if .CanWrite}}
+  <section class="card mb-4" id="threads-dispatch" aria-labelledby="threads-dispatch-heading">
+    <h3 id="threads-dispatch-heading" class="px-3 pt-2 text-sm font-semibold">Run workflow</h3>
+    {{if .DispatchError}}<p class="err-line px-3 pt-1 text-xs" role="alert">{{.DispatchError}}</p>{{end}}
+    {{if .Dispatch}}
+    <p class="muted mb-2 px-3 text-xs">Manual dispatch for a workflow that declares <code class="mono">workflow_dispatch</code>. Choosing a workflow shows its declared inputs; a required input is marked <span aria-hidden="true">*</span>.</p>
+    <form method="get" action="/{{$d.Repo.Full}}/threads" class="flex flex-wrap items-end gap-2 px-3">
+      <div class="min-w-0 flex-1">
+        <label class="mb-1 block text-sm font-medium" for="threads-dispatch-select">Workflow</label>
+        <select class="input" id="threads-dispatch-select" name="dispatch">
+          {{range .Dispatch}}<option value="{{.Path}}"{{if eq .Path $d.DispatchSelected}} selected{{end}}>{{.Label}}</option>{{end}}
+        </select>
+      </div>
+      <div><button type="submit" class="btn">choose inputs</button></div>
+    </form>
+    {{if .DispatchSelected}}
+    <form method="post" action="/{{$d.Repo.Full}}/threads/dispatch" class="mt-3 space-y-2 px-3 pb-3">
+      <input type="hidden" name="workflow" value="{{.DispatchSelected}}">
+      <div>
+        <label class="mb-1 block text-sm font-medium" for="threads-dispatch-ref">Ref</label>
+        <input class="input mono" id="threads-dispatch-ref" name="ref" type="text" required
+               placeholder="main, v1.2.0, refs/heads/main" value="{{.DispatchRef}}">
+      </div>
+      {{range .DispatchInputs}}{{$in := .}}
+      <div>
+        <label class="mb-1 block text-sm font-medium" for="threads-input-{{.Name}}">
+          <code class="mono text-xs">{{.Name}}</code>
+          {{if .Required}}<span class="text-[var(--pd-warn)]" aria-label="required">*</span>{{end}}
+          {{with .Description}}<span class="muted font-normal">— {{.}}</span>{{end}}
+        </label>
+        {{if eq .Type "choice"}}
+        <select class="input" id="threads-input-{{.Name}}" name="input.{{.Name}}">
+          {{range .Options}}<option value="{{.}}"{{if eq . $in.Value}} selected{{end}}>{{.}}</option>{{end}}
+        </select>
+        {{else if eq .Type "boolean"}}
+        <select class="input" id="threads-input-{{.Name}}" name="input.{{.Name}}">
+          <option value="false"{{if or (eq $in.Value "") (eq $in.Value "false")}} selected{{end}}>false</option>
+          <option value="true"{{if eq $in.Value "true"}} selected{{end}}>true</option>
+        </select>
+        {{else}}
+        <input class="input" id="threads-input-{{.Name}}" name="input.{{.Name}}" type="text" value="{{.Value}}">
+        {{end}}
+      </div>
+      {{end}}
+      <div><button type="submit" class="btn primary">run workflow</button></div>
+    </form>
+    {{end}}
+    {{else}}
+    <p class="muted px-3 pb-3 text-xs">No workflow at the default branch declares <code class="mono">workflow_dispatch</code>, so there is nothing to run manually yet.</p>
+    {{end}}
+  </section>
+  {{end}}
+
+  {{if .Workflows}}
+  <section class="mb-4" aria-labelledby="threads-workflows">
+    <h3 id="threads-workflows" class="mb-2 text-sm font-semibold">Workflows</h3>
+    <ul class="space-y-2">
+      {{range .Workflows}}
+      <li class="card" id="{{.Anchor}}">
+        <div class="flex flex-wrap items-center gap-2 px-3 py-2">
+          <span class="text-sm font-medium">{{.Name}}</span>
+          <code class="mono min-w-0 truncate text-xs">{{.Path}}</code>
+          {{range .Triggers}}<span class="chip chip-neutral">{{.}}</span>{{end}}
+          {{if .Error}}<span class="chip chip-neutral">parse error</span>{{end}}
+        </div>
+        {{if .Error}}<p class="err-line px-3 pb-2 text-xs" role="alert">{{.Error}}</p>{{end}}
+      </li>
+      {{end}}
+    </ul>
+  </section>
+  {{end}}
+  {{with .WorkflowsError}}<p class="muted mb-3 text-xs">workflows: {{.}}</p>{{end}}
+
+  {{/* Run-list filters (round-2 pass 2): a plain GET, so the narrowing lives in
+       the URL (shareable, back-button safe) and every run link keeps the page
+       it came from. Layout is the canonical filter bar (style guideline §6,
+       issue #232): labelled fields in a grid card, 2-up on phones → 4-up; a
+       grid cell gives each `.input` a real width, where the old flex wrapper
+       collapsed to min-content (round-3 defect: 50/28/29 px controls). The
+       `span.block` wrapper keeps a form control's intrinsic height when it is
+       itself a grid item (12 §Run-list filters). */}}
+  <form method="get" action="/{{$d.Repo.Full}}/threads"
+        class="card mb-3 grid grid-cols-2 gap-x-3 gap-y-2 p-3 sm:grid-cols-4"
+        aria-label="filter runs">
+    <label class="grid min-w-0 gap-1">
+      <span class="eyebrow">Workflow</span>
+      <span class="block min-w-0"><select class="input" id="threads-filter-workflow" name="workflow">
+        <option value="">any</option>
+        {{range .FilterWorkflowOptions}}<option value="{{.}}"{{if eq . $d.FilterWorkflow}} selected{{end}}>{{.}}</option>{{end}}
+      </select></span>
+    </label>
+    <label class="grid min-w-0 gap-1">
+      <span class="eyebrow">State</span>
+      <span class="block min-w-0"><select class="input" id="threads-filter-state" name="state">
+        <option value="">any</option>
+        {{range .States}}<option value="{{.}}"{{if eq . $d.FilterState}} selected{{end}}>{{.}}</option>{{end}}
+      </select></span>
+    </label>
+    <label class="grid min-w-0 gap-1">
+      <span class="eyebrow">Actor</span>
+      <span class="block min-w-0"><input class="input" id="threads-filter-actor" name="actor" type="text" value="{{.FilterActor}}" placeholder="any"></span>
+    </label>
+    <div class="flex min-w-0 items-end gap-2 self-end">
+      <button type="submit" class="btn">filter</button>
+      {{if .FilterActive}}<a class="link text-xs" href="/{{$d.Repo.Full}}/threads">clear</a>{{end}}
+    </div>
+  </form>
 
   {{if .Rows}}
   <ul class="space-y-2">
@@ -20,16 +128,19 @@
         <a class="link text-sm font-medium" href="{{.Href}}">{{.Workflow}}</a>
         <span class="chip chip-neutral">{{.State}}</span>
         {{if not .Trusted}}<span class="chip chip-draft" title="fork pull request: base-branch workflow, no secrets">untrusted</span>{{end}}
-        <span class="muted text-xs">{{.Event}}{{with .Branch}} · {{.}}{{end}}</span>
+        <span class="muted text-xs">{{.Event}}{{with .Branch}} · {{.}}{{end}}{{with .Actor}} · {{.}}{{end}}</span>
         <a class="link mono text-xs" href="/{{$d.Repo.Full}}/commit/{{.Commit}}">{{.ShortCommit}}</a>
+        {{with .DurationSeconds}}<span class="muted text-xs">{{duration .}}</span>{{end}}
         <span class="muted ml-auto shrink-0 text-xs">{{template "collab_time" .UpdatedAt}}</span>
       </div>
     </li>
     {{end}}
   </ul>
   {{if .More}}{{template "collab_pager" .OlderHref}}{{end}}
+  {{else if and (not .Error) .FilterActive}}
+  <p class="muted text-sm">No run matches this filter. <a class="link" href="/{{$d.Repo.Full}}/threads">clear it</a>.</p>
   {{else if not .Error}}
-  {{template "collab_empty" (dict "icon" "check" "title" "No workflow runs yet" "hint" "Add a workflow under .spindle/workflows/ and push, or dispatch one through the workflow API." "href" "/api#threads" "label" "Workflow API")}}
+  {{template "collab_empty" (dict "icon" "check" "title" "No workflow runs yet" "hint" "Add a workflow under .spindle/workflows/ and push, or run one from the Run workflow control above." "href" "" "label" "")}}
   {{end}}
 </div>
 {{end}}

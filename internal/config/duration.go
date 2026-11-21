@@ -2,6 +2,7 @@ package config
 
 import (
 	"fmt"
+	"math"
 	"regexp"
 	"strconv"
 	"time"
@@ -37,6 +38,11 @@ func ParseDuration(s string) (Duration, error) {
 		case "w":
 			unit = 7 * 24 * time.Hour
 		}
+		// Bound before multiplying: time.Duration(n)*unit wraps silently, and
+		// the old post-hoc d/unit check cannot see every wrap.
+		if n > uint64(math.MaxInt64)/uint64(unit) {
+			return 0, fmt.Errorf("invalid duration %q: overflows time.Duration", s)
+		}
 		d := time.Duration(n) * unit
 		if n > 0 && d/unit != time.Duration(n) {
 			return 0, fmt.Errorf("invalid duration %q: overflows time.Duration", s)
@@ -44,6 +50,9 @@ func ParseDuration(s string) (Duration, error) {
 		return Duration(d), nil
 	}
 	if n, err := strconv.ParseUint(s, 10, 64); err == nil {
+		if n > uint64(math.MaxInt64)/uint64(time.Second) {
+			return 0, fmt.Errorf("invalid duration %q: overflows time.Duration", s)
+		}
 		d := time.Duration(n) * time.Second
 		if n > 0 && d/time.Second != time.Duration(n) {
 			return 0, fmt.Errorf("invalid duration %q: overflows time.Duration", s)

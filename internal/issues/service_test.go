@@ -31,7 +31,7 @@ func TestCreateIssue(t *testing.T) {
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			th, ev, err := s.CreateIssue(reqCtx(), "acme", "repo", c.actor, c.title, c.body)
+			th, ev, err := s.CreateIssue(reqCtx(), "acme", "repo", c.actor, c.title, c.body, nil)
 			if c.wantErr != nil {
 				if !errors.Is(err, c.wantErr) {
 					t.Fatalf("err = %v, want %v", err, c.wantErr)
@@ -56,7 +56,7 @@ func TestCreateIssue(t *testing.T) {
 	}
 	// Private repo: stranger denied, member allowed.
 	roles.private["acme/priv"] = true
-	if _, _, err := s.CreateIssue(reqCtx(), "acme", "priv", bobP, "x", ""); !errors.Is(err, ErrForbidden) {
+	if _, _, err := s.CreateIssue(reqCtx(), "acme", "priv", bobP, "x", "", nil); !errors.Is(err, ErrForbidden) {
 		t.Fatalf("private stranger err = %v", err)
 	}
 	roles.grant("acme", "priv", "bob@example.com", "read")

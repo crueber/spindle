@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"encoding/json"
 	"fmt"
+	"html"
 	"io"
 	"net/http"
 	"net/url"
@@ -104,14 +105,20 @@ func sanitizeNext(next string) string {
 // and PKCE S256 (the verifier rides a short-lived HttpOnly cookie — F1).
 func (s *Server) authLogin(w http.ResponseWriter, r *http.Request) {
 	if !s.authSvc.BrowserLoginEnabled() {
-		// #344: the 501 string must not be the end-user experience — a
-		// browser gets the rendered login page (with the disabled
-		// explanation); API clients keep the plain status.
+		// #344 / F1: the 501 string must not be the end-user experience — a
+		// browser gets a rendered login page that is HONEST for the mode
+		// (token mode offers the token-paste form or the file/API recovery;
+		// it never blames the OIDC trio). API clients keep the plain status.
 		if browserLooks(r) {
 			next := sanitizeNext(r.URL.Query().Get("next"))
+			mode := s.cfg.Server.Auth.Mode
+			status := http.StatusNotImplemented
+			if mode == "token" && s.authSvc.TokenSignInEnabled() {
+				status = http.StatusOK // the token-paste form IS the login page
+			}
 			w.Header().Set("Content-Type", "text/html; charset=utf-8")
-			w.WriteHeader(http.StatusNotImplemented)
-			_, _ = w.Write([]byte(loginUnavailableHTML(next)))
+			w.WriteHeader(status)
+			_, _ = w.Write([]byte(loginPageHTML(mode, s.authSvc.TokenSignInEnabled(), next)))
 			return
 		}
 		plainStatus(w, http.StatusNotImplemented, "browser login is not enabled")
@@ -150,23 +157,145 @@ func (s *Server) authLogin(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusFound)
 }
 
-// loginUnavailableHTML renders the #344 login entry page: a working
-// "Log in with OIDC" button (GET /_auth/login?next=…, which starts the
-// provider flow whenever browser login is enabled) plus a clear explanation
-// for the disabled state. Served in two places: GET /_auth/login itself
-// (501) when the trio is incomplete, and the gated-group 401 path for
-// browser-ish GETs (middleware.go authFailure) so an unauthenticated browser
-// never faces a bare "authentication required" with no path forward. The
-// next target travels in the query string (url.QueryEscape — the only
-// interpolation, so no HTML escaping hazard even when a call site passes a
-// hostile RequestURI); the enabled /_auth/login flow additionally confines
-// it via sanitizeNext before signing it into state.
-func loginUnavailableHTML(next string) string {
+// tokenSignInFormHTML is the token-paste form shared by the login page and the
+// rejected-credential re-render. esc is an already-HTML-escaped next path.
+func tokenSignInFormHTML(esc string) string {
+	return `<form method="post" action="/_auth/token">
+<input type="hidden" name="next" value="` + esc + `">
+<p><label>Admin token <input type="password" name="token" autocomplete="off" required autofocus></label></p>
+<p><button type="submit">Sign in</button></p>
+</form>`
+}
+
+// authTokenSignIn answers POST /_auth/token (F1): the token-mode counterpart of
+// the OIDC login flow. It validates the pasted value against the same static
+// token map the credential chain uses, requires an admin principal (the setup
+// page is the destination), mints a normal walgit_session with session_secret,
+// and redirects to next. No new credential type and no new secret: the session
+// is the existing §8.5 wire, and the cookie authenticates through authToken's
+// session branch.
+//
+// Same-origin: a browser form POST carries Origin/Sec-Fetch-Site. Cross-site
+// values are refused before the token is read (CSRF: minting a cookie for an
+// attacker's chosen token is not useful, but refusing keeps the surface
+// uniform with POST /_auth/tokens).
+func (s *Server) authTokenSignIn(w http.ResponseWriter, r *http.Request) {
+	if s.cfg.Server.Auth.Mode != "token" {
+		plainStatus(w, http.StatusNotFound, "not found")
+		return
+	}
+	if o := r.Header.Get("Origin"); o != "" && !sameOriginHost(o, r.Host) && !s.isCanonicalOrigin(o) {
+		plainStatus(w, http.StatusForbidden, "cross-origin sign-in refused")
+		return
+	}
+	if sf := r.Header.Get("Sec-Fetch-Site"); sf != "" && sf != "same-origin" && sf != "none" {
+		plainStatus(w, http.StatusForbidden, "cross-site sign-in refused")
+		return
+	}
+	if err := r.ParseForm(); err != nil {
+		plainStatus(w, http.StatusBadRequest, "unreadable form")
+		return
+	}
+	next := sanitizeNext(r.PostFormValue("next"))
+	esc := html.EscapeString(next)
+	if !s.authSvc.TokenSignInEnabled() {
+		plainStatus(w, http.StatusNotImplemented,
+			"browser sign-in requires server.auth.session_secret (set it and restart, or use the JSON API with an admin token)")
+		return
+	}
+	raw := strings.TrimSpace(r.PostFormValue("token"))
+	if raw == "" {
+		writeTokenSignInError(w, esc, "Enter an admin static token.", http.StatusUnauthorized)
+		return
+	}
+	p, ok := s.authSvc.StaticPrincipal(raw)
+	if !ok {
+		w.Header().Set("WWW-Authenticate", `Bearer realm="walgit"`)
+		writeTokenSignInError(w, esc,
+			"That token is not in server.auth.tokens (or its token_env is unset on this host).",
+			http.StatusUnauthorized)
+		return
+	}
+	if !p.Admin {
+		plainStatus(w, http.StatusForbidden, "admin access required: this token's principal is not an admin")
+		return
+	}
+	sess, merr := s.authSvc.MintSession(p.Name)
+	if merr != nil {
+		plainStatus(w, http.StatusServiceUnavailable, "session mint failed")
+		return
+	}
+	s.setSessionCookie(w, sess)
+	http.Redirect(w, r, next, http.StatusSeeOther)
+}
+
+// writeTokenSignInError re-renders the token-paste page with the reason and the
+// original next target (the submitted token is never echoed back).
+func writeTokenSignInError(w http.ResponseWriter, esc, msg string, status int) {
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.Header().Set("Cache-Control", "no-store")
+	w.WriteHeader(status)
+	_, _ = w.Write([]byte(`<!doctype html><html><head><title>spindle — sign in</title></head><body>
+<h1>Sign in with a static token</h1>
+<p role="alert">` + html.EscapeString(msg) + `</p>` +
+		tokenSignInFormHTML(esc) +
+		`<p>Paste a <code>[[server.auth.tokens]]</code> value whose principal has
+<code>admin = true</code>; or use the JSON API with an admin token
+(<code>curl -H 'Authorization: Bearer &lt;token&gt;' ` + esc + `</code>).</p>
+</body></html>`))
+}
+
+// loginPageHTML renders the browser login entry for the caller's auth mode
+// (F1): the OIDC flow's disabled-trio explanation, the token-mode token-paste
+// form (or its file/API recovery when no session secret exists), or the
+// authentication-disabled notice. The next target travels only as a sanitized
+// path in the query/hidden field (sanitizeNext ran at the call site), and the
+// form posts back to sanitizeNext again — no open redirect.
+//
+// Served in two places: GET /_auth/login when browser login is disabled, and
+// the gated-group 401 path for browser-ish GETs (middleware.go authFailure) so
+// an unauthenticated browser never faces a bare "authentication required" with
+// no path forward.
+func loginPageHTML(mode string, tokenSignIn bool, next string) string {
 	if next == "" {
 		next = "/"
 	}
-	loginURL := "/_auth/login?next=" + url.QueryEscape(next)
-	return `<!doctype html><html><head><title>spindle — log in</title></head><body>
+	esc := html.EscapeString(next)
+	switch mode {
+	case "token":
+		if tokenSignIn {
+			return `<!doctype html><html><head><title>spindle — sign in</title></head><body>
+<h1>Sign in with a static token</h1>
+<p>This host authenticates with static tokens (<code>server.auth.mode = "token"</code>).
+Paste an <strong>admin</strong> static token (a <code>[[server.auth.tokens]]</code> row
+with <code>admin = true</code>) to start a browser session.</p>` +
+				tokenSignInFormHTML(esc) +
+				`<p>The session is an HMAC-signed <code>walgit_session</code> cookie
+(<code>server.auth.session_secret</code>, lifetime <code>server.auth.session_ttl</code>).
+It is not a new credential: removing the token from <code>server.auth.tokens</code>
+invalidates the session on the next request.</p>
+</body></html>`
+		}
+		return `<!doctype html><html><head><title>spindle — token mode</title></head><body>
+<h1>Token mode: browser sign-in is not enabled</h1>
+<p>This host authenticates with static tokens (<code>server.auth.mode = "token"</code>),
+but <code>server.auth.session_secret</code> is missing or shorter than 32 bytes, so no
+signed session can be minted.</p>
+<p>Two ways forward:</p>
+<ol>
+<li><strong>Edit <code>spindle.toml</code></strong> on the server (set
+<code>server.auth.session_secret</code> to at least 32 random bytes, e.g.
+<code>openssl rand -hex 32</code>) and restart. Then this page offers a token-paste
+sign-in.</li>
+<li><strong>Use the JSON API</strong> with an admin token:
+<code>curl -H 'Authorization: Bearer &lt;token&gt;' ` + esc + `</code>
+(or <code>PUT /api/v1/setup</code> to validate and save the fix).</li>
+</ol>
+<p>No identity-provider configuration is involved on this host.</p>
+</body></html>`
+	case "oidc":
+		loginURL := "/_auth/login?next=" + url.QueryEscape(next)
+		return `<!doctype html><html><head><title>spindle — log in</title></head><body>
 <h1>Log in with OIDC</h1>
 <p>Browser login is not enabled on this instance: the server's OIDC
 configuration is incomplete (it needs <code>server.auth.session_secret</code>,
@@ -180,6 +309,16 @@ restarts the server.</p>
 names the missing keys) or open <code>/setup</code> — the OIDC section
 flags the incomplete trio before you save.</p>
 </body></html>`
+	default:
+		return `<!doctype html><html><head><title>spindle — sign in</title></head><body>
+<h1>Authentication is disabled</h1>
+<p>This instance runs with <code>server.auth.mode = "none"</code>: there is no
+account to sign in to and no login flow to start. Set a real auth mode in
+<code>spindle.toml</code> (or on the setup page) and restart to require
+credentials.</p>
+<p><a href="/setup">Open setup</a></p>
+</body></html>`
+	}
 }
 
 // authRedirectURI is {public_url}/_auth/callback; loopback origins use
@@ -400,7 +539,7 @@ func (s *Server) authLogout(w http.ResponseWriter, r *http.Request) {
 func (s *Server) authTokensPage(w http.ResponseWriter, r *http.Request) {
 	p, aerr := s.authSvc.Authenticate(r, s.cfg)
 	if aerr != nil || p.Anonymous {
-		w.Header().Set("WWW-Authenticate", `Bearer realm="walgit"`)
+		w.Header().Set("WWW-Authenticate", s.authChallenge())
 		plainStatus(w, http.StatusUnauthorized, "authentication required")
 		return
 	}
@@ -443,7 +582,7 @@ func (s *Server) authTokensMint(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if p.Anonymous {
-		w.Header().Set("WWW-Authenticate", `Bearer realm="walgit"`)
+		w.Header().Set("WWW-Authenticate", s.authChallenge())
 		plainStatus(w, http.StatusUnauthorized, "authentication required")
 		return
 	}

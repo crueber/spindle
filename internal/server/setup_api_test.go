@@ -10,6 +10,8 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"testing"
@@ -84,13 +86,26 @@ func TestSetupAPISaveResponseWireShape(t *testing.T) {
 		t.Fatalf("PUT = %d %s", rec.Code, rec.Body.String())
 	}
 	body := rec.Body.String()
-	if !strings.HasPrefix(body, `{"errors":[],"requires_restart":["server.listen"],"saved":true}`) {
+	var saveResp struct {
+		Saved           bool     `json:"saved"`
+		RequiresRestart []string `json:"requires_restart"`
+		Backup          string   `json:"backup"`
+		Errors          []any    `json:"errors"`
+	}
+	if err := json.Unmarshal([]byte(body), &saveResp); err != nil {
+		t.Fatalf("save body = %s (%v)", body, err)
+	}
+	if !saveResp.Saved || len(saveResp.RequiresRestart) != 1 || saveResp.RequiresRestart[0] != "server.listen" || len(saveResp.Errors) != 0 {
 		t.Fatalf("save body = %s", body)
+	}
+	// A fresh data dir has no previous file, so the first save keeps no backup.
+	if saveResp.Backup != "" {
+		t.Fatalf("fresh save reports backup %q", saveResp.Backup)
 	}
 
 	// Validation failures report EVERY error as {key, message}.
 	req = httptest.NewRequest("POST", "/api/v1/setup/test",
-		strings.NewReader(`{"overrides": {"store.backend": "nope", "server.max_push_bytes": "-1"}}`))
+		strings.NewReader(`{"overrides": {"store.backend": "nope", "server.listen": "bogus"}}`))
 	rec = httptest.NewRecorder()
 	s.setupTest(rec, req)
 	if rec.Code != http.StatusUnprocessableEntity {
@@ -111,6 +126,63 @@ func TestSetupAPISaveResponseWireShape(t *testing.T) {
 	for _, e := range out.Errors {
 		if e.Message == "" {
 			t.Fatalf("empty message in %+v", out.Errors)
+		}
+	}
+}
+
+// TestSetupAPIRejectsOutOfRangeNumbers pins closing-audit Observation 3 on the
+// API twin of the page: PUT /api/v1/setup answers 422 with the offending key
+// and persists nothing when a numeric override is outside its field's range
+// (before the fix, 99999999999999999999 saturated to MinInt64 and saved).
+func TestSetupAPIRejectsOutOfRangeNumbers(t *testing.T) {
+	dataDir := t.TempDir()
+	cfg := config.FirstRunDefaults(dataDir)
+	s := New(Options{Config: cfg, Store: newFakeStore(), Engine: &fakeEngine{},
+		DataDir: dataDir, Boot: BootState{Mode: "normal"}})
+
+	// Establish a known file to compare against.
+	rec := httptest.NewRecorder()
+	s.setupPut(rec, httptest.NewRequest("PUT", "/api/v1/setup",
+		strings.NewReader(`{"overrides": {"server.listen": "127.0.0.1:9099"}}`)))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("baseline PUT = %d %s", rec.Code, rec.Body.String())
+	}
+	path := filepath.Join(dataDir, "spindle.toml")
+	before, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	for _, tc := range []struct{ key, body string }{
+		{"server.max_concurrent_requests", `{"overrides": {"server.max_concurrent_requests": 99999999999999999999}}`},
+		{"wal.cas_max_retries", `{"overrides": {"wal.cas_max_retries": 4294967296}}`},
+	} {
+		rec = httptest.NewRecorder()
+		s.setupPut(rec, httptest.NewRequest("PUT", "/api/v1/setup", strings.NewReader(tc.body)))
+		if rec.Code != http.StatusUnprocessableEntity {
+			t.Fatalf("%s: PUT = %d %s", tc.key, rec.Code, rec.Body.String())
+		}
+		var out struct {
+			Errors []struct {
+				Key     string `json:"key"`
+				Message string `json:"message"`
+			} `json:"errors"`
+		}
+		if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
+			t.Fatal(err)
+		}
+		if len(out.Errors) != 1 || out.Errors[0].Key != tc.key {
+			t.Fatalf("%s: errors = %+v, want one keyed error", tc.key, out.Errors)
+		}
+		if !strings.Contains(out.Errors[0].Message, "range") {
+			t.Fatalf("%s: message names no range: %q", tc.key, out.Errors[0].Message)
+		}
+		after, rerr := os.ReadFile(path)
+		if rerr != nil {
+			t.Fatal(rerr)
+		}
+		if string(after) != string(before) {
+			t.Fatalf("%s: rejected PUT rewrote the file", tc.key)
 		}
 	}
 }

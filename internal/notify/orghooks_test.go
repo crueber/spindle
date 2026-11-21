@@ -5,6 +5,7 @@
 package notify
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"net/http"
@@ -81,6 +82,7 @@ func TestOrgWebhookGatingTable(t *testing.T) {
 		{"DELETE", "/api/v1/orgs/acme/webhooks/" + id},
 		{"POST", "/api/v1/orgs/acme/webhooks/" + id + "/ping"},
 		{"GET", "/api/v1/orgs/acme/webhooks/" + id + "/deliveries"},
+		{"POST", "/api/v1/orgs/acme/webhooks/" + id + "/deliveries/1/redeliver"},
 		{"GET", "/api-browser/v1/orgs/acme/webhooks"},
 	}
 	for _, tc := range paths {
@@ -741,3 +743,78 @@ func TestOrgHookEventShape(t *testing.T) {
 }
 
 func boolPtr(b bool) *bool { return &b }
+
+// TestOrgHookRedeliver covers the org replay path end to end: a ping retains
+// its body, redeliver re-posts the identical bytes and appends a row, and a
+// bodyless record answers 410 through the HTTP twin.
+func TestOrgHookRedeliver(t *testing.T) {
+	x, _ := orgHarness(t)
+	sink, srv := newSink(t, "orgsecret")
+	defer srv.Close()
+	h, err := x.svc.CreateOrgHook(ctx(), "acme", "amy@example.com", HookSpec{
+		URL: strPtr(srv.URL), Secret: strPtr("orgsecret"),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	delivered, err := x.svc.PingOrgHook(ctx(), "acme", h.ID, "amy@example.com")
+	if err != nil || !delivered {
+		t.Fatalf("ping = %v %v", delivered, err)
+	}
+	d := x.svc.ReadOrgDeliveries(ctx(), "acme", h.ID)
+	if len(d.Entries) != 1 || len(d.Entries[0].Body) == 0 {
+		t.Fatalf("deliveries = %+v", d.Entries)
+	}
+	seq := d.Entries[0].Seq
+	entry, err := x.svc.RedeliverOrgHook(ctx(), "acme", h.ID, seq)
+	if err != nil || entry == nil || entry.Status != 200 {
+		t.Fatalf("redeliver = %+v %v", entry, err)
+	}
+	if sink.count() != 2 {
+		t.Fatalf("posts = %d, want 2", sink.count())
+	}
+	sink.mu.Lock()
+	p1, p2 := sink.posts[0], sink.posts[1]
+	sink.mu.Unlock()
+	if p1.delivery != p2.delivery || !bytes.Equal(p1.body, p2.body) {
+		t.Fatal("org replay must be byte-identical")
+	}
+
+	// HTTP twin: unknown seq 404, bodyless row 410, malformed seq 404.
+	rec := do(x.handler, req(t, "POST", "/api/v1/orgs/acme/webhooks/"+h.ID+"/deliveries/999/redeliver", "amy@example.com"))
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("unknown seq = %d", rec.Code)
+	}
+	if err := x.svc.Store.Delete(ctx(), OrgHookDeliveriesKey("acme", h.ID), ""); err != nil {
+		t.Fatal(err)
+	}
+	writeRaw(t, x.svc.Store, OrgHookDeliveriesKey("acme", h.ID),
+		mustEncode(t, DeliveriesDoc{Entries: []DeliveryEntry{{Seq: 12, Event: "ping", Status: 200}}}))
+	rec = do(x.handler, req(t, "POST", "/api/v1/orgs/acme/webhooks/"+h.ID+"/deliveries/12/redeliver", "amy@example.com"))
+	if rec.Code != http.StatusGone {
+		t.Fatalf("bodyless = %d (%s)", rec.Code, rec.Body.String())
+	}
+	rec = do(x.handler, req(t, "POST", "/api/v1/orgs/acme/webhooks/"+h.ID+"/deliveries/x/redeliver", "amy@example.com"))
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("bad seq = %d", rec.Code)
+	}
+}
+
+// TestOrgHookRedeliverInactive pins the parked-hook rule.
+func TestOrgHookRedeliverInactive(t *testing.T) {
+	x, _ := orgHarness(t)
+	h, err := x.svc.CreateOrgHook(ctx(), "acme", "amy@example.com", HookSpec{URL: strPtr("https://hooks.example/acme")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	off := false
+	if _, err := x.svc.PatchOrgHook(ctx(), "acme", h.ID, HookSpec{Active: &off}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := x.svc.RedeliverOrgHook(ctx(), "acme", h.ID, 1); err == nil || !strings.Contains(err.Error(), "inactive") {
+		t.Fatalf("inactive err = %v", err)
+	}
+	if _, err := x.svc.RedeliverOrgHook(ctx(), "acme", "nope", 1); err == nil {
+		t.Fatal("unknown hook must error")
+	}
+}

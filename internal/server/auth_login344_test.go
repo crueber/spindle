@@ -37,7 +37,7 @@ func TestGatedBrowserLoginDecisionTable(t *testing.T) {
 		}
 	})
 	t.Run("disabled browser GET renders the login page, not a bare 401", func(t *testing.T) {
-		_, h := newTestServer(t, nil) // token mode: browser login disabled
+		_, h := newTestServer(t, nil) // token mode: token-paste sign-in is the browser login
 		rec := httptest.NewRecorder()
 		h.ServeHTTP(rec, browserGET("/services/setup.json"))
 		if rec.Code != http.StatusUnauthorized {
@@ -50,10 +50,13 @@ func TestGatedBrowserLoginDecisionTable(t *testing.T) {
 			t.Fatalf("content-type = %q, want the rendered page", ct)
 		}
 		body := rec.Body.String()
-		for _, want := range []string{"Log in with OIDC", "/_auth/login?next=", "Browser login is not enabled"} {
+		for _, want := range []string{"Sign in with a static token", `action="/_auth/token"`} {
 			if !strings.Contains(body, want) {
 				t.Fatalf("page missing %q:\n%s", want, body)
 			}
+		}
+		if strings.Contains(body, "OIDC") {
+			t.Fatalf("token-mode 401 must not mention OIDC:\n%s", body)
 		}
 	})
 	t.Run("disabled plain GET keeps the bare 401", func(t *testing.T) {
@@ -96,30 +99,31 @@ func TestGatedBrowserLoginDecisionTable(t *testing.T) {
 	})
 }
 
-// TestAuthLoginDisabledRendersPage pins the /_auth/login half of #344: a
-// browser gets the rendered page (501, with a button that round-trips next);
-// API clients keep the plain 501 string.
+// TestAuthLoginDisabledRendersPage pins the /_auth/login half of #344/F1: in
+// TOKEN mode a browser gets the token-paste sign-in page (200 — the recovery
+// path is real), never the OIDC-trio explanation; API clients keep the plain
+// 501 string.
 func TestAuthLoginDisabledRendersPage(t *testing.T) {
-	_, h := newTestServer(t, nil) // token mode: browser login disabled
-	t.Run("browser gets the page", func(t *testing.T) {
+	_, h := newTestServer(t, nil) // token mode with a session secret
+	t.Run("browser gets the token-paste page", func(t *testing.T) {
 		req := httptest.NewRequest(http.MethodGet, "http://x/_auth/login?next=/acme/widgets", nil)
 		req.Header.Set("Accept", "text/html")
 		rec := httptest.NewRecorder()
 		h.ServeHTTP(rec, req)
-		if rec.Code != http.StatusNotImplemented {
-			t.Fatalf("status = %d, want 501", rec.Code)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("status = %d, want 200 (token sign-in form)", rec.Code)
 		}
 		if ct := rec.Header().Get("Content-Type"); !strings.HasPrefix(ct, "text/html") {
 			t.Fatalf("content-type = %q, want the rendered page", ct)
 		}
 		body := rec.Body.String()
-		for _, want := range []string{"Log in with OIDC", "Browser login is not enabled"} {
+		for _, want := range []string{"Sign in with a static token", `action="/_auth/token"`, `value="/acme/widgets"`} {
 			if !strings.Contains(body, want) {
 				t.Fatalf("page missing %q:\n%s", want, body)
 			}
 		}
-		if !strings.Contains(body, "/_auth/login?next=%2Facme%2Fwidgets") {
-			t.Fatalf("button must round-trip next:\n%s", body)
+		if strings.Contains(body, "OIDC") {
+			t.Fatalf("token-mode login page must not mention OIDC:\n%s", body)
 		}
 	})
 	t.Run("API client keeps the plain string", func(t *testing.T) {
@@ -163,14 +167,31 @@ func TestLoginNextRoundtrip(t *testing.T) {
 	}
 }
 
-// TestLoginUnavailablePageDefaultsNext pins the empty-next edge: the button
-// still targets the flow entry with next=/.
+// TestLoginUnavailablePageDefaultsNext pins the empty-next edge: the OIDC
+// button still targets the flow entry with next=/.
 func TestLoginUnavailablePageDefaultsNext(t *testing.T) {
-	body := loginUnavailableHTML("")
+	body := loginPageHTML("oidc", false, "")
 	for _, want := range []string{"Log in with OIDC", "/_auth/login?next=%2F"} {
 		if !strings.Contains(body, want) {
 			t.Fatalf("page missing %q:\n%s", want, body)
 		}
+	}
+}
+
+// TestLoginPageTokenModeCopy pins F1's honest copy: a token host without a
+// session secret states the file/API path and never blames OIDC.
+func TestLoginPageTokenModeCopy(t *testing.T) {
+	body := loginPageHTML("token", false, "/setup")
+	for _, want := range []string{"token", "server.auth.session_secret", "spindle.toml", "/api/v1/setup"} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("token-mode page missing %q:\n%s", want, body)
+		}
+	}
+	if strings.Contains(body, "OIDC") {
+		t.Fatalf("token-mode page must not mention OIDC:\n%s", body)
+	}
+	if strings.Contains(body, `action="/_auth/token"`) {
+		t.Fatalf("no form without a session secret:\n%s", body)
 	}
 }
 

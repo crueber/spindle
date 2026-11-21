@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -395,6 +396,31 @@ func TestWebhookEndpointsTable(t *testing.T) {
 		t.Fatalf("deliveries cache = %q", cc)
 	}
 
+	// Redeliver the failed ping (retained body) — a fresh attempt row, still
+	// an unreachable sink, so {delivery:false}; the ring grows to two.
+	pingSeq := deliv.Entries[0].Seq
+	rec = do(x.handler, req(t, "POST", "/acme/repo/api/webhooks/"+id+"/deliveries/"+strconv.Itoa(pingSeq)+"/redeliver", "amy@example.com"))
+	if rec.Code != 200 {
+		t.Fatalf("redeliver = %d %q", rec.Code, rec.Body.String())
+	}
+	var redelivered struct {
+		Delivery bool          `json:"delivery"`
+		Entry    DeliveryEntry `json:"entry"`
+	}
+	mustJSON(t, rec, &redelivered)
+	if redelivered.Delivery || redelivered.Entry.Seq != pingSeq {
+		t.Fatalf("redeliver = %+v", redelivered)
+	}
+	rec = do(x.handler, req(t, "GET", "/acme/repo/api/webhooks/"+id+"/deliveries", "amy@example.com"))
+	mustJSON(t, rec, &deliv)
+	if len(deliv.Entries) != 2 {
+		t.Fatalf("ring after redeliver = %+v", deliv)
+	}
+	// Malformed seq is 404 (foreign delivery, never a 400 noise).
+	if rec := do(x.handler, req(t, "POST", "/acme/repo/api/webhooks/"+id+"/deliveries/nope/redeliver", "amy@example.com")); rec.Code != http.StatusNotFound {
+		t.Fatalf("bad seq = %d", rec.Code)
+	}
+
 	// Unknown hook → 404 on every sub-route.
 	for _, tc := range []struct{ method, path string }{
 		{"GET", "/acme/repo/api/webhooks/nope"},
@@ -402,6 +428,7 @@ func TestWebhookEndpointsTable(t *testing.T) {
 		{"DELETE", "/acme/repo/api/webhooks/nope"},
 		{"POST", "/acme/repo/api/webhooks/nope/ping"},
 		{"GET", "/acme/repo/api/webhooks/nope/deliveries"},
+		{"POST", "/acme/repo/api/webhooks/nope/deliveries/1/redeliver"},
 	} {
 		var rr *http.Request
 		if tc.method == "PATCH" {

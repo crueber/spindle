@@ -1,7 +1,8 @@
 // cli_issue.go — `spindle issue` (11_config_cli.md §6.6): list/show/create/
 // comment/close/reopen over the shipped /{owner}/{repo}/api/issues surface
-// (docs/features/02_issues.md §7). Labels, assignees, and milestones ride
-// the same PATCH the web UI uses — the CLI forks no write path.
+// (docs/features/02_issues.md §7). Create is ONE request: labels, assignees
+// and milestone ride the create body, so a bad label fails before an issue
+// exists (the server validates them before allocating a number).
 package main
 
 import (
@@ -98,9 +99,9 @@ func runIssueList(ctx context.Context, c *cli, args []string) int {
 	fs.StringVar(&assignee, "assignee", "", "assignee login or *none")
 	fs.StringVar(&milestone, "milestone", "", "milestone id or none")
 	fs.StringVar(&after, "after", "", "issue-number cursor")
-	pos, ok := parseAPI(fs, args)
-	if !ok {
-		return exitArg
+	pos, exit := parseAPI(fs, args)
+	if exit != parseContinue {
+		return exit
 	}
 	owner, repo, ok := oneRepo(c, pos, "issue list OWNER/REPO")
 	if !ok {
@@ -156,9 +157,9 @@ func runIssueShow(ctx context.Context, c *cli, args []string) int {
 	f.add(fs)
 	var comments int
 	fs.IntVar(&comments, "comments", 0, "event window size (server default 50)")
-	pos, ok := parseAPI(fs, args)
-	if !ok {
-		return exitArg
+	pos, exit := parseAPI(fs, args)
+	if exit != parseContinue {
+		return exit
 	}
 	owner, repo, num, ok := repoAndNum(c, pos, "issue show OWNER/REPO NUM")
 	if !ok {
@@ -197,9 +198,9 @@ func runIssueCreate(ctx context.Context, c *cli, args []string) int {
 	fs.Var(&labels, "label", "label to apply (repeatable)")
 	fs.Var(&assignees, "assignee", "assignee login (repeatable)")
 	fs.StringVar(&milestone, "milestone", "", "milestone id")
-	pos, ok := parseAPI(fs, args)
-	if !ok {
-		return exitArg
+	pos, exit := parseAPI(fs, args)
+	if exit != parseContinue {
+		return exit
 	}
 	owner, repo, ok := oneRepo(c, pos, "issue create OWNER/REPO --title T")
 	if !ok {
@@ -218,37 +219,25 @@ func runIssueCreate(ctx context.Context, c *cli, args []string) int {
 		fmt.Fprintf(c.stderr(), "spindle: %v\n", err)
 		return exitErr
 	}
+	// ONE write: the create body carries the metadata (02_issues.md §7).
+	// The server validates every label/assignee/milestone before it
+	// allocates a number, so a rejection leaves nothing behind.
+	req := map[string]any{"title": title, "body": text}
+	if len(labels) > 0 {
+		req["labels"] = []string(labels)
+	}
+	if len(assignees) > 0 {
+		req["assignees"] = []string(assignees)
+	}
+	if milestone != "" {
+		req["milestone"] = milestone
+	}
 	var created struct {
 		Thread *issueThread `json:"thread"`
 	}
-	raw, err := a.callInto(ctx, "POST", apiPath(owner, repo, "issues"), nil,
-		map[string]string{"title": title, "body": text}, &created)
+	raw, err := a.callInto(ctx, "POST", apiPath(owner, repo, "issues"), nil, req, &created)
 	if err != nil {
 		return a.fail(err)
-	}
-	// Labels/assignees/milestone are a second PATCH — the create body accepts
-	// only {title, body} (02_issues.md §7), so the CLI must not pretend.
-	if len(labels) > 0 || len(assignees) > 0 || milestone != "" {
-		patch := map[string]any{}
-		if len(labels) > 0 {
-			patch["labels"] = []string(labels)
-		}
-		if len(assignees) > 0 {
-			patch["assignees"] = []string(assignees)
-		}
-		if milestone != "" {
-			patch["milestone"] = milestone
-		}
-		if created.Thread == nil {
-			fmt.Fprintln(c.stderr(), "spindle: server returned no issue number; metadata not applied")
-			return exitErr
-		}
-		num := strconv.Itoa(created.Thread.Num)
-		raw, err = a.callInto(ctx, "PATCH", apiPath(owner, repo, "issues", num), nil, patch, &created)
-		if err != nil {
-			fmt.Fprintf(c.stderr(), "spindle: issue #%s was created, but the metadata update failed\n", num)
-			return a.fail(err)
-		}
 	}
 	if f.json {
 		return a.emitJSON(raw)
@@ -268,9 +257,9 @@ func runIssueComment(ctx context.Context, c *cli, args []string) int {
 	var body, bodyFile string
 	fs.StringVar(&body, "body", "", "comment body")
 	fs.StringVar(&bodyFile, "body-file", "", "read the body from FILE (- = stdin)")
-	pos, ok := parseAPI(fs, args)
-	if !ok {
-		return exitArg
+	pos, exit := parseAPI(fs, args)
+	if exit != parseContinue {
+		return exit
 	}
 	owner, repo, num, ok := repoAndNum(c, pos, "issue comment OWNER/REPO NUM --body B")
 	if !ok {
@@ -321,9 +310,9 @@ func issueSetState(ctx context.Context, c *cli, args []string, verb string) int 
 	if verb == "close" {
 		fs.StringVar(&reason, "reason", "", "completed|not_planned")
 	}
-	pos, ok := parseAPI(fs, args)
-	if !ok {
-		return exitArg
+	pos, exit := parseAPI(fs, args)
+	if exit != parseContinue {
+		return exit
 	}
 	owner, repo, num, ok := repoAndNum(c, pos, "issue "+verb+" OWNER/REPO NUM")
 	if !ok {
@@ -359,7 +348,8 @@ func issueSetState(ctx context.Context, c *cli, args []string, verb string) int 
 		if verb == "reopen" {
 			done = "reopened"
 		}
-		fmt.Fprintf(c.stdout(), "#%d %s\n", num, done)
+		fmt.Fprintf(c.stdout(), "#%d %s\n%s\n", num, done,
+			a.base+"/"+owner+"/"+repo+"/issues/"+strconv.Itoa(num))
 	}
 	return exitOK
 }
@@ -397,8 +387,10 @@ func printIssueView(c *cli, v issueView) {
 	}
 }
 
-// oneRepo parses exactly one OWNER/REPO positional.
+// oneRepo parses exactly one OWNER/REPO positional (defaulting to -R /
+// SPINDLE_REPO when omitted).
 func oneRepo(c *cli, pos []string, usage string) (string, string, bool) {
+	pos = c.withRepoSelector(pos, 1)
 	if len(pos) != 1 {
 		fmt.Fprintf(c.stderr(), "usage: spindle %s\n", usage)
 		return "", "", false
@@ -411,8 +403,10 @@ func oneRepo(c *cli, pos []string, usage string) (string, string, bool) {
 	return owner, repo, true
 }
 
-// repoAndNum parses OWNER/REPO plus an issue/PR number.
+// repoAndNum parses OWNER/REPO plus an issue/PR number (the repo defaults to
+// -R / SPINDLE_REPO).
 func repoAndNum(c *cli, pos []string, usage string) (string, string, int, bool) {
+	pos = c.withRepoSelector(pos, 2)
 	if len(pos) != 2 {
 		fmt.Fprintf(c.stderr(), "usage: spindle %s\n", usage)
 		return "", "", 0, false

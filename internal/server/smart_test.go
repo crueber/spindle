@@ -89,7 +89,7 @@ func Test401VsPktErrTruthTable(t *testing.T) {
 			t.Fatalf("case %d: status = %d, want %d", i, rec.Code, tc.wantStatus)
 		}
 		if tc.wantStatus == http.StatusUnauthorized {
-			if got := rec.Header().Get("WWW-Authenticate"); got != `Bearer realm="walgit"` {
+			if got := rec.Header().Get("WWW-Authenticate"); got != `Basic realm="walgit", Bearer realm="walgit"` {
 				t.Fatalf("case %d: WWW-Authenticate = %q", i, got)
 			}
 		}

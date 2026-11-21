@@ -102,6 +102,7 @@ import (
 	"github.com/crueber/spindle/internal/api"
 	"github.com/crueber/spindle/internal/checks"
 	"github.com/crueber/spindle/internal/config"
+	"github.com/crueber/spindle/internal/forksync"
 	"github.com/crueber/spindle/internal/git"
 	"github.com/crueber/spindle/internal/identity"
 	"github.com/crueber/spindle/internal/notify"
@@ -169,6 +170,11 @@ type RepoDeps struct {
 
 	// SyncFork starts the WP5 sync-fork task (forksync.Service.Start).
 	SyncFork func(ctx context.Context, owner, repo string, p auth.Principal) (string, error)
+	// SyncOutcome reads the last sync-fork outcome sidecar
+	// (forksync.Service.LastOutcome) so the fork header shows what happened —
+	// fast-forward, already current, diverged (with the upstream message and
+	// the PR link) or failure — instead of only "sync started".
+	SyncOutcome func(ctx context.Context, owner, repo string) (*forksync.Sidecar, error)
 
 	// RoleOf resolves the viewer's repo role (identity.Service.Resolve's role
 	// half) — the write gate that decides whether Create tag renders at all.
@@ -445,12 +451,20 @@ type RepoChrome struct {
 	PushMirrorTitle string
 	PushMirrorNext  string
 
+	// ForkSync is the last sync-fork outcome (nil = never run on this fork).
+	ForkSync *ForkSyncView
+
 	CloneURL    string
 	SSHURL      string
 	HTTPLabel   string
 	ForkHref    string
 	ForksHref   string
 	SettingsRef string
+	// ClonePrimary controls the masthead Clone button's emphasis. The chrome is
+	// the page's ONE primary action only when the page body has none (style
+	// guideline F3): a page with its own primary (New issue, Save, Comment,
+	// …) demotes Clone to a secondary .btn so the accent stays unique.
+	ClonePrimary bool
 
 	// Star/watch (07 §§7–8). ShowStar/ShowWatch mean "the counters were
 	// read"; CanStar/CanWatch mean "the write seam is wired"; Off means the
@@ -476,6 +490,11 @@ type RepoChrome struct {
 
 	Tabs    []repoTab
 	Section string
+
+	// FeaturePackages is the resolved features.packages flag (Forgejo #522).
+	// The Packages page gates on it exactly like its JSON twin, and the tab
+	// strip renders the tab only when it is on.
+	FeaturePackages bool
 }
 
 // repoTab is one entry of the repo tab strip.
@@ -485,6 +504,20 @@ type repoTab struct {
 	Href   string
 	Active bool
 	Badge  int
+}
+
+// ForkSyncView is the last sync-fork result as the fork header renders it.
+// The page never calls the task from a template: it reads the outcome sidecar
+// the task recorded (law 4 — the bucket is the state).
+type ForkSyncView struct {
+	Result   string // current | fast-forward | diverged | failed
+	Label    string // display chip text
+	Message  string // the sidecar's human message (upstream names included)
+	PRURL    string // divergence: the diff link (parent repo, fork head)
+	Branch   string
+	At       string
+	Diverged bool
+	Failed   bool
 }
 
 // buildRepoChrome composes the header model in ONE pass (no N+1 browser
@@ -502,6 +535,7 @@ func (s *Server) buildRepoChrome(r *http.Request, rq repoRequest, sum api.Summar
 		ForksHref:    "/" + rq.full + "/forks",
 		ForkHref:     "/" + rq.full + "/fork",
 		SettingsRef:  "/" + rq.full + "/settings",
+		ClonePrimary: true, // the code/browse pages' one primary; pageRepo demotes it per page
 	}
 	// Empty is the api's vocabulary plus the refs==0 fallback for views that
 	// predate Health (same predicate summarizeSnapshot uses).
@@ -563,6 +597,35 @@ func (s *Server) buildRepoChrome(r *http.Request, rq repoRequest, sum api.Summar
 	if c.ForkParent != "" && repoDeps.SyncFork != nil &&
 		repoCanWrite(r.Context(), rq.id.Owner, rq.id.Name, rq.p) {
 		c.CanSyncFork = true
+	}
+	// The last sync outcome is bucket state, not the click's flash: reading it
+	// here is what makes a diverged sync visible (and linkable to the new-PR
+	// form) on the next page load. Only forks pay the sidecar probe.
+	if c.ForkParent != "" && repoDeps.SyncOutcome != nil {
+		if out, err := repoDeps.SyncOutcome(r.Context(), c.Owner, c.Name); err == nil && out != nil {
+			v := &ForkSyncView{
+				Result:  out.Result,
+				Message: out.Message,
+				PRURL:   out.PRURL,
+				Branch:  out.Branch,
+				At:      out.UpdatedAt,
+			}
+			switch out.Result {
+			case forksync.ResultCurrent:
+				v.Label = "up to date"
+			case forksync.ResultFastForward:
+				v.Label = "fast-forwarded"
+			case forksync.ResultDiverged:
+				v.Label = "diverged"
+				v.Diverged = true
+			case forksync.ResultFailed:
+				v.Label = "sync failed"
+				v.Failed = true
+			default:
+				v.Label = out.Result
+			}
+			c.ForkSync = v
+		}
 	}
 	hasChecks := false
 	if repoDeps.ChecksSummary != nil {
@@ -627,6 +690,12 @@ func (s *Server) buildRepoChrome(r *http.Request, rq repoRequest, sum api.Summar
 		{ID: "commits", Label: "Commits", Href: "/" + c.Full + "/commits"},
 		{ID: "tags", Label: "Tags", Href: "/" + c.Full + "/tags", Badge: c.Tags},
 	}
+	c.FeaturePackages = feat.Packages
+	if feat.Packages {
+		// The registry tab (docs/features/14 §7): the package IS the repo,
+		// so a repository with images shows them here, next to its git tags.
+		c.Tabs = append(c.Tabs, repoTab{ID: "packages", Label: "Packages", Href: "/" + c.Full + "/packages"})
+	}
 	if feat.Issues {
 		c.Tabs = append(c.Tabs, repoTab{ID: "issues", Label: "Issues", Href: "/" + c.Full + "/issues", Badge: counts.OpenIssues})
 	}
@@ -650,7 +719,7 @@ func (s *Server) buildRepoChrome(r *http.Request, rq repoRequest, sum api.Summar
 		c.Tabs[i].Active = c.Tabs[i].ID == c.Section
 		active = active || c.Tabs[i].Active
 	}
-	if !active && (c.Section == "issues" || c.Section == "pulls" || c.Section == "releases") {
+	if !active && (c.Section == "issues" || c.Section == "pulls" || c.Section == "releases" || c.Section == "packages") {
 		// Forgejo #522: a hidden feature tab must never leave the strip blank
 		// (and must never hold aria-current) — the page re-highlights onto
 		// Code. Checks keeps its mapping (#505/#513): a check-less repo's
@@ -680,6 +749,8 @@ func repoTabSection(path string) string {
 		return "commits"
 	case "tags":
 		return "tags"
+	case "packages":
+		return "packages"
 	case "issues", "labels", "milestones":
 		return "issues"
 	case "pulls", "pull":
@@ -1720,6 +1791,32 @@ type commitPage struct {
 	TagName      string
 	TagMessage   string
 	TagErr       string
+
+	// Checks is the commit's per-context checks panel (round-2 pass 2): the
+	// same statuses the checks page and the PR checks panel render. Nil when
+	// the checks surface is not wired or nothing ever reported for this sha —
+	// the panel is omitted rather than shown empty (the /checks page already
+	// explains the zero-check state).
+	Checks *commitChecksPanel
+}
+
+// commitChecksPanel is one commit's checks panel: the combined worst-of state
+// and its contexts, with the duration each context took when it has one.
+type commitChecksPanel struct {
+	State    string
+	Contexts []commitCheckRow
+}
+
+// commitCheckRow is one context row of the commit checks panel (the
+// collab_check_contexts partial's field set, plus the context's duration).
+type commitCheckRow struct {
+	Context         string
+	State           string
+	Description     string
+	TargetURL       string
+	Creator         string
+	UpdatedAt       string
+	DurationSeconds int64
 }
 
 var (
@@ -1751,6 +1848,11 @@ func (s *Server) commitPageData(w http.ResponseWriter, r *http.Request, rq repoR
 		return nil, false
 	}
 	data := &commitPage{Repo: c, SHA: sha, CanCreateTag: repoCanWrite(ctx, c.Owner, c.Name, rq.p) && repoDeps.Tags != nil}
+	if data.CanCreateTag && c != nil {
+		// The Create-tag form's submit is this page's primary action; Clone
+		// stays a secondary masthead button (style guideline F3).
+		c.ClonePrimary = false
+	}
 	if c.Empty {
 		data.Guide = s.repoGuide(c)
 		return data, true
@@ -1837,6 +1939,7 @@ func (s *Server) commitPageData(w http.ResponseWriter, r *http.Request, rq repoR
 		}
 		data.Files = append(data.Files, cf)
 	}
+	data.Checks = commitChecks(ctx, c.Owner, c.Name, data.SHA, rq.p)
 	return data, true
 }
 
@@ -2025,10 +2128,17 @@ type walPage struct {
 	Segments     []string
 	SegmentAll   bool
 	SegmentMore  bool
-	Ops          []walOp
-	Recent       []walTask
-	OpsAvailable int
-	OpsRecent    int
+	OpsPanel     walOpsPanel
+}
+
+// walOpsPanel is the shared Ops inventory + run controls (WP9 G12/G16): the
+// WAL page and the Settings → WAL panel render the same partial. OpsURL is the
+// existing JSON op stream endpoint; each run form appends the op name.
+type walOpsPanel struct {
+	Ops    []walOp
+	Recent []walTask
+	OpsURL string
+	CanRun bool
 }
 
 func (s *Server) repoWAL(w http.ResponseWriter, r *http.Request) {
@@ -2146,39 +2256,56 @@ func (s *Server) repoWAL(w http.ResponseWriter, r *http.Request) {
 	// Ops inventory (api.Tasks): the wire is {op,params[{name,values[]}]} —
 	// there is no kind/doc, so params render as an inventory (checkbox vs
 	// select vs text is derived from values, spec §6.2 item 3). Running an op
-	// is a POST stream (the islands group's form); no dead buttons here.
+	// is a POST stream to …/api/ops/{op} (the ops island); no dead buttons.
 	if s.env.API.Tasks != nil {
-		for _, op := range s.env.API.Tasks.Ops() {
-			row := walOp{Op: op.Op}
-			for _, p := range op.Params {
-				wp := walParam{Name: p.Name, Values: p.Values}
-				switch {
-				case len(p.Values) == 0:
-					wp.Kind, wp.Required = "text", true
-				case len(p.Values) == 1 && p.Values[0] == "1":
-					wp.Kind = "checkbox"
-				default:
-					wp.Kind = "select"
-				}
-				row.Params = append(row.Params, wp)
-			}
-			data.Ops = append(data.Ops, row)
-		}
-		data.OpsAvailable = len(data.Ops)
-		if _, recent, terr := s.env.API.Tasks.List(ctx, rq.id); terr == nil {
-			for _, t := range recent {
-				data.Recent = append(data.Recent, walTask{
-					Label: t.Kind,
-					Kind:  t.Kind,
-					State: t.Summary,
-					Stamp: t.Finished,
-					OK:    t.OK,
-				})
-			}
-			data.OpsRecent = len(data.Recent)
+		data.OpsPanel = walOpsPanel{
+			Ops:    walOpsFrom(s.env.API.Tasks),
+			Recent: walRecentFrom(ctx, s.env.API.Tasks, rq.id),
+			OpsURL: "/" + rq.id.Owner + "/" + rq.id.Name + "/api/ops/",
+			CanRun: repoCanWrite(ctx, rq.id.Owner, rq.id.Name, rq.p),
 		}
 	}
 	s.page(w, r, rq.p, http.StatusOK, "repo/wal", "WAL · "+c.Full, data)
+}
+
+// walOpsFrom projects the task table's op specs onto the page's inventory
+// row. Shared by the WAL page and the Settings → WAL panel (WP9 G16), so the
+// two cannot drift.
+func walOpsFrom(tasks api.Tasks) []walOp {
+	out := make([]walOp, 0, len(tasks.Ops()))
+	for _, op := range tasks.Ops() {
+		row := walOp{Op: op.Op}
+		for _, p := range op.Params {
+			wp := walParam{Name: p.Name, Values: p.Values}
+			switch {
+			case len(p.Values) == 0:
+				wp.Kind, wp.Required = "text", true
+			case len(p.Values) == 1 && p.Values[0] == "1":
+				wp.Kind = "checkbox"
+			default:
+				wp.Kind = "select"
+			}
+			row.Params = append(row.Params, wp)
+		}
+		out = append(out, row)
+	}
+	return out
+}
+
+// walRecentFrom is the bounded recent-task list both WAL surfaces render.
+func walRecentFrom(ctx context.Context, tasks api.Tasks, id git.RepoId) []walTask {
+	_, recent, err := tasks.List(ctx, id)
+	if err != nil {
+		return nil
+	}
+	out := make([]walTask, 0, len(recent))
+	for _, t := range recent {
+		out = append(out, walTask{
+			Label: t.Kind, Kind: t.Kind, State: t.Summary,
+			Stamp: t.Finished, OK: t.OK,
+		})
+	}
+	return out
 }
 
 // chipTone maps a status word to the shared chip tone (Wal.jsx CHIP_TONES).
@@ -2392,4 +2519,39 @@ func (s *Server) repoSyncFork(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.formsRedirectFlash(w, r, "/"+rq.full, "Sync fork started (task "+shortSHA(id)+")")
+}
+
+// commitChecks builds the commit page's checks panel (nil when there is nothing
+// to show). One combined read, already bounded by the checks service; a commit
+// nobody reported for renders no panel (the checks page owns the zero state).
+func commitChecks(ctx context.Context, owner, repo, sha string, p auth.Principal) *commitChecksPanel {
+	if collabDeps.ChecksCombined == nil || sha == "" {
+		return nil
+	}
+	cv, err := collabDeps.ChecksCombined(ctx, owner, repo, sha, p)
+	if err != nil || cv == nil || len(cv.Statuses) == 0 {
+		return nil
+	}
+	rows := make([]commitCheckRow, 0, len(cv.Statuses))
+	for _, st := range cv.Statuses {
+		rows = append(rows, commitCheckRow{
+			Context: st.Context, State: st.State, Description: st.Description,
+			TargetURL: st.TargetURL, Creator: st.Creator, UpdatedAt: st.UpdatedAt,
+			DurationSeconds: checksDuration(st.StartedAt, st.CompletedAt),
+		})
+	}
+	return &commitChecksPanel{State: cv.State, Contexts: rows}
+}
+
+// checksDuration is started→completed seconds (0 when either is missing).
+func checksDuration(started, completed *string) int64 {
+	if started == nil || completed == nil {
+		return 0
+	}
+	from, ferr := time.Parse(time.RFC3339, *started)
+	to, terr := time.Parse(time.RFC3339, *completed)
+	if ferr != nil || terr != nil || to.Before(from) {
+		return 0
+	}
+	return int64(to.Sub(from) / time.Second)
 }

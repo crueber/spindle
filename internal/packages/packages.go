@@ -41,10 +41,20 @@ import (
 
 // Limits (docs/features/14 §5). Zero Service fields resolve to these.
 const (
-	DefaultMaxBlobBytes     int64 = 2 << 30
+	// DefaultMaxBlobBytes is GHCR's per-layer ceiling (10 GB) rather than a
+	// smaller spindle-specific cap: a registry that refuses a layer the
+	// reference implementation accepts is a parity bug, not prudence.
+	DefaultMaxBlobBytes     int64 = 10 << 30
 	DefaultMaxManifestBytes int64 = 4 << 20
 	DefaultUploadTTL              = 24 * time.Hour
 	DefaultTokenTTL               = 5 * time.Minute
+	// DefaultBlobGrace keeps a just-finalized blob out of the sweep: a
+	// manifest PUT follows its layer uploads, and a pass landing in that
+	// window would otherwise delete bytes the push is about to reference.
+	DefaultBlobGrace = 10 * time.Minute
+	// DefaultGCInterval is the minimum spacing between maintainer sweeps of
+	// one repo (the in-memory due gate; a wiped instance only repeats work).
+	DefaultGCInterval = 15 * time.Minute
 )
 
 // RegistryPrefix is the bucket prefix this feature owns (§2). It is
@@ -54,9 +64,18 @@ const registrySuffix = "/packages/registry"
 // RoleService is the narrow P6 surface this package consumes (the same shape
 // internal/releases and internal/checks use: satisfied by *identity.Service,
 // tests substitute a fake). Core never imports this package.
+//
+// CheckPush is the git receive-pack gate VERBATIM (identity.CheckPush, the
+// Forgejo #347 rule): push authorisation is not reimplemented here, it is the
+// same function the git transport enforces — self-namespace owner, org roster,
+// explicit binding, host admin; the host-wide write flag grants nothing. A
+// registry that resolved roles on its own drifted from git once (an owner with
+// no access.json could git-push but not docker-push, docs/AUDIT-V1.md); reusing
+// the gate makes that class of divergence impossible.
 type RoleService interface {
 	Resolve(ctx context.Context, owner, repo string, p auth.Principal) (identity.Role, *identity.AccessDoc)
 	CheckRead(ctx context.Context, owner, repo string, p auth.Principal) *auth.AuthError
+	CheckPush(ctx context.Context, owner, repo string, p auth.Principal) *auth.AuthError
 }
 
 // Authenticator resolves the request principal through Seam 2 (the server's
@@ -82,6 +101,12 @@ type Service struct {
 	MaxManifestBytes int64
 	UploadTTL        time.Duration
 	TokenTTL         time.Duration
+	// BlobGrace protects a just-finalized blob from the maintainer sweep
+	// while its manifest is still in flight (0 → DefaultBlobGrace).
+	BlobGrace time.Duration
+	// GCInterval is the maintainer sweep's per-repo due spacing (0 →
+	// DefaultGCInterval). In-memory only: a restart merely repeats a pass.
+	GCInterval time.Duration
 	// AnonymousRead is the auth.anonymous_read fallback when Roles is nil
 	// (tests). Production always wires Roles, whose CheckRead is the
 	// authority (the Forgejo #345 visibility rule).
@@ -104,6 +129,13 @@ type Service struct {
 	// re-mints on every operation, so the practical effect is re-login
 	// after a restart — documented in 14_packages.md §4).
 	TokenSecret []byte
+
+	// gcMu guards the sweep bookkeeping: recently finalized blobs (the
+	// grace guard, §6) and the per-repo last-sweep clock. Both are caches —
+	// no lock is held across a store call.
+	gcMu    sync.Mutex
+	recent  map[string]time.Time
+	sweptAt map[string]time.Time
 }
 
 // New builds a Service over st and the role resolver.
@@ -196,6 +228,18 @@ func abortedKey(owner, repo, id string) string {
 
 func tagsPrefix(owner, repo string) string {
 	return RepoBase(owner, repo) + "/tags/"
+}
+
+func blobsPrefix(owner, repo string) string {
+	return RepoBase(owner, repo) + "/blobs/sha256/"
+}
+
+func manifestsPrefix(owner, repo string) string {
+	return RepoBase(owner, repo) + "/manifests/sha256/"
+}
+
+func uploadsPrefix(owner, repo string) string {
+	return RepoBase(owner, repo) + "/uploads/"
 }
 
 // validateRepo checks the owner/repo shape (path safety) before it becomes a
@@ -355,9 +399,11 @@ func roleRank(role string) int {
 
 // CanPull enforces read (pull) on the repository: the identity require_read
 // gate is the authority when wired, so anonymous callers reach public repos
-// and a flag-only fallback keeps instances without identity working.
+// and a flag-only fallback keeps instances without identity working. There is
+// no host-write shortcut: the git read gate grants a host-wide write flag
+// nothing (Forgejo #374), and the registry has no privilege of its own.
 func (s *Service) CanPull(ctx context.Context, owner, repo string, p auth.Principal) *Error {
-	if p.Admin || p.Write {
+	if p.Admin {
 		return nil
 	}
 	if s.Roles == nil {
@@ -379,25 +425,35 @@ func (s *Service) CanPull(ctx context.Context, owner, repo string, p auth.Princi
 	return nil
 }
 
-// CanPush enforces write on the repository (scope push ⇒ role write).
+// CanPush enforces write on the repository (scope push ⇒ the git push rule).
+// It calls the SAME gate the receive-pack path enforces — identity.CheckPush —
+// so the owner-of-a-repo-without-access.json case, org rosters, explicit
+// bindings and the host-admin bypass behave identically on both transports
+// (docs/AUDIT-V1.md finding 1).
 func (s *Service) CanPush(ctx context.Context, owner, repo string, p auth.Principal) *Error {
-	if p.Admin {
-		return nil
-	}
-	if p.Anonymous {
-		return errUnauthorized()
-	}
 	if s.Roles == nil {
+		if p.Admin {
+			return nil
+		}
+		if p.Anonymous {
+			return errUnauthorized()
+		}
 		if !p.Write {
 			return errDenied("write access required")
 		}
 		return nil
 	}
-	role, _ := s.Roles.Resolve(ctx, owner, repo, p)
-	if roleRank(string(role)) >= roleRank(string(identity.RoleWrite)) {
-		return nil
+	if aerr := s.Roles.CheckPush(ctx, owner, repo, p); aerr != nil {
+		switch aerr.Kind {
+		case auth.ErrForbidden:
+			return errDenied(aerr.Why)
+		case auth.ErrUnavailable:
+			return errInternal(errors.New(aerr.Why))
+		default:
+			return errUnauthorized()
+		}
 	}
-	return errDenied("write access required")
+	return nil
 }
 
 // --- manifests ----------------------------------------------------------------
@@ -552,27 +608,163 @@ func (s *Service) putTag(ctx context.Context, owner, repo, tag string, raw []byt
 	return errConflict("tag pointer changed concurrently; retry the push")
 }
 
-// DeleteManifest removes a tag pointer (tag ref) or a manifest object
-// (digest ref). Blobs stay until the maintainer sweep (§6). Deletion is
-// idempotent: an absent object is still 202.
+// DeleteManifest removes a tag pointer (tag ref) or a manifest VERSION (digest
+// ref: the manifest, the direct platform manifests an index owns, and every
+// tag pointer aimed at any of them — GHCR drops the version's tags with the
+// version). Blobs stay until the maintainer sweep (§6).
+//
+// An unknown tag or digest is a real 404 (MANIFEST_UNKNOWN), never a silent
+// 202: a delete that hides a typo is worse than one that says not-found.
 func (s *Service) DeleteManifest(ctx context.Context, owner, repo, ref string) *Error {
 	if err := validateRepo(owner, repo); err != nil {
 		return err
 	}
 	switch {
 	case IsTag(ref):
-		if err := s.Store.Delete(ctx, tagKey(owner, repo, ref), ""); err != nil {
+		key := tagKey(owner, repo, ref)
+		meta, err := s.Store.Head(ctx, key)
+		if err != nil {
+			return mapStoreErr(err)
+		}
+		if meta == nil {
+			return errManifestUnknown(ref)
+		}
+		if err := s.Store.Delete(ctx, key, meta.Version); err != nil {
+			if store.IsNotFound(err) {
+				return errManifestUnknown(ref) // lost the race to another delete
+			}
 			return mapStoreErr(err)
 		}
 		return nil
 	case IsDigest(ref):
-		if err := s.Store.Delete(ctx, manifestKey(owner, repo, DigestHex(ref)), ""); err != nil {
-			return mapStoreErr(err)
-		}
-		return nil
+		return s.deleteManifestTree(ctx, owner, repo, DigestHex(ref))
 	default:
 		return errManifestUnknown(ref)
 	}
+}
+
+// deleteManifestTree deletes a manifest digest and the platform manifests an
+// index owns (GHCR's "delete the version"): the index bytes name their
+// children, so the version is the whole tree. A child that another stored
+// manifest also references is kept (manifests are content-addressed and may be
+// shared). Deeper nesting is not produced by any client, so only the direct
+// children are considered — documented in §6.
+//
+// Deleting the root also drops every tag aiming at it (and at any child it
+// took with it), so `tags/list` never advertises a dead pointer.
+func (s *Service) deleteManifestTree(ctx context.Context, owner, repo, rootHex string) *Error {
+	rootKey := manifestKey(owner, repo, rootHex)
+	raw, _, err := store.GetBytes(ctx, s.Store, rootKey, store.GetOptions{})
+	if err != nil {
+		if store.IsNotFound(err) {
+			return errManifestUnknown("sha256:" + rootHex)
+		}
+		return mapStoreErr(err)
+	}
+	children := indexChildren(raw)
+
+	// References from every OTHER stored manifest keep a shared child alive.
+	keep := map[string]bool{}
+	if len(children) > 0 {
+		prefix := manifestsPrefix(owner, repo)
+		var keys []string
+		if lerr := s.Store.List(ctx, prefix, "", func(m store.ObjectMeta) error {
+			keys = append(keys, m.Key)
+			return nil
+		}); lerr != nil {
+			return mapStoreErr(lerr)
+		}
+		for _, key := range keys {
+			hex := strings.TrimPrefix(key, prefix)
+			if hex == rootHex {
+				continue
+			}
+			body, _, gerr := store.GetBytes(ctx, s.Store, key, store.GetOptions{})
+			if gerr != nil {
+				if store.IsNotFound(gerr) {
+					continue
+				}
+				return mapStoreErr(gerr)
+			}
+			for _, child := range indexChildren(body) {
+				keep[child] = true
+			}
+		}
+	}
+
+	deleted := map[string]bool{"sha256:" + rootHex: true}
+	if derr := s.Store.Delete(ctx, rootKey, ""); derr != nil {
+		return mapStoreErr(derr)
+	}
+	for _, child := range children {
+		if child == rootHex || keep[child] {
+			continue
+		}
+		if derr := s.Store.Delete(ctx, manifestKey(owner, repo, child), ""); derr != nil && !store.IsNotFound(derr) {
+			return mapStoreErr(derr)
+		}
+		deleted["sha256:"+child] = true
+	}
+	return s.dropTagPointersFor(ctx, owner, repo, deleted)
+}
+
+// indexChildren returns the manifest digests (hex) an index body references.
+func indexChildren(raw []byte) []string {
+	var doc struct {
+		Manifests []struct {
+			Digest string `json:"digest"`
+		} `json:"manifests"`
+	}
+	if json.Unmarshal(raw, &doc) != nil {
+		return nil
+	}
+	out := make([]string, 0, len(doc.Manifests))
+	for _, m := range doc.Manifests {
+		if IsDigest(m.Digest) {
+			out = append(out, DigestHex(m.Digest))
+		}
+	}
+	return out
+}
+
+// dropTagPointers deletes every tag pointer whose digest is ref. One prefix
+// LIST plus a pointer read per tag — a delete-time cost, never a request hot
+// path (§6). A pointer whose version moved is left alone (the tag now names a
+// different manifest); a malformed pointer is deleted, since it can never
+// resolve.
+func (s *Service) dropTagPointers(ctx context.Context, owner, repo, ref string) *Error {
+	return s.dropTagPointersFor(ctx, owner, repo, map[string]bool{ref: true})
+}
+
+// dropTagPointersFor is dropTagPointers over a digest set (a deleted version
+// tree), matching the full "sha256:" spelling each pointer stores.
+func (s *Service) dropTagPointersFor(ctx context.Context, owner, repo string, digests map[string]bool) *Error {
+	prefix := tagsPrefix(owner, repo)
+	var keys []string
+	if err := s.Store.List(ctx, prefix, "", func(m store.ObjectMeta) error {
+		keys = append(keys, m.Key)
+		return nil
+	}); err != nil {
+		return mapStoreErr(err)
+	}
+	for _, key := range keys {
+		raw, meta, err := store.GetBytes(ctx, s.Store, key, store.GetOptions{})
+		if err != nil {
+			if store.IsNotFound(err) {
+				continue
+			}
+			return mapStoreErr(err)
+		}
+		var doc tagDoc
+		malformed := json.Unmarshal(raw, &doc) != nil
+		if !malformed && !digests[doc.Digest] {
+			continue
+		}
+		if err := s.Store.Delete(ctx, key, meta.Version); err != nil && !store.IsNotFound(err) && !store.IsPreconditionFailed(err) {
+			return mapStoreErr(err)
+		}
+	}
+	return nil
 }
 
 // --- blobs --------------------------------------------------------------------
@@ -807,6 +999,9 @@ func (s *Service) FinalizeUpload(ctx context.Context, owner, repo, id, digest st
 	}); err != nil {
 		return 0, mapStoreErr(err)
 	}
+	// Grace guard (§6): the manifest PUT follows this finalize, so a sweep
+	// landing in between must not treat the blob as garbage yet.
+	s.noteBlob(owner, repo, DigestHex(digest))
 	if err := s.Store.Delete(ctx, key, ""); err != nil {
 		return 0, mapStoreErr(err)
 	}

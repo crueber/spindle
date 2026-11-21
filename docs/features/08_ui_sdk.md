@@ -212,7 +212,8 @@ this section is the client mirror of exactly one provider; auth levels shown per
 | `repo.invites.list/create()/cancel(id)` | `POST/GET …/api/invitations`, `DELETE …/api/invitations/{id}` | repo invites (admin; shipped on `repo.invites`, not `repo.access.invitations` — corrected 2026-09-04) |
 | `repo.collaborators.list()` | `GET …/api/collaborators` | effective bindings + resolution source |
 | `repo.assignables()` | `GET …/api/assignables` | `[{principal, display}]` |
-| `repo.webhooks.list/create(id?)/get/update/remove(id)/ping(id)/deliveries(id)` | `GET/POST …/api/webhooks`, `GET/PATCH/DELETE …/webhooks/{id}`, `POST …/webhooks/{id}/ping`, `GET …/webhooks/{id}/deliveries` | per 06; the secret is never returned (`secret_set`) |
+| `repo.webhooks.list/create(id?)/get/update/remove(id)/ping(id)/deliveries(id)/redeliver(id, seq)` | `GET/POST …/api/webhooks`, `GET/PATCH/DELETE …/webhooks/{id}`, `POST …/webhooks/{id}/ping`, `GET …/webhooks/{id}/deliveries`, `POST …/webhooks/{id}/deliveries/{seq}/redeliver` | per 06; the secret is never returned (`secret_set`); redeliver replays the retained body and answers 410 when it was not retained |
+| `orgs.webhooks.list/create/get/update/remove/ping/deliveries/redeliver(org, id, seq)` | the `/api/v1/orgs/{org}/webhooks…` twins (both lanes) | per 06 §5.4; org-owner gate; same wire shapes as repo hooks |
 
 ### 3.7 `releases.js` + `social.js` (07)
 
@@ -517,3 +518,11 @@ ceiling — no ARIA beyond what semantics require.
 - Real-time collaborative editing (presence, live cursors) — SSE carries state changes, not keystrokes.
 - Offline mode / service workers; every page needs a live server (the JSON API and the SDK likewise).
 - Push notification channels (web push, email digests) — 06's per-user stream and webhooks are the only fan-out surfaces in v1.
+
+- **Page-layer parity for repo invitations, avatar upload, and starred repositories (WP9 G9/G10/G17,
+  2026-11-21).** No SDK or wire change: `repo.invites`, `users.avatar.upload`, and `client.starred` had
+  the API methods; the rendered Go pages now expose the same operations — Settings → Access renders the
+  invite form and the pending list with its accept link, `/{owner}?edit=1` carries the avatar file input
+  (same allowlist as `users.avatar.upload`), and `/{user}/starred` lists the starred repos the viewer may
+  read. Both surfaces call the SDK's underlying verbs through service method values, so the client and
+  the page cannot drift.

@@ -28,6 +28,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"net/url"
 	"sort"
 	"strconv"
 	"strings"
@@ -42,7 +43,20 @@ import (
 	"github.com/crueber/spindle/internal/notify"
 	"github.com/crueber/spindle/internal/pushmirror"
 	"github.com/crueber/spindle/internal/server/auth"
+	"github.com/crueber/spindle/internal/threads"
 )
+
+// ThreadsSettings is the runner/secret surface the settings pages need (the
+// Threads service's admin methods; composition binds *threads.Service).
+type ThreadsSettings interface {
+	ListRunners(ctx context.Context, repo string, p auth.Principal) ([]threads.RunnerView, error)
+	MintRegistrationToken(ctx context.Context, repo string, p auth.Principal) (*threads.RegistrationToken, error)
+	RevokeRunner(ctx context.Context, repo, id string, p auth.Principal) error
+	ListSecrets(ctx context.Context, repo string, p auth.Principal) ([]threads.SecretView, error)
+	SetSecret(ctx context.Context, repo, name, value string, p auth.Principal) error
+	DeleteSecret(ctx context.Context, repo, name string, p auth.Principal) error
+	SecretsEnabled() bool
+}
 
 // SettingsServices is the concrete service set the settings group adapts.
 // Every field is optional; nil disables the panels that depend on it.
@@ -53,6 +67,8 @@ type SettingsServices struct {
 	Notify *notify.Service
 	Mirror *mirror.Handler
 	Push   *pushmirror.Handler
+	// Threads powers Settings → Runners and Settings → Secrets (15 §6).
+	Threads ThreadsSettings
 
 	// Now is the clock for derived timestamps (tests pin it).
 	Now func() time.Time
@@ -81,6 +97,9 @@ func (d *SettingsDeps) BindSettingsServices(s SettingsServices) {
 	d.RepoPolicy = s.repoPolicy
 	d.RepoProtection = s.repoProtection
 	d.RepoConfig = s.repoConfig
+	if s.API != nil && s.API.Repo != nil {
+		d.RepoWAL = s.repoWAL
+	}
 	if s.Ident != nil {
 		d.RepoRole = s.repoRole
 		d.RepoAccess = s.repoAccess
@@ -144,13 +163,28 @@ func (s SettingsServices) repoScheduled(ctx context.Context, owner, repo string)
 		UpstreamGit: body.Upstream.Git,
 		LastRound:   body.Upstream.LastRound,
 	}
-	for _, st := range body.Strategies {
-		out.Strategies = append(out.Strategies, SettingsStrategy{
-			Name: st.Name, Kind: st.Kind, Base: st.Base,
-			Schedule: st.Schedule, ScheduleHuman: st.ScheduleHuman, Next: st.Next,
-			Keep: strconv.Itoa(st.Keep), Filter: st.Filter,
-			Refs: strings.Join(st.Refs, ", "),
-		})
+	// The structured editors read the SAME stored + effective projections the
+	// JSON settings API serves (api.SettingsDocument): stored sections decide
+	// the override state, the merged config supplies inherited values.
+	if _, stored, eff, derr := api.SettingsDocument(ctx, s.API, s.repoID(owner, repo)); derr == nil {
+		out.Sections = settingsScheduledSections(stored, eff, nil)
+		// The describe read still supplies the next-slot projection: show it
+		// on the matching row (display-only; the editor never writes it).
+		for _, st := range body.Strategies {
+			for i := range out.Sections {
+				if out.Sections[i].ID != "bundles" {
+					continue
+				}
+				for j := range out.Sections[i].Rows {
+					row := &out.Sections[i].Rows[j]
+					if row.Base >= 0 && len(row.Cells) > 0 && row.Cells[0].Value == st.Name {
+						row.Next = st.Next
+					}
+				}
+			}
+		}
+	} else {
+		out.Error = derr.Error()
 	}
 	host := body.Maintenance.ThisHost
 	out.HostFacts = []SettingsKV{
@@ -181,6 +215,51 @@ func yesNo(b bool) string {
 		return "yes"
 	}
 	return "no"
+}
+
+// repoWAL reads the Settings → WAL panel (WP9 G16): the same overview facts
+// the WAL page renders, plus the shared ops inventory. Running an op goes to
+// the existing …/api/ops/{op} endpoint; this read never starts anything.
+func (s SettingsServices) repoWAL(ctx context.Context, owner, repo string) (*SettingsWAL, error) {
+	if s.API == nil || s.API.Repo == nil {
+		return nil, nil
+	}
+	id := s.repoID(owner, repo)
+	ov, err := s.API.Repo.Overview(ctx, id)
+	if err != nil {
+		return nil, err
+	}
+	out := &SettingsWAL{
+		Owner:    owner,
+		Name:     repo,
+		Health:   ov.Health.Status,
+		ServedBy: ov.Hostname,
+		CloneURL: ov.CloneURL,
+		Packs: fmt.Sprintf("%d live packs · %s · %d pushes recorded",
+			ov.Packs.Live, fmtBytes(ov.Packs.LiveBytes), ov.Packs.Pushes),
+	}
+	if out.Health == "" {
+		out.Health = "ok"
+	}
+	out.HealthTone = chipTone(out.Health)
+	out.Facts = []SettingsKV{
+		{Key: "manifest version", Value: strconv.FormatUint(ov.Manifest.Version, 10)},
+		{Key: "next_seq", Value: strconv.FormatUint(ov.Manifest.NextSeq, 10)},
+		{Key: "min_seq", Value: strconv.FormatUint(ov.Manifest.MinSeq, 10)},
+		{Key: "entries", Value: strconv.FormatUint(ov.Manifest.Entries, 10)},
+		{Key: "tail entries", Value: strconv.FormatUint(ov.Manifest.TailEntries, 10)},
+		{Key: "checkpoint", Value: anyLabel(ov.Manifest.Checkpoint, "@")},
+		{Key: "packset", Value: anyLabel(ov.Manifest.Packset, "")},
+		{Key: "local size", Value: fmtBytes(ov.Local.SizeBytes)},
+	}
+	if s.API.Tasks != nil {
+		out.Panel = walOpsPanel{
+			Ops:    walOpsFrom(s.API.Tasks),
+			Recent: walRecentFrom(ctx, s.API.Tasks, id),
+			OpsURL: "/" + owner + "/" + repo + "/api/ops/",
+		}
+	}
+	return out, nil
 }
 
 func (s SettingsServices) repoMirror(ctx context.Context, owner, repo string) (*SettingsMirror, error) {
@@ -261,8 +340,8 @@ func (s SettingsServices) repoPolicy(ctx context.Context, owner, repo string) (*
 	if s.API == nil || s.API.Store == nil {
 		return nil, nil
 	}
-	raw, _, err := api.PolicyRaw(ctx, s.API, s.repoID(owner, repo))
-	out := &SettingsPolicy{Text: string(raw)}
+	raw, ver, err := api.PolicyRaw(ctx, s.API, s.repoID(owner, repo))
+	out := &SettingsPolicy{Text: string(raw), Exists: ver != ""}
 	if err != nil {
 		// Keep the bytes visible (the operator must fix them); the parse
 		// error renders inline, exactly like the API's fail-closed GET.
@@ -341,6 +420,30 @@ func (s SettingsServices) repoAccess(ctx context.Context, owner, repo string, p 
 			Principal: c.Principal, Role: c.Role, Source: c.Source,
 		})
 	}
+	// Pending collaborator invitations (G9) are an ADMIN read: the list
+	// carries each invite's capability token, so a triage reader never
+	// triggers the read and never receives a token. The page gate (Access
+	// MinRead triage) is therefore still safe — the panel renders read-only
+	// for non-admins.
+	if role == identity.RoleAdmin || p.Admin {
+		out.InvitesWired = true
+		invs, ierr := s.Ident.ListRepoInvites(ctx, owner, repo, 100)
+		if ierr != nil {
+			return nil, ierr
+		}
+		now := s.now().UTC()
+		for _, inv := range invs {
+			row := SettingsInvite{
+				ID: inv.ID, Subject: inv.Subject, Role: inv.Role,
+				InvitedBy: inv.InvitedBy, ExpiresAt: inv.ExpiresAt,
+				AcceptURL: InvitePageURL(inv.ID, inv.Token),
+			}
+			if exp, perr := time.Parse(time.RFC3339, inv.ExpiresAt); !exp.IsZero() && perr == nil && !now.Before(exp) {
+				row.Expired = true
+			}
+			out.Invites = append(out.Invites, row)
+		}
+	}
 	// The owner kind decides the private-visibility wording and whether the
 	// team picker renders (org-owned namespaces only).
 	if org, oerr := s.Ident.GetOrg(ctx, owner); oerr == nil && org != nil {
@@ -394,8 +497,9 @@ func (s SettingsServices) repoAdmin(ctx context.Context, owner, repo string, p a
 				}
 				for _, e := range d.Entries[start:] {
 					row.Recent = append(row.Recent, SettingsDelivery{
-						Seq: strconv.Itoa(e.Seq), Event: e.Event, Status: e.Status,
-						At: e.At, Error: e.Error,
+						Seq: strconv.Itoa(e.Seq), SeqNum: e.Seq, Event: e.Event, Status: e.Status,
+						At: e.At, Error: e.Error, DurationMs: e.DurationMs,
+						Redeliverable: len(e.Body) > 0,
 					})
 				}
 				last := d.Entries[len(d.Entries)-1]
@@ -405,6 +509,32 @@ func (s SettingsServices) repoAdmin(ctx context.Context, owner, repo string, p a
 		}
 	}
 	sort.SliceStable(out.Webhooks, func(i, j int) bool { return out.Webhooks[i].ID < out.Webhooks[j].ID })
+	if s.Threads != nil {
+		runners, err := s.Threads.ListRunners(ctx, owner+"/"+repo, p)
+		if err != nil {
+			return nil, err
+		}
+		out.RunnersWired = true
+		for _, r := range runners {
+			row := SettingsRunner{
+				ID: r.ID, Name: r.Name, Labels: strings.Join(r.Labels, ", "), State: r.State,
+				Version: r.DeclaredVersion, CreatedAt: r.CreatedAt,
+			}
+			if r.LastSeenAt != nil {
+				row.LastSeenAt = *r.LastSeenAt
+			}
+			out.Runners = append(out.Runners, row)
+		}
+		secrets, err := s.Threads.ListSecrets(ctx, owner+"/"+repo, p)
+		if err != nil {
+			return nil, err
+		}
+		out.SecretsWired = true
+		out.SecretsEnabled = s.Threads.SecretsEnabled()
+		for _, sec := range secrets {
+			out.Secrets = append(out.Secrets, SettingsSecret{Name: sec.Name, CreatedAt: sec.CreatedAt, UpdatedAt: sec.UpdatedAt})
+		}
+	}
 	return out, nil
 }
 
@@ -428,16 +558,39 @@ func (s SettingsServices) repoWrite(ctx context.Context, owner, repo string, p a
 	switch w.Action {
 	case SettingsActionGeneral:
 		return s.writeGeneral(ctx, id, p, w)
+	case SettingsActionScheduled:
+		return s.writeScheduled(ctx, owner, repo, p, w)
 	case SettingsActionAccess:
 		return s.writeAccess(ctx, owner, repo, w)
+	case SettingsActionInviteCreate:
+		return s.createRepoInvite(ctx, owner, repo, p, w)
+	case SettingsActionInviteCancel:
+		return s.cancelRepoInvite(ctx, owner, repo, w)
 	case SettingsActionPolicy:
 		if s.API == nil {
 			return SettingsWriteResult{}, settingsWriteErr(http.StatusServiceUnavailable, "policy store not configured")
+		}
+		// An emptied editor expresses removal: `{}`/blank is not a valid
+		// policy document (version 1 is required), so Save on an empty
+		// textarea removes the document instead of answering 400.
+		if strings.TrimSpace(w.Get("policy")) == "" {
+			if werr := api.DeletePolicy(ctx, s.API, id); werr != nil {
+				return SettingsWriteResult{}, settingsWriteErr(werr.Status, werr.Message)
+			}
+			return SettingsWriteResult{Notice: "policy removed — every push is allowed"}, nil
 		}
 		if werr := api.PutPolicy(ctx, s.API, id, []byte(w.Get("policy"))); werr != nil {
 			return SettingsWriteResult{}, settingsWriteErr(werr.Status, werr.Message)
 		}
 		return SettingsWriteResult{Notice: "policy saved"}, nil
+	case SettingsActionPolicyRemove:
+		if s.API == nil {
+			return SettingsWriteResult{}, settingsWriteErr(http.StatusServiceUnavailable, "policy store not configured")
+		}
+		if werr := api.DeletePolicy(ctx, s.API, id); werr != nil {
+			return SettingsWriteResult{}, settingsWriteErr(werr.Status, werr.Message)
+		}
+		return SettingsWriteResult{Notice: "policy removed — every push is allowed"}, nil
 	case SettingsActionProtection:
 		if s.API == nil {
 			return SettingsWriteResult{}, settingsWriteErr(http.StatusServiceUnavailable, "policy store not configured")
@@ -477,8 +630,13 @@ func (s SettingsServices) repoWrite(ctx context.Context, owner, repo string, p a
 		if werr != nil {
 			return SettingsWriteResult{}, settingsWriteErr(werr.Status, werr.Message)
 		}
+		// A dry run evaluates the POSTED document and changes nothing, so the
+		// stored-policy facts must survive the verdict: without Exists the
+		// Remove card would claim "No policy document is stored" while the
+		// document is live, and the typed-confirm removal would vanish.
+		_, ver, _ := api.PolicyRaw(ctx, s.API, id)
 		panel := &SettingsPolicy{
-			Text: w.Get("policy"), DryRunN: n, DryRunDone: true,
+			Text: w.Get("policy"), Exists: ver != "", DryRunN: n, DryRunDone: true,
 			DryRunAllow: res.Allowed, DryRunDeny: res.Denied,
 			DryRunRefs: settingsDryRunRows(res),
 		}
@@ -522,12 +680,28 @@ func (s SettingsServices) repoWrite(ctx context.Context, owner, repo string, p a
 		return s.createToken(ctx, owner, repo, p, w)
 	case SettingsActionTokenRevoke:
 		return s.revokeToken(ctx, owner, repo, p, w)
+	case SettingsActionRunnerToken:
+		return s.mintRunnerToken(ctx, owner, repo, p, w)
+	case SettingsActionRunnerRevoke:
+		return s.revokeRunner(ctx, owner, repo, p, w)
+	case SettingsActionSecretPut:
+		return s.putSecret(ctx, owner, repo, p, w)
+	case SettingsActionSecretDelete:
+		return s.deleteSecret(ctx, owner, repo, p, w)
 	case SettingsActionWebhookCreate:
 		return s.createWebhook(ctx, owner, repo, p, w)
+	case SettingsActionWebhookUpdate:
+		return s.updateWebhook(ctx, owner, repo, w)
+	case SettingsActionWebhookRotate:
+		return s.rotateWebhookSecret(ctx, owner, repo, w)
 	case SettingsActionWebhookDelete:
 		return s.deleteWebhook(ctx, owner, repo, w)
 	case SettingsActionWebhookPing:
 		return s.pingWebhook(ctx, owner, repo, p, w)
+	case SettingsActionWebhookToggle:
+		return s.toggleWebhook(ctx, owner, repo, w)
+	case SettingsActionWebhookRedeliver:
+		return s.redeliverWebhook(ctx, owner, repo, w)
 	case SettingsActionTransfer:
 		return s.transferRepo(ctx, owner, repo, p, w)
 	case SettingsActionDelete:
@@ -650,6 +824,47 @@ func (s SettingsServices) writeAccess(ctx context.Context, owner, repo string, w
 		return SettingsWriteResult{}, settingsWriteErr(settingsIdentityStatus(perr), perr.Error())
 	}
 	return SettingsWriteResult{Notice: "saved (version " + strconv.Itoa(out.Version) + ")"}, nil
+}
+
+// createRepoInvite issues one collaborator invitation (G9). The admin role
+// was re-checked by repoWrite (CheckRole(admin), the API's route floor); the
+// service validates the subject and role floor, so the page rejects exactly
+// what POST …/invitations rejects. The returned Link is the human accept page
+// (/invitations?id=&token=) — the same target the invitee inbox previews.
+func (s SettingsServices) createRepoInvite(ctx context.Context, owner, repo string, p auth.Principal, w SettingsRepoWrite) (SettingsWriteResult, *SettingsWriteError) {
+	if s.Ident == nil {
+		return SettingsWriteResult{}, settingsWriteErr(http.StatusServiceUnavailable, "identity service not configured")
+	}
+	inv, err := s.Ident.CreateRepoInvite(ctx, owner, repo, w.Get("subject"), identity.Role(w.Get("role")), p.Name, 7*24*time.Hour)
+	if err != nil {
+		return SettingsWriteResult{}, settingsWriteErr(settingsIdentityStatus(err), err.Error())
+	}
+	return SettingsWriteResult{Notice: "invitation created — share the link below", Link: InvitePageURL(inv.ID, inv.Token)}, nil
+}
+
+// cancelRepoInvite withdraws one pending repo invitation. Delete-on-
+// transition: the issuer object and the invitee's inbox row both go away, so
+// the accept link answers 409 afterwards.
+func (s SettingsServices) cancelRepoInvite(ctx context.Context, owner, repo string, w SettingsRepoWrite) (SettingsWriteResult, *SettingsWriteError) {
+	if s.Ident == nil {
+		return SettingsWriteResult{}, settingsWriteErr(http.StatusServiceUnavailable, "identity service not configured")
+	}
+	id := strings.TrimSpace(w.Get("id"))
+	if id == "" {
+		return SettingsWriteResult{}, settingsWriteErr(http.StatusBadRequest, "invitation id is required")
+	}
+	if _, err := s.Ident.DeleteRepoInvite(ctx, owner, repo, id); err != nil {
+		return SettingsWriteResult{}, settingsWriteErr(settingsIdentityStatus(err), err.Error())
+	}
+	return SettingsWriteResult{Notice: "invitation cancelled"}, nil
+}
+
+// InvitePageURL is the human accept link: /invitations carries the token-
+// authorized preview and the accept form, so a copied link works for the
+// invitee after sign-in (never the raw API path). Both scopes share it (repo
+// create, org create) and the page renders it in the body, never a redirect.
+func InvitePageURL(id, token string) string {
+	return "/invitations?id=" + url.QueryEscape(id) + "&token=" + url.QueryEscape(token)
 }
 
 func (s SettingsServices) writeMirror(ctx context.Context, owner, repo string, w SettingsRepoWrite) (SettingsWriteResult, *SettingsWriteError) {
@@ -796,6 +1011,50 @@ func (s SettingsServices) revokeToken(ctx context.Context, owner, repo string, p
 	return SettingsWriteResult{Notice: "token revoked"}, nil
 }
 
+func (s SettingsServices) mintRunnerToken(ctx context.Context, owner, repo string, p auth.Principal, w SettingsRepoWrite) (SettingsWriteResult, *SettingsWriteError) {
+	if s.Threads == nil {
+		return SettingsWriteResult{}, settingsWriteErr(http.StatusServiceUnavailable, "the Threads service is not configured")
+	}
+	created, err := s.Threads.MintRegistrationToken(ctx, owner+"/"+repo, p)
+	if err != nil {
+		return SettingsWriteResult{}, settingsWriteErr(settingsThreadsStatus(err), err.Error())
+	}
+	return SettingsWriteResult{
+		Secret: created.Token,
+		Notice: "runner registration token created — copy it now, it is shown once and expires " + created.ExpiresAt,
+	}, nil
+}
+
+func (s SettingsServices) revokeRunner(ctx context.Context, owner, repo string, p auth.Principal, w SettingsRepoWrite) (SettingsWriteResult, *SettingsWriteError) {
+	if s.Threads == nil {
+		return SettingsWriteResult{}, settingsWriteErr(http.StatusServiceUnavailable, "the Threads service is not configured")
+	}
+	if err := s.Threads.RevokeRunner(ctx, owner+"/"+repo, w.Get("id"), p); err != nil {
+		return SettingsWriteResult{}, settingsWriteErr(settingsThreadsStatus(err), err.Error())
+	}
+	return SettingsWriteResult{Notice: "runner revoked"}, nil
+}
+
+func (s SettingsServices) putSecret(ctx context.Context, owner, repo string, p auth.Principal, w SettingsRepoWrite) (SettingsWriteResult, *SettingsWriteError) {
+	if s.Threads == nil {
+		return SettingsWriteResult{}, settingsWriteErr(http.StatusServiceUnavailable, "the Threads service is not configured")
+	}
+	if err := s.Threads.SetSecret(ctx, owner+"/"+repo, w.Get("secret_name"), w.Get("secret_value"), p); err != nil {
+		return SettingsWriteResult{}, settingsWriteErr(settingsThreadsStatus(err), err.Error())
+	}
+	return SettingsWriteResult{Notice: "secret stored (write-only — the value can never be read back)"}, nil
+}
+
+func (s SettingsServices) deleteSecret(ctx context.Context, owner, repo string, p auth.Principal, w SettingsRepoWrite) (SettingsWriteResult, *SettingsWriteError) {
+	if s.Threads == nil {
+		return SettingsWriteResult{}, settingsWriteErr(http.StatusServiceUnavailable, "the Threads service is not configured")
+	}
+	if err := s.Threads.DeleteSecret(ctx, owner+"/"+repo, w.Get("id"), p); err != nil {
+		return SettingsWriteResult{}, settingsWriteErr(settingsThreadsStatus(err), err.Error())
+	}
+	return SettingsWriteResult{Notice: "secret deleted"}, nil
+}
+
 func (s SettingsServices) createWebhook(ctx context.Context, owner, repo string, p auth.Principal, w SettingsRepoWrite) (SettingsWriteResult, *SettingsWriteError) {
 	if s.Notify == nil {
 		return SettingsWriteResult{}, settingsWriteErr(http.StatusServiceUnavailable, "notifications service not configured")
@@ -833,6 +1092,45 @@ func settingsEventList(raw string) []string {
 	return out
 }
 
+// updateWebhook edits a hook's URL, event filter and active flag through the
+// SAME notify.PatchHook call the JSON PATCH route makes. The secret is never
+// part of this form: rotation is its own control (rotateWebhookSecret).
+func (s SettingsServices) updateWebhook(ctx context.Context, owner, repo string, w SettingsRepoWrite) (SettingsWriteResult, *SettingsWriteError) {
+	if s.Notify == nil {
+		return SettingsWriteResult{}, settingsWriteErr(http.StatusServiceUnavailable, "notifications service not configured")
+	}
+	url := strings.TrimSpace(w.Get("url"))
+	if url == "" {
+		return SettingsWriteResult{}, settingsWriteErrField(http.StatusUnprocessableEntity, "url", "url is required")
+	}
+	events := settingsEventList(w.Get("events"))
+	if events == nil {
+		events = []string{} // empty means all; a non-nil empty slice clears the filter
+	}
+	active := w.Get("active") == "true"
+	spec := notify.HookSpec{URL: &url, Events: events, Active: &active}
+	if _, err := s.Notify.PatchHook(ctx, owner, repo, w.Get("id"), spec); err != nil {
+		return SettingsWriteResult{}, settingsWriteErr(settingsNotifyStatus(err), err.Error())
+	}
+	return SettingsWriteResult{Notice: "webhook updated"}, nil
+}
+
+// rotateWebhookSecret replaces only the signing secret — the first-class
+// rotation control (a blank secret is a validation error, not a silent keep).
+func (s SettingsServices) rotateWebhookSecret(ctx context.Context, owner, repo string, w SettingsRepoWrite) (SettingsWriteResult, *SettingsWriteError) {
+	if s.Notify == nil {
+		return SettingsWriteResult{}, settingsWriteErr(http.StatusServiceUnavailable, "notifications service not configured")
+	}
+	secret := w.Get("secret")
+	if strings.TrimSpace(secret) == "" {
+		return SettingsWriteResult{}, settingsWriteErrField(http.StatusUnprocessableEntity, "secret", "enter the new signing secret to rotate it")
+	}
+	if _, err := s.Notify.PatchHook(ctx, owner, repo, w.Get("id"), notify.HookSpec{Secret: &secret}); err != nil {
+		return SettingsWriteResult{}, settingsWriteErr(settingsNotifyStatus(err), err.Error())
+	}
+	return SettingsWriteResult{Notice: "webhook signing secret rotated"}, nil
+}
+
 func (s SettingsServices) deleteWebhook(ctx context.Context, owner, repo string, w SettingsRepoWrite) (SettingsWriteResult, *SettingsWriteError) {
 	if s.Notify == nil {
 		return SettingsWriteResult{}, settingsWriteErr(http.StatusServiceUnavailable, "notifications service not configured")
@@ -855,6 +1153,59 @@ func (s SettingsServices) pingWebhook(ctx context.Context, owner, repo string, p
 		return SettingsWriteResult{Notice: "ping failed — the delivery row carries the detail"}, nil
 	}
 	return SettingsWriteResult{Notice: "ping delivered"}, nil
+}
+
+// toggleWebhook enables/disables one hook without touching its secret
+// (PATCH active only; the same CAS the API uses).
+func (s SettingsServices) toggleWebhook(ctx context.Context, owner, repo string, w SettingsRepoWrite) (SettingsWriteResult, *SettingsWriteError) {
+	if s.Notify == nil {
+		return SettingsWriteResult{}, settingsWriteErr(http.StatusServiceUnavailable, "notifications service not configured")
+	}
+	h := s.Notify.GetHook(ctx, owner, repo, w.Get("id"))
+	if h == nil {
+		return SettingsWriteResult{}, settingsWriteErr(http.StatusNotFound, "unknown webhook")
+	}
+	active := !h.Active
+	if _, err := s.Notify.PatchHook(ctx, owner, repo, h.ID, notify.HookSpec{Active: &active}); err != nil {
+		return SettingsWriteResult{}, settingsWriteErr(settingsNotifyStatus(err), err.Error())
+	}
+	if active {
+		return SettingsWriteResult{Notice: "webhook enabled"}, nil
+	}
+	return SettingsWriteResult{Notice: "webhook disabled"}, nil
+}
+
+// rotateWebhook replaces the HMAC secret (write-only; never echoed). An empty
+// submission is rejected instead of silently clearing the secret.
+func (s SettingsServices) rotateWebhook(ctx context.Context, owner, repo string, w SettingsRepoWrite) (SettingsWriteResult, *SettingsWriteError) {
+	if s.Notify == nil {
+		return SettingsWriteResult{}, settingsWriteErr(http.StatusServiceUnavailable, "notifications service not configured")
+	}
+	secret := w.Get("secret")
+	if secret == "" {
+		return SettingsWriteResult{}, settingsWriteErr(http.StatusUnprocessableEntity, "a new secret is required")
+	}
+	if _, err := s.Notify.PatchHook(ctx, owner, repo, w.Get("id"), notify.HookSpec{Secret: &secret}); err != nil {
+		return SettingsWriteResult{}, settingsWriteErr(settingsNotifyStatus(err), err.Error())
+	}
+	return SettingsWriteResult{Notice: "webhook secret rotated"}, nil
+}
+
+// redeliverWebhook re-sends one retained delivery (no cursor change). A row
+// whose payload the ring did not retain answers 410 with the honest reason.
+func (s SettingsServices) redeliverWebhook(ctx context.Context, owner, repo string, w SettingsRepoWrite) (SettingsWriteResult, *SettingsWriteError) {
+	if s.Notify == nil {
+		return SettingsWriteResult{}, settingsWriteErr(http.StatusServiceUnavailable, "notifications service not configured")
+	}
+	seq, err := strconv.Atoi(w.Get("seq"))
+	if err != nil || seq < 0 {
+		return SettingsWriteResult{}, settingsWriteErr(http.StatusUnprocessableEntity, "a delivery seq is required")
+	}
+	entry, rerr := s.Notify.RedeliverHook(ctx, owner, repo, w.Get("id"), seq)
+	if rerr != nil {
+		return SettingsWriteResult{}, settingsWriteErr(settingsNotifyStatus(rerr), rerr.Error())
+	}
+	return SettingsWriteResult{Notice: "redelivered #" + strconv.Itoa(entry.Seq) + " → " + strconv.Itoa(entry.Status)}, nil
 }
 
 func (s SettingsServices) transferRepo(ctx context.Context, owner, repo string, p auth.Principal, w SettingsRepoWrite) (SettingsWriteResult, *SettingsWriteError) {
@@ -898,6 +1249,24 @@ func settingsWriteErr(status int, msg string) *SettingsWriteError {
 }
 
 // settingsAuthErr maps identity's *auth.AuthError the way every handler does.
+// settingsThreadsStatus maps a Threads error onto the page's write status.
+func settingsThreadsStatus(err error) int {
+	switch {
+	case errors.Is(err, threads.ErrNotFound):
+		return http.StatusNotFound
+	case errors.Is(err, threads.ErrInvalid):
+		return http.StatusUnprocessableEntity
+	case errors.Is(err, threads.ErrUnauthorized):
+		return http.StatusUnauthorized
+	case errors.Is(err, threads.ErrForbidden):
+		return http.StatusForbidden
+	case errors.Is(err, threads.ErrUnavailable):
+		return http.StatusServiceUnavailable
+	default:
+		return http.StatusUnprocessableEntity
+	}
+}
+
 func settingsAuthErr(aerr *auth.AuthError) *SettingsWriteError {
 	switch aerr.Kind {
 	case auth.ErrForbidden:
@@ -974,6 +1343,8 @@ func settingsNotifyStatus(err error) int {
 		return http.StatusBadRequest
 	case strings.Contains(msg, notify.ErrConflict.Error()):
 		return http.StatusConflict
+	case strings.Contains(msg, notify.ErrGone.Error()):
+		return http.StatusGone
 	}
 	return http.StatusServiceUnavailable
 }

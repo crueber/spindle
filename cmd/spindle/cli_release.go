@@ -31,9 +31,9 @@ var releaseGroup = &apiGroup{
 		{name: "show", usage: "spindle release show OWNER/REPO TAG",
 			help:  "one release",
 			flags: []string{"json"}, run: runReleaseShow},
-		{name: "create", usage: "spindle release create OWNER/REPO TAG [--name N] [--notes S|--notes-file F] [--draft] [--prerelease]",
-			help:  "create or update a release for a tag",
-			flags: []string{"json", "quiet", "name", "notes", "notes-file", "draft", "prerelease"}, run: runReleaseCreate},
+		{name: "create", usage: "spindle release create OWNER/REPO TAG [--name N] [--notes S|--notes-file F] [--target REF] [--draft] [--prerelease]",
+			help:  "create or update a release for a tag (title defaults to the tag)",
+			flags: []string{"json", "quiet", "name", "notes", "notes-file", "target", "draft", "prerelease"}, run: runReleaseCreate},
 		{name: "delete", usage: "spindle release delete OWNER/REPO TAG",
 			help:  "delete a release and its assets",
 			flags: []string{"json", "quiet"}, run: runReleaseDelete},
@@ -92,9 +92,9 @@ func runReleaseList(ctx context.Context, c *cli, args []string) int {
 	f.add(fs)
 	var after string
 	fs.StringVar(&after, "after", "", "created_at cursor")
-	pos, ok := parseAPI(fs, args)
-	if !ok {
-		return exitArg
+	pos, exit := parseAPI(fs, args)
+	if exit != parseContinue {
+		return exit
 	}
 	owner, repo, ok := oneRepo(c, pos, "release list OWNER/REPO")
 	if !ok {
@@ -120,7 +120,7 @@ func runReleaseList(ctx context.Context, c *cli, args []string) int {
 	if f.json {
 		return a.emitJSON(raw)
 	}
-	t := newTable(c.stdout(), "TAG", "NAME", "DEV", "AUTHOR", "CREATED", "ASSETS")
+	t := newTable(c.stdout(), "TAG", "NAME", "DRAFT", "AUTHOR", "CREATED", "ASSETS")
 	for _, r := range res.Releases {
 		dev := ""
 		if r.Draft {
@@ -141,9 +141,9 @@ func runReleaseShow(ctx context.Context, c *cli, args []string) int {
 	f := &apiFlags{}
 	fs := newAPIFlagSet(c, "release show")
 	f.add(fs)
-	pos, ok := parseAPI(fs, args)
-	if !ok {
-		return exitArg
+	pos, exit := parseAPI(fs, args)
+	if exit != parseContinue {
+		return exit
 	}
 	owner, repo, tag, ok := repoAndWord(c, pos, "release show OWNER/REPO TAG")
 	if !ok {
@@ -170,19 +170,27 @@ func runReleaseCreate(ctx context.Context, c *cli, args []string) int {
 	f := &apiFlags{}
 	fs := newAPIFlagSet(c, "release create")
 	f.add(fs)
-	var name, notes, notesFile string
+	var name, notes, notesFile, target string
 	var draft, prerelease bool
-	fs.StringVar(&name, "name", "", "release display name")
+	fs.StringVar(&name, "name", "", "release title (default: the tag)")
 	fs.StringVar(&notes, "notes", "", "release notes (markdown)")
 	fs.StringVar(&notesFile, "notes-file", "", "read the notes from FILE (- = stdin)")
+	fs.StringVar(&target, "target", "", "commit (sha or ref) for a tag that does not exist yet; requires --draft")
 	fs.BoolVar(&draft, "draft", false, "save as a draft")
 	fs.BoolVar(&prerelease, "prerelease", false, "mark as a prerelease")
-	pos, ok := parseAPI(fs, args)
-	if !ok {
-		return exitArg
+	pos, exit := parseAPI(fs, args)
+	if exit != parseContinue {
+		return exit
 	}
 	owner, repo, tag, ok := repoAndWord(c, pos, "release create OWNER/REPO TAG")
 	if !ok {
+		return exitArg
+	}
+	if target != "" && !draft {
+		// A new tag is created on publish, so a target only pairs with a
+		// draft (WP3.3, 07_releases_stars.md): refuse the impossible combo
+		// before touching the server.
+		fmt.Fprintln(c.stderr(), "spindle: --target requires --draft (a new tag is created when the draft is published)")
 		return exitArg
 	}
 	body, exit := readBodyFlag(c, notes, notesFile)
@@ -194,7 +202,15 @@ func runReleaseCreate(ctx context.Context, c *cli, args []string) int {
 		fmt.Fprintf(c.stderr(), "spindle: %v\n", err)
 		return exitErr
 	}
-	req := map[string]any{"name": name, "body": body, "draft": draft, "prerelease": prerelease}
+	// name is omitted when unset: the server defaults it to the tag on
+	// create and leaves an existing release's title untouched on update.
+	req := map[string]any{"body": body, "draft": draft, "prerelease": prerelease}
+	if name != "" {
+		req["name"] = name
+	}
+	if target != "" {
+		req["target"] = target
+	}
 	var r releaseDoc
 	raw, err := a.callInto(ctx, "PUT", apiPath(owner, repo, "releases", tag), nil, req, &r)
 	if err != nil {
@@ -213,9 +229,9 @@ func runReleaseDelete(ctx context.Context, c *cli, args []string) int {
 	f := &apiFlags{}
 	fs := newAPIFlagSet(c, "release delete")
 	f.add(fs)
-	pos, ok := parseAPI(fs, args)
-	if !ok {
-		return exitArg
+	pos, exit := parseAPI(fs, args)
+	if exit != parseContinue {
+		return exit
 	}
 	owner, repo, tag, ok := repoAndWord(c, pos, "release delete OWNER/REPO TAG")
 	if !ok {
@@ -247,11 +263,12 @@ func runReleaseUpload(ctx context.Context, c *cli, args []string) int {
 	f.add(fs)
 	var name string
 	fs.StringVar(&name, "name", "", "asset name (default: the file's base name)")
-	pos, ok := parseAPI(fs, args)
-	if !ok {
-		return exitArg
+	pos, exit := parseAPI(fs, args)
+	if exit != parseContinue {
+		return exit
 	}
-	if len(pos) < 2 || len(pos) > 3 {
+	pos = c.withRepoSelector(pos, 3)
+	if len(pos) != 3 {
 		fmt.Fprintln(c.stderr(), "usage: spindle release upload OWNER/REPO TAG FILE [--name ASSET]")
 		return exitArg
 	}
@@ -371,9 +388,9 @@ func runChecksList(ctx context.Context, c *cli, args []string) int {
 	f.add(fs)
 	var after string
 	fs.StringVar(&after, "after", "", "sha cursor")
-	pos, ok := parseAPI(fs, args)
-	if !ok {
-		return exitArg
+	pos, exit := parseAPI(fs, args)
+	if exit != parseContinue {
+		return exit
 	}
 	owner, repo, ok := oneRepo(c, pos, "checks list OWNER/REPO")
 	if !ok {
@@ -414,10 +431,11 @@ func runChecksStatus(ctx context.Context, c *cli, args []string) int {
 	f := &apiFlags{}
 	fs := newAPIFlagSet(c, "checks status")
 	f.add(fs)
-	pos, ok := parseAPI(fs, args)
-	if !ok {
-		return exitArg
+	pos, exit := parseAPI(fs, args)
+	if exit != parseContinue {
+		return exit
 	}
+	pos = c.withRepoSelector(pos, 2)
 	if len(pos) < 1 || len(pos) > 2 {
 		fmt.Fprintln(c.stderr(), "usage: spindle checks status OWNER/REPO [REF]")
 		return exitArg
@@ -429,7 +447,9 @@ func runChecksStatus(ctx context.Context, c *cli, args []string) int {
 	}
 	ref := "HEAD"
 	if len(pos) == 2 {
-		ref = pos[1]
+		// A full ref (refs/heads/main) resolves like the short branch every
+		// other command accepts; /resolve/<seg> takes one path segment.
+		ref = shortRef(pos[1])
 	}
 	a, err := newAPIClient(c, f)
 	if err != nil {
@@ -458,8 +478,10 @@ func runChecksStatus(ctx context.Context, c *cli, args []string) int {
 	return exitOK
 }
 
-// repoAndWord parses OWNER/REPO plus one free-form token (tag, slug…).
+// repoAndWord parses OWNER/REPO plus one free-form token (tag, slug…); the
+// repo defaults to -R / SPINDLE_REPO.
 func repoAndWord(c *cli, pos []string, usage string) (owner, repo, word string, ok bool) {
+	pos = c.withRepoSelector(pos, 2)
 	if len(pos) != 2 {
 		fmt.Fprintf(c.stderr(), "usage: spindle %s\n", usage)
 		return "", "", "", false

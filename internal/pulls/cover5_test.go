@@ -97,7 +97,7 @@ func TestCover5SavePRBranches(t *testing.T) {
 		t.Fatal("put err must surface")
 	}
 	e.clearFails()
-	// Stale version on a missing key ⇒ conflict (reload finds nothing).
+	// Stale version on a missing key ⇒ conflict (whole-doc saves never retry).
 	if err := e.svc.savePR(ctx(), "o", "r", &PRDoc{Num: 77}, "stale"); !errors.Is(err, ErrConflict) {
 		t.Fatalf("stale: %v", err)
 	}
@@ -139,9 +139,7 @@ func TestCover5ListBranches(t *testing.T) {
 		if err != nil || len(res.Pulls) != 1 {
 			t.Fatalf("ghost: %+v %v", res, err)
 		}
-		pr, prVer, _ := e.svc.loadPR(ctx(), "o", "r", 1)
-		pr.Merged = true
-		_ = e.svc.savePR(ctx(), "o", "r", pr, prVer)
+		markMergedPR(t, e, "o", "r", 1)
 		if n, err := e.svc.findOpenPair(ctx(), "o", "r", "refs/heads/main", "refs/heads/topic", "o/r"); err != nil || n != 0 {
 			t.Fatalf("merged pair = %d %v", n, err)
 		}

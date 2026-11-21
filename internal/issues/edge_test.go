@@ -138,7 +138,7 @@ func TestMutationStoreFailures(t *testing.T) {
 		mustPut(t, s, CounterKey("acme", "repo"), []byte(`{"next":1}`))
 		raw, _ := jsonMarshal(&Thread{Num: 1, Kind: "issue"})
 		mustPut(t, s, ThreadKey("acme", "repo", 1), raw)
-		if _, _, err := s.CreateIssue(reqCtx(), "acme", "repo", janeP, "t", ""); !errors.Is(err, ErrConflict) {
+		if _, _, err := s.CreateIssue(reqCtx(), "acme", "repo", janeP, "t", "", nil); !errors.Is(err, ErrConflict) {
 			t.Fatalf("err = %v", err)
 		}
 	})

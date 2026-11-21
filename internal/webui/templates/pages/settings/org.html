@@ -24,6 +24,7 @@
     {{if eq .Data.Tab "members"}}{{template "settings-org-members" .Data}}{{end}}
     {{if eq .Data.Tab "teams"}}{{template "settings-org-teams" .Data}}{{end}}
     {{if eq .Data.Tab "invitations"}}{{template "settings-org-invitations" .Data}}{{end}}
+    {{if eq .Data.Tab "webhooks"}}{{template "settings-org-webhooks" .Data}}{{end}}
     {{if eq .Data.Tab "activity"}}{{template "settings-org-activity" .Data}}{{end}}
     {{if eq .Data.Tab "danger"}}{{template "settings-org-danger" .Data}}{{end}}
   </div>

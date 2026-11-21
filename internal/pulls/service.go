@@ -127,67 +127,72 @@ func (s *Service) loadPR(ctx context.Context, owner, repo string, num int) (*PRD
 	return p, ver, nil
 }
 
-// savePR CAS-writes a pr.json sidecar (bounded 5, then conflict).
-func (s *Service) savePR(ctx context.Context, owner, repo string, p *PRDoc, ver store.Version) error {
-	p.Version++
-	raw := encodePR(p)
+// prWriteAttempts bounds the pr.json CAS retry loop (contention, not a hint).
+const prWriteAttempts = 5
+
+// updatePR applies one writer's owned delta to the freshest pr.json and
+// CAS-writes it, re-loading and re-applying on every precondition failure
+// (§2.3 write discipline). `mutate` runs against the freshly loaded doc on
+// each attempt, so no field is ever taken from a stale copy: a writer can
+// only change what it explicitly sets, and returns changed=false when the
+// fresh doc already records the wanted state (no write, no version bump).
+//
+// Concurrency: read-modify-write on one key; CAS is the commit point, so a
+// lost race retries against the winner's doc instead of clobbering it. The
+// loop is bounded (prWriteAttempts) and returns ErrConflict on exhaustion.
+func (s *Service) updatePR(ctx context.Context, owner, repo string, num int, mutate func(*PRDoc) (bool, error)) (*PRDoc, error) {
+	for attempt := 0; attempt < prWriteAttempts; attempt++ {
+		cur, ver, err := s.loadPR(ctx, owner, repo, num)
+		if err != nil {
+			return nil, err
+		}
+		if cur == nil {
+			return nil, fmt.Errorf("%w: pull request %d not found", ErrNotFound, num)
+		}
+		changed, merr := mutate(cur)
+		if merr != nil {
+			return nil, merr
+		}
+		if !changed {
+			return cur, nil
+		}
+		cur.Version++
+		if perr := s.putPR(ctx, owner, repo, cur, ver); perr != nil {
+			if store.IsPreconditionFailed(perr) {
+				continue
+			}
+			return nil, perr
+		}
+		return cur, nil
+	}
+	return nil, fmt.Errorf("%w: pull request %d changed concurrently", ErrConflict, num)
+}
+
+// putPR writes one encoded pr.json with an explicit precondition ("" ⇒
+// Create). It is the only pr.json PUT in this package.
+func (s *Service) putPR(ctx context.Context, owner, repo string, p *PRDoc, ver store.Version) error {
 	opts := store.PutOptions{Mode: store.PutUpdate, IfVersion: ver, ContentType: "application/json"}
 	if ver == "" {
 		opts.Mode = store.PutCreate
 	}
-	for attempt := 0; attempt < 5; attempt++ {
-		if _, err := store.PutBytes(ctx, s.Store, PRKey(owner, repo, p.Num), raw, opts); err != nil {
-			if store.IsPreconditionFailed(err) {
-				cur, cver, gerr := s.loadPR(ctx, owner, repo, p.Num)
-				if gerr != nil || cur == nil {
-					return fmt.Errorf("%w: pull request %d changed concurrently", ErrConflict, p.Num)
-				}
-				// Re-apply onto the fresh doc (§2.3 write discipline): each
-				// writer owns a disjoint field set, so the retry merges field
-				// groups instead of overwriting wholesale. The merge outcome
-				// is write-once — a landed merged:true is never unset.
-				freshVersion := cur.Version
-				reapplyPR(cur, p)
-				cur.Version = freshVersion
-				p = cur
-				p.Version++
-				raw = encodePR(p)
-				opts = store.PutOptions{Mode: store.PutUpdate, IfVersion: cver, ContentType: "application/json"}
-				continue
-			}
-			return err
-		}
-		return nil
-	}
-	return fmt.Errorf("%w: pull request %d changed concurrently", ErrConflict, p.Num)
+	_, err := store.PutBytes(ctx, s.Store, PRKey(owner, repo, p.Num), encodePR(p), opts)
+	return err
 }
 
-// reapplyPR merges a stale writer's doc onto the fresh doc on a pr.json
-// CAS retry (§2.3 write discipline: disjoint owned field sets per writer —
-// UpdatePR owns Body + Draft, refreshHead owns Head.SHA/HeadForcePushedAt, the merge
-// task owns the outcome fields). The merge outcome is write-once/monotonic:
-// once the fresh doc records merged:true, no retry unsets it (or its
-// merged_at/merged_by/merge_commit_sha/merge_strategy). Symmetrically, a
-// merge-completion writer owns ONLY the outcome fields, so its retry keeps
-// the fresh doc's editorial/head/base/draft fields. Unmerged-vs-unmerged
-// retries stay last-writer-wins (head sha self-heals via live drift
-// detection on the next read; bodies are human-rate).
-func reapplyPR(cur, p *PRDoc) {
-	if cur.Merged {
-		merged, at, by, sha, strategy := cur.Merged, cur.MergedAt, cur.MergedBy, cur.MergeCommitSHA, cur.MergeStrategy
-		*cur = *p
-		cur.Merged, cur.MergedAt, cur.MergedBy, cur.MergeCommitSHA, cur.MergeStrategy = merged, at, by, sha, strategy
-		return
+// savePR writes a WHOLE pr.json document as the caller holds it. It is the
+// explicit whole-doc writer: the OpenPR create path and hermetic tests use
+// it; production maintenance writers go through updatePR instead. A CAS
+// loss is reported as ErrConflict, never retried — a stale whole doc has no
+// owned delta to re-apply, and copying it onto the fresh doc is exactly the
+// field-resurrection bug §2.3 forbids (head sha reverted to a stale value;
+// see the Decisions entry for the TestSink flake).
+func (s *Service) savePR(ctx context.Context, owner, repo string, p *PRDoc, ver store.Version) error {
+	p.Version++
+	err := s.putPR(ctx, owner, repo, p, ver)
+	if store.IsPreconditionFailed(err) {
+		return fmt.Errorf("%w: pull request %d changed concurrently", ErrConflict, p.Num)
 	}
-	if p.Merged {
-		body, head, forced, published := cur.Body, cur.Head, cur.HeadForcePushedAt, cur.HeadPublished
-		draft, fork, base := cur.Draft, cur.Fork, cur.Base
-		*cur = *p
-		cur.Body, cur.Head, cur.HeadForcePushedAt, cur.HeadPublished = body, head, forced, published
-		cur.Draft, cur.Fork, cur.Base = draft, fork, base
-		return
-	}
-	*cur = *p
+	return err
 }
 
 // --- shared P4 index ---------------------------------------------------------
@@ -462,6 +467,13 @@ func (s *Service) OpenPR(ctx context.Context, owner, repo string, actor auth.Pri
 	if nt != nil {
 		th = nt
 	}
+	// CI trigger (Threads pass A): a new PR starts its pull_request runs.
+	// Post-commit, on the same lifecycle edge the notify/SSE seams use.
+	s.pullEvent(ctx, PullEvent{
+		Repo: baseRepo, Action: "opened", Num: num,
+		BaseRef: in.BaseRef, HeadRef: in.HeadRef, HeadSHA: headSHA,
+		HeadRepo: repoName(headOwner, headRepo), Fork: !sameRepo, Actor: who,
+	})
 	return th, pr, nil
 }
 
@@ -740,12 +752,15 @@ type PROut struct {
 	Labels    []string `json:"labels"`
 	Assignees []string `json:"assignees"`
 	Author    string   `json:"author"`
-	BaseRef   string   `json:"base_ref"`
-	HeadRef   string   `json:"head_ref"`
-	HeadSHA   string   `json:"head_sha"`
-	Draft     bool     `json:"draft"`
-	Merged    bool     `json:"merged"`
-	UpdatedAt string   `json:"updated_at"`
+	// CommentCount comes from the shared index card (P4), like the issue
+	// list's card: the two list rows show the same anatomy.
+	CommentCount int    `json:"comment_count"`
+	BaseRef      string `json:"base_ref"`
+	HeadRef      string `json:"head_ref"`
+	HeadSHA      string `json:"head_sha"`
+	Draft        bool   `json:"draft"`
+	Merged       bool   `json:"merged"`
+	UpdatedAt    string `json:"updated_at"`
 }
 
 // ListFilter shapes GET …/pulls (§8): state/labels/base/head/sort/n/after.
@@ -815,7 +830,8 @@ func (s *Service) ListPRs(ctx context.Context, owner, repo string, p auth.Princi
 		rows = append(rows, PROut{
 			Num: pr.Num, Title: c.Title, State: c.State,
 			Labels: nonNilStr(c.Labels), Assignees: nonNilStr(c.Assignees), Author: c.Author,
-			BaseRef: pr.Base.Ref, HeadRef: pr.Head.Ref, HeadSHA: pr.Head.SHA,
+			CommentCount: c.CommentCount,
+			BaseRef:      pr.Base.Ref, HeadRef: pr.Head.Ref, HeadSHA: pr.Head.SHA,
 			Draft: pr.Draft, Merged: pr.Merged, UpdatedAt: c.UpdatedAt,
 		})
 	}
@@ -917,7 +933,7 @@ func (s *Service) UpdatePR(ctx context.Context, owner, repo string, num int, act
 	if th == nil || th.Kind != "pr" {
 		return nil, nil, fmt.Errorf("%w: %d", ErrNotFound, num)
 	}
-	pr, prVer, err := s.loadPR(ctx, owner, repo, num)
+	pr, _, err := s.loadPR(ctx, owner, repo, num)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -1020,41 +1036,49 @@ func (s *Service) UpdatePR(ctx context.Context, owner, repo string, num int, act
 		}
 		s.emit(ctx, NotifyEvent{Repo: repoName(owner, repo), Class: class, Actor: who, PullNum: num, Recipients: prParticipants(th, who)})
 		s.stream(ctx, StreamEvent{Name: "pull", Repo: repoName(owner, repo), Action: action, Num: num, Title: th.Title, State: th.State, Author: th.Author, BaseRef: pr.Base.Ref, HeadRef: pr.Head.Ref, HeadSHA: pr.Head.SHA})
+		// CI trigger (Threads pass A): reopening an open PR starts its
+		// pull_request runs. Closing never does.
+		if to == StateOpen {
+			s.pullEvent(ctx, PullEvent{
+				Repo: repoName(owner, repo), Action: "reopened", Num: num,
+				BaseRef: pr.Base.Ref, HeadRef: pr.Head.Ref, HeadSHA: pr.Head.SHA,
+				HeadRepo: pr.Head.Repo, Fork: pr.Fork != nil, Actor: who,
+			})
+		}
 	}
 	if p.Body != nil || draft != nil {
-		// Owned-delta re-apply (§2.3: UpdatePR owns body + draft): set the
-		// owned fields on the fresh doc, so a concurrently-landed merge
-		// outcome (or head refresh) survives even when no CAS retry fires.
-		if fresh, fver, ferr := s.loadPR(ctx, owner, repo, num); ferr == nil && fresh != nil {
-			pr, prVer = fresh, fver
-		}
-		if draft != nil {
-			// Merged is terminal for draft (mirrors the state flips): a
-			// merge landing between the two reads still refuses here.
-			// Body edits stay allowed on merged PRs, as before.
-			if pr.Merged {
-				return nil, nil, fmt.Errorf("%w: pull request #%d is merged", ErrConflict, num)
+		// Owned-delta re-apply (§2.3: UpdatePR owns body + draft): the
+		// updater re-loads the fresh doc and sets only these two fields, so a
+		// concurrently-landed merge outcome or head refresh survives both a
+		// CAS retry and the no-retry happy path.
+		applied := draft != nil
+		updated, uerr := s.updatePR(ctx, owner, repo, num, func(cur *PRDoc) (bool, error) {
+			changed := false
+			if draft != nil {
+				// Merged is terminal for draft (mirrors the state flips): a
+				// merge landing between the two reads still refuses here.
+				// Body edits stay allowed on merged PRs, as before.
+				if cur.Merged {
+					return false, fmt.Errorf("%w: pull request #%d is merged", ErrConflict, num)
+				}
+				applied = *draft != cur.Draft // a concurrent flip already reached it
+				if applied {
+					cur.Draft = *draft
+					changed = true
+				}
 			}
-			if *draft == pr.Draft {
-				draft = nil // a concurrent flip already reached the wanted state
+			if p.Body != nil && *p.Body != cur.Body {
+				cur.Body = *p.Body
+				changed = true
 			}
+			return changed, nil
+		})
+		if uerr != nil {
+			return nil, nil, uerr
 		}
-		changed := false
-		if p.Body != nil && *p.Body != pr.Body {
-			pr.Body = *p.Body
-			changed = true
-		}
-		if draft != nil {
-			pr.Draft = *draft
-			changed = true
-		}
-		if changed {
-			if serr := s.savePR(ctx, owner, repo, pr, prVer); serr != nil {
-				return nil, nil, serr
-			}
-			if npr, _, nerr := s.loadPR(ctx, owner, repo, num); nerr == nil && npr != nil {
-				pr = npr
-			}
+		pr = updated
+		if !applied {
+			draft = nil // no draft_changed event for a no-op flip
 		}
 	}
 	if draft != nil {

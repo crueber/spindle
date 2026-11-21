@@ -29,6 +29,9 @@ func TestOrgBirthObserverEmitsForOrgsOnly(t *testing.T) {
 
 	ident := identity.New(st, cfg)
 	notifySvc, _ := newNotifyService(st, ident)
+	if notifySvc.OrgOwner == nil {
+		t.Fatal("composition must wire notify.OrgOwner to identity (org owners would 403)")
+	}
 	reg.OnCreate = orgBirthObserver(ident, notifySvc)
 
 	if _, err := ident.CreateOrg(ctx, "acme", "Acme", "", "amy@example.com"); err != nil {

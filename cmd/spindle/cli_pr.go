@@ -18,15 +18,21 @@ var prGroup = &apiGroup{
 	name: "pr",
 	help: "pull requests: list, read, write, merge, review, checks",
 	commands: []apiCommand{
-		{name: "list", usage: "spindle pr list OWNER/REPO [--state open|closed] [--base B] [--head H] [--limit N]",
+		{name: "list", usage: "spindle pr list OWNER/REPO [--state open|closed|all] [--base B] [--head H] [--limit N]",
 			help:  "list pull requests",
 			flags: []string{"json", "limit", "state", "base", "head", "after"}, run: runPRList},
 		{name: "show", usage: "spindle pr show OWNER/REPO NUM",
 			help:  "one pull request with its timeline",
 			flags: []string{"json", "comments"}, run: runPRShow},
+		{name: "diff", usage: "spindle pr diff OWNER/REPO NUM",
+			help:  "the pull request's unified diff (text/plain)",
+			flags: []string{"quiet"}, run: runPRDiff},
 		{name: "create", usage: "spindle pr create OWNER/REPO --title T --base B --head H [--body B|--body-file F] [--draft]",
 			help:  "open a pull request",
 			flags: []string{"json", "quiet", "title", "body", "body-file", "base", "head", "draft"}, run: runPRCreate},
+		{name: "close", usage: "spindle pr close OWNER/REPO NUM",
+			help:  "close a pull request without merging",
+			flags: []string{"json", "quiet"}, run: runPRClose},
 		{name: "merge", usage: "spindle pr merge OWNER/REPO NUM [--method merge|squash|rebase] [--delete-head] [--title T] [--message M] [--wait]",
 			help:  "merge a pull request (a task)",
 			flags: []string{"json", "quiet", "method", "delete-head", "title", "message", "wait"}, run: runPRMerge},
@@ -131,13 +137,13 @@ func runPRList(ctx context.Context, c *cli, args []string) int {
 	fs := newAPIFlagSet(c, "pr list")
 	f.add(fs)
 	var state, base, head, after string
-	fs.StringVar(&state, "state", "", "open|closed")
+	fs.StringVar(&state, "state", "", "open|closed|all")
 	fs.StringVar(&base, "base", "", "filter by base branch")
 	fs.StringVar(&head, "head", "", "filter by head branch")
 	fs.StringVar(&after, "after", "", "pull-number cursor")
-	pos, ok := parseAPI(fs, args)
-	if !ok {
-		return exitArg
+	pos, exit := parseAPI(fs, args)
+	if exit != parseContinue {
+		return exit
 	}
 	owner, repo, ok := oneRepo(c, pos, "pr list OWNER/REPO")
 	if !ok {
@@ -149,7 +155,8 @@ func runPRList(ctx context.Context, c *cli, args []string) int {
 		return exitErr
 	}
 	q := url.Values{}
-	if state != "" {
+	// `all` is gh's spelling for "no state filter": the API's default.
+	if state != "" && state != "all" {
 		q.Set("state", state)
 	}
 	if base != "" {
@@ -195,9 +202,9 @@ func runPRShow(ctx context.Context, c *cli, args []string) int {
 	f.add(fs)
 	var comments int
 	fs.IntVar(&comments, "comments", 0, "event window size (server default 50)")
-	pos, ok := parseAPI(fs, args)
-	if !ok {
-		return exitArg
+	pos, exit := parseAPI(fs, args)
+	if exit != parseContinue {
+		return exit
 	}
 	owner, repo, num, ok := repoAndNum(c, pos, "pr show OWNER/REPO NUM")
 	if !ok {
@@ -224,6 +231,71 @@ func runPRShow(ctx context.Context, c *cli, args []string) int {
 	return exitOK
 }
 
+// runPRDiff prints the pull request's unified diff (GET …/pulls/{num}/diff
+// is text/plain; the bytes go straight to stdout so `spindle pr diff N | git
+// apply` works).
+func runPRDiff(ctx context.Context, c *cli, args []string) int {
+	f := &apiFlags{}
+	fs := newAPIFlagSet(c, "pr diff")
+	fs.BoolVar(&f.quiet, "quiet", false, "suppress headers and confirmations")
+	pos, exit := parseAPI(fs, args)
+	if exit != parseContinue {
+		return exit
+	}
+	owner, repo, num, ok := repoAndNum(c, pos, "pr diff OWNER/REPO NUM")
+	if !ok {
+		return exitArg
+	}
+	a, err := newAPIClient(c, f)
+	if err != nil {
+		fmt.Fprintf(c.stderr(), "spindle: %v\n", err)
+		return exitErr
+	}
+	raw, err := a.call(ctx, "GET", apiPath(owner, repo, "pulls", strconv.Itoa(num), "diff"), nil, nil)
+	if err != nil {
+		return a.fail(err)
+	}
+	if len(raw) > 0 {
+		_, _ = a.out.Write(raw)
+		if raw[len(raw)-1] != '\n' {
+			fmt.Fprintln(a.out)
+		}
+	}
+	return exitOK
+}
+
+// runPRClose sets state=closed through the documented pull PATCH.
+func runPRClose(ctx context.Context, c *cli, args []string) int {
+	f := &apiFlags{}
+	fs := newAPIFlagSet(c, "pr close")
+	f.add(fs)
+	pos, exit := parseAPI(fs, args)
+	if exit != parseContinue {
+		return exit
+	}
+	owner, repo, num, ok := repoAndNum(c, pos, "pr close OWNER/REPO NUM")
+	if !ok {
+		return exitArg
+	}
+	a, err := newAPIClient(c, f)
+	if err != nil {
+		fmt.Fprintf(c.stderr(), "spindle: %v\n", err)
+		return exitErr
+	}
+	raw, err := a.call(ctx, "PUT", apiPath(owner, repo, "pulls", strconv.Itoa(num)), nil,
+		map[string]string{"state": "closed"})
+	if err != nil {
+		return a.fail(err)
+	}
+	if f.json {
+		return a.emitJSON(raw)
+	}
+	if !f.quiet {
+		fmt.Fprintf(c.stdout(), "#%d closed\n%s\n", num, a.base+"/"+owner+"/"+repo+"/pulls/"+strconv.Itoa(num))
+	}
+	return exitOK
+}
+
 func runPRCreate(ctx context.Context, c *cli, args []string) int {
 	f := &apiFlags{}
 	fs := newAPIFlagSet(c, "pr create")
@@ -236,9 +308,9 @@ func runPRCreate(ctx context.Context, c *cli, args []string) int {
 	fs.StringVar(&base, "base", "", "base branch (required)")
 	fs.StringVar(&head, "head", "", "head branch (required)")
 	fs.BoolVar(&draft, "draft", false, "open as a draft")
-	pos, ok := parseAPI(fs, args)
-	if !ok {
-		return exitArg
+	pos, exit := parseAPI(fs, args)
+	if exit != parseContinue {
+		return exit
 	}
 	owner, repo, ok := oneRepo(c, pos, "pr create OWNER/REPO --title T --base B --head H")
 	if !ok {
@@ -291,9 +363,9 @@ func runPRMerge(ctx context.Context, c *cli, args []string) int {
 	fs.StringVar(&title, "title", "", "merge commit title")
 	fs.StringVar(&message, "message", "", "merge commit message")
 	fs.BoolVar(&wait, "wait", false, "poll the merge task until it finishes")
-	pos, ok := parseAPI(fs, args)
-	if !ok {
-		return exitArg
+	pos, exit := parseAPI(fs, args)
+	if exit != parseContinue {
+		return exit
 	}
 	owner, repo, num, ok := repoAndNum(c, pos, "pr merge OWNER/REPO NUM")
 	if !ok {
@@ -374,7 +446,8 @@ func waitMergeTask(ctx context.Context, c *cli, a *apiClient, owner, repo string
 		switch out.Task.State {
 		case "ok":
 			if !f.quiet {
-				fmt.Fprintf(c.stdout(), "Merged #%d (%s)\n", num, out.Task.Summary)
+				fmt.Fprintf(c.stdout(), "Merged #%d (%s)\n%s\n", num, out.Task.Summary,
+					a.base+"/"+owner+"/"+repo+"/pulls/"+strconv.Itoa(num))
 			}
 			return exitOK
 		case "error":
@@ -402,9 +475,9 @@ func runPRReview(ctx context.Context, c *cli, args []string) int {
 	fs.BoolVar(&approve, "approve", false, "submit APPROVED")
 	fs.BoolVar(&requestChanges, "request-changes", false, "submit CHANGES_REQUESTED")
 	fs.BoolVar(&comment, "comment", false, "submit COMMENTED")
-	pos, ok := parseAPI(fs, args)
-	if !ok {
-		return exitArg
+	pos, exit := parseAPI(fs, args)
+	if exit != parseContinue {
+		return exit
 	}
 	owner, repo, num, ok := repoAndNum(c, pos, "pr review OWNER/REPO NUM (--approve|--request-changes|--comment)")
 	if !ok {
@@ -472,9 +545,9 @@ func runPRComment(ctx context.Context, c *cli, args []string) int {
 	var body, bodyFile string
 	fs.StringVar(&body, "body", "", "comment body")
 	fs.StringVar(&bodyFile, "body-file", "", "read the body from FILE (- = stdin)")
-	pos, ok := parseAPI(fs, args)
-	if !ok {
-		return exitArg
+	pos, exit := parseAPI(fs, args)
+	if exit != parseContinue {
+		return exit
 	}
 	owner, repo, num, ok := repoAndNum(c, pos, "pr comment OWNER/REPO NUM --body B")
 	if !ok {
@@ -511,9 +584,9 @@ func runPRChecks(ctx context.Context, c *cli, args []string) int {
 	f := &apiFlags{}
 	fs := newAPIFlagSet(c, "pr checks")
 	f.add(fs)
-	pos, ok := parseAPI(fs, args)
-	if !ok {
-		return exitArg
+	pos, exit := parseAPI(fs, args)
+	if exit != parseContinue {
+		return exit
 	}
 	owner, repo, num, ok := repoAndNum(c, pos, "pr checks OWNER/REPO NUM")
 	if !ok {

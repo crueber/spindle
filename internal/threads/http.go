@@ -2,7 +2,9 @@ package threads
 
 import (
 	"encoding/json"
+	"fmt"
 	"io"
+	"math"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -22,7 +24,25 @@ import (
 // the checks/import precedent, law 12). One entry per distinct path shape.
 var ExposedTemplates = []string{
 	"/{owner}/{repo}/api/threads",
+	"/{owner}/{repo}/api/threads/workflows",
 	"/{owner}/{repo}/api/threads/{run}",
+	"/{owner}/{repo}/api/threads/{run}/cancel",
+	"/{owner}/{repo}/api/threads/{run}/rerun",
+	"/{owner}/{repo}/api/threads/{run}/approve",
+	"/{owner}/{repo}/api/threads/{run}/deny",
+	"/{owner}/{repo}/api/threads/{run}/jobs/{job}/log",
+	"/{owner}/{repo}/api/threads/runners",
+	"/{owner}/{repo}/api/threads/runners/tokens",
+	"/{owner}/{repo}/api/threads/runners/{id}",
+	"/{owner}/{repo}/api/threads/secrets",
+	"/{owner}/{repo}/api/threads/secrets/{name}",
+	"/api/v1/threads/runners/register",
+	"/api/v1/threads/runners/declare",
+	"/api/v1/threads/runners/fetch",
+	"/api/v1/threads/jobs/{ref}/attempt/{n}/start",
+	"/api/v1/threads/jobs/{ref}/attempt/{n}/log",
+	"/api/v1/threads/jobs/{ref}/attempt/{n}/complete",
+	"/api/v1/threads/jobs/{ref}/attempt/{n}/cancel",
 }
 
 // Authenticator resolves the request principal through Seam 2 (the server
@@ -47,8 +67,13 @@ func (h *Handler) principal(r *http.Request) (auth.Principal, *auth.AuthError) {
 // Handle answers one request; false when the path is not a threads route.
 func (h *Handler) Handle(w http.ResponseWriter, r *http.Request) bool {
 	segs := splitPath(r)
-	if len(segs) == 0 || segs[0] == "api" || segs[0] == "api-browser" {
-		return false // no top-level threads routes; all are repo-scoped
+	if len(segs) == 0 {
+		return false
+	}
+	// The runner protocol is top-level (/api/v1/threads/…): runners are
+	// infrastructure, not users, so their paths are not repo-scoped.
+	if segs[0] == "api" || segs[0] == "api-browser" {
+		return h.handleTop(w, r, segs)
 	}
 	if len(segs) >= 4 && (segs[2] == "api" || segs[2] == "api-browser") {
 		owner, repo := segs[0], strings.TrimSuffix(segs[1], ".git")
@@ -186,6 +211,71 @@ func (h *Handler) handleRepo(w http.ResponseWriter, r *http.Request, repo string
 		}
 		methodNotAllowed(w, "GET", "POST")
 		return true
+	case len(rest) == 1 && rest[0] == "workflows":
+		if r.Method != http.MethodGet {
+			methodNotAllowed(w, "GET")
+			return true
+		}
+		h.listWorkflows(w, r, repo)
+		return true
+	case rest[0] == "runners":
+		switch {
+		case len(rest) == 1 && r.Method == http.MethodGet:
+			h.listRunners(w, r, repo)
+		case len(rest) == 2 && rest[1] == "tokens" && r.Method == http.MethodPost:
+			h.mintRunnerToken(w, r, repo)
+		case len(rest) == 2 && r.Method == http.MethodDelete:
+			h.revokeRunner(w, r, repo, rest[1])
+		case len(rest) == 1:
+			methodNotAllowed(w, "GET")
+		case len(rest) == 2 && rest[1] == "tokens":
+			methodNotAllowed(w, "POST")
+		default:
+			methodNotAllowed(w, "DELETE")
+		}
+		return true
+	case rest[0] == "secrets":
+		switch {
+		case len(rest) == 1 && r.Method == http.MethodGet:
+			h.listSecrets(w, r, repo)
+		case len(rest) == 2 && r.Method == http.MethodPut:
+			h.putSecret(w, r, repo, rest[1])
+		case len(rest) == 2 && r.Method == http.MethodDelete:
+			h.deleteSecret(w, r, repo, rest[1])
+		case len(rest) == 1:
+			methodNotAllowed(w, "GET")
+		default:
+			methodNotAllowed(w, "PUT", "DELETE")
+		}
+		return true
+	case len(rest) == 2 && rest[1] == "cancel":
+		if r.Method != http.MethodPost {
+			methodNotAllowed(w, "POST")
+			return true
+		}
+		h.cancelRun(w, r, repo, rest[0])
+		return true
+	case len(rest) == 2 && rest[1] == "rerun":
+		if r.Method != http.MethodPost {
+			methodNotAllowed(w, "POST")
+			return true
+		}
+		h.rerunRun(w, r, repo, rest[0])
+		return true
+	case len(rest) == 2 && (rest[1] == "approve" || rest[1] == "deny"):
+		if r.Method != http.MethodPost {
+			methodNotAllowed(w, "POST")
+			return true
+		}
+		h.approvalRun(w, r, repo, rest[0], rest[1] == "approve")
+		return true
+	case len(rest) == 4 && rest[1] == "jobs" && rest[3] == "log":
+		if r.Method != http.MethodGet {
+			methodNotAllowed(w, "GET")
+			return true
+		}
+		h.streamLog(w, r, repo, rest[0], rest[2])
+		return true
 	case len(rest) == 1:
 		if r.Method != http.MethodGet {
 			methodNotAllowed(w, "GET")
@@ -219,12 +309,33 @@ func (h *Handler) listRuns(w http.ResponseWriter, r *http.Request, repo string) 
 		}
 		n = parsed
 	}
-	page, err := h.Svc.ListRuns(r.Context(), repo, p, q.Get("after"), n)
+	f := RunFilter{
+		Workflow: strings.TrimSpace(q.Get("workflow")),
+		State:    strings.TrimSpace(q.Get("state")),
+		Actor:    strings.TrimSpace(q.Get("actor")),
+	}
+	page, err := h.Svc.ListRunsFiltered(r.Context(), repo, p, q.Get("after"), n, f)
 	if err != nil {
 		writeErr(w, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, page)
+}
+
+// listWorkflows answers the per-file parse state at a commit (default: the
+// default branch tip) — the API twin of the Threads page's workflow list.
+func (h *Handler) listWorkflows(w http.ResponseWriter, r *http.Request, repo string) {
+	p, aerr := h.principal(r)
+	if aerr != nil {
+		writeErr(w, aerr)
+		return
+	}
+	list, err := h.Svc.ListWorkflows(r.Context(), repo, r.URL.Query().Get("commit"), p)
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, list)
 }
 
 func (h *Handler) getRun(w http.ResponseWriter, r *http.Request, repo, runID string) {
@@ -248,16 +359,52 @@ func (h *Handler) dispatch(w http.ResponseWriter, r *http.Request, repo string) 
 		return
 	}
 	var body struct {
-		Workflow string `json:"workflow"`
-		Ref      string `json:"ref"`
+		Workflow string         `json:"workflow"`
+		Ref      string         `json:"ref"`
+		Inputs   map[string]any `json:"inputs"`
 	}
-	if !decodeStrict(w, r, 1<<20, map[string]bool{"workflow": true, "ref": true}, &body) {
+	if !decodeStrict(w, r, 1<<20, map[string]bool{"workflow": true, "ref": true, "inputs": true}, &body) {
 		return
 	}
-	runs, err := h.Svc.DispatchRun(r.Context(), repo, body.Ref, body.Workflow, p)
+	inputs, ierr := coerceInputs(body.Inputs)
+	if ierr != nil {
+		writeErr(w, ierr)
+		return
+	}
+	runs, err := h.Svc.DispatchRun(r.Context(), repo, body.Ref, body.Workflow, inputs, p)
 	if err != nil {
 		writeErr(w, err)
 		return
 	}
 	writeJSON(w, http.StatusCreated, map[string]any{"runs": runs})
+}
+
+// coerceInputs turns the JSON input map into the string map the workflow
+// schema is typed over. String, boolean and integral-number values are
+// accepted (a JSON-only client should not have to stringify a boolean); any
+// other shape is a 400 naming the input.
+func coerceInputs(in map[string]any) (map[string]string, error) {
+	if len(in) == 0 {
+		return nil, nil
+	}
+	out := make(map[string]string, len(in))
+	for name, v := range in {
+		switch val := v.(type) {
+		case nil:
+			// An explicit null is an omitted value (defaults/required apply).
+		case string:
+			out[name] = val
+		case bool:
+			out[name] = strconv.FormatBool(val)
+		case float64:
+			if val == math.Trunc(val) && math.Abs(val) < 1e15 {
+				out[name] = strconv.FormatInt(int64(val), 10)
+			} else {
+				out[name] = strconv.FormatFloat(val, 'f', -1, 64)
+			}
+		default:
+			return nil, fmt.Errorf("%w: input %q must be a string, boolean or number", ErrInvalid, name)
+		}
+	}
+	return out, nil
 }

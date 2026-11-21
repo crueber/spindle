@@ -41,6 +41,20 @@ func (r *PushRequest) Has(cap string) bool {
 	return false
 }
 
+// WantsReport reports whether the client negotiated a status report:
+// `report-status` or `report-status-v2`. The v2 capability IMPLIES v1
+// semantics (04_git.md §7.2: we always emit plain report-status lines even
+// when v2 was negotiated), and a client that sees `report-status-v2`
+// advertised requests ONLY that cap — so a refusal path that tests
+// `Has("report-status")` alone writes no report and leaves git blocked
+// reading the status stream forever (the rejected-pack hang).
+func (r *PushRequest) WantsReport() bool {
+	if r == nil {
+		return false
+	}
+	return r.Has("report-status") || r.Has("report-status-v2")
+}
+
 // ParsePushRequest parses the full body: first pkt-line `<old> <new>
 // <ref>\0<caps>`, then further command lines until flush; push-option lines
 // follow when `push-options` was requested; the REMAINDER is raw pack bytes.
@@ -95,6 +109,14 @@ func (l *Layer) parsePushCommands(repo *LocalRepo, pr *PktReader) (*PushRequest,
 		}
 		line, caps := FirstNul(p)
 		text := strings.TrimRight(string(line), "\n")
+		// A shallow clone's push opens with the protocol's pre-command
+		// `shallow <oid>` section (04_git.md §7 step 1). receive-pack v1 does
+		// not advertise `shallow`, so stock servers answer a bare protocol
+		// error; name the cause and the remedy instead of "bad push command
+		// line" (closing-audit Observation 2).
+		if strings.HasPrefix(text, "shallow ") {
+			return nil, ErrShallowPush
+		}
 		if first {
 			first = false
 			req.CapsRaw = strings.TrimRight(string(caps), "\n")
@@ -155,6 +177,30 @@ func ParseShallow(body []byte) []Oid {
 		}
 	}
 	return out
+}
+
+// ParseShallowSection returns the `shallow <oid>` lines that OPEN a
+// receive-pack request and stops at the first line that is not one. Unlike
+// ParseShallow it never reads past the section, so pack bytes cannot be
+// mistaken for a shallow line; the receive path uses it to refuse a shallow
+// push with a legible reason before any repository work.
+func ParseShallowSection(body []byte) []Oid {
+	pr := NewPktReader(bytes.NewReader(body))
+	var out []Oid
+	for {
+		p, kind, err := pr.Next()
+		if err != nil || kind == PktKindFlush {
+			return out
+		}
+		if kind != PktKindData || len(p) == 0 {
+			continue
+		}
+		v, ok := strings.CutPrefix(strings.TrimRight(string(p), "\n"), "shallow ")
+		if !ok {
+			return nil
+		}
+		out = append(out, Oid(v))
+	}
 }
 
 // --- report-status (§7.2) -----------------------------------------------------------

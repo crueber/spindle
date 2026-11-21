@@ -49,7 +49,10 @@
         {{template "collab_state_chip" .Chip}}
         {{range .Labels}}{{template "collab_label_chip" .}}{{end}}
         <span class="mono muted min-w-0 truncate text-xs">{{.BaseRef}} ← {{.HeadRef}}</span>
-        <span class="card-meta ml-auto mt-0! shrink-0">{{.Author}} · {{template "collab_time" .UpdatedAt}}</span>
+        <span class="card-meta ml-auto mt-0! shrink-0">
+          {{if .CommentCount}}<span aria-label="{{.CommentCount}} comments" title="{{.CommentCount}} comments">{{template "collab_icon" "comment"}} {{.CommentCount}}</span> · {{end}}
+          {{if .Author}}{{.Author}} · {{end}}{{template "collab_time" .UpdatedAt}}
+        </span>
       </div>
     </li>
     {{end}}

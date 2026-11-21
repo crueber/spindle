@@ -50,6 +50,7 @@ web/sdk/src/
 ├── auth.js       popup flow: openAuthPopup, postMessage wait, probe
 ├── repo.js       the repo client group: refs/tree/blob/raw/commits/commit/resolve/overview
 ├── admin.js      create/delete, tasks, ops, policy, settings groups
+├── packages.js   the OCI registry's JSON twin: list/get/deleteTag/deleteManifest (docs/features/14 §7)
 └── types.js      JSDoc @typedef blocks (§1.1) — editor IntelliSense only, no runtime
 ```
 
@@ -192,8 +193,9 @@ status.
 
 **A page scoped to a repository renders the repository chrome — the masthead (`repo_header`:
 owner/name, description, branch/tag counts, stars/watches/forks with their write affordances, Clone) and
-the tab strip (`repo_tabs`: Code, Commits, Issues, Pulls, Checks when the repo ever reported one,
-Releases, Settings) — above its own content.** The chrome is one component with one active-tab rule, so it
+the tab strip (`repo_tabs`: Code, Commits, Tags, Packages (when `features.packages`, docs/features/14
+§7), Issues, Pulls, Checks when the repo ever reported one, Threads, Releases, Settings) — above its
+own content.** The chrome is one component with one active-tab rule, so it
 cannot drift page by page: a user moving Commits → Issues → Settings never loses the header.
 
 The attach is structural, not per-template:
@@ -212,9 +214,15 @@ The attach is structural, not per-template:
   keeps its exact status/redirect and body (no repository name, description or tabs). A failed summary
   read yields `nil` — the page renders without chrome rather than failing a request that its own gate
   already admitted.
+- **Exactly one amber CTA per page (style guideline F3).** The masthead Clone is `.btn.primary` only when
+  the page body has no primary action of its own (Code/Commits/Tags/WAL/Checks/Threads/Forks). A page
+  that renders its own `.btn primary` — New issue, New pull request, New release, Save, Comment,
+  Create tag — demotes Clone to a secondary `.btn`: `pageRepo` consults `repoPageOwnPrimary(name)` and
+  the repo group's commit handler clears `RepoChrome.ClonePrimary` when the tag form is available.
+  `TestOnePrimaryPerRepoPage` counts `.primary` nodes on the code/issues/pulls/settings pages.
 - The active tab is derived from the request path by `repoTabSection` (`/{o}/{r}/<first segment>`), so a
   handler never restates its section: `issues|labels|milestones → Issues`, `pulls|pull → Pulls`,
-  `checks|check → Checks`, `releases|release → Releases`, `wal|settings → Settings`,
+  `checks|check → Checks`, `releases|release → Releases`, `packages → Packages`, `wal|settings → Settings`,
   `tree|blob|commits|commit → Code`. A feature-disabled tab re-highlights onto Code (#522); `/forks` and
   `/fork` are masthead affordances, not tabs, and keep Code current.
 - Exceptions, by design: the repo group's own six pages (tree/blob/commits/commit/wal) include the
@@ -251,27 +259,110 @@ signed-in principal keys/invitations/setup live in the identity menu (setup admi
 
 Read pages (`GET`): `/`, `/explore`, `/how-it-works`, `/api`, `/new`, `/import`, `/orgs/new`, `/keys`,
 `/invitations`, `/notifications`, `/login-required`, `/setup`, `/{owner}`, `/{owner}/repositories`,
-`/{owner}/organizations`, `/{owner}/settings`, `/{owner}/teams/{slug}`, `/{owner}/{repo}` (code),
+`/{owner}/organizations`, `/{owner}/starred`, `/{owner}/settings`, `/{owner}/teams/{slug}`, `/{owner}/{repo}` (code),
 `/tree[/{path}]`, `/blob/{path}`, `/commits`, `/commit/{sha}`, `/wal`, `/issues`, `/issues/{num}`,
 `/pulls`, `/pull/{num}` (+ `/commits`, `/files`), `/checks`, `/checks/{sha}`, `/threads`,
-`/threads/{run}`, `/releases`, `/releases/{tag}`, `/forks`, `/labels`, `/milestones`,
+`/threads/{run}`, `/releases`, `/releases/{tag}`, `/packages`, `/forks`, `/labels`, `/milestones`,
 `/settings[/{tab}]`, `/fork`, `/issues/new`, `/pulls/new`, `/releases/new`.
 
 Writes post to sibling paths on the page that owns them (`…/close`, `…/merge`, `…/reviews`,
 `…/threads/{id}`, `…/labels`, `…/milestones/{id}/state`, `…/settings/{tab}`, `…/releases/{tag}/assets`,
 the `star|unstar|watch|unwatch|tag` toggles, owner profile/avatar verbs, notification/invitation state
-changes). Three read fragments serve htmx directly: `/checks/{sha}/contexts`,
+changes, and `…/threads/dispatch` — the Run workflow form). Three read fragments serve htmx directly: `/checks/{sha}/contexts`,
 `/pull/{num}/threads/{tid}`, `/pull/{num}/merge/task`. Shape-generic families (teams) go through one
 dispatcher (§2.3).
 
-The Threads pages (`internal/webui/threads.go`, docs/features/15 §6.1) are read-only in T1: the run
-list renders newest-first with a cursor "Older" link, the run page shows the header and each job's
-check context/runs-on/steps. Both carry the repository chrome and the **Threads** tab, which is
-always present (a workflow-less repo has a legitimate empty run list; the Checks #505
-hide-on-empty rule is about an externally reported surface, not this one). The seam is
-`ThreadsDeps` (`List`/`Get`, bound in composition to `*threads.Service` with the repo id joined),
-and `collabErrStatus` maps the Threads sentinels onto page statuses so a private repo answers its
-real 401/403 rather than a 503 card. Dispatch (write role) is the JSON API only.
+**Repo settings tabs (the gate contract).** `settingsRepoTabs` (`internal/webui/settings.go`) pins each
+tab's floor: `read` = WAL; `triage` = Access (read-only — every access write is admin); `admin` =
+General, Scheduled tasks, Mirror, Push policy, Branch protection, Effective config & history, CI tokens,
+Webhooks, Danger Zone. A role **not** in the ladder — empty/unresolved (`identity.Resolve` answers `""`
+for a principal with no binding), `none`, or any unknown spelling — ranks **0**, below every floor, and
+is no-access: the tab answers **403** (a private repo stays **404** from the visibility gate, which runs
+first), and a **200 never carries a mutation control the principal cannot submit** — no Save form, no
+mirror/push create form, no configured upstream URL, no token/webhook/danger control. Host admin (and
+only host admin, plus an explicit admin binding) sees every tab.
+
+The Threads pages (`internal/webui/threads.go`, docs/features/15 §6.1) render newest-first with a
+cursor "Older" link, run duration, and a **Workflows** section listing every discovered workflow file
+at the default branch tip (path, name, triggers, and the per-file parse error when it does not parse,
+anchored `#workflow-<slug>`); the run page shows the header (with duration) and each job's check
+context/state/duration/runs-on/steps, and links to that per-file error when the run's workflow file
+currently fails to parse. Both carry the repository chrome and the **Threads** tab, which is always
+present (a workflow-less repo has a legitimate empty run list; the Checks #505 hide-on-empty rule is
+about an externally reported surface, not this one). The seam is `ThreadsDeps`
+(`List`/`Get`/`Workflows`/`Cancel`/`Rerun`/`Dispatch`/`Role`, bound in composition to
+`*threads.Service` with the repo id joined), and `collabErrStatus` maps the Threads sentinels onto
+page statuses so a private repo answers its real 401/403 rather than a 503 card.
+
+**Round 2, pass 2 additions (docs/features/15 §6.3).**
+
+- **Run-list filters.** The list page carries a plain GET form (`?workflow=&state=&actor=`) with a
+  workflow `select` over the discovered workflows, a state `select` over the run-state vocabulary
+  (including `pending_approval` and `skipped`) and an actor text field. Filters are URL state
+  (shareable, back-button safe), the form is *not* a primary action (`<button class="btn">filter</button>`,
+  never `.btn.primary`), a filtered empty result reads "No run matches this filter" with a clear link
+  rather than the "no runs yet" empty state, and each row shows the actor. The service narrows
+  server-side (`ListRunsFiltered`, bounded to 1000 scanned headers) so the page never walks the repo.
+  **Round 3 fixed the rendered layout:** the controls were wrapped in `<div class="min-w-0">` inside a
+  flex row, so each `width:100%` `.input` collapsed to min-content (measured 50 px workflow / 28 px
+  state / 29 px actor at 1440 and 390 — unusable). The form now uses the canonical filter bar
+  (style guideline §6, issue #232 / `pages/collab/issues.html`): `card mb-3 grid grid-cols-2 gap-x-3
+  gap-y-2 p-3 sm:grid-cols-4` with a `label.grid.min-w-0` + `.eyebrow` per field, 2-up on phones and
+  4-up from `sm`, so every control has a real cell width and the row wraps instead of collapsing.
+  Each control sits in a `span.block.min-w-0` inside its label: a replaced form element that is itself
+  the grid item can lose its intrinsic height in some engines, and the block wrapper keeps the field
+  at its full 30 px at every viewport (measured: 265/264/265 px wide at 1440, 160 px each at 390,
+  `scrollWidth === clientWidth` at both).
+- **The approval gate on the run page.** A held run (`pending_approval`) renders a `warn-line` reason
+  ("first-time contributor's fork pull request … has not executed"); a **maintain+** caller sees
+  **approve run** (the run page's one `.btn.primary`) and **deny** (a `.link`-styled secondary submit),
+  while a write-but-not-maintain caller sees neither (the service re-checks the maintain floor).
+  After a decision the page shows `approved by …` / `denied by …` with the time. The cancel control is
+  offered for `pending_approval` too.
+- **Runner attribution and job permissions.** Each job row shows `runner <name>` (display name, id as
+  the fallback) and its declared `permissions` map, both read from the job record — no registry read
+  on the page.
+- **Commit-detail checks panel.** `repo/commit` renders a **Checks** section (combined-state dot +
+  chip, then the shared `collab_check_contexts` rows: dot, context, state chip, description, creator,
+  time) with a link to the checks page, from the same `checks.Service.CombinedView` the checks page and
+  the PR box use; a commit nobody reported for renders no panel (the checks page owns the zero state).
+  One read, no N+1.
+
+**Run workflow (docs/features/15 §6.1, round 2).** For a write-capable caller the list page owns the
+page's **one `.btn.primary`** (`repoPageOwnPrimary` includes `collab/threads`, so the masthead Clone
+demotes to a secondary `.btn`; style guideline §1 F3): a workflow select restricted to files that
+declare `workflow_dispatch`, a ref field pre-filled from the default branch (`?dispatch=<path>`
+re-renders for another workflow — a plain GET, no island), and that workflow's declared inputs as
+typed controls (`select` for `choice`/`boolean`, text for `string`, required marked, defaults
+pre-filled; the settings-row idiom, `card` + labelled fields). The form posts
+`POST /{owner}/{repo}/threads/dispatch` (same-origin, `ParseForm`, then the same `DispatchRun` the
+JSON API calls) and **303**s to the created run. A `422` re-renders the page with the service's
+message (which names the offending input) and the submitted values; 401/403/404 keep their own
+statuses. The control is hidden for a read-only principal (the service re-checks the write role), and
+the dead `/api#threads` link it replaces is gone.
+
+The Packages page (`internal/webui/packages.go`, docs/features/14 §7) carries the chrome through
+`s.pageRepo` and the **Packages** tab, which renders only when `features.packages` resolves on
+(the page itself answers 404 when it is off, matching every `/v2` route and the JSON twin). Its
+seam is `PackagesDeps` (`List`/`Get`/`DeleteTag`/`DeleteManifest`, plus `CanPush` bound to
+`packages.Service.CanPush` — the same identity.CheckPush call the API gates on), so the page cannot
+grant a delete the API would refuse. Tags render with digest, size, platforms and update time; the
+pull command is copyable (`data-copy`); both delete forms use the typed-confirmation island.
+
+**Account-parity pages (WP9 G9/G10/G17).** Three owner surfaces exist so the account operations are
+editable without the API: (1) Settings → Access renders an admin-only "Invite a collaborator" form and a
+pending-invitation table whose rows carry the copyable human accept link
+(`/invitations?id=<id>&token=<token>`) plus cancel — a non-admin never triggers the invite read (the rows
+hold capability tokens), and the write re-checks `CheckRole(admin)` in the seam, exactly like the JSON
+route (`G9`); (2) `/{owner}?edit=1` renders the avatar upload card (multipart, PNG/JPEG/GIF ≤ 2 MiB —
+the identity verb's own allowlist/crop/self-or-admin rule; 413/415 are the verb's statuses) beside the
+profile form, with the identity menu's initials chip as the no-avatar fallback (`G10`); (3)
+`/{owner}/starred` is a user-only owner tab listing the starred repositories with the shared
+`public_repo_row` anatomy, filtered through the API's `VisibleRepos` rule (the JSON twin is
+deliberately unfiltered) and paged by the API's `<starred_at>|<repo>` cursor — taken from the last
+rendered row so an invisible key never enters the URL (`G17`). Unknown users/orgs are real 404s
+(`identity.UserExists`, profile or user.json, with a repo-owner fallback) — never a fabricated empty
+list.
 
 ### 2.4 Gates (exact parity with the API)
 
@@ -336,6 +427,19 @@ locally.
 The provider answers `/setup` in setup-only mode with the banner and boot errors, and its **POST**
 (validate/save) is the recovery path: a saved valid file returns the process to a normal boot. Only the
 `setup*` deps are bound there; every other page is outside the setup-only route set (503 by design).
+
+**Rows (WP9 G18).** Every schema card splits into the always-visible **Essentials** and a collapsed
+native `<details class="setup-advanced">` **Advanced** group. The partition is data-driven:
+`settingsPrepareSetup` moves each row by its `Advanced` flag, which comes from the one display-metadata
+table `settingsFieldMeta` (a key absent from it is essential) — there is no second list in the view or
+template. A rejected Advanced key opens its disclosure (`SettingsSetupSection.AdvancedHasErrors`) so
+the error line is visible. Collapsed rows stay mounted, so a zero-edit Save posts the same payload and
+writes a byte-identical file. Enum-valued keys (`server.auth.mode`, `store.backend`, `cache.mode`,
+`bundles.serve_via`, `compaction.engine`, `git.upload_pack_engine`, `telemetry.log_format`) render as
+`<select>`s whose choices are `setup.EnumValues` (the schema/loader table, carried on `Field.Enum`);
+an empty value renders an `(unset)` row and an out-of-set value renders a `current: …` row so a save
+never silently rewrites it. The frozen `/api/v1/setup` JSON is unchanged (`DisplayType`/`Enum` are
+`json:"-"`).
 
 ### 2.11 Testing
 
@@ -442,6 +546,28 @@ the effects are DOM refetches, not client caches.
 
 ## Decisions & deviations from the Rust design
 
+- **The Threads filter row is the canonical filter-bar grid (2026-11-21, round 3).** The round-2 row
+  was a flex line whose children were `min-w-0` wrappers around `width:100%` `.input`s: flex sizing
+  resolved each wrapper to min-content, so the workflow/state/actor controls rendered 50/28/29 px at
+  both 1440 and 390. A flex row is the wrong container for a full-width field; the canonical idiom is
+  the issue filter bar's grid card (`grid-cols-2 … sm:grid-cols-4`, labelled fields, one cell per
+  field), which gives every `.input` a real cell width and stacks to two columns at ~390 px. The row
+  keeps the `filter` button secondary (the page's one `.btn.primary` remains Run workflow) and keeps
+  URL state untouched; only the layout changed. Measured rendered controls after the fix: 265 / 264 /
+  265 px wide at 1440×900 and 160 px each at 390×844, 30 px tall, form 1120 px / 358 px wide, with
+  `document.documentElement.scrollWidth === clientWidth` at both (no page-level horizontal pan).
+
+- **The Threads Run workflow control is a server-rendered form (2026-11-21).** Dispatch was API-only
+  (the page linked a dead `/api#threads`), and workflow inputs are per-file, so a single form cannot
+  render every workflow's fields. The page therefore uses a **plain-GET workflow chooser**
+  (`?dispatch=<path>`, URL state per §2.9 — the pattern the issue filter bar already establishes)
+  plus one POST to `…/threads/dispatch` that calls the same `DispatchRun` the JSON API uses. No
+  island was added: the typed controls are `select`/`input` with the shared `.input` class, the
+  workflow select offers only `workflow_dispatch` files, and the page declares its own primary
+  (`repoPageOwnPrimary`), which demotes the masthead Clone exactly per F3. A `422` re-renders the
+  page with the service's input-naming message and the submitted values (the §2.5 write contract);
+  the reader never sees the control and the service still enforces the write role.
+
 - **The task-progress island and the settle window (2026-11-20).** A page that starts a background
   task must never leave a spinner: `/import` renders `[data-task-id][data-task-stream]` and
   `web/src/islands/tasks.js` (registered in `index.js`, fetch stream from `sse.js` as §2.6 requires —
@@ -489,7 +615,7 @@ the effects are DOM refetches, not client caches.
 - **REDESIGNED (issue #270) — releases list + detail match the sibling tabs; asset-upload crash fixed:** (1) crash first — `Release.jsx` `onFile` reset the file input via `e.currentTarget` after the upload await, but Solid nulls `currentTarget` once the handler yields, so the reset threw and the catch toasted `assetCannot set properties of null (setting 'value')`. The handler now captures the input element synchronously before any await (`const input = e.currentTarget`) and resets the captured element in a `finally`; audit found no other `e.currentTarget`-after-`await` handler in the pages (all other event-object uses are synchronous). (2) List goes single-column like Issues (the #35 two-column grid + Latest sidebar is deleted — the sidebar duplicated the first row on most repos): heading + toolbar row mirroring Issues ("Releases" `h2`, right-aligned Refresh + primary New release), All/Drafts/Prereleases pills (`role="group"`, `aria-pressed`, counts) filtering the loaded page client-side via the headless-testable `filterReleases` helper (no new endpoint), name-led divider-separated rows (emerald title link, `latest` chip + `keyAssets` quick-downloads folded inline onto the matching first-page row, `ReleaseBadges`, tag in mono, one-line `excerptBody` excerpt, asset count, `<DateTime>`), "Older" pagination, `Empty` kept (dedicated filtered-empty text when the filter narrows a non-empty page). Drafts stay server-hidden so the Drafts chip reads 0 on most repos — honest, not broken. (3) Detail is name-led: `h1` is the release name (tag fallback), meta row carries tag mono + badges + `<DateTime>` + author + short tag sha; actions group top-right in edit/lifecycle/destructive/navigation order (Edit, Publish primary when draft, Delete danger, Refresh); edit mode is a composer-section form (centered `max-w-2xl` card, Content fieldset with Title/Notes labels + help text, Save primary/Cancel — the IssueNew/PullNew convention). (4) Assets become a `data-table` (icon/name-link/size/short-sha with full-sha title/download/delete, `overflow-x-auto`) under a counted section header; upload is a primary button + drop hint (section-level dragover highlight + drop, same single-file path) with a staged `role="status"` affordance — the page reads + `sha256Hex`-hashes first, then passes the digest so the SDK skips its internal hash, so "Hashing…" (read+hash, the slow part on big files) and "Uploading…" (the POST) stay honest. No new endpoints (assets list already carries name/size/sha256), no new deps. Headless cover: `releases-panel.test.js` gains `filterReleases` + `excerptBody` cases; browser proof: list/detail/upload (incl. the crash scenario) both themes, zero console errors.
 - **FIXED (issue #115) — opaque dropdown panels + styled scrollbars:** the refs dropdown (`.ref-drop`) rendered semi-transparent — the shared `.card` is `dark:bg-zinc-900/70`, so page text bled through. The issue-#37 `.clone-body` solid-panel treatment is generalized: `.ref-drop`, `.tasks-drop`, `.notif-drop`, `.reaction-drop`, `.label-drop`, `.close-drop` all get solid `bg-white` / `dark:bg-zinc-900` (same-specificity rule ordered after `.card`, so no JSX churn for the background). Scrollable popovers (refs list, label menu, notification tray) carry the new `.scroll-slim` class: thin styled webkit scrollbar plus Firefox `scrollbar-width: thin` + `scrollbar-color`, themed in both modes. Scope: clone menu (already solid), refs picker, tasks overlay, notification tray, reaction menu, label picker, comment close/reopen menu — every absolutely-positioned `.card` popover. No backend or SDK change; no new deps.
 - **FIXED (issue #117) — owners page shows per-owner repos + intro:** `/` was a bare owner-name list; it now renders the intro card (§2.3.1) plus one capped section per owner with that owner's repos, newest-first both levels. No new endpoint (core `GET /api/v1/owners` + `/{owner}/repos` already list everything), no new SDK method (`owners.list()/repos()`), no new deps. Caps (`MAX_OWNERS` 50 / `MAX_REPOS_PER_OWNER` 10) and the newest-first proxy (reverse of server order — the listing path exposes no creation timestamps) live in the headless-testable `web/src/lib/owners.js` (`web/test/unit/owners.test.js`); the §2.3 route-table row already promised "each → their repos" and is now true.
-- **FIXED (issue #137) — calm owners page + star counts:** per-owner `.card` sections flatten to a `divide-y` divider stack (intro card kept; caps, overflow links, newest-first order from #117 unchanged; owner heading quieter at `text-sm`) and every repo row on `/` and `/:owner` shows `(N ⭐)` via `<StarCount>` (`web/src/components/StarCount.jsx`) on the shared `social:{o}/{r}` 30 s `useData` key — single-flighted, non-blocking (muted `(…)` placeholder, link renders first), worst case bounded by the #117 caps (50 × 10 = 500 GETs cold, each independent). Formatting/TTL constants live in headless-testable `web/src/lib/stars.js` (`web/test/unit/stars.test.js`). Scope: the org page has no repo listing, starred lists are SDK-only (no listing UI yet), and the repo chrome already shows its count via the star toggle — so `/` + `/:owner` is everywhere a repo list renders. No backend change (`GET …/api/social` exists, 07 §7); no new deps. Links stay plain anchors (keyboard flow unchanged); `.muted`/emerald-link classes carry dark + light.
+- **FIXED (issue #137) — calm owners page + star counts:** per-owner `.card` sections flatten to a `divide-y` divider stack (intro card kept; caps, overflow links, newest-first order from #117 unchanged; owner heading quieter at `text-sm`) and every repo row on `/` and `/:owner` shows `(N ⭐)` via `<StarCount>` (`web/src/components/StarCount.jsx`) on the shared `social:{o}/{r}` 30 s `useData` key — single-flighted, non-blocking (muted `(…)` placeholder, link renders first), worst case bounded by the #117 caps (50 × 10 = 500 GETs cold, each independent). Formatting/TTL constants live in headless-testable `web/src/lib/stars.js` (`web/test/unit/stars.test.js`). Scope: the org page has no repo listing, starred lists are SDK-only (no listing UI yet — **superseded for the rendered page by the WP9 G17 `/{owner}/starred` tab, §2.3.1**; the note described the now-deleted SPA), and the repo chrome already shows its count via the star toggle — so `/` + `/:owner` is everywhere a repo list rendered. No backend change (`GET …/api/social` exists, 07 §7); no new deps. Links stay plain anchors (keyboard flow unchanged); `.muted`/emerald-link classes carry dark + light.
 - **FIXED (issue #124) — clone-menu protocol honesty + dead "git" block removal:** the #37 toggle labeled its first pill a hardcoded "HTTPS" while the command text showed the server's `clone_url` verbatim — on plain-http servers (or TLS-terminating proxies, where `baseURL` sees no `r.TLS` and advertises `http://`) the pill and the text disagreed. Decision: the honest rule is (a) — show exactly what the server advertises (that URL is known to work) and derive the pill label from its scheme (`lib/clone.js` `httpProtoLabel`: "HTTPS" for `https://`, "HTTP" otherwise), so pill and text always agree and the command always works. Upgrading `http→https` for display was rejected: the client cannot distinguish "http behind a TLS proxy" from "plain-http only", and on the latter the upgraded command is broken (verified live: `hub.example.com` advertises `http://`, `git clone http://…` works via the proxy's 301 to https — but a LAN `http://192.168.2.48:8080` box has no TLS to upgrade to). Toggle values become `http`/`ssh` ("http" = the HTTP(S) transport, label by scheme); SSH derivation and recipe pinning are unchanged. Also deletes the leftover pre-#37 `<div class="clone-recipe"><strong>git</strong>…` block that duplicated the command textbox below the recipes. No backend or SDK change; no new deps. Headless cover: `clone.test.js` gains the `httpProtoLabel` scheme-agreement cases. (Resolved by Forgejo #165: `baseURL` now honors `X-Forwarded-Proto` — proxied servers advertise `https://` — with `server.public_url` as the canonical override.)
 - **FIXED (issue #123) — settings left sidebar (+ WAL move):** the top pill menu becomes a left sidebar with two clear sections — the standard settings listing (scheduled, policy, config, access, CI tokens, webhooks, WAL) plus the Danger Zone in its own danger-styled section (red heading + red entry, active state included). WAL moves from the repo tab bar into the sidebar and renders inline (`Wal.jsx` unchanged — it already reads `useRepo()` itself); the `/wal` route is kept for old links and now highlights Settings (`lib/tabs.js` `wal → settings`). Narrower content column is handled per-tab: webhook add-row becomes URL-full-width + events/secret/button grid row, config publish message input grows (`flex-1 basis-48`), CI-token name input grows with a cap, policy dry-run N+button stay grouped, access add-row becomes a responsive grid, every data table scrolls (`overflow-x-auto` added where missing: tokens, dry-run, webhooks), danger-confirm input is `max-w-full`, and the WAL manifest/local pair gets its missing `grid` (was `data-table` + `md:grid-cols-2` with no `grid`, so the two-up never applied). Responsive: below `lg` the sidebar stacks above content with internally-scrolling section rows; nav semantics are `nav` + section `h3`s + native buttons with `aria-current="page"`, tabs deep-link via `#id`. No backend or SDK change; no new deps. Headless cover: `web/test/unit/settings-nav.test.js` (sections, WAL placement, id/label uniqueness, resolver + hash fallback) with `repo-tabs.test.js` updated for the `/wal → settings` highlight.
 - **FIXED (issue #133) — app-wide relative date design:** every timestamp renders through one shared `<DateTime>` (`web/src/components/DateTime.jsx`: `<time dateTime>` + hover `title`) backed by the headless-testable `web/src/lib/format.js` helpers. Three tiers — age < 1 day relative only ("just now" < 60 s, "N minute(s) ago" < 60 min, "N hour(s) ago" < 24 h), 1–30 days relative only ("N day(s) ago"; issue #312 moved the old " - {ordinal} of {Month}" suffix into the hover title), 31+ days "{Month} {ordinal}, {Year}"; the hover title is the user's-local wall time "YYYY-MM-DD HH:MM <zone>" (`fmtDateTitle`), never UTC-suffixed, prepended with "{Month} {ordinal} · " for timestamps in the 1–30-day window (e.g. "September 2nd · 2025-09-02 14:03 CDT" — the < 1 day tier needs no calendar date and the 31+ day tier already shows the full date, so both keep the plain wall-time title). Decisions: "month" is a fixed 31-day boundary (whole-day age ≤ 30 middle tier, ≥ 31 absolute — calendar months vary 28–31 days, which would flip the tier on unknowable days); "just now" covers sub-minute ages (the issue's examples start at minutes — a bare "0 minutes ago" must never render); future timestamps clamp to "just now" (clock skew / optimistic rows must never render "-3 minutes ago"); month names are fixed English (deterministic in every browser locale — only the hover title localizes); fallbacks match the old per-page formatters (falsy → "", unparseable → String(input)). Sweeps all previous `fmtDate`/`toLocaleString`/ISO-slice call sites (issues, pulls, commits, releases, checks, comments, WAL, settings incl. webhook deliveries, keys, orgs); `Repo.jsx`/`Org.jsx` per-page formatters deleted. Display-only — no backend, SDK, or data change; no new deps. Headless cover: `web/test/unit/dates.test.js` (tier boundaries, ordinals incl. 11/12/13, future clamp, fallbacks, title shape/zone, #312 1–30-day title prefix with 1/30/31-day boundary pins, `dateTimeAttr` normalization).
@@ -734,10 +860,228 @@ the effects are DOM refetches, not client caches.
   Stray close tags survive only for block containers, because HTML blocks end at blank lines — that is
   what keeps `<details>`/`<div>` spanning markdown balanced. **Deliberate deviations:** protocol-relative
   markdown links stay *rejected* by `sanitizeURL` (the codebase's one URL policy; they are "untouched" by
-  the resolver only because they never reach it), and raw SVG is dropped (the raw lane serves SVG as
-  text/plain to keep the same-origin XSS surface closed). Raw-lane content type now names passive media
-  (`image/png|jpeg|gif|webp|avif|bmp|x-icon`, `video/*`, `audio/*`) so `nosniff` pages can embed it; text
-  and SVG stay `text/plain`. Tests: `TestRenderMarkdownCtxRelativeURLs`, `…CtxSlashedRef`,
+  the resolver only because they never reach it), and raw SVG markup inside markdown is dropped (only an
+  `<img src=…svg?raw=1>` embed is allowed, and that lane serves the file as `image/svg+xml` under
+  `Content-Security-Policy: default-src 'none'; sandbox` + nosniff — an `<img>` renders it, a direct
+  navigation cannot run its script). Raw-lane content type now names passive media
+  (`image/png|jpeg|gif|webp|avif|bmp|x-icon`, `image/svg+xml`, `video/*`, `audio/*`) so `nosniff` pages
+  can embed it; every other type stays `text/plain`. Tests: `TestRenderMarkdownCtxRelativeURLs`, `…CtxSlashedRef`,
   `…CtxShortensFullRef`, `TestRenderMarkdownSanitizerNeuters`, `…SanitizerAllows`,
   `…SanitizerResolvesRelativeURLs`, `TestRenderMarkdownInlineRawHTML`, `TestRenderMarkdownLoomReadme`
   (golden fixture `testdata/loom-readme.md`), `TestRawContentType`.
+- **FIXED (web-parity audit, 2026-11-21) — settings gate mirrors the API, fork outcomes render, 390 px
+  tables scroll in place.** Four page-level corrections, no new dependencies, composition only.
+  (1) **Settings tabs:** General, Scheduled tasks and Mirror were `MinRead: read` while every write they
+  expose is admin-only (and the other seven tabs were already admin/triage), so an anonymous reader under
+  `anonymous_read` got live `Save` / `create mirror` forms and the Mirror panel could print a configured
+  upstream URL. All three are now `MinRead: admin`: the page answers the SAME 403 as the POSTs and the
+  other mutation tabs (a private repo stays 404 via the identity gate), the nav hides the entries, and
+  `TestSettingsRepoGuestTabsMirrorAPIGate` pins the guest matrix (never a body carrying the upstream
+  URL). Stricter-than-API is deliberate: the mirror GET is public, the editing surface is not. The
+  shell also probes repo existence through the registry the API uses (`settingsRepoAccess` →
+  `repoExists`), so an unknown repo answers **404** with the standard error page instead of 200 with
+  an inline "not found"; a registry error is 503.
+  (2) **Fork sync outcome:** `RepoDeps.SyncOutcome` (composition wires `forksync.Service.LastOutcome`)
+  lets the repo header render the LAST sidecar beside the Sync button — `up to date` /
+  `fast-forwarded` / `diverged` (the upstream message + an **Open pull request** link) / `sync failed`
+  — instead of only the POST's "started" flash. The new-PR form splits `head=<owner>/<repo>:<branch>`
+  on the colon (and still honours `from_repo` + `head=<branch>`), so the divergence link preselects the
+  fork AND its branch. (3) **390 px:** the Tags table card and the Release-detail assets/notes
+  sections/wrappers gained `min-w-0` AND the scroll wrappers became `relative`. Root cause was
+  two-part: the grid item's automatic min-width let the wrapper stretch to the table's content width,
+  and the header's `<span class="sr-only">Actions</span>` is absolutely positioned — with no positioned
+  ancestor its containing block was the page, so its static x (~578 px, the last column) kept
+  `documentElement.scrollWidth` wide even after the wrapper clipped. `relative` makes the wrapper the
+  containing block so the span is clipped by the scroll container. Both pages now assert
+  `document.documentElement.scrollWidth === clientWidth` at 390 (390/390) and hold at 1440.
+  (4) **Effective policy at 1440:** the Effect cell is long prose, and the `.overflow-x-auto .data-table
+  td { white-space: nowrap }` rule clipped it inside the card; the table opts into the new shared
+  `.data-table.wrap` rule (`white-space: normal`, declared after the nowrap rule) so the summary wraps
+  and fits. Tests: `internal/webui` chrome/form/settings contracts above plus rendered 1440/390 checks.
+- **FIXED (web re-audit round 2, 2026-11-21) — an unresolved role is no-access, not admin.** The
+  first audit fixed the anonymous reader but left the rank helper's fall-through: `settingsRoleRank`
+  answered **5 (admin)** for an empty or unknown role string, and `identity.Resolve` answers `""` for an
+  authenticated principal with no binding on a public repo. Reproduced on a real server: `guest@example.com`
+  (authenticated, `admin:false`, no repo role) got **200 with live forms on all ten settings tabs**, while
+  `POST /settings/general` correctly answered 403 and `GET /api/access` 403; the Mirror tab printed the
+  configured upstream URL. `settingsRoleRank` now ranks `""`/`none`/unknown as **0** — below every tab
+  floor — so every tab answers 403 (the private-repo 404 is unchanged, the visibility gate runs first),
+  and the redundant rank-0 → 404 branch in `settingsRepoAccess` is deleted (a read-visible repo with no
+  role is forbidden, not hidden). The same audit covered the other role comparisons: `collab.roleRank`,
+  `forms.formsRoleAtLeast` (map lookup) and the forms/parity write gates already fail closed at 0; the
+  only permissive default left is `settingsRepoAccess`'s `role := "admin"` when the identity seam is not
+  wired at all — there is no role to resolve there, so the (already-run) server read gate is the authority.
+  A triage viewer may read the Access tab but every access write is admin, so the tab now renders a
+  read-only visibility/bindings card (`SettingsAccess.CanEdit`, stamped from the page's admin verdict,
+  including the rejected-write restore path) instead of a Save form its POST would 403. Pinned by
+  `TestSettingsRoleMatrix` (7 principals — anonymous, authenticated no-role, read, triage, write,
+  maintain, admin — × all 11 tabs, asserting status and that a non-admin 200 carries no `hx-post` form,
+  mirror/upstream field, upstream URL, token/webhook/danger control), plus
+  `TestSettingsTriageAccessTabIsReadOnly` and `TestSettingsAdminViewUnchanged` (the admin row still
+  renders the very forms the matrix bans, so the assertions have teeth).
+- **NEW (foundations audit nits, 2026-11-21) — one primary CTA, shared list-row
+  anatomy, no stale htmx SSE extension.** (a) The masthead Clone is primary
+  only on pages without a body primary; `pageRepo` demotes it via
+  `repoPageOwnPrimary` (collab list/detail, settings, repo forms) and the
+  commit page demotes it when Create tag renders. (b) Issue and PR list rows
+  now share one anatomy (always-present state chip, label chips, author · age,
+  comment count); the pulls wire gained `comment_count` from the index card it
+  already reads. (c) `web/dist/htmx-ext-sse.js` (removed with D-WEB-14) can no
+  longer ship: `build:vendor` deletes it, `make web` and the Dockerfile assert
+  its absence, and `web/embed_test.go` walks the embedded dist in `go test`.
+  The `/setup` denied card is mode-aware (F1): token mode offers the
+  `POST /_auth/token` paste form when a `session_secret` exists, otherwise the
+  file/API recovery — never the OIDC-trio explanation on a token host — and
+  the inline submit is a secondary `.btn` so the header Login stays the page's
+  single amber action.
+- **FIXED (2026-11-21) — rendered markdown fills its card (the 72ch cap is
+  gone).** `.markdown-body` (`web/src/app.css`) carried `max-width: 72ch`, the
+  last carry-over of design proposal B's reading measure. Measured in
+  Chromium at 1440: the blob page card was 1120px and the body 641.32px
+  (72ch), so a README used ~57% of its card and its `align="center"` block
+  centred inside that narrow column — the screenshot-reported defect. The cap
+  is removed, so every markdown surface fills its container: blob Preview
+  (README), issue/PR bodies and comments, release notes, commit bodies, owner
+  bios, org bios, doc tabs and the composer preview. The base rule keeps no
+  `max-width`/`width`/auto-margin; containment stays per-media (`img
+  max-width:100% height:auto`, `table`/`pre` `overflow-x:auto`), so nothing
+  widens the page. Rendered proof after the fix: body 1118px in a 1120px card
+  at 1440, paragraph 1086px, 1600px image scaled to 1086px; at 390px body
+  356px in a 358px card, image 324px, `scrollWidth === clientWidth` on both.
+  Pinned by `web/test/unit/markdown-width.test.js` (no measure cap on the
+  class, the containment rules, and a template census that fails if a
+  `markdown-body` surface carries a width utility). Pages that legitimately
+  stay narrower do so at the CARD level, not the body: the issue/PR
+  conversation main column (848px beside the 16rem details sidebar) and
+  `max-w-2xl` form/release cards.
+- **NEW (2026-11-21) — struct-slice rows on `/setup` (WP9 G1/G3/G4).** A schema key
+  whose value is a struct slice (`server.auth.tokens` → `[]StaticToken`,
+  `bundles.strategy` → `[]BundleStrategy`) now renders as a repeating-row editor
+  instead of an empty text input: one `.setup-rows` fieldset per element (cells for
+  the type's own toml fields), plus a blank "new row" fieldset, plus a per-row
+  "remove this row" checkbox — add and revoke both work without JS. Static auth
+  tokens therefore have a real editor in `/setup` (principal, `token_env`, write,
+  admin) and bundle strategies likewise (name, kind, base, schedule, keep,
+  backfill_max, chain, filter, refs, min_commits). Secret cells render
+  `setup.SecretMask` in a `type="password"` input and are overwrite-only: the mask
+  comes back and keeps the stored value by row identity (`#<i>.__base`, so deleting
+  row 0 cannot move its secret to row 1), while a typed value rotates it and is
+  never echoed — including on the rejected-form re-render, which rebuilds the typed
+  rows through the same cells. The schema projection lives in `cmd/spindle`'s
+  `setupViewFn` (`setup.RenderRows`), the row controls in
+  `partials/settings_setup.html` (`Control == "rows"`), and the parser in
+  `internal/setup/rows.go`; the whole-schema `TestFormValuesWholeSchemaRoundTrip`
+  and the page-level `TestSetupPageZeroEditFormSavesByteIdentical` (GET `/setup` →
+  scrape → POST unchanged → byte-identical file) are the gates. A validation error
+  now marks the row its message names (`setup.Validate` fills `Error.Key`) and a
+  keyless error prints in the banner only — it is no longer copied onto every row.
+- **NEW (2026-11-21, WP6.2) — org Webhooks tab.** `/{owner}/settings?tab=webhooks` (org-owner
+  floor, `settingsOrgTabs` `MinRead: admin`) renders the shared
+  `templates/partials/settings_webhooks.html` panel — the same canonical markup as
+  `/{owner}/{name}/settings/webhooks`: create form (URL, events, write-only secret, one
+  `.primary`), per-hook enable/disable, secret rotation, ping, recent deliveries with
+  status/`duration_ms` and a `redeliver` control only on rows whose body the ring retained, and
+  delete inside a `<details>` with the typed-id confirmation island (`data-danger-expected`);
+  the server re-checks `confirm == id` before the service call. Repo and org differ only in form
+  plumbing (path-scoped `webhook_action` vs one POST with hidden `org_action` + `id`). The page
+  seam is `SettingsDeps.OrgWebhookWrite` (composition binds the notify service and re-checks
+  `CheckOrgOwner`); a nil binding renders the honest "not wired" card. Non-owners never see the
+  nav entry and the direct URL answers 403 — the page mirrors the API gate rather than inventing
+  one.
+- **NEW (2026-11-21, WP9 G2) — org settings writes are bound.** `wireSettingsPages` now binds
+  `SettingsDeps.OrgWrite` to `orgWriteFn` (identity's `PutOrg`/avatar/member/team/invite/delete
+  verbs), re-checking `CheckOrgOwner` exactly like the JSON twins; host admins pass. The profile
+  tab gained avatar removal, the team card gained rename/description + per-member remove, and
+  delete redirects home. `webui.SettingsBindings()` exposes the installed seam to the composition
+  guard `TestSettingsWiringBindsEveryRenderedSeam`, which fails when any rendered seam is nil
+  (the previous failure mode was a rendered form whose every submit 503'd).
+- **NEW (WP9 repo-settings parity, 2026-11-21) — every repo settings tab edits the wire path it
+  protects.** Five page contracts, no new endpoint and no new dependency.
+  (1) **Scheduled tasks** is no longer read-only: the four tuning sections (`bundles`, `maintenance`,
+  `compaction`, `upstream`) render as structured fieldsets over the SAME stored document the config tab
+  publishes — an "Override host config" checkbox per section (checked iff the stored document carries
+  the section), stored values when checked and merged effective values when not; unchecked sections are
+  deleted from the published document, and a section's values are shown from `config.RepoSettings` (so
+  a stored `[bundles]` with a key absent renders that key's zero, exactly what the whole-section merge
+  means). Bundle strategies use the repeated-row protocol established for `/setup`
+  (`K#<i>.<tomlname>`, `K#<i>.__base`, `K#<i>.__remove`, one blank add row): add/edit/remove is one
+  code path (`settings_scheduled.go`). Coercion is the config types' own `UnmarshalText`
+  (`ByteSize`/`Duration`) plus `strconv` for ints; the re-encoded document then goes through
+  `config.ParseRepoSettings` + `ValidateAgainst` + `api.PublishSettings` (the JSON PUT's
+  parse/publish path plus the `/settings/validate` rule), so a rejected value writes nothing
+  and re-renders with the posted values and the offending cell marked.
+  `api.SettingsDocument` exposes the stored + effective projections to both the page and the API so
+  they cannot drift. (2) **Webhooks** gain a per-hook `edit` disclosure: one form for URL/events/active
+  through `notify.PatchHook` (the PATCH route's service call; the secret is never in it) and a separate
+  first-class **Rotate signing secret** form (`webhook-rotate`, blank is a 422, not a silent keep).
+  (3) **Push policy** gains a typed-confirm **Remove policy** card (`DELETE …/api/policy` semantics
+  through `api.DeletePolicy`) and an emptied editor Save is removal instead of a 400 — `{}` never was a
+  policy document. (4) **WAL**: the settings tab renders the WAL page's facts plus the shared Ops card
+  (`partials/repo_wal_ops.html`); every op is a form POSTing the existing `…/api/ops/{op}` stream
+  (AuthWrite) with its params. The new `islands/ops.js` reads that POST response as an SSE fetch stream
+  (reusing `sse.js`'s frame parser), appends notices/progress to `[data-op-log]` and renders the
+  terminal TaskRecord into `[data-op-task]`; it deliberately does not auto-retry (a retried POST after
+  a terminal frame would start a new op) and reports a lost stream honestly. (5) **Gates**: Scheduled
+  and Webhooks stay `MinRead: admin` (their writes are admin-only), the WAL tab stays `read` because
+  the panel is a read surface, and the run forms render only for a write role — the API re-checks
+  AuthWrite. Tests: `settings_scheduled_test.go` (rendered-form round trip, per-section uncheck,
+  coercion/validation failures writing nothing, row add/edit/remove, webhook edit/rotate, policy
+  removal + emptied editor, WAL panel reader/writer matrix) and `web/test/unit/ops.test.js`.
+- **NEW (2026-11-21, WP9 G18) — `/setup` groups Essentials/Advanced and renders enums as selects.**
+  The page no longer prints all 145 keys in one flat list: `settingsPrepareSetup` partitions each
+  schema card's rows by the `Advanced` flag of the single display-metadata table
+  (`settingsFieldMeta` — no second list), the essentials render open and the rest inside a native
+  `<details class="setup-advanced">` (the style-guideline §7 collapse idiom, #168's contract now
+  server-rendered). Collapsed rows stay mounted, so the zero-edit payload and the byte-identical
+  save are unchanged (`TestSetupPageZeroEditFormSavesByteIdentical` asserts every control inside a
+  closed group is in the scraped payload). A validation error on an Advanced row opens that
+  section's disclosure (`AdvancedHasErrors`), so a rejected key is never hidden behind a toggle.
+  The free-text enum keys (`server.auth.mode`, `store.backend`, `cache.mode`,
+  `bundles.serve_via`, `compaction.engine`, `git.upload_pack_engine`, `telemetry.log_format`) are
+  `<select>`s over `internal/setup`'s one value table (`EnumValues`, carried on `Field.Enum` and
+  `DisplayType: "enum"`; both `json:"-"`, so the frozen `/api/v1/setup` shape does not move). The
+  select always represents stored truth: an empty value gets an `(unset)` row and an out-of-set
+  value a `current: …` row. Three dead `settingsFieldMeta` entries
+  (`telemetry.metrics_listen`, `git.max_pack_bytes`, `upstream.allow_import` — keys the schema no
+  longer has) are deleted, and a test now fails if any metadata key is not a schema key. Cover:
+  `TestSchemaEnumsAreTheRenderedValueSets`, `TestSettingsFieldMetaNamesOnlyRealSchemaKeys`,
+  `TestSettingsSetupPartitionsAdvancedFromMeta`, `TestSettingsSetupOptions`,
+  `TestSetupPageRejectedAdvancedKeyOpensItsGroup` plus the extended zero-edit gate.
+- **NEW (2026-11-21, org invitation links) — the org Invitations tab gets the repo Access tab's
+  one-shot link treatment.** `POST /{org}/settings` with `org_action=invite` answers in the page
+  body (never a redirect) with the human accept link (`/invitations?id=…&token=…`,
+  `webui.InvitePageURL`, the same helper the repo create uses) and adds the just-created row to the
+  pending table, so its copy control sits where the operator expects; a later read redacts the
+  token by contract (`orgViewFn` never sets `AcceptURL`) and the same row renders the masked
+  `token ••••••••` marker. The share card and the per-row copy cell are one shared partial
+  (`partials/settings_invite.html`, `settings-invite-share` / `settings-invite-accept`) consumed by
+  both scopes. The tab is `MinRead: admin` exactly like the API's `CheckOrgOwner` collection route
+  (it was previously readable by any member), and the org view skips the list read for a non-owner.
+  Cancel keeps the existing delete-on-transition rule: the copied link answers 409 afterwards.
+- **FIXED (round-3 settings audit, 2026-11-21) — a policy dry-run keeps the stored-policy facts.**
+  The dry-run branch synthesised its `SettingsPolicy` panel without `Exists`, so after a dry run the
+  Remove card claimed "No policy document is stored" although the document was live and the typed-confirm
+  removal disappeared until reload. The seam now reads the stored document's version (`api.PolicyRaw`)
+  into `Exists` while still evaluating the POSTED text, so the verdict and the stored facts render
+  together and the dry run changes nothing. Pinned by `TestSettingsSeamsPolicyRawSaveAndDryRun`
+  (dry-run body must still carry the remove card + `data-danger-expected`, and must not say "No policy
+  document is stored").
+- **FIXED (round-3 settings audit, 2026-11-21) — the non-admin Access page renders ONE read-only card.**
+  The read-only branch opened `<section data-access-readonly>` and never closed it, so the explanatory
+  card nested inside it and "Visibility & role bindings" rendered twice for a triage/write principal.
+  The section is closed before a separate **Changing access** card (no duplicate heading, no nesting);
+  the page gate is unchanged (Access is `MinRead: triage`; a `read` principal still gets the API's 403).
+  Pinned by `TestSettingsRepoAccessReadOnlyCardIsNotNested` (exactly one `data-access-readonly` section,
+  one heading, stored bindings visible, no admin form).
+- **FIXED (round-3 settings audit, 2026-11-21) — `/setup` says what Save does and keeps a backup.**
+  Next to the Validate/Save pair the page states that Save writes the full canonical document (comments
+  in a hand-written file are not preserved by the TOML encoder) and that the first save rewriting an
+  existing file keeps it as `spindle.toml.bak-<utc>`; the post-save banner names the backup actually
+  written. Copy and backup semantics are `11_config_cli.md` §3.7 / D6's backup amendment.
+  Pinned by `TestSetupPageCanonicalSaveKeepsOneBackup` (rendered copy, one primary, backup named).
+- **FIXED (round-3 settings audit, 2026-11-21) — a coercion rejection marks its row.**
+  `/setup`'s rejected-submit path now attaches a keyed `setup.Coerce` failure to the same row a
+  `config.Validate` failure marks (struct-slice cell keys map onto their row editor by the bracket
+  prefix), so the error line renders in the row and an Advanced group opens; the errors table's KEY
+  cell is no longer empty. Pinned by `TestSetupPageCoercionErrorMarksItsRow` (every field type) and
+  `TestSetupPageUnknownKeyCannotPassSilently`.

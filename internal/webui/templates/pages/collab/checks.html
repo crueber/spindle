@@ -10,6 +10,8 @@
           <option value="pending" {{if eq .State "pending"}}selected{{end}}>pending</option>
           <option value="success" {{if eq .State "success"}}selected{{end}}>success</option>
           <option value="failure" {{if eq .State "failure"}}selected{{end}}>failure</option>
+          <option value="cancelled" {{if eq .State "cancelled"}}selected{{end}}>cancelled</option>
+          <option value="skipped" {{if eq .State "skipped"}}selected{{end}}>skipped</option>
           <option value="error" {{if eq .State "error"}}selected{{end}}>error</option>
         </select>
         <input class="input w-44" name="context" value="{{.Context}}" placeholder="filter by context…" aria-label="filter by context">

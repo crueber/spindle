@@ -9,6 +9,7 @@ package identity
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"sync"
 	"testing"
@@ -229,4 +230,52 @@ func TestResolveUsernameConcurrentFirstLogin(t *testing.T) {
 			t.Fatalf("iter %d split identity: %q vs %q", i, got[0], got[1])
 		}
 	}
+}
+
+func TestUserExists(t *testing.T) {
+	s := testService()
+	ctx := context.Background()
+	if ok, err := s.UserExists(ctx, "nobody@example.com"); err != nil || ok {
+		t.Fatalf("unknown user = %v, %v", ok, err)
+	}
+	if ok, err := s.UserExists(ctx, "bad!!principal"); err != nil || ok {
+		t.Fatalf("invalid username = %v, %v", ok, err)
+	}
+	// The binding doc is what makes a username claimed (the invite/role
+	// paths' own "is this a real user" probe).
+	if _, err := s.EnsureProfile(ctx, "erin@example.com"); err != nil {
+		t.Fatal(err)
+	}
+	// EnsureProfile creates profile.json only; UserExists reads user.json,
+	// so record the binding the way login does.
+	if _, err := store.PutBytes(ctx, s.Store, UserKey("erin"), []byte(`{"username":"erin","email":"erin@example.com"}`),
+		store.PutOptions{Mode: store.PutOverwrite, ContentType: "application/json"}); err != nil {
+		t.Fatal(err)
+	}
+	if ok, err := s.UserExists(ctx, "erin"); err != nil || !ok {
+		t.Fatalf("claimed user = %v, %v", ok, err)
+	}
+	// A lazily created profile (first authenticated access) is also a claim
+	// even without the OIDC username binding (token-mode principals).
+	if ok, err := s.UserExists(ctx, "frank"); err != nil || ok {
+		t.Fatalf("profile-less user = %v, %v", ok, err)
+	}
+	if _, err := s.EnsureProfile(ctx, "frank"); err != nil {
+		t.Fatal(err)
+	}
+	if ok, err := s.UserExists(ctx, "frank"); err != nil || !ok {
+		t.Fatalf("profile-only user = %v, %v", ok, err)
+	}
+	// A store fault is surfaced (the page answers 503, never a false 404).
+	bad := New(headErrStore{ObjectStore: s.Store}, config.Defaults())
+	if _, err := bad.UserExists(ctx, "erin"); err == nil {
+		t.Fatal("UserExists must surface a store fault")
+	}
+}
+
+// headErrStore fails the existence probe only.
+type headErrStore struct{ store.ObjectStore }
+
+func (headErrStore) Head(context.Context, string) (*store.ObjectMeta, error) {
+	return nil, errors.New("head down")
 }

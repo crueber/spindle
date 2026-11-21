@@ -24,6 +24,7 @@ import { attachReviews } from "./reviews.js";
 import { attachChecks } from "./checks.js";
 import { attachNotifications, attachNotifyRepo } from "./notifications.js";
 import { attachReleases } from "./releases.js";
+import { attachPackages } from "./packages.js";
 import { attachTags } from "./tags.js";
 import { attachSocial, attachSocialTop } from "./social.js";
 import { attachOrgs } from "./orgs.js";
@@ -217,6 +218,7 @@ export class ReposClient {
     attachChecks(r);
     attachNotifyRepo(r);
     attachReleases(r);
+    attachPackages(r);
     attachTags(r);
     attachSocial(r);
     attachMirror(r);

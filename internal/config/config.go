@@ -83,16 +83,21 @@ type Server struct {
 	// granularity. Default 10m; non-positive falls back to the
 	// default. Must comfortably exceed ServeSyncTimeout (the wait bound
 	// is per request; this bound is per body of work).
-	ServeMaterializeTimeout Duration  `toml:"serve_materialize_timeout"`
-	MaxPushBytes            ByteSize  `toml:"max_push_bytes"`
-	MaxTreeLog              int       `toml:"max_tree_log"` // per-entry tree-date walk cap (§9.4; default 200)
-	Roles                   []string  `toml:"roles"`        // serve | maintain | events; empty = all
-	AutoCreateOnPush        bool      `toml:"auto_create_on_push"`
-	AccelRedirect           bool      `toml:"accel_redirect"`
-	PublicURL               string    `toml:"public_url"`
-	CorsOrigins             []string  `toml:"cors_origins"`
-	Auth                    Auth      `toml:"auth"`
-	SSH                     ServerSSH `toml:"ssh"`
+	ServeMaterializeTimeout Duration `toml:"serve_materialize_timeout"`
+	MaxPushBytes            ByteSize `toml:"max_push_bytes"`
+	MaxTreeLog              int      `toml:"max_tree_log"` // per-entry tree-date walk cap (§9.4; default 200)
+	Roles                   []string `toml:"roles"`        // serve | maintain | events; empty = all
+	AutoCreateOnPush        bool     `toml:"auto_create_on_push"`
+	AccelRedirect           bool     `toml:"accel_redirect"`
+	PublicURL               string   `toml:"public_url"`
+	CorsOrigins             []string `toml:"cors_origins"`
+	// SecretsKey is the dedicated at-rest/attempt-token key for Threads
+	// (15_threads.md §5.3). When empty, server.auth.session_secret is used;
+	// when both are empty, repository secrets are unavailable (503) and
+	// attempt tokens are process-local.
+	SecretsKey string    `toml:"secrets_key"`
+	Auth       Auth      `toml:"auth"`
+	SSH        ServerSSH `toml:"ssh"`
 }
 
 // --- Server SSH (17_ssh.md) ---
@@ -285,9 +290,28 @@ type Attachments struct {
 // honours. Additive section (14_extensibility.md §14.12 — existing keys never
 // change meaning).
 type Packages struct {
-	MaxBlobBytes     ByteSize `toml:"max_blob_bytes"`     // one blob object (default 2 GiB)
+	MaxBlobBytes     ByteSize `toml:"max_blob_bytes"`     // one blob object (default 10 GiB, GHCR parity)
 	MaxManifestBytes ByteSize `toml:"max_manifest_bytes"` // one manifest body (default 4 MiB)
 	UploadTTL        Duration `toml:"upload_ttl"`         // abandoned upload staging (default 24h)
+}
+
+// Threads bounds the CI surface (docs/features/15_threads.md §8): terminal-run
+// retention, the first-time-fork approval gate and the default job-token
+// permissions. Additive section (14_extensibility.md §14.12).
+type Threads struct {
+	// Retention is the terminal-run window: a finished run (with its job
+	// records, log frames and queue entries) older than this is deleted by the
+	// maintainer's `threads-gc` pass. Default 720h (30 days); non-positive
+	// falls back to the default (there is no "keep forever" spelling).
+	Retention Duration `toml:"retention"`
+	// ApproveFirstTimeForks holds a fork pull request from an author with no
+	// merged PR in the repository in `pending_approval` until a maintainer
+	// approves it (15 §5.2). Default true.
+	ApproveFirstTimeForks bool `toml:"approve_first_time_forks"`
+	// DefaultPermissions is the job token's `contents` level when a workflow
+	// declares no `permissions:` ("read" | "write"; default read). A fork run
+	// is always read regardless.
+	DefaultPermissions string `toml:"default_permissions"`
 }
 
 // Import bounds the repository-import surface (docs/features/10 §6:
@@ -324,6 +348,7 @@ type Config struct {
 	Import      Import      `toml:"import"`
 	Attachments Attachments `toml:"attachments"`
 	Packages    Packages    `toml:"packages"`
+	Threads     Threads     `toml:"threads"`
 
 	// DataDir is the zero-config root (divergence D5): --data-dir / SPINDLE_DATA_DIR,
 	// default ~/.local/share/spindle. Holds store/, cache/, and the saved spindle.toml.
@@ -404,6 +429,11 @@ func Defaults() *Config {
 			FsckInterval:   Duration(7 * 24 * time.Hour),
 			FollowInterval: Duration(30 * time.Second),
 		},
+		Threads: Threads{
+			Retention:             Duration(30 * 24 * time.Hour),
+			ApproveFirstTimeForks: true,
+			DefaultPermissions:    "read",
+		},
 		Placement: Placement{Serve: []string{"*"}, Maintain: []string{"*"}},
 		Compaction: Compaction{
 			Enabled:             true,
@@ -461,7 +491,7 @@ func Defaults() *Config {
 			MaxImageBytes: 8 << 20,
 		},
 		Packages: Packages{
-			MaxBlobBytes:     2 << 30,
+			MaxBlobBytes:     10 << 30,
 			MaxManifestBytes: 4 << 20,
 			UploadTTL:        Duration(24 * time.Hour),
 		},

@@ -736,7 +736,12 @@ git log <commit-sha> --format=SPINDLETREE\ %H\ %cI --name-status --no-renames --
    resolved path → `404` "blob requires a path". Then walk `path` to the blob sha (must be `100644|100755|120000`; else `404`).
 2. `size` via `git cat-file -s <sha>`; if `size > 2 MiB` → `{"ref","sha","path","name","size","too_large":true}` (no contents).
 3. Else `git cat-file blob <sha>` capped at 2 MiB+1 read; NUL or invalid UTF-8 → `"binary":true`; else `"contents":"<utf-8 text>"`.
-4. `?raw` bypasses JSON: `200 text/plain; charset=utf-8` full raw bytes (the cap is a JSON-shape rule). Same caching rules as the JSON form.
+4. `?raw` bypasses JSON: full raw bytes (the cap is a JSON-shape rule). Same caching rules as the JSON form. The
+   `Content-Type` is the real type for passive media (PNG/JPEG/GIF/WebP/AVIF/BMP/ICO, MP4/WebM/Ogg video,
+   MP3/WAV/Ogg/M4A audio); **SVG is served as `image/svg+xml` with `Content-Security-Policy: default-src
+   'none'; sandbox` and `X-Content-Type-Options: nosniff`** — an `<img>` embed renders, while a direct
+   navigation cannot execute script the file carries. Everything else is `text/plain; charset=utf-8`
+   (never displayed under nosniff).
 
 ### 9.6 Commits — `GET …/commits?ref=&path=&skip=&n=`
 
@@ -841,7 +846,9 @@ so the UI can guide instead of traying without parsing prose.
 - `PUT …/policy` (require_admin) → body = policy JSON; validate at load (§14.4 rules: unknown keys inside
   rule/match/effect are parse errors; `^` exclusions refused on union families; disjoint-bypass protect
   load check). Invalid → `400` with a plain-text reason list. Valid → CAS-write `repos/<o>/<r>/policy.json`.
-- `DELETE …/policy` (require_admin) → back to allow-all (`204`).
+- `DELETE …/policy` (require_admin) → back to allow-all (`204`). This is also the page's **Remove
+  policy** control (typed confirmation) and the behaviour of saving an emptied policy editor
+  (`PUT` with a blank body stays a `400`; the page never sends one).
 - `POST …/policy/validate` → parse the body (or the stored policy when body empty) →
   `{ok, errors[], rules, groups, protect}` where `protect` = the compiled protect-rule summary.
 - `POST …/policy/dry-run?last=N` → evaluate the given body (else the stored policy) against the **last N
@@ -850,6 +857,10 @@ so the UI can guide instead of traying without parsing prose.
   wire triple cannot express it). No mutation; the dry-run never enforces.
 
 ## 11. Settings endpoints (D24, §15.2)
+
+The repo Settings → Scheduled tab edits `[bundles]`/`[maintenance]`/`[compaction]`/`[upstream]` as
+structured fields and publishes through exactly the `PUT` below (one validation path); the raw TOML
+editor remains available for everything else.
 
 - `GET …/settings` → `{revision, author, updated_at, message, toml}` (revision `0` = none ever published).
   `toml` is the raw per-repo TOML body as published.
@@ -1418,3 +1429,14 @@ listings (§8), never from the status code. Nil `Access` → legacy flag-only ga
   FNV suffix (the `~m` precedent) so outcome-only changes bust the
   mutable-collab revalidation. Independent of the pull projection:
   either, both, or neither may render.
+- **NEW (foundations audit F4, 2026-11-21) — the import form never echoes the
+  source token.** `POST /api/v1/repos/imports` accepts a one-shot `token`
+  (per-request child env; never stored, never logged) and the page twin
+  (`POST /import`) uses the same body validation. A rejected page submit now
+  drops the submitted value before rendering (`formsImportData.scrubSecrets`
+  runs on every failure/terminal render, and the template has no `value=` for
+  the field): the retry form keeps every other input — source, owner, name,
+  refs, format — and renders the token field EMPTY. `TestFormsImportValidation
+  FailureNeverEchoesToken` asserts a failed response contains no submitted
+  token. Setup secrets already behaved this way (mask, overwrite-only); this
+  closes the one page that echoed a credential.

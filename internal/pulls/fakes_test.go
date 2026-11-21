@@ -618,6 +618,22 @@ func (e *testEnv) notifies() []NotifyEvent {
 	return append([]NotifyEvent(nil), e.notify...)
 }
 
+// markMergedPR records the merge outcome through the narrow updater (the
+// merge task's owned-delta write) — tests that only need the flag use it
+// instead of a whole-doc save, which a concurrent writer could 412.
+func markMergedPR(t *testing.T, e *testEnv, owner, repo string, num int) {
+	t.Helper()
+	if _, err := e.svc.updatePR(ctx(), owner, repo, num, func(cur *PRDoc) (bool, error) {
+		if cur.Merged {
+			return false, nil
+		}
+		cur.Merged = true
+		return true, nil
+	}); err != nil {
+		t.Fatalf("mark merged %d: %v", num, err)
+	}
+}
+
 // failGet fails subsequent Gets of key with err (fault injection without
 // swapping the Service's store — safe under background passes).
 func (e *testEnv) failGet(key string, err error) {

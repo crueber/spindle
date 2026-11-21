@@ -9,16 +9,11 @@ import (
 // thread state, not a one-way latch); reopening a closed-but-unmerged PR
 // restores commenting; merged PRs are terminal (reopen refused 409).
 
+// markMerged594 stamps the merged flag through the narrow updater (the merge
+// task's owned-delta write).
 func markMerged594(t *testing.T, e *testEnv, owner, repo string, num int) {
 	t.Helper()
-	pr, ver, err := e.svc.loadPR(ctx(), owner, repo, num)
-	if err != nil || pr == nil {
-		t.Fatalf("loadPR: %v", err)
-	}
-	pr.Merged = true
-	if err := e.svc.savePR(ctx(), owner, repo, pr, ver); err != nil {
-		t.Fatalf("savePR: %v", err)
-	}
+	markMergedPR(t, e, owner, repo, num)
 }
 
 func mustCommentLocked(t *testing.T, e *testEnv, num int) {

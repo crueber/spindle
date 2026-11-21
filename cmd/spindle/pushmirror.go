@@ -106,11 +106,12 @@ func chainPushMirror(srv *server.Server, h *pushmirror.Handler) {
 // service: after a successful client push lands, the service probes the
 // config sidecar and fires an async sync when configured. Nil service →
 // nil hook (no fan-out). The server never imports the feature (law 8).
-func pushMirrorOnPushOf(svc *pushmirror.Service) func(id git.RepoId, refs []server.PushedRef) {
+// byJob (a Threads job-token push) still mirrors: a mirror is not a workflow.
+func pushMirrorOnPushOf(svc *pushmirror.Service) func(id git.RepoId, refs []server.PushedRef, byJob bool) {
 	if svc == nil {
 		return nil
 	}
-	return func(id git.RepoId, refs []server.PushedRef) {
+	return func(id git.RepoId, refs []server.PushedRef, _ bool) {
 		svc.EnqueueOnPush(id.Owner, id.Name)
 	}
 }
@@ -118,7 +119,7 @@ func pushMirrorOnPushOf(svc *pushmirror.Service) func(id git.RepoId, refs []serv
 // pushMirrorHookOf resolves the OnPush hook from the collab wiring (nil
 // collab/service → nil hook — setup-only and bare instances fan out
 // nothing).
-func pushMirrorHookOf(c *collabWiring) func(id git.RepoId, refs []server.PushedRef) {
+func pushMirrorHookOf(c *collabWiring) func(id git.RepoId, refs []server.PushedRef, byJob bool) {
 	if c == nil || c.pushMirrorSvc == nil {
 		return nil
 	}

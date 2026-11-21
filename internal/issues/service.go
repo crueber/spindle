@@ -132,11 +132,22 @@ func (s *Service) checkAssignees(ctx context.Context, owner, repo string, names 
 
 // --- create ------------------------------------------------------------------
 
+// IssueMeta is the optional metadata an issue create may carry (§7). It is
+// validated BEFORE a number is allocated, so a rejected create leaves no
+// thread, no counter increment and no event behind — `spindle issue create
+// --label` is one request with one outcome.
+type IssueMeta struct {
+	Labels    []string
+	Assignees []string
+	Milestone *string
+}
+
 // CreateIssue allocates a number (P2), Creates the thread header, Creates
 // the opened event, parses #N refs at write time (§6), updates the index,
 // and emits subscribed/mentioned notifications (§10). Auth: read
-// (authenticated) — any principal passing the read gate.
-func (s *Service) CreateIssue(ctx context.Context, owner, repo string, actor auth.Principal, title, body string) (*Thread, *Event, error) {
+// (authenticated) — any principal passing the read gate; metadata is the
+// same triage gate the PATCH uses, enforced before the write.
+func (s *Service) CreateIssue(ctx context.Context, owner, repo string, actor auth.Principal, title, body string, meta *IssueMeta) (*Thread, *Event, error) {
 	if err := requireAuthenticated(actor); err != nil {
 		return nil, nil, err
 	}
@@ -152,6 +163,10 @@ func (s *Service) CreateIssue(ctx context.Context, owner, repo string, actor aut
 			return nil, nil, err
 		}
 	}
+	labels, assignees, milestone, err := s.resolveIssueMeta(ctx, owner, repo, actor, meta)
+	if err != nil {
+		return nil, nil, err
+	}
 	num, err := s.allocNum(ctx, owner, repo)
 	if err != nil {
 		return nil, nil, err
@@ -160,7 +175,7 @@ func (s *Service) CreateIssue(ctx context.Context, owner, repo string, actor aut
 	th := &Thread{
 		Num: num, Kind: "issue", Title: t, State: StateOpen,
 		Author: normPrincipal(actor.Name), CreatedAt: now, UpdatedAt: now,
-		Labels: []string{}, Assignees: []string{},
+		Labels: labels, Assignees: assignees, Milestone: milestone,
 		Participants: []string{normPrincipal(actor.Name)},
 		NextEventSeq: 1, CommentCount: 0,
 		ReactionSummary: map[string]map[string]int{}, Version: 1,
@@ -177,17 +192,76 @@ func (s *Service) CreateIssue(ctx context.Context, owner, repo string, actor aut
 		return nil, nil, err
 	}
 	s.updateIndex(ctx, owner, repo, cardOf(th))
+	if milestone != nil {
+		// The issue is born open, so it joins the milestone's open bucket.
+		s.moveMilestone(ctx, owner, repo, StateOpen, nil, milestone)
+	}
 	// Opened-body refs source from the thread itself; comment bodies
 	// source from their event seq.
 	s.writeRefs(ctx, owner, repo, num, -1, normPrincipal(actor.Name), body)
 	s.emitSubscribed(ctx, owner, repo, th, normPrincipal(actor.Name), "opened")
 	s.emitMentioned(ctx, owner, repo, num, normPrincipal(actor.Name), body)
+	for _, a := range assignees {
+		s.emit(ctx, NotifyEvent{Repo: repoName(owner, repo), Class: "assigned",
+			Actor: normPrincipal(actor.Name), IssueNum: num, Recipients: []string{a}})
+	}
 	s.stream(ctx, StreamEvent{Name: "issue", Repo: repoName(owner, repo), IssueNum: num, Seq: ev.Seq})
 	nt, _, _ := s.loadThread(ctx, owner, repo, num)
 	if nt != nil {
 		th = nt
 	}
 	return th, ev, nil
+}
+
+// resolveIssueMeta validates the optional create metadata and returns the
+// canonical values to store (labels []/assignees [] never nil, milestone the
+// stored id). Every check runs before the caller allocates a number.
+func (s *Service) resolveIssueMeta(ctx context.Context, owner, repo string, actor auth.Principal, meta *IssueMeta) (labels, assignees []string, milestone *string, err error) {
+	labels, assignees = []string{}, []string{}
+	if meta == nil || (len(meta.Labels) == 0 && len(meta.Assignees) == 0 && meta.Milestone == nil) {
+		return labels, assignees, nil, nil
+	}
+	// Metadata at create is the same privilege as PATCHing it (§7).
+	if rerr := s.requireRole(ctx, owner, repo, actor, string(identity.RoleTriage)); rerr != nil {
+		return nil, nil, nil, rerr
+	}
+	if len(meta.Labels) > 0 {
+		ls, _, lerr := s.loadLabels(ctx, owner, repo)
+		if lerr != nil {
+			return nil, nil, nil, lerr
+		}
+		for _, n := range meta.Labels {
+			ln, verr := validateLabelName(n)
+			if verr != nil {
+				return nil, nil, nil, verr
+			}
+			found := findLabel(ls, ln)
+			if found == nil {
+				return nil, nil, nil, fmt.Errorf("%w: unknown label %q", ErrInvalid, n)
+			}
+			labels = append(labels, found.Name)
+		}
+		labels = uniqSorted(labels)
+	}
+	if len(meta.Assignees) > 0 {
+		as, aerr := s.checkAssignees(ctx, owner, repo, meta.Assignees)
+		if aerr != nil {
+			return nil, nil, nil, aerr
+		}
+		assignees = as
+	}
+	if meta.Milestone != nil {
+		id := strings.ToLower(strings.TrimSpace(*meta.Milestone))
+		m, _, merr := s.loadMilestone(ctx, owner, repo, id)
+		if merr != nil {
+			return nil, nil, nil, merr
+		}
+		if m == nil {
+			return nil, nil, nil, fmt.Errorf("%w: unknown milestone %q", ErrInvalid, *meta.Milestone)
+		}
+		milestone = &m.ID
+	}
+	return labels, assignees, milestone, nil
 }
 
 // --- comment -----------------------------------------------------------------

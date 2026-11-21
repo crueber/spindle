@@ -160,6 +160,15 @@ func (s *Server) SSHReceivePack(ctx context.Context, id git.RepoId, sp sshd.Prin
 
 	req, packReader, perr := s.layer.ParsePushRequestStream(repo, lr)
 	if perr != nil {
+		// A shallow clone cannot push: surface the cause and the remedy on
+		// stderr (the session handler prints it), not a generic protocol
+		// error.
+		if errors.Is(perr, git.ErrShallowPush) {
+			s.log.Warn("push refused: shallow clone cannot push",
+				"repo", id.String(), "principal", sp.Name,
+				"remedy", "fetch the full history; Threads checkout needs `with: fetch-depth: 0`")
+			return errors.New(git.ShallowPushReason)
+		}
 		// A cap hit inside the command section is a push refusal, not a
 		// transport error: answer on the git wire the way the pack path does
 		// (band-2 + the negotiated unpack-ng trailer), so git prints the
@@ -278,9 +287,16 @@ func (s *Server) pushPipeline(ctx context.Context, id git.RepoId, p auth.Princip
 		managedReq = &cp
 	}
 	if pack != nil {
+		// thin=true unconditionally (04_git.md §3.2/§7 step 2): git send-pack
+		// builds a THIN pack by default (deltas against objects it saw in the
+		// advertisement) whether or not receive-pack advertises the
+		// client-side `thin-pack` fetch cap — stock receive-pack therefore
+		// always fixes thin packs. Keying --fix-thin on a capability the
+		// client cannot negotiate rejected every incremental push carrying
+		// a cross-pack delta ("pack has N unresolved deltas").
 		if _, ierr := s.layer.IngestStream(ctx, repo, pack,
-			packMax, managedReq.Has("thin-pack"), true); ierr != nil {
-			band2Failure(out, managedReq, "pack rejected: "+ierr.Error())
+			packMax, true, true); ierr != nil {
+			band2Failure(out, managedReq, ierr.Error())
 			return nil
 		}
 	}
@@ -292,7 +308,7 @@ func (s *Server) pushPipeline(ctx context.Context, id git.RepoId, p auth.Princip
 	}
 	if len(tips) > 0 {
 		if cerr := s.layer.CheckConnectivity(ctx, repo, tips); cerr != nil {
-			band2Failure(out, managedReq, "connectivity check failed: "+cerr.Error())
+			band2Refusal(out, managedReq, "connectivity check failed: "+cerr.Error(), cerr.Error())
 			return nil
 		}
 	}
@@ -345,14 +361,32 @@ func (s *Server) pushPipeline(ctx context.Context, id git.RepoId, p auth.Princip
 	// pipeline (sync.go:434 bypass), so they cannot fan out by
 	// construction.
 	//
+	// A push authenticated by a Threads job token is MARKED (byJob): the push
+	// lands normally, but it is a machine's write inside a run, not a user's
+	// push — GitHub's GITHUB_TOKEN rule. The hook decides (Threads creates no
+	// run), and the events-bridge wake is skipped too, so a job's own push can
+	// neither retrigger workflows nor wake a `synchronize`.
+	//
 	// ### Concurrency
 	// Hazard: blocking the push response on a sync probe. Avoidance:
 	// the hook spawns its own goroutine and returns; the callee owns
 	// its probe/task lifetime (drain cancels via its own ctx).
+	byJob := p.JobRepo != ""
 	if landed && s.onPush != nil {
 		notify := s.onPush
 		refs := landedRefs
-		go notify(id, refs)
+		go notify(id, refs, byJob)
+	}
+	// Events bridge wake (09 §6.3). A client push is the only producer of WAL
+	// ref events, and the `pulls` sink is what turns a head-push into the PR
+	// head refresh + the pull_request "synchronize" CI trigger (15 §2.1). The
+	// bridge is otherwise woken only by POST /_events/notify, so a head push
+	// used to wait for events.sweep_interval (default 5 minutes) before its PR
+	// run existed. Wake is a non-blocking coalescing send (no store call), so
+	// it is safe inline; the response is already on the wire. A job-token push
+	// never wakes it (the marker above).
+	if landed && s.notify != nil && !byJob {
+		s.notify(id.String())
 	}
 	return nil
 }

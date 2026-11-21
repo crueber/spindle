@@ -82,6 +82,16 @@ func (f *fakeAPI) last() recordedReq {
 	return f.records[len(f.records)-1]
 }
 
+// first is last for the opening request of a multi-call command.
+func (f *fakeAPI) first() recordedReq {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if len(f.records) == 0 {
+		f.t.Fatal("no request recorded")
+	}
+	return f.records[0]
+}
+
 func (f *fakeAPI) count() int {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -267,22 +277,16 @@ func TestIssueCommandsHTTPShape(t *testing.T) {
 	if code != exitOK || !strings.Contains(out, "#9") {
 		t.Fatalf("issue create = %d %q", code, out)
 	}
-	// First request: POST {title, body}. Second: PATCH metadata.
-	f.mu.Lock()
-	posts := append([]recordedReq(nil), f.records...)
-	f.mu.Unlock()
-	if len(posts) < 2 {
-		t.Fatalf("expected POST+PATCH, got %d requests", len(posts))
+	// ONE request: the metadata rides the create body (02_issues.md §7), so
+	// a rejected label cannot leave an issue behind.
+	rec = f.last()
+	if rec.Method != "POST" || rec.Path != "/acme/mono/api/issues" {
+		t.Fatalf("create request = %s %s", rec.Method, rec.Path)
 	}
-	post, patch := posts[len(posts)-2], posts[len(posts)-1]
-	if post.Method != "POST" || post.Path != "/acme/mono/api/issues" {
-		t.Fatalf("create request = %s %s", post.Method, post.Path)
-	}
-	decodeBody(t, post, map[string]any{"title": "New", "body": "text"})
-	if patch.Method != "PATCH" || patch.Path != "/acme/mono/api/issues/9" {
-		t.Fatalf("patch request = %s %s", patch.Method, patch.Path)
-	}
-	decodeBody(t, patch, map[string]any{"labels": []any{"bug"}, "assignees": []any{"bob"}, "milestone": "3"})
+	decodeBody(t, rec, map[string]any{
+		"title": "New", "body": "text",
+		"labels": []any{"bug"}, "assignees": []any{"bob"}, "milestone": "3",
+	})
 
 	if code, _, _ := runCmd(t, srv, "tok", runIssueComment, "acme/mono", "7", "--body", "hi"); code != exitOK {
 		t.Fatalf("comment = %d", code)
@@ -323,6 +327,33 @@ func TestIssueNotFoundExitThree(t *testing.T) {
 	code, _, errOut := runCmd(t, srv, "", runIssueShow, "acme/mono", "404")
 	if code != exitNotFound {
 		t.Fatalf("exit = %d, want %d (%s)", code, exitNotFound, errOut)
+	}
+}
+
+// TestIssueCreateBadLabelLeavesNothingBehind proves create is ONE write: a
+// rejected label is a single 400 POST, never a create-then-PATCH that leaves
+// an unlabeled issue behind (the audit's issue #3).
+func TestIssueCreateBadLabelLeavesNothingBehind(t *testing.T) {
+	f, srv := newFakeAPI(t)
+	f.onFunc("POST", "/acme/mono/api/issues", func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, `invalid: unknown label "bug"`, http.StatusBadRequest)
+	})
+	code, out, errOut := runCmd(t, srv, "tok", runIssueCreate, "acme/mono", "--title", "T", "--label", "bug")
+	if code != exitErr {
+		t.Fatalf("exit = %d, want %d (%s)", code, exitErr, errOut)
+	}
+	if !strings.Contains(errOut, "unknown label") {
+		t.Fatalf("stderr = %q", errOut)
+	}
+	if f.count() != 1 {
+		t.Fatalf("requests = %d, want exactly the create POST", f.count())
+	}
+	rec := f.last()
+	if rec.Method != "POST" || rec.Path != "/acme/mono/api/issues" {
+		t.Fatalf("request = %s %s", rec.Method, rec.Path)
+	}
+	if strings.Contains(out, "Opened") {
+		t.Fatalf("reported success after a rejected create: %q", out)
 	}
 }
 
@@ -402,6 +433,22 @@ func TestReleaseCommandsHTTPShape(t *testing.T) {
 	}
 	decodeBody(t, f.last(), map[string]any{"name": "One", "body": "notes", "draft": true, "prerelease": true})
 
+	// No --name: the field is omitted and the server defaults the title to
+	// the tag (a create and an update both behave the way gh does).
+	if code, _, _ := runCmd(t, srv, "tok", runReleaseCreate, "acme/mono", "v1", "--notes", "notes"); code != exitOK {
+		t.Fatalf("release create without --name = %d", code)
+	}
+	decodeBody(t, f.last(), map[string]any{"body": "notes", "draft": false, "prerelease": false})
+
+	// --target + --draft seeds a not-yet-existing tag (WP3.3).
+	if code, _, _ := runCmd(t, srv, "tok", runReleaseCreate, "acme/mono", "v1", "--draft", "--target", "refs/heads/main"); code != exitOK {
+		t.Fatalf("release create --target = %d", code)
+	}
+	decodeBody(t, f.last(), map[string]any{"body": "", "draft": true, "prerelease": false, "target": "refs/heads/main"})
+	if code, _, errOut := runCmd(t, srv, "tok", runReleaseCreate, "acme/mono", "v1", "--target", "main"); code != exitArg {
+		t.Fatalf("--target without --draft = %d (%s)", code, errOut)
+	}
+
 	dir := t.TempDir()
 	asset := filepath.Join(dir, "app.bin")
 	if err := os.WriteFile(asset, []byte("abc"), 0o600); err != nil {
@@ -452,31 +499,134 @@ func TestChecksCommandsHTTPShape(t *testing.T) {
 	}
 }
 
-// --- packages / threads (documented, not yet served) ----------------------
+// --- packages (served, docs/features/14 §7) --------------------------------
 
-func TestPackagesAndThreadsNotEnabled(t *testing.T) {
-	_, srv := newFakeAPI(t) // every route 404s
-	cases := []struct {
-		name string
-		fn   func(ctx context.Context, c *cli, args []string) int
-		args []string
-	}{
-		{"packages list", runPackagesList, []string{"acme/mono"}},
-		{"packages show", runPackagesShow, []string{"acme/mono", "sha256:abc"}},
-		{"packages delete", runPackagesDelete, []string{"acme/mono", "sha256:abc"}},
-		{"threads list", runThreadsList, []string{"acme/mono"}},
-		{"threads show", runThreadsShow, []string{"acme/mono", "r1"}},
-		{"threads run", runThreadsRun, []string{"acme/mono", "ci"}},
-		{"threads cancel", runThreadsCancel, []string{"acme/mono", "r1"}},
+func TestPackagesCommands(t *testing.T) {
+	f, srv := newFakeAPI(t)
+	f.on("GET", "/acme/mono/api/packages", 200, `{"repository":"acme/mono","packages":[{"tag":"v1.0","digest":"sha256:`+strings.Repeat("a", 64)+`","size":12,"platforms":["linux/amd64"],"updated_at":"2026-11-21T12:00:00Z"}],"manifests":[],"total_size":12,"more":false}`)
+	f.on("GET", "/acme/mono/api/packages/sha256:abc", 200, `{"digest":"sha256:abc"}`)
+	f.on("DELETE", "/acme/mono/api/packages/tags/v1.0", 204, "")
+	f.on("DELETE", "/acme/mono/api/packages/sha256:abc", 204, "")
+
+	code, out, errOut := runCmd(t, srv, "tok", runPackagesList, "acme/mono")
+	if code != exitOK {
+		t.Fatalf("list = %d (%s)", code, errOut)
 	}
-	for _, tc := range cases {
-		code, _, errOut := runCmd(t, srv, "tok", tc.fn, tc.args...)
-		if code != exitErr {
-			t.Errorf("%s: exit = %d, want %d", tc.name, code, exitErr)
+	for _, want := range []string{"TAG", "v1.0", "linux/amd64"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("list output missing %q: %q", want, out)
 		}
-		if !strings.Contains(errOut, "feature not enabled") {
-			t.Errorf("%s: stderr = %q", tc.name, errOut)
+	}
+	if rec := f.last(); rec.Path != "/acme/mono/api/packages" || rec.Method != "GET" {
+		t.Fatalf("list request = %s %s", rec.Method, rec.Path)
+	}
+
+	if code, out, errOut := runCmd(t, srv, "tok", runPackagesShow, "acme/mono", "sha256:abc"); code != exitOK || !strings.Contains(out, "sha256:abc") {
+		t.Fatalf("show = %d %q %q", code, out, errOut)
+	}
+
+	// --tag deletes a tag pointer without needing a digest positional.
+	if code, out, _ := runCmd(t, srv, "tok", runPackagesDelete, "acme/mono", "--tag", "v1.0"); code != exitOK || !strings.Contains(out, "Deleted tag v1.0") {
+		t.Fatalf("delete tag = %d %q", code, out)
+	}
+	if rec := f.last(); rec.Method != "DELETE" || rec.Path != "/acme/mono/api/packages/tags/v1.0" {
+		t.Fatalf("delete tag request = %s %s", rec.Method, rec.Path)
+	}
+	if code, _, _ := runCmd(t, srv, "tok", runPackagesDelete, "acme/mono", "sha256:abc"); code != exitOK {
+		t.Fatalf("delete digest = %d", code)
+	}
+	if rec := f.last(); rec.Path != "/acme/mono/api/packages/sha256:abc" {
+		t.Fatalf("delete digest path = %s", rec.Path)
+	}
+	// A real 404 is a not-found (exit 3), never "feature not enabled".
+	code, _, errOut = runCmd(t, srv, "tok", runPackagesList, "acme/ghost")
+	if code != exitNotFound || strings.Contains(errOut, "feature not enabled") {
+		t.Fatalf("missing repo = %d %q", code, errOut)
+	}
+	// Usage edges: --tag plus a digest is refused.
+	c := isolateCLI(t, srv.URL)
+	c.out, c.errOut = &bytes.Buffer{}, &bytes.Buffer{}
+	if code := runPackagesDelete(t.Context(), c, []string{"acme/mono", "--tag", "v1", "sha256:abc"}); code != exitArg {
+		t.Fatalf("tag+digest = %d", code)
+	}
+}
+
+// TestPackagesDeleteTargetForms pins the (--tag T | DIGEST) contract: exactly
+// one target, resolved from two positionals (tag) or three (digest).
+func TestPackagesDeleteTargetForms(t *testing.T) {
+	f, srv := newFakeAPI(t)
+	f.on("DELETE", "/acme/mono/api/packages/tags/v1", 200, `{}`)
+	f.on("DELETE", "/acme/mono/api/packages/sha256:abc", 200, `{}`)
+
+	if code, out, _ := runCmd(t, srv, "tok", runPackagesDelete, "acme/mono", "--tag", "v1"); code != exitOK || !strings.Contains(out, "tag v1") {
+		t.Fatalf("--tag form = %d %q", code, out)
+	}
+	if rec := f.last(); rec.Method != "DELETE" || rec.Path != "/acme/mono/api/packages/tags/v1" {
+		t.Fatalf("--tag request = %s %s", rec.Method, rec.Path)
+	}
+	if code, out, _ := runCmd(t, srv, "tok", runPackagesDelete, "acme/mono", "sha256:abc"); code != exitOK || !strings.Contains(out, "sha256:abc") {
+		t.Fatalf("digest form = %d %q", code, out)
+	}
+	if rec := f.last(); rec.Method != "DELETE" || rec.Path != "/acme/mono/api/packages/sha256:abc" {
+		t.Fatalf("digest request = %s %s", rec.Method, rec.Path)
+	}
+	for _, args := range [][]string{{"acme/mono"}, {"acme/mono", "--tag", "v1", "sha256:abc"}} {
+		if code, _, errOut := runCmd(t, srv, "tok", runPackagesDelete, args...); code != exitArg {
+			t.Fatalf("%v: exit = %d, want %d (%s)", args, code, exitArg, errOut)
 		}
+	}
+}
+
+// --- threads (served: GET/POST /{o}/{r}/api/threads) ----------------------
+
+func TestThreadsCommandsHTTPShape(t *testing.T) {
+	f, srv := newFakeAPI(t)
+	f.on("GET", "/acme/mono/api/threads", 200, `{"runs":[{"id":"r1","workflow":"ci","event":"push","state":"queued","commit":"abcdef1234567890"}],"more":false}`)
+	f.on("GET", "/acme/mono/api/threads/r1", 200, `{"run":{"id":"r1","workflow":"ci","state":"queued"},"jobs":[]}`)
+	f.on("POST", "/acme/mono/api/threads", 201, `{"runs":[{"id":"r2","workflow":"ci.yml","state":"queued"}]}`)
+
+	if code, out, _ := runCmd(t, srv, "", runThreadsList, "acme/mono"); code != exitOK || !strings.Contains(out, "r1") {
+		t.Fatalf("threads list = %d %q", code, out)
+	}
+	if code, out, _ := runCmd(t, srv, "", runThreadsShow, "acme/mono", "r1"); code != exitOK || !strings.Contains(out, `"id": "r1"`) {
+		t.Fatalf("threads show = %d %q", code, out)
+	}
+	// Dispatch is POST …/api/threads with {ref, workflow} — the served route.
+	if code, out, _ := runCmd(t, srv, "tok", runThreadsRun, "acme/mono", "ci.yml", "--ref", "refs/heads/main"); code != exitOK || !strings.Contains(out, "r2") {
+		t.Fatalf("threads run = %d %q", code, out)
+	}
+	rec := f.last()
+	if rec.Method != "POST" || rec.Path != "/acme/mono/api/threads" {
+		t.Fatalf("dispatch request = %s %s", rec.Method, rec.Path)
+	}
+	decodeBody(t, rec, map[string]any{"ref": "refs/heads/main", "workflow": "ci.yml"})
+	if code, _, errOut := runCmd(t, srv, "tok", runThreadsRun, "acme/mono", "ci.yml"); code != exitArg || !strings.Contains(errOut, "--ref") {
+		t.Fatalf("dispatch without --ref = %d %q", code, errOut)
+	}
+}
+
+func TestThreadsShowUnknownRunIsNotFound(t *testing.T) {
+	_, srv := newFakeAPI(t) // every route 404s
+	code, _, errOut := runCmd(t, srv, "", runThreadsShow, "acme/mono", "r404")
+	if code != exitNotFound {
+		t.Fatalf("exit = %d, want %d (%s)", code, exitNotFound, errOut)
+	}
+	if strings.Contains(errOut, "feature not enabled") {
+		t.Fatalf("unknown run misreported: %q", errOut)
+	}
+}
+
+func TestThreadsCancelExplainsTheT2Gap(t *testing.T) {
+	f, srv := newFakeAPI(t)
+	code, _, errOut := runCmd(t, srv, "", runThreadsCancel, "acme/mono", "r1")
+	if code != exitErr {
+		t.Fatalf("exit = %d, want %d", code, exitErr)
+	}
+	if !strings.Contains(errOut, "T2 runner protocol") {
+		t.Fatalf("message = %q", errOut)
+	}
+	if f.count() != 0 {
+		t.Fatalf("cancel called a route (%d requests)", f.count())
 	}
 }
 
@@ -574,7 +724,7 @@ func TestAuthRejectedTokenIsAuthExit(t *testing.T) {
 func TestAuthTokenCommandsExplainTheGap(t *testing.T) {
 	_, srv := newFakeAPI(t)
 	for _, sub := range []string{"list", "create", "revoke"} {
-		code, _, errOut := runCmd(t, srv, "", runAuthTokenUnsupported)
+		code, _, errOut := runCmd(t, srv, "", runAuthTokenUnsupported("token "+sub))
 		if code != exitErr {
 			t.Fatalf("token %s = %d", sub, code)
 		}
@@ -648,6 +798,63 @@ func TestAuthStatusAtAuthNoneServer(t *testing.T) {
 
 // --- coverage of the remaining surfaces ----------------------------------
 
+// TestPRDiffAndClose pin the two review-workflow commands: `pr diff` streams
+// the text/plain patch verbatim, `pr close` sets state=closed on the pull PATCH.
+func TestPRDiffAndClose(t *testing.T) {
+	f, srv := newFakeAPI(t)
+	const patch = "diff --git a/x b/x\n--- a/x\n+++ b/x\n"
+	f.onFunc("GET", "/acme/mono/api/pulls/3/diff", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+		_, _ = w.Write([]byte(patch))
+	})
+	f.on("PUT", "/acme/mono/api/pulls/3", 200, `{"thread":{"num":3,"state":"closed"},"pr":{"num":3}}`)
+
+	code, out, _ := runCmd(t, srv, "", runPRDiff, "acme/mono", "3")
+	if code != exitOK || out != patch {
+		t.Fatalf("pr diff = %d %q", code, out)
+	}
+	if rec := f.last(); rec.Method != "GET" || rec.Path != "/acme/mono/api/pulls/3/diff" {
+		t.Fatalf("diff request = %s %s", rec.Method, rec.Path)
+	}
+
+	code, out, _ = runCmd(t, srv, "tok", runPRClose, "acme/mono", "3")
+	if code != exitOK || !strings.Contains(out, "#3 closed") || !strings.Contains(out, "/acme/mono/pulls/3") {
+		t.Fatalf("pr close = %d %q", code, out)
+	}
+	rec := f.last()
+	if rec.Method != "PUT" || rec.Path != "/acme/mono/api/pulls/3" {
+		t.Fatalf("close request = %s %s", rec.Method, rec.Path)
+	}
+	decodeBody(t, rec, map[string]any{"state": "closed"})
+}
+
+// TestPRListStateAllOmitsTheFilter: `--state all` is gh's spelling for the
+// API's default (no state parameter), not a 400.
+func TestPRListStateAllOmitsTheFilter(t *testing.T) {
+	f, srv := newFakeAPI(t)
+	f.on("GET", "/acme/mono/api/pulls", 200, `{"pulls":[],"more":false}`)
+	if code, _, _ := runCmd(t, srv, "", runPRList, "acme/mono", "--state", "all"); code != exitOK {
+		t.Fatalf("pr list --state all = %d", code)
+	}
+	if _, ok := f.last().Query["state"]; ok {
+		t.Fatalf("state filter sent for --state all: %v", f.last().Query)
+	}
+}
+
+// TestChecksStatusNormalizesFullRef: refs/heads/main resolves like `main`
+// (every other command normalizes the same way).
+func TestChecksStatusNormalizesFullRef(t *testing.T) {
+	f, srv := newFakeAPI(t)
+	f.on("GET", "/acme/mono/api/resolve/main", 200, `{"ref":"main","sha":"abc123def456","kind":"branch"}`)
+	f.on("GET", "/acme/mono/api/checks/abc123def456", 200, `{"sha":"abc123def456","state":"success","total_counts":{},"statuses":[]}`)
+	if code, _, errOut := runCmd(t, srv, "", runChecksStatus, "acme/mono", "refs/heads/main"); code != exitOK {
+		t.Fatalf("checks status refs/heads/main = %d (%s)", code, errOut)
+	}
+	if rec := f.first(); rec.Path != "/acme/mono/api/resolve/main" {
+		t.Fatalf("resolve path = %s", rec.Path)
+	}
+}
+
 func TestPRShowHumanAndDraft(t *testing.T) {
 	f, srv := newFakeAPI(t)
 	f.on("GET", "/acme/mono/api/pulls/1", 200, `{"thread":{"num":1,"title":"Feature","state":"open","author":"alice","updated_at":"2026-01-01T00:00:00Z"},
@@ -710,5 +917,80 @@ func TestReleaseUploadMissingFile(t *testing.T) {
 	code, _, errOut := runCmd(t, srv, "tok", runReleaseUpload, "acme/mono", "v1", filepath.Join(t.TempDir(), "nope.bin"))
 	if code != exitErr || !strings.Contains(errOut, "no such file") {
 		t.Fatalf("upload missing file = %d %q", code, errOut)
+	}
+}
+
+// TestOrgWebhookCommands pins the WP6.2 org webhook CLI: list/create/
+// delete/ping/deliveries/redeliver against the served route shapes, the
+// --json passthrough, and the exit-code mapping (404 → 3, 410 → 1).
+func TestOrgWebhookCommands(t *testing.T) {
+	f, srv := newFakeAPI(t)
+	f.on("GET", "/api/v1/orgs/acme/webhooks", 200,
+		`{"webhooks":[{"id":"h1","url":"https://h.example/x","events":["commented"],"active":true,"secret_set":true}]}`)
+	f.on("POST", "/api/v1/orgs/acme/webhooks", 201,
+		`{"id":"h1","url":"https://h.example/x","events":["commented"],"active":true,"secret_set":true}`)
+	f.on("DELETE", "/api/v1/orgs/acme/webhooks/h1", 204, ``)
+	f.on("POST", "/api/v1/orgs/acme/webhooks/h1/ping", 200, `{"delivery":true}`)
+	f.on("GET", "/api/v1/orgs/acme/webhooks/h1/deliveries", 200,
+		`{"updated_at":"2026-01-01T00:00:00Z","entries":[{"seq":3,"event":"ping","status":200,"at":"2026-01-01T00:00:00Z","duration_ms":4}]}`)
+	f.on("POST", "/api/v1/orgs/acme/webhooks/h1/deliveries/3/redeliver", 200,
+		`{"delivery":true,"entry":{"seq":3,"event":"ping","status":200,"at":"2026-01-01T00:00:01Z","duration_ms":2}}`)
+
+	if code, out, _ := runCmd(t, srv, "tok", runOrgWebhookList, "acme"); code != exitOK || !strings.Contains(out, "h1") || !strings.Contains(out, "active") {
+		t.Fatalf("webhook list = %d %q", code, out)
+	}
+	if code, out, _ := runCmd(t, srv, "tok", runOrgWebhookList, "acme", "--json"); code != exitOK || !strings.Contains(out, `"webhooks"`) {
+		t.Fatalf("webhook list --json = %d %q", code, out)
+	}
+	if code, _, _ := runCmd(t, srv, "tok", runOrgWebhookCreate, "acme",
+		"--url", "https://h.example/x", "--events", "commented,opened", "--secret", "s", "--inactive"); code != exitOK {
+		t.Fatalf("webhook create = %d", code)
+	}
+	rec := f.last()
+	if rec.Method != "POST" || rec.Path != "/api/v1/orgs/acme/webhooks" {
+		t.Fatalf("create request = %s %s", rec.Method, rec.Path)
+	}
+	decodeBody(t, rec, map[string]any{
+		"url": "https://h.example/x", "events": []any{"commented", "opened"},
+		"secret": "s", "active": false, "insecure_tls": false,
+	})
+	if code, _, _ := runCmd(t, srv, "tok", runOrgWebhookPing, "acme", "h1"); code != exitOK {
+		t.Fatalf("webhook ping = %d", code)
+	}
+	if code, out, _ := runCmd(t, srv, "tok", runOrgWebhookDeliveries, "acme", "h1"); code != exitOK || !strings.Contains(out, "ping") || !strings.Contains(out, "4ms") {
+		t.Fatalf("webhook deliveries = %d %q", code, out)
+	}
+	if code, out, _ := runCmd(t, srv, "tok", runOrgWebhookRedeliver, "acme", "h1", "3"); code != exitOK || !strings.Contains(out, "Redelivered #3 → 200") {
+		t.Fatalf("webhook redeliver = %d %q", code, out)
+	}
+	if rec := f.last(); rec.Method != "POST" || rec.Path != "/api/v1/orgs/acme/webhooks/h1/deliveries/3/redeliver" {
+		t.Fatalf("redeliver request = %s %s", rec.Method, rec.Path)
+	}
+	if code, _, _ := runCmd(t, srv, "tok", runOrgWebhookDelete, "acme", "h1"); code != exitOK {
+		t.Fatalf("webhook delete = %d", code)
+	}
+	if rec := f.last(); rec.Method != "DELETE" || rec.Path != "/api/v1/orgs/acme/webhooks/h1" {
+		t.Fatalf("delete request = %s %s", rec.Method, rec.Path)
+	}
+
+	// Bad positionals: usage errors (exitArg), no request.
+	if code, _, _ := runCmd(t, srv, "tok", runOrgWebhookCreate, "acme"); code != exitArg {
+		t.Fatalf("create without --url = %d", code)
+	}
+	if code, _, _ := runCmd(t, srv, "tok", runOrgWebhookRedeliver, "acme", "h1", "x"); code != exitArg {
+		t.Fatalf("redeliver bad seq = %d", code)
+	}
+}
+
+// TestOrgWebhookExitCodes pins the standard mapping against real statuses.
+func TestOrgWebhookExitCodes(t *testing.T) {
+	f, srv := newFakeAPI(t)
+	f.on("POST", "/api/v1/orgs/acme/webhooks/nope/ping", 404, `not found`)
+	f.on("POST", "/api/v1/orgs/acme/webhooks/h1/deliveries/9/redeliver", 410, `gone: payload not retained`)
+	if code, _, _ := runCmd(t, srv, "tok", runOrgWebhookPing, "acme", "nope"); code != exitNotFound {
+		t.Fatalf("ping 404 = %d, want %d", code, exitNotFound)
+	}
+	if code, _, errOut := runCmd(t, srv, "tok", runOrgWebhookRedeliver, "acme", "h1", "9"); code != exitErr || !strings.Contains(errOut, "410") {
+		t.Fatalf("redeliver 410 = %d (%q)", code, errOut)
 	}
 }

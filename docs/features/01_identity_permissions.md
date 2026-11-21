@@ -394,6 +394,14 @@ Invitation kinds: `org` (join an org with role `owner|member`) and `repo` (colla
 - `id` and `token` are independent random values; `id` is the key, `token` is the bearer secret for
   emailed links. Email delivery is out of scope (06 owns webhooks; an operator's SMTP glue is theirs) —
   the API returns the accept URL: `/api/v1/invitations/{id}?token=<token>`.
+- **Subject addressing: email OR username.** `subject` may be a verified email or a bare principal
+  name (`ValidPrincipal` accepts both). A static-token principal has no verified email, so a
+  username-addressed invitation is the only claimable form for it: the invitee's inbox row lives under
+  `users/<subject>/invitations/index.json`, and accept matches the invited subject by **email or
+  principal name** (`matchPrincipal`; a principal carrying a verified email may claim either
+  spelling). An email-addressed invite stays unclaimable by an email-less principal — that is
+  correct, not a lookup bug — so the org Invitations form accepts an email or a username
+  (round-3 audit; it was `<input type=email>`).
 - **Accept** (the only mutation): `POST /api/v1/invitations/{id}/accept` — requires an authenticated
   principal whose email equals the invite `subject`, OR a browser GET of the signed link (token
   matches) which renders the invite summary and the UI then POSTs accept (the link's token authorizes
@@ -405,8 +413,8 @@ Invitation kinds: `org` (join an org with role `owner|member`) and `repo` (colla
   inboxes, so `MyInvites` skips repo-kind rows whose manifest is gone AND rows whose issuer object is
   gone (the inbox is a cache of issuer truth — this also keeps swept rows hidden after a recreate, and
   expiry still lists, failing closed on accept, unchanged). Creating a repo invite for a ghost is 404;
-  accepting one is 409 "no longer pending" (no binding is written — the synthesized default must never
-  gain ghost bindings). Probe errors keep the row (fail open).
+  accepting one is 409 (no binding is written — the synthesized default must never gain ghost
+  bindings). Probe errors keep the row (fail open).
 
 ### Concurrency
 
@@ -414,7 +422,7 @@ Hazard: accepting an invite concurrently from two tabs, or accepting a just-canc
 accept is a CAS sequence — binding write first (org `members.json` CAS / `access.json` CAS loop), then
 invite-object DELETE, idempotent for the loser (a second accept sees 412/absent → done, like the P3
 event path). A cancelled-vs-accept race is decided by which CAS lands first; the loser gets 409
-"invitation no longer pending" and writes nothing. Inbox index updates happen after the commit in the
+"no longer valid" and writes nothing. Inbox index updates happen after the commit in the
 same handler (P8 shape); a crash drops one inbox entry — the issuer-side list is the truth.
 
 ## 8. API endpoints
@@ -432,7 +440,7 @@ RouteProvider (Seam 1).
 | `PUT /api/v1/users/{principal}` | self or admin | body = profile → 200 profile; 400 invalid |
 | `GET /api/v1/users/{principal}/avatar` | any (public read) | avatar bytes (generated SVG `image/svg+xml` or #601 uploaded square PNG `image/png`, immutable max-age + version ETag, `?v=` busting); 404 when none |
 | `PUT /api/v1/users/{principal}/avatar` | self or admin | upload raw bytes → server-side center-crop to square PNG → 200 profile (clears opt-out, bumps `avatar_updated_at`); 413 over 2 MiB; 400 over 4096px/16M decoded px (bomb guard); 415 outside PNG/JPEG/GIF (SVG rejected — same-origin script risk; WebP rejected — stdlib cannot crop it, the deliberate #359 divergence); 404 unknown |
-| `POST /api/v1/users/{principal}/avatar` | self or admin | regenerate (clears opt-out, installs fresh deterministic render, REPLACES an upload when one exists — #601) → 200 profile; 404 without a verified email |
+| `POST /api/v1/users/{principal}/avatar` | self or admin | regenerate (clears opt-out, installs fresh deterministic render, REPLACES an upload when one exists — #601) → 200 profile; the seed is the verified email, else the principal name (round-3 audit; only an empty principal is 404) |
 | `DELETE /api/v1/users/{principal}/avatar` | self or admin | remove (either kind) + opt out of auto-generation → 200 profile; 404 unknown |
 | `GET /api/v1/users/{principal}/orgs` | any (mutable-collab, content ETag) | → sorted `["acme", …]` over `MemberOrgsFor` (any roster role, #370 alias matching); `[]` when none, 200 for unknown principals (never 404); GET-only |
 | `GET /api/v1/orgs` | any (mutable-collab, no version token) | → sorted `["acme", …]` |
@@ -442,7 +450,7 @@ RouteProvider (Seam 1).
 | `GET/PUT/DELETE …/members/{principal}` | read / owner / owner | roster ops; last owner removal → 409 |
 | `GET/POST …/teams`, `GET/PUT/DELETE …/teams/{slug}` | read / owner | team CRUD |
 | `PUT/DELETE …/teams/{slug}/members/{principal}` | owner | membership edit |
-| `POST /api/v1/orgs/{org}/invitations` | owner | `{email, role}` → 201 `{id, accept_url}` |
+| `POST /api/v1/orgs/{org}/invitations` | owner | `{email, role}` (the `email` field accepts an email or a username) → 201 `{id, accept_url}` |
 | `GET /api/v1/invitations` | any authed (no-store) | → my pending invites `[]` |
 | `GET /api/v1/invitations/{id}?token=` | token OR subject match | invite summary (signed-link preview) |
 | `POST /api/v1/invitations/{id}/accept` | authed, subject match | → 200 `{bound: "org"\|"repo"}`; 409 not pending |
@@ -482,9 +490,26 @@ proxy (`web/src/lib/owners.js`) are historical (D-WEB-15). 08 §6 owns the cache
 Pages (server-rendered by `internal/webui`, `12_web_ui.md` §2; templates under
 `internal/webui/templates/pages/settings/` + `public/`, one handler per route):
 
-- **Org settings** `/:org/settings` — sub-tabs profile / members / teams / invitations, plus an
-  owner-only Danger Zone tab (typed-confirm delete-org; non-owners see no affordance, server still
-  gates); member rows inline role `<select>`; invite form shows the returned accept link.
+- **Org settings** `/:org/settings` — sub-tabs profile / members / teams / invitations / webhooks,
+  plus an owner-only Danger Zone tab (typed-confirm delete-org; non-owners see no affordance,
+  server still gates); member rows inline role `<select>`; invite form shows the returned accept
+  link. **As built (WP9 G2):** every form writes through composition's `orgWriteFn` →
+  identity's verbs (`PutOrg`, avatar put/remove, `SetMember`/`RemoveMember`, `CreateTeam`/
+  `PutTeam`/`DeleteTeam` + `SetTeamMember`/`RemoveTeamMember`, `CreateOrgInvite`/
+  `DeleteOrgInvite`, `DeleteOrg`), with the API's `CheckOrgOwner` floor (org owner or host
+  admin); the teams card edits name/description and removes members, the profile removes the
+  avatar, and delete redirects home with a notice. Non-owners and signed-out callers get the
+  API's 403/401; the composition wiring is pinned so a seam cannot silently regress to 503.
+  **Invitation links (2026-11-21 follow-up):** the invitations tab is `MinRead: admin` exactly
+  like `GET/POST /api/v1/orgs/{org}/invitations` (a member never sees the tab, the read, or a
+  token). Create renders the human accept link once in the page body —
+  `/invitations?id=…&token=…` (`webui.InvitePageURL`, shared with the repo Access tab; never a
+  redirect) — and adds the created row to the pending table with its copy control. Every later
+  read stays redacted (`ListOrgInvites`' token is not projected by `orgViewFn`; pending rows show
+  the masked `token ••••••••` marker), so showing a link again requires a new invitation. Accept
+  is the API's `POST /api/v1/invitations/{id}/accept` (grants the invited org role: member or
+  owner); cancel is delete-on-transition, so the copied link answers 409 afterwards. The share
+  card and per-row copy cell are the shared `partials/settings_invite.html` blocks.
 - **Team page** `/:org/teams/:slug` — member list, add/remove, and the repos this team is bound to
   (derived by reading that org's repos' `access.json`; bounded by the org's repo count, P5-acceptable).
 - **Repo Access tab** `/:owner/:repo/settings/access` — a fourth settings sub-tab: visibility
@@ -552,6 +577,19 @@ bootstrap's Create. Avoidance: edits to a repo with no `access.json` synthesize 
   groups at once. Rationale: the group claim is signature-verified IdP truth, while an env token
   opened the entire configuration surface to anyone who could read the process environment.
 
+- **Invitation refusals name the cause that is knowable (closing-audit Observation 1, 2026-11-21).** The
+  top-level preview/accept routes carry only an invitation id; the id→scope index does not exist and
+  accept/cancel is delete-on-transition, so an id absent from the caller's inbox cannot be proven
+  spent or foreign. The 409 therefore names both possibilities ("invitation is not addressed to your
+  account, or it was already accepted or cancelled") instead of asserting the spent one — the old
+  "no longer pending" sentence told a foreign opener of a live invite the wrong thing. A row that
+  outlived its issuer object is provably dead and says "no longer valid: … accepted or cancelled, or
+  its repository was deleted"; an invite whose repo vanished under a surviving object names the
+  deletion. All stay 409 and leak nothing (the sentence is identical whether the id exists or not);
+  the org and repo families share the one `findInviteFor` path. Gates:
+  `TestInvitationRefusalWording` (live-foreign preview/accept for both families, spent re-accept,
+  dangling row, deleted repo) and `TestPublicFriendlyInviteErr` (the page keeps the accurate
+  sentences).
 - **Frontend idiom is the server-rendered page layer (D-WEB-14/D-WEB-15; supersedes the D-WEB-6 SolidJS entry for issue #76).** The §9 page sketches read in the shipped idiom: Go handlers + templates, Tailwind component classes, server-side state. **Historical (D-WEB-6):** Solid components under `@solidjs/router`, state via Solid signals/stores. Routes, gating, and wire shapes are unchanged.
 
 - **Principal = email; profiles are the only identity objects here** — keys/tokens/sessions stay auth-provider territory (Seam 2); this doc owns zero credentials. (SUPERSEDED by the #370 entry below: the principal NAME is now the username; the email rides `Principal.Email` for alias matching only.)
@@ -637,7 +675,12 @@ bootstrap's Create. Avoidance: edits to a repo with no `access.json` synthesize 
   until an explicit `POST …/avatar` regenerates (same email → identical image,
   the determinism note). The seed feeds the PRNG only (verified absent from the
   output) with a sanitize-first gate (SVG shape, no `<script>`, no seed leak —
-  fail closed). Consumption: `me().avatar_url` → navbar identity control, plus
+  fail closed; the leak test is token-aware so a short username colliding with
+  the static skeleton's "rendering" is not a false rejection). A principal with
+  no verified email (a static-token account) seeds from its principal NAME —
+  the same fallback the initials chip renders — so the regenerate control the
+  page offers can never answer 404; only an empty principal is unmappable
+  (round-3 audit). Consumption: `me().avatar_url` → navbar identity control, plus
   the `/:owner` header with self-service regenerate/remove. Rationale: logins
   must never block on generation, emails must never leak into markup or other
   users' views, and the task table must not gain a non-repo kind.
@@ -958,3 +1001,34 @@ bootstrap's Create. Avoidance: edits to a repo with no `access.json` synthesize 
   `/login-required`) apart from "you lack permission" (403); the catch-all lives in the identity
   chain, not in each package remembering to gate. No new round trips (the assert reuses the
   resolved principal).
+- **WP9 G9/G10 — collaborator invitations and avatar upload are page-editable (2026-11-21,
+  `feat/identity-ui-parity`).** The v1 editability rule ("every user-facing setting is editable in the
+  rendered UI; an API-only path is a defect") closes the two identity gaps the WP9 audit filed.
+  *G9 (repo invites):* Settings → Access gains an admin-only "Invite a collaborator" form (email **or**
+  username + the repo role list) and a pending-invitations table with each row's copyable accept link
+  and a cancel control. The link is the human `/invitations?id=<id>&token=<token>` page (the token-
+  authorized preview plus the accept form), never the raw API path. Create, list, accept and cancel all
+  run the JSON twin's verbs (`CreateRepoInvite` / `ListRepoInvites` / `AcceptInviteFor` /
+  `CancelInvite`); issuer-side cancel was lifted out of `http_invites.go`'s raw store writes into
+  `Service.DeleteRepoInvite` so the page and the API share one delete-on-transition path (object +
+  inbox row, second cancel = 404). Admin-only is enforced twice: the page omits the form and does not
+  even read the invitation collection for a non-admin (the rows carry capability tokens), and
+  `SettingsServices.repoWrite` re-runs `CheckRole(admin)` like every other repo settings write. The
+  Access write form is now gated the same way (a triage reader gets a read-only note instead of a form
+  whose submit 403s). The invite list's `AcceptURL` is admin-scoped only; the JSON collection keeps its
+  redacted `invite_summary` (token never returned there).
+  *G10 (avatar upload):* `/{owner}?edit=1` renders an Avatar card beside the profile form with the same
+  raster allowlist as the org form (`image/png,image/jpeg,image/gif`, ≤ 2 MiB; no WebP/SVG), posting
+  multipart to `POST /{owner}/avatar/upload` — the page half of the existing
+  `PUT /api/v1/users/{principal}/avatar` verb (`PutUserAvatarBytes`: magic sniff, center-crop to a
+  square PNG, self-or-admin). 413 (too large) and 415 (type) map to the verb's sentinels through
+  `formsErrStatus`; the composition materializes the lazily-created identity profile first
+  (`EnsureProfile`, the same step login runs) so the form is never a button that 404s for a principal
+  who has not logged in through the avatar hook. The owner sidebar's no-avatar state renders the
+  identity menu's initials chip instead of an empty column, and Regenerate/Remove stay available.
+  `Service.UserExists` (user.json binding **or** profile.json) is the exported page probe behind the
+  owner-scoped 404 decisions (the starred page, below). Tests: `TestRepoInviteAdminAPI`,
+  `TestRepoInviteAdminCancel`, `TestUserExists` (identity);
+  `TestSettingsAccessInviteLifecycle`, `TestSettingsAccessInviteValidationAndFloor`,
+  `TestSettingsAccessInviteSeamEdges`, `TestOwnerAvatarUpload`, `TestOwnerAvatarRemovalShowsInitials`
+  (webui).

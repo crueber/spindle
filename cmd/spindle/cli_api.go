@@ -393,8 +393,10 @@ func exitCodeFor(err error) int {
 }
 
 // notEnabled rewrites a 404 from a documented-but-not-yet-implemented
-// surface (packages, threads, team repo bindings) into a clear message
-// (exit 1), instead of the misleading "not found" (exit 3).
+// surface (packages, team repo bindings) into a clear message (exit 1),
+// instead of the misleading "not found" (exit 3). Served surfaces —
+// threads, issues, pulls, releases, checks — must NOT use this: their 404
+// means the named object is missing.
 func (a *apiClient) notEnabled(err error, feature string) int {
 	var ae *apiError
 	if errors.As(err, &ae) && ae.Status == http.StatusNotFound {
@@ -420,18 +422,46 @@ func (f *apiFlags) add(fs *flag.FlagSet) {
 	fs.IntVar(&f.limit, "limit", 0, "maximum number of rows to request")
 }
 
+// usageByCommand maps "issue list" → the command table's documented usage
+// line, so a command's own `--help` prints real syntax (positionals and all)
+// rather than a placeholder. Derived from the table, never maintained apart.
+var usageByCommand = map[string]string{}
+
+func init() {
+	for _, g := range apiGroups {
+		for i := range g.commands {
+			usageByCommand[g.name+" "+g.commands[i].name] = g.commands[i].usage
+		}
+	}
+}
+
 // newAPIFlagSet builds a FlagSet that reports usage to the CLI's stderr.
+// Usage prints THIS command's usage line and every flag it defines, so
+// `spindle issue list --help` is the per-command help §6.6 promises (the
+// global table stays `spindle help` / a leading `-h`).
 func newAPIFlagSet(c *cli, name string) *flag.FlagSet {
 	fs := flag.NewFlagSet(name, flag.ContinueOnError)
 	fs.SetOutput(c.stderr())
-	fs.Usage = func() { fmt.Fprintf(c.stderr(), "usage: spindle %s [flags] [args]\n", name) }
+	fs.Usage = func() {
+		usage := usageByCommand[name]
+		if usage == "" {
+			usage = "spindle " + name + " [flags] [args]"
+		}
+		fmt.Fprintf(c.stderr(), "usage: %s\n\nflags:\n", usage)
+		fs.PrintDefaults()
+	}
 	return fs
 }
 
+// parseContinue is parseAPI's "no help, no error" marker: run the command.
+const parseContinue = -1
+
 // parseAPI parses argv with flags allowed AFTER positionals (gh-style).
-// Returns false on a usage error (the caller returns exit 2).
-func parseAPI(fs *flag.FlagSet, args []string) ([]string, bool) {
-	var flags, pos []string
+// A requested `-h`/`--help` prints this command's usage + flags (the
+// FlagSet's Usage) and returns exitOK; any other parse error returns
+// exitArg; parseContinue means the caller should keep going.
+func parseAPI(fs *flag.FlagSet, args []string) (pos []string, exit int) {
+	var flags []string
 	for i := 0; i < len(args); i++ {
 		a := args[i]
 		if a == "--" {
@@ -456,9 +486,12 @@ func parseAPI(fs *flag.FlagSet, args []string) ([]string, bool) {
 		pos = append(pos, a)
 	}
 	if err := fs.Parse(flags); err != nil {
-		return nil, false
+		if errors.Is(err, flag.ErrHelp) {
+			return nil, exitOK
+		}
+		return nil, exitArg
 	}
-	return pos, true
+	return pos, parseContinue
 }
 
 // isBoolFlag reports whether a flag.Value is a boolean (so --flag consumes
@@ -490,6 +523,28 @@ func (t *table) row(cols ...string) {
 func (t *table) flush() { _ = t.w.Flush() }
 
 // --- paths ----------------------------------------------------------------
+
+// repoSelector is the default OWNER/REPO for commands that take one: the
+// global -R (peeled in main) then SPINDLE_REPO. Empty when neither is set, in
+// which case the command requires the positional.
+func (c *cli) repoSelector() string {
+	if c != nil {
+		if v := strings.TrimSpace(c.repo); v != "" {
+			return v
+		}
+	}
+	return strings.TrimSpace(os.Getenv("SPINDLE_REPO"))
+}
+
+// withRepoSelector splices the default repo into the positionals when the
+// caller omitted OWNER/REPO. n is how many positionals the command wants.
+func (c *cli) withRepoSelector(pos []string, n int) []string {
+	sel := c.repoSelector()
+	if sel == "" || len(pos) >= n {
+		return pos
+	}
+	return append([]string{sel}, pos...)
+}
 
 // apiPath builds /owner/repo/api/<segments…> with per-segment escaping.
 func apiPath(owner, repo string, segs ...string) string {
@@ -576,12 +631,17 @@ type apiGroup struct {
 }
 
 // groupRunner dispatches a group: two-token subcommands first ("member list"),
-// then one token — the same resolution order as main's flat table.
+// then one token — the same resolution order as main's flat table. A leading
+// `-h`/`--help` prints the group table (exit 0), never "unknown subcommand".
 func groupRunner(g *apiGroup) func(context.Context, *cli, []string) int {
 	return func(ctx context.Context, c *cli, args []string) int {
 		if len(args) == 0 {
 			printGroupHelp(c, g)
 			return exitArg
+		}
+		if args[0] == "-h" || args[0] == "--help" {
+			printGroupHelp(c, g)
+			return exitOK
 		}
 		if len(args) >= 2 {
 			key := args[0] + " " + args[1]

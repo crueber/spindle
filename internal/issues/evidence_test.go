@@ -56,7 +56,7 @@ func TestEvidenceIssueReadPath(t *testing.T) {
 				long = 60
 			}
 			for i := 0; i < n; i++ {
-				th, _, err := s.CreateIssue(ctx, "acme", "repo", janeP, fmt.Sprintf("issue %d", i), "body")
+				th, _, err := s.CreateIssue(ctx, "acme", "repo", janeP, fmt.Sprintf("issue %d", i), "body", nil)
 				if err != nil {
 					t.Fatal(err)
 				}

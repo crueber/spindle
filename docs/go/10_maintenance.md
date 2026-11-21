@@ -446,3 +446,24 @@ Operator view of one pass on an ssd host (`spindle serve --config walgit.toml`):
   durability would leave serve-only deployments with unbounded absence.
   (Corrected 2026-09-09 per review #258: the original entry claimed R1 B1
   authority for sweep-only writes — the opposite of what R1 ordered.)
+- **NEW (2026-11-21) — out-of-band per-repo sweeps are a plug, not a priority row.**
+  `Options.Sweepers` (an ordered `[]maintain.Sweeper`, each `Kind()` + `Sweep()`) runs AFTER the §4
+  ladder for every assigned repo, through the SAME task path (`Tasks().Run(kind)`: `(repo,kind)`
+  single-flight, narration, task table) and under the same unit cap. The §4 priority list stays
+  exactly seven rows: a sweep has no desired-state predicate the plan could read for free (that would
+  be a LIST per repo per pass), so it carries its own in-memory cadence gate instead — a
+  `DueSweeper`'s `Due(repo)` is asked BEFORE a task is opened, so an idle repo costs one map lookup,
+  not a task record. First (and only) consumer: `packages-gc` (docs/features/14 §6), bound from
+  composition. A sweep failure is logged and counted (`OutcomeError`) but never fails the pass, and
+  a cancelled sweep is safe because every pass is idempotent.
+- **Per-repo compaction/maintenance/upstream editors + op run control (WP9, 2026-11-21).** The repo
+  Settings → Scheduled tab edits `[maintenance]`, `[compaction]` and `[upstream]` (git/lfs/follow) as
+  structured fieldsets over the stored repo settings document; the values are coerced by
+  `ByteSize`/`Duration.UnmarshalText` and published through `config.ParseRepoSettings` +
+  `ValidateAgainst` (so this section's validation is still the only gate). Because `[maintenance]` and
+  `[compaction]` merge wholesale, a present section pins every key; the editor's "Override host config"
+  checkbox is the explicit consent, and unchecking removes the section. `[upstream]` merges per field,
+  so blanks inherit. The WAL page and Settings → WAL share one Ops card (`partials/repo_wal_ops.html`);
+  running an op is a form POST to the existing `…/api/ops/{op}` SSE endpoint (AuthWrite), read by
+  `web/src/islands/ops.js` — no new endpoint and no new task kind. The forms appear only for a write
+  role; read-only viewers get the inventory.

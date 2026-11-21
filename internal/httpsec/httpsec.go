@@ -16,11 +16,13 @@ import (
 // what the pages actually load: htmx and the island bundle from 'self', the
 // single external stylesheet, inline `style=` attributes (label swatches,
 // progress widths — the only inline style form the templates use), images from
-// this host plus http(s)/data markdown sources, and same-origin fetch/SSE.
-// There are no inline scripts or inline event handlers, so script-src needs no
-// nonce or hash.
+// this host plus http(s)/data markdown sources, media from this host or https
+// (the sanitizer keeps external <video>/<audio> sources), and same-origin
+// fetch/SSE. There are no inline scripts or inline event handlers, so script-src
+// needs no nonce or hash.
 const ContentSecurityPolicy = "default-src 'self'; script-src 'self'; " +
 	"style-src 'self' 'unsafe-inline'; img-src 'self' https: http: data:; " +
+	"media-src 'self' https:; " +
 	"frame-ancestors 'none'; base-uri 'none'; form-action 'self'; object-src 'none'"
 
 // Apply sets the shared header set on h. Existing values win, so a route with a

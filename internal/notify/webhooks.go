@@ -503,8 +503,10 @@ func (s *Service) deliverHook(ctx context.Context, owner, repo string, h *Hook) 
 			}
 			continue
 		}
+		body, _ := encode(ev)
+		start := time.Now()
 		status, derr := s.postEvent(ctx, h, ev)
-		s.recordDelivery(ctx, owner, repo, h.ID, ev, status, derr)
+		s.recordDelivery(ctx, owner, repo, h.ID, ev, status, derr, body, time.Since(start))
 		if derr != nil || status < 200 || status >= 300 {
 			break // cursor stays: retry from here next pass
 		}
@@ -536,14 +538,21 @@ func (s *Service) postEvent(ctx context.Context, h *Hook, ev *ActivityEvent) (in
 	if err != nil {
 		return 0, err
 	}
+	return s.postBody(ctx, h, ev.Action, ev.Seq, body)
+}
+
+// postBody POSTs one already-encoded body with the §5.3 keeper headers
+// (delivery id = sha256(body+seq), event name, optional HMAC). Redeliver
+// reuses it so a replay is byte-identical to the original attempt.
+func (s *Service) postBody(ctx context.Context, h *Hook, action string, seq int, body []byte) (int, error) {
 	req, err := http.NewRequestWithContext(ctx, "POST", h.URL, bytes.NewReader(body))
 	if err != nil {
 		return 0, err
 	}
-	sum := sha256.Sum256(append(append([]byte(nil), body...), []byte(strconv.Itoa(ev.Seq))...))
+	sum := sha256.Sum256(append(append([]byte(nil), body...), []byte(strconv.Itoa(seq))...))
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("X-Walgit-Delivery", hex.EncodeToString(sum[:]))
-	req.Header.Set("X-Walgit-Event", ev.Action)
+	req.Header.Set("X-Walgit-Event", action)
 	if h.Secret != "" {
 		mac := hmac.New(sha256.New, []byte(h.Secret))
 		mac.Write(body)
@@ -669,8 +678,8 @@ func redactDeliveryKV(s, key string) string {
 // not durability — best-effort CAS). Transport errors are scrubbed of
 // credential material before storing: they echo the hook URL, which may
 // carry userinfo or query tokens.
-func (s *Service) recordDelivery(ctx context.Context, owner, repo, id string, ev *ActivityEvent, status int, derr error) {
-	recordDeliveryAt(ctx, s, DeliveriesKey(owner, repo, id), ev, status, derr)
+func (s *Service) recordDelivery(ctx context.Context, owner, repo, id string, ev *ActivityEvent, status int, derr error, body []byte, dur time.Duration) DeliveryEntry {
+	return recordDeliveryAt(ctx, s, DeliveriesKey(owner, repo, id), ev, status, derr, body, dur)
 }
 
 // ReadDeliveries loads the ring (nil entries when absent — wire `[]`).
@@ -717,8 +726,9 @@ func (s *Service) PingHook(ctx context.Context, owner, repo, id, actor string) (
 	if err := s.putCreate(ctx, ActivityKey(owner, repo, seq), raw); err != nil && !store.IsPreconditionFailed(err) {
 		return false, err
 	}
+	start := time.Now()
 	status, derr := s.postEvent(ctx, h, &ev)
-	s.recordDelivery(ctx, owner, repo, h.ID, &ev, status, derr)
+	s.recordDelivery(ctx, owner, repo, h.ID, &ev, status, derr, raw, time.Since(start))
 	if derr != nil || status < 200 || status >= 300 {
 		return false, nil
 	}
@@ -726,4 +736,48 @@ func (s *Service) PingHook(ctx context.Context, owner, repo, id, actor string) (
 		s.advanceCursor(ctx, owner, repo, id, seq)
 	}
 	return true, nil
+}
+
+// RedeliverHook re-POSTs one stored delivery (admin). The stored body is
+// byte-identical to the original attempt, so the delivery id and HMAC
+// match too (a receiver that dedups on X-Walgit-Delivery still sees the
+// same event, which is the honest replay semantics). The cursor is NOT
+// touched: a manual replay is not a delivery-loop advance. An inactive
+// hook is refused like ping; a row without a retained body answers
+// ErrGone (410) instead of inventing bytes.
+func (s *Service) RedeliverHook(ctx context.Context, owner, repo, id string, seq int) (*DeliveryEntry, error) {
+	h := s.GetHook(ctx, owner, repo, id)
+	if h == nil {
+		return nil, fmt.Errorf("%w: unknown webhook", ErrNotFound)
+	}
+	if !h.Active {
+		return nil, fmt.Errorf("%w: webhook inactive", ErrInvalid)
+	}
+	return redeliverAt(ctx, s, DeliveriesKey(owner, repo, id), h, seq)
+}
+
+// redeliverAt finds the newest ring row for seq, re-POSTs its retained
+// body through postBody, and appends the new attempt to the same ring.
+// Shared by the repo and org surfaces (one ring shape, two key families).
+func redeliverAt(ctx context.Context, s *Service, key string, h *Hook, seq int) (*DeliveryEntry, error) {
+	d := readDeliveriesAt(ctx, s, key)
+	var match *DeliveryEntry
+	for i := range d.Entries {
+		if d.Entries[i].Seq == seq {
+			row := d.Entries[i]
+			match = &row // last match wins: the newest attempt for this seq
+		}
+	}
+	if match == nil {
+		return nil, fmt.Errorf("%w: unknown delivery #%d", ErrNotFound, seq)
+	}
+	if len(match.Body) == 0 {
+		return nil, fmt.Errorf("%w: delivery #%d has no retained payload (the activity event was compacted or the body exceeded %d bytes); send a ping to test the endpoint", ErrGone, seq, MaxDeliveryBody)
+	}
+	start := time.Now()
+	status, derr := s.postBody(ctx, h, match.Event, seq, match.Body)
+	// The fresh attempt lands in the same ring (scrubbed error included);
+	// the cursor stays put — a manual replay never advances delivery state.
+	entry := recordDeliveryAt(ctx, s, key, &ActivityEvent{Seq: seq, Action: match.Event}, status, derr, match.Body, time.Since(start))
+	return &entry, nil
 }

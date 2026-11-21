@@ -34,14 +34,20 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// Handle answers one /v2 request; false when the path is not ours.
+// Handle answers one registry or packages-API request; false when the path is
+// not ours.
 func (h *Handler) Handle(w http.ResponseWriter, r *http.Request) bool {
 	segs := splitPath(r)
-	if len(segs) == 0 || segs[0] != "v2" {
+	if len(segs) == 0 || segs[0] == "" {
 		return false
 	}
-	h.serveV2(w, r, segs)
-	return true
+	if segs[0] == "v2" {
+		h.serveV2(w, r, segs)
+		return true
+	}
+	// The page/API twin lives on the repo lanes (/{o}/{r}/api[-browser]/
+	// packages); everything else belongs to the core mux.
+	return h.HandleAPI(w, r, segs)
 }
 
 func splitPath(r *http.Request) []string {

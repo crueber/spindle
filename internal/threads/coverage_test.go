@@ -489,7 +489,7 @@ func TestCheckMirrorNilSink(t *testing.T) {
 func TestDispatchNilGit(t *testing.T) {
 	e := newTestEnv(t)
 	e.svc.Git = nil
-	if _, err := e.svc.DispatchRun(ctx(), "o/r", "refs/heads/main", "", e.writer()); !errors.Is(err, ErrUnavailable) {
+	if _, err := e.svc.DispatchRun(ctx(), "o/r", "refs/heads/main", "", nil, e.writer()); !errors.Is(err, ErrUnavailable) {
 		t.Fatalf("nil git dispatch = %v", err)
 	}
 }
@@ -590,7 +590,7 @@ func TestRunIDsFiltersForeignKeys(t *testing.T) {
 
 func TestFoldRunMissingRun(t *testing.T) {
 	e := newTestEnv(t)
-	if err := e.svc.foldRun(ctx(), "o", "r", "0000000000000000001-abc123"); !errors.Is(err, ErrNotFound) {
+	if _, err := e.svc.foldRun(ctx(), "o", "r", "0000000000000000001-abc123"); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("fold missing run = %v", err)
 	}
 }
@@ -702,10 +702,10 @@ func TestServiceBadRepoPaths(t *testing.T) {
 	if _, err := e.svc.ListRuns(ctx(), "bad", e.public(), "", 1); !errors.Is(err, ErrInvalid) {
 		t.Fatalf("ListRuns bad repo = %v", err)
 	}
-	if _, err := e.svc.DispatchRun(ctx(), "bad", "refs/heads/main", "", e.writer()); !errors.Is(err, ErrInvalid) {
+	if _, err := e.svc.DispatchRun(ctx(), "bad", "refs/heads/main", "", nil, e.writer()); !errors.Is(err, ErrInvalid) {
 		t.Fatalf("DispatchRun bad repo = %v", err)
 	}
-	if err := e.svc.foldRun(ctx(), "o", "r", "0000000000000000001-abc123"); !errors.Is(err, ErrNotFound) {
+	if _, err := e.svc.foldRun(ctx(), "o", "r", "0000000000000000001-abc123"); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("foldRun missing run = %v", err)
 	}
 	if p, err := e.svc.ListRuns(ctx(), "o/r", e.public(), "", 0); err != nil || len(p.Runs) != 0 {

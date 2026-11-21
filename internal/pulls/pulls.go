@@ -138,6 +138,39 @@ type Emitter func(ctx context.Context, ev NotifyEvent)
 // Streamer appends StreamEvents to the repo's SSE stream. Nil-safe.
 type Streamer func(ctx context.Context, ev StreamEvent)
 
+// PullEvent is one pull_request lifecycle transition a CI trigger consumes
+// (Threads pass A, docs/features/15_threads.md §1): opened, synchronize (a new
+// head commit on an open PR) and reopened. A close never fires — a closing PR
+// must not start work.
+type PullEvent struct {
+	// Repo is the base repository ("owner/name") the PR targets.
+	Repo string
+	// Action is opened|synchronize|reopened.
+	Action string
+	Num    int
+	// BaseRef is the target branch (no refs/ prefix); HeadRef/HeadSHA name
+	// the revision being built. HeadRepo differs from Repo for a fork PR.
+	BaseRef  string
+	HeadRef  string
+	HeadSHA  string
+	HeadRepo string
+	// Fork is the trust class input: a cross-repository head runs the base
+	// branch's workflow files untrusted (15 §2).
+	Fork  bool
+	Actor string
+}
+
+// PullEventSink receives PullEvents synchronously from the pulls service, next
+// to the lifecycle emission the notify/SSE seams already use. A sink must not
+// block the PR mutation: composition detaches work onto its own goroutine.
+type PullEventSink func(ctx context.Context, ev PullEvent)
+
+// BranchPublished receives a server-side branch publish that never enters the
+// client push pipeline (the merge task's base-ref move), with the landed ref and
+// commit. Consumers wired to client pushes (Threads `on: push`) use it so a
+// merge commit gets its push-triggered runs. Synchronous; composition detaches.
+type BranchPublishedSink func(ctx context.Context, repo, ref, old, new string)
+
 // IssueCloser is the 02-provided seam the merge task calls at PR MERGE time
 // (never at push): ApplyClosingReferences parses closing keywords and closes
 // referenced issues. Satisfied by *issues.Service; tests substitute a fake.
@@ -238,6 +271,12 @@ type Service struct {
 	Notify Emitter
 	// Stream receives pull live updates (nil = no-op).
 	Stream Streamer
+	// PullEvents receives CI trigger transitions (opened/synchronize/
+	// reopened; never close). Nil = no-op.
+	PullEvents PullEventSink
+	// BranchPublished receives the merge task's base-ref publish (the
+	// server-side push no client pipeline sees). Nil = no-op.
+	BranchPublished BranchPublishedSink
 
 	flight *flightGroup
 	tasks  *taskTable
@@ -429,6 +468,22 @@ func (s *Service) stream(ctx context.Context, ev StreamEvent) {
 		return
 	}
 	s.Stream(ctx, ev)
+}
+
+// pullEvent delivers one CI trigger transition, nil-safe.
+func (s *Service) pullEvent(ctx context.Context, ev PullEvent) {
+	if s.PullEvents == nil {
+		return
+	}
+	s.PullEvents(ctx, ev)
+}
+
+// branchPublished delivers one server-side branch publish, nil-safe.
+func (s *Service) branchPublished(ctx context.Context, repo, ref, old, new string) {
+	if s.BranchPublished == nil {
+		return
+	}
+	s.BranchPublished(ctx, repo, ref, old, new)
 }
 
 // --- single-flight (13 §3) ---------------------------------------------------

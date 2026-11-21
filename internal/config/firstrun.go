@@ -1,11 +1,13 @@
 package config
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 )
 
 // FirstRunDefaults returns the zero-config boot configuration (divergence D5,
@@ -133,27 +135,82 @@ func ValidateForSave(c *Config) error {
 // SaveSetup validates c (§5), then atomically serializes it to
 // <data-dir>/spindle.toml: write spindle.toml.tmp (mode 0600), fsync, rename.
 // Readers see either the old or the new file, never a partial one.
-func SaveSetup(c *Config, dataDir string) error {
+//
+// The setup editor writes the FULL canonical document (Toml can be decoded but
+// its comments are not preserved by the codec), so the first rewrite of an
+// existing file keeps the operator's text: the previous bytes are copied to
+// spindle.toml.bak-<utc> beside the config before the rewrite. The backup is
+// made ONCE — a later save sees it already present — and an unchanged save
+// writes nothing at all (byte-identical), so comments an operator keeps in a
+// canonical file only go on the first canonicalising save. The returned string
+// is that backup's file name ("" when none was needed).
+func SaveSetup(c *Config, dataDir string) (string, error) {
 	if err := ValidateForSave(c); err != nil {
-		return err
+		return "", err
 	}
 	if err := EnsureDataDir(dataDir); err != nil {
-		return fmt.Errorf("create data dir: %w", err)
+		return "", fmt.Errorf("create data dir: %w", err)
 	}
 	body, err := MarshalTOML(c)
 	if err != nil {
-		return fmt.Errorf("marshal config: %w", err)
+		return "", fmt.Errorf("marshal config: %w", err)
+	}
+	path := filepath.Join(dataDir, ConfigFileName)
+	backup, rewrite, err := backupBeforeRewrite(path, body)
+	if err != nil {
+		return "", err
+	}
+	if !rewrite {
+		return "", nil // byte-identical: nothing to write, nothing to keep
 	}
 	tmpPath := filepath.Join(dataDir, "spindle.toml.tmp")
 	if err := writeFileSync(tmpPath, body); err != nil {
 		os.Remove(tmpPath)
-		return fmt.Errorf("write config: %w", err)
+		return "", fmt.Errorf("write config: %w", err)
 	}
-	if err := os.Rename(tmpPath, filepath.Join(dataDir, "spindle.toml")); err != nil {
+	if err := os.Rename(tmpPath, path); err != nil {
 		os.Remove(tmpPath)
-		return fmt.Errorf("rename config into place: %w", err)
+		return "", fmt.Errorf("rename config into place: %w", err)
 	}
-	return nil
+	return backup, nil
+}
+
+// backupBeforeRewrite copies an existing config's bytes to
+// spindle.toml.bak-<utc> when the document about to be written differs and no
+// backup exists yet. rewrite is false when the file already equals body (a
+// no-op save must not touch the file at all). It returns the backup's base
+// name, "" when there is nothing to back up (no file, an empty file, or a
+// backup already exists).
+func backupBeforeRewrite(path string, body []byte) (name string, rewrite bool, err error) {
+	cur, err := os.ReadFile(path)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return "", true, nil
+		}
+		// A directory where the config belongs holds no operator text; let the
+		// write/rename below report the real failure. Any other read error
+		// fails closed: rewriting a file we could not read would destroy it
+		// without a backup.
+		if fi, serr := os.Stat(path); serr == nil && fi.IsDir() {
+			return "", true, nil
+		}
+		return "", false, fmt.Errorf("read config: %w", err)
+	}
+	if bytes.Equal(cur, body) {
+		return "", false, nil
+	}
+	if len(cur) == 0 {
+		return "", true, nil
+	}
+	if prior, _ := filepath.Glob(path + ".bak-*"); len(prior) > 0 {
+		return "", true, nil // the operator's original text is already preserved
+	}
+	name = ConfigFileName + ".bak-" + time.Now().UTC().Format("20060102T150405Z")
+	backupPath := filepath.Join(filepath.Dir(path), name)
+	if err := writeFileSync(backupPath, cur); err != nil {
+		return "", false, fmt.Errorf("write config backup: %w", err)
+	}
+	return name, true, nil
 }
 
 // writeFileSync writes body with mode 0600 and fsyncs before returning.

@@ -259,7 +259,7 @@ func TestMarshalTOMLRoundTrip(t *testing.T) {
 func TestSaveSetupWritesAtomicallyWith0600(t *testing.T) {
 	dir := tmpDataDir(t)
 	c := FirstRunDefaults(dir)
-	if err := SaveSetup(c, dir); err != nil {
+	if _, err := SaveSetup(c, dir); err != nil {
 		t.Fatalf("SaveSetup: %v", err)
 	}
 	path := filepath.Join(dir, "spindle.toml")
@@ -287,7 +287,7 @@ func TestSaveSetupRejectsInvalidConfig(t *testing.T) {
 	dir := tmpDataDir(t)
 	c := FirstRunDefaults(dir)
 	c.Server.Auth.Mode = "oidc" // no allowlist/trio → still invalid (#371: not the anon flag)
-	if err := SaveSetup(c, dir); err == nil {
+	if _, err := SaveSetup(c, dir); err == nil {
 		t.Fatal("SaveSetup must refuse an invalid config")
 	}
 	if _, err := os.Stat(filepath.Join(dir, "spindle.toml")); !errors.Is(err, os.ErrNotExist) {
@@ -523,7 +523,7 @@ func TestSaveSetupMkdirFailure(t *testing.T) {
 	}
 	sub := filepath.Join(blocker, "sub")
 	c := FirstRunDefaults(sub)
-	if err := SaveSetup(c, sub); err == nil {
+	if _, err := SaveSetup(c, sub); err == nil {
 		t.Fatal("want SaveSetup error when the data dir cannot be created")
 	}
 }
@@ -566,7 +566,7 @@ func TestSaveSetupIOErrors(t *testing.T) {
 	if err := os.Mkdir(filepath.Join(dir, "spindle.toml.tmp"), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	if err := SaveSetup(c, dir); err == nil || !strings.Contains(err.Error(), "write config") {
+	if _, err := SaveSetup(c, dir); err == nil || !strings.Contains(err.Error(), "write config") {
 		t.Fatalf("err = %v, want write config error", err)
 	}
 
@@ -574,7 +574,7 @@ func TestSaveSetupIOErrors(t *testing.T) {
 	if err := os.Mkdir(filepath.Join(dir, "spindle.toml"), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	if err := SaveSetup(c, dir); err == nil || !strings.Contains(err.Error(), "rename") {
+	if _, err := SaveSetup(c, dir); err == nil || !strings.Contains(err.Error(), "rename") {
 		t.Fatalf("err = %v, want rename error", err)
 	}
 }

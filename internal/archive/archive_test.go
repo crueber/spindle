@@ -1,7 +1,10 @@
 package archive
 
 import (
+	"archive/tar"
+	"archive/zip"
 	"bytes"
+	"compress/gzip"
 	"context"
 	"errors"
 	"io"
@@ -110,14 +113,54 @@ func TestArchiveTarMatchesGitArchive(t *testing.T) {
 	if err != nil {
 		t.Fatalf("local git archive: %v", err)
 	}
-	if !bytes.Equal(w.Body.Bytes(), want) {
-		t.Fatalf("tar bytes differ: got %d want %d", w.Body.Len(), len(want))
+	// The body is a REAL gzip stream (audit FAIL 1: the old lane labelled a
+	// plain tar as application/gzip).
+	body := w.Body.Bytes()
+	if len(body) < 2 || body[0] != 0x1f || body[1] != 0x8b {
+		t.Fatalf("body does not start with the gzip magic 1f 8b: % x", body[:min(4, len(body))])
+	}
+	zr, err := gzip.NewReader(bytes.NewReader(body))
+	if err != nil {
+		t.Fatalf("gzip.NewReader: %v", err)
+	}
+	got, err := io.ReadAll(zr)
+	if err != nil {
+		t.Fatalf("gunzip: %v", err)
+	}
+	if err := zr.Close(); err != nil {
+		t.Fatalf("gunzip close: %v", err)
+	}
+	if !bytes.Equal(got, want) {
+		t.Fatalf("decompressed tar differs from `git archive`: got %d want %d", len(got), len(want))
+	}
+	// A tar reader sees exactly the same entries as the local git archive
+	// (the listing is what users open).
+	gotNames, wantNames := tarNames(t, got), tarNames(t, want)
+	if strings.Join(gotNames, "\n") != strings.Join(wantNames, "\n") {
+		t.Fatalf("tar listing differs:\n got %v\nwant %v", gotNames, wantNames)
 	}
 	if got := w.Header().Get("Content-Type"); got != "application/gzip" {
 		t.Fatalf("content-type %q", got)
 	}
 	if w.Header().Get("ETag") == "" {
 		t.Fatal("missing ETag")
+	}
+}
+
+// tarNames lists the entry names of a tar stream in order.
+func tarNames(t *testing.T, b []byte) []string {
+	t.Helper()
+	tr := tar.NewReader(bytes.NewReader(b))
+	var names []string
+	for {
+		hdr, err := tr.Next()
+		if err == io.EOF {
+			return names
+		}
+		if err != nil {
+			t.Fatalf("tar read: %v", err)
+		}
+		names = append(names, hdr.Name)
 	}
 }
 
@@ -135,9 +178,63 @@ func TestArchiveZipMatchesGitArchiveWithStoreFlag(t *testing.T) {
 	if err != nil {
 		t.Fatalf("local git archive: %v", err)
 	}
-	if !bytes.Equal(w.Body.Bytes(), want) {
-		t.Fatalf("zip bytes differ: got %d want %d", w.Body.Len(), len(want))
+	// Compare the ARCHIVE, not the container bytes. A zip stream carries
+	// producer-specific fields (version-made-by, extra-field order, the UT
+	// timestamp encoding) that differ between Go's writer and any given git
+	// build, so byte equality is a toolchain assertion that flakes the moment
+	// the two producers encode equally-valid zips differently (CI run 1091:
+	// "got 515 want 515"). Entry names, modes, mtimes and contents are what
+	// the archive actually promises.
+	zipEntriesEqual(t, w.Body.Bytes(), want)
+}
+
+// zipEntriesEqual fails unless both zip streams carry the same entries: name,
+// mode, modification time and decompressed content, in order.
+func zipEntriesEqual(t *testing.T, got, want []byte) {
+	t.Helper()
+	gz, err := zip.NewReader(bytes.NewReader(got), int64(len(got)))
+	if err != nil {
+		t.Fatalf("our zip: %v", err)
 	}
+	wz, err := zip.NewReader(bytes.NewReader(want), int64(len(want)))
+	if err != nil {
+		t.Fatalf("git zip: %v", err)
+	}
+	if len(gz.File) != len(wz.File) {
+		t.Fatalf("entry count: got %d want %d", len(gz.File), len(wz.File))
+	}
+	for i := range gz.File {
+		g, w := gz.File[i], wz.File[i]
+		if g.Name != w.Name {
+			t.Fatalf("entry %d name: got %q want %q", i, g.Name, w.Name)
+		}
+		if g.Mode() != w.Mode() {
+			t.Fatalf("entry %q mode: got %v want %v", g.Name, g.Mode(), w.Mode())
+		}
+		if !g.Modified.Equal(w.Modified) {
+			t.Fatalf("entry %q mtime: got %v want %v", g.Name, g.Modified, w.Modified)
+		}
+		gb, err := readZipEntry(g)
+		if err != nil {
+			t.Fatalf("entry %q: %v", g.Name, err)
+		}
+		wb, err := readZipEntry(w)
+		if err != nil {
+			t.Fatalf("entry %q: %v", w.Name, err)
+		}
+		if !bytes.Equal(gb, wb) {
+			t.Fatalf("entry %q content differs (%d vs %d bytes)", g.Name, len(gb), len(wb))
+		}
+	}
+}
+
+func readZipEntry(f *zip.File) ([]byte, error) {
+	rc, err := f.Open()
+	if err != nil {
+		return nil, err
+	}
+	defer rc.Close()
+	return io.ReadAll(rc)
 }
 
 func TestArchiveETag304AndRefEquivalence(t *testing.T) {

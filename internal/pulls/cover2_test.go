@@ -205,9 +205,7 @@ func TestCoverUpdateNoop(t *testing.T) {
 		t.Fatalf("same: %+v %v", th2, err)
 	}
 	// Merged PR cannot be closed.
-	pr.Merged = true
-	_, prVer, _ := e.svc.loadPR(ctx(), "o", "r", 1)
-	_ = e.svc.savePR(ctx(), "o", "r", pr, prVer)
+	markMergedPR(t, e, "o", "r", 1)
 	if _, _, err := e.svc.UpdatePR(ctx(), "o", "r", 1, writer(), PRPatch{State: strPtr("closed")}); !errors.Is(err, ErrConflict) {
 		t.Fatalf("merged close: %v", err)
 	}
@@ -425,9 +423,7 @@ func TestCoverBranchHeadFork(t *testing.T) {
 		}
 		e.roles.Roles["jane@example.com"] = "write"
 		openBasic(t, e, "o", "r")
-		pr, prVer, _ := e.svc.loadPR(ctx(), "o", "r", 1)
-		pr.Merged = true
-		_ = e.svc.savePR(ctx(), "o", "r", pr, prVer)
+		markMergedPR(t, e, "o", "r", 1)
 		putPolicy(t, e, `{"version":1,"rules":[{"name":"no-del","match":{"refs":["refs/heads/topic"]},"effect":{"protect":{"restricts":["delete"]}}}]}`)
 		if err := e.svc.DeleteHead(ctx(), "o", "r", 1, maintainer()); !errors.Is(err, ErrConflict) {
 			t.Fatalf("deny: %v", err)

@@ -85,8 +85,11 @@ Repos that already hold more hooks than the cap (created before it) are grandfat
 delivery still scans all their hooks and only new creates are refused.
 
 Delivery records: `repos/<o>/<r>/webhooks/<id>/deliveries/recent.json` — one CAS'd last-25 ring
-`{updated_at, entries:[{seq, event, status, at, error?, duration_ms}]}` (debugging surface only, not
-a durability mechanism).
+`{updated_at, entries:[{seq, event, status, at, error?, duration_ms, body?}]}` (debugging surface, not
+a durability mechanism). `duration_ms` is the measured POST time. `body` is the exact request body
+(including its keeper headers' inputs) retained for **redeliver**, capped at `MaxDeliveryBody`
+(64 KiB): a larger body is delivered normally but not retained, and a row without `body` is the
+honest "payload not retained" marker — redeliver answers `410 Gone`, never a fabricated replay.
 
 ### 1.5 Org webhook configs — `orgs/<org>/webhooks/<id>.json` (Forgejo #363)
 
@@ -393,13 +396,15 @@ RouteProvider (Seam 1).
 | `DELETE /{o}/{r}/api/webhooks/{id}` | admin | → 204 | also deletes cursor + deliveries |
 | `POST /{o}/{r}/api/webhooks/{id}/ping` | admin | → `{delivery: true}` | enqueues `ping` activity event |
 | `GET /{o}/{r}/api/webhooks/{id}/deliveries` | admin | → `{updated_at, entries: [...]}` | no-store |
+| `POST /{o}/{r}/api/webhooks/{id}/deliveries/{seq}/redeliver` | admin | → `{delivery, entry}` | re-POSTs the retained body byte-identically; cursor unchanged; 404 unknown seq, 410 when the body was not retained, 400 for an inactive hook |
 | `GET /api/v1/orgs/{org}/webhooks` | org owner | → `{webhooks: [Hook (no secret)]}` | both lanes; 401 anon, 403 non-owner |
 | `POST /api/v1/orgs/{org}/webhooks` | org owner | `{url, events[], secret?, insecure_tls?}` → `Hook` | filter accepts org actions (§5.4) + repo actions + `*`; 409 past the per-org cap (§1.5) |
 | `GET /api/v1/orgs/{org}/webhooks/{id}` | org owner | → `Hook` (`secret_set`, never `secret`) | 404 on unknown id (never 403) |
 | `PATCH /api/v1/orgs/{org}/webhooks/{id}` | org owner | partial → `Hook` | CAS'd |
 | `DELETE /api/v1/orgs/{org}/webhooks/{id}` | org owner | → 204 | also deletes both cursor families + deliveries |
 | `POST /api/v1/orgs/{org}/webhooks/{id}/ping` | org owner | → `{delivery: true}` | enqueues org-log `ping` (§5.4) |
-| `GET /api/v1/orgs/{org}/webhooks/{id}/deliveries` | org owner | → `{updated_at, entries: [...]}` | no-store |
+| `GET /api/v1/orgs/{org}/webhooks/{id}/deliveries` | org owner | → `{updated_at, entries: [...]}` | no-store; same ring shape as §1.4 (retained `body` + `duration_ms`) |
+| `POST /api/v1/orgs/{org}/webhooks/{id}/deliveries/{seq}/redeliver` | org owner | → `{delivery, entry}` | same semantics as the repo route: byte-identical replay, no cursor change, 404/410/400 as above |
 | `GET /api/v1/orgs/{org}/activity?n=&after=` | org owner | → `{events: [ActivityEvent], more}` (n default 50, max 200) | both lanes; 401 anon, 403 non-owner; no-store; newest-first, gaps skipped (§5.5) |
 | `GET /api/v1/orgs/{org}/activity/stream` | org owner | SSE `org_activity` frames (§5.5) | no-store; recent-ring replay, then live |
 
@@ -418,7 +423,8 @@ UI surfaces (page patterns in `12_web_ui.md` §2; templates
 | Notification tray | `/notifications` | Paged tray from `GET /api/v1/notifications`; state filter tabs (all/unread); row click navigates to `/{repo}/issues/{num}` (or PR view) and marks read; mounts the per-user SSE stream to prepend live items |
 | Chrome badge | every page | Unread count from `unread_count`, refreshed on stream frames; badge links to the tray |
 | Watch toggle | repo header | `PUT/DELETE /{o}/{r}/api/watch`; optimistic flip, reconcile on error |
-| Webhooks settings | `/{o}/{r}/settings/webhooks` (admin only) | CRUD table + `ping` button + recent deliveries expander; secret shown once at creation |
+| Webhooks settings | `/{o}/{r}/settings/webhooks` (admin only) | CRUD table + enable/disable + secret rotation + `ping` + delivery rows (status, `duration_ms`, retained-or-not) with `redeliver` where the body was retained; delete behind the typed-id confirmation; secret shown only as `•••••• (set)` |
+| Org Webhooks settings | `/{org}/settings?tab=webhooks` (org owner only) | the same canonical panel as the repo tab, scoped to the org (create/list/toggle/rotate/ping/deliveries/redeliver/delete); nav entry hidden for non-owners and the direct URL answers 403 |
 | Org activity | `/:org/settings` → Activity (owner only) | newest-first org-event table (member/team/repo/invite) with an "older" cursor; live rows prepend over the `org_activity` stream (one connection per mount, capped reconnect) |
 | Mention autocomplete | comment composer | suggests `@principal` from F1 user search and `@org/team` from F1 teams; purely advisory — the server re-parses |
 | Rendered mention links | every thread body (issue/PR/review via the Go markdown renderer) | `@username` and legacy `@email` tokens link to `/{principal}` at render time (`internal/webui/markdown.go`, beside the #340 ref pass): same left-boundary + trailing-punct rules as §3, code spans/fences/links skipped, `@org/team` NOT linked (team URLs live under settings/teams, out of scope); ALL grammar-valid tokens link with no existence probe (dead links acceptable, GitHub behavior — decision (a)), href lowercased, display as typed; plain relative anchors, zero sanitizer changes |
@@ -431,8 +437,8 @@ client.notifications.unreadCount()                       // GET unread_count
 client.notifications.markRead(id) / markUnread(id) / markAllRead()
 client.notifications.stream(onNotification)              // fetch-based SSE reader, cancel fn returned
 client.watch.get(o, r) / client.watch.set(o, r, on)      // PUT/DELETE watch
-client.webhooks.list(o, r) / create(o, r, spec) / update(o, r, id, patch) / remove(o, r, id) / ping(o, r, id) / deliveries(o, r, id)
-client.orgs.webhooks.list(org) / create(org, spec) / get(org, id) / update(org, id, patch) / remove(org, id) / ping(org, id) / deliveries(org, id)
+client.webhooks.list(o, r) / create(o, r, spec) / update(o, r, id, patch) / remove(o, r, id) / ping(o, r, id) / deliveries(o, r, id) / redeliver(o, r, id, seq)
+client.orgs.webhooks.list(org) / create(org, spec) / get(org, id) / update(org, id, patch) / remove(org, id) / ping(org, id) / deliveries(org, id) / redeliver(org, id, seq)
 client.orgs.activity.list(org, {n, after}) / stream(org, onEvent)   // GET …/activity + fetch-based SSE reader, cancel fn returned
 ```
 
@@ -810,7 +816,28 @@ a read notification while its tray page is open is harmless (404 → UI drops th
 
 - Email delivery (§5.2 seam), push notifications, mobile.
 - Per-thread mute/snooze and per-repo notification settings UI (GitHub's "participating vs all" dial) — v1 emits for participants + watchers; a preference object is the natural extension.
-- An org-settings webhooks tab in the web UI (the API + SDK surface in §6/§7 is the v1 contract; the tab is a pure UI follow-up). The org-settings Activity tab (§5.5/§7) is NOT covered by this exclusion — it landed with #364.
+- ~~An org-settings webhooks tab in the web UI~~ — landed in WP6.2 (§7; the Activity tab landed with #364).
 - Notification digest batching, threading/grouping rules beyond the (user, thread, reason) dedup.
 - Webhook retry-with-backoff schedules (v1 is at-least-once via cursor; a failed delivery retries on the next pass), delivery payload customization/templates, and bot signatures.
 - In-repo "notifications" for git events (pushes) — those stay on the WAL events bridge (09).
+
+- **NEW (2026-11-21, WP6.2) — org Webhooks tab + redeliver.** The org API/SDK surface already
+  mirrored the repo one; WP6.2 closes the remaining parity gaps: (1) `/{org}/settings?tab=webhooks`
+  renders the same canonical `webhooks-panel` partial as the repo tab (create with events/secret,
+  enable/disable, secret rotation, ping, deliveries with status + `duration_ms`, redeliver where
+  retained, delete behind a typed-id confirmation). Every action re-checks the org-owner gate at
+  the composition seam (`OrgWebhookWrite`, `CheckOrgOwner`), and the nav entry is absent/403 for
+  non-owners exactly like Activity/Danger. (2) Both surfaces gain **redeliver**: retained ring
+  rows keep the exact POST body (≤ `MaxDeliveryBody`, 64 KiB) and replay it byte-identically
+  (same `X-Walgit-Delivery`, same HMAC), appending a new attempt row without advancing any
+  cursor. Unknown seq → 404; a row without `body` (pre-retention record, compacted source, or
+  oversized body) → 410 with the honest reason; an inactive hook → 400, like ping. (3) The repo
+  tab gains the same enable/disable/rotate/redeliver controls (previously PATCH-only at the API).
+  Rationale: a replay that cannot reproduce byte-identical bytes is a different event to a
+  receiver that dedups on `X-Walgit-Delivery`; retaining the body is what makes "redeliver"
+  truthful, and refusing (410) is what keeps an unretained row honest. The org Webhooks write
+  seam is separate (`SettingsDeps.OrgWebhookWrite`) because the hook surface is notify-owned while
+  the rest of the org page is identity-owned (WP9 G2 later bound that half too).
+  Composition now also wires `notify.Service.OrgOwner` to identity (`newNotifyService`); it had
+  been left nil, so in `token`/`oidc` mode the org webhook API was host-admin-only instead of
+  owner-gated. Pinned by `TestOrgBirthObserverEmitsForOrgsOnly`'s construction assertion.

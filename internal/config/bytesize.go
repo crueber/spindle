@@ -39,7 +39,11 @@ func ParseByteSize(s string) (ByteSize, error) {
 		if v != math.Trunc(v) {
 			return 0, fmt.Errorf("invalid size %q: not a whole number of bytes", s)
 		}
-		if v > math.MaxInt64 || v < math.MinInt64 {
+		// 2^63 is exactly representable in float64 and is one past MaxInt64;
+		// comparing against math.MaxInt64 (which converts to 2^63) let
+		// exactly 2^63 bytes through, and int64(v) then saturated.
+		const int64Limit = 9223372036854775808.0
+		if v >= int64Limit || v < -int64Limit {
 			return 0, fmt.Errorf("invalid size %q: overflows int64", s)
 		}
 		return ByteSize(int64(v)), nil

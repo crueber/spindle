@@ -545,19 +545,21 @@ func (s *Server) authFailure(w http.ResponseWriter, r *http.Request, aerr *auth.
 				http.StatusTemporaryRedirect)
 			return
 		}
-		// #344: an unauthenticated browser with login disabled must still
-		// get something usable — the rendered login page (with the disabled
-		// explanation), not a bare 401. Status stays 401 and the Bearer
+		// #344 / F1: an unauthenticated browser with login disabled must still
+		// get something usable — the rendered login page HONEST for the mode
+		// (the token-paste form in token mode, the OIDC explanation only on an
+		// OIDC host), not a bare 401. Status stays 401 and the Bearer
 		// challenge stays, so API clients see no behavior change.
 		if r.Method == http.MethodGet && browserLooks(r) &&
 			r.Header.Get("Authorization") == "" {
-			w.Header().Set("WWW-Authenticate", `Bearer realm="walgit"`)
+			w.Header().Set("WWW-Authenticate", s.authChallenge())
 			w.Header().Set("Content-Type", "text/html; charset=utf-8")
 			w.WriteHeader(http.StatusUnauthorized)
-			_, _ = w.Write([]byte(loginUnavailableHTML(r.URL.RequestURI())))
+			_, _ = w.Write([]byte(loginPageHTML(s.cfg.Server.Auth.Mode,
+				s.authSvc.TokenSignInEnabled(), r.URL.RequestURI())))
 			return
 		}
-		w.Header().Set("WWW-Authenticate", `Bearer realm="walgit"`)
+		w.Header().Set("WWW-Authenticate", s.authChallenge())
 		plainStatus(w, http.StatusUnauthorized, aerr.Why)
 	}
 }
@@ -571,7 +573,7 @@ func (s *Server) mapAuthStatus(w http.ResponseWriter, aerr *auth.AuthError) {
 		w.Header().Set("Retry-After", "15")
 		plainStatus(w, http.StatusServiceUnavailable, aerr.Why)
 	default:
-		w.Header().Set("WWW-Authenticate", `Bearer realm="walgit"`)
+		w.Header().Set("WWW-Authenticate", s.authChallenge())
 		plainStatus(w, http.StatusUnauthorized, aerr.Why)
 	}
 }

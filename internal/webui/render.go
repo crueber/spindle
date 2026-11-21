@@ -64,8 +64,9 @@ func (s *Server) chrome(r *http.Request, p auth.Principal, title string) Chrome 
 		Mode:      mode,
 		SignedIn:  signedIn,
 		Admin:     p.Admin,
-		// The browser login exists only for the OIDC flow.
-		ShowLogin: !signedIn && mode == "oidc",
+		// The browser login exists for the OIDC flow and for token mode's
+		// token-paste form (F1); auth none has no account to sign in to.
+		ShowLogin: !signedIn && (mode == "oidc" || s.tokenSignInEnabled()),
 		LoginHref: "/_auth/login?next=" + url.QueryEscape(r.URL.Path),
 		// Forgejo #466: the create button shares the identity gate.
 		ShowCreate: signedIn,
@@ -162,8 +163,34 @@ func (s *Server) page(w http.ResponseWriter, r *http.Request, p auth.Principal, 
 // page's own content. It is the ONE attach point — a group never re-renders
 // the header itself (12_web_ui.md §2.2.1). chrome must already be gated: build
 // it with repoChromeFor/repoChromeFrom AFTER the handler's own read gate ran.
+//
+// F3 (one amber primary): when the page template renders its own primary body
+// action, the masthead Clone is demoted to a secondary .btn so the accent is
+// unique. A page with no body action (Code, tags, commits, …) keeps Clone
+// primary.
 func (s *Server) pageRepo(w http.ResponseWriter, r *http.Request, p auth.Principal, chrome *RepoChrome, status int, name, title string, data any) {
+	if chrome != nil && repoPageOwnPrimary(name) {
+		chrome.ClonePrimary = false
+	}
 	s.render(w, r, status, name, PageData{Chrome: s.chrome(r, p, title), Repo: chrome, Data: data})
+}
+
+// repoPageOwnPrimary reports whether a repo-scoped page template carries its
+// own .btn.primary (style guideline F3). Keep this list in sync with a new page
+// that adds a primary CTA; the clone-primary test walks it.
+func repoPageOwnPrimary(name string) bool {
+	switch name {
+	case "collab/issues", "collab/pulls", "collab/releases", "collab/release",
+		"collab/issue", "collab/pull", "collab/pull_files", "collab/threads",
+		// The run page's approve control (first-time-contributor gate) is its
+		// one primary action when a run is held.
+		"collab/thread_detail",
+		"settings/repo",
+		"forms/fork", "forms/release_new", "forms/issue_new", "forms/pull_new",
+		"forms/labels", "forms/milestones":
+		return true
+	}
+	return false
 }
 
 // errorPage renders the shared error page (HTML) or a plain-text body when the

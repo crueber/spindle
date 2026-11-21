@@ -1,10 +1,12 @@
 // cli_misc.go — `spindle packages`, `spindle threads`, `spindle api`, and
 // `spindle completion` (11_config_cli.md §6.6).
 //
-// packages and threads are defined against their DOCUMENTED paths (WP1 /
-// WP10 are not landed). A 404 from those surfaces is reported as "feature
-// not enabled" (exit 1) — never the misleading not-found exit 3 — so the
-// command surface ships now and starts working the day the server route
+// packages rides the served registry API (docs/features/14 §7: GET
+// /{o}/{r}/api/packages, DELETE …/packages/tags/{tag}, DELETE …/packages/{digest}),
+// so its 404s are real not-found answers from a live endpoint. threads (WP10)
+// is still defined against its documented path; a 404 there is reported as
+// "feature not enabled" (exit 1) — never the misleading not-found exit 3 —
+// so the command surface ships now and starts working the day the server route
 // lands, with no CLI change.
 package main
 
@@ -24,7 +26,7 @@ import (
 
 var packagesGroup = &apiGroup{
 	name: "packages",
-	help: "OCI packages (WP1; endpoints documented, not yet served)",
+	help: "OCI packages (the repository's container registry)",
 	commands: []apiCommand{
 		{name: "list", usage: "spindle packages list OWNER/REPO", help: "list package tags and digests",
 			flags: []string{"json"}, run: runPackagesList},
@@ -39,9 +41,9 @@ func runPackagesList(ctx context.Context, c *cli, args []string) int {
 	f := &apiFlags{}
 	fs := newAPIFlagSet(c, "packages list")
 	f.add(fs)
-	pos, ok := parseAPI(fs, args)
-	if !ok {
-		return exitArg
+	pos, exit := parseAPI(fs, args)
+	if exit != parseContinue {
+		return exit
 	}
 	owner, repo, ok := oneRepo(c, pos, "packages list OWNER/REPO")
 	if !ok {
@@ -54,24 +56,26 @@ func runPackagesList(ctx context.Context, c *cli, args []string) int {
 	}
 	raw, err := a.call(ctx, "GET", apiPath(owner, repo, "packages"), nil, nil)
 	if err != nil {
-		return a.notEnabled(err, "packages")
+		return a.fail(err)
 	}
 	if f.json {
 		return a.emitJSON(raw)
 	}
 	var page struct {
 		Packages []struct {
-			Tag    string `json:"tag"`
-			Digest string `json:"digest"`
-			Size   int64  `json:"size"`
+			Tag       string   `json:"tag"`
+			Digest    string   `json:"digest"`
+			Size      int64    `json:"size"`
+			Platforms []string `json:"platforms"`
+			UpdatedAt string   `json:"updated_at"`
 		} `json:"packages"`
 	}
 	if err := json.Unmarshal(raw, &page); err != nil {
 		return a.emitJSON(raw)
 	}
-	t := newTable(c.stdout(), "TAG", "DIGEST", "SIZE")
+	t := newTable(c.stdout(), "TAG", "DIGEST", "SIZE", "PLATFORMS", "UPDATED")
 	for _, p := range page.Packages {
-		t.row(p.Tag, short12(p.Digest), strconv.FormatInt(p.Size, 10))
+		t.row(p.Tag, short12(p.Digest), strconv.FormatInt(p.Size, 10), strings.Join(p.Platforms, ","), p.UpdatedAt)
 	}
 	t.flush()
 	return exitOK
@@ -81,9 +85,9 @@ func runPackagesShow(ctx context.Context, c *cli, args []string) int {
 	f := &apiFlags{}
 	fs := newAPIFlagSet(c, "packages show")
 	f.add(fs)
-	pos, ok := parseAPI(fs, args)
-	if !ok {
-		return exitArg
+	pos, exit := parseAPI(fs, args)
+	if exit != parseContinue {
+		return exit
 	}
 	owner, repo, digest, ok := repoAndWord(c, pos, "packages show OWNER/REPO DIGEST")
 	if !ok {
@@ -96,7 +100,7 @@ func runPackagesShow(ctx context.Context, c *cli, args []string) int {
 	}
 	raw, err := a.call(ctx, "GET", apiPath(owner, repo, "packages", digest), nil, nil)
 	if err != nil {
-		return a.notEnabled(err, "packages")
+		return a.fail(err)
 	}
 	return a.emitJSON(raw)
 }
@@ -107,13 +111,36 @@ func runPackagesDelete(ctx context.Context, c *cli, args []string) int {
 	f.add(fs)
 	var tag string
 	fs.StringVar(&tag, "tag", "", "delete by tag instead of digest")
-	pos, ok := parseAPI(fs, args)
-	if !ok {
+	pos, exit := parseAPI(fs, args)
+	if exit != parseContinue {
+		return exit
+	}
+	if len(pos) == 0 {
+		if sel := c.repoSelector(); sel != "" {
+			pos = []string{sel}
+		}
+	}
+	if len(pos) != 1 && len(pos) != 2 {
+		fmt.Fprintln(c.stderr(), "usage: spindle packages delete OWNER/REPO (--tag T | DIGEST)")
 		return exitArg
 	}
-	owner, repo, digest, ok := repoAndWord(c, pos, "packages delete OWNER/REPO (--tag T | DIGEST)")
+	owner, repo, ok := splitRepo(pos[0])
 	if !ok {
+		fmt.Fprintf(c.stderr(), "spindle: %q is not OWNER/REPO\n", pos[0])
 		return exitArg
+	}
+	// Exactly one target: `--tag T` takes just OWNER/REPO, DIGEST takes
+	// OWNER/REPO DIGEST. Giving both is usage, not a preference.
+	var digest string
+	switch {
+	case tag != "" && len(pos) == 2:
+		fmt.Fprintln(c.stderr(), "spindle: pass --tag T or DIGEST, not both")
+		return exitArg
+	case tag == "" && len(pos) != 2:
+		fmt.Fprintln(c.stderr(), "usage: spindle packages delete OWNER/REPO (--tag T | DIGEST)")
+		return exitArg
+	case len(pos) == 2:
+		digest = pos[1]
 	}
 	a, err := newAPIClient(c, f)
 	if err != nil {
@@ -126,7 +153,7 @@ func runPackagesDelete(ctx context.Context, c *cli, args []string) int {
 	}
 	raw, err := a.call(ctx, "DELETE", path, nil, nil)
 	if err != nil {
-		return a.notEnabled(err, "packages")
+		return a.fail(err)
 	}
 	if f.json {
 		return a.emitJSON(raw)
@@ -141,25 +168,30 @@ func runPackagesDelete(ctx context.Context, c *cli, args []string) int {
 	return exitOK
 }
 
-// --- threads (WP10; docs/features/15_threads.md §6) -----------------------
+// --- threads (WP10/T1; docs/features/15_threads.md §6) --------------------
+//
+// The threads routes ARE served (T1): GET /{o}/{r}/api/threads lists runs,
+// POST dispatches {ref, workflow}, GET /{o}/{r}/api/threads/{run} reads one.
+// There is no cancellation route in T1 — cancel/rerun arrive with the T2
+// runner protocol (15 §"Read-only in T1"), so `threads cancel` says so
+// instead of calling a path that does not exist.
 
 var threadsGroup = &apiGroup{
 	name: "threads",
-	help: "CI runs (WP10; endpoints documented, not yet served)",
+	help: "CI runs (WP10/T1): list, show, dispatch",
 	commands: []apiCommand{
 		{name: "list", usage: "spindle threads list OWNER/REPO [--limit N]", help: "list CI runs",
 			flags: []string{"json", "limit"}, run: runThreadsList},
 		{name: "show", usage: "spindle threads show OWNER/REPO RUN", help: "one CI run and its jobs",
 			flags: []string{"json"}, run: runThreadsShow},
-		{name: "run", usage: "spindle threads run OWNER/REPO WORKFLOW [--ref R]", help: "dispatch a workflow run",
+		{name: "run", usage: "spindle threads run OWNER/REPO WORKFLOW --ref REF", help: "dispatch a workflow run",
 			flags: []string{"json", "quiet", "ref"}, run: runThreadsRun},
-		{name: "cancel", usage: "spindle threads cancel OWNER/REPO RUN", help: "cancel a running workflow",
+		{name: "cancel", usage: "spindle threads cancel OWNER/REPO RUN", help: "cancel a run (T2 runner protocol; not yet available)",
 			flags: []string{"json", "quiet"}, run: runThreadsCancel},
 	},
 }
 
-// threads path constants: the documented repo-scoped shape, so the commands
-// bind the day WP10 registers its routes.
+// threadsPath is the served repo-scoped shape /{o}/{r}/api/threads[/…].
 func threadsPath(owner, repo string, segs ...string) string {
 	return apiPath(owner, repo, append([]string{"threads"}, segs...)...)
 }
@@ -168,9 +200,9 @@ func runThreadsList(ctx context.Context, c *cli, args []string) int {
 	f := &apiFlags{}
 	fs := newAPIFlagSet(c, "threads list")
 	f.add(fs)
-	pos, ok := parseAPI(fs, args)
-	if !ok {
-		return exitArg
+	pos, exit := parseAPI(fs, args)
+	if exit != parseContinue {
+		return exit
 	}
 	owner, repo, ok := oneRepo(c, pos, "threads list OWNER/REPO")
 	if !ok {
@@ -187,7 +219,7 @@ func runThreadsList(ctx context.Context, c *cli, args []string) int {
 	}
 	raw, err := a.call(ctx, "GET", threadsPath(owner, repo), q, nil)
 	if err != nil {
-		return a.notEnabled(err, "threads")
+		return a.fail(err)
 	}
 	if f.json {
 		return a.emitJSON(raw)
@@ -197,7 +229,7 @@ func runThreadsList(ctx context.Context, c *cli, args []string) int {
 			ID         string `json:"id"`
 			Workflow   string `json:"workflow"`
 			Event      string `json:"event"`
-			Status     string `json:"status"`
+			State      string `json:"state"`
 			Conclusion string `json:"conclusion"`
 			Commit     string `json:"commit"`
 		} `json:"runs"`
@@ -205,9 +237,13 @@ func runThreadsList(ctx context.Context, c *cli, args []string) int {
 	if err := json.Unmarshal(raw, &page); err != nil {
 		return a.emitJSON(raw)
 	}
-	t := newTable(c.stdout(), "RUN", "WORKFLOW", "EVENT", "STATUS", "COMMIT")
+	t := newTable(c.stdout(), "RUN", "WORKFLOW", "EVENT", "STATE", "COMMIT")
 	for _, r := range page.Runs {
-		t.row(r.ID, r.Workflow, r.Event, r.Status, short12(r.Commit))
+		state := r.State
+		if r.Conclusion != "" {
+			state = r.Conclusion
+		}
+		t.row(r.ID, r.Workflow, r.Event, state, short12(r.Commit))
 	}
 	t.flush()
 	return exitOK
@@ -217,9 +253,9 @@ func runThreadsShow(ctx context.Context, c *cli, args []string) int {
 	f := &apiFlags{}
 	fs := newAPIFlagSet(c, "threads show")
 	f.add(fs)
-	pos, ok := parseAPI(fs, args)
-	if !ok {
-		return exitArg
+	pos, exit := parseAPI(fs, args)
+	if exit != parseContinue {
+		return exit
 	}
 	owner, repo, run, ok := repoAndWord(c, pos, "threads show OWNER/REPO RUN")
 	if !ok {
@@ -230,9 +266,10 @@ func runThreadsShow(ctx context.Context, c *cli, args []string) int {
 		fmt.Fprintf(c.stderr(), "spindle: %v\n", err)
 		return exitErr
 	}
+	// The route is served: a 404 here is a genuinely unknown run (exit 3).
 	raw, err := a.call(ctx, "GET", threadsPath(owner, repo, run), nil, nil)
 	if err != nil {
-		return a.notEnabled(err, "threads")
+		return a.fail(err)
 	}
 	return a.emitJSON(raw)
 }
@@ -242,13 +279,17 @@ func runThreadsRun(ctx context.Context, c *cli, args []string) int {
 	fs := newAPIFlagSet(c, "threads run")
 	f.add(fs)
 	var ref string
-	fs.StringVar(&ref, "ref", "", "git ref to run (default: the repo's default branch)")
-	pos, ok := parseAPI(fs, args)
+	fs.StringVar(&ref, "ref", "", "git ref to run (required: the API resolves it to a commit)")
+	pos, exit := parseAPI(fs, args)
+	if exit != parseContinue {
+		return exit
+	}
+	owner, repo, workflow, ok := repoAndWord(c, pos, "threads run OWNER/REPO WORKFLOW --ref REF")
 	if !ok {
 		return exitArg
 	}
-	owner, repo, workflow, ok := repoAndWord(c, pos, "threads run OWNER/REPO WORKFLOW")
-	if !ok {
+	if strings.TrimSpace(ref) == "" {
+		fmt.Fprintln(c.stderr(), "spindle: --ref is required (the dispatch API resolves it to a commit)")
 		return exitArg
 	}
 	a, err := newAPIClient(c, f)
@@ -256,48 +297,47 @@ func runThreadsRun(ctx context.Context, c *cli, args []string) int {
 		fmt.Fprintf(c.stderr(), "spindle: %v\n", err)
 		return exitErr
 	}
-	raw, err := a.call(ctx, "POST", threadsPath(owner, repo, workflow, "runs"), nil,
-		map[string]string{"ref": ref})
+	// The served dispatch endpoint is POST …/api/threads with {ref, workflow}.
+	var out struct {
+		Runs []struct {
+			ID       string `json:"id"`
+			Workflow string `json:"workflow"`
+			State    string `json:"state"`
+		} `json:"runs"`
+	}
+	raw, err := a.callInto(ctx, "POST", threadsPath(owner, repo), nil,
+		map[string]string{"ref": ref, "workflow": workflow}, &out)
 	if err != nil {
-		return a.notEnabled(err, "threads")
+		return a.fail(err)
 	}
 	if f.json {
 		return a.emitJSON(raw)
 	}
 	if !f.quiet {
-		fmt.Fprintf(c.stdout(), "Dispatched %s\n", workflow)
+		for _, r := range out.Runs {
+			fmt.Fprintf(c.stdout(), "Dispatched %s run %s (%s)\n", r.Workflow, r.ID, r.State)
+		}
+		if len(out.Runs) == 0 {
+			fmt.Fprintf(c.stdout(), "Dispatched %s\n", workflow)
+		}
 	}
 	return exitOK
 }
 
+// runThreadsCancel reports the documented gap (15 §"Read-only in T1"): the
+// JSON API has no cancellation route until the T2 runner protocol lands, and
+// a runner-ack cancellation cannot be faked by a client.
 func runThreadsCancel(ctx context.Context, c *cli, args []string) int {
 	f := &apiFlags{}
 	fs := newAPIFlagSet(c, "threads cancel")
 	f.add(fs)
-	pos, ok := parseAPI(fs, args)
-	if !ok {
-		return exitArg
+	pos, exit := parseAPI(fs, args)
+	if exit != parseContinue {
+		return exit
 	}
-	owner, repo, run, ok := repoAndWord(c, pos, "threads cancel OWNER/REPO RUN")
-	if !ok {
-		return exitArg
-	}
-	a, err := newAPIClient(c, f)
-	if err != nil {
-		fmt.Fprintf(c.stderr(), "spindle: %v\n", err)
-		return exitErr
-	}
-	raw, err := a.call(ctx, "POST", threadsPath(owner, repo, run, "cancel"), nil, nil)
-	if err != nil {
-		return a.notEnabled(err, "threads")
-	}
-	if f.json {
-		return a.emitJSON(raw)
-	}
-	if !f.quiet {
-		fmt.Fprintf(c.stdout(), "Cancel requested for run %s\n", run)
-	}
-	return exitOK
+	_ = pos // the message is the same whatever positional is given
+	fmt.Fprintln(c.stderr(), "spindle: threads cancel is not available: run cancellation is acknowledged by a runner and the JSON API exposes no route until the T2 runner protocol lands (docs/features/15_threads.md).")
+	return exitErr
 }
 
 // --- api: the escape hatch (§6.6) -----------------------------------------
@@ -311,9 +351,9 @@ func runAPI(ctx context.Context, c *cli, args []string) int {
 	fs.StringVar(&data, "d", "", "request body: literal, @FILE, or - for stdin")
 	fs.Var(&headers, "H", "request header 'Key: Value' (repeatable)")
 	fs.BoolVar(&pretty, "json", false, "pretty-print a JSON response")
-	pos, ok := parseAPI(fs, args)
-	if !ok {
-		return exitArg
+	pos, exit := parseAPI(fs, args)
+	if exit != parseContinue {
+		return exit
 	}
 	if len(pos) != 1 {
 		fmt.Fprintln(c.stderr(), "usage: spindle api [PATH] [-X METHOD] [-d DATA] [-H 'Key: Value']")
@@ -444,9 +484,9 @@ func (a *apiClient) sendAbsolute(ctx context.Context, method, u string, body []b
 
 func runCompletion(ctx context.Context, c *cli, args []string) int {
 	fs := newAPIFlagSet(c, "completion")
-	pos, ok := parseAPI(fs, args)
-	if !ok {
-		return exitArg
+	pos, exit := parseAPI(fs, args)
+	if exit != parseContinue {
+		return exit
 	}
 	if len(pos) != 1 {
 		fmt.Fprintln(c.stderr(), "usage: spindle completion bash|zsh|fish")

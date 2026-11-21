@@ -56,7 +56,7 @@ func TestSetupPutEditsCurrentFile(t *testing.T) {
 	base.Server.Listen = "127.0.0.1:9443"
 	base.Server.Auth.Mode = "none"
 	base.Server.Auth.AnonymousRead = true
-	if err := config.SaveSetup(base, dataDir); err != nil {
+	if _, err := config.SaveSetup(base, dataDir); err != nil {
 		t.Fatal(err)
 	}
 	s, _ := setupMergeServer(t, dataDir)
@@ -127,7 +127,7 @@ func TestSetupTestValidatesMergedConfig(t *testing.T) {
 	// A static admin token: the setup surface requires an admin principal and
 	// there is no env-token escape hatch (WP13).
 	base.Server.Auth.Tokens = []config.StaticToken{{Principal: "admin", Token: "tok123", Write: true, Admin: true}}
-	if err := config.SaveSetup(base, dataDir); err != nil {
+	if _, err := config.SaveSetup(base, dataDir); err != nil {
 		t.Fatal(err)
 	}
 	s, _ := setupMergeServer(t, dataDir)

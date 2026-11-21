@@ -15,6 +15,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -73,7 +74,8 @@ func TestBuildSchemaGroupsAndTypes(t *testing.T) {
 		{"server.auth.mode", "string", c.Server.Auth.Mode},
 		{"server.auth.admin_groups", "list", c.Server.Auth.AdminGroups},
 		{"server.auth.groups_claim", "string", c.Server.Auth.GroupsClaim},
-		{"server.auth.tokens", "list", c.Server.Auth.Tokens},
+		// A struct slice's value is the masked row map (G3: never the secret).
+		{"server.auth.tokens", "list", []map[string]any{}},
 		{"server.auth.session_ttl", "duration", c.Server.Auth.SessionTTL.String()},
 	}
 	for _, tc := range cases {
@@ -105,6 +107,7 @@ func TestBuildSchemaSecretFlagsAndFieldJSON(t *testing.T) {
 		"server.auth.tokens":              false, // a list of token tables, not one value
 		"server.auth.oauth_client_secret": true,
 		"server.auth.session_secret":      true,
+		"server.secrets_key":              true,  // the Threads at-rest key
 		"server.auth.access_token_ttl":    false, // a duration
 		"server.listen":                   false,
 		"server.ssh.host_key":             false, // a path
@@ -138,6 +141,7 @@ func TestSecretKeyTruthTable(t *testing.T) {
 		"key":            false, // a bare path flag (host_key), never a value
 		"my_password":    true,
 		"session_secret": true,
+		"secrets_key":    true,
 		"admin_token":    true,
 		"token":          true,
 		"token_env":      false,
@@ -401,7 +405,7 @@ func TestSetPathWalksSections(t *testing.T) {
 	}{
 		{"section as value", []string{"server", "auth"}, "server.auth: is a section, not a value"},
 		{"scalar as section", []string{"server", "http2", "deep"}, "server.http2: is not a section"},
-		{"unknown section", []string{"nope", "key"}, `unknown key ".nope"`},
+		{"unknown section", []string{"nope", "key"}, `unknown key "nope.key"`},
 		{"unknown key", []string{"server", "nope"}, `unknown key "server.nope"`},
 		{"single segment", []string{"server"}, `key "server" must be section.field`},
 	} {
@@ -601,7 +605,7 @@ func TestSaveWritesAtomicallyAndDiffsRestart(t *testing.T) {
 	cand.Server.Listen = "127.0.0.1:9099"
 	cand.Server.RequestTimeout = config.Duration(90 * time.Minute)
 
-	restart, err := Save(dataDir, cand, effective)
+	restart, _, err := Save(dataDir, cand, effective)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -627,7 +631,7 @@ func TestSaveWritesAtomicallyAndDiffsRestart(t *testing.T) {
 
 	// Saving the same values again reports no restart keys (non-nil slice: the
 	// API marshals [] not null).
-	restart, err = Save(dataDir, cand, cand)
+	restart, _, err = Save(dataDir, cand, cand)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -638,7 +642,7 @@ func TestSaveWritesAtomicallyAndDiffsRestart(t *testing.T) {
 	// An invalid candidate writes nothing and reports the failure.
 	bad := config.FirstRunDefaults(dataDir)
 	bad.Store.Backend = "nope"
-	if _, err := Save(dataDir, bad, effective); err == nil {
+	if _, _, err := Save(dataDir, bad, effective); err == nil {
 		t.Fatal("invalid save must fail")
 	}
 }
@@ -653,7 +657,7 @@ func TestSaveSerialized(t *testing.T) {
 			defer wg.Done()
 			c := config.FirstRunDefaults(dataDir)
 			c.Server.Listen = "127.0.0.1:" + strconv.Itoa(9000+i)
-			if _, err := Save(dataDir, c, c); err != nil {
+			if _, _, err := Save(dataDir, c, c); err != nil {
 				errs <- err
 			}
 		}(i)
@@ -808,5 +812,49 @@ func TestProbeAuth(t *testing.T) {
 	}
 	if probe.ClientIDPresent {
 		t.Fatalf("empty client id reported present: %+v", probe)
+	}
+}
+
+// TestSchemaEnumsAreTheRenderedValueSets pins G18's enum wiring: the closed
+// value sets live in this package (the schema authority), every key is a real
+// schema key, and BuildSchema carries them to the page without changing the
+// frozen wire Type ("string").
+func TestSchemaEnumsAreTheRenderedValueSets(t *testing.T) {
+	byKey := map[string]Field{}
+	for _, g := range BuildSchema(config.Defaults(), config.Defaults()) {
+		for _, f := range g.Keys {
+			byKey[f.Key] = f
+		}
+	}
+	for key, want := range schemaEnums {
+		f, ok := byKey[key]
+		if !ok {
+			t.Fatalf("%s: enum key is not a schema key", key)
+		}
+		if len(want) == 0 {
+			t.Fatalf("%s: empty enum set", key)
+		}
+		if f.DisplayType != "enum" {
+			t.Fatalf("%s: DisplayType = %q, want enum", key, f.DisplayType)
+		}
+		if !slices.Equal(f.Enum, want) {
+			t.Fatalf("%s: schema Enum = %v, want %v", key, f.Enum, want)
+		}
+		if f.Type != "string" {
+			t.Fatalf("%s: wire Type = %q, want string (frozen API shape)", key, f.Type)
+		}
+		if got := EnumValues(key); !slices.Equal(got, want) {
+			t.Fatalf("EnumValues(%s) = %v, want %v", key, got, want)
+		}
+	}
+	// The four free-text enum keys G18 named render as selects.
+	for _, key := range []string{"bundles.serve_via", "compaction.engine", "git.upload_pack_engine", "telemetry.log_format"} {
+		f := byKey[key]
+		if f.DisplayType != "enum" || len(f.Enum) == 0 {
+			t.Fatalf("%s is still free text: %+v", key, f)
+		}
+	}
+	if f := byKey["server.listen"]; f.DisplayType == "enum" {
+		t.Fatal("server.listen must stay a free-form text input")
 	}
 }

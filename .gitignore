@@ -25,3 +25,6 @@ walgit-state.json
 
 # agent workspace state (opencode goals/session scratch)
 .opencode/
+
+# local run scratch (servers, data dirs, pids, screenshots) — never commit it
+.run/

@@ -1,0 +1,160 @@
+{{/* partials/webhooks_panel.html — the canonical Webhooks tab panel shared by
+   repo settings (path-scoped rows, webhook_action) and org settings (one URL,
+   org_action + hidden id). The caller supplies SettingsWebhookPanel.
+
+   One .primary per page (the create button); row actions are links/buttons.
+   Delete is destructive and typed-confirmed against the hook id (the server
+   re-checks it). A delivery whose body was not retained shows no redeliver
+   control — the page never offers a replay it cannot perform. 390px: the
+   table scrolls in place; forms keep wrapping. */}}
+{{define "webhooks-panel"}}
+{{$panel := .WebhookPanel}}
+{{with $panel}}
+{{if not .Wired}}
+<div class="card p-4"><p class="muted text-sm">The webhook service is not wired on this build.</p></div>
+{{else}}
+<div class="space-y-4">
+  <p class="muted text-sm">One POST per collaboration event, signed with <code class="mono text-xs">X-Walgit-Signature</code> and identified by <code class="mono text-xs">X-Walgit-Delivery</code> / <code class="mono text-xs">X-Walgit-Event</code>. HTTPS only (loopback HTTP in dev).</p>
+  <form class="card p-4" method="post" action="{{.CreateAction}}" hx-post="{{.CreateAction}}"
+        hx-target="#settings-panel" hx-select="#settings-panel" hx-swap="outerHTML">
+    {{range .CreateFields}}<input type="hidden" name="{{.Key}}" value="{{.Value}}">{{end}}
+    <h3 class="card-header">Add a webhook</h3>
+    <div class="grid gap-3">
+      <div>
+        <label class="mb-1 block text-sm font-medium" for="webhook-url">URL</label>
+        <input class="input mono text-xs" id="webhook-url" name="url" type="url" required placeholder="https://example.com/hook" value="{{.NewURL}}">
+      </div>
+      <div>
+        <label class="mb-1 block text-sm font-medium" for="webhook-events">Events</label>
+        <input class="input mono" id="webhook-events" name="events" type="text" placeholder="empty = all, * = everything, else a comma list" value="{{.NewEvents}}">
+      </div>
+      <div>
+        <label class="mb-1 block text-sm font-medium" for="webhook-secret">Secret (optional, write-only)</label>
+        <input class="input md:max-w-md" id="webhook-secret" name="secret" type="password" autocomplete="new-password">
+      </div>
+    </div>
+    <div class="mt-2"><button type="submit" class="btn primary">create webhook</button></div>
+    {{if .Error}}<p class="err-line" role="alert">{{.Error}}</p>{{end}}
+  </form>
+  <section class="card p-4">
+    <h3 class="card-header">Webhooks</h3>
+    {{if .Rows}}
+    <div class="overflow-x-auto">
+      <table class="data-table">
+        <thead><tr><th>url</th><th>events</th><th>state</th><th>secret</th><th></th></tr></thead>
+        <tbody>
+          {{range .Rows}}
+          <tr>
+            <td class="break-all mono text-xs">{{.URL}}</td>
+            <td class="muted mono text-xs">{{if .Events}}{{.Events}}{{else}}all{{end}}</td>
+            <td>{{if .Active}}<span class="chip-open">active</span>{{else}}<span class="chip-closed">off</span>{{end}}</td>
+            <td>{{if .SecretSet}}<span class="chip-neutral" title="secret set (write-only)">•••••• (set)</span>{{else}}<span class="muted">—</span>{{end}}</td>
+            <td>
+              <div class="flex items-center gap-2 whitespace-nowrap">
+                <form method="post" action="{{.ActionURL}}" hx-post="{{.ActionURL}}"
+                      hx-target="#settings-panel" hx-select="#settings-panel" hx-swap="outerHTML">
+                  {{range .Fields}}<input type="hidden" name="{{.Key}}" value="{{.Value}}">{{end}}
+                  <input type="hidden" name="{{.ActionField}}" value="{{.ToggleValue}}">
+                  <button type="submit" class="link text-xs">{{if .Active}}disable{{else}}enable{{end}}</button>
+                </form>
+                {{if $panel.CanEdit}}
+                <details{{if .EditOpen}} open{{end}}>
+                  <summary class="link text-xs">edit webhook</summary>
+                  <form class="mt-1 grid gap-2 sm:grid-cols-[minmax(0,1fr)_auto_auto] sm:items-end"
+                        method="post" action="{{.ActionURL}}" hx-post="{{.ActionURL}}"
+                        hx-target="#settings-panel" hx-select="#settings-panel" hx-swap="outerHTML">
+                    {{range .Fields}}<input type="hidden" name="{{.Key}}" value="{{.Value}}">{{end}}
+                    <input type="hidden" name="{{.ActionField}}" value="{{.UpdateValue}}">
+                    <div>
+                      <label class="mb-1 block text-sm font-medium" for="webhook-edit-url-{{.ID}}">URL</label>
+                      <input class="input mono text-xs" id="webhook-edit-url-{{.ID}}" name="url" type="url" required
+                             value="{{if .EditURL}}{{.EditURL}}{{else}}{{.URL}}{{end}}">
+                    </div>
+                    <div>
+                      <label class="mb-1 block text-sm font-medium" for="webhook-edit-events-{{.ID}}">Events</label>
+                      <input class="input mono text-xs" id="webhook-edit-events-{{.ID}}" name="events" type="text"
+                             value="{{if .EditEvents}}{{.EditEvents}}{{else}}{{.Events}}{{end}}">
+                    </div>
+                    <label class="flex items-center gap-2 text-sm">
+                      <input type="checkbox" name="active" value="1"{{if or .EditActive .Active}} checked{{end}}>
+                      active
+                    </label>
+                    <div><button type="submit" class="btn">save</button></div>
+                    {{if .EditError}}<p class="err-line sm:col-span-3" role="alert">{{.EditError}}</p>{{end}}
+                  </form>
+                </details>
+                {{end}}
+                <form class="flex items-center gap-1" method="post" action="{{.ActionURL}}" hx-post="{{.ActionURL}}"
+                      hx-target="#settings-panel" hx-select="#settings-panel" hx-swap="outerHTML">
+                  {{range .Fields}}<input type="hidden" name="{{.Key}}" value="{{.Value}}">{{end}}
+                  <input type="hidden" name="{{.ActionField}}" value="{{.RotateValue}}">
+                  <input class="input w-40 text-xs" name="secret" type="password" autocomplete="new-password" placeholder="new secret" aria-label="New secret for {{.ID}}">
+                  <button type="submit" class="link text-xs" title="Rotate signing secret">rotate secret</button>
+                </form>
+                <form method="post" action="{{.ActionURL}}" hx-post="{{.ActionURL}}"
+                      hx-target="#settings-panel" hx-select="#settings-panel" hx-swap="outerHTML">
+                  {{range .Fields}}<input type="hidden" name="{{.Key}}" value="{{.Value}}">{{end}}
+                  <input type="hidden" name="{{.ActionField}}" value="{{.PingValue}}">
+                  <button type="submit" class="link text-xs">ping</button>
+                </form>
+                <details>
+                  <summary class="link text-xs text-[var(--pd-danger)]">delete…</summary>
+                  <form class="mt-1 flex flex-wrap items-end gap-1" method="post" action="{{.ActionURL}}" hx-post="{{.ActionURL}}"
+                        hx-target="#settings-panel" hx-select="#settings-panel" hx-swap="outerHTML"
+                        data-danger-expected="{{.ID}}">
+                    {{range .Fields}}<input type="hidden" name="{{.Key}}" value="{{.Value}}">{{end}}
+                    <input type="hidden" name="{{.ActionField}}" value="{{.DeleteValue}}">
+                    <label class="mb-1 block text-sm font-medium" for="webhook-confirm-{{.ID}}">Type <code class="mono text-xs">{{.ID}}</code></label>
+                    <input class="input md:max-w-56 mono text-xs" id="webhook-confirm-{{.ID}}" name="confirm" type="text" autocomplete="off" data-danger-input required>
+                    <button type="submit" class="btn danger" data-danger-submit disabled>delete</button>
+                  </form>
+                </details>
+              </div>
+            </td>
+          </tr>
+          {{end}}
+        </tbody>
+      </table>
+    </div>
+    {{range .Rows}}{{if or .Recent .LastPing}}
+    <div class="mt-3 border-t border-[var(--pd-line)] pt-2" aria-label="deliveries for {{.URL}}">
+      <p class="muted text-[11px]"><span class="font-medium">recent deliveries</span> <span class="mono break-all">{{.URL}}</span></p>
+      {{if .Recent}}
+      <div class="mt-1 overflow-x-auto">
+        <table class="data-table">
+          <thead><tr><th>seq</th><th>event</th><th>status</th><th>time</th><th>at</th><th></th></tr></thead>
+          <tbody>
+            {{$row := .}}
+            {{range .Recent}}
+            <tr>
+              <td class="mono text-xs">#{{.Seq}}</td>
+              <td class="mono text-xs">{{.Event}}</td>
+              <td class="tabular">{{.Status}}</td>
+              <td class="tabular text-xs">{{if .DurationMs}}{{.DurationMs}}ms{{else}}—{{end}}</td>
+              <td class="tabular mono text-[11px]">{{.At}}</td>
+              <td>
+                {{if .Error}}<span class="text-[11px] text-[var(--pd-danger)]">{{.Error}}</span>{{end}}
+                {{if .Redeliverable}}
+                <form method="post" action="{{$row.ActionURL}}" hx-post="{{$row.ActionURL}}"
+                      hx-target="#settings-panel" hx-select="#settings-panel" hx-swap="outerHTML">
+                  {{range $row.Fields}}<input type="hidden" name="{{.Key}}" value="{{.Value}}">{{end}}
+                  <input type="hidden" name="{{$row.ActionField}}" value="{{$row.RedeliverValue}}">
+                  <input type="hidden" name="seq" value="{{.SeqNum}}">
+                  <button type="submit" class="link text-xs">redeliver</button>
+                </form>
+                {{else}}<span class="muted text-[11px]" title="the ring did not retain this payload">payload not retained</span>{{end}}
+              </td>
+            </tr>
+            {{end}}
+          </tbody>
+        </table>
+      </div>
+      {{else}}<p class="muted mt-1 text-[11px]">{{.LastPing}}</p>{{end}}
+    </div>
+    {{end}}{{end}}
+    {{else}}<p class="muted text-sm">no webhooks.</p>{{end}}
+  </section>
+</div>
+{{end}}
+{{end}}
+{{end}}

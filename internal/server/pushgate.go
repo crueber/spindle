@@ -28,6 +28,19 @@ type PushGate interface {
 // legacy host-flag check (requireWrite); a wired gate is the authority and
 // the host write flag is NOT consulted (identity strips it — the #347 fix).
 func (s *Server) checkPushWrite(ctx context.Context, id git.RepoId, p auth.Principal) *auth.AuthError {
+	// A job token (Threads, 15 §5) pushes only with the `push` scope and only to
+	// its own repository. It is NOT the triggering user: the push policy below
+	// still applies (a protected ref refuses it exactly like any other
+	// non-owner), and no other repository accepts it.
+	if p.JobRepo != "" {
+		if p.JobRepo != id.String() {
+			return &auth.AuthError{Kind: auth.ErrForbidden, Why: "the job token is scoped to " + p.JobRepo}
+		}
+		if !p.JobPush {
+			return &auth.AuthError{Kind: auth.ErrForbidden, Why: "the job token has no push permission (workflow permissions: contents: read)"}
+		}
+		return nil
+	}
 	if s.pushGate == nil {
 		return requireWrite(p)
 	}

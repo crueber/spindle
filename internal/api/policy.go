@@ -113,12 +113,25 @@ func (h *handlers) policyPut(w http.ResponseWriter, r *http.Request) {
 	writeCached(w, r, ccNoStore, "", http.StatusOK, json.RawMessage(body))
 }
 
+// DeletePolicy removes the stored policy document (back to allow-all). A
+// missing document is success — deletion is idempotent. The caller has
+// already enforced the admin gate.
+func DeletePolicy(ctx context.Context, e *Env, id git.RepoId) *WriteError {
+	if e.Store == nil {
+		return &WriteError{Status: http.StatusServiceUnavailable, Message: "policy store not configured"}
+	}
+	if err := e.Store.Delete(ctx, policyKey(id), ""); err != nil && !store.IsNotFound(err) {
+		return &WriteError{Status: http.StatusServiceUnavailable, Message: err.Error()}
+	}
+	return nil
+}
+
 func (h *handlers) policyDelete(w http.ResponseWriter, r *http.Request) {
 	if !h.env.gate(w, r, AuthAdmin) {
 		return
 	}
-	if err := h.env.Store.Delete(r.Context(), policyKey(RepoOf(r)), ""); err != nil && !store.IsNotFound(err) {
-		writePlain(w, http.StatusServiceUnavailable, err.Error())
+	if werr := DeletePolicy(r.Context(), h.env, RepoOf(r)); werr != nil {
+		writePlain(w, werr.Status, werr.Message)
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)

@@ -2,6 +2,7 @@
 package main
 
 import (
+	"errors"
 	"flag"
 	"fmt"
 	"os"
@@ -10,16 +11,25 @@ import (
 
 // newFlagSet builds a per-subcommand FlagSet whose parse errors print usage
 // and funnel to exit 2 (§6.3: the dispatcher overrides flag's os.Exit(2)).
+// The usage text lists the flags this command defines, so `-h` after an
+// operator subcommand prints that command's help, not the global table.
 func newFlagSet(name string) *flag.FlagSet {
 	fs := flag.NewFlagSet(name, flag.ContinueOnError)
 	fs.SetOutput(os.Stderr)
-	fs.Usage = func() { fmt.Fprintf(os.Stderr, "usage: spindle %s [flags]\n", name) }
+	fs.Usage = func() {
+		fmt.Fprintf(os.Stderr, "usage: spindle %s [flags]\n\nflags:\n", name)
+		fs.PrintDefaults()
+	}
 	return fs
 }
 
-// mustParse parses argv; on error the process exits 2 (§6.3).
+// mustParse parses argv; on error the process exits 2 (§6.3). An explicit
+// -h/--help (flag.ErrHelp) is a successful help request: exit 0.
 func mustParse(fs *flag.FlagSet, args []string) []string {
 	if err := fs.Parse(args); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			os.Exit(exitOK)
+		}
 		os.Exit(exitArg)
 	}
 	return fs.Args()

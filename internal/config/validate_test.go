@@ -402,12 +402,9 @@ func TestResolveDataDirContainer(t *testing.T) {
 func TestValidateMalformedListen(t *testing.T) {
 	c := Defaults()
 	c.Server.Listen = "no-port-here"
-	warnings, errs := Validate(c)
-	if len(errs) != 0 {
-		t.Fatalf("errs = %v", errs)
-	}
-	if len(warnings) != 1 {
-		t.Fatalf("unparseable listen must not count as loopback: %v", warnings)
+	_, errs := Validate(c)
+	if len(errs) != 1 || !strings.Contains(errs[0].Error(), "server.listen") {
+		t.Fatalf("errs = %v, want one server.listen error (fail closed before net.Listen)", errs)
 	}
 }
 

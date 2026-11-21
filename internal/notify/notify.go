@@ -102,6 +102,11 @@ const (
 	MaxTeamFanout = 100
 	// MaxDeliveries bounds the per-hook deliveries ring (§1.4: 25).
 	MaxDeliveries = 25
+	// MaxDeliveryBody bounds the event body retained in one deliveries-ring
+	// row for redeliver (§1.4/§1.5 amendment). Larger bodies are delivered
+	// normally but not retained: redeliver answers ErrGone instead of faking
+	// a delivery from a partial body.
+	MaxDeliveryBody = 64 << 10
 	// DefaultMaxHooksPerRepo caps hook configs per repo (§1.4). The sweep
 	// and delivery cost per repo is O(hooks), so the cap is also the
 	// per-repo sweep bound (issue #156). Overridable per Service via
@@ -161,6 +166,10 @@ var (
 	ErrForbidden    = fmt.Errorf("forbidden")
 	ErrInvalid      = fmt.Errorf("invalid")
 	ErrConflict     = fmt.Errorf("conflict")
+	// ErrGone is a delivery whose payload was not retained (compacted log or
+	// over MaxDeliveryBody): redeliver is impossible, and saying so is the
+	// honest answer (410).
+	ErrGone = fmt.Errorf("gone")
 )
 
 // statusFor maps sentinels to HTTP status codes.
@@ -178,6 +187,8 @@ func statusFor(err error) int {
 		return 400
 	case isErr(err, ErrConflict):
 		return 409
+	case isErr(err, ErrGone):
+		return 410
 	default:
 		return 500
 	}
@@ -248,13 +259,17 @@ type CursorDoc struct {
 }
 
 // DeliveryEntry is one row of the per-hook deliveries ring (§1.4).
+// Body retains the exact POST body when it is within MaxDeliveryBody so
+// redeliver re-sends byte-identical bytes (same delivery id + HMAC); an
+// absent Body is the honest "payload not retained" marker (§1.4 amendment).
 type DeliveryEntry struct {
-	Seq        int    `json:"seq"`
-	Event      string `json:"event"`
-	Status     int    `json:"status"`
-	At         string `json:"at"`
-	Error      string `json:"error,omitempty"`
-	DurationMs int64  `json:"duration_ms"`
+	Seq        int             `json:"seq"`
+	Event      string          `json:"event"`
+	Status     int             `json:"status"`
+	At         string          `json:"at"`
+	Error      string          `json:"error,omitempty"`
+	DurationMs int64           `json:"duration_ms"`
+	Body       json.RawMessage `json:"body,omitempty"`
 }
 
 // DeliveriesDoc is repos/<o>/<r>/webhooks/<id>/deliveries/recent.json.

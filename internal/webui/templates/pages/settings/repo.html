@@ -14,7 +14,7 @@
           <h3 id="settings-nav-standard" class="side-nav-heading">Settings</h3>
           <ul class="flex gap-1 overflow-x-auto pb-1 lg:flex-col lg:overflow-visible lg:pb-0">
             {{range .Data.Nav}}
-            <li class="flex-none"><a class="side-nav-item" href="{{.Href}}"{{if .Active}} aria-current="page"{{end}}>{{.Label}}</a></li>
+            <li class="flex-none"><a class="side-nav-item w-auto lg:w-full" href="{{.Href}}"{{if .Active}} aria-current="page"{{end}}>{{.Label}}</a></li>
             {{end}}
           </ul>
         </section>
@@ -23,7 +23,7 @@
           <h3 id="settings-nav-danger" class="side-nav-heading side-nav-heading-danger">Danger Zone</h3>
           <ul class="flex gap-1 overflow-x-auto pb-1 lg:flex-col lg:overflow-visible lg:pb-0">
             {{range .Data.Danger}}
-            <li class="flex-none"><a class="side-nav-item side-nav-item-danger" href="{{.Href}}"{{if .Active}} aria-current="page"{{end}}>{{.Label}}</a></li>
+            <li class="flex-none"><a class="side-nav-item side-nav-item-danger w-auto lg:w-full" href="{{.Href}}"{{if .Active}} aria-current="page"{{end}}>{{.Label}}</a></li>
             {{end}}
           </ul>
         </section>
@@ -45,6 +45,8 @@
         {{if eq .Data.Tab "config"}}{{template "settings-repo-config" .Data}}{{end}}
         {{if eq .Data.Tab "access"}}{{template "settings-repo-access" .Data}}{{end}}
         {{if eq .Data.Tab "tokens"}}{{template "settings-repo-tokens" .Data}}{{end}}
+        {{if eq .Data.Tab "runners"}}{{template "settings-repo-runners" .Data}}{{end}}
+        {{if eq .Data.Tab "secrets"}}{{template "settings-repo-secrets" .Data}}{{end}}
         {{if eq .Data.Tab "webhooks"}}{{template "settings-repo-webhooks" .Data}}{{end}}
         {{if eq .Data.Tab "wal"}}{{template "settings-repo-wal" .Data}}{{end}}
         {{if eq .Data.Tab "danger"}}{{template "settings-repo-danger" .Data}}{{end}}

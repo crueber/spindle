@@ -79,30 +79,30 @@ func TestDiscoverNoFilesIsNotAnError(t *testing.T) {
 	}
 }
 
-func TestDiscoverMalformedIsVisibleError(t *testing.T) {
+func TestDiscoverMalformedIsPerFileError(t *testing.T) {
 	f := newFakeGit()
 	f.add(testSHA, ".spindle/workflows/broken.yml", "name: nope\non: [\n")
 	files, err := Discover(ctx(), f, "o/r", testSHA)
-	if err == nil {
-		t.Fatal("malformed workflow must surface an error")
+	if err != nil {
+		t.Fatalf("a broken file must not fail discovery: %v", err)
 	}
-	if !errors.Is(err, ErrUnprocessable) {
-		t.Fatalf("err = %v (want ErrUnprocessable)", err)
+	if len(files) != 1 || files[0].Workflow != nil || files[0].Error == "" {
+		t.Fatalf("files = %+v (want one file with Error)", files)
 	}
-	if !strings.Contains(err.Error(), "broken.yml") {
-		t.Fatalf("error must name the file: %v", err)
-	}
-	if files != nil {
-		t.Fatalf("no files may be returned on a parse failure: %v", files)
+	if !strings.Contains(files[0].Error, "broken.yml") && !strings.Contains(files[0].Error, "yaml") {
+		t.Fatalf("error must explain the parse failure: %q", files[0].Error)
 	}
 }
 
-func TestDiscoverUnknownKeyIsVisibleError(t *testing.T) {
+func TestDiscoverUnknownKeyIsPerFileError(t *testing.T) {
 	f := newFakeGit()
-	f.add(testSHA, ".spindle/workflows/ci.yml", "name: CI\non:\n  push:\njobs:\n  b:\n    runs-on: x\n    steps:\n      - run: y\n    uses: nope\n")
-	_, err := Discover(ctx(), f, "o/r", testSHA)
-	if !errors.Is(err, ErrUnprocessable) {
-		t.Fatalf("unknown key err = %v (want ErrUnprocessable)", err)
+	f.add(testSHA, ".spindle/workflows/ci.yml", "name: CI\non:\n  push:\njobs:\n  b:\n    runs-on: x\n    runson: typo\n    steps:\n      - run: y\n")
+	files, err := Discover(ctx(), f, "o/r", testSHA)
+	if err != nil {
+		t.Fatalf("unknown key must not fail discovery: %v", err)
+	}
+	if len(files) != 1 || files[0].Error == "" {
+		t.Fatalf("files = %+v (want one file with Error)", files)
 	}
 }
 
@@ -125,13 +125,16 @@ func TestDiscoverIgnoresNestedAndNonYAML(t *testing.T) {
 	}
 }
 
-func TestDiscoverOversizedFileIsUnprocessable(t *testing.T) {
+func TestDiscoverOversizedFileIsPerFileError(t *testing.T) {
 	f := newFakeGit()
 	big := "name: big\non: push\njobs:\n  b:\n    runs-on: x\n    steps:\n      - run: echo\n" + strings.Repeat("# pad\n", maxWorkflowBytes)
 	f.add(testSHA, ".spindle/workflows/big.yml", big)
-	_, err := Discover(ctx(), f, "o/r", testSHA)
-	if !errors.Is(err, ErrUnprocessable) || !strings.Contains(err.Error(), "larger than") {
-		t.Fatalf("oversized err = %v", err)
+	files, err := Discover(ctx(), f, "o/r", testSHA)
+	if err != nil {
+		t.Fatalf("an oversized file must not fail discovery: %v", err)
+	}
+	if len(files) != 1 || !strings.Contains(files[0].Error, "larger than") {
+		t.Fatalf("oversized files = %+v", files)
 	}
 }
 
@@ -154,7 +157,8 @@ func TestDiscoverBackendFailuresAreUnavailable(t *testing.T) {
 }
 
 // TestSelectFilesTriggerMatrix pins 15 §1: push branch filters, PR filters,
-// dispatch presence (including a null key), and schedule never firing here.
+// dispatch presence (including a null key) and the schedule event selecting
+// exactly the files that declare it (round-2 pass 2).
 func TestSelectFilesTriggerMatrix(t *testing.T) {
 	f := newFakeGit()
 	f.add(testSHA, ".spindle/workflows/ci.yml", workflowYAML)
@@ -167,15 +171,17 @@ func TestSelectFilesTriggerMatrix(t *testing.T) {
 		event, branch, want string
 		n                   int
 	}{
-		{EventPush, "main", "", 1},         // branch filter matches
-		{EventPush, "dev", "", 0},          // branch filter excludes
-		{EventPush, "", "", 0},             // a branch-filtered trigger matches no empty branch
-		{EventPullReq, "main", "", 1},      // PR trigger present
-		{EventDispatch, "", "", 1},         // workflow_dispatch present (null form)
-		{EventDispatch, "", "ci.yml", 1},   // dispatch filter by basename
-		{EventDispatch, "", "docs.yml", 0}, // unknown file: no match
-		{EventSchedule, "", "", 0},         // cron never fires through Fires
-		{"bogus", "", "", 0},               // unknown event: no match
+		{EventPush, "main", "", 1},              // branch filter matches
+		{EventPush, "dev", "", 0},               // branch filter excludes
+		{EventPush, "", "", 0},                  // a branch-filtered trigger matches no empty branch
+		{EventPullReq, "main", "", 1},           // PR trigger present
+		{EventDispatch, "", "", 1},              // workflow_dispatch present (null form)
+		{EventDispatch, "", "ci.yml", 1},        // dispatch filter by basename
+		{EventDispatch, "", "docs.yml", 0},      // unknown file: no match
+		{EventSchedule, "", "", 2},              // both fixture files declare `schedule:`
+		{EventSchedule, "", "scheduled.yml", 1}, // a tick names exactly one file
+		{EventSchedule, "", "nope.yml", 0},      // and never an unknown one
+		{"bogus", "", "", 0},                    // unknown event: no match
 	}
 	for _, tc := range cases {
 		got := SelectFiles(files, tc.event, tc.branch, tc.want)
@@ -219,7 +225,8 @@ func TestFoldRunState(t *testing.T) {
 		{"one running", []*Job{job(JobQueued), job(JobRunning)}, RunRunning},
 		{"success", []*Job{job(JobSuccess), job(JobSuccess)}, RunSuccess},
 		{"failure wins", []*Job{job(JobSuccess), job(JobFailure)}, RunFailure},
-		{"cancelled counts", []*Job{job(JobSuccess), job(JobCancelled)}, RunFailure},
+		{"cancelled is distinct from failure", []*Job{job(JobSuccess), job(JobCancelled)}, RunCancelled},
+		{"failure outranks cancelled", []*Job{job(JobFailure), job(JobCancelled)}, RunFailure},
 		{"terminal + queued is running", []*Job{job(JobSuccess), job(JobQueued)}, RunRunning},
 	}
 	for _, tc := range cases {

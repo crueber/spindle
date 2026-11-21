@@ -97,6 +97,20 @@ func (g *SubprocessGit) ResolveRef(ctx context.Context, repo, ref string) (strin
 	return normalizeSHA(strings.TrimSpace(out))
 }
 
+// DefaultBranch runs `git symbolic-ref --quiet --short HEAD` (the branch a
+// scheduled run belongs to; a detached HEAD reports nothing, and the scheduler
+// then creates the run without a branch name).
+func (g *SubprocessGit) DefaultBranch(ctx context.Context, repo string) (string, error) {
+	out, _, err := g.run(ctx, repo, []string{"symbolic-ref", "--quiet", "--short", "HEAD"})
+	if err != nil {
+		if nf := notFoundIfExit(err); errors.Is(nf, ErrNotFound) {
+			return "", nil
+		}
+		return "", err
+	}
+	return strings.TrimSpace(out), nil
+}
+
 // runner is the directory resolver composition injects (the serve-synced dirs
 // adapter; tests use a temp dir).
 type runner interface {

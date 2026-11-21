@@ -7,6 +7,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"time"
 )
 
 // Validate runs every §5 rule: exit-2-fatal errors plus at most one warning.
@@ -17,6 +18,7 @@ func Validate(c *Config) (warnings []string, errs []error) {
 		warnings = append(warnings, w)
 	}
 	errs = append(errs, checkOIDC(c)...)
+	errs = append(errs, checkListen(c)...)
 	errs = append(errs, checkBundleStrategies(c)...)
 	errs = append(errs, checkBundleChainFilters(c)...)
 	errs = append(errs, checkStore(c)...)
@@ -28,7 +30,48 @@ func Validate(c *Config) (warnings []string, errs []error) {
 	errs = append(errs, checkImport(c)...)
 	errs = append(errs, checkPackages(c)...)
 	errs = append(errs, checkTreeLog(c)...)
+	errs = append(errs, checkSecretsKey(c)...)
+	errs = append(errs, checkThreads(c)...)
 	return warnings, errs
+}
+
+// checkThreads (15_threads.md §8): the retention window must be a real window
+// (a negative value would delete everything the pass can see) and the default
+// job permission must be one of the two levels a token can be scoped to.
+func checkThreads(c *Config) []error {
+	var errs []error
+	if time.Duration(c.Threads.Retention) < 0 {
+		errs = append(errs, fmt.Errorf("threads.retention must not be negative (got %s); leave it unset for the 30d default", time.Duration(c.Threads.Retention)))
+	}
+	switch strings.ToLower(strings.TrimSpace(c.Threads.DefaultPermissions)) {
+	case "", "read", "write":
+	default:
+		errs = append(errs, fmt.Errorf("threads.default_permissions must be read or write (got %q)", c.Threads.DefaultPermissions))
+	}
+	return errs
+}
+
+// checkListen validates the HTTP listener shape before boot: a malformed
+// server.listen otherwise fails only inside net.Listen, where setup-only mode
+// could not explain it.
+func checkListen(c *Config) []error {
+	if strings.TrimSpace(c.Server.Listen) == "" {
+		return []error{fmt.Errorf("server.listen is required (host:port, e.g. 0.0.0.0:8080)")}
+	}
+	if _, _, err := net.SplitHostPort(c.Server.Listen); err != nil {
+		return []error{fmt.Errorf("server.listen %q must be host:port (e.g. 0.0.0.0:8080)", c.Server.Listen)}
+	}
+	return nil
+}
+
+// checkSecretsKey (15_threads.md §5.3): the dedicated Threads key is optional,
+// but a short one is a configuration error (the derived AES-256/HMAC keys need a
+// real secret, not a passphrase placeholder).
+func checkSecretsKey(c *Config) []error {
+	if k := c.Server.SecretsKey; k != "" && len(k) < 32 {
+		return []error{fmt.Errorf("server.secrets_key must be at least 32 bytes (got %d)", len(k))}
+	}
+	return nil
 }
 
 // checkSSH (17_ssh.md §3): the transport is disabled unless listen is set;
@@ -62,7 +105,7 @@ func checkPackages(c *Config) []error {
 	p := c.Packages
 	var errs []error
 	if p.MaxBlobBytes <= 0 {
-		errs = append(errs, fmt.Errorf("packages.max_blob_bytes must be positive (default 2GiB)"))
+		errs = append(errs, fmt.Errorf("packages.max_blob_bytes must be positive (default 10GiB)"))
 	}
 	if p.MaxManifestBytes <= 0 {
 		errs = append(errs, fmt.Errorf("packages.max_manifest_bytes must be positive (default 4MiB)"))

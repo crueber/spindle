@@ -156,11 +156,13 @@ func inviteKeys(inv *Invitation) string {
 }
 
 // CreateOrgInvite records an org invitation (owner-only, checked by the
-// handler). Returns id + accept URL path.
-func (s *Service) CreateOrgInvite(ctx context.Context, org, email, role, invitedBy string, ttl time.Duration) (*Invitation, error) {
-	email = normPrincipal(email)
-	if !ValidPrincipal(email) {
-		return nil, fmt.Errorf("%w: invalid email %q", ErrInvalid, email)
+// handler). subject is an email OR a username: a static-token principal has no
+// verified email, so username addressing is the only way to invite it (the
+// accept matches the invited subject by email or principal name).
+func (s *Service) CreateOrgInvite(ctx context.Context, org, subject, role, invitedBy string, ttl time.Duration) (*Invitation, error) {
+	subject = normPrincipal(subject)
+	if !ValidPrincipal(subject) {
+		return nil, fmt.Errorf("%w: invalid subject %q", ErrInvalid, subject)
 	}
 	if !validOrgRole(role) {
 		return nil, fmt.Errorf("%w: invalid org role %q", ErrInvalid, role)
@@ -181,7 +183,7 @@ func (s *Service) CreateOrgInvite(ctx context.Context, org, email, role, invited
 	now := s.nowUTC()
 	inv := &Invitation{
 		Version: 1, ID: id, Token: token, Kind: InviteOrg, Org: org,
-		Role: role, Subject: email, InvitedBy: normPrincipal(invitedBy),
+		Role: role, Subject: subject, InvitedBy: normPrincipal(invitedBy),
 		State: "pending", CreatedAt: now.Format(time.RFC3339),
 		ExpiresAt: now.Add(ttl).Format(time.RFC3339),
 	}
@@ -189,10 +191,10 @@ func (s *Service) CreateOrgInvite(ctx context.Context, org, email, role, invited
 		store.PutOptions{Mode: store.PutCreate, ContentType: "application/json"}); err != nil {
 		return nil, err
 	}
-	if err := s.inboxAdd(ctx, email, InboxEntry{ID: id, Org: org, Role: role, InvitedBy: inv.InvitedBy, CreatedAt: inv.CreatedAt, ExpiresAt: inv.ExpiresAt}); err != nil {
+	if err := s.inboxAdd(ctx, subject, InboxEntry{ID: id, Org: org, Role: role, InvitedBy: inv.InvitedBy, CreatedAt: inv.CreatedAt, ExpiresAt: inv.ExpiresAt}); err != nil {
 		return nil, err
 	}
-	s.emitOrgEvent(ctx, org, "invite_created", normPrincipal(invitedBy), email+" invited to "+org)
+	s.emitOrgEvent(ctx, org, "invite_created", normPrincipal(invitedBy), subject+" invited to "+org)
 	return inv, nil
 }
 
@@ -393,7 +395,14 @@ func (s *Service) findInviteFor(ctx context.Context, p auth.Principal, id string
 		}
 	}
 	if len(scopes) == 0 {
-		return nil, fmt.Errorf("%w: invitation no longer pending", ErrConflict)
+		// The id is not in this principal's inbox. Two causes share this
+		// state and the storage cannot tell them apart: the invitation is
+		// still pending but addressed to another account, or it is spent
+		// (accepted/cancelled deletes the object AND this row, leaving no
+		// record). Naming only the spent cause — "no longer pending" — was
+		// the round-4 audit's misleading refusal; name both, without
+		// revealing which one holds.
+		return nil, fmt.Errorf("%w: invitation is not addressed to your account, or it was already accepted or cancelled", ErrConflict)
 	}
 	for _, e := range scopes {
 		var keys []string
@@ -423,7 +432,10 @@ func (s *Service) findInviteFor(ctx context.Context, p auth.Principal, id string
 			return inv, nil
 		}
 	}
-	return nil, fmt.Errorf("%w: invitation no longer pending", ErrConflict)
+	// The inbox row outlived the issuer object: either the invitation was
+	// spent (accepted/cancelled) or its repository was swept while the row
+	// remained (the sweep cannot enumerate inboxes). Name both.
+	return nil, fmt.Errorf("%w: invitation is no longer valid: it was already accepted or cancelled, or its repository was deleted", ErrConflict)
 }
 
 // PreviewInvite renders the signed-link preview for an authenticated
@@ -484,7 +496,7 @@ func (s *Service) AcceptInviteFor(ctx context.Context, p auth.Principal, id stri
 	// role into a freshly synthesized access.json for a ghost repo — the
 	// invite died with the repo, so this is 409 like the swept-keys case.
 	if !s.inviteRepoAlive(ctx, inv) {
-		return "", fmt.Errorf("%w: invitation no longer pending", ErrConflict)
+		return "", fmt.Errorf("%w: invitation is no longer valid: its repository was deleted", ErrConflict)
 	}
 	switch inv.Kind {
 	case InviteOrg:
@@ -617,9 +629,39 @@ func (s *Service) DeleteOrgInvite(ctx context.Context, org, id, actor string) (*
 	return inv, nil
 }
 
+// DeleteRepoInvite cancels one repo invitation by id (issuer-side cancel:
+// the repo-admin path, authorized by the handler/page via CheckRole(admin),
+// exactly like DeleteOrgInvite's owner check). Delete-on-transition: the
+// issuer object goes away and the invitee's inbox row is dropped, so the
+// accept link answers 409 "no longer valid" without leaving a cancelled
+// record behind. Unknown ids are ErrNotFound; a corrupt object is
+// ErrInvalid; an id stored under another repo is ErrNotFound (the key is
+// scoped, never a prefix scan).
+func (s *Service) DeleteRepoInvite(ctx context.Context, owner, repo, id string) (*Invitation, error) {
+	raw, _, gerr := store.GetBytes(ctx, s.Store, RepoInviteKey(owner, repo, id), store.GetOptions{})
+	if gerr != nil {
+		if store.IsNotFound(gerr) {
+			return nil, fmt.Errorf("%w: unknown invitation", ErrNotFound)
+		}
+		return nil, gerr
+	}
+	inv, perr := parseInvite(raw)
+	if perr != nil {
+		return nil, perr
+	}
+	if derr := s.Store.Delete(ctx, RepoInviteKey(owner, repo, id), ""); derr != nil && !store.IsNotFound(derr) {
+		return nil, derr
+	}
+	_ = s.inboxRemove(ctx, normPrincipal(inv.Subject), id)
+	return inv, nil
+}
+
 // ListRepoInvites returns pending repo invites (admin-only, checked by the
 // handler) via LIST over the repo invitation prefix — a collaboration page,
 // not a git hot path. n caps the page (P5; default 100, max 1000, like teams).
+// The full Invitation (including its capability token) is returned: callers
+// that render the accept link are the repo-admin page and the admin API. The
+// JSON collection redacts the token in its own projection (inviteSummary).
 func (s *Service) ListRepoInvites(ctx context.Context, owner, repo string, n int) ([]*Invitation, error) {
 	if n <= 0 || n > 1000 {
 		n = 100
