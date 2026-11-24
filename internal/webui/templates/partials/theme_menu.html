@@ -1,0 +1,66 @@
+{{define "theme_menu"}}
+{{/* The theme menu (PLAN-THEMES §7.4, W2) — the single selection surface.
+
+     Rows are static server markup (a JS-less client still gets complete,
+     named content) and the island paints each swatch from the theme registry
+     (web/src/islands/themes.js) and marks the current choice with
+     aria-checked. Adding a palette (W3) is a data change: a row here, a
+     registry entry, and its [data-theme] block in app.css — the gate
+     (web/test/unit/themes.test.js) fails if the three disagree, and the
+     template carries no colour literal at all.
+
+     Menus are radio groups, not commands (§8.2's corrected model):
+     role="menuitemradio" + aria-checked, arrows/Home/End/Escape from
+     menus.js, and a click applies + persists without a reload. */}}
+<div data-menu data-theme-menu class="theme-menu relative">
+  <button type="button" class="icon-btn" data-menu-trigger aria-haspopup="menu" aria-expanded="false" aria-label="Theme" title="Theme">
+    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="true">
+      <path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8Z"/>
+    </svg>
+  </button>
+  <div data-menu-panel role="menu" aria-label="Theme" hidden class="card popover absolute right-0 mt-1 w-64 py-1">
+    <button type="button" role="menuitemradio" aria-checked="false" data-theme-option="system" class="theme-item">
+      <span class="theme-system-mark" aria-hidden="true">◐</span>
+      <span class="theme-label">Match system</span>
+      <span class="theme-check" aria-hidden="true">✓</span>
+    </button>
+    <div class="theme-sep" role="separator"></div>
+    <button type="button" role="menuitemradio" aria-checked="false" data-theme-option="dark" class="theme-item">
+      <span class="theme-swatch" aria-hidden="true"><span data-swatch="canvas"></span><span data-swatch="text"></span><span data-swatch="accent"></span></span>
+      <span class="theme-label">dark</span>
+      <span class="theme-check" aria-hidden="true">✓</span>
+    </button>
+    <button type="button" role="menuitemradio" aria-checked="false" data-theme-option="light" class="theme-item">
+      <span class="theme-swatch" aria-hidden="true"><span data-swatch="canvas"></span><span data-swatch="text"></span><span data-swatch="accent"></span></span>
+      <span class="theme-label">light</span>
+      <span class="theme-check" aria-hidden="true">✓</span>
+    </button>
+    <button type="button" role="menuitemradio" aria-checked="false" data-theme-option="hc-dark" class="theme-item">
+      <span class="theme-swatch" aria-hidden="true"><span data-swatch="canvas"></span><span data-swatch="text"></span><span data-swatch="accent"></span></span>
+      <span class="theme-label">dark · high contrast</span>
+      <span class="theme-check" aria-hidden="true">✓</span>
+    </button>
+    <button type="button" role="menuitemradio" aria-checked="false" data-theme-option="hc-light" class="theme-item">
+      <span class="theme-swatch" aria-hidden="true"><span data-swatch="canvas"></span><span data-swatch="text"></span><span data-swatch="accent"></span></span>
+      <span class="theme-label">light · high contrast</span>
+      <span class="theme-check" aria-hidden="true">✓</span>
+    </button>
+    <div class="theme-sep" role="separator"></div>
+    <button type="button" role="menuitemradio" aria-checked="false" data-theme-option="paper" class="theme-item">
+      <span class="theme-swatch" aria-hidden="true"><span data-swatch="canvas"></span><span data-swatch="text"></span><span data-swatch="accent"></span></span>
+      <span class="theme-label">paper</span>
+      <span class="theme-check" aria-hidden="true">✓</span>
+    </button>
+    <button type="button" role="menuitemradio" aria-checked="false" data-theme-option="ocean" class="theme-item">
+      <span class="theme-swatch" aria-hidden="true"><span data-swatch="canvas"></span><span data-swatch="text"></span><span data-swatch="accent"></span></span>
+      <span class="theme-label">ocean</span>
+      <span class="theme-check" aria-hidden="true">✓</span>
+    </button>
+    <button type="button" role="menuitemradio" aria-checked="false" data-theme-option="terminal" class="theme-item">
+      <span class="theme-swatch" aria-hidden="true"><span data-swatch="canvas"></span><span data-swatch="text"></span><span data-swatch="accent"></span></span>
+      <span class="theme-label">terminal</span>
+      <span class="theme-check" aria-hidden="true">✓</span>
+    </button>
+  </div>
+</div>
+{{end}}

@@ -1,0 +1,111 @@
+{{/* partials/settings_repo_environments.html — repo settings → Environments
+   (deployment environments, docs/PLAN-THREADS-ENVIRONMENTS.md §7).
+   One settings tab per file: the body lives here and pages/settings/repo.html
+   carries only its dispatch line. Anatomy: .card sections, the .setup-row
+   label/control pairing, .data-table inside overflow-x-auto (guideline §8).
+   Floor: maintain (create/update/delete and the scoped secrets). 390px: fields
+   full width, tables scroll in place, buttons wrap. */}}
+{{define "settings-repo-environments"}}
+{{with .Environments}}
+<div class="space-y-4">
+  <p class="muted text-sm">An environment is a deployment target a job names (<code class="mono">environment:</code>). Required reviewers hold a deployment <strong>pending</strong> until one of them (or a repo admin) approves it — nothing starts and no environment secret is resolved before that. Secrets scoped here are injected only into an approved job that names this environment, and never into a fork run. A reviewer needs at least write access.</p>
+  {{if not .Wired}}
+  <div class="card p-4"><p class="muted text-sm">The Threads environment store is not wired on this build.</p></div>
+  {{else}}
+  {{if not .Enabled}}
+  <div class="card border-l-2 border-l-[var(--pd-warn)] p-4 text-sm">
+    <strong class="font-semibold">Environment secrets are unavailable.</strong>
+    <p class="muted mt-1 text-xs">Set <code class="mono">server.secrets_key</code> (or <code class="mono">server.auth.session_secret</code>) to enable at-rest encryption. Environments and reviewers still work.</p>
+  </div>
+  {{end}}
+  <form class="card p-4" method="post" action="/{{$.Owner}}/{{$.Name}}/settings/environments"
+        hx-post="/{{$.Owner}}/{{$.Name}}/settings/environments" hx-target="#settings-panel" hx-select="#settings-panel" hx-swap="outerHTML">
+    <h3 class="card-header">Add or update an environment</h3>
+    <div class="grid gap-3">
+      <div>
+        <label class="mb-1 block text-sm font-medium" for="environment-name">Name</label>
+        <input class="input mono md:max-w-md" id="environment-name" name="environment_name" type="text" required
+               value="{{.NewName}}" placeholder="production" pattern="[A-Za-z0-9][A-Za-z0-9._-]{0,63}">
+        <p class="muted mt-1 text-[11px]">Letters, digits, <code class="mono">.</code>, <code class="mono">_</code> and <code class="mono">-</code>; an existing name is updated.</p>
+      </div>
+      <div>
+        <label class="mb-1 block text-sm font-medium" for="environment-reviewers">Required reviewers</label>
+        <input class="input mono md:max-w-md" id="environment-reviewers" name="environment_reviewers" type="text"
+               value="{{.NewReviewers}}" placeholder="ada, grace">
+        <p class="muted mt-1 text-[11px]">Comma-separated principals with write access or higher. Leave empty for no approval gate.</p>
+      </div>
+    </div>
+    <div class="mt-2"><button type="submit" class="btn primary whitespace-nowrap">save environment</button></div>
+    {{if .Error}}<p class="err-line" role="alert">{{.Error}}</p>{{end}}
+  </form>
+
+  {{if .Rows}}
+  <section class="space-y-3">
+    {{range .Rows}}
+    {{$env := .}}
+    <div class="card">
+      <div class="flex flex-wrap items-center gap-2 px-3 py-2">
+        <h3 class="text-sm font-semibold tracking-tight mono">{{.Name}}</h3>
+        {{if .Reviewers}}<span class="chip chip-neutral">{{len .Reviewers}} required reviewer{{if ne (len .Reviewers) 1}}s{{end}}</span>{{else}}<span class="chip chip-draft">no approval required</span>{{end}}
+        <span class="muted ml-auto text-[11px] mono">{{.UpdatedAt}}</span>
+      </div>
+      <div class="border-t border-[color:var(--pd-line)] px-3 py-2 text-sm">
+        <p class="muted text-xs">reviewers: {{if .Reviewers}}<span class="mono">{{.ReviewersText}}</span>{{else}}—{{end}}</p>
+      </div>
+      <div class="border-t border-[color:var(--pd-line)] px-3 py-2">
+        <h4 class="mb-1 text-xs font-semibold uppercase tracking-wide">Secrets</h4>
+        {{if .Secrets}}
+        <div class="overflow-x-auto">
+          <table class="data-table">
+            <thead><tr><th scope="col">name</th><th scope="col">value</th><th scope="col">updated</th><th scope="col"></th></tr></thead>
+            <tbody>
+              {{range .Secrets}}
+              <tr>
+                <td class="mono font-medium">{{.Name}}</td>
+                <td class="muted mono text-xs">•••••• (set)</td>
+                <td class="tabular muted text-[11px] mono">{{.UpdatedAt}}</td>
+                <td>
+                  <form method="post" action="/{{$.Owner}}/{{$.Name}}/settings/environments/{{$env.Name}}"
+                        hx-post="/{{$.Owner}}/{{$.Name}}/settings/environments/{{$env.Name}}" hx-target="#settings-panel" hx-select="#settings-panel" hx-swap="outerHTML">
+                    <input type="hidden" name="environment_action" value="secret-delete">
+                    <input type="hidden" name="environment_secret_name" value="{{.Name}}">
+                    <button type="submit" class="link text-xs">delete</button>
+                  </form>
+                </td>
+              </tr>
+              {{end}}
+            </tbody>
+          </table>
+        </div>
+        {{else}}<p class="muted text-xs">no environment secrets stored.</p>{{end}}
+        <form class="mt-2 grid gap-2" method="post" action="/{{$.Owner}}/{{$.Name}}/settings/environments/{{.Name}}"
+              hx-post="/{{$.Owner}}/{{$.Name}}/settings/environments/{{.Name}}" hx-target="#settings-panel" hx-select="#settings-panel" hx-swap="outerHTML">
+          <input type="hidden" name="environment_action" value="secret-put">
+          <div class="grid gap-2 sm:flex sm:flex-wrap sm:items-end">
+            <div class="min-w-0 sm:flex-1">
+              <label class="mb-1 block text-xs font-medium" for="env-{{.Name}}-secret-name">secret name</label>
+              <input class="input mono" id="env-{{.Name}}-secret-name" name="environment_secret_name" type="text" required placeholder="DEPLOY_TOKEN" pattern="[A-Za-z_][A-Za-z0-9_]{0,63}">
+            </div>
+            <div class="min-w-0 sm:flex-1">
+              <label class="mb-1 block text-xs font-medium" for="env-{{.Name}}-secret-value">value</label>
+              <input class="input" id="env-{{.Name}}-secret-value" name="environment_secret_value" type="password" required autocomplete="new-password">
+            </div>
+            <button type="submit" class="btn whitespace-nowrap">add secret</button>
+          </div>
+        </form>
+      </div>
+      <div class="flex flex-wrap items-center justify-end gap-3 border-t border-[color:var(--pd-line)] px-3 py-2">
+        <form method="post" action="/{{$.Owner}}/{{$.Name}}/settings/environments/{{.Name}}"
+              hx-post="/{{$.Owner}}/{{$.Name}}/settings/environments/{{.Name}}" hx-target="#settings-panel" hx-select="#settings-panel" hx-swap="outerHTML">
+          <input type="hidden" name="environment_action" value="delete">
+          <button type="submit" class="link text-xs">delete environment</button>
+        </form>
+      </div>
+    </div>
+    {{end}}
+  </section>
+  {{else}}<p class="muted text-sm">no environments configured.</p>{{end}}
+  {{end}}
+</div>
+{{else}}{{template "settings-repo-notwired" .}}{{end}}
+{{end}}

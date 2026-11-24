@@ -42,11 +42,11 @@
           <a class="commit-subject block truncate text-sm font-medium leading-5 text-[var(--pd-text)]" href="{{$c.Href}}" title="{{if $c.Subject}}{{$c.Subject}}{{else}}(no message){{end}}">{{if $c.Subject}}{{$c.Subject}}{{else}}(no message){{end}}</a>
           <p class="commit-meta mt-px truncate font-mono text-[11px] leading-4 text-[var(--pd-muted)]">
             <span>{{$c.Author}}</span>
-            {{if $c.Email}}<span class="text-[var(--pd-dim)]"> &lt;{{$c.Email}}&gt;</span>{{end}}
+            {{if $c.Email}}<span class="text-[var(--pd-muted)]"> &lt;{{$c.Email}}&gt;</span>{{end}}
             {{if $c.Stamp}}<span> · <time datetime="{{$c.Stamp}}" title="{{$c.Stamp}}">{{with rel $c.Stamp}}{{.}}{{else}}—{{end}}</time></span>{{end}}
             {{if $c.Trailers}}<span class="pill ml-1.5">{{$c.Trailers}} trailers</span>{{end}}
             {{if $c.ParentsLabel}}
-            <span class="text-[var(--pd-dim)]"> · {{$c.ParentsLabel}}</span>
+            <span class="text-[var(--pd-muted)]"> · {{$c.ParentsLabel}}</span>
             {{range $j, $p := $c.Parents}}{{if $j}}<span class="text-[var(--pd-dim)]"> · </span>{{end}}<a class="sha link mono" href="/{{$.Data.Repo.Full}}/commit/{{$p}}" title="parent {{$p}}">{{shortsha $p}}</a>{{end}}
             {{end}}
           </p>

@@ -1,6 +1,8 @@
 // sink.go — the Sink abstraction and the built-in webhook sink (09 §4): one
 // JSON array POST per catch-up, sha1 delivery id, optional sha256 HMAC
-// signature, 10 s request-context timeout, 2xx acks, at-least-once.
+// signature, 10 s request-context timeout, 2xx acks, at-least-once. The other
+// built-in kind (jsonl) and the kind registry live in jsonl.go /
+// sink_registry.go.
 package events
 
 import (
@@ -44,10 +46,16 @@ var webhookClient = &http.Client{ //nolint:exhaustruct // http.Client.Timeout de
 type WebhookSink struct {
 	URL    string
 	Secret string // optional; enables X-Walgit-Signature
+	Label  string // metric label; "" → "webhook"
 }
 
 // Name implements Sink.
-func (s *WebhookSink) Name() string { return "webhook" }
+func (s *WebhookSink) Name() string {
+	if s != nil && s.Label != "" {
+		return s.Label
+	}
+	return KindWebhook
+}
 
 // Deliver implements Sink (09 §4.1, normative wire contract).
 func (s *WebhookSink) Deliver(ctx context.Context, repo string, batch []RefEvent) error {

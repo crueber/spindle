@@ -1,16 +1,21 @@
 # compose.standalone.yml — spindle ALONE: filesystem store, zero external services.
 #
 #   docker compose -f compose.standalone.yml up -d --build
-#   open http://localhost:8080/setup    # configure auth, store, everything
+#   open http://localhost:8080/admin    # configure auth, store, everything
 #
 # Repositories live in the spindle-data volume (the server's filesystem store
 # under /var/lib/spindle/store). No object store, no database — the only
 # durable state is the mounted volume, so backups are `docker run --rm -v
 # spindle-standalone_spindle-data:/data alpine tar cz -C /data` of that volume.
 #
-# First boot is zero-config (auth "none" on 0.0.0.0:8080 with a loud warning);
-# /setup writes <data-dir>/spindle.toml for every later boot. To pre-configure
-# instead, mount a config file:
+# FIRST RUN IS RESTRICTED: there is no open mode. The container serves only
+# /admin and the health endpoints until OIDC is configured (everything else
+# 503). Open /admin, fill the OIDC card (issuer, allowed email domain, client
+# id/secret, session secret, admin group), Save, restart. Prerequisites at the
+# IdP: a client whose redirect URI is <public-url>/_auth/callback, and a group
+# (default `spindle-admin`) containing your administrators.
+#
+# To pre-configure instead, mount a config file:
 #   volumes:
 #     - spindle-data:/var/lib/spindle
 #     - ./spindle.toml:/var/lib/spindle/spindle.toml:ro
@@ -25,14 +30,14 @@ services:
     ports: ["8080:8080", "2222:2222"]
     environment:
       # SSH git transport (17_ssh.md): clone/fetch/push over ssh://. Keys are
-      # added through the /keys page (auth "none" manages the anon principal's
-      # keys); the host key auto-generates into the data volume, so clients can
-      # pin it across restarts (TOFU).
+      # added through the /keys page by the signed-in user; the host key
+      # auto-generates into the data volume, so clients can pin it across
+      # restarts (TOFU). The listener stays OFF in the restricted first run.
       SPINDLE__SERVER__SSH__LISTEN: 0.0.0.0:2222
     volumes: [spindle-data:/var/lib/spindle]
     restart: unless-stopped
     healthcheck:
-      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8080/readyz"]
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8080/healthz"]
       interval: 10s
       timeout: 5s
       retries: 12

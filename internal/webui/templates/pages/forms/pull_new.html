@@ -97,7 +97,7 @@
       <textarea id="pull-body" name="body" class="input min-h-24" aria-label="body">{{.Data.Body}}</textarea>
     </label>
     <label class="flex cursor-pointer items-start gap-2 card p-3">
-      <input type="checkbox" name="draft" class="mt-0.5 h-4 w-4 accent-amber-500"{{if .Data.Draft}} checked{{end}}>
+      <input type="checkbox" name="draft" class="mt-0.5 h-4 w-4 check"{{if .Data.Draft}} checked{{end}}>
       <span>
         <span class="block text-sm font-medium">Open as draft</span>
         <span class="muted block text-[11px]">Drafts cannot merge until marked ready for review.</span>

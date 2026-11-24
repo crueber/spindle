@@ -67,12 +67,27 @@ func TestApplyEnvPrimaryWinsOnConflict(t *testing.T) {
 }
 
 func TestApplyEnvNestedSection(t *testing.T) {
-	c, _, err := applyEnvOn(t, nil, "SPINDLE__SERVER__AUTH__MODE=oidc")
+	c, _, err := applyEnvOn(t, nil, "SPINDLE__SERVER__AUTH__ISSUER=https://id.example.com")
 	if err != nil {
 		t.Fatalf("applyEnv: %v", err)
 	}
-	if c.Server.Auth.Mode != "oidc" {
-		t.Fatalf("server.auth.mode = %q, want oidc", c.Server.Auth.Mode)
+	if c.Server.Auth.Issuer != "https://id.example.com" {
+		t.Fatalf("server.auth.issuer = %q, want the env value", c.Server.Auth.Issuer)
+	}
+}
+
+// TestApplyEnvRemovedAuthKeys: a residual removed key is a named, fatal error
+// (PLAN-OIDC-ONLY §4.1), not a silently ignored override.
+func TestApplyEnvRemovedAuthKeys(t *testing.T) {
+	for _, kv := range []string{
+		"SPINDLE__SERVER__AUTH__MODE=oidc",
+		"SPINDLE__SERVER__AUTH__ADMIN_EMAILS=[\"ops@example.com\"]",
+		"SPINDLE__SERVER__AUTH__ADMIN_DOMAINS=[\"example.com\"]",
+	} {
+		_, _, err := applyEnvOn(t, nil, kv)
+		if err == nil || !strings.Contains(err.Error(), "was removed") {
+			t.Fatalf("%s: err = %v, want the named removal hint", kv, err)
+		}
 	}
 }
 

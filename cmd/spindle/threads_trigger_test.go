@@ -144,6 +144,37 @@ func TestPullEventSinkForkUsesBaseWorkflowUntrusted(t *testing.T) {
 	}
 }
 
+// TestPullEventSinkHonoursTypes pins the wiring: the sink forwards the pulls
+// action into CreateRun, so a `types: [opened]` workflow runs for an opened PR
+// and (because the action is required) never for an edge the file lists out.
+func TestPullEventSinkHonoursTypes(t *testing.T) {
+	sha := strings.Repeat("e", 40)
+	g := newTriggerGit()
+	g.add(sha, ".spindle/workflows/ci.yml", strings.Replace(triggerWorkflow,
+		"on: [push, pull_request]",
+		"on:\n  pull_request:\n    types: [opened]", 1))
+	svc := triggerService(t, g)
+	sink := threadsPullEventOf(&collabWiring{threadsSvc: svc})
+	sink(context.Background(), pulls.PullEvent{
+		Repo: "o/r", Action: "opened", Num: 9,
+		BaseRef: "main", HeadRef: "feat", HeadSHA: sha, HeadRepo: "o/r", Actor: "ada",
+	})
+	runs := awaitRuns(t, svc, 1)
+	if runs[0].WorkflowPath != ".spindle/workflows/ci.yml" {
+		t.Fatalf("typed workflow did not run on opened: %+v", runs[0])
+	}
+	// A synchronize delivery for the same file creates nothing (poll a short
+	// window: threadsRun detaches, so there is no completion signal).
+	sink(context.Background(), pulls.PullEvent{
+		Repo: "o/r", Action: "synchronize", Num: 9,
+		BaseRef: "main", HeadRef: "feat", HeadSHA: sha, HeadRepo: "o/r", Actor: "ada",
+	})
+	time.Sleep(100 * time.Millisecond)
+	if page, err := svc.ListRuns(context.Background(), "o/r", auth.Principal{Name: "reader"}, "", 50); err == nil && len(page.Runs) != 1 {
+		t.Fatalf("types: [opened] created a synchronize run: %+v", page.Runs)
+	}
+}
+
 func TestBranchPublishedSinkCreatesPushRun(t *testing.T) {
 	sha := strings.Repeat("d", 40)
 	g := newTriggerGit()

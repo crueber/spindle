@@ -255,7 +255,9 @@ truth**; frames invalidate cache keys, they do not carry full state.
 
 - `GET /{o}/{r}/api/collab/stream` — repo-scoped, read auth (anonymous when `anonymous_read`). Frame
   `event: <kind>` with data `{num?, seq?, kind, sha?, tag?, actor, at}`; kinds: `issue`, `issue_event`,
-  `pull`, `review`, `thread`, `check`, `release`, `access`. Defined here because it is cross-feature; each
+  `pull`, `review`, `thread`, `check`, `release`, `access`, `moderation` (M2: `action`
+  `hidden|unhidden|locked|unlocked|apply`, `state` `hidden|visible|locked|unlocked`, optional
+  `num`/`seq`/`thread_id` — invalidation + state only; a comment body never rides a frame). Defined here because it is cross-feature; each
   feature doc names the frames its handlers emit (02: `issue` `{num, card}` on header mutations and
   `issue_event` `{num, event}` on appended events; 03: `pull` with
   `{action: opened|closed|reopened|merged|head_force_pushed, num, title, state, author, base_ref, head_ref,
@@ -509,6 +511,17 @@ ceiling — no ARIA beyond what semantics require.
   acceptable (decision (a)). Renderer-only, every rendered-body consumer inherits it; no new deps.
   *(Implementation move, D-WEB-14/D-WEB-15: the pipeline is `internal/webui/markdown.go`; the
   SPA's `renderBody`/render-md path is historical.)*
+
+- **Markdown line breaks are CommonMark/GFM (2026-11-21).** The rendered-body contract now states the
+  break rule the Go renderer implements: one source newline inside a paragraph is a soft break and
+  renders as a space (prose reflows to the container, like GitHub), a blank line starts a new
+  paragraph, and a hard break needs two or more trailing spaces or a trailing backslash before the
+  newline. A list item's or blockquote's unindented following line continues its open paragraph
+  (lazy continuation). Fenced code stays verbatim; raw HTML blocks keep their newlines and explicit
+  `<br>`s through the sanitizer, which remains the XSS boundary. Before this the renderer emitted
+  `<br>` for every newline — a carry-over of the SPA's `marked` `breaks: true` config, which GitHub
+  never used — so READMEs broke at the author's line width. Every rendered-body consumer inherits the
+  fix; no new deps, no template or CSS change.
 
 ## Explicitly out of scope
 

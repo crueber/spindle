@@ -273,4 +273,8 @@ func registerInventory(r *Registry) {
 	r.Gauge("walgit_checkpoint_lag_entries", "WAL checkpoint lag (entries)")
 	r.Gauge("walgit_checkpoint_age_seconds", "WAL checkpoint age")
 	r.Counter("walgit_repo_miss_total", "unknown-repo requests")
+	// PLAN-V2 §M.3 names the spam counter with the spindle prefix (the
+	// walgit_ series above are Rust-era wire names kept for compatibility;
+	// a new series takes the current prefix).
+	r.Counter(spamFlagMetric, spamFlagHelp)
 }

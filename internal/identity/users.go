@@ -36,12 +36,37 @@ import (
 
 // UserDoc is users/<username>/user.json: the immutable username ↔
 // verified-email binding. Version is the CAS token.
+//
+// The disablement fields are the Administration area's directory decision
+// (docs/PLAN-ADMIN.md §3.7): the flag lives HERE, on the credential
+// binding, not on profile.json — a profile is public-facing display state
+// (display name, bio, avatar) and a credential fact must not ride a
+// document the profile page reads. Every field is append-only (law 5):
+// old readers ignore them, old writers never emit them, and a cleared
+// disablement writes zero values back so an active account's bytes match
+// its pre-field shape.
 type UserDoc struct {
 	Version  int    `json:"version"`
 	Username string `json:"username"`
 	Email    string `json:"email"`
 	// CreatedAt is RFC3339.
 	CreatedAt string `json:"created_at"`
+
+	// Disabled is the deactivate flag enforced at the credential boundary
+	// (internal/server/auth.go accountGate): a disabled account cannot
+	// authenticate with any OIDC-derived credential.
+	Disabled bool `json:"disabled,omitempty"`
+	// DisabledBy / DisabledAt / Reason record the transition (the audit
+	// family carries the durable record; this is the account's own state,
+	// so the directory can explain a row after an audit page is gone).
+	DisabledBy string `json:"disabled_by,omitempty"`
+	DisabledAt string `json:"disabled_at,omitempty"`
+	Reason     string `json:"reason,omitempty"`
+	// TokensRevokedAt is the RFC3339 watermark deactivation set: every
+	// wgt_ token AND browser session minted at or before it is refused,
+	// permanently. Reactivation clears Disabled and keeps this — revoked
+	// credentials are never restored (the user signs in again).
+	TokensRevokedAt string `json:"tokens_revoked_at,omitempty"`
 }
 
 // AliasDoc is users/by-email/<encoded-email>/ref.json: the login fast
@@ -192,15 +217,36 @@ func (s *Service) ensureAlias(ctx context.Context, email, username string) {
 // not manufacture authority for it. Absent or error reads as non-user
 // (fail closed). Head's absent contract is (nil, nil), like orgExists.
 func (s *Service) userExists(ctx context.Context, username string) bool {
+	ok, err := s.accountTrace(ctx, username)
+	return err == nil && ok
+}
+
+// accountTrace is the ONE claimed-user predicate: a users/<u>/user.json (the
+// OIDC username registry) or a users/<u>/profile.json (created lazily on first
+// authenticated access or first role grant) is an account trace. Token-mode
+// principals have only the profile, so probing user.json alone made their own
+// repositories unadministrable (the audit's HIGH bug) — and a rebase dropped
+// this helper once, which the owner-predicate test now pins. Unknown and
+// invalid namespaces are (false, nil); a store error surfaces so callers can
+// fail closed.
+func (s *Service) accountTrace(ctx context.Context, username string) (bool, error) {
 	if s == nil || s.Store == nil {
-		return false
+		return false, nil
 	}
 	username = normPrincipal(username)
 	if !auth.ValidUsername(username) {
-		return false
+		return false, nil
 	}
-	meta, err := s.Store.Head(ctx, UserKey(username))
-	return err == nil && meta != nil
+	for _, key := range []string{UserKey(username), ProfileKey(username)} {
+		meta, err := s.Store.Head(ctx, key)
+		if err != nil {
+			return false, err
+		}
+		if meta != nil {
+			return true, nil
+		}
+	}
+	return false, nil
 }
 
 // UserExists reports whether username is a claimed identity: a users/<u>/
@@ -220,18 +266,7 @@ func (s *Service) UserExists(ctx context.Context, username string) (bool, error)
 	if !auth.ValidUsername(username) {
 		return false, nil
 	}
-	meta, err := s.Store.Head(ctx, UserKey(username))
-	if err != nil {
-		return false, err
-	}
-	if meta != nil {
-		return true, nil
-	}
-	prof, err := s.GetProfile(ctx, username)
-	if err != nil {
-		return false, err
-	}
-	return prof != nil, nil
+	return s.accountTrace(ctx, username)
 }
 
 // EmailForUsername returns the verified email bound to username, or ""

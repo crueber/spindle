@@ -232,7 +232,7 @@ name: ci
 on: [push, pull_request]          # v1 triggers: push, pull_request, workflow_dispatch. NOT schedule (R3).
 jobs:
   build:
-    runs-on: [linux, x64]         # label match vs runner labels; subset match (runner ⊇ job labels)
+    runs-on: [self-hosted, linux, docker]   # exact labels; subset match (runner ⊇ job labels)
     steps:
       - name: checkout            # reserved: coordinator-supplied clone (no script)
         uses: checkout@v1         # v1: ONLY checkout (+ setup-* toolchain shims TBD at review). Arbitrary uses: NON-GOAL (§9).

@@ -62,6 +62,7 @@ import (
 	"github.com/crueber/spindle/internal/identity"
 	"github.com/crueber/spindle/internal/issues"
 	"github.com/crueber/spindle/internal/mirror"
+	"github.com/crueber/spindle/internal/moderation"
 	"github.com/crueber/spindle/internal/pulls"
 	"github.com/crueber/spindle/internal/releases"
 	"github.com/crueber/spindle/internal/repoimport"
@@ -252,10 +253,10 @@ func (s *Server) formsDispatchDelete5(w http.ResponseWriter, r *http.Request) {
 // --- shared mutation plumbing (FOUNDATION GAP: see the file header) ---------
 
 // formsOriginOK rejects a cross-origin write. Origin wins when present;
-// otherwise Referer. A request carrying neither fails closed whenever a
-// cookie-backed session could authenticate it (token/oidc); only the auth-less
-// "none" boot — where there is no victim session to ride — accepts it. This is
-// the same rule the collab and public groups apply.
+// otherwise Referer. A request carrying neither fails closed: every instance
+// has a cookie-backed OIDC session that could authenticate it (PLAN-OIDC-ONLY
+// removed the auth-less boot). This is the same rule the collab and public
+// groups apply.
 func (s *Server) formsOriginOK(r *http.Request) bool {
 	if o := r.Header.Get("Origin"); o != "" {
 		return formsSameHost(r, o)
@@ -263,8 +264,7 @@ func (s *Server) formsOriginOK(r *http.Request) bool {
 	if ref := r.Header.Get("Referer"); ref != "" {
 		return formsSameHost(r, ref)
 	}
-	mode := s.authMode()
-	return mode == "" || mode == "none"
+	return false
 }
 
 func formsSameHost(r *http.Request, raw string) bool {
@@ -355,10 +355,9 @@ type formsBase struct {
 func (b *formsBase) setErr(msg string) { b.Err = msg }
 
 // formsAnonymousViewer is lib/writeGate.js isAnonymousViewer on the server:
-// a signed-out viewer under a real auth mode. auth.none is legacy-open.
+// a signed-out viewer (OIDC is the only authentication).
 func (s *Server) formsAnonymousViewer(p auth.Principal) bool {
-	mode := s.authMode()
-	return p.Anonymous && (mode == "token" || mode == "oidc")
+	return p.Anonymous
 }
 
 func (s *Server) formsBase(r *http.Request, p auth.Principal, action string) formsBase {
@@ -366,7 +365,7 @@ func (s *Server) formsBase(r *http.Request, p auth.Principal, action string) for
 	b := formsBase{
 		Flash:     formsFlash(r),
 		Anonymous: anon,
-		NoWrite:   !p.Anonymous && !p.Write && s.authMode() != "none",
+		NoWrite:   !p.Anonymous && !p.Write,
 	}
 	if anon {
 		b.GateHref = formsLoginRequired(r, action)
@@ -590,18 +589,22 @@ func formsErrStatus(err error) int {
 	}
 	switch {
 	case errors.Is(err, issues.ErrInvalid), errors.Is(err, pulls.ErrInvalid),
-		errors.Is(err, releases.ErrInvalid), errors.Is(err, identity.ErrInvalid):
+		errors.Is(err, releases.ErrInvalid), errors.Is(err, identity.ErrInvalid),
+		errors.Is(err, moderation.ErrInvalid):
 		return http.StatusBadRequest
 	case errors.Is(err, issues.ErrConflict), errors.Is(err, pulls.ErrConflict),
 		errors.Is(err, releases.ErrConflict), errors.Is(err, identity.ErrConflict),
-		store.IsPreconditionFailed(err):
+		errors.Is(err, moderation.ErrConflict), store.IsPreconditionFailed(err):
 		return http.StatusConflict
 	case errors.Is(err, issues.ErrNotFound), errors.Is(err, pulls.ErrNotFound),
-		errors.Is(err, releases.ErrNotFound), errors.Is(err, identity.ErrNotFound):
+		errors.Is(err, releases.ErrNotFound), errors.Is(err, identity.ErrNotFound),
+		errors.Is(err, moderation.ErrNotFound):
 		return http.StatusNotFound
-	case errors.Is(err, issues.ErrForbidden), errors.Is(err, pulls.ErrForbidden), errors.Is(err, releases.ErrForbidden):
+	case errors.Is(err, issues.ErrForbidden), errors.Is(err, pulls.ErrForbidden),
+		errors.Is(err, releases.ErrForbidden), errors.Is(err, moderation.ErrForbidden):
 		return http.StatusForbidden
-	case errors.Is(err, issues.ErrUnauthorized), errors.Is(err, pulls.ErrUnauthorized), errors.Is(err, releases.ErrUnauthorized):
+	case errors.Is(err, issues.ErrUnauthorized), errors.Is(err, pulls.ErrUnauthorized),
+		errors.Is(err, releases.ErrUnauthorized), errors.Is(err, moderation.ErrUnauthorized):
 		return http.StatusUnauthorized
 	case errors.Is(err, identity.ErrTooLarge):
 		// The avatar-upload verbs' cap (identity.PutUserAvatarBytes /
@@ -1318,8 +1321,8 @@ func (s *Server) formsImportMirror(w http.ResponseWriter, r *http.Request, p aut
 		s.formsFail(w, r, p, nil, "forms/import", "Import repository", data, verr)
 		return
 	}
-	if data.Dangerous && !formsDangerousAllowed(s.authMode(), p) {
-		data.Err = "dangerous:true requires an authenticated admin (server.auth.mode token/oidc)"
+	if data.Dangerous && !formsDangerousAllowed(p) {
+		data.Err = "dangerous:true requires a signed-in host admin (OIDC admin group)"
 		s.formsImportRender(w, r, p, http.StatusForbidden, data)
 		return
 	}
@@ -1368,10 +1371,9 @@ func (s *Server) formsImportMirror(w http.ResponseWriter, r *http.Request, p aut
 }
 
 // formsDangerousAllowed mirrors the import/mirror dangerous-confirm authority:
-// an authenticated admin under a real auth mode (auth-none admin is
-// unauthenticated, so it never qualifies).
-func formsDangerousAllowed(mode string, p auth.Principal) bool {
-	return !p.Anonymous && p.Admin && (mode == "token" || mode == "oidc")
+// a signed-in host admin (the OIDC group predicate; anonymous is never admin).
+func formsDangerousAllowed(p auth.Principal) bool {
+	return !p.Anonymous && p.Admin
 }
 
 // --- /orgs/new ---------------------------------------------------------------
@@ -1699,6 +1701,22 @@ func (s *Server) formsReleaseNewPost(w http.ResponseWriter, r *http.Request) {
 
 // --- /{owner}/{name}/issues/new ---------------------------------------------
 
+// formsIssueTemplates is the optional §15 read half: the concrete
+// *issues.Service answers it; a test fake that does not is simply treated as
+// "no templates in this repo" (the blank composer).
+type formsIssueTemplates interface {
+	Templates(ctx context.Context, owner, repo string) (*issues.TemplateDoc, error)
+}
+
+// issueTemplateChoice is one chooser entry (no body: the body arrives through
+// the selected template, never in the list markup).
+type issueTemplateChoice struct {
+	Path  string
+	Name  string
+	About string
+	Title string
+}
+
 type formsIssueNewData struct {
 	formsBase
 	Full        string
@@ -1707,15 +1725,134 @@ type formsIssueNewData struct {
 	Preview     bool
 	PreviewHTML template.HTML
 	Disabled    bool
+
+	// §15 templates: the chooser plus the selected template's metadata. A
+	// selection arrives as ?template=<path> (GET) and rides the form as a
+	// hidden field (POST), so no client JavaScript is needed to prefill.
+	Templates []issueTemplateChoice
+	Selected  string
+	Template  *issues.IssueTemplate
+	Labels    string
+	Assignees string
+}
+
+// formsIssueTemplatesFor reads the cached template projection. One
+// exact-key bucket GET — never a git call on a composer request (law 6).
+func (s *Server) formsIssueTemplatesFor(r *http.Request, owner, name string) []issues.IssueTemplate {
+	if formsDeps.Issues == nil {
+		return nil
+	}
+	src, ok := formsDeps.Issues.(formsIssueTemplates)
+	if !ok {
+		return nil
+	}
+	doc, err := src.Templates(r.Context(), owner, name)
+	if err != nil || doc == nil {
+		return nil
+	}
+	return doc.Templates
+}
+
+// formsTemplateByPath resolves one selection ("no traversal": the path must
+// be exactly one of the discovered entries).
+func formsTemplateByPath(list []issues.IssueTemplate, p string) *issues.IssueTemplate {
+	p = strings.TrimSpace(p)
+	if p == "" {
+		return nil
+	}
+	for i := range list {
+		if list[i].Path == p {
+			return &list[i]
+		}
+	}
+	return nil
 }
 
 func (s *Server) formsIssueNewDataFor(r *http.Request, p auth.Principal, owner, name string) *formsIssueNewData {
 	sum, _ := s.formsSummary(r, owner, name)
-	return &formsIssueNewData{
+	data := &formsIssueNewData{
 		formsBase: s.formsBase(r, p, "Create a new issue"),
 		Full:      owner + "/" + name,
 		Disabled:  !formsFeatureEnabled(sum, "issues"),
 	}
+	// One projection read serves both the chooser and the selection (one
+	// exact-key GET per composer render; never a second store round trip).
+	list := s.formsIssueTemplatesFor(r, owner, name)
+	for _, t := range list {
+		data.Templates = append(data.Templates, issueTemplateChoice{Path: t.Path, Name: t.Name, About: t.About, Title: t.Title})
+	}
+	sel := strings.TrimSpace(r.URL.Query().Get("template"))
+	if sel == "" {
+		return data
+	}
+	tpl := formsTemplateByPath(list, sel)
+	if tpl == nil {
+		data.setErr("unknown issue template")
+		return data
+	}
+	data.Selected = tpl.Path
+	data.Template = tpl
+	data.Title = tpl.Title
+	data.Body = tpl.Body
+	data.Labels = strings.Join(tpl.Labels, ", ")
+	data.Assignees = strings.Join(tpl.Assignees, ", ")
+	return data
+}
+
+// formsTemplateMeta filters the selected template's metadata to what this
+// author may actually apply: labels must exist in the repo and the actor must
+// hold the create-metadata floor (triage, 02 §7); assignees must resolve at
+// triage. Dropped values are listed in the page's notice — never silently
+// half-applied and never a failed create (a reader may still file an issue
+// from a template).
+func (s *Server) formsTemplateMeta(r *http.Request, p auth.Principal, owner, name string, tpl *issues.IssueTemplate) (labels, assignees []string, dropped []string) {
+	if tpl == nil {
+		return nil, nil, nil
+	}
+	triage := false
+	if formsDeps.Identity != nil {
+		role, _ := formsDeps.Identity.Resolve(r.Context(), owner, name, p)
+		triage = roleRank(role) >= roleRank(identity.RoleTriage)
+	} else if p.Admin || p.Write {
+		triage = true
+	}
+	if !triage {
+		if len(tpl.Labels) > 0 || len(tpl.Assignees) > 0 {
+			dropped = append(dropped, "labels/assignees (needs triage)")
+		}
+		return nil, nil, dropped
+	}
+	if len(tpl.Labels) > 0 {
+		var known []issues.Label
+		if formsDeps.Issues != nil {
+			known, _ = formsDeps.Issues.ListLabels(r.Context(), owner, name)
+		}
+		for _, want := range tpl.Labels {
+			found := false
+			for _, l := range known {
+				if strings.EqualFold(l.Name, want) {
+					labels = append(labels, l.Name)
+					found = true
+					break
+				}
+			}
+			if !found {
+				dropped = append(dropped, "label "+want)
+			}
+		}
+	}
+	for _, want := range tpl.Assignees {
+		role := identity.Role("")
+		if formsDeps.Identity != nil {
+			role, _ = formsDeps.Identity.Resolve(r.Context(), owner, name, auth.Principal{Name: normPrincipal(want)})
+		}
+		if roleRank(role) >= roleRank(identity.RoleTriage) {
+			assignees = append(assignees, normPrincipal(want))
+		} else {
+			dropped = append(dropped, "assignee "+want)
+		}
+	}
+	return labels, assignees, dropped
 }
 
 func (s *Server) formsIssueNew(w http.ResponseWriter, r *http.Request) {
@@ -1741,6 +1878,15 @@ func (s *Server) formsIssueNewPost(w http.ResponseWriter, r *http.Request) {
 	data := s.formsIssueNewDataFor(r, p, owner, name)
 	data.Title = r.PostFormValue("title")
 	data.Body = r.PostFormValue("body")
+	if sel := strings.TrimSpace(r.PostFormValue("template")); sel != "" {
+		data.Selected = sel
+		data.Template = formsTemplateByPath(s.formsIssueTemplatesFor(r, owner, name), sel)
+		if data.Template == nil {
+			data.setErr("the selected issue template no longer exists")
+			s.pageRepo(w, r, p, chrome, http.StatusBadRequest, "forms/issue_new", "New issue", data)
+			return
+		}
+	}
 	if data.Disabled {
 		data.Err = "Issues are disabled for this repository."
 		s.pageRepo(w, r, p, chrome, http.StatusForbidden, "forms/issue_new", "New issue", data)
@@ -1756,7 +1902,12 @@ func (s *Server) formsIssueNewPost(w http.ResponseWriter, r *http.Request) {
 		s.errorPage(w, r, http.StatusServiceUnavailable, "issues service not configured")
 		return
 	}
-	th, _, cerr := formsDeps.Issues.CreateIssue(r.Context(), owner, name, p, data.Title, data.Body, nil)
+	labels, assignees, dropped := s.formsTemplateMeta(r, p, owner, name, data.Template)
+	var meta *issues.IssueMeta
+	if len(labels) > 0 || len(assignees) > 0 {
+		meta = &issues.IssueMeta{Labels: labels, Assignees: assignees}
+	}
+	th, _, cerr := formsDeps.Issues.CreateIssue(r.Context(), owner, name, p, data.Title, data.Body, meta)
 	if cerr != nil {
 		s.formsFail(w, r, p, chrome, "forms/issue_new", "New issue", data, cerr)
 		return
@@ -1765,7 +1916,11 @@ func (s *Server) formsIssueNewPost(w http.ResponseWriter, r *http.Request) {
 	if th != nil {
 		num = th.Num
 	}
-	s.formsRedirect(w, r, fmt.Sprintf("/%s/%s/issues/%d", owner, name, num))
+	notice := ""
+	if len(dropped) > 0 {
+		notice = "?template_skipped=" + url.QueryEscape(strings.Join(dropped, ", "))
+	}
+	s.formsRedirect(w, r, fmt.Sprintf("/%s/%s/issues/%d%s", owner, name, num, notice))
 }
 
 // --- /{owner}/{name}/pulls/new ---------------------------------------------

@@ -53,10 +53,11 @@ func assertURLsSafe(t *testing.T, out string) {
 // --- the JS test vectors (blob-md.test.js) ---------------------------------
 
 func TestRenderMarkdownBlobPipeline(t *testing.T) {
+	t.Parallel()
 	src := "# hello\n\n[evil](javascript:alert(1)) [ok](/rel)\n\n```js\nconst a = 1;\n```\n"
 	out := md(src)
 	for _, want := range []string{
-		"<h1>hello</h1>",
+		"<h2>hello</h2>", // demoted: the page owns the h1
 		`<a href="/rel" rel="nofollow ugc noopener">ok</a>`,
 		`<pre><code class="language-js">const a = 1;`,
 		"evil", // the link text survives; only the dangerous href is dropped
@@ -73,17 +74,23 @@ func TestRenderMarkdownBlobPipeline(t *testing.T) {
 // --- blocks ----------------------------------------------------------------
 
 func TestRenderMarkdownHeadings(t *testing.T) {
-	for lvl := 1; lvl <= 6; lvl++ {
+	t.Parallel()
+	// ATX levels demote one step (writeHeading): the page owns the single
+	// h1, so markdown h1 renders as h2 and h6 stays h6 (no h7+ abuse).
+	for lvl := 1; lvl <= 5; lvl++ {
 		src := strings.Repeat("#", lvl) + " title"
-		want := "<h" + string(rune('0'+lvl)) + ">title</h" + string(rune('0'+lvl)) + ">\n"
+		want := "<h" + string(rune('0'+lvl+1)) + ">title</h" + string(rune('0'+lvl+1)) + ">\n"
 		if out := md(src); out != want {
 			t.Errorf("%d: got %q want %q", lvl, out, want)
 		}
 	}
+	if out := md("###### title"); out != "<h6>title</h6>\n" {
+		t.Errorf("6 hashes do not demote past h6: %q", out)
+	}
 	if out := md("####### seven"); strings.Contains(out, "<h7") || strings.Contains(out, "<h6") {
 		t.Errorf("7 hashes must not be a heading: %q", out)
 	}
-	if out := md("## closed ##"); out != "<h2>closed</h2>\n" {
+	if out := md("## closed ##"); out != "<h3>closed</h3>\n" {
 		t.Errorf("closing hashes: %q", out)
 	}
 	if out := md("#no space"); strings.Contains(out, "<h1>") {
@@ -92,15 +99,17 @@ func TestRenderMarkdownHeadings(t *testing.T) {
 }
 
 func TestRenderMarkdownSetext(t *testing.T) {
-	if out := md("Title\n=====\n"); out != "<h1>Title</h1>\n" {
+	t.Parallel()
+	if out := md("Title\n=====\n"); out != "<h2>Title</h2>\n" {
 		t.Fatalf("setext h1 = %q", out)
 	}
-	if out := md("Sub\n---\n"); out != "<h2>Sub</h2>\n" {
+	if out := md("Sub\n---\n"); out != "<h3>Sub</h3>\n" {
 		t.Fatalf("setext h2 = %q", out)
 	}
 }
 
 func TestRenderMarkdownInline(t *testing.T) {
+	t.Parallel()
 	tests := []struct{ src, want string }{
 		{"**bold**", "<p><strong>bold</strong></p>\n"},
 		{"__bold__", "<p><strong>bold</strong></p>\n"},
@@ -121,6 +130,7 @@ func TestRenderMarkdownInline(t *testing.T) {
 }
 
 func TestRenderMarkdownFencedCode(t *testing.T) {
+	t.Parallel()
 	out := md("```html\n<script>alert(1)</script>\n```")
 	if !strings.Contains(out, `<pre><code class="language-html">&lt;script&gt;alert(1)&lt;/script&gt;`) {
 		t.Fatalf("fenced code = %q", out)
@@ -144,6 +154,7 @@ func TestRenderMarkdownFencedCode(t *testing.T) {
 }
 
 func TestRenderMarkdownUnorderedList(t *testing.T) {
+	t.Parallel()
 	out := md("- a\n- b\n")
 	want := "<ul>\n<li>a</li>\n<li>b</li>\n</ul>\n"
 	if out != want {
@@ -152,6 +163,7 @@ func TestRenderMarkdownUnorderedList(t *testing.T) {
 }
 
 func TestRenderMarkdownOrderedList(t *testing.T) {
+	t.Parallel()
 	out := md("1. a\n2. b\n")
 	if !strings.HasPrefix(out, "<ol>") || !strings.Contains(out, "<li>a</li>") || !strings.Contains(out, "<li>b</li>") {
 		t.Fatalf("ordered list = %q", out)
@@ -163,6 +175,7 @@ func TestRenderMarkdownOrderedList(t *testing.T) {
 }
 
 func TestRenderMarkdownNestedList(t *testing.T) {
+	t.Parallel()
 	out := md("- a\n  - b\n- c\n")
 	if !strings.Contains(out, "<li>a<ul>") {
 		t.Fatalf("nested list = %q", out)
@@ -173,6 +186,7 @@ func TestRenderMarkdownNestedList(t *testing.T) {
 }
 
 func TestRenderMarkdownTaskList(t *testing.T) {
+	t.Parallel()
 	out := md("- [ ] todo\n- [x] done\n- [X] also\n")
 	if !strings.Contains(out, `<li><input type="checkbox" disabled> todo</li>`) {
 		t.Fatalf("unchecked item = %q", out)
@@ -183,14 +197,16 @@ func TestRenderMarkdownTaskList(t *testing.T) {
 }
 
 func TestRenderMarkdownBlockquote(t *testing.T) {
+	t.Parallel()
 	out := md("> quote\n> more\n")
-	want := "<blockquote>\n<p>quote<br>\nmore</p>\n</blockquote>\n"
+	want := "<blockquote>\n<p>quote\nmore</p>\n</blockquote>\n"
 	if out != want {
 		t.Fatalf("got %q want %q", out, want)
 	}
 }
 
 func TestRenderMarkdownTable(t *testing.T) {
+	t.Parallel()
 	out := md("| name | value |\n| --- | ---: |\n| a | <b> |\n| b | 2 |\n")
 	for _, want := range []string{
 		"<table>", "<thead>", "<th>name</th>", "<th>value</th>",
@@ -206,6 +222,7 @@ func TestRenderMarkdownTable(t *testing.T) {
 }
 
 func TestRenderMarkdownThematicBreak(t *testing.T) {
+	t.Parallel()
 	for _, src := range []string{"---", "***", "___", "- - -"} {
 		if out := md(src); !strings.Contains(out, "<hr>") {
 			t.Errorf("%q: no <hr> in %q", src, out)
@@ -214,15 +231,46 @@ func TestRenderMarkdownThematicBreak(t *testing.T) {
 }
 
 func TestRenderMarkdownLineBreaks(t *testing.T) {
-	if out := md("a\nb\n"); out != "<p>a<br>\nb</p>\n" {
-		t.Fatalf("breaks = %q", out)
+	t.Parallel()
+	// CommonMark/GFM: a single newline inside a paragraph is a soft break and
+	// renders as a space, so the text reflows to the container width.
+	if out := md("a\nb\n"); out != "<p>a\nb</p>\n" {
+		t.Fatalf("soft break = %q", out)
 	}
+	if out := md("a\nb\n"); strings.Contains(out, "<br>") {
+		t.Fatalf("soft break emitted <br>: %q", out)
+	}
+	// Two or more trailing spaces are a hard break.
+	if out := md("a  \nb\n"); out != "<p>a<br>\nb</p>\n" {
+		t.Fatalf("two-space hard break = %q", out)
+	}
+	// A trailing backslash is a hard break; the marker itself never renders.
+	if out := md("a\\\nb\n"); out != "<p>a<br>\nb</p>\n" {
+		t.Fatalf("backslash hard break = %q", out)
+	}
+	// A single trailing space is still a soft break.
+	if out := md("a \nb\n"); out != "<p>a\nb</p>\n" {
+		t.Fatalf("one-space soft break = %q", out)
+	}
+	// An escaped backslash is a literal, not a hard break.
+	if out := md("a\\\\\nb\n"); out != "<p>a\\\nb</p>\n" {
+		t.Fatalf("escaped backslash = %q", out)
+	}
+	// A hard-break marker on the paragraph's last line has no newline to end.
+	if out := md("a  \n"); out != "<p>a</p>\n" {
+		t.Fatalf("trailing marker = %q", out)
+	}
+	if out := md("a\\\n"); out != "<p>a\\</p>\n" {
+		t.Fatalf("trailing backslash = %q", out)
+	}
+	// A blank line starts a new paragraph.
 	if out := md("a\n\nb\n"); strings.Count(out, "<p>") != 2 {
 		t.Fatalf("paragraphs = %q", out)
 	}
 }
 
 func TestRenderMarkdownRawHTMLSanitized(t *testing.T) {
+	t.Parallel()
 	// Raw HTML is allowed through the allowlist sanitizer (WP12): the tag
 	// survives, the event handler never does.
 	out := md(`<div onclick="alert(1)">hi</div>`)
@@ -240,6 +288,7 @@ func TestRenderMarkdownRawHTMLSanitized(t *testing.T) {
 // --- links and the security boundary ---------------------------------------
 
 func TestRenderMarkdownLinks(t *testing.T) {
+	t.Parallel()
 	tests := []struct{ src, want string }{
 		{"[a](/rel)", `<a href="/rel" rel="nofollow ugc noopener">a</a>`},
 		{"[a](https://x.test/a)", `<a href="https://x.test/a" rel="nofollow ugc noopener" target="_blank">a</a>`},
@@ -259,6 +308,7 @@ func TestRenderMarkdownLinks(t *testing.T) {
 }
 
 func TestRenderMarkdownImage(t *testing.T) {
+	t.Parallel()
 	if out := md("![alt](a.png)"); out != "<p><img src=\"a.png\" alt=\"alt\"></p>\n" {
 		t.Fatalf("image = %q", out)
 	}
@@ -272,6 +322,7 @@ func TestRenderMarkdownImage(t *testing.T) {
 }
 
 func TestRenderMarkdownAutolinks(t *testing.T) {
+	t.Parallel()
 	out := md("see https://x.test/a.")
 	if !strings.Contains(out, `<a href="https://x.test/a" rel="nofollow ugc noopener" target="_blank">https://x.test/a</a>.`) {
 		t.Fatalf("bare URL = %q", out)
@@ -290,6 +341,7 @@ func TestRenderMarkdownAutolinks(t *testing.T) {
 }
 
 func TestRenderMarkdownDangerousURLs(t *testing.T) {
+	t.Parallel()
 	payloads := []string{
 		"javascript:alert(1)",
 		"JaVaScRiPt:alert(1)",
@@ -325,6 +377,7 @@ func TestRenderMarkdownDangerousURLs(t *testing.T) {
 }
 
 func TestRenderMarkdownLinkTextSurvivesDroppedHref(t *testing.T) {
+	t.Parallel()
 	out := md("[click me](javascript:alert(1))")
 	if !strings.Contains(out, "click me") || strings.Contains(out, "href=") {
 		t.Fatalf("dropped link = %q", out)
@@ -334,6 +387,7 @@ func TestRenderMarkdownLinkTextSurvivesDroppedHref(t *testing.T) {
 // --- #N / PRN refs (Forgejo #340) ------------------------------------------
 
 func TestRenderMarkdownRefsNeedRepoBase(t *testing.T) {
+	t.Parallel()
 	if out := md("#3 and PR4"); strings.Contains(out, "<a ") {
 		t.Fatalf("ctx-less renderer must not link refs: %q", out)
 	}
@@ -343,6 +397,7 @@ func TestRenderMarkdownRefsNeedRepoBase(t *testing.T) {
 }
 
 func TestRenderMarkdownRefs(t *testing.T) {
+	t.Parallel()
 	out := mdIn("see #3, PR4, pr5 and #003 and (#7).", "o", "r")
 	for _, want := range []string{
 		`<a href="/o/r/issues/3" rel="nofollow ugc noopener">#3</a>`,
@@ -361,12 +416,13 @@ func TestRenderMarkdownRefs(t *testing.T) {
 }
 
 func TestRenderMarkdownRefBoundaries(t *testing.T) {
+	t.Parallel()
 	out := mdIn("x#3 #3x #3.2 xPR3 PR3abc #x3 #-3", "o", "r")
 	if strings.Contains(out, "<a ") {
 		t.Fatalf("boundary case linked: %q", out)
 	}
 	out = mdIn("### heading\n#3", "o", "r")
-	if !strings.HasPrefix(out, "<h3>heading</h3>") || strings.Count(out, "/issues/") != 1 {
+	if !strings.HasPrefix(out, "<h4>heading</h4>") || strings.Count(out, "/issues/") != 1 {
 		t.Fatalf("heading/ref = %q", out)
 	}
 	out = mdIn("`#3` and `PR4`", "o", "r")
@@ -386,6 +442,7 @@ func TestRenderMarkdownRefBoundaries(t *testing.T) {
 // --- @mentions (Forgejo #440) ----------------------------------------------
 
 func TestRenderMarkdownMentions(t *testing.T) {
+	t.Parallel()
 	out := md("hi @bob.")
 	if !strings.Contains(out, `hi @<a href="/bob" rel="nofollow ugc noopener">bob</a>.`) {
 		t.Fatalf("mention = %q", out)
@@ -401,6 +458,7 @@ func TestRenderMarkdownMentions(t *testing.T) {
 }
 
 func TestRenderMarkdownMentionExemptions(t *testing.T) {
+	t.Parallel()
 	for _, src := range []string{
 		"a@b.com", "@@x", "@org/team", "@bob@x", "`@bob`", "[@bob](https://x.test)", "@..", "x@y",
 	} {
@@ -420,6 +478,7 @@ func TestRenderMarkdownMentionExemptions(t *testing.T) {
 // --- misc ------------------------------------------------------------------
 
 func TestRenderMarkdownEmpty(t *testing.T) {
+	t.Parallel()
 	if out := md(""); out != "" {
 		t.Fatalf("empty = %q", out)
 	}
@@ -429,12 +488,14 @@ func TestRenderMarkdownEmpty(t *testing.T) {
 }
 
 func TestRenderMarkdownCRLF(t *testing.T) {
-	if out := md("# a\r\n\r\nb\r\n"); out != "<h1>a</h1>\n<p>b</p>\n" {
+	t.Parallel()
+	if out := md("# a\r\n\r\nb\r\n"); out != "<h2>a</h2>\n<p>b</p>\n" {
 		t.Fatalf("crlf = %q", out)
 	}
 }
 
 func TestRenderMarkdownDeepNesting(t *testing.T) {
+	t.Parallel()
 	out := md("- a\n  - b\n    - c\n")
 	if !strings.Contains(out, "<li>a<ul>") || !strings.Contains(out, "<li>b<ul>") || !strings.Contains(out, "<li>c</li>") {
 		t.Fatalf("deep nesting = %q", out)
@@ -444,24 +505,36 @@ func TestRenderMarkdownDeepNesting(t *testing.T) {
 // --- parser edge cases ------------------------------------------------------
 
 func TestRenderMarkdownListEdges(t *testing.T) {
+	t.Parallel()
 	// A blank line between items keeps one list.
 	if out := md("- a\n\n- b\n"); strings.Count(out, "<li>") != 2 || strings.Count(out, "<ul>") != 1 {
 		t.Fatalf("loose list = %q", out)
 	}
-	// A continuation line indented to the content column is a hard break.
-	if out := md("- a\n  b\n"); !strings.Contains(out, "<li>a<br>\nb</li>") {
+	// A continuation line indented to the content column is a soft break
+	// (CommonMark: the item's paragraph keeps flowing).
+	if out := md("- a\n  b\n"); !strings.Contains(out, "<li>a\nb</li>") {
 		t.Fatalf("continuation = %q", out)
 	}
 	// The forgiving indent path: content starts at column 4, continuation 2.
-	if out := md("*   a\n  b\n"); !strings.Contains(out, "<li>a<br>\nb</li>") {
+	if out := md("*   a\n  b\n"); !strings.Contains(out, "<li>a\nb</li>") {
 		t.Fatalf("forgiving indent = %q", out)
+	}
+	// A lazy continuation line (no indent at all) stays in the open item
+	// paragraph, the way GitHub renders it.
+	if out := md("- a\nlazy\n"); !strings.Contains(out, "<li>a\nlazy</li>") {
+		t.Fatalf("lazy continuation = %q", out)
+	}
+	// After a closed code block the item has no open paragraph, so an
+	// unindented line ends the list instead of joining the item.
+	if out := md("- a\n  ```\n  x\n  ```\nafter\n"); !strings.Contains(out, "</ul>\n<p>after</p>") {
+		t.Fatalf("lazy after fence = %q", out)
 	}
 	// A different bullet still belongs to the same list.
 	if out := md("- a\n* b\n"); strings.Count(out, "<ul>") != 1 || strings.Count(out, "<li>") != 2 {
 		t.Fatalf("mixed bullets = %q", out)
 	}
 	// A block at column 0 ends the list.
-	if out := md("- a\n# h\n"); !strings.Contains(out, "<li>a</li>") || !strings.Contains(out, "<h1>h</h1>") {
+	if out := md("- a\n# h\n"); !strings.Contains(out, "<li>a</li>") || !strings.Contains(out, "<h2>h</h2>") {
 		t.Fatalf("list then heading = %q", out)
 	}
 	// A 4-space nested list (2-space dedent leaves a 2-space marker).
@@ -486,21 +559,31 @@ func TestRenderMarkdownListEdges(t *testing.T) {
 }
 
 func TestRenderMarkdownBlockquoteEdges(t *testing.T) {
-	if out := md("> a\nlazy\n"); !strings.Contains(out, "<p>a<br>\nlazy</p>") {
+	t.Parallel()
+	if out := md("> a\nlazy\n"); !strings.Contains(out, "<p>a\nlazy</p>") {
 		t.Fatalf("lazy continuation = %q", out)
+	}
+	// A quote whose last block is a heading or fence has no open paragraph, so
+	// an unindented line ends the quote (CommonMark 5.2).
+	if out := md("> # h\nlazy\n"); !strings.Contains(out, "</blockquote>\n<p>lazy</p>") {
+		t.Fatalf("lazy after heading = %q", out)
+	}
+	if out := md("> ```\n> x\n> ```\nlazy\n"); !strings.Contains(out, "</blockquote>\n<p>lazy</p>") {
+		t.Fatalf("lazy after fence = %q", out)
 	}
 	if out := md("> a\n\n> b\n"); strings.Count(out, "<p>") != 2 {
 		t.Fatalf("blank inside quote = %q", out)
 	}
-	if out := md("> # h\n"); !strings.Contains(out, "<blockquote>\n<h1>h</h1>") {
+	if out := md("> # h\n"); !strings.Contains(out, "<blockquote>\n<h2>h</h2>") {
 		t.Fatalf("heading in quote = %q", out)
 	}
-	if out := md("> a\n# h\n"); !strings.Contains(out, "</blockquote>") || !strings.Contains(out, "<h1>h</h1>") {
+	if out := md("> a\n# h\n"); !strings.Contains(out, "</blockquote>") || !strings.Contains(out, "<h2>h</h2>") {
 		t.Fatalf("block start ends quote = %q", out)
 	}
 }
 
 func TestRenderMarkdownFenceEdges(t *testing.T) {
+	t.Parallel()
 	if out := md("    ```\ncode\n    ```\n"); strings.Contains(out, "<pre>") {
 		t.Fatalf("4-space fence is not a fence: %q", out)
 	}
@@ -525,19 +608,20 @@ func TestRenderMarkdownFenceEdges(t *testing.T) {
 }
 
 func TestRenderMarkdownHeadingEdges(t *testing.T) {
+	t.Parallel()
 	if out := md("    # h\n"); strings.Contains(out, "<h1>") {
 		t.Fatalf("4-space heading = %q", out)
 	}
-	if out := md("#####\n"); out != "<h5></h5>\n" {
+	if out := md("#####\n"); out != "<h6></h6>\n" {
 		t.Fatalf("bare heading = %q", out)
 	}
-	if out := md("## ##\n"); out != "<h2></h2>\n" {
+	if out := md("## ##\n"); out != "<h3></h3>\n" {
 		t.Fatalf("closing-only heading = %q", out)
 	}
-	if out := md("   # h\n"); out != "<h1>h</h1>\n" {
+	if out := md("   # h\n"); out != "<h2>h</h2>\n" {
 		t.Fatalf("3-space heading = %q", out)
 	}
-	if out := md("a\n=x\n"); !strings.Contains(out, "a<br>") {
+	if out := md("a\n=x\n"); !strings.Contains(out, "a\n=x") {
 		t.Fatalf("invalid setext = %q", out)
 	}
 	if out := md("---x\n"); strings.Contains(out, "<hr>") {
@@ -549,6 +633,7 @@ func TestRenderMarkdownHeadingEdges(t *testing.T) {
 }
 
 func TestRenderMarkdownTableEdges(t *testing.T) {
+	t.Parallel()
 	if out := md("a | b\nnope | b\n"); strings.Contains(out, "<table>") {
 		t.Fatalf("invalid delimiter row: %q", out)
 	}
@@ -573,6 +658,7 @@ func TestRenderMarkdownTableEdges(t *testing.T) {
 }
 
 func TestRenderMarkdownInlineEdges(t *testing.T) {
+	t.Parallel()
 	tests := []struct{ src, want string }{
 		{`\a`, "<p>\\a</p>\n"},
 		{"a\\", "<p>a\\</p>\n"},
@@ -607,6 +693,7 @@ func TestRenderMarkdownInlineEdges(t *testing.T) {
 }
 
 func TestRenderMarkdownMentionTrailingPunctuation(t *testing.T) {
+	t.Parallel()
 	out := md("(@bob), and @bob!")
 	if strings.Count(out, `<a href="/bob"`) != 2 || !strings.Contains(out, "), and") || !strings.Contains(out, "</a>!") {
 		t.Fatalf("punctuation = %q", out)
@@ -614,6 +701,7 @@ func TestRenderMarkdownMentionTrailingPunctuation(t *testing.T) {
 }
 
 func TestRenderMarkdownWriteTextEmpty(t *testing.T) {
+	t.Parallel()
 	var b strings.Builder
 	r := &mdRenderer{refBase: "/o/r"}
 	r.writeText(&b, "", true)
@@ -624,6 +712,7 @@ func TestRenderMarkdownWriteTextEmpty(t *testing.T) {
 }
 
 func TestMatchRefEdges(t *testing.T) {
+	t.Parallel()
 	for _, in := range []string{"#", "PR", "x#3", "#3x", "#3.2", "#-1", "pRx"} {
 		if _, ok := matchRef(in, 0); ok {
 			t.Errorf("matchRef(%q) matched", in)
@@ -639,6 +728,7 @@ func TestMatchRefEdges(t *testing.T) {
 }
 
 func TestMatchMentionEdges(t *testing.T) {
+	t.Parallel()
 	for _, in := range []string{"@", "@.", "a@b", "@@x", "@" + strings.Repeat("a", 65)} {
 		if _, ok := matchMention(in, 0); ok {
 			t.Errorf("matchMention(%q) matched", in)
@@ -654,6 +744,7 @@ func TestMatchMentionEdges(t *testing.T) {
 }
 
 func TestDecodeEntitiesEdges(t *testing.T) {
+	t.Parallel()
 	if got := decodeEntities("&amp;&#65;&#x41;&colon;"); got != "&AA:" {
 		t.Fatalf("decode = %q", got)
 	}
@@ -665,6 +756,7 @@ func TestDecodeEntitiesEdges(t *testing.T) {
 }
 
 func TestSanitizeURLEdges(t *testing.T) {
+	t.Parallel()
 	ok := []string{"", "  ", "\x01", "#f", "?q=1", "/p", "p", "HTTP://x", "mailto:a@b", "https://x/?a=1&b=2"}
 	for _, in := range ok {
 		if _, allowed := sanitizeURL(in, urlForLink); !allowed {
@@ -683,6 +775,7 @@ func TestSanitizeURLEdges(t *testing.T) {
 }
 
 func TestFindCloseRunEdges(t *testing.T) {
+	t.Parallel()
 	if got := findCloseRun("abc", 0, '*', 1); got != -1 {
 		t.Fatalf("no close = %d", got)
 	}
@@ -695,6 +788,7 @@ func TestFindCloseRunEdges(t *testing.T) {
 }
 
 func TestWriteParagraphNoContent(t *testing.T) {
+	t.Parallel()
 	var b strings.Builder
 	r := &mdRenderer{}
 	if next := r.writeParagraph(&b, []string{""}, 0, false); next != 1 || b.String() != "" {

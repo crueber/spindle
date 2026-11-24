@@ -88,10 +88,13 @@ func TestCoverageCollabPureBranches(t *testing.T) {
 		t.Fatalf("collabRole seam = %q", got)
 	}
 
-	// Only token/oidc gate anonymous writes.
-	f.srv.env.Cfg.Server.Auth.Mode = ""
-	if f.srv.anonWrite(auth.Anonymous()) {
-		t.Fatal("mode none must not gate anonymous writes")
+	// Anonymous writes are gated to the login interstitial; a signed-in
+	// principal is not.
+	if !f.srv.anonWrite(auth.Anonymous()) {
+		t.Fatal("anonymous writes must be gated")
+	}
+	if f.srv.anonWrite(auth.Principal{Name: "alice"}) {
+		t.Fatal("a signed-in principal must not be gated")
 	}
 
 	if _, ok := issueNum("16777216"); ok {
@@ -189,15 +192,14 @@ func TestCoverageCollabGateAndWriteGuards(t *testing.T) {
 	f2.srv.Serve(rec, req)
 	wantStatus(t, rec, http.StatusNotFound)
 
-	// With no auth mode and no role, a floor-gated write is a 401 (the
-	// caller is a stranger, not an anonymous-mode login).
-	f2.srv.env.Cfg.Server.Auth.Mode = ""
+	// With no role, an anonymous floor-gated write goes to the login
+	// interstitial (303), never a silent success.
 	f2.principal = auth.Anonymous()
 	rec = httptest.NewRecorder()
 	req = f2.req("POST", "/acme/widgets/issues/3/labels", url.Values{"label": {"x"}})
 	req.Header.Set("Accept", "text/plain")
 	f2.srv.Serve(rec, req)
-	wantStatus(t, rec, http.StatusUnauthorized)
+	wantStatus(t, rec, http.StatusSeeOther)
 }
 
 func TestCoverageCollabIssueReadBranches(t *testing.T) {
@@ -829,6 +831,7 @@ func TestCoverageCollabFragmentExecutionFailure(t *testing.T) {
 }
 
 func TestCoverageCollabDiffAndVisibilityHelpers(t *testing.T) {
+	t.Parallel()
 	files := ParseUnifiedDiff("diff --git a/x b/x\n--- a/x\n+++ b/x\n@@ -1,2 +1,2 @@\n-old\n+new\n ctx\n")
 
 	// An old-side stage marks the deletion row.

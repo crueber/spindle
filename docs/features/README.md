@@ -37,10 +37,14 @@ commits are ordinary git objects; a PR's *head* is an ordinary ref published thr
 | [`09_rollout.md`](09_rollout.md) | Implementation phasing, agent dispatch plan, API versioning, invariants | all |
 | [`10_git_import.md`](10_git_import.md) | One-shot git import (clone-and-land + provenance) | — |
 | [`11_mirror.md`](11_mirror.md) | Pull-only mirrors with scheduled upstream syncs | 10 (clone/enumerate/refmap/scrub/SSRF reuse) |
-| [`12_runner.md`](12_runner.md) | GitHub-style runners design plan (DRAFT — awaiting review, do not implement) | 05 (checks reporting + merge gate) |
+| [`12_runner.md`](12_runner.md) | GitHub-style runners — earlier design record, **superseded for v1 by [`15_threads.md`](15_threads.md)**; do not implement from it | 05 (checks reporting + merge gate) |
 | [`13_push_mirror.md`](13_push_mirror.md) | Push mirroring (on-push fan-out + optional schedule; password/token/SSH-key auth, keypair generation) | 10 (normalize/SSRF/scrub reuse), 11 (preset-cron/lease/task/route patterns) |
-| [`14_packages.md`](14_packages.md) | Packages: an **OCI registry** (v1, specified — see `docs/PLAN-V1.md` WP1) | 01, 02 |
-| [`15_threads.md`](15_threads.md) | Threads: **CI runs** (workflow files, container jobs, checks results; v1 — pass A triggers/spec and pass B1's runner protocol/queue/secrets/logs landed, the container executor is pass B2) | 05 |
+| [`14_packages.md`](14_packages.md) | Packages: an **OCI registry** — v1, **shipped**: `/v2` protocol, token auth, page/API/SDK/CLI, `packages-gc` (as-built in §3–§7) | 01, 02 |
+| [`15_threads.md`](15_threads.md) | Threads: **CI runs** — v1, **shipped**: workflow files, runner protocol + `spindle runner serve`, container jobs, checks results (usage: [`docs/threads.md`](../threads.md)) | 05 |
+| [`17_file_edit.md`](17_file_edit.md) | Browser file edit: **shipped** — one text file per commit (create/edit/delete), direct or new-branch + PR, through the push funnel | 03 (PR open), 01 (push gate) |
+| [`16_moderation.md`](16_moderation.md) | Moderation: **shipped** — M1 user blocks, M2 hide/minimize + conversation locks, M3 abuse reports + per-repo/host queues + audit viewer, M4 rate limits + advisory spam signals + audit-completeness sweep | 01, 02, 03, 04, 06 |
+| [`18_repo_insights.md`](18_repo_insights.md) | Repository Insights: **shipped** — a cached pulse projection (commits, contributors, code frequency, issue/PR counts, existing facts) with an honest no-traffic statement | — (bucket + git; reads 02/03/05/07/14/15 families) |
+| [`19_static_sites.md`](19_static_sites.md) | Static sites: **shipped** — a repository's tree published read-only from a dedicated static hostname on its own listener (`<static-host>/{owner}/{repo}/…`), Pages-like resolution, cookie-less origin ⇒ public repos only, no build step | — (bucket + git; config `[static_sites]`/`[static_site]`) |
 
 ## Shared primitives (normative for every feature doc)
 
@@ -52,7 +56,8 @@ All new objects live under **new top-level prefixes**, peer to `repos/`:
 
 ```
 orgs/<org>/                          # org profile, members, teams (01)
-users/<principal>/                   # per-user profile, prefs, notifications, stars (01, 06, 07)
+users/<principal>/                   # per-user profile, prefs, notifications, stars, blocks (01, 06, 07, 16)
+moderation/                          # host-scope audit family (16; new prefix peer to repos/)
 repos/<o>/<r>/meta/                  # repo-collab metadata that is NOT git/WAL state
 repos/<o>/<r>/issues/                # issues AND pull requests (shared numbering; 02/03)
 repos/<o>/<r>/checks/                # commit statuses + check runs (05)
@@ -144,8 +149,20 @@ checks surface) is **in scope for v1**; see [`15_threads.md`](15_threads.md). Th
 nearest doc describing the seam it would plug into.
 
 **Amended 2026-11-20:** *Packages* is no longer out of scope for the **OCI/container** case — it is a
-v1 requirement (`README.md`) and is specified in [`14_packages.md`](14_packages.md). npm, Maven,
-NuGet, RubyGems and proxy/virtual registries remain out of scope; each is a separate plan.
+v1 requirement and is **shipped**; the protocol and product surfaces are documented as built in
+[`14_packages.md`](14_packages.md) §3–§7. npm, Maven, NuGet, RubyGems and proxy/virtual registries
+remain out of scope; each is a separate plan.
+
+**Amended 2026-11-21/22:** *Moderation* leaves the deferred list — M1 (user blocks), M2 (content
+hiding + conversation locks), M3 (abuse reports with per-repo and host queues + the audit viewer) and
+M4 (`[rate_limit]` middleware, advisory spam signals, the audit-completeness sweep) are **shipped**
+([`16_moderation.md`](16_moderation.md)). Instance-level suspension/deletion and org-level blocks
+remain out of scope.
+
+**Amended 2026-11-21:** *Browser file edit* is in scope and **shipped** ([`17_file_edit.md`](17_file_edit.md)).
+It is deliberately single-file per commit (GitHub's web editor parity): a multi-file editor and the
+`git/commits`-style multi-file JSON API remain out of scope, as do binary upload (release assets /
+packages, not the editor) and rename-as-an-action (rename = delete + create, two commits).
 
 ## Rollout phasing (summary — details in 09)
 

@@ -73,14 +73,14 @@ func TestGateUnionAndBypass(t *testing.T) {
 	if err := e.svc.CheckRequiredChecks(ctx(), "o", "r", sha, "refs/heads/main", "merger@example.com"); err != nil {
 		t.Fatalf("scoped: %v", err)
 	}
-	// Bypassed rules contribute nothing (03 §5 step 4); bypassing every
-	// carrying rule skips the gate.
+	// Bypass lists govern direct pushes only: a merger the rule's bypass
+	// admits is STILL gated at merge time (03 §5 step 4).
 	e.putPolicy(t, `{"version":1,"rules":[
 	  {"name":"r1","match":{"refs":["refs/heads/main"]},"effect":{"protect":{"restricts":["update"],"require_checks":["zzz"],"bypass":["merger@example.com"]}}}]}`)
-	if err := e.svc.CheckRequiredChecks(ctx(), "o", "r", sha, "refs/heads/main", "merger@example.com"); err != nil {
-		t.Fatalf("bypassed: %v", err)
+	if err := e.svc.CheckRequiredChecks(ctx(), "o", "r", sha, "refs/heads/main", "merger@example.com"); err == nil || !strings.Contains(err.Error(), "zzz (missing)") {
+		t.Fatalf("bypassed merger must still be gated: %v", err)
 	}
-	// Partial bypass: the non-bypassed rule still gates.
+	// Partial bypass: the non-bypassed rule gates as well (union of all).
 	e.putPolicy(t, `{"version":1,"rules":[
 	  {"name":"r1","match":{"refs":["refs/heads/main"]},"effect":{"protect":{"restricts":["update"],"require_checks":["a"],"bypass":["merger@example.com"]}}},
 	  {"name":"r2","match":{"refs":["refs/heads/main"]},"effect":{"protect":{"restricts":["update"],"require_checks":["zzz"]}}}]}`)

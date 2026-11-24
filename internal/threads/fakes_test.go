@@ -169,11 +169,11 @@ on:
     - cron: "0 3 * * *"
 jobs:
   build:
-    runs-on: ubuntu-latest
+    runs-on: linux
     steps:
       - run: echo build
   test:
-    runs-on: ubuntu-latest
+    runs-on: linux
     needs: [build]
     steps:
       - run: echo test
@@ -189,11 +189,11 @@ on:
   workflow_dispatch:
 jobs:
   build:
-    runs-on: ubuntu-latest
+    runs-on: linux
     steps:
       - run: echo build
   test:
-    runs-on: ubuntu-latest
+    runs-on: linux
     steps:
       - run: echo test
 `

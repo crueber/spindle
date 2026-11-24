@@ -21,8 +21,11 @@ func realRepoFixture(t *testing.T) (*LocalRepo, *Layer, Oid) {
 		t.Skip("git < 2.47")
 	}
 	up := t.TempDir()
+	// Background maintenance off: the packs this fixture produces feed tests
+	// that read the spindle repo's pack set (idx, commit-graph, fold), and a
+	// host gc.auto repacking the upstream changes what pack-objects emits.
 	mk := func(argv ...string) {
-		c := exec.Command("git", argv...)
+		c := exec.Command("git", append([]string{"-c", "gc.auto=0", "-c", "maintenance.auto=false"}, argv...)...)
 		c.Dir = up
 		c.Env = append(os.Environ(), "GIT_AUTHOR_NAME=t", "GIT_AUTHOR_EMAIL=t@t",
 			"GIT_COMMITTER_NAME=t", "GIT_COMMITTER_EMAIL=t@t")
@@ -47,7 +50,7 @@ func realRepoFixture(t *testing.T) (*LocalRepo, *Layer, Oid) {
 	}
 	l := NewLayer()
 	var packBuf bytes.Buffer
-	pc := exec.Command("git", "pack-objects", "--stdout", "--revs", "--all")
+	pc := exec.Command("git", "-c", "gc.auto=0", "-c", "maintenance.auto=false", "pack-objects", "--stdout", "--revs", "--all")
 	pc.Dir = up
 	pc.Stdout = &packBuf
 	if err := pc.Run(); err != nil {

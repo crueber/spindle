@@ -257,7 +257,8 @@ func (h *Handler) routeAccess(w http.ResponseWriter, r *http.Request, owner, rep
 			writePlain(w, http.StatusConflict, "access.json changed under you; reload")
 			return true
 		}
-		doc, err := h.Svc.PutAccess(r.Context(), owner, repo, curVer, Visibility(body.Visibility), body.RoleBindings)
+		doc, err := h.Svc.PutAccess(WithActor(r.Context(), p.Name), owner, repo, curVer,
+			Visibility(body.Visibility), body.RoleBindings)
 		if err != nil {
 			slog.Info("identity: access PUT error", "repo", owner+"/"+repo, "principal", p.Name, "err", err.Error())
 			writeErr(w, err)

@@ -1,0 +1,516 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self'; media-src 'self'; font-src 'self'; connect-src 'none'; object-src 'none'; base-uri 'self'; form-action 'none'">
+<meta name="referrer" content="no-referrer">
+<meta name="color-scheme" content="dark light">
+<meta name="theme-color" content="#0f1113" media="(prefers-color-scheme: dark)">
+<meta name="theme-color" content="#ffffff" media="(prefers-color-scheme: light)">
+<title>spindle — a complete git host in Go</title>
+<meta name="description" content="spindle is a complete git host in Go: smart HTTP and SSH, LFS, bundles, issues, pull requests, CI, an OCI registry, static sites, a JSON API and a UI — where the object store is the only database. MIT, one binary, disposable instances.">
+<link rel="canonical" href="https://crueber.github.io/spindle/">
+<meta property="og:type" content="website">
+<meta property="og:site_name" content="spindle">
+<meta property="og:title" content="spindle — a complete git host in Go">
+<meta property="og:description" content="Git over smart HTTP and SSH, LFS, bundles, issues, pull requests, CI, an OCI registry, static sites, a JSON API and a UI. One binary in front of one bucket — the object store is the only database.">
+<meta property="og:url" content="https://crueber.github.io/spindle/">
+<meta property="og:image" content="https://crueber.github.io/spindle/img/og.png">
+<meta property="og:image:type" content="image/png">
+<meta property="og:image:width" content="1200">
+<meta property="og:image:height" content="630">
+<meta property="og:image:alt" content="The spindle repository page: header, branch selector, latest commit and file tree.">
+<meta name="twitter:card" content="summary_large_image">
+<meta name="twitter:title" content="spindle — a complete git host in Go">
+<meta name="twitter:description" content="Git, LFS, issues, pull requests, CI, an OCI registry, static sites and an API in one binary — where the object store is the only database.">
+<meta name="twitter:image" content="https://crueber.github.io/spindle/img/og.png">
+<meta name="twitter:image:alt" content="The spindle repository page with its header, latest commit and file tree.">
+<script src="theme-init.js"></script>
+<link rel="icon" href="favicon.svg" type="image/svg+xml">
+<link rel="stylesheet" href="style.css">
+<script src="site.js" defer></script>
+</head>
+<body>
+<a class="skip" href="#main">Skip to content</a>
+
+<header class="site-head">
+  <div class="wrap head-in">
+    <a class="brand" href="#top" aria-label="spindle, back to top">
+      <span class="brand-mark" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="3.5" y="3.5" width="17" height="17" rx="1.5"/><path d="M12 3.5v5M12 15.5v5M3.5 12h5M15.5 12h5"/><rect class="dot" x="10" y="10" width="4" height="4" stroke="none"/></svg></span>
+      <span>spindle</span>
+    </a>
+    <nav class="nav" aria-label="Sections">
+      <a href="#tour">Tour</a>
+      <a href="#why">Why</a>
+      <a href="#deploy">Deploy</a>
+      <a href="#cli">CLI</a>
+      <a href="#docs">Docs</a>
+    </nav>
+    <div class="head-end">
+      <a class="gh-link" href="https://github.com/crueber/spindle" aria-label="spindle on GitHub">
+        <svg viewBox="0 0 16 16" aria-hidden="true"><path fill="currentColor" d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"/></svg>
+        <span>GitHub</span>
+      </a>
+      <div class="theme" role="group" aria-label="Colour palette">
+        <button type="button" data-theme-set="dark" aria-pressed="true" aria-label="Dark palette">DK</button>
+        <button type="button" data-theme-set="light" aria-pressed="false" aria-label="Light palette">LT</button>
+        <button type="button" data-theme-set="hc-dark" aria-pressed="false" aria-label="High-contrast dark palette">HC</button>
+      </div>
+    </div>
+  </div>
+</header>
+
+<main id="main" tabindex="-1">
+  <!-- ============================================================ hero -->
+  <section class="hero" id="top" aria-labelledby="hero-title">
+    <div class="wrap hero-grid">
+      <div class="hero-text">
+        <p class="eyebrow"><span class="tick" aria-hidden="true"></span>MIT licensed · self-hosted · one binary</p>
+        <h1 id="hero-title">A complete git host in Go — <span>where the object store is the only database.</span></h1>
+        <p class="lede">Git over smart HTTP and SSH, LFS, bundles, issues, pull requests, CI, an OCI registry, static sites, a JSON API and a UI. One binary in front of one bucket: no SQL, no Redis, no queue, no search cluster.</p>
+        <div class="cta">
+          <a class="btn primary" href="https://github.com/crueber/spindle">View on GitHub <span class="arr" aria-hidden="true">→</span></a>
+          <a class="btn" href="https://github.com/crueber/spindle/tree/main/docs">Read the docs</a>
+        </div>
+        <ul class="hero-meta">
+          <li>Go 1.27</li>
+          <li>Linux/amd64 image</li>
+          <li>OIDC required</li>
+          <li>single binary</li>
+        </ul>
+      </div>
+
+      <figure class="store">
+        <div class="store-bar">
+          <span class="marks" aria-hidden="true">▪▪▪</span>
+          <span class="path">repos/you/demo/</span>
+          <span class="chip">bucket</span>
+        </div>
+        <pre tabindex="0" aria-label="Bucket key layout for one repository"><code><span class="line hot">manifest.pb          <span class="c">← commit point (CAS)</span></span><span class="line">log/0000000000000042.pb</span><span class="line">wal/9f2c…a1.pack  + .idx</span><span class="line">checkpoints/000…42/refs.pb</span><span class="line">policy.json</span><span class="line">lfs/objects/ab/cd/&lt;sha256&gt;</span><span class="line">insights/pulse.json</span></code></pre>
+        <figcaption>Every object the repository owns, in one bucket. <b>manifest.pb</b> is the only commit point for a push; a push is never acknowledged before the bucket has it.</figcaption>
+      </figure>
+    </div>
+  </section>
+
+  <!-- ============================================================ measured -->
+  <section class="measured" aria-label="Measured properties">
+    <ul class="wrap measured-in">
+      <li class="measure"><b>8</b><span>store operations for a push with the whole collaboration layer mounted; 9 warm, and no collaboration keys touched</span></li>
+      <li class="measure"><b>1</b><span>round trip for a warm-refs clone</span></li>
+      <li class="measure"><b>One bucket</b><span>refs, packs, config, policy, issues, PRs and CI runs; no SQL, Redis or queue</span></li>
+      <li class="measure"><b>One binary</b><span>serve, maintain, events and runner — the same build</span></li>
+      <li class="measure"><a href="https://github.com/crueber/spindle/blob/main/docs/EVIDENCE.md">Every number has a committed harness in docs/EVIDENCE.md →</a></li>
+    </ul>
+  </section>
+
+  <!-- ============================================================ demo -->
+  <section class="demo" aria-labelledby="demo-title">
+    <div class="wrap">
+      <header class="sec-head">
+        <p class="eyebrow"><span class="tick" aria-hidden="true"></span>Demo</p>
+        <h2 id="demo-title">See it run.</h2>
+        <p class="sec-lede">A short animated tour of a spindle instance. No sound.</p>
+      </header>
+      <figure class="demo-figure">
+        <video data-autoplay muted loop playsinline controls preload="none" poster="img/demo-poster.webp" width="1280" height="800" aria-describedby="demo-cap demo-desc">
+          <source src="demo.webm" type="video/webm">
+          <a href="demo.webm">Download the demo (WebM)</a>
+        </video>
+        <figcaption id="demo-cap">Built from captures of a local spindle instance. The on-screen push budget (≤ 5 HTTP round trips) and the strip above (store operations) count different things. Autoplay stops under <code>prefers-reduced-motion</code>; the poster is the fallback.</figcaption>
+        <p id="demo-desc" class="sr-only">A silent 11.5-second tour of a spindle instance: landing page, repository, code file, issue, pull request diff, a Threads CI run, packages and a release.</p>
+        <details class="demo-transcript">
+          <summary>Demo contents</summary>
+          <ol>
+            <li>The landing page and its push diagram.</li>
+            <li>A repository: branch, latest commit and file tree.</li>
+            <li>A Go file with server-rendered highlighting.</li>
+            <li>An issue with its comment thread and labels.</li>
+            <li>A pull request with a passing check and its diff.</li>
+            <li>A Threads container run, from steps to the job log.</li>
+            <li>The packages page for one OCI tag.</li>
+            <li>A release page.</li>
+          </ol>
+        </details>
+      </figure>
+    </div>
+  </section>
+
+  <!-- ============================================================ tour -->
+  <section class="section" id="tour" aria-labelledby="tour-title">
+    <div class="wrap">
+      <header class="sec-head">
+        <p class="eyebrow"><span class="tick" aria-hidden="true"></span>Tour</p>
+        <h2 id="tour-title">The product, not a mockup.</h2>
+        <p class="sec-lede">Every capture below is a running spindle instance. The interface is server-rendered Go: the same pages your browser gets are the ones the server writes.</p>
+      </header>
+
+      <div class="tour">
+        <article class="tour-item">
+          <div class="tour-text">
+            <p class="tour-num">01 / REPOSITORY</p>
+            <h3>The repository page</h3>
+            <p>Clone URLs for HTTP and SSH, the default branch, the latest commit and the file tree. With <code>anonymous_read</code> on — the default — public repositories clone and browse without a session.</p>
+            <ul>
+              <li>smart HTTP v0/v2 · SSH</li>
+              <li>auto-create on first push</li>
+              <li>source archives: tar.gz, zip</li>
+            </ul>
+          </div>
+          <figure class="shot tour-media">
+            <img src="img/repo.webp" alt="The spindle repository page for acme/spindle: the header, branch selector, latest commit, file tree and About sidebar." width="1280" height="800" loading="lazy" decoding="async">
+            <figcaption>Repository · header, clone control, commit and tree</figcaption>
+          </figure>
+        </article>
+
+        <article class="tour-item flip">
+          <div class="tour-text">
+            <p class="tour-num">02 / CODE</p>
+            <h3>The code view</h3>
+            <p>Files are rendered server-side in Go. Escaping text, sanitizing raw HTML through an allowlist and highlighting syntax are the XSS boundary — there is no client sanitizer to bypass.</p>
+            <ul>
+              <li>rendered by the server</li>
+              <li>markdown, diffs and graphs, escaping included</li>
+              <li>no client data layer</li>
+            </ul>
+          </div>
+          <figure class="shot tour-media">
+            <img src="img/code.webp" alt="The spindle code view: a source file with server-rendered syntax highlighting, line numbers and the file header." width="1280" height="800" loading="lazy" decoding="async">
+            <figcaption>Code · server-rendered highlighting, line numbers</figcaption>
+          </figure>
+        </article>
+
+        <article class="tour-item">
+          <div class="tour-text">
+            <p class="tour-num">03 / ISSUES</p>
+            <h3>An issue</h3>
+            <p>An immutable event log plus a CAS'd header: comments, labels, milestones, assignees, close and reopen. Issues and pull requests share one numbering space, so an issue and a PR never take the same number.</p>
+            <ul>
+              <li>shared issue/PR numbering</li>
+              <li>templates, labels, milestones</li>
+              <li>same bucket family as git</li>
+            </ul>
+          </div>
+          <figure class="shot tour-media">
+            <img src="img/issue.webp" alt="An issue in spindle: the title header, comment thread, labels and sidebar metadata." width="1280" height="800" loading="lazy" decoding="async">
+            <figcaption>Issue · conversation, labels, metadata</figcaption>
+          </figure>
+        </article>
+
+        <article class="tour-item flip">
+          <div class="tour-text">
+            <p class="tour-num">04 / PULL REQUESTS</p>
+            <h3>A pull request diff</h3>
+            <p>The PR head is an ordinary ref: <code>refs/pull/N/head</code>. Mergeability is computed on demand; merging is a task with merge, squash or rebase. Reviews carry verdicts and line-anchored threads, and required checks gate the merge.</p>
+            <ul>
+              <li>merge · squash · rebase</li>
+              <li>line-anchored review threads</li>
+              <li>required checks gate the merge</li>
+            </ul>
+          </div>
+          <figure class="shot tour-media">
+            <img src="img/pull-request.webp" alt="A spindle pull request: the description, a passing Threads check, and the changed files with added and removed lines." width="1280" height="1500" loading="lazy" decoding="async">
+            <figcaption>Pull request · description, checks and diff</figcaption>
+          </figure>
+        </article>
+
+        <article class="tour-item">
+          <div class="tour-text">
+            <p class="tour-num">05 / PHONE</p>
+            <h3>The same pages at 390 px</h3>
+            <p>One server-rendered layout, no separate mobile client and no client-side router. The chrome folds: the tab strip scrolls inside itself, the file table scrolls inside its wrapper, the page never pans sideways.</p>
+            <ul>
+              <li>one layout for every viewport</li>
+              <li>no separate mobile client</li>
+            </ul>
+          </div>
+          <figure class="phone tour-media">
+            <img src="img/mobile-repo.webp" alt="The spindle repository page at phone width: the repository header, branch row and file list stacked in one column." width="390" height="844" loading="lazy" decoding="async">
+            <figcaption>Repository · 390 px</figcaption>
+          </figure>
+        </article>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============================================================ surface -->
+  <section class="section" id="surface" aria-labelledby="surface-title">
+    <div class="wrap">
+      <header class="sec-head">
+        <p class="eyebrow"><span class="tick" aria-hidden="true"></span>Also shipped</p>
+        <h2 id="surface-title">CI, a registry and a second listener.</h2>
+        <p class="sec-lede">One binary also runs Threads jobs in containers, keeps an OCI registry per repository, and publishes a repository's committed tree as a static site on its own cookie-less hostname.</p>
+      </header>
+      <div class="surface">
+        <figure class="shot">
+          <img src="img/checks.webp" alt="A Threads run in spindle: a successful container job from a golang image, with its step list and a passing go test log." width="1280" height="1000" loading="lazy" decoding="async">
+          <figcaption>Threads · a real container run, streamed log</figcaption>
+        </figure>
+        <figure class="shot">
+          <img src="img/packages.webp" alt="The Packages page of one repository: a docker pull command, one OCI tag v0.3.0, and its manifest versions." width="1280" height="800" loading="lazy" decoding="async">
+          <figcaption>Registry · one repository, one OCI tag</figcaption>
+        </figure>
+        <figure class="shot">
+          <img src="img/static-site.webp" alt="A static site served by spindle's second listener: a documentation page titled One loop, no sidecars at /acme/spindle/." width="1280" height="800" loading="lazy" decoding="async">
+          <figcaption>Static site · committed bytes, cookie-less listener</figcaption>
+        </figure>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============================================================ concepts -->
+  <section class="section alt" id="concepts" aria-labelledby="concepts-title">
+    <div class="wrap">
+      <header class="sec-head">
+        <p class="eyebrow"><span class="tick" aria-hidden="true"></span>The design, in three clips</p>
+        <h2 id="concepts-title">The object store is the repository.</h2>
+        <p class="sec-lede">Refs, packs, config, policy, issues, PRs and CI runs are objects in one bucket. Disk and memory are caches; the manifest CAS is the only commit point for a push. Wipe every instance and the repositories are still there.</p>
+      </header>
+      <div class="concepts">
+        <figure class="concept">
+          <div class="concept-media">
+            <img class="still" src="img/concept-bucket-still.gif" alt="Still: the bucket holding refs, packs, config and policy, with an instance connecting to it." width="640" height="360" loading="lazy" decoding="async">
+            <button class="concept-play" type="button" aria-pressed="false" aria-label="Play the one-bucket animation" data-label="the one-bucket animation" data-gif="img/concept-bucket.gif" data-anim-alt="Animation: one bucket holds refs, packs, config and policy while a server instance disappears and a fresh one connects with nothing lost.">Play</button>
+          </div>
+          <figcaption><b>One bucket.</b> The repository is the store. An instance is a reader and writer in front of it, not the owner of the data.</figcaption>
+        </figure>
+        <figure class="concept">
+          <div class="concept-media">
+            <img class="still" src="img/concept-push-still.gif" alt="Still: a laptop pushing a pack of git objects toward a bucket, before the acknowledgement." width="640" height="360" loading="lazy" decoding="async">
+            <button class="concept-play" type="button" aria-pressed="false" aria-label="Play the push animation" data-label="the push animation" data-gif="img/concept-push.gif" data-anim-alt="Animation: a laptop pushes a pack of git objects to a bucket, which writes then acknowledges; the client finishes only after the acknowledgement.">Play</button>
+          </div>
+          <figcaption><b>A push is acknowledged by the bucket.</b> The write lands and the CAS commits before the client hears success.</figcaption>
+        </figure>
+        <figure class="concept">
+          <div class="concept-media">
+            <img class="still" src="img/concept-collab-still.gif" alt="Still: an issue, a linked pull request and a passing check beside the git lane." width="640" height="360" loading="lazy" decoding="async">
+            <button class="concept-play" type="button" aria-pressed="false" aria-label="Play the collaboration animation" data-label="the collaboration animation" data-gif="img/concept-collab.gif" data-anim-alt="Animation: beside the git lane, issue 7 opens, pull request 8 links to it, a green check stamps the PR, and the write-ahead log stays git-only.">Play</button>
+          </div>
+          <figcaption><b>Collaboration rides beside git.</b> Issues, reviews and checks are object families of their own; the write-ahead log stays git-only.</figcaption>
+        </figure>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============================================================ why -->
+  <section class="section" id="why" aria-labelledby="why-title">
+    <div class="wrap">
+      <header class="sec-head">
+        <p class="eyebrow"><span class="tick" aria-hidden="true"></span>Why spindle</p>
+        <h2 id="why-title">Six properties that follow from one decision.</h2>
+        <p class="sec-lede">The bucket is the only database. Everything else — disposable instances, one binary, a complete surface — is a consequence.</p>
+      </header>
+
+      <div class="why">
+        <article class="why-item">
+          <p class="idx">01</p>
+          <h3>The object store is the only database</h3>
+          <p>Refs, packs, config, policy, issues, pull requests, reviews, checks, releases, CI runs and notifications are object families under one prefix, read through a single <code>ObjectStore</code> contract.</p>
+        </article>
+        <article class="why-item">
+          <p class="idx">02</p>
+          <h3>Disposable by construction</h3>
+          <p>Kill an instance, wipe a cache, run a second reader: the bucket is unchanged and a fresh process serves the same repositories immediately. Disk and memory are warmth, not truth.</p>
+        </article>
+        <article class="why-item">
+          <p class="idx">03</p>
+          <h3>One binary, every role</h3>
+          <p><code>serve</code>, <code>maintain</code>, <code>events</code> and <code>runner serve</code> are the same binary. Nothing else to install, schedule or keep in sync — the maintainer runs checkpoints, bundles, compaction and repair.</p>
+        </article>
+        <article class="why-item">
+          <p class="idx">04</p>
+          <h3>A complete surface</h3>
+          <p>Git over smart HTTP and SSH, LFS and bundle-uri; issues, PRs, reviews and checks; Threads CI; an OCI registry per repository; static sites; a JSON API, SSE and a dependency-free SDK.</p>
+        </article>
+        <article class="why-item">
+          <p class="idx">05</p>
+          <h3>OIDC and nothing else</h3>
+          <p>Any OpenID Connect issuer; verified groups decide who administers the instance. No local accounts, no passwords, no email or domain admin rule, no static-token admin. A config that cannot satisfy it boots restricted, never open.</p>
+        </article>
+        <article class="why-item">
+          <p class="idx">06</p>
+          <h3>It speaks walgit's bucket</h3>
+          <p>Key layout, protobuf field numbers and wire encoding, JSON shapes and git wire behaviour follow walgit. Golden fixtures in <code>testdata/</code> fail the build if either side drifts — compatibility is a test, not an intention.</p>
+        </article>
+      </div>
+
+      <p class="evidence"><span>Measured on the real code path, with harnesses committed:</span> <a href="https://github.com/crueber/spindle/blob/main/docs/EVIDENCE.md">docs/EVIDENCE.md</a></p>
+    </div>
+  </section>
+
+  <!-- ============================================================ deploy -->
+  <section class="section alt" id="deploy" aria-labelledby="deploy-title">
+    <div class="wrap">
+      <header class="sec-head">
+        <p class="eyebrow"><span class="tick" aria-hidden="true"></span>Deploy</p>
+        <h2 id="deploy-title">One container, one bucket, no database.</h2>
+        <p class="sec-lede">The prebuilt image runs <code>spindle serve</code> by default. The first boot is restricted until OIDC is configured: there is no setup token and no open mode.</p>
+      </header>
+
+      <div class="split">
+        <div>
+          <ol class="steps">
+            <li>
+              <span class="n" aria-hidden="true">1</span>
+              <div>
+                <h3>Register the OIDC client</h3>
+                <p>Any issuer works. The redirect URI is <code>&lt;public_url&gt;/_auth/callback</code>; membership of an admin group is what makes an administrator.</p>
+              </div>
+            </li>
+            <li>
+              <span class="n" aria-hidden="true">2</span>
+              <div>
+                <h3>Start it</h3>
+                <p>Pull the image and give it one volume at <code>/var/lib/spindle</code>. Publish <code>2222</code> for git over SSH. TLS terminates at your proxy, not in spindle.</p>
+              </div>
+            </li>
+            <li>
+              <span class="n" aria-hidden="true">3</span>
+              <div>
+                <h3>Configure at <code>/admin</code></h3>
+                <p>Save writes <code>&lt;data-dir&gt;/spindle.toml</code> without dialling the identity provider, then you restart. Push a repository, browse it, open an issue.</p>
+              </div>
+            </li>
+          </ol>
+          <p class="note">Back up the store, not the machine: <code>store.root</code> (or the bucket under <code>store.prefix</code>), <code>spindle.toml</code> and the SSH host key. <code>spindle doctor</code> reads the config and a bounded bucket sample before an upgrade. Full procedure: <a href="https://github.com/crueber/spindle/blob/main/docs/BACKUP.md">docs/BACKUP.md</a> · <a href="https://github.com/crueber/spindle/blob/main/docs/UPGRADE.md">docs/UPGRADE.md</a>.</p>
+        </div>
+
+        <div>
+          <figure class="code">
+            <div class="code-bar"><span>docker-compose.yml</span><span class="state">ghcr.io</span></div>
+            <pre tabindex="0" aria-label="Docker Compose example"><code><span class="k">services:</span>
+  <span class="k">spindle:</span>
+    image: ghcr.io/crueber/spindle:latest   <span class="c"># :main · vX.Y.Z · sha-&lt;sha&gt;</span>
+    ports: ["8080:8080", "2222:2222"]       <span class="c"># HTTP · SSH</span>
+    environment:
+      SPINDLE__SERVER__SSH__LISTEN: 0.0.0.0:2222
+    volumes: [spindle-data:/var/lib/spindle]
+    restart: unless-stopped
+
+<span class="k">volumes:</span>
+  spindle-data: {}</code></pre>
+          </figure>
+          <figure class="code">
+            <div class="code-bar"><span>shell</span><span class="state">prebuilt</span></div>
+            <pre tabindex="0" aria-label="Pull and start commands"><code>docker pull ghcr.io/crueber/spindle:latest
+docker compose up -d
+<span class="c"># then open http://localhost:8080/admin</span></code></pre>
+          </figure>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============================================================ cli -->
+  <section class="section" id="cli" aria-labelledby="cli-title">
+    <div class="wrap">
+      <header class="sec-head">
+        <p class="eyebrow"><span class="tick" aria-hidden="true"></span>CLI</p>
+        <h2 id="cli-title">One CLI for the whole surface.</h2>
+        <p class="sec-lede">The server binary is also the client: the API command groups speak the JSON API, <code>spindle api</code> reaches any endpoint directly, and <code>spindle auth</code> keeps the token.</p>
+      </header>
+
+      <div class="split">
+        <figure class="code">
+          <div class="code-bar"><span>spindle · real commands</span><span class="state">client</span></div>
+          <pre tabindex="0" aria-label="A few spindle commands"><code>spindle auth login --server https://spindle.example.com \
+  --token-file ~/token
+spindle repo create you/demo
+spindle issue list you/demo --state open
+spindle pr merge you/demo 17 --method squash --delete-head --wait
+spindle threads run you/demo ci --ref main
+spindle config check
+spindle doctor --json</code></pre>
+        </figure>
+
+        <ul class="cli-list">
+          <li><b>git and repositories</b><code>spindle repo</code>, <code>spindle import</code> and <code>spindle wal</code> cover creation, import and the write-ahead log.</li>
+          <li><b>collaboration</b><code>spindle issue</code>, <code>spindle pr</code>, <code>spindle release</code>, <code>spindle checks</code> and <code>spindle org</code>.</li>
+          <li><b>CI and registry</b><code>spindle threads</code> runs and watches workflows; <code>spindle packages</code> reads the OCI surface.</li>
+          <li><b>operations</b><code>spindle config dump|check</code> shows the effective config and validates file plus environment overrides; <code>spindle doctor</code> is the read-only upgrade check.</li>
+          <li><b>anything else</b><code>spindle api /api/v1/me --json</code> — the same JSON API the UI uses. Reference: <a href="https://github.com/crueber/spindle/blob/main/docs/CLI.md">docs/CLI.md</a>.</li>
+        </ul>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============================================================ docs -->
+  <section class="section alt" id="docs" aria-labelledby="docs-title">
+    <div class="wrap">
+      <header class="sec-head">
+        <p class="eyebrow"><span class="tick" aria-hidden="true"></span>Docs</p>
+        <h2 id="docs-title">Every claim has a file.</h2>
+        <p class="sec-lede">The specification, procedures and measured evidence live in the repository. Read the source of truth, not a summary of it.</p>
+      </header>
+
+      <div class="links">
+        <a class="linkcard" href="https://github.com/crueber/spindle#readme">
+          <span class="lc-t">README <span class="arr" aria-hidden="true">→</span></span>
+          <p>What it is, how to run it in two minutes, and the deploy shapes.</p>
+        </a>
+        <a class="linkcard" href="https://github.com/crueber/spindle/blob/main/docs/FEATURES.md">
+          <span class="lc-t">FEATURES <span class="arr" aria-hidden="true">→</span></span>
+          <p>Capability by capability, with the deep doc for each.</p>
+        </a>
+        <a class="linkcard" href="https://github.com/crueber/spindle/blob/main/docs/DEPLOY.md">
+          <span class="lc-t">DEPLOY <span class="arr" aria-hidden="true">→</span></span>
+          <p>Install, ports, the proxy, storage and configuration.</p>
+        </a>
+        <a class="linkcard" href="https://github.com/crueber/spindle/blob/main/docs/CLI.md">
+          <span class="lc-t">CLI <span class="arr" aria-hidden="true">→</span></span>
+          <p>The command families, flags and the exit-code contract.</p>
+        </a>
+        <a class="linkcard" href="https://github.com/crueber/spindle/blob/main/docs/EVIDENCE.md">
+          <span class="lc-t">EVIDENCE <span class="arr" aria-hidden="true">→</span></span>
+          <p>Measured performance claims, each with a committed harness.</p>
+        </a>
+        <a class="linkcard" href="https://github.com/crueber/spindle/tree/main/docs">
+          <span class="lc-t">ALL DOCS <span class="arr" aria-hidden="true">→</span></span>
+          <p>Operations, backup, upgrade, Threads, the store and the API.</p>
+        </a>
+      </div>
+    </div>
+  </section>
+</main>
+
+<footer class="foot">
+  <div class="wrap foot-in">
+    <div>
+      <div class="foot-brand">
+        <span class="brand-mark" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="3.5" y="3.5" width="17" height="17" rx="1.5"/><path d="M12 3.5v5M12 15.5v5M3.5 12h5M15.5 12h5"/><rect class="dot" x="10" y="10" width="4" height="4" stroke="none"/></svg></span>
+        <span>spindle</span>
+      </div>
+      <p class="foot-tag">A complete git host in Go. The object store is the only database; instances are disposable.</p>
+      <div class="foot-legal">
+        <p><a href="https://github.com/crueber/spindle/blob/main/LICENSE">MIT</a> © 2026 Christopher Rueber</p>
+        <p>Political advocacy isn't welcome here — see the <a href="https://github.com/crueber/spindle/blob/main/CODE_OF_CONDUCT.md">Code of Conduct</a></p>
+        <p>Built on <a href="https://github.com/tobi/walgit">walgit</a>. Thank you, Tobi.</p>
+      </div>
+    </div>
+
+    <nav aria-label="Project links">
+      <h2>Project</h2>
+      <ul class="foot-links">
+        <li><a href="https://github.com/crueber/spindle">Source on GitHub</a></li>
+        <li><a href="https://github.com/crueber/spindle/releases">Releases</a></li>
+        <li><a href="https://github.com/crueber/spindle/pkgs/container/spindle">Container image (GHCR)</a></li>
+        <li><a href="https://github.com/crueber/spindle/blob/main/CODE_OF_CONDUCT.md">Code of Conduct</a></li>
+        <li><a href="https://github.com/tobi/walgit">Acknowledgements: walgit, by Tobi Lütke</a></li>
+      </ul>
+    </nav>
+
+    <div>
+      <h2>Docs</h2>
+      <ul class="foot-links">
+        <li><a href="https://github.com/crueber/spindle/tree/main/docs">Documentation index</a></li>
+        <li><a href="https://github.com/crueber/spindle/blob/main/docs/DEPLOY.md">Deploy guide</a></li>
+        <li><a href="https://github.com/crueber/spindle/blob/main/docs/CLI.md">CLI reference</a></li>
+        <li><a href="https://github.com/crueber/spindle/blob/main/docs/EVIDENCE.md">Evidence and harnesses</a></li>
+      </ul>
+    </div>
+
+    <p class="foot-note"><span>Server-rendered Go · htmx 2.0.4, vendored · no client framework</span><span>No trackers, no external requests.</span></p>
+  </div>
+</footer>
+</body>
+</html>

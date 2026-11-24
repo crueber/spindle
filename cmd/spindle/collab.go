@@ -16,13 +16,16 @@ import (
 
 	"github.com/crueber/spindle/internal/api"
 	"github.com/crueber/spindle/internal/archive"
+	"github.com/crueber/spindle/internal/branches"
 	"github.com/crueber/spindle/internal/checks"
 	"github.com/crueber/spindle/internal/config"
 	"github.com/crueber/spindle/internal/forksync"
 	"github.com/crueber/spindle/internal/git"
 	"github.com/crueber/spindle/internal/identity"
+	"github.com/crueber/spindle/internal/insights"
 	"github.com/crueber/spindle/internal/issues"
 	"github.com/crueber/spindle/internal/mirror"
+	"github.com/crueber/spindle/internal/moderation"
 	"github.com/crueber/spindle/internal/notify"
 	"github.com/crueber/spindle/internal/packages"
 	"github.com/crueber/spindle/internal/pulls"
@@ -37,13 +40,19 @@ import (
 	"github.com/crueber/spindle/internal/tags"
 	"github.com/crueber/spindle/internal/threads"
 	"github.com/crueber/spindle/internal/wal"
+	"github.com/crueber/spindle/internal/webedit"
 )
 
 // collabWiring holds every collaboration service + handler (never built in
 // setup-only mode, where there is no store).
 type collabWiring struct {
-	ident         *identity.Service
-	identHandler  *identity.Handler
+	ident        *identity.Service
+	identHandler *identity.Handler
+	// Feature M1 (docs/features/16_moderation.md): the block list, its
+	// both-lane top-level API, and the audit family skeleton. Its gates are
+	// consumer-owned, so it is wired onto each consumer below.
+	modSvc        *moderation.Service
+	modHandler    *moderation.Handler
 	createHandler *api.CreateHandler // #210 POST /api/v1/repos twin (Seam 1)
 	issuesSvc     *issues.Service
 	issuesHandler *issues.Handler
@@ -51,7 +60,12 @@ type collabWiring struct {
 	pullsHandler  *pulls.Handler
 	// pullsPub is the WAL ref publisher pulls writes through; serve attaches
 	// the events-bridge wake once the bridge (created later) exists.
-	pullsPub          *pullsPublisher
+	pullsPub *pullsPublisher
+	// Feature F (file edit): the service, its both-lane handler, and the WAL
+	// publisher whose events-bridge wake serve attaches alongside pullsPub.
+	webeditSvc        *webedit.Service
+	webeditHandler    *webedit.Handler
+	webeditPub        *webeditPublisher
 	reviewSvc         *review.Service
 	reviewHandler     *review.Handler
 	checksSvc         *checks.Service
@@ -62,6 +76,7 @@ type collabWiring struct {
 	releasesHandler   *releases.Handler
 	tagsSvc           *tags.Service
 	tagsHandler       *tags.Handler
+	branchesSvc       *branches.Service
 	socialSvc         *social.Service
 	socialHandler     *social.Handler
 	notifySvc         *notify.Service
@@ -74,9 +89,14 @@ type collabWiring struct {
 	pushMirrorHandler *pushmirror.Handler
 	packagesSvc       *packages.Service
 	packagesHandler   *packages.Handler
-	archiveHandler    *archive.Handler
-	forksyncSvc       *forksync.Service
-	forksyncHandler   *forksync.Handler
+	// Insights (docs/features/18): the cached repository pulse projection and
+	// the on-demand refresh starter (the maintainer sweeper calls the service
+	// directly).
+	insightsSvc     *insights.Service
+	insightsStart   func(ctx context.Context, owner, repo string) error
+	archiveHandler  *archive.Handler
+	forksyncSvc     *forksync.Service
+	forksyncHandler *forksync.Handler
 }
 
 // newIdentityService builds the Wave A identity surface (docs/features/01:
@@ -121,6 +141,10 @@ func buildCollab(st store.ObjectStore, cfg *config.Config, reg *wal.Registry, ap
 	// expansion wired into dry-run via GroupExpander), and the
 	// access-bootstrap op (Seam 5).
 	c.ident, c.identHandler = newIdentityService(st, cfg)
+	// Feature M1 moderation: blocks + audit over identity's user namespace
+	// probe. Built here because its gate is needed by every collaboration
+	// service below; wired onto them once they exist.
+	c.modSvc, c.modHandler = newModerationService(st, c.ident, reg)
 	var _ api.CreateOwnerGate = c.ident
 	var _ api.AccessBootstrap = c.ident
 	var _ api.OwnerEditor = c.ident
@@ -160,6 +184,12 @@ func buildCollab(st store.ObjectStore, cfg *config.Config, reg *wal.Registry, ap
 	// nil until wireNotifyFanout binds the real emitter below
 	// (best-effort synchronous fan-out contract, P8).
 	c.issuesSvc, c.issuesHandler = newIssuesService(st, c.ident, cfg)
+	// 02 §15: the template discovery reader is the same stock-git subprocess
+	// over the serve-synced repo dirs the Threads reader uses; the post-push
+	// hook (cmd/spindle/issue_templates.go) is its only caller.
+	if reg != nil {
+		c.issuesSvc.TemplateGit = issues.NewSubprocessTemplateGit(cfg.Git.Binary, &pullsDirs{reg: reg})
+	}
 	// Forgejo #319: the summary open-count projection behind the Env hook
 	// (api renders CollabCounts without importing the feature, law 8 —
 	// the MirrorSummary shape). One shared-index read per summary serves
@@ -195,6 +225,11 @@ func buildCollab(st store.ObjectStore, cfg *config.Config, reg *wal.Registry, ap
 	// the WAL publish path (never force); the merge task calls 02's
 	// ApplyClosingReferences seam via issuesSvc.
 	c.pullsSvc, c.pullsHandler, c.pullsPub = newPullsService(st, c.ident, c.issuesSvc, reg, cfg.Git.Binary)
+	// Feature F (docs/features/17_file_edit.md): the browser file editor —
+	// one commit through the same WAL funnel a push uses, optional new
+	// branch + immediate PR (the shipped pulls opener, reached through the
+	// consumer-owned PROpener seam). No new bucket keys, no new task kind.
+	c.webeditSvc, c.webeditHandler, c.webeditPub = newWebeditService(st, c.ident, reg, cfg.Git.Binary, c.pullsSvc, cfg)
 	// Wave C2 review (docs/features/04): immutable reviews, CAS'd
 	// line-anchored threads, the review-requests index, the
 	// review_summary render cache, and the required-reviews
@@ -227,6 +262,15 @@ func buildCollab(st store.ObjectStore, cfg *config.Config, reg *wal.Registry, ap
 	// pulls exists by now and threads must not import it (law 8).
 	if c.threadsSvc != nil && c.pullsSvc != nil {
 		c.threadsSvc.Approvals = threadsApprovals{svc: c.pullsSvc, ident: c.ident, cfg: cfg}
+	}
+	// Runner administration is a host-admin mutation and is audited in the
+	// host audit family (docs/PLAN-INSTANCE-RUNNERS.md §4). A nil moderation
+	// service (tests) records nothing.
+	if c.threadsSvc != nil && c.modSvc != nil {
+		mod := c.modSvc
+		c.threadsSvc.Audit = func(ctx context.Context, actor, action, target, detail string) error {
+			return mod.RecordAdmin(ctx, actor, action, target, detail)
+		}
 	}
 	// Threads triggers (pass A, docs/features/15 §1): the PR lifecycle edges
 	// (opened/synchronize/reopened) and the merge task's server-side base
@@ -274,11 +318,44 @@ func buildCollab(st store.ObjectStore, cfg *config.Config, reg *wal.Registry, ap
 			ot.packages = c.packagesSvc
 		}
 	}
+	// Insights (docs/features/18_repo_insights.md): the cached pulse
+	// projection over the store + the pinned git scan. The seam is optional
+	// (a test build without a registry leaves it nil; the page then says
+	// "not available"), and the op rides the shared task table.
+	c.insightsSvc = newInsightsService(st, reg)
+	if c.insightsSvc != nil {
+		if apiEnv != nil {
+			if ot, ok := apiEnv.Tasks.(*opsTasks); ok {
+				ot.insights = c.insightsSvc
+			}
+		}
+		c.insightsStart = func(ctx context.Context, owner, repo string) error {
+			return startInsightsRefresh(reg, c.insightsSvc, owner, repo)
+		}
+	}
+	// Feature T / PLAN-V2 §3 T.1: the repository move runs as the
+	// `repo-transfer` task on the core table, and its cross-reference steps
+	// reach the families that live in other packages through identity's
+	// consumer-owned seams (law 8 — identity must not import pulls/packages;
+	// composition owns both sides, exactly like the fork-delete sweep below).
+	// The serving-copy seam is the WAL registry itself: Invalidate is the
+	// non-destructive twin of the delete path's teardown, VerifyRepo proves the
+	// destination's manifest + refs replay before the task says done.
+	if c.ident != nil && reg != nil {
+		identity.RegisterKind(identity.TransferKind)
+		c.ident.Tasks = reg.Tasks()
+		c.ident.Serving = reg
+		c.ident.Forks = c.pullsSvc
+		c.ident.Packages = c.packagesSvc
+	}
 	// Forgejo #253 tags (create lightweight tag at a commit, server-side
 	// via the WAL ref-update path): the P6 write gate + policy create
 	// check live in the package; ref creates funnel through the WAL
 	// publish path (never force); events ride the existing WAL bridge.
 	c.tagsSvc, c.tagsHandler = newTagsService(st, c.ident, reg, cfg.Git.Binary)
+	// Repo browsing M2: branch create/delete on the same P6 gate + WAL ref
+	// funnel (no new writer). The page reads live in api.RepoBrowse.
+	c.branchesSvc = newBranchesService(st, c.ident, reg, cfg.Git.Binary, apiEnvRepo(apiEnv))
 	if c.ident != nil {
 		_, c.archiveHandler = newArchiveService(c.ident, reg, cfg.Git.Binary)
 	}
@@ -320,6 +397,16 @@ func buildCollab(st store.ObjectStore, cfg *config.Config, reg *wal.Registry, ap
 	wireNotifyFanout(c.notifySvc, c.issuesSvc, c.pullsSvc, c.reviewSvc, c.checksSvc)
 	wireReleasesFanout(c.releasesSvc, c.notifySvc)
 	wireSocialForks(c.socialSvc, c.pullsSvc)
+	// Feature M1: one moderation service satisfies every consumer-owned
+	// block gate (issues/pulls/review writes, identity invitations, notify's
+	// mention filter). Nil-safe per consumer.
+	wireModeration(c.modSvc, c.ident, c.issuesSvc, c.pullsSvc, c.reviewSvc, c.notifySvc)
+	// M2: the moderation SSE frames ride the one repo collab stream once the
+	// bus exists (the service is built before notify).
+	wireModerationStream(c.modSvc, c.notifySvc)
+	// M3: report_filed notifies the repo admins (reason moderation) through
+	// the same notify service; the callback carries no reported content.
+	wireModerationReports(c.modSvc, c.ident, c.notifySvc)
 	// Forgejo #522: the per-repo feature-flag write guards — Star
 	// refuses new stars, SetWatch refuses new watches, and StartFork
 	// refuses new forks when the repo's flag is off (DELETE/unstar/
@@ -393,6 +480,15 @@ func buildCollab(st store.ObjectStore, cfg *config.Config, reg *wal.Registry, ap
 		c.ident.OrgEvent = func(ctx context.Context, org, action, actor, title string) {
 			c.notifySvc.EmitOrgEvent(ctx, org, action, actor, title)
 		}
+		// PLAN-ADMIN §8.6: identity's administrative writes (access grants,
+		// org/team membership, ownership transfer) record into the ONE host
+		// audit family. Identity cannot import moderation (moderation imports
+		// identity for the role gates), so the writer is this seam.
+		if c.modSvc != nil {
+			c.ident.Audit = func(ctx context.Context, actor, action, target, detail string) error {
+				return c.modSvc.RecordAdmin(ctx, actor, action, target, detail)
+			}
+		}
 		// Forgejo #364: repo births land in the same org log (the
 		// "repo-create" leg of the org activity surface). The wal
 		// registry is the single birth choke (API creates, push
@@ -448,6 +544,11 @@ func chainCollab(srv *server.Server, c *collabWiring) {
 		}
 		srv.ChainExtra(c.identHandler)
 	}
+	if c.modHandler != nil {
+		// The block twins (/api/v1/users/{principal}/blocks) are top-level
+		// and independent of every repo lane; chain them beside identity.
+		chainModeration(srv, c.modHandler)
+	}
 	if c.issuesHandler != nil {
 		// Chain the issues surface in front of the core api mux (Seam 1);
 		// authentication resolves through the server chain (Seam 2),
@@ -464,6 +565,9 @@ func chainCollab(srv *server.Server, c *collabWiring) {
 	}
 	if c.pullsHandler != nil {
 		chainPulls(srv, c.pullsHandler)
+	}
+	if c.webeditHandler != nil {
+		chainWebedit(srv, c.webeditHandler)
 	}
 	if c.reviewHandler != nil {
 		chainReview(srv, c.reviewHandler)

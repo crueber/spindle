@@ -60,6 +60,11 @@ func LoadSetupOnly(dataDir string, candidates []string, getenv func(string) stri
 					path, key.String(), findKeyLine(lines, key), removedTLSHint))
 				continue
 			}
+			if hint, ok := removedAuthKeyHint(key.String()); ok {
+				errs = append(errs, fmt.Errorf("%s: unsupported key %q (line %d): %s",
+					path, key.String(), findKeyLine(lines, key), hint))
+				continue
+			}
 			errs = append(errs, fmt.Errorf("%s: unknown key %q (line %d)",
 				path, key.String(), findKeyLine(lines, key)))
 		}

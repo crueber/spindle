@@ -532,7 +532,8 @@ func (s *Service) Tray(ctx context.Context, who, state, after string, n int) ([]
 			for _, en := range ix.Entries {
 				indexed = append(indexed, Notification{
 					ID: en.ID, Repo: en.Repo, Num: en.Num, Kind: en.Kind,
-					Reason: en.Reason, Title: en.Title, State: en.State, CreatedAt: en.At,
+					Reason: en.Reason, Title: en.Title, Actor: en.Actor,
+					State: en.State, CreatedAt: en.At,
 				})
 			}
 			indexFull = len(ix.Entries) >= TrayPageSize

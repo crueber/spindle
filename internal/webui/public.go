@@ -162,6 +162,27 @@ type PublicDeps struct {
 	// ExtraEndpoints appends feature-owned discovery templates
 	// (api.RegisterExposed call sites) to the /api page's live endpoint list.
 	ExtraEndpoints []string
+
+	// Blocks is the M1 moderation seam (PLAN-V2 §M.5): the profile page's
+	// block/unblock control and the owner-only "Blocked (N)" disclosure.
+	// Implemented by composition over *moderation.Service; nil hides the
+	// control (no button that cannot save).
+	Blocks BlockList
+}
+
+// BlockList is the profile page's read/write view of the block state. The
+// page never writes the bucket by hand and never re-implements the list
+// rule: the service owns storage, the audit entry, and the self/unknown
+// checks.
+type BlockList interface {
+	// Blocked reports whether blocker has blocked subject.
+	Blocked(ctx context.Context, blocker, subject string) (bool, error)
+	// List returns the blocker's blocked principals (self-view only).
+	List(ctx context.Context, principal string) ([]string, error)
+	// Block adds subject and reports whether the state changed.
+	Block(ctx context.Context, blocker, subject string) (bool, error)
+	// Unblock removes subject and reports whether the state changed.
+	Unblock(ctx context.Context, blocker, subject string) (bool, error)
 }
 
 // OwnerProfileInput is the owner edit form's four fields — exactly the shape
@@ -193,7 +214,7 @@ var reservedOwnerNames = map[string]bool{
 	"how-it-works":   true,
 	"import":         true,
 	"new":            true,
-	"setup":          true,
+	"admin":          true,
 	"keys":           true,
 	"invitations":    true,
 	"notifications":  true,
@@ -228,6 +249,11 @@ func init() {
 		s.mux.HandleFunc("POST /{owner}/avatar/regenerate", s.publicOwnerAvatarRegenerate)
 		s.mux.HandleFunc("POST /{owner}/avatar/remove", s.publicOwnerAvatarRemove)
 		s.mux.HandleFunc("POST /{owner}/avatar/upload", s.publicOwnerAvatarUpload)
+
+		// Moderation block control (PLAN-V2 §M.5, M1): plain POSTs, 303 back
+		// with a notice — the same write shape as the profile/avatar verbs.
+		s.mux.HandleFunc("POST /{owner}/block", s.publicOwnerBlock)
+		s.mux.HandleFunc("POST /{owner}/unblock", s.publicOwnerUnblock)
 	})
 }
 
@@ -308,7 +334,7 @@ func (s *Server) publicAPIDocs(w http.ResponseWriter, r *http.Request) {
 		AuthBrowser:    "/api-browser/v1",
 		BrowserLogin:   s.browserLoginEnabled(),
 		LoginURL:       s.loginURL(),
-		Mode:           s.authModeOrDefault(),
+		Mode:           "oidc",
 		SDKSnippet:     sdkSnippet,
 		CISnippet:      ciSnippet,
 		ReleaseSnippet: releaseSnippet,
@@ -375,42 +401,23 @@ func sanitizeNextPath(next string) string {
 	return httpsec.SafeNext(next, "/")
 }
 
-// authModeOrDefault is the discovery auth mode spelling ("none" for an
-// unconfigured instance, the zero-config first run).
-func (s *Server) authModeOrDefault() string {
-	if m := s.authMode(); m != "" {
-		return m
-	}
-	return "none"
-}
-
-// browserLoginEnabled is the discovery §8 gate (mode oidc + the session/client
-// trio). It mirrors api.browserLoginEnabled without importing server
-// internals; config validation refuses mode=oidc without the trio, so a false
-// here on an oidc instance means a legacy config predating that refusal.
+// browserLoginEnabled is the discovery §8 gate (the session/client trio). It
+// mirrors api.browserLoginEnabled without importing server internals; config
+// validation refuses a config without the trio, so a false here means the
+// restricted boot (which serves no pages).
 func (s *Server) browserLoginEnabled() bool {
 	if s.env.Cfg == nil {
 		return false
 	}
 	a := s.env.Cfg.Server.Auth
-	return a.Mode == "oidc" && a.SessionSecret != "" &&
+	return a.SessionSecret != "" &&
 		a.OAuthClientID != "" && a.OAuthClientSecret != ""
-}
-
-// tokenSignInEnabled reports the F1 token-mode browser path: the setup page's
-// token-paste form can mint a session only with server.auth.session_secret.
-func (s *Server) tokenSignInEnabled() bool {
-	if s.env.Cfg == nil {
-		return false
-	}
-	a := s.env.Cfg.Server.Auth
-	return a.Mode == "token" && a.SessionSecret != ""
 }
 
 // loginURL is the browser login entry the interstitial links to ("" when the
 // flow cannot start).
 func (s *Server) loginURL() string {
-	if !s.browserLoginEnabled() && !s.tokenSignInEnabled() {
+	if !s.browserLoginEnabled() {
 		return ""
 	}
 	return "/_auth/login"
@@ -501,6 +508,17 @@ type ownerData struct {
 	// Starred view (WP9 G17): MoreAfter is the page cursor for the "Older"
 	// link; empty means the list ended.
 	MoreAfter string
+
+	// Moderation (PLAN-V2 §M.5, M1). CanBlock is the signed-in, non-self,
+	// non-org viewer case; Blocked is whether the viewer already blocks this
+	// owner (the control then offers Unblock). The list itself is PRIVATE to
+	// the blocker: BlockedPrincipals/BlockCount render on one's own profile
+	// only (BlockListSelf), never on someone else's page.
+	CanBlock          bool
+	Blocked           bool
+	BlockedPrincipals []string
+	BlockCount        int
+	BlockListSelf     bool
 
 	Notice string
 	Err    string
@@ -620,6 +638,25 @@ func (s *Server) ownerPageData(w http.ResponseWriter, r *http.Request, owner, vi
 		data.CanRemoveAvatar = data.CanRegenAvatar && publicDeps.RemoveAvatar != nil && data.AvatarURL != ""
 		data.CanUploadAvatar = data.Self && publicDeps.UploadAvatar != nil
 		data.Initials = initials(owner)
+
+		// Moderation (PLAN-V2 §M.5, M1): the block list is private to the
+		// blocker. Self sees the disclosure; any other signed-in viewer sees
+		// only the control (Block/Unblock), never the list. A nil seam hides
+		// both (no button that cannot save).
+		if publicDeps.Blocks != nil && !p.Anonymous {
+			if data.Self {
+				data.BlockListSelf = true
+				if names, berr := publicDeps.Blocks.List(r.Context(), owner); berr == nil {
+					data.BlockedPrincipals = names
+					data.BlockCount = len(names)
+				}
+			} else if !data.IsOrg {
+				data.CanBlock = true
+				if blocked, berr := publicDeps.Blocks.Blocked(r.Context(), p.Name, owner); berr == nil {
+					data.Blocked = blocked
+				}
+			}
+		}
 	}
 
 	switch view {
@@ -938,10 +975,9 @@ type inviteRowVM struct {
 
 // invitationsData is the /invitations view model.
 type invitationsData struct {
-	Identity *IdentityNotice
-	Rows     []inviteRowVM
-	Note     string
-	Err      string
+	Rows []inviteRowVM
+	Note string
+	Err  string
 
 	LinkID  string
 	Link    *inviteRowVM
@@ -955,7 +991,7 @@ type invitationsData struct {
 // This is an identity-owned page: the API answers 401 for an anonymous caller,
 // so the page does too (never the inbox of the synthetic "anonymous"
 // principal). On an unsecured instance (auth none) there is no identity to own
-// an inbox, so the shared notice points at /setup instead of rendering one.
+// an inbox, so the shared notice points at /admin/config instead of rendering one.
 // 390px: rows wrap (flex-wrap), the action row wraps.
 func (s *Server) publicInvitations(w http.ResponseWriter, r *http.Request) {
 	p, ok := s.principal(w, r)
@@ -968,10 +1004,6 @@ func (s *Server) publicInvitations(w http.ResponseWriter, r *http.Request) {
 	switch s.identityAccessFor(p) {
 	case identitySignIn:
 		s.errorPage(w, r, http.StatusUnauthorized, "sign in to view your invitations")
-		return
-	case identityDisabled:
-		data.Identity = &IdentityNotice{What: "Invitations"}
-		s.page(w, r, p, http.StatusOK, "public/invitations", "Invitations", data)
 		return
 	}
 	if publicDeps.MyInvites == nil {
@@ -1168,12 +1200,11 @@ type notifRowVM struct {
 
 // notificationsData is the /notifications view model.
 type notificationsData struct {
-	Identity *IdentityNotice
-	State    string
-	Rows     []notifRowVM
-	More     bool
-	After    string
-	Unread   int
+	State  string
+	Rows   []notifRowVM
+	More   bool
+	After  string
+	Unread int
 }
 
 // publicNotifications answers GET /notifications (06 §7): the per-user tray,
@@ -1184,7 +1215,7 @@ type notificationsData struct {
 //
 // Identity-owned, like /invitations: a signed-out caller under oidc/token gets
 // the API's 401 (never the synthetic "anonymous" tray), and auth none renders
-// the shared notice + /setup path instead of a tray with no owner. 390px: rows
+// the shared notice + /admin path instead of a tray with no owner. 390px: rows
 // wrap, the header controls wrap, the row body truncates instead of panning.
 func (s *Server) publicNotifications(w http.ResponseWriter, r *http.Request) {
 	p, ok := s.principal(w, r)
@@ -1199,10 +1230,6 @@ func (s *Server) publicNotifications(w http.ResponseWriter, r *http.Request) {
 	switch s.identityAccessFor(p) {
 	case identitySignIn:
 		s.errorPage(w, r, http.StatusUnauthorized, "sign in to see your notifications")
-		return
-	case identityDisabled:
-		data.Identity = &IdentityNotice{What: "Notifications"}
-		s.page(w, r, p, http.StatusOK, "public/notifications", "Notifications", data)
 		return
 	}
 	if publicDeps.Tray == nil {
@@ -1307,9 +1334,6 @@ func (s *Server) writePrincipal(w http.ResponseWriter, r *http.Request) (auth.Pr
 	switch s.identityAccessFor(p) {
 	case identitySignIn:
 		s.errorPage(w, r, http.StatusUnauthorized, "authentication required")
-		return p, false
-	case identityDisabled:
-		s.errorPage(w, r, http.StatusForbidden, "authentication is disabled on this instance — configure it at /setup")
 		return p, false
 	}
 	if !publicSameOrigin(r) {

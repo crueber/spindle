@@ -1,0 +1,303 @@
+{{/* pages/admin/maintenance.html — GET /admin/maintenance
+   (docs/PLAN-ADMIN.md §3.5). Purpose: is the machinery healthy, and what is it
+   doing. One read view, no forms: the maintainer's state and counters, the
+   event-sink configuration, storage/cache facts plus the filesystem holding
+   cache.dir, and the three machine endpoints with their current answers. Every
+   edit links to /admin/config#<section>; per-repo ops stay on the repository
+   pages (no instance-wide trigger is invented here). */}}
+{{define "content"}}
+<div class="admin-page" id="admin-page" data-admin-section="maintenance">
+  <div class="flex flex-col gap-4 lg:flex-row lg:gap-6">
+    {{template "admin-nav" .Data}}
+
+    <div class="min-w-0 flex-1">
+      {{template "admin-header" .Data}}
+
+      {{if .Data.Denied}}
+        {{template "admin-denied" .Data}}
+      {{else}}
+        {{if .Data.Restricted}}{{template "admin-restricted" .}}{{end}}
+        {{template "admin-banners" .Data}}
+
+        {{/* ---- Restart (always available to a host admin) ---- */}}
+        <section class="card mb-4 border-l-2 border-l-[var(--pd-warn)] p-4" aria-labelledby="admin-restart">
+          <h2 class="card-header" id="admin-restart">Restart</h2>
+          <p class="muted mt-1 text-sm">Restart this process to put a saved configuration in force.
+            Configuration shows the same control after a save that changed a restart-required key.</p>
+          {{template "admin-restart-form" .Data}}
+          {{template "admin-restart-truth" .Data}}
+        </section>
+
+        {{/* ---- Maintainer ---- */}}
+        <section class="card mb-4 p-4" aria-labelledby="admin-maintainer">
+          <h2 class="card-header" id="admin-maintainer">Maintainer</h2>
+          {{with .Data.Maint}}
+          <p class="mt-1 flex flex-wrap items-center gap-2 text-sm">
+            {{if .Running}}<span class="chip chip-open">running on this host</span><span class="muted">The loop is live; the counters below are its point-in-time snapshot.</span>
+            {{else if .Wired}}<span class="chip chip-neutral">not running on this host</span><span class="muted">The status seam is wired but reported no live maintainer (this looks like a serve-only process).</span>
+            {{else if .Restricted}}<span class="chip chip-closed">not running</span><span class="muted">Restricted mode has no object store, so no maintainer starts until a valid configuration is saved and the server restarted.</span>
+            {{else}}<span class="chip chip-draft">not wired on this build</span><span class="muted">This build does not expose maintainer metrics, so its state cannot be reported.</span>{{end}}
+          </p>
+
+          {{if .Known}}
+          <h3 class="eyebrow mt-3">Role &amp; placement (from configuration)</h3>
+          <div class="kv mt-1">
+            <div class="kv-row"><span class="kv-key">server.roles</span><span class="kv-val break-all">{{.Roles}}</span></div>
+            <div class="kv-row"><span class="kv-key">placement.maintain</span><span class="kv-val break-all">{{.Placement}}</span></div>
+            <div class="kv-row"><span class="kv-key">placement.maintain_exclude</span><span class="kv-val break-all">{{.Exclude}}</span></div>
+            <div class="kv-row"><span class="kv-key">maintenance.interval</span><span class="kv-val">{{.Interval}}</span></div>
+            <div class="kv-row"><span class="kv-key">maintenance.follow_interval</span><span class="kv-val">{{.Follow}}</span></div>
+            <div class="kv-row"><span class="kv-key">maintenance.fsck_interval</span><span class="kv-val">{{.Fsck}}</span></div>
+            <div class="kv-row"><span class="kv-key">maintenance.checkpoints</span><span class="kv-val">{{if .Checkpoints}}on{{else}}off{{end}}</span></div>
+            <div class="kv-row"><span class="kv-key">maintenance.max_pack_bytes</span><span class="kv-val">{{.MaxPack}}</span></div>
+            <div class="kv-row"><span class="kv-key">maintenance.disk</span><span class="kv-val">{{.Disk}}</span></div>
+          </div>
+          {{end}}
+
+          {{if .Running}}{{with .Snapshot}}
+          <h3 class="eyebrow mt-3">Last pass &amp; counters</h3>
+          <div class="kv mt-1">
+            <div class="kv-row"><span class="kv-key">passes</span><span class="kv-val">{{.Passes}}</span></div>
+            <div class="kv-row"><span class="kv-key">last pass</span><span class="kv-val">{{if .Passes}}{{with duration .LastPassSeconds}}{{.}}{{else}}&lt;1s{{end}}{{else}}not yet{{end}}</span></div>
+            <div class="kv-row"><span class="kv-key">checkpoint lag</span><span class="kv-val">{{.CheckpointLagEntries}} entries · {{.CheckpointAgeSeconds}}s</span></div>
+            <div class="kv-row"><span class="kv-key">missing / repaired objects</span><span class="kv-val">{{.MissingObjects}} / {{.RepairObjects}}</span></div>
+            <div class="kv-row"><span class="kv-key">follow refs</span><span class="kv-val">{{.FollowRefs}}</span></div>
+          </div>
+          {{end}}{{end}}
+
+          {{if .Running}}
+          <h3 class="eyebrow mt-3">Task kinds</h3>
+          {{if .Units}}
+          <div class="mt-1 overflow-x-auto">
+            <table class="data-table" aria-label="maintainer task kinds and unit outcomes">
+              <thead><tr><th scope="col">kind</th><th scope="col">outcomes</th></tr></thead>
+              <tbody>
+                {{range .Units}}
+                <tr>
+                  <th scope="row" class="mono text-xs">{{.Key}}</th>
+                  <td class="mono text-[11.5px] text-[var(--pd-text-2)]">{{if .Value}}{{.Value}}{{else}}<span class="muted">no data yet</span>{{end}}</td>
+                </tr>
+                {{end}}
+              </tbody>
+            </table>
+          </div>
+          {{else}}
+          <p class="muted mt-1 text-sm">No unit outcomes recorded yet — a kind appears here after its first run on this host.</p>
+          {{end}}
+          <p class="muted mt-2 text-sm">The pass runs at most one bounded unit per assigned repository; <code class="mono text-xs">follow</code> is the separate follow loop and never a pass unit. This page reports the loop the host runs — <code class="mono text-xs">server.roles</code> decides whether it runs here at all. <a class="link inline-flex min-h-6 items-center py-1" href="/admin/config#maintenance">Edit maintenance settings</a></p>
+          {{end}}
+          {{end}}
+        </section>
+
+        {{/* ---- Packages GC (PLAN-ADMIN §8.6): the page's one control ---- */}}
+        <section class="card mb-4 p-4" aria-labelledby="admin-packages-gc">
+          <h2 class="card-header" id="admin-packages-gc">Packages garbage collection</h2>
+          {{with .Data.GC}}
+          <p class="mt-1 flex flex-wrap items-center gap-2 text-sm">
+            {{if .Restricted}}<span class="chip chip-closed">not available</span><span class="muted">The store is not open, so there is nothing to sweep.</span>
+            {{else if .Running}}<span class="chip chip-draft">running</span><span class="muted">A pass is running now{{if .Running.DryRun}} (dry run — counting only){{end}}; the card below narrates it.</span>
+            {{else if .NotWired}}<span class="chip chip-neutral">not wired</span><span class="muted">This build does not expose the packages registry to the Administration area, so there is no manual trigger here.</span>
+            {{else}}<span class="chip chip-neutral">idle</span><span class="muted">No pass is running on this instance.</span>{{end}}
+          </p>
+          {{if .Error}}<p class="err-line mt-2" role="alert">{{.Error}}</p>{{end}}
+          <p class="muted mt-1 text-sm">{{.Scheduled}}{{if and .Grace (not .Restricted)}} A blob finalized in the last {{.Grace}} is kept even when no manifest names it yet (its push may still be in flight).{{end}}</p>
+
+          {{if not .Restricted}}
+          <h3 class="eyebrow mt-3">Last runs</h3>
+          {{if or .Last .LastApply}}
+          <ul class="mt-1 grid gap-2">
+            {{with .LastApply}}
+            <li class="flex flex-wrap items-baseline gap-x-2 gap-y-1 text-sm">
+              {{if .OK}}<span class="chip chip-open">ok</span>{{else}}<span class="chip chip-closed">failed</span>{{end}}
+              <strong>apply</strong>
+              <span class="muted">{{template "collab_time" .At}}{{with .Actor}} · {{.}}{{end}}</span>
+              <span>{{.Summary}}</span>
+              {{with .Error}}<span class="err-line">{{.}}</span>{{end}}
+            </li>
+            {{end}}
+            {{with .Last}}{{if or (not $.Data.GC.LastApply) (ne .At $.Data.GC.LastApply.At)}}
+            <li class="flex flex-wrap items-baseline gap-x-2 gap-y-1 text-sm">
+              {{if .OK}}<span class="chip chip-open">ok</span>{{else}}<span class="chip chip-closed">failed</span>{{end}}
+              <strong>{{if .DryRun}}dry run{{else}}apply{{end}}</strong>
+              <span class="muted">{{template "collab_time" .At}}{{with .Actor}} · {{.}}{{end}}</span>
+              <span>{{.Summary}}</span>
+              {{with .Error}}<span class="err-line">{{.}}</span>{{end}}
+            </li>
+            {{end}}{{end}}
+          </ul>
+          {{else}}
+          <p class="muted mt-1 text-sm">No pass is recorded on this instance yet. The summary lives in the object store (<code class="mono text-xs">packages/gc_state.json</code>), so it survives a restart.</p>
+          {{end}}
+
+          {{if not .NotWired}}
+          <div class="mt-3 grid gap-3 md:grid-cols-2">
+            <form class="grid gap-2" method="post" action="/admin/maintenance/gc">
+              <input type="hidden" name="op" value="dry-run">
+              <p class="muted text-[11px]">A dry run walks every registry and <strong>counts</strong> what an applying pass would reclaim. Nothing is deleted; the number is a reading of the store right now, not a promise (a push racing the pass changes it).</p>
+              <div><button type="submit" class="btn">Dry run — count, do not delete</button></div>
+            </form>
+            <form class="grid gap-2" method="post" action="/admin/maintenance/gc"
+                  data-danger-expected="apply">
+              <input type="hidden" name="op" value="apply">
+              <p class="muted text-[11px]">An apply pass deletes every blob no stored manifest names, plus expired upload staging. Deletion is immediate and there is no undo — the repository's manifests are the only references.</p>
+              <div>
+                <label class="mb-1 block text-xs font-medium" for="gc-confirm">Type <code class="mono text-xs">apply</code> to confirm</label>
+                <input class="input mono max-w-[10rem] text-xs" id="gc-confirm" name="confirm" type="text"
+                       autocomplete="off" data-danger-arm required>
+              </div>
+              <div><button type="submit" class="btn primary">Run GC now</button></div>
+            </form>
+          </div>
+          {{end}}
+          {{end}}
+          {{end}}
+
+          {{with .Data.GCTask}}
+          <div class="mt-4 grid gap-2" aria-label="Packages GC progress" aria-live="polite"
+               data-task-id="{{.ID}}" data-task-stream="{{.Stream}}"
+               data-task-return="/admin/maintenance"
+               data-task-noun="{{if .DryRun}}dry run{{else}}GC pass{{end}}" data-task-labels="{{.Title}}">
+            <p class="text-sm font-medium">{{.Title}}</p>
+            <div data-task-bars class="grid gap-2">
+              <div class="grid gap-1">
+                <div class="flex flex-wrap items-baseline gap-2 text-sm"><span class="font-medium">starting…</span></div>
+                <div class="h-1.5 overflow-hidden rounded bg-[var(--pd-raised)]" role="progressbar"
+                     aria-label="packages GC progress" aria-valuemin="0" aria-valuemax="100">
+                  <div class="h-full w-1/6 bg-[var(--pd-accent)]"></div>
+                </div>
+              </div>
+            </div>
+            <pre data-task-log class="code-view max-h-64 min-h-[2rem] overflow-y-auto p-2" aria-label="Packages GC log"></pre>
+            <p class="muted text-[11px]">
+              The pass keeps running if you navigate away. Task
+              <a class="link mono" href="{{.Stream}}">{{.ID}}</a> —
+              <a class="link" href="{{.Stream}}">follow its progress</a>
+              (the same URL with <code class="mono">Accept: text/event-stream</code>).
+            </p>
+            <noscript><p class="muted text-[11px]">JavaScript is off: the pass is still running — reload this page to read the recorded summary.</p></noscript>
+          </div>
+          {{end}}
+          <p class="mt-3 text-sm"><a class="link inline-flex min-h-6 items-center py-1" href="/admin/config#packages">Edit registry limits</a></p>
+        </section>
+
+        {{/* ---- Event bridge ---- */}}
+        <section class="card mb-4 p-4" aria-labelledby="admin-event-bridge">
+          <h2 class="card-header" id="admin-event-bridge">Event bridge</h2>
+          {{with .Data.Bridge}}
+          {{if .Restricted}}
+          <p class="muted mt-1 text-sm">Restricted mode has no store, so the bridge is not running and its configuration is not in force. Fix the configuration on <a class="link" href="/admin/config#events">Configuration</a>.</p>
+          {{else if not .Known}}
+          <p class="muted mt-1 text-sm">The event-bridge configuration is not wired on this build, so its sinks and cadence cannot be reported.</p>
+          {{else}}
+          <p class="mt-1 flex flex-wrap items-center gap-2 text-sm">
+            {{if .RoleDisabled}}<span class="chip chip-neutral">events role off</span><span class="muted">This host's <code class="mono text-xs">server.roles</code> excludes <code class="mono text-xs">events</code>, so the bridge does not run here.</span>
+            {{else if .Configured}}<span class="chip chip-open">configured</span><span class="muted">The bridge delivers ref events to the sinks below; delivery is retried on the next sweep.</span>
+            {{else}}<span class="chip chip-draft">no sinks</span><span class="muted">No webhook or sink is configured, so ref events are not delivered anywhere.</span>{{end}}
+          </p>
+          {{if .Rows}}
+          <div class="kv mt-2">
+            {{range .Rows}}<div class="kv-row"><span class="kv-key">{{.Key}}</span><span class="kv-val break-all">{{.Value}}</span></div>{{end}}
+            <div class="kv-row"><span class="kv-key">sweep interval</span><span class="kv-val">{{$.Data.Bridge.Sweep}}</span></div>
+          </div>
+          {{end}}
+          <div class="setup-note mt-3">
+            <p class="text-sm">Delivery cursors are <strong>per repository</strong> (<code class="mono text-xs">events/cursor.json</code> in the object store); this instance keeps no aggregate in memory, so this page shows no cursor position, last-delivery time or pending/failed count — inventing one would be a guess. The delivery signal is the machine series on <a class="link" href="/metrics">/metrics</a>: <code class="mono text-xs">events_published_total</code>, <code class="mono text-xs">events_bridge_lag_entries</code> and <code class="mono text-xs">events_bridge_gap_total</code>.</p>
+            <p class="muted mt-1 text-sm">There is no instance-wide redeliver or cursor reset — the bridge has no such mutation — so this page offers none. A failing sink holds its repository's cursor until the next sweep succeeds; per-hook delivery is on each repository's webhooks.</p>
+          </div>
+          <p class="mt-2 text-sm"><a class="link inline-flex min-h-6 items-center py-1" href="/admin/config#events">Edit event settings</a> · <a class="link inline-flex min-h-6 items-center py-1" href="/how-it-works#wal">How ref events work</a></p>
+          {{end}}
+          {{end}}
+        </section>
+
+        {{/* ---- Storage & cache ---- */}}
+        <section class="card mb-4 p-4" aria-labelledby="admin-storage">
+          <h2 class="card-header" id="admin-storage">Storage &amp; cache</h2>
+          {{if .Data.Storage.Configured}}
+          <p class="muted mt-1 text-sm">Store and cache policy from the effective configuration; the filesystem numbers are measured now (statfs) on the host holding <code class="mono text-xs">cache.dir</code>. Cache contents are not measured here — that is a full directory walk, not a page fact.</p>
+          <div class="kv mt-2">
+            {{range .Data.Storage.Rows}}
+            <div class="kv-row"><span class="kv-key">{{.Key}}</span><span class="kv-val break-all">{{.Value}}</span></div>
+            {{end}}
+          </div>
+          {{with .Data.Storage.FS}}
+          <div class="mt-3">
+            <h3 class="eyebrow">Filesystem holding cache.dir</h3>
+            {{if .Measured}}
+            <p class="mt-1 font-mono text-[11.5px] text-[var(--pd-text-2)]">{{.Type}} · {{.FreeText}} free of {{.TotalText}} · {{.UsedPct}}% in use</p>
+            <div class="mt-1 h-1.5 overflow-hidden rounded bg-[var(--pd-raised)]" role="progressbar"
+                 aria-valuenow="{{.UsedPct}}" aria-valuemin="0" aria-valuemax="100"
+                 aria-valuetext="{{.UsedPct}}% of {{.TotalText}} in use; {{.FreeText}} free"
+                 aria-label="filesystem use where the cache lives">
+              <div class="h-full {{if .Tight}}bg-[var(--pd-warn)]{{else}}bg-[var(--pd-ok)]{{end}}" style="width: {{.UsedPct}}%"></div>
+            </div>
+            {{if .Tight}}<p class="warn-line">Use is at or above the configured high watermark — the eviction pass frees cache space on its next run.</p>{{end}}
+            {{else}}
+            <p class="muted mt-1 text-sm">Filesystem capacity could not be read: <code class="mono text-xs">cache.dir</code> may not exist on this host, or statfs is unavailable off Linux.</p>
+            {{end}}
+          </div>
+          {{end}}
+          {{if .Data.Storage.BudgetNote}}<p class="{{if .Data.Storage.BudgetWarn}}warn-line{{else}}muted mt-2 text-sm{{end}}">{{.Data.Storage.BudgetNote}}</p>{{end}}
+          {{with .Data.Storage.Packages}}
+          <div class="mt-3">
+            <h3 class="eyebrow">OCI registry</h3>
+            {{if .Error}}
+            <p class="err-line mt-1" role="alert">{{.Error}}</p>
+            {{else if .Known}}
+            <p class="mt-1 text-sm">Registry storage: <strong class="tabular">{{.Total}}</strong>{{with .Updated}} · last reconciled {{.}}{{end}}</p>
+            {{if .Repos}}
+            <div class="kv mt-1">
+              {{range .Repos}}<div class="kv-row"><span class="kv-key">{{.Key}}</span><span class="kv-val tabular">{{.Value}}</span></div>{{end}}
+            </div>
+            <p class="muted text-[11px]">Largest registries (up to five) from the same index.</p>
+            {{else}}
+            <p class="muted mt-1 text-sm">No registry holds objects on this instance.</p>
+            {{end}}
+            <p class="muted mt-1 text-[11.5px]">{{.Note}}</p>
+            {{else}}
+            <p class="muted mt-1 text-sm">{{.Note}}</p>
+            {{end}}
+          </div>
+          {{end}}
+          <p class="mt-3 text-sm"><a class="link inline-flex min-h-6 items-center py-1" href="/admin/config#store">Edit storage settings</a> · <a class="link inline-flex min-h-6 items-center py-1" href="/admin/config#cache">Edit cache settings</a></p>
+          {{else if .Data.Storage.Restricted}}
+          {{template "collab_empty" (dict "icon" "file" "title" "No effective storage configuration" "hint" "The configuration file is invalid, so the store and cache facts are not in force. Fix it on Configuration, save, and restart. /healthz and /readyz keep answering in this mode; /readyz reports restricted." "href" "/admin/config#store" "label" "Open configuration")}}
+          {{else}}
+          {{template "collab_empty" (dict "icon" "file" "title" "Storage is not wired on this build" "hint" "This build could not read an effective configuration, so the store and cache facts cannot be reported." "href" "/admin/config#store" "label" "Open configuration")}}
+          {{end}}
+        </section>
+
+        {{/* ---- Health endpoints ---- */}}
+        <section class="card mb-4 p-4" aria-labelledby="admin-health-endpoints">
+          <h2 class="card-header" id="admin-health-endpoints">Health endpoints</h2>
+          <p class="muted mt-1 text-sm">The machine-owned answers, rendered as a reading plus the link — never a second dashboard.</p>
+          <div class="mt-2 overflow-x-auto">
+            <table class="data-table wrap" aria-label="health endpoints with their current answers">
+              <thead><tr><th scope="col" class="w-24">endpoint</th><th scope="col" class="w-56">current answer</th><th scope="col">what it proves</th></tr></thead>
+              <tbody>
+                {{range .Data.Endpoints}}
+                <tr>
+                  <th scope="row"><a class="link mono text-xs" href="{{.Path}}">{{.Path}}</a></th>
+                  <td><span class="chip chip-{{.Tone}}">{{.Code}}</span> <span class="mono text-[11.5px] text-[var(--pd-text-2)]">{{.Answer}}</span></td>
+                  <td class="muted">{{.Proves}}</td>
+                </tr>
+                {{end}}
+              </tbody>
+            </table>
+          </div>
+        </section>
+
+        {{/* ---- Ops entry points ---- */}}
+        <section class="card p-4" aria-labelledby="admin-ops">
+          <h2 class="card-header" id="admin-ops">Per-repository ops</h2>
+          <p class="muted mt-1 text-sm">Manual operations are scoped to one repository and stay where its state is; the one cross-repository trigger on this page is the packages GC above (the <code class="mono text-xs">packages-gc</code> task at instance scope). Everything else is per repository.</p>
+          <ul class="mt-2 space-y-1 text-sm">
+            <li><a class="link inline-flex min-h-6 items-center" href="/how-it-works#wal">How the WAL works</a> <span class="muted">— the model behind checkpoints, compaction and materialize.</span></li>
+            <li><a class="link inline-flex min-h-6 items-center" href="/api">API route table</a> <span class="muted">— every <code class="mono text-xs">POST /api/ops/&lt;op&gt;</code> lane, including the per-repository <code class="mono text-xs">packages-gc</code>.</span></li>
+            <li><a class="link inline-flex min-h-6 items-center" href="/">Repositories</a> <span class="muted">— open one and its WAL page (<code class="mono text-xs">/{owner}/{repo}/wal</code>) for materialize, compact, fsck and a single repository's packages-GC start.</span></li>
+          </ul>
+        </section>
+      {{end}}
+    </div>
+  </div>
+</div>
+{{end}}

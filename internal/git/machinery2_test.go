@@ -92,8 +92,95 @@ func TestPackRefs(t *testing.T) {
 func TestFoldCommitGraphs(t *testing.T) {
 	repo, l, _ := realRepoFixture(t)
 	idxs, _ := filepath.Glob(filepath.Join(repo.PackDir(), "pack-*.idx"))
-	if err := l.FoldCommitGraphs(t.Context(), repo, idxs); err != nil {
+	given := make([]string, len(idxs))
+	for i, p := range idxs {
+		given[i] = filepath.Base(p) // `pack-<checksum>.idx`, never the bare checksum
+	}
+	if err := l.FoldCommitGraphs(t.Context(), repo, given); err != nil {
 		t.Fatalf("FoldCommitGraphs: %v", err)
+	}
+}
+
+// TestFoldCommitGraphsTwoPacks pins the production shape (BUG-5): every push
+// folds freshly ingested packs by name, and a repo with more than one pack
+// must produce a readable chain. `--stdin-packs` resolves each line under
+// objects/pack, so the bare checksum (what the publisher used to send) fails
+// with "error adding pack ./objects/pack/<checksum>.idx".
+func TestFoldCommitGraphsTwoPacks(t *testing.T) {
+	if !gitAtLeast(t, 2, 47) {
+		t.Skip("git < 2.47")
+	}
+	up := t.TempDir()
+	// No background gc/maintenance in the fixture: this test pins the spindle
+	// repo's pack layout at exactly two packs, and a host gc.auto (or a cruft
+	// pack git writes for unreachable objects) repacks underneath it.
+	mk := func(argv ...string) {
+		c := exec.Command("git", append([]string{"-c", "gc.auto=0", "-c", "maintenance.auto=false"}, argv...)...)
+		c.Dir = up
+		c.Env = append(os.Environ(), "GIT_AUTHOR_NAME=t", "GIT_AUTHOR_EMAIL=t@t",
+			"GIT_COMMITTER_NAME=t", "GIT_COMMITTER_EMAIL=t@t")
+		if out, err := c.CombinedOutput(); err != nil {
+			t.Fatalf("git %s: %v\n%s", argv, err, out)
+		}
+	}
+	pack := func(stdin string, args ...string) []byte {
+		c := exec.Command("git", append([]string{"-c", "gc.auto=0", "-c", "maintenance.auto=false", "pack-objects", "--stdout"}, args...)...)
+		c.Dir = up
+		c.Stdin = strings.NewReader(stdin)
+		var buf bytes.Buffer
+		c.Stdout = &buf
+		if err := c.Run(); err != nil {
+			t.Fatalf("pack-objects %s: %v", args, err)
+		}
+		return buf.Bytes()
+	}
+	mk("init", "-q", "-b", "main", ".")
+	os.WriteFile(filepath.Join(up, "f.txt"), []byte("one\n"), 0o644)
+	mk("add", ".")
+	mk("commit", "-m", "c1")
+	first := pack("", "--revs", "--all")
+	os.WriteFile(filepath.Join(up, "g.txt"), []byte("two\n"), 0o644)
+	mk("add", ".")
+	mk("commit", "-m", "c2")
+	second := pack("HEAD\n^HEAD~1\n", "--revs")
+
+	repo, err := InitLocalRepo(t.TempDir(), RepoId{Owner: "o", Name: "fold2"}, Sha1)
+	if err != nil {
+		t.Fatalf("init: %v", err)
+	}
+	l := NewLayer()
+	for _, p := range [][]byte{first, second} {
+		if _, err := l.Ingest(t.Context(), repo, bytes.NewReader(p), 0, false, true); err != nil {
+			t.Fatalf("Ingest: %v", err)
+		}
+	}
+	idxs, _ := filepath.Glob(filepath.Join(repo.PackDir(), "pack-*.idx"))
+	if len(idxs) != 2 {
+		t.Fatalf("packs = %d, want 2", len(idxs))
+	}
+	names := make([]string, len(idxs))
+	for i, p := range idxs {
+		names[i] = filepath.Base(p)
+	}
+
+	// Negative control: the bare checksum spelling the publisher used to send
+	// is not a pack name, and git says so (this is the audit's log line).
+	bare := strings.TrimSuffix(strings.TrimPrefix(names[0], "pack-"), ".idx") + ".idx"
+	if err := l.FoldCommitGraphs(t.Context(), repo, []string{bare}); err == nil {
+		t.Fatalf("bare %q accepted by --stdin-packs; the name must be pack-<checksum>.idx", bare)
+	}
+
+	if err := l.FoldCommitGraphs(t.Context(), repo, names); err != nil {
+		t.Fatalf("FoldCommitGraphs(%v): %v", names, err)
+	}
+	verify := exec.Command("git", "commit-graph", "verify")
+	verify.Dir = repo.Path
+	if out, err := verify.CombinedOutput(); err != nil {
+		t.Fatalf("commit-graph verify: %v\n%s", err, out)
+	}
+	chain, err := os.ReadFile(filepath.Join(repo.Path, "objects", "info", "commit-graphs", "commit-graph-chain"))
+	if err != nil || len(strings.Fields(string(chain))) == 0 {
+		t.Fatalf("commit-graph chain unreadable: %v (%q)", err, chain)
 	}
 }
 

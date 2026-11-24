@@ -168,28 +168,29 @@ func TestSelectFilesTriggerMatrix(t *testing.T) {
 		t.Fatal(err)
 	}
 	cases := []struct {
-		event, branch, want string
-		n                   int
+		event, branch, action, want string
+		n                           int
 	}{
-		{EventPush, "main", "", 1},              // branch filter matches
-		{EventPush, "dev", "", 0},               // branch filter excludes
-		{EventPush, "", "", 0},                  // a branch-filtered trigger matches no empty branch
-		{EventPullReq, "main", "", 1},           // PR trigger present
-		{EventDispatch, "", "", 1},              // workflow_dispatch present (null form)
-		{EventDispatch, "", "ci.yml", 1},        // dispatch filter by basename
-		{EventDispatch, "", "docs.yml", 0},      // unknown file: no match
-		{EventSchedule, "", "", 2},              // both fixture files declare `schedule:`
-		{EventSchedule, "", "scheduled.yml", 1}, // a tick names exactly one file
-		{EventSchedule, "", "nope.yml", 0},      // and never an unknown one
-		{"bogus", "", "", 0},                    // unknown event: no match
+		{EventPush, "main", "", "", 1},              // branch filter matches
+		{EventPush, "dev", "", "", 0},               // branch filter excludes
+		{EventPush, "", "", "", 0},                  // a branch-filtered trigger matches no empty branch
+		{EventPullReq, "main", "opened", "", 1},     // PR trigger present
+		{EventPullReq, "main", "", "", 1},           // no filter: any (or no) action matches
+		{EventDispatch, "", "", "", 1},              // workflow_dispatch present (null form)
+		{EventDispatch, "", "", "ci.yml", 1},        // dispatch filter by basename
+		{EventDispatch, "", "", "docs.yml", 0},      // unknown file: no match
+		{EventSchedule, "", "", "", 2},              // both fixture files declare `schedule:`
+		{EventSchedule, "", "", "scheduled.yml", 1}, // a tick names exactly one file
+		{EventSchedule, "", "", "nope.yml", 0},      // and never an unknown one
+		{"bogus", "", "", "", 0},                    // unknown event: no match
 	}
 	for _, tc := range cases {
-		got := SelectFiles(files, tc.event, tc.branch, tc.want)
+		got := SelectFiles(files, tc.event, tc.branch, tc.action, tc.want)
 		if len(got) != tc.n {
-			t.Errorf("SelectFiles(%s,%q,%q) = %d, want %d", tc.event, tc.branch, tc.want, len(got), tc.n)
+			t.Errorf("SelectFiles(%s,%q,%q,%q) = %d, want %d", tc.event, tc.branch, tc.action, tc.want, len(got), tc.n)
 		}
 	}
-	if got := SelectFiles(files, EventDispatch, "", ".spindle/workflows/ci.yml"); len(got) != 1 {
+	if got := SelectFiles(files, EventDispatch, "", "", ".spindle/workflows/ci.yml"); len(got) != 1 {
 		t.Errorf("dispatch by full path = %d, want 1", len(got))
 	}
 }

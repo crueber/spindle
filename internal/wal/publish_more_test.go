@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -374,16 +375,45 @@ func TestFoldCommitGraphs_RunsOffCriticalPath(t *testing.T) {
 		t.Fatal(err)
 	}
 	h.ensurePublisher()
+	old := logWarnf
+	var mu sync.Mutex
+	var warnings []string
+	logWarnf = func(format string, args ...any) {
+		mu.Lock()
+		warnings = append(warnings, fmt.Sprintf(format, args...))
+		mu.Unlock()
+	}
+	t.Cleanup(func() { logWarnf = old })
+
 	// A push entry whose pack has no commit-graph yet: the fold runs in the
-	// background and its failure (no such idx) is logged, never fatal.
+	// background and its failure (no such idx) is logged, never fatal. The
+	// warning names the pack-name spelling the publisher feeds (BUG-5: a bare
+	// `<checksum>.idx` is not a pack name for --stdin-packs).
+	checksum := strings.Repeat("0", 40)
 	entries := []*proto.LogEntry{{
 		Seq: 1, Kind: proto.EntryKindPush, Writer: "w",
-		Pack: &proto.PackRef{Checksum: strings.Repeat("0", 40), Seq: 1},
+		Pack: &proto.PackRef{Checksum: checksum, Seq: 1},
 		Txn:  refTxn("refs/heads/x", git.Sha1.ZeroHex(), strings.Repeat("a", 40)),
 	}}
 	h.pub.foldCommitGraphs(entries)
 	h.pub.foldCommitGraphs(nil) // early return
-	time.Sleep(100 * time.Millisecond)
+
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		mu.Lock()
+		got := append([]string(nil), warnings...)
+		mu.Unlock()
+		if len(got) > 0 {
+			if !strings.Contains(got[0], "pack-"+checksum+".idx") {
+				t.Fatalf("fold warning does not name the pack-name spelling: %q", got[0])
+			}
+			return // logged a warning, push path unaffected
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("fold failure was not logged as a warning")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
 }
 
 func TestSweepBurned_MissingOrphan(t *testing.T) {

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/crueber/spindle/internal/store"
@@ -80,6 +81,10 @@ type GCResult struct {
 	RunsDeleted int `json:"runs_deleted"`
 	JobsDeleted int `json:"jobs_deleted"`
 	LogsDeleted int `json:"logs_deleted"`
+	// ArtifactsDeleted / ArtifactBytes count published artifacts reclaimed
+	// (with their run, or early through a per-artifact retention-days window).
+	ArtifactsDeleted int   `json:"artifacts_deleted"`
+	ArtifactBytes    int64 `json:"artifact_bytes"`
 	// QueueDeleted counts completed queue entries removed with their run.
 	QueueDeleted int `json:"queue_deleted"`
 	// RunnersDeleted / CredentialsDeleted count registry rows and their
@@ -92,8 +97,8 @@ type GCResult struct {
 
 // String renders the one-line notice the task log carries.
 func (r GCResult) String() string {
-	return fmt.Sprintf("requeued=%d runs=%d jobs=%d logs=%d queue=%d runners=%d credentials=%d freed=%dB",
-		r.Requeued, r.RunsDeleted, r.JobsDeleted, r.LogsDeleted, r.QueueDeleted,
+	return fmt.Sprintf("requeued=%d runs=%d jobs=%d logs=%d artifacts=%d artifact_bytes=%d queue=%d runners=%d credentials=%d freed=%dB",
+		r.Requeued, r.RunsDeleted, r.JobsDeleted, r.LogsDeleted, r.ArtifactsDeleted, r.ArtifactBytes, r.QueueDeleted,
 		r.RunnersDeleted, r.CredentialsDeleted, r.BytesFreed)
 }
 
@@ -153,6 +158,8 @@ func (s *Service) Retain(ctx context.Context, owner, repo string, log TaskLogger
 		res.JobsDeleted += n.jobs
 		res.LogsDeleted += n.logs
 		res.QueueDeleted += n.queue
+		res.ArtifactsDeleted += n.artifacts
+		res.ArtifactBytes += n.artifactsBytes
 		res.BytesFreed += n.bytes
 	}
 	if len(gone) > 0 {
@@ -162,7 +169,12 @@ func (s *Service) Retain(ctx context.Context, owner, repo string, log TaskLogger
 		// removed. The dispatch head drops the dangling seqs on its next visit.
 		s.dropQueueEntries(ctx, owner, repo, gone, res)
 	}
-	s.deleteDeadRunners(ctx, owner, repo, cutoff, res)
+	// Shortened per-artifact windows (retention-days) are reclaimed through the
+	// expiry index: ONE prefix LIST per pass, never a per-run enumeration.
+	if eerr := s.expireArtifacts(ctx, owner, repo, now, res); eerr != nil {
+		return res, eerr
+	}
+	s.deleteDeadRunners(ctx, cutoff, res)
 
 	if log != nil {
 		log.Notice(fmt.Sprintf("threads-gc %s/%s: %s", owner, repo, res.String()))
@@ -202,11 +214,16 @@ func (s *Service) dropQueueEntries(ctx context.Context, owner, repo string, gone
 		}
 		res.QueueDeleted++
 	}
+	for runID := range gone {
+		s.removeQueueIndexRun(ctx, repoID(owner, repo), runID)
+	}
 }
 
 // runCounts is what deleting one run freed.
 type runCounts struct {
 	jobs, logs, queue int
+	artifacts         int
+	artifactsBytes    int64
 	bytes             int64
 }
 
@@ -250,6 +267,21 @@ func (s *Service) deleteRun(ctx context.Context, owner, repo, runID string) (run
 			out.queue++
 		}
 	}
+	// Artifacts are deleted with the run: their blobs, their manifests, and any
+	// short-expiry index rows (an index row whose artifact is gone is dropped
+	// by the next expiry pass).
+	arts, aerr := s.loadArtifacts(ctx, owner, repo, runID)
+	if aerr != nil {
+		return out, aerr
+	}
+	for _, art := range arts {
+		freed, derr := s.deleteArtifact(ctx, owner, repo, runID, art.Name)
+		if derr != nil {
+			return out, derr
+		}
+		out.artifacts++
+		out.artifactsBytes += freed
+	}
 	if derr := s.Store.Delete(ctx, RunKey(owner, repo, runID), ""); derr != nil && !store.IsNotFound(derr) {
 		return out, derr
 	}
@@ -277,19 +309,41 @@ func (s *Service) deleteJob(ctx context.Context, owner, repo, runID string, job 
 	if err := s.Store.Delete(ctx, JobKey(owner, repo, runID, job.ID), ""); err != nil && !store.IsNotFound(err) {
 		return out, err
 	}
+	// OIDC request-token records are per attempt and carry no index: the
+	// retention pass lists the (small) family under this job and drops it with
+	// the job. It holds only hashes.
+	tokPrefix := IDTokenRequestPrefix(owner, repo, runID, job.ID)
+	var tokKeys []string
+	if err := s.Store.List(ctx, tokPrefix, "", func(m store.ObjectMeta) error {
+		tokKeys = append(tokKeys, m.Key)
+		return nil
+	}); err != nil {
+		return out, err
+	}
+	for _, k := range tokKeys {
+		if err := s.Store.Delete(ctx, k, ""); err != nil && !store.IsNotFound(err) {
+			return out, err
+		}
+	}
 	return out, nil
 }
 
-// deleteDeadRunners removes runner registry records whose credential is dead:
+// deleteDeadRunners removes instance runner records whose credential is dead:
 // a revoked runner past the window, or a pending registration that expired
-// unused. A live runner is never touched.
-func (s *Service) deleteDeadRunners(ctx context.Context, owner, repo string, cutoff time.Time, res *GCResult) {
+// unused. A live runner is never touched. The family is instance-wide, so a
+// process-local hourly gate keeps the per-repository retention pass from
+// LISTing it once per repository (a restart repeats the sweep — safe).
+func (s *Service) deleteDeadRunners(ctx context.Context, cutoff time.Time, res *GCResult) {
+	if !s.runnerSweepDue() {
+		return
+	}
 	if res.RunnersDeleted >= retentionRunners {
 		return
 	}
 	var keys []string
-	if err := s.Store.List(ctx, RunnersPrefix(owner, repo), "", func(m store.ObjectMeta) error {
-		if strings.HasSuffix(m.Key, ".json") {
+	if err := s.Store.List(ctx, RunnersPrefix(), "", func(m store.ObjectMeta) error {
+		rest := strings.TrimPrefix(m.Key, RunnersPrefix())
+		if strings.HasSuffix(rest, ".json") && !strings.Contains(rest, "/") {
 			keys = append(keys, m.Key)
 		}
 		return nil
@@ -315,14 +369,47 @@ func (s *Service) deleteDeadRunners(ctx context.Context, owner, repo string, cut
 			continue
 		}
 		res.RunnersDeleted++
-		if doc.RegisteredBy != "" {
-			ckey := RunnerTokenKey(doc.RegisteredBy, doc.ID)
-			if derr := s.Store.Delete(ctx, ckey, ""); derr != nil && !store.IsNotFound(derr) {
-				continue
-			}
-			res.CredentialsDeleted++
+		if derr := s.Store.Delete(ctx, RunnerCredentialKey(doc.ID), ""); derr != nil && !store.IsNotFound(derr) {
+			continue
+		}
+		res.CredentialsDeleted++
+		if derr := s.Store.Delete(ctx, RunnerTokenKey(doc.ID), ""); derr != nil && !store.IsNotFound(derr) {
+			continue
 		}
 	}
+}
+
+// runnerSweepGate is the process-wide hourly gate for the instance runner
+// family's retention pass.
+type runnerSweepGate struct {
+	mu sync.Mutex
+	at time.Time
+}
+
+// runnerGateAlloc guards the lazy gate allocation (a Service built by hand in a
+// test has no New() to initialise it).
+var runnerGateAlloc sync.Mutex
+
+func (s *Service) sweepGate() *runnerSweepGate {
+	runnerGateAlloc.Lock()
+	defer runnerGateAlloc.Unlock()
+	if s.runnerSweep == nil {
+		s.runnerSweep = &runnerSweepGate{}
+	}
+	return s.runnerSweep
+}
+
+// runnerSweepDue applies the process-wide hourly gate (see sweepGate).
+func (s *Service) runnerSweepDue() bool {
+	g := s.sweepGate()
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	now := s.nowUTC()
+	if !g.at.IsZero() && now.Sub(g.at) < time.Hour {
+		return false
+	}
+	g.at = now
+	return true
 }
 
 // deadRunner reports a runner record past retention that can never authenticate

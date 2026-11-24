@@ -573,11 +573,16 @@ func TestSettingsAccessInviteSeamEdges(t *testing.T) {
 	ctx := context.Background()
 	uiSeedRepo(t, h.store, "acme", "monorepo")
 	// An expired pending invite renders the expired chip (the list is a raw
-	// read — expiry is display state, and accept still fails closed).
-	// The seam's clock is the harness's fixed 2026-11-20; a TTL two days back
-	// from the real clock is already expired there.
-	if _, err := h.ident.CreateRepoInvite(ctx, "acme", "monorepo", "old@example.com", identity.RoleRead, "alice@example.com", -48*time.Hour); err != nil {
-		t.Fatal(err)
+	// read — expiry is display state, and accept still fails closed). The
+	// expiry is computed from the HARNESS clock, not the wall clock: deriving
+	// "two days ago" from time.Now() made this a date bomb (it broke when the
+	// real date passed publicFixedNow + 48h, 2026-11-22).
+	prevNow := h.ident.Now
+	h.ident.Now = func() time.Time { return publicFixedNow }
+	_, inviteErr := h.ident.CreateRepoInvite(ctx, "acme", "monorepo", "old@example.com", identity.RoleRead, "alice@example.com", -48*time.Hour)
+	h.ident.Now = prevNow
+	if inviteErr != nil {
+		t.Fatal(inviteErr)
 	}
 	code, body := seamsGet(t, h, "/acme/monorepo/settings/access")
 	if code != http.StatusOK {

@@ -83,8 +83,10 @@ func TestOIDCUsernameAuthSurfaces(t *testing.T) {
 		t.Fatalf("me = %d", rec.Code)
 	}
 	body := rec.Body.String()
-	if !strings.Contains(body, "crueber") || strings.Contains(body, email) {
-		t.Fatalf("me body leaks: %s", body)
+	// /_auth/me now carries the diagnostic fields (email/groups/admin/
+	// groups_claim) by design — the principal itself is still the username.
+	if !strings.Contains(body, `"principal":"crueber"`) || !strings.Contains(body, `"groups_claim":"groups"`) {
+		t.Fatalf("me body = %s", body)
 	}
 	// wgt_ path.
 	tok, err := s.authSvc.MintToken(email)

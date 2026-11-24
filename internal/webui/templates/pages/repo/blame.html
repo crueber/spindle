@@ -1,0 +1,77 @@
+{{define "content"}}
+<div class="repo-shell">
+  {{template "repo_header" .Data.Repo}}
+  {{template "repo_tabs" .Data.Repo}}
+  {{template "repo_degraded" .Data.Repo}}
+
+  {{if .Data.Guide}}
+  {{template "repo_guide" .Data.Guide}}
+  {{else}}
+  <div class="blame-page">
+    <nav class="crumbs mb-2 flex flex-wrap items-baseline gap-x-1 font-mono text-[11px]" aria-label="file path">
+      <a class="link" href="/{{.Data.Repo.Full}}">root</a>
+      {{range .Data.Crumbs}}{{if .Last}}<span class="text-[var(--pd-dim)]" aria-hidden="true"> / </span><strong class="font-medium text-[var(--pd-text)]">{{.Name}}</strong>{{else}}<span class="text-[var(--pd-dim)]" aria-hidden="true"> / </span><a class="link" href="{{.Href}}">{{.Name}}</a>{{end}}{{end}}
+    </nav>
+
+    <div class="blob-body card overflow-hidden">
+      <div class="blob-head flex flex-wrap items-center gap-x-3 gap-y-1 border-b border-[var(--pd-line)] px-3 py-1.5 font-mono text-xs leading-4">
+        <h2 class="font-semibold">{{.Data.Name}}</h2>
+        {{if .Data.Lang}}<span class="chip">{{.Data.Lang}}</span>{{end}}
+        <span class="mono tabular text-[11px] text-[var(--pd-muted)]">{{.Data.Size}}{{if .Data.SHA}} · {{.Data.SHA}}{{end}}</span>
+        <span class="mono text-[11px] text-[var(--pd-muted)]" title="Every visible line's last-touching commit">blame at {{.Data.Ref}}</span>
+        {{if .Data.RawHref}}<a class="link ml-auto font-mono text-[11px]" href="{{.Data.RawHref}}" target="_blank" rel="noopener">raw</a>{{end}}
+      </div>
+
+      <!-- Code | Blame is a query-free pair of links: two pages, one file,
+           and no client state to keep in sync (the blob page's Preview|Code
+           precedent). -->
+      <div class="seg flex items-center gap-1.5 border-b border-[var(--pd-line)] px-3 py-1.5">
+        <a href="{{.Data.CodeHref}}" class="btn px-2 py-1">Code</a>
+        <a href="{{.Data.BlameHref}}" class="btn px-2 py-1 btn-active" aria-current="page">Blame</a>
+      </div>
+
+      {{if .Data.TooLarge}}
+      <p class="muted px-4 py-8 text-center text-sm italic">
+        This file is too large to render ({{.Data.Size}}; the render cap is 2 MiB). <a class="link not-italic" href="{{.Data.RawHref}}">Fetch it raw</a> from the API.
+      </p>
+      {{else if .Data.Binary}}
+      <p class="muted px-4 py-8 text-center text-sm italic">binary file, {{.Data.Size}}</p>
+      {{else}}
+      {{if .Data.Truncated}}
+      <p class="muted border-b border-[var(--pd-line)] px-4 py-2 text-center text-xs">
+        Blame covers the first {{.Data.Cap}} lines; open the raw file for the rest.
+      </p>
+      {{end}}
+      <!-- Per-line table with a blame gutter (issue #243 layout): each line's
+           number and code share a <tr>, and consecutive lines from one commit
+           share a rowspanned attribution cell linked to that commit. The
+           wrapper scrolls long lines in place, so the page never pans at
+           390px. -->
+      <div class="blob-cols flex overflow-x-auto">
+        <table class="blob-table" aria-label="File blame by line">
+          <tbody>
+            {{range .Data.Blocks}}
+            {{$block := .}}
+            {{range $i, $line := .Lines}}
+            <tr id="L{{$line.No}}" class="blob-row">
+              {{if eq $i 0}}
+              <td class="blame-meta w-[104px] min-w-[104px] border-r border-[var(--pd-line)] bg-[var(--pd-surface)] px-1.5 py-0 align-top font-mono text-[10.5px] leading-5 text-[var(--pd-muted)] sm:w-[132px] sm:min-w-[132px] sm:px-2" rowspan="{{len $block.Lines}}">
+                <a class="link mono" href="{{$block.Href}}" title="{{$block.Short}} — view commit">{{$block.Short}}</a>
+                <span class="block truncate" title="{{$block.Author}}">{{$block.Author}}</span>
+                {{if $block.Stamp}}<time class="block truncate" datetime="{{$block.Stamp}}" title="{{$block.Stamp}}">{{with rel $block.Stamp}}{{.}}{{else}}—{{end}}</time>{{end}}
+              </td>
+              {{end}}
+              <td class="blob-num" data-line-no><a href="#L{{$line.No}}" aria-label="Line {{$line.No}}">{{$line.No}}</a></td>
+              <td class="blob-code"><code>{{if $line.Blank}}<br />{{else}}{{$line.Code}}{{end}}</code></td>
+            </tr>
+            {{end}}
+            {{end}}
+          </tbody>
+        </table>
+      </div>
+      {{end}}
+    </div>
+  </div>
+  {{end}}
+</div>
+{{end}}

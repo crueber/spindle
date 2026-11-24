@@ -608,6 +608,12 @@ func (s *Service) SetMember(ctx context.Context, org, principal string, role Org
 	} else if roleChanged {
 		s.emitOrgEvent(ctx, org, "member_role_changed", "", principal+" is now "+string(role)+" in "+org)
 	}
+	// An org role is an access grant (org owners administer the namespace), so
+	// it is an audited administrative mutation (PLAN-ADMIN §8.6). A no-op PUT
+	// still describes the current grant: the record states the outcome, not an
+	// intention.
+	s.auditAdmin(ctx, AuditOrgMemberGrant, "org:"+org,
+		"principal="+principal+";role="+string(role)+";added="+boolText(added)+";changed="+boolText(roleChanged))
 	return result, nil
 }
 
@@ -661,6 +667,7 @@ func (s *Service) RemoveMember(ctx context.Context, org, principal string) (*Mem
 	}
 	if removed {
 		s.emitOrgEvent(ctx, org, "member_removed", "", principal+" left "+org)
+		s.auditAdmin(ctx, AuditOrgMemberRevoke, "org:"+org, "principal="+principal)
 	}
 	return result, nil
 }
@@ -670,6 +677,13 @@ func (s *Service) RemoveMember(ctx context.Context, org, principal string) (*Mem
 func encodeTeam(t *Team) []byte {
 	raw, _ := json.Marshal(t)
 	return raw
+}
+
+func boolText(b bool) string {
+	if b {
+		return "yes"
+	}
+	return "no"
 }
 
 func parseTeam(raw []byte) (*Team, error) {
@@ -851,6 +865,7 @@ func (s *Service) SetTeamMember(ctx context.Context, org, slug, principal string
 	s.teams.invalidate(org, slug)
 	if added {
 		s.emitOrgEvent(ctx, org, "team_member_added", "", principal+" joined team "+org+"/"+slug)
+		s.auditAdmin(ctx, AuditTeamGrant, "team:"+org+"/"+slug, "principal="+principal)
 	}
 	return result, nil
 }
@@ -890,6 +905,7 @@ func (s *Service) RemoveTeamMember(ctx context.Context, org, slug, principal str
 	s.teams.invalidate(org, slug)
 	if removed {
 		s.emitOrgEvent(ctx, org, "team_member_removed", "", principal+" left team "+org+"/"+slug)
+		s.auditAdmin(ctx, AuditTeamRevoke, "team:"+org+"/"+slug, "principal="+principal)
 	}
 	return result, nil
 }

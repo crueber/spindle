@@ -132,10 +132,11 @@ func TestMergeConsultsReviewGate(t *testing.T) {
 	})
 	t.Run("required-reviews rule does not deny the protect check", func(t *testing.T) {
 		// Regression pin for the two-halves split: a required-reviews
-		// rule matching the base must NOT fail checkProtectedRef (the
-		// merge publish is server-side, not a receive-pack push) — its
-		// verdict comes only from the gate above. Before EvaluateProtect,
-		// this merge died with "rejected by rule 'pr-gate'".
+		// rule matching the base must NOT deny the merge through the
+		// protect path (the merge publish is server-side and protect
+		// restricts govern direct pushes) — its verdict comes only from
+		// the gate above. Before EvaluateProtect, this merge died with
+		// "rejected by rule 'pr-gate'".
 		e := newTestEnv()
 		e.roles.Roles["jane@example.com"] = "write"
 		e.roles.Roles["merger@example.com"] = "maintain"

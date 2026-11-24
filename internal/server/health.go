@@ -24,7 +24,7 @@ func writeJSONBody(w http.ResponseWriter, status int, v any) {
 	_, _ = w.Write(b)
 }
 
-// healthz answers 200 {"status":"ok","version":…} — even in setup-only mode,
+// healthz answers 200 {"status":"ok","version":…} — even in restricted mode,
 // so orchestrators can tell "up but unconfigured" from "down" (§10.1).
 func (s *Server) healthz(w http.ResponseWriter, r *http.Request) {
 	writeJSONBody(w, http.StatusOK, map[string]any{
@@ -40,23 +40,39 @@ var prewarmPending int64
 // SetPrewarmPending is called by the prewarm loop.
 func SetPrewarmPending(n int64) { prewarmPending = n }
 
-// readyz implements §10.2: 200 ready (+ prewarm_pending, instance, placement,
-// warnings, config:"defaults" in defaults-banner mode) or 503 warming /
-// draining / setup_required.
+// readyz implements §10.2: 200 ready (+ prewarm_pending, instance, placement)
+// in a normal boot, 200 restricted (+ version, surface:"admin") in the
+// restricted boot, and 503 only when this process is genuinely unable to serve
+// the surface it owns — warming, or draining.
+//
+// The restricted boot is READY for the surface it serves (PLAN-OIDC-ONLY
+// §2.1/§10.2): a health-gated ingress must route it, or the operator can never
+// reach /admin to fix the config that caused the restricted boot in the first
+// place. The body says which surface answered, so "ready" never claims more
+// than that; /healthz remains the liveness answer.
 func (s *Server) readyz(w http.ResponseWriter, r *http.Request) {
-	if s.boot.InSetupOnly() {
-		writeJSONBody(w, http.StatusServiceUnavailable, map[string]any{
-			"status": "setup_required",
-			"errors": s.boot.Errors,
-		})
-		return
-	}
 	if s.drain.Phase() == 2 {
 		w.Header().Set("Retry-After", "15")
 		writeJSONBody(w, http.StatusServiceUnavailable, map[string]any{
 			"status":  "draining",
 			"running": s.inflight.N(),
 		})
+		return
+	}
+	if s.boot.InSetupOnly() {
+		// 200: the restricted surface (admin + setup API + health) is up and
+		// accepting work. Errors stay in the body (key names/messages the
+		// /admin config page already shows, never values) so an operator's
+		// probe tells them why the boot was restricted.
+		body := map[string]any{
+			"status":  "restricted",
+			"version": s.Version(),
+			"surface": "admin",
+		}
+		if n := len(s.boot.Errors); n > 0 {
+			body["errors"] = s.boot.Errors
+		}
+		writeJSONBody(w, http.StatusOK, body)
 		return
 	}
 	if p := prewarmPending; p > 0 && !s.prewarmTimedOut() {
@@ -78,12 +94,6 @@ func (s *Server) readyz(w http.ResponseWriter, r *http.Request) {
 			"maintain_exclude": false,
 		},
 	}
-	if s.cfg.Server.Auth.Mode == "none" {
-		body["warnings"] = []string{"auth_none"}
-	}
-	if s.boot.Mode == "defaults" {
-		body["config"] = "defaults"
-	}
 	writeJSONBody(w, http.StatusOK, body)
 }
 
@@ -97,6 +107,41 @@ func (s *Server) prewarmTimedOut() bool {
 		return false
 	}
 	return time.Since(prewarmStart) > t
+}
+
+// HealthFacts is the readiness projection the Administration Overview renders
+// (report item: one read-only seam instead of a second copy of readyz's rules).
+// It is the SAME decision readyz makes, in one place.
+//
+// State "setup_required" names the restricted BOOT; the wire answer for it is
+// 200 {"status":"restricted","surface":"admin"} (§10.2). The page projection
+// still renders that arm as its 503-era copy; the readiness rule is this
+// function, not the page's label.
+type HealthFacts struct {
+	State          string // "ready" | "warming" | "draining" | "setup_required"
+	PrewarmPending int64
+	// Warnings mirror readyz's machine warnings.
+	Warnings []string
+}
+
+// HealthFacts reports the current readiness verdict. Read-only, point-in-time,
+// no store call (13_concurrency.md: nothing blocks).
+func (s *Server) HealthFacts() HealthFacts {
+	f := HealthFacts{PrewarmPending: prewarmPending}
+	if s.boot.InSetupOnly() {
+		f.State = "setup_required"
+		return f
+	}
+	if s.drain.Phase() == 2 {
+		f.State = "draining"
+		return f
+	}
+	if p := prewarmPending; p > 0 && !s.prewarmTimedOut() {
+		f.State = "warming"
+		return f
+	}
+	f.State = "ready"
+	return f
 }
 
 // sdkReposJS serves the esbuild bundle of the SDK submodules
@@ -128,13 +173,13 @@ func (s *Server) sdkReposJS(w http.ResponseWriter, r *http.Request) {
 func (s *Server) eventsNotify(w http.ResponseWriter, r *http.Request) {
 	p, aerr := s.authSvc.Authenticate(r, s.cfg)
 	if aerr != nil {
-		s.mapAuthStatus(w, aerr)
+		s.mapAuthStatus(w, r, aerr)
 		return
 	}
 	if aerr := requireWrite(p); aerr != nil {
 		// A bare return would emit an empty 200; map it like every other
 		// handler-authenticated route (§8.6).
-		s.mapAuthStatus(w, aerr)
+		s.mapAuthStatus(w, r, aerr)
 		return
 	}
 	if s.notify != nil {
@@ -148,20 +193,16 @@ func (s *Server) eventsNotify(w http.ResponseWriter, r *http.Request) {
 func (s *Server) setupJSON(w http.ResponseWriter, r *http.Request) {
 	p, aerr := s.authSvc.Authenticate(r, s.cfg)
 	if aerr != nil {
-		s.mapAuthStatus(w, aerr)
+		s.mapAuthStatus(w, r, aerr)
 		return
 	}
 	if aerr := requireRead(p, s.cfg.Server.Auth.AnonymousRead); aerr != nil {
-		s.mapAuthStatus(w, aerr)
+		s.mapAuthStatus(w, r, aerr)
 		return
 	}
 	base := s.baseURL(r)
 	repo := r.URL.Query().Get("repo")
-	authNone := s.cfg.Server.Auth.Mode == "none"
-	extraHeader := ""
-	if !authNone {
-		extraHeader = ` -c http.extraHeader="Authorization: Bearer $WALGIT_TOKEN"`
-	}
+	extraHeader := ` -c http.extraHeader="Authorization: Bearer $WALGIT_TOKEN"`
 	manual := fmt.Sprintf("git%s -c transfer.bundleURI=true -c fetch.bundleURI=%s/%s.git/bundles/catchup clone %s/%s.git",
 		extraHeader, base, repo, base, repo)
 	plain := fmt.Sprintf("git clone -c fetch.bundleURI=%s/%s.git/bundles/catchup %s/%s.git",
@@ -180,9 +221,7 @@ func (s *Server) setupJSON(w http.ResponseWriter, r *http.Request) {
 		"bundle_list":    base + "/" + repo + ".git/bundles/list",
 		"setup_text":     "export WALGIT_TOKEN=$(cat ~/.config/git/" + hostSlug(r.Host) + "-token)",
 	}
-	if s.cfg.Server.Auth.Mode == "oidc" {
-		body["token_url"] = base + "/_auth/tokens"
-	}
+	body["token_url"] = base + "/_auth/tokens"
 	// #344: advertise the browser-login entry so /setup can warn when OIDC
 	// is selected without a working flow, and so clients can render the
 	// login button only when it works.
@@ -307,9 +346,10 @@ func uiAsset(name string) ([]byte, bool) {
 		return webAsset("dist/" + name)
 	case strings.HasPrefix(name, "concepts/") && hasSuffixFold(name, ".gif"):
 		return webAsset("dist/" + name)
-	// D-WEB-14 stable page assets: the stylesheet, the island bundle, and the
-	// vendored htmx files keep fixed names (no-cache + ETag, never immutable).
-	case name == "app.css", name == "ui.js", name == "htmx.min.js":
+	// D-WEB-14 stable page assets: the stylesheet, the island bundle, the
+	// pre-paint theme boot script (PLAN-THEMES §7.3), and the vendored htmx
+	// files keep fixed names (no-cache + ETag, never immutable).
+	case name == "app.css", name == "ui.js", name == "theme-boot.js", name == "htmx.min.js":
 		return webAsset("dist/" + name)
 	}
 	return nil, false

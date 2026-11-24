@@ -1,0 +1,133 @@
+{{/* partials/admin_config_rows.html — /admin/config rows (PLAN-ADMIN §3.3/§4).
+   Anatomy: docs/style-guideline.md §7 "Configuration rows" (.setup-row / .setup-label
+   / .setup-examples / .setup-callout / .setup-advanced in web/src/app.css).
+   At 390px .setup-row is one column (label above control, app.css md:grid);
+   examples wrap (break-words); every control is w-full.
+
+   Every section card is its own anchor (#<section>, scroll-mt-16) and the auth
+   card also carries the #server.auth alias docs/errors use. Each row is
+   #row-<key> (error-summary and reset links land there) and data-name="<key>"
+   (the filter island's match field, same substring rule as the server's ?q). */}}
+
+{{define "admin-config-section"}}
+<section class="card scroll-mt-16 p-4" id="{{.Section}}" data-section="{{.Section}}" data-section-card>
+  {{if eq .Section "auth"}}<span id="server.auth" class="block scroll-mt-16"></span>{{end}}
+  <div class="flex flex-wrap items-baseline justify-between gap-2">
+    <h2 class="card-header">{{.Section}}</h2>
+    <p class="muted text-xs">
+      {{if .Changed}}<span class="chip chip-neutral">{{.Changed}} changed</span> · {{end}}{{.Keys}} keys
+    </p>
+  </div>
+  {{if .Why}}<p class="muted -mt-1 mb-2 text-sm">{{.Why}}</p>{{end}}
+  {{if eq .Section "packages"}}
+  <p class="setup-examples"><span class="setup-note">The registry is per repository (<code class="mono">docker push &lt;host&gt;/&lt;owner&gt;/&lt;repo&gt;</code>) and needs the same access as <code class="mono">git push</code>: anonymous callers get the Docker token challenge, so a credential (session, <code class="mono">wgt_</code> token or static machine token) is required to push.</span></p>
+  {{end}}
+  {{range .Essential}}{{template "admin-config-field" .}}{{end}}
+  {{if .Advanced}}
+  <details class="setup-advanced" data-advanced-for="{{.Section}}"{{if or .AdvancedHasErrors .ForceAdvancedOpen}} open{{end}}>
+    <summary class="setup-advanced-toggle"><span>Advanced</span> <span class="muted text-xs">{{len .Advanced}} keys</span></summary>
+    {{range .Advanced}}{{template "admin-config-field" .}}{{end}}
+  </details>
+  {{end}}
+</section>
+{{end}}
+
+{{define "admin-config-field"}}
+<div class="setup-row" id="row-{{.Key}}" data-key="{{.Key}}" data-name="{{.Key}}"{{if .Errors}} data-invalid="1"{{end}}{{if .Focus}} data-error-focus{{end}}>
+  <div class="min-w-0">
+    <div class="setup-label">
+      <label class="flex min-w-0 flex-wrap items-center gap-2" for="{{.InputID}}">
+        <code class="mono text-sm break-all">{{.Key}}</code>
+        {{if .Errors}}<span class="chip chip-closed">invalid</span>{{else if .Masked}}<span class="chip chip-neutral">set</span>{{else if .FromFile}}<span class="chip chip-neutral">file</span>{{else}}<span class="muted text-[11px]">default</span>{{end}}
+      </label>
+      {{if .CanReset}}<a class="link py-1 text-xs" href="?reset={{.Key}}#row-{{.Key}}" title="Reset to the compiled default: {{if .Default}}{{.Default}}{{else}}(empty){{end}}">reset to default</a>{{end}}
+    </div>
+    {{if .Example}}
+    <p class="setup-examples"><span class="muted">e.g.</span> <span class="setup-ex">{{.Example}}</span>{{if .Note}}<span class="setup-note">{{.Note}}</span>{{end}}</p>
+    {{else if .Note}}
+    <p class="setup-examples"><span class="setup-note">{{.Note}}</span></p>
+    {{end}}
+  </div>
+  <div class="min-w-0">
+    {{if eq .Control "bool"}}
+      <input type="hidden" name="cfg.{{.Key}}" value="false">
+      <label class="flex cursor-pointer items-center gap-2 text-sm">
+        <input type="checkbox" role="switch" id="{{.InputID}}" name="cfg.{{.Key}}" value="true" class="h-5 w-5 shrink-0 check"{{if .Bool}} checked{{end}}{{if .Errors}} aria-invalid="true" aria-describedby="err-{{.Key}}-0"{{end}}>
+        <span class="muted">{{if .Bool}}enabled{{else}}disabled{{end}}</span>
+      </label>
+    {{else if eq .Control "select"}}
+      <select class="input md:max-w-md" id="{{.InputID}}" name="cfg.{{.Key}}"{{if .Errors}} aria-invalid="true" aria-describedby="err-{{.Key}}-0"{{end}}>
+        {{range .Options}}<option value="{{.Value}}"{{if .Selected}} selected{{end}}>{{.Label}}</option>{{end}}
+      </select>
+    {{else if eq .Control "textarea"}}
+      <textarea class="input mono text-xs" id="{{.InputID}}" name="cfg.{{.Key}}" rows="4" spellcheck="false"{{if .Errors}} aria-invalid="true" aria-describedby="err-{{.Key}}-0"{{end}}>{{.Value}}</textarea>
+    {{else if eq .Control "number"}}
+      <input class="input md:max-w-md" id="{{.InputID}}" name="cfg.{{.Key}}" type="number" step="any" value="{{.Value}}"{{if .Errors}} aria-invalid="true" aria-describedby="err-{{.Key}}-0"{{end}}>
+    {{else if eq .Control "password"}}
+      <input class="input md:max-w-md" id="{{.InputID}}" name="cfg.{{.Key}}" type="password" autocomplete="new-password" value="{{.Value}}"{{if .Errors}} aria-invalid="true" aria-describedby="err-{{.Key}}-0"{{end}}>
+    {{else if eq .Control "rows"}}
+      {{/* Struct-slice editor (rows.go): one fieldset per element plus a blank
+         "add a row" fieldset; per-row "remove" (existing rows only). Every
+         cell name is setup.RowCellKey, so the save path is the same Coerce
+         path as a scalar key. Works without JS: type in the blank row to add,
+         tick remove to revoke. */}}
+      <div class="space-y-2"{{if .Errors}} aria-describedby="err-{{.Key}}-0"{{end}}>
+        {{range .Rows}}
+        <fieldset class="setup-rows" tabindex="-1">
+          <legend class="setup-rows-legend">{{.Caption}}{{if ge .Base 0}} <span class="mono text-[11px]">(#{{.Base}})</span>{{end}}</legend>
+          <input type="hidden" name="cfg.{{.BaseKey}}" value="{{if ge .Base 0}}{{.Base}}{{end}}">
+          <div class="grid grid-cols-1 gap-x-3 gap-y-2 sm:grid-cols-2">
+            {{range .Cells}}
+            <label class="flex min-w-0 flex-col gap-1" for="{{.Key}}">
+              <span class="setup-note">{{.Label}}{{if .Secret}} · secret{{end}}</span>
+              {{if eq .Type "bool"}}
+                <input type="hidden" name="cfg.{{.Key}}" value="false">
+                <input type="checkbox" role="switch" id="{{.Key}}" name="cfg.{{.Key}}" value="true" class="h-5 w-5 shrink-0 check"{{if .Bool}} checked{{end}}>
+              {{else if eq .Type "int"}}
+                <input class="input mono text-sm" id="{{.Key}}" name="cfg.{{.Key}}" type="number" step="1" value="{{.Value}}">
+              {{else if eq .Type "size"}}
+                <input class="input mono text-sm" id="{{.Key}}" name="cfg.{{.Key}}" type="text" value="{{.Value}}" placeholder="e.g. 64MiB">
+              {{else if eq .Type "duration"}}
+                <input class="input mono text-sm" id="{{.Key}}" name="cfg.{{.Key}}" type="text" value="{{.Value}}" placeholder="e.g. 1h">
+              {{else if .Secret}}
+                <input class="input mono text-sm" id="{{.Key}}" name="cfg.{{.Key}}" type="password" autocomplete="new-password" value="{{.Value}}" placeholder="leave as-is to keep">
+              {{else}}
+                <input class="input mono text-sm" id="{{.Key}}" name="cfg.{{.Key}}" type="text" value="{{.Value}}">
+              {{end}}
+            </label>
+            {{end}}
+          </div>
+          {{if ge .Base 0}}
+          <label class="mt-2 flex cursor-pointer items-center gap-2 text-xs">
+            <input type="checkbox" name="cfg.{{.RemoveKey}}" value="true" class="h-4 w-4 shrink-0 check">
+            <span class="muted">remove this row</span>
+          </label>
+          {{end}}
+        </fieldset>
+        {{end}}
+      </div>
+    {{else}}
+      <input class="input md:max-w-md" id="{{.InputID}}" name="cfg.{{.Key}}" type="text" value="{{.Value}}"{{if .Errors}} aria-invalid="true" aria-describedby="err-{{.Key}}-0"{{end}}>
+    {{end}}
+    {{range $i, $e := .Errors}}<p class="err-line" id="err-{{$.Key}}-{{$i}}" role="alert">{{$e.Message}}</p>{{end}}
+  </div>
+</div>
+{{end}}
+
+{{/* The OIDC discovery result fragment (hx-post /admin/config/auth-test). Never JSON. */}}
+{{define "admin-config-authtest"}}
+<div id="admin-auth-test" aria-live="polite">
+  {{if .Errors}}
+    {{range .Errors}}<p class="err-line" role="alert">{{.Message}}</p>{{end}}
+  {{else}}{{with .Result}}
+    <div class="setup-callout">
+      <p class="text-sm"><strong>Discovery OK</strong> — issuer <code class="mono">{{.Issuer}}</code>{{if .ClientIDPresent}}<span class="muted"> · client_id set</span>{{else}}<span class="muted"> · no client_id in the form yet</span>{{end}}</p>
+      <ul class="muted mt-1 space-y-0.5 mono text-xs">
+        <li class="break-all">authorization: {{.AuthorizationEndpoint}}</li>
+        <li class="break-all">token: {{.TokenEndpoint}}</li>
+        <li class="break-all">jwks: {{.JWKSURI}}</li>
+      </ul>
+    </div>
+  {{end}}{{end}}
+</div>
+{{end}}

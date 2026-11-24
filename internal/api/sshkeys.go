@@ -85,8 +85,7 @@ func (h *handlers) sshKeysList(w http.ResponseWriter, r *http.Request) {
 // anonymous principal is never admitted: with anonymous_read on, the
 // AuthRead gate lets anonymous reads through, and without this check the
 // call would write a key record for the synthetic "anonymous" principal
-// (Forgejo #502 defect A). Auth-none is unaffected — its principal is
-// auth.None(), never anonymous.
+// (Forgejo #502 defect A).
 func (h *handlers) sshKeysAdd(w http.ResponseWriter, r *http.Request) {
 	if !h.env.gate(w, r, AuthRead) {
 		return

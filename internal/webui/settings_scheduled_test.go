@@ -357,7 +357,7 @@ func TestSettingsScheduledRequiresAdmin(t *testing.T) {
 		called = true
 		return SettingsWriteResult{}, nil
 	}
-	BindSettings(f.deps)
+	BindSettings(f.deps.SettingsDeps)
 	for _, tab := range []string{"scheduled", "webhooks", "policy"} {
 		if rec := settingsDo(t, s, http.MethodGet, "/acme/monorepo/settings/"+tab, nil, nil); rec.Code != http.StatusForbidden {
 			t.Fatalf("write role GET %s = %d, want 403", tab, rec.Code)
@@ -650,6 +650,7 @@ func TestSettingsScheduledBrokenDocumentAndEmptyForm(t *testing.T) {
 }
 
 func TestSettingsScheduledHelpers(t *testing.T) {
+	t.Parallel()
 	// section/field value projections answer "" for an unknown key (never a
 	// panic) and the select helper reports an off-enum current value.
 	if settingsBundlesValue(config.Bundles{}, "nope") != "" ||
@@ -771,7 +772,7 @@ func TestSettingsWALPanelRunControls(t *testing.T) {
 				OpsURL: "/acme/monorepo/api/ops/", CanRun: true,
 			}}, nil
 	}
-	BindSettings(f.deps)
+	BindSettings(f.deps.SettingsDeps)
 	rec = settingsDo(t, s, http.MethodGet, "/acme/monorepo/settings/wal", nil, nil)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("GET wal as writer = %d", rec.Code)

@@ -353,6 +353,7 @@ func (parityFailRegistry) Repos(context.Context, string) ([]string, error) {
 }
 
 func TestValidateOwnerProfileRules(t *testing.T) {
+	t.Parallel()
 	cases := []struct {
 		name string
 		in   OwnerProfileInput

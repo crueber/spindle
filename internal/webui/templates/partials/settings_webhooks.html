@@ -14,7 +14,16 @@
 <div class="card p-4"><p class="muted text-sm">The webhook service is not wired on this build.</p></div>
 {{else}}
 <div class="space-y-4">
-  <p class="muted text-sm">One POST per collaboration event, signed with <code class="mono text-xs">X-Walgit-Signature</code> and identified by <code class="mono text-xs">X-Walgit-Delivery</code> / <code class="mono text-xs">X-Walgit-Event</code>. HTTPS only (loopback HTTP in dev).</p>
+  <p class="muted text-sm">One POST per collaboration or push event, signed with <code class="mono text-xs">X-Walgit-Signature</code> and identified by <code class="mono text-xs">X-Walgit-Delivery</code> / <code class="mono text-xs">X-Walgit-Event</code>. HTTPS only (loopback HTTP in dev).</p>
+  {{if .EventHints}}
+  <datalist id="webhook-event-topics">
+    {{range .EventHints}}<option value="{{.}}"></option>{{end}}
+  </datalist>
+  <p class="muted text-xs" id="webhook-event-hints">
+    Topics: {{range $i, $t := .EventHints}}{{if $i}}, {{end}}<code class="mono text-xs">{{$t}}</code>{{end}}.
+    {{if .OffersPush}}<code class="mono text-xs">push</code> selects the whole push/ref family; {{end}}an empty list means every topic.
+  </p>
+  {{end}}
   <form class="card p-4" method="post" action="{{.CreateAction}}" hx-post="{{.CreateAction}}"
         hx-target="#settings-panel" hx-select="#settings-panel" hx-swap="outerHTML">
     {{range .CreateFields}}<input type="hidden" name="{{.Key}}" value="{{.Value}}">{{end}}
@@ -26,7 +35,7 @@
       </div>
       <div>
         <label class="mb-1 block text-sm font-medium" for="webhook-events">Events</label>
-        <input class="input mono" id="webhook-events" name="events" type="text" placeholder="empty = all, * = everything, else a comma list" value="{{.NewEvents}}">
+        <input class="input mono" id="webhook-events" name="events" type="text" list="webhook-event-topics" placeholder="empty = all, * = everything, else a comma list" value="{{.NewEvents}}" aria-describedby="webhook-event-hints">
       </div>
       <div>
         <label class="mb-1 block text-sm font-medium" for="webhook-secret">Secret (optional, write-only)</label>
@@ -40,8 +49,8 @@
     <h3 class="card-header">Webhooks</h3>
     {{if .Rows}}
     <div class="overflow-x-auto">
-      <table class="data-table">
-        <thead><tr><th>url</th><th>events</th><th>state</th><th>secret</th><th></th></tr></thead>
+      <table class="data-table" aria-label="webhooks">
+        <thead><tr><th scope="col">url</th><th scope="col">events</th><th scope="col">state</th><th scope="col">secret</th><th scope="col"></th></tr></thead>
         <tbody>
           {{range .Rows}}
           <tr>
@@ -72,8 +81,8 @@
                     </div>
                     <div>
                       <label class="mb-1 block text-sm font-medium" for="webhook-edit-events-{{.ID}}">Events</label>
-                      <input class="input mono text-xs" id="webhook-edit-events-{{.ID}}" name="events" type="text"
-                             value="{{if .EditEvents}}{{.EditEvents}}{{else}}{{.Events}}{{end}}">
+                      <input class="input mono text-xs" id="webhook-edit-events-{{.ID}}" name="events" type="text" list="webhook-event-topics"
+                             value="{{if .EditEvents}}{{.EditEvents}}{{else}}{{.Events}}{{end}}" aria-describedby="webhook-event-hints">
                     </div>
                     <label class="flex items-center gap-2 text-sm">
                       <input type="checkbox" name="active" value="1"{{if or .EditActive .Active}} checked{{end}}>
@@ -121,8 +130,8 @@
       <p class="muted text-[11px]"><span class="font-medium">recent deliveries</span> <span class="mono break-all">{{.URL}}</span></p>
       {{if .Recent}}
       <div class="mt-1 overflow-x-auto">
-        <table class="data-table">
-          <thead><tr><th>seq</th><th>event</th><th>status</th><th>time</th><th>at</th><th></th></tr></thead>
+        <table class="data-table" aria-label="recent deliveries">
+          <thead><tr><th scope="col">seq</th><th scope="col">event</th><th scope="col">status</th><th scope="col">time</th><th scope="col">at</th><th scope="col"></th></tr></thead>
           <tbody>
             {{$row := .}}
             {{range .Recent}}

@@ -346,6 +346,7 @@ func (s *Service) RepairIndex(ctx context.Context, owner, repo string) (int, err
 			Open:             []Card{},
 			ClosedRecent:     []Card{},
 			CardVersion:      CardProjectionVersion,
+			Pinned:           ix.Pinned,
 		}
 		for _, c := range have {
 			if c.Kind != "issue" {
@@ -461,7 +462,7 @@ func (s *Service) CompactIndex(ctx context.Context, owner, repo string) (bool, e
 			// CardVersion rides along for size fidelity; compaction
 			// never stamps freshness (Forgejo #564 — eviction cannot
 			// vouch for the surviving cards).
-			trial := &Index{Version: ix.Version + 1, CompactedThrough: ix.CompactedThrough, Open: ix.Open, CardVersion: ix.CardVersion}
+			trial := &Index{Version: ix.Version + 1, CompactedThrough: ix.CompactedThrough, Open: ix.Open, CardVersion: ix.CardVersion, Pinned: ix.Pinned}
 			var kept []Card
 			for _, k := range ix.ClosedRecent {
 				if keep[k.Num] {

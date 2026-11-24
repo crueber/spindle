@@ -191,3 +191,200 @@ func TestTaskTable_RunningJoinHint(t *testing.T) {
 		time.Sleep(time.Millisecond)
 	}
 }
+
+func TestBroadcast_CloseEndsSubscribers(t *testing.T) {
+	var b Broadcast[int]
+	b.Send(1)
+	_, ch, _ := b.Subscribe()
+	b.Close()
+	if _, ok := <-ch; ok {
+		t.Fatal("Close must close subscriber channels")
+	}
+	// Send after Close is a no-op (never a panic on a closed channel).
+	b.Send(2)
+	// Subscribing after Close hands back an already-closed channel (a reader
+	// ends instead of blocking on a stream nobody will close).
+	_, dead, replay := b.Subscribe()
+	if replay != nil {
+		t.Fatalf("closed broadcast replay = %v, want nil", replay)
+	}
+	if _, ok := <-dead; ok {
+		t.Fatal("subscribe after Close must end")
+	}
+	b.Close() // idempotent
+}
+
+// TestTaskTable_SubscribeByID covers the handle-free attach path (PLAN-V2
+// §T.1): attach to a task by id, get its replay + live packets, and end the
+// stream when the record is evicted.
+func TestTaskTable_SubscribeByID(t *testing.T) {
+	tt := newTaskTable("test-host", context.Background())
+	release := make(chan struct{})
+	started := make(chan struct{})
+	done := make(chan *TaskRecord, 1)
+	go func() {
+		rec, _ := tt.Run(context.Background(), "acme/api", "repo-transfer", nil,
+			func(ctx context.Context, task *Task) error {
+				// Signal only after BOTH narrations exist: the subscriber
+				// below asserts its replay ring carries them, and closing
+				// started first made that a race against this goroutine
+				// (replay = [task, notice] with the bar still unwritten).
+				task.Notice("phase one")
+				task.Progress("objects", 1, 4, "objects")
+				close(started)
+				<-release
+				return nil
+			})
+		done <- rec
+	}()
+	<-started
+	rec := tt.Running("acme/api", "repo-transfer")
+	if rec == nil {
+		t.Fatal("no running record")
+	}
+	subID, ch, replay, ok := tt.Subscribe(rec.ID)
+	if !ok {
+		t.Fatal("Subscribe by id failed")
+	}
+	// The replay ring carries the narration the late attacher missed.
+	var notices, bars int
+	for _, p := range replay {
+		switch p.Kind {
+		case "notice":
+			notices++
+		case "progress":
+			bars++
+		}
+	}
+	if notices == 0 || bars == 0 {
+		t.Fatalf("replay missing narration: %+v", replay)
+	}
+	close(release)
+	final := <-done
+	// Follow the live stream until the terminal task packet (the channel is
+	// closed by Unsubscribe/the janitor, never by the reader).
+	var terminal *TaskRecord
+	deadline := time.After(5 * time.Second)
+read:
+	for {
+		select {
+		case p, ok := <-ch:
+			if !ok {
+				break read
+			}
+			if p.Kind == "task" && p.Task != nil && p.Task.Finished != "" {
+				cp := *p.Task
+				terminal = &cp
+				break read
+			}
+		case <-deadline:
+			t.Fatal("no terminal packet on the attach stream")
+		}
+	}
+	tt.Unsubscribe(rec.ID, subID)
+	if _, stillOpen := <-ch; stillOpen {
+		t.Fatal("Unsubscribe must close the attach channel")
+	}
+	if terminal == nil || terminal.ID != final.ID {
+		t.Fatalf("terminal packet = %+v, want record %s", terminal, final.ID)
+	}
+	if final.Summary != "" {
+		t.Fatalf("clean task summary = %q", final.Summary)
+	}
+	// Unknown ids answer ok=false (404 at the handler).
+	if _, _, _, ok := tt.Subscribe("nope"); ok {
+		t.Fatal("unknown id must not subscribe")
+	}
+	tt.Unsubscribe("nope", 1) // idempotent on an unknown id
+}
+
+// TestTaskTableRunningForAndEviction covers the listing's running half and the
+// janitor's eviction of a finished record with its packet drone (the attach
+// stream must end, not leak).
+func TestTaskTableRunningForAndEviction(t *testing.T) {
+	tt := newTaskTable("test-host", context.Background())
+	ctx := context.Background()
+	releaseF, releaseB := make(chan struct{}), make(chan struct{})
+	startedF, startedB := make(chan struct{}), make(chan struct{})
+	go func() {
+		_, _ = tt.Run(ctx, "acme/api", "fsck", nil, func(ctx context.Context, task *Task) error {
+			close(startedF)
+			<-releaseF
+			return nil
+		})
+	}()
+	<-startedF
+	go func() {
+		_, _ = tt.Run(ctx, "acme/api", "bundle", nil, func(ctx context.Context, task *Task) error {
+			close(startedB)
+			<-releaseB
+			return nil
+		})
+	}()
+	<-startedB
+	// A different repo's running task must not appear — and it stays RUNNING
+	// through the first eviction assertion. A task that returns immediately is
+	// already finished, so evictFinished(future) evicts it and the "did not
+	// touch live records" assertion fails under load (the transfer T1 gate flake:
+	// "evicted 1 live records").
+	releaseO := make(chan struct{})
+	go func() {
+		_, _ = tt.Run(ctx, "acme/other", "fsck", nil, func(ctx context.Context, task *Task) error {
+			<-releaseO
+			return nil
+		})
+	}()
+	live := tt.RunningFor("acme/api")
+	if len(live) != 2 {
+		t.Fatalf("RunningFor = %d entries, want 2", len(live))
+	}
+	if live[0].Kind != "fsck" || live[1].Kind != "bundle" {
+		t.Fatalf("RunningFor order = %s,%s (want start order)", live[0].Kind, live[1].Kind)
+	}
+	if got := tt.RunningFor("acme/none"); len(got) != 0 {
+		t.Fatalf("unknown repo running = %d", len(got))
+	}
+	rec := tt.Running("acme/api", "fsck")
+	subID, _, _, ok := tt.Subscribe(rec.ID)
+	if !ok {
+		t.Fatal("subscribe failed")
+	}
+	// Eviction must not touch a live record.
+	if n := tt.evictFinished(time.Now().Add(48 * time.Hour)); n != 0 {
+		t.Fatalf("evicted %d live records", n)
+	}
+	close(releaseO)
+	close(releaseF)
+	close(releaseB)
+	waitFinished := func(id string) {
+		deadline := time.Now().Add(2 * time.Second)
+		for {
+			if cur := tt.Get(id); cur != nil && cur.Finished != "" {
+				return
+			}
+			if time.Now().After(deadline) {
+				t.Fatalf("task %s never finished", id)
+			}
+			time.Sleep(2 * time.Millisecond)
+		}
+	}
+	waitFinished(rec.ID)
+	tt.Unsubscribe(rec.ID, subID)
+	// Re-subscribe so the eviction's Close has a live subscriber to end.
+	_, ch2, _, ok := tt.Subscribe(rec.ID)
+	if !ok {
+		t.Fatal("re-subscribe failed")
+	}
+	if n := tt.evictFinished(time.Now().Add(48 * time.Hour)); n < 2 {
+		t.Fatalf("evicted %d records, want at least the two finished ones", n)
+	}
+	if _, open := <-ch2; open {
+		t.Fatal("eviction must close the drone (attached reader ends)")
+	}
+	if tt.Get(rec.ID) != nil {
+		t.Fatal("record survived eviction")
+	}
+	if _, _, _, ok := tt.Subscribe(rec.ID); ok {
+		t.Fatal("evicted task must not be subscribable")
+	}
+}

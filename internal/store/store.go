@@ -142,6 +142,9 @@ func (e *StoreError) Error() string {
 	case ErrKindRetryable:
 		return fmt.Sprintf("retryable store error: %s: %v", e.Key, e.Err)
 	case ErrKindInvalidArgument:
+		if e.Err != nil {
+			return fmt.Sprintf("invalid argument: %s: %v", e.Key, e.Err)
+		}
 		return fmt.Sprintf("invalid argument: %s", e.Key)
 	case ErrKindCorrupt:
 		return fmt.Sprintf("corrupt: %s: %v", e.Key, e.Err)

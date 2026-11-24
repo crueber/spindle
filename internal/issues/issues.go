@@ -83,6 +83,41 @@ type RoleService interface {
 // back to the mode default, mirroring internal/identity.
 type Authenticator func(r *http.Request) (auth.Principal, *auth.AuthError)
 
+// ModerationGate is the consumer-owned block/moderation seam (PLAN-V2 §M.5,
+// the ChecksGate pattern): issues defines the interface it needs and
+// composition satisfies it with *moderation.Service. The service owns the
+// rule (a block applies only in the blocker's USER namespace, never in org
+// repos; hiding and locking are repo-scoped); this package owns the
+// enforcement/projection points, so the API handlers and the page forms that
+// call the same verbs cannot diverge.
+type ModerationGate interface {
+	// BlockedFromRepo reports whether actor is blocked by the repository
+	// owner's user namespace. The reason string is advisory only.
+	BlockedFromRepo(ctx context.Context, owner, repo, actor string) (bool, string, error)
+	// Snapshot visits every hidden target in the repo and reports this
+	// conversation's moderation lock and document revision, in ONE read
+	// (M2). The revision folds into the ETag so a hide can never 304 a
+	// stale body. The projection redacts from the hidden targets; the
+	// mutating verbs refuse on lock.
+	// Snapshot also reports the lock MODE ("all" or "collaborators"), so a
+	// consumer enforces a collaborators-only lock without a second read.
+	Snapshot(ctx context.Context, owner, repo string, num int, fn func(target, by, at, reason string)) (locked bool, lockMode, lockReason string, revision int, err error)
+}
+
+// HiddenInfo is the M2 moderation hint attached to one projected event. It
+// says who hid the body and why; Body is present only to a moderator
+// (triage+) and absent — never emptied client-side — for everyone else.
+type HiddenInfo struct {
+	By     string `json:"by"`
+	At     string `json:"at"`
+	Reason string `json:"reason"`
+}
+
+// hiddenPrefix is the plan's target key for one issue/PR event body.
+func hiddenTarget(num, seq int) string {
+	return fmt.Sprintf("thread:%06x:event:%012x", num, seq)
+}
+
 // NotifyEvent is the §10 emission contract with 06 (internal/notify):
 // per P8 the mutating handler emits synchronously after the CAS commits,
 // resolving targets from participants[] + parsed mentions — 06 MUST NOT
@@ -150,6 +185,21 @@ type Service struct {
 	Notify Emitter
 	// Stream receives issue/issue_event live updates (nil = no-op).
 	Stream Streamer
+
+	// Moderation is the consumer-owned block gate (PLAN-V2 §M.5). Every
+	// interaction verb below consults it after role resolution and before
+	// any CAS; a blocked principal is refused with the shared neutral text
+	// (identity.InteractionRefused). Satisfied by *moderation.Service; nil
+	// means the feature is off and every write is allowed (absence of the
+	// feature must not break writes — the feature's own failures fail
+	// closed inside the gate).
+	Moderation ModerationGate
+
+	// TemplateGit is the git-read seam for §15 issue-template discovery. It
+	// is consulted ONLY by RefreshTemplates (the post-push hook); the
+	// composer reads the cached projection. Nil = no discovery (an empty
+	// chooser, exactly like a repo without .spindle/ISSUE_TEMPLATE).
+	TemplateGit TemplateGit
 
 	// Log receives best-effort-path diagnostics (Forgejo #564): dropped
 	// index updates and dropped milestone-counter updates are logged here

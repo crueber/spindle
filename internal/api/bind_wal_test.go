@@ -209,7 +209,6 @@ func newEngineFixture(t *testing.T, eng WalEngine) *engineFixture {
 	t.Helper()
 	reg := &fakeRegistry{repos: map[string][]string{"demo": {"walgit"}}, created: map[string]bool{}}
 	cfg := config.Defaults()
-	cfg.Server.Auth.Mode = "token"
 	cfg.Server.Auth.AnonymousRead = true
 	cfg.Git.Binary = "git"
 	env := NewEnv(store.NewMemory(), reg, cfg, eng, "test", "host-a")
@@ -657,6 +656,30 @@ func TestWalBlobShapes(t *testing.T) {
 	if err != nil || !bytes.Equal(b.Contents, []byte("hello again\n")) || b.Binary || b.TooLarge || b.Size != 12 {
 		t.Fatalf("text blob = %+v, %v", b, err)
 	}
+	// The §9.5 shape carries the entry name, the blob's own oid and the ref
+	// the rev resolved from — the blob page header renders them.
+	if b.Name != "hello.txt" || b.Ref != "refs/heads/main" {
+		t.Fatalf("blob shape = name %q ref %q, want hello.txt / refs/heads/main", b.Name, b.Ref)
+	}
+	if want := runGit(t, fix.bare.Path, "rev-parse", "main:hello.txt"); b.ObjectSHA != want {
+		t.Fatalf("blob object sha = %q, want the blob oid %q", b.ObjectSHA, want)
+	}
+	if b.SHA != fix.main {
+		t.Fatalf("blob rev sha = %q, want the resolved commit %q", b.SHA, fix.main)
+	}
+	// A tag-addressed rev echoes the tag (main sits past base, so only the
+	// tag points at it) — the page's raw href renders the requested ref.
+	tagged, err := v.Blob(ctx, id, fix.base, "hello.txt", false)
+	if err != nil || tagged.Ref != "refs/tags/"+fix.tag {
+		t.Fatalf("tag blob = ref %q, err %v; want refs/tags/%s", tagged.Ref, err, fix.tag)
+	}
+	if tagged.ObjectSHA == b.ObjectSHA {
+		t.Fatalf("blob oid unchanged across revisions: %q", tagged.ObjectSHA)
+	}
+	if tagged.SHA != fix.base {
+		t.Fatalf("tag blob rev sha = %q, want base %q", tagged.SHA, fix.base)
+	}
+	// The too-large branch keeps the same inventory (the page links it raw).
 	bin, err := v.Blob(ctx, id, fix.main, "bin.dat", false)
 	if err != nil || !bin.Binary {
 		t.Fatalf("binary blob = %+v, %v", bin, err)
@@ -665,6 +688,9 @@ func TestWalBlobShapes(t *testing.T) {
 	big, err := v.Blob(ctx, id, fix.main, "big.dat", false)
 	if err != nil || !big.TooLarge || big.Contents != nil || big.Size != int64(2<<20)+17 {
 		t.Fatalf("big blob = size %d tooLarge %v err %v", big.Size, big.TooLarge, err)
+	}
+	if big.Name != "big.dat" || big.Ref != "refs/heads/main" || big.ObjectSHA == "" {
+		t.Fatalf("too-large blob shape = %+v", big)
 	}
 	// raw download bypasses the cap
 	raw, err := v.Blob(ctx, id, fix.main, "big.dat", true)

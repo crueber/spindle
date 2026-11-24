@@ -1038,12 +1038,26 @@ func TestSweepAndRun(t *testing.T) {
 		t.Fatal(err)
 	}
 	x.svc.sweepWebhooks(ctx())
-	// Run serves a wake then exits on cancel.
+	// Run serves a wake then exits on cancel. Wait on both events: the
+	// task record proves the wake was served, the closed channel proves
+	// Run returned (a bare cancel leaves the goroutine's exit unobserved).
 	rctx, cancel := context.WithCancel(ctx())
-	go x.svc.Run(rctx)
+	done := make(chan struct{})
+	go func() { defer close(done); x.svc.Run(rctx) }()
 	x.svc.wakeRepo("acme/repo2")
-	time.Sleep(50 * time.Millisecond)
+	deadline := time.Now().Add(15 * time.Second)
+	for x.svc.TaskStatus("acme/repo2", TaskKindWebhooks) == nil {
+		if time.Now().After(deadline) {
+			t.Fatal("Run never served the wake-up")
+		}
+		time.Sleep(time.Millisecond)
+	}
 	cancel()
+	select {
+	case <-done:
+	case <-time.After(30 * time.Second):
+		t.Fatal("Run did not return after cancel")
+	}
 }
 
 func TestRetentionCorruptUserIndex(t *testing.T) {

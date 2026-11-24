@@ -3,10 +3,12 @@ package server
 // Setup editing semantics (§3.4): PUT/POST /api/v1/setup edit the CURRENT
 // file-visible configuration — untouched keys keep their values, the
 // zero-config first-run shape is the base when no file exists, and the
-// standalone setup surface stays open whenever auth mode is "none".
+// standalone setup surface is open only in the restricted boot (it is
+// admin-only after a normal boot: PLAN-OIDC-ONLY §2.1).
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -23,8 +25,21 @@ import (
 func setupMergeServer(t *testing.T, dataDir string) (*Server, http.Handler) {
 	t.Helper()
 	paths := []string{filepath.Join(dataDir, config.ConfigFileName)}
-	// The effective config mirrors a real boot: defaults ⊕ file (first-run
-	// shape when no file exists).
+	// A normal boot has a valid file. When the test did not write one, seed the
+	// complete OIDC set the boot now requires.
+	if _, err := os.Stat(paths[0]); errors.Is(err, os.ErrNotExist) {
+		seed := config.FirstRunDefaults(dataDir)
+		seed.Server.Listen = "127.0.0.1:8080"
+		seed.Server.Auth.Issuer = "https://id.example.com"
+		seed.Server.Auth.AllowedDomains = []string{"example.com"}
+		seed.Server.Auth.OAuthClientID = "spindle"
+		seed.Server.Auth.OAuthClientSecret = "s3cret"
+		seed.Server.Auth.SessionSecret = strings.Repeat("x", 32)
+		seed.Server.Auth.AdminGroups = []string{"spindle-admin"}
+		if _, err := config.SaveSetup(seed, dataDir); err != nil {
+			t.Fatal(err)
+		}
+	}
 	cfg, err := config.LoadSetupBase(dataDir, paths)
 	if err != nil {
 		t.Fatal(err)
@@ -33,15 +48,29 @@ func setupMergeServer(t *testing.T, dataDir string) (*Server, http.Handler) {
 		o.Config = cfg
 	})
 	s.cfg.DataDir = dataDir
+	s.authSvc = NewAuthService(&s.cfg.Server.Auth, s.Now)
+	installTestAdminHook(s)
 	s.boot.ConfigPaths = paths
 	s.boot.Mode = "normal"
+	s.boot.FileState = "valid"
 	return s, h
+}
+
+// adminCookie mints a real session carrying the admin group (the setup surface
+// is admin-only after a normal boot).
+func adminCookie(t *testing.T, s *Server, req *http.Request) {
+	t.Helper()
+	sess, err := s.authSvc.MintSession("admin@example.com", "spindle-admin")
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.AddCookie(&http.Cookie{Name: "walgit_session", Value: sess.Wire})
 }
 
 func putSetup(t *testing.T, s *Server, body string) (int, map[string]any) {
 	t.Helper()
 	req := httptest.NewRequest("PUT", "/api/v1/setup", strings.NewReader(body))
-	req.Header.Set("Authorization", "Bearer tok123")
+	adminCookie(t, s, req)
 	rec := httptest.NewRecorder()
 	s.setupPut(rec, req)
 	out := map[string]any{}
@@ -54,8 +83,11 @@ func TestSetupPutEditsCurrentFile(t *testing.T) {
 	dataDir := t.TempDir()
 	base := config.FirstRunDefaults(dataDir)
 	base.Server.Listen = "127.0.0.1:9443"
-	base.Server.Auth.Mode = "none"
-	base.Server.Auth.AnonymousRead = true
+	base.Server.Auth.Issuer = "https://file.example.com"
+	base.Server.Auth.AllowedDomains = []string{"example.com"}
+	base.Server.Auth.OAuthClientID = "spindle"
+	base.Server.Auth.OAuthClientSecret = "s3cret"
+	base.Server.Auth.SessionSecret = strings.Repeat("x", 32)
 	if _, err := config.SaveSetup(base, dataDir); err != nil {
 		t.Fatal(err)
 	}
@@ -72,8 +104,8 @@ func TestSetupPutEditsCurrentFile(t *testing.T) {
 	if after.Server.Listen != "127.0.0.1:9443" {
 		t.Fatalf("untouched listen reset: %q", after.Server.Listen)
 	}
-	if after.Server.Auth.Mode != "none" {
-		t.Fatalf("untouched auth mode reset: %q", after.Server.Auth.Mode)
+	if after.Server.Auth.Issuer != "https://file.example.com" {
+		t.Fatalf("untouched issuer reset: %q", after.Server.Auth.Issuer)
 	}
 	if time.Duration(after.Server.RequestTimeout) != 2*time.Hour {
 		t.Fatalf("override not applied: %v", after.Server.RequestTimeout)
@@ -95,7 +127,13 @@ func TestSetupPutFirstRunKeepsFirstRunShape(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	code, body := putSetup(t, s, `{"overrides": {"server.request_timeout": "30m"}}`)
+	code, body := putSetup(t, s, `{"overrides": {"server.request_timeout": "30m",`+
+		`"server.auth.issuer": "https://id.example.com",`+
+		`"server.auth.allowed_domains": ["example.com"],`+
+		`"server.auth.oauth_client_id": "spindle",`+
+		`"server.auth.oauth_client_secret": "s3cret",`+
+		`"server.auth.session_secret": "`+strings.Repeat("x", 32)+`",`+
+		`"server.auth.admin_groups": ["spindle-admin"]}}`)
 	if code != http.StatusOK {
 		t.Fatalf("put = %d %v", code, body)
 	}
@@ -117,36 +155,33 @@ func TestSetupPutFirstRunKeepsFirstRunShape(t *testing.T) {
 func TestSetupTestValidatesMergedConfig(t *testing.T) {
 	dataDir := t.TempDir()
 	base := config.FirstRunDefaults(dataDir)
-	base.Server.Auth.Mode = "oidc"
 	base.Server.Auth.AnonymousRead = false
 	base.Server.Auth.Issuer = "https://id.example.com"
 	base.Server.Auth.AllowedDomains = []string{"example.com"}
 	base.Server.Auth.OAuthClientID = "spindle"
 	base.Server.Auth.OAuthClientSecret = "s3cret"
 	base.Server.Auth.SessionSecret = strings.Repeat("x", 32) // trio complete (#344)
-	// A static admin token: the setup surface requires an admin principal and
-	// there is no env-token escape hatch (WP13).
-	base.Server.Auth.Tokens = []config.StaticToken{{Principal: "admin", Token: "tok123", Write: true, Admin: true}}
+
 	if _, err := config.SaveSetup(base, dataDir); err != nil {
 		t.Fatal(err)
 	}
 	s, _ := setupMergeServer(t, dataDir)
 
-	// mode=oidc alone is only valid because the FILE supplies the trio.
+	// An unrelated override is valid because the FILE supplies the OIDC set.
 	req := httptest.NewRequest("POST", "/api/v1/setup/test",
-		strings.NewReader(`{"overrides": {"server.auth.mode": "oidc"}}`))
-	req.Header.Set("Authorization", "Bearer tok123")
+		strings.NewReader(`{"overrides": {"server.request_timeout": "2h"}}`))
+	adminCookie(t, s, req)
 	rec := httptest.NewRecorder()
 	s.setupTest(rec, req)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("merged validate = %d %s (file keys must satisfy the request)", rec.Code, rec.Body.String())
 	}
 
-	// Breaking the merge: clearing the file's oauth_client_secret leaves
-	// client_id set — "both set or both unset" fails only against the merge.
+	// Breaking the merge: clearing session_secret fails the OIDC rule only
+	// because the request overrides the file's value.
 	req = httptest.NewRequest("POST", "/api/v1/setup/test",
-		strings.NewReader(`{"overrides": {"server.auth.oauth_client_secret": ""}}`))
-	req.Header.Set("Authorization", "Bearer tok123")
+		strings.NewReader(`{"overrides": {"server.auth.session_secret": ""}}`))
+	adminCookie(t, s, req)
 	rec = httptest.NewRecorder()
 	s.setupTest(rec, req)
 	if rec.Code != http.StatusUnprocessableEntity {
@@ -173,12 +208,11 @@ func TestCORSAllowsSameOriginWrites(t *testing.T) {
 
 	dataDir := t.TempDir()
 	s, h := setupMergeServer(t, dataDir)
-	s.cfg.Server.Auth.Mode = "none"
-	s.cfg.Server.Auth.AnonymousRead = true
 	s.boot.Mode = "normal"
 	req := httptest.NewRequest("PUT", "http://walgit.localhost:8080/api/v1/setup",
 		strings.NewReader(`{"overrides": {"server.request_timeout": "2h"}}`))
 	req.Header.Set("Origin", "http://walgit.localhost:8080")
+	adminCookie(t, s, req)
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
 	if rec.Code != http.StatusOK {
@@ -306,6 +340,7 @@ func TestSetupImportKeysRoundTrip(t *testing.T) {
 	for k, v := range singles {
 		body, _ := json.Marshal(map[string]any{"overrides": map[string]any{k: v}})
 		req := httptest.NewRequest("POST", "/api/v1/setup/test", strings.NewReader(string(body)))
+		adminCookie(t, s, req)
 		rec := httptest.NewRecorder()
 		s.setupTest(rec, req)
 		if rec.Code != http.StatusOK {
@@ -364,6 +399,7 @@ func TestSetupTreeLogKeyRoundTrip(t *testing.T) {
 
 	body, _ := json.Marshal(map[string]any{"overrides": map[string]any{"server.max_tree_log": "200"}})
 	req := httptest.NewRequest("POST", "/api/v1/setup/test", strings.NewReader(string(body)))
+	adminCookie(t, s, req)
 	rec := httptest.NewRecorder()
 	s.setupTest(rec, req)
 	if rec.Code != http.StatusOK {
@@ -397,6 +433,7 @@ func TestSetupServeTimeoutKeysRoundTrip(t *testing.T) {
 	} {
 		body, _ := json.Marshal(map[string]any{"overrides": map[string]any{k: v}})
 		req := httptest.NewRequest("POST", "/api/v1/setup/test", strings.NewReader(string(body)))
+		adminCookie(t, s, req)
 		rec := httptest.NewRecorder()
 		s.setupTest(rec, req)
 		if rec.Code != http.StatusOK {
@@ -422,39 +459,37 @@ func TestSetupServeTimeoutKeysRoundTrip(t *testing.T) {
 	}
 }
 
-// The setup surface is open at ANY time while auth mode is "none" — first
-// run, normal running mode, and setup-only mode alike — with no credential.
-func TestSetupOpenWheneverAuthNone(t *testing.T) {
-	for _, mode := range []string{"defaults", "normal", "setup_only"} {
-		t.Run(mode, func(t *testing.T) {
-			dataDir := t.TempDir()
-			s, h := setupMergeServer(t, dataDir)
-			s.cfg.Server.Auth.Mode = "none"
-			s.cfg.Server.Auth.AnonymousRead = true
-			s.boot.Mode = mode
-
-			// The setup JSON API keeps the §3.4 access rule in every mode.
-			rec := httptest.NewRecorder()
-			h.ServeHTTP(rec, httptest.NewRequest("GET", "http://x/api/v1/setup", nil))
-			if rec.Code != http.StatusOK {
-				t.Fatalf("GET /api/v1/setup in %s mode = %d, want open (body %.80s)", mode, rec.Code, rec.Body.String())
-			}
-			// GET /setup is the server-rendered page: it reaches the page
-			// provider in every mode (the provider owns the §3.4 page rule).
-			ui := &fakeUI{paths: map[string]bool{"/setup": true}}
-			s.SetUI(ui)
-			rec = httptest.NewRecorder()
-			h.ServeHTTP(rec, httptest.NewRequest("GET", "http://x/setup", nil))
-			if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `id="page"`) {
-				t.Fatalf("GET /setup in %s mode = %d, want the page provider (body %.80s)", mode, rec.Code, rec.Body.String())
-			}
-			// And the save path answers too (a valid override, no credential).
-			code, body := putSetup(t, s, `{"overrides": {"server.request_timeout": "45m"}}`)
-			if code != http.StatusOK {
-				t.Fatalf("PUT in %s mode = %d %v", mode, code, body)
-			}
-		})
-	}
+// The setup surface is open ONLY in the restricted boot: after a normal boot
+// an unauthenticated read is 401 (no silent open window).
+func TestSetupOpenOnlyInRestrictedMode(t *testing.T) {
+	t.Run("restricted boot is open", func(t *testing.T) {
+		s, h := setupMergeServer(t, t.TempDir())
+		s.boot.Mode = "setup_only"
+		s.boot.FileState = "absent"
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, httptest.NewRequest("GET", "http://x/api/v1/setup", nil))
+		if rec.Code != http.StatusOK {
+			t.Fatalf("GET /api/v1/setup = %d, want open (body %.80s)", rec.Code, rec.Body.String())
+		}
+		// A valid save (the OIDC set the restricted boot asks for) works with
+		// no credential.
+		code, body := putSetup(t, s, `{"overrides": {"server.auth.issuer": "https://id.example.com",`+
+			`"server.auth.allowed_domains": ["example.com"],`+
+			`"server.auth.oauth_client_id": "spindle",`+
+			`"server.auth.oauth_client_secret": "s3cret",`+
+			`"server.auth.session_secret": "`+strings.Repeat("y", 32)+`"}}`)
+		if code != http.StatusOK {
+			t.Fatalf("PUT in restricted mode = %d %v", code, body)
+		}
+	})
+	t.Run("normal boot requires an admin", func(t *testing.T) {
+		_, h := setupMergeServer(t, t.TempDir())
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, httptest.NewRequest("GET", "http://x/api/v1/setup", nil))
+		if rec.Code != http.StatusUnauthorized {
+			t.Fatalf("GET /api/v1/setup = %d, want 401", rec.Code)
+		}
+	})
 }
 
 // The page assets must be served with the right caching class: stable names
@@ -462,14 +497,12 @@ func TestSetupOpenWheneverAuthNone(t *testing.T) {
 // no-cache + ETag; an unknown name is a 404. The hashed `assets/` lane stays
 // immutable for content-addressed files if any ship.
 func TestServeUIAssetsCaching(t *testing.T) {
-	s, h := setupMergeServer(t, t.TempDir())
-	s.cfg.Server.Auth.Mode = "none"
-	s.cfg.Server.Auth.AnonymousRead = true
-	s.boot.Mode = "normal"
+	_, h := setupMergeServer(t, t.TempDir())
 
 	for _, tc := range []struct{ name, ctype string }{
 		{"app.css", "text/css; charset=utf-8"},
 		{"ui.js", "text/javascript; charset=utf-8"},
+		{"theme-boot.js", "text/javascript; charset=utf-8"},
 		{"htmx.min.js", "text/javascript; charset=utf-8"},
 	} {
 		rec := httptest.NewRecorder()
@@ -528,17 +561,20 @@ func TestSetupSchemaSplitsAuthGroup(t *testing.T) {
 			t.Fatalf("server group still carries auth key %q", k.Key)
 		}
 	}
-	foundMode := false
+	foundAdmin := false
 	for _, k := range groups[1].Keys {
 		if !strings.HasPrefix(k.Key, "server.auth.") {
 			t.Fatalf("auth group carries non-auth key %q", k.Key)
 		}
 		if k.Key == "server.auth.mode" {
-			foundMode = true
+			t.Fatal("server.auth.mode must be gone (PLAN-OIDC-ONLY §4.1)")
+		}
+		if k.Key == "server.auth.admin_groups" {
+			foundAdmin = true
 		}
 	}
-	if !foundMode {
-		t.Fatal("auth group is missing server.auth.mode")
+	if !foundAdmin {
+		t.Fatal("auth group is missing server.auth.admin_groups")
 	}
 }
 
@@ -550,21 +586,28 @@ func TestSetupAuthTestDiscovery(t *testing.T) {
 		"issuer":                 "", // filled per case
 		"authorization_endpoint": "https://id.example.com/authorize",
 		"token_endpoint":         "https://id.example.com/token",
-		"jwks_uri":               "https://id.example.com/jwks",
+		"jwks_uri":               "PLACEHOLDER",
 	}
 	var served map[string]any
 	idp := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/.well-known/openid-configuration" {
-			http.NotFound(w, r)
-			return
-		}
 		w.Header().Set("content-type", "application/json")
-		json.NewEncoder(w).Encode(served)
+		switch r.URL.Path {
+		case "/.well-known/openid-configuration":
+			json.NewEncoder(w).Encode(served)
+		case "/jwks":
+			json.NewEncoder(w).Encode(map[string]any{"keys": []map[string]any{{
+				"kty": "RSA", "alg": "RS256", "use": "sig", "kid": "k1",
+				"n": "sXchQ2xibm9ybWFsZQ", "e": "AQAB",
+			}}})
+		default:
+			http.NotFound(w, r)
+		}
 	}))
 	defer idp.Close()
 
 	post := func(s *Server, body string) (int, map[string]any) {
 		req := httptest.NewRequest("POST", "/api/v1/setup/auth/test", strings.NewReader(body))
+		adminCookie(t, s, req)
 		rec := httptest.NewRecorder()
 		s.setupAuthTest(rec, req)
 		var out map[string]any
@@ -584,7 +627,7 @@ func TestSetupAuthTestDiscovery(t *testing.T) {
 
 	// ok: discovery document whose issuer matches the configured value.
 	served = map[string]any{"issuer": idp.URL, "authorization_endpoint": doc["authorization_endpoint"],
-		"token_endpoint": doc["token_endpoint"], "jwks_uri": doc["jwks_uri"]}
+		"token_endpoint": doc["token_endpoint"], "jwks_uri": idp.URL + "/jwks"}
 	code, out := post(s, fmt.Sprintf(`{"issuer": %q, "client_id": "spindle-web", "redirect_uri": "http://localhost:8080/_auth/callback"}`, idp.URL))
 	if code != http.StatusOK || out["ok"] != true {
 		t.Fatalf("ok case = %d %v", code, out)
@@ -638,6 +681,7 @@ func TestSetupSSHExternalPortRoundTrip(t *testing.T) {
 	for _, v := range []string{"12222", "2222"} {
 		body, _ := json.Marshal(map[string]any{"overrides": map[string]any{"server.ssh.external_port": v}})
 		req := httptest.NewRequest("POST", "/api/v1/setup/test", strings.NewReader(string(body)))
+		adminCookie(t, s, req)
 		rec := httptest.NewRecorder()
 		s.setupTest(rec, req)
 		if rec.Code != http.StatusOK {
@@ -647,6 +691,7 @@ func TestSetupSSHExternalPortRoundTrip(t *testing.T) {
 	for _, v := range []string{"70000", "-1", "many"} {
 		body, _ := json.Marshal(map[string]any{"overrides": map[string]any{"server.ssh.external_port": v}})
 		req := httptest.NewRequest("POST", "/api/v1/setup/test", strings.NewReader(string(body)))
+		adminCookie(t, s, req)
 		rec := httptest.NewRecorder()
 		s.setupTest(rec, req)
 		if rec.Code != http.StatusUnprocessableEntity {

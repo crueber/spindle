@@ -43,9 +43,9 @@ func TestCoverageSettingsAuthFailureGuards(t *testing.T) {
 		return auth.Principal{}, &auth.AuthError{Kind: auth.ErrForbidden, Why: "credential revoked"}
 	}
 	for _, tc := range []struct{ method, path string }{
-		{http.MethodGet, "/setup"},
-		{http.MethodPost, "/setup"},
-		{http.MethodPost, "/setup/auth-test"},
+		{http.MethodGet, "/admin/config"},
+		{http.MethodPost, "/admin/config"},
+		{http.MethodPost, "/admin/config/auth-test"},
 		{http.MethodGet, "/keys"},
 		{http.MethodPost, "/keys"},
 		{http.MethodPost, "/keys/id/delete"},
@@ -65,42 +65,42 @@ func TestCoverageSettingsAuthFailureGuards(t *testing.T) {
 	}
 }
 
-func TestCoverageSettingsSetupValidationOutcomes(t *testing.T) {
+func TestCoverageAdminConfigValidationOutcomes(t *testing.T) {
 	// The validator is optional: a build without it answers 503, never a
 	// silent "valid" redirect.
-	s := newSettingsServer(t, &settingsFakes{deps: SettingsDeps{
-		SetupView: func(context.Context) (*SettingsSetupView, error) { return settingsFakeView(), nil },
+	s := newSettingsServer(t, &settingsFakes{deps: testDeps{
+		ConfigView: func(context.Context) (*AdminConfigView, error) { return adminFakeView(), nil },
 	}})
-	rec := settingsDo(t, s, http.MethodPost, "/setup", url.Values{"op": {"validate"}}, nil)
+	rec := settingsDo(t, s, http.MethodPost, "/admin/config", url.Values{"op": {"validate"}}, nil)
 	if rec.Code != http.StatusServiceUnavailable {
 		t.Fatalf("validate without a validator = %d", rec.Code)
 	}
 
 	// Validator outage is a 503 with the reason.
-	s = newSettingsServer(t, &settingsFakes{deps: SettingsDeps{
-		SetupView: func(context.Context) (*SettingsSetupView, error) { return settingsFakeView(), nil },
-		SetupValidate: func(context.Context, map[string]string) ([]SettingsSetupError, error) {
+	s = newSettingsServer(t, &settingsFakes{deps: testDeps{
+		ConfigView: func(context.Context) (*AdminConfigView, error) { return adminFakeView(), nil },
+		Validate: func(context.Context, map[string]string) ([]AdminError, error) {
 			return nil, &settingsTestErr{"validator crashed"}
 		},
 	}})
-	rec = settingsDo(t, s, http.MethodPost, "/setup", url.Values{"op": {"validate"}}, nil)
+	rec = settingsDo(t, s, http.MethodPost, "/admin/config", url.Values{"op": {"validate"}}, nil)
 	if rec.Code != http.StatusServiceUnavailable {
 		t.Fatalf("validator outage = %d", rec.Code)
 	}
 
 	// Errors reject with the typed values; success redirects with validated=1.
 	var seen map[string]string
-	s = newSettingsServer(t, &settingsFakes{deps: SettingsDeps{
-		SetupView: func(context.Context) (*SettingsSetupView, error) { return settingsFakeView(), nil },
-		SetupValidate: func(_ context.Context, values map[string]string) ([]SettingsSetupError, error) {
+	s = newSettingsServer(t, &settingsFakes{deps: testDeps{
+		ConfigView: func(context.Context) (*AdminConfigView, error) { return adminFakeView(), nil },
+		Validate: func(_ context.Context, values map[string]string) ([]AdminError, error) {
 			seen = values
 			if values["server.listen"] == "bad" {
-				return []SettingsSetupError{{Key: "server.listen", Message: "not a listen address"}}, nil
+				return []AdminError{{Key: "server.listen", Message: "not a listen address"}}, nil
 			}
 			return nil, nil
 		},
 	}})
-	rec = settingsDo(t, s, http.MethodPost, "/setup", url.Values{
+	rec = settingsDo(t, s, http.MethodPost, "/admin/config", url.Values{
 		"op": {"validate"}, "cfg.server.listen": {"bad"},
 	}, nil)
 	if rec.Code != http.StatusUnprocessableEntity {
@@ -111,26 +111,26 @@ func TestCoverageSettingsSetupValidationOutcomes(t *testing.T) {
 		t.Fatalf("validator saw %v", seen)
 	}
 
-	rec = settingsDo(t, s, http.MethodPost, "/setup", url.Values{
+	rec = settingsDo(t, s, http.MethodPost, "/admin/config", url.Values{
 		"op": {"validate"}, "cfg.server.listen": {"0.0.0.0:8080"},
 	}, nil)
 	if rec.Code != http.StatusSeeOther {
 		t.Fatalf("validate ok = %d", rec.Code)
 	}
-	if loc := rec.Header().Get("Location"); loc != "/setup?validated=1" {
+	if loc := rec.Header().Get("Location"); loc != "/admin/config?validated=1" {
 		t.Fatalf("validate Location = %q", loc)
 	}
 
 	// A view outage during the reject still renders the typed form.
-	s = newSettingsServer(t, &settingsFakes{deps: SettingsDeps{
-		SetupView: func(context.Context) (*SettingsSetupView, error) {
+	s = newSettingsServer(t, &settingsFakes{deps: testDeps{
+		ConfigView: func(context.Context) (*AdminConfigView, error) {
 			return nil, &settingsTestErr{"schema down"}
 		},
-		SetupSave: func(context.Context, map[string]string) (SettingsSetupResult, []SettingsSetupError, error) {
-			return SettingsSetupResult{}, []SettingsSetupError{{Message: "bad value"}}, nil
+		Save: func(context.Context, map[string]string) (AdminSaveResult, []AdminError, error) {
+			return AdminSaveResult{}, []AdminError{{Message: "bad value"}}, nil
 		},
 	}})
-	rec = settingsDo(t, s, http.MethodPost, "/setup", url.Values{"op": {"save"}, "cfg.server.listen": {"x"}}, nil)
+	rec = settingsDo(t, s, http.MethodPost, "/admin/config", url.Values{"op": {"save"}, "cfg.server.listen": {"x"}}, nil)
 	if rec.Code != http.StatusUnprocessableEntity {
 		t.Fatalf("reject without schema = %d", rec.Code)
 	}
@@ -138,22 +138,22 @@ func TestCoverageSettingsSetupValidationOutcomes(t *testing.T) {
 
 	// op=save with an unparseable form body is a 400 (the values never reach
 	// the binding).
-	s = newSettingsServer(t, &settingsFakes{deps: SettingsDeps{
-		SetupView: func(context.Context) (*SettingsSetupView, error) { return settingsFakeView(), nil },
-		SetupSave: func(context.Context, map[string]string) (SettingsSetupResult, []SettingsSetupError, error) {
+	s = newSettingsServer(t, &settingsFakes{deps: testDeps{
+		ConfigView: func(context.Context) (*AdminConfigView, error) { return adminFakeView(), nil },
+		Save: func(context.Context, map[string]string) (AdminSaveResult, []AdminError, error) {
 			t.Fatal("malformed form reached the saver")
-			return SettingsSetupResult{}, nil, nil
+			return AdminSaveResult{}, nil, nil
 		},
 	}})
-	rec = coverageRawPost(s, "/setup", "application/x-www-form-urlencoded", "%zz", nil)
+	rec = coverageRawPost(s, "/admin/config", "application/x-www-form-urlencoded", "%zz", nil)
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("malformed setup form = %d", rec.Code)
 	}
 	// A nil view is an empty (still renderable) schema.
-	s = newSettingsServer(t, &settingsFakes{deps: SettingsDeps{
-		SetupView: func(context.Context) (*SettingsSetupView, error) { return nil, nil },
+	s = newSettingsServer(t, &settingsFakes{deps: testDeps{
+		ConfigView: func(context.Context) (*AdminConfigView, error) { return nil, nil },
 	}})
-	rec = settingsDo(t, s, http.MethodGet, "/setup", nil, nil)
+	rec = settingsDo(t, s, http.MethodGet, "/admin/config", nil, nil)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("nil setup view = %d", rec.Code)
 	}
@@ -312,7 +312,7 @@ func TestCoverageSettingsRepoWriteGuards(t *testing.T) {
 
 func TestCoverageSettingsOrgWriteBranches(t *testing.T) {
 	// A nil org view is a 404, not a rendered empty page.
-	f := &settingsFakes{deps: SettingsDeps{
+	f := &settingsFakes{deps: testDeps{
 		OrgView: func(context.Context, string, auth.Principal) (*SettingsOrgPage, error) { return nil, nil },
 	}}
 	s := newSettingsServer(t, f)
@@ -399,6 +399,7 @@ func TestCoverageSettingsOrgWriteBranches(t *testing.T) {
 }
 
 func TestCoverageSettingsPureHelpers(t *testing.T) {
+	t.Parallel()
 	if got := settingsRoleRank("maintain"); got != 4 {
 		t.Fatalf("settingsRoleRank(maintain) = %d", got)
 	}
@@ -411,13 +412,13 @@ func TestCoverageSettingsPureHelpers(t *testing.T) {
 	}
 
 	// The redirect URI follows the request scheme when no public URL is set.
-	req := httptest.NewRequest(http.MethodGet, "https://spindle.example/setup", nil)
+	req := httptest.NewRequest(http.MethodGet, "https://spindle.example/admin/config", nil)
 	req.TLS = &tls.ConnectionState{}
-	if got := settingsRedirectURI(req, ""); got != "https://spindle.example/_auth/callback" {
-		t.Fatalf("settingsRedirectURI(tls) = %q", got)
+	if got := adminRedirectURI(req, ""); got != "https://spindle.example/_auth/callback" {
+		t.Fatalf("adminRedirectURI(tls) = %q", got)
 	}
-	if got := settingsRedirectURI(httptest.NewRequest(http.MethodGet, "http://h/setup", nil), "https://public.example/"); got != "https://public.example/_auth/callback" {
-		t.Fatalf("settingsRedirectURI(public) = %q", got)
+	if got := adminRedirectURI(httptest.NewRequest(http.MethodGet, "http://h/admin/config", nil), "https://public.example/"); got != "https://public.example/_auth/callback" {
+		t.Fatalf("adminRedirectURI(public) = %q", got)
 	}
 
 	// settingsFormValues ignores a key the form carried with no values (the

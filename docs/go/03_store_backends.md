@@ -67,7 +67,9 @@ Control-plane traffic MUST NEVER queue behind bulk bytes. This is the incident-p
 
 Credentials come from env-var *names* in config (`store.s3.access_key_env` / `store.s3.secret_key_env`,
 defaults `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY`; `AWS_SESSION_TOKEN` honored if set), plus region,
-endpoint, and `force_path_style` (true for rustfs/MinIO). Reads are presigned GETs; writes are signed PUTs.
+endpoint, and `force_path_style` (true for rustfs/MinIO). The endpoint has **no implicit default**
+(OBS-1): `store.backend = "s3"` without `store.s3.endpoint` is a load-time validation error, so an
+omitted key can never point the deployment at AWS. Reads are presigned GETs; writes are signed PUTs.
 
 ### 2.1 Hand-rolled SigV4
 
@@ -250,6 +252,7 @@ out; lazy iterator; sidecars filtered; the §1 no-LIST-hot-path rule unchanged.
 | key-guard rejection | InvalidArgument |
 | `EIO`; `ENFILE`/`EMFILE` | Retryable (one retry / semaphore-bounded) |
 | `ENOSPC`, `EACCES`, `EPERM`, `EROFS`, `EXDEV` (temp not in the object's dir — a bug) | Other |
+| The row above for `ENOSPC`/`EDQUOT` carries a diagnosis: the message names `store.root` and the filesystem-full errno, so an operator can tell which volume ran dry (BUG-6) | Other |
 
 **Concurrency, metrics, durability.** `fsync` the temp pre-rename always; parent dir post-rename
 only for lease/manifest keys (bulk skips it — crash ⇒ re-push; the WAL tolerates). The §1 classifier
@@ -542,6 +545,12 @@ Memory and filesystem run **unconditionally** in CI; S3 is an env-gated integrat
 - **Divergence (2026-08-31): D5 — zero-config first run defaults to this backend**: no config file ⇒
   `store.backend = "filesystem"` rooted at `<data-dir>/store` (replaces the Rust fail-closed
   config-required boot; setup flow in 11_config_cli.md / 06_server_http.md).
+- **OBS-1 (2026-11-21): `filesystem` is the compiled-in default too, and S3 is never implied.**
+  The compiled table previously defaulted `store.backend = "s3"` with an AWS endpoint, so a config
+  file that omitted the key silently aimed a deployment at AWS; the first-run defaults masked it
+  only in the no-file case. The compiled default is now `filesystem` and `store.s3.endpoint` has no
+  default — `backend = "s3"` requires an explicit endpoint, bucket and credential env names, checked
+  by config validation (11_config_cli.md §5 rule 5).
 - **Divergence (2026-08-31): D7 — the contract suite always runs memory AND filesystem** (§9.10); S3 stays env-gated.
 - **Divergence (2026-08-31): D1 — dependency budget is exactly `go-chi/chi/v5`, `BurntSushi/toml`,
   `golang.org/x/net`; the store layer spends none of it** (stdlib only, as before).

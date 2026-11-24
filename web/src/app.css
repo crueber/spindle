@@ -17,10 +17,13 @@
   --font-sans: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
   --font-mono: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
 
-  /* Precision Dark (docs/style-guideline.md §1). The RAW RAMPS are retuned so
-     the ~350 inline zinc/emerald/amber utilities already in templates adopt the
-     language without a per-template edit; the semantic roles live in the
-     --pd-* block below and are what components must use. */
+  /* Precision Dark (docs/style-guideline.md §1). The RAW ZINC RAMP is retuned so
+     the inline zinc utilities already in templates adopt the language without a
+     per-template edit; the semantic roles live in the --pd-* block below and are
+     what components must use. There is deliberately no emerald/amber retune:
+     green and amber are semantic tokens (--pd-ok/--pd-warn/--pd-accent), and a
+     raw emerald/amber utility anywhere is a gate failure (PLAN-THEMES §9.1
+     pair 25, web/test/unit/themes.test.js). */
   --color-zinc-50:  #f7f7f6;
   --color-zinc-100: #e8ebec;
   --color-zinc-200: #e2e2df;
@@ -32,32 +35,6 @@
   --color-zinc-800: #232a2e;
   --color-zinc-900: #14181b;
   --color-zinc-950: #0f1113;
-
-  /* Green is STATE only (open / passing / healthy / diff-add) — never action. */
-  --color-emerald-50:  #e8f6f0;
-  --color-emerald-100: #d1ece1;
-  --color-emerald-200: #a7d9c6;
-  --color-emerald-300: #6fc0a4;
-  --color-emerald-400: #4ec9a4;
-  --color-emerald-500: #2fae86;
-  --color-emerald-600: #12856a;
-  --color-emerald-700: #0f7355;
-  --color-emerald-800: #0b5a43;
-  --color-emerald-900: #1b3f34;
-  --color-emerald-950: #0c2a22;
-
-  /* Amber is ACTION (dark) and WARN (both) — see --pd-accent. */
-  --color-amber-50:  #fdf7ea;
-  --color-amber-100: #f8ebcd;
-  --color-amber-200: #f2d795;
-  --color-amber-300: #ffd08a;
-  --color-amber-400: #ffc862;
-  --color-amber-500: #ffb224;
-  --color-amber-600: #b26a00;
-  --color-amber-700: #9a5b00;
-  --color-amber-800: #7a4600;
-  --color-amber-900: #3a2a08;
-  --color-amber-950: #241905;
 
   /* Radius never exceeds 4px on panels/controls (§1 F4). */
   --radius-sm: 2px;
@@ -78,8 +55,12 @@
 }
 
 /* Semantic roles — the ONLY colour tokens components may reference (§1 F2).
-   Measured pairs: text 15.6:1 / 16.6:1, text-2 7.8:1 / 6.7:1, muted 4.6:1 /
-   4.8:1, accent-on-surface 9.9:1, light accent-on-white 5.4:1. */
+   The token set is the theme contract (PLAN-THEMES §1.2): a theme block defines
+   every token in this list, and web/test/unit/themes.test.js asserts
+   completeness, liveness (every token has a consumer outside the theme blocks)
+   and the measured contrast of every gated pair. Measured: text 15.63:1 /
+   17.77:1, text-2 8.28 / 7.14, muted-on-surface 5.14 / 5.08, accent/canvas
+   10.49 / 5.43, on-accent 10.51 / 5.43. */
 :root {
   --pd-canvas: #ffffff;
   --pd-surface: #f7f7f6;
@@ -89,14 +70,25 @@
   --pd-line-strong: #cfcfca;
   --pd-text: #17181a;
   --pd-text-2: #55585d;
-  --pd-muted: #6f7378;
+  --pd-muted: #666a6f;
   --pd-dim: #8a8f94;
   --pd-accent: #9a5b00;
   --pd-accent-hover: #7a4600;
   --pd-on-accent: #ffffff;
   --pd-ok: #0f7355;
+  --pd-ok-bg: #dbe8e2;
   --pd-warn: #8a5a10;
+  --pd-warn-bg: #eee2ca;
   --pd-danger: #b42323;
+  --pd-danger-bg: #ecd5d4;
+  --pd-merged: #6d28d9;
+  --pd-merged-bg: #e7e1f4;
+  --pd-prerelease: #0c6291;
+  --pd-prerelease-bg: #d8e9f0;
+  --pd-link: #17181a;
+  --pd-code-bg: #ffffff;
+  --pd-kw: #6d28d9;
+  --pd-info-bg: #e8f1f8;
   --pd-add-bg: #e8f6f0;
   --pd-add-fg: #0b5a43;
   --pd-del-bg: #fdf0f0;
@@ -114,14 +106,25 @@
   --pd-line-strong: #323a3f;
   --pd-text: #e6eaec;
   --pd-text-2: #a3adb4;
-  --pd-muted: #79838b;
+  --pd-muted: #818b93;
   --pd-dim: #525c63;
   --pd-accent: #ffb224;
   --pd-accent-hover: #ffc862;
   --pd-on-accent: #151004;
   --pd-ok: #4ec9a4;
+  --pd-ok-bg: #1d3431;
   --pd-warn: #e0a95e;
+  --pd-warn-bg: #393227;
   --pd-danger: #e06c6c;
+  --pd-danger-bg: #352528;
+  --pd-merged: #a78bfa;
+  --pd-merged-bg: #2e2d43;
+  --pd-prerelease: #38bdf8;
+  --pd-prerelease-bg: #1a3643;
+  --pd-link: #e6eaec;
+  --pd-code-bg: #0f1113;
+  --pd-kw: #a78bfa;
+  --pd-info-bg: #10202b;
   --pd-add-bg: rgb(78 201 164 / 0.12);
   --pd-add-fg: #b7e8d8;
   --pd-del-bg: rgb(224 108 108 / 0.12);
@@ -131,11 +134,327 @@
   --pd-shadow: 0 8px 24px rgb(0 0 0 / 0.45);
 }
 
+/* Per-side ramp retunes (PLAN-THEMES §5.1). Both sides share the @theme zinc
+   ramp, so each side retunes the text steps that fail on it: light 400 is
+   2.64:1 on white and dark 500 is 3.96:1 on the graphite canvas. The light
+   side also nudges 500 darker (#676b70) so the composed ramp stays
+   strictly ordered after the 400 fix — the plan's §5.1 monotonicity assertion
+   caught that inversion, and ±0.05 drift is pinned in themes.test.js. `.dark`
+   restores the light-side overrides so the dark side keeps its own steps. A
+   theme block (any future [data-theme]) sets its active side's steps the same
+   way. */
+:root {
+  --color-zinc-400: #6a6f74;
+  --color-zinc-500: #676b70;
+}
+.dark {
+  --color-zinc-400: #9aa0a6;
+  --color-zinc-500: #79838b;
+}
+
+/* ===========================================================================
+   The five additional palettes (PLAN-THEMES W3, §4.3–§4.7).
+   Each block is DATA: the complete 34-token contract, plus the active side's
+   zinc steps and the graph halo (--graph-ring, always the palette's surface so
+   the rail's halo matches the row it sits on). No component rule, no
+   [data-theme] anywhere else (§1.3-1). Blocks are declared after `.dark` /
+   `:root`, so at equal specificity they win; the boot script keeps `.dark` on
+   dark-side palettes so every `dark:` utility still fires (§8.1).
+
+   The identity rules survive every palette (§1.3): amber/terracotta/azure is
+   the ACTION accent only, green stays the state family, links stay ink with an
+   underline, and the semantic roles never move. Every gated pair in §9.1 is
+   measured by web/test/unit/themes.test.js with a ±0.05 drift pin.
+   =========================================================================== */
+
+/* hc-dark — the graphite/amber identity, stronger (§4.3): body 17.71:1,
+   secondary 12.32:1, button label 11.77:1, control border 3.30:1. `dim` stays
+   the documented 4.99:1 gutter deviation (§10.5-2), not raised to 7. The 400
+   and 500 text steps are the 11px-note pair; 700 is the avatar ground. Step 300
+   is deliberately not overridden: it is inert on the dark side and overriding
+   it broke the composed ramp's monotonicity (plan §5.1). */
+[data-theme="hc-dark"] {
+  --pd-canvas: #0f1113;
+  --pd-surface: #14181b;
+  --pd-raised: #1c2125;
+  --pd-raised-2: #22282c;
+  --pd-line: #39434b;
+  --pd-line-strong: #5b6871;
+  --pd-text: #f4f8fa;
+  --pd-text-2: #c8d2d9;
+  --pd-muted: #a6b1ba;
+  --pd-dim: #7d8992;
+  --pd-accent: #ffc23e;
+  --pd-accent-hover: #ffd06e;
+  --pd-on-accent: #151004;
+  --pd-ok: #5fd6b0;
+  --pd-ok-bg: #1a3a33;
+  --pd-warn: #e8ba7c;
+  --pd-warn-bg: #3f3626;
+  --pd-danger: #f08484;
+  --pd-danger-bg: #3d2427;
+  --pd-merged: #b9a3fc;
+  --pd-merged-bg: #332b4d;
+  --pd-prerelease: #6cc8f8;
+  --pd-prerelease-bg: #15394a;
+  --pd-link: #f4f8fa;
+  --pd-code-bg: #0f1113;
+  --pd-kw: #c0b0ff;
+  --pd-info-bg: #14242f;
+  --pd-add-bg: rgb(78 201 164 / 0.16);
+  --pd-add-fg: #c8f2e2;
+  --pd-del-bg: rgb(224 108 108 / 0.16);
+  --pd-del-fg: #f8d4d4;
+  --pd-sel: #33290f;
+  --pd-sel-edge: #ffc23e;
+  --pd-shadow: 0 8px 24px rgb(0 0 0 / 0.55);
+  --color-zinc-400: #c2ccd4;
+  --color-zinc-500: #a6b1ba;
+  --color-zinc-600: #7d8992;
+  --color-zinc-700: #3e4850;
+  --color-zinc-800: #2c363e;
+  --graph-ring: #14181b;
+}
+
+/* hc-light — the light language, stronger (§4.4): body 19.70:1, secondary
+   12.58:1, button label 7.77:1, control border 3.25:1, `dim` the documented
+   5.04:1 gutter deviation. Step 700 is overridden so the composed ramp stays
+   strictly darkening through the darker 600 (the avatar ground on both sides). */
+[data-theme="hc-light"] {
+  --pd-canvas: #ffffff;
+  --pd-surface: #f7f7f6;
+  --pd-raised: #efefed;
+  --pd-raised-2: #e6e6e3;
+  --pd-line: #c8c8c3;
+  --pd-line-strong: #8f8f89;
+  --pd-text: #0a0b0c;
+  --pd-text-2: #2f3438;
+  --pd-muted: #4d5358;
+  --pd-dim: #656b70;
+  --pd-accent: #7a4600;
+  --pd-accent-hover: #5c3400;
+  --pd-on-accent: #ffffff;
+  --pd-ok: #0c5c44;
+  --pd-ok-bg: #cde5db;
+  --pd-warn: #6f4a0c;
+  --pd-warn-bg: #e6dcc4;
+  --pd-danger: #9c1c1c;
+  --pd-danger-bg: #f3d4d4;
+  --pd-merged: #5b21b6;
+  --pd-merged-bg: #e2dcf3;
+  --pd-prerelease: #0c5f8a;
+  --pd-prerelease-bg: #d2e8f0;
+  --pd-link: #0a0b0c;
+  --pd-code-bg: #ffffff;
+  --pd-kw: #5b21b6;
+  --pd-info-bg: #e3edf5;
+  --pd-add-bg: #dcf0e8;
+  --pd-add-fg: #08392a;
+  --pd-del-bg: #fae8e8;
+  --pd-del-fg: #701616;
+  --pd-sel: #fceebc;
+  --pd-sel-edge: #7a4600;
+  --pd-shadow: 0 8px 24px rgb(0 0 0 / 0.12);
+  --color-zinc-200: #b4b4ae;
+  --color-zinc-300: #9a9a93;
+  --color-zinc-400: #6a6f74;
+  --color-zinc-500: #4d5358;
+  --color-zinc-600: #2f3438;
+  --color-zinc-700: #262c30;
+  --graph-ring: #f7f7f6;
+}
+
+/* paper — warm cream, sepia ink, terracotta action (§4.5). A long-form reading
+   world: the warm cast is the expressive move, the semantics stay stock. The
+   code ground is the distinct #fdfaf1 (that is why --pd-code-bg exists); the
+   accent is terracotta, never a link or decoration. */
+[data-theme="paper"] {
+  --pd-canvas: #f9f3e7;
+  --pd-surface: #f2ecdc;
+  --pd-raised: #ebe2cd;
+  --pd-raised-2: #e2d8bf;
+  --pd-line: #ded2b6;
+  --pd-line-strong: #a8935f;
+  --pd-text: #241d10;
+  --pd-text-2: #5a5040;
+  --pd-muted: #6a5f4a;
+  --pd-dim: #94876a;
+  --pd-accent: #9c4a12;
+  --pd-accent-hover: #7d3a0e;
+  --pd-on-accent: #ffffff;
+  --pd-ok: #175c43;
+  --pd-ok-bg: #dbe7d7;
+  --pd-warn: #7a4a10;
+  --pd-warn-bg: #ecdfc0;
+  --pd-danger: #a02222;
+  --pd-danger-bg: #f2ddda;
+  --pd-merged: #5b21b6;
+  --pd-merged-bg: #e5def0;
+  --pd-prerelease: #0c5f8a;
+  --pd-prerelease-bg: #d4e6ea;
+  --pd-link: #241d10;
+  --pd-code-bg: #fdfaf1;
+  --pd-kw: #5b21b6;
+  --pd-info-bg: #e3ecef;
+  --pd-add-bg: #dcead5;
+  --pd-add-fg: #123a28;
+  --pd-del-bg: #f4e0d8;
+  --pd-del-fg: #701c1c;
+  --pd-sel: #f2e3ba;
+  --pd-sel-edge: #9c4a12;
+  --pd-shadow: 0 8px 24px rgb(31 24 6 / 0.14);
+  --color-zinc-50: #faf4e8;
+  --color-zinc-100: #f0e9d6;
+  --color-zinc-200: #ddd2b4;
+  --color-zinc-300: #c3b58c;
+  --color-zinc-400: #6f6444;
+  --color-zinc-500: #5b5032;
+  --color-zinc-600: #463d22;
+  --color-zinc-700: #3a3117;
+  --color-zinc-800: #2e2612;
+  --color-zinc-900: #191407;
+  --color-zinc-950: #100c04;
+  --graph-ring: #f2ecdc;
+}
+
+/* ocean — deep navy, slate surfaces, azure action (§4.6): a calm non-grey
+   dark. Azure is the ACTION colour only (primaries/active/focus); links stay
+   ink, and prerelease moved to the pale cyan so it separates from the accent
+   (ΔE ~29 protan / 32 deutan). */
+[data-theme="ocean"] {
+  --pd-canvas: #0c1420;
+  --pd-surface: #101a29;
+  --pd-raised: #16222f;
+  --pd-raised-2: #1c2a3a;
+  --pd-line: #1e2a3c;
+  --pd-line-strong: #33415a;
+  --pd-text: #e0eaf4;
+  --pd-text-2: #a6b8cc;
+  --pd-muted: #7d8ea6;
+  --pd-dim: #56657e;
+  --pd-accent: #6cb6ff;
+  --pd-accent-hover: #93c8ff;
+  --pd-on-accent: #081120;
+  --pd-ok: #55cf9f;
+  --pd-ok-bg: #12332b;
+  --pd-warn: #e6b577;
+  --pd-warn-bg: #3a3324;
+  --pd-danger: #ef7d7d;
+  --pd-danger-bg: #3c2730;
+  --pd-merged: #b9a3fc;
+  --pd-merged-bg: #302b4a;
+  --pd-prerelease: #a5e3f7;
+  --pd-prerelease-bg: #16324a;
+  --pd-link: #e0eaf4;
+  --pd-code-bg: #0c1420;
+  --pd-kw: #b0a6f7;
+  --pd-info-bg: #14304a;
+  --pd-add-bg: rgb(85 207 159 / 0.12);
+  --pd-add-fg: #bce8d8;
+  --pd-del-bg: rgb(239 125 125 / 0.12);
+  --pd-del-fg: #f4c8c8;
+  --pd-sel: #1a2c4d;
+  --pd-sel-edge: #6cb6ff;
+  --pd-shadow: 0 8px 24px rgb(0 0 0 / 0.5);
+  --color-zinc-50: #eef3fa;
+  --color-zinc-100: #dbe6f2;
+  --color-zinc-200: #b8c9de;
+  --color-zinc-300: #93a9c6;
+  --color-zinc-400: #8fa3bd;
+  --color-zinc-500: #6d80a0;
+  --color-zinc-600: #4a5c78;
+  --color-zinc-700: #2c3d58;
+  --color-zinc-800: #1c2942;
+  --color-zinc-900: #111c2e;
+  --color-zinc-950: #0b1320;
+  --graph-ring: #101a29;
+}
+
+/* terminal — green-cast CRT world, phosphor-grey text, amber action KEPT
+   (§1.3-4: a green accent would collide with the ok-state green that sits
+   beside it on every issue and PR page). The character comes from the world,
+   not from repainting the action. */
+[data-theme="terminal"] {
+  --pd-canvas: #0a0f0c;
+  --pd-surface: #0f1611;
+  --pd-raised: #161f18;
+  --pd-raised-2: #1b2620;
+  --pd-line: #1c271f;
+  --pd-line-strong: #2f4032;
+  --pd-text: #d9e8dc;
+  --pd-text-2: #a4b8a9;
+  --pd-muted: #7d9182;
+  --pd-dim: #576858;
+  --pd-accent: #ffb224;
+  --pd-accent-hover: #ffc862;
+  --pd-on-accent: #151004;
+  --pd-ok: #57d6ab;
+  --pd-ok-bg: #12352a;
+  --pd-warn: #e0a95e;
+  --pd-warn-bg: #3a3323;
+  --pd-danger: #e87474;
+  --pd-danger-bg: #3a2426;
+  --pd-merged: #b9a3fc;
+  --pd-merged-bg: #302b4a;
+  --pd-prerelease: #6cc8f8;
+  --pd-prerelease-bg: #16324a;
+  --pd-link: #d9e8dc;
+  --pd-code-bg: #0a0f0c;
+  --pd-kw: #b0a2f0;
+  --pd-info-bg: #14261f;
+  --pd-add-bg: rgb(87 214 171 / 0.12);
+  --pd-add-fg: #b8ead2;
+  --pd-del-bg: rgb(232 116 116 / 0.12);
+  --pd-del-fg: #f2c6c6;
+  --pd-sel: #292211;
+  --pd-sel-edge: #ffb224;
+  --pd-shadow: 0 8px 24px rgb(0 0 0 / 0.5);
+  --color-zinc-50: #eaf2eb;
+  --color-zinc-100: #d7e6d9;
+  --color-zinc-200: #b6cdb9;
+  --color-zinc-300: #8fa89a;
+  --color-zinc-400: #8ba592;
+  --color-zinc-500: #6d8477;
+  --color-zinc-600: #4c5f53;
+  --color-zinc-700: #2c3a2f;
+  --color-zinc-800: #1d2a20;
+  --color-zinc-900: #131b15;
+  --color-zinc-950: #0c120d;
+  --graph-ring: #0f1611;
+}
+
 @layer base {
   /* 08 §7 a11y floor: every keyboard-reachable control shows focus. */
   :focus-visible {
     outline: 2px solid var(--pd-accent);
     outline-offset: 1px;
+  }
+  /* Skip link (docs/style-guideline.md §4b): visually hidden until it
+     receives keyboard focus, then a fixed banner. Reuses .sr-only's
+     clip technique rather than display:none so it stays focusable. */
+  .skip-link {
+    position: fixed; top: 0; left: 0; z-index: 60;
+    transform: translateY(-200%);
+    padding: 8px 14px;
+    background: var(--pd-accent); color: var(--pd-on-accent);
+    font-size: 13px; font-weight: 600;
+    border-end-end-radius: var(--radius-lg);
+  }
+  .skip-link:focus-visible {
+    transform: none;
+    outline: 2px solid var(--pd-accent); outline-offset: 2px;
+  }
+  /* Reduced motion (WCAG 2.3.3 / 2.2 AA floor): kill the colour
+     transitions on controls and the progress bar's easing for users
+     who ask for less motion. Nothing on the site animates position,
+     so transitions are the whole story. */
+  @media (prefers-reduced-motion: reduce) {
+    *, ::before, ::after {
+      transition-duration: 0.01ms !important;
+      animation-duration: 0.01ms !important;
+      animation-iteration-count: 1 !important;
+      scroll-behavior: auto !important;
+    }
   }
   /* System select idiom (Forgejo #547): the native dropdown panel and
      option highlight follow the app theme instead of OS chrome (white
@@ -204,6 +523,55 @@
     transition: background-color .12s, color .12s, border-color .12s;
   }
   .btn:hover { background: var(--pd-raised-2); color: var(--pd-text); }
+  /* Icon controls (§2 Controls): the ONE square, border-based icon button for
+     header chrome and icon-only actions. Deliberately not `.btn` plus padding
+     utilities: `.btn` sizes itself from its label, so three icon controls
+     drifted into three different boxes (theme/`+` padded rects vs the 32px
+     avatar circle with a ring). This box is fixed — 32×32 with a 16px glyph
+     and a 7px inset — so every icon control is the same size, and it is the
+     avatar's historical footprint (the cluster does not reflow). Same border,
+     radius, surface and hover as `.btn`; the avatar uses this box too, not a
+     circle (§1 F4 caps radius at 4px). */
+  .icon-btn {
+    display: inline-flex; align-items: center; justify-content: center;
+    width: 32px; height: 32px; flex: none;
+    border: 1px solid var(--pd-line-strong); border-radius: var(--radius-md);
+    background: var(--pd-raised); color: var(--pd-text-2);
+    transition: background-color .12s, color .12s, border-color .12s;
+  }
+  .icon-btn:hover { background: var(--pd-raised-2); color: var(--pd-text); }
+  /* Theme menu (PLAN-THEMES §7.4, W2): a radio-group popover, never a pair of
+     primaries. Each theme row previews its palette with three chips
+     (canvas | text | accent) whose colours the island writes from the theme
+     registry — the template carries no colour literal, and the gate pins the
+     registry to the token blocks. `aria-checked` is the only selected state:
+     the check glyph is decorative and its space is reserved, so rows do not
+     shift as the choice moves. */
+  .theme-item {
+    display: flex; align-items: center; gap: 8px; width: 100%;
+    padding: 5px 10px; text-align: left;
+    font-family: var(--font-mono); font-size: 11.5px; line-height: 18px;
+    color: var(--pd-text-2);
+  }
+  .theme-item:hover,
+  .theme-item:focus-visible { background: var(--pd-raised); color: var(--pd-text); }
+  .theme-item[aria-checked="true"] { color: var(--pd-text); font-weight: 600; }
+  .theme-label { flex: 1; min-width: 0; }
+  .theme-check { visibility: hidden; flex: none; color: var(--pd-accent); }
+  .theme-item[aria-checked="true"] .theme-check { visibility: visible; }
+  .theme-sep { height: 1px; margin: 4px 0; background: var(--pd-line); }
+  .theme-system-mark {
+    display: inline-flex; flex: none; width: 24px; height: 14px;
+    align-items: center; justify-content: center;
+    color: var(--pd-muted); font-size: 12px; line-height: 14px;
+  }
+  /* Three 7×14 chips in one 24×14 box: canvas | text | accent. */
+  .theme-swatch {
+    display: inline-flex; flex: none; width: 24px; height: 14px;
+    border: 1px solid var(--pd-line-strong); border-radius: 2px;
+    overflow: hidden;
+  }
+  .theme-swatch > span { flex: 1; }
   .btn.primary {
     background: var(--pd-accent); border-color: var(--pd-accent);
     color: var(--pd-on-accent); font-weight: 600;
@@ -228,13 +596,13 @@
      through the global :focus-visible rule. */
   .link {
     cursor: pointer;
-    color: var(--pd-text);
+    color: var(--pd-link);
     text-decoration: underline;
-    text-decoration-color: color-mix(in srgb, var(--pd-text) 35%, transparent);
+    text-decoration-color: color-mix(in srgb, var(--pd-link) 35%, transparent);
     text-underline-offset: 2px;
   }
   .link:hover {
-    color: var(--pd-text);
+    color: var(--pd-link);
     text-decoration-color: currentColor;
   }
   .icon { display: inline-block; height: 1em; width: 1em; flex: none; vertical-align: -0.125em; }
@@ -297,20 +665,60 @@
   }
 
   /* State chips: 10px tracked caps on a tinted ground. Colour is STATE, never
-     action (§1 F3); every variant is one shared shape. */
+     action (§1 F3); every variant is one shared shape. Both spellings render:
+     bare chip-open (single class) and composed chip chip-open (below). */
   .chip, .chip-open, .chip-closed, .chip-merged, .chip-draft, .chip-prerelease, .chip-neutral {
     display: inline-flex; align-items: center; gap: 4px;
     border-radius: var(--radius-sm); padding: 1px 5px;
     font-family: var(--font-mono); font-size: 10px; font-weight: 500;
     letter-spacing: .06em; text-transform: uppercase; line-height: 14px;
   }
-  .chip-open       { background: color-mix(in srgb, var(--pd-ok) 16%, transparent);     color: var(--pd-ok); }
-  .chip-closed     { background: color-mix(in srgb, var(--pd-danger) 16%, transparent); color: var(--pd-danger); }
-  .chip-draft      { background: color-mix(in srgb, var(--pd-warn) 18%, transparent);   color: var(--pd-warn); }
-  .chip-merged     { background: color-mix(in srgb, var(--color-violet-400) 18%, transparent); color: var(--color-violet-400); }
-  .chip-prerelease { background: color-mix(in srgb, var(--color-sky-400) 18%, transparent);    color: var(--color-sky-400); }
-  .chip-neutral    { background: var(--pd-raised); color: var(--pd-text-2); }
   .chip            { background: var(--pd-raised); color: var(--pd-text-2); }
+  .chip-neutral    { background: var(--pd-raised); color: var(--pd-text-2); }
+  .chip-open       { background: var(--pd-ok-bg);     color: var(--pd-ok); }
+  .chip-closed     { background: var(--pd-danger-bg); color: var(--pd-danger); }
+  .chip-draft      { background: var(--pd-warn-bg);   color: var(--pd-warn); }
+  .chip-merged     { background: var(--pd-merged-bg); color: var(--pd-merged); }
+  .chip-prerelease { background: var(--pd-prerelease-bg); color: var(--pd-prerelease); }
+  /* Composed-state precedence (the .btn.btn-active fix): the Go side and
+     several templates emit "chip chip-<state>", and the bare-variant rules
+     above would lose to the same-specificity .chip base declared before
+     them ONLY by order — the bug was .chip declared AFTER the variants,
+     which flipped every state chip to neutral (measured live: chip-open
+     computed text-2/raised). The compound spellings pin the variants at
+     (0,2,0) regardless of declaration order, for both emitted spellings. */
+  .chip.chip-open       { background: var(--pd-ok-bg);     color: var(--pd-ok); }
+  .chip.chip-closed     { background: var(--pd-danger-bg); color: var(--pd-danger); }
+  .chip.chip-draft      { background: var(--pd-warn-bg);   color: var(--pd-warn); }
+  .chip.chip-merged     { background: var(--pd-merged-bg); color: var(--pd-merged); }
+  .chip.chip-prerelease { background: var(--pd-prerelease-bg); color: var(--pd-prerelease); }
+
+  /* Check-state dots — the ONE renderer for every check state (PLAN-THEMES
+     §6.1/§8.4-2). The `collab_check_dot` template block maps state → these
+     classes; no Go code emits a colour class (the old `checkStateDot` is
+     deleted). Shape is the non-hue channel, so the read survives CVD:
+       success           filled circle        (--pd-ok)
+       failure / error   filled diamond       (--pd-danger)
+       pending           hollow circle        (--pd-warn)
+       in_progress       hollow circle + pulse (--pd-warn)
+       cancelled/skipped hollow + muted       (--pd-muted; = the old "dim"
+                                                read, at a 3:1-capable step)
+     Every dot is decorative where a state label sits beside it; where the dot
+     IS the label (`repo_check_pill`) the anchor carries the accessible name. */
+  .dot {
+    display: inline-block; flex: none;
+    width: 10px; height: 10px; border-radius: 999px;
+    background: var(--pd-muted);
+  }
+  .dot-ok      { background: var(--pd-ok); }
+  .dot-fail    { background: var(--pd-danger); border-radius: 1px; transform: rotate(45deg); }
+  .dot-pending { background: transparent; border: 1.5px solid var(--pd-warn); }
+  .dot-progress { background: transparent; border: 1.5px solid var(--pd-warn); @apply animate-pulse; }
+  .dot-muted   { background: transparent; border: 1.5px solid var(--pd-muted); }
+
+  /* Native checkbox/radio accent (§8.4-4): one shared class, never a raw amber
+     utility (the markdown task-box rule below is the same mechanism). */
+  .check { accent-color: var(--pd-accent); }
 
   /* Card headers (Forgejo #521): one title treatment for sidebar/conversation
      cards. */
@@ -323,7 +731,7 @@
     background: var(--pd-canvas); color: var(--pd-text);
     padding: 4px 9px; font-size: 13px; line-height: 20px;
   }
-  .input::placeholder { color: var(--pd-dim); }
+  .input::placeholder { color: var(--pd-muted); }
   .input:focus {
     border-color: var(--pd-accent);
     outline: none;
@@ -337,8 +745,15 @@
   .setup-examples { @apply mt-0.5 text-xs leading-snug text-zinc-500 break-words dark:text-zinc-400;
                     /* keep the example legible while typing — never hidden */ white-space: pre-wrap; }
   .setup-ex { @apply font-mono text-[11px] text-zinc-600 dark:text-zinc-300; }
-  .setup-note { @apply block text-[11px] text-zinc-400 dark:text-zinc-500; }
-  .setup-callout { @apply mb-3 rounded-lg border border-sky-300 bg-sky-50 p-3 dark:border-sky-900 dark:bg-sky-950/50; }
+  .setup-note { @apply block text-[11px]; color: var(--pd-muted); }
+  /* The one cool-blue informational panel, as tokens (PLAN-THEMES §1.2/§8.4-6):
+     a theme re-hues it through --pd-info-bg without touching this rule. */
+  .setup-callout {
+    margin-bottom: 0.75rem; border-radius: var(--radius-lg);
+    border: 1px solid var(--pd-line-strong);
+    background: var(--pd-info-bg);
+    padding: 0.75rem;
+  }
   /* Struct-slice row editors (server.auth.tokens, bundles.strategy): one
      bordered fieldset per element, a caption line, cells in a 1/2-col grid,
      and a per-row remove control. Reuses .setup-row's label/control anatomy
@@ -427,6 +842,10 @@
   .card.absolute, .card.fixed {
     background: var(--pd-surface);
     box-shadow: var(--pd-shadow);
+    /* Structural viewport cap (PLAN-THEMES §7.4/§8.4-8): every floating panel,
+       including the theme menu, is bounded at viewport - 1rem — the enumerated
+       rule below stays as a harmless no-op for its named panels. */
+    max-width: calc(100vw - 1rem);
   }
 
   /* Popover viewport bounds (issue #278): fixed-width right-anchored panels
@@ -496,9 +915,9 @@
   .markdown-body li:has(> input[type="checkbox"]) { @apply -ml-6 list-none pl-0; }
   .markdown-body input[type="checkbox"] { margin-right: 6px; accent-color: var(--pd-accent); }
   .markdown-body a {
-    color: var(--pd-text);
+    color: var(--pd-link);
     text-decoration: underline;
-    text-decoration-color: color-mix(in srgb, var(--pd-text) 40%, transparent);
+    text-decoration-color: color-mix(in srgb, var(--pd-link) 40%, transparent);
     text-underline-offset: 2px;
   }
   .markdown-body a:hover { text-decoration-color: currentColor; }
@@ -510,7 +929,7 @@
   .markdown-body pre {
     margin: 12px 0; overflow-x: auto;
     border: 1px solid var(--pd-line); border-radius: var(--radius-lg);
-    background: var(--pd-canvas); padding: 12px;
+    background: var(--pd-code-bg); padding: 12px;
   }
   .markdown-body pre code { @apply block rounded-none border-0 bg-transparent p-0 text-xs leading-5 text-inherit dark:bg-transparent dark:text-inherit; }
   .markdown-body blockquote { @apply my-3 rounded-r border-l-4 border-zinc-300 bg-zinc-50/60 py-0.5 pr-3 pl-3 text-zinc-600
@@ -535,7 +954,7 @@
   }
   .code-view {
     overflow-x: auto; border: 1px solid var(--pd-line);
-    border-radius: var(--radius-lg); background: var(--pd-canvas);
+    border-radius: var(--radius-lg); background: var(--pd-code-bg);
     font-family: var(--font-mono); font-size: 11.5px; line-height: 18px;
   }
   /* Blob per-line table (issue #243): each gutter number + code line share a
@@ -555,8 +974,8 @@
   .blob-num a:hover { color: var(--pd-accent); }
   .blob-code { @apply min-w-0 px-3.5 align-top; }
   .blob-code code { white-space: pre; }
-  /* highlighter tokens (lib/highlight.js spans) */
-  .tok-kw { color: var(--color-violet-400); }
+  /* highlighter tokens (internal/webui/highlight.go spans) */
+  .tok-kw { color: var(--pd-kw); }
   .tok-str { color: var(--pd-ok); }
   .tok-com { color: var(--pd-muted); font-style: italic; }
   .tok-num { color: var(--pd-accent); }
@@ -613,7 +1032,7 @@
   }
   @media (min-width: 640px) { .status-strip { display: flex; } }
   @media (min-width: 640px) { body:has(.status-strip) main { padding-bottom: 34px; } }
-  .status-strip .key { color: var(--pd-dim); }
+  .status-strip .key { color: var(--pd-muted); }
   .status-strip .val { color: var(--pd-text-2); }
   .status-strip .live { margin-left: auto; display: inline-flex; align-items: center; gap: 6px; }
   .status-strip .dot { width: 6px; height: 6px; border-radius: 999px; background: var(--pd-ok); }
@@ -718,4 +1137,103 @@ div.diff-row:hover { background-color: var(--pd-sel); box-shadow: inset 2px 0 0 
 @media (max-width: 480px) {
   .graph-on .commit-row { grid-template-columns: minmax(0, 1fr) auto auto; }
   .graph-on .commit-rail { display: none; }
+}
+
+/* Print (PLAN-THEMES §8.3, W2): paper is paper. The light token set is
+   re-asserted on every theme — default, `.dark`, and any `[data-theme]` — so a
+   dark-theme reader prints black-on-white, and the tint grounds are dropped to
+   transparent (the chip labels, the diff sign column and the state words carry
+   the semantics without a fill, §6.1). The block is declaration-only and
+   token-for-token the `:root` set except the neutralised grounds/shadow and
+   the transparent surfaces; web/test/unit/themes.test.js parses it and fails
+   on any drift, so the printed palette can never diverge from the measured
+   light palette. */
+@media print {
+  :root, .dark, [data-theme] {
+    --pd-canvas: #ffffff;
+    --pd-surface: #ffffff;
+    --pd-raised: #efefed;
+    --pd-raised-2: #e6e6e3;
+    --pd-line: #e2e2df;
+    --pd-line-strong: #cfcfca;
+    --pd-text: #17181a;
+    --pd-text-2: #55585d;
+    --pd-muted: #666a6f;
+    --pd-dim: #8a8f94;
+    --pd-accent: #9a5b00;
+    --pd-accent-hover: #7a4600;
+    --pd-on-accent: #ffffff;
+    --pd-ok: #0f7355;
+    --pd-ok-bg: transparent;
+    --pd-warn: #8a5a10;
+    --pd-warn-bg: transparent;
+    --pd-danger: #b42323;
+    --pd-danger-bg: transparent;
+    --pd-merged: #6d28d9;
+    --pd-merged-bg: transparent;
+    --pd-prerelease: #0c6291;
+    --pd-prerelease-bg: transparent;
+    --pd-link: #17181a;
+    --pd-code-bg: #ffffff;
+    --pd-kw: #6d28d9;
+    --pd-info-bg: transparent;
+    --pd-add-bg: transparent;
+    --pd-add-fg: #0b5a43;
+    --pd-del-bg: transparent;
+    --pd-del-fg: #8f2020;
+    --pd-sel: transparent;
+    --pd-sel-edge: #b26a00;
+    --pd-shadow: none;
+    /* the light side's full ramp and graph lanes, so no palette's ramp (paper's
+       sand, ocean's navy, terminal's green, the HC steps) survives into print —
+       every theme prints the same measured light paper */
+    --color-zinc-50: #f7f7f6;
+    --color-zinc-100: #e8ebec;
+    --color-zinc-200: #e2e2df;
+    --color-zinc-300: #cfcfca;
+    --color-zinc-400: #6a6f74;
+    --color-zinc-500: #676b70;
+    --color-zinc-600: #55585d;
+    --color-zinc-700: #323a3f;
+    --color-zinc-800: #232a2e;
+    --color-zinc-900: #14181b;
+    --color-zinc-950: #0f1113;
+    --graph-0: #047857;
+    --graph-1: #0369a1;
+    --graph-2: #b45309;
+    --graph-3: #be123c;
+    --graph-4: #6d28d9;
+    --graph-5: #c2410c;
+    --graph-6: #0e7490;
+    --graph-7: #4d7c0f;
+    --graph-ring: #ffffff;
+  }
+  .site-header { background: var(--pd-canvas); backdrop-filter: none; }
+  .card.absolute, .card.fixed { box-shadow: none; }
+  .theme-menu, .status-strip, .progress, .tray { display: none; }
+  .skip-link { display: none; }
+  a { text-decoration: underline; }
+}
+
+/* Forced colours (PLAN-THEMES §8.3, W2): the OS owns the palette. Nothing here
+   sets a colour — the app is border-and-text driven, so we keep the structural
+   channels visible (control borders, links as underlines, the diff sign
+   column, the skip link) and let the labels + shapes carry state (§6.1). The
+   declaration-only token stance is deliberate: no `[data-theme]` palette may
+   leak a tint into a forced-colours rendering. */
+@media (forced-colors: active) {
+  :root, .dark, [data-theme] {
+    /* the default; stated so a future "fix" cannot take colour control back */
+    forced-color-adjust: auto;
+    --pd-shadow: none;
+  }
+  .btn, .icon-btn, .input, .chip, .pill, .theme-swatch { border: 1px solid; }
+  .card.absolute, .card.fixed { box-shadow: none; }
+  .theme-check { visibility: visible; }
+  /* Links keep their non-colour channel (underline) when the OS owns colour. */
+  a, .link { text-decoration: underline; }
+  /* The diff's add/del tints vanish with the OS palette; the sign column
+     ("+"/"−" text) and the gutter divider are the load-bearing channels and
+     need no colour. Keep the divider visible. */
+  .diff-num { border-inline-end: 1px solid; }
 }

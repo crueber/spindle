@@ -54,6 +54,7 @@ func eqStrs(t *testing.T, label string, got, want []string) {
 // --- lane assignment (same vectors as commit-graph-506.test.js) -------------
 
 func TestAssignLanesEmptyWindow(t *testing.T) {
+	t.Parallel()
 	rows, width := assignLanes(nil)
 	if len(rows) != 0 || width != 0 {
 		t.Fatalf("empty window: rows=%v width=%d", rows, width)
@@ -67,6 +68,7 @@ func TestAssignLanesEmptyWindow(t *testing.T) {
 }
 
 func TestAssignLanesLinearThreadsOneLane(t *testing.T) {
+	t.Parallel()
 	rows, width := assignLanes([]GraphCommit{gc("c", "b"), gc("b", "a"), gc("a")})
 	if width != 1 {
 		t.Fatalf("width = %d, want 1", width)
@@ -82,6 +84,7 @@ func TestAssignLanesLinearThreadsOneLane(t *testing.T) {
 }
 
 func TestAssignLanesBranchRejoinsBase(t *testing.T) {
+	t.Parallel()
 	rows, width := assignLanes([]GraphCommit{gc("side", "base"), gc("main", "base"), gc("base")})
 	if width != 2 {
 		t.Fatalf("width = %d, want 2", width)
@@ -97,6 +100,7 @@ func TestAssignLanesBranchRejoinsBase(t *testing.T) {
 }
 
 func TestAssignLanesMergeFansOut(t *testing.T) {
+	t.Parallel()
 	rows, width := assignLanes([]GraphCommit{
 		gc("m", "a", "b"), gc("a", "x"), gc("b", "x"), gc("x"),
 	})
@@ -116,6 +120,7 @@ func TestAssignLanesMergeFansOut(t *testing.T) {
 }
 
 func TestAssignLanesBranchThenMerge(t *testing.T) {
+	t.Parallel()
 	rows, width := assignLanes([]GraphCommit{
 		gc("tip", "m"), gc("m", "main", "feat"), gc("main", "root"), gc("feat", "root"), gc("root"),
 	})
@@ -135,6 +140,7 @@ func TestAssignLanesBranchThenMerge(t *testing.T) {
 }
 
 func TestAssignLanesPerWindow(t *testing.T) {
+	t.Parallel()
 	rows, width := assignLanes([]GraphCommit{gc("old2", "old1"), gc("old1", "older")})
 	if width != 1 {
 		t.Fatalf("width = %d, want 1", width)
@@ -144,6 +150,7 @@ func TestAssignLanesPerWindow(t *testing.T) {
 }
 
 func TestGraphGeometry(t *testing.T) {
+	t.Parallel()
 	if laneX(0) != graphLanePad || laneX(1) != graphLanePad+graphLaneGap {
 		t.Fatalf("laneX: %d %d", laneX(0), laneX(1))
 	}
@@ -169,6 +176,7 @@ func TestGraphGeometry(t *testing.T) {
 // --- rendering --------------------------------------------------------------
 
 func TestRenderCommitGraphRails(t *testing.T) {
+	t.Parallel()
 	commits := []GraphCommit{
 		{SHA: "m", Short: "m", Subject: "merge two", Parents: []string{"a", "b"}},
 		{SHA: "a", Short: "a", Subject: "first", Parents: []string{"x"}},
@@ -220,6 +228,7 @@ func TestRenderCommitGraphRails(t *testing.T) {
 }
 
 func TestRenderCommitGraphEscapesText(t *testing.T) {
+	t.Parallel()
 	html := string(RenderCommitGraphRows([]GraphCommit{{
 		SHA:     `a"b<c`,
 		Short:   `s&s`,
@@ -238,6 +247,7 @@ func TestRenderCommitGraphEscapesText(t *testing.T) {
 }
 
 func TestRenderCommitGraphRowsStillShowLanes(t *testing.T) {
+	t.Parallel()
 	commits := make([]GraphCommit, 0, 10)
 	for i := 0; i < 10; i++ {
 		commits = append(commits, gc("c", "p"))

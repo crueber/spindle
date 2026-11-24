@@ -21,10 +21,17 @@ func TestAuthChallengeAdvertisesBasicForStaticTokens(t *testing.T) {
 		t.Fatalf("challenge with static tokens = %q, want %q", got, want)
 	}
 
-	// No static tokens → Bearer only (ID tokens / browser sessions only).
-	plain, _ := newTestServer(t, func(o *Options) { o.Config.Server.Auth.Tokens = nil })
+	// No machine credentials at all → Bearer only (ID tokens/sessions only).
+	plain := &Server{}
 	if got, want := plain.authChallenge(), `Bearer realm="walgit"`; got != want {
-		t.Fatalf("challenge without static tokens = %q, want %q", got, want)
+		t.Fatalf("challenge without machine credentials = %q, want %q", got, want)
+	}
+	// An ExtraCredential machine shape (CI/job tokens) also needs the Basic
+	// prompt, because git only asks its credential helper when Basic is
+	// advertised.
+	withHook, _ := newTestServer(t, func(o *Options) { o.Config.Server.Auth.Tokens = nil })
+	if got, want := withHook.authChallenge(), `Basic realm="walgit", Bearer realm="walgit"`; got != want {
+		t.Fatalf("challenge with an ExtraCredential hook = %q, want %q", got, want)
 	}
 
 	// An unwired auth service must not panic.
@@ -37,7 +44,7 @@ func TestAuthChallengeAdvertisesBasicForStaticTokens(t *testing.T) {
 	// table (the username is ignored by walgit's LFS-era convention).
 	req := httptest.NewRequest(http.MethodGet, "/x", nil)
 	req.Header.Set("Authorization", "Basic "+base64.StdEncoding.EncodeToString([]byte("alice:tok123")))
-	p, aerr := s.authSvc.Authenticate(req, &config.Config{Server: config.Server{Auth: config.Auth{Mode: "token"}}})
+	p, aerr := s.authSvc.Authenticate(req, &config.Config{Server: config.Server{Auth: config.Auth{}}})
 	if aerr != nil || p.Name != "alice" || !p.Write {
 		t.Fatalf("Basic static token = %+v %v", p, aerr)
 	}

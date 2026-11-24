@@ -253,7 +253,7 @@ func TestSetupOnlyMethodFallback(t *testing.T) {
 	if rec.Code != http.StatusServiceUnavailable || rec.Header().Get("Retry-After") != "15" {
 		t.Fatalf("setup-only 405 fallback = %d", rec.Code)
 	}
-	if !strings.Contains(rec.Body.String(), "/setup") {
+	if !strings.Contains(rec.Body.String(), "/admin") {
 		t.Fatalf("body = %q", rec.Body.String())
 	}
 }
@@ -293,7 +293,7 @@ func TestSetupJSONForwardedProto(t *testing.T) {
 // happy path of credentialHelper directly instead.
 func TestCredentialHelperRenders(t *testing.T) {
 	out, err := credentialHelper(installTmplData{
-		Host: "wal.example.com", Slug: "wal-example-com", AuthNone: false,
+		Host: "wal.example.com", Slug: "wal-example-com",
 	})
 	if err != nil || !strings.Contains(out, "wal-example-com") {
 		t.Fatalf("credential helper = %q %v", out, err)
@@ -303,7 +303,6 @@ func TestCredentialHelperRenders(t *testing.T) {
 // TestWgtPrincipalDenied covers the wgt path with a disallowed email.
 func TestWgtPrincipalDenied(t *testing.T) {
 	s, _ := newTestServer(t, nil)
-	s.cfg.Server.Auth.Mode = "oidc"
 	svc := NewAuthService(&s.cfg.Server.Auth, s.Now)
 	tok, err := svc.MintToken("mallory@evil.test")
 	if err != nil {

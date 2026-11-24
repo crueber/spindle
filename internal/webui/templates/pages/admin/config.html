@@ -1,0 +1,144 @@
+{{/* pages/admin/config.html — GET /admin/config (docs/PLAN-ADMIN.md §3.3/§4).
+   The whole configuration editor, lifted into the Administration shell: the
+   byte-identical whole-file save contract is unchanged (one form, one Save).
+   Progressive disclosure over the 149-key schema:
+     - ?q=<key>           server-honoured key filter (the island narrows live)
+     - ?changed=1         rows whose value differs from the compiled default
+     - ?reset=<key>       seeds one row from its default (nothing is saved)
+     - #<section>         section anchors (+ #server.auth aliases the auth card)
+     - the TOML disclosure is the SAVED configuration's canonical document. */}}
+{{define "content"}}
+<div class="admin-page" id="admin-page" data-admin-section="config">
+  <div class="flex flex-col gap-4 lg:flex-row lg:gap-6">
+    {{template "admin-nav" .Data}}
+
+    <div class="min-w-0 flex-1">
+      {{template "admin-header" .Data}}
+
+      {{if .Data.Denied}}
+        {{template "admin-denied" .Data}}
+      {{else}}
+        {{if .Data.Restricted}}{{template "admin-restricted" .}}{{end}}
+        {{template "admin-banners" .Data}}
+
+        {{if .Data.RequiresRestart}}
+        {{/* The dedicated restart card (docs/PLAN-ADMIN.md §5 as amended):
+             the saved file is on disk, but these keys are read once at boot. */}}
+        <section class="card mb-3 border-l-2 border-l-[var(--pd-warn)] p-4" aria-labelledby="admin-restart-required">
+          <h2 class="card-header" id="admin-restart-required">Restart required</h2>
+          <p class="text-sm">Restart required for:</p>
+          <ul class="mt-1 list-disc space-y-1 pl-5 text-sm">
+            {{range .Data.RestartLinks}}
+            <li><a class="link mono text-xs break-all" href="{{.Href}}">{{.Key}}</a></li>
+            {{end}}
+          </ul>
+          <p class="muted mt-2 text-sm">These keys are read once at startup. The saved file is written,
+            but the running process still has the previous values until it restarts (live keys in the
+            same save took effect immediately).</p>
+          {{template "admin-restart-form" .Data}}
+          {{template "admin-restart-truth" .Data}}
+        </section>
+        {{end}}
+
+        {{if .Data.ErrorLinks}}
+        <section class="card mb-3 p-4" aria-labelledby="admin-error-summary-title">
+          <h2 class="card-header" id="admin-error-summary-title">Current validation errors</h2>
+          <div class="relative overflow-x-auto" role="alert">
+            <table class="data-table wrap" aria-label="configuration validation errors">
+              <thead><tr><th scope="col">key</th><th scope="col">message</th></tr></thead>
+              <tbody>
+                {{range .Data.ErrorLinks}}
+                <tr>
+                  <td class="w-36 align-top sm:w-auto sm:whitespace-nowrap">{{if .Href}}<a class="link" href="{{.Href}}"><code class="mono text-xs break-all">{{.Key}}</code></a>{{else}}<span class="muted">—</span>{{end}}</td>
+                  <td class="min-w-0 break-words align-top">{{.Message}}</td>
+                </tr>
+                {{end}}
+              </tbody>
+            </table>
+          </div>
+          <p class="muted mt-2 text-[11px]">Nothing is disabled — fix the values and re-validate.</p>
+        </section>
+        {{end}}
+
+        {{if .Data.View.TOML}}
+        <details class="card mb-3 p-4" id="admin-toml">
+          <summary class="cursor-pointer py-1 text-sm font-medium">The file Save writes <span class="muted text-xs">— read-only</span></summary>
+          <p class="muted mt-2 text-[11px]">The canonical <code class="mono text-xs">spindle.toml</code> of the <strong>saved configuration</strong> — the exact bytes a zero-edit Save writes (before the first save: the first-run defaults). It does not include unsaved edits in the form below; Save writes the whole document.</p>
+          <div class="mt-2 flex justify-end"><button type="button" class="btn" data-copy="#admin-toml-doc">copy</button></div>
+          <pre class="code-view mt-1 max-h-[28rem] min-w-0 overflow-auto p-3 text-xs" id="admin-toml-doc">{{.Data.View.TOML}}</pre>
+        </details>
+        {{end}}
+
+        {{if .Data.View.Sections}}
+        <nav class="mb-3 flex gap-1 overflow-x-auto pb-1" aria-label="Configuration sections">
+          {{range .Data.View.Sections}}
+          <a class="pill flex-none py-1" href="#{{.Section}}">{{.Section}}{{if .Changed}} · {{.Changed}} changed{{end}}</a>
+          {{end}}
+        </nav>
+        {{end}}
+
+        <form class="card mb-3 flex flex-wrap items-end gap-2 p-3" method="get" action="/admin/config"
+              role="search" data-filter-toolbar>
+          <label class="flex w-full min-w-0 flex-col gap-1 text-sm sm:w-auto sm:flex-1" for="admin-config-q">
+            <span class="font-medium">Filter keys</span>
+            <input class="input w-full" id="admin-config-q" name="q" type="search" value="{{.Data.Query}}"
+                   placeholder="e.g. auth, cache, tokens" autocomplete="off" data-filter="#admin-config-form">
+          </label>
+          <label class="flex min-h-6 items-center gap-2 py-0.5 text-sm">
+            <input type="checkbox" name="changed" value="1" class="h-5 w-5 shrink-0 check"{{if .Data.ChangedOnly}} checked{{end}} data-autosubmit>
+            <span>changed only</span>
+          </label>
+          <button type="submit" class="btn">Filter</button>
+          <a class="link self-center py-1 text-sm" href="/admin/config" data-filter-clear>clear</a>
+          <p class="muted w-full text-xs" data-filter-count data-total="{{.Data.View.TotalKeys}}">Showing {{.Data.View.ShownKeys}} of {{.Data.View.TotalKeys}} keys{{if .Data.View.ChangedKeys}} · {{.Data.View.ChangedKeys}} changed{{end}}</p>
+        </form>
+
+        <form id="admin-config-form" class="space-y-4" method="post" action="/admin/config"
+              hx-post="/admin/config" hx-target="#admin-page" hx-select="#admin-page" hx-swap="outerHTML"
+              data-leave-guard>
+          <div class="flex flex-wrap items-center gap-2">
+            <button type="submit" class="btn" name="op" value="validate">Validate</button>
+            <button type="submit" class="btn primary" name="op" value="save">Save<span class="ml-1" data-dirty-indicator hidden>· unsaved</span></button>
+            <span class="muted text-xs" data-dirty-status role="status" aria-live="polite"></span>
+          </div>
+          <p class="muted text-[11px]">Save never contacts the identity provider: validation is shape-only, so a recovery save works while the IdP is unreachable. Use Test above for a live probe. Save writes the <strong>full canonical</strong> <code class="mono text-xs">spindle.toml</code> document — comments in a hand-written file are not preserved by the TOML encoder. The first save that rewrites an existing file keeps the previous text beside it as <code class="mono text-xs">spindle.toml.bak-&lt;utc&gt;</code> (once; a save that changes nothing writes no file). Leaving with unsaved edits warns once.</p>
+
+          {{range .Data.View.Sections}}{{template "admin-config-section" .}}{{end}}
+        </form>
+
+        <p class="muted mt-3 text-sm" data-filter-empty hidden>No key matches the filter. <a class="link" href="/admin/config">Clear it</a> to see every setting.</p>
+
+        {{if eq .Data.View.AuthMode "oidc"}}
+        <section class="card mt-4 p-4" aria-labelledby="admin-oidc">
+          <h2 class="card-header" id="admin-oidc">OIDC discovery</h2>
+          <div class="setup-callout">
+            <p class="text-sm">Register this <strong>redirect URI</strong> with your OIDC issuer (exact match, no trailing slash) before sign-in will work:</p>
+            <p class="mt-1 flex flex-wrap items-center gap-2">
+              <code class="code-view inline-block max-w-full break-all px-2 py-1" id="oidc-redirect-uri">{{.Data.RedirectURI}}</code>
+              <button type="button" class="btn" data-copy="#oidc-redirect-uri">copy</button>
+            </p>
+          </div>
+          <form class="grid gap-3" method="post" action="/admin/config/auth-test"
+                hx-post="/admin/config/auth-test" hx-target="#admin-auth-test" hx-swap="innerHTML">
+            <div>
+              <label class="mb-1 block text-sm font-medium" for="auth-test-issuer">Issuer</label>
+              <input class="input" id="auth-test-issuer" name="issuer" type="url" value="{{.Data.View.Issuer}}" placeholder="https://id.example.com">
+            </div>
+            <div>
+              <label class="mb-1 block text-sm font-medium" for="auth-test-client">Client ID</label>
+              <input class="input" id="auth-test-client" name="client_id" type="text" value="{{.Data.View.ClientID}}">
+            </div>
+            <input type="hidden" name="redirect_uri" value="{{.Data.RedirectURI}}">
+            <div class="flex flex-wrap items-center gap-2">
+              <button type="submit" class="btn">Test discovery + signing keys</button>
+              <span class="muted text-[11px]">fetches &lt;issuer&gt;/.well-known/openid-configuration and its jwks_uri</span>
+            </div>
+          </form>
+          <div id="admin-auth-test" aria-live="polite"></div>
+        </section>
+        {{end}}
+      {{end}}
+    </div>
+  </div>
+</div>
+{{end}}

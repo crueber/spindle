@@ -299,3 +299,78 @@ func (s *Server) publicOwnerAvatar(w http.ResponseWriter, r *http.Request, regen
 	}
 	s.formsRedirectFlash(w, r, "/"+urlPathEscape(owner), msg)
 }
+
+// --- moderation block control (PLAN-V2 §M.5, M1) -----------------------------
+
+// publicOwnerBlock / publicOwnerUnblock serve POST /{owner}/block and
+// /{owner}/unblock: the viewer's OWN list, so the gate is signed-in +
+// same-origin + a different, existing user (no self-block, no org). The
+// moderation verb owns storage, the audit record and the unknown-subject
+// check; the page never writes the bucket by hand.
+func (s *Server) publicOwnerBlock(w http.ResponseWriter, r *http.Request) {
+	s.publicOwnerBlockToggle(w, r, true)
+}
+
+func (s *Server) publicOwnerUnblock(w http.ResponseWriter, r *http.Request) {
+	s.publicOwnerBlockToggle(w, r, false)
+}
+
+func (s *Server) publicOwnerBlockToggle(w http.ResponseWriter, r *http.Request, block bool) {
+	owner := r.PathValue("owner")
+	if !validOwnerPath(owner) {
+		s.errorPage(w, r, http.StatusNotFound, "not found")
+		return
+	}
+	p, ok := s.principal(w, r)
+	if !ok {
+		return
+	}
+	action := "Block this user"
+	if !block {
+		action = "Unblock this user"
+	}
+	if !s.parityWritePreflight(w, r, p, action) {
+		return
+	}
+	if publicDeps.Blocks == nil {
+		s.errorPage(w, r, http.StatusServiceUnavailable, "moderation is not wired on this build")
+		return
+	}
+	// The page mirrors the API's self rule: the list edited is always the
+	// caller's own.
+	blocker := p.Name
+	if strings.EqualFold(blocker, owner) {
+		s.errorPage(w, r, http.StatusBadRequest, "you cannot block yourself")
+		return
+	}
+	// Orgs are not block targets (a block is a person relationship).
+	if publicDeps.Org != nil {
+		if org, oerr := publicDeps.Org(r.Context(), owner); oerr == nil && org != nil {
+			s.errorPage(w, r, http.StatusBadRequest, "organizations cannot be blocked")
+			return
+		}
+	}
+	var (
+		changed bool
+		err     error
+	)
+	msg := "Blocked @" + owner
+	if block {
+		changed, err = publicDeps.Blocks.Block(r.Context(), blocker, owner)
+	} else {
+		changed, err = publicDeps.Blocks.Unblock(r.Context(), blocker, owner)
+		msg = "Unblocked @" + owner
+	}
+	if err != nil {
+		s.errorPage(w, r, parityErrStatus(err), parityErrMessage(err))
+		return
+	}
+	if !changed {
+		if block {
+			msg = "Already blocked"
+		} else {
+			msg = "Not blocked"
+		}
+	}
+	s.formsRedirectFlash(w, r, "/"+urlPathEscape(owner), msg)
+}

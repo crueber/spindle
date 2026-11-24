@@ -28,11 +28,11 @@ jobs:
 		t.Fatalf("presence flags = %+v", w.On)
 	}
 	for _, event := range []string{"push", "pull_request"} {
-		if !w.Fires(event, "anything") {
+		if !w.Fires(event, "anything", "opened") {
 			t.Errorf("bare %s trigger did not fire", event)
 		}
 	}
-	if w.Fires("workflow_dispatch", "") {
+	if w.Fires("workflow_dispatch", "", "") {
 		t.Error("bare push/pr workflow must not fire on dispatch")
 	}
 }

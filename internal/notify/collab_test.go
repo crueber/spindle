@@ -150,7 +150,7 @@ func TestCollabStreamReplayAndLive(t *testing.T) {
 func TestCollabStreamOtherRepoIsolated(t *testing.T) {
 	x := newHarness(t)
 	who := "amy@example.com"
-	x.svc.PublishFrame(RepoFrame{Name: "issue", Repo: "acme/other", Num: 1})
+	x.svc.PublishFrame(RepoFrame{Name: "issue", Repo: "acme/other", Num: 1, Title: "other-repo"})
 	rec := newSafeRecorder()
 	r := httptest.NewRequest("GET", "/acme/repo/api/collab/stream", nil)
 	r.Header.Set("X-Test-Principal", who)
@@ -169,12 +169,44 @@ func TestCollabStreamOtherRepoIsolated(t *testing.T) {
 		}
 		time.Sleep(5 * time.Millisecond)
 	}
-	time.Sleep(100 * time.Millisecond)
-	_, _, body := rec.snapshot()
-	if strings.Contains(body, "acme/other") {
-		cancel()
-		t.Fatalf("cross-repo leak: %q", body)
+	// Publish an OWN-repo frame and wait for it: the stream is ordered, so
+	// once it lands every frame the connection was ever going to carry has
+	// already been written. That is the barrier the old 100 ms sleep stood
+	// in for (and it failed open: a leak after the window passed unseen).
+	// The frame payload carries no repo name, so the two frames are told
+	// apart by their title — the old "acme/other" substring could never
+	// appear in this stream and made the leak assertion vacuous.
+	x.svc.PublishFrame(RepoFrame{Name: "issue", Repo: "acme/repo", Num: 2, Title: "own-repo"})
+	for {
+		_, _, body := rec.snapshot()
+		if strings.Contains(body, "own-repo") {
+			if strings.Contains(body, "other-repo") {
+				cancel()
+				t.Fatalf("cross-repo leak: %q", body)
+			}
+			break
+		}
+		if time.Now().After(deadline) {
+			cancel()
+			t.Fatalf("own-repo frame never arrived: %q", body)
+		}
+		time.Sleep(5 * time.Millisecond)
 	}
 	cancel()
 	<-done
+}
+
+// TestModerationFrameCarriesState pins the M2 frame contract: the moderation
+// kind survives framing and carries action + resulting state (hidden/visible/
+// locked/unlocked) — and nothing body-shaped.
+func TestModerationFrameCarriesState(t *testing.T) {
+	f, ok := frameFor(RepoFrame{Name: "moderation", Repo: "acme/repo", Num: 3, Seq: 9, Tid: "deadbeef",
+		Actor: "mod", Action: "hidden", State: "hidden", At: "t"})
+	if !ok {
+		t.Fatal("moderation frame dropped")
+	}
+	if f.Kind != "moderation" || f.Action != "hidden" || f.State != "hidden" ||
+		f.Num != 3 || f.Seq != 9 || f.Tid != "deadbeef" || f.Actor != "mod" {
+		t.Fatalf("moderation frame = %+v", f)
+	}
 }

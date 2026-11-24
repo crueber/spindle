@@ -57,7 +57,7 @@ func TestEntropyFailures(t *testing.T) {
 	if _, err := newQueueSeq(time.Now()); err == nil {
 		t.Fatal("newQueueSeq must fail")
 	}
-	if _, err := e.svc.MintRegistrationToken(ctx(), "o/r", admin); err == nil {
+	if _, err := e.svc.MintRegistrationToken(ctx(), admin, mintAllPolicy("")); err == nil {
 		t.Fatal("mint must fail")
 	}
 	// Sealing needs a nonce.
@@ -100,8 +100,8 @@ func TestAttemptStoreFailurePaths(t *testing.T) {
 	admin := auth.Principal{Name: "admin", Admin: true}
 	h.Auth = func(*http.Request) (auth.Principal, *auth.AuthError) { return admin, nil }
 	run := e.mustCreate(t)[0]
-	mint, _ := e.svc.MintRegistrationToken(ctx(), "o/r", admin)
-	res, err := e.svc.Register(ctx(), RegisterInput{Token: mint.Token, Labels: []string{"ubuntu-latest"}})
+	mint, _ := e.svc.MintRegistrationToken(ctx(), admin, mintAllPolicy(""))
+	res, err := e.svc.Register(ctx(), RegisterInput{Token: mint.Token, Labels: []string{"linux"}})
 	if err != nil {
 		t.Fatalf("register: %v", err)
 	}
@@ -248,7 +248,7 @@ func TestLogReadFailurePaths(t *testing.T) {
 	}
 	fs.clear()
 	// More than the limit sets more.
-	runner := &runnerAuth{Owner: "o", Repo: "r", Doc: &RunnerDoc{ID: "rnr", Labels: []string{"ubuntu-latest"}, State: RunnerActive}}
+	runner := &runnerAuth{Doc: &RunnerDoc{ID: "rnr", Labels: []string{"linux"}, AllowAll: true, State: RunnerActive}}
 	job, err := e.svc.FetchJob(ctx(), runner, time.Millisecond)
 	if err != nil || job == nil {
 		t.Fatalf("fetch = %+v, %v", job, err)
@@ -340,44 +340,44 @@ func TestRunnerListAndRevokeRoleFailures(t *testing.T) {
 	e := newTestEnv(t)
 	admin := auth.Principal{Name: "admin", Admin: true}
 	reader := auth.Principal{Name: "reader"}
-	if _, err := e.svc.ListRunners(ctx(), "o/r", reader); err == nil {
+	if _, err := e.svc.ListRunners(ctx(), reader); err == nil {
 		t.Fatal("a reader must not list runners")
 	}
-	if err := e.svc.RevokeRunner(ctx(), "o/r", "abcdefgh1234", reader); err == nil {
+	if err := e.svc.RevokeRunner(ctx(), "abcdefgh1234", reader); err == nil {
 		t.Fatal("a reader must not revoke runners")
 	}
 	// The registry record vanished between the read and the CAS.
-	mint, _ := e.svc.MintRegistrationToken(ctx(), "o/r", admin)
-	doc, ver, _ := e.svc.loadRunner(ctx(), "o", "r", mint.ID)
+	mint, _ := e.svc.MintRegistrationToken(ctx(), admin, mintAllPolicy(""))
+	doc, ver, _ := e.svc.loadRunner(ctx(), mint.ID)
 	_ = doc
 	_ = ver
-	if err := e.store.Delete(ctx(), RunnerKey("o", "r", mint.ID), ""); err != nil {
+	if err := e.store.Delete(ctx(), RunnerKey(mint.ID), ""); err != nil {
 		t.Fatalf("delete: %v", err)
 	}
-	if err := e.svc.RevokeRunner(ctx(), "o/r", mint.ID, admin); err == nil {
+	if err := e.svc.RevokeRunner(ctx(), mint.ID, admin); err == nil {
 		t.Fatal("a vanished registry record must fail the revoke")
 	}
 	// A corrupt registry record.
-	mint2, _ := e.svc.MintRegistrationToken(ctx(), "o/r", admin)
-	if _, err := store.PutBytes(ctx(), e.store, RunnerKey("o", "r", mint2.ID), []byte("{"), store.PutOptions{Mode: store.PutOverwrite}); err != nil {
+	mint2, _ := e.svc.MintRegistrationToken(ctx(), admin, mintAllPolicy(""))
+	if _, err := store.PutBytes(ctx(), e.store, RunnerKey(mint2.ID), []byte("{"), store.PutOptions{Mode: store.PutOverwrite}); err != nil {
 		t.Fatalf("seed: %v", err)
 	}
-	if err := e.svc.RevokeRunner(ctx(), "o/r", mint2.ID, admin); err == nil {
+	if err := e.svc.RevokeRunner(ctx(), mint2.ID, admin); err == nil {
 		t.Fatal("a corrupt registry record must fail the revoke")
 	}
 	// Revoking twice is the idempotent branch.
-	mint3, _ := e.svc.MintRegistrationToken(ctx(), "o/r", admin)
-	if err := e.svc.RevokeRunner(ctx(), "o/r", mint3.ID, admin); err != nil {
+	mint3, _ := e.svc.MintRegistrationToken(ctx(), admin, mintAllPolicy(""))
+	if err := e.svc.RevokeRunner(ctx(), mint3.ID, admin); err != nil {
 		t.Fatalf("revoke: %v", err)
 	}
-	if err := e.svc.RevokeRunner(ctx(), "o/r", mint3.ID, admin); err != nil {
+	if err := e.svc.RevokeRunner(ctx(), mint3.ID, admin); err != nil {
 		t.Fatalf("revoke twice: %v", err)
 	}
 }
 
 func TestFetchLoopCancelAndTimeout(t *testing.T) {
 	e := newTestEnv(t)
-	runner := &runnerAuth{Owner: "o", Repo: "r", Doc: &RunnerDoc{ID: "rnr", Labels: []string{"ubuntu-latest"}, State: RunnerActive}}
+	runner := &runnerAuth{Doc: &RunnerDoc{ID: "rnr", Labels: []string{"linux"}, AllowAll: true, State: RunnerActive}}
 	// Nothing queued and the poll bounded by the request context: the loop
 	// parks on the wake channel and returns the context error.
 	wctx, wcancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
@@ -407,8 +407,8 @@ func TestProtocolHandlerErrorBranches(t *testing.T) {
 	e, fs, hh, _ := faultEnv(t)
 	admin := auth.Principal{Name: "admin", Admin: true}
 	hh.Auth = func(*http.Request) (auth.Principal, *auth.AuthError) { return admin, nil }
-	mint, _ := e.svc.MintRegistrationToken(ctx(), "o/r", admin)
-	res, err := e.svc.Register(ctx(), RegisterInput{Token: mint.Token, Labels: []string{"ubuntu-latest"}})
+	mint, _ := e.svc.MintRegistrationToken(ctx(), admin, mintAllPolicy(""))
+	res, err := e.svc.Register(ctx(), RegisterInput{Token: mint.Token, Labels: []string{"linux"}})
 	if err != nil {
 		t.Fatalf("register: %v", err)
 	}

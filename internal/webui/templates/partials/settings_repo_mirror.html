@@ -1,0 +1,209 @@
+{{/* partials/settings_repo_mirror.html — repo settings → Mirror (pull + push containers).
+   One settings tab per file: a new tab is a new settings_repo_<tab>.html
+   partial plus one dispatch line in pages/settings/repo.html — never a body
+   in the shell. Every panel receives the SettingsRepoPage, so a form can
+   build its action from .Owner/.Name. Anatomy: .card sections, the .setup-row
+   label/control pairing for forms, .data-table inside overflow-x-auto
+   (guideline §8). 390px: fields full width, toggle rows keep
+   label-left/control-right, tables scroll in place. */}}
+{{/* ---- Mirror (pull + push containers, Forgejo #627) -------------------- */}}
+{{define "settings-repo-mirror"}}
+<div class="space-y-4">
+  {{with .Mirror}}
+  <section class="card p-4" aria-label="Pull mirror">
+    <h3 class="card-header">Pull mirror</h3>
+    {{if not .Configured}}
+    <form class="grid gap-3" method="post" action="/{{$.Owner}}/{{$.Name}}/settings/mirror"
+          hx-post="/{{$.Owner}}/{{$.Name}}/settings/mirror" hx-target="#settings-panel" hx-select="#settings-panel" hx-swap="outerHTML"
+          aria-label="Create mirror">
+      <input type="hidden" name="mirror_action" value="put">
+      <div>
+        <label class="mb-1 block text-sm font-medium" for="mirror-upstream">Upstream URL</label>
+        <input class="input mono text-xs" id="mirror-upstream" name="upstream_url" type="text" required placeholder="https://example.com/acme/monorepo.git" value="{{.Upstream}}">
+        <p class="muted mt-1 text-[11px]">The first sync runs asynchronously once created.</p>
+      </div>
+      <div>
+        <label class="mb-1 block text-sm font-medium" for="mirror-schedule">Schedule</label>
+        <select class="input w-auto" id="mirror-schedule" name="schedule" aria-label="Schedule">
+          {{$sched := .Schedule}}{{range .Presets}}<option value="{{.ID}}"{{if eq .ID $sched}} selected{{end}}>{{.Label}}</option>{{end}}
+        </select>
+      </div>
+      <div><button type="submit" class="btn primary">create mirror</button></div>
+      {{if .Error}}<p class="err-line" role="alert">{{.Error}}</p>{{end}}
+    </form>
+    {{else}}
+    <dl class="grid grid-cols-1 gap-x-6 gap-y-1 text-sm sm:grid-cols-[minmax(10rem,30%)_1fr]">
+      <dt class="eyebrow">upstream</dt><dd class="break-all mono text-xs">{{.Upstream}}</dd>
+      <dt class="eyebrow">status</dt><dd><span class="chip chip-neutral">mirror · pull-only</span></dd>
+      <dt class="eyebrow">next sync</dt><dd>{{.NextSync}}</dd>
+      <dt class="eyebrow">last synced</dt><dd>{{.LastSynced}}</dd>
+      <dt class="eyebrow">last result</dt><dd class="break-words">{{.LastResult}}</dd>
+      {{if .Failures}}<dt class="eyebrow">consecutive failures</dt><dd>{{.Failures}} — backing off</dd>{{end}}
+    </dl>
+    <form class="mt-3 flex flex-wrap items-end gap-3" method="post" action="/{{$.Owner}}/{{$.Name}}/settings/mirror"
+          hx-post="/{{$.Owner}}/{{$.Name}}/settings/mirror" hx-target="#settings-panel" hx-select="#settings-panel" hx-swap="outerHTML"
+          aria-label="Mirror schedule">
+      <input type="hidden" name="mirror_action" value="schedule">
+      <div>
+        <label class="mb-1 block text-sm font-medium" for="mirror-schedule-set">Schedule</label>
+        <select class="input w-auto" id="mirror-schedule-set" name="schedule" aria-label="Schedule">
+          {{$sched := .Schedule}}{{range .Presets}}<option value="{{.ID}}"{{if eq .ID $sched}} selected{{end}}>{{.Label}}</option>{{end}}
+        </select>
+      </div>
+      <button type="submit" class="btn">save schedule</button>
+    </form>
+    <form class="mt-3 card grid gap-3 p-3" method="post" action="/{{$.Owner}}/{{$.Name}}/settings/mirror"
+          hx-post="/{{$.Owner}}/{{$.Name}}/settings/mirror" hx-target="#settings-panel" hx-select="#settings-panel" hx-swap="outerHTML"
+          aria-label="Sync now">
+      <input type="hidden" name="mirror_action" value="sync">
+      <h4 class="eyebrow">Sync now</h4>
+      <div>
+        <label class="mb-1 block text-sm font-medium" for="mirror-token">Token (optional)</label>
+        <input class="input md:max-w-md" id="mirror-token" name="token" type="password" autocomplete="new-password" value="">
+        <p class="muted mt-1 text-[11px]">Never stored — used for this sync only.</p>
+      </div>
+      <label class="flex items-center gap-2 text-sm"><input type="checkbox" name="force" value="true" class="h-4 w-4 check"> force resync</label>
+      <div class="flex flex-wrap gap-2">
+        <button type="submit" class="btn">sync now</button>
+      </div>
+    </form>
+    <form class="mt-3" method="post" action="/{{$.Owner}}/{{$.Name}}/settings/mirror"
+          hx-post="/{{$.Owner}}/{{$.Name}}/settings/mirror" hx-target="#settings-panel" hx-select="#settings-panel" hx-swap="outerHTML">
+      <input type="hidden" name="mirror_action" value="remove">
+      <button type="submit" class="btn danger">remove mirror</button>
+    </form>
+    {{end}}
+    {{if .Note}}<p class="mt-2 text-sm text-[var(--pd-ok)]">{{.Note}}</p>{{end}}
+  </section>
+  {{end}}
+
+  {{with .Push}}
+  <section class="card mt-4 p-4" aria-label="Push mirror">
+    <h3 class="card-header">Push mirror</h3>
+    {{if not .Configured}}
+    <form class="grid gap-3" method="post" action="/{{$.Owner}}/{{$.Name}}/settings/mirror"
+          hx-post="/{{$.Owner}}/{{$.Name}}/settings/mirror" hx-target="#settings-panel" hx-select="#settings-panel" hx-swap="outerHTML"
+          aria-label="Configure push mirror">
+      <p class="muted text-sm">This repository has no push mirror. Point it at an upstream to fan out every push there — refs and objects, after the push lands here. Scheduled re-sync is optional (default: on push only).</p>
+      <input type="hidden" name="push_action" value="put">
+      <div>
+        <label class="mb-1 block text-sm font-medium" for="push-upstream">Upstream URL</label>
+        <input class="input mono text-xs" id="push-upstream" name="upstream_url" type="text" required placeholder="https://example.com/backup/repo.git or ssh://example.com/acme/mirror.git" value="{{.Upstream}}">
+      </div>
+      <div>
+        <label class="mb-1 block text-sm font-medium" for="push-auth">Auth method</label>
+        <select class="input w-auto" id="push-auth" name="auth_kind" aria-label="Auth method">
+          {{$kind := .AuthKind}}{{range .AuthKinds}}<option value="{{.ID}}"{{if eq .ID $kind}} selected{{end}}>{{.Label}}</option>{{end}}
+        </select>
+      </div>
+      <div>
+        <label class="mb-1 block text-sm font-medium" for="push-username">Username (HTTPS password/token)</label>
+        <input class="input md:max-w-sm" id="push-username" name="username" type="text" autocomplete="off" value="{{.Username}}">
+      </div>
+      <div>
+        <label class="mb-1 block text-sm font-medium" for="push-password">Password <span class="muted">(write-only)</span></label>
+        <input class="input md:max-w-md" id="push-password" name="password" type="password" autocomplete="new-password" value="">
+      </div>
+      <div>
+        <label class="mb-1 block text-sm font-medium" for="push-token">Access token <span class="muted">(write-only)</span></label>
+        <input class="input md:max-w-md" id="push-token" name="token" type="password" autocomplete="off" value="">
+      </div>
+      <div>
+        <label class="mb-1 block text-sm font-medium" for="push-private-key">SSH private key <span class="muted">(write-only; or generate after creating)</span></label>
+        <textarea class="input mono text-xs" id="push-private-key" name="ssh_private_key" rows="3" spellcheck="false" autocomplete="off"></textarea>
+      </div>
+      <div>
+        <label class="mb-1 block text-sm font-medium" for="push-known-hosts">Known hosts (optional)</label>
+        <textarea class="input mono text-xs" id="push-known-hosts" name="ssh_known_hosts" rows="2" spellcheck="false" placeholder="blank = trust on first use">{{.KnownHosts}}</textarea>
+      </div>
+      <div>
+        <label class="mb-1 block text-sm font-medium" for="push-schedule">Schedule</label>
+        <select class="input w-auto" id="push-schedule" name="schedule" aria-label="Schedule">
+          {{$sched := .Schedule}}{{range .Presets}}<option value="{{.ID}}"{{if eq .ID $sched}} selected{{end}}>{{.Label}}</option>{{end}}
+        </select>
+      </div>
+      <label class="flex items-center gap-2 text-sm"><input type="checkbox" name="dangerous" value="true" class="h-4 w-4 check"> allow a host outside the import allowlist / private network</label>
+      <div><button type="submit" class="btn">configure push mirror</button></div>
+      {{if .Error}}<p class="err-line" role="alert">{{.Error}}</p>{{end}}
+    </form>
+    {{else}}
+    <dl class="grid grid-cols-1 gap-x-6 gap-y-1 text-sm sm:grid-cols-[minmax(10rem,30%)_1fr]">
+      <dt class="eyebrow">upstream</dt><dd class="break-all mono text-xs">{{.Upstream}}</dd>
+      <dt class="eyebrow">status</dt><dd><span class="chip chip-neutral">mirror · push</span></dd>
+      <dt class="eyebrow">auth</dt><dd>{{.AuthLabel}}{{if .Username}} · {{.Username}}{{end}}{{if .HasSecret}} · secret stored ({{.SecretHint}}){{else}} · no secret stored{{end}}</dd>
+      {{if .Fingerprint}}<dt class="eyebrow">deploy key fingerprint</dt><dd class="break-all mono text-xs">{{.Fingerprint}}</dd>{{end}}
+      {{if .HostKey}}<dt class="eyebrow">host key</dt><dd class="break-all mono text-xs">{{.HostKey}}</dd>{{end}}
+      <dt class="eyebrow">sync</dt><dd>{{.NextSync}}</dd>
+      <dt class="eyebrow">last synced</dt><dd>{{.LastSynced}}</dd>
+      <dt class="eyebrow">last result</dt><dd class="break-words">{{.LastResult}}</dd>
+    </dl>
+    <form class="mt-3 grid gap-3" method="post" action="/{{$.Owner}}/{{$.Name}}/settings/mirror"
+          hx-post="/{{$.Owner}}/{{$.Name}}/settings/mirror" hx-target="#settings-panel" hx-select="#settings-panel" hx-swap="outerHTML"
+          aria-label="Push mirror schedule and secrets">
+      <input type="hidden" name="push_action" value="schedule">
+      <div class="grid gap-3 sm:grid-cols-2">
+        <div>
+          <label class="mb-1 block text-sm font-medium" for="push-schedule-set">Schedule</label>
+          <select class="input w-auto" id="push-schedule-set" name="schedule" aria-label="Schedule">
+            {{$sched := .Schedule}}{{range .Presets}}<option value="{{.ID}}"{{if eq .ID $sched}} selected{{end}}>{{.Label}}</option>{{end}}
+          </select>
+        </div>
+        <div>
+          <label class="mb-1 block text-sm font-medium" for="push-auth-set">Auth method</label>
+          <select class="input w-auto" id="push-auth-set" name="auth_kind" aria-label="Auth method">
+            {{$kind := .AuthKind}}{{range .AuthKinds}}<option value="{{.ID}}"{{if eq .ID $kind}} selected{{end}}>{{.Label}}</option>{{end}}
+          </select>
+        </div>
+        <div>
+          <label class="mb-1 block text-sm font-medium" for="push-username-set">Username</label>
+          <input class="input" id="push-username-set" name="username" type="text" autocomplete="off" value="{{.Username}}">
+        </div>
+        <div>
+          <label class="mb-1 block text-sm font-medium" for="push-secret">Password or token <span class="muted">(blank = keep)</span></label>
+          <input class="input md:max-w-md" id="push-secret" name="token" type="password" autocomplete="new-password" value="" placeholder="write-only">
+        </div>
+        <div>
+          <label class="mb-1 block text-sm font-medium" for="push-password-set">Password (HTTPS) <span class="muted">(blank = keep)</span></label>
+          <input class="input md:max-w-md" id="push-password-set" name="password" type="password" autocomplete="new-password" value="">
+        </div>
+        <div>
+          <label class="mb-1 block text-sm font-medium" for="push-known-hosts-set">Known hosts</label>
+          <textarea class="input mono text-xs" id="push-known-hosts-set" name="ssh_known_hosts" rows="2" spellcheck="false">{{.KnownHosts}}</textarea>
+        </div>
+      </div>
+      <div><button type="submit" class="btn">save</button></div>
+    </form>
+    <div class="mt-4 card p-3">
+      <h4 class="eyebrow mb-2">Deploy key</h4>
+      {{if .PublicKey}}
+      <label class="mb-1 block text-sm font-medium" for="push-public-key">Public key (install it upstream)</label>
+      <textarea class="input mono text-xs" id="push-public-key" rows="3" readonly>{{.PublicKey}}</textarea>
+      {{end}}
+      <form class="mt-2 flex flex-wrap items-end gap-3" method="post" action="/{{$.Owner}}/{{$.Name}}/settings/mirror"
+            hx-post="/{{$.Owner}}/{{$.Name}}/settings/mirror" hx-target="#settings-panel" hx-select="#settings-panel" hx-swap="outerHTML">
+        <input type="hidden" name="push_action" value="keygen">
+        <div class="min-w-0 flex-1">
+          <label class="mb-1 block text-sm font-medium" for="push-keygen-hosts">Known hosts for the generated key (optional)</label>
+          <input class="input mono text-xs" id="push-keygen-hosts" name="ssh_known_hosts" type="text" value="{{.KnownHosts}}">
+        </div>
+        <button type="submit" class="btn">generate keypair</button>
+      </form>
+    </div>
+    <form class="mt-3 flex flex-wrap items-end gap-3" method="post" action="/{{$.Owner}}/{{$.Name}}/settings/mirror"
+          hx-post="/{{$.Owner}}/{{$.Name}}/settings/mirror" hx-target="#settings-panel" hx-select="#settings-panel" hx-swap="outerHTML">
+      <input type="hidden" name="push_action" value="sync">
+      <label class="flex items-center gap-2 text-sm"><input type="checkbox" name="force" value="true" class="h-4 w-4 check"> force</label>
+      <button type="submit" class="btn">sync now</button>
+    </form>
+    <form class="mt-3" method="post" action="/{{$.Owner}}/{{$.Name}}/settings/mirror"
+          hx-post="/{{$.Owner}}/{{$.Name}}/settings/mirror" hx-target="#settings-panel" hx-select="#settings-panel" hx-swap="outerHTML">
+      <input type="hidden" name="push_action" value="remove">
+      <button type="submit" class="btn danger">remove push mirror</button>
+    </form>
+    {{end}}
+    {{if .Note}}<p class="mt-2 text-sm text-[var(--pd-ok)]">{{.Note}}</p>{{end}}
+  </section>
+  {{end}}
+  {{if and (not .Mirror) (not .Push)}}{{template "settings-repo-notwired" .}}{{end}}
+</div>
+{{end}}

@@ -35,8 +35,9 @@ type repoFakeView struct {
 	summary    api.SummaryData
 	summaryErr error
 
-	resolution api.Resolution
-	resolveErr error
+	resolution    api.Resolution
+	resolveErr    error
+	resolveFailOn string
 
 	tree    api.TreeResult
 	treeErr error
@@ -55,6 +56,18 @@ type repoFakeView struct {
 
 	overview    api.OverviewData
 	overviewErr error
+
+	blame    api.BlameResult
+	blameErr error
+	blameN   int
+
+	branches    api.BranchOverview
+	branchesErr error
+	branchesN   int
+
+	compare    api.CompareResult
+	compareErr error
+	compareN   int
 
 	syncErr error
 
@@ -92,7 +105,7 @@ func (v *repoFakeView) Sync(context.Context, git.RepoId, api.SyncLevel) error {
 
 func (v *repoFakeView) Resolve(_ context.Context, _ git.RepoId, rest string) (api.Resolution, error) {
 	v.resolveN++
-	if v.resolveErr != nil {
+	if v.resolveErr != nil && (v.resolveFailOn == "" || v.resolveFailOn == rest) {
 		return api.Resolution{}, v.resolveErr
 	}
 	r := v.resolution
@@ -274,10 +287,7 @@ func (f *repoFixture) newServer(cfg *config.Config) *Server {
 	if f.tasks != nil {
 		apiEnv.Tasks = f.tasks
 	}
-	s, err := New(Env{Cfg: cfg, API: apiEnv, Version: "test"})
-	if err != nil {
-		f.t.Fatalf("webui.New: %v", err)
-	}
+	s := newTestServer(f.t, Env{Cfg: cfg, API: apiEnv, Version: "test"})
 	f.s = s
 	f.rebind()
 	return s
@@ -420,6 +430,7 @@ func activeTabOf(t *testing.T, body string) string {
 // --- tree -------------------------------------------------------------------
 
 func TestRepoTreeRootRendersListing(t *testing.T) {
+	t.Parallel()
 	f := newRepoFixture(t, true)
 	f.view.tree = api.TreeResult{
 		Ref: "refs/heads/main",
@@ -435,7 +446,7 @@ func TestRepoTreeRootRendersListing(t *testing.T) {
 		`class="repo-header`,
 		`/demo/spindle/blob/main/main.go`,
 		`/demo/spindle/tree/main/pkg`,
-		`<h1>Hello</h1>`,
+		`<h2>Hello</h2>`,
 		`Welcome.`,
 		`README.md`,
 	} {
@@ -452,7 +463,7 @@ func TestRepoTreeRootRendersListing(t *testing.T) {
 		t.Error("tree page lost the in-place scroll wrapper")
 	}
 	// Tab strip: Code..Settings in order, Code active at the root.
-	if got, want := strings.Join(tabIDs(t, body), ","), "code,commits,tags,packages,issues,pulls,threads,releases,settings"; got != want {
+	if got, want := strings.Join(tabIDs(t, body), ","), "code,commits,tags,packages,issues,pulls,threads,releases,insights,settings"; got != want {
 		t.Errorf("tabs = %s, want %s (Checks hidden: has_checks=false)", got, want)
 	}
 	if got := activeTabOf(t, body); got != "code" {
@@ -465,6 +476,7 @@ func TestRepoTreeRootRendersListing(t *testing.T) {
 }
 
 func TestRepoTreeSubpathBreadcrumbKeepsShortRef(t *testing.T) {
+	t.Parallel()
 	f := newRepoFixture(t, true)
 	f.view.tree = api.TreeResult{
 		Ref:     "refs/heads/main",
@@ -491,6 +503,7 @@ func TestRepoTreeSubpathBreadcrumbKeepsShortRef(t *testing.T) {
 }
 
 func TestRepoTreeDoctabSelection(t *testing.T) {
+	t.Parallel()
 	f := newRepoFixture(t, true)
 	f.view.tree = api.TreeResult{
 		Ref: "refs/heads/main",
@@ -506,7 +519,7 @@ func TestRepoTreeDoctabSelection(t *testing.T) {
 	if !strings.Contains(body, `aria-current="page"`) {
 		t.Error("no selected doc tab")
 	}
-	if !strings.Contains(body, "<h1>Read me</h1>") {
+	if !strings.Contains(body, "<h2>Read me</h2>") {
 		t.Error("README body missing")
 	}
 	if f.view.blobN != 0 {
@@ -515,7 +528,7 @@ func TestRepoTreeDoctabSelection(t *testing.T) {
 	// Selecting the other tab fetches the blob and renders markdown.
 	f.view.blob = api.BlobResult{Name: "guide.md", Path: "guide.md", Size: 8, Contents: []byte("## Guide")}
 	body = f.mustGet("/demo/spindle?doc=guide.md", http.StatusOK)
-	if !strings.Contains(body, "<h2>Guide</h2>") {
+	if !strings.Contains(body, "<h3>Guide</h3>") {
 		t.Error("selected doc body missing")
 	}
 	if f.view.blobN != 1 {
@@ -524,6 +537,7 @@ func TestRepoTreeDoctabSelection(t *testing.T) {
 }
 
 func TestRepoTreeEmptyRepoIsAGuide(t *testing.T) {
+	t.Parallel()
 	f := newRepoFixture(t, true)
 	f.view.summary = api.SummaryData{Health: api.RepoHealthEmpty}
 	body := f.mustGet("/demo/spindle", http.StatusOK)
@@ -566,6 +580,7 @@ func TestRepoEmptyMirrorNeverShowsPushGuide(t *testing.T) {
 // --- blob -------------------------------------------------------------------
 
 func TestRepoBlobPlainCode(t *testing.T) {
+	t.Parallel()
 	f := newRepoFixture(t, true)
 	f.view.blob = api.BlobResult{
 		Ref: "refs/heads/main", Name: "main.go", Path: "main.go", Size: 25,
@@ -598,6 +613,7 @@ func TestRepoBlobPlainCode(t *testing.T) {
 }
 
 func TestRepoBlobEscapesAndEmptySplit(t *testing.T) {
+	t.Parallel()
 	f := newRepoFixture(t, true)
 	f.view.blob = api.BlobResult{Ref: "refs/heads/main", Name: "a.txt", Path: "a.txt", Size: 4, Contents: []byte("a\nb\n")}
 	body := f.mustGet("/demo/spindle/blob/main/a.txt", http.StatusOK)
@@ -618,12 +634,51 @@ func TestRepoBlobEscapesAndEmptySplit(t *testing.T) {
 	}
 }
 
+func TestRepoBlobHeaderRawAndSHA(t *testing.T) {
+	t.Parallel()
+	f := newRepoFixture(t, true)
+	blobSHA := strings.Repeat("d", 40)
+	f.view.blob = api.BlobResult{
+		Ref: "refs/heads/main", SHA: strings.Repeat("a", 40), ObjectSHA: blobSHA,
+		Name: "README.md", Path: "README.md", Size: 20, Contents: []byte("# Title\n"),
+	}
+	body := f.mustGet("/demo/spindle/blob/main/README.md", http.StatusOK)
+	for _, want := range []string{
+		`/demo/spindle/api/blob/main/README.md?raw`,
+		"20b · " + blobSHA[:10], // the size·sha inventory, formatted with the blob oid
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("blob header missing %q", want)
+		}
+	}
+
+	// A non-default ref is echoed into the raw href: visiting a tag resolves
+	// to that tag, never to whichever branch happens to share the commit.
+	f = newRepoFixture(t, true)
+	f.view.resolution = api.Resolution{Ref: "refs/tags/v1.0", SHA: strings.Repeat("a", 40), Kind: "tag"}
+	f.view.blob = api.BlobResult{
+		Ref: "refs/heads/main", SHA: strings.Repeat("a", 40), ObjectSHA: blobSHA,
+		Name: "README.md", Path: "README.md", Size: 20, Contents: []byte("# Title\n"),
+	}
+	body = f.mustGet("/demo/spindle/blob/v1.0/README.md", http.StatusOK)
+	if !strings.Contains(body, `/demo/spindle/api/blob/v1.0/README.md?raw`) {
+		t.Errorf("tag visit did not echo the tag in the raw href: %.600s", body)
+	}
+	if strings.Contains(body, `/api/blob/main/README.md?raw`) {
+		t.Error("tag visit echoed the branch instead of the requested tag")
+	}
+}
+
 func TestRepoBlobPlaceholders(t *testing.T) {
+	t.Parallel()
 	f := newRepoFixture(t, true)
 	f.view.blob = api.BlobResult{Name: "big.bin", Path: "big.bin", Size: 5 << 20, TooLarge: true}
 	body := f.mustGet("/demo/spindle/blob/main/big.bin", http.StatusOK)
 	if !strings.Contains(body, "This file is too large to render") {
 		t.Error("too-large copy missing")
+	}
+	if !strings.Contains(body, `href="/demo/spindle/api/blob/main/big.bin?raw"`) {
+		t.Error("too-large branch renders no raw link")
 	}
 	if strings.Contains(body, "binary file,") {
 		t.Error("too-large page also rendered the binary copy")
@@ -640,10 +695,11 @@ func TestRepoBlobPlaceholders(t *testing.T) {
 }
 
 func TestRepoBlobMarkdownPreviewAndCode(t *testing.T) {
+	t.Parallel()
 	f := newRepoFixture(t, true)
 	f.view.blob = api.BlobResult{Name: "README.md", Path: "README.md", Size: 20, Contents: []byte("# Title\n\n`x`")}
 	body := f.mustGet("/demo/spindle/blob/main/README.md", http.StatusOK)
-	if !strings.Contains(body, "<h1>Title</h1>") {
+	if !strings.Contains(body, "<h2>Title</h2>") {
 		t.Error("markdown preview body missing")
 	}
 	if !strings.Contains(body, "?view=code") {
@@ -654,7 +710,7 @@ func TestRepoBlobMarkdownPreviewAndCode(t *testing.T) {
 	if !strings.Contains(body, "code-view") {
 		t.Error("code view did not render")
 	}
-	if strings.Contains(body, "<h1>Title</h1>") {
+	if strings.Contains(body, "<h2>Title</h2>") {
 		t.Error("code view still rendered the markdown preview")
 	}
 }
@@ -677,6 +733,7 @@ func commitsFixture(sha string) []api.Commit {
 }
 
 func TestRepoCommitsListAndPager(t *testing.T) {
+	t.Parallel()
 	f := newRepoFixture(t, true)
 	sha := strings.Repeat("a", 40)
 	f.view.commits = api.CommitPage{Ref: "refs/heads/main", SHA: sha, Commits: commitsFixture(sha), More: true}
@@ -714,6 +771,7 @@ func olderHrefOf(t *testing.T, body string) string {
 }
 
 func TestRepoCommitsEmptyWindowAndGraph(t *testing.T) {
+	t.Parallel()
 	f := newRepoFixture(t, true)
 	sha := strings.Repeat("a", 40)
 	f.view.commits = api.CommitPage{Ref: "refs/heads/main", SHA: sha}
@@ -777,6 +835,7 @@ func TestCommitPageChecksPanel(t *testing.T) {
 }
 
 func TestRepoCommitDetail(t *testing.T) {
+	t.Parallel()
 	f := newRepoFixture(t, true)
 	sha := strings.Repeat("a", 40)
 	patch := "diff --git a/a.txt b/a.txt\nindex 111..222 100644\n--- a/a.txt\n+++ b/a.txt\n@@ -1,2 +1,2 @@\n hello\n-old\n+new\n"
@@ -834,6 +893,7 @@ func TestRepoCommitDetail(t *testing.T) {
 }
 
 func TestRepoCommitBinaryFile(t *testing.T) {
+	t.Parallel()
 	f := newRepoFixture(t, true)
 	sha := strings.Repeat("a", 40)
 	f.view.detail = api.CommitDetail{
@@ -884,6 +944,7 @@ func walFixture() api.OverviewData {
 }
 
 func TestRepoWALRendersCards(t *testing.T) {
+	t.Parallel()
 	f := newRepoFixture(t, true)
 	f.tasks = &repoFakeTasks{
 		ops: []api.OpSpec{
@@ -940,6 +1001,7 @@ func TestRepoWALRendersCards(t *testing.T) {
 }
 
 func TestRepoWALWithoutFsckOrBundles(t *testing.T) {
+	t.Parallel()
 	f := newRepoFixture(t, true)
 	f.view.overview = api.OverviewData{
 		Hostname: "node-1",
@@ -966,6 +1028,7 @@ func TestRepoWALWithoutFsckOrBundles(t *testing.T) {
 // --- gates and 404s ---------------------------------------------------------
 
 func TestRepoMissingRepoIs404(t *testing.T) {
+	t.Parallel()
 	f := newRepoFixture(t, true)
 	code, _ := f.get("/demo/nope")
 	if code != http.StatusNotFound {
@@ -979,6 +1042,7 @@ func TestRepoMissingRepoIs404(t *testing.T) {
 }
 
 func TestRepoMissingRefOrPathIs404(t *testing.T) {
+	t.Parallel()
 	f := newRepoFixture(t, true)
 	f.view.resolveErr = fmt.Errorf("%w: nope", api.ErrNotFound)
 	code, _ := f.get("/demo/spindle/tree/nope")
@@ -999,6 +1063,7 @@ func TestRepoMissingRefOrPathIs404(t *testing.T) {
 }
 
 func TestRepoVisibilityGate(t *testing.T) {
+	t.Parallel()
 	// No identity surface + anonymous_read=false + anonymous → 401.
 	f := newRepoFixture(t, false)
 	if code, _ := f.get("/demo/spindle"); code != http.StatusUnauthorized {
@@ -1035,6 +1100,7 @@ func (f *repoFixture) cfgForTest() *config.Config {
 }
 
 func TestRepoMethodNotAllowed(t *testing.T) {
+	t.Parallel()
 	// The page mux owns GET/HEAD only. A write method is NOT answered by the
 	// provider (Serve → false), so the server's repo dispatch keeps answering
 	// 405 + Allow: GET, HEAD — the exact wire contract from before the move.
@@ -1047,6 +1113,7 @@ func TestRepoMethodNotAllowed(t *testing.T) {
 }
 
 func TestRepoDotGitPaths(t *testing.T) {
+	t.Parallel()
 	f := newRepoFixture(t, true)
 	f.view.tree = api.TreeResult{Ref: "refs/heads/main", Entries: []api.TreeEntry{{Name: "a.go", Type: "blob", Mode: "100644", Size: 3, SHA: strings.Repeat("c", 40)}}}
 	body := f.mustGet("/demo/spindle.git", http.StatusOK)
@@ -1061,6 +1128,7 @@ func TestRepoDotGitPaths(t *testing.T) {
 // --- unit helpers -----------------------------------------------------------
 
 func TestRepoTabSection(t *testing.T) {
+	t.Parallel()
 	cases := map[string]string{
 		"/o/r":                         "code",
 		"/o/r/tree/main":               "code",
@@ -1074,6 +1142,7 @@ func TestRepoTabSection(t *testing.T) {
 		"/o/r/checks":                  "checks",
 		"/o/r/threads":                 "threads",
 		"/o/r/releases":                "releases",
+		"/o/r/insights":                "insights",
 		"/o/r/wal":                     "settings",
 		"/o/r/settings":                "settings",
 		"/o/r/unknown":                 "code",
@@ -1093,8 +1162,8 @@ func TestRepoTabGating(t *testing.T) {
 	f.view.summary.Features = &feats
 	f.view.summary.Health = api.RepoHealthHealthy
 	body := f.mustGet("/demo/spindle", http.StatusOK)
-	if got := strings.Join(tabIDs(t, body), ","); got != "code,commits,tags,packages,pulls,threads,settings" {
-		t.Errorf("tabs = %s, want code,commits,tags,packages,pulls,threads,settings", got)
+	if got := strings.Join(tabIDs(t, body), ","); got != "code,commits,tags,packages,pulls,threads,insights,settings" {
+		t.Errorf("tabs = %s, want code,commits,tags,packages,pulls,threads,insights,settings", got)
 	}
 
 	// A feature-disabled section re-highlights onto Code (#522). The path is
@@ -1166,6 +1235,7 @@ func TestRepoChromeProjectsHeader(t *testing.T) {
 // the masthead carries no static ref pill — it would compete with the selector
 // that actually changes what you are looking at.
 func TestRepoBranchSelector(t *testing.T) {
+	t.Parallel()
 	f := newRepoFixture(t, true)
 	f.view.refs = []api.Ref{{Name: "refs/heads/main", SHA: strings.Repeat("a", 40)}}
 	body := f.mustGet("/demo/spindle", http.StatusOK)
@@ -1184,6 +1254,7 @@ func TestRepoBranchSelector(t *testing.T) {
 }
 
 func TestRepoLinkify(t *testing.T) {
+	t.Parallel()
 	sha40 := strings.Repeat("a", 40)
 	sha64 := strings.Repeat("b", 64)
 	got := string(repoLinkify("hi https://x.test/y. "+sha40+" "+sha64+" <b>", "/o/r"))
@@ -1203,6 +1274,7 @@ func TestRepoLinkify(t *testing.T) {
 }
 
 func TestRepoGroupTrailers(t *testing.T) {
+	t.Parallel()
 	groups := groupTrailers([]api.Trailer{
 		{Key: "Custom", Value: "plain"},
 		{Key: "Co-authored-by", Value: "Ada <ada@example.test>"},
@@ -1223,6 +1295,7 @@ func TestRepoGroupTrailers(t *testing.T) {
 }
 
 func TestRepoFormatters(t *testing.T) {
+	t.Parallel()
 	if got := fmtSize(92); got != "92b" {
 		t.Errorf("fmtSize(92) = %s", got)
 	}
@@ -1266,6 +1339,7 @@ func TestRepoFormatters(t *testing.T) {
 }
 
 func TestNextSyncText(t *testing.T) {
+	t.Parallel()
 	now := time.Date(2026, 1, 2, 3, 0, 0, 0, time.UTC)
 	cases := []struct {
 		name string
@@ -1287,6 +1361,7 @@ func TestNextSyncText(t *testing.T) {
 }
 
 func TestDocCandidates(t *testing.T) {
+	t.Parallel()
 	entries := []api.TreeEntry{
 		{Name: "zzz.md", Type: "blob"},
 		{Name: "README.md", Type: "blob"},
@@ -1314,13 +1389,11 @@ func TestRepoBindRepo(t *testing.T) {
 }
 
 func TestRepoOpenErrorPaths(t *testing.T) {
+	t.Parallel()
 	// No RepoView wired → 503 (the page cannot pretend the repo is empty).
 	f := newRepoFixture(t, true)
 	cfg := f.cfgForTest()
-	s, err := New(Env{Cfg: cfg, API: &api.Env{Cfg: cfg}, Version: "test"})
-	if err != nil {
-		t.Fatalf("New: %v", err)
-	}
+	s := newTestServer(t, Env{Cfg: cfg, API: &api.Env{Cfg: cfg}, Version: "test"})
 	s.BindAuth(pages.Auth{Authenticate: func(*http.Request) (auth.Principal, *auth.AuthError) {
 		return auth.Anonymous(), nil
 	}})
@@ -1355,6 +1428,7 @@ func TestRepoOpenErrorPaths(t *testing.T) {
 }
 
 func TestRepoErrorTextTwin(t *testing.T) {
+	t.Parallel()
 	f := newRepoFixture(t, true)
 	req := httptest.NewRequest(http.MethodGet, "/demo/nope", nil)
 	req.Header.Set("Accept", "text/plain")
@@ -1372,6 +1446,7 @@ func TestRepoErrorTextTwin(t *testing.T) {
 }
 
 func TestRepoChromeFor(t *testing.T) {
+	t.Parallel()
 	f := newRepoFixture(t, true)
 	req := httptest.NewRequest(http.MethodGet, "/demo/spindle/issues", nil)
 	rec := httptest.NewRecorder()
@@ -1412,6 +1487,7 @@ func TestRepoChromeFor(t *testing.T) {
 }
 
 func TestRepoBaseAndSSHURL(t *testing.T) {
+	t.Parallel()
 	f := newRepoFixture(t, true)
 	req := httptest.NewRequest(http.MethodGet, "/", nil)
 	req.Host = "example.test"
@@ -1490,6 +1566,7 @@ func TestRepoPlaceholderGuide(t *testing.T) {
 }
 
 func TestRepoBlobErrorAndEmpty(t *testing.T) {
+	t.Parallel()
 	f := newRepoFixture(t, true)
 	f.view.blobErr = fmt.Errorf("%w: object", api.ErrNotFound)
 	if code, _ := f.get("/demo/spindle/blob/main/a.txt"); code != http.StatusNotFound {
@@ -1510,13 +1587,15 @@ func TestRepoBlobErrorAndEmpty(t *testing.T) {
 	if f.view.blobN != 0 {
 		t.Errorf("empty repo blob reads = %d, want 0", f.view.blobN)
 	}
-	// Unresolved ref (raw sha view) → no raw link.
+	// Sha-addressed view: no ref resolves, so the raw link echoes the sha —
+	// the raw lane resolves a full sha through the same §9.3 split.
 	f = newRepoFixture(t, true)
-	f.view.resolution = api.Resolution{SHA: strings.Repeat("a", 40), Kind: "commit"}
+	sha := strings.Repeat("a", 40)
+	f.view.resolution = api.Resolution{SHA: sha, Kind: "commit"}
 	f.view.blob = api.BlobResult{Name: "a.txt", Path: "a.txt", Size: 1, Contents: []byte("x")}
-	body = f.mustGet("/demo/spindle/blob/"+strings.Repeat("a", 40)+"/a.txt", http.StatusOK)
-	if strings.Contains(body, "?raw") {
-		t.Error("raw link rendered for an unresolved ref")
+	body = f.mustGet("/demo/spindle/blob/"+sha+"/a.txt", http.StatusOK)
+	if want := `/demo/spindle/api/blob/` + sha + `/a.txt?raw`; !strings.Contains(body, want) {
+		t.Errorf("sha-addressed blob missing raw link %q", want)
 	}
 	// Nested path derives the display name and breadcrumb.
 	f = newRepoFixture(t, true)
@@ -1530,6 +1609,7 @@ func TestRepoBlobErrorAndEmpty(t *testing.T) {
 }
 
 func TestRepoCommitsErrorAndEmpty(t *testing.T) {
+	t.Parallel()
 	f := newRepoFixture(t, true)
 	f.view.commitsErr = fmt.Errorf("%w: no such ref", api.ErrNotFound)
 	if code, _ := f.get("/demo/spindle/commits"); code != http.StatusNotFound {
@@ -1560,6 +1640,7 @@ func TestRepoCommitsErrorAndEmpty(t *testing.T) {
 }
 
 func TestRepoCommitFlagsAndNoMessage(t *testing.T) {
+	t.Parallel()
 	f := newRepoFixture(t, true)
 	sha := strings.Repeat("a", 40)
 	f.view.detail = api.CommitDetail{
@@ -1592,6 +1673,7 @@ func TestRepoCommitFlagsAndNoMessage(t *testing.T) {
 }
 
 func TestRepoWALHelpers(t *testing.T) {
+	t.Parallel()
 	if got := anyLabel(nil, "@"); got != "" {
 		t.Errorf("anyLabel(nil) = %q", got)
 	}
@@ -1636,6 +1718,7 @@ func TestRepoWALHelpers(t *testing.T) {
 }
 
 func TestRepoFormatterEdges(t *testing.T) {
+	t.Parallel()
 	if got := fmtMode("755", "blob"); got != ".rwxr-xr-x" {
 		t.Errorf("fmtMode(755) = %q", got)
 	}
@@ -1661,6 +1744,7 @@ func TestRepoFormatterEdges(t *testing.T) {
 }
 
 func TestRepoDocHelpers(t *testing.T) {
+	t.Parallel()
 	if got := docPath("", "README.md"); got != "README.md" {
 		t.Errorf("docPath(root) = %q", got)
 	}
@@ -1676,6 +1760,7 @@ func TestRepoDocHelpers(t *testing.T) {
 }
 
 func TestRepoGateAndChromeEdges(t *testing.T) {
+	t.Parallel()
 	f := newRepoFixture(t, true)
 	// A repo segment that trims to nothing is a malformed id → 404.
 	if code, _ := f.get("/demo/.git"); code != http.StatusNotFound {
@@ -1717,6 +1802,7 @@ func TestRepoGateAndChromeEdges(t *testing.T) {
 }
 
 func TestRepoTreeAndBlobMoreErrors(t *testing.T) {
+	t.Parallel()
 	// Tree failure (generic) → 503; doc blob failure → 404.
 	f := newRepoFixture(t, true)
 	f.view.treeErr = errors.New("engine down")
@@ -1773,6 +1859,7 @@ func TestRepoTreeAndBlobMoreErrors(t *testing.T) {
 }
 
 func TestRepoCommitsAndCommitMoreErrors(t *testing.T) {
+	t.Parallel()
 	f := newRepoFixture(t, true)
 	f.view.resolveErr = errors.New("engine down")
 	if code, _ := f.get("/demo/spindle/commits"); code != http.StatusServiceUnavailable {
@@ -1807,6 +1894,7 @@ func TestRepoCommitsAndCommitMoreErrors(t *testing.T) {
 }
 
 func TestRepoWALFsckSampleAndTasks(t *testing.T) {
+	t.Parallel()
 	f := newRepoFixture(t, true)
 	at := time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)
 	ov := walFixture()
@@ -1831,6 +1919,7 @@ func TestRepoWALFsckSampleAndTasks(t *testing.T) {
 }
 
 func TestRepoLinkifyWithoutRepoBase(t *testing.T) {
+	t.Parallel()
 	got := string(repoLinkify("sha "+strings.Repeat("a", 40), ""))
 	if strings.Contains(got, "/commit/") {
 		t.Errorf("repo-less linkify linked a sha: %s", got)
@@ -1841,6 +1930,7 @@ func TestRepoLinkifyWithoutRepoBase(t *testing.T) {
 }
 
 func TestRepoHelperRemainders(t *testing.T) {
+	t.Parallel()
 	if containsString([]string{"a"}, "b") {
 		t.Error("containsString found a missing value")
 	}
@@ -1868,6 +1958,7 @@ func TestRepoHelperRemainders(t *testing.T) {
 }
 
 func TestRepoDocPlaceholders(t *testing.T) {
+	t.Parallel()
 	f := newRepoFixture(t, true)
 	f.view.tree = api.TreeResult{Entries: []api.TreeEntry{{Name: "README.md", Type: "blob"}}}
 	f.view.blob = api.BlobResult{Name: "README.md", Path: "README.md", Size: 3 << 20, TooLarge: true}
@@ -1889,6 +1980,7 @@ func TestRepoDocPlaceholders(t *testing.T) {
 }
 
 func TestRepoCommitsAndWALRemainders(t *testing.T) {
+	t.Parallel()
 	f := newRepoFixture(t, true)
 	sha := strings.Repeat("a", 40)
 	// A page whose Ref is empty falls back to the short sha in the crumb.
@@ -1911,6 +2003,7 @@ func TestRepoCommitsAndWALRemainders(t *testing.T) {
 }
 
 func TestRepoRouteDataFailures(t *testing.T) {
+	t.Parallel()
 	for _, path := range []string{
 		"/demo/spindle/blob/main/a.txt",
 		"/demo/spindle/commits",
@@ -1965,6 +2058,7 @@ func TestRepoCommitsGraphPagerAndVisibility(t *testing.T) {
 }
 
 func TestRepoCommitSHAFallbackAndBinaryStatus(t *testing.T) {
+	t.Parallel()
 	f := newRepoFixture(t, true)
 	requested := strings.Repeat("a", 40)
 	f.view.detail = api.CommitDetail{
@@ -1981,6 +2075,7 @@ func TestRepoCommitSHAFallbackAndBinaryStatus(t *testing.T) {
 }
 
 func TestRepoWALRemainingRows(t *testing.T) {
+	t.Parallel()
 	f := newRepoFixture(t, true)
 	at := time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)
 	ov := api.OverviewData{
@@ -2007,12 +2102,14 @@ func TestRepoWALRemainingRows(t *testing.T) {
 }
 
 func TestRepoModeFallbackBits(t *testing.T) {
+	t.Parallel()
 	if got := fmtMode("000", "blob"); got != ".---------" {
 		t.Errorf("fmtMode(000) = %q", got)
 	}
 }
 
 func TestRepoRemainingBranches(t *testing.T) {
+	t.Parallel()
 	// Blob with no Name/Path in the payload: the handler derives both from the
 	// resolved path.
 	f := newRepoFixture(t, true)
@@ -2072,6 +2169,7 @@ func TestRepoRemainingBranches(t *testing.T) {
 }
 
 func TestReservedTwoSegmentPathsDecline(t *testing.T) {
+	t.Parallel()
 	// The repo group's two-segment pattern must not swallow paths that are not
 	// repositories (their groups register literal patterns today; this guard
 	// keeps the SPA fallback alive for any that has not landed yet).
@@ -2100,6 +2198,7 @@ func TestReservedTwoSegmentPathsDecline(t *testing.T) {
 }
 
 func TestRepoAuthFailurePages(t *testing.T) {
+	t.Parallel()
 	// An invalid credential is a real 401 page (never a 200 shell), and the
 	// status mapping follows authErrorStatus.
 	f := newRepoFixture(t, true)
@@ -2135,6 +2234,7 @@ func TestRepoAuthFailurePages(t *testing.T) {
 }
 
 func TestRepoBlobPathFallbackAndWALDefaultStatus(t *testing.T) {
+	t.Parallel()
 	// The Blob payload may omit Path; the resolved path is the fallback (the
 	// raw link and the breadcrumb both use it).
 	f := newRepoFixture(t, true)
@@ -2155,6 +2255,7 @@ func TestRepoBlobPathFallbackAndWALDefaultStatus(t *testing.T) {
 // The Code page's Precision Dark chrome: branch selector, commit strip, About
 // rail and status strip all render from data the view already had.
 func TestRepoTreePrecisionDarkChrome(t *testing.T) {
+	t.Parallel()
 	f := newRepoFixture(t, true)
 	sha := strings.Repeat("a", 40)
 	f.view.tree = api.TreeResult{Entries: []api.TreeEntry{{Name: "a.go", Type: "blob", Mode: "100644", Size: 12}}}
@@ -2192,6 +2293,7 @@ func TestRepoTreePrecisionDarkChrome(t *testing.T) {
 
 // Chrome failures are not page failures: the table still renders.
 func TestRepoTreeChromeDegrades(t *testing.T) {
+	t.Parallel()
 	for _, tc := range []struct {
 		name string
 		set  func(*repoFixture)
@@ -2216,6 +2318,7 @@ func TestRepoTreeChromeDegrades(t *testing.T) {
 }
 
 func TestCodeHealth(t *testing.T) {
+	t.Parallel()
 	cases := []struct {
 		c    *RepoChrome
 		want string
@@ -2233,6 +2336,7 @@ func TestCodeHealth(t *testing.T) {
 }
 
 func TestInitialOf(t *testing.T) {
+	t.Parallel()
 	cases := map[string]string{"": "?", "  ": "?", "ada": "A", "Ada Lovelace": "A", "émile": "É"}
 	for in, want := range cases {
 		if got := initialOf(in); got != want {

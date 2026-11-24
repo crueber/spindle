@@ -24,10 +24,10 @@ func (l *Layer) ParsePushRequestStream(repo *Repo, r io.Reader) (*PushRequest, i
 func (l *Layer) IngestStream(ctx, repo *Repo, pack io.Reader, maxBytes int64, thin, fsck bool) (*IngestResult, error) // pack piped into index-pack (17_ssh.md §5)
 ```
 
-Errors are sentinel-wrapped values the callers map: `ErrMaxBytes`, `ErrPackRejected`, `ErrMissingObject`,
-`ErrRefConflict`, `ErrTooManyWants`. The WAL publish path (`05_wal_engine.md`) and HTTP layer
-(`06_server_http.md`) consume these; policy evaluation (`policy.json`, §14) happens in `internal/policy`,
-not here.
+Errors are sentinel-wrapped values the callers map: `ErrMaxBytes`, `ErrPackRejected`, `ErrNoSpace`,
+`ErrMissingObject`, `ErrRefConflict`, `ErrTooManyWants`. The WAL publish path (`05_wal_engine.md`) and
+HTTP layer (`06_server_http.md`) consume these; policy evaluation (`policy.json`, §14) happens in
+`internal/policy`, not here.
 
 ## 1. Repo identity and local layout (§7.1)
 
@@ -183,7 +183,21 @@ git index-pack --stdin --keep --rev-index --threads=0 [--fix-thin] [--fsck-objec
 
 `IngestResult{Checksum Oid, ObjectCount uint64, KeepPath discarded, Trace *IngestMetrics}`.
 
-### Concurrency
+### 3.4 Failure classification (space vs rejection)
+
+Every failed ingest maps through one classifier (`packFailure`):
+
+- **Out of space / quota (`ErrNoSpace`)** — index-pack's stderr says `No space left on device` or
+  `Disk quota exceeded`, or a scratch/rename/temp write failed with `ENOSPC`/`EDQUOT`. The returned
+  `*SpaceError` names the write path, the repo cache dir (`cache.dir`), the filesystem type and its
+  free/total bytes, and the remedy (`cache.dir` quota or `cache.max_bytes`); it still satisfies
+  `errors.Is(err, ErrPackRejected)`. `internal/server` appends the configured
+  `cache.max_bytes`/`cache.dir` and logs the failure at Error level before answering the push. This is
+  the BUG-6 fix: a full cache used to reach the client as a bare `unpacker error`.
+- **Anything else** — `*PackRejectedError{Detail: <stderr tail>}` wrapped around `ErrPackRejected`.
+- **`max_bytes` crossed** — `ErrMaxBytes` (mapped before classification), never misread as space.
+
+### 3.5 Concurrency
 - **Hazard:** two concurrent ingests into one repo interleave pack renames and corrupt the local odb;
   crash mid-move leaves a torn pack set.
 - **Avoidance:** ingest is serialized per repo by the ingest lock — one `sync.Mutex` per repo handle,
@@ -544,8 +558,10 @@ under the per-repo pack_mutex (doc 05/10). Exact argv:
   checksum (the file name under `objects/info/commit-graphs/`); copy it out as the `wal/<checksum>.commit-graph`
   side-file (store key, doc 02). On a reader, install the side-file as the chain BASE:
   `objects/info/commit-graphs/graph-<hash>.graph` + `commit-graph-chain` naming only it.
-- **Incremental fold (downloaded packs):** `git commit-graph write --split --stdin-packs` fed the pack
-  idx names on stdin (one per line; close stdin, drain, Wait).
+- **Incremental fold (downloaded packs):** `git commit-graph write --split --stdin-packs` fed, one per
+  line on stdin, the **pack names** under `objects/pack` (`pack-<checksum>.idx`; a bare
+  `<checksum>.idx` is resolved relative to `objects/pack` and fails "error adding pack"), then close
+  stdin, drain, Wait. The fold is best-effort: a failure logs a warning and never fails the push.
 - **History pack (D18, when `git.history_pack`):** pipeline
   `git pack-objects --filter=blob:none --revs --delta-base-offset --stdout -q` (all ref oids on stdin)
   piped into `git index-pack --stdin` in a scratch with alternates → rename to
@@ -553,6 +569,26 @@ under the per-repo pack_mutex (doc 05/10). Exact argv:
   `derived_from=<base>`. A **history midx**: `git multi-pack-index write --stdin-packs
   --preferred-pack=<history idx>` covering history packs + installed bases; removed when no history packs
   exist. History packs never supersede anything; they are superseded with their base (doc 10).
+
+### 9.11 Push-payload commit listing (events bridge)
+
+The events bridge's `repo-hooks` sink enriches a push/ref event with real commit summaries
+(docs/features/06 §5.3.1). Exact argv, `Layer.LogRange` (`internal/git/log.go`), run in the repo
+git-dir, 30 s timeout, `Pool`-accounted:
+
+```
+git log --no-renames --max-count=<limit> --format=%H%x00%an%x00%ae%x00%aI%x00%s%x1e <new> [--not <old>]
+```
+
+- `<limit>` is the caller's bound (default 50, hard cap 200; `notify.MaxPushCommits` is the payload
+  bound, which is the production caller).
+- `--not <old>` is omitted when `old` is empty or the all-zero OID (a create): the listing is then the
+  newest `<limit>` commits reachable from `<new>`, which is what a bounded create payload can honestly
+  say.
+- Records are `<oid>\0<author>\0<author-email>\0<author-date>\0<subject>\x1e`; the subject only (a
+  full message can exceed the delivery-body cap). An unparseable record is skipped.
+- Every error degrades to "no commit summaries" at the caller — payload enrichment never fails a
+  webhook delivery.
 
 ## 10. Bundle creation primitives (§7.8)
 
@@ -747,6 +783,155 @@ and other forges' directories are ignored). The `<commit>:<path>` form rejects p
 `:` (ambiguous with the tree-ish separator). These calls are control-plane, event-rate reads —
 never on a git hot path — and they never write a ref, object, or worktree.
 
+## 15. Server-side commit plumbing (browser file edit, docs/features/17)
+
+`internal/webedit` mints one commit from plumbing only — no worktree, no branch movement, no checkout —
+in the repo's serving copy (`internal/webedit/git.go`). Every command runs under the bounded pool with
+`GIT_DIR=<repo>`, `GIT_TERMINAL_PROMPT=0`, a per-command timeout and request-ctx cancellation. The
+index file is a **request-scoped temporary file** (`GIT_INDEX_FILE` under a unique scratch dir removed
+on every exit path); `GIT_WORK_TREE` points at that empty scratch dir because
+`update-index --force-remove` refuses to run in a repo without a work tree at all.
+
+```
+git rev-parse --verify --quiet refs/heads/<branch>^{commit}      # resolve the base
+git ls-tree -z <commit> -- <path>                                # entry mode/type/oid
+git cat-file -s <oid>                                            # size (binary/LFS guard input)
+git cat-file blob <oid>                                          # content (read side)
+git hash-object -w --stdin                                       # the new blob
+git read-tree <base>                                             # temp index = base tree
+git update-index --add --cacheinfo <mode>,<blob>,<path>          # create/edit
+git update-index --force-remove -- <path>                        # delete
+git write-tree                                                   # the new tree
+git diff-tree --quiet <base> <tree>                              # exit 1 = changed, 0 = no-op (422)
+git commit-tree <tree> -p <base> -m <message>                    # author=principal, committer=server
+git diff-tree -p --no-color --no-commit-id <base> <tree>         # preview only (writes nothing)
+git for-each-ref --format=%(refname)                             # pack exclusion list
+git pack-objects --revs --stdout                                 # stdin: <tip> + ^<ref> per existing ref
+```
+
+Notes pinned by tests:
+
+- `commit-tree` runs with `GIT_AUTHOR_NAME/EMAIL/DATE` = the signed-in principal and
+  `GIT_COMMITTER_NAME/EMAIL` = `spindle <spindle@localhost>`, both at the same wall-clock instant
+  (`<unix> +0000`; git rejects a sub-8-digit stamp).
+- `pack-objects` takes no `--not`/`--all` flags; caret negation rides stdin (the merge-task precedent,
+  §9). The resulting pack is thick, self-contained and O(KiB–MiB): one blob, its rebuilt ancestor trees,
+  and one commit. It is ingested with `Layer.Ingest` (complete, fsck on) and published in the same WAL
+  entry as the ref txn.
+- `diff-tree --quiet` (rather than the plan's `diff-index`) needs no index and no work tree: it compares
+  two trees directly, which is exactly the no-op question.
+- A delete of the last file in a directory drops the directory entry itself (write-tree does that
+  naturally); deleting the repo's only file produces a valid empty tree — allowed, not refused.
+- Paths are validated before any argv is built (no `..`/`.git` segment, no leading `-`), and revs are
+  sha-resolved first, so no user string is ever parsed as an option.
+
+## 16. Repository browsing reads (server-rendered pages, docs/go/12)
+
+The Blame/Branches/Compare pages read the repository through **one optional seam**,
+`api.RepoBrowse`, implemented by the same `walView` that backs `api.RepoView` and running in the same
+materialized serving copy under the §2 discipline (`GIT_DIR`, `GIT_TERMINAL_PROMPT=0`, request ctx,
+`git.binary`). These are event-rate page reads, never push/clone hot paths; they write nothing (no ref,
+object, worktree or index), so law 4 holds — attribution and comparison are derived renders.
+
+### 16.1 Per-line blame
+
+```
+git cat-file -s <commit>:<path>                              # size (same 2 MiB guard as §9.5)
+git blame --line-porcelain -L 1,10001 <commit> -- <path>     # attribution + content
+```
+
+`--line-porcelain` (NOT `--porcelain`) is deliberate: every line record repeats the full commit header,
+so attribution never depends on group state. A grouped stream puts commit metadata on a group's first
+line; an unchanged trailing line in a later group, a CRLF file, or a merge commit then require
+carry-over parsing, which is exactly where a per-line renderer drifts. The cost (a few hundred bytes
+per line) is bounded by `-L` and the 2 MiB cap.
+
+`<commit>` is the sha `Repo.Resolve` already returned — never a user string — and the path follows `--`.
+The `-L 1,<cap+1>` bound asks for one extra line so a truncated render is observable without a second
+read; the page states the cap. `git blame` runs under a 20 s ctx timeout. Binary detection reuses git's
+NUL-in-first-8KiB heuristic over the attributed lines, so the page refuses with the blob page's exact
+language.
+
+### 16.2 Branch overview (list, create, delete)
+
+The Branches page reads every branch in ONE spawn — the per-branch rev-list shape would be N
+processes for N branches:
+
+```
+git for-each-ref --sort=-committerdate --count=501 \
+  --format=%(refname:strip=2)%09%(objectname)%09%(committerdate:iso-strict)%09%(ahead-behind:<default-sha>)%09%(authorname)%09%(subject) \
+  refs/heads
+```
+
+`%(ahead-behind:<committish>)` is evaluated by git inside the one enumeration, so ahead/behind costs
+no extra spawn. It takes the default branch's **resolved sha**, never a ref name: refnames may contain
+`%` and parentheses, and the value lands inside a format string. The subject is the LAST field because
+a commit subject may itself contain tabs (refnames cannot). A git build without the atom is retried
+once without it; the page then renders "—" (`ahead_known:false`) instead of a fabricated zero.
+
+Writes go through the WAL publish funnel (never a direct `update-ref`), one `REF_UPDATE` txn each,
+CAS'd by the manifest verify step:
+
+```
+git rev-parse --verify --quiet --end-of-options <from>^{commit}   # create's start commit
+# create: refs/heads/<name> zero-oid -> <commit>
+# delete: refs/heads/<name> <resolved-sha> -> zero-oid
+```
+
+No new pack rides either txn: the starting commit's objects are already published (a create adds no
+object), and a delete adds none. The delete path refuses the default branch (the `HEAD` target from the
+manifest snapshot) and any ref the stored policy protects against `delete`, evaluated with
+`policy.EvaluateProtect` over the SAME `policy.json` object the Settings → Branch protection tab
+renders — no second protection rule exists. Writer commits/deletes do not run the on-push fan-out
+(they introduce no commits; workflows fire on pushes, not ref bookkeeping).
+
+### 16.3 Ref-to-ref comparison
+
+```
+git rev-list --count --left-right <base>...<head>       # "<base-only> <head-only>"
+git merge-base <base> <head>                            # common ancestor (diff base)
+git log --format=<§9.11 gitFmtLog> --max-count=<n+1> <head> --not <base>
+git diff --numstat -z --no-renames <diff-base> <head>   # change summary
+git diff --no-color --no-renames <diff-base> <head>     # unified patch
+```
+
+Every argument is a resolved hex object id (the page resolves both refs through `Repo.Resolve`
+first), so no user string can be option-shaped. `--no-renames` matches the commit renderer, which is
+also what parses and draws the patch — the compare page never owns a second differ. The diff base is
+the merge-base (what a merge of head would bring); when the histories share no ancestor, git exits
+non-zero from `merge-base` and the diff falls back to `<base> <head>` with the page stating that the
+difference is the full tree difference, never pretending a shared root.
+
+The commit list is head-only (`--not <base>`, capped at 250 with `more`) and ahead/behind is the
+same triple-dot count git prints (left = base-only, right = head-only). The patch is capped at 2 MiB
+by bytes with an explicit truncation notice; the stats are `--numstat` (a binary file is `-1/-1`, the
+§9.6 rule).
+
+### 16.4 Repository Insights scan
+
+The Insights page never runs git on a request path: it reads the cached
+`repos/<o>/<r>/insights/pulse.json` projection (`docs/features/18_repo_insights.md`). The
+`insights-refresh` task makes exactly ONE spawn for every git-derived fact:
+
+```
+git log --no-renames --no-ext-diff --no-textconv --no-show-signature --no-decorate \
+  --max-count=<cap+1> --since=<RFC3339 UTC> \
+  --format=%x1e%H%x00%an%x00%ae%x00%cI --shortstat <resolved-head-sha>
+```
+
+- `<head>` is a resolved hex oid (the serving copy's default-branch tip), never a ref name.
+- `--since` is the earliest bucket start of the widest (365-day) window; exact per-window filtering
+  happens in Go.
+- One extra commit is requested so truncation is observable without a second read (the cap defaults
+  to 20,000; a truncated window is stated in the UI).
+- `--no-ext-diff`/`--no-textconv` stop repository config from spawning helpers or changing the
+  content diffed; `--no-show-signature`/`--no-decorate` keep the record stream clean.
+- A record is `0x1e`, then `%H %an %ae %cI` NUL-separated, then the optional `--shortstat` block.
+  The parser splits on NUL (names may contain newlines) and skips malformed records; a hard
+  subprocess failure fails the refresh (no half-truth projection is written).
+- Merge commits appear as commits with no shortstat block (zero line changes); binary-only changes
+  also contribute zero. Cost: linear in commits, one process (E20).
+
 ## Decisions & deviations from the Rust design
 
 - **Collaboration-layer fork→base bridge fetch (issue #456, owned by
@@ -788,6 +973,14 @@ never on a git hot path — and they never write a ref, object, or worktree.
   a single local object read — no history walk, no new config, no new pool —
   and every failure degrades to null activity (R1 B3: derivation never fails
   the push; the sweep heals).
+- **Repository Insights is one `--shortstat` walk (§16.4, 2026-11-21):** the
+  pulse projection needs commit counts, distinct authors and line totals over
+  three nested windows, so the task runs one `git log --max-count=<cap+1>
+  --since=<365d floor> --format=… --shortstat` and slices windows in Go.
+  Rationale: the alternative (one walk per window) triples the spawn cost and
+  can disagree about the head; one walk + the cached projection keeps a page
+  read at zero git. Merge commits contribute zero lines and the cap/truncation
+  is stated in the UI — no sampled tail is silently presented as complete.
 - **New Go-only config keys** `git.ingest_timeout`, `git.connectivity_timeout`, `git.max_git_procs`:
   Rust hard-codes tokio timeouts/worker counts; Go makes them explicit for operators (documented in doc 11).
 - **`git.binary` is plumbed everywhere** (unlike Rust, which hardcodes `"git"` — §20 item 5): one field on
@@ -953,3 +1146,28 @@ never on a git hot path — and they never write a ref, object, or worktree.
   support — advertising `shallow` remains a follow-up. Gates: `TestParsePushRequestShallowRefused`,
   `TestParseShallowSection`, `TestPushFromShallowCloneNamesCauseAndRemedy`,
   `TestSSHReceivePackShallowCloneNamesRemedy`.
+
+- **NEW (2026-11-21, Feature F) — the browser commit plumbing (§15) uses `diff-tree`, not
+  `diff-index`, and gives the temporary index an empty `GIT_WORK_TREE`.** The plan's prose named
+  `git diff-index --quiet <base>`; without `--cached` that compares the *work tree* (a bare repo has
+  none) and with `--cached` it re-reads the index we just built. `diff-tree --quiet <base> <tree>`
+  asks the no-op question directly over the two trees. `update-index --force-remove` also refuses to
+  run at all in a repo with no work tree ("this operation must be run in a work tree"); the empty
+  scratch dir satisfies the check and nothing is ever read or written there. Both argv are pinned by
+  `TestSubprocessGitCommitLifecycle` / `TestSubprocessGitErrors`.
+
+## 14b. Issue-template reads (docs/features/02 §15, feature-owned)
+
+`internal/issues` reads issue templates at a commit from the same serving copy, with the §14 discipline (read-only, no
+worktree, `GIT_DIR` set, `GIT_TERMINAL_PROMPT=0`, ctx timeout, bounded stdout/stderr, own bounded semaphore of
+`4 × GOMAXPROCS`; a non-zero exit is the not-found class, an exec/timeout failure is 503). Exact argv:
+
+```
+git ls-tree -z --name-only -r <commit> -- .spindle/ISSUE_TEMPLATE
+git show <commit>:<path>
+git rev-parse --verify --quiet <ref>^{commit}
+```
+
+Only direct children of `.spindle/ISSUE_TEMPLATE` with a `.md` extension are read; nested paths and other extensions are
+ignored, and `.github` is never consulted. These calls run **only** from the post-push hook (`OnPush`), never from a
+composer or API request — that path reads the cached `meta/issue_templates.json` projection instead (law 6).

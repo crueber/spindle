@@ -680,7 +680,7 @@ func printGroupHelp(c *cli, g *apiGroup) {
 // this table — there is no second list to drift.
 var apiGroups = []*apiGroup{
 	authGroup, userGroup, orgGroup, issueGroup, prGroup, releaseGroup,
-	checksGroup, packagesGroup, threadsGroup,
+	checksGroup, packagesGroup, threadsGroup, fileGroup,
 }
 
 // --- completion -----------------------------------------------------------

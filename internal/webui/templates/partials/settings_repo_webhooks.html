@@ -1,0 +1,12 @@
+{{/* partials/settings_repo_webhooks.html — repo settings → Webhooks.
+   One settings tab per file: a new tab is a new settings_repo_<tab>.html
+   partial plus one dispatch line in pages/settings/repo.html — never a body
+   in the shell. Every panel receives the SettingsRepoPage, so a form can
+   build its action from .Owner/.Name. Anatomy: .card sections, the .setup-row
+   label/control pairing for forms, .data-table inside overflow-x-auto
+   (guideline §8). 390px: fields full width, toggle rows keep
+   label-left/control-right, tables scroll in place. */}}
+{{/* ---- Webhooks --------------------------------------------------------- */}}
+{{define "settings-repo-webhooks"}}
+{{template "webhooks-panel" .}}
+{{end}}

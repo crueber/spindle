@@ -32,6 +32,10 @@ import (
 var collabKinds = map[string]bool{
 	"issue": true, "issue_event": true, "pull": true, "review": true,
 	"thread": true, "check": true, "release": true, "access": true,
+	// M2 moderation (PLAN-V2 §M.2): hide/unhide/lock/unlock frames. State
+	// carries the resulting visibility ("hidden"/"visible"/"locked"/
+	// "unlocked"); the body never rides a frame.
+	"moderation": true,
 }
 
 // collabFrame is the wire data for one frame: the RepoFrame plus the

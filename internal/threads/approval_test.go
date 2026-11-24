@@ -47,6 +47,7 @@ func approvalEnv(t *testing.T) (*testEnv, *fakeApprovals) {
 func forkPR(t *testing.T, e *testEnv, actor string) []*Run {
 	t.Helper()
 	runs, err := e.svc.CreateRun(ctx(), "o/r", testSHA, EventPullReq, CreateOpts{
+		Action: "opened",
 		Branch: "main", Ref: "refs/pull/1/head", BaseBranch: "main", Fork: true, Actor: actor,
 	})
 	if err != nil {
@@ -68,7 +69,7 @@ func TestApprovalHoldsFirstTimeForkRun(t *testing.T) {
 	if got := countPrefix(t, e, QueuePrefix("o", "r")); got != 0 {
 		t.Fatalf("queue objects = %d, want 0 (the gate IS the queue)", got)
 	}
-	runner := &RunnerDoc{ID: "rnr", Name: "r1", Labels: []string{"ubuntu-latest"}, State: RunnerActive}
+	runner := &RunnerDoc{ID: "rnr", Name: "r1", Labels: []string{"linux"}, AllowAll: true, State: RunnerActive, AllowForkRuns: true}
 	claim, err := e.svc.claimLoop(ctx(), "o", "r", runner, runner.Labels)
 	if err != nil {
 		t.Fatalf("claimLoop: %v", err)
@@ -109,6 +110,7 @@ func TestApprovalSkipsTrustedAndKnownContributors(t *testing.T) {
 	}
 	for _, tc := range cases {
 		runs, err := e.svc.CreateRun(ctx(), "o/r", testSHA, EventPullReq, CreateOpts{
+			Action: "opened",
 			Branch: "main", Ref: "refs/pull/1/head", BaseBranch: "main", Fork: tc.fork, Actor: tc.actor,
 		})
 		if err != nil {
@@ -154,7 +156,7 @@ func TestApprovalApproveQueuesAndDenyCancels(t *testing.T) {
 		t.Fatalf("approved run = %+v", got)
 	}
 	// It is now claimable.
-	runner := &RunnerDoc{ID: "rnr", Labels: []string{"ubuntu-latest"}, State: RunnerActive}
+	runner := &RunnerDoc{ID: "rnr", Labels: []string{"linux"}, AllowAll: true, State: RunnerActive, AllowForkRuns: true}
 	claim, cerr := e.svc.claimLoop(ctx(), "o", "r", runner, runner.Labels)
 	if cerr != nil || claim == nil || claim.Run.ID != held.ID {
 		t.Fatalf("claim after approve = %+v, %v", claim, cerr)

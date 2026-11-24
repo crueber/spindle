@@ -28,8 +28,7 @@ func testHandler(t *testing.T, svc *Service, reg *wal.Registry, p auth.Principal
 			_, err := reg.Create(ctx, owner+"/"+name, git.Sha1)
 			return err
 		},
-		AuthMode: func() string { return "none" },
-		Now:      time.Now,
+		Now: time.Now,
 	}
 }
 
@@ -303,10 +302,14 @@ func TestCreateFromURL(t *testing.T) {
 	if rec := doHandle(writer, http.MethodPost, "/api/v1/repos/mirrors", `{"source_url":"::bad::","owner":"acme","name":"n"}`); rec.Code != http.StatusBadRequest {
 		t.Fatalf("bad url = %d", rec.Code)
 	}
-	// Off-allowlist host + dangerous without authority (mode none) → 403.
+	// Off-allowlist host + dangerous: a signed-in admin may proceed; a plain
+	// writer may not (the OIDC group predicate is the authority).
 	danger := `{"source_url":"https://example.com/a.git","owner":"acme","name":"n","dangerous":true}`
-	if rec := doHandle(testHandler(t, svc, reg, adminP), http.MethodPost, "/api/v1/repos/mirrors", danger); rec.Code != http.StatusForbidden {
-		t.Fatalf("dangerous = %d: %s", rec.Code, rec.Body.String())
+	if rec := doHandle(testHandler(t, svc, reg, writeP), http.MethodPost, "/api/v1/repos/mirrors", danger); rec.Code != http.StatusForbidden {
+		t.Fatalf("non-admin dangerous = %d: %s", rec.Code, rec.Body.String())
+	}
+	if rec := doHandle(testHandler(t, svc, reg, adminP), http.MethodPost, "/api/v1/repos/mirrors", danger); rec.Code != http.StatusAccepted {
+		t.Fatalf("admin dangerous = %d: %s", rec.Code, rec.Body.String())
 	}
 	// file:// twin on the api-browser lane: full flow.
 	up := initUpstream(t)
@@ -413,18 +416,14 @@ func TestWritersAndShapes(t *testing.T) {
 	if !isExists(store.NewPrecondition("k", "v")) {
 		t.Fatal("isExists broken")
 	}
-	// dangerousAllowed matrix.
-	h := &Handler{AuthMode: func() string { return "token" }}
+	// dangerousAllowed: a signed-in host admin only.
+	h := &Handler{}
 	if !h.dangerousAllowed(adminP) || h.dangerousAllowed(writeP) || h.dangerousAllowed(anonP) {
-		t.Fatal("token-mode matrix broken")
+		t.Fatal("dangerous matrix broken")
 	}
-	h.AuthMode = func() string { return "none" }
-	if h.dangerousAllowed(adminP) {
-		t.Fatal("none-mode admin allowed")
-	}
-	h.AuthMode = nil
-	if h.dangerousAllowed(adminP) {
-		t.Fatal("nil-mode admin allowed")
+	// An admin flag on an anonymous principal never qualifies.
+	if h.dangerousAllowed(auth.Principal{Admin: true, Anonymous: true}) {
+		t.Fatal("anonymous admin allowed")
 	}
 	// checkSSRF nil-service is permissive (no gate configured).
 	hn := &Handler{}

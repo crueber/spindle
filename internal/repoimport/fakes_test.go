@@ -217,8 +217,10 @@ func writerPrincipal() auth.Principal { return auth.Principal{Name: "writer", Wr
 // Returns the file:// URL. Layout is deterministic (fixed messages).
 func fixtureRepo(t *testing.T, dir string, n, branches, tags int) string {
 	t.Helper()
+	// No background gc/maintenance while the fixture is built: it packs
+	// underneath the test and defeats the single-pack pin below.
 	run := func(args ...string) string {
-		cmd := exec.Command("git", args...)
+		cmd := exec.Command("git", append([]string{"-c", "gc.auto=0", "-c", "maintenance.auto=false"}, args...)...)
 		cmd.Dir = dir
 		out, err := cmd.CombinedOutput()
 		if err != nil {
@@ -263,6 +265,25 @@ func fixtureRepo(t *testing.T, dir string, n, branches, tags int) string {
 // separate-git-dir clone, or GIT_DIR/GIT_OBJECT_DIRECTORY move them
 // elsewhere). A hard-coded path glob turns that into a false "zero packs"
 // verdict on a correctly packed fixture (CI-only failure, git 2.55).
+// countPacks reports how many .pack files the repo has.
+func countPacks(dir string) (int, string) {
+	packDir := ""
+	if cmd := exec.Command("git", "rev-parse", "--path-format=absolute", "--git-path", "objects/pack"); cmd != nil {
+		cmd.Dir = dir
+		if out, err := cmd.Output(); err == nil {
+			packDir = strings.TrimSpace(string(out))
+		}
+	}
+	if packDir == "" {
+		return 0, ""
+	}
+	if !filepath.IsAbs(packDir) {
+		packDir = filepath.Join(dir, packDir)
+	}
+	packs, _ := filepath.Glob(filepath.Join(packDir, "*.pack"))
+	return len(packs), packDir
+}
+
 func repackSingle(t *testing.T, dir string) {
 	t.Helper()
 	// -f recomputes deltas, so the fixture's pack cannot inherit geometry
@@ -272,10 +293,21 @@ func repackSingle(t *testing.T, dir string) {
 	// a cruft pack for unreachable objects (2.55 does, and background auto-gc
 	// can race the fixture) leaves a SECOND .pack here, and the pinned layout
 	// below is the cost model's premise (CI run 1051).
-	cmd := exec.Command("git", "-c", "gc.auto=0", "-c", "maintenance.auto=false", "repack", "-a", "-d", "-f", "--no-cruft")
-	cmd.Dir = dir
-	if out, err := cmd.CombinedOutput(); err != nil {
-		t.Fatalf("repack: %v\n%s", err, out)
+	gitx := func(args ...string) {
+		cmd := exec.Command("git", append([]string{"-c", "gc.auto=0", "-c", "maintenance.auto=false"}, args...)...)
+		cmd.Dir = dir
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v\n%s", args, err, out)
+		}
+	}
+	gitx("repack", "-a", "-d", "-f", "--no-cruft")
+	// A concurrent auto-gc or an unreachable-object pack can survive one pass
+	// (git 2.55 has done both under load). Prune and repack again before
+	// asserting the pinned layout; three passes is a bound, not a retry loop
+	// that hides a real regression.
+	if n, _ := countPacks(dir); n != 1 {
+		gitx("prune", "--expire=now")
+		gitx("repack", "-a", "-d", "-f", "--no-cruft")
 	}
 	packDir := gitOutput(t, dir, "rev-parse", "--path-format=absolute", "--git-path", "objects/pack")
 	if !filepath.IsAbs(packDir) {

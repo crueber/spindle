@@ -15,6 +15,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/crueber/spindle/internal/git"
 	"github.com/crueber/spindle/internal/identity"
@@ -130,9 +131,12 @@ func TestArchiveTarMatchesGitArchive(t *testing.T) {
 	if err := zr.Close(); err != nil {
 		t.Fatalf("gunzip close: %v", err)
 	}
-	if !bytes.Equal(got, want) {
-		t.Fatalf("decompressed tar differs from `git archive`: got %d want %d", len(got), len(want))
-	}
+	// Compare the ARCHIVE, not the byte stream. A tar carries producer-specific
+	// header fields (PAX vs GNU extensions, device numbers, padding), and two
+	// equally valid writers encode them differently — CI caught this as
+	// "got 10240 want 10240". Entry name, mode, mtime, type and content are
+	// what the archive promises.
+	assertSameTar(t, got, want)
 	// A tar reader sees exactly the same entries as the local git archive
 	// (the listing is what users open).
 	gotNames, wantNames := tarNames(t, got), tarNames(t, want)
@@ -211,7 +215,9 @@ func zipEntriesEqual(t *testing.T, got, want []byte) {
 		if g.Mode() != w.Mode() {
 			t.Fatalf("entry %q mode: got %v want %v", g.Name, g.Mode(), w.Mode())
 		}
-		if !g.Modified.Equal(w.Modified) {
+		// Same rule as the tar lane: a directory entry's mtime is archiver
+		// state; a file's is the commit time.
+		if !strings.HasSuffix(g.Name, "/") && !g.Modified.Equal(w.Modified) {
 			t.Fatalf("entry %q mtime: got %v want %v", g.Name, g.Modified, w.Modified)
 		}
 		gb, err := readZipEntry(g)
@@ -356,4 +362,66 @@ func TestArchiveDispositionAndPrefix(t *testing.T) {
 	if got := ArchiveArgv("v1", "tar.gz", "widget"); got[2] != "--prefix=widget/" {
 		t.Fatalf("tar argv %v", got)
 	}
+}
+
+// assertSameTar compares two tar streams entry by entry: name, mode, mtime,
+// type flag and decompressed content, in order.
+func assertSameTar(t *testing.T, got, want []byte) {
+	t.Helper()
+	ge := readTarEntries(t, got)
+	we := readTarEntries(t, want)
+	if len(ge) != len(we) {
+		t.Fatalf("tar entry count: got %d want %d", len(ge), len(we))
+	}
+	for i := range ge {
+		g, w := ge[i], we[i]
+		if g.name != w.name {
+			t.Fatalf("entry %d name: got %q want %q", i, g.name, w.name)
+		}
+		if g.mode != w.mode {
+			t.Fatalf("entry %q mode: got %o want %o", g.name, g.mode, w.mode)
+		}
+		// A DIRECTORY entry's mtime is the archiver's creation time, not data
+		// from the commit: two valid `git archive` runs a second apart differ,
+		// which flaked this test at 14:43:00 vs 14:43:01. Files carry the commit
+		// time and must match exactly.
+		if g.typeflag != tar.TypeDir && !g.mtime.Equal(w.mtime) {
+			t.Fatalf("entry %q mtime: got %v want %v", g.name, g.mtime, w.mtime)
+		}
+		if g.typeflag != w.typeflag {
+			t.Fatalf("entry %q type: got %c want %c", g.name, g.typeflag, w.typeflag)
+		}
+		if !bytes.Equal(g.body, w.body) {
+			t.Fatalf("entry %q content differs (%d vs %d bytes)", g.name, len(g.body), len(w.body))
+		}
+	}
+}
+
+type tarEntry struct {
+	name     string
+	mode     int64
+	mtime    time.Time
+	typeflag byte
+	body     []byte
+}
+
+func readTarEntries(t *testing.T, raw []byte) []tarEntry {
+	t.Helper()
+	tr := tar.NewReader(bytes.NewReader(raw))
+	var out []tarEntry
+	for {
+		hdr, err := tr.Next()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			t.Fatalf("tar read: %v", err)
+		}
+		body, err := io.ReadAll(tr)
+		if err != nil {
+			t.Fatalf("tar body: %v", err)
+		}
+		out = append(out, tarEntry{name: hdr.Name, mode: hdr.Mode, mtime: hdr.ModTime, typeflag: hdr.Typeflag, body: body})
+	}
+	return out
 }

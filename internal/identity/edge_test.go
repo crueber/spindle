@@ -142,8 +142,8 @@ func TestWriteErrMapping(t *testing.T) {
 	}
 	s := testService()
 	r4 := httptest.NewRequest(http.MethodGet, "/", nil)
-	if p, _ := (&Handler{Svc: s}).principal(r4); !p.Write || !p.Admin {
-		t.Errorf("none-mode default = %+v", p)
+	if p, _ := (&Handler{Svc: s}).principal(r4); !p.Anonymous {
+		t.Errorf("uninjected principal = %+v, want anonymous", p)
 	}
 	// splitPath bad-encoding fallback: craft the URL directly since
 	// httptest.NewRequest rejects malformed escapes.

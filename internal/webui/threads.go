@@ -15,6 +15,8 @@ package webui
 import (
 	"context"
 	"fmt"
+	"log/slog"
+	"mime"
 	"net/http"
 	"net/url"
 	"path"
@@ -51,6 +53,10 @@ type ThreadsDeps struct {
 	// Role resolves the caller's repo role for the verb affordance (nil =
 	// only a write-capable principal sees the buttons).
 	Role func(ctx context.Context, owner, repo string, p auth.Principal) (string, error)
+	// OpenArtifact opens one run artifact for the ZIP download; the service
+	// checks the repository read gate and the expiry, so the page handler never
+	// decides access itself (15 §2.5).
+	OpenArtifact func(ctx context.Context, owner, repo, runID, name string, p auth.Principal) (*threads.ArtifactDownload, error)
 }
 
 var threadsDeps ThreadsDeps
@@ -69,6 +75,7 @@ func (s *Server) mountThreads() {
 	m.HandleFunc("GET /{owner}/{repo}/threads", s.threadsList)
 	m.HandleFunc("POST /{owner}/{repo}/threads/dispatch", s.threadsDispatch)
 	m.HandleFunc("GET /{owner}/{repo}/threads/{run}", s.threadRun)
+	m.HandleFunc("GET /{owner}/{repo}/threads/{run}/artifacts/{artifact}", s.threadArtifactDownload)
 	m.HandleFunc("POST /{owner}/{repo}/threads/{run}/cancel", s.threadRunCancel)
 	m.HandleFunc("POST /{owner}/{repo}/threads/{run}/rerun", s.threadRunRerun)
 	m.HandleFunc("POST /{owner}/{repo}/threads/{run}/approve", s.threadRunApprove)
@@ -412,6 +419,9 @@ type threadRunData struct {
 	// JobLogs is one live-log panel per job (the island attaches by URL over
 	// the existing SSE transport — no new transport, 15 §6).
 	JobLogs []threadJobLog
+	// Artifacts are the files this run published (15 §2.5): name, size, age and
+	// a ZIP download link. They render under the jobs.
+	Artifacts []threadArtifact
 	// Error is the page-level error text (empty on a clean render); the empty
 	// section uses it to avoid claiming "no jobs" for a failed read.
 	Error string
@@ -424,6 +434,18 @@ type threadJobLog struct {
 	LogURL string
 	// Live is true while the job can still produce frames.
 	Live bool
+}
+
+// threadArtifact is one published artifact row on the run page.
+type threadArtifact struct {
+	Name  string
+	Size  string
+	Files int
+	Href  string
+	// CreatedAt/ExpiresAt are the run's own timestamps (rendered with the shared
+	// collab_time template, never re-formatted here).
+	CreatedAt string
+	ExpiresAt string
 }
 
 // threadRun renders one run and its jobs.
@@ -456,6 +478,13 @@ func (s *Server) threadRun(w http.ResponseWriter, r *http.Request) {
 	data.CanWrite = threadCanWrite(r.Context(), rc, p)
 	data.CanApprove = data.CanWrite && threadCanMaintain(r.Context(), rc, p)
 	data.Approval = threads.Approval(view.Run)
+	if view.Approval != nil {
+		// The service's principal-aware projection: a listed reviewer with only
+		// write access sees the environment controls too (the verb re-checks).
+		data.Approval = *view.Approval
+		data.CanApprove = data.CanWrite && view.Approval.CanDecide
+	}
+	data.CanApprove = data.CanApprove || data.Approval.CanDecide
 	for _, job := range view.Jobs {
 		data.JobLogs = append(data.JobLogs, threadJobLog{
 			JobID:  job.ID,
@@ -464,7 +493,47 @@ func (s *Server) threadRun(w http.ResponseWriter, r *http.Request) {
 			Live:   job.State == threads.JobQueued || job.State == threads.JobRunning,
 		})
 	}
+	for _, art := range view.Artifacts {
+		data.Artifacts = append(data.Artifacts, threadArtifact{
+			Name: art.Name, Size: fmtAssetSize(art.TotalSize), Files: len(art.Files),
+			Href: "/" + rc.Full + "/threads/" + url.PathEscape(view.Run.ID) +
+				"/artifacts/" + url.PathEscape(art.Name),
+			CreatedAt: art.CreatedAt, ExpiresAt: art.ExpiresAt,
+		})
+	}
 	s.pageRepo(w, r, p, s.collabChrome(r, rc, p), http.StatusOK, "collab/thread_detail", "Run "+data.ShortRun, data)
+}
+
+// threadArtifactDownload streams one artifact as a ZIP (15 §2.5). The service
+// is the gate: it resolves the caller's repository read role and the
+// artifact's expiry, and returns the opened manifest; the page only sets the
+// download headers and copies the archive.
+func (s *Server) threadArtifactDownload(w http.ResponseWriter, r *http.Request) {
+	rc, p, ok := s.collabEnv(w, r)
+	if !ok {
+		return
+	}
+	name := r.PathValue("artifact")
+	if threadsDeps.OpenArtifact == nil {
+		s.collabError(w, r, http.StatusServiceUnavailable, "threads service not wired")
+		return
+	}
+	dl, err := threadsDeps.OpenArtifact(r.Context(), rc.Owner, rc.Name, r.PathValue("run"), name, p)
+	if err != nil {
+		s.collabError(w, r, collabErrStatus(err), err.Error())
+		return
+	}
+	hdr := w.Header()
+	hdr.Set("Content-Type", "application/zip")
+	hdr.Set("Content-Disposition", mime.FormatMediaType("attachment", map[string]string{"filename": name + ".zip"}))
+	hdr.Set("Cache-Control", "no-store")
+	hdr.Set("X-Content-Type-Options", "nosniff")
+	w.WriteHeader(http.StatusOK)
+	if err := threads.WriteArtifactZip(r.Context(), w, dl); err != nil {
+		// Headers are spent; the failed copy is logged, never rendered into a
+		// zip's bytes.
+		slog.Default().Warn("threads: artifact download aborted", "artifact", name, "err", err)
+	}
 }
 
 // threadRunCancel answers POST …/threads/{run}/cancel from the page.

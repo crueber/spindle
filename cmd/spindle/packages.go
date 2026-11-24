@@ -23,6 +23,15 @@ import (
 	"github.com/crueber/spindle/internal/store"
 )
 
+// collabPackagesSvc is the nil-safe registry accessor the admin wiring passes
+// (a restricted boot has no collaboration wiring at all).
+func collabPackagesSvc(c *collabWiring) *packages.Service {
+	if c == nil {
+		return nil
+	}
+	return c.packagesSvc
+}
+
 // newPackagesService builds the registry service over st/ident. Limits come
 // from the [packages] config section (compiled-in defaults when unset) and the
 // spool lives under cache.dir (the LFS/release spool precedent).
@@ -51,6 +60,21 @@ func newPackagesService(st store.ObjectStore, ident *identity.Service, cfg *conf
 			}
 			return config.FeaturesOf([]byte(doc.TOML)), true
 		}
+		// The registry policy (docs/features/14 §5): the repo settings
+		// [packages] section over the instance default quota. One settings
+		// read, fail-open to the instance default when the doc is unreadable
+		// (display metadata must never invent a quota — the Features rule).
+		defaults := cfg.Packages
+		svc.Policy = func(ctx context.Context, owner, repo string) config.PackagesPolicy {
+			if apiEnv.Repo == nil {
+				return config.PackagesPolicy{QuotaBytes: int64(cfg.Packages.QuotaBytes)}
+			}
+			doc, err := apiEnv.Repo.Settings(ctx, git.RepoId{Owner: owner, Name: repo})
+			if err != nil {
+				return config.PackagesPolicy{QuotaBytes: int64(cfg.Packages.QuotaBytes)}
+			}
+			return config.PackagesPolicyOf([]byte(doc.TOML), defaults)
+		}
 		// Repo existence: the registry is per repository, so a push to an
 		// unknown repo is NAME_UNKNOWN rather than an implicit create.
 		if apiEnv.Repos != nil {
@@ -59,7 +83,7 @@ func newPackagesService(st store.ObjectStore, ident *identity.Service, cfg *conf
 			}
 		}
 	}
-	h := &packages.Handler{Svc: svc, AuthRequired: cfg.Server.Auth.Mode != "none"}
+	h := &packages.Handler{Svc: svc, AuthRequired: true}
 	return svc, h
 }
 
@@ -120,6 +144,11 @@ func maintainSweepers(c *collabWiring) []maintain.Sweeper {
 	var out []maintain.Sweeper
 	if c.packagesSvc != nil {
 		out = append(out, packagesSweeper{svc: c.packagesSvc})
+	}
+	// Insights (docs/features/18): the refresh is a task on its own cadence;
+	// the service's head equality gate makes an unchanged repo a no-op.
+	if c.insightsSvc != nil {
+		out = append(out, &insightsSweeper{svc: c.insightsSvc})
 	}
 	// Threads (docs/features/15 §8, round-2 pass 2; round 3): `threads-gc` repairs the
 	// queue every five minutes and applies the retention window once an hour PER

@@ -1,0 +1,89 @@
+{{/* pages/admin/reports.html — GET /admin/reports (PLAN-V2 §M.3/M.4).
+
+   The cross-repository abuse queue. Rows are (repo,id) pointers: the repo
+   link opens the repository, the conversation link opens the reported thread,
+   and the resolve form posts to the host-admin twin (which delegates to the
+   repo writer). Stacks at ~390 px; no table, so no overflow wrapper. */}}
+{{define "content"}}
+<div class="admin-page" id="admin-page" data-admin-section="reports">
+  <div class="flex flex-col gap-4 lg:flex-row lg:gap-6">
+    {{template "admin-nav" .Data}}
+
+    <div class="min-w-0 flex-1">
+      {{template "admin-header" .Data}}
+
+      {{if .Data.Denied}}
+        {{template "admin-denied" .Data}}
+      {{else}}
+        {{if .Data.Restricted}}{{template "admin-restricted" .}}{{end}}
+        {{template "admin-banners" .Data}}
+
+        {{with .Data.Reports}}
+        {{$view := .}}
+        {{if .NotWired}}
+        <div class="card p-4"><p class="muted text-sm">Report moderation is not wired on this build.</p></div>
+        {{else}}
+        {{if .Error}}<p class="err-line" role="alert">{{.Error}}</p>{{end}}
+        <section class="card p-4" aria-labelledby="admin-reports-queue">
+          <div class="flex flex-wrap items-center gap-2">
+            <h2 class="card-header mb-0!" id="admin-reports-queue">Report queue</h2>
+            <span class="chip chip-draft">{{len .Rows}}</span>
+            <div class="ml-auto flex flex-wrap gap-1" role="group" aria-label="report state filter">
+              <a class="btn{{if eq .State "open"}} primary{{end}}" href="/admin/reports?state=open">Open</a>
+              <a class="btn{{if eq .State "resolved"}} primary{{end}}" href="/admin/reports?state=resolved">Resolved</a>
+              <a class="btn{{if eq .State "all"}} primary{{end}}" href="/admin/reports?state=all">All</a>
+            </div>
+          </div>
+
+          {{if .Rows}}
+          <ul class="mt-3">
+            {{range .Rows}}
+            <li class="border-t border-[var(--pd-line)] py-3 first:border-t-0 first:pt-0" id="report-{{.Owner}}-{{.Name}}-{{.ID}}">
+              <div class="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1">
+                <a class="link min-w-0 max-w-full font-medium" href="{{.Settings}}">{{.Repo}}</a>
+                <a class="link min-w-0 max-w-full" href="{{.Href}}">#{{.ID}} {{.Kind}}</a>
+                <span class="{{.StateTone}}">{{.StateLabel}}</span>
+                <span class="muted font-mono text-[11px] break-all">{{.Target}}</span>
+                <span class="card-meta ml-auto mt-0! shrink-0">{{.Reporter}} · {{template "collab_time" .CreatedAt}}</span>
+              </div>
+              <p class="muted mt-1 text-xs">reason: <strong class="text-[var(--pd-text)]">{{.Reason}}</strong>{{with .Note}} · note: {{.}}{{end}}</p>
+              {{if eq .State "open"}}
+              <form class="mt-2 grid gap-2 sm:max-w-lg" method="post" action="{{.ResolveURL}}" aria-label="resolve report {{.ID}}">
+                <input type="hidden" name="owner" value="{{.Owner}}">
+                <input type="hidden" name="repo" value="{{.Name}}">
+                <input type="hidden" name="id" value="{{.ID}}">
+                <input type="hidden" name="state" value="{{$view.State}}">
+                <fieldset class="grid gap-1">
+                  <legend class="eyebrow">Resolve as</legend>
+                  {{$row := .}}
+                  {{range $view.Reasons}}
+                  <label class="flex items-center gap-2 text-sm">
+                    <input type="radio" name="action" value="{{.ID}}"{{if eq .ID "none"}} checked{{end}}>
+                    <span>{{.Label}}</span>
+                  </label>
+                  {{end}}
+                </fieldset>
+                <label class="eyebrow" for="admin-resolve-note-{{$row.Repo}}-{{$row.ID}}">Note (optional)</label>
+                <input class="input" id="admin-resolve-note-{{$row.Repo}}-{{$row.ID}}" name="note" maxlength="2000" autocomplete="off">
+                <div class="flex justify-end">
+                  <button type="submit" class="btn primary px-2 py-1">Resolve report #{{.ID}}</button>
+                </div>
+              </form>
+              {{else}}
+              <p class="muted mt-1 text-xs">resolved by {{.ResolvedBy}} · {{template "collab_time" .ResolvedAt}}{{with .Action}} · action: {{.}}{{end}}{{with .ResolveNote}} · note: {{.}}{{end}}</p>
+              {{end}}
+            </li>
+            {{end}}
+          </ul>
+          {{if .More}}<p class="mt-3"><a class="link text-xs" href="/admin/reports?state={{.State}}&amp;after={{.Next}}">older reports…</a></p>{{end}}
+          {{else}}
+          {{template "collab_empty" (dict "compact" true "icon" "comment" "title" "No reports here" "hint" "Nothing in this state across the repositories this instance serves.")}}
+          {{end}}
+        </section>
+        {{end}}
+        {{end}}
+      {{end}}
+    </div>
+  </div>
+</div>
+{{end}}

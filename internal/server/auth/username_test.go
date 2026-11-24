@@ -115,10 +115,6 @@ func TestPrincipalShapes(t *testing.T) {
 	if !a.Anonymous || a.Name != "anonymous" || a.Write || a.Admin {
 		t.Errorf("Anonymous() = %+v", a)
 	}
-	n := None()
-	if n.Anonymous || n.Name != "anon" || !n.Write || !n.Admin {
-		t.Errorf("None() = %+v", n)
-	}
 	if got := (&AuthError{Why: "nope"}).Error(); got != "nope" {
 		t.Errorf("Error() = %q", got)
 	}

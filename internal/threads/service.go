@@ -13,6 +13,7 @@ import (
 
 	"github.com/crueber/spindle/internal/server/auth"
 	"github.com/crueber/spindle/internal/store"
+	"github.com/crueber/spindle/internal/threads/workflow"
 )
 
 // This file owns run creation (15 §2), the run/job reads, the job→checks
@@ -129,6 +130,13 @@ func (s *Service) CreateRun(ctx context.Context, repo, commit, event string, opt
 	if !validEvent(event) {
 		return nil, fmt.Errorf("%w: event must be push|pull_request|workflow_dispatch|schedule, got %q", ErrInvalid, event)
 	}
+	action := strings.TrimSpace(opts.Action)
+	if event == EventPullReq {
+		if !workflow.ValidPullRequestType(action) {
+			return nil, fmt.Errorf("%w: pull_request action must be one of %s, got %q", ErrInvalid,
+				strings.Join(workflow.PullRequestTypes, ", "), action)
+		}
+	}
 	if s.Git == nil {
 		return nil, fmt.Errorf("%w: git backend not wired", ErrUnavailable)
 	}
@@ -179,7 +187,7 @@ func (s *Service) CreateRun(ctx context.Context, repo, commit, event string, opt
 		slog.Warn("threads: workflow files failed to parse; their workflows are disabled, the rest still run",
 			"repo", repo, "commit", workflowCommit, "files", paths)
 	}
-	matched := SelectFiles(files, event, strings.TrimSpace(opts.Branch), want)
+	matched := SelectFiles(files, event, strings.TrimSpace(opts.Branch), action, want)
 	if len(matched) == 0 {
 		if event == EventDispatch && want != "" {
 			return nil, fmt.Errorf("%w: no workflow_dispatch workflow named %q", ErrNotFound, want)
@@ -222,8 +230,30 @@ func (s *Service) createOne(ctx context.Context, owner, repo, sha, event string,
 		jobKeys = append(jobKeys, k)
 	}
 	sort.Strings(jobKeys)
+	// The header is built before the job loop: a job-level `if:` reads the
+	// github.* context (commit, event, branch, run id), and the header is that
+	// context. It is written after the jobs (the header is the commit point).
+	run := &Run{
+		ID: runID, Repo: repoID(owner, repo), Commit: sha, Event: event,
+		Branch: strings.TrimSpace(opts.Branch), Ref: strings.TrimSpace(opts.Ref),
+		Workflow: f.Name, WorkflowPath: f.Path, WorkflowCommit: workflowCommit,
+		WorkflowDigest: f.Digest, Trusted: trusted, State: RunQueued, Actor: actor,
+		Attempt:   attempt,
+		Inputs:    runInputs(opts),
+		CreatedAt: now, UpdatedAt: now, Version: 1,
+	}
 	used := map[string]bool{}
 	jobs := make([]*Job, 0, len(jobKeys))
+	// One resolver per workflow file: its jobs share action directories, and a
+	// definition is read from git once. It is pinned to the RUN commit (the
+	// head the runner checks out), so a fork PR's local actions are the fork's
+	// checked-out code and a base-branch workflow can never execute an action
+	// file from another ref (docs/threads.md §3.4a).
+	resolver := newActionResolver(s.Git, repoID(owner, repo), sha)
+	// The group/name templates expand against the run's own context: the header
+	// exists before the job loop (it is written after), and a branch name in a
+	// group is what keeps a push on one branch off another branch's key.
+	ec := expandContext{GitHub: githubContext(run, f.Name), Inputs: groupInputs(f.Workflow, opts.Inputs)}
 	for _, key := range jobKeys {
 		def := f.Workflow.Jobs[key]
 		display := strings.TrimSpace(def.Name)
@@ -231,7 +261,7 @@ func (s *Service) createOne(ctx context.Context, owner, repo, sha, event string,
 			display = key
 		}
 		base := buildSpec(f.Name, f.Workflow, def, opts.Inputs)
-		instances, xerr := expandJobSpec(key, display, base)
+		instances, xerr := expandJobSpec(key, display, base, ec)
 		if xerr != nil {
 			return nil, xerr
 		}
@@ -244,7 +274,6 @@ func (s *Service) createOne(ctx context.Context, owner, repo, sha, event string,
 				RunsOn:    strings.Join(spec.RunsOn, ", "),
 				Container: containerImage(spec.Container),
 				Needs:     nonNilStr(def.Needs),
-				Steps:     convenienceSteps(spec.Steps),
 				Spec:      spec,
 				Attempt:   attempt,
 				Trusted:   trusted,
@@ -252,6 +281,58 @@ func (s *Service) createOne(ctx context.Context, owner, repo, sha, event string,
 				CreatedAt: now, UpdatedAt: now,
 				Version: 1,
 			}
+			// A job with no `needs:` can be decided now: nothing about it can
+			// change between creation and a runner's claim, so a false `if:` is
+			// written `skipped` (never enqueued) instead of being re-evaluated
+			// by every probe. A dependent job is decided by the needs cascade.
+			if len(def.Needs) == 0 {
+				if verdict, reason, _ := evaluateJobIf(job, run, needFacts{}); verdict != jobIfRun {
+					job.State = JobSkipped
+					job.CompletedAt = &now
+					job.Reason = reason
+					if verdict == jobIfError {
+						job.State = JobFailure
+					}
+				}
+			}
+			// Local actions are resolved before the image gate: the gate must
+			// see every docker:// image an action names, and a definition that
+			// cannot be used is a failed job with the reason (never a runner's
+			// surprise). A job a condition already skipped runs no step, so it
+			// is not refused.
+			if job.State == JobQueued {
+				if aerr := resolver.fill(ctx, spec); aerr != nil {
+					job.State = JobFailure
+					job.CompletedAt = &now
+					job.Reason = aerr.Error()
+				}
+			}
+			// The image gate (threads.image_allow_prefixes /
+			// threads.image_require_digest) and the container option policy run
+			// for EVERY job that could execute, whatever its trust class. They
+			// are decided here — where the spec is final and before anything is
+			// enqueued — so a refusal is a failed job with a Reason and a red
+			// check, never a runner's surprise and never a silent skip. A job a
+			// condition already skipped pulls no image and starts no container,
+			// so it is not refused. A policy that cannot be evaluated refuses
+			// (fail closed).
+			if job.State == JobQueued {
+				if reason, refused := s.jobRefusalReason(spec); refused {
+					job.State = JobFailure
+					job.CompletedAt = &now
+					job.Reason = reason
+				}
+			}
+			// The deployment-environment decision (docs/PLAN-THREADS-ENVIRONMENTS.md
+			// §5): an undefined environment fails the job (fail closed), a defined
+			// one carries its deployment record, and one with required reviewers
+			// holds the run until a listed reviewer (or a repo admin) decides.
+			if _, eerr := s.applyEnvironmentDecision(ctx, owner, repo, job, now); eerr != nil {
+				return nil, eerr
+			}
+			// The display list is built after resolution: a composite action is
+			// shown expanded, in place (its definitions are embedded above).
+			job.Steps = convenienceSteps(spec)
 			body, _ := json.Marshal(job) // cannot fail: the record is pure JSON types
 			if perr := s.putCreate(ctx, JobKey(owner, repo, runID, job.ID), body); perr != nil {
 				if store.IsPreconditionFailed(perr) {
@@ -262,18 +343,20 @@ func (s *Service) createOne(ctx context.Context, owner, repo, sha, event string,
 			jobs = append(jobs, job)
 		}
 	}
-	state := RunQueued
+	run.Concurrency = runGroups(jobs)
+	// The run-level hold: the fork gate, or the stricter environment gate when
+	// any job names an environment with required reviewers. The environment hold
+	// names the environments so the page, the check description and the API say
+	// WHICH deployment is waiting instead of a generic "pending approval".
 	if gate {
-		state = RunPendingApproval
+		run.State = RunPendingApproval
+		run.ApprovalKind = ApprovalFork
 	}
-	run := &Run{
-		ID: runID, Repo: repoID(owner, repo), Commit: sha, Event: event,
-		Branch: strings.TrimSpace(opts.Branch), Ref: strings.TrimSpace(opts.Ref),
-		Workflow: f.Name, WorkflowPath: f.Path, WorkflowCommit: workflowCommit,
-		WorkflowDigest: f.Digest, Trusted: trusted, State: state, Actor: actor,
-		Attempt: attempt, Concurrency: runGroups(jobs),
-		Inputs:    runInputs(opts),
-		CreatedAt: now, UpdatedAt: now, Version: 1,
+	gatedEnvs := pendingEnvironments(jobs)
+	if len(gatedEnvs) > 0 {
+		run.State = RunPendingApproval
+		run.ApprovalKind = ApprovalEnvironment
+		run.Environments = gatedEnvs
 	}
 	body, _ := json.Marshal(run) // cannot fail: the record is pure JSON types
 	if perr := s.putCreate(ctx, RunKey(owner, repo, runID), body); perr != nil {
@@ -287,25 +370,77 @@ func (s *Service) createOne(ctx context.Context, owner, repo, sha, event string,
 			return nil, cerr
 		}
 	}
-	if gate {
+	if run.State == RunPendingApproval {
 		// The approval gate IS the queue: the jobs exist (the page, the checks
 		// mirror and the PR panel stay coherent) but no runner can see them
-		// until ApproveRun enqueues them (15 §5.2). No wake: there is nothing to
-		// claim.
+		// until ApproveRun enqueues them — the fork gate (15 §5.2) and an
+		// environment's required reviewers share this state machine
+		// (docs/PLAN-THREADS-ENVIRONMENTS.md §6). No wake: nothing to claim.
 		return run, nil
 	}
 	// Enqueue AFTER the run header (the header is the commit point, so a runner
 	// can never claim a job of an invisible run). A queue failure is logged and
 	// leaves the job queued exactly like a pre-runner instance (15 §8): the run
-	// page shows it, and threads-gc re-enqueues it.
+	// page shows it, and threads-gc re-enqueues it. A job the `if:`/`needs:`
+	// decision already terminalised is never enqueued.
 	idx := needsIndex(jobs)
 	for _, job := range jobs {
-		if _, eerr := s.enqueueJob(ctx, owner, repo, job, entryNeeds(idx, job)); eerr != nil {
+		if job.State != JobQueued {
+			continue
+		}
+		if _, eerr := s.enqueueJob(ctx, owner, repo, job, entryNeedMap(idx, job)); eerr != nil {
 			slog.Warn("threads: enqueue job", "repo", repoID(owner, repo), "run", runID, "job", job.ID, "err", eerr)
 		}
 	}
 	fetchHub.wake(repoID(owner, repo))
+	// A job decided at creation (a false `if:`) can doom its dependents with no
+	// runner poll, and a run whose every job was decided has nothing left to
+	// wait for. Settle it now rather than leaving the run at "queued" until a
+	// probe happens to visit it (a deployment with no runner included).
+	if !allQueued(jobs) {
+		return s.settleDecidedJobs(ctx, owner, repo, runID)
+	}
 	return run, nil
+}
+
+// settleDecidedJobs cascades the jobs a condition or dependency decided before
+// any runner ran, folds the run when nothing is left to run, and returns the
+// settled header. It is the shared tail of run creation, approval and rerun.
+func (s *Service) settleDecidedJobs(ctx context.Context, owner, repo, runID string) (*Run, error) {
+	if serr := s.skipBlockedDependents(ctx, owner, repo, runID, nil); serr != nil {
+		return nil, serr
+	}
+	jobs, err := s.loadJobs(ctx, owner, repo, runID)
+	if err != nil {
+		return nil, err
+	}
+	if !anyLive(jobs) {
+		if _, ferr := s.foldRun(ctx, owner, repo, runID); ferr != nil {
+			return nil, ferr
+		}
+	}
+	return s.loadRun(ctx, owner, repo, runID)
+}
+
+// anyLive reports a job that can still change (queued or running).
+func anyLive(jobs []*Job) bool {
+	for _, j := range jobs {
+		if j.State == JobQueued || j.State == JobRunning {
+			return true
+		}
+	}
+	return false
+}
+
+// allQueued reports that nothing was decided before a runner ran (the common
+// path, where the settlement read is skipped entirely).
+func allQueued(jobs []*Job) bool {
+	for _, j := range jobs {
+		if j.State != JobQueued {
+			return false
+		}
+	}
+	return true
 }
 
 // reportCheck mirrors one job state into the checks surface (nil Checks = no
@@ -317,6 +452,12 @@ func (s *Service) reportCheck(ctx context.Context, run *Run, job *Job) error {
 		return nil
 	}
 	desc := fmt.Sprintf("%s / %s (run %s)", job.specWorkflow(run.Workflow), job.Name, run.ID)
+	if job.Deployment != nil && job.Deployment.Environment != "" {
+		// A held or approved deployment names its environment in the checks
+		// description, so the checks panel says WHICH deployment is waiting.
+		desc = fmt.Sprintf("%s / %s · environment %s (run %s)",
+			job.specWorkflow(run.Workflow), job.Name, job.Deployment.Environment, run.ID)
+	}
 	if len([]rune(desc)) > 256 {
 		desc = string([]rune(desc)[:253]) + "…"
 	}
@@ -363,7 +504,7 @@ func (s *Service) DispatchRun(ctx context.Context, repo, ref, workflowRef string
 		if derr != nil {
 			return nil, derr
 		}
-		target := SelectFiles(files, EventDispatch, "", workflowRef)
+		target := SelectFiles(files, EventDispatch, "", "", workflowRef)
 		if len(target) == 0 {
 			if broken := brokenWorkflowFiles(files, workflowRef); len(broken) > 0 {
 				return nil, fmt.Errorf("%w: %s: %s", ErrUnprocessable, broken[0].Path, broken[0].Error)
@@ -423,8 +564,13 @@ func (s *Service) GetRun(ctx context.Context, repo, runID string, p auth.Princip
 	if err != nil {
 		return nil, err
 	}
+	arts, aerr := s.runArtifactViews(ctx, owner, name, run)
+	if aerr != nil {
+		return nil, aerr
+	}
 	s.fillDurations(run, jobs)
-	return &RunView{Run: run, Jobs: jobs}, nil
+	av := s.ApprovalFor(ctx, owner, name, run, p)
+	return &RunView{Run: run, Jobs: jobs, Artifacts: arts, Approval: &av}, nil
 }
 
 // fillDurations sets the derived DurationSeconds on a run and its jobs (a read
@@ -692,9 +838,19 @@ type JobUpdate struct {
 	RunnerName      string
 	CancelRequested *bool
 	StepResults     []StepResult
-	LeaseUntil      *string
-	StartedAt       *string
-	CompletedAt     *string
+	// Outputs replaces the job's reported outputs when non-nil (complete); a
+	// rerun clears them through ClearTimings.
+	Outputs     map[string]string
+	LeaseUntil  *string
+	StartedAt   *string
+	CompletedAt *string
+	// Reason records why the job did not execute (a false job-level `if:`, a
+	// blocked `needs:`, an unsupported condition). A rerun clears it.
+	Reason string
+	// Deployment replaces the job's deployment record when non-nil (an
+	// approval/denial decision, or a rerun's re-decision). Nil leaves it alone:
+	// a plain requeue must not forget an approval the job already carried.
+	Deployment *Deployment
 }
 
 // UpdateJob CAS-updates one job record, mirrors the new state into the checks
@@ -751,6 +907,9 @@ func (s *Service) UpdateJob(ctx context.Context, repo, runID, jobID string, up J
 		if up.StepResults != nil {
 			job.StepResults = up.StepResults
 		}
+		if up.Outputs != nil {
+			job.Outputs = up.Outputs
+		}
 		if up.LeaseUntil != nil {
 			job.LeaseUntil = up.LeaseUntil
 		}
@@ -763,6 +922,18 @@ func (s *Service) UpdateJob(ctx context.Context, repo, runID, jobID string, up J
 			job.Runner = ""
 			job.RunnerName = ""
 			job.StepResults = nil
+			job.Outputs = nil
+			job.Reason = ""
+		}
+		// The reason is applied AFTER the reset: a caller that clears an
+		// attempt's timings and states a new refusal (a policy re-check on
+		// rerun) means the new reason, not an empty one.
+		if up.Reason != "" {
+			job.Reason = up.Reason
+		}
+		if up.Deployment != nil {
+			dep := *up.Deployment
+			job.Deployment = &dep
 		}
 		switch {
 		case up.StartedAt != nil:
@@ -779,6 +950,12 @@ func (s *Service) UpdateJob(ctx context.Context, repo, runID, jobID string, up J
 		default:
 			job.CompletedAt = nil
 		}
+		// `continue-on-error: true` on the job: the record keeps `failure`
+		// (nothing is rewritten) and carries Tolerated, which the run fold
+		// ignores — that is how a reader tells "failed but tolerated" from
+		// "succeeded". Recomputed from the final state, so a successful retry
+		// or a requeue clears it.
+		job.Tolerated = job.State == JobFailure && job.Spec != nil && job.Spec.ContinueOnError
 		job.Version++
 		body, _ := json.Marshal(&job) // cannot fail: the record is pure JSON types
 		updated = &job
@@ -797,6 +974,10 @@ func (s *Service) UpdateJob(ctx context.Context, repo, runID, jobID string, up J
 		return nil, ferr
 	}
 	if terminal(updated.State) {
+		// The lease is over: drop it from the runner registry's display state
+		// (best effort; the runner may be gone) and from the global hint.
+		s.clearRunnerCurrentJob(ctx, updated.Runner, repoID(owner, name), runID, jobID)
+		s.removeQueueIndexJob(ctx, repoID(owner, name), runID, jobID)
 		// `needs:` dependents (15 §4.1): a concluded job unblocks its
 		// dependents (the wake below) or dooms them (a failed/cancelled need
 		// terminalises them as cancelled, transitively). No runner poll is

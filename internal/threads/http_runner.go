@@ -3,19 +3,28 @@ package threads
 import (
 	"encoding/json"
 	"net/http"
+	neturl "net/url"
 	"strconv"
 	"strings"
 	"time"
 )
 
-// The runner protocol (15 §3): JSON over HTTPS, authenticated by the protocol's
-// own tokens (never a session cookie), versioned by X-Spindle-Runner: 1 on every
-// response. Paths are top-level because a runner is infrastructure, not a user:
+// The runner protocol (docs/PLAN-INSTANCE-RUNNERS.md §4): JSON over HTTPS,
+// authenticated by the protocol's own tokens (never a session cookie), versioned
+// by X-Spindle-Runner: 1 on every response. Paths are top-level because a runner
+// is instance infrastructure, not a repository member:
 //
-//	POST /api/v1/threads/runners/register         registration token → runner token
-//	POST /api/v1/threads/runners/declare          version + labels (liveness)
-//	POST /api/v1/threads/runners/fetch            long-poll (≤ 30 s), 204 when idle
+//	POST /api/v1/threads/runners/register         registration token → runner credential
+//	POST /api/v1/threads/runners/declare          version + labels + capacity (liveness)
+//	POST /api/v1/threads/runners/fetch            global long-poll (≤ 30 s), 204 when idle
 //	POST /api/v1/threads/jobs/{ref}/attempt/{n}/start|log|complete|cancel
+//
+// The host-admin fleet surface lives beside it (the service is the gate):
+//
+//	POST   /api/v1/admin/runners/tokens           mint a one-time registration token
+//	GET    /api/v1/admin/runners                  the instance fleet
+//	DELETE /api/v1/admin/runners/{id}             revoke
+//	POST   /api/v1/admin/runners/{id}/policy      change one runner's repository policy
 //
 // {ref} is an opaque job reference (jr_…, see JobRef): the protocol table's
 // {id} cannot be a bare job id, because two runs may both own "j-build".
@@ -70,21 +79,46 @@ func (h *Handler) handleTop(w http.ResponseWriter, r *http.Request, segs []strin
 		}
 		writePlain(w, http.StatusNotFound, "unknown runner endpoint")
 		return true
-	case len(rest) == 5 && rest[0] == "jobs" && rest[2] == "attempt":
-		if r.Method != http.MethodPost {
-			methodNotAllowed(w, "POST")
-			return true
-		}
-		h.attemptOp(w, r, rest[1], rest[3], rest[4])
+	case len(rest) >= 5 && rest[0] == "jobs" && rest[2] == "attempt":
+		h.attemptOp(w, r, rest[1], rest[3], rest[4:])
 		return true
 	}
 	return false
 }
 
+// handleAdminRunners answers /api/v1/admin/runners[/…] (the instance fleet).
+// It is a host-admin surface on both JSON lanes: the service's requireHostAdmin
+// decides (401 anonymous, 403 authenticated non-admin).
+func (h *Handler) handleAdminRunners(w http.ResponseWriter, r *http.Request, rest []string) bool {
+	if h.Svc == nil || h.Svc.Store == nil {
+		writePlain(w, http.StatusServiceUnavailable, "threads service not wired")
+		return true
+	}
+	switch {
+	case len(rest) == 0 && r.Method == http.MethodGet:
+		h.listRunners(w, r)
+	case len(rest) == 1 && rest[0] == "tokens" && r.Method == http.MethodPost:
+		h.mintRunnerToken(w, r)
+	case len(rest) == 2 && rest[1] == "policy" && r.Method == http.MethodPost:
+		h.setRunnerPolicy(w, r, rest[0])
+	case len(rest) == 1 && r.Method == http.MethodDelete:
+		h.revokeRunner(w, r, rest[0])
+	case len(rest) == 0:
+		methodNotAllowed(w, "GET")
+	case len(rest) == 1 && rest[0] == "tokens":
+		methodNotAllowed(w, "POST")
+	case len(rest) == 2 && rest[1] == "policy":
+		methodNotAllowed(w, "POST")
+	default:
+		methodNotAllowed(w, "DELETE")
+	}
+	return true
+}
+
 // runnerRegister consumes a registration token once.
 func (h *Handler) runnerRegister(w http.ResponseWriter, r *http.Request) {
 	var in RegisterInput
-	if !decodeStrict(w, r, maxProtocolBody, map[string]bool{"token": true, "name": true, "labels": true}, &in) {
+	if !decodeStrict(w, r, maxProtocolBody, map[string]bool{"token": true, "name": true, "labels": true, "capacity": true, "allow_fork_runs": true}, &in) {
 		return
 	}
 	if h.Svc == nil || h.Svc.Store == nil {
@@ -107,7 +141,7 @@ func (h *Handler) runnerDeclare(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var in DeclareInput
-	if !decodeStrict(w, r, 16<<10, map[string]bool{"version": true, "labels": true}, &in) {
+	if !decodeStrict(w, r, 16<<10, map[string]bool{"version": true, "labels": true, "capacity": true, "allow_fork_runs": true}, &in) {
 		return
 	}
 	view, derr := h.Svc.Declare(r.Context(), auth, in)
@@ -134,7 +168,7 @@ func (h *Handler) runnerFetch(w http.ResponseWriter, r *http.Request) {
 		}
 		wait = time.Duration(secs) * time.Second
 	}
-	job, ferr := h.Svc.FetchJobFrom(r.Context(), auth, wait, checkoutBase(r))
+	job, ferr := h.Svc.FetchJobFrom(r.Context(), auth, wait, h.checkoutBase(r))
 	if ferr != nil {
 		writeErr(w, ferr)
 		return
@@ -147,25 +181,62 @@ func (h *Handler) runnerFetch(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, job)
 }
 
-// attemptOp dispatches one attempt-scoped operation.
-func (h *Handler) attemptOp(w http.ResponseWriter, r *http.Request, ref, nRaw, op string) {
+// attemptOp dispatches one attempt-scoped operation. op is the remainder of the
+// path, so an artifact transfer's nested route (artifacts/{name}/blobs/{index})
+// stays under the same authenticated job channel.
+func (h *Handler) attemptOp(w http.ResponseWriter, r *http.Request, ref, nRaw string, op []string) {
 	attempt, nerr := attemptPathNumber(nRaw)
 	if nerr != nil {
 		writeErr(w, nerr)
 		return
 	}
-	switch op {
-	case "start":
-		h.attemptStart(w, r, ref, attempt)
-	case "log":
-		h.attemptLog(w, r, ref, attempt)
-	case "complete":
-		h.attemptComplete(w, r, ref, attempt)
-	case "cancel":
-		h.attemptCancel(w, r, ref, attempt)
-	default:
-		writePlain(w, http.StatusNotFound, "unknown attempt operation")
+	if len(op) == 1 {
+		switch op[0] {
+		case "start":
+			if r.Method != http.MethodPost {
+				methodNotAllowed(w, "POST")
+				return
+			}
+			h.attemptStart(w, r, ref, attempt)
+			return
+		case "log":
+			if r.Method != http.MethodPost {
+				methodNotAllowed(w, "POST")
+				return
+			}
+			h.attemptLog(w, r, ref, attempt)
+			return
+		case "complete":
+			if r.Method != http.MethodPost {
+				methodNotAllowed(w, "POST")
+				return
+			}
+			h.attemptComplete(w, r, ref, attempt)
+			return
+		case "cancel":
+			if r.Method != http.MethodPost {
+				methodNotAllowed(w, "POST")
+				return
+			}
+			h.attemptCancel(w, r, ref, attempt)
+			return
+		case "artifacts":
+			h.attemptArtifacts(w, r, ref, attempt, nil)
+			return
+		case "id-token":
+			if r.Method != http.MethodPost {
+				methodNotAllowed(w, "POST")
+				return
+			}
+			h.exchangeIDToken(w, r, ref, attempt)
+			return
+		}
 	}
+	if len(op) >= 1 && op[0] == "artifacts" {
+		h.attemptArtifacts(w, r, ref, attempt, op[1:])
+		return
+	}
+	writePlain(w, http.StatusNotFound, "unknown attempt operation")
 }
 
 // attemptStart issues the attempt token (authenticated by the runner token: it
@@ -243,7 +314,7 @@ func (h *Handler) attemptComplete(w http.ResponseWriter, r *http.Request, ref st
 		return
 	}
 	var in CompleteInput
-	if !decodeStrict(w, r, maxProtocolBody, map[string]bool{"conclusion": true, "steps": true}, &in) {
+	if !decodeStrict(w, r, maxProtocolBody, map[string]bool{"conclusion": true, "steps": true, "outputs": true}, &in) {
 		return
 	}
 	view, err := h.Svc.Complete(r.Context(), claims, in)
@@ -268,18 +339,19 @@ func (h *Handler) attemptCancel(w http.ResponseWriter, r *http.Request, ref stri
 	writeJSON(w, http.StatusOK, view)
 }
 
-// --- repo-scoped admin surface ----------------------------------------------
+// --- host-admin fleet surface ------------------------------------------------
 
-// runners / runner tokens / secrets are repo admin operations. They live on the
-// repo lanes (a page and its API twin share the gate: admin, both lanes).
+// runners / runner tokens are HOST-ADMIN operations (never a repository role:
+// an instance runner is infrastructure and may be offered any repository's
+// jobs). The service re-checks the gate, so the handler and the CLI share it.
 
-func (h *Handler) listRunners(w http.ResponseWriter, r *http.Request, repo string) {
+func (h *Handler) listRunners(w http.ResponseWriter, r *http.Request) {
 	p, aerr := h.principal(r)
 	if aerr != nil {
 		writeErr(w, aerr)
 		return
 	}
-	runners, err := h.Svc.ListRunners(r.Context(), repo, p)
+	runners, err := h.Svc.ListRunners(r.Context(), p)
 	if err != nil {
 		writeErr(w, err)
 		return
@@ -287,13 +359,26 @@ func (h *Handler) listRunners(w http.ResponseWriter, r *http.Request, repo strin
 	writeJSON(w, http.StatusOK, map[string]any{"runners": runners})
 }
 
-func (h *Handler) mintRunnerToken(w http.ResponseWriter, r *http.Request, repo string) {
+func (h *Handler) mintRunnerToken(w http.ResponseWriter, r *http.Request) {
 	p, aerr := h.principal(r)
 	if aerr != nil {
 		writeErr(w, aerr)
 		return
 	}
-	tok, err := h.Svc.MintRegistrationToken(r.Context(), repo, p)
+	// Gate before decoding: an anonymous caller must get a real 401, not a
+	// body-validation 400 (the credential boundary runs first).
+	if err := requireHostAdmin(p); err != nil {
+		writeErr(w, err)
+		return
+	}
+	// The repository policy is the ADMIN's, set here exactly as the page's mint
+	// form sets it: {name?, allow_all, repos}. Neither field is accepted on the
+	// runner protocol, so a runner cannot widen its own tenancy.
+	var in MintInput
+	if !decodeStrict(w, r, 16<<10, map[string]bool{"name": true, "allow_all": true, "repos": true}, &in) {
+		return
+	}
+	tok, err := h.Svc.MintRegistrationToken(r.Context(), p, in)
 	if err != nil {
 		writeErr(w, err)
 		return
@@ -301,18 +386,46 @@ func (h *Handler) mintRunnerToken(w http.ResponseWriter, r *http.Request, repo s
 	writeJSON(w, http.StatusCreated, tok)
 }
 
-func (h *Handler) revokeRunner(w http.ResponseWriter, r *http.Request, repo, id string) {
+func (h *Handler) revokeRunner(w http.ResponseWriter, r *http.Request, id string) {
 	p, aerr := h.principal(r)
 	if aerr != nil {
 		writeErr(w, aerr)
 		return
 	}
-	if err := h.Svc.RevokeRunner(r.Context(), repo, id, p); err != nil {
+	if err := h.Svc.RevokeRunner(r.Context(), id, p); err != nil {
 		writeErr(w, err)
 		return
 	}
 	w.Header().Set("Cache-Control", "no-store")
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// setRunnerPolicy answers POST /api/v1/admin/runners/{id}/policy: the admin
+// JSON lane for the fleet's one non-mint tenancy write. Body shape is the
+// mint's ({allow_all, repos}); the service validates, CASes only the policy and
+// audits it.
+func (h *Handler) setRunnerPolicy(w http.ResponseWriter, r *http.Request, id string) {
+	p, aerr := h.principal(r)
+	if aerr != nil {
+		writeErr(w, aerr)
+		return
+	}
+	// Gate before decoding: an anonymous caller gets a real 401, never a body
+	// 400 (the credential boundary runs first).
+	if err := requireHostAdmin(p); err != nil {
+		writeErr(w, err)
+		return
+	}
+	var in RunnerPolicyInput
+	if !decodeStrict(w, r, 16<<10, map[string]bool{"allow_all": true, "repos": true}, &in) {
+		return
+	}
+	pol, err := h.Svc.SetRunnerPolicy(r.Context(), id, RunnerPolicy{AllowAll: in.AllowAll, Repos: in.Repos}, p.Name)
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"id": strings.ToLower(strings.TrimSpace(id)), "policy": pol})
 }
 
 func (h *Handler) listSecrets(w http.ResponseWriter, r *http.Request, repo string) {
@@ -426,6 +539,23 @@ func marshalName(v any) string {
 	// fail, and a nil body simply carries no data.
 	b, _ := json.Marshal(v)
 	return string(b)
+}
+
+// checkoutBase derives the runner-facing origin: the configured
+// server.public_url when set (the operator's declaration of an address job
+// containers can reach), otherwise the protocol request's origin. See
+// checkoutBase(r) for the request-derived rule. A public value that is not an
+// absolute http(s) URL is ignored — a malformed setting must not poison the
+// checkout.
+func (h *Handler) checkoutBase(r *http.Request) string {
+	if h != nil && h.Svc != nil {
+		if base := strings.TrimSpace(h.Svc.CheckoutBaseURL); base != "" {
+			if u, err := neturl.Parse(base); err == nil && (u.Scheme == "http" || u.Scheme == "https") && u.Host != "" {
+				return strings.TrimRight(base, "/")
+			}
+		}
+	}
+	return checkoutBase(r)
 }
 
 // checkoutBase derives the runner-facing origin from the protocol request, so

@@ -21,6 +21,9 @@ type Env struct {
 	Cfg     *config.Config
 	API     *api.Env
 	Version string
+	// Restricted is the boot state: only /admin and /admin/config are
+	// reachable, so the area nav must not offer the read-only pages.
+	Restricted bool
 
 	// Now is the clock (tests override it). nil → time.Now.
 	Now func() time.Time

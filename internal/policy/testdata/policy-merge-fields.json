@@ -1,0 +1,31 @@
+{
+  "version": 1,
+  "groups": [
+    { "name": "sre", "members": ["ops@example.com"] }
+  ],
+  "rules": [
+    {
+      "name": "protection:main-push",
+      "match": { "refs": ["refs/heads/main"] },
+      "effect": {
+        "protect": {
+          "restricts": ["create", "update", "force-push", "delete"],
+          "bypass": ["role:acme/monorepo:admin"],
+          "require_checks": ["ci/build"],
+          "require_up_to_date": true,
+          "merge_methods": ["merge", "squash"]
+        }
+      }
+    },
+    {
+      "name": "protection:main-reviews",
+      "match": { "refs": ["refs/heads/main"] },
+      "effect": { "required-reviews": { "min_approvals": 2, "dismiss_stale": true } }
+    },
+    {
+      "name": "release-lock",
+      "match": { "refs": ["refs/heads/release/*"] },
+      "effect": { "protect": { "restricts": ["delete", "force-push"] } }
+    }
+  ]
+}

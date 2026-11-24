@@ -1,0 +1,421 @@
+# Features
+
+> What spindle does, capability by capability, with the deep doc for each. Setup, the first-run
+> OIDC card, backup/restore and the compose examples live in the [README](../README.md);
+> the command-line surface is [`CLI.md`](CLI.md). Everything here has one architectural
+> constraint in common: the object store is the only database, so an instance is disposable and
+> "wipe it" loses nothing but warmth.
+
+## 1. Git hosting
+
+Repositories speak **smart HTTP v0 and v2** and **SSH**. Over HTTP the advertisement is
+`GET /{owner}/{repo}[.git]/info/refs?service=git-upload-pack|git-receive-pack`, with the protocol
+version chosen by the client's `Git-Protocol` header; fetches are `POST …/git-upload-pack`, pushes
+`POST …/git-receive-pack` (which requires the `.git` suffix). Over SSH the same repositories are
+served by `server.ssh.listen` (e.g. `0.0.0.0:2222`) at
+`ssh://git@host:2222/<owner>/<repo>.git`, with public keys added on the **/keys** page or with
+`spindle user keys add`; the host key lives in the data dir, so it survives restarts and container
+recreation. Every git operation is a `git` subprocess with a fixed argv — the wire details are
+[`go/04_git.md`](go/04_git.md) and [`go/17_ssh.md`](go/17_ssh.md).
+
+Around that core:
+
+- **Git LFS** — the batch API (`POST …/info/lfs/objects/batch`, `application/vnd.git-lfs+json`),
+  per-object `GET|HEAD` and `PUT …/info/lfs/objects/{oid}`, and `…/info/lfs/verify`, capped by
+  `lfs.max_object_bytes` ([`go/06_server_http.md`](go/06_server_http.md) §5).
+- **Bundle-uri** — `…/bundles/list?filter=blob:none`, `…/bundles/catchup`, and
+  `…/bundles/{strategy}/{name}`, so a blobless clone bootstraps from prebuilt bundles instead of a
+  full pack; strategies and slots are [`go/08_bundles.md`](go/08_bundles.md).
+- **Source archives** — `GET|HEAD /{owner}/{repo}/archive/{ref}.tar.gz` and `.zip`, produced by
+  `git archive` in a bounded pool ([`go/04_git.md`](go/04_git.md) §11.3).
+- **Push policy** — the per-repository `policy.json` rule language (`protect`, `history`, `size`
+  effects, fail-closed parse, ordered rules) evaluated before any forward or sync work; read, save
+  and clear it with `spindle repo policy get|set --file F|clear`, and dry-run a proposal through the
+  API ([`go/14_extensibility.md`](go/14_extensibility.md), the policy section of
+  [`go/06_server_http.md`](go/06_server_http.md) §4.4).
+- **Auto-create on push** — `server.auto_create_on_push` is `true` in the zero-config first-run shape (the compiled default is
+`false`), so the first push to
+  a new `owner/name` registers the repository; `spindle repo create OWNER/REPO` is the explicit
+  path.
+- **Import, mirrors and forks** — one-shot import from a local git directory or a URL
+  (`spindle import --from GITDIR owner/name`, `spindle import --url URL owner/name`, with ref
+  filters and provenance recorded in `meta/import.json`), pull-only mirrors with scheduled upstream
+  syncs and push mirrors (`repos/<o>/<r>/meta/{mirror,pushmirror}.json`), and in-instance forks with
+  a "Sync fork" driver. Surfaces: Settings → Mirror / Push mirror, the fork page,
+  [`features/10_git_import.md`](features/10_git_import.md),
+  [`features/11_mirror.md`](features/11_mirror.md),
+  [`features/13_push_mirror.md`](features/13_push_mirror.md), and `internal/forksync` (PLAN-V1 WP5).
+
+**Bucket-native state.** Refs, packs, the WAL, policy, access bindings and every collaboration
+object are objects under `repos/<owner>/<repo>/` (plus the instance-root families `users/`,
+`orgs/`, `meta/`, `packages/`, `threads/`, `moderation/`). There is no SQL, no Redis, no queue
+server and no search index: disk and memory are caches, the manifest CAS is the only commit point,
+and a push is never acknowledged before the bucket acknowledges it. Key layout, protobuf field
+numbers and JSON shapes stay byte-compatible with the Rust walgit implementation, pinned by golden
+fixtures in the packages' `testdata/` directories ([`go/02_storage_protobuf.md`](go/02_storage_protobuf.md)).
+
+## 2. Collaboration
+
+The collaboration layer is a parallel object family with its own CAS discipline — it never produces
+WAL entries and never gates a push except where a policy effect explicitly consults it. Every
+feature is a set of objects under a top-level prefix, so it inherits the same durability,
+replication and backup story as git itself. The normative primitive list (P1–P9, including the
+shared issue/PR numbering space) is
+[`features/README.md`](features/README.md#p1--the-collaboration-object-family).
+
+- **Issues** — immutable event log plus a CAS'd header: comments, labels, milestones, assignees,
+  close/reopen, templates, pinning and dependency links. Shared numbering with pull requests (an
+  issue and a PR never take the same number) ([`features/02_issues.md`](features/02_issues.md)).
+- **Pull requests and review** — the PR head is an ordinary ref (`refs/pull/N/head`), mergeability
+  is computed on demand, merging is a task (merge/squash/rebase, optional head-branch deletion),
+  and reviews carry approve / request-changes / comment verdicts plus line-anchored threads and
+  review requests ([`features/03_pull_requests.md`](features/03_pull_requests.md),
+  [`features/04_code_review.md`](features/04_code_review.md)). `spindle pr …` covers list, show,
+  diff, create, close, merge, review, comment and checks.
+- **Checks and statuses** — external CI posts commit statuses and check runs; a repository can
+  require checks before merge, and Threads reports its jobs into the same surface
+  ([`features/05_checks_statuses.md`](features/05_checks_statuses.md)). `spindle checks list|status`,
+  `spindle pr checks`.
+- **Notifications** — subscriptions and mentions, delivered in the UI and fanned out to webhooks
+  ([`features/06_notifications.md`](features/06_notifications.md)).
+- **Releases and stars** — releases with markdown notes, assets (streamed upload up to
+  `releases.max_asset_bytes`, 2 GiB by default) and one release per tag; stars and watches on
+  repositories ([`features/07_releases_stars.md`](features/07_releases_stars.md)).
+  `spindle release list|show|create|delete|upload`.
+- **Organizations and teams** — org profiles, members, teams, repository role bindings in
+  `access.json`, and invitations
+  ([`features/01_identity_permissions.md`](features/01_identity_permissions.md)). `spindle org …`.
+- **Moderation** — user blocks, comment minimize/hide and conversation locks, abuse reports with
+  per-repository and host queues, rate limits and advisory spam signals, all audited
+  ([`features/16_moderation.md`](features/16_moderation.md)).
+- **Browser file edit** — create, edit and delete one text file as one commit, directly or on a new
+  branch with a PR, through the same push funnel and gates as a CLI push
+  ([`features/17_file_edit.md`](features/17_file_edit.md)). `spindle file put|create|delete`.
+- **Insights** — a cached pulse projection (commits, contributors, code frequency, issue/PR counts)
+  with an honest statement that spindle collects no traffic data
+  ([`features/18_repo_insights.md`](features/18_repo_insights.md)).
+
+## 3. Threads (CI)
+
+Threads runs CI from `.spindle/workflows/<name>.yml` in the repository. Workflow files are triggered
+by `push`, `pull_request` (opened/synchronize/reopened), `workflow_dispatch` with typed inputs, and
+`schedule` (five-field UTC cron); jobs run in containers with services, `needs:` ordering,
+`strategy.matrix` and `concurrency` groups, report into the checks surface that gates merges, and
+stream logs over SSE with cancel and rerun. `permissions:` mints a scoped job token
+(`$SPINDLE_JOB_TOKEN`) and, with `id-token: write` on a trusted run, a short-lived audience-scoped
+OIDC ID token for cloud providers; repository secrets are write-only and masked (never exposed to
+fork PRs), and first-time fork contributors need approval. Deployment environments add required
+reviewers and environment-scoped secrets: a job names one with `environment:`, and nothing starts —
+and no environment secret is resolved — until a listed reviewer or a repo admin approves the
+deployment (Settings → Environments).
+
+Runs, jobs and steps, from the outside in: one **run** per workflow file per event (the file pinned
+to a path, commit and sha256), one **job** per `jobs:` key or matrix cell (one container, one
+workspace volume, one runner claim, reported as the check `threads/<workflow>/<job>`), and one
+**step** per `steps:` entry (one `docker exec` in that container). A run's state folds from its jobs,
+and a job that never ran because its `if:` was false or its `needs:` dependency failed is `skipped`,
+not `cancelled`.
+
+### 3.1 Workflows, triggers and secrets
+
+The workflow is read **from the pushed commit**, so the push that introduces the file triggers the
+run itself. Only `.spindle/workflows/*.yml` and `*.yaml` are read (one directory, no nesting, no
+`.github/` fallback), each capped at 1 MiB.
+
+A run is **trusted** or **untrusted**, and that is server-side policy a file cannot opt out of:
+
+| Run | Workflow read at | Trusted | Secrets | Job token |
+|---|---|---|---|---|
+| `push` (client push or PR merge) | the pushed commit / merge commit | yes | yes | per `permissions` |
+| `pull_request`, same repository | the head commit | yes | yes | per `permissions` |
+| `pull_request`, fork | the **base branch tip** | no | none | `contents: read` |
+| `workflow_dispatch` | the resolved ref's commit | yes | yes | per `permissions` |
+| `schedule` | the default branch tip | yes | yes | per `permissions` |
+
+`push` fires for `refs/heads/<branch>` only (tags and branch deletes create no run). Secrets are
+managed in **Settings → Secrets** or the API, are write-only (the API returns names and timestamps,
+never values), are stored sealed with AES-256-GCM, and are injected as environment variables of
+their own name in every step of every job. Masking is server-side and best-effort: exact substring
+replacement in log frames and step results, skipping values shorter than 4 bytes — a runner that
+encodes, splits or derives a value defeats it, and step outputs (`$SPINDLE_OUTPUT`) are data, not
+logs, so a secret must never go into one. A fork run's payload carries `secrets: {}` and
+`secrets_denied: true`. The job token is scoped to one attempt of one job in one repository:
+always read of its own repository, plus push only when the effective `permissions:` say
+`contents: write` — and a push authenticated by it never starts a workflow run, so a
+`contents: write` workflow cannot rebuild itself forever. A fork PR from a first-time contributor is
+created `pending_approval` (jobs written, checks mirrored as `pending`, nothing enqueued) and waits
+for a maintainer's approve or deny unless the author already has a merged PR in the repository.
+Details: [`threads.md`](threads.md#51-repository-secrets),
+[`threads.md`](threads.md#52-the-check-every-run-passes-through),
+[`threads.md`](threads.md#53-the-job-token), [`threads.md`](threads.md#54-the-approval-gate).
+
+Job OIDC tokens are off unless the job asks: `permissions: id-token: write` (never `write-all`), a
+trusted run only, then `SPINDLE_ID_TOKEN_REQUEST_URL` + `SPINDLE_ID_TOKEN_REQUEST_TOKEN` (and the
+`ACTIONS_*` spellings) let the job `POST {"audience": "…"}` for an RS256 five-minute JWT whose
+issuer is `server.public_url`, with `sub` = `repo:<owner>/<name>:ref:<ref>` and the run/job claims
+([`threads.md`](threads.md#55-job-oidc-tokens-cloud-identity)). Environments are repository-scoped
+deployment targets with required reviewers (write or more, checked when saved, at most 10) and their
+own secrets, which override repository secrets of the same name and reach only a job that names the
+environment in a trusted run with an approved deployment; the run is created `pending_approval` and
+nothing is enqueued until a listed reviewer or a repo admin decides
+([`threads.md`](threads.md#56-deployment-environments)).
+
+### 3.2 Steps and actions
+
+A step is a `run:` command or a `uses:` of the built-in `actions/checkout`,
+`actions/upload-artifact` or `actions/download-artifact`, a **local composite action**
+(`uses: ./.spindle/actions/setup`, resolved at run creation from the run commit), or a
+**`docker://` image** (`uses: docker://alpine:3.20`). There is **no remote action marketplace** —
+`owner/repo@ref` is refused with "there is no marketplace" — and **no cache action**
+(`actions/cache` is not implemented, so every job starts from a cold workspace). Artifacts pass files
+between jobs of the same run. The reference is
+[§3.4 steps](threads.md#34-steps) and
+[§3.4a local actions and docker images](threads.md#34a-local-actions-and-docker-images).
+
+### 3.3 Runners
+
+A runner executes the jobs. Runners are **instance-scoped**: a host administrator mints a one-time
+registration token in the browser at `/admin/runners` together with the runner's **repository
+policy** — every repository, or an allowlist of `owner/name` / `owner/*` patterns — and the runner is
+offered only the repositories that policy allows (it can never change it; changing it is revoke +
+re-mint). There is no runner admin surface in the CLI (static machine credentials never
+administer; a user `wgt_` token still re-derives its owner's admin verdict on the API), so there are
+no `runner token|list|revoke` commands; `runner serve --register` is the operator step after a
+browser mint. Start the runner
+binary; it needs a Docker daemon, and the stock host socket must be acknowledged with
+`--allow-host-docker`:
+
+```sh
+spindle runner serve --server https://spindle.example.com --register wrg_… \
+  --token-file /srv/spindle/runner.token \
+  --labels self-hosted,linux,docker --capacity 1 \
+  --allow-host-docker   # only when that daemon is the host socket
+
+# afterwards the token file is enough
+spindle runner serve --server https://spindle.example.com \
+  --token-file /srv/spindle/runner.token \
+  --labels self-hosted,linux,docker --capacity 1 --allow-host-docker
+```
+
+Labels are **exact, comma-separated strings matched as a subset**: a runner claims a job only when
+it declares every label the job's `runs-on` names (no wildcards or aliases; both sides are
+normalized to lower case, so matching is case-insensitive). The default set is
+`self-hosted,linux,docker`, so declare it in the workflow:
+
+```yaml
+jobs:
+  test:
+    runs-on: [self-hosted, linux, docker]
+    container: golang:1.27
+    steps:
+      - uses: actions/checkout
+      - run: go test ./...
+```
+
+The default job image is `alpine/git:latest` (it carries `git`, which checkout needs inside the job
+container). `--capacity 1` per runner is the isolation-preserving default for untrusted code; scale
+out with more runners rather than a bigger capacity. A job that pushes must check out with
+`fetch-depth: 0`. A job with a label no runner declares simply stays queued — the run page shows its
+`runs-on` and `/admin/runners` shows the declared sets. Every flag and its `SPINDLE_RUNNER_*`
+environment variable is tabulated in [`threads.md`](threads.md#81-flags-and-environment); there is
+deliberately no repository-policy flag.
+
+### 3.4 Runner in a container
+
+The published image is also the runner (same binary) and ships the `docker` CLI — the CI container
+contract asserts `docker --version` — so the runner can be a container on the host whose daemon it
+drives:
+
+```sh
+docker run -d --name spindle-runner --restart unless-stopped \
+  -v /var/run/docker.sock:/var/run/docker.sock \
+  --group-add "$(stat -c '%g' /var/run/docker.sock)" \
+  -v /srv/spindle/runner.token:/run/secrets/runner.token:ro \
+  ghcr.io/crueber/spindle:latest \
+  runner serve --server https://spindle.example.com \
+    --token-file /run/secrets/runner.token \
+    --labels self-hosted,linux,docker --capacity 1 --allow-host-docker
+```
+
+`--group-add` is how the image's nonroot user (uid 1000) opens the socket and reads a token file
+`chown`ed to it, and `--allow-host-docker` stays required for the host socket (job containers are
+siblings on that daemon). If job containers cannot resolve your server's name, set
+`server.public_url` to an address they can reach — see [`threads.md`](threads.md#44-checkout).
+
+### 3.5 Image policy
+
+A workflow's `container.image`, every `services.*.image` and every `docker://` image (a step's or a
+local docker action's) can be constrained instance-wide on **Administration → Configuration**, in the
+`threads` card:
+
+- `threads.image_allow_prefixes` — a comma-separated allowlist of literal `host[:port]/path`
+  prefixes, e.g. `docker.io/library, ghcr.io/acme, ak.example/dockerhub`. A job naming any image
+  outside it is **refused at creation**: a failed job whose reason names the image, its field and the
+  allowlist, with a red check; nothing is enqueued.
+- `threads.image_require_digest` (**Advanced**) — require `@sha256:` on every workflow-named image, so
+  a moved tag cannot change what CI runs. It refuses tag-named images too, so pin the images first.
+  The runner's own `--image` is the operator's declaration and neither key governs it.
+
+Both are **supply-chain hygiene, not a sandbox**: an allowed, digest-pinned image still runs as the
+job, with the job's token and secrets. They decide which bytes may be pulled — the allowlist matches
+the reference the workflow authored, not a runner's mirror rewrite — and they do not contain the code
+that then runs. The mirror these keys pair with is
+[`threads.md`](threads.md#86-mirroring-job-images).
+
+### 3.6 Security
+
+- A runner that mounts the host docker socket is **root-equivalent infrastructure**. Job containers
+  are **siblings** on that daemon — the runner holds the socket, not the job containers — so a
+  container escape or a daemon-level bug is root on the host, exposing every job and secret it ran.
+- The minted **repository policy is tenancy, not isolation**: it decides which repositories reach a
+  runner's host (and a runner cannot widen it), not what a job can do once it runs. Put the runner
+  and the daemon it drives on a **host whose compromise must not touch the git host** — no store
+  credentials, no admin session, egress limited to spindle and the registries — and see
+  [the dedicated-worker shape](threads.md#the-dedicated-worker-shape-the-safe-topology-for-untrusted-code)
+  for the safe topology, rootless/sandboxed runtimes and the `DOCKER_HOST` rules.
+- Run untrusted code only on a **dedicated or disposable host**, never the git host, and keep
+  `--capacity 1` per daemon.
+- **Fork runs are off by default.** A fork PR runs the base branch's workflow file with a read-only
+  checkout and no secrets, but its step scripts are the fork's code; only a runner started with
+  `--allow-fork-runs` (on a disposable host) accepts one. Without such a runner the fork job stays
+  queued.
+- The image allowlist and digest rule are hygiene, not isolation (above), and only
+  admin-registered runners exist at all — the browser mint at `/admin/runners` is the entire
+  authorization to execute instance jobs.
+
+The full boundary — the container option/mount allowlist, the fork-run rules and the residual-risk
+statement — is [the security boundary](threads.md#the-security-boundary); capacity shapes are
+[§8.3](threads.md#83-capacity-and-isolation) and the container runner
+[§8.5](threads.md#85-running-the-runner-in-a-container).
+
+Full reference — workflow keys, triggers, containers/services, secrets and permissions, the runner's
+flags and `SPINDLE_RUNNER_*` environment, schedules, retention, approval and troubleshooting — is
+[`threads.md`](threads.md); the design and as-built record is
+[`features/15_threads.md`](features/15_threads.md).
+
+## 4. Packages (OCI registry)
+
+Each repository is also an OCI registry under its own path. The package **is** the repository, so its
+permissions are the repository's: `pull` uses the read gate, `push` is the same gate as `git push`.
+
+```sh
+docker login spindle.example.com -u <user> -p <token>
+docker push spindle.example.com/acme/demo:1.4.2
+docker pull spindle.example.com/acme/demo@sha256:<digest>
+```
+
+Tags are CAS pointers and manifests are content-addressed; multi-arch indexes are stored like any
+other manifest; deleting a manifest digest removes that version and the tags aimed at it. With
+`server.auth.anonymous_read` on (the default), public repositories allow anonymous pull. The same
+registry is exposed by the **Packages** tab (`/<owner>/<repo>/packages`), the
+`/<owner>/<repo>/api/packages…` JSON API, the `repos.js` SDK and `spindle packages list|show|delete`;
+the `packages-gc` maintainer sweep reclaims unreferenced blobs. `packages.max_blob_bytes` defaults to
+10 GiB. The registry requires the same credential as `git push` (session, `wgt_` token or a static
+machine token) — anonymous callers get the Docker token challenge.
+
+Under the hood: blobs and manifests live at `repos/<o>/<r>/packages/registry/{blobs,manifests}/sha256/…`
+with tags as CAS JSON pointers and chunked uploads staged under `uploads/<id>/data` (TTL, GC'd);
+the `/v2` protocol subset (ping, manifests, blobs, chunked upload with resume, `tags/list` paging,
+`/v2/token`) is what Docker, Podman, `buildx` and `crane` need. Auth is Basic or the standard Bearer
+challenge → `/v2/token`, whose short-lived (5 min) HMAC-signed token carries the requested scopes and
+whose `push` scope is granted only when `CheckPush` — the git receive-pack gate — passes. Per-repository
+quota and tag retention are stored counters, not a second index. Protocol, routes, error codes and
+the five surfaces: [`features/14_packages.md`](features/14_packages.md).
+
+## 5. Static sites
+
+A repository's **committed bytes** can be served read-only from a **dedicated static host** on its
+own listener:
+
+```
+https://<static-host>/<owner>/<repo>/            → the ref's index.html
+https://<static-host>/<owner>/<repo>/docs/       → docs/index.html
+https://<static-host>/<owner>/<repo>/assets/app.css
+```
+
+There is no build step, no template engine, no per-site configuration file and no per-site redirect
+rules — what is committed is what is served (a CI job may produce the tree; spindle does not learn
+Jekyll). Resolution follows GitHub Pages: a bare `/{owner}/{repo}` is a `301` to the slashed form, a
+directory resolves `index.html` then `index.htm` (never a listing), a path that is missing but has an
+`x.html` sibling is served with `200`, and anything else is the site's own `404.html`
+with status `404` (or a one-line plain-text 404 when there is none). Dotfile segments, symlinks and
+gitlinks are **never** served; paths are case-sensitive. Responses carry a pinned content-type
+table with `X-Content-Type-Options: nosniff`, a strong `ETag` (the blob's git object id) with
+`If-None-Match` → `304`, `Cache-Control: public, max-age=600` on 200s and their 304 revalidations (404s and 301s carry no cache
+headers), and
+`Accept-Ranges: bytes` with single-`Range` `206`/`416` and `HEAD`.
+
+Configuration is a global section plus a per-repository one:
+
+```toml
+[static_sites]
+enabled        = false              # off by default: the listener is not started at all
+address        = "127.0.0.1:8081"   # must differ from server.listen
+host           = "static.localhost" # the ONLY Host this listener answers for (port-insensitive)
+max_file_bytes = "8MiB"             # larger files are a 404 in v1
+index_files    = ["index.html", "index.htm"]
+
+[static_site]                       # per repository, in the repo settings document
+enabled = true                      # *bool: absent/false = not published
+ref     = ""                        # "" = the default branch tip
+root    = ""                        # "" = repository root; narrows to e.g. "public" or "docs"
+```
+
+Validation fails closed: `enabled` requires a non-empty `host`, a parseable `address` and
+`address != server.listen`; a per-repo `ref` must be a valid ref name and `root` a clean relative
+path with no `..`. An unreadable or invalid settings document means **not published**. The global
+section lives in `spindle.toml` (Administration → Configuration); the per-repo section lives in the
+repository settings document, editable in Settings → Effective config & history.
+
+**Why a separate host, not a path on the app.** Serving user HTML on the application origin is
+account takeover: same-origin script can `fetch` the app's API with the visitor's session, read
+pages for CSRF tokens and reach non-HttpOnly storage — `SameSite` does not help, because the
+request is same-site *and* same-origin. Ports do not isolate cookies (RFC 6265 cookies are
+host-scoped), so the isolation comes from the **hostname**: the listener is cookie-less, answers
+only when `Host` equals `static_sites.host`, serves **public repositories only** (a private repo is
+a plain 404, so existence is not leaked and there is no login redirect loop), and never mounts the
+session middleware, CORS, page provider or API routes.
+
+Everything — the resolution table, response semantics, the request/subprocess budget, the residual
+cookie-tossing risk and the v1 non-goals — is
+[`features/19_static_sites.md`](features/19_static_sites.md).
+
+## 6. API, SDK and web UI
+
+Three front doors over the same state — JSON API, SDK, web UI — plus the API browser that documents
+the first and the Administration area that operates the instance.
+
+- **JSON API** — `/{owner}/{repo}/api` (and the `/api-browser` lane for browser sessions): repo
+  summary, refs, resolve, tree, blob, commits, commit, diff, policy, settings, overview, ops, tasks
+  and every collaboration feature's endpoints. Long work answers as **SSE** when the request sends
+  `Accept: text/event-stream`: an opener comment, `notice` / `progress` / `task` packets, then
+  exactly one terminal `result` or `error`, with a `: keepalive` every 10 s; a client that
+  disconnects stops only the writing, and the render lands in the cache. Errors are plain text;
+  lists are `[]`, never `null`; every cacheable GET belongs to one of three classes — immutable
+  (`private, max-age=31536000, immutable`, sha-addressed), ref-dependent
+  (`private, max-age=0, stale-while-revalidate=60` + ETag), or mutable collaboration
+  (`private, no-cache` + a version ETag) — so user-mutable state revalidates on every read. Wire
+  contract: [`go/07_api.md`](go/07_api.md); the route table is
+  [`go/06_server_http.md`](go/06_server_http.md) §5.
+- **SDK** — `repos.js`, a dependency-free ES module served at `/repos.js` (module MIME is
+  load-bearing) and bundled from `web/sdk/src/`: repo reads plus `repo.issues`, `repo.pulls`,
+  `repo.checks`, `repo.releases`, `repo.packages` and the rest, Node-tested module by module. The
+  browser shares the visitor's session; scripts use the same API through it
+  ([`features/08_ui_sdk.md`](features/08_ui_sdk.md)).
+- **Web UI** — server-rendered Go `html/template` pages enhanced with vendored htmx and small
+  vanilla-ES islands (`web/src/islands/`) for theme, menus, copy, SSE and submit keys; no UI
+  framework, no client data layer, no client-side router. Markdown, unified diffs, commit graphs and
+  syntax highlighting are rendered **server-side in Go**, so user text is escaped and sanitized on
+  the server; README, issue, PR and release-note markdown follows GitHub (tables, task lists,
+  relative links and images, sanitized `<details>`, `<video>` and `align=`). The htmx SSE extension is deliberately not used (the island keeps a fetch stream
+  with cookies, backoff and auth handling). The design language is Precision Dark
+  ([`style-guideline.md`](style-guideline.md)).
+- **API browser** — `/api` renders the route table with live discovery (`GET /api/v1`), so you can
+  see what the instance actually serves before writing a call. `spindle api PATH` is the same thing
+  from a terminal, with `--json` (`curl`-equivalent: `-X`, `-d`, `-H`).
+- **Administration** — `/admin` (Overview), `/admin/config` (every setting, with restart-required
+  keys linked to their rows), `/admin/access`, `/admin/maintenance` (health, packages GC, Restart),
+  `/admin/directory` (accounts and organizations), `/admin/runners` (instance runners and the image
+  policy), reports and the audit log. Administration is OIDC-group gated (browser only) and open
+  only in the restricted first boot; the CLI's machine credentials cannot administer.
+

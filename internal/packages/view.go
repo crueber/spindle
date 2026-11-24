@@ -52,6 +52,11 @@ type RepoPackages struct {
 	Manifests  []ManifestView `json:"manifests"`
 	TotalSize  int64          `json:"total_size"`
 	More       bool           `json:"more"`
+	// Usage is the stored counter and the resolved quota (docs/features/14
+	// §5): the number a push is bounded by, read from usage.json, never
+	// measured by listing. Nil only when the counter read failed — the page
+	// then says so instead of showing a zero.
+	Usage *UsageInfo `json:"usage,omitempty"`
 }
 
 // indexPlatformDoc is the OCI index / Docker manifest-list shape.
@@ -161,6 +166,11 @@ func (s *Service) ListPackages(ctx context.Context, owner, repo string, limit in
 		}
 		return out.Manifests[i].Digest < out.Manifests[j].Digest
 	})
+	// The stored counter, not a walk: the page and the quota check read the
+	// same number (one GET plus the policy projection).
+	if usage, uerr := s.Usage(ctx, owner, repo); uerr == nil {
+		out.Usage = usage
+	}
 	return out, nil
 }
 

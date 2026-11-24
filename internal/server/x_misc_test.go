@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -151,7 +152,7 @@ func TestMapAuthStatusAndInjectPrincipal(t *testing.T) {
 	}
 	for kind, want := range cases {
 		rec := httptest.NewRecorder()
-		s.mapAuthStatus(rec, &auth.AuthError{Kind: kind, Why: "why"})
+		s.mapAuthStatus(rec, httptest.NewRequest("GET", "/x", nil), &auth.AuthError{Kind: kind, Why: "why"})
 		if rec.Code != want {
 			t.Fatalf("%v = %d, want %d", kind, rec.Code, want)
 		}
@@ -170,7 +171,6 @@ func TestMapAuthStatusAndInjectPrincipal(t *testing.T) {
 
 func TestAuthFailureBrowserRedirect(t *testing.T) {
 	s, _ := newTestServer(t, nil)
-	s.cfg.Server.Auth.Mode = "oidc"
 	s.cfg.Server.Auth.SessionSecret = "0123456789abcdef0123456789abcdef"
 	s.cfg.Server.Auth.OAuthClientID = "c"
 	s.cfg.Server.Auth.OAuthClientSecret = "s"
@@ -399,12 +399,12 @@ auto_create_on_push = true
 
 func TestSetupPutRestartKeys(t *testing.T) {
 	dataDir := t.TempDir()
-	cfg := config.Defaults()
-	cfg.DataDir = dataDir
-	cfg.Server.Auth.Mode = "token"
-	cfg.Server.Auth.Tokens = []config.StaticToken{{Principal: "alice", Token: "tok123", Write: true, Admin: true}}
+	cfg := seedValidConfig(t, dataDir)
 	s := New(Options{Config: cfg, Store: newFakeStore(), Engine: &fakeEngine{},
-		DataDir: dataDir, Boot: BootState{Mode: "normal"}})
+		DataDir: dataDir, Boot: BootState{Mode: "normal", FileState: "valid",
+			ConfigPaths: []string{filepath.Join(dataDir, config.ConfigFileName)}}})
+	s.authSvc = NewAuthService(&cfg.Server.Auth, s.Now)
+	installTestAdminHook(s)
 	body := `{"overrides": {"server.listen": "127.0.0.1:9099"}}`
 	req := httptest.NewRequest("PUT", "http://x/api/v1/setup", strings.NewReader(body))
 	req.Header.Set("Authorization", "Bearer tok123")

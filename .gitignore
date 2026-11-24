@@ -5,6 +5,8 @@
 *.test
 *.out
 .cover/
+# staged marketing site (make site / the Pages workflow)
+/dist/
 
 # web
 web/dist/*

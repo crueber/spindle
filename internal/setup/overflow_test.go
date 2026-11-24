@@ -173,6 +173,11 @@ func TestStructSliceCellOverflowIsKeyedAndChangesNothing(t *testing.T) {
 		t.Fatal(err)
 	}
 	base := config.FirstRunDefaults(dir)
+	base.Server.Auth.Issuer = "https://id.example.com"
+	base.Server.Auth.AllowedDomains = []string{"example.com"}
+	base.Server.Auth.OAuthClientID = "id"
+	base.Server.Auth.OAuthClientSecret = "secret"
+	base.Server.Auth.SessionSecret = "0123456789abcdef0123456789abcdef"
 	base.Bundles.Strategy = []config.BundleStrategy{{Name: "weekly", Kind: "full", Schedule: "0 0 23 * * 0", Keep: 2}}
 	if _, err := config.SaveSetup(base, dir); err != nil {
 		t.Fatal(err)

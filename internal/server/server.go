@@ -78,6 +78,18 @@ type Server struct {
 	// (Forgejo #376 — set from Options.AvatarHook); nil → no-op.
 	avatarHook func(username, email string)
 
+	// spamObserver observes the text of a landed collaboration write for the
+	// advisory spam signal (PLAN-V2 §M.7). Composition binds the moderation
+	// service's scoring verb; the server never imports the feature package
+	// (law 8). Nil (or nil-with-options) = scoring off. It returns true when
+	// the observation pre-filed a report, which is what the
+	// spindle_spam_flag_total counter counts.
+	spamObserver func(ctx context.Context, owner, repo, principal, body string) bool
+
+	// rate is the in-process token-bucket limiter (ratelimit.go); nil when
+	// rate_limit.enabled is false, which allows everything.
+	rate *rateLimiter
+
 	// onPush fires after a successful client push lands (Forgejo #623):
 	// non-nil → called fire-and-forget with the repo id, the landed refs and
 	// whether the push authenticated as a Threads job token (15 §5) AFTER the
@@ -161,6 +173,14 @@ type Options struct {
 	// starts a workflow — GitHub's GITHUB_TOKEN rule. Wired by composition
 	// (cmd/spindle); server never imports the feature packages (law 8).
 	OnPush func(id git.RepoId, refs []PushedRef, byJob bool)
+	// SpamObserver observes the text of a landed collaboration write for the
+	// advisory spam signal (PLAN-V2 §M.7). Composition binds the moderation
+	// service's scoring verb (moderation.Service.NoteBody); nil = no scoring.
+	// Called synchronously with the request context after the handler wrote a
+	// non-error status; it never blocks the response body (the response is
+	// already written) and its only effect is a pre-filed report plus the
+	// returned "filed" flag (the counter).
+	SpamObserver func(ctx context.Context, owner, repo, principal, body string) bool
 }
 
 // PushedRef is one ref that landed in a client push. Ref is the full ref name
@@ -174,10 +194,15 @@ type PushedRef struct {
 
 // BootState is the §3.4 boot decision tree outcome.
 type BootState struct {
-	// Mode: "normal" (config valid), "defaults" (no config file), or
-	// "setup_only" (config file present but INVALID).
-	Mode   string // "normal" | "defaults" | "setup_only"
-	Errors []string
+	// Mode: "normal" (the effective config passed validation) or
+	// "setup_only" (restricted: no config / invalid config — OIDC is not
+	// configured, so only the Administration area and health answer).
+	Mode string // "normal" | "setup_only"
+	// FileState: "absent" (no config file — the env overlay may still have
+	// completed a valid config), "valid", or "invalid". The restricted boot
+	// distinguishes absent (first run) from invalid (a file to fix).
+	FileState string
+	Errors    []string
 	// ConfigPaths are the candidate config-file paths in boot priority order
 	// (explicit --config / pointer first, then the data-dir files) — the setup
 	// API edits on top of the first existing one (§3.4).
@@ -223,12 +248,28 @@ func New(o Options) *Server {
 	s.metrics = newRegistry()
 	registerInventory(s.metrics)
 	s.authSvc = NewAuthService(&o.Config.Server.Auth, o.Now)
+	// Last-used bookkeeping for static tokens (06 §8.2.1) runs behind the
+	// auth boundary: debounced, asynchronous, bounded, and never able to fail
+	// a request. Production enables it; nil (no store) disables it.
+	s.authSvc.SetTokenUsage(NewTokenUsageRecorder(o.Store, o.Log, o.Now))
 	s.readGate = o.ReadGate
 	s.pushGate = o.PushGate
 	s.mirrorGuard = o.MirrorGuard
 	s.onPush = o.OnPush
 	s.placeholderHints = o.PlaceholderHints
 	s.avatarHook = o.AvatarHook
+	s.spamObserver = o.SpamObserver
+	if lim, lerr := limiterFromConfig(o.Config, o.Now); lerr != nil {
+		// Validate reports the bad [rate_limit] spelling and the boot is
+		// restricted; a runnable instance keeps the compiled default rates
+		// (never "enabled but unlimited").
+		o.Log.Warn("rate limit: bad rate_limit spelling; using compiled defaults", "err", lerr)
+		def := config.Defaults()
+		def.RateLimit.Enabled = true
+		s.rate, _ = limiterFromConfig(def, o.Now)
+	} else {
+		s.rate = lim
+	}
 	return s
 }
 

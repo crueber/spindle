@@ -68,10 +68,19 @@ type QueueEntry struct {
 	// can refuse an ineligible job with one bounded GET per dependency and
 	// never LISTs (15 §4.1, round 2).
 	Needs []string `json:"needs,omitempty"`
+	// NeedKeys maps each `needs:` YAML key to the job ids it expanded to, so a
+	// job-level `if:` can read `needs.<key>.result` from the dependency records
+	// the gate already reads (a matrix dependency's key covers every cell).
+	NeedKeys map[string][]string `json:"need_keys,omitempty"`
 	// Runner is the claiming runner id ("" while queued).
 	Runner string `json:"runner,omitempty"`
 	// CancelRequested is the operator's cancel signal the runner acks.
 	CancelRequested bool `json:"cancel_requested,omitempty"`
+	// Fork marks a fork pull-request job (the run's trust class). It is offered
+	// only to a runner whose registry record opted in to fork runs; the field
+	// is a hint copied from the job at enqueue, and the job record re-checked
+	// under the claim CAS stays the authority (docs/threads.md §8.7).
+	Fork bool `json:"fork,omitempty"`
 
 	EnqueuedAt string  `json:"enqueued_at"`
 	ClaimedAt  *string `json:"claimed_at,omitempty"`
@@ -101,12 +110,13 @@ func newQueueSeq(now time.Time) (string, error) {
 	return id, nil
 }
 
-// enqueueJob appends one job to the repo queue. needs are the job ids this job
-// waits on (resolved by the caller from the run's job set, 15 §4.1). The entry
-// is the truth; the head append is a bounded projection, so a head failure is
-// logged by the caller and repaired by threads-gc — it never fails run
-// creation.
-func (s *Service) enqueueJob(ctx context.Context, owner, repo string, job *Job, needs []string) (*QueueEntry, error) {
+// enqueueJob appends one job to the repo queue. needs is the job's `needs:`
+// resolved to key → job ids (entryNeedMap); the entry carries both the flat id
+// list (the claim gate) and the key mapping (a job-level `if:` reading
+// needs.<key>.result). The entry is the truth; the head append is a bounded
+// projection, so a head failure is logged by the caller and repaired by
+// threads-gc — it never fails run creation.
+func (s *Service) enqueueJob(ctx context.Context, owner, repo string, job *Job, needs map[string][]string) (*QueueEntry, error) {
 	seq, err := newQueueSeq(s.nowUTC())
 	if err != nil {
 		return nil, fmt.Errorf("%w: mint queue seq: %v", ErrUnavailable, err)
@@ -114,7 +124,8 @@ func (s *Service) enqueueJob(ctx context.Context, owner, repo string, job *Job, 
 	now := s.nowUTC().Format(dateTimeFmt)
 	entry := &QueueEntry{
 		Seq: seq, RunID: job.RunID, JobID: job.ID,
-		Labels: jobLabels(job), Needs: needs, Attempt: job.Attempt, State: QueueQueued,
+		Labels: jobLabels(job), Needs: needIDs(needs), NeedKeys: needs, Attempt: job.Attempt, State: QueueQueued,
+		Fork:       !job.Trusted,
 		EnqueuedAt: now, Version: 1,
 	}
 	body, _ := json.Marshal(entry) // cannot fail: the record is pure JSON types
@@ -126,6 +137,12 @@ func (s *Service) enqueueJob(ctx context.Context, owner, repo string, job *Job, 
 	}
 	if herr := s.appendHead(ctx, owner, repo, seq); herr != nil {
 		return entry, herr
+	}
+	// The global hint is what lets an instance runner find this repository. A
+	// failed append is logged by the caller and repaired by
+	// threads-queue-reconcile; the job remains queued either way.
+	if ierr := s.appendQueueIndex(ctx, repoID(owner, repo), job.RunID, job.ID, entry.Labels, entry.Fork, now); ierr != nil {
+		return entry, ierr
 	}
 	return entry, nil
 }
@@ -291,19 +308,27 @@ func (s *Service) claimLoop(ctx context.Context, owner, repo string, runner *Run
 // offered again. skip holds sequences this poll already refused (a busy
 // concurrency group), so one probe does not re-claim them in a loop.
 func (s *Service) claimLoopSkip(ctx context.Context, owner, repo string, runner *RunnerDoc, labels []string, skip map[string]bool) (*Claim, error) {
+	// Repository tenancy is the first filter: the admin's allowlist decides
+	// whether this runner may see this repository at all. An empty policy
+	// (a record written before tenancy) allows nothing.
+	if !runner.AllowsRepo(repoID(owner, repo)) {
+		return nil, nil
+	}
 	head, _, err := s.loadHead(ctx, owner, repo)
 	if err != nil || head == nil {
 		return nil, err
 	}
 	drop := map[string]bool{}
+	indexDrop := map[string]QueueIndexEntry{}
 	jobs := jobCache{}
+	runs := runCache{}
 	var claimed *Claim
 	attempts := 0
 	for _, seq := range head.Pending {
 		if attempts >= queueScanMax || claimed != nil {
 			break
 		}
-		if skip[seq] {
+		if skip[repoID(owner, repo)+"|"+seq] {
 			continue
 		}
 		entry, ver, eerr := s.loadEntry(ctx, owner, repo, seq)
@@ -312,6 +337,9 @@ func (s *Service) claimLoopSkip(ctx context.Context, owner, repo string, runner 
 		}
 		if entry == nil || entry.State == QueueDone {
 			drop[seq] = true
+			if entry != nil {
+				indexDrop[seq] = QueueIndexEntry{Repo: repoID(owner, repo), RunID: entry.RunID, JobID: entry.JobID}
+			}
 			continue
 		}
 		if entry.State == QueueClaimed {
@@ -328,12 +356,19 @@ func (s *Service) claimLoopSkip(ctx context.Context, owner, repo string, runner 
 		if !labelsMatch(labels, entry.Labels) {
 			continue
 		}
+		// Fork runs need an opted-in runner. The entry is NOT retired: the job
+		// stays queued for a runner that accepts fork code (or for the operator
+		// to start one), exactly like a label mismatch.
+		if entry.Fork && !runner.AllowForkRuns {
+			continue
+		}
 		// `needs:` eligibility (15 §4.1). A job is offered only when every
-		// dependency concluded successfully; a job whose dependency failed or
-		// was cancelled can never run, so it is skipped (terminalised
-		// cancelled) here rather than left queued forever. Waiting entries do
-		// not consume the scan budget: the dependency's own entry must still
-		// be reachable in this probe.
+		// dependency is terminal; then its job-level `if:` decides (the default
+		// is "all dependencies succeeded"). A dependency that failed skips the
+		// job — unless the job's own `if:` says otherwise — and the decision
+		// terminalises it here rather than leaving it queued forever. Waiting
+		// entries do not consume the scan budget: the dependency's own entry
+		// must still be reachable in this probe.
 		if len(entry.Needs) > 0 {
 			gate, gerr := s.needsGate(ctx, owner, repo, entry, jobs)
 			if gerr != nil {
@@ -341,12 +376,34 @@ func (s *Service) claimLoopSkip(ctx context.Context, owner, repo string, runner 
 			}
 			switch gate {
 			case needsBlocked:
-				if _, serr := s.skipJob(ctx, owner, repo, entry); serr != nil {
+				if _, serr := s.settleQueuedJob(ctx, owner, repo, entry, JobSkipped,
+					"needs: a dependency record could not be read"); serr != nil {
 					return nil, serr
 				}
 				drop[seq] = true
+				indexDrop[seq] = QueueIndexEntry{Repo: repoID(owner, repo), RunID: entry.RunID, JobID: entry.JobID}
 				continue
 			case needsWaiting:
+				continue
+			}
+			verdict, reason, derr := s.dependentVerdict(ctx, owner, repo, entry, jobs, runs)
+			if derr != nil {
+				return nil, derr
+			}
+			switch verdict {
+			case jobIfSkip:
+				if _, serr := s.settleQueuedJob(ctx, owner, repo, entry, JobSkipped, reason); serr != nil {
+					return nil, serr
+				}
+				drop[seq] = true
+				indexDrop[seq] = QueueIndexEntry{Repo: repoID(owner, repo), RunID: entry.RunID, JobID: entry.JobID}
+				continue
+			case jobIfError:
+				if _, serr := s.settleQueuedJob(ctx, owner, repo, entry, JobFailure, reason); serr != nil {
+					return nil, serr
+				}
+				drop[seq] = true
+				indexDrop[seq] = QueueIndexEntry{Repo: repoID(owner, repo), RunID: entry.RunID, JobID: entry.JobID}
 				continue
 			}
 		}
@@ -362,6 +419,9 @@ func (s *Service) claimLoopSkip(ctx context.Context, owner, repo string, runner 
 		}
 	}
 	s.trimHead(ctx, owner, repo, drop)
+	for _, row := range indexDrop {
+		s.removeQueueIndexJob(ctx, row.Repo, row.RunID, row.JobID)
+	}
 	return claimed, nil
 }
 
@@ -385,15 +445,29 @@ func (s *Service) claimEntry(ctx context.Context, owner, repo string, entry *Que
 	if err != nil || job == nil || run == nil {
 		return nil, err
 	}
+	// Tenancy under the claim CAS (the authority, like the fork gate below): a
+	// stale hint row or a hostile entry can never hand a repository's code to a
+	// runner the admin did not allow. The job stays queued for an eligible
+	// runner.
+	if !runner.AllowsRepo(repoID(owner, repo)) {
+		return nil, nil
+	}
+	// Fork gating under the claim CAS (the authority): a hostile or stale entry
+	// cannot hand fork code to a runner that never opted in. The job stays
+	// queued (returning no claim is not a refusal of the job).
+	if !(job.Trusted && run.Trusted) && !runner.AllowForkRuns {
+		return nil, nil
+	}
 	if job.Attempt != entry.Attempt || job.State != JobQueued {
 		// The job moved on (cancelled, rerun, already claimed): retire the
-		// entry so the head stops offering it.
+		// entry so the head stops offering it, and drop its global hint row.
 		entry.State = QueueDone
 		entry.FinishedAt = ptr(s.nowUTC().Format(dateTimeFmt))
 		entry.Version++
 		body, _ := json.Marshal(entry) // cannot fail: the record is pure JSON types
 		_, _ = store.PutBytes(ctx, s.Store, QueueEntryKey(owner, repo, entry.Seq), body,
 			store.PutOptions{Mode: store.PutUpdate, IfVersion: ver, ContentType: "application/json"})
+		s.removeQueueIndexJob(ctx, repoID(owner, repo), entry.RunID, entry.JobID)
 		return nil, nil
 	}
 	now := s.nowUTC()
@@ -468,6 +542,9 @@ func (s *Service) requeueEntry(ctx context.Context, owner, repo string, entry *Q
 	if perr != nil && !store.IsPreconditionFailed(perr) {
 		return perr
 	}
+	// The old lease is gone: drop it from the registry's display state (best
+	// effort; the runner may already be dead).
+	s.clearRunnerCurrentJob(ctx, entry.Runner, repoID(owner, repo), entry.RunID, entry.JobID)
 	return nil
 }
 
@@ -510,6 +587,7 @@ func (s *Service) finishEntry(ctx context.Context, owner, repo, seq string) {
 	}
 	key := QueueEntryKey(owner, repo, seq)
 	now := s.nowUTC().Format(dateTimeFmt)
+	var runID, jobID string
 	_, _ = s.casUpdate(ctx, key, 3, func(cur []byte, _ store.Version) ([]byte, bool, error) {
 		if cur == nil {
 			return nil, false, nil
@@ -518,6 +596,7 @@ func (s *Service) finishEntry(ctx context.Context, owner, repo, seq string) {
 		if jerr := json.Unmarshal(cur, &e); jerr != nil {
 			return nil, false, fmt.Errorf("%w: queue entry: %v", ErrCorrupt, jerr)
 		}
+		runID, jobID = e.RunID, e.JobID
 		if e.State == QueueDone {
 			return nil, false, nil
 		}
@@ -529,6 +608,9 @@ func (s *Service) finishEntry(ctx context.Context, owner, repo, seq string) {
 		return body, true, nil
 	})
 	s.trimHead(ctx, owner, repo, map[string]bool{seq: true})
+	if runID != "" {
+		s.removeQueueIndexJob(ctx, repoID(owner, repo), runID, jobID)
+	}
 }
 
 // setEntryCancel CASes the cancel signal onto one queue entry (an unclaimed
@@ -539,6 +621,8 @@ func (s *Service) setEntryCancel(ctx context.Context, owner, repo, seq string, r
 	}
 	key := QueueEntryKey(owner, repo, seq)
 	now := s.nowUTC().Format(dateTimeFmt)
+	var runID, jobID string
+	retired := false
 	_, _ = s.casUpdate(ctx, key, 3, func(cur []byte, _ store.Version) ([]byte, bool, error) {
 		if cur == nil {
 			return nil, false, nil
@@ -547,18 +631,28 @@ func (s *Service) setEntryCancel(ctx context.Context, owner, repo, seq string, r
 		if jerr := json.Unmarshal(cur, &e); jerr != nil {
 			return nil, false, fmt.Errorf("%w: queue entry: %v", ErrCorrupt, jerr)
 		}
+		runID, jobID = e.RunID, e.JobID
 		e.CancelRequested = true
 		if !running {
 			e.State = QueueDone
 			e.FinishedAt = &now
+			retired = true
 		}
 		e.Version++
 		body, _ := json.Marshal(&e) // cannot fail: the record is pure JSON types
 		return body, true, nil
 	})
+	if retired {
+		s.removeQueueIndexJob(ctx, repoID(owner, repo), runID, jobID)
+	}
 }
 
 // --- wake-up hub -------------------------------------------------------------
+
+// globalWakeKey is the hub key every instance runner fetch waits on. The
+// per-repo keys still exist for the per-repository internals/tests, but a
+// global fetch must hear about an enqueue in ANY repository.
+const globalWakeKey = "*"
 
 // queueHub wakes long-polling fetches in this process when an enqueue lands.
 // It is an optimisation, never the correctness mechanism: a fetch also re-probes
@@ -596,14 +690,22 @@ func (h *queueHub) subscribe(repo string) (<-chan struct{}, func()) {
 	}
 }
 
-// wake nudges every fetch waiting on one repo (non-blocking sends).
+// subscribeGlobal registers a channel woken by an enqueue in any repository.
+func (h *queueHub) subscribeGlobal() (<-chan struct{}, func()) {
+	return h.subscribe(globalWakeKey)
+}
+
+// wake nudges every fetch waiting on one repo, and every global fetch: an
+// instance runner does not know which repository an enqueue belongs to.
 func (h *queueHub) wake(repo string) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	for ch := range h.subs[repo] {
-		select {
-		case ch <- struct{}{}:
-		default:
+	for _, key := range []string{repo, globalWakeKey} {
+		for ch := range h.subs[key] {
+			select {
+			case ch <- struct{}{}:
+			default:
+			}
 		}
 	}
 }

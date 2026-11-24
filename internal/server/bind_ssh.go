@@ -237,6 +237,22 @@ func (s *Server) uploadPackPrepare(ctx context.Context, id git.RepoId) (*git.Loc
 	return repo, nil
 }
 
+// describeIngestFailure renders an ingest error for the git wire. A cache
+// space failure (BUG-6) carries the git-layer path/filesystem/capacity text
+// plus the configured cache.dir/cache.max_bytes so the client sees exactly
+// which knob to change; any other failure is passed through.
+func (s *Server) describeIngestFailure(err error) (string, bool) {
+	if !errors.Is(err, git.ErrNoSpace) {
+		return err.Error(), false
+	}
+	msg := err.Error()
+	if s.cfg.Cache.MaxBytes > 0 {
+		msg += fmt.Sprintf(" (cache.max_bytes=%d, cache.dir=%s)",
+			int64(s.cfg.Cache.MaxBytes), s.cfg.Cache.Dir)
+	}
+	return msg, true
+}
+
 // pushPipeline runs the §4 push stages over a parsed request: ingest the
 // pack, check connectivity, publish to the WAL, and write the report-status
 // result to out. Mid-pipeline refusals are git-wire responses (nil error);
@@ -296,7 +312,18 @@ func (s *Server) pushPipeline(ctx context.Context, id git.RepoId, p auth.Princip
 		// a cross-pack delta ("pack has N unresolved deltas").
 		if _, ierr := s.layer.IngestStream(ctx, repo, pack,
 			packMax, true, true); ierr != nil {
-			band2Failure(out, managedReq, ierr.Error())
+			// A cache-space failure gets the full diagnosis on the wire and
+			// in the log (path, filesystem, capacity, cache.dir/cache.max_
+			// bytes) — never a bare "unpacker error" (BUG-6).
+			msg, space := s.describeIngestFailure(ierr)
+			if space {
+				s.log.Error("push ingest failed: cache out of space", "repo", id.String(),
+					"principal", p.Name, "cache_dir", s.cfg.Cache.Dir,
+					"cache_max_bytes", int64(s.cfg.Cache.MaxBytes), "err", ierr)
+			} else {
+				s.log.Warn("push ingest failed", "repo", id.String(), "principal", p.Name, "err", ierr)
+			}
+			band2Failure(out, managedReq, msg)
 			return nil
 		}
 	}

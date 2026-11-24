@@ -4,10 +4,9 @@
 // packages rides the served registry API (docs/features/14 §7: GET
 // /{o}/{r}/api/packages, DELETE …/packages/tags/{tag}, DELETE …/packages/{digest}),
 // so its 404s are real not-found answers from a live endpoint. threads (WP10)
-// is still defined against its documented path; a 404 there is reported as
-// "feature not enabled" (exit 1) — never the misleading not-found exit 3 —
-// so the command surface ships now and starts working the day the server route
-// lands, with no CLI change.
+// is served end to end (pass B1/B2): list/show/run read and dispatch runs, and
+// cancel/rerun post the operator verbs, so a 404 there means the named run does
+// not exist (exit 3).
 package main
 
 import (
@@ -168,17 +167,16 @@ func runPackagesDelete(ctx context.Context, c *cli, args []string) int {
 	return exitOK
 }
 
-// --- threads (WP10/T1; docs/features/15_threads.md §6) --------------------
+// --- threads (WP10; docs/features/15_threads.md §3) -----------------------
 //
-// The threads routes ARE served (T1): GET /{o}/{r}/api/threads lists runs,
-// POST dispatches {ref, workflow}, GET /{o}/{r}/api/threads/{run} reads one.
-// There is no cancellation route in T1 — cancel/rerun arrive with the T2
-// runner protocol (15 §"Read-only in T1"), so `threads cancel` says so
-// instead of calling a path that does not exist.
+// The threads routes are SERVED (pass B1/B2): GET /{o}/{r}/api/threads lists
+// runs, POST dispatches {ref, workflow}, GET /{o}/{r}/api/threads/{run} reads
+// one, and POST …/{run}/cancel and …/{run}/rerun are the operator verbs the run
+// page's buttons use (repo write role, same service calls).
 
 var threadsGroup = &apiGroup{
 	name: "threads",
-	help: "CI runs (WP10/T1): list, show, dispatch",
+	help: "CI runs (WP10): list, show, dispatch, cancel, rerun",
 	commands: []apiCommand{
 		{name: "list", usage: "spindle threads list OWNER/REPO [--limit N]", help: "list CI runs",
 			flags: []string{"json", "limit"}, run: runThreadsList},
@@ -186,8 +184,10 @@ var threadsGroup = &apiGroup{
 			flags: []string{"json"}, run: runThreadsShow},
 		{name: "run", usage: "spindle threads run OWNER/REPO WORKFLOW --ref REF", help: "dispatch a workflow run",
 			flags: []string{"json", "quiet", "ref"}, run: runThreadsRun},
-		{name: "cancel", usage: "spindle threads cancel OWNER/REPO RUN", help: "cancel a run (T2 runner protocol; not yet available)",
+		{name: "cancel", usage: "spindle threads cancel OWNER/REPO RUN", help: "cancel a run (queued jobs now, a running job at its runner's ack)",
 			flags: []string{"json", "quiet"}, run: runThreadsCancel},
+		{name: "rerun", usage: "spindle threads rerun OWNER/REPO RUN", help: "rerun a run as a new attempt",
+			flags: []string{"json", "quiet"}, run: runThreadsRerun},
 	},
 }
 
@@ -324,20 +324,80 @@ func runThreadsRun(ctx context.Context, c *cli, args []string) int {
 	return exitOK
 }
 
-// runThreadsCancel reports the documented gap (15 §"Read-only in T1"): the
-// JSON API has no cancellation route until the T2 runner protocol lands, and
-// a runner-ack cancellation cannot be faked by a client.
+// runThreadsCancel / runThreadsRerun are the operator verbs: POST
+// …/api/threads/{run}/cancel and …/rerun (repo write role, the same service
+// calls the run page's buttons make). Both answer {"run": Run} — 200 for
+// cancel, 201 for rerun. The body carries no per-job detail (jobs are the
+// show endpoint's), so the human line reads the returned run state: a
+// `cancelled` run took effect on every job, anything else means at least one
+// running job is still waiting for its runner to acknowledge the signal.
 func runThreadsCancel(ctx context.Context, c *cli, args []string) int {
+	return threadsOperatorVerb(ctx, c, args, "cancel")
+}
+
+func runThreadsRerun(ctx context.Context, c *cli, args []string) int {
+	return threadsOperatorVerb(ctx, c, args, "rerun")
+}
+
+func threadsOperatorVerb(ctx context.Context, c *cli, args []string, verb string) int {
 	f := &apiFlags{}
-	fs := newAPIFlagSet(c, "threads cancel")
+	fs := newAPIFlagSet(c, "threads "+verb)
 	f.add(fs)
 	pos, exit := parseAPI(fs, args)
 	if exit != parseContinue {
 		return exit
 	}
-	_ = pos // the message is the same whatever positional is given
-	fmt.Fprintln(c.stderr(), "spindle: threads cancel is not available: run cancellation is acknowledged by a runner and the JSON API exposes no route until the T2 runner protocol lands (docs/features/15_threads.md).")
-	return exitErr
+	owner, repo, run, ok := repoAndWord(c, pos, "threads "+verb+" OWNER/REPO RUN")
+	if !ok {
+		return exitArg
+	}
+	a, err := newAPIClient(c, f)
+	if err != nil {
+		fmt.Fprintf(c.stderr(), "spindle: %v\n", err)
+		return exitErr
+	}
+	var out struct {
+		Run struct {
+			State   string `json:"state"`
+			Attempt int    `json:"attempt"`
+		} `json:"run"`
+	}
+	// No request body: the verb is the URL, and the service owns the work.
+	raw, err := a.callInto(ctx, "POST", threadsPath(owner, repo, run, verb), nil, nil, &out)
+	if err != nil {
+		return a.fail(err)
+	}
+	if f.json {
+		return a.emitJSON(raw)
+	}
+	if !f.quiet {
+		if verb == "cancel" {
+			switch {
+			case out.Run.State == "cancelled":
+				fmt.Fprintf(c.stdout(), "Cancelled run %s\n", run)
+			case terminalRunState(out.Run.State):
+				// Every job was already terminal: the service skips them, so
+				// saying "cancel requested" would promise a change that cannot come.
+				fmt.Fprintf(c.stdout(), "Run %s is already %s; nothing to cancel\n", run, out.Run.State)
+			default:
+				fmt.Fprintf(c.stdout(), "Cancel requested for run %s (state: %s); a running job stops when its runner acknowledges\n", run, out.Run.State)
+			}
+		} else {
+			fmt.Fprintf(c.stdout(), "Reran run %s as attempt %d (state: %s)\n", run, out.Run.Attempt, out.Run.State)
+		}
+	}
+	return exitOK
+}
+
+// terminalRunState reports the run states that need no further work
+// (docs/features/15_threads.md §2 fold rules). The CLI keeps its own copy on
+// purpose: it is an API client and must not import the feature package.
+func terminalRunState(state string) bool {
+	switch state {
+	case "success", "failure", "cancelled", "skipped":
+		return true
+	}
+	return false
 }
 
 // --- api: the escape hatch (§6.6) -----------------------------------------

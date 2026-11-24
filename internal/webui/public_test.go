@@ -74,9 +74,8 @@ func (f publicFakeOwnerEdit) CanEditOwnerProfile(context.Context, string, auth.P
 	return f.allow, nil
 }
 
-func publicCfg(mode string, anonymousRead bool) *config.Config {
+func publicCfg(_ string, anonymousRead bool) *config.Config {
 	cfg := &config.Config{}
-	cfg.Server.Auth.Mode = mode
 	cfg.Server.Auth.AnonymousRead = anonymousRead
 	cfg.Server.Auth.SessionSecret = "s"
 	cfg.Server.Auth.OAuthClientID = "id"
@@ -98,10 +97,7 @@ func publicEnv(cfg *config.Config, reg api.RepoRegistry) Env {
 // newPublicServer builds the provider with a fixed principal and bindings.
 func newPublicServer(t *testing.T, env Env, p auth.Principal, deps PublicDeps) *Server {
 	t.Helper()
-	s, err := New(env)
-	if err != nil {
-		t.Fatalf("webui.New: %v", err)
-	}
+	s := newTestServer(t, env)
 	s.BindAuth(pages.Auth{
 		Authenticate: func(*http.Request) (auth.Principal, *auth.AuthError) { return p, nil },
 		Refresh:      func(http.ResponseWriter, *http.Request, auth.Principal) {},
@@ -209,10 +205,15 @@ func TestPublicLanding(t *testing.T) {
 		`class="btn primary px-4 py-2" href="/explore"`,
 		`href="#quickstart"`,
 		`id="quickstart"`,
-		"Push in 30 seconds",
+		"First boot, first push",
+		"RESTRICTED boot",
+		"There is no anonymous or",
 		"/_ui/concepts/push-still.gif",
 		`href="/how-it-works"`,
 	)
+	if strings.Contains(rec.Body.String(), `auth "none"`) {
+		t.Fatal("landing still advertises the removed auth none mode")
+	}
 	if cc := rec.Header().Get("Cache-Control"); cc != "no-cache, private" {
 		t.Fatalf("Cache-Control = %q, want no-cache, private", cc)
 	}
@@ -293,8 +294,12 @@ func TestPublicLoginRequired(t *testing.T) {
 	publicWantContains(t, rec, "Continuing to: /")
 	publicWantNotContains(t, rec, "evil.example")
 
-	// No OIDC flow → the page says so, no dead button.
-	env2 := publicEnv(publicCfg("none", true), nil)
+	// No OIDC trio → the page says so, no dead button.
+	cfg2 := publicCfg("", true)
+	cfg2.Server.Auth.SessionSecret = ""
+	cfg2.Server.Auth.OAuthClientID = ""
+	cfg2.Server.Auth.OAuthClientSecret = ""
+	env2 := publicEnv(cfg2, nil)
 	s2 := newPublicServer(t, env2, auth.Anonymous(), PublicDeps{})
 	rec = publicGet(s2, "/login-required")
 	publicWantStatus(t, rec, http.StatusOK)
@@ -350,7 +355,7 @@ func TestPublicReservedOwnerNamesFallThrough(t *testing.T) {
 	// Every SPA-only single-segment route is reserved: the owner handler must
 	// write nothing so the server can fall back to the SPA.
 	for _, name := range []string{
-		"explore", "how-it-works", "import", "new", "setup", "keys",
+		"explore", "how-it-works", "import", "new", "admin", "keys",
 		"invitations", "notifications", "login-required",
 	} {
 		if !reservedOwnerNames[name] {
@@ -554,7 +559,9 @@ func TestInvitationsInbox(t *testing.T) {
 		`title="2030-01-01T00:00:00Z">2030-01-01</span>`,
 		`action="/invitations/inv-org/accept"`,
 		`action="/invitations/inv-org/decline"`,
-		`<button type="submit" class="btn primary px-2 py-1 text-xs" disabled`,
+		// Rows are equal actions: accept is a .btn, never a page accent. The
+		// shared-link preview (below) owns the one primary when it renders.
+		`<button type="submit" class="btn px-2 py-1 text-xs" disabled`,
 	)
 
 	// Shared deep link previews on top.
@@ -680,7 +687,8 @@ func TestNotificationsTray(t *testing.T) {
 		`href="/acme/widget/pull/3"`,
 		`href="/acme/widget/issues/7"`,
 		`<span class="chip chip-open">review_requested</span>`,
-		`border-l-4 border-l-emerald-500`,
+		`border-l-4 border-l-[color:var(--pd-ok)]`,
+		`dot dot-ok mt-1 shrink-0`,
 		`aria-label="unread"`,
 		`action="/notifications/n1/read?state=unread"`,
 		`action="/notifications/n2/unread?state=unread"`,
@@ -707,6 +715,30 @@ func TestNotificationsTray(t *testing.T) {
 	if gotState != "unread" || gotAfter != "n9" {
 		t.Fatalf("Tray got state=%q after=%q, want unread/n9", gotState, gotAfter)
 	}
+}
+
+func TestNotificationsRowActor(t *testing.T) {
+	env, _ := alicePublicEnv(t)
+	s := newPublicServer(t, env, auth.Principal{Name: "alice"}, PublicDeps{
+		Tray: func(context.Context, string, string, string, int) ([]notify.Notification, bool) {
+			return []notify.Notification{
+				{ID: "n1", Repo: "acme/widget", Num: 3, Kind: "issue", Reason: "mentioned",
+					Title: "bob can file", Actor: "bob", State: "unread", CreatedAt: "2026-11-19T10:00:00Z"},
+				// A system emission has no actor: the cell stays empty rather
+				// than inventing "someone".
+				{ID: "n2", Repo: "acme/widget", Kind: "release", Reason: "subscribed",
+					Title: "v1", Actor: "", State: "read", CreatedAt: "2026-11-18T10:00:00Z"},
+			}, false
+		},
+		UnreadCount: func(context.Context, string) int { return 1 },
+	})
+	rec := publicGet(s, "/notifications")
+	publicWantStatus(t, rec, http.StatusOK)
+	publicWantContains(t, rec,
+		`<span class="muted text-xs">bob</span>`,
+		`<span class="muted text-xs"></span>`, // system row: empty, not "someone"
+	)
+	publicWantNotContains(t, rec, "someone")
 }
 
 func TestNotificationsTrayEmpty(t *testing.T) {
@@ -820,6 +852,7 @@ func TestOwnerInvalidSlugIs404(t *testing.T) {
 // --- helper units ------------------------------------------------------------
 
 func TestPublicVisibilityBadge(t *testing.T) {
+	t.Parallel()
 	cases := []struct{ in, label, title string }{
 		{"public", "public", "public — anyone may read"},
 		{"authenticated", "authenticated", "private — signed-in users may read"},
@@ -837,6 +870,7 @@ func TestPublicVisibilityBadge(t *testing.T) {
 }
 
 func TestPublicFriendlyInviteErr(t *testing.T) {
+	t.Parallel()
 	cases := map[string]string{
 		"invitation expired": "invitation expired",
 		"invitation is not addressed to your account, or it was already accepted or cancelled":               "invitation is not addressed to your account, or it was already accepted or cancelled",
@@ -856,6 +890,7 @@ func TestPublicFriendlyInviteErr(t *testing.T) {
 }
 
 func TestPublicInviteExpiry(t *testing.T) {
+	t.Parallel()
 	if inviteExpired("", publicFixedNow) {
 		t.Fatal("empty stamp must not read expired")
 	}
@@ -883,6 +918,7 @@ func TestPublicInviteExpiry(t *testing.T) {
 }
 
 func TestPublicJoinWhere(t *testing.T) {
+	t.Parallel()
 	cases := [][3]string{
 		{"Berlin", "Europe/Berlin", "Berlin · Europe/Berlin"},
 		{"Berlin", "", "Berlin"},
@@ -923,6 +959,7 @@ func TestPublicDiscoveryExtras(t *testing.T) {
 }
 
 func TestPublicCanEditOwner(t *testing.T) {
+	t.Parallel()
 	env, _ := alicePublicEnv(t)
 	s := &Server{env: env}
 	alice := auth.Principal{Name: "alice"}
@@ -957,6 +994,7 @@ func (errOwnerEdit) CanEditOwnerProfile(context.Context, string, auth.Principal)
 }
 
 func TestPublicCanEditOwnerProbeError(t *testing.T) {
+	t.Parallel()
 	env, _ := alicePublicEnv(t)
 	env.API.OwnerEdit = errOwnerEdit{}
 	s := &Server{env: env}
@@ -985,26 +1023,27 @@ func TestPublicReadOwnerProfileCorrupt(t *testing.T) {
 	}
 }
 
-func TestPublicAuthModeDefault(t *testing.T) {
+func TestPublicBrowserLoginGate(t *testing.T) {
+	t.Parallel()
 	s := &Server{env: Env{}}
-	if got := s.authModeOrDefault(); got != "none" {
-		t.Fatalf("nil cfg mode = %q", got)
-	}
 	if s.browserLoginEnabled() {
 		t.Fatal("nil cfg must not enable browser login")
 	}
 	if s.loginURL() != "" {
 		t.Fatal("nil cfg must not advertise a login URL")
 	}
-	// oidc without the session/client trio is a legacy config: no browser flow.
+	// Without the session/client trio there is no browser flow.
 	cfg := &config.Config{}
-	cfg.Server.Auth.Mode = "oidc"
 	s = &Server{env: Env{Cfg: cfg}}
 	if s.browserLoginEnabled() {
-		t.Fatal("oidc without the trio must not enable browser login")
+		t.Fatal("no trio must not enable browser login")
 	}
-	if got := s.authModeOrDefault(); got != "oidc" {
-		t.Fatalf("mode = %q", got)
+	// With the trio the flow starts (OIDC is the only authentication).
+	cfg.Server.Auth.SessionSecret = strings.Repeat("x", 32)
+	cfg.Server.Auth.OAuthClientID = "id"
+	cfg.Server.Auth.OAuthClientSecret = "secret"
+	if !s.browserLoginEnabled() || s.loginURL() != "/_auth/login" {
+		t.Fatal("the trio must enable the browser flow")
 	}
 }
 
@@ -1041,6 +1080,7 @@ func TestPublicServiceUnavailable(t *testing.T) {
 }
 
 func TestPublicNotifRowFallbacks(t *testing.T) {
+	t.Parallel()
 	// No thread number → the repo page; pull kind wins; the reason decides Hot.
 	cases := []struct {
 		in   notify.Notification

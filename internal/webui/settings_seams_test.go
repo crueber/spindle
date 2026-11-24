@@ -27,6 +27,8 @@ import (
 	"github.com/crueber/spindle/internal/pushmirror"
 	"github.com/crueber/spindle/internal/server/auth"
 	"github.com/crueber/spindle/internal/store"
+	"github.com/crueber/spindle/internal/store/proto"
+	"github.com/crueber/spindle/internal/wal"
 )
 
 // --- api.Env fakes (the composition boundary) -------------------------------
@@ -112,6 +114,20 @@ func (f *seamsRegistry) Delete(_ context.Context, id git.RepoId) error {
 	return nil
 }
 
+// seedManifest writes a decodable manifest (a transfer reads and retargets
+// Manifest.Repo, so the bytes must be a real proto.Manifest).
+func seedManifest(t *testing.T, st store.ObjectStore, owner, repo string) {
+	t.Helper()
+	m := &proto.Manifest{FormatVersion: 1, Repo: owner + "/" + repo, ObjectFormat: "sha1",
+		Revision: 1, Writer: "seed-" + owner + "-" + repo}
+	if _, err := st.Put(context.Background(), store.RepoPrefix(owner, repo)+store.Manifest,
+		store.PutBody{Bytes: m.Marshal()}, store.PutOptions{Mode: store.PutCreate, ContentType: "application/x-protobuf"}); err != nil {
+		if !store.IsPreconditionFailed(err) {
+			t.Fatalf("seed manifest %s/%s: %v", owner, repo, err)
+		}
+	}
+}
+
 // --- harness ----------------------------------------------------------------
 
 type seamsHarness struct {
@@ -129,8 +145,13 @@ type seamsHarness struct {
 func newSeamsHarness(t *testing.T) *seamsHarness {
 	t.Helper()
 	cmd := config.Defaults()
-	cmd.Server.Auth.Mode = "none"
 	cmd.Server.Auth.AnonymousRead = true
+	cmd.Server.Auth.Issuer = "https://id.example.com"
+	cmd.Server.Auth.AllowedDomains = []string{"example.com"}
+	cmd.Server.Auth.OAuthClientID = "spindle"
+	cmd.Server.Auth.OAuthClientSecret = "s3cret"
+	cmd.Server.Auth.SessionSecret = strings.Repeat("x", 32)
+	cmd.Server.Auth.AdminGroups = []string{"spindle-admin"}
 	cmd.Server.Roles = []string{"serve", "maintain"}
 	cmd.Import.URLAllowlist = []string{"example.com"}
 	cmd.Bundles.Strategy = []config.BundleStrategy{{
@@ -140,6 +161,11 @@ func newSeamsHarness(t *testing.T) *seamsHarness {
 
 	mem := store.NewMemory()
 	ident := identity.New(mem, cmd)
+	// Real task table: the repository transfer runs as a repo-transfer task
+	// (PLAN-V2 §T.1), so the settings seam starts one and renders its card.
+	walReg := wal.NewRegistry(context.Background(), mem, cmd)
+	t.Cleanup(walReg.Close)
+	ident.Tasks = walReg.Tasks()
 	notes := notify.New(mem, ident)
 	cks := checks.New(mem, ident)
 	mirrorSvc := mirror.New(mirror.Deps{Store: mem, Allowlist: []string{"example.com"}, Now: func() time.Time {
@@ -161,7 +187,7 @@ func newSeamsHarness(t *testing.T) *seamsHarness {
 		Now:    func() time.Time { return time.Date(2026, 11, 20, 10, 0, 0, 0, time.UTC) },
 	})
 
-	f := &settingsFakes{deps: deps}
+	f := &settingsFakes{deps: testDeps{SettingsDeps: deps}}
 	s := newSettingsServer(t, f)
 	return &seamsHarness{s: s, store: mem, apiE: apiEnv, repo: repo, reg: reg,
 		ident: ident, notes: notes, cks: cks, deps: deps}
@@ -763,26 +789,37 @@ func TestSettingsSeamsWebhooksCreatePingDelete(t *testing.T) {
 func TestSettingsSeamsDangerTransferAndDelete(t *testing.T) {
 	h := newSeamsHarness(t)
 	ctx := context.Background()
-	if _, err := h.store.Put(ctx, store.RepoPrefix("acme", "monorepo")+store.Manifest,
-		store.PutBody{Bytes: []byte("manifest")}, store.PutOptions{Mode: store.PutCreate}); err != nil {
-		t.Fatalf("seed manifest: %v", err)
-	}
-	code, loc, body := seamsPost(t, h, "/acme/monorepo/settings/danger", url.Values{
+	seedManifest(t, h.store, "acme", "monorepo")
+	code, _, body := seamsPost(t, h, "/acme/monorepo/settings/danger", url.Values{
 		"danger_action": {"transfer"},
 		"owner":         {"alice"},
 		"confirm":       {"acme/monorepo"},
 	})
-	if code != http.StatusSeeOther {
+	// A transfer answers the live task card, not a redirect: the source page
+	// stops existing when the move commits (PLAN-V2 §T.1).
+	if code != http.StatusOK {
 		t.Fatalf("transfer = %d (%s)", code, body)
 	}
-	settingsMustContain(t, loc, "/alice/monorepo/settings/general", "transfer redirect")
-
-	// Delete goes through the registry (the API's repo delete seam).
-	if _, err := h.store.Put(ctx, store.RepoPrefix("acme", "monorepo")+store.Manifest,
-		store.PutBody{Bytes: []byte("manifest")}, store.PutOptions{Mode: store.PutCreate}); err != nil {
-		t.Fatalf("re-seed manifest: %v", err)
+	settingsMustContain(t, body, `data-task-stream="/acme/monorepo/api/tasks/`, "transfer task stream")
+	settingsMustContain(t, body, `data-task-next="/alice/monorepo"`, "transfer destination")
+	settingsMustContain(t, body, "transfer started", "transfer notice")
+	// The task itself completes and the destination becomes readable.
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		ok, err := store.Exists(ctx, h.store, store.RepoPrefix("alice", "monorepo")+store.Manifest)
+		if err == nil && ok {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("transfer never committed: %v", err)
+		}
+		time.Sleep(5 * time.Millisecond)
 	}
-	code, loc, body = seamsPost(t, h, "/acme/monorepo/settings/danger", url.Values{
+
+	// Delete goes through the registry (the API's repo delete seam); this also
+	// mints a fresh manifest at the source name.
+	seedManifest(t, h.store, "acme", "monorepo")
+	code, loc, body := seamsPost(t, h, "/acme/monorepo/settings/danger", url.Values{
 		"danger_action": {"delete"},
 		"confirm":       {"acme/monorepo"},
 	})
@@ -822,6 +859,7 @@ func TestSettingsSeamsCrossOriginRefused(t *testing.T) {
 // --- seam unit bits ---------------------------------------------------------
 
 func TestSettingsSeamsTomlPassengers(t *testing.T) {
+	t.Parallel()
 	in := "description = \"old\"\n\n[features]\nissues = false\n\n[bundles]\nmain_only = true\n"
 	got := settingsWithFeatures(in, map[string]bool{"issues": true, "pulls": true, "releases": true, "forks": true, "watch": true, "star": true})
 	settingsMustContain(t, got, "[features]\nissues = true", "features replaced")
@@ -849,6 +887,7 @@ func TestSettingsSeamsTomlPassengers(t *testing.T) {
 }
 
 func TestSettingsSeamsStatusMapping(t *testing.T) {
+	t.Parallel()
 	cases := []struct {
 		err  error
 		want int
@@ -928,7 +967,7 @@ func TestSettingsSeamsUnwiredServices(t *testing.T) {
 	if deps.RepoWrite != nil {
 		t.Fatal("RepoWrite must stay nil without services")
 	}
-	f := &settingsFakes{deps: deps}
+	f := &settingsFakes{deps: testDeps{SettingsDeps: deps}}
 	s := newSettingsServer(t, f)
 	for _, tab := range []string{"mirror", "policy", "access", "tokens"} {
 		rec := settingsDo(t, s, http.MethodGet, "/acme/monorepo/settings/"+tab, nil, nil)
@@ -1015,7 +1054,6 @@ func TestSettingsSeamsPushSyncAndErrors(t *testing.T) {
 
 func TestSettingsSeamsTokenWebhookErrorsAndTransfer(t *testing.T) {
 	h := newSeamsHarness(t)
-	ctx := context.Background()
 	if code, _, body := seamsPost(t, h, "/acme/monorepo/settings/tokens/nope", url.Values{"token_action": {"revoke"}}); code != http.StatusNotFound {
 		t.Fatalf("revoke unknown = %d (%s)", code, body)
 	}
@@ -1029,14 +1067,8 @@ func TestSettingsSeamsTokenWebhookErrorsAndTransfer(t *testing.T) {
 		t.Fatalf("bad hook url = %d (%s)", code, body)
 	}
 	// Transfer onto an existing repo is the identity 409.
-	if _, err := h.store.Put(ctx, store.RepoPrefix("acme", "monorepo")+store.Manifest,
-		store.PutBody{Bytes: []byte("m")}, store.PutOptions{Mode: store.PutCreate}); err != nil {
-		t.Fatalf("seed src: %v", err)
-	}
-	if _, err := h.store.Put(ctx, store.RepoPrefix("alice", "monorepo")+store.Manifest,
-		store.PutBody{Bytes: []byte("m")}, store.PutOptions{Mode: store.PutCreate}); err != nil {
-		t.Fatalf("seed dst: %v", err)
-	}
+	seedManifest(t, h.store, "acme", "monorepo")
+	seedManifest(t, h.store, "alice", "monorepo")
 	code, _, body := seamsPost(t, h, "/acme/monorepo/settings/danger", url.Values{
 		"danger_action": {"transfer"}, "owner": {"alice"}, "confirm": {"acme/monorepo"},
 	})
@@ -1047,16 +1079,23 @@ func TestSettingsSeamsTokenWebhookErrorsAndTransfer(t *testing.T) {
 
 // --- Branch protection (WP2.3) ---------------------------------------------
 
-// TestSettingsSeamsProtectionRoundTrip is the definition-of-done round trip:
-// UI payload → the SAME validated policy document → the push gate enforces
-// it (the bypass role admits its holder, everyone else is denied).
+// TestSettingsSeamsProtectionRoundTrip is the definition-of-done round trip
+// for a named ruleset (PLAN-V2 §2.4): UI payload → the SAME validated policy
+// document → the push gate and the merge gate enforce it. It also pins the
+// read-time mapping of the pre-ruleset names (`protection-push` /
+// `protection-reviews` read as the ruleset "default", and the first save
+// rewrites them under the new names) and that an unrelated rule's bytes
+// survive.
 func TestSettingsSeamsProtectionRoundTrip(t *testing.T) {
 	h := newSeamsHarness(t)
 	ctx := context.Background()
 	id := git.RepoId{Owner: "acme", Name: "monorepo"}
-	// A hand-written rule the structured form must preserve.
-	const custom = `{"version":1,"rules":[{"name":"release-tags","match":{"refs":["refs/tags/v*"]},"effect":{"protect":{"restricts":["delete"]}}}]}`
-	if werr := api.PutPolicy(ctx, h.apiE, id, []byte(custom)); werr != nil {
+	// A hand-written rule the ruleset form must preserve, next to the legacy
+	// pair the read maps onto the "default" ruleset.
+	const seeded = `{"version":1,"rules":[
+		{"name":"release-tags","match":{"refs":["refs/tags/v*"]},"effect":{"protect":{"restricts":["delete"]}}},
+		{"name":"protection-push","match":{"refs":["refs/heads/main"]},"effect":{"protect":{"restricts":["create","update"]}}}]}`
+	if werr := api.PutPolicy(ctx, h.apiE, id, []byte(seeded)); werr != nil {
 		t.Fatalf("seed policy: %v", werr)
 	}
 	if _, err := h.ident.PutAccess(ctx, "acme", "monorepo", "", identity.Visibility("private"),
@@ -1069,22 +1108,37 @@ func TestSettingsSeamsProtectionRoundTrip(t *testing.T) {
 		t.Fatalf("GET protection = %d (%s)", code, body)
 	}
 	settingsMustContain(t, body, "Branch protection", "tab heading")
-	settingsMustContain(t, body, "Effective policy", "effective view")
+	settingsMustContain(t, body, "Protection rulesets", "ruleset list")
 	settingsMustContain(t, body, "release-tags", "existing rule listed")
-	settingsMustContain(t, body, `name="refs"`, "structured form")
+	settingsMustContain(t, body, "What applies to a ref", "effective view")
 	settingsMustContain(t, body, `name="policy"`, "advanced raw editor (not the only path)")
 
-	code, loc, body := seamsPost(t, h, "/acme/monorepo/settings/protection", url.Values{
-		"enabled":       {"1"},
-		"refs":          {"refs/heads/main, refs/heads/release/*"},
-		"approvals":     {"2"},
-		"dismiss_stale": {"1"},
-		"checks":        {"ci/build, lint"},
-		"push_roles":    {"maintain", "admin"},
-		"block_force":   {"1"},
-		"block_delete":  {"1"},
+	// The form page for the mapped "default" ruleset: the legacy rules seed
+	// the fields.
+	code, body = seamsGet(t, h, "/acme/monorepo/settings/protection/default")
+	if code != http.StatusOK {
+		t.Fatalf("GET default ruleset = %d (%s)", code, body)
+	}
+	settingsMustContain(t, body, `value="refs/heads/main"`, "stored ref pattern in the form")
+	settingsMustContain(t, body, `name="ruleset_slug"`, "name field")
+	settingsMustContain(t, body, `name="merge_methods"`, "merge-method picker")
+	settingsMustContain(t, body, `name="require_up_to_date"`, "up-to-date toggle")
+
+	code, loc, body := seamsPost(t, h, "/acme/monorepo/settings/protection/default", url.Values{
+		"ruleset_action":     {"save"},
+		"ruleset_slug":       {"default"},
+		"enabled":            {"1"},
+		"refs":               {"refs/heads/main, refs/heads/release/*"},
+		"approvals":          {"2"},
+		"dismiss_stale":      {"1"},
+		"checks":             {"ci/build, lint"},
+		"push_roles":         {"maintain", "admin"},
+		"block_force":        {"1"},
+		"block_delete":       {"1"},
+		"require_up_to_date": {"1"},
+		"merge_methods":      {"merge", "squash"},
 	})
-	if code != http.StatusSeeOther || !strings.Contains(loc, "/settings/protection") {
+	if code != http.StatusSeeOther || !strings.Contains(loc, "/settings/protection/default") {
 		t.Fatalf("save = %d %q (%s)", code, loc, body)
 	}
 
@@ -1099,9 +1153,13 @@ func TestSettingsSeamsProtectionRoundTrip(t *testing.T) {
 	if doc.RuleByName("release-tags") == nil {
 		t.Fatalf("custom rule dropped: %s", raw)
 	}
-	push := doc.RuleByName("protection-push")
+	// The read-time mapping wrote the new names; the legacy ones are gone.
+	if doc.RuleByName("protection-push") != nil || doc.RuleByName("protection-reviews") != nil {
+		t.Fatalf("legacy names survived the first save: %s", raw)
+	}
+	push := doc.RuleByName("protection:default-push")
 	if push == nil || push.Protect() == nil {
-		t.Fatalf("protection-push missing: %s", raw)
+		t.Fatalf("protection:default-push missing: %s", raw)
 	}
 	pe := push.Protect()
 	if !containsStr(pe.RestrictOps, "force-push") || !containsStr(pe.RestrictOps, "delete") ||
@@ -1114,7 +1172,10 @@ func TestSettingsSeamsProtectionRoundTrip(t *testing.T) {
 	if len(pe.RequireChecks) != 2 || pe.RequireChecks[0] != "ci/build" {
 		t.Fatalf("checks = %v", pe.RequireChecks)
 	}
-	rev := doc.RuleByName("protection-reviews")
+	if !pe.RequireUpToDate || strings.Join(pe.MergeMethods, ",") != "merge,squash" {
+		t.Fatalf("merge fields = %+v", pe)
+	}
+	rev := doc.RuleByName("protection:default-reviews")
 	if rev == nil || rev.RequiredReviews() == nil || rev.RequiredReviews().MinApprovals != 2 || !rev.RequiredReviews().DismissStale {
 		t.Fatalf("reviews = %+v", rev)
 	}
@@ -1132,9 +1193,17 @@ func TestSettingsSeamsProtectionRoundTrip(t *testing.T) {
 	if v := policy.Evaluate(ctx, enforced, policy.Request{Principal: "carol@example.com", Ref: "refs/heads/main", Op: policy.OpUpdate}); v.Allow {
 		t.Fatal("non-bypass push allowed")
 	}
+	// The merge half resolves from the same document (the PR page and the
+	// merge task share this resolver).
+	gate := policy.MergeGateFor(doc, policy.Request{Principal: "carol@example.com", Ref: "refs/heads/main", Op: policy.OpUpdate})
+	if !gate.RequireUpToDate || gate.Allows("rebase") || !gate.Allows("squash") {
+		t.Fatalf("merge gate = %+v", gate)
+	}
 
-	// Disabling removes only the managed rules.
-	code, _, body = seamsPost(t, h, "/acme/monorepo/settings/protection", url.Values{"refs": {"refs/heads/main"}})
+	// Disabling removes only the ruleset's rules.
+	code, _, body = seamsPost(t, h, "/acme/monorepo/settings/protection/default", url.Values{
+		"ruleset_action": {"save"}, "ruleset_slug": {"default"}, "refs": {"refs/heads/main"},
+	})
 	if code != http.StatusSeeOther {
 		t.Fatalf("disable = %d (%s)", code, body)
 	}
@@ -1143,8 +1212,8 @@ func TestSettingsSeamsProtectionRoundTrip(t *testing.T) {
 	if perr != nil {
 		t.Fatalf("parse after disable: %v (%s)", perr, raw)
 	}
-	if doc.RuleByName("protection-push") != nil || doc.RuleByName("protection-reviews") != nil {
-		t.Fatalf("managed rules survived disable: %s", raw)
+	if doc.RuleByName("protection:default-push") != nil || doc.RuleByName("protection:default-reviews") != nil {
+		t.Fatalf("ruleset rules survived disable: %s", raw)
 	}
 	if doc.RuleByName("release-tags") == nil {
 		t.Fatalf("custom rule dropped on disable: %s", raw)
@@ -1152,7 +1221,8 @@ func TestSettingsSeamsProtectionRoundTrip(t *testing.T) {
 }
 
 // TestSettingsSeamsProtectionValidation pins the inline refusals: an empty
-// ref list, an unknown role and a bad check context never reach the store.
+// ref list, an unknown role, a bad check context and a method set that
+// permits nothing never reach the store.
 func TestSettingsSeamsProtectionValidation(t *testing.T) {
 	h := newSeamsHarness(t)
 	ctx := context.Background()
@@ -1162,19 +1232,21 @@ func TestSettingsSeamsProtectionValidation(t *testing.T) {
 		form url.Values
 		want string
 	}{
-		{"no refs", url.Values{"enabled": {"1"}, "refs": {" "}}, "at least one ref pattern"},
-		{"unknown role", url.Values{"enabled": {"1"}, "refs": {"refs/heads/main"}, "push_roles": {"owner"}}, "unknown push role"},
-		{"bad check", url.Values{"enabled": {"1"}, "refs": {"refs/heads/main"}, "checks": {"ci;build"}}, "invalid context"},
+		{"no refs", url.Values{"enabled": {"1"}, "refs": {" "}, "ruleset_slug": {"main"}, "merge_methods": {"merge"}}, "at least one ref pattern"},
+		{"unknown role", url.Values{"enabled": {"1"}, "refs": {"refs/heads/main"}, "ruleset_slug": {"main"}, "push_roles": {"owner"}, "merge_methods": {"merge"}}, "unknown push role"},
+		{"bad check", url.Values{"enabled": {"1"}, "refs": {"refs/heads/main"}, "ruleset_slug": {"main"}, "checks": {"ci;build"}, "merge_methods": {"merge"}}, "invalid context"},
+		{"bad name", url.Values{"enabled": {"1"}, "refs": {"refs/heads/main"}, "ruleset_slug": {"Main Ruleset"}, "merge_methods": {"merge"}}, "ruleset names are"},
+		{"no methods", url.Values{"enabled": {"1"}, "refs": {"refs/heads/main"}, "ruleset_slug": {"main"}}, "select at least one merge method"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			code, _, body := seamsPost(t, h, "/acme/monorepo/settings/protection", tc.form)
+			code, _, body := seamsPost(t, h, "/acme/monorepo/settings/protection/new", tc.form)
 			if code != http.StatusBadRequest {
 				t.Fatalf("status = %d, want 400 (%s)", code, body)
 			}
 			settingsMustContain(t, body, tc.want, "inline error")
 		})
 	}
-	if raw, _, _ := api.PolicyRaw(ctx, h.apiE, id); strings.Contains(string(raw), "protection-push") {
+	if raw, _, _ := api.PolicyRaw(ctx, h.apiE, id); strings.Contains(string(raw), "protection:main-push") {
 		t.Fatalf("a rejected form wrote the store: %s", raw)
 	}
 }

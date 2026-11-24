@@ -1,0 +1,82 @@
+{{/* partials/settings_repo_danger.html — repo settings → Danger Zone.
+   One settings tab per file: a new tab is a new settings_repo_<tab>.html
+   partial plus one dispatch line in pages/settings/repo.html — never a body
+   in the shell. Every panel receives the SettingsRepoPage, so a form can
+   build its action from .Owner/.Name. Anatomy: .card sections, the .setup-row
+   label/control pairing for forms, .data-table inside overflow-x-auto
+   (guideline §8). 390px: fields full width, toggle rows keep
+   label-left/control-right, tables scroll in place. */}}
+{{/* ---- Danger Zone ------------------------------------------------------ */}}
+{{define "settings-repo-danger"}}
+{{with .DangerData}}
+<div class="space-y-4">
+  <section class="card p-4" aria-label="Danger Zone">
+    <h3 class="card-header text-[var(--pd-danger)]">Danger Zone</h3>
+    <p class="muted text-sm">These actions are irreversible. Forks are unaffected.</p>
+
+    <div class="mt-4 card p-3">
+      <h4 class="eyebrow">Transfer repository</h4>
+      <p class="muted mt-1 text-[11px]">Moves the repository — and its access bindings — to another owner. You lose admin access unless the new owner grants it back.</p>
+      <form class="mt-2 grid gap-2" method="post" action="/{{$.Owner}}/{{$.Name}}/settings/danger"
+            hx-post="/{{$.Owner}}/{{$.Name}}/settings/danger" hx-target="#settings-panel" hx-select="#settings-panel" hx-swap="outerHTML"
+            data-danger-expected="{{.FullName}}">
+        <input type="hidden" name="danger_action" value="transfer">
+        <div>
+          <label class="mb-1 block text-sm font-medium" for="transfer-owner">New owner</label>
+          <input class="input md:max-w-sm" id="transfer-owner" name="owner" type="text" required>
+        </div>
+        <div>
+          <label class="mb-1 block text-sm font-medium" for="transfer-confirm">Type <code class="mono text-xs">{{.FullName}}</code> to confirm</label>
+          <input class="input md:max-w-sm mono text-xs" id="transfer-confirm" name="confirm" type="text" autocomplete="off" data-danger-arm required>
+        </div>
+        <div><button type="submit" class="btn danger">Transfer this repository</button></div>
+        {{if .Error}}<p class="err-line" role="alert">{{.Error}}</p>{{end}}
+      </form>
+      {{/* The transfer runs as a repo-transfer task (PLAN-V2 §T.1): the card
+           streams its narration, shows the phase bars, and opens the new path
+           only after the task's verification step passed. */}}
+      {{with .Task}}
+      <div class="mt-3 grid gap-2" aria-label="Transfer progress" aria-live="polite"
+           data-task-id="{{.ID}}" data-task-stream="{{.Stream}}"
+           data-task-next="{{.Next}}" data-task-return="/{{$.Owner}}/{{$.Name}}/settings/danger"
+           data-task-noun="transfer" data-task-labels="{{.Title}}">
+        <p class="text-sm font-medium">{{.Title}}</p>
+        <div data-task-bars class="grid gap-2">
+          <div class="grid gap-1">
+            <div class="flex flex-wrap items-baseline gap-2 text-sm"><span class="font-medium">starting…</span></div>
+            <div class="h-1.5 overflow-hidden rounded bg-[var(--pd-raised)]" role="progressbar"
+                 aria-label="transfer progress" aria-valuemin="0" aria-valuemax="100">
+              <div class="h-full w-1/6 bg-[var(--pd-accent)]"></div>
+            </div>
+          </div>
+        </div>
+        <pre data-task-log class="code-view max-h-64 min-h-[2rem] overflow-y-auto p-2" aria-label="Transfer log"></pre>
+        <p class="muted text-[11px]">
+          The move keeps running if you navigate away. Task
+          <a class="link mono" href="{{.Stream}}">{{.ID}}</a> —
+          <a class="link" href="{{.Stream}}">follow its progress</a>
+          (the same URL with <code class="mono">Accept: text/event-stream</code>).
+        </p>
+        <noscript><p class="muted text-[11px]">JavaScript is off: the transfer is still running — reload this page or open the task link above to check it.</p></noscript>
+      </div>
+      {{end}}
+    </div>
+
+    <div class="mt-4 card p-3 border-[color-mix(in_srgb,var(--pd-danger)_50%,var(--pd-line))]">
+      <h4 class="eyebrow text-[var(--pd-danger)]">Delete repository</h4>
+      <p class="muted mt-1 text-[11px]">Deletes the repository for everyone. Irreversible; forks are unaffected.</p>
+      <form class="mt-2 grid gap-2" method="post" action="/{{$.Owner}}/{{$.Name}}/settings/danger"
+            hx-post="/{{$.Owner}}/{{$.Name}}/settings/danger" hx-target="#settings-panel" hx-select="#settings-panel" hx-swap="outerHTML"
+            data-danger-expected="{{.FullName}}">
+        <input type="hidden" name="danger_action" value="delete">
+        <div>
+          <label class="mb-1 block text-sm font-medium" for="delete-confirm">Type <code class="mono text-xs">{{.FullName}}</code> to confirm</label>
+          <input class="input md:max-w-sm mono text-xs" id="delete-confirm" name="confirm" type="text" autocomplete="off" data-danger-arm required>
+        </div>
+        <div><button type="submit" class="btn danger">Delete this repository</button></div>
+      </form>
+    </div>
+  </section>
+</div>
+{{else}}{{template "settings-repo-notwired" .}}{{end}}
+{{end}}

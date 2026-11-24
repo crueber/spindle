@@ -119,7 +119,7 @@ func twoRuns(t *testing.T, e *testEnv, yaml string) (*Run, *Run) {
 }
 
 func runnerFor(e *testEnv) *runnerAuth {
-	return &runnerAuth{Owner: "o", Repo: "r", Doc: &RunnerDoc{ID: "rnrbec2", Labels: []string{"linux"}, State: RunnerActive}}
+	return &runnerAuth{Doc: &RunnerDoc{ID: "rnrbec2", Labels: []string{"linux"}, AllowAll: true, State: RunnerActive}}
 }
 
 const groupedWorkflow = `name: Grouped
@@ -145,7 +145,7 @@ func TestConcurrencyGroupOneInFlightPerRepo(t *testing.T) {
 		t.Fatalf("first claim ran %s, want the older run %s", job.RunID, first.ID)
 	}
 	// The second run's job must not be admitted while the first run is live.
-	b := &runnerAuth{Owner: "o", Repo: "r", Doc: &RunnerDoc{ID: "rnrbec3", Labels: []string{"linux"}, State: RunnerActive}}
+	b := &runnerAuth{Doc: &RunnerDoc{ID: "rnrbec3", Labels: []string{"linux"}, AllowAll: true, State: RunnerActive}}
 	if other, ferr := e.svc.FetchJob(ctx(), b, time.Millisecond); ferr != nil || other != nil {
 		t.Fatalf("concurrent fetch admitted %+v (err %v)", other, ferr)
 	}
@@ -193,7 +193,7 @@ func TestConcurrencyCancelInProgressCancelsTheOlderRun(t *testing.T) {
 	if err != nil || job == nil || job.RunID != first.ID {
 		t.Fatalf("first claim = %+v, %v", job, err)
 	}
-	b := &runnerAuth{Owner: "o", Repo: "r", Doc: &RunnerDoc{ID: "rnrbec4", Labels: []string{"linux"}, State: RunnerActive}}
+	b := &runnerAuth{Doc: &RunnerDoc{ID: "rnrbec4", Labels: []string{"linux"}, AllowAll: true, State: RunnerActive}}
 	// The holder is a RUNNING job: the existing cancel path signals it
 	// (cancel_requested) and the busy runner acks on its next write, which is
 	// when the group frees. That hand-off is what keeps the old container from
@@ -277,7 +277,7 @@ func TestMatrixFailFastCancelsSiblings(t *testing.T) {
 func TestResolveCloneCredential(t *testing.T) {
 	e := newTestEnv(t)
 	e.mustCreate(t)
-	a := &runnerAuth{Owner: "o", Repo: "r", Doc: &RunnerDoc{ID: "rnrbec2", Labels: []string{"ubuntu-latest"}, State: RunnerActive}}
+	a := &runnerAuth{Doc: &RunnerDoc{ID: "rnrbec2", Labels: []string{"linux"}, AllowAll: true, State: RunnerActive, AllowForkRuns: true}}
 	job, err := e.svc.FetchJob(ctx(), a, time.Millisecond)
 	if err != nil || job == nil {
 		t.Fatalf("fetch = %+v %v", job, err)
@@ -310,7 +310,7 @@ func TestResolveCloneCredential(t *testing.T) {
 func TestFetchPayloadCarriesCheckoutURL(t *testing.T) {
 	e := newTestEnv(t)
 	e.mustCreate(t)
-	a := &runnerAuth{Owner: "o", Repo: "r", Doc: &RunnerDoc{ID: "rnrbec2", Labels: []string{"ubuntu-latest"}, State: RunnerActive}}
+	a := &runnerAuth{Doc: &RunnerDoc{ID: "rnrbec2", Labels: []string{"linux"}, AllowAll: true, State: RunnerActive, AllowForkRuns: true}}
 	job, err := e.svc.FetchJobFrom(ctx(), a, time.Millisecond, "https://spindle.example.com")
 	if err != nil || job == nil {
 		t.Fatalf("fetch = %+v %v", job, err)
@@ -336,12 +336,13 @@ func TestForkRunPayloadHasNoSecretsAndReadOnlyCheckout(t *testing.T) {
 on: [pull_request]
 jobs:
   build:
-    runs-on: ubuntu-latest
+    runs-on: linux
     steps:
       - run: echo from-base
 `)
 	e.git.refs["refs/heads/main"] = baseSHA
 	runs, err := e.svc.CreateRun(ctx(), "o/r", testSHA, EventPullReq, CreateOpts{
+		Action: "opened",
 		Branch: "main", BaseBranch: "main", Fork: true,
 	})
 	if err != nil {
@@ -350,7 +351,7 @@ jobs:
 	if len(runs) != 1 || runs[0].Trusted || runs[0].WorkflowCommit != baseSHA {
 		t.Fatalf("fork run = %+v", runs)
 	}
-	a := &runnerAuth{Owner: "o", Repo: "r", Doc: &RunnerDoc{ID: "rnrbec2", Labels: []string{"ubuntu-latest"}, State: RunnerActive}}
+	a := &runnerAuth{Doc: &RunnerDoc{ID: "rnrbec2", Labels: []string{"linux"}, AllowAll: true, State: RunnerActive, AllowForkRuns: true}}
 	job, ferr := e.svc.FetchJobFrom(ctx(), a, time.Millisecond, "http://127.0.0.1:8080")
 	if ferr != nil || job == nil {
 		t.Fatalf("fetch = %+v %v", job, ferr)
@@ -381,13 +382,22 @@ func TestClaimRunnerCredentialShape(t *testing.T) {
 
 func TestRunGroupsAndCheckoutBase(t *testing.T) {
 	jobs := []*Job{
-		{Spec: &Spec{Concurrency: &ConcurrencySpec{Group: "b"}}},
-		{Spec: &Spec{Concurrency: &ConcurrencySpec{Group: "a"}}},
-		{Spec: &Spec{Concurrency: &ConcurrencySpec{Group: "a"}}},
-		{Spec: nil},
+		{State: JobQueued, Spec: &Spec{Concurrency: &ConcurrencySpec{Group: "b"}}},
+		{State: JobQueued, Spec: &Spec{Concurrency: &ConcurrencySpec{Group: "a"}}},
+		{State: JobQueued, Spec: &Spec{Concurrency: &ConcurrencySpec{Group: "a"}}},
+		{State: JobQueued, Spec: nil},
 	}
 	if got := runGroups(jobs); len(got) != 2 || got[0] != "a" || got[1] != "b" {
 		t.Fatalf("runGroups = %v", got)
+	}
+	// A job a job-level `if:`/`needs:` terminalised holds nothing: its group
+	// must not block another run while this one is still live.
+	skipped := []*Job{
+		{State: JobSkipped, Spec: &Spec{Concurrency: &ConcurrencySpec{Group: "skipped"}}},
+		{State: JobQueued, Spec: &Spec{Concurrency: &ConcurrencySpec{Group: "live"}}},
+	}
+	if got := runGroups(skipped); len(got) != 1 || got[0] != "live" {
+		t.Fatalf("runGroups with a skipped job = %v", got)
 	}
 	if runGroups(nil) != nil {
 		t.Fatal("no jobs, no groups")
@@ -427,7 +437,7 @@ func TestFailFastCancelsARunningSibling(t *testing.T) {
 	if err != nil || first == nil {
 		t.Fatalf("first fetch: %+v %v", first, err)
 	}
-	b := &runnerAuth{Owner: "o", Repo: "r", Doc: &RunnerDoc{ID: "rnrbec5", Labels: []string{"linux"}, State: RunnerActive}}
+	b := &runnerAuth{Doc: &RunnerDoc{ID: "rnrbec5", Labels: []string{"linux"}, AllowAll: true, State: RunnerActive}}
 	second, err := e.svc.FetchJob(ctx(), b, time.Millisecond)
 	if err != nil || second == nil {
 		t.Fatalf("second fetch: %+v %v", second, err)
@@ -514,7 +524,7 @@ func TestAttemptCancelHTTPErrors(t *testing.T) {
 	admin := auth.Principal{Name: "admin", Admin: true}
 	*cur = admin
 	e.mustCreate(t)
-	runnerID, runnerToken := registerRunner(t, e, h, admin, "ubuntu-latest")
+	runnerID, runnerToken := registerRunner(t, e, h, admin, "linux")
 	job, _ := fetchJob(t, h, runnerToken)
 	if job == nil {
 		t.Fatal("no job")

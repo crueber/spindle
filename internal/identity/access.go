@@ -132,6 +132,23 @@ func (s *Service) orgExists(ctx context.Context, org string) bool {
 	return err == nil && meta != nil
 }
 
+// IsOrg reports whether owner is an org namespace (one exact-key probe of
+// orgs/<owner>/org.json). It is the exported half of orgExists, consumed by
+// moderation's block gate: a personal block list never applies to an
+// org-owned repository (PLAN-V2 §M.5). A store error surfaces so a caller
+// can fail closed; absence is a clean "not an org".
+func (s *Service) IsOrg(ctx context.Context, owner string) (bool, error) {
+	owner = strings.ToLower(strings.TrimSpace(owner))
+	if s == nil || s.Store == nil || !ValidOrg(owner) {
+		return false, nil
+	}
+	meta, err := s.Store.Head(ctx, OrgKey(owner))
+	if err != nil {
+		return false, err
+	}
+	return meta != nil, nil
+}
+
 // isUserNamespace reports whether owner is a USER namespace (grant
 // sites consult this before manufacturing a user:<owner> binding): a
 // legacy email spelling, or a username backed by the registry (a
@@ -285,6 +302,8 @@ func (s *Service) PutAccess(ctx context.Context, owner, repo string, base store.
 		return nil, cerr
 	}
 	slog.Debug("identity: access PUT", "repo", owner+"/"+repo, "to", result.Version, "visibility", string(result.Visibility))
+	s.auditAdmin(ctx, AuditAccessGrant, "repo:"+owner+"/"+repo,
+		fmt.Sprintf("version=%d;visibility=%s;bindings=%d", result.Version, result.Visibility, len(result.RoleBindings)))
 	s.access.invalidate(owner, repo)
 	if s.Stream != nil {
 		s.Stream(ctx, owner+"/"+repo)

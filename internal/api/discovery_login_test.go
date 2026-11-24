@@ -9,11 +9,11 @@ import (
 
 // TestDiscoveryBrowserLoginAdvertisement pins the #344 discovery half: the
 // auth block reports browser_login + login_url exactly when the OIDC browser
-// flow can start (mode=oidc + the session/client trio), so the SPA renders
-// the "Log in with OIDC" button only when it works.
+// flow can start (the session/client trio), so the SPA renders the "Log in
+// with OIDC" button only when it works. OIDC is the only authentication, so
+// the advertised mode is always "oidc" (PLAN-OIDC-ONLY §4.5).
 func TestDiscoveryBrowserLoginAdvertisement(t *testing.T) {
 	trio := func(c *config.Config) {
-		c.Server.Auth.Mode = "oidc"
 		c.Server.Auth.SessionSecret = strings.Repeat("x", 32)
 		c.Server.Auth.OAuthClientID = "id"
 		c.Server.Auth.OAuthClientSecret = "secret"
@@ -23,25 +23,25 @@ func TestDiscoveryBrowserLoginAdvertisement(t *testing.T) {
 		mutate    func(*config.Config)
 		wantLogin bool
 		wantURL   string
-		wantMode  string
 	}{
-		{"token mode disabled", func(c *config.Config) {}, false, "", "token"},
-		{"oidc trio enabled", trio, true, "/_auth/login", "oidc"},
-		{"oidc missing session_secret disabled", func(c *config.Config) {
+		{"no trio disabled", func(c *config.Config) {
+			c.Server.Auth.SessionSecret = ""
+			c.Server.Auth.OAuthClientID = ""
+			c.Server.Auth.OAuthClientSecret = ""
+		}, false, ""},
+		{"trio enabled", trio, true, "/_auth/login"},
+		{"missing session_secret disabled", func(c *config.Config) {
 			trio(c)
 			c.Server.Auth.SessionSecret = ""
-		}, false, "", "oidc"},
-		{"oidc missing oauth_client_id disabled", func(c *config.Config) {
+		}, false, ""},
+		{"missing oauth_client_id disabled", func(c *config.Config) {
 			trio(c)
 			c.Server.Auth.OAuthClientID = ""
-		}, false, "", "oidc"},
-		{"oidc missing oauth_client_secret disabled", func(c *config.Config) {
+		}, false, ""},
+		{"missing oauth_client_secret disabled", func(c *config.Config) {
 			trio(c)
 			c.Server.Auth.OAuthClientSecret = ""
-		}, false, "", "oidc"},
-		{"none mode", func(c *config.Config) {
-			c.Server.Auth.Mode = "none"
-		}, false, "", "none"},
+		}, false, ""},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -69,8 +69,8 @@ func TestDiscoveryBrowserLoginAdvertisement(t *testing.T) {
 			if doc.Auth.LoginURL != tc.wantURL {
 				t.Fatalf("login_url = %q, want %q", doc.Auth.LoginURL, tc.wantURL)
 			}
-			if doc.Auth.Mode != tc.wantMode {
-				t.Fatalf("mode = %q, want %q", doc.Auth.Mode, tc.wantMode)
+			if doc.Auth.Mode != "oidc" {
+				t.Fatalf("mode = %q, want oidc", doc.Auth.Mode)
 			}
 			// The pre-existing members never move (contract stability).
 			if !doc.Auth.Bearer || doc.Auth.Setup != "/services/setup.json" ||

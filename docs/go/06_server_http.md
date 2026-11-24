@@ -5,7 +5,7 @@ Package: `internal/server` (module `github.com/crueber/spindle`). Binary `spindl
 
 ## 1. What this server is
 
-One process serves: git smart HTTP (v0/v2), the LFS basic transfer protocol, immutable static objects (bundles, LFS bytes), the JSON API with SSE, the server-rendered page tree (`internal/webui` behind the `internal/pages` seam, §3.5), the setup UI/API (§3.4), and instance health/metrics. There is **no dumb-HTTP mode** (§20.2: `GET /{o}/{r}/HEAD` and `/objects/info/packs` MUST NOT exist — always 404 via the wildcard catch-all) and **no `/services/git-*` routes** (§20.3: `/services/*` hosts only JSON-UI endpoints, `setup.json`, and `public/*`).
+One process serves: git smart HTTP (v0/v2), the LFS basic transfer protocol, immutable static objects (bundles, LFS bytes), the JSON API with SSE, the server-rendered page tree (`internal/webui` behind the `internal/pages` seam, §3.5), the Administration area/API (§3.4), and instance health/metrics; when `static_sites.enabled`, a **second, independent HTTP listener** (`internal/staticpages`, §2.6) serves published static sites on its own address and hostname. There is **no dumb-HTTP mode** (§20.2: `GET /{o}/{r}/HEAD` and `/objects/info/packs` MUST NOT exist — always 404 via the wildcard catch-all) and **no `/services/git-*` routes** (§20.3: `/services/*` hosts only JSON-UI endpoints, `setup.json`, and `public/*`).
 
 ## 2. Server core
 
@@ -61,6 +61,7 @@ The ordered list, outermost first, is FIXED (the Rust spec's stack; the code-vs-
 | 7 | `refreshSession` | sliding cookie: if a valid `walgit_session` cookie is older than `session_ttl/4` AND the principal still passes policy, re-issue via `Set-Cookie` on app responses (skip `/_auth/*`). Stateless: age comes from the token's `iat` (§8.5). |
 | 8 | *(page/static gating — not a middleware layer)* `requireAuth` | NOT in the main chain and no longer mounted as a route group: the page tree gates inside the provider (`internal/pages.Auth`, §3.5), and the read-gated statics that remain (`/services/setup.json`, `/metrics`) are wrapped per route with `s.gated` (§3.1). On failure: if the request is a browser-ish GET without an `Authorization` header and browser login is enabled → 307 `/_auth/login?next=<path?query>`; if the request is a browser-ish GET without an `Authorization` header and browser login is DISABLED → 401 (with the `WWW-Authenticate: Bearer` challenge, so API clients see no change) carrying the rendered login page — a working "Log in with OIDC" button (GET `/_auth/login?next=…`) plus the disabled explanation (#344); else emit the mapped status (401 with `WWW-Authenticate: Bearer realm="walgit"`, 403, 503+`Retry-After: 15`) with a plain-text body naming the setup command. All other endpoints authenticate **inside handlers**. |
 | 9 | `compress` | attached with `Use`/wrapping ONLY to the web lanes (JSON API `/api*`+`/api-browser*`, repo JSON lanes, and the `/_ui/*` page-asset route) — each is a chi sub-router/group or a wrapped handler so compression stays scoped. brotli+gzip at fastest level. **NEVER** on git smart HTTP, bundles, LFS bytes, or the token page's SSE-adjacent streams; SSE excluded (streamed answers are never compressed); `/_ui` assets arrive precompressed and pass through untouched. Rationale: packs are already compressed and Content-Length/Range must stay exact. |
+| 10 | `rateLimit` | the PLAN-V2 §M.7 buckets — see §2.4. Innermost (last) so it reads the resolved request and sits above every handler. A disabled limiter (`rate_limit.enabled = false`, the default) is a passthrough. |
 
 ### 2.3 CORS — exact rules
 
@@ -73,7 +74,50 @@ Scope: only paths matching `/api*`, `/api-browser*`, and `/{o}/{r}/api[-browser]
 - Credentials mode is always `include`, so the allow-origin value is never `*` — it is the concrete origin.
 - The `cors` middleware stays **hand-rolled** — `chi/cors` is NOT used (chi core only; the header rules above, including the foreign-origin 403, are more specific than any library). It plugs into the chain as any other `func(http.Handler) http.Handler`.
 
-### 2.4 Interfaces this package consumes (seams for 07/04/05 siblings)
+### 2.4 Rate limiting (PLAN-V2 §M.7)
+
+Hand-rolled token buckets in `internal/server/ratelimit.go` — no module (L1). The state is
+instance-local memory **by design**: a limiter is a control-plane cache like the render LRU, not
+bucket state (L4) — durability would throttle nobody after a restart and would turn every write into a
+cross-instance CAS.
+
+- **Classes** (`writeClass`): `collab_write` (issue/PR comments, review submits and dismissals,
+  reactions, review-thread opens and comments, review requests), `issue_open`, `report`, `auth_fail`.
+  **Git pushes and reads are never limited** — the classifier only matches the four shapes above, so a
+  CI push storm cannot throttle; a test drives 150 git requests through an enabled limiter.
+- **One gate per class**: classification is by method + path shape, and both lanes are covered because
+  the middleware sits above the whole route tree — the page form `POST /{o}/{r}/issues/{n}/comments`
+  and the JSON twin `POST /{o}/{r}/api[-browser]/issues/{n}/comments` share one bucket. A moderator
+  action (`…/moderation/{hide,lock}`), a state change (`…/close`), a merge, and the host-admin queue
+  are *not* limited.
+- **Key**: the principal name when authenticated (`u:<name>`, so a shared address cannot spend another
+  signed-in client's budget), else the client address (`a:<remote host>` — the port is not the key).
+- **`X-Forwarded-For`** is ignored unless `rate_limit.trust_proxy` is true, and then only the FIRST
+  hop is read, with the deployment assumption stated in the doc and the `[rate_limit]` comment: the
+  proxy in front of spindle must **overwrite** the header, never append to a client-supplied one.
+- **Refusal**: `429` plain text `too many requests` + `Retry-After: 60`. Neutral — no state, no
+  principal existence, no repo existence.
+- **`auth_fail`** is consumed where a credential is actually *rejected* (`mapAuthStatus`/`authFailure`
+  on `ErrInvalid`, plus the login flow), never for a missing credential, a 403 authorization decision
+  or a 503 outage. A credential-bearing request (or `/_auth/callback`/`/_auth/tokens`) from an address
+  that has exhausted its failure budget is refused at the middleware with the 429 before another
+  verification runs. Session cookies are deliberately not pre-checked: a stale cookie resolves to
+  anonymous, and refusing browsers over another client's failures on a shared address is the one
+  lockout a limiter must not create.
+- **Bound**: one mutex-guarded map keyed `class\x00key`; a clock-driven idle sweep (keys untouched past
+  10 minutes, at most once a minute) and a hard 10 000-key bound whose overflow eviction is
+  deterministic (oldest `last` first, ties by key) — the surviving set is a function of the input
+  sequence, never of map iteration order.
+- **Config**: `[rate_limit]` (§11_config_cli.md) — `enabled` (default false: a zero-config boot
+  changes nothing), four `N/s|N/min|N/h` rates, `trust_proxy`. Every key is restart-required (the
+  buckets are built at boot), which is why every key appears in `/admin/config`'s restart list.
+- **Spam signal**: after a landed `collab_write` the middleware hands the request body's text (the
+  `body`/`note` form fields, or the `body`/`body_text`/`note`/`text` JSON members) to the composition-bound
+  `Options.SpamObserver` — the moderation service's advisory scorer
+  (`docs/features/16_moderation.md` §13). A rejected write is not observed. The server owns the
+  `spindle_spam_flag_total{repo}` counter; the observer returns whether it pre-filed a report.
+
+### 2.5 Interfaces this package consumes (seams for 07/04/05 siblings)
 
 ```go
 // internal/api handlers, mounted per §3
@@ -96,6 +140,70 @@ type SetupAPI interface {
     http.Handler // GET /api/v1/setup · POST /api/v1/setup/test · PUT /api/v1/setup (§3.4)
 }
 ```
+
+### 2.6 The static-site listener (docs/features/19)
+
+A second, **optional** HTTP listener serves a repository's committed bytes as a static site —
+GitHub-Pages-shaped, but addressed as `<static host>/<owner>/<repo>/…` instead of a subdomain per
+owner. It is configured by `[static_sites]` (11_config_cli.md) and is constructed only when
+`static_sites.enabled`; when disabled no socket is bound and nothing else in the section is
+validated. It is an ordinary plain-HTTP listener like the main one — h2c + HTTP/1.1 through the same
+`h2c.NewHandler` wrap, `TCP_NODELAY`, bound to `static_sites.address` — and it is shut down by the
+same phase-2 drain (§12). It starts only on a normal boot (a restricted boot has no store or identity
+to serve from), and a bind failure is a startup failure rather than a silent downgrade to the main
+listener alone. Its handler is `internal/staticpages.Handler` (`ServeHTTP` only); there is no chi
+router on it and no route registration.
+
+**It mounts none of the main chain.** No middleware slice (§2.2), no session/cookie handling or
+`refreshSession`, no CORS (§2.3), no `canonicalBrowserHost` redirect, no page provider, no API lane
+and no setup surface. It sets no cookie and reads none, which is why it can serve public
+repositories only.
+
+- **Host gate.** It answers only when the request `Host` equals `static_sites.host`
+  (case-insensitive, port-insensitive). Any other `Host` — including the application's own — is a
+  `404` with **no body**, so a proxy that points the app name at this listener cannot reach user
+  content.
+- **URL family** `/{owner}/{repo}/{rest}`: `owner`/`repo` parse with the repository-id rules
+  (04_git.md); `rest` is percent-decoded, duplicate slashes collapsed and `.` segments dropped, and
+  is **refused** (404) on `..`, a backslash, NUL, a control byte or an empty segment after
+  normalisation — before any ref or blob is read. Paths are case-sensitive, as git is.
+- **Resolution** (docs/features/19 §3): a tree target without a trailing slash — `/{o}/{r}` itself,
+  or `…/x` where `x` is a tree — → `301` to the slash form (query preserved); `…/x/` where `x` is a
+  tree → index resolution inside `x` over `static_sites.index_files` in order (`index.html`,
+  `index.htm`; a directory without one is 404 — never a listing); `…/x` where `x` is a blob → its
+  bytes; `…/x` missing but `x.html` a blob → serve `x.html` with **200** (GitHub's fallback, which
+  generators rely on); `…/x/` where `x` is a blob → `404`; anything else → the site's root `404.html`
+  with status **404** (a one-line plain-text 404 when absent). There is **no SPA rewrite**. Dotfiles
+  never serve (any segment starting with `.` is 404), and symlinks (mode `120000`) and gitlinks
+  (`160000`) are never served.
+- **Bytes and caching** (the §5 static contract, implemented in the package): `ETag` is the blob's
+  git object id, strong and quoted, and `If-None-Match` → `304`; `Cache-Control: public, max-age=600`
+  on 200s and their 304 revalidations; **404s and 301s carry no cache headers**; `HEAD`, `Range`/`If-Range` and `206`/`416`
+  come from `http.ServeContent` with the bytes, the ETag and a zero modtime (there is no
+  `Last-Modified`). `Content-Type` comes from the package's **pinned** extension table — never
+  sniffed — with `; charset=utf-8` on `text/*` and `application/json`, and
+  `X-Content-Type-Options: nosniff` on every response. No CORS headers, no app CSP, no `Set-Cookie`
+  and no `X-Frame-Options` are added to user content.
+- **Public only.** Visibility is an anonymous `CheckRead`, and publication is the per-repo
+  `[static_site] enabled` flag: a repo that is not public and a repo that is not published are both
+  a plain `404` (existence is not leaked, and there is no login redirect loop).
+
+**Why a separate listener and a separate hostname.** Serving user-authored HTML on the application
+origin is account takeover: same-origin script can `fetch` the API with the visitor's session and
+read CSRF tokens. Cookies are **host-scoped** (RFC 6265), so only a host split isolates — a second
+port on the same host shares the cookie jar and isolates nothing. The port is merely where the second
+listener binds; the isolation is `static_sites.host`. The residual `Domain=.parent` cookie-tossing
+risk and the deferred `__Host-` hardening are recorded in docs/features/19 §2.
+
+#### Concurrency (static listener)
+
+Hazard: a slow client plus a spawned `cat-file` pins a goroutine and a subprocess slot, and a pool
+shared with git-over-HTTP would starve control-plane traffic. Avoidance: `internal/staticpages` owns
+its own bounded pool (4 × `GOMAXPROCS`, modelled on `internal/archive`) and every command is
+`exec.CommandContext(r.Context(), …)` with a per-command timeout, so a client disconnect kills the
+child; the `rw` read guard from the serve-level `Sync` is released before any subprocess; and a body
+is read into a buffer capped by `static_sites.max_file_bytes` and handed to `http.ServeContent`, so a
+request cannot allocate without limit (13_concurrency.md §7).
 
 ## 3. Routing
 
@@ -125,7 +233,22 @@ r.Route("/_ui", func(g chi.Router) {        // page assets (app.css, ui.js, htmx
 })
 r.Get("/services/setup.json", s.gated(s.setupJSON))
 r.Get("/metrics", s.gated(s.metricsHandler))
-r.Get("/setup", s.pageOr404)             // setup page: the provider owns the §3.4 rules (§3.5)
+r.Get("/admin", s.pageOr404)             // Administration: Overview (§3.4/§3.5)
+r.Get("/admin/config", s.pageOr404)      // Administration: Configuration (the whole editor)
+r.Post("/admin/config", s.pageOr404)
+r.Post("/admin/config/auth-test", s.pageOr404)
+r.Get("/admin/access", s.pageOr404)      // Administration: Access
+r.Get("/admin/maintenance", s.pageOr404) // Administration: Maintenance
+r.Get("/admin/reports", s.pageOr404)     // Administration: moderation queue (PLAN-V2 M3)
+r.Post("/admin/reports/resolve", s.pageOr404) // the queue's resolve form (body-addressed)
+r.Get("/admin/audit", s.pageOr404)       // Administration: audit viewer
+r.Get("/admin/runners", s.pageOr404)     // Administration: instance runner fleet
+r.Post("/admin/runners", s.pageOr404)    // mint an instance registration token
+r.Post("/admin/runners/revoke", s.pageOr404) // revoke one runner (body-addressed)
+r.Get("/admin/directory", s.pageOr404)   // Administration: users and organizations directory
+r.Post("/admin/directory/deactivate", s.pageOr404) // deactivate an account (body-addressed)
+r.Post("/admin/directory/reactivate", s.pageOr404) // reactivate an account (body-addressed)
+r.Post("/admin/restart", s.pageOr404)    // typed-confirm restart (both boot modes)
 r.Get("/", s.pageOr404)                  // page provider: landing
 r.Get("/explore", s.pageOr404)           // page provider: owners list; ?format=text → plain-text twin
 r.Get("/how-it-works", s.pageOr404)      // page provider: deep-dive (static; no text twin, issue #191)
@@ -138,9 +261,11 @@ r.HandleFunc("/*", s.uiOr(s.repoDispatch)) // pages first, then EVERYTHING repo-
 chi mechanics (normative):
 
 - **Method enforcement** is chi's on the routes above: a `GET`-only route hit with `POST` reaches `MethodNotAllowed` → 405 with `Allow`. Inside the `/*` wildcard the hand dispatch owns the §3.3 table and enforces methods itself: known repo path + unsupported method → 405 with `Allow` + plain-text body; unknown path → 404. Both 404 and 405 bodies are plain text, no HTML error pages (Rust contract).
-- **Page gating** (§2.2 #8, §3.5): there is no `requireAuth` route group any more. Every page route goes through `pageOr404` (a pure page route) or `uiOr(fallback)` (a path a non-page lane also owns); the page provider applies the server's own authority functions inside each handler (`s.gated` for `anonymous_read`, the identity read gate for repo visibility, per-action role floors), exactly mirroring its API twin. `/_ui/*` assets are public — static filenames, no secrets, and the stylesheet must load so `/setup` can render its access-restricted card; `/services/setup.json` and `/metrics` are wrapped with `s.gated`.
+- **Page gating** (§2.2 #8, §3.5): there is no `requireAuth` route group any more. Every page route goes through `pageOr404` (a pure page route) or `uiOr(fallback)` (a path a non-page lane also owns); the page provider applies the server's own authority functions inside each handler (`s.gated` for `anonymous_read`, the identity read gate for repo visibility, per-action role floors), exactly mirroring its API twin. `/_ui/*` assets are public — static filenames, no secrets, and the stylesheet must load so `/admin/config` can render its access-restricted card; `/services/setup.json` and `/metrics` are wrapped with `s.gated`.
 - **Compress groups** (§2.2 #9): the JSON API (`/api*`, `/api-browser*`) and the `/_ui/*` asset route are wrapped with `compress`; git, bundles, and LFS traffic stays outside them.
-- **Setup-only mode** (§3.4) is a branch at the top of `s.mount`: when active, only `GET /setup`, `POST /setup`, `/api/v1/setup*`, `/_ui/*`, `/healthz`, `/readyz`, and `/services/public/*` are registered (plus a `503` fallback for everything else); the full tree below is never mounted.
+- **Restricted mode** (§3.4) is a branch at the top of `s.mount`: when active, only `GET /admin`, `GET /admin/config`, `POST /admin/config`, `POST /admin/config/auth-test`, `POST /admin/restart`, `/api/v1/setup*`, `/_ui/*`, `/healthz`, `/readyz`, and `/services/public/*` are registered (plus a `503` fallback for everything else); the full tree below is never mounted.
+- **Feature route families (Seam 1).** Handler-shaped feature surfaces are not core routes: each implements `Handle(w,r) bool` and is fronted by a `ChainExtra`/`ChainAPI` closure (the first match wins, both lanes). The moderation family (PLAN-V2 §1, `docs/features/16_moderation.md`) contributes `GET|PUT /{owner}/{repo}/api[-browser]/moderation`, `GET|POST /{owner}/{repo}/api[-browser]/moderation/reports`, `POST …/reports/{id}/resolve|dismiss`, the top-level twins `GET /api/v1/moderation/reports`, `POST /api/v1/moderation/reports/{owner}/{repo}/{id}/resolve`, `GET /api/v1/moderation/audit`, and the M1 block twins `GET|PUT|DELETE /api/v1/users/{principal}/blocks…`; the same templates are registered through `api.RegisterExposed` (law 12 / Forgejo #272). Body-addressed admin forms (the `/admin/reports/resolve` above) exist because a literal multi-segment `/admin/…` path would overlap the repo wildcard family's patterns.
+- **Second listener.** Nothing in this tree is reachable on the static-site listener, and nothing on that listener is reachable here: it is a separate `http.Server` with its own `ServeHTTP` that mounts none of the chain above (§2.6), started only when `static_sites.enabled`.
 
 ### 3.2 The `{owner}/{repo}` wildcard dispatch
 
@@ -159,6 +284,9 @@ Then dispatch on `sub[0]` (after `.git`-strip and re-join with "/"): the table i
 
 ### 3.3 Complete route inventory (every row copied from Rust spec §8.3)
 
+The static-site listener's `/{owner}/{repo}/{rest}` family is deliberately **not** in this inventory:
+it is a different host, a different `http.Server` and a different handler (§2.6).
+
 **Open (no auth):**
 
 | Method | Path | Notes |
@@ -173,14 +301,31 @@ Then dispatch on `sub[0]` (after `.git`-strip and re-join with "/"): the table i
 | POST | `/_events/notify` | handler-authenticated |
 | OPTIONS | (preflights) | §2.3 |
 
-**Setup (open per the §3.4 access rules; the API is `internal/setup`, the UI is the server-rendered `/setup` page):**
+**Administration (open per the §3.4 access rules; the pages are server-rendered by `internal/webui`, the config API is `internal/setup`):**
 
 | Method | Path | Notes |
 |---|---|---|
-| GET | `/setup` | setup page, server-rendered by the page provider (`internal/webui`, D-WEB-14); assets at `/_ui/app.css` + `/_ui/ui.js` |
+| GET | `/admin` | Overview: instance state, version, readiness, first-run checklist (read-only) |
+| GET | `/admin/config` | Configuration: the whole schema editor; assets at `/_ui/app.css` + `/_ui/ui.js` |
+| POST | `/admin/config` | validate (`op=validate`) or validate-then-save (`op=save`, the whole file) |
+| POST | `/admin/config/auth-test` | OIDC discovery fragment (htmx) |
+| GET | `/admin/access` | Access: sign-in method + host-admin rules (read view) |
+| GET | `/admin/maintenance` | Maintenance: storage facts + health endpoints (read view) |
+| GET | `/admin/runners` | Instance runners: the fleet, the mint form, the one-time token (host admin; docs/PLAN-INSTANCE-RUNNERS.md) |
+| POST | `/admin/runners` | mint a one-time instance registration token (name optional; token rendered in place, never a redirect) |
+| POST | `/admin/runners/revoke` | revoke one runner (id in the body: a literal multi-segment admin path would overlap the repo wildcard family) |
+| GET | `/admin/directory` | Users and organizations directory (`?tab=users\|orgs&q=&after=`; host admin; bounded server-rendered lists, PLAN-ADMIN §3.7) |
+| POST | `/admin/directory/deactivate` | deactivate an account (username/reason/confirm in the body; typed confirmation + reason enforced server-side, 422 with a named error; audited `user_deactivate`) |
+| POST | `/admin/directory/reactivate` | reactivate an account (audited `user_reactivate`; revoked credentials stay revoked) |
+| POST | `/admin/restart` | host-admin typed-confirm (`restart`) restart: audit `admin_restart`, flush the "restarting" page, then the injected `AdminDeps.Restart` (composition: graceful self-SIGTERM; the supervisor restarts the process). Mounted in the restricted boot too; one signal per process (a concurrent second answers 409). |
 | GET | `/api/v1/setup` | full config schema + effective values + file state + validation errors |
 | POST | `/api/v1/setup/test` | validate a proposed config without saving |
 | PUT | `/api/v1/setup` | validate + atomically write `<data-dir>/spindle.toml` |
+
+“Setup” is retired as a user-facing word: the area is **Administration**; the setup API
+keeps its historical handle because its wire names are frozen contracts (PLAN-ADMIN §1.5).
+`/setup` is deleted, not redirected (pre-1.0: no aliases) — every in-tree producer of the
+old URL was rewritten with the move (DEVIATIONS D-UX-5).
 
 **Self-authing (`require_read`/`require_write` in handler):**
 
@@ -207,6 +352,7 @@ Then dispatch on `sub[0]` (after `.git`-strip and re-join with "/"): the table i
 | GET | `/api/v1/owners`, `/api/v1/owners/{owner}/repos` (+ `/services/api/…` twins) | owner listing, SWR (visibility-filtered per caller — Forgejo #345) |
 | GET | `/services/api/instance` | instance facts (no-store) |
 | GET | `/_auth/me`, `/_auth/check` | §8.6 |
+| GET | `/.well-known/openid-configuration`, `/.well-known/jwks.json` | Threads OIDC discovery/JWKS; **open** (no credential), `public, max-age=60`; registered only when the api seam is wired |
 
 **Write/admin:**
 
@@ -220,9 +366,10 @@ Then dispatch on `sub[0]` (after `.git`-strip and re-join with "/"): the table i
 | POST | `{lane}/ops/{op}?params` | require_write | start maintenance op; SSE attach; joins a running same-(repo,kind) task |
 | GET/POST | `/_auth/tokens` | session | token page / mint (CSRF-guarded same-origin) |
 
-**Gated (`require_auth` = read):** `/services/setup.json`, `/metrics` (`text/plain; version=0.0.4`). **Page routes** are gated inside the page provider with the same rules (§3.5): `GET /` (landing page, always HTML — the front door makes zero store reads), `GET /explore` (owners list; `?format=text` → one owner per line as `text/plain`), `GET /how-it-works` (deep dive, always HTML — zero store reads, no text twin), `/{owner}`, `/{owner}/{repo}`, `/{owner}/teams/{slug}` page routes (tree/blob/commits/commit/wal/settings/issues/labels/milestones/pulls/pull — every page is a full HTML document with `Cache-Control: no-cache` + a strong ETag; a path the provider does not own is the plain §3 404). The `?format=text` query is the only `/explore` machine twin: there is no `Accept: text/plain` negotiation (that branch lived in the deleted server `explorePage` shell handler and was not carried over, D-WEB-15). The setup routes above are NOT in this group — their access rule is §3.4 (open exactly while no config file exists, the config is invalid, or auth mode is `none`).
+**Gated (`require_auth` = read):** `/services/setup.json`, `/metrics` (`text/plain; version=0.0.4`). **Page routes** are gated inside the page provider with the same rules (§3.5): `GET /` (landing page, always HTML — the front door makes zero store reads), `GET /explore` (owners list; `?format=text` → one owner per line as `text/plain`), `GET /how-it-works` (deep dive, always HTML — zero store reads, no text twin), `/{owner}`, `/{owner}/{repo}`, `/{owner}/teams/{slug}` page routes (tree/blob/commits/commit/wal/insights/settings/issues/labels/milestones/pulls/pull — every page is a full HTML document with `Cache-Control: no-cache` + a strong ETag; a path the provider does not own is the plain §3 404). The `?format=text` query is the only `/explore` machine twin: there is no `Accept: text/plain` negotiation (that branch lived in the deleted server `explorePage` shell handler and was not carried over, D-WEB-15). The Administration routes above are NOT in this group — their access rule is §3.4 (open exactly while no config file exists, the config is invalid, or auth mode is `none`; otherwise an authenticated host admin, with the designed denied view carrying the API's 401/403).
+**Gated (`require_auth` = read):** `/services/setup.json`, `/metrics` (`text/plain; version=0.0.4`). **Instance runner routes (2026-11-22, docs/PLAN-INSTANCE-RUNNERS.md):** `{POST} /api[-browser]/v1/admin/runners/tokens` (mint; host admin), `{GET} /api[-browser]/v1/admin/runners` (fleet; host admin), `{DELETE} /api[-browser]/v1/admin/runners/{id}` (revoke; host admin) — the service's `requireHostAdmin` is the gate (anonymous 401, repo admin 403), and `POST /api/v1/threads/runners/{register,declare,fetch}` are instance-scoped (no repository in the credential; fetch is a global claim over the queue hint with the per-repo entry CAS as the authority). The old `/{o}/{r}/api/threads/runners*` routes are deleted, not aliased. **Threads artifact routes (2026-11-21, docs/features/15 §2.5):** `GET {lane}/threads/{run}/artifacts` (JSON list, read gate), `GET /{o}/{r}/threads/{run}/artifacts/{name}` (page-lane ZIP download, read gate + `Content-Disposition`, served by `internal/webui`), and the runner channel `{POST,GET,PUT} /api/v1/threads/jobs/{ref}/attempt/{n}/artifacts[/{name}[/blobs/{i}]]` (attempt token, `ScopeArtifact`, own run only). The api-lane gzip wrapper bypasses `application/octet-stream` so a blob's `Content-Length` survives (Artifacts uploads are opaque bytes). **Threads environment routes (2026-11-23, docs/PLAN-THREADS-ENVIRONMENTS.md):** the deployment-environment surface is repository-scoped on both JSON lanes — `GET {lane}/threads/environments` (list), `GET|PUT|DELETE {lane}/threads/environments/{name}` (record; `PUT` takes `{required_reviewers:[…]}`), `GET {lane}/threads/environments/{name}/secrets` (names only), `PUT|DELETE {lane}/threads/environments/{name}/secrets/{secret}` (write-only value). Every method is the maintain-floor service gate (`internal/threads`), the same call the Settings → Environments page makes; secret values are accepted and never returned, and a run's approve/deny verbs now also answer for an environment hold (`approval_kind: environment`). **Threads OIDC routes (2026-11-23, docs/PLAN-THREADS-OIDC.md):** `GET /.well-known/openid-configuration` and `GET /.well-known/jwks.json` are **open** (a cloud provider fetches them with no spindle credential; registered on the core router only when the API seam is wired, served by `internal/threads`, `public, max-age=60`), and `POST /api/v1/threads/jobs/{ref}/attempt/{n}/id-token` is the machine exchange (machine-only `/api/v1`, **handed to the api provider without session authentication** because its `wot_` request token is not a session/ID token; the handler verifies it against the bucket record and refuses with a real 401/403 itself). It answers `{"value":"<JWT>"}`; missing audience 400, bad/unknown/expired request token 401, scoped/denied/finished/fork 403, over-budget 429 with `Retry-After`. **Page routes** are gated inside the page provider with the same rules (§3.5): `GET /` (landing page, always HTML — the front door makes zero store reads), `GET /explore` (owners list; `?format=text` → one owner per line as `text/plain`), `GET /how-it-works` (deep dive, always HTML — zero store reads, no text twin), `/{owner}`, `/{owner}/{repo}`, `/{owner}/teams/{slug}` page routes (tree/blob/commits/commit/wal/insights/settings/issues/labels/milestones/pulls/pull — every page is a full HTML document with `Cache-Control: no-cache` + a strong ETag; a path the provider does not own is the plain §3 404). The `?format=text` query is the only `/explore` machine twin: there is no `Accept: text/plain` negotiation (that branch lived in the deleted server `explorePage` shell handler and was not carried over, D-WEB-15). `POST /{owner}/{repo}/insights/refresh` is a page-lane write (write floor + same-origin) that starts/joins the `insights-refresh` task and 303s back; it is not an API lane. The setup routes above are NOT in this group — their access rule is §3.4 (open exactly while no config file exists, the config is invalid, or auth mode is `none`).
 
-**Reserved single-segment UI names** (explicit routes shadow those owner names; an owner literally named `explore` loses its `/:owner` UI page — its section link then points at `/explore`, the list, not its repos — while its git/API paths are unaffected; same precedent as the existing names): `import`, `api`, `keys`, `setup`, `explore`, `how-it-works`, `new` (the `/new` create form, issue #210 — served through the `/{owner}` page-route shape like `/import`, so no explicit server route was added; an owner literally named `new` loses its `/{owner}` UI page only).
+**Reserved single-segment UI names** (explicit routes shadow those owner names; an owner literally named `explore` loses its `/:owner` UI page — its section link then points at `/explore`, the list, not its repos — while its git/API paths are unaffected; same precedent as the existing names): `import`, `api`, `keys`, `admin`, `explore`, `how-it-works`, `new` (the `/new` create form, issue #210 — served through the `/{owner}` page-route shape like `/import`, so no explicit server route was added; an owner literally named `new` loses its `/{owner}` UI page only).
 
 **OCI registry (`features.packages`; top-level `/v2` namespace, `internal/packages`, docs/features/14):**
 
@@ -256,7 +403,7 @@ Error bodies on these rows are plain text (the JSON API convention), never the O
 
 Every row above resolves the principal through the server chain first (Basic password = token,
 exactly the git HTTP path) and verifies `wgp1.` bearer tokens locally; `features.packages = false`
-makes all repo-scoped rows `404`. Setup-only and un-wired builds never register the namespace.
+makes all repo-scoped rows `404`. Restricted and un-wired builds never register the namespace.
 
 **Both API lanes hit the same handlers.** `/{owner}/{repo}/api/…` (bearer/same-origin) and `/{owner}/{repo}/api-browser/…` (cross-origin browser, `credentials: include`) differ only in the `Lane` value passed to the handler (which changes cache headers and auth-redirect behavior per 07_api.md). Same for `/api/v1` vs `/api-browser/v1` in the non-repo lane.
 
@@ -266,7 +413,7 @@ Hazard: the wildcard dispatch runs on every unmatched request (scanners, probes)
 
 ### 3.4 Bootstrap & setup (zero-config first run)
 
-`internal/setup` owns the schema description for the UI, validate-for-save, the atomic write of `<data-dir>/spindle.toml`, and bootstrap-mode detection; `internal/server` wires the JSON surface (`s.setupAPIRouter`) and routes `GET`/`POST /setup` through the page provider; the page itself is `internal/webui`'s settings page (`internal/webui/templates/pages/settings/setup.html` + the `partials/settings_setup.html` blocks), rendered and validated server-side (D-WEB-14).
+`internal/setup` owns the schema description for the UI, validate-for-save, the atomic write of `<data-dir>/spindle.toml`, and bootstrap-mode detection; `internal/server` wires the JSON surface (`s.setupAPIRouter`) and routes `GET`/`POST /admin/config` through the page provider; the page itself is `internal/webui`'s Administration page (`internal/webui/templates/pages/admin/config.html` + the `partials/admin_config_rows.html` blocks), rendered and validated server-side (D-WEB-14).
 
 **Boot flow decision tree (normative):**
 
@@ -274,18 +421,18 @@ Hazard: the wildcard dispatch runs on every unmatched request (scanners, probes)
 locate data dir (--data-dir flag > SPINDLE_DATA_DIR env; default ~/.local/share/spindle, containers /var/lib/spindle)
 ├─ no <data-dir>/spindle.toml → boot with the first-run defaults (below) + a LOUD setup banner in the logs on every start
 ├─ config file present, parses + validates → normal boot (§10.4)
-└─ config file present but INVALID (parse or validation errors) → SETUP-ONLY MODE:
-     only GET/POST /setup, /_ui/*, /api/v1/setup, /api/v1/setup/test, PUT /api/v1/setup,
+└─ config file present but INVALID (parse or validation errors) → RESTRICTED MODE:
+     only GET /admin, GET/POST /admin/config, /_ui/*, /api/v1/setup, /api/v1/setup/test, PUT /api/v1/setup,
      /healthz, /readyz, and /services/public/* answer; everything else → 503 plain text
-     with a pointer to /setup. The UI shows the exact errors; a saved fix takes effect
-     after a restart (the process stays in setup-only mode until restarted).
+     with a pointer to /admin/config. The UI shows the exact errors; a saved fix takes effect
+     after a restart (the process stays in restricted mode until restarted).
      The boot config is the BEST-EFFORT parse of the file (defaults ⊕ every decodable
      field ⊕ the valid env overlay/PORT — the overlay still WINS over the file, as on a
      valid boot), not the first-run defaults: [server].listen is
-     honoured so the recovery page stays where the operator put it, and the setup page
+     honoured so the recovery page stays where the operator put it, and the Configuration page
      pre-fills those effective values with the offending rows marked. Only an unparseable
      server.listen falls back to the compiled-in default (a bind failure would make
-     /setup unreachable), and the banner names the bad value.
+     /admin/config unreachable), and the banner names the bad value.
 ```
 
 **First-run defaults (built into the binary; no TOML needed to start):**
@@ -294,13 +441,59 @@ locate data dir (--data-dir flag > SPINDLE_DATA_DIR env; default ~/.local/share/
 |---|---|
 | `server.listen` | `"0.0.0.0:8080"` |
 | `store.backend` | `"filesystem"`, rooted at `<data-dir>/store` (02_storage_protobuf.md) |
-| `server.auth.mode` | `"none"` — **deliberately allowed on any bind** (see below) |
+| authentication | **unconfigured** — the boot is RESTRICTED (Administration area + health only) until OIDC is configured (§3.4, D-OIDC-1) |
 | `server.auto_create_on_push` | `true` |
 | everything else | Rust-spec defaults (11_config_cli.md) |
 
 **Data-dir layout:** `<data-dir>/store/` (object store), `<data-dir>/cache/` (prewarm, LFS spool), `<data-dir>/spindle.toml` (saved by setup Save; the only config file the server reads).
 
-**Setup UI:** `GET /setup` is a server-rendered page; its assets are `/_ui/app.css` + `/_ui/ui.js` (stable names, `no-cache` + ETag). It groups ALL config keys by section with current effective values (merging defaults ← file ← env) and validates on save. Every section renders its always-visible Essentials open and its sane-default knobs inside a collapsed native `<details class="setup-advanced">` (the partition comes from `internal/webui`'s one display-metadata table, never a second list; a rejected advanced key opens its group). Enum-valued keys render as `<select>`s over `internal/setup`'s `EnumValues` table (`server.auth.mode`, `store.backend`, `cache.mode`, `bundles.serve_via`, `compaction.engine`, `git.upload_pack_engine`, `telemetry.log_format`); the choices ride `Field.Enum`/`DisplayType`, both excluded from the frozen JSON. Every key round-trips: a struct slice (`server.auth.tokens`, `bundles.strategy`) renders as repeating rows of its element's toml fields (add row / per-row remove / masked secrets), unsigned counters render as their decimal value, and an empty list renders empty — a zero-edit Save writes a byte-identical file (collapsed rows stay mounted). The page provider implements `POST /setup` (validate-then-save through the same `internal/setup` path as `PUT /api/v1/setup`, re-rendering with errors or the saved/restart status; `hx-post` swaps the page fragment) and `POST /setup/auth-test` (the OIDC discovery result fragment). The page's row form namespace is `K#<i>.<tomlname>` per cell with `K#<i>.__base` (the stored row it came from) and `K#<i>.__remove=true`; `setup.ParseRowEdits` is the single parser (`internal/setup/rows.go`). `internal/server` currently routes `GET /setup` in both boot modes and `POST /setup` in setup-only mode — the mode where saving is the recovery path (§3.1). The JSON endpoints below remain the programmatic surface.
+**Administration area (PLAN-ADMIN M1/M2):** four server-rendered pages behind the one §3.4
+access rule, composed from one shell (area side-nav with `aria-current`, eyebrow + one `<h1>` +
+purpose + state chips, `.card` sections; 12_web_ui.md §2.10):
+
+- **Overview** (`GET /admin`) — read-only: instance state (first run / configured / restricted),
+  version, auth mode + anonymous_read, store target, listen/roles; the readiness projection
+  (the same facts `readyz` reports, via `server.HealthFacts`); the maintainer counters when a
+  maintainer runs on this host; and, only while the config file is absent, the first-run
+  checklist (sign-in, store, first administrators, first repository) with server-computed done
+  state and a link to the page that fixes each item. Its one `.btn.primary` is the checklist's
+  "Open configuration" while first-run is showing; otherwise it has none.
+- **Access** (`GET /admin/access`) — read view: sign-in method, anonymous_read, the host-admin
+  rules. Every edit affordance links to `/admin/config#auth`.
+- **Directory** (`GET /admin/directory`, `POST …/deactivate`, `POST …/reactivate`) — host-admin
+  users and organizations directory (PLAN-ADMIN §3.7): two bounded, cursor-paged, server-rendered
+  lists (name order; users searchable by username and display name with the scan bound stated), a
+  user row's organization memberships annotated from ONE bounded organization walk per page, and the
+  one audited account transition — deactivate behind the typed confirmation plus a required reason
+  (422 with a named inline error on a missing reason, a wrong confirmation or one's own account),
+  reactivate as a plain same-origin POST. Both 303 back to `?q=<username>`. No email, token or key is
+  rendered.
+- **Maintenance** (`GET /admin/maintenance`) — read view: the maintainer's state and task kinds
+  (canonical kinds say "no data yet" until they run; `follow` is the separate loop), the
+  event-bridge configuration (per-repo cursors and the `/metrics` series stand in for an
+  invented aggregate; there is no redeliver mutation), storage/cache facts plus the filesystem
+  holding `cache.dir` (statfs meter, budget warning), the machine endpoints with their current
+  answers, and links to per-repo ops. No cross-repo trigger.
+  version, the OIDC admin group + anonymous_read, store target, listen/roles; the readiness
+  projection (the same facts `readyz` reports, via `server.HealthFacts`); the maintainer counters
+  when a maintainer runs on this host; and, only in the restricted-absent boot, the **first-run OIDC
+  onboarding card**: issuer, allowed email domain, client id, client secret, session secret (with a
+  generated copyable suggestion) and admin group, plus the copyable redirect URI and a live **Test**
+  (discovery + JWKS). Its one `.btn.primary` is the card's "Save configuration"; otherwise the page
+  has none.
+- **Access** (`GET /admin/access`) — read view: sign-in method (issuer, groups claim),
+  anonymous_read, the admin group, and a **Your session** card with the signed-in principal's live
+  verified groups beside the configured group, the admin verdict and the session issued-at. Every
+  edit affordance links to `/admin/config#auth`.
+- **Directory** (`GET /admin/directory`) — the instance users and organizations directory, host-admin
+  only: a users tab (bounded, name-ordered, searchable, cursor-paged; memberships and owner marker per
+  row; state as text with who/when/why) and an organizations tab (name, display name, member count),
+  plus the deactivate/reactivate controls (PLAN-ADMIN §3.7).
+- **Maintenance** (`GET /admin/maintenance`) — read view: storage/cache facts from configuration
+  and links to `/healthz`, `/readyz`, `/metrics`.
+- **Configuration** (`GET /admin/config`) — the whole editor, below.
+
+**Configuration editor:** `GET /admin/config` is a server-rendered page; its assets are `/_ui/app.css` + `/_ui/ui.js` (stable names, `no-cache` + ETag). It groups ALL config keys by section with current effective values (merging defaults ← file ← env) and validates on save. Every section renders its always-visible Essentials open and its sane-default knobs inside a collapsed native `<details class="setup-advanced">` (the partition comes from `internal/webui`'s one display-metadata table, never a second list; a rejected advanced key opens its group). Enum-valued keys render as `<select>`s over `internal/setup`'s `EnumValues` table (`store.backend`, `cache.mode`, `bundles.serve_via`, `compaction.engine`, `git.upload_pack_engine`, `telemetry.log_format`); the choices ride `Field.Enum`/`DisplayType`, both excluded from the frozen JSON. Every key round-trips: a struct slice (`server.auth.tokens`, `bundles.strategy`) renders as repeating rows of its element's toml fields (add row / per-row remove / masked secrets), unsigned counters render as their decimal value, and an empty list renders empty — a zero-edit Save writes a byte-identical file (collapsed rows stay mounted). The page provider implements `POST /admin/config` (validate-then-save through the same `internal/setup` path as `PUT /api/v1/setup`, re-rendering with errors or the saved/restart status; `hx-post` swaps the page fragment) and `POST /admin/config/auth-test` (the OIDC discovery result fragment). The page's row form namespace is `K#<i>.<tomlname>` per cell with `K#<i>.__base` (the stored row it came from) and `K#<i>.__remove=true`; `setup.ParseRowEdits` is the single parser (`internal/setup/rows.go`). `internal/server` currently routes `GET /admin/config` in both boot modes and `POST /admin/config` in restricted mode — the mode where saving is the recovery path (§3.1). The JSON endpoints below remain the programmatic surface.
 
 **Setup API:**
 
@@ -308,11 +501,11 @@ locate data dir (--data-dir flag > SPINDLE_DATA_DIR env; default ~/.local/share/
 - `POST /api/v1/setup/test` — body: raw TOML (or `{overrides: {key: value}}`); runs the full validator WITHOUT saving → `200 {errors: []}` or `422 {errors: [{key, message}]}`. Each error's `key` is the schema key its message names (`setup.KeyInMessage`), empty only when the message names no key.
 - `PUT /api/v1/setup` — body: same as test. Validate; on success atomically write `<data-dir>/spindle.toml` (tmp + rename in the data dir), then respond `200 {saved: true, requires_restart: [<key>…], errors: []}`. The running process does NOT hot-reload — `requires_restart` lists every key whose effective value differs from the just-saved file (all of them, effectively; the process continues in its current boot mode).
 
-**Access rules:** open while (no config file) OR (config invalid) OR (`server.auth.mode = "none"`); otherwise an authenticated **admin principal** is required (`p.Admin`; anonymous → 401, authenticated non-admin → 403, same `require_admin` mapping as §8.3). Admin now comes from any of: `server.auth.admin_groups` (default `["spindle-admins"]`) matching the OIDC claim named by `server.auth.groups_claim` (default `"groups"`, case-insensitive), `admin_emails`, or `admin_domains`. **There is no setup token:** `SPINDLE_SETUP_TOKEN` (env) and the `?token=`/Bearer bypass are gone and have no effect. The same rule gates `GET|POST|PUT /api/v1/setup{,/test}`, `POST /setup`, `POST /setup/auth-test`, and the page provider's `SetupAccess` seam.
+**Access rules:** open **only** in the restricted boot (no config file, or an invalid one). Otherwise an authenticated **admin principal** is required (`p.Admin`; anonymous → 401, authenticated non-admin → 403, same `require_admin` mapping as §8.3). Admin is exactly `signed in ∧ verified groups_claim ∩ server.auth.admin_groups ≠ ∅` (default group `spindle-admin`, claim default `groups`, case-insensitive) — there are no email/domain rules and no static-token admins. **There is no setup token and no other back door:** `SPINDLE_SETUP_TOKEN`, the `?token=`/Bearer bypass and the token-paste form are gone and have no effect. The same rule gates `GET|POST|PUT /api/v1/setup{,/test}`, `POST /admin/config`, `POST /admin/config/auth-test`, and the page provider's `AdminDeps.Access` seam.
 
-**Token-mode browser recovery (F1):** the rule above is unchanged, but the *path to it* exists in every mode. Under `server.auth.mode = "token"` with `server.auth.session_secret` set, the `/setup` restricted card renders a token-paste form that `POST`s to `/_auth/token` (§8.6): the value is validated against the same `[[server.auth.tokens]]` map the credential chain uses, must belong to an `admin = true` principal, and mints the ordinary HMAC-signed `walgit_session` cookie. The page reloads authenticated (admin → the form; non-admin → the restricted card). Without a session secret the card states the exact file/API recovery (set `session_secret` and restart, or `curl -H 'Authorization: Bearer …' .../api/v1/setup`) and offers no form that cannot mint. No new credential type, no new secret, and `SPINDLE_SETUP_TOKEN` still has no effect.
+**First-run / lockout recovery:** the OIDC card's Save validates shape only — it never dials the IdP, because recovery must not depend on the thing being recovered. The **Test** button is the live probe (discovery, issuer match, endpoints, and a JWKS fetch requiring at least one usable RS256/ES256 signing key). The denied view states the recovery verbatim: edit `<data-dir>/spindle.toml` (or `SPINDLE__SERVER__AUTH__*`) and restart; there is no unauthenticated back door. An invalid file returns the instance to the restricted boot, which is the recovery loop and grants nothing but the validated-save editor.
 
-**auth-none on any bind (supersedes the Rust fail-closed loopback rule):** the Rust rule (refuse auth `none` unless the listen address is loopback) is deliberately dropped for zero-config friendliness. With `mode = "none"` on a non-loopback bind, the server boots but: logs a persistent `WARN auth mode is "none" — anyone on the network has write+admin` at startup AND once per hour thereafter; `/setup` shows a red banner; `readyz` gains `"warnings":["auth_none"]`; and the setup UI pre-selects a real auth mode as the recommended fix. No request is ever refused because of it.
+**No open mode:** `server.auth.mode` is deleted (PLAN-OIDC-ONLY / D-OIDC-1). The Rust fail-closed loopback rule and the later warning-only divergence are both moot: there is no `none` to bind, warn about or serve.
 
 #### Concurrency (setup)
 
@@ -336,9 +529,10 @@ type Provider interface {
 - `Server.SetUI(provider)` + `bindUI()` hand over exactly the authority functions the API's gated
   handlers use (`Authenticate`, `maybeRefreshSession`, the identity `checkReadGate`), so page gating
   cannot drift from the JSON lane's. The provider is built in **every** boot mode, including
-  setup-only (§3.4) — `/setup` is the way out of an invalid config.
-- `pageOr404` answers a pure page route (`GET /`, `/explore`, `/how-it-works`, `/setup`, and the
-  owner/repo page routes reached through the `/*` wildcard): provider first; when it writes nothing,
+  restricted mode (§3.4) — `/admin/config` is the way out of an invalid config.
+- `pageOr404` answers a pure page route (`GET /`, `/explore`, `/how-it-works`, the Administration
+  pages `/admin`, `/admin/config`, `/admin/access`, `/admin/maintenance`, and the owner/repo page
+  routes reached through the `/*` wildcard): provider first; when it writes nothing,
   the plain §3 404. There is **no SPA shell fallback** — a path the provider does not own is a 404.
 - `uiOr(fallback)` fronts a path a non-page lane also owns (`/api` docs vs the JSON lane, the `/*`
   repo dispatch): the provider answers first, otherwise the fallback runs. "Not mine" is signalled by
@@ -351,7 +545,7 @@ type Provider interface {
   served*.
 
 **`/_ui/*` asset classes** (`serveUIAssets`; the route is public — static filenames, no secrets, and
-`app.css` must load so `/setup` can render its access-restricted card):
+`app.css` must load so `/admin/config` can render its access-restricted card):
 
 | Path | Source | Cache / type |
 |---|---|---|
@@ -520,7 +714,7 @@ type Principal struct {
 var Anonymous = Principal{Name: "anonymous", Anonymous: true} // no write, no admin
 ```
 
-`mode=none`: everyone is `anon` with write+admin. The Rust spec's fail-closed rule (refuse this mode unless the listen address is loopback) is **superseded** by the spindle divergence (§3.4): any bind is allowed, with loud warnings in the logs, the setup UI, and `readyz`.
+There is no open principal: `auth.None()` is deleted. An unauthenticated request is `Anonymous` (read per `anonymous_read`, never admin), and administration is the group predicate in §8.4 (7') alone. Machine credentials (static tokens, `wct_`/`wjr_`/`wjt_`/`wrt_` shapes) are never anonymous and never admin.
 
 ### 8.2 Client credential resolution order
 
@@ -529,6 +723,56 @@ var Anonymous = Principal{Name: "anonymous", Anonymous: true} // no write, no ad
 3. Else the plain `Authorization` header.
 
 Then parse: `Bearer <token>` (case-insensitive prefix) or `Basic base64(user:password)` (the password is the token; the user is ignored except for LFS upstream auth conventions).
+
+### 8.2.1 Static machine tokens: lifetime, identity, last use
+
+`server.auth.tokens` rows are configuration entries (11_config_cli.md §4). Each row may carry:
+
+- `name` — an optional stable label (unique across rows). It is the rotation handle, the key of the
+  last-used record, and the table identity on the Access page. Without one a row is identified by
+  `sha256:<12 hex>` of its resolved secret; the secret itself is never rendered, logged or stored in
+  the usage object.
+- `expires_at` — an optional RFC 3339 instant. It is parsed at load (11_config_cli.md §5); a past
+  value is legal and means the credential is expired. The comparison is inclusive: at `expires_at`
+  the token is already dead.
+
+**Expiry is a real 401.** An expired row resolves exactly like an unknown token:
+`AuthError{Kind: ErrInvalid}` → `401` + the ordinary `WWW-Authenticate` challenge (§4.2) — never a
+403 and never an in-band pkt-line message, so git erases the dead credential and re-prompts. The
+401 body does not say "expired" (an attacker learns nothing, and the operator reads the row on the
+Access page). `StaticPrincipal` (the browser token-mint check) refuses an expired row the same way.
+
+The secret is never kept in memory for comparison: each row stores `sha256(secret)` and a lookup
+computes `sha256(candidate)` and compares every row with `crypto/subtle.ConstantTimeCompare` (no
+early exit), so the compare stays timing-safe and a matching row is not distinguishable by timing.
+
+**Last use is recorded out of band.** A successful static-token authentication offers an observation
+to an in-process recorder; it never performs a store write on the request path and can never fail
+the request. The record is one CAS object, `auth/token-usage.json`
+(`{"version":1,"tokens":{"<name|sha256:…>":{name,principal,last_used,source,user_agent,count}}}`),
+read once when the Access page renders. The write bound, per process, is:
+
+- at most **one observation per token per 5 minutes** (a debounce; `count` counts update windows,
+  not requests),
+- at most **64 observations queued** (a full queue drops the observation; the next window
+  re-offers it) and exactly one drainer goroutine, which exits when the queue is empty,
+- at most **1 GET + 1 PUT per write**, retried once on a CAS loss, under a 10 s budget.
+
+A write failure is logged and dropped (the next window records the next use); `last_used` is
+therefore accurate to the debounce window, not to the request, and it is advisory — authentication
+reads none of it. The recorder is an injectable component of the auth service (`nil` = disabled):
+production wires it from the store, while a harness measuring another subsystem (e.g. the rate
+limiter's no-store-read budget) disables it so its window contains only the subsystem under test.
+
+**Rotation.** Add the NEW row (new secret, same `principal`, new `name`) with a generous
+`expires_at` on the OLD row, then roll a second instance with the new config: both rows authenticate
+while both are configured, so clients can move at their own pace. Update clients, then remove the
+OLD row and roll again. **"Without downtime" means a rolling deploy where old and new processes
+overlap.** A single-instance restart is downtime-free only if the orchestrator overlaps processes;
+there is no in-process config reload, so restarting one instance in place is a brief outage for its
+in-flight requests. Removing a row is the only revocation that exists — there is no mint/revoke API.
+
+Verification of the rendered Access page is a real browser at desktop and ~390 px (both themes).
 
 ### 8.3 Decision trees per mode
 
@@ -543,6 +787,7 @@ resolved credential?
 └─ bearer/basic token
    ├─ exact match against resolved static tokens → principal with write/admin flags from config
    │   (token_env env var overrides the literal at startup; empty-resolved entries dropped)
+   │   └─ expired (expires_at reached) or unparseable expiry → Invalid → 401 (§8.2.1)
    └─ miss → Invalid → 401
 ```
 
@@ -550,6 +795,7 @@ resolved credential?
 ```
 bearer token?
 ├─ static token match → principal            (static tokens work in oidc mode)
+│    └─ expired (expires_at reached) or unparseable expiry → Invalid → 401 (§8.2.1)
 ├─ "wgt_" prefix → verify wgt_ token (§8.5) → principal from email
 └─ else → verify as ID token via JWKS (§8.4) → principal
 basic? → static token or wgt_ only (no ID tokens over Basic)
@@ -575,7 +821,7 @@ Use `crypto/rsa`, `crypto/ecdsa`, `encoding/base64`, `encoding/json` only. Rules
 4. `iss` must equal the configured issuer with trailing slash stripped, **or** its bare host.
 5. `aud` must be in `server.auth.audiences ∪ {oauth_client_id}`; the browser flow pins exactly `oauth_client_id`.
 6. Claims require `email` and `email_verified`.
-7. Email policy: allowed iff domain ∈ `allowed_domains` or address ∈ `allowed_emails` (else 403). `write` = allowed, unless `write_domains` is set: write iff domain ∈ write_domains. `admin` via `admin_emails`/`admin_domains` (lowercased comparisons) **or** via the configured group claim: the ID-token claim named by `server.auth.groups_claim` (default `groups`) may be a JSON array of strings or a single string; when any value intersects `server.auth.admin_groups` (default `["spindle-admins"]`, case-insensitive) the principal is admin. An empty `admin_groups` never grants admin, group values never grant `write`, and the email/domain admission check above still runs first (a group cannot admit a disallowed email).
+7. Email policy: allowed iff domain ∈ `allowed_domains` or address ∈ `allowed_emails` (else 403). `write` = allowed, unless `write_domains` is set: write iff domain ∈ write_domains. `admin` **only** via the configured group claim: the ID-token claim named by `server.auth.groups_claim` (default `groups`) may be a JSON array of strings or a single string; when any value intersects `server.auth.admin_groups` (default `["spindle-admin"]`, case-insensitive) the principal is admin. This is the ONE admin predicate, computed here and nowhere else. `admin_groups` must be non-empty (boot refuses it), group values never grant `write`, and the admission check above still runs first (a group cannot admit a disallowed email). Static tokens are machine credentials with `Admin: false` always.
 
 **JWKS cache:** discovery document cached once per process; keys cached honoring the JWKS response's `Cache-Control: max-age` (default 300 s); stale-while-refresh on expiry (serve stale keys while one background refresh runs); inline refresh on unknown `kid`; refresh failure → 503 Unavailable.
 
@@ -607,6 +853,16 @@ The optional fifth line carries group membership so a browser session (or a mint
 Access tokens carry the `wgt_` prefix (kind `token`, TTL `access_token_ttl` = 90 d). Sessions (kind `session`, no prefix) live in the cookie. Rotating the secret revokes everything; nothing can be listed or revoked individually — say so in the token page text.
 
 Session cookie `walgit_session`: `HttpOnly`; `SameSite=None; Secure` when CORS origins are configured, else `SameSite=Lax`; `Max-Age` = `session_ttl` (30 d); sliding re-issue at ttl/4 (§2.1 #7).
+
+**Account deactivation (2026-11-22, PLAN-ADMIN §3.7).** After OIDC verification and username resolution, `AuthService.accountGate` consults the instance directory's account state (`users/<username>/user.json`; the seam is `AuthService.AccountLookup`, wired by composition to `identity.Service.UserState`, which memoizes one exact-key read in a bounded in-process LRU — 4096 entries, 10 s TTL, negative entries included, errors never cached — and invalidates on a local deactivate/reactivate; a warm signed-in request therefore performs no store op, and 10 s is the cross-instance staleness bound). Every OIDC-derived credential resolves through that one function — an ID token, a `wgt_` token, a browser session, a forwarded identity and SSH key auth — so:
+
+- a **disabled** account is refused `403` with a neutral message (it names neither the administrator nor the reason);
+- a session or `wgt_` wire whose `iat` is **at or before `tokens_revoked_at`** is refused `401` (deactivation revokes both permanently; reactivation does not restore them, and a new mint requires a fresh sign-in). The wire carries `iat` at second precision, so "at or before" is inclusive at second granularity — fail closed: a session minted in the very same second as a reactivation can be refused once and works on the retry a moment later;
+- an **unreadable** account state fails closed (`503`), never "not disabled";
+- **static `server.auth.tokens`** and the Seam 2 machine-credential shapes never reach the gate — they are configuration entries, not user-bound accounts;
+- an **unwired** `AccountLookup` (tests, a build without identity) disables the feature.
+
+There is no page-level deactivation check: a route that resolves a principal after `Authenticate` cannot see a disabled account.
 
 ### 8.6 Browser login (`/_auth/*`; OIDC iff mode oidc + session_secret + client id + client secret; token-paste iff mode token + session_secret)
 
@@ -654,14 +910,12 @@ curl -s https://walgit.example.com/api/v1/me -H "Authorization: Bearer $WALGIT_T
 ```toml
 # walgit.toml — the auth block the server consumes
 [server.auth]
-mode = "oidc"
 anonymous_read = false
 session_secret = "32-bytes-minimum-generated-once"
 audiences = ["spindle"]
 allowed_domains = ["example.com"]
 write_domains = ["example.com"]
-admin_emails = ["crueber@example.com"]
-admin_groups = ["spindle-admins"]   # OIDC group claim values granted global admin (+ /setup)
+admin_groups = ["spindle-admin"]    # OIDC group claim values granted global admin (+ the Administration area)
 groups_claim = "groups"             # ID-token claim carrying group membership
 
 [server]
@@ -717,9 +971,19 @@ The helper is generated with the host baked in and served by the installer; the 
 
 ### 10.2 `GET /readyz`
 
+**The ingress contract: health-gate on `/readyz`, not `/healthz`.** A `200`
+means "serve this process's allowed surface". That surface is normally the full
+tree; in the restricted boot (§3.4) it is the Administration area plus the setup
+API and health endpoints — a 200 there is the only way the operator reaches
+`/admin` through a health-gated proxy, so **a proxy must never treat a
+restricted instance as dead** (the 2026-11-22 incident: a stale config booted
+restricted, `/readyz` answered 503, the ingress routed nothing, and the fix had
+to be edited on the host). `/healthz` is liveness only and never distinguishes
+the two surfaces.
+
 - 200 `{"status":"ready","prewarm_pending":N,"instance":"<name>","placement":{"serve":bool,"serve_exclude":bool,"maintain":bool,"maintain_exclude":bool}}` when prewarm finished (or `cache.prewarm_ready_timeout` elapsed; 0 = don't gate). In defaults-banner mode (no config file, §3.4) this adds `"config":"defaults"`.
-- 503 `{"status":"warming"|"draining","running":N}` before readiness or during phase-2 drain; the draining variant adds `Retry-After: 15`.
-- 503 `{"status":"setup_required","errors":[<config validation error>…]}` in SETUP-ONLY MODE (§3.4) — the readiness gate IS the config; `/healthz` still answers 200 so orchestrators can tell "up but unconfigured" from "down".
+- 200 `{"status":"restricted","version":"<build sha>","surface":"admin","errors":[<config validation error>…]}` in RESTRICTED MODE (§3.4) — ready for the surface it actually serves. `errors` is present only when the boot decision recorded validation errors (an absent file has none); it carries key names and messages, never configured values. There is no separate `?surface=admin` probe: an ingress health check is a dumb path fetch in most proxies, and one endpoint answering one question cannot disagree with itself.
+- 503 `{"status":"warming"|"draining","running":N}` before readiness or during phase-2 drain; the draining variant adds `Retry-After: 15`. Readiness is therefore not a constant in either boot: a draining restricted instance also answers 503, and a normal boot keeps every pre-existing unready condition.
 
 ### 10.3 Metrics — hand-rolled Prometheus text exposition
 
@@ -735,13 +999,14 @@ curl -s localhost:8442/metrics | grep walgit_http_inflight
 
 ### 10.4 Startup order
 
-1. **Bootstrap leg (§3.4, `internal/setup`):** resolve the data dir (`--data-dir` flag → `SPINDLE_DATA_DIR` → default `~/.local/share/spindle`; containers `/var/lib/spindle`), ensure `store/` + `cache/`, load `<data-dir>/spindle.toml` if present. Missing → first-run defaults + loud setup banner; invalid → SETUP-ONLY MODE (log the exact errors, mount only the §3.4 subset, and skip steps 3–7); valid → continue.
+1. **Bootstrap leg (§3.4, `internal/setup`):** resolve the data dir (`--data-dir` flag → `SPINDLE_DATA_DIR` → default `~/.local/share/spindle`; containers `/var/lib/spindle`), ensure `store/` + `cache/`, load `<data-dir>/spindle.toml` if present. Missing → first-run defaults + loud setup banner; invalid → RESTRICTED MODE (log the exact errors, mount only the §3.4 subset, and skip steps 3–7); valid → continue.
 2. Tracing init (filter from `RUST_LOG`-equivalent env else `telemetry.log_filter`; pretty or Cloud-Logging JSON).
 3. Open store.
 4. Build AppState (wal registry, bundler, auth service + JWKS, per-repo semaphores, metrics registry).
 5. Spawn: prewarm (bounded parallelism `cache.prewarm_parallelism`, default 2), events bridge (if role+sink), maintainer loop (if role), follow loop (if role), watchdog (1 s tick; warns "runtime stalled" when a tick is > 2.5 s late).
 6. Bind: plain TCP, `TCP_NODELAY` per connection, **h2c** (HTTP/2 prior knowledge) + HTTP/1.1 — via `golang.org/x/net/http2/h2c` wrapped around the chi router. TLS termination belongs on the reverse proxy in front (§11); the server never wraps the listener.
    - Loopback binds also take the IPv6 twin (`::1`) so `*.localhost` works.
+   - When `static_sites.enabled`, the static listener binds `static_sites.address` the same way (§2.6); it is not constructed at all when disabled. Both listeners close at the phase-2 drain boundary (§12).
 7. Auth `none` on a non-loopback bind is allowed (§3.4 divergence from the Rust fail-closed rule) — emit the loud warning instead of refusing.
 
 Go shape: one `http.Server` with `BaseContext` carrying the app context; `Serve(l)` on a listener built per the above; h2c via `h2c.NewHandler(r, &http2.Server{})` where `r` is the chi router (§3.1).
@@ -761,7 +1026,7 @@ Signal handler (`SIGTERM`/`SIGINT`) drives the `DrainState`:
 - **Phase 1 (bounded 30 s):** stop starting maintenance units, interrupt the running unit at once; serving + `/readyz` stay up; maintenance ops endpoints return the drain 503 shape.
 - **Phase 2:** `/readyz` → 503 `{"status":"draining"}` + `Retry-After: 15`; new fetch/push/LFS requests refused 503 (git-ish clients get the pkt-ERR shape per §4.2 conditions); in-flight requests capped at `server.drain_timeout` (each handler's context is cancelled at the deadline); then exit.
 
-Go mechanism: the signal handler cancels a `drainCtx` (phase 1) and, after the phase boundary, cancels the root `appCtx` with a `context.WithTimeout(appCtx, server.drain_timeout)` governing the remaining requests; `http.Server.Shutdown` (stop accepting) runs at the phase-2 boundary, and the process exits when `Inflight` hits zero or the timeout fires. Channel ownership and the shutdown checklist are in 13_concurrency.md — every goroutine started in §10.4 takes its context from `appCtx` and returns on cancel.
+Go mechanism: the signal handler cancels a `drainCtx` (phase 1) and, after the phase boundary, cancels the root `appCtx` with a `context.WithTimeout(appCtx, server.drain_timeout)` governing the remaining requests; `http.Server.Shutdown` (stop accepting) runs at the phase-2 boundary for **every** listener the process opened (the static listener included, §2.6), and the process exits when `Inflight` hits zero or the timeout fires. Channel ownership and the shutdown checklist are in 13_concurrency.md — every goroutine started in §10.4 takes its context from `appCtx` and returns on cancel.
 
 #### Concurrency (drain)
 
@@ -783,6 +1048,51 @@ Hazard: keepalive ticker and event writer racing on the same `http.ResponseWrite
 
 ## 14. Decisions & deviations from the Rust design
 
+- **NEW (2026-11-24) — static sites are served by a second listener on their own hostname
+  (docs/features/19).** `[static_sites]` adds an optional plain-HTTP/h2c listener
+  (`static_sites.address`, default `127.0.0.1:8081`) that answers only for `static_sites.host`
+  (default `static.localhost`; port- and case-insensitive, every other Host a bodiless 404) and
+  serves committed bytes from **public** repositories under `/{owner}/{repo}/…`. It mounts nothing of
+  the §2.2 chain — no session/cookie middleware, no CORS, no canonical-host redirect, no page
+  provider, no API routes — and sets no cookie, which is why private repositories are a plain 404.
+  Rationale: serving user-authored HTML on the application origin is account takeover (same-origin
+  script with the visitor's session), and cookies are host-scoped, so **ports do not isolate** — a
+  second port on the app's host shares the jar. The isolation is the hostname; the second socket is
+  required because two listeners cannot share one bind. Disabled (the default) binds nothing and
+  validates nothing beyond the section shape.
+- **NEW (2026-11-22) — `/readyz` is a readiness answer per surface, not a config verdict.** The
+  restricted boot (§3.4) answers `200 {"status":"restricted","version":…,"surface":"admin"}` where
+  this doc and the Rust design said `503 {"status":"setup_required"}`. Rationale: the 2026-11-22
+  incident — a stale config booted restricted, a health-gated ingress saw the 503 and routed nothing,
+  and `/admin` (the only recovery UI) was unreachable, forcing a host edit. Readiness means "serve
+  this process's allowed surface"; the normal boot's ready/warming/draining rules are unchanged, and
+  a phase-2 draining restricted instance still answers 503, so readiness does not become a constant.
+  A second probe (`?surface=admin`) was rejected: most proxies health-check a bare path, and two
+  endpoints answering "are you ready" can disagree. `/healthz` is untouched liveness.
+- **NEW (2026-11-21, PLAN-ADMIN M1/M2) — `/setup` moves to the Administration area.** The
+  page routes are now `GET /admin` (Overview), `GET|POST /admin/config` + `POST
+  /admin/config/auth-test` (the whole editor, unchanged save contract),
+  `GET /admin/access`, `GET /admin/maintenance`; `/setup` is **deleted, not
+  redirected** (pre-1.0: no aliases — every in-tree producer of the old URL was
+  rewritten in the same change, see DEVIATIONS D-UX-5). `mountSetupOnly` (restricted
+  mode) serves `GET /admin` + `GET|POST /admin/config` + the auth-test POST, and the 503
+  copy names `/admin`; the normal boot registers all four pages through `pageOr404`.
+  `admin` joins the reserved single-segment owner names (the `/explore` trade). The one
+  §3.4 access rule is bound as `AdminDeps.Access` and gates every page — a page never
+  leaks what `/api/v1/setup*` protects. Machine surfaces keep their names
+  (`/api/v1/setup*`, `internal/setup`, `/services/setup.json`): the setup API is the
+  machine surface of `/admin/config`. Rationale: the surface is used daily, so its name
+  and URL must describe daily operation (PLAN-ADMIN §0).
+- **NEW (2026-11-21, PLAN-ADMIN M5) — Maintenance reports facts and invents no control plane.**
+  `GET /admin/maintenance` stays a read view: it renders the maintainer snapshot
+  (`AdminDeps.Maintain`, canonical `maintain.Kind*` rows with an honest "no data yet"),
+  the event bridge's *configuration* (the bridge exposes no instance-level cursor/delivery
+  aggregate — cursors are per-repository `events/cursor.json` objects — and there is no
+  reset/redeliver mutation, so the card names the `/metrics` series instead of fabricating
+  numbers), storage/cache from the effective config plus one `config.CacheSpace` statfs on the
+  filesystem holding `cache.dir` (a bounded progressbar and the boot guard's
+  budget-exceeds warning restated), and the three machine endpoints with their current answers.
+  No cross-repository trigger is added (a follow-up card owns those).
 - ~~Router is Go 1.22+ `http.ServeMux` plus a hand-rolled `/{owner}/{repo}[.git]/<sub>` fallback instead of a path-matching framework~~ — superseded by divergence D1 (chi); the hand-rolled `/{owner}/{repo}[.git]/<sub>` parsing survives inside the trailing wildcard (§3.2).
 - Middleware is an explicit ordered slice of `func(http.Handler) http.Handler` factories applied via chi `Use` (not tower layers) — the order is load-bearing (§2.2); making it data makes it reviewable and testable.
 - ~~Self-signed TLS uses `crypto/x509`/`crypto/ecdsa` instead of `rcgen` — the SAN-stable regeneration contract (§11) is preserved; rcgen is not needed.~~ — superseded by the #165 removal below (no in-process TLS at all).
@@ -827,7 +1137,7 @@ Hazard: keepalive ticker and event writer racing on the same `http.ResponseWrite
   no explicit server route) and joins the reserved single-segment UI names (§3). Wire shapes and
   the six Decisions entries live in 07_api.md §9.1.1/§14.
 - **NEW (2026-09-05) — server-side TLS removed; termination belongs on the reverse proxy** (Forgejo #165): `server.tls.*` config, cert/key loading, self-signed generation, the TLS listener wrap, `/services/public/ca.pem`, and the `setup.json` `ca_url`/`trust` fields are all gone — the server listens plain HTTP (h2c retained). Rationale: inbound (UI/API/git/SSH) all work behind a TLS-terminating proxy and outbound HTTPS never used the server cert; one fewer crypto surface to own. Residual `server.tls.*` settings fail closed (file rejected at load, env override fatal) with a reverse-proxy pointer. The same change honors `X-Forwarded-Proto` when building absolute URLs (`requestScheme`: proxy header, else the connection), closing the follow-up noted in 12_web_ui.md — no separate issue needed.
-- **NEW (2026-09-11) — OIDC browser login is fail-closed and always has a login entry** (Forgejo #344): config validation refuses `auth.mode = "oidc"` without the full browser-login trio (`server.auth.session_secret` + `server.auth.oauth_client_id` + `server.auth.oauth_client_secret`), naming the missing keys — the previous pair-only check let a partially-configured instance boot into a dead state (every browser GET a bare 401, `/_auth/login` a 501). The §2.2 #8 precondition gap is closed: a browser-ish GET with login disabled answers 401 carrying the rendered login page (working "Log in with OIDC" button + disabled explanation + the `spindle config check` / `/setup` pointers) instead of the bare string; `GET /_auth/login` itself renders the same page (501) for browsers while API clients keep the plain status. Browser-login availability is advertised as `browser_login` + `login_url` in the discovery auth block (`GET /api/v1`) and in `/services/setup.json`, so the page chrome renders the login affordance only when it works and `/setup` refuses an incomplete trio through the same server-side validation on save (the SPA's client-side trio check in `web/src/lib/setup.js` was removed with D-WEB-15). Rationale (law 9): refuse-to-start was preferred over a degraded boot — a degraded mode that still serves a login page would need its own gate semantics, and #345 (visibility as read authority) already owns the "what can signed-out users read" question; this change only fixes *how a browser gets an identity* under current semantics. Shared gate chain (`Env.gate`, smart-HTTP, LFS, page `gated()`) untouched in behavior except the login path; bearer/token paths (static tokens work in oidc mode) unaffected.
+- **NEW (2026-09-11) — OIDC browser login is fail-closed and always has a login entry** (Forgejo #344): config validation refuses `auth.mode = "oidc"` without the full browser-login trio (`server.auth.session_secret` + `server.auth.oauth_client_id` + `server.auth.oauth_client_secret`), naming the missing keys — the previous pair-only check let a partially-configured instance boot into a dead state (every browser GET a bare 401, `/_auth/login` a 501). The §2.2 #8 precondition gap is closed: a browser-ish GET with login disabled answers 401 carrying the rendered login page (working "Log in with OIDC" button + disabled explanation + the `spindle config check` / `/admin/config` pointers) instead of the bare string; `GET /_auth/login` itself renders the same page (501) for browsers while API clients keep the plain status. Browser-login availability is advertised as `browser_login` + `login_url` in the discovery auth block (`GET /api/v1`) and in `/services/setup.json`, so the page chrome renders the login affordance only when it works and `/admin/config` refuses an incomplete trio through the same server-side validation on save (the SPA's client-side trio check in `web/src/lib/admin/config.js` was removed with D-WEB-15). Rationale (law 9): refuse-to-start was preferred over a degraded boot — a degraded mode that still serves a login page would need its own gate semantics, and #345 (visibility as read authority) already owns the "what can signed-out users read" question; this change only fixes *how a browser gets an identity* under current semantics. Shared gate chain (`Env.gate`, smart-HTTP, LFS, page `gated()`) untouched in behavior except the login path; bearer/token paths (static tokens work in oidc mode) unaffected.
 - **NEW (2026-09-11) — visibility is the read authority for repo surfaces** (Forgejo #345):
   §8.3 `require_read` on repo-scoped paths (smart-HTTP upload-pack, LFS reads, bundle lists,
   the JSON API lanes via 07 §13, SSH fetch via 17.6, repo page routes) resolves the identity
@@ -884,7 +1194,7 @@ Hazard: keepalive ticker and event writer racing on the same `http.ResponseWrite
 - **NEW (2026-09-12) — post-login avatar hook** (Forgejo #376):
   `GET /_auth/callback` fires the `AvatarHook` seam after the session mint
   (wired in `cmd/spindle` to the identity service's `EnsureAvatarAsync`;
-  nil in setup-only/tests). The hook only enqueues — a per-principal
+  nil in restricted mode/tests). The hook only enqueues — a per-principal
   single-flight background generation (DiceBear rings on spindle-green since
   #525 — constellation before; seed =
   email) that installs `users/<username>/avatar.svg` — so the login
@@ -914,12 +1224,12 @@ Hazard: keepalive ticker and event writer racing on the same `http.ResponseWrite
 **Divergence (2026-08-31):**
 
 - **D1 — Router is chi.** `github.com/go-chi/chi/v5` (core package ONLY — no `chi/cors`, no `chi/middleware`) replaces Go 1.22 ServeMux patterns (§3.1). Route inventory and handler behavior are unchanged; only registration/matching mechanics moved to chi. CORS stays hand-rolled (§2.3). Backend dependency budget is now exactly: `chi/v5`, `BurntSushi/toml`, `golang.org/x/net` (h2c), `golang.org/x/crypto` (SSH transport, 17_ssh.md), `github.com/dicebear/dicebear-go/v10` + `github.com/dicebear/styles/v10` (user-avatar generation, Forgejo #376 — plus build-required transitives `github.com/dicebear/schema` + `github.com/santhosh-tekuri/jsonschema/v6`; AGENTS.md §1).
-- **D2 — Frontend was standard ECMAScript (SUPERSEDED 2026-09-02 by explicit user request — DEVIATIONS.md D-WEB-6; SUPERSEDED AGAIN 2026-11-19/20 — D-WEB-14/D-WEB-15).** Historical: no TypeScript, no framework, no bundler; the SDK was ONE plain-ESM `web/sdk/repos.js`; the `/repos.mjs` route and the esbuild twin were gone (§3.1, §3.3); `web/src/setup*` was a plain-ESM setup page. **Second historical shape:** SolidJS SPA (`solid-js` + `@solidjs/router` runtime, Tailwind v4, vite-built into `web/dist/`; Setup page at `web/src/pages/Setup.jsx`). **Shipped stack:** server-rendered pages — Go `html/template` (`internal/webui` behind `internal/pages`) + vendored htmx + vanilla-ES islands, Tailwind v4 as the only stylesheet build, dark by default; the SDK stays dependency-free, authored as submodules (`web/sdk/src/*.js`) and esbuild-bundled to `web/dist/repos.js`.
+- **D2 — Frontend was standard ECMAScript (SUPERSEDED 2026-09-02 by explicit user request — DEVIATIONS.md D-WEB-6; SUPERSEDED AGAIN 2026-11-19/20 — D-WEB-14/D-WEB-15).** Historical: no TypeScript, no framework, no bundler; the SDK was ONE plain-ESM `web/sdk/repos.js`; the `/repos.mjs` route and the esbuild twin were gone (§3.1, §3.3); `web/src/admin/config*` was a plain-ESM Configuration page. **Second historical shape:** SolidJS SPA (`solid-js` + `@solidjs/router` runtime, Tailwind v4, vite-built into `web/dist/`; Configuration page at `web/src/pages/Setup.jsx`). **Shipped stack:** server-rendered pages — Go `html/template` (`internal/webui` behind `internal/pages`) + vendored htmx + vanilla-ES islands, Tailwind v4 as the only stylesheet build, dark by default; the SDK stays dependency-free, authored as submodules (`web/sdk/src/*.js`) and esbuild-bundled to `web/dist/repos.js`.
 - **NEW (2026-11-20) — the SPA shell is deleted; pages are the only UI** (DEVIATIONS.md D-WEB-14/D-WEB-15; §3.5): every page route goes through `pageOr404`/`uiOr` to the `internal/pages` provider, which renders a full HTML document (`no-cache` + strong ETag). A path the provider does not own is the plain §3 404 — there is no client router fallback, no `index.html` shell, and no `Accept: text/plain` twin (the `/explore` machine twin is `?format=text`, served by the page layer's own handler). `/_ui/*` carries exactly the page assets (`app.css`, `ui.js`, the vendored htmx files, `concepts/`, the immutable `assets/` lane) and stays public; `/repos.js` is unchanged. Rationale: server rendering makes the Go renderer the XSS boundary (law 9 style fail-closed), keeps page gating identical to the API's by construction (one authority seam), and drops the client data layer and router from the dependency budget (law 1).
 - **D5 — Zero-config first run.** Missing config boots with built-in defaults (`0.0.0.0:8080`, filesystem store under `<data-dir>/store`, auth `none`, `auto_create_on_push`) instead of fatal exit 2 — the old step-2 "missing config file is a fatal exit 2" of the startup order is superseded by the bootstrap leg (§10.4, §3.4).
-- **D6 — Setup UI + API first-class.** `/setup` + `/api/v1/setup{,/test}` with the open-while-unsecured access rule and the SETUP-ONLY MODE for invalid configs (§3.4, new `internal/setup` package).
-- **WP13 (2026-11-20) — OIDC admin groups replace the setup token.** Admin/setup authority is the `admin` flag, now derivable from `server.auth.admin_groups` (default `["spindle-admins"]`) matched against the ID-token claim named by `server.auth.groups_claim` (default `"groups"`, array or single string, case-insensitive). The `SPINDLE_SETUP_TOKEN` env var, its `?token=`/Bearer bypass, and the setup-page token field are DELETED (law: pre-1.0 deletes shapes); setting the env var has no effect. `admin_emails`/`admin_domains` remain (migration path), and group values never grant `write` or bypass the email admission rule. The session/token wire gains the optional fifth `{groups}` line described in §8.5 so a browser session keeps group-derived admin; this deliberately diverges from the Rust payload shape (a session is a spindle-minted wire, not a bucket format), and a 4-line token still verifies. Staleness: IdP membership changes apply at the next sign-in/mint; `admin_groups` edits apply immediately; `session_secret` rotation revokes captured groups immediately. Rationale: an env secret that opens the whole configuration surface to anyone who can read the process environment is a weaker boundary than the signed IdP group claim, and the operator asked for group-based setup access.
-- **Supersession (deliberate, fail-closed):** the Rust rule that auth `mode = "none"` is refused unless the listen address is loopback is REPLACED — auth-none is allowed on any bind with loud warnings (logs, setup UI, `readyz`) and zero refused requests (§3.4, §8.1, §10.4 step 7).
+- **D6 — Administration area + setup API first-class.** `/admin/config` + `/api/v1/setup{,/test}` with the open-while-unsecured access rule and the RESTRICTED MODE for invalid configs (§3.4, new `internal/setup` package).
+- **WP13 (2026-11-20) — OIDC admin groups replace the setup token.** Admin/admin/config authority is the `admin` flag, now derivable from `server.auth.admin_groups` (default `["spindle-admin"]` since PLAN-OIDC-ONLY) matched against the ID-token claim named by `server.auth.groups_claim` (default `"groups"`, array or single string, case-insensitive). The `SPINDLE_SETUP_TOKEN` env var, its `?token=`/Bearer bypass, and the setup-page token field are DELETED (law: pre-1.0 deletes shapes); setting the env var has no effect. (`admin_emails`/`admin_domains` were removed by PLAN-OIDC-ONLY; see D-OIDC-1.) Group values never grant `write` or bypass the email admission rule. The session/token wire gains the optional fifth `{groups}` line described in §8.5 so a browser session keeps group-derived admin; this deliberately diverges from the Rust payload shape (a session is a spindle-minted wire, not a bucket format), and a 4-line token still verifies. Staleness: IdP membership changes apply at the next sign-in/mint; `admin_groups` edits apply immediately; `session_secret` rotation revokes captured groups immediately. Rationale: an env secret that opens the whole configuration surface to anyone who can read the process environment is a weaker boundary than the signed IdP group claim, and the operator asked for group-based setup access.
+- **Supersession — RETIRED by PLAN-OIDC-ONLY.** The loopback rule and the warning-only compromise are both gone with `server.auth.mode`: authentication is OIDC, and an unconfigured/invalid instance boots restricted (D-OIDC-1).
 - **Mirror discovery refusal (Forgejo #240, R1 (c)).** `gitInfoRefs` answers
   receive-pack discovery on a pull-only mirror with 403 plain text (every
   principal, admins included); upload-pack discovery is unaffected, and SSH
@@ -968,7 +1278,7 @@ Hazard: keepalive ticker and event writer racing on the same `http.ResponseWrite
   merge-task fragment (`GET …/pull/{n}/merge/task`) now requires the same `maintain` floor the
   merge POST does, and UI-10: page bodies render a generic sentence for backend/store failures
   (detail goes to the log; `repoViewError` precedent) instead of `err.Error()`.
-- **NEW (security audit UI-04, 2026-11-20) — `/setup` masks stored secrets (overwrite-only).**
+- **NEW (security audit UI-04, 2026-11-20) — `/admin/config` masks stored secrets (overwrite-only).**
   The page never renders a secret value: `internal/webui.settingsPrepareField` replaces any
   `Secret` field whose value is non-empty with `setup.SecretMask` (`•••••• (set)`) before the
   template runs, so `session_secret`, `oauth_client_secret`, `events.webhook_secret`,
@@ -979,7 +1289,7 @@ Hazard: keepalive ticker and event writer racing on the same `http.ResponseWrite
   schema still reports effective values (its contract, and it shares the setup access gate); the
   browser surface is the leak this decision closes.
 - **NEW (foundations audit F1, 2026-11-21) — token mode gets a real browser sign-in.**
-  `auth.mode = "token"` had no browser path: `/setup` said "sign in" while
+  `auth.mode = "token"` had no browser path: `/admin/config` said "sign in" while
   `GET /_auth/login` answered 501 blaming the OIDC trio. The token tree now
   accepts the `walgit_session` cookie (minted only by `POST /_auth/token`,
   mode-gated, same-origin, admin static token only), and the principal is
@@ -989,9 +1299,9 @@ Hazard: keepalive ticker and event writer racing on the same `http.ResponseWrite
   secret. `GET /_auth/login` renders the token-paste page in token mode (200
   when `session_secret` exists, an honest token-mode 501 otherwise) and the
   disabled-login page is mode-aware: an OIDC host gets the trio explanation, a
-  token host never sees it. The `/setup` access matrix is unchanged (open for
+  token host never sees it. The `/admin/config` access matrix is unchanged (open for
   no/invalid config or `auth.mode = "none"`; otherwise admin).
-- **NEW (foundations audit F5, 2026-11-21) — setup-only boot keeps the file's
+- **NEW (foundations audit F5, 2026-11-21) — restricted boot keeps the file's
   values and still honours the env overlay.** An invalid config previously
   booted first-run defaults, ignoring `[server].listen` (from the file AND
   from `SPINDLE__SERVER__LISTEN`), and pre-filled defaults, so fixing one key
@@ -1000,7 +1310,7 @@ Hazard: keepalive ticker and event writer racing on the same `http.ResponseWrite
   overlay/PORT, which WINS over the file exactly as on a valid boot; the setup
   view marks the rows named by the validator errors. `config.Validate` now also
   refuses an unparseable `server.listen` before `net.Listen` can fail, and the
-  setup-only boot falls back to the compiled-in listener only for that
+  restricted boot falls back to the compiled-in listener only for that
   unparseable case (the recovery page must stay reachable). Tests:
   `TestLoadSetupOnlyEnvListenWinsOverInvalidFile`,
   `TestSetupOnlyBootEnvListenWinsOverFile`, `TestSetupOnlyBootPrefillsFileValues`.
@@ -1012,3 +1322,53 @@ Hazard: keepalive ticker and event writer racing on the same `http.ResponseWrite
   delivery id/HMAC) and never advances the cursor. 404 unknown seq, 410 payload-not-retained,
   400 inactive hook. The org Webhooks tab writes through the page provider (same owner gate as
   its API twin); it adds no route shape.
+
+- **D-OIDC-1 (2026-11-21, PLAN-OIDC-ONLY) — one auth: OIDC; administration by group; first run restricted.**
+  `server.auth.mode` is deleted (auth configured ⇔ issuer, client id/secret, ≥32-byte session secret,
+  an admission allowlist, `groups_claim`, non-empty `admin_groups`). A missing/incomplete set boots
+  RESTRICTED (only `/admin*`, their POSTs, the auth-test POST and health answer; everything else 503;
+  no store, no API, SSH not listening). `admin_emails`, `admin_domains` and `StaticToken.Admin` are
+  deleted; `p.Admin` is computed once in `principalFromEmailGroups` and every page/API gate reads it.
+  Static tokens remain machine credentials over Bearer/Basic (never admin); `WWW-Authenticate`
+  advertises Basic whenever a machine credential can exist (static rows or an `ExtraCredential` hook),
+  because git only asks its credential helper when Basic is offered. `/_auth/me` gains
+  `groups`/`admin`/`groups_claim` (additive), and the Access page renders the live groups beside the
+  configured group. `POST /_auth/token` (token-paste sign-in) is deleted. `ProbeAuth` now fetches the
+  discovered JWKS and requires a usable RS256/ES256 key; Save still validates shape only. The e2e
+  seam is an in-test stub IdP (`internal/e2e/oidp_test.go`) minting real RS256 ID tokens — `_test.go`
+  only, never in a release build; the human dev IdP is `internal/devtools/oidpstub`. Reverses D-UX-3
+  and the auth-`none` half of D-UX-1.
+
+- **NEW — `POST /admin/restart` is a real route in both boot modes (PLAN-ADMIN §5 as amended):** the
+  earlier plan rejected a restart button because it could not be honest; the implemented control is.
+  The route is `s.pageOr404` in the normal tree and `s.uiOr(setupOnlyUnavailable)` in the restricted
+  mount, because a saved file only takes effect when the process exits and its supervisor starts it
+  again — the restricted boot's recovery loop. The handler (`internal/webui/admin_restart.go`) owns
+  the gate (`AdminDeps.Access`), `settingsSameOrigin`, the typed `restart` confirmation, the
+  `admin_restart` audit and a process-wide one-signal guard (first wins, a concurrent second is 409);
+  the signal itself is the injected `AdminDeps.Restart`, bound by composition to
+  `syscall.Kill(os.Getpid(), syscall.SIGTERM)`. It is not evaluated as an API route: there is no JSON
+  twin, and no test ever signals its own process.
+- **NEW (2026-11-23) — static machine tokens expire, are named, and record their last use.** §8.2.1.
+  An optional `expires_at` makes an expired row an ordinary 401 (never a 403/pkt-ERR, so git erases
+  it), an optional `name` gives the row a stable rotation/usage identity (else a SHA-256 prefix,
+  never the secret), and successful authentication feeds a debounced (one write per token per 5
+  minutes), bounded (64-entry queue, one drainer) asynchronous CAS object `auth/token-usage.json`
+  that the Access page reads once. The request path performs no store write and a bookkeeping failure
+  never fails authentication. Rationale: a static credential was permanent, unobservable and
+  rotation by edit-and-restart — a leaked one was valid forever with no trace of use. The compare
+  was changed from a map lookup to a constant-time scan over SHA-256 digests so the property the doc
+  already claimed (timing-safe static-token matching) is true. No mint/revoke API is added; rotation
+  stays a config change plus a rolling deploy, and a single-instance restart is stated honestly as
+  downtime unless the orchestrator overlaps processes.
+- **NEW (2026-11-23) — issue parity routes ride the existing issues ExtraRoutes chain; the templates
+  projection is push-fed** (02 §13–§15). Four repo-scoped JSON shapes join
+  `internal/issues.ExposedTemplates` (`…/api/issues/{num}/pin` PUT/DELETE,
+  `…/api/issues/{num}/dependencies` GET/POST, `…/api/issues/{num}/dependencies/{kind}/{target}`
+  DELETE, `…/api/issue-templates` GET) on both lanes through the same `Handle(w,r) bool` seam — no
+  core-table edit (law 8). The page twins live on the existing `issues` and `issues/{num}` mounts and
+  answer with the collab write-back convention (same-origin, triage floor, inline error line). The
+  template projection is a bucket object refreshed from the post-push hook
+  (`server.Options.OnPush` → `issues.Service.RefreshTemplatesFromDefaultBranch`), so a composer
+  request is one exact-key GET and never a git subprocess; a failed refresh leaves the previous
+  projection serving and logs.

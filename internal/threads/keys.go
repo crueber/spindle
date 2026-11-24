@@ -14,13 +14,18 @@ import (
 //
 //	repos/<o>/<r>/threads/queue/<seq>.json           queue entry (Create, CAS-claimed)
 //	repos/<o>/<r>/threads/queue/head.json            dispatch head (CAS'd, bounded pending window)
-//	repos/<o>/<r>/threads/runners/<id>.json          runner registry record (labels, last seen)
+//	threads/queue/index.json                         global dispatch hint (CAS'd, bounded)
+//	threads/runners/<id>.json                        instance runner registry (labels, capacity, last seen)
+//	threads/runners/tokens/<id>.json                 single-use registration token (hash only, TTL)
+//	threads/runners/credentials/<id>.json            long-lived runner credential (hash only, revocable)
 //	repos/<o>/<r>/threads/secrets/<name>.json        sealed secret envelope (write-only API)
 //	repos/<o>/<r>/threads/runs/<run>/jobs/<jid>/log/<attempt>-<seq>   log frames (Create-only)
-//	users/<principal>/tokens/threads/<id>.json       runner credentials (hash only, revocable)
 //
-// `users/<principal>/…` mirrors identity's one-segment encoding (@ → %40), so
-// an email principal stays one key segment.
+// Runners are instance-scoped infrastructure, so their families live under
+// `threads/` (never a repository) and a credential names a runner id, never a
+// repository. `users/<principal>/…` mirrors identity's one-segment encoding
+// (@ → %40) and is still used by the secret/token families that belong to a
+// principal.
 
 // QueuePrefix returns repos/<o>/<r>/threads/queue/.
 func QueuePrefix(owner, repo string) string {
@@ -37,15 +42,30 @@ func QueueHeadKey(owner, repo string) string {
 	return QueuePrefix(owner, repo) + "head.json"
 }
 
-// RunnersPrefix returns repos/<o>/<r>/threads/runners/.
-func RunnersPrefix(owner, repo string) string {
-	return "repos/" + owner + "/" + repo + "/threads/runners/"
-}
+// RunnersPrefix returns threads/runners/ (the instance registry family).
+func RunnersPrefix() string { return "threads/runners/" }
 
-// RunnerKey returns repos/<o>/<r>/threads/runners/<id>.json.
-func RunnerKey(owner, repo, id string) string {
-	return RunnersPrefix(owner, repo) + id + ".json"
-}
+// RunnerKey returns threads/runners/<id>.json.
+func RunnerKey(id string) string { return RunnersPrefix() + id + ".json" }
+
+// RunnerTokensPrefix returns threads/runners/tokens/ (single-use registration
+// tokens, hash only).
+func RunnerTokensPrefix() string { return RunnersPrefix() + "tokens/" }
+
+// RunnerTokenKey returns threads/runners/tokens/<id>.json.
+func RunnerTokenKey(id string) string { return RunnerTokensPrefix() + id + ".json" }
+
+// RunnerCredentialsPrefix returns threads/runners/credentials/ (long-lived
+// runner credentials, hash only).
+func RunnerCredentialsPrefix() string { return RunnersPrefix() + "credentials/" }
+
+// RunnerCredentialKey returns threads/runners/credentials/<id>.json. A
+// credential names a runner id and never a repository: the runner may be
+// offered any repository's jobs.
+func RunnerCredentialKey(id string) string { return RunnerCredentialsPrefix() + id + ".json" }
+
+// QueueIndexKey returns threads/queue/index.json — the global dispatch hint.
+func QueueIndexKey() string { return "threads/queue/index.json" }
 
 // SecretsPrefix returns repos/<o>/<r>/threads/secrets/.
 func SecretsPrefix(owner, repo string) string {
@@ -81,17 +101,6 @@ func padInt(v, width int) string {
 		s = "0" + s
 	}
 	return s
-}
-
-// encodePrincipal mirrors identity's one-segment principal encoding (@ → %40).
-func encodePrincipal(p string) string {
-	return strings.ReplaceAll(strings.ToLower(strings.TrimSpace(p)), "@", "%40")
-}
-
-// RunnerTokenKey returns users/<principal>/tokens/threads/<id>.json — the
-// runner credential record (hash only, revocable).
-func RunnerTokenKey(principal, id string) string {
-	return "users/" + encodePrincipal(principal) + "/tokens/threads/" + id + ".json"
 }
 
 // --- opaque job references -------------------------------------------------

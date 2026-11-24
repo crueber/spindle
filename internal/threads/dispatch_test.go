@@ -36,7 +36,7 @@ on:
         description: image tag
 jobs:
   deploy:
-    runs-on: ubuntu-latest
+    runs-on: linux
     steps:
       - run: echo "${{ inputs.env }} ${{ inputs.count }} ${{ inputs.dry_run }}"
 `
@@ -259,7 +259,7 @@ on:
         description: anything
 jobs:
   go:
-    runs-on: ubuntu-latest
+    runs-on: linux
     steps:
       - run: echo hi
 `

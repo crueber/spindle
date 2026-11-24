@@ -1,0 +1,12 @@
+{{define "repo_branch_actions"}}
+<div class="flex flex-wrap items-center justify-end gap-1">
+  {{if .CompareHref}}<a class="btn whitespace-nowrap px-2 py-0.5 text-[11px]" href="{{.CompareHref}}" title="Compare {{.Name}} with the default branch">compare</a>{{end}}
+  <button type="button" class="btn whitespace-nowrap px-2 py-0.5 text-[11px]" data-copy="{{.CloneCommand}}" title="Copy the clone command for this branch">copy clone</button>
+  {{if .CanDelete}}
+  <form method="post" action="{{.DeleteAction}}">
+    <input type="hidden" name="name" value="{{.Name}}">
+    <button type="submit" class="btn danger whitespace-nowrap px-2 py-0.5 text-[11px]" aria-label="Delete branch {{.Name}}">delete</button>
+  </form>
+  {{end}}
+</div>
+{{end}}

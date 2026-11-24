@@ -1,0 +1,183 @@
+{{/* pages/admin/directory.html — GET /admin/directory (docs/PLAN-ADMIN.md §3.7).
+
+    The instance-wide users and organizations directory, host-admin only. Two
+    bounded, server-rendered lists (tab switch), a search over username and
+    display name with the scan bound stated honestly, and the one mutation:
+    deactivate (typed confirmation + reason, audited) or reactivate (audited;
+    revoked credentials stay revoked). A deactivated row carries its state as
+    text, never colour alone; the page renders no email address. Tables scroll
+    in their own overflow wrapper at ~390 px. */}}
+{{define "content"}}
+<div class="admin-page" id="admin-page" data-admin-section="directory">
+  <div class="flex flex-col gap-4 lg:flex-row lg:gap-6">
+    {{template "admin-nav" .Data}}
+
+    <div class="min-w-0 flex-1">
+      {{template "admin-header" .Data}}
+
+      {{if .Data.Denied}}
+        {{template "admin-denied" .Data}}
+      {{else}}
+        {{if .Data.Restricted}}{{template "admin-restricted" .}}{{end}}
+        {{template "admin-banners" .Data}}
+
+        {{with .Data.Directory}}
+        {{if .Notice}}
+        <div class="card mb-3 border-l-2 border-l-[var(--pd-ok)] p-3 text-sm" role="status">{{.Notice}}</div>
+        {{end}}
+        {{if .Error}}
+        <div class="card mb-3 border-l-2 border-l-[var(--pd-danger)] p-3 text-sm" role="alert" tabindex="-1" autofocus>{{.Error}}</div>
+        {{end}}
+
+        <nav class="mb-4 flex flex-wrap gap-1" aria-label="Directory view">
+          {{/* aria-current="true" (not "page"): the AREA nav owns the one
+               aria-current="page"; this strip is a view switch inside it. */}}
+          <a class="side-nav-item w-auto" href="{{.UsersTabURL}}"{{if eq .Tab "users"}} aria-current="true"{{end}}>Users</a>
+          <a class="side-nav-item w-auto" href="{{.OrgsTabURL}}"{{if eq .Tab "orgs"}} aria-current="true"{{end}}>Organizations</a>
+        </nav>
+
+        {{if eq .Tab "users"}}
+        {{/* ---- Users ---- */}}
+        <section class="card mb-4 p-4" aria-labelledby="admin-dir-users">
+          <div class="flex flex-wrap items-baseline gap-2">
+            <h2 class="card-header mb-0!" id="admin-dir-users">Users</h2>
+            <span class="chip chip-draft">{{len .Users}}</span>
+          </div>
+          <p class="muted mt-1 text-sm">Accounts are listed in name order. Deactivation is enforced at the credential boundary: sign-in, existing sessions,
+            <code class="mono text-xs">wgt_</code> tokens and SSH keys stop working immediately, and reactivation never restores a revoked credential.</p>
+
+          <form class="mt-3 flex flex-wrap items-end gap-2" method="get" action="{{.SearchURL}}" role="search">
+            <input type="hidden" name="tab" value="users">
+            <div class="min-w-0 flex-1">
+              <label class="mb-1 block text-sm font-medium" for="admin-dir-search">Search username or display name</label>
+              <input class="input w-full" id="admin-dir-search" name="q" type="search" value="{{.Query}}"
+                     placeholder="alice" autocomplete="off" maxlength="64">
+            </div>
+            <button type="submit" class="btn primary whitespace-nowrap">search</button>
+            {{if .Query}}<a class="link inline-flex min-h-6 items-center text-sm" href="/admin/directory">clear</a>{{end}}
+          </form>
+          {{if .Query}}
+          <p class="muted mt-2 text-[11px]">
+            Examined {{.Examined}} account{{if ne .Examined 1}}s{{end}} in name order{{if .ScanBound}} (bound {{.ScanBound}} per search){{end}}.
+            {{if .Truncated}}<strong>More accounts may match:</strong> refine the search (a username fragment is the cheapest filter), or continue with the next link below.{{end}}
+          </p>
+          {{end}}
+
+          {{if .Users}}
+          <div class="mt-2 overflow-x-auto">
+            <table class="data-table wrap min-w-[44rem]" aria-label="instance accounts">
+              <thead><tr>
+                <th scope="col">username</th><th scope="col">state</th><th scope="col">display name</th>
+                <th scope="col">organizations</th>
+                <th scope="col"><span class="sr-only">actions</span></th>
+              </tr></thead>
+              <tbody>
+                {{range .Users}}
+                <tr{{if eq $.Data.Directory.RowError .Username}} class="bg-[var(--pd-raised)]"{{end}}>
+                  <th scope="row" class="text-left align-top">
+                    <a class="link mono text-xs break-all" href="/{{.Username}}">{{.Username}}</a>
+                  </th>
+                  <td class="align-top">
+                    <span class="whitespace-nowrap {{.ChipClass}}">{{.ChipLabel}}</span>
+                    {{if .Disabled}}
+                    <p class="muted mt-1 max-w-[14rem] text-[11px] break-words">deactivated{{if .DisabledAt}} {{rel .DisabledAt}}{{end}}{{if .DisabledBy}} by <span class="mono">{{.DisabledBy}}</span>{{end}}{{if .Reason}} — {{.Reason}}{{end}}</p>
+                    {{end}}
+                  </td>
+                  <td class="align-top break-words">{{if .DisplayName}}{{.DisplayName}}{{else}}<span class="muted">—</span>{{end}}</td>
+                  <td class="align-top text-xs">
+                    {{if .Roles}}
+                      {{range $i, $r := .Roles}}{{if $i}}, {{end}}<a class="link" href="/{{$r.Org}}">{{$r.Org}}</a>{{if $r.Owner}} <span class="muted">(owner)</span>{{end}}{{end}}
+                    {{else}}<span class="muted">none</span>{{end}}
+                  </td>
+                  <td class="align-top text-right">
+                    {{if not .Bound}}
+                    <span class="muted text-[11px]">no sign-in account to deactivate</span>
+                    {{else if .Disabled}}
+                    <form method="post" action="/admin/directory/reactivate" class="text-right">
+                      <input type="hidden" name="username" value="{{.Username}}">
+                      <button type="submit" class="btn text-xs">reactivate</button>
+                      <p class="muted mt-1 text-[11px]">signs in again; revoked tokens stay revoked</p>
+                    </form>
+                    {{else}}
+                    <details>
+                      <summary class="link inline-flex min-h-6 items-center text-xs text-[var(--pd-danger)]" tabindex="0">deactivate…</summary>
+                      <form class="mt-1 min-w-[15rem] text-left" method="post" action="/admin/directory/deactivate"
+                            data-danger-confirm="{{.Username}}">
+                        <input type="hidden" name="username" value="{{.Username}}">
+                        <label class="mb-1 block text-[11px]" for="admin-dir-reason-{{.Username}}">Reason (recorded in the audit log)</label>
+                        <input class="input w-full text-xs" id="admin-dir-reason-{{.Username}}" name="reason"
+                               type="text" maxlength="500" autocomplete="off" required>
+                        <label class="mb-1 mt-2 block text-[11px]" for="admin-dir-confirm-{{.Username}}">Type <code class="mono">{{.Username}}</code> to confirm</label>
+                        <input class="input mono w-full text-xs" id="admin-dir-confirm-{{.Username}}" name="confirm"
+                               type="text" autocomplete="off" data-danger-arm required>
+                        <button type="submit" class="btn danger mt-1 text-xs" data-danger-submit disabled>deactivate account</button>
+                      </form>
+                    </details>
+                    {{end}}
+                  </td>
+                </tr>
+                {{end}}
+              </tbody>
+            </table>
+          </div>
+          {{if .HasNext}}
+          <p class="mt-3 flex flex-wrap items-center gap-3 text-sm">
+            <a class="link inline-flex min-h-6 items-center" href="{{.NextURL}}">next page →</a>
+            <a class="link inline-flex min-h-6 items-center" href="{{.FirstURL}}">first page</a>
+          </p>
+          {{else if and .After (not .Query)}}
+          <p class="muted mt-3 text-sm">End of the accounts this search examined.</p>
+          {{end}}
+          {{else}}
+          {{if .Query}}
+          {{template "collab_empty" dict "icon" "file" "title" "No account matches that search" "hint" "Searches are case-insensitive over the username and the display name. A search examines a bounded slice of the accounts in name order; clear it to browse, or refine the username fragment." "href" "/admin/directory" "label" "Clear the search"}}
+          {{else if .After}}
+          <p class="muted mt-3 text-sm">End of the accounts this search examined. <a class="link inline-flex min-h-6 items-center" href="{{.FirstURL}}">first page</a></p>
+          {{else}}
+          {{template "collab_empty" dict "icon" "file" "title" "No accounts yet" "hint" "Accounts appear here the first time someone signs in with OIDC. A principal that only ever held a machine credential or a grant has a profile but no sign-in account, and shows as such." "href" "/admin/access" "label" "Open Access"}}
+          {{end}}
+          {{end}}
+        </section>
+        {{else}}
+        {{/* ---- Organizations ---- */}}
+        <section class="card p-4" aria-labelledby="admin-dir-orgs">
+          <div class="flex flex-wrap items-baseline gap-2">
+            <h2 class="card-header mb-0!" id="admin-dir-orgs">Organizations</h2>
+            <span class="chip chip-draft">{{len .Orgs}}</span>
+          </div>
+          <p class="muted mt-1 text-sm">Organization names are listed in name order with their member count. Membership and ownership are managed on each
+            organization's own page — this directory only reports them.</p>
+          {{if .Orgs}}
+          <div class="mt-2 overflow-x-auto">
+            <table class="data-table wrap min-w-[30rem]" aria-label="instance organizations">
+              <thead><tr>
+                <th scope="col">name</th><th scope="col">display name</th><th scope="col">members</th>
+              </tr></thead>
+              <tbody>
+                {{range .Orgs}}
+                <tr>
+                  <th scope="row" class="text-left"><a class="link mono text-xs break-all" href="/{{.Name}}">{{.Name}}</a></th>
+                  <td class="break-words">{{if .DisplayName}}{{.DisplayName}}{{else}}<span class="muted">—</span>{{end}}</td>
+                  <td class="tabular">{{.Members}}</td>
+                </tr>
+                {{end}}
+              </tbody>
+            </table>
+          </div>
+          {{if .HasNext}}
+          <p class="mt-3 flex flex-wrap items-center gap-3 text-sm">
+            <a class="link inline-flex min-h-6 items-center" href="{{.NextURL}}">next page →</a>
+            <a class="link inline-flex min-h-6 items-center" href="{{.FirstURL}}">first page</a>
+          </p>
+          {{end}}
+          {{else}}
+          {{template "collab_empty" dict "icon" "file" "title" "No organizations yet" "hint" "An organization is created from the new-organization form; it then owns repositories and holds a member roster." "href" "/orgs/new" "label" "Create an organization"}}
+          {{end}}
+        </section>
+        {{end}}
+        {{end}}
+      {{end}}
+    </div>
+  </div>
+</div>
+{{end}}

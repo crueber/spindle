@@ -99,6 +99,35 @@ type RoleService interface {
 // AuthService, injected by composition). Nil falls back to anonymous.
 type Authenticator func(r *http.Request) (auth.Principal, *auth.AuthError)
 
+// ModerationGate is the consumer-owned block/moderation seam (PLAN-V2
+// §M.5/M.6): pulls defines what it needs and composition satisfies it with
+// *moderation.Service. Enforcement and redaction live in the verbs, so the
+// API and the page forms share one gate.
+type ModerationGate interface {
+	// BlockedFromRepo reports whether actor is blocked by the repository
+	// owner's user namespace.
+	BlockedFromRepo(ctx context.Context, owner, repo, actor string) (bool, string, error)
+	// Snapshot visits every hidden target and reports this conversation's
+	// moderation lock, in one read (M2). The lock refuses new comments; the
+	// hidden targets redact event/description bodies in the projection.
+	// Snapshot reports the lock MODE too ("all" | "collaborators").
+	Snapshot(ctx context.Context, owner, repo string, num int, fn func(target, by, at, reason string)) (locked bool, lockMode, lockReason string, revision int, err error)
+}
+
+// HiddenInfo is the M2 moderation hint attached to a projected event or the
+// PR description; the body is present only to moderators (triage+).
+type HiddenInfo struct {
+	By     string `json:"by"`
+	At     string `json:"at"`
+	Reason string `json:"reason"`
+}
+
+// HiddenTarget is the plan's target key for one PR conversation event body
+// (the shared issues family covers issues and PRs).
+func HiddenTarget(num, seq int) string {
+	return fmt.Sprintf("thread:%06x:event:%012x", num, seq)
+}
+
 // NotifyEvent is the §8/P8 emission contract with 06 (internal/notify): per
 // P8 the mutating handler emits synchronously after the CAS commits.
 // Classes: "opened" (pull_opened), "closed", "reopened", "merged",
@@ -271,6 +300,11 @@ type Service struct {
 	Notify Emitter
 	// Stream receives pull live updates (nil = no-op).
 	Stream Streamer
+	// Moderation is the consumer-owned block gate (PLAN-V2 §M.5; the
+	// ChecksGate pattern). Every interaction verb consults it after role
+	// resolution and before any CAS; forks/stars/watches are explicitly
+	// unaffected. Nil = feature off (writes allowed).
+	Moderation ModerationGate
 	// PullEvents receives CI trigger transitions (opened/synchronize/
 	// reopened; never close). Nil = no-op.
 	PullEvents PullEventSink

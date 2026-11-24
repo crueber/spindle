@@ -475,6 +475,17 @@ func TestSummaryPlaceholderProjection(t *testing.T) {
 // --- discovery (RegisterExposed) -------------------------------------------------
 
 func TestCreateExposedTemplateRegistered(t *testing.T) {
+	// The registry is package-global: save/restore it, or the endpoint leaks
+	// into every later test in this process — including the next -count
+	// iteration's exact-list TestDiscoveryShape, which then sees a phantom.
+	exposedMu.Lock()
+	saved := exposedExtra
+	exposedMu.Unlock()
+	defer func() {
+		exposedMu.Lock()
+		exposedExtra = saved
+		exposedMu.Unlock()
+	}()
 	RegisterExposed(ExposedTemplatesCreate...)
 	eps := discoveryEndpoints()
 	found := false

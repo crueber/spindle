@@ -186,6 +186,9 @@ func (s *Service) UploadAttachment(ctx context.Context, owner, repo string, p au
 	if err := s.requireRead(ctx, owner, repo, p); err != nil {
 		return nil, err
 	}
+	if err := s.requireNotBlocked(ctx, owner, repo, p); err != nil {
+		return nil, err
+	}
 	want, err := normalizeSHA256(declaredSHA)
 	if err != nil {
 		return nil, err

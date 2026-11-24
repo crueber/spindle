@@ -35,6 +35,10 @@ var ExposedTemplates = []string{
 	"/{owner}/{repo}/api/issues/{num}/comments",
 	"/{owner}/{repo}/api/issues/{num}/reactions",
 	"/{owner}/{repo}/api/issues/{num}/reactions/{seq}/{content}",
+	"/{owner}/{repo}/api/issues/{num}/pin",
+	"/{owner}/{repo}/api/issues/{num}/dependencies",
+	"/{owner}/{repo}/api/issues/{num}/dependencies/{kind}/{target}",
+	"/{owner}/{repo}/api/issue-templates",
 	"/{owner}/{repo}/api/labels",
 	"/{owner}/{repo}/api/labels/{name}",
 	"/{owner}/{repo}/api/milestones",
@@ -288,6 +292,18 @@ func (h *Handler) handleRepo(w http.ResponseWriter, r *http.Request, owner, repo
 		}
 		h.uploadAttachment(w, r, owner, repo)
 		return true
+	case "issue-templates":
+		// GET /{o}/{r}/api/issue-templates (§15): the cached push-time
+		// projection. Read-gated; never a git call.
+		if len(rest) != 1 {
+			return false
+		}
+		if r.Method != http.MethodGet {
+			methodNotAllowed(w, "GET")
+			return true
+		}
+		h.listIssueTemplates(w, r, owner, repo)
+		return true
 	}
 	return false
 }
@@ -361,6 +377,42 @@ func (h *Handler) routeIssues(w http.ResponseWriter, r *http.Request, owner, rep
 				return true
 			}
 			h.removeReaction(w, r, owner, repo, num, rest[1], rest[2])
+			return true
+		}
+		return false
+	case "pin":
+		if len(rest) != 1 {
+			return false
+		}
+		switch r.Method {
+		case http.MethodPut:
+			h.setPin(w, r, owner, repo, num, true)
+			return true
+		case http.MethodDelete:
+			h.setPin(w, r, owner, repo, num, false)
+			return true
+		}
+		methodNotAllowed(w, "PUT", "DELETE")
+		return true
+	case "dependencies":
+		if len(rest) == 1 {
+			switch r.Method {
+			case http.MethodGet:
+				h.listDependencies(w, r, owner, repo, num)
+				return true
+			case http.MethodPost:
+				h.addDependency(w, r, owner, repo, num)
+				return true
+			}
+			methodNotAllowed(w, "GET", "POST")
+			return true
+		}
+		if len(rest) == 3 {
+			if r.Method != http.MethodDelete {
+				methodNotAllowed(w, "DELETE")
+				return true
+			}
+			h.removeDependency(w, r, owner, repo, num, rest[1], rest[2])
 			return true
 		}
 		return false
@@ -498,7 +550,13 @@ func (h *Handler) getIssue(w http.ResponseWriter, r *http.Request, owner, repo s
 		writeErr(w, err)
 		return
 	}
-	writeCached(w, r, ccThread, "v"+strconv.Itoa(view.Thread.Version), http.StatusOK, view)
+	etag := "v" + strconv.Itoa(view.Thread.Version)
+	if view.ModerationRevision > 0 {
+		// M2: a hide/unhide/lock must revalidate (never a 304 serving the
+		// pre-moderation body).
+		etag += "-m" + strconv.Itoa(view.ModerationRevision)
+	}
+	writeCached(w, r, ccThread, etag, http.StatusOK, view)
 }
 
 func (h *Handler) listEvents(w http.ResponseWriter, r *http.Request, owner, repo string, num int) {
@@ -891,4 +949,123 @@ func (h *Handler) deleteMilestone(w http.ResponseWriter, r *http.Request, owner,
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// --- pinning (§13) -----------------------------------------------------------
+
+// setPin serves PUT/DELETE …/api/issues/{num}/pin. The response carries the
+// whole pin set (newest-first), so a client never has to refetch the list to
+// know the new order.
+func (h *Handler) setPin(w http.ResponseWriter, r *http.Request, owner, repo string, num int, pinned bool) {
+	p, aerr := h.principal(r)
+	if aerr != nil {
+		writeErr(w, aerr)
+		return
+	}
+	pins, changed, err := h.Svc.PinIssue(r.Context(), owner, repo, num, p, pinned)
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	if pins == nil {
+		pins = []int{}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"pinned": pins, "num": num, "changed": changed})
+}
+
+// --- dependencies (§14) ------------------------------------------------------
+
+func (h *Handler) listDependencies(w http.ResponseWriter, r *http.Request, owner, repo string, num int) {
+	p, aerr := h.principal(r)
+	if aerr != nil {
+		writeErr(w, aerr)
+		return
+	}
+	view, err := h.Svc.DependenciesFor(r.Context(), owner, repo, num, p)
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, view)
+}
+
+func (h *Handler) addDependency(w http.ResponseWriter, r *http.Request, owner, repo string, num int) {
+	p, aerr := h.principal(r)
+	if aerr != nil {
+		writeErr(w, aerr)
+		return
+	}
+	var body struct {
+		Kind   string `json:"kind"`
+		Target int    `json:"target"`
+	}
+	if !decodeStrict(w, r, 64<<10, map[string]bool{"kind": true, "target": true}, &body) {
+		return
+	}
+	if body.Target < 1 {
+		writePlain(w, http.StatusBadRequest, "target must be an issue number")
+		return
+	}
+	changed, err := h.Svc.AddDependency(r.Context(), owner, repo, num, p, body.Kind, body.Target)
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	view, verr := h.Svc.DependenciesFor(r.Context(), owner, repo, num, p)
+	if verr != nil {
+		writeErr(w, verr)
+		return
+	}
+	status := http.StatusCreated
+	if !changed {
+		status = http.StatusOK
+	}
+	writeJSON(w, status, view)
+}
+
+func (h *Handler) removeDependency(w http.ResponseWriter, r *http.Request, owner, repo string, num int, kind, targetSeg string) {
+	p, aerr := h.principal(r)
+	if aerr != nil {
+		writeErr(w, aerr)
+		return
+	}
+	target, cerr := parseNum(targetSeg)
+	if cerr != nil {
+		writePlain(w, http.StatusNotFound, "unknown issue")
+		return
+	}
+	if _, err := h.Svc.RemoveDependency(r.Context(), owner, repo, num, p, kind, target); err != nil {
+		writeErr(w, err)
+		return
+	}
+	view, verr := h.Svc.DependenciesFor(r.Context(), owner, repo, num, p)
+	if verr != nil {
+		writeErr(w, verr)
+		return
+	}
+	writeJSON(w, http.StatusOK, view)
+}
+
+// listIssueTemplates serves GET …/api/issue-templates (§15): the cached
+// push-time projection, read from one bucket object. No git runs here.
+func (h *Handler) listIssueTemplates(w http.ResponseWriter, r *http.Request, owner, repo string) {
+	p, aerr := h.principal(r)
+	if aerr != nil {
+		writeErr(w, aerr)
+		return
+	}
+	if err := h.Svc.requireRead(r.Context(), owner, repo, p); err != nil {
+		writeErr(w, err)
+		return
+	}
+	doc, err := h.Svc.Templates(r.Context(), owner, repo)
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"templates":    doc.Templates,
+		"commit":       doc.Commit,
+		"refreshed_at": doc.RefreshedAt,
+	})
 }

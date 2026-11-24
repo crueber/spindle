@@ -44,8 +44,8 @@ func (f *fakeChecksGate) CheckRequiredChecks(ctx context.Context, _, _, headSHA,
 
 // TestMergeConsultsChecksGate proves the 05 coordination: the merge task
 // consults the checks-provided gate with the LIVE head sha after the
-// protected-ref check; a failed gate narrates the shortfall verbatim and
-// publishes nothing (the merge logic is NOT forked — one call site).
+// merge-policy precondition; a failed gate narrates the shortfall verbatim
+// and publishes nothing (the merge logic is NOT forked — one call site).
 func TestMergeConsultsChecksGate(t *testing.T) {
 	t.Run("deny blocks the publish with the verbatim message", func(t *testing.T) {
 		e := newTestEnv()

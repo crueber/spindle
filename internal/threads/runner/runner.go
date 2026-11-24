@@ -13,12 +13,15 @@ import (
 	"github.com/crueber/spindle/internal/threads"
 )
 
-// Runner is the long-poll loop over one repository's queue (15 §3/§4).
+// Runner is the long-poll loop over the INSTANCE queue (15 §3/§4,
+// docs/PLAN-INSTANCE-RUNNERS.md): it is registered once by a host
+// administrator and every fetch is a global claim, so the same runner may be
+// offered jobs from any repository.
 //
 // Capacity: the runner keeps `Capacity` jobs in flight, one goroutine each,
 // every one with its own long-poll, container, network and workspace volume.
 // The server has no worker counter — the CAS claim is the arbitration — so any
-// number of runners may share a repository, and a capacity-N runner is N
+// number of runners may serve the instance, and a capacity-N runner is N
 // concurrent fetches. Capacity 1 (the default) keeps one daemon shared by one
 // job at a time, which is the isolation-preserving shape for untrusted code.
 //
@@ -55,6 +58,18 @@ type Config struct {
 	WorkspaceDir    string
 	AllowHostDocker bool
 	ServerOrigin    string
+	// AllowForkRuns opts this runner in to executing fork pull-request code
+	// (default false). The server never offers it a fork run unless the registry
+	// records the flag; the runner also refuses one it was handed anyway
+	// (defence in depth, docs/threads.md §8.7).
+	AllowForkRuns bool
+	// ImagePrefix/ImagePrefixAll/ImagePull/ImageRequireDigest are the
+	// image-source policy (docs/threads.md §8.1/§8.6). Empty/zero values keep
+	// today's behaviour.
+	ImagePrefix        string
+	ImagePrefixAll     bool
+	ImagePull          string
+	ImageRequireDigest bool
 
 	FetchWait  time.Duration
 	BackoffMin time.Duration
@@ -79,6 +94,9 @@ func New(cfg Config) (*Runner, error) {
 	if cfg.Capacity <= 0 {
 		cfg.Capacity = 1
 	}
+	if cfg.Capacity > threads.MaxRunnerCapacity {
+		cfg.Capacity = threads.MaxRunnerCapacity
+	}
 	if cfg.FetchWait <= 0 {
 		cfg.FetchWait = 20 * time.Second
 	}
@@ -90,6 +108,15 @@ func New(cfg Config) (*Runner, error) {
 	}
 	if cfg.Logger == nil {
 		cfg.Logger = slog.Default()
+	}
+	images := ImageConfig{
+		Prefix:        cfg.ImagePrefix,
+		PrefixAll:     cfg.ImagePrefixAll,
+		Pull:          cfg.ImagePull,
+		RequireDigest: cfg.ImageRequireDigest,
+	}
+	if err := ValidateImageConfig(images); err != nil {
+		return nil, fmt.Errorf("runner: %v", err)
 	}
 	hostDocker := hostDockerExposed(cfg.DockerBin)
 	if hostDocker && !cfg.AllowHostDocker {
@@ -105,9 +132,17 @@ func New(cfg Config) (*Runner, error) {
 			Docker:       &DockerCLIProcess{Bin: cfg.DockerBin},
 			DefaultImage: cfg.DefaultImage,
 			WorkspaceDir: cfg.WorkspaceDir,
+			Images:       images,
 			ServerURL:    cfg.ServerOrigin,
 			Logger:       cfg.Logger,
+			Artifacts:    client,
 		}
+	}
+	if exec.Images == (ImageConfig{}) {
+		exec.Images = images
+	}
+	if exec.Artifacts == nil {
+		exec.Artifacts = client
 	}
 	if exec.WorkspaceDir == "" {
 		exec.WorkspaceDir = cfg.WorkspaceDir
@@ -139,7 +174,8 @@ func (r *Runner) Run(ctx context.Context) error {
 		return err
 	}
 	r.cfg.Logger.Info("threads runner: serving",
-		"server", r.cfg.ServerURL, "labels", strings.Join(r.cfg.Labels, ","), "capacity", r.cfg.Capacity)
+		"server", r.cfg.ServerURL, "labels", strings.Join(r.cfg.Labels, ","), "capacity", r.cfg.Capacity,
+		"allow_fork_runs", r.cfg.AllowForkRuns)
 	var wg sync.WaitGroup
 	for i := 0; i < r.cfg.Capacity; i++ {
 		wg.Add(1)
@@ -163,8 +199,14 @@ func (r *Runner) Run(ctx context.Context) error {
 func (r *Runner) declare(ctx context.Context) error {
 	backoff := r.cfg.BackoffMin
 	for {
-		_, err := r.client.Declare(ctx, r.cfg.Version, r.cfg.Labels)
+		view, err := r.client.Declare(ctx, r.cfg.Version, r.cfg.Labels, r.cfg.Capacity, r.cfg.AllowForkRuns)
 		if err == nil {
+			// The repository policy is the ADMIN's (set at the mint); the runner
+			// states it and cannot change it (docs/threads.md §8.7).
+			if view != nil {
+				r.cfg.Logger.Info("threads runner: repository policy",
+					"policy", view.Policy.Describe(), "allow_fork_runs", view.AllowForkRuns)
+			}
 			return nil
 		}
 		if errors.Is(err, ErrUnauthorized) {
@@ -239,12 +281,32 @@ func (r *Runner) runJob(ctx context.Context, job *threads.FetchResult) {
 		log.Warn("threads runner: start failed; job will be requeued by its lease", "err", err)
 		return
 	}
+	// Defence in depth: the server is supposed to offer a fork run only to a
+	// runner whose registry record opted in, but this runner must never execute
+	// fork code on a host that did not declare it acceptable. Report it as a
+	// failed job with the reason (the lease then has nothing to requeue).
+	if !job.Trusted && !r.cfg.AllowForkRuns {
+		msg := "spindle: this runner has not opted in to fork pull-request runs (--allow-fork-runs / SPINDLE_RUNNER_ALLOW_FORK_RUNS), so it refused to execute the job; start a runner that accepts fork code on a disposable host"
+		log.Error("threads runner: refusing fork run: this runner did not opt in", "hint", "--allow-fork-runs")
+		refuseCtx, refuseCancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
+		defer refuseCancel()
+		_, cerr := r.client.Complete(refuseCtx, start.Token, job.JobRef, job.Attempt, threads.CompleteInput{
+			Conclusion: threads.JobFailure,
+			Steps: []threads.StepResult{{
+				Number: 1, Name: "fork run refused", Conclusion: threads.JobFailure, Error: msg,
+			}},
+		})
+		if cerr != nil {
+			log.Error("threads runner: reporting the fork refusal failed", "err", cerr)
+		}
+		return
+	}
 	jobCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	stream := NewStreamer(r.client, start.Token, job.JobRef, job.Attempt, job.Mask, cancel, log)
 	log.Info("threads runner: job started", "workflow", job.Workflow, "commit", job.Commit, "check", job.Context)
 
-	res := r.exec.Execute(jobCtx, ExecInput{Job: job, AttemptToken: start.Token}, stream)
+	res := r.exec.Execute(jobCtx, ExecInput{Job: job, AttemptToken: start.Token, Caps: start.Artifacts}, stream)
 
 	// SIGTERM (or the job context) makes this a cancel, not a failure: the
 	// containers are already gone (Execute's deferred cleanup).
@@ -259,7 +321,7 @@ func (r *Runner) runJob(ctx context.Context, job *threads.FetchResult) {
 	doneCtx, doneCancel := context.WithTimeout(context.WithoutCancel(ctx), 60*time.Second)
 	defer doneCancel()
 	view, cerr := r.client.Complete(doneCtx, start.Token, job.JobRef, job.Attempt, threads.CompleteInput{
-		Conclusion: conclusion, Steps: res.Steps,
+		Conclusion: conclusion, Steps: res.Steps, Outputs: res.Outputs,
 	})
 	switch {
 	case cerr == nil:
@@ -301,7 +363,7 @@ func nextBackoff(d, max time.Duration) time.Duration {
 
 // Register consumes a registration token and returns the long-lived runner
 // credential (the bootstrap path: `spindle runner serve --register wrg_…`).
-func Register(ctx context.Context, serverURL, regToken, name string, labels []string) (*threads.RegisterResult, error) {
+func Register(ctx context.Context, serverURL, regToken, name string, labels []string, capacity int, allowForkRuns bool) (*threads.RegisterResult, error) {
 	client := NewClient(serverURL, "")
-	return client.Register(ctx, regToken, name, labels)
+	return client.Register(ctx, regToken, name, labels, capacity, allowForkRuns)
 }

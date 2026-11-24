@@ -9,6 +9,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 )
@@ -22,10 +23,11 @@ type Packet = Progress
 // ring so late attachers get history. A subscriber channel is owned and
 // closed by Unsubscribe only.
 type Broadcast[T any] struct {
-	mu   sync.Mutex
-	subs map[uint64]chan T
-	next uint64
-	buf  []T // replay ring (200)
+	mu     sync.Mutex
+	subs   map[uint64]chan T
+	next   uint64
+	buf    []T // replay ring (200)
+	closed bool
 }
 
 const (
@@ -44,10 +46,35 @@ func (b *Broadcast[T]) Subscribe() (id uint64, ch <-chan T, replay []T) {
 	id = b.next
 	b.next++
 	c := make(chan T, bcastSubCap)
+	if b.closed {
+		// The owner closed the stream between the caller's lookup and this
+		// Subscribe: hand back a closed channel (the reader ends) instead of
+		// a channel nobody will ever send on or close.
+		close(c)
+		return id, c, nil
+	}
 	b.subs[id] = c
 	replay = make([]T, len(b.buf))
 	copy(replay, b.buf)
 	return id, c, replay
+}
+
+// Close ends the stream: every subscriber channel is closed and the replay
+// ring is dropped. Later Subscribe calls get a closed channel; Send is a
+// no-op. The task table closes a task's drone when its record is evicted, so
+// an attached SSE reader ends instead of leaking on a channel nobody owns.
+func (b *Broadcast[T]) Close() {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.closed {
+		return
+	}
+	b.closed = true
+	for id, c := range b.subs {
+		close(c)
+		delete(b.subs, id)
+	}
+	b.buf = nil
 }
 
 // Unsubscribe closes and removes the subscriber's channel.
@@ -66,6 +93,9 @@ func (b *Broadcast[T]) Unsubscribe(id uint64) {
 func (b *Broadcast[T]) Send(v T) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
+	if b.closed {
+		return
+	}
 	b.buf = append(b.buf, v)
 	if len(b.buf) > bcastReplayLen {
 		b.buf = b.buf[len(b.buf)-bcastReplayLen:]
@@ -86,6 +116,7 @@ type TaskTable struct {
 	running  map[string]*runningTask  // key "repo/kind"
 	recent   map[string][]*TaskRecord // per repo ring (30)
 	byID     map[string]*TaskRecord
+	drones   map[string]*Broadcast[Packet] // per-task packet stream, keyed by task id
 	hostname string
 	ctx      context.Context // registry lifetime; cancel = drain phase 1
 	drainMu  sync.Mutex
@@ -106,6 +137,7 @@ func newTaskTable(hostname string, ctx context.Context) *TaskTable {
 		running:  map[string]*runningTask{},
 		recent:   map[string][]*TaskRecord{},
 		byID:     map[string]*TaskRecord{},
+		drones:   map[string]*Broadcast[Packet]{},
 		hostname: hostname,
 		ctx:      ctx,
 	}
@@ -113,32 +145,34 @@ func newTaskTable(hostname string, ctx context.Context) *TaskTable {
 
 // Task is the reporter handed to a running task body.
 type Task struct {
-	mu    sync.Mutex // guards rec (Notice/Progress/Record run on parallel workers)
+	// rec is shared with the table (readers, the terminal transition), so ONE
+	// lock guards it: the table's mu. Task never takes a lock of its own — a
+	// second mutex over the same record was a real data race (Notice/Progress
+	// under Task.mu vs Get/Running under TaskTable.mu).
 	rec   *TaskRecord
 	table *TaskTable
 	ctx   context.Context
 	bcast *Broadcast[Packet]
-	alarm *time.Timer // bounded-watchdog safety: task hard cap handled by ctx
 }
 
 // Ctx is the task's context — canceled by drain (phase 1) or registry close.
 func (t *Task) Ctx() context.Context { return t.ctx }
 
-// Record returns the live record (callers copy).
+// Record returns a copy of the live record.
 func (t *Task) Record() TaskRecord {
-	t.mu.Lock()
-	defer t.mu.Unlock()
+	t.table.mu.Lock()
+	defer t.table.mu.Unlock()
 	return *t.rec
 }
 
 // Notice publishes a notice packet and appends to the record's log tail (60).
 func (t *Task) Notice(text string) {
-	t.mu.Lock()
+	t.table.mu.Lock()
 	t.rec.LogTail = append(t.rec.LogTail, text)
 	if len(t.rec.LogTail) > 60 {
 		t.rec.LogTail = t.rec.LogTail[len(t.rec.LogTail)-60:]
 	}
-	t.mu.Unlock()
+	t.table.mu.Unlock()
 	t.bcast.Send(Packet{Kind: "notice", Text: text})
 	t.table.publishRecord(t)
 }
@@ -159,18 +193,19 @@ func (t *Task) Progress(label string, done, total uint64, unit string) {
 		pct := float64(done) / float64(total) * 100
 		p.Percent = &pct
 	}
-	t.mu.Lock()
 	if p.Total != nil { // the record's snapshot keeps the latest bar with a total
+		t.table.mu.Lock()
 		t.rec.Progress = &p
+		t.table.mu.Unlock()
 	}
-	t.mu.Unlock()
 	t.bcast.Send(p)
-
 }
 
-// publishRecord mirrors the record into the repo broadcast (task packet).
+// publishRecord mirrors the record into the task's broadcast (task packet).
 func (t *TaskTable) publishRecord(task *Task) {
+	t.mu.Lock()
 	rec := *task.rec
+	t.mu.Unlock()
 	task.bcast.Send(Packet{Kind: "task", Task: &rec})
 }
 
@@ -219,6 +254,7 @@ func (t *TaskTable) Run(ctx context.Context, repo, kind string, params map[strin
 		}
 		t.running[key] = rt
 		t.byID[rt.rec.ID] = rt.rec
+		t.drones[rt.rec.ID] = rt.drone
 		t.mu.Unlock()
 
 		task := &Task{rec: rt.rec, table: t, ctx: runCtx, bcast: rt.drone}
@@ -299,11 +335,99 @@ func (t *TaskTable) Running(repo, kind string) *TaskRecord {
 	return &cp
 }
 
-// Get returns a task record by id (janitor evicts finished records after 1h).
+// RunningFor returns copies of every live record for repo, whatever the kind
+// (sorted by start time). The task listing uses it: a kind added after the
+// listing was written (repo-transfer) must still be visible while it runs, and
+// "running" is not derivable from the finished-recent ring.
+func (t *TaskTable) RunningFor(repo string) []*TaskRecord {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	out := make([]*TaskRecord, 0, len(t.running))
+	prefix := repo + "/"
+	for key, rt := range t.running {
+		if !strings.HasPrefix(key, prefix) {
+			continue
+		}
+		cp := *rt.rec
+		out = append(out, &cp)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Started < out[j].Started })
+	return out
+}
+
+// Get returns a copy of a task record by id (janitor evicts finished records
+// after 1h). The copy matters: the owning goroutine mutates the live record
+// under the table lock, so handing the pointer out would race every reader
+// (the same reason Running copies).
 func (t *TaskTable) Get(id string) *TaskRecord {
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	return t.byID[id]
+	rec := t.byID[id]
+	if rec == nil {
+		return nil
+	}
+	cp := *rec
+	return &cp
+}
+
+// Subscribe attaches to one task's packet stream BY ID — the handle-free
+// attach path law 7 requires. The leader's own drone already carries every
+// notice/progress/task packet, so a client can follow a task whose repository
+// handle is gone: the `repo-transfer` task tears its source handle down before
+// the copy pass (PLAN-V2 §T.1), which would strand an attach routed through
+// RepoHandle.Progress().
+//
+// ok=false when the id is unknown or its record was janitor-evicted; the
+// caller then answers 404. The replay ring serves a late attacher the
+// narration it missed. The returned channel is closed by Unsubscribe or by
+// the janitor's eviction (Broadcast.Close), never by the reader.
+func (t *TaskTable) Subscribe(id string) (subID uint64, ch <-chan Packet, replay []Packet, ok bool) {
+	t.mu.Lock()
+	d := t.drones[id]
+	t.mu.Unlock()
+	if d == nil {
+		return 0, nil, nil, false
+	}
+	subID, ch, replay = d.Subscribe()
+	return subID, ch, replay, true
+}
+
+// Unsubscribe releases one Subscribe attachment (idempotent: a janitor
+// eviction between the two calls makes it a no-op).
+func (t *TaskTable) Unsubscribe(id string, subID uint64) {
+	t.mu.Lock()
+	d := t.drones[id]
+	t.mu.Unlock()
+	if d != nil {
+		d.Unsubscribe(subID)
+	}
+}
+
+// evictFinished drops records (and their packet drones) finished before cut.
+// Split out of the janitor so the eviction — including the drone Close that
+// ends a late attacher's stream — is testable without waiting five minutes.
+func (t *TaskTable) evictFinished(cut time.Time) int {
+	limit := cut.UTC().Format(time.RFC3339Nano)
+	var evicted []*Broadcast[Packet]
+	n := 0
+	t.mu.Lock()
+	for id, rec := range t.byID {
+		if rec.Finished != "" && rec.Finished < limit {
+			delete(t.byID, id)
+			n++
+			if d := t.drones[id]; d != nil {
+				delete(t.drones, id)
+				evicted = append(evicted, d)
+			}
+		}
+	}
+	t.mu.Unlock()
+	// Close off-lock (Broadcast.Close closes subscriber channels, and a reader
+	// may be mid-Send/Unsubscribe); nothing here touches the table.
+	for _, d := range evicted {
+		d.Close()
+	}
+	return n
 }
 
 // janitor evicts finished records after 1 h (§5.8 by_id janitor).
@@ -315,14 +439,7 @@ func (t *TaskTable) janitor(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-tk.C:
-			cut := time.Now().Add(-time.Hour).Format(time.RFC3339Nano)
-			t.mu.Lock()
-			for id, rec := range t.byID {
-				if rec.Finished != "" && rec.Finished < cut {
-					delete(t.byID, id)
-				}
-			}
-			t.mu.Unlock()
+			t.evictFinished(time.Now().Add(-time.Hour))
 		}
 	}
 }

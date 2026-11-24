@@ -12,13 +12,13 @@ import (
 	"github.com/crueber/spindle/internal/server/auth"
 )
 
-// setupGroupServer wires an oidc-mode server with the WP13 defaults:
-// admin_groups ["spindle-admins"], groups_claim "groups", allowed domain
-// example.com. mutate runs before the AuthService is (re)built.
+// setupGroupServer wires an OIDC server with the defaults: admin_groups
+// ["spindle-admin"], groups_claim "groups", allowed domain example.com.
+// mutate runs before the AuthService is (re)built.
 func setupGroupServer(t *testing.T, mutate func(*config.Auth)) (*Server, http.Handler, *stubIssuer) {
 	t.Helper()
 	s, h, iss := oidcFull(t)
-	s.cfg.Server.Auth.AdminGroups = []string{"spindle-admins"}
+	s.cfg.Server.Auth.AdminGroups = []string{"spindle-admin"}
 	s.cfg.Server.Auth.GroupsClaim = "groups"
 	if mutate != nil {
 		mutate(&s.cfg.Server.Auth)
@@ -72,25 +72,25 @@ func TestSetupAccessOIDCAdminGroups(t *testing.T) {
 		denied bool
 	}{
 		{"group member", nil, "dev@example.com",
-			map[string]any{"groups": []string{"spindle-admins"}}, http.StatusOK, true, true, false},
+			map[string]any{"groups": []string{"spindle-admin"}}, http.StatusOK, true, true, false},
 		{"other group", nil, "dev@example.com",
 			map[string]any{"groups": []string{"other"}}, http.StatusForbidden, false, true, false},
 		{"claim absent", nil, "dev@example.com", nil, http.StatusForbidden, false, true, false},
 		{"case-insensitive", nil, "dev@example.com",
-			map[string]any{"groups": []string{"Spindle-Admins"}}, http.StatusOK, true, true, false},
+			map[string]any{"groups": []string{"Spindle-Admin"}}, http.StatusOK, true, true, false},
 		{"single string claim", nil, "dev@example.com",
-			map[string]any{"groups": "spindle-admins"}, http.StatusOK, true, true, false},
+			map[string]any{"groups": "spindle-admin"}, http.StatusOK, true, true, false},
 		{"configured claim name", func(a *config.Auth) { a.GroupsClaim = "roles" },
-			"dev@example.com", map[string]any{"roles": []string{"spindle-admins"}},
+			"dev@example.com", map[string]any{"roles": []string{"spindle-admin"}},
 			http.StatusOK, true, true, false},
-		{"empty admin_groups never grants", func(a *config.Auth) { a.AdminGroups = nil },
-			"dev@example.com", map[string]any{"groups": []string{"spindle-admins"}},
+		{"empty admin_groups never grants (unit-level; boot refuses it)", func(a *config.Auth) { a.AdminGroups = nil },
+			"dev@example.com", map[string]any{"groups": []string{"spindle-admin"}},
 			http.StatusForbidden, false, true, false},
 		{"groups do not grant write", func(a *config.Auth) { a.WriteDomains = []string{"writers.test"} },
-			"dev@example.com", map[string]any{"groups": []string{"spindle-admins"}},
+			"dev@example.com", map[string]any{"groups": []string{"spindle-admin"}},
 			http.StatusOK, true, false, false},
 		{"email policy still applies", nil, "dev@notallowed.test",
-			map[string]any{"groups": []string{"spindle-admins"}}, http.StatusForbidden, false, false, true},
+			map[string]any{"groups": []string{"spindle-admin"}}, http.StatusForbidden, false, false, true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -123,17 +123,13 @@ func TestSetupAccessOIDCAdminGroups(t *testing.T) {
 
 // A group admin keeps the flag across the browser session path: the verified
 // groups ride the walgit session wire, and the policy is re-applied per
-// request. Admin email/domain rules keep working alongside groups, and a
-// legacy 4-line session (no groups) stays valid.
-func TestSetupAccessGroupsAcrossSessionAndEmailRules(t *testing.T) {
-	s, h, _ := setupGroupServer(t, func(a *config.Auth) {
-		a.AllowedDomains = []string{"example.com", "admins.test"}
-		a.AdminEmails = []string{"boss@example.com"}
-		a.AdminDomains = []string{"admins.test"}
-	})
+// request. A legacy 4-line session (no groups) stays valid and carries no
+// admin.
+func TestSetupAccessGroupsAcrossSession(t *testing.T) {
+	s, h, _ := setupGroupServer(t, nil)
 
 	// Group admin through the session cookie (what a real browser carries).
-	sess, err := s.authSvc.MintSession("dev@example.com", "spindle-admins")
+	sess, err := s.authSvc.MintSession("dev@example.com", "spindle-admin")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -145,7 +141,7 @@ func TestSetupAccessGroupsAcrossSessionAndEmailRules(t *testing.T) {
 		t.Fatalf("group-admin session = %d (%s)", rec.Code, rec.Body.String())
 	}
 	// And through a minted wgt_ access token.
-	tok, _ := s.authSvc.MintToken("dev@example.com", "spindle-admins")
+	tok, _ := s.authSvc.MintToken("dev@example.com", "spindle-admin")
 	if rec := setupGet(t, h, "Bearer "+tok.Wire); rec.Code != http.StatusOK {
 		t.Fatalf("group-admin wgt_ token = %d", rec.Code)
 	}
@@ -159,21 +155,24 @@ func TestSetupAccessGroupsAcrossSessionAndEmailRules(t *testing.T) {
 		t.Fatalf("non-admin session = %d, want 403", rec.Code)
 	}
 
-	// Admin email and admin domain still grant admin (migration path).
-	for _, email := range []string{"boss@example.com", "any@admins.test"} {
-		sess, _ := s.authSvc.MintSession(email)
-		p, aerr := s.authSvc.principalFromEmailGroups(email, nil)
-		if aerr != nil || !p.Admin {
-			t.Fatalf("%s admin = %+v aerr=%v", email, p, aerr)
-		}
-		req := httptest.NewRequest("GET", "http://x/api/v1/setup", nil)
-		req.AddCookie(&http.Cookie{Name: "walgit_session", Value: sess.Wire})
-		rec := httptest.NewRecorder()
-		h.ServeHTTP(rec, req)
-		if rec.Code != http.StatusOK {
-			t.Fatalf("%s session = %d", email, rec.Code)
-		}
+	// The predicate is the GROUP intersection, nothing else: an admitted
+	// address with no group claim is a plain user.
+	plainEmail, aerr := s.authSvc.principalFromEmailGroups("boss@example.com", nil, time.Time{})
+	if aerr != nil || plainEmail.Admin {
+		t.Fatalf("email without groups must not be admin: %+v aerr=%v", plainEmail, aerr)
 	}
+	// The admin policy is re-applied per request: the same session loses
+	// admin as soon as admin_groups changes.
+	s.cfg.Server.Auth.AdminGroups = []string{"other-group"}
+	s.authSvc = NewAuthService(&s.cfg.Server.Auth, s.Now)
+	req = httptest.NewRequest("GET", "http://x/api/v1/setup", nil)
+	req.AddCookie(&http.Cookie{Name: "walgit_session", Value: sess.Wire})
+	rec = httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("revoked group session = %d, want 403", rec.Code)
+	}
+	s.cfg.Server.Auth.AdminGroups = []string{"spindle-admin"}
 
 	// A 4-line session minted before groups existed still verifies.
 	exp := time.Now().Add(time.Hour).Unix()

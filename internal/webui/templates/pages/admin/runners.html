@@ -1,0 +1,251 @@
+{{/* pages/admin/runners.html — GET/POST /admin/runners
+   (docs/PLAN-INSTANCE-RUNNERS.md §5).
+
+   An instance runner is infrastructure: a host administrator mints a one-time
+   registration token here AND sets the runner's repository tenancy policy — all
+   repositories, or a bounded list of owner/name and owner/* patterns. The policy
+   is the admin's: the runner protocol has no field for it, so a runner can never
+   widen what it is offered.
+
+   The page is three server-rendered views (Fleet · Mint token · Security policy,
+   ?tab= links, Fleet the default), so every view is a deep link and works with
+   no JS. The fleet is a responsive GRID of one card per runner — every fact the
+   old ten-column table carried stays visible, and a long repository policy wraps
+   in its card instead of being clipped or panned to at ~390 px. The one-time
+   token is rendered in place, once — never a redirect, never a URL. A registered
+   runner's policy is changed in place (the card's "change policy…" form,
+   POST /admin/runners/policy) — no revoke and re-mint, no interruption of the
+   job the runner is on; revoke asks for typed confirmation. */}}
+{{define "content"}}
+<div class="admin-page" id="admin-page" data-admin-section="runners">
+  <div class="flex flex-col gap-4 lg:flex-row lg:gap-6">
+    {{template "admin-nav" .Data}}
+
+    <div class="min-w-0 flex-1">
+      {{template "admin-header" .Data}}
+
+      {{if .Data.Denied}}
+        {{template "admin-denied" .Data}}
+      {{else}}
+        {{if .Data.Restricted}}{{template "admin-restricted" .}}{{end}}
+        {{template "admin-banners" .Data}}
+
+        {{with .Data.Runners}}
+        {{/* View switch inside the Administration area: the area side-nav keeps
+             the page's aria-current="page" for the Runners section, and this
+             strip marks the active view with its own aria-current. It scrolls
+             internally if the three labels ever exceed a narrow viewport
+             (min-w-0 + overflow-x-auto), never the page. */}}
+        <nav class="mb-4 min-w-0 overflow-x-auto" aria-label="Runner views">
+          <div class="flex w-max gap-1">
+            <a class="side-nav-item w-auto" href="{{.FleetTabURL}}"{{if eq .Tab "fleet"}} aria-current="page"{{end}}>Fleet</a>
+            <a class="side-nav-item w-auto" href="{{.MintTabURL}}"{{if eq .Tab "mint"}} aria-current="page"{{end}}>Mint token</a>
+            <a class="side-nav-item w-auto" href="{{.SecurityTabURL}}"{{if eq .Tab "security"}} aria-current="page"{{end}}>Security policy</a>
+          </div>
+        </nav>
+
+        {{if eq .Tab "fleet"}}
+        {{/* ---- Fleet: one card per runner, responsive grid ---- */}}
+        <section aria-labelledby="admin-runner-fleet">
+          <div class="mb-3 flex flex-wrap items-center gap-2">
+            <h2 class="text-xl font-semibold tracking-tight" id="admin-runner-fleet">Fleet</h2>
+            <span class="chip chip-draft">{{len .Rows}}</span>
+          </div>
+          {{if .PolicyError}}<p class="err-line mb-3" id="admin-runner-policy-error" role="alert">{{.PolicyError}}</p>{{end}}
+          {{if not .Wired}}
+          <div class="card p-4"><p class="muted text-sm">{{if .Error}}{{.Error}}{{else}}The Threads runner service is not wired on this build.{{end}}</p></div>
+          {{else if .Rows}}
+          <div class="grid gap-3 md:grid-cols-2 xl:grid-cols-3" id="admin-runner-grid">
+            {{range .Rows}}{{template "admin_runner_card" .}}{{end}}
+          </div>
+          {{else}}
+          {{template "collab_empty" dict "icon" "file" "title" "No runners are registered" "hint" "Mint a registration token, then start a host with spindle runner serve --register. The runner appears here when it registers, with its labels, capacity and current job." "href" .MintTabURL "label" "Mint a registration token"}}
+          {{end}}
+        </section>
+        {{end}}
+
+        {{if eq .Tab "mint"}}
+        {{/* ---- Mint: the one-time token + the mint form ---- */}}
+        <section class="space-y-4" aria-labelledby="admin-runner-mint">
+          {{if .NewRunnerToken}}
+          <div class="card border-l-2 border-l-[var(--pd-warn)] p-3 text-sm" id="admin-runner-token-card">
+            <strong class="font-semibold">Copy now — shown once and expires.</strong>
+            <p class="mt-1 break-all mono text-xs" id="admin-runner-registration-token">{{.NewRunnerToken}}</p>
+            <button type="button" class="btn mt-2" data-copy="#admin-runner-registration-token">copy</button>
+            <p class="muted mt-1 text-[11px]">Expires {{.Expires}}. Pass it to
+              <code class="mono text-xs">spindle runner serve --register</code>; it cannot be read back.</p>
+          </div>
+          {{end}}
+
+          {{if not .Wired}}
+          <div class="card p-4"><p class="muted text-sm">{{if .Error}}{{.Error}}{{else}}The Threads runner service is not wired on this build.{{end}}</p></div>
+          {{else}}
+          <form class="card p-4" method="post" action="/admin/runners" aria-labelledby="admin-runner-mint">
+            <h2 class="card-header" id="admin-runner-mint">Mint a registration token</h2>
+            <label class="mb-1 block text-sm font-medium" for="admin-runner-name">Runner name (optional)</label>
+            <input class="input w-full md:max-w-md" id="admin-runner-name" name="name" type="text"
+                   maxlength="100" placeholder="build-01" autocomplete="off">
+            <p class="muted mt-1 text-[11px]">Single use, 15 minutes. The runner declares its own labels and
+              capacity at registration. Only a host administrator can mint one.</p>
+
+            <fieldset class="mt-3" aria-describedby="admin-runner-policy-help">
+              <legend class="text-sm font-medium">Repository policy</legend>
+              <label class="mt-1 flex items-start gap-2" for="admin-runner-allow-all">
+                <input type="checkbox" id="admin-runner-allow-all" name="allow_all" value="1"
+                       class="mt-0.5 h-4 w-4 check"{{if .AllowAll}} checked{{end}}>
+                <span>
+                  <span class="block text-sm">All repositories</span>
+                  <span class="muted block text-[11px]">This runner may be offered a job from any repository
+                    on this instance, including private ones.</span>
+                </span>
+              </label>
+              <label class="mt-2 block text-sm font-medium" for="admin-runner-repos">…or only these repositories</label>
+              <textarea class="input mono mt-1 w-full md:max-w-md" id="admin-runner-repos" name="repos" rows="2"
+                        autocomplete="off" placeholder="acme/mono, acme/*">{{.ReposText}}</textarea>
+              <p class="muted mt-1 text-[11px]"><code class="mono">owner/name</code> allows one repository,
+                <code class="mono">owner/*</code> allows every repository of that owner; one per line or comma
+                separated, at most 50. Leave both empty and nothing is minted — a token that could never be
+                offered a job is a mistake, not a default.</p>
+              <p class="muted mt-1 text-[11px]" id="admin-runner-policy-help">The runner cannot change its
+                policy: the protocol carries labels, capacity and the fork opt-in only. A registered runner's
+                policy is changed in place on the Fleet card (audited; its current job keeps running).
+                The policy decides which repositories a host is offered — it does not contain the code that
+                runs there.</p>
+            </fieldset>
+
+            {{if .MintWired}}
+            <div class="mt-2"><button type="submit" class="btn primary whitespace-nowrap">mint token</button></div>
+            {{else}}
+            <p class="muted mt-2 text-sm">Minting is not wired on this build: the runner service is unavailable,
+              so no token can be issued.</p>
+            {{end}}
+            {{if .Error}}<p class="err-line" role="alert">{{.Error}}</p>{{end}}
+          </form>
+          {{end}}
+        </section>
+        {{end}}
+
+        {{if eq .Tab "security"}}
+        {{/* ---- Security policy (read-only; the editor is Configuration) ---- */}}
+        <section class="card p-4" aria-labelledby="admin-runner-security">
+          <h2 class="card-header" id="admin-runner-security">Runner security</h2>
+          {{with $.Data.RunnerSecurity}}
+          {{if .Known}}
+          <div class="kv mt-1">
+            <div class="kv-row flex-wrap">
+              <span class="kv-key"><a class="link mono text-xs" href="{{.AllowHref}}">threads.image_allow_prefixes</a></span>
+              <span class="kv-val break-words">{{.AllowText}}</span>
+            </div>
+            <div class="kv-row flex-wrap">
+              <span class="kv-key"><a class="link mono text-xs" href="{{.DigestHref}}">threads.image_require_digest</a></span>
+              <span class="kv-val break-words">{{.DigestText}}</span>
+            </div>
+          </div>
+          {{else}}
+          <p class="muted mt-1 text-sm">The effective configuration is not available, so the current image
+            policy cannot be reported.</p>
+          {{end}}
+          {{end}}
+          <div class="setup-note mt-3">
+            <p class="text-sm"><strong>The image policy is supply-chain hygiene, not a sandbox.</strong>
+              The runner host mounts the Docker daemon socket, so a job that reaches it is
+              root-equivalent infrastructure. Fork runs stay off unless the runner opted in, and the
+              allowlist/digest rule narrows which images a workflow may name — it does not contain
+              the code inside them.</p>
+            <p class="muted mt-1 text-sm"><strong>Repository policy is tenancy, not isolation.</strong>
+              A runner is offered only the repositories its minted policy allows, which keeps one
+              host's code off another team's repositories. It does not contain a job that reaches
+              the daemon: a runner with a socket is root-equivalent on its host, so run untrusted
+              code on a dedicated host (docs/threads.md §8.5, §8.7).</p>
+            <p class="muted mt-1 text-sm">Set both keys on
+              <a class="link" href="/admin/config#row-threads.image_allow_prefixes">Configuration</a>
+              (one save path; this card never edits). Background:
+              <a class="link" href="https://github.com/crueber/spindle/blob/main/docs/threads.md#83-capacity-and-isolation">docs/threads.md §8.3 — capacity and isolation</a>
+              · <a class="link" href="https://github.com/crueber/spindle/blob/main/docs/threads.md#86-mirroring-job-images">§8.6 — mirroring job images</a>.</p>
+          </div>
+        </section>
+        {{end}}
+        {{end}}
+      {{end}}
+    </div>
+  </div>
+</div>
+{{end}}
+
+{{/* admin_runner_card is ONE runner: every fact as labelled text (state is a
+     chip that carries its own word; fork trust, policy, capacity, last seen and
+     the current job are plain wrapping text — never colour or truncation
+     alone), then the two per-card actions. Params: AdminRunnerRow. */}}
+{{define "admin_runner_card"}}
+<article class="card flex min-w-0 flex-col p-4" id="admin-runner-card-{{.ID}}" aria-labelledby="admin-runner-name-{{.ID}}">
+  <div class="flex flex-wrap items-start justify-between gap-2">
+    <div class="min-w-0">
+      <h3 class="text-base font-semibold tracking-tight break-words" id="admin-runner-name-{{.ID}}">{{.Name}}</h3>
+      <p class="muted mono mt-0.5 text-[11px] break-all">{{.ID}}</p>
+    </div>
+    <span class="whitespace-nowrap {{.ChipClass}}">{{.ChipLabel}}</span>
+  </div>
+
+  <dl class="mt-3 grid grid-cols-[5.5rem_minmax(0,1fr)] gap-x-3 gap-y-1.5 text-xs">
+    <dt class="muted">labels</dt>
+    <dd class="min-w-0">
+      {{with .LabelChips}}<span class="flex flex-wrap gap-1">{{range .}}<span class="chip mono">{{.}}</span>{{end}}</span>{{else}}<span class="muted">none declared</span>{{end}}
+    </dd>
+
+    <dt class="muted">repository policy</dt>
+    <dd class="min-w-0 break-words" title="{{.PolicyTitle}}">{{.PolicyText}}</dd>
+
+    <dt class="muted">fork runs</dt>
+    <dd class="min-w-0">{{.ForkRunsText}}</dd>
+
+    <dt class="muted">capacity</dt>
+    <dd class="tabular">{{.Capacity}}</dd>
+
+    <dt class="muted">last seen</dt>
+    <dd class="mono break-words">{{.LastSeen}}</dd>
+
+    <dt class="muted">current job</dt>
+    <dd class="mono break-all">{{if .CurrentJob}}{{.CurrentJob}}{{else}}<span class="muted">—</span>{{end}}</dd>
+  </dl>
+
+  {{if not .IsRevoked}}
+  <div class="mt-3 flex flex-col gap-2 border-t border-[var(--pd-line)] pt-3">
+    {{if .PolicyWired}}
+    <details class="min-w-0"{{if .PolicyOpen}} open{{end}}>
+      <summary class="link inline-flex min-h-6 cursor-pointer items-center text-xs">change policy…</summary>
+      <form class="mt-2" method="post" action="/admin/runners/policy">
+        <input type="hidden" name="id" value="{{.ID}}">
+        <fieldset class="min-w-0"{{if .PolicyOpen}} aria-describedby="admin-runner-policy-error"{{end}}>
+          <legend class="mb-1 text-[11px] font-medium">Repository policy for {{.Name}} ({{.ID}})</legend>
+          <label class="flex items-start gap-2" for="admin-runner-policy-all-{{.ID}}">
+            <input type="checkbox" class="mt-0.5 h-4 w-4 check" id="admin-runner-policy-all-{{.ID}}"
+                   name="allow_all" value="1"{{if .PolicyAllowAll}} checked{{end}}>
+            <span class="text-[11px]">All repositories</span>
+          </label>
+          <label class="mt-1 block text-[11px]" for="admin-runner-policy-repos-{{.ID}}">…or only
+            these (<code class="mono">owner/name</code> or <code class="mono">owner/*</code>)</label>
+          <textarea class="input mono mt-1 w-full text-xs" id="admin-runner-policy-repos-{{.ID}}"
+                    name="repos" rows="3" autocomplete="off">{{.PolicyRepos}}</textarea>
+          <button type="submit" class="btn mt-2 text-xs">save policy</button>
+        </fieldset>
+      </form>
+    </details>
+    {{end}}
+    <details class="min-w-0">
+      <summary class="link inline-flex min-h-6 cursor-pointer items-center text-xs text-[var(--pd-danger)]" tabindex="0">revoke…</summary>
+      <form class="mt-2" method="post" action="/admin/runners/revoke"
+            data-danger-confirm="{{.ID}}">
+        <input type="hidden" name="id" value="{{.ID}}">
+        <label class="mb-1 block text-[11px]" for="admin-runner-confirm-{{.ID}}">Type <code class="mono">{{.ID}}</code></label>
+        <input class="input mono w-full text-xs" id="admin-runner-confirm-{{.ID}}" name="confirm"
+               type="text" autocomplete="off" data-danger-arm required>
+        <button type="submit" class="btn danger mt-1 text-xs" data-danger-submit disabled>revoke</button>
+      </form>
+    </details>
+  </div>
+  {{else}}
+  <p class="muted mt-3 border-t border-[var(--pd-line)] pt-3 text-[11px]">Revoked — its credential is dead, it
+    cannot be offered a job, and its policy can no longer be changed.</p>
+  {{end}}
+</article>
+{{end}}

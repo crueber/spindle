@@ -47,6 +47,7 @@ var activityActions = map[string]bool{
 	ActionReopened: true, ActionAssigned: true, ActionReviewRequested: true,
 	ActionReviewPosted: true, ActionCheckReported: true,
 	ActionReleasePublished: true, ActionMentioned: true, ActionPing: true,
+	ActionModerationReported: true,
 }
 
 // --- hook ids (ULID, lowercase per §1.4) -----------------------------------------
@@ -104,12 +105,16 @@ func validateHookURL(raw string) error {
 }
 
 // validateHookEvents enforces the action filter ([] = all; "*" wildcard).
+// Repo hooks accept the collaboration actions plus the push topic family
+// (push.go); org hooks validate against orgActions|activityActions only, so
+// they cannot subscribe to push (there is no repository to push to at org
+// scope).
 func validateHookEvents(events []string) error {
 	for _, e := range events {
 		if e == "*" {
 			continue
 		}
-		if !activityActions[e] {
+		if !activityActions[e] && !pushTopics[e] {
 			return fmt.Errorf("%w: unknown webhook event %q", ErrInvalid, e)
 		}
 	}
@@ -126,13 +131,19 @@ func isLoopbackHost(host string) bool {
 	return false
 }
 
-// hookMatches reports whether the events filter selects action.
+// hookMatches reports whether the events filter selects action. The "push"
+// topic is the umbrella for the whole push/ref family, so a hook subscribed to
+// "push" receives branch.created as well as a bare push event on a non-branch
+// ref.
 func hookMatches(events []string, action string) bool {
 	if len(events) == 0 {
 		return true
 	}
 	for _, e := range events {
 		if e == "*" || e == action {
+			return true
+		}
+		if e == TopicPush && pushTopics[action] {
 			return true
 		}
 	}
@@ -416,9 +427,7 @@ func (s *Service) DeliverRepo(ctx context.Context, owner, repo string) {
 loop:
 	for _, h := range active {
 		h := h
-		select {
-		case sem <- struct{}{}:
-		case <-ctx.Done():
+		if !acquireFanoutSlot(ctx, sem) {
 			break loop // stop launching; still Wait for in-flight below
 		}
 		wg.Add(1)

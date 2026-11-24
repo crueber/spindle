@@ -138,19 +138,23 @@ func TestEventsNotify(t *testing.T) {
 // TestPageRoutesGoToProvider: the browser page tree is answered by the page
 // provider (internal/pages seam) — /, /explore, /how-it-works, /{owner},
 // /{owner}/{repo}, the /{owner}/{repo}/<page> shapes, /{owner}/teams/{slug}
-// and /setup. The server owns the shape (method gates, reservations) and the
-// provider owns the rendering and gating.
+// and the Administration area (/admin, /admin/config, …). The server owns the
+// shape (method gates, reservations) and the provider owns the rendering and
+// gating.
 func TestPageRoutesGoToProvider(t *testing.T) {
 	ui := &fakeUI{paths: map[string]bool{
-		"/":                true,
-		"/explore":         true,
-		"/how-it-works":    true,
-		"/setup":           true,
-		"/alice":           true,
-		"/o/r":             true,
-		"/o/r/tree/main":   true,
-		"/acme/teams/core": true,
-		"/api":             true,
+		"/":                  true,
+		"/explore":           true,
+		"/how-it-works":      true,
+		"/admin":             true,
+		"/admin/config":      true,
+		"/admin/access":      true,
+		"/admin/maintenance": true,
+		"/alice":             true,
+		"/o/r":               true,
+		"/o/r/tree/main":     true,
+		"/acme/teams/core":   true,
+		"/api":               true,
 	}}
 	s, h := newTestServer(t, func(o *Options) { o.API = &fakeAPI{} })
 	s.SetUI(ui)
@@ -163,7 +167,8 @@ func TestPageRoutesGoToProvider(t *testing.T) {
 	}
 	for _, url := range []string{
 		"http://x/", "http://x/explore", "http://x/explore?format=text",
-		"http://x/how-it-works", "http://x/setup", "http://x/alice",
+		"http://x/how-it-works", "http://x/admin", "http://x/admin/config",
+		"http://x/admin/access", "http://x/admin/maintenance", "http://x/alice",
 		"http://x/o/r", "http://x/o/r/tree/main", "http://x/acme/teams/core",
 	} {
 		rec := do("GET", url)
@@ -206,7 +211,7 @@ func TestPageRoutesGoToProvider(t *testing.T) {
 func TestPageRoutes404WithoutProvider(t *testing.T) {
 	_, h := newTestServer(t, nil)
 	for _, url := range []string{
-		"http://x/", "http://x/explore", "http://x/how-it-works", "http://x/setup",
+		"http://x/", "http://x/explore", "http://x/how-it-works", "http://x/admin",
 		"http://x/alice", "http://x/o/r", "http://x/o/r/tree",
 	} {
 		req := httptest.NewRequest("GET", url, nil)
@@ -247,7 +252,6 @@ func TestSetupJSONRecipes(t *testing.T) {
 	}
 	// oidc mode exposes the token URL; there is no CA URL anymore (#165:
 	// TLS terminates at the reverse proxy, never in-process).
-	s.cfg.Server.Auth.Mode = "oidc"
 	rec = httptest.NewRecorder()
 	s.setupJSON(rec, req)
 	if !strings.Contains(rec.Body.String(), "/_auth/tokens") {
@@ -362,6 +366,12 @@ func TestCompressBypassesImages(t *testing.T) {
 	}
 	if rec := run("text/event-stream"); rec.Header().Get("Content-Encoding") == "gzip" {
 		t.Fatal("SSE must bypass gzip")
+	}
+	// Opaque byte streams bypass too: a runner verifies a blob's recorded
+	// length against Content-Length, which a gzip hop deletes (Threads
+	// artifacts, 15 §2.5).
+	if rec := run("application/octet-stream"); rec.Header().Get("Content-Encoding") == "gzip" {
+		t.Fatal("application/octet-stream must bypass gzip")
 	}
 	if rec := run("text/html; charset=utf-8"); rec.Header().Get("Content-Encoding") != "gzip" {
 		t.Fatal("text/html must still gzip")

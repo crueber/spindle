@@ -82,11 +82,16 @@ export function attach(el, open = connect, fetchImpl = globalThis.fetch) {
   const url = el.getAttribute("data-threadlog-url");
   if (!url) return null;
   const state = { touched: false, last: 0, stopped: false, failures: 0, live: false };
+  // aria-busy while the panel is still loading (live tail or replay); every
+  // terminal path (done frame, fallback, cancel, replay error) clears it via
+  // stop() or the explicit removes below. No-JS pages never set it.
+  el.setAttribute("aria-busy", "true");
   let handle = null;
   let done = false;
 
   const stop = () => {
     state.stopped = true;
+    el.removeAttribute("aria-busy");
     if (handle) handle.cancel();
   };
 
@@ -148,11 +153,13 @@ export function attach(el, open = connect, fetchImpl = globalThis.fetch) {
       if (!state.touched) el.textContent = page.state && isTerminal(page.state) ? `(no log output · ${page.state})` : "(no log output yet)";
       if (isTerminal(page.state)) {
         done = true;
+        el.removeAttribute("aria-busy");
         return;
       }
     } catch (err) {
       el.textContent = `(log unavailable: ${err && err.message ? err.message : err})`;
       done = true;
+      el.removeAttribute("aria-busy");
       return;
     }
     tail();
@@ -162,6 +169,7 @@ export function attach(el, open = connect, fetchImpl = globalThis.fetch) {
   return {
     cancel() {
       state.stopped = true;
+      el.removeAttribute("aria-busy");
       if (handle) handle.cancel();
     },
   };

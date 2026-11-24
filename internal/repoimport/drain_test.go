@@ -17,20 +17,39 @@ import (
 
 // hangingGitBinary installs a git stand-in that hangs forever on clone
 // (exec-replaced sleep, so CommandContext SIGKILL reaps it — no orphan
-// grandchildren) and delegates every other argv to the real git.
-func hangingGitBinary(t *testing.T) string {
+// grandchildren) and delegates every other argv to the real git. It writes
+// startedMarker before it hangs so the caller can gate on the leader
+// actually being inside the clone instead of sleeping and hoping.
+func hangingGitBinary(t *testing.T, startedMarker string) string {
 	t.Helper()
 	dir := t.TempDir()
 	path := filepath.Join(dir, "hang-git")
 	script := "#!/bin/sh\n" +
 		"for a in \"$@\"; do\n" +
-		"  if [ \"$a\" = \"clone\" ]; then exec sleep 300; fi\n" +
+		"  if [ \"$a\" = \"clone\" ]; then\n" +
+		"    : > '" + startedMarker + "'\n" +
+		"    exec sleep 300\n" +
+		"  fi\n" +
 		"done\n" +
 		"exec git \"$@\"\n"
 	if err := os.WriteFile(path, []byte(script), 0o755); err != nil {
 		t.Fatal(err)
 	}
 	return path
+}
+
+// waitFile polls for path to exist (the fixture's own signal that a
+// subprocess reached a named point) or fails the test at the deadline.
+func waitFile(t *testing.T, path string, timeout time.Duration) {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		if _, err := os.Stat(path); err == nil {
+			return
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	t.Fatalf("%s never appeared within %v (the fixture never reached that point)", path, timeout)
 }
 
 // waitRunning polls until the service holds the target's running entry
@@ -56,7 +75,8 @@ func waitRunning(t *testing.T, svc *Service, target string, timeout time.Duratio
 func TestDrainCancelsHangingImport(t *testing.T) {
 	cfg := testConfig(t)
 	svc, st := testService(t, cfg, &FakeRoles{})
-	svc.git.Binary = hangingGitBinary(t)
+	cloneStarted := filepath.Join(t.TempDir(), "clone-started")
+	svc.git.Binary = hangingGitBinary(t, cloneStarted)
 
 	res, _, err := svc.Begin(context.Background(), adminPrincipal(), fileParams("acme", "drain", "file:///hang.git"), "")
 	if err != nil {
@@ -66,9 +86,10 @@ func TestDrainCancelsHangingImport(t *testing.T) {
 		t.Fatalf("Begin = %+v, want 202 task", res)
 	}
 	waitRunning(t, svc, "acme/drain", 10*time.Second)
-	// Let the leader reach the hanging clone so this exercises a
-	// mid-clone cancel, not a pre-start refusal.
-	time.Sleep(2 * time.Second)
+	// Gate on the fixture's own marker: the wrapper writes it just before it
+	// hangs on clone, so this exercises a mid-clone cancel, not a pre-start
+	// refusal, without a wall-clock sleep standing in for the guarantee.
+	waitFile(t, cloneStarted, 10*time.Second)
 
 	start := time.Now()
 	svc.reg.Tasks().Drain()

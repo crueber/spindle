@@ -241,7 +241,10 @@ func TestExposedCoversRoutes(t *testing.T) {
 	*cur = auth.Principal{Name: "writer", Admin: true}
 	run := e.mustCreate(t)[0]
 	jid := "j-build"
-	minted, merr := e.svc.MintRegistrationToken(ctx(), "o/r", *cur)
+	if _, perr := e.svc.PutEnvironment(ctx(), "o/r", "prod", EnvironmentInput{}, *cur); perr != nil {
+		t.Fatalf("create environment: %v", perr)
+	}
+	minted, merr := e.svc.MintRegistrationToken(ctx(), *cur, mintAllPolicy(""))
 	if merr != nil {
 		t.Fatalf("mint registration token: %v", merr)
 	}
@@ -263,11 +266,19 @@ func TestExposedCoversRoutes(t *testing.T) {
 		"/{owner}/{repo}/api/threads/{run}/deny":    {http.MethodPost, "/o/r/api/threads/" + run.ID + "/deny", false},
 		"/{owner}/{repo}/api/threads/{run}/jobs/{job}/log": {
 			http.MethodGet, "/o/r/api/threads/" + run.ID + "/jobs/" + jid + "/log?accept=json", false},
-		"/{owner}/{repo}/api/threads/runners":             {http.MethodGet, "/o/r/api/threads/runners", false},
-		"/{owner}/{repo}/api/threads/runners/tokens":      {http.MethodPost, "/o/r/api/threads/runners/tokens", false},
-		"/{owner}/{repo}/api/threads/runners/{id}":        {http.MethodDelete, "/o/r/api/threads/runners/" + minted.ID, false},
+		"/{owner}/{repo}/api/threads/{run}/artifacts":     {http.MethodGet, "/o/r/api/threads/" + run.ID + "/artifacts", false},
+		"/api/v1/admin/runners":                           {http.MethodGet, "/api/v1/admin/runners", false},
+		"/api/v1/admin/runners/tokens":                    {http.MethodPost, "/api/v1/admin/runners/tokens", false},
+		"/api/v1/admin/runners/{id}":                      {http.MethodDelete, "/api/v1/admin/runners/" + minted.ID, false},
+		"/api/v1/admin/runners/{id}/policy":               {http.MethodPost, "/api/v1/admin/runners/" + minted.ID + "/policy", false},
 		"/{owner}/{repo}/api/threads/secrets":             {http.MethodGet, "/o/r/api/threads/secrets", false},
 		"/{owner}/{repo}/api/threads/secrets/{name}":      {http.MethodPut, "/o/r/api/threads/secrets/TOKEN", false},
+		"/{owner}/{repo}/api/threads/environments":        {http.MethodGet, "/o/r/api/threads/environments", false},
+		"/{owner}/{repo}/api/threads/environments/{name}": {http.MethodPut, "/o/r/api/threads/environments/prod", false},
+		"/{owner}/{repo}/api/threads/environments/{name}/secrets": {
+			http.MethodGet, "/o/r/api/threads/environments/prod/secrets", false},
+		"/{owner}/{repo}/api/threads/environments/{name}/secrets/{secret}": {
+			http.MethodPut, "/o/r/api/threads/environments/prod/secrets/TOKEN", false},
 		"/api/v1/threads/runners/register":                {http.MethodPost, "/api/v1/threads/runners/register", true},
 		"/api/v1/threads/runners/declare":                 {http.MethodPost, "/api/v1/threads/runners/declare", true},
 		"/api/v1/threads/runners/fetch":                   {http.MethodPost, "/api/v1/threads/runners/fetch", true},
@@ -275,6 +286,13 @@ func TestExposedCoversRoutes(t *testing.T) {
 		"/api/v1/threads/jobs/{ref}/attempt/{n}/log":      {http.MethodPost, "/api/v1/threads/jobs/jr_x/attempt/1/log", true},
 		"/api/v1/threads/jobs/{ref}/attempt/{n}/complete": {http.MethodPost, "/api/v1/threads/jobs/jr_x/attempt/1/complete", true},
 		"/api/v1/threads/jobs/{ref}/attempt/{n}/cancel":   {http.MethodPost, "/api/v1/threads/jobs/jr_x/attempt/1/cancel", true},
+		"/api/v1/threads/jobs/{ref}/attempt/{n}/id-token": {http.MethodPost, "/api/v1/threads/jobs/jr_x/attempt/1/id-token", true},
+		"/api/v1/threads/jobs/{ref}/attempt/{n}/artifacts": {
+			http.MethodPost, "/api/v1/threads/jobs/jr_x/attempt/1/artifacts", true},
+		"/api/v1/threads/jobs/{ref}/attempt/{n}/artifacts/{name}": {
+			http.MethodGet, "/api/v1/threads/jobs/jr_x/attempt/1/artifacts/build", true},
+		"/api/v1/threads/jobs/{ref}/attempt/{n}/artifacts/{name}/blobs/{index}": {
+			http.MethodGet, "/api/v1/threads/jobs/jr_x/attempt/1/artifacts/build/blobs/0", true},
 	}
 	if len(samples) != len(ExposedTemplates) {
 		t.Fatalf("ExposedTemplates = %v (samples out of date)", ExposedTemplates)

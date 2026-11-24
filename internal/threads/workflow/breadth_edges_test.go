@@ -108,7 +108,7 @@ func TestFiresPullRequestAbsent(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if w.Fires("pull_request", "main") {
+	if w.Fires("pull_request", "main", "opened") {
 		t.Fatal("push-only workflow fired on pull_request")
 	}
 }

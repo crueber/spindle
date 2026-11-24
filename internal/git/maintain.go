@@ -210,7 +210,8 @@ func InstallCommitGraphBase(repo *LocalRepo, checksum string, data []byte) error
 //
 //	git commit-graph write --split --stdin-packs
 //
-// fed the pack idx names on stdin (close stdin, drain, Wait).
+// fed the pack names under objects/pack (`pack-<checksum>.idx`, one per
+// line; a bare `<checksum>.idx` fails) on stdin (close stdin, drain, Wait).
 func (l *Layer) FoldCommitGraphs(ctx context.Context, repo *LocalRepo, idxNames []string) error {
 	ctx, cancel := context.WithTimeout(ctx, l.MaintTTL)
 	defer cancel()

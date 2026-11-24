@@ -227,8 +227,9 @@ type Service struct {
 	// delimiter listing over repos/; composition may inject the registry.
 	Repos func(ctx context.Context) ([][2]string, error)
 
-	access *accessCache
-	teams  *teamCache
+	access   *accessCache
+	teams    *teamCache
+	accounts *accountCache // credential-boundary account state (§3.7)
 
 	// Generate renders one deterministic avatar SVG for a seed (the
 	// verified email). Forgejo #376: production is
@@ -258,17 +259,73 @@ type Service struct {
 	// report "" (system) with the subject in the title; invite paths
 	// carry the inviter/invitee they know.
 	OrgEvent func(ctx context.Context, org, action, actor, title string)
+
+	// Blocks is the moderation block gate consumers define for themselves
+	// (PLAN-V2 §M.5, the ChecksGate pattern; satisfied by
+	// *moderation.Service, nil = feature off). Identity consults it when an
+	// invitation would be created BY a principal who has blocked the
+	// subject: a block is bidirectional in invitations (the blocked user
+	// must not be pulled into the blocker's space, and the blocker must not
+	// use an invite to reach them). Nil allows — absence of the feature must
+	// not break invites.
+	Blocks BlockGate
+
+	// Tasks is the Seam 5 task table a repository move runs on (PLAN-V2
+	// §T.1; satisfied by *wal.TaskTable at composition, nil = no task
+	// surface so BeginTransfer answers 503 while the synchronous
+	// TransferRepo stays usable).
+	Tasks TaskRunner
+
+	// Serving is the serving-copy surface a move quiesces and verifies
+	// (satisfied by *wal.Registry; nil skips those steps).
+	Serving Serving
+
+	// Forks rewrites the fork pointer families outside the moved prefix
+	// (satisfied by *pulls.Service; nil = no fork surface on this build).
+	Forks ForkMover
+
+	// Packages invalidates the OCI registry's per-repo sweep bookkeeping
+	// after a move (satisfied by *packages.Service; nil = no registry).
+	Packages PackagesMover
+
+	// Audit writes one host-audit record for identity's administrative
+	// mutations (access grants, org/team membership, ownership transfer).
+	// Satisfied by *moderation.Service.RecordAdmin at composition; nil = no
+	// audit family on this build (the change lands, nothing is recorded —
+	// docs/features/16_moderation.md §14).
+	Audit func(ctx context.Context, actor, action, target, detail string) error
+
+	// transferMu guards the move join hints only (never held across I/O);
+	// transfers is keyed by the SOURCE repo id, so a second start while the
+	// first runs joins its record instead of duplicating the work.
+	transferMu sync.Mutex
+	transfers  map[string]*transferSlot
 }
+
+// BlockGate is the consumer-owned moderation seam identity defines for its
+// own writes (PLAN-V2 §M.5: "identity invite create: BlockedBy"). It is
+// satisfied by *moderation.Service.
+type BlockGate interface {
+	BlockedBy(ctx context.Context, blocker, subject string) (bool, error)
+}
+
+// InteractionRefused is the ONE neutral refusal text for a moderation-gated
+// interaction. It deliberately names neither the block nor the blocker: the
+// blocked principal is never told a block exists (PLAN-V2 §M.12 decision
+// (b)). Every consumer package renders exactly this string, so a refusal by
+// one verb cannot be distinguished from another's.
+const InteractionRefused = "not permitted in this repository"
 
 // New builds a Service over st.
 func New(st store.ObjectStore, cfg *config.Config) *Service {
 	s := &Service{
-		Store:  st,
-		Cfg:    cfg,
-		Now:    time.Now,
-		Rand:   rand.Reader,
-		access: newAccessCache(512),
-		teams:  newTeamCache(512),
+		Store:    st,
+		Cfg:      cfg,
+		Now:      time.Now,
+		Rand:     rand.Reader,
+		access:   newAccessCache(512),
+		teams:    newTeamCache(512),
+		accounts: newAccountCache(AccountStateCacheCapacity, AccountStateCacheTTL),
 	}
 	s.Repos = s.listRepos
 	return s
@@ -326,13 +383,10 @@ func (s *Service) anonymousRead() bool {
 }
 
 // principalOf resolves the request principal: the injected auth.Principal,
-// else the mode default (mode none → everyone is anon with write+admin).
+// else the anonymous viewer (there is no open mode any more — PLAN-OIDC-ONLY).
 func (s *Service) principalOf(ctx context.Context) auth.Principal {
 	if p, ok := ctx.Value(principalKey{}).(auth.Principal); ok {
 		return p
-	}
-	if s.Cfg != nil && s.Cfg.Server.Auth.Mode == "none" {
-		return auth.None()
 	}
 	return auth.Anonymous()
 }
@@ -340,7 +394,7 @@ func (s *Service) principalOf(ctx context.Context) auth.Principal {
 // Authenticator resolves the request principal through Seam 2 (the
 // server's AuthService, injected by composition). Identity never mints
 // principals and never reads credentials; a nil Authenticator falls back
-// to the mode default.
+// to the anonymous viewer.
 type Authenticator func(r *http.Request) (auth.Principal, *auth.AuthError)
 
 // randomHex returns n random bytes as hex.

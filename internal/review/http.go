@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/url"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 
@@ -150,7 +151,11 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 }
 
 // decodeStrict unmarshals body into v after rejecting unknown top-level
-// keys (fail closed: unknown keys on write are 400, on read ignored).
+// keys (fail closed: unknown keys on write are 400, on read ignored). The
+// error names every offending key AND the accepted set, so a client written
+// against a stale shape (the SPA-era flat `{path, side, line, body}` thread
+// entry, BUG-8) learns the whole shape in one round trip instead of one key
+// per retry.
 func decodeStrict(w http.ResponseWriter, r *http.Request, limit int64, allowed map[string]bool, v any) bool {
 	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, limit))
 	if err != nil {
@@ -166,17 +171,41 @@ func decodeStrict(w http.ResponseWriter, r *http.Request, limit int64, allowed m
 		writePlain(w, http.StatusBadRequest, "invalid JSON: expected an object")
 		return false
 	}
+	var unknown []string
 	for k := range keys {
 		if !allowed[k] {
-			writePlain(w, http.StatusBadRequest, "unknown field "+strconv.Quote(k))
-			return false
+			unknown = append(unknown, k)
 		}
+	}
+	if len(unknown) > 0 {
+		sort.Strings(unknown)
+		accepted := make([]string, 0, len(allowed))
+		for k := range allowed {
+			accepted = append(accepted, k)
+		}
+		sort.Strings(accepted)
+		noun := "field"
+		if len(unknown) > 1 {
+			noun = "fields"
+		}
+		writePlain(w, http.StatusBadRequest, "unknown "+noun+" "+
+			strings.Join(quoteAll(unknown), ", ")+" (accepted: "+strings.Join(accepted, ", ")+")")
+		return false
 	}
 	if err := json.Unmarshal(body, v); err != nil {
 		writePlain(w, http.StatusBadRequest, "invalid JSON: "+err.Error())
 		return false
 	}
 	return true
+}
+
+// quoteAll strconv.Quotes every name for an error message.
+func quoteAll(names []string) []string {
+	out := make([]string, len(names))
+	for i, n := range names {
+		out[i] = strconv.Quote(n)
+	}
+	return out
 }
 
 func methodNotAllowed(w http.ResponseWriter, allow ...string) {

@@ -988,10 +988,14 @@ const GateTimeout = 15 * time.Second
 // required context is present AND success. Refusal is the verbatim
 // message: merge refused: required checks not green for <sha>: <ctx>
 // (<state|missing>), … No matching rules carrying the gate ⇒ nil. An
-// unparseable policy.json fails closed. Bypass: union covers matching
-// rules the merger does NOT bypass (03 §5 step 4 — bypass lists apply
-// unchanged; 05's "no bypass list" means require_checks carries no
-// bypass FIELD of its own).
+// unparseable policy.json fails closed.
+//
+// Bypass lists govern direct pushes only (03 §5 step 4): every matching
+// rule's require_checks applies to the merging actor whether or not that
+// rule's protect.bypass admits them. A merger who may push to main still
+// merges only a green head. 05's "no bypass list" means require_checks
+// carries no bypass FIELD of its own; required-reviews (04 §6) is a
+// different effect with its own bypass, which its own gate evaluates.
 func (s *Service) CheckRequiredChecks(ctx context.Context, owner, repo, headSHA, baseRef, merger string) error {
 	gctx, cancel := context.WithTimeout(ctx, GateTimeout)
 	defer cancel()
@@ -1038,8 +1042,10 @@ func (s *Service) CheckRequiredChecks(ctx context.Context, owner, repo, headSHA,
 }
 
 // requiredUnion collects the union of require_checks contexts across
-// matching protect rules the merger does not bypass (05 §6 combination
-// rule), sorted for stable refusal messages.
+// matching protect rules (05 §6 combination rule), sorted for stable
+// refusal messages. Bypass lists are NOT consulted: protect.bypass
+// governs direct pushes only, and a merge is always check-gated for the
+// merging actor (03 §5 step 4).
 func requiredUnion(doc *policy.Document, baseRef, merger string) []string {
 	rules := policy.MatchingRules(doc, policy.Request{Principal: merger, Ref: baseRef, Op: policy.OpUpdate})
 	seen := map[string]bool{}
@@ -1048,9 +1054,6 @@ func requiredUnion(doc *policy.Document, baseRef, merger string) []string {
 		pe := r.Protect()
 		if pe == nil || len(pe.RequireChecks) == 0 {
 			continue
-		}
-		if policy.Bypassed(pe.Bypass, merger, nil, doc.Roster()) {
-			continue // bypassed rules contribute nothing (03 §5 step 4)
 		}
 		for _, c := range pe.RequireChecks {
 			if !seen[c] {

@@ -616,17 +616,153 @@ func TestThreadsShowUnknownRunIsNotFound(t *testing.T) {
 	}
 }
 
-func TestThreadsCancelExplainsTheT2Gap(t *testing.T) {
+// TestThreadsCancelRerunHTTPShape pins the operator verbs: POST
+// …/api/threads/{run}/cancel (200) and …/rerun (201), each answering
+// {"run": Run}; --json passes the body through unchanged.
+func TestThreadsCancelRerunHTTPShape(t *testing.T) {
+	const cancelBody = `{"run":{"id":"r1","workflow":"ci","state":"cancelled","attempt":1}}`
+	const rerunBody = `{"run":{"id":"r1","workflow":"ci","state":"queued","attempt":2}}`
 	f, srv := newFakeAPI(t)
-	code, _, errOut := runCmd(t, srv, "", runThreadsCancel, "acme/mono", "r1")
-	if code != exitErr {
-		t.Fatalf("exit = %d, want %d", code, exitErr)
+	f.on("POST", "/acme/mono/api/threads/r1/cancel", 200, cancelBody)
+	f.on("POST", "/acme/mono/api/threads/r1/rerun", 201, rerunBody)
+
+	code, out, errOut := runCmd(t, srv, "tok", groupRunner(threadsGroup), "cancel", "acme/mono", "r1")
+	if code != exitOK || !strings.Contains(out, "Cancelled run r1") {
+		t.Fatalf("threads cancel = %d %q %q", code, out, errOut)
 	}
-	if !strings.Contains(errOut, "T2 runner protocol") {
-		t.Fatalf("message = %q", errOut)
+	if rec := f.last(); rec.Method != "POST" || rec.Path != "/acme/mono/api/threads/r1/cancel" {
+		t.Fatalf("cancel request = %s %s", rec.Method, rec.Path)
+	} else if len(rec.Body) != 0 {
+		t.Fatalf("cancel sent a body: %s", rec.Body)
 	}
-	if f.count() != 0 {
-		t.Fatalf("cancel called a route (%d requests)", f.count())
+
+	code, out, errOut = runCmd(t, srv, "tok", groupRunner(threadsGroup), "rerun", "acme/mono", "r1")
+	if code != exitOK || !strings.Contains(out, "attempt 2") || !strings.Contains(out, "queued") {
+		t.Fatalf("threads rerun = %d %q %q", code, out, errOut)
+	}
+	if rec := f.last(); rec.Method != "POST" || rec.Path != "/acme/mono/api/threads/r1/rerun" {
+		t.Fatalf("rerun request = %s %s", rec.Method, rec.Path)
+	}
+
+	// The human line reads the returned state: a live job means the cancel is
+	// only requested, an already-finished run means nothing was left to cancel.
+	f.on("POST", "/acme/mono/api/threads/r-run/cancel", 200, `{"run":{"id":"r-run","state":"running","attempt":1}}`)
+	if code, out, _ := runCmd(t, srv, "tok", runThreadsCancel, "acme/mono", "r-run"); code != exitOK ||
+		!strings.Contains(out, "Cancel requested") || !strings.Contains(out, "state: running") {
+		t.Fatalf("cancel of a running run = %d %q", code, out)
+	}
+	f.on("POST", "/acme/mono/api/threads/r-done/cancel", 200, `{"run":{"id":"r-done","state":"success","attempt":1}}`)
+	if code, out, _ := runCmd(t, srv, "tok", runThreadsCancel, "acme/mono", "r-done"); code != exitOK ||
+		!strings.Contains(out, "nothing to cancel") {
+		t.Fatalf("cancel of a finished run = %d %q", code, out)
+	}
+
+	// --json is the API body verbatim (re-indented), never a CLI envelope.
+	code, out, _ = runCmd(t, srv, "tok", runThreadsCancel, "acme/mono", "r1", "--json")
+	if code != exitOK {
+		t.Fatalf("cancel --json = %d", code)
+	}
+	var got map[string]map[string]any
+	if err := json.Unmarshal([]byte(out), &got); err != nil {
+		t.Fatalf("cancel --json output: %v (%q)", err, out)
+	}
+	if got["run"]["state"] != "cancelled" {
+		t.Fatalf("cancel --json body = %q", out)
+	}
+	code, out, _ = runCmd(t, srv, "tok", runThreadsRerun, "acme/mono", "r1", "--json")
+	if code != exitOK {
+		t.Fatalf("rerun --json = %d", code)
+	}
+	got = nil
+	if err := json.Unmarshal([]byte(out), &got); err != nil {
+		t.Fatalf("rerun --json output: %v (%q)", err, out)
+	}
+	if got["run"]["attempt"] != float64(2) {
+		t.Fatalf("rerun --json body = %q", out)
+	}
+
+	// --quiet prints nothing on success.
+	if code, out, _ := runCmd(t, srv, "tok", runThreadsCancel, "acme/mono", "r1", "--quiet"); code != exitOK || out != "" {
+		t.Fatalf("cancel --quiet = %d %q", code, out)
+	}
+}
+
+// TestThreadsCancelRerunExitCodes pins the §6.6 mapping for both verbs: 404 →
+// 3 (the run does not exist), 401/403 → 4 with the login hint, 409/5xx → 1
+// with the server's message, and a bad argv → 2.
+func TestThreadsCancelRerunExitCodes(t *testing.T) {
+	for _, verb := range []string{"cancel", "rerun"} {
+		run := runThreadsCancel
+		if verb == "rerun" {
+			run = runThreadsRerun
+		}
+		path := "/acme/mono/api/threads/r1/" + verb
+		cases := []struct {
+			name   string
+			status int
+			body   string
+			want   int
+			msg    string
+		}{
+			{"unknown run", http.StatusNotFound, "not found\n", exitNotFound, "not found"},
+			{"forbidden", http.StatusForbidden, "requires write role\n", exitAuth, "requires write role"},
+			{"unauthorized", http.StatusUnauthorized, "authentication required\n", exitAuth, "authentication required"},
+			{"conflict", http.StatusConflict, "job j1 is still running; cancel it first\n", exitErr, "still running"},
+			{"server error", http.StatusInternalServerError, "fold failed\n", exitErr, "fold failed"},
+		}
+		for _, tc := range cases {
+			t.Run(verb+"/"+tc.name, func(t *testing.T) {
+				f, srv := newFakeAPI(t)
+				f.onFunc("POST", path, func(w http.ResponseWriter, r *http.Request) {
+					http.Error(w, strings.TrimSpace(tc.body), tc.status)
+				})
+				code, _, errOut := runCmd(t, srv, "tok", run, "acme/mono", "r1")
+				if code != tc.want {
+					t.Fatalf("exit = %d, want %d (%s)", code, tc.want, errOut)
+				}
+				if !strings.Contains(errOut, tc.msg) {
+					t.Fatalf("stderr %q misses the server message %q", errOut, tc.msg)
+				}
+			})
+		}
+		// Usage: OWNER/REPO alone (the run is required) and an unparseable repo.
+		_, usageSrv := newFakeAPI(t)
+		for _, args := range [][]string{{"acme/mono"}, {"not-a-repo", "r1"}, {}} {
+			if code, _, errOut := runCmd(t, usageSrv, "tok", run, args...); code != exitArg {
+				t.Fatalf("%s %v: exit = %d, want %d (%s)", verb, args, code, exitArg, errOut)
+			}
+		}
+	}
+}
+
+// TestThreadsCancelRerunInHelpAndCompletion pins that both verbs are in the
+// one command table dispatch, help and completion read: the group table, the
+// per-command help, and the completion words.
+func TestThreadsCancelRerunInHelpAndCompletion(t *testing.T) {
+	var out, errOut bytes.Buffer
+	c := &cli{out: &out, errOut: &errOut}
+	if code := groupRunner(threadsGroup)(t.Context(), c, nil); code != exitArg {
+		t.Fatalf("bare threads = %d, want %d", code, exitArg)
+	}
+	for _, verb := range []string{"cancel", "rerun"} {
+		if !strings.Contains(errOut.String(), verb) {
+			t.Fatalf("group table misses %q:\n%s", verb, errOut.String())
+		}
+		words := completionWords()
+		if !containsWord(words["threads"], verb) {
+			t.Errorf("completion words[threads] misses %q: %v", verb, words["threads"])
+		}
+		if !containsWord(words["threads "+verb], "--json") || !containsWord(words["threads "+verb], "--quiet") {
+			t.Errorf("completion words[threads %s] flags: %v", verb, words["threads "+verb])
+		}
+		var helpOut bytes.Buffer
+		hc := &cli{out: &bytes.Buffer{}, errOut: &helpOut}
+		if code := groupRunner(threadsGroup)(t.Context(), hc, []string{verb, "--help"}); code != exitOK {
+			t.Fatalf("threads %s --help = %d", verb, code)
+		}
+		if !strings.Contains(helpOut.String(), "usage: spindle threads "+verb+" OWNER/REPO RUN") {
+			t.Fatalf("threads %s --help usage line:\n%s", verb, helpOut.String())
+		}
 	}
 }
 

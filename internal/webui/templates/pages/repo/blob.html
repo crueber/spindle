@@ -24,12 +24,18 @@
         <h2 class="font-semibold">{{.Data.Name}}</h2>
         {{if .Data.Lang}}<span class="chip">{{.Data.Lang}}</span>{{end}}
         <span class="mono tabular text-[11px] text-[var(--pd-muted)]">{{.Data.Size}}{{if .Data.SHA}} · {{.Data.SHA}}{{end}}</span>
-        {{if .Data.RawHref}}<a class="link ml-auto font-mono text-[11px]" href="{{.Data.RawHref}}" target="_blank" rel="noopener">raw</a>{{end}}
+        {{if .Data.EditNote}}<span class="mono text-[11px] text-[var(--pd-muted)]" title="The web editor cannot change this file">{{.Data.EditNote}}</span>{{end}}
+        {{if .Data.CanEdit}}
+        <a class="btn ml-auto px-2 py-0.5 text-[11px]" href="{{.Data.EditHref}}">Edit</a>
+        {{if .Data.DeleteHref}}<a class="link font-mono text-[11px]" href="{{.Data.DeleteHref}}">Delete</a>{{end}}
+        {{end}}
+        {{if .Data.CanBlame}}<a class="link {{if not .Data.CanEdit}}ml-auto {{end}}font-mono text-[11px]" href="{{.Data.BlameHref}}">Blame</a>{{end}}
+        {{if .Data.RawHref}}<a class="link {{if or .Data.CanEdit .Data.CanBlame}}font-mono text-[11px]{{else}}ml-auto font-mono text-[11px]{{end}}" href="{{.Data.RawHref}}" target="_blank" rel="noopener">raw</a>{{end}}
       </div>
 
       {{if .Data.TooLarge}}
       <p class="muted px-4 py-8 text-center text-sm italic">
-        This file is too large to render ({{.Data.Size}}; the render cap is 2 MiB). Fetch it raw from the API.
+        This file is too large to render ({{.Data.Size}}; the render cap is 2 MiB). <a class="link not-italic" href="{{.Data.RawHref}}">Fetch it raw</a> from the API.
       </p>
       {{else if .Data.Binary}}
       <p class="muted px-4 py-8 text-center text-sm italic">binary file, {{.Data.Size}}</p>

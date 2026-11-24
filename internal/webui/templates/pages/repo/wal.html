@@ -99,7 +99,7 @@
         <table class="data-table kv">
           <tbody>
             {{range .Data.Manifest}}
-            <tr><th class="w-32 align-top">{{.Label}}</th><td class="mono break-words text-[11.5px] text-[var(--pd-text-2)]">{{if .Stamp}}<time datetime="{{.Stamp}}" title="{{.Stamp}}">{{with rel .Stamp}}{{.}}{{else}}—{{end}}</time>{{else}}{{.Value}}{{end}}</td></tr>
+            <tr><th scope="row" class="w-32 align-top">{{.Label}}</th><td class="mono break-words text-[11.5px] text-[var(--pd-text-2)]">{{if .Stamp}}<time datetime="{{.Stamp}}" title="{{.Stamp}}">{{with rel .Stamp}}{{.}}{{else}}—{{end}}</time>{{else}}{{.Value}}{{end}}</td></tr>
             {{end}}
           </tbody>
         </table>
@@ -111,7 +111,7 @@
         <table class="data-table kv">
           <tbody>
             {{range .Data.Local}}
-            <tr><th class="w-32 align-top">{{.Label}}</th><td class="mono break-words text-[11.5px] text-[var(--pd-text-2)]">{{if .Stamp}}<time datetime="{{.Stamp}}" title="{{.Stamp}}">{{with rel .Stamp}}{{.}}{{else}}—{{end}}</time>{{else}}{{.Value}}{{end}}</td></tr>
+            <tr><th scope="row" class="w-32 align-top">{{.Label}}</th><td class="mono break-words text-[11.5px] text-[var(--pd-text-2)]">{{if .Stamp}}<time datetime="{{.Stamp}}" title="{{.Stamp}}">{{with rel .Stamp}}{{.}}{{else}}—{{end}}</time>{{else}}{{.Value}}{{end}}</td></tr>
             {{end}}
           </tbody>
         </table>
@@ -146,7 +146,7 @@
       </div>
       <div class="overflow-x-auto">
         <table class="data-table plan-table">
-          <thead><tr><th>strategy</th><th>slot</th><th>status</th><th>detail</th><th>bundle</th></tr></thead>
+          <thead><tr><th scope="col">strategy</th><th scope="col">slot</th><th scope="col">status</th><th scope="col">detail</th><th scope="col">bundle</th></tr></thead>
           <tbody>
             {{range .Data.PlanRows}}
             <tr>
@@ -169,7 +169,7 @@
       {{if .Data.Compactions}}
       <div class="overflow-x-auto">
         <table class="data-table">
-          <thead><tr><th>at_seq</th><th>at</th><th>packs</th><th>host</th></tr></thead>
+          <thead><tr><th scope="col">at_seq</th><th scope="col">at</th><th scope="col">packs</th><th scope="col">host</th></tr></thead>
           <tbody>
             {{range .Data.Compactions}}
             <tr>
@@ -194,7 +194,7 @@
       {{if .Data.Segments}}
       <div class="overflow-x-auto">
         <table class="data-table segments-table">
-          <thead><tr><th>segment</th></tr></thead>
+          <thead><tr><th scope="col">segment</th></tr></thead>
           <tbody>
             {{range .Data.Segments}}<tr><td><code class="mono text-[11.5px]">{{.}}</code></td></tr>{{end}}
           </tbody>

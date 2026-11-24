@@ -138,13 +138,13 @@ func TestRetainKeepsChecksForLivePR(t *testing.T) {
 func TestRetainDeletesDeadRunners(t *testing.T) {
 	e, now := retentionEnv(t)
 	admin := auth.Principal{Name: "writer", Admin: true}
-	deadTok, err := e.svc.MintRegistrationToken(context.Background(), "o/r", admin)
+	deadTok, err := e.svc.MintRegistrationToken(context.Background(), admin, mintAllPolicy(""))
 	if err != nil {
 		t.Fatal(err)
 	}
 	live := e.writer()
 	live.Admin = true
-	liveTok, err := e.svc.MintRegistrationToken(context.Background(), "o/r", live)
+	liveTok, err := e.svc.MintRegistrationToken(context.Background(), live, mintAllPolicy(""))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -162,12 +162,12 @@ func TestRetainDeletesDeadRunners(t *testing.T) {
 	if res.RunnersDeleted != 1 || res.CredentialsDeleted != 1 {
 		t.Fatalf("retain = %+v, want the one unused registration removed", res)
 	}
-	if doc, _, _ := e.svc.loadRunner(context.Background(), "o", "r", deadTok.ID); doc != nil {
+	if doc, _, _ := e.svc.loadRunner(context.Background(), deadTok.ID); doc != nil {
 		t.Fatalf("expired registration row survived")
 	}
 	// The live runner stays.
 	found := false
-	for _, v := range mustListRunners(t, e.svc, "o/r", live) {
+	for _, v := range mustListRunners(t, e.svc, live) {
 		if v.State == RunnerActive {
 			found = true
 		}
@@ -177,9 +177,9 @@ func TestRetainDeletesDeadRunners(t *testing.T) {
 	}
 }
 
-func mustListRunners(t *testing.T, s *Service, repo string, p auth.Principal) []RunnerView {
+func mustListRunners(t *testing.T, s *Service, p auth.Principal) []RunnerView {
 	t.Helper()
-	rows, err := s.ListRunners(context.Background(), repo, p)
+	rows, err := s.ListRunners(context.Background(), p)
 	if err != nil {
 		t.Fatalf("ListRunners: %v", err)
 	}
@@ -367,35 +367,39 @@ func TestRetentionStoreFaultsFailClosed(t *testing.T) {
 		e, now := retentionEnv(t)
 		// The cap already reached: no listing at all.
 		res := &GCResult{RunnersDeleted: retentionRunners}
-		e.svc.deleteDeadRunners(context.Background(), "o", "r", *now, res)
+		e.svc.runnerSweep = &runnerSweepGate{}
+		e.svc.deleteDeadRunners(context.Background(), *now, res)
 		// A listing failure.
 		fs := newFaultStore()
 		e.store = fs.Memory
 		e.svc.Store = fs
 		fs.fail("list", 0)
-		e.svc.deleteDeadRunners(context.Background(), "o", "r", *now, &GCResult{})
+		e.svc.runnerSweep = &runnerSweepGate{}
+		e.svc.deleteDeadRunners(context.Background(), *now, &GCResult{})
 		// An unreadable record (valid key, get fault).
 		fs.clear()
 		e.store = fs.Memory
-		if _, err := store.PutBytes(context.Background(), fs, RunnerKey("o", "r", "bad"), []byte(`{"id":"bad"}`),
+		if _, err := store.PutBytes(context.Background(), fs, RunnerKey("bad"), []byte(`{"id":"bad"}`),
 			store.PutOptions{Mode: store.PutCreate}); err != nil {
 			t.Fatal(err)
 		}
 		fs.fail("get", 0)
-		e.svc.deleteDeadRunners(context.Background(), "o", "r", *now, &GCResult{})
+		e.svc.runnerSweep = &runnerSweepGate{}
+		e.svc.deleteDeadRunners(context.Background(), *now, &GCResult{})
 		// A dead runner whose record delete succeeds but whose credential
 		// delete fails: the failure is skipped, the delete is counted.
 		fs.clear()
 		old := now.Add(-40 * 24 * time.Hour).Format(dateTimeFmt)
 		doc := &RunnerDoc{ID: "rnrbeef01", State: RunnerRevoked, RegisteredBy: "alice",
 			CreatedAt: old, RevokedAt: &old, Version: 1}
-		if _, err := store.PutBytes(context.Background(), fs, RunnerKey("o", "r", doc.ID), mustJSON(doc),
+		if _, err := store.PutBytes(context.Background(), fs, RunnerKey(doc.ID), mustJSON(doc),
 			store.PutOptions{Mode: store.PutCreate}); err != nil {
 			t.Fatal(err)
 		}
 		fs.fail("delete", 1)
 		res = &GCResult{}
-		e.svc.deleteDeadRunners(context.Background(), "o", "r", *now, res)
+		e.svc.runnerSweep = &runnerSweepGate{}
+		e.svc.deleteDeadRunners(context.Background(), *now, res)
 		if res.RunnersDeleted != 1 || res.CredentialsDeleted != 0 {
 			t.Fatalf("credential-delete failure = %+v, want the record counted only", res)
 		}

@@ -99,3 +99,58 @@ func TestDispatchShortCircuits(t *testing.T) {
 		t.Fatalf("HEAD = %d", w.Code)
 	}
 }
+
+// TestTaskAcrossLaneAfterMove pins the repo-transfer attach path (PLAN-V2
+// §T.1): a task's record names its own repo, and after the move the lane the
+// client started on no longer resolves — so the read gate follows the record's
+// repo (or the move destination it carries), never the lane path.
+func TestTaskAcrossLaneAfterMove(t *testing.T) {
+	f := newFixture(t)
+	seedSummary(f)
+	ok := true
+	// The record is keyed by the SOURCE (gone after the move) and names the
+	// destination in params["to"].
+	f.tasks.records["m1"] = TaskRecord{ID: "m1", Kind: "repo-transfer", Repo: "demo/moved",
+		OK: &ok, Finished: "2026-11-21T00:00:01Z", LogTail: []string{},
+		Params: map[string]string{"from": "demo/moved", "to": "demo/walgit"}}
+	// A gate that refuses the source but admits the destination: the pair is
+	// readable through the destination (the access document moved with it).
+	g := &laneGate{allow: "demo/walgit", deny: "demo/moved"}
+	f.env.Access = g
+	w := f.do("GET", "/demo/walgit/api/tasks/m1", nil, nil, readP())
+	if w.Code != 200 || !strings.Contains(w.Body.String(), `"repo-transfer"`) {
+		t.Fatalf("follow via destination = %d (%s)", w.Code, w.Body.String())
+	}
+	// A gate that refuses both is a real 403 (never a silent 200).
+	f.env.Access = &laneGate{deny: "demo/moved", deny2: "demo/walgit"}
+	if w := f.do("GET", "/demo/walgit/api/tasks/m1", nil, nil, readP()); w.Code != http.StatusForbidden {
+		t.Fatalf("refused both = %d (%s), want 403", w.Code, w.Body.String())
+	}
+	// A task with no destination is gated on its own repo alone.
+	f.tasks.records["m2"] = TaskRecord{ID: "m2", Kind: "fsck", Repo: "demo/walgit", OK: &ok}
+	f.env.Access = &laneGate{allow: "demo/walgit"}
+	if w := f.do("GET", "/demo/walgit/api/tasks/m2", nil, nil, readP()); w.Code != 200 {
+		t.Fatalf("own repo = %d (%s)", w.Code, w.Body.String())
+	}
+	// A record naming a malformed repo is refused, not panicked on.
+	f.tasks.records["m3"] = TaskRecord{ID: "m3", Kind: "fsck", Repo: "no-slash"}
+	if w := f.do("GET", "/demo/walgit/api/tasks/m3", nil, nil, readP()); w.Code != http.StatusForbidden {
+		t.Fatalf("malformed repo = %d (%s), want 403", w.Code, w.Body.String())
+	}
+}
+
+// laneGate allows exactly the named repos (and denies everything else).
+type laneGate struct {
+	allow, deny, deny2 string
+}
+
+func (g *laneGate) CheckRead(_ context.Context, owner, repo string, _ auth.Principal) *auth.AuthError {
+	id := owner + "/" + repo
+	switch id {
+	case g.allow:
+		return nil
+	case g.deny, g.deny2:
+		return &auth.AuthError{Kind: auth.ErrForbidden, Why: "read access required"}
+	}
+	return &auth.AuthError{Kind: auth.ErrForbidden, Why: "read access required"}
+}

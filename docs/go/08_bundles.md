@@ -580,7 +580,7 @@ Setup hygiene (from the installer, §8.9 of the Rust spec): unset stale
 - All git invocations go through `internal/git`'s configured binary — fixing §20.5 (`git.binary` not
   plumbed) at the seam rather than per-callsite.
 - **UI strategy editor (WP9, 2026-11-21):** `bundles.strategy` is editable from the repo Settings →
-  Scheduled tab and `/setup` as repeating rows (the shared `K#<i>.<tomlname>` protocol); the row editor
+  Scheduled tab and `/admin/config` as repeating rows (the shared `K#<i>.<tomlname>` protocol); the row editor
   builds a `[]BundleStrategy` and publishes it through the ordinary repo-settings path
   (`config.ParseRepoSettings` + `ValidateAgainst`), so the cron/kind/base/keep/filter validation in this
   doc is the gate, not a second parser. A stored `[bundles]` pins the whole section (the merge is

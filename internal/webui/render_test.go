@@ -11,20 +11,18 @@ import (
 )
 
 // newBare builds a provider with the real templates and no wired services —
-// enough to exercise the renderer and the error paths.
+// enough to exercise the renderer and the error paths. The page set is parsed
+// once per test binary (testsupport_test.go).
 func newBare(t *testing.T) *Server {
 	t.Helper()
-	s, err := New(Env{Cfg: &config.Config{}, Version: "test"})
-	if err != nil {
-		t.Fatalf("New: %v", err)
-	}
-	return s
+	return newTestServer(t, Env{Cfg: &config.Config{}, Version: "test"})
 }
 
 // TestRenderSetsSecurityHeaders pins UI-02 at the page layer: every rendered
 // page carries the shared CSP/XFO/Referrer-Policy/nosniff set and the private
 // cache directive.
 func TestRenderSetsSecurityHeaders(t *testing.T) {
+	t.Parallel()
 	s := newBare(t)
 	rec := httptest.NewRecorder()
 	s.errorPage(rec, httptest.NewRequest(http.MethodGet, "/missing", nil), http.StatusNotFound, "detail text")
@@ -62,6 +60,7 @@ func TestRenderSetsSecurityHeaders(t *testing.T) {
 }
 
 func TestErrorPageRendersStatus(t *testing.T) {
+	t.Parallel()
 	s := newBare(t)
 	for _, tc := range []struct {
 		status int
@@ -93,6 +92,7 @@ func TestErrorPageRendersStatus(t *testing.T) {
 // A missing page template must produce one 500 and stop: the renderer must
 // never recurse into the error page (that shipped a stack overflow once).
 func TestRenderMissingTemplateDoesNotRecurse(t *testing.T) {
+	t.Parallel()
 	s := newBare(t)
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodGet, "/", nil)
@@ -108,6 +108,7 @@ func TestRenderMissingTemplateDoesNotRecurse(t *testing.T) {
 // The error page compares an int status with the template builtin `eq`; this
 // pins that the helper map does not shadow it with a string-only func.
 func TestErrorPageBuiltinEq(t *testing.T) {
+	t.Parallel()
 	s := newBare(t)
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodGet, "/", nil)

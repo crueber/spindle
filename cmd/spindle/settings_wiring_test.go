@@ -15,24 +15,50 @@ import (
 
 	"github.com/crueber/spindle/internal/api"
 	"github.com/crueber/spindle/internal/config"
+	"github.com/crueber/spindle/internal/git"
 	"github.com/crueber/spindle/internal/identity"
+	"github.com/crueber/spindle/internal/moderation"
 	"github.com/crueber/spindle/internal/server"
 	"github.com/crueber/spindle/internal/server/auth"
 	"github.com/crueber/spindle/internal/store"
 	"github.com/crueber/spindle/internal/webui"
 )
 
+// wiringRegistry is the smallest live-repo source the Overview's checklist
+// needs (one OwnerRepoCounts call).
+type wiringRegistry struct{}
+
+func (wiringRegistry) Owners(context.Context) ([]string, error) { return []string{"acme"}, nil }
+func (wiringRegistry) Repos(context.Context, string) ([]string, error) {
+	return []string{"widgets"}, nil
+}
+func (wiringRegistry) OwnerRepoCounts(context.Context) (map[string]int, error) {
+	return map[string]int{"acme": 1}, nil
+}
+func (wiringRegistry) Exists(context.Context, git.RepoId) (bool, error) { return true, nil }
+func (wiringRegistry) Create(context.Context, git.RepoId, git.ObjectFormat) error {
+	return nil
+}
+func (wiringRegistry) Delete(context.Context, git.RepoId) error { return nil }
+
 func TestSettingsWiringBindsEveryRenderedSeam(t *testing.T) {
 	cfg := config.Defaults()
 	st := store.NewMemory()
 	ident := identity.New(st, cfg)
 	notes, _ := newNotifyService(st, ident)
-	c := &collabWiring{ident: ident, notifySvc: notes}
+	c := &collabWiring{ident: ident, notifySvc: notes, modSvc: moderation.New(st)}
 
 	webui.BindSettings(webui.SettingsDeps{})
-	t.Cleanup(func() { webui.BindSettings(webui.SettingsDeps{}) })
+	webui.BindAdmin(webui.AdminDeps{})
+	t.Cleanup(func() {
+		webui.BindSettings(webui.SettingsDeps{})
+		webui.BindAdmin(webui.AdminDeps{})
+	})
 	wireSettingsPages(cfg, server.BootState{Mode: "normal"}, &api.Env{}, c)
+	srv := server.New(server.Options{Config: cfg, Boot: server.BootState{Mode: "normal"}})
+	wireAdminPages(cfg, server.BootState{Mode: "normal"}, &api.Env{Repos: wiringRegistry{}}, srv, nil, moderation.New(st), nil, nil, nil)
 	d := webui.SettingsBindings()
+	a := webui.AdminBindings()
 
 	// The surfaces the page renders unconditionally with a normal store
 	// boot. Mirror/Push are bound only when those services exist (not in
@@ -41,11 +67,6 @@ func TestSettingsWiringBindsEveryRenderedSeam(t *testing.T) {
 		name string
 		ok   bool
 	}{
-		{"SetupAccess", d.SetupAccess != nil},
-		{"SetupView", d.SetupView != nil},
-		{"SetupValidate", d.SetupValidate != nil},
-		{"SetupSave", d.SetupSave != nil},
-		{"SetupAuthTest", d.SetupAuthTest != nil},
 		{"RepoRole", d.RepoRole != nil},
 		{"RepoGeneral", d.RepoGeneral != nil},
 		{"RepoScheduled", d.RepoScheduled != nil},
@@ -55,6 +76,8 @@ func TestSettingsWiringBindsEveryRenderedSeam(t *testing.T) {
 		{"RepoAccess", d.RepoAccess != nil},
 		{"RepoAdmin", d.RepoAdmin != nil},
 		{"RepoWrite", d.RepoWrite != nil},
+		{"RepoReports", d.RepoReports != nil},
+		{"RepoReportResolve", d.RepoReportResolve != nil},
 		{"OrgView", d.OrgView != nil},
 		{"OrgWrite", d.OrgWrite != nil},
 		{"OrgWebhookWrite", d.OrgWebhookWrite != nil},
@@ -62,6 +85,29 @@ func TestSettingsWiringBindsEveryRenderedSeam(t *testing.T) {
 	for _, s := range seams {
 		if !s.ok {
 			t.Errorf("composition left SettingsDeps.%s nil (the page renders but writes 503)", s.name)
+		}
+	}
+	// The Administration area's rendered seams (PLAN-ADMIN M2). Maintain is
+	// bound only when a maintainer runs, so it is asserted in its own test.
+	adminSeams := []struct {
+		name string
+		ok   bool
+	}{
+		{"Access", a.Access != nil},
+		{"ConfigView", a.ConfigView != nil},
+		{"Validate", a.Validate != nil},
+		{"Save", a.Save != nil},
+		{"AuthTest", a.AuthTest != nil},
+		{"Health", a.Health != nil},
+		{"Repos", a.Repos != nil},
+		{"Reports", a.Reports != nil},
+		{"Audit", a.Audit != nil},
+		{"ResolveReport", a.ResolveReport != nil},
+		{"AuditWrite", a.AuditWrite != nil},
+	}
+	for _, s := range adminSeams {
+		if !s.ok {
+			t.Errorf("composition left AdminDeps.%s nil (the page renders but is degraded)", s.name)
 		}
 	}
 	if d.OrgView == nil || d.OrgWrite == nil {

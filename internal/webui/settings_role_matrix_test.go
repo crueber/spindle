@@ -22,7 +22,7 @@ import (
 // absence assertions are meaningful: an admin 200 must actually render the
 // forms (checked below), which proves the non-admin 200s would have shown them.
 func settingsMatrixFakes(role string) *settingsFakes {
-	f := &settingsFakes{deps: SettingsDeps{
+	f := &settingsFakes{deps: testDeps{
 		RepoRole: func(context.Context, string, string, auth.Principal) (string, error) { return role, nil },
 		RepoGeneral: func(context.Context, string, string) (*SettingsGeneral, error) {
 			return &SettingsGeneral{Description: "a monorepo", MaxLength: 200}, nil
@@ -40,7 +40,7 @@ func settingsMatrixFakes(role string) *settingsFakes {
 			return &SettingsPolicy{Text: "protect main"}, nil
 		},
 		RepoProtection: func(context.Context, string, string) (*SettingsProtection, error) {
-			return &SettingsProtection{Refs: "refs/heads/main"}, nil
+			return &SettingsProtection{}, nil
 		},
 		RepoConfig: func(context.Context, string, string) (*SettingsConfig, error) {
 			return &SettingsConfig{Text: "[features]\n"}, nil

@@ -2,7 +2,15 @@
    (specs/settings.md §2). Sidebar anatomy: .side-nav-* (guideline §2, issues
    #123/#276). 390px: the two nav sections stack full-width, each an
    internally-scrolling chip bar above the content; fields go full width;
-   toggle rows keep label-left/control-right. */}}
+   toggle rows keep label-left/control-right.
+
+   PARTIAL RULE: a settings tab body lives in exactly one
+   partials/settings_repo_<tab>.html partial. Adding a tab means adding a
+   partial and one dispatch line below — never a body in this shell. The
+   shell carries only the nav, the notices and the dispatch; a body here
+   turns every tab edit into a conflict in one file (and one stale branch's
+   shell can silently drop another tab's dispatch). Do not inline a panel
+   here, even a small one. */}}
 {{define "content"}}
 <div class="settings-page" id="settings-page" data-settings-tab="{{.Data.Tab}}">
   {{/* Forgejo #631: no visual page heading — the sidebar carries it. */}}
@@ -45,9 +53,10 @@
         {{if eq .Data.Tab "config"}}{{template "settings-repo-config" .Data}}{{end}}
         {{if eq .Data.Tab "access"}}{{template "settings-repo-access" .Data}}{{end}}
         {{if eq .Data.Tab "tokens"}}{{template "settings-repo-tokens" .Data}}{{end}}
-        {{if eq .Data.Tab "runners"}}{{template "settings-repo-runners" .Data}}{{end}}
         {{if eq .Data.Tab "secrets"}}{{template "settings-repo-secrets" .Data}}{{end}}
+        {{if eq .Data.Tab "environments"}}{{template "settings-repo-environments" .Data}}{{end}}
         {{if eq .Data.Tab "webhooks"}}{{template "settings-repo-webhooks" .Data}}{{end}}
+        {{if eq .Data.Tab "reports"}}{{template "settings-repo-reports" .Data}}{{end}}
         {{if eq .Data.Tab "wal"}}{{template "settings-repo-wal" .Data}}{{end}}
         {{if eq .Data.Tab "danger"}}{{template "settings-repo-danger" .Data}}{{end}}
       </div>

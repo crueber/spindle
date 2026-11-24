@@ -107,6 +107,7 @@ import (
 	"github.com/crueber/spindle/internal/httpsec"
 	"github.com/crueber/spindle/internal/identity"
 	"github.com/crueber/spindle/internal/issues"
+	"github.com/crueber/spindle/internal/moderation"
 	"github.com/crueber/spindle/internal/policy"
 	"github.com/crueber/spindle/internal/pulls"
 	"github.com/crueber/spindle/internal/releases"
@@ -135,6 +136,15 @@ type CollabDeps struct {
 	IssueUnreact func(ctx context.Context, owner, repo string, num, target int, actor auth.Principal, content string) (*issues.Thread, error)
 	Labels       func(ctx context.Context, owner, repo string) ([]issues.Label, error)      // GAP, see header
 	Milestones   func(ctx context.Context, owner, repo string) ([]*issues.Milestone, error) // GAP, see header
+	// IssueDeps is the §14 dependency read behind the page card.
+	IssueDeps func(ctx context.Context, owner, repo string, num int, p auth.Principal) (*issues.DependencyView, error)
+	// IssueDepAdd/IssueDepRemove are the §14 write verbs (floor: triage).
+	IssueDepAdd    func(ctx context.Context, owner, repo string, num int, actor auth.Principal, kind string, target int) (bool, error)
+	IssueDepRemove func(ctx context.Context, owner, repo string, num int, actor auth.Principal, kind string, target int) (bool, error)
+	// IssuePins is the §13 pin set behind the list chip and the detail toggle.
+	IssuePins func(ctx context.Context, owner, repo string) ([]int, error)
+	// IssuePin is the §13 toggle (floor: triage).
+	IssuePin func(ctx context.Context, owner, repo string, num int, actor auth.Principal, pinned bool) ([]int, bool, error)
 	// Collaborators supplies the assignee picker (roles ≥ triage per 02 §4).
 	Collaborators func(ctx context.Context, owner, repo string) []identity.Collaborator
 
@@ -183,6 +193,19 @@ type CollabDeps struct {
 
 	// PolicyOf supplies the merge-box policy document (spec §6 F3).
 	PolicyOf func(ctx context.Context, id git.RepoId) (*policy.Document, error)
+
+	// Feature M2 (PLAN-V2 §M.2/M.4): the page's four moderation verbs. They
+	// are bound verbatim to *moderation.Service, so a page action and the
+	// API twin share one writer and one role floor (the pages only hide
+	// affordances).
+	ModHide   func(ctx context.Context, owner, repo string, actor auth.Principal, target, reason string) (int, bool, error)
+	ModUnhide func(ctx context.Context, owner, repo string, actor auth.Principal, target string) (int, bool, error)
+	ModLock   func(ctx context.Context, owner, repo string, num int, actor auth.Principal, reason, mode string) (int, bool, error)
+	ModUnlock func(ctx context.Context, owner, repo string, num int, actor auth.Principal) (int, bool, error)
+	// ModReport files one abuse report (PLAN-V2 §M.3/M.4). The service owns
+	// target validation, the duplicate rule, the floor and the notification;
+	// the page only carries the form and renders the returned id.
+	ModReport func(ctx context.Context, owner, repo string, actor auth.Principal, in ModerationReportInput) (int, error)
 }
 
 var collabDeps CollabDeps
@@ -213,6 +236,13 @@ func (s *Server) mountCollab() {
 	m.HandleFunc("POST /{owner}/{repo}/issues/{num}/assignees", s.issueAssignees)
 	m.HandleFunc("POST /{owner}/{repo}/issues/{num}/reactions/{seq}", s.issueReact)
 	m.HandleFunc("POST /{owner}/{repo}/issues/{num}/reactions/{seq}/{content}/delete", s.issueUnreact)
+	m.HandleFunc("POST /{owner}/{repo}/issues/{num}/moderation/{action}", s.issueModerate)
+	m.HandleFunc("POST /{owner}/{repo}/issues/{num}/report", s.issueReport)
+	// §13/§14 parity: pin toggles and dependency links (floor triage).
+	m.HandleFunc("POST /{owner}/{repo}/issues/{num}/pin", s.issuePin)
+	m.HandleFunc("POST /{owner}/{repo}/issues/{num}/unpin", s.issueUnpin)
+	m.HandleFunc("POST /{owner}/{repo}/issues/{num}/dependencies", s.issueDependencyAdd)
+	m.HandleFunc("POST /{owner}/{repo}/issues/{num}/dependencies/{kind}/{target}/delete", s.issueDependencyRemove)
 
 	// Pulls (list is plural; the conversation is singular /pull/{num})
 	m.HandleFunc("GET /{owner}/{repo}/pulls", s.pullList)
@@ -241,6 +271,8 @@ func (s *Server) mountCollab() {
 	m.HandleFunc("POST /{owner}/{repo}/pull/{num}/merge", s.pullMerge)
 	m.HandleFunc("GET /{owner}/{repo}/pull/{num}/merge/task", s.pullMergeTask)
 	m.HandleFunc("POST /{owner}/{repo}/pull/{num}/update-branch", s.pullUpdateBranch)
+	m.HandleFunc("POST /{owner}/{repo}/pull/{num}/moderation/{action}", s.pullModerate)
+	m.HandleFunc("POST /{owner}/{repo}/pull/{num}/report", s.pullReport)
 
 	// Checks
 	m.HandleFunc("GET /{owner}/{repo}/checks", s.checksList)
@@ -364,7 +396,7 @@ func (s *Server) collabEnv(w http.ResponseWriter, r *http.Request) (collabRepo, 
 	}
 	rc.Role = s.collabRole(r.Context(), rc.Owner, rc.Name, p)
 	rc.Anonymous = p.Anonymous
-	rc.SignedIn = !p.Anonymous && s.authMode() != "" && s.authMode() != "none"
+	rc.SignedIn = s.signedIn(p)
 	rc.CanWrite = rc.atLeast(identity.RoleWrite)
 	rc.CanTriage = rc.atLeast(identity.RoleTriage)
 	rc.CanMaint = rc.atLeast(identity.RoleMaintain)
@@ -460,13 +492,9 @@ func (s *Server) collabWriteHref(p auth.Principal, next, action string) string {
 	return "/login-required?next=" + url.QueryEscape(next) + "&action=" + url.QueryEscape(action)
 }
 
-// anonWrite mirrors web/src/lib/writeGate.isAnonymousViewer: only a usable
-// auth mode (token/oidc) gates, and only for an anonymous/absent identity.
+// anonWrite mirrors web/src/lib/writeGate.isAnonymousViewer: an anonymous
+// viewer is gated to the login interstitial (OIDC is the only authentication).
 func (s *Server) anonWrite(p auth.Principal) bool {
-	mode := s.authMode()
-	if mode != "token" && mode != "oidc" {
-		return false
-	}
 	return p.Anonymous
 }
 
@@ -587,14 +615,25 @@ func collabErrStatus(err error) int {
 	case errors.Is(err, pulls.ErrUnprocessable), errors.Is(err, review.ErrUnprocessable),
 		errors.Is(err, checks.ErrUnprocessable), errors.Is(err, threads.ErrUnprocessable):
 		return http.StatusUnprocessableEntity
+	case errors.Is(err, threads.ErrTooLarge):
+		return http.StatusRequestEntityTooLarge
 	case errors.Is(err, issues.ErrUnauthorized), errors.Is(err, pulls.ErrUnauthorized),
 		errors.Is(err, review.ErrUnauthorized), errors.Is(err, checks.ErrUnauthorized),
-		errors.Is(err, releases.ErrUnauthorized), errors.Is(err, threads.ErrUnauthorized):
+		errors.Is(err, releases.ErrUnauthorized), errors.Is(err, threads.ErrUnauthorized),
+		errors.Is(err, moderation.ErrUnauthorized):
 		return http.StatusUnauthorized
 	case errors.Is(err, issues.ErrForbidden), errors.Is(err, pulls.ErrForbidden),
 		errors.Is(err, review.ErrForbidden), errors.Is(err, checks.ErrForbidden),
-		errors.Is(err, releases.ErrForbidden), errors.Is(err, threads.ErrForbidden):
+		errors.Is(err, releases.ErrForbidden), errors.Is(err, threads.ErrForbidden),
+		errors.Is(err, moderation.ErrForbidden):
 		return http.StatusForbidden
+	// M3 page report writes: the same sentinels the JSON lane maps.
+	case errors.Is(err, moderation.ErrNotFound):
+		return http.StatusNotFound
+	case errors.Is(err, moderation.ErrInvalid):
+		return http.StatusBadRequest
+	case errors.Is(err, moderation.ErrConflict):
+		return http.StatusConflict
 	default:
 		return http.StatusServiceUnavailable
 	}
@@ -962,6 +1001,14 @@ func closedStateLabel(reason *string) string {
 type lockState struct {
 	Locked bool
 	Reason string
+	// Moderated marks the M2 moderator lock (as opposed to the closed/merged
+	// conversation lock); the header renders the lock banner and pill for it.
+	Moderated bool
+	// Mode is the M2 lock mode ("all" | "collaborators"); CollaboratorsOnly
+	// is true for the latter, where the banner names the narrower rule even
+	// though a write+ viewer keeps their composer.
+	Mode              string
+	CollaboratorsOnly bool
 }
 
 func issueCommentLock(th *issues.Thread) lockState {
@@ -1165,10 +1212,54 @@ type mergeStateView struct {
 	Task         *pulls.TaskRecord
 	Detail       mergeDetail
 	Strategy     string
+	// Behind is true when the base tip is not contained in the head; when
+	// the base ref's policy demands an up-to-date head (PLAN-V2 §2.2) that
+	// is a merge blocker and the fix is the update-branch control.
+	Behind bool
+	// UpdateHint is the standard affordance text, non-empty only when
+	// require_up_to_date makes the behind state block the merge.
+	UpdateHint string
 }
 
-func pullMergeState(pr *pulls.PRDoc, mergeable *pulls.MergeableDoc, checksBlockers []string, reviewDecision string, requiresReviews *bool, role identity.Role, task *pulls.TaskRecord) mergeStateView {
+// mergeMethod is one permitted merge method (the select's option).
+type mergeMethod struct {
+	Value string
+	Label string
+}
+
+func mergeMethodLabel(method string) string {
+	switch method {
+	case pulls.StrategySquash:
+		return "squash"
+	case pulls.StrategyRebase:
+		return "rebase"
+	default:
+		return "merge"
+	}
+}
+
+// mergeMethodsFor renders the permitted set for the select, defaulting to
+// every method when the policy names none. The page offers exactly this set;
+// the merge task refuses anything outside it (the policy gate is the
+// authority, this is the offer).
+func mergeMethodsFor(gate policy.MergeGate) []mergeMethod {
+	out := make([]mergeMethod, 0, 3)
+	for _, m := range gate.MethodsOrAll() {
+		out = append(out, mergeMethod{Value: m, Label: mergeMethodLabel(m)})
+	}
+	return out
+}
+
+func pullMergeState(pr *pulls.PRDoc, mergeable *pulls.MergeableDoc, checksBlockers []string, reviewDecision string, requiresReviews *bool, role identity.Role, task *pulls.TaskRecord, gate policy.MergeGate) mergeStateView {
 	st := "ready"
+	behind := mergeable != nil && mergeable.State == pulls.MergeableBehind
+	// require_up_to_date turns the behind stamp into a hard blocker: the
+	// merge would land a tree that predates its base (PLAN-V2 §2.2). The
+	// update-branch control is the fix, so the hint names it.
+	updateHint := ""
+	if behind && gate.RequireUpToDate {
+		updateHint = "head is behind base — update the branch first"
+	}
 	switch {
 	case pr != nil && pr.Merged:
 		st = "merged"
@@ -1184,6 +1275,8 @@ func pullMergeState(pr *pulls.PRDoc, mergeable *pulls.MergeableDoc, checksBlocke
 		st = "blocked"
 	case mergeable != nil && mergeable.State == pulls.MergeableDirty:
 		st = "blocked"
+	case updateHint != "":
+		st = "blocked"
 	case mergeable != nil && (mergeable.State == pulls.MergeableClean || mergeable.State == pulls.MergeableBehind):
 		st = "mergeable"
 	}
@@ -1196,6 +1289,9 @@ func pullMergeState(pr *pulls.PRDoc, mergeable *pulls.MergeableDoc, checksBlocke
 	if mergeable != nil && mergeable.State == pulls.MergeableDirty {
 		blockers = append(blockers, "conflicts: "+strings.Join(mergeable.Conflicts, ", "))
 	}
+	if updateHint != "" {
+		blockers = append(blockers, updateHint)
+	}
 	v := mergeStateView{
 		State:        st,
 		CanMerge:     st == "mergeable" && roleRank(role) >= roleRank(identity.RoleMaintain),
@@ -1205,6 +1301,11 @@ func pullMergeState(pr *pulls.PRDoc, mergeable *pulls.MergeableDoc, checksBlocke
 		Task:         task,
 		Detail:       terminalMergeDetail(pr, nil),
 		Strategy:     "merge",
+		Behind:       behind,
+		UpdateHint:   updateHint,
+	}
+	if len(gate.MethodsOrAll()) > 0 {
+		v.Strategy = gate.MethodsOrAll()[0]
 	}
 	switch {
 	case roleRank(role) < roleRank(identity.RoleMaintain):
@@ -1237,7 +1338,7 @@ type mergeabilityText struct {
 	Sub  string
 }
 
-func mergeabilityDisplay(state string, mergeable *pulls.MergeableDoc, blockers []string, reviewDecision string, draft, zeroChecks bool) mergeabilityText {
+func mergeabilityDisplay(state string, mergeable *pulls.MergeableDoc, blockers []string, reviewDecision string, draft, zeroChecks, behindRequired bool) mergeabilityText {
 	wire := ""
 	if mergeable != nil {
 		wire = mergeable.State
@@ -1252,6 +1353,10 @@ func mergeabilityDisplay(state string, mergeable *pulls.MergeableDoc, blockers [
 		return mergeabilityText{"Merging…", mergeabilityMutedCls, ""}
 	case state == "draft" || draft:
 		return mergeabilityText{"Draft pull request", mergeabilityBadCls, ""}
+	case behindRequired:
+		// require_up_to_date: the head predates its base, so merging is
+		// refused until the branch is updated (PLAN-V2 §2.2).
+		return mergeabilityText{"Update the branch", mergeabilityBadCls, "head is behind base — update the branch first"}
 	case len(blockers) > 0:
 		return mergeabilityText{"Checks failing", mergeabilityBadCls, ""}
 	case reviewDecision == review.DecisionChangesRequested:
@@ -1276,26 +1381,6 @@ func mergeabilityDisplay(state string, mergeable *pulls.MergeableDoc, blockers [
 }
 
 // --- checks helpers ----------------------------------------------------------
-
-func checkStateDot(state string) string {
-	switch state {
-	case checks.StateSuccess:
-		return "inline-block h-2.5 w-2.5 rounded-full bg-emerald-500"
-	case checks.StateInProgress:
-		return "inline-block h-2.5 w-2.5 rounded-full bg-amber-400 animate-pulse"
-	case checks.StatePending:
-		return "inline-block h-2.5 w-2.5 rounded-full bg-amber-400"
-	case checks.StateFailure:
-		return "inline-block h-2.5 w-2.5 rounded-full bg-red-500"
-	case checks.StateCancelled:
-		return "inline-block h-2.5 w-2.5 rounded-full bg-zinc-400"
-	case checks.StateSkipped:
-		return "inline-block h-2.5 w-2.5 rounded-full bg-zinc-500"
-	case checks.StateError:
-		return "inline-block h-2.5 w-2.5 rounded-full bg-red-700"
-	}
-	return "inline-block h-2.5 w-2.5 rounded-full bg-zinc-400"
-}
 
 func zeroChecksTitle(required []string, known bool) string {
 	if known && len(required) == 0 {
@@ -1461,6 +1546,16 @@ type collabEvent struct {
 	CanAdd    bool
 	AddReason string
 	Locked    bool
+
+	// M2 moderation projection: Hidden rows render a muted "hidden by a
+	// moderator" card; HideTarget is the plan's target key for the hide/
+	// unhide form. Body is non-empty only for a moderator (the service
+	// redacts it for everyone else).
+	Hidden       bool
+	HiddenBy     string
+	HiddenReason string
+	HiddenAt     string
+	HideTarget   string
 }
 
 // timelineData carries the root context the timeline partial needs (the md
@@ -1473,6 +1568,13 @@ type timelineData struct {
 	CanReact    bool
 	Locked      bool
 	LockReason  string
+	// CanModerate shows the hide/unhide affordances (triage+);
+	// ModerationBase is the row form action root.
+	CanModerate    bool
+	ModerationBase string
+	// CanReport shows the M3 "Report" disclosure on every comment card
+	// (any authenticated reader; the service re-checks the read floor).
+	CanReport bool
 }
 
 // orderedEvents sorts the service's newest-first window into the one
@@ -1506,6 +1608,11 @@ type issueListRow struct {
 	Author       string
 	CommentCount int
 	UpdatedAt    string
+	// Pinned marks a §13 pinned row (text chip, never colour-only) and
+	// drives the per-row pin toggle for triage viewers.
+	Pinned   bool
+	PinLabel string // "Pin" | "Unpin"
+	PinHref  string // POST target (…/issues/{num}/pin | …/unpin)
 }
 
 // labelOption is one filter/picker row.
@@ -1621,6 +1728,9 @@ type issuesListData struct {
 	MilestoneOptions []msOption
 	MilestoneUnknown bool
 	OlderHref        string
+	// SelfHref is the current list URL (path + query), the return target of
+	// a row's pin toggle.
+	SelfHref string
 
 	Error  string
 	Notice string
@@ -1642,6 +1752,7 @@ func (s *Server) renderIssues(w http.ResponseWriter, r *http.Request, rc collabR
 		Repo:           rc,
 		Assignee:       q.Get("assignee"),
 		MilestoneParam: q.Get("milestone"),
+		SelfHref:       r.URL.RequestURI(),
 		Error:          errMsg,
 		Notice:         notice,
 	}
@@ -1723,6 +1834,17 @@ func (s *Server) renderIssues(w http.ResponseWriter, r *http.Request, rc collabR
 			Author:       c.Author,
 			CommentCount: c.CommentCount,
 			UpdatedAt:    c.UpdatedAt,
+		}
+		for _, p := range res.Pinned {
+			if p == c.Num {
+				row.Pinned = true
+				break
+			}
+		}
+		if row.Pinned {
+			row.PinLabel, row.PinHref = "Unpin", "/"+rc.Full+"/issues/"+strconv.Itoa(c.Num)+"/unpin"
+		} else {
+			row.PinLabel, row.PinHref = "Pin", "/"+rc.Full+"/issues/"+strconv.Itoa(c.Num)+"/pin"
 		}
 		data.Rows = append(data.Rows, row)
 	}
@@ -1857,10 +1979,25 @@ type issueData struct {
 
 	Lock         lockState
 	CanTriage    bool
+	CanMaint     bool
+	LockAction   string
+	UnlockAction string
 	AllLabels    []issues.Label
 	LabelOptions []labelOption
 	CanModify    bool
 	Composer     composerModel
+
+	// §13 pinning: Pinned drives the header chip; the actions are the page
+	// POST targets (floor triage, mirrored by the service).
+	Pinned      bool
+	PinAction   string
+	UnpinAction string
+	// §14 dependencies: the card renders both directions plus the derived
+	// unblocked signal; the add/remove targets are page POSTs (floor triage).
+	Deps         *issues.DependencyView
+	DepAddAction string
+	DepRemove    string // base for …/dependencies/{kind}/{target}/delete
+	DepKinds     []depKind
 
 	Error  string
 	Notice string
@@ -1881,6 +2018,19 @@ func (s *Server) issuePage(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) renderIssue(w http.ResponseWriter, r *http.Request, rc collabRepo, p auth.Principal, num, status int, errMsg, notice string) {
 	afterSeq, _ := strconv.Atoi(r.URL.Query().Get("after_seq"))
+	if notice == "" {
+		notice = reportedNotice(r)
+	}
+	if notice == "" {
+		// §15: a template create that could not apply all of its metadata
+		// says so (the issue still landed — never a silent half-apply).
+		if skipped := strings.TrimSpace(r.URL.Query().Get("template_skipped")); skipped != "" {
+			if len(skipped) > 200 {
+				skipped = skipped[:200]
+			}
+			notice = "Created from the template; not applied: " + skipped
+		}
+	}
 	if collabDeps.IssuesGet == nil {
 		s.pageRepo(w, r, p, s.collabChrome(r, rc, p), http.StatusServiceUnavailable, "collab/issue", "Issue", issueData{
 			Repo: rc, Num: num, Error: "issues service not wired",
@@ -1900,7 +2050,8 @@ func (s *Server) renderIssue(w http.ResponseWriter, r *http.Request, rc collabRe
 	th := view.Thread
 	milestones := s.loadMilestones(r.Context(), rc)
 	labels := s.loadLabels(r.Context(), rc)
-	lock := issueCommentLock(th)
+	lock := moderationLock(issueCommentLock(th), view.Locked, view.LockMode, view.LockReason, rc.CanWrite)
+	base := "/" + rc.Full + "/issues/" + strconv.Itoa(num)
 	data := issueData{
 		Repo:            rc,
 		Num:             th.Num,
@@ -1917,6 +2068,9 @@ func (s *Server) renderIssue(w http.ResponseWriter, r *http.Request, rc collabRe
 		EventsMore:      view.EventsMore,
 		Lock:            lock,
 		CanTriage:       rc.CanTriage,
+		CanMaint:        rc.CanMaint,
+		LockAction:      base + "/moderation/lock",
+		UnlockAction:    base + "/moderation/unlock",
 		AllLabels:       labels,
 		Error:           errMsg,
 		Notice:          notice,
@@ -1929,13 +2083,16 @@ func (s *Server) renderIssue(w http.ResponseWriter, r *http.Request, rc collabRe
 		data.StateCls = "chip chip-open"
 	}
 	tl := timelineData{
-		Owner:      rc.Owner,
-		Repo:       rc.Name,
-		Ref:        rc.HeadLabel,
-		Base:       "/" + rc.Full + "/issues/" + strconv.Itoa(th.Num),
-		CanReact:   !rc.Anonymous,
-		Locked:     lock.Locked,
-		LockReason: lock.Reason,
+		Owner:          rc.Owner,
+		Repo:           rc.Name,
+		Ref:            rc.HeadLabel,
+		Base:           base,
+		CanReact:       !rc.Anonymous,
+		Locked:         lock.Locked,
+		LockReason:     lock.Reason,
+		CanModerate:    rc.CanTriage,
+		ModerationBase: base + "/moderation",
+		CanReport:      !rc.Anonymous,
 	}
 	for _, ev := range view.Events {
 		if ev.Type == issues.EventReactionChanged {
@@ -1951,8 +2108,17 @@ func (s *Server) renderIssue(w http.ResponseWriter, r *http.Request, rc collabRe
 			row.Body = ptrStr(ev.Body)
 			row.Reactions, row.Addable = reactionRows(th.ReactionSummary, ev.Seq)
 			row.CanAdd = tl.CanReact && !lock.Locked
-			row.AddReason = lock.Reason
+			if !lock.Moderated {
+				// The moderator lock already has its own banner; repeating the
+				// reason on every row's reaction group is noise.
+				row.AddReason = lock.Reason
+			}
 			row.Locked = lock.Locked
+			row.HideTarget = threadHideTarget(th.Num, ev.Seq)
+			if ev.Hidden != nil {
+				row.Hidden, row.HiddenBy = true, ev.Hidden.By
+				row.HiddenReason, row.HiddenAt = ev.Hidden.Reason, ev.Hidden.At
+			}
 		}
 		tl.Events = append(tl.Events, row)
 	}
@@ -1961,22 +2127,51 @@ func (s *Server) renderIssue(w http.ResponseWriter, r *http.Request, rc collabRe
 	data.Timeline = tl
 	data.CanModify = isPullAuthor(th.Author, p) || rc.CanTriage
 	data.LabelOptions = labelOptions(labels, th.Labels)
-	base := "/" + rc.Full + "/issues/" + strconv.Itoa(th.Num)
 	data.AssigneeAction = base + "/assignees"
 	data.LabelAction = base + "/labels"
 	data.MilestoneAction = base + "/milestone"
+	// §13 pinning: one index read (the same object the lists read); a
+	// missing/unwired seam leaves the chip off rather than failing the page.
+	if collabDeps.IssuePins != nil {
+		if pins, perr := collabDeps.IssuePins(r.Context(), rc.Owner, rc.Name); perr == nil {
+			for _, p := range pins {
+				if p == th.Num {
+					data.Pinned = true
+					break
+				}
+			}
+		}
+	}
+	data.PinAction = base + "/pin"
+	data.UnpinAction = base + "/unpin"
+	// §14 dependencies: read-gated by the service; a failure renders the card
+	// empty (advisory metadata must not fail the conversation page).
+	data.DepAddAction = base + "/dependencies"
+	data.DepRemove = base + "/dependencies"
+	data.DepKinds = []depKind{
+		{Value: issues.DepBlockedBy, Label: "is blocked by"},
+		{Value: issues.DepBlocks, Label: "blocks"},
+	}
+	if collabDeps.IssueDeps != nil {
+		if view, derr := collabDeps.IssueDeps(r.Context(), rc.Owner, rc.Name, th.Num, p); derr == nil {
+			data.Deps = view
+		}
+	}
 	data.Composer = composerModel{
-		Action:              base + "/comments",
-		CloseAction:         base + "/close",
-		ReopenAction:        base + "/reopen",
-		Label:               "New comment",
-		Placeholder:         "Write a comment… (#N links issues, @user mentions)",
-		SubmitLabel:         "Comment",
-		Locked:              lock.Locked,
-		LockReason:          lock.Reason,
-		ShowClose:           !lock.Locked && data.CanModify,
-		ShowReopen:          lock.Locked && data.CanModify,
-		ShowCommentAndClose: !lock.Locked && data.CanModify,
+		Action:       base + "/comments",
+		CloseAction:  base + "/close",
+		ReopenAction: base + "/reopen",
+		Label:        "New comment",
+		Placeholder:  "Write a comment… (#N links issues, @user mentions)",
+		SubmitLabel:  "Comment",
+		Locked:       lock.Locked,
+		LockReason:   lock.Reason,
+		// Close/reopen are state transitions, not conversation writes: the
+		// moderator lock refuses comments/reactions, never closing. "Comment
+		// and close" posts a comment, so it follows the composer.
+		ShowClose:           !data.Closed && data.CanModify,
+		ShowReopen:          data.Closed && data.CanModify,
+		ShowCommentAndClose: !lock.Locked && !data.Closed && data.CanModify,
 		MentionNames:        mentionNames(th.Participants),
 		MentionID:           "mention-issue-" + strconv.Itoa(th.Num),
 	}
@@ -2191,6 +2386,102 @@ func (s *Server) issueAssignees(w http.ResponseWriter, r *http.Request) {
 	redirectPage(w, r, "/"+rc.Full+"/issues/"+strconv.Itoa(num))
 }
 
+// --- §13 pinning / §14 dependencies (parity card) -----------------------------
+
+// issuePin / issueUnpin toggle the repo pin set (floor: triage, mirrored by
+// the service). The list row and the detail header share them.
+func (s *Server) issuePin(w http.ResponseWriter, r *http.Request) {
+	s.setIssuePin(w, r, true)
+}
+
+func (s *Server) issueUnpin(w http.ResponseWriter, r *http.Request) {
+	s.setIssuePin(w, r, false)
+}
+
+func (s *Server) setIssuePin(w http.ResponseWriter, r *http.Request, pinned bool) {
+	num, ok := issueNum(r.PathValue("num"))
+	if !ok {
+		s.collabError(w, r, http.StatusNotFound, "unknown issue")
+		return
+	}
+	rc, p, ok := s.collabWrite(w, r, identity.RoleTriage, "Pin an issue")
+	if !ok {
+		return
+	}
+	if collabDeps.IssuePin == nil {
+		s.collabError(w, r, http.StatusServiceUnavailable, "issues service not wired")
+		return
+	}
+	if _, _, err := collabDeps.IssuePin(r.Context(), rc.Owner, rc.Name, num, p, pinned); err != nil {
+		s.issueWriteBack(w, r, rc, p, num, err)
+		return
+	}
+	fallback := "/" + rc.Full + "/issues/" + strconv.Itoa(num)
+	redirectPage(w, r, safeNext(r.PostFormValue("next"), fallback))
+}
+
+// issueDependencyAdd adds one blocks/blocked_by link (floor: triage).
+func (s *Server) issueDependencyAdd(w http.ResponseWriter, r *http.Request) {
+	num, ok := issueNum(r.PathValue("num"))
+	if !ok {
+		s.collabError(w, r, http.StatusNotFound, "unknown issue")
+		return
+	}
+	rc, p, ok := s.collabWrite(w, r, identity.RoleTriage, "Link issue dependencies")
+	if !ok {
+		return
+	}
+	if collabDeps.IssueDepAdd == nil {
+		s.collabError(w, r, http.StatusServiceUnavailable, "issues service not wired")
+		return
+	}
+	kind := strings.TrimSpace(r.PostFormValue("kind"))
+	target, cerr := strconv.Atoi(strings.TrimSpace(r.PostFormValue("target")))
+	if cerr != nil || target < 1 {
+		s.issueWriteBack(w, r, rc, p, num, fmt.Errorf("%w: target must be an issue number", issues.ErrInvalid))
+		return
+	}
+	if _, err := collabDeps.IssueDepAdd(r.Context(), rc.Owner, rc.Name, num, p, kind, target); err != nil {
+		s.issueWriteBack(w, r, rc, p, num, err)
+		return
+	}
+	redirectPage(w, r, "/"+rc.Full+"/issues/"+strconv.Itoa(num)+"#dependencies")
+}
+
+// issueDependencyRemove removes one link (floor: triage).
+func (s *Server) issueDependencyRemove(w http.ResponseWriter, r *http.Request) {
+	num, ok := issueNum(r.PathValue("num"))
+	if !ok {
+		s.collabError(w, r, http.StatusNotFound, "unknown issue")
+		return
+	}
+	rc, p, ok := s.collabWrite(w, r, identity.RoleTriage, "Link issue dependencies")
+	if !ok {
+		return
+	}
+	if collabDeps.IssueDepRemove == nil {
+		s.collabError(w, r, http.StatusServiceUnavailable, "issues service not wired")
+		return
+	}
+	kind := strings.TrimSpace(r.PathValue("kind"))
+	target, ok := issueNum(r.PathValue("target"))
+	if !ok {
+		s.collabError(w, r, http.StatusNotFound, "unknown issue")
+		return
+	}
+	if _, err := collabDeps.IssueDepRemove(r.Context(), rc.Owner, rc.Name, num, p, kind, target); err != nil {
+		s.issueWriteBack(w, r, rc, p, num, err)
+		return
+	}
+	redirectPage(w, r, "/"+rc.Full+"/issues/"+strconv.Itoa(num)+"#dependencies")
+}
+
+// depKind is one option in the dependency add picker.
+type depKind struct {
+	Value string
+	Label string
+}
+
 // togglePrincipal adds or removes one principal from a sorted set.
 func togglePrincipal(cur []string, name string) []string {
 	next := make([]string, 0, len(cur)+1)
@@ -2399,9 +2690,24 @@ func (s *Server) pullList(w http.ResponseWriter, r *http.Request) {
 // --- pull conversation -------------------------------------------------------
 
 type threadCommentRow struct {
+	Seq  int
 	By   string
 	At   string
 	Body string
+	// TID is the review thread the comment belongs to (the report form's
+	// review_thread target needs it).
+	TID string
+	// M2 moderation projection.
+	Hidden         bool
+	HiddenBy       string
+	HiddenReason   string
+	HiddenAt       string
+	HideTarget     string
+	CanModerate    bool
+	ModerationBase string
+	// M3 report affordance.
+	CanReport    bool
+	ReportAction string
 }
 
 type threadCard struct {
@@ -2422,6 +2728,10 @@ type threadCard struct {
 	ReplyAction     string
 	ResolveAction   string
 	UnresolveAction string
+	// Locked disables the reply composer with the reason (M2; composes with
+	// the closed/merged lock).
+	Locked     bool
+	LockReason string
 }
 
 func threadCards(headers []*review.ThreadHeader, base string, canResolve bool) []threadCard {
@@ -2675,6 +2985,17 @@ type reviewRow struct {
 	DismissSeq int
 	CanDismiss bool
 	Action     string
+	// M2 moderation projection.
+	Hidden       bool
+	HiddenBy     string
+	HiddenReason string
+	HiddenAt     string
+	HideTarget   string
+	CanModerate  bool
+	// M3 report affordance: a review body is reportable by any authenticated
+	// reader; ReportAction is the repo report endpoint for this pull.
+	CanReport    bool
+	ReportAction string
 }
 
 type pullData struct {
@@ -2692,6 +3013,14 @@ type pullData struct {
 	Body        string
 	OpenedActor string
 	OpenedAt    string
+	// M2 moderation projection for the description (its opened event).
+	DescriptionHidden     bool
+	DescriptionHiddenBy   string
+	DescriptionHiddenWhy  string
+	DescriptionHiddenAt   string
+	DescriptionHideTarget string
+	LockAction            string
+	UnlockAction          string
 
 	Timeline   timelineData
 	EventsMore bool
@@ -2750,6 +3079,16 @@ type pullData struct {
 	Mergeable    *pulls.MergeableDoc
 	MergeState   mergeStateView
 	Mergeability mergeabilityText
+	// MergeMethods are the methods the base ref's policy permits for THIS
+	// viewer (PLAN-V2 §2.2 merge_methods; empty = every method). The page
+	// offers only these, and the merge task refuses anything else — the
+	// page is never the gate.
+	MergeMethods []mergeMethod
+	// UpToDateRequired is the resolved require_up_to_date for this viewer;
+	// Behind is the mergeable stamp's answer. Together they render the
+	// "update the branch first" affordance.
+	UpToDateRequired bool
+	Behind           bool
 
 	Diff       convDiff
 	DiffError  string
@@ -2781,6 +3120,9 @@ func (s *Server) pullPage(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) renderPull(w http.ResponseWriter, r *http.Request, rc collabRepo, p auth.Principal, num, status int, errMsg, notice string) {
 	ctx := r.Context()
+	if notice == "" {
+		notice = reportedNotice(r)
+	}
 	if collabDeps.PullGet == nil {
 		s.pageRepo(w, r, p, s.collabChrome(r, rc, p), http.StatusServiceUnavailable, "collab/pull", "Pull request", pullData{
 			Repo: rc, Num: num, Error: "pulls service not wired",
@@ -2804,27 +3146,36 @@ func (s *Server) renderPull(w http.ResponseWriter, r *http.Request, rc collabRep
 		head = pr.Head.SHA
 	}
 	base := "/" + rc.Full + "/pull/" + strconv.Itoa(num)
-	lock := pullCommentLock(th, pr)
+	lock := moderationLock(pullCommentLock(th, pr), view.Locked, view.LockMode, view.LockReason, rc.CanWrite)
 	data := pullData{
-		Repo:       rc,
-		Num:        th.Num,
-		Title:      th.Title,
-		Badge:      pullBadgeView(th, pr),
-		Author:     th.Author,
-		UpdatedAt:  th.UpdatedAt,
-		Merged:     pr != nil && pr.Merged,
-		Draft:      pr != nil && pr.Draft,
-		Lock:       lock,
-		EventsMore: view.EventsMore,
-		CanWrite:   rc.CanWrite,
-		CanTriage:  rc.CanTriage,
-		CanMaint:   rc.CanMaint,
-		HeadSHA:    head,
-		HeadRefOK:  view.HeadRefOk,
-		Error:      errMsg,
-		Notice:     notice,
+		Repo:         rc,
+		Num:          th.Num,
+		Title:        th.Title,
+		Badge:        pullBadgeView(th, pr),
+		Author:       th.Author,
+		UpdatedAt:    th.UpdatedAt,
+		Merged:       pr != nil && pr.Merged,
+		Draft:        pr != nil && pr.Draft,
+		Lock:         lock,
+		EventsMore:   view.EventsMore,
+		CanWrite:     rc.CanWrite,
+		CanTriage:    rc.CanTriage,
+		CanMaint:     rc.CanMaint,
+		HeadSHA:      head,
+		HeadRefOK:    view.HeadRefOk,
+		Error:        errMsg,
+		Notice:       notice,
+		LockAction:   base + "/moderation/lock",
+		UnlockAction: base + "/moderation/unlock",
 	}
 	data.Terminal = data.Merged || th.State == "closed"
+	if view.DescriptionHidden != nil {
+		data.DescriptionHidden = true
+		data.DescriptionHiddenBy = view.DescriptionHidden.By
+		data.DescriptionHiddenWhy = view.DescriptionHidden.Reason
+		data.DescriptionHiddenAt = view.DescriptionHidden.At
+		data.DescriptionHideTarget = threadHideTarget(num, 0)
+	}
 	if pr != nil {
 		data.Body = pr.Body
 		data.BaseRef, data.BaseSHA, data.HeadRef = pr.Base.Ref, pr.Base.SHA, pr.Head.Ref
@@ -2857,11 +3208,17 @@ func (s *Server) renderPull(w http.ResponseWriter, r *http.Request, rc collabRep
 
 	// Timeline (opened/commented are bodies for issues; a PR's opened event
 	// is a system row because the description renders once, above).
-	tl := timelineData{Owner: rc.Owner, Repo: rc.Name, Ref: rc.HeadLabel, Base: base, CanReact: !rc.Anonymous, Locked: lock.Locked, LockReason: lock.Reason}
+	tl := timelineData{Owner: rc.Owner, Repo: rc.Name, Ref: rc.HeadLabel, Base: base, CanReact: !rc.Anonymous, Locked: lock.Locked, LockReason: lock.Reason,
+		CanModerate: rc.CanTriage, ModerationBase: base + "/moderation", CanReport: !rc.Anonymous}
 	for _, ev := range view.Events {
 		row := collabEvent{Seq: ev.Seq, Actor: ev.Actor, System: pullEventText(ev), At: ev.At}
 		if row.System == "" {
 			row.Body = ptrStr(ev.Body)
+		}
+		row.HideTarget = threadHideTarget(num, ev.Seq)
+		if ev.Hidden != nil {
+			row.Hidden, row.HiddenBy = true, ev.Hidden.By
+			row.HiddenReason, row.HiddenAt = ev.Hidden.Reason, ev.Hidden.At
 		}
 		if ev.Type == pulls.EventOpened {
 			data.OpenedActor, data.OpenedAt = ev.Actor, ev.At
@@ -2892,7 +3249,13 @@ func (s *Server) renderPull(w http.ResponseWriter, r *http.Request, rc collabRep
 		if revs, rerr := collabDeps.ReviewsList(ctx, rc.Owner, rc.Name, num, p, 0, 50); rerr == nil {
 			data.ReviewsMore = revs.More
 			for _, rv := range revs.Reviews {
-				row := reviewRow{Seq: rv.Seq, By: rv.By, At: rv.At, Body: rv.Body, CommitSHA: rv.CommitSHA}
+				row := reviewRow{Seq: rv.Seq, By: rv.By, At: rv.At, Body: rv.Body, CommitSHA: rv.CommitSHA,
+					CanModerate: rc.CanTriage, HideTarget: reviewHideTarget(num, rv.Seq),
+					CanReport: !rc.Anonymous, ReportAction: base + "/report"}
+				if rv.Hidden != nil {
+					row.Hidden, row.HiddenBy = true, rv.Hidden.By
+					row.HiddenReason, row.HiddenAt = rv.Hidden.Reason, rv.Hidden.At
+				}
 				if rv.Kind == review.KindReviewDismissed {
 					row.Dismissed = true
 					row.Reason = rv.Reason
@@ -2935,6 +3298,10 @@ func (s *Server) renderPull(w http.ResponseWriter, r *http.Request, rc collabRep
 		if threads, terr := collabDeps.ThreadsList(ctx, rc.Owner, rc.Name, num, p, nil, "", 100); terr == nil {
 			data.ThreadsMore = threads.More
 			data.Threads = threadCards(threads.Threads, base, !rc.Anonymous)
+			for i := range data.Threads {
+				data.Threads[i].Locked = lock.Locked
+				data.Threads[i].LockReason = lock.Reason
+			}
 			data.Index = sortedThreadIndex(data.Threads)
 		}
 	}
@@ -2971,10 +3338,24 @@ func (s *Server) renderPull(w http.ResponseWriter, r *http.Request, rc collabRep
 	}
 
 	// Merge machine
+	var mergeGate policy.MergeGate
+	if pol != nil && pr != nil {
+		// One resolver, shared with the merge task's gate: the page offers
+		// exactly the methods the server will accept, and shows the
+		// update-branch affordance when require_up_to_date blocks a behind
+		// head (PLAN-V2 §2.2).
+		// Tags are not carried on the page principal (the edge binds them
+		// for push evaluation only), so a tag-spelled bypass reads as
+		// absent — the same answer the merge task's own evaluation gives.
+		mergeGate = policy.MergeGateFor(pol, policy.Request{Principal: p.Name, Ref: pr.Base.Ref, Op: policy.OpUpdate})
+		data.MergeMethods = mergeMethodsFor(mergeGate)
+		data.UpToDateRequired = mergeGate.RequireUpToDate
+	}
 	data.Mergeable = view.Mergeable
-	data.MergeState = pullMergeState(pr, view.Mergeable, data.CheckBlockers, data.ReviewDec, data.RequiresReviews, rc.Role, mergeTaskFor(rc.Owner, rc.Name))
+	data.Behind = view.Mergeable != nil && view.Mergeable.State == pulls.MergeableBehind
+	data.MergeState = pullMergeState(pr, view.Mergeable, data.CheckBlockers, data.ReviewDec, data.RequiresReviews, rc.Role, mergeTaskFor(rc.Owner, rc.Name), mergeGate)
 	data.MergeState.Detail = terminalMergeDetail(pr, view.Events)
-	data.Mergeability = mergeabilityDisplay(data.MergeState.State, view.Mergeable, data.CheckBlockers, data.ReviewDec, data.Draft, data.ZeroChecks && len(data.RequiredChecks) == 0)
+	data.Mergeability = mergeabilityDisplay(data.MergeState.State, view.Mergeable, data.CheckBlockers, data.ReviewDec, data.Draft, data.ZeroChecks && len(data.RequiredChecks) == 0, data.MergeState.UpdateHint != "")
 
 	// Diff + file-level thread placement
 	if collabDeps.PullDiff != nil {
@@ -3004,10 +3385,11 @@ func sortedThreadIndex(cards []threadCard) []threadCard {
 
 // checkPillView is the shared checks pill model (Checks.jsx CheckPill): a
 // link to /checks/{sha} with a state dot, neutral when zero contexts
-// reported.
+// reported. It carries the state string, not a colour class: the ONE dot
+// renderer is the `collab_check_dot` template block (PLAN-THEMES §8.4-2).
 type checkPillView struct {
 	Href  string
-	Dot   string
+	State string
 	Label string
 	Title string
 }
@@ -3021,7 +3403,7 @@ func checkPillFor(owner, repo, sha, state string, zero bool) checkPillView {
 	}
 	return checkPillView{
 		Href:  "/" + owner + "/" + repo + "/checks/" + sha,
-		Dot:   checkStateDot(state),
+		State: state,
 		Label: label,
 		Title: title,
 	}
@@ -3515,7 +3897,15 @@ func (s *Server) pullThreadComments(w http.ResponseWriter, r *http.Request) {
 	}
 	var comments []threadCommentRow
 	for _, c := range view.Comments {
-		comments = append(comments, threadCommentRow{By: c.By, At: c.At, Body: c.Body})
+		row := threadCommentRow{Seq: c.Seq, By: c.By, At: c.At, Body: c.Body, TID: tid,
+			CanModerate: rc.CanTriage, HideTarget: reviewThreadHideTarget(num, tid, c.Seq),
+			ModerationBase: "/" + rc.Full + "/pull/" + strconv.Itoa(num) + "/moderation",
+			CanReport:      !rc.Anonymous, ReportAction: "/" + rc.Full + "/pull/" + strconv.Itoa(num) + "/report"}
+		if c.Hidden != nil {
+			row.Hidden, row.HiddenBy = true, c.Hidden.By
+			row.HiddenReason, row.HiddenAt = c.Hidden.Reason, c.Hidden.At
+		}
+		comments = append(comments, row)
 	}
 	s.collabFragment(w, r, "collab/pull", "collab_thread_comments", comments)
 }
@@ -3702,7 +4092,7 @@ func (s *Server) renderFiles(w http.ResponseWriter, r *http.Request, rc collabRe
 		s.pageRepo(w, r, p, s.collabChrome(r, rc, p), st, "collab/pull_files", "Files", filesData{Repo: rc, Num: num, Error: err.Error()})
 		return
 	}
-	data := filesData{Repo: rc, Num: num, Title: view.Thread.Title, Lock: pullCommentLock(view.Thread, view.PR), Error: errMsg, Notice: notice}
+	data := filesData{Repo: rc, Num: num, Title: view.Thread.Title, Lock: moderationLock(pullCommentLock(view.Thread, view.PR), view.Locked, view.LockMode, view.LockReason, rc.CanWrite), Error: errMsg, Notice: notice}
 	raw, derr := collabDeps.PullDiff(r.Context(), rc.Owner, rc.Name, num, p)
 	if derr != nil {
 		data.DiffError = derr.Error()
@@ -3756,7 +4146,6 @@ type checkRow struct {
 	SHA          string
 	Short        string
 	Href         string
-	Dot          string
 	State        string
 	UpdatedAt    string
 	Contexts     []checks.IndexContext
@@ -3817,7 +4206,6 @@ func (s *Server) checksList(w http.ResponseWriter, r *http.Request) {
 			SHA:          row.SHA,
 			Short:        shortSHA(row.SHA),
 			Href:         "/" + rc.Full + "/commit/" + row.SHA,
-			Dot:          checkStateDot(row.State),
 			State:        row.State,
 			UpdatedAt:    row.UpdatedAt,
 			Contexts:     row.Contexts,

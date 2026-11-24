@@ -27,6 +27,9 @@ var (
 	// PNG/JPEG/GIF/WebP magic-sniff allowlist (SVG rejected: same-origin
 	// served SVG is script execution in our origin).
 	ErrUnsupportedMedia = errors.New("unsupported avatar type")
+	// ErrUnavailable maps to 503: a required service seam is not wired on
+	// this build (the move's task registry, the packages surface).
+	ErrUnavailable = errors.New("unavailable")
 )
 
 // statusFor maps a sentinel to its HTTP status.
@@ -46,6 +49,8 @@ func statusFor(err error) int {
 		return http.StatusRequestEntityTooLarge
 	case errors.Is(err, ErrUnsupportedMedia):
 		return http.StatusUnsupportedMediaType
+	case errors.Is(err, ErrUnavailable):
+		return http.StatusServiceUnavailable
 	}
 	return http.StatusServiceUnavailable
 }

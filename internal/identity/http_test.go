@@ -134,12 +134,6 @@ func TestOrgsEndpoints(t *testing.T) {
 	if w.Code != http.StatusCreated {
 		t.Fatalf("POST org = %d: %s", w.Code, w.Body.String())
 	}
-	// Auth-none's "anon" creator is not an email: creation still succeeds
-	// (profile ensure is best-effort).
-	hn := testHandler(s, noneP)
-	if w := doReq(hn, "POST", "/api/v1/orgs", `{"org":"ncorg"}`); w.Code != http.StatusCreated {
-		t.Errorf("POST org anon-creator = %d: %s", w.Code, w.Body.String())
-	}
 	var created map[string]string
 	if err := json.Unmarshal(w.Body.Bytes(), &created); err != nil || created["org"] != "acme" {
 		t.Errorf("create body: %s", w.Body.String())

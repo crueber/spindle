@@ -25,6 +25,7 @@ import (
 // --- template helper funcs ---------------------------------------------------
 
 func TestCoverageHelperFuncs(t *testing.T) {
+	t.Parallel()
 	hasPrefix := (&Server{}).funcs()["hasPrefix"].(func(string, string) bool)
 	if !hasPrefix("refs/heads/main", "refs/heads/") {
 		t.Fatal("hasPrefix must accept a real prefix")
@@ -75,6 +76,7 @@ func coverageRenderer() *Server {
 }
 
 func TestCoverageErrorPageFailsClosedWithoutTemplate(t *testing.T) {
+	t.Parallel()
 	s := coverageRenderer()
 
 	rec := httptest.NewRecorder()
@@ -111,6 +113,7 @@ func TestCoverageErrorPageFailsClosedWithoutTemplate(t *testing.T) {
 }
 
 func TestCoverageFailPlainTextTwin(t *testing.T) {
+	t.Parallel()
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest("GET", "/x", nil)
 	req.Header.Set("Accept", "text/plain")
@@ -127,6 +130,7 @@ func TestCoverageFailPlainTextTwin(t *testing.T) {
 }
 
 func TestCoverageRenderExecutionErrorFailsClosed(t *testing.T) {
+	t.Parallel()
 	// {{.Data.Field}} on a nil Data errors at execution time (the "broken
 	// template at request time" case render must not propagate).
 	tpl := template.Must(template.New("base").Parse(`{{define "base"}}{{.Data.Field}}{{end}}`))
@@ -167,6 +171,7 @@ func (w *coverageWriter) Write(b []byte) (int, error) { return len(b), nil }
 func (w *coverageWriter) WriteHeader(int)             {}
 
 func TestCoverageServeDispatch(t *testing.T) {
+	t.Parallel()
 	var nilServer *Server
 	if nilServer.Serve(httptest.NewRecorder(), httptest.NewRequest("GET", "/", nil)) {
 		t.Fatal("a nil provider must not claim a request")
@@ -188,6 +193,7 @@ func TestCoverageServeDispatch(t *testing.T) {
 }
 
 func TestCoverageAuthErrorStatus(t *testing.T) {
+	t.Parallel()
 	for _, tc := range []struct {
 		kind auth.AuthErrorKind
 		want int
@@ -203,6 +209,7 @@ func TestCoverageAuthErrorStatus(t *testing.T) {
 }
 
 func TestCoveragePrincipalFailure(t *testing.T) {
+	t.Parallel()
 	s := coverageRenderer()
 	s.auth = pages.Auth{Authenticate: func(*http.Request) (auth.Principal, *auth.AuthError) {
 		return auth.Principal{}, &auth.AuthError{Kind: auth.ErrForbidden, Why: "denied by policy"}
@@ -254,12 +261,8 @@ func (r *coverageRegistry) Delete(context.Context, git.RepoId) error            
 func newCoverageExploreServer(t *testing.T, reg api.RepoRegistry) *Server {
 	t.Helper()
 	cfg := config.Defaults()
-	cfg.Server.Auth.Mode = "token"
 	cfg.Server.Auth.AnonymousRead = true
-	s, err := New(Env{Cfg: cfg, API: &api.Env{Repos: reg}})
-	if err != nil {
-		t.Fatalf("webui.New: %v", err)
-	}
+	s := newTestServer(t, Env{Cfg: cfg, API: &api.Env{Repos: reg}})
 	s.BindAuth(pages.Auth{Authenticate: func(*http.Request) (auth.Principal, *auth.AuthError) {
 		return auth.Principal{Name: "alice"}, nil
 	}})
@@ -267,6 +270,7 @@ func newCoverageExploreServer(t *testing.T, reg api.RepoRegistry) *Server {
 }
 
 func TestCoverageExplorePage(t *testing.T) {
+	t.Parallel()
 	reg := &coverageRegistry{
 		owners: []string{"zeta", "acme"},
 		repos:  map[string][]string{"acme": {"widgets"}, "zeta": {"tools"}},
@@ -346,6 +350,7 @@ func TestCoverageExplorePage(t *testing.T) {
 // --- diff / graph small helpers ---------------------------------------------
 
 func TestCoverageAtoiOr(t *testing.T) {
+	t.Parallel()
 	if got := atoiOr("", 7); got != 7 {
 		t.Fatalf("atoiOr(empty) = %d", got)
 	}
@@ -358,6 +363,7 @@ func TestCoverageAtoiOr(t *testing.T) {
 }
 
 func TestCoverageGraphLaneReuse(t *testing.T) {
+	t.Parallel()
 	// A window whose next tip is not a pending parent reuses the freed lane
 	// instead of widening the graph.
 	rows, width := assignLanes([]GraphCommit{gc("a", "b", "c"), gc("b"), gc("c"), gc("d")})
@@ -399,6 +405,7 @@ func TestCoverageGraphLaneReuse(t *testing.T) {
 }
 
 func TestCoverageRenderRailSkipsHoles(t *testing.T) {
+	t.Parallel()
 	// m(a,b) then a(b) leaves a freed middle lane in row a's bottom snapshot;
 	// the rail must skip it rather than draw a lane at index 0.
 	rows := RenderCommitGraphRows([]GraphCommit{gc("m", "a", "b"), gc("a", "b")})

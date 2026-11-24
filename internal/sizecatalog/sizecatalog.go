@@ -212,6 +212,94 @@ func (r Row) FullName() string { return r.Owner + "/" + r.Name }
 // CatalogKey is the bucket-root aggregate key (store.Catalog).
 const CatalogKey = "meta/repos.pb"
 
+// RenameRow CAS-moves one aggregate row from oldID to newID on a repository
+// move (PLAN-V2 §T.1), carrying every size/activity field verbatim so the
+// moved repo does not read as unknown-sized until the next sweep.
+//
+// Idempotent under a retried task: a catalog that no longer names oldID
+// writes nothing and reports moved=false (the row is already at newID, or it
+// was never folded in). A stale newID row is dropped in favour of the moved
+// one. The rewrite is pure (re-derived by WriteCatalog on every 412 retry),
+// ≤8 attempts, and a failure is bounded staleness — the sweep's fold
+// reconciles rows against live manifests, so a miss heals, never corrupts.
+func RenameRow(ctx context.Context, st store.ObjectStore, oldID, newID string) (bool, error) {
+	if oldID == "" || newID == "" || oldID == newID {
+		return false, nil
+	}
+	moved := false
+	_, err := WriteCatalog(ctx, st, func(cur *proto.RepoCatalog) (*proto.RepoCatalog, error) {
+		// Reset per attempt: only the landed write reports the move.
+		moved = false
+		if cur == nil {
+			return nil, nil
+		}
+		named := false
+		for _, r := range cur.Repos {
+			if r == oldID {
+				named = true
+				break
+			}
+		}
+		hadEntry := false
+		for _, e := range cur.Entries {
+			if e != nil && e.Repo == oldID {
+				hadEntry = true
+				break
+			}
+		}
+		if !named && !hadEntry {
+			// Already renamed (or never folded): no write, no version bump.
+			return nil, nil
+		}
+		names := make([]string, 0, len(cur.Repos)+1)
+		hasNew := false
+		for _, r := range cur.Repos {
+			switch r {
+			case oldID:
+				continue
+			case newID:
+				hasNew = true
+			}
+			names = append(names, r)
+		}
+		if !hasNew {
+			names = append(names, newID)
+		}
+		sort.Strings(names)
+		cur.Repos = names
+		// Two passes: drop a stale newID row, then carry the old row over
+		// (never merge — the moved row is the live one).
+		kept := make([]*proto.RepoCatalogEntry, 0, len(cur.Entries)+1)
+		for _, e := range cur.Entries {
+			if e == nil || e.Repo == newID {
+				continue
+			}
+			kept = append(kept, e)
+		}
+		entries := make([]*proto.RepoCatalogEntry, 0, len(kept)+1)
+		for _, e := range kept {
+			if e.Repo == oldID {
+				cp := *e
+				cp.Repo = newID
+				e = &cp
+				moved = true
+			}
+			entries = append(entries, e)
+		}
+		cur.Entries = entries
+		if !moved {
+			// The legacy name list named it but no row existed: the rename is
+			// still a real (if size-less) move.
+			moved = true
+		}
+		return cur, nil
+	})
+	if err != nil {
+		return false, err
+	}
+	return moved, nil
+}
+
 // ReadCatalog fetches and decodes the aggregate. Absent → (empty, nil):
 // the catalog is optional/rebuildable; callers fall back to null rows.
 func ReadCatalog(ctx context.Context, st store.ObjectStore) (*proto.RepoCatalog, error) {

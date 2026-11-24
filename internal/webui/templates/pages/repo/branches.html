@@ -1,0 +1,91 @@
+{{define "content"}}
+<div class="repo-shell">
+  {{template "repo_header" .Data.Repo}}
+  {{template "repo_tabs" .Data.Repo}}
+  {{template "repo_degraded" .Data.Repo}}
+
+  {{if .Data.Guide}}
+  {{template "repo_guide" .Data.Guide}}
+  {{else}}
+  <div class="branches-page">
+    {{if .Data.Flash}}<p class="card mb-3 border-l-2 border-l-[var(--pd-ok)] p-3 text-sm" role="status">{{.Data.Flash}}</p>{{end}}
+    {{if .Data.Err}}<p class="card mb-3 border-l-2 border-l-[var(--pd-danger)] p-3 text-sm" role="alert">{{.Data.Err}}</p>{{end}}
+
+    <div class="mb-3 flex flex-wrap items-baseline gap-x-3 gap-y-1">
+      <h2 class="text-lg font-semibold">Branches</h2>
+      <span class="mono text-[11px] text-[var(--pd-muted)]">{{len .Data.Rows}}{{if .Data.More}}+{{end}} shown</span>
+      {{if .Data.Default}}<span class="chip">default <code class="mono">{{.Data.Default}}</code></span>{{end}}
+      {{if not .Data.AheadKnown}}<span class="mono text-[11px] text-[var(--pd-muted)]">ahead/behind unavailable on this git build</span>{{end}}
+    </div>
+
+    {{if .Data.WriteHref}}
+    <p class="card mb-3 p-3 text-sm"><a class="link" href="{{.Data.WriteHref}}">Sign in</a> to create or delete branches.</p>
+    {{end}}
+
+    {{if .Data.CanWrite}}
+    <section class="card mb-3 p-3" aria-label="Create a branch">
+      <form class="flex flex-wrap items-end gap-2" method="post" action="/{{.Data.Repo.Full}}/branches">
+        <div class="min-w-0 flex-1 basis-40">
+          <label class="eyebrow mb-1 block" for="branch-name">Branch name</label>
+          <input class="input w-full font-mono text-xs" id="branch-name" name="name" type="text" value="{{.Data.FormName}}" placeholder="feature/topic" required aria-label="Branch name">
+        </div>
+        <div class="min-w-0 flex-1 basis-40">
+          <label class="eyebrow mb-1 block" for="branch-from">Start from</label>
+          <input class="input w-full font-mono text-xs" id="branch-from" name="from" type="text" value="{{if .Data.FormFrom}}{{.Data.FormFrom}}{{else}}{{.Data.FromDefault}}{{end}}" placeholder="branch, tag or commit" aria-label="Starting ref">
+        </div>
+        <button type="submit" class="btn primary whitespace-nowrap">Create branch</button>
+      </form>
+      <p class="muted mt-1 text-[11px]">The new branch points at the commit the starting ref resolves to; nothing is copied or committed.</p>
+    </section>
+    {{end}}
+
+    <div class="overflow-x-auto">
+      <table class="data-table wrap" aria-label="Repository branches">
+        <thead>
+          <tr>
+            <th scope="col">branch</th>
+            <th scope="col">last commit</th>
+            <th scope="col" class="hidden sm:table-cell">vs {{if .Data.Default}}<code class="mono">{{.Data.Default}}</code>{{else}}default{{end}}</th>
+            <th scope="col" class="hidden text-right sm:table-cell"><span class="sr-only">actions</span></th>
+          </tr>
+        </thead>
+        <tbody>
+          {{range .Data.Rows}}
+          <tr>
+            <td class="align-top">
+              <div class="flex flex-wrap items-baseline gap-x-2 gap-y-1">
+                <a class="link mono text-xs" href="{{.TreeHref}}">{{.Name}}</a>
+                {{if .IsDefault}}<span class="chip chip-neutral">default</span>{{end}}
+              </div>
+              <span class="mono text-[11px] text-[var(--pd-muted)]"><a class="sha link mono" href="{{.CommitHref}}" title="{{.SHA}}">{{.Short}}</a></span>
+              <!-- Below sm the vs/actions columns collapse under the branch
+                   name: every action stays reachable without the page or a
+                   sticky overlay hiding the comparison text. -->
+              <div class="mono mt-1 text-[11px] text-[var(--pd-muted)] sm:hidden">{{.Vs}}</div>
+              <div class="mt-1 sm:hidden">{{template "repo_branch_actions" .}}</div>
+            </td>
+            <td class="align-top">
+              <div class="max-w-[46ch] break-words text-sm">{{if .Subject}}{{.Subject}}{{else}}<span class="muted italic">(no message)</span>{{end}}</div>
+              <div class="mono text-[11px] text-[var(--pd-muted)]">
+                {{if .Author}}{{.Author}} · {{end}}{{if .Stamp}}<time datetime="{{.Stamp}}" title="{{.Stamp}}">{{with rel .Stamp}}{{.}}{{else}}—{{end}}</time>{{else}}—{{end}}
+              </div>
+            </td>
+            <td class="hidden align-top whitespace-nowrap sm:table-cell">
+              <span class="mono text-[11px] tabular-nums">{{.Vs}}</span>
+            </td>
+            <td class="hidden align-top sm:table-cell">
+              {{template "repo_branch_actions" .}}
+            </td>
+          </tr>
+          {{end}}
+        </tbody>
+      </table>
+    </div>
+
+    {{if .Data.More}}
+    <p class="muted mt-2 text-center text-xs">Showing the first 500 branches by most recent commit.</p>
+    {{end}}
+  </div>
+  {{end}}
+</div>
+{{end}}

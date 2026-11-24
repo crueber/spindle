@@ -29,12 +29,14 @@ import (
 
 // Chain principals: alice (host admin) drives, bob (writer, team member)
 // is the second human the notification/review paths need (P8 minus-actor:
-// a single principal can never observe its own tray).
-const (
+// a single principal can never observe its own tray). The tokens are real
+// RS256 ID tokens minted by the in-test IdP (oidp_test.go): the server
+// verifies them exactly as it verifies a browser login.
+var (
 	chainAlice    = "alice@example.com"
 	chainBob      = "bob@example.com"
-	chainAliceTok = "alice-chain-secret"
-	chainBobTok   = "bob-chain-secret"
+	chainAliceTok string
+	chainBobTok   string
 )
 
 // chainPhase records one phase duration for the end-of-test timing table
@@ -135,31 +137,29 @@ func pollUntil(t *testing.T, timeout time.Duration, what string, cond func() boo
 	t.Fatalf("timed out waiting for %s (%v)", what, timeout)
 }
 
-// chainServer boots the binary with a token-auth config (alice admin, bob
-// writer) on a throwaway data dir; cleaned up by t.Cleanup.
+// chainServer boots the binary with a real OIDC config pointed at the in-test
+// IdP (alice = member of the admin group, bob = plain admitted user) on a
+// throwaway data dir; cleaned up by t.Cleanup.
 func chainServer(t *testing.T) *e2eServer {
 	t.Helper()
 	bin := buildSpindle(t)
 	dataDir := t.TempDir()
+	p := newOIDP(t)
 	writeSpindleConfig(t, dataDir, fmt.Sprintf(`
 [server]
 auto_create_on_push = true
 
-[server.auth]
-mode = "token"
-tokens = [
-  { principal = %q, token = %q, write = true, admin = true },
-  { principal = %q, token = %q, write = true },
-]
-
+%s
 [store]
 backend = "filesystem"
 root = %q
 
 [cache]
 dir = %q
-`, chainAlice, chainAliceTok, chainBob, chainBobTok,
-		filepath.Join(dataDir, "store"), filepath.Join(dataDir, "cache")))
+`, p.configBlock(), filepath.Join(dataDir, "store"), filepath.Join(dataDir, "cache")))
+	chainAliceTok = p.idToken(chainAlice, "spindle-admin")
+	chainBobTok = p.idToken(chainBob)
+	e2eDefaultBearer = chainAliceTok
 	s := startServer(t, bin, dataDir, freePort(t))
 	t.Cleanup(s.stop)
 	return s
@@ -360,9 +360,24 @@ func TestE2E_CollabFullChain(t *testing.T) {
 
 	// ---- 8. required-checks policy gate (05 §6): blocked then green --------------
 	step = time.Now()
+	// PLAN-V2 §2.2 merge-method half rides the same rule: only a merge commit
+	// is permitted on main, so a request for another strategy is refused on
+	// the request path with a named 409 (never a silent coercion).
 	policyDoc := `{"version":1,"rules":[{"name":"main-checks","match":{"refs":["refs/heads/main"]},` +
-		`"effect":{"protect":{"restricts":["force-push"],"require_checks":["ci/build"]}}}]}`
+		`"effect":{"protect":{"restricts":["force-push"],"require_checks":["ci/build"],` +
+		`"merge_methods":["merge"]}}}]}`
 	mustAPI(t, "PUT", repoLane+"/policy", policyDoc, chainAliceTok)
+	for _, forbidden := range []string{"squash", "rebase"} {
+		st, body := apiCall(t, "POST", fmt.Sprintf("%s/pulls/%d/merge", repoLane, prNum),
+			fmt.Sprintf(`{"strategy":%q}`, forbidden), chainAliceTok)
+		if st != http.StatusConflict {
+			t.Fatalf("POST merge %s: status %d, want 409 (merge_methods gate): %s", forbidden, st, body)
+		}
+		if !strings.Contains(string(body), "merge method not allowed") ||
+			!strings.Contains(string(body), forbidden) || !strings.Contains(string(body), "main-checks") {
+			t.Fatalf("merge_methods refusal = %s", body)
+		}
+	}
 
 	// Merge attempt while ci/build is missing: the task must NOT merge.
 	st, _ := apiCall(t, "POST", fmt.Sprintf("%s/pulls/%d/merge", repoLane, prNum),
@@ -402,6 +417,73 @@ func TestE2E_CollabFullChain(t *testing.T) {
 		t.Fatalf("combined checks state = %v, want success", got)
 	}
 	mark("gates (blocked+green)", step)
+
+	// ---- 8b. require_up_to_date: behind refused, update-branch fixes it ------------
+	step = time.Now()
+	// The base moves ahead of the PR head while the head stays put: a real
+	// push to main, which the push half still allows (require_up_to_date is
+	// merge-only — GitHub parity).
+	mustAPI(t, "PUT", repoLane+"/policy",
+		`{"version":1,"rules":[{"name":"main-checks","match":{"refs":["refs/heads/main"]},`+
+			`"effect":{"protect":{"restricts":["force-push"],"require_checks":["ci/build"],`+
+			`"merge_methods":["merge"],"require_up_to_date":true}}}]}`, chainAliceTok)
+	g.run(work, "checkout", "main")
+	g.commitFile(work, "base.txt", "base moved on\n", "unrelated main commit")
+	g.runAuth(work, chainAliceTok, "push", "origin", "main")
+	g.run(work, "checkout", "feature")
+	behindState, behindErr := "", ""
+	if st, _ := apiCall(t, "POST", fmt.Sprintf("%s/pulls/%d/merge", repoLane, prNum),
+		`{"strategy":"merge"}`, chainAliceTok); st < 200 || st > 299 {
+		t.Fatalf("POST merge (behind): status %d, want 202 (the gate fails the task)", st)
+	}
+	pollUntil(t, 60*time.Second, "behind merge task to finish", func() bool {
+		st, data := apiCall(t, "GET", fmt.Sprintf("%s/pulls/%d/merge/task", repoLane, prNum), "", chainAliceTok)
+		if st != http.StatusOK {
+			return true
+		}
+		var v map[string]any
+		if err := json.Unmarshal(data, &v); err != nil {
+			return false
+		}
+		task, _ := v["task"].(map[string]any)
+		behindState, _ = task["state"].(string)
+		behindErr, _ = task["error"].(string)
+		return behindState != "" && behindState != "running"
+	})
+	if behindState != "error" || !strings.Contains(behindErr, "head is behind base") {
+		t.Fatalf("behind merge task = %q / %q, want the up-to-date refusal", behindState, behindErr)
+	}
+	// The standard affordance: update the branch, then report the new head's
+	// checks (a new commit has no status), then the merge lands (phase 9).
+	if st, _ := apiCall(t, "POST", fmt.Sprintf("%s/pulls/%d/update-branch", repoLane, prNum),
+		"{}", chainAliceTok); st < 200 || st > 299 {
+		t.Fatalf("POST update-branch: status %d", st)
+	}
+	updatedHead := ""
+	pollUntil(t, 60*time.Second, "update-branch to move the head", func() bool {
+		st, data := apiCall(t, "GET", fmt.Sprintf("%s/pulls/%d", repoLane, prNum), "", chainAliceTok)
+		if st != http.StatusOK {
+			return false
+		}
+		var v map[string]any
+		if err := json.Unmarshal(data, &v); err != nil {
+			return false
+		}
+		pr, _ := v["pr"].(map[string]any)
+		head, _ := pr["head"].(map[string]any)
+		sha, _ := head["sha"].(string)
+		if sha != "" && sha != featureSHA {
+			updatedHead = sha
+			return true
+		}
+		return false
+	})
+	if updatedHead == "" {
+		t.Fatalf("update-branch did not move the PR head off %s", featureSHA)
+	}
+	mustAPI(t, "POST", fmt.Sprintf("%s/checks/statuses/%s", repoLane, updatedHead),
+		`{"context":"ci/build","state":"success"}`, chainAliceTok)
+	mark("up-to-date gate + update-branch", step)
 
 	// ---- 9. merge → close-on-merge (03 merge task + 02 §10 seam) -------------------
 	step = time.Now()

@@ -577,22 +577,12 @@ func statusOfAuth(cerr *auth.AuthError) *StatusError {
 }
 
 // dangerousAllowed reports whether p may wield the dangerous confirm over
-// HTTP (fix #237): an authenticated admin under a real auth mode. The
-// auth-none principal carries Admin (zero-config law 10) but is NOT
-// authenticated — anyone on the network — so mode none never qualifies
-// (CLI --dangerous stays the operator path there). Unknown modes fail
-// closed: only token/oidc qualify. The CLI headless runner bypasses Begin
-// entirely, so operator --dangerous is unaffected.
-// No locks, no I/O — pure predicate on the principal + cfg.
+// HTTP (fix #237): a signed-in host admin. The admin flag is the OIDC group
+// predicate (PLAN-OIDC-ONLY §1.2); anonymous principals are never admin. The
+// CLI headless runner bypasses Begin entirely, so operator --dangerous is
+// unaffected. No locks, no I/O — pure predicate on the principal.
 func (s *Service) dangerousAllowed(p auth.Principal) bool {
-	if p.Anonymous || !p.Admin {
-		return false
-	}
-	mode := "none"
-	if s.cfg != nil && s.cfg.Server.Auth.Mode != "" {
-		mode = s.cfg.Server.Auth.Mode
-	}
-	return mode == "token" || mode == "oidc"
+	return !p.Anonymous && p.Admin
 }
 
 // checkRead gates task-status reads on the namespace (the task may exist

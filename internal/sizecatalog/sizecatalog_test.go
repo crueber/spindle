@@ -263,3 +263,130 @@ func TestReadCatalogAbsent(t *testing.T) {
 		t.Fatalf("absent → empty: %+v", cat)
 	}
 }
+
+// TestRenameRow covers the repository-move row rewrite (PLAN-V2 §T.1): the
+// row travels with all its fields, is idempotent on a retry, and a missing
+// old row writes nothing.
+func TestRenameRow(t *testing.T) {
+	ctx := context.Background()
+	st := store.NewMemory()
+	now := time.Date(2026, 11, 21, 12, 0, 0, 0, time.UTC)
+	orig := &proto.RepoCatalog{
+		Repos: []string{"acme/app", "acme/other"},
+		Entries: []*proto.RepoCatalogEntry{
+			{Repo: "acme/app", SizeBytes: 4096, ObjectCount: 12, HeadSeq: 7,
+				LastCommitSHA: "abc", LastPushAt: &proto.Timestamp{Seconds: 1700000000}},
+			{Repo: "acme/other", SizeBytes: 1, ObjectCount: 1, HeadSeq: 1},
+		},
+		UpdatedAt: &proto.Timestamp{Seconds: now.Unix()},
+	}
+	if _, err := WriteCatalog(ctx, st, func(*proto.RepoCatalog) (*proto.RepoCatalog, error) {
+		return orig, nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	moved, err := RenameRow(ctx, st, "acme/app", "beta/app")
+	if err != nil || !moved {
+		t.Fatalf("RenameRow = %v, %v", moved, err)
+	}
+	cat, err := ReadCatalog(ctx, st)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(cat.Repos) != 2 || cat.Repos[0] != "acme/other" || cat.Repos[1] != "beta/app" {
+		t.Fatalf("name set = %v, want [acme/other beta/app]", cat.Repos)
+	}
+	var row *proto.RepoCatalogEntry
+	for _, e := range cat.Entries {
+		if e.Repo == "acme/app" {
+			t.Fatalf("old row still present: %+v", e)
+		}
+		if e.Repo == "beta/app" {
+			row = e
+		}
+	}
+	if row == nil {
+		t.Fatal("moved row missing")
+	}
+	if row.SizeBytes != 4096 || row.ObjectCount != 12 || row.HeadSeq != 7 ||
+		row.LastCommitSHA != "abc" || row.LastPushAt == nil || row.LastPushAt.Seconds != 1700000000 {
+		t.Fatalf("row fields not carried: %+v", row)
+	}
+	// Idempotent: a retried task finds no old row and writes nothing.
+	before, _, _ := store.GetBytes(ctx, st, CatalogKey, store.GetOptions{})
+	moved, err = RenameRow(ctx, st, "acme/app", "beta/app")
+	if err != nil || moved {
+		t.Fatalf("retry = %v, %v; want (false, nil)", moved, err)
+	}
+	after, _, _ := store.GetBytes(ctx, st, CatalogKey, store.GetOptions{})
+	if string(before) != string(after) {
+		t.Fatal("idempotent retry must not rewrite the catalog")
+	}
+	// A repo that was never folded: no rows, no write.
+	if moved, err := RenameRow(ctx, st, "ghost/x", "ghost/y"); err != nil || moved {
+		t.Fatalf("uncatalogued = %v, %v", moved, err)
+	}
+	// Legacy name-set-only rows still rename (sizes stay unknown).
+	if _, err := WriteCatalog(ctx, st, func(cur *proto.RepoCatalog) (*proto.RepoCatalog, error) {
+		cur.Repos = append(cur.Repos, "legacy/x")
+		sortStrings(cur.Repos)
+		return cur, nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if moved, err := RenameRow(ctx, st, "legacy/x", "legacy/y"); err != nil || !moved {
+		t.Fatalf("legacy rename = %v, %v", moved, err)
+	}
+	cat, _ = ReadCatalog(ctx, st)
+	found := false
+	for _, r := range cat.Repos {
+		if r == "legacy/y" {
+			found = true
+		}
+		if r == "legacy/x" {
+			t.Fatal("legacy old name survived")
+		}
+	}
+	if !found {
+		t.Fatalf("legacy new name missing: %v", cat.Repos)
+	}
+	// A stale target row is dropped in favour of the moved one.
+	if _, err := WriteCatalog(ctx, st, func(cur *proto.RepoCatalog) (*proto.RepoCatalog, error) {
+		cur.Repos = append(cur.Repos, "zeta/old", "zeta/new")
+		sortStrings(cur.Repos)
+		cur.Entries = append(cur.Entries,
+			&proto.RepoCatalogEntry{Repo: "zeta/old", SizeBytes: 10},
+			&proto.RepoCatalogEntry{Repo: "zeta/new", SizeBytes: 0})
+		return cur, nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if moved, err := RenameRow(ctx, st, "zeta/old", "zeta/new"); err != nil || !moved {
+		t.Fatalf("stale target = %v, %v", moved, err)
+	}
+	cat, _ = ReadCatalog(ctx, st)
+	size := uint64(99)
+	for _, e := range cat.Entries {
+		if e.Repo == "zeta/new" {
+			size = e.SizeBytes
+		}
+	}
+	if size != 10 {
+		t.Fatalf("moved row must win over the stale target, size = %d", size)
+	}
+	// Validation guards.
+	if moved, err := RenameRow(ctx, st, "", "x"); err != nil || moved {
+		t.Fatalf("empty old = %v, %v", moved, err)
+	}
+	if moved, err := RenameRow(ctx, st, "x", "x"); err != nil || moved {
+		t.Fatalf("identical = %v, %v", moved, err)
+	}
+}
+
+func sortStrings(s []string) {
+	for i := 1; i < len(s); i++ {
+		for j := i; j > 0 && s[j] < s[j-1]; j-- {
+			s[j], s[j-1] = s[j-1], s[j]
+		}
+	}
+}

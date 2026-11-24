@@ -9,8 +9,9 @@ import (
 
 // ProtectEffect — the enforced effect. Default if omitted: restrict all
 // four ops, empty bypass. Combination: every matching rule applies (AND);
-// bypass a rule only if THAT rule's bypass matches. restricts is a closed
-// enum; null and [] are parse errors, not "restrict nothing".
+// bypass a rule only if THAT rule's bypass matches. `restricts`/`bypass`
+// are the PUSH half: they govern direct ref updates (client pushes) and
+// never deny a server-side merge (03 §5 step 4).
 //
 // require_checks (docs/features/05 §6) is the observational half of this
 // effect: a strict list of 1–32 CI context names that must be green on the
@@ -18,12 +19,25 @@ import (
 // here — receive-pack cannot observe external CI (the 14.5 honest note),
 // so the push half ignores it and 05's merge-time gate (internal/checks,
 // consulted by 03's merge task) owns the verdict. Combination across
-// matching rules is union (05 §6); the load-time disjoint-bypass check
-// below is unchanged by this field.
+// matching rules is union (05 §6), and the union is evaluated for the
+// merging actor regardless of any rule's bypass list — bypass governs
+// direct pushes only. The load-time disjoint-bypass check below is
+// unchanged by this field.
+//
+// require_up_to_date and merge_methods (docs/PLAN-V2.md §2.2, feature 03
+// §5 step 1) are the two MERGE-METHOD half fields, likewise parsed here
+// and never evaluated on the push path: the merge task's MergeGate
+// (merge.go in this package) resolves the combination for one merging
+// actor and the task enforces it. Combination: require_up_to_date is
+// all-of across matching rules the actor does not bypass; merge_methods is
+// the intersection across matching rules (an absent list is the universe,
+// so intersecting with an absent rule is a no-op).
 type ProtectEffect struct {
-	RestrictOps   []string // create | update | delete | force-push
-	Bypass        []string // actor spellings; bypass a rule only if THIS rule's bypass matches
-	RequireChecks []string // optional CI contexts (05 §6); push path ignores, merge gate unions
+	RestrictOps     []string // create | update | delete | force-push
+	Bypass          []string // actor spellings; bypass a rule only if THIS rule's bypass matches
+	RequireChecks   []string // optional CI contexts (05 §6); push path ignores, merge gate unions
+	RequireUpToDate bool     // merge-time: refuse a head that is behind its base
+	MergeMethods    []string // merge|squash|rebase subset; empty = every method
 }
 
 func (p *ProtectEffect) Kind() string { return "protect" }
@@ -33,7 +47,12 @@ func (p *ProtectEffect) Kind() string { return "protect" }
 // mutated. Unresolvable bypass entries warn and match nothing (an empty
 // allow-set denies — fail-closed).
 func (p *ProtectEffect) ExpandedCopy(ctx context.Context, x Expander) (Effect, []string) {
-	cpy := &ProtectEffect{RestrictOps: append([]string{}, p.RestrictOps...), RequireChecks: append([]string{}, p.RequireChecks...)}
+	cpy := &ProtectEffect{
+		RestrictOps:     append([]string{}, p.RestrictOps...),
+		RequireChecks:   append([]string{}, p.RequireChecks...),
+		RequireUpToDate: p.RequireUpToDate,
+		MergeMethods:    append([]string{}, p.MergeMethods...),
+	}
 	if len(p.Bypass) == 0 {
 		return cpy, nil
 	}
@@ -54,7 +73,7 @@ func (p *ProtectEffect) Parse(raw json.RawMessage) error {
 	}
 	for k := range m {
 		switch k {
-		case "restricts", "bypass", "require_checks", "_comment":
+		case "restricts", "bypass", "require_checks", "require_up_to_date", "merge_methods", "_comment":
 		default:
 			return invalidf("effect protect: unknown key %q", k)
 		}
@@ -63,6 +82,8 @@ func (p *ProtectEffect) Parse(raw json.RawMessage) error {
 	p.RestrictOps = nil
 	p.Bypass = nil
 	p.RequireChecks = nil
+	p.RequireUpToDate = false
+	p.MergeMethods = nil
 
 	if raw, ok := m["restricts"]; ok {
 		if string(raw) == "null" {
@@ -120,6 +141,41 @@ func (p *ProtectEffect) Parse(raw json.RawMessage) error {
 			seen[c] = true
 		}
 		p.RequireChecks = list
+	}
+
+	if raw, ok := m["require_up_to_date"]; ok {
+		if string(raw) == "null" {
+			return invalidf("effect protect.require_up_to_date: null is a parse error, not \"off\"")
+		}
+		var b bool
+		if err := json.Unmarshal(raw, &b); err != nil {
+			return invalidf("effect protect.require_up_to_date: must be a boolean")
+		}
+		p.RequireUpToDate = b
+	}
+
+	if raw, ok := m["merge_methods"]; ok {
+		if string(raw) == "null" {
+			return invalidf("effect protect.merge_methods: null is a parse error, not \"every method\"")
+		}
+		var list []string
+		if err := json.Unmarshal(raw, &list); err != nil {
+			return invalidf("effect protect.merge_methods: must be an array of merge|squash|rebase")
+		}
+		if len(list) == 0 {
+			return invalidf("effect protect.merge_methods: [] is a parse error, not \"every method\" (omit the key)")
+		}
+		seen := map[string]bool{}
+		for _, method := range list {
+			if !mergeMethodEnum[method] {
+				return invalidf("effect protect.merge_methods: %q is not one of merge|squash|rebase", method)
+			}
+			if seen[method] {
+				return invalidf("effect protect.merge_methods: duplicate method %q", method)
+			}
+			seen[method] = true
+		}
+		p.MergeMethods = list
 	}
 	return nil
 }

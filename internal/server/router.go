@@ -31,23 +31,31 @@ func (s *Server) Handler() http.Handler {
 // handlers then see the same principal the git paths resolve). Anonymous
 // requests pass through untouched, preserving legacy read behavior.
 //
-// Defense in depth (Forgejo #502): in oidc mode the identity contract
+// Defense in depth (Forgejo #502): the identity contract
 // (internal/identity/access.go Resolve) grants an anonymous principal
 // read-at-most, so any state-changing method (anything but GET/HEAD/OPTIONS)
 // from an anonymous principal is refused here with 401 before the handler
 // runs — the guarantee lives in the identity chain, not in each package
 // remembering to gate. The per-route requireAuthenticated calls stay (they
-// keep error messages precise and cover other modes); this assert is the
-// catch-all. Auth-none is unaffected (its principal is never anonymous);
-// token mode keeps its per-route gates.
+// keep error messages precise); this assert is the catch-all.
 func (s *Server) apiServe(w http.ResponseWriter, r *http.Request) {
+	// The job OIDC exchange authenticates with its own opaque request token
+	// (docs/PLAN-THREADS-OIDC.md §5): the session/ID-token authenticator must
+	// not consume that bearer (it would reject it as an unknown token before
+	// the handler could check it). The handler is the only claimant of this
+	// path family and answers 401/403 itself, so passing it through grants
+	// nothing — exactly like the runner protocol's self-authorising paths.
+	if idTokenExchangePath(r.URL.Path) {
+		s.api.Serve(w, injectPrincipal(r, auth.Anonymous()))
+		return
+	}
 	p, aerr := s.authSvc.Authenticate(r, s.cfg)
 	if aerr != nil {
-		s.mapAuthStatus(w, aerr)
+		s.mapAuthStatus(w, r, aerr)
 		return
 	}
 	p = s.authSvc.identityForward(r, p)
-	if p.Anonymous && s.cfg != nil && s.cfg.Server.Auth.Mode == "oidc" && isWriteMethod(r) && !runnerProtocolPath(r.URL.Path) {
+	if p.Anonymous && isWriteMethod(r) && !runnerProtocolPath(r.URL.Path) {
 		w.Header().Set("WWW-Authenticate", s.authChallenge())
 		plainStatus(w, http.StatusUnauthorized, "authentication required")
 		return
@@ -76,6 +84,24 @@ func isWriteMethod(r *http.Request) bool {
 func runnerProtocolPath(path string) bool {
 	return strings.HasPrefix(path, "/api/v1/threads/runners/") ||
 		strings.HasPrefix(path, "/api/v1/threads/jobs/")
+}
+
+// idTokenExchangePath reports the job OIDC exchange path
+// (/api/v1/threads/jobs/{ref}/attempt/{n}/id-token). It is the one runner-family
+// path whose credential (wot_) is NOT resolved by AuthService: the exchange
+// handler verifies the request token against the bucket record, so the session
+// authenticator must let the request through instead of rejecting an unknown
+// bearer. The shape check is the last two segments plus the family prefix; the
+// handler validates {ref}/{n} and the method.
+func idTokenExchangePath(path string) bool {
+	const prefix = "/api/v1/threads/jobs/"
+	const suffix = "/id-token"
+	if !strings.HasPrefix(path, prefix) || !strings.HasSuffix(path, suffix) {
+		return false
+	}
+	rest := strings.TrimSuffix(strings.TrimPrefix(path, prefix), suffix)
+	segs := strings.Split(rest, "/")
+	return len(segs) == 3 && segs[1] == "attempt" && segs[0] != "" && segs[2] != ""
 }
 
 // gated wraps a handler for the gated group (requireAuth = read).
@@ -108,6 +134,16 @@ func (s *Server) mount(r chi.Router) {
 	r.Get("/readyz", s.readyz)
 	r.Get("/repos.js", s.sdkReposJS)
 	r.Get("/services/public/install.sh", s.installSh)
+
+	// Threads OIDC discovery (docs/PLAN-THREADS-OIDC.md): the issuer a job's
+	// token names must be fetchable by a cloud provider with no spindle
+	// credential, so these two documents ride the api seam (whose threads
+	// handler owns them) rather than a gated lane. Both are GET-only; the
+	// handler answers 404 when the surface is not wired.
+	if s.api != nil {
+		r.Get("/.well-known/openid-configuration", s.apiServe)
+		r.Get("/.well-known/jwks.json", s.apiServe)
+	}
 
 	// Feature namespaces outside /api and the repo lanes (bind_top.go):
 	// the OCI registry lives at /v2/*, whose segments are not an
@@ -159,7 +195,8 @@ func (s *Server) mount(r chi.Router) {
 	// Page assets (D-WEB-14/D-WEB-15): /_ui/* carries the server-rendered page
 	// assets only (app.css, ui.js, the vendored htmx files, concepts/). Static
 	// filenames, no secrets — auth is the API's job; the stylesheet must load
-	// everywhere so /setup can render its access-restricted card. gzip applies
+	// everywhere so the Administration area can render its access-restricted
+	// card. gzip applies
 	// to the text assets.
 	r.Route("/_ui", func(g chi.Router) {
 		g.Handle("/*", s.compress(http.HandlerFunc(s.serveUIAssets)))
@@ -167,11 +204,26 @@ func (s *Server) mount(r chi.Router) {
 	r.Get("/services/setup.json", s.gated(s.setupJSON))
 	r.Get("/metrics", s.gated(s.metricsHandler))
 
-	// Setup page (§3.4) — server-rendered by the page provider (the provider
-	// owns the §3.4 access rules; the setup API keeps its own gating).
-	r.Get("/setup", s.pageOr404)
-	r.Post("/setup", s.pageOr404)
-	r.Post("/setup/auth-test", s.pageOr404)
+	// Administration area (§3.4, docs/PLAN-ADMIN.md) — server-rendered by the
+	// page provider, which owns the §3.4 access rules (the setup API keeps its
+	// own gating). "/admin" joins the reserved owner names for the same reason
+	// /explore is explicit: an owner literally named "admin" keeps its git/API
+	// paths and loses only its /admin UI page.
+	r.Get("/admin", s.pageOr404)
+	r.Get("/admin/config", s.pageOr404)
+	r.Post("/admin/config", s.pageOr404)
+	r.Post("/admin/config/auth-test", s.pageOr404)
+	r.Get("/admin/access", s.pageOr404)
+	r.Get("/admin/maintenance", s.pageOr404)
+	// Instance runners (docs/PLAN-INSTANCE-RUNNERS.md §5): the fleet page and
+	// its two body-addressed writes.
+	r.Get("/admin/runners", s.pageOr404)
+	r.Post("/admin/runners", s.pageOr404)
+	r.Post("/admin/runners/revoke", s.pageOr404)
+	// The restart control (docs/PLAN-ADMIN.md §5 as amended): typed confirm,
+	// audit, one delayed self-signal. Reachable in BOTH boot modes — the
+	// restricted boot is the recovery path a restart exists for.
+	r.Post("/admin/restart", s.pageOr404)
 
 	// Public page tree: / is the landing page, /explore is the owners list
 	// (issue #187), /how-it-works is the developer deep-dive (issue #191).
@@ -190,46 +242,53 @@ func (s *Server) mount(r chi.Router) {
 	r.HandleFunc("/*", s.uiOr(s.repoDispatch)) // server-rendered pages first (§3.2)
 }
 
-// mountSetupOnly registers the §3.4 setup-only subset: /setup*, /api/v1/setup*,
-// /healthz, /readyz, /services/public/install.sh; everything else 503 plain
-// a pointer to /setup.
+// mountSetupOnly registers the §3.4 restricted subset: /admin*,
+// /api/v1/setup*, /healthz, /readyz, /services/public/install.sh; everything
+// else 503 plain with a pointer to /admin.
 func (s *Server) mountSetupOnly(r chi.Router) {
 	r.Get("/healthz", s.healthz)
 	r.Get("/readyz", s.readyz)
 	r.Mount("/api/v1/setup", s.setupAPIRouter())
-	// /setup is server-rendered (D-WEB-14): the page provider answers it. The
-	// provider's /setup handler is mode-agnostic and reads internal/setup
-	// directly, so an invalid config can be fixed without a JSON round trip.
+	// /admin + /admin/config are server-rendered (D-WEB-14): the page provider
+	// answers them. The provider's handlers are mode-agnostic and read
+	// internal/setup directly, so an invalid config can be fixed without a
+	// JSON round trip.
 	//
 	// POST matters as much as GET here: the page's Validate/Save buttons submit
-	// the form to /setup, and setup-only mode is exactly the mode where the
-	// config MUST be fixable from the browser. A GET-only route would render a
-	// dead form. Without a page provider the POST keeps the §3.4 503 answer.
-	r.Get("/setup", s.pageOr404)
-	r.Post("/setup", s.uiOr(setupOnlyUnavailable))
-	r.Post("/setup/auth-test", s.uiOr(setupOnlyUnavailable))
+	// the form to /admin/config, and the restricted boot is exactly the mode
+	// where the config MUST be fixable from the browser. A GET-only route would
+	// render a dead form. Without a page provider the POST keeps the §3.4 503
+	// answer.
+	r.Get("/admin", s.pageOr404)
+	r.Get("/admin/config", s.pageOr404)
+	r.Post("/admin/config", s.uiOr(setupOnlyUnavailable))
+	r.Post("/admin/config/auth-test", s.uiOr(setupOnlyUnavailable))
+	// The restart control is part of the recovery path: after a save the
+	// process must exit and be started by its supervisor before the fixed
+	// configuration is in force.
+	r.Post("/admin/restart", s.uiOr(setupOnlyUnavailable))
 	r.Route("/_ui", func(g chi.Router) {
 		g.Handle("/*", s.compress(http.HandlerFunc(s.serveUIAssets)))
 	})
 	r.Get("/services/public/install.sh", s.installSh)
 	r.NotFound(func(w http.ResponseWriter, r *http.Request) {
 		plainStatus(w, http.StatusServiceUnavailable,
-			"walgit: configuration is invalid — open /setup to fix it")
+			"walgit: configuration is invalid — open /admin to fix it")
 	})
 	r.MethodNotAllowed(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Retry-After", "15")
 		plainStatus(w, http.StatusServiceUnavailable,
-			"walgit: configuration is invalid — open /setup to fix it")
+			"walgit: configuration is invalid — open /admin to fix it")
 	})
 }
 
-// setupOnlyUnavailable is the POST /setup fallback in setup-only mode when the
-// page provider does not answer (unmigrated build): the §3.4 503, never a
-// dead 405 form.
+// setupOnlyUnavailable is the POST /admin/config fallback in restricted mode
+// when the page provider does not answer (unmigrated build): the §3.4 503,
+// never a dead 405 form.
 func setupOnlyUnavailable(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Retry-After", "15")
 	plainStatus(w, http.StatusServiceUnavailable,
-		"walgit: configuration is invalid — open /setup to fix it")
+		"walgit: configuration is invalid — open /admin to fix it")
 }
 
 // setupAPIRouter returns the internal/setup HTTP surface (§3.4) — the server
@@ -251,7 +310,6 @@ func (s *Server) authFlow() http.Handler {
 	// URL.Path is NOT stripped under chi Mount, so the mux needs full paths.
 	m := http.NewServeMux()
 	m.HandleFunc("GET /_auth/login", s.authLogin)
-	m.HandleFunc("POST /_auth/token", s.authTokenSignIn)
 	m.HandleFunc("GET /_auth/callback", s.authCallback)
 	m.HandleFunc("GET /_auth/claimed", s.authClaimed)
 	m.HandleFunc("GET /_auth/logout", s.authLogout)

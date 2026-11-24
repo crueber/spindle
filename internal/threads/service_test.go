@@ -46,7 +46,7 @@ func TestCreateRunRoundTrip(t *testing.T) {
 		t.Fatalf("view = %+v", view)
 	}
 	jobs := view.Jobs
-	if jobs[0].ID != "j-build" || jobs[0].Name != "build" || jobs[0].RunsOn != "ubuntu-latest" {
+	if jobs[0].ID != "j-build" || jobs[0].Name != "build" || jobs[0].RunsOn != "linux" {
 		t.Fatalf("job[0] = %+v", jobs[0])
 	}
 	if jobs[0].Context != "threads/ci/build" || jobs[1].Context != "threads/ci/test" {
@@ -122,7 +122,7 @@ func TestCreateRunValidation(t *testing.T) {
 		{"bad repo", "not-a-repo", testSHA, EventPush, CreateOpts{}, ErrInvalid},
 		{"bad sha", "o/r", "nope", EventPush, CreateOpts{}, ErrInvalid},
 		{"bad event", "o/r", testSHA, "bogus", CreateOpts{}, ErrInvalid},
-		{"fork without base", "o/r", testSHA, EventPullReq, CreateOpts{Fork: true}, ErrInvalid},
+		{"fork without base", "o/r", testSHA, EventPullReq, CreateOpts{Action: "opened", Fork: true}, ErrInvalid},
 	}
 	for _, tc := range cases {
 		_, err := e.svc.CreateRun(ctx(), tc.repo, tc.commit, tc.event, tc.opts)
@@ -147,7 +147,7 @@ func TestTrustClassSelection(t *testing.T) {
 	e.git.refs["refs/heads/main"] = baseSHA
 
 	// Same-repository PR: head file, trusted.
-	runs, err := e.svc.CreateRun(ctx(), "o/r", testSHA, EventPullReq, CreateOpts{Branch: "main", BaseBranch: "main"})
+	runs, err := e.svc.CreateRun(ctx(), "o/r", testSHA, EventPullReq, CreateOpts{Action: "opened", Branch: "main", BaseBranch: "main"})
 	if err != nil {
 		t.Fatalf("same-repo PR: %v", err)
 	}
@@ -157,6 +157,7 @@ func TestTrustClassSelection(t *testing.T) {
 
 	// Fork PR: base-branch file, untrusted, checks still report the head.
 	runs, err = e.svc.CreateRun(ctx(), "o/r", testSHA, EventPullReq, CreateOpts{
+		Action: "opened",
 		Branch: "main", BaseBranch: "main", Fork: true,
 	})
 	if err != nil {
@@ -185,6 +186,7 @@ func TestTrustClassSelection(t *testing.T) {
 	// An explicit BaseCommit wins over the branch resolution.
 	e.git.refs["refs/heads/main"] = testSHA
 	runs, err = e.svc.CreateRun(ctx(), "o/r", testSHA, EventPullReq, CreateOpts{
+		Action: "opened",
 		Branch: "main", BaseBranch: "main", BaseCommit: baseSHA, Fork: true,
 	})
 	if err != nil || len(runs) != 1 || runs[0].WorkflowCommit != baseSHA {
@@ -193,7 +195,7 @@ func TestTrustClassSelection(t *testing.T) {
 
 	// A fork PR whose base branch cannot resolve fails visibly.
 	e.git.refs = map[string]string{}
-	if _, err := e.svc.CreateRun(ctx(), "o/r", testSHA, EventPullReq, CreateOpts{BaseBranch: "gone", Fork: true}); !errors.Is(err, ErrNotFound) {
+	if _, err := e.svc.CreateRun(ctx(), "o/r", testSHA, EventPullReq, CreateOpts{Action: "opened", BaseBranch: "gone", Fork: true}); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("unknown base err = %v", err)
 	}
 }

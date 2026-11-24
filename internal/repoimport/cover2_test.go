@@ -332,6 +332,26 @@ func TestAttachCancelEmpty(t *testing.T) {
 	}
 }
 
+// waitSubs waits until st holds n subscribers. A stream's own subscriber
+// count is the signal that an SSE handler is live; a wall-clock sleep only
+// guesses at it (and hangs the test when the guess is wrong).
+func waitSubs(t *testing.T, st *stream, n int) {
+	t.Helper()
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		st.mu.Lock()
+		got := len(st.subs)
+		st.mu.Unlock()
+		if got == n {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("stream subscribers = %d, want %d", got, n)
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+}
+
 func TestAttachUnsubscribed(t *testing.T) {
 	svc, _ := testService(t, nil, &FakeRoles{})
 	h := testHandler(svc, adminPrincipal())
@@ -345,8 +365,8 @@ func TestAttachUnsubscribed(t *testing.T) {
 		w := doGet(t, h, "/api/v1/repos/imports/i-unsub", "text/event-stream")
 		done <- w.Code
 	}()
-	time.Sleep(200 * time.Millisecond)
-	st.unsubscribe(0) // the handler's sub id (first subscriber) → !ok arm
+	waitSubs(t, st, 1) // the handler's own registration, not a grace period
+	st.unsubscribe(0)  // the handler's sub id (first subscriber) → !ok arm
 	select {
 	case code := <-done:
 		if code != 200 {

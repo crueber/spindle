@@ -202,10 +202,13 @@ honest note). When the merge task runs for PR *N* onto a protected ref whose rul
 
 Refusal is the task's normal failure: plain-text message listing each offender verbatim —
 `merge refused: required checks not green for <sha>: ci/build (failure), lint (missing)` — surfaced
-on the task stream and the PR page. No bypass list: bypassing the gate means editing `policy.json`
-(admin, audited via settings history). Direct pushes to the protected ref are not gated by this field
-(CI cannot have reported for a commit that was just pushed); teams wanting push-side control use the
-existing protect rules.
+on the task stream and the PR page. **Bypass lists govern direct pushes only:** the union is every
+matching rule's contexts, evaluated for the merging actor whether or not that rule's `protect.bypass`
+admits them — an actor allowed to push directly still merges only a green head. There is therefore no
+bypass path for a merger; changing what gates a merge means editing `policy.json` (admin, audited via
+settings history). Direct pushes to the protected ref are not gated by this field (CI cannot have
+reported for a commit that was just pushed); teams wanting push-side control use the existing protect
+rules (`restricts`/`bypass`, which never deny a merge — 03 §5 step 4).
 
 ### Concurrency
 
@@ -270,7 +273,7 @@ re-exports; envelope/SSE parsing reuses `sdk/src/sse.js` — one parser (12_web_
 - **CI tokens are per-repo records with a `scopes` field, resolved through an unprivileged principal + handler-side capability check** — keeps the frozen `Principal{write, admin}` untouched (a frozen contract) while scoping leaks to one repo and one capability.
 - **Secret format `wct_<id>.<secret>`, only `sha256` hash stored; revoked records retained** — id-in-token enables repo-local lookup with one conditional GET; retention makes revocation unambiguous.
 - **Combined = worst-of with `error > failure > pending > success`, zero contexts ⇒ `pending`** — matches the aggregate-intuition contract; the merge gate separately distinguishes "missing" from "failing".
-- **`require_checks` lives inside the existing `protect` effect, evaluated by the merge task, union across matching rules** — statuses cannot exist at receive-pack time (honest note, 14.5), so the gate belongs where the merge decides.
+- **`require_checks` lives inside the existing `protect` effect, evaluated by the merge task, union across matching rules** — statuses cannot exist at receive-pack time (honest note, 14.5), so the gate belongs where the merge decides. The `protect` effect has two halves with different actor sets: `restricts`/`bypass` gate direct pushes, `require_checks` gates merges for **every** merging actor (a bypass entry never exempts a merge, and an update restriction never denies one — 03 §5 step 4).
 - **Combined/status GETs are no-store, not sha-addressed-immutable** — sha-addressed content here mutates by design; misclassifying it as immutable would cache stale reds/greens forever.
 - **No new task kind except `checks-index-compact`** — reports are short writes; only index compaction outgrows a request, and it follows P4's compaction rule.
 - **Failure notifications only for head shas of open PRs** — every context failure for every sha would spam; the PR is the review surface that cares.
@@ -316,11 +319,11 @@ re-exports; envelope/SSE parsing reuses `sdk/src/sse.js` — one parser (12_web_
   sidecars, and confirms `state:"open"` on the thread header (the header
   wins over the projection). Bounded at collaboration rate; best-effort
   per P8.
-- **Bypass lists apply to the whole rule** (03 §5 step 4): the union
-  covers matching rules the merger does not bypass; 05's "no bypass
-  list" means `require_checks` carries no bypass FIELD of its own. A
-  merger bypassing every carrying rule skips the gate (the merge-queue
-  shape); bypassing some still gates on the rest.
+- **Bypass lists do not weaken the merge gate (2026-11-21).** `protect.bypass` is the push half of the
+  rule; `requiredUnion` used to skip bypassed rules, so any actor admitted by the protect gate was
+  exempt from `require_checks` — the opposite of the standard workflow. The union now covers every
+  matching rule for the merging actor, bypass or not (03 §5 step 4). `required-reviews` is a separate
+  effect with its own bypass, and its merge gate keeps it (approvals are not a push restriction).
 - **Re-reports keep the first creator** (`created_at` pairs with it);
   `updated_at`/`version` move on every CAS write.
 - **Index CAS exhaustion answers 200, not 503**: the status CAS already

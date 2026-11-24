@@ -532,12 +532,6 @@ func TestPrincipalOfModes(t *testing.T) {
 	if !p.Anonymous || p.Write || p.Admin {
 		t.Fatalf("anon default = %+v", p)
 	}
-	// mode none → full access
-	f.env.Cfg.Server.Auth.Mode = "none"
-	p = f.env.PrincipalOf(r)
-	if !p.Write || !p.Admin {
-		t.Fatalf("mode none = %+v", p)
-	}
 	// injected principal wins
 	r = r.WithContext(WithPrincipal(r.Context(), auth.Principal{Name: "jane", Write: true}))
 	if p := f.env.PrincipalOf(r); p.Name != "jane" {
@@ -815,3 +809,34 @@ func TestBaseURLVariants(t *testing.T) {
 		t.Fatalf("forwarded = %q", got)
 	}
 }
+
+// TestPumpTaskStreamExported is the page-side entry (internal/webui's packages
+// GC card): the package-level wrapper starts its own envelope, writes the task
+// packet and the terminal result, and refuses a non-flushing writer.
+func TestPumpTaskStreamExported(t *testing.T) {
+	upd := make(chan Progress)
+	close(upd)
+	done := make(chan TaskDone, 1)
+	rec := TaskRecord{ID: "t2", Kind: "packages-gc", Repo: "instance"}
+	done <- TaskDone{Record: rec}
+	w := httptest.NewRecorder()
+	r := httptest.NewRequest("GET", "/admin/maintenance/gc/stream?id=t2", nil)
+	if !PumpTaskStream(w, r, TaskStream{Record: rec, Updates: upd, Done: done}) {
+		t.Fatal("a flushing writer must be accepted")
+	}
+	for _, want := range []string{": walgit", "event: task", "event: result", `"id":"t2"`} {
+		if !strings.Contains(w.Body.String(), want) {
+			t.Fatalf("pump missing %s: %s", want, w.Body.String())
+		}
+	}
+	if PumpTaskStream(nopFlushWriter{}, r, TaskStream{}) {
+		t.Fatal("a writer without Flush must be refused")
+	}
+}
+
+// nopFlushWriter is an http.ResponseWriter that cannot stream.
+type nopFlushWriter struct{}
+
+func (nopFlushWriter) Header() http.Header         { return http.Header{} }
+func (nopFlushWriter) Write(b []byte) (int, error) { return len(b), nil }
+func (nopFlushWriter) WriteHeader(int)             {}

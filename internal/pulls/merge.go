@@ -41,6 +41,9 @@ func (s *Service) StartMerge(ctx context.Context, owner, repo string, num int, a
 	if err := s.requireRole(ctx, owner, repo, actor, "maintain"); err != nil {
 		return nil, err
 	}
+	if err := s.requireNotBlocked(ctx, owner, repo, actor); err != nil {
+		return nil, err
+	}
 	if err := validateStrategy(in.Strategy); err != nil {
 		return nil, err
 	}
@@ -53,6 +56,24 @@ func (s *Service) StartMerge(ctx context.Context, owner, repo string, num int, a
 	}
 	if th == nil || th.Kind != "pr" {
 		return nil, fmt.Errorf("%w: %d", ErrNotFound, num)
+	}
+	// Merge-method gate (PLAN-V2 §2.2), request-path half: a strategy the
+	// base ref's policy forbids is refused here with the named 409 before a
+	// task exists. The task re-checks under itself (runMerge), because
+	// policy.json may change between the request and the task.
+	pr, _, perr := s.loadPR(ctx, owner, repo, num)
+	if perr != nil {
+		return nil, perr
+	}
+	if pr == nil {
+		return nil, fmt.Errorf("%w: %d", ErrNotFound, num)
+	}
+	gate, gerr := s.loadMergeGate(ctx, owner, repo, pr.Base.Ref, normPrincipal(actor.Name))
+	if gerr != nil {
+		return nil, gerr
+	}
+	if merr := checkMergeMethod(gate, in.Strategy, pr.Base.Ref); merr != nil {
+		return nil, merr
 	}
 	repoID := repoName(owner, repo)
 	entry, joined := s.tasks.begin(repoID, TaskKindMerge)
@@ -87,6 +108,9 @@ func (s *Service) MergeTask(owner, repo string) *TaskRecord {
 // single-flight plus the WAL publish CAS.
 func (s *Service) runMerge(ctx context.Context, owner, repo string, num int, actor auth.Principal, in MergeInput, correlationID string, rec *TaskRecord) (map[string]any, error) {
 	who := normPrincipal(actor.Name)
+	if err := validateStrategy(in.Strategy); err != nil {
+		return nil, err // HTTP callers were refused at StartMerge; keep 400 for direct callers
+	}
 	th, _, err := s.loadThread(ctx, owner, repo, num)
 	if err != nil {
 		return nil, err
@@ -163,12 +187,45 @@ func (s *Service) runMerge(ctx context.Context, owner, repo string, num int, act
 		return nil, fmt.Errorf("%w: pull request #%d is already merged (up to date)", ErrConflict, num)
 	}
 	rec.notice("mergeability %s (base %s, head %s)", m.State, shortSHA(baseLive), shortSHA(headLive))
-	// Step 4: protected-ref gate — explicitly evaluate policy.json for
-	// (merger, base.ref, update). The required-checks gate is consulted
-	// next, when a rule carries it (05 §6 merge-time half).
-	if gerr := s.checkProtectedRef(ctx, owner, repo, who, pr.Base.Ref, "update"); gerr != nil {
-		rec.notice("protected-ref gate: %s", gerr.Error())
+	// Step 4: policy preconditions for the merge publish (push-vs-merge
+	// split). A `protect` rule's `restricts`/`bypass` pair governs DIRECT
+	// ref updates (client pushes); it never denies the server-side merge.
+	// "Nobody may push to main" is not "nobody may merge into main" — the
+	// standard team workflow (restrict pushes AND require CI green) has to
+	// be expressible, and GitHub/Forgejo both read branch protection that
+	// way. What a merge still must satisfy is the observation half of the
+	// same policy, consulted through its own gates below: require_checks
+	// (05 §6) and required-reviews (04 §6). policy.json must still load and
+	// parse here (fail closed) and the target must not be server-managed —
+	// loadMergeGate is those two checks plus the merge-method half, in one
+	// read.
+	//
+	// Merge-method gate, task half (PLAN-V2 §2.2): merge_methods is the
+	// intersection across matching rules and require_up_to_date is all-of
+	// across matching rules the merging actor does not bypass. The task is
+	// the choke point — a POST that skipped the request-path check (a
+	// policy.json edit between the two) is still refused here, and the
+	// server-side publish never lands a method the branch forbids or a tree
+	// that predates its base.
+	gate, gerr := s.loadMergeGate(ctx, owner, repo, pr.Base.Ref, who)
+	if gerr != nil {
+		rec.notice("merge policy: %s", gerr.Error())
 		return nil, fmt.Errorf("%w: %v", ErrConflict, gerr)
+	}
+	if merr := checkMergeMethod(gate, in.Strategy, pr.Base.Ref); merr != nil {
+		rec.notice("merge method gate: %s", merr.Error())
+		return nil, merr
+	}
+	if gate.RequireUpToDate {
+		contained, cerr := s.Git.IsAncestor(ctx, baseDir, baseLive, headLive)
+		if cerr != nil {
+			return nil, cerr
+		}
+		if uerr := checkMergeUpToDate(gate, contained, pr.Base.Ref); uerr != nil {
+			rec.notice("up-to-date gate: %s", uerr.Error())
+			return nil, uerr
+		}
+		rec.notice("up-to-date gate: satisfied")
 	}
 	// Required-checks gate (05 §6 merge-time half): the checks-provided
 	// gate function with the LIVE head sha (it reads the stored combined
@@ -459,6 +516,9 @@ func (s *Service) UpdateBranch(ctx context.Context, owner, repo string, num int,
 	if err := s.requireRole(ctx, owner, repo, actor, "write"); err != nil {
 		return nil, err
 	}
+	if err := s.requireNotBlocked(ctx, owner, repo, actor); err != nil {
+		return nil, err
+	}
 	if s.Git == nil || s.Dirs == nil || s.Refs == nil {
 		return nil, fmt.Errorf("%w: git backend not wired", ErrUnavailable)
 	}
@@ -580,6 +640,9 @@ func (s *Service) DeleteHead(ctx context.Context, owner, repo string, num int, a
 		return err
 	}
 	if err := s.requireRole(ctx, owner, repo, actor, "maintain"); err != nil {
+		return err
+	}
+	if err := s.requireNotBlocked(ctx, owner, repo, actor); err != nil {
 		return err
 	}
 	if s.Refs == nil {

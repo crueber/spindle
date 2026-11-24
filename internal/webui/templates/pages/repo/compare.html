@@ -1,0 +1,141 @@
+{{define "content"}}
+<div class="repo-shell">
+  {{template "repo_header" .Data.Repo}}
+  {{template "repo_tabs" .Data.Repo}}
+  {{template "repo_degraded" .Data.Repo}}
+
+  {{if .Data.Guide}}
+  {{template "repo_guide" .Data.Guide}}
+  {{else}}
+  <div class="compare-page">
+    <nav class="crumbs mb-2 flex flex-wrap items-baseline gap-x-1.5 font-mono text-[11px]" aria-label="comparison">
+      <a class="link" href="/{{.Data.Repo.Full}}/commits">Commits</a>
+      <span class="text-[var(--pd-dim)]" aria-hidden="true">/</span>
+      <span class="mono">compare</span>
+    </nav>
+
+    {{if .Data.CrossRepo}}
+    <!-- Cross-repository comparison is the pull-request composer's job (the
+         fork object bridge lives in pulls). This page never pretends to have
+         compared two repositories it did not read. -->
+    <section class="card p-4" aria-label="Cross-repository comparison">
+      <h2 class="text-lg font-semibold">Comparing across repositories</h2>
+      <p class="muted mt-2 text-sm">
+        The head <code class="mono">{{.Data.Head}}</code> lives in
+        <code class="mono">{{.Data.CrossRepo}}</code>. Comparing repositories is done by the
+        pull-request composer, which fetches the head repository's objects and shows the same patch.
+      </p>
+      <p class="mt-3"><a class="btn primary" href="{{.Data.PRHref}}">Compare in a new pull request</a></p>
+      <p class="muted mt-2 text-[11px]">Pick <code class="mono">{{.Data.Base}}</code> as the base and your branch as the head; the preview is the comparison.</p>
+    </section>
+    {{else}}
+    <section class="card mb-3 overflow-hidden">
+      <div class="border-b border-[var(--pd-line)] px-4 py-3">
+        <h2 class="break-words text-lg font-semibold leading-snug">
+          Comparing <a class="link mono text-[13px]" href="{{.Data.BaseHref}}">{{.Data.Base}}</a>
+          <span class="muted text-sm">…</span>
+          <a class="link mono text-[13px]" href="{{.Data.HeadHref}}">{{.Data.Head}}</a>
+        </h2>
+      </div>
+      <div class="kv grid grid-cols-1 gap-x-8 px-4 py-2 sm:grid-cols-2">
+        <div class="kv-row">
+          <span class="kv-key">base</span>
+          <span class="kv-val"><code class="mono"><a class="link" href="/{{.Data.Repo.Full}}/commit/{{.Data.BaseSHA}}">{{shortsha .Data.BaseSHA}}</a></code></span>
+        </div>
+        <div class="kv-row">
+          <span class="kv-key">head</span>
+          <span class="kv-val"><code class="mono"><a class="link" href="/{{.Data.Repo.Full}}/commit/{{.Data.HeadSHA}}">{{shortsha .Data.HeadSHA}}</a></code></span>
+        </div>
+        <div class="kv-row">
+          <span class="kv-key">commits</span>
+          <span class="kv-val">{{.Data.Ahead}} ahead · {{.Data.Behind}} behind</span>
+        </div>
+        <div class="kv-row">
+          <span class="kv-key">change</span>
+          <span class="kv-val">
+            <span class="text-[var(--pd-ok)]">+{{.Data.Adds}}</span>
+            <span class="text-[var(--pd-danger)]">−{{.Data.Dels}}</span>
+            <span class="text-[var(--pd-muted)]">across {{.Data.StatN}} {{plural .Data.StatN "file" "files"}}</span>
+          </span>
+        </div>
+      </div>
+
+      {{if .Data.Identical}}
+      <p class="border-t border-[var(--pd-line)] px-4 py-3 text-sm" role="status">
+        <strong>Identical:</strong> both refs point at the same commit — there is nothing to compare.
+      </p>
+      {{else if .Data.NoCommonAncestor}}
+      <p class="border-t border-[var(--pd-line)] px-4 py-3 text-sm" role="status">
+        These refs share no common ancestry. The change below is the full tree difference between them.
+      </p>
+      {{else if eq .Data.Ahead 0}}
+      <p class="border-t border-[var(--pd-line)] px-4 py-3 text-sm" role="status">
+        <strong>Nothing to merge:</strong> <code class="mono">{{.Data.Head}}</code> has no commits that
+        <code class="mono">{{.Data.Base}}</code> does not already have.
+      </p>
+      {{end}}
+    </section>
+
+    {{if .Data.Commits}}
+    <section class="card mb-3 overflow-hidden" aria-label="Commits in this comparison">
+      <div class="flex flex-wrap items-baseline gap-x-3 border-b border-[var(--pd-line)] px-4 py-2">
+        <h3 class="text-sm font-semibold">Commits</h3>
+        <span class="mono text-[11px] text-[var(--pd-muted)]">{{.Data.Ahead}}{{if .Data.More}}+{{end}} on {{.Data.Head}}</span>
+      </div>
+      <table class="data-table wrap" aria-label="Commits in the comparison">
+        <tbody>
+          {{range .Data.Commits}}
+          <tr>
+            <td class="align-top">
+              <a class="link text-sm" href="{{.Href}}">{{.Subject}}</a>
+              <div class="mono text-[11px] text-[var(--pd-muted)]">
+                <a class="sha link mono" href="{{.Href}}">{{.Short}}</a>
+                {{if .Author}} · {{.Author}}{{end}}
+                {{if .Stamp}} · <time datetime="{{.Stamp}}" title="{{.Stamp}}">{{with rel .Stamp}}{{.}}{{else}}—{{end}}</time>{{end}}
+              </div>
+            </td>
+          </tr>
+          {{end}}
+        </tbody>
+      </table>
+      {{if .Data.More}}<p class="muted border-t border-[var(--pd-line)] px-4 py-2 text-xs">Showing the first {{len .Data.Commits}} commits; open the commits list for the rest.</p>{{end}}
+    </section>
+    {{end}}
+
+    {{if .Data.PatchTruncated}}
+    <p class="card mb-3 p-3 text-sm" role="status">
+      The patch is larger than 2 MiB and is truncated here. <strong>Files changed:</strong>
+      {{.Data.StatN}} (+{{.Data.Adds}} −{{.Data.Dels}}) — fetch the refs with git for the full patch.
+    </p>
+    {{end}}
+
+    {{if .Data.Files}}
+    <nav class="file-nav mb-2 flex flex-wrap items-center gap-x-3 gap-y-1" aria-label="changed files">
+      <span class="eyebrow">files</span>
+      {{range .Data.Files}}<a class="link mono max-w-full truncate text-[11px]" href="#{{.Anchor}}">{{.Path}}</a>{{end}}
+    </nav>
+    <div class="compare-files">
+      {{range .Data.Files}}
+      <section class="diff-file card mb-3 overflow-hidden" id="{{.Anchor}}">
+        <div class="diff-file-head flex flex-wrap items-baseline gap-2 border-b border-[var(--pd-line)] px-3 py-1.5">
+          <h3 class="mono min-w-0 break-all text-xs font-medium text-[var(--pd-text)]">{{.Path}}</h3>
+          {{if .Flags}}<span class="mono text-[11px] text-[var(--pd-muted)]">({{.Flags}})</span>{{end}}
+          <span class="diffstat ml-auto font-mono text-[11px] tabular-nums">
+            <span class="text-[var(--pd-ok)]">+{{.Added}}</span>
+            <span class="text-[var(--pd-danger)]">−{{.Deleted}}</span>
+          </span>
+        </div>
+        <div class="diff-holder overflow-x-auto">
+          {{template "repo_diff" .}}
+        </div>
+      </section>
+      {{end}}
+    </div>
+    {{else if not .Data.Identical}}
+    <p class="muted card p-4 text-center text-sm italic">No textual diff is shown for this comparison.</p>
+    {{end}}
+    {{end}}
+  </div>
+  {{end}}
+</div>
+{{end}}

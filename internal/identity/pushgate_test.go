@@ -52,8 +52,6 @@ func TestCheckPushMatrix(t *testing.T) {
 		{"explicit maintain binding", "acme", "r2", dave, true, 0},
 		// Host admin bypasses on a foreign repo.
 		{"host admin bypass", "acme", "r", admin, true, 0},
-		// Auth-none anon carries admin: zero-config pushes pass.
-		{"auth-none anon bypass", "acme", "r", noneP, true, 0},
 		// THE FIX: host-wide write alone grants nothing repo-scoped.
 		// writer carries Write:true and no relationship to acme/r.
 		{"host-write-only foreigner denied", "acme", "r", writer, false, auth.ErrForbidden},

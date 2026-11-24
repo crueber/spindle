@@ -1,6 +1,6 @@
 # Dockerfile — one binary in front of a store. Zero config by default: filesystem store in the data dir.
 #   docker build -t spindle .
-#   docker run --rm -p 8080:8080 spindle     # → open http://host:8080/setup
+#   docker run --rm -p 8080:8080 spindle     # → open http://host:8080/admin
 #
 # Compose examples: compose.standalone.yml (filesystem store) and
 # compose.yaml (spindle + rustfs, the S3-backed stack).
@@ -53,10 +53,18 @@ RUN CGO_ENABLED=0 go build -trimpath -buildvcs=auto \
       -ldflags "-s -w -X main.buildSHA=${SPINDLE_BUILD_SHA}" \
       -o /out/bin/spindle ./cmd/spindle
 
-# ---- 3. runtime: git >= 2.47, CA certs, nonroot ----
+# ---- 3. runtime: git >= 2.47, CA certs, docker CLI, nonroot ----
+# The server and the Threads runner are the SAME binary and the SAME published
+# image (one pull path, one tag to publish). The runner shells out to `docker`
+# (docs/threads.md §2.2), so the CLI ships here and is inert for a server-only
+# deployment; without it a containerised `spindle runner serve` cannot create a
+# job container at all. Nonroot stays: the docker socket is granted to the
+# process by an explicit group at `docker run --group-add`, never by making the
+# image root.
 FROM docker.io/library/alpine:3.22
-RUN apk add --no-cache git ca-certificates \
+RUN apk add --no-cache git ca-certificates docker-cli \
     && git --version \
+    && docker --version \
     && addgroup -g 1000 spindle && adduser -D -u 1000 -G spindle spindle \
     && mkdir -p /var/lib/spindle && chown -R spindle:spindle /var/lib/spindle
 COPY --from=build /out/bin/spindle /usr/local/bin/spindle

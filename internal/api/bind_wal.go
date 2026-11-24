@@ -78,9 +78,11 @@ func taskFromWal(t wal.TaskRecord) TaskRecord {
 	}
 }
 
-// progressFromWal converts one engine narration packet.
+// progressFromWal converts one engine narration packet. A "task" packet keeps
+// its record snapshot (the handle-free attach stream's live state — the
+// repo-transfer progress card reads it from here).
 func progressFromWal(p wal.Progress) Progress {
-	return Progress{
+	out := Progress{
 		Kind:    p.Kind,
 		Text:    p.Text,
 		Label:   p.Label,
@@ -89,6 +91,11 @@ func progressFromWal(p wal.Progress) Progress {
 		Unit:    p.Unit,
 		Percent: p.Percent,
 	}
+	if p.Task != nil {
+		rec := taskFromWal(*p.Task)
+		out.Task = &rec
+	}
+	return out
 }
 
 // TaskRecordFromWal is the exported conversion for composition glue (cmd).
@@ -476,7 +483,21 @@ func (v *walView) Blob(ctx context.Context, id git.RepoId, sha, path string, raw
 	if _, err := fmt.Sscanf(strings.TrimSpace(string(sizeOut)), "%d", &size); err != nil {
 		return BlobResult{}, err
 	}
-	res := BlobResult{Path: path, Size: size}
+	// The wire shape (§9.5) carries the resolved blob sha, the entry name and
+	// the ref the rev resolved from — the blob page header renders "size ·
+	// sha" and the raw link from them. The blob oid is a separate object from
+	// the commit the caller addressed us with, so it is a shape walk, not the
+	// rev: `rev-parse <commit>:<path>` (best-effort — a display field must not
+	// fail an otherwise readable blob).
+	blobSHA, _ := v.gitCmd(ctx, repo, "rev-parse", "--verify", "--quiet", spec)
+	res := BlobResult{
+		Path:      path,
+		Name:      baseName(path),
+		Size:      size,
+		Ref:       v.refNameForSHA(repo, sha),
+		SHA:       sha,
+		ObjectSHA: strings.TrimSpace(string(blobSHA)),
+	}
 	if size > maxBlobBytes && !raw {
 		res.TooLarge = true
 		return res, nil
@@ -491,6 +512,41 @@ func (v *walView) Blob(ctx context.Context, id git.RepoId, sha, path string, raw
 	res.Contents = body
 	res.Binary = isBinary(body)
 	return res, nil
+}
+
+// refNameForSHA is the reverse of the §9.3 split for callers holding only the
+// resolved sha (the BlobResult shape carries a ref; the Rev-parse fallback
+// drops it): the branch HEAD points at, else the first branch by name, else
+// the first tag by name. Best-effort — an unreadable ref cache yields "" (the
+// blob page then falls back to the sha it addressed, which the raw lane
+// resolves through the same split).
+func (v *walView) refNameForSHA(repo *git.LocalRepo, sha string) string {
+	snap, err := v.layer.Snapshot(repo)
+	if err != nil || snap == nil || sha == "" {
+		return ""
+	}
+	if snap.HeadTarget != "" {
+		if e, ok := snap.Get(snap.HeadTarget); ok && entrySHA(e) == sha {
+			return snap.HeadTarget
+		}
+	}
+	// Refs are name-sorted; branches sort before tags by prefix.
+	for _, prefix := range []string{"refs/heads/", "refs/tags/"} {
+		for _, e := range snap.Refs {
+			if strings.HasPrefix(e.Name, prefix) && entrySHA(e) == sha {
+				return e.Name
+			}
+		}
+	}
+	return ""
+}
+
+// entrySHA is a ref's commit sha (a tag's peeled commit, §9.2).
+func entrySHA(e git.RefEntry) string {
+	if e.Peeled != "" {
+		return string(e.Peeled)
+	}
+	return string(e.Oid)
 }
 
 func (v *walView) Commits(ctx context.Context, id git.RepoId, sha, path string, skip, n int) (CommitPage, error) {

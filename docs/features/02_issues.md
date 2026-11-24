@@ -18,6 +18,8 @@ Bucket keys (all under the repo prefix; lowercase, `/`-delimited per P1):
 | `repos/<o>/<r>/meta/labels.json` | repo label set | CAS'd |
 | `repos/<o>/<r>/meta/milestones/<id:06x>.json` | milestone | `Create` + CAS'd update |
 | `repos/<o>/<r>/meta/milestones/index.json` | milestone id allocator `{"next": N}` | CAS'd |
+| `repos/<o>/<r>/meta/issue_deps.json` | issue dependency links (§14) | CAS'd |
+| `repos/<o>/<r>/meta/issue_templates.json` | issue-template projection (§15) | CAS'd (written off the request path) |
 
 `<num:06x>`/`<id:06x>` are lowercase hex, zero-padded to 6 digits, so LIST scans return numeric order (same idiom as P3's 12-hex
 seqs). Threads for **both** kinds (`"issue"`/`"pr"`) live in this one family (P2 shared numbering); PR state lives in 03's
@@ -110,7 +112,8 @@ between two threads' CAS targets is promised anywhere.
   "version": 42,
   "compacted_through": "00003a",
   "open": [ {card} ],
-  "closed_recent": [ {card} ]
+  "closed_recent": [ {card} ],
+  "pinned": [7, 3]
 }
 ```
 
@@ -122,6 +125,9 @@ between two threads' CAS targets is promised anywhere.
 ```
 
 - Cards are the P3 header minus `version`/`next_event_seq`/`reaction_summary` — a projection, never an authority; the header wins.
+- `pinned` (§13) is the repo pin set: issue numbers, newest-first, bounded by `MaxPinned` (50). It is an **additive** field
+  on the existing CAS'd index (law 5: an unknown-field-tolerant reader round-trips an index without it unchanged), so pinning
+  needs no object family of its own. `RepairIndex` and `CompactIndex` carry it through unchanged.
 - `open` = every `kind: "issue"` thread with `state: "open"`, newest-activity-first; `closed_recent` = closed threads newer than
   `compacted_through`. **Compaction rule:** when the object exceeds ~256 KiB, the `issue-index-compact` task (§9) evicts the oldest
   `closed_recent` entries and advances `compacted_through` in the same CAS; compacted threads are served by paginated LIST over
@@ -185,7 +191,9 @@ next issue event touching that milestone; the counter is display state, thread h
 - `PATCH {state: "closed", state_reason: "completed"|"not_planned"}` → `state_changed` event; reopen clears `state_reason` to
   `null`. Author may close/reopen own thread; others' need triage (P6).
 - **Comment lock (Forgejo #594):** a closed issue is read-only for conversation writes — `AddComment` and `AddReaction`
-  refuse `409` (`ErrLocked`, human-readable toast text) while `state != open`. The lock keys on CURRENT state, never a
+  refuse `409` (`ErrLocked`, human-readable toast text) while `state != open`. The M2 moderator lock (§16 §10) composes
+  additively; its `collaborators` mode (§16 §10.1) admits role ≥ write (so a writer keeps commenting on a locked thread
+  while a reader is refused) through the same gate, and the view's `lock_mode` is what the page renders. The lock keys on CURRENT state, never a
   one-way latch: reopening restores commenting. Reaction REMOVAL stays available on locked threads (personal undo, not
   conversation activity). No maintainer/admin override in v1 (named decision, Decisions).
 - **Closing keywords (`fixes #N`) — decided: parsed at PR MERGE time, never at push.** The receive-pack path is git-only (README
@@ -236,6 +244,12 @@ RFC 3339, cache class per route. `num` matches `[1-9][0-9]{0,8}` (decimal on the
 | `POST …/api/issues/{num}/comments` | read (authenticated) | `{body}` → `201 {event}` |
 | `POST …/api/issues/{num}/reactions` | read (authenticated) | `{target_event_seq, content}` → `{event}` |
 | `DELETE …/api/issues/{num}/reactions/{target_event_seq}/{content}` | own reaction only | → `204` |
+| `GET …/api/issue-templates` | read | → `{templates:[{path,name,about,title,labels,assignees,body}], commit, refreshed_at}` — the cached projection (§15), never a git call |
+| `PUT …/api/issues/{num}/pin` | triage | → `200 {pinned:[int], num, changed}`; pins the issue (§13); idempotent (`changed:false` when already pinned) |
+| `DELETE …/api/issues/{num}/pin` | triage | → `200 {pinned:[int], num, changed}`; unpins (§13) |
+| `GET …/api/issues/{num}/dependencies` | read | → `{num, blocks:[{num,title,state}], blocked_by:[…], blocked:bool, unblocked:bool}` (§14) |
+| `POST …/api/issues/{num}/dependencies` | triage | `{kind:"blocks"|"blocked_by", target:N}` → `201 {…view}` (200 when the link already existed); self 400, unknown target 404, cycle 409 |
+| `DELETE …/api/issues/{num}/dependencies/{kind}/{target}` | triage | → `200 {…view}`; absent link is an idempotent 200 |
 | `GET …/api/labels` | read | → `{labels:[]}` |
 | `POST …/api/labels` | triage | `{name, color, description?}` → `201 {label}` |
 | `PATCH …/api/labels/{name}` | triage | `{color?, description?}` → `{label}` |
@@ -309,10 +323,11 @@ the `web/src/islands/sse.js` reader where a surface subscribes):
 
 | Route | Page | Live behavior |
 |---|---|---|
-| `/:o/:r/issues` | list: filter bar (state/assignee/labels/milestone/since, #415), paged cards from the index | SSE `issue` upserts/patches cards in place |
+| `/:o/:r/issues` | list: filter bar (state/assignee/labels/milestone/since, #415), paged cards from the index; §13 pinned issues lead the list behind a `pinned` text chip, and a triage viewer gets a per-row `Pin`/`Unpin` text button | SSE `issue` upserts/patches cards in place |
 | `/:o/:r/issues/new` | create form (title, markdown-lite body, preview toggle) | — |
 | `/:o/:r/issues/:num` | thread: header (`#N` state badge — the single source of state), timeline (seq-window, older on demand; renders oldest → newest, #225), comment composer, one sidebar metadata card (labels + `+` dropdown / assignees + `+` dropdown (WP6.1) / milestone with a linked title to the filtered issue list; triage sees the `+` dropdown when unset and a direct `−` clear button when set — issue #148) | `issue_event` appends timeline frames; `issue` updates the header |
 | | Forgejo #594: a closed thread renders the composer disabled with the server's reason (`lockState` in `internal/webui/collab.go`: "This conversation is closed") while the Reopen control stays live, so a reopen unlocks with no reload. The add-reaction `+` menu disables the same way; summary chips stay live (removal-only on locked threads). A raced 409 renders the API's message verbatim on the page (`.err-line`; no raw TypeError). | |
+| | §13/§14: the header carries a `pinned` text chip and a triage `Pin`/`Unpin` button; the sidebar's dependency card (`id="dependencies"`) renders "Blocked by" / "Blocks" chips with each issue's state word, a `blocked`/`unblocked` text chip (never colour-only), and a triage-only add form (`Link` kind select + `#N` input) plus a per-chip remove. Adding a dependency with an empty/self/cyclic/missing target re-renders with the service's plain-text reason inline. | |
 | `/:o/:r/labels` | label CRUD (triage-gated UI) | on save, refetch |
 | `/:o/:r/milestones` | milestone CRUD + progress bars + per-milestone linked issues (each milestone lists/links its issues via the server-side `milestone=` list filter; the title links to the filtered issue list) | on save, refetch |
 
@@ -369,6 +384,133 @@ is historical, D-WEB-15.)*
 Hazard: concurrent identical uploads racing on one content-addressed key. Avoidance: the store's create-if-absent
 arbitrates; losers take the 412 as idempotent 201 (same key ⇒ same bytes). No locks, no single-flight, no task kinds; the
 handler holds no repo locks across store calls (13 §2 rule 4).
+
+## 13. Pinning
+
+**Decided: the pin set lives in the existing CAS'd index — no new object family.** `Index.Pinned` (§2) is an additive JSON
+field (`[]int`, newest-first). `PinIssue(repo, num, pinned)` validates the issue exists (§404 otherwise) and CASes the index
+in one bounded loop; both directions are idempotent and report `changed`. Floor: **triage** (curation, like labels — a random
+commenter cannot reorder everyone's list); host admins pass, anonymous is a real 401.
+
+- Ordering: every list read (`ListIssues`, index-first **and** the LIST fallback) sorts the filtered pool **pinned first,
+  newest-number-first inside the pinned block**, then the rest newest-number-first. The §2 index storage order does not
+  change; the pin block is applied at render, so a state/label filter still pins its matches to the top.
+- The list response carries `pinned:[int]` (additive), so the page renders the chip and the toggle without a second read and
+  a client can keep the server's order. The issue page additionally reads `PinnedIssues` (one exact-key GET) for its header
+  chip/toggle.
+- No thread event is written: a pin is display state, not conversation history (the labels.json precedent, not the
+  labels_changed event — the pin set is repo-scoped, not a property of one thread).
+- Cap `MaxPinned = 50` → 409 ("at most 50 pinned issues").
+- A pinned number whose thread no longer resolves simply never matches a card; nothing has to be repaired.
+
+### Concurrency
+
+Hazard: two curators pinning at once, or a pin racing a mutation's `updateIndex`. Avoidance: both are CAS loops over
+`issues/index.json`; a loser retries on the fresh body, so no pin is lost. `updateIndex`, `RepairIndex` and `CompactIndex`
+all preserve `Pinned`. No lock, no task kind, no extra read on any hot path.
+
+## 14. Dependencies (blocks / blocked_by)
+
+**Decided: one repo-scoped CAS'd link document — `meta/issue_deps.json`.**
+
+```json
+{"version": 4, "links": [{"blocker": 3, "blocked": 7}]}
+```
+
+`blocker blocks blocked`. Both API spellings are accepted at the edge (`kind:"blocks"` with `target` = the blocked issue;
+`kind:"blocked_by"` with `target` = the blocker) and normalize onto the same directed edge, so `#3 blocks #7` and
+`#7 is blocked by #3` are one link. Rules:
+
+- **Same repo, issue kind only.** A non-issue number (a PR thread) or an unknown number is 404; a self-link is 400.
+- **Cycles are refused (409).** Adding `B → C` runs a reachability probe over the stored edges; if `C` already reaches `B`
+  the link would make the "all blockers closed" signal meaningless, so the write is refused with the pair named. The probe
+  reads the same object the write CASes, so the answer cannot race the write.
+- Caps: `MaxDependenciesPerIssue = 25` per side, `MaxDependencies = 500` per repo (409 past either) — this bounds the page's
+  header probes as well as the object.
+- **Unblocked is derived on read**, never stored: `blocked` is "at least one blocker is open"; `unblocked` is `!blocked`
+  (true with no blockers at all). Closing/reopening a blocker flips it with no write to the link document.
+- Floor: **triage** for add and remove; both are idempotent (`changed` reported; the API answers 200 for a no-op).
+- No thread event: links are repo metadata (the labels.json precedent). `#N` mentions keep producing `referenced` events;
+  a dependency link is a different, explicit relationship.
+
+### Concurrency
+
+Hazard: two curator writes at once, or two edits of different links racing (the lost-link shape). Avoidance: ONE CAS'd
+document, so every add/remove is a single atomic compare-and-swap and the two directions can never disagree — no two-object
+write, no ordering promise needed. Losers retry on the fresh body (10 attempts, then 409). Reads are one exact-key GET plus
+one header probe per linked issue (≤ the per-issue cap); no LIST runs on any dependency path.
+
+## 15. Issue templates (`.spindle/ISSUE_TEMPLATE`)
+
+**Decided: repository templates are read from `.spindle/ISSUE_TEMPLATE/*.md` and cached in one bucket projection;
+discovery runs on the push path, never on a composer request.** GitHub issue *forms*
+(`.github/ISSUE_TEMPLATE/*.yml` schemas — the `type: form` documents with typed inputs) are **not implemented** and
+`.github` is never read. Files outside `.spindle/ISSUE_TEMPLATE` (including nested subdirectories) are ignored.
+
+A template is a markdown file with optional `---` front matter:
+
+```
+---
+name: Bug report
+about: Something is broken
+title: "[bug] "
+labels: bug, regression
+assignees: alice
+---
+Steps to reproduce…
+```
+
+| Field | Notes |
+|---|---|
+| `name` | chooser label; defaults to the file stem |
+| `about` | one-line description (chooser tooltip + hint) |
+| `title` | prefilled title |
+| `labels` | comma list or `[a, b]` |
+| `assignees` | comma list or `[a, b]` |
+
+Parsing rules: the front-matter subset is `key: value` lines (one layer of quotes stripped, `#` comments and unknown keys
+ignored — forward compatible). An **unterminated** front-matter block, a malformed assignment, or a body over
+`MaxBodyBytes` makes the file malformed: it is **skipped** (logged) rather than offered half-parsed. A file with no front
+matter is legal (stem name, whole file is the body). At most `MaxIssueTemplates` (20) are offered, and one file may not
+exceed 128 KiB.
+
+### Discovery and the cache
+
+`repos/<o>/<r>/meta/issue_templates.json` is a derived, CAS'd projection:
+`{"version":N,"commit":"<sha>","refreshed_at":"RFC3339","templates":[…]}` (template bodies included, so the composer never
+needs the file again). The refresh is the **post-push hook**
+(`server.Options.OnPush` → `issues.Service.RefreshTemplatesFromDefaultBranch`): any branch create/update makes it resolve
+`HEAD` in the repo's serving copy, walk `git ls-tree -r <commit> -- .spindle/ISSUE_TEMPLATE` (04_git.md §14b), read each
+file, and CAS the projection (no write when the commit and the list are unchanged). Deletes, tag pushes and Threads
+job-token pushes never refresh.
+
+Consequences, stated plainly: **a composer/API request makes zero git calls** — `GET …/api/issue-templates` and the
+new-issue page are one exact-key GET of the projection. A repository whose last push predates this feature shows no
+chooser until its next push (the directory does not exist in any projection yet). A failed refresh leaves the previous
+projection serving and logs; a per-file read failure skips that file. Losing the object loses warmth only — the next push
+rebuilds it.
+
+### Composer behavior
+
+`GET /{o}/{r}/issues/new?template=<path>` prefills the title and body and renders the template's labels/assignees as a
+notice; a chip row of the repo's templates (plus "start blank") is the chooser — plain links, no client JavaScript. `POST`
+carries the selection as a hidden `template` field. Metadata application is **filtered, never half-applied and never a failed
+create**:
+
+- labels are applied only when they name an existing repo label (unknown names are reported as not applied);
+- assignees are applied only when they resolve to role ≥ triage;
+- a template with labels/assignees submitted by an author below triage applies **title and body only** (the create-metadata
+  floor of §7), and the landed issue page says what was not applied (`?template_skipped=`).
+
+A selection that no longer exists between render and submit is `400` ("the selected issue template no longer exists") —
+the composer never creates from a template it cannot resolve. No directory (or an empty one) is exactly today's blank
+composer.
+
+### Concurrency
+
+Hazard: two pushes racing one refresh. Avoidance: one bounded CAS on the projection; identical content detects the no-op.
+The refresh runs in its own goroutine with a deadline, off the request path, and holds no lock. Reads are single GETs (the
+bucket is the truth; a stale projection is the documented consequence above).
 
 ## Decisions
 
@@ -773,9 +915,81 @@ handler holds no repo locks across store calls (13 §2 rule 4).
 
 ## Explicitly out of scope
 
-- Conversation locking/pinning, issue templates, saved replies, issue transfer between repos.
+- Saved replies, issue transfer between repos.
+- Cross-repo dependencies and dependency links on pull requests (the link document is repo- and issue-scoped, §14).
+- GitHub issue **forms** (`.github/ISSUE_TEMPLATE/*.yml` schemas, §15) — only `.spindle/ISSUE_TEMPLATE/*.md` is read.
 - Sub-issues, tasklists, projects/boards (P9), Discussions (P9).
 - Cross-repo closing keywords (`fixes owner/repo#N`) — the parser records them as `cross_referenced` only.
 - Full-text issue search (P9: index-format decision deferred); label rename propagation beyond the index hot window.
 - Editing/deleting comments after write (corrections are compensating events, P3); reactions on labels/milestones.
 - Editing/deleting attachments after upload, thumbnailing, EXIF stripping, per-repo quotas beyond the per-file cap (§12).
+- **Moderation block gate (PLAN-V2 M1, 2026-11-21).** `issues` declares its own consumer-owned
+  `ModerationGate{BlockedFromRepo(ctx, owner, repo, actor)}` (the `pulls.ChecksGate` pattern) and
+  consults it in `CreateIssue`, `AddComment`, `AddReaction`, `UploadAttachment` and `patchThread`
+  (behind `PatchIssue`/`PatchThreadMetadata`) after role resolution and before any CAS. A blocked
+  principal gets `ErrForbidden` wrapping `identity.InteractionRefused` ("not permitted in this
+  repository") — never a message naming the block. Labels/milestones are repo configuration, and
+  removing one's own reaction is a personal undo (#594), so both are exempt by decision. Nil gate =
+  feature off; a gate error fails closed (503-class). Contract: `docs/features/16_moderation.md`.
+- **Moderation projection and conversation lock (PLAN-V2 M2, 2026-11-21).** The same gate grows
+  `Snapshot(ctx, owner, repo, num, fn)` — one conditional GET that visits the repo's hidden targets
+  and reports this conversation's moderator lock (and the document revision). `GetThread` (both
+  lanes) redacts: a hidden event carries `hidden:{by,at,reason}` and **omits `body`** for anyone below
+  triage; a moderator keeps the body alongside the marker. `ThreadView` gains
+  `locked`/`lock_reason`, and the ETag gains `-m<revision>` so a hide/unhide/lock can never 304 a
+  pre-moderation body. `AddComment` and `AddReaction` consult the lock before any CAS and refuse with
+  `ErrLocked` ("conversation locked: <reason>") — host admins included (the #594 no-override
+  decision); closed/merged state and the moderator lock are additive (`threadLocked` OR lock), and
+  metadata edits stay available. A gate error fails the read closed. Contract:
+  `docs/features/16_moderation.md` §10.
+
+- **Issue parity: pinning on the index, dependencies in one link document (2026-11-23).** Pinning (§13) is an additive
+  `pinned` array on the existing CAS'd `issues/index.json` — no new bucket family, no extra read on any list path, ordering
+  applied at render so filters keep their pins. Dependencies (§14) got one repo-scoped CAS'd document
+  (`meta/issue_deps.json`) rather than a field on each thread header: a link has two sides, and a two-object write is the
+  lost-update shape `13_concurrency.md §5` forbids (the second CAS can fail after the first commits, leaving one side
+  claiming a link the other never heard of). One document makes add/remove atomic, cycle detection a read of the same
+  object, and the derived `unblocked` signal free. Alternatives rejected: per-header arrays (two CASes, partial writes);
+  deriving `blocked_by` by scanning headers (a LIST on a request path, law 4). Both floors are **triage** (curation, not
+  conversation), both are moderation-exempt as repo configuration (16_moderation §3.3), and neither appends a thread event:
+  a pin is display state and a link is repo metadata (the labels.json precedent). Cycles are **refused** (409) instead of
+  tolerated because the feature's whole value is the "all blockers closed" signal, which a cycle can never satisfy.
+  Tests: `internal/issues/parity_test.go` (floors, CAS idempotence, pinned ordering under filters, concurrent pin/add
+  losing no update, self/missing/cycle refusals, unblocked flip, both API lanes' shapes) and
+  `internal/webui/parity_pages_test.go` (chips, text state, triage-only controls, redirect-safe `next`, read-role refusal
+  before the seam). Rendered proof: verify in a real browser at desktop and ~390 px, both themes.
+
+- **Issue templates: push-fed projection, no git on the composer (2026-11-23).** `.spindle/ISSUE_TEMPLATE/*.md` is
+  discovered by the post-push hook and CASed into `meta/issue_templates.json`; the composer and the API read that object
+  with one GET. Rationale: the file lives in git, so answering a composer request from git would add a subprocess (and a
+  tree walk) to a page render — the shape law 6 and the "no git on a request path" rule forbid — and it would make a
+  template edit visible only after a push anyway. The push hook is where a landed commit is a fact, matching the §5
+  closing-keyword decision (the push path itself stays git-only; this is the post-push fan-out, like Threads runs). Chose a
+  **full-body cache** over re-reading files per render so the successful path is one exact-key GET; the object is derived
+  and rebuildable, so losing it is warmth, not truth. GitHub **forms** (YAML schemas) are explicitly out of scope: they are a
+  different document format with a typed renderer, and only `.spindle` is read (never `.github`). Malformed files are
+  skipped with a log line instead of failing the refresh — one bad template must not blank the chooser. Metadata
+  application is filtered (existing labels, triage assignees, and the §7 floor for the author) and the result is reported on
+  the landing page, because a template must never turn "file an issue" into a 403 or a silent half-apply. Tests:
+  `internal/issues/templates_test.go` (front-matter matrix incl. malformed/oversized, discovery + sorted skip, no-op refresh
+  keeps the version, changed commit rewrites, failed refresh keeps the old projection, read path with `TemplateGit` nil,
+  default-branch hook + unborn HEAD, API shapes/gate/corrupt 503) and `internal/webui/parity_forms_test.go` (chooser,
+  prefill, filtered metadata, read-role drop + notice, vanished-template 400). Rendered proof: verify in a real browser at
+  desktop and ~390 px, both themes.
+
+- **Lock modes: `all` stays absolute, `collaborators` is the write floor (2026-11-23).** The M2 conversation lock gained
+  `mode` (§16 §10.1). `all` is today's behavior and stays a full stop — host admins included, the #594 no-override decision
+  untouched. `collaborators` admits role ≥ write on the normal P6 ladder, which is where a host admin already resolves;
+  that is the documented answer for "how do host admins behave in each mode" — the mode narrows the audience rather than
+  adding an operator exception, so an operator can talk in a collaborators-only thread and cannot in an all-locked one. The
+  gate stays consumer-owned: each of `internal/issues`, `internal/pulls` and `internal/review` compares the returned mode
+  against its own `lockModeCollaborators` constant (the string is contractual, documented in 16_moderation §10.1) and asks
+  its own role resolver, so no feature imports the moderation implementation. The page's lock control gained a mode select;
+  the page keeps the composer live for a write+ viewer under `collaborators` (the banner says who may still speak) because
+  the server would accept the comment — a disabled composer there would be a lie. Changing the mode of an already-locked
+  thread is unlock → lock from the page; the service accepts a direct switch (keeping the first moderator's evidence) for
+  API/PUT clients. Tests: `internal/moderation/lockmode_test.go` (default, switch keeps evidence, audit names both modes,
+  invalid mode 400, Apply mode-only delta floor + no-op, flat envelope mode), `internal/issues/lockmode_test.go`,
+  `internal/pulls/lockmode_test.go`, `internal/review/lockmode_test.go` (all refuses writer/reader/admin; collaborators
+  admits writer + admin and refuses reader; gate errors fail closed), `internal/webui/parity_pages_test.go` (mode select,
+  banner text, live vs disabled composer). Rendered proof: verify in a real browser at desktop and ~390 px, both themes.

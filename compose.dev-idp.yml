@@ -1,0 +1,23 @@
+# compose.dev-idp.yml — a local OIDC provider for spindle development.
+#
+# DEV TOOLING ONLY. The provider is `internal/devtools/oidpstub`, which is NOT
+# part of the spindle image (cmd/spindle never imports internal/devtools); this
+# file runs it from a Go toolchain image with the repository bind-mounted.
+#
+#   docker compose -f compose.standalone.yml -f compose.dev-idp.yml --profile dev-idp up
+#
+# The stub prints the [server.auth] block to use (client id spine-dev,
+# secret spine-dev-secret, issuer http://host.docker.internal:9999) and
+# auto-approves logins with any email and the groups you type.
+services:
+  oidpstub:
+    profiles: ["dev-idp"]
+    image: golang:1.27-alpine
+    working_dir: /src
+    command: ["go", "run", "./internal/devtools/oidpstub", "-addr", "0.0.0.0:9999", "-issuer", "http://host.docker.internal:9999"]
+    volumes:
+      - .:/src
+    ports:
+      - "9999:9999"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"

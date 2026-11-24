@@ -5,6 +5,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -164,5 +165,89 @@ func TestRegistry_OnCreateFiresOncePerBirth(t *testing.T) {
 	r2, _ := newTestRegistry(t)
 	if _, err := r2.Create(ctx, "acme/other", git.Sha1); err != nil {
 		t.Fatalf("create without observer: %v", err)
+	}
+}
+
+// TestRegistry_Invalidate covers the move's quiesce step (PLAN-V2 §3 T.1): the
+// handle and the local serving copy go, bucket objects stay, the listing
+// snapshot is dropped, and the call is idempotent.
+func TestRegistry_Invalidate(t *testing.T) {
+	r, st := newTestRegistry(t)
+	ctx := context.Background()
+	h, err := r.Create(ctx, "acme/moved", git.Sha1)
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	dir := h.Dir()
+	if _, err := os.Stat(dir); err != nil {
+		t.Fatalf("serving copy missing after create: %v", err)
+	}
+	// Warm the listing snapshot so the invalidation has something to drop.
+	_ = r.List()
+	if err := r.Invalidate("acme/moved"); err != nil {
+		t.Fatalf("invalidate: %v", err)
+	}
+	if r.Get("acme/moved") != nil {
+		t.Fatal("handle survived Invalidate")
+	}
+	if _, err := os.Stat(dir); !os.IsNotExist(err) {
+		t.Fatalf("serving copy survived Invalidate: %v", err)
+	}
+	// Bucket truth is untouched (the non-destructive contract).
+	if ok, err := store.Exists(ctx, st, manifestKey("acme/moved")); err != nil || !ok {
+		t.Fatalf("manifest must survive Invalidate: %v %v", ok, err)
+	}
+	r.listing.mu.Lock()
+	snapshot := r.listing.repos
+	r.listing.mu.Unlock()
+	if snapshot != nil {
+		t.Fatal("listing snapshot survived Invalidate")
+	}
+	// Idempotent, and a bad id is rejected rather than silently ignored.
+	if err := r.Invalidate("acme/moved"); err != nil {
+		t.Fatalf("second invalidate: %v", err)
+	}
+	if err := r.Invalidate("bad id!"); err == nil {
+		t.Fatal("invalid id must error")
+	}
+	// The repo still opens afterwards (bucket truth).
+	if _, err := r.Open(ctx, "acme/moved"); err != nil {
+		t.Fatalf("re-open after Invalidate: %v", err)
+	}
+}
+
+// TestRegistry_VerifyRepo covers the move's verification probe: a healthy repo
+// passes, a misdirected manifest and a corrupt one fail with a named detail.
+func TestRegistry_VerifyRepo(t *testing.T) {
+	r, st := newTestRegistry(t)
+	ctx := context.Background()
+	if _, err := r.Create(ctx, "acme/ok", git.Sha1); err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	if err := r.VerifyRepo(ctx, "acme/ok"); err != nil {
+		t.Fatalf("verify healthy repo: %v", err)
+	}
+	// Unknown repo → a not-found error.
+	if err := r.VerifyRepo(ctx, "acme/ghost"); err == nil {
+		t.Fatal("unknown repo must not verify")
+	}
+	// A manifest whose repo field names something else fails the way a move
+	// would leave it if the retargeting were skipped.
+	misdirected := (&pbManifest{FormatVersion: 1, Repo: "acme/elsewhere", ObjectFormat: "sha1", Revision: 2}).Marshal()
+	if _, err := store.PutBytes(ctx, st, manifestKey("acme/misdirected"), misdirected,
+		store.PutOptions{Mode: store.PutCreate}); err != nil {
+		t.Fatal(err)
+	}
+	err := r.VerifyRepo(ctx, "acme/misdirected")
+	if err == nil || !strings.Contains(err.Error(), "names repo") {
+		t.Fatalf("misdirected manifest = %v, want a named failure", err)
+	}
+	// A corrupt manifest fails at the decode.
+	if _, err := store.PutBytes(ctx, st, manifestKey("acme/corrupt"), []byte("{nope"),
+		store.PutOptions{Mode: store.PutCreate}); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.VerifyRepo(ctx, "acme/corrupt"); err == nil {
+		t.Fatal("corrupt manifest must not verify")
 	}
 }

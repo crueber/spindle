@@ -17,7 +17,9 @@ func TestSaveSetupKeepsOneBackupOfExistingFile(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, ConfigFileName)
 	// A hand-written file: the canonical document plus an operator comment.
-	body, err := MarshalTOML(FirstRunDefaults(dir))
+	c := validOIDC()
+	c.DataDir = dir
+	body, err := MarshalTOML(c)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -95,7 +97,8 @@ func TestSaveSetupKeepsOneBackupOfExistingFile(t *testing.T) {
 
 func TestSaveSetupFreshAndEmptyFilesMakeNoBackup(t *testing.T) {
 	dir := t.TempDir()
-	c := FirstRunDefaults(dir)
+	c := validOIDC()
+	c.DataDir = dir
 	if backup, err := SaveSetup(c, dir); err != nil || backup != "" {
 		t.Fatalf("fresh save = %q err=%v, want no backup", backup, err)
 	}
@@ -104,7 +107,9 @@ func TestSaveSetupFreshAndEmptyFilesMakeNoBackup(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(dir2, ConfigFileName), nil, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if backup, err := SaveSetup(FirstRunDefaults(dir2), dir2); err != nil || backup != "" {
+	empty := validOIDC()
+	empty.DataDir = dir2
+	if backup, err := SaveSetup(empty, dir2); err != nil || backup != "" {
 		t.Fatalf("empty-file save = %q err=%v, want no backup", backup, err)
 	}
 }

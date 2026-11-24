@@ -16,16 +16,16 @@ on:
     branches: [main]
 jobs:
   lint:
-    runs-on: ubuntu-latest
+    runs-on: linux
     steps:
       - run: echo lint
   build:
-    runs-on: ubuntu-latest
+    runs-on: linux
     needs: [lint]
     steps:
       - run: echo build
   test:
-    runs-on: ubuntu-latest
+    runs-on: linux
     needs: [build]
     steps:
       - run: echo test
@@ -37,21 +37,21 @@ on:
     branches: [main]
 jobs:
   root:
-    runs-on: ubuntu-latest
+    runs-on: linux
     steps:
       - run: echo root
   left:
-    runs-on: ubuntu-latest
+    runs-on: linux
     needs: [root]
     steps:
       - run: echo left
   right:
-    runs-on: ubuntu-latest
+    runs-on: linux
     needs: [root]
     steps:
       - run: echo right
   join:
-    runs-on: ubuntu-latest
+    runs-on: linux
     needs: [left, right]
     steps:
       - run: echo join
@@ -65,12 +65,12 @@ on:
     branches: [main]
 jobs:
   aaa-dependent:
-    runs-on: ubuntu-latest
+    runs-on: linux
     needs: [zzz-root]
     steps:
       - run: echo dependent
   zzz-root:
-    runs-on: ubuntu-latest
+    runs-on: linux
     steps:
       - run: echo root
 `
@@ -88,8 +88,11 @@ func needsEnv(t *testing.T, workflow string) (*testEnv, string) {
 }
 
 // needsRunner is the label set the fixture jobs ask for.
+// needsRunner is the shared unit-test runner. It opts in to fork runs so
+// fork-flow tests (permissions, payloads, approval) need no special casing; the
+// fork-gating tests construct a DEFAULT runner explicitly to pin the refusal.
 func needsRunner() *RunnerDoc {
-	return &RunnerDoc{ID: "rnr", Labels: []string{"ubuntu-latest"}, State: RunnerActive}
+	return &RunnerDoc{ID: "rnr", Labels: []string{"linux"}, AllowAll: true, State: RunnerActive, AllowForkRuns: true}
 }
 
 // claimOne runs one claim probe and returns the claimed job id ("" = nothing).
@@ -247,7 +250,7 @@ func TestNeedsCancelledDependencySkipsDownstream(t *testing.T) {
 func TestNeedsUnrelatedJobsStartInParallel(t *testing.T) {
 	e, runID := needsEnv(t, needsChainYAML+`
   docs:
-    runs-on: ubuntu-latest
+    runs-on: linux
     steps:
       - run: echo docs
 `)
@@ -284,14 +287,14 @@ on:
     branches: [main]
 jobs:
   build:
-    runs-on: ubuntu-latest
+    runs-on: linux
     strategy:
       matrix:
         go: ["1.26", "1.27"]
     steps:
       - run: echo ${{ matrix.go }}
   deploy:
-    runs-on: ubuntu-latest
+    runs-on: linux
     needs: [build]
     steps:
       - run: echo deploy

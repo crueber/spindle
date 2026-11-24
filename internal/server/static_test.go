@@ -276,9 +276,9 @@ func TestCredentialResolutionOrder(t *testing.T) {
 	}
 }
 
-func TestTokenModeDecisionTree(t *testing.T) {
+func TestCredentialDecisionTree(t *testing.T) {
 	s, _ := newTestServer(t, nil)
-	// Static match → principal with flags from config.
+	// Seam-2 credential match → principal with the hook's flags.
 	p, aerr := s.authSvc.Authenticate(bearerReq("tok123"), s.cfg)
 	if aerr != nil || p.Name != "alice" || !p.Write || !p.Admin {
 		t.Fatalf("p=%+v aerr=%v", p, aerr)
@@ -293,18 +293,10 @@ func TestTokenModeDecisionTree(t *testing.T) {
 	if aerr != nil || !p.Anonymous {
 		t.Fatalf("p=%+v aerr=%v", p, aerr)
 	}
-	// mode none → everyone is anon with write+admin (§8.1; the frozen
-	// Principal.None carries Anonymous=false by design).
-	s.cfg.Server.Auth.Mode = "none"
-	p, _ = s.authSvc.Authenticate(httptest.NewRequest("GET", "/x", nil), s.cfg)
-	if !p.Write || !p.Admin || p.Name != "anon" {
-		t.Fatalf("mode none principal = %+v", p)
-	}
 }
 
 func TestWgtTokenLifecycle(t *testing.T) {
 	s, _ := newTestServer(t, nil)
-	s.cfg.Server.Auth.Mode = "oidc"
 	tok, err := s.authSvc.MintToken("alice@example.com")
 	if err != nil {
 		t.Fatal(err)
@@ -333,7 +325,6 @@ func TestWgtTokenLifecycle(t *testing.T) {
 
 func TestOIDCTreeBasicAuthNoIDTokens(t *testing.T) {
 	s, _ := newTestServer(t, nil)
-	s.cfg.Server.Auth.Mode = "oidc"
 	// Basic + static token → ok.
 	req := httptest.NewRequest("GET", "/x", nil)
 	req.SetBasicAuth("user", "tok123")
@@ -386,7 +377,6 @@ func TestJWKSVerify(t *testing.T) {
 	defer issuer.Close()
 
 	s, _ := newTestServer(t, nil)
-	s.cfg.Server.Auth.Mode = "oidc"
 	// cfg issuer is the LOGICAL issuer (the token iss); the JWKS discovery
 	// hits the test server URL. §8.4 rule 4 also accepts the bare host.
 	s.cfg.Server.Auth.Issuer = "https://issuer.test"

@@ -8,14 +8,48 @@ import (
 	"time"
 
 	"github.com/crueber/spindle/internal/config"
+	"github.com/crueber/spindle/internal/server/auth"
 )
+
+// installTestAdminHook installs the TEST-ONLY Seam-2 credential (the same
+// ExtraCredential hook composition wires for CI/runner prefixes): the fixture
+// bearer authenticates as a host admin so handler tests can exercise admin
+// routes without a live IdP. The released binary never installs this hook; it
+// exists in _test.go only.
+func installTestAdminHook(s *Server) {
+	s.authSvc.ExtraCredential = func(token string) (auth.Principal, *auth.AuthError, bool) {
+		switch token {
+		case "tok123", "adm", "tok-root":
+			return auth.Principal{Name: "alice", Write: true, Admin: true}, nil, true
+		}
+		return auth.Principal{}, nil, false
+	}
+}
+
+// seedValidConfig writes a complete, normally-booting OIDC spindle.toml into
+// dir (the base the setup surface edits in these tests). It returns the seeded
+// effective config.
+func seedValidConfig(t *testing.T, dir string) *config.Config {
+	t.Helper()
+	c := config.FirstRunDefaults(dir)
+	c.Server.Listen = "127.0.0.1:8080"
+	c.Server.Auth.Issuer = "https://id.example.com"
+	c.Server.Auth.AllowedDomains = []string{"example.com"}
+	c.Server.Auth.OAuthClientID = "spindle"
+	c.Server.Auth.OAuthClientSecret = "s3cret"
+	c.Server.Auth.SessionSecret = "0123456789abcdef0123456789abcdef"
+	c.Server.Auth.AdminGroups = []string{"spindle-admin"}
+	if _, err := config.SaveSetup(c, dir); err != nil {
+		t.Fatal(err)
+	}
+	return c
+}
 
 // newTestServer builds a Server with a fake engine and a memory store.
 func newTestServer(t *testing.T, mutate func(*Options)) (*Server, http.Handler) {
 	t.Helper()
 	cfg := config.Defaults()
-	cfg.Server.Auth.Mode = "token"
-	cfg.Server.Auth.Tokens = []config.StaticToken{{Principal: "alice", Token: "tok123", Write: true, Admin: true}}
+	cfg.Server.Auth.Tokens = []config.StaticToken{{Principal: "static-probe", Token: "tok-static", Write: true}}
 	cfg.Server.CorsOrigins = []string{"https://app.example.com", "*.localhost"}
 	cfg.Server.Auth.AnonymousRead = false
 	cfg.Server.Auth.SessionSecret = "0123456789abcdef0123456789abcdef"
@@ -27,6 +61,7 @@ func newTestServer(t *testing.T, mutate func(*Options)) (*Server, http.Handler) 
 		mutate(&o)
 	}
 	s := New(o)
+	installTestAdminHook(s)
 	return s, s.Handler()
 }
 
@@ -99,7 +134,7 @@ func TestCanonicalBrowserHostRedirect(t *testing.T) {
 			r.Host = "localhost:8080"
 			r.Header.Set("Accept", "text/html")
 			return r
-		}, http.StatusOK}, // token mode: the token-paste sign-in page, not a canonical-host hop
+		}, http.StatusNotImplemented}, // the /_auth flow is skipped by the canonical-host hop
 		{"healthz skipped", func() *http.Request {
 			r := httptest.NewRequest("GET", "http://localhost:8080/healthz", nil)
 			r.Host = "localhost:8080"

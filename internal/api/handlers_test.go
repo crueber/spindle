@@ -42,8 +42,13 @@ func newFixture(t *testing.T) *fixture {
 		tasks: &fakeTasks{records: map[string]TaskRecord{}, streams: map[string]TaskStream{}},
 	}
 	cfg := config.Defaults()
-	cfg.Server.Auth.Mode = "token"
 	cfg.Server.Auth.AnonymousRead = true
+	cfg.Server.Auth.Issuer = "https://id.example.com"
+	cfg.Server.Auth.AllowedDomains = []string{"example.com"}
+	cfg.Server.Auth.OAuthClientID = "spindle"
+	cfg.Server.Auth.OAuthClientSecret = "s3cret"
+	cfg.Server.Auth.SessionSecret = "0123456789abcdef0123456789abcdef"
+	cfg.Server.Auth.AdminGroups = []string{"spindle-admin"}
 	f.env = &Env{
 		Store:    store.NewMemory(),
 		Repos:    f.reg,

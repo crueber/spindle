@@ -611,7 +611,7 @@ seven clean; two FAILs and three smaller gaps were dispatched to
   `width:100%` `.input` in a flex row collapsed to min-content at both 1440 and 390. The row now uses
   the canonical filter-bar grid (`card … grid-cols-2 sm:grid-cols-4`, labelled fields; style
   guideline §6, `pages/collab/issues.html`), each control in a `span.block.min-w-0` so it keeps its
-  intrinsic height. Measured rendered controls (Obscura, real Chromium engine): **265 / 264 / 265 px
+  intrinsic height. Measured rendered controls (headless Chromium over CDP): **265 / 264 / 265 px
   wide at 1440×900, 160 px each at 390×844, 30 px tall**, form 1120/358 px, and
   `scrollWidth === clientWidth` at both widths (no page-level pan). Filtering behaviour and URL state
   are unchanged; the `filter` button stays secondary (the page's one `.primary` is Run workflow).
@@ -772,3 +772,34 @@ Three observations were outside the nine items; each is closed here:
 | 3. An out-of-range integer in a `/setup` field saved `MinInt64` with a success response (`bundles.strategy#0.keep = 99999999999999999999`). | **FIXED.** `setup.parseSettingInt` fell through `strconv.ParseInt` to `ParseFloat` and converted with `int64(f)`, which saturates on amd64. It and a new `parseSettingUint` now bound the float path to exactly representable values, and `Coerce` bounds every width (int8..int64, uint8..uint64, ByteSize, Duration, floats) with a keyed `setup.Error` naming the accepted range; `config.ParseByteSize`'s 2^63 boundary and `config.ParseDuration`'s pre-multiply overflow check are fixed the same way. `PUT /api/v1/setup` answers 422 with the key and writes nothing. Gates: `TestNumericCoercionNeverSaturates`, `TestStructSliceCellOverflowIsKeyedAndChangesNothing` (file byte-identical), `TestSetupAPIRejectsOutOfRangeNumbers`, `TestNumericBoundaryMessagesNameTheRange`; rendered proof on the page at 1440 and 390. Doc: 11_config_cli.md §3.7. |
 | 1. A foreign principal opening a still-pending invitation got `409 invitation no longer pending` — the wrong cause for a live invite. | **FIXED (accurate wording, still 409, no leak).** The top-level routes carry only an id and there is no id→scope index, so an id absent from the caller's inbox names both knowable causes ("not addressed to your account, or already accepted or cancelled"); a row that outlived its issuer object says "no longer valid" naming the spent/swept-repo causes, and a repo deleted under a surviving object names the deletion. Same path for org and repo families. Gates: `TestInvitationRefusalWording`, `TestPublicFriendlyInviteErr`. Doc: 01_identity_permissions.md §7 + Decisions. |
 | 2. A `contents: write` job with the default (shallow) checkout cannot push: `HTTP 400` with a 113-byte body. | **FIXED as documentation + legible refusal (no default change — GitHub behaves the same).** The checkout section of 15_threads.md states plainly that pushing requires full depth and shows the exact `with: fetch-depth: 0` snippet; the receive path refuses a leading `shallow <oid>` section with an ERR packet naming the cause and remedy (`fetch-depth: 0`, `git fetch --unshallow`) on both HTTP and SSH and logs repo/principal, so the job log shows the fix instead of a bare 400. Advertising `shallow` stays a follow-up. Gates: `TestParsePushRequestShallowRefused`, `TestParseShallowSection`, `TestPushFromShallowCloneNamesCauseAndRemedy`, `TestSSHReceivePackShallowCloneNamesRemedy`. Docs: 15_threads.md (checkout + Decision h), 04_git.md §7 step 1 + Decisions. |
+
+### Post-audit follow-ups (2026-11-21, user-reported and self-found)
+
+- **Markdown soft breaks** (`fix/markdown-softbreaks`): prose was wrapping at the author's source line
+  width because the renderer emitted `<br>` for every newline — the `marked` `breaks: true` carry-over.
+  Now a soft break folds to a space, only two trailing spaces or an unescaped trailing backslash
+  hard-break, and lazy continuation works for lists and blockquotes. Pinned by
+  `testdata/readme-breaks.md` goldens; measured 4 source lines → 3 rendered lines at 1440 and 7 at 390.
+- **Threads job semantics** (`fix/threads-job-semantics`): job-level `if:` (server-decided before
+  claim, `needs.<job>.result` and `success()/failure()/cancelled()` contexts, false ⇒ `skipped`) and
+  `continue-on-error:` (record says `failure` + `tolerated: true`; the run fold ignores it) now apply;
+  a step `id:` (previously a parse error) is accepted with `steps.<id>.outcome|conclusion`, and
+  `outputs` parses but reads empty (documented). Real-container e2e for both.
+- **CLI** (`fix/cli-threads-cancel`): `threads cancel` and `threads rerun` call the routes that have
+  existed since B1/B2 instead of the stale "no route until the runner lands" message.
+- **Docs** (`docs/threads-reference`, `docs/refresh-readme-agents`): `docs/threads.md` is the new
+  user-facing reference (and a test parses its fenced examples against the real parser);
+  `docs/features/15_threads.md` stays the design record. README and AGENTS were refreshed against the
+  code — including the stale `- [ ] packages … not yet implemented` checklist line (packages shipped
+  in v0.5.0), the Threads item pointing at the new reference, and eleven new field lessons.
+- **Repository pulse / Insights** (`feat/repo-insights`): the parity-audit card's "repository pulse"
+  is implemented as `/{owner}/{repo}/insights` — a cached `insights/pulse.json` projection (Pulse,
+  Contributors, Code frequency, honest Facts) computed by one bounded `git log --shortstat` in the
+  `insights-refresh` task (maintainer due gate + writer-triggered). Clone/view traffic is explicitly
+  refused (no git access log exists) rather than invented; the page is server-rendered with CSS bars,
+  no JS and no chart library, gated exactly like the Code page. Docs: `docs/features/18_repo_insights.md`;
+  cost: EVIDENCE E20 (16.6 ms at 1k commits, 156.2 ms at 10k, one git call, one page GET).
+- **CI determinism** (`fix/notify-coverage`): `internal/notify` coverage varied 94.9–95.3 % run to run
+  because five fan-out loops chose randomly between a ready semaphore slot and a cancelled context,
+  so `make cover` failed at random. Slot acquisition now re-checks the context after taking a slot
+  (same policy, chosen by construction); 20/20 runs report **97.3 %**.

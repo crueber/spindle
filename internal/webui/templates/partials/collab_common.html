@@ -43,7 +43,7 @@
       {{range .Labels}}{{template "collab_label_chip" .}}{{else}}<span class="muted">none</span>{{end}}
       {{if .CanTriage}}
       <details class="relative inline-block" data-popover>
-        <summary class="muted list-none cursor-pointer rounded border border-[var(--pd-line-strong)] px-1.5 py-0 text-xs leading-5 hover:text-[var(--pd-text)]" aria-haspopup="menu" aria-label="Add or remove labels" data-popover-trigger>+</summary>
+        <summary class="muted list-none cursor-pointer rounded border border-[var(--pd-line-strong)] px-1.5 py-0.5 text-xs leading-5 hover:text-[var(--pd-text)]" aria-haspopup="menu" aria-label="Add or remove labels" data-popover-trigger>+</summary>
         <div class="label-drop scroll-slim card absolute right-0 z-30 mt-1 max-h-72 w-80 overflow-y-auto p-1" role="menu" aria-label="Labels" data-popover-panel>
           {{range .LabelOptions}}
           <form method="post" action="{{$.LabelAction}}">
@@ -68,7 +68,7 @@
       {{range .Assignees}}<span class="chip chip-neutral">{{.}}</span>{{else}}<span class="muted">none</span>{{end}}
       {{if .CanTriage}}
       <details class="relative inline-block" data-popover>
-        <summary class="muted list-none cursor-pointer rounded border border-[var(--pd-line-strong)] px-1.5 py-0 text-xs leading-5 hover:text-[var(--pd-text)]" aria-haspopup="menu" aria-label="Add or remove assignees" data-popover-trigger>+</summary>
+        <summary class="muted list-none cursor-pointer rounded border border-[var(--pd-line-strong)] px-1.5 py-0.5 text-xs leading-5 hover:text-[var(--pd-text)]" aria-haspopup="menu" aria-label="Add or remove assignees" data-popover-trigger>+</summary>
         <div class="label-drop scroll-slim card absolute right-0 z-30 mt-1 max-h-72 w-64 overflow-y-auto p-1" role="menu" aria-label="Assignees" data-popover-panel>
           {{range .AssigneeOptions}}
           <form method="post" action="{{$.AssigneeAction}}">
@@ -88,8 +88,7 @@
   </div>
 
   <div class="p-3">
-    <p class="eyebrow mb-1">Milestone</p>
-    {{with .Milestone}}
+    <p class="eyebrow mb-1">Milestone</p>    {{with .Milestone}}
     <div class="flex flex-wrap items-center gap-1">
       {{template "collab_milestone_chip" .}}
       {{if $.CanTriage}}
@@ -102,7 +101,7 @@
     {{else}}
     {{if .CanTriage}}
     <details class="relative inline-block" data-popover>
-      <summary class="muted list-none cursor-pointer rounded border border-[var(--pd-line-strong)] px-1.5 py-0 text-xs leading-5 hover:text-[var(--pd-text)]" aria-haspopup="menu" aria-label="Set a milestone" data-popover-trigger>+</summary>
+      <summary class="muted list-none cursor-pointer rounded border border-[var(--pd-line-strong)] px-1.5 py-0.5 text-xs leading-5 hover:text-[var(--pd-text)]" aria-haspopup="menu" aria-label="Set a milestone" data-popover-trigger>+</summary>
       <div class="milestone-drop scroll-slim card absolute right-0 z-30 mt-1 max-h-72 w-64 overflow-y-auto p-1" role="menu" aria-label="Milestones" data-popover-panel>
         {{range .Milestones}}
         <form method="post" action="{{$.MilestoneAction}}">
@@ -118,4 +117,67 @@
     {{end}}
   </div>
 </section>
+{{end}}
+
+{{/* ---- §14 dependency card (issue sidebar) ----------------------------
+     Both directions plus the derived unblocked signal: a text chip (never
+     colour-only) says "blocked" or "unblocked", and every linked issue is a
+     chip with its own state word. The add/remove controls are triage-only and
+     post one link per form (the label/milestone toggle idiom). */}}
+{{define "collab_dependency_card"}}
+{{with .View}}
+<section id="dependencies" class="card divide-y divide-[color:var(--pd-line)] text-sm" aria-label="Dependencies">
+  <div class="p-3">
+    <div class="mb-1 flex items-center gap-2">
+      <p class="eyebrow">Blocked by</p>
+      {{if .Blocked}}<span class="chip chip-closed">blocked</span>{{else}}<span class="chip chip-open">unblocked</span>{{end}}
+    </div>
+    <ul class="grid gap-1">
+      {{range .BlockedBy}}
+      <li class="flex flex-wrap items-center gap-1">
+        <a class="chip max-w-full truncate" href="/{{$.Repo.Full}}/issues/{{.Num}}" title="{{.Title}}">#{{.Num}} {{.Title}}</a>
+        <span class="muted text-xs">{{.State}}</span>
+        {{if $.CanTriage}}
+        <form method="post" action="{{$.RemoveBase}}/blocked_by/{{.Num}}/delete">
+          <button type="submit" class="link text-xs" aria-label="Remove the blocker #{{.Num}}">remove</button>
+        </form>
+        {{end}}
+      </li>
+      {{else}}
+      <li class="muted">Nothing blocks this issue.</li>
+      {{end}}
+    </ul>
+  </div>
+  <div class="p-3">
+    <p class="eyebrow mb-1">Blocks</p>
+    <ul class="grid gap-1">
+      {{range .Blocks}}
+      <li class="flex flex-wrap items-center gap-1">
+        <a class="chip max-w-full truncate" href="/{{$.Repo.Full}}/issues/{{.Num}}" title="{{.Title}}">#{{.Num}} {{.Title}}</a>
+        <span class="muted text-xs">{{.State}}</span>
+        {{if $.CanTriage}}
+        <form method="post" action="{{$.RemoveBase}}/blocks/{{.Num}}/delete">
+          <button type="submit" class="link text-xs" aria-label="Stop blocking #{{.Num}}">remove</button>
+        </form>
+        {{end}}
+      </li>
+      {{else}}
+      <li class="muted">This issue blocks nothing.</li>
+      {{end}}
+    </ul>
+  </div>
+  {{if $.CanTriage}}
+  <form class="grid gap-1 p-3" method="post" action="{{$.AddAction}}" aria-label="Link a dependency">
+    <label class="eyebrow" for="dep-kind">Link</label>
+    <div class="flex flex-wrap gap-1">
+      <select class="input min-w-0 flex-1" id="dep-kind" name="kind">
+        {{range $.Kinds}}<option value="{{.Value}}">{{.Label}}</option>{{end}}
+      </select>
+      <input class="input w-24" name="target" inputmode="numeric" placeholder="#N" aria-label="Issue number" required>
+      <button type="submit" class="btn">Add</button>
+    </div>
+  </form>
+  {{end}}
+</section>
+{{end}}
 {{end}}

@@ -149,28 +149,24 @@ func gateServer(t *testing.T) *e2eServer {
 	bin := buildSpindle(t)
 	dataDir := t.TempDir()
 	port := freePort(t)
+	p := newOIDP(t)
+	chainAliceTok = p.idToken(chainAlice, "spindle-admin")
+	chainBobTok = p.idToken(chainBob)
+	e2eDefaultBearer = chainAliceTok
 	writeSpindleConfig(t, dataDir, fmt.Sprintf(`
 [server]
 listen = "0.0.0.0:%d"
 auto_create_on_push = true
 secrets_key = "0123456789abcdef0123456789abcdef"
 
-[server.auth]
-mode = "token"
-anonymous_read = true
-tokens = [
-  { principal = %q, token = %q, write = true, admin = true },
-  { principal = %q, token = %q, write = true },
-]
-
+%s
 [store]
 backend = "filesystem"
 root = %q
 
 [cache]
 dir = %q
-`, port, chainAlice, chainAliceTok, chainBob, chainBobTok,
-		filepath.Join(dataDir, "store"), filepath.Join(dataDir, "cache")))
+`, port, p.configBlock(), filepath.Join(dataDir, "store"), filepath.Join(dataDir, "cache")))
 	s := startServer(t, bin, dataDir, port)
 	t.Cleanup(s.stop)
 	return s

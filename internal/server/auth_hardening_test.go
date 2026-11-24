@@ -16,7 +16,6 @@ import (
 func TestVerifyNonceMismatch(t *testing.T) {
 	iss := newStubIssuer(t)
 	tSrv, _ := newTestServer(t, nil)
-	tSrv.cfg.Server.Auth.Mode = "oidc"
 	tSrv.cfg.Server.Auth.Issuer = iss.srvURL()
 	tSrv.cfg.Server.Auth.OAuthClientID = "spindle"
 	tSrv.cfg.Server.Auth.AllowedDomains = []string{"example.com"}

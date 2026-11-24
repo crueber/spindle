@@ -4,9 +4,10 @@
   "type": "module",
   "scripts": {
     "build:sdk": "esbuild sdk/src/index.js --bundle --format=esm --target=es2022 --minify --outfile=dist/repos.js",
-    "build": "pnpm run build:css && pnpm run build:islands && pnpm run build:vendor && pnpm run build:sdk",
+    "build": "pnpm run build:css && pnpm run build:islands && pnpm run build:boot && pnpm run build:vendor && pnpm run build:sdk",
     "build:css": "vite build --config vite.app.config.mjs && rm -f dist/app-entry.js",
     "build:islands": "esbuild src/islands/index.js --bundle --format=esm --target=es2022 --outfile=dist/ui.js",
+    "build:boot": "esbuild src/theme-boot.js --bundle --format=iife --target=es2022 --outfile=dist/theme-boot.js",
     "build:vendor": "rm -f dist/htmx-ext-sse.js && cp vendor/htmx.min.js dist/"
   },
   "devDependencies": {

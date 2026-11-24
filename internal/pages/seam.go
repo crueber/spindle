@@ -10,6 +10,7 @@ package pages
 import (
 	"context"
 	"net/http"
+	"time"
 
 	"github.com/crueber/spindle/internal/server/auth"
 )
@@ -25,6 +26,10 @@ type Auth struct {
 	// nil → visibility is not wired; callers fall back to the anonymous_read
 	// flag exactly like the API.
 	CheckRead func(ctx context.Context, owner, repo string, p auth.Principal) *auth.AuthError
+	// SessionInfo reports the walgit_session cookie's issued-at when the
+	// request carries a verifiable one (Access diagnostics: staleness is
+	// visible). ok=false for bearer credentials and anonymous requests.
+	SessionInfo func(r *http.Request) (issuedAt time.Time, ok bool)
 }
 
 // Provider answers browser page routes — the whole page tree (D-WEB-14; the

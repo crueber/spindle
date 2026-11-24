@@ -76,7 +76,6 @@ type Field struct {
 func EnumValues(key string) []string { return schemaEnums[key] }
 
 var schemaEnums = map[string][]string{
-	"server.auth.mode":       {"none", "token", "oidc"},
 	"store.backend":          {"s3", "memory", "filesystem"},
 	"cache.mode":             {"budget", "disk", "auto"},
 	"bundles.serve_via":      {"proxy", "signed_url"},
@@ -133,6 +132,99 @@ func BaseConfig(dataDir string, candidates []string) *config.Config {
 		return config.FirstRunDefaults(dataDir)
 	}
 	return base
+}
+
+// AnchorOf maps one config key to the section anchor the Configuration page
+// renders for it (docs/PLAN-ADMIN.md §4.6). The page's one coordinate system:
+// every keyed validator/coercion error and every deep link names
+// /admin/config#<AnchorOf(key)>, which is the section card's id. The rule is
+// the schema's own: the top-level toml section, except server.auth.* which
+// BuildSchema splits into the first-class "auth" card. Total for every key
+// BuildSchema emits (pinned by anchor_test.go).
+func AnchorOf(key string) string {
+	if i := strings.IndexByte(key, '.'); i > 0 {
+		section := key[:i]
+		if section == "server" && strings.HasPrefix(key, "server.auth.") {
+			return "auth"
+		}
+		return section
+	}
+	return key
+}
+
+// TOMLView renders the canonical document a Save would write, with every
+// secret value replaced by SecretMask. It is the Configuration page's
+// read-only TOML disclosure: the rest of the bytes are MarshalTOML's exactly
+// (same encoder, same order), and the mask is what keeps the page from
+// publishing a stored secret (secrets never leave the server — PLAN-ADMIN §5).
+// The page labels the view as the SAVED configuration: unsaved form edits are
+// intentionally not reflected, because only Save moves the file.
+func TOMLView(c *config.Config) ([]byte, error) {
+	clone := deepClone(reflect.ValueOf(c).Elem()).Addr().Interface().(*config.Config)
+	maskSecrets(reflect.ValueOf(clone).Elem())
+	return config.MarshalTOML(clone)
+}
+
+// deepClone copies the struct and every nested struct / struct-slice it owns,
+// so masking cannot mutate the caller's config (a shallow copy would share the
+// token slice's backing array).
+func deepClone(v reflect.Value) reflect.Value {
+	out := reflect.New(v.Type()).Elem()
+	switch v.Kind() {
+	case reflect.Struct:
+		out.Set(v)
+		for i := 0; i < v.NumField(); i++ {
+			f := v.Type().Field(i)
+			if f.PkgPath != "" { // unexported (the provenance map): shallow copy is never mutated
+				continue
+			}
+			if f.Type.Kind() == reflect.Struct ||
+				(f.Type.Kind() == reflect.Slice && f.Type.Elem().Kind() == reflect.Struct) {
+				out.Field(i).Set(deepClone(v.Field(i)))
+			}
+		}
+		return out
+	case reflect.Slice:
+		if v.IsNil() {
+			return reflect.Zero(v.Type())
+		}
+		cp := reflect.MakeSlice(v.Type(), v.Len(), v.Len())
+		for i := 0; i < v.Len(); i++ {
+			cp.Index(i).Set(deepClone(v.Index(i)))
+		}
+		return cp
+	default:
+		return v
+	}
+}
+
+// maskSecrets walks the config the same way BuildSchema does and replaces
+// every secretKey field (scalars, and struct-slice element cells such as
+// server.auth.tokens[].token) with SecretMask on the clone.
+func maskSecrets(rv reflect.Value) {
+	rt := rv.Type()
+	for i := 0; i < rt.NumField(); i++ {
+		f := rt.Field(i)
+		name := tomlName(f.Tag.Get("toml"))
+		if name == "" || name == "-" {
+			continue
+		}
+		fv := rv.Field(i)
+		switch {
+		case f.Type.Kind() == reflect.Struct:
+			maskSecrets(fv)
+		case f.Type.Kind() == reflect.Slice && f.Type.Elem().Kind() == reflect.Struct:
+			for j := 0; j < fv.Len(); j++ {
+				maskSecrets(fv.Index(j))
+			}
+		case secretKey(name) && fv.Kind() == reflect.String && fv.CanSet():
+			// An unset secret stays "" — masking it would fabricate "set"
+			// and make a secret-free document differ from Save's bytes.
+			if fv.String() != "" {
+				fv.SetString(SecretMask)
+			}
+		}
+	}
 }
 
 // BuildSchema walks the Config struct via its toml tags: section = top-level
@@ -909,13 +1001,59 @@ func isKeyByte(b byte) bool {
 // nothing changed. backup names the spindle.toml.bak-<utc> file the first
 // canonicalising rewrite of an existing config kept ("" when none was made).
 func Save(dataDir string, c *config.Config, effective *config.Config) (restart []string, backup string, err error) {
+	return SaveWithComparison(dataDir, c, c, effective)
+}
+
+// SaveWithComparison writes write but computes the restart diff against
+// compare. The two differ only for values that are EFFECTIVE but not in the
+// file (environment or flags): the saved document keeps the file's bytes, so
+// an env-supplied secret is never silently persisted, while the restart list
+// does not claim those secrets changed (FillEffectiveSecrets made compare match
+// the running config for them).
+func SaveWithComparison(dataDir string, write, compare, effective *config.Config) (restart []string, backup string, err error) {
 	saveMu.Lock()
-	backup, err = config.SaveSetup(c, dataDir)
+	backup, err = config.SaveSetupValidated(write, compare, dataDir)
 	saveMu.Unlock()
 	if err != nil {
 		return nil, "", err
 	}
-	return RestartKeys(effective, c), backup, nil
+	return RestartKeys(effective, compare), backup, nil
+}
+
+// FillEffectiveSecrets returns a copy of candidate in which every EMPTY secret
+// scalar is filled from effective. The Configuration page renders a secret as
+// a mask; a masked or empty field means "keep the current value", but the
+// file-visible base may not carry a value supplied by the environment or a
+// flag — and validating the file candidate alone then refuses the save and
+// demands a rotation that is not needed (2026-11-22, live OIDC secrets from
+// SPINDLE__SERVER__AUTH__*).
+//
+// The copy is for VALIDATION and the restart diff only: SaveWithComparison
+// still writes candidate, so an environment-only secret is not persisted to
+// spindle.toml. Struct-slice secrets (server.auth.tokens) are excluded: their
+// rows carry their own masked-cell rule.
+func FillEffectiveSecrets(candidate, effective *config.Config) *config.Config {
+	if candidate == nil || effective == nil {
+		return candidate
+	}
+	cp := *candidate
+	for _, g := range BuildSchema(effective, effective) {
+		for _, f := range g.Keys {
+			if !f.Secret || len(f.Fields) > 0 {
+				continue
+			}
+			dst, _, err := fieldByKey(reflect.ValueOf(&cp).Elem(), strings.Split(f.Key, "."), "")
+			if err != nil || dst.Kind() != reflect.String || !dst.CanSet() || dst.String() != "" {
+				continue
+			}
+			src, _, serr := fieldByKey(reflect.ValueOf(effective).Elem(), strings.Split(f.Key, "."), "")
+			if serr != nil || src.Kind() != reflect.String || src.String() == "" {
+				continue
+			}
+			dst.SetString(src.String())
+		}
+	}
+	return &cp
 }
 
 // RestartKeys diffs the effective config against the candidate. It compares
@@ -988,6 +1126,7 @@ type AuthProbe struct {
 	JWKSURI               string
 	ScopesSupported       []string
 	SigningAlgs           []string
+	SigningKeys           int
 	RedirectURI           string
 	ClientIDPresent       bool
 }
@@ -1054,6 +1193,45 @@ func ProbeAuth(issuer, clientID, redirectURI string) (AuthProbe, []Error) {
 	}
 	if len(errs) > 0 {
 		return res, errs
+	}
+	// The JWKS is the half of discovery that actually verifies logins: fetch it
+	// and require at least one signing key the server can verify (RSA/RS256 or
+	// EC/P-256/ES256 — the only algs the JWKS verifier implements). A discovery
+	// document that advertises an endpoint serving no usable key is a failed
+	// Test, with the precise reason.
+	resp, err = client.Get(doc.JWKSURI)
+	if err != nil {
+		return res, []Error{{Key: "server.auth.issuer", Message: fmt.Sprintf("JWKS fetch failed (%s): %v", doc.JWKSURI, err)}}
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return res, []Error{{Key: "server.auth.issuer", Message: fmt.Sprintf("JWKS fetch returned %d from %s", resp.StatusCode, doc.JWKSURI)}}
+	}
+	var jwks struct {
+		Keys []struct {
+			Kty string `json:"kty"`
+			Crv string `json:"crv"`
+			Alg string `json:"alg"`
+			Use string `json:"use"`
+		} `json:"keys"`
+	}
+	if err := json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(&jwks); err != nil {
+		return res, []Error{{Key: "server.auth.issuer", Message: fmt.Sprintf("JWKS response from %s is not a valid JWK set: %v", doc.JWKSURI, err)}}
+	}
+	for _, k := range jwks.Keys {
+		if k.Use != "" && k.Use != "sig" {
+			continue
+		}
+		if k.Kty == "RSA" && (k.Alg == "" || k.Alg == "RS256") {
+			res.SigningKeys++
+			continue
+		}
+		if k.Kty == "EC" && k.Crv == "P-256" && (k.Alg == "" || k.Alg == "ES256") {
+			res.SigningKeys++
+		}
+	}
+	if res.SigningKeys == 0 {
+		return res, []Error{{Key: "server.auth.issuer", Message: fmt.Sprintf("JWKS at %s serves no usable signing key (needs RSA/RS256 or EC/P-256/ES256) — logins cannot be verified", doc.JWKSURI)}}
 	}
 	return res, []Error{}
 }

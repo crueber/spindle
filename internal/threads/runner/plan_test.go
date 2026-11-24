@@ -25,8 +25,7 @@ func fixtureJob() *threads.FetchResult {
 			Container: &threads.ContainerSpec{
 				Image:   "golang:1.27",
 				Env:     map[string]string{"CGO_ENABLED": "0"},
-				Options: "--user 1000",
-				Volumes: []string{"cache:/go/pkg/mod"},
+				Options: "--user 1000 --cpus 2",
 			},
 			Services: map[string]threads.ServiceSpec{
 				"redis": {Image: "redis:7", Ports: []string{"6379:6379"}, Env: map[string]string{"A": "b"}},
@@ -74,8 +73,7 @@ func TestBuildPlanContainerAndNames(t *testing.T) {
 		"--add-host host.docker.internal:host-gateway",
 		"--workdir " + DefaultWorkspace,
 		"--mount type=volume,source=" + p.Names.Volume + ",target=" + DefaultWorkspace,
-		"--user 1000",
-		"--volume cache:/go/pkg/mod",
+		"--user 1000 --cpus 2",
 		"--env CGO_ENABLED=0",
 		"--env GITHUB_SHA=" + job.Commit,
 		"--env MATRIX_GO=1.27",

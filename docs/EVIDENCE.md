@@ -43,6 +43,7 @@ requested or when a review questions a hot path).
 | E16 | 2026-09-09 | Repo size catalog (`internal/sizecatalog`, Forgejo #248) | What does one fold pass cost, what does the detailed listing cost, and what does the push path pay for durable size state? | Fold linear in repo count (2 GETs + ≤1 PUT per repo + 1 catalog CAS, 0 LIST at 3 and 12 repos); listing flat (exactly 1 catalog GET at any population); push +1 PUT per pack-changing publish (repo-scoped sidecar, parallel with the manifest CAS, +0 sequential trips; ref-only/settings write nothing — E17 amends ref-only to write the push clock). Cannot explode: bounded/resumable passes, PUT-if-changed sidecars, probe-only reads. |
 | E18 | 2026-11-21 | Threads PR head-push delivery (`internal/server`, `internal/pulls`, `internal/events`) | Does a push to an open PR's head produce its `pull_request` run promptly, or only on the events sweep — and can a late delivery move the head backwards? | Prompt: with `events.sweep_interval = 1h` configured, the run appeared **53 ms** after the push (the wake is a non-blocking in-process signal; +0 store ops on the push path). Head is monotonic: 3 out-of-order/duplicate deliveries created 0 extra runs and 0 backwards head moves. Cannot regress: `internal/e2e/threads_triggers_test.go` fails if the latency exceeds 5 s or any duplicate run/head rewind appears. |
 | E17 | 2026-09-09 | Last-commit activity (`internal/git`, `internal/sizecatalog`, Forgejo #247) | What does the push hint cost, what does a sweep heal cost, does the listing stay flat, and does explore order by commit time? | Push +0 (derivation is git-local, hint rides the existing sidecar PUT; cold 11 / warm 10 ops unchanged); sweep heals once per stale repo (refs view + ≤1 serve-sync + 1 git read, then quiet); listing flat (exactly 1 catalog GET); explore newest-commit-first from `sort=activity&order=desc` (commit dates, not push times). Cannot explode: no LIST, per-repo isolation, bounded parallelism (8/2), field-scoped merge never regresses. |
+| E20 | 2026-11-21 | Repository Insights refresh (`internal/insights`, `internal/git`) | What does the pulse refresh cost at 1k and 10k commits, how many git invocations does it take, and what does a page read pay? | One git scan + 57 store ops per refresh; 16.6 ms at 1k, 156.2 ms at 10k (git dominates, linear in commits); page read is one GET, zero git/LIST. |
 
 ---
 
@@ -1277,9 +1278,9 @@ approval?
 - `internal/threads/schedule_test.go` (restart + two concurrent instances + tick math),
   `internal/threads/gc_test.go` (window rules and the second-pass no-op), `cmd/spindle/threads_sweep_test.go`
   (the two maintain task kinds through the sweeper the maintainer calls).
-- Rendered: `obscura serve` (CDP, `Emulation.setDeviceMetricsOverride`) against a live token-mode
-  server; every capture asserted `document.documentElement.scrollWidth === clientWidth` at 1440×900
-  and 390×844.
+- Rendered: a headless Chromium over CDP (`Emulation.setDeviceMetricsOverride`) against a live
+  token-mode server; every capture asserted `document.documentElement.scrollWidth === clientWidth`
+  at 1440×900 and 390×844.
 
 **Results (development host, 2026-11-21).**
 
@@ -1294,7 +1295,7 @@ approval?
 | job token, `contents: read` (same run) | push refused, `refs/heads/ci-readonly` absent, job handled the refusal | scope is enforced server-side, not by the script |
 | approval gate, live runner polling throughout, fork PR by a non-maintainer | run stayed `pending_approval`, both jobs `queued`, `started_at` nil, no claim for **12 s** (two full 5 s poll windows) | nothing is enqueued before a decision |
 | approval gate, approve then deny | approved run `success` and logged `gate-ran`; denied run `cancelled`, jobs `cancelled`, later approve `409` | one decision, recorded (`approved_by`/`denied_by`) |
-| rendered pages (Threads list with filters, held run, commit checks panel) | `scrollWidth == clientWidth` at 1440 and 390 | no page-level overflow; the only console error is obscura's `XPathEvaluator` gap in htmx 2 |
+| rendered pages (Threads list with filters, held run, commit checks panel) | `scrollWidth == clientWidth` at 1440 and 390 | no page-level overflow; the only console error is the headless engine's missing `XPathEvaluator`, which htmx 2 probes for |
 
 **Analysis.** The schedule's bound is one exact-key GET plus one bounded file list per repo per
 minute (no LIST on a hot path); the retention pass is `retentionBatch` runs and `retentionRunners`
@@ -1302,3 +1303,46 @@ records per hour, each delete an idempotent object delete. The job token is the 
 with scopes derived from `permissions:` — one credential type, verified locally, with a single
 job-record GET for completion revocation. The approval gate costs one exact-key projection read at run
 creation and nothing for a non-fork or maintainer-authored run.
+
+---
+
+## E20 — Repository Insights refresh: one git scan, linear in commits (2026-11-21)
+
+**Area:** the cached repository pulse projection (`internal/insights`,
+`internal/git` §16.4, docs/features/18_repo_insights.md).
+
+**Question:** the Insights page must never run git or LIST on a request path. What does the
+`insights-refresh` task cost at a normal and an order-of-magnitude history, how many git
+invocations does one refresh make, and what does the page read pay?
+
+**Method.** Harness: `internal/devtools/insightsbench` (`-tags evidence`):
+
+```
+cd /var/tmp && TMPDIR=/var/tmp/sp-tmp go test -tags evidence \
+  ./internal/devtools/insightsbench/ -run TestInsightsRefreshScale -v -timeout 30m
+```
+
+Fixtures are real bare repositories built by `git fast-import`: 1,000 and 10,000 commits spread over
+364 days, each changing one of 20 files (so every commit has a real one-line diff). The measured code
+path is the shipped one: `*git.Layer.InsightsCommits` (the pinned `git log --shortstat` argv) and
+`insights.Service.Refresh` over the **memory store**, seeded with 100 shared-index cards (50 closed
+PRs with `pr.json` sidecars), `meta/social.json`, 25 release headers, 25 package tags and 25 Threads
+run records — i.e. the sidecar/LIST caps are exercised at their realistic worst. Median of 3 runs.
+
+**Results.**
+
+| fixture | raw git scan | full refresh | git calls/refresh | store ops/refresh |
+|---|---|---|---|---|
+| 1,000 commits | **16.6 ms** | **16.5 ms** | 1 | 57 |
+| 10,000 commits | **156.2 ms** | **157.5 ms** | 1 | 57 |
+
+**Analysis.** The single git spawn dominates: the full refresh tracks the raw scan (`+1.4 ms` at 10k
+for the index, sidecars, facts and one CAS PUT), and the cost is linear in commits scanned (10×
+history ≈ 10× time), not in repository or object count. The store ops are constant at this seed size:
+projection GET/HEAD/PUT, shared-index GET, 50 `pr.json` GETs (the merge-classification cap), social
+GET, three capped prefix LISTs and the listed metadata the memory backend counts. There is exactly
+**one git invocation per refresh** (asserted by a counting wrapper in the harness), and a repo whose
+head did not move and whose projection is under 24 h old does not reach git at all
+(`RefreshIfStale` stops after one refs-level head read + one exact-key GET). A page read is one GET;
+it never runs git and never LISTs. The measurement host is a workstation VM — the durable claims are
+the one-spawn count, the constant store-op count, and linear-in-commits time.

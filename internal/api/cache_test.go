@@ -137,8 +137,22 @@ func TestRenderCacheBoundedJoin(t *testing.T) {
 			return []byte("x"), "", nil
 		})
 	}()
-	time.Sleep(10 * time.Millisecond) // let the leader register inflight
-	release <- struct{}{}             // will be taken if leader started
+	// The cache's own inflight table says the leader registered; an
+	// unbuffered send after a sleep could block forever if it had not.
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		c.mu.Lock()
+		registered := len(c.inflight)
+		c.mu.Unlock()
+		if registered == 1 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("leader never registered inflight (len=%d)", registered)
+		}
+		time.Sleep(time.Millisecond)
+	}
+	close(release)
 	<-done
 	c.mu.Lock()
 	n := len(c.inflight)

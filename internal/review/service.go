@@ -105,6 +105,24 @@ func requireAuthenticated(p auth.Principal) error {
 	return nil
 }
 
+// requireNotBlocked is review's one moderation enforcement point
+// (PLAN-V2 §M.5): every interaction verb calls it after role resolution and
+// before any CAS. Host admins are exempt; gate errors fail closed; the
+// refusal never names the block (identity.InteractionRefused).
+func (s *Service) requireNotBlocked(ctx context.Context, owner, repo string, actor auth.Principal) error {
+	if s.Moderation == nil || actor.Anonymous || actor.Admin {
+		return nil
+	}
+	blocked, _, err := s.Moderation.BlockedFromRepo(ctx, owner, repo, normPrincipal(actor.Name))
+	if err != nil {
+		return fmt.Errorf("moderation unavailable: %v", err)
+	}
+	if blocked {
+		return fmt.Errorf("%w: %s", ErrForbidden, identity.InteractionRefused)
+	}
+	return nil
+}
+
 // threadLocked reports whether a PR is read-only for inline-thread writes
 // (Forgejo #594): merged or plain-closed. The PR header state carries the
 // merge stamp (merge stamps StateClosed alongside Merged), so the state
@@ -336,6 +354,12 @@ func (s *Service) SubmitReview(ctx context.Context, owner, repo string, num int,
 	if err := s.requireRead(ctx, owner, repo, actor); err != nil {
 		return nil, nil, nil, err
 	}
+	if err := s.requireNotBlocked(ctx, owner, repo, actor); err != nil {
+		return nil, nil, nil, err
+	}
+	if err := s.requireUnlocked(ctx, owner, repo, num, actor); err != nil {
+		return nil, nil, nil, err
+	}
 	if err := validateState(in.State); err != nil {
 		return nil, nil, nil, err
 	}
@@ -505,6 +529,9 @@ func (s *Service) DismissReview(ctx context.Context, owner, repo string, num, se
 		return nil, nil, err
 	}
 	if err := s.requireRole(ctx, owner, repo, actor, "maintain"); err != nil {
+		return nil, nil, err
+	}
+	if err := s.requireNotBlocked(ctx, owner, repo, actor); err != nil {
 		return nil, nil, err
 	}
 	if strings.TrimSpace(reason) == "" {
@@ -681,6 +708,13 @@ func (s *Service) ListReviews(ctx context.Context, owner, repo string, num int, 
 	if filtered == nil {
 		filtered = []*ReviewEvent{}
 	}
+	mv, merr := s.moderationView(ctx, owner, repo, num, p)
+	if merr != nil {
+		return nil, merr
+	}
+	for _, rv := range filtered {
+		applyReview(rv, mv, num)
+	}
 	return &ListResult{Reviews: filtered, More: more}, nil
 }
 
@@ -699,7 +733,16 @@ func (s *Service) GetReview(ctx context.Context, owner, repo string, num, seq in
 	if raw == nil {
 		return nil, fmt.Errorf("%w: review %d", ErrNotFound, seq)
 	}
-	return parseReview(raw)
+	ev, perr := parseReview(raw)
+	if perr != nil {
+		return nil, perr
+	}
+	mv, merr := s.moderationView(ctx, owner, repo, num, p)
+	if merr != nil {
+		return nil, merr
+	}
+	applyReview(ev, mv, num)
+	return ev, nil
 }
 
 // --- merge-time gate (§6) -----------------------------------------------------

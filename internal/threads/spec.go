@@ -26,7 +26,14 @@ func buildSpec(wfName string, wf *workflow.Workflow, def workflow.Job, inputs ma
 		Uses:            strings.TrimSpace(def.Uses),
 		With:            nonNilMap(def.With),
 		Inputs:          nonNilMap(inputs),
+		Outputs:         nonNilMap(def.Outputs),
 		Steps:           stepSpecs(def.Steps),
+	}
+	if def.Environment != nil {
+		spec.Environment = &EnvironmentSpec{
+			Name: strings.TrimSpace(def.Environment.Name),
+			URL:  strings.TrimSpace(def.Environment.URL),
+		}
 	}
 	if def.Container != nil {
 		spec.Container = containerSpec(def.Container)
@@ -128,6 +135,7 @@ func stepSpecs(in []workflow.Step) []StepSpec {
 	out := make([]StepSpec, 0, len(in))
 	for _, st := range in {
 		out = append(out, StepSpec{
+			ID:               st.ID,
 			Name:             st.Name,
 			Run:              st.Run,
 			Uses:             st.Uses,
@@ -144,13 +152,49 @@ func stepSpecs(in []workflow.Step) []StepSpec {
 }
 
 // convenienceSteps projects the spec's steps onto the record's display shape
-// (name/run/uses), which the run page and older readers use.
-func convenienceSteps(in []StepSpec) []Step {
-	out := make([]Step, 0, len(in))
-	for _, st := range in {
-		out = append(out, Step{Name: st.Name, Run: st.Run, Uses: st.Uses})
+// (name/run/uses), which the run page and older readers use. A repository-local
+// composite action is shown EXPANDED, in place, with each inner step carrying
+// the action step it came from in Parent (docs/threads.md §3.4a): the page then
+// shows what will actually run, before (and independently of) the runner's
+// report. The display walk is bounded like the resolver's; a hostile payload
+// cannot loop it.
+func convenienceSteps(spec *Spec) []Step {
+	if spec == nil {
+		return nil
 	}
+	var out []Step
+	appendDisplaySteps(&out, spec.Steps, spec.Actions, "", 1)
 	return out
+}
+
+// appendDisplaySteps appends one step list, expanding local composites. depth
+// is the composite nesting level (workflow steps are 1).
+func appendDisplaySteps(out *[]Step, steps []StepSpec, actions map[string]ActionSpec, parent string, depth int) {
+	for _, st := range steps {
+		uses := strings.TrimSpace(st.Uses)
+		if IsLocalAction(uses) && depth <= workflow.MaxActionDepth {
+			if dir, err := LocalActionDir(uses); err == nil {
+				if def, ok := actions[dir]; ok && def.Using == workflow.ActionUsingComposite {
+					name := strings.TrimSpace(st.Name)
+					if name == "" {
+						name = dir
+					}
+					child := name
+					if parent != "" {
+						child = parent + " / " + name
+					}
+					appendDisplaySteps(out, def.Steps, actions, child, depth+1)
+					continue
+				}
+				if def, ok := actions[dir]; ok && def.Using == workflow.ActionUsingDocker && def.Image != "" {
+					// One row, but the page should say which image runs.
+					*out = append(*out, Step{Name: st.Name, Run: st.Run, Uses: "docker://" + def.Image, Parent: parent})
+					continue
+				}
+			}
+		}
+		*out = append(*out, Step{Name: st.Name, Run: st.Run, Uses: st.Uses, Parent: parent})
+	}
 }
 
 // nonNilMap normalizes an empty map to nil (maps render as {} only when set).

@@ -147,25 +147,26 @@ func (l *Layer) ingestFed(ctx context.Context, repo *LocalRepo, feed ingestFeed,
 	defer l.sweepTmp(scratch)
 	defer os.Remove(tracePath)
 
-	// Build the scratch git-dir by hand (no subprocess).
+	// Build the scratch git-dir by hand (no subprocess). Every local write is
+	// space-classified: an ENOSPC here is a cache-space fault, not a bad pack.
 	if err := os.MkdirAll(scratchPack, 0o755); err != nil {
-		return nil, err
+		return nil, wrapSpace(repo.Path, scratch, err)
 	}
 	if err := os.MkdirAll(filepath.Join(scratch, "refs"), 0o755); err != nil {
-		return nil, err
+		return nil, wrapSpace(repo.Path, scratch, err)
 	}
 	if err := writeHeadSeed(scratch); err != nil {
-		return nil, err
+		return nil, wrapSpace(repo.Path, scratch, err)
 	}
 	if err := os.MkdirAll(filepath.Join(scratch, "objects", "info"), 0o755); err != nil {
-		return nil, err
+		return nil, wrapSpace(repo.Path, scratch, err)
 	}
 	if err := os.WriteFile(filepath.Join(scratch, "objects", "info", "alternates"),
 		[]byte(repo.ObjectsDir()+"\n"), 0o644); err != nil {
-		return nil, err
+		return nil, wrapSpace(repo.Path, scratch, err)
 	}
 	if err := copyFile(filepath.Join(scratch, "config"), filepath.Join(repo.Path, "config")); err != nil {
-		return nil, err
+		return nil, wrapSpace(repo.Path, scratch, err)
 	}
 
 	argv := []string{"index-pack", "--stdin", "--keep", "--rev-index", "--threads=0"}
@@ -246,7 +247,14 @@ func (l *Layer) ingestFed(ctx context.Context, repo *LocalRepo, feed ingestFeed,
 				detail = ge.Detail
 			}
 		}
-		return nil, &PackRejectedError{Detail: detail}
+		// index-pack writing the scratch pack hit a full filesystem or quota:
+		// name the cache path, filesystem and capacity instead of letting the
+		// client see only "unpacker error" (BUG-6).
+		spaceCause := runErr
+		if spaceCause == nil {
+			spaceCause = poolErr
+		}
+		return nil, packFailure(repo.Path, scratch, detail, spaceCause)
 	}
 
 	// Parse the trailing checksum from index-pack's stdout: take the LAST
@@ -271,7 +279,7 @@ func (l *Layer) ingestFed(ctx context.Context, repo *LocalRepo, feed ingestFeed,
 	} {
 		if _, err := os.Stat(mv.src); err == nil {
 			if err := os.Rename(mv.src, mv.dst); err != nil {
-				return nil, err
+				return nil, wrapSpace(repo.Path, mv.dst, err)
 			}
 		}
 	}
@@ -281,7 +289,7 @@ func (l *Layer) ingestFed(ctx context.Context, repo *LocalRepo, feed ingestFeed,
 	// bytes are 256 BE fanout counts; count = fanout[255]. No subprocess.
 	count, err := idxObjectCount(dstBase + ".idx")
 	if err != nil {
-		return nil, err
+		return nil, wrapSpace(repo.Path, dstBase+".idx", err)
 	}
 	if count == 0 {
 		// Zero-object pack (ref-only push): install nothing.
@@ -324,7 +332,7 @@ func (s stagedPack) reader() io.Reader {
 func (l *Layer) stagePack(pack io.Reader, maxBytes int64) (stagedPack, error) {
 	tmp, err := os.CreateTemp("", "walgit-packfeed-*")
 	if err != nil {
-		return stagedPack{}, err
+		return stagedPack{}, wrapSpace(os.TempDir(), os.TempDir(), err)
 	}
 	started := time.Now()
 	buf := make([]byte, 64<<10)
@@ -341,7 +349,7 @@ func (l *Layer) stagePack(pack io.Reader, maxBytes int64) (stagedPack, error) {
 			if _, werr := tmp.Write(buf[:n]); werr != nil {
 				tmp.Close()
 				os.Remove(tmp.Name())
-				return stagedPack{}, werr
+				return stagedPack{}, wrapSpace(filepath.Dir(tmp.Name()), tmp.Name(), werr)
 			}
 		}
 		if rerr == io.EOF {

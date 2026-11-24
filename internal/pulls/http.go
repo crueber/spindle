@@ -572,6 +572,12 @@ func pullETag(view *PullView) string {
 		sb.WriteByte('.')
 		sb.WriteString(view.Mergeable.ComputedAt)
 	}
+	if view.ModerationRevision > 0 {
+		// M2: a hide/unhide/lock must revalidate; the thread/pr versions do
+		// not move when only the moderation document changes.
+		sb.WriteString(".mod")
+		sb.WriteString(strconv.Itoa(view.ModerationRevision))
+	}
 	return sb.String()
 }
 

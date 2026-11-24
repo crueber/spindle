@@ -88,6 +88,10 @@ var TaskKinds = []string{
 	"materialize", "remote-index", "history-pack", "compact", "bundle",
 	"checkpoint", "fsck", "repair", "follow", "rev-index", "sync",
 	"rematerialize", "prewarm",
+	// Feature T (PLAN-V2 §3.1): the repository move task. Starts on the
+	// identity lane (POST …/api/transfer), shows up here because it rides the
+	// same (repo,kind) table and the same attach stream.
+	"repo-transfer",
 }
 
 // Lane is which of the two API lanes answered (06_server_http.md §3.3).
@@ -359,15 +363,19 @@ type TreeResult struct {
 
 // BlobResult backs GET …/blob/{rev}/{path}. Exactly one of Contents /
 // Binary / TooLarge is meaningful (TooLarge wins: no contents fetched).
+// Ref/SHA echo the resolution (§9.5 response shape); ObjectSHA is the walked
+// blob's own oid — the blob page header's "size · sha" inventory, never a
+// wire field (the wire's sha stays the resolved commit, like tree/resolve).
 type BlobResult struct {
-	Ref      string `json:"ref"`
-	SHA      string `json:"sha"`
-	Path     string `json:"path"`
-	Name     string `json:"name"`
-	Size     int64  `json:"size"`
-	Binary   bool   `json:"binary,omitempty"`
-	TooLarge bool   `json:"too_large,omitempty"`
-	Contents []byte `json:"-"`
+	Ref       string `json:"ref"`
+	SHA       string `json:"sha"`
+	ObjectSHA string `json:"-"`
+	Path      string `json:"path"`
+	Name      string `json:"name"`
+	Size      int64  `json:"size"`
+	Binary    bool   `json:"binary,omitempty"`
+	TooLarge  bool   `json:"too_large,omitempty"`
+	Contents  []byte `json:"-"`
 }
 
 // CommitPage backs GET …/commits.
@@ -764,13 +772,10 @@ func WithPrincipal(ctx context.Context, p auth.Principal) context.Context {
 }
 
 // PrincipalOf returns the request's identity: the injected Principal, else the
-// mode default (mode none → everyone is anon with write+admin).
+// anonymous viewer (there is no open mode any more — PLAN-OIDC-ONLY).
 func (e *Env) PrincipalOf(r *http.Request) auth.Principal {
 	if p, ok := r.Context().Value(principalCtxKey{}).(auth.Principal); ok {
 		return p
-	}
-	if e.Cfg != nil && e.Cfg.Server.Auth.Mode == "none" {
-		return auth.None()
 	}
 	return auth.Anonymous()
 }

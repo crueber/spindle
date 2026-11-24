@@ -112,7 +112,7 @@ func TestCancelMatrixSiblingsBranches(t *testing.T) {
 on: [push]
 jobs:
   build:
-    runs-on: ubuntu-latest
+    runs-on: linux
     strategy:
       matrix:
         go: ["1.26", "1.27"]
@@ -277,12 +277,12 @@ func TestSweepScheduleCreateRunFailure(t *testing.T) {
 func TestDeleteDeadRunnerFailurePin(t *testing.T) {
 	e, fs, _, _ := faultEnv(t)
 	admin := auth.Principal{Name: "admin", Admin: true}
-	tok, err := e.svc.MintRegistrationToken(ctx(), "o/r", admin)
+	tok, err := e.svc.MintRegistrationToken(ctx(), admin, mintAllPolicy(""))
 	if err != nil {
 		t.Fatal(err)
 	}
 	old := e.svc.nowUTC().Add(-40 * 24 * time.Hour).Format(dateTimeFmt)
-	if _, err := e.svc.casUpdate(ctx(), RunnerKey("o", "r", tok.ID), 5, func(cur []byte, _ store.Version) ([]byte, bool, error) {
+	if _, err := e.svc.casUpdate(ctx(), RunnerKey(tok.ID), 5, func(cur []byte, _ store.Version) ([]byte, bool, error) {
 		var doc RunnerDoc
 		if jerr := jsonUnmarshal(cur, &doc); jerr != nil {
 			return nil, false, jerr
@@ -297,7 +297,7 @@ func TestDeleteDeadRunnerFailurePin(t *testing.T) {
 	}
 	fs.fail("delete", 0)
 	res := &GCResult{}
-	e.svc.deleteDeadRunners(ctx(), "o", "r", e.svc.nowUTC().Add(-30*24*time.Hour), res)
+	e.svc.deleteDeadRunners(ctx(), e.svc.nowUTC().Add(-30*24*time.Hour), res)
 	if res.RunnersDeleted != 0 {
 		t.Fatalf("a failed delete was counted: %+v", res)
 	}

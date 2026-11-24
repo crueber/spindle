@@ -35,8 +35,14 @@ const (
 )
 
 // ruleNameRe pins rule names: they are metric labels and the word in the
-// wire rejection `rejected by rule '<name>'`.
-var ruleNameRe = regexp.MustCompile(`^[a-z][a-z0-9-]{0,62}$`)
+// wire rejection `rejected by rule '<name>'`. The grammar admits ':' after
+// the first character so the settings rulesets can name their managed pairs
+// `protection:<slug>-push` / `protection:<slug>-reviews` (PLAN-V2 §2.4;
+// additive to MASTER_RUST_SPEC's `^[a-z][a-z0-9-]{0,62}$` — see
+// docs/features/03_pull_requests.md Decisions). A name is an opaque string
+// everywhere it is used, so widening it breaks no reader of a file that
+// existed before.
+var ruleNameRe = regexp.MustCompile(`^[a-z][a-z0-9:-]{0,62}$`)
 
 // Group is one roster entry: names, not decisions, resolved at eval time.
 // Editing the roster applies to the next push.
@@ -294,7 +300,7 @@ func parseRule(i int, ent json.RawMessage) (*Rule, error) {
 		return nil, invalidf("rules[%d]: missing name", i)
 	}
 	if err := json.Unmarshal(nameRaw, &r.Name); err != nil || !ruleNameRe.MatchString(r.Name) {
-		return nil, invalidf("rules[%d].name: must match ^[a-z][a-z0-9-]{0,62}$", i)
+		return nil, invalidf("rules[%d].name: must match ^[a-z][a-z0-9:-]{0,62}$", i)
 	}
 
 	if raw, ok := m["_comment"]; ok {

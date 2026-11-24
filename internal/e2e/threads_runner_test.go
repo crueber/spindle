@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -27,24 +28,27 @@ func basicAuth(cred string) string {
 }
 
 // threadsServer boots the binary in token mode with a secrets key and an
-// anonymous-read public default, on a throwaway data dir.
-func threadsServer(t *testing.T) *e2eServer {
+// anonymous-read public default, on a throwaway data dir. An optional public
+// URL sets server.public_url (the checkout base job containers use).
+func threadsServer(t *testing.T, publicURL ...string) *e2eServer {
 	t.Helper()
 	bin := buildSpindle(t)
 	dataDir := t.TempDir()
 	port := freePort(t)
+	pub := ""
+	if len(publicURL) > 0 && publicURL[0] != "" {
+		pub = fmt.Sprintf("public_url = %q\n", publicURL[0])
+	}
+	p := newOIDP(t)
+	chainAliceTok = p.idToken(chainAlice, "spindle-admin")
+	e2eDefaultBearer = chainAliceTok
 	writeSpindleConfig(t, dataDir, fmt.Sprintf(`
 [server]
 listen = "0.0.0.0:%d"
-auto_create_on_push = true
+%sauto_create_on_push = true
 secrets_key = "0123456789abcdef0123456789abcdef"
 
-[server.auth]
-mode = "token"
-anonymous_read = true
-tokens = [
-  { principal = %q, token = %q, write = true, admin = true },
-]
+%s
 
 [store]
 backend = "filesystem"
@@ -52,8 +56,7 @@ root = %q
 
 [cache]
 dir = %q
-`, port, chainAlice, chainAliceTok,
-		filepath.Join(dataDir, "store"), filepath.Join(dataDir, "cache")))
+`, port, pub, p.configBlock(), filepath.Join(dataDir, "store"), filepath.Join(dataDir, "cache")))
 	s := startServer(t, bin, dataDir, port)
 	t.Cleanup(s.stop)
 	return s
@@ -72,7 +75,9 @@ func requireDocker(t *testing.T) {
 
 // startThreadsRunner boots `spindle runner serve` as a subprocess and returns a
 // stop function (SIGTERM, which the runner handles by cancelling in-flight jobs,
-// cleaning containers and reporting them cancelled).
+// cleaning containers and reporting them cancelled). The harness runner is a
+// disposable test host, so it opts in to fork runs: the fork suites exercise
+// execution, while the default-off gating is pinned by the threads unit tests.
 func startThreadsRunner(t *testing.T, bin, serverURL, registerToken, labels string, capacity int) *runnerProc {
 	t.Helper()
 	tokenFile := filepath.Join(t.TempDir(), "runner.token")
@@ -83,6 +88,7 @@ func startThreadsRunner(t *testing.T, bin, serverURL, registerToken, labels stri
 		"--labels", labels,
 		"--capacity", fmt.Sprint(capacity),
 		"--allow-host-docker",
+		"--allow-fork-runs",
 		"--image", "alpine/git:latest",
 		"--fetch-timeout", "5")
 	cmd.Env = append(os.Environ(), "HOME="+t.TempDir())
@@ -136,10 +142,17 @@ func (s *syncBuffer) String() string {
 	return s.b.String()
 }
 
-// mintRunnerToken mints a registration token through the admin API.
+// mintRunnerToken mints an instance-scoped registration token through the
+// host-admin API (repoLane is kept for call-site readability; the route is
+// instance-scoped).
 func mintRunnerToken(t *testing.T, repoLane, token string) string {
 	t.Helper()
-	res := mustAPI(t, "POST", repoLane+"/threads/runners/tokens", `{}`, token)
+	u, err := url.Parse(repoLane)
+	if err != nil || u.Scheme == "" || u.Host == "" {
+		t.Fatalf("repo lane %q is not an absolute URL", repoLane)
+	}
+	origin := u.Scheme + "://" + u.Host
+	res := mustAPI(t, "POST", origin+"/api/v1/admin/runners/tokens", `{"allow_all":true}`, token)
 	tok, _ := res["token"].(string)
 	if !strings.HasPrefix(tok, "wrg_") {
 		t.Fatalf("registration token answer = %v", res)
@@ -147,10 +160,12 @@ func mintRunnerToken(t *testing.T, repoLane, token string) string {
 	return tok
 }
 
-// threadRun is one run joined with its jobs (the API's shape).
+// threadRun is one run joined with its jobs and published artifacts (the API's
+// shape).
 type threadRun struct {
-	Run  map[string]any
-	Jobs []map[string]any
+	Run       map[string]any
+	Jobs      []map[string]any
+	Artifacts []map[string]any
 }
 
 // getRun fetches one run view.
@@ -163,6 +178,13 @@ func getRun(t *testing.T, repoLane, runID, token string) threadRun {
 	for _, j := range jobs {
 		if m, ok := j.(map[string]any); ok {
 			out.Jobs = append(out.Jobs, m)
+		}
+	}
+	if arts, ok := res["artifacts"].([]any); ok {
+		for _, a := range arts {
+			if m, ok := a.(map[string]any); ok {
+				out.Artifacts = append(out.Artifacts, m)
+			}
 		}
 	}
 	return out
@@ -504,11 +526,36 @@ jobs:
 	mustAPI(t, "POST", repoLane+"/pulls",
 		fmt.Sprintf(`{"title":"fork PR","base_ref":"refs/heads/main","head_ref":"refs/heads/forkfeat","fork":{"repo":%q}}`,
 			owner+"/"+forkName), chainAliceTok)
+	// A group-only host admin is not resolvable from the bare actor name the
+	// event carries (PLAN-OIDC-ONLY §1.3), so the fork run is held and this
+	// admin approves it explicitly.
+	approveForkRun := func(skip string) string {
+		t.Helper()
+		var id string
+		pollUntil(t, 60*time.Second, "the held fork run", func() bool {
+			res := mustAPI(t, "GET", repoLane+"/threads?n=10", "", chainAliceTok)
+			runs, _ := res["runs"].([]any)
+			for _, r := range runs {
+				m, _ := r.(map[string]any)
+				if m["event"] != "pull_request" || m["id"] == skip {
+					continue
+				}
+				if m["state"] == "pending_approval" {
+					id, _ = m["id"].(string)
+					return id != ""
+				}
+			}
+			return false
+		})
+		mustAPI(t, "POST", repoLane+"/threads/"+id+"/approve", "", chainAliceTok)
+		return id
+	}
+	approveForkRun("")
 	// ---- read-only checkout credential: a probe runner claims the job and
 	// tries to push with the attempt token. -----------------------------------
 	reg := mintRunnerToken(t, repoLane, chainAliceTok)
 	probe := mustAPI(t, "POST", s.base+"/api/v1/threads/runners/register",
-		fmt.Sprintf(`{"token":%q,"labels":["linux"]}`, reg), "")
+		fmt.Sprintf(`{"token":%q,"labels":["linux"],"allow_fork_runs":true}`, reg), "")
 	probeToken, _ := probe["token"].(string)
 	if !strings.HasPrefix(probeToken, "wrt_") {
 		t.Fatalf("probe register = %v", probe)
@@ -565,6 +612,7 @@ jobs:
 	mustAPI(t, "POST", repoLane+"/pulls",
 		fmt.Sprintf(`{"title":"fork PR 2","base_ref":"refs/heads/main","head_ref":"refs/heads/forkfeat2","fork":{"repo":%q}}`,
 			owner+"/"+forkName), chainAliceTok)
+	approveForkRun(probeRunID)
 
 	var runID string
 	pollUntil(t, 90*time.Second, "the fork run", func() bool {

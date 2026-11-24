@@ -46,6 +46,7 @@ const threadsPushTimeout = 60 * time.Second
 func newThreadsService(st store.ObjectStore, ident *identity.Service, checksSvc *checks.Service, reg *wal.Registry, cfg *config.Config, gitBinary string) (*threads.Service, *threads.Handler) {
 	api.RegisterExposed(threads.ExposedTemplates...)
 	threads.RegisterKind(threads.KindThreadsGC)
+	threads.RegisterKind(threads.KindThreadsQueueReconcile)
 	threads.RegisterKind(threads.KindThreadsSchedule)
 	svc := threads.New(st, ident)
 	if cfg != nil {
@@ -54,6 +55,16 @@ func newThreadsService(st store.ObjectStore, ident *identity.Service, checksSvc 
 		svc.Retention = time.Duration(cfg.Threads.Retention)
 		svc.ApproveFirstTimeForks = cfg.Threads.ApproveFirstTimeForks
 		svc.DefaultPermissions = cfg.Threads.DefaultPermissions
+		svc.MaxArtifactBytesPerRun = int64(cfg.Threads.MaxArtifactBytesPerRun)
+		svc.MaxArtifactBytesPerFile = int64(cfg.Threads.MaxArtifactBytesPerFile)
+		// The checkout URL prefers the configured public origin: it is the
+		// address the operator declared reachable from job containers, where
+		// the request origin may be a browser-only name (docs/threads.md §4.4).
+		svc.CheckoutBaseURL = cfg.Server.PublicURL
+		// The instance-wide image gate (docs/PLAN-ARTIFACT-KEEPER.md §3.3):
+		// applied at run creation over container.image and services.*.image.
+		svc.ImageAllowPrefixes = cfg.Threads.ImageAllowPrefixes
+		svc.ImageRequireDigest = cfg.Threads.ImageRequireDigest
 	}
 	// Protocol keys (15 §5.3): server.secrets_key wins over the session secret;
 	// without either, attempt tokens are process-local and repository secrets
@@ -99,27 +110,19 @@ func (a threadsApprovals) MergedAuthor(ctx context.Context, owner, repo, author 
 }
 
 // Maintainer reports whether actor holds maintain/admin in the repository. The
-// answer comes from the identity ladder plus the configured admin principals:
-// the auth chain derives p.Admin per request and the actor here is only a NAME
-// (a PR event carries no principal), so a static token principal flagged admin
-// is recognised by name. An OIDC admin known only by email/domain/group is not
-// resolvable from a name and may be gated once — they can approve it (the gate
-// is not a lockout).
+// answer comes from the identity ladder only: the auth chain derives p.Admin
+// per request, and the actor here is only a NAME (a PR event carries no
+// principal). Static tokens can never administer (PLAN-OIDC-ONLY §1.3), so an
+// OIDC admin known only by group is not resolvable from a name and may be
+// gated once — they can approve it (the gate is not a lockout).
 func (a threadsApprovals) Maintainer(ctx context.Context, owner, repo, actor string) (bool, error) {
 	actor = strings.TrimSpace(actor)
 	if actor == "" {
 		return false, nil
 	}
-	svc, cfg := a.ident, a.cfg
+	svc := a.ident
 	if svc == nil {
 		return false, nil
-	}
-	if cfg != nil {
-		for _, tok := range cfg.Server.Auth.Tokens {
-			if tok.Admin && strings.EqualFold(strings.TrimSpace(tok.Principal), actor) {
-				return true, nil
-			}
-		}
 	}
 	role, _ := svc.Resolve(ctx, owner, repo, auth.Principal{Name: actor})
 	switch strings.ToLower(string(role)) {
@@ -233,10 +236,13 @@ func threadsPullEventOf(c *collabWiring) pulls.PullEventSink {
 	return func(_ context.Context, ev pulls.PullEvent) {
 		// ev.BaseRef arrives as the PR's base ref ("refs/heads/main"); Branch is
 		// the plain name every trigger filter and the base-branch resolution
-		// expect (a fork run resolves refs/heads/<BaseBranch>).
+		// expect (a fork run resolves refs/heads/<BaseBranch>). Action is the
+		// lifecycle edge (opened/synchronize/reopened) the `types` filter
+		// reads; pulls never emits close, so a `types: [closed]` workflow is a
+		// parse error rather than a dead trigger.
 		base := threadsBranchName(ev.BaseRef)
 		threadsRun(svc, ev.Repo, ev.HeadSHA, threads.EventPullReq, threads.CreateOpts{
-			Branch: base, Ref: fmt.Sprintf("refs/pull/%d/head", ev.Num),
+			Branch: base, Action: ev.Action, Ref: fmt.Sprintf("refs/pull/%d/head", ev.Num),
 			BaseBranch: base, Fork: ev.Fork, Actor: ev.Actor,
 		})
 	}
@@ -271,20 +277,31 @@ func threadsBranchPublishedOf(c *collabWiring) pulls.BranchPublishedSink {
 	}
 }
 
-// onPushHookOf combines the post-push fan-outs (Forgejo #623 push mirrors and
-// Threads runs). Nil when neither service exists (setup-only, bare tests).
+// onPushHookOf combines the post-push fan-outs (Forgejo #623 push mirrors,
+// Threads runs, and the 02 §15 issue-template refresh). Nil when no consumer
+// exists (setup-only, bare tests).
 func onPushHookOf(c *collabWiring) func(id git.RepoId, refs []server.PushedRef, byJob bool) {
-	pm := pushMirrorHookOf(c)
-	th := threadsOnPushOf(c)
-	switch {
-	case pm == nil:
-		return th
-	case th == nil:
-		return pm
+	hooks := []func(id git.RepoId, refs []server.PushedRef, byJob bool){
+		pushMirrorHookOf(c),
+		threadsOnPushOf(c),
+		issuesTemplatesOnPushOf(c),
+	}
+	live := make([]func(id git.RepoId, refs []server.PushedRef, byJob bool), 0, len(hooks))
+	for _, h := range hooks {
+		if h != nil {
+			live = append(live, h)
+		}
+	}
+	switch len(live) {
+	case 0:
+		return nil
+	case 1:
+		return live[0]
 	}
 	return func(id git.RepoId, refs []server.PushedRef, byJob bool) {
-		pm(id, refs, byJob)
-		th(id, refs, byJob)
+		for _, h := range live {
+			h(id, refs, byJob)
+		}
 	}
 }
 

@@ -1,0 +1,51 @@
+{{/* partials/settings_repo_config.html — repo settings → Effective config & history.
+   One settings tab per file: a new tab is a new settings_repo_<tab>.html
+   partial plus one dispatch line in pages/settings/repo.html — never a body
+   in the shell. Every panel receives the SettingsRepoPage, so a form can
+   build its action from .Owner/.Name. Anatomy: .card sections, the .setup-row
+   label/control pairing for forms, .data-table inside overflow-x-auto
+   (guideline §8). 390px: fields full width, toggle rows keep
+   label-left/control-right, tables scroll in place. */}}
+{{/* ---- Effective config & history --------------------------------------- */}}
+{{define "settings-repo-config"}}
+{{with .Config}}
+<div class="space-y-4">
+  <form class="card p-4" method="post" action="/{{$.Owner}}/{{$.Name}}/settings/config"
+        hx-post="/{{$.Owner}}/{{$.Name}}/settings/config" hx-target="#settings-panel" hx-select="#settings-panel" hx-swap="outerHTML">
+    <h3 class="card-header">Effective config</h3>
+    <label class="mb-1 block text-sm font-medium" for="config-text">TOML (published to the WAL)</label>
+    <textarea class="input mono text-xs" id="config-text" name="config" rows="16" spellcheck="false">{{.Text}}</textarea>
+    <div class="mt-2 grid gap-2 sm:grid-cols-[1fr_auto]">
+      <div>
+        <label class="mb-1 block text-sm font-medium" for="config-message">Publish message</label>
+        <input class="input" id="config-message" name="message" type="text" value="{{.Message}}" placeholder="why this changed">
+      </div>
+      <div class="flex flex-wrap items-end gap-2">
+        <button type="submit" class="btn primary" name="config_action" value="publish">Publish</button>
+        <button type="submit" class="btn" name="config_action" value="clear">Clear</button>
+      </div>
+    </div>
+    {{if .Error}}<p class="err-line" role="alert">{{.Error}}</p>{{end}}
+    {{if .Note}}<p class="mt-2 text-sm text-[var(--pd-ok)]">{{.Note}}</p>{{end}}
+  </form>
+
+  <section class="card p-4">
+    <h3 class="card-header">History</h3>
+    {{if .Revisions}}
+    <ul class="space-y-3">
+      {{range .Revisions}}
+      <li class="card p-3">
+        <p class="text-sm"><span class="chip-neutral">#{{.Rev}}</span> <span class="muted">{{.Author}} · {{.At}}{{if .Message}} · {{.Message}}{{end}}</span></p>
+        {{if .Diff}}
+        <pre class="code-view mt-2 p-2">{{range .Diff}}{{.Sign}} {{.Text}}
+{{end}}</pre>
+        {{else}}<p class="muted mt-1 text-[11px]">no textual change against the current document.</p>{{end}}
+        <p class="mt-2"><a class="link text-sm" href="/{{$.Owner}}/{{$.Name}}/settings/config?rev={{.Rev}}">revert to this in the editor</a></p>
+      </li>
+      {{end}}
+    </ul>
+    {{else}}<p class="muted text-sm">no revisions published.</p>{{end}}
+  </section>
+</div>
+{{else}}{{template "settings-repo-notwired" .}}{{end}}
+{{end}}

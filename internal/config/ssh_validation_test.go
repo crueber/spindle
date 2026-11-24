@@ -10,13 +10,13 @@ import (
 )
 
 func TestCheckSSHDisabledByDefault(t *testing.T) {
-	if _, errs := Validate(Defaults()); len(errs) != 0 {
+	if _, errs := Validate(testBaseConfig()); len(errs) != 0 {
 		t.Fatalf("defaults must not trip ssh validation: %v", errs)
 	}
 }
 
 func TestCheckSSHListenFormat(t *testing.T) {
-	c := Defaults()
+	c := testBaseConfig()
 	c.Server.SSH.Listen = "2222" // no host
 	_, errs := Validate(c)
 	if len(errs) != 1 || !strings.Contains(errs[0].Error(), "host:port") {
@@ -37,7 +37,7 @@ func TestCheckSSHListenFormat(t *testing.T) {
 
 func TestCheckSSHExternalPortRange(t *testing.T) {
 	for _, port := range []int{-1, 65536, 100000} {
-		c := Defaults()
+		c := testBaseConfig()
 		c.Server.SSH.Listen = "0.0.0.0:2222"
 		c.Server.SSH.ExternalPort = port
 		_, errs := Validate(c)
@@ -46,7 +46,7 @@ func TestCheckSSHExternalPortRange(t *testing.T) {
 		}
 	}
 	for _, port := range []int{0, 1, 22, 2222, 12222, 65535} {
-		c := Defaults()
+		c := testBaseConfig()
 		c.Server.SSH.Listen = "0.0.0.0:2222"
 		c.Server.SSH.ExternalPort = port
 		if _, errs := Validate(c); len(errs) != 0 {

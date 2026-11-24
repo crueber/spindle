@@ -13,6 +13,7 @@ import (
 	"github.com/crueber/spindle/internal/config"
 	"github.com/crueber/spindle/internal/server/auth"
 	"github.com/crueber/spindle/internal/store"
+	"github.com/crueber/spindle/internal/store/proto"
 )
 
 func testClock() time.Time { return time.Date(2026, 9, 3, 12, 0, 0, 0, time.UTC) }
@@ -43,7 +44,6 @@ var (
 	stranger = auth.Principal{Name: "stranger@example.com"}
 	admin    = auth.Principal{Name: "root@example.com", Write: true, Admin: true}
 	anon     = auth.Anonymous()
-	noneP    = auth.None()
 )
 
 func daveP() auth.Principal { return dave }
@@ -66,12 +66,15 @@ func doReq(h *Handler, method, target string, body string) *httptest.ResponseRec
 	return w
 }
 
-// seedRepo marks owner/repo as existing: the manifest probe is the
-// repo-existence signal (invite paths gate on it), and the body is never
-// read.
+// seedRepo marks owner/repo as existing. The manifest probe is the
+// repo-existence signal (invite paths gate on it); it is a real
+// proto.Manifest because a repository move reads and retargets Manifest.Repo
+// (PLAN-V2 §T.1), and two different repos must never look byte-identical.
 func seedRepo(t *testing.T, s *Service, owner, repo string) {
 	t.Helper()
-	if _, err := store.PutBytes(context.Background(), s.Store, "repos/"+owner+"/"+repo+"/manifest.pb", []byte("manifest"),
+	m := &proto.Manifest{FormatVersion: 1, Repo: owner + "/" + repo, ObjectFormat: "sha1",
+		Revision: 1, Writer: "seed-" + owner + "-" + repo}
+	if _, err := store.PutBytes(context.Background(), s.Store, "repos/"+owner+"/"+repo+"/manifest.pb", m.Marshal(),
 		store.PutOptions{Mode: store.PutCreate, ContentType: "application/x-protobuf"}); err != nil {
 		if !store.IsPreconditionFailed(err) {
 			t.Fatal(err)

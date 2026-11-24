@@ -43,18 +43,17 @@ func pushGuardSetup(t *testing.T, exists bool) *pushGuardFixture {
 	t.Helper()
 	st := newFakeStore()
 	cfg := config.Defaults()
-	cfg.Server.Auth.Mode = "token"
 	cfg.Server.Auth.Tokens = []config.StaticToken{
 		{Principal: "alice@example.com", Token: "tok-alice", Write: true},
 		{Principal: "bob@example.com", Token: "tok-bob", Write: true},
 		{Principal: "carol@example.com", Token: "tok-carol"},
 		{Principal: "mallory@example.com", Token: "tok-mallory", Write: true},
-		{Principal: "root@example.com", Token: "tok-root", Write: true, Admin: true},
 		{Principal: "solo", Token: "tok-solo", Write: true},
 	}
 	cfg.Server.Auth.SessionSecret = "0123456789abcdef0123456789abcdef"
 	ident := identity.New(st, cfg)
 	ctx := context.Background()
+	_ = ctx
 	if _, err := ident.CreateOrg(ctx, "acme", "Acme", "", "alice@example.com"); err != nil {
 		t.Fatal(err)
 	}
@@ -80,6 +79,14 @@ func pushGuardSetup(t *testing.T, exists bool) *pushGuardFixture {
 		Config: cfg, Store: st, Engine: eng,
 		DataDir: t.TempDir(), Log: testLogger(t), PushGate: ident,
 	})
+	// TEST-ONLY Seam-2 credential: the host-admin bypass case (a signed-in
+	// admin) needs an admin principal; a static token can never be one.
+	srv.Auth().ExtraCredential = func(token string) (auth.Principal, *auth.AuthError, bool) {
+		if token == "tok-root" {
+			return auth.Principal{Name: "root@example.com", Write: true, Admin: true}, nil, true
+		}
+		return auth.Principal{}, nil, false
+	}
 	return &pushGuardFixture{srv: srv, ident: ident, eng: eng}
 }
 

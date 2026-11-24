@@ -409,11 +409,11 @@ clean.
   headless run refuses at the commit point).
 - **Import dialog dangerous confirm (fix #23):** `/import` carries an unchecked-by-default
   dangerous checkbox (DNS-TOCTOU + redirect-following help text) wired through `imports.start()`.
-- **Setup [import] section (fix #23):** the Setup UI exposes all eight `[import]` keys
+- **Setup [import] section (fix #23):** the Administration area exposes all eight `[import]` keys
   (url_allowlist, timeouts, caps, SSRF bools) with spec-spelling examples; fail-closed defaults unchanged.
 - **`import.max_bytes` compiled default equals
   `server.max_push_bytes`' compiled default (64 GiB)** rather than a
-  dynamic follow — visible in `config dump`/setup; operators
+  dynamic follow — visible in `config dump`/admin/config; operators
   constraining pushes set both keys (terminal errors name the key).
 - **The `.idx` discipline (§6.1)** closes a latent `AddPack` gap (idx
   neither installed nor uploaded) with no `internal/wal` touch.
@@ -451,16 +451,13 @@ clean.
   refused; the allowlist is host-only by design and the scheme is part of
   the canonical identity. `### Concurrency`: no new goroutines, locks, or
   channels — pure string predicates on the request path.
-- **`dangerous:true` requires an authenticated admin (fix #237):** the
-  `Begin` gate honors the body flag only when the principal is an
-  authenticated admin under `server.auth.mode` token/oidc (403 otherwise,
-  naming `spindle import --dangerous`). The auth-none principal carries
-  `Admin` for zero-config friendliness but is unauthenticated, so it never
-  qualifies over HTTP — the operator path there is CLI-only. Anonymous
+- **`dangerous:true` requires a signed-in host admin (fix #237):** the
+  `Begin` gate honors the body flag only when `!p.Anonymous && p.Admin`
+  (403 otherwise, naming `spindle import --dangerous`) — the OIDC group
+  predicate is the only admin grant (`docs/PLAN-OIDC-ONLY.md`). Anonymous
   still 401s first via the unchanged S6 order (authenticate → authorize →
-  dangerous-gate → join-or-start). Unknown auth modes fail closed
-  (only token/oidc qualify). `### Concurrency`: no shared state — a pure
-  predicate on the principal + cfg, evaluated under no lock.
+  dangerous-gate → join-or-start). `### Concurrency`: no shared state — a pure
+  predicate on the principal, evaluated under no lock.
 - **Non-wedging imports (fix #79):** the manifest used to commit
   BEFORE ingest/refs/admin/doc, so any later failure left a refless,
   admin-less repo whose retry 409'd "delete and retry" to a caller

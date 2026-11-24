@@ -42,10 +42,10 @@ contract").
 | bundle-uri | v2 capability + `bundle-uri` command, static lists `bundles/list` (clones) and `bundles/catchup` (fetch recipes), per-strategy bundle objects with ETag/Range/immutable, calendar-slot scheduling with backfill, chained incrementals, blobless (`blob:none`) family on a filtered list, optional presigned store URLs, `bundles.require` refusal of unbounded zero-have clones with the exact fix in the error |
 | LFS | Batch API (`operation=upload\|download`, transfer `basic`), basic transfer GET/HEAD/PUT + `verify`, sha256-addressed objects in the bucket, size+sha256 verification, `max_object_bytes` cap, optional read-through from an upstream LFS server (stream + persist), presigned or proxied serving |
 | web UI | GitHub-shaped owners/repos pages, tree/blob/commits/commit pages, README rendering, markdown preview, syntax-highlighted blobs, unified diffs, branch/tag picker, clone menu with setup recipes, WAL health dashboard (manifest, packs, bundle chain + plan, compactions, segments, ops), tasks overlay, settings tab (scheduled tasks, push policy editor + validate + dry-run, effective config editor + history + revert). *Rust renders this in React; spindle renders it as server-rendered Go `html/template` pages (`internal/webui`) + vendored htmx + vanilla-ES islands — D-WEB-14, see 12_web_ui.md.* |
-| setup | `/setup` web UI — ALL config keys grouped by section with current effective values, validate + Save; `GET /api/v1/setup` (full schema + effective values + file state), `POST /api/v1/setup/test` (validate without saving), `PUT /api/v1/setup` (validate + write); zero-config bootstrap, atomic save to `<data-dir>/spindle.toml`, restart-needed reporting, setup-only recovery mode. Full spec: 06_server_http.md |
+| administration | `/admin` (Overview) + `/admin/config` web UI — ALL config keys grouped by section with current effective values, validate + Save; `GET /api/v1/setup` (full schema + effective values + file state), `POST /api/v1/setup/test` (validate without saving), `PUT /api/v1/setup` (validate + write); zero-config bootstrap, atomic save to `<data-dir>/spindle.toml`, restart-needed reporting, restricted recovery mode. Full spec: 06_server_http.md |
 | JSON API | Repository-scoped read API (`refs`, `refs/{branches\|tags}` paged/streamed, `resolve`, `tree`, `blob`, `commits`, `commit`), repo summary/create/delete, per-repo settings (get/put/delete/effective/history/describe/validate), policy (get/put/delete/validate/dry-run), overview (WAL health), tasks + attachable SSE streams, ops (maintenance actions), owner listing, discovery document, `me`; two lanes (bearer/same-origin and cross-origin browser) |
 | SDK | authored as submodules (`web/sdk/src/*.js`) and bundled by esbuild into the shipped `web/dist/repos.js` — dependency-free at runtime; maps the whole API, picks the lane, performs the popup auth flow, unwraps the SSE envelope |
-| auth | `none` (everyone anon+write+admin; allowed on any bind with loud warnings in logs + setup UI — the Rust loopback-only rule is superseded, see §9.5), `token` (static tokens as Bearer or Basic password), `oidc` (any OpenID Connect issuer: browser sign-in, verified ID tokens as bearers, `wgt_` access tokens minted at `/_auth/tokens`, static tokens for robots); admin flags independent of write; trusted-forwarder identity forwarding; real 401 semantics so git erases dead credentials |
+| auth | `none` (everyone anon+write+admin; allowed on any bind with loud warnings in logs + Administration area — the Rust loopback-only rule is superseded, see §9.5), `token` (static tokens as Bearer or Basic password), `oidc` (any OpenID Connect issuer: browser sign-in, verified ID tokens as bearers, `wgt_` access tokens minted at `/_auth/tokens`, static tokens for robots); admin flags independent of write; trusted-forwarder identity forwarding; real 401 semantics so git erases dead credentials |
 | policy | Per-repo `policy.json` rule language: groups, ordered rules, ref/principal/path match, `protect` (AND-combined, enforced), `history`/`size` (parsed, not enforced), named-rule rejections on the wire |
 | settings | Per-repo TOML overrides (`[bundles]`, `[maintenance]`, `[compaction]`, `[upstream]`, `[integrations]`, ≤ 16 KiB) published **into the WAL** (inline on the manifest + SETTINGS log entries with history) |
 | events | A bridge (its own role) tails the WAL from a durable cursor and POSTs `ref` events (create/update/delete) to a webhook, at-least-once per batch, dedup key `(repo, seq, ref_name)`, HMAC signature, bucket-notification wake-up + periodic sweep |
@@ -72,7 +72,7 @@ Explicitly **not** in scope (Rust spec §1.3): code review, merge queues, CI, is
 | Web UI on the monorepo | tree/blob/commits render without packs on disk, ~100–200 ms warm |
 | Push | acknowledged only after the bucket ACKs; one CAS per batch; the maintaining host writes |
 | Consistency | push then fetch anywhere sees it; concurrent pushers: exactly one winner (simulation suite proves) |
-| Security | every route authenticated in token/oidc mode; invalid config ⇒ setup-only mode (nothing else serves); dead credential ⇒ real 401 |
+| Security | every route authenticated in token/oidc mode; invalid config ⇒ restricted mode (nothing else serves); dead credential ⇒ real 401 |
 | Data completeness | every object reachable from an advertised ref is in a live pack; weekly fsck + repair keep it so |
 
 The last two proof-bearing rows are covered by 15_testing.md (simulation/contract suites) and 03_store_backends.md (round-trip budgets).
@@ -140,7 +140,7 @@ the Go mechanism that enforces it.
 11. **User friendliness is a first-class law.** The zero-config first run is part of the product: `spindle` with
     no arguments and no config file must boot into a usable server (§9.5). Where the Rust spec fails closed —
     refusing to boot without config, allowing auth `none` only on loopback — spindle warns loudly and serves
-    instead (warn-don't-refuse); refusal is reserved for an INVALID config, which enters setup-only mode.
+    instead (warn-don't-refuse); refusal is reserved for an INVALID config, which enters restricted mode.
 
 ---
 
@@ -335,8 +335,9 @@ Go module: `github.com/crueber/spindle`. These paths are normative; every other 
 | `internal/bundle` | The bundle-uri subsystem: strategies, calendar slots, backfill, chained incrementals, blobless family, `bundles/list` + `bundles/catchup` |
 | `internal/policy` | The per-repo push policy rule language: parse, validate, evaluate, dry-run |
 | `internal/server` | chi router (`github.com/go-chi/chi/v5`, core only), hand-ordered middleware as `func(http.Handler) http.Handler`, git smart-HTTP + LFS + static endpoints, auth (none/token/oidc), setup recipes, plain-HTTP/h2c listener |
-| `internal/setup` | The setup subsystem (wired into routes by `internal/server`): the config schema description for the UI, validate-for-save, atomic write of `<data-dir>/spindle.toml`, bootstrap-mode detection, the `/setup` UI and `/api/v1/setup` endpoints, and the setup-only mode gate (§9.5, 06_server_http.md) |
+| `internal/setup` | The setup subsystem (wired into routes by `internal/server`): the config schema description for the UI, validate-for-save, atomic write of `<data-dir>/spindle.toml`, bootstrap-mode detection, the `/admin/config` UI and `/api/v1/setup` endpoints, and the restricted mode gate (§9.5, 06_server_http.md) |
 | `internal/api` | The JSON API wire contract, SSE envelope, tasks surface, two-lane auth, render caches |
+| `internal/staticpages` | The static-site byte route (docs/features/19): the dedicated listener's handler — path rules, `.html` fallback, `404.html`, dotfile/symlink refusal, the pinned MIME table and a bounded blob read, over its own git pool (4 × `GOMAXPROCS`). Composition-wired (`RepoDirs`/`Settings`/`Visible` seams): it derives everything, stores nothing, and serves public repositories only |
 | `internal/cachepolicy` | The shared HTTP cache-class definition (07 §4 law, Forgejo #382): the five Cache-Control values + the mutability rule + the `Check` guard; stdlib-only leaf aliased by core and feature packages, never redeclared |
 | `internal/events` | The WAL → webhook bridge: durable cursor, delivery + HMAC signing, bucket-notification wake-ups, sweep |
 | `internal/egress` | Shared webhook egress hardening (stdlib only): refuse-all redirect policy + delivery-time non-public IP screen with pinned dialing, reused by `internal/events` and tenant webhooks (06_notifications.md §5.3, 09_events.md §4.2) |
@@ -354,13 +355,16 @@ registries of §9.3.
 
 ### 9.1 Minimal dependencies
 
-The entire Go backend allows exactly **three** third-party modules — no exceptions without a written amendment:
+The entire Go backend allows exactly **seven** third-party modules — no exceptions without a written amendment (live budget: AGENTS.md law 1):
 
 | Module | Why it earns its place |
 |---|---|
 | `golang.org/x/net` | h2c serving (HTTP/2 without TLS) — `net/http` cannot do it alone; wrapped around the chi router |
 | `github.com/BurntSushi/toml` | Config parsing; hand-rolling a TOML parser is a spec bug |
 | `github.com/go-chi/chi/v5` | The HTTP router. Chi core ONLY — `chi/cors`, `chi/middleware`, and every other subpackage stay hand-rolled; the ordered middleware chain of 06_server_http.md is adapted to `func(http.Handler) http.Handler` |
+| `golang.org/x/crypto` | SSH git transport only (docs/go/17_ssh.md); no other use |
+| `github.com/dicebear/dicebear-go/v10` + `github.com/dicebear/styles/v10` | Deterministic user-avatar generation only (docs/features/01_identity_permissions.md) |
+| `gopkg.in/yaml.v3` | Threads workflow files only, imported by `internal/threads/workflow` and nothing else (docs/features/15_threads.md) |
 
 Everything else is stdlib or hand-rolled:
 
@@ -447,23 +451,24 @@ A single binary anyone can run is the product (§1), so ease of use is design la
 The Rust spec's fail-closed boot rule is superseded in one direction: **warn, don't refuse**. Full spec:
 06_server_http.md (setup) and 11_config_cli.md (config, data dir).
 
-- **Zero-config first run.** No `spindle.toml` is needed to start: a missing config boots with built-in
-  defaults — `server.listen = "0.0.0.0:8080"`, `store.backend = "filesystem"` rooted at `<data-dir>/store`,
-  `server.auth.mode = "none"` (allowed on any bind, with loud warnings in the logs and a setup-UI banner — a
-  deliberate divergence from the Rust loopback-only rule), `server.auto_create_on_push = true`; every other
-  key keeps its Rust-spec default.
+- **Zero-config first run is restricted.** No `spindle.toml` is needed to *start*: a missing config boots
+  with built-in defaults — `server.listen = "0.0.0.0:8080"`, `store.backend = "filesystem"` rooted at
+  `<data-dir>/store`, `server.auto_create_on_push = true` — but **serves only the Administration area and
+  the health endpoints** until OIDC is configured (`docs/PLAN-OIDC-ONLY.md`; DEVIATIONS D-OIDC-1).
+  Authentication is OIDC and nothing else; there is no open mode and no warning-only compromise.
 - **Data dir.** `--data-dir` flag / `SPINDLE_DATA_DIR` env, default `~/.local/share/spindle` (`/var/lib/spindle`
   in containers); it holds `store/`, `cache/`, and the saved `spindle.toml`.
-- **Setup UI + API.** `/setup` groups ALL config keys by section with current effective values and validates +
+- **Administration area + API.** `/admin/config` groups ALL config keys by section with current effective values and validates +
   saves (atomic tmp+rename to `<data-dir>/spindle.toml`, reporting which keys need a restart). API:
   `GET /api/v1/setup` (full schema + effective values + file state), `POST /api/v1/setup/test` (validate
   without saving), `PUT /api/v1/setup` (validate + write).
-- **Boot flow.** config present → validate → boot if it all works; config missing → defaults + setup banner;
-  config INVALID → **setup-only mode**: only `/setup`, `/healthz`, `/readyz` answer (everything else 503 with
-  a pointer to `/setup`), the UI shows the exact errors, and saving a fixed config requires a restart.
-- **Setup access rule.** Open while (no config file OR config invalid OR `auth.mode = none`); otherwise an
-  admin principal is required (OIDC `admin_groups` — default `spindle-admins` —, `admin_emails`, or
-  `admin_domains`); there is no setup token (WP13).
+- **Boot flow.** config present + valid → normal boot; config missing (without a complete `SPINDLE__SERVER__AUTH__*`
+  set) or INVALID → **restricted mode**: only `/admin` + `/admin/config`, their POSTs, the auth-test POST
+  and `/healthz`, `/readyz` answer (everything else 503 with a pointer to `/admin`), the UI shows the exact
+  errors (or the OIDC onboarding card when no file exists), and saving a fixed config requires a restart.
+- **Administration access rule.** Open **only** in the restricted boot; otherwise the caller must be a signed-in
+  member of the OIDC `admin_groups` (default `spindle-admin`). There are no `admin_emails`/`admin_domains`
+  and no static-token admins, and no setup token.
 
 ---
 
@@ -478,7 +483,7 @@ $ spindle
 # auto_create_on_push on.
 ```
 
-Open **http://localhost:8080/setup** — every config key grouped by section with its effective value. Review and
+Open **http://localhost:8080/admin** — the Overview, then Configuration with every config key grouped by section with its effective value. Review and
 Save (writes `<data-dir>/spindle.toml` atomically and reports which keys need a restart), or just start using the
 server as-is.
 
@@ -494,9 +499,9 @@ $ git clone http://localhost:8080/alice/my-repo.git
 # browse http://localhost:8080/alice/my-repo — UI, API, and WAL health on the same prefix
 ```
 
-For a real deployment (S3 bucket, token/OIDC auth), edit the config through the setup UI or
+For a real deployment (S3 bucket, token/OIDC auth), edit the config through the Administration area or
 `spindle config check --config spindle.toml` to validate before serving (exit codes: 0 ok, 1 error, 2 usage,
-3 crash). Full key reference: 11_config_cli.md; auth modes, the OIDC flow, and the setup spec: 06_server_http.md.
+3 crash). Full key reference: 11_config_cli.md; OIDC, the group predicate, and the setup spec: 06_server_http.md.
 
 ---
 
@@ -520,7 +525,7 @@ For a real deployment (S3 bucket, token/OIDC auth), edit the config through the 
 | bulk pool | the Go translation of the Rust "bulk runtime": 4 dedicated worker goroutines for pack materialization, fed by a bounded channel; never runs on request goroutines |
 | singleflight | hand-rolled in-flight dedup: concurrent fetches of one key collapse into one round trip |
 | h2c | HTTP/2 cleartext; spindle serves it via `golang.org/x/net` when `server.http2 = true` |
-| setup-only mode | the recovery state for an INVALID config: only `/setup`, `/healthz`, `/readyz` answer; everything else is 503 with a pointer to `/setup` (`internal/setup`) |
+| restricted mode | the recovery state for an INVALID config: only `/admin` + `/admin/config`, `/healthz`, `/readyz` answer; everything else is 503 with a pointer to `/admin/config` (`internal/setup`) |
 
 ---
 
@@ -541,7 +546,7 @@ For a real deployment (S3 bucket, token/OIDC auth), edit the config through the 
 - **Divergence (2026-08-31, D3):** all dev/CI targets are Make targets (build, test, race, cover, sim, e2e, contract, vet, fmt, image, dev, clean) — no `just`file.
 - **Divergence (2026-08-31, D4):** a local-filesystem store backend (`store.backend = "filesystem"`) joins S3/memory: keys map to paths under `store.root`; conditional writes via sidecar `.lock` + flock + stat-compare + atomic rename (residual TOCTOU vs S3 documented); `renameat2(RENAME_NOREPLACE)` for create-if-absent with a portable fallback; version token/ETag = `"<size>:<mtime_ns>"`; compose = stream-concat temp + rename; range reads via `os.File.ReadAt`; no accel/signed URLs. It joins the contract suite as an ALWAYS-run backend. See 03_store_backends.md.
 - **Divergence (2026-08-31, D5):** zero-config first run is a first-class law (§9.5) — missing config boots with defaults (`0.0.0.0:8080`, filesystem store under `<data-dir>`, auth `none` + loud warnings, `auto_create_on_push = true`); data dir via `--data-dir`/`SPINDLE_DATA_DIR` (default `~/.local/share/spindle`, containers `/var/lib/spindle`). Supersedes the Rust fail-closed boot rule and the auth-`none`-loopback-only rule (warn-don't-refuse instead).
-- **Divergence (2026-08-31, D6):** `/setup` web UI + `/api/v1/setup` API are first-class (§9.5; full spec in 06_server_http.md), including the setup-only recovery mode for invalid configs. (The setup token this entry once carried is REMOVED by WP13: setup access is the admin flag, now including OIDC `admin_groups`.)
+- **Divergence (2026-08-31, D6):** `/admin/config` web UI + `/api/v1/setup` API are first-class (§9.5; full spec in 06_server_http.md), including the restricted recovery mode for invalid configs. (The setup token this entry once carried is REMOVED by WP13: setup access is the admin flag, now including OIDC `admin_groups`.)
 - **Divergence (2026-08-31, D7):** CI enforces ≥ 95% statement coverage per `internal/...` package (Make `cover` target with per-package fail-under; `cmd/` main glue excluded); table-driven httptest for every handler.
 - **Shared webhook egress package (2026-09-05, issue #78):** `internal/egress` joins the §8 tree — stdlib-only refuse-all redirect policy + delivery-time non-public IP screen with pinned dialing, reused verbatim by `internal/events` (09_events.md §4.2) and tenant repo webhooks (docs/features/06_notifications.md §5.3) so the two sinks cannot drift apart. No new third-party module (dependency budget unchanged).
 - **Server-side TLS removed (2026-09-05, Forgejo #165):** the server listens plain HTTP (h2c retained via `golang.org/x/net`); `server.tls.*`, cert/key loading, self-signed generation, and `/services/public/ca.pem` are gone, and `X-Forwarded-Proto` is honored when building absolute URLs. TLS terminates at the reverse proxy (16_packaging.md §3.4). `golang.org/x/crypto` stays for the SSH transport only; no new module.

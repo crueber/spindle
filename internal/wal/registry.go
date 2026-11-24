@@ -385,6 +385,67 @@ func (r *Registry) Get(id string) *RepoHandle {
 	return r.repos[id]
 }
 
+// Invalidate drops the in-memory handle, its serving copy (<cache.dir>/
+// <owner>/<name>.git) and the listing-cache snapshot for id, WITHOUT touching
+// a single bucket object — the non-destructive twin of Delete, and the
+// quiesce/cleanup step of a repository move (PLAN-V2 §T.1). Bucket truth is
+// untouched: the next Open re-reads the manifest and re-materializes. It is
+// idempotent (an unopened repo with no local dir is a no-op) and takes no lock
+// across a store call (only the map swap is under mu).
+func (r *Registry) Invalidate(id string) error {
+	rid, err := git.ParseRepoId(id)
+	if err != nil {
+		return err
+	}
+	r.mu.Lock()
+	h := r.repos[id]
+	delete(r.repos, id)
+	r.mu.Unlock()
+	if h != nil {
+		h.teardown()
+	}
+	if r.cacheRoot != "" {
+		dir := rid.LocalDir(r.cacheRoot)
+		if rerr := os.RemoveAll(dir); rerr != nil {
+			return &WalError{Kind: WalErrIo, Detail: dir, Wrapped: rerr}
+		}
+	}
+	// The 30s listing snapshot still names the old id (and does not yet name
+	// the new one): dropping it makes the next List answer from the bucket.
+	r.listing.mu.Lock()
+	r.listing.repos, r.listing.at = nil, time.Time{}
+	r.listing.mu.Unlock()
+	return nil
+}
+
+// VerifyRepo proves a repository is readable from the bucket after a move
+// (PLAN-V2 §T.1): the manifest decodes, names id, and the refs phase replays
+// (its log segments/checkpoint are present and applicable). It runs at
+// LevelRefs only — packs are not materialized, so the probe is two bucket
+// reads and no git work (law 6). Errors name the missing piece.
+func (r *Registry) VerifyRepo(ctx context.Context, id string) error {
+	h, err := r.Open(ctx, id)
+	if err != nil {
+		return err
+	}
+	m, _ := h.ManifestSnapshot()
+	if m == nil {
+		return &WalError{Kind: WalErrCorrupt, Detail: "manifest " + id}
+	}
+	if m.Repo != id {
+		return &WalError{Kind: WalErrCorrupt,
+			Detail: fmt.Sprintf("manifest at %s names repo %q (a move must rewrite it)", id, m.Repo)}
+	}
+	g, err := h.Sync(ctx, LevelRefs)
+	if err != nil {
+		return err
+	}
+	if g != nil {
+		g.Release()
+	}
+	return nil
+}
+
 // ---- listing (05 §5.1.5) ----------------------------------------------------
 
 type listingCache struct {

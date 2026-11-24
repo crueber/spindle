@@ -71,7 +71,7 @@ func TestBuildSchemaGroupsAndTypes(t *testing.T) {
 		{"server.max_push_bytes", "int", int64(c.Server.MaxPushBytes)},
 		{"server.auto_create_on_push", "bool", c.Server.AutoCreateOnPush},
 		{"server.cors_origins", "list", c.Server.CorsOrigins},
-		{"server.auth.mode", "string", c.Server.Auth.Mode},
+		{"server.auth.issuer", "string", c.Server.Auth.Issuer},
 		{"server.auth.admin_groups", "list", c.Server.Auth.AdminGroups},
 		{"server.auth.groups_claim", "string", c.Server.Auth.GroupsClaim},
 		// A struct slice's value is the masked row map (G3: never the secret).
@@ -422,8 +422,8 @@ func TestSetPathWalksSections(t *testing.T) {
 		})
 	}
 	// The nested auth section is editable by its dotted key.
-	if err := setDottedKey(c, "server.auth.mode", "token"); err != nil || c.Server.Auth.Mode != "token" {
-		t.Fatalf("auth mode = %q err=%v", c.Server.Auth.Mode, err)
+	if err := setDottedKey(c, "server.auth.issuer", "https://id.example.com"); err != nil || c.Server.Auth.Issuer != "https://id.example.com" {
+		t.Fatalf("issuer = %q err=%v", c.Server.Auth.Issuer, err)
 	}
 	if _, err := parseSettingInt("1.5"); err == nil {
 		t.Fatal("fractional int must fail")
@@ -576,11 +576,23 @@ func (errBody) Read([]byte) (int, error) { return 0, errors.New("torn body") }
 
 // --- validate + save ------------------------------------------------------
 
+// oidcReady returns a first-run config completed with the OIDC set boot
+// validation requires (PLAN-OIDC-ONLY).
+func oidcReady(dir string) *config.Config {
+	c := config.FirstRunDefaults(dir)
+	c.Server.Auth.Issuer = "https://id.example.com"
+	c.Server.Auth.AllowedDomains = []string{"example.com"}
+	c.Server.Auth.OAuthClientID = "id"
+	c.Server.Auth.OAuthClientSecret = "secret"
+	c.Server.Auth.SessionSecret = "0123456789abcdef0123456789abcdef"
+	return c
+}
+
 func TestValidateReturnsEveryError(t *testing.T) {
-	if errs := Validate(config.Defaults()); len(errs) != 0 {
-		t.Fatalf("defaults must validate, got %v", errs)
+	if errs := Validate(oidcReady(t.TempDir())); len(errs) != 0 {
+		t.Fatalf("a complete config must validate, got %v", errs)
 	}
-	c := config.Defaults()
+	c := oidcReady(t.TempDir())
 	c.Store.Backend = "nope"
 	c.Store.MultipartPartSize = 1 << 30
 	c.Store.MultipartThreshold = 1 << 20
@@ -600,8 +612,8 @@ func TestValidateReturnsEveryError(t *testing.T) {
 
 func TestSaveWritesAtomicallyAndDiffsRestart(t *testing.T) {
 	dataDir := t.TempDir()
-	effective := config.FirstRunDefaults(dataDir)
-	cand := config.FirstRunDefaults(dataDir)
+	effective := oidcReady(dataDir)
+	cand := oidcReady(dataDir)
 	cand.Server.Listen = "127.0.0.1:9099"
 	cand.Server.RequestTimeout = config.Duration(90 * time.Minute)
 
@@ -655,7 +667,7 @@ func TestSaveSerialized(t *testing.T) {
 		wg.Add(1)
 		go func(i int) {
 			defer wg.Done()
-			c := config.FirstRunDefaults(dataDir)
+			c := oidcReady(dataDir)
 			c.Server.Listen = "127.0.0.1:" + strconv.Itoa(9000+i)
 			if _, _, err := Save(dataDir, c, c); err != nil {
 				errs <- err
@@ -678,7 +690,7 @@ func TestEffectiveValueAndRestartKeys(t *testing.T) {
 		t.Fatalf("effective listen = %v", EffectiveValue(c, "server.listen"))
 	}
 	// The auth subsection is keyed by its own group, not a section prefix.
-	if EffectiveValue(c, "server.auth.mode") != c.Server.Auth.Mode {
+	if EffectiveValue(c, "server.auth.issuer") != c.Server.Auth.Issuer {
 		t.Fatalf("effective auth mode = %v", EffectiveValue(c, "server.auth.mode"))
 	}
 	if EffectiveValue(c, "nodot") != nil || EffectiveValue(c, "bogus") != nil {
@@ -732,13 +744,20 @@ func contains(list []string, s string) bool {
 
 func TestProbeAuth(t *testing.T) {
 	var served map[string]any
+	var jwksDoc = map[string]any{"keys": []map[string]any{{
+		"kty": "RSA", "alg": "RS256", "use": "sig", "kid": "k1",
+		"n": "sXchQ2xibm9ybWFsZQ", "e": "AQAB",
+	}}}
 	idp := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/.well-known/openid-configuration" {
-			http.NotFound(w, r)
-			return
-		}
 		w.Header().Set("content-type", "application/json")
-		json.NewEncoder(w).Encode(served)
+		switch r.URL.Path {
+		case "/.well-known/openid-configuration":
+			json.NewEncoder(w).Encode(served)
+		case "/jwks":
+			json.NewEncoder(w).Encode(jwksDoc)
+		default:
+			http.NotFound(w, r)
+		}
 	}))
 	defer idp.Close()
 
@@ -747,7 +766,7 @@ func TestProbeAuth(t *testing.T) {
 		"issuer":                                idp.URL,
 		"authorization_endpoint":                "https://id.example.com/authorize",
 		"token_endpoint":                        "https://id.example.com/token",
-		"jwks_uri":                              "https://id.example.com/jwks",
+		"jwks_uri":                              idp.URL + "/jwks",
 		"scopes_supported":                      []string{"openid", "email"},
 		"id_token_signing_alg_values_supported": []string{"RS256"},
 	}
@@ -756,7 +775,7 @@ func TestProbeAuth(t *testing.T) {
 		t.Fatalf("ok probe errors = %v", errs)
 	}
 	if probe.Issuer != idp.URL || probe.AuthorizationEndpoint != "https://id.example.com/authorize" ||
-		probe.TokenEndpoint != "https://id.example.com/token" || probe.JWKSURI != "https://id.example.com/jwks" {
+		probe.TokenEndpoint != "https://id.example.com/token" || probe.JWKSURI != idp.URL+"/jwks" {
 		t.Fatalf("probe = %+v", probe)
 	}
 	if len(probe.ScopesSupported) != 2 || len(probe.SigningAlgs) != 1 {
@@ -770,6 +789,33 @@ func TestProbeAuth(t *testing.T) {
 	served["issuer"] = "https://elsewhere.example.com"
 	if _, errs := ProbeAuth(idp.URL, "", ""); len(errs) != 1 || !strings.Contains(errs[0].Message, "does not match") {
 		t.Fatalf("mismatch errors = %v", errs)
+	}
+
+	// The JWKS half: fetching it, and requiring a usable signing key.
+	served["issuer"] = idp.URL
+	jwksDoc = map[string]any{"keys": []any{}}
+	if _, errs := ProbeAuth(idp.URL, "", ""); len(errs) != 1 || !strings.Contains(errs[0].Message, "no usable signing key") {
+		t.Fatalf("empty JWKS errors = %v", errs)
+	}
+	jwksDoc = map[string]any{"keys": []map[string]any{{"kty": "EC", "crv": "P-256", "alg": "ES256", "use": "sig", "kid": "ec1"}}}
+	if _, errs := ProbeAuth(idp.URL, "", ""); len(errs) != 0 {
+		t.Fatalf("EC P-256 key must be accepted: %v", errs)
+	}
+	jwksDoc = map[string]any{"keys": []map[string]any{{"kty": "RSA", "alg": "RS256", "use": "sig", "kid": "k1", "n": "sXchQ2xibm9ybWFsZQ", "e": "AQAB"}}}
+	jwksDown := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.Contains(r.URL.Path, "jwks") {
+			http.Error(w, "gone", http.StatusBadGateway)
+			return
+		}
+		w.Header().Set("content-type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{
+			"issuer": "http://" + r.Host, "authorization_endpoint": "https://id.example.com/authorize",
+			"token_endpoint": "https://id.example.com/token", "jwks_uri": "http://127.0.0.1:1/jwks",
+		})
+	}))
+	defer jwksDown.Close()
+	if _, errs := ProbeAuth(jwksDown.URL, "", ""); len(errs) != 1 || !strings.Contains(errs[0].Message, "JWKS fetch failed") {
+		t.Fatalf("unreachable JWKS errors = %v", errs)
 	}
 
 	// Missing a required endpoint is named in the error.

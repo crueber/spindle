@@ -26,6 +26,7 @@ import (
 	"time"
 
 	"github.com/crueber/spindle/internal/api"
+	"github.com/crueber/spindle/internal/server/auth"
 	"github.com/crueber/spindle/internal/store"
 	"github.com/crueber/spindle/internal/wal"
 	gossh "golang.org/x/crypto/ssh"
@@ -69,6 +70,7 @@ func sshTestEnv(t *testing.T) (base, keyPath string) {
 	cfg := walTestCfg(t)
 	cfg.Server.AutoCreateOnPush = true
 	cfg.Server.SSH.Listen = "127.0.0.1:0"
+	cfg.Server.Auth.AllowedDomains = []string{"example.com"}
 
 	ctx := context.Background()
 	st := store.NewMemory()
@@ -82,6 +84,12 @@ func sshTestEnv(t *testing.T) (base, keyPath string) {
 		DataDir: t.TempDir(),
 		Log:     testLogger(t),
 	})
+	srv.Auth().EmailLookup = func(username string) (string, bool) {
+		if username == "ada" {
+			return "ada@example.com", true
+		}
+		return "", false
+	}
 	// the user registers the key through the API surface (17_ssh.md §3)
 	if _, err := srv.SSHKeyRegistry().Add(ctx, "ada", pubLine, "e2e"); err != nil {
 		t.Fatal(err)
@@ -177,7 +185,6 @@ func TestSSHReadOnlyKeyCannotPush(t *testing.T) {
 	cfg := walTestCfg(t)
 	cfg.Server.AutoCreateOnPush = true
 	cfg.Server.SSH.Listen = "127.0.0.1:0"
-	cfg.Server.Auth.Mode = "oidc"
 	cfg.Server.Auth.AllowedDomains = []string{"example.com", "writer.example.com"}
 	cfg.Server.Auth.WriteDomains = []string{"writer.example.com"}
 
@@ -257,6 +264,7 @@ func TestSSHKeysViaAPIThenClone(t *testing.T) {
 	cfg := walTestCfg(t)
 	cfg.Server.AutoCreateOnPush = true
 	cfg.Server.SSH.Listen = "127.0.0.1:0"
+	cfg.Server.Auth.AllowedDomains = []string{"example.com"}
 
 	ctx := context.Background()
 	st := store.NewMemory()
@@ -266,6 +274,18 @@ func TestSSHKeysViaAPIThenClone(t *testing.T) {
 	apiEnv := api.NewEnv(st, nil, cfg, NewWalEngine(reg, cfg), "test", "test-host")
 	apiProvider := NewAPIProvider(apiEnv)
 	srv := New(Options{Config: cfg, Store: st, Engine: NewWalEngine(reg, cfg), DataDir: t.TempDir(), Log: testLogger(t), API: apiProvider})
+	srv.Auth().EmailLookup = func(username string) (string, bool) {
+		if username == "ada" {
+			return "ada@example.com", true
+		}
+		return "", false
+	}
+	srv.Auth().ExtraCredential = func(token string) (auth.Principal, *auth.AuthError, bool) {
+		if token == "tok-e2e" {
+			return auth.Principal{Name: "ada", Write: true}, nil, true
+		}
+		return auth.Principal{}, nil, false
+	}
 	apiEnv.SSHKeys = srv.SSHKeyRegistry() // read at request time
 	api := httptest.NewServer(srv.Handler())
 	t.Cleanup(api.Close)
@@ -298,8 +318,11 @@ func TestSSHKeysViaAPIThenClone(t *testing.T) {
 	gitSSHExpectFail(t, keyPath, seed, "ls-remote", sshBase+"/acme/api.git")
 
 	// add the key through the API
-	res, err := http.Post(api.URL+"/api/v1/ssh-keys", "application/json",
+	keyReq, _ := http.NewRequest("POST", api.URL+"/api/v1/ssh-keys",
 		strings.NewReader(fmt.Sprintf(`{"key": %q, "title": "laptop"}`, pubLine)))
+	keyReq.Header.Set("Content-Type", "application/json")
+	keyReq.Header.Set("Authorization", "Bearer tok-e2e")
+	res, err := http.DefaultClient.Do(keyReq)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -315,12 +338,14 @@ func TestSSHKeysViaAPIThenClone(t *testing.T) {
 	if err := json.NewDecoder(res.Body).Decode(&added); err != nil {
 		t.Fatal(err)
 	}
-	if added.Principal != "anon" || added.ID == "" || !strings.HasPrefix(added.Fingerprint, "SHA256:") {
+	if added.Principal != "ada" || added.ID == "" || !strings.HasPrefix(added.Fingerprint, "SHA256:") {
 		t.Fatalf("added record = %+v", added)
 	}
 
 	// list shows exactly one key
-	lres, lerr := http.Get(api.URL + "/api/v1/ssh-keys")
+	lreq, _ := http.NewRequest("GET", api.URL+"/api/v1/ssh-keys", nil)
+	lreq.Header.Set("Authorization", "Bearer tok-e2e")
+	lres, lerr := http.DefaultClient.Do(lreq)
 	if lerr != nil {
 		t.Fatal(lerr)
 	}
@@ -331,8 +356,11 @@ func TestSSHKeysViaAPIThenClone(t *testing.T) {
 	}
 
 	// duplicate registration -> 409
-	dup, derr := http.Post(api.URL+"/api/v1/ssh-keys", "application/json",
+	dupReq, _ := http.NewRequest("POST", api.URL+"/api/v1/ssh-keys",
 		strings.NewReader(fmt.Sprintf(`{"key": %q}`, pubLine)))
+	dupReq.Header.Set("Content-Type", "application/json")
+	dupReq.Header.Set("Authorization", "Bearer tok-e2e")
+	dup, derr := http.DefaultClient.Do(dupReq)
 	if derr != nil {
 		t.Fatal(derr)
 	}
@@ -358,6 +386,7 @@ func TestSSHKeysViaAPIThenClone(t *testing.T) {
 	if delErr != nil {
 		t.Fatal(delErr)
 	}
+	delReq.Header.Set("Authorization", "Bearer tok-e2e")
 	delRes, delErr := http.DefaultClient.Do(delReq)
 	if delErr != nil || delRes.StatusCode != http.StatusOK {
 		t.Fatalf("delete = %v %d", delErr, delRes.StatusCode)

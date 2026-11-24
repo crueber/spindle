@@ -15,14 +15,15 @@ func TestSetupOnlyMode(t *testing.T) {
 	cfg := config.Defaults()
 	s := New(Options{Config: cfg, Store: newFakeStore(), Engine: &fakeEngine{},
 		Boot: BootState{Mode: "setup_only", Errors: []string{"store.backend: unknown backend \"tape\""}}})
-	s.SetUI(&fakeUI{paths: map[string]bool{"/setup": true}})
+	s.SetUI(&fakeUI{paths: map[string]bool{"/admin": true, "/admin/config": true}})
 	h := s.Handler()
 
 	// The §3.4 subset answers.
 	allowed := map[string]int{
 		"/healthz":                    http.StatusOK,
-		"/readyz":                     http.StatusServiceUnavailable, // setup_required
-		"/setup":                      http.StatusOK,
+		"/readyz":                     http.StatusOK, // 200 restricted: ready for the admin surface
+		"/admin":                      http.StatusOK,
+		"/admin/config":               http.StatusOK,
 		"/api/v1/setup":               http.StatusOK,
 		"/services/public/install.sh": http.StatusOK,
 	}
@@ -36,7 +37,7 @@ func TestSetupOnlyMode(t *testing.T) {
 		}
 	}
 
-	// Everything else → 503 plain text with a pointer to /setup.
+	// Everything else → 503 plain text with a pointer to /admin.
 	others := []string{"/", "/metrics", "/api/v1/me", "/services/setup.json",
 		"/o/r.git/info/refs?service=git-upload-pack", "/repos.js", "/_auth/login"}
 	for _, path := range others {
@@ -47,16 +48,22 @@ func TestSetupOnlyMode(t *testing.T) {
 		if rec.Code != http.StatusServiceUnavailable {
 			t.Fatalf("%s = %d, want 503", path, rec.Code)
 		}
-		if body := rec.Body.String(); !strings.Contains(body, "/setup") {
-			t.Fatalf("%s body missing /setup pointer: %q", path, body)
+		if body := rec.Body.String(); !strings.Contains(body, "/admin") {
+			t.Fatalf("%s body missing /admin pointer: %q", path, body)
 		}
 	}
 
-	// readyz carries the exact config validation errors.
+	// readyz is 200 with the restricted status (the ingress contract) and
+	// still carries the exact config validation errors.
 	req := httptest.NewRequest("GET", "http://x/readyz", nil)
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
-	if !strings.Contains(rec.Body.String(), "setup_required") ||
+	if rec.Code != http.StatusOK {
+		t.Fatalf("readyz = %d, want 200 (body %s)", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), `"status":"restricted"`) ||
+		!strings.Contains(rec.Body.String(), `"surface":"admin"`) ||
+		!strings.Contains(rec.Body.String(), `"version":"`) ||
 		!strings.Contains(rec.Body.String(), "tape") {
 		t.Fatalf("readyz body = %q", rec.Body.String())
 	}
@@ -85,13 +92,19 @@ func TestSetupAPISaveRoundTrip(t *testing.T) {
 	dataDir := t.TempDir()
 	cfg := config.Defaults()
 	cfg.DataDir = dataDir
-	cfg.Server.Auth.Mode = "none" // open access rule
 	s := New(Options{Config: cfg, Store: newFakeStore(), Engine: &fakeEngine{},
-		DataDir: dataDir, Boot: BootState{Mode: "defaults"}})
+		DataDir: dataDir, Boot: BootState{Mode: "setup_only", FileState: "absent"}})
 	h := s.Handler()
 
-	// POST test: valid config → 200 {errors: []}
-	body := `{"overrides": {"server.listen": "127.0.0.1:9099"}}`
+	// POST test: a complete config → 200 {errors: []}. (A partial save is
+	// invalid now: OIDC is required, PLAN-OIDC-ONLY §4.2.)
+	body := `{"overrides": {"server.listen": "127.0.0.1:9099",` +
+		`"server.auth.issuer": "https://id.example.com",` +
+		`"server.auth.allowed_domains": ["example.com"],` +
+		`"server.auth.oauth_client_id": "id",` +
+		`"server.auth.oauth_client_secret": "secret",` +
+		`"server.auth.session_secret": "0123456789abcdef0123456789abcdef",` +
+		`"server.auth.admin_groups": ["spindle-admin"]}}`
 	req := httptest.NewRequest("POST", "http://x/api/v1/setup/test", strings.NewReader(body))
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
@@ -120,38 +133,53 @@ func TestSetupAPISaveRoundTrip(t *testing.T) {
 	}
 }
 
-// The setup surface has no env-token escape hatch: SPINDLE_SETUP_TOKEN must
-// have no effect. In token mode (not open) an unauthenticated request is 401
-// even when the env var is set and echoed back as ?token= or Bearer, a static
-// admin token passes, and a non-admin token is 403.
-func TestSetupAccessTokenMode(t *testing.T) {
+// The setup surface has no env-token escape hatch: SPINDLE_SETUP_TOKEN has no
+// effect. After a normal boot the surface is admin-only (a real OIDC session
+// minted with the admin group passes; a signed-in non-admin is 403; an
+// unauthenticated request is 401).
+func TestSetupAccessAdminOnly(t *testing.T) {
 	t.Setenv("SPINDLE_SETUP_TOKEN", "sekrit")
 	cfg := config.Defaults()
-	cfg.Server.Auth.Mode = "token" // not open
-	cfg.Server.Auth.Tokens = []config.StaticToken{
-		{Principal: "admin", Token: "adm", Write: true, Admin: true},
-		{Principal: "user", Token: "usr", Write: true},
-	}
+	cfg.Server.Auth.Issuer = "https://id.example.com"
+	cfg.Server.Auth.AllowedDomains = []string{"example.com"}
+	cfg.Server.Auth.OAuthClientID = "id"
+	cfg.Server.Auth.OAuthClientSecret = "secret"
+	cfg.Server.Auth.SessionSecret = "0123456789abcdef0123456789abcdef"
+	cfg.Server.Auth.AdminGroups = []string{"spindle-admin"}
 	s := New(Options{Config: cfg, Store: newFakeStore(), Engine: &fakeEngine{},
-		Boot: BootState{Mode: "normal"}})
+		Boot: BootState{Mode: "normal", FileState: "valid"}})
+	svc := NewAuthService(&cfg.Server.Auth, s.Now)
+	s.authSvc = svc
+	adminSess, err := svc.MintSession("root@example.com", "spindle-admin")
+	if err != nil {
+		t.Fatal(err)
+	}
+	userSess, err := svc.MintSession("user@example.com")
+	if err != nil {
+		t.Fatal(err)
+	}
 	h := s.Handler()
 
 	cases := []struct {
-		name string
-		url  string
-		auth string
-		want int
+		name   string
+		url    string
+		auth   string
+		cookie string
+		want   int
 	}{
-		{"anonymous", "/api/v1/setup", "", http.StatusUnauthorized},
-		{"env token as query", "/api/v1/setup?token=sekrit", "", http.StatusUnauthorized},
-		{"env token as bearer", "/api/v1/setup", "Bearer sekrit", http.StatusUnauthorized},
-		{"admin static token", "/api/v1/setup", "Bearer adm", http.StatusOK},
-		{"non-admin static token", "/api/v1/setup", "Bearer usr", http.StatusForbidden},
+		{"anonymous", "/api/v1/setup", "", "", http.StatusUnauthorized},
+		{"env token as query", "/api/v1/setup?token=sekrit", "", "", http.StatusUnauthorized},
+		{"env token as bearer", "/api/v1/setup", "Bearer sekrit", "", http.StatusUnauthorized},
+		{"admin session", "/api/v1/setup", "", adminSess.Wire, http.StatusOK},
+		{"non-admin session", "/api/v1/setup", "", userSess.Wire, http.StatusForbidden},
 	}
 	for _, tc := range cases {
 		req := httptest.NewRequest("GET", "http://x"+tc.url, nil)
 		if tc.auth != "" {
 			req.Header.Set("Authorization", tc.auth)
+		}
+		if tc.cookie != "" {
+			req.AddCookie(&http.Cookie{Name: "walgit_session", Value: tc.cookie})
 		}
 		rec := httptest.NewRecorder()
 		h.ServeHTTP(rec, req)
@@ -263,27 +291,6 @@ func TestMetricsExposition(t *testing.T) {
 }
 
 func TestReadyzStates(t *testing.T) {
-	t.Run("auth_none warning", func(t *testing.T) {
-		cfg := config.Defaults()
-		cfg.Server.Auth.Mode = "none"
-		s := New(Options{Config: cfg, Store: newFakeStore(), Engine: &fakeEngine{},
-			Boot: BootState{Mode: "normal"}})
-		rec := httptest.NewRecorder()
-		s.readyz(rec, httptest.NewRequest("GET", "/readyz", nil))
-		if !strings.Contains(rec.Body.String(), "auth_none") {
-			t.Fatalf("body = %s", rec.Body.String())
-		}
-	})
-	t.Run("defaults mode config flag", func(t *testing.T) {
-		cfg := config.Defaults()
-		s := New(Options{Config: cfg, Store: newFakeStore(), Engine: &fakeEngine{},
-			Boot: BootState{Mode: "defaults"}})
-		rec := httptest.NewRecorder()
-		s.readyz(rec, httptest.NewRequest("GET", "/readyz", nil))
-		if !strings.Contains(rec.Body.String(), `"config":"defaults"`) {
-			t.Fatalf("body = %s", rec.Body.String())
-		}
-	})
 	t.Run("draining", func(t *testing.T) {
 		cfg := config.Defaults()
 		s := New(Options{Config: cfg, Store: newFakeStore(), Engine: &fakeEngine{},

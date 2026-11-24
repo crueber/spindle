@@ -567,6 +567,25 @@ func TestProtectedRefGate(t *testing.T) {
 	}
 }
 
+func TestMergeTargetGate(t *testing.T) {
+	e := newTestEnv()
+	// No policy ⇒ allow (the merge gates below decide).
+	if err := e.svc.checkMergeTarget(ctx(), "o", "r", "refs/heads/main"); err != nil {
+		t.Fatalf("allow-all: %v", err)
+	}
+	// Managed refs are never a merge target.
+	if err := e.svc.checkMergeTarget(ctx(), "o", "r", "refs/pull/1/head"); !errors.Is(err, ErrForbidden) {
+		t.Fatalf("managed err = %v", err)
+	}
+	// Unparseable policy fails the merge closed even though protect
+	// restricts are not evaluated (an unreadable policy is never "merge
+	// without a policy").
+	putPolicyRaw(t, e, `{"version":1,"rules":[{"name":"x"]}`)
+	if err := e.svc.checkMergeTarget(ctx(), "o", "r", "refs/heads/main"); !errors.Is(err, ErrConflict) {
+		t.Fatalf("corrupt err = %v", err)
+	}
+}
+
 func putPolicy(t *testing.T, e *testEnv, doc string) {
 	t.Helper()
 	key := PolicyKey("o", "r")

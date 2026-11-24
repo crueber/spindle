@@ -24,16 +24,22 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"log/slog"
 	"net/http"
 	"net/url"
+	"os"
+	"sort"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/crueber/spindle/internal/api"
 	"github.com/crueber/spindle/internal/config"
 	"github.com/crueber/spindle/internal/git"
 	"github.com/crueber/spindle/internal/identity"
+	"github.com/crueber/spindle/internal/maintain"
+	"github.com/crueber/spindle/internal/moderation"
 	"github.com/crueber/spindle/internal/notify"
 	"github.com/crueber/spindle/internal/packages"
 	"github.com/crueber/spindle/internal/policy"
@@ -42,6 +48,7 @@ import (
 	"github.com/crueber/spindle/internal/setup"
 	"github.com/crueber/spindle/internal/store"
 	"github.com/crueber/spindle/internal/threads"
+	"github.com/crueber/spindle/internal/wal"
 	"github.com/crueber/spindle/internal/webui"
 )
 
@@ -67,6 +74,7 @@ func wireWebUI(cfg *config.Config, boot server.BootState, apiEnv *api.Env, c *co
 	wireRepoPages(c, apiEnv)
 	wireCollabPages(apiEnv, c)
 	wireFormPages(c)
+	wireWebeditPages(c)
 	wirePackagesPage(c)
 	wireSettingsPages(cfg, boot, apiEnv, c)
 }
@@ -168,6 +176,13 @@ func wirePublicPages(c *collabWiring, apiEnv *api.Env) {
 	if c != nil && c.socialSvc != nil {
 		// The starred page reads the same service the JSON twin does (07 §7).
 		d.Starred = c.socialSvc.Starred
+	}
+	if c != nil && c.modSvc != nil {
+		// M1 moderation: the profile page's block control reads and writes
+		// the viewer's own list through the service (never the bucket), and
+		// the self disclosure is the service's list verb.
+		mod := c.modSvc
+		d.Blocks = blockListOf(mod)
 	}
 	// StarCount stays nil: social.Counts takes a principal the seam does not
 	// carry and costs one store read PER LISTING ROW (the header marks it
@@ -276,6 +291,10 @@ func wireRepoPages(c *collabWiring, apiEnv *api.Env) {
 			d.TagsList = c.tagsSvc.ListTagEntries
 			d.TagDelete = c.tagsSvc.DeleteTag
 		}
+		if c.branchesSvc != nil {
+			d.BranchCreate = c.branchesSvc.Create
+			d.BranchDelete = c.branchesSvc.Delete
+		}
 		if c.forksyncSvc != nil {
 			d.SyncFork = c.forksyncSvc.Start
 			d.SyncOutcome = c.forksyncSvc.LastOutcome
@@ -288,6 +307,12 @@ func wireRepoPages(c *collabWiring, apiEnv *api.Env) {
 		}
 		if c.checksSvc != nil {
 			d.ChecksIndex = c.checksSvc.ListChecks
+		}
+		if c.insightsSvc != nil {
+			// Insights (docs/features/18): Load is ONE exact-key GET; the
+			// refresh starts the narrated task and returns immediately.
+			d.Insights = c.insightsSvc.Load
+			d.InsightsRefresh = c.insightsStart
 		}
 	}
 	webui.BindRepo(d)
@@ -321,6 +346,13 @@ func wireCollabPages(apiEnv *api.Env, c *collabWiring) {
 			// reads (store.go ListLabels/ListMilestones).
 			d.Labels = iss.ListLabels
 			d.Milestones = iss.ListMilestones
+			// §13/§14 parity: pinning rides the issues index, dependencies
+			// the repo link document — both service methods verbatim.
+			d.IssuePins = iss.PinnedIssues
+			d.IssuePin = iss.PinIssue
+			d.IssueDeps = iss.DependenciesFor
+			d.IssueDepAdd = iss.AddDependency
+			d.IssueDepRemove = iss.RemoveDependency
 		}
 		if pl := c.pullsSvc; pl != nil {
 			d.PullsList = pl.ListPRs
@@ -347,6 +379,14 @@ func wireCollabPages(apiEnv *api.Env, c *collabWiring) {
 			d.RequestsGet = rv.GetRequests
 			d.RequestsAdd = rv.AddRequests
 			d.RequestsRemove = rv.RemoveRequests
+		}
+		// Feature M2 (PLAN-V2 §M.2/M.4): the page's four moderation verbs are
+		// the service methods verbatim — the page re-checks no rule of its own.
+		if mod := c.modSvc; mod != nil {
+			d.ModHide = mod.Hide
+			d.ModUnhide = mod.Unhide
+			d.ModLock = mod.LockThread
+			d.ModUnlock = mod.UnlockThread
 		}
 		if ck := c.checksSvc; ck != nil {
 			d.ChecksList = ck.ListChecks
@@ -414,6 +454,11 @@ func wireCollabPages(apiEnv *api.Env, c *collabWiring) {
 		td.Dispatch = func(ctx context.Context, owner, repo, ref, workflow string, inputs map[string]string, p auth.Principal) ([]*threads.Run, error) {
 			return th.DispatchRun(ctx, owner+"/"+repo, ref, workflow, inputs, p)
 		}
+		// Artifact ZIP download (15 §2.5): the service resolves the read gate
+		// and the expiry; the page only writes the archive.
+		td.OpenArtifact = func(ctx context.Context, owner, repo, runID, name string, p auth.Principal) (*threads.ArtifactDownload, error) {
+			return th.OpenArtifact(ctx, owner+"/"+repo, runID, name, p)
+		}
 		if c.ident != nil {
 			ident := c.ident
 			td.Role = func(ctx context.Context, owner, repo string, p auth.Principal) (string, error) {
@@ -460,17 +505,38 @@ func wireFormPages(c *collabWiring) {
 }
 
 // ---------------------------------------------------------------------------
+// webedit: Feature F's three pages (create/edit/delete) + the form write
+// ---------------------------------------------------------------------------
+
+// wireWebeditPages binds the browser file editor onto its pages. CanPush is
+// the SAME identity.CheckPush the git receive path consults (F.8: the push
+// floor, never CheckRole(write)), so the affordances and the API gate cannot
+// disagree.
+func wireWebeditPages(c *collabWiring) {
+	d := webui.WebeditDeps{}
+	if c != nil {
+		if c.webeditSvc != nil {
+			d.Save = c.webeditSvc.Save
+			d.Preview = c.webeditSvc.Preview
+			d.Load = c.webeditSvc.Load
+			d.MaxBytes = c.webeditSvc.MaxBytes
+		}
+		if c.ident != nil {
+			ident := c.ident
+			d.CanPush = func(ctx context.Context, owner, repo string, p auth.Principal) bool {
+				return ident.CheckPush(ctx, owner, repo, p) == nil
+			}
+		}
+	}
+	webui.BindWebedit(d)
+}
+
+// ---------------------------------------------------------------------------
 // settings: /setup (both boot modes) + repo/org settings
 // ---------------------------------------------------------------------------
 
 func wireSettingsPages(cfg *config.Config, boot server.BootState, apiEnv *api.Env, c *collabWiring) {
-	d := webui.SettingsDeps{
-		SetupAccess:   setupAccessFn(cfg, boot),
-		SetupView:     setupViewFn(cfg, boot),
-		SetupValidate: setupValidateFn(cfg, boot),
-		SetupSave:     setupSaveFn(cfg, boot),
-		SetupAuthTest: setupAuthTestFn(),
-	}
+	d := webui.SettingsDeps{}
 	if c != nil {
 		// One call fills Repo{General,Scheduled,Mirror,PushMirror,Policy,
 		// Config,Role,Access,Admin,Write} from the same services the JSON
@@ -501,53 +567,389 @@ func wireSettingsPages(cfg *config.Config, boot server.BootState, apiEnv *api.En
 			// notify service the JSON twins call, one adapter.
 			d.OrgWebhookWrite = orgWebhookWriteFn(c.notifySvc)
 		}
+		// Feature M3 (PLAN-V2 §M.3): Settings → Reports reads and writes the
+		// same moderation verbs the JSON twins call.
+		if c.modSvc != nil {
+			d.RepoReports = moderationReportsPage(c.modSvc)
+			d.RepoReportResolve = moderationReportResolve(c.modSvc)
+		}
 	}
 	webui.BindSettings(d)
 }
 
-// setupAccessFn mirrors internal/server's setupAccess rule (§3.4) without the
-// write-a-response half: open while the config is invalid/absent or
-// auth.mode == none, else an authenticated admin principal is required.
-// Admin is Principal.Admin, so OIDC users in server.auth.admin_groups qualify
-// (WP13) along with the admin email/domain rules. No env token exists.
-func setupAccessFn(cfg *config.Config, boot server.BootState) func(*http.Request, auth.Principal) *auth.AuthError {
+// ---------------------------------------------------------------------------
+// administration: /admin + /admin/config (both boot modes)
+// ---------------------------------------------------------------------------
+
+// wireAdminPages binds the Administration area (docs/PLAN-ADMIN.md M2). The
+// config seam is the SAME three functions the /api/v1/setup JSON surface uses;
+// the rest are read-only projections. It runs in BOTH boot modes: the
+// restricted boot is exactly the mode where the area is the way out.
+//
+// srv supplies HealthFacts (the readyz verdict); maint is the maintainer
+// (nil in setup-only mode and on a serve-only host, where its card is absent).
+func wireAdminPages(cfg *config.Config, boot server.BootState, apiEnv *api.Env, srv *server.Server, maint *maintain.Maintainer, mod *moderation.Service, th *threads.Service, pkgs *packages.Service, reg *wal.Registry) {
+	d := webui.AdminDeps{
+		Access:     adminAccessFn(cfg, boot),
+		ConfigView: adminConfigViewFn(cfg, boot),
+		Validate:   adminValidateFn(cfg, boot),
+		Save:       adminSaveFn(cfg, boot),
+		AuthTest:   adminAuthTestFn(),
+		// The restart seam is bound in BOTH boot modes: a saved file takes
+		// effect only after the process exits, and the restricted boot is the
+		// recovery path a restart exists for.
+		Restart: adminRestartFn(),
+	}
+	if mod != nil {
+		d.Reports = moderationGlobalReports(mod)
+		d.Audit = moderationAuditView(mod)
+		d.ResolveReport = moderationReportResolve(mod)
+		// The config save is the Administration area's one mutation and the
+		// audit family's first non-moderation caller (PLAN-V2 §M.4,
+		// docs/features/16_moderation.md §14).
+		d.AuditWrite = func(ctx context.Context, actor, action, target, detail string) error {
+			return mod.RecordAdmin(ctx, actor, action, target, detail)
+		}
+	}
+	if th != nil {
+		// Instance runners (docs/PLAN-INSTANCE-RUNNERS.md §5): the same
+		// service the JSON API and CLI call, so the page, the API and the CLI
+		// share one host-admin gate and one audit trail.
+		d.Runners = func(ctx context.Context, p auth.Principal) ([]webui.AdminRunnerRow, error) {
+			rows, err := th.ListRunners(ctx, p)
+			if err != nil {
+				return nil, err
+			}
+			out := make([]webui.AdminRunnerRow, 0, len(rows))
+			for _, r := range rows {
+				row := webui.AdminRunnerRow{
+					ID: r.ID, Name: r.Name, Labels: strings.Join(r.Labels, ", "),
+					Capacity: strconv.Itoa(r.Capacity), State: r.State,
+					AllowAll: r.AllowAll, Repos: r.Repos, ForkRuns: r.AllowForkRuns,
+				}
+				if r.LastSeenAt != nil {
+					row.LastSeen = *r.LastSeenAt
+				}
+				if r.CurrentJob != nil {
+					row.CurrentJob = r.CurrentJob.Repo + " · " + r.CurrentJob.RunID + " · " + r.CurrentJob.JobID
+				}
+				out = append(out, row)
+			}
+			return out, nil
+		}
+		// The mint carries the ADMIN-set repository policy (docs/threads.md
+		// §8.7) and a registered runner's policy is edited in place (SetPolicy,
+		// audited as runner_policy): the page's tenancy seam, bound beside the
+		// fleet read so the page and the JSON lane share one service call and
+		// one audit trail.
+		webui.BindAdminRunnerTenancy(webui.AdminRunnerTenancyDeps{
+			Mint: func(ctx context.Context, in threads.MintInput, p auth.Principal) (string, string, string, error) {
+				tok, err := th.MintRegistrationToken(ctx, p, in)
+				if err != nil {
+					return "", "", "", err
+				}
+				return tok.ID, tok.Token, tok.ExpiresAt, nil
+			},
+			SetPolicy: th.SetRunnerPolicy,
+		})
+		d.RevokeRunner = func(ctx context.Context, id string, p auth.Principal) error {
+			return th.RevokeRunner(ctx, id, p)
+		}
+	}
+	if srv != nil {
+		d.Health = func() webui.AdminHealthView {
+			f := srv.HealthFacts()
+			return webui.AdminHealthView{
+				State: f.State, Label: adminHealthLabel(f.State), Summary: adminHealthSummary(f.State),
+				Warnings: adminHealthWarnings(f.Warnings), PrewarmPending: f.PrewarmPending,
+			}
+		}
+	}
+	if maint != nil {
+		d.Maintain = func() (webui.AdminMaintainView, bool) {
+			snap := maint.Metrics()
+			v := webui.AdminMaintainView{
+				Passes:               snap.Passes,
+				LastPassSeconds:      snap.LastPassNanos / int64(time.Second),
+				CheckpointLagEntries: snap.CheckpointLagEntries,
+				CheckpointAgeSeconds: snap.CheckpointAgeSeconds,
+				MissingObjects:       snap.MissingObjects,
+				RepairObjects:        snap.RepairObjects,
+				FollowRefs:           snap.FollowRefs,
+			}
+			// The canonical kinds in the maintainer's own order, so a kind with
+			// no runs yet reads "no data yet" instead of vanishing (the
+			// Maintenance page's task-kind table); a future kind is appended,
+			// never dropped.
+			v.Units = adminUnitRows(snap)
+			return v, true
+		}
+	}
+	// The Maintenance page's packages-GC control (PLAN-ADMIN §8.6): the pass
+	// is the existing packages-gc task at instance scope, on the SAME task
+	// table the per-repo op lane uses. The audit sink is the host family's one
+	// writer (RecordAdmin), so a trigger writes `packages_gc` next to the
+	// config save's record.
+	if pkgs != nil && reg != nil {
+		tasks := reg.Tasks()
+		if pkgs.Audit == nil && mod != nil {
+			pkgs.Audit = func(ctx context.Context, actor, action, target, detail string) error {
+				return mod.RecordAdmin(ctx, actor, action, target, detail)
+			}
+		}
+		d.PackagesGCStart = func(ctx context.Context, actor string, dryRun bool) (*webui.AdminGCTask, error) {
+			task, err := pkgs.StartGC(ctx, tasks, actor, dryRun)
+			if err != nil {
+				return nil, err
+			}
+			return &webui.AdminGCTask{
+				ID: task.ID, Kind: task.Kind, DryRun: task.DryRun, Joined: task.Joined,
+				Stream: "/admin/maintenance/gc/stream?id=" + url.QueryEscape(task.ID),
+			}, nil
+		}
+		d.PackagesGCStatus = func(ctx context.Context) (packages.GCStatus, error) {
+			return pkgs.GCStatus(ctx, tasks)
+		}
+		d.PackagesGCAttach = func(ctx context.Context, id string) (api.TaskStream, bool, error) {
+			// Attach is keyed on the record's id; the lane is irrelevant once
+			// the id is known (the transfer task's own attach documents why).
+			return (&opsTasks{reg: reg}).Attach(ctx, git.RepoId{}, id)
+		}
+		// The registry footprint (docs/features/14 §5): one GET of the index
+		// the maintainer pass writes — never a bucket walk on a page.
+		d.PackagesUsage = func(ctx context.Context) (packages.InstanceUsage, error) {
+			u, err := pkgs.InstanceUsage(ctx)
+			if err != nil {
+				return packages.InstanceUsage{}, err
+			}
+			return *u, nil
+		}
+	}
+	if apiEnv != nil && apiEnv.Repos != nil {
+		repos := apiEnv.Repos
+		d.Repos = func(ctx context.Context) (int, error) {
+			counts, err := repos.OwnerRepoCounts(ctx)
+			if err != nil {
+				return 0, err
+			}
+			total := 0
+			for _, n := range counts {
+				total += n
+			}
+			return total, nil
+		}
+	}
+	webui.BindAdmin(d)
+}
+
+// adminRestartFn is the restart seam behind POST /admin/restart: a graceful
+// self-SIGTERM. The process's existing two-phase drain takes it from there, and
+// the supervisor (a container restart policy, a Swarm service task, or systemd
+// Restart=) starts a fresh process. There is no in-process reload; with
+// restart: no the instance stays down, and the page says so.
+//
+// Tests never call this: they inject webui.AdminDeps.Restart with a fake, so no
+// test signals its own process.
+func adminRestartFn() func() {
+	return func() {
+		if err := syscall.Kill(os.Getpid(), syscall.SIGTERM); err != nil {
+			slog.Error("admin restart: self-SIGTERM failed", "err", err)
+		}
+	}
+}
+
+// collabModSvc is the nil-safe accessor the admin wiring passes (a restricted
+// boot has no collaboration wiring at all).
+func collabModSvc(c *collabWiring) *moderation.Service {
+	if c == nil {
+		return nil
+	}
+	return c.modSvc
+}
+
+// collabThreadsSvc is the nil-safe Threads service for the Administration area.
+func collabThreadsSvc(c *collabWiring) *threads.Service {
+	if c == nil {
+		return nil
+	}
+	return c.threadsSvc
+}
+
+// wireAdminDirectory binds /admin/directory's seam (docs/PLAN-ADMIN.md §3.7):
+// the same identity reads the user-orgs rail and the create gate use, plus the
+// one audited deactivate/reactivate transition. It runs after wireAdminPages
+// because BindDirectory fills the deps BindAdmin installed; a restricted boot
+// (no collaboration wiring) binds nothing and the page says so.
+func wireAdminDirectory(c *collabWiring) {
+	if c == nil || c.ident == nil {
+		return
+	}
+	svc := c.ident
+	webui.BindDirectory(webui.DirectorySeam{
+		Users:    svc.ListDirectoryUsers,
+		Orgs:     svc.ListDirectoryOrgs,
+		OrgRoles: svc.OrgRolesFor,
+		SetState: func(ctx context.Context, username string, disabled bool, reason string) error {
+			_, err := svc.SetUserDisabled(ctx, username, disabled, reason)
+			return err
+		},
+	})
+}
+
+// adminUnitRows projects one metrics snapshot onto the Maintenance page's task
+// kind table: the canonical kinds in the maintainer's own order (a kind with no
+// runs is an empty value → "no data yet"), then any kind the snapshot has that
+// this list does not know yet (appended, never dropped). follow is the separate
+// loop, so its counts are aggregated from FollowRoundsByOutcome ("<repo>
+// <outcome>" → count).
+func adminUnitRows(snap maintain.MetricsSnapshot) []webui.SettingsKV {
+	rows := make([]webui.SettingsKV, 0, len(snap.Units)+1)
+	seen := make(map[string]bool, len(snap.Units))
+	add := func(kind string, outcomes map[maintain.Outcome]int64) {
+		seen[kind] = true
+		rows = append(rows, webui.SettingsKV{Key: kind, Value: outcomeSummary(outcomes)})
+	}
+	for _, kind := range []string{
+		maintain.KindCheckpoint, maintain.KindRepair, maintain.KindBundle,
+		maintain.KindCompact, maintain.KindRevIndex, maintain.KindFsck,
+	} {
+		add(kind, snap.Units[kind])
+	}
+	follow := map[maintain.Outcome]int64{}
+	for key, n := range snap.FollowRoundsByOutcome {
+		if i := strings.LastIndexByte(key, ' '); i >= 0 {
+			follow[maintain.Outcome(key[i+1:])] += n
+		}
+	}
+	add(maintain.KindFollow, follow)
+	extra := make([]string, 0, len(snap.Units))
+	for kind := range snap.Units {
+		if !seen[kind] {
+			extra = append(extra, kind)
+		}
+	}
+	sort.Strings(extra)
+	for _, kind := range extra {
+		add(kind, snap.Units[kind])
+	}
+	return rows
+}
+
+// outcomeSummary renders one kind's outcome counts deterministically
+// ("error 1 · ok 12"); an empty map is "no data yet" (the template's empty
+// state), never a fake zero row.
+func outcomeSummary(outcomes map[maintain.Outcome]int64) string {
+	if len(outcomes) == 0 {
+		return ""
+	}
+	parts := make([]string, 0, len(outcomes))
+	for outcome, n := range outcomes {
+		parts = append(parts, string(outcome)+" "+strconv.FormatInt(n, 10))
+	}
+	sort.Strings(parts)
+	return strings.Join(parts, " · ")
+}
+
+// adminHealthLabel is the chip text for a readiness state: the machine code
+// never renders bare in the UI (state carries its words).
+func adminHealthLabel(state string) string {
+	switch state {
+	case "ready":
+		return "ready"
+	case "warming":
+		return "warming"
+	case "draining":
+		return "draining"
+	case "setup_required":
+		return "not ready"
+	}
+	return state
+}
+
+// adminHealthSummary is the one-line readiness text for the Overview.
+func adminHealthSummary(state string) string {
+	switch state {
+	case "ready":
+		return "The instance answers and is accepting work."
+	case "warming":
+		return "Warming: prewarm is still running; /readyz answers 503 until it finishes."
+	case "draining":
+		return "Draining: in-flight work is finishing; /readyz answers 503."
+	case "setup_required":
+		return "Restricted: the configuration is invalid, so only the Administration area and the health endpoints answer."
+	}
+	return state
+}
+
+// adminHealthWarnings renders the machine warning codes as sentences (state is
+// never a bare code in the UI).
+func adminHealthWarnings(codes []string) []string {
+	out := make([]string, 0, len(codes))
+	for _, c := range codes {
+		switch c {
+		case "config_defaults":
+			out = append(out, "No config file: this instance is running on first-run defaults.")
+		default:
+			out = append(out, c)
+		}
+	}
+	return out
+}
+
+// adminAccessFn mirrors internal/server's setupAccess rule (§3.4) without the
+// write-a-response half: open ONLY in the restricted boot (no config / invalid
+// config), else an authenticated admin principal is required. Admin is
+// Principal.Admin — the OIDC group predicate derived at the credential
+// boundary. No env token exists.
+func adminAccessFn(cfg *config.Config, boot server.BootState) func(*http.Request, auth.Principal) *auth.AuthError {
 	return func(r *http.Request, p auth.Principal) *auth.AuthError {
-		open := boot.Mode == "defaults" || boot.InSetupOnly() ||
-			(cfg != nil && cfg.Server.Auth.Mode == "none")
-		if open {
+		if boot.InSetupOnly() {
 			return nil
 		}
 		if p.Anonymous {
-			return &auth.AuthError{Kind: auth.ErrUnauthorized, Why: "authentication required for setup"}
+			return &auth.AuthError{Kind: auth.ErrUnauthorized, Why: "authentication required"}
 		}
 		if !p.Admin {
-			return &auth.AuthError{Kind: auth.ErrForbidden, Why: "setup requires an admin principal (an OIDC admin group, admin email, or admin domain)"}
+			return &auth.AuthError{Kind: auth.ErrForbidden, Why: "administration requires a signed-in member of the configured OIDC admin group (server.auth.admin_groups)"}
 		}
 		return nil
 	}
 }
 
-// setupViewFn builds the schema view from the SAME functions GET
+// adminConfigViewFn builds the schema view from the SAME functions GET
 // /api/v1/setup serves (setup.BuildSchema over the running config + the boot
 // state), flattened to the display strings the form posts back.
-func setupViewFn(cfg *config.Config, boot server.BootState) func(context.Context) (*webui.SettingsSetupView, error) {
-	return func(context.Context) (*webui.SettingsSetupView, error) {
-		fileState := "absent"
-		switch {
-		case boot.Mode == "normal":
-			fileState = "valid"
-		case boot.InSetupOnly():
-			fileState = "invalid"
+func adminConfigViewFn(cfg *config.Config, boot server.BootState) func(context.Context) (*webui.AdminConfigView, error) {
+	return func(context.Context) (*webui.AdminConfigView, error) {
+		fileState := boot.FileState
+		if fileState == "" {
+			if boot.InSetupOnly() {
+				fileState = "invalid"
+			} else {
+				fileState = "valid"
+			}
 		}
-		view := &webui.SettingsSetupView{FileState: fileState}
+		view := &webui.AdminConfigView{FileState: fileState,
+			FirstRun: boot.InSetupOnly() && fileState == "absent"}
+		// The TOML disclosure shows the SAVED configuration: the canonical
+		// document a zero-edit Save writes (MarshalTOML over the file-visible
+		// base — the same base the save path coerces on top of). It never
+		// reflects unsaved form edits, and the page labels that.
+		dataDir := ""
 		if cfg != nil {
-			view.AuthMode = cfg.Server.Auth.Mode
+			dataDir = cfg.DataDir
+			view.AuthMode = "oidc"
 			view.PublicURL = cfg.Server.PublicURL
 			view.Issuer = cfg.Server.Auth.Issuer
 			view.ClientID = cfg.Server.Auth.OAuthClientID
 		}
+		if fileState != "invalid" {
+			if body, err := setup.TOMLView(setup.BaseConfig(dataDir, boot.ConfigPaths)); err == nil {
+				view.TOML = string(body)
+			}
+		}
 		for _, e := range boot.Errors {
-			view.Errors = append(view.Errors, webui.SettingsSetupError{Message: e})
+			view.Errors = append(view.Errors, webui.AdminError{Message: e})
 		}
 		effective := cfg
 		if effective == nil {
@@ -565,18 +967,18 @@ func setupViewFn(cfg *config.Config, boot server.BootState) func(context.Context
 		}
 		fieldErrs := setupBootFieldErrors(boot.Errors, keys)
 		for _, g := range schema {
-			sec := webui.SettingsSetupSection{Section: g.Section}
+			sec := webui.AdminConfigSection{Section: g.Section}
 			for _, k := range g.Keys {
 				ftype := k.Type
 				if k.DisplayType != "" {
 					ftype = k.DisplayType
 				}
 				// Secret rows carry the raw value here; the page layer masks it
-				// before rendering (webui.settingsPrepareSetup), so the real
+				// before rendering (webui.adminPrepareConfig), so the real
 				// value never reaches a template. Save is overwrite-only:
 				// setup.ParseValues keeps the stored value when the mask or an
 				// empty field comes back.
-				f := webui.SettingsSetupField{
+				f := webui.AdminConfigField{
 					Key:     k.Key,
 					Type:    ftype,
 					Value:   setup.DisplayValue(k),
@@ -605,23 +1007,23 @@ func setupViewFn(cfg *config.Config, boot server.BootState) func(context.Context
 // validator writes key names into its messages ("server.auth.session_secret
 // must be at least 32 bytes"); matching is by whole key (a char before/after
 // cannot continue the identifier), and one message may name several keys.
-func setupBootFieldErrors(msgs, keys []string) map[string][]webui.SettingsSetupError {
-	out := map[string][]webui.SettingsSetupError{}
+func setupBootFieldErrors(msgs, keys []string) map[string][]webui.AdminError {
+	out := map[string][]webui.AdminError{}
 	for _, msg := range msgs {
 		for _, key := range keys {
 			if !setup.MessageNamesKey(msg, key) {
 				continue
 			}
-			out[key] = append(out[key], webui.SettingsSetupError{Key: key, Message: msg})
+			out[key] = append(out[key], webui.AdminError{Key: key, Message: msg})
 		}
 	}
 	return out
 }
 
-// setupValidateFn is the API's POST /api/v1/setup/test: parse over the
+// adminValidateFn is the API's POST /api/v1/setup/test: parse over the
 // file-visible base, run the full validator, write nothing.
-func setupValidateFn(cfg *config.Config, boot server.BootState) func(context.Context, map[string]string) ([]webui.SettingsSetupError, error) {
-	return func(_ context.Context, values map[string]string) ([]webui.SettingsSetupError, error) {
+func adminValidateFn(cfg *config.Config, boot server.BootState) func(context.Context, map[string]string) ([]webui.AdminError, error) {
+	return func(_ context.Context, values map[string]string) ([]webui.AdminError, error) {
 		c, err := setupCandidate(cfg, boot, values)
 		if err != nil {
 			return setupParseErrors(err), nil
@@ -630,26 +1032,33 @@ func setupValidateFn(cfg *config.Config, boot server.BootState) func(context.Con
 	}
 }
 
-// setupSaveFn is the API's PUT /api/v1/setup: validate THEN atomically write
+// adminSaveFn is the API's PUT /api/v1/setup: validate THEN atomically write
 // <data-dir>/spindle.toml and diff against the running effective config.
-func setupSaveFn(cfg *config.Config, boot server.BootState) func(context.Context, map[string]string) (webui.SettingsSetupResult, []webui.SettingsSetupError, error) {
-	return func(_ context.Context, values map[string]string) (webui.SettingsSetupResult, []webui.SettingsSetupError, error) {
+func adminSaveFn(cfg *config.Config, boot server.BootState) func(context.Context, map[string]string) (webui.AdminSaveResult, []webui.AdminError, error) {
+	return func(_ context.Context, values map[string]string) (webui.AdminSaveResult, []webui.AdminError, error) {
 		c, err := setupCandidate(cfg, boot, values)
 		if err != nil {
-			return webui.SettingsSetupResult{}, setupParseErrors(err), nil
+			return webui.AdminSaveResult{}, setupParseErrors(err), nil
 		}
-		if errs := setupErrors(setup.Validate(c)); len(errs) > 0 {
-			return webui.SettingsSetupResult{}, errs, nil
+		// The page masks every secret, and a masked/empty field keeps the
+		// file's value. A secret supplied by the environment or a flag is not
+		// in that file, so validating the file candidate alone would refuse the
+		// save and demand an unnecessary rotation (2026-11-22). Validate and
+		// diff a copy that carries the effective secret; write the file
+		// candidate, so the env-only secret is not persisted.
+		compare := setup.FillEffectiveSecrets(c, cfg)
+		if errs := setupErrors(setup.Validate(compare)); len(errs) > 0 {
+			return webui.AdminSaveResult{}, errs, nil
 		}
 		dataDir, effective := "", config.Defaults()
 		if cfg != nil {
 			dataDir, effective = cfg.DataDir, cfg
 		}
-		restart, backup, serr := setup.Save(dataDir, c, effective)
+		restart, backup, serr := setup.SaveWithComparison(dataDir, c, compare, effective)
 		if serr != nil {
-			return webui.SettingsSetupResult{}, nil, serr
+			return webui.AdminSaveResult{}, nil, serr
 		}
-		return webui.SettingsSetupResult{Saved: true, RequiresRestart: restart, Backup: backup}, nil, nil
+		return webui.AdminSaveResult{Saved: true, RequiresRestart: restart, Backup: backup}, nil, nil
 	}
 }
 
@@ -670,10 +1079,10 @@ func setupCandidate(cfg *config.Config, boot server.BootState, values map[string
 }
 
 // setupErrors maps setup.Error onto the page's error row.
-func setupErrors(in []setup.Error) []webui.SettingsSetupError {
-	out := make([]webui.SettingsSetupError, 0, len(in))
+func setupErrors(in []setup.Error) []webui.AdminError {
+	out := make([]webui.AdminError, 0, len(in))
 	for _, e := range in {
-		out = append(out, webui.SettingsSetupError{Key: e.Key, Message: e.Message})
+		out = append(out, webui.AdminError{Key: e.Key, Message: e.Message})
 	}
 	return out
 }
@@ -682,19 +1091,19 @@ func setupErrors(in []setup.Error) []webui.SettingsSetupError {
 // Coerce reports a keyed setup.Error (the same structure config.Validate
 // errors use), so a rejected value marks its row and opens its Advanced group;
 // only a genuinely keyless failure stays in the banner.
-func setupParseErrors(err error) []webui.SettingsSetupError {
-	return []webui.SettingsSetupError{{Key: setup.KeyOf(err), Message: err.Error()}}
+func setupParseErrors(err error) []webui.AdminError {
+	return []webui.AdminError{{Key: setup.KeyOf(err), Message: err.Error()}}
 }
 
-// setupAuthTestFn is the auth card's discovery probe (setup.ProbeAuth — the
+// adminAuthTestFn is the auth card's discovery probe (setup.ProbeAuth — the
 // same call POST /api/v1/setup/auth/test makes).
-func setupAuthTestFn() func(context.Context, string, string, string) (*webui.SettingsSetupAuthTest, []webui.SettingsSetupError) {
-	return func(_ context.Context, issuer, clientID, redirectURI string) (*webui.SettingsSetupAuthTest, []webui.SettingsSetupError) {
+func adminAuthTestFn() func(context.Context, string, string, string) (*webui.AdminAuthTest, []webui.AdminError) {
+	return func(_ context.Context, issuer, clientID, redirectURI string) (*webui.AdminAuthTest, []webui.AdminError) {
 		probe, errs := setup.ProbeAuth(issuer, clientID, redirectURI)
 		if len(errs) > 0 {
 			return nil, setupErrors(errs)
 		}
-		return &webui.SettingsSetupAuthTest{
+		return &webui.AdminAuthTest{
 			Issuer:                probe.Issuer,
 			AuthorizationEndpoint: probe.AuthorizationEndpoint,
 			TokenEndpoint:         probe.TokenEndpoint,

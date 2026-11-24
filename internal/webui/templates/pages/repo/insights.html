@@ -1,0 +1,268 @@
+{{define "content"}}
+<div class="repo-shell">
+  {{template "repo_header" .Data.Repo}}
+  {{template "repo_tabs" .Data.Repo}}
+  {{template "repo_degraded" .Data.Repo}}
+
+  {{if .Data.Guide}}
+  {{template "repo_guide" .Data.Guide}}
+  {{else}}
+  <div class="min-w-0">
+    <div class="mb-3 flex flex-wrap items-start justify-between gap-3">
+      <div class="min-w-0">
+        <h2 class="text-lg font-semibold">Insights</h2>
+        <p class="muted mt-1 max-w-2xl text-sm">How this repository is doing, computed from git and the bucket. Every window and bucket is UTC; a page read never runs git.</p>
+      </div>
+      {{if .Data.CanRefresh}}
+      <form class="shrink-0" method="post" action="{{.Data.RefreshAction}}">
+        <input type="hidden" name="window" value="{{.Data.Window}}">
+        <button class="btn whitespace-nowrap" type="submit">Refresh now</button>
+      </form>
+      {{end}}
+    </div>
+
+    {{if .Data.Flash}}<p class="card mb-3 border-l-2 border-l-[var(--pd-ok)] p-3 text-sm" role="status">{{.Data.Flash}}</p>{{end}}
+    {{if .Data.Err}}<p class="card mb-3 border-l-2 border-l-[var(--pd-danger)] p-3 text-sm" role="alert">{{.Data.Err}}</p>{{end}}
+
+    {{if not .Data.Projection}}
+    <section class="card p-4" aria-label="Insights not computed">
+      <h3 class="card-header">Not computed yet</h3>
+      <p class="mt-2 max-w-2xl text-sm">This repository has no insights projection yet. The maintainer computes one in the background; a repository writer can start a refresh from this page, then reload when the task finishes.</p>
+      <p class="muted mt-2 text-[11px]">The projection is a cached object in the bucket. Reading this page never walks history; the refresh is one bounded git scan.</p>
+    </section>
+    {{else}}
+
+    {{if .Data.Stale}}
+    <p class="card mb-3 border-l-2 border-l-[var(--pd-warn)] p-3 text-sm" role="status">
+      <span class="chip chip-warn">stale</span>
+      {{.Data.StaleText}}
+      {{if .Data.CanRefresh}}Refresh to replace it with a snapshot of the current head.{{end}}
+    </p>
+    {{end}}
+
+    <nav class="mb-3 flex flex-wrap items-center gap-2" aria-label="Insights period">
+      <span class="eyebrow">window</span>
+      {{range .Data.Windows}}
+      <a class="btn{{if .Active}} btn-active{{end}}" href="?window={{.Days}}" {{if .Active}}aria-current="page"{{end}}>{{.Label}}</a>
+      {{end}}
+    </nav>
+
+    <section class="card mb-3 p-4" aria-label="Repository pulse">
+      <div class="mb-3 flex flex-wrap items-baseline justify-between gap-2">
+        <h3 class="text-base font-semibold">Pulse</h3>
+        <span class="mono text-[11px] text-[var(--pd-muted)]">last {{.Data.Window}} days · UTC · {{.Data.Block.Bucket}} buckets</span>
+      </div>
+      <dl class="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-6">
+        <div><dt class="eyebrow">commits</dt><dd class="mono text-xl tabular-nums">{{.Data.Block.Commits}}</dd></div>
+        <div><dt class="eyebrow">contributors</dt><dd class="mono text-xl tabular-nums">{{.Data.Block.ContributorsTotal}}</dd></div>
+        <div><dt class="eyebrow">lines added</dt><dd class="mono text-xl tabular-nums text-[var(--pd-ok)]">{{if .Data.Block.Additions}}+{{.Data.Block.Additions}}{{else}}0{{end}}</dd></div>
+        <div><dt class="eyebrow">lines removed</dt><dd class="mono text-xl tabular-nums text-[var(--pd-danger)]">{{if .Data.Block.Deletions}}−{{.Data.Block.Deletions}}{{else}}0{{end}}</dd></div>
+        <div><dt class="eyebrow">PRs opened</dt><dd class="mono text-xl tabular-nums">{{.Data.Block.PRsOpened}}</dd></div>
+        <div><dt class="eyebrow">PRs merged</dt><dd class="mono text-xl tabular-nums">{{.Data.Block.PRsMerged}}</dd></div>
+      </dl>
+      <p class="muted mt-3 text-[11px]">Issues opened <span class="mono">{{.Data.Block.IssuesOpened}}</span> · issues closed <span class="mono">{{.Data.Block.IssuesClosed}}</span> in the same window.</p>
+
+      {{if .Data.Block.Commits}}
+      <figure class="mt-3">
+        <figcaption class="text-sm text-[var(--pd-text-2)]">{{.Data.PulseSummary}}</figcaption>
+        <div class="mt-2 flex h-24 gap-0.5 border-b border-[var(--pd-line-strong)]" aria-hidden="true">
+          {{range .Data.Bars}}
+          <span class="relative h-full min-w-0 flex-1">
+            <span data-bar="commit" class="absolute inset-x-0 bottom-0 bg-[var(--pd-text-2)]" style="height: {{.CommitPct}}%"></span>
+          </span>
+          {{end}}
+        </div>
+        <div class="mono mt-1 flex flex-wrap items-baseline justify-between gap-x-3 text-[10px] text-[var(--pd-muted)]">
+          <span>{{.Data.PeriodFirst}} → {{.Data.PeriodLast}} · UTC</span>
+          <span>{{.Data.PulseActive}} of {{.Data.PeriodCount}} {{.Data.BucketNoun}}s with commits</span>
+        </div>
+      </figure>
+      <div class="relative mt-3 overflow-x-auto">
+        <table class="data-table" aria-label="Periods with commits per {{.Data.Block.Bucket}}">
+          <thead>
+            <tr><th scope="col">period</th><th scope="col" class="text-right">commits</th></tr>
+          </thead>
+          <tbody>
+            {{range .Data.Bars}}{{if .Commits}}
+            <tr data-bucket-row="active">
+              <td class="whitespace-nowrap">{{.Label}}</td>
+              <td class="text-right"><span class="mono tabular-nums">{{.Commits}}</span></td>
+            </tr>
+            {{end}}{{end}}
+          </tbody>
+        </table>
+      </div>
+      <details class="mt-2">
+        <summary class="cursor-pointer select-none py-1 text-xs text-[var(--pd-muted)] hover:text-[var(--pd-text)]">All {{.Data.PeriodCount}} periods (including empty ones)</summary>
+        <div class="relative mt-1 overflow-x-auto">
+          <table class="data-table" aria-label="Commits per {{.Data.Block.Bucket}}">
+            <thead>
+              <tr><th scope="col">period</th><th scope="col" class="text-right">commits</th></tr>
+            </thead>
+            <tbody>
+              {{range .Data.Bars}}
+              <tr data-bucket-row="all">
+                <td class="whitespace-nowrap">{{.Label}}</td>
+                <td class="text-right"><span class="mono tabular-nums">{{.Commits}}</span></td>
+              </tr>
+              {{end}}
+            </tbody>
+          </table>
+        </div>
+      </details>
+      {{else}}
+      <p class="mt-3 border-t border-[var(--pd-line)] pt-3 text-sm text-[var(--pd-muted)]">No commits in this window.</p>
+      {{end}}
+    </section>
+
+    <div class="mb-3 grid gap-3 lg:grid-cols-2">
+      <section class="card p-4" aria-label="Code frequency">
+        <div class="mb-2 flex flex-wrap items-baseline justify-between gap-2">
+          <h3 class="text-base font-semibold">Code frequency</h3>
+          <span class="muted text-[11px]"><span class="text-[var(--pd-ok)]">added</span> / <span class="text-[var(--pd-danger)]">removed</span></span>
+        </div>
+        {{if or .Data.Block.Additions .Data.Block.Deletions}}
+        <figure class="mt-1">
+          <figcaption class="text-sm text-[var(--pd-text-2)]">{{.Data.FreqSummary}}</figcaption>
+          <div class="mt-2 flex h-24 gap-0.5 border-b border-[var(--pd-line-strong)]" aria-hidden="true">
+            {{range .Data.Bars}}
+            <span class="relative h-full min-w-0 flex-1">
+              {{if .Additions}}<span data-bar="additions" class="absolute inset-x-0 bottom-0 bg-[var(--pd-ok)]" style="height: {{.AddPct}}%"></span>{{end}}
+              {{if .Deletions}}<span data-bar="deletions" class="absolute inset-x-0 bg-[var(--pd-danger)]" style="bottom: {{.DelBottom}}%; height: {{.DelPct}}%"></span>{{end}}
+            </span>
+            {{end}}
+          </div>
+          <div class="mono mt-1 flex flex-wrap items-baseline justify-between gap-x-3 text-[10px] text-[var(--pd-muted)]">
+            <span>{{.Data.PeriodFirst}} → {{.Data.PeriodLast}} · UTC</span>
+            <span>{{.Data.FreqActive}} of {{.Data.PeriodCount}} {{.Data.BucketNoun}}s with changes</span>
+          </div>
+        </figure>
+        <div class="relative mt-3 overflow-x-auto">
+          <table class="data-table" aria-label="Periods with line changes per {{.Data.Block.Bucket}}">
+            <thead>
+              <tr><th scope="col">period</th><th scope="col" class="text-right">added</th><th scope="col" class="text-right">removed</th></tr>
+            </thead>
+            <tbody>
+              {{range .Data.Bars}}{{if or .Additions .Deletions}}
+              <tr data-bucket-row="active">
+                <td class="whitespace-nowrap">{{.Label}}</td>
+                <td class="text-right"><span class="mono tabular-nums text-[var(--pd-ok)]">{{if .Additions}}+{{.Additions}}{{else}}0{{end}}</span></td>
+                <td class="text-right"><span class="mono tabular-nums text-[var(--pd-danger)]">{{if .Deletions}}−{{.Deletions}}{{else}}0{{end}}</span></td>
+              </tr>
+              {{end}}{{end}}
+            </tbody>
+          </table>
+        </div>
+        <details class="mt-2">
+          <summary class="cursor-pointer select-none py-1 text-xs text-[var(--pd-muted)] hover:text-[var(--pd-text)]">All {{.Data.PeriodCount}} periods (including empty ones)</summary>
+          <div class="relative mt-1 overflow-x-auto">
+            <table class="data-table" aria-label="Added and removed lines per {{.Data.Block.Bucket}}">
+              <thead>
+                <tr><th scope="col">period</th><th scope="col" class="text-right">added</th><th scope="col" class="text-right">removed</th></tr>
+              </thead>
+              <tbody>
+                {{range .Data.Bars}}
+                <tr data-bucket-row="all">
+                  <td class="whitespace-nowrap">{{.Label}}</td>
+                  <td class="text-right"><span class="mono tabular-nums text-[var(--pd-ok)]">{{if .Additions}}+{{.Additions}}{{else}}0{{end}}</span></td>
+                  <td class="text-right"><span class="mono tabular-nums text-[var(--pd-danger)]">{{if .Deletions}}−{{.Deletions}}{{else}}0{{end}}</span></td>
+                </tr>
+                {{end}}
+              </tbody>
+            </table>
+          </div>
+        </details>
+        {{else if .Data.Block.Commits}}
+        <p class="text-sm text-[var(--pd-muted)]">Commits in this window carry no line changes (merge-only or binary changes).</p>
+        {{else}}
+        <p class="text-sm text-[var(--pd-muted)]">No code frequency data in this window.</p>
+        {{end}}
+      </section>
+
+      <section class="card p-4" aria-label="Pull requests and issues">
+        <h3 class="mb-2 text-base font-semibold">Pull requests and issues</h3>
+        {{if or .Data.Block.PRsOpened .Data.Block.PRsMerged .Data.Block.IssuesOpened .Data.Block.IssuesClosed}}
+        <dl class="kv">
+          <div class="kv-row"><dt class="kv-key">pull requests opened</dt><dd class="kv-val">{{.Data.Block.PRsOpened}}</dd></div>
+          <div class="kv-row"><dt class="kv-key">pull requests merged</dt><dd class="kv-val">{{.Data.Block.PRsMerged}}</dd></div>
+          <div class="kv-row"><dt class="kv-key">issues opened</dt><dd class="kv-val">{{.Data.Block.IssuesOpened}}</dd></div>
+          <div class="kv-row"><dt class="kv-key">issues closed</dt><dd class="kv-val">{{.Data.Block.IssuesClosed}}</dd></div>
+        </dl>
+        {{else}}
+        <p class="text-sm text-[var(--pd-muted)]">No pull requests or issues in this window.</p>
+        {{end}}
+        {{if .Data.CollabNote}}<p class="muted mt-2 text-[11px]">{{.Data.CollabNote}}</p>{{end}}
+      </section>
+    </div>
+
+    <section class="card mb-3 p-4" aria-label="Contributors">
+      <div class="mb-2 flex flex-wrap items-baseline justify-between gap-2">
+        <h3 class="text-base font-semibold">Contributors</h3>
+        <span class="mono text-[11px] text-[var(--pd-muted)]">{{len .Data.Contributors}} shown{{if .Data.Block.ContributorsCapped}} of {{.Data.Block.ContributorsTotal}} (top {{len .Data.Contributors}} by commits){{else}} · {{.Data.Block.ContributorsTotal}} total{{end}}</span>
+      </div>
+      {{if .Data.Contributors}}
+      <div class="relative overflow-x-auto">
+        <table class="data-table" aria-label="Commit authors in this window">
+          <thead>
+            <tr><th scope="col">author</th><th scope="col" class="text-right">commits</th><th scope="col">last active</th></tr>
+          </thead>
+          <tbody>
+            {{range .Data.Contributors}}
+            <tr>
+              <td>
+                {{if .Name}}{{.Name}}{{else}}<span class="muted italic">(no name)</span>{{end}}
+                {{if .Email}}<span class="mono block text-[11px] text-[var(--pd-muted)] break-all">{{.Email}}</span>{{end}}
+              </td>
+              <td class="text-right"><span class="mono tabular-nums">{{.Commits}}</span></td>
+              <td class="whitespace-nowrap"><time class="mono text-[11px]" datetime="{{.LastActive}}" title="{{.LastActive}}">{{with rel .LastActive}}{{.}}{{else}}—{{end}}</time></td>
+            </tr>
+            {{end}}
+          </tbody>
+        </table>
+      </div>
+      {{if .Data.Block.ContributorsCapped}}<p class="muted mt-2 text-[11px]">The list is capped at the top {{len .Data.Contributors}} authors by commit count; the total above counts every distinct author in the window.</p>{{end}}
+      {{else}}
+      <p class="text-sm text-[var(--pd-muted)]">No commit authors in this window.</p>
+      {{end}}
+    </section>
+
+    <section class="card mb-3 p-4" aria-label="Repository facts">
+      <h3 class="mb-2 text-base font-semibold">Facts the bucket knows</h3>
+      <div class="grid gap-3 sm:grid-cols-2">
+        <dl class="kv">
+          <div class="kv-row"><dt class="kv-key">stars</dt><dd class="kv-val">{{if .Data.Projection.Facts.Social}}{{.Data.Projection.Facts.Stars}}{{else}}—{{end}}</dd></div>
+          <div class="kv-row"><dt class="kv-key">watchers</dt><dd class="kv-val">{{if .Data.Projection.Facts.Social}}{{.Data.Projection.Facts.Watchers}}{{else}}—{{end}}</dd></div>
+          <div class="kv-row"><dt class="kv-key">forks</dt><dd class="kv-val">{{if .Data.Projection.Facts.Social}}{{.Data.Projection.Facts.Forks}}{{else}}—{{end}}</dd></div>
+        </dl>
+        <dl class="kv">
+          <div class="kv-row"><dt class="kv-key">releases</dt><dd class="kv-val">{{if .Data.Projection.Facts.ReleasesKnown}}{{.Data.Projection.Facts.Releases}}{{if .Data.Projection.Facts.ReleasesCapped}}+{{end}}{{else}}—{{end}}</dd></div>
+          <div class="kv-row"><dt class="kv-key">package tags</dt><dd class="kv-val">{{if .Data.Projection.Facts.PackagesKnown}}{{.Data.Projection.Facts.Packages}}{{if .Data.Projection.Facts.PackagesCapped}}+{{end}}{{else}}—{{end}}</dd></div>
+          <div class="kv-row"><dt class="kv-key">Threads runs</dt><dd class="kv-val">{{if .Data.Projection.Facts.ThreadsRunsKnown}}{{.Data.Projection.Facts.ThreadsRuns}}{{if .Data.Projection.Facts.ThreadsRunsCapped}}+{{end}}{{else}}—{{end}}</dd></div>
+        </dl>
+      </div>
+      <p class="muted mt-2 text-[11px]">A <span class="mono">+</span> means the count stopped at the read cap; the true number is at least that. A dash means the read failed — never a fabricated zero.</p>
+    </section>
+
+    <section class="card mb-3 border-l-2 border-l-[var(--pd-line-strong)] p-4" aria-label="Traffic">
+      <h3 class="mb-2 text-base font-semibold">Traffic is not measured</h3>
+      <p class="max-w-3xl text-sm">spindle keeps no git access log, so clone, fetch and view counts do not exist and this page does not invent them. CI has the same limit: these are the git-derived and bucket-stored facts above, nothing else.</p>
+      <p class="muted mt-2 text-[11px]">What <em>does</em> exist is shown above: commit activity, authors, line churn, issue/PR states, stars/watchers/forks, releases, package tags and Threads runs.</p>
+    </section>
+
+    <section class="card p-4" aria-label="Projection details">
+      <h3 class="mb-2 text-base font-semibold">About this projection</h3>
+      <dl class="kv">
+        <div class="kv-row"><dt class="kv-key">computed</dt><dd class="kv-val"><time datetime="{{.Data.ComputedAt}}" title="{{.Data.ComputedAt}}">{{with rel .Data.ComputedAt}}{{.}}{{else}}{{.Data.ComputedAt}}{{end}}</time></dd></div>
+        <div class="kv-row"><dt class="kv-key">head</dt><dd class="kv-val break-all">{{if .Data.Projection.HeadSHA}}{{.Data.Projection.HeadSHA}}{{else}}(unborn){{end}}</dd></div>
+        <div class="kv-row"><dt class="kv-key">commits scanned</dt><dd class="kv-val">{{.Data.Projection.Scan.Commits}} (cap {{.Data.Projection.Scan.MaxCommits}}, since {{.Data.Projection.Scan.Since}})</dd></div>
+        <div class="kv-row"><dt class="kv-key">git invocations</dt><dd class="kv-val">1 per refresh</dd></div>
+      </dl>
+      {{if .Data.ScanNote}}<p class="mt-2 text-[11px] text-[var(--pd-warn)]">{{.Data.ScanNote}}</p>{{end}}
+      {{if .Data.FutureNote}}<p class="muted mt-1 text-[11px]">{{.Data.FutureNote}}</p>{{end}}
+      <p class="muted mt-1 text-[11px]">Buckets are UTC calendar days, weeks starting Monday, or calendar months. A merge commit counts as a commit and contributes zero line changes.</p>
+    </section>
+    {{end}}
+  </div>
+  {{end}}
+</div>
+{{end}}

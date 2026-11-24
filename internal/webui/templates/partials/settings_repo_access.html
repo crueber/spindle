@@ -1,0 +1,194 @@
+{{/* partials/settings_repo_access.html — repo settings → Access.
+   One settings tab per file: a new tab is a new settings_repo_<tab>.html
+   partial plus one dispatch line in pages/settings/repo.html — never a body
+   in the shell. Every panel receives the SettingsRepoPage, so a form can
+   build its action from .Owner/.Name. Anatomy: .card sections, the .setup-row
+   label/control pairing for forms, .data-table inside overflow-x-auto
+   (guideline §8). 390px: fields full width, toggle rows keep
+   label-left/control-right, tables scroll in place. */}}
+{{/* ---- Access ----------------------------------------------------------- */}}
+{{define "settings-repo-access"}}
+{{with .Access}}
+<div class="space-y-4">
+  <section class="card p-4">
+    <h3 class="card-header">Effective access</h3>
+    <p class="text-sm">your role: <code class="mono text-xs">{{.Role}}</code></p>
+    {{if .Collaborators}}
+    <div class="mt-2 overflow-x-auto">
+      <table class="data-table">
+        <thead><tr><th scope="col">principal</th><th scope="col">role</th><th scope="col">source</th></tr></thead>
+        <tbody>{{range .Collaborators}}<tr><td class="mono break-all">{{.Principal}}</td><td>{{.Role}}</td><td class="muted">{{.Source}}</td></tr>{{end}}</tbody>
+      </table>
+    </div>
+    {{else}}<p class="muted mt-1 text-sm">no effective collaborators.</p>{{end}}
+  </section>
+
+  {{/* Collaborator invitations (WP9 G9). Admin-only: the pending rows carry
+       each invite's capability token as the accept link, so a triage reader
+       renders only the explanation, never a token. Create posts with
+       invite_action=create; cancel posts to the id path. */}}
+  <section class="card p-4" aria-label="Collaborator invitations">
+    <h3 class="card-header">Invite a collaborator</h3>
+    {{if $.Admin}}
+    {{if .InviteLink}}
+    {{template "settings-invite-share" .InviteLink}}
+    {{end}}
+    <form class="grid gap-2 sm:grid-cols-[minmax(0,1fr)_auto_auto] sm:items-end"
+          method="post" action="/{{$.Owner}}/{{$.Name}}/settings/access"
+          hx-post="/{{$.Owner}}/{{$.Name}}/settings/access" hx-target="#settings-panel" hx-select="#settings-panel" hx-swap="outerHTML">
+      <input type="hidden" name="invite_action" value="create">
+      <div>
+        <label class="mb-1 block text-sm font-medium" for="invite-subject">Email or username</label>
+        <input class="input mono text-xs" id="invite-subject" name="subject" type="text" required
+               placeholder="jane@example.com" value="{{.NewSubject}}">
+      </div>
+      <div>
+        <label class="mb-1 block text-sm font-medium" for="invite-role">Role</label>
+        <select class="input w-auto" id="invite-role" name="role">
+          {{range .Roles}}<option value="{{.}}"{{if eq . $.Access.NewRole}} selected{{end}}>{{.}}</option>{{end}}
+        </select>
+      </div>
+      <div><button type="submit" class="btn">invite</button></div>
+    </form>
+    <p class="muted mt-1 text-[11px]">Inviting grants the chosen repo role once the invitee accepts the link. Invitations expire after 7 days.</p>
+    {{else}}
+    <p class="muted text-sm">Only a repository admin can invite collaborators.</p>
+    {{end}}
+
+    <h4 class="eyebrow mb-1 mt-4">Pending invitations</h4>
+    {{if .InvitesWired}}
+    {{if .Invites}}
+    <div class="overflow-x-auto">
+      <table class="data-table">
+        <thead><tr><th scope="col">subject</th><th scope="col">role</th><th scope="col">invited by</th><th scope="col">expires</th><th scope="col">accept link</th><th scope="col"></th></tr></thead>
+        <tbody>
+          {{range .Invites}}
+          <tr>
+            <td class="mono break-all">{{.Subject}}</td>
+            <td>{{.Role}}</td>
+            <td class="mono break-all">{{.InvitedBy}}</td>
+            <td class="whitespace-nowrap font-mono text-xs">
+              {{if .ExpiresAt}}{{if .Expired}}<span class="chip-closed">expired</span>{{else}}<span title="{{.ExpiresAt}}">{{.ExpiresAt}}</span>{{end}}{{else}}<span class="muted">—</span>{{end}}
+            </td>
+            <td class="min-w-0">
+              {{template "settings-invite-accept" .AcceptLink}}
+            </td>
+            <td>
+              {{if $.Admin}}
+              <form method="post" action="/{{$.Owner}}/{{$.Name}}/settings/access/{{.ID}}"
+                    hx-post="/{{$.Owner}}/{{$.Name}}/settings/access/{{.ID}}" hx-target="#settings-panel" hx-select="#settings-panel" hx-swap="outerHTML">
+                <input type="hidden" name="invite_action" value="cancel">
+                <button type="submit" class="btn px-2 py-0.5 text-xs" title="cancel this invitation">cancel</button>
+              </form>
+              {{end}}
+            </td>
+          </tr>
+          {{end}}
+        </tbody>
+      </table>
+    </div>
+    {{else}}<p class="muted text-sm">no pending invitations.</p>{{end}}
+    {{else if $.Admin}}<p class="muted text-sm">The identity service is not wired on this build — invitations unavailable.</p>
+    {{else}}<p class="muted text-sm">Only a repository admin can see pending invitations.</p>{{end}}
+  </section>
+
+  {{if .CanEdit}}
+  <form class="card p-4" method="post" action="/{{$.Owner}}/{{$.Name}}/settings/access"
+        hx-post="/{{$.Owner}}/{{$.Name}}/settings/access" hx-target="#settings-panel" hx-select="#settings-panel" hx-swap="outerHTML">
+    <h3 class="card-header">Visibility &amp; role bindings</h3>
+    <input type="hidden" name="version" value="{{.Version}}">
+    <div class="grid gap-3">
+      <div>
+        <label class="mb-1 block text-sm font-medium" for="access-visibility">Visibility</label>
+        <select class="input w-auto" id="access-visibility" name="visibility">
+          <option value=""{{if eq .Visibility ""}} selected{{end}}>(unseeded)</option>
+          <option value="public"{{if eq .Visibility "public"}} selected{{end}}>public — anyone may read</option>
+          <option value="authenticated"{{if eq .Visibility "authenticated"}} selected{{end}}>authenticated — signed-in users may read</option>
+          <option value="private"{{if eq .Visibility "private"}} selected{{end}}>private — {{if .IsOrg}}org members{{else}}owner{{end}} only</option>
+        </select>
+        <p class="muted mt-1 text-[11px]">Saving requires admin. A concurrent edit is refused (409) and the form reseeds from server truth.</p>
+      </div>
+
+      <div>
+        <h4 class="eyebrow mb-1">Role bindings</h4>
+        <input type="hidden" name="binding_count" value="{{len .Bindings}}">
+        {{if .Bindings}}
+        <div class="overflow-x-auto">
+          <table class="data-table">
+            <thead><tr><th scope="col">subject</th><th scope="col">role</th><th scope="col"></th></tr></thead>
+            <tbody>
+              {{range $i, $b := .Bindings}}
+              <tr>
+                <td class="break-all"><code class="mono text-xs">{{$b.Subject}}</code><input type="hidden" name="binding_subject_{{$i}}" value="{{$b.Subject}}"></td>
+                <td>
+                  <select class="input w-auto" name="binding_role_{{$i}}" aria-label="Role for {{$b.Subject}}">
+                    {{range $.Access.Roles}}<option value="{{.}}"{{if eq . $b.Role}} selected{{end}}>{{.}}</option>{{end}}
+                  </select>
+                </td>
+                <td><label class="muted flex items-center gap-1 text-[11px]"><input type="checkbox" name="binding_remove_{{$i}}" value="true" class="h-4 w-4 check"> remove</label></td>
+              </tr>
+              {{end}}
+            </tbody>
+          </table>
+        </div>
+        {{else}}<p class="muted text-sm">no bindings — org members, org owners, and host admins still apply.</p>{{end}}
+      </div>
+
+      <fieldset class="card p-3">
+        <legend class="eyebrow px-1">Add a binding</legend>
+        <div class="grid gap-2 sm:grid-cols-2">
+          <div>
+            <label class="mb-1 block text-sm font-medium" for="access-new-subject">Subject</label>
+            <input class="input mono text-xs" id="access-new-subject" name="new_subject" type="text" placeholder="user:jane@example.com">
+          </div>
+          <div>
+            <label class="mb-1 block text-sm font-medium" for="access-new-role">Role</label>
+            <select class="input w-auto" id="access-new-role" name="new_role">
+              {{range .Roles}}<option value="{{.}}">{{.}}</option>{{end}}
+            </select>
+          </div>
+        </div>
+        {{if .Teams}}
+        <div class="mt-2">
+          <label class="mb-1 block text-sm font-medium" for="access-new-team">Team (optional)</label>
+          <select class="input w-auto" id="access-new-team" name="new_team">
+            <option value="">(none)</option>
+            {{range .Teams}}<option value="{{.ID}}">{{.Label}}</option>{{end}}
+          </select>
+        </div>
+        {{end}}
+      </fieldset>
+    </div>
+    <p class="muted mt-2 text-[11px]">version {{.Version}} · full-document PUT · 409 means someone else saved first.</p>
+    <div class="mt-2 flex flex-wrap items-center gap-2">
+      <button type="submit" class="btn primary">Save</button>
+    </div>
+    {{if .Error}}<p class="err-line" role="alert">{{.Error}}</p>{{end}}
+    {{if .Note}}<p class="mt-2 text-sm text-[var(--pd-ok)]">{{.Note}}</p>{{end}}
+  </form>
+  {{else}}
+  <section class="card p-4" data-access-readonly>
+    <h3 class="card-header">Visibility &amp; role bindings</h3>
+    <p class="muted text-sm">Read-only — changing access requires the admin role.</p>
+    <p class="mt-2 text-sm">visibility: <code class="mono text-xs">{{.Visibility}}</code></p>
+    {{if .Bindings}}
+    <div class="mt-2 overflow-x-auto">
+      <table class="data-table">
+        <thead><tr><th scope="col">subject</th><th scope="col">role</th></tr></thead>
+        <tbody>{{range .Bindings}}<tr><td class="mono break-all">{{.Subject}}</td><td>{{.Role}}</td></tr>{{end}}</tbody>
+      </table>
+    </div>
+    {{else}}<p class="muted mt-1 text-sm">no role bindings — org members, org owners, and host admins still apply.</p>{{end}}
+  </section>
+  {{/* The write is admin-only (the POST gate and the seam both re-check);
+       a triage reader gets the read-only view, never a form that 403s. This is
+       a SEPARATE card — the read-only section above must stay closed, or the
+       card nests inside itself and the heading renders twice. */}}
+  <section class="card p-4" aria-label="Changing access">
+    <h3 class="card-header">Changing access</h3>
+    <p class="muted text-sm">Only a repository admin can change visibility or role bindings.</p>
+  </section>
+  {{end}}
+</div>
+{{else}}{{template "settings-repo-notwired" .}}{{end}}
+{{end}}

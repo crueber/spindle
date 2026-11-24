@@ -212,6 +212,12 @@ func checkAvatarSVG(svg, seed string) error {
 // "erin" occurs inside the literal attribute "shape-rendering", which is not a
 // leak of the operator's name.
 func seedAppears(svg, seed string) bool {
+	// An empty seed cannot leak; treating it as a match would make the
+	// sanitize gate reject every avatar with no seed (defensive: the caller
+	// already skips the check, but the predicate should be correct on its own).
+	if seed == "" {
+		return false
+	}
 	for from := 0; ; {
 		i := strings.Index(svg[from:], seed)
 		if i < 0 {

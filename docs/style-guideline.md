@@ -28,10 +28,10 @@
   `internal/server/bind_ui.go`, `internal/webui/*.go`.
 - htmx usage and island lifecycle: `docs/go/12_web_ui.md` §2.6–§2.7;
   `web/src/islands/index.js`.
-- Setup page rendering/validation/save contract:
+- Configuration page rendering/validation/save contract:
   `docs/go/12_web_ui.md` §2.10; implementation
-  `internal/webui/settings.go`, `internal/webui/templates/pages/settings/setup.html`,
-  `internal/webui/templates/partials/settings_setup.html`.
+  `internal/webui/settings.go`, `internal/webui/templates/pages/admin/config.html`,
+  `internal/webui/templates/partials/admin_config_rows.html`.
 - Repo chrome, ref/clone UI, WAL/tasks/settings page contracts:
   `docs/go/12_web_ui.md` §2.3, §2.9; implementation
   `internal/webui/templates/partials/repo_header.html`, `repo_tabs.html`.
@@ -52,27 +52,51 @@ The language in one sentence: **a dense, flat, terminal-native tool — graphite
 panes, one amber accent that means *action*, monospace for every identifier, and
 colour otherwise reserved for state.**
 
-**F1 — Dark is the shipped default; light is the base layer.**
-`internal/webui/templates/base.html` carries `<html lang="en" class="dark">`;
-the header toggle (`partials/header.html`, `data-theme-toggle`) is driven by
-`web/src/islands/theme.js`, which persists the choice in localStorage
-(`spindle-theme`, dark stays the default when storage is unavailable) and syncs
-the `.dark` class. `web/src/app.css` wires it: Tailwind v4 CSS-first
-(`@import "tailwindcss"`, no config file, no CDN) with the class-based dark
-variant (`@custom-variant dark`, never `prefers-color-scheme`, because the
-toggle is a deliberate user choice). Every shared class ships light as the base
-and carries the dark theme in `dark:` variants. Because pages are server-
-rendered, a swapped fragment inherits the class already on `<html>` — an island
-must never re-apply the theme to a subtree. (AGENTS.md law 1, D-WEB-6/D-WEB-14;
-`docs/go/12_web_ui.md` §2.2.)
+**F1 — Dark is the shipped default; light is the base layer; the reader picks
+the palette.** `internal/webui/templates/base.html` carries
+`<html lang="en" class="dark" data-theme="dark">` — the no-JS/no-storage floor,
+so a client without JavaScript still gets the product default, complete and
+unstyled-flash-free. **Before the first paint**, the classic same-origin script
+`/_ui/theme-boot.js` (a parser-blocking `<script>` immediately after the
+stylesheet link, so `script-src 'self'` is untouched) resolves the stored choice
+(`localStorage["spindle-theme"]`, the plan's decision), else the OS side
+(`prefers-color-scheme`, upgraded to that side's high-contrast palette when the
+OS also asks for more contrast and that palette exists), else `dark`, and
+writes `data-theme` plus the `.dark` side class on `<html>`. `data-theme` names
+the palette; the `.dark` class remains the luminance-side switch the ~50
+`dark:` utilities fire on. The theme list is data, not code:
+`web/src/islands/themes.js` is the one registry (id, side, swatch preview), the
+header menu (`partials/theme_menu.html`) is server markup, and
+`web/test/unit/themes.test.js` fails if the registry, the menu and the CSS
+theme blocks disagree or if a swatch drifts from its token values.
 
-**F2 — One token system, two themes.** Every surface, line and text colour comes
-from the semantic variables below (`web/src/app.css`, `:root` = light,
-`.dark` = dark). Components reference the variables; templates reference the
-component classes or the Tailwind ramps. A hex literal in a template is a bug
-(F2 previously; unchanged in force, retuned in value). Contrast is a gate, not a
-preference: every pair in the table is measured, and the three text-carrying
-pairs hold ≥ 4.5:1 in both themes.
+The header control is a menu, not a toggle (`partials/theme_menu.html`):
+"Match system" plus every theme, each row a `role="menuitemradio"` with
+`aria-checked`, and a three-chip swatch (canvas | text | accent) filled from the
+registry. `web/src/islands/theme.js` applies and persists a pick without a
+reload, marks the current choice, and re-resolves live only while the choice is
+"Match system" — an explicit pick is never overridden by an OS change. Storage
+denied/private mode changes nothing about the page: a read failure resolves like
+an absent value and a write failure only loses persistence (the click's own
+theme still applies). `web/src/app.css` wires the class-based variant
+(`@custom-variant dark`, never `prefers-color-scheme` for palettes — the tokens
+are discrete blocks and the boot script picks the id once, before paint). Every
+shared class ships light as the base and carries the dark theme in `dark:`
+variants. Because pages are server-rendered, a swapped fragment inherits the
+theme already on `<html>` — an island must never re-apply the theme to a
+subtree. (AGENTS.md law 1, D-WEB-6/D-WEB-14/D-WEB-16; `docs/go/12_web_ui.md`
+§2.2.)
+
+**F2 — One token system, one contract per theme.** Every surface, line and text
+colour comes from the semantic variables below (`web/src/app.css`, `:root` =
+light, `.dark` = dark; a future `[data-theme]` block is a peer). Components
+reference the variables; templates reference the component classes or the
+Tailwind zinc ramp. A hex literal in a template is a bug. Contrast is a gate,
+not a preference: `web/test/unit/themes.test.js` parses this stylesheet and
+measures every pair (text 4.5:1, non-text UI 3:1; 7:1 text roles in the two HC
+palettes) in **every palette**, plus completeness, liveness (every token has a
+consumer outside the theme blocks), theme-block purity and the raw-ramp grep —
+see "The theme contract" below.
 
 | Token | Dark (default) | Light | Role |
 |---|---|---|---|
@@ -82,27 +106,101 @@ pairs hold ≥ 4.5:1 in both themes.
 | `--pd-raised-2` | `#22282c` | `#e6e6e3` | pressed / selected rows |
 | `--pd-line` | `#232a2e` | `#e2e2df` | hairline borders (the default border) |
 | `--pd-line-strong` | `#323a3f` | `#cfcfca` | control borders, dividers that must read |
-| `--pd-text` | `#e6eaec` | `#17181a` | primary text (15.6:1 / 16.6:1) |
-| `--pd-text-2` | `#a3adb4` | `#55585d` | secondary text (7.8:1 / 6.7:1) |
-| `--pd-muted` | `#79838b` | `#6f7378` | metadata (4.6:1 / 4.8:1) |
-| `--pd-dim` | `#525c63` | `#8a8f94` | decorative only — never text a user must read |
+| `--pd-text` | `#e6eaec` | `#17181a` | primary text (15.63:1 / 17.77:1) |
+| `--pd-text-2` | `#a3adb4` | `#55585d` | secondary text (8.28:1 / 7.14:1) |
+| `--pd-muted` | `#818b93` | `#666a6f` | metadata (5.14:1 / 5.08:1 on surface) |
+| `--pd-dim` | `#525c63` | `#8a8f94` | decorative only — gutter numbers, separators |
 | `--pd-accent` | `#ffb224` | `#9a5b00` | **action**: primary button, focus, active branch |
 | `--pd-accent-hover` | `#ffc862` | `#7a4600` | action hover |
-| `--pd-on-accent` | `#151004` | `#ffffff` | text on the accent (10.5:1 / 5.4:1) |
-| `--pd-ok` | `#4ec9a4` | `#0f7355` | open / passing / healthy |
-| `--pd-warn` | `#e0a95e` | `#8a5a10` | draft / degraded |
-| `--pd-danger` | `#e06c6c` | `#b42323` | closed / failing / destructive |
+| `--pd-on-accent` | `#151004` | `#ffffff` | text on the accent (10.51:1 / 5.43:1) |
+| `--pd-ok` / `--pd-ok-bg` | `#4ec9a4` / `#1d3431` | `#0f7355` / `#dbe8e2` | open / passing / healthy |
+| `--pd-warn` / `--pd-warn-bg` | `#e0a95e` / `#393227` | `#8a5a10` / `#eee2ca` | draft / degraded |
+| `--pd-danger` / `--pd-danger-bg` | `#e06c6c` / `#352528` | `#b42323` / `#ecd5d4` | closed / failing / destructive |
+| `--pd-merged` / `--pd-merged-bg` | `#a78bfa` / `#2e2d43` | `#6d28d9` / `#e7e1f4` | merged |
+| `--pd-prerelease` / `--pd-prerelease-bg` | `#38bdf8` / `#1a3643` | `#0c6291` / `#d8e9f0` | pre-release |
+| `--pd-link` | `#e6eaec` | `#17181a` | link ink (= text in every shipped theme) |
+| `--pd-code-bg` | `#0f1113` | `#ffffff` | code blocks (`pre`, `.code-view`) |
+| `--pd-kw` | `#a78bfa` | `#6d28d9` | syntax keywords (6.95:1 / 7.10:1) |
+| `--pd-info-bg` | `#10202b` | `#e8f1f8` | informational callout ground |
+| `--pd-add-bg` / `--pd-add-fg` | `rgb(78 201 164 / .12)` / `#b7e8d8` | `#e8f6f0` / `#0b5a43` | diff added |
+| `--pd-del-bg` / `--pd-del-fg` | `rgb(224 108 108 / .12)` / `#f2c3c3` | `#fdf0f0` / `#8f2020` | diff removed |
+| `--pd-sel` / `--pd-sel-edge` | `#2a2214` / `#ffb224` | `#fdf0d0` / `#b26a00` | line selection |
+| `--pd-shadow` | `0 8px 24px rgb(0 0 0 / .45)` | `0 8px 24px rgb(0 0 0 / .12)` | popover elevation |
 
-**F3 — Amber means *action*, never *link*.** Exactly one primary action per
-page owns the accent (`pages/collab/issues.html` toolbar remains the reference).
-On repository pages the masthead Clone is that action only when the page body
-has no primary of its own; a page with New issue / New pull request / Save /
-Comment / Create tag demotes Clone to a secondary `.btn` (the audit F1 nit —
-two amber CTAs read as two equal actions). Links are ink: `--pd-text` with a
-1 px underline at 40 % opacity that goes solid on hover and takes the accent on
-focus. `.link` keeps its role as the one text-action treatment but is no longer
-emerald. Amber on *state* is forbidden: an issue is open (`--pd-ok`), merged
-(violet-free: `--pd-text-2` on `--pd-raised`), or closed (`--pd-danger`).
+**The palette roster (PLAN-THEMES §13).** Seven palettes ship, all selectable
+from the header menu: the two defaults above plus
+
+| id | side | world | action accent |
+|---|---|---|---|
+| `dark` *(default)* | dark | graphite + amber | `#ffb224` |
+| `light` | light | the same language on paper-white | `#9a5b00` |
+| `hc-dark` | dark | graphite, higher contrast (text ≥ 7:1, border 3.30:1) | `#ffc23e` |
+| `hc-light` | light | light, higher contrast (7.77:1 body pair, border 3.25:1) | `#7a4600` |
+| `paper` | light | warm cream, sepia ink, long-form reading | `#9c4a12` terracotta |
+| `ocean` | dark | deep navy, slate surfaces, calm non-grey dark | `#6cb6ff` azure |
+| `terminal` | dark | green-cast CRT world, phosphor-grey text | `#ffb224` amber |
+
+Every palette sets the *same* roles (`web/src/app.css`, one `[data-theme]`
+block each) — the expressive move is the world, never the vocabulary: green is
+state in all seven (that is why `terminal` keeps the amber action), links are
+ink with an underline, and the action accent (amber / terracotta / azure) never
+lands in the state-green hue band. `ocean`'s prerelease is the pale cyan so it
+separates from the azure accent, and `paper`'s code ground is the distinct
+`#fdfaf1`. Print maps every palette to the measured light paper (the full zinc
+ramp is re-asserted, not just the text steps), and forced colours sets no colour
+for any palette.
+
+**The theme contract (PLAN-THEMES §1.3, binding).** A theme sets *only* the
+complete token list above (plus its side's zinc ramp steps) — never a component
+rule, a per-page override, or a `[data-theme]` conditional anywhere else. Roles
+are fixed (ok = open/passing, danger = closed/failing, merged = merged, warn =
+draft, prerelease = pre-release); a theme retunes values, never reassigns them.
+The action accent stays action and green stays state in every palette —
+theme-independent.
+Two documented deviations are asserted at their floor rather than raised in the
+two defaults: `--pd-line-strong` (the hairline control border is the Precision
+Dark identity; the control is identified by its label) and `--pd-dim`
+(decorative gutter numbers/separators, never text a reader must read). The HC
+palettes raise the border to 3:1 and `dim` to 4.5:1 (§4.3/§4.4). The
+per-side zinc text steps are retuned in the same blocks (light 400/500, dark
+500, plus each new palette's steps) so the 11px note text passes; the gate's
+drift pin (±0.05) makes a silent above-threshold repaint a build failure.
+
+**Print and forced colours are theme-independent, declaration-only blocks**
+(`web/src/app.css`, the last two rules). `@media print` re-asserts the measured
+light token set on `:root, .dark, [data-theme]` — paper is paper regardless of
+the screen palette — with the chip/tint grounds and selection dropped to
+transparent, `--pd-shadow: none`, an opaque header, and the operated-tool
+chrome plus the theme menu hidden; the gate compares it token-for-token with the
+`:root` block and its full zinc ramp (so no palette's ramp survives into print)
+and re-runs the text contrast on paper, so it cannot drift.
+`@media (forced-colors: active)` sets no colour at all: it declares
+`forced-color-adjust: auto` (the default, stated so it is not "fixed" later)
+and `--pd-shadow: none`, keeps control borders and the diff gutter divider
+visible, and keeps links underlined — the OS palette owns the rendering and the
+non-colour channels (labels, chip text, sign column, underline) carry the
+meaning.
+
+**F3 — Amber means *action*, never *link*.** **At most one** primary action
+per rendered page owns the accent (`pages/collab/issues.html` toolbar remains
+the reference); a page with a real main action renders **exactly one**. The
+renderer's chrome projection decides precedence in ONE place
+(`internal/webui/render.go` `projectPrimary`): the masthead Clone is promoted to
+`.btn.primary` only when the page body renders no primary of its own. So a
+repository page whose body owns the action — New issue, New pull request, New
+release, Save, Comment, Create tag, Run workflow, Approve run — keeps that CTA
+primary and demotes Clone to a secondary `.btn`; a page with no body action
+(Code, Commits, Tags, Packages, WAL, a merged PR whose composer is locked)
+keeps Clone as its one primary. Generic chrome never competes with a page's own
+CTA, and a conditional CTA decides by rendering, not by a handler flag. A list
+whose actions are per row (the invitations inbox) has no single page action:
+its rows are `.btn` and the page deliberately renders zero primaries. The
+header `Login` is a secondary `.btn` in every state — signing in is chrome, not
+the page's action. Links are ink: `--pd-text` with a 1 px underline at 40 %
+opacity that goes solid on hover and takes the accent on focus. `.link` keeps
+its role as the one text-action treatment but is no longer emerald. Amber on
+*state* is forbidden: an issue is open (`--pd-ok`), merged
+(`--pd-merged`, the merged chip), or closed (`--pd-danger`).
 
 **F4 — Flat panes, hairline depth.** Radius never exceeds 4 px (`--radius-sm:
 2px`, `--radius-md: 3px`, `--radius-lg: 4px`, `--radius-xl: 6px`). Cards carry
@@ -125,7 +223,8 @@ carrying information is smaller than 11 px on a touch viewport.
 
 **F7 — The a11y floor: every keyboard-reachable control shows focus.**
 `web/src/app.css` (`@layer base :focus-visible`) paints a 2 px `--pd-accent`
-outline at 1 px offset in both themes — amber on graphite is 10.5:1. Popovers
+outline at 1 px offset in every palette — amber on graphite is 10.5:1, and the
+gate holds the accent ring ≥ 3:1 on every canvas. Popovers
 keep a native-button keyboard baseline (Enter/Space toggle, Tab walks controls,
 Esc closes and returns focus — `web/src/islands/menus.js`, Forgejo #214);
 decorative glyphs and inline SVG icons are `aria-hidden` so accessible names
@@ -190,13 +289,54 @@ navigation; server-rendered pages arrive with the active tab already marked
 
 - `.btn` / `.btn.primary` / `.btn.danger` — **amber is the primary action**
   (§1 F3). `.btn` is a 26 px control on `--pd-raised`; `.btn.primary` is the one
-  amber CTA; `.btn.danger` carries `--pd-danger`. Exactly ONE primary CTA per
-  page; the issues-list toolbar is the reference (`pages/collab/issues.html`:
-  Labels / Milestones `.btn`, then one `.btn primary` "New issue").
+  amber CTA; `.btn.danger` carries `--pd-danger`. At most ONE primary CTA per
+  rendered page, and exactly one when the page has a real primary action; the
+  issues-list toolbar is the reference (`pages/collab/issues.html`: Labels /
+  Milestones `.btn`, then one `.btn primary` "New issue"). The renderer's
+  projection demotes the repository masthead Clone whenever the page body
+  renders a primary of its own; templates add their CTA and never decide
+  between the two.
 - `.btn-active` — toggled control state: amber border + amber text on the
   raised surface, never a filled button (state filters, the graph toggle, the
   star/watch on-state). References: `pages/collab/pulls.html`,
   `pages/repo/commits.html`, `pages/settings/org.html`, `repo_header.html`.
+- `.icon-btn` (site-header cluster report, 2026-11-21) — **the one icon
+  control**: a fixed 32×32 square (16 px glyph, 7 px inset), `--pd-raised`
+  surface, 1 px `--pd-line-strong` border, `--radius-md`, `--pd-text-2` glyph
+  that goes `--pd-text` on a `--pd-raised-2` hover — the same border, radius,
+  surface and hover as `.btn`, sized by the box instead of the label. It is
+  the canonical treatment for header chrome and any icon-only action; an
+  icon-only control MUST NOT be `.btn` plus padding utilities (three of those
+  produced three different boxes: a padded rect, a padded rect and a 32 px
+  circle with a ring) and MUST NOT be a one-off utility soup in a template.
+  Reference: `partials/header.html` (theme menu, create menu, account menu);
+  all three are asserted by `TestHeaderIconControlFamily`
+  (`internal/webui/header_icon_test.go`). The **header account control** uses
+  the SAME box and shape — identity is carried by the initials and the
+  accessible name, not a circle, because §1 F4 caps radius at 4 px and one lone
+  circle was exactly the inconsistency the cluster report named. (A profile
+  page's large avatar is an identity *display*, not an icon control, and keeps
+  its circle.) Sizing rationale: 32 px is the avatar's historical footprint
+  (the cluster does not reflow), keeps a comfortable ≥24 px target, and centers
+  against the 26–28 px `.btn` text controls on the same baseline; text controls
+  keep `.btn`.
+- `.theme-item`, `.theme-swatch`, `.theme-check`, `.theme-sep` (PLAN-THEMES
+  §7.4, W2) — the header **theme menu**: an `.icon-btn` trigger
+  (`aria-label="Theme"`, `aria-haspopup="menu"`) plus a `.card absolute` panel
+  of rows. Rows are a radio group, never command items: `role="menuitemradio"`
+  with `aria-checked` (Enter/Space activates, and a click applies + persists
+  and closes back to the trigger). "Match system" leads, then one row per
+  palette, each prefixed by a three-chip `.theme-swatch` (canvas | text |
+  accent) whose colours are written from the theme registry
+  (`web/src/islands/themes.js`) — the template carries no colour literal, and
+  the gate pins the registry to the token blocks. The check glyph is
+  decorative and its space is reserved, so rows never shift as the choice
+  moves. Panel width is 256 px and rides the structural
+  `max-width: calc(100vw - 1rem)` popover cap, so it fits 390 px with no page
+  pan; the popover key contract (arrows wrap, Home/End, Esc closes and returns
+  focus, outside click dismisses) is `menus.js`. Reference:
+  `partials/theme_menu.html`, `web/src/islands/theme.js`,
+  `TestHeaderIconControlFamily`.
 - `.link` (Forgejo #568, retuned 2026-11-20) — the ONE shared treatment for
   text-level actions that must read as links, not surrounding text. **Ink, not
   accent**: `--pd-text` with a 35 %-opacity underline that goes solid on hover
@@ -221,7 +361,12 @@ navigation; server-rendered pages arrive with the active tab already marked
   scattered the Settings Features rows). Non-text controls use dedicated
   markup: real `<input type="checkbox">` in a Tailwind peer pattern with
   `role="switch"` + `aria-checked` where it is a setting switch
-  (`partials/settings_setup.html`, `partials/settings_repo.html`).
+  (`partials/admin_config_rows.html`, `partials/settings_repo.html`).
+- `.check` (PLAN-THEMES W1) — the ONE accent for a native checkbox/radio:
+  `accent-color: var(--pd-accent)`. Every `accent-amber-500` utility in the
+  tree was replaced by this class; a raw amber/emerald utility is a gate
+  failure (`themes.test.js`, raw-ramp grep). Reference:
+  `partials/settings_repo.html`, `pages/forms/*.html`.
 - `.eyebrow` (2026-11-20) — the micro-caps label (10 px, `0.08em` tracking,
   monospace, `--pd-muted`). Every sidebar/section label that names a region
   rather than speaking a sentence uses it (§1 F6).
@@ -306,8 +451,22 @@ top to bottom:
    description, a monospace meta line (branch and tag counts), then the quiet
    counters and — on pages with no body primary — the page's ONE `.btn.primary`
    (Clone). A page that owns a primary action (New issue, New pull request,
-   Save, Comment, Create tag) renders Clone as a secondary `.btn` (F3). No ref
-   pill (§3).
+   Save, Comment, Create tag) renders Clone as a secondary `.btn` (F3); the
+   renderer's projection decides precedence by counting the page body's
+   rendered primaries, never a per-page list. No ref pill (§3).
+   **The repo action row is one `.btn` anatomy** (Forgejo fork-button report):
+   Star and Watch are single `.btn` controls reading `<count> <label>` with the
+   count in `.mono`; Fork is the SAME anatomy with **two hit targets** because
+   its count and its label navigate to different places (the forks list; the
+   create form) and anchors cannot nest. Its shell is one `.btn` with
+   `gap-0 p-0`; the count anchor carries `pl-2.5 pr-1.5` and the label
+   `pl-0 pr-2.5`, so the rendered text is `<count> Fork` with the 6 px
+   count→label gap its siblings get from `.btn`'s flex gap, and the outer
+   edges keep `.btn`'s 10 px inset. `py-[3px]` keeps each anchor a 24 px-tall
+   target inside the 26 px shell and `min-w-6` keeps the count 24 px wide
+   (WCAG 2.5.8, §4b). Reference: `partials/repo_header.html` (Fork group);
+   the anatomy is pinned by `TestRepoHeaderForkButtonAnatomy`
+   (`internal/webui/fork_button_test.go`).
 2. **Tab strip** (`partials/repo_tabs.html`): active tab = amber bottom border.
 3. **Toolbar**: branch selector, monospace path breadcrumb (only below the
    root), and the directory filter (`data-filter` → `web/src/islands/filter.js`,
@@ -325,6 +484,26 @@ top to bottom:
    branch count, fixed to the viewport bottom above `sm:`. It says only what the
    page knows — there is no fabricated CI state.
 
+### 3.2 The Administration area
+
+`internal/webui/templates/pages/admin/*.html` (handler `internal/webui/admin.go`) is the reference
+for instance-scoped pages. One shell (`partials/admin_shell.html`) composes every page:
+
+- **Area side-nav** (`admin-nav`): the repo-settings `.side-nav-*` idiom — heading
+  `Administration`, then `Overview · Configuration · Access · Maintenance` with
+  `aria-current="page"` on the active page. Below `lg:` it is a full-width chip bar above
+  the content; no Danger section exists (no instance-destructive op today).
+- **Header** (`admin-header`): `.eyebrow` `administration`, the page's **one `<h1>`**, a
+  one-line purpose in `text-sm --pd-text-2`, then text state chips (`host admin`,
+  `first run`, `restricted`) — state is never colour-only.
+- **Banners**: `role="status"` / `role="alert"` in the shared `border-l-2` card shape.
+- **Sections**: `.card` + `.card-header`, `.kv` rows for instance facts, `.setup-*` rows for
+  editable keys, `.empty-state` for an honest "nothing configured", and exactly one
+  `.btn.primary` per page **only when the page has a real primary action** — the Overview's
+  is the first-run checklist CTA; Access/Maintenance (read views) have none.
+- **Denied** is a designed view (`admin-denied`), never a bare 403: mode-specific recovery
+  copy plus, in token mode, the paste form.
+
 ## 4. Popovers
 
 - **Opaque backgrounds are the STRUCTURAL default** (Forgejo #405,
@@ -332,12 +511,16 @@ top to bottom:
   `bg-white / dark:bg-zinc-900` via a higher-specificity rule ordered after
   `.card` — new dropdowns are covered automatically, no per-menu hook class
   needed. (The enumerated hook classes stay in markup as harmless markers.)
-- **Viewport bound** (issue #278, `web/src/app.css`): every absolute/fixed
-  panel (`.clone-body`, `.ref-drop`, `.tasks-drop`, `.notif-drop`,
-  `.reaction-drop`, `.label-drop`, `.milestone-drop`, `.close-drop`, `.tag-drop`,
-  `.tray`) carries `max-width: calc(100vw - 1rem)`. Desktop widths untouched —
-  the bound only caps. Deliberately unbounded: `.progress` (fluid `inset-x-0`),
-  inline forms, invisible helpers.
+- **Viewport bound** (issue #278; structural since PLAN-THEMES §8.4-8,
+  `web/src/app.css`): EVERY floating panel is capped at
+  `max-width: calc(100vw - 1rem)` by the `.card.absolute, .card.fixed` rule
+  itself, so a new popover (the theme menu, any future dropdown) is bounded
+  without a per-menu hook class. The enumerated rule (`.clone-body`,
+  `.ref-drop`, `.tasks-drop`, `.notif-drop`, `.reaction-drop`, `.label-drop`,
+  `.milestone-drop`, `.close-drop`, `.tag-drop`, `.tray`) stays as a harmless
+  no-op for its named panels. Desktop widths untouched — the bound only caps.
+  Deliberately unbounded: `.progress` (fluid `inset-x-0`), inline forms,
+  invisible helpers.
 - **Behavior contract** (`web/src/islands/menus.js`; the clone menu in
   `partials/repo_header.html` and the identity/create menus in
   `partials/header.html` are the references; label/milestone pickers follow it):
@@ -354,6 +537,46 @@ top to bottom:
   popover, solid-panel + `.scroll-slim`, menu keyboard conventions,
   outside-click close.
 
+## 4b. Accessibility floor (binding)
+
+The floor is normative in `AGENTS.md` §2 ("Accessibility is a requirement");
+this section is the design-language side of the same rules.
+
+- **Skip link** (`web/src/app.css` `.skip-link`, `templates/base.html`): the
+  first focusable element on every page, hidden by transform until
+  `:focus-visible`, then a fixed amber banner that jumps to `#app`. No page
+  may remove it, and the `<main id="app">` target is part of the base
+  contract.
+- **One h1, demoted markdown.** The page's masthead/title owns the single
+  `<h1>`. Rendered markdown demotes one level (`internal/webui/markdown.go`
+  `writeHeading`), so a README's `#` never introduces a second h1 or skips
+  under the masthead; page titles that stand alone (account pages, `/admin/config`,
+  `/new`) promote to h1 rather than starting at h2.
+- **Touch targets ≥ 24px** (WCAG 2.5.8): header controls are either
+  `.icon-btn` squares (32×32: theme, create, account) or inline-flex items
+  padded to the `.btn` row (`.py-1` on `partials/header.html`; the fork
+  group's anchors fill its `p-0` shell). Inline links inside a sentence and
+  links inside ≥34px table rows ride the spacing exception — do not pad those.
+- **Composed-state precedence.** Any "base + variant" pair emitted as two
+  classes (`chip chip-open`, the `.btn.btn-active`/`.pill.btn-active` fix
+  before it) must declare the variant at compound specificity: a bare
+  `.chip-open` loses to a later same-specificity `.chip` and every state
+  renders neutral (measured live before the fix — chips were all zinc).
+- **Live regions and busy state.** Flashes and notices are `role="status"` /
+  `role="alert"` (the existing convention); polled fragments carry
+  `aria-live="polite"` and `aria-busy="true"` while running
+  (`partials/collab_threads.html`); streaming panels set `aria-busy` from the
+  island and clear it on every terminal path (`web/src/islands/threadlog.js`)
+  — no-JS renders never set it.
+- **Reduced motion.** `@media (prefers-reduced-motion: reduce)` in
+  `web/src/app.css` kills transitions/animations globally; new shared
+  animations must not opt out.
+- **Tables and scopes.** Every `<th>` carries `scope="col"` (or `"row"` for
+  key/value rows); a table a reader can land on blind (file tree, tags,
+  explore, keys, releases, packages, webhook lists) names itself with
+  `aria-label`. Tables inside a card whose `<h3 class="card-header">` names
+  them lean on that heading instead.
+
 ## 5. Empty states
 
 `.empty-state` / `.empty-state-compact` (issues #34/#35, `web/src/app.css`):
@@ -367,13 +590,15 @@ Forgejo #281) follow the same truthful-empty language. The exactly-ONE-CTA
 pairing (toolbar primary + Empty action) is the issues pattern (issue #50 as
 amended by #270).
 
-## 6. State chips
+## 6. State chips and state dots
 
 `.chip-open` / `.chip-closed` / `.chip-merged` / `.chip-draft` /
 `.chip-prerelease` / `.chip-neutral` (`web/src/app.css`) — the state→color
-mapping is fixed (emerald / red / purple / amber / sky / zinc). Consumers:
-`pages/collab/issue.html` (open/closed), the pull-state helper in
-`internal/webui/collab.go` (open/closed/merged mapping),
+mapping is fixed (ok / danger / merged / warn / prerelease / neutral). The
+chip text and ground are token pairs (`--pd-ok` on `--pd-ok-bg`, …, never a
+`color-mix` or a raw violet/sky utility), so a theme retunes them by value
+alone. Consumers: `pages/collab/issue.html` (open/closed), the pull-state
+helper in `internal/webui/collab.go` (open/closed/merged mapping),
 `pages/collab/releases.html` (draft/prerelease), and the PR page's review
 verdict chip (Forgejo #545 — APPROVED → chip-open, CHANGES_REQUESTED →
 chip-closed, COMMENTED/dismissed/requested → chip-neutral,
@@ -381,16 +606,37 @@ REVIEW_REQUIRED/unknown → chip-draft). `.chip-neutral` is the no-signal chip f
 states that carry no color meaning. New states extend the family; inline colors
 are never used for state.
 
+**`.dot` / `.dot-ok` / `.dot-fail` / `.dot-pending` / `.dot-progress` /
+`.dot-muted`** (PLAN-THEMES W1, `web/src/app.css`) — the ONE check-state
+renderer, the `collab_check_dot` template block
+(`partials/collab_checks.html`). It takes a state string; no Go code builds a
+colour class (the old `checkStateDot` is deleted). **Shape is the non-hue
+channel** (WCAG 1.4.1): pass = filled circle, failure/error = filled diamond,
+pending = hollow circle, in-progress = hollow circle + pulse, cancelled /
+skipped / none = hollow muted ring. Colour comes only from
+`--pd-ok`/`--pd-danger`/`--pd-warn`/`--pd-muted`. Consumers:
+`collab_check_pill` (pull, check detail), the dot-only `repo_check_pill`
+(commits — the anchor carries the accessible name), `collab_check_contexts`,
+the checks page and the Threads run rows. Do not reintroduce a second dot
+renderer or an inline `bg-*` state dot.
+
 ## 7. Forms
 
-- **Setup rows** (`.setup-row` / `.setup-label` / `.setup-examples` /
+- **Configuration rows** (`.setup-row` / `.setup-label` / `.setup-examples` /
   `.setup-note` / `.setup-callout`, `web/src/app.css`;
-  `partials/settings_setup.html`): label column left, control right, tight
+  `partials/admin_config_rows.html`): label column left, control right, tight
   gutter; stacks to one column on phones. Native `<details>` for collapsible
   Advanced groups (issue #168 — `.setup-advanced`; collapsed rows stay mounted
-  so the save payload is complete).
+  so the save payload is complete). A caption stacked above its control uses a
+  `flex flex-col` label, never `grid`: a replaced control (input/select) that is
+  a grid item collapses to its border+padding height in Chromium (the search
+  box and every struct-slice cell rendered 10 px tall until the label became a
+  column flex box — PLAN-ADMIN M3, rendered proof at 1440/390).
+  so the save payload is complete). `.setup-note` is `--pd-muted` and
+  `.setup-callout` is `--pd-info-bg` on a `--pd-line-strong` border
+  (PLAN-THEMES W1) — no raw `text-zinc-*`/`sky-*` colour in these rules.
 - **Struct-slice row editors** (`.setup-rows` / `.setup-rows-legend`,
-  `partials/settings_setup.html`; `internal/setup/rows.go`): a repeating value
+  `partials/admin_config_rows.html`; `internal/setup/rows.go`): a repeating value
   (static auth tokens, bundle strategies) is one bordered fieldset per element
   with the element's name as the legend, its cells in a one/two-column grid of
   labelled inputs/switch pairs, and a per-row "remove this row" checkbox; a
@@ -543,6 +789,20 @@ Tailwind-only rule.
 
 ## Decisions & deviations from the Rust design
 
+- **NEW (2026-11-21, PLAN-ADMIN M3) — Configuration findability composes existing patterns.** The
+  section strip is `.pill` links (§6), the section cards keep `.card` + `card-header` + `.setup-*`
+  rows (§7), the error summary is a `.data-table` in an `overflow-x-auto` wrapper (§8) inside a
+  `role="alert"` card, and section/row anchors use the shared `scroll-mt-16` idiom. The reset
+  control is a `.link`; the TOML disclosure is a `.code-view` with the copy island; the dirty
+  indicator rides the Save `.btn.primary`. No CSS changed: a per-page filter/reset class would
+  have duplicated the canonical `.input`/`.link`/`.pill` shapes. Rationale: findability is
+  composition, not a new visual language.
+- **NEW (2026-11-21, PLAN-ADMIN M1/M2) — the Administration area entry (§3.2).** The
+  instance-scoped pages moved from one `/setup` form to a four-page area with one shell; the
+  entry names the shared blocks and the one-primary/one-h1/no-breadcrumb rules. No new CSS:
+  everything composes `.side-nav-*`, `.card`, `.kv`, `.setup-*`, `.chip-*`, `.empty-state`
+  and `.btn` (§2, §5, §6, §7). Rationale: the surface is used daily (DEVIATIONS D-UX-5), so
+  its anatomy is a canonical reference rather than a per-page decision.
 - **NEW (Forgejo #537) — this guideline.** The de-facto design language
   previously lived in `ui.css` comments, per-page JSX, scattered AGENTS.md
   working rules, and the cited tickets; it is now codified here with a
@@ -575,3 +835,24 @@ Tailwind-only rule.
   vocabulary was removed — `.card`, `.btn`, `.link`, `.chip*`, `.pill`,
   `.data-table` keep their names and roles, so the migration is a retune, not a
   rewrite.
+- **ADOPTED (2026-11-21, accessibility pass) — §4b is normative and
+  markdown headings demote.** The floor (skip link, one h1, ≥24px targets,
+  scopes/labels, live+busy, reduced motion) lands as shared implementations
+  with tests (`internal/webui/a11y_test.go`). Rendered markdown demotes every
+  heading one level (h6 stays h6): the page masthead owns the single h1, and a
+  README's `#` becomes an h2 under it — a deliberate divergence from the Rust
+  SPA, which emitted literal `h1` from markdown. The composed-state chip
+  precedence fix (`chip chip-open` compound selectors) repairs a live defect
+  the retune introduced: `.chip` was declared after the variants and every
+  state chip rendered neutral zinc in both themes.
+- **PINNED (2026-11-21) — F3 is at most one primary, enforced by the renderer.**
+  The rule was applied by a hand-maintained page-name list plus handler flags,
+  which let pages drift (a signed-out code page could render the header Login,
+  the masthead Clone and a body CTA as three equal actions). The chrome
+  projection (`projectPrimary`, `internal/webui/render.go`) now probes the page
+  body with Clone demoted and promotes Clone only when the body renders no
+  primary — conditional CTAs decide by rendering, new pages inherit the rule
+  with no list to update. The header Login is always secondary. `TestOnePrimaryPerPageMatrix`
+  walks the page families and fails on 0 or 2+ beyond the documented zero-CTA
+  cases (read views, the per-row invitations inbox). Rationale: two amber CTAs
+  read as two equal actions; the page's own action always outranks chrome.

@@ -1,14 +1,25 @@
 {{define "base"}}<!doctype html>
-<html lang="en" class="dark">
+<html lang="en" class="dark" data-theme="dark">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>{{with .Chrome.Title}}{{.}} · {{end}}spindle</title>
   <link rel="stylesheet" href="/_ui/app.css">
+  {{/* No flash of the wrong theme (PLAN-THEMES §7.3): a classic same-origin
+       script, parser-blocking, right after the stylesheet, resolves the stored
+       choice (or prefers-color-scheme, or dark) and writes data-theme + the
+       .dark side class on <html> before first paint. CSP stays strict —
+       script-src 'self', no inline script. The markup's class="dark"
+       data-theme="dark" is the no-JS / storage-denied floor. */}}
+  <script src="/_ui/theme-boot.js"></script>
   <script src="/_ui/htmx.min.js" defer></script>
   <script type="module" src="/_ui/ui.js"></script>
 </head>
 <body class="min-h-screen bg-[var(--pd-canvas)] text-[var(--pd-text)] antialiased">
+  {{/* Skip link (WCAG 2.4.1): first focusable element on every page; hidden
+       until keyboard focus, then a fixed banner in both themes. The target
+       is #app — the one <main> landmark every page shares. */}}
+  <a class="skip-link" href="#app">Skip to content</a>
   <div class="flex min-h-screen flex-col">
     {{template "header" .}}
     <main id="app" class="mx-auto w-full max-w-6xl flex-1 px-4 py-6">

@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -20,7 +21,8 @@ func TestStoreErrorStrings(t *testing.T) {
 		{NewNotFound("k"), "object not found: k"},
 		{NewPrecondition("k", "v1"), `precondition failed: k (current="v1")`},
 		{NewRetryable("k", errors.New("boom")), "retryable store error: k: boom"},
-		{NewInvalid("k", errors.New("x")), "invalid argument: k"},
+		{NewInvalid("k", errors.New("x")), "invalid argument: k: x"},
+		{NewInvalid("k", nil), "invalid argument: k"},
 		{NewCorrupt("k", errors.New("bad")), "corrupt: k: bad"},
 		{NewOther("k", errors.New("meh")), "store error: k: meh"},
 	}
@@ -31,9 +33,46 @@ func TestStoreErrorStrings(t *testing.T) {
 	}
 }
 
+// TestFilesystemMapErrNoSpace pins BUG-6's store half: a full disk maps to an
+// error naming store.root and keeping the errno reachable, not a bare
+// "store error: <key>".
+func TestFilesystemMapErrNoSpace(t *testing.T) {
+	f := &Filesystem{root: "/var/lib/spindle/store"}
+	cause := &os.PathError{Op: "write", Path: "/var/lib/spindle/store/wal/x.pb", Err: syscall.ENOSPC}
+	err := f.mapErr("wal/x.pb", cause)
+	if !errors.Is(err, syscall.ENOSPC) {
+		t.Fatalf("errors.Is(ENOSPC) = false: %v", err)
+	}
+	msg := err.Error()
+	for _, want := range []string{"no space left", "store.root /var/lib/spindle/store"} {
+		if !strings.Contains(msg, want) {
+			t.Errorf("message %q missing %q", msg, want)
+		}
+	}
+}
+
 type wrappedErr struct{ error }
 
 func (w wrappedErr) Unwrap() error { return w.error }
+
+// TestInvalidArgumentKeepsCause pins BUG-7: an invalid-argument store error
+// must name its cause and keep the chain (errors.Is reaches both the kind
+// sentinel and the wrapped sentinel).
+func TestInvalidArgumentKeepsCause(t *testing.T) {
+	sentinel := errors.New("bad range")
+	inner := fmt.Errorf("range [3,1): %w", sentinel)
+	err := fmt.Errorf("put objects/x: %w", NewInvalid("objects/x", inner))
+	if got := err.Error(); !strings.Contains(got, "invalid argument: objects/x") ||
+		!strings.Contains(got, "range [3,1)") || !strings.Contains(got, "bad range") {
+		t.Fatalf("Error() drops the cause: %q", got)
+	}
+	if !errors.Is(err, sentinel) {
+		t.Fatal("errors.Is lost the wrapped sentinel")
+	}
+	if !IsInvalidArgument(err) {
+		t.Fatal("IsInvalidArgument lost the kind through wrapping")
+	}
+}
 
 func TestKindIsAndPreconditionCurrent(t *testing.T) {
 	wrapped := wrappedErr{NewNotFound("k")}

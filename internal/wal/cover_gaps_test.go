@@ -39,6 +39,11 @@ func TestEvictorLoopTicksAndStops(t *testing.T) {
 	r := NewRegistry(context.Background(), store2(), cfg)
 	defer r.Close()
 
+	// One pass, called directly: the tick body is deterministic this way
+	// (a sleep "lets a tick run" only if the runner is kind).
+	r.evictIdle()
+
+	// The loop's own contract is that a cancelled context ends it.
 	ctx, cancel := context.WithCancel(context.Background())
 	r.wg.Add(1)
 	done := make(chan struct{})
@@ -46,7 +51,6 @@ func TestEvictorLoopTicksAndStops(t *testing.T) {
 		defer close(done)
 		r.evictorLoop(ctx, 5*time.Millisecond)
 	}()
-	time.Sleep(40 * time.Millisecond) // let at least one tick run
 	cancel()
 
 	select {

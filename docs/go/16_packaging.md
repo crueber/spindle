@@ -66,7 +66,7 @@ Exactly ONE external binary at runtime: `git` (≥ 2.47 server-side, ≥ 2.46 fo
 ```dockerfile
 # Dockerfile — one binary in front of a store. Zero config by default: filesystem store in the data dir.
 #   docker build -t spindle .
-#   docker run --rm -p 8080:8080 spindle     # → open http://host:8080/setup
+#   docker run --rm -p 8080:8080 spindle     # → open http://host:8080/admin
 #
 # Compose examples: compose.standalone.yml (filesystem store) and
 # compose.yaml (spindle + rustfs, the S3-backed stack).
@@ -139,8 +139,13 @@ CMD ["serve"]
 Rules:
 
 - **Runtime base is alpine, not distroless/static**: the one hard runtime dependency is `git`, and distroless ships none. Alpine 3.22 ships git ≥ 2.47; a CI job (§8) fails the image if `git --version` inside it is < 2.47. tini is not needed (alpine `docker run --init`, k8s, and podman reap zombies; `git` children are waited on by `os/exec` anyway — see 04_git.md).
-- `/readyz` reflects real readiness: store open + prewarm done (gated by `cache.prewarm_ready_timeout`) — NOT liveness. `/healthz` is the dumb liveness probe.
-- **No config file is baked**: the image boots zero-config (D5) with `SPINDLE_DATA_DIR=/var/lib/spindle`; that data dir holds `store/`, `cache/`, and the `spindle.toml` that `/setup` writes. Operators who prefer a file mount one and point `SPINDLE_CONFIG` at it, or set `SPINDLE__*` env overrides — the table in §3.1 is unchanged.
+- `/readyz` reflects real readiness for the surface this process serves: the normal boot's store +
+  prewarm (gated by `cache.prewarm_ready_timeout`), and `200 {"status":"restricted"}` in the restricted
+  boot (its admin surface is up) — NOT liveness, and not a constant (drain and warm-up still answer
+  503). `/healthz` is the dumb liveness probe. The image HEALTHCHECK above therefore keeps a
+  restricted instance healthy, which is what lets an ingress route `/admin` for recovery
+  (06_server_http.md §10.2).
+- **No config file is baked**: the image boots zero-config (D5) with `SPINDLE_DATA_DIR=/var/lib/spindle`; that data dir holds `store/`, `cache/`, and the `spindle.toml` that `/admin/config` writes. Operators who prefer a file mount one and point `SPINDLE_CONFIG` at it, or set `SPINDLE__*` env overrides — the table in §3.1 is unchanged.
 - `SPINDLE_BUILD_SHA` build-arg comes from CI; a locally built image reports `dev`.
 - **The web stage must receive the Tailwind scan inputs, not just `web/`.** `web/src/app.css` declares
   `@source "../../internal/webui/templates"`, so the image copies that directory to
@@ -167,8 +172,8 @@ Behavior is §15 of the Rust spec, unchanged, plus these naming rules:
 
 - TOML **key names** are unchanged from §15.1 — that is the compatibility surface. Both prefixes are stripped by the same loop (accept either; the longest matching prefix wins per key), so ops scripts and compose files written for the Rust deployment keep working verbatim.
 - `PORT` env overrides the listen port and rewrites a loopback `public_url`'s port in lockstep (unchanged).
-- `--config /dev/null` = explicit defaults + env only. **A missing config file is NOT fatal (D5):** boot proceeds on built-in defaults — `server.listen = "0.0.0.0:8080"`, `store.backend = "filesystem"` rooted at `<data-dir>/store`, `server.auth.mode = "none"` (loud WARNINGs in logs + a setup banner), `server.auto_create_on_push = true` — and the UI advertises `/setup` (D6).
-- A config file that IS present but fails validation boots into **setup-only mode** (D6): only `/setup`, `/healthz`, `/readyz` answer; everything else is `503` with a pointer to the exact errors, which the setup UI also shows. Saving a fixed config then requires a restart.
+- `--config /dev/null` = explicit defaults + env only. **A missing config file is NOT fatal (D5):** boot proceeds on built-in defaults — `server.listen = "0.0.0.0:8080"`, `store.backend = "filesystem"` rooted at `<data-dir>/store`, `server.auto_create_on_push = true` — and **restricted**: authentication is OIDC-only, and an unconfigured instance serves only `/admin*`, their POSTs and health until OIDC is saved (D-OIDC-1, PLAN-OIDC-ONLY).
+- A config file that IS present but fails validation boots into **restricted mode** (D6): only `/admin` + `/admin/config`, `/healthz`, `/readyz` answer; everything else is `503` with a pointer to the exact errors, which the Administration area also shows. Saving a fixed config then requires a restart.
 - `spindle config check [--env-file …] [--strict]` stays fail-closed for the file it is handed (§15) and remains the supervisor pre-start gate (exit 1 invalid, exit 3 on ignored overrides under `--strict`):
   ```sh
   docker run --rm -v ./spindle.toml:/etc/spindle/spindle.toml:ro spindle config check --strict
@@ -176,7 +181,7 @@ Behavior is §15 of the Rust spec, unchanged, plus these naming rules:
 
 ### 3.2 `spindle.standalone.toml` — OPTIONAL one-box bucket shape
 
-Copy-pasteable; every key is a §15.1 key. **This file is OPTIONAL** — the documented default path is NO config at all (D5/D6: `./spindle serve`, first-run `/setup`). Use this shape when you want one binary, one bucket, and one origin behind a TLS-terminating proxy (§3.4). The file the setup UI saves lands at `<data-dir>/spindle.toml` (atomic tmp+rename), not at this path. Memory-friendly: small cache budget, small remote-reader LRUs.
+Copy-pasteable; every key is a §15.1 key. **This file is OPTIONAL** — the documented default path is NO config at all (D5/D6: `./spindle serve`, first-run `/admin/config`). Use this shape when you want one binary, one bucket, and one origin behind a TLS-terminating proxy (§3.4). The file the Administration area saves lands at `<data-dir>/spindle.toml` (atomic tmp+rename), not at this path. Memory-friendly: small cache budget, small remote-reader LRUs.
 
 ```toml
 # spindle.standalone.toml — one binary, one bucket, one origin.
@@ -190,13 +195,17 @@ auto_create_on_push = true
 roles = []                                     # empty = every role: serve, maintain, events
 
 [server.auth]
-mode = "none"                 # loopback play: everyone is `anon` with write
-# Shared machine — static tokens:
-# mode = "token"
-# anonymous_read = false
-# tokens = [
-#   { principal = "alice", token_env = "SPINDLE_TOKEN_ALICE", write = true },
-# ]
+issuer = "https://id.example.com"       # the IdP; register <public_url>/_auth/callback
+allowed_domains = ["example.com"]        # who may sign in
+oauth_client_id = "spindle"
+oauth_client_secret = "…"
+session_secret = "…"                    # openssl rand -hex 32; identical on every host
+admin_groups = ["spindle-admin"]        # required; these users administer the instance
+# Machine credentials (git/API/CLI only, never admin):
+# [[server.auth.tokens]]
+# principal = "ci-bot"
+# token_env = "SPINDLE_TOKEN_ALICE"
+# write = true
 
 [store]
 backend = "s3"
@@ -322,7 +331,7 @@ Repo-prefix routing for a fleet: `location ~ ^/<owner>/<repo>([./?]|$)` blocks p
 
 | Shape | Config essence | Notes |
 |---|---|---|
-| **Personal / self-hosted (default)** | no config at all: `./spindle serve` — filesystem store under `<data-dir>/store`, cache under `<data-dir>/cache`, `auth.mode = "none"` (loud warnings + setup banner), all roles | one binary, no bucket, no edge; tune later via `/setup` → `<data-dir>/spindle.toml`; add the nginx edge (§4) when it leaves the LAN |
+| **Personal / self-hosted (default)** | `./spindle serve` — filesystem store under `<data-dir>/store`, cache under `<data-dir>/cache`, all roles; OIDC configured on the first-run card (issuer + allowlist + client + session secret + admin group) | one binary, no bucket, no edge; tune later via `/admin/config` → `<data-dir>/spindle.toml`; add the nginx edge (§4) when it leaves the LAN |
 | **One box** | §3.2 standalone: all roles, one S3 bucket, nothing in front except the §3.4 TLS proxy | `roles = []`; the bucket is the only durable state |
 | **Fleet** | many `spindle serve` hosts behind the nginx edge; the monorepo's host pins `cache.mode = "disk"` + `maintenance.disk = "ssd"`, everyone else budget-mode (`cache.max_bytes`) | placement globs decide who does what (below); the edge does TLS/routing/offload; `server.auth.session_secret` MUST be identical on every host (rotation revokes all sessions+tokens) |
 | **Serverless** | `server.roles = ["serve"]` only, config purely via env (`--config /dev/null` + `SPINDLE__*`), `cache.dir` on the ephemeral FS, bounded prefetch (`wal.prefetch_max_bytes`, set it low; `wal.prefetch_packs = false` under tight CPU) | CPU throttles between requests; a maintain fleet elsewhere holds the maintain role; keep-alives off, cold starts re-warm on demand |
@@ -368,7 +377,7 @@ Two example compose files ship at the repo root:
 
 - **`compose.standalone.yml`** — spindle ALONE: filesystem store on a named
   volume, port 8080, healthcheck. First boot is zero-config (auth `none` +
-  loud warning); `/setup` writes `spindle.toml` into the volume for later boots.
+  loud warning); `/admin/config` writes `spindle.toml` into the volume for later boots.
 - **`compose.yaml`** — the **bucket-backed stack**: rustfs (S3-compatible, the
   same fixture `make dev-store` and CI's s3-contract use) + a one-shot
   `create-bucket` job + spindle configured for the S3 store entirely through
@@ -477,11 +486,13 @@ git clone https://github.com/crueber/spindle && cd spindle
 
 # Zero-config: no TOML, no bucket, no TLS. Filesystem store inside the data dir.
 docker run --rm -p 8080:8080 spindle       # or: make build && ./spindle serve
-# The boot log warns that auth.mode = "none" and prints the setup banner.
+# FIRST RUN IS RESTRICTED: the log says "OIDC is not configured"; every route but
+# /admin, /admin/config and the health endpoints answers 503.
 
-# Open http://host:8080/setup — every config section with its current effective
-# value. Save writes <data-dir>/spindle.toml atomically and lists the keys that
-# need a restart. Or change nothing and keep the defaults: also a valid choice.
+# Open http://host:8080/admin — the first-run OIDC card asks for the issuer, your
+# allowed email domain, the OAuth client id/secret, a session secret and the admin
+# group (create that group at your IdP and put yourself in it). Test, Save, restart.
+# Save writes <data-dir>/spindle.toml atomically and lists the keys that need it.
 
 # First push creates the repo (auto_create_on_push defaults to true):
 mkdir demo && cd demo && git init -b main && echo hello > README.md
@@ -493,9 +504,9 @@ git push -u origin main
 git clone http://host:8080/$USER/demo.git
 ```
 
-TLS, OIDC, and bucket-backed shapes are deliberate upgrades, not defaults — §3.2/§3.3 (OPTIONAL config files) and §4 (nginx edge).
+TLS and bucket-backed shapes are deliberate upgrades — §3.2/§3.3 (OPTIONAL config files) and §4 (nginx edge). OIDC itself is not optional (PLAN-OIDC-ONLY).
 
-Token minting (team/production, `auth.mode = "oidc"`):
+Token minting (team/production, OIDC):
 
 1. Open `https://git.example.com` → sign in through the issuer (browser flow, `/_auth/callback`).
 2. Visit `/_auth/tokens` → mint a token: `wgt_…`, valid `server.auth.access_token_ttl` (default `90d`).
@@ -505,7 +516,7 @@ Token minting (team/production, `auth.mode = "oidc"`):
    git config --global credential.https://git.example.com.helper \
      '!f() { printf "username=x\npassword=%s\n" "$SPINDLE_TOKEN"; }; f'
    ```
-   Static-token deployments (`auth.mode = "token"`) skip the browser: the principal's `token_env` value IS the password (HTTP Basic or bearer).
+   Machine deployments skip the browser: a `[[server.auth.tokens]]` row's `token_env` value is the password (HTTP Basic or bearer) for git/API/CLI. Static tokens can never administer.
 
 Install one-liner (from any spindle host):
 
@@ -533,6 +544,6 @@ curl -fsSL https://github.com/crueber/spindle/raw/main/scripts/install.sh | sh
 - **D2 — SUPERSEDED 2026-09-02 by explicit user request (DEVIATIONS.md D-WEB-6), then again 2026-11-19/20 (D-WEB-14/D-WEB-15).** **Second historical shape:** the SolidJS + Tailwind v4 SPA built by vite into `web/dist/` (plain JSX, no TypeScript; runtime deps exactly solid-js + @solidjs/router; dark by default; no CDN), with the node stage running `pnpm run build` (vite SPA + esbuild SDK bundle). **Third historical shape:** the frontend was vanilla ESM (hand-written ES modules with native import map, `<template>`, ~40 lines of reactive helpers, embedded raw — no TypeScript, no framework; SolidJS/vite gone), superseding the "Node 20 + pnpm@10" decision above; the node stage was esbuild-only. **Shipped:** server-rendered pages (`internal/webui` `html/template` + vendored htmx + vanilla-ES islands) with `@tailwindcss/vite` building only `app.css`; the node stage builds stylesheet + islands + vendored copy + the SDK bundle. The SDK is **authored as submodules** (`web/sdk/src/*.js`) and esbuild-bundled to `web/dist/repos.js` (the `repos.mjs` twin is deleted; `dist/` is gitignored build output); JS tests run on Node's built-in `node --test` and import source, never the build.
 - **D3 — Make is the only task runner.** All dev/CI entry points are Make targets (`build vet fmt test race test-web e2e sim contract contract-s3 cover image dev-store clean ci`; `make help` is authoritative); the "`just` is fine too" note is retracted — there is no justfile.
 - **D4 — filesystem store backend is first-class.** `store.backend = "filesystem"` roots keys under `store.root` with sidecar-`flock` conditional writes, `renameat2(RENAME_NOREPLACE)` create-if-absent (portable fallback), `"<size>:<mtime_ns>"` version tokens/ETags, and no accel/signed URLs. It joins the contract suite as an ALWAYS-run backend beside memory (Make `contract`); the container's default path uses it; rustfs remains only as the bucket-contract fixture.
-- **D5 — zero-config first run (user friendliness is a first-class law).** A missing config boots on built-in defaults — `listen 0.0.0.0:8080`, filesystem store rooted at `<data-dir>/store`, `auth.mode = "none"` on ANY bind with loud warnings (a deliberate reversal of the Rust fail-closed loopback rule), `auto_create_on_push = true`; exit code 2 is now bad-argv only. Data dir = `--data-dir` / `SPINDLE_DATA_DIR` (default `~/.local/share/spindle`, containers `/var/lib/spindle`), holding `store/`, `cache/`, and the saved `spindle.toml`.
-- **D6 — setup UI + API are first-class.** `/setup` groups every config key by section with effective values; `GET /api/v1/setup`, `POST /api/v1/setup/test` (validate only), `PUT /api/v1/setup` (validate + atomic write of `<data-dir>/spindle.toml`, reporting restart-needed keys). Invalid config → setup-only mode: only `/setup`, `/healthz`, `/readyz` answer, everything else 503. Access: open while (no config file OR config invalid OR auth.mode = none), else an admin principal — OIDC `admin_groups` (default `spindle-admins`), `admin_emails`, or `admin_domains`. There is no setup token (`SPINDLE_SETUP_TOKEN` is gone and has no effect; WP13).
+- **D5 — zero-config first run (user friendliness is a first-class law).** A missing config boots on built-in defaults — `listen 0.0.0.0:8080`, filesystem store rooted at `<data-dir>/store`, `auto_create_on_push = true` — and **restricted** until OIDC is configured (D-OIDC-1 reverses the old auth-`none` serving default); exit code 2 is now bad-argv only. Data dir = `--data-dir` / `SPINDLE_DATA_DIR` (default `~/.local/share/spindle`, containers `/var/lib/spindle`), holding `store/`, `cache/`, and the saved `spindle.toml`.
+- **D6 — Administration area + API are first-class.** `/admin/config` groups every config key by section with effective values; `GET /api/v1/setup`, `POST /api/v1/setup/test` (validate only), `PUT /api/v1/setup` (validate + atomic write of `<data-dir>/spindle.toml`, reporting restart-needed keys). Invalid or absent config → restricted mode: only `/admin` + `/admin/config`, their POSTs, the auth-test POST and `/healthz`,`/readyz` answer, everything else 503. Access is open only in that restricted boot; otherwise it requires a signed-in member of the OIDC `admin_groups` (default `spindle-admin`). There are no `admin_emails`/`admin_domains` and no static-token admins, and no setup token (`SPINDLE_SETUP_TOKEN` is gone and has no effect).
 - **D7 — coverage gate.** CI fails below 95% statement coverage per `internal/...` package (Make `cover`; `cmd/` main glue excluded); the pipeline gains the `cover` and web-test steps; table-driven httptest for every handler.

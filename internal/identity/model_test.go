@@ -227,23 +227,12 @@ func TestServiceDefaults(t *testing.T) {
 	if _, err := s3.randomHex(4); err != nil {
 		t.Errorf("nil rand broken: %v", err)
 	}
-	// principalOf fallbacks: Defaults() boots auth.none → the anon-all
-	// principal; token mode without injection → anonymous.
-	if p := s3.principalOf(context.Background()); !p.Write || !p.Admin {
-		t.Errorf("defaults (none mode) must yield the admin principal, got %+v", p)
+	// principalOf fallbacks: without injection the viewer is anonymous (there
+	// is no open mode any more).
+	if p := s3.principalOf(context.Background()); !p.Anonymous || p.Write || p.Admin {
+		t.Errorf("uninjected principal must be anonymous, got %+v", p)
 	}
-	tokCfg := config.Defaults()
-	tokCfg.Server.Auth.Mode = "token"
-	sTok := New(store.NewMemory(), tokCfg)
-	if p := sTok.principalOf(context.Background()); !p.Anonymous {
-		t.Errorf("token mode must yield anonymous, got %+v", p)
-	}
-	cfg := config.Defaults()
-	cfg.Server.Auth.Mode = "none"
-	s4 := New(store.NewMemory(), cfg)
-	if p := s4.principalOf(context.Background()); !p.Admin || !p.Write {
-		t.Errorf("none mode must yield admin principal, got %+v", p)
-	}
+	s4 := New(store.NewMemory(), config.Defaults())
 	ctx := WithPrincipal(context.Background(), alice)
 	if p := s4.principalOf(ctx); p.Name != alice.Name {
 		t.Errorf("injected principal lost: %+v", p)
@@ -263,9 +252,6 @@ func (failReader) Read([]byte) (int, error) { return 0, errBoom }
 func TestAnonDefaults(t *testing.T) {
 	if anon.Name != "anonymous" || !anon.Anonymous {
 		t.Error("Anonymous() broken")
-	}
-	if noneP.Name != "anon" || !noneP.Write || !noneP.Admin {
-		t.Error("None() broken")
 	}
 	_ = alice
 	_ = auth.Anonymous()

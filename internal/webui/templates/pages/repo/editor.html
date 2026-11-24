@@ -1,0 +1,163 @@
+{{define "content"}}
+<div class="repo-shell">
+  {{template "repo_header" .Data.Repo}}
+  {{template "repo_tabs" .Data.Repo}}
+  {{template "repo_degraded" .Data.Repo}}
+
+  {{if .Data.Guide}}
+  {{template "repo_guide" .Data.Guide}}
+  {{else}}
+  <div class="mx-auto grid max-w-3xl gap-3">
+    <!-- Page header: what is being changed and where. -->
+    <div class="flex flex-wrap items-baseline gap-x-3 gap-y-1">
+      <h2 class="text-base font-semibold">
+        {{if eq .Data.Mode "new"}}Create a new file{{else if eq .Data.Mode "delete"}}Delete a file{{else}}Edit file{{end}}
+      </h2>
+      {{if .Data.Branch}}<span class="pill mono">{{.Data.Branch}}</span>{{end}}
+      {{if .Data.Path}}<span class="mono truncate text-xs text-[var(--pd-muted)]">{{.Data.Path}}</span>{{end}}
+      {{if .Data.BackHref}}<a class="link ml-auto text-xs" href="{{.Data.BackHref}}">Cancel</a>{{end}}
+    </div>
+
+    {{if .Data.Conflict}}
+    <div class="card border-[var(--pd-danger)] p-3" role="alert">
+      <p class="text-sm font-medium text-[var(--pd-danger)]">
+        {{if eq .Data.Conflict.What "blob"}}The file changed while you were editing{{else}}The branch moved under you{{end}}
+      </p>
+      <p class="mt-1 text-xs text-[var(--pd-text-2)]">
+        Nothing was written. Reopen the editor to start from the newer version.
+        <span class="mono">page: {{.Data.Conflict.Expected}}</span>
+        <span class="mono">disk: {{.Data.Conflict.Actual}}</span>
+      </p>
+      <a class="btn mt-2" href="{{.Data.BackHref}}">Reload the file</a>
+    </div>
+    {{end}}
+
+    {{if or .Data.Binary .Data.LFS .Data.TooLarge}}
+    <div class="card p-4">
+      <p class="text-sm">
+        {{if .Data.Binary}}This file is binary. The web editor only edits text files.
+        {{else if .Data.LFS}}This file is a Git LFS pointer. Use git + LFS from a clone to change it.
+        {{else}}This file is {{.Data.Size}} — larger than the editor cap ({{.Data.MaxBytes}}).{{end}}
+      </p>
+      <p class="mt-2 text-xs text-[var(--pd-muted)]">Nothing was changed.</p>
+      <div class="mt-3 flex flex-wrap gap-2">
+        {{if .Data.RawHref}}<a class="btn" href="{{.Data.RawHref}}">View raw</a>{{end}}
+        <a class="btn primary" href="{{.Data.BackHref}}">Back to the file</a>
+      </div>
+    </div>
+    {{else}}
+    <form class="card grid gap-3 p-3" method="post" action="{{.Data.Action}}"
+          {{if eq .Data.Mode "delete"}}data-danger-expected="{{.Data.Path}}"{{end}}>
+      <input type="hidden" name="mode" value="{{.Data.Mode}}">
+      <input type="hidden" name="ref" value="{{.Data.Branch}}">
+      <input type="hidden" name="expected_branch_sha" value="{{.Data.ExpectedBranchSHA}}">
+      <input type="hidden" name="expected_blob_sha" value="{{.Data.ExpectedBlobSHA}}">
+
+      {{if .Data.Err}}<p class="err-line" role="alert">{{.Data.Err}}</p>{{end}}
+
+      {{if eq .Data.Mode "new"}}
+      <label class="grid gap-1">
+        <span class="eyebrow">File path</span>
+        <input class="input mono" name="path" value="{{.Data.Path}}" required
+               placeholder="docs/guide.md" autocomplete="off" spellcheck="false">
+      </label>
+      {{else}}
+      <input type="hidden" name="path" value="{{.Data.Path}}">
+      <div class="flex flex-wrap items-center gap-2 border border-[var(--pd-line)] bg-[var(--pd-surface)] px-3 py-1.5">
+        <span class="mono text-xs">{{.Data.Path}}</span>
+        {{if .Data.Size}}<span class="mono text-[11px] text-[var(--pd-muted)]">{{.Data.Size}}</span>{{end}}
+        {{if .Data.ExpectedBlobSHA}}<span class="mono text-[11px] text-[var(--pd-muted)]">blob {{shortsha .Data.ExpectedBlobSHA}}</span>{{end}}
+      </div>
+      {{end}}
+
+      {{if eq .Data.Mode "delete"}}
+      <p class="text-sm">This deletes <span class="mono">{{.Data.Path}}</span> in one commit. Type the path to confirm.</p>
+      <label class="grid gap-1">
+        <span class="eyebrow">Type the file path</span>
+        <input class="input mono" type="text" data-danger-input name="confirm" required
+               autocomplete="off" spellcheck="false" placeholder="{{.Data.Path}}">
+      </label>
+      {{else}}
+      <label class="grid gap-1">
+        <span class="eyebrow">File content</span>
+        <textarea class="input mono min-h-64 text-xs leading-relaxed" name="content" rows="18"
+                  spellcheck="false" data-submit-keys>{{.Data.Content}}</textarea>
+      </label>
+      {{end}}
+
+      <label class="grid gap-1">
+        <span class="eyebrow">Commit message</span>
+        <input class="input" name="message" value="{{.Data.Message}}" required maxlength="72">
+      </label>
+      <label class="grid gap-1">
+        <span class="eyebrow">Extended description (optional)</span>
+        <textarea class="input min-h-16 text-sm" name="description" rows="3">{{.Data.Description}}</textarea>
+      </label>
+
+      {{if ne .Data.Mode "delete"}}
+      <div class="grid gap-2 border-t border-[var(--pd-line)] pt-3">
+        <div class="grid gap-2 sm:grid-cols-2">
+          <label class="grid gap-1">
+            <span class="eyebrow">Commit to branch</span>
+            {{if .Data.Branches}}
+            <select class="input w-full" name="ref">
+              {{range .Data.Branches}}
+              <option value="{{.Name}}"{{if eq .Name $.Data.Branch}} selected{{end}}>{{.Name}}</option>
+              {{end}}
+            </select>
+            {{else}}
+            <input class="input mono w-full" name="ref" value="{{.Data.Branch}}">
+            {{end}}
+          </label>
+          <label class="grid gap-1">
+            <span class="eyebrow">…or create a new branch (optional)</span>
+            <input class="input mono w-full" name="new_branch" value="{{.Data.NewBranch}}"
+                   placeholder="feature/my-change" autocomplete="off" spellcheck="false">
+          </label>
+        </div>
+        <label class="flex items-center gap-2 text-xs">
+          <input type="checkbox" name="open_pr" value="1"{{if .Data.OpenPR}} checked{{end}}>
+          <span>Open a pull request for the new branch</span>
+        </label>
+        <div class="grid gap-2 sm:grid-cols-2">
+          <label class="grid gap-1">
+            <span class="eyebrow">Pull request title (optional)</span>
+            <input class="input" name="pr_title" value="{{.Data.PRTitle}}">
+          </label>
+          <label class="grid gap-1">
+            <span class="eyebrow">Pull request description (optional)</span>
+            <input class="input" name="pr_body" value="{{.Data.PRBody}}">
+          </label>
+        </div>
+      </div>
+      {{end}}
+
+      <div class="flex flex-wrap items-center justify-end gap-2">
+        {{if ne .Data.Mode "delete"}}<button class="btn" type="submit" name="action" value="preview">Preview changes</button>{{end}}
+        <button class="btn primary{{if eq .Data.Mode "delete"}} danger{{end}}" type="submit" name="action" value="save"
+                {{if eq .Data.Mode "delete"}}data-danger-submit{{end}}>
+          {{if eq .Data.Mode "delete"}}Delete file{{else if eq .Data.Mode "new"}}Create file{{else}}Commit changes{{end}}
+        </button>
+      </div>
+    </form>
+    {{end}}
+
+    {{if .Data.DiffShown}}
+    <section class="card mt-1 overflow-hidden" aria-label="Pending changes">
+      <div class="flex items-center gap-2 border-b border-[var(--pd-line)] px-3 py-1.5">
+        <span class="eyebrow">Pending changes</span>
+        <span class="mono ml-auto text-[11px] text-[var(--pd-muted)]">{{len .Data.Diff}} file(s)</span>
+      </div>
+      {{if .Data.Diff}}
+      <div class="diff-holder overflow-x-auto">
+        {{range .Data.Diff}}{{template "repo_diff" .}}{{end}}
+      </div>
+      {{else}}
+      <p class="muted px-3 py-4 text-sm italic">No content change to preview.</p>
+      {{end}}
+    </section>
+    {{end}}
+  </div>
+  {{end}}
+</div>
+{{end}}

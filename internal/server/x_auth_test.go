@@ -126,7 +126,6 @@ func oidcFull(t *testing.T) (*Server, http.Handler, *stubIssuer) {
 	t.Helper()
 	iss := newStubIssuer(t)
 	s, h := newTestServer(t, nil)
-	s.cfg.Server.Auth.Mode = "oidc"
 	s.cfg.Server.Auth.Issuer = iss.srvURL()
 	s.cfg.Server.Auth.OAuthClientID = "spindle"
 	s.cfg.Server.Auth.OAuthClientSecret = "sekrit"
@@ -149,8 +148,10 @@ func TestAuthMeAndCheck(t *testing.T) {
 	req.Header.Set("Authorization", "Bearer tok123")
 	rec = httptest.NewRecorder()
 	s.authMe(rec, req)
-	if !strings.Contains(rec.Body.String(), `"principal":"alice"`) || !strings.Contains(rec.Body.String(), `"write":true`) {
-		t.Fatalf("me authed = %s", rec.Body.String())
+	for _, want := range []string{`"principal":"alice"`, `"write":true`, `"admin":true`, `"groups":[]`, `"groups_claim":"groups"`} {
+		if !strings.Contains(rec.Body.String(), want) {
+			t.Fatalf("me authed body lacks %q: %s", want, rec.Body.String())
+		}
 	}
 	// /_auth/check anonymous + no anonymous read → 401.
 	rec = httptest.NewRecorder()

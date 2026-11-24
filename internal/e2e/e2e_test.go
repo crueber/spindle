@@ -12,14 +12,15 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/BurntSushi/toml"
 )
 
-// testOwner is the owner segment used for every e2e repo. With auth mode
-// none, any owner name is writable.
+// testOwner is the owner segment used for every e2e repo. The test bearer is
+// a host admin (auto-create allowed), so any owner name is writable.
 const testOwner = "e2e"
 
 // TestMain cleans up the shared build directory after the whole run.
@@ -31,12 +32,13 @@ func TestMain(m *testing.M) {
 	os.Exit(code)
 }
 
-// newServer builds the binary and boots a fresh defaults-mode server on its
-// own data dir and port; both are cleaned up by t.Cleanup.
+// newServer builds the binary and boots a fresh OIDC-configured server (the
+// in-test IdP) on its own data dir and port; both are cleaned up by t.Cleanup.
 func newServer(t *testing.T) *e2eServer {
 	t.Helper()
 	bin := buildSpindle(t)
 	dataDir := t.TempDir()
+	writeE2EConfig(t, dataDir, newOIDP(t))
 	s := startServer(t, bin, dataDir, freePort(t))
 	t.Cleanup(s.stop)
 	return s
@@ -230,10 +232,13 @@ func lane(s *e2eServer, repo, sub string) string {
 	return base + "/" + sub
 }
 
-// ---- (c) no-config boot defaults ------------------------------------------------
+// ---- (c) no-config boot is RESTRICTED (PLAN-OIDC-ONLY §2.1) --------------------
 
 func TestE2E_BootDefaults(t *testing.T) {
-	s := newServer(t)
+	bin := buildSpindle(t)
+	dataDir := t.TempDir()
+	s := startServer(t, bin, dataDir, freePort(t))
+	t.Cleanup(s.stop)
 
 	var health struct {
 		Status  string `json:"status"`
@@ -243,18 +248,41 @@ func TestE2E_BootDefaults(t *testing.T) {
 	if health.Status != "ok" {
 		t.Fatalf("healthz status = %q, want ok", health.Status)
 	}
-
-	var ready map[string]any
-	getJSON(t, s.base+"/readyz", &ready)
-	if ready["status"] != "ready" {
-		t.Fatalf("readyz status = %v, want ready", ready["status"])
+	status, body := httpGet(s.base+"/readyz", 5*time.Second)
+	if status != http.StatusOK || !jsonHasKey(body, "status", "restricted") {
+		t.Fatalf("readyz = %d %s, want 200 restricted (ready for the admin surface)", status, body)
 	}
-	if ready["config"] != "defaults" {
-		t.Fatalf("readyz config = %v, want \"defaults\"", ready["config"])
+	if !jsonHasKey(body, "surface", "admin") {
+		t.Fatalf("readyz body = %s, want surface=admin", body)
 	}
 
-	if _, err := os.Stat(filepath.Join(s.dataDir, "spindle.toml")); !os.IsNotExist(err) {
-		t.Fatalf("spindle.toml exists after defaults boot (err=%v)", err)
+	// The Administration area is the ONLY surface; its Overview carries the
+	// OIDC onboarding card.
+	if status, body = httpGet(s.base+"/admin", 5*time.Second); status != http.StatusOK {
+		t.Fatalf("GET /admin = %d, want 200 (body %s)", status, body)
+	}
+	for _, want := range []string{"configure OIDC", "server.auth.issuer", "server.auth.admin_groups"} {
+		if !strings.Contains(string(body), want) {
+			t.Fatalf("GET /admin body lacks %q\n%s", want, body)
+		}
+	}
+	if status, body = httpGet(s.base+"/admin/config", 5*time.Second); status != http.StatusOK {
+		t.Fatalf("GET /admin/config = %d, want 200 (body %s)", status, body)
+	}
+	if status, _ = httpGet(s.base+"/api/v1/owners", 5*time.Second); status != http.StatusServiceUnavailable {
+		t.Fatalf("GET /api/v1/owners = %d, want 503", status)
+	}
+	// Readiness is not a licence to serve anything new: the non-admin surface
+	// still answers the restricted 503.
+	if status, _ = httpGet(s.base+"/", 5*time.Second); status != http.StatusServiceUnavailable {
+		t.Fatalf("GET / = %d, want the restricted 503", status)
+	}
+	infoRefs := s.gitURL(testOwner, uniqueRepo("blocked")) + "/info/refs?service=git-upload-pack"
+	if status, _ = httpGet(infoRefs, 5*time.Second); status != http.StatusServiceUnavailable {
+		t.Fatalf("GET git info/refs = %d, want 503", status)
+	}
+	if _, err := os.Stat(filepath.Join(dataDir, "spindle.toml")); !os.IsNotExist(err) {
+		t.Fatalf("spindle.toml exists after a first-run boot (err=%v)", err)
 	}
 }
 
@@ -271,18 +299,26 @@ func TestE2E_InvalidConfigSetupOnly(t *testing.T) {
 	var health map[string]any
 	getJSON(t, s.base+"/healthz", &health)
 
-	// /readyz reports setup_required with 503.
+	// /readyz reports the restricted surface with 200: the ingress must route
+	// this instance or /admin (the only way to fix the file) is unreachable.
 	status, body := httpGet(s.base+"/readyz", 5*time.Second)
-	if status != http.StatusServiceUnavailable {
-		t.Fatalf("readyz status = %d, want 503 (body %s)", status, body)
+	if status != http.StatusOK {
+		t.Fatalf("readyz status = %d, want 200 (body %s)", status, body)
 	}
-	if !jsonHasKey(body, "status", "setup_required") {
-		t.Fatalf("readyz body = %s, want status setup_required", body)
+	if !jsonHasKey(body, "status", "restricted") {
+		t.Fatalf("readyz body = %s, want status restricted", body)
 	}
 
-	// /setup serves (200); everything else 503.
-	if status, body = httpGet(s.base+"/setup", 5*time.Second); status != http.StatusOK {
-		t.Fatalf("GET /setup = %d, want 200 (body %s)", status, body)
+	// The Administration area serves (200); everything else 503. /setup is
+	// gone (deleted, not aliased).
+	if status, body = httpGet(s.base+"/admin", 5*time.Second); status != http.StatusOK {
+		t.Fatalf("GET /admin = %d, want 200 (body %s)", status, body)
+	}
+	if status, body = httpGet(s.base+"/admin/config", 5*time.Second); status != http.StatusOK {
+		t.Fatalf("GET /admin/config = %d, want 200 (body %s)", status, body)
+	}
+	if status, body = httpGet(s.base+"/setup", 5*time.Second); status != http.StatusServiceUnavailable {
+		t.Fatalf("GET /setup = %d, want the restricted 503 (deleted, never aliased; body %s)", status, body)
 	}
 	if status, body = httpGet(s.base+"/api/v1/owners", 5*time.Second); status != http.StatusServiceUnavailable {
 		t.Fatalf("GET /api/v1/owners = %d, want 503 (body %s)", status, body)
@@ -325,10 +361,25 @@ func TestE2E_SetupSaveRestart(t *testing.T) {
 	dataDir := t.TempDir()
 	writeSpindleConfig(t, dataDir, "bogus_key = 1\n")
 	port := freePort(t)
+	p := newOIDP(t)
+	e2eDefaultBearer = p.idToken("alice@example.com", "spindle-admin")
 	s := startServer(t, bin, dataDir, port)
 	t.Cleanup(s.stop)
 
-	// The setup API is open in setup-only mode and reports the bad file.
+	// The recovery loop's first half: the ingress sees a ready restricted
+	// instance, so /admin (where the fix happens) is reachable.
+	status, body := httpGet(s.base+"/readyz", 5*time.Second)
+	if status != http.StatusOK || !jsonHasKey(body, "status", "restricted") {
+		t.Fatalf("restricted readyz = %d %s, want 200 restricted", status, body)
+	}
+	if status, body = httpGet(s.base+"/admin", 5*time.Second); status != http.StatusOK {
+		t.Fatalf("restricted /admin = %d, want 200 (body %s)", status, body)
+	}
+	if status, _ = httpGet(s.base+"/", 5*time.Second); status != http.StatusServiceUnavailable {
+		t.Fatalf("restricted / = %d, want 503", status)
+	}
+
+	// The setup API is open in restricted mode and reports the bad file.
 	var setup struct {
 		FileState string `json:"file_state"`
 	}
@@ -340,14 +391,21 @@ func TestE2E_SetupSaveRestart(t *testing.T) {
 	// PUT a valid config: server.listen/store/cache rooted in this data dir,
 	// filesystem backend, auto-create on push (first-run default we want kept).
 	overrides := map[string]any{
-		"server.listen":              fmt.Sprintf("0.0.0.0:%d", port),
-		"server.auto_create_on_push": true,
-		"store.backend":              "filesystem",
-		"store.root":                 filepath.Join(dataDir, "store"),
-		"cache.dir":                  filepath.Join(dataDir, "cache"),
+		"server.listen":                   fmt.Sprintf("0.0.0.0:%d", port),
+		"server.auto_create_on_push":      true,
+		"server.auth.issuer":              p.issuer,
+		"server.auth.oauth_client_id":     p.client,
+		"server.auth.oauth_client_secret": p.secret,
+		"server.auth.session_secret":      "e2e-session-secret-0123456789abcdef",
+		"server.auth.allowed_domains":     []string{"example.com"},
+		"server.auth.admin_groups":        []string{"spindle-admin"},
+		"server.auth.audiences":           []string{p.client},
+		"store.backend":                   "filesystem",
+		"store.root":                      filepath.Join(dataDir, "store"),
+		"cache.dir":                       filepath.Join(dataDir, "cache"),
 	}
 	payload, _ := json.Marshal(map[string]any{"overrides": overrides})
-	status, body := httpRequest(t, http.MethodPut, s.base+"/api/v1/setup", payload)
+	status, body = httpRequest(t, http.MethodPut, s.base+"/api/v1/setup", payload)
 	if status < 200 || status > 299 {
 		t.Fatalf("PUT /api/v1/setup = %d, want 2xx (body %s)", status, body)
 	}
@@ -371,7 +429,10 @@ func TestE2E_SetupSaveRestart(t *testing.T) {
 	var ready map[string]any
 	getJSON(t, s2.base+"/readyz", &ready)
 	if ready["status"] != "ready" {
-		t.Fatalf("readyz after restart = %v, want \"ready\" (not setup_required)", ready["status"])
+		t.Fatalf("readyz after restart = %v, want \"ready\" (not restricted)", ready["status"])
+	}
+	if status, body = httpGet(s2.base+"/", 5*time.Second); status != http.StatusOK {
+		t.Fatalf("GET / after restart = %d, want 200 (normal pages; body %s)", status, body)
 	}
 
 	g := newGitClient(t)
@@ -392,25 +453,36 @@ type delivery struct {
 	DelivID string
 }
 
-// TestE2E_SetupEditsExistingFile: setup is open without credentials while
-// auth is none — INCLUDING normal running mode — and a save EDITS the
+// TestE2E_SetupEditsExistingFile: the setup surface is open in restricted mode
+// (a broken file) and admin-only after a valid OIDC boot; a save EDITS the
 // current spindle.toml instead of replacing it with defaults.
 func TestE2E_SetupEditsExistingFile(t *testing.T) {
 	bin := buildSpindle(t)
 	dataDir := t.TempDir()
 	writeSpindleConfig(t, dataDir, "bogus_key = 1\n")
 	port := freePort(t)
+	p := newOIDP(t)
+	adminToken := p.idToken("alice@example.com", "spindle-admin")
+	e2eDefaultBearer = adminToken
 	s := startServer(t, bin, dataDir, port)
 	t.Cleanup(s.stop)
 
-	// First save (from setup-only mode): the shape we expect to survive.
+	// First save (from restricted mode): a complete OIDC config — the shape we
+	// expect to survive.
 	overrides := map[string]any{
-		"server.listen":              fmt.Sprintf("0.0.0.0:%d", port),
-		"server.auto_create_on_push": true,
-		"server.request_timeout":     "90m",
-		"store.backend":              "filesystem",
-		"store.root":                 filepath.Join(dataDir, "store"),
-		"cache.dir":                  filepath.Join(dataDir, "cache"),
+		"server.listen":                   fmt.Sprintf("0.0.0.0:%d", port),
+		"server.auto_create_on_push":      true,
+		"server.request_timeout":          "90m",
+		"server.auth.issuer":              p.issuer,
+		"server.auth.oauth_client_id":     p.client,
+		"server.auth.oauth_client_secret": p.secret,
+		"server.auth.session_secret":      "e2e-session-secret-0123456789abcdef",
+		"server.auth.allowed_domains":     []string{"example.com"},
+		"server.auth.admin_groups":        []string{"spindle-admin"},
+		"server.auth.audiences":           []string{p.client},
+		"store.backend":                   "filesystem",
+		"store.root":                      filepath.Join(dataDir, "store"),
+		"cache.dir":                       filepath.Join(dataDir, "cache"),
 	}
 	payload, _ := json.Marshal(map[string]any{"overrides": overrides})
 	status, body := httpRequest(t, http.MethodPut, s.base+"/api/v1/setup", payload)
@@ -418,17 +490,22 @@ func TestE2E_SetupEditsExistingFile(t *testing.T) {
 		t.Fatalf("initial PUT = %d (body %s)", status, body)
 	}
 
-	// Restart into normal mode, then edit ONE key with NO credentials
-	// (auth.mode is none — setup must stay available at any time).
+	// Restart into normal mode, then edit ONE key. The setup surface is
+	// admin-only now: the OIDC admin token authenticates the write.
 	s.stop()
 	s2 := startServer(t, bin, dataDir, port)
 	t.Cleanup(s2.stop)
 	edit, _ := json.Marshal(map[string]any{"overrides": map[string]any{
 		"server.request_timeout": "2h",
 	}})
-	status, body = httpRequest(t, http.MethodPut, s2.base+"/api/v1/setup", edit)
+	status, body = httpRequestAuth(t, http.MethodPut, s2.base+"/api/v1/setup", edit, adminToken)
 	if status < 200 || status > 299 {
 		t.Fatalf("edit PUT = %d (body %s)", status, body)
+	}
+	// And without a credential the write is refused (never a silent 2xx).
+	status, body = httpRequest(t, http.MethodPut, s2.base+"/api/v1/setup", edit)
+	if status != http.StatusUnauthorized && status != http.StatusForbidden {
+		t.Fatalf("anonymous edit PUT = %d, want 401/403 (body %s)", status, body)
 	}
 
 	// The file kept every untouched key and gained the edited one.
@@ -442,7 +519,7 @@ func TestE2E_SetupEditsExistingFile(t *testing.T) {
 			AutoCreateOnPush bool   `toml:"auto_create_on_push"`
 			RequestTimeout   string `toml:"request_timeout"`
 			Auth             struct {
-				Mode string `toml:"mode"`
+				Issuer string `toml:"issuer"`
 			} `toml:"auth"`
 		} `toml:"server"`
 		Store struct {
@@ -455,7 +532,7 @@ func TestE2E_SetupEditsExistingFile(t *testing.T) {
 	}
 	if decoded.Server.Listen != fmt.Sprintf("0.0.0.0:%d", port) ||
 		!decoded.Server.AutoCreateOnPush ||
-		decoded.Server.Auth.Mode != "none" ||
+		decoded.Server.Auth.Issuer != p.issuer ||
 		decoded.Store.Backend != "filesystem" ||
 		decoded.Store.Root != filepath.Join(dataDir, "store") {
 		t.Fatalf("untouched keys lost:\n%s", raw)
@@ -500,10 +577,13 @@ func TestE2E_EventsWebhookDelivery(t *testing.T) {
 	defer sink.Close()
 
 	const secret = "e2e-webhook-secret"
+	p := newOIDP(t)
+	e2eDefaultBearer = p.idToken("alice@example.com", "spindle-admin")
 	writeSpindleConfig(t, dataDir, fmt.Sprintf(`
 [server]
 auto_create_on_push = true
 
+%s
 [store]
 backend = "filesystem"
 root = %q
@@ -515,7 +595,7 @@ dir = %q
 webhook_url = %q
 webhook_secret = %q
 sweep_interval = "1s"
-`, filepath.Join(dataDir, "store"), filepath.Join(dataDir, "cache"), sink.URL, secret))
+`, p.configBlock(), filepath.Join(dataDir, "store"), filepath.Join(dataDir, "cache"), sink.URL, secret))
 
 	s := startServer(t, bin, dataDir, freePort(t))
 	t.Cleanup(s.stop)
@@ -567,7 +647,7 @@ sweep_interval = "1s"
 	// Second push, woken immediately via POST /_events/notify.
 	sha2 := g.commitFile(dir, "hello.txt", "second revision\n", "update commit")
 	g.run(dir, "push", "origin", "main")
-	status, body := httpPost(t, s.base+"/_events/notify", []byte(`{"repo":"`+testOwner+`/`+repo+`"}`))
+	status, body := httpRequestAuth(t, "POST", s.base+"/_events/notify", []byte(`{"repo":"`+testOwner+`/`+repo+`"}`), e2eDefaultBearer)
 	if status < 200 || status > 299 {
 		t.Fatalf("POST /_events/notify = %d, want 2xx (body %s)", status, body)
 	}

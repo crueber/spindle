@@ -11,7 +11,6 @@ import (
 // oidcServer is a full §8.6 fixture: issuer + browser login enabled.
 func oidcServer(t *testing.T) (*Server, http.Handler) {
 	s, h := newTestServer(t, nil)
-	s.cfg.Server.Auth.Mode = "oidc"
 	s.cfg.Server.Auth.Issuer = "https://issuer.test"
 	s.cfg.Server.Auth.OAuthClientID = "spindle"
 	s.cfg.Server.Auth.OAuthClientSecret = "sekrit"

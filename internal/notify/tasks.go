@@ -540,9 +540,7 @@ func (s *Service) fanoutOne(ctx context.Context, owner, name, repo string, seq i
 		// workers exist at any instant. Budget accounting is unchanged —
 		// a recipient never launched before expiry counts failed,
 		// exactly as a worker stranded on the semaphore did before.
-		select {
-		case sem <- struct{}{}:
-		case <-fctx.Done():
+		if !acquireFanoutSlot(fctx, sem) {
 			fail() // budget expired waiting for a slot
 			continue
 		}

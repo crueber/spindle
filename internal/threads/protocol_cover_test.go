@@ -249,7 +249,7 @@ func TestQueueMidClaimMovesOn(t *testing.T) {
 	if _, err := e.svc.UpdateJob(ctx(), "o/r", run.ID, jobs[0].ID, JobUpdate{State: JobCancelled}); err != nil {
 		t.Fatalf("cancel job: %v", err)
 	}
-	runner := &runnerAuth{Owner: "o", Repo: "r", Doc: &RunnerDoc{ID: "rnr", Labels: []string{"ubuntu-latest"}, State: RunnerActive}}
+	runner := &runnerAuth{Doc: &RunnerDoc{ID: "rnr", Labels: []string{"linux"}, AllowAll: true, State: RunnerActive}}
 	claim, err := e.svc.claimLoop(ctx(), "o", "r", runner.Doc, runner.Doc.Labels)
 	if err != nil || claim == nil {
 		t.Fatalf("claimLoop = %+v, %v", claim, err)
@@ -276,28 +276,28 @@ func TestRunnerRegistryEdges(t *testing.T) {
 	admin := auth.Principal{Name: "admin", Admin: true}
 	*cur = admin
 	// Anonymous mint is refused.
-	if _, err := e.svc.MintRegistrationToken(ctx(), "o/r", auth.Anonymous()); err == nil {
+	if _, err := e.svc.MintRegistrationToken(ctx(), auth.Anonymous(), mintAllPolicy("")); err == nil {
 		t.Fatal("an anonymous registration token must be refused")
 	}
 	// Unknown runner mutations.
-	if rec := doAuth(h, http.MethodDelete, "/o/r/api/threads/runners/abcdefgh1234", "", ""); rec.Code != http.StatusNotFound {
+	if rec := doAuth(h, http.MethodDelete, "/api/v1/admin/runners/abcdefgh1234", "", ""); rec.Code != http.StatusNotFound {
 		t.Fatalf("unknown revoke = %d", rec.Code)
 	}
-	if rec := doAuth(h, http.MethodDelete, "/o/r/api/threads/runners/bogus!", "", ""); rec.Code != http.StatusNotFound {
+	if rec := doAuth(h, http.MethodDelete, "/api/v1/admin/runners/bogus!", "", ""); rec.Code != http.StatusNotFound {
 		t.Fatalf("bad id revoke = %d", rec.Code)
 	}
 	// Corrupt registry/credential records fail closed.
-	mint, err := e.svc.MintRegistrationToken(ctx(), "o/r", admin)
+	mint, err := e.svc.MintRegistrationToken(ctx(), admin, mintAllPolicy(""))
 	if err != nil {
 		t.Fatalf("mint: %v", err)
 	}
-	if _, err := store.PutBytes(ctx(), e.store, RunnerKey("o", "r", mint.ID), []byte("{"), store.PutOptions{Mode: store.PutOverwrite}); err != nil {
+	if _, err := store.PutBytes(ctx(), e.store, RunnerKey(mint.ID), []byte("{"), store.PutOptions{Mode: store.PutOverwrite}); err != nil {
 		t.Fatalf("seed: %v", err)
 	}
-	if rec := doAuth(h, http.MethodDelete, "/o/r/api/threads/runners/"+mint.ID, "", ""); rec.Code != http.StatusInternalServerError {
+	if rec := doAuth(h, http.MethodDelete, "/api/v1/admin/runners/"+mint.ID, "", ""); rec.Code != http.StatusInternalServerError {
 		t.Fatalf("corrupt registry revoke = %d", rec.Code)
 	}
-	if rec := doAuth(h, http.MethodGet, "/o/r/api/threads/runners", "", ""); rec.Code != http.StatusInternalServerError {
+	if rec := doAuth(h, http.MethodGet, "/api/v1/admin/runners", "", ""); rec.Code != http.StatusInternalServerError {
 		t.Fatalf("corrupt registry list = %d", rec.Code)
 	}
 	// Register with a malformed, unknown and expired token.
@@ -310,7 +310,7 @@ func TestRunnerRegistryEdges(t *testing.T) {
 		}
 	}
 	// An expiring registration token is refused.
-	mint2, err := e.svc.MintRegistrationToken(ctx(), "o/r", admin)
+	mint2, err := e.svc.MintRegistrationToken(ctx(), admin, mintAllPolicy(""))
 	if err != nil {
 		t.Fatalf("mint2: %v", err)
 	}
@@ -320,7 +320,7 @@ func TestRunnerRegistryEdges(t *testing.T) {
 		t.Fatalf("expired registration = %d", rec.Code)
 	}
 	// A revoked credential is refused by declare.
-	mint3, err := e.svc.MintRegistrationToken(ctx(), "o/r", admin)
+	mint3, err := e.svc.MintRegistrationToken(ctx(), admin, mintAllPolicy(""))
 	if err != nil {
 		t.Fatalf("mint3: %v", err)
 	}
@@ -333,7 +333,7 @@ func TestRunnerRegistryEdges(t *testing.T) {
 	if len(registered.Labels) != 1 || registered.Labels[0] != "self-hosted" {
 		t.Fatalf("default label = %v", registered.Labels)
 	}
-	if rec := doAuth(h, http.MethodDelete, "/o/r/api/threads/runners/"+registered.RunnerID, "", ""); rec.Code != http.StatusNoContent {
+	if rec := doAuth(h, http.MethodDelete, "/api/v1/admin/runners/"+registered.RunnerID, "", ""); rec.Code != http.StatusNoContent {
 		t.Fatalf("revoke = %d", rec.Code)
 	}
 	if rec := doAuth(h, http.MethodPost, "/api/v1/threads/runners/declare", `{}`, registered.Token); rec.Code != http.StatusUnauthorized {
@@ -441,14 +441,17 @@ func TestAttemptEdges(t *testing.T) {
 	_, runnerToken := registerRunner(t, e, h, admin)
 	job, _ := fetchJob(t, h, runnerToken)
 
-	// start: bad ref, other repo, unknown job, wrong attempt.
+	// start: bad ref, unknown repo/job, unknown job, wrong attempt. An instance
+	// runner is not repository-scoped, so an unknown repository is a 404 (the
+	// run record is absent), never the old repo-scope 403; the claim remains the
+	// authority (a job another runner holds is still 403 below).
 	goodRef := JobRef("o/r", run.ID, "j-build")
 	for _, tc := range []struct {
 		path string
 		want int
 	}{
 		{"/api/v1/threads/jobs/notaref/attempt/1/start", 404},
-		{"/api/v1/threads/jobs/" + JobRef("x/y", run.ID, "j-build") + "/attempt/1/start", 403},
+		{"/api/v1/threads/jobs/" + JobRef("x/y", run.ID, "j-build") + "/attempt/1/start", 404},
 		{"/api/v1/threads/jobs/" + JobRef("o/r", run.ID, "j-nope") + "/attempt/1/start", 404},
 		{"/api/v1/threads/jobs/" + goodRef + "/attempt/9/start", 409},
 		{"/api/v1/threads/jobs/" + goodRef + "/attempt/abc/start", 400},
@@ -549,7 +552,7 @@ func TestRunnerLivenessAndDeclare(t *testing.T) {
 	if rec := doAuth(h, http.MethodPost, "/api/v1/threads/runners/declare", `{"version":"1.2.3","labels":["GPU","linux"]}`, token); rec.Code != http.StatusOK {
 		t.Fatalf("declare = %d", rec.Code)
 	}
-	runner, _, err := e.svc.loadRunner(ctx(), "o", "r", id)
+	runner, _, err := e.svc.loadRunner(ctx(), id)
 	if err != nil {
 		t.Fatalf("loadRunner: %v", err)
 	}
@@ -561,7 +564,7 @@ func TestRunnerLivenessAndDeclare(t *testing.T) {
 	if _, err := e.svc.authorizeRunner(ctx(), token); err != nil {
 		t.Fatalf("authorize: %v", err)
 	}
-	refreshed, _, _ := e.svc.loadRunner(ctx(), "o", "r", id)
+	refreshed, _, _ := e.svc.loadRunner(ctx(), id)
 	if *refreshed.LastSeenAt <= *runner.LastSeenAt {
 		t.Fatalf("last_seen not refreshed: %q → %q", *runner.LastSeenAt, *refreshed.LastSeenAt)
 	}
@@ -569,14 +572,14 @@ func TestRunnerLivenessAndDeclare(t *testing.T) {
 		t.Fatal("a bad stamp is older")
 	}
 	// Corrupt runner records fail the bearer.
-	if _, err := store.PutBytes(ctx(), e.store, RunnerKey("o", "r", id), []byte("{"), store.PutOptions{Mode: store.PutOverwrite}); err != nil {
+	if _, err := store.PutBytes(ctx(), e.store, RunnerKey(id), []byte("{"), store.PutOptions{Mode: store.PutOverwrite}); err != nil {
 		t.Fatalf("seed: %v", err)
 	}
 	if rec := doAuth(h, http.MethodPost, "/api/v1/threads/runners/declare", `{}`, token); rec.Code != http.StatusInternalServerError {
 		t.Fatalf("corrupt runner declare = %d", rec.Code)
 	}
 	// Corrupt credentials too.
-	credKey := RunnerTokenKey("admin", id)
+	credKey := RunnerTokenKey(id)
 	if _, err := store.PutBytes(ctx(), e.store, credKey, []byte("{"), store.PutOptions{Mode: store.PutOverwrite}); err != nil {
 		t.Fatalf("seed: %v", err)
 	}
@@ -608,8 +611,8 @@ func TestRunnerProtocolMethodGates(t *testing.T) {
 	// Repo admin method gates.
 	for _, tc := range []struct{ method, path string }{
 		{http.MethodDelete, "/o/r/api/threads/secrets"},
-		{http.MethodPost, "/o/r/api/threads/runners"},
-		{http.MethodGet, "/o/r/api/threads/runners/tokens"},
+		{http.MethodPost, "/api/v1/admin/runners"},
+		{http.MethodGet, "/api/v1/admin/runners/tokens"},
 		{http.MethodGet, "/o/r/api/threads/" + "1795176002000000000-abcdef" + "/cancel"},
 		{http.MethodPost, "/o/r/api/threads/" + "1795176002000000000-abcdef" + "/jobs/j-build/log"},
 	} {
@@ -622,7 +625,7 @@ func TestRunnerProtocolMethodGates(t *testing.T) {
 func TestGCRequeuesExpiredClaims(t *testing.T) {
 	e := newTestEnv(t)
 	run := e.mustCreate(t)[0]
-	runner := &runnerAuth{Owner: "o", Repo: "r", Doc: &RunnerDoc{ID: "rnr", Labels: []string{"ubuntu-latest"}, State: RunnerActive}}
+	runner := &runnerAuth{Doc: &RunnerDoc{ID: "rnr", Labels: []string{"linux"}, AllowAll: true, State: RunnerActive}}
 	job, err := e.svc.FetchJob(ctx(), runner, time.Millisecond)
 	if err != nil || job == nil {
 		t.Fatalf("fetch = %+v, %v", job, err)

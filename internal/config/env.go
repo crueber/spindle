@@ -110,6 +110,7 @@ func applyEnv(c *Config, getenv func(string) string, environ []string) ([]Overri
 				}
 				return fmt.Errorf("%s: %w", e.name, err)
 			}
+			c.markExplicit(key)
 		}
 		return nil
 	}
@@ -139,11 +140,15 @@ func applyEnv(c *Config, getenv func(string) string, environ []string) ([]Overri
 		}
 		if err := assignPath(c, parts, e.raw); err != nil {
 			if errors.Is(err, errUnknownKey) {
+				if hint, ok := removedAuthKeyHint(key); ok {
+					return overrides, fmt.Errorf("%s: %s", e.name, hint)
+				}
 				overrides = append(overrides, Override{Name: e.name, Key: key, Reason: "unknown key " + key})
 				continue
 			}
 			return overrides, fmt.Errorf("%s: %w", e.name, err)
 		}
+		c.markExplicit(key)
 	}
 
 	// RUST_LOG (kept) overrides telemetry.log_filter; SPINDLE_LOG is the

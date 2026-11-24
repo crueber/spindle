@@ -11,6 +11,7 @@ func mdCtx(src string, ctx MarkdownCtx) string { return string(RenderMarkdownCtx
 // --- relative URL resolution (WP12 deliverable A) ---------------------------
 
 func TestRenderMarkdownCtxRelativeURLs(t *testing.T) {
+	t.Parallel()
 	ctx := MarkdownCtx{Owner: "acme", Repo: "loom", Ref: "main", Dir: "docs/nested"}
 	cases := []struct{ src, want string }{
 		// images always go to the raw-byte endpoint at the same ref
@@ -58,6 +59,7 @@ func TestRenderMarkdownCtxRelativeURLs(t *testing.T) {
 }
 
 func TestRenderMarkdownCtxSlashedRef(t *testing.T) {
+	t.Parallel()
 	ctx := MarkdownCtx{Owner: "acme", Repo: "loom", Ref: "feat/readme", Dir: ""}
 	out := mdCtx("[g](guide.md) ![i](a.png)", ctx)
 	for _, want := range []string{
@@ -73,6 +75,7 @@ func TestRenderMarkdownCtxSlashedRef(t *testing.T) {
 // A full ref name (refs/heads/main) is shortened before it enters a URL, so
 // a slash in "refs/heads" can never split the route.
 func TestRenderMarkdownCtxShortensFullRef(t *testing.T) {
+	t.Parallel()
 	ctx := MarkdownCtx{Owner: "acme", Repo: "loom", Ref: "refs/heads/main"}
 	if out := mdCtx("[g](a.md)", ctx); !strings.Contains(out, `href="/acme/loom/blob/main/a.md"`) {
 		t.Fatalf("full ref not shortened: %q", out)
@@ -82,6 +85,7 @@ func TestRenderMarkdownCtxShortensFullRef(t *testing.T) {
 // --- raw-HTML sanitizer corpus (WP12 deliverable B) -------------------------
 
 func TestRenderMarkdownSanitizerNeuters(t *testing.T) {
+	t.Parallel()
 	payloads := []struct{ name, src string }{
 		{"script", `<script>alert(1)</script>`},
 		{"script attr", `<div><script src="https://evil.test/x.js"></script>hi</div>`},
@@ -127,6 +131,7 @@ func TestRenderMarkdownSanitizerNeuters(t *testing.T) {
 }
 
 func TestRenderMarkdownSanitizerAllows(t *testing.T) {
+	t.Parallel()
 	src := strings.Join([]string{
 		`<div align="center">`,
 		`<p align="center">centered</p>`,
@@ -174,6 +179,7 @@ func TestRenderMarkdownSanitizerAllows(t *testing.T) {
 
 // Raw HTML resolves relative URLs with the same rules as markdown syntax.
 func TestRenderMarkdownSanitizerResolvesRelativeURLs(t *testing.T) {
+	t.Parallel()
 	ctx := MarkdownCtx{Owner: "acme", Repo: "loom", Ref: "main", Dir: "docs"}
 	out := mdCtx(`<p><img src="a.png"><a href="guide.md">g</a><a href="https://e.test/x">e</a></p>`, ctx)
 	for _, want := range []string{
@@ -190,6 +196,7 @@ func TestRenderMarkdownSanitizerResolvesRelativeURLs(t *testing.T) {
 // Inline raw HTML inside a paragraph is sanitized, not escaped, and normal
 // text stays escaped.
 func TestRenderMarkdownInlineRawHTML(t *testing.T) {
+	t.Parallel()
 	out := md("press <kbd>Ctrl</kbd> + <kbd>C</kbd> now")
 	if !strings.Contains(out, "<kbd>Ctrl</kbd>") || !strings.Contains(out, "<kbd>C</kbd>") {
 		t.Fatalf("inline kbd = %q", out)
@@ -214,13 +221,14 @@ func TestRenderMarkdownInlineRawHTML(t *testing.T) {
 // --- the golden fixture: a trimmed copy of the real loom README -------------
 
 func TestRenderMarkdownLoomReadme(t *testing.T) {
+	t.Parallel()
 	src := readTestdata(t, "loom-readme.md")
 	ctx := MarkdownCtx{Owner: "acme", Repo: "loom", Ref: "main", Dir: ""}
 	out := mdCtx(src, ctx)
 
 	for _, want := range []string{
 		`<div align="center">`, // centered header block survives
-		"<h1>Loom</h1>",        // markdown inside the div still renders
+		"<h2>Loom</h2>",        // markdown inside the div still renders (h1 demoted)
 		`</div>`,
 		"<details>",
 		"<summary><strong>🐳 Docker (recommended)</strong></summary>",

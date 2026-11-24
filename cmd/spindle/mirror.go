@@ -63,7 +63,6 @@ func newMirrorService(st store.ObjectStore, reg *wal.Registry, cfg *config.Confi
 			_, err := reg.Create(ctx, owner+"/"+name, git.Sha1)
 			return err
 		},
-		AuthMode: func() string { return cfg.Server.Auth.Mode },
 	}
 	if apiEnv != nil {
 		// The summary projection behind the Env hook (the ReadGate/

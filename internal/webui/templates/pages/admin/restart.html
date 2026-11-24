@@ -1,0 +1,51 @@
+{{/* pages/admin/restart.html — the answer to POST /admin/restart
+   (docs/PLAN-ADMIN.md §5 as amended; docs/go/12_web_ui.md §2.10).
+
+   Three states from one template:
+     - Restarting:       the request was accepted; the page was flushed before
+                         the delayed self-signal, so the reader sees it.
+     - AlreadyRequested: a concurrent second request (409) — no second signal.
+     - the confirmation form, with a named inline error on a missing/wrong word.
+
+   The process-exits truth is never softened: the supervisor restarts it, and
+   with restart: no it stays down. */}}
+{{define "content"}}
+<div class="admin-page" id="admin-page" data-admin-section="restart">
+  <div class="flex flex-col gap-4 lg:flex-row lg:gap-6">
+    {{template "admin-nav" .Data}}
+
+    <div class="min-w-0 flex-1">
+      {{template "admin-header" .Data}}
+
+      {{with .Data.Restart}}
+      {{if .Restarting}}
+      <section class="card border-l-2 border-l-[var(--pd-warn)] p-4" aria-labelledby="admin-restarting-title" role="status">
+        <h2 class="card-header" id="admin-restarting-title">Restarting</h2>
+        <p class="text-sm">The restart request was accepted. This process is shutting down now; when it
+          exits, its supervisor starts it again with the saved configuration.</p>
+        <p class="muted mt-2 text-sm">This page cannot follow the next process. Reload after the
+          supervisor has started it — if the instance does not come back, the supervisor is not
+          restarting it (see below).</p>
+        {{template "admin-restart-truth" .}}
+      </section>
+      {{else if .AlreadyRequested}}
+      <section class="card border-l-2 border-l-[var(--pd-warn)] p-4" aria-labelledby="admin-restart-requested-title" role="status">
+        <h2 class="card-header" id="admin-restart-requested-title">Already requested</h2>
+        <p class="text-sm">Another request already asked this instance to restart. A restart is
+          signalled once; this request did nothing, so there is no second signal.</p>
+        <p class="mt-2 text-sm"><a class="link" href="/admin/maintenance">Back to Maintenance</a></p>
+      </section>
+      {{else}}
+      <section class="card p-4" aria-labelledby="admin-restart-confirm-title">
+        <h2 class="card-header" id="admin-restart-confirm-title">Confirm the restart</h2>
+        {{if .Error}}<p class="err-line" role="alert">{{.Error}}</p>{{end}}
+        {{template "admin-restart-form" .}}
+        {{template "admin-restart-truth" .}}
+        <p class="mt-2 text-sm"><a class="link" href="/admin/maintenance">Cancel — back to Maintenance</a></p>
+      </section>
+      {{end}}
+      {{end}}
+    </div>
+  </div>
+</div>
+{{end}}

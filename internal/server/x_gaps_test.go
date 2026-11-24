@@ -157,7 +157,7 @@ func TestGitServiceGates(t *testing.T) {
 	// Write-denied principal → pkt-ERR shape (git client, carried auth, §4.2).
 	s3, _ := newTestServer(t, nil)
 	s3.cfg.Server.Auth.Tokens = append(s3.cfg.Server.Auth.Tokens,
-		config.StaticToken{Principal: "ro", Token: "ro-token", Write: false, Admin: false})
+		config.StaticToken{Principal: "ro", Token: "ro-token", Write: false})
 	s3.authSvc = NewAuthService(&s3.cfg.Server.Auth, s3.Now)
 	req = httptest.NewRequest("POST", "http://x/o/r.git/git-receive-pack?service=git-receive-pack", nil)
 	req.Header.Set("User-Agent", "git/2.46.0")
@@ -428,7 +428,6 @@ func TestRequireAuthMatrix(t *testing.T) {
 	}
 	// Aged session → sliding refresh sets a new cookie. Sessions are only
 	// honored in oidc mode (§8.3), so flip the mode.
-	s.cfg.Server.Auth.Mode = "oidc"
 	s.cfg.Server.Auth.SessionSecret = "0123456789abcdef0123456789abcdef"
 	s.cfg.Server.Auth.OAuthClientID = "spindle"
 	s.cfg.Server.Auth.OAuthClientSecret = "sekrit"
@@ -814,7 +813,11 @@ func TestSetupTestAndPutFailurePaths(t *testing.T) {
 		t.Fatalf("validation = %d %s", rec.Code, rec.Body.String())
 	}
 
-	// Save failure → 500 (data dir is a file).
+	// Save failure → 500 (data dir is a file). The base stays a valid file so
+	// validation passes; only the destination write fails.
+	validDir := t.TempDir()
+	seedValidConfig(t, validDir)
+	s.boot.ConfigPaths = []string{filepath.Join(validDir, config.ConfigFileName)}
 	fileDir := filepath.Join(t.TempDir(), "not-a-dir")
 	if err := os.WriteFile(fileDir, []byte("x"), 0o644); err != nil {
 		t.Fatal(err)

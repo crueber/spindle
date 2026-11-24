@@ -116,6 +116,24 @@ func requireAuthenticated(p auth.Principal) error {
 	return nil
 }
 
+// requireNotBlocked is pulls' one moderation enforcement point
+// (PLAN-V2 §M.5): called after role resolution and before any CAS by every
+// interaction verb. Host admins are exempt; a gate error fails closed; the
+// refusal text never names the block (identity.InteractionRefused).
+func (s *Service) requireNotBlocked(ctx context.Context, owner, repo string, actor auth.Principal) error {
+	if s.Moderation == nil || actor.Anonymous || actor.Admin {
+		return nil
+	}
+	blocked, _, err := s.Moderation.BlockedFromRepo(ctx, owner, repo, normPrincipal(actor.Name))
+	if err != nil {
+		return fmt.Errorf("moderation unavailable: %v", err)
+	}
+	if blocked {
+		return fmt.Errorf("%w: %s", ErrForbidden, identity.InteractionRefused)
+	}
+	return nil
+}
+
 // --- protected-ref gate (§5 step 4) ------------------------------------------
 
 // loadPolicy reads and parses repos/<o>/<r>/policy.json. A missing file is
@@ -137,12 +155,14 @@ func (s *Service) loadPolicy(ctx context.Context, owner, repo string) (*policy.D
 	return doc, nil
 }
 
-// checkProtectedRef explicitly evaluates policy.json for (principal =
-// merger, ref = base.ref, op) because the merge task's base-ref publish is
-// NOT a receive-pack push (§5 step 4): protect rules deny the merge exactly
-// as they would deny a push (plain-text `rejected by rule '<name>'`), and
-// bypass lists (e.g. svc:merge-queue) apply unchanged. Evaluation is pure
-// and local (no network in eval). op is create|update|delete|force-push.
+// checkProtectedRef explicitly evaluates policy.json for (principal,
+// ref, op) on the server-side ref-write decisions that still take the
+// protect verdict — the merge task's head cleanup (delete); the tags
+// service mirrors this shape for its server-side writes. It is NOT the
+// merge gate: protect restricts/bypass govern direct ref updates
+// (pushes), so runMerge does not call it for the base-ref update (see
+// checkMergeTarget). Evaluation is pure and local (no network in eval).
+// op is create|update|delete|force-push.
 func (s *Service) checkProtectedRef(ctx context.Context, owner, repo string, principal, ref, op string) error {
 	if walgit.IsManagedRef(ref) {
 		// Only the PR task publishes managed refs, server-side; a client
@@ -155,17 +175,88 @@ func (s *Service) checkProtectedRef(ctx context.Context, owner, repo string, pri
 	if err != nil {
 		return err
 	}
-	// Protect-only evaluation (policy.EvaluateProtect): the merge publish
-	// is server-side, NOT a receive-pack push, so observation effects with
-	// their own gates (required-reviews — consulted separately by runMerge
-	// through the ReviewGate seam) must not deny here. Required-checks
-	// runs through its own gate next (checkRequiredChecksGate in
-	// checks.go — 05 §6 merge-time half, never the push path).
+	// Protect-only evaluation (policy.EvaluateProtect): the publisher is
+	// server-side, NOT a receive-pack push, so observation effects with
+	// their own gates (required-reviews / require_checks) must not deny a
+	// ref delete here — they are merge gates, consulted separately by
+	// runMerge. On the delete path the protect verdict IS the gate.
 	v := policy.EvaluateProtect(ctx, doc, policy.Request{Principal: principal, Ref: ref, Op: op})
 	if !v.Allow {
 		return fmt.Errorf("rejected by rule '%s'", v.Rule)
 	}
 	return nil
+}
+
+// checkMergeTarget is the merge-time policy precondition (03 §5 step 4):
+// the target must not be a server-managed ref, and policy.json must load
+// and parse (fail closed — an unreadable policy never becomes "merge
+// without a policy"). Protect `restricts`/`bypass` are deliberately NOT
+// evaluated: they govern direct ref updates (client pushes), not the
+// server-side merge publish. A merge is constrained by the observation
+// half of the policy instead — require_checks (05 §6, always evaluated
+// for the merging actor, bypass or not) and required-reviews (04 §6,
+// which owns its own bypass list) — through their own gates.
+func (s *Service) checkMergeTarget(ctx context.Context, owner, repo, ref string) error {
+	_, err := s.loadMergeGate(ctx, owner, repo, ref, "")
+	return err
+}
+
+// --- merge-method gate (PLAN-V2 §2.2) ---------------------------------------
+
+// loadMergeGate is checkMergeTarget's one-read form: it refuses a
+// server-managed target, loads and parses policy.json (fail closed — an
+// unreadable policy never becomes "merge without a policy"), and resolves
+// the merge-method half of the `protect` effect for (base ref, merging
+// actor) through policy.MergeGateFor — the same resolver the PR page uses
+// to decide which methods to offer, so page and gate cannot drift.
+func (s *Service) loadMergeGate(ctx context.Context, owner, repo, ref, principal string) (policy.MergeGate, error) {
+	if walgit.IsManagedRef(ref) {
+		// The merge task never publishes a managed ref: a PR's base ref is
+		// a branch, and refs/pull/** belongs to the PR open task alone.
+		return policy.MergeGate{}, fmt.Errorf("%w: refused to publish managed ref %q through the merge path", ErrForbidden, ref)
+	}
+	doc, err := s.loadPolicy(ctx, owner, repo)
+	if err != nil {
+		return policy.MergeGate{}, err
+	}
+	return policy.MergeGateFor(doc, policy.Request{Principal: principal, Ref: ref, Op: policy.OpUpdate}), nil
+}
+
+// checkMergeMethod refuses a strategy the base ref's policy forbids
+// (merge_methods, PLAN-V2 §2.2/§2.5.2). The allowed set is intersected
+// across every matching rule; a rule that omits the field never narrows it.
+// The refusal names the method, the rule(s) and the allowed set — the same
+// text the API's 409 and the page's inline error carry.
+func checkMergeMethod(g policy.MergeGate, strategy, baseRef string) error {
+	if g.Allows(strategy) {
+		return nil
+	}
+	return fmt.Errorf("%w: %w: %q is not allowed on %s by rule %s (allowed: %s)",
+		ErrConflict, ErrMethodNotAllowed, strategy, baseRef, quoteRules(g.Rules),
+		strings.Join(g.MethodsOrAll(), ", "))
+}
+
+// checkMergeUpToDate refuses a merge whose head does not contain the base
+// tip when require_up_to_date applies to the merging actor (PLAN-V2
+// §2.2/§2.5.2). The fix is the update-branch task, so the message names it.
+func checkMergeUpToDate(g policy.MergeGate, contained bool, baseRef string) error {
+	if !g.RequireUpToDate || contained {
+		return nil
+	}
+	return fmt.Errorf("%w: %w (required on %s by rule %s)",
+		ErrConflict, ErrHeadBehindBase, baseRef, quoteRules(g.Rules))
+}
+
+// quoteRules renders rule names for a refusal ("'a', 'b'").
+func quoteRules(names []string) string {
+	if len(names) == 0 {
+		return "policy"
+	}
+	out := make([]string, 0, len(names))
+	for _, n := range names {
+		out = append(out, "'"+n+"'")
+	}
+	return strings.Join(out, ", ")
 }
 
 // --- message templates (§5 step 3) -------------------------------------------

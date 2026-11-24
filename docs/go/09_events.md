@@ -11,8 +11,10 @@ webhook failure adds lag (a metric), never a push failure. In Go this is package
 part of `internal/git`, `internal/wal` publish, or `internal/api` emits events.
 
 The bridge is instantiated only when **both** hold: the instance's `server.roles` includes `events`
-(empty = all roles) and `events.webhook_url` is set. Otherwise `POST /_events/notify` answers 404
-and no bridge goroutine is started.
+(empty = all roles) and at least one sink exists — `events.webhook_url` is set, a `[[events.sinks]]`
+entry exists, or a consumer package contributes a sink (the `pulls` invalidation sink, and the
+`repo-hooks` sink that feeds push/ref topics to repository webhooks, docs/features/06 §5.3.1).
+Otherwise `POST /_events/notify` answers 404 and no bridge goroutine is started.
 
 ```
 publishers (any role) ──▶ WAL log segments (bucket, immutable)
@@ -101,6 +103,11 @@ Example (this exact shape is the compatibility contract):
 ```
 
 ## 4. Delivery (the sink)
+
+Sinks are the built-in `webhook` and `jsonl` kinds (14 §14.6, `events.NewSink`) plus contributed
+sinks: `pulls` (PR invalidation) and `repo-hooks` (push/ref topics for repository webhooks,
+docs/features/06 §5.3.1). Every sink receives the same `RefEvent` batch; the `webhook` kind's wire
+contract is §4.1.
 
 ### 4.1 Wire contract
 

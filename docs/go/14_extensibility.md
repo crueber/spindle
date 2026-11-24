@@ -40,7 +40,7 @@ Extensions live in their own packages (`internal/issues`, `internal/pulls`, …)
 | WAL `LogEntry` kinds: PUSH, COMPACT, REF_UPDATE, CHECKPOINT, SETTINGS; append-only proto, field numbers frozen | §21, P2/P10 | Replay, checkpoints, burn, events all parse it |
 | Overwritable-object list: `manifest.pb`, `bundles/list.pb`, `leases/*`, `maintain/<host>.pb`, `events/cursor(s)/…`, `policy.json`, `fsck.pb`, render cache, the identity families (`users/*/profile.json`, `users/*/invitations/index.json`, `orgs/*/org.json`, `orgs/*/members.json`, `orgs/*/teams/*.json`, `repos/<o>/<r>/access.json` — Wave A amendment, see Decisions), the pulls families (`repos/<o>/<r>/pulls/<num>/pr.json`, `repos/<o>/<r>/pulls/<num>/mergeable.json`, `repos/<o>/<r>/meta/forks.json` — Wave C1 amendment, see Decisions; `repos/<o>/<r>/fork.json` is Create-once-then-CAS'd provenance in the same family), the checks families (`repos/<o>/<r>/checks/<sha>/<context>.json` — Create-then-CAS status records, `repos/<o>/<r>/checks/index.json` — CAS'd P4 projection, `repos/<o>/<r>/meta/ci_tokens/<id>.json` — CAS'd token records, revoked retained — Wave 05 amendment, see Decisions), the import provenance (`repos/<o>/<r>/meta/import.json` — Create-once-then-CAS'd, Feature 10 amendment, see Decisions), the mirror sidecar (`repos/<o>/<r>/meta/mirror.json` — Create-once-then-CAS'd pull-only flag + upstream pointer + schedule + outcome, Feature 11 amendment, see Decisions), the push-mirror sidecars (`repos/<o>/<r>/meta/pushmirror.json` — Create-once-then-CAS'd upstream pointer + auth-kind + schedule + outcome — plus `repos/<o>/<r>/meta/pushmirror-secret.json` — CAS'd auth material, never echoed — Forgejo #623 amendment, see Decisions), the size-catalog families (`repos/<o>/<r>/meta/stats.json` — overwrite per-repo size sidecar written by the publish path with sweep backfill, `meta/repos.pb` field-3 entries — CAS'd aggregate rows, Forgejo #248 amendment, see Decisions; shared rails #247 builds on), the owner-profile sidecar (`owners/<owner>/profile.json` — CAS'd display name/location/timezone/bio, Forgejo #234 amendment, see Decisions) | P2 | Everything else is `Create`-only, forever |
 | Git wire protocol v0/v2, receive-pack behavior, 401 semantics | §7, §8.4 | git is the client; we do not fork it |
-| Principal `{name, write, admin, anonymous}`; admin independent of write; auth modes `none`/`token`/`oidc` decision tree | §8.8 | Every route's authz reasoning assumes it |
+| Principal `{name, write, admin, anonymous}`; admin independent of write; the one OIDC credential tree and the group predicate | §8.8 | Every route's authz reasoning assumes it |
 | API conventions: plain-text errors, arrays `[]` never null, RFC 3339, two lanes `/api` + `/api-browser` (same handlers), SSE envelope, cache classes | §9 | SDK and edge depend on them |
 | `policy.json` envelope: `version`, `groups`, ordered `rules`, effect-tagged-union, fail-closed, unknown keys *inside* a rule/effect are parse errors | §14 | A typo must never become an allow |
 | Event schema (`action`, `ref_type`, `ref_name`, `old`, `new`, `pusher`, `correlation_id`, `_walgit`) and dedup key `(repo, _walgit.seq, ref_name)` | §12.1–12.2 | Consumers already key on it |
@@ -158,7 +158,7 @@ func ChainFromConfig(cfg *config.Config) *Chain
 
 Worked examples:
 
-- **OAuth app** (e.g. a Git forge): provider claims `gho_`-style tokens, exchanges/verifies them against the issuer, maps identity to `{name: email, write, admin}` via config lists (`allowed_domains`, `admin_emails` — the §8.8 email-policy shape generalizes).
+- **OAuth app** (e.g. a Git forge): provider claims `gho_`-style tokens, exchanges/verifies them against the issuer, maps identity to `{name: email, write, admin}` via config (`allowed_domains`; admin only through `admin_groups` — the §8.8 predicate generalizes).
 - **LDAP**: provider claims `ldap_` tokens (operator-issued static tokens that defer membership to the directory), resolves group membership with a 5 s context timeout and a 60 s in-process cache; directory down = `ErrUnavailable` (503), never a silent allow.
 - **SSO/SAML or another OIDC issuer**: the built-in `oidc` mode already covers any OpenID Connect issuer (§8.8); a new provider is only needed for non-OIDC flows.
 
@@ -268,11 +268,17 @@ url     = "https://ci.internal/hook"
 secret_env = "SPINDLE_HOOK_SECRET"
 [[events.sinks]]
 name    = "audit-log"
-kind    = "jsonl"                      # append Event JSON lines to a bucket object family
-prefix  = "audit/events"               # objects audit/events/<repo>/<yyyymmdd>.jsonl
+kind    = "jsonl"                      # one JSON object per line, size-rotated
+path    = "/var/lib/spindle/audit/events.jsonl"
+max_bytes = "64MiB"                    # optional (default 64MiB)
+keep      = 3                          # optional (default 3 rotated files)
 ```
 
-Built-in sink kinds at launch: `webhook` (identical to §12.2 wire behavior, including `X-Walgit-Delivery` and HMAC `X-Walgit-Signature`) and `jsonl` (bucket-side append-only audit trail). Everything else is registered by extension packages.
+Built-in sink kinds at launch: `webhook` (identical to §12.2 wire behavior, including `X-Walgit-Delivery` and HMAC `X-Walgit-Signature`) and `jsonl`. Everything else is registered by extension packages. Both are constructed by `events.NewSink(events.SinkSpec{...})` (`internal/events/sink_registry.go`); `events.SinkKinds()` is the registry's documented set, and `TestDocumentedSinkKindsAreConstructible` reads this section so the doc and the code cannot drift.
+
+**`jsonl` as built (2026-11-21).** One NDJSON frame per event on the configured local `path` — the same `RefEvent` objects the webhook sink sends as an array, so the two kinds cannot diverge in shape. The earlier sketch said "append … to a bucket object family (`audit/events/<repo>/<yyyymmdd>.jsonl`)"; that is not expressible as an append in an object store (PUT replaces the whole object, so appending is a read-modify-write per batch: an extra GET+PUT on every catch-up, racy across instances, and a lost CAS drops frames). An audit export is derived output like a log, not repository state, so the built kind writes a **local file** and the doc records the deviation instead of the bucket key. Rotation: when the next batch would push the file past `max_bytes`, it is renamed to `<path>.1` (shifting `.1…keep-1` up one and dropping the oldest) and a fresh file starts; a single batch larger than `max_bytes` is still written whole (losing events is worse than an oversized file). `path` is required, `max_bytes` must be positive, `keep >= 1`; validation names the exact key (`events.sinks[i].<key>`) so the setup page can mark the row. The registry never reads the environment: `secret_env` is resolved by composition, and an empty value logs a warning and delivers unsigned.
+
+**One cursor, N sinks (unchanged in this tree).** The per-sink cursor above is still the target shape; the bridge currently advances ONE cursor per repo after every sink acks, so a failing `jsonl` write holds the webhook sink's cursor too (fail closed: nothing is lost, everything replays at-least-once). The `repo-hooks` push sink (`cmd/spindle/events_hooks.go`, docs/features/06 §5.3.1) rides the same list.
 
 ### Concurrency
 
@@ -465,6 +471,20 @@ curl -N -H "Authorization: Bearer $SPINDLE_TOKEN" \
 - **Bridge serialization weakens from process-wide to per-repo** (single-flight per repo). Rationale: seq-ordered events plus the CAS'd cursor make cross-repo ordering meaningless (§12.2 already says "nothing across repos"); per-repo parallelism is free correctness-preserving concurrency.
 - **Auth is a provider chain instead of a closed three-mode switch.** Rationale: `none`/`token`/`oidc` semantics are frozen as the first chain members; LDAP/OAuth/SSO become registrations. Resolution order preserves the exact §8.8 decision tree and 401 semantics.
 - **Policy effects are an open registry; `review-required`/`ci-required` are additive and honestly scoped.** Rationale per the Rust policy doc: receive-pack only enforces what it can observe (who/where/shape); the enforceable form is "deny direct pushes except listed bypass," never "external CI is green."
+- **Merge-protection effect amendment (2026-11-21, PLAN-V2 §2.2, docs/features/03 §5.1):** the
+  `protect` effect gains two optional merge-only fields — `require_up_to_date` (bool, default false,
+  all-of across matching rules the merging actor does not bypass) and `merge_methods` (a non-empty
+  subset of `merge|squash|rebase`, intersection across matching rules, absent = every method). Both
+  are parsed in `internal/policy` (strict, fail closed: unknown values, duplicates, null and empty
+  lists are parse errors) and evaluated by ONE resolver, `policy.MergeGateFor`, which the merge task
+  (`internal/pulls`) and the PR page's merge box (`internal/webui`) both call — a page and a gate
+  cannot drift. They are NOT push effects (a push has no head/base pair), so receive-pack ignores
+  them exactly like `require_checks`. No new key family, no new effect kind, no task kind: the
+  frozen overwritable list is unchanged. The rule-name grammar also widens to
+  `^[a-z][a-z0-9:-]{0,62}$` so the settings rulesets can spell `protection:<slug>-push`
+  (docs/features/03 Decisions); a rule name is an opaque string at every use site, so this is an
+  additive grammar change with the usual rolling-upgrade caveat (§14.5: an older reader fails closed
+  on a name it cannot spell, so deploy before a repo adopts a `:`-named rule).
 - **Issues/PRs/reviews use sidecar state families, never WAL kinds.** Rationale: WAL kinds are a closed schema (frozen contract #2); the orphan-retry pattern from §6.4 is reused for issues so a crash never corrupts either family.
 - **PRs are a ref-namespace convention (`refs/heads/pull/<n>/{head,merge}`) computed by a maintainer unit, marked DESIGN SKETCH.** Rationale: refs get bundles/events/policy/fsck for free; anything richer would drag merge-queue machinery into core, which the Rust spec explicitly excludes.
 - **Issues index/PR review indexes added to the frozen overwritable-key list** (`issues/index.json`, `pulls/<n>/index.json` if adopted). Rationale: P2 requires overwritable objects to be enumerated; an unlisted mutable key would violate the invariant silently.
@@ -474,7 +494,7 @@ curl -N -H "Authorization: Bearer $SPINDLE_TOKEN" \
 - **Wave C1 pulls amendment (2026-09-04, docs/features/03):** the frozen overwritable-key list gains the pulls families — `repos/<o>/<r>/pulls/<num>/pr.json` (CAS'd sidecar), `repos/<o>/<r>/pulls/<num>/mergeable.json` (Create-then-CAS derived cache), `repos/<o>/<r>/meta/forks.json` (CAS'd parent index) — plus fork-side `repos/<o2>/<r2>/fork.json` (Create-once-then-CAS'd provenance) in the same family (14 §14.11 rule 2, in the same revision that adopts the feature). The shared `issues/index.json` / `meta/next_num` / thread keys are NOT new families (02 owns them; 03 reads/writes the same objects). The `refs/pull/**` server-managed namespace is enforced in the core push pipeline (`internal/git.IsManagedRef` + the server's pushPipeline refusal, both transports) with NO feature import — a pure namespace predicate, the same shape as any future managed namespace. Rationale: receive-pack must refuse PR refs even when no feature package is consulted; the push funnel is the one place every client write traverses.
 - **Wave C2 review amendment (2026-09-04, docs/features/04):** the frozen overwritable-key list gains the review families — `repos/<o>/<r>/pulls/<num>/review-requests.json` (CAS'd current-state index) and `repos/<o>/<r>/pulls/<num>/threads/<tid>/thread.json` (CAS'd per-thread headers) in the same revision that adopts the feature (14 §14.11 rule 2). Review events (`reviews/<seq>.json`) and thread comment events are Create-only immutable — not overwritable, no listing needed. The `next_review_seq` / `next_thread_num` / `review_summary` fields ride the EXISTING shared `issues/<num>/thread.json` header as additive optional fields (14 §14.12 field rule) — no new header family, and 03's header writes round-trip them opaquely (`pulls.Thread` carries them as preserved-but-uninterpreted state). The `required-reviews` effect registers via `policy.RegisterEffect` (Seam 3) with its type in `internal/policy` beside its siblings (push-path matching uses the package-private glob/actor law, so the type lives where the law lives); the merge-time half is 04's event scan, consulted by 03's merge task through pulls' `ReviewGate` seam — the merge logic is NOT forked, the gate is one check at the step-4 call site. 04 registers NO task kinds (the only long work in its graph is 03's `pull-merge`), NO event-sink cursor, and no discovery entries (the `/api/v1` `endpoints[]` derive from the core route table only — 01/02/03/C2 feature routes are absent there alike; the SDK enumerates them statically). Rationale: additive header fields keep one CAS arbitration point for review/thread allocation instead of inventing a second counter object; the effect type follows the existing effect code (strict parse, push-pure eval) while the unobservable half stays where the state is observable.
 - **Feature 06 notifications amendment (2026-09-04, docs/features/06):** the frozen overwritable-key list gains the notify families — `users/<principal>/notifications/index.json` (CAS'd P4 unread hot window), `users/<principal>/notifications/<id>.json` (Create-only, CAS state-flip read/unread, delete-on-retention), `repos/<o>/<r>/meta/collab_state.json` (CAS'd activity seq allocator), `repos/<o>/<r>/webhooks/<id>.json` (CAS'd hook config), `repos/<o>/<r>/webhooks/cursors/<id>.json` (CAS'd per-hook cursor, the direct analog of the per-sink `events/cursors/<sink>.json` family proposed here for the frozen list: `{"published_seq": N, "updated_at": RFC3339}`, one slow webhook never stalls another), `repos/<o>/<r>/webhooks/<id>/deliveries/recent.json` (CAS'd last-25 ring) — in the same revision that adopts the feature (14 §14.11 rule 2). Activity events (`collab-events/<seq>.json`) and watch records (`users/<principal>/watching/<o>/<r>.json`) are Create-only immutable, delete-on-transition — not overwritable, no listing needed. `social.json` (`repos/<o>/<r>/meta/social.json`, CAS'd counters + `watcher_list`) is WRITTEN here but OWNED by 07: the 07 wave adopts the family and must preserve the `watcher_list`/`watchers_truncated` fields 06 consumes. 06 registers three task kinds (`webhooks` per-repo delivery loop via sweep + wake-up, `notify-fanout` overflow drain, `notify-retention` global pass) as in-process (repo,kind) single-flight + background sweeps started by composition (the events-bridge pattern), NOT in the wal task table or the maintainer registry — no core touch. Seam 1 in code is the `server.ExtraRoutes` chain (`Handle(w,r) bool`, both lanes, top-level twins + repo lanes). No discovery entries (same rule as 01/02/03/C2/05). Rationale: per-hook cursors are the same isolation shape as per-sink cursors (a failed/slow consumer holds back only itself); the activity log is the webhook unit AND the fan-out backfill source, so its seq allocator and cursors need the same CAS protection as the families they mirror.
-- **Wave 05 checks amendment (2026-09-04, docs/features/05):** the frozen overwritable-key list gains the checks families — `repos/<o>/<r>/checks/<sha>/<context>.json` (Create-then-CAS status records, last-write-wins, never deleted), `repos/<o>/<r>/checks/index.json` (CAS'd P4 hot-window projection, newest 500 shas, inline compaction past 256 KiB), `repos/<o>/<r>/meta/ci_tokens/<id>.json` (CAS'd token records; hash-only, revoked retained) — in the same revision that adopts the feature (14 §14.11 rule 2). `require_checks` is NOT a new effect kind: it is an optional strict field inside the existing `protect` effect (1–32 validated context names, `policy.ValidCheckContext` — one grammar shared with the writer), parsed fail-closed but never evaluated on the push path (direct pushes are not gated; the merge task owns the verdict). Combination across matching rules is union over rules the merger does not bypass (03 §5 step 4: bypass lists apply unchanged; 05's "no bypass list" means the field carries no bypass of its own). Seam 2 in code is the `AuthService.ExtraCredential` hook (a func consulted after static tokens in `token`/`oidc` modes — the chain resolves the wct_ SHAPE to an unprivileged `ci:<id>` principal; the secret is verified handler-side per repo, so the chain never blocks on store I/O and `Evaluate` stays pure). Startup panics on prefix overlap (`checks.AssertPrefixDisjoint`, called from composition). The merge-time half is 05's stored-combined-view read, consulted by 03's merge task through pulls' `ChecksGate` seam — the merge logic is NOT forked, the gate is one check at the step-4 call site next to the 04 gate; nil backend fails closed only when a rule actually carries the gate. 05 registers one task kind (`checks-index-compact`, inline-triggered like 02's). No discovery entries (same rule as 01/02/03/C2: `/api/v1` `endpoints[]` derive from the core route table only). Rationale: the gate belongs where the merge decides (statuses cannot exist at receive-pack time — the 14.5 honest note); the hook keeps the frozen `Principal` untouched while scoping a leaked CI token to one repo and one capability.
+- **Wave 05 checks amendment (2026-09-04, docs/features/05):** the frozen overwritable-key list gains the checks families — `repos/<o>/<r>/checks/<sha>/<context>.json` (Create-then-CAS status records, last-write-wins, never deleted), `repos/<o>/<r>/checks/index.json` (CAS'd P4 hot-window projection, newest 500 shas, inline compaction past 256 KiB), `repos/<o>/<r>/meta/ci_tokens/<id>.json` (CAS'd token records; hash-only, revoked retained) — in the same revision that adopts the feature (14 §14.11 rule 2). `require_checks` is NOT a new effect kind: it is an optional strict field inside the existing `protect` effect (1–32 validated context names, `policy.ValidCheckContext` — one grammar shared with the writer), parsed fail-closed but never evaluated on the push path (direct pushes are not gated; the merge task owns the verdict). Combination across matching rules is union over every matching rule (amended 2026-11-21: the union no longer skips rules the merger bypasses — `protect.bypass` governs direct pushes only, so a bypassed actor's merge is still check-gated, 03 §5 step 4; 05's "no bypass list" means the field carries no bypass of its own). Seam 2 in code is the `AuthService.ExtraCredential` hook (a func consulted after static tokens in `token`/`oidc` modes — the chain resolves the wct_ SHAPE to an unprivileged `ci:<id>` principal; the secret is verified handler-side per repo, so the chain never blocks on store I/O and `Evaluate` stays pure). Startup panics on prefix overlap (`checks.AssertPrefixDisjoint`, called from composition). The merge-time half is 05's stored-combined-view read, consulted by 03's merge task through pulls' `ChecksGate` seam — the merge logic is NOT forked, the gate is one check at the step-4 call site next to the 04 gate; nil backend fails closed only when a rule actually carries the gate. 05 registers one task kind (`checks-index-compact`, inline-triggered like 02's). No discovery entries (same rule as 01/02/03/C2: `/api/v1` `endpoints[]` derive from the core route table only). Rationale: the gate belongs where the merge decides (statuses cannot exist at receive-pack time — the 14.5 honest note); the hook keeps the frozen `Principal` untouched while scoping a leaked CI token to one repo and one capability.
 - **Forgejo #271 amendment (2026-09-10, docs/features/05):** the "no discovery entries" sentence above is superseded for checks only — the five checks path shapes now appear in `/api/v1` `endpoints[]` via `checks.ExposedTemplates` + `api.RegisterExposed` from composition (the Feature 10 precedent: template + handler land in the same change, law 12; 01/02/03/C2/04/06/07 repo-lane routes stay unlisted). Rationale: the checks surface is the one feature designed for third-party integrators (external CI reporting with `wct_` tokens), and an integrator reading discovery or the `/api` docs page could not find it. A two-way contract test (`TestExposedCoversRoutes` in `internal/checks`: every served route covered, no phantom templates) keeps the list honest.
 - **Forgejo #272 amendment (2026-09-10):** the #271 checks-only exception becomes the rule — registration is now the norm, not opt-in. Every `server.ExtraRoutes` surface exports `ExposedTemplates` (one entry per distinct path shape, both lanes collapsing to one template; byte routes outside the api lanes stay out — the static contract, not the JSON API) and composition registers all of them via `api.RegisterExposed` in the same change (law 12): issues, pulls, releases, review, social, notify, identity, tags, plus mirror's repo lanes (`/{owner}/{repo}/api/mirror`, `…/mirror/sync` — real JSON API routes, so the Feature 11 "top-level twin only" exception is gone). Each package pins its list both ways (`TestExposedTemplatesExact` + `TestExposedCoversRoutes`: every served route covered by its canonical template, every template covering a served route), and `TestCollabServicesRegisterDiscovery` in `cmd/spindle` pins the composition wiring — removing a template or a registration fails CI, which is the actual fix for the drift (three sources, zero enforced agreement). The `/api` docs page renders the live discovery document beside a static route table that is now derived from the same registry. Rationale: discovery must enumerate what the server serves (14 §14.12 lane rule); an integrator reading `/api/v1` can now learn that issues, pulls, releases, stars, notifications, and review threads exist. This supersedes the "no discovery entries" sentences in the Wave C2 review, Feature 06 notifications, and Feature 07 releases/social amendments above (and the "stay unlisted" tail of the #271 amendment) — those described the pre-#272 rule, not the current wiring.
 - **Feature 07 releases/social amendment (2026-09-04, docs/features/07):** the frozen overwritable-key list gains the 07 families — `repos/<o>/<r>/releases/<tag.json>` (CAS'd header; tag percent-encoded `%`→`%25` `/`→`%2F`, never lowercased), `repos/<o>/<r>/releases/latest.json` (CAS'd pointer, monotonic `created_at` compare in-loop + bounded self-healing scan), `repos/<o>/<r>/meta/social.json` (CAS'd counters + `watcher_list`; adopted from 06, which keeps writing ONLY the watch fields — dual field-scoped CAS writers converge per 07 §4.1, no cross-feature lock) — in the same revision that adopts the feature (14 §14.11 rule 2). Asset bytes (`releases/assets/<tag>/<name>`, tag segment encoded as on the header — a sibling subtree, never nested under the header file, so header paths stay files on every backend) and star records (`users/<principal>/starred/<o>/<r>.json`) are Create-only immutable, delete-on-endpoint — not overwritable, no listing needed. The `/{o}/{r}/releases/{tag}/assets/{name}` byte family is the 14.3 routing note made concrete: repoDispatch consults a new `server.RepoRoutes` chain (`HandleRepo(w,r,id,sub) bool`) on paths the core switch does not claim, before the page route and the 404 — bytes are never compressed (no compress group wraps repoDispatch) and carry the static contract from the feature handler. Seam 1 in code is the `server.ExtraRoutes` chain for lanes plus `server.ChainRepo` for the byte family (both fronted in composition order). `releases.max_asset_bytes` (default 2 GiB) joins config as a reflective section (setup schema, env overlay, and size validation come for free). 07 registers NO task kinds (the named `release-asset-import` Seam 5 hook stays a name) and no discovery entries (same rule as 01/02/03/C2/05/06). Rationale: lane handlers cannot serve bytes (the api mux owns `/api*` only, and compressing immutable bytes would be pure waste); a chain consulted at the fallback keeps core ignorant of feature families while giving bytes the same first-match-wins discipline as the lane chain.
@@ -654,3 +674,102 @@ superseded by Forgejo #272, which lists the mirror repo lanes; see the #272 amen
   state must not live in the settings trust domain or on the manifest;
   secrets need their own CAS record with no manifest churn; a funnel
   never entered cannot fan out.
+- **Feature M1 moderation amendment (2026-11-21, PLAN-V2 §1,
+  docs/features/16_moderation.md):** the frozen overwritable-key list gains
+  `users/<principal>/blocks.json` (CAS'd, whole-document; normalized principal
+  names, sorted, unique, ≤ 500 — the `members.json` reasoning in
+  docs/features/01 §3) in the identity family. The NEW host prefix
+  `moderation/` (peer to `repos/`, `users/`, `orgs/` per P1) gains
+  `moderation/audit_state.json` (CAS'd seq allocator `{"next_seq": N}`, the
+  `collab_state.json` shape) and `moderation/audit/<seq:012x>.json`
+  (**Create**-only immutable records, delete-never; the family later carries
+  hide/unhide/lock/unlock, report terminal actions and the transfer record).
+  Both families join the frozen list in the same revision that adopts them
+  (14 §14.11 rule 2); not overwritable, no listing needed for the records.
+  Seam 1 is the `server.ExtraRoutes` chain: `GET/PUT/DELETE
+  /api/v1/users/{principal}/blocks[/{subject}]` on both lanes, top-level twins,
+  with discovery templates via the #272 `ExposedTemplates` +
+  `api.RegisterExposed` rule. The enforcement seams are consumer-owned (the
+  `ChecksGate` house style, §14.3): `issues`/`pulls`/`review` each declare
+  `ModerationGate{BlockedFromRepo}` consulted inside the verbs after role
+  resolution and before any CAS; `identity` declares `BlockGate{BlockedBy}`
+  for invite creation; `notify` declares `BlockGate{BlockedBy}` for the
+  fan-out mention filter (consulted once per resolved target, before the
+  activity append so the overflow path cannot reintroduce a suppressed name).
+  Composition satisfies all five with one `*moderation.Service`; nil = feature
+  off (writes allowed), a gate error fails closed. No new task kind, no new Go
+  module, no WAL kind, no policy effect. Rationale: a block is a person-level
+  relationship at human rate, so one whole-document CAS per user beats N
+  per-block objects and needs no LIST; the audit log is the one shared sink
+  every later moderation/transfer action writes, and Create-only records keep
+  it evidence rather than mutable state.
+- **Feature M2 moderation amendment (2026-11-21, PLAN-V2 §1,
+  docs/features/16_moderation.md §10):** the frozen overwritable-key list gains
+  `repos/<o>/<r>/meta/moderation.json` (CAS'd whole-document repo moderation
+  state: hidden-target map + per-conversation `locks` map + the plan's flat
+  repo-wide lock envelope; revision is the API concurrency token) in the same
+  revision that adopts it (14 §14.11 rule 2). No new host prefix, no new task
+  kind, no WAL kind, no policy effect, no new module. The consumer-owned gates
+  grow one method: `issues`/`pulls`/`review` declare
+  `ModerationGate.Snapshot(ctx, owner, repo, num, fn)` returning hidden targets
+  + the conversation lock + the document revision from ONE conditional GET;
+  composition satisfies all three with the one `*moderation.Service`, and the
+  same service's `Roles`/`TargetProbe` seams resolve floors and probe hide
+  targets by exact-key HEAD in the owning family (no LIST, and the moderation
+  package never learns another feature's key layout). The `PUT
+  /{o}/{r}/api[-browser]/moderation` one-writer verb is registered on the
+  existing `ExtraRoutes` chain (both lanes) with its discovery template; the
+  page actions ride the webui mount and call the same verbs. Redaction lives in
+  the feature READ verbs, so every page and JSON projection inherits one rule
+  (no projection builds its own body copy). The SSE family gains the
+  `moderation` collab kind (state only, never a body). Rationale: a repo-scoped
+  CAS document is the smallest shape that makes hides and locks readable in one
+  GET on every conversation page; putting the rule in the verbs is what makes
+  the page/JSON projection matrix testable rather than aspirational.
+- **Feature M3 moderation amendment (2026-11-22, PLAN-V2 §1 M.3,
+  docs/features/16_moderation.md §11):** the frozen overwritable-key list gains
+  the report windows — `repos/<o>/<r>/meta/moderation/reports/index.json`
+  (CAS'd P4 hot window; `next_id` allocator inside the same CAS) and the new
+  host prefix's `moderation/reports/index.json` (CAS'd cross-repo projection;
+  rows are `(repo,id)` pointers) — in the same revision that adopts them
+  (14 §14.11 rule 2). The per-repo report objects
+  (`repos/<o>/<r>/meta/moderation/reports/<id:012x>.json`) are **Create-only
+  immutable**, so they do not join the overwritable list; terminal state is a
+  compensating field on the index card, never a record rewrite. M3 registers
+  one task kind, `moderation-reports-compact` (a `*wal.TaskTable` kind under
+  the pseudo-repo `moderation`, started at the 256 KiB cap), whose body is the
+  family's only LIST: it rebuilds the global window from the per-repo indexes.
+  No request path lists, no new lock, no policy effect, no new module. The
+  report verbs (file/list/resolve/dismiss) live in `internal/moderation` and
+  are called by both lanes' handlers and the page twins; the global resolve
+  twin delegates to the repo writer (one writer). The SSE family gains the
+  `report_filed` action on the existing `moderation` kind (pointer only), and
+  notify gains the `moderation` reason/class for the repo-admin notification
+  (its arguments carry no reported content). Discovery lists the three
+  top-level twins and the three repo-lane templates via the existing
+  `api.RegisterExposed` call. Rationale: one immutable evidence object plus a
+  bounded, rebuildable hot window is the smallest shape that keeps the queue
+  paged without a LIST while preserving the record as the source of truth.
+- **Repository Insights amendment (2026-11-21, docs/features/18_repo_insights.md).**
+  The frozen overwritable-key list gains one family:
+  `repos/<o>/<r>/insights/pulse.json` (JSON version 1, CAS'd create-if-absent
+  then update-if-version; fully derived and rebuildable — losing it loses
+  warmth, not truth). It is written only by the `insights-refresh` task (Seam
+  5 kind), never by a request or the push path; the page read is one exact-key
+  GET. The task is registered through the existing maintainer sweeper seam
+  (`maintain.Sweeper`: a per-repo 30-minute in-memory due gate) and the ops
+  registry (`insights-refresh`, joins a running pass), with a 24-hour/head
+  equality staleness gate before any git runs. No new core import: `internal/git`
+  grew one pinned argv (`04_git.md` §16.4) and `internal/insights` consumes only
+  the store, that scanner, and two injected serving-copy resolvers. Rationale:
+  the card asks for a cached projection with no LIST on a request path, and one
+  object carrying all three nested windows keeps the windows consistent and the
+  read at one key; no new prefix, no WAL kind, no config key, no dependency.
+- **Issue parity amendment (2026-11-23, docs/features/02 §13–§15):** the frozen overwritable-key list gains
+  `repos/<o>/<r>/meta/issue_deps.json` (CAS'd dependency links, §14.11 rule 2) and
+  `repos/<o>/<r>/meta/issue_templates.json` (CAS'd derived template projection, written only by the post-push hook).
+  Pinning adds no key at all — it is an additive `pinned` field on the already-listed `issues/index.json`. Both new objects
+  are single repo-scoped documents with no child keys (not families), each with one CAS writer per operation: the link
+  document makes an add/remove atomic across both directions of a dependency, and the template projection keeps git off
+  every request path. Rationale: a per-thread-header pair for dependencies needs two CASes on two objects and can
+  half-commit; a per-request git read for templates breaks the round-trip budget and the "no git on a request path" rule.

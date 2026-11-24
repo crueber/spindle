@@ -60,6 +60,9 @@ func TestAnonWriteMatrix502(t *testing.T) {
 }
 
 // bodyOf renders the matrix body ("" = no body, never a nil-typed reader).
+// signedInP is a minimal non-anonymous principal.
+func signedInP() *auth.Principal { return &auth.Principal{Name: "alice"} }
+
 func bodyOf(s string) io.Reader {
 	if s == "" {
 		return nil
@@ -142,10 +145,9 @@ func TestSSHKeysAnonLeakClosed502(t *testing.T) {
 		t.Fatalf("anonymous ssh-keys DELETE = %d, want 401", w.Code)
 	}
 
-	// Auth-none keeps working: its principal is auth.None(), never anonymous.
-	f.env.Cfg.Server.Auth.Mode = "none"
-	w = f.do("POST", "/api/v1/ssh-keys", strings.NewReader(`{"key": "`+validKeyLine+`", "title": "laptop"}`), nil, nil)
+	// A signed-in principal keeps working (there is no open mode any more).
+	w = f.do("POST", "/api/v1/ssh-keys", strings.NewReader(`{"key": "`+validKeyLine+`", "title": "laptop"}`), nil, signedInP())
 	if w.Code != http.StatusCreated {
-		t.Fatalf("none-mode ssh-keys POST = %d, want 201", w.Code)
+		t.Fatalf("signed-in ssh-keys POST = %d, want 201", w.Code)
 	}
 }

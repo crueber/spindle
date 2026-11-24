@@ -3,8 +3,10 @@ package api
 import (
 	"net/http"
 	"strconv"
+	"strings"
 
 	"github.com/crueber/spindle/internal/git"
+	"github.com/crueber/spindle/internal/server/auth"
 )
 
 // --- ops (§12.2) ----------------------------------------------------------------------
@@ -160,8 +162,17 @@ func (h *handlers) tasksList(w http.ResponseWriter, r *http.Request) {
 
 // taskGet: the TaskRecord JSON, or — with Accept: text/event-stream — the
 // attach stream (one task packet, replay, live, terminal; §12.3).
+//
+// The record's OWN repo is the read authority once the id is known: a task can
+// outlive or move its lane (the repo-transfer task tears the source prefix down
+// mid-task, so the lane the client started on stops resolving). Narration is
+// gated on the repo the record names — or the move destination it carries in
+// params["to"], because the access document travelled with the prefix. Unknown
+// ids keep the lane's verdict (the repo gate, then 404), byte-identical to the
+// pre-transfer behavior.
 func (h *handlers) taskGet(w http.ResponseWriter, r *http.Request) {
-	if !h.open(w, r, AuthRead) {
+	if h.env.Tasks == nil {
+		writePlain(w, http.StatusServiceUnavailable, "task table not configured")
 		return
 	}
 	id := RepoOf(r)
@@ -173,7 +184,14 @@ func (h *handlers) taskGet(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if !found {
+			// Unknown id: the lane still owns its own verdict.
+			if !h.open(w, r, AuthRead) {
+				return
+			}
 			writePlain(w, http.StatusNotFound, "unknown task: "+taskID)
+			return
+		}
+		if !h.taskReadable(w, r, st.Record) {
 			return
 		}
 		s, ok := NewSSE(w, r)
@@ -191,11 +209,40 @@ func (h *handlers) taskGet(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if !ok {
+		if !h.open(w, r, AuthRead) {
+			return
+		}
 		// 404 if unknown on this instance (records are instance-memory only).
 		writePlain(w, http.StatusNotFound, "unknown task: "+taskID)
 		return
 	}
+	if !h.taskReadable(w, r, rec) {
+		return
+	}
 	writeCached(w, r, ccNoStore, "", http.StatusOK, rec)
+}
+
+// taskReadable gates a known task record on the repo it names (and, for a
+// move, the destination in params["to"]), never on the lane path.
+func (h *handlers) taskReadable(w http.ResponseWriter, r *http.Request, rec TaskRecord) bool {
+	if h.env.Access == nil {
+		// No identity surface on this build: the lane gate is the only
+		// authority there is (a transfer cannot exist without identity).
+		return h.open(w, r, AuthRead)
+	}
+	p := h.env.PrincipalOf(r)
+	check := func(id string) bool {
+		owner, repo, ok := strings.Cut(id, "/")
+		if !ok || owner == "" || repo == "" {
+			return false
+		}
+		return h.env.Access.CheckRead(r.Context(), owner, repo, p) == nil
+	}
+	if check(rec.Repo) || check(rec.Params["to"]) {
+		return true
+	}
+	mapAccessErr(w, &auth.AuthError{Kind: auth.ErrForbidden, Why: "read access required"})
+	return false
 }
 
 // taskRecordFrom converts an engine record (bind_wal.go uses this so the

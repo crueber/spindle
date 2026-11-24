@@ -34,18 +34,17 @@ type discoveryAuth struct {
 	Mode string `json:"mode"`
 }
 
-// browserLoginEnabled mirrors the server's BrowserLoginEnabled gate
-// (mode oidc + session secret + client id + client secret) over the shared
-// config shape — this package must not import internal/server (law 8), so
-// the three-line predicate lives here too. Validation (config.Validate)
-// refuses mode=oidc without the trio, so false here on an oidc instance
-// means a legacy config that predates the refusal.
+// browserLoginEnabled mirrors the server's BrowserLoginEnabled gate (session
+// secret + client id + client secret) over the shared config shape — this
+// package must not import internal/server (law 8), so the three-line
+// predicate lives here too. Validation refuses a config without the trio, so
+// false here means the restricted boot (which serves no /api/v1).
 func browserLoginEnabled(cfg *config.Config) bool {
 	if cfg == nil {
 		return false
 	}
 	a := cfg.Server.Auth
-	return a.Mode == "oidc" && a.SessionSecret != "" &&
+	return a.SessionSecret != "" &&
 		a.OAuthClientID != "" && a.OAuthClientSecret != ""
 }
 
@@ -59,13 +58,10 @@ func loginURLFor(cfg *config.Config) string {
 }
 
 // authModeOf reports the instance auth mode for the discovery auth block
-// (#371). Empty config defaults to "none" (the zero-config first run).
-func authModeOf(cfg *config.Config) string {
-	if cfg == nil || cfg.Server.Auth.Mode == "" {
-		return "none"
-	}
-	return cfg.Server.Auth.Mode
-}
+// (#371). The wire field is kept (one value): OIDC is the only authentication.
+// The restricted boot serves no /api/v1 at all, so a discovery response can
+// only come from a normally-booted instance.
+func authModeOf(cfg *config.Config) string { return "oidc" }
 
 // discoveryEndpoints derives the capability list from the route table so it
 // cannot drift (§8/§20.4 normative fix): only routes the router actually

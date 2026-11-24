@@ -2,12 +2,13 @@
 {{with .Data}}{{$d := .}}
 <div class="grid gap-4 md:grid-cols-[minmax(0,1fr)_16rem]">
   <div class="min-w-0">
-    <header class="mb-4 flex flex-wrap items-start gap-2 border-b border-[var(--pd-line)] pb-3">
+    <header id="conversation" class="mb-4 flex flex-wrap items-start gap-2 border-b border-[var(--pd-line)] pb-3">
       <div class="min-w-0 flex-1">
-        <h1 class="min-w-0 text-xl font-semibold tracking-tight"><span class="mono muted">#{{.Num}}</span> {{.Title}}</h1>
+        <h2 class="min-w-0 text-xl font-semibold tracking-tight"><span class="mono muted">#{{.Num}}</span> {{.Title}}</h2>
         <p class="muted mt-1 text-xs">{{.Author}} · {{template "collab_time" .UpdatedAt}}</p>
       </div>
       <span class="mt-1 flex shrink-0 flex-wrap items-center gap-2">
+        {{if .Lock.Moderated}}<span class="chip chip-neutral" role="status">Locked</span>{{end}}
         {{template "collab_state_chip" .Badge}}
         {{if .ShowReady}}
         <form method="post" action="/{{.Repo.Full}}/pull/{{.Num}}/ready"><button type="submit" class="btn px-2 py-1">Mark ready</button></form>
@@ -15,16 +16,71 @@
         {{if .ShowDraft}}
         <form method="post" action="/{{.Repo.Full}}/pull/{{.Num}}/draft"><button type="submit" class="btn px-2 py-1">Convert to draft</button></form>
         {{end}}
+        {{if .CanMaint}}
+        {{if .Lock.Moderated}}
+        <form method="post" action="{{.UnlockAction}}"><button type="submit" class="btn px-2 py-1">Unlock</button></form>
+        {{else}}
+        <details class="relative inline-block" data-popover>
+          <summary class="btn list-none px-2 py-1" aria-label="lock conversation options" data-popover-trigger>Lock</summary>
+          <form class="card absolute right-0 z-30 mt-1 grid w-64 gap-1 p-2" method="post" action="{{.LockAction}}" role="group" aria-label="lock conversation">
+            <label class="eyebrow" for="lock-mode-pull">Who may still comment</label>
+            <select class="input" id="lock-mode-pull" name="mode">
+              <option value="all" selected>Nobody (all)</option>
+              <option value="collaborators">Collaborators (write and up)</option>
+            </select>
+            <label class="eyebrow" for="lock-reason-pull">Reason (shown to everyone)</label>
+            <input class="input" id="lock-reason-pull" name="reason" placeholder="why is this conversation locked?">
+            <button type="submit" class="btn px-2 py-1">Lock conversation</button>
+          </form>
+        </details>
+        {{end}}
+        {{end}}
       </span>
     </header>
 
+    {{if .Lock.Moderated}}<p class="card mb-3 p-2 text-sm" role="status" aria-live="polite">{{.Lock.Reason}}{{if .Lock.CollaboratorsOnly}} — the composer below stays available to collaborators.{{end}}</p>{{end}}
     {{if .Error}}<p class="err-line" role="alert">{{.Error}}</p>{{end}}
     {{if .Notice}}<p class="warn-line" role="status">{{.Notice}}</p>{{end}}
 
-    {{if .Body}}
+    {{if .DescriptionHidden}}
+    <article class="mb-3 border-b border-[var(--pd-line)] pb-3" aria-label="Pull request description">
+      <p class="muted mb-1 text-xs">{{.OpenedActor}} · {{template "collab_time" .OpenedAt}}</p>
+      <div class="card border-dashed p-2" role="status" data-hidden-target="{{.DescriptionHideTarget}}">
+        <p class="muted text-xs">Description hidden by a moderator{{with .DescriptionHiddenBy}} · <span class="font-medium text-[var(--pd-text)]">{{.}}</span>{{end}}{{with .DescriptionHiddenAt}} · {{template "collab_time" .}}{{end}}{{with .DescriptionHiddenWhy}} · {{.}}{{end}}</p>
+        {{if .Body}}
+        <details class="mt-1">
+          <summary class="link inline-block px-1 py-1 text-xs">Show original</summary>
+          <div class="markdown-body mt-1">{{mdat .Body .Repo.Owner .Repo.Name .Repo.HeadLabel ""}}</div>
+        </details>
+        {{end}}
+        {{if .CanTriage}}
+        <form class="mt-1" method="post" action="/{{.Repo.Full}}/pull/{{.Num}}/moderation/unhide">
+          <input type="hidden" name="target" value="{{.DescriptionHideTarget}}">
+          <button type="submit" class="link inline-block px-1 py-1 text-xs">Unhide</button>
+        </form>
+        {{end}}
+      </div>
+    </article>
+    {{else if .Body}}
     <article class="mb-3 border-b border-[var(--pd-line)] pb-3" aria-label="Pull request description">
       <p class="muted mb-1 text-xs">{{.OpenedActor}} · {{template "collab_time" .OpenedAt}}</p>
       <div class="markdown-body">{{mdat .Body .Repo.Owner .Repo.Name .Repo.HeadLabel ""}}</div>
+      {{if .CanTriage}}
+      <details class="relative mt-1 inline-block" data-popover>
+        <summary class="btn list-none px-2 py-1 text-xs" aria-label="moderate the description" data-popover-trigger>Moderate</summary>
+        <form class="card absolute left-0 z-30 mt-1 grid w-52 gap-1 p-2" method="post" action="/{{.Repo.Full}}/pull/{{.Num}}/moderation/hide" role="group" aria-label="hide the description">
+          <input type="hidden" name="target" value="{{.DescriptionHideTarget}}">
+          <label class="eyebrow" for="hide-description">Hide reason</label>
+          <select class="input" id="hide-description" name="reason">
+            <option value="spam">spam</option>
+            <option value="abusive">abusive</option>
+            <option value="off-topic">off-topic</option>
+            <option value="other" selected>other</option>
+          </select>
+          <button type="submit" class="btn px-2 py-1">Hide description</button>
+        </form>
+      </details>
+      {{end}}
     </article>
     {{end}}
 
@@ -60,8 +116,43 @@
         </p>
         {{if .Dismissed}}
         <p class="muted text-sm italic">dismissed #{{.DismissSeq}}: {{.Reason}}</p>
+        {{else if .Hidden}}
+        <div class="card border-dashed p-2" role="status">
+          <p class="muted text-xs">Hidden by a moderator{{with .HiddenBy}} · <span class="font-medium text-[var(--pd-text)]">{{.}}</span>{{end}}{{with .HiddenAt}} · {{template "collab_time" .}}{{end}}{{with .HiddenReason}} · {{.}}{{end}}</p>
+          {{if .Body}}
+          <details class="mt-1">
+            <summary class="link inline-block px-1 py-1 text-xs">Show original</summary>
+            <div class="markdown-body mt-1">{{mdat .Body $d.Repo.Owner $d.Repo.Name $d.Repo.HeadLabel ""}}</div>
+          </details>
+          {{end}}
+          {{if .CanModerate}}
+          <form class="mt-1" method="post" action="/{{$d.Repo.Full}}/pull/{{$d.Num}}/moderation/unhide">
+            <input type="hidden" name="target" value="{{.HideTarget}}">
+            <button type="submit" class="link inline-block px-1 py-1 text-xs">Unhide</button>
+          </form>
+          {{end}}
+        </div>
         {{else}}
         {{with .Body}}<div class="markdown-body">{{mdat . $d.Repo.Owner $d.Repo.Name $d.Repo.HeadLabel ""}}</div>{{end}}
+        {{if .CanReport}}
+        {{template "collab_report_form" (dict "action" .ReportAction "kind" "review" "seq" .Seq "tid" "" "uid" (printf "rev-%d" .Seq))}}
+        {{end}}
+        {{if .CanModerate}}
+        <details class="relative mt-1 inline-block" data-popover>
+          <summary class="btn list-none px-2 py-1 text-xs" aria-label="moderate this review" data-popover-trigger>Moderate</summary>
+          <form class="card absolute left-0 z-30 mt-1 grid w-52 gap-1 p-2" method="post" action="/{{$d.Repo.Full}}/pull/{{$d.Num}}/moderation/hide" role="group" aria-label="hide this review">
+            <input type="hidden" name="target" value="{{.HideTarget}}">
+            <label class="eyebrow" for="hide-review-{{.Seq}}">Hide reason</label>
+            <select class="input" id="hide-review-{{.Seq}}" name="reason">
+              <option value="spam">spam</option>
+              <option value="abusive">abusive</option>
+              <option value="off-topic">off-topic</option>
+              <option value="other" selected>other</option>
+            </select>
+            <button type="submit" class="btn px-2 py-1">Hide review</button>
+          </form>
+        </details>
+        {{end}}
         {{if .CanDismiss}}
         <form class="mt-1 flex flex-wrap items-center gap-2" method="post" action="{{.Action}}">
           <input class="input w-auto flex-1" name="reason" placeholder="dismissal reason (required)" aria-label="dismissal reason">
@@ -81,7 +172,8 @@
       <h2 class="card-header">Finish review</h2>
       <form class="grid gap-2" method="post" action="/{{.Repo.Full}}/pull/{{.Num}}/reviews">
         <input type="hidden" name="commit_sha" value="{{.HeadSHA}}">
-        <textarea class="input min-h-16 text-sm leading-relaxed" name="body" rows="3" aria-label="review body" placeholder="Review summary (optional)"></textarea>
+        {{if .Lock.Locked}}<p class="muted text-sm" role="note">{{.Lock.Reason}}</p>{{end}}
+        <textarea class="input min-h-16 text-sm leading-relaxed disabled:cursor-not-allowed disabled:opacity-50" name="body" rows="3" aria-label="review body" placeholder="Review summary (optional)"{{if .Lock.Locked}} disabled aria-disabled="true"{{end}}></textarea>
         <label class="grid gap-1">
           <span class="eyebrow">Verdict</span>
           <select class="input" name="verdict">
@@ -189,10 +281,9 @@
           <label class="mt-2 grid gap-1">
             <span class="text-sm font-medium">Strategy</span>
             <select class="input w-full" name="strategy">
-              <option value="merge" selected>merge</option>
-              <option value="squash">squash</option>
-              <option value="rebase">rebase</option>
+              {{$sel := .MergeState.Strategy}}{{range .MergeMethods}}<option value="{{.Value}}"{{if eq .Value $sel}} selected{{end}}>{{.Label}}</option>{{else}}<option value="merge" selected>merge</option>{{end}}
             </select>
+            {{if lt (len .MergeMethods) 3}}<span class="muted text-[11px]">The base ref's protection ruleset allows only {{range $i, $m := .MergeMethods}}{{if $i}}, {{end}}{{$m.Label}}{{end}}.</span>{{end}}
           </label>
           <div class="mt-2 flex flex-wrap gap-2">
             <button type="submit" class="btn px-3 py-1" {{if not .MergeState.CanMerge}}disabled title="{{.MergeState.Tooltip}}"{{end}}>{{if eq .MergeState.State "merging"}}merging…{{else}}merge pull request{{end}}</button>
@@ -200,6 +291,7 @@
             <button type="submit" class="btn px-3 py-1" formaction="/{{.Repo.Full}}/pull/{{.Num}}/update-branch" formnovalidate title="update the PR branch from base">update branch</button>
             {{end}}
           </div>
+          {{if .MergeState.UpdateHint}}<p class="warn-line" role="status">{{.MergeState.UpdateHint}}</p>{{end}}
           {{if .MergeState.BlockersText}}<p class="warn-line">blocking merge: {{.MergeState.BlockersText}}</p>{{end}}
         </form>
         {{else}}

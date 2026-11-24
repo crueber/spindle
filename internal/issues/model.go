@@ -47,6 +47,12 @@ const (
 	MaxLabelLen    = 64
 	MaxLabelDesc   = 200
 	MaxRefsPerBody = 100
+	// MaxPinned bounds the repo pin set (a display-curation list, not a
+	// query language; the cap keeps the CAS'd index object small).
+	MaxPinned = 50
+	// MaxDependencies bounds the repo's issue link document (human-rate
+	// curation; the cap keeps the CAS'd object small and one read cheap).
+	MaxDependencies = 500
 )
 
 // ReactionContents is the closed emoji-name set (§8); unknown → 400.
@@ -131,6 +137,12 @@ type Event struct {
 	Op             *string `json:"op,omitempty"`
 	PRNum          *int    `json:"pr_num,omitempty"`
 	Keyword        *string `json:"keyword,omitempty"`
+
+	// Hidden is the M2 moderation projection hint (never persisted): set by
+	// the read verbs when a moderator hid this body. Body is omitted for
+	// every non-moderator — redaction happens server-side, so a hidden body
+	// never reaches a client that may not see it.
+	Hidden *HiddenInfo `json:"hidden,omitempty"`
 }
 
 // CardProjectionVersion is the current Card-projection version stamped on
@@ -157,6 +169,13 @@ type Index struct {
 	// Additive JSON field: unknown-field-tolerant readers round-trip
 	// older fixtures unchanged (law 5).
 	CardVersion int `json:"card_version,omitempty"`
+	// Pinned is the repo pin set (§13): issue numbers rendered first in
+	// every list, newest-number-first within the set. Additive JSON field
+	// (law 5) living in the existing CAS'd index — no new object family.
+	// Pins are display state: an absent entry (or a pinned number that no
+	// longer resolves) is simply not shown first; the header stays the
+	// truth about the issue itself.
+	Pinned []int `json:"pinned,omitempty"`
 }
 
 // Label is one entry of the repo label set (§3.1). Names are immutable

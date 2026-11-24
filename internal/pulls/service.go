@@ -334,6 +334,9 @@ func (s *Service) OpenPR(ctx context.Context, owner, repo string, actor auth.Pri
 	if err := s.requireRole(ctx, owner, repo, actor, "write"); err != nil {
 		return nil, nil, err
 	}
+	if err := s.requireNotBlocked(ctx, owner, repo, actor); err != nil {
+		return nil, nil, err
+	}
 	title, err := validateTitle(in.Title)
 	if err != nil {
 		return nil, nil, err
@@ -513,6 +516,18 @@ type PullView struct {
 	HeadRefOk  bool          `json:"head_ref_ok"`
 	Events     []*Event      `json:"events"`
 	EventsMore bool          `json:"events_more"`
+	// Locked/LockMode/LockReason are the M2 moderator lock (additive to the
+	// closed/merged conversation lock).
+	Locked     bool   `json:"locked"`
+	LockMode   string `json:"lock_mode,omitempty"`
+	LockReason string `json:"lock_reason,omitempty"`
+	// DescriptionHidden carries the moderation marker when the PR
+	// description's opened-event target is hidden. PR.Body is already
+	// omitted for non-moderators by the read verb.
+	DescriptionHidden *HiddenInfo `json:"description_hidden,omitempty"`
+	// ModerationRevision folds into the view's ETag (a hide must never 304
+	// a stale body).
+	ModerationRevision int `json:"-"`
 }
 
 // GetPR reads header + pr.json + live mergeable. Auth: read. Recovery (§3):
@@ -544,6 +559,11 @@ func (s *Service) GetPR(ctx context.Context, owner, repo string, num int, p auth
 		return nil, eerr
 	}
 	view.Events, view.EventsMore = events, more
+	mv, merr := s.moderationView(ctx, owner, repo, num, p)
+	if merr != nil {
+		return nil, merr
+	}
+	view.applyModeration(mv, num)
 	if s.Git == nil || s.Dirs == nil {
 		view.Mergeable = unknownMergeable(pr, s.nowUTC().Format(dateTimeFmt))
 		return view, nil
@@ -926,6 +946,9 @@ func (s *Service) UpdatePR(ctx context.Context, owner, repo string, num int, act
 	if err := s.requireRead(ctx, owner, repo, actor); err != nil {
 		return nil, nil, err
 	}
+	if err := s.requireNotBlocked(ctx, owner, repo, actor); err != nil {
+		return nil, nil, err
+	}
 	th, _, err := s.loadThread(ctx, owner, repo, num)
 	if err != nil {
 		return nil, nil, err
@@ -1146,6 +1169,12 @@ func (s *Service) AddComment(ctx context.Context, owner, repo string, num int, a
 		return nil, err
 	}
 	if err := s.requireRead(ctx, owner, repo, actor); err != nil {
+		return nil, err
+	}
+	if err := s.requireNotBlocked(ctx, owner, repo, actor); err != nil {
+		return nil, err
+	}
+	if err := s.requireUnlocked(ctx, owner, repo, num, actor); err != nil {
 		return nil, err
 	}
 	if strings.TrimSpace(body) == "" {

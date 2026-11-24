@@ -52,6 +52,8 @@ func TestCacheClassContract(t *testing.T) {
 		{"labels", "/{owner}/{repo}/api/labels", "/acme/repo/api/labels", ccNoStore, false},
 		{"milestones", "/{owner}/{repo}/api/milestones", "/acme/repo/api/milestones", ccNoStore, false},
 		{"milestone", "/{owner}/{repo}/api/milestones/{id}", "/acme/repo/api/milestones/" + created.Milestone.ID, ccNoStore, false},
+		{"dependencies", "/{owner}/{repo}/api/issues/{num}/dependencies", "/acme/repo/api/issues/1/dependencies", ccNoStore, false},
+		{"issue templates", "/{owner}/{repo}/api/issue-templates", "/acme/repo/api/issue-templates", ccNoStore, false},
 	}
 	covered := map[string]bool{}
 	for _, row := range rows {
@@ -80,11 +82,13 @@ func TestCacheClassContract(t *testing.T) {
 	// Mutation-only templates serve no 200-GET (POST/DELETE/PATCH-only per
 	// routeIssues/routeLabels/routeMilestones/handleRepo): no class applies.
 	noGET := map[string]bool{
-		"/{owner}/{repo}/api/issues/{num}/comments":                  true, // POST only
-		"/{owner}/{repo}/api/issues/{num}/reactions":                 true, // POST only
-		"/{owner}/{repo}/api/issues/{num}/reactions/{seq}/{content}": true, // DELETE only
-		"/{owner}/{repo}/api/labels/{name}":                          true, // PATCH/DELETE only
-		"/{owner}/{repo}/api/attachments":                            true, // POST upload only
+		"/{owner}/{repo}/api/issues/{num}/comments":                     true, // POST only
+		"/{owner}/{repo}/api/issues/{num}/reactions":                    true, // POST only
+		"/{owner}/{repo}/api/issues/{num}/reactions/{seq}/{content}":    true, // DELETE only
+		"/{owner}/{repo}/api/issues/{num}/pin":                          true, // PUT/DELETE only
+		"/{owner}/{repo}/api/issues/{num}/dependencies/{kind}/{target}": true, // DELETE only
+		"/{owner}/{repo}/api/labels/{name}":                             true, // PATCH/DELETE only
+		"/{owner}/{repo}/api/attachments":                               true, // POST upload only
 	}
 	for _, e := range ExposedTemplates {
 		if !covered[e] && !noGET[e] {

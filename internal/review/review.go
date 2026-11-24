@@ -78,6 +78,20 @@ type RoleService interface {
 
 // Authenticator resolves the request principal through Seam 2 (the server's
 // AuthService, injected by composition). Nil falls back to anonymous.
+
+// ModerationGate is the consumer-owned block/moderation seam (PLAN-V2
+// §M.5/M.6): review defines what it needs and composition satisfies it with
+// *moderation.Service, so API handlers and page forms share one gate and one
+// redaction rule.
+type ModerationGate interface {
+	BlockedFromRepo(ctx context.Context, owner, repo, actor string) (bool, string, error)
+	// Snapshot visits every hidden target and reports the PR conversation's
+	// moderation lock, in one read (M2). Review bodies and review-thread
+	// comments redact from the hidden targets; the lock refuses new reviews
+	// and thread content.
+	// Snapshot reports the lock MODE too ("all" | "collaborators").
+	Snapshot(ctx context.Context, owner, repo string, num int, fn func(target, by, at, reason string)) (locked bool, lockMode, lockReason string, revision int, err error)
+}
 type Authenticator func(r *http.Request) (auth.Principal, *auth.AuthError)
 
 // NotifyEvent is the §7/P8 emission contract with 06 (internal/notify): per
@@ -182,6 +196,11 @@ type Service struct {
 	// deadline). Zero means the default (15 s).
 	GateTimeout time.Duration
 
+	// Moderation is the consumer-owned block gate (PLAN-V2 §M.5; the
+	// ChecksGate pattern). Review submits, thread comments, resolutions and
+	// review-request mutations consult it after role resolution and before
+	// any CAS. Nil = feature off (writes allowed).
+	Moderation ModerationGate
 	// Notify receives §7/P8 fan-out synchronously after each committed
 	// mutation (nil = no-op until internal/notify lands).
 	Notify Emitter

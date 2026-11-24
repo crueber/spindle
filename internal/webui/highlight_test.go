@@ -6,6 +6,7 @@ import (
 )
 
 func TestLanguageFor(t *testing.T) {
+	t.Parallel()
 	cases := map[string]string{
 		"main.go":       "go",
 		"a.PY":          "python",
@@ -47,6 +48,7 @@ func TestLanguageFor(t *testing.T) {
 }
 
 func TestHighlightUnknownLanguageRendersPlain(t *testing.T) {
+	t.Parallel()
 	// css/html have a language name in the table but no tokenizer (the JS
 	// RULES list gates them out), and unknown extensions have none at all.
 	for _, path := range []string{"a.css", "a.html", "a.txt", "Makefile"} {
@@ -59,6 +61,7 @@ func TestHighlightUnknownLanguageRendersPlain(t *testing.T) {
 }
 
 func TestHighlightTokens(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name, path, code string
 		want             []string
@@ -138,6 +141,7 @@ func TestHighlightTokens(t *testing.T) {
 }
 
 func TestHighlightEscapesSource(t *testing.T) {
+	t.Parallel()
 	got := string(Highlight("a.go", "if a < b && c > d { x() }"))
 	for _, bad := range []string{"a < b", "&& c >"} {
 		if strings.Contains(got, bad) {
@@ -152,6 +156,7 @@ func TestHighlightEscapesSource(t *testing.T) {
 }
 
 func TestHighlightLanguageExplicitCore(t *testing.T) {
+	t.Parallel()
 	if got := string(highlightCode("x = 1", "")); got != "x = 1" {
 		t.Fatalf("empty language = %q", got)
 	}
@@ -161,6 +166,7 @@ func TestHighlightLanguageExplicitCore(t *testing.T) {
 }
 
 func TestHighlightNumberForms(t *testing.T) {
+	t.Parallel()
 	got := string(Highlight("a.js", "42 0x1f 3.14 x2"))
 	for _, want := range []string{
 		`<span class="tok-num">42</span>`,

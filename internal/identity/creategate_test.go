@@ -140,7 +140,6 @@ func TestCheckCreateOwner(t *testing.T) {
 		{"anonymous", "acme", auth.Anonymous(), auth.ErrUnauthorized, false, nil},
 		{"admin bypass foreign owner", "solo", admin("root@example.com"), 0, true, nil},
 		{"admin bypass unknown prefix", "free", admin("root@example.com"), 0, true, nil},
-		{"auth-none admin-shaped bypass", "free", auth.None(), 0, true, nil},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {

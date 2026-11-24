@@ -37,7 +37,6 @@ type authFunc func(r *http.Request) (auth.Principal, *auth.AuthError)
 // every collab route family.
 func TestChainCollabHonorsForwardedIdentity(t *testing.T) {
 	cfg := config.Defaults()
-	cfg.Server.Auth.Mode = "token"
 	cfg.Server.Auth.Tokens = []config.StaticToken{
 		{Principal: "broker", Token: "brokertok", Write: true},
 		{Principal: "alice", Token: "alicetok", Write: true},

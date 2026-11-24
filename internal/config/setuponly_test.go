@@ -46,7 +46,6 @@ public_url = "https://spindle.example.com"
 auto_create_on_push = false
 
 [server.auth]
-mode = "oidc"
 issuer = "https://id.example.com"
 # deliberately missing allowed_domains + the browser-login trio: invalid
 `)
@@ -63,7 +62,7 @@ issuer = "https://id.example.com"
 	if cfg.Server.AutoCreateOnPush {
 		t.Fatal("auto_create_on_push = true, want the file's false")
 	}
-	if cfg.Server.Auth.Mode != "oidc" || cfg.Server.Auth.Issuer != "https://id.example.com" {
+	if cfg.Server.Auth.Issuer != "https://id.example.com" {
 		t.Fatalf("auth = %+v, want the file values", cfg.Server.Auth)
 	}
 	// The file really is invalid: the boot banner must still explain why.
@@ -125,7 +124,6 @@ func TestLoadSetupOnlyEnvListenWinsOverInvalidFile(t *testing.T) {
 [server]
 listen = "127.0.0.1:18210"
 [server.auth]
-mode = "oidc"
 issuer = "https://id.example.com"
 `)
 	t.Setenv("SPINDLE__SERVER__LISTEN", "127.0.0.1:18731")
@@ -243,9 +241,9 @@ func TestLoadSetupBase(t *testing.T) {
 
 // TestValidateListenShape pins the new pre-boot check behind F5's banner.
 func TestValidateListenShape(t *testing.T) {
-	c := Defaults()
+	c := testBaseConfig()
 	if _, errs := Validate(c); len(errs) != 0 {
-		t.Fatalf("defaults must validate: %v", errs)
+		t.Fatalf("a valid config must pass: %v", errs)
 	}
 	c.Server.Listen = "8080"
 	if _, errs := Validate(c); len(errs) == 0 {

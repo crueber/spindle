@@ -22,9 +22,13 @@ import (
 func TestSetupAPISchemaWireShape(t *testing.T) {
 	cfg := config.Defaults()
 	s := New(Options{Config: cfg, Store: newFakeStore(), Engine: &fakeEngine{},
-		Boot: BootState{Mode: "normal"}})
+		Boot: BootState{Mode: "normal", FileState: "valid"}})
+	s.authSvc = NewAuthService(&cfg.Server.Auth, s.Now)
+	installTestAdminHook(s)
+	req := httptest.NewRequest("GET", "/api/v1/setup", nil)
+	req.Header.Set("Authorization", "Bearer tok123")
 	rec := httptest.NewRecorder()
-	s.setupGet(rec, httptest.NewRequest("GET", "/api/v1/setup", nil))
+	s.setupGet(rec, req)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("GET /api/v1/setup = %d %s", rec.Code, rec.Body.String())
 	}
@@ -40,7 +44,7 @@ func TestSetupAPISchemaWireShape(t *testing.T) {
 		t.Fatalf("body missing the frozen row %s", row)
 	}
 	// The auth subsection is its own card, immediately after server.
-	if !strings.Contains(body, `},{"section":"auth","keys":[{"key":"server.auth.mode"`) {
+	if !strings.Contains(body, `},{"section":"auth","keys":[{"key":"server.auth.`) {
 		t.Fatalf("auth card is not the second group: %.400s", body)
 	}
 	// Typed values keep their JSON types: a duration renders as its Go string,
@@ -74,12 +78,16 @@ func TestSetupAPISchemaWireShape(t *testing.T) {
 
 func TestSetupAPISaveResponseWireShape(t *testing.T) {
 	dataDir := t.TempDir()
-	cfg := config.FirstRunDefaults(dataDir)
+	cfg := seedValidConfig(t, dataDir)
 	s := New(Options{Config: cfg, Store: newFakeStore(), Engine: &fakeEngine{},
-		DataDir: dataDir, Boot: BootState{Mode: "normal"}})
+		DataDir: dataDir, Boot: BootState{Mode: "normal", FileState: "valid",
+			ConfigPaths: []string{filepath.Join(dataDir, config.ConfigFileName)}}})
+	s.authSvc = NewAuthService(&cfg.Server.Auth, s.Now)
+	installTestAdminHook(s)
 
 	req := httptest.NewRequest("PUT", "/api/v1/setup",
 		strings.NewReader(`{"overrides": {"server.listen": "127.0.0.1:9099"}}`))
+	req.Header.Set("Authorization", "Bearer tok123")
 	rec := httptest.NewRecorder()
 	s.setupPut(rec, req)
 	if rec.Code != http.StatusOK {
@@ -98,14 +106,15 @@ func TestSetupAPISaveResponseWireShape(t *testing.T) {
 	if !saveResp.Saved || len(saveResp.RequiresRestart) != 1 || saveResp.RequiresRestart[0] != "server.listen" || len(saveResp.Errors) != 0 {
 		t.Fatalf("save body = %s", body)
 	}
-	// A fresh data dir has no previous file, so the first save keeps no backup.
-	if saveResp.Backup != "" {
-		t.Fatalf("fresh save reports backup %q", saveResp.Backup)
+	// The seeded operator file is kept beside the canonical rewrite.
+	if !strings.HasPrefix(saveResp.Backup, config.ConfigFileName+".bak-") {
+		t.Fatalf("save reports backup %q, want the seeded file kept", saveResp.Backup)
 	}
 
 	// Validation failures report EVERY error as {key, message}.
 	req = httptest.NewRequest("POST", "/api/v1/setup/test",
 		strings.NewReader(`{"overrides": {"store.backend": "nope", "server.listen": "bogus"}}`))
+	req.Header.Set("Authorization", "Bearer tok123")
 	rec = httptest.NewRecorder()
 	s.setupTest(rec, req)
 	if rec.Code != http.StatusUnprocessableEntity {
@@ -136,14 +145,19 @@ func TestSetupAPISaveResponseWireShape(t *testing.T) {
 // (before the fix, 99999999999999999999 saturated to MinInt64 and saved).
 func TestSetupAPIRejectsOutOfRangeNumbers(t *testing.T) {
 	dataDir := t.TempDir()
-	cfg := config.FirstRunDefaults(dataDir)
+	cfg := seedValidConfig(t, dataDir)
 	s := New(Options{Config: cfg, Store: newFakeStore(), Engine: &fakeEngine{},
-		DataDir: dataDir, Boot: BootState{Mode: "normal"}})
+		DataDir: dataDir, Boot: BootState{Mode: "normal", FileState: "valid",
+			ConfigPaths: []string{filepath.Join(dataDir, config.ConfigFileName)}}})
+	s.authSvc = NewAuthService(&cfg.Server.Auth, s.Now)
+	installTestAdminHook(s)
 
 	// Establish a known file to compare against.
 	rec := httptest.NewRecorder()
-	s.setupPut(rec, httptest.NewRequest("PUT", "/api/v1/setup",
-		strings.NewReader(`{"overrides": {"server.listen": "127.0.0.1:9099"}}`)))
+	baseReq := httptest.NewRequest("PUT", "/api/v1/setup",
+		strings.NewReader(`{"overrides": {"server.listen": "127.0.0.1:9099"}}`))
+	baseReq.Header.Set("Authorization", "Bearer tok123")
+	s.setupPut(rec, baseReq)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("baseline PUT = %d %s", rec.Code, rec.Body.String())
 	}
@@ -158,7 +172,9 @@ func TestSetupAPIRejectsOutOfRangeNumbers(t *testing.T) {
 		{"wal.cas_max_retries", `{"overrides": {"wal.cas_max_retries": 4294967296}}`},
 	} {
 		rec = httptest.NewRecorder()
-		s.setupPut(rec, httptest.NewRequest("PUT", "/api/v1/setup", strings.NewReader(tc.body)))
+		badReq := httptest.NewRequest("PUT", "/api/v1/setup", strings.NewReader(tc.body))
+		badReq.Header.Set("Authorization", "Bearer tok123")
+		s.setupPut(rec, badReq)
 		if rec.Code != http.StatusUnprocessableEntity {
 			t.Fatalf("%s: PUT = %d %s", tc.key, rec.Code, rec.Body.String())
 		}

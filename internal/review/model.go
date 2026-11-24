@@ -104,6 +104,18 @@ type ReviewEvent struct {
 	Body      string `json:"body,omitempty"`       // markdown-lite, "" allowed
 	Dismisses *int   `json:"dismisses,omitempty"`  // review_dismissed: target review seq
 	Reason    string `json:"reason,omitempty"`     // review_dismissed
+	// Hidden is the M2 moderation projection hint (never persisted): set by
+	// the read verbs when a moderator hid this body. Body is omitted for
+	// non-moderators.
+	Hidden *HiddenInfo `json:"hidden,omitempty"`
+}
+
+// HiddenInfo is the M2 moderation hint attached to one projected review or
+// review-thread comment.
+type HiddenInfo struct {
+	By     string `json:"by"`
+	At     string `json:"at"`
+	Reason string `json:"reason"`
 }
 
 // Anchor is the normative §4 line anchor.
@@ -142,6 +154,8 @@ type ThreadComment struct {
 	At   string `json:"at"`
 	By   string `json:"by"`
 	Body string `json:"body"`
+	// Hidden is the M2 moderation projection hint (see HiddenInfo).
+	Hidden *HiddenInfo `json:"hidden,omitempty"`
 }
 
 // RequestedReviewer is one entry of the current-state index (§5).
@@ -252,58 +266,81 @@ func validateBody(body string) error {
 
 // validateSHA checks a full 40/64-hex sha.
 func validateSHA(sha string) error {
-	if len(sha) != 40 && len(sha) != 64 {
-		return fmt.Errorf("%w: sha must be 40/64-hex, got %q", ErrInvalid, sha)
-	}
-	for i := 0; i < len(sha); i++ {
-		c := sha[i]
-		if (c < '0' || c > '9') && (c < 'a' || c > 'f') {
-			return fmt.Errorf("%w: sha must be lowercase hex, got %q", ErrInvalid, sha)
-		}
+	if msg := commitSHAProblem(sha); msg != "" {
+		return fmt.Errorf("%w: %s", ErrInvalid, msg)
 	}
 	return nil
 }
 
+// commitSHAProblem is the message form (the anchor validator joins several
+// problems into one error, so it cannot wrap ErrInvalid per field).
+func commitSHAProblem(sha string) string {
+	if len(sha) != 40 && len(sha) != 64 {
+		return fmt.Sprintf("commit_sha must be 40/64-hex, got %q", sha)
+	}
+	for i := 0; i < len(sha); i++ {
+		c := sha[i]
+		if (c < '0' || c > '9') && (c < 'a' || c > 'f') {
+			return fmt.Sprintf("commit_sha must be lowercase hex, got %q", sha)
+		}
+	}
+	return ""
+}
+
 // validateContextSHA checks the §4 drift hash (hex SHA-256, 64 chars).
 func validateContextSHA(h string) error {
+	if msg := contextSHAProblem(h); msg != "" {
+		return fmt.Errorf("%w: %s", ErrInvalid, msg)
+	}
+	return nil
+}
+
+// contextSHAProblem is the message form (see commitSHAProblem).
+func contextSHAProblem(h string) string {
 	if len(h) != 64 {
-		return fmt.Errorf("%w: context_sha must be 64-hex SHA-256, got %q", ErrInvalid, h)
+		return fmt.Sprintf("context_sha must be 64-hex SHA-256, got %q", h)
 	}
 	for i := 0; i < len(h); i++ {
 		c := h[i]
 		if (c < '0' || c > '9') && (c < 'a' || c > 'f') {
-			return fmt.Errorf("%w: context_sha must be lowercase hex, got %q", ErrInvalid, h)
+			return fmt.Sprintf("context_sha must be lowercase hex, got %q", h)
 		}
 	}
-	return nil
+	return ""
 }
 
 // validateAnchor checks the normative §4 anchor: side selects the indexed
 // file (NEW ⇒ new range > 0, OLD ⇒ old range > 0), path non-empty,
 // commit_sha pinned, context_sha well-formed. Drift-hash *correctness* is
 // derived at view time by the client (§4/§8); the server validates shape
-// only (no git subprocesses on this path, §7 Concurrency).
+// only (no git subprocesses on this path, §7 Concurrency). Every problem is
+// reported in ONE error (BUG-8): a client copying the §4 example learned the
+// anchor one rejection at a time otherwise.
 func validateAnchor(a Anchor) error {
+	var problems []string
 	if strings.TrimSpace(a.Path) == "" || len(a.Path) > MaxPathLen || strings.Contains(a.Path, "\n") {
-		return fmt.Errorf("%w: anchor path must be 1-%d chars with no newlines", ErrInvalid, MaxPathLen)
+		problems = append(problems, fmt.Sprintf("path must be 1-%d chars with no newlines", MaxPathLen))
 	}
 	switch a.Side {
 	case SideNew:
 		if a.NewStart < 1 || a.NewLines < 1 {
-			return fmt.Errorf("%w: NEW anchors need new_start/new_lines >= 1", ErrInvalid)
+			problems = append(problems, "NEW anchors need new_start/new_lines >= 1")
 		}
 	case SideOld:
 		if a.OldStart < 1 || a.OldLines < 1 {
-			return fmt.Errorf("%w: OLD anchors need old_start/old_lines >= 1", ErrInvalid)
+			problems = append(problems, "OLD anchors need old_start/old_lines >= 1")
 		}
 	default:
-		return fmt.Errorf("%w: anchor side must be NEW|OLD, got %q", ErrInvalid, a.Side)
+		problems = append(problems, fmt.Sprintf("side must be NEW|OLD, got %q", a.Side))
 	}
-	if err := validateSHA(a.CommitSHA); err != nil {
-		return err
+	if msg := commitSHAProblem(a.CommitSHA); msg != "" {
+		problems = append(problems, msg)
 	}
-	if err := validateContextSHA(a.ContextSHA); err != nil {
-		return err
+	if msg := contextSHAProblem(a.ContextSHA); msg != "" {
+		problems = append(problems, msg)
+	}
+	if len(problems) > 0 {
+		return fmt.Errorf("%w: anchor: %s", ErrInvalid, strings.Join(problems, "; "))
 	}
 	return nil
 }

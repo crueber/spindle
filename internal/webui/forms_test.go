@@ -340,10 +340,9 @@ type formsHarness struct {
 	cfg *config.Config
 }
 
-func newFormsHarness(t *testing.T, mode string) *formsHarness {
+func newFormsHarness(t *testing.T, _ string) *formsHarness {
 	t.Helper()
 	cfg := config.Defaults()
-	cfg.Server.Auth.Mode = mode
 	cfg.Server.Auth.AnonymousRead = true
 	cfg.Import.AllowPrivateNetworks = true
 	cfg.Import.URLAllowlist = []string{"github.com"}
@@ -369,23 +368,34 @@ func newFormsHarness(t *testing.T, mode string) *formsHarness {
 }
 
 // formsParseTemplates parses base + this group's partials + one group page at
-// a time (isolated from sibling groups' template files).
+// a time (isolated from sibling groups' template files). The subset is fixed,
+// so it is parsed once per test binary (testsupport_test.go).
+var formsTemplates onceTemplates
+
 func formsParseTemplates(t *testing.T, s *Server) {
 	t.Helper()
-	s.tpl = map[string]*template.Template{}
+	s.tpl = formsTemplates.get(t, func() (map[string]*template.Template, error) {
+		return buildFormsTemplates(s)
+	})
+}
+
+func buildFormsTemplates(s *Server) (map[string]*template.Template, error) {
+	out := map[string]*template.Template{}
 	groupPages, err := fs.Glob(tplFS, "templates/pages/forms/*.html")
 	if err != nil || len(groupPages) == 0 {
-		t.Fatalf("forms templates: %v", err)
+		return nil, fmt.Errorf("forms templates: %v", err)
 	}
 	parts, err := fs.Glob(tplFS, "templates/partials/forms_*.html")
 	if err != nil {
-		t.Fatalf("forms partials: %v", err)
+		return nil, fmt.Errorf("forms partials: %w", err)
 	}
 	for _, p := range groupPages {
 		name := strings.TrimSuffix(strings.TrimPrefix(p, "templates/pages/"), ".html")
 		files := append([]string{
 			"templates/base.html",
 			"templates/partials/header.html",
+			// The header's theme menu (PLAN-THEMES §7.4).
+			"templates/partials/theme_menu.html",
 			"templates/partials/footer.html",
 			// The layout's repository chrome (12_web_ui.md §2.2.1).
 			"templates/partials/repo_header.html",
@@ -394,9 +404,9 @@ func formsParseTemplates(t *testing.T, s *Server) {
 		}, parts...)
 		tpl, perr := template.New("base").Funcs(s.funcs()).ParseFS(tplFS, files...)
 		if perr != nil {
-			t.Fatalf("parse %s: %v", name, perr)
+			return nil, fmt.Errorf("parse %s: %w", name, perr)
 		}
-		s.tpl[name] = tpl
+		out[name] = tpl
 	}
 	// The shared error page is what errorPage renders. The FOUNDATION's
 	// error.html currently compares an int through the string-only `eq`
@@ -407,9 +417,10 @@ func formsParseTemplates(t *testing.T, s *Server) {
 		`{{define "base"}}<html><body>{{template "content" .}}</body></html>{{end}}` +
 			`{{define "content"}}<h1>error</h1><p>{{.Data.Message}}</p>{{end}}`)
 	if perr != nil {
-		t.Fatalf("parse error stub: %v", perr)
+		return nil, fmt.Errorf("parse error stub: %w", perr)
 	}
-	s.tpl["error"] = errTpl
+	out["error"] = errTpl
+	return out, nil
 }
 
 func (h *formsHarness) request(t *testing.T, method, path string, form url.Values, who string, hdr map[string]string) *httptest.ResponseRecorder {
@@ -1540,7 +1551,7 @@ func TestFormsImportDangerousNeedsAdmin(t *testing.T) {
 		"schedule": {"daily"}, "dangerous": {"on"},
 	}, "writer", nil)
 	formsExpectStatus(t, w, http.StatusForbidden)
-	formsExpectContains(t, w, "requires an authenticated admin")
+	formsExpectContains(t, w, "requires a signed-in host admin")
 }
 
 func TestFormsImportServiceError(t *testing.T) {
@@ -1646,6 +1657,7 @@ func TestFormsMilestonesListErrorSurfaces(t *testing.T) {
 // --- helpers sanity ----------------------------------------------------------
 
 func TestFormsValidationMirrors(t *testing.T) {
+	t.Parallel()
 	cases := []struct {
 		owner, name string
 		wantErr     bool
@@ -1682,15 +1694,16 @@ func TestFormsValidationMirrors(t *testing.T) {
 	if !formsRoleAtLeast(identity.RoleWrite, identity.RoleTriage) || formsRoleAtLeast(identity.RoleRead, identity.RoleWrite) {
 		t.Error("role ladder wrong")
 	}
-	if !formsDangerousAllowed("token", auth.Principal{Name: "a", Admin: true}) {
-		t.Error("admin under token should qualify")
+	if !formsDangerousAllowed(auth.Principal{Name: "a", Admin: true}) {
+		t.Error("a signed-in admin should qualify")
 	}
-	if formsDangerousAllowed("none", auth.Principal{Name: "a", Admin: true}) {
-		t.Error("auth-none admin must not qualify")
+	if formsDangerousAllowed(auth.Principal{Name: "a", Admin: true, Anonymous: true}) {
+		t.Error("an anonymous admin-flagged principal must not qualify")
 	}
 }
 
 func TestFormsCompareHistories(t *testing.T) {
+	t.Parallel()
 	head := api.CommitPage{SHA: "h", Commits: []api.Commit{{SHA: "c3"}, {SHA: "c2"}, {SHA: "c1"}}, More: false}
 	base := api.CommitPage{SHA: "b", Commits: []api.Commit{{SHA: "c0"}}, More: true}
 	unique, ahead, behind, truncHead, truncBase := formsCompareHistories(head, base)
@@ -1706,6 +1719,7 @@ func TestFormsCompareHistories(t *testing.T) {
 }
 
 func TestFormsOriginCheck(t *testing.T) {
+	t.Parallel()
 	h := newFormsHarness(t, "none")
 	r := httptest.NewRequest(http.MethodPost, "/x", nil)
 	r.Host = "spindle.localhost:8080"
@@ -1722,17 +1736,12 @@ func TestFormsOriginCheck(t *testing.T) {
 	if h.s.formsOriginOK(r) {
 		t.Fatal("protocol-relative referer accepted")
 	}
-	// Fail closed when neither header is present in a cookie-auth mode; the
-	// auth-less none boot still accepts (no session to abuse).
+	// Fail closed when neither header is present: every instance now has a
+	// cookie-backed OIDC session that could authenticate the post.
 	r.Header.Del("Referer")
-	if !h.s.formsOriginOK(r) {
-		t.Fatal("none mode rejected a headerless post")
-	}
-	h.s.env.Cfg.Server.Auth.Mode = "token"
 	if h.s.formsOriginOK(r) {
-		t.Fatal("token mode accepted a headerless post (fail-open)")
+		t.Fatal("headerless post accepted (fail-open)")
 	}
-	h.s.env.Cfg.Server.Auth.Mode = "none"
 }
 
 func TestFormsHXRedirect(t *testing.T) {
@@ -1752,6 +1761,7 @@ func TestFormsHXRedirect(t *testing.T) {
 // --- error mapping / small helpers ------------------------------------------
 
 func TestFormsErrStatusTable(t *testing.T) {
+	t.Parallel()
 	cases := []struct {
 		err  error
 		want int
@@ -1793,6 +1803,7 @@ func TestFormsErrStatusTable(t *testing.T) {
 }
 
 func TestFormsSmallHelpers(t *testing.T) {
+	t.Parallel()
 	if formsLowerFirst("Create a repo") != "create a repo" || formsLowerFirst("") != "" {
 		t.Error("lowerFirst")
 	}
@@ -1855,6 +1866,7 @@ func TestFormsSmallHelpers(t *testing.T) {
 }
 
 func TestFormsLabelPackTable(t *testing.T) {
+	t.Parallel()
 	if len(formsLabelPacks) != 2 {
 		t.Fatalf("packs = %d", len(formsLabelPacks))
 	}
@@ -2014,6 +2026,7 @@ func TestFormsNewPostGuardTable(t *testing.T) {
 // --- import guards -----------------------------------------------------------
 
 func TestFormsImportSourceHint(t *testing.T) {
+	t.Parallel()
 	if got, err := formsSourceHint("acme/monorepo"); got != "https://github.com/acme/monorepo.git" || err != "" {
 		t.Fatalf("hint = %q %q", got, err)
 	}
@@ -2425,6 +2438,7 @@ func TestFormsAllPagesRequireAuth(t *testing.T) {
 }
 
 func TestFormsSameHostParseError(t *testing.T) {
+	t.Parallel()
 	h := newFormsHarness(t, "none")
 	r := httptest.NewRequest(http.MethodPost, "/x", nil)
 	r.Host = "spindle.localhost"
@@ -2435,6 +2449,7 @@ func TestFormsSameHostParseError(t *testing.T) {
 }
 
 func TestFormsSummaryError(t *testing.T) {
+	t.Parallel()
 	h := newFormsHarness(t, "none")
 	h.s.env.API = &api.Env{Repo: &formsFakeRepoView{summaryErr: errors.New("boom")}}
 	r := httptest.NewRequest(http.MethodGet, "/alice/thing", nil)
@@ -2597,6 +2612,7 @@ func TestFormsMalformedBodyTable(t *testing.T) {
 	for _, path := range paths {
 		r := httptest.NewRequest(http.MethodPost, path, strings.NewReader("owner=%zz"))
 		r.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+		r.Header.Set("Origin", "http://"+r.Host)
 		r.Header.Set("X-Test-User", "writer")
 		w := httptest.NewRecorder()
 		h.s.Serve(w, r)
@@ -2636,6 +2652,7 @@ func TestFormsInvisibleRepoCheckRead(t *testing.T) {
 }
 
 func TestFormsSummaryNilAPI(t *testing.T) {
+	t.Parallel()
 	h := newFormsHarness(t, "none")
 	h.s.env.API = nil
 	r := httptest.NewRequest(http.MethodGet, "/alice/thing", nil)
@@ -2648,6 +2665,7 @@ func TestFormsSummaryNilAPI(t *testing.T) {
 }
 
 func TestFormsRefListError(t *testing.T) {
+	t.Parallel()
 	h := newFormsHarness(t, "none")
 	h.s.env.API = &api.Env{Repo: &formsFakeRepoView{refErr: errors.New("refs down")}}
 	r := httptest.NewRequest(http.MethodGet, "/alice/thing", nil)
@@ -2909,6 +2927,7 @@ func TestFormsNeedWriteImport(t *testing.T) {
 }
 
 func TestFormsFlashTargetWithQuery(t *testing.T) {
+	t.Parallel()
 	h := newFormsHarness(t, "none")
 	w := httptest.NewRecorder()
 	h.s.formsRedirectFlash(w, httptest.NewRequest(http.MethodPost, "/x", nil), "/t?x=1", "hi")
@@ -2918,6 +2937,7 @@ func TestFormsFlashTargetWithQuery(t *testing.T) {
 }
 
 func TestFormsFeatureEnabledUnknown(t *testing.T) {
+	t.Parallel()
 	sum := api.SummaryData{Features: formsAllFeatures()}
 	if !formsFeatureEnabled(sum, "bogus") {
 		t.Fatal("unknown feature must stay enabled")
@@ -2925,6 +2945,7 @@ func TestFormsFeatureEnabledUnknown(t *testing.T) {
 }
 
 func TestFormsSummaryBadIDWithView(t *testing.T) {
+	t.Parallel()
 	h := newFormsHarness(t, "none")
 	h.s.env.API = &api.Env{Repo: &formsFakeRepoView{}}
 	r := httptest.NewRequest(http.MethodGet, "/x", nil)
@@ -2961,6 +2982,7 @@ func TestFormsMirrorStoreFailure(t *testing.T) {
 }
 
 func TestFormsCompareInvalidRepo(t *testing.T) {
+	t.Parallel()
 	h := newFormsHarness(t, "none")
 	h.s.env.API = &api.Env{Repo: &formsFakeRepoView{}}
 	r := httptest.NewRequest(http.MethodGet, "/x", nil)
@@ -2971,6 +2993,7 @@ func TestFormsCompareInvalidRepo(t *testing.T) {
 }
 
 func TestFormsCompareBaseEmptySHA(t *testing.T) {
+	t.Parallel()
 	head := api.CommitPage{SHA: "h", Commits: []api.Commit{{SHA: "c1"}}}
 	base := api.CommitPage{SHA: "b", Commits: []api.Commit{{SHA: ""}, {SHA: "c1"}}}
 	_, _, behind, _, _ := formsCompareHistories(head, base)

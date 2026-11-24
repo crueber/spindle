@@ -14,7 +14,10 @@ Seams that keep future GitHub-like features (issues, PRs, review) additive:
 - Handlers depend on two interfaces only: `RepoView` (refs sync + object access: `Resolve`, `Tree`,
   `Blob`, `Commits`, `Commit`) and `Tasks` (`List`, `Attach`, `Begin`) — both defined in this package and
   implemented by `internal/wal` / `internal/maintain`. New feature domains register their own lane routes;
-  nothing in the core response shapes changes.
+  nothing in the core response shapes changes. The server-rendered browse pages add an OPTIONAL extension,
+  `RepoBrowse` (`Blame`, `Branches`, `Compare`, same file), implemented by the same `walView`: the page
+  type-asserts it, so JSON handlers and older binders keep the frozen `RepoView` surface, and an
+  unwired view renders those pages as unavailable. Its argv is pinned in `04_git.md` §16.
 - Route registration is table-driven: `[]Route{Method, Pattern, Handler, Auth}` consumed by
   `internal/server`. Lanes (`/api` vs `/api-browser`) are resolved **before** dispatch: strip
   `/{owner}/{repo}[.git]/api` or `/api-browser` and mark the lane; handlers are lane-agnostic (§8.2).
@@ -420,7 +423,7 @@ table-derived list (PUT/DELETE rows are never `Expose`); feature-registered capa
 hint*, not an ACL.
 
 - `GET /api/v1/me` → `{principal, write, anonymous, admin, avatar_url?}`, `no-store`; `401` (plain text) when unauthenticated
-  in a mode that requires auth. `admin` (Forgejo #371) gates the navbar's Setup menu entry;
+  in a mode that requires auth. `admin` (Forgejo #371) gates the navbar's Administration menu entry;
   `avatar_url` (Forgejo #376 — the stable user-avatar URL, `?v=` cache-busted, omitted when
   the user has none or the identity surface is unwired) feeds the navbar identity control;
   the discovery auth block carries the instance `mode` (`none|token|oidc`) so the navbar knows
@@ -839,6 +842,39 @@ so the UI can guide instead of traying without parsing prose.
   (`require_write`, `(repo, kind)` single-flight join — §12.2); the `repair-check` option was
   considered and closed (Decisions).
 
+### 9.11 Browser file editor writes — `PUT|POST|DELETE …/api/contents` (Feature F)
+
+Feature-owned (docs/features/17_file_edit.md is normative); the row is pinned here because it is a
+repo-scoped JSON write on both lanes and must be discoverable. `ExposedTemplates` carries
+`/{owner}/{repo}/api/contents`; the `/api-browser` twin is identical.
+
+| Method + path | Auth | Request → response |
+|---|---|---|
+| `PUT /{o}/{r}/api/contents?ref=&path=` | push floor (`CheckPush`) + policy | `{message, description?, content:base64, expected_blob_sha?, expected_branch_sha?, new_branch?, open_pr?, pr_title?, pr_body?}` → `201 {commit:{sha}, branch, pr?:{num}}`; `409` when the branch or blob moved (naming both shas); `413` over `webedit.max_bytes`; `415` binary/LFS; `422` no-op |
+| `POST …/api/contents` | same | the create-new-file variant: `expected_blob_sha` forbidden, `409` when the path already exists |
+| `DELETE …/api/contents` | same | `{message, expected_blob_sha (required), …}` → `200 {commit:{sha}, branch}`; `404` when the path is absent |
+
+All writes are `no-store`, errors plain text, and a `Location` header names the landed file (or the
+PR). The commit is built with git plumbing and published through the WAL funnel, so it is a push for
+policy, events, Threads and checks.
+
+### 9.12 Issue parity endpoints — pinning, dependencies, templates (Feature 02)
+
+Feature-owned (`docs/features/02_issues.md` §13–§15 are normative); the rows are pinned here because
+they are repo-scoped JSON routes on both lanes.
+
+| Method + path | Auth | Request → response |
+|---|---|---|
+| `PUT\|DELETE /{o}/{r}/api/issues/{num}/pin` | triage | → `200 {pinned:[int], num, changed}`; idempotent |
+| `GET /{o}/{r}/api/issues/{num}/dependencies` | read | → `{num, blocks:[{num,title,state}], blocked_by:[…], blocked, unblocked}` |
+| `POST …/api/issues/{num}/dependencies` | triage | `{kind:"blocks"\|"blocked_by", target}` → `201` (200 when the link already existed) with the view; self 400, unknown/PR target 404, cycle 409 |
+| `DELETE …/api/issues/{num}/dependencies/{kind}/{target}` | triage | → `200` with the view |
+| `GET …/api/issue-templates` | read | → `{templates:[{path,name,about,title,labels,assignees}], refreshed_at, commit?}` — the push-time projection (§15); **never** a git call |
+| `GET …/api/issues/{num}` / `GET …/api/pulls/{num}` | read | views also carry `lock_mode` (`all` or `collaborators`) beside `locked`/`lock_reason` (16_moderation §10.3) |
+
+Every response is `no-store`, errors plain text. The templates route serves the cached projection only;
+discovery runs on the push path, so a composer request never shells out to git (law 6).
+
 ## 10. Policy endpoints (§14 semantics)
 
 - `GET …/policy` → the policy JSON document (§14.1 envelope); missing file = allow-all: emit
@@ -984,7 +1020,7 @@ listings (§8), never from the status code. Nil `Access` → legacy flag-only ga
 ## 14. Decisions & deviations from the Rust design
 
 - **Navbar identity signals (Forgejo #371).** `GET /api/v1/me` gains `admin`
-  (the navbar gates its Setup menu entry on it — `setupAccess` admits host
+  (the navbar gates its Administration menu entry on it — `setupAccess` admits host
   admins outside none mode) and the discovery auth block gains the instance
   `mode` (`none|token|oidc`), so the page chrome knows whether Login/identity apply
   at all (never in `none` mode — nothing to log in to — and the Login
@@ -1071,6 +1107,11 @@ listings (§8), never from the status code. Nil `Access` → legacy flag-only ga
   lines, in order" but not the join character; this matches git's in-memory representation).
 - **`?raw` blob responses are not size-capped** — the 2 MiB cap is a JSON-shape rule (`too_large`); raw
   is the download path. The Rust spec caps "the JSON"; raw is an intentional clarification, not a change.
+- **The blob page header renders the walked blob oid, not the resolved commit sha** — `BlobResult`
+  carries `ObjectSHA` (the `sha:path` object, display-only, never a wire field) beside `Ref`/`SHA`,
+  which echo the resolution exactly like tree/resolve. The JSON `sha` is unchanged (the resolved
+  commit); before this the binder filled neither `Ref`/`SHA`/`Name`, so the page's raw link and
+  `size · sha` inventory never rendered (BUG-3). No wire or bucket change.
 - **`POST ops/{op}` returns `409` (SSE `error`) for a same-(repo,kind) task running on another host** —
   §6.8 makes records instance-local; the Rust behavior of awaiting is only defined for the local table,
   and a cross-host wait has no attachable stream. Local joins keep the bounded-wait + reuse semantics.

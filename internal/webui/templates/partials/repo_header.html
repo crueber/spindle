@@ -66,9 +66,17 @@
       <span class="btn" title="{{.Watchers}} {{plural .Watchers "watcher" "watchers"}}"><span class="mono">{{.Watchers}}</span> Watch</span>
       {{end}}
     {{end}}
-    <span class="btn whitespace-nowrap" title="Fork {{.Full}}">
-      <a class="hover:underline" href="{{.ForksHref}}" title="View forks of {{.Full}}"><span class="mono">{{.Forks}}</span></a>
-      <a class="hover:underline" href="{{.ForkHref}}" title="Fork this repository">Fork</a>
+    {{/* The Fork shell is ONE .btn group with two anchors (anchors cannot
+         nest). The shell drops its own padding and flex gap; the anchors carry
+         asymmetric padding so the visible text reads exactly like its
+         Star/Watch siblings — count, 6px, label, and 10px at the outer edges.
+         py-[3px] keeps each link a 24px-tall target inside the 26px shell
+         (WCAG 2.5.8), and min-w-6 widens the count to 24px. The count and the
+         label stay two separate hit targets; the anatomy is pinned by
+         TestRepoHeaderForkButtonAnatomy. */}}
+    <span class="btn whitespace-nowrap gap-0 p-0" title="Fork {{.Full}}">
+      <a class="hover:underline inline-flex min-w-6 items-center py-[3px] pr-1.5 pl-2.5" href="{{.ForksHref}}" title="View forks of {{.Full}}"><span class="mono">{{.Forks}}</span></a>
+      <a class="hover:underline inline-flex items-center py-[3px] pr-2.5 pl-0" href="{{.ForkHref}}" title="Fork this repository">Fork</a>
     </span>
 
     <!-- Clone menu: the shared menus.js popover contract (outside-click, Esc,

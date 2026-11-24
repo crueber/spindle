@@ -2,12 +2,39 @@
 {{with .Data}}{{$d := .}}
 <div class="grid gap-4 md:grid-cols-[minmax(0,1fr)_16rem]">
   <div class="min-w-0">
-    <header class="mb-4 flex flex-wrap items-center gap-2 border-b border-[var(--pd-line)] pb-3">
+    <header id="conversation" class="mb-4 flex flex-wrap items-center gap-2 border-b border-[var(--pd-line)] pb-3">
       <h2 class="min-w-0 flex-1 text-xl font-semibold tracking-tight"><span class="mono muted">#{{.Num}}</span> {{.Title}}</h2>
+      {{if .Pinned}}<span class="chip chip-neutral shrink-0" title="Pinned to the top of the issue list">pinned</span>{{end}}
+      {{if .Lock.Moderated}}<span class="chip chip-neutral shrink-0" role="status">Locked</span>{{end}}
       <span class="{{.StateCls}} shrink-0">{{.StateLabel}}</span>
+      {{if .CanTriage}}
+      <form method="post" action="{{if .Pinned}}{{.UnpinAction}}{{else}}{{.PinAction}}{{end}}">
+        <button type="submit" class="btn px-2 py-1" aria-label="{{if .Pinned}}Unpin issue #{{.Num}}{{else}}Pin issue #{{.Num}}{{end}}">{{if .Pinned}}Unpin{{else}}Pin{{end}}</button>
+      </form>
+      {{end}}
+      {{if .CanMaint}}
+      {{if .Lock.Moderated}}
+      <form method="post" action="{{.UnlockAction}}"><button type="submit" class="btn px-2 py-1">Unlock</button></form>
+      {{else}}
+      <details class="relative inline-block" data-popover>
+        <summary class="btn list-none px-2 py-1" aria-label="lock conversation options" data-popover-trigger>Lock</summary>
+        <form class="card absolute right-0 z-30 mt-1 grid w-64 gap-1 p-2" method="post" action="{{.LockAction}}" role="group" aria-label="lock conversation">
+          <label class="eyebrow" for="lock-mode-issue">Who may still comment</label>
+          <select class="input" id="lock-mode-issue" name="mode">
+            <option value="all" selected>Nobody (all)</option>
+            <option value="collaborators">Collaborators (write and up)</option>
+          </select>
+          <label class="eyebrow" for="lock-reason-issue">Reason (shown to everyone)</label>
+          <input class="input" id="lock-reason-issue" name="reason" placeholder="why is this conversation locked?">
+          <button type="submit" class="btn px-2 py-1">Lock conversation</button>
+        </form>
+      </details>
+      {{end}}
+      {{end}}
     </header>
     <p class="muted mb-3 text-xs">{{.Author}} opened {{template "collab_time" .CreatedAt}} · {{.CommentCount}} {{plural .CommentCount "comment" "comments"}}</p>
 
+    {{if .Lock.Moderated}}<p class="card mb-3 p-2 text-sm" role="status" aria-live="polite">{{.Lock.Reason}}{{if .Lock.CollaboratorsOnly}} — the composer below stays available to collaborators.{{end}}</p>{{end}}
     {{if .Error}}<p class="err-line" role="alert">{{.Error}}</p>{{end}}
     {{if .Notice}}<p class="warn-line" role="status">{{.Notice}}</p>{{end}}
 
@@ -23,6 +50,9 @@
 
   <aside class="grid content-start gap-3">
     {{if .Repo.NewIssueHref}}<a class="btn w-full" href="{{.Repo.NewIssueHref}}">New issue</a>{{end}}
+    {{template "collab_dependency_card" (dict
+      "View" .Deps "CanTriage" .CanTriage "AddAction" .DepAddAction
+      "RemoveBase" .DepRemove "Kinds" .DepKinds "Repo" .Repo)}}
     {{template "collab_meta_card" (dict
       "Aria" "Issue metadata"
       "LabelAction" .LabelAction "AssigneeAction" .AssigneeAction "MilestoneAction" .MilestoneAction

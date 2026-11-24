@@ -22,7 +22,6 @@ type installTmplData struct {
 	Host     string
 	Base     string
 	Slug     string
-	AuthNone bool
 	Repo     string
 	TokenURL string
 	Helper   string // the rendered per-host credential helper (§9.3)
@@ -56,7 +55,6 @@ func (s *Server) installSh(w http.ResponseWriter, r *http.Request) {
 		Host:     host,
 		Base:     base,
 		Slug:     hostSlug(host),
-		AuthNone: s.cfg.Server.Auth.Mode == "none",
 		Repo:     r.URL.Query().Get("repo"),
 		TokenURL: base + "/_auth/tokens",
 	}

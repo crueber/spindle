@@ -18,134 +18,94 @@ func errsContain(t *testing.T, errs []error, substr string) {
 	t.Fatalf("errors %v missing %q", errs, substr)
 }
 
-func TestValidateDefaultsPass(t *testing.T) {
-	warnings, errs := Validate(Defaults())
-	if len(errs) != 0 {
-		t.Fatalf("compiled-in defaults must validate clean: %v", errs)
-	}
-	if len(warnings) != 0 {
-		t.Fatalf("loopback default must not warn: %v", warnings)
-	}
-}
-
-// Rule 1 — auth-none loopback is WARN-only (divergence).
-func TestValidateAuthNoneNonLoopbackWarns(t *testing.T) {
-	c := FirstRunDefaults("/data")
-	warnings, errs := Validate(c)
-	if len(errs) != 0 {
-		t.Fatalf("auth-none on 0.0.0.0 must not fail closed: %v", errs)
-	}
-	if len(warnings) != 1 || !strings.Contains(warnings[0], "non-loopback listen 0.0.0.0:8080") {
-		t.Fatalf("warnings = %v, want loud auth warning", warnings)
-	}
-	c2 := Defaults()
-	c2.Server.Listen = "127.0.0.1:8080"
-	c2.Server.Auth.Mode = "none"
-	if warnings, _ := Validate(c2); len(warnings) != 0 {
-		t.Fatalf("loopback auth-none must not warn: %v", warnings)
-	}
-}
-
-// Rule 2 — oidc allowlist.
-func TestValidateOIDC(t *testing.T) {
-	base := func() *Config {
-		c := Defaults()
-		c.Server.Auth.Mode = "oidc"
-		c.Server.Auth.AnonymousRead = false
-		c.Server.Auth.AllowedDomains = []string{"example.com"}
-		c.Server.Auth.OAuthClientID = "id"
-		c.Server.Auth.OAuthClientSecret = "secret"
-		c.Server.Auth.SessionSecret = strings.Repeat("x", 32)
-		return c
-	}
-	if _, errs := Validate(base()); len(errs) != 0 {
-		t.Fatalf("valid oidc config must pass: %v", errs)
-	}
-
-	// Forgejo #371: anonymous_read is allowed in oidc mode either way —
-	// true is the default recommendation (public browsing per #345),
-	// false the everything-requires-login hard-lock.
-	for _, anon := range []bool{true, false} {
-		c := base()
-		c.Server.Auth.AnonymousRead = anon
-		if _, errs := Validate(c); len(errs) != 0 {
-			t.Fatalf("oidc with anonymous_read=%v must pass: %v", anon, errs)
-		}
-	}
-
-	c := base()
-	c.Server.Auth.AllowedDomains = nil
-	c.Server.Auth.AllowedEmails = nil
-	_, errs := Validate(c)
-	errsContain(t, errs, "allowed_domains or server.auth.allowed_emails")
-
-	c = base()
-	c.Server.Auth.OAuthClientSecret = ""
-	_, errs = Validate(c)
-	errsContain(t, errs, "both set or both unset")
-
-	c = base()
-	c.Server.Auth.SessionSecret = "short"
-	_, errs = Validate(c)
-	errsContain(t, errs, "at least 32 bytes")
-
-	c = base()
+// validOIDC is a complete, valid OIDC configuration (the only authentication).
+func validOIDC() *Config {
+	c := Defaults()
+	c.Server.Auth.Issuer = "https://id.example.com"
+	c.Server.Auth.AllowedDomains = []string{"example.com"}
+	c.Server.Auth.OAuthClientID = "id"
+	c.Server.Auth.OAuthClientSecret = "secret"
 	c.Server.Auth.SessionSecret = strings.Repeat("x", 32)
-	if _, errs := Validate(c); len(errs) != 0 {
-		t.Fatalf("32-byte session_secret must pass: %v", errs)
-	}
-
-	// WP13: groups_claim must be non-empty (the default is "groups");
-	// admin_groups may be empty (group admins disabled).
-	c = base()
-	c.Server.Auth.GroupsClaim = ""
-	_, errs = Validate(c)
-	errsContain(t, errs, "groups_claim")
-
-	c = base()
-	c.Server.Auth.GroupsClaim = "groups"
-	c.Server.Auth.AdminGroups = nil
-	if _, errs := Validate(c); len(errs) != 0 {
-		t.Fatalf("empty admin_groups (group admins disabled) must pass: %v", errs)
-	}
-
-	// The defaults are the documented ones.
-	d := Defaults()
-	if d.Server.Auth.GroupsClaim != "groups" ||
-		len(d.Server.Auth.AdminGroups) != 1 || d.Server.Auth.AdminGroups[0] != "spindle-admins" {
-		t.Fatalf("group defaults = claim %q groups %v", d.Server.Auth.GroupsClaim, d.Server.Auth.AdminGroups)
-	}
+	return c
 }
 
-// Rule 2b — the browser-login trio (#344): mode=oidc with any of
-// session_secret / oauth_client_id / oauth_client_secret missing fails
-// closed and names the missing key(s) — never a silent boot.
-func TestValidateOIDCTrioMissing(t *testing.T) {
-	base := func() *Config {
-		c := Defaults()
-		c.Server.Auth.Mode = "oidc"
-		c.Server.Auth.AnonymousRead = false
-		c.Server.Auth.AllowedDomains = []string{"example.com"}
-		c.Server.Auth.OAuthClientID = "id"
-		c.Server.Auth.OAuthClientSecret = "secret"
-		c.Server.Auth.SessionSecret = strings.Repeat("x", 32)
-		return c
+// testBaseConfig is a complete valid configuration for the non-auth rule
+// tests: the compiled defaults plus the OIDC set the boot now requires.
+func testBaseConfig() *Config { return validOIDC() }
+
+// TestValidateDefaultsFailClosed: the compiled-in defaults are NOT a valid
+// configuration any more (PLAN-OIDC-ONLY §4.2) — that failure is exactly what
+// puts a fresh instance in restricted mode.
+func TestValidateDefaultsFailClosed(t *testing.T) {
+	warnings, errs := Validate(Defaults())
+	if len(warnings) != 0 {
+		t.Fatalf("there are no auth warnings any more: %v", warnings)
 	}
-	clear := map[string]func(a *Auth){
-		"server.auth.session_secret":      func(a *Auth) { a.SessionSecret = "" },
-		"server.auth.oauth_client_id":     func(a *Auth) { a.OAuthClientID = "" },
-		"server.auth.oauth_client_secret": func(a *Auth) { a.OAuthClientSecret = "" },
+	errsContain(t, errs, "server.auth.issuer")
+	errsContain(t, errs, "server.auth.session_secret")
+	errsContain(t, errs, "server.auth.oauth_client_id")
+}
+
+// TestValidateAuthConfigured: the §4.2 matrix, every finding naming its key.
+func TestValidateAuthConfigured(t *testing.T) {
+	if _, errs := Validate(validOIDC()); len(errs) != 0 {
+		t.Fatalf("valid OIDC config must pass: %v", errs)
 	}
-	for key, drop := range clear {
-		t.Run("missing "+key, func(t *testing.T) {
-			c := base()
+
+	t.Run("issuer required and absolute", func(t *testing.T) {
+		c := validOIDC()
+		c.Server.Auth.Issuer = ""
+		_, errs := Validate(c)
+		errsContain(t, errs, "server.auth.issuer is required")
+
+		for _, bad := range []string{"id.example.com", "ftp://id.example.com", "https://"} {
+			c = validOIDC()
+			c.Server.Auth.Issuer = bad
+			_, errs = Validate(c)
+			errsContain(t, errs, "must be an absolute http(s) URL")
+		}
+	})
+
+	t.Run("admission allowlist required", func(t *testing.T) {
+		c := validOIDC()
+		c.Server.Auth.AllowedDomains = nil
+		c.Server.Auth.AllowedEmails = nil
+		_, errs := Validate(c)
+		errsContain(t, errs, "allowed_domains or server.auth.allowed_emails")
+	})
+
+	t.Run("groups_claim required", func(t *testing.T) {
+		c := validOIDC()
+		c.Server.Auth.GroupsClaim = ""
+		_, errs := Validate(c)
+		errsContain(t, errs, "server.auth.groups_claim")
+	})
+
+	t.Run("admin_groups must not be empty", func(t *testing.T) {
+		c := validOIDC()
+		c.Server.Auth.AdminGroups = nil
+		_, errs := Validate(c)
+		errsContain(t, errs, "server.auth.admin_groups must not be empty")
+
+		c = validOIDC()
+		c.Server.Auth.AdminGroups = []string{"  ", ""}
+		_, errs = Validate(c)
+		errsContain(t, errs, "at least one non-empty group")
+	})
+
+	t.Run("browser-login trio names every missing key", func(t *testing.T) {
+		clear := map[string]func(a *Auth){
+			"server.auth.session_secret":      func(a *Auth) { a.SessionSecret = "" },
+			"server.auth.oauth_client_id":     func(a *Auth) { a.OAuthClientID = "" },
+			"server.auth.oauth_client_secret": func(a *Auth) { a.OAuthClientSecret = "" },
+		}
+		for key, drop := range clear {
+			c := validOIDC()
 			drop(&c.Server.Auth)
 			_, errs := Validate(c)
 			errsContain(t, errs, key)
-		})
-	}
-	t.Run("missing all three names all three", func(t *testing.T) {
-		c := base()
+		}
+		c := validOIDC()
 		c.Server.Auth.SessionSecret = ""
 		c.Server.Auth.OAuthClientID = ""
 		c.Server.Auth.OAuthClientSecret = ""
@@ -154,79 +114,39 @@ func TestValidateOIDCTrioMissing(t *testing.T) {
 			errsContain(t, errs, key)
 		}
 	})
-	t.Run("non-oidc modes do not require the trio", func(t *testing.T) {
-		for _, mode := range []string{"none", "token"} {
-			c := Defaults()
-			c.Server.Auth.Mode = mode
-			c.Server.Auth.SessionSecret = ""
-			c.Server.Auth.OAuthClientID = ""
-			c.Server.Auth.OAuthClientSecret = ""
-			_, errs := Validate(c)
-			for _, err := range errs {
-				if strings.Contains(err.Error(), "browser-login trio") {
-					t.Fatalf("mode %q must not require the trio: %v", mode, errs)
-				}
+
+	t.Run("session secret length", func(t *testing.T) {
+		c := validOIDC()
+		c.Server.Auth.SessionSecret = "short"
+		_, errs := Validate(c)
+		errsContain(t, errs, "at least 32 bytes")
+	})
+
+	t.Run("anonymous_read is orthogonal", func(t *testing.T) {
+		for _, anon := range []bool{true, false} {
+			c := validOIDC()
+			c.Server.Auth.AnonymousRead = anon
+			if _, errs := Validate(c); len(errs) != 0 {
+				t.Fatalf("anonymous_read=%v must pass: %v", anon, errs)
 			}
+		}
+	})
+
+	t.Run("defaults are the documented ones", func(t *testing.T) {
+		d := Defaults()
+		if d.Server.Auth.GroupsClaim != "groups" ||
+			len(d.Server.Auth.AdminGroups) != 1 || d.Server.Auth.AdminGroups[0] != "spindle-admin" {
+			t.Fatalf("group defaults = claim %q groups %v", d.Server.Auth.GroupsClaim, d.Server.Auth.AdminGroups)
 		}
 	})
 }
 
-// Rule 2c — the #371 validation matrix (oidc × anonymous_read ×
-// login-enabled): anonymous_read passes either way in oidc mode; the trio
-// (browser login enabled) is what decides boot, independent of the flag.
-func TestValidateOIDCAnonTrioMatrix(t *testing.T) {
-	base := func() *Config {
-		c := Defaults()
-		c.Server.Auth.Mode = "oidc"
-		c.Server.Auth.AllowedDomains = []string{"example.com"}
-		c.Server.Auth.OAuthClientID = "id"
-		c.Server.Auth.OAuthClientSecret = "secret"
-		c.Server.Auth.SessionSecret = strings.Repeat("x", 32)
-		return c
-	}
-	for _, anon := range []bool{true, false} {
-		for _, trio := range []bool{true, false} {
-			name := ""
-			if anon {
-				name += "anon-read "
-			} else {
-				name += "hard-lock "
-			}
-			if trio {
-				name += "login-enabled"
-			} else {
-				name += "login-disabled"
-			}
-			t.Run(name, func(t *testing.T) {
-				c := base()
-				c.Server.Auth.AnonymousRead = anon
-				if !trio {
-					c.Server.Auth.SessionSecret = ""
-				}
-				_, errs := Validate(c)
-				if trio && len(errs) != 0 {
-					t.Fatalf("oidc anon=%v trio complete must pass: %v", anon, errs)
-				}
-				if !trio {
-					errsContain(t, errs, "server.auth.session_secret")
-					for _, err := range errs {
-						if strings.Contains(err.Error(), "anonymous_read") {
-							t.Fatalf("trio failure must not blame anonymous_read: %v", errs)
-						}
-					}
-				}
-			})
-		}
-	}
-}
-
-// Rule 3 — bundle strategy validation.
 func TestValidateBundleStrategies(t *testing.T) {
-	if _, errs := Validate(Defaults()); len(errs) != 0 {
+	if _, errs := Validate(testBaseConfig()); len(errs) != 0 {
 		t.Fatalf("default bundle strategies must pass: %v", errs)
 	}
 	mutate := func(f func(s []BundleStrategy)) []error {
-		c := Defaults()
+		c := testBaseConfig()
 		f(c.Bundles.Strategy)
 		_, errs := Validate(c)
 		return errs
@@ -250,12 +170,12 @@ func TestValidateBundleStrategies(t *testing.T) {
 
 // Rule 4 — chain-shared filter is all-or-nothing, rejected by name.
 func TestValidateBundleChainFilter(t *testing.T) {
-	c := Defaults()
+	c := testBaseConfig()
 	c.Bundles.Strategy[0].Filter = "blob:none" // daily/hourly chain has none
 	_, errs := Validate(c)
 	errsContain(t, errs, "(daily) mixes filter values in its base chain")
 
-	c = Defaults()
+	c = testBaseConfig()
 	for i := range c.Bundles.Strategy {
 		c.Bundles.Strategy[i].Filter = "blob:none"
 	}
@@ -266,24 +186,47 @@ func TestValidateBundleChainFilter(t *testing.T) {
 
 // Rule 5 — store.
 func TestValidateStore(t *testing.T) {
-	c := Defaults()
+	c := testBaseConfig()
 	c.Store.Backend = "ftp"
 	_, errs := Validate(c)
 	errsContain(t, errs, "store.backend must be one of")
 
-	c = Defaults()
+	c = testBaseConfig()
+	c.Store.Backend = "s3" // endpoint is not implied (OBS-1)
+	_, errs = Validate(c)
+	errsContain(t, errs, "store.s3.endpoint is required when store.backend")
+
+	c = testBaseConfig()
+	c.Store.Backend = "s3"
+	c.Store.S3.Endpoint = "http://127.0.0.1:9000"
+	c.Store.Bucket = ""
+	c.Store.S3.AccessKeyEnv = ""
+	c.Store.S3.SecretKeyEnv = ""
+	_, errs = Validate(c)
+	errsContain(t, errs, "store.bucket is required")
+	errsContain(t, errs, "store.s3.access_key_env is required")
+	errsContain(t, errs, "store.s3.secret_key_env is required")
+
+	c = testBaseConfig()
+	c.Store.Backend = "s3"
+	c.Store.S3.Endpoint = "http://127.0.0.1:9000"
+	if _, errs := Validate(c); len(errs) != 0 {
+		t.Fatalf("complete s3 selection must pass: %v", errs)
+	}
+
+	c = testBaseConfig()
 	c.Store.MultipartThreshold = 1 << 20
 	c.Store.MultipartPartSize = 2 << 20
 	_, errs = Validate(c)
 	errsContain(t, errs, "multipart_part_size")
 
-	c = Defaults()
+	c = testBaseConfig()
 	c.Store.MultipartPartSize = 0 // zero = unset, allowed
 	if _, errs := Validate(c); len(errs) != 0 {
 		t.Fatalf("zero part size must pass: %v", errs)
 	}
 
-	c = Defaults()
+	c = testBaseConfig()
 	c.Store.Backend = "filesystem"
 	c.Store.Root = "relative/path"
 	_, errs = Validate(c)
@@ -292,22 +235,22 @@ func TestValidateStore(t *testing.T) {
 
 // Rule 6 — sizes/timeouts: negative values nowhere, watermark in (0,1) or 0.
 func TestValidateSizes(t *testing.T) {
-	c := Defaults()
+	c := testBaseConfig()
 	c.Store.MultipartThreshold = -1
 	_, errs := Validate(c)
 	errsContain(t, errs, "negative value for store.multipart_threshold")
 
-	c = Defaults()
+	c = testBaseConfig()
 	c.Maintenance.Interval = Duration(-time.Second)
 	_, errs = Validate(c)
 	errsContain(t, errs, "negative value for maintenance.interval")
 
-	c = Defaults()
+	c = testBaseConfig()
 	c.Cache.DiskHighWatermark = 1.5
 	_, errs = Validate(c)
 	errsContain(t, errs, "disk_high_watermark")
 
-	c = Defaults()
+	c = testBaseConfig()
 	c.Cache.DiskHighWatermark = 0
 	if _, errs := Validate(c); len(errs) != 0 {
 		t.Fatalf("watermark 0 must pass: %v", errs)
@@ -324,7 +267,7 @@ func TestValidatePlacementGlobs(t *testing.T) {
 		{"", false}, {"owner/*/*", false}, {"**", false}, {"a?b", false}, {"a[b", false}, {"/*", false},
 	}
 	for _, tt := range tests {
-		c := Defaults()
+		c := testBaseConfig()
 		c.Placement.Serve = []string{tt.glob}
 		_, errs := Validate(c)
 		if tt.ok && len(errs) != 0 {
@@ -338,7 +281,7 @@ func TestValidatePlacementGlobs(t *testing.T) {
 
 // Rule 8 — roles.
 func TestValidateRoles(t *testing.T) {
-	c := Defaults()
+	c := testBaseConfig()
 	c.Server.Roles = []string{"serve", "maintain", "events", "serve"} // duplicates allowed
 	if _, errs := Validate(c); len(errs) != 0 {
 		t.Fatalf("valid roles must pass: %v", errs)
@@ -350,7 +293,7 @@ func TestValidateRoles(t *testing.T) {
 
 // Rule 9 — paths.
 func TestValidatePaths(t *testing.T) {
-	c := Defaults()
+	c := testBaseConfig()
 	c.Cache.Dir = "relative/dir"
 	_, errs := Validate(c)
 	errsContain(t, errs, "cache.dir must be an absolute path")
@@ -400,7 +343,7 @@ func TestResolveDataDirContainer(t *testing.T) {
 }
 
 func TestValidateMalformedListen(t *testing.T) {
-	c := Defaults()
+	c := testBaseConfig()
 	c.Server.Listen = "no-port-here"
 	_, errs := Validate(c)
 	if len(errs) != 1 || !strings.Contains(errs[0].Error(), "server.listen") {
@@ -411,11 +354,11 @@ func TestValidateMalformedListen(t *testing.T) {
 // server.max_tree_log (issue #301): the default validates clean; a
 // non-positive bound fails closed, mirroring the [import] bounds pattern.
 func TestValidateTreeLog(t *testing.T) {
-	if _, errs := Validate(Defaults()); len(errs) != 0 {
+	if _, errs := Validate(testBaseConfig()); len(errs) != 0 {
 		t.Fatalf("tree-log default must validate clean: %v", errs)
 	}
 	for _, bad := range []int{0, -5} {
-		c := Defaults()
+		c := testBaseConfig()
 		c.Server.MaxTreeLog = bad
 		_, errs := Validate(c)
 		errsContain(t, errs, "server.max_tree_log must be >= 1")
@@ -424,24 +367,24 @@ func TestValidateTreeLog(t *testing.T) {
 
 // [import] section: defaults pass; bounds and allowlist shape fail closed.
 func TestValidateImport(t *testing.T) {
-	if _, errs := Validate(Defaults()); len(errs) != 0 {
+	if _, errs := Validate(testBaseConfig()); len(errs) != 0 {
 		t.Fatalf("import defaults must validate clean: %v", errs)
 	}
-	c := Defaults()
+	c := testBaseConfig()
 	c.Import.MaxRefs = 0
 	_, errs := Validate(c)
 	errsContain(t, errs, "import.max_refs must be >= 1")
-	c = Defaults()
+	c = testBaseConfig()
 	c.Import.MaxConcurrent = 0
 	_, errs = Validate(c)
 	errsContain(t, errs, "import.max_concurrent must be >= 1")
 	for _, bad := range []string{"https://github.com", "github.com/org", "host:22", "user@host", ""} {
-		c = Defaults()
+		c = testBaseConfig()
 		c.Import.URLAllowlist = []string{bad}
 		_, errs = Validate(c)
 		errsContain(t, errs, "must be a plain host")
 	}
-	c = Defaults()
+	c = testBaseConfig()
 	c.Import.URLAllowlist = []string{"github.com", "git.example.com"}
 	if _, errs := Validate(c); len(errs) != 0 {
 		t.Fatalf("plain-host allowlist must pass: %v", errs)
@@ -449,14 +392,14 @@ func TestValidateImport(t *testing.T) {
 }
 
 func TestAttachmentsDefaultsAndValidation(t *testing.T) {
-	c := Defaults()
+	c := testBaseConfig()
 	if c.Attachments.MaxImageBytes != ByteSize(8<<20) {
 		t.Fatalf("attachments.max_image_bytes = %v, want 8MiB", c.Attachments.MaxImageBytes)
 	}
 	if _, errs := Validate(c); len(errs) != 0 {
 		t.Fatalf("defaults do not validate: %v", errs)
 	}
-	bad := Defaults()
+	bad := testBaseConfig()
 	bad.Attachments.MaxImageBytes = -1
 	if _, errs := Validate(bad); len(errs) == 0 {
 		t.Fatal("negative attachments.max_image_bytes accepted")
@@ -464,7 +407,7 @@ func TestAttachmentsDefaultsAndValidation(t *testing.T) {
 	// TOML spelling round-trips through the file loader.
 	dir := t.TempDir()
 	path := filepath.Join(dir, "spindle.toml")
-	if err := os.WriteFile(path, []byte("[attachments]\nmax_image_bytes = \"1MiB\"\n"), 0o600); err != nil {
+	if err := os.WriteFile(path, []byte("[attachments]\nmax_image_bytes = \"1MiB\"\n[server.auth]\nissuer = \"https://id.example.com\"\nallowed_domains = [\"example.com\"]\noauth_client_id = \"id\"\noauth_client_secret = \"secret\"\nsession_secret = \"0123456789abcdef0123456789abcdef\"\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	loaded, _, err := LoadExplicit(path, func(string) string { return "" })

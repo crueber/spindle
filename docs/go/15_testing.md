@@ -1,7 +1,7 @@
 # 15 — Testing strategy
 > Source: MASTER_RUST_SPEC.md §17 (testing strategy, FaultStore, sim), §4.8 (round-trip budgets as test assertions), §20 (discrepancies as test-worthy behaviors) · Status: normative for the spindle Go implementation.
 
-spindle keeps the Rust system's testing philosophy unchanged: correctness claims are **proven by simulation**, not by unit tests alone; the object-store trait has **one contract suite run against every backend**; and protocol work is judged on **counted round trips**, asserted at the transport layer. The Go port replaces the tooling (cargo → go test, just → make) but copies every tier, every fault mode, and every budget — and adds two gates the Rust repo did not have: a per-package **coverage floor** (§1, §7) and a **web/JS test tier** (§6.5).
+spindle keeps the Rust system's testing philosophy unchanged: correctness claims are **proven by simulation**, not by unit tests alone; the object-store trait has **one contract suite run against every backend**; and protocol work is judged on **counted round trips**, asserted at the transport layer. The Go port replaces the tooling (cargo → go test, just → make) but copies every tier, every fault mode, and every budget — and adds three gates the Rust repo did not have: a per-package **coverage floor** (§1, §7), a **web/JS test tier** (§6.5), and a **rendered accessibility smoke** over a fixed page set (§6.6).
 
 Test framework: stdlib `testing` only. No testify, no gomock (dependency policy, see 01_overview.md). Assertions are `if got != want { t.Fatalf(...) }`; subtests are `t.Run`; parallel cases use `t.Parallel()`. Directory layout follows the canonical tree (02_concurrency.md is the canonical concurrency playbook referenced throughout).
 
@@ -15,14 +15,15 @@ Test framework: stdlib `testing` only. No testify, no gomock (dependency policy,
 | store contract | `make contract` (memory + filesystem, always); `make contract-s3` for the credentialed backend | ONE suite `contract.Run(store, prefix)` (§2) | every case green on every backend: memory + filesystem on every run, S3 whenever its env is set |
 | sim | `make sim` → `go test -count=1 -timeout 15m ./internal/sim/...` | fault-injection over one truth store, one `FaultStore` **per instance link** (§3, §4) | the consistency proof; deterministic under a seed |
 | e2e | `make e2e` → `go test -count=1 ./internal/e2e/...` | real git clients against the running spindle server (smart HTTP, receive/upload-pack, bundle-uri, WAL) **plus the first-run/bootstrap lifecycle scenarios (§5.3)** plus the collaboration full chain (§5.4) | ~60 s; run whenever git-path, boot-path, or collab-path code changes |
+| a11y | `make a11y` → `go test -count=1 -run TestA11y ./internal/e2e/` | the rendered accessibility floor over a fixed page set: real instance, admin sign-in through the in-test IdP, headless Chromium over CDP at 390 px **and** desktop (§6.6) | needs a browser: skips without one locally, `SPINDLE_A11Y=1` makes a missing browser a **failure** (CI); never in the fast tier |
 | lint/vet | `make vet` → `go vet ./...` && `gofmt -l` && `go build ./...` | Go equivalent of Rust's `-D warnings`: `go vet` output, any `gofmt -l` line, or any build warning fails the gate | zero findings |
-| race | `make race` → `go test -race -short -count=1 ./...` | full fast tier under the race detector (§6) | zero races |
+| race | PR: `make race-pr` → `-race` over the concurrency-owning packages; push to main: `make race` → `-race ./...` (both `-timeout 10m`, watchdog `timeout 1800`) | full fast tier under the race detector (§6) | zero races; the PR tier races where shared state lives because `internal/webui` is a large render suite that owns no shared state (§6.7); main is the complete set |
 | cover | `make cover` | per-package statement coverage of every `internal/...` package, ≥ 95% fail-under (§7) | CI-enforced; new code lands with tests (D7) |
 | web | `make test-web` → `node --test web/test/unit/*.test.js` | headless JS logic tests + opt-in fetch-based server smoke (§6.5; runs only with `SPINDLE_TEST_WEB_BASE_URL`) | zero npm dependencies; wired into `make test` and CI |
 | slow | no recipe yet (no `TestSlow*` soak tests exist; see D8) | `TestSlow*` soaks when they land: 20 k-ref push, 466 k-ref refs render, long bundle chains | nightly-ish; never in fast |
 
 Rules carried over verbatim from §17:
-- **Never run the whole test tree unbounded.** Every recipe is wrapped in a watchdog. The Makefile resolves `timeout` (GNU coreutils) and falls back to `gtimeout` (macOS); neither present → run unwrapped with a warning, never hang a contributor's session (the `T5`/`T15` variables in §7).
+- **Never run the whole test tree unbounded.** Every recipe is wrapped in a watchdog. The Makefile resolves `timeout` (GNU coreutils) into the `T5`/`T15` variables (§7); when it is absent the recipe runs unwrapped — there is no `gtimeout` fallback, so macOS contributors need coreutils on `PATH`. Never hang a contributor's session.
 - **Known-flaky tests are named with their cause, never assertion-loosened.** Port both known flakes with their causes as comments: a base published without `has_commit_graph` ~1 in 3 under the full e2e suite (passes alone); a base-rebuild kill-resume race ~1 in 7 on a shared test-abort constant. If a flake appears, name it, quarantine it behind `-run`, and fix the cause.
 - Tests are hermetic unless noted: e2e is the only tier that talks to a live server; slow soaks use the local rustfs dev store.
 
@@ -260,14 +261,21 @@ Byte-identical re-encoding is the compat bar (11_compat.md): a Go-written manife
 
 ### 5.3 First-run / bootstrap e2e scenarios (Divergences D5, D6)
 
-Zero-config first run and the setup UI/API are first-class behaviors (06_server_http.md §setup, 11_config_cli.md), so they are pinned by e2e scenarios that boot real server processes. Each scenario gets a fresh temp `--data-dir` (`SPINDLE_DATA_DIR` or `--data-dir`), a fresh port from the ephemeral range, lib-auth's env isolation, and a trap that kills the server and removes the dir; they run as part of `make e2e` (~30 s added) and in CI. Fixtures (config fragments + expected-error lists) live in `tests/bootstrap/`, the scenarios are shell functions in `tests/e2e.sh`, and unit coverage of the setup handlers stays in `internal/server` (table-driven httptest per D7) — the e2e layer proves only what unit tests cannot: a real restart, a real file write, and real 503 routing:
+Zero-config first run and the Administration area/API are first-class behaviors (06_server_http.md §setup, 11_config_cli.md), so they are pinned by e2e scenarios that boot real server processes. Each scenario gets a fresh temp `--data-dir` (`SPINDLE_DATA_DIR` or `--data-dir`), a fresh port from the ephemeral range, lib-auth's env isolation, and a trap that kills the server and removes the dir; they run as part of `make e2e` (~30 s added) and in CI. Fixtures (config fragments + expected-error lists) live in `tests/bootstrap/`, the scenarios are shell functions in `tests/e2e.sh`, and unit coverage of the setup handlers stays in `internal/server` (table-driven httptest per D7) — the e2e layer proves only what unit tests cannot: a real restart, a real file write, and real 503 routing:
 
 | Scenario | Steps | Asserts |
 |---|---|---|
-| `bootstrap_no_config` | start `spindle serve` with a clean `--data-dir` and no `spindle.toml` anywhere | boots with built-in defaults (D5): `server.listen = "0.0.0.0:8080"`, filesystem store rooted at `<data-dir>/store`, `auth.mode = "none"`, `auto_create_on_push = true`; `/healthz` + `/readyz` are 200; `/setup` serves the UI with the setup banner; the log contains the loud auth warnings; a git push against the anonymous server succeeds |
-| `bootstrap_invalid_config` | write a deliberately invalid `spindle.toml` into the data dir (unknown key and a type error, one at a time), then boot | **setup-only mode**: `/setup`, `/healthz`, `/readyz` answer; every other route (a git endpoint, `/api/v1/...`) returns 503 with a pointer to `/setup`; `GET /api/v1/setup` reports file state invalid and the exact validation errors; the UI renders those errors verbatim |
+| `bootstrap_no_config` | start `spindle serve` with a clean `--data-dir` and no `spindle.toml` anywhere | boots with built-in defaults (D5): `server.listen = "0.0.0.0:8080"`, filesystem store rooted at `<data-dir>/store`, `auth.mode = "none"`, `auto_create_on_push = true`; `/healthz` + `/readyz` are 200; `/admin/config` serves the UI with the setup banner; the log contains the loud auth warnings; a git push against the anonymous server succeeds |
+| `bootstrap_invalid_config` | write a deliberately invalid `spindle.toml` into the data dir (unknown key and a type error, one at a time), then boot | **restricted mode**: `/admin` + `/admin/config`, `/healthz`, `/readyz` answer; every other route (a git endpoint, `/api/v1/...`) returns 503 with a pointer to `/admin/config`; `GET /api/v1/setup` reports file state invalid and the exact validation errors; the UI renders those errors verbatim |
 | `bootstrap_setup_save_restart` | from the invalid (or absent) config: `PUT /api/v1/setup` with a corrected config, then restart the process | save returns 200 and lists which keys need a restart; `<data-dir>/spindle.toml` exists afterwards and is byte-valid TOML; after restart the server boots normally (no banner, no 503s, saved values effective — verified via `GET /api/v1/setup` effective values and a git round-trip) |
 | `bootstrap_setup_api_auth` | matrix over the access rule (D6/WP13): (a) no config file; (b) config present + `auth.mode = "none"`; (c) config present + token auth; (d) case (c) with `SPINDLE_SETUP_TOKEN` set; (e) oidc + ID token whose `groups` lists `spindle-admins`; (f) oidc + `groups: ["other"]` / claim absent; (g) oidc + an `admin_emails`/`admin_domains` match | (a) and (b): `GET/PUT /api/v1/setup` open, no credentials; (c): unauthenticated → 401, with the admin token → 200, a non-admin token → 403; (d): `SPINDLE_SETUP_TOKEN` has **no effect** (still 401); (e): 200; (f): 403; (g): 200 (the migration path). `POST /api/v1/setup/test` follows the same rule and never writes the file; `groups_claim = "roles"` reads `roles` instead, case differences match, and `admin_groups = []` never grants admin |
+
+The page layer repeats the access matrix in `internal/webui/admin_test.go` (anonymous / signed-in
+non-admin / host admin / open mode × all four Administration pages, asserting status **and** the
+designed denied view), pins that `/setup` answers 404 for GET and POST (deleted, never aliased), and
+walks the area's a11y floor (one `<h1>`, skip link, landmarks, exactly one `aria-current`, one
+`.btn.primary` where the page owns one). The rendered proof (desktop + ~390 px, both themes) is part
+of the milestone's definition of done, not a test.
 
 ### 5.4 Collaboration full chain (Feature 09)
 
@@ -307,7 +315,7 @@ object fails it.
 
 Mandatory for every PR that touches shared state:
 
-1. **`-race` in CI** — `make race` runs the full fast tier under the race detector. A data race is a failing build, no exceptions.
+1. **`-race` in CI** — every PR runs `make race-pr` (the packages that own shared state: wal, store, notify, api, events, threads, packages, maintain, identity, server, git, sshd, bundle, sim), and every push to main runs `make race` (the full fast tier). A data race is a failing build, no exceptions. The split exists because `internal/webui` is a large render suite that owns no locks, queues or goroutines worth racing — the detector is not finding anything there, and racing it on every PR spent ten minutes of the gate; the complete run still happens on main and on demand. §6.7 records what the suite now costs and the rule for parallelising it.
 2. **Stress tests** — every lock/actor with a plausible contention story gets a stress test: N goroutines × M ops against the shared structure, asserting the invariant (not the interleaving). The sim IS the store/WAL stress test; package-level stress tests cover caches, the SSE fan-out, and the events bridge.
 3. **Deadlock canary** — the test binary runs under `timeout 300` (fast tier); a suite that deadlocks fails the recipe, it does not hang CI silently. Additionally the watchdog pattern from §3.4 of the Rust spec is unit-tested: a stalled-tick detector test asserts the "async runtime stalled" warning fires when a tick is > 2.5 s late (simulated with a fake clock).
 4. **Every goroutine has a shutdown path** — linters cannot check this; review does. The sim's restart machinery is the executable proof that instances shut down on context cancel.
@@ -316,7 +324,7 @@ Mandatory for every PR that touches shared state:
 
 The frontend is server-rendered pages in Go (`internal/webui`), heavily enhanced by the vanilla-ES
 islands (`web/src/islands/`) and the dependency-free SDK — and its JS still needs no test framework:
-runner is Node's built-in `node --test` (Node ≥ 20), invoked by `make test-web`, wired into `make test`
+runner is Node's built-in `node --test` (Node 22 or newer; Node 24 also works — pass files or globs, never a directory), invoked by `make test-web`, wired into `make test`
 and `ci`. `web/package.json` carries only build devDependencies (`vite`, `@tailwindcss/vite`,
 `tailwindcss`, `esbuild`); there are no runtime npm dependencies. The test files import
 `node:test`/`node:assert` and the ESM sources directly.
@@ -331,23 +339,92 @@ and `ci`. `web/package.json` carries only build devDependencies (`vite`, `@tailw
 - **`web/test/unit/*.test.js`** — unit cases with `node:assert` in the Go tier's style: repos.js request
   shaping and error mapping, SSE frame parsing/backoff/coalescing, the SDK lane/401 rules. Same
   assertion discipline: `if (got !== want) throw`.
-- **`web/test/unit/smoke.test.js`** — fetch-based server smoke, **opt-in**: it only runs when the caller names a server in `SPINDLE_TEST_WEB_BASE_URL` (there is no ambient/default `:8080`, so an unrelated local server cannot break the tier). It asserts the server-rendered contract of D-WEB-14: `/` and `/setup` answer 200 `text/html; charset=utf-8` with the `base.html` shell (doctype, `<html lang="en" class="dark">`, `/_ui/app.css` stylesheet, vendored `/_ui/htmx.min.js` classic script, `/_ui/ui.js` module island, `<main id="app">`, server-rendered header/footer, and no Solid `id="root"`), the landing/setup page markers, the `/_ui/` assets' MIME + `no-cache` (`app.css` must carry the Tailwind utilities the templates use, `/_ui/index.html` is a 404), and `/repos.js` as `text/javascript` with `no-cache`, a strong `sdk-*` ETag, a 304 on revalidation, and the SDK's `ReposClient`/ESM exports. Unset → every case skips with the reason; set but unreachable or setup-only (503 at `/`) → skip with the reason; a reachable server is asserted strictly. Unit tests import the SOURCE modules directly, so testing needs no build; `make web` produces only the shipped artifact (and the smoke needs the server to have been built from one).
+- **`web/test/unit/smoke.test.js`** — fetch-based server smoke, **opt-in**: it only runs when the caller names a server in `SPINDLE_TEST_WEB_BASE_URL` (there is no ambient/default `:8080`, so an unrelated local server cannot break the tier). It asserts the server-rendered contract of D-WEB-14: `/` and `/admin/config` answer 200 `text/html; charset=utf-8` with the `base.html` shell (doctype, `<html lang="en" class="dark">`, `/_ui/app.css` stylesheet, vendored `/_ui/htmx.min.js` classic script, `/_ui/ui.js` module island, `<main id="app">`, server-rendered header/footer, and no Solid `id="root"`), the landing/Configuration page markers, the `/_ui/` assets' MIME + `no-cache` (`app.css` must carry the Tailwind utilities the templates use, `/_ui/index.html` is a 404), and `/repos.js` as `text/javascript` with `no-cache`, a strong `sdk-*` ETag, a 304 on revalidation, and the SDK's `ReposClient`/ESM exports. Unset → every case skips with the reason; set but unreachable or restricted mode (503 at `/`) → skip with the reason; a reachable server is asserted strictly. Unit tests import the SOURCE modules directly, so testing needs no build; `make web` produces only the shipped artifact (and the smoke needs the server to have been built from one).
+
+### 6.6 Rendered accessibility smoke (the browser tier)
+
+AGENTS.md §2 makes the accessibility floor a requirement, and a floor that depends on whoever remembers to drive a browser is not a gate. `internal/e2e/a11y_test.go` is the machine check: it boots the real binary, seeds a repository with an issue, a pull request and a release, signs in as an admin **through the in-test OIDC provider** (the production verification path: discovery, JWKS, nonce, PKCE, group claim), and drives headless Chromium over the DevTools Protocol across a **fixed page set** — landing `/`, repo code `/{owner}/{repo}`, an issue, a pull request, releases, `/admin`, `/admin/config` — at **390 px** and desktop.
+
+What each page must satisfy, per viewport:
+
+- the skip link exists, is the **first** focusable element, targets `#app`, and `#app` is the `<main>` landmark;
+- **exactly one `h1`**, and it renders;
+- every **visible** interactive control has an accessible name (`aria-label`/`aria-labelledby`, a wrapping or `for` `<label>`, its text, an image `alt`, `value`, or `title`) — and at least one control is found, so a probe that matches nothing fails;
+- no **positive `tabindex`**;
+- no control that **keyboard focus can land on but nothing renders** (`focus()` is a no-op for a `display:none` subtree, so the probe asks the browser rather than pattern-matching CSS);
+- at 390 px, `document.documentElement.scrollWidth === clientWidth` (no page-level horizontal pan);
+- **no page-code console errors** — `console.error`, uncaught exceptions, and browser log entries at level error. The allow-list holds exactly ONE entry, by text and URL: the engine's own 404 for `/favicon.ico`, which the browser requests on every page and the app does not ship.
+- the first real **Tab** focuses the skip link, matches `:focus-visible`, and paints a non-zero outline; **Enter** reaches `#app`.
+
+The CDP client (`internal/e2e/cdp_test.go`) is hand-rolled on `golang.org/x/net/websocket`, already in the dependency budget (law 1): launch `--headless=new --remote-debugging-port=0` into a throwaway profile, read the `DevTools listening on …` line, connect to the page target, then `Page.navigate` / `Runtime.evaluate` / `Emulation.setDeviceMetricsOverride` / `Input.dispatchKeyEvent`. Chromium is a **CI tool, not a Go dependency**. `--no-sandbox` is opt-in via `SPINDLE_CHROMIUM_NO_SANDBOX`, set only by the CI job (a job container has no user namespaces for Chromium's sandbox); a developer machine runs with the sandbox on.
+
+**Skip/fail rule.** Locally the smoke is best-effort: no browser (and no `SPINDLE_CHROMIUM`) → every case skips with the reason, so a contributor without Chromium is not blocked. In CI the browser is required: the gate sets `SPINDLE_A11Y=1`, and then `TestA11yPreflight` **fails** (never skips) when the browser is missing or will not start. A skipped accessibility gate is not a gate.
+
+**The checker has teeth, and that is tested.** A deliberate break — a second `<h1>`, a button whose only content is `aria-hidden` SVG, a missing skip link, a 1400 px child at 390 px, an inline script CSP violation — fails the run and names the page, the viewport and the offending selector; the break is never committed. `make e2e` runs the same package with `-skip TestA11y`, so the git tier stays browser-free.
+
+### 6.7 Render-suite speed: parse once, parallelise only the independent tests (`internal/webui`)
+
+`internal/webui` was the slowest package in the tree: **624 s** for `go test -race -count=1 ./internal/webui`
+on a 10-core host (543 s on a loaded runner; it hit Go's 10-minute per-package timeout twice on 2026-11-22,
+which is why the race/cover tiers carried a 20-minute band-aid). The measured cause was not the tests:
+each fixture helper (`newBare`, `newRepoFixture`, `newCollabFixture`, `newPublicServer`, `parityServer`,
+`newSettingsServer`, `newFormsHarness`) called `webui.New`, which parses **57 page sets × (base + every
+partial + the page)** — ~0.6 s per call under `-race`, once per test (1.3× CPU: the parse is
+single-threaded). Test bodies summed to 604 s; the parse was >90 % of it.
+
+Two test-only changes took it to **11 s** (`-race -count=1`), 811 tests, `-count=5 -race -shuffle=on` green
+in 41 s:
+
+1. **Parse once per test binary** (`internal/webui/testsupport_test.go`). The embedded template FS and the
+   `FuncMap` (`helpers.go funcs`) are server-independent, a parsed `*template.Template` is safe for
+   concurrent `Execute`, and production parses once per process anyway (one provider per process) — so
+   the tests share one parsed page set instead of rebuilding it per fixture (`newTestServer`), and the two
+   group harnesses that parse a subset (settings/admin, forms) memoize theirs (`onceTemplates`). The first
+   caller still runs the real `New()`, so the parse path — and a boot-time template error — stays covered.
+   Each server gets its own map over the shared sets, so a test that swaps a page cannot alter a peer's.
+2. **`t.Parallel()` on the 265 independent top-level tests.** Not on the rest.
+
+**The rule (binding tests stay sequential).** The page seams are process globals by design —
+`BindAdmin`, `BindSettings`, `BindCollab`, `BindForms`, `BindPackages`, `BindPublic`, `BindRepo`,
+`BindThreads`, `BindWebedit`, `BindDirectory`, `bindInsights` — and handlers read the bound value at
+request time. Two product knobs are also process-wide and saved/restored by tests
+(`adminRestartDelay`, `assetUploadBodyLimit`). A test that touches any of those is **not independent**,
+so it must not call `t.Parallel()`: Go's testing package runs every parallel top-level test only after
+the last sequential test returns, so keeping the binders sequential is what keeps them out of the
+parallel batch's window — no mutex, no sleep, no ordering assumption. What *is* parallel: the pure
+renderer tests (markdown/diff/graph/highlight), the helper/format tables, and the full-server tests whose
+harness binds nothing (most of `repo_test.go`, `blame`, `compare`, `coverage_core`, `settings_protection`,
+16 of the forms tests, …).
+
+The rule is executable: **`TestParallelTestsBindNoGlobals`** (`internal/webui/parallelism_test.go`) parses
+the package's `*_test.go` files, builds the call graph, and fails with the call path when a `t.Parallel()`
+test (transitively) binds a seam or writes a knob — so a harness that starts binding later cannot quietly
+turn a parallel test into a schedule-dependent race. `go test -race -count=5 -shuffle=on ./internal/webui`
+is the proof that the two sets do not interfere.
+
+Measured on a 10-core host, 2026-11-23: `-race -count=1` **624 s → 11 s**; `-race -count=5 -shuffle=on`
+**41 s**; the non-race fast tier for the package **145 s → 2.8 s**; `make cover` for the package
+**2.8 s, 95.1 %** (unchanged). The full race tier (`go test -race -short ./...`) is 158 s wall, and the
+slowest package in it is `internal/e2e` at 132 s — 4.5x under the 10-minute per-package ceiling the
+Makefile now states instead of the 20-minute band-aid it carried for `internal/webui`. The outer
+watchdog stays.
 
 ---
 
 ## 7. Makefile — every tier is a target
 
-All dev/CI entry points are Make targets (Divergence D3); there is no justfile, no separate task runner, nothing to remember beyond the tier map below. The watchdog semantics port unchanged: `T5`/`T15` resolve GNU `timeout` (coreutils), fall back to `gtimeout` (macOS), and run unwrapped with a warning if neither exists — no watchdog is worse than no tests.
+All dev/CI entry points are Make targets (Divergence D3); there is no justfile, no separate task runner, nothing to remember beyond the tier map below. The watchdog semantics port unchanged: `T5`/`T15` resolve GNU `timeout` (coreutils) and run unwrapped when it is absent — there is no `gtimeout` fallback, so macOS needs coreutils on `PATH`; no watchdog is worse than no tests, but inventing a fallback that does not exist is worse still.
 
 | tier | target | what makes it a tier |
 |---|---|---|
 | fast | `make test` | `test-go` (`-short`, watchdog) + `test-web` (`node --test`); hermetic, < 1 min |
-| race | `make race` | the fast tier under `-race` (CGO on for the detector only) |
+| race | `make race-pr` (PRs) / `make race` (main) | the fast tier under `-race` (CGO on for the detector only); PRs race the concurrency-owning packages, main races everything |
 | coverage | `make cover` | every `internal/...` package ≥ 95 % (D7); per-package profiles, never merged |
 | contract | `make contract` | memory + filesystem, always; `contract-s3` is env-gated |
 | proof | `make sim` | fault-injection consistency proof + round-trip budgets (`internal/sim`, seeded) |
 | e2e | `make e2e` | smart-HTTP against the real git binary (git ≥ 2.47) |
-| merge gate | `make ci` | `vet test race cover contract sim e2e` |
+| a11y | `make a11y` | the rendered accessibility floor over a fixed page set, headless Chromium over CDP at 390 px and desktop (§6.6); skips without a browser, `SPINDLE_A11Y=1` requires one |
+| merge gate | `make ci` | `vet test race cover contract sim e2e a11y` |
 
 The command lines live in the `Makefile` (16_packaging.md §7.2 owns the target list); this table is
 the tier contract — a tier that is not here is not a tier.
@@ -394,7 +471,7 @@ The rewrite copies CODE behavior (§20); each of these gets an explicit assertio
 - **D7 — Coverage gate.** `make cover` enforces **≥ 95% statement coverage on every `internal/...` package** (`cmd/` excluded), via per-package `-coverprofile` + the `covergate` checker (§7.1), CI-gated. Review bar is near 100%: new code lands with tests — table-driven `httptest` for every handler. This is new (the Rust spec had no coverage gate); it does not supersede any prior decision.
 - **D4 — Filesystem store joins the contract suite as an always-run backend.** `TestContract_Filesystem` runs wherever `TestContract_Memory` runs, no env needed; S3 stays env-gated (`SPINDLE_TEST_S3_ENDPOINT`) and CI exercises S3 via the rustfs container. Supplements (does not supersede) the `TestContract_LeaseSteal` decision — the suite's "one suite, every backend" rule now has three backends, two of them unconditional.
 - **D2 — Web/JS tests without a test framework (amended; frontend stack per D-WEB-14/D-WEB-15).** The JS tier is `node --test` over headless pure-ESM logic modules plus fetch-based smoke tests (§6.5), wired into `make test` and `ci`; tests import source (`sdk/src/*.js`, the islands' pure helpers) and need no build — the builds (`make web`: stylesheet + islands + SDK) produce only shipped artifacts. Amended when the user directed a build step for the modular SDK (2026-08-31, second pass); D-WEB-6's SolidJS + Tailwind port (2026-09-02) kept this tier unchanged, and D-WEB-14/D-WEB-15 (2026-11-19/20) moved page rendering/tests into Go `internal/webui` while keeping this JS tier — no test framework, no TypeScript.
-- **D5/D6 — Bootstrap and setup lifecycle is e2e-tested.** Four scenarios (§5.3: no-config defaults boot; invalid-config setup-only 503s; setup save → restart → normal; setup API auth matrix incl. the WP13 OIDC admin-group rows, and pinning that `SPINDLE_SETUP_TOKEN` has no effect) run in `make e2e` and CI. New; no prior decision affected.
+- **D5/D6 — Bootstrap and setup lifecycle is e2e-tested.** Four scenarios (§5.3: no-config defaults boot; invalid-config restricted mode 503s; setup save → restart → normal; setup API auth matrix incl. the WP13 OIDC admin-group rows, and pinning that `SPINDLE_SETUP_TOKEN` has no effect) run in `make e2e` and CI. New; no prior decision affected.
 - **D8 — Sim tier lands; D3 target list corrected (Forgejo #338, 2026-09-11).**
   `internal/sim` implements the §4 harness and eleven of the twelve scenarios
   (gaps G1/G2/G3 stated in the package doc: no kill hook exists in the
@@ -464,3 +541,50 @@ The rewrite copies CODE behavior (§20); each of these gets an explicit assertio
   restated: a test must never block on a channel only its own
   continuation can close — every such wait gets its own short
   deadline with a message naming the stuck wait.
+
+**Divergence (2026-11-23):**
+
+- **The rendered accessibility floor is a tier (`make a11y`), not a habit.** AGENTS.md §2 already
+  required a real-browser pass for UI work; nothing ran it on a change that did not touch the UI, and
+  nothing proved the floor on a page a writer never opened. `internal/e2e/a11y_test.go` now boots the
+  real binary, signs in as an admin through the in-test IdP, and asserts the floor over a **fixed page
+  set** (landing, repo code, an issue, a PR, releases, `/admin`, `/admin/config`) at 390 px and desktop
+  (§6.6). Rationale: a fixed set is a contract — a page that joins it gets the floor for free, and a
+  page outside it has no rendered floor at all. The CDP client is hand-rolled on
+  `golang.org/x/net/websocket` (already budgeted, law 1) and Chromium is an apt package in the gate
+  container, **not** a Go module; `--no-sandbox` is opt-in (`SPINDLE_CHROMIUM_NO_SANDBOX`) and set only
+  by CI, because a job container has no user namespaces for Chromium's sandbox. The tier is separate
+  from `make e2e` (`-skip TestA11y`) so the git tier stays browser-free, and the skip/fail rule is
+  explicit: no browser → skip locally, `SPINDLE_A11Y=1` → fail in CI (a skipped accessibility gate is
+  not a gate).
+
+## Auth test seams (OIDC-only, PLAN-OIDC-ONLY §6)
+
+There is **no configuration flag, environment variable or build mode that authenticates without a
+verified credential in the shipped binary**. What the release binary accepts is exactly: OIDC ID
+tokens/sessions (signature over the issuer's JWKS), `wgt_` HMAC tokens, operator-authored static
+tokens (machine, never admin), and the compiled-in `ExtraCredential` shapes (CI `wct_`, runner
+`wrt_`, job `wjt_`) that each feature package authorizes itself.
+
+Tests use these seams:
+
+1. **In-process unit/handler tests** construct `auth.Principal` values directly, mint sessions/tokens
+   with `AuthService.MintSession`/`MintToken` (the real HMAC wire), mint RS256 ID tokens against a
+   stub JWKS (`internal/server/x_auth_test.go`'s `stubIssuer`), and install the **test-only**
+   `ExtraCredential` hook in `_test.go` (`installTestAdminHook`) where a handler needs a host admin.
+   That hook is the same production seam composition uses for CI/runner credentials; it exists only
+   in test files.
+2. **E2E exercises the real verification path**: `internal/e2e/oidp_test.go` is a stdlib-only OIDC
+   provider on a real listener (discovery, JWKS, auto-approving authorize, token endpoint). It mints
+   real RS256 ID tokens carrying configurable `groups`, and the browser suite
+   (`TestE2E_OIDCFirstRunAndAdminByGroup`) drives `/_auth/login` → authorize → callback with
+   nonce + PKCE. There is no injected principal and no shortcut: the spindle subprocess verifies the
+   signature, issuer, audience, expiry, nonce and the group claim itself.
+3. **The seam cannot ship**: `oidp_test.go` is `_test.go` (never compiled into a release binary), and
+   the e2e package is not in `cmd/spindle`'s import graph.
+4. **Dev IdP for humans**: `go run ./internal/devtools/oidpstub` (stdlib only; also
+   `compose.dev-idp.yml` under the `dev-idp` profile). `internal/devtools` is not imported by
+   `cmd/spindle`, so it is not in the release binary or image; its `-help` says so.
+5. **The gate that keeps it that way**: `internal/config/seam_gate_test.go` scans the config
+   package's non-test sources for bypass-shaped keys (`testauth`, `auth_bypass`, `dev_auth`,
+   `insecure_auth`, `no_auth`) and fails if one ever appears.

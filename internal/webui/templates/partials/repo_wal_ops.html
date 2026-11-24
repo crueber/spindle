@@ -20,7 +20,7 @@
       {{range .Params}}
       {{if eq .Kind "checkbox"}}
       <label class="flex items-center gap-1 text-xs">
-        <input type="checkbox" name="{{.Name}}" value="{{index .Values 0}}" class="h-4 w-4 accent-amber-500">
+        <input type="checkbox" name="{{.Name}}" value="{{index .Values 0}}" class="h-4 w-4 check">
         <span class="mono">{{.Name}}</span>
       </label>
       {{else if eq .Kind "select"}}

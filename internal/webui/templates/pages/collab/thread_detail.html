@@ -35,8 +35,16 @@
 
   {{if .Approval.Pending}}
   <p class="warn-line mb-3 text-xs" role="status">
+    {{if eq .Approval.Kind "environment"}}
+    waiting for a required reviewer of environment{{if gt (len .Approval.Environments) 1}}s{{end}}
+    <span class="mono">{{range $i, $e := .Approval.Environments}}{{if $i}}, {{end}}{{$e}}{{end}}</span>: the deployment is held and
+    has not executed, and its environment secrets are not resolved.
+    {{with .Approval.Reviewers}}Required: <span class="mono">{{range $i, $r := .}}{{if $i}}, {{end}}{{$r}}{{end}}</span>. {{end}}
+    {{if .CanApprove}}Approve it to queue it, or deny it to fail the deployment.{{end}}
+    {{else}}
     waiting for a maintainer: this is a first-time contributor's fork pull request, so the run is held
     and has not executed. {{if .CanApprove}}Approve it to queue it, or deny it to cancel it.{{end}}
+    {{end}}
   </p>
   {{else if .Approval.ApprovedBy}}
   <p class="muted mb-3 text-xs">approved by {{.Approval.ApprovedBy}}{{with .Approval.ApprovedAt}} · {{template "collab_time" .}}{{end}}</p>
@@ -61,6 +69,25 @@
   </p>
   {{end}}
 
+  {{if .Artifacts}}
+  <section class="mb-4" aria-label="Artifacts">
+    <h3 class="mb-2 text-sm font-semibold tracking-tight">Artifacts</h3>
+    <ul class="card divide-y divide-[color:var(--pd-line)]">
+      {{range .Artifacts}}
+      <li class="flex flex-wrap items-center gap-x-3 gap-y-1 px-3 py-2">
+        <a class="link mono min-w-0 truncate text-xs" href="{{.Href}}" download>{{.Name}}</a>
+        <span class="muted text-xs">{{.Size}}</span>
+        <span class="muted text-xs">{{.Files}} file{{if ne .Files 1}}s{{end}}</span>
+        <span class="muted ml-auto text-xs">
+          {{template "collab_time" .CreatedAt}}
+          {{with .ExpiresAt}}· expires {{template "collab_time" .}}{{end}}
+        </span>
+      </li>
+      {{end}}
+    </ul>
+  </section>
+  {{end}}
+
   {{if .Jobs}}
   <ul class="space-y-2">
     {{range .Jobs}}
@@ -69,9 +96,15 @@
         {{template "collab_check_dot" (runDot .State)}}
         <span class="text-sm font-medium">{{.Name}}</span>
         <code class="mono text-xs">{{.Context}}</code>
-        <span class="chip chip-neutral">{{.State}}</span>
+        <span class="chip chip-neutral" {{if .Tolerated}}title="continue-on-error: this job failed, but the run is not failed by it"{{end}}>{{.State}}{{if .Tolerated}} · tolerated{{end}}</span>
+        {{with .Reason}}<span class="muted text-xs" title="why the job did not run">· {{.}}</span>{{end}}
         <span class="muted text-xs">runs-on {{.RunsOn}}</span>
         {{with .Container}}<span class="muted text-xs">· {{.}}</span>{{end}}
+        {{with .Deployment}}
+        <span class="chip chip-draft" title="deployment environment">env <span class="mono">{{.Environment}}</span></span>
+        <span class="muted text-xs">deployment {{.State}}{{with .ApprovedBy}} · approved by {{.}}{{end}}{{with .DeniedBy}} · denied by {{.}}{{end}}</span>
+        {{with .URL}}<a class="link text-xs" href="{{.}}" rel="noopener noreferrer" target="_blank">{{.}}</a>{{end}}
+        {{end}}
         {{if .RunnerName}}<span class="muted text-xs">· runner <span class="mono">{{.RunnerName}}</span></span>{{else if .Runner}}<span class="muted text-xs">· runner <span class="mono">{{.Runner}}</span></span>{{end}}
         {{with .Spec}}{{with .Permissions}}<span class="muted text-xs">· permissions {{range $k, $v := .}}{{$k}}={{$v}} {{end}}</span>{{end}}{{end}}
         <span class="muted ml-auto text-xs">{{with duration .DurationSeconds}}took {{.}} · {{end}}{{with .StartedAt}}{{template "collab_time" .}}{{else}}not started{{end}}</span>
@@ -79,7 +112,8 @@
       {{if .Steps}}
       <ul class="divide-y divide-[color:var(--pd-line)] border-t border-[color:var(--pd-line)]">
         {{range .Steps}}
-        <li class="flex flex-wrap items-center gap-2 px-3 py-1.5 text-xs">
+        <li class="flex flex-wrap items-center gap-2 px-3 py-1.5 text-xs{{if .Parent}} ml-3 border-l-2 border-[color:var(--pd-line)]{{end}}">
+          {{with .Parent}}<span class="muted whitespace-nowrap text-[11px]" title="expanded from this composite action step">{{.}} /</span>{{end}}
           {{with .Name}}<span class="whitespace-nowrap font-medium">{{.}}</span>{{end}}
           {{with .Run}}<code class="mono min-w-0 flex-1 truncate">{{.}}</code>{{end}}
           {{with .Uses}}<code class="mono min-w-0 flex-1 truncate">{{.}}</code>{{end}}

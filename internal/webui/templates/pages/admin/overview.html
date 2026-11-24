@@ -1,0 +1,173 @@
+{{/* pages/admin/overview.html — GET /admin (docs/PLAN-ADMIN.md §3.2).
+   The instance's state at a glance, and what to do next. Read-only: the only
+   primary is the first-run checklist's "Open configuration" CTA, and it only
+   renders while the config file is absent. */}}
+{{define "content"}}
+<div class="admin-page" id="admin-page" data-admin-section="overview">
+  <div class="flex flex-col gap-4 lg:flex-row lg:gap-6">
+    {{template "admin-nav" .Data}}
+
+    <div class="min-w-0 flex-1">
+      {{template "admin-header" .Data}}
+
+      {{if .Data.Denied}}
+        {{template "admin-denied" .Data}}
+      {{else}}
+        {{if .Data.Restricted}}{{template "admin-restricted" .}}{{end}}
+        {{template "admin-banners" .Data}}
+
+        {{if .Data.FirstRun}}
+        <section class="card mb-4 p-4" aria-labelledby="admin-first-run">
+          <h2 class="card-header" id="admin-first-run">First run: configure OIDC</h2>
+          <div class="setup-callout mt-2">
+            <p class="text-sm">This instance is <strong>not configured</strong>, so it serves nothing except this area and the health endpoints until it is. OIDC is the only sign-in: set the six values below, <strong>Test</strong> them against your identity provider, then <strong>Save</strong> and restart.</p>
+          </div>
+
+          <div class="setup-callout mt-3">
+            <p class="text-sm">Register this <strong>redirect URI</strong> with your OIDC issuer (exact match, no trailing slash) before sign-in will work:</p>
+            <p class="mt-1 flex flex-wrap items-center gap-2">
+              <code class="code-view inline-block max-w-full break-all px-2 py-1" id="first-run-redirect-uri">{{.Data.FirstRunRedirectURI}}</code>
+              <button type="button" class="btn" data-copy="#first-run-redirect-uri">copy</button>
+            </p>
+            <p class="muted mt-1 text-xs">Create the group <code class="mono text-xs">{{.Data.FirstRunAdminGroup}}</code> at your IdP and put yourself in it — membership is what grants administration here.</p>
+          </div>
+
+          <form class="mt-3 grid gap-3" method="post" action="/admin/config"
+                hx-post="/admin/config" hx-target="#admin-page" hx-select="#admin-page" hx-swap="outerHTML">
+            <input type="hidden" name="op" value="save">
+            <div class="setup-row">
+              <div class="min-w-0">
+                <label class="setup-label" for="first-run-issuer"><code class="mono text-sm">server.auth.issuer</code></label>
+                <p class="setup-examples"><span class="muted">e.g.</span> <span class="setup-ex">https://id.example.com</span><span class="setup-note">discovery at &lt;issuer&gt;/.well-known/openid-configuration</span></p>
+              </div>
+              <div class="min-w-0"><input class="input md:max-w-md" id="first-run-issuer" name="cfg.server.auth.issuer" type="url" value="{{.Data.FirstRunIssuer}}" autocomplete="off"></div>
+            </div>
+            <div class="setup-row">
+              <div class="min-w-0">
+                <label class="setup-label" for="first-run-allowed-domains"><code class="mono text-sm">server.auth.allowed_domains</code></label>
+                <p class="setup-examples"><span class="muted">e.g.</span> <span class="setup-ex">example.com</span><span class="setup-note">comma-separated email domains allowed to sign in (or set allowed_emails on Configuration)</span></p>
+              </div>
+              <div class="min-w-0"><input class="input md:max-w-md" id="first-run-allowed-domains" name="cfg.server.auth.allowed_domains" type="text" value="{{.Data.FirstRunAllowedDomains}}" autocomplete="off"></div>
+            </div>
+            <div class="setup-row">
+              <div class="min-w-0">
+                <label class="setup-label" for="first-run-client-id"><code class="mono text-sm">server.auth.oauth_client_id</code></label>
+                <p class="setup-examples"><span class="setup-note">the client id your IdP issued for this instance</span></p>
+              </div>
+              <div class="min-w-0"><input class="input md:max-w-md" id="first-run-client-id" name="cfg.server.auth.oauth_client_id" type="text" value="{{.Data.FirstRunClientID}}" autocomplete="off"></div>
+            </div>
+            <div class="setup-row">
+              <div class="min-w-0">
+                <label class="setup-label" for="first-run-client-secret"><code class="mono text-sm">server.auth.oauth_client_secret</code>{{if .Data.FirstRunClientSecret}} <span class="chip chip-neutral">set</span>{{end}}</label>
+                <p class="setup-examples"><span class="setup-note">overwrite-only — leave empty to keep the stored value</span></p>
+              </div>
+              <div class="min-w-0"><input class="input md:max-w-md" id="first-run-client-secret" name="cfg.server.auth.oauth_client_secret" type="password" autocomplete="new-password" value="" placeholder="{{if .Data.FirstRunClientSecret}}leave empty to keep{{else}}client secret{{end}}"></div>
+            </div>
+            <div class="setup-row">
+              <div class="min-w-0">
+                <label class="setup-label" for="first-run-session-secret"><code class="mono text-sm">server.auth.session_secret</code>{{if .Data.FirstRunSessionSecret}} <span class="chip chip-neutral">set</span>{{end}}</label>
+                <p class="setup-examples"><span class="setup-note">≥ 32 random bytes; signs every session and access token (rotating it revokes all)</span></p>
+              </div>
+              <div class="min-w-0">
+                <input class="input md:max-w-md" id="first-run-session-secret" name="cfg.server.auth.session_secret" type="password" autocomplete="new-password" value="" placeholder="{{if .Data.FirstRunSessionSecret}}leave empty to keep{{else}}paste a random secret{{end}}">
+                {{if .Data.FirstRunSecretSuggest}}
+                <p class="setup-examples mt-1"><span class="muted">suggested:</span> <code class="mono text-xs break-all" id="first-run-secret-suggest">{{.Data.FirstRunSecretSuggest}}</code> <button type="button" class="btn" data-copy="#first-run-secret-suggest">copy</button></p>
+                <p class="muted text-[11px]">or generate your own: <code class="mono text-xs">openssl rand -hex 32</code></p>
+                {{end}}
+              </div>
+            </div>
+            <div class="setup-row">
+              <div class="min-w-0">
+                <label class="setup-label" for="first-run-admin-group"><code class="mono text-sm">server.auth.admin_groups</code></label>
+                <p class="setup-examples"><span class="muted">default</span> <span class="setup-ex">spindle-admin</span><span class="setup-note">comma-separated; members of this group administer the instance</span></p>
+              </div>
+              <div class="min-w-0"><input class="input md:max-w-md" id="first-run-admin-group" name="cfg.server.auth.admin_groups" type="text" value="{{.Data.FirstRunAdminGroup}}" autocomplete="off"></div>
+            </div>
+            <div class="flex flex-wrap items-center gap-2">
+              <button type="submit" class="btn primary">Save configuration</button>
+              <span class="muted text-[11px]">Save does not contact the IdP — recovery must not depend on the thing being recovered. Use Test first.</span>
+            </div>
+          </form>
+
+          <form class="mt-3 grid gap-2" method="post" action="/admin/config/auth-test"
+                hx-post="/admin/config/auth-test" hx-target="#admin-auth-test" hx-swap="innerHTML">
+            <div class="flex flex-wrap items-end gap-2">
+              <input type="hidden" name="client_id" value="{{.Data.FirstRunClientID}}">
+              <input type="hidden" name="redirect_uri" value="{{.Data.FirstRunRedirectURI}}">
+              <label class="grid min-w-0 flex-1 gap-1 text-sm" for="first-run-test-issuer">
+                <span class="text-sm font-medium">Test discovery + signing keys</span>
+                <input class="input" id="first-run-test-issuer" name="issuer" type="url" value="{{.Data.FirstRunIssuer}}" placeholder="https://id.example.com">
+              </label>
+              <button type="submit" class="btn">Test</button>
+            </div>
+          </form>
+          <div id="admin-auth-test" aria-live="polite"></div>
+        </section>
+        {{end}}
+
+        <section class="card mb-4 p-4" aria-labelledby="admin-instance">
+          <h2 class="card-header" id="admin-instance">Instance</h2>
+          <div class="kv mt-2">
+            {{range .Data.Instance.Rows}}
+            <div class="kv-row"><span class="kv-key">{{.Key}}</span><span class="kv-val break-all">{{.Value}}</span></div>
+            {{end}}
+          </div>
+        </section>
+
+        <section class="card mb-4 p-4" aria-labelledby="admin-health">
+          <h2 class="card-header" id="admin-health">Health</h2>
+          {{with .Data.Health}}
+          <p class="mt-2 flex flex-wrap items-center gap-2 text-sm">
+            <span class="chip {{if eq .State "ready"}}chip-open{{else if eq .State "setup_required"}}chip-closed{{else}}chip-draft{{end}}">{{.Label}}</span>
+            <span class="muted">{{.Summary}}</span>
+          </p>
+          {{if .Warnings}}
+          <ul class="muted mt-2 list-disc space-y-1 pl-5 text-sm">
+            {{range .Warnings}}<li>{{.}}</li>{{end}}
+          </ul>
+          {{end}}
+          {{else}}
+          <p class="muted mt-2 text-sm">Readiness is not wired on this build.</p>
+          {{end}}
+          <p class="muted mt-2 text-sm">Machine endpoints: <a class="link" href="/healthz">/healthz</a> · <a class="link" href="/readyz">/readyz</a></p>
+        </section>
+
+        {{with .Data.Maintain}}
+        <section class="card mb-4 p-4" aria-labelledby="admin-maintainer">
+          <h2 class="card-header" id="admin-maintainer">Maintainer</h2>
+          <div class="kv mt-2">
+            <div class="kv-row"><span class="kv-key">passes</span><span class="kv-val">{{.Passes}}</span></div>
+            <div class="kv-row"><span class="kv-key">last pass duration</span><span class="kv-val">{{if .Passes}}{{with duration .LastPassSeconds}}{{.}}{{else}}&lt;1s{{end}}{{else}}not yet{{end}}</span></div>
+            <div class="kv-row"><span class="kv-key">checkpoint lag</span><span class="kv-val">{{.CheckpointLagEntries}} entries · {{.CheckpointAgeSeconds}}s</span></div>
+            <div class="kv-row"><span class="kv-key">missing / repaired</span><span class="kv-val">{{.MissingObjects}} / {{.RepairObjects}}</span></div>
+            <div class="kv-row"><span class="kv-key">follow refs</span><span class="kv-val">{{.FollowRefs}}</span></div>
+          </div>
+          <p class="mt-2 text-sm"><a class="link inline-flex min-h-6 items-center" href="/admin/maintenance">Maintenance</a> carries the full operational state.</p>
+        </section>
+        {{end}}
+
+        <section class="card p-4" aria-labelledby="admin-config-status">
+          <h2 class="card-header" id="admin-config-status">Configuration status</h2>
+          <p class="mt-2 flex flex-wrap items-center gap-2 text-sm">
+            {{if .Data.Restricted}}<span class="chip chip-closed">invalid</span><span class="muted">The config file failed validation; fix it on <a class="link" href="/admin/config">Configuration</a>.</span>
+            {{else if .Data.FirstRun}}<span class="chip chip-draft">not configured</span><span class="muted">No config file yet — configure OIDC above.</span>
+            {{else}}<span class="chip chip-open">valid</span><span class="muted">The config file loaded cleanly.</span>{{end}}
+          </p>
+          {{if .Data.View.Errors}}
+          <div class="relative mt-2 overflow-x-auto">
+            <table class="data-table" aria-label="configuration validation errors">
+              <thead><tr><th scope="col">key</th><th scope="col">message</th></tr></thead>
+              <tbody>
+                {{range .Data.View.Errors}}
+                <tr><td><code class="mono text-xs break-all">{{.Key}}</code></td><td class="break-words">{{.Message}}</td></tr>
+                {{end}}
+              </tbody>
+            </table>
+          </div>
+          {{end}}
+        </section>
+      {{end}}
+    </div>
+  </div>
+</div>
+{{end}}

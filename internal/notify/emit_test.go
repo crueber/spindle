@@ -167,6 +167,60 @@ func TestEmitMentionValidationAndAuthor(t *testing.T) {
 	}
 }
 
+func TestIndexCarriesActor(t *testing.T) {
+	x := newHarness(t)
+	seedRepo(t, x, "acme", "repo")
+	x.addProfile("amy@example.com", "bob@example.com", "carol@example.com")
+	x.writeThread(t, "acme", "repo", 7, "Bug title", "amy@example.com")
+	// bob mentions carol: the mention row and the author row both name bob.
+	x.svc.EmitIssue(ctx(), "acme/repo", 7, "mentioned", "bob@example.com", "", "", []string{"carol@example.com"})
+	x.svc.EmitIssue(ctx(), "acme/repo", 7, "subscribed", "bob@example.com", "", "commented", []string{})
+
+	for principal, wantReason := range map[string]string{
+		"carol@example.com": ReasonMentioned,
+		"amy@example.com":   ReasonAuthor,
+	} {
+		raw, _, err := store.GetBytes(ctx(), x.svc.Store, NotifIndexKey(principal), store.GetOptions{})
+		if err != nil {
+			t.Fatalf("%s index: %v", principal, err)
+		}
+		var ix IndexDoc
+		if err := json.Unmarshal(raw, &ix); err != nil {
+			t.Fatalf("%s index decode: %v", principal, err)
+		}
+		if len(ix.Entries) != 1 || ix.Entries[0].Reason != wantReason {
+			t.Fatalf("%s entries = %+v", principal, ix.Entries)
+		}
+		if got := ix.Entries[0].Actor; got != "bob@example.com" {
+			t.Errorf("%s index actor = %q, want bob@example.com", principal, got)
+		}
+		// The tray serves from that window — the row must carry it too.
+		rows, _ := x.svc.Tray(ctx(), principal, "", "", 10)
+		if len(rows) != 1 || rows[0].Actor != "bob@example.com" {
+			t.Errorf("%s tray rows = %+v", principal, rows)
+		}
+	}
+
+	// A system emission (no actor) stays honestly empty — never "someone".
+	x.svc.EmitIssue(ctx(), "acme/repo", 8, "mentioned", "", "", "", []string{"carol@example.com"})
+	raw, _, _ := store.GetBytes(ctx(), x.svc.Store, NotifIndexKey("carol@example.com"), store.GetOptions{})
+	var ix IndexDoc
+	_ = json.Unmarshal(raw, &ix)
+	var found bool
+	for _, en := range ix.Entries {
+		if en.Num != 8 {
+			continue
+		}
+		found = true
+		if en.Actor != "" {
+			t.Errorf("system row invented actor %q", en.Actor)
+		}
+	}
+	if !found {
+		t.Fatalf("system row missing: %+v", ix.Entries)
+	}
+}
+
 func TestEmitTeamExpansion(t *testing.T) {
 	x := newHarness(t)
 	x.addProfile("amy@example.com", "bob@example.com", "m1@example.com", "m2@example.com")

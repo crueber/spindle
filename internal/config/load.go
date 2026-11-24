@@ -119,6 +119,11 @@ func decodeFile(path string, c *Config) error {
 	if err != nil {
 		return fmt.Errorf("%s: %v", path, err)
 	}
+	// Record provenance before validation: which keys the file actually set
+	// (the cache-space clamp must never shrink a configured value, BUG-6).
+	for _, k := range md.Keys() {
+		c.markExplicit(k.String())
+	}
 	unknown := md.Undecoded()
 	if len(unknown) == 0 {
 		return nil
@@ -128,6 +133,10 @@ func decodeFile(path string, c *Config) error {
 	for _, key := range unknown {
 		if len(key) > 1 && key[0] == "server" && key[1] == "tls" {
 			msgs = append(msgs, fmt.Sprintf("unsupported key %q (line %d): %s", key.String(), findKeyLine(lines, key), removedTLSHint))
+			continue
+		}
+		if hint, ok := removedAuthKeyHint(key.String()); ok {
+			msgs = append(msgs, fmt.Sprintf("unsupported key %q (line %d): %s", key.String(), findKeyLine(lines, key), hint))
 			continue
 		}
 		msgs = append(msgs, fmt.Sprintf("unknown key %q (line %d)", key.String(), findKeyLine(lines, key)))

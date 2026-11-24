@@ -19,6 +19,11 @@ const (
 	statePresent = "present"
 	stateAbsent  = "absent"
 	stateInvalid = "invalid"
+	// stateUnconfigured: no config file exists and the effective config does
+	// not validate — the zero-config first run under PLAN-OIDC-ONLY (auth is
+	// OIDC-only, so plain defaults are invalid). The serve boot turns it into
+	// the restricted first-run state; other subcommands report the error.
+	stateUnconfigured = "unconfigured"
 )
 
 // resolveConfig runs the §3.1 ladder for a subcommand:
@@ -30,35 +35,57 @@ const (
 // It returns the effective config, the file state, and the load error (non-nil
 // for invalid files or a missing explicit file).
 func resolveConfig(c *cli) (*config.Config, string, error) {
+	cfg, state, _, err := resolveConfigEff(c, os.Getenv)
+	if err != nil && state != stateUnconfigured {
+		return nil, state, err
+	}
+	return cfg, state, err
+}
+
+// resolveConfigEff is resolveConfig without the "nil on error" convention: it
+// returns whatever config the ladder produced even when the file failed to
+// validate or decode. `spindle doctor` needs that best-effort config to open
+// the store and keep checking the bucket when the one thing wrong is a key
+// (the 2026-11-22 restricted-boot case). Every other caller keeps the strict
+// wrapper above.
+func resolveConfigEff(c *cli, getenv func(string) string) (*config.Config, string, []config.Override, error) {
 	explicit := c.configPath
 	if explicit == "" {
-		if ptr, ok := config.ConfigFilePointer(os.Getenv); ok {
+		if ptr, ok := config.ConfigFilePointer(getenv); ok {
 			explicit = ptr
 		}
 	}
 	if explicit != "" {
-		cfg, _, err := config.LoadExplicit(explicit, os.Getenv)
+		cfg, overrides, err := config.LoadExplicit(explicit, getenv)
 		if err != nil {
 			if strings.Contains(err.Error(), "config file not found") {
-				return nil, stateAbsent, err // missing explicit file (§6.1 exit 2)
+				return cfg, stateAbsent, overrides, err // missing explicit file (§6.1 exit 2)
 			}
-			return nil, stateInvalid, err
+			return cfg, stateInvalid, overrides, err
 		}
-		syncDataDirFlag(cfg, c, os.Getenv)
-		return cfg, statePresent, nil
+		syncDataDirFlag(cfg, c, getenv)
+		return cfg, statePresent, overrides, nil
 	}
 	cands := defaultConfigPaths(c)
-	cfg2, _, err := config.Load(cands, os.Getenv)
-	if err != nil {
-		return nil, stateInvalid, err
-	}
-	syncDataDirFlag(cfg2, c, os.Getenv)
+	exists := false
 	for _, p := range cands {
 		if _, statErr := os.Stat(p); statErr == nil {
-			return cfg2, statePresent, nil
+			exists = true
+			break
 		}
 	}
-	return cfg2, stateAbsent, nil
+	cfg2, overrides, err := config.Load(cands, getenv)
+	if err != nil {
+		if !exists {
+			return cfg2, stateUnconfigured, overrides, err
+		}
+		return cfg2, stateInvalid, overrides, err
+	}
+	syncDataDirFlag(cfg2, c, getenv)
+	if exists {
+		return cfg2, statePresent, overrides, nil
+	}
+	return cfg2, stateAbsent, overrides, nil
 }
 
 // defaultConfigPaths is [<data-dir>/spindle.toml, <data-dir>/walgit.toml].
@@ -128,7 +155,7 @@ func exitCodeForLoad(state string, err error) (int, string) {
 	if state == stateAbsent && err != nil {
 		return exitArg, err.Error() // missing explicitly-named file
 	}
-	return exitErr, err.Error() // invalid config surfaced by a command
+	return exitErr, err.Error() // invalid/unconfigured config surfaced by a command
 }
 
 // ---- config check -------------------------------------------------------------

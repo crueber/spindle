@@ -101,6 +101,23 @@ func (s *Service) EmitRelease(ctx context.Context, repo, tag, actor, at string) 
 	s.emit(ctx, Emission{Repo: repo, Kind: "release", Class: "release_published", Actor: actor, At: at, Title: tag})
 }
 
+// EmitModeration notifies repo admins that a report was filed (PLAN-V2 §M.3).
+// It carries the conversation pointer (num) and a generic title — never the
+// report's note, target or the reported body (the plan's notification rule;
+// the reported content stays in the repo family). Class "moderation" is not
+// a subscribed class, so no watcher/participant fan-out is added.
+func (s *Service) EmitModeration(ctx context.Context, repo string, num int, actor, at string, recipients []string) {
+	kind := "repo"
+	if num > 0 {
+		kind = "issue"
+	}
+	s.emit(ctx, Emission{
+		Repo: repo, Num: num, Kind: kind, Class: "moderation",
+		Action: ActionModerationReported, Actor: actor, At: at,
+		Title: "A new moderation report needs review", Recipients: recipients,
+	})
+}
+
 // --- class → reason/action ----------------------------------------------------
 
 // classReason maps a source class onto the §1.1 reason for its primary
@@ -113,6 +130,8 @@ func classReason(class string) string {
 		return ReasonMentioned
 	case "review_requested":
 		return ReasonReviewRequested
+	case "moderation":
+		return ReasonModeration
 	default:
 		return ReasonSubscribed
 	}
@@ -206,6 +225,12 @@ func (s *Service) emit(ctx context.Context, e Emission) {
 		}
 	}
 	targets := s.resolve(ctx, owner, name, e, actor, author, head)
+	// PLAN-V2 §M.5 mention filter: a blocked principal's interaction never
+	// notifies the blocker. Filtering happens BEFORE the activity append so
+	// the overflow fan-out path (which drains the stored recipient list)
+	// cannot reintroduce a suppressed name; the target set is already
+	// deduped by (principal, reason), so filtering preserves that.
+	targets = s.dropBlocked(ctx, actor, targets)
 	action := classAction(e.Class, e.Action)
 
 	// Reserve the activity seq first: the notification ids embed it.
@@ -290,6 +315,31 @@ func (s *Service) emit(ctx context.Context, e Emission) {
 	s.wakeRepo(e.Repo)
 }
 
+// dropBlocked removes every target whose principal has blocked the acting
+// principal (PLAN-V2 §M.5: no notification from a blocked principal ever
+// reaches the blocker, mentions included). A gate error drops that one
+// recipient and logs — silence is the fail-closed side of a block check, and
+// the activity event's recipient list stays truthful to what was delivered.
+func (s *Service) dropBlocked(ctx context.Context, actor string, targets []target) []target {
+	if s.Blocks == nil || actor == "" || len(targets) == 0 {
+		return targets
+	}
+	out := make([]target, 0, len(targets))
+	for _, t := range targets {
+		blocked, err := s.Blocks.BlockedBy(ctx, t.principal, actor)
+		if err != nil {
+			s.log().WarnContext(ctx, "notify: block filter probe failed; recipient dropped",
+				"recipient", t.principal, "actor", actor, "err", err)
+			continue
+		}
+		if blocked {
+			continue
+		}
+		out = append(out, t)
+	}
+	return out
+}
+
 // resolve computes the (principal, reason) set: validated primary
 // recipients ∪ team expansions ∪ watchers (subscribed classes) ∪ thread
 // author — minus the actor, deduped by (principal, reason).
@@ -322,9 +372,7 @@ func (s *Service) resolve(ctx context.Context, owner, repo string, e Emission, a
 			addTeam(s, ctx, owner, repo, r, e.Class, actor, author, add, &mu)
 			continue
 		}
-		select {
-		case sem <- struct{}{}:
-		case <-ctx.Done():
+		if !acquireFanoutSlot(ctx, sem) {
 			continue // request gone; remaining recipients dropped
 		}
 		wg.Add(1)
@@ -473,9 +521,7 @@ func (s *Service) createAll(ctx context.Context, owner, repo string, e Emission,
 	var wg sync.WaitGroup
 	for _, t := range targets {
 		t := t
-		select {
-		case sem <- struct{}{}:
-		case <-ctx.Done():
+		if !acquireFanoutSlot(ctx, sem) {
 			mu.Lock()
 			failed = true
 			mu.Unlock()
@@ -560,7 +606,7 @@ func (s *Service) createOne(ctx context.Context, e Emission, title, actor, at st
 	}
 	live, err := s.indexClaim(ctx, t.principal, IndexEntry{
 		ID: id, Repo: e.Repo, Num: e.Num, Kind: e.Kind,
-		Reason: t.reason, Title: title, State: StateUnread, At: at,
+		Reason: t.reason, Title: title, Actor: actor, State: StateUnread, At: at,
 	})
 	if err != nil {
 		return Notification{}, createFailed

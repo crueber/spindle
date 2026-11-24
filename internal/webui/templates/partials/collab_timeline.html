@@ -1,8 +1,13 @@
 {{/* collab_timeline — the ONE event renderer (spec §4.1): comment kinds as
      divider rows with markdown bodies + reaction summaries, everything else
      as a centered muted system line. Data: timelineData (Owner/Repo/Base/
-     Events/CanReact/Locked/LockReason). Rendered oldest → newest (the
-     handler sorts; a seq-less row sorts first). */}}
+     Events/CanReact/Locked/LockReason/CanModerate/ModerationBase). Rendered
+     oldest → newest (the handler sorts; a seq-less row sorts first).
+
+     M2 moderation (PLAN-V2 §M.4): a hidden body is REPLACED — the text never
+     reaches a non-moderator's browser. Moderators (triage+) get the marker,
+     the original behind an expand, and the unhide control; everyone else
+     gets the marker only. */}}
 {{define "collab_timeline"}}
 <ol class="timeline" aria-live="polite" aria-label="Discussion timeline">
   {{range .Events}}
@@ -14,9 +19,27 @@
   <li class="border-t border-[var(--pd-line)] py-3 first:border-t-0 first:pt-0" id="event-{{.Seq}}">
     <article>
       <p class="muted mb-1 text-xs"><span class="font-medium text-[var(--pd-text)]">{{.Actor}}</span> · {{template "collab_time" .At}}</p>
+      {{if .Hidden}}
+      <div class="card border-dashed p-2" data-hidden-target="{{.HideTarget}}" role="status">
+        <p class="muted text-xs">Hidden by a moderator{{with .HiddenBy}} · <span class="font-medium text-[var(--pd-text)]">{{.}}</span>{{end}}{{with .HiddenAt}} · {{template "collab_time" .}}{{end}}{{with .HiddenReason}} · {{.}}{{end}}</p>
+        {{if .Body}}
+        <details class="mt-1">
+          <summary class="link inline-block px-1 py-1 text-xs">Show original</summary>
+          <div class="markdown-body mt-1">{{mdat .Body $.Owner $.Repo $.Ref ""}}</div>
+        </details>
+        {{end}}
+        {{if $.CanModerate}}
+        <form class="mt-1" method="post" action="{{$.ModerationBase}}/unhide">
+          <input type="hidden" name="target" value="{{.HideTarget}}">
+          <button type="submit" class="link inline-block px-1 py-1 text-xs">Unhide</button>
+        </form>
+        {{end}}
+      </div>
+      {{else}}
       <div class="markdown-body">{{mdat .Body $.Owner $.Repo $.Ref ""}}</div>
+      {{end}}
       {{$ev := .}}
-      {{if or .Reactions .Addable}}
+      {{if or .Reactions .Addable $.CanModerate}}
       <div class="reaction-row mt-2 flex flex-wrap items-center gap-1" role="group" aria-label="reactions">
         {{range .Reactions}}
         <form method="post" action="{{$.Base}}/reactions/{{$ev.Seq}}/{{.Content}}/delete" class="inline">
@@ -38,7 +61,26 @@
         {{else if $ev.AddReason}}
         <span class="muted text-xs" title="{{$ev.AddReason}}">{{$ev.AddReason}}</span>
         {{end}}
+        {{if and $.CanModerate (not $ev.Hidden)}}
+        <details class="relative inline-block" data-popover>
+          <summary class="muted list-none cursor-pointer px-1.5 py-0.5 text-sm hover:text-[var(--pd-text)]" aria-label="moderate this comment" title="moderate this comment" data-popover-trigger>⋯</summary>
+          <form class="reaction-drop card absolute left-0 z-30 mt-1 grid w-52 gap-1 p-2" method="post" action="{{$.ModerationBase}}/hide" role="group" aria-label="hide this comment">
+            <input type="hidden" name="target" value="{{$ev.HideTarget}}">
+            <label class="eyebrow" for="hide-reason-{{$ev.Seq}}">Hide reason</label>
+            <select class="input" id="hide-reason-{{$ev.Seq}}" name="reason">
+              <option value="spam">spam</option>
+              <option value="abusive">abusive</option>
+              <option value="off-topic">off-topic</option>
+              <option value="other" selected>other</option>
+            </select>
+            <button type="submit" class="btn px-2 py-1">Hide comment</button>
+          </form>
+        </details>
+        {{end}}
       </div>
+      {{end}}
+      {{if and $.CanReport (not .Hidden)}}
+      {{template "collab_report_form" (dict "action" (printf "%s/report" $.Base) "kind" "thread" "seq" .Seq "tid" "" "uid" (printf "ev-%d" .Seq))}}
       {{end}}
     </article>
   </li>

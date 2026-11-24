@@ -64,7 +64,14 @@ jobs:
       - name: gofmt + go vet + go build
         run: make -o web vet
       - name: fast tier under the race detector
-        run: make -o web race
+        # PRs race the packages that own shared state; a push to main runs the
+        # full tier (docs/go/15_testing.md §6.1).
+        run: |
+          case "${{ github.event_name }}" in
+            push|workflow_dispatch) target=race ;;
+            *) target=race-pr ;;
+          esac
+          make -o web $target
       - name: coverage gate (≥95 % per internal package, D7)
         run: make cover
       - name: smart-HTTP end-to-end against the real git binary

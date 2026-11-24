@@ -123,20 +123,20 @@ func TestDeadRunnerRule(t *testing.T) {
 func TestRetainRevokedRunnerAndListingFailure(t *testing.T) {
 	e, now := retentionEnv(t)
 	admin := auth.Principal{Name: "writer", Admin: true}
-	tok, err := e.svc.MintRegistrationToken(context.Background(), "o/r", admin)
+	tok, err := e.svc.MintRegistrationToken(context.Background(), admin, mintAllPolicy(""))
 	if err != nil {
 		t.Fatal(err)
 	}
 	if _, err := e.svc.Register(context.Background(), RegisterInput{Token: tok.Token, Name: "r1", Labels: []string{"linux"}}); err != nil {
 		t.Fatal(err)
 	}
-	if err := e.svc.RevokeRunner(context.Background(), "o/r", tok.ID, admin); err != nil {
+	if err := e.svc.RevokeRunner(context.Background(), tok.ID, admin); err != nil {
 		t.Fatal(err)
 	}
 	// Age the revocation past the window.
 	revokedAt := now.Add(-40 * 24 * time.Hour).Format(dateTimeFmt)
 	createdAt := now.Add(-41 * 24 * time.Hour).Format(dateTimeFmt)
-	if _, err := e.svc.casUpdate(context.Background(), RunnerKey("o", "r", tok.ID), 5, func(cur []byte, _ store.Version) ([]byte, bool, error) {
+	if _, err := e.svc.casUpdate(context.Background(), RunnerKey(tok.ID), 5, func(cur []byte, _ store.Version) ([]byte, bool, error) {
 		var doc RunnerDoc
 		if jerr := json.Unmarshal(cur, &doc); jerr != nil {
 			return nil, false, jerr
@@ -155,7 +155,7 @@ func TestRetainRevokedRunnerAndListingFailure(t *testing.T) {
 	if res.RunnersDeleted != 1 || res.CredentialsDeleted != 1 {
 		t.Fatalf("retain = %+v, want the revoked runner removed", res)
 	}
-	if doc, _, _ := e.svc.loadRunner(context.Background(), "o", "r", tok.ID); doc != nil {
+	if doc, _, _ := e.svc.loadRunner(context.Background(), tok.ID); doc != nil {
 		t.Fatal("revoked runner survived")
 	}
 }

@@ -231,6 +231,7 @@ func TestPackagesPageUnwired(t *testing.T) {
 
 // shortDigest/shortMediaType/humanBytes are the page's display helpers.
 func TestPackagesDisplayHelpers(t *testing.T) {
+	t.Parallel()
 	cases := map[string]string{
 		"sha256:0123456789abcdef": "0123456789ab",
 		"weird":                   "weird",
@@ -260,5 +261,67 @@ func TestPackagesDisplayHelpers(t *testing.T) {
 		if got := humanBytes(in); got != want {
 			t.Errorf("humanBytes(%d) = %q, want %q", in, got, want)
 		}
+	}
+}
+
+// TestPackagesUsageStates is the rendered usage/quota contract (docs/features/14
+// §5): the numbers, the words that state the condition (never colour alone),
+// the meter's accessible reading only when a quota exists, and the unbounded
+// copy when none is set.
+func TestPackagesUsageStates(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		usage   *packages.UsageInfo
+		want    []string
+		notWant []string
+	}{
+		{
+			name:  "within quota",
+			usage: &packages.UsageInfo{Bytes: 2048, QuotaBytes: 4096, Blobs: 3, Manifests: 2},
+			want: []string{
+				"Storage", "2.0 KiB of 4.0 KiB quota", "within quota", "2.0 KiB remaining",
+				"3 blob(s) · 2 manifest(s)", `role="progressbar"`, `aria-valuenow="50"`,
+				`aria-valuetext="2.0 KiB of 4.0 KiB quota used (50%); 2.0 KiB free"`,
+				"[packages] quota_bytes", "packages-gc",
+			},
+			notWant: []string{"over quota", "no quota is set"},
+		},
+		{
+			name:    "over quota",
+			usage:   &packages.UsageInfo{Bytes: 8192, QuotaBytes: 4096, Blobs: 9, Manifests: 4},
+			want:    []string{"8.0 KiB of 4.0 KiB quota", "over quota", `aria-valuenow="100"`, "0 B remaining"},
+			notWant: []string{"within quota"},
+		},
+		{
+			name:    "unlimited",
+			usage:   &packages.UsageInfo{Bytes: 8192, Blobs: 9, Manifests: 4},
+			want:    []string{"Storage", "8.0 KiB", "no quota", "storage is unbounded"},
+			notWant: []string{"role=\"progressbar\"", "of 4.0 KiB quota"},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f, _ := packagesFixture(t, true)
+			usage := tc.usage
+			packagesDeps.List = func(context.Context, string, string) (*packages.RepoPackages, error) {
+				return &packages.RepoPackages{
+					Repository: "acme/widgets",
+					Packages:   []packages.TagInfo{{Tag: "v1.0.0", Digest: testDigest, Size: 4096}},
+					Manifests:  []packages.ManifestView{{Digest: testDigest, Size: 4096, Tags: []string{"v1.0.0"}}},
+					TotalSize:  4096,
+					Usage:      usage,
+				}, nil
+			}
+			body := bodyText(f.get("/acme/widgets/packages"))
+			for _, want := range tc.want {
+				if !strings.Contains(body, want) {
+					t.Errorf("page missing %q", want)
+				}
+			}
+			for _, bad := range tc.notWant {
+				if strings.Contains(body, bad) {
+					t.Errorf("page unexpectedly contains %q", bad)
+				}
+			}
+		})
 	}
 }

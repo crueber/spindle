@@ -48,7 +48,7 @@ func TestParseInvalidYAML(t *testing.T) {
 	if err != nil {
 		t.Fatalf("scalar on: rejected: %v", err)
 	}
-	if !w.Fires("push", "main") {
+	if !w.Fires("push", "main", "") {
 		t.Fatal("scalar on: push did not fire")
 	}
 	if _, err := Parse([]byte("on: teleport\njobs:\n  a:\n    runs-on: l\n    steps:\n      - run: x\n")); err == nil {
@@ -114,7 +114,7 @@ jobs:
 	if len(job.Steps) != 2 || job.Steps[0].With["fetch-depth"] != "0" || job.Steps[1].Shell != "bash" {
 		t.Fatalf("steps = %+v", job.Steps)
 	}
-	if !w.Fires("schedule", "") {
+	if !w.Fires("schedule", "", "") {
 		t.Fatal("schedule must match Fires (round-2 pass 2: the maintainer evaluates it)")
 	}
 }
@@ -170,16 +170,16 @@ func TestFiresBranchesAndDispatch(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !w.Fires("push", "main") || w.Fires("push", "nope") {
+	if !w.Fires("push", "main", "") || w.Fires("push", "nope", "") {
 		t.Fatal("push filter wrong")
 	}
-	if !w.Fires("pull_request", "main") || w.Fires("pull_request", "nope") {
+	if !w.Fires("pull_request", "main", "opened") || w.Fires("pull_request", "nope", "opened") {
 		t.Fatal("pr filter wrong")
 	}
-	if !w.Fires("workflow_dispatch", "") {
+	if !w.Fires("workflow_dispatch", "", "") {
 		t.Fatal("dispatch missing")
 	}
-	if w.Fires("push", "") {
+	if w.Fires("push", "", "") {
 		t.Fatal("empty branch must not match a filtered push")
 	}
 	if strings.TrimSpace(w.Name) == "" {

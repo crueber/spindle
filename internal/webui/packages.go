@@ -96,8 +96,24 @@ type packagesPage struct {
 	Pull      string // docker pull <host>/<o>/<r>:<first tag> (or bare)
 	Count     int
 	TotalSize string
+	Usage     *packageUsageView
 	Error     string
 	Flash     string
+}
+
+// packageUsageView is the page's usage/quota reading (docs/features/14 §5).
+// The state is words first — a hue-blind reader must get the same fact — and
+// the meter is decoration (aria-valuetext carries the numbers).
+type packageUsageView struct {
+	Used      string
+	Quota     string
+	Remaining string
+	Percent   int
+	Limited   bool
+	Over      bool
+	State     string // "within quota" | "over quota" | "no quota"
+	Tone      string // chip tone: open | closed | neutral
+	Counts    string // "3 blobs · 2 manifests"
 }
 
 func (s *Server) repoPackages(w http.ResponseWriter, r *http.Request) {
@@ -131,6 +147,7 @@ func (s *Server) repoPackages(w http.ResponseWriter, r *http.Request) {
 	}
 	data.Count = len(res.Packages)
 	data.TotalSize = humanBytes(res.TotalSize)
+	data.Usage = packageUsageOf(res.Usage)
 	base := s.packagesPullBase(r) + "/" + c.Full
 	data.Pull = "docker pull " + base
 	if len(res.Packages) > 0 {
@@ -264,6 +281,36 @@ func (s *Server) packagesPullBase(r *http.Request) string {
 		return u.Host
 	}
 	return strings.TrimPrefix(strings.TrimPrefix(base, "https://"), "http://")
+}
+
+// packageUsageOf projects the registry's usage reading onto the page: the
+// numbers, the words that state the quota condition, and the meter width. A
+// nil reading (the counter could not be read) renders nothing rather than a
+// fabricated zero.
+func packageUsageOf(u *packages.UsageInfo) *packageUsageView {
+	if u == nil {
+		return nil
+	}
+	v := &packageUsageView{
+		Used:    humanBytes(u.Bytes),
+		Limited: u.Limited(),
+		Over:    u.OverQuota(),
+		Percent: u.Percent(),
+		Counts:  strconv.FormatInt(u.Blobs, 10) + " blob(s) · " + strconv.FormatInt(u.Manifests, 10) + " manifest(s)",
+	}
+	switch {
+	case !v.Limited:
+		v.State, v.Tone = "no quota", "neutral"
+	case v.Over:
+		v.State, v.Tone = "over quota", "closed"
+	default:
+		v.State, v.Tone = "within quota", "open"
+	}
+	if v.Limited {
+		v.Quota = humanBytes(u.QuotaBytes)
+		v.Remaining = humanBytes(u.Remaining())
+	}
+	return v
 }
 
 // shortDigest renders sha256:abcdef… → abcdef… (12).

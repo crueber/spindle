@@ -9,6 +9,7 @@ import {
   taskBars,
   taskDone,
   taskRedirect,
+  taskTarget,
   taskFailureText,
   taskLogTail,
   MAX_RETRIES,
@@ -91,7 +92,7 @@ const source = (p) => readFileSync(new URL(p, import.meta.url), "utf8");
 test("island is registered in the boot list", () => {
   const index = source("../../src/islands/index.js");
   assert.match(index, /import \{ initTasks \} from "\.\/tasks\.js"/);
-  assert.match(index, /initTasks,\s*initOps,\s*initThreadLog\]/);
+  assert.match(index, /initTasks,\s*initOps,\s*initThreadLog,/);
 });
 
 test("island reuses the one SSE reader (no second fetch, no EventSource)", () => {
@@ -113,4 +114,16 @@ test("island reuses the one SSE reader (no second fetch, no EventSource)", () =>
 test("the sse reader exposes the HTTP status for terminal 401/404 decisions", () => {
   const sse = source("../../src/islands/sse.js");
   assert.match(sse, /err\.status = res\.status/);
+});
+
+// taskTarget — a repository transfer's record is keyed by the SOURCE repo, so
+// the success destination must come from the card, not from the record.
+test("taskTarget prefers the card's explicit destination", () => {
+  assert.equal(taskTarget("/beta/r1", { repo: "acme/r1" }, { repo: "acme/r1" }), "/beta/r1");
+  assert.equal(taskTarget("beta/r1", null, null), "/beta/r1");
+  assert.equal(taskTarget("", { repo: "acme/r1" }, null), "/acme/r1");
+  assert.equal(taskTarget("", null, { repo: "acme/r2" }), "/acme/r2");
+  assert.equal(taskTarget("", null, null), "");
+  // Never navigate on a non-repo path.
+  assert.equal(taskTarget("../etc/passwd", { repo: "acme/r1" }, null), "/acme/r1");
 });

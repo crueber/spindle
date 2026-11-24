@@ -436,11 +436,11 @@ func TestCoverRequiredChecksGate(t *testing.T) {
 	if err := e.svc.checkProtectedRef(ctx(), "o", "r", "m", "refs/heads/main", "update"); err == nil || !strings.Contains(err.Error(), "gated") {
 		t.Fatalf("protected: %v", err)
 	}
-	// A bypassed rule contributes nothing — the queue merges fine with no
-	// backend (03 §5 step 4: bypass lists apply unchanged).
+	// Bypass lists govern direct pushes only: a merger listed in the rule's
+	// bypass is STILL check-gated, so the unwired backend fails closed.
 	putPolicy(t, e, `{"version":1,"rules":[{"name":"gated","match":{"refs":["refs/heads/main"]},"effect":{"protect":{"restricts":["update"],"require_checks":["ci"],"bypass":["m"]}}}]}`)
-	if err := e.svc.checkRequiredChecksGate(ctx(), "o", "r", strings.Repeat("a", 40), "refs/heads/main", "m"); err != nil {
-		t.Fatalf("bypassed: %v", err)
+	if err := e.svc.checkRequiredChecksGate(ctx(), "o", "r", strings.Repeat("a", 40), "refs/heads/main", "m"); !errors.Is(err, ErrConflict) || !strings.Contains(err.Error(), "gated") {
+		t.Fatalf("bypassed merger must still be gated: %v", err)
 	}
 	// Plain protect rules merge fine with no backend.
 	putPolicy(t, e, `{"version":1,"rules":[{"name":"plain","match":{"refs":["refs/heads/main"]},"effect":{"protect":{"restricts":["update"]}}}]}`)
@@ -448,7 +448,7 @@ func TestCoverRequiredChecksGate(t *testing.T) {
 		t.Fatalf("plain: %v", err)
 	}
 	// Missing policy ⇒ no gate; unparseable ⇒ no gate verdict here
-	// (loadPolicy fails closed next).
+	// (checkMergeTarget fails the merge closed before the gate runs).
 	_ = e.store.Delete(ctx(), PolicyKey("o", "r"), "")
 	if err := e.svc.checkRequiredChecksGate(ctx(), "o", "r", strings.Repeat("a", 40), "refs/heads/main", "m"); err != nil {
 		t.Fatalf("absent: %v", err)

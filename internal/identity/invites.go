@@ -164,6 +164,9 @@ func (s *Service) CreateOrgInvite(ctx context.Context, org, subject, role, invit
 	if !ValidPrincipal(subject) {
 		return nil, fmt.Errorf("%w: invalid subject %q", ErrInvalid, subject)
 	}
+	if err := s.checkInviteBlocked(ctx, invitedBy, subject); err != nil {
+		return nil, err
+	}
 	if !validOrgRole(role) {
 		return nil, fmt.Errorf("%w: invalid org role %q", ErrInvalid, role)
 	}
@@ -207,6 +210,9 @@ func (s *Service) CreateRepoInvite(ctx context.Context, owner, repo, subject str
 	if !ValidPrincipal(subject) {
 		return nil, fmt.Errorf("%w: invalid subject %q", ErrInvalid, subject)
 	}
+	if err := s.checkInviteBlocked(ctx, invitedBy, subject); err != nil {
+		return nil, err
+	}
 	if !validRole(string(role)) {
 		return nil, fmt.Errorf("%w: invalid role %q", ErrInvalid, string(role))
 	}
@@ -236,6 +242,25 @@ func (s *Service) CreateRepoInvite(ctx context.Context, owner, repo, subject str
 		return nil, err
 	}
 	return inv, nil
+}
+
+// checkInviteBlocked refuses an invitation BY a principal who has blocked the
+// subject (PLAN-V2 §M.5). Nil-seam and blank-inviter are allowed: an
+// unwired feature must never break invitation creation, and system-created
+// invites have no blocker to consult. A gate error fails CLOSED (503-class):
+// the feature's own failures never let an interaction through.
+func (s *Service) checkInviteBlocked(ctx context.Context, invitedBy, subject string) error {
+	if s.Blocks == nil || invitedBy == "" {
+		return nil
+	}
+	blocked, err := s.Blocks.BlockedBy(ctx, invitedBy, subject)
+	if err != nil {
+		return fmt.Errorf("moderation unavailable: %v", err)
+	}
+	if blocked {
+		return fmt.Errorf("%w: %s", ErrForbidden, InteractionRefused)
+	}
+	return nil
 }
 
 // inboxAdd appends an entry to the invitee's inbox index (CAS; P8 fan-out

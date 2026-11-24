@@ -28,7 +28,12 @@ func discardLogger() *slog.Logger {
 func registryFor(t *testing.T, cfgAuth func(*config.Auth)) (*SSHKeyRegistry, context.Context) {
 	t.Helper()
 	c := config.Defaults()
-	c.Server.Auth.Mode = "none"
+	c.Server.Auth.Issuer = "https://id.example.com"
+	c.Server.Auth.AllowedDomains = []string{"example.com"}
+	c.Server.Auth.OAuthClientID = "id"
+	c.Server.Auth.OAuthClientSecret = "secret"
+	c.Server.Auth.SessionSecret = strings.Repeat("x", 32)
+	c.Server.Auth.AdminGroups = []string{"spindle-admin"}
 	if cfgAuth != nil {
 		cfgAuth(&c.Server.Auth)
 	}
@@ -117,9 +122,16 @@ func TestRegistryBadPrincipalName(t *testing.T) {
 }
 
 func TestRegistryLookupResolvesPrincipalRights(t *testing.T) {
-	// none mode: the anon-all principal
+	// OIDC: the key's principal name resolves through the wired EmailLookup
+	// back to its verified email and inherits that admission's flags.
 	r, ctx := registryFor(t, nil)
-	rec, err := r.Add(ctx, "anon", registryTestKey, "")
+	r.auth.EmailLookup = func(name string) (string, bool) {
+		if name == "ada" {
+			return "ada@example.com", true
+		}
+		return "", false
+	}
+	rec, err := r.Add(ctx, "ada", registryTestKey, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -127,20 +139,28 @@ func TestRegistryLookupResolvesPrincipalRights(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !entry.Write || !entry.Admin || entry.Principal != "anon" {
-		t.Fatalf("none-mode entry = %+v", entry)
+	if !entry.Write || entry.Admin || entry.Principal != "ada" {
+		t.Fatalf("oidc entry = %+v", entry)
 	}
 	if _, err := r.LookupByFingerprint(ctx, "SHA256:unknown"); !errors.Is(err, api.ErrKeyNotFound) {
 		t.Fatalf("unknown fp = %v", err)
 	}
+	// A name with no verified email behind it fails closed.
+	rec2, err := r.Add(ctx, "ghost", "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIB7Ybq5Fq1nZ1mY7W6yPfS0m2p7pX0M2V7n6l9r0Vw2T ghost@laptop", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := r.LookupByFingerprint(ctx, rec2.Fingerprint); err == nil {
+		t.Fatal("principal without a verified email must be denied")
+	}
 }
 
-func TestRegistryTokenModeRights(t *testing.T) {
+// Static tokens are machine credentials: a token principal name is not an
+// OIDC identity, so its SSH keys resolve nowhere (PLAN-OIDC-ONLY §1.3).
+func TestRegistryStaticTokenPrincipalHasNoSSHRights(t *testing.T) {
 	c := config.Defaults()
-	c.Server.Auth.Mode = "token"
 	c.Server.Auth.Tokens = []config.StaticToken{
 		{Principal: "ci", Token: "tok-write", Write: true},
-		{Principal: "ci", Token: "tok-admin", Admin: true},
 	}
 	a := NewAuthService(&c.Server.Auth, nil)
 	r := &SSHKeyRegistry{st: store.NewMemory(), auth: a, log: discardLogger()}
@@ -149,58 +169,43 @@ func TestRegistryTokenModeRights(t *testing.T) {
 	if _, err := r.Add(ctx, "ci", registryTestKey, ""); err != nil {
 		t.Fatal(err)
 	}
-	entry, err := r.LookupByFingerprint(ctx, fpID(fingerprintOf(registryTestKey)))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !entry.Write || !entry.Admin || entry.Principal != "ci" {
-		t.Fatalf("token-mode entry = %+v", entry)
-	}
-
-	// a principal whose tokens were all removed is denied at lookup time
-	empty := config.Defaults()
-	empty.Server.Auth.Mode = "token" // no tokens configured at all
-	aEmpty := NewAuthService(&empty.Server.Auth, nil)
-	rEmpty := &SSHKeyRegistry{st: store.NewMemory(), auth: aEmpty, log: discardLogger()}
-	if _, err := rEmpty.Add(ctx, "ghost", registryTestKey, ""); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := rEmpty.LookupByFingerprint(ctx, fpID(fingerprintOf(registryTestKey))); err == nil {
-		t.Fatal("credential-less principal must be denied")
+	if _, err := r.LookupByFingerprint(ctx, fpID(fingerprintOf(registryTestKey))); err == nil {
+		t.Fatal("a static-token principal must have no SSH rights")
 	}
 }
 
+// PrincipalForName has one identity source: the OIDC admission path.
 func TestPrincipalForNameBranches(t *testing.T) {
-	// none → the anon-all principal (covered above); the token-aggregate and
-	// forbidden branches live here for the 17_ssh.md §3 rights resolution.
 	c := config.Defaults()
-	c.Server.Auth.Mode = "token"
-	c.Server.Auth.Tokens = []config.StaticToken{
-		{Principal: "ci", Token: "t1", Write: true},
-		{Principal: "root", Token: "t2", Admin: true},
-	}
+	c.Server.Auth.Issuer = "https://id.example.com"
+	c.Server.Auth.AllowedDomains = []string{"example.com"}
+	c.Server.Auth.AdminGroups = []string{"spindle-admin"}
 	a := NewAuthService(&c.Server.Auth, nil)
-
-	// aggregate across a principal's tokens
+	a.EmailLookup = func(name string) (string, bool) {
+		switch name {
+		case "ci":
+			return "ci@example.com", true
+		case "root":
+			return "root@example.com", true
+		}
+		return "", false
+	}
 	p, err := a.PrincipalForName("ci")
 	if err != nil || !p.Write || p.Admin {
 		t.Fatalf("ci = %+v %v", p, err)
 	}
-	p, err = a.PrincipalForName("root")
-	if err != nil || !p.Admin || p.Write {
-		t.Fatalf("root = %+v %v", p, err)
+	p, err = a.PrincipalForName("root@example.com")
+	if err != nil || !p.Write || p.Admin {
+		t.Fatalf("root = %+v %v (groups, not emails, grant admin)", p, err)
 	}
-	// a principal with no credentials at all is denied
+	// a principal with no verified email at all is denied
 	if _, err := a.PrincipalForName("ghost"); err == nil {
 		t.Fatal("ghost principal must be denied")
 	}
-	// none mode: everyone is the anon-all principal
-	n := config.Defaults()
-	n.Server.Auth.Mode = "none"
-	an := NewAuthService(&n.Server.Auth, nil)
-	p, err = an.PrincipalForName("anyone")
-	if err != nil || !p.Write || !p.Admin || p.Name != "anon" {
-		t.Fatalf("none-mode anyone = %+v %v", p, err)
+	// nil lookup fails closed
+	bare := NewAuthService(&config.Auth{}, nil)
+	if _, err := bare.PrincipalForName("anyone"); err == nil {
+		t.Fatal("nil EmailLookup must deny")
 	}
 }
 
@@ -321,7 +326,7 @@ func (f *sshKeyErrStore) List(ctx context.Context, prefix, startAfter string, fn
 func TestRegistryStoreErrors(t *testing.T) {
 	mem := store.NewMemory()
 	fs := &sshKeyErrStore{ObjectStore: mem}
-	a := NewAuthService(&config.Auth{Mode: "none"}, nil)
+	a := NewAuthService(&config.Auth{}, nil)
 	r := &SSHKeyRegistry{st: fs, auth: a, log: discardLogger()}
 	ctx := context.Background()
 

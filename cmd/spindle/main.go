@@ -105,6 +105,7 @@ func init() {
 		{"mirror", "external bridge via a local bare buffer repo", runMirror},
 		{"config check", "validate file ⊕ env, report ignored overrides", runConfigCheck},
 		{"config dump", "print the effective config as TOML", runConfigDump},
+		{"doctor", "read-only upgrade readiness check (config + bounded bucket sample)", runDoctor},
 		{"version", "print the build identity", runVersion},
 		// WP11: the API client surface (11_config_cli.md §6.6).
 		{"auth", "log in/out, inspect the stored token", groupRunner(authGroup)},
@@ -116,7 +117,8 @@ func init() {
 		{"checks", "commit checks and statuses", groupRunner(checksGroup)},
 		{"packages", "OCI packages (WP1)", groupRunner(packagesGroup)},
 		{"threads", "CI runs (WP10)", groupRunner(threadsGroup)},
-		{"runner", "Threads runners: mint/list/revoke", groupRunner(runnerGroup)},
+		{"file", "edit one text file as one commit (the browser editor's path)", groupRunner(fileGroup)},
+		{"runner", "Threads runners: serve jobs", groupRunner(runnerGroup)},
 		{"api", "one authenticated API request", runAPI},
 		{"completion", "generate shell completion (bash|zsh|fish)", runCompletion},
 		{"help", "print this help", runHelp},
@@ -170,7 +172,7 @@ func runHelp(ctx context.Context, c *cli, args []string) int {
 
 // usageText mirrors the help table above (kept separate so help stays stable).
 var usageText = `Commands:
-  serve | compact | bundle | repo | wal | synth | import | mirror | config | version
+  serve | compact | bundle | repo | access | wal | synth | import | mirror | config | doctor | version
 Run "spindle help" or "spindle <command> -h" for details.
 `
 
@@ -264,6 +266,7 @@ Commands:
   mirror --from URL --to URL --dir PATH
   config check [--env-file PATH]… [--strict]
   config dump
+  doctor [--limit N] [--repos N] [--budget N] [--json]
   version
 
 API client (WP11; --json everywhere, exit 0 ok · 1 error · 2 usage · 3 not found · 4 auth):
@@ -274,7 +277,7 @@ API client (WP11; --json everywhere, exit 0 ok · 1 error · 2 usage · 3 not fo
   pr list|show|diff|create|close|merge|review|comment|checks
   release list|show|create|delete|upload
   checks list|status REPO [REF]
-  packages list|show|delete · threads list|show|run · runner serve|token|list|revoke
+  packages list|show|delete · threads list|show|run · runner serve
   api [-X METHOD] [-d DATA] [-H 'K: V'] PATH
   completion bash|zsh|fish
   help

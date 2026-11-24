@@ -10,6 +10,28 @@
   {{if .Flash}}<p class="warn-line" role="status">{{.Flash}}</p>{{end}}
   {{if .Error}}<p class="err-line" role="alert">{{.Error}}</p>{{end}}
 
+  {{with .Usage}}
+  <section class="card space-y-2 p-4" aria-label="storage usage and quota">
+    <div class="flex flex-wrap items-center gap-2">
+      <span class="eyebrow">Storage</span>
+      <span class="text-sm">{{.Used}}{{if .Limited}} of {{.Quota}} quota{{end}}</span>
+      <span class="chip chip-{{.Tone}}">{{.State}}</span>
+    </div>
+    {{if .Limited}}
+    <div class="h-1.5 overflow-hidden rounded bg-[var(--pd-raised)]" role="progressbar"
+         aria-valuenow="{{.Percent}}" aria-valuemin="0" aria-valuemax="100"
+         aria-valuetext="{{.Used}} of {{.Quota}} quota used ({{.Percent}}%); {{.Remaining}} free"
+         aria-label="registry bytes used against the quota">
+      <div class="h-full {{if .Over}}bg-[var(--pd-danger)]{{else}}bg-[var(--pd-ok)]{{end}}" style="width: {{.Percent}}%"></div>
+    </div>
+    <p class="muted text-xs">{{.Remaining}} remaining · {{.Counts}}</p>
+    {{else}}
+    <p class="muted text-xs">{{.Counts}} · no quota is set for this repository, so storage is unbounded.</p>
+    {{end}}
+    <p class="muted text-xs">A quota and retention policy are set in this repository's settings: <code class="mono">[packages] quota_bytes</code> and <code class="mono">[[packages.retention]]</code>. The maintainer's <code class="mono">packages-gc</code> pass reclaims what retention prunes.</p>
+  </section>
+  {{end}}
+
   <section class="card space-y-2 p-4" aria-label="pull command">
     <div class="eyebrow">Pull</div>
     <div class="flex flex-wrap items-center gap-2">
@@ -24,9 +46,9 @@
        table's min-width in the DOCUMENT scroll area (390px check), even though
        the card scrolls in place. The utility is the shared fix. -->
   <div class="card relative overflow-x-auto">
-    <table class="data-table min-w-[40rem]">
+    <table class="data-table min-w-[40rem]" aria-label="image tags">
       <thead>
-        <tr><th>Tag</th><th>Digest</th><th>Size</th><th>Platforms</th><th>Updated</th><th><span class="sr-only">Actions</span></th></tr>
+        <tr><th scope="col">Tag</th><th scope="col">Digest</th><th scope="col">Size</th><th scope="col">Platforms</th><th scope="col">Updated</th><th scope="col"><span class="sr-only">Actions</span></th></tr>
       </thead>
       <tbody>
         {{range .Rows}}
@@ -68,9 +90,9 @@
   <section class="card overflow-hidden" aria-label="manifest versions">
     <h3 class="card-header">Manifest versions</h3>
     <div class="relative overflow-x-auto">
-      <table class="data-table min-w-[36rem]">
+      <table class="data-table min-w-[36rem]" aria-label="images">
         <thead>
-          <tr><th>Digest</th><th>Type</th><th>Tags</th><th>Size</th><th>Platforms</th><th><span class="sr-only">Actions</span></th></tr>
+          <tr><th scope="col">Digest</th><th scope="col">Type</th><th scope="col">Tags</th><th scope="col">Size</th><th scope="col">Platforms</th><th scope="col"><span class="sr-only">Actions</span></th></tr>
         </thead>
         <tbody>
           {{range .Manifest}}

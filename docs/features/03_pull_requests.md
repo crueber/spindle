@@ -203,7 +203,10 @@ Steps (git is always the subprocess with exact argv, `docs/go/04_git.md`):
 1. **Re-verify under the task:** re-resolve base/head SHAs from the live refs; if either moved since
    `pr.json`, refresh the mergeability stamp first (the stamp check of §4); refuse `dirty`/`up_to_date`
    with a narrated reason. Refuse drafts the same way (narrated `409 pull request #<num> is a draft` —
-   mark-ready first, then merge).
+   mark-ready first, then merge). `require_up_to_date` is enforced here (§5.1): the head must contain
+   the base tip (`git merge-base --is-ancestor <base> <head>` in the base serving copy, after the fork
+   bridge), else the task refuses `409 head is behind base — update the branch first` naming the rule
+   and the ref, and the PR page's update-branch control is the fix.
 2. **Strategy argv** (stock git only; all plumbing — no worktree is created):
 
 | Strategy | Git argv (exact) | Result |
@@ -226,13 +229,28 @@ Steps (git is always the subprocess with exact argv, `docs/go/04_git.md`):
    squash/rebase — the head's subject (+ body = squashed head messages or the request's
    `commit_message`). `commit_title`/`commit_message` overrides win. Default-branch merges of protected
    refs append `(<full sha>)` per GitHub convention — the UI renders the sha link.
-4. **Protected-ref gate (policy interplay).** The base-ref publish is NOT a receive-pack push, so the
-   merge task MUST explicitly evaluate `policy.json` for `(principal = merger, ref = base.ref,
-   op = create-or-update)`: `protect` rules deny the merge exactly as they would deny a push
-   (plain-text reason `rejected by rule '<name>'`), and the required-checks gate (doc 05) MUST be
-   consulted when the rule carries it — unmet required checks on the head sha reject the merge with the
-   named checks in the narration. Bypass lists (e.g. `svc:merge-queue`) apply unchanged. Evaluation is
-   pure and local (already-loaded policy per `14_extensibility.md` Seam 3); no network in eval.
+4. **Policy interplay (the push-vs-merge split).** The base-ref publish is NOT a receive-pack push, and
+   `protect`'s `restricts`/`bypass` pair is the **push half**: it governs direct ref updates (client
+   pushes) and never denies the server-side merge. "Nobody may push to `main`" is not "nobody may merge
+   into `main`" — GitHub and Forgejo read branch protection the same way, and the standard team
+   workflow (restrict direct pushes **and** require CI green) must be expressible. The merge task
+   therefore does NOT evaluate `(merger, base.ref, update)` against `restricts`; it still
+   - fails closed on an unreadable/unparseable `policy.json` (never "merge without a policy") and
+     refuses a server-managed target ref, and
+   - consults the observation half of the policy, through its own gates:
+     - `require_checks` (doc 05 §6) — the union of every matching rule's contexts, evaluated for the
+       merging actor **regardless of any rule's `bypass` list** (bypass governs direct pushes only; an
+       actor allowed to push still merges only a green head), and
+     - `required-reviews` (doc 04 §6) — approvals are not a push restriction, so that effect keeps its
+       own bypass list and its own gate.
+   Evaluation is pure and local (already-loaded policy per `14_extensibility.md` Seam 3); no network in
+   eval. Unmet required checks on the live head sha reject the merge with the named checks in the
+   narration (`merge refused: required checks not green for <sha>: …`); a merge meant to be blocked by
+   policy is blocked with `required-reviews`/`require_checks`, never by `restricts`.
+   `merge_methods` is enforced with the same read (§5.1): an intersection across matching rules, checked
+   on the request path (`StartMerge`, a synchronous `409 merge method not allowed: "<method>" is not
+   allowed on <ref> by rule '<name>' (allowed: …)`) and again under the task, so a `policy.json` edit
+   between the POST and the task still refuses.
 5. **Publish:** one WAL entry moving `refs/heads/<base>`: `old = <base_sha at start of publish>,
    new = <merge commit>`, carrying the server-made objects with it (issue #424 amendment below: the
    merge commit (+ its tree) exist only in the serving copy, so the task packs `tip --not --all`
@@ -261,6 +279,36 @@ subject to the manifest CAS ladder (doc 05 publish path); a base sha that moved 
 and the task re-plans or fails loudly. No repo lock is held across the git subprocesses (13 §2 rule 4);
 the task holds no `syncMu`/`packMu`/`rw` — it goes through the same `RepoHandle` sync/read-guard path as
 any reader.
+
+### 5.1 Merge methods and up-to-date enforcement (PLAN-V2 §2.2)
+
+Two optional fields inside the existing `protect` effect, additive and merge-only (the push half
+ignores both — a direct push of new commits to the base ref is still allowed under
+`require_up_to_date`, GitHub parity):
+
+```json
+{ "name": "protection:main-push", "match": { "refs": ["refs/heads/main"] },
+  "effect": { "protect": { "require_up_to_date": true, "merge_methods": ["merge", "squash"] } } }
+```
+
+- `require_up_to_date` is a boolean, default false. `merge_methods` is a subset of
+  `merge|squash|rebase`; a null, empty list, duplicate or unknown value is a parse error (fail
+  closed), and an **absent** key means every method (so a rule that omits it never narrows a set).
+- Combination across matching rules: `require_up_to_date` is **all-of** over matching rules the
+  merging actor does not bypass (a rule's `bypass` list exempts that rule's demand, the same per-rule
+  law the push half uses); `merge_methods` is the **intersection** (absent = universe).
+- One resolver, `policy.MergeGateFor`, answers for the merge task (`pulls.loadMergeGate`) and for the
+  PR page's merge box (`internal/webui`), so the methods the page offers and the methods the server
+  accepts cannot drift. The page change is an offer, never the gate: a `POST …/merge` with a
+  forbidden method is refused server-side, and the test family pins that the refusal happens with
+  the page rendering normally.
+- Refusal messages are named (sentinels `pulls.ErrMethodNotAllowed`, `pulls.ErrHeadBehindBase`,
+  both wrapping `ErrConflict` → `409`): `merge method not allowed: "rebase" is not allowed on
+  refs/heads/main by rule 'protection:main-push' (allowed: merge, squash)` and `head is behind base —
+  update the branch first (required on refs/heads/main by rule 'protection:main-push')`.
+- The PR merge box offers only the permitted methods (with a line naming the ruleset when the set is
+  narrowed) and, when a behind head is refused, disables the merge button and renders the
+  update-branch control with the standard hint.
 
 ## 6. Force-push to the PR head branch
 
@@ -415,7 +463,7 @@ Pages (server-rendered by `internal/webui`, `12_web_ui.md` §2 — templates
 | Route | Page | Notes |
 |---|---|---|
 | `/:o/:r/pulls` | PR list (state tabs open/closed/merged, index-first, SSE-invalidating cards) | extends the repo shell tabs |
-| `/:o/:r/pull/{num}` | Conversation: timeline (P3 events), comment box, merge box (strategy select, mergeable state, task progress via htmx/SSE). Forgejo #594: the conversation is read-only while merged/closed — `AddComment` refuses `409` (`ErrLocked`); the composer (`lockState` in `internal/webui/collab.go`, merged wins with "Merged — commenting is locked") and thread replies render disabled-with-reason, new line-thread staging hides, and no reopen control renders for merged PRs. Reopening a closed-but-unmerged PR restores everything with no reload (the page re-reads). | |
+| `/:o/:r/pull/{num}` | Conversation: timeline (P3 events), comment box, merge box (strategy select limited to the base ref's permitted `merge_methods`, mergeable state incl. the `require_up_to_date` blocker + update-branch control, task progress via htmx/SSE). Forgejo #594: the conversation is read-only while merged/closed — `AddComment` refuses `409` (`ErrLocked`); the composer (`lockState` in `internal/webui/collab.go`, merged wins with "Merged — commenting is locked") and thread replies render disabled-with-reason, new line-thread staging hides, and no reopen control renders for merged PRs. Reopening a closed-but-unmerged PR restores everything with no reload (the page re-reads). | |
 | `/:o/:r/pull/{num}/commits` | commits of `base…head` (reuses `commits` page) | |
 | `/:o/:r/pull/{num}/files` | diff view: the Go diff renderer over the diff endpoint's patch, sign-first rows, anchors for review threads | |
 
@@ -432,6 +480,27 @@ through the Go services the SDK wraps).
 > lives in the Go page layer (`internal/webui/*.go` + `internal/webui/templates/**`), and the
 > decision itself is unchanged.
 
+- **Branch protection is edited as named rulesets; the rule-name grammar gains `:` (PLAN-V2 §2.4,
+  2026-11-21).** The Protection settings tab no longer edits one branch rule: it lists named rulesets,
+  each the pair `protection:<slug>-push` + `protection:<slug>-reviews` carrying the same
+  `match.refs`. The engine is unchanged (policy.json already supports N rules); the tab is a
+  presentation + form-shape layer with a **lossless** write — a save replaces only that pair's two
+  rules, preserves every other rule's bytes and every group, and a pair the form cannot express
+  (principal/path scoping, a non-role bypass, a `mode`, mismatched refs, a review rule with no push
+  rule) is shown **read-only** with its reason and refused by the server on save/delete. Pre-ruleset
+  rule names (`protection-push`/`protection-reviews`) read as the ruleset `default`; the first save of
+  that ruleset rewrites them under the new names (the mapping IS the read — no compat branch exists
+  afterwards). Ordering is the document's rule order, moved in ruleset-block units.
+  `ruleNameRe` widens from MASTER_RUST_SPEC's `^[a-z][a-z0-9-]{0,62}$` to
+  `^[a-z][a-z0-9:-]{0,62}$` — additive (every previously legal name stays legal, every existing file
+  still parses; a `:`-named file is rejected by an older reader, the same rolling-upgrade caveat the
+  `require_checks` amendment recorded). A rule name is an opaque string at every use site (metric
+  label, wire rejection text), so nothing else needed changing.
+- **`require_up_to_date`/`merge_methods` are merge-only `protect` fields resolved by ONE function for
+  both the task and the page (PLAN-V2 §2.2, 2026-11-21).** See §5.1. The alternates rejected: a
+  per-request-only check (a policy edit between POST and task would land the forbidden merge), and
+  a page-only reading of the policy (a second interpretation is exactly the drift the shared
+  `policy.MergeGateFor` prevents).
 - **One narrow updater owns the `pr.json` write discipline; whole-doc saves are create-only
   (2026-11-21, supersedes the `reapplyPR` field-merge from issue #64).** Every production writer
   now goes through `Service.updatePR(num, mutate)`: it loads the freshest sidecar, applies only its
@@ -789,6 +858,23 @@ through the Go services the SDK wraps).
   through pulls' `ChecksGate` seam (next to the 04 gate) — the merge
   logic is NOT forked. Nil backend fails closed only when a rule
   actually carries the gate (same rule as the pre-scan kept).
+
+- **FIXED (2026-11-21) — the push/merge split: `protect.restricts` never bans a merge, and
+  `protect.bypass` never exempts one from `require_checks`.** Both halves of the standard team workflow
+  were broken. (a) `runMerge` evaluated `protect` for `(merger, base.ref, update)`, so the exact rule
+  Settings → Branch protection generates when no push role is ticked
+  (`{"protect":{"restricts":["create","update"],"require_checks":[…]}}`) refused every merge with
+  `rejected by rule '<name>'` even on a green head — while the form said merges still land server-side.
+  The merge task now calls `checkMergeTarget` (managed-ref guard + fail-closed policy parse) and does not
+  apply `restricts`; the observation gates decide (checks, reviews). (b) `requiredUnion`
+  (`internal/checks`) dropped rules the merger bypassed, so any actor admitted by the protect gate was
+  exempt from the checks gate; the union is now every matching rule, bypass or not. `required-reviews`
+  keeps its own bypass (a different effect, a different contract — approvals are not a push
+  restriction). Semantics that shifted, deliberately: a protect rule restricting `update` no longer
+  stops merges, and a `bypass` entry no longer weakens the checks gate. Acceptance matrix:
+  `internal/pulls/protection_workflow_test.go` (green→merge, pending→refusal naming the context,
+  bypass actor pushes but stays check-gated, non-bypass push refused by the rule, no-`require_checks`
+  rule unchanged, gate reads the live head sha) plus the updated `internal/checks` gate tests.
 - **First fetch serves `unknown`** (§4 second line of defense): stamp
   mismatch (or miss) serves `unknown` + enqueues `pull-mergeable`; the
   background pass converges the cache and the next fetch serves the stamp
@@ -986,3 +1072,27 @@ through the Go services the SDK wraps).
   true, closed-filter keeps the flag, always-present wire shape) and
   `web/test/unit/pull-list-chip-530.test.js` (chip matrix incl. absent-flag
   old payloads).
+
+- **`PROpener` is a consumer-owned seam for the browser file editor (Feature F, 2026-11-21).**
+  `internal/webedit` opens the PR a proposed branch asks for through its own narrow interface
+  (`webedit.PROpener` with `OpenInput{Title, Body, BaseRef, HeadRef}`), and composition wires
+  `*pulls.Service.OpenPR` to it — the `ChecksGate` house style (law 8): pulls gains no dependency on
+  the editor, and the editor never imports pulls. The PR opens through the same service call a
+  human's `POST …/pulls` uses, gates included. Recorded here as a one-line consumer note, not a
+  change to pulls' behavior.
+- **Moderation block gate (PLAN-V2 M1, 2026-11-21).** `pulls` declares
+  `ModerationGate{BlockedFromRepo}` and consults it in `OpenPR`, `UpdatePR`, `AddComment`,
+  `StartMerge`, `UpdateBranch` and `DeleteHead` after role resolution and before any CAS/ref work. A
+  blocked principal gets `ErrForbidden` with `identity.InteractionRefused`; the message never names
+  the block. `StartFork` is exempt — the plan keeps forks (like stars and watches) outside block
+  semantics. Nil gate = feature off; a gate error fails closed. Contract:
+  `docs/features/16_moderation.md` §3.
+- **Moderation projection and conversation lock (PLAN-V2 M2, 2026-11-21).** `pulls` grows
+  `ModerationGate.Snapshot` (hidden targets + this PR's lock in one read). `GetPR` redacts the
+  timeline event bodies and the **description** — which is the `opened` event (`seq` 0), projected
+  as `description_hidden` with `pr.body` omitted for non-moderators — and exposes `locked`/
+  `lock_reason` plus `ModerationRevision` in the ETag (`.mod<rev>`), so the JSON twin and the page
+  agree and a hide can never be 304'd. `AddComment` consults the lock before any CAS
+  (`ErrLocked`, host admins included). Review bodies and review-thread comments redact in
+  `internal/review` (04's document), reached through the same gate. Contract:
+  `docs/features/16_moderation.md` §10.

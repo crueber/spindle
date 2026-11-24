@@ -131,6 +131,10 @@ const (
 	ReasonSubscribed      = "subscribed"
 	ReasonAuthor          = "author"
 	ReasonTeamMention     = "team_mention"
+	// ReasonModeration is the PLAN-V2 §M.3 report_filed class: it notifies
+	// repo admins and carries no reported content (the row's title is a
+	// generic "new report" line, never a body or note).
+	ReasonModeration = "moderation"
 )
 
 // Notification states (§1.1: the ONLY mutable field is state).
@@ -152,6 +156,9 @@ const (
 	ActionReleasePublished = "release_published"
 	ActionMentioned        = "mentioned"
 	ActionPing             = "ping"
+	// ActionModerationReported is the report_filed activity action
+	// (PLAN-V2 §M.3); it carries no reported content.
+	ActionModerationReported = "report_filed"
 )
 
 // dateTimeFmt is the RFC 3339 UTC wire timestamp (07 §2).
@@ -216,6 +223,11 @@ type Notification struct {
 }
 
 // IndexEntry is one hot-window row of the per-user unread index (§1.2).
+// Actor mirrors the notification object's actor (BUG-4): the tray/page serve
+// from this window, so dropping it here blanked "who acted" for every row.
+// Additive field (14 §14.12 rule 2 / law 5): older index docs decode with
+// Actor "" and those rows keep it until they leave the window — there is no
+// backfill pass, and a row that never knew an actor must not invent one.
 type IndexEntry struct {
 	ID     string `json:"id"`
 	Repo   string `json:"repo"`
@@ -223,6 +235,7 @@ type IndexEntry struct {
 	Kind   string `json:"kind"`
 	Reason string `json:"reason"`
 	Title  string `json:"title"`
+	Actor  string `json:"actor"`
 	State  string `json:"state"`
 	At     string `json:"at"`
 }
@@ -424,6 +437,13 @@ type TeamReader interface {
 // anonymous.
 type Authenticator func(r *http.Request) (auth.Principal, *auth.AuthError)
 
+// BlockGate is the consumer-owned moderation seam notify defines
+// (PLAN-V2 §M.5, the mention filter). It reports whether blocker has
+// blocked subject; satisfied by *moderation.Service. Nil = feature off.
+type BlockGate interface {
+	BlockedBy(ctx context.Context, blocker, subject string) (bool, error)
+}
+
 // Service is the notify store client: fan-out, indexes, activity log,
 // webhooks, SSE buses, tasks, retention. Construct with New; Roles,
 // Profiles, Teams may be nil in tests that exercise pure paths (nil
@@ -461,6 +481,16 @@ type Service struct {
 	// CollabCounts precedent). Wired by composition (cmd/spindle) over
 	// the WAL settings doc; tests substitute a fake.
 	Features func(ctx context.Context, owner, repo string) (config.ResolvedFeatures, bool)
+
+	// Blocks is the consumer-owned moderation seam (PLAN-V2 §M.5): it
+	// reports whether a notification RECIPIENT has blocked the acting
+	// principal. A blocked principal's interaction never notifies the
+	// blocker — mentions included (the plan's mention filter) — and the
+	// filter runs before the activity append, so the overflow fan-out path
+	// cannot reintroduce a suppressed recipient. Nil = feature off. A gate
+	// error drops that ONE recipient (fail closed: silence is the safe
+	// side of a block check) and is logged, never silently swallowed.
+	Blocks BlockGate
 
 	ubus  *userBus
 	rbus  *repoBus
@@ -744,6 +774,34 @@ func (s *Service) getJSON(ctx context.Context, key string) ([]byte, store.Versio
 func (s *Service) putCreate(ctx context.Context, key string, body []byte) error {
 	_, err := store.PutBytes(ctx, s.Store, key, body, store.PutOptions{Mode: store.PutCreate, ContentType: "application/json"})
 	return err
+}
+
+// acquireFanoutSlot takes one slot from a fan-out semaphore, preferring a
+// ready slot over an already-canceled context. A plain
+//
+//	select { case sem <- struct{}{}: case <-ctx.Done(): }
+//
+// has BOTH arms ready whenever the context is already done and a slot is
+// free, and Go picks among ready cases at random — so a canceled caller
+// would take either path per run (harmless here: both count the target
+// failed and skip its store work, but it makes the branch untestable).
+// Taking the slot first makes the cancel path explicit and deterministic:
+// every caller re-checks ctx after acquisition, releases the slot, and
+// reports failure without touching the store (createAll, fanoutOne,
+// resolve, DeliverRepo, DeliverOrg). False means the context ended while
+// every slot was busy.
+func acquireFanoutSlot(ctx context.Context, sem chan struct{}) bool {
+	select {
+	case sem <- struct{}{}:
+		return true
+	default:
+	}
+	select {
+	case sem <- struct{}{}:
+		return true
+	case <-ctx.Done():
+		return false
+	}
 }
 
 // normPrincipal lowercases and trims a principal name for comparison.

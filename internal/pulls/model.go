@@ -35,6 +35,16 @@ var (
 	ErrUnavailable = errors.New("temporarily unavailable")
 	// ErrCorrupt marks an unreadable bucket object (→ 500-class).
 	ErrCorrupt = errors.New("corrupt object")
+	// ErrMethodNotAllowed marks a merge strategy the base ref's policy
+	// forbids (PLAN-V2 §2.2 merge_methods; → 409, naming the allowed set).
+	// A named error, not a bare string: callers and tests match it and the
+	// message keeps the rule that narrowed the set.
+	ErrMethodNotAllowed = errors.New("merge method not allowed")
+	// ErrHeadBehindBase marks a merge refused by require_up_to_date
+	// (PLAN-V2 §2.2): the head does not contain the base tip, so the merge
+	// would land on a stale tree. Also → 409; the PR page's update-branch
+	// control is the fix (the refusal message names it).
+	ErrHeadBehindBase = errors.New("head is behind base — update the branch first")
 )
 
 // statusFor maps a service error onto its HTTP status.
@@ -248,6 +258,10 @@ type Event struct {
 	Source  map[string]any `json:"source,omitempty"`
 	PRNum   *int           `json:"pr_num,omitempty"`
 	Keyword *string        `json:"keyword,omitempty"`
+	// Hidden is the M2 moderation projection hint (never persisted): set by
+	// the read verbs when a moderator hid this body. Body is omitted for
+	// every non-moderator.
+	Hidden *HiddenInfo `json:"hidden,omitempty"`
 	// Merge carries the merge outcome on "merged" events.
 	MergeCommitSHA *string `json:"merge_commit_sha,omitempty"`
 	Strategy       *string `json:"strategy,omitempty"`

@@ -39,7 +39,7 @@ func threadsFixtureRun() *threads.Run {
 func threadsFixtureJob(run *threads.Run) *threads.Job {
 	return &threads.Job{
 		ID: "j-build", RunID: run.ID, Repo: run.Repo, Key: "build", Name: "build",
-		Context: "threads/ci/build", RunsOn: "ubuntu-latest",
+		Context: "threads/ci/build", RunsOn: "linux",
 		Steps: []threads.Step{{Run: "echo build"}},
 		Needs: []string{}, Attempt: 1, Trusted: true, State: threads.JobFailure,
 		CreatedAt: "2026-11-19T11:58:00Z", UpdatedAt: "2026-11-19T12:01:00Z",
@@ -102,7 +102,7 @@ func TestThreadsRunPageRendersJobs(t *testing.T) {
 	wantChrome(t, bodyText(rec), "acme/widgets", "threads")
 	wantContains(t, rec,
 		"threads/ci/build",
-		"ubuntu-latest",
+		"linux",
 		"echo build",
 		".spindle/workflows/ci.yml",
 		"ada",
@@ -456,9 +456,9 @@ func TestThreadsInProgressStateAndDuration(t *testing.T) {
 	list := f.get("/acme/widgets/threads")
 	wantStatus(t, list, http.StatusOK)
 	wantContains(t, list, "1m 12s")
-	// The dot vocabulary carries a distinct in_progress value (amber pulse),
-	// not "pending".
-	if !strings.Contains(bodyText(detail), "animate-pulse") {
+	// The dot vocabulary carries a distinct in_progress value (hollow circle
+	// + pulse via `.dot-progress`), not "pending" (PLAN-THEMES §6.1).
+	if !strings.Contains(bodyText(detail), "dot-progress") {
 		t.Fatal("a running job did not render the in_progress check dot")
 	}
 }
@@ -542,6 +542,7 @@ func TestThreadsDispatchRefusals(t *testing.T) {
 
 // TestRunDotStateVocabulary pins the run-page dot projection for every state.
 func TestRunDotStateVocabulary(t *testing.T) {
+	t.Parallel()
 	for state, want := range map[string]string{
 		threads.RunQueued:    "pending",
 		threads.RunRunning:   "in_progress",
@@ -558,6 +559,7 @@ func TestRunDotStateVocabulary(t *testing.T) {
 
 // TestDurationText pins the compact duration renderer used by the run page.
 func TestDurationText(t *testing.T) {
+	t.Parallel()
 	for seconds, want := range map[int64]string{
 		0: "", -3: "", 5: "5s", 59: "59s", 60: "1m 00s", 72: "1m 12s",
 		3599: "59m 59s", 3600: "1h 00m", 7322: "2h 02m",

@@ -23,8 +23,10 @@ package workflow
 import (
 	"errors"
 	"fmt"
+	"net/url"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
 
@@ -118,6 +120,9 @@ func (t *Triggers) UnmarshalYAML(node *yaml.Node) error {
 					if err = checkKeys(val, "branches", "types"); err == nil {
 						var p PRTrigger
 						if err = val.Decode(&p); err == nil {
+							err = validatePRTypes(p.Types)
+						}
+						if err == nil {
 							t.PullRequest = &p
 						}
 					}
@@ -179,12 +184,34 @@ type PushTrigger struct {
 	Tags     []string `yaml:"tags"`
 }
 
-// PRTrigger may filter the target branches.
+// PRTrigger may filter the target branches and the lifecycle actions.
 type PRTrigger struct {
 	Branches []string `yaml:"branches"`
-	// Types is accepted and carried; v1 fires on opened/synchronize/reopened
-	// only (15_threads.md §1) and does not filter by type yet.
+	// Types filters the pull_request lifecycle actions. The vocabulary is
+	// closed: only the actions the pulls service actually emits can be named
+	// (PullRequestTypes). An absent or empty filter fires on every emitted
+	// action; a named filter fires only on the listed ones, so `types:
+	// [closed]` must be a parse error rather than a workflow that can never
+	// run (15_threads.md §3.2, §6.2).
 	Types []string `yaml:"types"`
+}
+
+// PullRequestTypes is the closed set of pull_request lifecycle actions Threads
+// can emit, in emission order. The pulls service emits exactly these through
+// its PullEvents seam (internal/pulls/pulls.go PullEvent): opened, synchronize
+// (an applied new head commit) and reopened. A close never starts work and no
+// label event exists, so `closed`/`labeled` are rejected at parse time instead
+// of being accepted and ignored.
+var PullRequestTypes = []string{"opened", "synchronize", "reopened"}
+
+// ValidPullRequestType reports whether action is one Threads can emit.
+func ValidPullRequestType(action string) bool {
+	for _, t := range PullRequestTypes {
+		if t == action {
+			return true
+		}
+	}
+	return false
 }
 
 // DispatchTrigger is the manual trigger. Inputs are the typed
@@ -429,12 +456,79 @@ type Strategy struct {
 	FailFast *bool  `yaml:"fail-fast"`
 }
 
+// Environment is a job's deployment environment
+// (`jobs.<key>.environment`, docs/PLAN-THREADS-ENVIRONMENTS.md): a bare name
+// or `{name, url}`. The name is validated here (it is a bucket key segment);
+// whether the environment exists and who must approve it is the repository's
+// stored environment record, resolved by the server at run creation.
+type Environment struct {
+	Name string `yaml:"name"`
+	// URL is the deployment URL a run page renders. Only absolute http(s)
+	// URLs are accepted: a page renders it as a link, so a scheme the page
+	// could execute is this file's parse error.
+	URL string `yaml:"url"`
+}
+
+// EnvironmentNameRe pins an environment name: it is a bucket key segment and
+// a URL path segment.
+var EnvironmentNameRe = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$`)
+
+// UnmarshalYAML accepts the scalar name and the mapping form.
+func (e *Environment) UnmarshalYAML(node *yaml.Node) error {
+	switch node.Kind {
+	case yaml.ScalarNode:
+		if isNull(node) {
+			return nil
+		}
+		e.Name = node.Value
+		return nil
+	case yaml.MappingNode:
+		if err := checkKeys(node, "name", "url"); err != nil {
+			return err
+		}
+		var raw struct {
+			Name string `yaml:"name"`
+			URL  string `yaml:"url"`
+		}
+		if err := node.Decode(&raw); err != nil {
+			return err
+		}
+		e.Name, e.URL = raw.Name, raw.URL
+		return nil
+	default:
+		return fmt.Errorf("environment: expected a name or a mapping")
+	}
+}
+
+// Validate checks one environment declaration.
+func (e *Environment) Validate(job string) error {
+	if e == nil {
+		return nil
+	}
+	name := strings.TrimSpace(e.Name)
+	if !EnvironmentNameRe.MatchString(name) {
+		return fmt.Errorf("%w: job %s environment %q must match [A-Za-z0-9][A-Za-z0-9._-]{0,63}",
+			ErrBadEnvironment, job, e.Name)
+	}
+	if u := strings.TrimSpace(e.URL); u != "" {
+		parsed, err := url.Parse(u)
+		if err != nil || (parsed.Scheme != "http" && parsed.Scheme != "https") || parsed.Host == "" {
+			return fmt.Errorf("%w: job %s environment %s url %q must be an absolute http(s) URL",
+				ErrBadEnvironment, job, name, e.URL)
+		}
+	}
+	return nil
+}
+
 // Job is one unit of work. Steps run inside `Container` (or the runner's
 // default image) on one workspace. A job-level `uses` names a reusable
 // workflow instead of steps; it is accepted and carried, execution is pass B/C.
 type Job struct {
-	Name            string             `yaml:"name"`
-	RunsOn          Labels             `yaml:"runs-on"`
+	Name   string `yaml:"name"`
+	RunsOn Labels `yaml:"runs-on"`
+	// Environment is the deployment environment this job targets (nil when the
+	// job names none: an ordinary job is unchanged).
+	Environment     *Environment       `yaml:"environment"`
 	Container       *Container         `yaml:"container"`
 	Services        map[string]Service `yaml:"services"`
 	Env             map[string]string  `yaml:"env"`
@@ -443,6 +537,11 @@ type Job struct {
 	If              string             `yaml:"if"`
 	TimeoutMinutes  int                `yaml:"timeout-minutes"`
 	ContinueOnError bool               `yaml:"continue-on-error"`
+	// Outputs are the job's declared output templates
+	// (`name: ${{ steps.<id>.outputs.<x> }}`), evaluated by the runner once the
+	// steps finish and reported on complete (docs/threads.md §3.9). A dependent
+	// job reads them as `needs.<job>.outputs.<name>`.
+	Outputs map[string]string `yaml:"outputs"`
 	// Reusable workflow (accepted and carried; no runs-on/steps required).
 	Uses string            `yaml:"uses"`
 	With map[string]string `yaml:"with"`
@@ -465,6 +564,11 @@ type Service struct {
 
 // Step is one command or built-in action.
 type Step struct {
+	// ID is the step's `id:` (GitHub's `steps.<id>` key). It must be a
+	// GitHub-style identifier and unique within its job; the runner records
+	// the step's outcome/conclusion under it so a later step's `if:` can read
+	// `steps.<id>.outcome`.
+	ID               string            `yaml:"id"`
 	Name             string            `yaml:"name"`
 	Run              string            `yaml:"run"`
 	Uses             string            `yaml:"uses"`
@@ -479,14 +583,17 @@ type Step struct {
 
 // Errors returned by Parse. They are values so tests and the UI can match.
 var (
-	ErrEmpty      = errors.New("workflow: empty file")
-	ErrNoJobs     = errors.New("workflow: no jobs")
-	ErrNoSteps    = errors.New("workflow: job has no steps")
-	ErrNoRunsOn   = errors.New("workflow: job has no runs-on")
-	ErrBothStep   = errors.New("workflow: step has both run and uses")
-	ErrNoStepVerb = errors.New("workflow: step has neither run nor uses")
-	ErrBadNeeds   = errors.New("workflow: needs names an unknown job")
-	ErrCycle      = errors.New("workflow: job dependencies form a cycle")
+	ErrEmpty          = errors.New("workflow: empty file")
+	ErrNoJobs         = errors.New("workflow: no jobs")
+	ErrNoSteps        = errors.New("workflow: job has no steps")
+	ErrNoRunsOn       = errors.New("workflow: job has no runs-on")
+	ErrBothStep       = errors.New("workflow: step has both run and uses")
+	ErrNoStepVerb     = errors.New("workflow: step has neither run nor uses")
+	ErrBadNeeds       = errors.New("workflow: needs names an unknown job")
+	ErrBadStepID      = errors.New("workflow: invalid step id")
+	ErrBadOutput      = errors.New("workflow: invalid job outputs")
+	ErrBadEnvironment = errors.New("workflow: invalid environment")
+	ErrCycle          = errors.New("workflow: job dependencies form a cycle")
 )
 
 // Parse decodes and validates one workflow file.
@@ -513,8 +620,20 @@ func Parse(src []byte) (*Workflow, error) {
 	if err := validateDispatch(w.On.WorkflowDispatch); err != nil {
 		return nil, err
 	}
+	// Concurrency groups are expanded into bucket keys (the lock that decides
+	// which run executes), so a reference that would not resolve is THIS file's
+	// parse error — never a literal fallback (round-2 audit; 15 §4).
+	inputNames := dispatchInputNames(w.On.WorkflowDispatch)
+	if w.Concurrency != nil {
+		if err := ValidateGroupTemplate(w.Concurrency.Group, nil, inputNames, true); err != nil {
+			return nil, fmt.Errorf("workflow: %w", err)
+		}
+	}
 	for name, job := range w.Jobs {
 		reusable := strings.TrimSpace(job.Uses) != ""
+		if err := job.Environment.Validate(name); err != nil {
+			return nil, err
+		}
 		if !reusable {
 			if len(job.RunsOn) == 0 {
 				return nil, fmt.Errorf("%w: %s", ErrNoRunsOn, name)
@@ -523,6 +642,10 @@ func Parse(src []byte) (*Workflow, error) {
 				return nil, fmt.Errorf("%w: %s", ErrNoSteps, name)
 			}
 		}
+		stepIDs := map[string]bool{}
+		// declared grows in step order: a step may only read outputs of an
+		// earlier step (docs/threads.md §3.9).
+		declared := make([]string, 0, len(job.Steps))
 		for i, step := range job.Steps {
 			if step.Run != "" && step.Uses != "" {
 				return nil, fmt.Errorf("%w: %s step %d", ErrBothStep, name, i+1)
@@ -530,10 +653,27 @@ func Parse(src []byte) (*Workflow, error) {
 			if step.Run == "" && step.Uses == "" {
 				return nil, fmt.Errorf("%w: %s step %d", ErrNoStepVerb, name, i+1)
 			}
+			if err := checkStepID(name, i, step.ID, stepIDs); err != nil {
+				return nil, err
+			}
+			if err := validateStepFieldRefs(name, i, step, job.Needs, declared); err != nil {
+				return nil, err
+			}
+			if step.ID != "" {
+				declared = append(declared, strings.ToLower(step.ID))
+			}
+		}
+		if err := validateJobOutputs(name, job, inputNames, strategyAxes(job.Strategy)); err != nil {
+			return nil, err
 		}
 		for _, need := range job.Needs {
 			if _, ok := w.Jobs[need]; !ok {
 				return nil, fmt.Errorf("%w: %s needs %s", ErrBadNeeds, name, need)
+			}
+		}
+		if job.Concurrency != nil {
+			if err := ValidateGroupTemplate(job.Concurrency.Group, strategyAxes(job.Strategy), inputNames, false); err != nil {
+				return nil, fmt.Errorf("workflow: job %s: %w", name, err)
 			}
 		}
 	}
@@ -541,6 +681,34 @@ func Parse(src []byte) (*Workflow, error) {
 		return nil, err
 	}
 	return &w, nil
+}
+
+// checkStepID validates one step's `id:` (GitHub-style: letters, digits, `_`
+// and `-`, not starting with a digit) and rejects a duplicate within the same
+// job. An empty id is the common case and always fine.
+func checkStepID(job string, index int, id string, seen map[string]bool) error {
+	if id == "" {
+		return nil
+	}
+	for i, r := range id {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r == '_', r == '-':
+		case r >= '0' && r <= '9':
+			if i == 0 {
+				return fmt.Errorf("%w: job %s step %d: %q starts with a digit", ErrBadStepID, job, index+1, id)
+			}
+		default:
+			return fmt.Errorf("%w: job %s step %d: %q must contain only letters, digits, _ and -", ErrBadStepID, job, index+1, id)
+		}
+	}
+	// GitHub treats step ids case-insensitively in `steps.<id>`; a duplicate
+	// that only differs in case would make one of the two unreachable.
+	key := strings.ToLower(id)
+	if seen[key] {
+		return fmt.Errorf("%w: job %s: duplicate step id %q", ErrBadStepID, job, id)
+	}
+	seen[key] = true
+	return nil
 }
 
 // validateDispatch checks the typed workflow_dispatch inputs (v1 types:
@@ -561,6 +729,37 @@ func validateDispatch(d *DispatchTrigger) error {
 		}
 	}
 	return nil
+}
+
+// dispatchInputNames lists the declared workflow_dispatch input names, sorted
+// (the names a `${{ inputs.… }}` reference may use).
+func dispatchInputNames(d *DispatchTrigger) []string {
+	if d == nil || len(d.Inputs) == 0 {
+		return nil
+	}
+	out := make([]string, 0, len(d.Inputs))
+	for name := range d.Inputs {
+		out = append(out, name)
+	}
+	sort.Strings(out)
+	return out
+}
+
+// strategyAxes lists a strategy's usable matrix axes, sorted (an empty axis
+// contributes no cell, so it is not a declared axis).
+func strategyAxes(s *Strategy) []string {
+	if s == nil || len(s.Matrix) == 0 {
+		return nil
+	}
+	out := make([]string, 0, len(s.Matrix))
+	for axis, vals := range s.Matrix {
+		if len(vals) == 0 {
+			continue
+		}
+		out = append(out, axis)
+	}
+	sort.Strings(out)
+	return out
 }
 
 // ParseFile reads and parses one workflow file.
@@ -591,8 +790,12 @@ func Files(root string) ([]string, error) {
 
 // Fires reports whether the workflow triggers on an event. event is one of
 // "push", "pull_request", "workflow_dispatch"; schedule is handled by the
-// scheduler. branch may be empty (no filter applies).
-func (w *Workflow) Fires(event, branch string) bool {
+// scheduler. branch may be empty (no filter applies). action is the
+// pull_request lifecycle action the caller is delivering (opened, synchronize,
+// reopened) and is ignored by the other events; a pull_request event with no
+// recorded action matches only an unfiltered trigger, because a `types` filter
+// can only be decided from a known action.
+func (w *Workflow) Fires(event, branch, action string) bool {
 	switch event {
 	case "push":
 		if w.On.Push == nil && !w.On.PushSet {
@@ -609,7 +812,10 @@ func (w *Workflow) Fires(event, branch string) bool {
 		if w.On.PullRequest == nil {
 			return true // `pull_request:` with no filters: every target branch
 		}
-		return matchAny(w.On.PullRequest.Branches, branch)
+		if !matchAny(w.On.PullRequest.Branches, branch) {
+			return false
+		}
+		return matchPRType(w.On.PullRequest.Types, action)
 	case "workflow_dispatch":
 		return w.On.DispatchSet
 	case "schedule":
@@ -640,6 +846,38 @@ func (w *Workflow) Events() []string {
 		out = append(out, "schedule")
 	}
 	return out
+}
+
+// validatePRTypes closes the pull_request `types` vocabulary. A type Threads
+// never emits would make the trigger silently dead, so it is this file's parse
+// error naming the supported set. An empty list is rejected for the same
+// reason: it matches nothing.
+func validatePRTypes(types []string) error {
+	if len(types) == 0 && types != nil {
+		return fmt.Errorf("pull_request.types: an empty list matches no action; omit `types` to fire on every emitted action")
+	}
+	for _, t := range types {
+		if !ValidPullRequestType(t) {
+			return fmt.Errorf("pull_request.types: unsupported type %q (supported: %s)", t,
+				strings.Join(PullRequestTypes, ", "))
+		}
+	}
+	return nil
+}
+
+// matchPRType applies a validated `types` filter. An absent filter matches
+// every emitted action; a present one matches only the listed actions, so an
+// unknown/empty action never satisfies a filter.
+func matchPRType(types []string, action string) bool {
+	if len(types) == 0 {
+		return true
+	}
+	for _, t := range types {
+		if t == action && action != "" {
+			return true
+		}
+	}
+	return false
 }
 
 // matchAny implements the simple glob set CI authors expect: exact names and

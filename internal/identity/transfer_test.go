@@ -2,13 +2,16 @@ package identity
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/crueber/spindle/internal/config"
 	"github.com/crueber/spindle/internal/server/auth"
 	"github.com/crueber/spindle/internal/store"
+	"github.com/crueber/spindle/internal/wal"
 )
 
 // seedTransferRepo marks owner/repo as an existing repo with one payload
@@ -376,10 +379,21 @@ func TestDeleteOrgNamesTransfer(t *testing.T) {
 
 // --- handler ---------------------------------------------------------------
 
-func transferHandlerFixture(t *testing.T) (*Service, context.Context) {
+// transferFix is a service with the REAL task table wired, so handler tests
+// exercise the shipped path (202 + record) rather than a synchronous stub.
+type transferFix struct {
+	svc *Service
+	reg *wal.Registry
+	ctx context.Context
+}
+
+func newTransferFix(t *testing.T) *transferFix {
 	t.Helper()
 	s := testService()
 	ctx := context.Background()
+	reg := wal.NewRegistry(context.Background(), s.Store, config.Defaults())
+	t.Cleanup(reg.Close)
+	s.Tasks = reg.Tasks()
 	if _, err := s.CreateOrg(ctx, "acme", "A", "", "alice@example.com"); err != nil {
 		t.Fatal(err)
 	}
@@ -394,100 +408,145 @@ func transferHandlerFixture(t *testing.T) (*Service, context.Context) {
 		[]AccessBinding{{Subject: "user:alice@example.com", Role: RoleAdmin}}); err != nil {
 		t.Fatal(err)
 	}
-	return s, ctx
+	return &transferFix{svc: s, reg: reg, ctx: ctx}
+}
+
+// startTransfer POSTs the move and returns the decoded response.
+func startTransfer(t *testing.T, f *transferFix, h *Handler, path, body string) (int, map[string]any, string) {
+	t.Helper()
+	w := doReq(h, "POST", path, body)
+	var out map[string]any
+	if w.Code == 202 {
+		if err := json.Unmarshal(w.Body.Bytes(), &out); err != nil {
+			t.Fatalf("202 body is not JSON: %v (%s)", err, w.Body.String())
+		}
+	}
+	id, _ := out["task_id"].(string)
+	return w.Code, out, id
+}
+
+// waitTask polls the task record to its terminal state and returns it.
+func waitTask(t *testing.T, f *transferFix, id string) *wal.TaskRecord {
+	t.Helper()
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		if rec := f.reg.Tasks().Get(id); rec != nil && rec.Finished != "" {
+			return rec
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	t.Fatalf("task %s did not finish", id)
+	return nil
 }
 
 func TestTransferHandler(t *testing.T) {
 	newH := func(s *Service, p auth.Principal) *Handler { return testHandler(s, p) }
-	t.Run("happy path owner to org", func(t *testing.T) {
-		s, _ := transferHandlerFixture(t)
-		w := doReq(newH(s, alice), "POST", "/acme/r1/api/transfer", `{"owner":"beta"}`)
-		if w.Code != 201 {
-			t.Fatalf("POST transfer = %d (%s), want 201", w.Code, w.Body.String())
+	t.Run("owner to org starts a task", func(t *testing.T) {
+		f := newTransferFix(t)
+		code, out, id := startTransfer(t, f, newH(f.svc, alice), "/acme/r1/api/transfer", `{"owner":"beta"}`)
+		if code != 202 {
+			t.Fatalf("POST transfer = %d, want 202", code)
 		}
-		if got := w.Body.String(); !strings.Contains(got, `"repo":"r1"`) || !strings.Contains(got, `"owner":"beta"`) {
-			t.Errorf("201 must name the new address: %s", got)
+		if out["owner"] != "beta" || out["repo"] != "r1" || id == "" {
+			t.Fatalf("202 body must name the address and the task: %v", out)
+		}
+		rec := waitTask(t, f, id)
+		if rec.OK == nil || !*rec.OK {
+			t.Fatalf("task must end ok: %+v", rec)
+		}
+		if len(rec.LogTail) == 0 {
+			t.Fatal("task record must carry narration")
+		}
+		if _, _, err := store.GetBytes(context.Background(), f.svc.Store, "repos/beta/r1/"+manifestName, store.GetOptions{}); err != nil {
+			t.Errorf("destination must exist after the terminal ok: %v", err)
 		}
 	})
 	t.Run("rename in flight", func(t *testing.T) {
-		s, _ := transferHandlerFixture(t)
-		w := doReq(newH(s, alice), "POST", "/acme/r1/api/transfer", `{"owner":"beta","repo":"r2"}`)
-		if w.Code != 201 {
-			t.Fatalf("POST transfer = %d (%s), want 201", w.Code, w.Body.String())
+		f := newTransferFix(t)
+		code, _, id := startTransfer(t, f, newH(f.svc, alice), "/acme/r1/api/transfer", `{"owner":"beta","repo":"r2"}`)
+		if code != 202 {
+			t.Fatalf("POST transfer = %d, want 202", code)
 		}
-		if _, _, err := store.GetBytes(context.Background(), s.Store, "repos/beta/r2/"+manifestName, store.GetOptions{}); err != nil {
+		waitTask(t, f, id)
+		if _, _, err := store.GetBytes(context.Background(), f.svc.Store, "repos/beta/r2/"+manifestName, store.GetOptions{}); err != nil {
 			t.Errorf("renamed destination must exist: %v", err)
 		}
 	})
 	t.Run("browser lane", func(t *testing.T) {
-		s, _ := transferHandlerFixture(t)
-		w := doReq(newH(s, alice), "POST", "/acme/r1/api-browser/transfer", `{"owner":"beta"}`)
-		if w.Code != 201 {
-			t.Fatalf("browser lane = %d (%s), want 201", w.Code, w.Body.String())
+		f := newTransferFix(t)
+		code, _, id := startTransfer(t, f, newH(f.svc, alice), "/acme/r1/api-browser/transfer", `{"owner":"beta"}`)
+		if code != 202 {
+			t.Fatalf("browser lane = %d, want 202", code)
 		}
+		waitTask(t, f, id)
 	})
 	t.Run("anonymous is 401", func(t *testing.T) {
-		s, _ := transferHandlerFixture(t)
-		if w := doReq(newH(s, anon), "POST", "/acme/r1/api/transfer", `{"owner":"beta"}`); w.Code != 401 {
+		f := newTransferFix(t)
+		if w := doReq(newH(f.svc, anon), "POST", "/acme/r1/api/transfer", `{"owner":"beta"}`); w.Code != 401 {
 			t.Errorf("anon = %d, want 401", w.Code)
 		}
 	})
 	t.Run("non-admin is 403", func(t *testing.T) {
-		s, _ := transferHandlerFixture(t)
-		if w := doReq(newH(s, stranger), "POST", "/acme/r1/api/transfer", `{"owner":"beta"}`); w.Code != 403 {
+		f := newTransferFix(t)
+		if w := doReq(newH(f.svc, stranger), "POST", "/acme/r1/api/transfer", `{"owner":"beta"}`); w.Code != 403 {
 			t.Errorf("stranger = %d, want 403", w.Code)
 		}
 	})
 	t.Run("foreign destination is 403", func(t *testing.T) {
-		s, _ := transferHandlerFixture(t)
-		if w := doReq(newH(s, alice), "POST", "/acme/r1/api/transfer", `{"owner":"solo"}`); w.Code != 403 {
-			t.Errorf("foreign org = %d (%s), want 403", w.Code, w.Body.String())
+		f := newTransferFix(t)
+		if w := doReq(newH(f.svc, alice), "POST", "/acme/r1/api/transfer", `{"owner":"solo"}`); w.Code != 403 {
+			t.Errorf("foreign org = %d, want 403", w.Code)
 		}
 	})
 	t.Run("host admin bypasses admission", func(t *testing.T) {
-		s, _ := transferHandlerFixture(t)
-		if w := doReq(newH(s, admin), "POST", "/acme/r1/api/transfer", `{"owner":"solo"}`); w.Code != 201 {
-			t.Errorf("admin = %d (%s), want 201", w.Code, w.Body.String())
+		f := newTransferFix(t)
+		code, _, id := startTransfer(t, f, newH(f.svc, admin), "/acme/r1/api/transfer", `{"owner":"solo"}`)
+		if code != 202 {
+			t.Errorf("admin = %d, want 202", code)
 		}
+		waitTask(t, f, id)
 	})
 	t.Run("unknown source is 404", func(t *testing.T) {
-		s, _ := transferHandlerFixture(t)
-		if w := doReq(newH(s, admin), "POST", "/acme/ghost/api/transfer", `{"owner":"beta"}`); w.Code != 404 {
+		f := newTransferFix(t)
+		if w := doReq(newH(f.svc, admin), "POST", "/acme/ghost/api/transfer", `{"owner":"beta"}`); w.Code != 404 {
 			t.Errorf("ghost = %d, want 404", w.Code)
 		}
 	})
 	t.Run("occupied destination is 409", func(t *testing.T) {
-		s, _ := transferHandlerFixture(t)
-		seedRepo(t, s, "beta", "r1")
-		if w := doReq(newH(s, alice), "POST", "/acme/r1/api/transfer", `{"owner":"beta"}`); w.Code != 409 {
+		f := newTransferFix(t)
+		seedRepo(t, f.svc, "beta", "r1")
+		if w := doReq(newH(f.svc, alice), "POST", "/acme/r1/api/transfer", `{"owner":"beta"}`); w.Code != 409 {
 			t.Errorf("occupied = %d (%s), want 409", w.Code, w.Body.String())
 		}
 	})
 	t.Run("bad body is 400", func(t *testing.T) {
-		s, _ := transferHandlerFixture(t)
-		if w := doReq(newH(s, alice), "POST", "/acme/r1/api/transfer", `{"owner":""}`); w.Code != 400 {
+		f := newTransferFix(t)
+		if w := doReq(newH(f.svc, alice), "POST", "/acme/r1/api/transfer", `{"owner":""}`); w.Code != 400 {
 			t.Errorf("empty owner = %d, want 400", w.Code)
 		}
-		if w := doReq(newH(s, alice), "POST", "/acme/r1/api/transfer", `{"owner":"beta","repo":"bad repo!"}`); w.Code != 400 {
+		if w := doReq(newH(f.svc, alice), "POST", "/acme/r1/api/transfer", `{"owner":"beta","repo":"bad repo!"}`); w.Code != 400 {
 			t.Errorf("bad repo = %d, want 400", w.Code)
 		}
-		if w := doReq(newH(s, alice), "POST", "/acme/r1/api/transfer", `{oops`); w.Code != 400 {
+		if w := doReq(newH(f.svc, alice), "POST", "/acme/r1/api/transfer", `{oops`); w.Code != 400 {
 			t.Errorf("bad json = %d, want 400", w.Code)
 		}
 	})
 	t.Run("method gate", func(t *testing.T) {
-		s, _ := transferHandlerFixture(t)
-		if w := doReq(newH(s, alice), "GET", "/acme/r1/api/transfer", ""); w.Code != 405 {
+		f := newTransferFix(t)
+		if w := doReq(newH(f.svc, alice), "GET", "/acme/r1/api/transfer", ""); w.Code != 405 {
 			t.Errorf("GET = %d, want 405", w.Code)
 		}
 	})
 	t.Run("self transfer to own namespace", func(t *testing.T) {
-		s, _ := transferHandlerFixture(t)
-		w := doReq(newH(s, alice), "POST", "/acme/r1/api/transfer", `{"owner":"alice@example.com"}`)
-		if w.Code != 201 {
-			t.Fatalf("self-namespace = %d (%s), want 201", w.Code, w.Body.String())
+		f := newTransferFix(t)
+		code, _, id := startTransfer(t, f, newH(f.svc, alice), "/acme/r1/api/transfer", `{"owner":"alice@example.com"}`)
+		if code != 202 {
+			t.Fatalf("self-namespace = %d, want 202", code)
 		}
-		doc, _, err := s.GetAccess(context.Background(), "alice@example.com", "r1")
+		if rec := waitTask(t, f, id); rec.OK == nil || !*rec.OK {
+			t.Fatalf("self transfer must succeed: %+v", rec)
+		}
+		doc, _, err := f.svc.GetAccess(context.Background(), "alice@example.com", "r1")
 		if err != nil {
 			t.Fatal(err)
 		}

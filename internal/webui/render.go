@@ -11,6 +11,8 @@ import (
 	"log"
 	"net/http"
 	"net/url"
+	"reflect"
+	"regexp"
 	"strings"
 
 	"github.com/crueber/spindle/internal/httpsec"
@@ -28,14 +30,16 @@ type Chrome struct {
 	Principal auth.Principal
 	Version   string
 
-	Mode       string
 	SignedIn   bool
 	Admin      bool
 	ShowLogin  bool
 	LoginHref  string
 	ShowCreate bool
-	ShowSetup  bool
-	Initials   string
+	// ShowAdmin is the site-nav Administration link: present when the visitor
+	// can actually use the area (open mode, or a signed-in host admin), hidden
+	// otherwise — never shown-then-403'd (the org-tabs precedent).
+	ShowAdmin bool
+	Initials  string
 }
 
 // PageData is what a page template receives: {{.Chrome}} plus {{.Data}}.
@@ -54,29 +58,27 @@ type PageData struct {
 // chrome builds the layout model from the principal (the server-side
 // equivalent of web/src/lib/identity.js navModel).
 func (s *Server) chrome(r *http.Request, p auth.Principal, title string) Chrome {
-	mode := s.authMode()
 	signedIn := s.signedIn(p)
 	return Chrome{
 		Title:     title,
 		Path:      r.URL.Path,
 		Principal: p,
 		Version:   s.env.Version,
-		Mode:      mode,
 		SignedIn:  signedIn,
 		Admin:     p.Admin,
-		// The browser login exists for the OIDC flow and for token mode's
-		// token-paste form (F1); auth none has no account to sign in to.
-		ShowLogin: !signedIn && (mode == "oidc" || s.tokenSignInEnabled()),
+		// OIDC is the only authentication and boot validation guarantees the
+		// login trio, so the sign-in affordance is always the OIDC entry.
+		ShowLogin: !signedIn,
 		LoginHref: "/_auth/login?next=" + url.QueryEscape(r.URL.Path),
 		// Forgejo #466: the create button shares the identity gate.
 		ShowCreate: signedIn,
 		// Forgejo #371: keys/invitations are per-principal surfaces and live
 		// ONLY in the identity menu (an anonymous viewer has nothing to manage
-		// there), never in the primary nav. Setup stays in the nav for exactly
-		// the first-run/unsecured case: no signed-in principal and an auth mode
-		// that cannot mint one ("" or "none"), so a fresh instance can be
-		// configured; otherwise a signed-in admin reaches /setup from the menu.
-		ShowSetup: !signedIn && (mode == "" || mode == "none"),
+		// there), never in the primary nav. The Administration link follows the
+		// area's real access rule (PLAN-ADMIN §1.2): a signed-in host admin, or
+		// the restricted boot (where /admin is the only surface anyway). That
+		// is exactly "can use it", so no visitor is offered a link that 403s.
+		ShowAdmin: p.Admin,
 		Initials:  initials(p.Name),
 	}
 }
@@ -126,6 +128,7 @@ func (s *Server) render(w http.ResponseWriter, r *http.Request, status int, name
 		fail(w, r, http.StatusInternalServerError, "page template missing: "+name)
 		return
 	}
+	data = projectPrimary(t, data)
 	var buf bytes.Buffer
 	if err := t.ExecuteTemplate(&buf, "base", data); err != nil {
 		// A template failure must not recurse into the error page (which is
@@ -140,8 +143,12 @@ func (s *Server) render(w http.ResponseWriter, r *http.Request, status int, name
 	h := w.Header()
 	httpsec.Apply(h)
 	h.Set("Content-Type", "text/html; charset=utf-8")
-	// Authenticated page bodies must never enter a shared cache.
-	h.Set("Cache-Control", "no-cache, private")
+	// Authenticated page bodies must never enter a shared cache. A page that
+	// owns a tighter class (the audit viewer's no-store) sets it before the
+	// render and keeps it.
+	if h.Get("Cache-Control") == "" {
+		h.Set("Cache-Control", "no-cache, private")
+	}
 	h.Set("ETag", etag)
 	if inm := r.Header.Get("If-None-Match"); inm != "" && strings.Contains(inm, etag) {
 		w.WriteHeader(http.StatusNotModified)
@@ -158,39 +165,97 @@ func (s *Server) page(w http.ResponseWriter, r *http.Request, p auth.Principal, 
 	s.pageRepo(w, r, p, nil, status, name, title, data)
 }
 
+// classAttrRe finds every class attribute in a rendered fragment; the one
+// primary rule counts button nodes, so token membership (not substring order)
+// decides whether a node is `.btn.primary`.
+var classAttrRe = regexp.MustCompile(`class="([^"]*)"`)
+
+// countPrimaryButtons counts `.btn.primary` nodes in rendered HTML. It is the
+// renderer's own reading of the page, shared with the tests so the rule cannot
+// be satisfied by the source and broken by a conditional branch.
+func countPrimaryButtons(body []byte) int {
+	n := 0
+	for _, m := range classAttrRe.FindAllSubmatch(body, -1) {
+		var btn, primary bool
+		for _, tok := range strings.Fields(string(m[1])) {
+			switch tok {
+			case "btn":
+				btn = true
+			case "primary":
+				primary = true
+			}
+		}
+		if btn && primary {
+			n++
+		}
+	}
+	return n
+}
+
+// repoChromeOf finds the repository chrome a page renders. The layout owns it
+// for collab/form pages (PageData.Repo); the repo group's own templates carry
+// it inside their content, as the `Repo *RepoChrome` field of their page data
+// (12_web_ui.md §2.2.1). One lookup covers both shapes.
+func repoChromeOf(d PageData) *RepoChrome {
+	if d.Repo != nil {
+		return d.Repo
+	}
+	rv := reflect.ValueOf(d.Data)
+	for rv.Kind() == reflect.Pointer || rv.Kind() == reflect.Interface {
+		if rv.IsNil() {
+			return nil
+		}
+		rv = rv.Elem()
+	}
+	if rv.Kind() != reflect.Struct {
+		return nil
+	}
+	f := rv.FieldByName("Repo")
+	if !f.IsValid() || f.Kind() != reflect.Pointer || f.IsNil() {
+		return nil
+	}
+	c, _ := f.Interface().(*RepoChrome)
+	return c
+}
+
+// projectPrimary applies style-guideline F3 in ONE place: the masthead Clone
+// is the page's primary action exactly when the page body renders none of its
+// own. It probes the content template with Clone demoted, counts the page's
+// own `.btn.primary` nodes, and promotes Clone only when that count is zero —
+// so conditional CTAs (a held run's approve, a commit's Create tag, a signed
+// out issue's absent composer) need no per-page list and no handler flags.
+// A page that still renders two primaries of its own is a template bug the
+// one-primary matrix test catches; the probe never invents an action.
+func projectPrimary(t *template.Template, d PageData) PageData {
+	c := repoChromeOf(d)
+	if c == nil {
+		return d
+	}
+	content := t.Lookup("content")
+	if content == nil {
+		return d
+	}
+	c.ClonePrimary = false
+	var buf bytes.Buffer
+	if err := content.Execute(&buf, d); err != nil {
+		// The full render reports the same error with the template detail.
+		return d
+	}
+	c.ClonePrimary = countPrimaryButtons(buf.Bytes()) == 0
+	return d
+}
+
 // pageRepo renders a repo-scoped page: the same layout model plus the shared
 // repository chrome (masthead + tab strip), which the layout places above the
 // page's own content. It is the ONE attach point — a group never re-renders
 // the header itself (12_web_ui.md §2.2.1). chrome must already be gated: build
 // it with repoChromeFor/repoChromeFrom AFTER the handler's own read gate ran.
 //
-// F3 (one amber primary): when the page template renders its own primary body
-// action, the masthead Clone is demoted to a secondary .btn so the accent is
-// unique. A page with no body action (Code, tags, commits, …) keeps Clone
-// primary.
+// F3 (one amber primary) is applied by projectPrimary: the masthead Clone is
+// promoted to the page's primary action only when the page body renders no
+// primary of its own (style guideline §1 F3).
 func (s *Server) pageRepo(w http.ResponseWriter, r *http.Request, p auth.Principal, chrome *RepoChrome, status int, name, title string, data any) {
-	if chrome != nil && repoPageOwnPrimary(name) {
-		chrome.ClonePrimary = false
-	}
 	s.render(w, r, status, name, PageData{Chrome: s.chrome(r, p, title), Repo: chrome, Data: data})
-}
-
-// repoPageOwnPrimary reports whether a repo-scoped page template carries its
-// own .btn.primary (style guideline F3). Keep this list in sync with a new page
-// that adds a primary CTA; the clone-primary test walks it.
-func repoPageOwnPrimary(name string) bool {
-	switch name {
-	case "collab/issues", "collab/pulls", "collab/releases", "collab/release",
-		"collab/issue", "collab/pull", "collab/pull_files", "collab/threads",
-		// The run page's approve control (first-time-contributor gate) is its
-		// one primary action when a run is held.
-		"collab/thread_detail",
-		"settings/repo",
-		"forms/fork", "forms/release_new", "forms/issue_new", "forms/pull_new",
-		"forms/labels", "forms/milestones":
-		return true
-	}
-	return false
 }
 
 // errorPage renders the shared error page (HTML) or a plain-text body when the

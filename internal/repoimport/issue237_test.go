@@ -18,6 +18,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/crueber/spindle/internal/server/auth"
 )
@@ -209,40 +210,27 @@ func TestCheckSSRFVariantParity237(t *testing.T) {
 	}
 }
 
-// TestDangerousAllowed237 pins the authority rule: only an authenticated
-// admin under a real auth mode (token/oidc) may wield dangerous:true over
-// HTTP. The auth-none principal carries Admin but is unauthenticated —
-// never qualifies. Unknown modes fail closed.
+// TestDangerousAllowed237 pins the authority rule: only a signed-in host
+// admin may wield dangerous:true over HTTP. Admin is the OIDC group predicate;
+// anonymous is never admin, so there is no open-mode admin at all.
 func TestDangerousAllowed237(t *testing.T) {
 	admin := auth.Principal{Name: "root", Write: true, Admin: true}
 	writer := auth.Principal{Name: "writer", Write: true}
 	for _, tc := range []struct {
 		name string
-		mode string
 		p    auth.Principal
 		want bool
 	}{
-		{"none admin rejected", "none", auth.None(), false},
-		{"none token-admin rejected", "none", admin, false},
-		{"empty-mode admin rejected", "", admin, false},
-		{"token admin allowed", "token", admin, true},
-		{"oidc admin allowed", "oidc", admin, true},
-		{"token writer rejected", "token", writer, false},
-		{"oidc writer rejected", "oidc", writer, false},
-		{"token anonymous rejected", "token", auth.Anonymous(), false},
-		{"bogus mode admin rejected", "bogus", admin, false},
+		{"anonymous rejected", auth.Anonymous(), false},
+		{"admin allowed", admin, true},
+		{"writer rejected", writer, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			svc, _ := testService(t, nil, &FakeRoles{})
-			svc.cfg.Server.Auth.Mode = tc.mode
 			if got := svc.dangerousAllowed(tc.p); got != tc.want {
-				t.Fatalf("dangerousAllowed(mode=%q, %+v) = %v, want %v", tc.mode, tc.p, got, tc.want)
+				t.Fatalf("dangerousAllowed(%+v) = %v, want %v", tc.p, got, tc.want)
 			}
 		})
-	}
-	// Nil cfg fails closed (never a nil-map-style panic, never allowed).
-	if (&Service{}).dangerousAllowed(admin) {
-		t.Fatalf("nil-cfg dangerousAllowed(admin) = true, want false")
 	}
 }
 
@@ -271,9 +259,9 @@ func TestBeginDangerousGate237(t *testing.T) {
 			t.Fatalf("status = %d, want 403 (body %q)", w.Code, w.Body.String())
 		}
 	})
-	t.Run("auth-none dangerous 403 names CLI", func(t *testing.T) {
+	t.Run("signed-out dangerous 403 names CLI", func(t *testing.T) {
 		svc, _ := testService(t, nil, &FakeRoles{})
-		h := testHandler(svc, auth.None())
+		h := testHandler(svc, auth.Principal{Name: "nobody", Write: true})
 		w := doPost(t, h, "/api/v1/repos/imports", body("file:///srv/r.git", true), "")
 		if w.Code != 403 {
 			t.Fatalf("status = %d, want 403 (body %q)", w.Code, w.Body.String())
@@ -282,9 +270,8 @@ func TestBeginDangerousGate237(t *testing.T) {
 			t.Fatalf("body = %q, want the CLI pointer", w.Body.String())
 		}
 	})
-	t.Run("token-mode admin dangerous imports a real fixture", func(t *testing.T) {
+	t.Run("admin dangerous imports a real fixture", func(t *testing.T) {
 		cfg := testConfig(t)
-		cfg.Server.Auth.Mode = "token"
 		svc, _ := testService(t, cfg, &FakeRoles{})
 		h := testHandler(svc, auth.Principal{Name: "root", Write: true, Admin: true})
 		src := fixtureRepo(t, t.TempDir()+"/src", 1, 0, 0)
@@ -352,6 +339,46 @@ func mirrorSrcURLs237(t *testing.T, outPath string) []string {
 // git carries the single canonical URL — identical for all variants. The
 // allowlist names localhost with allow-private so no DNS or network is
 // touched (checkPrivate short-circuits on allow).
+// drainRunning237 waits until no import goroutine remains in the running map:
+// the stream's done is signalled slightly before the goroutine returns and
+// before finishLocked runs, and that goroutine writes into this test's
+// TempDirs. On a loaded -race runner t.TempDir's RemoveAll then walked the
+// tree while the store was still writing it (CI: "directory not empty" after
+// a green run).
+func drainRunning237(t *testing.T, svc *Service) {
+	t.Helper()
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		svc.mu.Lock()
+		n := len(svc.running)
+		svc.mu.Unlock()
+		if n == 0 {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatal("import goroutines still running when the test ended")
+}
+
+// awaitStarted237 waits for the import named in a 202 body to finish, then
+// for its goroutine to leave the running map, so a test that only asserts the
+// gate's 202 does not leave ambient work behind to fight t.TempDir cleanup.
+func awaitStarted237(t *testing.T, svc *Service, body []byte) {
+	t.Helper()
+	var out struct {
+		Task map[string]any `json:"task"`
+	}
+	if err := json.Unmarshal(body, &out); err != nil {
+		t.Fatalf("202 body: %v (%q)", err, body)
+	}
+	id, _ := out.Task["id"].(string)
+	if id == "" {
+		t.Fatalf("202 body lacks task id: %q", body)
+	}
+	awaitDone(t, svc, id, 60*time.Second)
+	drainRunning237(t, svc)
+}
+
 func TestCloneReceivesCanonicalURL237(t *testing.T) {
 	cfg := testConfig(t)
 	cfg.Import.URLAllowlist = []string{"localhost"}
@@ -391,6 +418,9 @@ func TestCloneReceivesCanonicalURL237(t *testing.T) {
 		// clone semaphore serializes real clones anyway.
 		awaitDone(t, svc, id, 60_000_000_000) // clone "succeeds", ingest 422s — outcome irrelevant
 	}
+	// Let every import goroutine leave the running map before the test's
+	// TempDirs are removed (see drainRunning237).
+	drainRunning237(t, svc)
 	urls := mirrorSrcURLs237(t, outPath)
 	if len(urls) != len(variants) {
 		t.Fatalf("recorded %d clone URLs, want %d", len(urls), len(variants))
@@ -406,6 +436,7 @@ func TestCloneReceivesCanonicalURL237(t *testing.T) {
 	if w.Code != 202 {
 		t.Fatalf("http twin status = %d, want 202 (documented http-without-token scope)", w.Code)
 	}
+	awaitStarted237(t, svc, w.Body.Bytes())
 }
 
 // TestVariantGateParityHTTP237 pins handler-level parity for rejected
@@ -496,4 +527,7 @@ func TestLegitimateCanonicalAllowlisted237(t *testing.T) {
 	if w.Code != 202 {
 		t.Fatalf("canonical allowlisted status = %d, want 202 (body %q)", w.Code, w.Body.String())
 	}
+	// Only the gate's 202 is under test, but the import it starts writes into
+	// this test's dirs: let it finish rather than racing t.TempDir cleanup.
+	awaitStarted237(t, svc, w.Body.Bytes())
 }

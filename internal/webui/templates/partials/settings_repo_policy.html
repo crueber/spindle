@@ -1,0 +1,69 @@
+{{/* partials/settings_repo_policy.html — repo settings → Push policy.
+   One settings tab per file: a new tab is a new settings_repo_<tab>.html
+   partial plus one dispatch line in pages/settings/repo.html — never a body
+   in the shell. Every panel receives the SettingsRepoPage, so a form can
+   build its action from .Owner/.Name. Anatomy: .card sections, the .setup-row
+   label/control pairing for forms, .data-table inside overflow-x-auto
+   (guideline §8). 390px: fields full width, toggle rows keep
+   label-left/control-right, tables scroll in place. */}}
+{{/* ---- Push policy ------------------------------------------------------ */}}
+{{define "settings-repo-policy"}}
+{{with .Policy}}
+<div class="space-y-4">
+  <form class="card p-4" method="post" action="/{{$.Owner}}/{{$.Name}}/settings/policy"
+        hx-post="/{{$.Owner}}/{{$.Name}}/settings/policy" hx-target="#settings-panel" hx-select="#settings-panel" hx-swap="outerHTML">
+    <h3 class="card-header">Push policy</h3>
+    <label class="mb-1 block text-sm font-medium" for="policy-text">Policy document (JSON)</label>
+    <textarea class="input mono text-xs" id="policy-text" name="policy" rows="14" spellcheck="false" data-submit-keys>{{.Text}}</textarea>
+    <p class="muted mt-1 text-[11px]">Clearing the editor and saving removes the policy document (every push is then allowed). Use <strong>Remove policy</strong> below when you want the typed confirmation.</p>
+    <div class="mt-2 flex flex-wrap items-end gap-3">
+      <div class="flex flex-wrap items-center gap-2">
+        <button type="submit" class="btn primary">Save</button>
+        <span class="muted text-[11px]">Ctrl/⌘+Enter saves (island). The server validates on save.</span>
+      </div>
+      <div class="ml-auto flex flex-wrap items-end gap-2">
+        <div>
+          <label class="mb-1 block text-sm font-medium" for="policy-n">dry-run against the last N pushes</label>
+          <input class="input w-24" id="policy-n" name="n" type="number" min="1" max="100" value="{{.DryRunN}}">
+        </div>
+        <button type="submit" class="btn" name="policy_action" value="dryrun">dry-run</button>
+      </div>
+    </div>
+    {{if .Error}}<p class="err-line" role="alert">{{.Error}}</p>{{end}}
+    {{if .Note}}<p class="mt-2 text-sm text-[var(--pd-ok)]">{{.Note}}</p>{{end}}
+
+    {{if .DryRunDone}}
+    <hr class="my-3 border-current opacity-10">
+    <p class="text-sm">Dry run: <strong>{{.DryRunAllow}}</strong> allowed / <strong>{{.DryRunDeny}}</strong> denied.</p>
+    {{if .DryRunRefs}}
+    <div class="mt-2 overflow-x-auto">
+      <table class="data-table">
+        <thead><tr><th scope="col">entry</th><th scope="col">detail</th></tr></thead>
+        <tbody>{{range .DryRunRefs}}<tr><td class="mono text-xs">{{.Key}}</td><td class="break-words">{{.Value}}</td></tr>{{end}}</tbody>
+      </table>
+    </div>
+    {{else}}<p class="muted mt-1 text-sm">no pushes to evaluate.</p>{{end}}
+    {{end}}
+  </form>
+
+  <section class="card p-4" aria-label="Remove policy">
+    <h3 class="card-header">Remove policy</h3>
+    {{if .Exists}}
+    <p class="muted text-sm">Deletes the stored policy document. The repository falls back to allow-all: every push to every ref is permitted until a new policy is saved.</p>
+    <form class="mt-2 grid gap-2" method="post" action="/{{$.Owner}}/{{$.Name}}/settings/policy"
+          hx-post="/{{$.Owner}}/{{$.Name}}/settings/policy" hx-target="#settings-panel" hx-select="#settings-panel" hx-swap="outerHTML"
+          data-danger-expected="{{$.Owner}}/{{$.Name}}">
+      <input type="hidden" name="policy_action" value="remove">
+      <div>
+        <label class="mb-1 block text-sm font-medium" for="policy-remove-confirm">Type <code class="mono text-xs">{{$.Owner}}/{{$.Name}}</code> to confirm</label>
+        <input class="input md:max-w-sm mono text-xs" id="policy-remove-confirm" name="confirm" type="text" autocomplete="off" data-danger-input required>
+      </div>
+      <div><button type="submit" class="btn danger" data-danger-submit disabled>Remove policy</button></div>
+    </form>
+    {{else}}
+    <p class="muted text-sm">No policy document is stored — the repository currently allows every push. Saving a document above creates one.</p>
+    {{end}}
+  </section>
+</div>
+{{else}}{{template "settings-repo-notwired" .}}{{end}}
+{{end}}

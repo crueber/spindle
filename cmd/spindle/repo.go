@@ -27,6 +27,9 @@ func openEngine(ctx context.Context, c *cli) (*wal.Registry, store.ObjectStore, 
 		os.Exit(code)
 	}
 	dataDir := dataDirFor(c)
+	if note := config.AdaptCacheBudget(cfg); note != "" {
+		fmt.Fprintf(os.Stderr, "spindle: warning: %s\n", note)
+	}
 	st, err := openStore(cfg, dataDir)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "spindle: store: %v\n", err)

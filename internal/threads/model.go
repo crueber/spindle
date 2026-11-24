@@ -25,6 +25,13 @@ var (
 	// ErrUnprocessable marks a well-formed but unusable request (a sha that
 	// is not a commit, a workflow file that does not parse; → 422).
 	ErrUnprocessable = errors.New("unprocessable")
+	// ErrTooLarge marks a request over a configured size cap (artifact
+	// uploads/downloads; → 413), never a generic 400: the named message says
+	// which cap and which config key.
+	ErrTooLarge = errors.New("too large")
+	// ErrRateLimited marks an over-budget request (the OIDC exchange's
+	// per-job window; → 429 with Retry-After).
+	ErrRateLimited = errors.New("rate limited")
 	// ErrUnavailable marks a down dependency (git, store; → 503).
 	ErrUnavailable = errors.New("temporarily unavailable")
 	// ErrCorrupt marks an unreadable bucket object (→ 500).
@@ -75,6 +82,11 @@ const (
 // (15 §2). T1 registers the name; the body is the T3 retention pass (see
 // Service.GC, the documented stub — logs and their frames do not exist yet).
 const KindThreadsGC = "threads-gc"
+
+// KindThreadsQueueReconcile is the Seam 5 task kind for the global queue-index
+// repair (docs/PLAN-INSTANCE-RUNNERS.md §3). It is the only place a global
+// index rebuild LISTs, and it runs per repository on the maintainer.
+const KindThreadsQueueReconcile = "threads-queue-reconcile"
 
 // RunIDLayout is the lexical run-id shape: 19-digit unix-nanos, a dash, and 6
 // lowercase hex chars. Lexical order == creation order, which is what the
@@ -145,12 +157,18 @@ type Run struct {
 	CompletedAt *string `json:"completed_at,omitempty"`
 	Version     int     `json:"version"`
 
-	// ApprovedBy/ApprovedAt and DeniedBy/DeniedAt record the first-time
-	// contributor gate's decision (15 §5.2); absent for every other run.
-	ApprovedBy string  `json:"approved_by,omitempty"`
-	ApprovedAt *string `json:"approved_at,omitempty"`
-	DeniedBy   string  `json:"denied_by,omitempty"`
-	DeniedAt   *string `json:"denied_at,omitempty"`
+	// ApprovedBy/ApprovedAt and DeniedBy/DeniedAt record the decided hold's
+	// decision: the first-time-contributor gate (15 §5.2) or an environment's
+	// required reviewers (docs/PLAN-THREADS-ENVIRONMENTS.md). ApprovalKind
+	// names which gate held it ("" = not held) and Environments the gated
+	// environment names, so the page, the check description and the API name
+	// the environment instead of a generic "pending approval".
+	ApprovalKind string   `json:"approval_kind,omitempty"`
+	Environments []string `json:"environments,omitempty"`
+	ApprovedBy   string   `json:"approved_by,omitempty"`
+	ApprovedAt   *string  `json:"approved_at,omitempty"`
+	DeniedBy     string   `json:"denied_by,omitempty"`
+	DeniedAt     *string  `json:"denied_at,omitempty"`
 
 	// DurationSeconds is a DERIVED read-model field (never stored, never CAS'd):
 	// the wall time from StartedAt to CompletedAt, or to now while the run is
@@ -165,6 +183,10 @@ type Step struct {
 	Name string `json:"name,omitempty"`
 	Run  string `json:"run,omitempty"`
 	Uses string `json:"uses,omitempty"`
+	// Parent is the display name of the composite action step this step was
+	// expanded from ("" for a top-level step). It carries no execution
+	// meaning: Spec.Steps is the payload (docs/threads.md §3.4a).
+	Parent string `json:"parent,omitempty"`
 }
 
 // SpecVersion is the current Job.Spec schema version. A runner refuses a spec
@@ -215,7 +237,21 @@ type Spec struct {
 	// substitutes ${{ inputs.<name> }} and exposes them to `if` as
 	// inputs.<name>; a non-dispatch run has none.
 	Inputs map[string]string `json:"inputs,omitempty"`
-	Steps  []StepSpec        `json:"steps"`
+	// Environment is the deployment environment the job targets (nil when the
+	// job names none), from `jobs.<key>.environment:` — a name and an optional
+	// URL. Environment secrets are resolved only for this name.
+	Environment *EnvironmentSpec `json:"environment,omitempty"`
+	// Outputs are the job's declared output templates (docs/threads.md §3.9),
+	// evaluated by the runner once its steps finish. A template may read
+	// `${{ steps.<id>.outputs.<name> }}`, `${{ matrix.<axis> }}` and
+	// `${{ inputs.<name> }}`; the parser validates the references.
+	Outputs map[string]string `json:"outputs,omitempty"`
+	Steps   []StepSpec        `json:"steps"`
+	// Actions are the repository-local action definitions this job's steps use
+	// (directly or nested), resolved from the run commit and embedded so the
+	// runner needs no repository access (docs/threads.md §3.4a). Keyed by
+	// repository-relative directory.
+	Actions map[string]ActionSpec `json:"actions,omitempty"`
 }
 
 // ContainerSpec is one job container (image plus the mapping fields).
@@ -254,6 +290,9 @@ type ConcurrencySpec struct {
 
 // StepSpec is one complete workflow step.
 type StepSpec struct {
+	// ID is the step's `id:` (GitHub's `steps.<id>` key); empty for an
+	// anonymous step. The runner records outcome/conclusion under it.
+	ID               string            `json:"id,omitempty"`
 	Name             string            `json:"name,omitempty"`
 	Run              string            `json:"run,omitempty"`
 	Uses             string            `json:"uses,omitempty"`
@@ -268,6 +307,79 @@ type StepSpec struct {
 	// TimeoutMinutes bounds one step; zero means the remaining job time.
 	TimeoutMinutes int `json:"timeout_minutes,omitempty"`
 }
+
+// ActionSpec is one repository-local action definition, resolved from the run
+// commit and embedded in the job payload (docs/threads.md §3.4a). The runner
+// never reads the repository: the definition it executes is exactly the one the
+// run was created with, so a later commit (or an earlier step editing the file)
+// cannot change it.
+type ActionSpec struct {
+	// Path is the repository-relative directory (".spindle/actions/setup").
+	Path string `json:"path"`
+	// Using is "composite" or "docker".
+	Using string `json:"using"`
+	// Inputs are the declared inputs; the runner turns them into INPUT_* env.
+	Inputs map[string]ActionInputSpec `json:"inputs,omitempty"`
+	// Outputs maps an output name to the template evaluated over the action's
+	// own step outputs (composite actions only).
+	Outputs map[string]string `json:"outputs,omitempty"`
+	// Steps are the composite body (composite actions only).
+	Steps []StepSpec `json:"steps,omitempty"`
+	// Image is the docker image with the docker:// prefix stripped (docker
+	// actions only); Entrypoint/Args/Env come from the action metadata.
+	Image      string            `json:"image,omitempty"`
+	Entrypoint []string          `json:"entrypoint,omitempty"`
+	Args       []string          `json:"args,omitempty"`
+	Env        map[string]string `json:"env,omitempty"`
+}
+
+// ActionInputSpec is one declared action input (the default is the YAML scalar
+// text, already a string in the action's environment).
+type ActionInputSpec struct {
+	Default    string `json:"default,omitempty"`
+	HasDefault bool   `json:"has_default,omitempty"`
+	Required   bool   `json:"required,omitempty"`
+}
+
+// EnvironmentSpec is a job's deployment environment (docs/threads.md §3.3):
+// the name of a repository environment record and the URL the run page links.
+type EnvironmentSpec struct {
+	Name string `json:"name"`
+	URL  string `json:"url,omitempty"`
+}
+
+// Deployment is one job's deployment record
+// (docs/PLAN-THREADS-ENVIRONMENTS.md §7): the environment it targets, the URL
+// it declared, and — when the environment requires reviewers — who decided it
+// and when. It lives on the job record (no separate family), so a run page and
+// an API reader see the same fact and the retention pass deletes it with the
+// job.
+type Deployment struct {
+	Environment string  `json:"environment"`
+	URL         string  `json:"url,omitempty"`
+	State       string  `json:"state"`
+	ApprovedBy  string  `json:"approved_by,omitempty"`
+	ApprovedAt  *string `json:"approved_at,omitempty"`
+	DeniedBy    string  `json:"denied_by,omitempty"`
+	DeniedAt    *string `json:"denied_at,omitempty"`
+}
+
+// Deployment states. `not_required` is an environment with no required
+// reviewers: the job runs and may resolve that environment's secrets, recorded
+// so the page can tell "no approval needed" from "not yet decided".
+const (
+	DeploymentNotRequired = "not_required"
+	DeploymentPending     = "pending"
+	DeploymentApproved    = "approved"
+	DeploymentDenied      = "denied"
+	DeploymentFailed      = "failed"
+)
+
+// Approval kinds (Run.ApprovalKind): which hold is on the run.
+const (
+	ApprovalFork        = "fork"
+	ApprovalEnvironment = "environment"
+)
 
 // specWorkflow returns the spec-carried workflow name, falling back to the run
 // header for a record written before Spec existed.
@@ -321,6 +433,25 @@ type Job struct {
 	LeaseUntil *string `json:"lease_until,omitempty"`
 	// StepResults are the runner-reported step outcomes from complete.
 	StepResults []StepResult `json:"step_results,omitempty"`
+	// Outputs are the job outputs the runner reported on complete, after
+	// evaluating the spec's `outputs:` templates against the step outputs
+	// (docs/threads.md §3.9). A dependent job reads them as
+	// `needs.<job>.outputs.<name>`; a job that did not succeed exposes none.
+	Outputs map[string]string `json:"outputs,omitempty"`
+	// Reason is why the job did not execute its steps, or why it is not green
+	// when no runner reported: a false job-level `if:`, a blocked `needs:`, or
+	// an `if:` the subset cannot evaluate. Written by the server only; empty on
+	// a job that ran.
+	Reason string `json:"reason,omitempty"`
+	// Tolerated records a FAILED job whose spec declares
+	// `continue-on-error: true`: the record still reads `failure` (nothing is
+	// rewritten) but the run fold treats it as neutral, so a reader can tell
+	// "failed but tolerated" from "succeeded".
+	Tolerated bool `json:"tolerated,omitempty"`
+	// Deployment is the job's deployment record when its spec names an
+	// environment (nil for an ordinary job): the environment, the declared
+	// URL, and the required-reviewer decision.
+	Deployment *Deployment `json:"deployment,omitempty"`
 
 	CreatedAt   string  `json:"created_at"`
 	UpdatedAt   string  `json:"updated_at"`
@@ -334,10 +465,16 @@ type Job struct {
 	DurationSeconds int64 `json:"duration_seconds,omitempty"`
 }
 
-// RunView is GET …/api/threads/{run}: the header plus its jobs (name-sorted).
+// RunView is GET …/api/threads/{run}: the header, its jobs (name-sorted), and
+// (15 §2.5) the artifacts a job published. Approval is the principal-aware
+// approval projection (pending/approved/denied, the environments a hold names,
+// the reviewers awaited and whether THIS caller may decide) — nil only on a
+// view a test built directly.
 type RunView struct {
-	Run  *Run   `json:"run"`
-	Jobs []*Job `json:"jobs"`
+	Run       *Run            `json:"run"`
+	Jobs      []*Job          `json:"jobs"`
+	Artifacts []*ArtifactView `json:"artifacts"`
+	Approval  *ApprovalView   `json:"approval,omitempty"`
 }
 
 // RunPage is GET …/api/threads: newest-first, cursor-paged by run id.
@@ -353,6 +490,12 @@ type CreateOpts struct {
 	// (pull_request) as a plain name ("main"). It selects push/PR trigger
 	// filters.
 	Branch string
+	// Action is the pull_request lifecycle action being delivered: opened,
+	// synchronize or reopened (workflow.PullRequestTypes). It is required for
+	// a pull_request and selects the `on.pull_request.types` filter; the
+	// other events ignore it. An action Threads cannot emit is ErrInvalid, so
+	// a caller cannot quietly create a run for an unknown edge.
+	Action string
 	// Ref is the triggering ref ("refs/heads/main"); optional.
 	Ref string
 	// BaseBranch/BaseCommit identify the trusted revision for a fork PR
@@ -447,6 +590,11 @@ func checkState(jobState string) string {
 // cancel must not read as a failure); skipped jobs are neutral (GitHub folds
 // them into a green run — the failure that skipped them is already the run's
 // failure); all green is success.
+//
+// A failed job whose `continue-on-error` is true is neutral for the same
+// reason: the job record keeps `failure` (and Job.Tolerated marks it), but the
+// run conclusion follows the OTHER jobs — that is exactly what
+// continue-on-error is for.
 func foldRunState(jobs []*Job) string {
 	if len(jobs) == 0 {
 		return RunQueued
@@ -456,7 +604,7 @@ func foldRunState(jobs []*Job) string {
 		if j.State != JobQueued {
 			allQueued = false
 		}
-		if j.State == JobFailure {
+		if j.State == JobFailure && !j.Tolerated {
 			anyFailed = true
 		}
 		if j.State == JobCancelled {

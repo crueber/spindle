@@ -1,0 +1,30 @@
+{{/* partials/admin_restart.html — the restart control's shared blocks
+   (docs/PLAN-ADMIN.md §5 as amended; docs/go/12_web_ui.md §2.10).
+
+   ONE form and ONE truth paragraph, composed by the Configuration card, the
+   Maintenance card and the restart page. The typed confirmation is the danger
+   idiom (web/src/islands/danger.js): the submit stays disabled until the word
+   matches, and the server re-checks it. The copy is load-bearing: the process
+   EXITS and a supervisor restarts it — there is no in-process reload, and
+   with restart: no the instance stays down. */}}
+
+{{/* The typed-confirm form: POST /admin/restart, host-admin gated, same-origin
+   enforced. */}}
+{{define "admin-restart-form"}}
+<form class="mt-3 flex flex-col gap-2" method="post" action="/admin/restart" data-danger-confirm="restart">
+  <div>
+    <label class="mb-1 block text-sm font-medium" for="admin-restart-confirm">Type <code class="mono text-xs">restart</code> to confirm</label>
+    <input class="input mono text-xs md:max-w-sm" id="admin-restart-confirm" name="confirm" type="text"
+           autocomplete="off" data-danger-arm required>
+  </div>
+  <div><button type="submit" class="btn danger whitespace-nowrap" data-danger-submit disabled>Restart now</button></div>
+</form>
+{{end}}
+
+{{/* What a restart is — the honest line, shared by every surface. */}}
+{{define "admin-restart-truth"}}
+<p class="muted mt-2 text-[11px]">The process exits and is restarted by its supervisor — a container
+restart policy, a Swarm service task, or systemd <code class="mono text-xs">Restart=</code>. There is
+no in-process reload. With <code class="mono text-xs">restart: no</code> the instance stays down until
+you start it.</p>
+{{end}}

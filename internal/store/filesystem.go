@@ -414,13 +414,31 @@ func (f *Filesystem) mapErr(key string, err error) error {
 		return NewPrecondition(key, "")
 	case errors.Is(err, syscall.EIO), errors.Is(err, syscall.ENFILE), errors.Is(err, syscall.EMFILE):
 		return NewRetryable(key, err)
-	case errors.Is(err, syscall.ENOSPC), errors.Is(err, syscall.EACCES),
+	case errors.Is(err, syscall.ENOSPC), isQuotaErr(err):
+		// Name the store root and the knob: a bare "store error: <key>:
+		// no space left on device" left an audit operator unable to tell
+		// which mount ran dry (BUG-6).
+		return NewOther(key, &storeNoSpaceError{root: f.root, cause: err})
+	case errors.Is(err, syscall.EACCES),
 		errors.Is(err, syscall.EPERM), errors.Is(err, syscall.EROFS), errors.Is(err, syscall.EXDEV):
 		return NewOther(key, err)
 	default:
 		return NewOther(key, err)
 	}
 }
+
+// storeNoSpaceError reports a full/quota-exceeded store.root filesystem with
+// the path and the underlying errno (errors.Is keeps reaching ENOSPC).
+type storeNoSpaceError struct {
+	root  string
+	cause error
+}
+
+func (e *storeNoSpaceError) Error() string {
+	return fmt.Sprintf("no space left on the filesystem holding store.root %s (%v); free space there or move store.root to a larger filesystem", e.root, e.cause)
+}
+
+func (e *storeNoSpaceError) Unwrap() error { return e.cause }
 
 // ---- interface ----
 

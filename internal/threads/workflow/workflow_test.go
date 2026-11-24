@@ -81,31 +81,31 @@ func TestFires(t *testing.T) {
 		t.Fatal(err)
 	}
 	cases := []struct {
-		event, branch string
-		want          bool
+		event, branch, action string
+		want                  bool
 	}{
-		{"push", "main", true},
-		{"push", "feature/x", false},
-		{"push", "release/1.2", true},
-		{"pull_request", "main", true},
-		{"pull_request", "dev", false},
-		{"workflow_dispatch", "", true},
-		{"schedule", "", false},
-		{"unknown", "", false},
+		{"push", "main", "", true},
+		{"push", "feature/x", "", false},
+		{"push", "release/1.2", "", true},
+		{"pull_request", "main", "opened", true},
+		{"pull_request", "dev", "opened", false},
+		{"workflow_dispatch", "", "", true},
+		{"schedule", "", "", false},
+		{"unknown", "", "", false},
 	}
 	for _, tc := range cases {
-		if got := w.Fires(tc.event, tc.branch); got != tc.want {
-			t.Errorf("Fires(%q,%q) = %v, want %v", tc.event, tc.branch, got, tc.want)
+		if got := w.Fires(tc.event, tc.branch, tc.action); got != tc.want {
+			t.Errorf("Fires(%q,%q,%q) = %v, want %v", tc.event, tc.branch, tc.action, got, tc.want)
 		}
 	}
 	// A workflow with no trigger block never fires.
 	empty := &Workflow{Jobs: map[string]Job{}}
-	if empty.Fires("push", "main") || empty.Fires("workflow_dispatch", "") {
+	if empty.Fires("push", "main", "") || empty.Fires("workflow_dispatch", "", "") {
 		t.Error("triggerless workflow fired")
 	}
 	// No branch filter matches every branch.
 	all := &Workflow{On: Triggers{Push: &PushTrigger{}}}
-	if !all.Fires("push", "anything") {
+	if !all.Fires("push", "anything", "") {
 		t.Error("empty filter did not match")
 	}
 }

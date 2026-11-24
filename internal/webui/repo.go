@@ -105,10 +105,12 @@ import (
 	"github.com/crueber/spindle/internal/forksync"
 	"github.com/crueber/spindle/internal/git"
 	"github.com/crueber/spindle/internal/identity"
+	"github.com/crueber/spindle/internal/insights"
 	"github.com/crueber/spindle/internal/notify"
 	"github.com/crueber/spindle/internal/server/auth"
 	"github.com/crueber/spindle/internal/social"
 	"github.com/crueber/spindle/internal/tags"
+	"github.com/crueber/spindle/internal/webedit"
 )
 
 // --- bindings ---------------------------------------------------------------
@@ -180,12 +182,30 @@ type RepoDeps struct {
 	// half) — the write gate that decides whether Create tag renders at all.
 	RoleOf func(ctx context.Context, owner, repo string, p auth.Principal) identity.Role
 
+	// --- branches (M2; docs/go/04_git.md §16.2) -----------------------------
+	//
+	// The write seams are branches.Service methods: the push gate, the
+	// default-branch refusal and the stored-policy protection check live
+	// there, so the page cannot drift from the service.
+	BranchCreate func(ctx context.Context, owner, repo string, p auth.Principal, name, from string) error
+	BranchDelete func(ctx context.Context, owner, repo string, p auth.Principal, name string) error
+
 	// --- checks (the commits list's per-row pills) --------------------------
 
 	// ChecksIndex is checks.Service.ListChecks: ONE bounded index page per
 	// commits window (after="", n ≤ 200), joined by sha. Never one Combined
 	// call per row (N+1 / unbounded fan-out).
 	ChecksIndex func(ctx context.Context, owner, repo string, p auth.Principal, after string, n int) (*checks.ChecksPage, error)
+
+	// --- insights (docs/features/18_repo_insights.md) -----------------------
+
+	// Insights is insights.Service.Load: ONE exact-key GET of the CAS'd
+	// projection. It never runs git and never LISTs.
+	Insights func(ctx context.Context, owner, repo string) (*insights.Projection, bool, error)
+	// InsightsRefresh starts (or joins) the `insights-refresh` task through
+	// the (repo,kind) single-flight registry and returns immediately; the
+	// projection appears when the task finishes.
+	InsightsRefresh func(ctx context.Context, owner, repo string) error
 }
 
 // RepoPlaceholder mirrors the summary's #210 sidecar projection.
@@ -207,7 +227,8 @@ func BindRepo(d RepoDeps) { repoDeps = d }
 
 func init() { registerGroup(func(s *Server) { s.registerRepoRoutes() }) }
 
-// registerRepoRoutes owns exactly the six repo page families. Distinct
+// registerRepoRoutes owns the repo page families (code, history, WAL/compare,
+// branches/tags, insights). Distinct
 // literal suffixes keep static-before-dynamic precedence: http.ServeMux gives
 // the more specific pattern the request, so /tree/... never falls into the
 // two-segment root. The tree family registers all three shapes because a
@@ -217,11 +238,21 @@ func (s *Server) registerRepoRoutes() {
 	s.mux.HandleFunc("GET /{owner}/{repo}/tree", s.repoTree)
 	s.mux.HandleFunc("GET /{owner}/{repo}/tree/{rest...}", s.repoTree)
 	s.mux.HandleFunc("GET /{owner}/{repo}/blob/{rest...}", s.repoBlob)
+	s.mux.HandleFunc("GET /{owner}/{repo}/blame/{rest...}", s.repoBlame)
 	s.mux.HandleFunc("GET /{owner}/{repo}/commits", s.repoCommits)
 	s.mux.HandleFunc("GET /{owner}/{repo}/commit/{sha}", s.repoCommit)
 	s.mux.HandleFunc("GET /{owner}/{repo}/wal", s.repoWAL)
+	s.mux.HandleFunc("GET /{owner}/{repo}/compare", s.repoCompare)
+	s.mux.HandleFunc("GET /{owner}/{repo}/compare/{spec...}", s.repoCompare)
+	s.mux.HandleFunc("GET /{owner}/{repo}/branches", s.repoBranches)
+	s.mux.HandleFunc("POST /{owner}/{repo}/branches", s.repoBranchCreate)
+	s.mux.HandleFunc("POST /{owner}/{repo}/branches/delete", s.repoBranchDelete)
 	s.mux.HandleFunc("GET /{owner}/{repo}/tags", s.repoTags)
 	s.mux.HandleFunc("POST /{owner}/{repo}/tags/{tag}/delete", s.repoTagDelete)
+	// Insights (docs/features/18): the read is a cached projection, the write
+	// starts the narrated refresh task — never a git scan on a request.
+	s.mux.HandleFunc("GET /{owner}/{repo}/insights", s.repoInsights)
+	s.mux.HandleFunc("POST /{owner}/{repo}/insights/refresh", s.repoInsightsRefresh)
 
 	// Star/watch toggles (repo header) and Create tag (commit page). These are
 	// the SPA's own affordances, re-homed as plain POSTs: the page renders the
@@ -460,10 +491,9 @@ type RepoChrome struct {
 	ForkHref    string
 	ForksHref   string
 	SettingsRef string
-	// ClonePrimary controls the masthead Clone button's emphasis. The chrome is
-	// the page's ONE primary action only when the page body has none (style
-	// guideline F3): a page with its own primary (New issue, Save, Comment,
-	// …) demotes Clone to a secondary .btn so the accent stays unique.
+	// ClonePrimary seeds the masthead Clone emphasis. The renderer's projection
+	// (projectPrimary, style guideline F3) promotes Clone only when the page
+	// body renders no primary of its own; no handler sets this directly.
 	ClonePrimary bool
 
 	// Star/watch (07 §§7–8). ShowStar/ShowWatch mean "the counters were
@@ -713,6 +743,11 @@ func (s *Server) buildRepoChrome(r *http.Request, rq repoRequest, sum api.Summar
 	if feat.Releases {
 		c.Tabs = append(c.Tabs, repoTab{ID: "releases", Label: "Releases", Href: "/" + c.Full + "/releases"})
 	}
+	// Insights is unconditional: every repository has a pulse (an empty one
+	// says "no commits in this window"), and the page gate is the Code gate.
+	// The strip scrolls internally at narrow widths (#274), so an extra tab
+	// never pans the page.
+	c.Tabs = append(c.Tabs, repoTab{ID: "insights", Label: "Insights", Href: "/" + c.Full + "/insights"})
 	c.Tabs = append(c.Tabs, repoTab{ID: "settings", Label: "Settings", Href: "/" + c.Full + "/settings"})
 	active := false
 	for i := range c.Tabs {
@@ -743,9 +778,9 @@ func repoTabSection(path string) string {
 		return "code"
 	}
 	switch strings.ToLower(segs[2]) {
-	case "tree", "blob":
+	case "tree", "blob", "blame", "branches":
 		return "code"
-	case "commits", "commit":
+	case "commits", "commit", "compare":
 		return "commits"
 	case "tags":
 		return "tags"
@@ -761,6 +796,8 @@ func repoTabSection(path string) string {
 		return "threads"
 	case "releases", "release":
 		return "releases"
+	case "insights":
+		return "insights"
 	case "wal", "settings":
 		return "settings"
 	}
@@ -1058,6 +1095,10 @@ type treePage struct {
 	DocTooBig  bool
 	DocBinary  bool
 	DocSize    string
+	// NewFileHref is the tree's "Add file" affordance (Feature F), gated by
+	// the push rule and routed through the login interstitial for an
+	// anonymous viewer in token/oidc mode. Empty = no affordance.
+	NewFileHref string
 }
 
 // repoBranchRef is one entry in the Code page's branch selector.
@@ -1153,6 +1194,21 @@ func (s *Server) repoTree(w http.ResponseWriter, r *http.Request) {
 	}
 	data.ArchiveTar = "/" + c.Full + "/archive/" + escapePath(treeRest) + ".tar.gz"
 	data.ArchiveZip = "/" + c.Full + "/archive/" + escapePath(treeRest) + ".zip"
+	// Feature F: "Add file" on the tree, gated by the push rule (an
+	// anonymous viewer gets the login interstitial). The current directory
+	// is prefilled into the path field.
+	if data.Branch != "" {
+		newPath := "/" + c.Full + "/new/" + escapePath(data.Branch)
+		if tree.Path != "" {
+			newPath += "?path=" + url.QueryEscape(tree.Path+"/")
+		}
+		switch {
+		case webeditDeps.CanPush != nil && webeditDeps.CanPush(ctx, rq.id.Owner, rq.id.Name, rq.p):
+			data.NewFileHref = newPath
+		case s.anonWrite(rq.p):
+			data.NewFileHref = s.collabWriteHref(rq.p, newPath, "Create a new file")
+		}
+	}
 	// Branch selector: one name-sorted page of heads (§9.2). A failure is not
 	// fatal — the selector is chrome, and the page must still render.
 	if refs, _, rerr := s.env.API.Repo.RefList(ctx, rq.id, "heads", api.RefQuery{N: 100}); rerr == nil {
@@ -1430,9 +1486,20 @@ type blobPage struct {
 	Binary     bool
 	IsMarkdown bool
 	CodeView   bool
+	BlameHref  string
+	CanBlame   bool
 	Markdown   template.HTML
 	Code       template.HTML
 	Lines      []blobLine
+
+	// Feature F (file edit): the write affordances, gated by the same push
+	// rule the editor applies. Hidden for a read-only principal; an
+	// anonymous viewer in token/oidc mode gets the login interstitial href
+	// (collabWriteHref). Binary/LFS/oversize files get no edit link.
+	CanEdit    bool
+	EditHref   string
+	DeleteHref string
+	EditNote   string
 }
 
 func (s *Server) repoBlob(w http.ResponseWriter, r *http.Request) {
@@ -1495,15 +1562,58 @@ func (s *Server) repoBlob(w http.ResponseWriter, r *http.Request) {
 	data.PathLink = r.URL.Path
 	data.Lang = LanguageFor(name)
 	data.Size = fmtSize(blob.Size)
-	data.SHA = shortSHA(blob.SHA)
-	if blob.Ref != "" {
-		data.RawHref = "/" + c.Full + "/api/blob/" + escapePath(shortRefName(blob.Ref)) + "/" + escapePath(data.Path) + "?raw"
+	data.SHA = shortSHA(blob.ObjectSHA)
+	if data.SHA == "" {
+		data.SHA = shortSHA(blob.SHA) // fakes/older binders: no walked oid
+	}
+	// The raw lane is addressed by a rev (§9.5), so echo the ref the visitor
+	// actually used ("as requested"): res.Ref is the resolved branch/tag from
+	// this tail, blob.Ref is the binder's reverse lookup, and a sha-addressed
+	// visit keeps the commit sha. The old `blob.Ref != ""` gate rendered no
+	// link at all once the binder stopped guessing.
+	rawRef := shortRefName(res.Ref)
+	if rawRef == "" {
+		rawRef = shortRefName(blob.Ref)
+	}
+	if rawRef == "" {
+		rawRef = res.SHA
+	}
+	if rawRef != "" && data.Path != "" {
+		data.RawHref = "/" + c.Full + "/api/blob/" + escapePath(rawRef) + "/" + escapePath(data.Path) + "?raw"
+		data.BlameHref = "/" + c.Full + "/blame/" + escapePath(rawRef+"/"+data.Path)
 	}
 	data.TooLarge, data.Binary = blob.TooLarge, blob.Binary
-	displayRef := shortRefName(blob.Ref)
-	if displayRef == "" {
-		displayRef = blob.SHA
+	data.CanBlame = data.BlameHref != "" && !blob.TooLarge && !blob.Binary
+	// Feature F: the Edit/Delete affordances. They follow the push gate, not
+	// the read gate (a reader who cannot push gets no dead link), and are
+	// refused for the editor's own guardrail cases.
+	editRef := rawRef
+	if editRef == "" {
+		editRef = shortRefName(blob.Ref)
 	}
+	if editRef != "" && data.Path != "" {
+		switch {
+		case blob.Binary, blob.TooLarge:
+			data.EditNote = "binary file"
+		case webedit.IsLFSPointer(blob.Contents):
+			data.EditNote = "Git LFS pointer"
+		case blob.Size > editorMaxBytes():
+			data.EditNote = "larger than the editor cap"
+		default:
+			switch {
+			case webeditDeps.CanPush != nil && webeditDeps.CanPush(ctx, rq.id.Owner, rq.id.Name, rq.p):
+				data.CanEdit = true
+				data.EditHref = s.collabWriteHref(rq.p, "/"+c.Full+"/edit/"+escapePath(editRef+"/"+data.Path), "Edit this file")
+				data.DeleteHref = s.collabWriteHref(rq.p, "/"+c.Full+"/delete/"+escapePath(editRef+"/"+data.Path), "Delete this file")
+			case s.anonWrite(rq.p):
+				// Anonymous viewer: the affordance is a login interstitial.
+				data.CanEdit = true
+				data.EditHref = s.collabWriteHref(rq.p, "/"+c.Full+"/edit/"+escapePath(editRef+"/"+data.Path), "Edit this file")
+				data.DeleteHref = s.collabWriteHref(rq.p, "/"+c.Full+"/delete/"+escapePath(editRef+"/"+data.Path), "Delete this file")
+			}
+		}
+	}
+	displayRef := rawRef
 	if data.Path != "" {
 		parts := strings.Split(data.Path, "/")
 		for i, part := range parts {
@@ -1521,9 +1631,9 @@ func (s *Server) repoBlob(w http.ResponseWriter, r *http.Request) {
 		// placeholders only
 	case data.IsMarkdown:
 		data.CodeView = r.URL.Query().Get("view") == "code"
-		mdRef := shortRefName(blob.Ref)
+		mdRef := shortRefName(res.Ref)
 		if mdRef == "" {
-			mdRef = shortRefName(res.Ref)
+			mdRef = shortRefName(blob.Ref)
 		}
 		if mdRef == "" {
 			mdRef = res.SHA
@@ -1848,11 +1958,6 @@ func (s *Server) commitPageData(w http.ResponseWriter, r *http.Request, rq repoR
 		return nil, false
 	}
 	data := &commitPage{Repo: c, SHA: sha, CanCreateTag: repoCanWrite(ctx, c.Owner, c.Name, rq.p) && repoDeps.Tags != nil}
-	if data.CanCreateTag && c != nil {
-		// The Create-tag form's submit is this page's primary action; Clone
-		// stays a secondary masthead button (style guideline F3).
-		c.ClonePrimary = false
-	}
 	if c.Empty {
 		data.Guide = s.repoGuide(c)
 		return data, true
@@ -1902,7 +2007,18 @@ func (s *Server) commitPageData(w http.ResponseWriter, r *http.Request, rq repoR
 		data.Dels += st.Deletions
 	}
 	data.StatN = len(detail.Stats)
-	for _, f := range ParseUnifiedDiff(detail.Patch) {
+	data.Files = commitFilesFrom(detail.Patch)
+	data.Checks = commitChecks(ctx, c.Owner, c.Name, data.SHA, rq.p)
+	return data, true
+}
+
+// commitFilesFrom renders one unified patch through the EXISTING diff
+// renderer (ParseUnifiedDiff + the commit-file view model). The commit page
+// and the compare page share this one path, so a compare can never show a
+// different diff than a commit renders.
+func commitFilesFrom(patch string) []commitFile {
+	files := []commitFile{}
+	for _, f := range ParseUnifiedDiff(patch) {
 		cf := commitFile{
 			Path:    f.Path,
 			Anchor:  fileAnchor(f.Path),
@@ -1937,10 +2053,9 @@ func (s *Server) commitPageData(w http.ResponseWriter, r *http.Request, rq repoR
 			}
 			cf.Hunks = append(cf.Hunks, dh)
 		}
-		data.Files = append(data.Files, cf)
+		files = append(files, cf)
 	}
-	data.Checks = commitChecks(ctx, c.Owner, c.Name, data.SHA, rq.p)
-	return data, true
+	return files
 }
 
 // fileAnchor is the per-file fragment id (Commit.jsx fileAnchor): every byte

@@ -1,0 +1,197 @@
+{{/* pages/admin/access.html — GET /admin/access (docs/PLAN-ADMIN.md §3.4,
+   as amended by PLAN-OIDC-ONLY §3.2).
+   Read view: OIDC is the only sign-in (there is no mode switch), administration
+   is exactly signed-in ∧ verified groups_claim ∩ server.auth.admin_groups, and
+   this session's delivered groups sit beside the configured set so a "valid
+   config, wrong group" lockout is diagnosable here. The static-token table
+   never renders a secret, the admission rules state their consequences, the
+   discovery probe reuses POST /admin/config/auth-test, and every fact links to
+   its row on the ONE editor at /admin/config#row-<key>. Nothing writes. */}}
+{{define "content"}}
+<div class="admin-page" id="admin-page" data-admin-section="access">
+  <div class="flex flex-col gap-4 lg:flex-row lg:gap-6">
+    {{template "admin-nav" .Data}}
+
+    <div class="min-w-0 flex-1">
+      {{template "admin-header" .Data}}
+
+      {{if .Data.Denied}}
+        {{template "admin-denied" .Data}}
+      {{else}}
+        {{if .Data.Restricted}}{{template "admin-restricted" .}}{{end}}
+        {{template "admin-banners" .Data}}
+
+        {{/* ---- 1. Sign-in (OIDC) ---- */}}
+        <section class="card mb-4 p-4" aria-labelledby="admin-access-signin">
+          <h2 class="card-header" id="admin-access-signin">Sign-in (OIDC)</h2>
+          {{if .Data.Access.Configured}}
+          <p class="muted mt-1 text-sm">OIDC is the only sign-in — there is no authentication mode to switch. Signing in succeeds only for an email that matches an admission rule (below); administration is separate (the admin group).</p>
+          <div class="mt-2">
+            {{range .Data.Access.SignIn}}{{template "admin-access-fact" .}}{{end}}
+          </div>
+          <div class="setup-callout mt-3">
+            <p class="text-sm">Register this <strong>redirect URI</strong> with the issuer (exact match, no trailing slash):</p>
+            <p class="mt-1 flex flex-wrap items-center gap-2">
+              <code class="code-view inline-block max-w-full break-all px-2 py-1" id="access-redirect-uri">{{.Data.Access.RedirectURI}}</code>
+              <button type="button" class="btn" data-copy="#access-redirect-uri">copy</button>
+            </p>
+            <p class="muted mt-1 text-[11px]">Computed as <code class="mono text-xs">…/_auth/callback</code> under <a class="link inline-flex min-h-6 items-center" href="/admin/config#row-server.public_url">server.public_url</a> when set, else under the request's own origin.</p>
+          </div>
+          <p class="mt-3 text-sm"><a class="link inline-flex min-h-6 items-center py-1" href="/admin/config#row-server.auth.issuer">Edit the sign-in settings</a></p>
+          {{else}}
+          {{template "collab_empty" dict "icon" "file" "title" "No effective sign-in configuration" "hint" "There is no loaded configuration to read, so the OIDC facts cannot be reported. Fix the configuration file on Configuration, save, and restart." "href" "/admin/config" "label" "Open configuration"}}
+          {{end}}
+        </section>
+
+        {{/* ---- 2. Your access (live) ---- */}}
+        <section class="card mb-4 p-4" aria-labelledby="admin-access-live">
+          <h2 class="card-header" id="admin-access-live">Your access</h2>
+          {{if .Data.SignedIn}}
+          <div class="mt-2 grid gap-3 sm:grid-cols-2">
+            <div class="min-w-0 rounded border border-[var(--pd-line)] p-3">
+              <h3 class="eyebrow">This session — verified groups</h3>
+              <p class="mt-1 text-sm"><span class="muted">principal</span> <span class="mono text-xs break-all">{{.Data.PrincipalName}}</span></p>
+              {{if .Data.PrincipalMail}}<p class="mt-0.5 text-sm"><span class="muted">email</span> <span class="mono text-xs break-all">{{.Data.PrincipalMail}}</span></p>{{end}}
+              <p class="mt-0.5 text-sm"><span class="muted">groups</span>
+                {{if .Data.Access.Groups}}<span class="mono text-xs break-all">{{range $i, $g := .Data.Access.Groups}}{{if $i}}, {{end}}{{$g}}{{end}}</span>{{else}}<span class="muted">none — the claim was absent or empty when this session was minted</span>{{end}}
+              </p>
+              {{if .Data.Access.SessionIssuedAt}}<p class="muted mt-0.5 text-[11px]">session issued {{rel .Data.Access.SessionIssuedAt}}</p>{{end}}
+            </div>
+            <div class="min-w-0 rounded border border-[var(--pd-line)] p-3">
+              <h3 class="eyebrow">Configured admin groups</h3>
+              {{if .Data.Access.AdminGroups}}
+              <ul class="mt-1 space-y-0.5">
+                {{range .Data.Access.AdminGroups}}<li class="mono text-xs break-all">{{.}}</li>{{end}}
+              </ul>
+              {{else}}
+              <p class="muted mt-1 text-sm">none — no group can grant administration</p>
+              {{end}}
+              <p class="muted mt-1 text-[11px]">From <a class="link" href="/admin/config#row-server.auth.admin_groups">server.auth.admin_groups</a>; matched case-insensitively against the verified claim.</p>
+            </div>
+          </div>
+          <p class="mt-3 flex flex-wrap items-center gap-2 text-sm" role="status">
+            <span class="chip {{if .Data.Access.Admin}}chip-open{{else}}chip-draft{{end}}">{{if .Data.Access.Admin}}admin{{else}}not admin{{end}}</span>
+            <span class="muted">{{.Data.Access.Verdict}}</span>
+          </p>
+          {{if not .Data.Access.Admin}}
+          <div class="mt-3 border-l-2 border-l-[var(--pd-danger)] p-3 text-sm" role="alert">
+            <p><strong>The two group lists do not intersect, so this account is not an administrator.</strong> The configuration is valid — the IdP delivered the wrong group value (or none).</p>
+            <ul class="muted mt-2 list-disc space-y-1 pl-5">
+              <li>This session delivered: <span class="mono text-xs break-all">{{if .Data.Access.Groups}}{{range $i, $g := .Data.Access.Groups}}{{if $i}}, {{end}}{{$g}}{{end}}{{else}}no groups{{end}}</span></li>
+              <li>Configured admin groups: <span class="mono text-xs break-all">{{if .Data.Access.AdminGroups}}{{range $i, $g := .Data.Access.AdminGroups}}{{if $i}}, {{end}}{{$g}}{{end}}{{else}}none{{end}}</span></li>
+            </ul>
+            <p class="mt-2">To fix it: confirm the claim named by <code class="mono text-xs">server.auth.groups_claim</code> is the one your IdP emits for group membership (a namespaced or <code class="mono text-xs">roles</code> claim is common), correct the value in <code class="mono text-xs">server.auth.admin_groups</code>, or have an IdP administrator add this account to the configured group. Then <strong>sign out and sign in again</strong> — group membership is carried by the session minted at sign-in, and removing a group at the IdP likewise takes effect on the next sign-in.</p>
+          </div>
+          {{end}}
+          {{else}}
+          <p class="muted mt-2 text-sm">You are not signed in. <a class="link" href="/_auth/login?next=%2Fadmin%2Faccess">Sign in with OIDC</a> to see the verified groups this session carries.</p>
+          {{end}}
+        </section>
+
+        {{/* ---- 3. Admission rules ---- */}}
+        <section class="card mb-4 p-4" aria-labelledby="admin-access-admission">
+          <h2 class="card-header" id="admin-access-admission">Admission rules</h2>
+          {{if .Data.Access.Configured}}
+          <p class="muted mt-1 text-sm">An email must match one of these before sign-in succeeds. <strong>Without an admission rule nobody may sign in</strong> — boot validation refuses a configuration where both lists are empty.</p>
+          <div class="mt-2">
+            {{range .Data.Access.Admission}}{{template "admin-access-fact" .}}{{end}}
+          </div>
+          <div class="setup-callout mt-3">
+            <p class="text-sm">These lists decide <strong>who may sign in and who may push</strong> — they never grant administration. Administration is the admin group above and nothing else, so adding an email here cannot create an administrator.</p>
+          </div>
+          {{else}}
+          {{template "collab_empty" dict "icon" "file" "title" "No admission rules to report" "hint" "There is no loaded configuration, so the instance has no effective admission rule. Fix it on Configuration, save, and restart." "href" "/admin/config#row-server.auth.allowed_domains" "label" "Open configuration"}}
+          {{end}}
+        </section>
+
+        {{/* ---- 4. Machine credentials ---- */}}
+        <section class="card mb-4 p-4" aria-labelledby="admin-access-tokens">
+          <h2 class="card-header" id="admin-access-tokens">Machine credentials</h2>
+          {{if .Data.Access.Configured}}
+          <p class="muted mt-1 text-sm">Static tokens authenticate git, API and CLI requests as their principal. <strong>A static token can never administer</strong>: host administration is the OIDC admin group and nothing else, and no token row flag can change that.</p>
+          {{if .Data.Access.TokensNeverExpire}}
+          <div class="setup-note mt-2" role="status">
+            <p class="text-sm"><strong>{{.Data.Access.TokensNeverExpire}} configured token{{if ne .Data.Access.TokensNeverExpire 1}}s{{end}} never expire{{if eq .Data.Access.TokensNeverExpire 1}}s{{end}}.</strong> A row without <code class="mono text-xs">expires_at</code> is valid forever: a leaked credential stays usable until the row is removed and the instance restarts. Set an expiry on every machine credential and rotate on a schedule (procedure below).</p>
+          </div>
+          {{end}}
+          {{if .Data.Access.Tokens}}
+          <div class="mt-2 overflow-x-auto">
+            <table class="data-table wrap min-w-[38rem]" aria-label="static machine tokens">
+              <thead><tr><th scope="col">name / principal</th><th scope="col">scope</th><th scope="col">expires</th><th scope="col">last used</th></tr></thead>
+              <tbody>
+                {{range .Data.Access.Tokens}}
+                <tr>
+                  <th scope="row" class="mono text-xs break-all">
+                    {{.Identity}}
+                    {{if .Principal}}<span class="muted block">{{.Principal}}</span>{{else}}<span class="muted block">no principal</span>{{end}}
+                    <span class="muted block text-[11px]">{{.Credential}}</span>
+                  </th>
+                  <td class="whitespace-nowrap">{{if .Write}}write{{else}}read-only{{end}}</td>
+                  <td class="whitespace-nowrap">
+                    {{if .NeverExpires}}<span class="chip chip-draft">never expires</span>
+                    {{else if .InvalidExpiry}}<span class="chip chip-closed">invalid expiry</span> <span class="muted mono text-xs">{{.ExpiresAt}}</span>
+                    {{else if .Expired}}<span class="chip chip-closed">expired</span> <span class="muted mono text-xs">{{.ExpiresAt}}</span>
+                    {{else}}<span class="mono text-xs">{{.ExpiresAt}}</span>{{end}}
+                  </td>
+                  <td class="text-xs">
+                    {{if .LastUsed}}<span>{{rel .LastUsed}}</span>{{if .LastSource}}<span class="muted block break-all">{{.LastSource}}</span>{{end}}{{else}}<span class="muted">not recorded yet</span>{{end}}
+                  </td>
+                </tr>
+                {{end}}
+              </tbody>
+            </table>
+          </div>
+          {{else}}
+          {{template "collab_empty" dict "icon" "file" "title" "No static tokens configured" "hint" "Only OIDC can authenticate today. Add a row under server.auth.tokens on Configuration if a machine needs git or API access." "href" "/admin/config#row-server.auth.tokens" "label" "Configure machine tokens"}}
+          {{end}}
+          <div class="setup-note mt-3">
+            <p class="text-sm">Edits go through Configuration: add, change or revoke a row under <a class="link" href="/admin/config#row-server.auth.tokens">server.auth.tokens</a>. Each row may set <code class="mono text-xs">name</code> (the stable label used above and in the last-used record), <code class="mono text-xs">expires_at</code> (RFC 3339; an expired row is refused with a 401, so git erases it) and <code class="mono text-xs">write</code>. <strong>server.auth.tokens requires a restart</strong>, and a row whose credential resolves to nothing is dropped at startup. <strong>No API route mints or revokes a static token</strong>, so this page offers no such control.</p>
+            <p class="mt-2 text-sm"><strong>Rotation without downtime is a rolling deploy.</strong> Add the NEW row for the same principal, roll a second instance with it (the old token still works while both rows are configured), update clients, then remove the OLD row and roll again. A single-instance restart is only downtime-free if your orchestrator overlaps old and new processes; there is no in-process config reload, so restarting one instance in place is a brief outage for its in-flight requests.</p>
+            <p class="muted mt-1 text-sm">Last use is recorded at most once per token per five minutes, asynchronously: a write failure only leaves the column stale, never fails a request. <code class="mono text-xs">wgt_</code> personal access tokens are a different credential: a signed-in user mints one at <a class="link" href="/_auth/tokens">/_auth/tokens</a>; rotating <code class="mono text-xs">server.auth.session_secret</code> revokes every session and <code class="mono text-xs">wgt_</code> token at once.</p>
+          </div>
+          {{else}}
+          {{template "collab_empty" dict "icon" "file" "title" "No machine credentials to report" "hint" "There is no loaded configuration, so no static token table is in force. Fix it on Configuration, save, and restart." "href" "/admin/config#row-server.auth.tokens" "label" "Open configuration"}}
+          {{end}}
+        </section>
+
+        {{/* ---- 5. Discovery test ---- */}}
+        <section class="card mb-4 p-4" aria-labelledby="admin-access-discovery">
+          <h2 class="card-header" id="admin-access-discovery">Discovery test</h2>
+          <p class="muted mt-1 text-sm">Fetches <code class="mono text-xs">&lt;issuer&gt;/.well-known/openid-configuration</code> and its <code class="mono text-xs">jwks_uri</code>, and reports precisely which step failed. It is a live probe only — <strong>Save never contacts the IdP and does not require this test to pass</strong>, so recovery does not depend on the thing being recovered.</p>
+          <form class="mt-3 grid gap-3" method="post" action="/admin/config/auth-test"
+                hx-post="/admin/config/auth-test" hx-target="#admin-access-auth-test" hx-swap="innerHTML">
+            <div class="grid gap-3 sm:grid-cols-2">
+              <div class="min-w-0">
+                <label class="mb-1 block text-sm font-medium" for="access-auth-test-issuer">Issuer</label>
+                <input class="input w-full" id="access-auth-test-issuer" name="issuer" type="url" value="{{.Data.Access.Issuer}}" placeholder="https://id.example.com">
+              </div>
+              <div class="min-w-0">
+                <label class="mb-1 block text-sm font-medium" for="access-auth-test-client">Client ID</label>
+                <input class="input w-full" id="access-auth-test-client" name="client_id" type="text" value="{{.Data.Access.ClientID}}">
+              </div>
+            </div>
+            <input type="hidden" name="redirect_uri" value="{{.Data.Access.RedirectURI}}">
+            <div class="flex flex-wrap items-center gap-2">
+              <button type="submit" class="btn">Test discovery + signing keys</button>
+              <span class="muted text-[11px]">reuses the Configuration page's probe (POST /admin/config/auth-test)</span>
+            </div>
+          </form>
+          <div id="admin-access-auth-test" aria-live="polite"></div>
+        </section>
+
+        {{/* ---- 6. Sessions ---- */}}
+        <section class="card p-4" aria-labelledby="admin-access-sessions">
+          <h2 class="card-header" id="admin-access-sessions">Sessions</h2>
+          <div class="mt-2">
+            {{range .Data.Access.SessionFacts}}{{template "admin-access-fact" .}}{{end}}
+          </div>
+          <div class="setup-callout mt-3">
+            <p class="text-sm"><strong>Administration is re-derived on every request</strong> from the session's verified groups against the current <code class="mono text-xs">server.auth.admin_groups</code>, so editing that list revokes or grants admin immediately — no re-login, no restart. Group values are captured at sign-in: a change at the IdP (added or removed membership) takes effect when the user signs in again, or when the session expires after <code class="mono text-xs">server.auth.session_ttl</code>.</p>
+            <p class="muted mt-1 text-sm">Rotating <code class="mono text-xs">server.auth.session_secret</code> revokes every session and <code class="mono text-xs">wgt_</code> token at once. Machine check: <code class="mono text-xs">curl -b walgit_session=… /_auth/me</code> returns this principal's <code class="mono text-xs">groups</code>, <code class="mono text-xs">admin</code> and <code class="mono text-xs">groups_claim</code>.</p>
+          </div>
+        </section>
+      {{end}}
+    </div>
+  </div>
+</div>
+{{end}}

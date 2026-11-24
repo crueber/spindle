@@ -4,7 +4,7 @@
 // service call the JSON API handler makes, so a page and its API twin cannot
 // drift. The one composition call
 //
-//	d := webui.SettingsDeps{ /* setup* fields from cmd/spindle/webui.go */ }
+//	d := webui.SettingsDeps{ /* repo/org fields from cmd/spindle/webui.go */ }
 //	d.BindSettingsServices(webui.SettingsServices{
 //	    API: apiEnv, Ident: c.ident, Checks: c.checksSvc, Notify: c.notifySvc,
 //	    Mirror: c.mirrorHandler, Push: c.pushMirrorHandler, Now: time.Now,
@@ -29,6 +29,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
+	"reflect"
 	"sort"
 	"strconv"
 	"strings"
@@ -46,16 +47,45 @@ import (
 	"github.com/crueber/spindle/internal/threads"
 )
 
-// ThreadsSettings is the runner/secret surface the settings pages need (the
-// Threads service's admin methods; composition binds *threads.Service).
+// ThreadsSettings is the secret surface the repo settings page needs (the
+// Threads service's secret methods; composition binds *threads.Service).
+// Runners are INSTANCE infrastructure and are administered in the
+// Administration area (/admin/runners), never in repo settings.
 type ThreadsSettings interface {
-	ListRunners(ctx context.Context, repo string, p auth.Principal) ([]threads.RunnerView, error)
-	MintRegistrationToken(ctx context.Context, repo string, p auth.Principal) (*threads.RegistrationToken, error)
-	RevokeRunner(ctx context.Context, repo, id string, p auth.Principal) error
 	ListSecrets(ctx context.Context, repo string, p auth.Principal) ([]threads.SecretView, error)
 	SetSecret(ctx context.Context, repo, name, value string, p auth.Principal) error
 	DeleteSecret(ctx context.Context, repo, name string, p auth.Principal) error
 	SecretsEnabled() bool
+}
+
+// environmentAdmin is the deployment-environment surface Settings → Environments
+// needs (docs/PLAN-THREADS-ENVIRONMENTS.md). It is discovered by type assertion
+// on SettingsServices.Threads: composition binds *threads.Service once, and a
+// service (or a test fake) without these methods simply renders the tab's "not
+// wired" card.
+type environmentAdmin interface {
+	ListEnvironments(ctx context.Context, repo string, p auth.Principal) ([]threads.EnvironmentView, error)
+	PutEnvironment(ctx context.Context, repo, name string, in threads.EnvironmentInput, p auth.Principal) (*threads.EnvironmentView, error)
+	DeleteEnvironment(ctx context.Context, repo, name string, p auth.Principal) error
+	ListEnvironmentSecrets(ctx context.Context, repo, env string, p auth.Principal) ([]threads.SecretView, error)
+	SetEnvironmentSecret(ctx context.Context, repo, env, name, value string, p auth.Principal) error
+	DeleteEnvironmentSecret(ctx context.Context, repo, env, name string, p auth.Principal) error
+	SecretsEnabled() bool
+}
+
+// environments returns the bound environment surface (nil when unwired). A
+// typed-nil *threads.Service (a restricted build wires the settings pages with
+// no Threads service) is treated as unwired, so the tab renders its honest card
+// instead of calling a method on a nil receiver.
+func (s SettingsServices) environments() environmentAdmin {
+	e, ok := s.Threads.(environmentAdmin)
+	if !ok {
+		return nil
+	}
+	if v := reflect.ValueOf(e); v.Kind() == reflect.Ptr && v.IsNil() {
+		return nil
+	}
+	return e
 }
 
 // SettingsServices is the concrete service set the settings group adapts.
@@ -67,7 +97,7 @@ type SettingsServices struct {
 	Notify *notify.Service
 	Mirror *mirror.Handler
 	Push   *pushmirror.Handler
-	// Threads powers Settings → Runners and Settings → Secrets (15 §6).
+	// Threads powers Settings → Secrets (15 §6).
 	Threads ThreadsSettings
 
 	// Now is the clock for derived timestamps (tests pin it).
@@ -97,6 +127,9 @@ func (d *SettingsDeps) BindSettingsServices(s SettingsServices) {
 	d.RepoPolicy = s.repoPolicy
 	d.RepoProtection = s.repoProtection
 	d.RepoConfig = s.repoConfig
+	if s.environments() != nil {
+		d.RepoEnvironments = s.repoEnvironments
+	}
 	if s.API != nil && s.API.Repo != nil {
 		d.RepoWAL = s.repoWAL
 	}
@@ -351,19 +384,22 @@ func (s SettingsServices) repoPolicy(ctx context.Context, owner, repo string) (*
 }
 
 // repoProtection reads the SAME stored policy the API enforces and projects
-// it into the Branch protection tab (the managed rules seed the form; every
-// rule feeds the read-only effective view).
+// it into the Branch protection tab: every named ruleset (the pre-ruleset
+// names read as "default"), the read-only rule table, and the raw document.
 func (s SettingsServices) repoProtection(ctx context.Context, owner, repo string) (*SettingsProtection, error) {
 	if s.API == nil || s.API.Store == nil {
 		return nil, nil
 	}
 	raw, _, err := api.PolicyRaw(ctx, s.API, s.repoID(owner, repo))
 	if err != nil {
-		out := &SettingsProtection{Enabled: true, Refs: "refs/heads/main", Roles: settingsProtectionRoles, Raw: string(raw)}
+		out := &SettingsProtection{
+			Owner: owner, Repo: repo, Roles: settingsProtectionRoles,
+			Methods: settingsMergeMethodOptions, Raw: string(raw),
+		}
 		out.Error = err.Error()
 		return out, nil
 	}
-	return settingsProtectionView(raw), nil
+	return settingsProtectionView(raw, owner, repo), nil
 }
 
 func (s SettingsServices) repoConfig(ctx context.Context, owner, repo string) (*SettingsConfig, error) {
@@ -510,21 +546,6 @@ func (s SettingsServices) repoAdmin(ctx context.Context, owner, repo string, p a
 	}
 	sort.SliceStable(out.Webhooks, func(i, j int) bool { return out.Webhooks[i].ID < out.Webhooks[j].ID })
 	if s.Threads != nil {
-		runners, err := s.Threads.ListRunners(ctx, owner+"/"+repo, p)
-		if err != nil {
-			return nil, err
-		}
-		out.RunnersWired = true
-		for _, r := range runners {
-			row := SettingsRunner{
-				ID: r.ID, Name: r.Name, Labels: strings.Join(r.Labels, ", "), State: r.State,
-				Version: r.DeclaredVersion, CreatedAt: r.CreatedAt,
-			}
-			if r.LastSeenAt != nil {
-				row.LastSeenAt = *r.LastSeenAt
-			}
-			out.Runners = append(out.Runners, row)
-		}
 		secrets, err := s.Threads.ListSecrets(ctx, owner+"/"+repo, p)
 		if err != nil {
 			return nil, err
@@ -546,12 +567,20 @@ func (s SettingsServices) repoWrite(ctx context.Context, owner, repo string, p a
 	}
 	// Every repo settings mutation re-checks the admin gate at the seam (the
 	// page checked it, but the seam is public) — the same rule the API's
-	// AuthAdmin routes apply.
+	// AuthAdmin routes apply. Deployment environments are the exception and
+	// carry the same maintain floor as their service methods
+	// (docs/PLAN-THREADS-ENVIRONMENTS.md §7).
+	seamRole := identity.RoleAdmin
+	switch w.Action {
+	case SettingsActionEnvironmentPut, SettingsActionEnvironmentDelete,
+		SettingsActionEnvironmentSecretPut, SettingsActionEnvironmentSecretDelete:
+		seamRole = identity.RoleMaintain
+	}
 	if s.Ident != nil {
-		if aerr := s.Ident.CheckRole(ctx, owner, repo, p, identity.RoleAdmin); aerr != nil {
+		if aerr := s.Ident.CheckRole(ctx, owner, repo, p, seamRole); aerr != nil {
 			return SettingsWriteResult{}, settingsAuthErr(aerr)
 		}
-	} else if !p.Admin {
+	} else if !p.Admin && seamRole == identity.RoleAdmin {
 		return SettingsWriteResult{}, settingsWriteErr(http.StatusForbidden, "admin access required")
 	}
 	id := s.repoID(owner, repo)
@@ -596,28 +625,40 @@ func (s SettingsServices) repoWrite(ctx context.Context, owner, repo string, p a
 			return SettingsWriteResult{}, settingsWriteErr(http.StatusServiceUnavailable, "policy store not configured")
 		}
 		cur, _, _ := api.PolicyRaw(ctx, s.API, id)
-		in, verr := settingsProtectionInputFrom(SettingsProtection{
-			Enabled:      w.Get("enabled") != "",
-			Refs:         w.Get("refs"),
-			Approvals:    settingsAtoiOr(w.Get("approvals"), 0),
-			DismissStale: w.Get("dismiss_stale") != "",
-			Checks:       w.Get("checks"),
-			PushRoles:    w.Multi["push_roles"],
-			BlockForce:   w.Get("block_force") != "",
-			BlockDelete:  w.Get("block_delete") != "",
-		})
-		if verr != nil {
-			return SettingsWriteResult{}, settingsWriteErr(http.StatusBadRequest, verr.Error())
-		}
+		in := settingsRulesetInputFrom(w)
 		in.Owner, in.Repo = owner, repo
-		doc, berr := settingsProtectionDocument(cur, in)
+		// A ruleset delete is destructive: the row's typed confirmation names
+		// the pair, and the server re-checks it (the disabled button is only
+		// an affordance, never the boundary). Unchecking "enabled" needs no
+		// arm — it is the plain form and it removes exactly the same bytes.
+		if in.Action == "delete" && w.Get("confirm") != "protection:"+in.Slug {
+			return SettingsWriteResult{}, settingsWriteErr(http.StatusBadRequest,
+				"type protection:"+in.Slug+" exactly to confirm removal")
+		}
+		doc, warnings, berr := settingsProtectionApply(cur, owner, repo, in)
 		if berr != nil {
 			return SettingsWriteResult{}, settingsWriteErr(http.StatusBadRequest, berr.Error())
 		}
 		if werr := api.PutPolicy(ctx, s.API, id, doc); werr != nil {
 			return SettingsWriteResult{}, settingsWriteErr(werr.Status, werr.Message)
 		}
-		return SettingsWriteResult{Notice: "branch protection saved"}, nil
+		notice := settingsProtectionNotice(in)
+		if len(warnings) > 0 {
+			notice += " — " + strings.Join(warnings, "; ")
+		}
+		res := SettingsWriteResult{Notice: notice}
+		// Saving a ruleset returns to its form (the list is one hop away);
+		// every other verb lands on the list. The notice rides the redirect
+		// the handler appends, so it is not repeated here.
+		if in.Action == "save" && in.Enabled {
+			slug := in.NewSlug
+			if slug == "" {
+				slug = in.Slug
+			}
+			res.Redirect = "/" + url.PathEscape(owner) + "/" + url.PathEscape(repo) +
+				"/settings/protection/" + url.PathEscape(slug)
+		}
+		return res, nil
 	case SettingsActionPolicyDryRun:
 		if s.API == nil || s.API.Repo == nil {
 			return SettingsWriteResult{}, settingsWriteErr(http.StatusServiceUnavailable, "policy evaluation not configured")
@@ -680,14 +721,18 @@ func (s SettingsServices) repoWrite(ctx context.Context, owner, repo string, p a
 		return s.createToken(ctx, owner, repo, p, w)
 	case SettingsActionTokenRevoke:
 		return s.revokeToken(ctx, owner, repo, p, w)
-	case SettingsActionRunnerToken:
-		return s.mintRunnerToken(ctx, owner, repo, p, w)
-	case SettingsActionRunnerRevoke:
-		return s.revokeRunner(ctx, owner, repo, p, w)
 	case SettingsActionSecretPut:
 		return s.putSecret(ctx, owner, repo, p, w)
 	case SettingsActionSecretDelete:
 		return s.deleteSecret(ctx, owner, repo, p, w)
+	case SettingsActionEnvironmentPut:
+		return s.putEnvironment(ctx, owner, repo, p, w)
+	case SettingsActionEnvironmentDelete:
+		return s.deleteEnvironment(ctx, owner, repo, p, w)
+	case SettingsActionEnvironmentSecretPut:
+		return s.putEnvironmentSecret(ctx, owner, repo, p, w)
+	case SettingsActionEnvironmentSecretDelete:
+		return s.deleteEnvironmentSecret(ctx, owner, repo, p, w)
 	case SettingsActionWebhookCreate:
 		return s.createWebhook(ctx, owner, repo, p, w)
 	case SettingsActionWebhookUpdate:
@@ -1011,30 +1056,6 @@ func (s SettingsServices) revokeToken(ctx context.Context, owner, repo string, p
 	return SettingsWriteResult{Notice: "token revoked"}, nil
 }
 
-func (s SettingsServices) mintRunnerToken(ctx context.Context, owner, repo string, p auth.Principal, w SettingsRepoWrite) (SettingsWriteResult, *SettingsWriteError) {
-	if s.Threads == nil {
-		return SettingsWriteResult{}, settingsWriteErr(http.StatusServiceUnavailable, "the Threads service is not configured")
-	}
-	created, err := s.Threads.MintRegistrationToken(ctx, owner+"/"+repo, p)
-	if err != nil {
-		return SettingsWriteResult{}, settingsWriteErr(settingsThreadsStatus(err), err.Error())
-	}
-	return SettingsWriteResult{
-		Secret: created.Token,
-		Notice: "runner registration token created — copy it now, it is shown once and expires " + created.ExpiresAt,
-	}, nil
-}
-
-func (s SettingsServices) revokeRunner(ctx context.Context, owner, repo string, p auth.Principal, w SettingsRepoWrite) (SettingsWriteResult, *SettingsWriteError) {
-	if s.Threads == nil {
-		return SettingsWriteResult{}, settingsWriteErr(http.StatusServiceUnavailable, "the Threads service is not configured")
-	}
-	if err := s.Threads.RevokeRunner(ctx, owner+"/"+repo, w.Get("id"), p); err != nil {
-		return SettingsWriteResult{}, settingsWriteErr(settingsThreadsStatus(err), err.Error())
-	}
-	return SettingsWriteResult{Notice: "runner revoked"}, nil
-}
-
 func (s SettingsServices) putSecret(ctx context.Context, owner, repo string, p auth.Principal, w SettingsRepoWrite) (SettingsWriteResult, *SettingsWriteError) {
 	if s.Threads == nil {
 		return SettingsWriteResult{}, settingsWriteErr(http.StatusServiceUnavailable, "the Threads service is not configured")
@@ -1053,6 +1074,101 @@ func (s SettingsServices) deleteSecret(ctx context.Context, owner, repo string, 
 		return SettingsWriteResult{}, settingsWriteErr(settingsThreadsStatus(err), err.Error())
 	}
 	return SettingsWriteResult{Notice: "secret deleted"}, nil
+}
+
+// repoEnvironments is the Settings → Environments read: one list call plus one
+// secret-name list per environment (values never leave the store). Every call
+// is the same service method the JSON API uses, so the page and its API twin
+// share one role floor (maintain).
+func (s SettingsServices) repoEnvironments(ctx context.Context, owner, repo string, p auth.Principal) (*SettingsEnvironmentPanel, error) {
+	envs := s.environments()
+	if envs == nil {
+		return nil, nil
+	}
+	list, err := envs.ListEnvironments(ctx, owner+"/"+repo, p)
+	if err != nil {
+		return nil, err
+	}
+	out := &SettingsEnvironmentPanel{Wired: true, Enabled: envs.SecretsEnabled()}
+	for _, env := range list {
+		row := SettingsEnvironment{
+			Name: env.Name, Reviewers: env.RequiredReviewers,
+			ReviewersText: strings.Join(env.RequiredReviewers, ", "),
+			CreatedAt:     env.CreatedAt, UpdatedAt: env.UpdatedAt,
+		}
+		secrets, serr := envs.ListEnvironmentSecrets(ctx, owner+"/"+repo, env.Name, p)
+		if serr != nil {
+			return nil, serr
+		}
+		for _, sec := range secrets {
+			row.Secrets = append(row.Secrets, SettingsSecret{Name: sec.Name, CreatedAt: sec.CreatedAt, UpdatedAt: sec.UpdatedAt})
+		}
+		out.Rows = append(out.Rows, row)
+	}
+	return out, nil
+}
+
+// putEnvironment creates or replaces one environment record (maintain floor,
+// re-checked by the service).
+func (s SettingsServices) putEnvironment(ctx context.Context, owner, repo string, p auth.Principal, w SettingsRepoWrite) (SettingsWriteResult, *SettingsWriteError) {
+	envs := s.environments()
+	if envs == nil {
+		return SettingsWriteResult{}, settingsWriteErr(http.StatusServiceUnavailable, "the Threads service is not configured")
+	}
+	reviewers := settingsReviewerList(w.Get("environment_reviewers"))
+	if _, err := envs.PutEnvironment(ctx, owner+"/"+repo, w.Get("environment_name"),
+		threads.EnvironmentInput{RequiredReviewers: reviewers}, p); err != nil {
+		return SettingsWriteResult{}, settingsWriteErr(settingsThreadsStatus(err), err.Error())
+	}
+	return SettingsWriteResult{Notice: "environment saved"}, nil
+}
+
+// deleteEnvironment removes one environment (and its sealed secrets).
+func (s SettingsServices) deleteEnvironment(ctx context.Context, owner, repo string, p auth.Principal, w SettingsRepoWrite) (SettingsWriteResult, *SettingsWriteError) {
+	envs := s.environments()
+	if envs == nil {
+		return SettingsWriteResult{}, settingsWriteErr(http.StatusServiceUnavailable, "the Threads service is not configured")
+	}
+	if err := envs.DeleteEnvironment(ctx, owner+"/"+repo, w.Get("id"), p); err != nil {
+		return SettingsWriteResult{}, settingsWriteErr(settingsThreadsStatus(err), err.Error())
+	}
+	return SettingsWriteResult{Notice: "environment deleted"}, nil
+}
+
+// putEnvironmentSecret stores one environment-scoped secret (write-only).
+func (s SettingsServices) putEnvironmentSecret(ctx context.Context, owner, repo string, p auth.Principal, w SettingsRepoWrite) (SettingsWriteResult, *SettingsWriteError) {
+	envs := s.environments()
+	if envs == nil {
+		return SettingsWriteResult{}, settingsWriteErr(http.StatusServiceUnavailable, "the Threads service is not configured")
+	}
+	if err := envs.SetEnvironmentSecret(ctx, owner+"/"+repo, w.Get("id"),
+		w.Get("environment_secret_name"), w.Get("environment_secret_value"), p); err != nil {
+		return SettingsWriteResult{}, settingsWriteErr(settingsThreadsStatus(err), err.Error())
+	}
+	return SettingsWriteResult{Notice: "environment secret stored (write-only — the value can never be read back)"}, nil
+}
+
+// deleteEnvironmentSecret removes one environment-scoped secret.
+func (s SettingsServices) deleteEnvironmentSecret(ctx context.Context, owner, repo string, p auth.Principal, w SettingsRepoWrite) (SettingsWriteResult, *SettingsWriteError) {
+	envs := s.environments()
+	if envs == nil {
+		return SettingsWriteResult{}, settingsWriteErr(http.StatusServiceUnavailable, "the Threads service is not configured")
+	}
+	if err := envs.DeleteEnvironmentSecret(ctx, owner+"/"+repo, w.Get("id"), w.Get("environment_secret_name"), p); err != nil {
+		return SettingsWriteResult{}, settingsWriteErr(settingsThreadsStatus(err), err.Error())
+	}
+	return SettingsWriteResult{Notice: "environment secret deleted"}, nil
+}
+
+// settingsReviewerList splits the reviewers textarea/CSV into names.
+func settingsReviewerList(raw string) []string {
+	var out []string
+	for _, part := range strings.FieldsFunc(raw, func(r rune) bool { return r == ',' || r == '\n' || r == ' ' || r == ';' }) {
+		if part = strings.TrimSpace(part); part != "" {
+			out = append(out, part)
+		}
+	}
+	return out
 }
 
 func (s SettingsServices) createWebhook(ctx context.Context, owner, repo string, p auth.Principal, w SettingsRepoWrite) (SettingsWriteResult, *SettingsWriteError) {
@@ -1208,6 +1324,11 @@ func (s SettingsServices) redeliverWebhook(ctx context.Context, owner, repo stri
 	return SettingsWriteResult{Notice: "redelivered #" + strconv.Itoa(entry.Seq) + " → " + strconv.Itoa(entry.Status)}, nil
 }
 
+// transferRepo starts the `repo-transfer` task (PLAN-V2 §3 T.1) and answers
+// the card that follows its progress. It never blocks on the move: a large
+// repository takes minutes, the settings request does not, and the source page
+// only exists until the move commits — so the result is a live task card whose
+// success target is the destination, not a redirect.
 func (s SettingsServices) transferRepo(ctx context.Context, owner, repo string, p auth.Principal, w SettingsRepoWrite) (SettingsWriteResult, *SettingsWriteError) {
 	if s.Ident == nil {
 		return SettingsWriteResult{}, settingsWriteErr(http.StatusServiceUnavailable, "identity service not configured")
@@ -1223,12 +1344,25 @@ func (s SettingsServices) transferRepo(ctx context.Context, owner, repo string, 
 	if aerr := s.Ident.CheckCreateOwner(ctx, dstOwner, p); aerr != nil {
 		return SettingsWriteResult{}, settingsAuthErr(aerr)
 	}
-	if err := s.Ident.TransferRepo(ctx, owner, repo, dstOwner, dstRepo); err != nil {
+	rec, joined, err := s.Ident.BeginTransfer(ctx, identity.TransferRequest{
+		SrcOwner: owner, SrcRepo: repo, DstOwner: dstOwner, DstRepo: dstRepo,
+	})
+	if err != nil {
 		return SettingsWriteResult{}, settingsWriteErr(settingsIdentityStatus(err), err.Error())
 	}
+	notice := "transfer started — the task moves and verifies the repository, then opens the new path"
+	if joined {
+		notice = "a transfer of this repository is already running — attached to its progress"
+	}
 	return SettingsWriteResult{
-		Notice:   "repository transferred to " + dstOwner + "/" + dstRepo,
-		Redirect: "/" + dstOwner + "/" + dstRepo + "/settings/general?saved=1",
+		Notice: notice,
+		Task: &SettingsTask{
+			ID:     rec.ID,
+			Kind:   rec.Kind,
+			Stream: "/" + url.PathEscape(owner) + "/" + url.PathEscape(repo) + "/api/tasks/" + url.PathEscape(rec.ID),
+			Next:   "/" + url.PathEscape(dstOwner) + "/" + url.PathEscape(dstRepo),
+			Title:  "transferring to " + dstOwner + "/" + dstRepo,
+		},
 	}, nil
 }
 

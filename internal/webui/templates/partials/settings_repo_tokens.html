@@ -1,0 +1,65 @@
+{{/* partials/settings_repo_tokens.html — repo settings → CI tokens.
+   One settings tab per file: a new tab is a new settings_repo_<tab>.html
+   partial plus one dispatch line in pages/settings/repo.html — never a body
+   in the shell. Every panel receives the SettingsRepoPage, so a form can
+   build its action from .Owner/.Name. Anatomy: .card sections, the .setup-row
+   label/control pairing for forms, .data-table inside overflow-x-auto
+   (guideline §8). 390px: fields full width, toggle rows keep
+   label-left/control-right, tables scroll in place. */}}
+{{/* ---- CI tokens -------------------------------------------------------- */}}
+{{define "settings-repo-tokens"}}
+{{with .AdminData}}
+<div class="space-y-4">
+  {{if .NewToken}}
+  <div class="card border-l-2 border-l-[var(--pd-warn)] p-3 text-sm">
+    <strong class="font-semibold">Copy now — shown once.</strong>
+    <p class="mt-1 break-all mono text-xs" id="ci-token-secret">{{.NewToken}}</p>
+    <button type="button" class="btn mt-2" data-copy="#ci-token-secret">copy</button>
+  </div>
+  {{end}}
+  {{if not .TokensWired}}
+  <div class="card p-4"><p class="muted text-sm">The CI-token service is not wired on this build.</p></div>
+  {{else}}
+  <form class="card p-4" method="post" action="/{{$.Owner}}/{{$.Name}}/settings/tokens"
+        hx-post="/{{$.Owner}}/{{$.Name}}/settings/tokens" hx-target="#settings-panel" hx-select="#settings-panel" hx-swap="outerHTML">
+    <h3 class="card-header">Create a CI token</h3>
+    <label class="mb-1 block text-sm font-medium" for="token-name">Name</label>
+    <input class="input md:max-w-md" id="token-name" name="name" type="text" required placeholder="ci" value="{{.NewName}}">
+    <p class="muted mt-1 text-[11px]">Scope <code class="mono text-xs">checks:write</code> only — a CI token can report checks, never write the repo.</p>
+    <div class="mt-2"><button type="submit" class="btn primary">create token</button></div>
+    {{if .Error}}<p class="err-line" role="alert">{{.Error}}</p>{{end}}
+  </form>
+  <section class="card p-4">
+    <h3 class="card-header">Tokens</h3>
+    {{if .Tokens}}
+    <div class="overflow-x-auto">
+      <table class="data-table">
+        <thead><tr><th scope="col">name</th><th scope="col">scopes</th><th scope="col">created by</th><th scope="col">created</th><th scope="col">status</th><th scope="col"></th></tr></thead>
+        <tbody>
+          {{range .Tokens}}
+          <tr>
+            <td class="mono font-medium">{{.Name}}</td>
+            <td class="muted mono text-xs">{{.Scopes}}</td>
+            <td class="mono">{{.CreatedBy}}</td>
+            <td class="tabular muted text-[11px] mono">{{.CreatedAt}}</td>
+            <td>{{if .RevokedAt}}<span class="chip-closed">revoked</span> <span class="muted text-[11px] mono">{{.RevokedAt}}</span>{{else}}<span class="chip-open">active</span>{{end}}</td>
+            <td>
+              {{if not .RevokedAt}}
+              <form method="post" action="/{{$.Owner}}/{{$.Name}}/settings/tokens/{{.ID}}"
+                    hx-post="/{{$.Owner}}/{{$.Name}}/settings/tokens/{{.ID}}" hx-target="#settings-panel" hx-select="#settings-panel" hx-swap="outerHTML">
+                <input type="hidden" name="token_action" value="revoke">
+                <button type="submit" class="link text-xs">revoke</button>
+              </form>
+              {{end}}
+            </td>
+          </tr>
+          {{end}}
+        </tbody>
+      </table>
+    </div>
+    {{else}}<p class="muted text-sm">no tokens.</p>{{end}}
+  </section>
+  {{end}}
+</div>
+{{else}}{{template "settings-repo-notwired" .}}{{end}}
+{{end}}

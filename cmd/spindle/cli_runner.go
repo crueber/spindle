@@ -1,26 +1,23 @@
-// cli_runner.go — the runner protocol's operator verbs (docs/features/15 §3/§6):
+// cli_runner.go — the runner process (docs/PLAN-INSTANCE-RUNNERS.md §6,
+// docs/features/15 §3/§6):
 //
-//	spindle runner token  OWNER/REPO [--labels linux,docker] [--name N]
-//	spindle runner list   OWNER/REPO
-//	spindle runner revoke OWNER/REPO ID
+//	spindle runner serve [--register TOKEN] [--labels a,b] [--capacity N]
 //
-// `runner token` mints a one-time registration token (printed once, the
-// `checks tokens` UX); the runner process itself is pass B2 and lives outside
-// this binary.
+// Runners are INSTANCE infrastructure administered by a host administrator in
+// the browser at /admin/runners. Mint/list/revoke are deliberately NOT CLI
+// verbs: the CLI's API client speaks static machine credentials, which cannot
+// administer (AGENTS law 9), so a token/list/revoke command could only 403.
+// `runner serve --register` is the operator step after a browser mint.
 package main
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"log/slog"
-	"net/http"
-	"net/url"
 	"os"
 	"strings"
 	"time"
 
-	"github.com/crueber/spindle/internal/threads"
 	"github.com/crueber/spindle/internal/threads/runner"
 )
 
@@ -33,15 +30,20 @@ import (
 func runRunnerServe(ctx context.Context, c *cli, args []string) int {
 	fs := newAPIFlagSet(c, "runner serve")
 	var (
-		capacity        int
-		labels          string
-		name            string
-		register        string
-		tokenFile       string
-		dockerBin       string
-		image           string
-		allowHostDocker bool
-		fetchTimeout    int
+		capacity           int
+		labels             string
+		name               string
+		register           string
+		tokenFile          string
+		dockerBin          string
+		image              string
+		imagePrefix        string
+		imagePull          string
+		imagePrefixAll     bool
+		imageRequireDigest bool
+		allowHostDocker    bool
+		allowForkRuns      bool
+		fetchTimeout       int
 	)
 	fs.IntVar(&capacity, "capacity", envInt("SPINDLE_RUNNER_CAPACITY", 1), "concurrent jobs this runner keeps in flight (default 1)")
 	fs.StringVar(&labels, "labels", envStr("SPINDLE_RUNNER_LABELS", "self-hosted,linux,docker"), "comma-separated labels the runner declares")
@@ -50,7 +52,12 @@ func runRunnerServe(ctx context.Context, c *cli, args []string) int {
 	fs.StringVar(&tokenFile, "token-file", envStr("SPINDLE_RUNNER_TOKEN_FILE", ""), "file holding the runner token (0600); SPINDLE_RUNNER_TOKEN wins when set")
 	fs.StringVar(&dockerBin, "docker", envStr("SPINDLE_RUNNER_DOCKER", "docker"), "docker CLI binary")
 	fs.StringVar(&image, "image", envStr("SPINDLE_RUNNER_IMAGE", runner.DefaultImage), "default job image when the workflow names none")
+	fs.StringVar(&imagePrefix, "image-prefix", envStr("SPINDLE_RUNNER_IMAGE_PREFIX", ""), "registry mirror prefix host[:port]/path every workflow image is rewritten under (off when empty)")
+	fs.BoolVar(&imagePrefixAll, "image-prefix-all", envBool("SPINDLE_RUNNER_IMAGE_PREFIX_ALL"), "rewrite registry-named images too (drops their host; needs --image-prefix)")
+	fs.StringVar(&imagePull, "image-pull", envStr("SPINDLE_RUNNER_IMAGE_PULL", runner.PullMissing), "docker create --pull policy: missing, always or never")
+	fs.BoolVar(&imageRequireDigest, "image-require-digest", envBool("SPINDLE_RUNNER_IMAGE_REQUIRE_DIGEST"), "refuse an image without @sha256: at plan time")
 	fs.BoolVar(&allowHostDocker, "allow-host-docker", envBool("SPINDLE_RUNNER_ALLOW_HOST_DOCKER"), "acknowledge that DOCKER_HOST exposes the host root filesystem (required for the default socket)")
+	fs.BoolVar(&allowForkRuns, "allow-fork-runs", envBool("SPINDLE_RUNNER_ALLOW_FORK_RUNS"), "execute fork pull-request code on this runner (default off; only on a disposable host)")
 	fs.IntVar(&fetchTimeout, "fetch-timeout", 20, "long-poll seconds per fetch (1–30)")
 	pos, exit := parseAPI(fs, args)
 	if exit != parseContinue {
@@ -58,6 +65,15 @@ func runRunnerServe(ctx context.Context, c *cli, args []string) int {
 	}
 	if len(pos) > 0 {
 		fmt.Fprintf(c.stderr(), "spindle runner serve: unexpected argument %q\n", pos[0])
+		return exitArg
+	}
+	images := runner.ImageConfig{
+		Prefix: imagePrefix, PrefixAll: imagePrefixAll, Pull: imagePull, RequireDigest: imageRequireDigest,
+	}
+	// Validate before anything dials the server: a bad prefix must be a
+	// startup error naming its flag, never a job that fails hours later.
+	if err := runner.ValidateImageConfig(images); err != nil {
+		fmt.Fprintf(c.stderr(), "spindle runner serve: %v\n", err)
 		return exitArg
 	}
 	serverURL, _, err := resolveServer(c)
@@ -76,7 +92,7 @@ func runRunnerServe(ctx context.Context, c *cli, args []string) int {
 		token = strings.TrimSpace(string(b))
 	}
 	if register != "" {
-		res, rerr := runner.Register(ctx, serverURL, strings.TrimSpace(register), name, labelList)
+		res, rerr := runner.Register(ctx, serverURL, strings.TrimSpace(register), name, labelList, capacity, allowForkRuns)
 		if rerr != nil {
 			fmt.Fprintf(c.stderr(), "spindle runner serve: register: %v\n", rerr)
 			return exitErr
@@ -97,9 +113,12 @@ func runRunnerServe(ctx context.Context, c *cli, args []string) int {
 		ServerURL: serverURL, Token: token, Name: name, Labels: labelList,
 		Capacity: capacity, Version: version(),
 		DockerBin: dockerBin, DefaultImage: image, AllowHostDocker: allowHostDocker,
-		ServerOrigin: serverURL,
-		FetchWait:    time.Duration(clamp(fetchTimeout, 1, 30)) * time.Second,
-		Logger:       logger,
+		ImagePrefix: imagePrefix, ImagePrefixAll: imagePrefixAll,
+		ImagePull: imagePull, ImageRequireDigest: imageRequireDigest,
+		AllowForkRuns: allowForkRuns,
+		ServerOrigin:  serverURL,
+		FetchWait:     time.Duration(clamp(fetchTimeout, 1, 30)) * time.Second,
+		Logger:        logger,
 	})
 	if err != nil {
 		fmt.Fprintf(c.stderr(), "spindle runner serve: %v\n", err)
@@ -164,163 +183,9 @@ func clamp(n, lo, hi int) int {
 
 var runnerGroup = &apiGroup{
 	name: "runner",
-	help: "Threads runners: serve jobs, mint registration tokens, list and revoke",
+	help: "Threads instance runners: serve jobs",
 	commands: []apiCommand{
-		{name: "serve", usage: "spindle runner serve [--capacity N] [--labels a,b] [--register TOKEN]", help: "run jobs: declare, fetch, execute in docker, stream logs (SIGTERM stops cleanly)",
-			flags: []string{"capacity", "labels", "name", "register", "token-file", "docker", "image", "allow-host-docker", "fetch-timeout"}, run: runRunnerServe},
-		{name: "token", usage: "spindle runner token OWNER/REPO [--labels a,b] [--name N]", help: "mint a one-time runner registration token",
-			flags: []string{"json", "labels", "name"}, run: runRunnerToken},
-		{name: "list", usage: "spindle runner list OWNER/REPO", help: "list registered runners",
-			flags: []string{"json"}, run: runRunnerList},
-		{name: "revoke", usage: "spindle runner revoke OWNER/REPO ID", help: "revoke a runner",
-			flags: []string{"json", "quiet"}, run: runRunnerRevoke},
+		{name: "serve", usage: "spindle runner serve [--capacity N] [--labels a,b] [--register TOKEN]", help: "run jobs: declare, fetch globally, execute in docker, stream logs (SIGTERM stops cleanly)",
+			flags: []string{"capacity", "labels", "name", "register", "token-file", "docker", "image", "image-prefix", "image-prefix-all", "image-pull", "image-require-digest", "allow-host-docker", "allow-fork-runs", "fetch-timeout"}, run: runRunnerServe},
 	},
 }
-
-// runnerTokenAnswer is the mint response (the one place the secret is shown).
-type runnerTokenAnswer struct {
-	ID        string `json:"id"`
-	Token     string `json:"token"`
-	ExpiresAt string `json:"expires_at"`
-}
-
-func runRunnerToken(ctx context.Context, c *cli, args []string) int {
-	f := &apiFlags{}
-	fs := newAPIFlagSet(c, "runner token")
-	f.add(fs)
-	var labels, name string
-	fs.StringVar(&labels, "labels", "", "comma-separated labels the runner will declare (default self-hosted)")
-	fs.StringVar(&name, "name", "", "runner name recorded at registration")
-	pos, exit := parseAPI(fs, args)
-	if exit != parseContinue {
-		return exit
-	}
-	owner, repo, ok := oneRepo(c, pos, "runner token OWNER/REPO")
-	if !ok {
-		return exitArg
-	}
-	a, err := newAPIClient(c, f)
-	if err != nil {
-		fmt.Fprintf(c.stderr(), "spindle: %v\n", err)
-		return exitErr
-	}
-	raw, err := a.call(ctx, http.MethodPost, threadsRunnerPath(owner, repo, "tokens"), nil,
-		map[string]string{"name": name, "labels": labels})
-	if err != nil {
-		return a.notEnabled(err, "threads")
-	}
-	if f.json {
-		return a.emitJSON(raw)
-	}
-	var answer runnerTokenAnswer
-	if err := json.Unmarshal(raw, &answer); err != nil {
-		return a.emitJSON(raw)
-	}
-	if !f.quiet {
-		fmt.Fprintf(c.stdout(), "Registration token (shown once, expires %s):\n%s\n\n", answer.ExpiresAt, answer.Token)
-		fmt.Fprintln(c.stdout(), "Pass it to the runner's `register` call; it cannot be read back.")
-	}
-	return exitOK
-}
-
-func runRunnerList(ctx context.Context, c *cli, args []string) int {
-	f := &apiFlags{}
-	fs := newAPIFlagSet(c, "runner list")
-	f.add(fs)
-	pos, exit := parseAPI(fs, args)
-	if exit != parseContinue {
-		return exit
-	}
-	owner, repo, ok := oneRepo(c, pos, "runner list OWNER/REPO")
-	if !ok {
-		return exitArg
-	}
-	a, err := newAPIClient(c, f)
-	if err != nil {
-		fmt.Fprintf(c.stderr(), "spindle: %v\n", err)
-		return exitErr
-	}
-	raw, err := a.call(ctx, http.MethodGet, threadsRunnerPath(owner, repo), nil, nil)
-	if err != nil {
-		return a.notEnabled(err, "threads")
-	}
-	if f.json {
-		return a.emitJSON(raw)
-	}
-	var body struct {
-		Runners []struct {
-			ID           string   `json:"id"`
-			Name         string   `json:"name"`
-			Labels       []string `json:"labels"`
-			State        string   `json:"state"`
-			LastSeenAt   *string  `json:"last_seen_at"`
-			RegisteredAt *string  `json:"registered_at"`
-		} `json:"runners"`
-	}
-	if err := json.Unmarshal(raw, &body); err != nil {
-		return a.emitJSON(raw)
-	}
-	t := newTable(c.stdout(), "ID", "NAME", "STATE", "LABELS", "LAST SEEN")
-	for _, r := range body.Runners {
-		seen := "-"
-		if r.LastSeenAt != nil {
-			seen = *r.LastSeenAt
-		}
-		t.row(r.ID, r.Name, r.State, joinComma(r.Labels), seen)
-	}
-	t.flush()
-	return exitOK
-}
-
-func runRunnerRevoke(ctx context.Context, c *cli, args []string) int {
-	f := &apiFlags{}
-	fs := newAPIFlagSet(c, "runner revoke")
-	f.add(fs)
-	pos, exit := parseAPI(fs, args)
-	if exit != parseContinue {
-		return exit
-	}
-	owner, repo, id, ok := repoAndWord(c, pos, "runner revoke OWNER/REPO ID")
-	if !ok {
-		return exitArg
-	}
-	a, err := newAPIClient(c, f)
-	if err != nil {
-		fmt.Fprintf(c.stderr(), "spindle: %v\n", err)
-		return exitErr
-	}
-	raw, err := a.call(ctx, http.MethodDelete, threadsRunnerPath(owner, repo, url.PathEscape(id)), nil, nil)
-	if err != nil {
-		return a.notEnabled(err, "threads")
-	}
-	if f.json {
-		return a.emitJSON(raw)
-	}
-	if !f.quiet {
-		fmt.Fprintf(c.stdout(), "Revoked runner %s\n", id)
-	}
-	return exitOK
-}
-
-// threadsRunnerPath builds /{o}/{r}/api/threads/runners[/…].
-func threadsRunnerPath(owner, repo string, segs ...string) string {
-	return apiPath(owner, repo, append([]string{"threads", "runners"}, segs...)...)
-}
-
-// joinComma renders a label list for the table.
-func joinComma(in []string) string {
-	out := ""
-	for i, s := range in {
-		if i > 0 {
-			out += ","
-		}
-		out += s
-	}
-	if out == "" {
-		return "-"
-	}
-	return out
-}
-
-// compile-time assertion: the CLI's mint answer mirrors the API type.
-var _ = threads.RegistrationToken{}

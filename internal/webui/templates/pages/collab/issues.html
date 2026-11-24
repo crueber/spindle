@@ -1,5 +1,5 @@
 {{define "content"}}
-{{with .Data}}
+{{with .Data}}{{$d := .}}
 <section aria-label="Issues">
   <div class="mb-3 flex flex-wrap items-center gap-2">
     <h2 class="text-xl font-semibold tracking-tight">Issues</h2>
@@ -63,8 +63,15 @@
     <li class="border-t border-[var(--pd-line)] py-3 first:border-t-0 first:pt-0">
       <div class="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1">
         <a class="link min-w-0 max-w-full font-medium leading-snug line-clamp-2 sm:line-clamp-1" href="{{.Href}}">#{{.Num}} {{.Title}}</a>
+        {{if .Pinned}}<span class="chip chip-neutral" title="Pinned to the top of the list">pinned</span>{{end}}
         {{template "collab_state_chip" .Chip}}
         {{range .Labels}}{{template "collab_label_chip" .}}{{end}}
+        {{if $d.Repo.CanTriage}}
+        <form method="post" action="{{.PinHref}}">
+          <input type="hidden" name="next" value="{{$d.SelfHref}}">
+          <button type="submit" class="link text-xs" aria-label="{{.PinLabel}} issue #{{.Num}}">{{.PinLabel}}</button>
+        </form>
+        {{end}}
         <span class="card-meta ml-auto mt-0! shrink-0">
           {{if .CommentCount}}<span aria-label="{{.CommentCount}} comments" title="{{.CommentCount}} comments">{{template "collab_icon" "comment"}} {{.CommentCount}}</span> · {{end}}
           {{with .Milestone}}{{template "collab_milestone_chip" .}} · {{end}}

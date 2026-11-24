@@ -183,6 +183,13 @@ func packetJSON(p Progress) string {
 // `task` packet, the replay buffer, then live packets, then the terminal
 // result/error. Returns when the stream ends or the client goes away.
 func (s *SSE) pump(st TaskStream) {
+	s.PumpTaskStream(st)
+}
+
+// PumpTaskStream exposes the envelope's task pump for a page-owned task card
+// (the Administration area's packages-GC card): one transport for both lanes,
+// so a page stream cannot drift from the API's task stream shape.
+func (s *SSE) PumpTaskStream(st TaskStream) {
 	s.Send("task", st.Record)
 	for _, p := range st.Replay {
 		if !s.Event(p.Kind, packetJSON(p)) {
@@ -210,6 +217,20 @@ func (s *SSE) pump(st TaskStream) {
 		return
 	}
 	s.Send("result", resultEnvelope{Task: done.Record, Value: done.Value})
+}
+
+// PumpTaskStream writes one task stream to w as an SSE envelope (headers,
+// opener, keepalive, packets, terminal). It is the page-side entry to
+// SSE.pump: internal/webui's task cards and the API's own task routes share
+// this one writer.
+func PumpTaskStream(w http.ResponseWriter, r *http.Request, st TaskStream) bool {
+	s, ok := NewSSE(w, r)
+	if !ok {
+		return false
+	}
+	defer s.Close()
+	s.PumpTaskStream(st)
+	return true
 }
 
 type sseError struct {

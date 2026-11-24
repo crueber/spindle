@@ -9,7 +9,7 @@
 // The asserted markup is what internal/webui actually emits, not a guess:
 //   layout     internal/webui/templates/base.html ("base")
 //   landing    internal/webui/templates/pages/public/landing.html
-//   setup      internal/webui/templates/pages/settings/setup.html
+//   admin      internal/webui/templates/pages/admin/{overview,config}.html
 //   assets     internal/server/health.go (serveUIAssets, uiAsset, sdkReposJS)
 //   page MIME  internal/webui/render.go (text/html; charset=utf-8, no-cache)
 
@@ -37,9 +37,9 @@ async function probe() {
   } catch (err) {
     return `SPINDLE_TEST_WEB_BASE_URL=${BASE} is unreachable at /: ${err.message}`;
   }
-  // Setup-only mode (§3.4) answers 503 everywhere but /setup and health.
+  // Restricted mode (§3.4) answers 503 everywhere but /admin, /admin/config and health.
   if (home.status === 503) {
-    return `server at ${BASE} is in setup-only mode (/ answered 503 — fix the config, restart, or point the smoke at another instance)`;
+    return `server at ${BASE} is in restricted mode (/ answered 503 — fix the config, restart, or point the smoke at another instance)`;
   }
   return "";
 }
@@ -75,14 +75,30 @@ test("GET / is a server-rendered page with the layout shell and landing content"
   );
 });
 
-test("GET /setup is a server-rendered page with the layout shell and the setup form", { skip }, async () => {
-  const res = await fetch(`${BASE}/setup`);
-  assert.equal(res.status, 200, "/setup status (the denied card is still a 200 page)");
+test("GET /admin is the Administration Overview with the shared shell", { skip }, async () => {
+  const res = await fetch(`${BASE}/admin`);
+  assert.equal(res.status, 200, "/admin status (auth-none instances are open by design)");
   assert.equal(res.headers.get("content-type"), "text/html; charset=utf-8");
   const html = await res.text();
-  assertShell(html, "/setup");
-  // setup.html renders this wrapper in both the form and the access-restricted card.
-  assert.match(html, /id="setup-page"/, "/setup renders settings/setup.html");
+  assertShell(html, "/admin");
+  // overview.html renders this wrapper (and the area nav) in every state.
+  assert.match(html, /data-admin-section="overview"/, "/admin renders pages/admin/overview.html");
+  assert.match(html, /aria-label="Administration sections"/, "/admin carries the area side-nav");
+});
+
+test("GET /admin/config is the configuration editor inside the same shell", { skip }, async () => {
+  const res = await fetch(`${BASE}/admin/config`);
+  assert.equal(res.status, 200, "/admin/config status");
+  assert.equal(res.headers.get("content-type"), "text/html; charset=utf-8");
+  const html = await res.text();
+  assertShell(html, "/admin/config");
+  assert.match(html, /data-admin-section="config"/, "/admin/config renders pages/admin/config.html");
+  assert.match(html, /name="cfg\.server\.listen"/, "the schema form is server-rendered");
+});
+
+test("GET /setup is gone — no alias, no redirect", { skip }, async () => {
+  const res = await fetch(`${BASE}/setup`, { redirect: "manual" });
+  assert.ok(res.status === 404 || res.status === 503, `/setup must not answer a page (got ${res.status})`);
 });
 
 test("/_ui/ page assets are served as their real types, no-cache, with the built content", { skip }, async () => {

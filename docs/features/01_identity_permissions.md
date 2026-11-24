@@ -37,10 +37,11 @@ SSH keys, tokens (`wgt_` minting), sessions, JWKS. Those live with the auth prov
 `Principal.Groups` (WP13) is the verified OIDC group list: it is captured from the
 signature-verified ID token (the claim named by `server.auth.groups_claim`, default `groups`), rides
 the walgit session/token wire so the browser path keeps it, and is consumed only to re-derive the
-host **admin** flag from `server.auth.admin_groups` (default `["spindle-admins"]`, case-insensitive).
+host **admin** flag from `server.auth.admin_groups` (default `["spindle-admin"]`, case-insensitive).
 Groups never grant `write`, never bypass the `allowed_domains`/`allowed_emails` admission check, and
-an empty `admin_groups` grants nothing. Host admin is what opens `/setup`; repo-scoped `admin` role
-bindings are a separate ladder (§5).
+`admin_groups` must be non-empty (boot refuses an empty list). Host admin is exactly
+"signed in ∧ groups ∩ admin_groups ≠ ∅" — it is what opens the Administration area; repo-scoped
+`admin` role bindings are a separate ladder (§5).
 
 A **user profile** is a bucket object keyed by the principal name:
 
@@ -49,13 +50,15 @@ A **user profile** is a bucket object keyed by the principal name:
 | `users/<principal>/profile.json` | CAS'd (overwritable family) | `{"version":1,"principal":"jane@example.com","display_name":"Jane Doe","bio":"","created_at":"RFC3339","updated_at":"RFC3339"}` (+ `avatar_content_type`/`avatar_updated_at` when the user holds an avatar (`image/svg+xml` generated, `image/png` #601 upload), `avatar_disabled` when opted out — Forgejo #376, append-only) |
 | `users/<username>/avatar.svg` | overwritable (Forgejo #376, uploads #601) | avatar bytes — generated SVG (`image/svg+xml`) or uploaded square PNG (`image/png`); the key keeps its generated-era spelling for both kinds (renaming would orphan existing avatars), the profile pointer is authoritative for the served Content-Type; same bytes-first/pointer-second discipline as the #359 org avatar |
 | `users/<principal>/invitations/index.json` | CAS'd (overwritable family) | inbox index, §7 |
+| `users/<username>/user.json` | CAS'd (overwritable family) | the OIDC username binding `{"version":1,"username":"jane","email":"jane@example.com","created_at":"RFC3339"}` (Forgejo #370), plus the append-only account-state fields `disabled`, `disabled_by`, `disabled_at`, `reason`, `tokens_revoked_at` (§5.6) |
 
 Rules: `<principal>` is the lowercased email, percent-encoded per segment for keys with `@` → `%40`
 keeping the one-segment rule. `profile.json` is created lazily: first authenticated request or first
 role granted. GET on a missing profile is the canonical "does this principal exist" probe (06
-notifications contract); there is deliberately no users LIST — enumeration of people is not a
-feature. A principal's existence check is O(1) GET; profile updates are self-or-admin (`PUT` with CAS
-`version`, 409 on mismatch).
+notifications contract); there is no users LIST on any public or per-user surface — enumeration of
+people is not a feature. The ONE exception is the host-admin directory (`/admin/directory`, §5.6),
+which is gated, bounded and cursor-paged. A principal's existence check is O(1) GET; profile updates
+are self-or-admin (`PUT` with CAS `version`, 409 on mismatch).
 
 ## 3. Orgs, members, teams
 
@@ -213,7 +216,7 @@ and lands the user back on the attempted action.
 ## 5. Role → capability matrix
 
 Resolution maps a role to capability checks; `admin` binding ⇒ the capability set of
-`Principal{write:true, admin:true}` **for repo-scoped ops**. Host-level admin (setup, instance facts,
+`Principal{write:true, admin:true}` **for repo-scoped ops**. Host-level admin (the Administration area, instance facts,
 cross-repo enumeration) stays flag-gated — an access.json admin is not a host admin.
 
 | Capability | read | triage | write | maintain | admin |
@@ -314,40 +317,199 @@ the `ReadGate` shape, law 8); nil seam → legacy host-flag gating.
 `CheckRole` is unchanged (its flag-aware contract serves the API
 surfaces); the push path never calls it with host flags set.
 
-### 5.4 Repo transfer between owners (issue #358)
+### 5.4 Repo transfer between owners (issue #358, PLAN-V2 §3 T.1 as built)
 
-Direct, owner-initiated transfer (v1 — no accept step):
-`POST /{owner}/{repo}/api/transfer` with `{owner, repo?}` moves every
-object under `repos/<src>/<r>/` to `repos/<dst>/<r>/` (repo name defaults
-to the source name, so transfer+rename passes both). Gates, in order:
-repo admin on the source (`CheckRole` admin — binding, source-org
-ownership, or host admin), then `CheckCreateOwner` admission verbatim on
-the destination (self, member org, or host admin — §5.2, same 401/403/503
-shape). The service is principal-free (like `DeleteOrg`); the handler
-gates. Success is `201 {owner, repo}`.
+A transfer moves every object under `repos/<src>/<r>/` to `repos/<dst>/<r>/`
+(repo name defaults to the source name, so transfer+rename passes both) and then
+fixes the families that name a repo **outside** that prefix. It is owner-initiated
+(no accept step yet — T3 owns that) and runs as the **`repo-transfer` task** on the
+core task table, not on the request goroutine (PLAN-V2 §3.1, law 7).
 
-The move is copy-then-delete over opaque bytes (law 4 — no source key is
-deleted before its copy ACKs), streamed (never whole packs in memory).
-Every destination write is `PutCreate`: a lost race aborts 409 with
-best-effort cleanup and the source untouched. The delete pass removes
-exactly the copied set, then re-lists the source prefix — leftovers mean
-a push raced the move and report 409 with the destination complete (a
-mistyped transfer is recoverable by transferring back; a raced transfer
-leaves the named src residue to delete — the destination is already
-complete, so a re-transfer would 409 on the occupied manifest). `access.json`
-is the one interpreted object: visibility and all bindings survive except
-the owner-subject — `user:<src>` bindings drop (the seller keeps no
-admin) and a user destination without a binding gains
-`user:<dst>`/admin (org destinations need none — org-owner resolution
-covers them); `team:` subjects name teams that still exist and move
-untouched. A missing source `access.json` materializes the destination's
-synthesized default for user destinations only; a corrupt one moves
-byte-identical (transfer never fails on it). Repo invitations under
-`meta/` move with the prefix, so pending invites survive. Content types
-restore the writer convention (`.json`/`.pb`, else octet-stream —
-serving MIME comes from sidecars, never object metadata). This is what
-makes the org-delete 409 true: an org that owns repos is deletable once
-each repo is transferred (or deleted) through a real capability.
+**API.** `POST /{owner}/{repo}/api/transfer` `{owner, repo?}` →
+`202 {owner, repo, task_id, joined, task}`. Gates, in order and unchanged from
+v1: repo admin on the source (`CheckRole` admin — binding, source-org ownership,
+or host admin), then `CheckCreateOwner` admission on the destination (self, member
+org, or host admin — §5.2, same 401/403/503 shape). `404` unknown source, `409` a
+destination that holds a *different* repository, `400` an illegal id, `503` a
+build without the task table. The service body is principal-free (like
+`DeleteOrg`); the handler gates. The `202` is the only "accepted" answer — "done"
+exists only as the task's terminal record, after the verification step below.
+
+**Task shape.** Kind `repo-transfer` (Seam 5, registered once by composition);
+`(repo, kind)` keyed on the **source** id, so `GET …/api/tasks` on the source
+lists it while it runs and a second `POST` while it runs **joins** the leader
+(`joined:true`, same `task_id`, one record — the service-level slot is the join
+decision, the table's own `(repo,kind)` join is the backstop). Narration:
+`notice` lines per phase and `progress` bars for copy and delete. Attach:
+`GET …/api/tasks/{id}` with `Accept: text/event-stream` — **handle-free**, via the
+task table's per-task drone (`TaskTable.Subscribe`), because the move tears the
+source handle down before the copy pass; the read gate follows the record's own
+repo (or the destination in `params["to"]`), so a lane that vanished mid-task
+cannot strand the stream. Progress is also readable as JSON through the same
+path. A drained instance answers `503 interrupted … safe to retry` (the task
+body ctx is cancelled by the registry drain).
+
+**Ordering rule — one writer per prefix, one authority per repository.**
+
+1. Every destination write is `PutCreate` (CAS): a destination key exists because
+   exactly one attempt created it; a losing attempt compares bytes instead of
+   interleaving writes.
+2. The destination manifest is copied **last**, so the destination becomes
+   openable only after every object it references is present. The source
+   manifest is snapshotted at the start and re-read immediately before that
+   copy: a byte difference means a push landed mid-move, and the attempt aborts
+   `409` **before** creating the destination manifest (a self-inconsistent
+   destination is worse than a failed move).
+3. The source manifest is deleted **first** in the delete pass: authority
+   transfers at the destination-manifest ACK, and the source stops being a
+   repository before any object it referenced is removed. No key is ever
+   deleted before its destination copy ACKs.
+
+The two paths may serve the same immutable bytes for one bounded window (a
+read-only shadow), but no prefix ever has two writers and the source's
+disappearance is monotonic. A push racing the delete pass is reported with the
+residue count (`409 … N object(s) remain`), never silently stranded.
+
+**Re-runnable after a crash (bucket truth, not task memory).** A retry converges
+from three observable states:
+
+| Source manifest | Destination manifest | Meaning / action |
+|---|---|---|
+| present | absent | fresh move |
+| present | present | copy/delete crashed: adopt each destination key whose bytes equal the source's (or the rewritten bytes); a different byte is a foreign repository → `409`, source untouched |
+| absent | present | the move committed, something afterwards failed: verify each source leftover is reproduced at the destination, delete it, then run the cross-reference families |
+
+`BeginTransfer`'s pre-flight accepts the "both present" pair only when the
+destination manifest equals the source's retargeted one, so a genuinely occupied
+destination is a `409` on the request path (not a task that fails later).
+
+**Families rewritten outside the prefix (T1).**
+
+| Family | Owner | Rewrite |
+|---|---|---|
+| `manifest.pb` `repo` field | core (`store/proto`) | **load-bearing**, inside the prefix: `wal.openOrInitLocal` derives the serving-copy directory from `Manifest.Repo`, so the moved manifest is rewritten to the destination id (revision/head_seq/packs/settings untouched — a move is not an edit). The verification fails the task if the destination manifest does not decode or names another repo. |
+| bucket-root `meta/repos.pb` row | `internal/sizecatalog` | `RenameRow`: CAS, carries size/object/activity fields verbatim, drops a stale destination row in favour of the moved one; an already-renamed row writes nothing (idempotent). A failure fails the task (T1 is stricter than the plan's "warn and continue": a terminal OK that still publishes the old row is a worse lie than a failed task that a retry or the sweep heals). |
+| parent `meta/forks.json` row | `internal/pulls` (**seam**) | `ChildMoved`: one CAS renaming the moved child's row; an absent index/row writes nothing (the #457 ghost rule). |
+| child `fork.json` `parent`/`root` | `internal/pulls` (**seam**) | `ParentMoved`: enumerates the **moved** index (it travelled with the prefix) and CASes each child's pointers old→new; a child whose provenance is gone is skipped, a corrupt one fails the pass. Load-bearing: `wal/forkread.go`'s pack fallback and `maintain/forknet.go`'s GC walk follow these pointers. |
+| `packages/registry/**` | `internal/packages` | travels with the prefix; T1 adds `RepoMoved` to drop the per-repo sweep bookkeeping (due clock + just-finalized blob grace) for both ids — the only cross-reference the registry has. Verification asserts every source registry key reappeared at the destination. |
+| serving copy + listing cache | `internal/wal` | new `(*Registry).Invalidate(id)`: drops the in-memory handle, removes the local `<cache.dir>/<owner>/<name>.git`, and invalidates the 30 s listing snapshot — **without touching bucket objects** (the non-destructive twin of `Delete`). Called on the source before the copy pass (quiesce) and on both ids afterwards. |
+| `access.json` | identity | unchanged from v1: owner-subject rewrite (`user:<src>` dropped, `user:<dst>`/admin added for user destinations), corrupt bytes carried opaquely, missing → the destination's synthesized default for user destinations only. |
+| stars/watches (`users/<p>/starred`, `users/<p>/watching`) | `internal/social` | **not rewritten** — the rows cannot be found without a users LIST (forbidden). The `/{user}/starred` page already skips rows whose manifest is missing and the moved `social.json` counters carry forward; documented residue, self-healing when users un-star/re-star at the new path. |
+
+`VerifyRepo` (also new on `(*wal.Registry)`) is the verification probe: it opens
+the destination, requires `Manifest.Repo == id`, and syncs to `LevelRefs` (log
+segments and checkpoint present and replayable — packs are not materialized).
+The task's verification step also asserts the source manifest is gone, the
+catalog row moved (when one existed), every package key followed, and the fork
+pointers are consistent — each failure names its piece, and only then does the
+record report OK.
+
+**Cost.** Two manifest GETs + one source LIST + one package LIST + two ops per
+key (unchanged from v1) on a human-rate admin path; the destination is verified
+with one open + a refs-level sync. No new locks, no new module, no LIST on a hot
+path.
+
+**As built deviations from the plan text.**
+
+- The task kind lives in `internal/identity` (the shipped `transfer.go` grew)
+  rather than a new package: the move, the access rewrite and the gates were
+  already there, and the cross-family steps bind through consumer-owned seams
+  (`identity.Serving/ForkMover/PackagesMover`, satisfied by `*wal.Registry`,
+  `*pulls.Service`, `*packages.Service`) rather than imports — identity must not
+  import pulls/packages (they import identity for the P6 gates).
+- "Registry invalidation" is `wal.Registry.Invalidate`/`VerifyRepo`; the plan
+  named `internal/store`, but the registry has lived in `internal/wal` since
+  05 §5.1.1, so the code follows the code.
+- The task table gained the handle-free attach (`Subscribe`/`Unsubscribe` over a
+  per-task packet drone, closed by the janitor) and `RunningFor` (the listing's
+  running half). `TaskTable.Get` now returns a copy: the record is shared with
+  the owning goroutine and two locks over one struct was a real race.
+- A catalog CAS miss fails the task (above), rather than "narrate and continue".
+- The settings Danger-Zone action now starts the task and renders its live card
+  (no redirect: the source page stops existing when the move commits); see
+  `docs/go/12_web_ui.md` §2.5/§2.7.
+- T2–T4 still own: `redirects/<owner>/<repo>.json` + the miss-path 301 probe +
+  the expiry sweep; the `meta/transfer.json` pending/accept flow, notification,
+  the org-owner accept floor and the form upgrade; org-webhook cursor cleanup,
+  the audit record, the CLI verbs and the warnings list.
+
+## 5.5 Blocked principals (moderation M1, `PLAN-V2` §1)
+
+The block list is an identity-scope, per-user object (one family, no per-block keys):
+
+```
+users/<principal>/blocks.json   CAS'd, overwritable {"version":1,"blocked":[…],"updated_at":…}
+```
+
+Normalized principal names, sorted, unique, ≤ 500. The full contract — CAS discipline, the audit
+family (`moderation/audit_state.json` + `moderation/audit/<seq>.json`), the consumer-owned gate
+interfaces, the notification filter, the API and the profile control — is
+[`16_moderation.md`](16_moderation.md). Identity's own consumer point is the invite verbs:
+`CreateOrgInvite`/`CreateRepoInvite` refuse (403, the neutral text) when the inviter has blocked the
+subject; that gate is the `Blocks BlockGate` field on `Service`, wired from composition (nil = allow).
+
+The rule in one line: a block restricts **interaction** with the blocker's content in the blocker's
+**user-namespace** repositories (comment, react, open/update/merge PRs, review, review-thread
+comments/resolutions, review requests, assign, attach), never reads, stars, watches or forks; org repos
+are unaffected; host admins are exempt; and the blocked principal is never told.
+
+Rate limits (M4) key on the principal when one is signed in and fall back to the client address, so a
+blocked or limited principal is never identified to the caller: the refusal is a neutral `429` with
+`Retry-After`, exactly like the block gate's neutral `403` (`16_moderation.md` §12). Identity writes
+(access/role grants) do not write the moderation audit family yet — the follow-up is recorded in
+`16_moderation.md` §14.2.
+
+## 5.6 Account deactivation — the instance directory (PLAN-ADMIN §3.7)
+
+The Administration area's `/admin/directory` is the instance-wide users and organizations
+directory, host-admin only. It reads `users/` and `orgs/` with bounded delimiter listings and one
+exact-key read per rendered row; there is no index object and no LIST on any other request path.
+Its one mutation is an account's deactivation:
+
+```
+users/<username>/user.json   + disabled, disabled_by, disabled_at, reason, tokens_revoked_at
+```
+
+**Why here.** `user.json` is the credential binding (the OIDC registry every sign-in creates), and
+the credential boundary already resolves a username on every request — so enforcement is one
+exact-key GET of the document the account IS. `profile.json` is presentation state (display name,
+bio, avatar) that the public profile page reads; a credential fact must not ride it. The fields are
+append-only (law 5): an active account's bytes keep their pre-field shape, and no key moves.
+
+**Cost.** The boundary's read is memoized in-process: a bounded LRU keyed by username
+(`AccountStateCacheCapacity` = 4096 entries, `AccountStateCacheTTL` = 10 s, negative entries —
+a principal with no binding — included, errors NEVER cached) in
+`internal/identity/account_cache.go`. A warm signed-in request therefore performs no store op; a
+cold or expired entry is one exact-key GET (never a LIST), and the gate still fails closed (503) on
+every attempted read after a fault. `SetUserDisabled` invalidates the account after its CAS commit,
+so this instance enforces a deactivation on the next request. **The TTL is the cross-instance
+bound:** another instance may serve a just-deactivated account for up to 10 s; a stale *disabled*
+entry after a reactivation merely refuses sign-in until expiry; and revoked credentials stay revoked
+regardless, because the watermark is permanent.
+
+**Enforcement (never page-by-page).** `internal/server/auth.go` applies `accountGate` inside
+`principalFromEmailGroups`, after OIDC verification and username resolution — the one function every
+OIDC-derived credential resolves through (ID token, `wgt_` token, browser session, forwarded
+identity, SSH key auth). A disabled account gets `403` with a neutral message (never naming the
+administrator or the reason); a credential minted at or before `tokens_revoked_at` gets `401`; an
+unreadable account state fails closed (`503`). Machine credentials (`server.auth.tokens`, CI/runner
+tokens) are configuration entries, not user-bound accounts: they never reach the gate. They are not
+permanent by default any more: a row may set `name` (a stable rotation/usage label) and
+`expires_at` (RFC 3339; an expired row is a plain 401, and its use is recorded out of band at most
+once per token per 5 minutes — 06_server_http.md §8.2.1). A row without `expires_at` remains valid
+until removed; the Access page warns about it.
+
+**Revocation is a watermark, not a registry.** Session and `wgt_` wires are HMAC-signed with their
+mint time in the payload, so deactivation writes `tokens_revoked_at = now` and any session/token at
+or before it is refused permanently. Reactivation clears the disablement fields and KEEPS the
+watermark: previously minted credentials stay dead and the account signs in again. A fresh ID token
+from the IdP is a new credential (subject only to the disabled flag).
+
+**Unchanged by design.** Org membership and ownership are not touched — a deactivated account still
+owns its organizations, the directory says which, and transfer is a separate operation. No email is
+rendered by the directory; the state is text, never colour alone. Every real transition writes one
+`user_deactivate`/`user_reactivate` audit record (`ActorOf` + reason) through the host audit family;
+a repeat of the same state writes nothing.
 
 ## 6. Policy engine integration (Seam 3 amendment)
 
@@ -432,6 +594,10 @@ mutable-collab (`private, no-cache` + version ETag where a token exists) or `no-
 (issue #280 — never SWR on mutable state), both lanes everywhere. All registered by the `identity`
 RouteProvider (Seam 1).
 
+The directory itself has **no JSON API**: `/admin/directory` is a server-rendered, host-admin page
+(PLAN-ADMIN §3.7), and its deactivate/reactivate POSTs are same-origin page writes — the API surface
+below is unchanged.
+
 ### Top-level (`/api/v1` + `/api-browser/v1` twins)
 
 | Method + path | Auth (P6) | Request → response |
@@ -455,6 +621,12 @@ RouteProvider (Seam 1).
 | `GET /api/v1/invitations/{id}?token=` | token OR subject match | invite summary (signed-link preview) |
 | `POST /api/v1/invitations/{id}/accept` | authed, subject match | → 200 `{bound: "org"\|"repo"}`; 409 not pending |
 | `DELETE /api/v1/invitations/{id}` | invitee (decline) or issuer (cancel) | → 204 |
+| `GET /api/v1/users/{principal}/blocks` | self or host admin | → `{version, blocked:[…]}` (no-store); 404 unknown principal |
+| `PUT /api/v1/users/{principal}/blocks/{subject}` | self or host admin | → `200 {version}`; 409 already blocked; 400 unknown/self |
+| `DELETE /api/v1/users/{principal}/blocks/{subject}` | self or host admin | → `200 {version}`; 404 not blocked |
+
+The `/blocks` rows belong to the moderation surface (`16_moderation.md` §4); they are listed here
+because the subject is a user identity. The list is private to its owner.
 
 ### 8.1 Owner/repo listing (core, reused — no endpoint added here)
 
@@ -565,17 +737,20 @@ bootstrap's Create. Avoidance: edits to a repo with no `access.json` synthesize 
 > (localStorage keys, signal-lifecycle rules), no longer has a client counterpart. The decisions
 > themselves are unchanged.
 
-- **Admin comes from an OIDC group claim (WP13, 2026-11-20)** — `server.auth.admin_groups`
-  (default `["spindle-admins"]`) intersects the ID-token claim named by `server.auth.groups_claim`
-  (default `"groups"`; JSON array of strings or a single string; case-insensitive) to set
-  `Principal.Admin`, which is what opens `/setup`. The env `SPINDLE_SETUP_TOKEN` escape hatch and the
-  setup-page token field are deleted and have no effect. `admin_emails`/`admin_domains` still grant
-  admin (the operator's migration path); groups never grant `write` and never bypass the email
-  admission rule; an empty `admin_groups` grants nothing. Group values ride `Principal.Groups` /
-  the session-token wire (06 §8.5) so the signed-in browser keeps admin; IdP membership changes land
-  at the next sign-in, `admin_groups` edits are immediate, and secret rotation revokes captured
-  groups at once. Rationale: the group claim is signature-verified IdP truth, while an env token
-  opened the entire configuration surface to anyone who could read the process environment.
+- **Admin comes from an OIDC group claim — and only from it (WP13; hardened by PLAN-OIDC-ONLY,
+  2026-11-21)** — `server.auth.admin_groups` (default `["spindle-admin"]`) intersects the ID-token
+  claim named by `server.auth.groups_claim` (default `"groups"`; JSON array of strings or a single
+  string; case-insensitive) to set `Principal.Admin`, computed in the ONE credential-boundary
+  predicate (`principalFromEmailGroups`). The env `SPINDLE_SETUP_TOKEN` escape hatch, the setup-page
+  token field, `admin_emails`/`admin_domains` and `[[server.auth.tokens]].admin` are all deleted:
+  static tokens are machine credentials (write per row, never admin). Groups never grant `write` and
+  never bypass the email admission rule; an empty `admin_groups` is a validation error (a guaranteed
+  lockout). Group values ride `Principal.Groups` / the session-token wire (06 §8.5) so the
+  signed-in browser keeps admin; IdP membership changes land at the next sign-in, `admin_groups`
+  edits are immediate, and secret rotation revokes captured groups at once. `/_auth/me` and the
+  Access page report the live groups beside the configured group so a wrong-group lockout is
+  self-diagnosable. Rationale: the group claim is signature-verified IdP truth, while an env token or
+  an ambient email/domain list grants authority nobody proved.
 
 - **Invitation refusals name the cause that is knowable (closing-audit Observation 1, 2026-11-21).** The
   top-level preview/accept routes carry only an invitation id; the id→scope index does not exist and
@@ -653,6 +828,25 @@ bootstrap's Create. Avoidance: edits to a repo with no `access.json` synthesize 
   409 referenced a missing feature, making orgs with repos undeletable; v1 skips the
   transfer+accept dance (Forgejo parity deferred) because both gates already exist and
   the owner initiating the move holds admin on both ends by construction.
+- **The move is a task and rewrites every cross-reference (PLAN-V2 §3 T.1, 2026-11-21):**
+  `TransferRepo` keeps the shipped copy-then-delete discipline verbatim and becomes the body of
+  the `repo-transfer` task (single-flight, narration, handle-free SSE attach, terminal record);
+  the request path answers `202 + TaskRecord` and the settings action renders the live card.
+  Ordering rule: destination writes are Create-only, the destination **manifest** is copied last
+  (the destination is never openable half-formed) after re-reading the source manifest (a
+  mid-move push aborts before the commit point), and the source manifest is deleted **first** in
+  the delete pass (authority transfers at that ACK; the source stops being a repo before its
+  objects go). No prefix is ever written by two principals, and the source's disappearance is
+  monotonic. Re-runs are decided by the bucket, never by task memory: identical destination keys
+  are adopted, differing ones are a foreign repository (`409`, source untouched), and the
+  post-commit resume only deletes leftovers it can prove are reproduced. New rewrites:
+  `manifest.repo` (load-bearing — the serving-copy directory keys off it), the catalog row
+  (`sizecatalog.RenameRow`), both fork directions (seams implemented by `pulls`), packages sweep
+  bookkeeping, and `wal.Registry.Invalidate`/`VerifyRepo` for the serving copies. Rationale:
+  the families outside the prefix are the whole feature — a stale fork pointer breaks the pack
+  fallback and GC liveness — so T1 verifies each one and fails the task with the missing piece
+  instead of reporting done. `stars`/`watching` rows stay behind (unfindable without a users
+  LIST), documented residue.
 - **Auto-generated user avatars (issue #376, §8 — law-1 exception, user-authorized
   2026-09-12, AGENTS.md §1):** `github.com/dicebear/dicebear-go/v10` +
   `github.com/dicebear/styles/v10` render the deterministic avatar (DiceBear
@@ -889,6 +1083,12 @@ bootstrap's Create. Avoidance: edits to a repo with no `access.json` synthesize 
   Rationale: two distinct intents (user-owned "not anonymous" vs org-owned "members only") need
   two values — one label cannot serve both — and a host-wide credential must never imply
   per-repo authorization.
+- **Deactivation lives on the credential binding, not the profile (2026-11-22, PLAN-ADMIN §3.7).**
+  `users/<username>/user.json` carries `disabled`/`disabled_by`/`disabled_at`/`reason`/
+  `tokens_revoked_at` as append-only fields; `internal/server`'s `accountGate` refuses a disabled
+  account and every credential minted at or before the watermark for all OIDC-derived credentials,
+  while machine tokens stay untouched. Rationale: one credential-boundary check instead of
+  per-page gates, no credential fact on a public-facing document, and no migration (additive JSON).
 - **Usernames are the identity key; emails are owner-visible only (Forgejo #370).**
   The principal NAME is the immutable username (derived at first OIDC login
   from the verified email's local part — `auth.DeriveUsername` — uniquified
@@ -1032,3 +1232,16 @@ bootstrap's Create. Avoidance: edits to a repo with no `access.json` synthesize 
   `TestSettingsAccessInviteLifecycle`, `TestSettingsAccessInviteValidationAndFloor`,
   `TestSettingsAccessInviteSeamEdges`, `TestOwnerAvatarUpload`, `TestOwnerAvatarRemovalShowsInitials`
   (webui).
+
+- **Static machine tokens get a lifecycle (2026-11-23).** `[[server.auth.tokens]]` rows may carry
+  `name` (unique, stable rotation/usage label) and `expires_at` (RFC 3339, validated at load; a past
+  instant is legal and already expired). An expired row answers a real 401 with the ordinary
+  challenge — never a 403 or an in-band message — so git erases it, and `StaticPrincipal` refuses it
+  too. Each row keeps only the SHA-256 digest of its secret (constant-time scan, no early exit), and
+  successful authentication feeds a debounced, bounded, asynchronous CAS object
+  (`auth/token-usage.json`, one write per token per 5 minutes, 64-entry queue, one drainer) that the
+  Access page reads once; a bookkeeping failure never fails the request. Rotation is
+  add-new-row → rolling deploy → update clients → remove-old-row → deploy, and the docs state
+  plainly that "without downtime" means overlapping processes, since there is no in-process config
+  reload. No mint/revoke API is introduced, and the credential still never administers: this is a
+  lifetime and an audit trail on the existing config-row model, not a second identity system.

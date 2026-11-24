@@ -24,9 +24,10 @@ import (
 //
 // Ported from render-md.js: headings, emphasis/strong, inline code, fenced
 // code (language class), ordered/unordered/task lists, blockquotes, tables,
-// horizontal rules, line breaks (breaks:true) and @user mentions. Issue/PR
-// refs (#N, PRN) need the repo base and stay plain text here; use
-// RenderMarkdownIn from a repo page.
+// horizontal rules, CommonMark soft/hard breaks (a single source newline
+// folds to a space; two trailing spaces or a trailing backslash is <br>) and
+// @user mentions. Issue/PR refs (#N, PRN) need the repo base and stay plain
+// text here; use RenderMarkdownIn from a repo page.
 func RenderMarkdown(src string) template.HTML {
 	return RenderMarkdownIn(src, "", "")
 }
@@ -179,7 +180,17 @@ func (r *mdRenderer) blocksTight(lines []string) string {
 	return b.String()
 }
 
+// writeHeading emits an ATX/setext heading, demoted one level. Demotion keeps
+// user markdown in its place in the page's heading order: the page already
+// owns the single h1 (the repo masthead or the page title), so a README's
+// "# Seed repo" must not introduce a second h1 or skip levels under it. h6
+// stays h6 (five demotion steps is the deepest outline a rendered document
+// can carry without abusing h7+). Both .markdown-body styles already cover
+// h1–h6, so a demoted h2 renders with the old h1 treatment.
 func (r *mdRenderer) writeHeading(b *strings.Builder, level int, text string) {
+	if level < 6 {
+		level++
+	}
 	tag := "h" + strconv.Itoa(level)
 	b.WriteString("<" + tag + ">")
 	b.WriteString(r.inline(text))
@@ -209,33 +220,87 @@ func (r *mdRenderer) writeParagraph(b *strings.Builder, lines []string, i int, t
 	for i < len(lines) && !isBlankLine(lines[i]) {
 		if len(para) > 0 {
 			if lvl, ok := setextLevel(lines[i]); ok {
-				r.writeHeading(b, lvl, strings.Join(para, " "))
+				r.writeHeading(b, lvl, strings.Join(paragraphText(para), " "))
 				return i + 1
 			}
 			if isBlockStart(lines[i]) || startsTable(lines, i) || htmlBlockStart(lines[i]) {
 				break
 			}
 		}
-		para = append(para, strings.TrimRight(lines[i], " \t"))
+		para = append(para, lines[i])
 		i++
 	}
 	if len(para) == 0 {
 		return i + 1
 	}
+	texts, hards := paragraphLines(para)
 	if !tight {
 		b.WriteString("<p>")
 	}
-	for k, line := range para {
+	for k := range texts {
 		if k > 0 {
-			// breaks:true — every source newline is a hard break.
-			b.WriteString("<br>\n")
+			// CommonMark: a soft break renders as a space (the newline is
+			// insignificant whitespace, so the text reflows to the container);
+			// only the previous line's hard-break marker emits <br>.
+			if hards[k-1] {
+				b.WriteString("<br>\n")
+			} else {
+				b.WriteString("\n")
+			}
 		}
-		b.WriteString(r.inline(line))
+		b.WriteString(r.inline(texts[k]))
 	}
 	if !tight {
 		b.WriteString("</p>\n")
 	}
 	return i
+}
+
+// paragraphLines splits a paragraph's raw lines into inline text and the
+// hard-break flag that belongs to each line's trailing newline. The last line
+// has no following newline, so its trailing backslash stays literal.
+func paragraphLines(para []string) ([]string, []bool) {
+	texts := make([]string, len(para))
+	hards := make([]bool, len(para))
+	for k, line := range para {
+		line = strings.TrimLeft(line, " \t")
+		if k == len(para)-1 {
+			texts[k] = strings.TrimRight(line, " \t")
+			continue
+		}
+		texts[k], hards[k] = splitHardBreak(line)
+	}
+	return texts, hards
+}
+
+// paragraphText returns a paragraph's lines as one heading line: leading
+// whitespace and hard-break markers are dropped, a single space joins them.
+func paragraphText(lines []string) []string {
+	texts, _ := paragraphLines(lines)
+	return texts
+}
+
+// splitHardBreak separates a paragraph line's content from its line-break
+// marker. CommonMark makes two or more trailing spaces, or an unescaped
+// trailing backslash, a hard break (<br>); one trailing space, or none, is a
+// soft break (a space). The marker never reaches inline rendering.
+func splitHardBreak(line string) (string, bool) {
+	content := strings.TrimRight(line, " \t")
+	if len(line)-len(strings.TrimRight(line, " ")) >= 2 {
+		return content, true
+	}
+	if strings.HasSuffix(content, `\`) {
+		k := len(content) - 1
+		for k > 0 && content[k-1] == '\\' {
+			k--
+		}
+		// An odd run ends in a live backslash: the last one is the break
+		// marker, the escaped pairs before it stay literal.
+		if (len(content)-k)%2 == 1 {
+			return content[:len(content)-1], true
+		}
+	}
+	return content, false
 }
 
 func (r *mdRenderer) writeBlockquote(b *strings.Builder, lines []string, i int) int {
@@ -262,8 +327,10 @@ func (r *mdRenderer) writeBlockquote(b *strings.Builder, lines []string, i int) 
 			}
 			break
 		}
-		// Lazy continuation of the quote's paragraph.
-		if len(inner) > 0 && !isBlockStart(lines[i]) && !startsTable(lines, i) {
+		// Lazy continuation: an unindented line extends the quote's open
+		// paragraph instead of ending the quote (CommonMark 5.2).
+		if len(inner) > 0 && lazyParagraphOpen(inner) &&
+			!isBlockStart(lines[i]) && !startsTable(lines, i) && !htmlBlockStart(lines[i]) {
 			inner = append(inner, lines[i])
 			i++
 			continue
@@ -307,12 +374,9 @@ func (r *mdRenderer) writeFence(b *strings.Builder, lines []string, i int, f fen
 	var body []string
 	for i < len(lines) {
 		line := lines[i]
-		lead := leadingSpaces(line)
-		if lead <= 3 && lead < len(line) && line[lead] == f.ch && runLength(line, lead, f.ch) >= f.n {
-			if strings.TrimSpace(line[lead+runLength(line, lead, f.ch):]) == "" {
-				i++
-				break
-			}
+		if isFenceClose(line, f) {
+			i++
+			break
 		}
 		body = append(body, line)
 		i++
@@ -330,6 +394,18 @@ func (r *mdRenderer) writeFence(b *strings.Builder, lines []string, i int, f fen
 	b.WriteString(escapeText(code))
 	b.WriteString("</code></pre>\n")
 	return i
+}
+
+// isFenceClose reports whether line closes the fence f: the same character run
+// at least as long, indented no more than three spaces, with nothing but
+// whitespace after it.
+func isFenceClose(line string, f fenceInfo) bool {
+	lead := leadingSpaces(line)
+	if lead > 3 || lead >= len(line) || line[lead] != f.ch {
+		return false
+	}
+	n := runLength(line, lead, f.ch)
+	return n >= f.n && strings.TrimSpace(line[lead+n:]) == ""
 }
 
 // fenceLanguage keeps the first info-string word, restricted to the charset
@@ -450,12 +526,63 @@ func (r *mdRenderer) writeList(b *strings.Builder, lines []string, i int) int {
 				i++
 				continue
 			}
+			// Lazy continuation: an unindented line extends the item's open
+			// paragraph rather than ending the list (CommonMark 5.2). A block
+			// start (another item, heading, fence, quote, table) still ends it.
+			if lazyParagraphOpen(item) && !isBlockStart(line) && !startsTable(lines, i) && !htmlBlockStart(line) {
+				item = append(item, strings.TrimLeft(line, " \t"))
+				i++
+				continue
+			}
 			break
 		}
 		r.writeListItem(b, item)
 	}
 	b.WriteString("</" + tag + ">\n")
 	return i
+}
+
+// lazyParagraphOpen reports whether a container's last block is an open
+// paragraph — the only block CommonMark lets a lazy continuation line extend
+// (spec 5.2). Fences and raw-HTML blocks are tracked so a line after a closed
+// code block or an ended HTML block is not mistaken for paragraph text.
+func lazyParagraphOpen(lines []string) bool {
+	var fence fenceInfo
+	inFence := false
+	inHTML := false
+	open := false
+	for _, line := range lines {
+		if inFence {
+			if isFenceClose(line, fence) {
+				inFence = false
+			}
+			continue
+		}
+		if inHTML {
+			if isBlankLine(line) {
+				inHTML = false
+			}
+			continue
+		}
+		if isBlankLine(line) {
+			open = false
+			continue
+		}
+		if f, ok := parseFence(line); ok {
+			fence, inFence, open = f, true, false
+			continue
+		}
+		if htmlBlockStart(line) {
+			inHTML, open = true, false
+			continue
+		}
+		if isBlockStart(line) {
+			open = false
+			continue
+		}
+		open = true
+	}
+	return open
 }
 
 func (r *mdRenderer) writeListItem(b *strings.Builder, item []string) {

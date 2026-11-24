@@ -19,6 +19,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	neturl "net/url"
 	"strconv"
 	"strings"
 	"time"
@@ -72,8 +73,8 @@ func NewClient(baseURL, token string) *Client {
 
 // Register consumes a one-time registration token and returns the long-lived
 // runner credential (the one response that carries a secret).
-func (c *Client) Register(ctx context.Context, regToken, name string, labels []string) (*threads.RegisterResult, error) {
-	body := map[string]any{"token": regToken, "name": name, "labels": labels}
+func (c *Client) Register(ctx context.Context, regToken, name string, labels []string, capacity int, allowForkRuns bool) (*threads.RegisterResult, error) {
+	body := map[string]any{"token": regToken, "name": name, "labels": labels, "capacity": capacity, "allow_fork_runs": allowForkRuns}
 	var out threads.RegisterResult
 	if err := c.do(ctx, http.MethodPost, "/api/v1/threads/runners/register", "", body, &out); err != nil {
 		return nil, err
@@ -81,12 +82,12 @@ func (c *Client) Register(ctx context.Context, regToken, name string, labels []s
 	return &out, nil
 }
 
-// Declare records the runner's version and label set (the runner's liveness
-// statement; fetching is the heartbeat).
-func (c *Client) Declare(ctx context.Context, version string, labels []string) (*threads.DeclareView, error) {
+// Declare records the runner's version, label set and capacity (the runner's
+// liveness statement; fetching is the heartbeat).
+func (c *Client) Declare(ctx context.Context, version string, labels []string, capacity int, allowForkRuns bool) (*threads.DeclareView, error) {
 	var out threads.DeclareView
 	if err := c.do(ctx, http.MethodPost, "/api/v1/threads/runners/declare", c.Token,
-		map[string]any{"version": version, "labels": labels}, &out); err != nil {
+		map[string]any{"version": version, "labels": labels, "capacity": capacity, "allow_fork_runs": allowForkRuns}, &out); err != nil {
 		return nil, err
 	}
 	return &out, nil
@@ -148,6 +149,99 @@ func (c *Client) AckCancel(ctx context.Context, token, jobRef string, attempt in
 // attemptPath renders /api/v1/threads/jobs/{ref}/attempt/{n}/{op}.
 func attemptPath(jobRef string, attempt int, op string) string {
 	return "/api/v1/threads/jobs/" + jobRef + "/attempt/" + strconv.Itoa(attempt) + "/" + op
+}
+
+// artifactPath renders one artifact route under the attempt.
+func artifactPath(jobRef string, attempt int, name string, rest ...string) string {
+	base := attemptPath(jobRef, attempt, "artifacts") + "/" + neturl.PathEscape(name)
+	for _, seg := range rest {
+		base += "/" + seg
+	}
+	return base
+}
+
+// PutArtifactBlob uploads one artifact file (raw bytes, ?path= and ?size=).
+func (c *Client) PutArtifactBlob(ctx context.Context, token, jobRef string, attempt int, name string, index int, filePath string, size int64, body io.Reader) (*threads.ArtifactBlobView, error) {
+	path := artifactPath(jobRef, attempt, name, "blobs", strconv.Itoa(index)) +
+		"?path=" + neturl.QueryEscape(filePath) + "&size=" + strconv.FormatInt(size, 10)
+	req, err := http.NewRequestWithContext(ctx, http.MethodPut, c.BaseURL+path, body)
+	if err != nil {
+		return nil, err
+	}
+	req.ContentLength = size
+	req.Header.Set("Content-Type", "application/octet-stream")
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("Accept", "application/json")
+	req.Header.Set("X-Spindle-Runner", ProtocolVersion)
+	resp, err := c.HTTP.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	raw, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	if resp.StatusCode < 200 || resp.StatusCode > 299 {
+		return nil, apiErrorFrom(resp.StatusCode, raw)
+	}
+	var out threads.ArtifactBlobView
+	if jerr := json.Unmarshal(raw, &out); jerr != nil {
+		return nil, fmt.Errorf("decode artifact blob answer: %w", jerr)
+	}
+	return &out, nil
+}
+
+// FinalizeArtifact commits the artifact's manifest.
+func (c *Client) FinalizeArtifact(ctx context.Context, token, jobRef string, attempt int, in threads.ArtifactFinalizeInput) (*threads.ArtifactView, error) {
+	var out threads.ArtifactView
+	if err := c.do(ctx, http.MethodPost, attemptPath(jobRef, attempt, "artifacts"), token, in, &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
+// ArtifactManifest reads one artifact's manifest (the download step).
+func (c *Client) ArtifactManifest(ctx context.Context, token, jobRef string, attempt int, name string) (*threads.Artifact, error) {
+	var out threads.Artifact
+	if err := c.do(ctx, http.MethodGet, artifactPath(jobRef, attempt, name), token, nil, &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
+// GetArtifactBlob streams one artifact file back; the caller closes the body.
+func (c *Client) GetArtifactBlob(ctx context.Context, token, jobRef string, attempt int, name string, index int) (io.ReadCloser, int64, error) {
+	path := artifactPath(jobRef, attempt, name, "blobs", strconv.Itoa(index))
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.BaseURL+path, nil)
+	if err != nil {
+		return nil, 0, err
+	}
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("X-Spindle-Runner", ProtocolVersion)
+	// The blob can be large: no whole-body read, and no client timeout on the
+	// streaming client (the caller's context bounds it).
+	hc := &http.Client{Timeout: 0}
+	resp, err := hc.Do(req)
+	if err != nil {
+		return nil, 0, err
+	}
+	if resp.StatusCode < 200 || resp.StatusCode > 299 {
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+		resp.Body.Close()
+		return nil, 0, apiErrorFrom(resp.StatusCode, body)
+	}
+	return resp.Body, resp.ContentLength, nil
+}
+
+// apiErrorFrom maps a non-2xx raw answer onto the client's error vocabulary.
+func apiErrorFrom(status int, body []byte) error {
+	msg := strings.TrimSpace(string(body))
+	switch status {
+	case http.StatusUnauthorized:
+		return fmt.Errorf("%w: %s", ErrUnauthorized, msg)
+	case http.StatusConflict:
+		return fmt.Errorf("%w: %s", ErrSuperseded, msg)
+	default:
+		return &APIError{Status: status, Message: msg}
+	}
 }
 
 // do issues one request with a bearer token and decodes a 2xx body.

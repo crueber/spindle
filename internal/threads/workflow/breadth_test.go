@@ -136,7 +136,7 @@ func TestParseOnStringAndList(t *testing.T) {
 	if err != nil {
 		t.Fatalf("list on: %v", err)
 	}
-	if !w.Fires("push", "main") || !w.Fires("pull_request", "dev") || w.Fires("workflow_dispatch", "") {
+	if !w.Fires("push", "main", "") || !w.Fires("pull_request", "dev", "opened") || w.Fires("workflow_dispatch", "", "") {
 		t.Fatalf("list triggers = %+v", w.On)
 	}
 	w, err = Parse([]byte("on: workflow_dispatch\njobs:\n  a:\n    runs-on: l\n    steps:\n      - run: x\n"))
@@ -154,7 +154,7 @@ func TestParseOnStringAndList(t *testing.T) {
 	if err != nil || !w.On.ScheduleSet || len(w.On.Schedule) != 1 {
 		t.Fatalf("schedule mapping = %+v, %v", w.On, err)
 	}
-	if !w.Fires("schedule", "") {
+	if !w.Fires("schedule", "", "") {
 		t.Fatal("a schedule workflow must answer Fires(schedule)")
 	}
 	// An unsupported cron is a parse error, not a dead trigger.

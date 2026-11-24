@@ -21,6 +21,12 @@ func tmpDataDir(t *testing.T) string {
 	return dir
 }
 
+// validAuthTOML completes a fixture with the OIDC set boot validation now
+// requires (PLAN-OIDC-ONLY §4.2); rules under test stay in the fixture body.
+const validAuthTOML = "\n[server.auth]\nissuer = \"https://id.example.com\"\nallowed_domains = [\"example.com\"]\noauth_client_id = \"id\"\noauth_client_secret = \"secret\"\nsession_secret = \"0123456789abcdef0123456789abcdef\"\n"
+
+func withAuth(body string) string { return body + validAuthTOML }
+
 func writeConfig(t *testing.T, dir, name, body string) string {
 	t.Helper()
 	path := filepath.Join(dir, name)
@@ -39,19 +45,19 @@ func TestLoadExplicitMissingFileIsFatal(t *testing.T) {
 
 func TestLoadExplicitDevNullIsDefaultsPlusEnv(t *testing.T) {
 	dir := tmpDataDir(t)
-	env := func(key string) string {
-		if key == "SPINDLE_DATA_DIR" {
-			return dir
-		}
-		return ""
-	}
-	c, _, err := LoadExplicit(DevNullConfigPath, env)
+	t.Setenv("SPINDLE_DATA_DIR", dir)
+	t.Setenv("SPINDLE__SERVER__AUTH__ISSUER", "https://id.example.com")
+	t.Setenv("SPINDLE__SERVER__AUTH__ALLOWED_DOMAINS", `["example.com"]`)
+	t.Setenv("SPINDLE__SERVER__AUTH__OAUTH_CLIENT_ID", "id")
+	t.Setenv("SPINDLE__SERVER__AUTH__OAUTH_CLIENT_SECRET", "secret")
+	t.Setenv("SPINDLE__SERVER__AUTH__SESSION_SECRET", "0123456789abcdef0123456789abcdef")
+	c, _, err := LoadExplicit(DevNullConfigPath, os.Getenv)
 	if err != nil {
 		t.Fatalf("LoadExplicit(/dev/null): %v", err)
 	}
 	// Compiled-in defaults, NOT first-run defaults: the operator explicitly
 	// declined file config (§3.1 step 2).
-	if c.Server.Listen != "127.0.0.1:8080" || c.Store.Backend != "s3" {
+	if c.Server.Listen != "127.0.0.1:8080" || c.Store.Backend != "filesystem" {
 		t.Fatalf("listen=%q backend=%q, want compiled-in defaults", c.Server.Listen, c.Store.Backend)
 	}
 	if c.DataDir != dir {
@@ -59,7 +65,11 @@ func TestLoadExplicitDevNullIsDefaultsPlusEnv(t *testing.T) {
 	}
 }
 
-func TestLoadMissingDefaultFileIsFirstRun(t *testing.T) {
+// TestLoadStoreBackendSelection pins OBS-1: the documented default is
+// filesystem (a config file that merely omits store.backend must never point
+// a deployment at AWS), selecting s3 requires explicit S3 config, and the env
+// overlay still wins over the file.
+func TestLoadStoreBackendSelection(t *testing.T) {
 	dir := tmpDataDir(t)
 	env := func(key string) string {
 		if key == "SPINDLE_DATA_DIR" {
@@ -67,7 +77,52 @@ func TestLoadMissingDefaultFileIsFirstRun(t *testing.T) {
 		}
 		return ""
 	}
-	c, _, err := Load([]string{filepath.Join(dir, ConfigFileName), filepath.Join(dir, ConfigAliasName)}, env)
+	base := writeConfig(t, dir, ConfigFileName, withAuth("[server]\nlisten = \"127.0.0.1:8081\"\n"))
+	c, _, err := Load([]string{base}, env)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if c.Store.Backend != "filesystem" {
+		t.Fatalf("backend = %q, want filesystem when the file omits store.backend", c.Store.Backend)
+	}
+
+	// Explicit s3 without an endpoint/credential names fails loudly, naming
+	// the missing keys instead of half-working against an implicit AWS host.
+	s3Only := writeConfig(t, dir, ConfigFileName, withAuth("[store]\nbackend = \"s3\"\n"))
+	_, _, err = Load([]string{s3Only}, env)
+	if err == nil || !strings.Contains(err.Error(), "store.s3.endpoint is required when store.backend = \"s3\"") {
+		t.Fatalf("err = %v, want a validation error naming store.s3.endpoint", err)
+	}
+
+	// Env overlay wins over the file, in both directions.
+	t.Setenv("SPINDLE__STORE__BACKEND", `"s3"`)
+	t.Setenv("SPINDLE__STORE__S3__ENDPOINT", `"http://127.0.0.1:9000"`)
+	c, _, err = Load([]string{base}, env)
+	if err != nil {
+		t.Fatalf("Load with env overlay: %v", err)
+	}
+	if c.Store.Backend != "s3" || c.Store.S3.Endpoint != "http://127.0.0.1:9000" {
+		t.Fatalf("env overlay lost: backend=%q endpoint=%q", c.Store.Backend, c.Store.S3.Endpoint)
+	}
+	t.Setenv("SPINDLE__STORE__BACKEND", `"filesystem"`)
+	c, _, err = Load([]string{s3Only}, env)
+	if err != nil {
+		t.Fatalf("Load with filesystem overlay: %v", err)
+	}
+	if c.Store.Backend != "filesystem" {
+		t.Fatalf("backend = %q, want the env overlay's filesystem", c.Store.Backend)
+	}
+}
+
+func TestLoadMissingDefaultFileIsFirstRun(t *testing.T) {
+	dir := tmpDataDir(t)
+	t.Setenv("SPINDLE_DATA_DIR", dir)
+	t.Setenv("SPINDLE__SERVER__AUTH__ISSUER", "https://id.example.com")
+	t.Setenv("SPINDLE__SERVER__AUTH__ALLOWED_DOMAINS", `["example.com"]`)
+	t.Setenv("SPINDLE__SERVER__AUTH__OAUTH_CLIENT_ID", "id")
+	t.Setenv("SPINDLE__SERVER__AUTH__OAUTH_CLIENT_SECRET", "secret")
+	t.Setenv("SPINDLE__SERVER__AUTH__SESSION_SECRET", "0123456789abcdef0123456789abcdef")
+	c, _, err := Load([]string{filepath.Join(dir, ConfigFileName), filepath.Join(dir, ConfigAliasName)}, os.Getenv)
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
@@ -80,8 +135,10 @@ func TestLoadMissingDefaultFileIsFirstRun(t *testing.T) {
 	if c.Cache.Dir != filepath.Join(dir, "cache") {
 		t.Fatalf("cache.dir = %q, want <data-dir>/cache", c.Cache.Dir)
 	}
-	if c.Server.Auth.Mode != "none" || !c.Server.Auth.AnonymousRead {
-		t.Fatalf("auth = %s (anon=%v), want none + anonymous_read", c.Server.Auth.Mode, c.Server.Auth.AnonymousRead)
+	// No config file: the OIDC set came entirely from the environment, and the
+	// effective config validates (the env-only operator boots normally).
+	if c.Server.Auth.Issuer != "https://id.example.com" || !c.Server.Auth.AnonymousRead {
+		t.Fatalf("auth = %+v, want the env-completed OIDC set", c.Server.Auth)
 	}
 	if !c.Server.AutoCreateOnPush {
 		t.Fatal("auto_create_on_push = false, want true on first run")
@@ -93,14 +150,14 @@ func TestLoadMissingDefaultFileIsFirstRun(t *testing.T) {
 
 func TestLoadWalgitTomlAlias(t *testing.T) {
 	dir := tmpDataDir(t)
-	writeConfig(t, dir, ConfigAliasName, "[server]\nlisten = \"127.0.0.1:9999\"\n")
-	env := func(key string) string {
-		if key == "SPINDLE_DATA_DIR" {
-			return dir
-		}
-		return ""
-	}
-	c, _, err := Load([]string{filepath.Join(dir, ConfigFileName), filepath.Join(dir, ConfigAliasName)}, env)
+	writeConfig(t, dir, ConfigAliasName, withAuth("[server]\nlisten = \"127.0.0.1:9999\"\n"))
+	t.Setenv("SPINDLE_DATA_DIR", dir)
+	t.Setenv("SPINDLE__SERVER__AUTH__ISSUER", "https://id.example.com")
+	t.Setenv("SPINDLE__SERVER__AUTH__ALLOWED_DOMAINS", `["example.com"]`)
+	t.Setenv("SPINDLE__SERVER__AUTH__OAUTH_CLIENT_ID", "id")
+	t.Setenv("SPINDLE__SERVER__AUTH__OAUTH_CLIENT_SECRET", "secret")
+	t.Setenv("SPINDLE__SERVER__AUTH__SESSION_SECRET", "0123456789abcdef0123456789abcdef")
+	c, _, err := Load([]string{filepath.Join(dir, ConfigFileName), filepath.Join(dir, ConfigAliasName)}, os.Getenv)
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
@@ -115,7 +172,7 @@ func TestLoadWalgitTomlAlias(t *testing.T) {
 
 func TestLoadFilePlusEnvWins(t *testing.T) {
 	dir := tmpDataDir(t)
-	writeConfig(t, dir, ConfigFileName, "[store]\nbucket = \"from-file\"\n")
+	writeConfig(t, dir, ConfigFileName, withAuth("[store]\nbucket = \"from-file\"\n"))
 	path := filepath.Join(dir, ConfigFileName)
 	t.Setenv("SPINDLE__STORE__BUCKET", "from-env")
 	t.Setenv("SPINDLE_DATA_DIR", dir)
@@ -134,11 +191,11 @@ func TestLoadFilePlusEnvWins(t *testing.T) {
 
 func TestLoadPortLockstepRewritesLoopbackPublicURL(t *testing.T) {
 	dir := tmpDataDir(t)
-	writeConfig(t, dir, ConfigFileName, `
+	writeConfig(t, dir, ConfigFileName, withAuth(`
 [server]
 listen = "127.0.0.1:8080"
 public_url = "http://127.0.0.1:8080"
-`)
+`))
 	t.Setenv("SPINDLE_DATA_DIR", dir)
 	t.Setenv("PORT", "9000")
 	c, _, err := Load([]string{filepath.Join(dir, ConfigFileName)}, os.Getenv)
@@ -160,13 +217,12 @@ func TestLoadUnknownKeyListsKeyAndLine(t *testing.T) {
 }
 func TestLoadInvalidValidationFails(t *testing.T) {
 	dir := tmpDataDir(t)
-	path := writeConfig(t, dir, ConfigFileName, "[server.auth]\nmode = \"oidc\"\n")
+	path := writeConfig(t, dir, ConfigFileName, "[server.auth]\nissuer = \"https://id.example.com\"\n")
 	_, _, err := Load([]string{path}, func(string) string { return "" })
-	// Forgejo #371: a bare oidc block still fails closed — on the
-	// allowlist + browser-login trio, no longer on anonymous_read
-	// (which is allowed either way in oidc mode).
-	if err == nil || (!strings.Contains(err.Error(), "allowed_domains") && !strings.Contains(err.Error(), "browser-login trio")) {
-		t.Fatalf("err = %v, want fail-closed oidc violation", err)
+	// A bare OIDC block still fails closed — on the admission allowlist and
+	// the browser-login trio (PLAN-OIDC-ONLY §4.2).
+	if err == nil || (!strings.Contains(err.Error(), "allowed_domains") && !strings.Contains(err.Error(), "server.auth.session_secret")) {
+		t.Fatalf("err = %v, want fail-closed OIDC violation", err)
 	}
 }
 
@@ -258,7 +314,9 @@ func TestMarshalTOMLRoundTrip(t *testing.T) {
 
 func TestSaveSetupWritesAtomicallyWith0600(t *testing.T) {
 	dir := tmpDataDir(t)
-	c := FirstRunDefaults(dir)
+	c := validOIDC()
+	c.DataDir = dir
+	c.Server.Listen = "0.0.0.0:8080"
 	if _, err := SaveSetup(c, dir); err != nil {
 		t.Fatalf("SaveSetup: %v", err)
 	}
@@ -286,7 +344,7 @@ func TestSaveSetupWritesAtomicallyWith0600(t *testing.T) {
 func TestSaveSetupRejectsInvalidConfig(t *testing.T) {
 	dir := tmpDataDir(t)
 	c := FirstRunDefaults(dir)
-	c.Server.Auth.Mode = "oidc" // no allowlist/trio → still invalid (#371: not the anon flag)
+	// FirstRunDefaults is unconfigured auth (no issuer/trio): already invalid.
 	if _, err := SaveSetup(c, dir); err == nil {
 		t.Fatal("SaveSetup must refuse an invalid config")
 	}
@@ -379,7 +437,7 @@ func TestParseRepoSettingsDescription(t *testing.T) {
 		t.Fatalf("description = %q, want unset", rs.Description)
 	}
 	// Description never merges into the host config.
-	merged, err := rs.Merge(Defaults())
+	merged, err := rs.Merge(testBaseConfig())
 	if err != nil {
 		t.Fatalf("Merge: %v", err)
 	}
@@ -388,10 +446,10 @@ func TestParseRepoSettingsDescription(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ParseRepoSettings: %v", err)
 	}
-	if _, err := rs2.Merge(Defaults()); err != nil {
+	if _, err := rs2.Merge(testBaseConfig()); err != nil {
 		t.Fatalf("Merge with description: %v", err)
 	}
-	if err := rs2.ValidateAgainst(Defaults()); err != nil {
+	if err := rs2.ValidateAgainst(testBaseConfig()); err != nil {
 		t.Fatalf("ValidateAgainst with description: %v", err)
 	}
 }
@@ -464,7 +522,7 @@ git = "https://upstream.example.com/repo.git"
 }
 
 func TestRepoSettingsValidateAgainst(t *testing.T) {
-	base := Defaults()
+	base := testBaseConfig()
 	rs, err := ParseRepoSettings([]byte("[bundles]\n[[bundles.strategy]]\nname = \"late\"\nkind = \"incremental\"\nbase = \"missing\"\nschedule = \"0 0 * * * *\"\n"))
 	if err != nil {
 		t.Fatalf("ParseRepoSettings: %v", err)
@@ -560,7 +618,8 @@ follow = ["main", "next"]
 
 func TestSaveSetupIOErrors(t *testing.T) {
 	dir := tmpDataDir(t)
-	c := FirstRunDefaults(dir)
+	c := validOIDC()
+	c.DataDir = dir
 
 	// spindle.toml.tmp already exists as a directory → write fails.
 	if err := os.Mkdir(filepath.Join(dir, "spindle.toml.tmp"), 0o700); err != nil {
@@ -590,7 +649,7 @@ func TestResolveDataDirNoHome(t *testing.T) {
 
 func TestLoadNilGetenvAndEmptyCandidate(t *testing.T) {
 	dir := tmpDataDir(t)
-	path := writeConfig(t, dir, ConfigFileName, "[server]\nlisten = \"127.0.0.1:8080\"\n")
+	path := writeConfig(t, dir, ConfigFileName, "[server]\nlisten = \"127.0.0.1:8080\"\n[server.auth]\nissuer = \"https://id.example.com\"\nallowed_domains = [\"example.com\"]\noauth_client_id = \"id\"\noauth_client_secret = \"secret\"\nsession_secret = \"0123456789abcdef0123456789abcdef\"\n")
 	c, _, err := Load([]string{"", path}, nil) // empty candidate skipped; nil getenv → os.Getenv
 	if err != nil {
 		t.Fatalf("Load: %v", err)

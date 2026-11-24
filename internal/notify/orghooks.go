@@ -98,6 +98,28 @@ var orgActions = map[string]bool{
 	OrgActionOrgDeleted: true, OrgActionRepoCreated: true,
 }
 
+// OrgHookTopics is the full filter vocabulary an ORG hook may use: the org-log
+// actions plus the collaboration actions it delivers from member repos. The
+// push family is absent by design — an org has no repository to push to
+// (docs/features/06 §5.3 push amendment); the settings panel offers exactly
+// this list so the offer never disagrees with validation.
+func OrgHookTopics() []string {
+	out := make([]string, 0, len(orgActions)+len(activityActions))
+	for a := range orgActions {
+		out = append(out, a)
+	}
+	for a := range activityActions {
+		out = append(out, a)
+	}
+	sortStrings(out)
+	return append(out, PushTopicsOfferedToOrg()...)
+}
+
+// PushTopicsOfferedToOrg returns nothing: push topics are repo-scope only.
+// It exists so the org list is built through one explicit gate rather than a
+// comment nobody can test.
+func PushTopicsOfferedToOrg() []string { return nil }
+
 // OrgHookKind marks ActivityEvents appended to the org log (Repo carries
 // the org name — there is no repo to name).
 const OrgHookKind = "org"
@@ -593,9 +615,7 @@ func (s *Service) DeliverOrg(ctx context.Context, org string) {
 loop:
 	for _, h := range active {
 		h := h
-		select {
-		case sem <- struct{}{}:
-		case <-ctx.Done():
+		if !acquireFanoutSlot(ctx, sem) {
 			break loop // stop launching; still Wait for in-flight below
 		}
 		wg.Add(1)
@@ -688,7 +708,11 @@ func (s *Service) deliverOrgRepo(ctx context.Context, org string, h *Hook, repo 
 			break
 		}
 		seq++
-		if ev.Action != ActionPing && !hookMatches(h.Events, ev.Action) {
+		// Push topics are repo-scope only: an org hook has no repository to
+		// push to, so it neither offers nor accepts them (validateOrgHookEvents),
+		// and an empty filter ("all") must not silently start delivering them
+		// because a member repo's log happens to carry one. Advance past.
+		if ev.Action != ActionPing && (pushTopics[ev.Action] || !hookMatches(h.Events, ev.Action)) {
 			if seq-1 > lastDelivered {
 				lastDelivered = seq - 1
 			}

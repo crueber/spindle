@@ -80,6 +80,39 @@
                — the form is the only rendered surface during editing. */}}
           {{if and .Data.BioMarkdown (not .Data.Editing)}}<div class="markdown-body mt-3">{{md .Data.BioMarkdown}}</div>{{end}}
         </div>
+        {{/* Moderation (PLAN-V2 §M.5, M1): a signed-in, non-self viewer gets
+             the one block/unblock text action. The blocked user is never told,
+             and the list itself never renders here — only on your own page. */}}
+        {{if .Data.CanBlock}}
+        <div class="mt-3">
+          <form method="post" action="/{{.Data.Owner}}/{{if .Data.Blocked}}unblock{{else}}block{{end}}">
+            <button type="submit" class="link inline-flex min-h-6 items-center whitespace-nowrap text-sm">{{if .Data.Blocked}}Unblock @{{.Data.Owner}}{{else}}Block @{{.Data.Owner}}{{end}}</button>
+          </form>
+          <p class="muted mt-1 text-xs">A blocked user cannot comment, review, react or open issues in your repositories, and you are not notified of their mentions.</p>
+        </div>
+        {{end}}
+        {{/* The disclosure is PRIVATE to the blocker: it renders only on your
+             own profile (BlockListSelf) and never for another viewer. */}}
+        {{if .Data.BlockListSelf}}
+        <section class="card mt-4 p-4" aria-labelledby="blocked-heading">
+          <h2 class="card-header" id="blocked-heading">Blocked ({{.Data.BlockCount}})</h2>
+          {{if .Data.BlockedPrincipals}}
+          <p class="muted text-xs">Only you can see this list. Blocked users cannot comment, review, react or open issues in your repositories.</p>
+          <ul class="mt-2">
+            {{range .Data.BlockedPrincipals}}
+            <li class="flex flex-wrap items-center justify-between gap-2 border-b border-[var(--pd-line)] py-1 text-sm last:border-b-0">
+              <a class="link" href="/{{.}}">@{{.}}</a>
+              <form method="post" action="/{{.}}/unblock">
+                <button type="submit" class="link inline-flex min-h-6 items-center whitespace-nowrap text-xs">unblock</button>
+              </form>
+            </li>
+            {{end}}
+          </ul>
+          {{else}}
+          <p class="muted text-sm">Nobody blocked.</p>
+          {{end}}
+        </section>
+        {{end}}
         {{end}}
       {{end}}
 

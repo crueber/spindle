@@ -39,11 +39,18 @@ func doAuth(h *Handler, method, path, body, token string) *httptest.ResponseReco
 // registerRunner mints + registers + declares one runner.
 func registerRunner(t *testing.T, e *testEnv, h *Handler, admin auth.Principal, labels ...string) (string, string) {
 	t.Helper()
-	mint, err := e.svc.MintRegistrationToken(ctx(), "o/r", admin)
+	return registerRunnerFork(t, e, h, admin, false, labels...)
+}
+
+// registerRunnerFork registers (and declares) a runner with an explicit
+// fork-run opt-in. The default is off: a fork job is never offered to it.
+func registerRunnerFork(t *testing.T, e *testEnv, h *Handler, admin auth.Principal, allowForkRuns bool, labels ...string) (string, string) {
+	t.Helper()
+	mint, err := e.svc.MintRegistrationToken(ctx(), admin, mintAllPolicy(""))
 	if err != nil {
 		t.Fatalf("mint: %v", err)
 	}
-	body, _ := json.Marshal(map[string]any{"token": mint.Token, "name": "r1", "labels": labels})
+	body, _ := json.Marshal(map[string]any{"token": mint.Token, "name": "r1", "labels": labels, "allow_fork_runs": allowForkRuns})
 	rec := doAuth(h, http.MethodPost, "/api/v1/threads/runners/register", string(body), "")
 	if rec.Code != http.StatusCreated {
 		t.Fatalf("register = %d: %s", rec.Code, rec.Body.String())
@@ -55,7 +62,8 @@ func registerRunner(t *testing.T, e *testEnv, h *Handler, admin auth.Principal, 
 	if err := json.Unmarshal(rec.Body.Bytes(), &reg); err != nil {
 		t.Fatalf("register json: %v", err)
 	}
-	rec = doAuth(h, http.MethodPost, "/api/v1/threads/runners/declare", `{"version":"9.9","labels":["ubuntu-latest"]}`, reg.Token)
+	declare, _ := json.Marshal(map[string]any{"version": "9.9", "labels": []string{"linux"}, "allow_fork_runs": allowForkRuns})
+	rec = doAuth(h, http.MethodPost, "/api/v1/threads/runners/declare", string(declare), reg.Token)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("declare = %d: %s", rec.Code, rec.Body.String())
 	}
@@ -83,7 +91,7 @@ func TestProtocolContract(t *testing.T) {
 	admin := auth.Principal{Name: "admin", Admin: true}
 	*cur = admin
 	run := e.mustCreate(t)[0]
-	runnerID, runnerToken := registerRunner(t, e, h, admin, "ubuntu-latest")
+	runnerID, runnerToken := registerRunner(t, e, h, admin, "linux")
 
 	job, rec := fetchJob(t, h, runnerToken)
 	if job == nil {
@@ -276,8 +284,7 @@ func TestClaimRaceExactlyOneWinner(t *testing.T) {
 	runners := make([]*runnerAuth, 0, 8)
 	for i := 0; i < 8; i++ {
 		runners = append(runners, &runnerAuth{
-			Owner: "o", Repo: "r",
-			Doc: &RunnerDoc{ID: fmt.Sprintf("runner%d", i), Labels: []string{"ubuntu-latest"}, State: RunnerActive},
+			Doc: &RunnerDoc{ID: fmt.Sprintf("runner%d", i), Labels: []string{"linux"}, AllowAll: true, State: RunnerActive},
 		})
 	}
 	var wg sync.WaitGroup
@@ -358,14 +365,14 @@ jobs:
 `)
 	e.mustCreate(t)
 	jobFrom := func(labels []string) *FetchResult {
-		r := &runnerAuth{Owner: "o", Repo: "r", Doc: &RunnerDoc{ID: "rnr", Labels: labels, State: RunnerActive}}
+		r := &runnerAuth{Doc: &RunnerDoc{ID: "rnr", Labels: labels, AllowAll: true, State: RunnerActive}}
 		res, err := e.svc.FetchJob(ctx(), r, time.Millisecond)
 		if err != nil {
 			t.Fatalf("FetchJob: %v", err)
 		}
 		return res
 	}
-	if job := jobFrom([]string{"ubuntu-latest"}); job != nil {
+	if job := jobFrom([]string{"linux"}); job != nil {
 		t.Fatalf("ubuntu runner claimed a gpu job: %+v", job)
 	}
 	if job := jobFrom([]string{"gpu"}); job != nil {
@@ -384,7 +391,7 @@ jobs:
 func TestLeaseExpiryRequeuesAsNewAttempt(t *testing.T) {
 	e := newTestEnv(t)
 	run := e.mustCreate(t)[0]
-	runner := &runnerAuth{Owner: "o", Repo: "r", Doc: &RunnerDoc{ID: "rnr1", Labels: []string{"ubuntu-latest"}, State: RunnerActive}}
+	runner := &runnerAuth{Doc: &RunnerDoc{ID: "rnr1", Labels: []string{"linux"}, AllowAll: true, State: RunnerActive}}
 	first, err := e.svc.FetchJob(ctx(), runner, time.Millisecond)
 	if err != nil || first == nil {
 		t.Fatalf("first fetch = %+v, %v", first, err)
@@ -392,7 +399,7 @@ func TestLeaseExpiryRequeuesAsNewAttempt(t *testing.T) {
 	// Time passes beyond the lease; another runner's probe requeues the entry,
 	// and the job's attempt advances (the old token is dead by identity).
 	e.advance(2 * time.Hour)
-	other := &runnerAuth{Owner: "o", Repo: "r", Doc: &RunnerDoc{ID: "rnr2", Labels: []string{"ubuntu-latest"}, State: RunnerActive}}
+	other := &runnerAuth{Doc: &RunnerDoc{ID: "rnr2", Labels: []string{"linux"}, AllowAll: true, State: RunnerActive}}
 	probe, err := e.svc.claimLoop(ctx(), "o", "r", other.Doc, other.Doc.Labels)
 	if err != nil {
 		t.Fatalf("claimLoop: %v", err)
@@ -471,7 +478,7 @@ func TestSecretsMatrix(t *testing.T) {
 
 	// A trusted run receives the value; the log masker scrubs it.
 	run := e.mustCreate(t)[0]
-	_, runnerToken := registerRunner(t, e, h, admin, "ubuntu-latest")
+	_, runnerToken := registerRunner(t, e, h, admin, "linux")
 	job, _ := fetchJob(t, h, runnerToken)
 	if job == nil || !job.Trusted {
 		t.Fatalf("trusted job = %+v", job)
@@ -501,12 +508,13 @@ func TestSecretsMatrix(t *testing.T) {
 
 	// A fork run gets no secrets at all.
 	forkRun, ferr := e.svc.CreateRun(ctx(), "o/r", testSHA, EventPullReq, CreateOpts{
+		Action: "opened",
 		Branch: "main", BaseCommit: testSHA, Fork: true, Actor: "guest",
 	})
 	if ferr != nil {
 		t.Fatalf("fork run: %v", ferr)
 	}
-	_, forkToken := registerRunner(t, e, h, admin, "ubuntu-latest")
+	_, forkToken := registerRunnerFork(t, e, h, admin, true, "linux")
 	forkRunner, ferr := e.svc.authorizeRunner(ctx(), forkToken)
 	if ferr != nil {
 		t.Fatalf("authorize second runner: %v", ferr)
@@ -623,8 +631,8 @@ func TestProtocolPermissionsMatrix(t *testing.T) {
 	// Anonymous probes.
 	*cur = auth.Anonymous()
 	for _, tc := range []struct{ method, path, body string }{
-		{http.MethodGet, "/o/r/api/threads/runners", ""},
-		{http.MethodPost, "/o/r/api/threads/runners/tokens", ""},
+		{http.MethodGet, "/api/v1/admin/runners", ""},
+		{http.MethodPost, "/api/v1/admin/runners/tokens", ""},
 		{http.MethodGet, "/o/r/api/threads/secrets", ""},
 		{http.MethodPut, "/o/r/api/threads/secrets/TOKEN", `{"value":"v"}`},
 	} {
@@ -635,8 +643,8 @@ func TestProtocolPermissionsMatrix(t *testing.T) {
 	// A reader is forbidden (401 only for anonymous).
 	*cur = auth.Principal{Name: "reader"}
 	for _, tc := range []struct{ method, path, body string }{
-		{http.MethodGet, "/o/r/api/threads/runners", ""},
-		{http.MethodPost, "/o/r/api/threads/runners/tokens", ""},
+		{http.MethodGet, "/api/v1/admin/runners", ""},
+		{http.MethodPost, "/api/v1/admin/runners/tokens", ""},
 		{http.MethodGet, "/o/r/api/threads/secrets", ""},
 	} {
 		if rec := doAuth(h, tc.method, tc.path, tc.body, ""); rec.Code != http.StatusForbidden {
@@ -691,7 +699,7 @@ func TestRegisterTokenSingleUseAndRevoke(t *testing.T) {
 	e, h, cur := newHTTP(t)
 	admin := auth.Principal{Name: "admin", Admin: true}
 	*cur = admin
-	mint, err := e.svc.MintRegistrationToken(ctx(), "o/r", admin)
+	mint, err := e.svc.MintRegistrationToken(ctx(), admin, mintAllPolicy(""))
 	if err != nil {
 		t.Fatalf("mint: %v", err)
 	}
@@ -704,7 +712,7 @@ func TestRegisterTokenSingleUseAndRevoke(t *testing.T) {
 		t.Fatalf("re-register = %d", rec.Code)
 	}
 	// List shows it; revoke kills the bearer.
-	rec := doAuth(h, http.MethodGet, "/o/r/api/threads/runners", "", "")
+	rec := doAuth(h, http.MethodGet, "/api/v1/admin/runners", "", "")
 	var listed struct {
 		Runners []RunnerView `json:"runners"`
 	}
@@ -714,7 +722,7 @@ func TestRegisterTokenSingleUseAndRevoke(t *testing.T) {
 	if len(listed.Runners) != 1 || listed.Runners[0].State != RunnerActive || listed.Runners[0].Name != "r1" {
 		t.Fatalf("runners = %+v", listed.Runners)
 	}
-	if rec := doAuth(h, http.MethodDelete, "/o/r/api/threads/runners/"+mint.ID, "", ""); rec.Code != http.StatusNoContent {
+	if rec := doAuth(h, http.MethodDelete, "/api/v1/admin/runners/"+mint.ID, "", ""); rec.Code != http.StatusNoContent {
 		t.Fatalf("revoke = %d: %s", rec.Code, rec.Body.String())
 	}
 	if rec := doAuth(h, http.MethodPost, "/api/v1/threads/runners/declare", `{}`, mintedToken(t, e, mint.ID)); rec.Code != http.StatusUnauthorized {
@@ -727,7 +735,7 @@ func TestRegisterTokenSingleUseAndRevoke(t *testing.T) {
 // keeps the token. (Helper kept separate so the single-use test stays readable.)
 func mintedToken(t *testing.T, e *testEnv, id string) string {
 	t.Helper()
-	raw, _, err := store.GetBytes(ctx(), e.store, RunnerTokenKey("admin", id), store.GetOptions{})
+	raw, _, err := store.GetBytes(ctx(), e.store, RunnerTokenKey(id), store.GetOptions{})
 	if err != nil {
 		t.Fatalf("credential: %v", err)
 	}

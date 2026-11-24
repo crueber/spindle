@@ -1,7 +1,7 @@
 {{define "content"}}
 <section class="mx-auto max-w-2xl">
   <div class="mb-3 flex flex-wrap items-baseline gap-2">
-    <h1 class="text-xl font-semibold">New release</h1>
+    <h2 class="text-xl font-semibold">New release</h2>
     <a class="ml-auto text-sm link" href="/{{.Data.Full}}/releases">all releases</a>
   </div>
   {{if .Data.Disabled}}
@@ -29,7 +29,7 @@
         </p>
       </div>
       <label class="flex cursor-pointer items-start gap-2 card p-3">
-        <input type="checkbox" name="create_tag" value="1" class="mt-0.5 h-4 w-4 accent-amber-500"{{if .Data.CreateTag}} checked{{end}}>
+        <input type="checkbox" name="create_tag" value="1" class="mt-0.5 h-4 w-4 check"{{if .Data.CreateTag}} checked{{end}}>
         <span>
           <span class="block text-sm font-medium">Create a new tag on publish</span>
           <span class="muted block text-[11px]">The tag is created when the draft is published — never before. Requires a draft and a target commit.</span>
@@ -67,14 +67,14 @@
     <fieldset class="grid gap-2">
       <legend class="eyebrow">Visibility</legend>
       <label class="flex cursor-pointer items-start gap-2 card p-3">
-        <input type="checkbox" name="draft" class="mt-0.5 h-4 w-4 accent-amber-500"{{if .Data.Draft}} checked{{end}}>
+        <input type="checkbox" name="draft" class="mt-0.5 h-4 w-4 check"{{if .Data.Draft}} checked{{end}}>
         <span>
           <span class="block text-sm font-medium">Draft</span>
           <span class="muted block text-[11px]">Keep hidden from the releases list until you publish it from the release page.</span>
         </span>
       </label>
       <label class="flex cursor-pointer items-start gap-2 card p-3">
-        <input type="checkbox" name="prerelease" class="mt-0.5 h-4 w-4 accent-amber-500"{{if .Data.Prerelease}} checked{{end}}>
+        <input type="checkbox" name="prerelease" class="mt-0.5 h-4 w-4 check"{{if .Data.Prerelease}} checked{{end}}>
         <span>
           <span class="block text-sm font-medium">Prerelease</span>
           <span class="muted block text-[11px]">Flag as an early release (alpha, beta, rc) rather than a final one.</span>

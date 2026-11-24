@@ -26,13 +26,15 @@ import (
 // starts unhung: tests build their fixture first, then call hang().
 type hangStore struct {
 	store.ObjectStore
-	mu   sync.Mutex
-	hung bool
-	gate chan struct{}
+	mu      sync.Mutex
+	hung    bool
+	gate    chan struct{}
+	entered chan struct{} // closed by the first hung GET: the wedge is real
+	once    sync.Once
 }
 
 func newHangStore(inner store.ObjectStore) *hangStore {
-	return &hangStore{ObjectStore: inner, gate: make(chan struct{})}
+	return &hangStore{ObjectStore: inner, gate: make(chan struct{}), entered: make(chan struct{})}
 }
 
 // hang arms the hang (the outage starts after fixture setup — like the
@@ -48,6 +50,7 @@ func (s *hangStore) Get(ctx context.Context, key string, opts store.GetOptions) 
 	hung, gate := s.hung, s.gate
 	s.mu.Unlock()
 	if hung && strings.Contains(key, "/wal/") {
+		s.once.Do(func() { close(s.entered) }) // the wedge is now observable
 		select {
 		case <-ctx.Done():
 			return nil, ctx.Err()
@@ -165,7 +168,13 @@ func TestServeRefsStayInstantDuringWedge(t *testing.T) {
 		_, err := awaitServe(context.Background(), h)
 		serveDone <- err
 	}()
-	time.Sleep(100 * time.Millisecond) // let the leader enter the body
+	// Gate on the store's own signal that the leader is inside the hung body
+	// (a sleep only guesses, and a slow runner makes the guess wrong).
+	select {
+	case <-st.entered:
+	case <-time.After(10 * time.Second):
+		t.Fatal("serve leader never reached the hung pack fetch")
+	}
 
 	// Ref-level syncs (summary/refs) never touch packMu: instant despite
 	// the wedge. This is the issue's exact divergence (refs 200 while
@@ -291,7 +300,11 @@ func TestServeClientCancelMarksNothing(t *testing.T) {
 		_, err := awaitServe(ctx, h)
 		done <- err
 	}()
-	time.Sleep(100 * time.Millisecond)
+	select {
+	case <-st.entered: // the leader is inside the hung body before we cancel
+	case <-time.After(10 * time.Second):
+		t.Fatal("serve leader never reached the hung pack fetch")
+	}
 	cancel()
 	if err := <-done; err == nil {
 		t.Fatal("canceled serve succeeded")

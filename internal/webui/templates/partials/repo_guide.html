@@ -10,7 +10,7 @@
   </p>
   <p class="muted text-sm">{{.MirrorLast}}</p>
   {{if .MirrorBad}}
-  <p class="text-xs text-amber-700 dark:text-amber-400">last sync: {{.MirrorResult}} — the next scheduled attempt will retry</p>
+  <p class="text-xs text-[color:var(--pd-warn)]">last sync: {{.MirrorResult}} — the next scheduled attempt will retry</p>
   {{end}}
   <div class="flex items-center gap-2">
     <code id="cmd-clone" class="clone-cmd block min-w-0 flex-1 overflow-x-auto rounded bg-zinc-100 px-2 py-1 font-mono text-xs dark:bg-zinc-800">{{.CloneCmd}}</code>
@@ -60,7 +60,7 @@
   <div class="space-y-2 border-t border-zinc-200 pt-3 dark:border-zinc-800">
     <p class="muted text-xs">reserved by {{.Placeholder.CreatedBy}} · {{.Placeholder.CreatedAt}}</p>
     {{if .Placeholder.ExpiresAt}}
-    <p class="text-xs text-amber-700 dark:text-amber-400">expires {{.Placeholder.ExpiresAt}}</p>
+    <p class="text-xs text-[color:var(--pd-warn)]">expires {{.Placeholder.ExpiresAt}}</p>
     {{end}}
   </div>
   {{end}}

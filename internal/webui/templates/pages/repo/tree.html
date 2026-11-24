@@ -28,6 +28,7 @@
               {{if .Current}}<span aria-hidden="true">✓</span>{{end}}
             </a>
             {{end}}
+            <a role="menuitem" href="/{{.Data.Repo.Full}}/branches" class="mt-1 block border-t border-[var(--pd-line)] px-2 py-1 text-[11px] hover:bg-[var(--pd-raised)]">View all branches</a>
           </div>
         </div>
         {{else}}
@@ -42,9 +43,15 @@
         {{end}}
 
         <div class="ml-auto flex items-center gap-2">
+          {{if .Data.NewFileHref}}
+          <a class="btn px-2 py-0.5 text-[11px] inline-flex items-center gap-1" href="{{.Data.NewFileHref}}">
+            <svg class="icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true"><path d="M8 3.5v9M3.5 8h9"/></svg>
+            Add file
+          </a>
+          {{end}}
           {{if .Data.ArchiveTar}}
-          <a class="text-xs link" href="{{.Data.ArchiveTar}}" download title="Download this ref as a tar.gz archive">Download .tar.gz</a>
-          <a class="text-xs link" href="{{.Data.ArchiveZip}}" download title="Download this ref as a zip archive">.zip</a>
+          <a class="text-xs link inline-flex items-center py-1" href="{{.Data.ArchiveTar}}" download title="Download this ref as a tar.gz archive">Download .tar.gz</a>
+          <a class="text-xs link inline-flex items-center py-1" href="{{.Data.ArchiveZip}}" download title="Download this ref as a zip archive">.zip</a>
           {{end}}
           <input type="search" class="input hidden h-[26px] w-40 py-0 font-mono text-[11px] sm:block sm:w-52"
                  placeholder="Filter files" aria-label="Filter files in this directory"
@@ -67,13 +74,13 @@
            spare width, size and age hug the right. The wrapper scrolls in
            place (issue #275) so a 390px page never pans. -->
       <div class="relative overflow-x-auto border border-[var(--pd-line)] bg-[var(--pd-surface)]">
-        <table class="data-table tree-table">
+        <table class="data-table tree-table" aria-label="files">
           <thead>
             <tr>
-              <th class="w-[26px]"><span class="sr-only">Type</span></th>
-              <th>Name</th>
-              <th class="text-right">Size</th>
-              <th class="text-right">Last change</th>
+              <th scope="col" class="w-[26px]"><span class="sr-only">Type</span></th>
+              <th scope="col">Name</th>
+              <th scope="col" class="text-right">Size</th>
+              <th scope="col" class="text-right">Last change</th>
             </tr>
           </thead>
           <tbody id="file-rows">

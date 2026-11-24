@@ -67,7 +67,7 @@ func TestClientVerbs(t *testing.T) {
 	defer srv.Close()
 	c := NewClient(srv.URL+"/", "")
 
-	reg, err := c.Register(context.Background(), "wrg_x", "n", []string{"linux"})
+	reg, err := c.Register(context.Background(), "wrg_x", "n", []string{"linux"}, 1, false)
 	if err != nil || reg.Token != "wrt_tok" {
 		t.Fatalf("Register = %+v, %v", reg, err)
 	}
@@ -78,7 +78,7 @@ func TestClientVerbs(t *testing.T) {
 	if gotAuth != "Bearer wjt_t" || !strings.HasSuffix(gotPath, "/attempt/2/cancel") {
 		t.Fatalf("request auth=%q path=%q", gotAuth, gotPath)
 	}
-	if _, err := c.Declare(context.Background(), "v", nil); err == nil || !isFatal(err) {
+	if _, err := c.Declare(context.Background(), "v", nil, 1, false); err == nil || !isFatal(err) {
 		t.Fatalf("401 Declare = %v (want a fatal error)", err)
 	}
 	// APIError formatting.
@@ -248,7 +248,7 @@ func TestRegisterPackageFunc(t *testing.T) {
 		_, _ = w.Write([]byte(`{"runner_id":"abc","repo":"o/r","token":"wrt_tok","labels":[]}`))
 	}))
 	defer srv.Close()
-	res, err := Register(context.Background(), srv.URL, "wrg_x", "n", nil)
+	res, err := Register(context.Background(), srv.URL, "wrg_x", "n", nil, 1, false)
 	if err != nil || res.Token != "wrt_tok" {
 		t.Fatalf("Register = %+v, %v", res, err)
 	}
@@ -318,34 +318,25 @@ func TestStepEdgeCases(t *testing.T) {
 	// An if error fails the step with the message.
 	step := plan.Steps[1]
 	step.If = "contains(github.ref, 'x')"
-	res := exec.runStep(context.Background(), plan, step, stream, nil, false)
+	res, _ := exec.runStep(context.Background(), plan, step, stream, nil, nil, false)
 	if res.Conclusion != threads.JobFailure || !strings.Contains(res.Error, "if:") {
 		t.Fatalf("if error = %+v", res)
 	}
 	// A skip under a false condition.
 	step = plan.Steps[2]
 	step.If = "false"
-	if res := exec.runStep(context.Background(), plan, step, stream, nil, false); res.Conclusion != "skipped" {
+	if res, _ := exec.runStep(context.Background(), plan, step, stream, nil, nil, false); res.Conclusion != "skipped" {
 		t.Fatalf("skip = %+v", res)
 	}
 	// An unsupported action fails with its reason.
 	step = plan.Steps[1]
 	step.Kind = "unsupported"
 	step.SkipReason = "nope"
-	if res := exec.runStep(context.Background(), plan, step, stream, nil, false); res.Conclusion != threads.JobFailure || res.Error != "nope" {
+	if res, _ := exec.runStep(context.Background(), plan, step, stream, nil, nil, false); res.Conclusion != threads.JobFailure || res.Error != "nope" {
 		t.Fatalf("unsupported = %+v", res)
 	}
 	if stepExitCode(os.ErrNotExist) != -1 {
 		t.Fatal("a non-step error has no exit code")
-	}
-	if b, err := (value{s: "0"}).truthy(); err != nil || b {
-		t.Fatal("truthy(0)")
-	}
-	if b, err := (value{s: "1"}).truthy(); err != nil || !b {
-		t.Fatal("truthy(1)")
-	}
-	if _, err := (value{s: "maybe"}).truthy(); err == nil {
-		t.Fatal("truthy(maybe) must error")
 	}
 }
 
@@ -520,7 +511,7 @@ func TestSetupVolumeFailureAndLogger(t *testing.T) {
 		t.Fatal("explicit logger")
 	}
 	// Register reports transport failures.
-	if _, err := Register(context.Background(), "http://[::1", "wrg_x", "", nil); err == nil {
+	if _, err := Register(context.Background(), "http://[::1", "wrg_x", "", nil, 1, false); err == nil {
 		t.Fatal("Register against a malformed URL must error")
 	}
 }

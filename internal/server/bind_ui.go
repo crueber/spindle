@@ -42,7 +42,8 @@ func (s *Server) bindUI() {
 		Authenticate: func(r *http.Request) (auth.Principal, *auth.AuthError) {
 			return s.authSvc.Authenticate(r, s.cfg)
 		},
-		Refresh:   s.maybeRefreshSession,
-		CheckRead: s.checkReadGate,
+		Refresh:     s.maybeRefreshSession,
+		CheckRead:   s.checkReadGate,
+		SessionInfo: s.sessionInfo,
 	})
 }

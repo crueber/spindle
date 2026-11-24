@@ -109,6 +109,26 @@ func requireAuthenticated(p auth.Principal) error {
 	return nil
 }
 
+// requireNotBlocked is the one moderation enforcement point for this package
+// (PLAN-V2 §M.5): every interaction verb calls it after role resolution and
+// before any CAS. A refused actor gets the shared neutral text so the block
+// is never revealed; host admins are exempt (they act as operators, and the
+// plan documents that). A gate error fails closed as a 503-class failure —
+// never a silent allow.
+func (s *Service) requireNotBlocked(ctx context.Context, owner, repo string, actor auth.Principal) error {
+	if s.Moderation == nil || actor.Anonymous || actor.Admin {
+		return nil
+	}
+	blocked, _, err := s.Moderation.BlockedFromRepo(ctx, owner, repo, normPrincipal(actor.Name))
+	if err != nil {
+		return fmt.Errorf("moderation unavailable: %v", err)
+	}
+	if blocked {
+		return fmt.Errorf("%w: %s", ErrForbidden, identity.InteractionRefused)
+	}
+	return nil
+}
+
 // checkAssignees validates assignee names: each must resolve to role ≥
 // triage (P6), naming the offender 400. Stored sorted, unique, ≤ 10.
 func (s *Service) checkAssignees(ctx context.Context, owner, repo string, names []string) ([]string, error) {
@@ -152,6 +172,9 @@ func (s *Service) CreateIssue(ctx context.Context, owner, repo string, actor aut
 		return nil, nil, err
 	}
 	if err := s.requireRead(ctx, owner, repo, actor); err != nil {
+		return nil, nil, err
+	}
+	if err := s.requireNotBlocked(ctx, owner, repo, actor); err != nil {
 		return nil, nil, err
 	}
 	t, err := validateTitle(title)
@@ -286,6 +309,12 @@ func (s *Service) AddComment(ctx context.Context, owner, repo string, num int, a
 	if err := s.requireRead(ctx, owner, repo, actor); err != nil {
 		return nil, err
 	}
+	if err := s.requireNotBlocked(ctx, owner, repo, actor); err != nil {
+		return nil, err
+	}
+	if err := s.requireUnlocked(ctx, owner, repo, num, actor); err != nil {
+		return nil, err
+	}
 	if err := validateBody(body); err != nil {
 		return nil, err
 	}
@@ -404,6 +433,9 @@ func (s *Service) patchThread(ctx context.Context, owner, repo string, num int, 
 		return nil, err
 	}
 	if err := s.requireRead(ctx, owner, repo, actor); err != nil {
+		return nil, err
+	}
+	if err := s.requireNotBlocked(ctx, owner, repo, actor); err != nil {
 		return nil, err
 	}
 	th, _, err := s.loadThread(ctx, owner, repo, num)
@@ -718,6 +750,12 @@ func (s *Service) AddReaction(ctx context.Context, owner, repo string, num, targ
 	if err := s.requireRead(ctx, owner, repo, actor); err != nil {
 		return nil, nil, false, err
 	}
+	if err := s.requireNotBlocked(ctx, owner, repo, actor); err != nil {
+		return nil, nil, false, err
+	}
+	if err := s.requireUnlocked(ctx, owner, repo, num, actor); err != nil {
+		return nil, nil, false, err
+	}
 	c := strings.ToLower(strings.TrimSpace(content))
 	if !ReactionContents[c] {
 		return nil, nil, false, fmt.Errorf("%w: unknown reaction %q", ErrInvalid, content)
@@ -919,6 +957,10 @@ type ListFilter struct {
 type ListResult struct {
 	Issues []Card `json:"issues"`
 	More   bool   `json:"more"`
+	// Pinned is the repo pin set (§13), newest-number-first: the client
+	// renders a "pinned" chip for members and keeps the server's order.
+	// Additive field (law 5) — an older client ignores it.
+	Pinned []int `json:"pinned"`
 }
 
 // ListIssues serves the list index-first (P4): when the CAS'd index is
@@ -953,11 +995,12 @@ func (s *Service) ListIssues(ctx context.Context, owner, repo string, p auth.Pri
 		return nil, err
 	}
 	next := s.loadCounter(ctx, owner, repo)
+	pins := pinSet(ix.Pinned)
 	if indexComplete(ix, next) {
 		pool := filterCards(append(append([]Card{}, ix.Open...), ix.ClosedRecent...), f)
-		sortCardsByNum(pool)
+		sortPinnedFirst(pool, pins)
 		page, more := windowCards(pool, f.After, n)
-		return &ListResult{Issues: page, More: more}, nil
+		return &ListResult{Issues: page, More: more, Pinned: pins}, nil
 	}
 	// Fall through to the LIST scan and merge (dedup by num; a scanned
 	// header replaces its stale card).
@@ -966,9 +1009,9 @@ func (s *Service) ListIssues(ctx context.Context, owner, repo string, p auth.Pri
 	if lerr != nil {
 		// LIST failure degrades to the index window, not an error.
 		pool = filterCards(pool, f)
-		sortCardsByNum(pool)
+		sortPinnedFirst(pool, pins)
 		page, _ := windowCards(pool, f.After, n)
-		return &ListResult{Issues: page, More: false}, nil
+		return &ListResult{Issues: page, More: false, Pinned: pins}, nil
 	}
 	byNum := map[int]Card{}
 	for _, c := range pool {
@@ -982,12 +1025,12 @@ func (s *Service) ListIssues(ctx context.Context, owner, repo string, p auth.Pri
 		merged = append(merged, c)
 	}
 	merged = filterCards(merged, f)
-	sortCardsByNum(merged)
+	sortPinnedFirst(merged, pins)
 	page, more := windowCards(merged, f.After, n)
 	if ix == nil || ix.CardVersion < CardProjectionVersion {
 		s.healStaleIndex(ctx, owner, repo, ix, scanned, next)
 	}
-	return &ListResult{Issues: page, More: more}, nil
+	return &ListResult{Issues: page, More: more, Pinned: pins}, nil
 }
 
 // healStaleIndex is the #564 self-heal: a version-stale index forces the
@@ -1248,12 +1291,92 @@ type ThreadView struct {
 	Thread     *Thread  `json:"thread"`
 	Events     []*Event `json:"events"`
 	EventsMore bool     `json:"events_more"`
+	// Locked/LockMode/LockReason are the M2 moderator lock (independent of,
+	// and additive to, the closed/merged conversation lock). Both the page
+	// and the JSON twin read them here: mode is "all" (nobody may write) or
+	// "collaborators" (write+ may).
+	Locked     bool   `json:"locked"`
+	LockMode   string `json:"lock_mode,omitempty"`
+	LockReason string `json:"lock_reason,omitempty"`
+	// ModerationRevision is the moderation document revision this view was
+	// redacted against (ETag material: a hide must never 304 a stale body).
+	ModerationRevision int `json:"-"`
+}
+
+// modView is one folded moderation read (M2).
+type modView struct {
+	hidden map[string]HiddenInfo
+	locked bool
+	mode   string
+	reason string
+	rev    int
+	reveal bool // caller may see hidden bodies (triage+)
+}
+
+// moderationView folds the repo moderation document into a timeline read:
+// one conditional GET shared by the redaction and the lock (PLAN-V2 §M.7).
+// A gate error fails the read closed — the page must not serve content it
+// cannot prove visible.
+func (s *Service) moderationView(ctx context.Context, owner, repo string, num int, p auth.Principal) (modView, error) {
+	mv := modView{hidden: map[string]HiddenInfo{}, reveal: s.canSeeHidden(ctx, owner, repo, p)}
+	if s.Moderation == nil {
+		return mv, nil
+	}
+	locked, mode, reason, rev, err := s.Moderation.Snapshot(ctx, owner, repo, num, func(target, by, at, why string) {
+		mv.hidden[target] = HiddenInfo{By: by, At: at, Reason: why}
+	})
+	if err != nil {
+		return modView{}, fmt.Errorf("moderation unavailable: %v", err)
+	}
+	mv.locked, mv.mode, mv.reason, mv.rev = locked, mode, reason, rev
+	return mv, nil
+}
+
+// canSeeHidden is the projection's role question: moderators (triage+) get
+// the original body alongside the hidden marker; everyone else does not.
+func (s *Service) canSeeHidden(ctx context.Context, owner, repo string, p auth.Principal) bool {
+	return s.requireRole(ctx, owner, repo, p, string(identity.RoleTriage)) == nil
+}
+
+// lockModeCollaborators is the wire spelling of moderation.LockModeCollaborators.
+// The consumer-owned-gate rule keeps this package from importing the
+// moderation implementation for one constant; the value is contractual
+// (docs/features/16_moderation.md §10.1) and cross-checked by moderation's
+// own tests.
+const lockModeCollaborators = "collaborators"
+
+// requireUnlocked is the M2 lock enforcement point for conversation writes
+// (comments, reactions). It composes with threadLocked while reads and
+// metadata remain available. Mode "all" refuses content from everyone, host
+// admins included (the v1 no-override lock decision, unchanged); mode
+// "collaborators" admits actors at role ≥ write on the normal P6 ladder —
+// which is where a host admin resolves, so an operator may still talk in a
+// collaborators-only thread and may not in an all-locked one.
+func (s *Service) requireUnlocked(ctx context.Context, owner, repo string, num int, actor auth.Principal) error {
+	if s.Moderation == nil {
+		return nil
+	}
+	locked, mode, reason, _, err := s.Moderation.Snapshot(ctx, owner, repo, num, nil)
+	if err != nil {
+		return fmt.Errorf("moderation unavailable: %v", err)
+	}
+	if !locked {
+		return nil
+	}
+	if mode == lockModeCollaborators && s.requireRole(ctx, owner, repo, actor, string(identity.RoleWrite)) == nil {
+		return nil
+	}
+	if reason == "" {
+		reason = "locked by a moderator"
+	}
+	return fmt.Errorf("%w: conversation locked: %s", ErrLocked, reason)
 }
 
 // GetThread reads header + last 50 events (events_more when older remain).
 // afterSeq windows the log older-on-demand: only seqs < afterSeq (0 =
-// newest). ETag material is Thread.Version (the HTTP layer renders
-// "v<version>").
+// newest). ETag material is Thread.Version plus the moderation revision (the
+// HTTP layer renders "v<version>-m<rev>") so a moderation change always
+// revalidates.
 func (s *Service) GetThread(ctx context.Context, owner, repo string, num int, p auth.Principal, afterSeq, n int) (*ThreadView, error) {
 	if err := s.requireRead(ctx, owner, repo, p); err != nil {
 		return nil, err
@@ -1269,7 +1392,21 @@ func (s *Service) GetThread(ctx context.Context, owner, repo string, num int, p 
 	if err != nil {
 		return nil, err
 	}
-	return &ThreadView{Thread: th, Events: events, EventsMore: more}, nil
+	mv, err := s.moderationView(ctx, owner, repo, num, p)
+	if err != nil {
+		return nil, err
+	}
+	for _, ev := range events {
+		if h, ok := mv.hidden[hiddenTarget(num, ev.Seq)]; ok {
+			hh := h
+			ev.Hidden = &hh
+			if !mv.reveal {
+				ev.Body = nil
+			}
+		}
+	}
+	return &ThreadView{Thread: th, Events: events, EventsMore: more,
+		Locked: mv.locked, LockMode: mv.mode, LockReason: mv.reason, ModerationRevision: mv.rev}, nil
 }
 
 // eventWindow returns at most n events newest-first with seq < afterSeq

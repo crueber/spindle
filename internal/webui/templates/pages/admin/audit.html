@@ -1,0 +1,114 @@
+{{/* pages/admin/audit.html — GET /admin/audit (PLAN-V2 §M.3/M.4,
+   PLAN-ADMIN §8.6).
+
+   The moderation audit viewer: every record, one page at a time, cursor =
+   the last seq the page examined. Filters are plain GET params (server-
+   rendered, no JS required): verb/action, actor, repo (or "-" for
+   instance-level) and since. Every link carries the cursor AND the filters,
+   so paging survives filtering; bad input renders a named inline error and
+   never 500s.
+
+   The table is wrapped in the standard overflow-x-auto container so only the
+   table scrolls at ~390 px. */}}
+{{define "content"}}
+<div class="admin-page" id="admin-page" data-admin-section="audit">
+  <div class="flex flex-col gap-4 lg:flex-row lg:gap-6">
+    {{template "admin-nav" .Data}}
+
+    <div class="min-w-0 flex-1">
+      {{template "admin-header" .Data}}
+
+      {{if .Data.Denied}}
+        {{template "admin-denied" .Data}}
+      {{else}}
+        {{if .Data.Restricted}}{{template "admin-restricted" .}}{{end}}
+        {{template "admin-banners" .Data}}
+
+        {{with .Data.Audit}}{{$a := .}}
+        <section class="card overflow-hidden" aria-labelledby="admin-audit-log">
+          <div class="flex flex-wrap items-center gap-2 border-b border-[var(--pd-line)] px-3 py-2">
+            <h2 class="card-header mb-0!" id="admin-audit-log">Audit log</h2>
+            {{if gt .After 0}}<span class="chip chip-neutral">after #{{.After}}</span>{{end}}
+            {{if .Filter.Active}}<span class="chip chip-draft">filtered</span>{{end}}
+          </div>
+
+          {{if .NotWired}}
+          <p class="muted p-4 text-sm">The audit viewer is not wired on this build.</p>
+          {{else if .Error}}
+          <p class="err-line p-4" role="alert">{{.Error}}</p>
+          {{else}}
+
+          {{/* ---- Filters: one GET form, no JS needed. ---- */}}
+          <form class="grid gap-2 border-b border-[var(--pd-line)] p-3 sm:grid-cols-2 lg:grid-cols-4" method="get" action="/admin/audit" aria-label="Audit log filters">
+            <div>
+              <label class="mb-1 block text-xs font-medium" for="audit-action">verb</label>
+              <input class="input" id="audit-action" name="action" type="text" list="audit-actions" value="{{.Filter.Action}}" placeholder="e.g. config_save" autocomplete="off">
+              <datalist id="audit-actions">{{range .Actions}}<option value="{{.}}"></option>{{end}}</datalist>
+            </div>
+            <div>
+              <label class="mb-1 block text-xs font-medium" for="audit-actor">actor</label>
+              <input class="input" id="audit-actor" name="actor" type="text" value="{{.Filter.Actor}}" placeholder="principal or email" autocomplete="off">
+            </div>
+            <div>
+              <label class="mb-1 block text-xs font-medium" for="audit-repo">repository</label>
+              <input class="input" id="audit-repo" name="repo" type="text" value="{{.Filter.Repo}}" placeholder="owner/name or - for instance-level" autocomplete="off">
+            </div>
+            <div>
+              <label class="mb-1 block text-xs font-medium" for="audit-since">since</label>
+              <input class="input" id="audit-since" name="since" type="text" value="{{.Filter.Since}}" placeholder="2026-11-15, 12h or 7d" autocomplete="off">
+            </div>
+            <div class="flex flex-wrap items-center gap-2 sm:col-span-2 lg:col-span-4">
+              <button type="submit" class="btn whitespace-nowrap">Apply filters</button>
+              {{if .Filter.Active}}<a class="link inline-flex min-h-6 items-center py-1 text-sm" href="/admin/audit">clear</a>{{end}}
+              {{with .Filter.SinceLabel}}<span class="muted text-xs">{{.}}</span>{{end}}
+            </div>
+          </form>
+          {{if .FilterErrs}}
+          <ul class="err-line m-0 list-none px-3 py-2" role="alert">
+            {{range .FilterErrs}}<li>{{.}}</li>{{end}}
+          </ul>
+          {{end}}
+
+          <div class="overflow-x-auto">
+            <table class="w-full text-left text-sm">
+              <caption class="sr-only">Audit records, oldest first within the page.</caption>
+              <thead>
+                <tr class="border-b border-[var(--pd-line)] text-[11px] uppercase tracking-wide text-[var(--pd-text-2)]">
+                  <th scope="col" class="px-3 py-2 font-medium">seq</th>
+                  <th scope="col" class="px-3 py-2 font-medium">when</th>
+                  <th scope="col" class="px-3 py-2 font-medium">actor</th>
+                  <th scope="col" class="px-3 py-2 font-medium">action</th>
+                  <th scope="col" class="px-3 py-2 font-medium">target</th>
+                  <th scope="col" class="px-3 py-2 font-medium">reason</th>
+                  <th scope="col" class="px-3 py-2 font-medium">context</th>
+                </tr>
+              </thead>
+              <tbody>
+                {{range .Rows}}
+                <tr class="border-t border-[var(--pd-line)] align-top">
+                  <td class="px-3 py-2 font-mono text-xs whitespace-nowrap">#{{.Seq}}</td>
+                  <td class="px-3 py-2 whitespace-nowrap">{{template "collab_time" .At}}</td>
+                  <td class="px-3 py-2">{{.Actor}}</td>
+                  <td class="px-3 py-2"><span class="chip chip-neutral">{{.Action}}</span></td>
+                  <td class="min-w-[10rem] px-3 py-2 font-mono text-xs break-all">{{.Target}}</td>
+                  <td class="px-3 py-2">{{.Reason}}</td>
+                  <td class="min-w-[14rem] px-3 py-2 font-mono text-xs break-all">{{.Context}}</td>
+                </tr>
+                {{else}}
+                <tr><td colspan="7" class="muted px-3 py-4 text-sm">{{if $a.Filter.Active}}No records match these filters in this range{{if gt $a.After 0}} (after #{{$a.After}}){{end}} — continue below, or clear the filters.{{else}}No audit records yet.{{end}}</td></tr>
+                {{end}}
+              </tbody>
+            </table>
+          </div>
+          <div class="flex flex-wrap items-center justify-between gap-2 px-3 py-2">
+            <p class="muted text-xs">Examined {{.Scanned}} record(s) on this page{{if .Filter.Active}}; a filtered page may be shorter than the page size without being the end of the log{{end}}.</p>
+            {{if .More}}<a class="link inline-flex min-h-6 items-center py-1 text-xs" href="{{.NextQuery}}">older records…</a>{{else}}<span class="muted text-xs">end of the log</span>{{end}}
+          </div>
+          {{end}}
+        </section>
+        {{end}}
+      {{end}}
+    </div>
+  </div>
+</div>
+{{end}}

@@ -16,6 +16,14 @@ import (
 // isolation per case) and a --data-dir flag value.
 func resolveWithEnv(t *testing.T, dataDir string) (*config.Config, string) {
 	t.Helper()
+	// A complete OIDC set in the environment: resolveConfig's ladder now fails
+	// validation for an unconfigured instance, and these tests assert path
+	// syncing, not boot state.
+	t.Setenv("SPINDLE__SERVER__AUTH__ISSUER", "https://id.example.com")
+	t.Setenv("SPINDLE__SERVER__AUTH__ALLOWED_DOMAINS", `["example.com"]`)
+	t.Setenv("SPINDLE__SERVER__AUTH__OAUTH_CLIENT_ID", "id")
+	t.Setenv("SPINDLE__SERVER__AUTH__OAUTH_CLIENT_SECRET", "secret")
+	t.Setenv("SPINDLE__SERVER__AUTH__SESSION_SECRET", "0123456789abcdef0123456789abcdef")
 	c := &cli{dataDir: dataDir}
 	cfg, state, err := resolveConfig(c)
 	if err != nil {
@@ -119,7 +127,8 @@ func TestDataDirFlagSyncMatrix(t *testing.T) {
 	t.Run("explicit --config plus flag syncs too", func(t *testing.T) {
 		flagDD := t.TempDir()
 		file := filepath.Join(t.TempDir(), "custom.toml")
-		if err := os.WriteFile(file, []byte(""), 0o600); err != nil {
+		body := "[server.auth]\nissuer = \"https://id.example.com\"\nallowed_domains = [\"example.com\"]\noauth_client_id = \"id\"\noauth_client_secret = \"secret\"\nsession_secret = \"0123456789abcdef0123456789abcdef\"\n"
+		if err := os.WriteFile(file, []byte(body), 0o600); err != nil {
 			t.Fatal(err)
 		}
 		c := &cli{configPath: file, dataDir: flagDD}
@@ -147,6 +156,11 @@ func TestDataDirFlagSyncMatrix(t *testing.T) {
 	})
 
 	t.Run("env-file data dir also syncs to flag", func(t *testing.T) {
+		t.Setenv("SPINDLE__SERVER__AUTH__ISSUER", "https://id.example.com")
+		t.Setenv("SPINDLE__SERVER__AUTH__ALLOWED_DOMAINS", `["example.com"]`)
+		t.Setenv("SPINDLE__SERVER__AUTH__OAUTH_CLIENT_ID", "id")
+		t.Setenv("SPINDLE__SERVER__AUTH__OAUTH_CLIENT_SECRET", "secret")
+		t.Setenv("SPINDLE__SERVER__AUTH__SESSION_SECRET", "0123456789abcdef0123456789abcdef")
 		envDD := t.TempDir()
 		t.Setenv("SPINDLE_DATA_DIR", envDD)
 		flagDD := t.TempDir()

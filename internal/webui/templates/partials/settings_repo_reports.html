@@ -1,0 +1,104 @@
+{{/* settings_repo_reports.html — Settings → Reports (PLAN-V2 §M.3/M.4).
+
+   The repo-side moderation queue: open reports first, then the resolved
+   recent tail. Canonical list anatomy: pages/collab/issues.html (a <ul> of
+   border-t rows, a state chip with its text label, a muted meta line). The
+   per-row resolve form composes the shared .input/.btn vocabulary and stacks
+   at ~390 px (one column, full-width controls; tables are not used, so no
+   overflow wrapper is needed).
+
+   Data: SettingsRepoReports (State/Open/Resolved/Reasons/NotWired/Error). */}}
+{{define "settings-repo-reports"}}
+{{/* The settings shell deliberately carries no visible page heading (Forgejo
+   #631: the sidebar is the position indicator); the tab still owns the page's
+   one h1 for assistive tech, visually hidden. */}}
+<h1 class="sr-only">Reports</h1>
+{{$reports := .Reports}}
+{{with $reports}}
+{{if .NotWired}}
+<div class="card p-4">
+  <p class="muted text-sm">Report moderation is not wired on this build yet.</p>
+</div>
+{{else}}
+<div class="space-y-4">
+  {{if .Error}}<p class="err-line" role="alert">{{.Error}}</p>{{end}}
+
+  {{if .ShowOpen}}
+  <section class="card p-4" aria-labelledby="reports-open">
+    <div class="flex flex-wrap items-center gap-2">
+      <h3 class="card-header mb-0!" id="reports-open">Open reports</h3>
+      <span class="chip chip-draft">{{len .Open}}</span>
+      <div class="ml-auto flex flex-wrap gap-1" role="group" aria-label="report state filter">
+        <a class="btn{{if eq .State "open"}} primary{{end}}" href="?state=open">Open</a>
+        <a class="btn{{if eq .State "resolved"}} primary{{end}}" href="?state=resolved">Resolved</a>
+        <a class="btn{{if eq .State "all"}} primary{{end}}" href="?state=all">All</a>
+      </div>
+    </div>
+    <p class="muted mt-1 text-xs">Reports filed by anyone with read access. Resolving with <strong>Hide</strong> or <strong>Lock</strong> applies that moderation action before the report closes; <strong>Dismiss</strong> records the decision only. Every action is audited.</p>
+
+    {{if .Open}}
+    <ul class="mt-3">
+      {{range .Open}}
+      <li class="border-t border-[var(--pd-line)] py-3 first:border-t-0 first:pt-0" id="report-{{.ID}}">
+        <div class="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1">
+          <a class="link min-w-0 max-w-full font-medium" href="{{.Href}}">#{{.ID}} {{.Kind}}</a>
+          <span class="{{.StateTone}}">{{.StateLabel}}</span>
+          <span class="muted font-mono text-[11px] break-all">{{.Target}}</span>
+          <span class="card-meta ml-auto mt-0! shrink-0">{{.Reporter}} · {{template "collab_time" .CreatedAt}}</span>
+        </div>
+        <p class="muted mt-1 text-xs">reason: <strong class="text-[var(--pd-text)]">{{.Reason}}</strong>{{with .Note}} · note: {{.}}{{end}}</p>
+
+        <form class="mt-2 grid gap-2 sm:max-w-lg" method="post" action="{{.Action}}" aria-label="resolve report {{.ID}}">
+          <fieldset class="grid gap-1">
+            <legend class="eyebrow">Resolve as</legend>
+            {{$row := .}}
+            {{range $reports.Reasons}}
+            <label class="flex items-center gap-2 text-sm">
+              <input type="radio" name="action" value="{{.ID}}"{{if eq .ID "none"}} checked{{end}}>
+              <span>{{.Label}}</span>
+            </label>
+            {{end}}
+          </fieldset>
+          <label class="eyebrow" for="resolve-note-{{$row.ID}}">Note (optional)</label>
+          <input class="input" id="resolve-note-{{$row.ID}}" name="note" maxlength="2000" autocomplete="off">
+          <div class="flex justify-end">
+            <button type="submit" class="btn primary px-2 py-1">Resolve report #{{.ID}}</button>
+          </div>
+        </form>
+      </li>
+      {{end}}
+    </ul>
+    {{else}}
+    {{template "collab_empty" (dict "compact" true "icon" "comment" "title" "No open reports" "hint" "Nothing is waiting for a moderator in this repository.")}}
+    {{end}}
+  </section>
+  {{end}}
+
+  {{if .ShowResolved}}
+  <section class="card p-4" aria-labelledby="reports-resolved">
+    <h3 class="card-header" id="reports-resolved">Resolved</h3>
+    <p class="muted mt-1 text-xs">The recent tail of the hot window. Older decisions stay in the moderation audit log; the report record itself is immutable evidence.</p>
+    {{if .Resolved}}
+    <ul class="mt-3">
+      {{range .Resolved}}
+      <li class="border-t border-[var(--pd-line)] py-2 first:border-t-0 first:pt-0" id="report-{{.ID}}">
+        <div class="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1">
+          <a class="link min-w-0 max-w-full font-medium" href="{{.Href}}">#{{.ID}} {{.Kind}}</a>
+          <span class="{{.StateTone}}">{{.StateLabel}}</span>
+          {{if .ActionLabel}}<span class="chip chip-neutral">action: {{.ActionLabel}}</span>{{end}}
+          <span class="card-meta ml-auto mt-0! shrink-0">{{.ResolvedBy}} · {{template "collab_time" .ResolvedAt}}</span>
+        </div>
+        <p class="muted mt-1 text-xs">reason: {{.Reason}} · reported by {{.Reporter}} · {{.Target}}</p>
+        {{if .ResolveNote}}<p class="muted mt-1 text-xs">decision note: {{.ResolveNote}}</p>{{end}}
+      </li>
+      {{end}}
+    </ul>
+    {{else}}
+    <p class="muted mt-2 text-sm">No resolved reports in the hot window.</p>
+    {{end}}
+  </section>
+  {{end}}
+</div>
+{{end}}
+{{end}}
+{{end}}

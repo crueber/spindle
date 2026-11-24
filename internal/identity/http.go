@@ -780,8 +780,10 @@ func (h *Handler) routeMembers(w http.ResponseWriter, r *http.Request, org strin
 			writeErr(w, cerr)
 			return true
 		}
+		// Name the operator on the audit record the roster write emits.
+		ctx := WithActor(r.Context(), p.Name)
 		if r.Method == http.MethodDelete {
-			m, err := h.Svc.RemoveMember(r.Context(), org, target)
+			m, err := h.Svc.RemoveMember(ctx, org, target)
 			if err != nil {
 				writeErr(w, err)
 				return true
@@ -795,7 +797,7 @@ func (h *Handler) routeMembers(w http.ResponseWriter, r *http.Request, org strin
 		if !readBodyJSON(w, r, 64<<10, &body) {
 			return true
 		}
-		m, err := h.Svc.SetMember(r.Context(), org, target, OrgRole(strings.ToLower(body.Role)))
+		m, err := h.Svc.SetMember(ctx, org, target, OrgRole(strings.ToLower(body.Role)))
 		if err != nil {
 			writeErr(w, err)
 			return true
@@ -879,9 +881,10 @@ func (h *Handler) routeTeams(w http.ResponseWriter, r *http.Request, org string,
 			writeErr(w, cerr)
 			return true
 		}
+		ctx := WithActor(r.Context(), p.Name)
 		switch r.Method {
 		case http.MethodPut:
-			t, err := h.Svc.SetTeamMember(r.Context(), org, slug, target)
+			t, err := h.Svc.SetTeamMember(ctx, org, slug, target)
 			if err != nil {
 				writeErr(w, err)
 				return true
@@ -889,7 +892,7 @@ func (h *Handler) routeTeams(w http.ResponseWriter, r *http.Request, org string,
 			writeCached(w, r, ccNoStore, "", http.StatusOK, t)
 			return true
 		case http.MethodDelete:
-			t, err := h.Svc.RemoveTeamMember(r.Context(), org, slug, target)
+			t, err := h.Svc.RemoveTeamMember(ctx, org, slug, target)
 			if err != nil {
 				writeErr(w, err)
 				return true

@@ -63,89 +63,6 @@ func (s *stubSSHKeys) Delete(_ context.Context, principal, id string) error {
 
 const validKeyLine = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAII/VO93dFREgk2CscLYyCKH4ZjDpD8XYGB/X8ReU2QWx ada@laptop"
 
-func TestSSHKeysAPINoneMode(t *testing.T) {
-	f := newFixture(t) // auth none? the fixture is token mode — build none here
-	f.env.Cfg.Server.Auth.Mode = "none"
-	f.env.Cfg.Server.Auth.AnonymousRead = true
-	stub := &stubSSHKeys{recs: map[string]SshKeyRecord{}}
-	f.env.SSHKeys = stub
-
-	// anonymous caller (no principal): none mode → anon, write allowed
-	w := f.do("POST", "/api/v1/ssh-keys", strings.NewReader(`{"key": "`+validKeyLine+`", "title": "laptop"}`), nil, nil)
-	if w.Code != 201 {
-		t.Fatalf("add = %d %s", w.Code, w.Body.String())
-	}
-	if !strings.Contains(w.Body.String(), `"principal":"anon"`) {
-		t.Fatalf("record principal = %s", w.Body.String())
-	}
-
-	// list shows it
-	w = f.do("GET", "/api/v1/ssh-keys", nil, nil, nil)
-	if w.Code != 200 || !strings.Contains(w.Body.String(), "fp-1") {
-		t.Fatalf("list = %d %s", w.Code, w.Body.String())
-	}
-
-	// duplicate → 409
-	stub.addErr = ErrKeyDuplicate
-	w = f.do("POST", "/api/v1/ssh-keys", strings.NewReader(`{"key": "`+validKeyLine+`"}`), nil, nil)
-	if w.Code != 409 {
-		t.Fatalf("duplicate = %d", w.Code)
-	}
-	stub.addErr = nil
-
-	// malformed key → 400 (the registry's format error)
-	stub.addErr = ErrKeyBadKeyLine
-	w = f.do("POST", "/api/v1/ssh-keys", strings.NewReader(`{"key": "junk"}`), nil, nil)
-	if w.Code != 400 || !strings.Contains(w.Body.String(), "authorized_keys") {
-		t.Fatalf("bad key = %d %s", w.Code, w.Body.String())
-	}
-	stub.addErr = nil
-
-	// bad principal → 400
-	stub.addErr = ErrKeyBadPrincipal
-	w = f.do("POST", "/api/v1/ssh-keys", strings.NewReader(`{"key": "`+validKeyLine+`"}`), nil, nil)
-	if w.Code != 400 {
-		t.Fatalf("bad principal = %d", w.Code)
-	}
-	stub.addErr = nil
-
-	// any other Add error (store put failure, rollback failure) → 500, never
-	// a silent 200 (the default branch is the store-failure mapping)
-	stub.addErr = errors.New("put failed")
-	w = f.do("POST", "/api/v1/ssh-keys", strings.NewReader(`{"key": "`+validKeyLine+`"}`), nil, nil)
-	if w.Code != 500 {
-		t.Fatalf("store failure = %d %s", w.Code, w.Body.String())
-	}
-
-	// empty key → 400 before the registry
-	w = f.do("POST", "/api/v1/ssh-keys", strings.NewReader(`{"key": "  "}`), nil, nil)
-	if w.Code != 400 {
-		t.Fatalf("empty key = %d", w.Code)
-	}
-
-	// delete: wrong owner -> 403; unknown -> 404; own -> 200
-	w = f.do("DELETE", "/api/v1/ssh-keys/fp-1", nil, nil, &auth.Principal{Name: "someoneelse", Write: true})
-	if w.Code != 403 {
-		t.Fatalf("foreign delete = %d", w.Code)
-	}
-	w = f.do("DELETE", "/api/v1/ssh-keys/missing-fp", nil, nil, nil)
-	if w.Code != 404 {
-		t.Fatalf("missing delete = %d", w.Code)
-	}
-	w = f.do("DELETE", "/api/v1/ssh-keys/fp-1", nil, nil, nil)
-	if w.Code != 200 {
-		t.Fatalf("own delete = %d", w.Code)
-	}
-	if _, ok := stub.recs["fp-1"]; ok {
-		t.Fatal("record must be gone")
-	}
-}
-
-// TestSSHKeysListRefusesAnonymous pins the read side of the Forgejo #502
-// defect-A rule (the same refusal add/delete already carry): with
-// anonymous_read on, AuthRead admits anonymous, but the synthetic "anonymous"
-// principal owns no keys and must never receive a listing. The /keys page
-// mirrors this refusal with a 401 (internal/webui).
 func TestSSHKeysListRefusesAnonymous(t *testing.T) {
 	f := newFixture(t)
 	f.env.Cfg.Server.Auth.AnonymousRead = true
@@ -203,4 +120,67 @@ func TestSSHKeysAPIWriteGate(t *testing.T) {
 		t.Fatalf("record principal = %q", rec.Principal)
 	}
 	_ = store.ErrKindNotFound // keep the store import if unused elsewhere
+}
+
+// TestSSHKeysAddDeleteBranches covers the handler's client-error and failure
+// arms for a signed-in principal (the anonymous arms are pinned separately).
+func TestSSHKeysAddDeleteBranches(t *testing.T) {
+	f := newFixture(t)
+	f.env.Cfg.Server.Auth.AnonymousRead = true
+	stub := &stubSSHKeys{recs: map[string]SshKeyRecord{}}
+	f.env.SSHKeys = stub
+	alice := auth.Principal{Name: "alice@example.com", Write: true}
+
+	// Unreadable JSON and a missing key are 400s.
+	if w := f.do("POST", "/api/v1/ssh-keys", strings.NewReader("{"), nil, &alice); w.Code != http.StatusBadRequest {
+		t.Fatalf("bad json = %d", w.Code)
+	}
+	if w := f.do("POST", "/api/v1/ssh-keys", strings.NewReader(`{"key":"  "}`), nil, &alice); w.Code != http.StatusBadRequest {
+		t.Fatalf("empty key = %d", w.Code)
+	}
+	// A store failure that is not a known key error is a 500.
+	stub.addErr = errors.New("store down")
+	if w := f.do("POST", "/api/v1/ssh-keys", strings.NewReader(`{"key":"ssh-ed25519 AAAA x"}`), nil, &alice); w.Code != http.StatusInternalServerError {
+		t.Fatalf("generic add error = %d", w.Code)
+	}
+	stub.addErr = nil
+
+	// Delete: empty id 400, unknown 404, forbidden 403, generic 500.
+	if w := f.do("DELETE", "/api/v1/ssh-keys/", nil, nil, &alice); w.Code != http.StatusBadRequest && w.Code != http.StatusNotFound {
+		t.Fatalf("empty id = %d", w.Code)
+	}
+	if w := f.do("DELETE", "/api/v1/ssh-keys/missing", nil, nil, &alice); w.Code != http.StatusNotFound {
+		t.Fatalf("unknown delete = %d", w.Code)
+	}
+	stub.getErr = ErrKeyForbidden
+	if w := f.do("DELETE", "/api/v1/ssh-keys/fp-1", nil, nil, &alice); w.Code != http.StatusForbidden {
+		t.Fatalf("forbidden delete = %d", w.Code)
+	}
+	stub.getErr = errors.New("store down")
+	if w := f.do("DELETE", "/api/v1/ssh-keys/fp-1", nil, nil, &alice); w.Code != http.StatusInternalServerError {
+		t.Fatalf("generic delete = %d", w.Code)
+	}
+	stub.getErr = nil
+
+	// List with a store failure is a 500.
+	f.env.SSHKeys = &errListKeys{stub: stub}
+	if w := f.do("GET", "/api/v1/ssh-keys", nil, nil, &alice); w.Code != http.StatusInternalServerError {
+		t.Fatalf("list error = %d", w.Code)
+	}
+}
+
+// errListKeys makes List fail.
+type errListKeys struct{ stub *stubSSHKeys }
+
+func (e *errListKeys) List(context.Context, string) ([]SshKeyRecord, error) {
+	return nil, errors.New("list down")
+}
+func (e *errListKeys) Add(ctx context.Context, p, k, t string) (SshKeyRecord, error) {
+	return e.stub.Add(ctx, p, k, t)
+}
+func (e *errListKeys) Get(ctx context.Context, p, id string) (SshKeyRecord, error) {
+	return e.stub.Get(ctx, p, id)
+}
+func (e *errListKeys) Delete(ctx context.Context, p, id string) error {
+	return e.stub.Delete(ctx, p, id)
 }

@@ -15,6 +15,7 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"sync"
 	"time"
 
@@ -40,6 +41,7 @@ const (
 func newThreadsSweepers(svc *threads.Service) []maintain.Sweeper {
 	return []maintain.Sweeper{
 		&threadsSweeper{svc: svc, kind: threads.KindThreadsGC, cadence: threadsGCCadence, run: queueSweep},
+		&threadsSweeper{svc: svc, kind: threads.KindThreadsQueueReconcile, cadence: threadsGCCadence, run: queueIndexSweep},
 		&threadsSweeper{svc: svc, kind: threads.KindThreadsGC, cadence: threadsRetentionCadence, run: retentionSweep},
 		&threadsSweeper{svc: svc, kind: threads.KindThreadsSchedule, cadence: threadsScheduleCadence, aligned: true, run: scheduleSweep},
 	}
@@ -131,6 +133,18 @@ func queueSweep(ctx context.Context, svc *threads.Service, repo string, log main
 func retentionSweep(ctx context.Context, svc *threads.Service, repo string, log maintain.TaskLogger) error {
 	owner, name, _ := splitRepo(repo)
 	_, err := svc.Retain(ctx, owner, name, log)
+	return err
+}
+
+// queueIndexSweep is the threads-queue-reconcile body: rebuild one repository's
+// rows in the global dispatch hint from its authoritative queue entries (the
+// only place the index is repaired, and the only LIST it performs).
+func queueIndexSweep(ctx context.Context, svc *threads.Service, repo string, log maintain.TaskLogger) error {
+	owner, name, _ := splitRepo(repo)
+	n, err := svc.ReconcileQueueIndex(ctx, owner, name)
+	if err == nil && n > 0 && log != nil {
+		log.Notice(fmt.Sprintf("threads-queue-reconcile %s: %d rows", repo, n))
+	}
 	return err
 }
 

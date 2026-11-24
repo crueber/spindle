@@ -35,18 +35,19 @@ type StartView struct {
 	// `contents: write`). The job payload states its own authority.
 	Permissions map[string]string `json:"permissions"`
 	Scopes      []string          `json:"scopes"`
+	// Artifacts advertises the instance's artifact caps so the runner refuses
+	// an over-cap upload before streaming it (15 §2.5).
+	Artifacts ArtifactCaps `json:"artifacts"`
 }
 
 // Start marks the attempt running and issues its short-lived wjt_ token. The
 // caller is authenticated by the runner token; the path's job reference and
-// attempt number must match both the runner's repository and the claim.
+// attempt number must match the claim. An instance runner is not scoped to a
+// repository: the claim (the queue entry naming this runner) is the authority.
 func (s *Service) Start(ctx context.Context, runner *runnerAuth, ref string, attempt int) (*StartView, error) {
 	owner, repo, runID, jobID, err := parseJobRef(ref)
 	if err != nil {
 		return nil, fmt.Errorf("%w: unknown job reference", ErrNotFound)
-	}
-	if owner != runner.Owner || repo != runner.Repo {
-		return nil, fmt.Errorf("%w: job belongs to another repository", ErrForbidden)
 	}
 	job, run, jerr := s.loadJobAndRun(ctx, owner, repo, runID, jobID)
 	if jerr != nil {
@@ -89,6 +90,7 @@ func (s *Service) Start(ctx context.Context, runner *runnerAuth, ref string, att
 		Token: token, ExpiresAt: expires.Format(dateTimeFmt), Repo: claims.Repo,
 		RunID: runID, JobID: jobID, Attempt: attempt,
 		Permissions: perms, Scopes: claims.Scopes,
+		Artifacts: s.ArtifactCaps(),
 	}, nil
 }
 
@@ -183,11 +185,14 @@ func (s *Service) renewLeaseFor(ctx context.Context, owner, repo string, job *Jo
 	return s.renewLease(ctx, owner, repo, entry, job)
 }
 
-// StepResult is one completed step's outcome (complete's payload). ExitCode and
-// DurationMS are the runner's accounting (pinned by pass B2; older runners omit
-// them and the fields stay zero).
+// StepResult is one completed step's outcome (complete's payload) and the
+// `steps.<id>` context a later step's `if:` reads. ExitCode and DurationMS are
+// the runner's accounting (pinned by pass B2; older runners omit them and the
+// fields stay zero).
 type StepResult struct {
-	Number     int    `json:"number,omitempty"`
+	Number int `json:"number,omitempty"`
+	// ID is the step's `id:` ("" for an anonymous step).
+	ID         string `json:"id,omitempty"`
 	Name       string `json:"name,omitempty"`
 	Conclusion string `json:"conclusion"`
 	Error      string `json:"error,omitempty"`
@@ -199,6 +204,10 @@ type StepResult struct {
 type CompleteInput struct {
 	Conclusion string       `json:"conclusion"`
 	Steps      []StepResult `json:"steps"`
+	// Outputs are the job outputs the runner evaluated from the spec's
+	// `outputs:` templates (docs/threads.md §3.9). Only a successful job's
+	// outputs are stored; a failed or cancelled job exposes none.
+	Outputs map[string]string `json:"outputs,omitempty"`
 }
 
 // CompleteView is the complete answer.
@@ -238,8 +247,21 @@ func (s *Service) Complete(ctx context.Context, claims AttemptClaims, in Complet
 		steps[i].Conclusion = normalizeConclusion(steps[i].Conclusion)
 		steps[i].Error = truncate(steps[i].Error, 512)
 	}
+	// Job outputs: the runner already enforced the caps; the server enforces
+	// them again (a bugging runner must not enlarge a job record past the
+	// documented bound) and stores none for a job that did not succeed — a
+	// dependent job must never read outputs from a failed dependency.
+	outputs := in.Outputs
+	if state != JobSuccess {
+		outputs = nil
+	}
+	if len(outputs) > 0 {
+		if oerr := ValidateOutputs(outputs); oerr != nil {
+			return nil, fmt.Errorf("%w: %v", ErrInvalid, oerr)
+		}
+	}
 	updated, uerr := s.UpdateJob(ctx, repoID(owner, repo), claims.Run, claims.Job, JobUpdate{
-		State: state, StepResults: steps, CancelRequested: boolPtr(false),
+		State: state, StepResults: steps, Outputs: outputs, CancelRequested: boolPtr(false),
 	})
 	if uerr != nil {
 		return nil, uerr
@@ -247,8 +269,9 @@ func (s *Service) Complete(ctx context.Context, claims AttemptClaims, in Complet
 	// fail-fast: a failed matrix cell cancels its siblings (GitHub's default
 	// is on; `fail-fast: false` opts out). The sibling cancel rides the same
 	// terminal path the operator uses, so a running sibling acks on its next
-	// write.
-	if state == JobFailure && job.Spec != nil && job.Spec.MatrixGroup != "" &&
+	// write. A job-level `continue-on-error` tolerates the failure, so it must
+	// not fail fast either.
+	if state == JobFailure && job.Spec != nil && !job.Spec.ContinueOnError && job.Spec.MatrixGroup != "" &&
 		(job.Spec.Strategy == nil || job.Spec.Strategy.FailFast == nil || *job.Spec.Strategy.FailFast) {
 		if ferr := s.cancelMatrixSiblings(ctx, owner, repo, claims.Run, claims.Job, job.Spec.MatrixGroup); ferr != nil {
 			return nil, ferr
@@ -410,7 +433,10 @@ func (s *Service) cancelRunSystem(ctx context.Context, owner, name, runID string
 
 // RerunRun creates a new attempt for every job of a run (repo write role):
 // state resets to queued, the attempt number advances (which invalidates every
-// previous attempt token by identity) and the jobs are re-enqueued.
+// previous attempt token by identity) and the jobs are re-enqueued. The
+// environment gate is re-applied (a record added or tightened since the run was
+// created must be honoured by the re-run button), so a re-run of an
+// environment-gated deployment is held again for a fresh decision.
 func (s *Service) RerunRun(ctx context.Context, repo, runID string, p auth.Principal) (*Run, error) {
 	owner, name, err := splitRepo(repo)
 	if err != nil {
@@ -430,10 +456,26 @@ func (s *Service) RerunRun(ctx context.Context, repo, runID string, p auth.Princ
 	if err != nil {
 		return nil, err
 	}
+	now := s.nowUTC().Format(dateTimeFmt)
 	requeue := make([]*Job, 0, len(jobs))
+	var gated []string
+	anyRefused := false
 	for _, job := range jobs {
 		if job.State == JobRunning {
 			return nil, fmt.Errorf("%w: job %s is still running; cancel it first", ErrConflict, job.ID)
+		}
+		// The image and container-option gates are re-applied on every attempt:
+		// a policy tightened after the run was created must not be bypassed by a
+		// rerun, and the refusal lands as a failed job with the same named Reason.
+		if reason, refused := s.jobRefusalReason(job.Spec); refused {
+			anyRefused = true
+			if _, uerr := s.UpdateJob(ctx, repo, runID, job.ID, JobUpdate{
+				State: JobFailure, Attempt: job.Attempt + 1, ClearTimings: true,
+				CancelRequested: boolPtr(false), Reason: reason,
+			}); uerr != nil {
+				return nil, uerr
+			}
+			continue
 		}
 		next, uerr := s.UpdateJob(ctx, repo, runID, job.ID, JobUpdate{
 			State: JobQueued, Attempt: job.Attempt + 1, ClearTimings: true,
@@ -442,12 +484,32 @@ func (s *Service) RerunRun(ctx context.Context, repo, runID string, p auth.Princ
 		if uerr != nil {
 			return nil, uerr
 		}
+		// Re-decide the deployment against the CURRENT environment record: an
+		// undefined environment fails the job closed, a reviewed one holds the
+		// re-run for a new approval (the previous decision is not transferable).
+		held, eerr := s.applyEnvironmentDecision(ctx, owner, name, next, now)
+		if eerr != nil {
+			return nil, eerr
+		}
+		if next.State != JobQueued || next.Deployment != nil {
+			if _, uerr := s.UpdateJob(ctx, repo, runID, job.ID, JobUpdate{
+				State: next.State, Deployment: next.Deployment, Reason: next.Reason,
+			}); uerr != nil {
+				return nil, uerr
+			}
+		}
+		if next.State != JobQueued {
+			continue
+		}
+		if held {
+			gated = append(gated, next.Deployment.Environment)
+			continue
+		}
 		requeue = append(requeue, next)
 	}
 	// The run header is the run's commit point: bump its attempt after the
 	// jobs, then enqueue. A failure between the two leaves jobs queued with a
 	// stale header, which the next rerun (or threads-gc) repairs.
-	now := s.nowUTC().Format(dateTimeFmt)
 	if _, cerr := s.casUpdate(ctx, RunKey(owner, name, runID), 5, func(cur []byte, _ store.Version) ([]byte, bool, error) {
 		if cur == nil {
 			return nil, false, fmt.Errorf("%w: unknown run %q", ErrNotFound, runID)
@@ -461,18 +523,53 @@ func (s *Service) RerunRun(ctx context.Context, repo, runID string, p auth.Princ
 		r.UpdatedAt = now
 		r.StartedAt = nil
 		r.CompletedAt = nil
+		// The previous decision belonged to the previous attempt.
+		r.ApprovedBy, r.ApprovedAt = "", nil
+		r.DeniedBy, r.DeniedAt = "", nil
+		r.ApprovalKind, r.Environments = "", nil
+		if len(gated) > 0 {
+			r.State = RunPendingApproval
+			r.ApprovalKind = ApprovalEnvironment
+			r.Environments = uniqueEnvNames(gated)
+		}
 		r.Version++
 		run = &r
 		return mustJSON(&r), true, nil
 	}); cerr != nil {
 		return nil, cerr
 	}
+	if len(gated) > 0 {
+		// The hold IS the queue: no runner may claim a deployment nobody
+		// approved.
+		return run, nil
+	}
 	idx := needsIndex(jobs)
 	for _, job := range requeue {
-		if _, eerr := s.enqueueJob(ctx, owner, name, job, entryNeeds(idx, job)); eerr != nil {
+		// A rerun is a new attempt, so a job-level `if:` is evaluated again: a
+		// job with no `needs:` is decided here (a dependent is decided by the
+		// cascade once its dependencies conclude).
+		if len(job.Needs) == 0 {
+			if verdict, reason, _ := evaluateJobIf(job, run, needFacts{}); verdict != jobIfRun {
+				state := JobSkipped
+				if verdict == jobIfError {
+					state = JobFailure
+				}
+				if _, uerr := s.UpdateJob(ctx, repo, runID, job.ID, JobUpdate{State: state, Reason: reason}); uerr != nil {
+					return nil, uerr
+				}
+				continue
+			}
+		}
+		if _, eerr := s.enqueueJob(ctx, owner, name, job, entryNeedMap(idx, job)); eerr != nil {
 			return nil, eerr
 		}
 		fetchHub.wake(repoID(owner, name))
+	}
+	// A condition that skips a job dooms its dependents; settle against the
+	// final job set (the loop may have reset a dependent before its dependency
+	// was decided) and fold a run with nothing left to run.
+	if anyRefused || !allQueued(requeue) {
+		return s.settleDecidedJobs(ctx, owner, name, runID)
 	}
 	return run, nil
 }

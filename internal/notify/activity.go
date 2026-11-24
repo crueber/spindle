@@ -39,7 +39,18 @@ type activityPayload struct {
 // between reservation and the event Create leaves a gap — allowed and
 // counted by readers as an honest gap (§5.3).
 func (s *Service) reserveSeq(ctx context.Context, owner, repo string) (int, error) {
-	var seq int
+	return s.reserveSeqs(ctx, owner, repo, 1)
+}
+
+// reserveSeqs reserves n consecutive seqs in ONE CAS and returns the first:
+// a push batch (one event per ref update) must not pay one CAS per ref.
+// Unused reservations are honest gaps (§5.3), exactly like a crash between
+// reserve and append.
+func (s *Service) reserveSeqs(ctx context.Context, owner, repo string, n int) (int, error) {
+	if n < 1 {
+		return 0, fmt.Errorf("%w: reserve %d seqs", ErrInvalid, n)
+	}
+	var first int
 	_, err := s.casUpdate(ctx, CollabStateKey(owner, repo), 8, func(cur []byte, _ store.Version) ([]byte, bool, error) {
 		var st CollabState
 		if cur != nil {
@@ -47,11 +58,11 @@ func (s *Service) reserveSeq(ctx context.Context, owner, repo string) (int, erro
 				return nil, false, fmt.Errorf("%w: collab_state: %v", ErrInvalid, err)
 			}
 		}
-		seq = st.NextSeq + 1
-		if seq < 1 {
-			seq = 1
+		first = st.NextSeq + 1
+		if first < 1 {
+			first = 1
 		}
-		st.NextSeq = seq
+		st.NextSeq = first + n - 1
 		raw, err := encode(st)
 		if err != nil {
 			return nil, false, err
@@ -61,7 +72,7 @@ func (s *Service) reserveSeq(ctx context.Context, owner, repo string) (int, erro
 	if err != nil {
 		return 0, err
 	}
-	return seq, nil
+	return first, nil
 }
 
 // appendActivity Creates the immutable activity event for seq (P3

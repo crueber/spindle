@@ -185,7 +185,7 @@ func TestLFSPutValidation(t *testing.T) {
 	}
 	// Write-denied principal → pkt-ERR shape (Authorization carried, §4.2).
 	s.cfg.Server.Auth.Tokens = append(s.cfg.Server.Auth.Tokens,
-		config.StaticToken{Principal: "ro", Token: "ro-token", Write: false, Admin: false})
+		config.StaticToken{Principal: "ro", Token: "ro-token", Write: false})
 	s.authSvc = NewAuthService(&s.cfg.Server.Auth, s.Now)
 	req = httptest.NewRequest("PUT", "http://x/o/r.git/info/lfs/objects/"+oid+"?service=git-upload-pack", nil)
 	req.Header.Set("Authorization", "Bearer ro-token")

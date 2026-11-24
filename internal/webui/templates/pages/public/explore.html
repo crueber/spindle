@@ -18,9 +18,9 @@
       {{if .Data.Owners}}
       <div class="card overflow-hidden">
         <div class="overflow-x-auto">
-          <table class="data-table">
+          <table class="data-table" aria-label="repository owners">
             <thead>
-              <tr><th>owner</th><th class="w-px text-right">repositories</th></tr>
+              <tr><th scope="col">owner</th><th scope="col" class="w-px text-right">repositories</th></tr>
             </thead>
             <tbody>
               {{range .Data.Owners}}

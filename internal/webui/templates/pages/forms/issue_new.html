@@ -8,7 +8,24 @@
   </p>
   {{else}}
   {{template "forms_messages" .Data}}
+  {{if .Data.Templates}}
+  <nav class="card mb-3 p-3 text-sm" aria-label="Issue templates">
+    <p class="eyebrow mb-1">Start from a template</p>
+    <ul class="flex flex-wrap gap-2">
+      {{range .Data.Templates}}
+      <li>
+        <a class="btn px-2 py-1 text-xs" href="?template={{.Path | urlquery}}" {{if eq .Path $.Data.Selected}}aria-current="true"{{end}} title="{{.About}}">{{.Name}}</a>
+      </li>
+      {{end}}
+      {{if .Data.Selected}}
+      <li><a class="link text-xs self-center" href="/{{.Data.Full}}/issues/new">start blank</a></li>
+      {{end}}
+    </ul>
+    {{with .Data.Template}}{{with .About}}<p class="muted mt-2 text-xs">{{.}}</p>{{end}}{{end}}
+  </nav>
+  {{end}}
   <form method="post" action="/{{.Data.Full}}/issues/new" class="grid gap-3" aria-label="New issue">
+    {{with .Data.Selected}}<input type="hidden" name="template" value="{{.}}">{{end}}
     <label class="grid gap-1" for="issue-title">
       <span class="text-sm font-medium">Title</span>
       <input id="issue-title" name="title" class="input" value="{{.Data.Title}}" maxlength="256" placeholder="Publish fails on empty tree">
@@ -21,6 +38,11 @@
       <textarea id="issue-body" name="body" class="input min-h-32" placeholder="Steps to reproduce… (markdown; #N links issues)">{{.Data.Body}}</textarea>
       {{end}}
     </div>
+    {{with .Data.Labels}}
+    <p class="muted text-xs">Template labels: <span class="mono">{{.}}</span>{{with $.Data.Assignees}} · assignees: <span class="mono">{{.}}</span>{{end}}</p>
+    {{else}}{{with .Data.Assignees}}
+    <p class="muted text-xs">Template assignees: <span class="mono">{{.}}</span></p>
+    {{end}}{{end}}
     <div class="flex flex-wrap items-center justify-between gap-2">
       <button type="submit" class="btn primary">Create issue</button>
       <button type="submit" name="action" value="preview" class="btn" aria-pressed="{{if .Data.Preview}}true{{else}}false{{end}}">{{if .Data.Preview}}Edit{{else}}Preview{{end}}</button>

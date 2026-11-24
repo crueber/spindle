@@ -72,6 +72,10 @@ var middlewareOrder = []string{
 	"recoverPanic",
 	"cors",
 	"refreshSession",
+	// rateLimit is innermost: it reads the resolved request (method, path,
+	// principal) and sits above every handler, so no page form or API verb
+	// can skip its class (PLAN-V2 §M.6.4, docs/go/06_server_http.md §2.4).
+	"rateLimit",
 }
 
 // middlewareByName resolves one factory per name — an explicit, reviewable map.
@@ -91,6 +95,8 @@ func (s *Server) middlewareByName(name string) func(http.Handler) http.Handler {
 		return s.cors
 	case "refreshSession":
 		return s.refreshSession
+	case "rateLimit":
+		return s.rateLimit
 	}
 	return nil
 }
@@ -530,15 +536,29 @@ func injectPrincipal(r *http.Request, p auth.Principal) *http.Request {
 	return r.WithContext(api.WithPrincipal(ctx, p))
 }
 
+// noteAuthFailure consumes one auth_fail token for a rejected credential and
+// reports whether the address is now over budget (the caller answers 429).
+// Nil limiter (disabled) never consumes.
+func (s *Server) noteAuthFailure(r *http.Request) bool {
+	if s.rate == nil {
+		return false
+	}
+	return !s.rate.Allow(classAuthFail, s.clientAddr(r))
+}
+
 // authFailure maps the gated-group outcomes.
 func (s *Server) authFailure(w http.ResponseWriter, r *http.Request, aerr *auth.AuthError) {
 	switch aerr.Kind {
 	case auth.ErrForbidden:
-		plainStatus(w, http.StatusForbidden, aerr.Why+" — see: spindle config (server.auth: admin_groups, admin_emails)")
+		plainStatus(w, http.StatusForbidden, aerr.Why+" — see: spindle config (server.auth.admin_groups)")
 	case auth.ErrUnavailable:
 		w.Header().Set("Retry-After", "15")
 		plainStatus(w, http.StatusServiceUnavailable, aerr.Why)
 	default: // ErrInvalid / ErrUnauthorized
+		if aerr.Kind == auth.ErrInvalid && s.noteAuthFailure(r) {
+			s.rateLimited(w)
+			return
+		}
 		if r.Method == http.MethodGet && browserLooks(r) &&
 			r.Header.Get("Authorization") == "" && s.authSvc.BrowserLoginEnabled() {
 			http.Redirect(w, r, "/_auth/login?next="+r.URL.RequestURI(),
@@ -546,17 +566,15 @@ func (s *Server) authFailure(w http.ResponseWriter, r *http.Request, aerr *auth.
 			return
 		}
 		// #344 / F1: an unauthenticated browser with login disabled must still
-		// get something usable — the rendered login page HONEST for the mode
-		// (the token-paste form in token mode, the OIDC explanation only on an
-		// OIDC host), not a bare 401. Status stays 401 and the Bearer
-		// challenge stays, so API clients see no behavior change.
+		// get something usable — the rendered login page naming the missing
+		// keys and the file/env recovery, not a bare 401. Status stays 401 and
+		// the Bearer challenge stays, so API clients see no behavior change.
 		if r.Method == http.MethodGet && browserLooks(r) &&
 			r.Header.Get("Authorization") == "" {
 			w.Header().Set("WWW-Authenticate", s.authChallenge())
 			w.Header().Set("Content-Type", "text/html; charset=utf-8")
 			w.WriteHeader(http.StatusUnauthorized)
-			_, _ = w.Write([]byte(loginPageHTML(s.cfg.Server.Auth.Mode,
-				s.authSvc.TokenSignInEnabled(), r.URL.RequestURI())))
+			_, _ = w.Write([]byte(loginPageHTML(r.URL.RequestURI())))
 			return
 		}
 		w.Header().Set("WWW-Authenticate", s.authChallenge())
@@ -565,7 +583,16 @@ func (s *Server) authFailure(w http.ResponseWriter, r *http.Request, aerr *auth.
 }
 
 // mapAuthStatus is the shared 401/403/503 mapping (§8.6) used inside handlers.
-func (s *Server) mapAuthStatus(w http.ResponseWriter, aerr *auth.AuthError) {
+// A rejected CREDENTIAL (ErrInvalid) consumes one auth_fail token first: once
+// the address has burned its budget the answer is the neutral 429 rather than
+// another 401, so a guessing client gets no oracle and no free verification
+// (PLAN-V2 §M.7, docs/go/06_server_http.md §2.4). Authorization decisions
+// (403) and outages (503) are not failed logins and are never counted.
+func (s *Server) mapAuthStatus(w http.ResponseWriter, r *http.Request, aerr *auth.AuthError) {
+	if aerr.Kind == auth.ErrInvalid && s.noteAuthFailure(r) {
+		s.rateLimited(w)
+		return
+	}
 	switch aerr.Kind {
 	case auth.ErrForbidden:
 		plainStatus(w, http.StatusForbidden, aerr.Why)
@@ -616,10 +643,12 @@ func (cw *compressWriter) Header() http.Header { return cw.w.Header() }
 func (cw *compressWriter) WriteHeader(status int) {
 	ct := cw.w.Header().Get("Content-Type")
 	if strings.HasPrefix(ct, "text/event-stream") || strings.HasPrefix(ct, "image/") ||
+		strings.HasPrefix(ct, "application/octet-stream") ||
 		cw.w.Header().Get("Content-Encoding") != "" {
 		cw.bypass = true // SSE; already-compressed image bytes (issue #187:
-		// gzipping LZW GIFs burns CPU per request for zero gain); or the
-		// asset arrived precompressed
+		// gzipping LZW GIFs burns CPU per request for zero gain); opaque binary
+		// streams (artifact blobs: a runner verifies the recorded length, and a
+		// gzip hop hides it); or the asset arrived precompressed
 	} else {
 		h := cw.w.Header()
 		h.Set("Content-Encoding", "gzip")

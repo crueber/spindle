@@ -23,11 +23,13 @@ import (
 	"github.com/crueber/spindle/internal/events"
 	"github.com/crueber/spindle/internal/git"
 	"github.com/crueber/spindle/internal/identity"
+	"github.com/crueber/spindle/internal/insights"
 	"github.com/crueber/spindle/internal/maintain"
 	"github.com/crueber/spindle/internal/notify"
 	"github.com/crueber/spindle/internal/packages"
 	"github.com/crueber/spindle/internal/pulls"
 	"github.com/crueber/spindle/internal/server"
+	"github.com/crueber/spindle/internal/server/auth"
 	"github.com/crueber/spindle/internal/store"
 	"github.com/crueber/spindle/internal/wal"
 	"github.com/crueber/spindle/internal/webui"
@@ -43,19 +45,32 @@ func runServe(ctx context.Context, c *cli, args []string) int {
 
 	cfg, fileState, err := resolveConfig(c)
 	if err != nil {
-		if fileState == stateAbsent {
+		switch fileState {
+		case stateAbsent:
 			// Missing explicitly-named file (§6.1: exit 2).
 			fmt.Fprintf(os.Stderr, "spindle: %v\n", err)
 			return exitArg
+		case stateUnconfigured:
+			// NO config file and no complete OIDC set anywhere: the zero-config
+			// first run is RESTRICTED (PLAN-OIDC-ONLY §2.1). The only reachable
+			// surfaces are the Administration area and health; /admin carries
+			// the OIDC onboarding card. The validation findings are logged for
+			// the operator, not rendered as a wall of boot errors.
+			fmt.Fprintf(os.Stderr, "spindle: first run: OIDC is not configured — serving only /admin until a config is saved and the server restarted (%v)\n", err)
+			cfg, _ = setupOnlyBootConfig(c, dataDir, err)
+			boot := server.BootState{Mode: "setup_only", FileState: "absent", ConfigPaths: configCandidates(c)}
+			return serveHTTP(ctx, cfg, boot, dataDir, nil)
+		default:
+			// INVALID config → RESTRICTED MODE (§3.4): only /admin, /healthz,
+			// /readyz, /services/public answer; the setup UI displays the
+			// errors. F5: boot on the file's BEST-EFFORT values (not
+			// FirstRunDefaults), so [server].listen is honoured and the page
+			// pre-fills from the file.
+			fmt.Fprintf(os.Stderr, "spindle: config invalid — entering restricted mode (Administration area only): %v\n", err)
+			cfg, msgs := setupOnlyBootConfig(c, dataDir, err)
+			boot := server.BootState{Mode: "setup_only", FileState: "invalid", Errors: msgs, ConfigPaths: configCandidates(c)}
+			return serveHTTP(ctx, cfg, boot, dataDir, nil)
 		}
-		// INVALID config → SETUP-ONLY MODE (§3.4): only /setup, /healthz,
-		// /readyz, /services/public answer; the setup UI displays the errors.
-		// F5: boot on the file's BEST-EFFORT values (not FirstRunDefaults), so
-		// [server].listen is honoured and the page pre-fills from the file.
-		fmt.Fprintf(os.Stderr, "spindle: config invalid — entering setup-only mode: %v\n", err)
-		cfg, msgs := setupOnlyBootConfig(c, dataDir, err)
-		boot := server.BootState{Mode: "setup_only", Errors: msgs, ConfigPaths: configCandidates(c)}
-		return serveHTTP(ctx, cfg, boot, dataDir, nil)
 	}
 	// The --data-dir flag is authoritative over the XDG/env default (§3.1.1):
 	// re-point the flag-derived PATHS so first-run store/cache and setup saves
@@ -74,13 +89,14 @@ func runServe(ctx context.Context, c *cli, args []string) int {
 	if cfg.Cache.Dir == filepath.Join(envDataDir, "cache") {
 		cfg.Cache.Dir = filepath.Join(dataDir, "cache")
 	}
-	bootMode := "normal"
+	bootFileState := "valid"
 	if fileState == stateAbsent {
-		bootMode = "defaults"
+		// The env overlay completed a valid OIDC set with no config file.
+		bootFileState = "absent"
 		logSetupBanner(cfg)
 	}
 	for _, w := range mustWarnings(cfg) {
-		slog.Warn(w) // the §5-rule-1 auth-none-on-non-loopback warning
+		slog.Warn(w)
 	}
 
 	st, err := openStore(cfg, dataDir)
@@ -88,7 +104,7 @@ func runServe(ctx context.Context, c *cli, args []string) int {
 		fmt.Fprintf(os.Stderr, "spindle: store: %v\n", err)
 		return exitErr
 	}
-	return serveHTTP(ctx, cfg, server.BootState{Mode: bootMode, ConfigPaths: configCandidates(c)}, dataDir, st)
+	return serveHTTP(ctx, cfg, server.BootState{Mode: "normal", FileState: bootFileState, ConfigPaths: configCandidates(c)}, dataDir, st)
 }
 
 // setupOnlyBootConfig builds the F5 setup-only boot config (the file's
@@ -117,6 +133,16 @@ func setupOnlyBootConfig(c *cli, dataDir string, loadErr error) (*config.Config,
 func serveHTTP(ctx context.Context, cfg *config.Config, boot server.BootState, dataDir string, st store.ObjectStore) int {
 	log := newLogger(cfg)
 	setupOnly := boot.InSetupOnly()
+
+	// Cache-space safety (BUG-6): a cache.dir on a filesystem smaller than the
+	// default budget can never fit it. The loader keeps provenance, so a
+	// configured value is reported but never changed; the compiled default is
+	// lowered to the eviction watermark with this log line.
+	if !setupOnly {
+		if note := config.AdaptCacheBudget(cfg); note != "" {
+			log.Warn(note, "cache_dir", cfg.Cache.Dir, "cache_max_bytes", int64(cfg.Cache.MaxBytes))
+		}
+	}
 
 	var reg *wal.Registry
 	var engine *server.WalEngine
@@ -148,17 +174,53 @@ func serveHTTP(ctx context.Context, cfg *config.Config, boot server.BootState, d
 	if collab != nil {
 		pullsSvc, notifySvc, ident = collab.pullsSvc, collab.notifySvc, collab.ident
 	}
+	// The on-push fan-out (push mirrors + Threads run creation) is shared by
+	// the git receive path and the browser editor's publish: both ARE pushes.
+	onPush := onPushHookOf(collab)
 	var wake func(repo string)
-	if !setupOnly && eventsRole && (cfg.Events.WebhookURL != "" || pullsSvc != nil) {
+	if !setupOnly && eventsRole && (cfg.Events.WebhookURL != "" || pullsSvc != nil || notifySvc != nil) {
 		var sinks []events.Sink
 		if cfg.Events.WebhookURL != "" {
 			sinks = append(sinks, &events.WebhookSink{URL: cfg.Events.WebhookURL, Secret: cfg.Events.WebhookSecret})
+		}
+		// [[events.sinks]] (14 §14.6): the built-in webhook and jsonl kinds
+		// through the registry. Validation already named any bad key; a
+		// constructor failure here is a boot error (fail closed).
+		for i, spec := range cfg.Events.Sinks {
+			secret := ""
+			if spec.SecretEnv != "" {
+				secret = os.Getenv(spec.SecretEnv)
+				if secret == "" {
+					log.Warn("events: sink secret_env is empty; deliveries are unsigned",
+						"index", i, "name", spec.Name, "env", spec.SecretEnv)
+				}
+			}
+			sink, serr := events.NewSink(events.SinkSpec{
+				Name: spec.Name, Kind: spec.Kind, URL: spec.URL, Secret: secret,
+				Path: spec.Path, MaxBytes: int64(spec.MaxBytes), Keep: spec.Keep,
+			})
+			if serr != nil {
+				log.Error("events: bad [[events.sinks]] entry", "index", i, "err", serr)
+				return 1
+			}
+			sinks = append(sinks, sink)
 		}
 		if pullsSvc != nil {
 			// The pulls invalidation sink rides the bridge (Seam 4);
 			// its Deliver never fails, so it never holds back the
 			// shared cursor.
 			sinks = append(sinks, &pullsSinkAdapter{svc: pullsSvc})
+		}
+		if notifySvc != nil {
+			// Repository hooks subscribed to push/ref topics receive the
+			// bridge batch through the activity log (docs/features/06
+			// §5.3 push amendment); the delivery task, signature, retry
+			// and redeliver are the existing collaboration ones.
+			var lister pushCommitLister
+			if engine != nil && reg != nil {
+				lister = &pushCommitReader{eng: engine, layer: reg.GitLayer()}
+			}
+			sinks = append(sinks, &repoHooksSink{svc: notifySvc, commits: lister})
 		}
 		bridge := events.New(events.Deps{
 			Source:        events.NewRegistrySource(reg),
@@ -175,6 +237,12 @@ func serveHTTP(ctx context.Context, cfg *config.Config, boot server.BootState, d
 		// (15 §2.1 round 2).
 		if collab != nil && collab.pullsPub != nil {
 			collab.pullsPub.wake = wake
+		}
+		// The browser editor's publish is a push: wake the bridge so events,
+		// webhooks and Threads triggers fire promptly, not at the sweep.
+		if collab != nil && collab.webeditPub != nil {
+			collab.webeditPub.wake = wake
+			collab.webeditPub.onPush = onPush
 		}
 	}
 
@@ -210,7 +278,11 @@ func serveHTTP(ctx context.Context, cfg *config.Config, boot server.BootState, d
 		// Threads run creation (docs/features/15 §2) — one hook, both
 		// consumers (nil in setup-only — no push paths exist there; nil
 		// without the collab surface — no fan-out).
-		OnPush: onPushHookOf(collab),
+		OnPush: onPush,
+		// PLAN-V2 §M.7: the advisory spam signal, scored inside the
+		// collab-write middleware and filed through the one moderation
+		// service (nil without collab wiring).
+		SpamObserver: spamObserverOf(collab),
 	})
 	// Features 01–08 mount here (collab.go chainCollab, 09 §4 touch
 	// point 3: one block per package + the per-user SSE mounts that
@@ -225,7 +297,7 @@ func serveHTTP(ctx context.Context, cfg *config.Config, boot server.BootState, d
 	// the provider must exist in every boot mode. wireWebUI binds the feature
 	// seams; setup-only passes nil services, so only the setup deps bind and
 	// every other page renders its "not wired" card instead of panicking.
-	ui, uerr := webui.New(webui.Env{Cfg: cfg, API: apiEnv, Version: version()})
+	ui, uerr := webui.New(webui.Env{Cfg: cfg, API: apiEnv, Version: version(), Restricted: setupOnly})
 	if uerr != nil {
 		log.Error("webui: templates failed to parse", "err", uerr)
 		return 1
@@ -257,6 +329,15 @@ func serveHTTP(ctx context.Context, cfg *config.Config, boot server.BootState, d
 			}
 			return "", false
 		}
+		// PLAN-ADMIN §3.7: the credential boundary's account gate. One
+		// exact-key read of users/<username>/user.json per authenticated
+		// OIDC-derived credential; a store error fails the credential
+		// closed (503) rather than reading as "not disabled".
+		srv.Auth().AccountLookup = func(username string) (auth.AccountState, error) {
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			return identSvc.UserState(ctx, username)
+		}
 	}
 
 	// the SSH key registry backs both the sshd auth lookup and the
@@ -271,9 +352,14 @@ func serveHTTP(ctx context.Context, cfg *config.Config, boot server.BootState, d
 	defer cancelDrain()
 
 	var maintainerDone chan struct{}
+	// adminMaint is the maintainer the Administration Overview reads its
+	// metrics from; nil when this host does not run one (serve-only, or the
+	// restricted boot) — the card is then absent, never a fake zero.
+	var adminMaint *maintain.Maintainer
 	if !setupOnly {
 		if len(roles) == 0 || roles["maintain"] {
 			m := maintain.NewWalMaintainer(reg, maintain.Options{Sweepers: maintainSweepers(collab)})
+			adminMaint = m
 			maintainerDone = make(chan struct{})
 			go func() {
 				defer close(maintainerDone)
@@ -306,6 +392,16 @@ func serveHTTP(ctx context.Context, cfg *config.Config, boot server.BootState, d
 		}
 	}
 
+	// Administration area (docs/PLAN-ADMIN.md M2): bind AFTER the background
+	// loops so the Overview reads a live maintainer (nil there = absent card),
+	// and before the listener accepts a request.
+	wireAdminPages(cfg, boot, apiEnv, srv, adminMaint, collabModSvc(collab), collabThreadsSvc(collab), collabPackagesSvc(collab), reg)
+	// PLAN-ADMIN §3.7: the instance directory's reads and its one audited
+	// transition, bound after the area itself (BindDirectory fills the seam
+	// BindAdmin installed). A restricted boot has no identity service, so the
+	// page renders its honest not-wired card.
+	wireAdminDirectory(collab)
+
 	// ---- listener (§10.4 step 6): plain HTTP with h2c ---------------------------
 	// TLS termination belongs on the reverse proxy in front of spindle
 	// (#165): the server never wraps the listener.
@@ -321,7 +417,12 @@ func serveHTTP(ctx context.Context, cfg *config.Config, boot server.BootState, d
 	log.Info("listening", "addr", cfg.Server.Listen, "version", version())
 
 	// ---- SSH git transport (17_ssh.md): disabled unless server.ssh.listen set --
-	if sshSrv, serr := srv.SSH(); serr != nil {
+	// In the restricted boot the listener is gated OFF: there is no store and no
+	// auth registry, so refusing to listen is the honest version of every key
+	// lookup failing closed (PLAN-OIDC-ONLY §2.1).
+	if setupOnly {
+		log.Info("ssh transport disabled in restricted mode")
+	} else if sshSrv, serr := srv.SSH(); serr != nil {
 		log.Error("ssh disabled: config error", "err", serr)
 	} else if sshSrv != nil {
 		go func() {
@@ -333,13 +434,62 @@ func serveHTTP(ctx context.Context, cfg *config.Config, boot server.BootState, d
 
 	serveErr := make(chan error, 2)
 	go func() { serveErr <- httpSrv.Serve(ln) }()
-	// Loopback IPv6 twin so *.localhost works (§10.4 step 6).
+	// Loopback IPv6 twin so *.localhost works (§10.4 step 6). Its bind failure
+	// is not fatal (the main listener is serving), but it is not silent either:
+	// a twin that did not bind is why a client resolving *.localhost to ::1
+	// hangs, so log it loudly enough to be diagnosed.
 	if twin, ok := loopbackTwin(cfg.Server.Listen); ok {
 		go func() {
-			if tln, terr := net.Listen("tcp", twin); terr == nil {
-				_ = httpSrv.Serve(srv.BuildListener(tln))
+			tln, terr := net.Listen("tcp", twin)
+			if terr != nil {
+				log.Warn("ipv6 twin bind failed; *.localhost over ::1 will not answer", "addr", twin, "err", terr)
+				return
+			}
+			if serr := httpSrv.Serve(srv.BuildListener(tln)); serr != nil && !errors.Is(serr, http.ErrServerClosed) {
+				log.Error("ipv6 twin server stopped", "addr", twin, "err", serr)
 			}
 		}()
+	}
+
+	// ---- static-site listener (docs/features/19 §5) -----------------------------
+	// A second listener on its own address, answering one Host. Only a normal
+	// boot with a store and identity starts it (a restricted boot has neither,
+	// and the sites it would advertise are not readable). A bind failure is a
+	// startup failure: sites were configured on, so an address that cannot be
+	// bound is an outage, never a silent downgrade to "main listener only".
+	var staticSrv *http.Server
+	if cfg.StaticSites.Enabled && !setupOnly && ident != nil && reg != nil {
+		if staticHandler := newStaticPagesHandler(cfg, ident, reg, apiEnv, log); staticHandler != nil {
+			sln, lerr := net.Listen("tcp", cfg.StaticSites.Address)
+			if lerr != nil {
+				log.Error("static sites listen failed", "addr", cfg.StaticSites.Address, "err", lerr)
+				return exitErr
+			}
+			staticSrv = srv.NewHTTPServer(staticHandler, appCtxer{ctx})
+			go func() {
+				if serr := staticSrv.Serve(srv.BuildListener(sln)); serr != nil && !errors.Is(serr, http.ErrServerClosed) {
+					log.Error("static sites server stopped", "err", serr)
+				}
+			}()
+			// Loopback IPv6 twin so the configured *.localhost host resolves on
+			// both families, exactly like the main listener (§10.4 step 6). Same
+			// rule as that one: a failed twin bind is logged, never swallowed.
+			if twin, ok := loopbackTwin(cfg.StaticSites.Address); ok {
+				go func() {
+					tln, terr := net.Listen("tcp", twin)
+					if terr != nil {
+						log.Warn("static ipv6 twin bind failed; the static host will not answer over ::1", "addr", twin, "err", terr)
+						return
+					}
+					if serr := staticSrv.Serve(srv.BuildListener(tln)); serr != nil && !errors.Is(serr, http.ErrServerClosed) {
+						log.Error("static sites ipv6 twin stopped", "addr", twin, "err", serr)
+					}
+				}()
+			}
+			log.Info("static sites listening", "addr", cfg.StaticSites.Address, "host", cfg.StaticSites.Host)
+		} else {
+			log.Warn("static sites enabled but composition seams are missing; listener not started")
+		}
 	}
 
 	// ---- two-phase drain on SIGTERM/SIGINT (§12) --------------------------------
@@ -381,7 +531,35 @@ func serveHTTP(ctx context.Context, cfg *config.Config, boot server.BootState, d
 		}
 	}
 	// Phase 2: readyz flips, new requests refused, in-flight capped.
+	//
+	// Total bound, stated once: server.drain_timeout from this line. Main's
+	// phase 2 is bounded by 2×drain_timeout (its own Shutdown deadline plus the
+	// inflight wait), and the static listener's Shutdown — started HERE, at the
+	// same boundary, never after phase 2 — carries an absolute deadline of
+	// now+drain_timeout. The static drain runs concurrently, so the pair costs
+	// max(2×drain_timeout, drain_timeout) = 2×drain_timeout and no more: a stuck
+	// request on each listener cannot add a third budget, and the static
+	// listener stops accepting at this instant rather than only after the app's
+	// whole drain, which is what used to leave it accepting user traffic (and
+	// cutting in-flight static responses at exit) through phase 2.
+	drainUntil := time.Now().Add(time.Duration(cfg.Server.DrainTimeout))
+	var staticDrained chan struct{}
+	if staticSrv != nil {
+		staticDrained = make(chan struct{})
+		go func() {
+			defer close(staticDrained)
+			shutCtx, cancel := context.WithDeadline(context.Background(), drainUntil)
+			defer cancel()
+			// Shutdown closes the listener(s) immediately, then waits for
+			// in-flight requests until the deadline. A failed Shutdown is
+			// logged by the server itself and must not extend the bound.
+			_ = staticSrv.Shutdown(shutCtx)
+		}()
+	}
 	srv.RunPhase2(httpSrv)
+	if staticDrained != nil {
+		<-staticDrained
+	}
 	cancelDrain()
 	if reg != nil {
 		reg.Close()
@@ -544,10 +722,12 @@ func mustWarnings(cfg *config.Config) []string {
 	return out
 }
 
-// logSetupBanner emits the zero-config first-run banner (§2.3).
+// logSetupBanner emits the env-configured first-run notice: no config file,
+// but a complete OIDC set came from the environment, so the instance serves
+// normally. Saving /admin/config writes the file that makes it durable.
 func logSetupBanner(cfg *config.Config) {
-	slog.Warn("zero-config first run: auth.mode=none on " + cfg.Server.Listen +
-		"; anyone who can reach this port can read and write every repository — configure server.auth and restart; the web UI shows a persistent banner linking /setup until a config file exists")
+	slog.Info("first run: OIDC is configured entirely from the environment on " + cfg.Server.Listen +
+		"; save /admin/config to write " + config.ConfigFileName + " and make it durable")
 }
 
 // openStore builds the object store per store.backend (D4).
@@ -766,6 +946,7 @@ type opsTasks struct {
 	eng      *server.WalEngine
 	ident    *identity.Service
 	packages *packages.Service
+	insights *insights.Service
 }
 
 func (t *opsTasks) Ops() []api.OpSpec {
@@ -783,15 +964,25 @@ func (t *opsTasks) Ops() []api.OpSpec {
 		// force (SSE-attachable, joins a running pass).
 		ops = append(ops, api.OpSpec{Op: packages.TaskKindGC})
 	}
+	if t.insights != nil {
+		// Seam 5: the repository pulse refresh (docs/features/18), normally
+		// driven by the maintainer's due gate; the manual force joins a
+		// running refresh instead of racing it.
+		ops = append(ops, api.OpSpec{Op: insights.TaskKind})
+	}
 	return ops
 }
 
 func (t *opsTasks) List(ctx context.Context, id git.RepoId) ([]api.TaskRecord, []api.TaskRecord, error) {
+	running := []api.TaskRecord{}
+	for _, rec := range t.reg.Tasks().RunningFor(id.String()) {
+		running = append(running, api.TaskRecordFromWal(*rec))
+	}
 	recent := []api.TaskRecord{}
 	for _, rec := range t.reg.Tasks().List(id.String()) {
 		recent = append(recent, api.TaskRecordFromWal(*rec))
 	}
-	return nil, recent, nil
+	return running, recent, nil
 }
 
 func (t *opsTasks) Get(ctx context.Context, id git.RepoId, taskID string) (api.TaskRecord, bool, error) {
@@ -847,21 +1038,25 @@ func (t *opsTasks) Attach(ctx context.Context, id git.RepoId, taskID string) (ap
 	if rec == nil {
 		return api.TaskStream{}, false, nil
 	}
-	h := t.reg.Get(id.String())
-	if h == nil {
-		return api.TaskStream{}, false, nil
-	}
 	if rec.Finished != "" {
 		done := api.TaskDone{Record: api.TaskRecordFromWal(*rec)}
 		recCh := make(chan api.TaskDone, 1)
 		recCh <- done
 		return api.TaskStream{Record: done.Record, Done: recCh}, true, nil
 	}
-	subID, updates, replay := h.Progress().Subscribe()
+	// Handle-free attach (law 7): the table's per-task drone carries the
+	// narration, so a task whose repository handle is gone still streams —
+	// the repo-transfer task tears its source handle down before the copy
+	// pass (PLAN-V2 §T.1), which would strand an attach routed through
+	// RepoHandle.Progress().
+	subID, updates, replay, ok := t.reg.Tasks().Subscribe(taskID)
+	if !ok {
+		return api.TaskStream{}, false, nil
+	}
 	recCh := make(chan api.TaskDone, 1)
 	ticker := time.NewTicker(500 * time.Millisecond)
 	go func() {
-		defer h.Progress().Unsubscribe(subID)
+		defer t.reg.Tasks().Unsubscribe(taskID, subID)
 		defer ticker.Stop()
 		for {
 			select {
@@ -917,6 +1112,13 @@ func (t *opsTasks) opFn(id git.RepoId, op string, params map[string]string) func
 		return func(ctx context.Context, task *wal.Task) error {
 			_, err := t.packages.GC(ctx, id.Owner, id.Name, task)
 			return err
+		}
+	case insights.TaskKind:
+		if t.insights == nil {
+			return nil
+		}
+		return func(ctx context.Context, task *wal.Task) error {
+			return t.insights.Refresh(ctx, id.Owner, id.Name, task)
 		}
 	default:
 		return nil

@@ -93,6 +93,13 @@ type Service struct {
 	// metadata rule: an unreadable settings doc must never break the
 	// registry).
 	Features func(ctx context.Context, owner, repo string) (config.ResolvedFeatures, bool)
+	// Policy resolves the effective per-repo registry policy (docs/features/14
+	// §5): the settings [packages] section resolved over the instance default
+	// (`packages.quota_bytes`). The projection owns the resolution, so it
+	// always answers a complete policy; nil is unlimited with no retention —
+	// the compatible behavior for tests and un-wired builds (an unreadable
+	// settings doc must never invent a quota nobody set).
+	Policy func(ctx context.Context, owner, repo string) config.PackagesPolicy
 	// Exists reports whether the repository exists (nil → assume it does:
 	// unit tests without a registry). A missing repo answers NAME_UNKNOWN.
 	Exists func(ctx context.Context, owner, repo string) (bool, error)
@@ -119,6 +126,19 @@ type Service struct {
 	PublicURL string
 	// ServiceName is the token `service` value (default: the request host).
 	ServiceName string
+
+	// Repos enumerates this instance's [owner, repo] pairs for the
+	// instance-scope GC (nil → a delimiter listing over repos/, the
+	// maintainer-pass LIST; never a request path). Composition may inject
+	// identity's registry walk instead.
+	Repos func(ctx context.Context) ([][2]string, error)
+	// Audit records one administrative mutation in the host audit family
+	// (nil = no audit family on this build; the GC trigger then records no
+	// entry rather than failing — docs/features/14_packages.md §6).
+	Audit AuditFunc
+	// Logf is the package's log sink (nil → log.Printf): a failed summary or
+	// audit write is reported, never silently swallowed.
+	Logf func(format string, args ...any)
 
 	Now func() time.Time
 
@@ -319,6 +339,23 @@ func errUploadUnknown(id string) *Error {
 
 func errSizeInvalid(msg string) *Error {
 	return ociErr(413, CodeSizeInvalid, msg)
+}
+
+// errQuotaExceeded is the named 413 the push commit point returns when a
+// repository's stored bytes plus what is being written would cross its quota
+// (docs/features/14 §5). The spec has no QUOTA code, so DENIED carries the
+// name in the message and the numbers in detail — a client prints the message,
+// and an operator reading a CI log sees usage against quota, not "413".
+func errQuotaExceeded(usage, quota, requested int64) *Error {
+	over := usage + requested - quota
+	if over < 0 {
+		over = 0
+	}
+	e := ociErr(http.StatusRequestEntityTooLarge, CodeDenied,
+		"packages quota exceeded: repo holds "+humanBytes(usage)+" of "+humanBytes(quota)+
+			" quota; this push needs "+humanBytes(requested)+" more ("+humanBytes(over)+" over)")
+	e.Detail = map[string]any{"usage": usage, "quota": quota, "requested": requested}
+	return e
 }
 
 func errDenied(msg string) *Error {
@@ -530,6 +567,15 @@ func manifestMediaType(raw []byte) string {
 // PutManifest stores the manifest bytes (a content-addressed blob) and, for a
 // tag ref, CASes the pointer. A digest ref must match the computed digest.
 // Returns the digest.
+//
+// This is the push COMMIT POINT and therefore where the repository quota is
+// enforced (docs/features/14 §5): the counter is read once, the projected
+// footprint (stored bytes + this manifest when it is new) is compared with the
+// quota, and an over-quota push is refused with a named 413 BEFORE anything is
+// written — no manifest object, no tag pointer. Layer bytes are already in the
+// counter (finalize accounts them), so "usage plus the new blobs" is exactly
+// the counter plus this body; `FinalizeUpload` refuses an over-quota layer for
+// the same reason, so a push cannot stream past the bound and only fail here.
 func (s *Service) PutManifest(ctx context.Context, owner, repo, ref string, body []byte, contentType string) (string, *Error) {
 	if err := validateRepo(owner, repo); err != nil {
 		return "", err
@@ -549,12 +595,40 @@ func (s *Service) PutManifest(ctx context.Context, owner, repo, ref string, body
 	if contentType != "" {
 		mt = contentType
 	}
+	// The counter drives both the quota and the page. A failure to read it is
+	// a 500 rather than an unenforced push: the quota is a bound, and a bound
+	// that silently disappears on a store hiccup is not one.
+	usage, _, uerr := s.readUsage(ctx, owner, repo)
+	if uerr != nil {
+		return "", errInternal(uerr)
+	}
+	pol := s.policyFor(ctx, owner, repo)
+	// Is this manifest object already stored? A re-push of identical bytes is
+	// idempotent and must not be counted twice (S3 ETags are content hashes,
+	// never counters).
+	existing, herr := s.Store.Head(ctx, manifestKey(owner, repo, hexDigest))
+	if herr != nil {
+		return "", mapStoreErr(herr)
+	}
+	isNew := existing == nil
+	if pol.QuotaBytes > 0 && isNew {
+		if usage.Bytes+int64(len(body)) > pol.QuotaBytes {
+			return "", errQuotaExceeded(usage.Bytes, pol.QuotaBytes, int64(len(body)))
+		}
+	}
 	// The manifest object is idempotent content-addressed bytes (S3 keeps
 	// the same version for identical bytes — never assume a counter).
 	if _, err := s.Store.Put(ctx, manifestKey(owner, repo, hexDigest), store.PutBody{Bytes: body}, store.PutOptions{
 		Mode: store.PutOverwrite, ContentType: mt, Immutable: true,
 	}); err != nil {
 		return "", mapStoreErr(err)
+	}
+	if isNew {
+		// A lost increment is repaired by the next sweep's reconcile; it must
+		// never fail a manifest that is already committed.
+		s.adjustUsage(ctx, owner, repo, Usage{
+			Bytes: int64(len(body)), ManifestBytes: int64(len(body)), Manifests: 1,
+		})
 	}
 	if IsTag(ref) {
 		doc := tagDoc{Digest: digest, MediaType: mt, UpdatedAt: s.now().Format(time.RFC3339)}
@@ -693,6 +767,10 @@ func (s *Service) deleteManifestTree(ctx context.Context, owner, repo, rootHex s
 	}
 
 	deleted := map[string]bool{"sha256:" + rootHex: true}
+	// The counter drops with the version tree; the blobs stay until the sweep
+	// (which reconciles the absolute number anyway).
+	freed := int64(len(raw))
+	freedCount := int64(1)
 	if derr := s.Store.Delete(ctx, rootKey, ""); derr != nil {
 		return mapStoreErr(derr)
 	}
@@ -700,11 +778,16 @@ func (s *Service) deleteManifestTree(ctx context.Context, owner, repo, rootHex s
 		if child == rootHex || keep[child] {
 			continue
 		}
+		if meta, herr := s.Store.Head(ctx, manifestKey(owner, repo, child)); herr == nil && meta != nil {
+			freed += meta.Size
+			freedCount++
+		}
 		if derr := s.Store.Delete(ctx, manifestKey(owner, repo, child), ""); derr != nil && !store.IsNotFound(derr) {
 			return mapStoreErr(derr)
 		}
 		deleted["sha256:"+child] = true
 	}
+	s.adjustUsage(ctx, owner, repo, Usage{Bytes: -freed, ManifestBytes: -freed, Manifests: -freedCount})
 	return s.dropTagPointersFor(ctx, owner, repo, deleted)
 }
 
@@ -727,17 +810,12 @@ func indexChildren(raw []byte) []string {
 	return out
 }
 
-// dropTagPointers deletes every tag pointer whose digest is ref. One prefix
-// LIST plus a pointer read per tag — a delete-time cost, never a request hot
-// path (§6). A pointer whose version moved is left alone (the tag now names a
-// different manifest); a malformed pointer is deleted, since it can never
-// resolve.
-func (s *Service) dropTagPointers(ctx context.Context, owner, repo, ref string) *Error {
-	return s.dropTagPointersFor(ctx, owner, repo, map[string]bool{ref: true})
-}
-
-// dropTagPointersFor is dropTagPointers over a digest set (a deleted version
-// tree), matching the full "sha256:" spelling each pointer stores.
+// dropTagPointersFor deletes every tag pointer whose digest is in the set (a
+// deleted version tree), matching the full "sha256:" spelling each pointer
+// stores. One prefix LIST plus a pointer read per tag — a delete-time cost,
+// never a request hot path (§6). A pointer whose version moved is left alone
+// (the tag now names a different manifest); a malformed pointer is deleted,
+// since it can never resolve.
 func (s *Service) dropTagPointersFor(ctx context.Context, owner, repo string, digests map[string]bool) *Error {
 	prefix := tagsPrefix(owner, repo)
 	var keys []string
@@ -994,11 +1072,25 @@ func (s *Service) FinalizeUpload(ctx context.Context, owner, repo, id, digest st
 	if got != digest {
 		return 0, errDigestInvalid("provided digest does not match the uploaded bytes")
 	}
+	// Quota (docs/features/14 §5): the same bound the manifest commit point
+	// enforces, applied here so a push cannot stream an unbounded team of
+	// layers past it and only fail at the end. Layer bytes are counted as they
+	// land, so the counter is the repo's stored footprint. A refusal writes no
+	// blob (the staging object stays for the TTL sweep's cleanup).
+	usage, uv, uerr := s.readUsage(ctx, owner, repo)
+	if uerr != nil {
+		return 0, errInternal(uerr)
+	}
+	pol := s.policyFor(ctx, owner, repo)
+	if pol.QuotaBytes > 0 && usage.Bytes+size > pol.QuotaBytes {
+		return 0, errQuotaExceeded(usage.Bytes, pol.QuotaBytes, size)
+	}
 	if _, err := s.Store.Put(ctx, blobKey(owner, repo, DigestHex(digest)), store.PutBody{File: tmp}, store.PutOptions{
 		Mode: store.PutOverwrite, Immutable: true,
 	}); err != nil {
 		return 0, mapStoreErr(err)
 	}
+	s.adjustUsageFrom(ctx, owner, repo, usage, uv, Usage{Bytes: size, BlobBytes: size, Blobs: 1})
 	// Grace guard (§6): the manifest PUT follows this finalize, so a sweep
 	// landing in between must not treat the blob as garbage yet.
 	s.noteBlob(owner, repo, DigestHex(digest))

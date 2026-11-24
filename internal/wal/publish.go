@@ -1064,7 +1064,10 @@ func (p *Publisher) foldCommitGraphs(entries []*proto.LogEntry) {
 	var idxNames []string
 	for _, e := range entries {
 		if e.Kind == proto.EntryKindPush && e.Pack != nil && !e.Pack.HasCommitGraph {
-			idxNames = append(idxNames, e.Pack.Checksum+".idx")
+			// `--stdin-packs` resolves each line as a name under
+			// objects/pack, so it is the pack name (`pack-<checksum>.idx`),
+			// never the bare checksum (04_git.md §9).
+			idxNames = append(idxNames, "pack-"+e.Pack.Checksum+".idx")
 		}
 	}
 	if len(idxNames) == 0 {

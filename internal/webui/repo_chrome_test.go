@@ -204,9 +204,9 @@ func TestRepoChromeCodePageKeepsItsOwn(t *testing.T) {
 			t.Errorf("%s: masthead count = %d, want exactly 1", path, got)
 		}
 		// code, commits, tags, packages (docs/features/14 §7), issues, pulls,
-		// checks (busySummary), threads, releases, settings.
-		if got := len(tabsOf(t, body)); got != 10 {
-			t.Errorf("%s: tab count = %d, want 10", path, got)
+		// checks (busySummary), threads, releases, insights, settings.
+		if got := len(tabsOf(t, body)); got != 11 {
+			t.Errorf("%s: tab count = %d, want 11", path, got)
 		}
 	}
 	if got := activeTabOf(t, f.mustGet("/demo/spindle/commits", http.StatusOK)); got != "commits" {
@@ -298,6 +298,7 @@ func TestOnePrimaryPerRepoPage(t *testing.T) {
 // TestRepoChromeForDegrades: the post-gate chrome read never writes and never
 // errors — it answers nil, and the page renders without chrome.
 func TestRepoChromeForDegrades(t *testing.T) {
+	t.Parallel()
 	req := httptest.NewRequest(http.MethodGet, "/acme/widgets/issues", nil)
 	// No RepoView wired at all.
 	if c := (&Server{env: Env{}}).repoChromeFor(req, auth.Anonymous(), "acme", "widgets"); c != nil {

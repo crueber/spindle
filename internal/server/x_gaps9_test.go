@@ -81,16 +81,6 @@ func TestWGTPrincipalRoundTripAndReject(t *testing.T) {
 	}
 }
 
-func TestAuthenticateUnknownModeIsAnonymous(t *testing.T) {
-	s, _ := newTestServer(t, nil)
-	s.cfg.Server.Auth.Mode = "bogus-mode"
-	s.authSvc = NewAuthService(&s.cfg.Server.Auth, s.Now)
-	p, aerr := s.authSvc.Authenticate(httptest.NewRequest("GET", "http://x/", nil), s.cfg)
-	if aerr != nil || !p.Anonymous {
-		t.Fatalf("unknown mode = %+v %v, want anonymous", p, aerr)
-	}
-}
-
 func TestPrincipalForNameOIDCAdmission(t *testing.T) {
 	s, _ := oidcServer(t)
 	p, err := s.authSvc.PrincipalForName("alice@example.com")
@@ -152,7 +142,7 @@ func TestVerifyTokenWireNegatives(t *testing.T) {
 		t.Fatalf("valid token = %+v %v", got, aerr)
 	}
 	// Without a session secret every verification is unavailable (§8.5).
-	bare := NewAuthService(&config.Auth{Mode: "oidc"}, time.Now)
+	bare := NewAuthService(&config.Auth{}, time.Now)
 	if _, aerr := bare.VerifyToken(valid.Wire); aerr == nil || aerr.Kind != auth.ErrUnavailable {
 		t.Fatalf("no-secret verify = %v, want ErrUnavailable", aerr)
 	}
@@ -387,6 +377,7 @@ func TestExchangeCodeNegatives(t *testing.T) {
 func TestSetupAuthTestEdgeCases(t *testing.T) {
 	post := func(s *Server, body string) (int, map[string]any) {
 		req := httptest.NewRequest("POST", "/api/v1/setup/auth/test", strings.NewReader(body))
+		adminCookie(t, s, req)
 		rec := httptest.NewRecorder()
 		s.setupAuthTest(rec, req)
 		var out map[string]any
@@ -434,10 +425,12 @@ func TestSetupAuthTestEdgeCases(t *testing.T) {
 		!strings.Contains(msgOf(out), "not a valid OIDC discovery document") {
 		t.Fatalf("torn discovery = %d %v", code, out)
 	}
-	// Gated: in normal mode with token auth, anonymous callers get 401.
-	s.cfg.Server.Auth.Mode = "token"
-	if code, _ := post(s, `{"issuer":"https://id.example.com"}`); code != http.StatusUnauthorized {
-		t.Fatalf("anonymous probe = %d, want 401", code)
+	// Gated: after a normal boot, anonymous callers get 401.
+	anonReq := httptest.NewRequest("POST", "/api/v1/setup/auth/test", strings.NewReader(`{"issuer":"https://id.example.com"}`))
+	anonRec := httptest.NewRecorder()
+	s.setupAuthTest(anonRec, anonReq)
+	if code := anonRec.Code; code != http.StatusUnauthorized {
+		t.Fatalf("anonymous probe = %d, want 401", anonRec.Code)
 	}
 }
 

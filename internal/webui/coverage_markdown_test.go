@@ -11,6 +11,7 @@ import (
 )
 
 func TestCoverageBlocksTightDispatchesEveryBlock(t *testing.T) {
+	t.Parallel()
 	r := &mdRenderer{}
 	out := r.blocksTight([]string{
 		"",
@@ -26,14 +27,17 @@ func TestCoverageBlocksTightDispatchesEveryBlock(t *testing.T) {
 		"1 | 2",
 		"",
 		"- nested",
+		"",
+		`<div align="center">raw</div>`,
 	})
 	for _, want := range []string{
 		`<pre><code class="language-go">`,
-		"<h1>Heading</h1>",
+		"<h2>Heading</h2>",
 		"<hr>",
 		"<blockquote>",
 		"<table",
 		"<li>",
+		`<div align="center">raw</div>`,
 	} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("blocksTight missing %q in %q", want, out)
@@ -42,6 +46,7 @@ func TestCoverageBlocksTightDispatchesEveryBlock(t *testing.T) {
 }
 
 func TestCoverageFenceLanguageCharset(t *testing.T) {
+	t.Parallel()
 	for _, tc := range []struct{ in, want string }{
 		{"", ""},
 		{"go", "go"},
@@ -57,6 +62,7 @@ func TestCoverageFenceLanguageCharset(t *testing.T) {
 }
 
 func TestCoverageListBlankLineContinuation(t *testing.T) {
+	t.Parallel()
 	// A blank line inside an item keeps the indented continuation (the
 	// CommonMark loose-item rule), so both paragraphs belong to one <li>.
 	out := md("- one\n\n  two\n")
@@ -69,6 +75,7 @@ func TestCoverageListBlankLineContinuation(t *testing.T) {
 }
 
 func TestCoverageTaskBoxFallback(t *testing.T) {
+	t.Parallel()
 	if rest, checked, ok := taskBox("[x] done"); !ok || !checked || rest != "done" {
 		t.Fatalf("checked task = %q %v %v", rest, checked, ok)
 	}
@@ -85,6 +92,7 @@ func TestCoverageTaskBoxFallback(t *testing.T) {
 }
 
 func TestCoverageBlockPredicates(t *testing.T) {
+	t.Parallel()
 	if isThematicBreak("   ") {
 		t.Fatal("blank line is not a thematic break")
 	}
@@ -111,6 +119,7 @@ func TestCoverageBlockPredicates(t *testing.T) {
 }
 
 func TestCoverageEmphasisFallbacks(t *testing.T) {
+	t.Parallel()
 	// An underscore run whose closing candidate is preceded by a space is not
 	// emphasis at all (intraword/space rules), so the text survives verbatim.
 	if out := md("_a _"); !strings.Contains(out, "_a _") {
@@ -128,6 +137,7 @@ func TestCoverageEmphasisFallbacks(t *testing.T) {
 }
 
 func TestCoverageLinkFallbacks(t *testing.T) {
+	t.Parallel()
 	// No closing bracket: literal text.
 	if out := md("[x"); !strings.Contains(out, "[x") {
 		t.Fatalf("unclosed label = %q", out)
@@ -149,6 +159,7 @@ func TestCoverageLinkFallbacks(t *testing.T) {
 }
 
 func TestCoverageBareURLTerminatorsAndRefs(t *testing.T) {
+	t.Parallel()
 	// A double quote ends the autolink (the renderer must not swallow markup).
 	out := md(`see https://x.test/a"b`)
 	if !strings.Contains(out, `href="https://x.test/a"`) {

@@ -66,9 +66,6 @@ type Handler struct {
 	// CreateRepo, so a deny writes nothing. Composition binds the
 	// identity service; nil → legacy-open (no gate).
 	CheckCreateOwner func(ctx context.Context, owner string, p auth.Principal) *auth.AuthError
-	// AuthMode reports server.auth.mode for the dangerous-confirm
-	// authority rule (import dangerousAllowed shape).
-	AuthMode func() string
 	// Now is overridable for tests.
 	Now func() time.Time
 }
@@ -600,20 +597,11 @@ func (h *Handler) createFromURL(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusAccepted, map[string]any{"task": map[string]any{"id": id}, "target": in.Owner + "/" + in.Name})
 }
 
-// dangerousAllowed mirrors the import rule: an authenticated admin
-// under token/oidc (auth-none Admin is unauthenticated — anyone on
-// the network — so mode none never qualifies).
+// dangerousAllowed mirrors the import rule: a signed-in host admin. The
+// admin flag is the OIDC group predicate (PLAN-OIDC-ONLY §1.2); an anonymous
+// principal is never admin by construction.
 func (h *Handler) dangerousAllowed(p auth.Principal) bool {
-	if p.Anonymous || !p.Admin {
-		return false
-	}
-	mode := "none"
-	if h.AuthMode != nil {
-		if m := h.AuthMode(); m != "" {
-			mode = m
-		}
-	}
-	return mode == "token" || mode == "oidc"
+	return !p.Anonymous && p.Admin
 }
 
 // checkSSRF enforces the v1 egress gate on a normalized source (the

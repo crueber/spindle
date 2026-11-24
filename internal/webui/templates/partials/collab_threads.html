@@ -1,8 +1,45 @@
 {{define "collab_thread_comments"}}
 {{range .}}
-<div class="mt-1 border-t border-[var(--pd-line)] pt-1 text-sm">
+<div class="mt-1 border-t border-[var(--pd-line)] pt-1 text-sm" id="thread-comment-{{.HideTarget}}">
   <p class="muted text-xs"><span class="font-medium text-[var(--pd-text)]">{{.By}}</span> · {{template "collab_time" .At}}</p>
+  {{if .Hidden}}
+  <div class="card border-dashed p-2" data-hidden-target="{{.HideTarget}}" role="status">
+    <p class="muted text-xs">Hidden by a moderator{{with .HiddenBy}} · <span class="font-medium text-[var(--pd-text)]">{{.}}</span>{{end}}{{with .HiddenReason}} · {{.}}{{end}}</p>
+    {{if .Body}}
+    <details class="mt-1">
+      <summary class="link inline-block px-1 py-1 text-xs">Show original</summary>
+      <div class="markdown-body mt-1">{{md .Body}}</div>
+    </details>
+    {{end}}
+    {{if .CanModerate}}
+    <form class="mt-1" method="post" action="{{.ModerationBase}}/unhide">
+      <input type="hidden" name="target" value="{{.HideTarget}}">
+      <button type="submit" class="link inline-block px-1 py-1 text-xs">Unhide</button>
+    </form>
+    {{end}}
+  </div>
+  {{else}}
   <div class="markdown-body">{{md .Body}}</div>
+  {{if .CanReport}}
+  {{template "collab_report_form" (dict "action" .ReportAction "kind" "review_thread" "seq" .Seq "tid" .TID "uid" (printf "rc-%s-%d" .TID .Seq))}}
+  {{end}}
+  {{if .CanModerate}}
+  <details class="relative mt-1 inline-block" data-popover>
+    <summary class="btn list-none px-2 py-1 text-xs" aria-label="moderate this reply" data-popover-trigger>Moderate</summary>
+    <form class="card absolute left-0 z-30 mt-1 grid w-52 gap-1 p-2" method="post" action="{{.ModerationBase}}/hide" role="group" aria-label="hide this reply">
+      <input type="hidden" name="target" value="{{.HideTarget}}">
+      <label class="eyebrow" for="hide-thread-{{.HideTarget}}">Hide reason</label>
+      <select class="input" id="hide-thread-{{.HideTarget}}" name="reason">
+        <option value="spam">spam</option>
+        <option value="abusive">abusive</option>
+        <option value="off-topic">off-topic</option>
+        <option value="other" selected>other</option>
+      </select>
+      <button type="submit" class="btn px-2 py-1">Hide reply</button>
+    </form>
+  </details>
+  {{end}}
+  {{end}}
 </div>
 {{else}}
 <p class="muted mt-1 text-xs">No replies yet.</p>
@@ -23,7 +60,8 @@
     <div class="thread-comments"></div>
   </details>
   <form class="mt-2 grid gap-2" method="post" action="{{.ReplyAction}}" data-composer>
-    <textarea class="input min-h-16 text-sm leading-relaxed" name="body" rows="3" aria-label="reply body" placeholder="Reply… (#N links issues, @user mentions)" data-autogrow data-submit-keys></textarea>
+    {{if .Locked}}<p class="muted text-sm" role="note">{{.LockReason}}</p>{{end}}
+    <textarea class="input min-h-16 text-sm leading-relaxed disabled:cursor-not-allowed disabled:opacity-50" name="body" rows="3" aria-label="reply body" placeholder="Reply… (#N links issues, @user mentions)" data-autogrow data-submit-keys{{if .Locked}} disabled aria-disabled="true" title="{{.LockReason}}"{{end}}></textarea>
     <div class="flex flex-wrap items-center justify-end gap-2">
       {{if .CanResolve}}
       {{if .Resolved}}
@@ -32,7 +70,7 @@
       <button type="submit" class="btn" formaction="{{.ResolveAction}}" formnovalidate>Resolve</button>
       {{end}}
       {{end}}
-      <button type="submit" class="btn">Reply</button>
+      <button type="submit" class="btn"{{if .Locked}} disabled{{end}}>Reply</button>
     </div>
   </form>
 </div>
@@ -41,7 +79,7 @@
 {{/* collab_merge_task: the merge task block (htmx polls this fragment). */}}
 {{define "collab_merge_task"}}
 {{with .Task}}
-<div aria-live="polite" aria-label="Merge task" {{if eq (printf "%s" .State) "running"}}hx-get="/{{$.Full}}/pull/{{$.Num}}/merge/task" hx-trigger="every 2s" hx-swap="outerHTML"{{end}}>
+<div aria-live="polite" aria-label="Merge task"{{if eq (printf "%s" .State) "running"}} aria-busy="true" hx-get="/{{$.Full}}/pull/{{$.Num}}/merge/task" hx-trigger="every 2s" hx-swap="outerHTML"{{end}}>
   <p class="mono text-xs">merge task {{.State}}{{with .Error}}: {{.}}{{end}}</p>
   {{if .Progress}}<ul class="muted mt-1 text-xs">{{range .Progress}}<li>{{.}}</li>{{end}}</ul>{{end}}
 </div>

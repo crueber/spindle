@@ -6,6 +6,10 @@
 > Relationship to existing docs: `docs/features/09_rollout.md` is the **as-built record** of the
 > collaboration layer (waves A–E, landed 2026-09-04). It is not a v1 release plan and does not
 > describe GitHub parity; where this document and 09 disagree, 09 is history and this is the plan.
+>
+> **Update 2026-11-21:** the audit table in §1 is the 2026-11-20 opening snapshot, not current state.
+> [`AUDIT-V1.md`](AUDIT-V1.md) holds the re-audited verdicts and closing evidence; the CLI, Threads and
+> Packages items it records as absent are shipped.
 
 ## 0. Definition of done for v1
 
@@ -24,7 +28,7 @@ token/OIDC identity with repository-role scopes and introduces no second credent
 GitHub allows must render the same way, safely).
 
 Deliberately **not** v1 (README `Backlog`, and P9): code search, projects, wiki, insights,
-moderation, sponsorships, forum, ownership transfer, SAML/SCIM, merge queue, auto-merge, stacked
+moderation, sponsorships, forum, SAML/SCIM, merge queue, auto-merge, stacked
 PRs, Discussions, and — inside Threads — a third-party action marketplace, caches and OIDC cloud
 credentials.
 

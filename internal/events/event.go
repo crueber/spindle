@@ -1,7 +1,8 @@
 // Package events is the WAL events bridge (docs/go/09_events.md): one
 // long-lived goroutine reads the WAL log per repo, classifies ref events, and
-// delivers whole batches to sinks (one built-in webhook). Push paths never
-// publish events; the bridge is the only producer.
+// delivers whole batches to sinks (the built-in webhook and jsonl kinds plus
+// contributed sinks: pulls invalidation, repo-hook push topics). Push paths
+// never publish events; the bridge is the only producer.
 package events
 
 import (

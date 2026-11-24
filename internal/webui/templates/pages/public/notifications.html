@@ -1,7 +1,4 @@
 {{define "content"}}
-{{if .Data.Identity}}
-{{template "identity_notice" .Data.Identity}}
-{{else}}
 {{/* /notifications (06 §7): the per-user tray. Rows link to their thread;
      unread rows carry the state edge and an "unread" dot. Mark read / unread /
      all-read are POST forms (303 back with the filter preserved).
@@ -13,7 +10,7 @@
 <section class="notifications-page mx-auto max-w-3xl" data-sse="notifications" data-sse-url="/api/v1/notifications/stream" data-sse-mode="invalidate">
   <header class="mb-3 flex flex-wrap items-center gap-2 border-b border-[var(--pd-line)] pb-3">
     <p class="eyebrow w-full">inbox</p>
-    <h2 class="text-lg font-semibold">Notifications</h2>
+    <h1 class="text-lg font-semibold">Notifications</h1>
     {{if .Data.Unread}}<span class="pill" aria-live="polite">{{.Data.Unread}} unread</span>{{end}}
     <div class="ml-auto flex flex-wrap gap-2">
       <a class="btn px-2 py-1 text-sm{{if eq .Data.State ""}} btn-active{{end}}" href="/notifications">all</a>
@@ -28,7 +25,7 @@
   <ol class="grid grid-cols-1 gap-2">
     {{range .Data.Rows}}
     <li>
-      <div class="card flex w-full items-start gap-3 p-3 text-left{{if eq .State "unread"}} border-l-4 border-l-emerald-500{{else}} opacity-75{{end}}">
+      <div class="card flex w-full items-start gap-3 p-3 text-left{{if eq .State "unread"}} border-l-4 border-l-[color:var(--pd-ok)]{{else}} opacity-75{{end}}">
         <div class="min-w-0 flex-1">
           <div class="flex flex-wrap items-center gap-2 text-sm">
             <span class="chip{{if .Hot}} chip-open{{end}}">{{.Reason}}</span>
@@ -39,7 +36,7 @@
           <a class="mt-0.5 block truncate font-medium link" href="{{.Href}}">{{if .Title}}{{.Title}}{{else}}(no title){{end}}</a>
         </div>
         <div class="flex shrink-0 items-center gap-2">
-          {{if eq .State "unread"}}<span class="mt-1 inline-block h-2 w-2 shrink-0 rounded-full bg-emerald-500" aria-label="unread"></span>{{end}}
+          {{if eq .State "unread"}}<span class="dot dot-ok mt-1 shrink-0" role="img" aria-label="unread"></span>{{end}}
           <form method="post" action="/notifications/{{.ID}}/{{if eq .State "unread"}}read{{else}}unread{{end}}{{if $.Data.State}}?state={{$.Data.State}}{{end}}">
             <button type="submit" class="link whitespace-nowrap text-xs">{{if eq .State "unread"}}mark read{{else}}mark unread{{end}}</button>
           </form>
@@ -60,5 +57,4 @@
   </div>
   {{end}}
 </section>
-{{end}}
 {{end}}

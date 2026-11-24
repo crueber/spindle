@@ -170,18 +170,23 @@ func newFixture(t *testing.T) *fixture {
 // store failure.
 type countStore struct {
 	*store.Memory
-	mu          sync.Mutex
-	puts        int
-	gets        int
-	lists       int
-	getFn       func(store.GetResult, error) (store.GetResult, error)
-	getKeyFn    func(string, store.GetResult, error) (store.GetResult, error)
+	mu       sync.Mutex
+	puts     int
+	gets     int
+	lists    int
+	deletesN int
+	getFn    func(store.GetResult, error) (store.GetResult, error)
+	getKeyFn func(string, store.GetResult, error) (store.GetResult, error)
+	// putPreFn fails BEFORE the memory write (the contention shape: the store
+	// refuses the write, so the caller's retry is a real second attempt).
+	putPreFn    func(key string) error
 	putFn       func(key string, err error) error
 	headFn      func(*store.ObjectMeta, error) (*store.ObjectMeta, error)
 	headKeyFn   func(string, *store.ObjectMeta, error) (*store.ObjectMeta, error)
 	deleteFn    func(error) error
 	deleteKeyFn func(string, error) error
 	listFn      func(error) error
+	listKeyFn   func(string, error) error
 	composeFn   func(error) error
 }
 
@@ -189,6 +194,11 @@ func (c *countStore) Put(ctx context.Context, key string, body store.PutBody, op
 	c.mu.Lock()
 	c.puts++
 	c.mu.Unlock()
+	if c.putPreFn != nil {
+		if perr := c.putPreFn(key); perr != nil {
+			return store.ObjectMeta{}, perr
+		}
+	}
 	m, err := c.Memory.Put(ctx, key, body, opts)
 	if c.putFn != nil {
 		if ferr := c.putFn(key, err); ferr != nil {
@@ -217,6 +227,11 @@ func (c *countStore) List(ctx context.Context, prefix, startAfter string, fn fun
 	c.lists++
 	c.mu.Unlock()
 	err := c.Memory.List(ctx, prefix, startAfter, fn)
+	if c.listKeyFn != nil {
+		if ferr := c.listKeyFn(prefix, err); ferr != nil {
+			return ferr
+		}
+	}
 	if c.listFn != nil {
 		if ferr := c.listFn(err); ferr != nil {
 			return ferr
@@ -246,7 +261,16 @@ func (c *countStore) Compose(ctx context.Context, dst string, sources []string, 
 	return m, err
 }
 
+func (c *countStore) deletes() int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.deletesN
+}
+
 func (c *countStore) Delete(ctx context.Context, key string, ifVersion store.Version) error {
+	c.mu.Lock()
+	c.deletesN++
+	c.mu.Unlock()
 	err := c.Memory.Delete(ctx, key, ifVersion)
 	if c.deleteKeyFn != nil {
 		if ferr := c.deleteKeyFn(key, err); ferr != nil {
@@ -839,14 +863,18 @@ func TestBudgetNoList(t *testing.T) {
 		t.Fatalf("manifest = %d", w.Code)
 	}
 	puts, gets, lists := f.st.counts()
-	// 2N blob writes (staging + final blob) + manifest + tag pointer.
-	if puts != 2*layers+2 {
-		t.Fatalf("push puts = %d, want %d", puts, 2*layers+2)
+	// 2N blob writes (staging + final blob) + N usage-counter writes (one per
+	// finalized layer) + manifest + its usage update + tag pointer.
+	if puts != 3*layers+3 {
+		t.Fatalf("push puts = %d, want %d", puts, 3*layers+3)
 	}
-	// One tag-pointer probe + one staging read per blob (finalize verifies
-	// the digest while spooling; the blob is never read back after commit).
-	if gets != 1+layers {
-		t.Fatalf("push reads = %d, want %d", gets, 1+layers)
+	// One tag-pointer probe + one staging read per blob (finalize verifies the
+	// digest while spooling; the blob is never read back after commit) + one
+	// usage-counter read per layer, one for the manifest and one manifest HEAD
+	// (a re-push of identical bytes must not be counted twice). The counter is
+	// what makes a quota enforceable at the commit point without a LIST.
+	if gets != 2*layers+3 {
+		t.Fatalf("push reads = %d, want %d", gets, 2*layers+3)
 	}
 	if lists != 0 {
 		t.Fatalf("push listed the bucket %d times", lists)

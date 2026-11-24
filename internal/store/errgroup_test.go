@@ -58,7 +58,16 @@ func TestWeightedCancelMidAcquire(t *testing.T) {
 	}
 	errc := make(chan error, 1)
 	go func() { errc <- w.Acquire(ctx, 2) }() // blocks: only 1 permit free
-	time.Sleep(10 * time.Millisecond)
+	// Wait on the semaphore itself: when both permits are taken the waiter
+	// has taken one and is blocked on the second — the mid-acquire state
+	// this test is about. (A sleep guesses at the same thing.)
+	deadline := time.Now().Add(5 * time.Second)
+	for len(w.sem) != 2 {
+		if time.Now().After(deadline) {
+			t.Fatalf("waiter never reached mid-acquire (permits taken = %d)", len(w.sem))
+		}
+		time.Sleep(time.Millisecond)
+	}
 	cancel()
 	if err := <-errc; !errors.Is(err, context.Canceled) {
 		t.Fatalf("Acquire after cancel: %v", err)

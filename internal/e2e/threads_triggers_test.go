@@ -21,18 +21,15 @@ func triggerServer(t *testing.T) *e2eServer {
 	t.Helper()
 	bin := buildSpindle(t)
 	dataDir := t.TempDir()
+	p := newOIDP(t)
+	chainAliceTok = p.idToken(chainAlice, "spindle-admin")
+	e2eDefaultBearer = chainAliceTok
 	writeSpindleConfig(t, dataDir, fmt.Sprintf(`
 [server]
 auto_create_on_push = true
 secrets_key = "0123456789abcdef0123456789abcdef"
 
-[server.auth]
-mode = "token"
-anonymous_read = true
-tokens = [
-  { principal = %q, token = %q, write = true, admin = true },
-]
-
+%s
 [events]
 sweep_interval = "1h"
 
@@ -42,8 +39,7 @@ root = %q
 
 [cache]
 dir = %q
-`, chainAlice, chainAliceTok,
-		filepath.Join(dataDir, "store"), filepath.Join(dataDir, "cache")))
+`, p.configBlock(), filepath.Join(dataDir, "store"), filepath.Join(dataDir, "cache")))
 	s := startServer(t, bin, dataDir, freePort(t))
 	t.Cleanup(s.stop)
 	return s
@@ -56,7 +52,7 @@ on:
   pull_request:
 jobs:
   build:
-    runs-on: ubuntu-latest
+    runs-on: linux
     steps:
       - run: echo "run ${{ github.event_name }}"
 `

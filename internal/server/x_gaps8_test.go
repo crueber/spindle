@@ -465,7 +465,6 @@ func TestOriginAllowedPortAndLabel(t *testing.T) {
 
 func TestMaybeRefreshSessionBranches(t *testing.T) {
 	s, _ := newTestServer(t, nil)
-	s.cfg.Server.Auth.Mode = "oidc"
 	s.authSvc = NewAuthService(&s.cfg.Server.Auth, s.Now)
 	// Anonymous principal → no-op.
 	rec := httptest.NewRecorder()

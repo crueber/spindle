@@ -1,8 +1,18 @@
 {{define "collab_check_pill"}}
-{{with .}}<a class="inline-flex items-center gap-1.5 text-sm {{if eq .Label "no checks"}}muted{{end}}" href="{{.Href}}" title="{{.Title}}"><span class="{{.Dot}}" aria-hidden="true"></span>{{.Label}}</a>{{end}}
+{{with .}}<a class="inline-flex items-center gap-1.5 text-sm {{if eq .Label "no checks"}}muted{{end}}" href="{{.Href}}" title="{{.Title}}">{{template "collab_check_dot" .State}}{{.Label}}</a>{{end}}
 {{end}}
 
-{{define "collab_check_dot"}}<span class="{{if eq . "success"}}inline-block h-2.5 w-2.5 rounded-full bg-emerald-500{{else if eq . "in_progress"}}inline-block h-2.5 w-2.5 rounded-full bg-amber-400 animate-pulse{{else if eq . "pending"}}inline-block h-2.5 w-2.5 rounded-full bg-amber-400{{else if eq . "failure"}}inline-block h-2.5 w-2.5 rounded-full bg-red-500{{else if eq . "error"}}inline-block h-2.5 w-2.5 rounded-full bg-red-700{{else if eq . "cancelled"}}inline-block h-2.5 w-2.5 rounded-full bg-zinc-400{{else if eq . "skipped"}}inline-block h-2.5 w-2.5 rounded-full bg-zinc-500{{else}}inline-block h-2.5 w-2.5 rounded-full bg-zinc-400{{end}}" aria-hidden="true"></span>{{end}}
+{{/* collab_check_dot: the ONE check-state renderer (PLAN-THEMES §6.1/§8.4-2).
+     It takes a state string (success / failure / error / pending /
+     in_progress / cancelled / skipped / anything else) and emits the shared
+     `.dot .dot-*` class pair defined in web/src/app.css. Shape is the non-hue
+     channel: filled circle = pass, filled diamond = fail, hollow = pending /
+     running, hollow + muted = cancelled / skipped / none. Colour lives only in
+     the stylesheet — no Go code builds a colour class (the old checkStateDot
+     helper is deleted). Decorative here: every surface with a label carries the
+     state in text; where the dot IS the label (repo_check_pill) the anchor
+     names it. */}}
+{{define "collab_check_dot"}}<span class="{{if eq . "success"}}dot dot-ok{{else if or (eq . "failure") (eq . "error")}}dot dot-fail{{else if eq . "in_progress"}}dot dot-progress{{else if eq . "pending"}}dot dot-pending{{else if or (eq . "cancelled") (eq . "skipped")}}dot dot-muted{{else}}dot dot-muted{{end}}" aria-hidden="true"></span>{{end}}
 
 {{/* collab_check_contexts: one sha's per-context rows (<ul.divide-y>). */}}
 {{define "collab_check_contexts"}}

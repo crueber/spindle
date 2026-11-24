@@ -44,8 +44,8 @@ func sweepEnv(t *testing.T) (*threads.Service, *triggerGit) {
 func TestThreadsSweepersAreTheRegisteredKinds(t *testing.T) {
 	svc, _ := sweepEnv(t)
 	sw := newThreadsSweepers(svc)
-	if len(sw) != 3 {
-		t.Fatalf("sweepers = %d, want 3", len(sw))
+	if len(sw) != 4 {
+		t.Fatalf("sweepers = %d, want 4", len(sw))
 	}
 	kinds := map[string]bool{}
 	var gc int
@@ -55,7 +55,8 @@ func TestThreadsSweepersAreTheRegisteredKinds(t *testing.T) {
 			gc++
 		}
 	}
-	if gc != 2 || !kinds[threads.KindThreadsGC] || !kinds[threads.KindThreadsSchedule] {
+	if gc != 2 || !kinds[threads.KindThreadsGC] || !kinds[threads.KindThreadsSchedule] ||
+		!kinds[threads.KindThreadsQueueReconcile] {
 		t.Fatalf("kinds = %v (gc sweepers = %d)", kinds, gc)
 	}
 	// The due gate: due once, then not until the cadence elapses.

@@ -38,17 +38,18 @@ func roundTripConfig(t *testing.T) *config.Config {
 	c.Server.CorsOrigins = nil // empty list must stay empty
 	c.Server.MaxPushBytes = 64 << 30
 	c.Server.RequestTimeout = 90 * 60e9
-	c.Server.Auth.Mode = "token"
+	c.Server.Auth.Issuer = "https://id.example.com"
 	c.Server.Auth.AnonymousRead = true
 	c.Server.Auth.SessionSecret = strings.Repeat("s", 32)
+	c.Server.Auth.OAuthClientID = "client-id"
 	c.Server.Auth.OAuthClientSecret = "oauth-client-secret-value"
+	c.Server.Auth.AllowedDomains = []string{"example.com"}
 	c.Server.Auth.Tokens = []config.StaticToken{
-		{Principal: "alice@example.com", Token: tokenLiteral, Write: true, Admin: true},
+		{Principal: "alice@example.com", Token: tokenLiteral, Write: true},
 		{Principal: "bob@example.com", TokenEnv: "BOB_TOKEN", Write: true},
 	}
-	c.Server.Auth.AdminEmails = []string{"ops@example.com"}
-	c.Server.Auth.AdminDomains = nil
-	c.Server.Auth.AdminGroups = []string{"spindle-admins"}
+	c.Server.Auth.AllowedEmails = nil
+	c.Server.Auth.AdminGroups = []string{"spindle-admin"}
 	c.Server.Auth.Audiences = nil
 	c.Server.Auth.TrustedForwarders = nil
 	c.WAL.SnapshotEveryEntries = 512 // uint64
@@ -86,7 +87,7 @@ func TestFormValuesWholeSchemaRoundTrip(t *testing.T) {
 	for _, key := range []string{
 		"server.auth.tokens", "bundles.strategy", // struct slices
 		"wal.snapshot_every_entries", "wal.cas_max_retries", // unsigned ints
-		"server.auth.admin_domains", "cache.prewarm", "upstream.follow", "import.url_allowlist", // empty lists
+		"server.auth.allowed_emails", "cache.prewarm", "upstream.follow", "import.url_allowlist", // empty lists
 	} {
 		if _, err := findField(groups, key); err != nil {
 			t.Fatalf("%s missing from the schema: %v", key, err)
@@ -144,10 +145,10 @@ func TestFormValuesWholeSchemaRoundTrip(t *testing.T) {
 		}
 	}
 	// 3. The empty lists stayed empty, never [""].
-	if len(got.Cache.Prewarm) != 0 || len(got.Server.Auth.AdminDomains) != 0 ||
+	if len(got.Cache.Prewarm) != 0 || len(got.Server.Auth.AllowedEmails) != 0 ||
 		len(got.Import.URLAllowlist) != 0 || len(got.Placement.ServeExclude) != 0 {
-		t.Fatalf("an empty list became a bogus entry: prewarm=%q domains=%q allowlist=%q exclude=%q",
-			got.Cache.Prewarm, got.Server.Auth.AdminDomains, got.Import.URLAllowlist, got.Placement.ServeExclude)
+		t.Fatalf("an empty list became a bogus entry: prewarm=%q emails=%q allowlist=%q exclude=%q",
+			got.Cache.Prewarm, got.Server.Auth.AllowedEmails, got.Import.URLAllowlist, got.Placement.ServeExclude)
 	}
 	// 4. Struct slices survived whole, secrets included.
 	if !reflect.DeepEqual(got.Server.Auth.Tokens, base.Server.Auth.Tokens) {
@@ -210,7 +211,7 @@ func TestKeyInMessageWholeKey(t *testing.T) {
 
 func TestStructSliceSecretMasking(t *testing.T) {
 	c := config.Defaults()
-	c.Server.Auth.Tokens = []config.StaticToken{{Principal: "alice@example.com", Token: tokenLiteral, Admin: true}}
+	c.Server.Auth.Tokens = []config.StaticToken{{Principal: "alice@example.com", Token: tokenLiteral, Write: true}}
 	groups := BuildSchema(c, config.Defaults())
 	f, err := findField(groups, "server.auth.tokens")
 	if err != nil {
@@ -349,8 +350,7 @@ func TestRowEditorAddRotateRevoke(t *testing.T) {
 func TestEmptyListIsEmpty(t *testing.T) {
 	base := config.Defaults()
 	keys := []string{
-		"server.roles", "server.cors_origins", "server.auth.admin_emails",
-		"server.auth.admin_domains", "server.auth.allowed_domains",
+		"server.roles", "server.cors_origins", "server.auth.allowed_domains",
 		"server.auth.allowed_emails", "server.auth.write_domains",
 		"server.auth.audiences", "server.auth.trusted_forwarders",
 		"cache.prewarm", "placement.serve_exclude", "placement.maintain_exclude",
@@ -366,8 +366,7 @@ func TestEmptyListIsEmpty(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, val := range [][]string{
-		c.Server.Roles, c.Server.CorsOrigins, c.Server.Auth.AdminEmails,
-		c.Server.Auth.AdminDomains, c.Server.Auth.AllowedDomains,
+		c.Server.Roles, c.Server.CorsOrigins, c.Server.Auth.AllowedDomains,
 		c.Server.Auth.AllowedEmails, c.Server.Auth.WriteDomains,
 		c.Server.Auth.Audiences, c.Server.Auth.TrustedForwarders,
 		c.Cache.Prewarm, c.Placement.ServeExclude, c.Placement.MaintainExclude,

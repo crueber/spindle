@@ -6,6 +6,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -51,7 +52,7 @@ func TestGitInfoRefsAuthAndGateBranches(t *testing.T) {
 	// Write-denied receive-pack advertisement → pkt-ERR.
 	s2, _ := newTestServer(t, nil)
 	s2.cfg.Server.Auth.Tokens = append(s2.cfg.Server.Auth.Tokens,
-		config.StaticToken{Principal: "ro", Token: "ro-token", Write: false, Admin: false})
+		config.StaticToken{Principal: "ro", Token: "ro-token", Write: false})
 	s2.authSvc = NewAuthService(&s2.cfg.Server.Auth, s2.Now)
 	req = httptest.NewRequest("GET", "http://x/o/r.git/info/refs?service=git-receive-pack", nil)
 	req.Header.Set("User-Agent", "git/2.46.0")
@@ -317,6 +318,8 @@ func TestSetupAccessInvalidToken(t *testing.T) {
 func TestSetupValidationErrorsAndListCoerce(t *testing.T) {
 	s, _ := newTestServer(t, nil)
 	s.cfg.DataDir = t.TempDir()
+	seedValidConfig(t, s.cfg.DataDir)
+	s.boot.ConfigPaths = []string{filepath.Join(s.cfg.DataDir, config.ConfigFileName)}
 	// oidc without client id/secret → validation error → 422 (both test+put).
 	for _, body := range []string{
 		`{"overrides": {"server.auth.mode": "oidc"}}`,

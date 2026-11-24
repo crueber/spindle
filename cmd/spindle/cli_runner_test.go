@@ -1,66 +1,84 @@
-// cli_runner_test.go — the runner group's HTTP shape (docs/features/15 §3/§6):
-// the mint POST, the list GET and the revoke DELETE reach the documented
-// endpoints, and the one-time token prints once (never via a URL).
+// cli_runner_test.go — the runner group's surface: `serve`'s image-flag
+// validation/help, and the deliberate absence of the admin verbs (the CLI's
+// machine credentials cannot administer; administration is browser-only).
 package main
 
 import (
+	"bytes"
 	"strings"
 	"testing"
 )
 
-func TestRunnerTokenCommand(t *testing.T) {
-	f, srv := newFakeAPI(t)
-	f.on("POST", "/acme/mono/api/threads/runners/tokens", 201,
-		`{"id":"abcd1234","token":"wrg_x.abcd1234.secret","expires_at":"2026-11-20T12:15:00Z"}`)
-	code, out, errOut := runCmd(t, srv, "tok", runRunnerToken, "acme/mono", "--labels", "linux,docker", "--name", "build-01")
-	if code != exitOK {
-		t.Fatalf("exit = %d (%s)", code, errOut)
-	}
-	if !strings.Contains(out, "wrg_x.abcd1234.secret") || !strings.Contains(out, "shown once") {
-		t.Fatalf("mint output = %q", out)
-	}
-	rec := f.last()
-	if rec.Method != "POST" || rec.Path != "/acme/mono/api/threads/runners/tokens" {
-		t.Fatalf("mint request = %s %s", rec.Method, rec.Path)
-	}
-	decodeBody(t, rec, map[string]any{"name": "build-01", "labels": "linux,docker"})
-	// --json prints the endpoint body verbatim.
-	f.on("POST", "/acme/mono/api/threads/runners/tokens", 201,
-		`{"id":"abcd1234","token":"t","expires_at":"2026-11-20T12:15:00Z"}`)
-	code, out, _ = runCmd(t, srv, "tok", runRunnerToken, "acme/mono", "--json")
-	if code != exitOK || !strings.Contains(out, `"token": "t"`) {
-		t.Fatalf("json mint = %d %q", code, out)
+func TestRunnerServeImageFlagValidation(t *testing.T) {
+	// A bad image policy is a startup usage error that names its flag, before
+	// the runner dials anything (docs/threads.md §8.1).
+	for _, tc := range []struct {
+		name string
+		args []string
+		want string
+	}{
+		{"scheme", []string{"--image-prefix", "https://ak.example/dockerhub"}, "--image-prefix"},
+		{"trailing slash", []string{"--image-prefix", "ak.example/dockerhub/"}, "--image-prefix"},
+		{"no path", []string{"--image-prefix", "ak.example"}, "--image-prefix"},
+		{"prefix-all alone", []string{"--image-prefix-all"}, "--image-prefix-all"},
+		{"bad pull", []string{"--image-pull", "sometimes"}, "--image-pull"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			c := isolateCLI(t, "http://127.0.0.1:1")
+			var out, errOut bytes.Buffer
+			c.out, c.errOut = &out, &errOut
+			code := runRunnerServe(t.Context(), c, tc.args)
+			if code != exitArg {
+				t.Fatalf("exit = %d, want %d (%s)", code, exitArg, errOut.String())
+			}
+			if !strings.Contains(errOut.String(), tc.want) {
+				t.Fatalf("stderr %q misses %q", errOut.String(), tc.want)
+			}
+		})
 	}
 }
 
-func TestRunnerListAndRevokeCommands(t *testing.T) {
-	f, srv := newFakeAPI(t)
-	f.on("GET", "/acme/mono/api/threads/runners", 200,
-		`{"runners":[{"id":"abcd1234","name":"build-01","labels":["linux"],"state":"active","last_seen_at":"2026-11-20T12:00:00Z"}]}`)
-	code, out, errOut := runCmd(t, srv, "tok", runRunnerList, "acme/mono")
-	if code != exitOK {
-		t.Fatalf("list exit = %d (%s)", code, errOut)
-	}
-	for _, want := range []string{"abcd1234", "build-01", "active", "linux", "2026-11-20T12:00:00Z"} {
-		if !strings.Contains(out, want) {
-			t.Fatalf("list output %q missing %q", out, want)
+func TestRunnerGroupHelpListsImageFlags(t *testing.T) {
+	// The apiGroup's flag list is what `--help` renders: a flag missing there
+	// is a flag the operator cannot discover.
+	flags := ""
+	for _, cmd := range runnerGroup.commands {
+		if cmd.name == "serve" {
+			flags = strings.Join(cmd.flags, ",")
 		}
 	}
-	f.on("DELETE", "/acme/mono/api/threads/runners/abcd1234", 204, "")
-	code, out, errOut = runCmd(t, srv, "tok", runRunnerRevoke, "acme/mono", "abcd1234")
-	if code != exitOK || !strings.Contains(out, "Revoked runner abcd1234") {
-		t.Fatalf("revoke = %d %q (%s)", code, out, errOut)
+	for _, want := range []string{"image-prefix", "image-prefix-all", "image-pull", "image-require-digest"} {
+		if !strings.Contains(flags, want) {
+			t.Fatalf("runner serve help flags %q miss %q", flags, want)
+		}
 	}
-	if rec := f.last(); rec.Method != "DELETE" {
-		t.Fatalf("revoke method = %s", rec.Method)
+}
+
+func TestRunnerAdminVerbsAreGone(t *testing.T) {
+	// Administration is OIDC/browser-only (AGENTS law 9): the CLI's machine
+	// credentials cannot mint, list or revoke. The verbs must not come back as
+	// dead 403-only commands.
+	names := map[string]bool{}
+	for _, cmd := range runnerGroup.commands {
+		names[cmd.name] = true
 	}
-	// An unknown runner surfaces the server's 404 (the CLI's error mapping).
-	f.on("DELETE", "/acme/mono/api/threads/runners/ghost", 404, "unknown runner")
-	if code, _, _ := runCmd(t, srv, "tok", runRunnerRevoke, "acme/mono", "ghost"); code != exitErr {
-		t.Fatalf("unknown revoke exit = %d", code)
+	if len(runnerGroup.commands) != 1 || !names["serve"] {
+		t.Fatalf("runner group commands = %v, want only serve", names)
 	}
-	// A malformed OWNER/REPO is an argv error.
-	if code, _, _ := runCmd(t, srv, "tok", runRunnerList, "mono"); code != exitArg {
-		t.Fatalf("bad repo exit = %d", code)
+	for _, verb := range []string{"token", "list", "revoke"} {
+		if names[verb] {
+			t.Fatalf("dead admin verb %q is back", verb)
+		}
+	}
+	// The group dispatcher treats an admin verb as a group-help request (exit
+	// arg), never as an operation: nothing dials the server.
+	c := isolateCLI(t, "http://127.0.0.1:1")
+	var out, errOut bytes.Buffer
+	c.out, c.errOut = &out, &errOut
+	if code := groupRunner(runnerGroup)(t.Context(), c, []string{"token"}); code != exitArg {
+		t.Fatalf("runner token exit = %d, want %d", code, exitArg)
+	}
+	if !strings.Contains(errOut.String(), `unknown subcommand "token"`) || !strings.Contains(errOut.String(), "serve") {
+		t.Fatalf("group help = %q", errOut.String())
 	}
 }

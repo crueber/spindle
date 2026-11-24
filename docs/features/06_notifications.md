@@ -49,7 +49,7 @@ P4 pattern. CAS'd, carried in the same two-step as the notification Creates:
 | Field | Type |
 |---|---|
 | `unread_count` | int |
-| `entries` | `[{id, repo, num, kind, reason, title, state, at}]` — hot window only, newest-first |
+| `entries` | `[{id, repo, num, kind, reason, title, actor, state, at}]` — hot window only, newest-first |
 | `compacted_through` | string — oldest `id` still represented in `entries` |
 
 The index is the tray's O(1) default read; older pages LIST `…/notifications/<id>.json` (P4/P5 —
@@ -72,7 +72,7 @@ toggle belongs to 07/08; this doc only consumes it.
 | `id` | string | 24-char ULID |
 | `url` | string | https only (`http` allowed on loopback for dev) |
 | `secret` | string | write-only: set via POST/PATCH body, NEVER returned; response carries `secret_set: bool` |
-| `events` | array | filter list of activity `action`s, `[]` = all; see §5.3 |
+| `events` | array | filter list of activity `action`s plus the push topics, `[]` = all; see §5.3 / §5.3.1 |
 | `active` | bool | `false` = config kept, delivery skipped |
 | `insecure_tls` | bool | default `false` |
 | `created_by`, `created_at`, `updated_at` | | RFC 3339 |
@@ -229,7 +229,9 @@ and per-user email preference keys — nothing in this doc's objects precludes t
 
 The question "extend the 09_events WAL bridge with collaboration events?" is decided: **v1 webhooks are
 repo-level configs delivered from a collaboration activity log, NOT from the WAL bridge.** The WAL bridge
-stays git-only (P1 law); the events-bridge loop is frozen and gains no collaboration awareness. Instead:
+stays git-only (P1 law); the events-bridge loop is frozen and gains no collaboration awareness. (2026-11-21:
+a bridge **sink** — not the loop — appends git push events to the same activity log for repo hooks; see
+§5.3.1. The delivery unit is unchanged.) Instead:
 
 - **Activity log:** every fanned-out mutation appends one immutable event at
   `repos/<o>/<r>/collab-events/<seq:012x>.json` (`Create`; seq reserved by CAS on
@@ -266,6 +268,43 @@ stays git-only (P1 law); the events-bridge loop is frozen and gains no collabora
   event bypasses the events filter there); the ping request performs exactly one bounded
   POST and returns promptly regardless of backlog depth. With no backlog the ping advances
   the hook cursor past the ping event so the loop does not redeliver it.
+
+#### 5.3.1 Push/ref topics on repo hooks (2026-11-21 amendment)
+
+Repo hooks can subscribe to git events without a new producer or a new delivery path. The events bridge
+(09_events) already classifies WAL `PUSH`/`REF_UPDATE` entries into one `RefEvent` per ref update; a
+`repo-hooks` bridge sink (`cmd/spindle/events_hooks.go`) hands the batch to
+`notify.Service.PushSink`, which appends ONE activity event per ref event with `action` = the push topic.
+Delivery, signature, retry, deliveries ring and redeliver are then the §5.3 collaboration path byte for
+byte — the "deliver from the activity log" decision is unchanged, only the log gains a producer.
+
+- **Topic vocabulary (exactly what the bridge can emit):** `push` (umbrella: every push/ref event,
+  including refs that are neither branch nor tag, whose event action is the umbrella itself),
+  `branch.created`, `branch.updated`, `branch.deleted`, `tag.created`, `tag.updated`, `tag.deleted`.
+  A hook subscribed to `push` receives the whole family; a concrete topic receives only itself. `*` and
+  the empty filter keep meaning "everything" (a repo hook with no filter now also receives pushes —
+  the intended reading of "all").
+- **When push history is recorded:** only while at least one ACTIVE repo hook subscribes to the family
+  (`notify.WantsPush`). A repo with no push consumer pays one hook scan per bridge catch-up and writes
+  nothing; a hook created later sees pushes from its creation onward (no history backfill), like any
+  other activity event.
+- **Payload (the POST body) is the normal activity event** — `{seq, repo, action, kind:"repo",
+  actor:<pusher>, at, payload}` — with `payload = {class:"push", recipients:[], detail:{ref, ref_type,
+  before, after, repository:"owner/name", pusher, commits:[{id,author,email,message,at}], _walgit:{seq,
+  entry_kind, request_id}}}`. One event per ref update, so a three-branch push is three deliveries.
+  `commits` lists at most 50 commits (newest first) for branch/tag create/update; a delete carries `[]`,
+  and an unreachable object/cold serving copy also degrades to `[]` (the payload is best-effort
+  enrichment — it never fails the delivery). `X-Walgit-Event` is the concrete topic.
+- **Wake:** the push path already wakes the events bridge for CI (`bind_ssh.go`); that same wake is the
+  hook wake, and `PushSink` wakes the `webhooks` task through the existing coalescing channel. No second
+  path, no additional store read on the request. A Threads job-token push still skips the bridge wake
+  (the CI loop-suppression rule), so its hook delivery waits for the next wake/sweep like its CI run.
+- **Deduplication:** the bridge cursor is the only delivery cursor; a sink error leaves it untouched
+  (at-least-once). A replayed batch re-appends events with fresh activity seqs — consumers dedup on the
+  documented key `(repo, payload.detail._walgit.seq, ref)`, not on `X-Walgit-Delivery` alone.
+- **Org hooks cannot subscribe:** an org has no repository to push to, so `validateOrgHookEvents`
+  rejects the topics, the org panel does not offer them, and `deliverOrgRepo` skips any push action it
+  sees in a member repo's log (an empty org filter must not silently gain them).
 
 ### Concurrency
 
@@ -558,6 +597,10 @@ a read notification while its tray page is open is harmless (404 → UI drops th
 - **§1.1 sort sentence corrected**: sha256-hex ids do NOT sort by event time, so LIST overflow pages sort by `(created_at desc, id)` — the index (newest-first entries) is still the O(1) default read. Rationale: the formula is normative; the sentence described a different id scheme.
 - **Watch endpoints live in `internal/notify` until 07 lands** (`PUT/DELETE/GET /{o}/{r}/api/watch` writing the 07 §5 record shape verbatim), and the watcher array field is **`watcher_list`** (capped, `watchers_truncated`), NOT `watchers` — 07 defines `watchers` as the COUNT. Rationale: 06 must resolve watchers without listing users, and the count/array names must not collide when 07 adopts `social.json`.
 - **Thread author receives `author` INSTEAD of `subscribed`** on activity classes (never both). Rationale: the §2 table names three distinct reasons; doubling the author's tray for one event is noise, and the dedup key keeps both representable if a future dial wants both.
+- **Moderation hide/lock notify nobody in M2 (2026-11-21).** Content hiding and conversation locks
+  publish a `moderation` collab frame (invalidation + state) and append to the moderation audit family;
+  they add NO notification class and NO webhook event. The author learns from the rendered marker and
+  the public record. The plan's `report_filed` moderation class arrives with M3.
 - **Repo StreamEvent frames land on notify's in-process repo bus** (drop-oldest, 64-frame ring, `SubscribeRepo` seam) with NO v1 HTTP reader — 08's collab stream subscribes there. Rationale: no repo broadcast bus exists yet; the normative live proof (notification object + `notification` frame) rides Emit, and inventing a second stream endpoint here would preempt 08's stream design.
 - **Overflow (> 100 recipients) writes the activity event FIRST** (recipients in the payload as the durable queue) and returns; `notify-fanout` drains it. Dedup-skips never arm the task (a task racing a later read-flip could otherwise mint a duplicate live entry). Rationale: the request never extends past the 5 s budget; the activity payload is the only queue that survives a restart.
 - **No config key**: retention window is a `RetentionDays` field defaulting to 30, no `notifications.*` TOML. Rationale: one scalar does not justify a config surface + validation + schema churn; composition can set it from env later without a wire change.
@@ -841,3 +884,27 @@ a read notification while its tray page is open is harmless (404 → UI drops th
   Composition now also wires `notify.Service.OrgOwner` to identity (`newNotifyService`); it had
   been left nil, so in `token`/`oidc` mode the org webhook API was host-admin-only instead of
   owner-gated. Pinned by `TestOrgBirthObserverEmitsForOrgsOnly`'s construction assertion.
+
+- **FIXED (BUG-4, 2026-11-21) — the unread index carries `actor`.** The notification
+  object always had `actor` (§1.1), but the hot-window `IndexEntry` omitted it and the tray
+  serves index rows without a per-id GET, so every tray/notifications row rendered
+  `` `{{.Actor}}` `` empty even though the object knew who acted. `IndexEntry` gains
+  `"actor"` (same value as the object, `""` for system) and `Tray` copies it through; no
+  object, key or route changed. This is a **frozen-shape additive field**: the index is in
+  the overwritable-key family (14 §14.12 rule 2), and law 5's append-only rule permits
+  adding a field — an old index doc decodes with `actor: ""` and those rows keep it until they
+  leave the hot window: there is no backfill pass (pre-1.0 shape change in place) and a row that
+  never saw an actor stays empty rather than inventing "someone". Pinned by
+  `TestIndexCarriesActor` (mention + author emissions) and the rendered-row assertion in
+  `internal/webui`'s notifications page test.
+- **Moderation mention filter (PLAN-V2 M1, 2026-11-21).** `notify` declares the consumer-owned
+  `BlockGate{BlockedBy(ctx, blocker, subject)}` (satisfied by `*moderation.Service`) and applies it
+  once per resolved target in `emit`, **before** `appendActivity`: a notification whose recipient has
+  blocked the acting principal is dropped — mentions, subscribed, assigned and review-requested alike
+  — so the overflow `notify-fanout` drain cannot reintroduce the name from the stored recipient list.
+  The filter maps the already-deduped target set 1:1 (no duplicates) and leaves the reverse direction
+  untouched. A probe error drops that one recipient and logs (fail closed: silence beats notifying a
+  person who may have blocked the actor); the activity record still lands so webhooks/backfill keep
+  their truth. Nil gate = feature off. Tests: `TestBlockedActorNeverNotifiesBlocker`,
+  `TestBlockFilterDoesNotDuplicateOrRestrictReverse`, `TestBlockFilterProbeErrorDropsRecipient`.
+  Contract: `docs/features/16_moderation.md` §3.3.

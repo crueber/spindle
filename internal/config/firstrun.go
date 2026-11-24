@@ -11,7 +11,9 @@ import (
 )
 
 // FirstRunDefaults returns the zero-config boot configuration (divergence D5,
-// 11_config_cli.md §2.3): a fresh machine serves git over HTTP with no file.
+// 11_config_cli.md §2.3, as amended by PLAN-OIDC-ONLY): a fresh machine gets
+// the first-run store/listen shape and NO authentication — which fails
+// validation, so the boot is restricted until OIDC is configured.
 // Every unmarked key keeps its compiled-in §2 table value.
 func FirstRunDefaults(dataDir string) *Config {
 	c := Defaults()
@@ -21,7 +23,6 @@ func FirstRunDefaults(dataDir string) *Config {
 	c.Store.Backend = "filesystem"
 	c.Store.Root = filepath.Join(dataDir, "store")
 	c.Cache.Dir = filepath.Join(dataDir, "cache")
-	c.Server.Auth.Mode = "none"
 	return c
 }
 
@@ -31,7 +32,7 @@ func FirstRunDefaults(dataDir string) *Config {
 // file). Candidates are checked in priority order (an explicit --config path
 // first, then the data-dir files, mirroring the §3.1 ladder). With no
 // candidate present the zero-config first-run shape is the base, so a first
-// save cannot silently swap the filesystem store for the s3 default or move
+// save cannot silently swap the filesystem store for a bucket backend or move
 // the listener off 0.0.0.0. An unparseable file returns the error; the caller
 // falls back to FirstRunDefaults (the file's own errors surface separately
 // through the boot state).
@@ -145,9 +146,20 @@ func ValidateForSave(c *Config) error {
 // canonical file only go on the first canonicalising save. The returned string
 // is that backup's file name ("" when none was needed).
 func SaveSetup(c *Config, dataDir string) (string, error) {
-	if err := ValidateForSave(c); err != nil {
+	return SaveSetupValidated(c, c, dataDir)
+}
+
+// SaveSetupValidated writes write but validates validate. The admin page uses
+// it when a value is EFFECTIVE but not in the file (environment or flags): the
+// document on disk keeps the file's bytes (the env secret is not silently
+// persisted), while the check is run on the configuration that will actually
+// take effect. A file that relies on the environment stays exactly that; an
+// invalid effective config is still refused.
+func SaveSetupValidated(write, validate *Config, dataDir string) (string, error) {
+	if err := ValidateForSave(validate); err != nil {
 		return "", err
 	}
+	c := write
 	if err := EnsureDataDir(dataDir); err != nil {
 		return "", fmt.Errorf("create data dir: %w", err)
 	}

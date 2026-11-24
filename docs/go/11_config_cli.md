@@ -2,7 +2,7 @@
 
 > Source: MASTER_RUST_SPEC.md §15 (configuration reference, per-repo settings D24), §16 (CLI reference), §19 (porting notes: clap/exit codes) · Status: normative for the spindle Go implementation.
 
-The binary is `spindle` (module `github.com/crueber/spindle`). It reads the same config files, honors the same environment variables, emits the same exit codes, and exposes the same subcommand surface as the Rust `walgit`, so operators' `walgit.toml`, deployment scripts, and shell habits carry over unchanged. Config parsing uses `github.com/BurntSushi/toml` — the only TOML dependency allowed, and one of the six direct backend modules in the budget (AGENTS.md law 1: chi, toml, x/net, x/crypto, dicebear-go + dicebear/styles). One deliberate divergence: **a config file is now OPTIONAL** — a first run with no file boots on built-in defaults (§2.3), and the default file location lives under the data dir (§3.1). All other CLI mechanics (dispatch, flag parsing, duration/size parsing) are hand-rolled or stdlib.
+The binary is `spindle` (module `github.com/crueber/spindle`). It reads the same config files, honors the same environment variables, emits the same exit codes, and exposes the same subcommand surface as the Rust `walgit`, so operators' `walgit.toml`, deployment scripts, and shell habits carry over unchanged. Config parsing uses `github.com/BurntSushi/toml` — the only TOML dependency allowed, and one of the seven direct backend modules in the budget (AGENTS.md law 1: chi, toml, x/net, x/crypto, dicebear-go + dicebear/styles, yaml.v3). One deliberate divergence: **a config file is now OPTIONAL** — a first run with no file boots on built-in defaults (§2.3), and the default file location lives under the data dir (§3.1). All other CLI mechanics (dispatch, flag parsing, duration/size parsing) are hand-rolled or stdlib.
 
 ---
 
@@ -14,6 +14,7 @@ cmd/spindle/cli_*.go    the WP11 API client (cli_api.go client/state/table, cli_
                         cli_issue, cli_pr, cli_release (releases+checks), cli_misc (packages/threads/api/completion))
 internal/config/       file+env loading, decoding, validation, per-repo settings, effective-config dump
 internal/config/       (files) config.go, env.go, validate.go, size.go, repo_settings.go, check.go
+internal/doctor/       the read-only upgrade preflight (§6.7): config findings + a bounded bucket sample
 ```
 
 `internal/config` owns everything the rest of the system consumes:
@@ -66,12 +67,10 @@ Copied from Rust spec §15.1; key names, defaults, and meanings are **normative 
 | `server.ssh.external_port` | `0` | port advertised in `ssh://` clone URLs; 0 = the listen port — the external/internal split (issue #215) |
 | `server.ssh.host_key` / `host_key_env` | — | OpenSSH/PEM private key: path / env var NAME; auto-generated ed25519 under `<data-dir>/ssh/` when unset |
 | SSH public keys | — | user-managed in the object store via `GET\|POST\|DELETE /api/v1/ssh-keys` and the `/keys` page — not config (17_ssh.md §3) |
-| `server.auth.mode` | `"none"` | `none` \| `token` \| `oidc` |
-| `server.auth.anonymous_read` | `true` | oidc: true (public browsing) recommended, false = hard-lock |
-| `server.auth.tokens[]` | — | `{principal, token \| token_env, write, admin}`; robots allowed in oidc mode too |
-| `server.auth.admin_emails / admin_domains` | `[]` | oidc admins |
-| `server.auth.admin_groups` | `["spindle-admins"]` | OIDC groups granted global admin (and `/setup`); empty = group admins disabled (WP13) |
-| `server.auth.groups_claim` | `"groups"` | ID-token claim carrying group membership (array of strings or one string); must be non-empty in oidc mode |
+| authentication | — | **OIDC only**: issuer, client id/secret, ≥32-byte session secret, an admission allowlist, `groups_claim` and a non-empty `admin_groups` are all required; without them the boot is restricted (`docs/PLAN-OIDC-ONLY.md`) |
+| `server.auth.anonymous_read` | `true` | true = public browsing, false = hard-lock |
+| `server.auth.tokens[]` | — | `{principal, name?, token \| token_env, write, expires_at?}` — machine credentials over Bearer/Basic, never admin; `expires_at` is RFC 3339, `name` is the stable rotation/usage label |
+| `server.auth.admin_groups` | `["spindle-admin"]` | OIDC groups granted global admin (the Administration area); must be non-empty |
 | `server.auth.issuer` | — | discovery at `<issuer>/.well-known/openid-configuration` |
 | `server.auth.allowed_domains / allowed_emails` | `[]` | admission (email_verified required) |
 | `server.auth.write_domains` | — | omit = every admitted identity writes |
@@ -81,15 +80,16 @@ Copied from Rust spec §15.1; key names, defaults, and meanings are **normative 
 | `server.auth.access_token_ttl` | `"90d"` | `wgt_` token lifetime |
 | `server.auth.audiences` | `[]` | accepted `aud` on bearer ID tokens (∪ oauth_client_id) |
 | `server.auth.trusted_forwarders` | `[]` | principals allowed to set `X-Walgit-Principal` (push broker hop) |
-| `store.backend` | `"s3"` | `s3` \| `memory` \| `filesystem` (D4, 03_store_backends.md) † |
+| `store.backend` | `"filesystem"` | `s3` \| `memory` \| `filesystem` (D4, 03_store_backends.md) †; a bucket backend is selected explicitly, never inherited by omission (OBS-1) |
 | `store.bucket` / `store.prefix` | `"walgit"` / `""` | bucket + key prefix |
-| `store.root` | — | filesystem backend root (D4); first-run default `<data-dir>/store` (§2.3) † |
+| `store.root` | — | filesystem backend root (D4); default `<data-dir>/store` (§2.3) † |
 | `store.max_retries` | `8` | retryable store errors, jittered backoff |
 | `store.multipart_threshold` / `multipart_part_size` | `"64MiB"` / `"32MiB"` | multipart thresholds |
-| `store.s3.endpoint/region/access_key_env/secret_key_env/force_path_style` | AWS defaults | incl. rustfs/MinIO (path style true) |
+| `store.s3.endpoint` | — | **required when `store.backend = "s3"`** (validation fails loudly; no implicit AWS host, OBS-1) |
+| `store.s3.region/access_key_env/secret_key_env/force_path_style` | `"us-east-1"` / `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` / `false` | incl. rustfs/MinIO (path style true); the `*_env` values are env-var names |
 | `cache.dir` | `"/tmp/walgit"` | local cache root (`<dir>/<owner>/<name>.git`) † |
 | `cache.mode` | `"auto"` | `budget` \| `disk` \| `auto` (= disk when `maintenance.disk = "ssd"`) |
-| `cache.max_bytes` | `"20GiB"` | budget-mode cap for everything on disk |
+| `cache.max_bytes` | `"20GiB"` | budget-mode cap for everything on disk; lowered at boot to the cache filesystem's eviction watermark when it is smaller and the value is still the compiled default (§8, BUG-6) |
 | `cache.disk_high_watermark` | `0.9` | disk-mode eviction trigger (low mark = −0.10) |
 | `cache.evict_idle_after` | `"6h"` | idle repos evicted (budget cap or watermark) |
 | `cache.prewarm[]` / `prewarm_parallelism` / `prewarm_ready_timeout` | `[]` / `2` / `"0s"` | warm repos at startup; `/readyz` gating |
@@ -125,8 +125,11 @@ Copied from Rust spec §15.1; key names, defaults, and meanings are **normative 
 | `packages.max_blob_bytes` | `"10GiB"` | one OCI blob object (GHCR per-layer parity); over cap → 413 `SIZE_INVALID` (14 §5) |
 | `packages.max_manifest_bytes` | `"4MiB"` | one manifest body; over cap → 413 `SIZE_INVALID` (14 §5) |
 | `packages.upload_ttl` | `"24h"` | chunked-upload staging lifetime; expired ids are `BLOB_UPLOAD_UNKNOWN` (14 §5) |
+| `packages.quota_bytes` | `"0B"` | instance default per-repository registry quota (stored blob + manifest bytes); `0` = unlimited; a repository's `[packages] quota_bytes` setting overrides it; over quota → named `413 DENIED` at the commit point (14 §5) |
 | `threads.retention` | `"720h"` (30d) | terminal Threads runs (with their job records, log frames and queue entries) older than this are deleted by the maintainer's `threads-gc` pass; non-positive falls back to the default — there is no "keep forever" spelling (15 §8) |
 | `threads.approve_first_time_forks` | `true` | hold a fork pull request from an author with no merged PR in the repository in `pending_approval` until a maintainer approves it (15 §5.2); `false` disables the gate |
+| `threads.max_artifact_bytes_per_run` | `2GiB` | per-run total for published artifacts (sum of every artifact of the run; enforced on upload, finalize and download; 15 §2.5). A named `413` states the cap and this key |
+| `threads.max_artifact_bytes_per_file` | `256MiB` | one artifact file; clamped down to the per-run value when larger. A named `413` states the cap and this key |
 | `threads.default_permissions` | `"read"` | the job token's `contents` level when a workflow declares no `permissions:` (`read` \| `write`); a fork run is always `read` (15 §5) |
 | `upstream.git` / `upstream.lfs` / `upstream.token_env` / `upstream.follow` | — | repair source; LFS read-through; token env var (never the token); refs kept equal |
 | `git.binary` | `"git"` | path to git binary (spindle always execs it; see 04_git.md) |
@@ -140,6 +143,25 @@ Copied from Rust spec §15.1; key names, defaults, and meanings are **normative 
 | `telemetry.metrics` | `true` | Prometheus on /metrics |
 | `telemetry.lock_wait_warn` | `"1s"` | lock-wait WARN + histogram threshold |
 | `events.webhook_url` / `webhook_secret` / `sweep_interval` | — / — / `"5m"` | events bridge (09_events.md) |
+| `rate_limit.enabled` | `false` | request rate limiting (PLAN-V2 §M.7). Off by default: a zero-config boot changes nothing (L10). In-process, built at boot — every key below is **restart-required**, and `/admin/config`'s restart list names each changed one |
+| `rate_limit.collab_write` | `"30/min"` | comments, review submits/dismissals, reactions, review-thread opens/comments, review requests |
+| `rate_limit.issue_open` | `"10/h"` | opening an issue or a pull request |
+| `rate_limit.report` | `"5/h"` | filing an abuse report |
+| `rate_limit.auth_fail` | `"10/min"` | failed credential attempts per address |
+| `rate_limit.trust_proxy` | `false` | key anonymous clients on the first `X-Forwarded-For` hop; only with a proxy that overwrites the header |
+| `static_sites.enabled` | `false` | serve published static sites from a **second HTTP listener** on its own hostname (docs/features/19, 06_server_http.md §2.6); `false` binds nothing and the rest of the section is not validated |
+| `static_sites.address` | `"127.0.0.1:8081"` | the static listener's own `host:port`; must differ from `server.listen` |
+| `static_sites.host` | `"static.localhost"` | the ONLY `Host` header the static listener answers for (port-insensitive, case-insensitive); every other Host is a bodiless 404 |
+| `static_sites.max_file_bytes` | `"8MiB"` | per-file cap on the buffered read path; a larger blob is a 404 (v1 has no streaming path) |
+| `static_sites.index_files` | `["index.html","index.htm"]` | directory-index probe order inside a tree; a directory matching none is a 404, never a listing |
+
+The four rates are spelled `N/s`, `N/min` or `N/h` with `N > 0` (a token bucket of capacity `N`
+refilled continuously over the window). Anything else — `30/m`, `30 per minute`, `0/min`, a day unit —
+is a validation error naming the exact key, so the Configuration page can mark the row (§7). Git
+pushes and reads are never rate limited (a CI push storm must not throttle); the classes, keying,
+`Retry-After` and the in-memory bound are §2.4 of `06_server_http.md`, and the normative product
+contract is `docs/features/16_moderation.md` §12.
+
 
 Notes:
 - `git.upload_pack_engine`: the Rust `gix` engine has no Go equivalent and none is wanted (dependency law). In spindle the accepted values are still `auto | git | gix` for file compatibility, but `gix` is treated exactly as `git` at load time **with a one-time startup WARN naming the key** (ruling C-4: an inert config value must be visible to the operator); `auto` resolves to `git`. See 04_git.md for the upload-pack implementation.
@@ -150,7 +172,7 @@ Notes:
 ### 2.1 Example: minimal config
 
 ```toml
-# walgit.toml — one-box, loopback, token auth off, S3 default chain
+# walgit.toml — one-box, loopback, token auth off, explicit S3 backend
 [server]
 listen = "127.0.0.1:8080"
 
@@ -177,11 +199,19 @@ listen = "0.0.0.0:8080"
 public_url = "https://git.example.com"   # the reverse proxy's origin (it terminates TLS; 16_packaging.md §3.4)
 
 [server.auth]
-mode = "token"
+issuer = "https://id.example.com"
+allowed_domains = ["example.com"]
+oauth_client_id = "spindle"
+oauth_client_secret = "…"
+session_secret = "…"                  # openssl rand -hex 32
+admin_groups = ["spindle-admin"]
 anonymous_read = false
-tokens = [
-  { principal = "alice", token_env = "WALGIT_TOKEN_ALICE", write = true, admin = true },
-]
+[[server.auth.tokens]]                # machine credentials (git/API/CLI only)
+principal = "ci-bot"                  # the identity it authenticates as
+token_env = "WALGIT_TOKEN_CI"         # or `token = "…"` (masked in the editor)
+write = true
+name = "ci-bot-2026h2"                # optional stable label (rotation + last-used key)
+expires_at = "2026-12-31T23:59:59Z"   # optional RFC 3339; omit = never expires (warned)
 
 [store]
 backend = "s3"
@@ -202,15 +232,14 @@ When no config file is found (§3.1), the server boots anyway on these **first-r
 | Key | First-run value | Why it differs |
 |---|---|---|
 | `server.listen` | `"0.0.0.0:8080"` | a first-run server should be reachable, not only loopback |
-| `store.backend` | `"filesystem"` | no bucket credentials exist yet; keys map to paths under `store.root` (D4, 03_store_backends.md) |
-| `store.root` | `<data-dir>/store` | the filesystem backend's root, inside the data dir |
+| `store.root` | `<data-dir>/store` | the filesystem backend's root, inside the data dir (`store.backend` is already `filesystem` in the compiled table) |
 | `cache.dir` | `<data-dir>/cache` | the data dir owns all writable state — no `/tmp` surprise |
-| `server.auth.mode` | `"none"` | zero-friction first run; allowed on ANY bind with a loud warning (§5, rule 1 — the Rust fail-closed loopback rule is superseded) |
+| authentication | **unconfigured** | a fresh machine has no IdP; the boot is restricted (only the Administration area + health answer) until OIDC is saved |
 | `server.auto_create_on_push` | `true` | `git push` to a fresh server should just work |
 
 All other keys take their table (Rust-spec) defaults. The effective first-run config is exactly what `config dump` prints when no file is present, and what `GET /api/v1/setup` reports as effective values with `file_state = "absent"`.
 
-A first-run boot also surfaces a **setup banner**: the log warns that auth is `none`, and the web UI shows a persistent banner linking `/setup` until a config file exists with auth configured. When `auth.mode = "none"` on a non-loopback bind, the warning is emitted at every startup regardless of first-run state.
+A first-run boot logs `first run: OIDC is not configured — serving only /admin until a config is saved and the server restarted` and serves the restricted surface. Its Overview carries the OIDC onboarding card; there is no warning-only compromise and no open mode (`DEVIATIONS.md` D-OIDC-1).
 
 ## 3. Loading order, env overrides, PORT lockstep
 
@@ -219,7 +248,7 @@ A first-run boot also surfaces a **setup banner**: the log warns that auth is `n
 1. **Defaults.** The `Config` struct's Go zero values are NOT the defaults; `Config` values are first set from the compiled-in default table (§2). This is a literal table (`defaultConfig()` returning a fully populated `Config`), because the zero value of `time.Duration(0)` or `int64(0)` legitimately means "off" for some keys — the defaults must not be confusable with "off". When no config file exists at all, the first-run defaults of §2.3 are applied on top of the compiled-in table before the remaining legs run.
 2. **File (optional).** The config file is looked up in this order, first hit wins:
    - **Explicit `--config PATH`** (or `SPINDLE_CONFIG` / legacy `WALGIT_CONFIG` env when `--config` is absent). BurntSushi/toml `DecodeFile` into a fresh struct seeded from defaults; unknown keys are an error listing key + line (fail-closed, same as serde's `deny_unknown_fields` behavior in the Rust binary). **A missing explicitly-named file is fatal (exit 2, `config file not found: <path>`)** — if the operator pointed at a file, silence would be a footgun. Explicit `--config /dev/null` = defaults+env only (file leg is skipped when the path is `/dev/null`).
-   - **`<data-dir>/spindle.toml`**, if it exists (data dir: §3.1.1). `<data-dir>/walgit.toml` is accepted as an alias (checked second). If the file exists but is INVALID — parse error or unknown key — boot enters **setup-only mode** (06_server_http.md): only `/setup`, `/healthz`, and `/readyz` answer; everything else returns 503 with a pointer to the errors, and the setup UI displays them. Saving a fixed config (§3.7) then requires a restart.
+   - **`<data-dir>/spindle.toml`**, if it exists (data dir: §3.1.1). `<data-dir>/walgit.toml` is accepted as an alias (checked second). If the file exists but is INVALID — parse error or unknown key — boot enters **restricted mode** (06_server_http.md): only `/admin` + `/admin/config`, `/healthz`, and `/readyz` answer; everything else returns 503 with a pointer to the errors, and the Administration area displays them. Saving a fixed config (§3.7) then requires a restart.
    - **No file** → zero-config first run on the §2.3 first-run defaults, with the setup banner (§2.3).
 3. **Env overlay.** `SPINDLE__SECTION__KEY=value` (legacy `WALGIT__SECTION__KEY=value` accepted as a fallback alias; `SPINDLE_` wins when both define the same key) on top of the file result (§3.2) — or on top of the defaults when no file was loaded. The overlay applies identically in all three file states; **env always wins over the file** (file ⊕ env, documented).
 4. **PORT lockstep.** If `PORT` env is set, it overrides the port portion of `server.listen` AND, when `server.public_url` is a loopback URL (`http://127.0.0.1:PORT`, `http://localhost:PORT`, `http://[::1]:PORT`), rewrites its port to the same value (§3.3).
@@ -233,7 +262,7 @@ All writable state lives under one **data dir**, selected by:
 2. else the `SPINDLE_DATA_DIR` env var;
 3. else the default: `~/.local/share/spindle` (XDG), or `/var/lib/spindle` when the process detects a container context (`/.dockerenv` present or `KUBERNETES_SERVICE_HOST` set).
 
-The data dir holds `<data-dir>/store/` (filesystem store backend root, `store.root` when `backend = "filesystem"`, D4), `<data-dir>/cache/` (first-run `cache.dir`, §2.3), and the saved config `<data-dir>/spindle.toml` (written by the setup UI, §3.7; `walgit.toml` alias accepted).
+The data dir holds `<data-dir>/store/` (filesystem store backend root, `store.root` when `backend = "filesystem"`, D4), `<data-dir>/cache/` (first-run `cache.dir`, §2.3), and the saved config `<data-dir>/spindle.toml` (written by the Administration area, §3.7; `walgit.toml` alias accepted).
 
 The directory is created (mode `0700`) on first boot if missing. `--data-dir` never sets a config value directly — it only relocates the file leg (§3.1 step 2) and provides the default expansion for `store.root` / `cache.dir` in the first-run table; an explicit `store.root` or `cache.dir` in the file or env always wins. Like `--config`, `--data-dir` is peeled before subcommand dispatch (§6.3) and is honored by every subcommand that loads config. Concretely, after the ladder, `resolveConfig` re-points the flag-derived paths (`DataDir`, plus `Store.Root`/`Cache.Dir` when they still equal the env-default-derived paths) at the flag dir — the shared #611 sync; `serve` repeats the same comparison as an idempotent no-op.
 
@@ -241,7 +270,7 @@ The directory is created (mode `0700`) on first boot if missing. `--data-dir` ne
 
 Decision: **primary prefix `SPINDLE__`, legacy `WALGIT__` accepted as an alias** — new deployments and docs use `SPINDLE__`, while deployment scripts, systemd units, and secret manifests written for walgit keep working unchanged, and both binaries can be mixed in one fleet. When both spellings are set for the same key, the `SPINDLE__` value wins and the `WALGIT__` one is ignored (reported as an ignored override, never fatal). Same rule for the config-file pointer: `SPINDLE_CONFIG` primary, `WALGIT_CONFIG` fallback.
 
-- Pattern: `WALGIT__` + section path joined by `__`, value = TOML value syntax. `WALGIT__STORE__BUCKET=acme` sets `store.bucket = "acme"`. Nesting beyond one level: `WALGIT__SERVER__AUTH__MODE=oidc` sets `server.auth.mode`.
+- Pattern: `WALGIT__` + section path joined by `__`, value = TOML value syntax. `WALGIT__STORE__BUCKET=acme` sets `store.bucket = "acme"`. Nesting beyond one level: `WALGIT__SERVER__AUTH__ISSUER=https://id.example.com` sets `server.auth.issuer`; a removed auth key (`…__MODE`, `…__ADMIN_EMAILS`) is a named fatal error.
 - Array-of-table (`[[bundles.strategy]]`) overrides: `WALGIT__BUNDLES__STRATEGY__0__BACKFILL_MAX=1` (index after the section, zero-based, whole-array replacement semantics like §3.4 placement). An override naming index N when the file provides fewer entries is an error (exit 1): the operator asked to mutate a slot that does not exist.
 - The value is parsed as a TOML value (TOML "value" productions only — strings, integers, floats, booleans, arrays, inline tables). `WALGIT__SERVER__ROLES='["serve"]'` is an array; a bare `serve` is a parse error naming the key. Dates/datetimes are not needed by any key and are rejected.
 - Scalars under `[bundles.strategy]` like `WALGIT__BUNDLES__MIN_COMMITS=10` go through the same typed decode as the file leg: the string is decoded as TOML, then assigned; a type mismatch with the target field is an error (exit 1) naming the key, the raw value, and the expected type.
@@ -274,7 +303,7 @@ If ANY `WALGIT__PLACEMENT__*` override is present, the entire `[placement]` sect
 
 ### 3.5 Validation is fail-closed
 
-Every rule in §5 runs after the ladder completes. A violation aborts startup (exit 2) or `config check` (exit 1). There is exactly one "warn and continue" path — rule 1 (auth-none on a non-loopback bind), a deliberate divergence from the Rust fail-closed rule (§5) — and the softer ignored-override treatment for unknown-key env overrides (§3.2), because those cannot change behavior. Everything else remains fail-closed.
+Every rule in §5 runs after the ladder completes. A violation aborts startup (exit 2) or `config check` (exit 1). The one softer path is the ignored-override treatment for unknown-key env overrides (§3.2), because those cannot change behavior. Everything else remains fail-closed (§5).
 
 ### 3.6 Concurrency
 
@@ -282,16 +311,25 @@ Config is loaded once, before any goroutine that reads it is started, and is nev
 
 ### 3.7 Setup save semantics (divergence D6)
 
-The setup UI (`/setup`) and its API (`GET /api/v1/setup`, `POST /api/v1/setup/test`, `PUT /api/v1/setup`; endpoint shapes and access rules are 06_server_http.md's job — this doc fixes the file semantics) write the config file:
+The Administration area (`/admin/config`) and its API (`GET /api/v1/setup`, `POST /api/v1/setup/test`, `PUT /api/v1/setup`; endpoint shapes and access rules are 06_server_http.md's job — this doc fixes the file semantics) write the config file:
 
 - **Atomic write.** The setup API serializes the submitted config to TOML (same key names as §2), writes it to `<data-dir>/spindle.toml.tmp`, fsyncs, then `rename`s it over `<data-dir>/spindle.toml`. Readers see either the old or the new file, never a partial one. Permissions `0600` (the file may contain `token_env`-adjacent material; secrets themselves never live in the file — `token_env` names an env var).
 - **Validate before write.** `PUT /api/v1/setup` runs the full §5 validation on the submitted values FIRST; invalid input writes nothing and returns the per-key errors (this is also what `POST /api/v1/setup/test` does without saving). Only an all-green submission is written.
 - **Restart-required keys.** The save response reports, per key, whether it takes effect without a restart. Restart-required (the default — most keys are consumed once at subsystem construction: store backend, WAL, cache, auth, listen address, …) vs. read-live (picked up on the next tick/emit): `telemetry.log_format`, `telemetry.log_filter`, `maintenance.interval`, `maintenance.follow_interval`, `wal.freshness_ttl`. spindle does NOT hot-reload the shared `*Config` (§3.6); read-live keys are re-read from the effective config at their point of use, which the setup save updates by writing the file and refreshing the in-memory first-run overlay — a restart is still the supported way to be sure.
 - **Edits apply to the current file (§3.4).** Submitted overrides merge onto the file-visible config — compiled-in defaults ⊕ the first existing candidate file, or the zero-config first-run shape when no file exists — so a save changes only the keys the operator touched; keys the form does not carry keep their file values. Env overlays are never baked into the file: the file keeps its own values and env still wins at load (see the env-interaction bullet below).
-- **Interaction with env (file ⊕ env, env wins).** The saved file participates in the ordinary ladder (§3.1): env overrides and PORT lockstep still apply on top of it, and an env override of a key the operator just set in the UI will silently win — the setup UI therefore shows the effective value (post-env) for every key and warns when a submitted value is masked by an active `SPINDLE__`/`WALGIT__`/`PORT` override. Setup never writes env vars.
-- **Invalid-config rescue.** When boot landed in setup-only mode (§3.1 step 2), a successful setup save writes a valid file but does NOT swap the running config; the response says `restart_required: true` for every key and the UI tells the operator to restart. (Boot flow: config present → validate → boot if it all works; config missing → defaults + setup banner; config INVALID → setup-only mode.)
-- **Every advertised key round-trips (G1 fix, 2026-11-21).** The page renders each schema key's current effective value in the spec spelling and posts it back through `setup.Coerce` (the shared `config` parsers). Struct slices (`server.auth.tokens`, `bundles.strategy`) are repeating rows over the element's toml fields — the element schema travels in the row so no column is invented — and are rebuilt in posted order, with secrets kept by row identity (`__base`), so deleting row 0 can never hand row 1 the deleted credential. Unsigned counters (`wal.snapshot_every_entries`, `wal.cas_max_retries`) coerce like ints. A blank value for a list field is the empty list; a nil slice stays nil (it encodes to nothing), so an untouched form changes **no value** — the acceptance gate is `TestFormValuesWholeSchemaRoundTrip` (whole schema, `internal/setup`: render → coerce → decode → re-encode identical) plus `TestSetupPageZeroEditFormSavesByteIdentical` (GET /setup → scrape every control → POST it back unmodified → 303 with the effective values unchanged, a second save of the now-canonical file byte-identical, and a rejected change leaving the file untouched while naming its key; `cmd/spindle`). Validation errors carry the schema key their message names (`setup.Validate` → `Error.Key`), so a failure marks the offending row instead of printing one keyless line on every row.
+- **Interaction with env (file ⊕ env, env wins).** The saved file participates in the ordinary ladder (§3.1): env overrides and PORT lockstep still apply on top of it, and an env override of a key the operator just set in the UI will silently win — the Administration area therefore shows the effective value (post-env) for every key and warns when a submitted value is masked by an active `SPINDLE__`/`WALGIT__`/`PORT` override. Setup never writes env vars.
+- **Invalid-config rescue.** When boot landed in restricted mode (§3.1 step 2), a successful setup save writes a valid file but does NOT swap the running config; the response says `restart_required: true` for every key and the UI tells the operator to restart. (Boot flow: config present → validate → boot if it all works; config missing → defaults + setup banner; config INVALID → restricted mode.)
+- **Every advertised key round-trips (G1 fix, 2026-11-21).** The page renders each schema key's current effective value in the spec spelling and posts it back through `setup.Coerce` (the shared `config` parsers). Struct slices (`server.auth.tokens`, `bundles.strategy`) are repeating rows over the element's toml fields — the element schema travels in the row so no column is invented — and are rebuilt in posted order, with secrets kept by row identity (`__base`), so deleting row 0 can never hand row 1 the deleted credential. Unsigned counters (`wal.snapshot_every_entries`, `wal.cas_max_retries`) coerce like ints. A blank value for a list field is the empty list; a nil slice stays nil (it encodes to nothing), so an untouched form changes **no value** — the acceptance gate is `TestFormValuesWholeSchemaRoundTrip` (whole schema, `internal/setup`: render → coerce → decode → re-encode identical) plus `TestSetupPageZeroEditFormSavesByteIdentical` (GET /admin/config → scrape every control → POST it back unmodified → 303 with the effective values unchanged, a second save of the now-canonical file byte-identical, and a rejected change leaving the file untouched while naming its key; `cmd/spindle`). Validation errors carry the schema key their message names (`setup.Validate` → `Error.Key`), so a failure marks the offending row instead of printing one keyless line on every row.
 - **Coercion errors are keyed (round-3 audit fix, 2026-11-21).** `setup.Coerce` returns a `setup.Error{Key, Message}` (the same type `Validate` uses; it implements `error` and is lifted back with `setup.KeyOf`), so a value its parser rejects — duration, size, int, uint, float, bool, list, struct-slice cell, even a nested unknown key — marks its row exactly like a `config.Validate` rejection and opens a collapsed Advanced group. A struct-slice cell is keyed `key[i].field` and the page attaches it to the owning row editor by the bracket prefix. Only a genuinely keyless failure stays in the banner. The acceptance gate is `TestCoerceFailuresCarryTheirKey` (every field type, `internal/setup`), `TestUnknownSetupKeyCannotPassSilently` (negative control), and `TestSetupPageCoercionErrorMarksItsRow` (rendered row + Advanced group + KEY cell, `cmd/spindle`); the JSON 422 body carries the same key.
+- **Keyed errors name the row's anchor (2026-11-21, PLAN-ADMIN M3).** `setup.AnchorOf(key)` is the
+  total key→section map the Configuration page renders (`/admin/config#<section>`, with the auth
+  card's `#server.auth` alias), so every validator/coercion error that names a key also names where
+  to fix it: the page's `role="alert"` summary links each error to its row (`#row-<key>`; a
+  struct-slice cell to its row editor; an unmounted key to its section), marks the row with a
+  visible `invalid` chip plus `aria-invalid`/`aria-describedby`, opens the Advanced group, and
+  focuses the offending control. The same coordinate system serves the boot-error table, the
+  saved-restart list and the docs. `setup.AnchorOf` is pinned total over `BuildSchema`
+  (`internal/setup/anchor_test.go`).
 - **Numeric coercion never saturates (closing-audit Observation 3, 2026-11-21).** `setup.Coerce` rejects a number outside its field's range — or one its parser cannot represent — as a keyed `setup.Error` that names the key and the accepted range (`setup.parseSettingInt`/`parseSettingUint`), so the page marks the row and `PUT /api/v1/setup` answers 422 with that key instead of persisting a clipped value. Widths are bounded by the Go field (`int8..int64`, `uint8..uint64`, named types: `-2147483648..2147483647`, `0..4294967295`, `0..18446744073709551615`); sizes by `0..9223372036854775807` bytes (the `ByteSize` int64 range, with config.ParseByteSize's 2^63 boundary fixed); durations by `time.Duration`'s maximum (`2562047h47m16.854775807s`); floats must be finite and parse at the field's width. Scientific notation is still accepted for ints (`1.073741824e+09`) but only where float64 represents the integer exactly (|value| < 2^53), so a value like `99999999999999999999` is an error, never `MinInt64` (which is what the pre-fix `int64(f)` conversion produced on amd64 while reporting a successful save). A legitimate boundary value (MinInt64/MaxInt64, MaxUint32, MaxInt64 bytes) still saves. Gates: `TestNumericCoercionNeverSaturates` (every width and spelling), `TestStructSliceCellOverflowIsKeyedAndChangesNothing` (row cell; rejected save leaves the file byte-identical), `TestSetupAPIRejectsOutOfRangeNumbers` (PUT → 422 with the key, file untouched), and `TestNumericBoundaryMessagesNameTheRange` (the range is spelled in the message).
 - **The canonical rewrite keeps the operator's file, once (round-3 audit fix, 2026-11-21).** Save writes the FULL canonical document — BurntSushi/toml decodes comments but cannot re-emit them, and hand-rolling a trivia-preserving TOML editor was rejected in favor of a backup (law 1: no new dependency). Before the first rewrite of an existing file, `config.SaveSetup` copies the previous bytes to `<data-dir>/spindle.toml.bak-<utc>` (`0600`, once — a later save sees it and keeps it), and a save whose bytes already match the file writes nothing at all. The page says both next to Save and names the backup after the save; the API response reports it as `backup` (empty when none was made). A read error on an existing file fails closed rather than overwriting text that could not be preserved. Gates: `TestSaveSetupKeepsOneBackupOfExistingFile` (`internal/config`) and `TestSetupPageCanonicalSaveKeepsOneBackup` (`cmd/spindle`, rendered).
 
@@ -313,6 +351,7 @@ type RepoSettings struct {  // the four allowed sections; zero = "not set, inher
     Description  string              // issue #235 display metadata
     Features     *RepoFeatures       // Forgejo #522 [features] six flags, absent = all-on
     Review       *RepoReview         // Forgejo #586 [review] allow_self_approval, absent = allowed
+    StaticSite   *RepoStaticSite     // docs/features/19 [static_site] enabled/ref/root, absent = not published
 }
 func (r *RepoSettings) Merge(base *Config) (*Config, error)  // "with_settings": pointer-set fields override base
 ```
@@ -320,8 +359,8 @@ func (r *RepoSettings) Merge(base *Config) (*Config, error)  // "with_settings":
 ### 4.2 Rules (normative, unchanged from Rust spec §15.2)
 
 - Allowed sections: `[bundles]`, `[maintenance]`, `[compaction]`, `[upstream]`, `[features]`
-  (Forgejo #522), `[review]` (Forgejo #586); `[integrations]` accepted (stored verbatim,
-  forward-compat). Anything else → 400 at publish.
+  (Forgejo #522), `[review]` (Forgejo #586), `[static_site]` (docs/features/19); `[integrations]`
+  accepted (stored verbatim, forward-compat). Anything else → 400 at publish.
 - Top-level `description` key (issue #235): the per-repo short display string shown in the repo header. Single line (no CR/LF/NUL), at most 512 characters (`MaxRepoDescriptionRunes`); violations → 400 like any other invalid key. Display metadata only — never merged into the host config (`Merge` ignores it), never in `settings/effective`. Rides the same WAL-published document, so revision/author/admin-writes come free.
 - `[review] allow_self_approval` (Forgejo #586): the per-repo self-approval knob — `true`
   (or absent key/section: default ON, fresh repos behave like GitHub) lets the PR author
@@ -329,6 +368,16 @@ func (r *RepoSettings) Merge(base *Config) (*Config, error)  // "with_settings":
   Behavior metadata only — never merged into the host config (`Merge` ignores it), never
   in `settings/effective` (the `[features]` passenger precedent). Wrong type or unknown
   `[review]` key → 400 like any other invalid key.
+- `[static_site]` (docs/features/19 §5): `enabled` (`*bool` — absent and explicit `false` both mean
+  **not published**, but they stay distinguishable so the settings summary can say "unset"),
+  `ref` (`""` = the repository's default branch tip; otherwise a git ref name, short branch or full
+  `refs/…`), `root` (`""` = the repository root; otherwise a clean relative path with no `..`). Same
+  passenger discipline: validated + persisted + revisioned + admin-written with the document, never
+  merged, never in `settings/effective` — the listener is the host section `[static_sites]`, so there
+  is no per-repo default to inherit. A ref that is not a valid git ref name, an absolute root, or a
+  root that is not a clean relative path is a 400 at publish; an empty, unparseable or invalid
+  settings document resolves to "not published" (fail closed — an unreadable document must never
+  expose a repository's bytes on another origin).
 - Size: the serialized settings payload MUST be ≤ 16 KiB; larger → 400.
 - `[integrations]` contents are stored verbatim and never interpreted; the 16 KiB budget includes them.
 - NOT settable via settings: auth, store, server, wal, cache, `upstream.token_env` (host-only). A `[server]`, `[store]`, `[wal]`, `[cache]`, or `upstream.token_env` key inside repo settings → 400.
@@ -351,8 +400,8 @@ $ spindle repo settings set acme/monorepo --file /tmp/settings.toml -m "bundle a
 
 Each rule is a named function in `internal/config/validate.go`; the list is the contract:
 
-1. **none-mode loopback (DIVERGENCE — warn, not fail).** When `server.auth.mode = "none"` and `server.listen` is NOT on a loopback address (127.0.0.0/8, `::1`, or `localhost` host), startup logs a loud warning — `auth.mode=none on non-loopback listen <addr>; anyone who can reach this port can read and write every repository — set server.auth.mode = "token" (or oidc) and restart` — and continues. The Rust rule (fail-closed, exit 2) is **superseded by divergence**: zero-config first runs bind `0.0.0.0` with auth `none` by design (§2.3), and an operator who sets an explicit file keeps the freedom to do the same, warned. `config check` reports it as a warning, exit 0.
-2. **oidc allowlist + browser-login trio.** `mode = "oidc"` requires at least one of `allowed_domains` / `allowed_emails` non-empty (`anonymous_read` is allowed either way — Forgejo #371: `true` is the default recommendation so visitors browse public repos per #345's visibility semantics, `false` the everything-requires-login hard-lock for non-repo surfaces). `oauth_client_id` and `oauth_client_secret` must be both set or both unset, AND all three of `session_secret` / `oauth_client_id` / `oauth_client_secret` must be non-empty (the browser-login trio, #344 — a partially-configured OIDC instance previously booted into a dead login state, so the missing keys are named in the error). `session_secret`, when set, MUST be ≥ 32 bytes.
+1. **OIDC is configured (always on).** `checkAuthConfigured` requires: `issuer` an absolute http(s) URL; at least one of `allowed_domains` / `allowed_emails`; a non-empty `groups_claim`; a non-empty `admin_groups` (an empty list is a guaranteed lockout); and all three of `session_secret` / `oauth_client_id` / `oauth_client_secret`, with `session_secret` ≥ 32 bytes. Every finding names its key. There is no `server.auth.mode`, no warning-only path, and removed keys (`mode`, `admin_emails`, `admin_domains`, a token row's `admin`) are named errors (§4.1 of PLAN-OIDC-ONLY). `anonymous_read` is orthogonal (Forgejo #371).
+2. **static-token rows** (`checkStaticTokens`): `[[server.auth.tokens]].expires_at`, when set, parses as RFC 3339 (the key is named in the error); a PAST instant is deliberately accepted and simply makes the credential immediately expired (a config saved before its deadline keeps validating after it) — it is not a warning, because the requested lifetime has simply run out. A non-empty `name` is unique across rows: it is the stable label the rotation procedure and the last-used record key on, so a duplicate would make both ambiguous. An empty `name` is valid (the Access page then identifies the row by a SHA-256 hash prefix, never the secret).
 3. **bundle strategy validation.** For each `[[bundles.strategy]]`:
    - `kind = "incremental"` requires `base` naming an earlier-declared strategy's `name` (unknown or later-declared base → error);
    - a whole chain shares one `filter`: a strategy and its transitive base chain MUST declare identical `filter` values (absent = none);
@@ -361,7 +410,7 @@ Each rule is a named function in `internal/config/validate.go`; the list is the 
    - `filter`, when present, is only `"blob:none"` (Rust accepts nothing else);
    - `backfill_max` ≥ 0; `min_commits` ≥ 0; a strategy's `refs` globs compile as `owner`-free git ref globs.
 4. **chain-shared filter (restated).** A filtered chain is all-or-nothing: mixing `filter = "blob:none"` with a filterless strategy in one lineage is the classic footgun and is rejected by name in the error.
-5. **store**: `store.backend ∈ {s3,memory,filesystem}`; for s3, `access_key_env`/`secret_key_env` name existing env vars only at use time (not validated at load — the Rust behavior); `multipart_part_size` ≤ `multipart_threshold` when both are non-zero; for filesystem, `store.root` (default `<data-dir>/store`, §2.3) must be an absolute path or empty (empty = first-run default).
+5. **store**: `store.backend ∈ {s3,memory,filesystem}` (the compiled default is `filesystem`; a bucket backend is always an explicit choice). For s3, `store.s3.endpoint` and non-empty `store.bucket`/`store.s3.access_key_env`/`store.s3.secret_key_env` are required — selecting `s3` without them is a validation error naming each missing key, never a silent AWS default. The `*_env` values are env-var **names**; whether they resolve to values is checked at use time, not at load (the Rust behavior). `multipart_part_size` ≤ `multipart_threshold` when both are non-zero; for filesystem, `store.root` (default `<data-dir>/store`, §2.3) must be an absolute path or empty (empty = the data-dir default).
 6. **sizes/timeouts**: every duration/size key parses (§1); `cache.disk_high_watermark ∈ (0,1)` or 0; negative values nowhere.
 7. **placement globs** compile: each entry is `*`, `owner/*`, or `owner/name` (one `/` at most).
 8. **roles**: each role ∈ {serve, maintain, events}; duplicates allowed (idempotent), unknown role → error.
@@ -373,6 +422,25 @@ Each rule is a named function in `internal/config/validate.go`; the list is the 
     (a silent substitution would bypass the client's pinned host key; auto-generation covers the
     unset case). SSH public keys are user-managed data in the object store (`/api/v1/ssh-keys`),
     not config — nothing else to validate here.
+
+11. **rate limits** (PLAN-V2 §M.7): each of `rate_limit.collab_write` / `issue_open` / `report` /
+    `auth_fail` is `N/s`, `N/min` or `N/h` with `N > 0` (`config.ParseRate`); anything else is an
+    error naming the key — `rate_limit.report: "5/day" is not a rate (accepted N/s, N/min or N/h
+    with N > 0, e.g. 30/min)`. Validation runs even when `enabled = false`, so a file that is
+    switched on later cannot carry a value the loader would have refused. The parser and the
+    server's bucket builder are the same function; there is no second spelling.
+
+12. **static sites** (`checkStaticSites`, docs/features/19 §5): with `static_sites.enabled = false`
+    the rest of the section is not validated (an operator may stage a config before turning the
+    listener on). With `enabled = true`: `host` is required and must not carry surrounding
+    whitespace (the handler compares it exactly); `address` is required, must parse as `host:port`,
+    and must not equal `server.listen`; `max_file_bytes` must be positive; every `index_files` entry
+    is a plain file name (no separator, no `..`, not empty, not `.`). The `address` vs
+    `server.listen` comparison is an **exact string comparison of the two configured values** —
+    nothing is normalised, so `:8080` vs `0.0.0.0:8080` (or `localhost` vs `127.0.0.1`) passes
+    validation and fails at `net.Listen` with a clear bind error; a home-grown normaliser would have
+    to guess which spellings are the same bind and would reject valid configs. Every message names
+    its key so the Configuration page marks the row.
 
 ## 6. CLI: `spindle`
 
@@ -428,6 +496,7 @@ Implementation notes per group (behavioral truth from Rust spec §16; each comma
 | `import --direct --from GITDIR owner/name [--packs DIR] [--refs GLOB]… [--bundle=true] [--bundle-strategy S] [--replace] [--force] [--commit-graph=true] [--history-pack=true] [--parallelism 8] [--verify-closure=true]` | bucket-direct import of ready-made packs: verify closure → side files → history pack → striped uploads (HEAD-skip existing, marker-file resumability, `--force` after a moved target) → ref snapshot + checkpoint → manifest CAS (`min_seq = seq+1`; `first_state_at = as_of = now`) → bundle list (supersedes same-strategy + dependents). Re-run on a completed import = no-op. Striped upload parallelism = `--parallelism` goroutines (see 03_store_backends.md §striped). | 05_wal_engine.md, 03_store_backends.md |
 | `mirror --from URL --to URL --dir PATH [--ref NAME]… [--interval 30s] [--once] [--force] [--repack-every 1h] [--identity token\|gcloud\|gce]` | external bridge via a local bare buffer repo: fetch from source, ff-only push to destination; bearer token from `$WALGIT_TOKEN` / gcloud / GCE metadata (cached 50 min); `--once` exits non-zero on push failure; geometric repack of the buffer on `--repack-every`. The interval loop and any child git processes take the command's ctx. | 10_maintenance.md |
 | `config check [--env-file PATH]… [--strict]` / `config dump` | validate file ⊕ env, print ignored overrides to stderr; `--strict` exits 3 when any override was ignored (supervisor pre-start check). With NO config file present, `config check` validates the effective defaults (§2.3) ⊕ env — it passes (exit 0) unless an env override breaks a rule; this makes it usable as a pre-flight check on a not-yet-configured host. `config dump` prints the effective config as TOML (defaults ⊕ first-run overrides ⊕ file ⊕ env, post-PORT-lockstep, post-placement-all-or-nothing), reporting `file_state` (present / absent / invalid) so scripts can tell the three boot states apart. `--env-file` loads KEY=VALUE pairs into the override set (does not touch the real environment). | §6.3 |
+| `doctor [--limit N] [--repos N] [--budget N] [--json]` | **read-only upgrade readiness check** (§6.7): the config preflight through the shipped validators plus a bounded, sampling bucket read (one LIST per family) for corrupt/undecodable objects, missing/unknown schema versions, missing required fields, size outliers and the four highest-risk orphan pointers. Exit 0 clean, 1 findings, 2 usage/IO. Never writes, never repairs; `LIST` is allowed here because an explicit diagnostic is not a request path. Run against the **deployed** config with the **new** binary before recreating a task (`docs/UPGRADE.md`). | §6.7 |
 
 There are NO `fsck`/`repair` subcommands — those are maintainer units (10_maintenance.md); manual recovery is `spindle wal add-pack --tier 0` + ref-delete pushes.
 
@@ -481,10 +550,11 @@ $ spindle wal add-pack acme/monorepo /tmp/pack-ab12.pack --tier 0
 $ spindle synth --out /tmp/big --size l --seed 7
 ```
 ```console
-# zero-config first run: no file anywhere, boots on §2.3 defaults with setup banner
+# zero-config first run: no file anywhere, boots RESTRICTED on §2.3 defaults
 $ spindle serve
 # → server.listen = "0.0.0.0:8080", store.backend = "filesystem" (<data-dir>/store),
-#   server.auth.mode = "none" (warning logged), server.auto_create_on_push = true
+#   authentication unconfigured (§5 rule 1) ⇒ only /admin*, their POSTs and health answer,
+#   server.auto_create_on_push = true. Configure OIDC on /admin, save, restart.
 ```
 
 ### 6.6 API client commands (WP11)
@@ -504,7 +574,7 @@ pr        list|show|diff|create|close|merge|review|comment|checks
 release   list|show|create|delete|upload
 checks    list|status REPO [REF]
 packages  list|show|delete
-threads   list|show|run|cancel
+threads   list|show|run|cancel|rerun
 runner    serve [--capacity N] [--labels a,b] [--register TOKEN] · token OWNER/REPO [--labels a,b] [--name N] · list OWNER/REPO · revoke OWNER/REPO ID
 api       [-X METHOD] [-d DATA] [-H 'Key: Value'] PATH
 completion bash|zsh|fish
@@ -548,6 +618,7 @@ Every API command also accepts `--json`; list commands add `--limit` and, where 
 | `release upload` | `--name` |
 | `packages delete` | `--tag T` (or a `DIGEST` positional) |
 | `threads run` | `--ref REF` (required) |
+| `threads cancel` / `threads rerun` | none (the verb is the URL; the run is a positional) |
 | `runner serve` | `--capacity N --labels a,b --name N --register TOKEN --token-file F --docker BIN --image IMG --allow-host-docker --fetch-timeout S` |
 
 **Server and token (`--server`, `SPINDLE_SERVER`, `SPINDLE_TOKEN`).**
@@ -598,14 +669,20 @@ includes the token.
   hit `GET|DELETE /{o}/{r}/api/packages…`, a 404 is the endpoint's own not-found (exit 3), and
   `packages delete` takes exactly one target — `--tag T` or a `DIGEST` positional (both, or
   neither, is exit 2). The human table carries PLATFORMS and UPDATED columns.
-- `packages` (WP1, `14_packages.md`) is bound to its documented paths
-  (`/{o}/{r}/api/packages…`). Until those routes ship, a 404 is reported as **"feature not enabled
-  on this server"** with exit 1 — not the misleading not-found exit 3.
 - `threads` (WP10, `15_threads.md`) and `runner` (its pass-B1 protocol surface, `15_threads.md`
   §6.2) are SERVED: `threads list|show` read the run records, `threads run` dispatches
-  (`POST …/api/threads` with `{ref, workflow}`), `threads cancel` posts to
-  `…/api/threads/{run}/cancel`, and `runner token|list|revoke` drive the runner registry. A 404 from
-  those paths is a real not-found (exit 3).
+  (`POST …/api/threads` with `{ref, workflow}`), `threads cancel` posts
+  `…/api/threads/{run}/cancel` and `threads rerun` posts `…/api/threads/{run}/rerun` (both repo
+  write, the same service calls the run page's buttons make, both answering `{"run": Run}` — 200
+  for cancel, 201 for rerun). `runner serve` is the only runner verb: administration is
+  browser-only at `/admin/runners` because the CLI's static machine credentials cannot administer
+  (AGENTS law 9), so there are no `runner token|list|revoke` commands. A 404 from the threads paths
+  is a real not-found (exit 3).
+  `threads cancel` reports what the response can prove: a returned run state of `cancelled` means
+  every job took effect now; any other state means a running job still waits for its runner to
+  acknowledge `cancel_requested` (the body carries the run header, not per-job flags).
+  `threads rerun` prints the new attempt number; the run id is unchanged (rerun advances the same
+  run's attempt, it does not allocate a new run).
 
 **`spindle runner serve` is not an API command** (pass B2, `15_threads.md` §4.1): it is the Threads
 runner process — a long-lived protocol client that talks to the runner endpoints with its own
@@ -656,11 +733,71 @@ $ spindle pr merge acme/mono 42 --method squash --wait
 $ spindle release create acme/mono v1.3.0-rc1 --draft --target refs/heads/main
 $ spindle release upload acme/mono v1.2.0 dist/app-linux-amd64
 $ spindle threads run acme/mono ci.yml --ref refs/heads/main
+$ spindle threads cancel acme/mono 1795176002000000000-abcdef
+$ spindle threads rerun acme/mono 1795176002000000000-abcdef
 $ spindle -R acme/mono issue show 1
 $ spindle api /api/v1/me
 $ spindle api -X POST /api/v1/orgs -d '{"org":"acme","display_name":"Acme"}'
 $ spindle completion bash > /etc/bash_completion.d/spindle
 ```
+
+### 6.7 `spindle doctor` — the read-only upgrade preflight
+
+`doctor` answers one question: **would this build serve this bucket?** It was added after the
+2026-11-22 restricted boot, where a `server.auth.mode` key the old binary tolerated was refused
+by the new one and nothing checked the deployed config before the task was recreated. Its
+operating procedure is [`docs/UPGRADE.md`](../UPGRADE.md).
+
+```console
+$ spindle doctor [--config PATH] [--data-dir PATH] \
+    [--limit N] [--repos N] [--budget N] [--json]
+```
+
+- **Config check.** The command runs the ordinary §3.1 ladder through `config.Load` (so every
+  §5 rule and the strict loader's unknown/removed-key errors apply) and reports each
+  `config.Validate` error/warning with its key path. When the strict load cannot decode a file at
+  all, it reuses `config.LoadSetupOnly` — the restricted-boot loader — for the best-effort config
+  and its already-keyed errors, then keeps checking the bucket. Ignored env overrides that name an
+  unknown key (the `--strict` detection) are reported too: a typo'd `SPINDLE__STORE__BKUET` means
+  the setting the operator believes they deployed never reached the instance. It never
+  re-implements a rule and never writes the file back.
+- **Bucket sample.** Eight families are sampled with one bounded `LIST` each (or one exact `GET`
+  for singleton documents): `manifest` (`manifest.pb`), `refs` (`checkpoints/*/refs.pb`),
+  `access` (`access.json`), `identity` (`users/`, `owners/`, `orgs/`), `collab`
+  (`issues/`, `pulls/`), `packages` (registry manifests and tags), `threads` (runs, jobs,
+  queue, artifacts under `threads/`) and `moderation` (indices, records, audit). Each sampled
+  object is decoded with the family's codec — `internal/store/proto` for protobuf, a
+  field-tolerant JSON decode for the JSON families (additive fields are the compat rule, so
+  unknown fields are not findings) — and reported as `bucket.decode`, `bucket.version`
+  (missing/unknown schema version), `bucket.required` (missing/invalid required field) or
+  `bucket.size` (a generous per-family byte bound).
+- **Bounded, and honest about it.** `--limit N` (default 200) caps decoded objects per family and
+  orphan rows per check; `--repos N` (default 200) caps sampled repositories; `--budget N`
+  (default 2000) caps total decoded objects. Each family's report line says
+  `family <name>: sampled M of N objects`, and a count-cap hit is printed as `N+ (cap reached)`.
+  The command never claims an exhaustive scan.
+- **Orphans — the four highest-risk pointers only** (not a general referential graph):
+  Threads artifacts whose run record (`threads/runs/<run>.json`) is gone; global queue index rows
+  (`threads/queue/index.json`) naming a missing per-repo job; moderation report index pointers
+  (global and per-repo) with no immutable record; fork child/parent pointers that disagree in
+  either direction. Plus one repository check: a `repos/<o>/<r>/` prefix with WAL history
+  (`checkpoints/` or `log/`) but no `manifest.pb` — a repository that cannot open. A stale
+  prefix with only sidecars, or a fork-provisioned unborn prefix, is expected state and is NOT
+  reported.
+- **Read-only.** The only store operations are `Get`, `Head`, `List` and `ListPrefixes`; the
+  command holds no locks across calls and is safe against a live instance. It does not create the
+  store root or cache dir: a missing filesystem root is exit 2. `LIST` is permitted here by
+  decision because an explicit operator diagnostic is not a request path; nothing else may call
+  `LIST` on a hot path.
+- **Output.** One line per finding: `check`, the full key path, a short reason. Then the per-family
+  sampling lines, the repository sampling line and a summary count. `--json` emits one stable
+  document: `{version, findings:[{check,key,reason}], summary:{findings,clean,limit,budget,
+  decoded,budget_exhausted,repos_sampled,repos_total,repos_truncated}, families:[{family,sampled,
+  total,truncated,findings}]}`.
+- **Exit codes:** `0` clean, `1` at least one finding, `2` usage/IO failure (bad flag, a missing
+  explicitly-named config file, an unreadable store). `2` means the check did not complete and must
+  not be read as clean. A finding (including a config warning) is `1` because this is a readiness
+  gate.
 
 ## 7. Worked end-to-end example
 
@@ -668,7 +805,7 @@ $ spindle completion bash > /etc/bash_completion.d/spindle
 # 0. zero-config first run (no --config, no <data-dir>/spindle.toml): §2.3 defaults + env
 $ spindle config dump
 # → listen = "0.0.0.0:8080", store = filesystem @ ~/.local/share/spindle/store,
-#   cache.dir = <data-dir>/cache, auth.mode = "none" (warned), auto_create_on_push = true
+#   cache.dir = <data-dir>/cache, authentication unconfigured (restricted boot), auto_create_on_push = true
 # → file_state = "absent"
 
 # 1. defaults + file + env
@@ -703,6 +840,17 @@ $ WALGIT__STORE__BKUET=x spindle config check --config /etc/spindle/walgit.toml 
 
 ## 8. Decisions & deviations from the Rust design
 
+- **NEW (2026-11-24) — static sites: one host section, one per-repo section (docs/features/19).**
+  `[static_sites]` (`enabled`/`address`/`host`/`max_file_bytes`/`index_files`) configures the
+  dedicated listener and is host-only; `[static_site]` (`enabled`/`ref`/`root`) is the fifth
+  settings passenger and says only what one repository publishes. The split is deliberate:
+  publication is per-repository data that rides the WAL document (revisioned, admin-written,
+  visible in history), while the listener is a host-wide socket no repository may configure. For
+  the same reason `[static_site]` never merges — there is no host default to inherit — and an
+  unreadable settings document resolves to "not published" rather than failing open. `enabled`
+  defaults `false` host-side, so an upgrade never opens a new origin nobody asked for, and the
+  rest of the section is validated only when it is on. `index_files` defaults to
+  `["index.html","index.htm"]` and `max_file_bytes` to `8MiB` (`docs/features/19` §5).
 - **Env prefix: `SPINDLE__` is primary, `WALGIT__` accepted as a legacy alias** (supersedes the earlier "stays `WALGIT__`" decision): new deployments and docs use `SPINDLE__`; scripts, systemd units, and secret manifests written for walgit keep working via the alias, and `SPINDLE_` wins when both define the same key (§3.2). Compat preserved, naming future-proofed.
 - **Config file name/location (superseded in part):** the earlier decision kept `walgit.toml` as the implied default file name. The divergence moves the default location under the data dir — `<data-dir>/spindle.toml` is the default path, `<data-dir>/walgit.toml` is accepted as an alias (checked second, §3.1, §6.1) — so the README's "`walgit.toml` remains a valid config file name" promise still holds for the alias, while first-run and setup-UI files are written as `spindle.toml`.
 - **`--json` flag added to table-output commands** (JSONL, stable snake_case keys): Rust's human tables are unscriptable; JSONL costs ~20 lines and no dependency.
@@ -719,12 +867,22 @@ $ WALGIT__STORE__BKUET=x spindle config check --config /etc/spindle/walgit.toml 
   exit 0); only a help token **before** the first command prints the global table (§6.3), because
   the old blanket peel made every subcommand's flags undiscoverable. (b) `threads` routes are
   served, so `threads run` dispatches `POST …/api/threads {ref, workflow}` and `threads show`'s
-  404 is a real exit 3; `threads cancel` prints the T2-runner gap and exits 1 rather than calling
-  a path that does not exist. (c) `issue create` carries labels/assignees/milestone in the create
+  404 is a real exit 3. (The gap this entry recorded — `threads cancel` printing a T2-runner
+  message instead of calling a route — is closed by the 2026-11-21 cancel/rerun entry below.)
+  (c) `issue create` carries labels/assignees/milestone in the create
   body — the server validates them before allocating a number — so a bad label can no longer
   leave an unlabeled issue behind (the audit's non-atomic create). (d) `-R/--repo` is spelled
   `-R` (the `--repo` long form is already `bundle run --repo ID`) with `SPINDLE_REPO` as the env
   default, matching `gh -R`/`GH_REPO`.
+- **NEW (2026-11-21) — `threads cancel` and `threads rerun` are served verbs.** Both POST the
+  route the run page's buttons use (`POST …/api/threads/{run}/cancel|rerun`, repo write,
+  `docs/features/15_threads.md` §3), and each prints only what the returned body proves: cancel
+  names the returned run state (a `cancelled` state means every job took effect now; any other
+  state means a live job waits for its runner's ack — the body carries the run header, not the
+  per-job `cancel_requested` flags), rerun prints the new attempt on the **same** run id and
+  refuses with the API's 409 message while a job is running. The previous "T2 runner protocol;
+  not yet available" message outlived the route by a pass; §6.6's exit table is unchanged
+  (404 → 3, 401/403 → 4, 409/5xx → 1, usage → 2).
 - **NEW (WP11) — `auth token list|create|revoke` is a documented gap.** Minting is a browser-session surface (`/_auth/tokens`, CSRF-guarded), not the public JSON API; the commands exit 1 with a pointer instead of the CLI inventing a token endpoint.
 - **NEW (WP11) — shell completion is generated from the dispatch tables.** `completionWords()` walks `subcommands` plus the `apiGroups` table; `spindle completion bash|zsh|fish` differs only in the shell template. No hand-maintained command list can go stale.
 - **`RUST_LOG` honored (kept) as an override of `telemetry.log_filter`**, and `SPINDLE_LOG` accepted as the new-style spelling: zero-cost compat for existing log-tuning scripts.
@@ -747,7 +905,17 @@ $ WALGIT__STORE__BKUET=x spindle config check --config /etc/spindle/walgit.toml 
 
 ### Divergence (2026-08-31)
 
-- **D5 — Config is optional; zero-config first run.** The Rust spec boots fail-closed with no config file ("run `walgit init` first"); spindle boots on the first-run defaults of §2.3 instead: `listen = "0.0.0.0:8080"`, `store.backend = "filesystem"` rooted at `<data-dir>/store`, `auth.mode = "none"` (warned), `auto_create_on_push = true`, everything else per the Rust defaults. User friendliness is a first-class law. A missing file at the DEFAULT location is a first run, not an error; a missing explicitly-named file (`--config`/config-env pointer) remains fatal (exit 2), and `/dev/null` still forces defaults+env (§3.1). Data dir (`--data-dir` / `SPINDLE_DATA_DIR`, default `~/.local/share/spindle`, `/var/lib/spindle` in containers) owns `store/`, `cache/`, and the saved `spindle.toml` (§3.1.1).
+- **D5 — Config is optional; zero-config first run.** The Rust spec boots fail-closed with no config file ("run `walgit init` first"); spindle boots on the first-run defaults of §2.3 instead: `listen = "0.0.0.0:8080"`, `store.backend = "filesystem"` rooted at `<data-dir>/store`, authentication unconfigured (the boot is restricted — Administration area + health only — until OIDC is configured), `auto_create_on_push = true`, everything else per the Rust defaults. User friendliness is a first-class law. A missing file at the DEFAULT location is a first run, not an error; a missing explicitly-named file (`--config`/config-env pointer) remains fatal (exit 2), and `/dev/null` still forces defaults+env (§3.1). Data dir (`--data-dir` / `SPINDLE_DATA_DIR`, default `~/.local/share/spindle`, `/var/lib/spindle` in containers) owns `store/`, `cache/`, and the saved `spindle.toml` (§3.1.1).
+- **NEW (2026-11-22) — `[rate_limit]` is a reflective, restart-required section, `enabled` defaults
+  off (PLAN-V2 §M.4).** Six keys (`enabled`, four `N/s|N/min|N/h` rates, `trust_proxy`) with no
+  hand-written schema row: `BuildSchema` walks the struct, `Coerce` accepts the spellings as
+  strings, `Validate` parses them and names the key, the env overlay is
+  `SPINDLE__RATE_LIMIT__*`, and `/admin/config` renders the card with per-key notes. **Restart is
+  the honest answer** rather than a hot reload: the buckets are built at boot from the effective
+  config (the process has no config-reload path at all), so every changed key appears in
+  `RestartKeys` — a limiter that silently applied a saved-but-unsaved-to-memory rate would be a
+  config lie. `enabled = false` is the zero-config default (L10) and the plan's open question (c)
+  answered: an instance must not start refusing writes because it was upgraded.
 - **NEW (2026-11-21) — setup save backs up the first canonical rewrite (round-3 audit).**
   `SaveSetup` still writes the full canonical document (Toml keeps comments only on decode), but
   before the first rewrite of an existing file it copies the previous bytes to
@@ -756,7 +924,7 @@ $ WALGIT__STORE__BKUET=x spindle config check --config /etc/spindle/walgit.toml 
   dependency or a hand-rolled parser), rejected under law 1; a backup keeps the operator's text
   without inventing a format. Rationale: a zero-edit save silently deleting a hand-written comment
   is data loss, and the alternative (save only changed keys) does not restore comments either.
-- **D6 — Setup UI + API save semantics (§3.7).** The setup UI writes `<data-dir>/spindle.toml` atomically (tmp + fsync + rename, mode `0600`) after full §5 validation; the save response reports restart-required vs read-live keys; the saved file joins the ordinary ladder so env ⊕ file still holds with env winning. Boot states: config present → validate → boot; absent → defaults + setup banner; INVALID → setup-only mode (only `/setup`, `/healthz`, `/readyz` answer; rest 503) until a fixed config is saved and the process restarted. Endpoint shapes and the setup access rule live in 06_server_http.md.
+- **D6 — Administration area + API save semantics (§3.7).** The Administration area writes `<data-dir>/spindle.toml` atomically (tmp + fsync + rename, mode `0600`) after full §5 validation; the save response reports restart-required vs read-live keys; the saved file joins the ordinary ladder so env ⊕ file still holds with env winning. Boot states: config present → validate → boot; absent → defaults + setup banner; INVALID → restricted mode (only `/admin` + `/admin/config`, `/healthz`, `/readyz` answer; rest 503) until a fixed config is saved and the process restarted. Endpoint shapes and the setup access rule live in 06_server_http.md.
 - **Auth-none loopback rule superseded.** Rust validation rule 1 (auth `none` requires a loopback listen, fail-closed) is replaced by a loud warning on any bind (§5 rule 1); the first-run default `0.0.0.0:8080` + `auth = "none"` depends on it. All other validation stays fail-closed.
 - **D4 — `filesystem` added to `store.backend`** (`s3|memory|filesystem`, §2 note † and §5 rule 5): keys map to paths under `store.root`, first-run default `<data-dir>/store`. 03_store_backends.md owns the backend semantics; this doc owns the key, its validation, and the default.
 - **Feature 10 amendment (2026-09-04, docs/features/10):** additive `[import]` section (`clone_timeout`, `git_timeout`, `max_bytes`, `max_refs`, `max_concurrent`, `allow_private_networks`, `url_allowlist`, `allow_file_urls`) + the `import --url` CLI row in the §6.2 table (§6.2, same change, law 12). Rationale: 14 §14.12 — new sections/keys are additive; existing keys never change meaning.
@@ -767,12 +935,12 @@ $ WALGIT__STORE__BKUET=x spindle config check --config /etc/spindle/walgit.toml 
   them one stalled materialize wedged every object-level request past the proxy (504) while refs
   stayed instant; the wait must sit under typical proxy 60s timeouts and the body cap comfortably
   above the wait (per-request patience vs per-body-of-work patience are different bounds).
-- **NEW (2026-09-11) — oidc validation requires the browser-login trio (#344):** §5 rule 2
-  additionally refuses `auth.mode = "oidc"` when any of `server.auth.session_secret` /
-  `oauth_client_id` / `oauth_client_secret` is empty, naming the missing keys. Rationale (law 9):
-  the old pair-only check let a partially-configured instance boot into a dead login state
-  (browser login disabled ⇒ every browser GET a bare 401, `/_auth/login` a 501); refuse-to-start
-  was preferred over a degraded boot (see 06_server_http.md §14 for the login-page half).
+- **NEW (2026-09-11) — oidc validation required the browser-login trio (#344):** §5 rule 2
+  refused `auth.mode = "oidc"` when any of `server.auth.session_secret` / `oauth_client_id` /
+  `oauth_client_secret` was empty, naming the missing keys. **Superseded by PLAN-OIDC-ONLY
+  (2026-11-21):** the mode is gone and §5 rule 1 is the always-on `checkAuthConfigured` set
+  (issuer/allowlist/groups claim/admin groups/trio); an incomplete set is a restricted boot, not a
+  dead serving boot.
 - **NEW (2026-09-15) — `--data-dir` sync lives in the shared CLI path (Forgejo #611):**  `resolveConfig` (`cmd/spindle/config.go`, via `syncDataDirFlag`) re-points the flag-derived
   paths (`DataDir`, `Store.Root`, `Cache.Dir`) to the effective `--data-dir` whenever they
   currently equal the `ResolveDataDir(env)`-derived paths — the exact comparison `serve` always
@@ -791,14 +959,14 @@ $ WALGIT__STORE__BKUET=x spindle config check --config /etc/spindle/walgit.toml 
   (visibility as the read authority for repo surfaces) and made public repos unbrowsable on
   OIDC instances. `true` is now the default recommendation (visitors browse public repos
   without logging in; the navbar offers Login); `false` stays as the everything-requires-login
-  hard-lock for non-repo surfaces. The `/setup` copy and its field metadata
+  hard-lock for non-repo surfaces. The `/admin/config` copy and its field metadata
   (`internal/webui/settings.go`) describe the trade-off instead of "must be false". Interaction
   with #344: the browser-login trio requirement is unchanged — anonymous browsing never
   removes the need for a working login flow.
 - **NEW (2026-11-21) — the setup form is a LOSSLESS editor of the schema (G1/G3/G4, WP9).**
   `internal/setup` joins every value the schema advertises to a spelling `Coerce` accepts
   (`setup.DisplayValue`), and `setup.FormValues` renders the whole schema into the map
-  `POST /setup` hands to `ParseValues`. Struct-slice rows live in `internal/setup/rows.go`
+  `POST /admin/config` hands to `ParseValues`. Struct-slice rows live in `internal/setup/rows.go`
   (form namespace `K#<i>.<tomlname>`, `__base`, `__remove`; `RenderRows` /
   `ParseRowEdits` / `FormValues`), so the page, the API and the acceptance test share one
   renderer and one parser. Rationale: the audit measured 21 keys that could not round-trip
@@ -816,3 +984,48 @@ $ WALGIT__STORE__BKUET=x spindle config check --config /etc/spindle/walgit.toml 
   status, duration, at, error) and `redeliver ORG ID SEQ` (`{delivery, entry}`; a 410
   payload-not-retained is exit 1 with the server's reason, a 404 is exit 3 — the standard
   mapping). Every command accepts `--json`; the JSON is the API body unchanged.
+- **NEW (2026-11-21) — `store.backend` defaults to `filesystem`, and `s3` must be configured
+  explicitly (OBS-1).** The compiled-in table used to default `store.backend = "s3"` with an
+  implicit AWS endpoint, so a config file that simply omitted the key pointed a deployment at
+  AWS (the audit found one); the first-run defaults hid this by overriding the backend only in
+  the no-file case. Both the file leg and `--config /dev/null` now default to `filesystem`, and
+  `store.s3.endpoint` is empty by default: validation rejects `store.backend = "s3"` without an
+  endpoint, bucket, or credential env-var names, naming each missing key (fail closed instead of
+  half-working against an unintended host). The env overlay still wins over the file for the
+  backend and every S3 key. `store.root`'s data-dir default is unchanged and now applies to the
+  compiled default too.
+- **NEW (2026-11-21) — the cache budget is reconciled with the cache filesystem (BUG-6).**
+  `cache.max_bytes`'s default (20 GiB) assumed a volume that large; on a tmpfs/small data dir the
+  budget can never fit, and a push died mid-ingest with ENOSPC while the client saw only
+  `unpacker error`. At boot (`serve` and the CLI engine paths, after the loader has recorded which
+  keys the file/env actually set) the filesystem holding `cache.dir` is statfs'd: if it is smaller
+  than the budget and `cache.max_bytes` is still the **compiled default**, the budget is lowered to
+  the eviction watermark (`cache.disk_high_watermark`, default 0.9) of that filesystem, with a WARN
+  naming the path, filesystem type and both values. A **user-configured** `cache.max_bytes` is never
+  changed — it is reported as a warning naming `cache.dir`/`cache.max_bytes` (fail loud, honor the
+  operator). Independently of the budget, ENOSPC/EDQUOT during ingest now produce a diagnosis that
+  names the failing path, the filesystem and its capacity (04_git.md §3.4), and
+  `store.root`'s filesystem-full error names the root (03_store_backends.md §4).
+- **NEW (2026-11-22) — `spindle doctor` is a first-class subcommand, and LIST inside it is by
+  decision.** A deployed instance can be unreadable to a new binary for reasons no unit test sees
+  (the 2026-11-22 restricted boot: a removed `server.auth.mode` key the old binary tolerated).
+  The preflight has to exercise the **new** binary's validator against the **deployed** file and
+  decode real bucket objects, so it needs `LIST` — which stays forbidden on every request path.
+  The decision is scoped: `internal/doctor` is the only caller, every family walk is bounded
+  (`--limit`, `--repos`, `--budget`, and a per-family count cap) and the output states the sample
+  rather than implying an exhaustive scan. The command writes nothing, repairs nothing and holds
+  no locks across store calls, so it is safe against a live instance; config errors are reported
+  through the existing `config.Validate`/`config.LoadSetupOnly` surfaces instead of a second copy
+  of the rules. Exit 2 (usage/IO) is distinct from exit 1 (findings) so a preflight script can
+  tell "the check ran and found problems" from "the check did not run".
+- **NEW (2026-11-23) — static machine tokens have a lifecycle.** `[[server.auth.tokens]]`
+  gains `name` (optional, unique, the stable rotation/usage label) and `expires_at`
+  (optional RFC 3339). Validation (`checkStaticTokens`) refuses an unparseable expiry and a
+  duplicate name, naming the row key; a past instant is accepted and means "expired now", because
+  a config written before a deadline must keep validating after it. The row editor needs no new
+  code: both are ordinary element fields, so they render as cells and coerce through the shared
+  `setup.Coerce` path, and a zero-edit save stays byte-identical. On authentication an expired row
+  is an ordinary `ErrInvalid` (401 + the normal Basic/Bearer challenge), never a 403 and never an
+  in-band message, so git erases it. Rationale: a permanent, unobservable credential is a permanent
+  leak; the fields add a bounded lifetime and an audit trail at the config layer where the
+  credential already lives, without adding a token-minting API or local state.

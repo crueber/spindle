@@ -100,6 +100,7 @@ func TestCoverageInvitationPreviewFallbacks(t *testing.T) {
 }
 
 func TestCoverageInviteRowFallsBackToID(t *testing.T) {
+	t.Parallel()
 	row := inviteRow(identity.InboxEntry{ID: "inv-42", Role: "member"}, publicFixedNow)
 	if row.Scope != "inv-42" || row.Kind != "org" || row.ID != "inv-42" {
 		t.Fatalf("inviteRow fallback = %+v", row)

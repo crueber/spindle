@@ -13,7 +13,7 @@
   {{range .Tabs}}
   <a href="{{.Href}}"
      data-tab="{{.ID}}"
-     class="border-b-2 border-transparent px-3 py-1.5 text-[13px] text-[var(--pd-muted)] hover:text-[var(--pd-text)]{{if .Active}} border-b-amber-500! font-medium! text-[var(--pd-text)]!{{end}}"
+     class="border-b-2 border-transparent px-3 py-1.5 text-[13px] text-[var(--pd-muted)] hover:text-[var(--pd-text)]{{if .Active}} border-b-[color:var(--pd-accent)]! font-medium! text-[var(--pd-text)]!{{end}}"
      {{if .Active}}aria-current="page"{{end}}>{{.Label}}{{if .Badge}}<span class="tab-badge" aria-label="{{.Badge}} open">{{.Badge}}</span>{{end}}</a>
   {{end}}
 </nav>

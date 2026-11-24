@@ -4,9 +4,9 @@
    http.ServeMux — see settings.go's ROUTE SHAPE note. */}}
 {{define "content"}}
 <div class="settings-page" id="settings-page" data-settings-tab="{{.Data.Tab}}">
-  <h2 class="mb-1 flex items-baseline gap-2 text-xl font-semibold">
+  <h1 class="mb-1 flex items-baseline gap-2 text-xl font-semibold">
     <span class="eyebrow">org</span> <span class="mono">{{.Data.Org}}</span>
-  </h2>
+  </h1>
   {{if not .Data.CanManage}}
   <p class="muted mb-3 text-sm">read-only — org owner required to make changes.</p>
   {{end}}

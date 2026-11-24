@@ -1,11 +1,18 @@
 // tasks.js — background-task progress for a server-started task (the /import
-// card). Island spec §2.7 (docs/go/12_web_ui.md).
+// card and the repository-transfer card). Island spec §2.7
+// (docs/go/12_web_ui.md).
 //
-// Markup contract (templates/pages/forms/import.html):
-//   <div data-task-id="i…" data-task-stream="/api/v1/repos/imports/i…">
+// Markup contract (templates/pages/forms/import.html,
+// partials/settings_repo_danger.html):
+//   <div data-task-id="…" data-task-stream="/o/r/api/tasks/…">
 //     <div data-task-bars></div>              ← one row per progress label
 //     <pre data-task-log></pre>               ← log tail (replaced wholesale)
 //   </div>
+//
+// Optional attributes: data-task-next (where a successful task goes — a
+// repo-transfer's destination, which the record itself cannot name because the
+// record's repo is the SOURCE), data-task-return (the failure link, default the
+// import form), data-task-noun (the word in the sentences, default "import").
 //
 // `data-task-id` is the **import/service id** — the id the status endpoint
 // accepts (repoimport stamps it on the wire; the WAL table's own id stays
@@ -92,6 +99,19 @@ export function taskRedirect(payload) {
     .trim()
     .replace(/^\/+|\/+$/g, "");
   return REPO_PATH.test(repo) ? `/${repo}` : "";
+}
+
+/**
+ * taskTarget picks where a successful task goes: the card's explicit
+ * `data-task-next` first (a transfer's destination is NOT the record's repo —
+ * the record is keyed by the source), then the payload/record `repo`.
+ */
+export function taskTarget(explicit, payload, record) {
+  const given = String(explicit ?? "")
+    .trim()
+    .replace(/^\/+|\/+$/g, "");
+  if (REPO_PATH.test(given)) return `/${given}`;
+  return taskRedirect(payload) || taskRedirect(record);
 }
 
 /** taskFailureText is the honest one-line reason for a failed import. */
@@ -226,23 +246,29 @@ function start(card) {
     if (barsEl) barsEl.replaceChildren(box);
   };
 
+  const noun = (card.getAttribute("data-task-noun") || "import").trim() || "import";
+  const back = (card.getAttribute("data-task-return") || "").trim();
+
   const settle = (kind, payload) => {
     if (finished) return;
     finished = true;
     stop();
     card.dataset.taskState = "done";
     if (taskDone(kind, payload) === "ok") {
-      const target = taskRedirect(payload) || taskRedirect(lastRecord);
+      const target = taskTarget(card.getAttribute("data-task-next"), payload, lastRecord);
       if (target) {
-        setBar({ label: "import", text: "complete", percent: 100 });
-        note("ok", `import complete — opening ${target}`);
+        setBar({ label: noun, text: "complete", percent: 100 });
+        note("ok", `${noun} complete — opening ${target}`);
         window.location.assign(target);
         return;
       }
-      note("ok", "import complete", { label: "explore repositories", url: "/explore" });
+      note("ok", `${noun} complete`, back
+        ? { label: "go back", url: back }
+        : { label: "explore repositories", url: "/explore" });
       return;
     }
-    note("failed", taskFailureText(kind, payload), { label: "back to the import form", url: "/import" });
+    note("failed", taskFailureText(kind, payload),
+      back ? { label: "go back", url: back } : { label: "back to the import form", url: "/import" });
     setLog(taskLogTail(lastRecord));
   };
 
@@ -274,12 +300,12 @@ function start(card) {
       errors += 1;
       card.dataset.taskState = "error";
       if (err && err.status === 404) {
-        // Pruned past retention (1h): the ring is gone, the repo is the truth.
+        // Pruned past retention (1h): the ring is gone, the record is the truth.
         finished = true;
         stop();
-        note("failed", "this import is no longer tracked (finished over an hour ago)", {
+        note("failed", `this ${noun} is no longer tracked (finished over an hour ago)`, {
           label: "look for the repository",
-          url: "/explore",
+          url: back || "/explore",
         });
         return;
       }
@@ -292,7 +318,7 @@ function start(card) {
       }
       finished = true;
       stop();
-      note("failed", "lost the progress stream — the import keeps running", {
+      note("failed", `lost the progress stream — the ${noun} keeps running`, {
         label: "check its status",
         url,
       });
@@ -317,7 +343,7 @@ function onAuthRequired() {
     if (!barsEl) continue;
     const box = node("div", "grid gap-2");
     box.setAttribute("role", "status");
-    box.append(node("p", "warn-line", "sign in again to follow this import — it keeps running"));
+    box.append(node("p", "warn-line", "sign in again to follow this task — it keeps running"));
     const link = node("a", "link text-sm", "reload the page");
     link.href = window.location.href;
     box.append(link);

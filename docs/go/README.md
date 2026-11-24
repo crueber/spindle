@@ -4,7 +4,7 @@ The Go rewrite of the walgit design. The behavioral reference is
 [`../MASTER_RUST_SPEC.md`](../MASTER_RUST_SPEC.md) (the Rust implementation's complete specification);
 this directory specifies **how to build spindle in Go** — and where spindle deliberately diverges: a Chi
 router, a server-rendered Go page frontend with vendored htmx (D-WEB-14/D-WEB-15), zero-config first run
-with a setup UI, a local
+with a Administration area, a local
 filesystem store backend, and Make-based tooling. Everything not listed as a divergence follows the Rust
 spec exactly.
 
@@ -13,10 +13,11 @@ order that matches your work.
 
 ## The four laws of this rewrite
 
-1. **Minimal dependencies.** The backend allows six direct third-party modules: `github.com/go-chi/chi/v5`
+1. **Minimal dependencies.** The backend allows seven direct third-party modules: `github.com/go-chi/chi/v5`
    (the router — core only, all middleware hand-rolled), `github.com/BurntSushi/toml` (config),
-   `golang.org/x/net` (h2c), `golang.org/x/crypto` (SSH server transport only), and
-   `github.com/dicebear/dicebear-go/v10` + `github.com/dicebear/styles/v10` (deterministic avatars only).
+   `golang.org/x/net` (h2c), `golang.org/x/crypto` (SSH server transport only), `github.com/dicebear/dicebear-go/v10`
+   + `github.com/dicebear/styles/v10` (deterministic avatars only), and `gopkg.in/yaml.v3` (Threads
+   workflow files only — imported by `internal/threads/workflow` and nothing else).
    Everything else is stdlib or hand-rolled (SigV4, protobuf wire codec, JWKS, SSE,
    Prometheus exposition, LRU, singleflight). AGENTS.md law 1 is the authority. The frontend budget (amended
    2026-11-19/20 by explicit user request — DEVIATIONS.md D-WEB-14/D-WEB-15): browser pages are Go
@@ -35,8 +36,8 @@ order that matches your work.
    registries. [`14_extensibility.md`](14_extensibility.md) maps future GitHub-like features onto those
    seams without touching core.
 4. **User friendliness is a feature.** `spindle` runs with NO config on sane defaults (`0.0.0.0:8080`, local
-   filesystem store, first push creates the repo); the `/setup` UI exposes every option with a validated
-   save-to-disk; an invalid config file boots into setup-only recovery instead of refusing to start.
+   filesystem store, first push creates the repo); the `/admin/config` UI exposes every option with a validated
+   save-to-disk; an invalid config file boots into restricted mode recovery instead of refusing to start.
    Backend code ships with near-100% test coverage (≥ 95% per package, CI-enforced); the JS is tested with
    Node's built-in runner.
 
@@ -55,14 +56,14 @@ readable by spindle and vice versa.
 | [`03_store_backends.md`](03_store_backends.md) | S3 (hand-rolled SigV4), **filesystem**, leases, striped I/O, round-trip budgets | `internal/store` |
 | [`04_git.md`](04_git.md) | git subprocess layer: ingest, refs, pkt-line, receive-pack, upload-pack, repack, bundles | `internal/git` |
 | [`05_wal_engine.md`](05_wal_engine.md) | Sync levels, publish/CAS ladder, checkpoints, replay, remote reader, tasks | `internal/wal` |
-| [`06_server_http.md`](06_server_http.md) | Chi routing, middleware, git/LFS/static endpoints, auth (3 modes), **bootstrap + setup UI/API** | `internal/server` |
+| [`06_server_http.md`](06_server_http.md) | Chi routing, middleware, git/LFS/static endpoints, auth (3 modes), **bootstrap + Administration area/API** | `internal/server` |
 | [`07_api.md`](07_api.md) | JSON API wire contract, SSE envelope, tasks, caching, render recipes | `internal/api` |
 | [`08_bundles.md`](08_bundles.md) | Slots, chains, backfill, blobless family, lists, D17 forcing | `internal/bundle` |
 | [`09_events.md`](09_events.md) | WAL → webhook bridge: cursor, delivery, wake-ups | `internal/events` |
 | [`10_maintenance.md`](10_maintenance.md) | Maintainer loop, compaction, base rebuild, follow, fsck/repair | `internal/maintain` |
 | [`17_ssh.md`](17_ssh.md) | SSH git transport: x/crypto/ssh listener, key auth, command framing | `internal/sshd` |
 | [`11_config_cli.md`](11_config_cli.md) | Every config key (optional file), per-repo settings, env overrides, CLI reference | `internal/config`, `cmd/spindle` |
-| [`12_web_ui.md`](12_web_ui.md) | Server-rendered pages + htmx/islands, SDK (D-WEB-14), **setup UI**, `node --test` suite | `internal/webui/`, `web/` |
+| [`12_web_ui.md`](12_web_ui.md) | Server-rendered pages + htmx/islands, SDK (D-WEB-14), **Administration area**, `node --test` suite | `internal/webui/`, `web/` |
 | [`13_concurrency.md`](13_concurrency.md) | **The concurrency playbook** — referenced by every other doc | cross-cutting |
 | [`14_extensibility.md`](14_extensibility.md) | Core-vs-extension seams; issues/PRs/multi-user roadmap | cross-cutting |
 | [`15_testing.md`](15_testing.md) | Test pyramid, store contract, FaultStore sim, coverage gate, Make targets | `internal/*/…test` |
@@ -73,11 +74,11 @@ readable by spindle and vice versa.
 ```
 Wave 1 (independent):  02 storage+proto ─┬─ 03 backends (incl. filesystem) ── 15 store contract
                        11 config+cli    ─┘
-Wave 2 (needs 02+03):  04 git  ─┬─ 05 wal ─┬─ 06 server (chi + setup) ── 07 api
+Wave 2 (needs 02+03):  04 git  ─┬─ 05 wal ─┬─ 06 server (chi + admin/config) ── 07 api
                                 │          ├─ 08 bundles
                                 │          ├─ 09 events
                                 │          └─ 10 maintenance
-Wave 3 (needs 06):     12 web ui + setup frontend (the SDK can start in wave 1 — it only needs 07's
+Wave 3 (needs 06):     12 web ui + Administration area (the SDK can start in wave 1 — it only needs 07's
                        shapes on paper)
 Always:                13 concurrency (read before writing any goroutine), 14 extensibility (before
                        freezing any interface), 16 packaging (last)

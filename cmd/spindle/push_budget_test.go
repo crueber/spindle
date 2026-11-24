@@ -161,8 +161,11 @@ func budgetGit(t *testing.T, dir string, args ...string) string {
 		"GIT_COMMITTER_NAME=Budget",
 		"GIT_COMMITTER_EMAIL=budget@example.com",
 	)
-	// Deterministic identity without touching any config file.
-	full := append([]string{"-c", "user.name=Budget", "-c", "user.email=budget@example.com"}, args...)
+	// Deterministic identity without touching any config file; the machine
+	// token rides http.extraHeader (OIDC is the only authentication).
+	full := []string{"-c", "http.extraHeader=Authorization: Bearer budget-token",
+		"-c", "user.name=Budget", "-c", "user.email=budget@example.com"}
+	full = append(full, args...)
 	cmd.Args = append([]string{"git"}, full...)
 	out, err := cmd.CombinedOutput()
 	if err != nil {
@@ -175,6 +178,7 @@ func TestPushFastPathZeroCollabRoundTrips(t *testing.T) {
 	ctx := context.Background()
 	dataDir := t.TempDir()
 	cfg := config.FirstRunDefaults(dataDir)
+	cfg.Server.Auth.Tokens = []config.StaticToken{{Principal: "e2e", Token: "budget-token", Write: true}}
 	cfg.Store.Backend = "memory" // count shapes, not network RTT
 	cfg.Cache.Dir = filepath.Join(dataDir, "cache")
 
@@ -210,7 +214,7 @@ func TestPushFastPathZeroCollabRoundTrips(t *testing.T) {
 		API:       server.NewAPIProvider(env),
 		DataDir:   dataDir,
 		CacheRoot: cfg.Cache.Dir,
-		Boot:      server.BootState{Mode: "defaults"},
+		Boot:      server.BootState{Mode: "normal", FileState: "valid"},
 		ReadGate:  readGateOf(collab.ident),
 		// Forgejo #347: the push gate rides the same live identity
 		// service — in auth-none mode every CheckPush/CheckCreateOwner

@@ -24,7 +24,6 @@ func (p *countingProvider502) Serve(w http.ResponseWriter, r *http.Request) {
 func oidcServer502(t *testing.T) (*Server, *countingProvider502) {
 	t.Helper()
 	s, _ := newTestServer(t, func(o *Options) {
-		o.Config.Server.Auth.Mode = "oidc"
 		o.Config.Server.Auth.AnonymousRead = true
 	})
 	prim := &countingProvider502{}
@@ -80,22 +79,5 @@ func TestAPIServeOIDCAuthedWritePasses502(t *testing.T) {
 	}
 	if prim.served != 1 {
 		t.Error("authed POST: handler must run")
-	}
-}
-
-func TestAPIServeTokenModeKeepsPerRouteGates502(t *testing.T) {
-	// Outside oidc mode the assert does not fire: anonymous writes reach
-	// the seam, where the per-route gates refuse them (401 via gate()).
-	s, _ := newTestServer(t, nil) // token mode
-	prim := &countingProvider502{}
-	s.api = prim
-	req := httptest.NewRequest("POST", "/api/v1/ssh-keys", nil)
-	rec := httptest.NewRecorder()
-	s.apiServe(rec, req)
-	if rec.Code != http.StatusOK {
-		t.Errorf("token-mode anonymous POST: status = %d, want seam passthrough 200", rec.Code)
-	}
-	if prim.served != 1 {
-		t.Error("token-mode anonymous POST: seam must run (its own gates refuse)")
 	}
 }

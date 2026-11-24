@@ -88,14 +88,24 @@ type e2eServer struct {
 // caller's job via stop() (registered as t.Cleanup by the scenario helpers).
 func startServer(t *testing.T, bin, dataDir string, port int) *e2eServer {
 	t.Helper()
+	return startServerWithEnv(t, bin, dataDir, port)
+}
+
+// startServerWithEnv is startServer plus extra environment entries, for a
+// scenario that configures a section through the SPINDLE__/PORT overlay rather
+// than spindle.toml (docs/go/11_config_cli.md §3: exact dotted paths, so
+// SPINDLE__STATIC_SITES__ENABLED is static_sites.enabled). Additive: the
+// plain startServer delegates here with no extra env.
+func startServerWithEnv(t *testing.T, bin, dataDir string, port int, extraEnv ...string) *e2eServer {
+	t.Helper()
 	logs := &bytes.Buffer{}
 	cmd := exec.Command(bin)
-	cmd.Env = []string{
+	cmd.Env = append([]string{
 		"SPINDLE_DATA_DIR=" + dataDir,
 		"PORT=" + strconv.Itoa(port),
 		"HOME=" + dataDir,
 		"PATH=" + os.Getenv("PATH"),
-	}
+	}, extraEnv...)
 	cmd.Stdout = logs
 	cmd.Stderr = logs
 	if err := cmd.Start(); err != nil {
@@ -220,7 +230,34 @@ func httpRequest(t *testing.T, method, url string, body []byte) (int, []byte) {
 	return resp.StatusCode, data
 }
 
+// httpRequestAuth is httpRequest with a preemptive Bearer credential (the OIDC
+// ID-token path the JSON API accepts), for writes that require an admin.
+func httpRequestAuth(t *testing.T, method, url string, body []byte, bearer string) (int, []byte) {
+	t.Helper()
+	req, err := http.NewRequest(method, url, bytes.NewReader(body))
+	if err != nil {
+		t.Fatalf("%s %s: %v", method, url, err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	if bearer != "" {
+		req.Header.Set("Authorization", "Bearer "+bearer)
+	}
+	resp, err := httpClient.Do(req)
+	if err != nil {
+		t.Fatalf("%s %s: %v", method, url, err)
+	}
+	defer resp.Body.Close()
+	data, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	return resp.StatusCode, data
+}
+
 // ---- git client helpers --------------------------------------------------------
+
+// e2eDefaultBearer is the bearer every gitClient sends on its first request
+// unless the test supplies its own (runAuth). It is set by the server
+// bootstrap (writeE2EConfig) — OIDC is the only authentication, so e2e git
+// operations authenticate exactly like a user's would.
+var e2eDefaultBearer string
 
 // gitClient runs the real git binary with an isolated config: no prompts, no
 // system/global config from the user's machine, deterministic identity and
@@ -242,8 +279,12 @@ func newGitClient(t *testing.T) *gitClient {
 }
 
 // run executes git with the isolated environment and fails the test on error.
+// When the test bootstrap configured a default bearer (writeE2EConfig) it rides
+// http.extraHeader — the same preemptive credential a real user's helper sends
+// — unless the caller already set an extraHeader (runAuth).
 func (g *gitClient) run(dir string, args ...string) string {
 	g.t.Helper()
+	args = g.withDefaultAuth(args)
 	cmd := exec.Command("git", args...)
 	cmd.Dir = dir
 	cmd.Env = append(os.Environ(),
@@ -290,6 +331,7 @@ func (g *gitClient) commitFile(dir, path, content, msg string) string {
 // (a client blocked reading a status stream that never ends).
 func (g *gitClient) cmdDeadline(d time.Duration, dir string, args ...string) (int, string) {
 	g.t.Helper()
+	args = g.withDefaultAuth(args)
 	ctx, cancel := context.WithTimeout(context.Background(), d)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, "git", args...)
@@ -317,6 +359,20 @@ func (g *gitClient) cmdDeadline(d time.Duration, dir string, args ...string) (in
 		g.t.Fatalf("git %v: %v\n%s", args, err, out)
 	}
 	return ee.ExitCode(), string(out)
+}
+
+// withDefaultAuth prefixes the default bearer header when the test bootstrap
+// set one and the caller did not already supply http.extraHeader.
+func (g *gitClient) withDefaultAuth(args []string) []string {
+	if e2eDefaultBearer == "" {
+		return args
+	}
+	for _, a := range args {
+		if strings.Contains(a, "http.extraHeader") {
+			return args
+		}
+	}
+	return append([]string{"-c", "http.extraHeader=Authorization: Bearer " + e2eDefaultBearer}, args...)
 }
 
 // lsRemote runs git ls-remote (with extra args such as --tags or a URL) and

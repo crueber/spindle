@@ -121,7 +121,7 @@ func TestFaultsOnApprovalAndJobToken(t *testing.T) {
 on: [push]
 jobs:
   build:
-    runs-on: ubuntu-latest
+    runs-on: linux
     steps:
       - run: echo
 `)
@@ -224,16 +224,16 @@ func TestDropQueueEntriesEdges(t *testing.T) {
 func TestDeleteDeadRunnersEdges(t *testing.T) {
 	e := newTestEnv(t)
 	// A corrupt registry object is skipped, never fatal.
-	if _, err := store.PutBytes(ctx(), e.store, RunnerKey("o", "r", "bad"), []byte("{"), store.PutOptions{Mode: store.PutCreate}); err != nil {
+	if _, err := store.PutBytes(ctx(), e.store, RunnerKey("bad"), []byte("{"), store.PutOptions{Mode: store.PutCreate}); err != nil {
 		t.Fatal(err)
 	}
 	res := &GCResult{}
-	e.svc.deleteDeadRunners(ctx(), "o", "r", time.Now().Add(-time.Hour), res)
+	e.svc.deleteDeadRunners(ctx(), time.Now().Add(-time.Hour), res)
 	if res.RunnersDeleted != 0 {
 		t.Fatalf("corrupt runner counted: %+v", res)
 	}
 	// A cancelled context stops the loop.
 	cctx, cancel := context.WithCancel(ctx())
 	cancel()
-	e.svc.deleteDeadRunners(cctx, "o", "r", time.Now().Add(-time.Hour), res)
+	e.svc.deleteDeadRunners(cctx, time.Now().Add(-time.Hour), res)
 }

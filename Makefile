@@ -5,6 +5,14 @@ SHA     ?= $(shell git rev-parse --short=12 HEAD 2>/dev/null || echo dev)
 LDFLAGS := -s -w -X main.buildSHA=$(SHA)
 T5  := $(shell command -v timeout >/dev/null 2>&1 && echo "timeout 300" || echo "")
 T15 := $(shell command -v timeout >/dev/null 2>&1 && echo "timeout 900" || echo "")
+# The race/cover tiers use Go's own per-package ceiling (10m, now stated
+# explicitly) and keep an outer watchdog for a whole-run hang. The tier once
+# raised the package ceiling to 20m because internal/webui -- a render suite
+# that owns no shared state -- took 543s under -race; it now takes ~12s
+# (docs/go/15_testing.md §6.7), so the default is the ceiling again. The
+# slowest package in the full tier is internal/e2e at ~132s on a 10-core host,
+# ~4.5x under the ceiling.
+T30 := $(shell command -v timeout >/dev/null 2>&1 && echo "timeout 1800" || echo "")
 # S3 contract target: the rustfs rig defaults (compose.yaml), overridable from
 # the environment so CI can point at a service container by hostname.
 SPINDLE_TEST_S3_ENDPOINT   ?= http://127.0.0.1:9000
@@ -44,15 +52,28 @@ test-go: web ## fast Go tier: hermetic, < 1 min, watchdog-wrapped
 test-web: ## headless JS logic tests + fetch smoke (node --test, imports source)
 	node --test web/test/unit/*.test.js
 
-race: web ## full fast tier under the race detector
-	$(T15) $(GO) test -race -short -count=1 ./...
+race: web ## full fast tier under the race detector (main pushes / on demand)
+	$(T30) $(GO) test -race -short -count=1 -timeout 10m ./...
+
+# The PR gate races the packages that own shared state; the full tier above runs
+# on every main push (docs/go/15_testing.md §6.1). internal/webui is a large
+# render suite that owns no shared state, so racing it on every PR spends gate
+# time proving nothing (it is also 12s now, not 543s: §6.7).
+RACE_PKGS := ./internal/wal/... ./internal/store/... ./internal/notify/... \
+             ./internal/api/... ./internal/events/... ./internal/threads/... \
+             ./internal/packages/... ./internal/maintain/... ./internal/identity/... \
+             ./internal/server/... ./internal/git/... ./internal/sshd/... \
+             ./internal/bundle/... ./internal/sim/... ./internal/staticpages/...
+
+race-pr: web ## PR race tier: the concurrency-owning packages under -race
+	$(T30) $(GO) test -race -short -count=1 -timeout 10m $(RACE_PKGS)
 
 cover: ## coverage gate: >= 95% statements, every internal/... package (per-leaf profiles; e2e harness glue excluded)
 	@mkdir -p .cover && rm -f .cover/*.out
 	@pkgs=$$($(GO) list -f '{{if .TestGoFiles}}{{.ImportPath}}{{end}}' ./internal/... | grep -v devtools | grep -v "/e2e"); \
 	for p in $$pkgs; do \
 		name=$$(echo $$p | sed 's|github.com/crueber/spindle/internal/||; s|/|_|g'); \
-		$(GO) test -count=1 -coverprofile=.cover/$$name.out "$$p" || exit 1; \
+		$(GO) test -count=1 -timeout 10m -coverprofile=.cover/$$name.out "$$p" || exit 1; \
 	done
 	$(GO) run ./internal/devtools/covergate -dir .cover -min 95
 
@@ -77,7 +98,13 @@ landing-gifs: ## regenerate the landing-page concept GIFs (MANUAL: run only when
 	$(GO) run ./internal/devtools/landinggif -out web/public/concepts/
 
 e2e: ## smart-HTTP end-to-end against the real git binary
-	$(T15) $(GO) test -count=1 ./internal/e2e/...
+	$(T15) $(GO) test -count=1 -skip 'TestA11y' ./internal/e2e/...
+
+a11y: web ## rendered accessibility smoke: headless Chromium over CDP (fixed page set; skips without a browser, CI sets SPINDLE_A11Y=1)
+	$(T15) $(GO) test -count=1 -timeout 10m -run 'TestA11y' -v ./internal/e2e/
+
+backup-drill: ## restore drill: seed, snapshot, restore into an empty instance, compare every surface (docs/BACKUP.md)
+	$(T15) $(GO) test -count=1 -timeout 15m -run TestE2E_BackupRestoreDrill -v ./internal/e2e/
 
 image: ## build the OCI image
 	docker build -t spindle .
@@ -88,13 +115,26 @@ dev-store: ## start rustfs (S3-compatible) for bucket-contract tests
 dev-store-stop:
 	docker compose down
 
+# project website (site/ + docs/demo.webm) staged into one directory, the same way Pages serves it
+SITE_DIR ?= dist/site
+SITE_PORT ?= 8099
+site: ## stage the marketing site into dist/site (exactly what GitHub Pages serves)
+	scripts/site-stage.sh $(SITE_DIR)
+
+site-preview: site ## stage and serve the site at http://localhost:8099
+	@echo "http://localhost:$(SITE_PORT)/"
+	cd $(SITE_DIR) && python3 -m http.server $(SITE_PORT) --bind 127.0.0.1
+
+site-check: ## static site gate: publish strings, referenced assets, one h1, alt, no off-origin assets
+	scripts/site-check.sh
+
 clean: ## remove build artifacts
-	rm -rf $(BINARY) .cover web/dist
+	rm -rf $(BINARY) .cover web/dist dist
 	mkdir -p web/dist && touch web/dist/.keep
 
-ci: vet test race cover contract sim e2e ## everything that must be green before a merge (09: contract + e2e gate the collab seams too)
+ci: vet test race cover contract sim e2e a11y ## everything that must be green before a merge (09: contract + e2e gate the collab seams too; a11y is the rendered floor, skipping only where no browser exists)
 
 help: ## show targets
 	@grep -E '^[a-zA-Z0-9_-]+:.*## ' $(MAKEFILE_LIST) | awk 'BEGIN{FS=":.*## "}{printf "  \033[36m%-14s\033[0m %s\n", $$1, $$2}'
 
-.PHONY: web build fmt vet test test-go test-web race cover sim contract contract-fs contract-s3 e2e image dev-store dev-store-stop clean ci help landing-gifs
+.PHONY: web build fmt vet test test-go test-web race cover sim contract contract-fs contract-s3 e2e a11y backup-drill image dev-store dev-store-stop site site-preview site-check clean ci help landing-gifs

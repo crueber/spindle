@@ -91,7 +91,10 @@ directory IS the thread id; every comment in a thread shares it).
   silently relocated and never mutated. Same derivation for the merge gate, so no writer owns
   staleness.
 
-Comment event: `{ "kind": "review_thread_comment", "seq": 7, "at": …, "by": …, "body": "…" }`. Thread
+Comment event: `{ "kind": "review_thread_comment", "seq": 7, "at": …, "by": …, "body": "…" }`. These are
+**stored-object** shapes, not requests: creating a comment posts `{ "body": "…" }` to the thread's
+comments endpoint, and opening a thread posts `{ "anchor": <the §4 object above>, "body": "…" }` — every
+anchor field is required on the wire (a flat `{path, side, line, body}` spelling is rejected; BUG-8). Thread
 header:
 
 ```json
@@ -209,11 +212,11 @@ plain text (07 §2); arrays serialize `[]`; timestamps RFC 3339 UTC; SHAs full-h
 | Method + path | Auth (P6) | Request → response |
 |---|---|---|
 | `GET /{o}/{r}/api/pulls/{num}/reviews` | read | → `{reviews: [review event], more}` (paged, `n` default 50) |
-| `POST /{o}/{r}/api/pulls/{num}/reviews` | read | `{state, body?, commit_sha, threads?: [{anchor, body}]}` → `{review, threads[]}`; author self-approve/request-changes → `422` only when the repo's `[review] allow_self_approval` is off (default on — Forgejo #586) |
+| `POST /{o}/{r}/api/pulls/{num}/reviews` | read | `{state, body?, commit_sha, threads?: [{anchor, body}]}` (state = `APPROVED\|CHANGES_REQUESTED\|COMMENTED`; anchor = the §4 object, all fields required) → `{review, threads[]}`; author self-approve/request-changes → `422` only when the repo's `[review] allow_self_approval` is off (default on — Forgejo #586) |
 | `GET /{o}/{r}/api/pulls/{num}/reviews/{seq}` | read | → review event; `404` unknown |
 | `POST /{o}/{r}/api/pulls/{num}/reviews/{seq}/dismiss` | maintain | `{reason}` → `{review: DISMISSED …}` |
 | `GET /{o}/{r}/api/pulls/{num}/threads` | read | → `{threads: [thread header], more}` (`?resolved=` filter) |
-| `POST /{o}/{r}/api/pulls/{num}/threads` | read | `{anchor, body}` → `{thread}`; drift-hash verifiable server-side |
+| `POST /{o}/{r}/api/pulls/{num}/threads` | read | `{anchor, body}` → `{thread}` (anchor = the §4 object, all fields required; no flat `{path, line, body}` spelling); drift-hash verifiable server-side |
 | `GET /{o}/{r}/api/pulls/{num}/threads/{tid}` | read | → `{thread, comments: [events]}` (seq window) |
 | `POST /{o}/{r}/api/pulls/{num}/threads/{tid}/comments` | read | `{body}` → `{comment}` |
 | `POST /{o}/{r}/api/pulls/{num}/threads/{tid}/resolve` | read (opener, review participants) or triage+ | → `{thread}` |
@@ -250,7 +253,8 @@ No new top-level routes: review lives on 03's PR page (`/:owner/:repo/pull/:num`
 - **Thread cards:** rendered inline at the anchor's start line; unresolved-first ordering; resolve
   toggle calls the thread endpoint; outdated threads (hash mismatch) collapse with the original lines.
 - **Finish-review modal:** collects pending single line comments (each opened a thread immediately) +
-  a top-level body + verdict (`COMMENT`/`APPROVE`/`REQUEST_CHANGES`); one `POST reviews`.
+  a top-level body + verdict (`COMMENTED`/`APPROVED`/`CHANGES_REQUESTED` — the wire values, not the
+  UI labels); one `POST reviews`.
 - **Reviewers panel:** picker fed by `review-suggest` (150 ms debounce, abort-on-keystroke per the
   §2.6 ref-picker pattern); Dismiss button visible to `maintain`.
 - **SSE:** the `web/src/islands/sse.js` reader subscribes the repo stream (`data-sse`);
@@ -412,3 +416,29 @@ envelope handling; JSDoc `@typedef Review/ThreadAnchor/ThreadHeader` in `types.j
   - **No summary/ETag projection (law 8).** The knob is enforced read-time, never
     rendered from a cache — `review_summary`, the repo summary, and the ETag suffixes
     are untouched, so no SWR-cached surface can serve a stale policy.
+
+- **FIXED (BUG-8, 2026-11-21) — documented thread/review request shapes pinned; the docs
+  corrected, not the handler.** An API-vs-docs audit found the docs ambiguous in three places, and the handler's error ladder made a consumer discover the shape
+  one rejection per round trip: (a) §4's stored-object fences read like request bodies, (b) §7's
+  table did not say every anchor field is required (a flat `{path, side, line, body}` entry — the
+  SPA-era spelling removed by D-WEB-15 — is *not* accepted), and (c) §8 listed the UI verdict labels
+  (`COMMENT`/`APPROVE`/`REQUEST_CHANGES`) instead of the wire values
+  (`COMMENTED`/`APPROVED`/`CHANGES_REQUESTED`). **Decision: correct the docs** — the handler's
+  `{anchor, body}` / `{body}` / `{state, body?, commit_sha, threads?}` shapes ARE the public
+  contract and are unchanged; accepting the old flat spelling would be exactly the "still accepted
+  for" alias the pre-1.0 rule forbids. Two failure-path improvements ship with it (no wire change
+  for valid requests): `decodeStrict` names every unknown key **and** the accepted set in one 400,
+  and `validateAnchor` reports every anchor problem at once (path/side/range/commit_sha/context_sha)
+  instead of stopping at the first. The rendered `/api` docs page text was corrected in the same
+  change (it listed lowercase state names and an anchor without `context_sha`). Pinned by
+  `TestDocExamplesVerbatim` (`internal/review/doc_examples_test.go`), which posts §4's anchor and
+  §7's three write shapes verbatim and asserts the flat entry is refused with a one-round-trip
+  message.
+- **Moderation block gate (PLAN-V2 M1, 2026-11-21).** `review` declares
+  `ModerationGate{BlockedFromRepo}` and consults it in `SubmitReview`, `DismissReview`, `OpenThread`,
+  `AddThreadComment`, `ResolveThread`, `UnresolveThread`, `AddRequests` and `RemoveRequests` after
+  role resolution and before any CAS. The refusal is `ErrForbidden` with
+  `identity.InteractionRefused` (never the word "block"). Nil gate = feature off; a gate error fails
+  closed (503-class). The moderation *conversation lock* (M2) will compose with the existing
+  closed/merged lock at the same call sites; M1 ships only the block half. Contract:
+  `docs/features/16_moderation.md` §3.

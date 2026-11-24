@@ -358,3 +358,34 @@ func TestDeleteIndexVersionOwnsItsChildren(t *testing.T) {
 		t.Fatalf("dead tag pointers remain: %s", w.Body.String())
 	}
 }
+
+// TestRepoMovedDropsSweepBookkeeping pins the move invalidation (PLAN-V2
+// §T.1): the old id's due/grace clocks go, the new id starts clean, and an
+// unrelated repo's bookkeeping survives.
+func TestRepoMovedDropsSweepBookkeeping(t *testing.T) {
+	f := newFixture(t)
+	f.svc.BlobGrace = time.Minute
+	f.svc.GCInterval = 10 * time.Minute
+	f.svc.noteBlob("acme", "demo", "aa")
+	f.svc.noteBlob("acme", "other", "bb")
+	f.svc.markSwept("acme", "demo", f.now)
+	f.svc.markSwept("acme", "other", f.now)
+
+	f.svc.RepoMoved("acme", "demo", "beta", "demo")
+
+	if f.svc.blobFresh("acme", "demo", "aa", f.now) {
+		t.Fatal("old id's grace clock survived the move")
+	}
+	if !f.svc.SweepDue("acme", "demo") {
+		t.Fatal("old id's due clock survived the move")
+	}
+	if !f.svc.SweepDue("beta", "demo") {
+		t.Fatal("new id must start due")
+	}
+	if !f.svc.blobFresh("acme", "other", "bb", f.now) || f.svc.SweepDue("acme", "other") {
+		t.Fatal("unrelated repo's bookkeeping must be untouched")
+	}
+	// Idempotent and safe on nil maps.
+	f.svc.sweptAt, f.svc.recent = nil, nil
+	f.svc.RepoMoved("x", "y", "z", "w")
+}

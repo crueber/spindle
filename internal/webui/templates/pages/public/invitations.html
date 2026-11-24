@@ -1,18 +1,18 @@
 {{define "content"}}
-{{if .Data.Identity}}
-{{template "identity_notice" .Data.Identity}}
-{{else}}
 {{/* /invitations (Forgejo #362): the invitee inbox. Rows carry kind, scope,
      role, issuer, expiry; accept/decline are POST forms (303 back with the
      outcome in ?note=). Shared accept links deep-link as ?id=&token= and
      preview on top. Expired rows stay listed but accept is disabled (the
      server still rejects with 409). A signed-out caller never reaches this
      branch: the handler answers 401, and auth none renders the shared
-     identity notice. 390px: rows wrap, the action row wraps. */}}
+     identity notice. One-primary rule (style guideline §1 F3): rows are equal
+     actions, so row accept/decline are `.btn`; only the focused shared-link
+     preview (when present) is the page's one `.btn.primary`. 390px: rows
+     wrap, the action row wraps. */}}
 <div class="invitations-page mx-auto max-w-3xl">
   <header class="mb-3 border-b border-[var(--pd-line)] pb-3">
     <p class="eyebrow">inbox</p>
-    <h2 class="mt-1 text-lg font-semibold">Invitations</h2>
+    <h1 class="mt-1 text-lg font-semibold">Invitations</h1>
     <p class="muted mt-1 text-sm">
       Pending organization and repository invitations addressed to you. Expired
       invitations stay listed but cannot be accepted — decline clears them.
@@ -65,7 +65,7 @@
       </div>
       <div class="mt-2 flex flex-wrap gap-2">
         <form method="post" action="/invitations/{{.ID}}/accept">
-          <button type="submit" class="btn primary px-2 py-1 text-xs"{{if .Expired}} disabled title="expired — the server rejects accept with 409"{{else}} title="accept this invitation"{{end}}>accept</button>
+          <button type="submit" class="btn px-2 py-1 text-xs"{{if .Expired}} disabled title="expired — the server rejects accept with 409"{{else}} title="accept this invitation"{{end}}>accept</button>
         </form>
         <form method="post" action="/invitations/{{.ID}}/decline">
           <button type="submit" class="btn px-2 py-1 text-xs">decline</button>
@@ -85,5 +85,4 @@
     Managing an organization instead? <a class="link" href="/explore">explore owners</a> to find it.
   </p>
 </div>
-{{end}}
 {{end}}

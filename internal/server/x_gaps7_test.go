@@ -22,7 +22,6 @@ func TestNewAuthServiceVariants(t *testing.T) {
 	// nil clock → time.Now; TokenEnv resolution; empty-resolved dropped.
 	t.Setenv("SPINDLE_TEST_TOKEN_A", "env-token")
 	svc := NewAuthService(&config.Auth{
-		Mode: "token",
 		Tokens: []config.StaticToken{
 			{Principal: "env", TokenEnv: "SPINDLE_TEST_TOKEN_A", Write: true},
 			{Principal: "dropped", TokenEnv: "SPINDLE_TEST_TOKEN_MISSING"},
@@ -31,7 +30,7 @@ func TestNewAuthServiceVariants(t *testing.T) {
 	}, nil)
 	req := httptest.NewRequest("GET", "/x", nil)
 	req.Header.Set("Authorization", "Bearer env-token")
-	p, aerr := svc.Authenticate(req, &config.Config{Server: config.Server{Auth: config.Auth{Mode: "token"}}})
+	p, aerr := svc.Authenticate(req, &config.Config{Server: config.Server{Auth: config.Auth{}}})
 	if aerr != nil || p.Name != "env" || !p.Write {
 		t.Fatalf("env token principal = %+v %v", p, aerr)
 	}
@@ -45,7 +44,7 @@ func TestNewAuthServiceVariants(t *testing.T) {
 
 func (s *AuthService) cfg2() *config.Config {
 	return &config.Config{Server: config.Server{Auth: config.Auth{
-		Mode: "token", Tokens: []config.StaticToken{
+		Tokens: []config.StaticToken{
 			{Principal: "env", TokenEnv: "SPINDLE_TEST_TOKEN_A"},
 			{Principal: "dropped", TokenEnv: "SPINDLE_TEST_TOKEN_MISSING"},
 			{Principal: "empty"},
@@ -59,7 +58,7 @@ func TestParseCredentialEdges(t *testing.T) {
 	}
 	req := httptest.NewRequest("GET", "/x", nil)
 	req.Header.Set("Authorization", "Digest abc")
-	s := NewAuthService(&config.Auth{Mode: "token", SessionSecret: "0123456789abcdef0123456789abcdef"}, nil)
+	s := NewAuthService(&config.Auth{SessionSecret: "0123456789abcdef0123456789abcdef"}, nil)
 	if _, aerr := s.Authenticate(req, s.cfg2()); aerr == nil || aerr.Kind != auth.ErrInvalid {
 		t.Fatalf("unsupported scheme = %v", aerr)
 	}
@@ -67,7 +66,7 @@ func TestParseCredentialEdges(t *testing.T) {
 
 func TestOIDCModeCredentialVariants(t *testing.T) {
 	cfg := &config.Auth{
-		Mode: "oidc", Issuer: "https://issuer.test",
+		Issuer:         "https://issuer.test",
 		SessionSecret:  "0123456789abcdef0123456789abcdef",
 		AccessTokenTTL: config.Duration(24 * time.Hour),
 		SessionTTL:     config.Duration(24 * time.Hour),
@@ -123,8 +122,8 @@ func TestPrincipalFromEmailPolicies(t *testing.T) {
 		AllowedDomains: []string{"example.com", "admins.test"},
 		AllowedEmails:  []string{"special@other.test"},
 		WriteDomains:   []string{"example.com", "writers.test"},
-		AdminEmails:    []string{"boss@example.com"},
-		AdminDomains:   []string{"admins.test"},
+		AdminGroups:    []string{"spindle-admin"},
+		GroupsClaim:    "groups",
 	}
 	svc := NewAuthService(cfg, nil)
 	// allowed_emails grants access even outside allowed domains.
@@ -137,15 +136,14 @@ func TestPrincipalFromEmailPolicies(t *testing.T) {
 	if !p.Write {
 		t.Fatal("write domain must grant write")
 	}
-	// admin email → admin.
-	p, _ = svc.principalFromEmail("boss@example.com")
+	// The group intersection is the only admin grant.
+	p, _ = svc.principalFromEmailGroups("alice@example.com", []string{"spindle-admin"}, time.Time{})
 	if !p.Admin {
-		t.Fatal("admin email must grant admin")
+		t.Fatalf("admin group = %+v", p)
 	}
-	// admin domain → admin.
-	p, _ = svc.principalFromEmail("root@admins.test")
-	if !p.Admin {
-		t.Fatalf("admin domain = %+v", p)
+	p, _ = svc.principalFromEmailGroups("boss@example.com", []string{"other"}, time.Time{})
+	if p.Admin {
+		t.Fatalf("a non-matching group must not grant admin: %+v", p)
 	}
 }
 

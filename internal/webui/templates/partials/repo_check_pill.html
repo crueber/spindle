@@ -1,13 +1,13 @@
 {{define "repo_check_pill"}}
-{{/* One commit row's check state (Checks.jsx CheckPill, dot-only variant —
-     the SPA's Commits rows are not verbose). Links to the per-sha checks
-     detail; the dot class comes from checkStateDot (state colour, §1 F3/§6),
-     and a repo with zero reported contexts renders the neutral #518 pill
-     ("no checks"), never a green/amber guess. The dot IS the label, so the
-     anchor carries the title and the dot carries the accessible name. */}}
+{{/* One commit row's check state (dot-only variant — Commits rows are not
+     verbose). Links to the per-sha checks detail; the dot is rendered by the
+     shared `collab_check_dot` block (shape + token colour, PLAN-THEMES
+     §8.4-2), and a repo with zero reported contexts renders the neutral
+     "no checks" pill, never a green/amber guess. The dot IS the label, so the
+     anchor carries the accessible name. */}}
 {{with .}}
-<a class="inline-flex items-center p-1" href="{{.Href}}" title="{{.Title}}">
-  <span class="{{.Dot}}" aria-label="{{.Title}}"></span>
+<a class="inline-flex items-center p-1" href="{{.Href}}" title="{{.Title}}" aria-label="{{.Title}}">
+  {{template "collab_check_dot" .State}}
 </a>
 {{end}}
 {{end}}

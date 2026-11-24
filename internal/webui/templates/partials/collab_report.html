@@ -1,0 +1,31 @@
+{{/* collab_report_form — the inline abuse-report form (PLAN-V2 §M.3/M.4).
+
+   One <details> disclosure per comment card / review body / thread reply: a
+   .link "Report" summary opening the plan's reason radios plus an optional
+   note. Full width at ~390 px, capped on wider screens; the submit is a normal
+   .btn (never a page .primary — a report is not the page's action).
+
+   Params (dict): action (the repo report endpoint), kind, seq, tid, uid (a
+   unique id suffix for the note field label). */}}
+{{define "collab_report_form"}}
+<details class="mt-2" data-report>
+  <summary class="link inline-block px-1 py-1 text-xs">Report</summary>
+  <form class="mt-1 grid w-full gap-2 sm:max-w-md" method="post" action="{{.action}}" role="group" aria-label="report this content">
+    <input type="hidden" name="kind" value="{{.kind}}">
+    <input type="hidden" name="seq" value="{{.seq}}">
+    {{with .tid}}<input type="hidden" name="tid" value="{{.}}">{{end}}
+    <fieldset class="grid gap-1">
+      <legend class="eyebrow">Reason</legend>
+      <label class="flex items-center gap-2 text-sm"><input type="radio" name="reason" value="spam"> <span>spam</span></label>
+      <label class="flex items-center gap-2 text-sm"><input type="radio" name="reason" value="abusive"> <span>abusive</span></label>
+      <label class="flex items-center gap-2 text-sm"><input type="radio" name="reason" value="off-topic"> <span>off-topic</span></label>
+      <label class="flex items-center gap-2 text-sm"><input type="radio" name="reason" value="other" checked> <span>other</span></label>
+    </fieldset>
+    <label class="eyebrow" for="report-note-{{.uid}}">Note (optional)</label>
+    <textarea class="input min-h-12 text-sm leading-relaxed" id="report-note-{{.uid}}" name="note" rows="2" maxlength="2000"></textarea>
+    <div class="flex justify-end">
+      <button type="submit" class="btn px-2 py-1">Submit report</button>
+    </div>
+  </form>
+</details>
+{{end}}

@@ -40,9 +40,9 @@ func TestHandlerAuthErrorBranches(t *testing.T) {
 		{http.MethodPost, "/o/r/api/threads/" + run.ID + "/cancel", ""},
 		{http.MethodPost, "/o/r/api/threads/" + run.ID + "/rerun", ""},
 		{http.MethodGet, "/o/r/api/threads/" + run.ID + "/jobs/j-build/log?accept=json", ""},
-		{http.MethodGet, "/o/r/api/threads/runners", ""},
-		{http.MethodPost, "/o/r/api/threads/runners/tokens", ""},
-		{http.MethodDelete, "/o/r/api/threads/runners/abcdefgh1234", ""},
+		{http.MethodGet, "/api/v1/admin/runners", ""},
+		{http.MethodPost, "/api/v1/admin/runners/tokens", ""},
+		{http.MethodDelete, "/api/v1/admin/runners/abcdefgh1234", ""},
 		{http.MethodGet, "/o/r/api/threads/secrets", ""},
 		{http.MethodPut, "/o/r/api/threads/secrets/TOKEN", `{"value":"x"}`},
 		{http.MethodDelete, "/o/r/api/threads/secrets/TOKEN", ""},
@@ -70,9 +70,9 @@ func TestHandlerMethodGatesAndMisses(t *testing.T) {
 	*cur = auth.Principal{Name: "admin", Admin: true}
 	run := e.mustCreate(t)[0]
 	for _, tc := range []struct{ method, path string }{
-		{http.MethodPost, "/o/r/api/threads/runners"},
-		{http.MethodGet, "/o/r/api/threads/runners/tokens"},
-		{http.MethodPost, "/o/r/api/threads/runners/abcdefgh1234"},
+		{http.MethodPost, "/api/v1/admin/runners"},
+		{http.MethodGet, "/api/v1/admin/runners/tokens"},
+		{http.MethodPost, "/api/v1/admin/runners/abcdefgh1234"},
 		{http.MethodDelete, "/o/r/api/threads/secrets"},
 		{http.MethodPatch, "/o/r/api/threads/secrets/TOKEN"},
 		{http.MethodPost, "/o/r/api/threads/" + run.ID + "/cancel"},
@@ -263,7 +263,7 @@ func TestQueueClaimFailurePaths(t *testing.T) {
 	admin := auth.Principal{Name: "admin", Admin: true}
 	run := e.mustCreate(t)[0]
 	_ = run
-	runner := &runnerAuth{Owner: "o", Repo: "r", Doc: &RunnerDoc{ID: "rnr", Labels: []string{"ubuntu-latest"}, State: RunnerActive}}
+	runner := &runnerAuth{Doc: &RunnerDoc{ID: "rnr", Labels: []string{"linux"}, AllowAll: true, State: RunnerActive}}
 	// A failing entry GET during the probe.
 	fs.fail("get", 1) // head ok, entry fails
 	if _, err := e.svc.claimLoop(ctx(), "o", "r", runner.Doc, runner.Doc.Labels); err == nil {
@@ -314,11 +314,11 @@ func TestFetchReleaseOnMarkFailure(t *testing.T) {
 	e, fs, _, _ := faultEnv(t)
 	admin := auth.Principal{Name: "admin", Admin: true}
 	e.mustCreate(t)
-	mint, err := e.svc.MintRegistrationToken(ctx(), "o/r", admin)
+	mint, err := e.svc.MintRegistrationToken(ctx(), admin, mintAllPolicy(""))
 	if err != nil {
 		t.Fatalf("mint: %v", err)
 	}
-	res, err := e.svc.Register(ctx(), RegisterInput{Token: mint.Token, Labels: []string{"ubuntu-latest"}})
+	res, err := e.svc.Register(ctx(), RegisterInput{Token: mint.Token, Labels: []string{"linux"}})
 	if err != nil {
 		t.Fatalf("register: %v", err)
 	}
@@ -344,7 +344,7 @@ func TestFetchTimeoutCapAndSecrets(t *testing.T) {
 		t.Fatalf("set secret: %v", err)
 	}
 	e.mustCreate(t)
-	runner := &runnerAuth{Owner: "o", Repo: "r", Doc: &RunnerDoc{ID: "rnr", Labels: []string{"ubuntu-latest"}, State: RunnerActive}}
+	runner := &runnerAuth{Doc: &RunnerDoc{ID: "rnr", Labels: []string{"linux"}, AllowAll: true, State: RunnerActive}}
 	// wait > 30 s is clamped, not rejected.
 	job, err := e.svc.FetchJob(ctx(), runner, time.Minute)
 	if err != nil || job == nil {
@@ -361,7 +361,7 @@ func TestFetchTimeoutCapAndSecrets(t *testing.T) {
 	if _, err := store.PutBytes(ctx(), e.store, SecretKey("o", "r", "TOKEN"), mustJSON(&doc), store.PutOptions{Mode: store.PutOverwrite}); err != nil {
 		t.Fatalf("seed: %v", err)
 	}
-	second := &runnerAuth{Owner: "o", Repo: "r", Doc: &RunnerDoc{ID: "rnr2", Labels: []string{"ubuntu-latest"}, State: RunnerActive}}
+	second := &runnerAuth{Doc: &RunnerDoc{ID: "rnr2", Labels: []string{"linux"}, AllowAll: true, State: RunnerActive}}
 	if _, ferr := e.svc.FetchJob(ctx(), second, time.Millisecond); ferr == nil {
 		t.Fatal("a corrupt secret must fail the fetch")
 	}
@@ -370,7 +370,7 @@ func TestFetchTimeoutCapAndSecrets(t *testing.T) {
 func TestAuthorizeRunnerFailures(t *testing.T) {
 	e := newTestEnv(t)
 	admin := auth.Principal{Name: "admin", Admin: true}
-	mint, err := e.svc.MintRegistrationToken(ctx(), "o/r", admin)
+	mint, err := e.svc.MintRegistrationToken(ctx(), admin, mintAllPolicy(""))
 	if err != nil {
 		t.Fatalf("mint: %v", err)
 	}
@@ -389,27 +389,16 @@ func TestAuthorizeRunnerFailures(t *testing.T) {
 		t.Fatal("an unknown credential must fail")
 	}
 	// A revoked credential.
-	if err := e.svc.revokeCredential(ctx(), "admin", res.RunnerID, e.now.Format(dateTimeFmt)); err != nil {
+	if err := e.svc.revokeRunnerCredential(ctx(), res.RunnerID, e.now.Format(dateTimeFmt)); err != nil {
 		t.Fatalf("revoke credential: %v", err)
 	}
 	if _, err := e.svc.authorizeRunner(ctx(), res.Token); err == nil {
 		t.Fatal("a revoked credential must fail")
 	}
-	// A credential whose repository segment is malformed.
-	credKey := RunnerTokenKey("admin", "badrepo01")
-	cred := &RunnerCredential{ID: "badrepo01", Principal: "admin", Repo: "bad repo", Kind: credRunner,
-		TokenHash: hashSecret("secretsecretsecret"), CreatedAt: e.now.Format(dateTimeFmt), Version: 1}
-	if _, err := store.PutBytes(ctx(), e.store, credKey, mustJSON(cred), store.PutOptions{Mode: store.PutCreate}); err != nil {
-		t.Fatalf("seed: %v", err)
-	}
-	tok := runnerTokenPrefix + base64.RawURLEncoding.EncodeToString([]byte("admin")) + ".badrepo01.secretsecretsecret"
-	if _, err := e.svc.authorizeRunner(ctx(), tok); err == nil {
-		t.Fatal("a malformed repo must fail")
-	}
 	// A credential with no registry record.
-	cred2 := &RunnerCredential{ID: "noregistry1", Principal: "admin", Repo: "o/r", Kind: credRunner,
+	cred2 := &RunnerCredential{ID: "noregistry1",
 		TokenHash: hashSecret("secretsecretsecret"), CreatedAt: e.now.Format(dateTimeFmt), Version: 1}
-	if _, err := store.PutBytes(ctx(), e.store, RunnerTokenKey("admin", "noregistry1"), mustJSON(cred2), store.PutOptions{Mode: store.PutCreate}); err != nil {
+	if _, err := store.PutBytes(ctx(), e.store, RunnerCredentialKey("noregistry1"), mustJSON(cred2), store.PutOptions{Mode: store.PutCreate}); err != nil {
 		t.Fatalf("seed: %v", err)
 	}
 	tok2 := runnerTokenPrefix + base64.RawURLEncoding.EncodeToString([]byte("admin")) + ".noregistry1.secretsecretsecret"
@@ -418,15 +407,15 @@ func TestAuthorizeRunnerFailures(t *testing.T) {
 	}
 	// A registry record revoked behind the credential's back.
 	res2, err := e.svc.Register(ctx(), RegisterInput{Token: func() string {
-		m, _ := e.svc.MintRegistrationToken(ctx(), "o/r", admin)
+		m, _ := e.svc.MintRegistrationToken(ctx(), admin, mintAllPolicy(""))
 		return m.Token
 	}(), Labels: []string{"linux"}})
 	if err != nil {
 		t.Fatalf("register 2: %v", err)
 	}
-	doc, _, _ := e.svc.loadRunner(ctx(), "o", "r", res2.RunnerID)
+	doc, _, _ := e.svc.loadRunner(ctx(), res2.RunnerID)
 	doc.State = RunnerRevoked
-	if _, err := store.PutBytes(ctx(), e.store, RunnerKey("o", "r", res2.RunnerID), mustJSON(doc), store.PutOptions{Mode: store.PutOverwrite}); err != nil {
+	if _, err := store.PutBytes(ctx(), e.store, RunnerKey(res2.RunnerID), mustJSON(doc), store.PutOptions{Mode: store.PutOverwrite}); err != nil {
 		t.Fatalf("seed: %v", err)
 	}
 	if _, err := e.svc.authorizeRunner(ctx(), res2.Token); err == nil {
@@ -434,13 +423,13 @@ func TestAuthorizeRunnerFailures(t *testing.T) {
 	}
 	// A corrupt registry record fails (the liveness refresh).
 	res3, err := e.svc.Register(ctx(), RegisterInput{Token: func() string {
-		m, _ := e.svc.MintRegistrationToken(ctx(), "o/r", admin)
+		m, _ := e.svc.MintRegistrationToken(ctx(), admin, mintAllPolicy(""))
 		return m.Token
 	}(), Labels: []string{"linux"}})
 	if err != nil {
 		t.Fatalf("register 3: %v", err)
 	}
-	if _, err := store.PutBytes(ctx(), e.store, RunnerKey("o", "r", res3.RunnerID), []byte("{"), store.PutOptions{Mode: store.PutOverwrite}); err != nil {
+	if _, err := store.PutBytes(ctx(), e.store, RunnerKey(res3.RunnerID), []byte("{"), store.PutOptions{Mode: store.PutOverwrite}); err != nil {
 		t.Fatalf("seed: %v", err)
 	}
 	if _, err := e.svc.authorizeRunner(ctx(), res3.Token); err == nil {
@@ -451,7 +440,7 @@ func TestAuthorizeRunnerFailures(t *testing.T) {
 func TestDeclareFailurePaths(t *testing.T) {
 	e := newTestEnv(t)
 	admin := auth.Principal{Name: "admin", Admin: true}
-	mint, _ := e.svc.MintRegistrationToken(ctx(), "o/r", admin)
+	mint, _ := e.svc.MintRegistrationToken(ctx(), admin, mintAllPolicy(""))
 	res, err := e.svc.Register(ctx(), RegisterInput{Token: mint.Token, Labels: []string{"linux"}})
 	if err != nil {
 		t.Fatalf("register: %v", err)
@@ -461,14 +450,14 @@ func TestDeclareFailurePaths(t *testing.T) {
 		t.Fatalf("authorize: %v", err)
 	}
 	// The record vanishes between authorize and declare.
-	if err := e.store.Delete(ctx(), RunnerKey("o", "r", res.RunnerID), ""); err != nil {
+	if err := e.store.Delete(ctx(), RunnerKey(res.RunnerID), ""); err != nil {
 		t.Fatalf("delete: %v", err)
 	}
 	if _, err := e.svc.Declare(ctx(), runner, DeclareInput{Labels: []string{"x"}}); err == nil {
 		t.Fatal("declare on a vanished runner must fail")
 	}
 	// A corrupt record.
-	if _, err := store.PutBytes(ctx(), e.store, RunnerKey("o", "r", res.RunnerID), []byte("{"), store.PutOptions{Mode: store.PutOverwrite}); err != nil {
+	if _, err := store.PutBytes(ctx(), e.store, RunnerKey(res.RunnerID), []byte("{"), store.PutOptions{Mode: store.PutOverwrite}); err != nil {
 		t.Fatalf("seed: %v", err)
 	}
 	if _, err := e.svc.Declare(ctx(), runner, DeclareInput{}); err == nil {
@@ -476,11 +465,11 @@ func TestDeclareFailurePaths(t *testing.T) {
 	}
 	// A record revoked between authorize and declare.
 	doc := &RunnerDoc{ID: res.RunnerID, State: RunnerActive, CreatedAt: "2026-11-20T12:00:00Z", Version: 1}
-	if _, err := store.PutBytes(ctx(), e.store, RunnerKey("o", "r", res.RunnerID), mustJSON(doc), store.PutOptions{Mode: store.PutOverwrite}); err != nil {
+	if _, err := store.PutBytes(ctx(), e.store, RunnerKey(res.RunnerID), mustJSON(doc), store.PutOptions{Mode: store.PutOverwrite}); err != nil {
 		t.Fatalf("seed: %v", err)
 	}
 	doc.State = RunnerRevoked
-	if _, err := store.PutBytes(ctx(), e.store, RunnerKey("o", "r", res.RunnerID), mustJSON(doc), store.PutOptions{Mode: store.PutOverwrite}); err != nil {
+	if _, err := store.PutBytes(ctx(), e.store, RunnerKey(res.RunnerID), mustJSON(doc), store.PutOptions{Mode: store.PutOverwrite}); err != nil {
 		t.Fatalf("seed: %v", err)
 	}
 	if _, err := e.svc.Declare(ctx(), runner, DeclareInput{}); err == nil {
@@ -492,25 +481,25 @@ func TestRegisterFailurePaths(t *testing.T) {
 	e := newTestEnv(t)
 	admin := auth.Principal{Name: "admin", Admin: true}
 	// Registry record vanished after the credential was minted.
-	mint, _ := e.svc.MintRegistrationToken(ctx(), "o/r", admin)
-	if err := e.store.Delete(ctx(), RunnerKey("o", "r", mint.ID), ""); err != nil {
+	mint, _ := e.svc.MintRegistrationToken(ctx(), admin, mintAllPolicy(""))
+	if err := e.store.Delete(ctx(), RunnerKey(mint.ID), ""); err != nil {
 		t.Fatalf("delete: %v", err)
 	}
 	if _, err := e.svc.Register(ctx(), RegisterInput{Token: mint.Token}); err == nil {
 		t.Fatal("a vanished registry record must fail register")
 	}
 	// Registry record corrupt.
-	mint2, _ := e.svc.MintRegistrationToken(ctx(), "o/r", admin)
-	if _, err := store.PutBytes(ctx(), e.store, RunnerKey("o", "r", mint2.ID), []byte("{"), store.PutOptions{Mode: store.PutOverwrite}); err != nil {
+	mint2, _ := e.svc.MintRegistrationToken(ctx(), admin, mintAllPolicy(""))
+	if _, err := store.PutBytes(ctx(), e.store, RunnerKey(mint2.ID), []byte("{"), store.PutOptions{Mode: store.PutOverwrite}); err != nil {
 		t.Fatalf("seed: %v", err)
 	}
 	if _, err := e.svc.Register(ctx(), RegisterInput{Token: mint2.Token}); err == nil {
 		t.Fatal("a corrupt registry record must fail register")
 	}
 	// Registry record revoked.
-	mint3, _ := e.svc.MintRegistrationToken(ctx(), "o/r", admin)
+	mint3, _ := e.svc.MintRegistrationToken(ctx(), admin, mintAllPolicy(""))
 	doc := &RunnerDoc{ID: mint3.ID, State: RunnerRevoked, CreatedAt: "2026-11-20T12:00:00Z", Version: 1}
-	if _, err := store.PutBytes(ctx(), e.store, RunnerKey("o", "r", mint3.ID), mustJSON(doc), store.PutOptions{Mode: store.PutOverwrite}); err != nil {
+	if _, err := store.PutBytes(ctx(), e.store, RunnerKey(mint3.ID), mustJSON(doc), store.PutOptions{Mode: store.PutOverwrite}); err != nil {
 		t.Fatalf("seed: %v", err)
 	}
 	if _, err := e.svc.Register(ctx(), RegisterInput{Token: mint3.Token}); err == nil {
@@ -519,7 +508,7 @@ func TestRegisterFailurePaths(t *testing.T) {
 	// Credential record consumed behind the first check's back: a second
 	// registration attempt through the CAS sees it. (The CAS also has a
 	// corrupt branch.)
-	mint4, _ := e.svc.MintRegistrationToken(ctx(), "o/r", admin)
+	mint4, _ := e.svc.MintRegistrationToken(ctx(), admin, mintAllPolicy(""))
 	if _, err := e.svc.Register(ctx(), RegisterInput{Token: mint4.Token}); err != nil {
 		t.Fatalf("register: %v", err)
 	}
@@ -527,25 +516,23 @@ func TestRegisterFailurePaths(t *testing.T) {
 		t.Fatal("a consumed token must fail")
 	}
 	// The credential record is corrupt.
-	mint5, _ := e.svc.MintRegistrationToken(ctx(), "o/r", admin)
-	if _, err := store.PutBytes(ctx(), e.store, RunnerTokenKey("admin", mint5.ID), []byte("{"), store.PutOptions{Mode: store.PutOverwrite}); err != nil {
+	mint5, _ := e.svc.MintRegistrationToken(ctx(), admin, mintAllPolicy(""))
+	if _, err := store.PutBytes(ctx(), e.store, RunnerTokenKey(mint5.ID), []byte("{"), store.PutOptions{Mode: store.PutOverwrite}); err != nil {
 		t.Fatalf("seed: %v", err)
 	}
 	if _, err := e.svc.Register(ctx(), RegisterInput{Token: mint5.Token}); err == nil {
 		t.Fatal("a corrupt credential must fail register")
 	}
-	// A registration token whose kind was already flipped (not registration).
-	mint6, _ := e.svc.MintRegistrationToken(ctx(), "o/r", admin)
-	cred, _, _ := e.svc.loadCredential(ctx(), "admin", mint6.ID)
-	cred.Kind = credRunner
-	if _, err := store.PutBytes(ctx(), e.store, RunnerTokenKey("admin", mint6.ID), mustJSON(cred), store.PutOptions{Mode: store.PutOverwrite}); err != nil {
+	// A corrupt registration-token record fails register.
+	mint6, _ := e.svc.MintRegistrationToken(ctx(), admin, mintAllPolicy(""))
+	if _, err := store.PutBytes(ctx(), e.store, RunnerTokenKey(mint6.ID), []byte("{"), store.PutOptions{Mode: store.PutOverwrite}); err != nil {
 		t.Fatalf("seed: %v", err)
 	}
 	if _, err := e.svc.Register(ctx(), RegisterInput{Token: mint6.Token}); err == nil {
-		t.Fatal("a runner-kind credential must not register")
+		t.Fatal("a corrupt registration token must fail")
 	}
 	// A bad secret for an existing registration token.
-	mint7, _ := e.svc.MintRegistrationToken(ctx(), "o/r", admin)
+	mint7, _ := e.svc.MintRegistrationToken(ctx(), admin, mintAllPolicy(""))
 	parts := strings.Split(mint7.Token, ".")
 	wrong := parts[0] + "." + parts[1] + "." + strings.Repeat("1", 64)
 	if _, err := e.svc.Register(ctx(), RegisterInput{Token: wrong}); err == nil {
@@ -556,45 +543,45 @@ func TestRegisterFailurePaths(t *testing.T) {
 func TestRevokeAndListFailurePaths(t *testing.T) {
 	e := newTestEnv(t)
 	admin := auth.Principal{Name: "admin", Admin: true}
-	mint, _ := e.svc.MintRegistrationToken(ctx(), "o/r", admin)
+	mint, _ := e.svc.MintRegistrationToken(ctx(), admin, mintAllPolicy(""))
 	// Revoking twice is idempotent; the credential record may already be gone.
-	if err := e.svc.RevokeRunner(ctx(), "o/r", mint.ID, admin); err != nil {
+	if err := e.svc.RevokeRunner(ctx(), mint.ID, admin); err != nil {
 		t.Fatalf("revoke: %v", err)
 	}
-	if err := e.svc.RevokeRunner(ctx(), "o/r", mint.ID, admin); err != nil {
+	if err := e.svc.RevokeRunner(ctx(), mint.ID, admin); err != nil {
 		t.Fatalf("revoke twice: %v", err)
 	}
-	if err := e.store.Delete(ctx(), RunnerTokenKey("admin", mint.ID), ""); err != nil {
+	if err := e.store.Delete(ctx(), RunnerTokenKey(mint.ID), ""); err != nil {
 		t.Fatalf("delete: %v", err)
 	}
-	if err := e.svc.revokeCredential(ctx(), "admin", mint.ID, e.now.Format(dateTimeFmt)); err != nil {
+	if err := e.svc.revokeRunnerCredential(ctx(), mint.ID, e.now.Format(dateTimeFmt)); err != nil {
 		t.Fatalf("revoke absent credential: %v", err)
 	}
 	// A corrupt credential record surfaces from the credential revoke.
-	mint2, _ := e.svc.MintRegistrationToken(ctx(), "o/r", admin)
-	if _, err := store.PutBytes(ctx(), e.store, RunnerTokenKey("admin", mint2.ID), []byte("{"), store.PutOptions{Mode: store.PutOverwrite}); err != nil {
+	mint2, _ := e.svc.MintRegistrationToken(ctx(), admin, mintAllPolicy(""))
+	if _, err := store.PutBytes(ctx(), e.store, RunnerCredentialKey(mint2.ID), []byte("{"), store.PutOptions{Mode: store.PutOverwrite}); err != nil {
 		t.Fatalf("seed: %v", err)
 	}
-	if err := e.svc.revokeCredential(ctx(), "admin", mint2.ID, e.now.Format(dateTimeFmt)); err == nil {
+	if err := e.svc.revokeRunnerCredential(ctx(), mint2.ID, e.now.Format(dateTimeFmt)); err == nil {
 		t.Fatal("a corrupt credential must surface")
 	}
 	// ListRunners tolerates a record deleted between LIST and GET.
 	vanish := &vanishingStore{Memory: store.NewMemory()}
-	vanish.key = RunnerKey("o", "r", mint2.ID)
+	vanish.key = RunnerKey(mint2.ID)
 	vanishEnvelope := newTestEnv(t)
 	vanishEnvelope.svc = New(vanish, vanishEnvelope.roles)
 	vanishEnvelope.svc.Now = func() time.Time { return e.now }
-	if _, err := store.PutBytes(ctx(), vanish, RunnerKey("o", "r", mint2.ID), mustJSON(&RunnerDoc{ID: mint2.ID, State: RunnerActive, CreatedAt: "x", Version: 1}), store.PutOptions{Mode: store.PutCreate}); err != nil {
+	if _, err := store.PutBytes(ctx(), vanish, RunnerKey(mint2.ID), mustJSON(&RunnerDoc{ID: mint2.ID, State: RunnerActive, CreatedAt: "x", Version: 1}), store.PutOptions{Mode: store.PutCreate}); err != nil {
 		t.Fatalf("seed: %v", err)
 	}
-	if rows, err := vanishEnvelope.svc.ListRunners(ctx(), "o/r", admin); err != nil || len(rows) != 0 {
+	if rows, err := vanishEnvelope.svc.ListRunners(ctx(), admin); err != nil || len(rows) != 0 {
 		t.Fatalf("vanished runner = %+v, %v", rows, err)
 	}
 	// A corrupt runner record fails the list.
-	if _, err := store.PutBytes(ctx(), e.store, RunnerKey("o", "r", mint2.ID), []byte("{"), store.PutOptions{Mode: store.PutOverwrite}); err != nil {
+	if _, err := store.PutBytes(ctx(), e.store, RunnerKey(mint2.ID), []byte("{"), store.PutOptions{Mode: store.PutOverwrite}); err != nil {
 		t.Fatalf("seed: %v", err)
 	}
-	if _, err := e.svc.ListRunners(ctx(), "o/r", admin); err == nil {
+	if _, err := e.svc.ListRunners(ctx(), admin); err == nil {
 		t.Fatal("a corrupt runner record must fail the list")
 	}
 }
@@ -777,7 +764,7 @@ func TestGCCapAndCorruptHead(t *testing.T) {
 	e := newTestEnv(t)
 	admin := auth.Principal{Name: "admin", Admin: true}
 	run := e.mustCreate(t)[0]
-	runner := &runnerAuth{Owner: "o", Repo: "r", Doc: &RunnerDoc{ID: "rnr", Labels: []string{"ubuntu-latest"}, State: RunnerActive}}
+	runner := &runnerAuth{Doc: &RunnerDoc{ID: "rnr", Labels: []string{"linux"}, AllowAll: true, State: RunnerActive}}
 	job, err := e.svc.FetchJob(ctx(), runner, time.Millisecond)
 	if err != nil || job == nil {
 		t.Fatalf("fetch = %+v, %v", job, err)
@@ -820,7 +807,7 @@ func TestQueueCorruptAndRenewBranches(t *testing.T) {
 	if _, err := store.PutBytes(ctx(), e.store, QueueEntryKey("o", "r", entry.Seq), []byte("{"), store.PutOptions{Mode: store.PutOverwrite}); err != nil {
 		t.Fatalf("seed: %v", err)
 	}
-	runner := &runnerAuth{Owner: "o", Repo: "r", Doc: &RunnerDoc{ID: "rnr", Labels: []string{"ubuntu-latest"}, State: RunnerActive}}
+	runner := &runnerAuth{Doc: &RunnerDoc{ID: "rnr", Labels: []string{"linux"}, AllowAll: true, State: RunnerActive}}
 	if _, err := e.svc.claimLoop(ctx(), "o", "r", runner.Doc, runner.Doc.Labels); err == nil {
 		t.Fatal("a corrupt entry must fail the probe")
 	}

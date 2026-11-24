@@ -8,7 +8,7 @@
 <form class="card max-w-2xl p-4" method="post" action="/{{$.Org}}/settings" enctype="multipart/form-data"
       hx-post="/{{$.Org}}/settings" hx-target="#settings-panel" hx-select="#settings-panel" hx-swap="outerHTML">
   <input type="hidden" name="org_action" value="profile">
-  <h3 class="card-header">Profile</h3>
+  <h2 class="card-header">Profile</h2>
   {{if .ReadOnly}}
   <dl class="grid grid-cols-1 gap-x-6 gap-y-1 text-sm sm:grid-cols-[minmax(8rem,30%)_1fr]">
     <dt class="eyebrow">display name</dt><dd>{{.DisplayName}}</dd>
@@ -71,11 +71,11 @@
 
 {{define "settings-org-members"}}
 <section class="card p-4">
-  <h3 class="card-header">Members</h3>
+  <h2 class="card-header">Members</h2>
   {{if .Members}}
   <div class="overflow-x-auto">
     <table class="data-table">
-      <thead><tr><th>principal</th><th>role</th><th></th></tr></thead>
+      <thead><tr><th scope="col">principal</th><th scope="col">role</th><th scope="col"></th></tr></thead>
       <tbody>
         {{range $i, $m := .Members}}
         <tr>
@@ -130,7 +130,7 @@
 
 {{define "settings-org-teams"}}
 <section class="card p-4">
-  <h3 class="card-header">Teams</h3>
+  <h2 class="card-header">Teams</h2>
   {{if .Teams}}
   <div class="space-y-3">
     {{range $i, $t := .Teams}}
@@ -216,14 +216,14 @@
 
 {{define "settings-org-invitations"}}
 <section class="card p-4">
-  <h3 class="card-header">Invitations</h3>
+  <h2 class="card-header">Invitations</h2>
   {{if .InviteLink}}
   {{template "settings-invite-share" .InviteLink}}
   {{end}}
   {{if .Invites}}
   <div class="overflow-x-auto">
     <table class="data-table">
-      <thead><tr><th>subject</th><th>role</th><th>invited by</th><th>expires</th><th>accept link</th><th></th></tr></thead>
+      <thead><tr><th scope="col">subject</th><th scope="col">role</th><th scope="col">invited by</th><th scope="col">expires</th><th scope="col">accept link</th><th scope="col"></th></tr></thead>
       <tbody>
         {{range .Invites}}
         <tr>
@@ -278,12 +278,12 @@
 {{/* The live prepend is the islands group's SSE reader; data-sse names the
      stream kind, and the endpoint lands with the org-activity view. */}}
 <section class="card p-4" aria-label="Organization activity" data-sse="org-activity">
-  <h3 class="card-header">Activity</h3>
+  <h2 class="card-header">Activity</h2>
   <p class="muted mb-2 text-sm">member, team, repository, and invitation events — newest first, live.</p>
   {{if .Activity}}
   <div class="overflow-x-auto">
     <table class="data-table">
-      <thead><tr><th>time</th><th>event</th><th>actor</th><th>detail</th></tr></thead>
+      <thead><tr><th scope="col">time</th><th scope="col">event</th><th scope="col">actor</th><th scope="col">detail</th></tr></thead>
       <tbody id="org-activity-rows">
         {{range .Activity}}
         <tr data-seq="{{.Seq}}"><td class="tabular mono text-[11px]">{{.At}}</td><td><code class="mono text-xs">{{.Action}}</code></td><td><code class="mono text-xs">{{if .Actor}}{{.Actor}}{{else}}—{{end}}</code></td><td class="text-sm">{{.Title}}</td></tr>
@@ -303,7 +303,7 @@
 
 {{define "settings-org-danger"}}
 <section class="card p-4" aria-label="Danger Zone">
-  <h3 class="card-header text-[var(--pd-danger)]">Danger Zone</h3>
+  <h2 class="card-header text-[var(--pd-danger)]">Danger Zone</h2>
   <p class="muted text-sm">Deleting the organization is irreversible. Repositories it owns must be transferred to another owner (repo settings → Danger Zone) or deleted first.</p>
   <form class="mt-2 grid gap-2" method="post" action="/{{.Org}}/settings"
         hx-post="/{{.Org}}/settings" hx-target="#settings-panel" hx-select="#settings-panel" hx-swap="outerHTML"

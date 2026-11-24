@@ -165,6 +165,11 @@ func (s *Service) releaseConcurrency(ctx context.Context, owner, repo, runID str
 func runGroups(jobs []*Job) []string {
 	seen := map[string]bool{}
 	for _, j := range jobs {
+		// A job the `if:`/`needs:` decision terminalised holds nothing: its
+		// group must not block another run while this one is still live.
+		if j.State != JobQueued && j.State != JobRunning {
+			continue
+		}
 		if j.Spec == nil || j.Spec.Concurrency == nil {
 			continue
 		}

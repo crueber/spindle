@@ -454,7 +454,9 @@ Operator view of one pass on an ssd host (`spindle serve --config walgit.toml`):
   be a LIST per repo per pass), so it carries its own in-memory cadence gate instead — a
   `DueSweeper`'s `Due(repo)` is asked BEFORE a task is opened, so an idle repo costs one map lookup,
   not a task record. First (and only) consumer: `packages-gc` (docs/features/14 §6), bound from
-  composition. A sweep failure is logged and counted (`OutcomeError`) but never fails the pass, and
+  composition; the repository Insights refresh (docs/features/18, `insights-refresh`) is the second,
+  with a 30-minute in-memory gate and its own 24-hour/head-equality staleness check inside the task.
+  A sweep failure is logged and counted (`OutcomeError`) but never fails the pass, and
   a cancelled sweep is safe because every pass is idempotent.
 - **Per-repo compaction/maintenance/upstream editors + op run control (WP9, 2026-11-21).** The repo
   Settings → Scheduled tab edits `[maintenance]`, `[compaction]` and `[upstream]` (git/lfs/follow) as

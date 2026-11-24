@@ -136,17 +136,13 @@ func newCollabFixture(t *testing.T) *collabFixture {
 		reg:       &collabFakeRegistry{exists: map[string]bool{"acme/widgets": true}},
 	}
 	cfg := &config.Config{}
-	cfg.Server.Auth.Mode = "token"
 	cfg.Server.Auth.AnonymousRead = true
 	env := Env{
 		Cfg: cfg,
 		API: &api.Env{Repos: f.reg, Repo: f.view},
 		Now: func() time.Time { return time.Date(2026, 11, 19, 12, 0, 0, 0, time.UTC) },
 	}
-	srv, err := New(env)
-	if err != nil {
-		t.Fatalf("webui.New: %v", err)
-	}
+	srv := newTestServer(t, env)
 	srv.BindAuth(pages.Auth{
 		Authenticate: func(r *http.Request) (auth.Principal, *auth.AuthError) {
 			return f.principal, nil
@@ -390,7 +386,6 @@ func TestCollabAnonymousWriteTarget(t *testing.T) {
 	f := newCollabFixture(t)
 	f.principal = auth.Anonymous()
 	cfg := f.srv.env.Cfg
-	cfg.Server.Auth.Mode = "oidc"
 	cfg.Server.Auth.AnonymousRead = true
 	f.deps(issueDeps())
 	rec := f.get("/acme/widgets/issues")
@@ -720,7 +715,7 @@ func TestCollabChecks(t *testing.T) {
 
 	rec := f.get("/acme/widgets/checks")
 	wantStatus(t, rec, http.StatusOK)
-	wantContains(t, rec, "Checks", "1 context", "failure", "bg-red-500", "reporting API", `hx-get="/acme/widgets/checks/`+sha+`/contexts"`)
+	wantContains(t, rec, "Checks", "1 context", "failure", "dot-fail", "reporting API", `hx-get="/acme/widgets/checks/`+sha+`/contexts"`)
 
 	// The expand fallback (?expanded=) renders the context rows inline.
 	rec = f.get("/acme/widgets/checks?expanded=" + sha)
@@ -739,7 +734,7 @@ func TestCollabChecks(t *testing.T) {
 	f.deps(checkDeps())
 	rec = f.get("/acme/widgets/checks/" + sha)
 	wantStatus(t, rec, http.StatusOK)
-	wantContains(t, rec, "Checks for", "ci/test", "3 failed", "bg-red-500")
+	wantContains(t, rec, "Checks for", "ci/test", "3 failed", "dot-fail")
 	// Non-hex sha is 404, never a 400 page.
 	wantStatus(t, f.get("/acme/widgets/checks/nothex"), http.StatusNotFound)
 
@@ -855,6 +850,7 @@ func TestCollabRouteOwnership(t *testing.T) {
 }
 
 func TestCollabHelpers(t *testing.T) {
+	t.Parallel()
 	if got := issueEventText(&issues.Event{Type: issues.EventStateChanged, To: ptr("closed")}, nil); got != "closed" {
 		t.Fatalf("unhonest close text: %q", got)
 	}
@@ -1008,7 +1004,6 @@ func TestCollabIssueWrites(t *testing.T) {
 	}
 	// Anonymous write in oidc mode redirects to the interstitial.
 	f.principal = auth.Anonymous()
-	f.srv.env.Cfg.Server.Auth.Mode = "oidc"
 	rec := f.post("/acme/widgets/issues/3/comments", url.Values{"body": {"hi"}})
 	if rec.Code != http.StatusSeeOther || !strings.HasPrefix(rec.Header().Get("Location"), "/login-required?next=") {
 		t.Fatalf("anon write = %d %q", rec.Code, rec.Header().Get("Location"))
@@ -1326,6 +1321,7 @@ func TestCollabMergeTaskRequiresMaintain(t *testing.T) {
 // --- helper coverage ---------------------------------------------------------
 
 func TestCollabPureHelpers(t *testing.T) {
+	t.Parallel()
 	milestones := []*issues.Milestone{{ID: "000001", Title: "v1"}, {ID: "000002", Title: "v2", State: "closed"}}
 	ev := func(typ string) *issues.Event { return &issues.Event{Type: typ} }
 
@@ -1484,15 +1480,6 @@ func TestCollabPureHelpers(t *testing.T) {
 			t.Fatalf("verdict chip %q empty class", state)
 		}
 	}
-	for _, tc := range []struct{ state, want, cls string }{
-		{checks.StateSuccess, "bg-emerald-500", ""}, {checks.StatePending, "bg-amber-400", ""},
-		{checks.StateFailure, "bg-red-500", ""}, {checks.StateError, "bg-red-700", ""},
-		{"other", "bg-zinc-400", ""},
-	} {
-		if got := checkStateDot(tc.state); !strings.Contains(got, tc.want) {
-			t.Fatalf("dot %q = %q", tc.state, got)
-		}
-	}
 	if zeroChecksTitle(nil, true) != "No checks configured" || zeroChecksTitle([]string{"a"}, true) != "No checks reported yet" || zeroChecksTitle(nil, false) != "No checks reported yet" {
 		t.Fatal("zeroChecksTitle")
 	}
@@ -1507,30 +1494,30 @@ func TestCollabPureHelpers(t *testing.T) {
 	// merge machine + display
 	pr := &pulls.PRDoc{}
 	pr.Merged = true
-	if got := pullMergeState(pr, nil, nil, "", nil, identity.RoleAdmin, nil); got.State != "merged" {
+	if got := pullMergeState(pr, nil, nil, "", nil, identity.RoleAdmin, nil, policy.MergeGate{}); got.State != "merged" {
 		t.Fatalf("merge state merged = %q", got.State)
 	}
 	pr = &pulls.PRDoc{Draft: true}
-	if got := pullMergeState(pr, nil, nil, "", nil, identity.RoleAdmin, nil); got.State != "draft" {
+	if got := pullMergeState(pr, nil, nil, "", nil, identity.RoleAdmin, nil, policy.MergeGate{}); got.State != "draft" {
 		t.Fatalf("merge state draft = %q", got.State)
 	}
-	if got := pullMergeState(nil, &pulls.MergeableDoc{State: pulls.MergeableDirty}, nil, "", nil, identity.RoleAdmin, nil); got.State != "blocked" {
+	if got := pullMergeState(nil, &pulls.MergeableDoc{State: pulls.MergeableDirty}, nil, "", nil, identity.RoleAdmin, nil, policy.MergeGate{}); got.State != "blocked" {
 		t.Fatalf("merge state dirty = %q", got.State)
 	}
-	if got := pullMergeState(nil, &pulls.MergeableDoc{State: pulls.MergeableClean}, nil, "", nil, identity.RoleAdmin, nil); !got.CanMerge {
+	if got := pullMergeState(nil, &pulls.MergeableDoc{State: pulls.MergeableClean}, nil, "", nil, identity.RoleAdmin, nil, policy.MergeGate{}); !got.CanMerge {
 		t.Fatalf("merge state clean = %+v", got)
 	}
-	if got := pullMergeState(nil, nil, []string{"a"}, "", nil, identity.RoleAdmin, nil); got.State != "blocked" || !strings.Contains(got.Tooltip, "blocked") {
+	if got := pullMergeState(nil, nil, []string{"a"}, "", nil, identity.RoleAdmin, nil, policy.MergeGate{}); got.State != "blocked" || !strings.Contains(got.Tooltip, "blocked") {
 		t.Fatalf("merge state checks = %+v", got)
 	}
 	fail := &pulls.TaskRecord{State: "failed", Error: "boom"}
-	if got := pullMergeState(nil, nil, nil, "", nil, identity.RoleAdmin, fail); got.State != "failed" {
+	if got := pullMergeState(nil, nil, nil, "", nil, identity.RoleAdmin, fail, policy.MergeGate{}); got.State != "failed" {
 		t.Fatalf("merge state failed = %q", got.State)
 	}
-	if got := pullMergeState(nil, nil, nil, review.DecisionChangesRequested, ptrBool(false), identity.RoleAdmin, nil); got.State != "ready" {
+	if got := pullMergeState(nil, nil, nil, review.DecisionChangesRequested, ptrBool(false), identity.RoleAdmin, nil, policy.MergeGate{}); got.State != "ready" {
 		t.Fatalf("changes requested without a rule must not block: %q", got.State)
 	}
-	if got := pullMergeState(nil, nil, nil, review.DecisionChangesRequested, nil, identity.RoleAdmin, nil); got.State != "blocked" {
+	if got := pullMergeState(nil, nil, nil, review.DecisionChangesRequested, nil, identity.RoleAdmin, nil, policy.MergeGate{}); got.State != "blocked" {
 		t.Fatalf("unknown rule presence must fail closed: %q", got.State)
 	}
 	for _, tc := range []struct {
@@ -1554,7 +1541,7 @@ func TestCollabPureHelpers(t *testing.T) {
 		{"", "Unknown", nil, false, false, "", nil},
 		{"weird", "weird", nil, false, false, "", nil},
 	} {
-		got := mergeabilityDisplay(tc.state, tc.mergeable, tc.blockers, tc.review, tc.draft, tc.zero)
+		got := mergeabilityDisplay(tc.state, tc.mergeable, tc.blockers, tc.review, tc.draft, tc.zero, false)
 		if got.Text != tc.want {
 			t.Fatalf("mergeability(%q) = %q want %q", tc.state, got.Text, tc.want)
 		}

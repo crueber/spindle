@@ -64,7 +64,7 @@
     <div class="overflow-x-auto">
       <table class="data-table">
         <thead>
-          <tr><th class="w-40">method</th><th>path</th><th>what</th></tr>
+          <tr><th scope="col" class="w-40">method</th><th scope="col">path</th><th scope="col">what</th></tr>
         </thead>
         <tbody>
           {{range .Data.Routes}}
@@ -213,9 +213,14 @@
           <code class="font-mono text-xs">POST …/reviews</code> takes
           <code class="font-mono text-xs">{state, body?, commit_sha?, threads?}</code>
           with <code class="font-mono text-xs">state</code> one of
-          <code class="font-mono text-xs">approve|request-changes|comment</code>;
+          <code class="font-mono text-xs">APPROVED|CHANGES_REQUESTED|COMMENTED</code>;
           thread anchors are
-          <code class="font-mono text-xs">{path, side, old_start?, old_lines?, new_start?, new_lines?, commit_sha?}</code>.
+          <code class="font-mono text-xs">{path, side, old_start, old_lines, new_start, new_lines, commit_sha, context_sha}</code>
+          — every field required (the side's range pair must be ≥ 1, the
+          other pair zero; <code class="font-mono text-xs">context_sha</code>
+          is the §4 drift hash). A thread entry is
+          <code class="font-mono text-xs">{anchor, body}</code>; a reply is
+          <code class="font-mono text-xs">{body}</code>.
         </li>
       </ul>
       <p class="muted">

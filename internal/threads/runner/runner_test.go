@@ -228,6 +228,11 @@ func TestRunnerRefusesHostDockerWithoutAck(t *testing.T) {
 	if _, err := New(Config{ServerURL: "http://x", Token: "t", Capacity: 0, AllowHostDocker: true}); err != nil {
 		t.Fatalf("New with ack: %v", err)
 	}
+	// The worker count is bounded by the same ceiling the server records.
+	r, err := New(Config{ServerURL: "http://x", Token: "t", Capacity: 999, AllowHostDocker: true})
+	if err != nil || r.cfg.Capacity != threads.MaxRunnerCapacity {
+		t.Fatalf("capacity clamp = %+v, %v", r, err)
+	}
 }
 
 func TestNextBackoffCaps(t *testing.T) {

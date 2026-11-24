@@ -1,0 +1,48 @@
+{{/* partials/settings_repo_wal.html — repo settings → WAL.
+   One settings tab per file: a new tab is a new settings_repo_<tab>.html
+   partial plus one dispatch line in pages/settings/repo.html — never a body
+   in the shell. Every panel receives the SettingsRepoPage, so a form can
+   build its action from .Owner/.Name. Anatomy: .card sections, the .setup-row
+   label/control pairing for forms, .data-table inside overflow-x-auto
+   (guideline §8). 390px: fields full width, toggle rows keep
+   label-left/control-right, tables scroll in place. */}}
+{{/* ---- WAL (the real panel, WP9 G16) ------------------------------------ */}}
+{{define "settings-repo-wal"}}
+{{with .WAL}}
+<div class="space-y-4">
+  <section class="card overflow-hidden">
+    <div class="flex flex-wrap items-center gap-2 border-b border-[var(--pd-line)] px-3 py-1.5">
+      <h3 class="eyebrow">WAL health</h3>
+      <span class="{{.HealthTone}}">{{.Health}}</span>
+    </div>
+    <div class="space-y-1.5 px-3 py-2.5">
+      {{if .ServedBy}}
+      <p class="flex flex-wrap items-baseline gap-x-2 font-mono text-[11px]">
+        <span class="eyebrow">served by</span>
+        <span class="text-[var(--pd-text-2)]">{{.ServedBy}}</span>
+      </p>
+      {{end}}
+      {{if .CloneURL}}
+      <p class="flex flex-wrap items-baseline gap-x-2 font-mono text-[11px]">
+        <span class="eyebrow">clone</span>
+        <span class="break-all text-[var(--pd-text-2)]">{{.CloneURL}}</span>
+      </p>
+      {{end}}
+      <p class="font-mono text-[11px] text-[var(--pd-text-2)]">{{.Packs}}</p>
+      <p class="font-mono text-[11px]"><a class="link" href="/{{.Owner}}/{{.Name}}/wal">the full WAL view →</a></p>
+    </div>
+  </section>
+
+  <section class="card p-4">
+    <h3 class="card-header">Manifest</h3>
+    {{if .Facts}}
+    <dl class="grid grid-cols-1 gap-x-6 gap-y-1 text-sm sm:grid-cols-[minmax(10rem,30%)_1fr]">
+      {{range .Facts}}<dt class="muted mono text-[11px] break-all">{{.Key}}</dt><dd class="break-words mono text-xs">{{.Value}}</dd>{{end}}
+    </dl>
+    {{else}}<p class="muted text-sm">no manifest facts reported.</p>{{end}}
+  </section>
+
+  {{template "repo-wal-ops" .Panel}}
+</div>
+{{else}}{{template "settings-repo-notwired" .}}{{end}}
+{{end}}

@@ -26,6 +26,7 @@ import { attachNotifications, attachNotifyRepo } from "./notifications.js";
 import { attachReleases } from "./releases.js";
 import { attachPackages } from "./packages.js";
 import { attachTags } from "./tags.js";
+import { attachContents } from "./contents.js";
 import { attachSocial, attachSocialTop } from "./social.js";
 import { attachOrgs } from "./orgs.js";
 import { attachTransfer } from "./transfer.js";
@@ -220,6 +221,7 @@ export class ReposClient {
     attachReleases(r);
     attachPackages(r);
     attachTags(r);
+    attachContents(r);
     attachSocial(r);
     attachMirror(r);
     attachPushMirror(r);

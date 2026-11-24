@@ -4,7 +4,7 @@ package setup
 // came from, exactly like a config.Validate rejection. That key is what the
 // /setup page uses to mark the offending row and open a collapsed Advanced
 // group, so it is asserted here per field type and then rendered in
-// internal/webui (TestSettingsSetupCoercionErrorMarksItsRow).
+// internal/webui (TestAdminConfigCoercionErrorMarksItsRow).
 
 import (
 	"net/url"

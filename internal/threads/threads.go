@@ -8,9 +8,10 @@
 // pass B2 and is not here.
 //
 // Triggers: push (client and the merge task's server-side publish),
-// pull_request (opened/synchronize/reopened; never close) and
-// workflow_dispatch. The pulls service emits the PR edges through its
-// PullEvents seam; composition binds every trigger to one CreateRun path.
+// pull_request (opened/synchronize/reopened; never close, and `types` filters
+// over exactly that closed set) and workflow_dispatch. The pulls service emits
+// the PR edges through its PullEvents seam; composition binds every trigger to
+// one CreateRun path.
 // Parsing is per file, so a broken workflow disables only itself and its error
 // is visible in the UI/API (15 §2.1).
 //
@@ -121,13 +122,47 @@ type Service struct {
 	// Retention is the terminal-run window (threads.retention; default 30d).
 	// The maintainer's threads-gc retention half deletes runs past it (gc.go).
 	Retention time.Duration
+	// MaxArtifactBytesPerRun / MaxArtifactBytesPerFile bound published
+	// artifacts (threads.max_artifact_bytes_per_run / _per_file, 15 §8);
+	// zero selects the defaults in artifacts.go.
+	MaxArtifactBytesPerRun  int64
+	MaxArtifactBytesPerFile int64
+	// ImageAllowPrefixes / ImageRequireDigest are the instance-wide image gate
+	// (threads.image_allow_prefixes / _require_digest,
+	// docs/PLAN-ARTIFACT-KEEPER.md §3.3): enforced at run creation over the
+	// container and every service image, for every trust class. Empty/false =
+	// no restriction (the compatible default).
+	ImageAllowPrefixes []string
+	ImageRequireDigest bool
+	// CheckoutBaseURL is the configured public origin (server.public_url) used
+	// for the runner-facing checkout URL. It wins over the request origin
+	// because it is the operator's declaration of the address JOB CONTAINERS
+	// can reach: a canonical browser host (walgit.localhost) or a proxy name
+	// resolves on the host but not inside a container. Empty keeps the
+	// request-derived origin (docs/threads.md §4.4).
+	CheckoutBaseURL string
+	// Audit records host-administrative runner mutations (mint/revoke) in the
+	// host audit family. Composition binds moderation.RecordAdmin; nil (tests,
+	// restricted builds) records nothing. A failure is logged, never fatal: the
+	// mutation is committed and must not be reverted by an audit outage.
+	Audit func(ctx context.Context, actor, action, target, detail string) error
+
+	// runnerSweep gates the instance runner family's retention: the family is
+	// instance-wide, so one process-wide hourly gate keeps the per-repository
+	// retention pass from LISTing it once per repository. A pointer keeps
+	// Service copyable (tests copy it by value).
+	runnerSweep *runnerSweepGate
+	// oidcCache is the in-process OIDC signing-key cache (one entry: active
+	// private key + rendered JWKS). A pointer keeps Service copyable; New
+	// installs it, and a literal Service falls back to a throwaway cache.
+	oidcCache *oidcKeyCache
 }
 
 // New builds a Service over st. The protocol keys default to a process-local
 // keyring (attempt tokens live exactly as long as the jobs they authorise);
 // composition replaces it with the configured one via SetKeyring.
 func New(st store.ObjectStore, roles RoleService) *Service {
-	s := &Service{Store: st, Roles: roles, Now: time.Now}
+	s := &Service{Store: st, Roles: roles, Now: time.Now, oidcCache: &oidcKeyCache{}}
 	if k, err := NewKeyring("", ""); err == nil {
 		s.keys = k
 	}
@@ -337,6 +372,10 @@ func statusFor(err error) int {
 		return http.StatusConflict
 	case errors.Is(err, ErrUnprocessable):
 		return http.StatusUnprocessableEntity
+	case errors.Is(err, ErrTooLarge):
+		return http.StatusRequestEntityTooLarge
+	case errors.Is(err, ErrRateLimited):
+		return http.StatusTooManyRequests
 	case errors.Is(err, ErrUnavailable):
 		return http.StatusServiceUnavailable
 	default:

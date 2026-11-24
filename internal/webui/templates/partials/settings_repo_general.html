@@ -1,0 +1,59 @@
+{{/* partials/settings_repo_general.html — repo settings → General (description, features, code review).
+   One settings tab per file: a new tab is a new settings_repo_<tab>.html
+   partial plus one dispatch line in pages/settings/repo.html — never a body
+   in the shell. Every panel receives the SettingsRepoPage, so a form can
+   build its action from .Owner/.Name. Anatomy: .card sections, the .setup-row
+   label/control pairing for forms, .data-table inside overflow-x-auto
+   (guideline §8). 390px: fields full width, toggle rows keep
+   label-left/control-right, tables scroll in place. */}}
+{{/* ---- General (description, features, code review) --------------------- */}}
+{{define "settings-repo-general"}}
+{{with .General}}
+<form class="card space-y-4 p-4" method="post" action="/{{$.Owner}}/{{$.Name}}/settings/general"
+      hx-post="/{{$.Owner}}/{{$.Name}}/settings/general" hx-target="#settings-panel" hx-select="#settings-panel" hx-swap="outerHTML">
+  <div>
+    <label class="mb-1 block text-sm font-medium" for="repo-description">Description</label>
+    <input class="input w-full" id="repo-description" name="description" type="text" maxlength="{{.MaxLength}}"
+           placeholder="A short description of this repository" value="{{.Description}}">
+    <p class="muted mt-1 text-[11px]">Shown in the repo header next to the name. Empty hides it. Saving requires admin.</p>
+  </div>
+
+  <hr class="border-current opacity-10">
+
+  <h4 class="eyebrow">Features</h4>
+  <p class="muted text-[11px]">Unchecking hides a tab or refuses new stars/watches/forks. Existing content is kept — re-enabling restores everything.</p>
+  <div class="grid gap-2">
+    {{range .Features}}
+    <label class="flex cursor-pointer items-center justify-between gap-4 text-sm">
+      <span class="min-w-0">
+        <span class="font-medium">{{.Label}}</span>
+        <span class="muted block text-[11px]">{{.Hint}}</span>
+      </span>
+      {{/* Forgejo #533: the .input class never goes on a checkbox. */}}
+      <input type="hidden" name="feature_{{.Key}}" value="false">
+      <input type="checkbox" role="switch" name="feature_{{.Key}}" value="true"
+             class="h-5 w-5 shrink-0 check"{{if .Enabled}} checked{{end}} aria-label="{{.Label}}">
+    </label>
+    {{end}}
+  </div>
+
+  <hr class="border-current opacity-10">
+
+  <h4 class="eyebrow">Code review</h4>
+  <label class="flex cursor-pointer items-center justify-between gap-4 text-sm">
+    <span class="min-w-0">
+      <span class="font-medium">Allow self-approval</span>
+      <span class="muted block text-[11px]">Authors may approve or request changes on their own pull requests (a self-approval never counts toward required reviews).</span>
+    </span>
+    <input type="hidden" name="allow_self_approval" value="false">
+    <input type="checkbox" role="switch" name="allow_self_approval" value="true"
+           class="h-5 w-5 shrink-0 check"{{if .SelfApproval}} checked{{end}} aria-label="Allow self-approval">
+  </label>
+
+  <div class="flex flex-wrap items-center gap-2">
+    <button type="submit" class="btn primary">Save</button>
+  </div>
+  {{if .Error}}<p class="err-line" role="alert">{{.Error}}</p>{{end}}
+</form>
+{{else}}{{template "settings-repo-notwired" .}}{{end}}
+{{end}}

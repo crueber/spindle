@@ -17,6 +17,7 @@ index 1111111..2222222 100644
 `
 
 func TestParseUnifiedDiffHappyPath(t *testing.T) {
+	t.Parallel()
 	files := ParseUnifiedDiff(diffMod)
 	if len(files) != 1 {
 		t.Fatalf("files = %d, want 1", len(files))
@@ -53,12 +54,14 @@ func TestParseUnifiedDiffHappyPath(t *testing.T) {
 }
 
 func TestParseUnifiedDiffEmpty(t *testing.T) {
+	t.Parallel()
 	if files := ParseUnifiedDiff(""); files != nil {
 		t.Fatalf("empty = %+v", files)
 	}
 }
 
 func TestParseUnifiedDiffNewFile(t *testing.T) {
+	t.Parallel()
 	files := ParseUnifiedDiff(`diff --git a/new.txt b/new.txt
 new file mode 100644
 index 0000000..789
@@ -85,6 +88,7 @@ index 0000000..789
 }
 
 func TestParseUnifiedDiffDevNullMarksAddedWithoutModeLine(t *testing.T) {
+	t.Parallel()
 	files := ParseUnifiedDiff(`diff --git a/n.txt b/n.txt
 --- /dev/null
 +++ b/n.txt
@@ -97,6 +101,7 @@ func TestParseUnifiedDiffDevNullMarksAddedWithoutModeLine(t *testing.T) {
 }
 
 func TestParseUnifiedDiffDeletedFile(t *testing.T) {
+	t.Parallel()
 	files := ParseUnifiedDiff(`diff --git a/gone.txt b/gone.txt
 deleted file mode 100644
 index 789..0000000
@@ -118,6 +123,7 @@ index 789..0000000
 }
 
 func TestParseUnifiedDiffRenameUsesNewPath(t *testing.T) {
+	t.Parallel()
 	files := ParseUnifiedDiff(`diff --git a/old.txt b/renamed.txt
 similarity index 95%
 rename from old.txt
@@ -135,6 +141,7 @@ rename to renamed.txt
 }
 
 func TestParseUnifiedDiffCopy(t *testing.T) {
+	t.Parallel()
 	files := ParseUnifiedDiff(`diff --git a/src.txt b/dst.txt
 similarity index 100%
 copy from src.txt
@@ -147,6 +154,7 @@ copy to dst.txt
 }
 
 func TestParseUnifiedDiffBinary(t *testing.T) {
+	t.Parallel()
 	files := ParseUnifiedDiff(`diff --git a/img.png b/img.png
 index 11..22 100644
 Binary files a/img.png and b/img.png differ
@@ -166,6 +174,7 @@ literal 10
 }
 
 func TestParseUnifiedDiffAddedBinaryKeepsAddedStatus(t *testing.T) {
+	t.Parallel()
 	files := ParseUnifiedDiff(`diff --git a/pic.png b/pic.png
 new file mode 100644
 index 0000000..abc
@@ -177,6 +186,7 @@ Binary files /dev/null and b/pic.png differ
 }
 
 func TestParseUnifiedDiffMultipleFiles(t *testing.T) {
+	t.Parallel()
 	files := ParseUnifiedDiff(`diff --git a/a.txt b/a.txt
 --- a/a.txt
 +++ b/a.txt
@@ -202,6 +212,7 @@ diff --git a/b.txt b/b.txt
 }
 
 func TestParseUnifiedDiffHunkWithoutCounts(t *testing.T) {
+	t.Parallel()
 	files := ParseUnifiedDiff(`diff --git a/a b/a
 --- a/a
 +++ b/a
@@ -216,6 +227,7 @@ func TestParseUnifiedDiffHunkWithoutCounts(t *testing.T) {
 }
 
 func TestParseUnifiedDiffNoNewlineMarker(t *testing.T) {
+	t.Parallel()
 	files := ParseUnifiedDiff(`diff --git a/a b/a
 --- a/a
 +++ b/a
@@ -243,6 +255,7 @@ func TestParseUnifiedDiffNoNewlineMarker(t *testing.T) {
 }
 
 func TestParseUnifiedDiffBareLFIsContext(t *testing.T) {
+	t.Parallel()
 	files := ParseUnifiedDiff(`diff --git a/a b/a
 --- a/a
 +++ b/a
@@ -266,6 +279,7 @@ func TestParseUnifiedDiffBareLFIsContext(t *testing.T) {
 }
 
 func TestParseUnifiedDiffJunkTolerated(t *testing.T) {
+	t.Parallel()
 	files := ParseUnifiedDiff(`some leading junk
 diff --git a/a b/a
 --- a/a
@@ -281,6 +295,7 @@ trailing junk
 }
 
 func TestParseUnifiedDiffMalformedHeaderFallback(t *testing.T) {
+	t.Parallel()
 	files := ParseUnifiedDiff(`diff --git weird name here
 +not really
 `)
@@ -290,6 +305,7 @@ func TestParseUnifiedDiffMalformedHeaderFallback(t *testing.T) {
 }
 
 func TestParseUnifiedDiffHunkContext(t *testing.T) {
+	t.Parallel()
 	files := ParseUnifiedDiff(`diff --git a/a.go b/a.go
 --- a/a.go
 +++ b/a.go
@@ -308,6 +324,7 @@ func TestParseUnifiedDiffHunkContext(t *testing.T) {
 }
 
 func TestParseUnifiedDiffMissingTrailingNewline(t *testing.T) {
+	t.Parallel()
 	files := ParseUnifiedDiff("diff --git a/a b/a\n--- a/a\n+++ b/a\n@@ -1 +1 @@\n-x\n+y")
 	if len(files) != 1 || files[0].Added != 1 || files[0].Deleted != 1 {
 		t.Fatalf("files = %+v", files)

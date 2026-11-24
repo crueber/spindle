@@ -5,7 +5,10 @@
 // settings merge, setup save) is implemented by the config owner in sibling files.
 package config
 
-import "time"
+import (
+	"strings"
+	"time"
+)
 
 // removedTLSHint explains the #165 removal wherever a residual server.tls.*
 // setting is rejected (TOML file or env overlay): fail closed with a pointer
@@ -21,28 +24,41 @@ type ByteSize int64
 
 // --- Auth ---
 
+// StaticToken is an operator-authored machine credential (server.auth.tokens):
+// it authenticates git/API/CLI requests as Principal with the row's Write flag
+// and can never administer — host administration is the OIDC admin group and
+// nothing else (docs/PLAN-OIDC-ONLY.md §1.3).
 type StaticToken struct {
 	Principal string `toml:"principal"`
 	Token     string `toml:"token"`     // literal secret (one of token/token_env required)
 	TokenEnv  string `toml:"token_env"` // env var NAME read at startup; overrides token
 	Write     bool   `toml:"write"`
-	Admin     bool   `toml:"admin"`
+	// Name is the optional stable label for this credential (06 §8.2.1): it
+	// keys the last-used record and names the row on the Access page across
+	// rotations. Without one a token is identified by a SHA-256 hash prefix —
+	// never by the secret. Names must be unique across the token rows.
+	Name string `toml:"name,omitempty"`
+	// ExpiresAt is the optional RFC 3339 instant at which this credential
+	// stops authenticating (e.g. "2026-12-31T23:59:59Z"). Validation refuses
+	// an unparseable value; a PAST value is accepted and the token is
+	// immediately expired (401). Empty = the credential never expires, which
+	// the Access page warns about.
+	ExpiresAt string `toml:"expires_at,omitempty"`
 }
 
+// Auth is the OIDC authentication configuration. There is no mode: "auth is
+// configured" means this set is complete (see Validate/checkAuthConfigured).
 type Auth struct {
-	Mode          string        `toml:"mode"` // "none" | "token" | "oidc" (default "none")
 	AnonymousRead bool          `toml:"anonymous_read"`
 	Tokens        []StaticToken `toml:"tokens"`
-	AdminEmails   []string      `toml:"admin_emails"`
-	AdminDomains  []string      `toml:"admin_domains"`
 	// AdminGroups lists the OIDC group values (from GroupsClaim) that grant
-	// the global admin flag — and therefore /setup. Empty disables group
-	// admins; the email/domain rules above stay authoritative (migration
-	// path). Compared case-insensitively.
+	// the global admin flag — and therefore the Administration area. It is
+	// required and non-empty: administration exists only through this group.
+	// Compared case-insensitively.
 	AdminGroups []string `toml:"admin_groups"`
 	// GroupsClaim names the ID-token claim carrying group membership. The
-	// claim may be a JSON array of strings or a single string. Required in
-	// oidc mode (it defaults to "groups", the conventional claim).
+	// claim may be a JSON array of strings or a single string. Required (it
+	// defaults to "groups", the conventional claim).
 	GroupsClaim       string   `toml:"groups_claim"`
 	Issuer            string   `toml:"issuer"`
 	AllowedDomains    []string `toml:"allowed_domains"`
@@ -268,10 +284,44 @@ type Telemetry struct {
 }
 
 type Events struct {
-	WebhookURL    string   `toml:"webhook_url"`
-	WebhookSecret string   `toml:"webhook_secret"`
-	SweepInterval Duration `toml:"sweep_interval"`
+	WebhookURL    string      `toml:"webhook_url"`
+	WebhookSecret string      `toml:"webhook_secret"`
+	SweepInterval Duration    `toml:"sweep_interval"`
+	Sinks         []EventSink `toml:"sinks"`
 }
+
+// EventSink is one `[[events.sinks]]` entry (14_extensibility.md §14.6).
+// Kind selects the built-in sink implementation; the remaining keys are the
+// kind's own:
+//
+//	kind = "webhook"  url (required), secret_env (optional env var name)
+//	kind = "jsonl"    path (required), max_bytes, keep
+//
+// The [events] webhook_url/webhook_secret pair stays the v1 single-sink
+// spelling and is equivalent to one webhook sink.
+type EventSink struct {
+	Name      string   `toml:"name"`
+	Kind      string   `toml:"kind"`
+	URL       string   `toml:"url"`
+	SecretEnv string   `toml:"secret_env"`
+	Path      string   `toml:"path"`
+	MaxBytes  ByteSize `toml:"max_bytes"`
+	Keep      int      `toml:"keep"`
+}
+
+// Event sink kinds (the documented set; events.SinkKinds pins it).
+const (
+	EventSinkWebhook = "webhook"
+	EventSinkJSONL   = "jsonl"
+)
+
+// Defaults for the jsonl sink's rotation (the doc's semantics: rotate when the
+// next NDJSON frame would push the file past max_bytes, keep `keep` rotated
+// files, drop the oldest).
+const (
+	DefaultEventSinkMaxBytes int64 = 64 << 20
+	DefaultEventSinkKeep           = 3
+)
 
 // Releases caps the collaboration release surface (docs/features/07 §1.2:
 // releases.max_asset_bytes, default 2 GiB → 413 over cap).
@@ -285,14 +335,76 @@ type Attachments struct {
 	MaxImageBytes ByteSize `toml:"max_image_bytes"`
 }
 
+// Webedit bounds the browser file editor (docs/features/17_file_edit.md:
+// webedit.max_bytes, default 1 MiB). The cap is the largest single file the
+// editor accepts; the commit's pack stays O(KiB) above it.
+type Webedit struct {
+	MaxBytes ByteSize `toml:"max_bytes"`
+}
+
+// StaticSites configures the dedicated static-site host (docs/features/19 §5):
+// a second HTTP listener that answers only for its own Host and serves
+// committed bytes out of public repositories. Off by default — the listener is
+// not started at all when enabled is false, which is why the rest of the
+// section is not validated then.
+type StaticSites struct {
+	Enabled bool `toml:"enabled"`
+	// Address is the listener's own host:port. It must differ from
+	// server.listen: the isolation comes from the hostname (§2), but two
+	// listeners cannot share one socket.
+	Address string `toml:"address"`
+	// Host is the ONLY Host header value this listener answers for
+	// (port-insensitive, case-insensitive). Every other Host is a bodiless
+	// 404, so a proxy pointing the app's name here cannot reach user content.
+	Host string `toml:"host"`
+	// MaxFileBytes caps one served file: the v1 read path buffers the blob, so
+	// a larger object is a 404 rather than an unbounded allocation.
+	MaxFileBytes ByteSize `toml:"max_file_bytes"`
+	// IndexFiles is the directory-index probe order inside a tree. A directory
+	// matching none of them is a 404 — never a listing (§3).
+	IndexFiles []string `toml:"index_files"`
+}
+
+// RateLimit is the request rate-limit surface (PLAN-V2 §M.7, docs/features/16
+// §12). Additive section (14_extensibility.md §14.12). Every rate is a token
+// bucket spelled "N/s" | "N/min" | "N/h" with N > 0, parsed by ParseRate:
+// N tokens per window, refilled continuously. The limiter is in-process
+// middleware state (a control-plane cache, never bucket state), so every key
+// here is restart-required — the buckets are built at boot and the process
+// does not hot-reload.
+//
+// enabled defaults to false: a zero-config boot changes nothing (L10). Git
+// pushes and reads are never rate limited (a CI push storm must not throttle);
+// classes cover collaboration writes, issue/PR opens, abuse reports and failed
+// authentication attempts.
+type RateLimit struct {
+	Enabled     bool   `toml:"enabled"`
+	CollabWrite string `toml:"collab_write"` // comments, reviews, reactions, review threads/requests
+	IssueOpen   string `toml:"issue_open"`   // opening an issue or pull request
+	Report      string `toml:"report"`       // filing an abuse report
+	AuthFail    string `toml:"auth_fail"`    // failed authentication attempts
+	// TrustProxy makes the limiter key anonymous requests on the FIRST hop of
+	// X-Forwarded-For. Default false: the header is client-controlled unless a
+	// trusted reverse proxy overwrites it, and trusting it unconditionally
+	// would let anyone mint unlimited limiter keys (16 §12.2).
+	TrustProxy bool `toml:"trust_proxy"`
+}
+
 // Packages bounds the OCI registry (docs/features/14 §5): one blob upload cap,
-// one manifest cap, and the chunked-upload staging TTL the maintainer sweep
-// honours. Additive section (14_extensibility.md §14.12 — existing keys never
-// change meaning).
+// one manifest cap, the chunked-upload staging TTL the maintainer sweep
+// honours, and the instance default per-repository byte quota. Additive
+// section (14_extensibility.md §14.12 — existing keys never change meaning).
 type Packages struct {
 	MaxBlobBytes     ByteSize `toml:"max_blob_bytes"`     // one blob object (default 10 GiB, GHCR parity)
 	MaxManifestBytes ByteSize `toml:"max_manifest_bytes"` // one manifest body (default 4 MiB)
 	UploadTTL        Duration `toml:"upload_ttl"`         // abandoned upload staging (default 24h)
+	// QuotaBytes is the instance default registry quota per repository
+	// (docs/features/14 §5): the stored blob + manifest bytes a repository
+	// may hold. 0 = unlimited — the compatible default, because a quota
+	// nobody asked for would start refusing pushes after an upgrade. A
+	// repository's settings [packages] quota_bytes overrides it, including
+	// an explicit 0 (unlimited for that repository).
+	QuotaBytes ByteSize `toml:"quota_bytes"`
 }
 
 // Threads bounds the CI surface (docs/features/15_threads.md §8): terminal-run
@@ -312,6 +424,22 @@ type Threads struct {
 	// declares no `permissions:` ("read" | "write"; default read). A fork run
 	// is always read regardless.
 	DefaultPermissions string `toml:"default_permissions"`
+	// MaxArtifactBytesPerRun / MaxArtifactBytesPerFile bound published run
+	// artifacts (15 §2.5): the per-run total and one uploaded file. Defaults
+	// 2GiB / 256MiB; a per-file value above the per-run value is clamped.
+	MaxArtifactBytesPerRun  ByteSize `toml:"max_artifact_bytes_per_run"`
+	MaxArtifactBytesPerFile ByteSize `toml:"max_artifact_bytes_per_file"`
+	// ImageAllowPrefixes is the instance-wide image allowlist (L2 of
+	// docs/PLAN-ARTIFACT-KEEPER.md §3.3): a job's container.image and every
+	// services.<id>.image must start with one of these literal host[:port]/path
+	// prefixes at a boundary, or the job is refused at creation. Empty = no
+	// restriction (the compatible default).
+	ImageAllowPrefixes []string `toml:"image_allow_prefixes"`
+	// ImageRequireDigest refuses a workflow-named image without @sha256:
+	// (independent of the allowlist: a prefix can be allowed and still
+	// mutable). Default false; turning it on breaks every tag-named workflow,
+	// so it is a deliberate rollout.
+	ImageRequireDigest bool `toml:"image_require_digest"`
 }
 
 // Import bounds the repository-import surface (docs/features/10 §6:
@@ -349,11 +477,38 @@ type Config struct {
 	Attachments Attachments `toml:"attachments"`
 	Packages    Packages    `toml:"packages"`
 	Threads     Threads     `toml:"threads"`
+	Webedit     Webedit     `toml:"webedit"`
+	StaticSites StaticSites `toml:"static_sites"`
+	RateLimit   RateLimit   `toml:"rate_limit"`
 
 	// DataDir is the zero-config root (divergence D5): --data-dir / SPINDLE_DATA_DIR,
 	// default ~/.local/share/spindle. Holds store/, cache/, and the saved spindle.toml.
 	// Not a TOML key (never loaded from the file); set by the loader.
 	DataDir string `toml:"-"`
+
+	// explicit records the dotted keys the config file or the env overlay
+	// actually set — provenance for "is this still the compiled default?"
+	// decisions (the cache-space clamp, BUG-6). Unexported: never a TOML
+	// key, never serialized, and a config built in a test/API caller simply
+	// has no map (Explicit reports false).
+	explicit map[string]bool
+}
+
+// Explicit reports whether the config file or the env overlay set the dotted
+// key (case-insensitive). A value equal to the compiled default that was never
+// explicitly set reports false.
+func (c *Config) Explicit(key string) bool {
+	if c == nil || c.explicit == nil {
+		return false
+	}
+	return c.explicit[strings.ToLower(key)]
+}
+
+func (c *Config) markExplicit(key string) {
+	if c.explicit == nil {
+		c.explicit = make(map[string]bool)
+	}
+	c.explicit[strings.ToLower(key)] = true
 }
 
 // Defaults returns the COMPILED-IN defaults (11_config_cli.md §2 — equal to Rust-spec defaults).
@@ -373,22 +528,27 @@ func Defaults() *Config {
 			MaxPushBytes:            64 << 30,
 			MaxTreeLog:              200,
 			Auth: Auth{
-				Mode:           "none",
 				AnonymousRead:  true,
-				AdminGroups:    []string{"spindle-admins"},
+				AdminGroups:    []string{"spindle-admin"},
 				GroupsClaim:    "groups",
 				SessionTTL:     Duration(30 * 24 * time.Hour),
 				AccessTokenTTL: Duration(90 * 24 * time.Hour),
 			},
 		},
 		Store: Store{
-			Backend:            "s3",
+			// filesystem is the documented default (OBS-1): a bucket backend
+			// is selected explicitly by the file or the env overlay, never
+			// inherited by omission (a file that merely omits store.backend
+			// once pointed a deployment at AWS).
+			Backend:            "filesystem",
 			Bucket:             "walgit",
 			MaxRetries:         8,
 			MultipartThreshold: 64 << 20,
 			MultipartPartSize:  32 << 20,
 			S3: S3{
-				Endpoint:     "https://s3.us-east-1.amazonaws.com",
+				// No implicit AWS endpoint: selecting s3 requires an
+				// explicit endpoint (validation fails loudly otherwise).
+				Endpoint:     "",
 				Region:       "us-east-1",
 				AccessKeyEnv: "AWS_ACCESS_KEY_ID",
 				SecretKeyEnv: "AWS_SECRET_ACCESS_KEY",
@@ -430,9 +590,16 @@ func Defaults() *Config {
 			FollowInterval: Duration(30 * time.Second),
 		},
 		Threads: Threads{
-			Retention:             Duration(30 * 24 * time.Hour),
-			ApproveFirstTimeForks: true,
-			DefaultPermissions:    "read",
+			Retention:               Duration(30 * 24 * time.Hour),
+			ApproveFirstTimeForks:   true,
+			DefaultPermissions:      "read",
+			MaxArtifactBytesPerRun:  2 << 30,
+			MaxArtifactBytesPerFile: 256 << 20,
+			// Image policy defaults to today's behaviour: no allowlist and no
+			// digest requirement (plan §3.3 — shipping an allowlist non-empty
+			// would break CI on the first push after the upgrade).
+			ImageAllowPrefixes: nil,
+			ImageRequireDigest: false,
 		},
 		Placement: Placement{Serve: []string{"*"}, Maintain: []string{"*"}},
 		Compaction: Compaction{
@@ -494,6 +661,30 @@ func Defaults() *Config {
 			MaxBlobBytes:     10 << 30,
 			MaxManifestBytes: 4 << 20,
 			UploadTTL:        Duration(24 * time.Hour),
+			// Unlimited by default: a compiled-in quota would begin
+			// refusing pushes on an upgrade that never asked for one.
+			QuotaBytes: 0,
+		},
+		Webedit: Webedit{MaxBytes: 1 << 20},
+		StaticSites: StaticSites{
+			// Off by default: a compiled-in second listener would open a new
+			// origin on every upgrade that never asked for one.
+			Enabled:      false,
+			Address:      "127.0.0.1:8081",
+			Host:         "static.localhost",
+			MaxFileBytes: 8 << 20,
+			IndexFiles:   []string{"index.html", "index.htm"},
+		},
+		RateLimit: RateLimit{
+			// Off by default (PLAN-V2 §M.12 open question (c)): enabling
+			// limits on a live instance is an operator decision with a
+			// visible 429, never a silent zero-config change.
+			Enabled:     false,
+			CollabWrite: "30/min",
+			IssueOpen:   "10/h",
+			Report:      "5/h",
+			AuthFail:    "10/min",
+			TrustProxy:  false,
 		},
 	}
 }

@@ -76,13 +76,13 @@ func e2eAuthHdr(token string) []string {
 func pushGuardStack(t *testing.T, mutate func(*config.Config)) (*Server, *identity.Service) {
 	t.Helper()
 	cfg := walTestCfg(t)
-	cfg.Server.Auth.Mode = "token"
 	cfg.Server.Auth.Tokens = []config.StaticToken{
 		{Principal: "alice", Token: "tok-alice", Write: true},
 		{Principal: "mallory", Token: "tok-mallory", Write: true},
 		{Principal: "observer", Token: "tok-observer"},
 	}
 	cfg.Server.Auth.SessionSecret = "0123456789abcdef0123456789abcdef"
+	cfg.Server.Auth.AllowedDomains = []string{"example.com"}
 	cfg.Server.AutoCreateOnPush = true
 	if mutate != nil {
 		mutate(cfg)
@@ -98,6 +98,16 @@ func pushGuardStack(t *testing.T, mutate func(*config.Config)) (*Server, *identi
 		DataDir: t.TempDir(), Log: testLogger(t),
 		ReadGate: ident, PushGate: ident,
 	})
+	// SSH has no credential to carry a token: the key's principal name resolves
+	// through the OIDC email lookup (the same admission path a browser login
+	// uses), so the derived username stays the token principal's name.
+	srv.Auth().EmailLookup = func(username string) (string, bool) {
+		switch username {
+		case "alice", "mallory", "observer":
+			return username + "@example.com", true
+		}
+		return "", false
+	}
 	return srv, ident
 }
 

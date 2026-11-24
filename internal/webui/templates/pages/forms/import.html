@@ -81,11 +81,11 @@
     {{if eq .Data.Phase "failed"}}<h3 class="card-header">try again</h3>{{end}}
     <div class="flex flex-wrap gap-4" role="radiogroup" aria-label="Import kind">
       <label class="flex items-center gap-1 text-sm">
-        <input type="radio" name="kind" value="import"{{if ne .Data.Mode "mirror"}} checked{{end}} class="h-4 w-4 accent-amber-500">
+        <input type="radio" name="kind" value="import"{{if ne .Data.Mode "mirror"}} checked{{end}} class="h-4 w-4 check">
         import once <span class="muted">(one-shot snapshot)</span>
       </label>
       <label class="flex items-center gap-1 text-sm">
-        <input type="radio" name="kind" value="mirror"{{if eq .Data.Mode "mirror"}} checked{{end}} class="h-4 w-4 accent-amber-500">
+        <input type="radio" name="kind" value="mirror"{{if eq .Data.Mode "mirror"}} checked{{end}} class="h-4 w-4 check">
         mirror continuously <span class="muted">(recurring pull, pushes rejected)</span>
       </label>
     </div>
@@ -112,15 +112,15 @@
     </label>
     <div class="flex flex-wrap gap-4">
       <label class="flex items-center gap-1 text-sm">
-        <input type="checkbox" name="default_branch_only"{{if .Data.BranchOnly}} checked{{end}} class="h-4 w-4 accent-amber-500">
+        <input type="checkbox" name="default_branch_only"{{if .Data.BranchOnly}} checked{{end}} class="h-4 w-4 check">
         default branch only
       </label>
       <label class="flex items-center gap-1 text-sm" title="refs/pull/N/head only — never /merge">
-        <input type="checkbox" name="include_pull_heads"{{if .Data.PullHeads}} checked{{end}} class="h-4 w-4 accent-amber-500">
+        <input type="checkbox" name="include_pull_heads"{{if .Data.PullHeads}} checked{{end}} class="h-4 w-4 check">
         include PR heads
       </label>
       <label class="flex items-center gap-1 text-sm">
-        <input type="checkbox" name="include_notes"{{if .Data.Notes}} checked{{end}} class="h-4 w-4 accent-amber-500">
+        <input type="checkbox" name="include_notes"{{if .Data.Notes}} checked{{end}} class="h-4 w-4 check">
         include notes
       </label>
       <label class="flex items-center gap-1 text-sm" for="import-format">
@@ -150,7 +150,7 @@
       </p>
     </details>
     <label class="flex items-start gap-2 text-sm">
-      <input type="checkbox" name="dangerous" class="mt-0.5 h-4 w-4 accent-amber-500"{{if .Data.Dangerous}} checked{{end}}>
+      <input type="checkbox" name="dangerous" class="mt-0.5 h-4 w-4 check"{{if .Data.Dangerous}} checked{{end}}>
       <span>
         <span class="font-medium">Allow hosts outside import.url_allowlist (dangerous)</span>
         <span class="muted block text-[11px]">

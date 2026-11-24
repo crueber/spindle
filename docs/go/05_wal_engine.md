@@ -166,7 +166,7 @@ type PersistedState struct {
 
 Two modes:
 
-- **Budget mode** (`cache.mode = "budget"`): evict least-recently-used repos idle longer than `cache.evict_idle_after` while the sum of repo-dir sizes exceeds `cache.max_bytes` (default 20 GiB).
+- **Budget mode** (`cache.mode = "budget"`): evict least-recently-used repos idle longer than `cache.evict_idle_after` while the sum of repo-dir sizes exceeds `cache.max_bytes` (default 20 GiB). At boot the budget is reconciled with the filesystem holding `cache.dir`: a still-default budget larger than the volume is lowered to the eviction watermark with a WARN, while an explicitly configured one is warned about and left alone (11_config_cli.md §8, BUG-6).
 - **Disk mode** (`cache.mode = "disk"`): `syscall.Statfs` on `cache.dir`; evict only when `used/total > cache.disk_high_watermark`; target = `used − (used − (watermark−0.10))·total`. Keep evicting (LRU) until below the target.
 
 Eviction of one repo MUST take **both** the repo's `syncMu` **try-lock** and the `rw.TryWrite`; **if either fails, skip that repo this pass** (never evict under readers, never block the evictor). Order: `syncMu` first, then `rw.TryWrite` — consistent with the global nesting order. After both are held: close/remove the handle from the map (subsequent opens recreate), then `os.RemoveAll` the dir, then release. Directory size accounting (needed by budget mode): `filepath.WalkDir`; symlinks counted by link size (`lstat`); hard links counted once per `(dev, ino)` pair — keep a `map[uint64]struct{}` keyed by `dev<<32|ino` per walk.
@@ -377,6 +377,7 @@ type TaskRecord struct {
     ID        string        // uuid (crypto/rand hex)
     Kind      string        // materialize | remote-index | history-pack | compact | bundle |
                             // checkpoint | fsck | repair | follow | rev-index | sync | rematerialize | prewarm
+                            // (+ Seam-5 feature kinds: repo-import, repo-transfer, packages-gc, mirror-*, threads-*)
     Repo      string
     Hostname  string
     Started   time.Time
@@ -406,9 +407,29 @@ type Broadcast[T any] struct {
 func (b *Broadcast[T]) Subscribe() (id uint64, ch <-chan T, replay []T)
 func (b *Broadcast[T]) Unsubscribe(id uint64)
 func (b *Broadcast[T]) Send(v T)        // non-blocking send to every sub; full channel = drop (lag-tolerant)
+func (b *Broadcast[T]) Close()          // closes every subscriber channel, drops the ring (owner only)
 ```
 
 `Send` NEVER blocks: `select { case ch <- v: default: }` — a slow SSE consumer drops packets rather than stalling the task (progress bars are lossy by design; the replay buffer covers reconnects). A subscriber channel is owned and closed by `Unsubscribe` only.
+
+**Handle-free attach (PLAN-V2 §3 T.1).** The per-task packet drone — not a repo handle — is the
+attach surface: `TaskTable.Subscribe(id)` returns the replay ring plus the live channel for one
+task id, and `Unsubscribe(id, subID)` releases it. A task that outlives or moves its repository
+(the `repo-transfer` move tears the source handle down before its copy pass) is still followable,
+because the record's own `repo` (or the destination in `params["to"]`) is the read authority at the
+API layer. The janitor `Close`s a task's drone when it evicts the record after 1 h, so an attached
+reader ends instead of leaking on a channel nobody owns. `RunningFor(repo)` is the listing's
+running half (every live kind for a repo — a kind added after the listing was written must still be
+visible). `Get(id)` returns a **copy**: the record is shared with the owning goroutine, so handing
+the pointer out raced every reader (one lock — the table's — guards the record; `Task` takes no
+lock of its own).
+
+**Serving-copy invalidation (PLAN-V2 §3 T.1).** `(*Registry).Invalidate(id)` drops the handle, the
+local serving copy and the 30 s listing snapshot **without touching bucket objects** — the
+non-destructive twin of `Delete`, used by a repository move to quiesce the source and flush both
+sides. `(*Registry).VerifyRepo(ctx, id)` opens the repo, requires `Manifest.Repo == id`, and syncs to
+`LevelRefs` (log/checkpoint present and replayable; packs are not materialized): the verification
+half of the same move.
 
 Kinds and drain hooks: phase 1 of drain interrupts running ops (cancel their contexts) — an interrupted task records failure `503 "interrupted: instance shut down; will be retried by the next pass"` when draining. Records are instance-memory only (cross-instance exclusivity is the lease, 03 §4.9). `hostname` tells where a task ran; a task vanishing from `running` counts as finished only when the same instance answers (or `recent` shows it with a result).
 

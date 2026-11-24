@@ -42,13 +42,18 @@ const (
 	// ScopePush authorises git pushes to the run's repository (workflow
 	// `permissions: contents: write`, 15 §5). A fork run never gets it.
 	ScopePush = "push"
+	// ScopeArtifact authorises the job channel's artifact operations: upload a
+	// blob / finalize an artifact, and download an artifact of the SAME run
+	// (15 §2.5). It is not a repository read and never reaches another run.
+	ScopeArtifact = "artifact"
 )
 
 // attemptScopes is the control scope set every attempt token carries (log,
-// complete, cancel) plus the git scopes derived from the job's effective
-// permissions. `push` is present only when `contents` resolves to write.
+// complete, cancel, artifact) plus the git scopes derived from the job's
+// effective permissions. `push` is present only when `contents` resolves to
+// write.
 func attemptScopes(scopes []string) []string {
-	out := []string{ScopeLog, ScopeComplete, ScopeCancel, ScopeRead}
+	out := []string{ScopeLog, ScopeComplete, ScopeCancel, ScopeRead, ScopeArtifact}
 	for _, sc := range scopes {
 		if sc == ScopePush {
 			out = append(out, ScopePush)

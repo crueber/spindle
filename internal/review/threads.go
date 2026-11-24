@@ -68,6 +68,12 @@ func (s *Service) OpenThread(ctx context.Context, owner, repo string, num int, a
 	if err := s.requireRead(ctx, owner, repo, actor); err != nil {
 		return nil, err
 	}
+	if err := s.requireNotBlocked(ctx, owner, repo, actor); err != nil {
+		return nil, err
+	}
+	if err := s.requireUnlocked(ctx, owner, repo, num, actor); err != nil {
+		return nil, err
+	}
 	if err := validateAnchor(anchor); err != nil {
 		return nil, err
 	}
@@ -251,6 +257,13 @@ func (s *Service) GetThread(ctx context.Context, owner, repo string, num int, ti
 	if filtered == nil {
 		filtered = []*ThreadComment{}
 	}
+	mv, merr := s.moderationView(ctx, owner, repo, num, p)
+	if merr != nil {
+		return nil, merr
+	}
+	for _, c := range filtered {
+		applyThreadComment(c, mv, num, tid)
+	}
 	return &ThreadView{Thread: th, Comments: filtered, More: more}, nil
 }
 
@@ -267,6 +280,12 @@ func (s *Service) AddThreadComment(ctx context.Context, owner, repo string, num 
 		return nil, err
 	}
 	if err := s.requireRead(ctx, owner, repo, actor); err != nil {
+		return nil, err
+	}
+	if err := s.requireNotBlocked(ctx, owner, repo, actor); err != nil {
+		return nil, err
+	}
+	if err := s.requireUnlocked(ctx, owner, repo, num, actor); err != nil {
 		return nil, err
 	}
 	if strings.TrimSpace(body) == "" {
@@ -432,11 +451,17 @@ func (s *Service) setResolved(ctx context.Context, owner, repo string, num int, 
 // ResolveThread marks a thread resolved (§7: opener, participants, or
 // triage+).
 func (s *Service) ResolveThread(ctx context.Context, owner, repo string, num int, tid string, actor auth.Principal) (*ThreadHeader, error) {
+	if err := s.requireNotBlocked(ctx, owner, repo, actor); err != nil {
+		return nil, err
+	}
 	return s.setResolved(ctx, owner, repo, num, tid, actor, true)
 }
 
 // UnresolveThread reopens a resolved thread (same auth as resolve).
 func (s *Service) UnresolveThread(ctx context.Context, owner, repo string, num int, tid string, actor auth.Principal) (*ThreadHeader, error) {
+	if err := s.requireNotBlocked(ctx, owner, repo, actor); err != nil {
+		return nil, err
+	}
 	return s.setResolved(ctx, owner, repo, num, tid, actor, false)
 }
 
@@ -520,6 +545,9 @@ func (s *Service) AddRequests(ctx context.Context, owner, repo string, num int, 
 	if err := s.requireRead(ctx, owner, repo, actor); err != nil {
 		return nil, err
 	}
+	if err := s.requireNotBlocked(ctx, owner, repo, actor); err != nil {
+		return nil, err
+	}
 	h, side, err := s.prHeadOf(ctx, owner, repo, num)
 	if err != nil {
 		return nil, err
@@ -591,6 +619,9 @@ func (s *Service) RemoveRequests(ctx context.Context, owner, repo string, num in
 		return nil, err
 	}
 	if err := s.requireRead(ctx, owner, repo, actor); err != nil {
+		return nil, err
+	}
+	if err := s.requireNotBlocked(ctx, owner, repo, actor); err != nil {
 		return nil, err
 	}
 	h, side, err := s.prHeadOf(ctx, owner, repo, num)

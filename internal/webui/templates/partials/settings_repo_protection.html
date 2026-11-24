@@ -1,0 +1,311 @@
+{{/* partials/settings_repo_protection.html — repo settings → Branch protection (ruleset list, effective view, ruleset form).
+   One settings tab per file: a new tab is a new settings_repo_<tab>.html
+   partial plus one dispatch line in pages/settings/repo.html — never a body
+   in the shell. Every panel receives the SettingsRepoPage, so a form can
+   build its action from .Owner/.Name. Anatomy: .card sections, the .setup-row
+   label/control pairing for forms, .data-table inside overflow-x-auto
+   (guideline §8). 390px: fields full width, toggle rows keep
+   label-left/control-right, tables scroll in place. */}}
+{{/* ---- Branch protection: named rulesets (PLAN-V2 §2.4) ----------------- */}}
+{{define "settings-repo-protection"}}
+{{with .Protection}}
+<div class="space-y-4">
+{{if .Editing}}{{template "settings-protection-form" (dict "P" . "Root" $)}}{{else}}{{template "settings-protection-list" (dict "P" . "Root" $)}}{{end}}
+
+  <details class="card p-4">
+    <summary class="cursor-pointer text-sm font-medium">Advanced: edit the full policy JSON</summary>
+    <p class="muted mt-1 text-[11px]">Every rule lives here — including the ones the ruleset form cannot express. Saving replaces the whole document.</p>
+    <form class="mt-2" method="post" action="/{{$.Owner}}/{{$.Name}}/settings/protection"
+          hx-post="/{{$.Owner}}/{{$.Name}}/settings/protection" hx-target="#settings-panel" hx-select="#settings-panel" hx-swap="outerHTML">
+      <input type="hidden" name="policy_action" value="raw">
+      <label class="mb-1 block text-sm font-medium" for="protection-raw">Policy document (JSON)</label>
+      <textarea class="input mono text-xs" id="protection-raw" name="policy" rows="14" spellcheck="false" data-submit-keys>{{.Raw}}</textarea>
+      <div class="mt-2 flex flex-wrap items-center gap-2">
+        <button type="submit" class="btn">Save raw document</button>
+        <span class="muted text-[11px]">Ctrl/⌘+Enter saves. Validated by the same parser as the API.</span>
+      </div>
+    </form>
+  </details>
+</div>
+{{else}}{{template "settings-repo-notwired" .}}{{end}}
+{{end}}
+
+{{/* ---- the ruleset list + the effective-rules view ---------------------- */}}
+{{define "settings-protection-list"}}
+{{$p := .P}}{{$root := .Root}}
+{{if $p.Error}}<p class="err-line" role="alert">{{$p.Error}}</p>{{end}}
+<section class="card min-w-0 p-4" aria-label="Protection rulesets">
+  <div class="flex flex-wrap items-start justify-between gap-2">
+    <div>
+      <h3 class="card-header">Protection rulesets</h3>
+      <p class="muted mb-3 text-xs">Each ruleset is a named pair of rules in the repository policy document. A ruleset is active while its rules are stored; removing it lets pushes it protected through. Higher rows are matched first when a refusal names a rule.</p>
+    </div>
+    <a class="btn primary" href="/{{$root.Owner}}/{{$root.Name}}/settings/protection/new"
+       hx-get="/{{$root.Owner}}/{{$root.Name}}/settings/protection/new" hx-target="#settings-panel" hx-select="#settings-panel" hx-swap="outerHTML">New ruleset</a>
+  </div>
+  {{if $p.Rulesets}}
+  <ul class="mt-2 space-y-2">
+    {{range $p.Rulesets}}
+    <li class="rounded-md border border-[var(--pd-border)] p-3">
+      <div class="flex flex-wrap items-start justify-between gap-2">
+        <div class="min-w-0">
+          <div class="flex flex-wrap items-center gap-2">
+            <a class="link font-medium" href="/{{$root.Owner}}/{{$root.Name}}/settings/protection/{{.Slug}}"
+               hx-get="/{{$root.Owner}}/{{$root.Name}}/settings/protection/{{.Slug}}" hx-target="#settings-panel" hx-select="#settings-panel" hx-swap="outerHTML">{{.Slug}}</a>
+            <span class="chip chip-neutral">active</span>
+            {{if not .Editable}}<span class="chip chip-draft">read-only</span>{{end}}
+          </div>
+          <p class="mono mt-1 break-words text-xs">{{.Refs}}</p>
+          <div class="mt-1 flex flex-wrap gap-1">
+            {{range .Summary}}<span class="chip chip-neutral">{{.}}</span>{{end}}
+          </div>
+          {{if not .Editable}}<p class="muted mt-1 text-[11px]">Read-only: {{.ReadOnly}}. Edit it in the advanced JSON below; this form never rewrites rules it cannot express.</p>{{end}}
+        </div>
+        <div class="flex flex-wrap items-center gap-1">
+          {{if .CanMoveUp}}
+          <form method="post" action="/{{$root.Owner}}/{{$root.Name}}/settings/protection/{{.Slug}}"
+                hx-post="/{{$root.Owner}}/{{$root.Name}}/settings/protection/{{.Slug}}" hx-target="#settings-panel" hx-select="#settings-panel" hx-swap="outerHTML">
+            <input type="hidden" name="ruleset_action" value="up">
+            <button type="submit" class="btn px-2 py-1" aria-label="move {{.Slug}} up" title="move up">↑</button>
+          </form>
+          {{end}}
+          {{if .CanMoveDown}}
+          <form method="post" action="/{{$root.Owner}}/{{$root.Name}}/settings/protection/{{.Slug}}"
+                hx-post="/{{$root.Owner}}/{{$root.Name}}/settings/protection/{{.Slug}}" hx-target="#settings-panel" hx-select="#settings-panel" hx-swap="outerHTML">
+            <input type="hidden" name="ruleset_action" value="down">
+            <button type="submit" class="btn px-2 py-1" aria-label="move {{.Slug}} down" title="move down">↓</button>
+          </form>
+          {{end}}
+          <a class="btn px-2 py-1" href="/{{$root.Owner}}/{{$root.Name}}/settings/protection/{{.Slug}}"
+             hx-get="/{{$root.Owner}}/{{$root.Name}}/settings/protection/{{.Slug}}" hx-target="#settings-panel" hx-select="#settings-panel" hx-swap="outerHTML">Edit</a>
+        </div>
+      </div>
+    </li>
+    {{end}}
+  </ul>
+  {{else}}
+  <p class="muted text-sm">No rulesets — the repository allows every push to every ref and requires nothing at merge time (allow-all).</p>
+  {{end}}
+</section>
+
+{{template "settings-protection-effective" $p}}
+
+<section class="card min-w-0 p-4" aria-label="Effective policy">
+  <h3 class="card-header">Every policy rule</h3>
+  <p class="muted mb-2 text-xs">The stored document, in order. Rows marked read-only are rules this form does not manage (edit them in the advanced JSON).</p>
+  {{if $p.Rules}}
+  <div class="min-w-0 overflow-x-auto">
+    <table class="data-table wrap">
+      <thead><tr><th scope="col">rule</th><th scope="col">refs</th><th scope="col">effect</th></tr></thead>
+      <tbody>
+        {{range $p.Rules}}<tr>
+          <td class="mono text-xs">{{.Name}}{{if .Managed}} <span class="chip chip-neutral">ruleset</span>{{end}}{{if .ReadOnly}} <span class="chip chip-draft">read-only</span>{{end}}{{if .Scoped}} <span class="chip chip-neutral">principal-scoped</span>{{end}}</td>
+          <td class="mono break-words text-xs">{{.Refs}}</td>
+          <td class="break-words">{{.Summary}}</td>
+        </tr>{{end}}
+      </tbody>
+    </table>
+  </div>
+  {{else}}
+  <p class="muted text-sm">No rules — allow-all.</p>
+  {{end}}
+</section>
+{{end}}
+
+{{/* ---- the computed effective-rules view ------------------------------- */}}
+{{define "settings-protection-effective"}}
+{{$p := .}}
+<section class="card min-w-0 p-4" aria-label="Effective rules">
+  <h3 class="card-header">What applies to a ref</h3>
+  <p class="muted mb-2 text-xs">Computed from the stored document by the same functions the server enforces with: the push verdict per operation, then the merge demands resolved for you (a rule whose bypass list admits you is not counted as a demand).</p>
+  <form method="get" action="" class="flex flex-wrap items-end gap-2">
+    <label class="grid gap-1" for="effective-ref">
+      <span class="text-sm font-medium">Ref</span>
+      <input class="input mono" id="effective-ref" name="ref" value="{{$p.RefArg}}" placeholder="refs/heads/main">
+    </label>
+    <button type="submit" class="btn">Evaluate</button>
+    <span class="muted text-[11px]">as <span class="mono">{{$p.Effective.Principal}}</span></span>
+  </form>
+  {{if $p.Effective.HasRules}}
+  <div class="mt-3 grid gap-3 lg:grid-cols-2">
+    <div class="min-w-0 overflow-x-auto">
+      <table class="data-table wrap">
+        <caption class="muted mb-1 text-left text-xs">direct pushes</caption>
+        <thead><tr><th scope="col">operation</th><th scope="col">verdict</th></tr></thead>
+        <tbody>
+          {{range $p.Effective.Ops}}<tr>
+            <td class="mono text-xs">{{.Op}}</td>
+            <td class="break-words">{{if .Allowed}}<span class="chip chip-open">allowed</span>{{else}}<span class="chip chip-closed">{{.Verdict}}</span>{{end}}</td>
+          </tr>{{end}}
+        </tbody>
+      </table>
+    </div>
+    <dl class="grid gap-1 text-sm">
+      <div class="flex flex-wrap gap-2">
+        <dt class="text-[var(--pd-muted)]">required checks</dt>
+        <dd class="mono text-xs">{{if $p.Effective.Checks}}{{range $i, $c := $p.Effective.Checks}}{{if $i}}, {{end}}{{$c}}{{end}}{{else}}none{{end}}</dd>
+      </div>
+      <div class="flex flex-wrap gap-2">
+        <dt class="text-[var(--pd-muted)]">approvals</dt>
+        <dd>{{if $p.Effective.Approvals}}{{$p.Effective.Approvals}} (rule <span class="mono text-xs">{{$p.Effective.ReviewsRule}}</span>{{if $p.Effective.DismissStale}}, stale dismissed{{end}}){{else}}none{{end}}{{if $p.Effective.ReviewsBypassed}} <span class="chip chip-neutral">you bypass a review rule</span>{{end}}</dd>
+      </div>
+      <div class="flex flex-wrap gap-2">
+        <dt class="text-[var(--pd-muted)]">up-to-date head</dt>
+        <dd>{{if $p.Effective.UpToDate}}required{{else}}not required{{end}}</dd>
+      </div>
+      <div class="flex flex-wrap gap-2">
+        <dt class="text-[var(--pd-muted)]">merge methods</dt>
+        <dd class="mono text-xs">{{range $i, $m := $p.Effective.Methods}}{{if $i}}, {{end}}{{$m}}{{end}}{{if not $p.Effective.MethodsNarrowed}} <span class="chip chip-neutral">every method</span>{{end}}</dd>
+      </div>
+    </dl>
+  </div>
+  {{if $p.Effective.Rules}}
+  <div class="mt-3 min-w-0 overflow-x-auto">
+    <table class="data-table wrap">
+      <caption class="muted mb-1 text-left text-xs">rules matching this ref, in order</caption>
+      <thead><tr><th scope="col">rule</th><th scope="col">refs</th><th scope="col">effect</th></tr></thead>
+      <tbody>
+        {{range $p.Effective.Rules}}<tr>
+          <td class="mono text-xs">{{.Name}}{{if .Scoped}} <span class="chip chip-neutral">principal-scoped</span>{{end}}</td>
+          <td class="mono break-words text-xs">{{.Refs}}</td>
+          <td class="break-words">{{.Summary}}</td>
+        </tr>{{end}}
+      </tbody>
+    </table>
+  </div>
+  {{else}}
+  <p class="muted mt-3 text-sm">No rule matches <span class="mono">{{$p.RefArg}}</span> — pushes are allowed and merges carry no demands from this ref's protection.</p>
+  {{end}}
+  {{else}}
+  <p class="muted mt-3 text-sm">No rules stored — allow-all.</p>
+  {{end}}
+</section>
+{{end}}
+
+{{/* ---- one ruleset's form ---------------------------------------------- */}}
+{{define "settings-protection-form"}}
+{{$p := .P}}{{$root := .Root}}{{$rs := .P.Editing}}
+<section class="card min-w-0 p-4">
+  <div class="flex flex-wrap items-start justify-between gap-2">
+    <div>
+      <h3 class="card-header">{{if .P.New}}New ruleset{{else}}Ruleset {{$rs.Slug}}{{end}}</h3>
+      {{if $rs.Editable}}<p class="muted mb-3 text-xs">Writes <span class="mono">protection:{{if $rs.Slug}}{{$rs.Slug}}{{else}}&lt;name&gt;{{end}}-push</span> and <span class="mono">…-reviews</span> into the repository policy document. Every other rule is preserved.</p>{{end}}
+    </div>
+    <a class="btn" href="/{{$root.Owner}}/{{$root.Name}}/settings/protection"
+       hx-get="/{{$root.Owner}}/{{$root.Name}}/settings/protection" hx-target="#settings-panel" hx-select="#settings-panel" hx-swap="outerHTML">All rulesets</a>
+  </div>
+  {{if and (not $rs.Editable) $rs.ReadOnly}}
+  <p class="warn-line" role="status">This ruleset is read-only: {{$rs.ReadOnly}}. Use the advanced JSON below.</p>
+  {{else}}
+  <form method="post" action="/{{$root.Owner}}/{{$root.Name}}/settings/protection/{{if .P.New}}new{{else}}{{$rs.Slug}}{{end}}"
+        hx-post="/{{$root.Owner}}/{{$root.Name}}/settings/protection/{{if .P.New}}new{{else}}{{$rs.Slug}}{{end}}" hx-target="#settings-panel" hx-select="#settings-panel" hx-swap="outerHTML">
+    <input type="hidden" name="ruleset_action" value="save">
+    <div class="grid gap-3 sm:grid-cols-2">
+      <label class="grid gap-1" for="ruleset-slug">
+        <span class="text-sm font-medium">Name</span>
+        <input class="input mono" id="ruleset-slug" name="ruleset_slug" value="{{$rs.Slug}}" placeholder="main-protection" required>
+        <span class="muted text-[11px]">1–39 characters of a-z, 0-9 and -. It is the rule-name infix and the URL.</span>
+      </label>
+      <label class="grid gap-1" for="ruleset-refs">
+        <span class="text-sm font-medium">Protected refs</span>
+        <input class="input mono" id="ruleset-refs" name="refs" value="{{$rs.Refs}}" placeholder="refs/heads/main, refs/heads/release/*">
+        <span class="muted text-[11px]">Comma or space separated doublestar globs (<code class="mono">*</code>, <code class="mono">**</code>).</span>
+      </label>
+    </div>
+
+    <label class="mt-3 flex items-start gap-2">
+      <input type="checkbox" name="enabled" value="1" class="mt-0.5 h-4 w-4 check"{{if $rs.Enabled}} checked{{end}}>
+      <span>
+        <span class="block text-sm font-medium">Ruleset enabled</span>
+        <span class="muted block text-[11px]">Unchecking and saving removes this ruleset's rules — pushes it protected become allowed.</span>
+      </span>
+    </label>
+
+    <div class="mt-3 grid gap-3 sm:grid-cols-2">
+      <label class="grid gap-1" for="ruleset-approvals">
+        <span class="text-sm font-medium">Required approvals</span>
+        <input class="input w-24" id="ruleset-approvals" name="approvals" type="number" min="0" max="50" value="{{$rs.Approvals}}">
+        <span class="muted text-[11px]">0 = reviews are not required; direct pushes are still governed below.</span>
+      </label>
+      <label class="mt-5 flex items-start gap-2 sm:mt-0 sm:self-end">
+        <input type="checkbox" name="dismiss_stale" value="1" class="mt-0.5 h-4 w-4 check"{{if $rs.DismissStale}} checked{{end}}>
+        <span class="text-sm">Dismiss stale approvals when the head moves</span>
+      </label>
+    </div>
+
+    <label class="mt-3 grid gap-1" for="ruleset-checks">
+      <span class="text-sm font-medium">Required status checks</span>
+      <input class="input mono" id="ruleset-checks" name="checks" value="{{$rs.ChecksText}}" placeholder="ci/build, lint">
+      <span class="muted text-[11px]">Context names (1–32) the merge gate requires green on the PR head, for every merging actor. Direct pushes are not blocked by checks.</span>
+    </label>
+
+    <fieldset class="mt-3">
+      <legend class="text-sm font-medium">Who may push directly</legend>
+      <p class="muted mb-1 text-[11px]">Roles that may push directly to the protected refs. No role selected = nobody. This list governs direct pushes only: a pull-request merge is still gated by the approvals and checks above, whoever merges.</p>
+      <div class="grid gap-1 sm:grid-cols-3">
+        {{range $p.Roles}}
+        <label class="flex items-center gap-2 text-sm">
+          <input type="checkbox" name="push_roles" value="{{.ID}}" class="h-4 w-4 check"{{if $p.PushRoleChecked .ID}} checked{{end}}>
+          <span>{{.Label}}</span>
+        </label>
+        {{end}}
+      </div>
+    </fieldset>
+
+    <div class="mt-3 grid gap-1 sm:grid-cols-2">
+      <label class="flex items-start gap-2">
+        <input type="checkbox" name="block_force" value="1" class="mt-0.5 h-4 w-4 check"{{if $rs.BlockForce}} checked{{end}}>
+        <span class="text-sm">Block force-pushes</span>
+      </label>
+      <label class="flex items-start gap-2">
+        <input type="checkbox" name="block_delete" value="1" class="mt-0.5 h-4 w-4 check"{{if $rs.BlockDelete}} checked{{end}}>
+        <span class="text-sm">Block branch deletion</span>
+      </label>
+    </div>
+
+    <fieldset class="mt-3">
+      <legend class="text-sm font-medium">Merge-time demands</legend>
+      <p class="muted mb-1 text-[11px]">Enforced by the merge task, not the page: a forbidden method or a stale head is refused server-side with a named error.</p>
+      <label class="flex items-start gap-2">
+        <input type="checkbox" name="require_up_to_date" value="1" class="mt-0.5 h-4 w-4 check"{{if $rs.RequireUpToDate}} checked{{end}}>
+        <span class="text-sm">Require an up-to-date head <span class="muted block text-[11px]">A merge is refused while the PR head is behind its base; the PR page offers Update branch.</span></span>
+      </label>
+      <div class="mt-2">
+        <span class="text-sm font-medium">Allowed merge methods</span>
+        <div class="grid gap-1 sm:grid-cols-3">
+          {{range $p.Methods}}
+          <label class="flex items-center gap-2 text-sm">
+            <input type="checkbox" name="merge_methods" value="{{.ID}}" class="h-4 w-4 check"{{if $rs.MergeMethodChecked .ID}} checked{{end}}>
+            <span>{{.Label}}</span>
+          </label>
+          {{end}}
+        </div>
+        <span class="muted text-[11px]">All three = every method (stored as absent). A PR page offers only the permitted ones.</span>
+      </div>
+    </fieldset>
+
+    <div class="mt-3 flex flex-wrap items-center gap-2">
+      <button type="submit" class="btn primary">Save ruleset</button>
+      <span class="muted text-[11px]">The server validates the generated policy document before it is stored.</span>
+    </div>
+    {{if .P.Error}}<p class="err-line" role="alert">{{.P.Error}}</p>{{end}}
+    {{if .P.Note}}<p class="mt-2 text-sm text-[var(--pd-ok)]">{{.P.Note}}</p>{{end}}
+  </form>
+
+  {{if and (not .P.New) $rs.Editable}}
+  <div class="mt-4 border-t border-[var(--pd-border)] pt-3">
+    <h4 class="text-sm font-medium">Remove this ruleset</h4>
+    <p class="muted mb-2 text-[11px]">Deletes its push and review rules. Every other rule is preserved.</p>
+    <form method="post" action="/{{$root.Owner}}/{{$root.Name}}/settings/protection/{{$rs.Slug}}"
+          hx-post="/{{$root.Owner}}/{{$root.Name}}/settings/protection/{{$rs.Slug}}" hx-target="#settings-panel" hx-select="#settings-panel" hx-swap="outerHTML"
+          data-danger-expected="protection:{{$rs.Slug}}">
+      <input type="hidden" name="ruleset_action" value="delete">
+      <label class="mb-1 block text-sm font-medium" for="ruleset-delete-confirm">Type <code class="mono text-xs">protection:{{$rs.Slug}}</code> to confirm</label>
+      <input class="input md:max-w-sm mono text-xs" id="ruleset-delete-confirm" name="confirm" type="text" autocomplete="off" data-danger-input required>
+      <div class="mt-2"><button type="submit" class="btn danger" data-danger-submit disabled>Remove ruleset</button></div>
+    </form>
+  </div>
+  {{end}}
+  {{end}}
+</section>
+{{end}}

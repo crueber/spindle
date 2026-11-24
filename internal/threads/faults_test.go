@@ -136,7 +136,7 @@ func TestFaultsOnQueueOps(t *testing.T) {
 		t.Fatal("appendHead with a failing get must fail")
 	}
 	fs.fail("list", 0)
-	if _, err := e.svc.ListRunners(ctx(), "o/r", admin); err == nil {
+	if _, err := e.svc.ListRunners(ctx(), admin); err == nil {
 		t.Fatal("ListRunners with a failing list must fail")
 	}
 	if _, err := e.svc.ListSecrets(ctx(), "o/r", admin); err == nil {
@@ -148,7 +148,7 @@ func TestFaultsOnQueueOps(t *testing.T) {
 	fs.clear()
 
 	// claimEntry tolerates a lost CAS (a concurrent claim won).
-	runner := &runnerAuth{Owner: "o", Repo: "r", Doc: &RunnerDoc{ID: "rnr", Labels: []string{"ubuntu-latest"}, State: RunnerActive}}
+	runner := &runnerAuth{Doc: &RunnerDoc{ID: "rnr", Labels: []string{"linux"}, AllowAll: true, State: RunnerActive}}
 	if _, err := e.svc.FetchJob(ctx(), runner, time.Millisecond); err != nil {
 		t.Fatalf("fetch: %v", err)
 	}
@@ -164,17 +164,17 @@ func TestFaultsOnRegistryAndSecrets(t *testing.T) {
 	// Mint: credential create fails; then the registry create fails (rollback
 	// path).
 	fs.fail("put", 0)
-	if _, err := e.svc.MintRegistrationToken(ctx(), "o/r", admin); err == nil {
+	if _, err := e.svc.MintRegistrationToken(ctx(), admin, mintAllPolicy("")); err == nil {
 		t.Fatal("mint with a failing put must fail")
 	}
 	fs.fail("put", 1)
-	if _, err := e.svc.MintRegistrationToken(ctx(), "o/r", admin); err == nil {
+	if _, err := e.svc.MintRegistrationToken(ctx(), admin, mintAllPolicy("")); err == nil {
 		t.Fatal("registry failure must fail the mint")
 	}
 	fs.clear()
 
 	// Register with a failing credential CAS.
-	mint, err := e.svc.MintRegistrationToken(ctx(), "o/r", admin)
+	mint, err := e.svc.MintRegistrationToken(ctx(), admin, mintAllPolicy(""))
 	if err != nil {
 		t.Fatalf("mint: %v", err)
 	}
@@ -195,12 +195,12 @@ func TestFaultsOnRegistryAndSecrets(t *testing.T) {
 	// Mint under a principal whose credential record has a conflicting id is
 	// covered by the retry (mint again with a put fault on the second write).
 	fs.fail("put", 1)
-	_, _ = e.svc.MintRegistrationToken(ctx(), "o/r", admin)
+	_, _ = e.svc.MintRegistrationToken(ctx(), admin, mintAllPolicy(""))
 	fs.clear()
 
 	// Revoke with a failing CAS.
 	fs.fail("put", 0)
-	if err := e.svc.RevokeRunner(ctx(), "o/r", res.RunnerID, admin); err == nil {
+	if err := e.svc.RevokeRunner(ctx(), res.RunnerID, admin); err == nil {
 		t.Fatal("revoke with a failing write must fail")
 	}
 	fs.clear()
@@ -232,11 +232,11 @@ func TestFaultsOnAttempts(t *testing.T) {
 	e, fs, h, _ := faultEnv(t)
 	admin := auth.Principal{Name: "admin", Admin: true}
 	run := e.mustCreate(t)[0]
-	mint, err := e.svc.MintRegistrationToken(ctx(), "o/r", admin)
+	mint, err := e.svc.MintRegistrationToken(ctx(), admin, mintAllPolicy(""))
 	if err != nil {
 		t.Fatalf("mint: %v", err)
 	}
-	res, err := e.svc.Register(ctx(), RegisterInput{Token: mint.Token, Labels: []string{"ubuntu-latest"}})
+	res, err := e.svc.Register(ctx(), RegisterInput{Token: mint.Token, Labels: []string{"linux"}})
 	if err != nil {
 		t.Fatalf("register: %v", err)
 	}
@@ -419,22 +419,12 @@ func TestPartialRunsAndBackground(t *testing.T) {
 		t.Fatalf("labels = %v", got)
 	}
 	// A corrupt credential record fails closed on register.
-	if _, err := store.PutBytes(ctx(), e.store, RunnerTokenKey("a@b", "abcdefgh1234"), []byte("{"), store.PutOptions{Mode: store.PutOverwrite}); err != nil {
+	if _, err := store.PutBytes(ctx(), e.store, RunnerTokenKey("abcdefgh1234"), []byte("{"), store.PutOptions{Mode: store.PutOverwrite}); err != nil {
 		t.Fatalf("seed: %v", err)
 	}
 	if _, err := e.svc.Register(ctx(), RegisterInput{Token: "wrg_YUBi.abcdefgh1234.0123456789abcdef"}); err == nil {
 		t.Fatal("a corrupt credential must fail register")
 	}
-	if _, err := e.svc.registerError(ctx(), "a@b", "abcdefgh1234"); err == nil {
-		t.Fatal("corrupt credential load must fail")
-	}
-}
-
-// registerError exercises loadCredential's corrupt path with the encoded
-// principal (a@b → a%40b).
-func (s *Service) registerError(ctx context.Context, principal, id string) (*RunnerCredential, error) {
-	cred, _, err := s.loadCredential(ctx, principal, id)
-	return cred, err
 }
 
 func TestMarshalAndTruncate(t *testing.T) {
@@ -463,31 +453,15 @@ func TestMarshalAndTruncate(t *testing.T) {
 		t.Fatalf("run ids out of order: %q %q", a, b)
 	}
 	// The keyring accessor is the composition's read.
-	if e := newTestEnv(t); e.svc.Keyring() == nil {
+	e := newTestEnv(t)
+	if e.svc.Keyring() == nil {
 		t.Fatal("New must install an ephemeral keyring")
 	}
-	// A credential/registry pair whose repo segment is malformed fails register.
-	e := newTestEnv(t)
-	cred := &RunnerCredential{
-		ID: "abcdefgh1234", Principal: "a", Repo: "bad repo", Kind: credRegistration,
-		TokenHash: hashSecret("0123456789abcdef"), CreatedAt: "2026-11-20T12:00:00Z", Version: 1,
-	}
-	if _, err := store.PutBytes(ctx(), e.store, RunnerTokenKey("a", cred.ID), mustJSON(cred), store.PutOptions{Mode: store.PutCreate}); err != nil {
-		t.Fatalf("seed: %v", err)
-	}
-	tok, _, _ := mintScopedToken(regTokenPrefix, "a", cred.ID)
-	cred.TokenHash = hashSecret(strings.Split(tok, ".")[2])
-	if _, err := store.PutBytes(ctx(), e.store, RunnerTokenKey("a", cred.ID), mustJSON(cred), store.PutOptions{Mode: store.PutOverwrite}); err != nil {
-		t.Fatalf("seed: %v", err)
-	}
-	if _, err := e.svc.Register(ctx(), RegisterInput{Token: tok}); err == nil {
-		t.Fatal("a malformed repo must fail register")
-	}
 	// A registry record that vanished fails register.
-	if err := e.svc.revokeCredential(ctx(), "a", "unknown", "2026-11-20T12:00:00Z"); err != nil {
+	if err := e.svc.revokeRunnerCredential(ctx(), "unknown", "2026-11-20T12:00:00Z"); err != nil {
 		t.Fatalf("revoke absent credential: %v", err)
 	}
-	if err := e.svc.RevokeRunner(ctx(), "o/r", "unknown", auth.Principal{Name: "admin", Admin: true}); err == nil {
+	if err := e.svc.RevokeRunner(ctx(), "unknown", auth.Principal{Name: "admin", Admin: true}); err == nil {
 		t.Fatal("revoke unknown runner must fail")
 	}
 	// The GC attempt cap fails the job instead of cycling.

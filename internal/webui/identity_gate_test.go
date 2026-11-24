@@ -11,10 +11,10 @@ package webui
 //     identity menu (never the primary nav, in any mode);
 //   - setup stays in the primary nav only for the first-run/unsecured case
 //     (auth mode "" / "none" with no signed-in principal); a signed-in admin
-//     reaches /setup from the identity menu;
+//     reaches /admin from the identity menu;
 //   - /keys, /invitations and /notifications require a signed-in principal:
 //     a signed-out caller under oidc/token gets the API's 401, and auth none
-//     (no identity exists) renders the shared notice pointing at /setup;
+//     (no identity exists) renders the shared notice pointing at /admin/config;
 //   - their writes refuse anonymous (401) and auth-none (403) callers before
 //     any service call.
 
@@ -34,16 +34,13 @@ import (
 
 // identityServer builds the full provider (real templates) with one auth mode
 // and principal, plus the public/settings seams these pages read.
-func identityServer(t *testing.T, mode string, p auth.Principal) *Server {
+func identityServer(t *testing.T, _ string, p auth.Principal) *Server {
 	t.Helper()
-	env := publicEnv(publicCfg(mode, true), &publicFakeRegistry{
+	env := publicEnv(publicCfg("", true), &publicFakeRegistry{
 		owners: []string{"alice"}, repos: map[string][]string{"alice": {"hello"}},
 	})
 	env.API.SSHKeys = &settingsFakeKeys{rows: []api.SshKeyRecord{{ID: "fp-1", Key: "ssh-ed25519 AAAA seeded"}}}
-	s, err := New(env)
-	if err != nil {
-		t.Fatalf("webui.New: %v", err)
-	}
+	s := newTestServer(t, env)
 	s.BindAuth(pageAuthFor(p))
 	BindPublic(PublicDeps{
 		MyInvites:   func(context.Context, auth.Principal) ([]identity.InboxEntry, error) { return nil, nil },
@@ -100,15 +97,12 @@ func TestIdentityNavMatrix(t *testing.T) {
 		name      string
 		mode      string
 		p         auth.Principal
-		wantSetup bool
+		wantAdmin bool
 		wantMenu  bool
 	}{
-		{"none mode", "none", auth.None(), true, false},
-		{"empty mode", "", auth.Principal{Name: "anon", Write: true, Admin: true}, true, false},
-		{"oidc signed out", "oidc", auth.Anonymous(), false, false},
-		{"token signed out", "token", auth.Anonymous(), false, false},
-		{"token signed in", "token", auth.Principal{Name: "alice", Write: true}, false, true},
-		{"oidc signed in", "oidc", auth.Principal{Name: "alice", Write: true}, false, true},
+		{"signed out", "oidc", auth.Anonymous(), false, false},
+		{"signed in", "oidc", auth.Principal{Name: "alice", Write: true}, false, true},
+		{"host admin", "oidc", auth.Principal{Name: "alice", Write: true, Admin: true}, true, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			s := identityServer(t, tc.mode, tc.p)
@@ -119,8 +113,8 @@ func TestIdentityNavMatrix(t *testing.T) {
 			if strings.Contains(nav, "/keys") || strings.Contains(nav, "/invitations") {
 				t.Fatalf("primary nav leaks keys/invitations: %s", nav)
 			}
-			if got := strings.Contains(nav, `href="/setup"`); got != tc.wantSetup {
-				t.Fatalf("nav setup = %v, want %v: %s", got, tc.wantSetup, nav)
+			if got := strings.Contains(nav, `href="/admin"`); got != tc.wantAdmin {
+				t.Fatalf("nav admin = %v, want %v: %s", got, tc.wantAdmin, nav)
 			}
 			if got := strings.Contains(body, "/_auth/logout?next=/"); got != tc.wantMenu {
 				t.Fatalf("identity menu = %v, want %v", got, tc.wantMenu)
@@ -130,22 +124,26 @@ func TestIdentityNavMatrix(t *testing.T) {
 }
 
 // TestIdentityMenuOwnsKeysInvitesAndSetup pins the signed-in destinations:
-// the menu carries keys + invitations for everyone and Setup for host admins.
-func TestIdentityMenuOwnsKeysInvitesAndSetup(t *testing.T) {
+// the menu carries keys + invitations for everyone and Administration for host
+// admins.
+func TestIdentityMenuOwnsKeysInvitesAndAdmin(t *testing.T) {
 	admin := identityServer(t, "oidc", auth.Principal{Name: "alice", Write: true, Admin: true})
 	body := publicGet(admin, "/").Body.String()
 	nav := siteNav(t, body)
-	if strings.Contains(nav, "/keys") || strings.Contains(nav, "/invitations") || strings.Contains(nav, "/setup") {
+	// keys/invitations are per-principal surfaces: menu-only, never in the
+	// primary nav. The Administration link IS a nav destination for a host
+	// admin (PLAN-ADMIN §1.2) — it is not an identity-menu-only surface.
+	if strings.Contains(nav, "/keys") || strings.Contains(nav, "/invitations") {
 		t.Fatalf("admin nav still leaks identity links: %s", nav)
 	}
 	publicWantContains(t, publicGet(admin, "/"),
-		`href="/keys">Keys</a>`, `href="/invitations">Invitations</a>`, `href="/setup">Setup</a>`)
+		`href="/keys">Keys</a>`, `href="/invitations">Invitations</a>`, `href="/admin">Administration</a>`)
 
 	plain := identityServer(t, "oidc", auth.Principal{Name: "bob", Write: true})
 	body = publicGet(plain, "/").Body.String()
 	publicWantContains(t, publicGet(plain, "/"), `href="/keys">Keys</a>`, `href="/invitations">Invitations</a>`)
-	if strings.Contains(body, `>Setup</a>`) {
-		t.Fatalf("non-admin menu carries Setup")
+	if strings.Contains(body, `>Administration</a>`) {
+		t.Fatalf("non-admin menu carries Administration")
 	}
 }
 
@@ -161,35 +159,22 @@ var identityPages = []identityPageCase{
 	{"notifications", "/notifications", "No notifications"},
 }
 
-// TestIdentityPagesRequireSignedIn is the table-driven gate: signed out under
-// oidc/token denies (401 + no form), auth none explains the /setup path (200,
-// no form), signed in renders the page.
+// TestIdentityPagesRequireSignedIn is the table-driven gate: signed out denies
+// (401 + no form), signed in renders the page.
 func TestIdentityPagesRequireSignedIn(t *testing.T) {
 	for _, page := range identityPages {
 		t.Run(page.name, func(t *testing.T) {
-			for _, mode := range []string{"oidc", "token"} {
-				s := identityServer(t, mode, auth.Anonymous())
-				rec := publicGet(s, page.path)
-				if rec.Code != http.StatusUnauthorized {
-					t.Fatalf("%s signed out (%s) = %d, want 401", page.path, mode, rec.Code)
-				}
-				publicWantContains(t, rec, "Sign in required")
-				publicWantNotContains(t, rec, page.marker, `<form method="post"`)
+			s := identityServer(t, "oidc", auth.Anonymous())
+			rec := publicGet(s, page.path)
+			if rec.Code != http.StatusUnauthorized {
+				t.Fatalf("%s signed out = %d, want 401", page.path, rec.Code)
 			}
-
-			// No identity exists: an explanatory page with the /setup path,
-			// never a management form and never a 404.
-			for _, mode := range []string{"none", ""} {
-				s := identityServer(t, mode, auth.Anonymous())
-				rec := publicGet(s, page.path)
-				publicWantStatus(t, rec, http.StatusOK)
-				publicWantContains(t, rec, "Authentication is disabled", `href="/setup"`, "Configure authentication")
-				publicWantNotContains(t, rec, page.marker, `<form method="post"`)
-			}
+			publicWantContains(t, rec, "Sign in required")
+			publicWantNotContains(t, rec, page.marker, `<form method="post"`)
 
 			// Signed in: the real page.
-			s := identityServer(t, "token", auth.Principal{Name: "alice", Write: true})
-			rec := publicGet(s, page.path)
+			s = identityServer(t, "oidc", auth.Principal{Name: "alice", Write: true})
+			rec = publicGet(s, page.path)
 			publicWantStatus(t, rec, http.StatusOK)
 			publicWantContains(t, rec, page.marker)
 			publicWantNotContains(t, rec, "Authentication is disabled")
@@ -197,27 +182,14 @@ func TestIdentityPagesRequireSignedIn(t *testing.T) {
 	}
 }
 
-// TestIdentityDenialSignInLinkOnlyWithBrowserLogin: the 401 page names a
-// sign-in path whenever a browser login exists — OIDC, or token mode with a
-// session_secret (F1's token-paste form). Token mode without a secret has no
-// login flow, so the page must not offer a dead button.
-func TestIdentityDenialSignInLinkOnlyWithBrowserLogin(t *testing.T) {
-	oidc := identityServer(t, "oidc", auth.Anonymous())
-	rec := publicGet(oidc, "/keys")
-	publicWantStatus(t, rec, http.StatusUnauthorized)
-	publicWantContains(t, rec, `href="/_auth/login?next=%2Fkeys"`)
-
-	token := identityServer(t, "token", auth.Anonymous())
-	rec = publicGet(token, "/keys")
+// TestIdentityDenialOffersTheLoginEntry: the 401 page carries the sign-in
+// message and the OIDC login entry (the only authentication).
+func TestIdentityDenialOffersTheLoginEntry(t *testing.T) {
+	s := identityServer(t, "oidc", auth.Anonymous())
+	rec := publicGet(s, "/keys")
 	publicWantStatus(t, rec, http.StatusUnauthorized)
 	publicWantContains(t, rec, "sign in to manage your SSH keys")
 	publicWantContains(t, rec, `href="/_auth/login?next=%2Fkeys"`)
-
-	noSecret := identityServer(t, "token", auth.Anonymous())
-	noSecret.env.Cfg.Server.Auth.SessionSecret = ""
-	rec = publicGet(noSecret, "/keys")
-	publicWantStatus(t, rec, http.StatusUnauthorized)
-	publicWantNotContains(t, rec, "/_auth/login")
 }
 
 // TestIdentityWritesRefuseNoIdentity pins the write side: anonymous is 401
@@ -241,12 +213,7 @@ func TestIdentityWritesRefuseNoIdentity(t *testing.T) {
 				t.Fatalf("anonymous %s %s = %d, want 401 (%s)", w.method, w.path, rec.Code, rec.Body.String())
 			}
 
-			none := identityServer(t, "none", auth.None())
-			if rec := identityDo(none, w.method, w.path, form); rec.Code != http.StatusForbidden {
-				t.Fatalf("auth-none %s %s = %d, want 403 (%s)", w.method, w.path, rec.Code, rec.Body.String())
-			}
-
-			signedIn := identityServer(t, "token", auth.Principal{Name: "alice", Write: true})
+			signedIn := identityServer(t, "oidc", auth.Principal{Name: "alice", Write: true})
 			rec := identityDo(signedIn, w.method, w.path, form)
 			if rec.Code != http.StatusSeeOther {
 				t.Fatalf("signed-in %s %s = %d, want 303 (%s)", w.method, w.path, rec.Code, rec.Body.String())

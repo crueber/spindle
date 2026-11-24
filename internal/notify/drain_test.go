@@ -161,9 +161,10 @@ func TestDrainRefusesNewTasks(t *testing.T) {
 		t.Fatalf("StartWebhooks after Drain = %+v, want nil", rec)
 	}
 	svc.enqueueFanout("acme/repo", 1)
-	// No leader may exist: give a would-be goroutine 100 ms to appear,
-	// then assert no task was ever registered.
-	time.Sleep(100 * time.Millisecond)
+	// Registration is synchronous: enqueueFanout checks Draining before it
+	// mints a task, so there is nothing to wait for — a grace period here
+	// only weakened the assertion (a goroutine that appeared late would have
+	// been missed, and the sleep still cost every run).
 	if rec := svc.TaskStatus("acme/repo", TaskKindFanout); rec != nil {
 		t.Fatalf("fanout task after Drain = %+v, want nil", rec)
 	}

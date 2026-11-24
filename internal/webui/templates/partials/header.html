@@ -3,23 +3,21 @@
   <!-- Narrow widths (Forgejo #273): brand + right cluster pinned, the site nav
        takes the leftover and scrolls internally. -->
   <div class="mx-auto flex max-w-6xl items-center gap-3 px-4 py-2.5 sm:gap-6">
-    <a href="/" class="brand shrink-0 text-[15px]">spindle</a>
+    {{/* Every header control is one of two families: text links padded to the
+         .btn row (WCAG 2.5.8) and `.icon-btn` squares (theme, create, avatar),
+         so the cluster shares one height, radius, border and hover. */}}
+    <a href="/" class="brand shrink-0 py-1 text-[15px]">spindle</a>
     <nav aria-label="Site" class="site-nav flex min-w-0 flex-1 items-center gap-3 overflow-x-auto whitespace-nowrap sm:gap-4">
-      <a href="/explore">explore</a>
-      {{if .Chrome.ShowSetup}}<a href="/setup">setup</a>{{end}}
+      <a href="/explore" class="inline-flex items-center py-1">explore</a>
+      {{if .Chrome.ShowAdmin}}<a href="/admin" class="inline-flex items-center py-1">admin</a>{{end}}
     </nav>
     <div class="ml-auto flex shrink-0 items-center gap-2">
-      <a href="/api" class="nav-link">API</a>
-      {{if .Chrome.ShowLogin}}<a href="{{.Chrome.LoginHref}}" class="btn primary px-2 py-1">Login</a>{{end}}
-      <button type="button" class="btn px-2 py-1" data-theme-toggle aria-pressed="false" title="Toggle dark mode">
-        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="true">
-          <path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8Z"/>
-        </svg>
-        <span class="sr-only">Toggle dark mode</span>
-      </button>
+      <a href="/api" class="nav-link inline-flex items-center py-1">API</a>
+      {{if .Chrome.ShowLogin}}<a href="{{.Chrome.LoginHref}}" class="btn px-2 py-1">Login</a>{{end}}
+      {{template "theme_menu" .}}
       {{if .Chrome.ShowCreate}}
       <div data-menu class="relative">
-        <button type="button" class="btn px-2 py-1" data-menu-trigger aria-haspopup="menu" aria-expanded="false" aria-label="Create new" title="Create new">
+        <button type="button" class="icon-btn" data-menu-trigger aria-haspopup="menu" aria-expanded="false" aria-label="Create new" title="Create new">
           <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="true">
             <path d="M8 3v10M3 8h10"/>
           </svg>
@@ -33,14 +31,14 @@
       {{end}}
       {{if .Chrome.SignedIn}}
       <div data-menu class="relative">
-        <button type="button" class="flex h-8 w-8 items-center justify-center rounded-full bg-zinc-700 text-sm font-semibold text-zinc-50 ring-1 ring-zinc-600 hover:ring-2 hover:ring-amber-500" data-menu-trigger aria-haspopup="menu" aria-expanded="false" title="{{.Chrome.Principal.Name}}">
+        <button type="button" class="icon-btn text-sm font-semibold text-[var(--pd-text)]" data-menu-trigger aria-haspopup="menu" aria-expanded="false" aria-label="Account menu for {{.Chrome.Principal.Name}}" title="{{.Chrome.Principal.Name}}">
           {{.Chrome.Initials}}
         </button>
         <div data-menu-panel role="menu" hidden class="card popover absolute right-0 mt-1 w-48 py-1">
           <a role="menuitem" class="block px-3 py-1.5 text-sm hover:bg-[var(--pd-raised)]" href="/{{.Chrome.Principal.Name}}">Your profile</a>
           <a role="menuitem" class="block px-3 py-1.5 text-sm hover:bg-[var(--pd-raised)]" href="/keys">Keys</a>
           <a role="menuitem" class="block px-3 py-1.5 text-sm hover:bg-[var(--pd-raised)]" href="/invitations">Invitations</a>
-          {{if .Chrome.Admin}}<a role="menuitem" class="block px-3 py-1.5 text-sm hover:bg-[var(--pd-raised)]" href="/setup">Setup</a>{{end}}
+          {{if .Chrome.Admin}}<a role="menuitem" class="block px-3 py-1.5 text-sm hover:bg-[var(--pd-raised)]" href="/admin">Administration</a>{{end}}
           <a role="menuitem" class="block px-3 py-1.5 text-sm hover:bg-[var(--pd-raised)]" href="/_auth/logout?next=/">Log out</a>
         </div>
       </div>

@@ -31,12 +31,11 @@ import (
 
 // parityServer builds a repo fixture with an explicit auth mode + principal and
 // installs the parity seams (reset on cleanup — RepoDeps is process-wide).
-func parityServer(t *testing.T, mode string, p auth.Principal, deps RepoDeps) *repoFixture {
+func parityServer(t *testing.T, _ string, p auth.Principal, deps RepoDeps) *repoFixture {
 	t.Helper()
 	f := newRepoFixture(t, true)
 	cfg := &config.Config{}
 	cfg.Server.Auth.AnonymousRead = true
-	cfg.Server.Auth.Mode = mode
 	cfg.Server.PublicURL = "http://example.test"
 	f.principal = p
 	f.newServer(cfg)
@@ -292,11 +291,11 @@ func TestRepoStarToggleGates(t *testing.T) {
 		t.Fatalf("anonymous Location = %q", loc)
 	}
 
-	// Anonymous with no auth mode: a real 401 (nothing to route to).
+	// Anonymous is always routed to the login interstitial now.
 	f = parityServer(t, "", auth.Anonymous(), deps)
 	rec = parityPost(t, f, "/demo/spindle/star", nil, nil)
-	if rec.Code != http.StatusUnauthorized {
-		t.Fatalf("anonymous/none star = %d, want 401", rec.Code)
+	if rec.Code != http.StatusSeeOther {
+		t.Fatalf("anonymous star = %d, want 303", rec.Code)
 	}
 
 	// Feature-disabled: the service's 403 text reaches the page.
@@ -691,6 +690,7 @@ func TestRepoCreateTagMalformedBody(t *testing.T) {
 // --- small helpers ------------------------------------------------------------
 
 func TestParityErrStatus(t *testing.T) {
+	t.Parallel()
 	cases := []struct {
 		err  error
 		want int

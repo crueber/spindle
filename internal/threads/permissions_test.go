@@ -80,7 +80,7 @@ func startJob(t *testing.T, e *testEnv, run *Run) (string, StartView) {
 	if jobID == "" {
 		t.Fatalf("no claimable job in %s", run.ID)
 	}
-	auth := &runnerAuth{Owner: "o", Repo: "r", Doc: needsRunner()}
+	auth := &runnerAuth{Doc: needsRunner()}
 	view, err := e.svc.Start(ctx(), auth, JobRef("o/r", run.ID, jobID), 1)
 	if err != nil {
 		t.Fatalf("Start: %v", err)
@@ -98,7 +98,7 @@ permissions:
   contents: write
 jobs:
   build:
-    runs-on: ubuntu-latest
+    runs-on: linux
     steps:
       - run: echo
 `)
@@ -118,7 +118,7 @@ permissions:
   contents: read
 jobs:
   build:
-    runs-on: ubuntu-latest
+    runs-on: linux
     steps:
       - run: echo
 `)
@@ -138,11 +138,12 @@ on: [pull_request]
 permissions: write-all
 jobs:
   build:
-    runs-on: ubuntu-latest
+    runs-on: linux
     steps:
       - run: echo
 `)
 	runs, err := e.svc.CreateRun(ctx(), "o/r", testSHA, EventPullReq, CreateOpts{
+		Action: "opened",
 		Branch: "main", Ref: "refs/pull/1/head", BaseBranch: "main", Fork: true, Actor: "newcomer",
 	})
 	if err != nil {
@@ -170,7 +171,7 @@ permissions:
   contents: write
 jobs:
   build:
-    runs-on: ubuntu-latest
+    runs-on: linux
     steps:
       - run: echo
 `)

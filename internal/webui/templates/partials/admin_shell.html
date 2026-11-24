@@ -1,0 +1,96 @@
+{{/* partials/admin_shell.html — the Administration area's ONE shell
+   (docs/PLAN-ADMIN.md §3.1). Every page in the area composes these four blocks:
+   the side-nav (.side-nav-*, guideline §2 — the repo-settings idiom), the
+   header (eyebrow + the page's one <h1> + purpose + state chips), the result
+   banners, and the shared denied view.
+
+   State is never colour-only: each chip carries its text (host admin / first
+   run / restricted) — the AGENTS a11y rule. 390px: the nav stacks full-width
+   above the content (the repo-settings responsive rule), never wraps. */}}
+
+{{/* The area nav. Params: the AdminPage (Nav + Section). */}}
+{{define "admin-nav"}}
+<nav class="min-w-0 shrink-0 lg:w-56" aria-label="Administration sections">
+  <div class="flex min-w-0 flex-col gap-3 lg:sticky lg:top-4 lg:block">
+    <section aria-labelledby="admin-nav-heading" class="min-w-0 flex-1 lg:flex-none">
+      <h2 id="admin-nav-heading" class="side-nav-heading">Administration</h2>
+      <ul class="flex gap-1 overflow-x-auto pb-1 lg:flex-col lg:overflow-visible lg:pb-0">
+        {{range .Nav}}
+        <li class="flex-none"><a class="side-nav-item w-auto lg:w-full" href="{{.Href}}"{{if .Active}} aria-current="page"{{end}}>{{.Label}}</a></li>
+        {{end}}
+      </ul>
+    </section>
+  </div>
+</nav>
+{{end}}
+
+{{/* The page header: eyebrow names the region, the page's one h1, its purpose,
+   then the state chips. */}}
+{{define "admin-header"}}
+<div class="mb-4">
+  <p class="eyebrow">administration</p>
+  <h1 class="text-xl font-semibold tracking-tight">{{.Title}}</h1>
+  <p class="muted mt-1 text-sm">{{.Purpose}}</p>
+  {{if or .HostAdmin .FirstRun .Restricted}}
+  <p class="mt-2 flex flex-wrap items-center gap-2">
+    {{if .HostAdmin}}<span class="chip chip-neutral">host admin</span>{{end}}
+    {{if .FirstRun}}<span class="chip chip-draft">first run</span>{{end}}
+    {{if .Restricted}}<span class="chip chip-closed">restricted</span>{{end}}
+  </p>
+  {{end}}
+</div>
+{{end}}
+
+{{/* Result banners (saved / validated / notices / errors). The error banner is
+   an alert; everything else is a polite status. */}}
+{{define "admin-banners"}}
+{{if .Saved}}
+<div class="card mb-3 border-l-2 border-l-[var(--pd-ok)] p-3 text-sm" role="status">
+  <strong class="font-semibold">Written to &lt;data-dir&gt;/spindle.toml.</strong>
+  {{if .Backup}}<p class="mt-1">The previous file was kept beside it as <code class="mono text-xs">{{.Backup}}</code>.</p>{{end}}
+  {{if not .RequiresRestart}}<p class="mt-1">No key in this save requires a restart.</p>{{end}}
+</div>
+{{end}}
+{{if .ValidateOK}}
+<div class="card mb-3 border-l-2 border-l-[var(--pd-ok)] p-3 text-sm" role="status">Valid — nothing was saved. Press Save to write the file.</div>
+{{end}}
+{{if .Notice}}
+<div class="card mb-3 border-l-2 border-l-[var(--pd-ok)] p-3 text-sm" role="status">{{.Notice}}</div>
+{{end}}
+{{if .Error}}
+{{/* Focus moves to a re-rendered error (including an htmx swap) so a
+     keyboard/AT user lands on the reason, not at the top of the form. */}}
+<div class="card mb-3 border-l-2 border-l-[var(--pd-danger)] p-3 text-sm" role="alert" tabindex="-1" autofocus>{{.Error}}</div>
+{{end}}
+{{end}}
+
+{{/* The restricted-mode banner (§2.2): the SAME semantics for every page. */}}
+{{define "admin-restricted"}}
+<div class="card mb-3 border-l-2 border-l-[var(--pd-danger)] p-3 text-sm" role="alert">
+  <strong class="font-semibold">Restricted mode — the configuration file is invalid.</strong>
+  <p class="mt-1">Until a fixed config is saved and the server restarted, only <code class="mono text-xs">/admin</code>, <code class="mono text-xs">/healthz</code> and <code class="mono text-xs">/readyz</code> answer; everything else returns 503. Fix the errors, Validate, Save, restart.</p>
+</div>
+{{end}}
+
+{{/* The designed forbidden view (§2.4), never a bare 403. Administration is
+   granted only by the OIDC admin group. A non-admin sees only their OWN
+   verified groups (self-diagnosis) — never the configured group names or the
+   issuer, and never a link into the admin-only Access page — plus the file/env
+   recovery verbatim. There is no unauthenticated back door. */}}
+{{define "admin-denied"}}
+<section class="card space-y-2 p-4" aria-labelledby="admin-denied-title">
+  <h2 class="card-header" id="admin-denied-title">Access restricted</h2>
+  <p class="text-sm">This instance requires a host administrator to view or change its configuration. Administration is granted only to a signed-in member of the configured OIDC admin group (<code class="mono text-xs">server.auth.admin_groups</code>).</p>
+  {{if .Detail}}<pre class="code-view whitespace-pre-wrap break-words p-3">{{.Detail}}</pre>{{end}}
+  {{if .SignedIn}}
+  <p class="muted text-sm">You are signed in as <strong>{{.PrincipalName}}</strong>{{if .PrincipalMail}} ({{.PrincipalMail}}){{end}}, but this account's verified groups do not grant administration.</p>
+  <p class="muted text-sm">Your verified groups: {{if .Groups}}<span class="mono text-xs break-all">{{range $i, $g := .Groups}}{{if $i}}, {{end}}{{$g}}{{end}}</span>{{else}}<em>none — your token's claim is empty or was not emitted by the IdP</em>{{end}}</p>
+  <p class="muted text-sm">An existing administrator can add you to the configured OIDC admin group; the group names themselves are not shown outside the Administration area.</p>
+  {{else}}
+  <p class="muted text-sm"><a class="link" href="/_auth/login?next=%2Fadmin">Sign in with OIDC</a> as a member of the configured admin group.</p>
+  {{end}}
+  <div class="setup-callout">
+    <p class="text-sm"><strong>No administrator can sign in?</strong> Recovery is the config file: edit <code class="mono text-xs">&lt;data-dir&gt;/spindle.toml</code> on the host (or set <code class="mono text-xs">SPINDLE__SERVER__AUTH__*</code> env vars) and restart. There is no unauthenticated back door.</p>
+  </div>
+</section>
+{{end}}

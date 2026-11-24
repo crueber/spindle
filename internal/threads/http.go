@@ -31,11 +31,17 @@ var ExposedTemplates = []string{
 	"/{owner}/{repo}/api/threads/{run}/approve",
 	"/{owner}/{repo}/api/threads/{run}/deny",
 	"/{owner}/{repo}/api/threads/{run}/jobs/{job}/log",
-	"/{owner}/{repo}/api/threads/runners",
-	"/{owner}/{repo}/api/threads/runners/tokens",
-	"/{owner}/{repo}/api/threads/runners/{id}",
+	"/{owner}/{repo}/api/threads/{run}/artifacts",
 	"/{owner}/{repo}/api/threads/secrets",
 	"/{owner}/{repo}/api/threads/secrets/{name}",
+	"/{owner}/{repo}/api/threads/environments",
+	"/{owner}/{repo}/api/threads/environments/{name}",
+	"/{owner}/{repo}/api/threads/environments/{name}/secrets",
+	"/{owner}/{repo}/api/threads/environments/{name}/secrets/{secret}",
+	"/api/v1/admin/runners",
+	"/api/v1/admin/runners/tokens",
+	"/api/v1/admin/runners/{id}",
+	"/api/v1/admin/runners/{id}/policy",
 	"/api/v1/threads/runners/register",
 	"/api/v1/threads/runners/declare",
 	"/api/v1/threads/runners/fetch",
@@ -43,6 +49,10 @@ var ExposedTemplates = []string{
 	"/api/v1/threads/jobs/{ref}/attempt/{n}/log",
 	"/api/v1/threads/jobs/{ref}/attempt/{n}/complete",
 	"/api/v1/threads/jobs/{ref}/attempt/{n}/cancel",
+	"/api/v1/threads/jobs/{ref}/attempt/{n}/id-token",
+	"/api/v1/threads/jobs/{ref}/attempt/{n}/artifacts",
+	"/api/v1/threads/jobs/{ref}/attempt/{n}/artifacts/{name}",
+	"/api/v1/threads/jobs/{ref}/attempt/{n}/artifacts/{name}/blobs/{index}",
 }
 
 // Authenticator resolves the request principal through Seam 2 (the server
@@ -70,9 +80,22 @@ func (h *Handler) Handle(w http.ResponseWriter, r *http.Request) bool {
 	if len(segs) == 0 {
 		return false
 	}
+	// The OIDC discovery/JWKS documents are top-level and public: a provider
+	// fetches them before it ever sees a job token. Unknown /.well-known paths
+	// fall through to the core mux's 404.
+	if segs[0] == ".well-known" {
+		return h.handleWellKnown(w, r, segs)
+	}
 	// The runner protocol is top-level (/api/v1/threads/…): runners are
 	// infrastructure, not users, so their paths are not repo-scoped.
 	if segs[0] == "api" || segs[0] == "api-browser" {
+		if len(segs) >= 4 && segs[1] == "v1" && segs[2] == "admin" && segs[3] == "runners" {
+			// The instance runner fleet is a HOST-ADMIN surface, not a repo
+			// lane: /api[-browser]/v1/admin/runners[/*] (both lanes, like every
+			// other JSON twin). The runner PROTOCOL stays machine-only: only
+			// /api/v1 handles threads/runners/{register,declare,fetch}.
+			return h.handleAdminRunners(w, r, segs[4:])
+		}
 		return h.handleTop(w, r, segs)
 	}
 	if len(segs) >= 4 && (segs[2] == "api" || segs[2] == "api-browser") {
@@ -123,6 +146,9 @@ func writePlain(w http.ResponseWriter, status int, msg string) {
 	if status == http.StatusServiceUnavailable {
 		hdr.Set("Retry-After", "15")
 	}
+	if status == http.StatusTooManyRequests {
+		hdr.Set("Retry-After", "60")
+	}
 	hdr.Set("Content-Length", strconv.Itoa(len(msg)))
 	w.WriteHeader(status)
 	_, _ = w.Write([]byte(msg))
@@ -144,6 +170,13 @@ func writeErr(w http.ResponseWriter, err error) {
 }
 
 func writeJSON(w http.ResponseWriter, status int, v any) {
+	writeJSONCached(w, status, v, "no-store")
+}
+
+// writeJSONCached is writeJSON with an explicit Cache-Control class (the OIDC
+// discovery/JWKS documents are the only public, cacheable JSON this package
+// serves; everything else mutates in place and stays no-store).
+func writeJSONCached(w http.ResponseWriter, status int, v any, cacheControl string) {
 	b, err := json.Marshal(v)
 	if err != nil {
 		writePlain(w, http.StatusInternalServerError, "threads: encode: "+err.Error())
@@ -151,7 +184,7 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 	}
 	hdr := w.Header()
 	hdr.Set("Content-Type", "application/json")
-	hdr.Set("Cache-Control", "no-store")
+	hdr.Set("Cache-Control", cacheControl)
 	hdr.Set("Content-Length", strconv.Itoa(len(b)))
 	w.WriteHeader(status)
 	_, _ = w.Write(b)
@@ -218,22 +251,6 @@ func (h *Handler) handleRepo(w http.ResponseWriter, r *http.Request, repo string
 		}
 		h.listWorkflows(w, r, repo)
 		return true
-	case rest[0] == "runners":
-		switch {
-		case len(rest) == 1 && r.Method == http.MethodGet:
-			h.listRunners(w, r, repo)
-		case len(rest) == 2 && rest[1] == "tokens" && r.Method == http.MethodPost:
-			h.mintRunnerToken(w, r, repo)
-		case len(rest) == 2 && r.Method == http.MethodDelete:
-			h.revokeRunner(w, r, repo, rest[1])
-		case len(rest) == 1:
-			methodNotAllowed(w, "GET")
-		case len(rest) == 2 && rest[1] == "tokens":
-			methodNotAllowed(w, "POST")
-		default:
-			methodNotAllowed(w, "DELETE")
-		}
-		return true
 	case rest[0] == "secrets":
 		switch {
 		case len(rest) == 1 && r.Method == http.MethodGet:
@@ -247,6 +264,9 @@ func (h *Handler) handleRepo(w http.ResponseWriter, r *http.Request, repo string
 		default:
 			methodNotAllowed(w, "PUT", "DELETE")
 		}
+		return true
+	case rest[0] == "environments":
+		h.environments(w, r, repo, rest[1:])
 		return true
 	case len(rest) == 2 && rest[1] == "cancel":
 		if r.Method != http.MethodPost {
@@ -275,6 +295,13 @@ func (h *Handler) handleRepo(w http.ResponseWriter, r *http.Request, repo string
 			return true
 		}
 		h.streamLog(w, r, repo, rest[0], rest[2])
+		return true
+	case len(rest) == 2 && rest[1] == "artifacts":
+		if r.Method != http.MethodGet {
+			methodNotAllowed(w, "GET")
+			return true
+		}
+		h.listArtifacts(w, r, repo, rest[0])
 		return true
 	case len(rest) == 1:
 		if r.Method != http.MethodGet {

@@ -3,7 +3,8 @@
 > **Status:** WP1 skeleton + second pass landed (2026-11-20 / 2026-11-21) — the registry protocol,
 > bucket storage, Basic + Bearer auth, the git-identical push gate, the feature toggle, limits, the
 > Packages page/tab, the JSON API, the SDK group, the CLI and the `packages-gc` maintainer sweep are
-> all in (`internal/packages`, `internal/webui/packages.go`, `web/sdk/src/packages.js`).
+> all in (`internal/packages`, `internal/webui/packages.go`, `web/sdk/src/packages.js`). Per-repository
+> quota, a stored usage counter with reconcile, and tag retention landed 2026-11-23 (§5b).
 > Supersedes the P9 "Packages — out of scope" line in `docs/features/README.md` for the OCI case only.
 > Companion: `docs/PLAN-V1.md` WP1; audit + fixes: `docs/AUDIT-V1.md`.
 
@@ -25,7 +26,8 @@ namespace to own, no package↔repo permission mapping to invent.
 
 **Non-goals for v1:** npm, Maven, NuGet, RubyGems; signed-image policy (cosign/notation);
 vulnerability scanning; cross-repository blob mounting (`?mount=`/`?from=`); the `referrers` API;
-pull-through caching; quotas. Each is a later plan, not a hidden requirement.
+pull-through caching. Quota and retention are no longer non-goals — see §5 (they shipped as stored
+counters, not as a second index).
 
 ## 2. Object layout (bucket-native, append-only)
 
@@ -35,6 +37,10 @@ repos/<o>/<r>/packages/registry/
   manifests/sha256/<hex>        manifest bytes (content type in the manifest's mediaType)
   tags/<tag>                    CAS JSON: {"digest":"sha256:...","media_type":"...","updated_at":"..."}
   uploads/<id>/data             chunked-upload staging (TTL, GC'd by the maintainer)
+  usage.json                    CAS counter: bytes/blobs/manifests (quota + page, §5)
+
+packages/usage.json             instance index (maintainer-written): per-repo bytes + total
+packages/gc_state.json          instance GC last-run summary (§6)
 ```
 
 Rules:
@@ -45,8 +51,10 @@ Rules:
   single manifest; nothing in the registry needs to interpret it beyond its size.
 - **A tag is a CAS pointer.** Concurrent pushes to the same tag race on the pointer's version, not on
   the bytes; the loser retries once against the new version or returns `409`.
-- **No index object and no reference counting.** Tags list by prefix paging; GC runs as a sweep
-  (§6), so no hot path ever enumerates the bucket (law 4).
+- **No tag index and no reference counting.** Tags list by prefix paging; GC runs as a sweep
+  (§6), so no hot path ever enumerates the bucket (law 4). The ONE stored aggregate is the usage
+  counter (one small CAS object per repository), maintained on put/delete and reconciled by the
+  sweep — it is a number, never a second index of digests.
 
 ## 3. Routes
 
@@ -124,19 +132,102 @@ A `docker push` of a three-layer image must behave like a git push (law 6):
 
 - Blob uploads are **parallel across layers** — the client already parallelises; the server must not
   serialise them behind a lock. No lock is held across a store call (law 3).
-- **As built (measured):** `POST` costs zero store writes (the upload id embeds its creation time and
-  an HMAC, so no metadata object is needed); a one-chunk `PATCH` is one staging write; `PUT` finalize
-  spools the staging bytes once (hash while spooling), then writes the content-addressed blob — so a
-  push of N layers performs **2N blob writes + 1 manifest write**, plus the tag pointer CAS (2N+2
-  `Put` calls for a tag push), **N+1 reads** (one tag-pointer probe + one staging read per blob) and
-  **zero LISTs**. The digest is only known at finalize, so the verify pass is the single staging read;
-  no blob is ever written before the digest matches. `TestBudgetNoList` asserts these counts.
+- **As built (measured, quota work included):** `POST` costs zero store writes (the upload id embeds
+  its creation time and an HMAC, so no metadata object is needed); a one-chunk `PATCH` is one staging
+  write; `PUT` finalize spools the staging bytes once (hash while spooling), then writes the
+  content-addressed blob and the usage counter — so a push of N layers performs **2N blob writes + 1
+  manifest write + N+1 usage writes** (3N+3 `Put` calls for a tag push), **2N+3 reads** (one
+  tag-pointer probe, one staging read and one counter read per blob, one counter read and one
+  manifest HEAD for the manifest) and **zero LISTs**. The counter is what makes the quota enforceable
+  at the commit point without a LIST; it is one CAS pair per committed object, the deliberate cost
+  of the feature (docs/features/14 §10 records the budget change). The digest is only known at
+  finalize, so the verify pass is the single staging read; no blob is ever written before the digest
+  matches. `TestBudgetNoList` asserts these counts.
 - The happy path never re-reads a blob to verify it; the digest is checked while streaming into the
   staging object, and the finalize rename is the commit point.
 - Chunk staging lives in `uploads/<id>/data`; resuming a `PATCH` continues at the last byte.
-- Limits (config, validated and surfaced in `/setup`): `packages.max_blob_bytes` (default 10 GiB —
+- Limits (config, validated and surfaced in `/admin/config`): `packages.max_blob_bytes` (default 10 GiB —
   GHCR's per-layer ceiling), `packages.max_manifest_bytes` (default 4 MiB), `packages.upload_ttl`
-  (default 24h).
+  (default 24h), `packages.quota_bytes` (default `0B` = unlimited — see §5b).
+
+## 5b. Quota, usage and retention
+
+The registry used to grow without a bound. It now carries a per-repository byte quota, a stored usage
+counter both surfaces read, and a retention policy the maintainer applies.
+
+**Schema (the decision).** The quota is BOTH an instance default and a per-repository override, with
+the host key only supplying the default:
+
+- `[packages] quota_bytes` in `spindle.toml` (instance default; `0B` = unlimited — the compatible
+  default, because an upgrade must not start refusing pushes nobody asked it to bound).
+- `[packages] quota_bytes` in the repository's settings document (`RepoPackages.QuotaBytes`, a
+  **pointer**: absent = inherit the instance default, explicit `0` = unlimited for this repository —
+  the Forgejo #522 "unset ≠ explicit zero" discipline). Retention lives here only; there is no
+  instance-wide retention default, because an instance-wide delete policy is an operator surprise.
+- `[[packages.retention]]` rules, first match wins: `pattern` (a `path.Match` glob over the tag name;
+  `""` or `"*"` matches every tag), `keep_last` (newest N matching tags survive) and `max_age`
+  (tags whose last update is older are pruned). At least one of the two must be set; at most 16 rules;
+  validated at publish (`config.ValidateRepoPackages`) so a policy that can never keep anything is a
+  rejected save, never a silent no-op.
+
+**Enforcement point.** The push COMMIT POINT is `Service.PutManifest`. It reads the counter once,
+projects `usage + len(manifest)` (layer bytes are already counted, see below), and refuses an
+over-quota push with `413` and a named error: code `DENIED` (the OCI spec has no QUOTA code, so the
+name is in the message), text `packages quota exceeded: repo holds 12.4 MiB of 10.0 MiB quota; this
+push needs 1.2 MiB more (3.6 MiB over)`, and `detail {usage, quota, requested}`. Nothing is written:
+no manifest object, no tag pointer, no counter change. `FinalizeUpload` applies the same bound to a
+layer, so a client cannot stream an unbounded set of layers and only fail at the end; a refused layer
+writes no blob (the staging object waits for the TTL sweep). A failed counter read is a `500` — a
+bound that silently disappears on a store hiccup is not a bound.
+
+**Usage without a LIST.** `repos/<o>/<r>/packages/usage.json` is a CAS JSON
+`{version, bytes, blob_bytes, manifest_bytes, blobs, manifests, updated_at}`. It is adjusted on blob
+finalize (+size), on a new manifest object (+body; a re-push of identical bytes is a HEAD hit and
+counts zero — S3 ETags are content hashes, never counters) and on a version delete (−the deleted
+manifest bodies). A lost CAS is not data loss: the counter is not the source of truth, the sweep's
+walk is. The Packages page, the JSON API (`usage` member on `GET …/api/packages`) and the quota check
+read that one object (`Service.Usage` — one GET plus the policy projection), and the Maintenance
+storage card reads the instance index (one GET). Neither lists. `TestUsageReadsNoList` asserts the
+store method set.
+
+The instance index `packages/usage.json` is written ONLY by an applying maintainer pass: a second
+instance-level CAS on every layer upload would be a hot-path round trip nobody asked for, so the card
+says "as of the last maintenance pass" instead of pretending to be live. It holds
+`{version, updated_at, total_bytes, repos: {"owner/repo": bytes}}` (a zero-byte registry's row is
+dropped, so the map is bounded by registries that hold objects).
+
+**Reconciliation (repairs drift).** The sweep already lists every manifest and blob, so it computes
+the true footprint (surviving manifest bytes + surviving blob bytes) and CAS-writes it as the
+absolute counter, reporting `UsageDrift = computed − stored`. That is the reconciliation task; a
+crash between a blob write and its counter CAS, a manual object delete, or a repo whose counter was
+written by an older build all repair within one due interval (15 min). A corrupt counter reads as
+zero, is logged, and is repaired by the same pass. A dry run computes the drift and writes nothing.
+
+**Retention (the maintainer pass).** `packages-gc` (the existing kind — no new task) runs retention
+before its mark phase, so the bytes a pruned version owned are reclaimed by the same pass:
+
+1. Read every tag pointer (one LIST, one GET per tag). A pointer without a parsable `updated_at` is
+   skipped: retention never prunes what it cannot date.
+2. Bucket tags by their first matching rule; newest-first within a bucket; prune `index >= keep_last`
+   and `updated_at <= now − max_age`.
+3. Delete the chosen pointers (CAS on their version; a pointer that moved or vanished under us is
+   left alone), then RE-READ the pointer set (a concurrent push may have re-tagged a digest).
+4. A pruned tag's digest is a deletion candidate only when no surviving tag names it. A candidate
+   whose manifest another stored manifest names as an index child is kept. Deleting a candidate
+   deletes its direct platform manifests too, unless a surviving manifest or tag names them — a
+   surviving tag that points straight at a platform manifest protects it.
+5. **An untagged manifest is never a candidate.** Only a version whose LAST tag this pass removed can
+   go; a manifest pushed by digest and never tagged stays until it is deleted explicitly (the §9
+   gap, unchanged).
+6. The mark phase then keeps every blob any surviving manifest names — a layer shared with a kept
+   version survives because the kept manifest still names it. Nothing here can remove a referenced
+   blob.
+
+The pass reports what it pruned: the task narration names the tag count, the manifest count and the
+bytes; `GCResult.Retention` carries `{tags, pruned_tags, pruned_names (≤20), manifests, bytes}`; the
+instance GC summary (`packages/gc_state.json`) gains `pruned_tags`/`pruned_manifests`/`usage_drift`
+(an older stored row reads zero, never a fabricated number). A dry run runs the same decision with
+`apply=false` and reports what it would prune without touching a tag.
 
 ## 6. Deletion and garbage collection
 
@@ -146,10 +237,11 @@ A `docker push` of a three-layer image must behave like a git push (law 6):
   real `404 MANIFEST_UNKNOWN` — never a silent `202` (a delete that hides a typo is worse than one
   that says not-found).
 - Blobs are removed by a **maintainer sweep**, never inline (no refcount, no LIST on the request
-  path): the pass marks every blob referenced by any stored manifest — image `config` + `layers`,
-  artifact `blobs`, `subject` — and deletes the rest, plus expired upload staging and abort
-  tombstones. It runs as task kind `packages-gc` with progress packets and `(repo, kind)`
-  single-flight.
+  path): the pass applies the repository's tag retention policy first (§5b), then marks every blob
+  referenced by any remaining stored manifest — image `config` + `layers`, artifact `blobs`,
+  `subject` — and deletes the rest, plus expired upload staging and abort tombstones. It runs as
+  task kind `packages-gc` with progress packets and `(repo, kind)` single-flight. The same pass
+  reconciles the usage counter to its own reading (§5b) and records the drift it repaired.
 - **As built:** the sweep is a `maintain.Sweeper` plugged into the maintain loop's task path
   (`internal/maintain/units.go`), so it runs after the §4 priority ladder through the same
   `Tasks().Run(Kind: "packages-gc")` — a manual start (`POST …/api/ops/packages-gc`, SSE-attachable
@@ -161,6 +253,27 @@ A `docker push` of a three-layer image must behave like a git push (law 6):
   flight — the one race the marker cannot see. A delete-time tag scan is the only other LIST, and it
   is bounded by the repo's tag count.
 - A tag that is the target of a release is unaffected: releases point at git tags, not registry tags.
+- **The instance trigger and its dry run (PLAN-ADMIN §8.6, as built 2026-11-22).** The Admin area's
+  Maintenance page owns the one manual control: `POST /admin/maintenance/gc` with `op=dry-run|apply`
+  starts (or joins) the SAME `packages-gc` task at **instance scope** — the reserved task-table repo
+  key `instance` (`packages.InstanceScope`; a repo key is always `<owner>/<repo>`, so it cannot
+  collide). The pass is `Service.SweepAll`, which enumerates registries with delimiter listings over
+  `repos/` (the maintainer's LIST, never a request path) and runs the per-repository mark/sweep body
+  for each, so one unreadable registry is counted and named rather than hiding the rest. `dry_run=1`
+  runs the same body with `apply=false` (`Service.PlanGC`/`sweepRepo`): it counts unreferenced blobs,
+  bytes and expired staging without deleting anything and without moving the per-repo due-gate clock.
+  The count is a reading of the store at that instant — a push racing the pass changes it — and the
+  page's copy says so. `apply` deletes and then records.
+  Last-run facts live in `packages/gc_state.json` at the bucket root (overwrite JSON version 1,
+  `{version:1,last:{…},last_apply:{…}}`, each row `{at, dry_run, actor, task_id, repos,
+  unreferenced, bytes, uploads, ok, error}`), because the task table is instance memory and the page
+  must stay honest across a restart; a lost object reads as "no pass recorded", never a fabricated
+  number. Every trigger — dry run, apply, or a join of a running pass — writes one `packages_gc`
+  record in the host audit family at target `instance:packages`. No new config key: the scheduled
+  cadence is the existing per-repo due gate (`DefaultGCInterval`) stated on the card.
+  Tests: `internal/packages/gcadmin_test.go` (plan counts without deleting, apply + record,
+  idempotence, corrupt/lost summary, enumeration, start/join/audit, refusal) and
+  `internal/webui/admin_gc_test.go`.
 
 ## 7. Surfaces
 
@@ -168,6 +281,13 @@ A `docker push` of a three-layer image must behave like a git push (law 6):
   updated, platforms for an index), a copyable `docker pull` command (per tag and for the package),
   a per-version manifest table, and delete actions behind the typed confirmation. Linked from the
   repository tab strip as **Packages** when `features.packages` is on.
+  **Usage and quota (docs/features/14 §5b, as built).** The page renders the stored counter in words
+  first: `12.4 MiB of 50.0 MiB quota` plus a chip that says **within quota**, **over quota** or **no
+  quota** (state is never colour-only), the remaining bytes and the blob/manifest counts, with the
+  meter as `role="progressbar"` carrying `aria-valuetext`. An unlimited repository says storage is
+  unbounded. A quota/retention policy is set in the repository's settings document (`[packages]` on
+  the Settings → Effective config editor) — the page names the keys and links the maintainer pass
+  that reclaims what retention prunes.
   **As built:** `internal/webui/packages.go` + `templates/pages/packages/packages.html`, rendered
   through `s.pageRepo` (the layout renders the chrome from `PageData.Repo`); the read gate is the
   repo visibility gate, the write gate is `packages.Service.CanPush` (the git rule, the SAME call the
@@ -180,7 +300,9 @@ A `docker push` of a three-layer image must behave like a git push (law 6):
   and the JSON API.
 - **JSON API** (both lanes, plain-text errors, `[]` never null):
   - `GET /{o}/{r}/api/packages[?n=]` → `{repository, packages:[{tag,digest,size,media_type,updated_at,platforms,pull}],
-    manifests:[{digest,media_type,size,updated_at,tags,platforms}], total_size, more}`
+    manifests:[{digest,media_type,size,updated_at,tags,platforms}], total_size, more,
+    usage:{bytes,blob_bytes,manifest_bytes,blobs,manifests,quota_bytes,updated_at}}` (the stored
+    counter and the resolved quota; `quota_bytes: 0` = unlimited)
   - `GET …/api/packages/{digest}` → one manifest view with its tag set and parsed `manifest` body
   - `DELETE …/api/packages/tags/{tag}` → `204`; unknown tag `404`
   - `DELETE …/api/packages/{digest}` → `204` (the version tree, as in §6); unknown `404`
@@ -191,6 +313,12 @@ A `docker push` of a three-layer image must behave like a git push (law 6):
 - **CLI**: `spindle packages list|show|delete` now call the served endpoints; `--tag` deletes a tag
   without a digest positional. A 404 is a real not-found (exit 3), not the old "feature not enabled"
   rewrite.
+- **Maintenance storage card (docs/PLAN-ADMIN.md §3.5):** the Storage & cache card gained an **OCI
+  registry** section: the instance total and up to five largest registries, read from the stored
+  index (`packages/usage.json`) in ONE GET, with the copy stating that the numbers are as of the last
+  maintainer pass and that per-repository quota/retention are set in each repository's settings
+  `[packages]`. Unwired, restricted and read-error states are the honest ones (never a fake zero);
+  the admin config page gains the `packages.quota_bytes` row (`50GiB` example, "0 = unlimited").
 - **Pushed `docker pull` host**: derived from `server.public_url` when set, else the request host.
 
 ## 8. Tests (definition of done)
@@ -206,8 +334,15 @@ A `docker push` of a three-layer image must behave like a git push (law 6):
   read + 1 manifest read + N blob reads.
 - **End to end**: when a Docker/Podman binary is present, the e2e suite pushes and pulls a real image
   (skip, not fail, when absent — the same rule the git e2e uses for a missing `git replay`).
+- **Quota, usage and retention (§5b)**: push refused at the quota (named 413, nothing written), a
+  push under the quota succeeding; the counter accurate across blob put, manifest put, version delete
+  and the sweep; retention pruning by count and by age, a shared manifest keeping its version, a
+  referenced blob never removed, an untagged manifest never pruned by a tag rule; the reconcile
+  repairing an under-reported counter and reporting the drift; no LIST on any usage read (the store
+  method set); the config key's default/validation and the `[packages]` settings round-trip.
 - **Rendered**: the Packages page at desktop and ~390 px, no page-level horizontal scroll; delete
-  flow behind the typed confirmation.
+  flow behind the typed confirmation; the usage/quota block in all three states (within, over,
+  unlimited) at 1440×900 and ~390×844 in dark and light.
 
 **As built (WP1 + second pass):** `internal/packages` passes the protocol subset (ping/challenge,
 Blob/manifest push+pull by tag and digest, multi-arch index round-trip, digest mismatch never stored,
@@ -216,6 +351,18 @@ delete, error codes, Range reads), the auth matrix (anonymous public pull, anony
 read-pull-only, write-push, admin-delete, feature-off 404, pull-token-cannot-push), the upload TTL,
 and the budget assertions in `TestBudgetNoList`; `TestDockerPushPull` pushes and pulls a real local
 image through a live Docker daemon (skips when docker or a local image is absent).
+
+The quota/retention pass's tests live in `internal/packages/quota_test.go` and
+`usage_edge_test.go` (`TestQuotaRefusesManifestAtCommitPoint`, `TestQuotaRefusesOversizedLayer`,
+`TestUsageCounterPutDeleteGC`, `TestInstanceUsageIndex`, `TestReconcileRepairsDrift`,
+`TestRetentionKeepLastSharedManifest`, `TestRetentionKeepLastDistinctVersions`, `TestRetentionMaxAge`,
+`TestRetentionBlobSharedByKeptVersion`, `TestRetentionIndexChildren`,
+`TestRetentionIndexChildFollowsPrunedIndex`, `TestRetentionKeepsDirectlyTaggedChild`,
+`TestUsageReadsNoList`, plus the failure/CAS/no-limit edges in `usage_edge_test.go`), the config
+round-trip in `internal/config/packages_cfg_test.go`, the page's three states in
+`internal/webui/packages_test.go` (`TestPackagesUsageStates`), the storage card in
+`internal/webui/admin_maintenance_test.go` (`TestAdminMaintenancePackagesUsage`) and the new schema
+row in `internal/webui/settings_test.go` (`TestAdminConfigPackagesQuotaRow`).
 
 The second-pass tests cover the audit findings end to end: `TestCanPushReusesGitOwnerRule` and
 `TestTokenEndpointGrantsOwnerPush` run against the REAL `identity.Service` (owner with no
@@ -228,8 +375,19 @@ API matrix lives in `TestPackagesAPISurface` (+ `TestExposedCoversAPIRoutes` for
 maintainer seam in `internal/maintain/sweepers_test.go`. The page, tab, feature-off 404 and delete
 gates are in `internal/webui/packages_test.go`; the SDK group in
 `web/test/unit/sdk-packages.test.js`; the CLI against a fake endpoint in
-`cmd/spindle/cli_commands_test.go`. Package coverage ≥ 95% (`internal/packages` 96%). The rendered
-check (1440 + 390 px, no page-level scroll) is recorded in `docs/AUDIT-V1.md`.
+`cmd/spindle/cli_commands_test.go`. Package coverage ≥ 95% (`internal/packages` 95%, `internal/config`
+96%). The rendered check (1440 + 390 px, no page-level scroll) is recorded in `docs/AUDIT-V1.md`.
+
+**Quota/retention rendered proof (2026-11-23).** Verified in a real browser at desktop and ~390 px,
+dark and light, against a live instance (a 5 MiB image pushed to `acme/demo`, instance quota 10 MiB):
+the Packages page renders `5.0 MiB of 10.0 MiB quota` + the **within quota** chip + the
+`role="progressbar"` reading (`aria-valuetext` = "5.0 MiB of 10.0 MiB quota used (50%); 5.0 MiB
+free"), the remaining bytes and the blob/manifest counts; the Maintenance storage card renders
+`Registry storage: 5.0 MiB · last reconciled …` with the `acme/demo` row. Measurements at 1440×900
+and 390×844: `document.documentElement.scrollWidth === clientWidth` in every case (1440/1440,
+390/390), one `h1`, no positive `tabindex`, the skip link first, and Escape closes the theme menu.
+The unbounded and over-quota states are pinned by `TestPackagesUsageStates` (the live instance was
+within quota); screenshots are working evidence under `/var/tmp/ui-spindle/`, not committed.
 
 ## 9. Risks
 
@@ -240,11 +398,18 @@ check (1440 + 390 px, no page-level scroll) is recorded in `docs/AUDIT-V1.md`.
   tag is never reclaimed automatically (delete it explicitly).
 - **Chunked-upload state** is the only mutable scratch in the bucket; TTL + maintainer cleanup keeps
   it from accumulating when clients vanish.
+- **The usage counter is a number, not a ledger.** A crash between an object write and its counter
+  CAS, a re-push of identical bytes, or two pushes racing a quota check can make the counter drift or
+  let one push overshoot before the next sweep (15 min) reconciles it. That is accepted and visible:
+  the sweep reports the drift, the Packages page shows the counter, and the quota is a growth bound,
+  not an admission controller for bytes. A repository can also exceed its quota by lowering the
+  quota below current usage — the next push is refused and the page says "over quota"; nothing is
+  deleted to enforce it (retention is the operator's explicit lever).
 - **Auth caching**: bearer tokens are verified locally (HMAC) and short-lived, so removing a user's
   access takes effect within the token TTL, not instantly. Document that window; keep it ≤ 5 min.
-- **`auth.mode = none` makes the registry anonymously writable**, exactly like git. It is the
-  zero-config mode's deliberate trade-off, but an image layer is opaque to review, so an exposed
-  instance should run `token` (or `oidc`) — the setup page's `packages` card says so.
+- **The registry requires a credential to push**, exactly like `git push` (session, `wgt_` token or a
+  static machine token). Anonymous callers get the Docker token challenge — `AuthRequired` is
+  unconditional now that OIDC is the only authentication; there is no anonymously-writable mode.
 
 ## 10. Decisions & deviations from the Rust design
 
@@ -298,6 +463,10 @@ check (1440 + 390 px, no page-level scroll) is recorded in `docs/AUDIT-V1.md`.
 
 ### As-built amendments (second pass, 2026-11-21)
 
+The skeleton pass's deferred list is now closed: the Packages page + tab (§7), the JSON API and SDK,
+and the `packages-gc` maintainer task all shipped in this pass (the audit re-ran them against a live
+Docker 29 client; `docs/AUDIT-V1.md`).
+
 - **Push authorisation is the git gate, not a copy of it.** `packages.RoleService` gained
   `CheckPush` and `CanPush` calls it verbatim; the previous local role ladder (and its read
   shortcut for the host write flag) is gone. This closes `docs/AUDIT-V1.md` finding 1: an owner with
@@ -321,6 +490,35 @@ check (1440 + 390 px, no page-level scroll) is recorded in `docs/AUDIT-V1.md`.
   bucket objects, so a `registry_package`-shaped event would need a new sink and a new read path
   purely for fan-out; the audit's product gaps (page, API, GC) were the ones users hit. A caller who
   needs a reaction can poll `GET …/api/packages` (ETag-able) or run the push through CI.
-- **`auth.mode = none` is documented loudly** in the setup page's `packages` card and in §9: the
-  registry is anonymously writable in that mode, which is consistent with the mode but sharper than
-  git (an image layer is opaque to review).
+- **The open-mode exception is deleted with `auth.mode`** (PLAN-OIDC-ONLY): the Configuration page's
+  `packages` card and §9 state that pushes need the same credential as `git push`; there is no
+  anonymously-writable registry.
+
+- **NEW (2026-11-23) — quota and retention: a config default plus a settings override, and a
+  maintainer-applied policy.** `packages.quota_bytes` is the instance default (`0B` = unlimited, so
+  no upgrade starts refusing pushes); the repository's `[packages]` section overrides it, with a
+  pointer so "unset (inherit)" and "explicit 0 (unlimited)" stay distinct. Retention is
+  per-repository only (`[[packages.retention]]`, first glob match wins) and applied by the existing
+  `packages-gc` pass, not a new task — the bytes a pruned version owned are reclaimed by the same
+  pass that decided to drop it, and the pass already owns the only LIST. Rationale: a second task
+  kind would double the task-table traffic for one cadence, and an instance-wide retention default
+  would be an operator surprise that deletes data.
+- **NEW — the push budget grows by the counter, deliberately.** The quota needs a number at the
+  commit point without a LIST, so a blob finalize now does one counter read + one CAS write and a
+  manifest put does one counter read + one manifest HEAD + one CAS write: a push is 3N+3 puts and
+  2N+3 reads instead of 2N+2/1+N (still zero LISTs). The alternative — deriving usage from the
+  manifests on every push — needs N HEADs and cannot dedupe shared blobs, so the counter wins.
+  `TestBudgetNoList` pins the new numbers; §5 states them.
+- **NEW — usage is a counter plus a maintainer reconcile, never a second index.** `usage.json` holds
+  bytes and counts only (no digest ledger); the sweep's existing walk is the reconciliation, and the
+  drift it repairs is reported in the task narration, `GCResult`, and the instance GC summary. A
+  corrupt counter reads as zero (logged) instead of failing a pull.
+- **NEW — the 413 is `DENIED`, not a new code.** The OCI Distribution spec has no QUOTA code, and a
+  registry that invents one breaks clients; the message names the condition and `detail` carries
+  `{usage, quota, requested}`.
+
+- **NEW — the quota/retention objects are inside the packages prefix.** `repos/<o>/<r>/packages/usage.json`
+  and `packages/{usage,gc_state}.json` are spindle-only keys under the prefix the first decision
+  already records; no Rust-era key, field number or file shape changes. A repository move carries the
+  per-repo counter with its registry (the prefix travels), and the instance index row is rewritten by
+  the next pass under the new name (the old row drops at its next zero reading).

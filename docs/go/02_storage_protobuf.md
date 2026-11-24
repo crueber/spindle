@@ -44,9 +44,49 @@ prepends the configured `store.prefix` (normalized to end with `/`).
 | `fsck.pb` | protobuf `FsckReport` | fsck unit (Overwrite) | Last connectivity audit |
 | `cache/api/v1/<sha1-of-cache-key>.json` | JSON | web API (Create) | Shared render cache of immutable API answers |
 | bucket root `maintain/<host>.pb` | protobuf `MaintainerHeartbeat` | maintainer (Overwrite) | Who maintains what, capacity, liveness |
+| bucket root `packages/gc_state.json` | JSON `{"version":1,"last":{…}?,"last_apply":{…}?}` (`at`, `dry_run`, `actor`, `task_id`, `repos`, `unreferenced`, `bytes`, `uploads`, `ok`, `error`) | packages GC pass (`internal/packages`, CAS overwrite) | The last instance-scope packages-GC run and the last APPLYING run (docs/features/14_packages.md §6). Instance-level bookkeeping only: it records what a pass did, is never read by a request path other than the Administration page, and losing it means "no pass recorded here" — no repository state depends on it |
 | bucket root `meta/repos.pb` | protobuf `RepoCatalog` (+ field-3 `entries`, Forgejo #248; entry fields 6-8, Forgejo #247) | optional, CAS'd | Size + activity aggregate (not required for correctness; rebuildable) |
 | `meta/stats.json` | JSON `{"version":1,"size_bytes":N,"object_count":M,"head_seq":H,"updated_at":RFC3339,"last_commit_sha"?:S,"last_commit_time"?:RFC3339,"last_push_at"?:RFC3339}` (Forgejo #248 + #247 activity) | publish path on every committed PUSH/COMPACT/REF_UPDATE (parallel blind-overwrite PUT, never a read) + maintainer sweep backfill (PUT-if-changed, field-scoped merge) | Per-repo size + activity sidecar (one file, one PUT, both concerns; absent/null activity = unknown) |
+| `insights/pulse.json` | JSON, version 1 (see `docs/features/18_repo_insights.md` §2.1) | `insights-refresh` task: maintainer due gate / writer on-demand (CAS: create-if-absent then update-if-version, bounded retry) | Cached repository pulse — commit buckets, contributors, code frequency, issue/PR counts, stars/watches/forks, release/package/run counts; stamped with `computed_at` + the head sha it describes; fully rebuildable, never authoritative |
 | `<key>.part/{i:04}`, `<key>.part/mid{g:04}` | bytes | striped upload | Temp parts, deleted after compose |
+
+**Threads artifact family (2026-11-21; new, spec'd in `docs/features/15_threads.md` §2.5).** The CI
+surface adds one bucket family and one index under a run:
+
+| Key (repo-relative) | Kind | Written by | Meaning |
+|---|---|---|---|
+| `threads/runs/<run>/artifacts/<name>/manifest.json` | JSON `{name,run,job,attempt,files[{path,size,sha256,index}],total_size,retention_days,created_at,trusted}` | runner job (Create) | **The artifact's commit point**; `PutCreate` makes the name unique per run |
+| `threads/runs/<run>/artifacts/<name>/blobs/<attempt:03d>-<index:06d>` | bytes | runner job (Create, immutable) | One artifact file; the attempt segment keeps a retried job from overwriting a previous attempt's bytes |
+| `threads/artifact-expiry/<expires-unix:019d>-<run>-<name>.json` | JSON `{run,name,expires_at}` | finalize (Create) | Only for a `retention-days` that SHORTENS the run's window; the retention pass lists this prefix and reclaims early artifacts |
+| `threads/runs/<run>/artifacts/<name>/…` remainder | — | retention | Deleted with the run (blobs first, manifest last) or by the expiry pass |
+
+The `retention-days` expiry is `min(run expiry, created + days)`; the run's own deletion is the
+expiry for every artifact without one. `threads/…` families are otherwise listed in
+`docs/features/15_threads.md` §2/§9.4, not repeated here.
+
+**Threads OIDC family (2026-11-23; `docs/PLAN-THREADS-OIDC.md`, `docs/features/15_threads.md` §2.6).**
+
+| Key (bucket-relative) | Kind | Written by | Meaning |
+|---|---|---|---|
+| `threads/oidc/signing-key.json` | JSON `{version, active_kid, keys:[{kid, alg, private_key_pem, created_at, retired_at?}]}` | first exchange/JWKS read (`PutCreate`, 412 re-reads the winner) and the 90-day rotation (bounded CAS) | The instance RS256 signing key set. **Private material**: never served by a page or an API (the JWKS renders only `n`/`e`); the bucket is its trust root. Read through an in-process cache (active private key + rendered JWKS): cold = one exact-key GET, warm JWKS/exchange = zero, 60 s TTL for a peer's rotation, local rotation cached immediately, errors not cached. Rotation appends a key and retires the old one in one CAS; retired public keys stay in the cached JWKS for an hour and are pruned on the next rotation. |
+| `repos/<o>/<r>/threads/runs/<run>/jobs/<jid>/id-token/<attempt:03d>.json` | JSON `{version, repo, run, job, attempt, token_hash, created_at, expires_at, window_from?, window_count?}` | job claim (overwrite; the attempt is part of the key) | The job OIDC request-token record. **Hash only** (`sha256(token)`, hex) — the plaintext exists only in the fetch payload and the job environment. The key is derivable from (repo, run, job, attempt), so the exchange is one exact-key GET plus one CAS write (the CAS also carries the per-attempt rate window). Retention lists this small family under the job and deletes it with the job. |
+
+**Threads deployment-environment family (2026-11-23; `docs/PLAN-THREADS-ENVIRONMENTS.md`,
+`docs/features/15_threads.md` §2.7).**
+
+| Key (repo-relative) | Kind | Written by | Meaning |
+|---|---|---|---|
+| `threads/environments/<name>.json` | JSON `{name, required_reviewers[], secrets[], created_by, created_at, updated_at, version}` | settings/API `PUT` (CAS) | The environment record: reviewers (write+ at save) and the **allowlist of secret names**. The commit point; a job naming an environment with no record fails closed. `secrets` is a name list so payload resolution is exact-key GETs, never a LIST. |
+| `threads/environments/<name>/secrets/<SECRET>.json` | JSON `{name, sealed, created_by, created_at, updated_at, version}` | settings/API secret `PUT` (CAS) | One sealed environment secret — the repository-secret envelope (AES-256-GCM base64 `nonce‖ciphertext`) with AAD `spindle/threads/environment-secret/v1\0<repo>\0<env>\0<name>`, so it cannot be replayed as a repository secret or under another environment. Deleted before the record on environment delete; removed with the record's allowlist entry. |
+
+**Identity account state (2026-11-22, PLAN-ADMIN §3.7 — no new family).** `users/<username>/user.json`
+(the OIDC username binding, `docs/features/01_identity_permissions.md` §2/§5.6) gains append-only
+fields `disabled`, `disabled_by`, `disabled_at`, `reason`, `tokens_revoked_at` (RFC3339). The key
+shape, the CAS token (`version`) and every existing field are unchanged: an older reader sees zero
+values for the new keys, an older writer never emits them, and a reactivated account writes the
+disablement fields back to their omitted form — so an active account's bytes match its pre-field
+shape. `tokens_revoked_at` is a watermark (not a credential registry): the credential boundary
+compares a session/`wgt_` wire's mint time against it.
 
 Normative rules carried over from §5.1:
 
@@ -59,6 +99,26 @@ Normative rules carried over from §5.1:
   `store.IsBulkKey(key string) bool` MUST exist even for backends that don't need it.
 - Writers MUST treat all keys marked immutable above as Create-only; an existing immutable key with
   different bytes is a `Corrupt` condition at the reader, never silently overwritten.
+
+### 2.1.1 A repository move rewrites three families (PLAN-V2 §3 T.1)
+
+A transfer copies the whole `repos/<src>/<dst>/` prefix Create-only, then deletes the source
+(manifest first), and finally rewrites the families **outside** the prefix that name a repo. The
+key layout is unchanged; what the move edits is:
+
+| Family | Field / row | Rule |
+|---|---|---|
+| `manifest.pb` | `repo` | rewritten to the destination id. **Load-bearing**: `wal.openOrInitLocal` derives `<cache.dir>/<owner>/<name>.git` from `Manifest.Repo`, so an unrewritten manifest would materialize the OLD owner's serving copy for the new path. Everything else (revision, head_seq, `packs[]`, settings) is untouched — a move is not an edit. |
+| bucket-root `meta/repos.pb` | the `Repos[]` name and its `Entries[]` row | CAS rename carrying `size_bytes`/`object_count`/`head_seq` and fields 6–8 verbatim (`sizecatalog.RenameRow`); a stale destination row is dropped in favour of the moved one; an already-renamed catalog writes nothing. A miss is bounded staleness (the sweep's fold reconciles rows against live manifests) and the task fails rather than claim success. |
+| `meta/forks.json` / `fork.json` | the child row; `parent` and `root` | CAS rewrites, only where the value still names the OLD id (idempotent on retry). A missing index/row writes nothing (the #457 ghost rule); a corrupt document fails the move, never gets guessed. Load-bearing: `wal/forkread.go`'s pack fallback and `maintain/forknet.go`'s GC walk follow `parent`/`root`. |
+| `meta/stats.json`, `packages/registry/**`, every other repo-scoped key | — | travel byte-identical with the prefix copy; no rewrite. The registry's per-repo sweep clocks are in-memory and are dropped for both ids (`packages.Service.RepoMoved`). |
+
+Ordering inside the prefix is normative: destination writes are Create-only, the destination
+manifest is written **last** (after re-reading the source manifest — a byte difference aborts
+before the commit point), and the source manifest is deleted **first** in the delete pass. Any
+source key still present after the delete pass is a concurrent write: reported with its key, never
+silently dropped, and a retry deletes only leftovers it can prove are reproduced at the
+destination.
 
 ## 2.2 Protobuf schema (canonical)
 
@@ -737,6 +797,16 @@ if errors.Is(err, store.ErrRetriesExhausted) { /* treat as contention/failure */
 
 ## Decisions & deviations from the Rust design
 
+- **A repository move rewrites `Manifest.Repo` and three cross-reference families (§2.1.1,
+  2026-11-21, PLAN-V2 §3 T.1):** the manifest's `repo` field is not opaque to the Go
+  implementation (the serving-copy directory is derived from it), so the move retargets it; the
+  bucket-root catalog row, the parent `meta/forks.json` row and the child `fork.json`
+  `parent`/`root` pointers are CAS-rewritten, and the OCI registry's in-memory sweep clocks are
+  invalidated. Key layout, protobuf numbers and JSON shapes are unchanged — no new family, no Rust
+  incompatibility (a Rust reader that trusts the catalog/forks indexes sees the same shapes it
+  always did, with the new name). Rationale: a move that leaves those pointers stale breaks fork
+  pack reads, GC liveness and the size listing; "the bucket is the repository" means the move must
+  fix every object that names the repository, not just the prefix.
 - **No `google.golang.org/protobuf`** — hand-rolled fixed-schema codec in `internal/store/proto`; the
   canonical `.proto` text stays the wire contract, and golden fixtures generated once against a real
   protobuf toolchain prove byte equality. Rationale: dependency minimization is the rewrite's first
@@ -833,3 +903,37 @@ if errors.Is(err, store.ErrRetriesExhausted) { /* treat as contention/failure */
   sidecar, ONE row, ONE sweep — the two writers share the full shape, so
   neither can clobber the other's fields; null + sweep-heal keeps the push
   hot path at +1 total op / +0 sequential trips with zero reads.
+- **Repository Insights family (2026-11-21, docs/features/18).** One new
+  overwritable family: `repos/<o>/<r>/insights/pulse.json` (JSON version 1,
+  CAS create-if-absent then update-if-version, bounded retry). It is a derived
+  cache — losing it loses warmth, never truth — and it is written only by the
+  `insights-refresh` task, never on a request or push path. The page read is
+  one exact-key GET. Rationale: the page needs three nested windows and the
+  facts families; a per-window key family would make the page choose a key and
+  let windows disagree about the head, while a single object keeps one
+  computed-at/head stamp and one CAS point. The family is added to the frozen
+  overwritable list in `14_extensibility.md` §14.11 rule 2 in the same change.
+- **Moderation reports family (2026-11-22, PLAN-V2 §1 M.3, docs/features/16_moderation.md §11).**
+  Two JSON windows and one immutable record, no proto: the per-repo hot window
+  `repos/<o>/<r>/meta/moderation/reports/index.json` (CAS'd; `version` is the revision token,
+  `next_id` the allocator inside the same CAS, `open`/`resolved_recent`/`compacted_through` the P4
+  window), the host-scope projection `moderation/reports/index.json` (CAS'd; the same window with a
+  `repo` pointer on every row), and the Create-only evidence record
+  `repos/<o>/<r>/meta/moderation/reports/<id:012x>.json` (never rewritten; terminal state is a
+  compensating field on the index card). The 256 KiB cap trims the resolved tail inline; the
+  `moderation-reports-compact` task (the pseudo-repo `moderation` on the wal `TaskTable`) is the
+  family's only LIST and rebuilds the global window from the per-repo indexes. Both windows join the
+  frozen overwritable list in `14_extensibility.md` §14.11 rule 2 in this change; the record does not
+  (Create-only). Rationale: the record is evidence, the windows are caches — one CAS shape for what
+  is mutable, one immutable object for what must never change.
+- **Issue parity: no proto and no new family (2026-11-23, docs/features/02 §13–§15).** Pinning is an
+  additive `pinned` array on the existing CAS'd `issues/index.json` (JSON, unknown-field-tolerant:
+  law 5 round-tripping is why an index written before this change reads unchanged and only gains the
+  field on its next write). Dependencies add ONE repo-scoped overwritable JSON object,
+  `repos/<o>/<r>/meta/issue_deps.json` (`{"version":N,"links":[{"blocker":a,"blocked":b}]}`, CAS'd,
+  monotonic `version`): one document so an add/remove is one atomic CAS and the two directions of a
+  link cannot disagree — a per-thread-header field pair would need two CASes on two objects and can
+  half-commit. The issue-template projection is one more overwritable JSON object,
+  `repos/<o>/<r>/meta/issue_templates.json` (CAS'd, derived, written only by the push hook — losing it
+  loses warmth, never truth). None of the three is a protobuf change, so the wire-compat fixtures and
+  field numbering are untouched.

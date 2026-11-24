@@ -123,7 +123,7 @@ func TestRepoSettingsReviewMergeIgnored(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ParseRepoSettings: %v", err)
 	}
-	base := Defaults()
+	base := testBaseConfig()
 	merged, err := rs.Merge(base)
 	if err != nil {
 		t.Fatalf("Merge: %v", err)

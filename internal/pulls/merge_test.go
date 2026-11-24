@@ -173,24 +173,51 @@ func TestMergeGates(t *testing.T) {
 			t.Fatal("dirty merge must not publish")
 		}
 	})
-	t.Run("protect denies with rule name", func(t *testing.T) {
+	t.Run("update restriction does not block the merge", func(t *testing.T) {
+		// The standard team workflow: nobody may push to main, CI must be
+		// green, merges go through the PR. The update restriction governs
+		// direct pushes only — treating it as a merge ban made the shape
+		// Settings → Branch protection generates unusable (the bug this
+		// test pins).
 		e := setup(t)
 		e.roles.Roles["merger@example.com"] = "maintain"
-		putPolicy(t, e, `{"version":1,"rules":[{"name":"no-direct-main","match":{"refs":["refs/heads/main"]},"effect":{"protect":{"restricts":["update"]}}}]}`)
+		putPolicy(t, e, `{"version":1,"rules":[{"name":"main-needs-ci","match":{"refs":["refs/heads/main"]},"effect":{"protect":{"restricts":["create","update"],"require_checks":["threads/ci/lint"]}}}]}`)
+		e.svc.Checks = &fakeChecksGate{}
 		rec, err := e.svc.StartMerge(ctx(), "o", "r", 1, maintainer(), MergeInput{Strategy: StrategyMerge}, "")
 		if err != nil {
 			t.Fatalf("StartMerge: %v", err)
 		}
 		done := waitTask(5*time.Second, func() *TaskRecord { return e.svc.MergeTask("o", "r") })
-		if done == nil || done.State != TaskError || !strings.Contains(done.Error, "no-direct-main") {
-			t.Fatalf("task = %+v", done)
+		if done == nil || done.State != TaskOK {
+			t.Fatalf("protected base must merge through the task: %+v", done)
 		}
 		_ = rec
+		if len(e.refs.updatesFor("refs/heads/main")) != 1 {
+			t.Fatalf("base not published: %+v", e.refs.updatesFor("refs/heads/main"))
+		}
+	})
+	t.Run("unparseable policy still fails the merge closed", func(t *testing.T) {
+		e := setup(t)
+		e.roles.Roles["merger@example.com"] = "maintain"
+		putPolicyRaw(t, e, `{"version":1,"rules":[{"name":"x"]}`)
+		// PLAN-V2 §2.2 reads the same policy on the request path (the
+		// merge-method gate), so an unreadable document is refused with a
+		// 409 before a task exists — still fail-closed, one step earlier.
+		_, err := e.svc.StartMerge(ctx(), "o", "r", 1, maintainer(), MergeInput{Strategy: StrategyMerge}, "")
+		if !errors.Is(err, ErrConflict) {
+			t.Fatalf("StartMerge err = %v", err)
+		}
+		if e.svc.MergeTask("o", "r") != nil {
+			t.Fatal("a refused request must not start a merge task")
+		}
+		if len(e.refs.updatesFor("refs/heads/main")) != 0 {
+			t.Fatalf("published with a corrupt policy: %+v", e.refs.updatesFor("refs/heads/main"))
+		}
 	})
 	t.Run("required-checks gate fails closed only when carried", func(t *testing.T) {
 		e := setup(t)
 		e.roles.Roles["merger@example.com"] = "maintain"
-		// No gate carried ⇒ merges (protect rules evaluated, checks pending).
+		// No gate carried ⇒ merges (plain protect rules do not deny a merge).
 		rec, err := e.svc.StartMerge(ctx(), "o", "r", 1, maintainer(), MergeInput{Strategy: StrategySquash}, "")
 		if err != nil {
 			t.Fatalf("StartMerge: %v", err)

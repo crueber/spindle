@@ -2,6 +2,7 @@ package runner
 
 import (
 	"context"
+	"encoding/json"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -26,8 +27,57 @@ func quietStream(t *testing.T) *Streamer {
 	return s
 }
 
+// recordingStream is a Streamer whose frames are captured, for assertions on
+// the runner-emitted log lines (the checkout base at job start).
+func recordingStream(t *testing.T) (*Streamer, func() string) {
+	t.Helper()
+	var mu sync.Mutex
+	var b strings.Builder
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var frame struct {
+			Text string `json:"text"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&frame)
+		mu.Lock()
+		b.WriteString(frame.Text)
+		mu.Unlock()
+		_, _ = w.Write([]byte(`{"state":"running","cancel":false}`))
+	}))
+	t.Cleanup(srv.Close)
+	s := NewStreamer(NewClient(srv.URL, "wjt_x"), "wjt_x", "jr_x", 1, nil, func() {}, nil)
+	return s, func() string {
+		mu.Lock()
+		defer mu.Unlock()
+		return b.String()
+	}
+}
+
 func executorWith(docker DockerCLI) *Executor {
 	return &Executor{Docker: docker, DefaultImage: "alpine/git:latest", ServiceReadyTimeout: 2 * time.Second}
+}
+
+func TestExecuteLogsTheCheckoutBaseAtJobStart(t *testing.T) {
+	docker := &fakeDocker{streamOutput: "ok\n"}
+	job := fixtureJob()
+	job.Spec.Services = nil
+	stream, frames := recordingStream(t)
+	res := executorWith(docker).Execute(context.Background(), ExecInput{Job: job, AttemptToken: "wjt_token_value"}, stream)
+	stream.Close()
+	if res.Conclusion != threads.JobSuccess {
+		t.Fatalf("conclusion = %s (%s)", res.Conclusion, res.Error)
+	}
+	got := frames()
+	// The fixture's origin is 127.0.0.1:8088; the container copy is
+	// host.docker.internal:8088, and both are stated once at job start.
+	for _, want := range []string{
+		"checkout from http://host.docker.internal:8088/acme/mono.git",
+		"reachable inside the job container as host.docker.internal:8088",
+		"payload URL http://127.0.0.1:8088/acme/mono.git rewritten",
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("job log misses %q:\n%s", want, got)
+		}
+	}
 }
 
 func TestExecuteHappyPathAndCleanup(t *testing.T) {

@@ -33,8 +33,14 @@ type AuthService struct {
 	cfg *config.Auth
 	now func() time.Time
 
-	static map[string]auth.Principal // resolved token → principal (token_env resolved at startup)
+	static []staticToken // resolved server.auth.tokens rows (token_env resolved at startup)
 	jwks   *JWKS
+
+	// usage records last successful static-token authentication (06 §8.2.1).
+	// It is debounced, asynchronous and advisory; nil = disabled (setup-only
+	// builds, harnesses measuring other subsystems). It never participates in
+	// auth and is only written after a credential resolves successfully.
+	usage *TokenUsageRecorder
 
 	// ExtraCredential is the Seam 2 hook for compiled-in credential
 	// shapes the core chain does not know (14_extensibility.md §14.4;
@@ -67,6 +73,40 @@ type AuthService struct {
 	// username-carrying credentials (SSH key auth via
 	// PrincipalForName). Nil or miss fails closed (ErrForbidden).
 	EmailLookup func(username string) (string, bool)
+
+	// AccountLookup reads the account's directory state (docs/PLAN-ADMIN.md
+	// §3.7): the deactivate flag and the credential-revocation watermark.
+	// Wired by composition to the identity service's exact-key read of
+	// users/<username>/user.json; nil = no directory on this build (the
+	// feature is off, and no disabled state can exist to enforce).
+	// Evaluated once per authenticated OIDC-derived credential — served from
+	// the identity service's bounded account-state cache (10 s TTL) on the
+	// warm path, so it is not a per-request bucket round trip — and an error
+	// FAILS CLOSED (ErrUnavailable), because an unreadable account state must
+	// not authenticate as "not disabled".
+	AccountLookup func(username string) (auth.AccountState, error)
+}
+
+// staticToken is one resolved server.auth.tokens row. The secret itself is not
+// kept: a constant-time compare happens over its SHA-256 digest, so a lookup
+// reveals nothing about the configured value and every row is compared on every
+// attempt (no early exit on the matching one).
+type staticToken struct {
+	principal auth.Principal
+	digest    [sha256.Size]byte
+	expires   time.Time // zero = never expires
+	invalid   bool      // unparseable expires_at (validation rejects it): fail closed
+	name      string    // configured label ("" = unnamed)
+	usageKey  string    // name or "sha256:<prefix>", keys the last-used record
+}
+
+// expired reports whether the credential may no longer authenticate. The
+// boundary is inclusive: at expires_at the token is already dead.
+func (t staticToken) expired(now time.Time) bool {
+	if t.invalid {
+		return true
+	}
+	return !t.expires.IsZero() && !now.Before(t.expires)
 }
 
 // NewAuthService builds the service and the resolved static-token table.
@@ -74,7 +114,7 @@ func NewAuthService(a *config.Auth, now func() time.Time) *AuthService {
 	if now == nil {
 		now = time.Now
 	}
-	s := &AuthService{cfg: a, now: now, static: map[string]auth.Principal{}}
+	s := &AuthService{cfg: a, now: now}
 	for _, t := range a.Tokens {
 		tok := t.Token
 		if t.TokenEnv != "" {
@@ -83,22 +123,52 @@ func NewAuthService(a *config.Auth, now func() time.Time) *AuthService {
 		if tok == "" {
 			continue
 		}
-		s.static[tok] = auth.Principal{Name: t.Principal, Write: t.Write, Admin: t.Admin}
+		entry := staticToken{
+			// Static tokens are machine credentials: never anonymous, never admin
+			// (administration is the OIDC admin group and nothing else).
+			principal: auth.Principal{Name: t.Principal, Write: t.Write},
+			digest:    sha256.Sum256([]byte(tok)),
+			name:      strings.TrimSpace(t.Name),
+		}
+		entry.usageKey = auth.TokenUsageIdentity(entry.name, tok)
+		if exp := strings.TrimSpace(t.ExpiresAt); exp != "" {
+			if parsed, err := time.Parse(time.RFC3339, exp); err == nil {
+				entry.expires = parsed
+			} else {
+				// Validate refuses this at load; a caller that bypassed it
+				// must not get a credential that outlives the broken row.
+				entry.invalid = true
+			}
+		}
+		s.static = append(s.static, entry)
 	}
-	if a.Mode == "oidc" {
-		s.jwks = NewJWKS(a.Issuer)
-	}
+	s.jwks = NewJWKS(a.Issuer)
 	return s
 }
 
-// authChallenge is the 401 WWW-Authenticate value for this host. Static
-// tokens are also accepted over HTTP Basic (the password is the token, see
-// parseCredential), and git's credential machinery only offers a username/
-// password prompt when the 401 advertises Basic — so Basic joins the
-// challenge whenever static tokens are configured (audit: token-auth git over
-// a plain URL could never authenticate).
+// lookupStatic finds a configured credential by its secret in constant time
+// over every row (the digest compare never short-circuits).
+func (s *AuthService) lookupStatic(raw string) (staticToken, bool) {
+	sum := sha256.Sum256([]byte(raw))
+	var found staticToken
+	ok := false
+	for i := range s.static {
+		if subtle.ConstantTimeCompare(s.static[i].digest[:], sum[:]) == 1 {
+			found = s.static[i]
+			ok = true
+		}
+	}
+	return found, ok
+}
+
+// authChallenge is the 401 WWW-Authenticate value for this host. Machine
+// credentials (static tokens, and the ExtraCredential shapes: CI, runner and
+// job tokens) are accepted over HTTP Basic — the password is the token — and
+// git's credential machinery only offers its username/password prompt when the
+// 401 advertises Basic. So Basic joins the challenge whenever a machine
+// credential can exist on this host; a pure OIDC build advertises Bearer only.
 func (s *AuthService) authChallenge() string {
-	if s != nil && len(s.static) > 0 {
+	if s != nil && (len(s.static) > 0 || s.ExtraCredential != nil) {
 		return `Basic realm="walgit", Bearer realm="walgit"`
 	}
 	return `Bearer realm="walgit"`
@@ -155,17 +225,12 @@ func parseCredential(cred string) (token string, basic bool, err error) {
 	return "", false, fmt.Errorf("unparseable credential")
 }
 
-// Authenticate resolves the request's principal per the §8.3 trees.
+// Authenticate resolves the request's principal (§8.3). OIDC is the only
+// authentication (docs/PLAN-OIDC-ONLY.md): machine credentials resolve first,
+// then a wgt_ token, then an ID token, then the session cookie, else the
+// anonymous viewer.
 func (s *AuthService) Authenticate(r *http.Request, c *config.Config) (auth.Principal, *auth.AuthError) {
-	switch s.cfg.Mode {
-	case "none":
-		return auth.None(), nil
-	case "token":
-		return s.authToken(r)
-	case "oidc":
-		return s.authOIDC(r)
-	}
-	return auth.Anonymous(), nil
+	return s.authOIDC(r)
 }
 
 // AuthenticateForwarded resolves the request's principal per Authenticate
@@ -186,38 +251,6 @@ func (s *AuthService) AuthenticateForwarded(r *http.Request, c *config.Config) (
 	return s.identityForward(r, p), nil
 }
 
-// authToken is the §8.3 `token` tree.
-//
-// A request without an Authorization credential may still carry the
-// walgit_session cookie minted by the token-paste sign-in (POST /_auth/token,
-// §8.6): the session names a static principal, so the principal's rights are
-// re-derived from the LIVE server.auth.tokens set on every request (removing
-// the token kills the session; nothing is copied into the session wire beyond
-// the principal name). A bad/expired cookie falls through to anonymous exactly
-// like the OIDC tree — an explicit credential still wins, and an invalid one
-// never falls back.
-func (s *AuthService) authToken(r *http.Request) (auth.Principal, *auth.AuthError) {
-	cred, _ := resolveCredential(r)
-	if cred == "" {
-		if p, ok := s.sessionPrincipal(r); ok {
-			return p, nil
-		}
-		return auth.Anonymous(), nil // read gated by server.auth.anonymous_read
-	}
-	tok, basic, perr := parseCredential(cred)
-	if perr != nil {
-		return auth.Anonymous(), &auth.AuthError{Kind: auth.ErrInvalid, Why: "invalid credentials"}
-	}
-	if p, ok := s.static[tok]; ok {
-		return p, nil
-	}
-	if p, aerr, claimed := s.extra(tok); claimed {
-		return p, aerr
-	}
-	_ = basic
-	return auth.Principal{}, &auth.AuthError{Kind: auth.ErrInvalid, Why: "invalid token"}
-}
-
 // authOIDC is the §8.3 `oidc` tree.
 func (s *AuthService) authOIDC(r *http.Request) (auth.Principal, *auth.AuthError) {
 	cred, _ := resolveCredential(r)
@@ -226,9 +259,19 @@ func (s *AuthService) authOIDC(r *http.Request) (auth.Principal, *auth.AuthError
 		if perr != nil {
 			return auth.Principal{}, &auth.AuthError{Kind: auth.ErrInvalid, Why: "invalid credentials"}
 		}
-		// Static tokens work in oidc mode.
-		if p, ok := s.static[tok]; ok {
-			return p, nil
+		// Static tokens work in oidc mode. An expired (or unparseable-expiry)
+		// row is a real 401 — indistinguishable from an unknown token, so a
+		// leaked credential learns nothing and git erases it.
+		if st, ok := s.lookupStatic(tok); ok {
+			if st.expired(s.now()) {
+				return auth.Principal{}, &auth.AuthError{Kind: auth.ErrInvalid, Why: "invalid token"}
+			}
+			if s.usage != nil {
+				s.usage.note(st.usageKey,
+					auth.TokenUsageEntry{Name: st.name, Principal: st.principal.Name},
+					r.RemoteAddr, r.UserAgent())
+			}
+			return st.principal, nil
 		}
 		if p, aerr, claimed := s.extra(tok); claimed {
 			return p, aerr
@@ -247,7 +290,11 @@ func (s *AuthService) authOIDC(r *http.Request) (auth.Principal, *auth.AuthError
 	if c, cerr := r.Cookie("walgit_session"); cerr == nil && c.Value != "" {
 		st, terr := s.VerifyToken(c.Value)
 		if terr == nil && st.Kind == "session" {
-			p, aerr := s.principalFromEmailGroups(st.Email, st.Groups)
+			// The session's mint time rides the gate: a session minted at
+			// or before the account's revocation watermark is refused
+			// (deactivation kills the browser login too, and reactivation
+			// requires a fresh sign-in).
+			p, aerr := s.principalFromEmailGroups(st.Email, st.Groups, st.IssuedAt)
 			if aerr != nil {
 				return auth.Principal{}, aerr
 			}
@@ -266,7 +313,11 @@ func (s *AuthService) verifyIDToken(ctx context.Context, raw string, browserFlow
 	if err != nil {
 		return auth.Principal{}, err
 	}
-	return s.principalFromEmailGroups(claims.Email, claims.Groups)
+	// An ID token is a fresh IdP credential, not a walgit-minted one: the
+	// account's revocation watermark deliberately does not apply to it (a
+	// reactivated user's next login works without a second wait), but the
+	// deactivate flag does.
+	return s.principalFromEmailGroups(claims.Email, claims.Groups, time.Time{})
 }
 
 // wgtPrincipal verifies a wgt_-prefixed token and derives the principal from
@@ -280,7 +331,9 @@ func (s *AuthService) wgtPrincipal(wire string) (auth.Principal, *auth.AuthError
 	if st.Kind != tokenKind {
 		return auth.Principal{}, &auth.AuthError{Kind: auth.ErrInvalid, Why: "wrong token kind"}
 	}
-	return s.principalFromEmailGroups(st.Email, st.Groups)
+	// A wgt_ token is user-bound: its mint time rides the gate, so a token
+	// minted at or before deactivation stays dead after reactivation.
+	return s.principalFromEmailGroups(st.Email, st.Groups, st.IssuedAt)
 }
 
 // principalFromEmail applies the §8.4 email policy (7) and returns the
@@ -291,7 +344,7 @@ func (s *AuthService) wgtPrincipal(wire string) (auth.Principal, *auth.AuthError
 // rides along on Principal.Email for alias matching and session/token
 // mints (the wire keeps carrying the email).
 func (s *AuthService) principalFromEmail(email string) (auth.Principal, *auth.AuthError) {
-	return s.principalFromEmailGroups(email, nil)
+	return s.principalFromEmailGroups(email, nil, time.Time{})
 }
 
 // principalFromEmailGroups is principalFromEmail plus the WP13 group-admin
@@ -301,7 +354,15 @@ func (s *AuthService) principalFromEmail(email string) (auth.Principal, *auth.Au
 // (case-insensitive). An empty admin_groups list never grants admin, and
 // group membership never upgrades Write — write stays the email policy's
 // business (write_domains), admin is an independent flag per §8.1.
-func (s *AuthService) principalFromEmailGroups(email string, groups []string) (auth.Principal, *auth.AuthError) {
+//
+// issuedAt is the mint time of the credential being resolved (zero for a
+// credential with no offline lifetime: an ID token, SSH key auth, a
+// forwarded identity). It feeds the account gate below, which is the ONE
+// deactivation enforcement point (docs/PLAN-ADMIN.md §3.7): every
+// OIDC-derived credential resolves through this function, so a disabled
+// account is refused here — before any page, API or git route sees a
+// principal — rather than page by page.
+func (s *AuthService) principalFromEmailGroups(email string, groups []string, issuedAt time.Time) (auth.Principal, *auth.AuthError) {
 	email = strings.ToLower(strings.TrimSpace(email))
 	domain := ""
 	if i := strings.LastIndexByte(email, '@'); i >= 0 {
@@ -331,32 +392,73 @@ func (s *AuthService) principalFromEmailGroups(email string, groups []string) (a
 			}
 		}
 	}
+	// The ONE admin predicate: signed-in ∧ groups ∩ admin_groups ≠ ∅.
+	// Nothing else grants administration — no email list, no domain list, no
+	// static-token flag, no forwarded header.
 	admin := false
-	for _, e := range s.cfg.AdminEmails {
-		if strings.EqualFold(email, e) {
-			admin = true
+	for _, g := range groups {
+		g = strings.TrimSpace(g)
+		if g == "" {
+			continue // an empty claim value never matches an admin group
 		}
-	}
-	for _, d := range s.cfg.AdminDomains {
-		if strings.EqualFold(domain, d) {
-			admin = true
-		}
-	}
-	if !admin && len(s.cfg.AdminGroups) > 0 {
-		for _, g := range groups {
-			g = strings.TrimSpace(g)
-			if g == "" {
-				continue // an empty claim value never matches an admin group
-			}
-			for _, want := range s.cfg.AdminGroups {
-				if strings.EqualFold(g, strings.TrimSpace(want)) {
-					admin = true
-				}
+		for _, want := range s.cfg.AdminGroups {
+			if strings.EqualFold(g, strings.TrimSpace(want)) {
+				admin = true
 			}
 		}
 	}
-	return auth.Principal{Name: s.usernameFor(email), Email: email,
+	name := s.usernameFor(email)
+	if aerr := s.accountGate(name, issuedAt); aerr != nil {
+		return auth.Principal{}, aerr
+	}
+	return auth.Principal{Name: name, Email: email,
 		Groups: groups, Write: write, Admin: admin}, nil
+}
+
+// accountGate enforces the instance directory's account state for a
+// resolved username (docs/PLAN-ADMIN.md §3.7):
+//
+//   - a disabled account is refused with 403 and a neutral message (it never
+//     names who deactivated it, or why);
+//   - a credential minted at or before the account's revocation watermark is
+//     refused with 401 (the wgt_ token and browser-session rule: deactivation
+//     revokes them, reactivation does not restore them). The wire carries `iat`
+//     at second precision, so the comparison is inclusive at second
+//     granularity: a credential minted in the same second as the deactivation
+//     is refused too (fail closed). The cost is that a sign-in in the very
+//     second after a reactivation can still be refused once — retrying (or the
+//     next page load a moment later) succeeds, which is the honest side of the
+//     trade;
+//   - an unreadable account state fails CLOSED with 503 — "not disabled"
+//     must never be the answer to a store error;
+//   - no lookup wired = no directory on this build (the feature is off; no
+//     disabled state can exist to enforce).
+//
+// Cost: the lookup is memoized by the identity service (bounded LRU, 4096
+// entries, 10 s TTL, negative entries included, errors never cached), so a
+// warm signed-in request costs NO store op; a cold/expired entry is one
+// exact-key GET. This instance invalidates on its own deactivate/reactivate,
+// so a local transition is enforced on the next request; the TTL is the
+// cross-instance bound (docs/PLAN-ADMIN.md §3.7). The anonymous path never
+// calls it, and machine credentials never reach it.
+func (s *AuthService) accountGate(username string, issuedAt time.Time) *auth.AuthError {
+	if s.AccountLookup == nil || username == "" {
+		return nil
+	}
+	st, err := s.AccountLookup(username)
+	if err != nil {
+		return &auth.AuthError{Kind: auth.ErrUnavailable, Why: "account state unavailable"}
+	}
+	if st.Disabled {
+		return &auth.AuthError{Kind: auth.ErrForbidden,
+			Why: "this account is deactivated; contact the instance administrator"}
+	}
+	if !st.TokensRevokedAt.IsZero() && !issuedAt.IsZero() &&
+		!issuedAt.After(st.TokensRevokedAt) {
+		return &auth.AuthError{Kind: auth.ErrUnauthorized,
+			Why: "this credential was revoked; sign in again"}
+	}
+	return nil
 }
 
 // usernameFor resolves the immutable username for a verified email:
@@ -413,47 +515,24 @@ func requireAdmin(p auth.Principal) *auth.AuthError {
 	return nil
 }
 
-// BrowserLoginEnabled reports §8.6 gating: mode oidc + session secret + client
-// id + client secret.
+// BrowserLoginEnabled reports §8.6 gating: the browser-login trio. Config
+// validation makes it true for every normally-booted instance.
 func (s *AuthService) BrowserLoginEnabled() bool {
-	return s.cfg.Mode == "oidc" && s.cfg.SessionSecret != "" &&
+	return s.cfg.SessionSecret != "" &&
 		s.cfg.OAuthClientID != "" && s.cfg.OAuthClientSecret != ""
-}
-
-// TokenSignInEnabled reports the token-mode browser path: a token-paste form
-// mints a walgit_session, so it needs server.auth.session_secret to sign the
-// wire. Without the secret the page states the file/API recovery instead.
-func (s *AuthService) TokenSignInEnabled() bool {
-	return s.cfg.Mode == "token" && s.cfg.SessionSecret != ""
 }
 
 // StaticPrincipal resolves ONE raw static token exactly as the token-mode
 // credential chain does (server.auth.tokens, token_env resolved at startup).
-// The Seam 2 hook is deliberately not consulted: a CI/feature credential is
+// An expired credential does not resolve (06 §8.2.1). The Seam 2 hook is
+// deliberately not consulted: a CI/feature credential is
 // not a browser identity and must never mint a session.
 func (s *AuthService) StaticPrincipal(raw string) (auth.Principal, bool) {
-	p, ok := s.static[raw]
-	return p, ok
-}
-
-// sessionPrincipal resolves a walgit_session cookie to a token-mode principal:
-// the session carries the static principal NAME, and PrincipalForName re-derives
-// write/admin from the live tokens. Unknown principal / expired / bad MAC →
-// not authenticated (anonymous), never an in-band error.
-func (s *AuthService) sessionPrincipal(r *http.Request) (auth.Principal, bool) {
-	c, err := r.Cookie("walgit_session")
-	if err != nil || c.Value == "" {
+	st, ok := s.lookupStatic(raw)
+	if !ok || st.expired(s.now()) {
 		return auth.Principal{}, false
 	}
-	st, aerr := s.VerifyToken(c.Value)
-	if aerr != nil || st.Kind != sessionKind || st.Email == "" {
-		return auth.Principal{}, false
-	}
-	p, perr := s.PrincipalForName(st.Email)
-	if perr != nil {
-		return auth.Principal{}, false
-	}
-	return p, true
+	return st.principal, true
 }
 
 // --- wgt_ tokens & sessions (§8.5) ---------------------------------------------------
@@ -1084,16 +1163,43 @@ func bareHost(iss string) string {
 
 // --- /_auth endpoints shared with the OIDC flow ---------------------------------------
 
-// meHandler answers GET /_auth/me → {principal, write} (§8.6).
+// authMe answers GET /_auth/me → {principal, write, anonymous, email, groups,
+// admin, groups_claim} (§8.6). The group fields are the live verified claims
+// beside the configured claim name, so a "valid config but wrong group"
+// lockout is diagnosable with one curl.
 func (s *Server) authMe(w http.ResponseWriter, r *http.Request) {
 	p, aerr := s.authSvc.Authenticate(r, s.cfg)
 	if aerr != nil {
-		s.mapAuthStatus(w, aerr)
+		s.mapAuthStatus(w, r, aerr)
 		return
+	}
+	groups := p.Groups
+	if groups == nil {
+		groups = []string{}
 	}
 	writeJSONBody(w, http.StatusOK, map[string]any{
 		"principal": p.Name, "write": p.Write, "anonymous": p.Anonymous,
+		"email": p.Email, "groups": groups, "admin": p.Admin,
+		"groups_claim": s.cfg.Server.Auth.GroupsClaim,
 	})
+}
+
+// sessionInfo reports the walgit_session cookie's issued-at for the Access
+// diagnostics (pages.Auth.SessionInfo). ok=false for bearer/static/anonymous
+// requests, so the card simply omits the line.
+func (s *Server) sessionInfo(r *http.Request) (time.Time, bool) {
+	if s.authSvc == nil {
+		return time.Time{}, false
+	}
+	c, err := r.Cookie("walgit_session")
+	if err != nil || c.Value == "" {
+		return time.Time{}, false
+	}
+	st, aerr := s.authSvc.VerifyToken(c.Value)
+	if aerr != nil || st.Kind != sessionKind {
+		return time.Time{}, false
+	}
+	return st.IssuedAt.UTC(), true
 }
 
 // checkHandler answers /_auth/check (the edge's auth_request): 204 +
@@ -1101,7 +1207,7 @@ func (s *Server) authMe(w http.ResponseWriter, r *http.Request) {
 func (s *Server) authCheck(w http.ResponseWriter, r *http.Request) {
 	p, aerr := s.authSvc.Authenticate(r, s.cfg)
 	if aerr != nil {
-		s.mapAuthStatus(w, aerr)
+		s.mapAuthStatus(w, r, aerr)
 		return
 	}
 	if p.Anonymous && !s.cfg.Server.Auth.AnonymousRead {
@@ -1159,56 +1265,31 @@ func randHex(n int) string {
 }
 
 // PrincipalForName resolves a named principal's rights for SSH key auth
-// (17_ssh.md §3): none-mode → the anon-all principal; oidc → the same
-// admission and flags the browser login applies to that email; token → the
-// aggregate of the principal's static tokens (an unknown principal in token
-// mode is denied — its keys were added by credentials since removed).
-//
-// In oidc mode the name may be a username (no @): it resolves through
-// the wired EmailLookup back to the verified email and inherits that
-// email's admission + flags (fail closed — nil lookup or miss denies).
+// (17_ssh.md §3). There is one identity source: the OIDC admission path. A
+// username (no @) resolves through the wired EmailLookup back to the verified
+// email and inherits that email's admission + flags (fail closed — nil lookup
+// or miss denies). A static token's principal name is not an OIDC identity, so
+// its SSH keys resolve nowhere.
 func (a *AuthService) PrincipalForName(name string) (auth.Principal, error) {
-	switch a.cfg.Mode {
-	case "none":
-		return auth.None(), nil
-	case "oidc":
-		if !strings.Contains(name, "@") {
-			if a.EmailLookup == nil {
-				return auth.Principal{}, &auth.AuthError{Kind: auth.ErrForbidden,
-					Why: "unknown principal"}
-			}
-			em, ok := a.EmailLookup(strings.ToLower(strings.TrimSpace(name)))
-			if !ok {
-				return auth.Principal{}, &auth.AuthError{Kind: auth.ErrForbidden,
-					Why: "unknown principal"}
-			}
-			p, aerr := a.principalFromEmail(em)
-			if aerr != nil {
-				return auth.Principal{}, aerr
-			}
-			return p, nil
-		}
+	if strings.Contains(name, "@") {
 		p, aerr := a.principalFromEmail(name)
 		if aerr != nil {
 			return auth.Principal{}, aerr
 		}
 		return p, nil
-	default: // token
-		var out auth.Principal
-		found := false
-		for _, p := range a.static {
-			if p.Name != name {
-				continue
-			}
-			found = true
-			out.Name = name
-			out.Write = out.Write || p.Write
-			out.Admin = out.Admin || p.Admin
-		}
-		if !found {
-			return auth.Principal{}, &auth.AuthError{Kind: auth.ErrForbidden,
-				Why: "principal has no active credentials"}
-		}
-		return out, nil
 	}
+	if a.EmailLookup == nil {
+		return auth.Principal{}, &auth.AuthError{Kind: auth.ErrForbidden,
+			Why: "unknown principal"}
+	}
+	em, ok := a.EmailLookup(strings.ToLower(strings.TrimSpace(name)))
+	if !ok {
+		return auth.Principal{}, &auth.AuthError{Kind: auth.ErrForbidden,
+			Why: "unknown principal"}
+	}
+	p, aerr := a.principalFromEmail(em)
+	if aerr != nil {
+		return auth.Principal{}, aerr
+	}
+	return p, nil
 }
