@@ -785,3 +785,67 @@ func TestSweepAllPrunesStaleInstanceRows(t *testing.T) {
 		t.Fatalf("total = %d, rows sum to %d", u.TotalBytes, sum)
 	}
 }
+
+// TestAwaitStartOrdering pins the scheduling window StartGC can hit: the job
+// sends the started record and may finish before the select runs. A pass that
+// started must answer its id, never "did not start; retry" (the flake GitHub's
+// slower runner exposed on v0.7.0).
+func TestAwaitStartOrdering(t *testing.T) {
+	t.Parallel()
+	rec := func(id string) *wal.TaskRecord { return &wal.TaskRecord{ID: id} }
+	none := func() *wal.TaskRecord { return nil }
+	fresh := func() (chan *wal.TaskRecord, chan error, chan time.Time, chan struct{}) {
+		return make(chan *wal.TaskRecord, 1), make(chan error, 1), make(chan time.Time, 1), make(chan struct{})
+	}
+
+	t.Run("started", func(t *testing.T) {
+		started, finished, timer, done := fresh()
+		started <- rec("t-started")
+		if id, err := awaitStart(started, finished, none, timer, done); id != "t-started" || err != nil {
+			t.Fatalf("started arm = (%q, %v)", id, err)
+		}
+	})
+
+	// The regression: finished won the select while started sat buffered.
+	t.Run("finished-before-select", func(t *testing.T) {
+		started, finished, timer, done := fresh()
+		started <- rec("t-fast")
+		finished <- nil
+		if id, err := awaitStart(started, finished, none, timer, done); id != "t-fast" || err != nil {
+			t.Fatalf("finished-before-select arm = (%q, %v)", id, err)
+		}
+	})
+
+	t.Run("refused", func(t *testing.T) {
+		started, finished, timer, done := fresh()
+		finished <- errors.New("503 interrupted")
+		if _, err := awaitStart(started, finished, none, timer, done); err == nil {
+			t.Fatal("a refused start must return its error")
+		}
+	})
+
+	t.Run("joined", func(t *testing.T) {
+		started, finished, timer, done := fresh()
+		finished <- nil
+		running := func() *wal.TaskRecord { return rec("t-joined") }
+		if id, err := awaitStart(started, finished, running, timer, done); id != "t-joined" || err != nil {
+			t.Fatalf("join arm = (%q, %v)", id, err)
+		}
+	})
+
+	t.Run("timeout", func(t *testing.T) {
+		started, finished, timer, done := fresh()
+		timer <- time.Now()
+		if id, err := awaitStart(started, finished, none, timer, done); id != "" || err != nil {
+			t.Fatalf("timeout arm = (%q, %v)", id, err)
+		}
+	})
+
+	t.Run("canceled", func(t *testing.T) {
+		started, finished, timer, done := fresh()
+		close(done)
+		if _, err := awaitStart(started, finished, none, timer, done); err == nil {
+			t.Fatal("cancellation must return an error")
+		}
+	})
+}

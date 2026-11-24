@@ -450,26 +450,11 @@ func (s *Service) StartGC(ctx context.Context, tasks TaskRunner, actor string, d
 	}()
 	timer := time.NewTimer(2 * time.Second)
 	defer timer.Stop()
-	var id string
-	select {
-	case rec := <-started:
-		id = rec.ID
-	case err := <-finished:
-		// A draining table refused the start, or the pass finished inside the
-		// scheduling window — answer the join hint, then the error.
-		if running := tasks.Running(InstanceScope, TaskKindGC); running != nil {
-			id = running.ID
-		} else if err != nil {
-			return GCTask{}, err
-		}
-	case <-timer.C:
-		// The table joined an existing pass (its leader owns the record): the
-		// documented join hint answers the id without waiting for the move.
-		if running := tasks.Running(InstanceScope, TaskKindGC); running != nil {
-			id = running.ID
-		}
-	case <-ctx.Done():
-		return GCTask{}, ctx.Err()
+	id, aerr := awaitStart(started, finished,
+		func() *wal.TaskRecord { return tasks.Running(InstanceScope, TaskKindGC) },
+		timer.C, ctx.Done())
+	if aerr != nil {
+		return GCTask{}, aerr
 	}
 	if id == "" {
 		return GCTask{}, fmt.Errorf("packages GC did not start; retry")
@@ -528,4 +513,37 @@ func (s *Service) logf(format string, args ...any) {
 		return
 	}
 	log.Printf(format, args...)
+}
+
+// awaitStart resolves the id of the pass StartGC just launched. It is a
+// function of its channels so the ordering is testable without a live table:
+// the job ALWAYS sends the started record before it returns, so a pass that
+// starts and finishes inside the scheduling window must answer that id rather
+// than "did not start" (a fast failing sweep made the finished-vs-started
+// select report a retry on slower CI runners).
+func awaitStart(started <-chan *wal.TaskRecord, finished <-chan error, running func() *wal.TaskRecord, timedOut <-chan time.Time, done <-chan struct{}) (string, error) {
+	select {
+	case rec := <-started:
+		return rec.ID, nil
+	case err := <-finished:
+		// Drain the start record first: it exists whenever the job ran at all.
+		select {
+		case rec := <-started:
+			return rec.ID, nil
+		default:
+		}
+		if rec := running(); rec != nil {
+			return rec.ID, nil
+		}
+		return "", err
+	case <-timedOut:
+		// The table joined an existing pass (its leader owns the record): the
+		// documented join hint answers the id without waiting for the move.
+		if rec := running(); rec != nil {
+			return rec.ID, nil
+		}
+		return "", nil
+	case <-done:
+		return "", context.Canceled
+	}
 }
