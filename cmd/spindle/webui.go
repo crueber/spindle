@@ -1028,7 +1028,12 @@ func adminValidateFn(cfg *config.Config, boot server.BootState) func(context.Con
 		if err != nil {
 			return setupParseErrors(err), nil
 		}
-		return setupErrors(setup.Validate(c)), nil
+		// Judge the same config Save would accept: a secret supplied by the
+		// environment or a flag is not in the file, so validating the file
+		// candidate alone reported an unrelated edit as "OIDC requires ..."
+		// and demanded a rotation that was not needed (2026-11-25). Save
+		// carries the identical fill (adminSaveFn) — the two steps must agree.
+		return setupErrors(setup.Validate(setup.FillEffectiveSecrets(c, cfg))), nil
 	}
 }
 
