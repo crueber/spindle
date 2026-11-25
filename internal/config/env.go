@@ -38,17 +38,13 @@ type envEntry struct {
 	primary bool // SPINDLE__ spelling (wins over WALGIT__)
 }
 
-// applyEnv overlays SPINDLE__SECTION__KEY=value (legacy WALGIT__ alias; primary
-// wins on conflict) onto c and returns the ignored overrides (11_config_cli.md
-// §3.2). getenv backs known special vars; environ is the full environment.
-func applyEnv(c *Config, getenv func(string) string, environ []string) ([]Override, error) {
-	if getenv == nil {
-		getenv = os.Getenv
-	}
-	var overrides []Override
+// collectEnvEntries reads the SPINDLE__SECTION__KEY / legacy WALGIT__ overlay
+// into one entry per dotted key. Both spellings are scanned legacy-first so the
+// primary spelling wins; a legacy spelling that lost is reported through
+// overrides when overrides is non-nil (nil callers ignore it — the after-save
+// [import] overlay only needs the winning value).
+func collectEnvEntries(environ []string, overrides *[]Override) map[string]envEntry {
 	entries := map[string]envEntry{}
-
-	// Legacy alias first so the primary spelling overwrites it.
 	for _, pass := range [...]struct {
 		prefix  string
 		primary bool
@@ -74,8 +70,8 @@ func applyEnv(c *Config, getenv func(string) string, environ []string) ([]Overri
 				if prev.primary {
 					continue // keep the first primary spelling
 				}
-				if pass.primary {
-					overrides = append(overrides, Override{
+				if pass.primary && overrides != nil {
+					*overrides = append(*overrides, Override{
 						Name:   prev.name,
 						Key:    key,
 						Reason: "overridden by " + envPrefixPrimary + strings.ToUpper(strings.ReplaceAll(key, ".", "__")),
@@ -85,6 +81,18 @@ func applyEnv(c *Config, getenv func(string) string, environ []string) ([]Overri
 			entries[key] = envEntry{name: name, raw: raw, primary: pass.primary}
 		}
 	}
+	return entries
+}
+
+// applyEnv overlays SPINDLE__SECTION__KEY=value (legacy WALGIT__ alias; primary
+// wins on conflict) onto c and returns the ignored overrides (11_config_cli.md
+// §3.2). getenv backs known special vars; environ is the full environment.
+func applyEnv(c *Config, getenv func(string) string, environ []string) ([]Override, error) {
+	if getenv == nil {
+		getenv = os.Getenv
+	}
+	var overrides []Override
+	entries := collectEnvEntries(environ, &overrides)
 
 	keys := make([]string, 0, len(entries))
 	placementTouched := false

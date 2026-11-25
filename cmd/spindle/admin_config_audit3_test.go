@@ -48,7 +48,7 @@ func adminConfigPageHarnessFile(t *testing.T, body []byte) (*webui.Server, strin
 		return auth.Principal{Name: "admin@example.com", Admin: true}, nil
 	}})
 	wireSettingsPages(cfg, boot, nil, nil)
-	wireAdminPages(cfg, boot, nil, nil, nil, nil, nil, nil, nil)
+	wireAdminPages(cfg, boot, nil, nil, nil, nil, nil, nil, nil, nil)
 	t.Cleanup(func() {
 		webui.BindSettings(webui.SettingsDeps{})
 		webui.BindAdmin(webui.AdminDeps{})

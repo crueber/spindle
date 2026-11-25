@@ -97,22 +97,34 @@ func defaultConfigPaths(c *cli) []string {
 	return []string{filepath.Join(dd, config.ConfigFileName), filepath.Join(dd, config.ConfigAliasName)}
 }
 
+// explicitConfigPath is the operator-named config file: --config first, then the
+// SPINDLE_CONFIG / legacy WALGIT_CONFIG pointer ("" when neither is set).
+func explicitConfigPath(c *cli) string {
+	if c.configPath != "" {
+		return c.configPath
+	}
+	if ptr, ok := config.ConfigFilePointer(os.Getenv); ok {
+		return ptr
+	}
+	return ""
+}
+
 // configCandidates are the §3.1 candidate config paths in priority order: the
 // explicit --config / pointer file when set, else the data-dir files. serve
 // passes them in BootState so the setup API edits on top of the file that was
 // actually loaded (§3.4).
 func configCandidates(c *cli) []string {
-	explicit := c.configPath
-	if explicit == "" {
-		if ptr, ok := config.ConfigFilePointer(os.Getenv); ok {
-			explicit = ptr
-		}
-	}
-	if explicit != "" {
+	if explicit := explicitConfigPath(c); explicit != "" {
 		return []string{explicit}
 	}
 	return defaultConfigPaths(c)
 }
+
+// configPathExplicit reports whether the candidate list is ONE named file
+// (--config / pointer) rather than the data-dir search ladder. BootState carries
+// it so the save target rule can write the named file even before it exists
+// instead of falling back to a data-dir shadow (config.SaveTargetPath).
+func configPathExplicit(c *cli) bool { return explicitConfigPath(c) != "" }
 
 // syncDataDirFlag applies the --data-dir flag sync shared by every subcommand
 // (11_config_cli.md §3.1.1; Forgejo #611): the flag is authoritative over the

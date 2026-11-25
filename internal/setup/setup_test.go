@@ -617,7 +617,7 @@ func TestSaveWritesAtomicallyAndDiffsRestart(t *testing.T) {
 	cand.Server.Listen = "127.0.0.1:9099"
 	cand.Server.RequestTimeout = config.Duration(90 * time.Minute)
 
-	restart, _, err := Save(dataDir, cand, effective)
+	restart, _, err := Save(filepath.Join(dataDir, config.ConfigFileName), cand, effective)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -643,7 +643,7 @@ func TestSaveWritesAtomicallyAndDiffsRestart(t *testing.T) {
 
 	// Saving the same values again reports no restart keys (non-nil slice: the
 	// API marshals [] not null).
-	restart, _, err = Save(dataDir, cand, cand)
+	restart, _, err = Save(path, cand, cand)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -654,7 +654,7 @@ func TestSaveWritesAtomicallyAndDiffsRestart(t *testing.T) {
 	// An invalid candidate writes nothing and reports the failure.
 	bad := config.FirstRunDefaults(dataDir)
 	bad.Store.Backend = "nope"
-	if _, _, err := Save(dataDir, bad, effective); err == nil {
+	if _, _, err := Save(path, bad, effective); err == nil {
 		t.Fatal("invalid save must fail")
 	}
 }
@@ -669,7 +669,7 @@ func TestSaveSerialized(t *testing.T) {
 			defer wg.Done()
 			c := oidcReady(dataDir)
 			c.Server.Listen = "127.0.0.1:" + strconv.Itoa(9000+i)
-			if _, _, err := Save(dataDir, c, c); err != nil {
+			if _, _, err := Save(filepath.Join(dataDir, config.ConfigFileName), c, c); err != nil {
 				errs <- err
 			}
 		}(i)

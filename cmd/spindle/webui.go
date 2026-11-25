@@ -588,12 +588,12 @@ func wireSettingsPages(cfg *config.Config, boot server.BootState, apiEnv *api.En
 //
 // srv supplies HealthFacts (the readyz verdict); maint is the maintainer
 // (nil in setup-only mode and on a serve-only host, where its card is absent).
-func wireAdminPages(cfg *config.Config, boot server.BootState, apiEnv *api.Env, srv *server.Server, maint *maintain.Maintainer, mod *moderation.Service, th *threads.Service, pkgs *packages.Service, reg *wal.Registry) {
+func wireAdminPages(cfg *config.Config, boot server.BootState, apiEnv *api.Env, srv *server.Server, maint *maintain.Maintainer, mod *moderation.Service, th *threads.Service, pkgs *packages.Service, reg *wal.Registry, live *config.LiveImport) {
 	d := webui.AdminDeps{
 		Access:     adminAccessFn(cfg, boot),
 		ConfigView: adminConfigViewFn(cfg, boot),
 		Validate:   adminValidateFn(cfg, boot),
-		Save:       adminSaveFn(cfg, boot),
+		Save:       adminSaveFn(cfg, boot, live),
 		AuthTest:   adminAuthTestFn(),
 		// The restart seam is bound in BOTH boot modes: a saved file takes
 		// effect only after the process exits, and the restricted boot is the
@@ -943,6 +943,10 @@ func adminConfigViewFn(cfg *config.Config, boot server.BootState) func(context.C
 			view.Issuer = cfg.Server.Auth.Issuer
 			view.ClientID = cfg.Server.Auth.OAuthClientID
 		}
+		// The page names the file Save writes. It is the loader's answer, not
+		// the data-dir default: an explicit --config/SPINDLE_CONFIG/WALGIT_CONFIG
+		// file is what the process read, so it is what a save must rewrite.
+		view.SavePath = config.SaveTargetPath(dataDir, boot.ConfigPaths, boot.ConfigExplicit)
 		if fileState != "invalid" {
 			if body, err := setup.TOMLView(setup.BaseConfig(dataDir, boot.ConfigPaths)); err == nil {
 				view.TOML = string(body)
@@ -1038,8 +1042,17 @@ func adminValidateFn(cfg *config.Config, boot server.BootState) func(context.Con
 }
 
 // adminSaveFn is the API's PUT /api/v1/setup: validate THEN atomically write
-// <data-dir>/spindle.toml and diff against the running effective config.
-func adminSaveFn(cfg *config.Config, boot server.BootState) func(context.Context, map[string]string) (webui.AdminSaveResult, []webui.AdminError, error) {
+// the config file this process loaded (config.SaveTargetPath over boot's
+// candidates — the explicit --config/pointer file when one booted, else the
+// data-dir file) and diff against the running effective config.
+//
+// After a successful write it publishes the saved [import] SSRF policy to
+// live, because the import/mirror/fork-sync gates read that policy per
+// request: without the publish the operator's save only took effect after a
+// restart (the Import page kept refusing an allowlisted source as private).
+// The publish reapplies the environment overlay, so a SPINDLE__IMPORT__*
+// value still wins over the file, exactly as at boot.
+func adminSaveFn(cfg *config.Config, boot server.BootState, live *config.LiveImport) func(context.Context, map[string]string) (webui.AdminSaveResult, []webui.AdminError, error) {
 	return func(_ context.Context, values map[string]string) (webui.AdminSaveResult, []webui.AdminError, error) {
 		c, err := setupCandidate(cfg, boot, values)
 		if err != nil {
@@ -1059,11 +1072,23 @@ func adminSaveFn(cfg *config.Config, boot server.BootState) func(context.Context
 		if cfg != nil {
 			dataDir, effective = cfg.DataDir, cfg
 		}
-		restart, backup, serr := setup.SaveWithComparison(dataDir, c, compare, effective)
+		// Write the file the process actually LOADED, never a data-dir shadow:
+		// with --config / SPINDLE_CONFIG / WALGIT_CONFIG the loaded file lives
+		// elsewhere, and a save to <data-dir>/spindle.toml was lost on the next
+		// restart (the loader never reads it).
+		target := config.SaveTargetPath(dataDir, boot.ConfigPaths, boot.ConfigExplicit)
+		restart, backup, serr := setup.SaveWithComparison(target, c, compare, effective)
 		if serr != nil {
 			return webui.AdminSaveResult{}, nil, serr
 		}
-		return webui.AdminSaveResult{Saved: true, RequiresRestart: restart, Backup: backup}, nil, nil
+		if _, perr := live.PublishFileSave(c, os.Environ()); perr != nil {
+			// The file is written; an unparseable overlay cannot happen on a
+			// booted process (the loader validated these keys), so this is
+			// logged rather than reported as a failed save, and the previous
+			// policy stays in force.
+			slog.Warn("webui admin config save: live import policy not published", "err", perr)
+		}
+		return webui.AdminSaveResult{Saved: true, RequiresRestart: restart, Backup: backup, Path: target}, nil, nil
 	}
 }
 

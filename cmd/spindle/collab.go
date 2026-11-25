@@ -139,7 +139,7 @@ func newIssuesService(st store.ObjectStore, ident *identity.Service, cfg *config
 // shared store/registry/config and binds the nil-safe cross-package seams
 // (fan-out, counters, frames, access bootstrap). apiEnv may be nil in
 // tests that only need the push path (back-bindings are skipped then).
-func buildCollab(st store.ObjectStore, cfg *config.Config, reg *wal.Registry, apiEnv *api.Env) *collabWiring {
+func buildCollab(st store.ObjectStore, cfg *config.Config, reg *wal.Registry, apiEnv *api.Env, live *config.LiveImport) *collabWiring {
 	c := &collabWiring{}
 	// Wave A identity (docs/features/01): the access.json/org/team
 	// surface (Seam 1, both lanes), the require_read gate (Seam 3
@@ -366,7 +366,7 @@ func buildCollab(st store.ObjectStore, cfg *config.Config, reg *wal.Registry, ap
 	}
 	// WP5: sync fork — the Seam 5 task kind, the lane surface, and the
 	// local pack-sharing fetch (registered once per process).
-	c.forksyncSvc, c.forksyncHandler = newForksyncService(st, c.ident, reg, cfg)
+	c.forksyncSvc, c.forksyncHandler = newForksyncService(st, c.ident, reg, cfg, live)
 	// WP3.3/WP4.2 wiring between the two features (composition owns both
 	// sides; neither package imports the other, law 8): a pending-tag draft
 	// publishes its ref through tags' own create path (policy + WAL CAS), and
@@ -452,18 +452,18 @@ func buildCollab(st store.ObjectStore, cfg *config.Config, reg *wal.Registry, ap
 	// surface (Seam 1, both lanes, top-level twins) over the P6 roles
 	// owned by identity; the repo-import task runs on the core wal
 	// task table (Seam 5) via the Service (B6 opsTasks-style wiring).
-	c.importSvc, c.importHandler = newImportService(st, c.ident, reg, cfg)
+	c.importSvc, c.importHandler = newImportService(st, c.ident, reg, cfg, live)
 	// Feature 11 mirrors (docs/features/11_mirror.md): the pull-only
 	// sidecar + scheduled sync surface (Seam 1, repo lanes + the
 	// create-from-URL top-level twin) over the same store/registry;
 	// the mirror-sync task runs on the core wal task table (Seam 5).
-	c.mirrorSvc, c.mirrorHandler = newMirrorService(st, reg, cfg, apiEnv)
+	c.mirrorSvc, c.mirrorHandler = newMirrorService(st, reg, cfg, apiEnv, live)
 	// Forgejo #623 push mirrors (docs/features/13_push_mirror.md): the
 	// config + secret sidecars + on-push/scheduled sync surface (Seam 1,
 	// repo lanes only — post-hoc config, never at create) over the same
 	// store/registry; the mirror-push-sync task runs on the core wal
 	// task table (Seam 5), fully independent of pull mirror-sync.
-	c.pushMirrorSvc, c.pushMirrorHandler = newPushMirrorService(st, reg, cfg, apiEnv)
+	c.pushMirrorSvc, c.pushMirrorHandler = newPushMirrorService(st, reg, cfg, apiEnv, live)
 	// Forgejo #346: the mirror create-from-URL twin enforces the same
 	// creation owner-admission rule (self, member org, or host admin)
 	// before creating anything.

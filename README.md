@@ -80,7 +80,9 @@ Open **http://localhost:8080/admin**. With no config the boot is **restricted**,
 Administration area, its POSTs, the setup API (`/api/v1/setup*`), the health endpoints and the embedded
 static assets (`/_ui/*`, `/services/public/*`) answer — no setup token, no anonymous admin. The first-run card takes the issuer,
 the admission allowlist (an email domain or address), the OAuth client id and secret, a session secret and the admin
-group; **Save** writes `<data-dir>/spindle.toml` without contacting the identity provider, then you restart. A
+group; **Save** writes the config file this process loaded (`<data-dir>/spindle.toml` on a default boot)
+without contacting the identity provider, then you restart. The page names the absolute path, and the
+import/mirror SSRF policy (`import.*`) applies on the next request rather than at the restart. A
 restricted `/readyz` is 200 with `status: restricted`, so a health-gated ingress routes it; the walkthrough, redirect
 URI and machine tokens are in [docs/OPERATIONS.md](docs/OPERATIONS.md). No identity provider handy? The dev IdP in
 [Develop](#develop) is one command.

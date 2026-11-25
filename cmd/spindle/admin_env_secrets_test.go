@@ -29,7 +29,7 @@ func TestAdminSaveKeepsEnvironmentOnlySecrets(t *testing.T) {
 	cfg.Server.Auth.AdminGroups = []string{"spindle-admin"}
 	boot := server.BootState{Mode: "normal", FileState: "absent"} // no file yet
 
-	save := adminSaveFn(cfg, boot)
+	save := adminSaveFn(cfg, boot, nil)
 	res, errs, err := save(context.Background(), map[string]string{
 		"server.auth.issuer":              "https://id.example.com",
 		"server.auth.allowed_domains":     "example.com",

@@ -42,7 +42,7 @@ func seedOrgs(t *testing.T, st store.ObjectStore) {
 
 func mkImportParams(t *testing.T, owner string) Params {
 	t.Helper()
-	p, _, err := ParseRequest([]byte(`{"source_url":"file:///srv/r.git","owner":"`+owner+`","name":"w"}`), testConfig(t))
+	p, _, err := ParseRequest([]byte(`{"source_url":"file:///srv/r.git","owner":"`+owner+`","name":"w"}`), testConfig(t), nil)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -226,7 +226,12 @@ type AdminPage struct {
 	RunnerSecurity AdminRunnerSecurity
 	// Backup is the spindle.toml.bak-<utc> file the first canonicalising
 	// save kept.
-	Backup     string
+	Backup string
+	// SavePath is the file the last save wrote (from ?path=<abs>, or the
+	// view's resolved target when the query does not carry one). The saved
+	// banner names it: "<data-dir>/spindle.toml" was a lie under an explicit
+	// --config.
+	SavePath   string
 	ValidateOK bool
 	AuthTest   *AdminAuthTest
 	AuthErrors []AdminError
@@ -688,6 +693,10 @@ func (s *Server) adminConfigPage(w http.ResponseWriter, r *http.Request) {
 	}
 	page.Saved = q.Get("saved") == "1"
 	page.Backup = q.Get("backup")
+	page.SavePath = q.Get("path")
+	if page.SavePath == "" {
+		page.SavePath = view.SavePath
+	}
 	if rq := q.Get("restart"); rq != "" {
 		page.RequiresRestart = strings.Split(rq, ",")
 		page.RestartLinks = adminRestartKeyLinks(page.RequiresRestart)
@@ -770,6 +779,9 @@ func (s *Server) adminConfigSubmit(w http.ResponseWriter, r *http.Request) {
 	// failed write never reverts a saved file — the audit-after-commit rule).
 	if d.AuditWrite != nil {
 		detail := "restart=" + strings.Join(result.RequiresRestart, ",")
+		if result.Path != "" {
+			detail += ";path=" + result.Path
+		}
 		if result.Backup != "" {
 			detail += ";backup=" + result.Backup
 		}
@@ -778,6 +790,7 @@ func (s *Server) adminConfigSubmit(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	http.Redirect(w, r, "/admin/config?saved=1&restart="+url.QueryEscape(strings.Join(result.RequiresRestart, ","))+
+		"&path="+url.QueryEscape(result.Path)+
 		"&backup="+url.QueryEscape(result.Backup), http.StatusSeeOther)
 }
 
@@ -866,6 +879,12 @@ func (s *Server) adminConfigAuthTest(w http.ResponseWriter, r *http.Request) {
 // setup API's boot state (file_state / errors) and access verdict.
 type AdminConfigView struct {
 	FileState string // "absent" | "valid" | "invalid"
+	// SavePath is the absolute file a save writes: the file the process
+	// loaded (an explicit --config / SPINDLE_CONFIG / WALGIT_CONFIG file, a
+	// data-dir spindle.toml or its walgit.toml alias), else the first-run
+	// <data-dir>/spindle.toml target. The page names it — an operator must be
+	// able to see which file changed (config.SaveTargetPath).
+	SavePath string
 	// FirstRun is true only for the restricted boot with no config file (the
 	// OIDC onboarding card). An env-configured instance also has FileState
 	// "absent" but boots normally, so it is not first run.
@@ -995,6 +1014,11 @@ type AdminSaveResult struct {
 	// canonicalising rewrite of an existing config ("" when none was made:
 	// no file, or a byte-identical save).
 	Backup string
+	// Path is the absolute file the save wrote — the file the process loaded
+	// (the explicit --config/SPINDLE_CONFIG/WALGIT_CONFIG file, else the
+	// data-dir one). The page names it so an operator can see which file
+	// changed; "" means the binding did not report it.
+	Path string
 }
 
 // AdminAuthTest is a successful OIDC discovery probe.
@@ -1655,9 +1679,9 @@ var adminFieldMeta = map[string]adminFieldMetaT{"server.listen": {Example: "0.0.
 	"import.max_bytes":                 {Advanced: true},
 	"import.max_refs":                  {Advanced: true},
 	"import.max_concurrent":            {Advanced: true},
-	"import.allow_private_networks":    {Advanced: true},
-	"import.url_allowlist":             {Advanced: true},
-	"import.allow_file_urls":           {Advanced: true},
+	"import.allow_private_networks":    {Advanced: true, Note: "the import/mirror SSRF policy is read at each import request: a save applies on the next import, no restart. Off (the default) refuses loopback and private sources."},
+	"import.url_allowlist":             {Advanced: true, Note: "part of the same live policy (no restart). Empty = GitHub only, other hosts need this list or the dangerous confirm."},
+	"import.allow_file_urls":           {Advanced: true, Note: "part of the same live policy (no restart). file:// sources are for tests/fixtures; leave off in production."},
 	"attachments.max_image_bytes":      {Advanced: true},
 	"packages.max_blob_bytes":          {Advanced: true},
 	"packages.max_manifest_bytes":      {Advanced: true},

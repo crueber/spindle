@@ -80,7 +80,7 @@ func TestBeginGates(t *testing.T) {
 		return svc, testHandler(svc, adminPrincipal())
 	}
 	mkParams := func() (Params, string) {
-		p, tok, err := ParseRequest([]byte(`{"source_url":"file:///srv/r.git","owner":"acme","name":"w"}`), testConfig(t))
+		p, tok, err := ParseRequest([]byte(`{"source_url":"file:///srv/r.git","owner":"acme","name":"w"}`), testConfig(t), nil)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -168,7 +168,7 @@ func TestBeginB2Join(t *testing.T) {
 	svc, _ := testService(t, nil, &FakeRoles{})
 	ctx := context.Background()
 	mk := func(src string) Params {
-		q, _, err := ParseRequest([]byte(fmt.Sprintf(`{"source_url":%q,"owner":"acme","name":"w"}`, src)), svc.cfg)
+		q, _, err := ParseRequest([]byte(fmt.Sprintf(`{"source_url":%q,"owner":"acme","name":"w"}`, src)), svc.cfg, nil)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -228,7 +228,7 @@ func TestBeginConcurrentSingleFlight(t *testing.T) {
 		wg.Add(1)
 		go func(i int) {
 			defer wg.Done()
-			q, _, err := ParseRequest([]byte(`{"source_url":"file:///srv/missing.git","owner":"acme","name":"race"}`), svc.cfg)
+			q, _, err := ParseRequest([]byte(`{"source_url":"file:///srv/missing.git","owner":"acme","name":"race"}`), svc.cfg, nil)
 			if err != nil {
 				out[i] = res{err: err}
 				return

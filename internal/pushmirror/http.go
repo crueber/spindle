@@ -829,12 +829,7 @@ func (h *Handler) checkSSRF(n repoimport.Normalized, dangerous bool) error {
 	if h.Svc == nil {
 		return nil
 	}
-	return repoimport.CheckSSRF(n, repoimport.SSRFConfig{
-		AllowPrivate: h.Svc.allowPrivate,
-		Allowlist:    h.Svc.allowlist,
-		AllowFile:    h.Svc.allowFile,
-		Dangerous:    dangerous,
-	}, nil)
+	return repoimport.CheckSSRF(n, h.Svc.ssrfPolicy(dangerous), nil)
 }
 
 // --- wire shapes --------------------------------------------------------------

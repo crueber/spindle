@@ -25,6 +25,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/crueber/spindle/internal/config"
 	"github.com/crueber/spindle/internal/repoimport"
 	"github.com/crueber/spindle/internal/store"
 	"github.com/crueber/spindle/internal/store/proto"
@@ -76,10 +77,13 @@ type Service struct {
 	async   map[string]*asyncSync // id-keyed async fires (HTTP 202 surface)
 
 	// SSRF gate input, from the [import] section (one gate, one clock
-	// for both mirror directions — no new config section).
+	// for both mirror directions — no new config section). live, when wired,
+	// is read at each request/task instead: saving the policy on
+	// /admin/config applies without a restart.
 	allowPrivate bool
 	allowlist    []string
 	allowFile    bool
+	live         *config.LiveImport
 }
 
 // Deps wires a Service. Store/Reg are required; GitBinary falls back
@@ -98,6 +102,9 @@ type Deps struct {
 	AllowPrivate bool
 	Allowlist    []string
 	AllowFile    bool
+	// LiveImport is the process's live [import] SSRF policy (optional). When
+	// wired, every create/sync gate reads it instead of the Allow* snapshot.
+	LiveImport *config.LiveImport
 }
 
 // New builds a Service over the shared store/registry.
@@ -119,6 +126,23 @@ func New(d Deps) *Service {
 		allowPrivate: d.AllowPrivate,
 		allowlist:    d.Allowlist,
 		allowFile:    d.AllowFile,
+		live:         d.LiveImport,
+	}
+}
+
+// ssrfPolicy is the gate input for one request/task: the live [import]
+// policy when composition wired the holder, else the boot snapshot. The
+// dangerous confirm flag is per-call (configuration asks for it; a stored
+// destination re-gates host/private only).
+func (s *Service) ssrfPolicy(dangerous bool) repoimport.SSRFConfig {
+	if imp, ok := s.live.Get(); ok {
+		return repoimport.SSRFPolicy(imp, dangerous)
+	}
+	return repoimport.SSRFConfig{
+		AllowPrivate: s.allowPrivate,
+		Allowlist:    s.allowlist,
+		AllowFile:    s.allowFile,
+		Dangerous:    dangerous,
 	}
 }
 
@@ -350,12 +374,9 @@ func (s *Service) runPush(ctx context.Context, task *wal.Task, owner, name strin
 	if verr := ValidateTarget(n, doc.AuthKind, sec != nil && sec.HasMaterial()); verr != nil {
 		return s.fail(ctx, owner, name, now, task, verr.Error())
 	}
-	if serr := repoimport.CheckSSRF(n, repoimport.SSRFConfig{
-		AllowPrivate: s.allowPrivate,
-		Allowlist:    s.allowlist,
-		AllowFile:    s.allowFile,
-		Dangerous:    true, // authority checked at admin-only config time; stored URL re-gates host/private only
-	}, nil); serr != nil {
+	// dangerous=true here re-gates host/private only: the authority check
+	// happened at admin-only config time.
+	if serr := repoimport.CheckSSRF(n, s.ssrfPolicy(true), nil); serr != nil {
 		return s.fail(ctx, owner, name, now, task, serr.Error())
 	}
 	auth, aerr := s.resolveAuth(doc, sec, n)

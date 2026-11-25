@@ -42,7 +42,7 @@ contract").
 | bundle-uri | v2 capability + `bundle-uri` command, static lists `bundles/list` (clones) and `bundles/catchup` (fetch recipes), per-strategy bundle objects with ETag/Range/immutable, calendar-slot scheduling with backfill, chained incrementals, blobless (`blob:none`) family on a filtered list, optional presigned store URLs, `bundles.require` refusal of unbounded zero-have clones with the exact fix in the error |
 | LFS | Batch API (`operation=upload\|download`, transfer `basic`), basic transfer GET/HEAD/PUT + `verify`, sha256-addressed objects in the bucket, size+sha256 verification, `max_object_bytes` cap, optional read-through from an upstream LFS server (stream + persist), presigned or proxied serving |
 | web UI | GitHub-shaped owners/repos pages, tree/blob/commits/commit pages, README rendering, markdown preview, syntax-highlighted blobs, unified diffs, branch/tag picker, clone menu with setup recipes, WAL health dashboard (manifest, packs, bundle chain + plan, compactions, segments, ops), tasks overlay, settings tab (scheduled tasks, push policy editor + validate + dry-run, effective config editor + history + revert). *Rust renders this in React; spindle renders it as server-rendered Go `html/template` pages (`internal/webui`) + vendored htmx + vanilla-ES islands — D-WEB-14, see 12_web_ui.md.* |
-| administration | `/admin` (Overview) + `/admin/config` web UI — ALL config keys grouped by section with current effective values, validate + Save; `GET /api/v1/setup` (full schema + effective values + file state), `POST /api/v1/setup/test` (validate without saving), `PUT /api/v1/setup` (validate + write); zero-config bootstrap, atomic save to `<data-dir>/spindle.toml`, restart-needed reporting, restricted recovery mode. Full spec: 06_server_http.md |
+| administration | `/admin` (Overview) + `/admin/config` web UI — ALL config keys grouped by section with current effective values, validate + Save; `GET /api/v1/setup` (full schema + effective values + file state), `POST /api/v1/setup/test` (validate without saving), `PUT /api/v1/setup` (validate + write); zero-config bootstrap, atomic save to the loaded config file (`<data-dir>/spindle.toml` by default), restart-needed reporting, restricted recovery mode. Full spec: 06_server_http.md |
 | JSON API | Repository-scoped read API (`refs`, `refs/{branches\|tags}` paged/streamed, `resolve`, `tree`, `blob`, `commits`, `commit`), repo summary/create/delete, per-repo settings (get/put/delete/effective/history/describe/validate), policy (get/put/delete/validate/dry-run), overview (WAL health), tasks + attachable SSE streams, ops (maintenance actions), owner listing, discovery document, `me`; two lanes (bearer/same-origin and cross-origin browser) |
 | SDK | authored as submodules (`web/sdk/src/*.js`) and bundled by esbuild into the shipped `web/dist/repos.js` — dependency-free at runtime; maps the whole API, picks the lane, performs the popup auth flow, unwraps the SSE envelope |
 | auth | `none` (everyone anon+write+admin; allowed on any bind with loud warnings in logs + Administration area — the Rust loopback-only rule is superseded, see §9.5), `token` (static tokens as Bearer or Basic password), `oidc` (any OpenID Connect issuer: browser sign-in, verified ID tokens as bearers, `wgt_` access tokens minted at `/_auth/tokens`, static tokens for robots); admin flags independent of write; trusted-forwarder identity forwarding; real 401 semantics so git erases dead credentials |
@@ -335,7 +335,7 @@ Go module: `github.com/crueber/spindle`. These paths are normative; every other 
 | `internal/bundle` | The bundle-uri subsystem: strategies, calendar slots, backfill, chained incrementals, blobless family, `bundles/list` + `bundles/catchup` |
 | `internal/policy` | The per-repo push policy rule language: parse, validate, evaluate, dry-run |
 | `internal/server` | chi router (`github.com/go-chi/chi/v5`, core only), hand-ordered middleware as `func(http.Handler) http.Handler`, git smart-HTTP + LFS + static endpoints, auth (none/token/oidc), setup recipes, plain-HTTP/h2c listener |
-| `internal/setup` | The setup subsystem (wired into routes by `internal/server`): the config schema description for the UI, validate-for-save, atomic write of `<data-dir>/spindle.toml`, bootstrap-mode detection, the `/admin/config` UI and `/api/v1/setup` endpoints, and the restricted mode gate (§9.5, 06_server_http.md) |
+| `internal/setup` | The setup subsystem (wired into routes by `internal/server`): the config schema description for the UI, validate-for-save, atomic write of the loaded config file (`<data-dir>/spindle.toml` by default), bootstrap-mode detection, the `/admin/config` UI and `/api/v1/setup` endpoints, and the restricted mode gate (§9.5, 06_server_http.md) |
 | `internal/api` | The JSON API wire contract, SSE envelope, tasks surface, two-lane auth, render caches |
 | `internal/staticpages` | The static-site byte route (docs/features/19): the dedicated listener's handler — path rules, `.html` fallback, `404.html`, dotfile/symlink refusal, the pinned MIME table and a bounded blob read, over its own git pool (4 × `GOMAXPROCS`). Composition-wired (`RepoDirs`/`Settings`/`Visible` seams): it derives everything, stores nothing, and serves public repositories only |
 | `internal/cachepolicy` | The shared HTTP cache-class definition (07 §4 law, Forgejo #382): the five Cache-Control values + the mutability rule + the `Check` guard; stdlib-only leaf aliased by core and feature packages, never redeclared |
@@ -459,7 +459,7 @@ The Rust spec's fail-closed boot rule is superseded in one direction: **warn, do
 - **Data dir.** `--data-dir` flag / `SPINDLE_DATA_DIR` env, default `~/.local/share/spindle` (`/var/lib/spindle`
   in containers); it holds `store/`, `cache/`, and the saved `spindle.toml`.
 - **Administration area + API.** `/admin/config` groups ALL config keys by section with current effective values and validates +
-  saves (atomic tmp+rename to `<data-dir>/spindle.toml`, reporting which keys need a restart). API:
+  saves (atomic tmp+rename to the file the process loaded, reporting which keys need a restart). API:
   `GET /api/v1/setup` (full schema + effective values + file state), `POST /api/v1/setup/test` (validate
   without saving), `PUT /api/v1/setup` (validate + write).
 - **Boot flow.** config present + valid → normal boot; config missing (without a complete `SPINDLE__SERVER__AUTH__*`
@@ -484,7 +484,7 @@ $ spindle
 ```
 
 Open **http://localhost:8080/admin** — the Overview, then Configuration with every config key grouped by section with its effective value. Review and
-Save (writes `<data-dir>/spindle.toml` atomically and reports which keys need a restart), or just start using the
+Save (writes the loaded config file atomically and reports which keys need a restart), or just start using the
 server as-is.
 
 ```console

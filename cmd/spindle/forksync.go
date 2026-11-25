@@ -35,7 +35,7 @@ import (
 )
 
 // newForksyncService builds the service + handler and registers the kind.
-func newForksyncService(st store.ObjectStore, ident *identity.Service, reg *wal.Registry, cfg *config.Config) (*forksync.Service, *forksync.Handler) {
+func newForksyncService(st store.ObjectStore, ident *identity.Service, reg *wal.Registry, cfg *config.Config, live *config.LiveImport) (*forksync.Service, *forksync.Handler) {
 	forksync.RegisterKind(forksync.KindSyncFork)
 	api.RegisterExposed(forksync.ExposedTemplates...)
 	svc := &forksync.Service{
@@ -59,7 +59,9 @@ func newForksyncService(st store.ObjectStore, ident *identity.Service, reg *wal.
 			if perr != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Hostname() == "" {
 				return fmt.Errorf("upstream URL %q is not an http(s) URL", rawURL)
 			}
-			if cfg.Import.AllowPrivateNetworks {
+			// Read per request: the live [import] policy when composition
+			// wired it, so an admin save applies without a restart.
+			if config.ImportPolicy(live, cfg).AllowPrivateNetworks {
 				return nil
 			}
 			ips, rerr := net.DefaultResolver.LookupNetIP(context.Background(), "ip", u.Hostname())

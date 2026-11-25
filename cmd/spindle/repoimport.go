@@ -25,7 +25,7 @@ import (
 // newImportService builds the import surface over st/ident/reg/cfg and
 // registers the task kind + discovery templates (called once per process
 // from buildCollab — 09 §4 touch point 3, one block for this package).
-func newImportService(st store.ObjectStore, ident *identity.Service, reg *wal.Registry, cfg *config.Config) (*repoimport.Service, *repoimport.Handler) {
+func newImportService(st store.ObjectStore, ident *identity.Service, reg *wal.Registry, cfg *config.Config, live *config.LiveImport) (*repoimport.Service, *repoimport.Handler) {
 	repoimport.RegisterKind(repoimport.KindRepoImport)
 	api.RegisterExposed(repoimport.ExposedTemplates...)
 	svc := repoimport.New(repoimport.Deps{
@@ -35,6 +35,9 @@ func newImportService(st store.ObjectStore, ident *identity.Service, reg *wal.Re
 		Cfg:       cfg,
 		GitBinary: cfg.Git.Binary,
 		Hostname:  instanceID(cfg),
+		// The live [import] SSRF policy: the HTTP gate re-reads it per
+		// request, so a /admin/config save applies without a restart.
+		LiveImport: live,
 	})
 	return svc, &repoimport.Handler{Svc: svc}
 }
@@ -114,7 +117,7 @@ func runImportURL(ctx context.Context, c *cli, a importURLArgs) int {
 		fmt.Fprintf(os.Stderr, "spindle: %v\n", err)
 		return exitErr
 	}
-	params, token, err := repoimport.ParseRequest(raw, cfg)
+	params, token, err := repoimport.ParseRequest(raw, cfg, nil)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "spindle: %v\n", err)
 		return exitErr

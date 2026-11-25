@@ -56,7 +56,7 @@ func TestSettingsWiringBindsEveryRenderedSeam(t *testing.T) {
 	})
 	wireSettingsPages(cfg, server.BootState{Mode: "normal"}, &api.Env{}, c)
 	srv := server.New(server.Options{Config: cfg, Boot: server.BootState{Mode: "normal"}})
-	wireAdminPages(cfg, server.BootState{Mode: "normal"}, &api.Env{Repos: wiringRegistry{}}, srv, nil, moderation.New(st), nil, nil, nil)
+	wireAdminPages(cfg, server.BootState{Mode: "normal"}, &api.Env{Repos: wiringRegistry{}}, srv, nil, moderation.New(st), nil, nil, nil, nil)
 	d := webui.SettingsBindings()
 	a := webui.AdminBindings()
 

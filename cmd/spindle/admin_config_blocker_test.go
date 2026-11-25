@@ -96,7 +96,7 @@ func adminConfigPageHarness(t *testing.T) (*webui.Server, string, []byte) {
 		return auth.Principal{Name: "admin@example.com", Admin: true}, nil
 	}})
 	wireSettingsPages(cfg, boot, nil, nil)
-	wireAdminPages(cfg, boot, nil, nil, nil, nil, nil, nil, nil)
+	wireAdminPages(cfg, boot, nil, nil, nil, nil, nil, nil, nil, nil)
 	t.Cleanup(func() {
 		webui.BindSettings(webui.SettingsDeps{})
 		webui.BindAdmin(webui.AdminDeps{})
@@ -480,7 +480,7 @@ func TestAdminConfigRevokeAndRotate(t *testing.T) {
 		return auth.Principal{Name: "admin@example.com", Admin: true}, nil
 	}})
 	wireSettingsPages(cfg, boot, nil, nil)
-	wireAdminPages(cfg, boot, nil, nil, nil, nil, nil, nil, nil)
+	wireAdminPages(cfg, boot, nil, nil, nil, nil, nil, nil, nil, nil)
 	t.Cleanup(func() {
 		webui.BindSettings(webui.SettingsDeps{})
 		webui.BindAdmin(webui.AdminDeps{})

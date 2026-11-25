@@ -320,7 +320,7 @@ it is a different host, a different `http.Server` and a different handler (§2.6
 | POST | `/admin/restart` | host-admin typed-confirm (`restart`) restart: audit `admin_restart`, flush the "restarting" page, then the injected `AdminDeps.Restart` (composition: graceful self-SIGTERM; the supervisor restarts the process). Mounted in the restricted boot too; one signal per process (a concurrent second answers 409). |
 | GET | `/api/v1/setup` | full config schema + effective values + file state + validation errors |
 | POST | `/api/v1/setup/test` | validate a proposed config without saving |
-| PUT | `/api/v1/setup` | validate + atomically write `<data-dir>/spindle.toml` |
+| PUT | `/api/v1/setup` | validate + atomically write the loaded config file (`<data-dir>/spindle.toml` by default, the explicit `--config`/pointer file when one booted) |
 
 “Setup” is retired as a user-facing word: the area is **Administration**; the setup API
 keeps its historical handle because its wire names are frozen contracts (PLAN-ADMIN §1.5).
@@ -413,7 +413,7 @@ Hazard: the wildcard dispatch runs on every unmatched request (scanners, probes)
 
 ### 3.4 Bootstrap & setup (zero-config first run)
 
-`internal/setup` owns the schema description for the UI, validate-for-save, the atomic write of `<data-dir>/spindle.toml`, and bootstrap-mode detection; `internal/server` wires the JSON surface (`s.setupAPIRouter`) and routes `GET`/`POST /admin/config` through the page provider; the page itself is `internal/webui`'s Administration page (`internal/webui/templates/pages/admin/config.html` + the `partials/admin_config_rows.html` blocks), rendered and validated server-side (D-WEB-14).
+`internal/setup` owns the schema description for the UI, validate-for-save, the atomic write of the loaded config file (`<data-dir>/spindle.toml` by default), and bootstrap-mode detection; `internal/server` wires the JSON surface (`s.setupAPIRouter`) and routes `GET`/`POST /admin/config` through the page provider; the page itself is `internal/webui`'s Administration page (`internal/webui/templates/pages/admin/config.html` + the `partials/admin_config_rows.html` blocks), rendered and validated server-side (D-WEB-14).
 
 **Boot flow decision tree (normative):**
 
@@ -445,7 +445,7 @@ locate data dir (--data-dir flag > SPINDLE_DATA_DIR env; default ~/.local/share/
 | `server.auto_create_on_push` | `true` |
 | everything else | Rust-spec defaults (11_config_cli.md) |
 
-**Data-dir layout:** `<data-dir>/store/` (object store), `<data-dir>/cache/` (prewarm, LFS spool), `<data-dir>/spindle.toml` (saved by setup Save; the only config file the server reads).
+**Data-dir layout:** `<data-dir>/store/` (object store), `<data-dir>/cache/` (prewarm, LFS spool), `<data-dir>/spindle.toml` (the default config location; setup Save rewrites the file the loader actually read, which is an explicit `--config`/pointer file when one is set).
 
 **Administration area (PLAN-ADMIN M1/M2):** four server-rendered pages behind the one §3.4
 access rule, composed from one shell (area side-nav with `aria-current`, eyebrow + one `<h1>` +
@@ -499,7 +499,7 @@ purpose + state chips, `.card` sections; 12_web_ui.md §2.10):
 
 - `GET /api/v1/setup` → `{ "file_state": "absent"|"valid"|"invalid", "errors": [<validation error>], "requires_restart": [<key>…], "groups": [{ "section": "server", "keys": [{ "key": "server.listen", "value": <effective>, "default": <…>, "type": "string"|"int"|"bool"|"duration"|"list", "secret": bool, "doc": "…", "fields": [<row column schema>] }] }] }`. `no-cache`. `fields` is present only for a struct slice: one column per element toml field (`key` = the field name, `type`, `secret`, `doc`), and the row `value` is the element list rendered as toml-name maps with every secret field replaced by `SecretMask` — a static token's value is never published by the API, exactly as on the page.
 - `POST /api/v1/setup/test` — body: raw TOML (or `{overrides: {key: value}}`); runs the full validator WITHOUT saving → `200 {errors: []}` or `422 {errors: [{key, message}]}`. Each error's `key` is the schema key its message names (`setup.KeyInMessage`), empty only when the message names no key.
-- `PUT /api/v1/setup` — body: same as test. Validate; on success atomically write `<data-dir>/spindle.toml` (tmp + rename in the data dir), then respond `200 {saved: true, requires_restart: [<key>…], errors: []}`. The running process does NOT hot-reload — `requires_restart` lists every key whose effective value differs from the just-saved file (all of them, effectively; the process continues in its current boot mode).
+- `PUT /api/v1/setup` — body: same as test. Validate; on success atomically write the file the process loaded, or the file it was told to load — `config.SaveTargetPath(dataDir, boot.ConfigPaths, boot.ConfigExplicit)`: the first EXISTING ladder candidate (an explicit `--config`/`SPINDLE_CONFIG`/`WALGIT_CONFIG` file alone when set, else `<data-dir>/spindle.toml`, else its `walgit.toml` alias); else, when the list is one NAMED file, that path (created, with its directory; `/dev/null` excluded); else `<data-dir>/spindle.toml` — then respond `200 {saved: true, requires_restart: [<key>…], backup: "<name>", path: "<abs>", errors: []}`. The `<target>.tmp` file and the `<file>.bak-<utc>` backup (e.g. `spindle.toml.bak-<utc>`) live beside the target. The running process does NOT hot-reload the shared `*Config`; `requires_restart` lists the changed keys that are consumed once at startup, so every READ-LIVE key (`config.RestartRequired`: telemetry logging, maintenance intervals, `wal.freshness_ttl`, and the `import.*` SSRF policy, which the save publishes to `config.LiveImport` so the import gates read it immediately) is omitted. The process continues in its current boot mode.
 
 **Access rules:** open **only** in the restricted boot (no config file, or an invalid one). Otherwise an authenticated **admin principal** is required (`p.Admin`; anonymous → 401, authenticated non-admin → 403, same `require_admin` mapping as §8.3). Admin is exactly `signed in ∧ verified groups_claim ∩ server.auth.admin_groups ≠ ∅` (default group `spindle-admin`, claim default `groups`, case-insensitive) — there are no email/domain rules and no static-token admins. **There is no setup token and no other back door:** `SPINDLE_SETUP_TOKEN`, the `?token=`/Bearer bypass and the token-paste form are gone and have no effect. The same rule gates `GET|POST|PUT /api/v1/setup{,/test}`, `POST /admin/config`, `POST /admin/config/auth-test`, and the page provider's `AdminDeps.Access` seam.
 
@@ -509,7 +509,7 @@ purpose + state chips, `.card` sections; 12_web_ui.md §2.10):
 
 #### Concurrency (setup)
 
-Hazard: concurrent Saves racing the file write. Avoidance: `internal/setup` serializes Saves with a process-wide mutex, writes `<data-dir>/spindle.toml.tmp` then `rename`s (same directory, atomic on POSIX); validation reads the in-memory effective config, never the file mid-write.
+Hazard: concurrent Saves racing the file write. Avoidance: `internal/setup` serializes Saves with a process-wide mutex, writes `<target>.tmp` then `rename`s (same directory as the target, atomic on POSIX); validation reads the in-memory effective config, never the file mid-write. The live `[import]` publish happens after the rename, so a gate can never read a policy the file does not carry.
 
 ### 3.5 The page-provider seam and `/_ui` assets (D-WEB-14, D-WEB-15)
 

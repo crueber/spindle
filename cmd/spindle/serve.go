@@ -58,7 +58,7 @@ func runServe(ctx context.Context, c *cli, args []string) int {
 			// the operator, not rendered as a wall of boot errors.
 			fmt.Fprintf(os.Stderr, "spindle: first run: OIDC is not configured — serving only /admin until a config is saved and the server restarted (%v)\n", err)
 			cfg, _ = setupOnlyBootConfig(c, dataDir, err)
-			boot := server.BootState{Mode: "setup_only", FileState: "absent", ConfigPaths: configCandidates(c)}
+			boot := server.BootState{Mode: "setup_only", FileState: "absent", ConfigPaths: configCandidates(c), ConfigExplicit: configPathExplicit(c)}
 			return serveHTTP(ctx, cfg, boot, dataDir, nil)
 		default:
 			// INVALID config → RESTRICTED MODE (§3.4): only /admin, /healthz,
@@ -68,7 +68,7 @@ func runServe(ctx context.Context, c *cli, args []string) int {
 			// pre-fills from the file.
 			fmt.Fprintf(os.Stderr, "spindle: config invalid — entering restricted mode (Administration area only): %v\n", err)
 			cfg, msgs := setupOnlyBootConfig(c, dataDir, err)
-			boot := server.BootState{Mode: "setup_only", FileState: "invalid", Errors: msgs, ConfigPaths: configCandidates(c)}
+			boot := server.BootState{Mode: "setup_only", FileState: "invalid", Errors: msgs, ConfigPaths: configCandidates(c), ConfigExplicit: configPathExplicit(c)}
 			return serveHTTP(ctx, cfg, boot, dataDir, nil)
 		}
 	}
@@ -104,7 +104,7 @@ func runServe(ctx context.Context, c *cli, args []string) int {
 		fmt.Fprintf(os.Stderr, "spindle: store: %v\n", err)
 		return exitErr
 	}
-	return serveHTTP(ctx, cfg, server.BootState{Mode: "normal", FileState: bootFileState, ConfigPaths: configCandidates(c)}, dataDir, st)
+	return serveHTTP(ctx, cfg, server.BootState{Mode: "normal", FileState: bootFileState, ConfigPaths: configCandidates(c), ConfigExplicit: configPathExplicit(c)}, dataDir, st)
 }
 
 // setupOnlyBootConfig builds the F5 setup-only boot config (the file's
@@ -134,6 +134,14 @@ func serveHTTP(ctx context.Context, cfg *config.Config, boot server.BootState, d
 	log := newLogger(cfg)
 	setupOnly := boot.InSetupOnly()
 
+	// The live [import] SSRF policy (config.LiveImport): constructed once here
+	// from the effective config and injected into every request-time reader
+	// (the Import page, the import service, mirrors, fork sync, the setup
+	// save). The save publishes to it after the file is written, so the import
+	// gates take the new policy on the next request — no restart
+	// (11_config_cli.md §3.7 read-live keys).
+	liveImport := config.NewLiveImport(cfg)
+
 	// Cache-space safety (BUG-6): a cache.dir on a filesystem smaller than the
 	// default budget can never fit it. The loader keeps provenance, so a
 	// configured value is reported but never changed; the compiled default is
@@ -162,7 +170,7 @@ func serveHTTP(ctx context.Context, cfg *config.Config, boot server.BootState, d
 		// Features 01–08 assemble in exactly one place (collab.go,
 		// 09 §4 touch point 3); integration tests reuse buildCollab
 		// so the measured composition is the shipped composition.
-		collab = buildCollab(st, cfg, reg, apiEnv)
+		collab = buildCollab(st, cfg, reg, apiEnv, liveImport)
 	}
 
 	// ---- events bridge before server.New (§10.4 order: AppState then loops) --
@@ -283,6 +291,9 @@ func serveHTTP(ctx context.Context, cfg *config.Config, boot server.BootState, d
 		// collab-write middleware and filed through the one moderation
 		// service (nil without collab wiring).
 		SpamObserver: spamObserverOf(collab),
+		// The setup API publishes a saved [import] policy here (the page save
+		// publishes to the same holder), so the Import API reads it live.
+		LiveImport: liveImport,
 	})
 	// Features 01–08 mount here (collab.go chainCollab, 09 §4 touch
 	// point 3: one block per package + the per-user SSE mounts that
@@ -297,7 +308,7 @@ func serveHTTP(ctx context.Context, cfg *config.Config, boot server.BootState, d
 	// the provider must exist in every boot mode. wireWebUI binds the feature
 	// seams; setup-only passes nil services, so only the setup deps bind and
 	// every other page renders its "not wired" card instead of panicking.
-	ui, uerr := webui.New(webui.Env{Cfg: cfg, API: apiEnv, Version: version(), Restricted: setupOnly})
+	ui, uerr := webui.New(webui.Env{Cfg: cfg, API: apiEnv, Version: version(), Restricted: setupOnly, LiveImport: liveImport})
 	if uerr != nil {
 		log.Error("webui: templates failed to parse", "err", uerr)
 		return 1
@@ -395,7 +406,7 @@ func serveHTTP(ctx context.Context, cfg *config.Config, boot server.BootState, d
 	// Administration area (docs/PLAN-ADMIN.md M2): bind AFTER the background
 	// loops so the Overview reads a live maintainer (nil there = absent card),
 	// and before the listener accepts a request.
-	wireAdminPages(cfg, boot, apiEnv, srv, adminMaint, collabModSvc(collab), collabThreadsSvc(collab), collabPackagesSvc(collab), reg)
+	wireAdminPages(cfg, boot, apiEnv, srv, adminMaint, collabModSvc(collab), collabThreadsSvc(collab), collabPackagesSvc(collab), reg, liveImport)
 	// PLAN-ADMIN §3.7: the instance directory's reads and its one audited
 	// transition, bound after the area itself (BindDirectory fills the seam
 	// BindAdmin installed). A restricted boot has no identity service, so the

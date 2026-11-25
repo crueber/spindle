@@ -98,8 +98,17 @@ func startServer(t *testing.T, bin, dataDir string, port int) *e2eServer {
 // plain startServer delegates here with no extra env.
 func startServerWithEnv(t *testing.T, bin, dataDir string, port int, extraEnv ...string) *e2eServer {
 	t.Helper()
+	return startServerArgs(t, bin, dataDir, port, nil, extraEnv...)
+}
+
+// startServerArgs boots the binary with explicit argv (e.g. `--config
+// /tmp/etc/spindle.toml`) plus extra env, and waits until /healthz answers. The
+// data-dir env is still set, so the store/cache defaults land under dataDir;
+// the config file is whatever the argv/env ladder resolves.
+func startServerArgs(t *testing.T, bin, dataDir string, port int, args []string, extraEnv ...string) *e2eServer {
+	t.Helper()
 	logs := &bytes.Buffer{}
-	cmd := exec.Command(bin)
+	cmd := exec.Command(bin, args...)
 	cmd.Env = append([]string{
 		"SPINDLE_DATA_DIR=" + dataDir,
 		"PORT=" + strconv.Itoa(port),

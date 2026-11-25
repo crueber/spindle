@@ -196,7 +196,7 @@ file or the `SPINDLE__*` overlay are preserved.
 |---|---|---|
 | `<data-dir>/store` | the filesystem object store (`store.root`) — every repository, issue, package, run | **yes** |
 | `<data-dir>/spindle.toml` | the config: issuer, client secret, session secret, store coordinates, admin group | **yes** |
-| `<data-dir>/spindle.toml.bak-<utc>` | the save-time undo copy of the previous file | no (same disk, not a backup) |
+| `<config-file>.bak-<utc>` | the save-time undo copy of the previous file, beside the file Save wrote (`spindle.toml.bak-<utc>` for the default) | no (same disk, not a backup) |
 | `<data-dir>/ssh/ed25519_host_key` | the auto-generated SSH host key (0600, dir 0700) | yes (losing it only forces clients to re-pin, TOFU) |
 | `<data-dir>/cache` | serving copies, materialized packs, render caches (`cache.dir`) | **no — expendable**, never restore it |
 
@@ -241,6 +241,14 @@ canonical host (or expect the hop) when verifying a page.
   accepted as an alias, checked second). `--config PATH` (or `SPINDLE_CONFIG`,
   legacy `WALGIT_CONFIG`) overrides it; `--config /dev/null` means "defaults +
   environment, no file".
+- **Save rewrites the file the process loaded**, in that same order: the explicit
+  `--config`/pointer file when set, else `<data-dir>/spindle.toml`, else the
+  `<data-dir>/walgit.toml` alias. With nothing on disk: a single NAMED
+  (`--config`/pointer) file is the file the process was told to load, so Save
+  creates it (and its directory); the data-dir ladder's first run writes
+  `<data-dir>/spindle.toml`. `--config /dev/null` never targets the device — that
+  save falls back to `<data-dir>/spindle.toml`. The Configuration page names the
+  resolved path, so an operator can always see which file changed.
 - A **missing file at the default path is the zero-config first run**, not an
   error. A missing **explicitly named** file is fatal: `config file not found:
   <path>`, exit 2.
@@ -248,7 +256,7 @@ canonical host (or expect the hop) when verifying a page.
   the restricted boot with the findings on `/admin/config`.
 - The Administration → Configuration page is the supported editor: it writes the
   whole canonical document atomically (temp file, fsync, rename, mode 0600) and
-  keeps `spindle.toml.bak-<utc>` before the first rewrite of an existing file.
+  keeps `<file>.bak-<utc>` (`spindle.toml.bak-<utc>` for the default file) before the first rewrite of an existing file.
 
 ### 6.2 The environment overlay
 
@@ -326,8 +334,9 @@ is [`UPGRADE.md`](UPGRADE.md).
 | Every URL except `/admin`, `/admin/config`, `/healthz`, `/readyz` answers 503 | restricted boot: no config, or an invalid one | fix the keys on `/admin/config` (the page names them), Save, restart — [`OPERATIONS.md` §1](OPERATIONS.md#1-the-restricted-first-boot) |
 | The instance boots restricted after a hand edit | the file no longer validates (an unknown or removed key such as `server.auth.mode`, a bad value) | `/admin/config` names each key and links its row; fix and Save, or fix on disk and restart — [`UPGRADE.md`](UPGRADE.md) §5 |
 | `/readyz` answers 200 with `"status":"restricted"` | that is a healthy restricted boot, not a failing process | route it. A health-gated ingress that gates it out makes `/admin` unreachable, which is how a restricted instance becomes an outage |
-| The Configuration page says **Restart required** | the changed keys are consumed once at startup | restart the process (Maintenance → Restart, `docker compose restart`, `systemctl restart`). A save never restarts it |
-| A save succeeded but behaviour did not change | no in-process reload (or the file is invalid and the boot fell back to restricted) | check `/readyz` for `restricted`, then `spindle config check`; restart |
+| The Configuration page says **Restart required** | the changed keys are consumed once at startup | restart the process (Maintenance → Restart, `docker compose restart`, `systemctl restart`). A save never restarts it, and the live keys (`telemetry.log_*`, `maintenance.*_interval`, `wal.freshness_ttl`, the `import.*` SSRF policy) never appear in that list |
+| A save succeeded but behaviour did not change | no in-process reload for that key (or the file is invalid and the boot fell back to restricted) | check `/readyz` for `restricted`, then `spindle config check`; restart — the import SSRF policy is the exception (it applies on the next request: check the file the page names, and any `SPINDLE__IMPORT__*` override masking it) |
+| A saved edit is gone after a restart | the save wrote a different file than the one the process loaded (an explicit `--config`/`SPINDLE_CONFIG`/`WALGIT_CONFIG` file is what the ladder reads) | the Configuration page names the file Save writes; it is the loaded file, so re-check that `--config`/the env pointer is what the supervisor passes (fixed 2026-11-25 — before that a save always wrote `<data-dir>/spindle.toml`) |
 | A `SPINDLE__*` override "does nothing" | a missing segment makes it an unknown key — reported, never applied | spell the full path (§6.2) and run `spindle config check --strict` |
 | S3 answers 403 on bucket/object calls | virtual-host addressing against rustfs/MinIO | `store.s3.force_path_style = true` (`SPINDLE__STORE__S3__FORCE_PATH_STYLE=true`) |
 | A compose healthcheck never turns healthy | busybox `wget localhost` resolves `::1` while the listener is IPv4 | pin `127.0.0.1` in the check (both shipped stacks do) |

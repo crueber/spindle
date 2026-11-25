@@ -125,6 +125,7 @@ type Service struct {
 	reg      *wal.Registry
 	roles    RoleService
 	cfg      *config.Config
+	live     *config.LiveImport
 	git      *Runner
 	hostname string
 
@@ -154,6 +155,11 @@ type Deps struct {
 	Cfg       *config.Config
 	GitBinary string
 	Hostname  string
+	// LiveImport is the process's live [import] SSRF policy (optional). When
+	// wired, the HTTP gate reads it at each request, so saving the policy on
+	// /admin/config applies immediately; nil keeps the Cfg snapshot (CLI,
+	// tests).
+	LiveImport *config.LiveImport
 }
 
 // New builds a Service over the shared store/registry/roles/config. Nil
@@ -181,6 +187,7 @@ func New(d Deps) *Service {
 		reg:      d.Reg,
 		roles:    d.Roles,
 		cfg:      cfg,
+		live:     d.LiveImport,
 		git:      newRunner(bin, cfg),
 		hostname: host,
 		running:  map[string]*running{},

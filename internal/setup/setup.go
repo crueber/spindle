@@ -1037,15 +1037,19 @@ func isKeyByte(b byte) bool {
 	return b >= 'a' && b <= 'z' || b >= 'A' && b <= 'Z' || b >= '0' && b <= '9' || b == '_' || b == '.'
 }
 
-// Save validates (config.SaveSetup fails closed), then atomically writes
-// <data-dir>/spindle.toml, serialized by the process-wide mutex (§3.4), and
-// diffs the candidate against the still-running effective config. The
-// returned keys are the ones whose effective value differs from the file just
-// saved — the process does NOT hot-reload. An empty (non-nil) slice means
-// nothing changed. backup names the spindle.toml.bak-<utc> file the first
-// canonicalising rewrite of an existing config kept ("" when none was made).
-func Save(dataDir string, c *config.Config, effective *config.Config) (restart []string, backup string, err error) {
-	return SaveWithComparison(dataDir, c, c, effective)
+// Save validates (config.SaveSetupTo fails closed), then atomically writes the
+// file at PATH — the file the running process loaded (config.SaveTargetPath
+// over the boot candidates), never a data-dir shadow copy — serialized by the
+// process-wide mutex (§3.4), and diffs the candidate against the still-running
+// effective config. The returned keys are the ones whose effective value
+// differs from the file just saved AND that are consumed once at startup — the
+// process does NOT hot-reload; a read-live key (the import SSRF policy) is
+// published separately and is therefore not named. An empty (non-nil) slice
+// means nothing needs a restart. backup names the spindle.toml.bak-<utc> file
+// the first canonicalising rewrite of an existing config kept ("" when none
+// was made).
+func Save(path string, c *config.Config, effective *config.Config) (restart []string, backup string, err error) {
+	return SaveWithComparison(path, c, c, effective)
 }
 
 // SaveWithComparison writes write but computes the restart diff against
@@ -1054,9 +1058,9 @@ func Save(dataDir string, c *config.Config, effective *config.Config) (restart [
 // an env-supplied secret is never silently persisted, while the restart list
 // does not claim those secrets changed (FillEffectiveSecrets made compare match
 // the running config for them).
-func SaveWithComparison(dataDir string, write, compare, effective *config.Config) (restart []string, backup string, err error) {
+func SaveWithComparison(path string, write, compare, effective *config.Config) (restart []string, backup string, err error) {
 	saveMu.Lock()
-	backup, err = config.SaveSetupValidated(write, compare, dataDir)
+	backup, err = config.SaveSetupTo(path, write, compare)
 	saveMu.Unlock()
 	if err != nil {
 		return nil, "", err
@@ -1103,6 +1107,11 @@ func FillEffectiveSecrets(candidate, effective *config.Config) *config.Config {
 // RestartKeys diffs the effective config against the candidate. It compares
 // RAW field values (not the schema's masked row maps), so rotating a static
 // token is reported even though both sides render the same SecretMask.
+//
+// A changed key that config.RestartRequired reports as READ LIVE is not in the
+// list: it already took effect (the import SSRF policy is the current case),
+// and naming it would tell the operator to restart for nothing. The list is
+// therefore "changed AND consumed once at startup".
 func RestartKeys(effective, candidate *config.Config) []string {
 	groups := BuildSchema(candidate, effective)
 	out := []string{}
@@ -1111,6 +1120,9 @@ func RestartKeys(effective, candidate *config.Config) []string {
 			a, aok := rawKeyValue(effective, k.Key)
 			b, bok := rawKeyValue(candidate, k.Key)
 			if !aok || !bok || fmt.Sprint(a) != fmt.Sprint(b) {
+				if !config.RestartRequired(k.Key) {
+					continue
+				}
 				out = append(out, k.Key)
 			}
 		}

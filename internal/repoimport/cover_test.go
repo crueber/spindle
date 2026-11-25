@@ -626,7 +626,7 @@ func (f *errIdxStore) Put(ctx context.Context, key string, body store.PutBody, o
 
 func TestParseRequestNilCfg(t *testing.T) {
 	// Nil cfg falls back to compiled-in defaults (file:// refused there).
-	_, _, err := ParseRequest([]byte(`{"source_url":"file:///x","owner":"a","name":"b","token":"t"}`), nil)
+	_, _, err := ParseRequest([]byte(`{"source_url":"file:///x","owner":"a","name":"b","token":"t"}`), nil, nil)
 	if err == nil || !strings.Contains(err.Error(), "allow_file_urls") {
 		t.Fatalf("nil cfg = %v, want defaults-applied refusal", err)
 	}
@@ -634,7 +634,7 @@ func TestParseRequestNilCfg(t *testing.T) {
 		c := config.Defaults()
 		c.Import.AllowFileURLs = true
 		return c
-	}())
+	}(), nil)
 	if err != nil || tok != "t" || !p.TokenSet {
 		t.Fatalf("explicit cfg = %+v %q %v", p, tok, err)
 	}
@@ -822,7 +822,7 @@ func TestNoOpDocAndTaskFallbacks(t *testing.T) {
 	live := wal.TaskRecord{ID: "i-j", Kind: KindRepoImport, Repo: "acme/j", LogTail: []string{"x"}}
 	st2.setRecord(live)
 	done := make(chan struct{})
-	want, _, err := ParseRequest([]byte(`{"source_url":"file:///srv/j.git","owner":"acme","name":"j"}`), svc.cfg)
+	want, _, err := ParseRequest([]byte(`{"source_url":"file:///srv/j.git","owner":"acme","name":"j"}`), svc.cfg, nil)
 	if err != nil {
 		t.Fatal(err)
 	}

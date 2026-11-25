@@ -23,7 +23,7 @@ func TestAdminRestartSeamBoundBothBootModes(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Cleanup(func() { webui.BindAdmin(webui.AdminDeps{}) })
-			wireAdminPages(config.Defaults(), tc.boot, nil, nil, nil, nil, nil, nil, nil)
+			wireAdminPages(config.Defaults(), tc.boot, nil, nil, nil, nil, nil, nil, nil, nil)
 			d := webui.AdminBindings()
 			if d.Restart == nil {
 				t.Fatal("AdminDeps.Restart is nil: POST /admin/restart would 503 and a saved config could never take effect")

@@ -190,7 +190,7 @@ func TestPushFastPathZeroCollabRoundTrips(t *testing.T) {
 
 	// The shipped composition: every feature package mounted, require_read
 	// gate wired, mirror guard wired — the push below runs through all of it.
-	collab := buildCollab(cs, cfg, reg, env)
+	collab := buildCollab(cs, cfg, reg, env, nil)
 	// Forgejo #522: the feature-flag write guards are wired onto the
 	// shipped services and fail open on a settings-less repo (no doc
 	// published yet → all enabled, so the tab gating and the guards

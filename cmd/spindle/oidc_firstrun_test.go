@@ -24,7 +24,7 @@ func TestFirstRunCardPartialPost(t *testing.T) {
 	path := filepath.Join(dataDir, config.ConfigFileName)
 	cfg := config.FirstRunDefaults(dataDir)
 	boot := server.BootState{Mode: "setup_only", FileState: "absent", ConfigPaths: []string{path}}
-	save := adminSaveFn(cfg, boot)
+	save := adminSaveFn(cfg, boot, nil)
 
 	values := map[string]string{
 		"server.auth.issuer":              "https://id.example.com",

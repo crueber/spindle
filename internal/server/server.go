@@ -86,6 +86,11 @@ type Server struct {
 	// spindle_spam_flag_total counter counts.
 	spamObserver func(ctx context.Context, owner, repo, principal, body string) bool
 
+	// liveImport is the live [import] SSRF policy (set from
+	// Options.LiveImport); the setup API publishes a saved section to it so
+	// the import gates read the new policy without a restart.
+	liveImport *config.LiveImport
+
 	// rate is the in-process token-bucket limiter (ratelimit.go); nil when
 	// rate_limit.enabled is false, which allows everything.
 	rate *rateLimiter
@@ -181,6 +186,12 @@ type Options struct {
 	// already written) and its only effect is a pre-filed report plus the
 	// returned "filed" flag (the counter).
 	SpamObserver func(ctx context.Context, owner, repo, principal, body string) bool
+	// LiveImport is the process's live [import] SSRF policy: PUT
+	// /api/v1/setup publishes the saved section to it after the file is
+	// written, exactly like the page save, so an import API call made before
+	// the process restarts reads the policy the operator just saved. Nil
+	// leaves the save on the boot snapshot (tests, restricted boot).
+	LiveImport *config.LiveImport
 }
 
 // PushedRef is one ref that landed in a client push. Ref is the full ref name
@@ -207,6 +218,14 @@ type BootState struct {
 	// (explicit --config / pointer first, then the data-dir files) — the setup
 	// API edits on top of the first existing one (§3.4).
 	ConfigPaths []string
+	// ConfigExplicit reports that ConfigPaths is ONE file the operator NAMED
+	// (--config / SPINDLE_CONFIG / WALGIT_CONFIG), not the data-dir search
+	// ladder. The save target rule needs it: when no candidate exists, a named
+	// file is the file the process was told to load (the save creates it),
+	// while an empty data-dir ladder means the first-run default. Composition
+	// sets it from cmd/spindle's configCandidates; a zero BootState keeps the
+	// data-dir fallback (tests).
+	ConfigExplicit bool
 }
 
 // InSetupOnly reports SETUP-ONLY MODE (§3.4).
@@ -259,6 +278,7 @@ func New(o Options) *Server {
 	s.placeholderHints = o.PlaceholderHints
 	s.avatarHook = o.AvatarHook
 	s.spamObserver = o.SpamObserver
+	s.liveImport = o.LiveImport
 	if lim, lerr := limiterFromConfig(o.Config, o.Now); lerr != nil {
 		// Validate reports the bad [rate_limit] spelling and the boot is
 		// restricted; a runnable instance keeps the compiled default rates

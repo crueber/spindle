@@ -62,8 +62,8 @@
 
         {{if .Data.View.TOML}}
         <details class="card mb-3 p-4" id="admin-toml">
-          <summary class="cursor-pointer py-1 text-sm font-medium">The file Save writes <span class="muted text-xs">— read-only</span></summary>
-          <p class="muted mt-2 text-[11px]">The canonical <code class="mono text-xs">spindle.toml</code> of the <strong>saved configuration</strong> — the exact bytes a zero-edit Save writes (before the first save: the first-run defaults). It does not include unsaved edits in the form below; Save writes the whole document.</p>
+          <summary class="cursor-pointer py-1 text-sm font-medium">The file Save writes{{if .Data.View.SavePath}} <code class="mono text-xs break-all">{{.Data.View.SavePath}}</code>{{end}} <span class="muted text-xs">— read-only</span></summary>
+          <p class="muted mt-2 text-[11px]">Save writes <strong>{{if .Data.View.SavePath}}<code class="mono text-xs break-all">{{.Data.View.SavePath}}</code>{{else}}the configuration file{{end}}</strong> — the file this process loaded (an explicit <code class="mono text-xs">--config</code>/<code class="mono text-xs">SPINDLE_CONFIG</code>/<code class="mono text-xs">WALGIT_CONFIG</code> file, else the data-dir's <code class="mono text-xs">spindle.toml</code>, else the alias). The canonical document below is the <strong>saved configuration</strong> — the exact bytes a zero-edit Save writes (before the first save: the first-run defaults). It does not include unsaved edits in the form below; Save writes the whole document.</p>
           <div class="mt-2 flex justify-end"><button type="button" class="btn" data-copy="#admin-toml-doc">copy</button></div>
           <pre class="code-view mt-1 max-h-[28rem] min-w-0 overflow-auto p-3 text-xs" id="admin-toml-doc">{{.Data.View.TOML}}</pre>
         </details>
@@ -101,7 +101,7 @@
             <button type="submit" class="btn primary" name="op" value="save">Save<span class="ml-1" data-dirty-indicator hidden>· unsaved</span></button>
             <span class="muted text-xs" data-dirty-status role="status" aria-live="polite"></span>
           </div>
-          <p class="muted text-[11px]">Save never contacts the identity provider: validation is shape-only, so a recovery save works while the IdP is unreachable. Use Test above for a live probe. Save writes the <strong>full canonical</strong> <code class="mono text-xs">spindle.toml</code> document — comments in a hand-written file are not preserved by the TOML encoder. The first save that rewrites an existing file keeps the previous text beside it as <code class="mono text-xs">spindle.toml.bak-&lt;utc&gt;</code> (once; a save that changes nothing writes no file). Leaving with unsaved edits warns once.</p>
+          <p class="muted text-[11px]">Save never contacts the identity provider: validation is shape-only, so a recovery save works while the IdP is unreachable. Use Test above for a live probe. Save writes <strong>{{if .Data.View.SavePath}}<code class="mono text-xs break-all">{{.Data.View.SavePath}}</code>{{else}}the configuration file{{end}}</strong> — the file this process loaded (an explicit <code class="mono text-xs">--config</code>/<code class="mono text-xs">SPINDLE_CONFIG</code>/<code class="mono text-xs">WALGIT_CONFIG</code> file, else the data-dir's <code class="mono text-xs">spindle.toml</code>, else the alias) — as the <strong>full canonical</strong> document; comments in a hand-written file are not preserved by the TOML encoder. The first save that rewrites an existing file keeps the previous text beside it as <code class="mono text-xs">&lt;file&gt;.bak-&lt;utc&gt;</code> (<code class="mono text-xs">spindle.toml.bak-&lt;utc&gt;</code> for the default file) (once; a save that changes nothing writes no file). Leaving with unsaved edits warns once.</p>
 
           {{range .Data.View.Sections}}{{template "admin-config-section" .}}{{end}}
         </form>

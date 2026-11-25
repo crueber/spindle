@@ -3,7 +3,9 @@ package server
 import (
 	"encoding/json"
 	"io"
+	"log/slog"
 	"net/http"
+	"os"
 
 	"github.com/crueber/spindle/internal/config"
 	"github.com/crueber/spindle/internal/setup"
@@ -123,17 +125,41 @@ func (s *Server) setupPut(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	restart, backup, serr := setup.Save(s.cfg.DataDir, c, s.cfg)
+	// The save rewrites the file the process LOADED (an explicit --config /
+	// SPINDLE_CONFIG / WALGIT_CONFIG file included), never a data-dir shadow
+	// copy — config.SaveTargetPath is the loader's own candidate order.
+	target := config.SaveTargetPath(s.cfg.DataDir, s.boot.ConfigPaths, s.boot.ConfigExplicit)
+	restart, backup, serr := setup.Save(target, c, s.cfg)
 	if serr != nil {
 		writeJSONBody(w, http.StatusInternalServerError, map[string]any{
 			"errors": []setup.Error{{Message: serr.Error()}},
 		})
 		return
 	}
+	// The [import] SSRF policy is read at request time, so the save publishes
+	// it now — the file alone would only take effect after a restart. Env
+	// wins over a file value here exactly as it does at boot
+	// (config.LiveImport.PublishFileSave).
+	publishLiveImport(s.log, s.liveImport, c)
 	writeJSONBody(w, http.StatusOK, map[string]any{
 		"saved":            true,
 		"requires_restart": restart,
 		"backup":           backup,
+		"path":             target,
 		"errors":           []setup.Error{},
 	})
+}
+
+// publishLiveImport hands a just-saved file candidate to the live [import]
+// policy holder (nil holder → nothing to publish). A failure leaves the
+// previous policy in place and is logged: the file is already written, and a
+// booted process has validated these same keys, so the only reachable cause is
+// a test-injected overlay.
+func publishLiveImport(log *slog.Logger, live *config.LiveImport, candidate *config.Config) {
+	if live == nil {
+		return
+	}
+	if _, err := live.PublishFileSave(candidate, os.Environ()); err != nil && log != nil {
+		log.Warn("setup save: live import policy not published", "err", err)
+	}
 }

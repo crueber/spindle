@@ -354,12 +354,23 @@ func TestSaveSetupRejectsInvalidConfig(t *testing.T) {
 }
 
 func TestRestartRequired(t *testing.T) {
-	for _, key := range []string{"telemetry.log_format", "telemetry.log_filter", "maintenance.interval", "maintenance.follow_interval", "wal.freshness_ttl"} {
+	for _, key := range []string{
+		"telemetry.log_format", "telemetry.log_filter", "maintenance.interval", "maintenance.follow_interval", "wal.freshness_ttl",
+		// The import/mirror egress policy is read per request and published by
+		// the admin save (config.LiveImport): no restart.
+		"import.allow_private_networks", "import.url_allowlist", "import.allow_file_urls",
+	} {
 		if RestartRequired(key) {
 			t.Errorf("RestartRequired(%q) = true, want read-live", key)
 		}
 	}
-	for _, key := range []string{"store.backend", "server.listen", "server.auth.mode", "cache.dir"} {
+	for _, key := range []string{
+		"store.backend", "server.listen", "server.auth.mode", "cache.dir",
+		// The rest of [import] is a construction snapshot (caps, timeouts,
+		// the clone semaphore), so it still needs a restart.
+		"import.clone_timeout", "import.git_timeout", "import.max_bytes",
+		"import.max_refs", "import.max_concurrent",
+	} {
 		if !RestartRequired(key) {
 			t.Errorf("RestartRequired(%q) = false, want restart-required", key)
 		}

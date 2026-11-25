@@ -46,7 +46,7 @@
 {{define "admin-banners"}}
 {{if .Saved}}
 <div class="card mb-3 border-l-2 border-l-[var(--pd-ok)] p-3 text-sm" role="status">
-  <strong class="font-semibold">Written to &lt;data-dir&gt;/spindle.toml.</strong>
+  <strong class="font-semibold">Written to {{if .SavePath}}<code class="mono text-xs">{{.SavePath}}</code>{{else}}the configuration file{{end}}.</strong>
   {{if .Backup}}<p class="mt-1">The previous file was kept beside it as <code class="mono text-xs">{{.Backup}}</code>.</p>{{end}}
   {{if not .RequiresRestart}}<p class="mt-1">No key in this save requires a restart.</p>{{end}}
 </div>

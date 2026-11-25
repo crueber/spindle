@@ -11,8 +11,15 @@
 {{with .Config}}
 <div class="space-y-4">
   <form class="card p-4" method="post" action="/{{$.Owner}}/{{$.Name}}/settings/config"
-        hx-post="/{{$.Owner}}/{{$.Name}}/settings/config" hx-target="#settings-panel" hx-select="#settings-panel" hx-swap="outerHTML">
+        hx-post="/{{$.Owner}}/{{$.Name}}/settings/config" hx-target="#settings-panel" hx-select="#settings-panel" hx-swap="outerHTML"
+        data-leave-guard>
     <h3 class="card-header">Effective config</h3>
+    <div class="mb-2 flex flex-col items-start gap-1">
+      <button type="button" class="btn whitespace-nowrap" data-snippet-insert data-snippet-target="#config-text"
+              data-snippet-status="#config-snippet-status" aria-describedby="config-snippet-hint">Insert static-site snippet</button>
+      <p id="config-snippet-hint" class="muted text-xs">The per-repo half of a static site: the instance admin must first enable the <code class="mono">[static_sites]</code> listener in <code class="mono">spindle.toml</code>.</p>
+    </div>
+    <p id="config-snippet-status" class="muted mb-1 text-xs" role="status" aria-live="polite"></p>
     <label class="mb-1 block text-sm font-medium" for="config-text">TOML (published to the WAL)</label>
     <textarea class="input mono text-xs" id="config-text" name="config" rows="16" spellcheck="false">{{.Text}}</textarea>
     <div class="mt-2 grid gap-2 sm:grid-cols-[1fr_auto]">
@@ -21,8 +28,9 @@
         <input class="input" id="config-message" name="message" type="text" value="{{.Message}}" placeholder="why this changed">
       </div>
       <div class="flex flex-wrap items-end gap-2">
-        <button type="submit" class="btn primary" name="config_action" value="publish">Publish</button>
-        <button type="submit" class="btn" name="config_action" value="clear">Clear</button>
+        <button type="submit" class="btn primary whitespace-nowrap" name="config_action" value="publish">Publish</button>
+        <button type="submit" class="btn whitespace-nowrap" name="config_action" value="clear">Clear</button>
+        <span class="muted text-xs" data-dirty-status role="status" aria-live="polite"></span>
       </div>
     </div>
     {{if .Error}}<p class="err-line" role="alert">{{.Error}}</p>{{end}}

@@ -1150,7 +1150,7 @@ func formsImportWireBody(data *formsImportData) []byte {
 }
 
 func (s *Server) formsImportOnce(w http.ResponseWriter, r *http.Request, p auth.Principal, data *formsImportData) {
-	params, token, perr := repoimport.ParseRequest(formsImportWireBody(data), s.env.Cfg)
+	params, token, perr := repoimport.ParseRequest(formsImportWireBody(data), s.env.Cfg, s.env.LiveImport)
 	if perr != nil {
 		s.formsFail(w, r, p, nil, "forms/import", "Import repository", data, perr)
 		return
@@ -1333,16 +1333,8 @@ func (s *Server) formsImportMirror(w http.ResponseWriter, r *http.Request, p aut
 			return
 		}
 	}
-	cfg := s.env.Cfg
-	if cfg == nil {
-		cfg = config.Defaults()
-	}
-	if serr := repoimport.CheckSSRF(n, repoimport.SSRFConfig{
-		AllowPrivate: cfg.Import.AllowPrivateNetworks,
-		Allowlist:    cfg.Import.URLAllowlist,
-		AllowFile:    cfg.Import.AllowFileURLs,
-		Dangerous:    data.Dangerous,
-	}, nil); serr != nil {
+	if serr := repoimport.CheckSSRF(n, repoimport.SSRFPolicy(
+		config.ImportPolicy(s.env.LiveImport, s.env.Cfg), data.Dangerous), nil); serr != nil {
 		s.formsFail(w, r, p, nil, "forms/import", "Import repository", data, serr)
 		return
 	}

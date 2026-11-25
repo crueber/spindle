@@ -447,7 +447,7 @@ func TestIssue79ConcurrentSameTarget(t *testing.T) {
 		wg.Add(1)
 		go func(i int) {
 			defer wg.Done()
-			p, tok, perr := ParseRequest([]byte(body), cfg)
+			p, tok, perr := ParseRequest([]byte(body), cfg, nil)
 			if perr != nil {
 				out[i] = res{err: perr}
 				return

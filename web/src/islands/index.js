@@ -22,8 +22,9 @@ import { initOps } from "./ops.js";
 import { init as initThreadLog } from "./threadlog.js";
 import { initLeaveGuard } from "./leaveguard.js";
 import { initErrorFocus } from "./focus.js";
+import { initSnippet } from "./snippet.js";
 
-const islands = [initTheme, initMenus, initCopy, initFilter, initAutogrow, initSelection, initDanger, initSubmitKeys, initSSE, initTasks, initOps, initThreadLog, initLeaveGuard, initErrorFocus];
+const islands = [initTheme, initMenus, initCopy, initFilter, initAutogrow, initSelection, initDanger, initSubmitKeys, initSSE, initTasks, initOps, initThreadLog, initLeaveGuard, initErrorFocus, initSnippet];
 
 export function boot(root = document) {
   for (const init of islands) {

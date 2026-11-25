@@ -129,6 +129,9 @@ ref     = ""         # "" = the repository's default branch tip
 root    = ""         # "" = repository root
 ```
 
+The repository's **Settings → Effective config & history** page has an **Insert static-site snippet** button that
+appends this block to the editor (or selects the existing `[static_site]` section instead of duplicating it).
+
 Validation (fail closed), with `enabled` on:
 
 - `host` non-empty, and **not the application's own hostname** — neither `server.public_url`'s

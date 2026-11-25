@@ -26,6 +26,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/crueber/spindle/internal/config"
 	"github.com/crueber/spindle/internal/repoimport"
 	"github.com/crueber/spindle/internal/store"
 	"github.com/crueber/spindle/internal/store/proto"
@@ -79,10 +80,13 @@ type Service struct {
 	async   map[string]*asyncSync // id-keyed async fires (HTTP 202 surface)
 
 	// SSRF gate input, from the [import] section (one gate, one clock
-	// for both flows — no new config section).
+	// for both flows — no new config section). live, when wired, is read at
+	// each request/task instead: saving the policy on /admin/config applies
+	// to the next mirror create/sync without a restart.
 	allowPrivate bool
 	allowlist    []string
 	allowFile    bool
+	live         *config.LiveImport
 	maxBytes     int64
 
 	// probeTimeout bounds one servability probe's Sync+object join loop
@@ -118,6 +122,10 @@ type Deps struct {
 	Allowlist    []string
 	AllowFile    bool
 	MaxBytes     int64
+	// LiveImport is the process's live [import] SSRF policy (optional). When
+	// wired, every create/sync gate reads it instead of the Allow* snapshot,
+	// so the admin save applies without a restart.
+	LiveImport *config.LiveImport
 }
 
 // New builds a Service over the shared store/registry.
@@ -139,6 +147,7 @@ func New(d Deps) *Service {
 		allowPrivate: d.AllowPrivate,
 		allowlist:    d.Allowlist,
 		allowFile:    d.AllowFile,
+		live:         d.LiveImport,
 		maxBytes:     d.MaxBytes,
 		probeTimeout: d.ProbeTimeout,
 	}
@@ -147,6 +156,22 @@ func New(d Deps) *Service {
 	}
 	s.probe = s.probeServe
 	return s
+}
+
+// ssrfPolicy is the gate input for one request/task: the live [import]
+// policy when composition wired the holder, else the boot snapshot. The
+// dangerous confirm flag is per-call (creation asks for it; a stored upstream
+// re-gates host/private only).
+func (s *Service) ssrfPolicy(dangerous bool) repoimport.SSRFConfig {
+	if imp, ok := s.live.Get(); ok {
+		return repoimport.SSRFPolicy(imp, dangerous)
+	}
+	return repoimport.SSRFConfig{
+		AllowPrivate: s.allowPrivate,
+		Allowlist:    s.allowlist,
+		AllowFile:    s.allowFile,
+		Dangerous:    dangerous,
+	}
 }
 
 // Store returns the service's object store: read-only consumers (the
@@ -324,12 +349,9 @@ func (s *Service) runSync(ctx context.Context, task *wal.Task, owner, name, toke
 	if verr := repoimport.ValidateTransport(n, token != ""); verr != nil {
 		return s.fail(ctx, owner, name, now, task, verr.Error())
 	}
-	if serr := repoimport.CheckSSRF(n, repoimport.SSRFConfig{
-		AllowPrivate: s.allowPrivate,
-		Allowlist:    s.allowlist,
-		AllowFile:    s.allowFile,
-		Dangerous:    true, // authority check happened at mirror creation (admin-only PUT); the stored URL re-gates host/private only
-	}, nil); serr != nil {
+	// dangerous=true here re-gates host/private only: the authority check
+	// happened at mirror creation (admin-only PUT).
+	if serr := repoimport.CheckSSRF(n, s.ssrfPolicy(true), nil); serr != nil {
 		return s.fail(ctx, owner, name, now, task, serr.Error())
 	}
 

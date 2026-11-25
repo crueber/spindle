@@ -34,7 +34,7 @@ const mirrorLoopInterval = time.Minute
 // process from buildCollab — one block for this package). apiEnv may
 // be nil in tests that only need the push path (the summary hook is
 // skipped then).
-func newMirrorService(st store.ObjectStore, reg *wal.Registry, cfg *config.Config, apiEnv *api.Env) (*mirror.Service, *mirror.Handler) {
+func newMirrorService(st store.ObjectStore, reg *wal.Registry, cfg *config.Config, apiEnv *api.Env, live *config.LiveImport) (*mirror.Service, *mirror.Handler) {
 	mirror.RegisterKind(mirror.KindMirrorSync)
 	mirror.RegisterKind(mirror.KindMirrorHeal)
 	api.RegisterExposed(mirror.ExposedTemplates...)
@@ -56,6 +56,9 @@ func newMirrorService(st store.ObjectStore, reg *wal.Registry, cfg *config.Confi
 		Allowlist:    cfg.Import.URLAllowlist,
 		AllowFile:    cfg.Import.AllowFileURLs,
 		MaxBytes:     int64(cfg.Import.MaxBytes),
+		// The live policy overrides the snapshot above once wired: the gate
+		// reads it per create/sync, so an admin save applies immediately.
+		LiveImport: live,
 	})
 	h := &mirror.Handler{
 		Svc: svc,

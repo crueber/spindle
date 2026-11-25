@@ -39,6 +39,7 @@ import (
 	"regexp"
 	"strings"
 
+	"github.com/crueber/spindle/internal/config"
 	"github.com/crueber/spindle/internal/egress"
 )
 
@@ -223,6 +224,19 @@ type SSRFConfig struct {
 	Allowlist    []string // plain hosts, lowercased at check time
 	AllowFile    bool
 	Dangerous    bool // explicit confirm for empty-allowlist non-GitHub URLs
+}
+
+// SSRFPolicy maps an effective [import] section onto the gate input.
+// dangerous is the request's confirm flag (never a stored value). Every call
+// site — the import API/page, mirror, push-mirror — builds its gate through
+// this one mapping, so the three flows cannot read different keys.
+func SSRFPolicy(imp config.Import, dangerous bool) SSRFConfig {
+	return SSRFConfig{
+		AllowPrivate: imp.AllowPrivateNetworks,
+		Allowlist:    imp.URLAllowlist,
+		AllowFile:    imp.AllowFileURLs,
+		Dangerous:    dangerous,
+	}
 }
 
 // CheckSSRF enforces the v1 egress policy on an already-normalized source.

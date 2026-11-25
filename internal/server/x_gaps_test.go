@@ -813,16 +813,18 @@ func TestSetupTestAndPutFailurePaths(t *testing.T) {
 		t.Fatalf("validation = %d %s", rec.Code, rec.Body.String())
 	}
 
-	// Save failure → 500 (data dir is a file). The base stays a valid file so
-	// validation passes; only the destination write fails.
+	// Save failure → 500. The write target is the file the process LOADED
+	// (config.SaveTargetPath), so block that file's own temporary path: the
+	// base stays a valid file, validation passes, and only the destination
+	// write fails. A data-dir that is a file no longer matters — the save no
+	// longer writes there when an explicit file was loaded.
 	validDir := t.TempDir()
 	seedValidConfig(t, validDir)
-	s.boot.ConfigPaths = []string{filepath.Join(validDir, config.ConfigFileName)}
-	fileDir := filepath.Join(t.TempDir(), "not-a-dir")
-	if err := os.WriteFile(fileDir, []byte("x"), 0o644); err != nil {
+	loaded := filepath.Join(validDir, config.ConfigFileName)
+	s.boot.ConfigPaths = []string{loaded}
+	if err := os.Mkdir(loaded+".tmp", 0o700); err != nil {
 		t.Fatal(err)
 	}
-	s.cfg.DataDir = fileDir
 	req = httptest.NewRequest("PUT", "/api/v1/setup", strings.NewReader(`{"overrides": {"server.listen": "127.0.0.1:1"}}`))
 	req.Header.Set("Authorization", "Bearer tok123")
 	rec = httptest.NewRecorder()

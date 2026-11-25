@@ -106,6 +106,15 @@ var readLiveKeys = []string{
 	"maintenance.interval",
 	"maintenance.follow_interval",
 	"wal.freshness_ttl",
+	// The import/mirror/fork-sync egress (SSRF) policy is one policy, read at
+	// each import request — never at construction. The admin save publishes
+	// the new section to config.LiveImport after the file is written
+	// (live.go), so these take effect on the very next import (2026-11-25:
+	// the Import page kept refusing an allowlisted private source until a
+	// restart, because it read the boot snapshot).
+	"import.allow_private_networks",
+	"import.url_allowlist",
+	"import.allow_file_urls",
 }
 
 // RestartRequired reports whether a key takes effect only after a restart
@@ -137,10 +146,17 @@ func ValidateForSave(c *Config) error {
 // <data-dir>/spindle.toml: write spindle.toml.tmp (mode 0600), fsync, rename.
 // Readers see either the old or the new file, never a partial one.
 //
+// A process booted with an explicit config path (--config / SPINDLE_CONFIG /
+// WALGIT_CONFIG) must NOT save here: that would write a shadow file the
+// loader never reads and lose every edit on the next restart. The admin save
+// resolves the file the process actually loaded with SaveTargetPath and calls
+// SaveSetupTo; this dataDir form remains the first-run default target.
+//
 // The setup editor writes the FULL canonical document (Toml can be decoded but
 // its comments are not preserved by the codec), so the first rewrite of an
 // existing file keeps the operator's text: the previous bytes are copied to
-// spindle.toml.bak-<utc> beside the config before the rewrite. The backup is
+// <file>.bak-<utc> beside the config before the rewrite (spindle.toml.bak-<utc>
+// for the default target). The backup is
 // made ONCE — a later save sees it already present — and an unchanged save
 // writes nothing at all (byte-identical), so comments an operator keeps in a
 // canonical file only go on the first canonicalising save. The returned string
@@ -149,25 +165,88 @@ func SaveSetup(c *Config, dataDir string) (string, error) {
 	return SaveSetupValidated(c, c, dataDir)
 }
 
+// SaveTargetPath resolves the file a setup save must write — "the file this
+// process would load, or the one it was told to load":
+//
+//  1. the first candidate that EXISTS — the same walk config.Load/LoadSetupBase
+//     does, so it is the file the process actually loaded;
+//  2. else, when the candidate list is an EXPLICIT single path the operator
+//     named (--config / SPINDLE_CONFIG / WALGIT_CONFIG; `explicit` is true), that
+//     path — the file the process was told to load. The save creates it (and its
+//     directory) rather than writing a shadow copy somewhere the loader will
+//     never look. (The boot itself refuses a missing explicit file, §6.1, so
+//     this is the recovery rule when the file disappears between boot and save,
+//     and the create rule for the restricted save paths.)
+//  3. otherwise <data-dir>/spindle.toml — the first-run target for the data-dir
+//     search ladder (where "no file" IS the first run).
+//
+// `/dev/null` is never a save target: the loader treats `--config /dev/null` as
+// "defaults + environment, no file", so the save falls back to the data-dir
+// default (creating a real file the next boot can load) instead of writing to
+// the device.
+func SaveTargetPath(dataDir string, candidates []string, explicit bool) string {
+	candidates = withoutDevNull(candidates)
+	for _, p := range candidates {
+		if p == "" {
+			continue
+		}
+		if _, err := os.Stat(p); err == nil {
+			return p
+		}
+	}
+	if explicit {
+		for _, p := range candidates {
+			if p != "" {
+				return p
+			}
+		}
+	}
+	return filepath.Join(dataDir, ConfigFileName)
+}
+
+// withoutDevNull drops the /dev/null pseudo-config (11_config_cli.md §3.1, §6.1)
+// from a save target's candidates.
+func withoutDevNull(candidates []string) []string {
+	out := make([]string, 0, len(candidates))
+	for _, p := range candidates {
+		if p == DevNullConfigPath {
+			continue
+		}
+		out = append(out, p)
+	}
+	return out
+}
+
 // SaveSetupValidated writes write but validates validate. The admin page uses
 // it when a value is EFFECTIVE but not in the file (environment or flags): the
 // document on disk keeps the file's bytes (the env secret is not silently
 // persisted), while the check is run on the configuration that will actually
 // take effect. A file that relies on the environment stays exactly that; an
 // invalid effective config is still refused.
+//
+// It writes the data-dir default target; use SaveSetupTo to write the file a
+// process loaded (the admin save path).
 func SaveSetupValidated(write, validate *Config, dataDir string) (string, error) {
+	return SaveSetupTo(filepath.Join(dataDir, ConfigFileName), write, validate)
+}
+
+// SaveSetupTo is SaveSetupValidated for an explicit target path: the file the
+// running process loaded (the loader's first existing candidate, or the
+// first-run default — see SaveTargetPath). The temporary file and the backup
+// live beside the TARGET, so the rename stays atomic on that filesystem and an
+// operator finds spindle.toml.bak-<utc> next to the file that was rewritten.
+// The target's directory is created when missing (the first-run save).
+func SaveSetupTo(path string, write, validate *Config) (string, error) {
 	if err := ValidateForSave(validate); err != nil {
 		return "", err
 	}
-	c := write
-	if err := EnsureDataDir(dataDir); err != nil {
-		return "", fmt.Errorf("create data dir: %w", err)
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		return "", fmt.Errorf("create config dir: %w", err)
 	}
-	body, err := MarshalTOML(c)
+	body, err := MarshalTOML(write)
 	if err != nil {
 		return "", fmt.Errorf("marshal config: %w", err)
 	}
-	path := filepath.Join(dataDir, ConfigFileName)
 	backup, rewrite, err := backupBeforeRewrite(path, body)
 	if err != nil {
 		return "", err
@@ -175,7 +254,7 @@ func SaveSetupValidated(write, validate *Config, dataDir string) (string, error)
 	if !rewrite {
 		return "", nil // byte-identical: nothing to write, nothing to keep
 	}
-	tmpPath := filepath.Join(dataDir, "spindle.toml.tmp")
+	tmpPath := path + ".tmp"
 	if err := writeFileSync(tmpPath, body); err != nil {
 		os.Remove(tmpPath)
 		return "", fmt.Errorf("write config: %w", err)
@@ -217,7 +296,7 @@ func backupBeforeRewrite(path string, body []byte) (name string, rewrite bool, e
 	if prior, _ := filepath.Glob(path + ".bak-*"); len(prior) > 0 {
 		return "", true, nil // the operator's original text is already preserved
 	}
-	name = ConfigFileName + ".bak-" + time.Now().UTC().Format("20060102T150405Z")
+	name = filepath.Base(path) + ".bak-" + time.Now().UTC().Format("20060102T150405Z")
 	backupPath := filepath.Join(filepath.Dir(path), name)
 	if err := writeFileSync(backupPath, cur); err != nil {
 		return "", false, fmt.Errorf("write config backup: %w", err)

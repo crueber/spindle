@@ -120,7 +120,7 @@ func (h *Handler) post(w http.ResponseWriter, r *http.Request) {
 		writePlain(w, http.StatusServiceUnavailable, "import service not configured")
 		return
 	}
-	params, token, perr := ParseRequest(body, h.svcCfg())
+	params, token, perr := ParseRequest(body, h.svcCfg(), h.svcLive())
 	if perr != nil {
 		writeStatusErr(w, perr)
 		return
@@ -164,6 +164,15 @@ func (h *Handler) svcCfg() *config.Config {
 		return nil
 	}
 	return h.Svc.cfg
+}
+
+// svcLive returns the live [import] policy holder (nil when unwired, which
+// leaves ParseRequest on the startup snapshot).
+func (h *Handler) svcLive() *config.LiveImport {
+	if h.Svc == nil {
+		return nil
+	}
+	return h.Svc.live
 }
 
 // --- GET /repos/imports/{id} -------------------------------------------------------------

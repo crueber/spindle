@@ -25,6 +25,12 @@ type Env struct {
 	// reachable, so the area nav must not offer the read-only pages.
 	Restricted bool
 
+	// LiveImport is the process's live [import] SSRF policy. The Import page
+	// gates through it (config.ImportPolicy) so a policy saved on
+	// /admin/config applies to the next request instead of the next restart;
+	// nil keeps the Cfg snapshot (tests, unwired boots).
+	LiveImport *config.LiveImport
+
 	// Now is the clock (tests override it). nil → time.Now.
 	Now func() time.Time
 }

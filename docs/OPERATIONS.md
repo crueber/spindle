@@ -94,14 +94,21 @@ plus the redirect URI with a copy button.
   issuer's discovery document, checks the issuer matches and the endpoints are
   present, then fetches `jwks_uri` and requires at least one usable `RS256`/`ES256`
   signing key.
-- **Save** validates the shape and writes `<data-dir>/spindle.toml`. It **never
-  contacts the IdP**: recovery must not depend on the thing being recovered. Use
-  Test first.
+- **Save** validates the shape and writes the config file this process **loaded** —
+  `<data-dir>/spindle.toml` on a default boot, or the explicit
+  `--config`/`SPINDLE_CONFIG`/`WALGIT_CONFIG` file when one was named (and
+  `<data-dir>/walgit.toml` if that alias is the loaded file). The page names the
+  resolved path above the TOML disclosure and the saved banner repeats it, so
+  there is never a question of which file changed. It **never contacts the IdP**:
+  recovery must not depend on the thing being recovered. Use Test first.
 
 ### 2.4 Save, restart, normal boot
 
-A save never restarts the process. After a successful save the page reports
-**Restart required** with the keys that changed (§3.7), and you restart:
+A save never restarts the process, and it writes the file this process loaded
+(the page names that absolute path). After a successful save the page reports
+**Restart required** with the keys that changed (§3.7); the live keys — including
+the import SSRF policy — have already taken effect, so you restart only for the
+keys it lists:
 
 - compose: **Administration → Maintenance → Restart**, or `docker compose restart`;
 - systemd or another supervisor: restart the unit/task;
@@ -116,8 +123,9 @@ mints a session cookie carrying the verified groups. If the group intersects
 `admin_groups`, the Administration link appears and `/admin` answers; otherwise
 `/admin` answers the designed denied view (401 signed out, 403 non-admin).
 
-The first save that rewrites an existing config keeps a
-`spindle.toml.bak-<utc>` copy beside it — a save-time undo buffer, not a backup
+The first save that rewrites an existing config keeps a `<file>.bak-<utc>` copy
+beside it (`spindle.toml.bak-<utc>` for the default file; beside the explicit
+`--config` file when one was loaded) — a save-time undo buffer, not a backup
 (it lives on the same disk). An unchanged save writes nothing at all.
 
 ### 2.5 Group claim semantics and staleness
@@ -251,10 +259,19 @@ page first, filterable by action, actor, repository and time window.
 A save **never restarts the process**. After it, the page reports **Restart
 required** with the exact keys that changed, each linking to its row (the server
 list is authoritative). Almost every key is consumed once at startup; the live
-keys take effect immediately:
+keys take effect immediately and therefore never appear in that list:
 
 `telemetry.log_format`, `telemetry.log_filter`, `maintenance.interval`,
-`maintenance.follow_interval`, `wal.freshness_ttl`.
+`maintenance.follow_interval`, `wal.freshness_ttl`, and the import/mirror egress
+policy — `import.allow_private_networks`, `import.url_allowlist`,
+`import.allow_file_urls`.
+
+The import policy is one policy read at each import: saving it on
+Configuration applies to the Import page, the import API and the mirror /
+push-mirror / fork-sync creation paths **on the next request**. If the Import page
+still refuses a source as private after a save, check *which* file the save wrote
+(the page names it) and whether a `SPINDLE__IMPORT__*` environment override is
+masking it — an env-supplied value wins over the file, at save time as at boot.
 
 **Maintenance → Restart** asks for a typed confirmation (the word `restart`), is
 audited (`admin_restart`), and then exits the process so its supervisor starts it

@@ -411,6 +411,20 @@ clean.
   dangerous checkbox (DNS-TOCTOU + redirect-following help text) wired through `imports.start()`.
 - **Setup [import] section (fix #23):** the Administration area exposes all eight `[import]` keys
   (url_allowlist, timeouts, caps, SSRF bools) with spec-spelling examples; fail-closed defaults unchanged.
+- **The SSRF policy takes effect on save, not on restart (2026-11-25).** `allow_private_networks`,
+  `url_allowlist` and `allow_file_urls` are read at each import request, so the admin save publishes the
+  saved section to `config.LiveImport` and every gate resolves `config.ImportPolicy(live, startupCfg)`:
+  the Import page (`internal/webui/forms.go`), `repoimport.ParseRequest` (the JSON API and the page's
+  one-shot path), and the mirror / push-mirror / fork-sync creation and sync paths. The publish reapplies
+  the `import.*` env overlay, so `SPINDLE__IMPORT__*` still wins over the file. The three keys are
+  read-live in `config.readLiveKeys`, so `setup.RestartKeys` drops them from the restart card. Before
+  this, a successful save left the Import page answering `source host "…" resolves to a private address
+  (import.allow_private_networks=false)` until the process restarted — the operator read that as "it
+  isn't saving". Caps and timeouts stay construction snapshots (restart-required). Gates:
+  `TestAdminSavePublishesLiveImportPolicy` / `TestAdminSaveLiveImportRespectsEnvironment`
+  (`cmd/spindle`), `TestPublishFileSaveEnvironmentWins` (`internal/config`), `TestParseRequestReadsLivePolicy`
+  (`internal/repoimport`), `TestFormsImportMirrorSSRFReadsLivePolicy` (`internal/webui`), and the e2e
+  `TestImportPolicySaveAppliesWithoutRestart`.
 - **`import.max_bytes` compiled default equals
   `server.max_push_bytes`' compiled default (64 GiB)** rather than a
   dynamic follow — visible in `config dump`/admin/config; operators

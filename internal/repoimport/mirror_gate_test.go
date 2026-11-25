@@ -18,7 +18,7 @@ func mirrorGateParams(t *testing.T, svc *Service, owner, name string) Params {
 	raw, _ := json.Marshal(map[string]any{
 		"source_url": "file://" + t.TempDir(), "owner": owner, "name": name,
 	})
-	params, _, err := ParseRequest(raw, svc.cfg)
+	params, _, err := ParseRequest(raw, svc.cfg, nil)
 	if err != nil {
 		t.Fatalf("parse: %v", err)
 	}

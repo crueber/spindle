@@ -101,7 +101,12 @@ type importRequest struct {
 // evaluated here for the SSRF shape only — its AUTHORITY (authenticated
 // admin principal) is enforced by the Begin gate, since this function has
 // no principal (fix #237).
-func ParseRequest(body []byte, cfg *config.Config) (Params, string, error) {
+//
+// cfg is the startup snapshot and live is the process's live [import] policy
+// holder (nil when unwired, e.g. the one-shot CLI): the gate reads
+// config.ImportPolicy(live, cfg), so an admin save of the SSRF policy applies
+// to the very next request instead of the next restart.
+func ParseRequest(body []byte, cfg *config.Config, live *config.LiveImport) (Params, string, error) {
 	var raw map[string]json.RawMessage
 	if err := json.Unmarshal(body, &raw); err != nil {
 		return Params{}, "", &StatusError{Status: 400, Message: "invalid JSON body"}
@@ -136,12 +141,7 @@ func ParseRequest(body []byte, cfg *config.Config) (Params, string, error) {
 	if cfg == nil {
 		cfg = config.Defaults()
 	}
-	if err := CheckSSRF(n, SSRFConfig{
-		AllowPrivate: cfg.Import.AllowPrivateNetworks,
-		Allowlist:    cfg.Import.URLAllowlist,
-		AllowFile:    cfg.Import.AllowFileURLs,
-		Dangerous:    in.Dangerous,
-	}, resolveHost); err != nil {
+	if err := CheckSSRF(n, SSRFPolicy(config.ImportPolicy(live, cfg), in.Dangerous), resolveHost); err != nil {
 		return Params{}, "", err
 	}
 	format := strings.ToLower(strings.TrimSpace(in.Format))

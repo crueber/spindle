@@ -69,7 +69,7 @@ Back up the two non-store items beside the archive while it is stopped:
 cp -p /var/lib/spindle/spindle.toml /var/lib/spindle/ssh/ed25519_host_key /backup/
 ```
 
-(The Configuration page's automatic `spindle.toml.bak-<utc>` is a save-time
+(The Configuration page's automatic `<file>.bak-<utc>` — `spindle.toml.bak-<utc>` for the default file — is a save-time
 undo buffer, not a backup: it lives on the same disk.)
 
 The script is `tar -C <store> -cpzf`, i.e. an ordinary archive: any `tar`/`rsync`

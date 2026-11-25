@@ -35,7 +35,7 @@ const pushMirrorLoopInterval = time.Minute
 // process from buildCollab — one block for this package). apiEnv may be
 // nil in tests that only need the push path (the summary hook is
 // skipped then).
-func newPushMirrorService(st store.ObjectStore, reg *wal.Registry, cfg *config.Config, apiEnv *api.Env) (*pushmirror.Service, *pushmirror.Handler) {
+func newPushMirrorService(st store.ObjectStore, reg *wal.Registry, cfg *config.Config, apiEnv *api.Env, live *config.LiveImport) (*pushmirror.Service, *pushmirror.Handler) {
 	pushmirror.RegisterKind(pushmirror.KindPushMirrorSync)
 	api.RegisterExposed(pushmirror.ExposedTemplates...)
 	svc := pushmirror.New(pushmirror.Deps{
@@ -51,6 +51,9 @@ func newPushMirrorService(st store.ObjectStore, reg *wal.Registry, cfg *config.C
 		AllowPrivate: cfg.Import.AllowPrivateNetworks,
 		Allowlist:    cfg.Import.URLAllowlist,
 		AllowFile:    cfg.Import.AllowFileURLs,
+		// The live policy overrides the snapshot above once wired: the gate
+		// reads it per request/sync, so an admin save applies immediately.
+		LiveImport: live,
 	})
 	h := &pushmirror.Handler{Svc: svc}
 	if apiEnv != nil {

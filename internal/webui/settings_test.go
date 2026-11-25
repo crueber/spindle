@@ -371,6 +371,46 @@ func TestAdminConfigSaveSuccessRedirectsWithRestartKeys(t *testing.T) {
 	settingsMustContain(t, rec.Body.String(), "cache.max_bytes", "saved page restart keys")
 }
 
+// TestAdminConfigSaveNamesWrittenFile: the save's own answer (AdminSaveResult.Path)
+// reaches the operator twice — the redirect carries it and the saved page names it.
+// "Written to <data-dir>/spindle.toml" was a lie under an explicit --config.
+func TestAdminConfigSaveNamesWrittenFile(t *testing.T) {
+	const target = "/etc/spindle/spindle.toml"
+	f := &settingsFakes{deps: testDeps{
+		ConfigView: func(context.Context) (*AdminConfigView, error) {
+			v := adminFakeView()
+			v.SavePath = target
+			return v, nil
+		},
+		Save: func(context.Context, map[string]string) (AdminSaveResult, []AdminError, error) {
+			return AdminSaveResult{Saved: true, Path: target}, nil, nil
+		},
+	}}
+	s := newSettingsServer(t, f)
+
+	// The Configuration page names the file Save writes before any save.
+	rec := settingsDo(t, s, http.MethodGet, "/admin/config", nil, nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET /admin/config = %d", rec.Code)
+	}
+	settingsMustContain(t, rec.Body.String(), target, "configuration page")
+
+	rec = settingsDo(t, s, http.MethodPost, "/admin/config", url.Values{"op": {"save"}}, nil)
+	if rec.Code != http.StatusSeeOther {
+		t.Fatalf("POST = %d, want 303 (%s)", rec.Code, rec.Body.String())
+	}
+	loc := rec.Header().Get("Location")
+	settingsMustContain(t, loc, "path="+url.QueryEscape(target), "redirect path")
+	rec = settingsDo(t, s, http.MethodGet, loc, nil, nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET %s = %d", loc, rec.Code)
+	}
+	body := rec.Body.String()
+	settingsMustContain(t, body, "Written to", "saved banner")
+	settingsMustContain(t, body, target, "saved banner path")
+	settingsMustNotContain(t, body, "&lt;data-dir&gt;/spindle.toml", "saved banner fallback copy")
+}
+
 func TestAdminConfigValidationErrorReRendersTypedValues(t *testing.T) {
 	errs := []AdminError{{Key: "server.request_timeout", Message: "server.request_timeout: not a duration"}}
 	f := &settingsFakes{deps: testDeps{
