@@ -127,7 +127,7 @@ func TestBlobEditAffordance(t *testing.T) {
 	if strings.Contains(body, "/edit/main/docs/guide.md") || !strings.Contains(body, "binary file") {
 		t.Fatalf("binary page affordance wrong")
 	}
-	// Anonymous in token mode: the interstitial, not a dead link.
+	// Anonymous: the interstitial, not a dead link.
 	f.view.blob.Binary = false
 	f.principal = auth.Anonymous()
 	body = f.getStatus("/acme/widgets/blob/main/docs/guide.md", http.StatusOK)
@@ -216,7 +216,7 @@ func TestEditorRefusals(t *testing.T) {
 }
 
 func TestEditorGates(t *testing.T) {
-	// Anonymous viewer in token mode is redirected to the interstitial.
+	// An anonymous viewer is redirected to the interstitial.
 	f := newEditFixture(t, auth.Anonymous())
 	rec := f.get("/acme/widgets/edit/main/docs/guide.md")
 	if rec.Code != http.StatusSeeOther || !strings.Contains(rec.Header().Get("Location"), "/login-required") {
@@ -367,7 +367,7 @@ func TestEditorRouteErrors(t *testing.T) {
 func TestEditPostGates(t *testing.T) {
 	form := url.Values{"mode": {"edit"}, "ref": {"main"}, "path": {"docs/guide.md"},
 		"message": {"m"}, "content": {"x"}, "expected_blob_sha": {editSHA}, "action": {"save"}}
-	// Anonymous viewer in token mode: interstitial.
+	// An anonymous viewer: interstitial.
 	f := newEditFixture(t, auth.Anonymous())
 	if rec := f.post("/acme/widgets/contents", form); rec.Code != http.StatusSeeOther ||
 		!strings.Contains(rec.Header().Get("Location"), "/login-required") {

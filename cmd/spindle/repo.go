@@ -3,6 +3,7 @@ package main
 
 import (
 	"context"
+	"flag"
 	"fmt"
 	"os"
 	"sort"
@@ -161,21 +162,42 @@ func runRepoInfo(ctx context.Context, c *cli, args []string) int {
 
 // ---- repo policy ----------------------------------------------------------------
 
+// repoPolicyFlags declares `repo policy`'s flags; the -h path and the command
+// share it so help cannot drift from what the command parses.
+func repoPolicyFlags(fs *flag.FlagSet) *string {
+	return fs.String("file", "", "policy.json path (set)")
+}
+
+// repoPolicyHelp prints the family usage + flags for `repo policy -h` (the
+// subcommand token is optional, so there is no FlagSet name to borrow).
+func repoPolicyHelp(c *cli) int {
+	fs := newFlagSet("repo policy get|set|clear")
+	repoPolicyFlags(fs)
+	fs.SetOutput(c.stderr())
+	fs.Usage()
+	return exitOK
+}
+
 func runRepoPolicy(ctx context.Context, c *cli, args []string) int {
 	if len(args) == 0 {
 		fmt.Fprintln(os.Stderr, "usage: spindle repo policy get|set --file F|clear <OWNER/REPO>")
 		return exitArg
 	}
+	if args[0] == "-h" || args[0] == "--help" {
+		return repoPolicyHelp(c)
+	}
 	sub, rest := args[0], args[1:]
-	_, st, cleanup := openEngine(ctx, c)
-	defer cleanup()
 	fs := newFlagSet("repo policy " + sub)
-	file := fs.String("file", "", "policy.json path (set)")
+	file := repoPolicyFlags(fs)
 	positional := mustParse(fs, rest)
 	if len(positional) != 1 {
 		fmt.Fprintln(os.Stderr, "usage: spindle repo policy get|set --file F|clear <OWNER/REPO>")
 		return exitArg
 	}
+	// Open the store only after argv is valid, so `-h` never resolves the config
+	// or touches the bucket (help wins over work).
+	_, st, cleanup := openEngine(ctx, c)
+	defer cleanup()
 	owner, name, ok := splitRepo(positional[0])
 	if !ok {
 		fmt.Fprintf(os.Stderr, "spindle: invalid repo id %q\n", positional[0])
@@ -227,16 +249,35 @@ func runRepoPolicy(ctx context.Context, c *cli, args []string) int {
 
 // ---- repo settings (D24) ----------------------------------------------------------
 
+// repoSettingsFlags declares `repo settings`'s flags; the -h path and the
+// command share it so help cannot drift from what the command parses.
+func repoSettingsFlags(fs *flag.FlagSet) (file, msg *string, effective *bool) {
+	file = fs.String("file", "", "settings TOML path (set)")
+	msg = fs.String("m", "", "change message")
+	effective = fs.Bool("effective", false, "print the merged host+repo config (show)")
+	return file, msg, effective
+}
+
+// repoSettingsHelp prints the family usage + flags for `repo settings -h`.
+func repoSettingsHelp(c *cli) int {
+	fs := newFlagSet("repo settings show|set|clear|history")
+	repoSettingsFlags(fs)
+	fs.SetOutput(c.stderr())
+	fs.Usage()
+	return exitOK
+}
+
 func runRepoSettings(ctx context.Context, c *cli, args []string) int {
 	if len(args) == 0 {
 		fmt.Fprintln(os.Stderr, "usage: spindle repo settings show [--effective]|set --file F [-m MSG]|clear|history <OWNER/REPO>")
 		return exitArg
 	}
+	if args[0] == "-h" || args[0] == "--help" {
+		return repoSettingsHelp(c)
+	}
 	sub, rest := args[0], args[1:]
 	fs := newFlagSet("repo settings " + sub)
-	file := fs.String("file", "", "settings TOML path (set)")
-	msg := fs.String("m", "", "change message")
-	effective := fs.Bool("effective", false, "print the merged host+repo config (show)")
+	file, msg, effective := repoSettingsFlags(fs)
 	positional := mustParse(fs, rest)
 	if len(positional) != 1 {
 		fmt.Fprintln(os.Stderr, "usage: spindle repo settings show|set|clear|history <OWNER/REPO>")

@@ -153,7 +153,7 @@ func runWalShow(ctx context.Context, c *cli, args []string) int {
 }
 
 func runWalMaterialize(ctx context.Context, c *cli, args []string) int {
-	return notImplemented("wal materialize")
+	return notImplemented(c, "wal materialize")
 }
 
 func runWalAddPack(ctx context.Context, c *cli, args []string) int {

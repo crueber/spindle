@@ -1319,17 +1319,27 @@ type modView struct {
 // cannot prove visible.
 func (s *Service) moderationView(ctx context.Context, owner, repo string, num int, p auth.Principal) (modView, error) {
 	mv := modView{hidden: map[string]HiddenInfo{}, reveal: s.canSeeHidden(ctx, owner, repo, p)}
+	if err := s.foldModeration(ctx, owner, repo, num, &mv); err != nil {
+		return modView{}, err
+	}
+	return mv, nil
+}
+
+// foldModeration is the one Snapshot read both the page/JSON projection and
+// the read-only search projection fold into their view. The caller owns the
+// reveal arm; search always leaves it false (search_read.go).
+func (s *Service) foldModeration(ctx context.Context, owner, repo string, num int, mv *modView) error {
 	if s.Moderation == nil {
-		return mv, nil
+		return nil
 	}
 	locked, mode, reason, rev, err := s.Moderation.Snapshot(ctx, owner, repo, num, func(target, by, at, why string) {
 		mv.hidden[target] = HiddenInfo{By: by, At: at, Reason: why}
 	})
 	if err != nil {
-		return modView{}, fmt.Errorf("moderation unavailable: %v", err)
+		return fmt.Errorf("moderation unavailable: %v", err)
 	}
 	mv.locked, mv.mode, mv.reason, mv.rev = locked, mode, reason, rev
-	return mv, nil
+	return nil
 }
 
 // canSeeHidden is the projection's role question: moderators (triage+) get

@@ -49,6 +49,7 @@ to install, schedule or keep in sync.
 | **CI** | Threads: workflows in `.spindle/workflows/`, container jobs with services, `needs:`, matrices and concurrency groups, checks that gate merges, SSE logs, scoped job tokens, deployment approvals |
 | **Registry** | an OCI registry per repository at `/v2`: `docker push <host>/<owner>/<repo>:1.4.2` — pull uses the read gate, push is the same gate as `git push` |
 | **Static sites** | a repository's committed tree served read-only at `<site-host>/{owner}/{repo}/…` by a second, cookie-less listener: no build step, Pages-style resolution, public repositories only (`[static_sites]` host, per-repo `[static_site]`) |
+| **Search** | `git grep` at a resolved commit on the serving copy (no index): code search in one repository or across an owner's readable repositories, plus issue/PR titles, labels and bodies with moderation redaction — through `/{o}/{r}/api/search`, `/api/v1/search`, both search pages and `spindle search` |
 | **API and UI** | a JSON API with SSE, the dependency-free `repos.js` SDK, and a server-rendered htmx UI |
 
 **Administration is OIDC and nothing else.** Any OpenID Connect issuer; your identity provider's groups decide who
@@ -187,7 +188,7 @@ Full manual: [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md) · the laws and field le
 
 | Doc | Holds |
 |---|---|
-| [docs/FEATURES.md](docs/FEATURES.md) | What ships: git, collaboration, Threads CI, the OCI registry, static sites, the API and the UI. |
+| [docs/FEATURES.md](docs/FEATURES.md) | What ships: git, collaboration, Threads CI, the OCI registry, static sites, search, the API and the UI. |
 | [docs/DEPLOY.md](docs/DEPLOY.md) | Images, compose (filesystem and S3), SSH, listeners, TLS at the proxy, configuration, troubleshooting. |
 | [docs/OPERATIONS.md](docs/OPERATIONS.md) | First run, OIDC, the Administration area, configuration and restart keys, tokens, runners. |
 | [docs/CLI.md](docs/CLI.md) | Every command, flag, repo selector and exit code. |

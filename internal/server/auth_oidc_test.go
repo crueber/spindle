@@ -85,7 +85,7 @@ func oidcStateNext(s *Server, loc string) (string, bool) {
 }
 
 func TestOIDCFlowDisabled501(t *testing.T) {
-	_, h := newTestServer(t, nil) // token mode: browser login disabled
+	_, h := newTestServer(t, nil) // no OIDC config: browser login disabled
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, httptest.NewRequest("GET", "http://x/_auth/login", nil))
 	if rec.Code != http.StatusNotImplemented {

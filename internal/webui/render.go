@@ -15,6 +15,7 @@ import (
 	"regexp"
 	"strings"
 
+	"github.com/crueber/spindle/internal/cachepolicy"
 	"github.com/crueber/spindle/internal/httpsec"
 	"github.com/crueber/spindle/internal/server/auth"
 )
@@ -144,15 +145,20 @@ func (s *Server) render(w http.ResponseWriter, r *http.Request, status int, name
 	httpsec.Apply(h)
 	h.Set("Content-Type", "text/html; charset=utf-8")
 	// Authenticated page bodies must never enter a shared cache. A page that
-	// owns a tighter class (the audit viewer's no-store) sets it before the
-	// render and keeps it.
+	// owns a tighter class (the audit viewer's and the search pages' no-store)
+	// sets it before the render and keeps it.
 	if h.Get("Cache-Control") == "" {
 		h.Set("Cache-Control", "no-cache, private")
 	}
-	h.Set("ETag", etag)
-	if inm := r.Header.Get("If-None-Match"); inm != "" && strings.Contains(inm, etag) {
-		w.WriteHeader(http.StatusNotModified)
-		return
+	// A no-store body has no revalidation story, so it carries no ETag: a
+	// conditional request could otherwise confirm a stale principal's answer
+	// (20_search.md §8, §12.11). cachepolicy.NoStore is the one such class.
+	if h.Get("Cache-Control") != cachepolicy.NoStore {
+		h.Set("ETag", etag)
+		if inm := r.Header.Get("If-None-Match"); inm != "" && strings.Contains(inm, etag) {
+			w.WriteHeader(http.StatusNotModified)
+			return
+		}
 	}
 	w.WriteHeader(status)
 	if r.Method != http.MethodHead {

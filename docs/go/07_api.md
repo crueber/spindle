@@ -107,6 +107,10 @@ GET …/ops                      → {available:[OpSpec], recent:[TaskRecord], b
 POST …/ops/{op}                → SSE attach (tasks, §10)
 GET …/tasks                    → {hostname, running:[TaskRecord], recent:[TaskRecord]} (no-store)
 GET …/tasks/{id}               → TaskRecord JSON, or SSE attach with `Accept: text/event-stream`
+GET …/search?q=&type=&ref=&regex=&case=&word=&path=&limit=
+      → SearchEnvelope (§9.13; no-store, no ETag)
+GET /api/v1/search?q=&owner=&type=&regex=&case=&word=&path=&limit=
+      → SearchEnvelope, owner scope (§9.13; no-store, no ETag)
 ```
 
 Lane note: every repo-scoped path above exists under both `/{o}/{r}/api/…` and
@@ -124,6 +128,14 @@ routes directly — so twins would widen the browser-lane (cookie) surface for n
 | **sha-addressed** (full 40/64-hex in the `{sha}`/`{rev}` position): `tree/{sha}/…`, `blob/{sha}/…`, `commits?ref={sha}`, `commit/{sha}` | `Cache-Control: private, max-age=31536000, immutable` |
 | **ref-dependent**: `owners*`, `refs*`, `resolve`, and any tree/blob/commits/commit addressed by a NAME | `Cache-Control: private, max-age=0, stale-while-revalidate=60` + `ETag: "<resolved sha>"` + `If-None-Match` → `304` |
 | **mutable collab** (issue #280) + the repo summary (Forgejo #381) + the repos/detailed listing (Forgejo #384) + the owner profile (Forgejo #385): any GET whose resource can change via a direct user action — issue/PR threads (`ETag: "v<version>"`), social counters, single/latest/list releases, the pull view, identity profiles/orgs/teams/invites/access docs,    the repo summary (visibility, open counts, checks existence, description, mirror state all mutate with no ref movement), the repos/detailed rows (visibility, mirror + mirror_upstream mutate with no ref movement; the ETag is a content hash over the rendered rows), and the owner profile (display name, location, timezone, bio all PUT-editable with no ref movement; the ETag is a content hash over the served doc) | `Cache-Control: private, no-cache` + the existing version ETag + `If-None-Match` → `304` |
+
+- **No-store class** (Forgejo #382's `cachepolicy.NoStore`): the code-search
+  responses (`…/search` and `/api/v1/search`, `20_search.md` §6) are
+  principal-, ref- and query-dependent, so they carry `Cache-Control: no-store`
+  (the shared `cachepolicy.NoStore` value; no-store forbids every cache) and
+  **no** ETag. There is no revalidating or shared form of this
+  response: one principal's match list must never be revalidated or reused for
+  another.
 
 - Mutability, not addressability, decides the class: SWR's stale-serve window is for content whose
   staleness is bounded by ref movement (refs move rarely; seconds-old is fine). User-mutable state
@@ -875,6 +887,60 @@ they are repo-scoped JSON routes on both lanes.
 Every response is `no-store`, errors plain text. The templates route serves the cached projection only;
 discovery runs on the push path, so a composer request never shells out to git (law 6).
 
+### 9.13 Search — `GET …/api/search` and `GET /api/v1/search` (Feature 20, frozen P0)
+
+Normative design: `docs/features/20_search.md` §6. Engine argv: `04_git.md` §17. The wire shape is frozen
+here so P2/P3 implement against it; the field semantics (`complete`, `truncated`, `timed_out`, `status`)
+are the completeness contract, not optional decoration.
+
+```
+GET /{owner}/{repo}/api/search            (+ api-browser twin)
+GET /api/v1/search                        (+ api-browser/v1 twin; owner required in v1)
+query: q (required) type=code|issues|all (default code on repo, issues globally)
+       ref= (repo only) regex=0|1 case=0|1 word=0|1 path=… (repeatable ≤8)
+       limit=1..200 (default 100) owner= (global, required)
+```
+
+```json
+{
+  "query": "func main",
+  "type": "code",
+  "options": {"regex": false, "case_sensitive": false, "word": false, "paths": [], "limit": 100},
+  "scope": {"kind": "repo", "owner": "acme", "repo": "app"},
+  "code": {
+    "complete": true,
+    "repos_considered": 1,
+    "repos_searched": 1,
+    "results": [{
+      "repo": "acme/app", "ref": "main", "sha": "<40/64 hex>",
+      "status": "ok", "complete": true, "truncated": false, "timed_out": false,
+      "match_count": 2, "file_count": 2,
+      "files": [{"path": "cmd/app/main.go",
+                 "matches": [{"line": 12, "column": 6, "text": "func main() {"}]}]
+    }]
+  }
+}
+```
+
+- `status` ∈ `ok | not_warm | not_searched | failed`; a non-`ok` entry carries a neutral `reason`.
+  `not_warm`/`not_searched`/`failed` never turn a whole owner-scope request into an error, and no denied
+  repository appears in any result or count.
+- `complete` (section and per repository), `truncated` and `timed_out` are always present: every cap,
+  timeout and cold state is a field (law 7). Per-file truncation folds into the repository-level
+  `truncated`.
+- `type:issues|all` adds `"issues": {complete, scanned:{threads, events, index_complete}, hits:[{repo,
+  num, kind, title, state, author, labels, updated_at, matched, url}]}`; unrequested sections are omitted,
+  never `null`, and arrays are `[]`.
+- `scope` is `{kind:"repo"|"owner", owner, repo?}`. Every match link is built from the resolved `sha`.
+- `Cache-Control: no-store`, no ETag (§4). Errors are plain text per §2; the mapping table is
+  `20_search.md` §10 (400 shape failures, 401/403/503 from the identity gate, 404 unknown repo/ref, 503
+  cold/remote or an unexpected grep failure).
+- Discovery: the two canonical templates are route-table rows with `Expose` (`/api/v1/search` and
+  `/{owner}/{repo}/api/search`), so the table-derived discovery lists them; the api-browser twins
+  share the handlers and add no entry. (P0 wrote "composition calls `api.RegisterExposed`" on the
+  assumption the routes would live in a feature package; they are core `internal/api` rows, and the
+  table is that mechanism's one source — decision below.)
+
 ## 10. Policy endpoints (§14 semantics)
 
 - `GET …/policy` → the policy JSON document (§14.1 envelope); missing file = allow-all: emit
@@ -1481,3 +1547,22 @@ listings (§8), never from the status code. Nil `Access` → legacy flag-only ga
   FailureNeverEchoesToken` asserts a failed response contains no submitted
   token. Setup secrets already behaved this way (mask, overwrite-only); this
   closes the one page that echoed a credential.
+- **NEW (2026-11-25) — search is a `no-store` surface with a completeness
+  contract (§9.13, `docs/features/20_search.md`).** Search responses are
+  principal-, ref- and query-dependent, so they join `cachepolicy.NoStore`
+  and carry no ETag: revalidation or a shared cache would leak one
+  principal's match list to another. Every degradation is a field
+  (`complete`, `truncated`, `timed_out`, `status`) because a silently short
+  result reads as "search is broken" (law 7); owner scope reports a
+  per-repository `not_warm`/`not_searched`/`failed` instead of failing 49
+  good answers because one repository is cold. The shape is frozen in P0 so
+  the service (P2) and the API/CLI/SDK (P3) implement one contract.
+- **NEW (2026-11-25) — the search routes are core table rows, discovered
+  through `Expose` (P3).** The P0 note expected composition to call
+  `api.RegisterExposed`; P3 put the handlers in `internal/api` (the service in
+  `internal/search` owns no HTTP), so the canonical rows carry
+  `Template`/`Expose` and discovery derives from the table, exactly like
+  every other core endpoint. The api-browser twins share the handler pointers
+  and add no entry. Rationale: one route table, one discovery source — a
+  second registry for routes the table already serves would be the phantom
+  class `TestExposedCoversRoutes` exists to prevent.

@@ -4,8 +4,8 @@ package server
 // binary on both transports: the repo-scoped push rule (and auto-create
 // admission) over real pushes, plus the #345 read alignment on the fetch
 // side. In-process server (memory store + real WAL engine + real identity
-// service, token mode) driven by git over HTTP (httptest) and SSH
-// (loopback). Push denials assert hard failure; the named message is
+// service, static-token credentials) driven by git over HTTP (httptest) and
+// SSH (loopback). Push denials assert hard failure; the named message is
 // asserted on ls-remote (HTTP discovery) and on push stderr (SSH), where
 // git surfaces it — the POST body itself only needs to fail.
 
@@ -71,8 +71,8 @@ func e2eAuthHdr(token string) []string {
 
 // pushGuardStack boots the shipped-shape stack for the e2e: real engine +
 // real identity wired as BOTH the read gate (#345) and the push gate
-// (#347), token mode with two host writers (alice, mallory — NEITHER a
-// host admin, so every allow below comes from repo-scoped rights).
+// (#347), static-token credentials with two host writers (alice, mallory —
+// NEITHER a host admin, so every allow below comes from repo-scoped rights).
 func pushGuardStack(t *testing.T, mutate func(*config.Config)) (*Server, *identity.Service) {
 	t.Helper()
 	cfg := walTestCfg(t)

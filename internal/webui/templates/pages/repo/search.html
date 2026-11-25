@@ -1,0 +1,17 @@
+{{define "content"}}
+<div class="repo-shell">
+  {{template "repo_header" .Data.Repo}}
+  {{template "repo_tabs" .Data.Repo}}
+  {{template "repo_degraded" .Data.Repo}}
+
+  {{/* The masthead owns the page's one h1 (the repository); the search title is
+       an h2 under it, exactly like every other repo-scoped page that carries a
+       body heading (blob's filename, a PR's title). */}}
+  <div class="mb-3 flex flex-wrap items-baseline gap-x-3 gap-y-1">
+    <h2 class="text-xl font-semibold tracking-tight">Search <span class="font-mono text-[var(--pd-text-2)]">{{.Data.Repo.Full}}</span></h2>
+    {{if .Data.Query}}<span class="font-mono text-[11px] text-[var(--pd-muted)]">for <span class="text-[var(--pd-text)]">{{.Data.Query}}</span></span>{{end}}
+  </div>
+
+  {{template "search_body" .Data}}
+</div>
+{{end}}

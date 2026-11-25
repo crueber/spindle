@@ -252,7 +252,7 @@ The attach is structural, not per-template:
 - The active tab is derived from the request path by `repoTabSection` (`/{o}/{r}/<first segment>`), so a
   handler never restates its section: `issues|labels|milestones → Issues`, `pulls|pull → Pulls`,
   `checks|check → Checks`, `releases|release → Releases`, `packages → Packages`, `wal|settings → Settings`,
-  `tree|blob|blame|branches → Code`, `commits|commit|compare → Commits`. A feature-disabled tab re-highlights onto Code (#522); `/forks` and
+  `tree|blob|blame|branches|search → Code`, `commits|commit|compare → Commits`. A feature-disabled tab re-highlights onto Code (#522); `/forks` and
   `/fork` are masthead affordances, not tabs, and keep Code current.
 - Exceptions, by design: the repo group's own pages (tree/blob/blame/commits/commit/wal) include the
   partials inside their `content` and leave `PageData.Repo` nil (one masthead, not two), and the collab
@@ -263,6 +263,17 @@ Testing: `repo_chrome_test.go` is table-driven over every repo-scoped page famil
 pages, settings tabs, repo forms) asserting exactly one masthead, the tab strip, and the current tab;
 plus the reverse (the Code pages keep exactly one) and the gate (a denied request carries no chrome and
 no repository metadata).
+
+**Code search (Feature 20, frozen P0 — `docs/features/20_search.md` §7).** The masthead carries a
+compact, native search form (`<form role="search" method="get" action="/{o}/{r}/search">` with a single
+`q` input and a plain `.btn` submit) beside the repository title: it is the entry point to
+`/{owner}/{repo}/search`, and at ~390 px it wraps below the title without panning. The box is chrome,
+so it is built by the one `pageRepo` render path like every other masthead control; it never becomes a
+tab, the one-amber-CTA rule counts it as a secondary (the page's own submit stays the one
+`.btn.primary`), and there is deliberately **no masthead/global search box** (no owner context implies
+instance-wide code search, which implies an index — `20_search.md` §12.6). A repo whose search is
+unavailable (cold or remote-served) still renders the box; the reason is discovered on submit, not
+guessed.
 
 ### 2.2.2 Settings tabs: one partial per tab
 
@@ -323,7 +334,8 @@ Read pages (`GET`): `/`, `/explore`, `/how-it-works`, `/api`, `/new`, `/import`,
 `/admin/maintenance`, `/admin/directory`, `/admin/reports`, `/admin/audit`, `/admin/runners`, `/{owner}`, `/{owner}/repositories`,
 `/{owner}/organizations`, `/{owner}/starred`, `/{owner}/settings`, `/{owner}/teams/{slug}`, `/{owner}/{repo}` (code),
 `/tree[/{path}]`, `/blob/{path}`, `/blame/{ref}/{path}`, `/branches`, `/compare/{base}...{head}`,
-`/commits`, `/commit/{sha}`, `/wal`, `/insights`, `/issues`, `/issues/{num}`,
+`/commits`, `/commit/{sha}`, `/wal`, `/insights`, `/search` (owner-scope, non-repo),
+`/{owner}/{repo}/search` (repo search — Feature 20), `/issues`, `/issues/{num}`,
 `/pulls`, `/pull/{num}` (+ `/commits`, `/files`), `/checks`, `/checks/{sha}`, `/threads`,
 `/threads/{run}`, `/releases`, `/releases/{tag}`, `/packages`, `/forks`, `/labels`, `/milestones`,
 `/settings[/{tab}]`, `/fork`, `/issues/new`, `/pulls/new`, `/releases/new`, and the browser editor's
@@ -369,6 +381,23 @@ window"), never empty charts. The gate is the Code page's (`repoGate` + `repoOpe
 a 404) and the cache key is repo-scoped. The refresh form (write floor) POSTs to
 `/{o}/{r}/insights/refresh`, which starts/joins the `insights-refresh` task and 303s back; the page
 never runs git or LISTs.
+
+**Search pages (`internal/webui/search.go`, Feature 20 — frozen P0, `docs/features/20_search.md` §7).**
+`/{owner}/{repo}/search` is a repository-chrome page with exactly one `h1` (the shared repository
+masthead; the page title "Search acme/app" is an `h2` under it, like every other repo-scoped body
+heading — `20_search.md` §12.14), a native
+`role="search"` GET form (`q`; Code/Issues/All tabs; a `<details>` "Options" with ref, case, regex, word
+and path), results grouped by file with `path:line` links to
+`/{o}/{r}/blob/{sha}/{path}#L{line}`, the matched span wrapped in `<mark>` by the server renderer (plain
+text, `html/template`-escaped — never `template.HTML`), and a `role="status"` count line that states
+every cap ("showing the first 200 matches; refine the query"). Each non-`ok` repository status renders
+its own notice (warming, not cached, not searched, failed) — never a silently short list. The gate is
+the Code page's `repoGate`/`repoVisible` (an invisible repository is a 404 page; the API keeps 401/403),
+the active tab is Code (§2.2.1), and the page needs no JavaScript (a GET form is native; htmx is not
+used). `/search?q=&owner=` is the non-repository owner-scope page (`gated()` —
+`anonymous_read` applies); without `owner` it explains that v1 needs an owner and links to the
+repository picker instead of searching the instance. Both pages share one results partial
+(`partials/search_results.html`); the submit is the page's one `.btn.primary`.
 
 The Threads pages (`internal/webui/threads.go`, docs/features/15 §6.1) render newest-first with a
 cursor "Older" link, run duration, and a **Workflows** section listing every discovered workflow file
@@ -682,7 +711,7 @@ var web embed.FS   // dist/app.css, dist/ui.js, dist/htmx*.js, dist/repos.js, di
 |---|---|
 | `/_ui/assets/*` (content-hashed, immutable) | `Cache-Control: public, max-age=31536000, immutable` |
 | `/_ui/app.css`, `/_ui/ui.js`, `/_ui/htmx.min.js` (stable names) | `Cache-Control: no-cache` + strong ETag |
-| every rendered page | `Cache-Control: no-cache` + strong ETag (a deploy is visible on the next request) |
+| every rendered page | `Cache-Control: no-cache` + strong ETag (a deploy is visible on the next request); the search pages and the audit viewer are the no-store exception (no ETag — a principal/query-dependent body) |
 | `/repos.js` (SDK) | `Cache-Control: no-cache` + ETag; module MIME is load-bearing |
 
 Compression: `gzip` via server middleware for text assets (`text/*`, `application/javascript`,
@@ -1287,11 +1316,10 @@ the effects are DOM refetches, not client caches.
   already reads. (c) `web/dist/htmx-ext-sse.js` (removed with D-WEB-14) can no
   longer ship: `build:vendor` deletes it, `make web` and the Dockerfile assert
   its absence, and `web/embed_test.go` walks the embedded dist in `go test`.
-  The `/admin/config` denied card is mode-aware (F1): token mode offers the
-  `POST /_auth/token` paste form when a `session_secret` exists, otherwise the
-  file/API recovery — never the OIDC-trio explanation on a token host — and
-  the inline submit is a secondary `.btn` so the header Login stays the page's
-  single amber action.
+  The `/admin/config` denied card is OIDC-only: it explains the configured
+  admin group plus the file/env recovery (the F1 mode-aware paste form is
+  history — PLAN-OIDC-ONLY), and the inline submit is a secondary `.btn` so
+  the header Login stays the page's single amber action.
 - **FIXED (2026-11-21) — rendered markdown fills its card (the 72ch cap is
   gone).** `.markdown-body` (`web/src/app.css`) carried `max-width: 72ch`, the
   last carry-over of design proposal B's reading measure. Measured in

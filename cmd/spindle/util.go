@@ -17,7 +17,7 @@ func newFlagSet(name string) *flag.FlagSet {
 	fs := flag.NewFlagSet(name, flag.ContinueOnError)
 	fs.SetOutput(os.Stderr)
 	fs.Usage = func() {
-		fmt.Fprintf(os.Stderr, "usage: spindle %s [flags]\n\nflags:\n", name)
+		fmt.Fprintf(fs.Output(), "usage: spindle %s [flags]\n\nflags:\n", name)
 		fs.PrintDefaults()
 	}
 	return fs

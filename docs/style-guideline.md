@@ -501,8 +501,9 @@ for instance-scoped pages. One shell (`partials/admin_shell.html`) composes ever
   editable keys, `.empty-state` for an honest "nothing configured", and exactly one
   `.btn.primary` per page **only when the page has a real primary action** — the Overview's
   is the first-run checklist CTA; Access/Maintenance (read views) have none.
-- **Denied** is a designed view (`admin-denied`), never a bare 403: mode-specific recovery
-  copy plus, in token mode, the paste form.
+- **Denied** is a designed view (`admin-denied`), never a bare 403: the OIDC
+  admin-group recovery copy plus, for a signed-in non-admin, their own verified
+  groups (self-diagnosis) and the file/env recovery verbatim.
 
 ## 4. Popovers
 

@@ -4,9 +4,8 @@
      all-read are POST forms (303 back with the filter preserved).
      The per-user SSE stream is an ISLAND: this page emits the contract hooks
      only (data-sse*) — no EventSource here, no client data layer. A signed-out
-     caller never reaches this branch (the handler answers 401); auth none
-     renders the shared identity notice. 390px: rows wrap, the header controls
-     wrap, the row title truncates. */}}
+     caller never reaches this branch (the handler answers 401). 390px: rows
+     wrap, the header controls wrap, the row title truncates. */}}
 <section class="notifications-page mx-auto max-w-3xl" data-sse="notifications" data-sse-url="/api/v1/notifications/stream" data-sse-mode="invalidate">
   <header class="mb-3 flex flex-wrap items-center gap-2 border-b border-[var(--pd-line)] pb-3">
     <p class="eyebrow w-full">inbox</p>

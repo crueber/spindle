@@ -4,7 +4,7 @@ package server
 // transports: the repo-scoped write rule (owner / org-attached /
 // explicitly bound / admin) at receive-pack dispatch, and the #346
 // admission for auto-create, against a REAL identity.Service (real P6
-// resolution, no stub gates) with token-mode auth.
+// resolution, no stub gates) with static-token credentials.
 //
 // Cell legend: alice = org owner (write flag, NO host admin — the bypass
 // must not decide her cell); bob = org member + team write binding (host

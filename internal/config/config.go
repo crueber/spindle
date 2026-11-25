@@ -390,6 +390,39 @@ type RateLimit struct {
 	TrustProxy bool `toml:"trust_proxy"`
 }
 
+// Search is the code-search surface (docs/features/20_search.md §5.2).
+// Additive section (14_extensibility.md §14.12). Two operator-only keys: every
+// other cap (pattern bytes, pathspecs, matches, bytes, deadlines, candidate
+// and worker counts) is a package constant in internal/search, promoted to a
+// config key only when an operator actually hits it. There is deliberately no
+// internal/setup schema row beyond what reflection already produces from this
+// struct: these are operator knobs, documented in 11_config_cli.md.
+type Search struct {
+	// Enabled turns the search routes on. It is a *bool so the JSON/TOML
+	// round trip can distinguish "absent" from an explicit false, and an
+	// absent key means enabled (the compiled default is true): search is part
+	// of the ordinary read surface, and only an explicit `enabled = false`
+	// turns it off. Use IsEnabled, never a nil dereference.
+	Enabled *bool `toml:"enabled"`
+	// MaxConcurrent bounds concurrent searches per instance (default 2; 0 =
+	// the default; 1..SearchMaxConcurrent). A single search can fan out to
+	// four workers, so this is the bound that keeps one public repository from
+	// turning a stranger's query into a CPU monopsony (20_search.md §11).
+	MaxConcurrent int `toml:"max_concurrent"`
+}
+
+// IsEnabled reports the effective search flag: nil means enabled.
+func (s Search) IsEnabled() bool { return s.Enabled == nil || *s.Enabled }
+
+// SearchMaxConcurrent is the validation ceiling for [search] max_concurrent.
+// Each concurrent search can hold up to four grep workers and a scan-pool
+// slot, so the ceiling is about protecting clone/upload-pack CPU, not a
+// capacity figure (20_search.md §11).
+const SearchMaxConcurrent = 16
+
+// Bool returns a pointer to v (the *bool spelling config fields use).
+func Bool(v bool) *bool { return &v }
+
 // Packages bounds the OCI registry (docs/features/14 §5): one blob upload cap,
 // one manifest cap, the chunked-upload staging TTL the maintainer sweep
 // honours, and the instance default per-repository byte quota. Additive
@@ -480,6 +513,7 @@ type Config struct {
 	Webedit     Webedit     `toml:"webedit"`
 	StaticSites StaticSites `toml:"static_sites"`
 	RateLimit   RateLimit   `toml:"rate_limit"`
+	Search      Search      `toml:"search"`
 
 	// DataDir is the zero-config root (divergence D5): --data-dir / SPINDLE_DATA_DIR,
 	// default ~/.local/share/spindle. Holds store/, cache/, and the saved spindle.toml.
@@ -685,6 +719,15 @@ func Defaults() *Config {
 			Report:      "5/h",
 			AuthFail:    "10/min",
 			TrustProxy:  false,
+		},
+		Search: Search{
+			// Enabled is compiled-in true (docs/features/20_search.md §5.2):
+			// search is a read of the serving copy, needs no new bucket key
+			// and no index, so a zero-config boot keeps the ordinary surface.
+			// The pointer is set (not nil) so the Configuration page renders
+			// the switch as on and a save writes the explicit value.
+			Enabled:       Bool(true),
+			MaxConcurrent: 2,
 		},
 	}
 }

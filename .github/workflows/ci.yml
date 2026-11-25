@@ -1,8 +1,9 @@
 name: CI
 # Installed by the publish flow (scripts/publish/ci.yml). Same gate as the development
 # repository: web build + headless JS tests, vet, race, the ≥95 % per-package coverage
-# gate, e2e against the real git binary, the filesystem contract, and the S3 contract
-# against a rustfs service.
+# gate, e2e against the real git binary, the filesystem contract, the S3 contract
+# against a rustfs service, and the rendered accessibility floor (make a11y) driven by
+# a real browser.
 on:
   push:
     branches: [main]
@@ -78,6 +79,68 @@ jobs:
         run: make e2e
       - name: store contract — memory + filesystem (always)
         run: make contract
+
+  a11y:
+    # The rendered accessibility floor (AGENTS.md §2, docs/go/15_testing.md §6.6): the
+    # real binary driven through headless Chromium over CDP across the fixed page set at
+    # 390 px and desktop. Its own job because it needs a browser; after the gate so a
+    # red gate does not pay for one. This is the same tier the development gate runs —
+    # `make a11y` with SPINDLE_A11Y=1, where a missing or broken browser is a FAILURE,
+    # never a skip (internal/e2e/a11y_test.go TestA11yPreflight).
+    runs-on: ubuntu-latest
+    needs: gate
+    env:
+      SPINDLE_A11Y: "1"
+      # Name the binary instead of relying on the PATH probe: the fix must be visible
+      # in this file, not inferred from the runner image.
+      SPINDLE_CHROMIUM: /usr/bin/google-chrome-stable
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: web/pnpm-lock.yaml
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: git >= 2.47
+        # The e2e harness asserts a modern git before it drives the pages
+        # (requireModernGit); the stock runner image is older than that.
+        run: |
+          sudo add-apt-repository -y ppa:git-core/ppa
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq git
+          git --version
+      - name: Chromium (the browser the floor needs)
+        # The development gate installs Debian's `chromium` into a job container. A
+        # hosted GitHub runner is an Ubuntu 24.04 VM, where `chromium` is only a snap
+        # stub that cannot start in CI; Google Chrome is a Chromium build and speaks
+        # the same DevTools protocol surface the test drives (`make a11y` also probes
+        # google-chrome-stable on PATH). Install it from Google's apt repository so the
+        # browser is provisioned by this job, not assumed from the image. No
+        # SPINDLE_CHROMIUM_NO_SANDBOX here: that exists because a job container has no
+        # user namespaces; the VM runs the browser with its sandbox on.
+        run: |
+          sudo install -d -m 0755 /etc/apt/keyrings
+          curl -fsSL https://dl.google.com/linux/linux_signing_key.pub \
+            | sudo gpg --batch --yes --dearmor -o /etc/apt/keyrings/google-chrome.gpg
+          echo "deb [arch=amd64 signed-by=/etc/apt/keyrings/google-chrome.gpg] https://dl.google.com/linux/chrome/deb/ stable main" \
+            | sudo tee /etc/apt/sources.list.d/google-chrome.list >/dev/null
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq --no-install-recommends google-chrome-stable fonts-dejavu-core
+          google-chrome-stable --version
+      - name: build the web once (go:embed all:dist)
+        run: |
+          pnpm --dir web install --frozen-lockfile
+          make web
+          touch web/dist/.keep
+      - name: rendered accessibility smoke (headless Chromium over CDP)
+        run: make -o web a11y
 
   s3-contract:
     runs-on: ubuntu-latest

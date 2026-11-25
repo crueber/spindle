@@ -1071,6 +1071,7 @@ var sectionWhy = map[string]string{
 	"webedit":      "Browser file editing: whether it is offered and the largest file the editor will commit.",
 	"static_sites": "Publishes repositories as static sites on a dedicated listener and hostname — off by default, public repositories only.",
 	"rate_limit":   "Request throttling for collaboration writes, issue/PR opens, reports and failed logins — off by default, enforced in-process, restart-required.",
+	"search":       "Code search over each repository's serving copy — no index and no extra storage; control whether it is offered and how many searches may run at once.",
 }
 
 // adminPrepareField derives the template-facing fields of one row.
@@ -1113,6 +1114,14 @@ func adminPrepareField(f *AdminConfigField) {
 	if f.Secret && f.Value != "" && f.Value != setup.SecretMask {
 		f.Value = setup.SecretMask
 		f.Masked = true
+	}
+	// An unset pointer scalar renders its EFFECTIVE value: a nil *bool means
+	// the compiled default (config.Search.Enabled is nil = enabled), so the
+	// switch must show on with the "default" chip instead of an off switch
+	// labelled "disabled" for something that is enabled. The chip stays
+	// honest because Value == Default (FromFile false) once seeded.
+	if f.Type == "bool" && strings.TrimSpace(f.Value) == "" && strings.TrimSpace(f.Default) != "" {
+		f.Value = f.Default
 	}
 	f.Bool = strings.EqualFold(strings.TrimSpace(f.Value), "true") || strings.TrimSpace(f.Value) == "1"
 	switch f.Type {
@@ -1663,6 +1672,8 @@ var adminFieldMeta = map[string]adminFieldMetaT{"server.listen": {Example: "0.0.
 	"rate_limit.report":                {Example: "5/h", Note: "filing an abuse report"},
 	"rate_limit.auth_fail":             {Example: "10/min", Note: "failed credential attempts per address: once spent, credential-bearing requests answer 429 with Retry-After"},
 	"rate_limit.trust_proxy":           {Type: "bool", Example: "true", Advanced: true, Note: "key anonymous clients on the first X-Forwarded-For hop. Only enable when a reverse proxy in front of spindle overwrites that header; otherwise a client can mint unlimited limiter keys."},
+	"search.enabled":                   {Type: "bool", Example: "true", Note: "on by default: search reads the serving copy and adds no storage. Off answers the search routes as not found."},
+	"search.max_concurrent":            {Example: "2", Note: "concurrent searches per instance (0 = 2, ceiling 16). One search can fan out to four grep workers, so this bounds CPU a public repository can consume."},
 }
 
 // ---------------------------------------------------------------------------

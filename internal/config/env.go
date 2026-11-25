@@ -275,6 +275,22 @@ func applyText(u interface{ UnmarshalText([]byte) error }, val any) error {
 
 func coerceInto(fv reflect.Value, val any, path, raw string) error {
 	switch fv.Kind() {
+	case reflect.Ptr:
+		// Optional scalars ([search] enabled *bool) keep "absent" distinct
+		// from an explicit false; an env overlay assigning the key produces a
+		// pointer (SPINDLE__SEARCH__ENABLED=false must actually disable it,
+		// not fail as an unsupported type).
+		if fv.Type().Elem().Kind() == reflect.Bool {
+			b, ok := val.(bool)
+			if !ok {
+				return typeErr(path, raw, val, "bool")
+			}
+			p := reflect.New(fv.Type().Elem())
+			p.Elem().SetBool(b)
+			fv.Set(p)
+			return nil
+		}
+		return typeErr(path, raw, val, fv.Type().String())
 	case reflect.String:
 		s, ok := val.(string)
 		if !ok {

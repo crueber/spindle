@@ -50,8 +50,9 @@ func openHandle(ctx context.Context, c *cli, repoID string) (*walHandleT, error)
 }
 
 // notImplemented prints the honest esoteric-flow notice (§6.2) and exits 1.
-func notImplemented(flow string) int {
-	fmt.Fprintf(os.Stderr, "spindle: %s: not yet implemented in this build\n", flow)
+// Help for the stub is dispatch's job (`spindle synth -h` never reaches here).
+func notImplemented(c *cli, flow string) int {
+	fmt.Fprintf(c.stderr(), "spindle: %s: not yet implemented in this build\n", flow)
 	return exitErr
 }
 

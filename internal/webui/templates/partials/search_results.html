@@ -1,0 +1,123 @@
+{{define "search_body"}}
+{{$d := .}}
+{{/* One native GET form for both surfaces (20_search.md §7): q, the type
+     choice, and a <details> Options group. No htmx, no client JS; the submit
+     is the page's one .btn.primary. The repo header carries a separate compact
+     box (partials/repo_header.html) whose submit is a plain .btn. */}}
+<form class="card mb-4 p-3" method="get" action="{{.Action}}" role="search" aria-label="Search">
+  <div class="flex flex-wrap items-end gap-2">
+    {{if .OwnerScope}}
+    <div class="min-w-0 flex-1 basis-40">
+      <label class="eyebrow mb-1 block" for="search-owner">Owner</label>
+      <input class="input w-full" id="search-owner" name="owner" type="text" value="{{.Owner}}" placeholder="owner" autocomplete="off" spellcheck="false" maxlength="100">
+    </div>
+    {{end}}
+    <div class="min-w-0 flex-1 basis-48">
+      <label class="eyebrow mb-1 block" for="search-q">Search text</label>
+      <input class="input w-full" id="search-q" name="q" type="search" value="{{.Query}}" placeholder="{{.Placeholder}}" autocomplete="off" spellcheck="false" maxlength="256">
+    </div>
+    <button type="submit" class="btn primary whitespace-nowrap">Search</button>
+    {{if .Queried}}<a class="link inline-flex min-h-6 items-center text-sm" href="{{.ClearHref}}">clear</a>{{end}}
+  </div>
+
+  <fieldset class="mt-3 flex flex-wrap items-center gap-x-4 gap-y-1">
+    <legend class="eyebrow">Search in</legend>
+    <label class="inline-flex min-h-6 items-center gap-1.5 text-sm"><input type="radio" name="type" value="code"{{if eq .Type "code"}} checked{{end}}> Code</label>
+    <label class="inline-flex min-h-6 items-center gap-1.5 text-sm"><input type="radio" name="type" value="issues"{{if eq .Type "issues"}} checked{{end}}> Issues and pulls</label>
+    <label class="inline-flex min-h-6 items-center gap-1.5 text-sm"><input type="radio" name="type" value="all"{{if eq .Type "all"}} checked{{end}}> Both</label>
+  </fieldset>
+
+  <details class="mt-3"{{if .OptionsOpen}} open{{end}}>
+    <summary class="link inline-flex min-h-6 cursor-pointer items-center text-sm">Options</summary>
+    <div class="mt-2 grid grid-cols-1 gap-3 sm:grid-cols-2">
+      {{if not .OwnerScope}}
+      <div class="min-w-0">
+        <label class="eyebrow mb-1 block" for="search-ref">Ref (branch, tag or commit)</label>
+        <input class="input w-full font-mono text-xs" id="search-ref" name="ref" type="text" value="{{.Ref}}" placeholder="{{if .DefaultRef}}{{.DefaultRef}}{{else}}default branch{{end}}" autocomplete="off" spellcheck="false" maxlength="256">
+      </div>
+      {{end}}
+      <div class="flex flex-wrap items-center gap-x-4 gap-y-1 sm:col-span-2">
+        <label class="inline-flex min-h-6 items-center gap-1.5 text-sm"><input type="checkbox" name="regex" value="1"{{if .Regex}} checked{{end}}> Regular expression (POSIX)</label>
+        <label class="inline-flex min-h-6 items-center gap-1.5 text-sm"><input type="checkbox" name="case" value="1"{{if .CaseSensitive}} checked{{end}}> Case-sensitive</label>
+        <label class="inline-flex min-h-6 items-center gap-1.5 text-sm"><input type="checkbox" name="word" value="1"{{if .Word}} checked{{end}}> Whole word</label>
+      </div>
+      <div class="min-w-0 sm:col-span-2">
+        <label class="eyebrow mb-1 block" for="search-path">Path filter (one pathspec per line, at most 8)</label>
+        <textarea class="input w-full font-mono text-xs" id="search-path" name="path" rows="2" spellcheck="false" placeholder="cmd/">{{.PathsText}}</textarea>
+      </div>
+    </div>
+    <p class="muted mt-1 text-[11px]">Case-insensitive matching is ASCII-only; use case-sensitive for non-ASCII variants. A leading <code class="mono">:</code>, <code class="mono">!</code> or <code class="mono">^</code> is rejected because it changes what the pathspec means.</p>
+  </details>
+</form>
+
+{{if .Error}}<p class="err-line mb-3" role="alert">{{.Error}}</p>{{end}}
+{{if .Notice}}<p class="muted mb-3 text-sm">{{.Notice}}</p>{{end}}
+
+{{if .Queried}}
+<div class="mb-2 flex flex-wrap items-baseline gap-x-3 gap-y-1">
+  <h2 class="text-lg font-semibold">Results</h2>
+  <p class="font-mono text-[11px] text-[var(--pd-muted)]" role="status">{{.StatusLine}}</p>
+</div>
+{{if .IncompleteNotice}}<p class="warn-line mb-3">{{.IncompleteNotice}}</p>{{end}}
+{{with .Code}}
+{{if .Note}}<p class="muted mb-2 text-sm">{{.Note}}</p>{{end}}
+{{range .Repos}}{{template "search_repo" .}}{{end}}
+{{end}}
+{{with .Issues}}{{template "search_issues" .}}{{end}}
+{{end}}
+{{end}}
+
+{{define "search_repo"}}
+{{/* One repository's answer. The heading names the repository on the owner
+     surface; in repository scope the section is simply the file list. */}}
+<section class="mb-4" aria-label="Results in {{.Repo}}">
+  <div class="mb-1 flex flex-wrap items-baseline gap-x-2 gap-y-1">
+    <h3 class="text-sm font-semibold"><a class="link mono break-all" href="/{{.Repo}}">{{.Repo}}</a></h3>
+    {{if .Chip}}<span class="{{.ChipClass}}">{{.Chip}}</span>{{end}}
+    {{if .Meta}}<span class="font-mono text-[11px] text-[var(--pd-muted)]">{{.Meta}}</span>{{end}}
+    {{if and (not .Chip) .FileCount}}<span class="font-mono text-[11px] text-[var(--pd-muted)]">{{.MatchCount}} {{plural .MatchCount "match" "matches"}} in {{.FileCount}} {{plural .FileCount "file" "files"}}</span>{{end}}
+  </div>
+  {{if .Notice}}<p class="warn-line mb-2">{{.Notice}}</p>{{end}}
+  {{range .Files}}{{$file := .}}
+  <div class="card mb-2 overflow-hidden">
+    <div class="flex flex-wrap items-baseline gap-x-2 border-b border-[var(--pd-line)] px-3 py-1.5">
+      <h4 class="min-w-0 font-mono text-xs font-semibold"><a class="link break-all" href="{{$file.Href}}">{{$file.Path}}</a></h4>
+      <span class="font-mono text-[11px] text-[var(--pd-muted)]">{{len $file.Matches}} {{plural (len $file.Matches) "match" "matches"}}</span>
+    </div>
+    <ul class="divide-y divide-[var(--pd-line)]">
+      {{range .Matches}}
+      <li class="flex min-w-0 items-baseline gap-2 px-3 py-1">
+        <a class="inline-flex min-h-6 shrink-0 items-center font-mono text-[11px] text-[var(--pd-muted)] hover:text-[var(--pd-text)]" href="{{$file.Href}}#L{{.Line}}" aria-label="Line {{.Line}}, column {{.Column}}" title="Line {{.Line}}, column {{.Column}}">L{{.Line}}{{if .Column}}:{{.Column}}{{end}}</a>
+        <code class="min-w-0 flex-1 overflow-x-auto whitespace-pre font-mono text-xs">{{if .HasMark}}{{.Before}}<mark class="rounded-sm bg-[var(--pd-sel)] px-0.5 text-[var(--pd-text)]">{{.Mark}}</mark>{{.After}}{{else}}{{.Text}}{{end}}</code>
+      </li>
+      {{end}}
+    </ul>
+  </div>
+  {{end}}
+</section>
+{{end}}
+
+{{define "search_issues"}}
+<section class="mb-4" aria-labelledby="search-issue-results">
+  <div class="mb-1 flex flex-wrap items-baseline gap-x-2 gap-y-1">
+    <h3 class="text-sm font-semibold" id="search-issue-results">Issues and pull requests</h3>
+    <span class="font-mono text-[11px] text-[var(--pd-muted)]">{{.StatusLine}}</span>
+  </div>
+  {{if .Notice}}<p class="warn-line mb-2">{{.Notice}}</p>{{end}}
+  {{if .Hits}}
+  <ul class="card divide-y divide-[var(--pd-line)]">
+    {{range .Hits}}
+    <li class="flex min-w-0 flex-wrap items-baseline gap-x-2 gap-y-1 px-3 py-2">
+      <a class="link min-w-0 font-medium break-words" href="{{.URL}}">{{.Repo}}#{{.Num}} {{.Title}}</a>
+      <span class="chip">{{.Kind}}</span>
+      <span class="{{.StateClass}}">{{.State}}</span>
+      {{range .Labels}}<span class="chip chip-neutral">{{.}}</span>{{end}}
+      <span class="font-mono text-[11px] text-[var(--pd-muted)]">matched {{.Matched}}{{if .Author}} · by {{.Author}}{{end}}</span>
+    </li>
+    {{end}}
+  </ul>
+  {{else}}
+  <p class="muted text-sm">No issue or pull-request matches.</p>
+  {{end}}
+</section>
+{{end}}

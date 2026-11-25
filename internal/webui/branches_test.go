@@ -201,7 +201,7 @@ func TestRepoBranchCreateGates(t *testing.T) {
 		t.Fatalf("reader create = %d", rec.Code)
 	}
 
-	// Anonymous in token mode: the login interstitial (303), never a write.
+	// Anonymous: the login interstitial (303), never a write.
 	g := parityServer(t, "token", auth.Anonymous(), w.deps())
 	g.view.branches = branchOverview()
 	rec = parityPost(t, g, "/demo/spindle/branches", url.Values{"name": {"x"}}, nil)
@@ -264,7 +264,7 @@ func TestRepoBranchDeleteWrites(t *testing.T) {
 }
 
 func TestRepoBranchesAnonWriteLink(t *testing.T) {
-	// In token mode an anonymous reader sees the sign-in link, not a form.
+	// An anonymous reader sees the sign-in link, not a form.
 	f := parityServer(t, "token", auth.Anonymous(), (&branchWrites{}).deps())
 	f.view.branches = branchOverview()
 	body := f.mustGet("/demo/spindle/branches", http.StatusOK)

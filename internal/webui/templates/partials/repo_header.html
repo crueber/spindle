@@ -20,6 +20,17 @@
       {{end}}{{end}}
       {{if .MirrorBadge}}<span class="chip-neutral" title="{{.MirrorTitle}}">{{.MirrorBadge}}</span>{{end}}
       {{if .PushMirrorBadge}}<span class="chip-neutral" title="{{.PushMirrorTitle}}">{{.PushMirrorBadge}}</span>{{end}}
+      {{/* Code search entry point (docs/features/20_search.md §7.3): a compact
+           native GET form beside the repository title. It is chrome — a plain
+           .btn submit, never the page's amber primary — and it stays visible
+           when search is unavailable (the reason is discovered on submit).
+           At ~390px it takes its own full-width line under the title, so the
+           masthead never pans. */}}
+      <form class="mt-1 flex w-full min-w-0 items-center gap-1.5 sm:mt-0 sm:ml-auto sm:w-64 sm:shrink-0" method="get" action="/{{.Full}}/search" role="search" aria-label="Search this repository">
+        <label class="sr-only" for="repo-search-q">Search this repository</label>
+        <input class="input min-w-0 flex-1 text-xs" id="repo-search-q" name="q" type="search" placeholder="search code…" autocomplete="off" spellcheck="false" maxlength="256">
+        <button type="submit" class="btn whitespace-nowrap">Search</button>
+      </form>
     </div>
     {{with .ForkSync}}
     <div class="mt-1.5 flex flex-wrap items-center gap-2 text-[11px] {{if .Failed}}text-[var(--pd-danger)]{{else if .Diverged}}text-[var(--pd-warn)]{{else}}text-[var(--pd-muted)]{{end}}" role="status">

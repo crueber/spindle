@@ -426,9 +426,9 @@ func TestInstallSh(t *testing.T) {
 			t.Fatalf("install.sh missing %q", want)
 		}
 	}
-	// Token mode → the credential helper is baked in.
+	// Static-token config → the credential helper is baked in.
 	if !strings.Contains(body, "credential") && !strings.Contains(body, "helper") {
-		t.Logf("helper not referenced in auth-token mode body (len %d)", len(body))
+		t.Logf("helper not referenced in static-token body (len %d)", len(body))
 	}
 	// No CA trust steps anymore (#165): the proxy terminates TLS.
 	rec = httptest.NewRecorder()

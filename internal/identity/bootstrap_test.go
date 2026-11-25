@@ -14,29 +14,67 @@ func TestBootstrap(t *testing.T) {
 	if err != nil || c != 0 || sk != 0 {
 		t.Errorf("empty bootstrap = %d/%d, %v", c, sk, err)
 	}
-	// Two repos via stub lister.
+	// The owner namespaces the sweep must distinguish: an org, a
+	// first-login username (user.json), a profile-only account
+	// (profile.json and no user.json), and a name with no account
+	// trace at all.
+	if _, err := s.ResolveUsername(ctx, "crueber@gmail.com"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.EnsureProfile(ctx, "profileonly"); err != nil {
+		t.Fatal(err)
+	}
+	if !s.userExists(ctx, "profileonly") {
+		t.Fatal("profile-only fixture is not a claimed user")
+	}
+	if meta, err := s.Store.Head(ctx, UserKey("profileonly")); err != nil || meta != nil {
+		t.Fatalf("profile-only fixture must have no user.json: %v %v", meta, err)
+	}
+	if _, err := s.CreateOrg(ctx, "acme", "Acme", "", "owner@example.com"); err != nil {
+		t.Fatal(err)
+	}
+	// Four repos via stub lister.
 	s.Repos = func(ctx context.Context) ([][2]string, error) {
-		return [][2]string{{"acme", "one"}, {"bob", "two"}}, nil
+		return [][2]string{
+			{"acme", "one"},         // org: empty
+			{"crueber", "reg"},      // user.json trace
+			{"profileonly", "solo"}, // profile.json trace
+			{"bob", "two"},          // no trace: empty
+		}, nil
 	}
 	c, sk, err = s.Bootstrap(ctx)
-	if err != nil || c != 2 || sk != 0 {
+	if err != nil || c != 4 || sk != 0 {
 		t.Errorf("bootstrap = %d/%d, %v", c, sk, err)
 	}
-	doc, ver, err := s.GetAccess(ctx, "acme", "one")
-	if err != nil || ver == "" {
-		t.Fatalf("materialized read: %v %q", err, ver)
+	// The materialised docs carry the owner grant exactly for user
+	// namespaces — both trace shapes — and nothing for orgs/unknowns.
+	wantBindings := map[[2]string][]AccessBinding{
+		{"acme", "one"}:         {},
+		{"crueber", "reg"}:      {{Subject: "user:crueber", Role: RoleAdmin}},
+		{"profileonly", "solo"}: {{Subject: "user:profileonly", Role: RoleAdmin}},
+		{"bob", "two"}:          {},
 	}
-	if doc.Version != 1 || doc.Visibility != VisibilityPublic {
-		t.Errorf("materialized doc: %+v", doc)
-	}
-	// Non-email owner namespaces materialize empty bindings (org-owner
-	// resolution covers org repos; host flags still apply per P6 step 3).
-	if len(doc.RoleBindings) != 0 {
-		t.Errorf("materialized bindings: %+v", doc.RoleBindings)
+	for rr, want := range wantBindings {
+		doc, ver, err := s.GetAccess(ctx, rr[0], rr[1])
+		if err != nil || ver == "" {
+			t.Fatalf("%s/%s materialized read: %v %q", rr[0], rr[1], err, ver)
+		}
+		if doc.Version != 1 || doc.Visibility != VisibilityPublic {
+			t.Errorf("%s/%s materialized doc: %+v", rr[0], rr[1], doc)
+		}
+		if len(doc.RoleBindings) != len(want) {
+			t.Errorf("%s/%s bindings = %+v, want %+v", rr[0], rr[1], doc.RoleBindings, want)
+			continue
+		}
+		for i := range want {
+			if doc.RoleBindings[i] != want[i] {
+				t.Errorf("%s/%s binding[%d] = %+v, want %+v", rr[0], rr[1], i, doc.RoleBindings[i], want[i])
+			}
+		}
 	}
 	// Second sweep skips.
 	c, sk, err = s.Bootstrap(ctx)
-	if err != nil || c != 0 || sk != 2 {
+	if err != nil || c != 0 || sk != 4 {
 		t.Errorf("re-sweep = %d/%d, %v", c, sk, err)
 	}
 	// A repo touched by an admin edit is skipped, not clobbered.
@@ -46,7 +84,7 @@ func TestBootstrap(t *testing.T) {
 		t.Fatal(err)
 	}
 	c, sk, err = s.Bootstrap(ctx)
-	if err != nil || c != 0 || sk != 2 {
+	if err != nil || c != 0 || sk != 4 {
 		t.Errorf("post-edit sweep = %d/%d, %v", c, sk, err)
 	}
 	if doc, _, _ := s.GetAccess(ctx, "bob", "two"); doc.Visibility != VisibilityPrivate {

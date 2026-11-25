@@ -11,7 +11,7 @@
 | Kind | Commands | Needs |
 |---|---|---|
 | **Operator-local** | `serve`, `compact`, `bundle`, `repo`, `access`, `wal`, `synth`, `import`, `mirror`, `config`, `doctor`, `version` | the config file / `SPINDLE__*` env and the data dir (store, cache) |
-| **JSON-API client** | `auth`, `user`, `org`, `issue`, `pr`, `release`, `checks`, `packages`, `threads`, `file`, `api` | `--server` and a token; no store access, no data dir |
+| **JSON-API client** | `auth`, `user`, `org`, `issue`, `pr`, `release`, `checks`, `packages`, `threads`, `file`, `search`, `api` | `--server` and a token; no store access, no data dir |
 | **Runner protocol client** | `runner serve` | a runner token and a Docker daemon; no store, no data dir |
 | **Shell plumbing** | `completion`, `help` | nothing (the tables are compiled in) |
 
@@ -19,10 +19,11 @@ The split is deliberate: the API client is built for **machine credentials** (st
 `[[server.auth.tokens]]` rows never administer), and the CLI exposes no admin commands, so
 administration is performed at `/admin` and no CLI command can create or
 revoke a runner token. `runner` sits in the client half of the help table, but it speaks the runner
-protocol rather than the JSON API, so it needs a runner token instead of a user token. Three commands
-are still stubs in this build — `synth`, `mirror`, `wal materialize` and `import --direct` answer
-`not yet implemented in this build` (exit 1); `import` is the supported way to bring an existing
-repository across.
+protocol rather than the JSON API, so it needs a runner token instead of a user token. Four surfaces
+are still stubs in this build: `synth`, `mirror`, `wal materialize` and `import --direct` answer
+`not yet implemented in this build` (exit 1). They stay in the command table, marked `stub` there, and
+each answers `-h`/`--help` with its usage and that stub notice — a command that help lists can always
+explain itself. `import` is the supported way to bring an existing repository across.
 
 ## 2. Global flags and how the target is chosen
 
@@ -108,16 +109,16 @@ not `--strict` was passed.
 | Command | Usage |
 |---|---|
 | `serve` | `spindle [--config PATH] [--data-dir PATH]` — run the server (the default with no subcommand) |
-| `compact` | `compact [REPO\|--all] [--once] [--base]` — one maintenance compaction pass, or the maintainer loop |
-| `bundle run` | `bundle run [--repo ID] [--strategy N]` — build bundle slots due now |
-| `bundle plan` | `bundle plan REPO` — print the slot table |
-| `bundle compose` | `bundle compose REPO [--strategy N]` — build one slot now |
+| `compact` | `compact [--once] [--base]` — one maintenance compaction pass, or the maintainer loop |
+| `bundle run` | `bundle run [--repo ID] [--strategy NAME]` — build bundle slots due now |
+| `bundle plan` | `bundle plan REPO [--json]` — print the slot table |
+| `bundle compose` | `bundle compose REPO [--strategy NAME]` — build one slot now |
 | `bundle rm` | `bundle rm REPO IDS…` — remove bundle entries |
 | `repo create` | `repo create REPO [--object-format sha1\|sha256]` |
 | `repo list` | `repo list [--json]` (JSONL) |
 | `repo info` | `repo info REPO` — manifest stats |
-| `repo policy` | `repo policy get\|set --file F\|clear REPO` — the `policy.json` rule document |
-| `repo settings` | `repo settings show\|set\|clear\|history REPO` — the per-repo settings document |
+| `repo policy` | `repo policy get REPO` / `repo policy set --file F REPO` / `repo policy clear REPO` — the `policy.json` rule document |
+| `repo settings` | `repo settings show [--effective] REPO` / `set --file F [-m MSG] REPO` / `clear REPO` / `history REPO` — the per-repo settings document |
 | `access` | `access get REPO` / `access put --file F REPO` — the `access.json` role bindings |
 | `wal ls` | `wal ls REPO [--from N] [--to N] [--json]` — log table |
 | `wal show` | `wal show REPO SEQ` — one entry, full |
@@ -125,7 +126,9 @@ not `--strict` was passed.
 | `wal add-pack` | `wal add-pack REPO PACK [--tier N] [--history-of CHECKSUM]` — publish an existing pack as a COMPACT entry |
 | `wal annotate-pack` | `wal annotate-pack REPO CHECKSUM [--rev] [--bitmap] [--commit-graph]` |
 | `wal rev-index` | `wal rev-index IDX [--out P]` — write a `.rev` from an `.idx` |
-| `import` | `import [--direct] --from GITDIR owner/name`, or `import --url URL owner/name [--ref REF]… [--refs GLOB]… [--default-branch-only] [--include-pull-heads] [--include-notes] [--token-env VAR] [--format sha1\|sha256] [--dangerous]` |
+| `synth` | *stub in this build* — `synth --out DIR --size s\|m\|l [--seed N]` would generate a deterministic synthetic repo through `git fast-import` |
+| `mirror` | *stub in this build* — `mirror --from URL --to URL --dir PATH` would bridge an external repo through a local bare buffer repo |
+| `import` | `import [--direct] [--reuse-packs] [--refs GLOB]… --from GITDIR owner/name`, or `import [--ref REF]… [--refs GLOB]… [--default-branch-only] [--include-pull-heads] [--include-notes] [--token-env VAR] [--format sha1\|sha256] [--dangerous] --url URL owner/name` |
 | `config check` | `config check [--env-file KEY=VALUE]… [--strict]` — validate file ⊕ env, report ignored overrides |
 | `config dump` | `config dump [--env-file KEY=VALUE]` — print the effective config as TOML |
 | `doctor` | `doctor [--limit N] [--repos N] [--budget N] [--json]` — read-only upgrade readiness (config + a bounded bucket sample) |
@@ -134,7 +137,8 @@ not `--strict` was passed.
 `import` never takes a token on the command line: `--token-env VAR` names the environment variable
 holding it. `--dangerous` is the confirmation for a non-allowlisted, non-GitHub source, and
 `--direct` (bucket-direct striped import) is not built yet: the flag is parsed and exits 1 with
-"not implemented", like the three stub commands above.
+"not implemented", like the three stub commands above. `spindle import -h` prints its usage; the
+stub flag is only reached when it is actually passed.
 
 ### 5.2 API client groups
 
@@ -154,6 +158,7 @@ command's usage line and flags (flags may follow positionals, `gh`-style).
 | `threads` | `list`, `show`, `run`, `cancel`, `rerun` |
 | `file` | `put`, `create`, `delete` (one text file as one commit — the browser editor's write path) |
 | `runner` | `serve` (see [`FEATURES.md`](FEATURES.md#33-runners) and [`threads.md`](threads.md#81-flags-and-environment)) |
+| `search` | `search QUERY [--owner OWNER \| -R OWNER/REPO] [--ref REF] [--regex] [--case] [--word] [--path PATHSPEC]… [--limit N] [--json]` — code search in one repository (the default branch, or `--ref`) or across an owner's readable repositories. It is a standalone command, not a group: `-R`/`SPINDLE_REPO` selects repository scope, `--owner` owner scope, and exactly one is required (v1 has no instance-wide code search). `--limit` is kept matches per repository (1..200). The command pins `type=code`; issue search has no CLI surface yet. |
 | `api` | `api [-X METHOD] [-d DATA] [-H 'K: V'] [-json] PATH` — one authenticated request; `-d` takes a literal, `@FILE` or `-` for stdin |
 | `completion` | `completion bash\|zsh\|fish` — generated from the same dispatch table |
 
@@ -193,6 +198,20 @@ spindle pr merge you/demo 17 --method squash --delete-head --wait
 spindle release create you/demo v1.2.0 --name "v1.2.0" --notes-file CHANGELOG.md
 spindle release upload you/demo v1.2.0 dist/spindle-linux-amd64.tar.gz
 spindle release list you/demo --json
+```
+
+**Search.** `spindle search` is the code-search client (Feature 20); the human output
+prints a per-repository header with its status and match counts, one row per match
+(`path:line:column  text`), and always shows the completeness fields; `--json` prints
+the API envelope unchanged (`query`, `options`, `scope`,
+`code.{complete,repos_considered,repos_searched,results[]}`).
+
+```sh
+spindle search "func main" -R you/demo                 # repository scope, default branch
+spindle search "TODO" -R you/demo --ref release/1.4 --path internal/ --limit 20
+spindle search 'errgroup\..*' --regex --case -R you/demo
+spindle search func --owner you                       # every readable repo under you
+spindle search func --owner you --json
 ```
 
 **Packages.** `docker login/push/pull` is the registry; the CLI reads and prunes it.
@@ -263,14 +282,16 @@ spindle api -H 'Accept: text/event-stream' /you/demo/api/tasks/<id>
 
 ```sh
 spindle help                    # the command table
-spindle <command> --help        # that command's usage line and flags
+spindle help repo               # a family's subcommand table (same as `spindle repo -h`)
+spindle <command> --help        # that command's usage line
 spindle issue --help            # a group's subcommand table
+spindle issue list --help       # that command's usage line and flags
 spindle completion bash         # also: zsh, fish
 ```
 
-`spindle help` and a leading `-h`/`--help` print the global table; `-h` after a command token is
-left to that command, which prints its own usage. Completion (bash, zsh, fish) is generated from the
-same dispatch table, so a new subcommand completes as soon as it exists. Two caveats in this build:
-`serve` starts the server rather than printing help (use `spindle help` for the global table), and
-`repo policy -h` resolves the configuration first, so an invalid config reports its errors (exit 1)
-instead of help.
+A leading `-h`/`--help` (before any command token) prints the global table. After a command token,
+help wins over execution: `serve` prints its usage instead of binding a port, `version` prints usage
+instead of the build identity, and a stub prints usage instead of the "not yet implemented" error.
+Every command and family in the table answers `-h`/`--help`, and `spindle help <topic>` answers the
+same way (an unknown topic exits 2 naming it). Completion (bash, zsh, fish) is generated from the
+same dispatch table, so a new subcommand completes as soon as it exists.

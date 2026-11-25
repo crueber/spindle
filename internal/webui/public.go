@@ -219,6 +219,9 @@ var reservedOwnerNames = map[string]bool{
 	"invitations":    true,
 	"notifications":  true,
 	"login-required": true,
+	// search is the owner-scope search page (Feature 20, §7.2): the literal
+	// route outranks GET /{owner}, so an owner by this name is shadowed.
+	"search": true,
 }
 
 func init() {
@@ -686,8 +689,9 @@ func (s *Server) ownerPageData(w http.ResponseWriter, r *http.Request, owner, vi
 			}
 			if !exists {
 				// A repo owner is an account even without a user.json binding
-				// or a profile doc (a token-mode principal). Only a namespace
-				// with no identity trace AND no repositories is unknown.
+				// or a profile doc (a machine-credential principal that never
+				// touched the web UI). Only a namespace with no identity trace
+				// AND no repositories is unknown.
 				repos, rerr := s.env.API.Repos.Repos(r.Context(), owner)
 				if rerr != nil {
 					s.errorPage(w, r, http.StatusServiceUnavailable, "repository registry unavailable")
@@ -990,8 +994,8 @@ type invitationsData struct {
 //
 // This is an identity-owned page: the API answers 401 for an anonymous caller,
 // so the page does too (never the inbox of the synthetic "anonymous"
-// principal). On an unsecured instance (auth none) there is no identity to own
-// an inbox, so the shared notice points at /admin/config instead of rendering one.
+// principal). There is no authentication-disabled state any more, so a
+// signed-out caller gets that 401 rather than an inbox with no owner.
 // 390px: rows wrap (flex-wrap), the action row wraps.
 func (s *Server) publicInvitations(w http.ResponseWriter, r *http.Request) {
 	p, ok := s.principal(w, r)
@@ -1213,10 +1217,9 @@ type notificationsData struct {
 // (data-sse*) and a placeholder region the island refreshes — no EventSource
 // here.
 //
-// Identity-owned, like /invitations: a signed-out caller under oidc/token gets
-// the API's 401 (never the synthetic "anonymous" tray), and auth none renders
-// the shared notice + /admin path instead of a tray with no owner. 390px: rows
-// wrap, the header controls wrap, the row body truncates instead of panning.
+// Identity-owned, like /invitations: a signed-out caller gets the API's 401
+// (never the synthetic "anonymous" tray). 390px: rows wrap, the header
+// controls wrap, the row body truncates instead of panning.
 func (s *Server) publicNotifications(w http.ResponseWriter, r *http.Request) {
 	p, ok := s.principal(w, r)
 	if !ok {
@@ -1319,13 +1322,10 @@ func (s *Server) publicNotificationState(w http.ResponseWriter, r *http.Request)
 // --- write plumbing ----------------------------------------------------------
 
 // writePrincipal resolves an authenticated principal for a mutation: 401 for
-// anonymous callers (the interstitial is a page, not a write target), 403 for
-// an instance with authentication disabled (auth none — no identity exists to
-// own the write, so the page-level explanation, not a credential request, is
-// the honest answer), and 403 for a cross-origin POST (the same-origin rule
-// every UI mutation carries). A request with neither Origin nor Referer is
-// refused: only a browser attaches them, and a cookie-bearing non-browser
-// client is already a deliberate actor.
+// anonymous callers (the interstitial is a page, not a write target) and 403
+// for a cross-origin POST (the same-origin rule every UI mutation carries). A
+// request with neither Origin nor Referer is refused: only a browser attaches
+// them, and a cookie-bearing non-browser client is already a deliberate actor.
 func (s *Server) writePrincipal(w http.ResponseWriter, r *http.Request) (auth.Principal, bool) {
 	p, ok := s.principal(w, r)
 	if !ok {

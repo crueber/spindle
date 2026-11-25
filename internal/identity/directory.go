@@ -116,9 +116,10 @@ type DirectoryUser struct {
 	Username string
 	// DisplayName is profile.json's display_name ("" when none is set).
 	DisplayName string
-	// Bound is false for a principal that has only a profile (a token-mode
-	// name, a grant subject): it has no sign-in account, so it cannot be
-	// deactivated and the page says so instead of offering the control.
+	// Bound is false for a principal that has only a profile (a grant subject
+	// with no OIDC sign-in, such as a machine credential): it has no sign-in
+	// account, so it cannot be deactivated and the page says so instead of
+	// offering the control.
 	Bound bool
 	// Disabled and its explanation fields mirror user.json.
 	Disabled   bool

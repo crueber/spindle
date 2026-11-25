@@ -25,6 +25,7 @@ func isolateCLI(t *testing.T, server string) *cli {
 	t.Setenv("SPINDLE_SERVER", server)
 	t.Setenv("SPINDLE_TOKEN", "")
 	t.Setenv("WALGIT_TOKEN", "")
+	t.Setenv("SPINDLE_REPO", "")
 	return &cli{}
 }
 

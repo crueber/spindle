@@ -118,6 +118,7 @@ func init() {
 		{"packages", "OCI packages (WP1)", groupRunner(packagesGroup)},
 		{"threads", "CI runs (WP10)", groupRunner(threadsGroup)},
 		{"file", "edit one text file as one commit (the browser editor's path)", groupRunner(fileGroup)},
+		{"search", "search code in a repository or across an owner (API client)", runSearch},
 		{"runner", "Threads runners: serve jobs", groupRunner(runnerGroup)},
 		{"api", "one authenticated API request", runAPI},
 		{"completion", "generate shell completion (bash|zsh|fish)", runCompletion},
@@ -125,29 +126,41 @@ func init() {
 	}
 }
 
-// main dispatches: peel the globals, resolve the subcommand (two-token
-// subcommands consume a second token), run, map errors onto exit codes.
+// main runs the dispatcher and exits with its code.
 func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
+	os.Exit(dispatch(ctx, os.Args[1:], &cli{}))
+}
 
-	c := &cli{}
-	rest := peelGlobals(os.Args[1:], c)
+// dispatch peels the globals, answers help before execution, resolves the
+// subcommand (two-token subcommands consume a second token), runs it, and maps
+// errors onto exit codes.
+func dispatch(ctx context.Context, argv []string, c *cli) int {
+	rest := peelGlobals(argv, c)
 	if len(rest) == 0 {
-		os.Exit(runServe(ctx, c, nil))
+		return runServe(ctx, c, nil)
+	}
+	// Help wins over execution: no -h/--help path starts a server, prints the
+	// build identity or runs a stub. A command that owns a FlagSet answers its
+	// own -h (usage + flags) via its runner, which parses before doing work.
+	if hasHelpFlag(rest) {
+		if handled, code := helpTarget(ctx, c, rest); handled {
+			return code
+		}
 	}
 	// Two-token commands first (bundle/wal/repo/config consume a second token).
 	if len(rest) >= 2 {
 		if cmd := lookup(rest[0] + " " + rest[1]); cmd != nil {
-			os.Exit(cmd.run(ctx, c, rest[2:]))
+			return cmd.run(ctx, c, rest[2:])
 		}
 	}
 	if cmd := lookup(rest[0]); cmd != nil {
-		os.Exit(cmd.run(ctx, c, rest[1:]))
+		return cmd.run(ctx, c, rest[1:])
 	}
-	fmt.Fprintf(os.Stderr, "spindle: unknown command %q\n\n", rest[0])
-	fmt.Fprint(os.Stderr, helpText)
-	os.Exit(exitArg)
+	fmt.Fprintf(c.stderr(), "spindle: unknown command %q\n\n", rest[0])
+	fmt.Fprint(c.stderr(), helpText)
+	return exitArg
 }
 
 func lookup(name string) *command {
@@ -164,22 +177,30 @@ func runVersion(ctx context.Context, c *cli, args []string) int {
 	return exitOK
 }
 
-// runHelp prints the command table (the "spindle help" the usage text names).
+// runHelp prints the command table, or help about the named command, family or
+// group: `spindle help repo` is `spindle repo -h`, flags included.
 func runHelp(ctx context.Context, c *cli, args []string) int {
-	fmt.Fprint(c.stdout(), helpText)
-	return exitOK
+	if len(args) == 0 {
+		fmt.Fprint(c.stdout(), helpText)
+		return exitOK
+	}
+	if handled, code := helpTarget(ctx, c, append(args, "-h")); handled {
+		return code
+	}
+	// A group's subcommand: the group dispatcher prints its usage + flags.
+	if g := groupByName(args[0]); g != nil {
+		return groupRunner(g)(ctx, c, append(args[1:], "-h"))
+	}
+	fmt.Fprintf(c.stderr(), "spindle: help: unknown command %q\n\n", strings.Join(args, " "))
+	fmt.Fprintln(c.stderr(), "Run \"spindle help\" for the command table.")
+	return exitArg
 }
-
-// usageText mirrors the help table above (kept separate so help stays stable).
-var usageText = `Commands:
-  serve | compact | bundle | repo | access | wal | synth | import | mirror | config | doctor | version
-Run "spindle help" or "spindle <command> -h" for details.
-`
 
 // peelGlobals removes --config PATH / --data-dir PATH / --server URL / -R REPO
 // from anywhere in argv (last wins) into c. A `-h`/`--help` BEFORE the first
-// command token prints the global table; after one it is left for that
-// command's own FlagSet, which prints that command's usage and flags.
+// command token prints the global table; after one it stays in the returned
+// argv, where dispatch turns it into that command's (or family's) help before
+// anything runs.
 func peelGlobals(argv []string, c *cli) []string {
 	var rest []string
 	seenCommand := false
@@ -188,7 +209,7 @@ func peelGlobals(argv []string, c *cli) []string {
 		switch arg {
 		case "--help", "-h":
 			if !seenCommand {
-				fmt.Print(helpText)
+				fmt.Fprint(c.stdout(), helpText)
 				os.Exit(exitOK)
 			}
 			rest = append(rest, arg)
@@ -241,29 +262,32 @@ Usage: spindle [--config PATH] [--data-dir PATH] [--server URL] [-R OWNER/REPO] 
 
 Commands:
   serve                                  run the server (default)
-  compact [REPO|--all] [--once] [--base] maintenance compaction pass
-  bundle run [--repo ID] [--strategy N]  build due bundle slots
+  compact [--once] [--base]              maintenance compaction pass
+  bundle run [--repo ID] [--strategy NAME]
+                                         build due bundle slots
   bundle plan REPO                       print the slot table
-  bundle compose REPO [--strategy N]     build one slot now
+  bundle compose REPO [--strategy NAME]  build one slot now
   bundle rm REPO IDS…                    remove bundle entries
   repo create REPO [--object-format F]   register a repository
   repo list                              list repositories
   repo info REPO                         manifest stats
-   repo policy get|set --file F|clear REPO
-   repo settings show|set|clear|history REPO
-   access get REPO | access put --file F REPO
+  repo policy get|set --file F|clear REPO
+  repo settings show|set|clear|history REPO
+  access get REPO | access put --file F REPO
   wal ls REPO [--from N] [--to N]        log table
   wal show REPO SEQ                      one entry, full
   wal materialize REPO --at-seq N --out DIR
+                                         stub: not implemented in this build
   wal add-pack REPO PACK [--tier N]
   wal annotate-pack REPO CHECKSUM [--rev] [--bitmap] [--commit-graph]
   wal rev-index IDX [--out P]
   synth --out DIR --size s|m|l [--seed N]
+                                         stub: not implemented in this build
   import [--direct] --from GITDIR owner/name
   import --url URL owner/name [--ref REF]… [--default-branch-only]
       [--include-pull-heads] [--include-notes] [--token-env VAR]
       [--format sha1|sha256] [--dangerous]
-  mirror --from URL --to URL --dir PATH
+  mirror --from URL --to URL --dir PATH  stub: not implemented in this build
   config check [--env-file PATH]… [--strict]
   config dump
   doctor [--limit N] [--repos N] [--budget N] [--json]
@@ -278,11 +302,15 @@ API client (WP11; --json everywhere, exit 0 ok · 1 error · 2 usage · 3 not fo
   release list|show|create|delete|upload
   checks list|status REPO [REF]
   packages list|show|delete · threads list|show|run · runner serve
+  search QUERY [-R OWNER/REPO | --owner OWNER] [--ref REF] [--regex] [--case]
+      [--word] [--path P]… [--limit N] [--json]   code search
   api [-X METHOD] [-d DATA] [-H 'K: V'] PATH
   completion bash|zsh|fish
   help
 
-Every subcommand answers '--help' with its own usage and flags.
+Every command and family answers '--help' with its own usage: a family prints its
+subcommands, a stub prints its usage and says this build does not implement it.
+"spindle help <command>" prints the same thing; "spindle help" prints this table.
 Repo: the OWNER/REPO positional, or -R OWNER/REPO / SPINDLE_REPO.
 Server/token: --server URL, SPINDLE_SERVER (default http://127.0.0.1:8080),
 SPINDLE_TOKEN, else the "spindle auth login" state file (0600).

@@ -27,9 +27,10 @@ func basicAuth(cred string) string {
 	return base64.StdEncoding.EncodeToString([]byte(cred))
 }
 
-// threadsServer boots the binary in token mode with a secrets key and an
-// anonymous-read public default, on a throwaway data dir. An optional public
-// URL sets server.public_url (the checkout base job containers use).
+// threadsServer boots the binary with an OIDC config (the in-test IdP), a
+// secrets key and an anonymous-read public default, on a throwaway data dir.
+// An optional public URL sets server.public_url (the checkout base job
+// containers use).
 func threadsServer(t *testing.T, publicURL ...string) *e2eServer {
 	t.Helper()
 	bin := buildSpindle(t)

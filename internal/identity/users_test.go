@@ -136,13 +136,27 @@ func TestMatchPrincipal(t *testing.T) {
 }
 
 // TestSynthesizeOwnerUserVsOrg pins the grant boundary: legacy email
-// owners and registry-backed usernames bind; orgs, synthetic names,
-// and unclaimed usernames never do (a user:<orgslug> binding would be
-// a latent grant to whoever later claims that username).
+// owners and claimed usernames bind; orgs, synthetic names, and
+// unclaimed usernames never do (a user:<orgslug> binding would be a
+// latent grant to whoever later claims that username). A claimed
+// username is the ONE accountTrace predicate — user.json (the OIDC
+// registry) OR profile.json (created lazily) — so both trace shapes
+// must synthesise the SAME owner grant.
 func TestSynthesizeOwnerUserVsOrg(t *testing.T) {
 	s := testService()
 	ctx := context.Background()
 	if _, err := s.ResolveUsername(ctx, "crueber@gmail.com"); err != nil {
+		t.Fatal(err)
+	}
+	// Explicit user.json-only account (registry, no profile).
+	if _, err := store.PutBytes(ctx, s.Store, UserKey("registryonly"),
+		[]byte(`{"version":1,"username":"registryonly","email":"reg@example.com"}`),
+		store.PutOptions{Mode: store.PutCreate}); err != nil {
+		t.Fatal(err)
+	}
+	// Profile-only account: no user.json, only the lazily created
+	// profile.json — an account trace in its own right.
+	if _, err := s.EnsureProfile(ctx, "profileonly"); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := s.CreateOrg(ctx, "acme", "Acme", "", "owner@example.com"); err != nil {
@@ -153,17 +167,29 @@ func TestSynthesizeOwnerUserVsOrg(t *testing.T) {
 		bind  bool
 	}{
 		{"crueber@gmail.com", true}, // legacy email owner keeps its grant
-		{"crueber", true},           // registry-backed username binds
+		{"crueber", true},           // first-login username (user.json)
+		{"registryonly", true},      // user.json-only account
+		{"profileonly", true},       // profile-only account
 		{"acme", false},             // org: org-owner resolution covers it
 		{"anon", false},             // synthetic: never bound
 		{"anonymous", false},        // synthetic: never bound
-		{"unclaimed", false},        // no registry entry: foreign namespace
+		{"unclaimed", false},        // no trace at all: foreign namespace
 		{"bad!!principal", false},   // not a principal at all
 	}
 	for _, tc := range cases {
 		doc := s.SynthesizeOwner(ctx, tc.owner)
-		if got := len(doc.RoleBindings) > 0; got != tc.bind {
-			t.Errorf("SynthesizeOwner(%q) bind = %v, want %v (%+v)", tc.owner, got, tc.bind, doc.RoleBindings)
+		if doc.Visibility != VisibilityPublic {
+			t.Errorf("SynthesizeOwner(%q) visibility = %q, want public", tc.owner, doc.Visibility)
+		}
+		if tc.bind {
+			want := AccessBinding{Subject: "user:" + normPrincipal(tc.owner), Role: RoleAdmin}
+			if len(doc.RoleBindings) != 1 || doc.RoleBindings[0] != want {
+				t.Errorf("SynthesizeOwner(%q) bindings = %+v, want [%+v]", tc.owner, doc.RoleBindings, want)
+			}
+			continue
+		}
+		if len(doc.RoleBindings) != 0 {
+			t.Errorf("SynthesizeOwner(%q) bindings = %+v, want none", tc.owner, doc.RoleBindings)
 		}
 	}
 	// The no-store fallback binds legacy emails only (fail closed).
@@ -256,7 +282,8 @@ func TestUserExists(t *testing.T) {
 		t.Fatalf("claimed user = %v, %v", ok, err)
 	}
 	// A lazily created profile (first authenticated access) is also a claim
-	// even without the OIDC username binding (token-mode principals).
+	// even without the OIDC username binding (a grant subject or machine
+	// credential).
 	if ok, err := s.UserExists(ctx, "frank"); err != nil || ok {
 		t.Fatalf("profile-less user = %v, %v", ok, err)
 	}

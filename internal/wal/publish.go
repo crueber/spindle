@@ -984,11 +984,18 @@ func (p *Publisher) commitLocal(ctx context.Context, next *pbManifest, version s
 		p.h.heldRev = next.Revision
 		p.h.freshAt = time.Now()
 	}
-	oldRev := p.h.state.Revision
-	wasReady := p.h.state.PacksReady()
+	// The keep-ready snapshot is taken INSIDE the state write (updateState
+	// holds stateMu): a detached materialize body updates Revision and
+	// PacksRevision under the same lock from another goroutine, so reading
+	// them here (outside it) is a data race — and worse, a torn snapshot could
+	// compare a stale Revision against a fresh PacksRevision, dropping a warm
+	// repository's keep-ready carry. Semantics are unchanged: if the state was
+	// packs-ready at the OLD revision, carry readiness to the new one.
 	set := func(st *RepoState) {
 		st.ManifestVersion = version
 		if applied {
+			oldRev := st.Revision
+			wasReady := st.PacksReady()
 			st.AppliedSeq = next.HeadSeq
 			st.Revision = next.Revision
 			if wasReady && st.PacksRevision == oldRev {

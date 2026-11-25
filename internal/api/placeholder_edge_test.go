@@ -44,7 +44,7 @@ func TestCreateHandlerServeHTTP(t *testing.T) {
 	if w.Code != http.StatusNotFound {
 		t.Fatalf("non-create = %d", w.Code)
 	}
-	// Create path via ServeHTTP → gated (no principal, token mode) → 401
+	// Create path via ServeHTTP → gated (no principal) → 401
 	// (anonymous is unauthenticated — Forgejo #502 — never 403).
 	w = httptest.NewRecorder()
 	r := httptest.NewRequest("POST", "/api/v1/repos", strings.NewReader(`{"owner":"a","name":"b"}`))

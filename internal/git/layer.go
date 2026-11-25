@@ -42,6 +42,7 @@ type Layer struct {
 	Binary      string // git.binary (default "git")
 	Scratch     string // cache.dir root — scratch/follow live under the caller's dirs
 	Pool        *Pool
+	ScanPool    *Pool  // derived pool for long scans (git grep), never Pool — 04_git.md §17.2; nil → package default
 	Version     string // walgit agent version for capability lines
 	MaxWants    int    // git.max_wants; 0 = unlimited
 	Fsck        bool   // wal.fsck_objects
@@ -75,6 +76,7 @@ func NewLayer() *Layer {
 	return &Layer{
 		Binary:      "git",
 		Pool:        NewPool(0),
+		ScanPool:    NewPool(GrepDefaultPoolSize),
 		Version:     "1.0.0",
 		Fsck:        true,
 		Connect:     true,

@@ -180,10 +180,30 @@ func (h *RepoHandle) materialize(ctx context.Context, t *Task, m *pbManifest, lv
 	// NEVER blocked; losing the race leaves the pending list for next sync.
 	h.removeSuperseded()
 
-	// packs_ready bookkeeping.
+	// packs_ready bookkeeping. A serve-level materialize also proves the local
+	// state reflects THIS manifest revision for refs (the refs phase ran
+	// first), so Revision is set alongside PacksRevision. Without it a
+	// repository whose log is empty (a fresh repository, HeadSeq 0) never
+	// applies a delta, so its state Revision stays 0 while PacksRevision
+	// becomes 1 — PacksReady reports false forever and every reader that
+	// gates on local warmth (search's owner scope, 20_search.md §3.1) is told
+	// a fully materialized repository is cold.
+	//
+	// Both counters are FORWARD-ONLY. This body can be the detached,
+	// timeout-continued half of a Sync that already returned (issue #320), so
+	// it may be applying a manifest snapshot (m) older than the state: a
+	// publish meanwhile advanced the state to revision 6 with its keep-ready
+	// rule, and a blind assignment here would write 5 back, leaving
+	// Revision=6 / PacksRevision=5 — a fully warm repository reading cold
+	// forever.
 	if err := h.updateState(func(st *RepoState) {
-		if lvl >= LevelServe && st.PacksRevision != m.Revision {
-			st.PacksRevision = m.Revision
+		if lvl >= LevelServe {
+			if st.PacksRevision < m.Revision {
+				st.PacksRevision = m.Revision
+			}
+			if st.Revision < m.Revision {
+				st.Revision = m.Revision
+			}
 		}
 	}); err != nil {
 		logWarnf("%s: state persist after materialize: %v", h.ID, err)

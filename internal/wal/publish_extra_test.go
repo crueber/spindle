@@ -674,14 +674,16 @@ func TestHandle_PacksReadyLifecycle(t *testing.T) {
 		t.Fatal(err)
 	}
 	// Fresh state: both counters at zero and no pending removals → ready.
-	if !h.packsReady() {
+	// The exported method (20_search.md §3.1) is the read-only snapshot the
+	// search service uses; it must agree with the internal one.
+	if !h.packsReady() || !h.PacksReady() {
 		t.Fatal("fresh repo must report packs_ready")
 	}
 	// A pending removal clears readiness.
 	if err := h.updateState(func(st *RepoState) { st.PendingPackRemovals = []string{"ghost"} }); err != nil {
 		t.Fatal(err)
 	}
-	if h.packsReady() {
+	if h.packsReady() || h.PacksReady() {
 		t.Fatal("pending removals must clear packs_ready")
 	}
 	// Materializing the live set at the manifest revision restores readiness.
@@ -696,7 +698,47 @@ func TestHandle_PacksReadyLifecycle(t *testing.T) {
 	if h.state.PacksRevision != h.manifest.Revision {
 		t.Fatalf("packs_revision %d, want %d", h.state.PacksRevision, h.manifest.Revision)
 	}
+	// A fresh repository never applies a log delta (HeadSeq 0), so the
+	// materialize is the only place its state Revision can catch up; without
+	// it PacksReady would report a fully materialized repository cold.
+	if !h.PacksReady() {
+		t.Fatalf("serve-level materialize must leave the repository warm (revision %d, packs_revision %d)", h.state.Revision, h.state.PacksRevision)
+	}
 	h.invalidateSettings()
+}
+
+// TestHandle_PacksReadySnapshotNeverSyncs pins the read-only contract the
+// search service depends on (docs/features/20_search.md §3.1): PacksReady
+// takes no context, touches only the persisted state snapshot, and answers
+// false — never "sync now" — when the local pack set lags the manifest.
+func TestHandle_PacksReadySnapshotNeverSyncs(t *testing.T) {
+	r, _ := newTestRegistry(t)
+	ctx := context.Background()
+	h, err := r.Create(ctx, "acme/api", git.Sha1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !h.PacksReady() {
+		t.Fatal("fresh repo must be warm")
+	}
+	// A manifest revision the local pack set has not materialized.
+	if err := h.updateState(func(st *RepoState) {
+		st.Revision = 9
+		st.PacksRevision = 8
+	}); err != nil {
+		t.Fatal(err)
+	}
+	h.stateMu.Lock()
+	applied := h.state.AppliedSeq
+	h.stateMu.Unlock()
+	if h.PacksReady() {
+		t.Fatal("lagging pack revision reported warm")
+	}
+	h.stateMu.Lock()
+	defer h.stateMu.Unlock()
+	if h.state.AppliedSeq != applied || h.state.Revision != 9 || h.state.PacksRevision != 8 {
+		t.Fatal("PacksReady mutated the state (it must never sync)")
+	}
 }
 
 func TestHandle_RegistryAccessors(t *testing.T) {

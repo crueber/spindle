@@ -7,8 +7,9 @@
 //	notification tray + webhook delivery → fork → cross-fork PR (shared
 //	numbering).
 //
-// Real server subprocess (token mode: alice admin + bob writer), real git
-// binary (credentials embedded in the remote URL), real webhook sink.
+// Real server subprocess (OIDC via the in-test IdP: alice admin + bob
+// writer), real git binary (credentials embedded in the remote URL), real
+// webhook sink.
 // Skipped in -short mode: this is the e2e tier (make e2e), not the fast tier
 // (docs/go/15_testing.md §1).
 package e2e

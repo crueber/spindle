@@ -21,6 +21,15 @@ func runAccess(ctx context.Context, c *cli, args []string) int {
 		return exitArg
 	}
 	sub, rest := args[0], args[1:]
+	if sub == "-h" || sub == "--help" {
+		// `access -h`: no subcommand to name, so print the get/put usage and the
+		// one flag they share instead of treating "-h" as a subcommand.
+		fs := newFlagSet("access get|put")
+		fs.String("file", "", "access JSON path (put)")
+		fs.SetOutput(c.stderr())
+		fs.Usage()
+		return exitOK
+	}
 	fs := newFlagSet("access " + sub)
 	file := fs.String("file", "", "access JSON path (put)")
 	positional := mustParse(fs, rest)

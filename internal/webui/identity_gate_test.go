@@ -13,10 +13,9 @@ package webui
 //     (auth mode "" / "none" with no signed-in principal); a signed-in admin
 //     reaches /admin from the identity menu;
 //   - /keys, /invitations and /notifications require a signed-in principal:
-//     a signed-out caller under oidc/token gets the API's 401, and auth none
-//     (no identity exists) renders the shared notice pointing at /admin/config;
-//   - their writes refuse anonymous (401) and auth-none (403) callers before
-//     any service call.
+//     a signed-out caller gets the API's 401 (there is no "authentication
+//     disabled" state any more);
+//   - their writes refuse anonymous (401) callers before any service call.
 
 import (
 	"context"
@@ -193,8 +192,8 @@ func TestIdentityDenialOffersTheLoginEntry(t *testing.T) {
 }
 
 // TestIdentityWritesRefuseNoIdentity pins the write side: anonymous is 401
-// even with anonymous_read on (the defect), auth none is 403 (no identity to
-// own the write), and a signed-in principal proceeds.
+// even with anonymous_read on (the defect), and a signed-in principal
+// proceeds.
 func TestIdentityWritesRefuseNoIdentity(t *testing.T) {
 	writes := []struct{ name, method, path string }{
 		{"key add", http.MethodPost, "/keys"},

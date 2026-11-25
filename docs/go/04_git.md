@@ -22,6 +22,7 @@ func (l *Layer) UploadPack(ctx, repo *Repo, body io.Reader, out io.Writer, proto
 func (l *Layer) UploadPackSSH(ctx, repo *Repo, body io.Reader, out io.Writer, protocol string) error  // no --stateless-rpc (17_ssh.md §2)
 func (l *Layer) ParsePushRequestStream(repo *Repo, r io.Reader) (*PushRequest, io.Reader, error)      // commands only; pack stays a stream (17_ssh.md §5)
 func (l *Layer) IngestStream(ctx, repo *Repo, pack io.Reader, maxBytes int64, thin, fsck bool) (*IngestResult, error) // pack piped into index-pack (17_ssh.md §5)
+func (l *Layer) Grep(ctx, repo *Repo, rev string, q GrepQuery) (*GrepResult, error) // code search at a resolved sha (§17)
 ```
 
 Errors are sentinel-wrapped values the callers map: `ErrMaxBytes`, `ErrPackRejected`, `ErrNoSpace`,
@@ -121,6 +122,10 @@ func (p *Pool) Run(ctx context.Context, fn func() error) error {
     }
 }
 ```
+
+One **derived** pool sits beside it: `Layer.ScanPool` (2 slots, §17.2) is used only by the
+long read-only `git grep` scan, so a broad search can never starve clone/upload-pack and a
+clone can never starve search. It is never the pool above.
 
 ### Concurrency
 - **Hazard:** unbounded concurrent git processes exhaust CPU/memory (each `upload-pack` can be ~RSS of the
@@ -932,6 +937,102 @@ git log --no-renames --no-ext-diff --no-textconv --no-show-signature --no-decora
 - Merge commits appear as commits with no shortstat block (zero line changes); binary-only changes
   also contribute zero. Cost: linear in commits, one process (E20).
 
+## 17. Code search: the grep primitive (`docs/features/20_search.md`)
+
+`Layer.Grep` / `Layer.GrepAt` run ONE `git grep` over the repository's already
+materialized serving copy at a **resolved object id**. Search is a read: it
+writes no ref, object, worktree or index, adds no bucket key, and runs no
+LIST. It is the engine decision of `20_search.md` §2 (grep now; an index only
+when a named trigger fires).
+
+### 17.1 The exact argv
+
+```
+git grep --no-color -n --column -I -z --no-textconv --no-recurse-submodules \
+  [-i] [-w] [-F|-E] -m <perFile+1> -e <pattern> <rev> -- [<pathspec>...]
+```
+
+- `<rev>` is a **resolved 40/64-hex oid** (never a ref name or other user
+  string); `--` always precedes the pathspec list, even when it is empty.
+- `-n --column` emit the 1-based line and the 1-based **byte** column; `-z`
+  makes the record NUL-delimited so paths containing spaces, colons and
+  newlines parse. Record shape (verified on git 2.53):
+  `<rev>:<path> \0 <line> \0 <column> \0 <text> \n`. `<text>` excludes the
+  line terminator: it runs to the `\n`, and the parser drops exactly one
+  trailing `\r`, so a CRLF line's content is reported without it — the answer
+  is deterministic regardless of the committed bytes or the git build (a
+  fixture must still pin `core.autocrlf=false`; a developer's global config
+  otherwise converts the blob and hides the case).
+- `-I` skips binary blobs (git's NUL-in-the-first-8-KiB probe), matching the
+  blob page. `--no-textconv` and explicit `-F`/`-E` stop repository config from
+  spawning filters or changing the pattern dialect; `--no-recurse-submodules`
+  is explicit even though it is the default.
+- `-i` is the default (ASCII case-insensitive, `20_search.md` §5.1); a
+  case-sensitive query omits it. `-E` selects POSIX ERE and is pre-validated
+  with Go `regexp.CompilePOSIX`; `-F` is the fixed-string default.
+- `-m <perFile+1>`: `git grep` caps per file silently, so asking for one extra
+  match makes per-file truncation observable without a second run.
+- Environment: `GIT_DIR=<serving copy>`, `GIT_TERMINAL_PROMPT=0`, `LC_ALL=C`
+  (deterministic, ASCII-only folding; no inherited locale). `cmd.Dir` is the
+  same directory. `exec.CommandContext` carries the caller's context plus the
+  query's hard deadline (default 10 s), so a client disconnect or a timeout
+  SIGKILLs the child.
+
+**Exit codes:** `0` = matches; `1` = **no matches (success, empty result)**;
+`≥ 2` = error. Treating `1` as an error is the classic bug this contract
+forbids. A bad pattern is an error in practice — measured git 2.53 exits
+`128` for `-e '('` — so the contract is the class (`≥ 2`), not the number. When
+the pattern still fails at run time (a dialect corner the pre-flight RE2 check
+accepted), the primitive returns `ErrGrepPattern` (a 400-class error), never an
+empty result; any other non-0/1 exit is a subprocess failure (503-class).
+
+### 17.2 A derived scan pool, never the control-plane pool
+
+`Layer.ScanPool` (`git.GrepDefaultPoolSize` = 2 slots) is the **only** pool a
+grep takes. `Layer.Pool` is for clone/upload-pack/ingest and is never used by
+search: a broad grep is CPU-bound for up to the deadline, clone/upload-pack is
+latency-sensitive I/O, and the 2026-08 incidents are what happens when bulk and
+control-plane work share a semaphore (`13_concurrency.md` §7). A hand-built
+`Layer` with a nil `ScanPool` falls back to a package default pool of the same
+size rather than borrowing the control plane. The slot is held only while the
+subprocess runs — never across a sync, a resolve or a store read.
+
+### 17.3 Streaming parse and caps
+
+The stdout stream is parsed **sequentially** (never `strings.Split` on NUL: a
+text blob may contain NUL after git's binary probe), which also handles a record
+straddling any write boundary:
+
+1. path up to `\0`, strip the known `<rev>:` prefix (fall back to the first
+   colon only if the prefix is absent);
+2. line digits up to `\0`, column digits up to `\0`;
+3. text up to `\n` — the raw line bytes with exactly one trailing `\r`
+   dropped (the terminator, §17.1), then capped at 4 KiB per match and
+   middle-ellipsized around the column on UTF-8 boundaries.
+
+Caps are enforced **while parsing** (`20_search.md` §5.2): per-file (the extra
+`-m` record), total matches, and stdout bytes. A cap cancels the subprocess
+(the parser asks the runner to cancel) and sets `GrepStats.Truncated`; the
+deadline is reported as `GrepStats.TimedOut` with the partial result and a nil
+error (a deadline is an answer, not a failure). A caller cancellation is
+returned as the context error. Output stays bounded: at most `Limit` matches,
+each at most `MaxText` bytes, read from at most `MaxBytes` of stdout.
+
+### 17.4 Tests and evidence (`internal/git/grep_test.go`)
+
+Real bare fixtures (built by a worktree commit, then `git clone --bare`, so the
+searched copy has no worktree): matches with exact line/column, a non-match
+(exit 1), a run-time-rejected pattern (distinct error), unicode plus the pinned
+ASCII-folding limitation, a binary blob skipped, a 60 KiB single line, CRLF, a
+missing trailing newline, pathspec filtering, ref selection, a path containing
+a colon and a newline, symlink content, a skipped submodule gitlink,
+cancellation (mid-flight via a stub that blocks on a fixture marker, and while
+queued for a pool slot), a deadline, the match/per-file/byte/text caps, the
+control-plane-pool isolation test, and the argv pinned literally. The stub
+`git` scripts stand in only for process-level behavior a real repository cannot
+produce on demand. `grep.go` holds 100 % statement coverage. The cost harness is
+`internal/devtools/searchbench`; its numbers live in `docs/EVIDENCE.md` E21.
+
 ## Decisions & deviations from the Rust design
 
 - **Collaboration-layer fork→base bridge fetch (issue #456, owned by
@@ -1155,6 +1256,17 @@ git log --no-renames --no-ext-diff --no-textconv --no-show-signature --no-decora
   run at all in a repo with no work tree ("this operation must be run in a work tree"); the empty
   scratch dir satisfies the check and nothing is ever read or written there. Both argv are pinned by
   `TestSubprocessGitCommitLifecycle` / `TestSubprocessGitErrors`.
+
+- **NEW (2026-11-25) — code search is one `git grep` on a DERIVED scan pool (§17).**
+  grep at a resolved sha needs no worktree, index file, write or lock, and its result
+  is exact-at-the-commit with no invalidation; that is why v1 has no index
+  (`docs/features/20_search.md` §2). `Layer.ScanPool` (2 slots) is separate from the
+  blocking `Layer.Pool` for the reason the bulk/control-plane split exists at all: a
+  broad search may burn a core for the 10 s deadline, and clone/upload-pack must not
+  queue behind it (nor search behind a clone). Nothing here writes, so law 4 and law 6
+  are untouched. The deadline and every cap are result fields, never errors; exit 1 is
+  empty success and `≥ 2` is a failure (git 2.53 exits 128 for a bad `-e` pattern —
+  the plan's "exit 2" was an assumption, corrected here).
 
 ## 14b. Issue-template reads (docs/features/02 §15, feature-owned)
 

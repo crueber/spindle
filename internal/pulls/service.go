@@ -261,7 +261,14 @@ func (s *Service) updateIndex(ctx context.Context, owner, repo string, card Card
 
 // upsertCard inserts or replaces a card, newest-activity-first in both
 // pages. Cards of either kind are carried (one index, one numbering space).
+//
+// A replacement is a re-projection of the same row, so it inherits the old
+// card's unknown JSON keys (law 5): the shared document may carry a field a
+// future writer added, and a PR state change must not strip it.
 func upsertCard(ix *Index, card Card) {
+	if old, ok := findIndexCard(ix, card.Num); ok {
+		card.inheritUnknown(old)
+	}
 	drop := func(cards []Card, num int) []Card {
 		out := cards[:0]
 		for _, c := range cards {
@@ -283,6 +290,18 @@ func upsertCard(ix *Index, card Card) {
 		ix.ClosedRecent = append(ix.ClosedRecent, card)
 		sortCards(ix.ClosedRecent)
 	}
+}
+
+// findIndexCard returns the current row for num from either page.
+func findIndexCard(ix *Index, num int) (Card, bool) {
+	for _, cards := range [][]Card{ix.Open, ix.ClosedRecent} {
+		for _, c := range cards {
+			if c.Num == num {
+				return c, true
+			}
+		}
+	}
+	return Card{}, false
 }
 
 // sortCards orders newest-activity-first (updated_at desc, num desc).

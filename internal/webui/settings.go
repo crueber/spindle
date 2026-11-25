@@ -1213,9 +1213,8 @@ func settingsKeyRows(recs []api.SshKeyRecord) []SettingsKeyRow {
 // settingsKeysPage answers GET /keys: the calling principal's SSH keys.
 //
 // This is an identity-owned page, so it carries the identity gate rather than
-// the anonymous_read gate: a signed-out caller under a real auth mode gets the
-// API's 401, and an unsecured (auth none) instance gets the shared notice with
-// the /setup path — never an "Add a key" form nobody owns (Forgejo #371).
+// the anonymous_read gate: a signed-out caller gets the API's 401 — never an
+// "Add a key" form nobody owns (Forgejo #371).
 func (s *Server) settingsKeysPage(w http.ResponseWriter, r *http.Request) {
 	p, ok := s.principal(w, r)
 	if !ok {

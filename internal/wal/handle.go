@@ -246,6 +246,14 @@ func (h *RepoHandle) packsReady() bool {
 	return h.state.PacksReady()
 }
 
+// PacksReady reports whether the local pack set is current and clean: the
+// applied pack revision equals the manifest revision and no removal is
+// pending (05 §5.1.4). It is a read-only snapshot of the persisted state —
+// it never syncs, resolves, materializes or fetches, so a caller deciding
+// whether a repository is warm pays nothing (docs/features/20_search.md §3.1,
+// where owner-scope code search greps warm repositories only).
+func (h *RepoHandle) PacksReady() bool { return h.packsReady() }
+
 // ---- catch-up and Sync (05 §5.2) --------------------------------------------
 
 // catchUp is the open-path applyDelta: the manifest is already in hand

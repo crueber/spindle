@@ -311,7 +311,7 @@ func runBundleRm(ctx context.Context, c *cli, args []string) int {
 // ---- synth / import / mirror ----------------------------------------------------
 
 func runSynth(ctx context.Context, c *cli, args []string) int {
-	return notImplemented("synth")
+	return notImplemented(c, "synth")
 }
 
 // runImport implements the classic import (§6.2): publish the source refs +
@@ -346,7 +346,7 @@ func runImport(ctx context.Context, c *cli, args []string) int {
 		})
 	}
 	if *direct {
-		return notImplemented("import --direct")
+		return notImplemented(c, "import --direct")
 	}
 	if *from == "" || len(positional) != 1 {
 		fmt.Fprintln(os.Stderr, "usage: spindle import --from GITDIR owner/name [--reuse-packs] [--refs GLOB]…")
@@ -540,7 +540,7 @@ func errAsExists(err error, target **wal.WalError) bool {
 }
 
 func runMirror(ctx context.Context, c *cli, args []string) int {
-	return notImplemented("mirror")
+	return notImplemented(c, "mirror")
 }
 
 // matchAnyGlob matching for ref globs (owner-free: suffix or prefix match).

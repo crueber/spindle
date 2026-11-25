@@ -63,6 +63,14 @@ func Routes(e *Env) []Route {
 		{Method: "PUT", Sub: "/services/api/owners/{owner}/profile", Handler: h.ownerProfilePut, Auth: AuthWrite, NonRepo: true},
 		{Method: "GET", Sub: "/services/api/instance", Handler: h.instance, Auth: AuthOpen, NonRepo: true},
 
+		// --- search (Feature 20 §6; 07_api.md §9.13) -------------------------
+		// Owner scope is the instance-level surface (owner required in v1);
+		// the repository lane lives in the repo table below. Discovery derives
+		// both canonical templates from these rows (Expose), so the /api page
+		// lists them without a second registry.
+		{Method: "GET", Sub: "/api/v1/search", Template: "/api/v1/search", Handler: h.searchOwner, Auth: AuthRead, Expose: true, NonRepo: true},
+		{Method: "GET", Sub: "/api-browser/v1/search", Handler: h.searchOwner, Auth: AuthRead, NonRepo: true},
+
 		// --- repo reads (§9) ---------------------------------------------------
 		{Method: "GET", Sub: "", Template: "/{owner}/{repo}/api", Handler: h.summary, Auth: AuthRead, Expose: true},
 		{Method: "GET", Sub: "refs", Template: "/{owner}/{repo}/api/refs", Handler: h.refsHead, Auth: AuthRead, Expose: true},
@@ -73,6 +81,11 @@ func Routes(e *Env) []Route {
 		{Method: "GET", Sub: "blob/{rest...}", Template: "/{owner}/{repo}/api/blob/{rev}/{path}", Handler: h.blob, Auth: AuthRead, Expose: true},
 		{Method: "GET", Sub: "commits", Template: "/{owner}/{repo}/api/commits", Handler: h.commits, Auth: AuthRead, Expose: true},
 		{Method: "GET", Sub: "commit/{sha}", Template: "/{owner}/{repo}/api/commit/{sha}", Handler: h.commitDetail, Auth: AuthRead, Expose: true},
+
+		// --- search (Feature 20 §6; 07_api.md §9.13) -------------------------
+		// AuthRead + the dispatcher's CheckRead: the read gate runs before any
+		// query, existence or ref work (§8). Both lanes answer this row.
+		{Method: "GET", Sub: "search", Template: "/{owner}/{repo}/api/search", Handler: h.searchRepo, Auth: AuthRead, Expose: true},
 
 		// --- policy (§10) --------------------------------------------------------
 		{Method: "GET", Sub: "policy", Template: "/{owner}/{repo}/api/policy", Handler: h.policyGet, Auth: AuthRead, Expose: true},

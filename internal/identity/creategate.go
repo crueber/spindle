@@ -179,7 +179,8 @@ func (s *Service) EnsureRepoAccessCreated(ctx context.Context, owner, repo, crea
 	}
 	doc := &AccessDoc{Version: 1, Visibility: vis, RoleBindings: []AccessBinding{}}
 	// The creator binding is a GRANT: only for user namespaces (a
-	// registry-backed username, or a legacy email). Synthetic
+	// username with an account trace — user.json or profile.json — or
+	// a legacy email). Synthetic
 	// principals, orgs, and unclaimed names materialize a
 	// visibility-only doc (see isUserNamespace).
 	if s.isUserNamespace(ctx, creator) {

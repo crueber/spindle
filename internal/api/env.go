@@ -612,6 +612,12 @@ type Env struct {
 	// pre-existing repos badge public, never private-by-omission.
 	RepoVisibility func(ctx context.Context, owner, repo string) (vis string, ok bool)
 
+	// Search is the code-search service seam (docs/features/20_search.md §6;
+	// 07_api.md §9.13). Nil → the two search routes answer the documented 503
+	// (never an ungated search). Implemented by *search.Service and bound by
+	// composition; this package speaks only its wire shapes.
+	Search SearchService
+
 	// Avatars is the per-user avatar URL projection (Forgejo #376):
 	// the stable avatar URL behind GET /api/v1/me's avatar_url (the
 	// navbar identity control renders it). Nil → me() omits

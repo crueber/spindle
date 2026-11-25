@@ -44,6 +44,7 @@ requested or when a review questions a hot path).
 | E18 | 2026-11-21 | Threads PR head-push delivery (`internal/server`, `internal/pulls`, `internal/events`) | Does a push to an open PR's head produce its `pull_request` run promptly, or only on the events sweep — and can a late delivery move the head backwards? | Prompt: with `events.sweep_interval = 1h` configured, the run appeared **53 ms** after the push (the wake is a non-blocking in-process signal; +0 store ops on the push path). Head is monotonic: 3 out-of-order/duplicate deliveries created 0 extra runs and 0 backwards head moves. Cannot regress: `internal/e2e/threads_triggers_test.go` fails if the latency exceeds 5 s or any duplicate run/head rewind appears. |
 | E17 | 2026-09-09 | Last-commit activity (`internal/git`, `internal/sizecatalog`, Forgejo #247) | What does the push hint cost, what does a sweep heal cost, does the listing stay flat, and does explore order by commit time? | Push +0 (derivation is git-local, hint rides the existing sidecar PUT; cold 11 / warm 10 ops unchanged); sweep heals once per stale repo (refs view + ≤1 serve-sync + 1 git read, then quiet); listing flat (exactly 1 catalog GET); explore newest-commit-first from `sort=activity&order=desc` (commit dates, not push times). Cannot explode: no LIST, per-repo isolation, bounded parallelism (8/2), field-scoped merge never regresses. |
 | E20 | 2026-11-21 | Repository Insights refresh (`internal/insights`, `internal/git`) | What does the pulse refresh cost at 1k and 10k commits, how many git invocations does it take, and what does a page read pay? | One git scan + 57 store ops per refresh; 16.6 ms at 1k, 156.2 ms at 10k (git dominates, linear in commits); page read is one GET, zero git/LIST. |
+| E21 | 2026-11-25 | Code search (`internal/git` §17, `internal/devtools/searchbench`) | What does one search query cost at 1k/10k/50k files, and does it grow with tree size or stop at the caps? | One `git grep` spawn, zero store round trips; a full-tree walk is linear in files (15.9/137.9/921.3 ms p50; p95 19/141.7/998.9 ms) and a capped broad query is flat (8–12.4 ms); 50k-file p95 stays under the 1.5 s index trigger. |
 
 ---
 
@@ -1346,3 +1347,56 @@ head did not move and whose projection is under 24 h old does not reach git at a
 (`RefreshIfStale` stops after one refs-level head read + one exact-key GET). A page read is one GET;
 it never runs git and never LISTs. The measurement host is a workstation VM — the durable claims are
 the one-spawn count, the constant store-op count, and linear-in-commits time.
+
+---
+
+## E21 — Code search: one `git grep`, linear in files (2026-11-25)
+
+**Area:** the code-search primitive (`internal/git` §17, `internal/devtools/searchbench`,
+docs/features/20_search.md §2).
+
+**Question:** what does one code-search query cost on the serving copy at realistic repository
+sizes, and does the cost grow with file count, line count, or the caps?
+
+**Method.** Harness: `internal/devtools/searchbench` (a normal `main` program, not a build-tagged
+test — it touches no store and needs no fixture beyond a temp dir):
+
+```
+cd /var/tmp && TMPDIR=/var/tmp/card-searchtmp go run ./internal/devtools/searchbench \
+  -sizes 1000,10000,50000 -reps 7
+```
+
+Each size is a **real bare repository** built by `git fast-import`: N text files (40 lines each,
+≈60 B/line) laid out as `dirNN/fileNNNNN.txt`, one commit. File 0 contains `narrowneedle`; every
+line contains `benchmarktoken`. The measured path is the shipped one — `*git.Layer.Grep` with the
+pinned argv and the streaming `-z` parser — after one untimed warmup run (page cache warm). Median
+and nearest-rank p95 over 7 timed runs. Host: workstation VM, linux/amd64, 10 CPUs, 11 GiB RAM,
+ext4, git 2.53.0. The quoted figures are one run; this VM varies by roughly ±20 % run to run. The
+"stdout bytes" column is the amount the parser observed before a cap cancelled the child; bytes
+already handed over by `os/exec` can overshoot the parsed prefix by up to one 32 KiB copy chunk, which
+is why a capped broad row's byte figure differs between runs while its kept-match count stays exactly
+200.
+
+**Results.**
+
+| files | lines/file | query | kept matches | stdout bytes | p50 | p95 |
+|---|---|---|---|---|---|---|
+| 1,000 | 40 | fixed narrow (full walk) | 1 | 137 | **15.9 ms** | **19 ms** |
+| 1,000 | 40 | regex narrow (full walk) | 1 | 137 | 21 ms | 22.2 ms |
+| 1,000 | 40 | fixed broad (capped) | 200 | 38,053 | 8 ms | 8.4 ms |
+| 10,000 | 40 | fixed narrow (full walk) | 1 | 137 | **137.9 ms** | **141.7 ms** |
+| 10,000 | 40 | regex narrow (full walk) | 1 | 137 | 171 ms | 186 ms |
+| 10,000 | 40 | fixed broad (capped) | 200 | 33,733 | 12.4 ms | 16.5 ms |
+| 50,000 | 40 | fixed narrow (full walk) | 1 | 137 | **921.3 ms** | **998.9 ms** |
+| 50,000 | 40 | regex narrow (full walk) | 1 | 137 | 936.5 ms | 1.0322 s |
+| 50,000 | 40 | fixed broad (capped) | 200 | 31,429 | 11.7 ms | 12.3 ms |
+
+**Analysis.** The cost shape is the durable claim: a query that must walk the whole tree is
+**linear in file count** (15.9 ms → 137.9 ms → 921.3 ms for 10×/50× files, ≈0.018 ms/file), a
+POSIX ERE adds a small constant multiplier (≈1.1× at 50k), and a broad query that trips the match
+caps is **flat** (8–12.4 ms regardless of tree size) because the caps bound the work, not the
+walker. Every full-walk p95 at 50,000 files (≈1.03 s) sits under the 1.5 s deferral trigger in
+`20_search.md` §2.1 for a repository 40× the median file count; a p95 above 1.5 s on the operator's
+median repository is the signal to start the index planning doc, not to tune this number. There is
+one `git grep` spawn per query and zero store round trips. Absolute numbers are this host's; the
+page-cache warmth and `LC_ALL=C` behavior are named in the harness and the method.

@@ -214,6 +214,12 @@ type Thread struct {
 
 // Card is the shared P4 index projection as pulls reads it (02 owns the
 // shape). PR rows are enriched from pr.json sidecars at list time.
+//
+// unknown holds every JSON key the struct does not name. The card rides in the
+// shared issues/index.json, which pulls rewrites on every PR mutation, so a
+// whitelist struct would strip the NEXT additive field a future 02 writer adds
+// — the same defect class as the missing card_version. Law 5: additive JSON
+// fields round-trip unchanged; UnmarshalJSON/MarshalJSON below keep them.
 type Card struct {
 	Num          int      `json:"num"`
 	Kind         string   `json:"kind"`
@@ -227,14 +233,182 @@ type Card struct {
 	CreatedAt    string   `json:"created_at"`
 	UpdatedAt    string   `json:"updated_at"`
 	CommentCount int      `json:"comment_count"`
+
+	unknown map[string]json.RawMessage
 }
 
 // Index is the shared P4 list object as pulls reads it (02 owns the shape).
+//
+// Every PR mutation REWRITES this document (updateIndex), so the mirror must
+// be lossless rather than a whitelist: 02's additive fields (card_version, the
+// pin set, and whatever a future writer adds) pass through a read-modify-write
+// unchanged. A lossy mirror once stripped `card_version`, making the issue
+// search projection report an incomplete index after the first PR write
+// (docs/features/20_search.md §6.3), and would have dropped every pin.
+// Law 5: additive JSON fields round-trip unchanged.
 type Index struct {
 	Version          int    `json:"version"`
 	CompactedThrough string `json:"compacted_through"`
 	Open             []Card `json:"open"`
 	ClosedRecent     []Card `json:"closed_recent"`
+	// CardVersion is 02's Card-projection stamp (Forgejo #564).
+	CardVersion int `json:"card_version,omitempty"`
+	// Pinned is 02's repo pin set (§13).
+	Pinned []int `json:"pinned,omitempty"`
+
+	unknown map[string]json.RawMessage
+}
+
+// ---- lossless JSON mirror (law 5) -------------------------------------------
+//
+// pulls is the second writer of repos/<o>/<r>/issues/index.json (02 owns the
+// shape). Every field it does not name is captured on decode and re-emitted on
+// encode, so an additive field added by a later writer survives the PR path.
+// The known fields keep their struct order and exact output; unknown keys are
+// appended in sorted order, and a document with no unknown keys marshals to the
+// same bytes as the plain struct (no bookkeeping field leaks into the wire).
+
+// cardJSONKeys / indexJSONKeys are the JSON names the structs above own. A key
+// that matches one of them (encoding/json matches field names case-insensitively
+// too) is never treated as an unknown, so a re-emit can never duplicate it.
+var (
+	cardJSONKeys = []string{
+		"num", "kind", "title", "state", "state_reason", "labels", "assignees",
+		"milestone", "author", "created_at", "updated_at", "comment_count",
+	}
+	indexJSONKeys = []string{
+		"version", "compacted_through", "open", "closed_recent",
+		"card_version", "pinned",
+	}
+)
+
+// UnmarshalJSON decodes the known card fields and keeps every other key.
+func (c *Card) UnmarshalJSON(data []byte) error {
+	type cardJSON Card // no methods: the alias avoids recursing into this one
+	var known cardJSON
+	if err := json.Unmarshal(data, &known); err != nil {
+		return err
+	}
+	unknown, err := captureUnknownJSON(data, cardJSONKeys)
+	if err != nil {
+		return err
+	}
+	*c = Card(known)
+	c.unknown = unknown
+	return nil
+}
+
+// MarshalJSON re-emits the known card fields plus every captured unknown key.
+func (c Card) MarshalJSON() ([]byte, error) {
+	type cardJSON Card
+	base, err := json.Marshal(cardJSON(c))
+	if err != nil {
+		return nil, err
+	}
+	return appendUnknownJSON(base, c.unknown, cardJSONKeys)
+}
+
+// UnmarshalJSON decodes the known envelope fields and keeps every other key.
+func (ix *Index) UnmarshalJSON(data []byte) error {
+	type indexJSON Index
+	var known indexJSON
+	if err := json.Unmarshal(data, &known); err != nil {
+		return err
+	}
+	unknown, err := captureUnknownJSON(data, indexJSONKeys)
+	if err != nil {
+		return err
+	}
+	*ix = Index(known)
+	ix.unknown = unknown
+	return nil
+}
+
+// MarshalJSON re-emits the known envelope fields plus every captured unknown key.
+func (ix Index) MarshalJSON() ([]byte, error) {
+	type indexJSON Index
+	base, err := json.Marshal(indexJSON(ix))
+	if err != nil {
+		return nil, err
+	}
+	return appendUnknownJSON(base, ix.unknown, indexJSONKeys)
+}
+
+// inheritUnknown carries old's captured keys onto c (a re-projection of the
+// same card must not drop a field a future writer added). c's own keys win.
+func (c *Card) inheritUnknown(old Card) {
+	if len(old.unknown) == 0 {
+		return
+	}
+	if c.unknown == nil {
+		c.unknown = make(map[string]json.RawMessage, len(old.unknown))
+	}
+	for k, v := range old.unknown {
+		if _, ok := c.unknown[k]; !ok {
+			c.unknown[k] = v
+		}
+	}
+}
+
+// captureUnknownJSON returns the object keys that known does not own. A null or
+// empty object yields nil (nothing to re-emit).
+func captureUnknownJSON(data []byte, known []string) (map[string]json.RawMessage, error) {
+	var all map[string]json.RawMessage
+	if err := json.Unmarshal(data, &all); err != nil {
+		return nil, err
+	}
+	for k := range all {
+		if ownsJSONKey(k, known) {
+			delete(all, k)
+		}
+	}
+	if len(all) == 0 {
+		return nil, nil
+	}
+	return all, nil
+}
+
+// appendUnknownJSON inserts the unknown keys into the JSON object base without
+// touching a known key. It returns base unchanged when there is nothing extra,
+// so a document without extras is byte-identical to the plain struct's output.
+func appendUnknownJSON(base []byte, unknown map[string]json.RawMessage, known []string) ([]byte, error) {
+	keys := make([]string, 0, len(unknown))
+	for k := range unknown {
+		if !ownsJSONKey(k, known) {
+			keys = append(keys, k)
+		}
+	}
+	if len(keys) == 0 {
+		return base, nil
+	}
+	if len(base) == 0 || base[len(base)-1] != '}' {
+		return nil, fmt.Errorf("pulls: marshal object: base is not a JSON object")
+	}
+	sort.Strings(keys) // stable output; JSON object order is not semantic
+	out := make([]byte, 0, len(base)+len(keys)*16)
+	out = append(out, base[:len(base)-1]...)
+	for _, k := range keys {
+		kb, err := json.Marshal(k)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, ',')
+		out = append(out, kb...)
+		out = append(out, ':')
+		out = append(out, unknown[k]...)
+	}
+	return append(out, '}'), nil
+}
+
+// ownsJSONKey reports whether key names one of the struct's JSON fields. The
+// comparison folds case because encoding/json does.
+func ownsJSONKey(key string, known []string) bool {
+	for _, k := range known {
+		if strings.EqualFold(key, k) {
+			return true
+		}
+	}
+	return false
 }
 
 // Counter is the shared {"next": N} allocator shape (P2).

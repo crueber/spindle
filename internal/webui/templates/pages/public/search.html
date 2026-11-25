@@ -1,0 +1,15 @@
+{{define "content"}}
+<section aria-label="Code search">
+  <h1 class="text-xl font-semibold tracking-tight">Search{{if .Data.Owner}} <span class="font-mono text-[var(--pd-text-2)]">{{.Data.Owner}}</span>{{end}}</h1>
+  <p class="muted mt-1 mb-3 max-w-[80ch] text-sm">Search the code in the repositories you can read under one owner. Results are grouped by repository, in git tree order; a repository you cannot read is not in the answer at all.</p>
+
+  {{if and (not .Data.Owner) (not .Data.Queried)}}
+  <div class="card mb-4 p-3">
+    <p class="text-sm">Version 1 searches one owner at a time. A search without an owner would span every repository on the instance, which needs an index spindle does not build — so the page does not guess and does not search instance-wide code.</p>
+    <p class="mt-2 text-sm">Name an owner below, or <a class="link" href="/explore">browse the repository picker</a> to find one.</p>
+  </div>
+  {{end}}
+
+  {{template "search_body" .Data}}
+</section>
+{{end}}

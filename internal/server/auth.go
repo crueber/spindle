@@ -522,8 +522,8 @@ func (s *AuthService) BrowserLoginEnabled() bool {
 		s.cfg.OAuthClientID != "" && s.cfg.OAuthClientSecret != ""
 }
 
-// StaticPrincipal resolves ONE raw static token exactly as the token-mode
-// credential chain does (server.auth.tokens, token_env resolved at startup).
+// StaticPrincipal resolves ONE raw static token from the static credential
+// chain (server.auth.tokens, token_env resolved at startup).
 // An expired credential does not resolve (06 §8.2.1). The Seam 2 hook is
 // deliberately not consulted: a CI/feature credential is
 // not a browser identity and must never mint a session.

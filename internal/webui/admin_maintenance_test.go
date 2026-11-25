@@ -329,23 +329,35 @@ func TestAdminMaintenanceHelpers(t *testing.T) {
 	if fs := adminFilesystem("", 0.9); fs.Measured {
 		t.Fatal("empty dir measured")
 	}
-	// The watermark fallback is the eviction pass's own 90%.
-	if fs := adminFilesystem(t.TempDir(), 0); !fs.Measured || fs.Tight != (fs.UsedPct >= 90) {
-		t.Fatalf("fallback watermark measurement = %+v", fs)
-	}
 	// A sink with no name is labelled by its kind, never a blank row.
 	bridge := config.Defaults()
 	bridge.Events.Sinks = []config.EventSink{{Kind: "jsonl"}}
 	if card := adminBridgeCard(bridge, false); len(card.Rows) != 3 || card.Rows[2].Key != "sink jsonl" {
 		t.Fatalf("unnamed sink rows = %+v", card.Rows)
 	}
-	// A measured filesystem in disk mode adds the watermark sentence.
+	// A measured filesystem in disk mode adds the watermark sentence. The
+	// AdminFilesystem value is constructed, never measured: the host's temp
+	// filesystem must not decide whether this test passes.
 	disk := config.Defaults()
 	disk.Cache.Dir = t.TempDir()
 	disk.Cache.Mode = "disk"
-	fs := adminFilesystem(disk.Cache.Dir, 0.9)
+	fs := AdminFilesystem{Measured: true, Type: "filesystem", Total: 64 << 30, Avail: 48 << 30, TotalText: "64 GiB", FreeText: "48 GiB", UsedPct: 25}
 	if note, warn := adminBudgetNote(disk, fs); warn || !strings.Contains(note, "high watermark") {
 		t.Fatalf("disk-mode budget note = %q warn=%v fs=%+v", note, warn, fs)
+	}
+	// The budget guard: larger than the filesystem warns, smaller does not.
+	// Both are constructed filesystems, so the branch is not host-dependent.
+	if note, warn := adminBudgetNote(disk, AdminFilesystem{Measured: true, Type: "tmpfs", Total: 8 << 30, Avail: 8 << 30, TotalText: "8.0 GiB", FreeText: "8.0 GiB"}); !warn || !strings.Contains(note, "larger than the 8.0 GiB tmpfs filesystem") {
+		t.Fatalf("over-budget note = %q warn=%v", note, warn)
+	}
+	small := config.Defaults()
+	small.Cache.MaxBytes = 1 << 20
+	if note, warn := adminBudgetNote(small, fs); warn || !strings.Contains(note, "about 0% of this filesystem") {
+		t.Fatalf("under-budget note = %q warn=%v", note, warn)
+	}
+	// An unmeasured filesystem is reported as unknown, never as a warning.
+	if note, warn := adminBudgetNote(disk, AdminFilesystem{}); warn || !strings.Contains(note, "could not be measured") {
+		t.Fatalf("unmeasured budget note = %q warn=%v", note, warn)
 	}
 	// Nil config / restricted mode report nothing rather than defaults.
 	if card := adminBridgeCard(nil, false); card.Known || card.Configured {
@@ -359,6 +371,44 @@ func TestAdminMaintenanceHelpers(t *testing.T) {
 	zero.Cache.MaxBytes = 0
 	if note, warn := adminBudgetNote(zero, AdminFilesystem{}); warn || !strings.Contains(note, "not set") {
 		t.Fatalf("zero budget note = %q warn=%v", note, warn)
+	}
+}
+
+// TestAdminFilesystemMeasurement covers the real statfs path, but asserts
+// properties that hold on any filesystem holding TMPDIR (a tiny tmpfs or a
+// nearly full root) rather than host-specific sizes.
+func TestAdminFilesystemMeasurement(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	fs := adminFilesystem(dir, 0.9)
+	if !fs.Measured {
+		t.Fatalf("an existing directory must measure: %+v", fs)
+	}
+	if fs.Type == "" || fs.TotalText == "" || fs.FreeText == "" {
+		t.Fatalf("a measured filesystem needs a type and human sizes: %+v", fs)
+	}
+	if fs.Total <= 0 || fs.Avail < 0 || fs.Avail > fs.Total {
+		t.Fatalf("nonsensical total/avail: %+v", fs)
+	}
+	if fs.UsedPct < 0 || fs.UsedPct > 100 {
+		t.Fatalf("UsedPct = %d, want [0,100]", fs.UsedPct)
+	}
+	// Tight is exactly the watermark comparison, whatever the host's use is.
+	if fs.Tight != (fs.UsedPct >= 90) {
+		t.Fatalf("Tight = %v at %d%% with watermark 0.9", fs.Tight, fs.UsedPct)
+	}
+	// The watermark fallback is the eviction pass's own 90% (0 and >=1 both).
+	for _, w := range []float64{0, 1, -0.5} {
+		if got := adminFilesystem(dir, w); got.Tight != (got.UsedPct >= 90) {
+			t.Fatalf("watermark %v: Tight = %v at %d%%, want the 90%% fallback", w, got.Tight, got.UsedPct)
+		}
+	}
+	if got := adminFilesystem(dir, 0.5); got.Tight != (got.UsedPct >= 50) {
+		t.Fatalf("watermark 0.5: Tight = %v at %d%%", got.Tight, got.UsedPct)
+	}
+	// A path that cannot be statfs'd is honestly unmeasured.
+	if got := adminFilesystem("/nonexistent/spindle-cache-probe", 0.9); got.Measured {
+		t.Fatalf("nonexistent dir measured: %+v", got)
 	}
 }
 

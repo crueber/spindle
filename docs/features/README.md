@@ -45,6 +45,7 @@ commits are ordinary git objects; a PR's *head* is an ordinary ref published thr
 | [`16_moderation.md`](16_moderation.md) | Moderation: **shipped** — M1 user blocks, M2 hide/minimize + conversation locks, M3 abuse reports + per-repo/host queues + audit viewer, M4 rate limits + advisory spam signals + audit-completeness sweep | 01, 02, 03, 04, 06 |
 | [`18_repo_insights.md`](18_repo_insights.md) | Repository Insights: **shipped** — a cached pulse projection (commits, contributors, code frequency, issue/PR counts, existing facts) with an honest no-traffic statement | — (bucket + git; reads 02/03/05/07/14/15 families) |
 | [`19_static_sites.md`](19_static_sites.md) | Static sites: **shipped** — a repository's tree published read-only from a dedicated static hostname on its own listener (`<static-host>/{owner}/{repo}/…`), Pages-like resolution, cookie-less origin ⇒ public repos only, no build step | — (bucket + git; config `[static_sites]`/`[static_site]`) |
+| [`20_search.md`](20_search.md) | Code search (and issue/PR text search): **shipped** — `git grep` at a resolved sha on the serving copy (no index in v1), repo and bounded owner scopes, honest caps, issue/PR metadata and bounded body/comment scan with moderation redaction; the two pages, `spindle search` and the SDK | 01, 02, 03 (issues/PR text), 04_git §17 |
 
 ## Shared primitives (normative for every feature doc)
 
@@ -141,7 +142,17 @@ data; the timeline is the backfill source of truth (same contract as the events 
 
 ### P9 — What is explicitly OUT of scope for this layer
 
-Code search (needs an index format decision — deferred), Discussions, Projects/boards, SAML/SCIM.
+Discussions, Projects/boards, SAML/SCIM. Instance-wide code search and any
+search **index** remain out of scope (the engine decision and its revisit
+triggers are [`20_search.md`](20_search.md) §2.1).
+
+**Amended 2026-11-25:** *Code search* leaves the deferred list for the **grep**
+case — repo scope and a bounded owner scope over the serving copy, no index, no
+new bucket family ([`20_search.md`](20_search.md), in progress). The text of
+issues and PRs (metadata plus a capped body/comment scan) ships in the same
+card by operator decision. What stays deferred is instance-wide code search,
+ranking/symbol search, and the index itself; any of those starts a new planning
+doc, not a patch.
 
 **Amended 2026-11-20:** *Threads* (spindle's CI — workflow files, container jobs reported into the
 checks surface) is **in scope for v1**; see [`15_threads.md`](15_threads.md). The earlier DRAFT
@@ -170,4 +181,4 @@ packages, not the editor) and rename-as-an-action (rename = delete + create, two
 2. **Phase B:** issues + notifications (02, 06 core) — proves the thread pattern end to end.
 3. **Phase C:** pull requests + code review + checks (03, 04, 05) — the merge task and required-checks gate.
 4. **Phase D:** releases, stars/watches, forks (07), full UI surfaces (08).
-5. **Phase E:** search and the deferred list — separate planning.
+5. **Phase E:** search (20) — code search on the grep engine plus issue/PR text, then the rest of the deferred list — separate planning.

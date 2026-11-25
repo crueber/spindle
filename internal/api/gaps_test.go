@@ -527,7 +527,7 @@ func TestNewIDShape(t *testing.T) {
 func TestPrincipalOfModes(t *testing.T) {
 	f := newFixture(t)
 	r := httptest.NewRequest("GET", "/x", nil)
-	// no principal + token mode → anonymous (read-only, never write)
+	// no principal → anonymous (read-only, never write)
 	p := f.env.PrincipalOf(r)
 	if !p.Anonymous || p.Write || p.Admin {
 		t.Fatalf("anon default = %+v", p)

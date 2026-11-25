@@ -288,6 +288,12 @@ func appendSchemaKeys(g *Group, prefix string, sv, dv reflect.Value) {
 		switch sf.Type.Kind() {
 		case reflect.Bool:
 			typ = "bool"
+		case reflect.Ptr:
+			// An optional scalar ([search] enabled *bool) renders and saves as
+			// its element type; the pointer only distinguishes "absent".
+			if sf.Type.Elem().Kind() == reflect.Bool {
+				typ = "bool"
+			}
 		case reflect.Int, reflect.Int64, reflect.Int32:
 			typ = "int"
 		case reflect.Uint, reflect.Uint64, reflect.Uint32, reflect.Uint16, reflect.Uint8:
@@ -376,6 +382,18 @@ func elementFields(t reflect.Type) []Field {
 func fmtAny(v reflect.Value) any {
 	if !v.IsValid() || !v.CanInterface() {
 		return nil
+	}
+	if v.Kind() == reflect.Ptr {
+		// Optional scalars ([search] enabled *bool): the schema reports the
+		// EFFECTIVE value, never an address. A nil pointer has no value to
+		// report (the page shows the compiled default in that column).
+		if v.IsNil() {
+			return nil
+		}
+		v = v.Elem()
+		if !v.IsValid() || !v.CanInterface() {
+			return nil
+		}
 	}
 	switch x := v.Interface().(type) {
 	case config.Duration:
@@ -770,6 +788,32 @@ func Coerce(field reflect.Value, raw, path string) error {
 		return nil
 	}
 	switch field.Kind() {
+	case reflect.Ptr:
+		// Optional scalars ([search] enabled *bool): the page posts the
+		// explicit true/false the switch shows, and saving materializes the
+		// pointer (an explicit value is no longer "absent"). A BLANK cell
+		// means "unset" and leaves the field as it is — a nil *bool
+		// round-trips as nil instead of failing as "not a bool" (the
+		// struct-row convention: a blank cell never invents a value).
+		if field.Type().Elem().Kind() == reflect.Bool {
+			if raw == "" {
+				return nil
+			}
+			var b bool
+			switch raw {
+			case "true":
+				b = true
+			case "false":
+				b = false
+			default:
+				return keyedError(path, "%s: not a bool", path)
+			}
+			p := reflect.New(field.Type().Elem())
+			p.Elem().SetBool(b)
+			field.Set(p)
+			return nil
+		}
+		return keyedError(path, "%s: unsupported type", path)
 	case reflect.String:
 		field.SetString(raw)
 	case reflect.Bool:
@@ -1083,6 +1127,14 @@ func rawKeyValue(c *config.Config, key string) (any, bool) {
 	fv, _, err := fieldByKey(reflect.ValueOf(c).Elem(), strings.Split(key, "."), "")
 	if err != nil || !fv.CanInterface() {
 		return nil, false
+	}
+	if fv.Kind() == reflect.Ptr {
+		// An optional scalar compares by VALUE: fmt.Sprint on two *bool
+		// pointers would print addresses and report every save as changed.
+		if fv.IsNil() {
+			return nil, true
+		}
+		fv = fv.Elem()
 	}
 	return fv.Interface(), true
 }

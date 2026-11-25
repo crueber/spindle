@@ -151,8 +151,9 @@ func (s *Service) IsOrg(ctx context.Context, owner string) (bool, error) {
 
 // isUserNamespace reports whether owner is a USER namespace (grant
 // sites consult this before manufacturing a user:<owner> binding): a
-// legacy email spelling, or a username backed by the registry (a
-// first-login binding proves the user exists). Orgs, synthetic
+// legacy email spelling, or a username with an account trace — a
+// user.json (the first-login registry) or a profile.json (created
+// lazily; it is an account trace in its own right). Orgs, synthetic
 // principals, and unclaimed usernames are never user namespaces —
 // manufacturing a binding for those would be a latent grant (org
 // delete / later username claim) or authority for a foreign
@@ -169,9 +170,9 @@ func (s *Service) isUserNamespace(ctx context.Context, owner string) bool {
 
 // SynthesizeOwner is the store-backed SynthesizeDefault: public, with a
 // user:<owner> admin binding when the owner namespace is a USER (see
-// isUserNamespace). Costs up to two exact-key probes (org.json,
-// user.json) on top of the access.json miss, only for repos with no
-// access.json (cold/legacy — never a git hot path).
+// isUserNamespace). Costs up to two exact-key probes (org.json, then
+// user.json or profile.json) on top of the access.json miss, only for
+// repos with no access.json (cold/legacy — never a git hot path).
 func (s *Service) SynthesizeOwner(ctx context.Context, owner string) *AccessDoc {
 	doc := &AccessDoc{
 		Version:      0,

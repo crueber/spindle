@@ -738,8 +738,8 @@ func secretFromInput(kind, username string, in *putBody) (*Secret, error) {
 	return nil, fmt.Errorf("pushmirror: unknown auth kind %q", kind)
 }
 
-// effectiveSecret maps a nil secret (auth none) to a tombstone-free nil
-// (no secret sidecar for none) and passes material kinds through.
+// effectiveSecret maps a nil secret (`AuthNone`) to a tombstone-free nil
+// (no secret sidecar for that kind) and passes material kinds through.
 func effectiveSecret(sec *Secret, kind string) *Secret {
 	if kind == AuthNone {
 		return &Secret{AuthKind: kind}

@@ -280,11 +280,11 @@ of the milestone's definition of done, not a test.
 ### 5.4 Collaboration full chain (Feature 09)
 
 `TestE2E_CollabFullChain` (`internal/e2e/collab_test.go`) proves the
-collaboration layer works as one system on a real stack: a token-mode
-server subprocess (alice admin + bob writer — two principals, because
-fan-out never notifies the actor), the real git binary (preemptive
-`http.extraHeader` Bearer auth — git never answers a Bearer 401
-challenge), and a real webhook sink. One scenario walks org → team →
+collaboration layer works as one system on a real stack: an OIDC
+server subprocess (the in-test IdP mints real RS256 ID tokens; alice admin +
+bob writer — two principals, because fan-out never notifies the actor), the
+real git binary (preemptive `http.extraHeader` Bearer auth — git never answers
+a Bearer 401 challenge), and a real webhook sink. One scenario walks org → team →
 access bindings → watch + repo webhook → issue #1 → branch push → PR #2
 (`fixes #1`) → cross-user approval review → `require_checks` policy
 (blocked merge task goes `error`, then reported-success turns the

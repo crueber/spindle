@@ -22,9 +22,9 @@ import (
 	"time"
 )
 
-// artifactsServer boots the binary on a throwaway data dir with a token-mode
-// admin principal, anonymous reads, and (optionally) a short threads retention
-// window and the fork approval gate disabled.
+// artifactsServer boots the binary on a throwaway data dir with an OIDC
+// admin principal (the in-test IdP), anonymous reads, and (optionally) a short
+// threads retention window and the fork approval gate disabled.
 func artifactsServer(t *testing.T, retention string, approveForks bool) *e2eServer {
 	t.Helper()
 	bin := buildSpindle(t)

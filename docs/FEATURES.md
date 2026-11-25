@@ -380,7 +380,65 @@ Everything — the resolution table, response semantics, the request/subprocess 
 cookie-tossing risk and the v1 non-goals — is
 [`features/19_static_sites.md`](features/19_static_sites.md).
 
-## 6. API, SDK and web UI
+## 6. Search
+
+Search answers "where is this text?" over what spindle already holds — one
+repository's tree at a resolved commit, the repositories a caller can read under
+one owner, and the issue/PR threads — with **no index, no database and no new
+dependency**: every code answer is one `git grep` subprocess against the serving
+copy the browser, blame and compare views already use, and every issue answer is
+the existing index, event and moderation reads under a bounded text scan.
+
+```sh
+spindle search "func main" -R acme/demo
+spindle search TODO --owner acme --path internal/ --limit 20
+spindle search 'errgroup\..*' --regex --case -R acme/demo
+```
+
+The API, page, CLI and SDK surfaces:
+
+- `GET /{owner}/{repo}/api/search` (and the `/api-browser` twin) — repository
+  scope: `q`, optional `ref` (default branch, tag or sha), `regex`, `case`,
+  `word`, repeatable `path` and `limit`.
+- `GET /api/v1/search?owner=…` — the same envelope across the repositories the
+  caller can read under one owner: at most 50 candidates, warm-only, with a
+  per-repository `not_warm`/`not_searched`/`failed` status instead of a silent
+  omission. Instance-wide code search is not offered in v1: without an owner the
+  cost is every repository on the instance and cannot be bounded honestly.
+- `/{owner}/{repo}/search` and `/search?owner=…` — native GET forms (no
+  JavaScript), file-grouped results, every match linked to
+  `/{owner}/{repo}/blob/{sha}/{path}#L{line}` and its matched span wrapped in
+  `<mark>` by the server renderer. The repository header carries a compact
+  search box; there is deliberately no masthead box, because a global box
+  without owner context would promise instance-wide code search.
+- `spindle search` and the SDK's `repo.search` / `client.search` — the same
+  handlers, rendered for a terminal or returned as the envelope.
+
+Every answer echoes the normalised `options`, the resolved `ref` and `sha`, and
+the completeness fields (`complete`, `truncated`, `timed_out`, and a
+per-repository `status`): a match cap, a byte cap, a fired deadline, a cold
+repository or a candidate the request deadline never started is a **field**,
+never a silently short list. Gating is the existing read gate
+(`identity.CheckRead`), so denied repositories contribute no name, no count and
+no reason; both pages use the Code page's gate (an invisible repository is a
+404 page) and both API lanes answer `Cache-Control: no-store` with no ETag,
+because the result is principal-, ref- and query-dependent.
+
+`type=issues|all` covers issue and pull-request titles, labels, authors, states
+and kinds from the shared index, plus body/comment text under a bounded scan
+(newest 50 threads, 500 events per repository) folded through moderation
+**before** matching — a hidden body can never be matched, counted or excerpted.
+
+The engine is a deliberate decision, not a stopgap: a full-tree query is linear
+in file count and a capped broad query is flat ([`EVIDENCE.md`](EVIDENCE.md)
+E21). An index starts a new planning doc when measured p95 exceeds 1.5 s on the
+median repository, when a repository that must be searchable is remote-served,
+when instance-wide code search becomes a requirement, or when ranking,
+symbol/definition search or exact whole-tree counts are wanted. Until then,
+grep on the serving copy is exact at the resolved sha, adds no push-path round
+trip and no bucket family.
+
+## 7. API, SDK and web UI
 
 Three front doors over the same state — JSON API, SDK, web UI — plus the API browser that documents
 the first and the Administration area that operates the instance.

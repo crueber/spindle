@@ -223,12 +223,12 @@ func (s *Service) userExists(ctx context.Context, username string) bool {
 
 // accountTrace is the ONE claimed-user predicate: a users/<u>/user.json (the
 // OIDC username registry) or a users/<u>/profile.json (created lazily on first
-// authenticated access or first role grant) is an account trace. Token-mode
-// principals have only the profile, so probing user.json alone made their own
-// repositories unadministrable (the audit's HIGH bug) — and a rebase dropped
-// this helper once, which the owner-predicate test now pins. Unknown and
-// invalid namespaces are (false, nil); a store error surfaces so callers can
-// fail closed.
+// authenticated access or first role grant, and the only trace a machine
+// credential's grant subject has) is an account trace. Probing user.json alone
+// made a profile-only principal's own repositories unadministrable (the
+// audit's HIGH bug) — and a rebase dropped this helper once, which the
+// owner-predicate test now pins. Unknown and invalid namespaces are
+// (false, nil); a store error surfaces so callers can fail closed.
 func (s *Service) accountTrace(ctx context.Context, username string) (bool, error) {
 	if s == nil || s.Store == nil {
 		return false, nil

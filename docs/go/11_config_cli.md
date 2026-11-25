@@ -154,6 +154,8 @@ Copied from Rust spec §15.1; key names, defaults, and meanings are **normative 
 | `static_sites.host` | `"static.localhost"` | the ONLY `Host` header the static listener answers for (port-insensitive, case-insensitive); every other Host is a bodiless 404 |
 | `static_sites.max_file_bytes` | `"8MiB"` | per-file cap on the buffered read path; a larger blob is a 404 (v1 has no streaming path) |
 | `static_sites.index_files` | `["index.html","index.htm"]` | directory-index probe order inside a tree; a directory matching none is a 404, never a listing |
+| `search.enabled` | `true` | code search over each repository's serving copy (`docs/features/20_search.md`). A `*bool` so "absent" stays distinct from an explicit `false`; absent/nil means enabled, and `false` answers the search routes as not found. Operator-only, restart-required (the service and its request pool are built at boot). No index, no bucket key |
+| `search.max_concurrent` | `2` | concurrent searches per instance (`0` = the default 2; ceiling 16). One search can fan out to four grep workers, so this is the CPU bound a public repository cannot turn a stranger into; every other search cap is a package constant in `internal/search` (20_search.md §5.2) |
 
 The four rates are spelled `N/s`, `N/min` or `N/h` with `N > 0` (a token bucket of capacity `N`
 refilled continuously over the window). Anything else — `30/m`, `30 per minute`, `0/min`, a day unit —
@@ -441,6 +443,13 @@ Each rule is a named function in `internal/config/validate.go`; the list is the 
     validation and fails at `net.Listen` with a clear bind error; a home-grown normaliser would have
     to guess which spellings are the same bind and would reject valid configs. Every message names
     its key so the Configuration page marks the row.
+
+13. **search** (`checkSearch`, docs/features/20_search.md §5.2/§11): `search.max_concurrent` is
+    non-negative and at most 16 (`0` = the default 2) — a larger value would let searches compete
+    with clone/upload-pack for CPU. `search.enabled` is a `*bool` (nil = enabled), so there is
+    nothing to validate there. Every other search cap (pattern bytes, pathspec count, match/byte
+    caps, deadlines, candidate and worker counts) is a package constant in `internal/search`, not a
+    config key.
 
 ## 6. CLI: `spindle`
 

@@ -90,8 +90,8 @@ func (s *Service) resolveCloneCredential(ctx context.Context, token string) (aut
 // unprivileged ci:<id> principal with no write — because the secret, the
 // revocation state and the repository scope are verified handler-side by
 // authorizeRunner against the credential record (one exact-key GET). Without
-// this claim a token-mode or oidc-mode instance would reject every runner
-// protocol call in the chain before the runner handler ran (pass B2).
+// this claim the authenticating chain would reject every runner protocol call
+// before the runner handler ran (pass B2).
 func ClaimRunnerCredential(token string) (auth.Principal, *auth.AuthError, bool) {
 	if !strings.HasPrefix(strings.TrimSpace(token), runnerTokenPrefix) {
 		return auth.Principal{}, nil, false

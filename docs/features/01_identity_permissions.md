@@ -719,8 +719,13 @@ Repos that predate this feature have no `access.json`. Normative behavior:
   repo's owner namespace (org-owned repos need none — org-owner resolution covers them); auth-`none`
   anonymous pushes stay flag-driven (everything is granted anyway).
 - **Materialization** is the `access-bootstrap` task kind (Seam 5): each sweep, for every repo still
-  lacking `access.json`, `Create`s the synthesized object (creator binding from the creating principal
-  when recorded, else `user:<owner>`); idempotent (`Create` 412 → skip), restartable, orphan-tolerant.
+  lacking `access.json`, `Create`s the synthesized object — exactly `SynthesizeOwner(owner)`: public,
+  with `{subject:"user:<owner>", role:"admin"}` when the **owner** namespace is a user (a legacy email
+  spelling, or a username with an account trace — `user.json` or `profile.json`), and no bindings for
+  an org or an unclaimed name (org-owner resolution covers org repos). The sweep never consults the
+  creating principal — the repo placeholder carries no `created_by` — so the grant belongs to the
+  owner, never to whoever pushed first. Idempotent (`Create` 412 → skip), restartable,
+  orphan-tolerant.
 
 ### Concurrency
 

@@ -33,6 +33,7 @@ import { attachTransfer } from "./transfer.js";
 import { attachUsers } from "./users.js";
 import { attachImports } from "./import.js";
 import { attachMirrors, attachMirror } from "./mirror.js";
+import { attachSearch, attachSearchTop } from "./search.js";
 import { attachPushMirror } from "./pushmirror.js";
 import { attachCreate } from "./create.js";
 import { openAuthPopup, canAuthenticate } from "./auth.js";
@@ -176,6 +177,7 @@ export class ReposClient {
     attachImports(this);
     attachMirrors(this);
     attachCreate(this);
+    attachSearchTop(this);
   }
 
   /**
@@ -225,6 +227,7 @@ export class ReposClient {
     attachSocial(r);
     attachMirror(r);
     attachPushMirror(r);
+    attachSearch(r);
     return r;
   }
 

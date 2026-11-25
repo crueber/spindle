@@ -778,7 +778,7 @@ func repoTabSection(path string) string {
 		return "code"
 	}
 	switch strings.ToLower(segs[2]) {
-	case "tree", "blob", "blame", "branches":
+	case "tree", "blob", "blame", "branches", "search":
 		return "code"
 	case "commits", "commit", "compare":
 		return "commits"

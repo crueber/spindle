@@ -33,6 +33,7 @@ import (
 	"github.com/crueber/spindle/internal/releases"
 	"github.com/crueber/spindle/internal/repoimport"
 	"github.com/crueber/spindle/internal/review"
+	"github.com/crueber/spindle/internal/search"
 	"github.com/crueber/spindle/internal/server"
 	"github.com/crueber/spindle/internal/server/auth"
 	"github.com/crueber/spindle/internal/social"
@@ -92,8 +93,12 @@ type collabWiring struct {
 	// Insights (docs/features/18): the cached repository pulse projection and
 	// the on-demand refresh starter (the maintainer sweeper calls the service
 	// directly).
-	insightsSvc     *insights.Service
-	insightsStart   func(ctx context.Context, owner, repo string) error
+	insightsSvc   *insights.Service
+	insightsStart func(ctx context.Context, owner, repo string) error
+	// searchSvc is the code-search service (docs/features/20_search.md): the
+	// scopes, query grammar, permission-aware fan-out and completeness. P3
+	// binds its API routes through api.Env.Search; P5 owns the pages.
+	searchSvc       *search.Service
 	archiveHandler  *archive.Handler
 	forksyncSvc     *forksync.Service
 	forksyncHandler *forksync.Handler
@@ -498,6 +503,18 @@ func buildCollab(st store.ObjectStore, cfg *config.Config, reg *wal.Registry, ap
 		// without buildCollab — task-kind registrations panic on a
 		// second buildCollab in one test binary).
 		reg.OnCreate = orgBirthObserver(c.ident, c.notifySvc)
+	}
+	// P2 of docs/features/20_search.md: the code-search service over the
+	// grep primitive (git.Layer's ScanPool), the WAL serving copies and
+	// identity's read gate. P3 binds the routes; nil-safe without reg/ident
+	// (a test composition answers 503, never an ungated search).
+	c.searchSvc = newSearchService(cfg, reg, apiEnv, c.ident, c.issuesSvc)
+	if apiEnv != nil {
+		// P3: the frozen API lanes (07_api.md §9.13) read the same service.
+		// The value is a *search.Service (never a typed nil): the routes
+		// answer its classified failures, and an unwired composition answers
+		// the documented 503 rather than searching with no gate.
+		apiEnv.Search = c.searchSvc
 	}
 	return c
 }

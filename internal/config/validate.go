@@ -34,8 +34,25 @@ func Validate(c *Config) (warnings []string, errs []error) {
 	errs = append(errs, checkSecretsKey(c)...)
 	errs = append(errs, checkThreads(c)...)
 	errs = append(errs, checkRateLimit(c)...)
+	errs = append(errs, checkSearch(c)...)
 	errs = append(errs, checkEventSinks(c)...)
 	return warnings, errs
+}
+
+// checkSearch validates the [search] section (docs/features/20_search.md
+// §5.2/§11). A zero max_concurrent means "the default" (2); a negative or
+// above-ceiling value is a configuration mistake that would otherwise be
+// silently clamped somewhere the operator cannot see. enabled is a *bool:
+// absent/nil is enabled, so there is nothing to validate there.
+func checkSearch(c *Config) []error {
+	n := c.Search.MaxConcurrent
+	switch {
+	case n < 0:
+		return []error{fmt.Errorf("search.max_concurrent must not be negative (0 = the default of 2; ceiling %d)", SearchMaxConcurrent)}
+	case n > SearchMaxConcurrent:
+		return []error{fmt.Errorf("search.max_concurrent is %d; the ceiling is %d (each search can hold four grep workers and a scan-pool slot, and clone/upload-pack must keep its CPU)", n, SearchMaxConcurrent)}
+	}
+	return nil
 }
 
 // checkRateLimit validates the [rate_limit] rate spellings (PLAN-V2 §M.7).

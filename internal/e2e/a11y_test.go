@@ -299,6 +299,12 @@ func TestA11yRenderedPages(t *testing.T) {
 		{"issue", fmt.Sprintf("/%s/%s/issues/%d", owner, repo, issueNum)},
 		{"pull request", fmt.Sprintf("/%s/%s/pull/%d", owner, repo, prNum)},
 		{"releases", "/" + owner + "/" + repo + "/releases"},
+		// Feature 20 (docs/features/20_search.md §7): the repository page and
+		// the owner surface, both with a query that matches the fixture README
+		// ("a11y fixture"). These are the pages whose form, results list, <mark>
+		// span and masthead search box the rendered floor covers.
+		{"repo search", "/" + owner + "/" + repo + "/search?q=fixture"},
+		{"owner search", "/search?owner=" + owner + "&q=fixture&type=code"},
 		{"admin", "/admin"},
 		{"admin config", "/admin/config"},
 	}

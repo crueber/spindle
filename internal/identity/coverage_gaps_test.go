@@ -212,8 +212,8 @@ func TestEmailForUsername(t *testing.T) {
 
 // TestUserExistsPredicate pins the claimed-user rule itself: a user.json (the
 // OIDC registry) OR a profile.json (lazily created) is an account trace, so a
-// token-mode owner with only a profile still counts. This is the predicate the
-// admin/owner synthesis depends on.
+// profile-only principal (a grant subject, a machine credential) still counts.
+// This is the predicate the admin/owner synthesis depends on.
 func TestUserExistsPredicate(t *testing.T) {
 	ctx := context.Background()
 	s := testService()

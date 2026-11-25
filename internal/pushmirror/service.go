@@ -124,7 +124,7 @@ func New(d Deps) *Service {
 
 // ValidateTarget checks an upstream URL against the chosen auth kind:
 //
-//	file:// → auth none only (e2e + fixture path; gated by AllowFile at the HTTP layer).
+//	file:// → `AuthNone` only (e2e + fixture path; gated by AllowFile at the HTTP layer).
 //	https:// → none|password|token (token over plaintext http refused).
 //	http:// → none only (never send secrets over plaintext).
 //	ssh:// + scp-like (git@host:path) → ssh only (no key agent ambiguity: the key file is the agent).
