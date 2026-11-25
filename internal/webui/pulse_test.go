@@ -126,7 +126,9 @@ func TestCodePulseFullProjection(t *testing.T) {
 	for _, want := range []string{
 		"Code pulse",
 		"10 commits · 90d",
-		"Top contributor 80% · 3 contributors",
+		"Top contributor",
+		"80%",
+		"3 contributors",
 		"Last commit",
 		"Last release",
 		"2d ago",
@@ -139,9 +141,33 @@ func TestCodePulseFullProjection(t *testing.T) {
 			t.Errorf("pulse card missing %q", want)
 		}
 	}
+	if strings.Contains(body, "Bus factor") || strings.Contains(body, "bus factor") {
+		t.Error("the card must not call the contributor share a bus factor")
+	}
+	// The share is the row's value; the count is a caption line beneath it,
+	// never a kv value (which would read as a suffix to the percentage).
+	doc := parsePage(t, body)
+	var caption *html.Node
+	walk(doc, func(n *html.Node) {
+		if n.Data == "p" && strings.TrimSpace(nodeText(n)) == "3 contributors" {
+			caption = n
+		}
+		if n.Data == "span" && strings.Contains(attr(n, "class"), "kv-val") &&
+			strings.TrimSpace(nodeText(n)) == "3 contributors" {
+			t.Error("the contributor count must not be a kv value")
+		}
+	})
+	if caption == nil {
+		t.Error("the contributor count is not a caption line")
+	}
+	if !strings.Contains(body, ">Top contributor</span>") || !strings.Contains(body, ">80%</span>") {
+		t.Error("the share is not the top-contributor row's value")
+	}
+	if strings.Contains(body, "80% · 3 contributors") {
+		t.Error("the share and the count must not share a line")
+	}
 	// The sparkline is inline SVG with an accessible name stating range and
 	// totals; the text repeats the fact.
-	doc := parsePage(t, body)
 	svg := nodesWithAttr(doc, "role", "img")
 	if len(svg) != 1 {
 		t.Fatalf("role=img nodes = %d, want 1", len(svg))
@@ -192,8 +218,29 @@ func TestCodePulseCappedContributors(t *testing.T) {
 	p.Windows["90"].ContributorsCapped = true
 	p.Windows["90"].ContributorsTotal = 60
 	_, body := pulseFixture(t, p, true)
-	if !strings.Contains(nodeText(parsePage(t, body)), "60+ contributors") {
+	doc := parsePage(t, body)
+	text := nodeText(doc)
+	if !strings.Contains(text, "60+ contributors") {
 		t.Errorf("capped contributors did not render 60+: %s", body)
+	}
+	caption, kvValue := false, false
+	walk(doc, func(n *html.Node) {
+		txt := strings.TrimSpace(nodeText(n))
+		switch {
+		case n.Data == "p" && txt == "60+ contributors":
+			caption = true
+		case n.Data == "span" && strings.Contains(attr(n, "class"), "kv-val") && txt == "60+ contributors":
+			kvValue = true
+		}
+	})
+	if !caption {
+		t.Errorf("capped count is not a caption line: %s", body)
+	}
+	if kvValue {
+		t.Errorf("capped count must not be a kv value: %s", body)
+	}
+	if !strings.Contains(body, ">80%</span>") {
+		t.Errorf("capped count lost the share line: %s", body)
 	}
 }
 
@@ -243,7 +290,7 @@ func TestCodePulseOldProjectionHidesLanguageRow(t *testing.T) {
 	if strings.Contains(body, "Last release") {
 		t.Error("a release count without a stamp must omit the dated row")
 	}
-	if !strings.Contains(body, "10 commits · 90d") || !strings.Contains(body, "Top contributor 80%") {
+	if !strings.Contains(body, "10 commits · 90d") || !strings.Contains(body, ">Top contributor</span>") {
 		t.Error("old projection lost the rows it still has")
 	}
 }
@@ -282,7 +329,7 @@ func TestCodePulseTruncatedAndCappedNotes(t *testing.T) {
 	}
 }
 
-func TestCodePulseNoCommitsNoBusFactor(t *testing.T) {
+func TestCodePulseNoCommitsNoContributorBlock(t *testing.T) {
 	p := pulseProjection()
 	p.Windows["90"] = &insights.Window{Days: 90, Commits: 0}
 	p.Windows["30"] = &insights.Window{Days: 30, Bucket: "day", Buckets: []insights.Bucket{
@@ -290,8 +337,11 @@ func TestCodePulseNoCommitsNoBusFactor(t *testing.T) {
 		{Start: "2026-11-25T00:00:00Z", Label: "Nov 25"},
 	}}
 	_, body := pulseFixture(t, p, true)
+	if strings.Contains(body, "Top contributor") {
+		t.Error("a zero-commit window must omit the top-contributor block")
+	}
 	if strings.Contains(body, "Bus factor") {
-		t.Error("a zero-commit window must omit the bus-factor row")
+		t.Error("a zero-commit window must omit the contributor block entirely")
 	}
 	if !strings.Contains(body, "0 commits · 90d") {
 		t.Error("the zero-total momentum line must still be honest")

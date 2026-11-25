@@ -477,11 +477,12 @@ top to bottom:
 5. **File table**: type icon, name (`.link`), monospace size, monospace age.
    No Unix mode column. The wrapper is `overflow-x-auto` (issue #275).
 6. **Docs panel** (`partials/repo_doctabs.html`): `?doc=` links, README first.
-7. **About rail** (`lg:` only): `.kv` rows built exclusively from data the
-   chrome already carries — stars, forks, watching, branches, tags, and the
-   repository's website when set (a real link; the visible text is
-   tail-truncated, the full URL stays in `href`/`title`). Nothing is
-   invented; a value the handler does not have is not rendered.
+7. **About rail** (`lg:` only): the description, then — when set — a single
+   `Website` link (the word is the visible text; the full URL stays in
+   `href`/`title`, never printed or truncated), then `.kv` rows built
+   exclusively from data the chrome already carries — stars, forks, watching,
+   branches, tags. Nothing is invented; a value the handler does not have is
+   not rendered.
 8. **Status strip** (`partials/repo_status.html`): branch, rev, health and the
    branch count, fixed to the viewport bottom above `sm:`. It says only what the
    page knows — there is no fabricated CI state.

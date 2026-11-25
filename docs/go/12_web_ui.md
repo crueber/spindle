@@ -1616,9 +1616,10 @@ the effects are DOM refetches, not client caches.
   it). The rule is the publish-time `config.ValidateRepoWebsite` (the one validation source): empty
   or an absolute http/https URL with a host and no credentials — a rejected value re-renders the tab
   with the typed value and a keyed `role="alert"` error, and nothing is published. The repo page's
-  About rail renders a `Website` `.kv` row only when set, as a real `<a>` with
-  `target="_blank" rel="noopener noreferrer nofollow"`; the visible text is the URL tail-truncated to
-  `maxWebsiteDisplayRunes` (48, `websiteDisplay`) while `href`/`title` carry the full value, and
-  html/template escapes both (no `template.HTML`). Empty means no row — no placeholder. Rationale:
-  the About rail is a key/value stack of things the chrome already carries, and the link belongs
-  there rather than in the header (a URL is not a title).
+  About box renders a single link reading `Website` only when set, under the
+  description and before the key/value rows, as a real `<a>` with
+  `target="_blank" rel="noopener noreferrer nofollow"`. The visible text is the
+  word (the URL is never printed or truncated); `href`/`title` carry the full
+  value, and html/template escapes both (no `template.HTML`). Empty means no
+  link — no placeholder. Rationale: a URL is not a key/value fact like the
+  counters, and a truncated URL fragment is noise; the word is the affordance.

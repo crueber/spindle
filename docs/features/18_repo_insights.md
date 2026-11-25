@@ -281,10 +281,13 @@ Four facts, each with its text reading:
    bucket count, the 30-day total, the peak day and the 90-day total; the text
    beside it repeats the fact. The sparkline is `polyline`, server-rendered, no
    chart library and no island.
-2. **Bus factor** — `"Top contributor 78% · 3 contributors"` from the 90-day
-   window (`Contributors[0].Commits / Commits`, `ContributorsTotal`). A capped
-   contributor list renders the true total with a `+` (`"60+ contributors"`).
-   A zero-commit window omits the row rather than printing `0%`.
+2. **Top contributor share** — two lines from the 90-day window:
+   `"Top contributor 78%"` (`Contributors[0].Commits / Commits`, its own `.kv`
+   row) and `"3 contributors"` as a left-aligned caption beneath the row
+   (`ContributorsTotal`), never a `.kv` value (it would read as a suffix to the
+   percentage). A capped contributor list renders the true total with a `+`
+   (`"60+ contributors"`). A zero-commit window omits both lines rather than
+   printing `0%`.
 3. **Cadence** — `"Last commit 2d ago"` from the Code page's own head-commit
    strip (`Latest.When`, the same `rel` treatment as every other stamp), and
    `"Last release 3mo ago"` from `Facts.LastReleaseAt` (`releases/latest.json`,

@@ -116,15 +116,15 @@
         {{if .Data.Repo.Description}}
         <p class="mb-2.5 text-[12.5px] leading-snug text-[var(--pd-text-2)]">{{.Data.Repo.Description}}</p>
         {{end}}
+        {{if .Data.Repo.Website}}
+        <p class="mb-2.5 text-[12.5px] leading-snug"><a class="link" href="{{.Data.Repo.Website}}" title="{{.Data.Repo.Website}}" target="_blank" rel="noopener noreferrer nofollow">Website</a></p>
+        {{end}}
         <div class="kv">
           <div class="kv-row"><span class="kv-key">Stars</span><span class="kv-val">{{.Data.Repo.Stars}}</span></div>
           <div class="kv-row"><span class="kv-key">Forks</span><span class="kv-val">{{.Data.Repo.Forks}}</span></div>
           <div class="kv-row"><span class="kv-key">Watching</span><span class="kv-val">{{.Data.Repo.Watchers}}</span></div>
           <div class="kv-row"><span class="kv-key">Branches</span><span class="kv-val">{{.Data.Repo.Branches}}</span></div>
           <div class="kv-row"><span class="kv-key">Tags</span><span class="kv-val">{{.Data.Repo.Tags}}</span></div>
-          {{if .Data.Repo.Website}}
-          <div class="kv-row"><span class="kv-key">Website</span><span class="kv-val min-w-0 truncate text-left"><a class="link" href="{{.Data.Repo.Website}}" title="{{.Data.Repo.Website}}" target="_blank" rel="noopener noreferrer nofollow">{{.Data.Repo.WebsiteText}}</a></span></div>
-          {{end}}
         </div>
       </div>
 
@@ -146,8 +146,9 @@
           <div class="mono mt-0.5 text-[10px] text-[var(--pd-muted)]">last 30 days · UTC</div>
         </div>
         <div class="kv">
-          {{if .Data.Pulse.BusText}}
-          <div class="kv-row"><span class="kv-key">Bus factor</span><span class="kv-val">{{.Data.Pulse.BusText}}</span></div>
+          {{if .Data.Pulse.TopShare}}
+          <div class="kv-row"><span class="kv-key">Top contributor</span><span class="kv-val">{{.Data.Pulse.TopShare}}</span></div>
+          <p class="mt-0.5 text-[11.5px] leading-snug text-[var(--pd-text-2)]">{{.Data.Pulse.ContributorLine}}</p>
           {{end}}
           {{if .Data.Pulse.LastCommit}}
           <div class="kv-row"><span class="kv-key">Last commit</span><span class="kv-val"><time datetime="{{.Data.Pulse.LastCommit}}" title="{{.Data.Pulse.LastCommit}}">{{rel .Data.Pulse.LastCommit}}</time></span></div>

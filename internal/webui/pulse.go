@@ -1,6 +1,6 @@
 // pulse.go — the Code page's "Code pulse" card (docs/features/18_repo_insights.md
-// §4.1): momentum, bus factor, cadence and the language mix, read from the
-// SAME cached projection the Insights page uses.
+// §4.1): momentum, top-contributor share, cadence and the language mix, read
+// from the SAME cached projection the Insights page uses.
 //
 // One exact-key GET (`repos/<o>/<r>/insights/pulse.json`) rides the tree
 // request; it never runs git and never LISTs. No projection → no card (the
@@ -40,8 +40,12 @@ type codePulse struct {
 	SparkPoints string
 	SparkLabel  string
 
-	// Bus factor (90-day window): "Top contributor 78% · 3 contributors".
-	BusText string
+	// Top contributor (90-day window): TopShare is the value of the
+	// "Top contributor" row ("78%") and ContributorLine is the caption line
+	// beneath it ("3 contributors", "60+ contributors" when capped). Both
+	// empty means the block is omitted (a zero-commit window).
+	TopShare        string
+	ContributorLine string
 
 	// Cadence: the page's head-commit time and the newest release stamp.
 	LastCommit   string // RFC 3339; empty = omit the row
@@ -87,14 +91,14 @@ func buildCodePulse(p *insights.Projection, latest *repoCommit, repo *RepoChrome
 		if pct > 100 {
 			pct = 100
 		}
-		noun := plural(w90.ContributorsTotal, "contributor", "contributors")
 		count := strconv.Itoa(w90.ContributorsTotal)
 		if w90.ContributorsCapped {
 			// ContributorsTotal is the window's true distinct count; the list
 			// itself is truncated at 50, so the "+" is conservative.
 			count += "+"
 		}
-		cp.BusText = fmt.Sprintf("Top contributor %d%% · %s %s", pct, count, noun)
+		cp.TopShare = strconv.Itoa(pct) + "%"
+		cp.ContributorLine = fmt.Sprintf("%s %s", count, plural(w90.ContributorsTotal, "contributor", "contributors"))
 	}
 
 	if latest != nil && latest.When != "" {
