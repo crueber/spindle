@@ -17,7 +17,10 @@ type summaryBody struct {
 	Name  string `json:"name"`
 	// Description is the per-repo short display string (issue #235): "" when
 	// unset, rendered by the repo header and set via the General settings tab.
-	Description  string           `json:"description"`
+	Description string `json:"description"`
+	// Website is the repository's public home page: "" when unset, rendered as
+	// a link on the repo page and set via the General settings tab.
+	Website      string           `json:"website"`
 	FullName     string           `json:"full_name"`
 	Head         *Ref             `json:"head"` // null = unborn (the one sanctioned null)
 	Branches     int              `json:"branches"`
@@ -194,6 +197,7 @@ func (h *handlers) summary(w http.ResponseWriter, r *http.Request) {
 		Owner:        id.Owner,
 		Name:         id.Name,
 		Description:  s.Description,
+		Website:      s.Website,
 		FullName:     id.Owner + "/" + id.Name,
 		Head:         s.Head,
 		Branches:     s.Branches,
@@ -232,6 +236,13 @@ func (h *handlers) summary(w http.ResponseWriter, r *http.Request) {
 		// the stale text. FNV-1a keeps the suffix short; clearing the
 		// description drops the suffix, which busts the cache too.
 		etag += "~d" + descriptionHash(s.Description)
+	}
+	if s.Website != "" {
+		// Same trap once more for the website link: a settings-only change
+		// moves no ref, so a revalidating client would 304 and keep showing
+		// the stale (or missing) Website row. Clearing the key drops the
+		// suffix, which busts the cache too.
+		etag += "~w" + websiteHash(s.Website)
 	}
 	if mirrorView != nil {
 		// Same trap once more (Forgejo #240): a sync outcome changes
@@ -312,6 +323,15 @@ func (h *handlers) summary(w http.ResponseWriter, r *http.Request) {
 func descriptionHash(d string) string {
 	h := fnv.New32a()
 	_, _ = h.Write([]byte(d))
+	return strconv.FormatUint(uint64(h.Sum32()), 16)
+}
+
+// websiteHash is the short ETag suffix covering the summary website
+// (the descriptionHash discipline): a website-only change keeps the head sha,
+// so a revalidating client must never 304 it away.
+func websiteHash(u string) string {
+	h := fnv.New32a()
+	_, _ = h.Write([]byte(u))
 	return strconv.FormatUint(uint64(h.Sum32()), 16)
 }
 

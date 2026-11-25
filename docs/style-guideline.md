@@ -478,7 +478,9 @@ top to bottom:
    No Unix mode column. The wrapper is `overflow-x-auto` (issue #275).
 6. **Docs panel** (`partials/repo_doctabs.html`): `?doc=` links, README first.
 7. **About rail** (`lg:` only): `.kv` rows built exclusively from data the
-   chrome already carries — stars, forks, watching, branches, tags. Nothing is
+   chrome already carries — stars, forks, watching, branches, tags, and the
+   repository's website when set (a real link; the visible text is
+   tail-truncated, the full URL stays in `href`/`title`). Nothing is
    invented; a value the handler does not have is not rendered.
 8. **Status strip** (`partials/repo_status.html`): branch, rev, health and the
    branch count, fixed to the viewport bottom above `sm:`. It says only what the
@@ -659,6 +661,19 @@ renderer or an inline `bg-*` state dot.
   it on submit. The island only arms the button (its trim is UI convenience,
   never the boundary); destructive actions are impossible without the server
   match.
+- **Sidebar insight card (the Code pulse pattern)** — canonical reference
+  `internal/webui/pulse.go` + `templates/pages/repo/tree.html` (card
+  `docs/features/18_repo_insights.md` §4.1). A second card in a page's About
+  rail, beneath the identity card, that states four cached facts: an
+  `.eyebrow` title, a mono value line, an inline-SVG `<polyline>` sparkline
+  (`role="img"` + an `aria-label` stating range and total; the text line
+  repeats the total), a `.kv` block for the remaining rows, a thin stacked mix
+  bar built from `--pd-text-2` at descending opacity (`aria-hidden`; the exact
+  percentages live in mono text), and a mono `.link` footer to the page that
+  owns the data. The pattern exists so a sidebar card is a composition of the
+  shared vocabulary, never a new CSS class: server-rendered, no JS, no extra
+  request, and nothing colour-only. When the source projection is absent the
+  card is absent — a sidebar never invents a fact to fill space.
 
 ## 8. Tables and code views
 

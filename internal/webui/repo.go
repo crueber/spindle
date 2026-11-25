@@ -98,6 +98,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/crueber/spindle/internal/api"
 	"github.com/crueber/spindle/internal/checks"
@@ -462,8 +463,13 @@ func isEmptyRepoErr(err error) bool {
 type RepoChrome struct {
 	Owner, Name, Full string
 	Description       string
-	Head              *api.Ref
-	HeadLabel         string
+	// Website is the repository's public home page ("" = no About row) and
+	// WebsiteText is its one-line display form: the same URL, tail-truncated
+	// for the rail. The href/title always carry the full value.
+	Website     string
+	WebsiteText string
+	Head        *api.Ref
+	HeadLabel   string
 
 	Branches, Tags int
 	Empty          bool
@@ -550,6 +556,21 @@ type ForkSyncView struct {
 	Failed   bool
 }
 
+// maxWebsiteDisplayRunes is the About rail's budget for the visible website
+// text (the rail is narrow; the full URL always stays in href and title).
+const maxWebsiteDisplayRunes = 48
+
+// websiteDisplay is the About rail's one-line rendering of the website URL:
+// short values render verbatim, longer ones are tail-truncated with an
+// ellipsis so the scheme and host survive. Unset stays "" (no row).
+func websiteDisplay(u string) string {
+	if utf8.RuneCountInString(u) <= maxWebsiteDisplayRunes {
+		return u
+	}
+	r := []rune(u)
+	return string(r[:maxWebsiteDisplayRunes-1]) + "…"
+}
+
 // buildRepoChrome composes the header model in ONE pass (no N+1 browser
 // fetches; the projections below are boot-bound in-process reads).
 func (s *Server) buildRepoChrome(r *http.Request, rq repoRequest, sum api.SummaryData) *RepoChrome {
@@ -558,6 +579,8 @@ func (s *Server) buildRepoChrome(r *http.Request, rq repoRequest, sum api.Summar
 		Name:         rq.id.Name,
 		Full:         rq.full,
 		Description:  sum.Description,
+		Website:      sum.Website,
+		WebsiteText:  websiteDisplay(sum.Website),
 		Head:         sum.Head,
 		Branches:     sum.Branches,
 		Tags:         sum.Tags,
@@ -1095,6 +1118,9 @@ type treePage struct {
 	DocTooBig  bool
 	DocBinary  bool
 	DocSize    string
+	// Pulse is the Code page's "Code pulse" card (18_repo_insights.md §4.1).
+	// nil = no projection (or an unwired seam) and therefore no card at all.
+	Pulse *codePulse
 	// NewFileHref is the tree's "Add file" affordance (Feature F), gated by
 	// the push rule and routed through the login interstitial for an
 	// anonymous viewer in token/oidc mode. Empty = no affordance.
@@ -1329,6 +1355,15 @@ func (s *Server) repoTree(w http.ResponseWriter, r *http.Request) {
 			default:
 				data.DocBody = RenderMarkdownCtx(string(blob.Contents), docCtx)
 			}
+		}
+	}
+	// Code pulse card (18_repo_insights.md §4.1): ONE exact-key GET of the
+	// cached projection, riding this request so the About rail can state the
+	// repository's momentum. Unwired seam, absent projection or a read error
+	// renders no card — the page never runs git for it and never invents one.
+	if repoDeps.Insights != nil {
+		if p, found, ierr := repoDeps.Insights(ctx, rq.id.Owner, rq.id.Name); ierr == nil && found && p != nil {
+			data.Pulse = buildCodePulse(p, data.Latest, c, s.env.now())
 		}
 	}
 	s.page(w, r, rq.p, http.StatusOK, "repo/tree", "Code · "+c.Full, data)

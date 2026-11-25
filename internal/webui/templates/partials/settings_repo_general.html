@@ -18,6 +18,13 @@
     <p class="muted mt-1 text-[11px]">Shown in the repo header next to the name. Empty hides it. Saving requires admin.</p>
   </div>
 
+  <div>
+    <label class="mb-1 block text-sm font-medium" for="repo-website">Website</label>
+    <input class="input w-full" id="repo-website" name="website" type="url" inputmode="url"
+           maxlength="{{.MaxWebsite}}" placeholder="https://example.com" value="{{.Website}}">
+    <p class="muted mt-1 text-[11px]">Linked from the repository page. An absolute http or https URL; empty hides the row.</p>
+  </div>
+
   <hr class="border-current opacity-10">
 
   <h4 class="eyebrow">Features</h4>

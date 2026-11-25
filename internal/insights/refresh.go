@@ -17,10 +17,11 @@ import (
 )
 
 // Scanner is the one git capability insights needs: a bounded history scan
-// with per-commit line totals. *git.Layer implements it; tests substitute a
-// pure fake.
+// with per-commit line totals, plus the bounded tree listing behind the
+// language mix. *git.Layer implements it; tests substitute a pure fake.
 type Scanner interface {
 	InsightsCommits(ctx context.Context, repo *git.LocalRepo, rev string, since time.Time, cap int) ([]git.InsightsCommit, bool, error)
+	InsightsLanguages(ctx context.Context, repo *git.LocalRepo, rev string, cap int) ([]git.InsightsLanguage, bool, error)
 }
 
 // Deps is the narrow composition seam: the store, the git scanner, and the two
@@ -42,6 +43,8 @@ type Deps struct {
 	TTL          time.Duration
 	MergeScanCap int
 	FactCap      int
+	// LanguageCap bounds the regular blobs one language scan counts.
+	LanguageCap int
 }
 
 // Service computes and reads projections.
@@ -63,6 +66,9 @@ func New(d Deps) *Service {
 	}
 	if d.FactCap <= 0 {
 		d.FactCap = DefaultFactCap
+	}
+	if d.LanguageCap <= 0 {
+		d.LanguageCap = git.InsightsLanguageScanMax
 	}
 	return &Service{d: d}
 }
@@ -137,7 +143,8 @@ func (s *Service) refresh(ctx context.Context, owner, repo string, log Logger, f
 	}
 
 	var commits []git.InsightsCommit
-	truncated := false
+	var languages []git.InsightsLanguage
+	truncated, languagesCapped := false, false
 	if head != "" {
 		local, servedHead, serr := s.d.Serve(ctx, owner, repo)
 		if serr != nil {
@@ -153,6 +160,13 @@ func (s *Service) refresh(ctx context.Context, owner, repo string, log Logger, f
 		}
 		log.Notice("insights: scanning commits since " + scanFloor(now).Format("2006-01-02"))
 		commits, truncated, err = s.d.Git.InsightsCommits(ctx, local, head, scanFloor(now), s.d.MaxCommits)
+		if err != nil {
+			return false, err
+		}
+		// The language mix rides the same serving copy and head (one extra
+		// bounded tree listing; §3.7).
+		log.Notice("insights: scanning the language mix at the same head")
+		languages, languagesCapped, err = s.d.Git.InsightsLanguages(ctx, local, head, s.d.LanguageCap)
 		if err != nil {
 			return false, err
 		}
@@ -179,7 +193,9 @@ func (s *Service) refresh(ctx context.Context, owner, repo string, log Logger, f
 			MergeScanCapped: ct.mergeScanCapped,
 			PRSidecarReads:  ct.sidecarReads,
 		},
-		Facts: facts,
+		Facts:           facts,
+		Languages:       languagesFrom(languages),
+		LanguagesCapped: languagesCapped,
 	}
 	body, merr := json.Marshal(p)
 	if merr != nil {
@@ -377,6 +393,20 @@ func (s *Service) readFacts(ctx context.Context, owner, repo string) Facts {
 			// assets/ and counts/ are subdirectories.
 			return rest != "latest.json" && strings.HasSuffix(rest, ".json") && !strings.Contains(rest, "/")
 		})
+	// One exact-key GET of the releases family's own pointer gives the newest
+	// published release's stamp (releases §2); the count LIST above cannot
+	// (ObjectMeta carries no time). A missing/unreadable pointer leaves the
+	// stamp empty and the card omits the row rather than inventing a date.
+	if raw, _, err := store.GetBytes(ctx, s.d.Store, "repos/"+owner+"/"+repo+"/releases/latest.json", store.GetOptions{}); err == nil && raw != nil {
+		var ptr struct {
+			CreatedAt string `json:"created_at"`
+		}
+		if json.Unmarshal(raw, &ptr) == nil {
+			if t, ok := parseStamp(ptr.CreatedAt); ok {
+				f.LastReleaseAt = rfc3339(t)
+			}
+		}
+	}
 	f.Packages, f.PackagesKnown, f.PackagesCapped = s.countPrefix(ctx,
 		"repos/"+owner+"/"+repo+"/packages/registry/tags/", func(rest string) bool {
 			return rest != "" && !strings.Contains(rest, "/")

@@ -74,6 +74,24 @@ type Projection struct {
 	Scan       ScanInfo           `json:"scan"`
 	Collab     CollabInfo         `json:"collab"`
 	Facts      Facts              `json:"facts"`
+	// Languages is the committed-bytes language mix at HeadSHA (the Code
+	// pulse card's fourth row). It is additive and omitempty: a projection
+	// written before the field existed decodes with no rows and the card
+	// hides only the language row. The estimate counts committed bytes, not
+	// lines (18_repo_insights.md §3.7).
+	Languages []Language `json:"languages,omitempty"`
+	// LanguagesCapped is true when the tree held more regular blobs than the
+	// scan counted; the mix is then explicitly bounded in the UI.
+	LanguagesCapped bool `json:"languages_capped,omitempty"`
+}
+
+// Language is one row of the committed-bytes language mix. Pct is a whole
+// number; the rows sum to 100 (the largest row absorbs the rounding
+// residual). Ordering is bytes desc, name asc.
+type Language struct {
+	Name  string `json:"name"`
+	Bytes int64  `json:"bytes"`
+	Pct   int    `json:"pct"`
 }
 
 // ScanInfo records what the one git invocation covered.
@@ -155,6 +173,11 @@ type Facts struct {
 	Releases       int  `json:"releases"`
 	ReleasesKnown  bool `json:"releases_known"`
 	ReleasesCapped bool `json:"releases_capped"`
+	// LastReleaseAt is the newest published release's created_at from the
+	// releases/latest.json pointer (empty when the family has no pointer).
+	// "Releases" is a count; this is the one stamp the pulse card needs for
+	// "Last release 3mo ago". Additive and omitempty.
+	LastReleaseAt string `json:"last_release_at,omitempty"`
 
 	Packages       int  `json:"packages"`
 	PackagesKnown  bool `json:"packages_known"`

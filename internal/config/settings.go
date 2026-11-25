@@ -4,8 +4,10 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
+	"net/url"
 	"path"
 	"strings"
+	"unicode"
 	"unicode/utf8"
 
 	"github.com/BurntSushi/toml"
@@ -21,13 +23,20 @@ const MaxRepoSettingsBytes = 16 << 10
 // invalid settings key.
 const MaxRepoDescriptionRunes = 512
 
+// MaxRepoWebsiteBytes bounds the per-repo website URL: a link, not a document.
+// Bytes (not runes) because a URL is an ASCII/percent-encoded wire string and
+// the bound mirrors the description's 512-character budget.
+const MaxRepoWebsiteBytes = 512
+
 // RepoSettings are the per-repo settings published into the WAL (D24): the
 // allowed sections merged over the host config by Merge ("with_settings").
 // Zero pointers mean "not set, inherit host config". Description is display
 // metadata (issue #235): it rides the same TOML document — persistence,
 // revisioning, authorship, and admin-only writes free — but it never merges
-// into the host config (Merge ignores it). Features (Forgejo #522) is the
-// same kind of passenger: six per-repo feature flags validated, persisted,
+// into the host config (Merge ignores it). Website is display metadata of the
+// same kind: the repository's public home page, rendered as a link on the repo
+// page and carried on the summary wire ("" = unset). Features (Forgejo #522) is
+// the same kind of passenger: six per-repo feature flags validated, persisted,
 // and revisioned with the doc, but never merged (there is no host-config
 // counterpart — an absent section means every feature enabled). Review
 // (Forgejo #586) is the same kind of passenger again: the [review] section
@@ -43,6 +52,7 @@ const MaxRepoDescriptionRunes = 512
 // listener instead.
 type RepoSettings struct {
 	Description  string                    `toml:"description"`
+	Website      string                    `toml:"website"`
 	Features     *RepoFeatures             `toml:"features"`
 	Review       *RepoReview               `toml:"review"`
 	Packages     *RepoPackages             `toml:"packages"`
@@ -473,7 +483,8 @@ var hostOnlyRepoSettings = map[string]bool{
 // ParseRepoSettings validates and decodes a settings payload (§4.2): size
 // budget, allowed sections only ([features] [review] [packages] [static_site]
 // [bundles] [maintenance] [compaction] [upstream], plus the top-level
-// description key and [integrations] stored verbatim), and host-only keys
+// description and website keys and [integrations] stored verbatim), and
+// host-only keys
 func ParseRepoSettings(payload []byte) (*RepoSettings, error) {
 	if len(payload) > MaxRepoSettingsBytes {
 		return nil, fmt.Errorf("repo settings payload is %d bytes; limit is %d", len(payload), MaxRepoSettingsBytes)
@@ -487,6 +498,9 @@ func ParseRepoSettings(payload []byte) (*RepoSettings, error) {
 		return nil, errors.New("repo settings: upstream.token_env is host-only and not settable via settings")
 	}
 	if err := ValidateRepoDescription(rs.Description); err != nil {
+		return nil, err
+	}
+	if err := ValidateRepoWebsite(rs.Website); err != nil {
 		return nil, err
 	}
 	if err := ValidateRepoPackages(rs.Packages); err != nil {
@@ -535,10 +549,62 @@ func DescriptionOf(body []byte) string {
 	return rs.Description
 }
 
+// ValidateRepoWebsite enforces the shape of the top-level `website` key: empty
+// ("unset") or an absolute http/https URL with a host and no credentials. The
+// scheme allowlist is the security rule — a settings value is rendered as an
+// anchor, so `javascript:`, `data:` and `file:` must never become linkable
+// (fail closed, like every other settings validation). Parsing is net/url's;
+// we do not rewrite the value, so the stored/rendered URL is exactly what the
+// operator typed (masked only by html/template's escaping).
+func ValidateRepoWebsite(u string) error {
+	if u == "" {
+		return nil
+	}
+	if n := len(u); n > MaxRepoWebsiteBytes {
+		return fmt.Errorf("repo settings: website is %d bytes; limit is %d", n, MaxRepoWebsiteBytes)
+	}
+	if strings.IndexFunc(u, unicode.IsSpace) >= 0 {
+		return errors.New("repo settings: website must not contain whitespace (percent-encode it as %20)")
+	}
+	for i := 0; i < len(u); i++ {
+		if c := u[i]; c < 0x20 || c == 0x7f {
+			return fmt.Errorf("repo settings: website %q must not contain control bytes", u)
+		}
+	}
+	parsed, err := url.Parse(u)
+	if err != nil {
+		return fmt.Errorf("repo settings: website %q is not a valid URL", u)
+	}
+	if parsed.Scheme != "http" && parsed.Scheme != "https" {
+		return fmt.Errorf("repo settings: website %q must be an absolute http or https URL", u)
+	}
+	if parsed.User != nil {
+		return fmt.Errorf("repo settings: website %q must not include credentials", u)
+	}
+	if parsed.Hostname() == "" {
+		return fmt.Errorf("repo settings: website %q must include a host", u)
+	}
+	return nil
+}
+
+// WebsiteOf extracts the website from a stored settings TOML body, returning ""
+// for empty bodies and for bodies that no longer parse (the DescriptionOf
+// fail-open: display metadata must never fail a read path — no row renders).
+func WebsiteOf(body []byte) string {
+	if len(bytes.TrimSpace(body)) == 0 {
+		return ""
+	}
+	rs, err := ParseRepoSettings(body)
+	if err != nil {
+		return ""
+	}
+	return rs.Website
+}
+
 // Merge ("with_settings"): pointer-set fields override base; unset sections
 // inherit. upstream.token_env never comes from settings — the base value is
-// preserved. Description, Features, Review, Packages and StaticSite never
-// merge: they are display/behavior metadata, not config (the host only
+// preserved. Description, Website, Features, Review, Packages and StaticSite
+// never merge: they are display/behavior metadata, not config (the host only
 // defaults the packages quota, resolved separately by PackagesPolicy; the
 // static listener is the host section [static_sites], while [static_site]
 // only says what this repository publishes).

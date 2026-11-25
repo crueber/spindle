@@ -617,6 +617,7 @@ func (v *walView) Summary(ctx context.Context, id git.RepoId) (SummaryData, erro
 		s.Health = RepoHealthEmpty
 	}
 	s.Description = v.repoDescription(ctx, id)
+	s.Website = v.repoWebsite(ctx, id)
 	features := v.repoFeatures(ctx, id)
 	s.Features = &features
 	return s, nil
@@ -654,6 +655,22 @@ func (v *walView) repoDescription(ctx context.Context, id git.RepoId) string {
 		return ""
 	}
 	return config.DescriptionOf([]byte(m.Settings.Toml))
+}
+
+// repoWebsite reads the repository's public home page from the
+// manifest-inline settings TOML (the repoDescription precedent: Manifest is
+// the open handle's in-memory snapshot, so this costs zero new store round
+// trips). Fail-open to "": display metadata must never fail the summary, and a
+// missing/unparseable/invalid doc renders as unset.
+func (v *walView) repoWebsite(ctx context.Context, id git.RepoId) string {
+	if v.engine == nil {
+		return ""
+	}
+	m, err := v.engine.Manifest(ctx, id)
+	if err != nil || m == nil || m.Settings == nil {
+		return ""
+	}
+	return config.WebsiteOf([]byte(m.Settings.Toml))
 }
 
 func (v *walView) Overview(ctx context.Context, id git.RepoId) (OverviewData, error) {

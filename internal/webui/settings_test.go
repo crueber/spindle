@@ -616,6 +616,7 @@ func settingsRepoFakes(role string) *settingsFakes {
 		RepoGeneral: func(context.Context, string, string) (*SettingsGeneral, error) {
 			return &SettingsGeneral{
 				Description:  "a monorepo",
+				Website:      "https://example.com/mono",
 				SelfApproval: true,
 				Features: []SettingsFeatureRow{
 					{Key: "issues", Enabled: true},
@@ -636,6 +637,9 @@ func TestSettingsRepoGeneralTabRenders(t *testing.T) {
 	body := rec.Body.String()
 	settingsMustContain(t, body, `id="settings-panel"`, "panel")
 	settingsMustContain(t, body, `value="a monorepo"`, "description")
+	settingsMustContain(t, body, `name="website" type="url" inputmode="url"`, "website field")
+	settingsMustContain(t, body, `placeholder="https://example.com"`, "website placeholder")
+	settingsMustContain(t, body, `value="https://example.com/mono"`, "website value")
 	settingsMustContain(t, body, `aria-current="page"`, "active tab")
 	settingsMustContain(t, body, `href="/acme/monorepo/settings/scheduled"`, "nav link")
 	settingsMustContain(t, body, `name="feature_issues"`, "feature toggle")

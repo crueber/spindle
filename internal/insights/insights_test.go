@@ -263,3 +263,51 @@ func TestStale(t *testing.T) {
 		t.Fatal("unparseable computed_at must be stale")
 	}
 }
+
+func TestLanguagesFrom(t *testing.T) {
+	// Whole-number percentages sum to 100; the largest remainder takes the
+	// residual deterministically: 1/3 each rounds to 34/33/33 (bytes order
+	// decides the tie, and "Alpha" wins the name tie-break).
+	got := languagesFrom([]git.InsightsLanguage{
+		{Name: "Beta", Bytes: 1}, {Name: "Alpha", Bytes: 1}, {Name: "Gamma", Bytes: 1},
+	})
+	if len(got) != 3 {
+		t.Fatalf("rows = %+v", got)
+	}
+	var sum int
+	for _, g := range got {
+		sum += g.Pct
+	}
+	if sum != 100 {
+		t.Fatalf("percentages sum to %d: %+v", sum, got)
+	}
+	if got[0].Name != "Alpha" || got[0].Pct != 34 {
+		t.Fatalf("largest-remainder winner = %+v", got[0])
+	}
+
+	// Zero-byte languages are dropped; an all-empty tree has no mix.
+	got = languagesFrom([]git.InsightsLanguage{
+		{Name: "Go", Bytes: 0}, {Name: "Other", Bytes: 0},
+	})
+	if got != nil {
+		t.Fatalf("all-empty tree = %+v", got)
+	}
+	got = languagesFrom([]git.InsightsLanguage{
+		{Name: "Go", Bytes: 100}, {Name: "Empty", Bytes: 0},
+	})
+	if len(got) != 1 || got[0].Pct != 100 {
+		t.Fatalf("zero-byte row not dropped: %+v", got)
+	}
+
+	// Deterministic output for the same input, twice.
+	in := []git.InsightsLanguage{{Name: "Go", Bytes: 84}, {Name: "JavaScript", Bytes: 9}, {Name: "CSS", Bytes: 7}}
+	a, b := languagesFrom(in), languagesFrom(in)
+	if len(a) != 3 || a[0].Pct != 84 || a[1].Pct != 9 || a[2].Pct != 7 {
+		t.Fatalf("mix = %+v", a)
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			t.Fatalf("non-deterministic at %d: %+v vs %+v", i, a, b)
+		}
+	}
+}

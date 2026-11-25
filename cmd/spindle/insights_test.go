@@ -20,6 +20,10 @@ func (noScan) InsightsCommits(context.Context, *git.LocalRepo, string, time.Time
 	return nil, false, nil
 }
 
+func (noScan) InsightsLanguages(context.Context, *git.LocalRepo, string, int) ([]git.InsightsLanguage, bool, error) {
+	return nil, false, nil
+}
+
 func testInsightsService() *insights.Service {
 	return insights.New(insights.Deps{
 		Store: store.NewMemory(),

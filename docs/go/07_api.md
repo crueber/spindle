@@ -529,7 +529,7 @@ hint*, not an ACL.
 
 ### 9.1 Repo summary — `GET /{o}/{r}/api` (and `{lane}` root)
 
-After a refs-level sync: `{owner, name, full_name, description, head:{name,sha}|null, branches, tags,
+After a refs-level sync: `{owner, name, full_name, description, website, head:{name,sha}|null, branches, tags,
 health, missing_total?, clone_url, ssh_clone_url?, html_url, api_url}`. `head` = default branch (`null` → JSON `null` — the one sanctioned null, it is not an
 array). `description` is the per-repo short display string (issue #235, `""` when unset — always
 present; old clients ignore it per 14 §14.12): sourced from the `description` key of the
@@ -538,7 +538,13 @@ sync already holds (**zero new store round trips** — the same in-memory guaran
 predicate below; unparseable docs fail open to `""`). `ETag` covers the description alongside
 health: `"<head sha>"` (`""` when unborn, as before) suffixed `~d<fnv1a32hex>` when set — without
 the suffix a description-only change (same head sha) would 304 and keep showing the stale text;
-clearing the description drops the suffix, which busts the cache too. `branches`/`tags` are **counts** (integers). `clone_url` from `server.public_url` (or request
+clearing the description drops the suffix, which busts the cache too. `website` is the
+repository's public home page (`""` when unset — always present; `ValidateRepoWebsite` admits only
+an absolute http/https URL with a host and no credentials at publish, and a hand-written invalid
+doc fails open to `""`). It folds the same way (manifest-inline settings TOML, zero new store
+round trips, `config.WebsiteOf`) and the `ETag` carries `~w<fnv1a32hex>` when set — a
+website-only change moves no ref, so without it a revalidating client would 304 and keep the stale
+(or missing) link; clearing the key drops the suffix and busts the cache too. `branches`/`tags` are **counts** (integers). `clone_url` from `server.public_url` (or request
 Host); `ssh_clone_url` (17_ssh.md §3 — the SSH transport advertisement, `external_port` else the
 listen port on the same public host, `:22` omitted; absent while SSH is disabled with no external
 override); `api_url` = the `/api` lane URL; mutable-collab class (`private, no-cache`,
@@ -967,7 +973,7 @@ editor remains available for everything else.
 - `GET …/settings` → `{revision, author, updated_at, message, toml}` (revision `0` = none ever published).
   `toml` is the raw per-repo TOML body as published.
 - `PUT …/settings?message=…` (require_admin): body = TOML, **≤ 16 KiB else `413`** (plain text). Validate
-  against THIS serving host's build: only the top-level `description` key and sections `[features]`,
+  against THIS serving host's build: only the top-level `description`/`website` keys and sections `[features]`,
   `[bundles]`, `[maintenance]`, `[compaction]`, `[upstream]` allowed (`[integrations]` accepted and
   ignored, forward compat); `upstream.token_env` and everything under auth/store/server/wal/cache is
   host-only and refused; unknown keys (including unknown keys inside an allowed section) are refused.
@@ -1208,6 +1214,14 @@ listings (§8), never from the status code. Nil `Access` → legacy flag-only ga
   `~degraded`). The General settings tab + header rendering are a 12_web_ui.md concern; the
   owner-list rows explicitly do NOT carry descriptions (names-only listing — per-row summary
   fetches would be N round trips).
+- **Repo website (2026-11-25):** additive `website` on the summary wire (`""` when unset — always
+  present; old clients ignore it, 14 §14.12), folded from the same manifest-inline settings TOML
+  at zero new store round trips; `ETag` gains `~w<fnv1a32hex>` when set so a settings-only link
+  change busts SWR. Fail-open display: an unreadable or invalid document renders `""` (no row),
+  never a failed summary — the only fail-closed step is publish (`ValidateRepoWebsite`: absolute
+  http/https, host required, no credentials). Rationale: the link is display metadata exactly
+  like `description`; the scheme allowlist belongs at the publish boundary because the value is
+  rendered as an anchor.
 - **Explicit create-repo placeholder (issue #210, R1 + review normative):**
   - *Sidecar classification:* `repos/<o>/<r>/meta/placeholder.json` is Create-once
     (`PutCreate`; 412 = already a placeholder — idempotent) + Delete-on-transition (cleared

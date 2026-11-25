@@ -916,7 +916,8 @@ by bytes with an explicit truncation notice; the stats are `--numstat` (a binary
 
 The Insights page never runs git on a request path: it reads the cached
 `repos/<o>/<r>/insights/pulse.json` projection (`docs/features/18_repo_insights.md`). The
-`insights-refresh` task makes exactly ONE spawn for every git-derived fact:
+`insights-refresh` task makes ONE history walk for every commit-derived fact, plus ONE tree listing
+for the language mix (§16.5):
 
 ```
 git log --no-renames --no-ext-diff --no-textconv --no-show-signature --no-decorate \
@@ -936,6 +937,30 @@ git log --no-renames --no-ext-diff --no-textconv --no-show-signature --no-decora
   subprocess failure fails the refresh (no half-truth projection is written).
 - Merge commits appear as commits with no shortstat block (zero line changes); binary-only changes
   also contribute zero. Cost: linear in commits, one process (E20).
+
+### 16.5 The language-mix listing (the Code pulse card)
+
+The same refresh makes ONE tree listing for the language mix, against the serving copy and resolved
+head it already holds:
+
+```
+git ls-tree -r -l -z <resolved-head-sha>
+```
+
+- `<rev>` is the resolved hex oid, never a ref name.
+- `-r` recurses (trees are not emitted as rows), `-l` adds the blob size, `-z` NUL-terminates so a
+  path containing anything but NUL parses. A record is
+  `<mode> SP <type> SP <oid> SP <size> TAB <path> NUL`; the size is `-` for a gitlink.
+- Only regular blobs count (`100644` / `100755`). Symlinks (`120000`) and gitlinks (`160000`) are
+  skipped, and an unparseable record is ignored rather than failing the refresh.
+- Entries are grouped by a pinned extension→language table (`internal/git/languages.go`: Go,
+  JavaScript, TypeScript, CSS, HTML, Shell, Python, Rust, Java, C, C++, Ruby, PHP, JSON, YAML,
+  Markdown, SQL, Dockerfile, Makefile; everything else `Other`). This is a **committed-bytes
+  estimate**, not a line counter: vendored trees, lockfiles and generated files count by size.
+- The tally caps at 50,000 regular blobs (`InsightsLanguageScanMax`); a tree past the cap is
+  reported capped and the UI says the mix is bounded. The listing streams through a counting writer,
+  so the cap bounds the count without buffering the whole output.
+- A hard subprocess failure fails the refresh (no half-truth projection is written).
 
 ## 17. Code search: the grep primitive (`docs/features/20_search.md`)
 

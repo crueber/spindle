@@ -175,6 +175,81 @@ func countIn(times []time.Time, start, now time.Time) int {
 	return n
 }
 
+// languagesFrom turns the git layer's byte tallies into the projection's
+// deterministic rows: zero-byte languages are dropped (an empty file is not a
+// language signal), percentages are whole numbers, and the largest row
+// absorbs the rounding residual so the rows sum to exactly 100. An all-empty
+// tree yields nil, and the card hides the row.
+func languagesFrom(tallies []git.InsightsLanguage) []Language {
+	var total int64
+	for _, t := range tallies {
+		if t.Bytes > 0 {
+			total += t.Bytes
+		}
+	}
+	if total <= 0 {
+		return nil
+	}
+	type exact struct {
+		lang Language
+		frac int64
+	}
+	rows := make([]exact, 0, len(tallies))
+	var sum int
+	for _, t := range tallies {
+		if t.Bytes <= 0 {
+			continue
+		}
+		num := t.Bytes * 100
+		pct := int(num / total)
+		rows = append(rows, exact{
+			lang: Language{Name: t.Name, Bytes: t.Bytes, Pct: pct},
+			frac: num % total,
+		})
+		sum += pct
+	}
+	// The rows are ordered bytes desc, name asc independent of the scanner's
+	// iteration order (the git layer already sorts; this makes the pure
+	// function's contract explicit and the correction deterministic).
+	sort.Slice(rows, func(i, j int) bool {
+		if rows[i].lang.Bytes != rows[j].lang.Bytes {
+			return rows[i].lang.Bytes > rows[j].lang.Bytes
+		}
+		return rows[i].lang.Name < rows[j].lang.Name
+	})
+	// Largest-remainder correction: give the leftover points to the rows with
+	// the biggest fractional part (name asc on a tie) so the ordering of the
+	// returned list is unchanged.
+	for remaining := 100 - sum; remaining > 0; remaining-- {
+		best := -1
+		for i := range rows {
+			if best < 0 {
+				best = i
+				continue
+			}
+			if rows[i].frac != rows[best].frac {
+				if rows[i].frac > rows[best].frac {
+					best = i
+				}
+				continue
+			}
+			if rows[i].lang.Name < rows[best].lang.Name {
+				best = i
+			}
+		}
+		if best < 0 {
+			break
+		}
+		rows[best].lang.Pct++
+		rows[best].frac = -1 // one correction per row
+	}
+	out := make([]Language, 0, len(rows))
+	for _, r := range rows {
+		out = append(out, r.lang)
+	}
+	return out
+}
+
 // countFuture counts commits dated after the projection instant (excluded
 // from every window; surfaced so the page can explain a scan > window total).
 func countFuture(commits []git.InsightsCommit, now time.Time) int {

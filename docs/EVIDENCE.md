@@ -43,7 +43,7 @@ requested or when a review questions a hot path).
 | E16 | 2026-09-09 | Repo size catalog (`internal/sizecatalog`, Forgejo #248) | What does one fold pass cost, what does the detailed listing cost, and what does the push path pay for durable size state? | Fold linear in repo count (2 GETs + ≤1 PUT per repo + 1 catalog CAS, 0 LIST at 3 and 12 repos); listing flat (exactly 1 catalog GET at any population); push +1 PUT per pack-changing publish (repo-scoped sidecar, parallel with the manifest CAS, +0 sequential trips; ref-only/settings write nothing — E17 amends ref-only to write the push clock). Cannot explode: bounded/resumable passes, PUT-if-changed sidecars, probe-only reads. |
 | E18 | 2026-11-21 | Threads PR head-push delivery (`internal/server`, `internal/pulls`, `internal/events`) | Does a push to an open PR's head produce its `pull_request` run promptly, or only on the events sweep — and can a late delivery move the head backwards? | Prompt: with `events.sweep_interval = 1h` configured, the run appeared **53 ms** after the push (the wake is a non-blocking in-process signal; +0 store ops on the push path). Head is monotonic: 3 out-of-order/duplicate deliveries created 0 extra runs and 0 backwards head moves. Cannot regress: `internal/e2e/threads_triggers_test.go` fails if the latency exceeds 5 s or any duplicate run/head rewind appears. |
 | E17 | 2026-09-09 | Last-commit activity (`internal/git`, `internal/sizecatalog`, Forgejo #247) | What does the push hint cost, what does a sweep heal cost, does the listing stay flat, and does explore order by commit time? | Push +0 (derivation is git-local, hint rides the existing sidecar PUT; cold 11 / warm 10 ops unchanged); sweep heals once per stale repo (refs view + ≤1 serve-sync + 1 git read, then quiet); listing flat (exactly 1 catalog GET); explore newest-commit-first from `sort=activity&order=desc` (commit dates, not push times). Cannot explode: no LIST, per-repo isolation, bounded parallelism (8/2), field-scoped merge never regresses. |
-| E20 | 2026-11-21 | Repository Insights refresh (`internal/insights`, `internal/git`) | What does the pulse refresh cost at 1k and 10k commits, how many git invocations does it take, and what does a page read pay? | One git scan + 57 store ops per refresh; 16.6 ms at 1k, 156.2 ms at 10k (git dominates, linear in commits); page read is one GET, zero git/LIST. |
+| E20 | 2026-11-21 | Repository Insights refresh (`internal/insights`, `internal/git`) | What does the pulse refresh cost at 1k and 10k commits, how many git invocations does it take, and what does a page read pay? | One history walk + one language tree listing + 58 store ops per refresh; 20.7 ms at 1k, 175.5 ms at 10k (git dominates, linear in commits); page read is one GET, zero git/LIST; the Code pulse card adds +0.9 ms to a warm tree render. |
 | E21 | 2026-11-25 | Code search (`internal/git` §17, `internal/devtools/searchbench`) | What does one search query cost at 1k/10k/50k files, and does it grow with tree size or stop at the caps? | One `git grep` spawn, zero store round trips; a full-tree walk is linear in files (15.9/137.9/921.3 ms p50; p95 19/141.7/998.9 ms) and a capped broad query is flat (8–12.4 ms); 50k-file p95 stays under the 1.5 s index trigger. |
 
 ---
@@ -1307,7 +1307,7 @@ creation and nothing for a non-fork or maintainer-authored run.
 
 ---
 
-## E20 — Repository Insights refresh: one git scan, linear in commits (2026-11-21)
+## E20 — Repository Insights refresh: linear in commits (2026-11-21)
 
 **Area:** the cached repository pulse projection (`internal/insights`,
 `internal/git` §16.4, docs/features/18_repo_insights.md).
@@ -1325,28 +1325,39 @@ cd /var/tmp && TMPDIR=/var/tmp/sp-tmp go test -tags evidence \
 
 Fixtures are real bare repositories built by `git fast-import`: 1,000 and 10,000 commits spread over
 364 days, each changing one of 20 files (so every commit has a real one-line diff). The measured code
-path is the shipped one: `*git.Layer.InsightsCommits` (the pinned `git log --shortstat` argv) and
+path is the shipped one: `*git.Layer.InsightsCommits` (the pinned `git log --shortstat` argv),
+`*git.Layer.InsightsLanguages` (the pinned `git ls-tree -r -l -z` argv, `04_git.md` §16.5) and
 `insights.Service.Refresh` over the **memory store**, seeded with 100 shared-index cards (50 closed
 PRs with `pr.json` sidecars), `meta/social.json`, 25 release headers, 25 package tags and 25 Threads
 run records — i.e. the sidecar/LIST caps are exercised at their realistic worst. Median of 3 runs.
 
 **Results.**
 
-| fixture | raw git scan | full refresh | git calls/refresh | store ops/refresh |
+| fixture | raw history scan | full refresh | git calls/refresh | store ops/refresh |
 |---|---|---|---|---|
-| 1,000 commits | **16.6 ms** | **16.5 ms** | 1 | 57 |
-| 10,000 commits | **156.2 ms** | **157.5 ms** | 1 | 57 |
+| 1,000 commits | **17.6 ms** | **20.7 ms** | 2 | 58 |
+| 10,000 commits | **175.5 ms** | **175.5 ms** | 2 | 58 |
 
-**Analysis.** The single git spawn dominates: the full refresh tracks the raw scan (`+1.4 ms` at 10k
-for the index, sidecars, facts and one CAS PUT), and the cost is linear in commits scanned (10×
-history ≈ 10× time), not in repository or object count. The store ops are constant at this seed size:
+**Analysis.** The single history walk dominates: the full refresh tracks the raw scan, and the cost
+is linear in commits scanned (10× history ≈ 10× time), not in repository or object count. The second
+git invocation is the language-mix tree listing (one `ls-tree` over 20 files here): its cost is
+bounded by file count and constant at these fixtures, and it runs in the same refresh against the
+serving copy the history walk already needed. The 58 store ops are constant at this seed size:
 projection GET/HEAD/PUT, shared-index GET, 50 `pr.json` GETs (the merge-classification cap), social
-GET, three capped prefix LISTs and the listed metadata the memory backend counts. There is exactly
-**one git invocation per refresh** (asserted by a counting wrapper in the harness), and a repo whose
-head did not move and whose projection is under 24 h old does not reach git at all
-(`RefreshIfStale` stops after one refs-level head read + one exact-key GET). A page read is one GET;
-it never runs git and never LISTs. The measurement host is a workstation VM — the durable claims are
-the one-spawn count, the constant store-op count, and linear-in-commits time.
+GET, `releases/latest.json` (the pulse card's last-release stamp), three capped prefix LISTs and the
+listed metadata the memory backend counts. There are exactly **two git invocations per refresh**
+(asserted by a counting wrapper in the harness), and a repo whose head did not move and whose
+projection is under 24 h old does not reach git at all (`RefreshIfStale` stops after one refs-level
+head read + one exact-key GET).
+
+**Page read.** The Insights page and the Code page's Code pulse card each read the projection with
+one exact-key GET; neither runs git or LISTs. Measured 2026-11-25 on this host against a real server
+(filesystem store, 7 KB projection, 300 warm requests per arm, same page): 11.1 ms without the card
+vs 12.0 ms with it — **+0.9 ms median** for the GET, JSON decode and card render. That is under the
+5–10 ms materiality bar, so the card reads directly and no short-TTL memo was added (a memo would
+buy nothing and would need staleness/eviction machinery). The measurement host is a workstation VM;
+the durable claims are the two-spawn count, the constant store-op count, linear-in-commits time, and
+the sub-millisecond warm card cost.
 
 ---
 

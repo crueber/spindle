@@ -89,6 +89,12 @@ func pad2(n int) string {
 // the value at request time — no island is needed (a minute of staleness on a
 // listing is invisible; detail pages carry the absolute stamp in the title).
 func relTime(stamp string) string {
+	return relTimeAt(stamp, time.Now())
+}
+
+// relTimeAt is relTime against an explicit clock (the pulse card renders
+// "computed 12m ago" from the request's clock, not the wall clock at render).
+func relTimeAt(stamp string, now time.Time) string {
 	if stamp == "" {
 		return ""
 	}
@@ -96,7 +102,7 @@ func relTime(stamp string) string {
 	if err != nil {
 		return ""
 	}
-	d := time.Since(t)
+	d := now.Sub(t)
 	switch {
 	case d < time.Minute:
 		return "just now"

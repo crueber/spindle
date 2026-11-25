@@ -93,13 +93,19 @@ func seedFacts(t *testing.T, st *store.Memory, owner, repo, now string) {
 }
 
 type countingScanner struct {
-	layer *git.Layer
-	calls int
+	layer     *git.Layer
+	calls     int
+	langCalls int
 }
 
 func (c *countingScanner) InsightsCommits(ctx context.Context, repo *git.LocalRepo, rev string, since time.Time, capN int) ([]git.InsightsCommit, bool, error) {
 	c.calls++
 	return c.layer.InsightsCommits(ctx, repo, rev, since, capN)
+}
+
+func (c *countingScanner) InsightsLanguages(ctx context.Context, repo *git.LocalRepo, rev string, capN int) ([]git.InsightsLanguage, bool, error) {
+	c.langCalls++
+	return c.layer.InsightsLanguages(ctx, repo, rev, capN)
 }
 
 func median(ds []time.Duration) time.Duration {
@@ -153,10 +159,10 @@ func TestInsightsRefreshScale(t *testing.T) {
 				refreshTimes = append(refreshTimes, time.Since(start))
 				ops = st.OpCounter().Load() - before
 			}
-			if scanner.calls != 3 {
-				t.Fatalf("expected exactly one git scan per refresh, got %d", scanner.calls)
+			if scanner.calls != 3 || scanner.langCalls != 3 {
+				t.Fatalf("expected one history scan and one tree listing per refresh, got %d/%d", scanner.calls, scanner.langCalls)
 			}
-			t.Logf("RESULT n=%d commits=%d raw_scan_median=%s refresh_median=%s store_ops_per_refresh=%d git_calls_per_refresh=1",
+			t.Logf("RESULT n=%d commits=%d raw_scan_median=%s refresh_median=%s store_ops_per_refresh=%d git_calls_per_refresh=2",
 				n, commits, median(scanTimes), median(refreshTimes), ops)
 		})
 	}

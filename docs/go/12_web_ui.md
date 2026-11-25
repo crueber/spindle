@@ -1608,3 +1608,17 @@ the effects are DOM refetches, not client caches.
   `collaborators`, a write+ viewer keeps a live composer while a read viewer sees it disabled with that reason —
   the rendered state mirrors what the server would accept. Composes the existing `.input`/`.chip`/`.card` idioms;
   verified rendered at desktop and ~390 px in both themes with the keyboard pass on the select and reason field.
+- **NEW (2026-11-25) — repository Website: General field + About row.** Settings → General gains a
+  `Website` input (`name="website" type="url" inputmode="url"`, placeholder `https://example.com`,
+  `maxlength=512`, tab order right after Description) prefilled from `config.WebsiteOf` and saved
+  through the existing General write path (`writeGeneral` → `settingsWithWebsite` into the
+  WAL-published TOML, every other section/keys preserved; empty writes `website = ""`, which clears
+  it). The rule is the publish-time `config.ValidateRepoWebsite` (the one validation source): empty
+  or an absolute http/https URL with a host and no credentials — a rejected value re-renders the tab
+  with the typed value and a keyed `role="alert"` error, and nothing is published. The repo page's
+  About rail renders a `Website` `.kv` row only when set, as a real `<a>` with
+  `target="_blank" rel="noopener noreferrer nofollow"`; the visible text is the URL tail-truncated to
+  `maxWebsiteDisplayRunes` (48, `websiteDisplay`) while `href`/`title` carry the full value, and
+  html/template escapes both (no `template.HTML`). Empty means no row — no placeholder. Rationale:
+  the About rail is a key/value stack of things the chrome already carries, and the link belongs
+  there rather than in the header (a URL is not a title).

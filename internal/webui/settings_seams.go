@@ -171,7 +171,9 @@ func (s SettingsServices) repoGeneral(ctx context.Context, owner, repo string) (
 	f := config.FeaturesOf(body)
 	return &SettingsGeneral{
 		Description:  config.DescriptionOf(body),
+		Website:      config.WebsiteOf(body),
 		MaxLength:    config.MaxRepoDescriptionRunes,
+		MaxWebsite:   config.MaxRepoWebsiteBytes,
 		SelfApproval: config.AllowSelfApprovalOf(body),
 		Features: []SettingsFeatureRow{
 			{Key: "issues", Enabled: f.Issues},
@@ -775,9 +777,9 @@ func settingsDryRunRows(res *api.DryRunBody) []SettingsKV {
 	return out
 }
 
-// writeGeneral edits the three passenger keys of the settings TOML (the SPA's
-// withDescription/withFeatures/withSelfApproval helpers, ported) and
-// publishes the document — every other section passes through untouched.
+// writeGeneral edits the passenger keys of the settings TOML (the SPA's
+// withDescription/withWebsite/withFeatures/withSelfApproval helpers, ported)
+// and publishes the document — every other section passes through untouched.
 func (s SettingsServices) writeGeneral(ctx context.Context, id git.RepoId, p auth.Principal, w SettingsRepoWrite) (SettingsWriteResult, *SettingsWriteError) {
 	if s.API == nil || s.API.Repo == nil {
 		return SettingsWriteResult{}, settingsWriteErr(http.StatusServiceUnavailable, "settings store not configured")
@@ -790,7 +792,12 @@ func (s SettingsServices) writeGeneral(ctx context.Context, id git.RepoId, p aut
 	if msg := settingsValidateDescription(desc); msg != "" {
 		return SettingsWriteResult{}, settingsWriteErr(http.StatusUnprocessableEntity, msg)
 	}
-	text := settingsWithDescription(doc.TOML, desc)
+	website := w.Get("website")
+	if err := config.ValidateRepoWebsite(website); err != nil {
+		return SettingsWriteResult{}, settingsWriteErr(http.StatusUnprocessableEntity, err.Error())
+	}
+	text := settingsWithWebsite(doc.TOML, website)
+	text = settingsWithDescription(text, desc)
 	if _, ok := w.Values["feature_issues"]; ok {
 		flags := map[string]bool{}
 		for _, f := range settingsFeatureDefs {
@@ -1514,7 +1521,22 @@ func settingsTableHeader(line string) string {
 // settingsWithDescription sets the top-level description (basic string),
 // leaving every section body untouched.
 func settingsWithDescription(text, desc string) string {
-	line := `description = "` + settingsEscapeTomlBasic(desc) + `"`
+	return settingsWithTopLevelString(text, "description", desc)
+}
+
+// settingsWithWebsite sets the top-level website (basic string) — an empty
+// value clears it in place, exactly like the description (the key is written
+// empty rather than deleted: the document the operator sees keeps its shape).
+func settingsWithWebsite(text, website string) string {
+	return settingsWithTopLevelString(text, "website", website)
+}
+
+// settingsWithTopLevelString replaces (or prepends) a top-level key. A
+// top-level key can only live before the first [table] header: a
+// section-nested lookalike is never read or rewritten (the description
+// contract, issue #235).
+func settingsWithTopLevelString(text, key, val string) string {
+	line := key + ` = "` + settingsEscapeTomlBasic(val) + `"`
 	if strings.TrimSpace(text) == "" {
 		return line + "\n"
 	}
@@ -1522,10 +1544,10 @@ func settingsWithDescription(text, desc string) string {
 	end := settingsTopLevelRegion(lines)
 	for i := 0; i < end; i++ {
 		t := strings.TrimSpace(lines[i])
-		if !strings.HasPrefix(t, "description") {
+		if !strings.HasPrefix(t, key) {
 			continue
 		}
-		if strings.HasPrefix(t, "description =") || strings.HasPrefix(t, "description=") {
+		if strings.HasPrefix(t, key+" =") || strings.HasPrefix(t, key+"=") {
 			lines[i] = line
 			return strings.Join(lines, "\n")
 		}

@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"testing"
 	"time"
 
@@ -17,13 +18,18 @@ import (
 )
 
 type fakeScanner struct {
-	commits   []git.InsightsCommit
-	truncated bool
-	err       error
-	calls     int
-	rev       string
-	since     time.Time
-	cap       int
+	commits    []git.InsightsCommit
+	truncated  bool
+	languages  []git.InsightsLanguage
+	langCapped bool
+	err        error
+	langErr    error
+	calls      int
+	langCalls  int
+	rev        string
+	since      time.Time
+	cap        int
+	langCap    int
 }
 
 func (f *fakeScanner) InsightsCommits(_ context.Context, _ *git.LocalRepo, rev string, since time.Time, capN int) ([]git.InsightsCommit, bool, error) {
@@ -33,6 +39,15 @@ func (f *fakeScanner) InsightsCommits(_ context.Context, _ *git.LocalRepo, rev s
 		return nil, false, f.err
 	}
 	return f.commits, f.truncated, nil
+}
+
+func (f *fakeScanner) InsightsLanguages(_ context.Context, _ *git.LocalRepo, rev string, capN int) ([]git.InsightsLanguage, bool, error) {
+	f.langCalls++
+	f.rev, f.langCap = rev, capN
+	if f.langErr != nil {
+		return nil, false, f.langErr
+	}
+	return f.languages, f.langCapped, nil
 }
 
 // wrapStore lets a test fail one operation without reimplementing the store.
@@ -226,8 +241,8 @@ func TestRefreshEmptyRepository(t *testing.T) {
 	if !ok || p.HeadSHA != "" || p.Scan.Commits != 0 {
 		t.Fatalf("empty projection = %+v", p)
 	}
-	if f.scanner.calls != 0 || f.serveCalls != 0 {
-		t.Fatalf("empty repo must not run git: scan=%d serve=%d", f.scanner.calls, f.serveCalls)
+	if f.scanner.calls != 0 || f.serveCalls != 0 || f.scanner.langCalls != 0 {
+		t.Fatalf("empty repo must not run git: scan=%d lang=%d serve=%d", f.scanner.calls, f.scanner.langCalls, f.serveCalls)
 	}
 	if len(p.Windows["30"].Buckets) != 30 || p.Windows["30"].Commits != 0 {
 		t.Fatalf("empty window = %+v", p.Windows["30"])
@@ -563,4 +578,96 @@ func TestReadCollabBadSidecars(t *testing.T) {
 	}
 	nopLogger{}.Notice("silent")
 	nopLogger{}.Progress("silent", 0, 0, "")
+}
+
+func TestRefreshPopulatesLanguages(t *testing.T) {
+	f := newFixture(t)
+	f.scanner.languages = []git.InsightsLanguage{
+		{Name: "Go", Bytes: 150, Files: 3},
+		{Name: "JavaScript", Bytes: 50, Files: 1},
+		{Name: "Other", Bytes: 0, Files: 1},
+	}
+	if err := f.svc.Refresh(context.Background(), "acme", "api", nil); err != nil {
+		t.Fatalf("Refresh: %v", err)
+	}
+	if f.scanner.langCalls != 1 || f.scanner.langCap != git.InsightsLanguageScanMax {
+		t.Fatalf("language scan = %d calls cap %d", f.scanner.langCalls, f.scanner.langCap)
+	}
+	p, ok, err := f.svc.Load(context.Background(), "acme", "api")
+	if err != nil || !ok {
+		t.Fatalf("Load: %v %v", ok, err)
+	}
+	if len(p.Languages) != 2 {
+		t.Fatalf("languages = %+v", p.Languages)
+	}
+	if p.Languages[0].Name != "Go" || p.Languages[0].Pct != 75 {
+		t.Fatalf("Go row = %+v", p.Languages[0])
+	}
+	if p.Languages[1].Name != "JavaScript" || p.Languages[1].Pct != 25 {
+		t.Fatalf("JavaScript row = %+v", p.Languages[1])
+	}
+	// The body carries the additive field under its pinned JSON name.
+	raw, _, err := store.GetBytes(context.Background(), f.st, Key("acme", "api"), store.GetOptions{})
+	if err != nil || !strings.Contains(string(raw), `"languages":[`) {
+		t.Fatalf("projection JSON missing languages: %v %s", err, raw)
+	}
+
+	f.scanner.langCapped = true
+	if err := f.svc.Refresh(context.Background(), "acme", "api", nil); err != nil {
+		t.Fatalf("capped Refresh: %v", err)
+	}
+	p, _, _ = f.svc.Load(context.Background(), "acme", "api")
+	if !p.LanguagesCapped {
+		t.Fatal("capped language scan must be recorded")
+	}
+}
+
+func TestRefreshLanguagesError(t *testing.T) {
+	f := newFixture(t)
+	f.scanner.langErr = errors.New("ls-tree down")
+	if err := f.svc.Refresh(context.Background(), "acme", "api", nil); err == nil {
+		t.Fatal("language scan failure must fail the refresh")
+	}
+	if _, ok, _ := f.svc.Load(context.Background(), "acme", "api"); ok {
+		t.Fatal("a failed refresh must write no projection")
+	}
+}
+
+func TestLoadOldProjectionWithoutLanguages(t *testing.T) {
+	f := newFixture(t)
+	// A projection written before the additive fields existed: version 1,
+	// no languages, no last_release_at. It must load; the page hides the row.
+	old := `{"version":1,"computed_at":"2026-11-20T00:00:00Z","head_sha":"` + f.head + `","windows":{},"scan":{"commits":0,"max_commits":20000},"collab":{"known":true},"facts":{"releases_known":true,"releases":0}}`
+	if _, err := f.st.Put(context.Background(), Key("acme", "old"), store.PutBody{Bytes: []byte(old)}, store.PutOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	p, ok, err := f.svc.Load(context.Background(), "acme", "old")
+	if err != nil || !ok {
+		t.Fatalf("old projection = %+v %v %v", p, ok, err)
+	}
+	if len(p.Languages) != 0 || p.LanguagesCapped {
+		t.Fatalf("old projection grew languages: %+v", p)
+	}
+	if p.Facts.LastReleaseAt != "" {
+		t.Fatalf("old projection grew a release stamp: %+v", p.Facts)
+	}
+}
+
+func TestReadFactsLastRelease(t *testing.T) {
+	f := newFixture(t)
+	ctx := context.Background()
+	putJSON(t, f.st, "repos/acme/api/releases/latest.json", map[string]any{
+		"tag": "v2", "created_at": "2026-08-01T12:00:00Z",
+	})
+	got := f.svc.readFacts(ctx, "acme", "api")
+	if got.LastReleaseAt != "2026-08-01T12:00:00Z" {
+		t.Fatalf("last release = %+v", got)
+	}
+	// A malformed pointer is ignored, never guessed.
+	if _, err := f.st.Put(ctx, "repos/acme/api/releases/latest.json", store.PutBody{Bytes: []byte("{")}, store.PutOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	if again := f.svc.readFacts(ctx, "acme", "api"); again.LastReleaseAt != "" {
+		t.Fatalf("corrupt pointer = %+v", again)
+	}
 }

@@ -82,6 +82,7 @@ import (
 	"time"
 
 	"github.com/crueber/spindle/internal/api"
+	"github.com/crueber/spindle/internal/config"
 	"github.com/crueber/spindle/internal/httpsec"
 	"github.com/crueber/spindle/internal/notify"
 	"github.com/crueber/spindle/internal/policy"
@@ -239,8 +240,11 @@ type SettingsFeatureRow struct {
 
 // SettingsGeneral is the General tab.
 type SettingsGeneral struct {
-	Description  string
-	MaxLength    int
+	Description string
+	Website     string
+	MaxLength   int
+	// MaxWebsite bounds the website input's maxlength (config.MaxRepoWebsiteBytes).
+	MaxWebsite   int
 	Features     []SettingsFeatureRow
 	SelfApproval bool
 	Note         string
@@ -1462,6 +1466,9 @@ func (s *Server) settingsRepoPage(r *http.Request, p auth.Principal, owner, name
 				if v.MaxLength == 0 {
 					v.MaxLength = 512
 				}
+				if v.MaxWebsite == 0 {
+					v.MaxWebsite = config.MaxRepoWebsiteBytes
+				}
 				settingsNormalizeFeatures(v)
 				page.General = v
 			}
@@ -1948,6 +1955,7 @@ func settingsRestoreRepoValues(page *SettingsRepoPage, r *http.Request, action s
 			page.General = &SettingsGeneral{}
 		}
 		page.General.Description = get("description")
+		page.General.Website = get("website")
 		page.General.SelfApproval = get("allow_self_approval") == "true"
 		for i := range page.General.Features {
 			if v := get("feature_" + page.General.Features[i].Key); v != "" {

@@ -446,6 +446,7 @@ func TestSettingsSeamsGeneralSavePreservesSections(t *testing.T) {
 	h.repo.doc = api.SettingsDoc{TOML: "description = \"old\"\n\n[bundles]\nmain_only = true\n"}
 	code, loc, body := seamsPost(t, h, "/acme/monorepo/settings/general", url.Values{
 		"description":         {"new"},
+		"website":             {"https://example.com/new?tab=code"},
 		"allow_self_approval": {"true"},
 		"feature_issues":      {"false", "true"},
 		"feature_pulls":       {"false"},
@@ -462,6 +463,7 @@ func TestSettingsSeamsGeneralSavePreservesSections(t *testing.T) {
 	if !strings.Contains(got, "new") {
 		t.Fatalf("new description missing:\n%s", got)
 	}
+	settingsMustContain(t, got, `website = "https://example.com/new?tab=code"`, "website written")
 	settingsMustContain(t, got, "[bundles]\nmain_only = true", "other sections preserved")
 	settingsMustContain(t, got, "[features]\nissues = true", "checkbox pair resolves to true")
 	settingsMustContain(t, got, "pulls = false", "unchecked feature")
@@ -475,6 +477,57 @@ func TestSettingsSeamsGeneralSavePreservesSections(t *testing.T) {
 		t.Fatalf("multi-line description = %d, want 422 (%s)", code, body)
 	}
 	settingsMustContain(t, body, "single line", "description error")
+}
+
+// A rejected website writes nothing and re-renders the typed value; an empty
+// value clears the key in place.
+func TestSettingsSeamsGeneralWebsite(t *testing.T) {
+	h := newSeamsHarness(t)
+	h.repo.doc = api.SettingsDoc{TOML: "description = \"keep\"\nwebsite = \"https://old.example/x\"\n\n[bundles]\nmain_only = true\n"}
+
+	for _, bad := range []string{"javascript:alert(1)", "data:text/html,x", "file:///etc/passwd",
+		"https://user:pass@example.com/", "https://", "not a url", "https://example.com/a b"} {
+		code, _, body := seamsPost(t, h, "/acme/monorepo/settings/general", url.Values{
+			"description": {"keep"}, "website": {bad},
+		})
+		if code != http.StatusUnprocessableEntity {
+			t.Fatalf("website %q = %d, want 422 (%s)", bad, code, body)
+		}
+		settingsMustContain(t, body, "repo settings: website", "keyed website error")
+		settingsMustContain(t, body, `value="`+hm(bad)+`"`, "typed website preserved")
+		if h.repo.published != nil {
+			t.Fatalf("rejected website %q published: %q", bad, h.repo.published)
+		}
+	}
+
+	code, loc, body := seamsPost(t, h, "/acme/monorepo/settings/general", url.Values{
+		"description": {"keep"}, "website": {"http://example.com/docs?ref=1"},
+	})
+	if code != http.StatusSeeOther || !strings.Contains(loc, "/settings/general") {
+		t.Fatalf("website save = %d %q (%s)", code, loc, body)
+	}
+	settingsMustContain(t, string(h.repo.published), `website = "http://example.com/docs?ref=1"`, "website saved")
+	settingsMustContain(t, string(h.repo.published), "[bundles]\nmain_only = true", "sections preserved")
+	settingsMustContain(t, string(h.repo.published), `description = "keep"`, "description preserved")
+
+	// Empty clears it (the key is written empty, like the description).
+	h.repo.published = nil
+	code, _, body = seamsPost(t, h, "/acme/monorepo/settings/general", url.Values{
+		"description": {"keep"}, "website": {""},
+	})
+	if code != http.StatusSeeOther {
+		t.Fatalf("website clear = %d (%s)", code, body)
+	}
+	if !strings.Contains(string(h.repo.published), `website = ""`) {
+		t.Fatalf("cleared website missing:\n%s", h.repo.published)
+	}
+}
+
+// hm is html.EscapeString's attribute subset the template applies to quotes and
+// ampersands (the value= assertion above).
+func hm(s string) string {
+	r := strings.NewReplacer("&", "&amp;", `"`, "&#34;", "'", "&#39;", "<", "&lt;", ">", "&gt;")
+	return r.Replace(s)
 }
 
 func TestSettingsSeamsScheduledDescribe(t *testing.T) {

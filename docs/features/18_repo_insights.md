@@ -19,7 +19,8 @@ instead of drawing a fake chart.
 Every read is ONE exact-key GET of a cached projection
 (`repos/<o>/<r>/insights/pulse.json`). The projection is computed by a narrated
 task (`insights-refresh`, Seam 5) that runs **one** bounded `git log` over at
-most 365 days plus bounded reads of existing index/card families. The
+most 365 days, **one** bounded `git ls-tree` for the language mix, plus bounded
+reads of existing index/card families. The
 maintainer sweeper refreshes stale projections on its cadence; a repository
 writer can start the same task from the page and reload when it finishes. No
 request path runs git, and no request path LISTs.
@@ -27,8 +28,8 @@ request path runs git, and no request path LISTs.
 ```
 page GET ──► insights/pulse.json (1 GET) ──► render
                     ▲
-maintainer due gate ─┤  insights-refresh task: 1 git scan + bounded family reads + 1 CAS PUT
-page POST (writer) ──┘
+maintainer due gate ─┤  insights-refresh task: 1 history walk + 1 tree listing
+page POST (writer) ──┘  + bounded family reads + 1 CAS PUT
 ```
 
 ## 2. Data model
@@ -60,8 +61,13 @@ derived and rebuildable; losing it loses warmth, never truth.
               "merge_scan_capped": false, "pr_sidecar_reads": 12 },
   "facts":  { "stars": 5, "watchers": 2, "forks": 1, "social_known": true,
               "releases": 3, "releases_known": true, "releases_capped": false,
+              "last_release_at": "2026-08-25T12:00:00Z",
               "packages": 2, "packages_known": true, "packages_capped": false,
-              "threads_runs": 9, "threads_runs_known": true, "threads_runs_capped": false }
+              "threads_runs": 9, "threads_runs_known": true, "threads_runs_capped": false },
+  "languages": [{"name":"Go","bytes":84000,"pct":84},
+                {"name":"JavaScript","bytes":9000,"pct":9},
+                {"name":"Other","bytes":7000,"pct":7}],
+  "languages_capped": false
 }
 ```
 
@@ -155,6 +161,7 @@ telling the UI to say "top 50".
 |---|---|---|
 | stars / watchers / forks | `meta/social.json` | 1 GET |
 | releases | `releases/<tag>.json` headers | 1 capped LIST (100) |
+| last release stamp | `releases/latest.json` | 1 GET |
 | package tags | `packages/registry/tags/<tag>` | 1 capped LIST (100) |
 | Threads runs | `threads/runs/<run>.json` | 1 capped LIST (100) |
 
@@ -183,6 +190,39 @@ that states the absence. No proxy metric is substituted.
 - **Channels/goroutines:** the on-demand start owns its goroutine via the task
   table's ctx (`Tasks().Run`); drain cancels it like every other task. No
   detached goroutine outlives the task table.
+
+### 3.7 Language mix (committed bytes, not lines)
+
+The refresh's second git call is ONE `git ls-tree -r -l -z <resolved-head>` on
+the serving copy it already materialized (`04_git.md` §16.5): the byte size of
+every regular blob in the served tree. Rows are grouped by a pinned
+extension→language table (`internal/git/languages.go`) — Go, JavaScript,
+TypeScript, CSS, HTML, Shell, Python, Rust, Java, C, C++, Ruby, PHP, JSON, YAML,
+Markdown, SQL, Dockerfile, Makefile, everything else `Other`. This is an
+**estimate from committed bytes, not a line counter**: a vendored tree, a
+lockfile or a generated file counts by its stored size. The projection says so
+in the card's method, not merely in this doc.
+
+Only regular blobs count: trees are not emitted under `-r`, symlinks
+(`120000`) and gitlinks (`160000`) are skipped, and an unparseable record is
+ignored. Zero-byte languages are dropped (an empty file is not a language
+signal), so an all-empty tree carries no rows and the card hides the row.
+Percentages are whole numbers and the rows sum to exactly 100: the largest
+entry absorbs the rounding residual (largest-remainder correction). Ordering is
+bytes desc, name asc — deterministic independent of directory order.
+
+The tally caps at **50,000 regular blobs** (`git.InsightsLanguageScanMax`); the
+listing streams through a counting writer, so the cap bounds the counting work
+without buffering the whole output. Past the cap the projection carries
+`languages_capped: true` and both the card and the Insights page say the mix is
+bounded. A subprocess failure fails the refresh (no half-truth projection).
+
+The fields are **additive and optional** (`languages`, `languages_capped`,
+`facts.last_release_at`): a projection written before them decodes with no rows
+and the card hides only the rows it cannot fill. That is why the schema
+`Version` stays 1 — a bump would invalidate every projection (and force a git
+scan on every repository) to express a change that old and new readers already
+tolerate. The next head move or 24 h TTL fills the new fields.
 
 ## 4. Page
 
@@ -224,36 +264,94 @@ POST re-checks it server-side (plus same-origin and the anonymous login
 interstitial). It is a secondary `.btn` — the page has no primary CTA, so the
 masthead Clone stays the one amber action.
 
+### 4.1 The Code page's "Code pulse" card
+
+The repository **Code** page (`pages/repo/tree.html`, handler `repoTree`) carries
+a second card in the About rail, beneath the About box: **Code pulse**. It is
+the same projection, read with the same ONE exact-key GET, and it renders only
+when the projection exists — an absent projection, an unwired seam or a read
+error renders **no card at all** (the page is unchanged). It never runs git,
+never LISTs and adds no JavaScript.
+
+Four facts, each with its text reading:
+
+1. **Momentum** — the 90-day commit total as text (`"41 commits · 90d"`) and an
+   inline-SVG sparkline of the 30-day daily buckets (`Windows["30"].Buckets`,
+   UTC). The `<svg role="img">` carries an `aria-label` that states the range,
+   bucket count, the 30-day total, the peak day and the 90-day total; the text
+   beside it repeats the fact. The sparkline is `polyline`, server-rendered, no
+   chart library and no island.
+2. **Bus factor** — `"Top contributor 78% · 3 contributors"` from the 90-day
+   window (`Contributors[0].Commits / Commits`, `ContributorsTotal`). A capped
+   contributor list renders the true total with a `+` (`"60+ contributors"`).
+   A zero-commit window omits the row rather than printing `0%`.
+3. **Cadence** — `"Last commit 2d ago"` from the Code page's own head-commit
+   strip (`Latest.When`, the same `rel` treatment as every other stamp), and
+   `"Last release 3mo ago"` from `Facts.LastReleaseAt` (`releases/latest.json`,
+   §3.5) or `"No release yet"` when `ReleasesKnown && Releases == 0`. When
+   `ReleasesKnown` is false, or a count exists without a stamp, the release row
+   is omitted — never a guessed date.
+4. **Language mix** — a thin stacked bar plus the text list (top 4 + `Other`,
+   `"Go 84% · JavaScript 9% · CSS 7%"`). The bar is `aria-hidden` decoration on
+   the `--pd-text-2` token with descending opacity; the percentages are in the
+   text. A projection without `Languages` hides only this row.
+
+The footer is `computed 12m ago` (relative from `ComputedAt`) linking to the
+repository's Insights tab. `Scan.Truncated` says the commit counts cover the
+most recent 20,000 commits; `LanguagesCapped` says the mix covers the first
+50,000 files.
+
+The card introduces no CSS class: it composes `.kv`, `.eyebrow`, `.link`, the
+card surface (`--pd-surface` + `--pd-line`) and Tailwind utilities. The
+composition is the shared pattern named in `docs/style-guideline.md` §7
+("sidebar insight card"), with this page as the canonical reference. Rendered
+proof: 1280 and 390 px, one `<h1>`, clean console, no page-level horizontal pan
+(`scrollWidth === clientWidth`).
+
 ## 5. Cost
 
 Evidence E20 (harness `internal/devtools/insightsbench`, `-tags evidence`):
 
 | fixture | raw git scan (median of 3) | full refresh (median) | git calls / refresh | store ops / refresh |
 |---|---|---|---|---|
-| 1,000 commits | 16.6 ms | 16.5 ms | 1 | 57 |
-| 10,000 commits | 156.2 ms | 157.5 ms | 1 | 57 |
+| 1,000 commits | 17.6 ms | 20.7 ms | 2 | 58 |
+| 10,000 commits | 175.5 ms | 175.5 ms | 2 | 58 |
 
 The measurement host is a workstation VM; the durable shape is that cost is
-dominated by the single git spawn and linear in commits (not in repository
-count or object count). The 57 store ops are: projection GET/HEAD/PUT, the
-shared index GET, 50 PR sidecar GETs, social GET, three capped LISTs and their
-per-key metadata (the memory backend counts each listed object).
+dominated by the single history walk and linear in commits (not in repository
+count or object count). The second invocation is the language-mix tree listing
+(§3.7): constant and small at these fixtures. The 58 store ops are: projection
+GET/HEAD/PUT, the shared index GET, 50 PR sidecar GETs, social GET,
+`releases/latest.json`, three capped LISTs and their per-key metadata (the
+memory backend counts each listed object).
 
-The page read is one GET; no refresh work ever rides a request.
+The page read is one GET; no refresh work ever rides a request. The Code pulse
+card adds the same one GET to the tree page (measured 2026-11-25, filesystem
+store, 7 KB projection, 300 warm requests each: 11.1 ms without a projection
+vs 12.0 ms with the card, **+0.9 ms median**). That is below the materiality
+bar (5–10 ms, or a second sequential round trip), so the card reads the
+projection directly and there is no memo to go stale.
 
 ## 6. Tests
 
 - `internal/git/insights_test.go`: parser shapes (merge/no-stats, NUL fields,
   names with newlines, bad records), singular/plural shortstat, `--since`,
   cap/truncation, merge zero-lines, invalid inputs.
+- `internal/git/languages_test.go`: the `ls-tree` tally against a real fixture
+  (Go/JS/CSS/unknown/binary/empty/symlink/gitlink), byte sizes and file counts,
+  the extension table, the entry cap's truncation flag, and the streaming
+  parser's chunk boundaries.
 - `internal/insights/insights_test.go`: UTC day/week/month bucket edges, window
   inclusion/exclusion, timezone normalization, future dates, contributor
   identity by email (same email, different name), ordering, cap, empty windows,
-  collab counts.
+  collab counts, the language mix (sum-to-100 rounding, zero-byte drop,
+  determinism).
 - `internal/insights/refresh_test.go`: Load shapes (absent/corrupt/unknown
   version), staleness (head/TTL/version), refresh happy path, empty repo,
   `RefreshIfStale` skip, CAS retry, merge-sidecar cap, bounded facts, LIST
-  failures as unknown, context cancellation, every error arm.
+  failures as unknown, context cancellation, every error arm, the language
+  scan's population/cap/error arms, the last-release pointer, and an old
+  projection without the additive fields.
 - `internal/webui/insights_test.go`: rendered page (one h1, tab, period links,
   chart bars/captions, facts, traffic copy, no ZgotmplZ), window
   selection/default, stale banner, empty states (no figure, no bars), chart
@@ -262,6 +360,13 @@ The page read is one GET; no refresh work ever rides a request.
   permission matrix (anonymous/private/public), refresh matrix (reader 403,
   writer 303, seam failure 503, cross-origin 403, anonymous interstitial), no
   cross-repo leak.
+- `internal/webui/pulse_test.go`: the Code pulse card renders all four rows
+  with exact text, the sparkline's `role="img"` label (range, totals, peak) and
+  server-rendered `<polyline>`, the card sits inside the About `<aside>` with
+  one `<h1>` and no script, capped contributors, `ReleasesKnown=false`,
+  "No release yet", absent projection (no card), old projection (no language
+  row), top-4 + `Other` folding, `Scan.Truncated`/`LanguagesCapped` wording, and
+  the zero-commit window.
 - `cmd/spindle/insights_test.go`: sweeper kind/due gate, maintainer
   registration, op listing and `opFn` mapping.
 
@@ -295,3 +400,33 @@ The page read is one GET; no refresh work ever rides a request.
   derived work, not a mutation of repository content; the write floor matches
   the create-tag/star precedent while keeping an anonymous or read-only viewer
   from filling the task table.
+- **The Code pulse card is the same projection, not a second one (2026-11-25).**
+  The Code page reads `insights/pulse.json` with one exact-key GET through the
+  existing `RepoDeps.Insights` seam. It adds no key, no task and no git: the
+  card is a render projection of the cached object, and an absent projection
+  renders no card. Hotspots (most-changed files) and test-signal insights are
+  deliberately NOT on the card — they remain Insights-page work, because a
+  sidebar has room for four facts and must never become a second page.
+- **Languages are an additive projection field, and the schema version stays 1
+  (2026-11-25).** `languages` / `languages_capped` / `facts.last_release_at`
+  are optional: an old body decodes with them absent and the card hides the
+  rows it cannot fill, while an old reader ignores them. A `Version` bump would
+  refuse every existing projection and force a git scan per repository to
+  express a change both sides already tolerate; the next head move or the 24 h
+  TTL fills the fields. Staleness stays head equality + TTL, unchanged.
+- **The language mix is a committed-bytes estimate, not a line counter
+  (2026-11-25).** One `ls-tree -r -l -z` at the resolved head, grouped by a
+  pinned extension table, is deterministic and costs one spawn — versus a
+  blame/line walk that would be linear in the whole tree and still wrong for
+  one-line minified files. Vendored trees and generated files count by size by
+  design; the card's method line says "committed bytes", and the cap (50,000
+  files) is stated when it bites. Symlinks and gitlinks are excluded so a
+  linked object cannot be double-counted.
+- **The extra read is measured, not memaized by reflex (2026-11-25).** See §5:
+  a warm Code page on the filesystem store costs single-digit microseconds more
+  with the card (one `GetBytes` + JSON decode of an already-tiny projection),
+  below the materiality bar (5–10 ms, or a second sequential round trip on a
+  hot path), so the card reads the projection directly and there is no memo to
+  go stale or to evict. If the projection grows or a remote backend changes the
+  measurement, revisit with a bounded 30–60 s memo keyed owner/repo and
+  invalidated by `computed_at`.

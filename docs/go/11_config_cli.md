@@ -353,6 +353,7 @@ type RepoSettings struct {  // the four allowed sections; zero = "not set, inher
     Integrations map[string]toml.Primitive `toml:"integrations"` // accepted, forward-compat, never interpreted
     // Passengers (validated, persisted, revisioned, admin-written — never merged):
     Description  string              // issue #235 display metadata
+    Website      string              // repository home page (top-level website key; http/https only)
     Features     *RepoFeatures       // Forgejo #522 [features] six flags, absent = all-on
     Review       *RepoReview         // Forgejo #586 [review] allow_self_approval, absent = allowed
     StaticSite   *RepoStaticSite     // docs/features/19 [static_site] enabled/ref/root, absent = not published
@@ -366,6 +367,7 @@ func (r *RepoSettings) Merge(base *Config) (*Config, error)  // "with_settings":
   (Forgejo #522), `[review]` (Forgejo #586), `[static_site]` (docs/features/19); `[integrations]`
   accepted (stored verbatim, forward-compat). Anything else → 400 at publish.
 - Top-level `description` key (issue #235): the per-repo short display string shown in the repo header. Single line (no CR/LF/NUL), at most 512 characters (`MaxRepoDescriptionRunes`); violations → 400 like any other invalid key. Display metadata only — never merged into the host config (`Merge` ignores it), never in `settings/effective`. Rides the same WAL-published document, so revision/author/admin-writes come free.
+- Top-level `website` key: the repository's public home page, shown as a link in the repo page's About rail. Empty (unset) or an **absolute http/https URL with a host and no credentials** (`ValidateRepoWebsite`); `javascript:`/`data:`/`file:`/other schemes, `user:pass@` credentials, whitespace, control bytes and values above 512 bytes (`MaxRepoWebsiteBytes`) → 400 like any other invalid key. Same passenger discipline as `description`: never merged, never in `settings/effective`.
 - `[review] allow_self_approval` (Forgejo #586): the per-repo self-approval knob — `true`
   (or absent key/section: default ON, fresh repos behave like GitHub) lets the PR author
   `APPROVE`/`CHANGES_REQUESTED` their own PR; `false` keeps the historical `422`.
@@ -904,6 +906,7 @@ $ WALGIT__STORE__BKUET=x spindle config check --config /etc/spindle/walgit.toml 
   path is built as `pack-<bare>.pack`, so the base lands under `wal/<bare>.pack` like the
   tier-0 trailer-derived packs. Same-file `AddPack` installs are a no-op (05_wal_engine.md).
 - **NEW (2026-09-09) — top-level `description` key in per-repo settings (#235):** a single-line ≤512-char display string riding the WAL-published settings TOML (persistence/revision/authorship/admin-writes free); never merged into the host config, never in `settings/effective`. Rationale: 14 §14.12 — additive key, existing keys never change meaning; the 16 KiB payload budget is unchanged and still covers it.
+- **NEW (2026-11-25) — top-level `website` key in per-repo settings:** the repository's home page, a link in the repo page's About rail and `website` on the summary wire. Fail-closed shape: empty or an absolute http/https URL with a non-empty host and no credentials; any other scheme (`javascript:`, `data:`, `file:`), whitespace, control byte or >512-byte value is refused at publish, naming the key. Rationale: a settings value rendered as an anchor is attacker-controlled markup, so the scheme allowlist belongs at the publish boundary, not in the template; the 512-byte bound mirrors `description`, and the value never merges into the host config (the `description` passenger discipline; 14 §14.12 additive key).
 - **NEW (2026-09-15) — `[review]` section in per-repo settings (Forgejo #586):**
   `allow_self_approval` (default ON — nil section/key resolves allowed, zero migration)
   gates author `APPROVE`/`CHANGES_REQUESTED` on their own PR (`COMMENTED` always allowed;

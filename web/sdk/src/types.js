@@ -28,6 +28,7 @@
  * @typedef {{head: {name: string, sha: string}|null}} Refs
  *
  * @typedef {{owner: string, name: string, full_name: string, description: string,
+ *   website: string,
  *   head: {name: string, sha: string}|null,
  *   branches: number, tags: number, health: "empty"|"healthy"|"degraded", missing_total?: number,
  *   open_issues: number, open_pulls: number, has_checks: boolean,

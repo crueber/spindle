@@ -407,6 +407,11 @@ type SummaryData struct {
 	// from the `description` key of the WAL-published settings TOML. Always
 	// present on the wire ("" = unset); old clients ignore it (14 §14.12).
 	Description string `json:"description"`
+	// Website is the repository's public home page, sourced from the
+	// `website` key of the WAL-published settings TOML (the Description
+	// precedent: manifest-inline, zero new store round trips). Always
+	// present on the wire ("" = unset); old clients ignore it (14 §14.12).
+	Website string `json:"website"`
 	// Features are the per-repo feature flags (Forgejo #522), sourced from
 	// the `[features]` section of the WAL-published settings TOML (the
 	// Description precedent: manifest-inline, zero new store round trips
