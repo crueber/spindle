@@ -897,11 +897,13 @@ type AdminConfigView struct {
 	PublicURL string
 	Issuer    string
 	ClientID  string
-	// TOML is the read-only canonical document of the SAVED configuration —
+	// TOML is a preview of the SAVED configuration's canonical document —
 	// exactly the bytes a zero-edit Save writes (config.MarshalTOML over
 	// setup.BaseConfig). It deliberately excludes unsaved form edits: the
-	// page is a whole-file editor, and only Save moves the file. Empty means
-	// the producer could not serialize it (the disclosure is not rendered).
+	// page is a whole-file editor, and only Save moves the file. The rendered
+	// copy never calls it "read-only" (operators read that as "Save cannot
+	// write"). Empty means the producer could not serialize it (the
+	// disclosure is not rendered).
 	TOML string
 
 	// Filter accounting over the prepared view (before ?q/?changed narrow it).

@@ -350,7 +350,12 @@ resumed chunked upload with `416` gap detection, tag CAS race, `tags/list` pagin
 delete, error codes, Range reads), the auth matrix (anonymous public pull, anonymous push denied,
 read-pull-only, write-push, admin-delete, feature-off 404, pull-token-cannot-push), the upload TTL,
 and the budget assertions in `TestBudgetNoList`; `TestDockerPushPull` pushes and pulls a real local
-image through a live Docker daemon (skips when docker or a local image is absent).
+image through a live Docker daemon (skips when docker or a local image is absent), asserting the
+registry contract — the pulled reference's `RepoDigests` carries the manifest digest the registry
+served. The image **ID** is daemon bookkeeping whose meaning depends on the image store (the classic
+graphdriver reports the config digest, the containerd image store an internal ID), so it is logged,
+never asserted: v0.8.1's tag CI (GitHub `ubuntu-latest`, containerd store) failed that comparison while
+the same commit passed on the classic store.
 
 The quota/retention pass's tests live in `internal/packages/quota_test.go` and
 `usage_edge_test.go` (`TestQuotaRefusesManifestAtCommitPoint`, `TestQuotaRefusesOversizedLayer`,

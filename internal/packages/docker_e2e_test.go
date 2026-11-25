@@ -92,6 +92,28 @@ func TestDockerPushPull(t *testing.T) {
 	if out, err := run(120*time.Second, "pull", digestRef); err != nil {
 		t.Fatalf("docker pull by digest: %v (%s)", err, out)
 	}
+	// The registry contract, asserted where both image stores agree: the pulled
+	// reference is a RepoDigest naming the pushed manifest, exactly the digest
+	// the registry served. `{{.Id}}` is daemon bookkeeping and store-dependent
+	// (classic graphdriver reports the config digest, the containerd image store
+	// reports its own image ID), so comparing it across a pull asserts a Docker
+	// internal, not our registry (the v0.8.1 tag CI failed that way on
+	// ubuntu-latest). The ID comparison stays as an informational log only.
+	repoDigests, err := run(20*time.Second, "image", "inspect", "--format", "{{range .RepoDigests}}{{println .}}{{end}}", digestRef)
+	if err != nil {
+		t.Fatalf("docker inspect pulled: %v (%s)", err, repoDigests)
+	}
+	wantDigestRef := host + "/acme/demo@" + mdig
+	found := false
+	for _, line := range strings.Split(repoDigests, "\n") {
+		if strings.TrimSpace(line) == wantDigestRef {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("pulled image RepoDigests %q do not carry the served manifest %q", strings.TrimSpace(repoDigests), wantDigestRef)
+	}
 	pulled, err := run(20*time.Second, "image", "inspect", "--format", "{{.Id}}", digestRef)
 	if err != nil {
 		t.Fatalf("docker inspect pulled: %v (%s)", err, pulled)
@@ -100,7 +122,5 @@ func TestDockerPushPull(t *testing.T) {
 	if err != nil {
 		t.Fatalf("docker inspect original: %v (%s)", err, original)
 	}
-	if strings.TrimSpace(pulled) != strings.TrimSpace(original) {
-		t.Fatalf("pulled image id %s != original %s", strings.TrimSpace(pulled), strings.TrimSpace(original))
-	}
+	t.Logf("image id pulled %s, original %s (informational; store-dependent)", strings.TrimSpace(pulled), strings.TrimSpace(original))
 }

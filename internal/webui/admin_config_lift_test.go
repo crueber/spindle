@@ -150,11 +150,15 @@ func TestAdminConfigLiftResetLinkAffordance(t *testing.T) {
 	settingsMustNotContain(t, body, `href="?reset=server.listen#row-server.listen"`, "a default row has no reset")
 }
 
-func TestAdminConfigLiftTOMLViewIsSavedAndReadOnly(t *testing.T) {
+func TestAdminConfigLiftTOMLViewIsSavedPreview(t *testing.T) {
 	s := adminLiftServer(t, adminLiftView())
 	body := settingsDo(t, s, http.MethodGet, "/admin/config", nil, nil).Body.String()
 	settingsMustContain(t, body, `id="admin-toml"`, "TOML disclosure")
-	settingsMustContain(t, body, "read-only", "read-only label")
+	// The disclosure is a preview of the SAVED document, never a read-only
+	// claim: an operator read "— read-only" as "Save cannot write this file".
+	settingsMustContain(t, body, "preview of the saved document", "preview qualifier")
+	settingsMustContain(t, body, "Save writes those edits to that path", "the editor is where changes are made")
+	settingsMustNotContain(t, body, "— read-only</span>", "the preview is not labelled read-only")
 	settingsMustContain(t, body, "saved configuration", "source is the saved configuration")
 	settingsMustContain(t, body, "listen = &#34;0.0.0.0:8080&#34;", "TOML document rendered (escaped)")
 	settingsMustContain(t, body, `data-copy="#admin-toml-doc"`, "copy affordance")

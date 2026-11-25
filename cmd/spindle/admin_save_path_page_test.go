@@ -82,7 +82,7 @@ func TestAdminConfigPageNamesLoadedFile(t *testing.T) {
 	if !strings.Contains(page, path) {
 		t.Fatalf("the page does not name the loaded config file %q", path)
 	}
-	if !strings.Contains(page, "The file Save writes") {
+	if !strings.Contains(page, "Save writes") {
 		t.Fatal("the TOML disclosure heading is missing")
 	}
 }

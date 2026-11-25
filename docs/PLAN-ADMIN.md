@@ -20,9 +20,11 @@
 > strip with changed counts and the `sectionWhy` line per card, `?q=` server filtering
 > (progressive: the filter island applies the same predicate live and opens Advanced groups
 > while a query is present), `?changed=1` over `FromFile`, `?reset=<key>` (form-only reseed to
-> the compiled default spelling, saved only by Save), the read-only TOML disclosure
-> (`setup.TOMLView`: the **saved** configuration's canonical bytes with non-empty secrets
-> masked — unsaved edits are not reflected, and it is hidden in restricted mode), error
+> the compiled default spelling, saved only by Save), the TOML disclosure labelled as a **preview of
+> the saved document** (`setup.TOMLView`: the **saved** configuration's canonical bytes with non-empty
+> secrets masked — unsaved edits are not reflected, and it is hidden in restricted mode; the copy says
+> the editor is where changes are made and Save writes those edits to that path, because "— read-only" read to
+> an operator as "Save cannot write this file"), error
 > navigation (the `role="alert"` summary links each row, `aria-invalid`, the Advanced group
 > opens, a small focus island lands on the offending control), and the leaveguard island
 > (`beforeunload` + one in-page link confirmation + the Save dirty indicator/live status).
