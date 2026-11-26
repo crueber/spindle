@@ -16,6 +16,7 @@ Test framework: stdlib `testing` only. No testify, no gomock (dependency policy,
 | sim | `make sim` → `go test -count=1 -timeout 15m ./internal/sim/...` | fault-injection over one truth store, one `FaultStore` **per instance link** (§3, §4) | the consistency proof; deterministic under a seed |
 | e2e | `make e2e` → `go test -count=1 ./internal/e2e/...` | real git clients against the running spindle server (smart HTTP, receive/upload-pack, bundle-uri, WAL) **plus the first-run/bootstrap lifecycle scenarios (§5.3)** plus the collaboration full chain (§5.4) | ~60 s; run whenever git-path, boot-path, or collab-path code changes |
 | a11y | `make a11y` → `go test -count=1 -run TestA11y ./internal/e2e/` | the rendered accessibility floor over a fixed page set: real instance, admin sign-in through the in-test IdP, headless Chromium over CDP at 390 px **and** desktop (§6.6) | needs a browser: skips without one locally, `SPINDLE_A11Y=1` makes a missing browser a **failure** (CI); never in the fast tier |
+| parity | `make parity` → `go run ./internal/devtools/paritygate -check` + `go test -run TestParity ./internal/e2e/` | the Threads conformance gate and corpus (§6.8): matrix integrity + the four Forgejo corpus files through the parser and the engine's run-creation path | **no docker, no network**; the execution tier is opt-in (`make parity-exec`, `SPINDLE_PARITY_EXEC=1`); `make parity-closed` adds the plan's closure rule |
 | lint/vet | `make vet` → `go vet ./...` && `gofmt -l` && `go build ./...` | Go equivalent of Rust's `-D warnings`: `go vet` output, any `gofmt -l` line, or any build warning fails the gate | zero findings |
 | race | PR: `make race-pr` → `-race` over the concurrency-owning packages; push to main: `make race` → `-race ./...` (both `-timeout 10m`, watchdog `timeout 1800`) | full fast tier under the race detector (§6) | zero races; the PR tier races where shared state lives because `internal/webui` is a large render suite that owns no shared state (§6.7); main is the complete set |
 | cover | `make cover` | per-package statement coverage of every `internal/...` package, ≥ 95% fail-under (§7) | CI-enforced; new code lands with tests (D7) |
@@ -411,6 +412,45 @@ watchdog stays.
 
 ---
 
+### 6.8 Conformance corpus and the parity gate (`internal/e2e`, `internal/devtools/paritygate`)
+
+Threads accepts the Actions syntax, so "accepted" has to mean *tested against real files*. Two
+artefacts make that mechanical (`docs/features/21_parity_master.md` §1/§9):
+
+- **`docs/features/parity/parity.json`** — one row per `PAR-` id (`status`, `wave`, `track`,
+  `security`, `decision`, `tests[]`). **`matrix.md`** beside it is generated; the gate fails a
+  hand-edited or stale copy.
+- **`internal/e2e/testdata/parity/`** — byte copies of real workflows with a `SOURCE.json` stamp
+  (repository, path, commit, fetch date, sha256), the converted golden each importer run must
+  reproduce, and the harness.
+
+`make parity` runs two things and is in `make ci`:
+
+1. **The gate** (`internal/devtools/paritygate`, stdlib only). It fails when a `have` row names no
+   test, or names a `Test…` that does not exist under `internal/**`; when a `missing`/`partial`
+   row is unplanned (no wave and no decision); when a `non-goal` has no `approved_by`; when the
+   master plan's `PAR-` table and the JSON disagree on the id set; or when `matrix.md` differs
+   from a fresh render. `WEAVE_CARD_URL`+`WEAVE_TOKEN` additionally compare the card body's ids
+   (skipped with a printed notice otherwise — the board's address is not in this tree).
+   **The rule that makes green mean something:** a row turns `have` only with a committed,
+   passing test named in `tests[]`; a green row without one is a red gate, not a review comment.
+2. **The corpus parse/plan tier** (`TestParityCorpusParsesAndPlans`, `-short`). Each converted
+   file must parse, expose its documented jobs/step counts, and pass through the engine's real
+   run-creation path (`threads.CreateRun` over a memory store).
+   `TestParityCorpusTriggerSemantics` drives the corpus's trigger shapes too (a tags-only file
+   fires on a matching tag, not on a branch push, and a tag run records no branch). After the
+   Wave-1 merges all four files convert with **zero** `UNTRANSLATED` constructs. A file whose
+   dependency rows are not `have` yet must instead fail with the refusal the harness documents for
+   it (an unused mechanism today), and the entry flips to the strict assertion in the change that
+   closes the row — a gap is named, never inert.
+
+Deliberate split, and why it is not a loophole: **the PR gate never needs docker**. The
+execution tier (`TestE2E_ParityExecution`, `make parity-exec`) boots a server and a runner and
+runs a corpus-shaped workflow to success; it needs `SPINDLE_PARITY_EXEC=1` and a daemon, so it
+runs where a runner is available (an operator machine, a self-hosted CI job), never on the merge
+gate. `make parity-closed` is not a tier: it is the plan's §9 closure check (no `missing` row),
+run when a wave closes.
+
 ## 7. Makefile — every tier is a target
 
 All dev/CI entry points are Make targets (Divergence D3); there is no justfile, no separate task runner, nothing to remember beyond the tier map below. The watchdog semantics port unchanged: `T5`/`T15` resolve GNU `timeout` (coreutils) and run unwrapped when it is absent — there is no `gtimeout` fallback, so macOS needs coreutils on `PATH`; no watchdog is worse than no tests, but inventing a fallback that does not exist is worse still.
@@ -424,7 +464,8 @@ All dev/CI entry points are Make targets (Divergence D3); there is no justfile, 
 | proof | `make sim` | fault-injection consistency proof + round-trip budgets (`internal/sim`, seeded) |
 | e2e | `make e2e` | smart-HTTP against the real git binary (git ≥ 2.47) |
 | a11y | `make a11y` | the rendered accessibility floor over a fixed page set, headless Chromium over CDP at 390 px and desktop (§6.6); skips without a browser, `SPINDLE_A11Y=1` requires one |
-| merge gate | `make ci` | `vet test race cover contract sim e2e a11y` |
+| parity | `make parity` | the conformance gate + corpus parse/plan tier (§6.8); no docker, no network; `parity-exec` is the opt-in docker tier |
+| merge gate | `make ci` | `vet test race cover contract sim e2e parity a11y` (a11y needs a browser; parity does not) |
 
 The command lines live in the `Makefile` (16_packaging.md §7.2 owns the target list); this table is
 the tier contract — a tier that is not here is not a tier.

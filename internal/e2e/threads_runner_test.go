@@ -261,7 +261,10 @@ func sseLog(t *testing.T, url, token string) string {
 }
 
 // twoJobWorkflow is the acceptance shape: lint (no needs) and test (needs lint),
-// both in the default alpine/git image, both checking out the run's commit.
+// both in the default alpine/git image, both checking out the run's commit. The
+// lint step also proves `${{ … }}` substitution in a real container: every
+// reference it reads is compared with the environment value it must equal
+// (docs/threads.md §3.6).
 const twoJobWorkflow = `name: CI
 on: [push, pull_request]
 jobs:
@@ -270,10 +273,18 @@ jobs:
     runs-on: linux
     steps:
       - uses: actions/checkout
-      - name: lint
+      - name: lint ${{ github.ref_name }}
+        env:
+          LINT_MARKER: lint-marker
         run: |
           echo "linting $GITHUB_SHA"
           test -f .spindle/workflows/ci.yml && echo "checkout ok"
+          test "${{ github.ref }}" = "$GITHUB_REF" && echo "ref substituted"
+          test "${{ github.sha }}" = "$GITHUB_SHA" && echo "sha substituted"
+          test "${{ github.repository }}" = "$GITHUB_REPOSITORY" && echo "repository substituted"
+          test "${{ env.LINT_MARKER }}" = "lint-marker" && echo "env substituted"
+          test -n "${{ github.actor }}" && echo "actor substituted"
+          test "${{ github.server_url }}" = "$GITHUB_SERVER_URL" && echo "server url substituted"
   test:
     name: test
     runs-on: linux
@@ -360,7 +371,11 @@ func TestE2E_ThreadsRunnerExecutesJobs(t *testing.T) {
 
 	// Logs over SSE: the checkout + lint output is attached, in order.
 	logText := sseLog(t, fmt.Sprintf("%s/threads/%s/jobs/j-lint/log", repoLane, runID), chainAliceTok)
-	for _, want := range []string{"checked out", "linting", "checkout ok"} {
+	for _, want := range []string{
+		"checked out", "linting", "checkout ok",
+		"ref substituted", "sha substituted", "repository substituted",
+		"env substituted", "actor substituted", "server url substituted",
+	} {
 		if !strings.Contains(logText, want) {
 			t.Fatalf("log stream misses %q:\n%s", want, logText)
 		}

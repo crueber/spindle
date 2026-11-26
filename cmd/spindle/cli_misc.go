@@ -188,6 +188,13 @@ var threadsGroup = &apiGroup{
 			flags: []string{"json", "quiet"}, run: runThreadsCancel},
 		{name: "rerun", usage: "spindle threads rerun OWNER/REPO RUN", help: "rerun a run as a new attempt",
 			flags: []string{"json", "quiet"}, run: runThreadsRerun},
+		// import is operator-local (a checkout, no server): it converts a
+		// Forgejo/GitHub workflow into .spindle/workflows (PAR-002). It lives
+		// in the group because it is the migration entry point operators look
+		// for there; docs/CLI.md §5.3 marks it as needing no API.
+		{name: "import", usage: "spindle threads import --from forgejo|github --repo DIR [--path PATH] [--out DIR] [--apply [--branch NAME]] [--json]",
+			help:  "convert a Forgejo/GitHub workflow into .spindle/workflows (local)",
+			flags: []string{"from", "repo", "path", "out", "apply", "branch", "allow-partial", "json"}, run: runThreadsImport},
 	},
 }
 

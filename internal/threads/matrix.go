@@ -2,15 +2,15 @@ package threads
 
 import (
 	"fmt"
-	"sort"
 	"strings"
 
 	"github.com/crueber/spindle/internal/threads/workflow"
 )
 
-// Matrix expansion (15 §1/§4, pass B2). `strategy.matrix` is the simple
-// product the parser accepts: one job instance per combination, in a
-// deterministic axis order (axes sorted by name, values in declaration order).
+// Matrix expansion (15 §1/§4, pass B2). `strategy.matrix` is the declaration
+// the parser accepted (axes plus include/exclude): one job instance per
+// expanded cell, in a deterministic order (axes sorted by name, values in
+// declaration order; include entries in list order).
 // Names follow GitHub's convention — the job key and display name gain
 // "(v1, v2)" — and every instance gets its own job id, checks context and
 // Spec.Matrix cell. fail-fast rides the strategy and is enforced by Complete.
@@ -23,48 +23,46 @@ type matrixCell struct {
 	Suffix string
 }
 
-// expandMatrix expands a matrix product into cells. A nil/empty matrix yields
-// exactly one empty cell, so the caller has one code path. Axes are sorted so
-// two servers expand the same workflow identically (the job ids are bucket
-// keys and checks contexts).
-func expandMatrix(m map[string][]string) []matrixCell {
-	if len(m) == 0 {
+// strategyMatrix converts a spec's matrix declaration to the parser's shared
+// expansion input.
+func strategyMatrix(s *StrategySpec) workflow.Matrix {
+	if s == nil {
+		return workflow.Matrix{}
+	}
+	m := workflow.Matrix{Axes: s.Matrix}
+	for _, combo := range s.Include {
+		m.Include = append(m.Include, workflow.MatrixCombination(combo))
+	}
+	for _, combo := range s.Exclude {
+		m.Exclude = append(m.Exclude, workflow.MatrixCombination(combo))
+	}
+	return m
+}
+
+// expandMatrix expands a matrix declaration into cells. A job with no matrix
+// yields exactly one empty cell, so the caller has one code path. Axes are
+// sorted so two servers expand the same workflow identically (the job ids are
+// bucket keys and checks contexts); `include`/`exclude` follow the parser's
+// documented rules (workflow.Matrix.Expand).
+func expandMatrix(s *StrategySpec) []matrixCell {
+	m := strategyMatrix(s)
+	if !m.Enabled() {
 		return []matrixCell{{}}
 	}
-	axes := make([]string, 0, len(m))
-	for axis := range m {
-		if len(m[axis]) == 0 {
-			continue // an empty axis contributes no value: skip it
+	cells := m.Expand()
+	out := make([]matrixCell, 0, len(cells))
+	for _, cell := range cells {
+		parts := make([]string, 0, len(cell.Order))
+		for _, key := range cell.Order {
+			parts = append(parts, cell.Values[key])
 		}
-		axes = append(axes, axis)
-	}
-	sort.Strings(axes)
-	if len(axes) == 0 {
-		return []matrixCell{{}}
-	}
-	cells := []matrixCell{{Values: map[string]string{}}}
-	for _, axis := range axes {
-		next := make([]matrixCell, 0, len(cells)*len(m[axis]))
-		for _, cell := range cells {
-			for _, value := range m[axis] {
-				vals := make(map[string]string, len(cell.Values)+1)
-				for k, v := range cell.Values {
-					vals[k] = v
-				}
-				vals[axis] = value
-				next = append(next, matrixCell{Values: vals})
-			}
+		suffix := ""
+		if len(parts) > 0 {
+			suffix = " (" + strings.Join(parts, ", ") + ")"
 		}
-		cells = next
+		out = append(out, matrixCell{Values: cell.Values, Suffix: suffix})
 	}
-	for i := range cells {
-		parts := make([]string, 0, len(axes))
-		for _, axis := range axes {
-			parts = append(parts, cells[i].Values[axis])
-		}
-		cells[i].Suffix = " (" + strings.Join(parts, ", ") + ")"
-	}
-	return cells
+	return out
 }
 
 // matrixGroupKey is the base job key a matrix expansion belongs to. It is
@@ -77,40 +75,29 @@ func matrixGroupKey(key string, cells int) string {
 	return key
 }
 
-// matrixIsMatrix reports whether the strategy declares a usable product.
+// matrixIsMatrix reports whether the strategy declares any combination: a
+// usable axis or an include entry.
 func matrixIsMatrix(s *StrategySpec) bool {
-	if s == nil || len(s.Matrix) == 0 {
-		return false
-	}
-	for _, vals := range s.Matrix {
-		if len(vals) > 0 {
-			return true
-		}
-	}
-	return false
+	return strategyMatrix(s).Enabled()
 }
 
 // validateMatrixProduct bounds the expansion (a workflow cannot ask one event
-// for an unbounded number of jobs; the run record would be unreadable).
-const maxMatrixJobs = 256
+// for an unbounded number of jobs; the run record would be unreadable). The
+// parser owns the bound; the server keeps the same one for a stored spec.
+const maxMatrixJobs = workflow.MaxMatrixCells
 
-// matrixProductSize returns the product size and a validation error.
+// matrixProductSize returns the expanded cell count and a validation error. It
+// is the server-side safety net for a spec stored before the parser bounded the
+// declaration.
 func matrixProductSize(s *StrategySpec) (int, error) {
-	if !matrixIsMatrix(s) {
+	m := strategyMatrix(s)
+	if !m.Enabled() {
 		return 1, nil
 	}
-	size := 1
-	for axis, vals := range s.Matrix {
-		if len(vals) == 0 {
-			continue
-		}
-		size *= len(vals)
-		if size > maxMatrixJobs {
-			return 0, fmt.Errorf("%w: strategy.matrix expands to more than %d jobs", ErrUnprocessable, maxMatrixJobs)
-		}
-		_ = axis
+	if err := m.Validate(); err != nil {
+		return 0, fmt.Errorf("%w: %v", ErrUnprocessable, err)
 	}
-	return size, nil
+	return len(m.Expand()), nil
 }
 
 // SubstituteMatrix replaces every `${{ matrix.<axis> }}` in s with the cell
@@ -159,11 +146,7 @@ func expandJobSpec(key, display string, base *Spec, ec expandContext) ([]jobInst
 	if err != nil {
 		return nil, err
 	}
-	var product map[string][]string
-	if strat != nil {
-		product = strat.Matrix
-	}
-	cells := expandMatrix(product)
+	cells := expandMatrix(strat)
 	// A name that names a matrix axis already distinguishes its cells, so the
 	// "(v1, v2)" suffix is not appended (GitHub's rule): `cell-${{ matrix.v }}`
 	// renders as `cell-a`, and the check context follows the rendered name.

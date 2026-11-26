@@ -7,6 +7,7 @@ import (
 	neturl "net/url"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -200,8 +201,10 @@ type PlanInput struct {
 	// Images is the runner's image-source policy (--image-prefix/-all,
 	// --image-pull, --image-require-digest); the zero value changes nothing.
 	Images ImageConfig
-	// ServerURL is the spindle origin the runner was configured with (exposed
-	// as SPINDLE_SERVER; informational).
+	// ServerURL is the spindle origin the runner was configured with; it is the
+	// fallback when the job payload carries no canonical origin (the server's
+	// server.public_url / request-derived base wins because it is the address job
+	// containers can reach — PAR-111).
 	ServerURL string
 	// Caps is the server's artifact cap advertisement (ExecInput.Caps).
 	Caps threads.ArtifactCaps
@@ -238,6 +241,11 @@ type Plan struct {
 	CheckoutOriginURL string
 	CheckoutSHA       string
 	Timeout           time.Duration
+	// ServerURL is the canonical spindle origin (no trailing slash) the job
+	// advertises as GITHUB_SERVER_URL/FORGEJO_SERVER_URL (GITHUB_API_URL is
+	// <ServerURL>/api/v1). Empty when neither the payload nor the runner was
+	// configured with one, in which case the variables are simply absent.
+	ServerURL string
 
 	// ContainerArgv is `docker create …` minus the leading "docker".
 	ContainerArgv []string
@@ -263,6 +271,12 @@ type Plan struct {
 	Matrix map[string]string
 	Inputs map[string]string
 	Env    map[string]string
+	// GitHub is the resolved `github.*` context of this job (docs/threads.md
+	// §3.6): the runner built-ins, captured BEFORE any authored `env:` overlay
+	// so a workflow that sets GITHUB_SHA in `env:` cannot change what
+	// `${{ github.sha }}` means, plus the run's actor. It is the one source of
+	// the `github.<field>` substitution and of a step `if:` reading it.
+	GitHub map[string]string
 	// Needs is the folded output map of the job's `needs:` dependencies (the
 	// server materializes it at claim time). Step fields read it as
 	// `${{ needs.<job>.outputs.<name> }}`.
@@ -310,6 +324,7 @@ type StepPlan struct {
 	Kind             string // run | checkout | docker | composite | artifact-* | unsupported
 	Uses             string
 	If               string
+	Shell            string // the resolved `shell:` ("" is the image's sh)
 	ContinueOnError  bool
 	Timeout          time.Duration
 	WorkingDirectory string
@@ -333,6 +348,20 @@ type StepPlan struct {
 	// ($SPINDLE_OUTPUT, aliased as $GITHUB_OUTPUT). Only a step with an id is
 	// collected (docs/threads.md §3.9).
 	OutputPath string
+	// EnvFile/PathFile are this step's command files ($GITHUB_ENV and
+	// $GITHUB_PATH, with the Forgejo alias names). Their effects reach LATER
+	// steps of the same job only (docs/threads.md §3.10). Both are empty for a
+	// docker:// action, whose image is third-party code and never receives the
+	// job's environment layer.
+	EnvFile  string
+	PathFile string
+	// StepEnv are the names this step's own `env:` block sets. A command-file
+	// value never overrides that most specific layer.
+	StepEnv []string
+	// EnvSecret maps a container variable onto the secret name whose value it
+	// receives at exec time: `env: FORGEJO_TOKEN: ${{ secrets.GITHUB_TOKEN }}`
+	// delivers the alias BY NAME, so no secret value ever reaches argv.
+	EnvSecret map[string]string
 	// Argv is `docker exec …` minus the leading "docker" (or `docker run …`
 	// for a docker action).
 	Argv []string
@@ -378,7 +407,10 @@ type DockerPlan struct {
 	Env        map[string]string
 }
 
-// StepTemplate is a step's unresolved fields (matrix/inputs already applied).
+// StepTemplate is a step's authored fields. Substitution happens when the step
+// is resolved (workflow.Substitute, one pass): at plan time for the preview
+// (step/needs outputs deferred), and again for real immediately before the step
+// runs, because each field may read an earlier step's outputs.
 type StepTemplate struct {
 	Name             string
 	Run              string
@@ -386,11 +418,14 @@ type StepTemplate struct {
 	Shell            string
 	Uses             string
 	WorkingDirectory string
-	// With/Env keep their authored values; matrix/inputs were substituted
-	// into the string fields, and the run-time step outputs are substituted at
-	// execution.
+	// With/Env are the authored `with:`/`env:` values (a composite action's
+	// inner step additionally carries its caller's env layer, see Inherited).
 	With map[string]string
 	Env  map[string]string
+	// Inherited is the caller's environment layer for a composite action's
+	// inner step: it resolves first, so the step's own `env:` reads the layer
+	// below it.
+	Inherited map[string]string
 }
 
 // BuildPlan validates the spec and resolves one job into docker argv.
@@ -432,7 +467,19 @@ func BuildPlan(in PlanInput) (*Plan, error) {
 	names := jobNames(job)
 	matrix := spec.Matrix
 	inputs := spec.Inputs
-	buildEnv := builtinEnv(job, ws, in.ServerURL, matrix)
+	// The canonical origin: the payload's (server.public_url, else the origin the
+	// runner reached) wins over the runner's own --server, because it is the
+	// address JOB CONTAINERS can use. A malformed value never reaches the
+	// environment (a job that curls $GITHUB_SERVER_URL must not get garbage).
+	serverBase := canonicalServerURL(job.ServerURL)
+	if serverBase == "" {
+		serverBase = canonicalServerURL(in.ServerURL)
+	}
+	buildEnv := builtinEnv(job, ws, serverBase, matrix)
+	// The `github.*` context is captured from the runner's own built-ins BEFORE
+	// an authored `env:` overlay: the context is the run's identity, not a
+	// variable a workflow may redefine (docs/threads.md §3.6).
+	github := githubContext(buildEnv)
 	for k, v := range spec.Env {
 		buildEnv[k] = headerValue(v)
 	}
@@ -446,11 +493,32 @@ func BuildPlan(in PlanInput) (*Plan, error) {
 		}
 	}
 	secretEnv := map[string]string{}
-	mask := make([]string, 0, len(job.Secrets))
+	mask := make([]string, 0, len(job.Secrets)+len(job.Mask)+2)
 	for name, value := range job.Secrets {
+		// The token aliases are reserved: a stored secret of that name is ignored
+		// so one variable can never carry two values (docs/threads.md §5.3). Its
+		// value is still masked (the server puts every secret value in Mask).
+		if reservedSecretName(name) {
+			continue
+		}
 		secretEnv[name] = value
 	}
 	mask = append(mask, job.Mask...)
+	// EVERY secret value the plan can substitute is registered here, exactly
+	// like an `env:`-delivered one: `${{ secrets.X }}` inside a `run:` value is
+	// spliced into the script, so the log stream must mask it even if the
+	// payload's own mask list omitted it (the plan is self-contained).
+	for _, value := range secretEnv {
+		if value != "" {
+			mask = append(mask, value)
+		}
+	}
+	// The attempt token is a bearer credential, and it is now also exposed as
+	// GITHUB_TOKEN/FORGEJO_TOKEN (§5.3), so a workflow echoing it must be masked
+	// exactly like a repository secret.
+	if in.AttemptToken != "" {
+		mask = append(mask, in.AttemptToken)
+	}
 	sort.Strings(mask)
 
 	idTokenRequestToken := ""
@@ -469,20 +537,21 @@ func BuildPlan(in PlanInput) (*Plan, error) {
 		Names: names, Workspace: ws, Image: image, RequestedImage: requestedImage,
 		Images:      in.Images,
 		CheckoutSHA: job.Commit, Secrets: secretEnv, Mask: mask,
+		ServerURL:           serverBase,
 		JobToken:            in.AttemptToken,
 		IDTokenRequestToken: idTokenRequestToken,
-		Matrix:              matrix, Inputs: inputs, Env: jobEnv,
+		Matrix:              matrix, Inputs: inputs, Env: jobEnv, GitHub: github,
 		Needs:        job.NeedsOutputs,
 		ArtifactCaps: in.Caps,
 		Actions:      spec.Actions,
 	}
-	// The job's output templates are plain strings here (matrix/inputs
-	// resolved); each reference to a step output is resolved from the collected
-	// outputs when the job finishes.
+	// The job's output templates stay as authored: every reference (github,
+	// matrix, inputs, env, secrets, step and needs outputs) is resolved in one
+	// pass when the job finishes (docs/threads.md §3.6/§3.9).
 	if len(spec.Outputs) > 0 {
 		p.OutputTemplates = make(map[string]string, len(spec.Outputs))
 		for name, tmpl := range spec.Outputs {
-			p.OutputTemplates[name] = subst(p, tmpl)
+			p.OutputTemplates[name] = tmpl
 		}
 	}
 	if job.Checkout != nil {
@@ -535,13 +604,95 @@ func jobNames(job *threads.FetchResult) Names {
 	}
 }
 
+// githubContext maps the runner's built-in GITHUB_* environment onto the closed
+// `github.*` context (docs/threads.md §3.6). It is the ONE source of the
+// context: substitution, a step `if:` and the concurrency/name expansions on
+// the server all read the same field set, so one reference cannot mean two
+// values. A field the environment does not carry (no actor, no server
+// addresses) is the empty string — an absent supported value expands empty.
+func githubContext(env map[string]string) map[string]string {
+	return map[string]string{
+		"ref":        env["GITHUB_REF"],
+		"ref_name":   env["GITHUB_REF_NAME"],
+		"sha":        env["GITHUB_SHA"],
+		"event_name": env["GITHUB_EVENT_NAME"],
+		"workflow":   env["GITHUB_WORKFLOW"],
+		"job":        env["GITHUB_JOB"],
+		"repository": env["GITHUB_REPOSITORY"],
+		"run_id":     env["GITHUB_RUN_ID"],
+		"actor":      env["GITHUB_ACTOR"],
+		"server_url": env["GITHUB_SERVER_URL"],
+		"api_url":    env["GITHUB_API_URL"],
+	}
+}
+
+// secretValues is the secrets context of this job: the decrypted repository and
+// environment secrets, plus the reserved token aliases (GitHub's own spelling
+// and Forgejo's), which can never be shadowed by a stored secret of the same
+// name (docs/threads.md §5.3). An untrusted run's map is empty, so every
+// reference reads empty — GitHub's rule, never the literal text.
+func (p *Plan) secretValues() map[string]string {
+	out := make(map[string]string, len(p.Secrets)+2)
+	for name, value := range p.Secrets {
+		out[name] = value
+	}
+	if p.JobToken != "" {
+		out[JobTokenSecretName] = p.JobToken
+		out[forgejoTokenSecret] = p.JobToken
+	}
+	return out
+}
+
+// githubValues is the plan's resolved `github.*` context (see githubContext).
+// A hand-built plan (a test or a helper that never went through BuildPlan) gets
+// the same map derived from its environment layer.
+func (p *Plan) githubValues() map[string]string {
+	if len(p.GitHub) > 0 {
+		return p.GitHub
+	}
+	return githubContext(p.Env)
+}
+
+// jobRef is the run's `GITHUB_REF` and `GITHUB_REF_NAME`, in the one spelling
+// every consumer agrees on: a branch push is `refs/heads/<branch>`, a tag push
+// is `refs/tags/<tag>` and its short name is the tag (never the branch, which a
+// tag run leaves empty), and a pull request is its BASE branch (the payload's
+// `Ref` may be `refs/pull/<n>/head`, which is not what a job reads — the same
+// rule the job OIDC token's `ref` claim applies). A payload with neither a ref
+// nor a branch answers two empty strings, never a malformed `refs/heads/`.
+func jobRef(job *threads.FetchResult) (ref, name string) {
+	if job == nil {
+		return "", ""
+	}
+	branch := strings.TrimSpace(job.Branch)
+	full := strings.TrimSpace(job.Ref)
+	// `Ref` is honoured only for a non-PR run and only when it is a real ref: an
+	// older server may send neither, and a PR's ref is its base branch.
+	if job.Event == threads.EventPullReq || !strings.HasPrefix(full, "refs/") {
+		full = ""
+	}
+	if full == "" {
+		if branch == "" {
+			return "", ""
+		}
+		full = "refs/heads/" + branch
+	}
+	if tag, ok := strings.CutPrefix(full, "refs/tags/"); ok {
+		return full, tag
+	}
+	if branch != "" {
+		return full, branch
+	}
+	if name, ok := strings.CutPrefix(full, "refs/heads/"); ok {
+		return full, name
+	}
+	return full, branch
+}
+
 // builtinEnv is the runner-provided environment (CI conventions: both the
 // spindle names and the GitHub-compatible aliases workflows expect).
 func builtinEnv(job *threads.FetchResult, ws, serverURL string, matrix map[string]string) map[string]string {
-	ref := ""
-	if branch := strings.TrimSpace(job.Branch); branch != "" {
-		ref = "refs/heads/" + branch
-	}
+	ref, refName := jobRef(job)
 	trusted := "false"
 	if job.Trusted {
 		trusted = "true"
@@ -552,7 +703,7 @@ func builtinEnv(job *threads.FetchResult, ws, serverURL string, matrix map[strin
 		"GITHUB_REPOSITORY": job.Repo,
 		"GITHUB_SHA":        job.Commit,
 		"GITHUB_REF":        ref,
-		"GITHUB_REF_NAME":   job.Branch,
+		"GITHUB_REF_NAME":   refName,
 		"GITHUB_EVENT_NAME": job.Event,
 		"GITHUB_WORKFLOW":   job.Workflow,
 		"GITHUB_JOB":        job.JobID,
@@ -571,8 +722,22 @@ func builtinEnv(job *threads.FetchResult, ws, serverURL string, matrix map[strin
 		"SPINDLE_WORKSPACE": ws,
 		"SPINDLE_ATTEMPT":   fmt.Sprint(job.Attempt),
 	}
+	// The run's actor (PAR-058's github.actor) is exposed under GitHub's
+	// spelling so `$GITHUB_ACTOR` and `${{ github.actor }}` agree; a payload
+	// with no actor (an older server, a synthetic run) omits the variable and
+	// the reference expands empty.
+	if actor := strings.TrimSpace(job.Actor); actor != "" {
+		env["GITHUB_ACTOR"] = actor
+	}
 	if serverURL != "" {
-		env["SPINDLE_SERVER"] = strings.TrimRight(serverURL, "/")
+		env["SPINDLE_SERVER"] = serverURL
+		// Server/API addresses (PAR-111): the configured external origin — never a
+		// hardcoded host — so a proxied deployment works and the corpus's
+		// `$GITHUB_SERVER_URL/$GITHUB_REPOSITORY.git` / `$GITHUB_API_URL/...`
+		// commands reach spindle. GITHUB_API_URL is the REST root, as on GitHub.
+		env["GITHUB_SERVER_URL"] = serverURL
+		env["GITHUB_API_URL"] = serverURL + "/api/v1"
+		env["FORGEJO_SERVER_URL"] = serverURL
 	}
 	// The OIDC exchange URL (never the token — that travels by NAME only, so
 	// it never reaches docker argv/inspect; docs/threads.md §5.5). Both the
@@ -591,6 +756,83 @@ func builtinEnv(job *threads.FetchResult, ws, serverURL string, matrix map[strin
 		env["MATRIX_"+envName(axis)] = matrix[axis]
 	}
 	return env
+}
+
+// canonicalServerURL normalises a configured spindle origin: an absolute
+// http(s) URL with no trailing slash. Anything else is "" (the variables are
+// then absent rather than wrong).
+func canonicalServerURL(raw string) string {
+	raw = strings.TrimSpace(raw)
+	raw = strings.TrimRight(raw, "/")
+	if raw == "" {
+		return ""
+	}
+	u, err := neturl.Parse(raw)
+	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
+		return ""
+	}
+	return raw
+}
+
+// The reserved spellings of the job token: the environment names it is
+// delivered under and the secret name it answers to. GITHUB_TOKEN is GitHub's
+// spelling, FORGEJO_TOKEN Forgejo's, SPINDLE_JOB_TOKEN spindle's own.
+const (
+	JobTokenSecretName  = "GITHUB_TOKEN"
+	forgejoTokenSecret  = "FORGEJO_TOKEN"
+	spindleTokenEnvName = "SPINDLE_JOB_TOKEN"
+)
+
+// reservedSecretName reports whether a name is the job token's: a repository
+// secret may not shadow (or be shadowed by) the automatic token, and is ignored
+// at plan time so one variable never has two values.
+func reservedSecretName(name string) bool {
+	return strings.EqualFold(strings.TrimSpace(name), JobTokenSecretName) ||
+		strings.EqualFold(strings.TrimSpace(name), forgejoTokenSecret)
+}
+
+// jobTokenEnvNames are the environment names the job token is delivered under:
+// the spindle spelling and the two platform aliases. They are delivered by NAME
+// (the value travels in the docker client's environment, never argv) and masked
+// in the log stream.
+func jobTokenEnvNames() []string {
+	return []string{spindleTokenEnvName, JobTokenSecretName, forgejoTokenSecret}
+}
+
+// secretValue resolves one `${{ secrets.<name> }}` reference: the reserved
+// token aliases first (they can never be shadowed by a stored secret of the same
+// name — GitHub refuses to create one, and a job must never authenticate with a
+// look-alike), then the job's decrypted secret map (case-insensitive, as on
+// GitHub). The second result reports whether the name exists at all; a missing
+// secret resolves to "" exactly like GitHub's empty context value.
+func (p *Plan) secretValue(name string) (string, bool) {
+	name = strings.TrimSpace(name)
+	if reservedSecretName(name) {
+		return p.JobToken, p.JobToken != ""
+	}
+	for key, value := range p.Secrets {
+		if strings.EqualFold(key, name) {
+			return value, true
+		}
+	}
+	return "", false
+}
+
+// secretRefRe matches a `${{ secrets.<name> }}` reference that is the WHOLE
+// value of a step `env:` entry — the only place a secret reference is resolved,
+// precisely because resolving it here keeps the value out of argv.
+var secretRefRe = regexp.MustCompile(`^\s*\$\{\{\s*secrets\.([A-Za-z_][A-Za-z0-9_]*)\s*\}\}\s*$`)
+
+// exactSecretRef reports whether an authored `env:` value is exactly one secret
+// reference, and which secret it names. Anything else (a prefix/suffix, several
+// references, another context) is not resolved: splicing a secret value into a
+// string would put it in the docker argv.
+func exactSecretRef(value string) (string, bool) {
+	m := secretRefRe.FindStringSubmatch(value)
+	if m == nil {
+		return "", false
+	}
+	return m[1], true
 }
 
 // envName uppercases an axis for the MATRIX_* env spelling.
@@ -840,7 +1082,7 @@ func planCompositeStep(p *Plan, index int, st threads.StepSpec, def threads.Acti
 		Kind: "composite", Uses: st.Uses, ContinueOnError: st.ContinueOnError,
 		Composite: &CompositePlan{Path: dir, Outputs: def.Outputs},
 		Template: &StepTemplate{
-			Name: subst(p, st.Name), If: subst(p, st.If), Uses: st.Uses,
+			Name: st.Name, If: st.If, Uses: st.Uses,
 		},
 	}
 	if st.TimeoutMinutes > 0 {
@@ -858,7 +1100,7 @@ func planCompositeStep(p *Plan, index int, st threads.StepSpec, def threads.Acti
 		}
 		caller.Composite.Steps = append(caller.Composite.Steps, planned...)
 	}
-	resolved, err := resolveStep(p, caller, func(s string) (string, error) { return s, nil })
+	resolved, err := resolveStep(p, caller, nil, false)
 	if err != nil {
 		return nil, fmt.Errorf("step %d (uses: %s): %w", index+1, uses, err)
 	}
@@ -895,12 +1137,13 @@ func planDockerStep(p *Plan, index int, st threads.StepSpec, dp *DockerPlan, wit
 		ID:              strings.ToLower(strings.TrimSpace(st.ID)),
 		ContinueOnError: st.ContinueOnError, Docker: dp,
 		Template: &StepTemplate{
-			Name:             subst(p, st.Name),
-			If:               subst(p, st.If),
+			Name:             st.Name,
+			If:               st.If,
 			Uses:             st.Uses,
 			WorkingDirectory: containerDir(wd, st.WorkingDirectory),
 			With:             copyStrings(with),
 			Env:              copyStrings(env),
+			Inherited:        copyStrings(ctx.env),
 		},
 	}
 	if st.TimeoutMinutes > 0 {
@@ -909,7 +1152,7 @@ func planDockerStep(p *Plan, index int, st threads.StepSpec, dp *DockerPlan, wit
 	sp.OutputIndex = *next
 	*next++
 	sp.OutputPath = outputFilePath(sp.OutputIndex)
-	resolved, err := resolveStep(p, sp, func(s string) (string, error) { return s, nil })
+	resolved, err := resolveStep(p, sp, nil, false)
 	if err != nil {
 		return nil, err
 	}
@@ -980,14 +1223,15 @@ func stepPlan(p *Plan, index int, st threads.StepSpec, ctx expandCtx, next *int)
 		wd = containerDir(ctx.workdir, st.WorkingDirectory)
 	}
 	tmpl := &StepTemplate{
-		Name:             subst(p, st.Name),
-		Run:              subst(p, st.Run),
-		If:               subst(p, st.If),
+		Name:             st.Name,
+		Run:              st.Run,
+		If:               st.If,
 		Shell:            st.Shell,
 		Uses:             st.Uses,
 		WorkingDirectory: wd,
 		With:             copyStrings(st.With),
 		Env:              copyStrings(env),
+		Inherited:        copyStrings(ctx.env),
 	}
 	sp := StepPlan{
 		Index:           index,
@@ -999,10 +1243,11 @@ func stepPlan(p *Plan, index int, st threads.StepSpec, ctx expandCtx, next *int)
 	sp.OutputIndex = *next
 	*next++
 	sp.OutputPath = outputFilePath(sp.OutputIndex)
+	sp.EnvFile, sp.PathFile = commandFilePaths(sp.OutputIndex)
 	if st.TimeoutMinutes > 0 {
 		sp.Timeout = time.Duration(st.TimeoutMinutes) * time.Minute
 	}
-	return resolveStep(p, sp, func(s string) (string, error) { return s, nil })
+	return resolveStep(p, sp, nil, false)
 }
 
 // ResolveStep re-resolves a planned step against the outputs collected so far,
@@ -1011,9 +1256,7 @@ func stepPlan(p *Plan, index int, st threads.StepSpec, ctx expandCtx, next *int)
 // (docs/threads.md §3.9). Step outputs and the job's `needs:` outputs are both
 // substituted (a field may read either).
 func (p *Plan) ResolveStep(step StepPlan, outputs map[string]map[string]string) (StepPlan, error) {
-	return resolveStep(p, step, func(s string) (string, error) {
-		return threads.SubstituteOutputs(s, outputs, p.Needs)
-	})
+	return resolveStep(p, step, outputs, true)
 }
 
 // ResolveChildStep re-resolves one composite action inner step against the
@@ -1029,23 +1272,76 @@ func (p *Plan) ResolveChildStep(step StepPlan, jobOutputs, local map[string]map[
 	for id, outs := range local {
 		merged[id] = outs
 	}
-	return resolveStep(p, step, func(s string) (string, error) {
-		return threads.SubstituteOutputs(s, merged, p.Needs)
-	})
+	return resolveStep(p, step, merged, true)
 }
 
 // resolveStep fills a step's resolved fields from its template and (re)builds
-// the docker argv. resolve is the substitution applied to every template field
-// (identity for the plan preview, step outputs at execution).
-func resolveStep(p *Plan, sp StepPlan, resolve func(string) (string, error)) (StepPlan, error) {
+// the docker argv. outputs are the step/needs outputs collected so far; strict
+// is false for the plan-time preview, where no step has run yet and an output
+// reference stays authored (ResolveStep resolves it for real just before the
+// step runs). Every substituted site is expanded in ONE pass (docs/threads.md
+// §3.6).
+func resolveStep(p *Plan, sp StepPlan, outputs map[string]map[string]string, strict bool) (StepPlan, error) {
 	t := sp.Template
 	if t == nil {
 		return sp, nil // a hand-built StepPlan (tests, the artifact helpers)
 	}
-	// Matrix/inputs substitution is idempotent, so applying it here also
-	// covers the raw With/Env values (the string fields already carry it).
+	// The environment layer at this step, lowest first: the job's layer
+	// (runner built-ins, workflow, job and container `env`, already folded into
+	// p.Env), the CALLER's layer for a composite action's inner step, then the
+	// step's own `env:`. A step's own values resolve against the layers below
+	// them, so `env.X` inside an `env:` value never reads a sibling or itself.
+	lower := make(map[string]string, len(p.Env)+len(t.Inherited))
+	for k, v := range p.Env {
+		lower[k] = v
+	}
+	inherited, err := p.resolveEnvLayer(t.Inherited, lower, outputs, strict)
+	if err != nil {
+		return sp, err
+	}
+	for k, v := range inherited {
+		lower[k] = v
+	}
+	env := make(map[string]string, len(p.Env)+len(t.Env)+2)
+	for k, v := range p.Env {
+		env[k] = v
+	}
+	values := make(map[string]string, len(lower)+len(t.Env))
+	for k, v := range lower {
+		values[k] = v
+	}
+	sp.EnvFrom = nil
+	sp.EnvSecret = nil
+	sp.StepEnv = sp.StepEnv[:0]
+	for _, k := range sortedKeys(t.Env) {
+		sp.StepEnv = append(sp.StepEnv, k)
+		// `env: NAME: ${{ secrets.X }}` (the whole value) is delivered BY NAME at
+		// exec time: the value would otherwise become an argv element, and a
+		// secret must never appear in argv, docker inspect or .git/config. The
+		// reference still resolves to its value for `${{ env.NAME }}`, which is
+		// what `$NAME` means inside the container.
+		if secretName, ok := exactSecretRef(t.Env[k]); ok {
+			if sp.EnvSecret == nil {
+				sp.EnvSecret = make(map[string]string, 1)
+			}
+			sp.EnvSecret[k] = secretName
+			value, _ := p.secretValue(secretName)
+			values[k] = value
+			continue
+		}
+		// The authored value is flattened first (an authored newline would be a
+		// typo); a substituted OUTPUT value keeps its newlines — it is one argv
+		// element to docker, and a multi-line output is legitimate data.
+		val, verr := p.expandValue(headerValue(t.Env[k]), lower, outputs, strict)
+		if verr != nil {
+			return sp, verr
+		}
+		env[k] = val
+		values[k] = val
+	}
+	sort.Strings(sp.StepEnv)
 	expand := func(s string) (string, error) {
-		return resolve(subst(p, s))
+		return p.expandValue(s, values, outputs, strict)
 	}
 	name, err := expand(t.Name)
 	if err != nil {
@@ -1061,6 +1357,11 @@ func resolveStep(p *Plan, sp StepPlan, resolve func(string) (string, error)) (St
 	if sp.Run, err = expand(t.Run); err != nil {
 		return sp, err
 	}
+	shell, err := expand(t.Shell)
+	if err != nil {
+		return sp, err
+	}
+	sp.Shell = strings.TrimSpace(shell)
 	wd, err := expand(t.WorkingDirectory)
 	if err != nil {
 		return sp, err
@@ -1068,24 +1369,9 @@ func resolveStep(p *Plan, sp StepPlan, resolve func(string) (string, error)) (St
 	sp.Uses = t.Uses
 	sp.WorkingDirectory = containerDir(p.Workspace, wd)
 	sp.Kind, sp.SkipReason, sp.Argv, sp.Artifact = "", "", nil, nil
-	sp.EnvFrom = nil
-	env := make(map[string]string, len(p.Env)+len(t.Env)+2)
-	for k, v := range p.Env {
-		env[k] = v
-	}
-	for k, v := range t.Env {
-		// The authored value is flattened first (an authored newline would be a
-		// typo); a substituted OUTPUT value keeps its newlines — it is one argv
-		// element to docker, and a multi-line output is legitimate data.
-		val, verr := expand(headerValue(v))
-		if verr != nil {
-			return sp, verr
-		}
-		env[k] = val
-	}
 	with := make(map[string]string, len(t.With))
-	for k, v := range t.With {
-		val, verr := expand(v)
+	for _, k := range sortedKeys(t.With) {
+		val, verr := expand(t.With[k])
 		if verr != nil {
 			return sp, verr
 		}
@@ -1103,8 +1389,20 @@ func resolveStep(p *Plan, sp StepPlan, resolve func(string) (string, error)) (St
 	// a workflow script), so they do receive it like any other run step.
 	isDocker := sp.Docker != nil || threads.DockerUsesImage(t.Uses) != ""
 	if p.JobToken != "" && !isDocker && sp.Composite == nil {
-		env["SPINDLE_JOB_TOKEN"] = ""
-		sp.EnvFrom = append(sp.EnvFrom, "SPINDLE_JOB_TOKEN")
+		// The token is delivered under every spelling a workflow expects:
+		// SPINDLE_JOB_TOKEN, GitHub's GITHUB_TOKEN and Forgejo's FORGEJO_TOKEN —
+		// one credential, aliased, never a second token (PAR-110). An authored
+		// `env:`/job `env:` value for the same name wins: a workflow that sets
+		// GITHUB_TOKEN to its own PAT (publish-github.yml does) must keep it.
+		for _, name := range jobTokenEnvNames() {
+			if _, authored := env[name]; authored {
+				continue
+			}
+			if _, secret := sp.EnvSecret[name]; secret {
+				continue // the authored test: already delivered by name
+			}
+			sp.EnvFrom = append(sp.EnvFrom, name)
+		}
 	}
 	// The OIDC request token follows the job token's rule exactly: delivered to
 	// repository-code steps by NAME (value from the docker client's
@@ -1121,6 +1419,18 @@ func resolveStep(p *Plan, sp StepPlan, resolve func(string) (string, error)) (St
 	if sp.OutputPath != "" {
 		env[OutputEnvVar] = sp.OutputPath
 		env[OutputEnvAlias] = sp.OutputPath
+	}
+	// The command files are pointed at a per-step path the same way. A docker://
+	// action has none (its image never receives the job's environment layer, and
+	// a value written into a third-party image would have to be trusted to come
+	// back — the same rule as secrets).
+	if sp.EnvFile != "" && !isDocker && sp.Composite == nil {
+		env[EnvFileVar] = sp.EnvFile
+		env[EnvFileAlias] = sp.EnvFile
+	}
+	if sp.PathFile != "" && !isDocker && sp.Composite == nil {
+		env[PathFileVar] = sp.PathFile
+		env[PathFileAlias] = sp.PathFile
 	}
 	switch {
 	case sp.Composite != nil:
@@ -1142,13 +1452,13 @@ func resolveStep(p *Plan, sp StepPlan, resolve func(string) (string, error)) (St
 		planUses(p, &sp, t.Uses, with, env)
 	default:
 		sp.Kind = "run"
-		cmd, cerr := shellCommand(t.Shell, sp.Run)
+		cmd, cerr := shellCommand(sp.Shell, sp.Run)
 		if cerr != nil {
 			sp.Kind = "unsupported"
 			sp.SkipReason = cerr.Error()
 			break
 		}
-		sp.Argv = execArgv(p, sp.WorkingDirectory, env, sp.EnvFrom, cmd)
+		sp.Argv = execArgv(p, sp.WorkingDirectory, env, sp.EnvFrom, sp.EnvSecret, cmd)
 	}
 	return sp, nil
 }
@@ -1221,17 +1531,154 @@ func copyStrings(in map[string]string) map[string]string {
 	return out
 }
 
-// subst applies the spec's expression substitutions to one string: matrix
-// cells first, then workflow_dispatch inputs (15 §1/§4.1).
-func subst(p *Plan, s string) string {
-	return threads.SubstituteInputs(threads.SubstituteMatrix(s, p.Matrix), p.Inputs)
+// stepValues is the complete runtime value set of one substitution site
+// (docs/threads.md §3.6): the resolved `github.*` context, the job's matrix
+// cell and dispatch inputs, the environment layer at the site, the job's
+// secrets, and — once a step has run — the step and needs outputs. strict is
+// false for the plan-time preview, where no step has published anything yet.
+func (p *Plan) stepValues(env map[string]string, outputs map[string]map[string]string, strict bool) workflow.TemplateValues {
+	vals := workflow.TemplateValues{
+		GitHub:  p.githubValues(),
+		Matrix:  p.Matrix,
+		Inputs:  p.Inputs,
+		Env:     env,
+		Secrets: p.secretValues(),
+	}
+	if strict {
+		vals.Steps = outputs
+		vals.Needs = p.Needs
+	}
+	return vals
+}
+
+// substitute expands every supported `${{ … }}` reference in one pass
+// (workflow.Substitute): substituted data is a value, never a template, so a
+// secret whose body contains `${{ github.ref }}` stays exactly that text. An
+// undeclared `steps`/`needs` output is a named error; every other absent
+// supported value expands empty.
+func (p *Plan) substitute(s string, vals workflow.TemplateValues) (string, error) {
+	return workflow.Substitute(s, vals)
+}
+
+// expandValue expands one step/site field against the environment layer at that
+// site (strict selects the execution rule; see resolveStep).
+func (p *Plan) expandValue(s string, env map[string]string, outputs map[string]map[string]string, strict bool) (string, error) {
+	vals := p.stepValues(env, outputs, strict)
+	if strict {
+		return p.substitute(s, vals)
+	}
+	return p.previewValue(s, vals)
+}
+
+// resolveEnvLayer resolves one environment layer's values against the layer
+// below it. A whole-value `${{ secrets.X }}` entry reads the secret's value
+// here; the delivery rule (by NAME, never argv) belongs to the step's own
+// `env:` block and is applied by resolveStep.
+func (p *Plan) resolveEnvLayer(layer, lower map[string]string, outputs map[string]map[string]string, strict bool) (map[string]string, error) {
+	if len(layer) == 0 {
+		return nil, nil
+	}
+	out := make(map[string]string, len(layer))
+	for _, k := range sortedKeys(layer) {
+		if name, ok := exactSecretRef(layer[k]); ok {
+			out[k], _ = p.secretValue(name)
+			continue
+		}
+		val, err := p.expandValue(headerValue(layer[k]), lower, outputs, strict)
+		if err != nil {
+			return nil, err
+		}
+		out[k] = val
+	}
+	return out, nil
+}
+
+// sortedKeys returns a map's keys in a deterministic order (substitution is
+// per-key, but a stable order keeps the plan preview reproducible).
+func sortedKeys(m map[string]string) []string {
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	return keys
+}
+
+// previewValue is the plan-time expansion of one field: everything a reference
+// can resolve without a step having run, with the `steps`/`needs` output spans
+// left exactly as authored. Those are resolved by ResolveStep immediately
+// before the step executes (the plan preview is not what runs).
+func (p *Plan) previewValue(s string, vals workflow.TemplateValues) (string, error) {
+	if !strings.Contains(s, "${{") {
+		return s, nil
+	}
+	guarded, spans := deferOutputRefs(s)
+	if len(spans) == 0 {
+		return workflow.Substitute(s, vals)
+	}
+	out, err := workflow.Substitute(guarded, vals)
+	if err != nil {
+		return "", err
+	}
+	for i := len(spans) - 1; i >= 0; i-- {
+		out = strings.ReplaceAll(out, outputSentinel(i), spans[i])
+	}
+	return out, nil
+}
+
+// deferOutputRefs replaces every `steps.<id>.outputs.<name>` /
+// `needs.<job>.outputs.<name>` span in s with a sentinel that cannot occur in
+// authored text, returning the guarded string and the original spans. Only the
+// span boundaries are read here (the first `}}` after a `${{`, exactly as the
+// template scanner does); whether the reference itself is well formed stays
+// workflow.Substitute's call.
+func deferOutputRefs(s string) (string, []string) {
+	var spans []string
+	var b strings.Builder
+	for {
+		i := strings.Index(s, "${{")
+		if i < 0 {
+			b.WriteString(s)
+			return b.String(), spans
+		}
+		b.WriteString(s[:i])
+		rest := s[i+3:]
+		j := strings.Index(rest, "}}")
+		if j < 0 {
+			b.WriteString(s[i:]) // unterminated: Substitute reports it
+			return b.String(), spans
+		}
+		span := s[i : i+3+j+2]
+		if isOutputRef(span) {
+			b.WriteString(outputSentinel(len(spans)))
+			spans = append(spans, span)
+		} else {
+			b.WriteString(span)
+		}
+		s = rest[j+2:]
+	}
+}
+
+// outputSentinel is the placeholder one deferred span is rewritten to.
+func outputSentinel(i int) string {
+	return "\x00spindle-output-" + strconv.Itoa(i) + "\x00"
+}
+
+// isOutputRef reports whether a `${{ … }}` body is the four-segment
+// steps/needs output form. It asks the template parser (OutputRefs) rather than
+// re-deriving the shape, so this preview helper can never disagree with what
+// the validator accepted.
+func isOutputRef(span string) bool {
+	refs, err := workflow.OutputRefs(span)
+	return err == nil && len(refs) == 1
 }
 
 // planUses resolves the built-in action set (15 §2, §2.5): actions/checkout,
 // actions/upload-artifact and actions/download-artifact. An unknown action is
 // recorded as an unsupported step: it fails with a clear message instead of
-// being silently ignored. `with` arrives with the run-time step-output
-// substitution applied; the action parsers still apply matrix/inputs.
+// being silently ignored. `with` arrives fully substituted (every `${{ … }}`
+// reference already resolved by resolveStep), so an action parser never
+// re-expands a value it was handed.
 func planUses(p *Plan, sp *StepPlan, uses string, with map[string]string, env map[string]string) {
 	action := strings.ToLower(strings.TrimSpace(uses))
 	base := action
@@ -1240,15 +1687,20 @@ func planUses(p *Plan, sp *StepPlan, uses string, with map[string]string, env ma
 	}
 	switch base {
 	case "actions/checkout":
-		sp.Kind = "checkout"
-		depth := "1"
-		if v, ok := with["fetch-depth"]; ok && strings.TrimSpace(v) == "0" {
-			depth = ""
+		opts, err := checkoutOptions(with)
+		if err != nil {
+			sp.Kind = "unsupported"
+			sp.SkipReason = fmt.Sprintf("%s (uses: %s)", err.Error(), uses)
+			return
 		}
-		sp.Run = checkoutScript(p, depth)
-		env["SPINDLE_JOB_TOKEN"] = "" // value supplied via --env NAME
-		sp.EnvFrom = append(sp.EnvFrom, "SPINDLE_JOB_TOKEN")
-		sp.Argv = execArgv(p, p.Workspace, env, sp.EnvFrom, []string{"sh", "-e", "-c", sp.Run})
+		sp.Kind = "checkout"
+		sp.Run = checkoutScript(p, opts)
+		// The checkout fetches with the job token; the aliases are already in
+		// EnvFrom (resolveStep), so the credential reaches the helper by NAME.
+		if p.JobToken != "" && !containsString(sp.EnvFrom, "SPINDLE_JOB_TOKEN") {
+			sp.EnvFrom = append(sp.EnvFrom, "SPINDLE_JOB_TOKEN")
+		}
+		sp.Argv = execArgv(p, p.Workspace, env, sp.EnvFrom, sp.EnvSecret, []string{"sh", "-e", "-c", sp.Run})
 	case "actions/upload-artifact":
 		step, err := parseUploadArtifact(p, with)
 		if err != nil {
@@ -1273,9 +1725,138 @@ func planUses(p *Plan, sp *StepPlan, uses string, with map[string]string, env ma
 	}
 }
 
+// checkoutInputs are the `with:` keys actions/checkout honours. Anything else is
+// refused BY NAME (PAR-073): an input that does nothing is a typo or a missing
+// feature, never something to ignore silently.
+var checkoutInputs = []string{"fetch-depth", "fetch-tags", "path", "ref"}
+
+// checkoutRefusals names the unsupported documented inputs and the spindle
+// spelling of the same job, so a refusal is actionable.
+var checkoutRefusals = map[string]string{
+	"clean":               "every job starts on a fresh workspace volume, so there is nothing to clean",
+	"persist-credentials": "the checkout authenticates with the job token in an in-memory credential helper and never writes credentials to .git/config",
+	"repository":          "a cross-repository checkout needs a credential for that repository; run plain git fetch with your own token in a run step",
+	"sparse-checkout":     "run git sparse-checkout in a run step after the checkout",
+	"ssh-key":             "the checkout uses the job token over HTTP; use git with your own key in a run step",
+	"submodules":          "run git submodule update --init --recursive in a run step after the checkout",
+	"token":               "the checkout authenticates with the job token (no separate token input); a contents: read job clones read-only",
+}
+
+// checkoutOpts is the resolved `with:` of one actions/checkout step.
+type checkoutOpts struct {
+	// Depth is the --depth value; "" is a full clone (fetch-depth: 0).
+	Depth string
+	// Tags adds --tags to the fetch (fetch-tags: true); otherwise --no-tags is
+	// passed explicitly so the behaviour never depends on git's config.
+	Tags bool
+	// Ref is the branch, tag or SHA to fetch; "" is the run commit.
+	Ref string
+	// Path is the checkout directory relative to the workspace; "" is the
+	// workspace root.
+	Path string
+}
+
+// checkoutOptions parses and validates actions/checkout's `with:` mapping.
+func checkoutOptions(with map[string]string) (checkoutOpts, error) {
+	keys := make([]string, 0, len(with))
+	for k := range with {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	for _, k := range keys {
+		if !containsString(checkoutInputs, k) {
+			hint := ""
+			if hint = checkoutRefusals[k]; hint != "" {
+				hint = ": " + hint
+			}
+			return checkoutOpts{}, fmt.Errorf("actions/checkout input %q is not supported (supported: %s)%s", k, strings.Join(checkoutInputs, ", "), hint)
+		}
+	}
+	opts := checkoutOpts{Depth: "1"}
+	if v, ok := with["fetch-depth"]; ok {
+		v = strings.TrimSpace(v)
+		if v == "0" {
+			opts.Depth = ""
+		} else if v != "" {
+			// A depth is a positive integer; anything else (a negative, a word)
+			// is a named error rather than git's own complaint.
+			for _, r := range v {
+				if r < '0' || r > '9' {
+					return checkoutOpts{}, fmt.Errorf("actions/checkout fetch-depth %q is not a non-negative integer (0 = full history)", v)
+				}
+			}
+			if strings.TrimLeft(v, "0") == "" {
+				opts.Depth = "" // "00…" is 0: full history
+			} else {
+				opts.Depth = v
+			}
+		}
+	}
+	if v, ok := with["fetch-tags"]; ok {
+		switch strings.ToLower(strings.TrimSpace(v)) {
+		case "", "false", "0", "no":
+			opts.Tags = false
+		case "true", "1", "yes":
+			opts.Tags = true
+		default:
+			return checkoutOpts{}, fmt.Errorf("actions/checkout fetch-tags %q is not a boolean (true / false)", v)
+		}
+	}
+	if v, ok := with["ref"]; ok {
+		ref := strings.TrimSpace(v)
+		if ref == "" {
+			return checkoutOpts{}, fmt.Errorf("actions/checkout ref is empty: name a branch, tag or commit SHA")
+		}
+		if len(ref) > 256 || strings.HasPrefix(ref, "-") || strings.ContainsAny(ref, " \t\r\n\x00") {
+			return checkoutOpts{}, fmt.Errorf("actions/checkout ref %q is not a valid ref (no whitespace, no leading '-', at most 256 bytes)", ref)
+		}
+		opts.Ref = ref
+	}
+	if v, ok := with["path"]; ok {
+		rel := strings.TrimSpace(v)
+		if rel == "" {
+			// An empty path is the workspace root, exactly like the default.
+			return opts, nil
+		}
+		if err := checkCheckoutPath(rel); err != nil {
+			return checkoutOpts{}, err
+		}
+		opts.Path = rel
+	}
+	return opts, nil
+}
+
+// checkCheckoutPath validates a checkout `path`: a relative directory inside the
+// workspace, never an absolute path, a home reference or an escaping `..`.
+func checkCheckoutPath(rel string) error {
+	if len(rel) > 512 || strings.ContainsAny(rel, "\x00") {
+		return fmt.Errorf("actions/checkout path %q is not a valid directory (at most 512 bytes)", rel)
+	}
+	if strings.HasPrefix(rel, "/") || strings.HasPrefix(rel, "~") {
+		return fmt.Errorf("actions/checkout path %q must be relative to the workspace (%s), not absolute or a home reference", rel, DefaultWorkspace)
+	}
+	for _, seg := range strings.Split(strings.ReplaceAll(rel, "\\", "/"), "/") {
+		switch seg {
+		case "", ".":
+			continue
+		case "..":
+			return fmt.Errorf("actions/checkout path %q must not contain '..'", rel)
+		}
+	}
+	return nil
+}
+
 // checkoutScript builds the in-container clone (15 §4): git, the job token as
-// an askpass-style credential helper (never written into .git/config), the
-// exact run commit.
+// an askpass-style credential helper (never written into .git/config), the exact
+// run commit (or the requested ref), shallow by default, into the requested
+// workspace subdirectory.
+//
+// The argv is explicit and pinned by docs/threads.md §4.4:
+//
+//	git init -q
+//	git remote add origin <url>
+//	git -c credential.helper=<helper> fetch -q [--depth=N] --no-tags|--tags origin <sha|ref>
+//	git checkout -q FETCH_HEAD
 //
 // A failed fetch does NOT end at git's bare `exit 128`: the script prints git's
 // own output verbatim (the evidence), then a named diagnostic that states the
@@ -1283,40 +1864,56 @@ func planUses(p *Plan, sp *StepPlan, uses string, with map[string]string, env ma
 // trap this closes is an unreachable checkout origin (a host-only name such as
 // walgit.localhost, or a proxy address), which is otherwise indistinguishable
 // from any other git failure in the log.
-func checkoutScript(p *Plan, depth string) string {
+func checkoutScript(p *Plan, opts checkoutOpts) string {
 	if p.CheckoutURL == "" {
 		return "echo 'spindle: no checkout URL in the job payload' >&2; exit 1"
 	}
+	dir := containerDir(p.Workspace, opts.Path)
+	target := p.CheckoutSHA
+	if opts.Ref != "" {
+		target = opts.Ref
+	}
 	depthFlag := ""
-	if depth != "" {
-		depthFlag = "--depth=" + depth + " "
+	if opts.Depth != "" {
+		depthFlag = "--depth=" + opts.Depth + " "
+	}
+	tagsFlag := "--no-tags "
+	if opts.Tags {
+		tagsFlag = "--tags "
 	}
 	// The helper's $SPINDLE_JOB_TOKEN is expanded by git's own shell, not ours:
 	// it stays inside single quotes here.
 	helper := `!f() { echo username=ci; echo password=$SPINDLE_JOB_TOKEN; }; f`
-	fetch := "git -c credential.helper=" + shQuote(helper) + " fetch -q " + depthFlag + "origin " + shQuote(p.CheckoutSHA)
-	lines := []string{
-		"set -e",
-		"cd " + shQuote(p.Workspace),
+	fetch := "git -c credential.helper=" + shQuote(helper) + " fetch -q " + depthFlag + tagsFlag + "origin " + shQuote(target)
+	lines := []string{"set -e"}
+	if dir != p.Workspace {
+		lines = append(lines, "mkdir -p "+shQuote(dir))
+	}
+	lines = append(lines,
+		"cd "+shQuote(dir),
 		"git init -q",
 		"git remote remove origin >/dev/null 2>&1 || true",
-		"git remote add origin " + shQuote(p.CheckoutURL),
-		"if checkout_out=$(" + fetch + " 2>&1); then",
+		"git remote add origin "+shQuote(p.CheckoutURL),
+		"if checkout_out=$("+fetch+" 2>&1); then",
 		"\t:",
 		"else",
 		"\trc=$?",
 		"\tprintf '%s\\n' \"$checkout_out\" >&2",
 		"\tcase \"$checkout_out\" in",
 		"\t*\"Could not resolve\"*|*\"unable to access\"*|*\"Connection refused\"*|*\"Failed to connect\"*|*\"Network is unreachable\"*|*\"No route to host\"*|*\"Temporary failure in name resolution\"*|*\"timed out\"*)",
-	}
+	)
 	lines = append(lines, printfLines(p.checkoutHint(true))...)
 	lines = append(lines, "\t\t;;")
 	lines = append(lines, "\t*)")
 	lines = append(lines, printfLines(p.checkoutHint(false))...)
 	lines = append(lines, "\t\t;;", "\tesac", "\texit \"$rc\"", "fi",
 		"git checkout -q FETCH_HEAD",
-		"echo \"checked out "+p.CheckoutSHA+"\"",
 	)
+	done := "checked out " + p.CheckoutSHA
+	if opts.Ref != "" {
+		done += " (ref " + opts.Ref + ")"
+	}
+	lines = append(lines, "echo "+shQuote(done))
 	return strings.Join(lines, "\n")
 }
 
@@ -1380,15 +1977,19 @@ func checkoutNotice(p *Plan) string {
 
 // credentialEnv are the values a step receives by NAME (`--env NAME` in argv,
 // value in the docker client's environment) and never as argv text: the job
-// token and the OIDC request token. A docker action step never carries either
-// (its EnvFrom is empty), because the image is third-party code.
-func credentialEnv(p *Plan, from []string) []string {
+// token (under all its aliases), the OIDC request token, and any variable whose
+// `env:` value was a whole secret reference. A docker action step never carries
+// any of them (its EnvFrom/EnvSecret are empty), because the image is
+// third-party code.
+func credentialEnv(p *Plan, from []string, secretEnv map[string]string) []string {
 	if p == nil {
 		return nil
 	}
 	var out []string
-	if containsString(from, "SPINDLE_JOB_TOKEN") {
-		out = append(out, "SPINDLE_JOB_TOKEN="+p.JobToken)
+	for _, name := range jobTokenEnvNames() {
+		if containsString(from, name) {
+			out = append(out, name+"="+p.JobToken)
+		}
 	}
 	if p.IDTokenRequestToken != "" {
 		if containsString(from, "SPINDLE_ID_TOKEN_REQUEST_TOKEN") {
@@ -1398,6 +1999,18 @@ func credentialEnv(p *Plan, from []string) []string {
 			out = append(out, "ACTIONS_ID_TOKEN_REQUEST_TOKEN="+p.IDTokenRequestToken)
 		}
 	}
+	targets := make([]string, 0, len(secretEnv))
+	for name := range secretEnv {
+		targets = append(targets, name)
+	}
+	sort.Strings(targets)
+	for _, name := range targets {
+		// A missing secret (untrusted run, wrong name) is an EMPTY value, exactly
+		// like GitHub's empty secrets context: the variable exists, the test
+		// `[ -n "$X" ]` is false.
+		value, _ := p.secretValue(secretEnv[name])
+		out = append(out, name+"="+value)
+	}
 	return out
 }
 
@@ -1406,7 +2019,7 @@ func credentialEnv(p *Plan, from []string) []string {
 // values are appended as `--env NAME` (the value is supplied through the docker
 // client's own environment, so it never appears in argv) and masked in the log
 // stream.
-func execArgv(p *Plan, workdir string, env map[string]string, from []string, cmd []string) []string {
+func execArgv(p *Plan, workdir string, env map[string]string, from []string, secretEnv map[string]string, cmd []string) []string {
 	argv := []string{"exec", "--workdir", workdir}
 	keys := make([]string, 0, len(env))
 	for k := range env {
@@ -1431,6 +2044,17 @@ func execArgv(p *Plan, workdir string, env map[string]string, from []string, cmd
 	// (the executor sets it from the plan's token), so it never appears in argv
 	// of the exec call, the container's create argv or .git/config.
 	for _, name := range from {
+		argv = append(argv, "--env", name)
+	}
+	// An `env: NAME: ${{ secrets.X }}` mapping is the same trick under the
+	// variable's own name: bare --env NAME plus the value in the docker client's
+	// environment (credentialEnv), never in argv.
+	targets := make([]string, 0, len(secretEnv))
+	for name := range secretEnv {
+		targets = append(targets, name)
+	}
+	sort.Strings(targets)
+	for _, name := range targets {
 		argv = append(argv, "--env", name)
 	}
 	argv = append(argv, p.Names.Container)

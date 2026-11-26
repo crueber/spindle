@@ -838,24 +838,42 @@ func (s *Service) Declare(ctx context.Context, runner *runnerAuth, in DeclareInp
 // FetchResult is the fetch answer: a self-contained job payload (the runner
 // needs no further reads to start — 12_runner D2).
 type FetchResult struct {
-	Repo     string `json:"repo"`
-	RunID    string `json:"run_id"`
-	JobID    string `json:"job_id"`
-	JobRef   string `json:"job_ref"`
-	Attempt  int    `json:"attempt"`
-	Commit   string `json:"commit"`
-	Event    string `json:"event"`
-	Branch   string `json:"branch"`
+	Repo    string `json:"repo"`
+	RunID   string `json:"run_id"`
+	JobID   string `json:"job_id"`
+	JobRef  string `json:"job_ref"`
+	Attempt int    `json:"attempt"`
+	Commit  string `json:"commit"`
+	Event   string `json:"event"`
+	Branch  string `json:"branch"`
+	// Ref is the run's full triggering ref ("refs/heads/main",
+	// "refs/tags/v1.2.3"); Branch is empty for a tag run, so this is what the
+	// runner's GITHUB_REF/GITHUB_REF_NAME are derived from (docs/threads.md
+	// §3.5). A pull request reports its base branch regardless (the PR head ref
+	// is not a job's identity).
+	Ref      string `json:"ref,omitempty"`
 	Workflow string `json:"workflow"`
 	Trusted  bool   `json:"trusted"`
 	Context  string `json:"context"`
-	Spec     *Spec  `json:"spec"`
+	// Actor is the principal that triggered the run (the run's `actor`): the
+	// runner exposes it as GITHUB_ACTOR and as `${{ github.actor }}`
+	// (docs/threads.md §3.5/§3.6), the same value a job-level `if:` reads on
+	// the server side.
+	Actor string `json:"actor,omitempty"`
+	Spec  *Spec  `json:"spec"`
 	// Checkout tells the runner where to clone from. URL is the runner-facing
 	// repository URL (derived from the fetch request's host, so a reverse proxy
 	// works); the credential is the attempt token (read scope, ci:<runner>
 	// principal), which is why the checkout is always read-only — fork runs
 	// get exactly that, never a push credential (15 §5.2).
 	Checkout *CheckoutInfo `json:"checkout,omitempty"`
+	// ServerURL is the canonical spindle origin (no trailing slash) the job
+	// exposes as GITHUB_SERVER_URL/FORGEJO_SERVER_URL, with GITHUB_API_URL
+	// derived as <origin>/api/v1. It is the same base the checkout URL uses
+	// (server.public_url when set, otherwise the runner-facing request origin),
+	// so a proxied deployment hands the job an address it can actually reach
+	// (PAR-111).
+	ServerURL string `json:"server_url,omitempty"`
 	// Secrets are decrypted ONLY for a trusted run (15 §5); a fork run carries
 	// an empty map and SecretsDenied=true.
 	Secrets       map[string]string `json:"secrets"`
@@ -1040,7 +1058,9 @@ func (s *Service) fetchPayload(ctx context.Context, owner, repo string, runner *
 		Repo: id, RunID: claim.Entry.RunID, JobID: claim.Entry.JobID,
 		JobRef:  JobRef(id, claim.Entry.RunID, claim.Entry.JobID),
 		Attempt: job.Attempt, Commit: claim.Run.Commit, Event: claim.Run.Event, Branch: claim.Run.Branch,
+		Ref:      claim.Run.Ref,
 		Workflow: claim.Run.Workflow, Trusted: claim.Run.Trusted, Context: job.Context, Spec: job.Spec,
+		Actor:   claim.Run.Actor,
 		Secrets: map[string]string{}, Mask: []string{},
 	}
 	trusted := claim.Run.Trusted && job.Trusted
@@ -1070,6 +1090,7 @@ func (s *Service) fetchPayload(ctx context.Context, owner, repo string, runner *
 	res.Checkout = &CheckoutInfo{ReadOnly: !containsScope(res.Scopes, ScopePush)}
 	if base := strings.TrimSpace(checkoutBase); base != "" {
 		res.Checkout.URL = strings.TrimRight(base, "/") + "/" + id + ".git"
+		res.ServerURL = strings.TrimRight(base, "/")
 	} else {
 		res.Checkout = &CheckoutInfo{ReadOnly: !containsScope(res.Scopes, ScopePush)}
 	}

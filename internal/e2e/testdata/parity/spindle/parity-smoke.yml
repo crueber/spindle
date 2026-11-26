@@ -1,0 +1,28 @@
+name: parity smoke
+# The execution tier's fixture (PAR-200). It is a Spindle workflow written in
+# the corpus's own idiom — the same `env:` block Weave and Scriobh use to fetch
+# their source, and the same `runs-on` label — so the opt-in tier proves the
+# engine executes the corpus SHAPE end to end without needing golang/buildah
+# images. The four Forgejo files themselves are the parse/plan tier.
+on:
+  push:
+    branches: [main]
+env:
+  CHECKOUT: |
+    git config --global --add safe.directory '*'
+    git init -q . && git remote add origin "${SPINDLE_SERVER}/${GITHUB_REPOSITORY}.git"
+    git -c "http.extraHeader=Authorization: token ${SPINDLE_JOB_TOKEN}" fetch -q --depth 1 origin "${GITHUB_SHA}"
+    git checkout -q FETCH_HEAD
+jobs:
+  smoke:
+    runs-on: linux
+    steps:
+      # $SPINDLE_JOB_TOKEN is delivered to every script step by NAME (never in
+      # argv), which is what the corpus's CHECKOUT block reads.
+      - name: Checkout
+        run: eval "$CHECKOUT"
+      - name: The checked-out tree is the pushed commit
+        run: |
+          set -eu
+          test -f .spindle/workflows/parity-smoke.yml
+          echo "parity smoke ok: $GITHUB_SHA"

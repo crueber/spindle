@@ -1,0 +1,405 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      bump:
+        description: "Version bump; creates the tag on this commit"
+        type: choice
+        options:
+          - none
+          - patch
+          - minor
+          - major
+        default: none
+      tag:
+        description: "Explicit tag (ignored when a bump is chosen)"
+        required: false
+
+env:
+  CHECKOUT: |
+    git config --global --add safe.directory '*'
+    git init -q . && git remote add origin "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}.git"
+    git -c "http.extraHeader=Authorization: token ${FORGEJO_TOKEN}" fetch -q --depth 1 origin "${GITHUB_SHA}"
+    git checkout -q FETCH_HEAD
+
+jobs:
+  prepare:
+    runs-on: docker
+    container:
+      image: ubuntu:24.04
+    outputs:
+      tag: ${{ steps.tag.outputs.tag }}
+    steps:
+      - name: Tools
+        run: apt-get update -qq && apt-get install -y -qq curl git jq >/dev/null
+      - name: Checkout
+        env:
+          FORGEJO_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: eval "$CHECKOUT"
+      - name: Resolve tag
+        id: tag
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          BUMP: ${{ github.event.inputs.bump }}
+          INPUT_TAG: ${{ github.event.inputs.tag }}
+        run: |
+          set -eu
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            if [ -n "${BUMP:-}" ] && [ "$BUMP" != "none" ]; then
+              api="$GITHUB_SERVER_URL/api/v1/repos/$GITHUB_REPOSITORY"
+              tags=$(curl -fsS -H "Authorization: token $GITHUB_TOKEN" "$api/tags?limit=200")
+              latest=$(printf '%s\n' "$tags" | jq -r '.[].name' \
+                | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | sort -V | tail -1 || true)
+              if [ -z "$latest" ]; then
+                latest="v0.0.0"
+              fi
+              version=${latest#v}
+              major=${version%%.*}
+              rest=${version#*.}
+              minor=${rest%%.*}
+              patch=${rest##*.}
+              case "$BUMP" in
+                major) major=$((major + 1)); minor=0; patch=0 ;;
+                minor) minor=$((minor + 1)); patch=0 ;;
+                patch) patch=$((patch + 1)) ;;
+                *) echo "unknown bump: $BUMP" >&2; exit 1 ;;
+              esac
+              TAG="v$major.$minor.$patch"
+              echo "bumping $latest to $TAG"
+            elif [ -n "${INPUT_TAG:-}" ]; then
+              TAG="$INPUT_TAG"
+            else
+              echo "choose a version bump or give an explicit tag" >&2
+              exit 1
+            fi
+          else
+            TAG="${GITHUB_REF_NAME}"
+          fi
+          case "$TAG" in v*) ;; *) echo "release tags start with v: $TAG" >&2; exit 1 ;; esac
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "TAG=$TAG" >> "$GITHUB_ENV"
+      - name: Create the release
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ steps.tag.outputs.tag }}
+          TARGET: ${{ github.sha }}
+        run: |
+          chmod +x scripts/release/release.sh scripts/release/upload-asset.sh
+          id=$(scripts/release/release.sh)
+          echo "release $id for $TAG"
+
+  cli:
+    needs: prepare
+    runs-on: docker
+    container:
+      image: golang:1.27.4
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { goos: linux, goarch: amd64 }
+          - { goos: linux, goarch: arm64 }
+          - { goos: darwin, goarch: arm64 }
+          - { goos: windows, goarch: amd64 }
+    steps:
+      - name: Checkout
+        env:
+          FORGEJO_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: eval "$CHECKOUT"
+      - name: Tools
+        run: apt-get update -qq && apt-get install -y -qq curl jq zip >/dev/null
+      - name: Build
+        env:
+          TAG: ${{ needs.prepare.outputs.tag }}
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+        run: |
+          set -eu
+          ldflags="-s -w -X main.version=$TAG -X github.com/crueber/scriobh/internal/server.version=$TAG"
+          name="scriobh-$TAG-$GOOS-$GOARCH"
+          mkdir -p "dist/$name"
+          CGO_ENABLED=0 GOOS=$GOOS GOARCH=$GOARCH go build -trimpath -ldflags "$ldflags" -o "dist/$name/scriobh" ./cmd/scriobh
+          CGO_ENABLED=0 GOOS=$GOOS GOARCH=$GOARCH go build -trimpath -ldflags "$ldflags" -o "dist/$name/scriobh-cli" ./cmd/scriobh-cli
+          cp README.md SECURITY.md LICENSE "dist/$name/" 2>/dev/null || true
+          cat > "dist/$name/INSTALL.txt" <<EOF
+          Scríobh $TAG for $GOOS/$GOARCH.
+          scriobh        the server, CLI, MCP server, backup and desktop mode
+          scriobh-cli    the small agent CLI (compendium, entity, doc, search)
+          Run "scriobh version" and read docs/INSTALL.md in the repository.
+          EOF
+          cd dist
+          if [ "$GOOS" = "windows" ]; then
+            zip -qr "$name.zip" "$name"
+            sha256sum "$name.zip" > "$name.zip.sha256"
+          else
+            tar -czf "$name.tar.gz" "$name"
+            sha256sum "$name.tar.gz" > "$name.tar.gz.sha256"
+          fi
+      - name: Upload
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ needs.prepare.outputs.tag }}
+        run: |
+          set -eu
+          for file in dist/*.tar.gz dist/*.zip dist/*.sha256; do
+            [ -e "$file" ] || continue
+            scripts/release/upload-asset.sh "$file"
+          done
+
+  docker:
+    needs: prepare
+    runs-on: docker
+    container:
+      image: quay.io/buildah/stable:latest
+    steps:
+      - name: Checkout
+        env:
+          FORGEJO_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          if command -v apk >/dev/null 2>&1; then apk add --no-cache git curl jq >/dev/null
+          elif command -v dnf >/dev/null 2>&1; then dnf install -y git curl jq >/dev/null
+          fi
+          eval "$CHECKOUT"
+      - name: Tools and architecture binaries
+        env:
+          TAG: ${{ needs.prepare.outputs.tag }}
+        run: |
+          set -eu
+          curl -fsSLo /tmp/go.tgz https://go.dev/dl/go1.27.4.linux-amd64.tar.gz
+          tar -C /usr/local -xzf /tmp/go.tgz
+          export PATH=/usr/local/go/bin:$PATH
+          for arch in amd64 arm64; do
+            dir="image-$arch"
+            mkdir -p "$dir/data"
+            CGO_ENABLED=0 GOOS=linux GOARCH=$arch go build -trimpath -ldflags "-s -w -X main.version=$TAG -X github.com/crueber/scriobh/internal/server.version=$TAG" -o "$dir/scriobh" ./cmd/scriobh
+            cp Dockerfile.release "$dir/Dockerfile"
+          done
+      - name: Build and push the image
+        env:
+          TAG: ${{ needs.prepare.outputs.tag }}
+          REGISTRY_USER: ${{ github.actor }}
+          REGISTRY_TOKEN: ${{ secrets.REGISTRY_TOKEN }}
+          REGISTRY_AUTH_FILE: /var/tmp/containers/auth.json
+        run: |
+          set -eu
+          image="github.com/${GITHUB_REPOSITORY}"
+          authfile="$REGISTRY_AUTH_FILE"
+          mkdir -p /etc/containers /var/lib/containers /var/tmp/containers
+          printf '[storage]\ndriver="vfs"\nrunroot="/var/tmp/containers"\ngraphroot="/var/lib/containers"\n' > /etc/containers/storage.conf
+          printf '%s' "$REGISTRY_TOKEN" | buildah login --authfile "$authfile" -u "$REGISTRY_USER" --password-stdin github.com
+          for arch in amd64 arm64; do
+            buildah --storage-driver vfs bud --isolation=chroot --arch "$arch" -f "image-$arch/Dockerfile" -t "$image:$TAG-$arch" "image-$arch"
+            buildah --storage-driver vfs push --authfile "$authfile" "$image:$TAG-$arch" "docker://$image:$TAG-$arch"
+          done
+          for tag in "$TAG" latest; do
+            buildah --storage-driver vfs manifest create "$image:$tag"
+            buildah --storage-driver vfs manifest add "$image:$tag" "docker://$image:$TAG-amd64"
+            buildah --storage-driver vfs manifest add "$image:$tag" "docker://$image:$TAG-arm64"
+            buildah --storage-driver vfs manifest push --authfile "$authfile" --all "$image:$tag" "docker://$image:$tag"
+          done
+          cat > docker-compose.release.yml <<EOF
+          services:
+            scriobh:
+              image: $image:$TAG
+              restart: unless-stopped
+              ports: ["8080:8080"]
+              environment:
+                SCRIOBH_BASE_URL: \${SCRIOBH_BASE_URL:-http://localhost:8080}
+                SCRIOBH_LISTEN: 0.0.0.0:8080
+                SCRIOBH_DATA_DIR: /data
+                SCRIOBH_OIDC_ISSUER: \${SCRIOBH_OIDC_ISSUER}
+                SCRIOBH_OIDC_CLIENT_ID: \${SCRIOBH_OIDC_CLIENT_ID}
+                SCRIOBH_OIDC_CLIENT_SECRET: \${SCRIOBH_OIDC_CLIENT_SECRET}
+                SCRIOBH_SECRET_KEY: \${SCRIOBH_SECRET_KEY}
+              volumes: ["scriobh-data:/data"]
+              security_opt: ["no-new-privileges:true"]
+              read_only: true
+              tmpfs: ["/tmp"]
+          volumes:
+            scriobh-data:
+          EOF
+          scripts/release/upload-asset.sh docker-compose.release.yml
+
+  tauri-linux:
+    needs: prepare
+    runs-on: docker
+    container:
+      image: golang:1.27.4
+    steps:
+      - name: Checkout
+        env:
+          FORGEJO_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: eval "$CHECKOUT"
+      - name: System libraries
+        run: |
+          apt-get update -qq
+          apt-get install -y -qq curl jq zip nodejs npm \
+            libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf \
+            libgtk-3-dev libayatana-appindicator3-dev file >/dev/null
+      - name: Rust
+        run: |
+          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+      - name: Build the editor and the shell
+        env:
+          TAG: ${{ needs.prepare.outputs.tag }}
+          SCRIOBH_VERSION: ${{ needs.prepare.outputs.tag }}
+          APPIMAGE_EXTRACT_AND_RUN: "1"
+        run: |
+          set -eu
+          . "$HOME/.cargo/env"
+          (cd web/editor && npm ci --no-audit --no-fund && node build.mjs)
+          (cd desktop && ./build.sh)
+      - name: Upload
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ needs.prepare.outputs.tag }}
+        run: |
+          set -eu
+          root=$(pwd)
+          find "$root/desktop/src-tauri/target/release/bundle" -type f \
+            \( -name '*.AppImage' -o -name '*.deb' -o -name '*.rpm' \) -print0 \
+            | while IFS= read -r -d '' file; do
+                dir=$(dirname "$file")
+                base=$(basename "$file")
+                (cd "$dir" && sha256sum "$base") > "$file.sha256"
+                "$root/scripts/release/upload-asset.sh" "$file"
+                "$root/scripts/release/upload-asset.sh" "$file.sha256"
+              done
+
+  # The Windows installer is cross-compiled on Linux with cargo-xwin, the
+  # path Tauri documents for NSIS. The macOS app is cross-compiled with an
+  # osxcross toolchain extracted from a pinned image, then assembled, signed
+  # ad-hoc with rcodesign, and wrapped as a disk image. Neither job needs a
+  # Windows or macOS machine.
+  tauri-windows:
+    needs: prepare
+    runs-on: docker
+    container:
+      image: golang:1.27.4
+    env:
+      DEBIAN_FRONTEND: noninteractive
+    steps:
+      - name: Checkout
+        env:
+          FORGEJO_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: eval "$CHECKOUT"
+      - name: System packages
+        run: |
+          apt-get update -qq
+          apt-get install -y -qq clang lld llvm nodejs npm zip jq pkg-config libssl-dev nsis >/dev/null
+      - name: Rust
+        run: |
+          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+      - name: Windows target and cargo-xwin
+        run: |
+          set -eu
+          . "$HOME/.cargo/env"
+          rustup target add x86_64-pc-windows-msvc
+          cargo install --locked cargo-xwin
+      - name: Build the installer
+        env:
+          SCRIOBH_VERSION: ${{ needs.prepare.outputs.tag }}
+        run: |
+          set -eu
+          . "$HOME/.cargo/env"
+          ./desktop/build-windows.sh
+      - name: Upload
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ needs.prepare.outputs.tag }}
+        run: |
+          set -eu
+          root=$(pwd)
+          find "$root/desktop/src-tauri/target/x86_64-pc-windows-msvc/release/bundle/nsis" \
+            -type f -name '*.exe' -print0 \
+            | while IFS= read -r -d '' file; do
+                dir=$(dirname "$file")
+                base=$(basename "$file")
+                (cd "$dir" && sha256sum "$base") > "$file.sha256"
+                "$root/scripts/release/upload-asset.sh" "$file"
+                "$root/scripts/release/upload-asset.sh" "$file.sha256"
+              done
+
+  tauri-macos:
+    needs: prepare
+    runs-on: docker
+    container:
+      image: ubuntu:24.04
+    env:
+      DEBIAN_FRONTEND: noninteractive
+      # Pinned osxcross image that carries the Darwin SDK and linker. The SDK
+      # is Apple-licensed; it is pulled at build time, never committed.
+      OSXCROSS_IMAGE: crazymax/osxcross@sha256:832e027d26eefd7189b9f742d363f629716bc5592e5b1427b11953f903422a64
+    steps:
+      - name: System packages
+        run: |
+          apt-get update -qq
+          apt-get install -y -qq ca-certificates curl git jq xz-utils build-essential clang lld \
+            libssl-dev pkg-config nodejs npm genisoimage hfsprogs cmake zlib1g-dev libbz2-dev >/dev/null
+      - name: Checkout
+        env:
+          FORGEJO_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: eval "$CHECKOUT"
+      - name: Go
+        run: |
+          curl -fsSLo /tmp/go.tgz https://go.dev/dl/go1.27.4.linux-amd64.tar.gz
+          tar -C /usr/local -xzf /tmp/go.tgz
+          echo "/usr/local/go/bin" >> "$GITHUB_PATH"
+      - name: osxcross
+        run: |
+          set -eu
+          curl -fsSLo /tmp/crane.tgz \
+            https://github.com/google/go-containerregistry/releases/download/v0.20.6/go-containerregistry_Linux_x86_64.tar.gz
+          tar -xzf /tmp/crane.tgz -C /usr/local/bin crane
+          crane export "$OSXCROSS_IMAGE" - | tar -x -C / osxcross
+          /osxcross/bin/oa64-clang --version
+      - name: Rust
+        run: |
+          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+      - name: Apple target
+        run: |
+          set -eu
+          . "$HOME/.cargo/env"
+          rustup target add aarch64-apple-darwin
+      - name: Signing and disk image tools
+        run: |
+          set -eu
+          curl -fsSL -o /tmp/rcodesign.tar.gz \
+            "https://github.com/indygreg/apple-platform-rs/releases/download/apple-codesign%2F0.29.0/apple-codesign-0.29.0-x86_64-unknown-linux-musl.tar.gz"
+          echo "dbe85cedd8ee4217b64e9a0e4c2aef92ab8bcaaa41f20bde99781ff02e600002  /tmp/rcodesign.tar.gz" | sha256sum -c -
+          tar -xzf /tmp/rcodesign.tar.gz -C /tmp
+          install -m 0755 /tmp/apple-codesign-0.29.0-x86_64-unknown-linux-musl/rcodesign /usr/local/bin/rcodesign
+          git clone -q https://github.com/mozilla/libdmg-hfsplus /tmp/libdmg
+          git -C /tmp/libdmg checkout -q ec239599c1f234a4e01ae3fe51214d0c77e5baa3
+          cmake -S /tmp/libdmg -B /tmp/libdmg/build -DCMAKE_BUILD_TYPE=Release >/dev/null
+          cmake --build /tmp/libdmg/build -j"$(nproc)" >/dev/null 2>&1
+          install -m 0755 /tmp/libdmg/build/dmg/dmg /usr/local/bin/dmg
+      - name: Build the app and the disk image
+        env:
+          SCRIOBH_VERSION: ${{ needs.prepare.outputs.tag }}
+        run: |
+          set -eu
+          . "$HOME/.cargo/env"
+          ./desktop/build-macos.sh
+      - name: Upload
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ needs.prepare.outputs.tag }}
+        run: |
+          set -eu
+          root=$(pwd)
+          find "$root/desktop/src-tauri/target/aarch64-apple-darwin/release/bundle/macos" \
+            -maxdepth 1 -type f \( -name '*.dmg' -o -name '*.app.tar.gz' \) -print0 \
+            | while IFS= read -r -d '' file; do
+                dir=$(dirname "$file")
+                base=$(basename "$file")
+                (cd "$dir" && sha256sum "$base") > "$file.sha256"
+                "$root/scripts/release/upload-asset.sh" "$file"
+                "$root/scripts/release/upload-asset.sh" "$file.sha256"
+              done

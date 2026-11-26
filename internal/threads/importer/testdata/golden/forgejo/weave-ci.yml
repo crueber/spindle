@@ -1,0 +1,137 @@
+# Converted from a forgejo workflow by `spindle threads import --from forgejo`.
+# This is a Spindle workflow: review the conversion report; untranslated constructs are marked below.
+name: CI
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+# No JavaScript actions: job images (golang, docker-cli) have no node, so source is
+# fetched with plain git and the release is published with curl against the Forgejo API.
+env:
+  CHECKOUT: |
+    git config --global --add safe.directory '*'
+    git init -q . && git remote add origin "${SPINDLE_SERVER}/${GITHUB_REPOSITORY}.git"
+    git -c "http.extraHeader=Authorization: token ${FORGEJO_TOKEN}" fetch -q --depth 1 origin "${GITHUB_SHA}"
+    git checkout -q FETCH_HEAD
+jobs:
+  test:
+    runs-on:
+      - self-hosted
+      - linux
+      - docker
+    container:
+      image: golang:1.27@sha256:01aa404fa56b604b6f48e90c1d6e2c79fe5cd78f9592f78d80303fbe171cdcc0 # golang:1.27 (scripts/update-pins.sh)
+    steps:
+      - name: Checkout
+        env:
+          FORGEJO_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: eval "$CHECKOUT"
+      - run: go vet ./...
+      - run: go test ./... -count=1
+  package:
+    # DAEMONLESS build. Job containers never receive /var/run/docker.sock: the runner talks to Docker
+    # through that socket itself and creates jobs as siblings, so a `docker` CLI inside a job has no
+    # daemon to reach ("Cannot connect to the Docker daemon at unix:///var/run/docker.sock"). Mounting
+    # the socket into jobs would hand every workflow root on the node, so the answer is buildah.
+    # The runners carry the capabilities buildah needs (SYS_ADMIN, apparmor=unconfined, nofile ulimit).
+    runs-on:
+      - self-hosted
+      - linux
+      - docker
+    needs: [test]
+    if: github.event_name == 'push'
+    container:
+      image: quay.io/buildah/stable:latest@sha256:e5a33092657823b0830186ea525054cf4cdeef29b6a44833444c59d86f561f29 # quay.io/buildah/stable:latest
+    steps:
+      - name: Checkout
+        env:
+          FORGEJO_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          if command -v apk >/dev/null 2>&1; then apk add --no-cache git >/dev/null
+          elif command -v microdnf >/dev/null 2>&1; then microdnf install -y git >/dev/null
+          elif command -v dnf >/dev/null 2>&1; then dnf install -y git >/dev/null
+          fi
+          eval "$CHECKOUT"
+      - name: Build
+        run: |
+          # vfs + chroot isolation are required here, not preferences: the default OCI runtime cannot
+          # create kernel keyrings inside a job container, and overlay-on-overlay is not permitted.
+          mkdir -p /etc/containers /var/lib/containers /var/tmp/containers
+          printf '[storage]\ndriver="vfs"\nrunroot="/var/tmp/containers"\ngraphroot="/var/lib/containers"\n' > /etc/containers/storage.conf
+          IMG=github.com/crueber/weave
+          case "$GITHUB_REF" in refs/tags/v*) VERSION="${GITHUB_REF#refs/tags/}" ;; *) VERSION="$GITHUB_SHA" ;; esac
+          buildah bud --storage-driver vfs --isolation=chroot \
+            --build-arg "VERSION=$VERSION" -t "$IMG:$GITHUB_SHA" -t "$IMG:latest" .
+          case "$GITHUB_REF" in refs/tags/v*) buildah --storage-driver vfs tag "$IMG:$GITHUB_SHA" "$IMG:$VERSION" ;; esac
+      - name: Push
+        env:
+          REGISTRY_USER: ${{ secrets.REGISTRY_USER }}
+          REGISTRY_TOKEN: ${{ secrets.REGISTRY_TOKEN }}
+        run: |
+          [ -n "$REGISTRY_TOKEN" ] || { echo "REGISTRY_USER / REGISTRY_TOKEN secrets are required"; exit 1; }
+          IMG=github.com/crueber/weave
+          # buildah login persists in the job container's ~/.config/containers/auth.json, so the push
+          # in this same container is authenticated.
+          buildah login -u "$REGISTRY_USER" -p "$REGISTRY_TOKEN" github.com
+          # Every buildah call must name the vfs driver explicitly: buildah 1.45 (the pinned image) no
+          # longer picks up the store from /etc/containers/storage.conf in a later step's shell, so a
+          # bare `buildah push` reports "image not known" for an image the Build step just tagged.
+          buildah --storage-driver vfs push "$IMG:$GITHUB_SHA"
+          buildah --storage-driver vfs push "$IMG:latest"
+          case "$GITHUB_REF" in refs/tags/v*) buildah --storage-driver vfs push "$IMG:${GITHUB_REF#refs/tags/}" ;; esac
+  release:
+    runs-on:
+      - self-hosted
+      - linux
+      - docker
+    needs: [test]
+    if: startsWith(github.ref, 'refs/tags/v')
+    container:
+      image: golang:1.27@sha256:01aa404fa56b604b6f48e90c1d6e2c79fe5cd78f9592f78d80303fbe171cdcc0 # golang:1.27 (scripts/update-pins.sh)
+    steps:
+      - name: Checkout
+        env:
+          FORGEJO_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: eval "$CHECKOUT"
+      - name: Build and package
+        env:
+          # base64 ed25519 seed (generate: go run ./cmd/weave-release -genkey -keyfile PATH). When it
+          # is absent the release is published UNSIGNED and the packager prints a warning.
+          RELEASE_SIGNING_KEY: ${{ secrets.RELEASE_SIGNING_KEY }}
+        run: |
+          # One Go packager (cmd/weave-release) builds the matrix, so scripts/release-local.sh
+          # verifies exactly what is published. Slim CLI (no server/SQLite) for linux, darwin and
+          # windows on amd64+arm64 -> .tar.gz/.zip with binary, completions and the skill, raw
+          # weave-<os>-<arch>[.exe] binaries, full server binaries for linux, install.sh/.ps1 and
+          # SHA256SUMS.txt. CGO_ENABLED=0, -trimpath, -ldflags "-s -w -X version" are set inside.
+          TAG="${GITHUB_REF#refs/tags/}"
+          go run ./cmd/weave-skillgen -check
+          go run ./cmd/weave-release -out dist -version "$TAG"
+          if [ -f dist/SHA256SUMS.txt.sig ]; then
+            # fail the release now if the signature does not verify with the key embedded in the CLI
+            go run ./cmd/weave-cli verify-release dist/SHA256SUMS.txt dist/SHA256SUMS.txt.sig
+          else
+            echo "WARNING: release is UNSIGNED (secret RELEASE_SIGNING_KEY is not set)"
+          fi
+          ls -la dist
+      - name: Publish release
+        env:
+          REGISTRY_TOKEN: ${{ secrets.REGISTRY_TOKEN }}
+        run: |
+          [ -n "$REGISTRY_TOKEN" ] || { echo "REGISTRY_TOKEN secret is required"; exit 1; }
+          TAG="${GITHUB_REF#refs/tags/}"
+          API="${SPINDLE_SERVER}/api/v1/repos/${GITHUB_REPOSITORY}"
+          AUTH="Authorization: token ${REGISTRY_TOKEN}"
+          BODY='{"tag_name":"'"$TAG"'","name":"Weave '"$TAG"'","body":"CLI: curl -fsSL '"${SPINDLE_SERVER}/${GITHUB_REPOSITORY}"'/releases/download/'"$TAG"'/install.sh | sh  (Windows: install.ps1). Archives weave_*_<os>_<arch> contain the CLI, shell completions and the agent skill; weave-server-linux-* are the full server binaries; verify with SHA256SUMS.txt (ed25519-signed: SHA256SUMS.txt.sig, check with weave verify-release). Container image: github.com/crueber/weave:'"$TAG"'"}'
+          RESP=$(curl -sS -X POST -H "$AUTH" -H 'Content-Type: application/json' -d "$BODY" "$API/releases")
+          ID=$(echo "$RESP" | sed -n 's/^{"id":\([0-9]*\).*/\1/p')
+          if [ -z "$ID" ]; then
+            ID=$(curl -sS -H "$AUTH" "$API/releases/tags/$TAG" | sed -n 's/^{"id":\([0-9]*\).*/\1/p')
+          fi
+          [ -n "$ID" ] || { echo "could not create or find release: $RESP"; exit 1; }
+          for f in dist/*; do
+            n=$(basename "$f"); echo "uploading $n"
+            curl -sS -f -X POST -H "$AUTH" -F "attachment=@$f" "$API/releases/$ID/assets?name=$n" >/dev/null
+          done
+          echo "release $TAG published with $(ls dist | wc -l) assets"

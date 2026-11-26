@@ -1,0 +1,2556 @@
+{
+  "docs_revision": {
+    "forgejo": "v17.0.2 (LTS v15.0.12)",
+    "github": "2026-11-26",
+    "checked": "2026-11-26",
+    "plan": "docs/features/21_parity_master.md",
+    "plan_commit": "64acd592"
+  },
+  "rows": [
+    {
+      "id": "PAR-001",
+      "area": "discovery",
+      "capability": "One discovered location: `.spindle/workflows/*.{yml,yaml}`, no foreign fallback, ever",
+      "provenance": "F",
+      "status": "have",
+      "wave": 1,
+      "track": [
+        "T3"
+      ],
+      "security": [
+        "S14"
+      ],
+      "decision": "",
+      "acceptance": "A repo containing only `.github/workflows/ci.yml` yields zero workflow files and a named hint pointing at `threads import`",
+      "docs_refs": [
+        "docs/features/21_parity_master.md §4.1",
+        "docs/threads.md §3",
+        "docs/WORKFLOWS.md"
+      ],
+      "tests": [
+        "TestDiscoverIgnoresForeignWorkflowDirs",
+        "TestDiscoverNoFilesIsNotAnError"
+      ],
+      "verify_only": true,
+      "notes": "Discovery half verified in Wave 1d. The acceptance line's \"named hint pointing at threads import\" is the migration banner, which is PAR-003 (Wave 2, T6): the engine has no code path that reads a foreign directory, and the hint is a page-only projection layered on top."
+    },
+    {
+      "id": "PAR-002",
+      "area": "discovery",
+      "capability": "One-way importer `spindle threads import` (converted file + report + golden diff)",
+      "provenance": "F",
+      "status": "have",
+      "wave": 1,
+      "track": [
+        "T1"
+      ],
+      "security": [
+        "S14"
+      ],
+      "acceptance": "Converting the 4 Forgejo corpus files produces files that parse and a committed golden per file; an untranslatable key is named in the report and exits non-zero",
+      "docs_refs": [
+        "docs/features/21_parity_master.md §4.1",
+        "docs/threads.md §3",
+        "docs/WORKFLOWS.md"
+      ],
+      "tests": [
+        "TestCorpusGolden",
+        "TestParityImporterReproducesGoldens",
+        "TestRunApplyRefusesUntranslated"
+      ],
+      "notes": "Landed on main (6ce73cf9 + bd019fcf). Converting the four Forgejo corpus files produces files that parse with zero refusals (matrix include/exclude is carried verbatim); an untranslatable construct is a `# UNTRANSLATED:` marker plus a report entry and exit 1, and --apply refuses to commit it without --allow-partial. TestCorpusGolden pins the importer goldens; TestParityImporterReproducesGoldens pins the parity corpus to the CLI output at importer commit 19549aa8."
+    },
+    {
+      "id": "PAR-003",
+      "area": "discovery",
+      "capability": "Migration banner: a foreign workflow directory is *shown* with the importer command, never run",
+      "provenance": "none",
+      "status": "missing",
+      "wave": 2,
+      "track": [
+        "T6"
+      ],
+      "security": [
+        "S14"
+      ],
+      "decision": "",
+      "acceptance": "The Threads page lists the foreign files and the exact `spindle threads import` invocation; no run is created by visiting it",
+      "docs_refs": [
+        "docs/features/21_parity_master.md §4.1",
+        "docs/threads.md §3",
+        "docs/WORKFLOWS.md"
+      ],
+      "tests": []
+    },
+    {
+      "id": "PAR-004",
+      "area": "discovery",
+      "capability": "Canonical `spindle.*` context / `SPINDLE_*` env with `github.*`/`forgejo.*` as aliases (D-1)",
+      "provenance": "none",
+      "status": "partial",
+      "wave": 2,
+      "track": [
+        "T1"
+      ],
+      "security": [],
+      "decision": "D-1",
+      "acceptance": "`spindle.ref`, `spindle.event_name` and `github.ref`, `forgejo.ref` resolve to the identical value in one table test",
+      "docs_refs": [
+        "docs/features/21_parity_master.md §4.1",
+        "docs/threads.md §3",
+        "docs/WORKFLOWS.md"
+      ],
+      "tests": []
+    },
+    {
+      "id": "PAR-010",
+      "area": "triggers",
+      "capability": "`on.push.tags` fires on tag pushes (`refs/tags/*`) with tag globs and `GITHUB_REF=refs/tags/X`",
+      "provenance": "B",
+      "status": "have",
+      "wave": 1,
+      "track": [
+        "T1"
+      ],
+      "security": [],
+      "acceptance": "A `v1.2.3` tag matching `tags: [v*]` starts exactly one run; a non-matching tag starts none",
+      "docs_refs": [
+        "docs/features/21_parity_master.md §4.2",
+        "docs/threads.md §3.2"
+      ],
+      "tests": [
+        "TestPushTagSemantics",
+        "TestPushRefKindSelectsTrigger",
+        "TestTagRunRecordsRefAndNoBranch",
+        "TestParityCorpusTriggerSemantics"
+      ],
+      "notes": "Landed on main (e4a3f949 semantics, 19549aa8 emitter). A tag push that matches `on.push.tags` starts exactly one run; a non-matching tag starts none; the run records refs/tags/<tag> with no branch. Proved on corpus content by TestParityCorpusTriggerSemantics (scriobh-release is tags-only)."
+    },
+    {
+      "id": "PAR-011",
+      "area": "triggers",
+      "capability": "A tags-only trigger stops matching every branch push",
+      "provenance": "F",
+      "status": "have",
+      "wave": 1,
+      "track": [
+        "T1"
+      ],
+      "security": [],
+      "acceptance": "`on: push: {tags: [\"v*\"]}` on a branch push creates no run (the current `matchAny(nil)` behaviour is pinned as a failing-first test)",
+      "docs_refs": [
+        "docs/features/21_parity_master.md §4.2",
+        "docs/threads.md §3.2"
+      ],
+      "tests": [
+        "TestPushTagSemantics",
+        "TestPushRefKindSelectsTrigger",
+        "TestParityCorpusTriggerSemantics"
+      ],
+      "notes": "Landed on main. A tags-only trigger no longer matches every branch push: TestPushTagSemantics pins the match table and TestParityCorpusTriggerSemantics drives the real tags-only corpus file with a branch push and expects zero runs."
+    },
+    {
+      "id": "PAR-012",
+      "area": "triggers",
+      "capability": "`on.push.paths` / `paths-ignore` (and `pull_request.paths`) with `**`, ANDed with `branches`",
+      "provenance": "B",
+      "status": "missing",
+      "wave": 2,
+      "track": [
+        "T1",
+        "T3"
+      ],
+      "security": [],
+      "decision": "",
+      "acceptance": "A docs-only push against `paths: ['src/**']` creates no run; a mixed commit does; a `paths`-only trigger uses the pushed commit's diff",
+      "docs_refs": [
+        "docs/features/21_parity_master.md §4.2",
+        "docs/threads.md §3.2"
+      ],
+      "tests": []
+    },
+    {
+      "id": "PAR-013",
+      "area": "triggers",
+      "capability": "Filter glob dialect: `*`, `**`, `?`, `+`, ordered `!` negation, `branches-ignore`/`tags-ignore`",
+      "provenance": "B",
+      "status": "partial",
+      "wave": 2,
+      "track": [
+        "T1"
+      ],
+      "security": [],
+      "decision": "",
+      "acceptance": "The documented filter cheat-sheet is a passing table test, including ordered include/exclude",
+      "docs_refs": [
+        "docs/features/21_parity_master.md §4.2",
+        "docs/threads.md §3.2"
+      ],
+      "tests": []
+    },
+    {
+      "id": "PAR-014",
+      "area": "triggers",
+      "capability": "Full `pull_request.types` vocabulary and its emitters (closed, labeled, ready_for_review, review_requested, …)",
+      "provenance": "B",
+      "status": "partial",
+      "wave": 2,
+      "track": [
+        "T3"
+      ],
+      "security": [],
+      "decision": "",
+      "acceptance": "Each documented type fires from the real event through the pulls seam; the default stays opened/synchronize/reopened",
+      "docs_refs": [
+        "docs/features/21_parity_master.md §4.2",
+        "docs/threads.md §3.2"
+      ],
+      "tests": []
+    },
+    {
+      "id": "PAR-015",
+      "area": "triggers",
+      "capability": "`pull_request_target`: base-tip file, base secrets, write token, head fetchable",
+      "provenance": "B",
+      "status": "missing",
+      "wave": 2,
+      "track": [
+        "T3"
+      ],
+      "security": [
+        "S5"
+      ],
+      "decision": "D-2",
+      "acceptance": "A fork PR run executes the base file and never the head's, with secrets resolving and the badge set",
+      "docs_refs": [
+        "docs/features/21_parity_master.md §4.2",
+        "docs/threads.md §3.2"
+      ],
+      "tests": []
+    },
+    {
+      "id": "PAR-016",
+      "area": "triggers",
+      "capability": "`merge_group` trigger wired to the merge-queue card (no queue semantics here)",
+      "provenance": "G",
+      "status": "missing",
+      "wave": 3,
+      "track": [
+        "T3"
+      ],
+      "security": [],
+      "decision": "",
+      "acceptance": "A queue entry starts a `merge_group` run whose checks gate the merge",
+      "docs_refs": [
+        "docs/features/21_parity_master.md §4.2",
+        "docs/threads.md §3.2"
+      ],
+      "tests": []
+    },
+    {
+      "id": "PAR-017",
+      "area": "triggers",
+      "capability": "`release` trigger (created/published/edited/deleted/prereleased/released) with `event.release.*`",
+      "provenance": "B",
+      "status": "missing",
+      "wave": 2,
+      "track": [
+        "T3"
+      ],
+      "security": [],
+      "decision": "",
+      "acceptance": "Publishing a release runs a workflow that reads its tag and asset list",
+      "docs_refs": [
+        "docs/features/21_parity_master.md §4.2",
+        "docs/threads.md §3.2"
+      ],
+      "tests": []
+    },
+    {
+      "id": "PAR-018",
+      "area": "triggers",
+      "capability": "`repository_dispatch` with `types` + `client_payload`, reachable from API/CLI/scoped token",
+      "provenance": "G",
+      "status": "missing",
+      "wave": 3,
+      "track": [
+        "T3"
+      ],
+      "security": [
+        "S10"
+      ],
+      "decision": "",
+      "acceptance": "A dispatch exposes `github.event.client_payload.*`; a token without `contents: write` is refused",
+      "docs_refs": [
+        "docs/features/21_parity_master.md §4.2",
+        "docs/threads.md §3.2"
+      ],
+      "tests": []
+    },
+    {
+      "id": "PAR-019",
+      "area": "triggers",
+      "capability": "`workflow_run` (workflows/types/branches filters, upstream run + artifacts) with the untrusted-trigger rule",
+      "provenance": "G",
+      "status": "missing",
+      "wave": 3,
+      "track": [
+        "T3"
+      ],
+      "security": [
+        "S7"
+      ],
+      "decision": "D-3",
+      "acceptance": "A follow-up workflow downloads the first run's artifact and is itself gated when the parent was untrusted",
+      "docs_refs": [
+        "docs/features/21_parity_master.md §4.2",
+        "docs/threads.md §3.2"
+      ],
+      "tests": []
+    },
+    {
+      "id": "PAR-020",
+      "area": "triggers",
+      "capability": "`issues`, `issue_comment`, `pull_request_review`(+`_comment`), `label`, `milestone`, `discussion`(+`_comment`)",
+      "provenance": "B",
+      "status": "missing",
+      "wave": 2,
+      "track": [
+        "T3"
+      ],
+      "security": [],
+      "decision": "",
+      "acceptance": "Each parses, is emitted by its owning package, and carries the documented payload; an `issue_comment` run uses the default-branch file",
+      "docs_refs": [
+        "docs/features/21_parity_master.md §4.2",
+        "docs/threads.md §3.2"
+      ],
+      "tests": []
+    },
+    {
+      "id": "PAR-021",
+      "area": "triggers",
+      "capability": "Repository/check/deploy triggers: create/delete, fork, watch, status, check_run/check_suite, deployment(+_status), registry_package, gollum, page_build, branch_protection_rule, public",
+      "provenance": "G",
+      "status": "missing",
+      "wave": 3,
+      "track": [
+        "T3"
+      ],
+      "security": [],
+      "decision": "",
+      "acceptance": "Each parses and fires from a synthesized event; a trigger for a surface spindle lacks is refused by name, not inert",
+      "docs_refs": [
+        "docs/features/21_parity_master.md §4.2",
+        "docs/threads.md §3.2"
+      ],
+      "tests": []
+    },
+    {
+      "id": "PAR-022",
+      "area": "triggers",
+      "capability": "Cron parity: names, `@daily`-family macros, `L`/`W`/`#`, per-entry `timezone:` with the DST rule; non-default-branch schedules ignored",
+      "provenance": "B",
+      "status": "partial",
+      "wave": 2,
+      "track": [
+        "T1"
+      ],
+      "security": [],
+      "decision": "",
+      "acceptance": "GitHub's and Forgejo's cron examples all parse and fire at the documented minute; the Berlin DST entry behaves as documented",
+      "docs_refs": [
+        "docs/features/21_parity_master.md §4.2",
+        "docs/threads.md §3.2"
+      ],
+      "tests": []
+    },
+    {
+      "id": "PAR-023",
+      "area": "triggers",
+      "capability": "Dispatch input types `environment` and `number` plus the `github.event.inputs.*` alias",
+      "provenance": "G",
+      "status": "partial",
+      "wave": 2,
+      "track": [
+        "T1",
+        "T6"
+      ],
+      "security": [],
+      "decision": "",
+      "acceptance": "An `environment` input renders a picker and both `inputs.x` and `event.inputs.x` agree",
+      "docs_refs": [
+        "docs/features/21_parity_master.md §4.2",
+        "docs/threads.md §3.2"
+      ],
+      "tests": []
+    },
+    {
+      "id": "PAR-024",
+      "area": "triggers",
+      "capability": "PR merge-ref semantics: the simulated merge commit (`refs/pull/N/merge`) is what runs",
+      "provenance": "G",
+      "status": "missing",
+      "wave": 3,
+      "track": [
+        "T3"
+      ],
+      "security": [
+        "S13"
+      ],
+      "decision": "",
+      "acceptance": "A merge-only failure goes red; `GITHUB_REF`/`GITHUB_SHA` name the merge commit; the head is still what a fork run cannot control",
+      "docs_refs": [
+        "docs/features/21_parity_master.md §4.2",
+        "docs/threads.md §3.2"
+      ],
+      "tests": []
+    },
+    {
+      "id": "PAR-030",
+      "area": "expressions",
+      "capability": "`${{ }}` in every documented site: run, with, env, name, if, shell, working-directory, runs-on, container.*, services.*, environment, defaults, outputs, concurrency",
+      "provenance": "B",
+      "status": "partial",
+      "wave": 1,
+      "track": [
+        "T1"
+      ],
+      "security": [
+        "S3"
+      ],
+      "decision": "",
+      "acceptance": "`container: image: debian:${{ matrix.variant }}` pulls that tag; `runs-on: ${{ matrix.os }}` selects; no supported span stays literal",
+      "docs_refs": [
+        "docs/features/21_parity_master.md §4.3",
+        "docs/threads.md §3.6",
+        "docs/threads.md §3.7"
+      ],
+      "tests": [
+        "TestSubstituteGitHubInEverySite",
+        "TestSubstituteEnvLayers",
+        "TestSubstituteMatrixAndInputs",
+        "TestSubstituteStepAndNeedsOutputs",
+        "TestStepIfReadsActorAndSecret",
+        "TestSubstituteIsOnePass",
+        "TestSubstituteInCompositeAction",
+        "TestSubstituteRejectsAMalformedSpan",
+        "TestSubstitutionSites"
+      ],
+      "notes": "Runner wiring landed (df8464b5) for every STEP-level site the row lists: `run`, `with`, `env` values, `name`, `if`, `shell`, `working-directory` (TestSubstituteGitHubInEverySite), plus job `outputs` templates, composite action outputs and `concurrency.group`. One TemplateValues set (github/matrix/inputs/env/secrets/steps/needs) feeds workflow.Substitute, expansion is one pass, and an undeclared steps/needs output is a named error. STILL PARTIAL on the row's own acceptance, verified by probing run creation at df8464b5: `runs-on: ${{ matrix.os }}` and `container: image: debian:${{ matrix.variant }}` keep the LITERAL span in the job spec (spec.RunsOn=[`${{ matrix.os }}`], spec.Container.Image=`debian:${{ matrix.variant }}`), so the label never matches a runner (the job queues) and the image gate sees the literal string. `services.*.image`, `environment`/`environment.url` (PAR-130) and `defaults` are likewise unsubstituted — the first two are used verbatim at run creation, and a `defaults:` block is still refused by the parser (PAR-054). Those are the remaining sites; the row closes when they substitute."
+    },
+    {
+      "id": "PAR-031",
+      "area": "expressions",
+      "capability": "`secrets.*` as an expression, empty (never literal) on an untrusted run",
+      "provenance": "B",
+      "status": "have",
+      "wave": 1,
+      "track": [
+        "T1"
+      ],
+      "security": [
+        "S3",
+        "S13"
+      ],
+      "decision": "",
+      "acceptance": "`env: TOKEN: ${{ secrets.TOKEN }}` yields the value, a fork run yields empty, and the log masks it",
+      "docs_refs": [
+        "docs/features/21_parity_master.md §4.3",
+        "docs/threads.md §3.6",
+        "docs/threads.md §3.7"
+      ],
+      "tests": [
+        "TestSecretsReferences",
+        "TestSecretsGitHubTokenResolvesByName",
+        "TestRepositorySecretResolvesByNameOnly",
+        "TestEmbeddedSecretReferenceIsSplicedAndMasked",
+        "TestMaskCoversTheJobToken",
+        "TestSubstitutedSecretIsMaskedInTheLog",
+        "TestSubstituteIsOnePass",
+        "TestEnvironmentForkRunNeverGetsSecrets"
+      ],
+      "notes": "Closed on its acceptance line, then strengthened by the runner substitution wave (df8464b5): every site now resolves `${{ secrets.<name> }}` (case-insensitive, token aliases included), an embedded reference is spliced like GitHub and the value joins the log mask (TestEmbeddedSecretReferenceIsSplicedAndMasked, TestSubstitutedSecretIsMaskedInTheLog), expansion is one pass so a secret whose body contains `${{ }}` is never rescanned, and a whole-value step `env:` entry keeps the stronger by-NAME delivery (the value never reaches argv). A fork/untrusted run still reads an empty secrets context."
+    },
+    {
+      "id": "PAR-032",
+      "area": "expressions",
+      "capability": "`github`/`forgejo`/`forge` contexts: full documented field set, identical values; identity/ref fields (actor, actor_id, triggering_actor, ref_type, ref_protected, head_ref, base_ref, run_number, run_attempt, workflow_ref, workflow_sha, action_path, action_ref, repository_owner(+_id))",
+      "provenance": "B",
+      "status": "partial",
+      "wave": 1,
+      "track": [
+        "T1"
+      ],
+      "security": [],
+      "decision": "",
+      "acceptance": "One table test per field, resolved in a step and in `if:`; `${{ forgejo.actor }} == ${{ github.actor }}`",
+      "docs_refs": [
+        "docs/features/21_parity_master.md §4.3",
+        "docs/threads.md §3.6",
+        "docs/threads.md §3.7"
+      ],
+      "tests": [
+        "TestGitHubContextFields",
+        "TestServerAddressFieldsAreInTheClosedSet",
+        "TestTagRunJobIfSeesTheTag"
+      ],
+      "notes": "Wave-1 slice landed and now resolves in every step site as well as a job/step `if:` (df8464b5): event_name, sha, ref, ref_name, repository, workflow, job, run_id, actor, server_url, api_url (and the forgejo.*/forge.* aliases, value-identical — TestSubstituteGitHubInEverySite, TestGitHubContextFields, TestServerAddressFieldsAreInTheClosedSet). The row is the FULL documented field set and the rest (actor_id, triggering_actor, ref_type, ref_protected, head_ref, base_ref, run_number, run_attempt, workflow_ref, workflow_sha, action_path, action_ref, repository_owner, repository_owner_id) is still a NAMED PARSE ERROR (workflow.GitHubFields is the closed list), so it cannot close here."
+    },
+    {
+      "id": "PAR-033",
+      "area": "expressions",
+      "capability": "`github.event` payload + `GITHUB_EVENT_PATH`/`FORGEJO_EVENT_PATH` JSON",
+      "provenance": "B",
+      "status": "missing",
+      "wave": 2,
+      "track": [
+        "T1"
+      ],
+      "security": [],
+      "decision": "",
+      "acceptance": "`jq -r .pull_request.number \"$GITHUB_EVENT_PATH\"` returns the PR number; `github.event.action` agrees",
+      "docs_refs": [
+        "docs/features/21_parity_master.md §4.3",
+        "docs/threads.md §3.6",
+        "docs/threads.md §3.7"
+      ],
+      "tests": []
+    },
+    {
+      "id": "PAR-034",
+      "area": "expressions",
+      "capability": "`runner` context and `RUNNER_OS/ARCH/NAME/TEMP/TOOL_CACHE/ENVIRONMENT/DEBUG`",
+      "provenance": "B",
+      "status": "missing",
+      "wave": 2,
+      "track": [
+        "T2"
+      ],
+      "security": [],
+      "decision": "",
+      "acceptance": "`${{ runner.os }}` is `Linux`; `${{ runner.temp }}` is a writable directory inside the job",
+      "docs_refs": [
+        "docs/features/21_parity_master.md §4.3",
+        "docs/threads.md §3.6",
+        "docs/threads.md §3.7"
+      ],
+      "tests": []
+    },
+    {
+      "id": "PAR-035",
+      "area": "expressions",
+      "capability": "`vars` context with repository/organization/user/environment variables, documented precedence, reserved-name refusal",
+      "provenance": "B",
+      "status": "missing",
+      "wave": 2,
+      "track": [
+        "T3"
+      ],
+      "security": [],
+      "decision": "",
+      "acceptance": "`${{ vars.X }}` resolves per scope; a `GITHUB_`/`SPINDLE_`-prefixed name is refused at save",
+      "docs_refs": [
+        "docs/features/21_parity_master.md §4.3",
+        "docs/threads.md §3.6",
+        "docs/threads.md §3.7"
+      ],
+      "tests": []
+    },
+    {
+      "id": "PAR-036",
+      "area": "expressions",
+      "capability": "`env` context in expressions (workflow → job → container → step layering, visible to `if:`)",
+      "provenance": "B",
+      "status": "have",
+      "wave": 2,
+      "track": [
+        "T1"
+      ],
+      "security": [],
+      "decision": "",
+      "acceptance": "`if: env.FLAG == '1'` follows the documented layer order in one table test",
+      "docs_refs": [
+        "docs/features/21_parity_master.md §4.3",
+        "docs/threads.md §3.6",
+        "docs/threads.md §3.7"
+      ],
+      "tests": [
+        "TestStepIfReadsTheLayeredEnv",
+        "TestSubstituteEnvLayers",
+        "TestSubstituteGitHubInEverySite"
+      ],
+      "notes": "Landed with the runner substitution wave (df8464b5). `${{ env.NAME }}` resolves against the authored layer (runner built-ins → workflow → job → container → step, step winning at a step field, and a step's own `env:` value resolves against the layer below it), and `if: env.FLAG == '1'` follows the same order for the layers visible to a condition — workflow → job → container, with the step layer excluded because the `if:` is evaluated before the step runs (TestStepIfReadsTheLayeredEnv is the acceptance table). An absent name expands empty, never the literal text, and `$GITHUB_ENV` writes are runtime state, not this context."
+    },
+    {
+      "id": "PAR-037",
+      "area": "expressions",
+      "capability": "Expression functions: contains, startsWith, endsWith, format, join, toJSON, fromJSON, hashFiles, case",
+      "provenance": "B",
+      "status": "have",
+      "wave": 1,
+      "track": [
+        "T1"
+      ],
+      "security": [],
+      "acceptance": "One conformance case per function with the platform-expected value; `hashFiles('**/go.sum')` returns a hash inside a job",
+      "docs_refs": [
+        "docs/features/21_parity_master.md §4.3",
+        "docs/threads.md §3.6",
+        "docs/threads.md §3.7"
+      ],
+      "tests": [
+        "TestEvalIfFunctions",
+        "TestEvalIfFunctionEdges",
+        "TestSubstitutionSites",
+        "TestValidateIf"
+      ],
+      "notes": "Landed on main (e4a3f949). startsWith/contains/endsWith/format/join/toJSON/fromJSON/case evaluate in `if:` and are validated in every substituted site; an unknown function is a named parse error. hashFiles stays PAR-041 (job-container walk)."
+    },
+    {
+      "id": "PAR-038",
+      "area": "expressions",
+      "capability": "Operators: loose cross-type equality, `<`/`<=`/`>`/`>=`, `[ ]` index, property access, `*`/object filters, value-returning logical and/or (the operand, not a boolean)",
+      "provenance": "B",
+      "status": "partial",
+      "wave": 2,
+      "track": [
+        "T1"
+      ],
+      "security": [],
+      "decision": "",
+      "acceptance": "`1 == '1'`, `true == 'true'`, `'a' < 'b'`, `github['sha']` and a filter over a list all match",
+      "docs_refs": [
+        "docs/features/21_parity_master.md §4.3",
+        "docs/threads.md §3.6",
+        "docs/threads.md §3.7"
+      ],
+      "tests": []
+    },
+    {
+      "id": "PAR-039",
+      "area": "expressions",
+      "capability": "`job`/`jobs`/`strategy` contexts (`job.status`, `strategy.job-index`, `job-total`, `max-parallel`)",
+      "provenance": "G",
+      "status": "missing",
+      "wave": 3,
+      "track": [
+        "T1"
+      ],
+      "security": [],
+      "decision": "",
+      "acceptance": "Each resolves in a step; `job.status` reflects a tolerated failure correctly",
+      "docs_refs": [
+        "docs/features/21_parity_master.md §4.3",
+        "docs/threads.md §3.6",
+        "docs/threads.md §3.7"
+      ],
+      "tests": []
+    },
+    {
+      "id": "PAR-040",
+      "area": "expressions",
+      "capability": "Per-key context availability, fail-closed with a named error (never a literal, never an empty string)",
+      "provenance": "B",
+      "status": "partial",
+      "wave": 2,
+      "track": [
+        "T1"
+      ],
+      "security": [],
+      "decision": "",
+      "acceptance": "A context outside the documented set for that key is a named parse/eval error; the availability table is a test table",
+      "docs_refs": [
+        "docs/features/21_parity_master.md §4.3",
+        "docs/threads.md §3.6",
+        "docs/threads.md §3.7"
+      ],
+      "tests": []
+    },
+    {
+      "id": "PAR-041",
+      "area": "expressions",
+      "capability": "`hashFiles` workspace walk in the job container (patterns, cache, caps)",
+      "provenance": "B",
+      "status": "missing",
+      "wave": 2,
+      "track": [
+        "T2"
+      ],
+      "security": [],
+      "decision": "",
+      "acceptance": "Two calls in one job hash the same bytes; a >N-file walk is refused with the cap named",
+      "docs_refs": [
+        "docs/features/21_parity_master.md §4.3",
+        "docs/threads.md §3.6",
+        "docs/threads.md §3.7"
+      ],
+      "tests": []
+    },
+    {
+      "id": "PAR-050",
+      "area": "jobs",
+      "capability": "`needs` as a bare string parse (`needs: test` ≡ `needs: [test]`)",
+      "provenance": "B",
+      "status": "have",
+      "wave": 1,
+      "track": [
+        "T1"
+      ],
+      "security": [],
+      "acceptance": "`needs: test` in both Weave files parses and orders the job; a matrix dependency still waits for every cell",
+      "docs_refs": [
+        "docs/features/21_parity_master.md §4.4",
+        "docs/threads.md §3.3",
+        "docs/threads.md §3.5"
+      ],
+      "tests": [
+        "TestNeedsScalarAndList",
+        "TestNeedsNullAccepted"
+      ],
+      "notes": "Landed on main (e4a3f949). `needs: test` is a one-element list, ordering is honoured, and a matrix dependency still waits for every cell (TestNeedsScalarAndList)."
+    },
+    {
+      "id": "PAR-051",
+      "area": "jobs",
+      "capability": "`strategy.matrix.include`/`exclude` with the documented expansion rules, object cells",
+      "provenance": "B",
+      "status": "have",
+      "wave": 1,
+      "track": [
+        "T1"
+      ],
+      "security": [],
+      "acceptance": "The three documented `include` examples produce exactly the documented cell sets; Scriobh's `include:` list runs unmodified",
+      "docs_refs": [
+        "docs/features/21_parity_master.md §4.4",
+        "docs/threads.md §3.3",
+        "docs/threads.md §3.5"
+      ],
+      "tests": [
+        "TestMatrixIncludeExclude",
+        "TestExpandMatrixIncludeExclude",
+        "TestStrategySpecCarriesIncludeExclude",
+        "TestMatrixIncludeOnly",
+        "TestParityCorpusParsesAndPlans"
+      ],
+      "notes": "Landed on main (parser e4a3f949, importer bd019fcf). include/exclude expand with GitHub's merge rules, object cells are supported, and scriobh-release's include list now runs unmodified after conversion (four `cli` cells). An object axis value is the one remaining named refusal (importer TestMatrixObjectAxisStillRefusedAndDeclared)."
+    },
+    {
+      "id": "PAR-052",
+      "area": "jobs",
+      "capability": "`strategy.max-parallel` and its effect on cell admission",
+      "provenance": "B",
+      "status": "missing",
+      "wave": 2,
+      "track": [
+        "T3"
+      ],
+      "security": [],
+      "decision": "",
+      "acceptance": "6 cells with `max-parallel: 2` never have three running",
+      "docs_refs": [
+        "docs/features/21_parity_master.md §4.4",
+        "docs/threads.md §3.3",
+        "docs/threads.md §3.5"
+      ],
+      "tests": []
+    },
+    {
+      "id": "PAR-053",
+      "area": "jobs",
+      "capability": "`runs-on` matrix/inputs substitution and the `runs-on: {group:, labels:}` form",
+      "provenance": "B",
+      "status": "missing",
+      "wave": 2,
+      "track": [
+        "T1"
+      ],
+      "security": [],
+      "decision": "",
+      "acceptance": "`runs-on: [docker, \"${{ matrix.arch }}\"]` selects the matching runner; the group form is honoured or refused by name",
+      "docs_refs": [
+        "docs/features/21_parity_master.md §4.4",
+        "docs/threads.md §3.3",
+        "docs/threads.md §3.5"
+      ],
+      "tests": []
+    },
+    {
+      "id": "PAR-054",
+      "area": "jobs",
+      "capability": "`defaults.run.{shell, working-directory}` at workflow and job level",
+      "provenance": "B",
+      "status": "missing",
+      "wave": 2,
+      "track": [
+        "T1"
+      ],
+      "security": [],
+      "decision": "",
+      "acceptance": "The documented `defaults` example runs unchanged; a step-level key still wins",
+      "docs_refs": [
+        "docs/features/21_parity_master.md §4.4",
+        "docs/threads.md §3.3",
+        "docs/threads.md §3.5"
+      ],
+      "tests": []
+    },
+    {
+      "id": "PAR-055",
+      "area": "jobs",
+      "capability": "Timeout parity: 360-minute job default, expression-valued, `timed_out` conclusion; step-level shape",
+      "provenance": "B",
+      "status": "partial",
+      "wave": 2,
+      "track": [
+        "T3"
+      ],
+      "security": [],
+      "decision": "",
+      "acceptance": "An idle job is cancelled at the documented limit and reads `timed_out`; a step `sleep` past its own limit kills the container",
+      "docs_refs": [
+        "docs/features/21_parity_master.md §4.4",
+        "docs/threads.md §3.3",
+        "docs/threads.md §3.5"
+      ],
+      "tests": []
+    },
+    {
+      "id": "PAR-056",
+      "area": "jobs",
+      "capability": "`continue-on-error` as an expression, and the Forgejo divergence recorded (D-4)",
+      "provenance": "B",
+      "status": "partial",
+      "wave": 1,
+      "track": [
+        "T1"
+      ],
+      "security": [],
+      "decision": "D-4",
+      "acceptance": "`continue-on-error: ${{ matrix.experimental }}` tolerates one cell; the matrix row states the Forgejo difference and names the approval",
+      "docs_refs": [
+        "docs/features/21_parity_master.md §4.4",
+        "docs/threads.md §3.3",
+        "docs/threads.md §3.5"
+      ],
+      "tests": [
+        "TestContinueOnErrorJobKeepsTheRunGreen",
+        "TestContinueOnErrorDependentRuns",
+        "TestDependencyResultToleratesOnlyAFailedToleratedJob"
+      ],
+      "notes": "Job-level semantics landed on main (14cc2f89): a failed tolerated job leaves the run green, dependents run, and needs.<job>.result reads success; the Forgejo \"ignored\" divergence is recorded (D-4). Still partial on the row's first clause: `continue-on-error: ${{ matrix.experimental }}` is not accepted — the key is a bool, so an expression is a parse error rather than a per-cell tolerance."
+    },
+    {
+      "id": "PAR-057",
+      "area": "jobs",
+      "capability": "`run-name` (expression-valued run title)",
+      "provenance": "G",
+      "status": "missing",
+      "wave": 4,
+      "track": [
+        "T6"
+      ],
+      "security": [],
+      "decision": "",
+      "acceptance": "The run list and API show the rendered value",
+      "docs_refs": [
+        "docs/features/21_parity_master.md §4.4",
+        "docs/threads.md §3.3",
+        "docs/threads.md §3.5"
+      ],
+      "tests": []
+    },
+    {
+      "id": "PAR-058",
+      "area": "jobs",
+      "capability": "Job `if:` may read `secrets` and `vars`; an untrusted run reads an empty secrets context",
+      "provenance": "B",
+      "status": "missing",
+      "wave": 2,
+      "track": [
+        "T1"
+      ],
+      "security": [
+        "S13"
+      ],
+      "decision": "",
+      "acceptance": "`if: secrets.DEPLOY_KEY != ''` evaluates on a trusted run and is false (not an error) on a fork",
+      "docs_refs": [
+        "docs/features/21_parity_master.md §4.4",
+        "docs/threads.md §3.3",
+        "docs/threads.md §3.5"
+      ],
+      "tests": []
+    },
+    {
+      "id": "PAR-059",
+      "area": "jobs",
+      "capability": "Re-run failed jobs only, preserving successful jobs and their checks",
+      "provenance": "B",
+      "status": "missing",
+      "wave": 2,
+      "track": [
+        "T3"
+      ],
+      "security": [],
+      "decision": "",
+      "acceptance": "A partially failed run reruns only the failed jobs; the attempt increments; green checks are untouched",
+      "docs_refs": [
+        "docs/features/21_parity_master.md §4.4",
+        "docs/threads.md §3.3",
+        "docs/threads.md §3.5"
+      ],
+      "tests": []
+    },
+    {
+      "id": "PAR-070",
+      "area": "steps",
+      "capability": "Remote `uses: owner/repo[/path]@ref` and full URLs: resolve, pin to a SHA, cache, honour allowlist/mirror policy",
+      "provenance": "B",
+      "status": "missing",
+      "wave": 2,
+      "track": [
+        "T4"
+      ],
+      "security": [
+        "S1"
+      ],
+      "decision": "D-5",
+      "acceptance": "`uses: https://code.forgejo.org/actions/setup-go@v5` runs unmodified; the resolved SHA is in the run header and the log; a non-allowlisted repo is a named refusal",
+      "docs_refs": [
+        "docs/features/21_parity_master.md §4.5",
+        "docs/threads.md §3.4"
+      ],
+      "tests": []
+    },
+    {
+      "id": "PAR-071",
+      "area": "steps",
+      "capability": "JavaScript actions (`runs.using: node20` / `node24`): `INPUT_*`, `GITHUB_OUTPUT`/`GITHUB_STATE`, pre/post hooks with pre-if/post-if",
+      "provenance": "B",
+      "status": "missing",
+      "wave": 2,
+      "track": [
+        "T4"
+      ],
+      "security": [
+        "S1"
+      ],
+      "decision": "",
+      "acceptance": "A published node action passes its own test suite; a post hook runs after a failed main in the documented order",
+      "docs_refs": [
+        "docs/features/21_parity_master.md §4.5",
+        "docs/threads.md §3.4"
+      ],
+      "tests": []
+    },
+    {
+      "id": "PAR-072",
+      "area": "steps",
+      "capability": "Docker/Dockerfile actions: no `action.yml`, `runs.args`, `with.args`/`with.entrypoint`; `docker://` args parity",
+      "provenance": "B",
+      "status": "partial",
+      "wave": 2,
+      "track": [
+        "T4"
+      ],
+      "security": [
+        "S12"
+      ],
+      "decision": "",
+      "acceptance": "A Dockerfile-only action builds and runs; `args` overrides the image CMD; `docker://` verify-and-close lands as a matrix row with its existing tests",
+      "docs_refs": [
+        "docs/features/21_parity_master.md §4.5",
+        "docs/threads.md §3.4"
+      ],
+      "tests": []
+    },
+    {
+      "id": "PAR-073",
+      "area": "steps",
+      "capability": "`actions/checkout` full input set: ref, repository, path, fetch-depth, fetch-tags, submodules, token, persist-credentials, clean, sparse-checkout",
+      "provenance": "B",
+      "status": "have",
+      "wave": 1,
+      "track": [
+        "T2"
+      ],
+      "security": [
+        "S10"
+      ],
+      "acceptance": "Weave's `fetch-tags: true` dispatch checkout runs unmodified; every documented input is honoured or refused by name",
+      "docs_refs": [
+        "docs/features/21_parity_master.md §4.5",
+        "docs/threads.md §3.4"
+      ],
+      "tests": [
+        "TestCheckoutInputArgv",
+        "TestCheckoutOptionsParse",
+        "TestBuildPlanCheckoutRefusesAnUnsupportedInput",
+        "TestCheckoutScriptRunsThePinnedArgvUnderARealShell"
+      ],
+      "notes": "Landed on main (14cc2f89). ref/path/fetch-depth/fetch-tags/submodules/token/persist-credentials/clean/sparse-checkout map onto a pinned git argv (TestCheckoutInputArgv); an unsupported documented input is refused by name with its alternative. Weave's fetch-tags: true dispatch checkout converts and plans (TestParityCorpusParsesAndPlans)."
+    },
+    {
+      "id": "PAR-074",
+      "area": "steps",
+      "capability": "Composite parity: `${{ inputs.* }}`, `github.action_path`, nested remote `uses:`, per-step env layering, output threading",
+      "provenance": "B",
+      "status": "partial",
+      "wave": 2,
+      "track": [
+        "T4"
+      ],
+      "security": [],
+      "decision": "",
+      "acceptance": "`sigstore/cosign-installer` runs unmodified and its composite reads `action_path`",
+      "docs_refs": [
+        "docs/features/21_parity_master.md §4.5",
+        "docs/threads.md §3.4"
+      ],
+      "tests": []
+    },
+    {
+      "id": "PAR-075",
+      "area": "steps",
+      "capability": "Reusable workflows, local: `on.workflow_call` (typed inputs, secrets, outputs) + `jobs.<id>.uses`/`with`/`secrets:`",
+      "provenance": "B",
+      "status": "missing",
+      "wave": 2,
+      "track": [
+        "T3"
+      ],
+      "security": [
+        "S8"
+      ],
+      "decision": "",
+      "acceptance": "The documented chain runs, each callee is visible on the run page, its output is consumable, permissions are downgrade-only",
+      "docs_refs": [
+        "docs/features/21_parity_master.md §4.5",
+        "docs/threads.md §3.4"
+      ],
+      "tests": []
+    },
+    {
+      "id": "PAR-076",
+      "area": "steps",
+      "capability": "Reusable workflows, cross-repo/remote: SHA-pinned resolution, explicit secrets only, 10-level cap",
+      "provenance": "G",
+      "status": "missing",
+      "wave": 3,
+      "track": [
+        "T3"
+      ],
+      "security": [
+        "S8"
+      ],
+      "decision": "D-6",
+      "acceptance": "`secrets: inherit` to a cross-repo callee is refused by name; a pinned remote callee runs; nesting 11 is refused",
+      "docs_refs": [
+        "docs/features/21_parity_master.md §4.5",
+        "docs/threads.md §3.4"
+      ],
+      "tests": []
+    },
+    {
+      "id": "PAR-077",
+      "area": "steps",
+      "capability": "`container` keys applied, not inert: credentials, ports, init, tty, entrypoint, command",
+      "provenance": "B",
+      "status": "partial",
+      "wave": 3,
+      "track": [
+        "T2"
+      ],
+      "security": [
+        "S12"
+      ],
+      "decision": "",
+      "acceptance": "A private-registry image pulls with workflow credentials; the `sleep infinity` entrypoint example runs; a refused key is named",
+      "docs_refs": [
+        "docs/features/21_parity_master.md §4.5",
+        "docs/threads.md §3.4"
+      ],
+      "tests": []
+    },
+    {
+      "id": "PAR-078",
+      "area": "steps",
+      "capability": "`services.<id>` parity: Forgejo's `cmd` spelling, credentials, `--health-*` options and readiness gating",
+      "provenance": "B",
+      "status": "partial",
+      "wave": 2,
+      "track": [
+        "T2"
+      ],
+      "security": [],
+      "decision": "",
+      "acceptance": "The documented postgres service with `--health-cmd pg_isready` gates the job; a 60 s miss fails the job naming the service",
+      "docs_refs": [
+        "docs/features/21_parity_master.md §4.5",
+        "docs/threads.md §3.4"
+      ],
+      "tests": []
+    },
+    {
+      "id": "PAR-079",
+      "area": "steps",
+      "capability": "`steps[*].shell` as an arbitrary command with `{0}`; `node`/`python` aliases; bash→sh fallback",
+      "provenance": "B",
+      "status": "partial",
+      "wave": 2,
+      "track": [
+        "T2"
+      ],
+      "security": [],
+      "decision": "",
+      "acceptance": "`shell: dash -e {0}` runs; `python` maps to `python {0}`; a missing bash falls back with a log line",
+      "docs_refs": [
+        "docs/features/21_parity_master.md §4.5",
+        "docs/threads.md §3.4"
+      ],
+      "tests": []
+    },
+    {
+      "id": "PAR-080",
+      "area": "steps",
+      "capability": "Step `background`/`wait`/`wait-all`/`cancel`/`parallel` (new keys) — or an approved non-goal (D-7)",
+      "provenance": "G",
+      "status": "missing",
+      "wave": 3,
+      "track": [
+        "T2"
+      ],
+      "security": [],
+      "decision": "D-7",
+      "acceptance": "Either each behaves as documented (process group killed on exit) or the matrix row is an approved non-goal",
+      "docs_refs": [
+        "docs/features/21_parity_master.md §4.5",
+        "docs/threads.md §3.4"
+      ],
+      "tests": []
+    },
+    {
+      "id": "PAR-081",
+      "area": "steps",
+      "capability": "Docker-in-job: daemonless builders documented as the parity path; optional runner-level daemon/privilege grant",
+      "provenance": "B",
+      "status": "partial",
+      "wave": 2,
+      "track": [
+        "T2"
+      ],
+      "security": [
+        "S2"
+      ],
+      "decision": "D-8",
+      "acceptance": "A buildah corpus job builds and pushes; a job asking for the socket on a non-granting runner is refused by name",
+      "docs_refs": [
+        "docs/features/21_parity_master.md §4.5",
+        "docs/threads.md §3.4"
+      ],
+      "tests": []
+    },
+    {
+      "id": "PAR-082",
+      "area": "steps",
+      "capability": "Built-in action surface verify-and-close (`docker://` never receives secrets or the job token; digest policy)",
+      "provenance": "F",
+      "status": "have",
+      "wave": 1,
+      "track": [
+        "T7"
+      ],
+      "security": [
+        "S13"
+      ],
+      "decision": "",
+      "acceptance": "The existing tests are named in the matrix row and re-run in the parity job",
+      "docs_refs": [
+        "docs/features/21_parity_master.md §4.5",
+        "docs/threads.md §3.4"
+      ],
+      "tests": [
+        "TestBuildPlanDockerActionArgv",
+        "TestExecuteForkDockerActionGetsNoSecrets",
+        "TestBuildPlanActionImagePolicy",
+        "TestBuildPlanRequireDigest",
+        "TestImagePolicyRequireDigest"
+      ],
+      "verify_only": true,
+      "notes": "Verified in Wave 1d: a docker:// step's argv carries no job token, no OIDC request material and no secret env (plan.go dockerRunArgv + credentialEnv), and the image gate (allowlist + require-digest) refuses before any container exists. The same tests run in the parity job because make parity runs the internal/threads/runner suite it names."
+    },
+    {
+      "id": "PAR-090",
+      "area": "commands",
+      "capability": "`$GITHUB_ENV`/`$FORGEJO_ENV`: later steps only, heredoc, caps, protected-name refusal",
+      "provenance": "B",
+      "status": "have",
+      "wave": 1,
+      "track": [
+        "T2"
+      ],
+      "security": [
+        "S4"
+      ],
+      "acceptance": "`echo \"TAG=$TAG\" >> \"$GITHUB_ENV\"` is visible to later steps and not before; `LD_PRELOAD` is refused by name",
+      "docs_refs": [
+        "docs/features/21_parity_master.md §4.6",
+        "docs/threads.md §3.8",
+        "docs/threads.md §3.9"
+      ],
+      "tests": [
+        "TestParseEnvFile",
+        "TestApplyCommandFiles",
+        "TestExecuteCommandFilesAffectLaterStepsOnly",
+        "TestExecuteCommandFileRefusalFailsTheStep"
+      ],
+      "notes": "Landed on main (14cc2f89). A `NAME=VALUE` line in $GITHUB_ENV is visible to later steps only; protected names (LD_PRELOAD, PATH, CI, the token aliases) are refused by name with a failing step; caps are enforced. Per-step files live in the job container, so concurrent jobs cannot see each other."
+    },
+    {
+      "id": "PAR-091",
+      "area": "commands",
+      "capability": "`$GITHUB_PATH`/`$FORGEJO_PATH`",
+      "provenance": "B",
+      "status": "have",
+      "wave": 1,
+      "track": [
+        "T2"
+      ],
+      "security": [
+        "S4"
+      ],
+      "acceptance": "A directory appended in one step is on `PATH` in the next, prepended, and never replaces it",
+      "docs_refs": [
+        "docs/features/21_parity_master.md §4.6",
+        "docs/threads.md §3.8",
+        "docs/threads.md §3.9"
+      ],
+      "tests": [
+        "TestParsePathFile",
+        "TestApplyCommandFiles"
+      ],
+      "notes": "Landed on main (14cc2f89). A directory appended to $GITHUB_PATH is prepended to the NEXT step's PATH (never replacing it), through a sh -c wrapper, with the same protected-name and cap rules."
+    },
+    {
+      "id": "PAR-092",
+      "area": "commands",
+      "capability": "`$GITHUB_STEP_SUMMARY` (1 MiB/step, sanitized markdown) and `$GITHUB_STATE` for pre/post",
+      "provenance": "B",
+      "status": "missing",
+      "wave": 2,
+      "track": [
+        "T2"
+      ],
+      "security": [
+        "S4",
+        "S15"
+      ],
+      "decision": "",
+      "acceptance": "The documented Mermaid example renders safely on the job page; state survives into a post hook",
+      "docs_refs": [
+        "docs/features/21_parity_master.md §4.6",
+        "docs/threads.md §3.8",
+        "docs/threads.md §3.9"
+      ],
+      "tests": []
+    },
+    {
+      "id": "PAR-093",
+      "area": "commands",
+      "capability": "Workflow commands: `::error`/`::warning`/`::notice` with file/line/col/title, `::group::`/`::endgroup::`, `::add-mask::`, `::stop-commands::`, `::set-output` if honoured",
+      "provenance": "B",
+      "status": "missing",
+      "wave": 2,
+      "track": [
+        "T2"
+      ],
+      "security": [
+        "S15"
+      ],
+      "decision": "",
+      "acceptance": "`::error file=a.go,line=3::msg` is a line-anchored annotation on job and commit; a masked value never prints later",
+      "docs_refs": [
+        "docs/features/21_parity_master.md §4.6",
+        "docs/threads.md §3.8",
+        "docs/threads.md §3.9"
+      ],
+      "tests": []
+    },
+    {
+      "id": "PAR-094",
+      "area": "commands",
+      "capability": "`$GITHUB_OUTPUT` heredoc, caps and collision rules (last wins; malformed line is a named failure)",
+      "provenance": "B",
+      "status": "partial",
+      "wave": 2,
+      "track": [
+        "T2"
+      ],
+      "security": [],
+      "decision": "",
+      "acceptance": "The documented multi-line heredoc publishes an output readable via `steps.<id>.outputs`; a malformed line names the line",
+      "docs_refs": [
+        "docs/features/21_parity_master.md §4.6",
+        "docs/threads.md §3.8",
+        "docs/threads.md §3.9"
+      ],
+      "tests": []
+    },
+    {
+      "id": "PAR-095",
+      "area": "commands",
+      "capability": "Cache service: key/restore-keys, branch and default-branch scope, `cache-hit`, eviction, size budget",
+      "provenance": "B",
+      "status": "missing",
+      "wave": 2,
+      "track": [
+        "T4"
+      ],
+      "security": [
+        "S6"
+      ],
+      "decision": "D-10",
+      "acceptance": "Run 2 restores run 1's cache; a miss is not a failure; lookup order is a test table; a fork run cannot write a base-readable entry",
+      "docs_refs": [
+        "docs/features/21_parity_master.md §4.6",
+        "docs/threads.md §3.8",
+        "docs/threads.md §3.9"
+      ],
+      "tests": []
+    },
+    {
+      "id": "PAR-096",
+      "area": "commands",
+      "capability": "`setup-*` cache integration (`cache: npm` / `pip` / `go`) on the cache service",
+      "provenance": "G",
+      "status": "missing",
+      "wave": 2,
+      "track": [
+        "T4"
+      ],
+      "security": [
+        "S6"
+      ],
+      "decision": "",
+      "acceptance": "`setup-node` with `cache: npm` restores and saves with no separate cache step",
+      "docs_refs": [
+        "docs/features/21_parity_master.md §4.6",
+        "docs/threads.md §3.8",
+        "docs/threads.md §3.9"
+      ],
+      "tests": []
+    },
+    {
+      "id": "PAR-097",
+      "area": "commands",
+      "capability": "Artifact v4 inputs: overwrite, compression-level, include-hidden-files, pattern, merge-multiple, artifact-ids, 255-char names, no-name download-all",
+      "provenance": "B",
+      "status": "partial",
+      "wave": 2,
+      "track": [
+        "T5"
+      ],
+      "security": [
+        "S7"
+      ],
+      "decision": "",
+      "acceptance": "`pattern: dist-*` with `merge-multiple: true` yields one merged tree; a no-name download fetches all",
+      "docs_refs": [
+        "docs/features/21_parity_master.md §4.6",
+        "docs/threads.md §3.8",
+        "docs/threads.md §3.9"
+      ],
+      "tests": []
+    },
+    {
+      "id": "PAR-098",
+      "area": "commands",
+      "capability": "Cross-run artifacts (download from another run id, same repository only)",
+      "provenance": "G",
+      "status": "missing",
+      "wave": 3,
+      "track": [
+        "T5"
+      ],
+      "security": [
+        "S7"
+      ],
+      "decision": "D-3",
+      "acceptance": "A `workflow_run` job downloads the upstream artifact; a cross-repository request is refused by name",
+      "docs_refs": [
+        "docs/features/21_parity_master.md §4.6",
+        "docs/threads.md §3.8",
+        "docs/threads.md §3.9"
+      ],
+      "tests": []
+    },
+    {
+      "id": "PAR-099",
+      "area": "commands",
+      "capability": "Artifact list/delete API, page list and a sweep report",
+      "provenance": "G",
+      "status": "partial",
+      "wave": 3,
+      "track": [
+        "T5"
+      ],
+      "security": [
+        "S7"
+      ],
+      "decision": "",
+      "acceptance": "Bytes freed are reported per family; a delete removes blob and manifest",
+      "docs_refs": [
+        "docs/features/21_parity_master.md §4.6",
+        "docs/threads.md §3.8",
+        "docs/threads.md §3.9"
+      ],
+      "tests": []
+    },
+    {
+      "id": "PAR-110",
+      "area": "secrets",
+      "capability": "Automatic token aliases: `FORGEJO_TOKEN`/`GITHUB_TOKEN` in env, `secrets.GITHUB_TOKEN`, `forgejo.token`",
+      "provenance": "B",
+      "status": "have",
+      "wave": 1,
+      "track": [
+        "T3"
+      ],
+      "security": [
+        "S10"
+      ],
+      "acceptance": "Weave's `FORGEJO_TOKEN: ${{ secrets.GITHUB_TOKEN }}` checkout works unmodified; the value never appears in argv or the plan payload",
+      "docs_refs": [
+        "docs/features/21_parity_master.md §4.7",
+        "docs/threads.md §5"
+      ],
+      "tests": [
+        "TestJobTokenAliasesReachEveryScriptStep",
+        "TestSecretsGitHubTokenResolvesByName",
+        "TestReservedTokenSecretCannotShadowTheJobToken",
+        "TestAuthoredTokenEnvBeatsTheAlias"
+      ],
+      "notes": "Landed on main (14cc2f89). The one attempt credential is delivered as GITHUB_TOKEN/FORGEJO_TOKEN and resolves as ${{ secrets.GITHUB_TOKEN }}; an authored env value wins; the name is reserved so a stored secret cannot shadow it; delivery stays name-only and the value is masked (TestMaskCoversTheJobToken)."
+    },
+    {
+      "id": "PAR-111",
+      "area": "secrets",
+      "capability": "Server/API addresses: `GITHUB_SERVER_URL`, `GITHUB_API_URL`, `FORGEJO_SERVER_URL` env and `github.server_url`/`api_url`/`graphql_url`/`retention_days`",
+      "provenance": "none",
+      "status": "have",
+      "wave": 1,
+      "track": [
+        "T3"
+      ],
+      "security": [],
+      "acceptance": "Scriobh's `$GITHUB_SERVER_URL/api/v1/...` curl succeeds; `${{ github.server_url }}` equals the env var",
+      "docs_refs": [
+        "docs/features/21_parity_master.md §4.7",
+        "docs/threads.md §5"
+      ],
+      "tests": [
+        "TestServerURLsFromPayload",
+        "TestServerURLsFallBackToTheRunner",
+        "TestGitHubServerURLSubstitution",
+        "TestServerAddressFieldsAreInTheClosedSet"
+      ],
+      "notes": "Landed on main (14cc2f89 + e4a3f949). GITHUB_SERVER_URL/GITHUB_API_URL/FORGEJO_SERVER_URL come from the configured origin with X-Forwarded-Proto (the checkout base), ${{ github.server_url }}/api_url resolve to the same values, and the fields joined the closed github.* set. Scriobh's $GITHUB_SERVER_URL/api/v1 curl converts to $SPINDLE_SERVER and plans."
+    },
+    {
+      "id": "PAR-112",
+      "area": "secrets",
+      "capability": "Permission scopes: every documented scope drives a real capability or is refused by name",
+      "provenance": "B",
+      "status": "partial",
+      "wave": 2,
+      "track": [
+        "T3"
+      ],
+      "security": [
+        "S10"
+      ],
+      "decision": "D-12",
+      "acceptance": "`issues: write` lets a job comment; an unimplemented scope is a parse error naming it (never inert)",
+      "docs_refs": [
+        "docs/features/21_parity_master.md §4.7",
+        "docs/threads.md §5"
+      ],
+      "tests": []
+    },
+    {
+      "id": "PAR-113",
+      "area": "secrets",
+      "capability": "Job token as a scoped platform API credential (comment, label, release, package)",
+      "provenance": "G",
+      "status": "partial",
+      "wave": 2,
+      "track": [
+        "T3"
+      ],
+      "security": [
+        "S10"
+      ],
+      "decision": "",
+      "acceptance": "A workflow comments on its own PR over HTTP with `$GITHUB_TOKEN`; the same token is refused another repository",
+      "docs_refs": [
+        "docs/features/21_parity_master.md §4.7",
+        "docs/threads.md §5"
+      ],
+      "tests": []
+    },
+    {
+      "id": "PAR-114",
+      "area": "secrets",
+      "capability": "Token default recorded: scoped + `contents: read`; Forgejo's implicit-write token is an approved divergence",
+      "provenance": "F",
+      "status": "have",
+      "wave": 1,
+      "track": [
+        "T3"
+      ],
+      "security": [
+        "S10"
+      ],
+      "decision": "D-12",
+      "acceptance": "The matrix row states both behaviours and the approval; a workflow relying on implicit write fails with a 403 that names the missing scope",
+      "docs_refs": [
+        "docs/features/21_parity_master.md §4.7",
+        "docs/threads.md §5"
+      ],
+      "tests": [
+        "TestPAR114NoPermissionsDefaultsToContentsRead",
+        "TestJobPermissionsDefaults",
+        "TestForkRunCannotEscalate"
+      ],
+      "notes": "Landed on main (14cc2f89). No `permissions:` block means contents: read; a push with that token is a 403 naming the missing scope, never a silent downgrade. Forgejo's implicit write is the recorded divergence (D-12)."
+    },
+    {
+      "id": "PAR-115",
+      "area": "secrets",
+      "capability": "Organization and user secret scopes with documented precedence and repository policy",
+      "provenance": "B",
+      "status": "missing",
+      "wave": 2,
+      "track": [
+        "T3"
+      ],
+      "security": [],
+      "decision": "",
+      "acceptance": "An org secret resolves in every org repo; a repo secret of the same name wins; an unselected repo gets nothing",
+      "docs_refs": [
+        "docs/features/21_parity_master.md §4.7",
+        "docs/threads.md §5"
+      ],
+      "tests": []
+    },
+    {
+      "id": "PAR-116",
+      "area": "secrets",
+      "capability": "Secret availability in `env`/`with`/`if`; fork runs empty; masking completeness (`::add-mask::`, annotations, summaries)",
+      "provenance": "B",
+      "status": "partial",
+      "wave": 2,
+      "track": [
+        "T3"
+      ],
+      "security": [
+        "S13",
+        "S15"
+      ],
+      "decision": "",
+      "acceptance": "A fork run's `${{ secrets.X }}` is empty and its env var unset; a masked value never appears in a later log line, annotation or summary",
+      "docs_refs": [
+        "docs/features/21_parity_master.md §4.7",
+        "docs/threads.md §5"
+      ],
+      "tests": []
+    },
+    {
+      "id": "PAR-117",
+      "area": "secrets",
+      "capability": "Non-secret `env` variables (repository/organization/environment) alongside environment secrets",
+      "provenance": "G",
+      "status": "missing",
+      "wave": 2,
+      "track": [
+        "T3"
+      ],
+      "security": [],
+      "decision": "",
+      "acceptance": "`${{ vars.X }}` resolves differently per environment; `env` and `vars` never collide",
+      "docs_refs": [
+        "docs/features/21_parity_master.md §4.7",
+        "docs/threads.md §5"
+      ],
+      "tests": []
+    },
+    {
+      "id": "PAR-118",
+      "area": "secrets",
+      "capability": "Fork token policy: per-repo send-write-tokens setting, `pull_request_target` trust split, first-run approval",
+      "provenance": "G",
+      "status": "partial",
+      "wave": 3,
+      "track": [
+        "T3"
+      ],
+      "security": [
+        "S13"
+      ],
+      "decision": "D-13",
+      "acceptance": "Flipping the setting makes a fork run write-capable, the change is audited, and the run page says so",
+      "docs_refs": [
+        "docs/features/21_parity_master.md §4.7",
+        "docs/threads.md §5"
+      ],
+      "tests": []
+    },
+    {
+      "id": "PAR-119",
+      "area": "secrets",
+      "capability": "OIDC enable-key parity: `enable-openid-connect: true` beside `permissions: id-token: write`",
+      "provenance": "F",
+      "status": "missing",
+      "wave": 2,
+      "track": [
+        "T1"
+      ],
+      "security": [
+        "S9"
+      ],
+      "decision": "",
+      "acceptance": "A Forgejo workflow with both spellings parses and mints a token with zero edits",
+      "docs_refs": [
+        "docs/features/21_parity_master.md §4.7",
+        "docs/threads.md §5"
+      ],
+      "tests": []
+    },
+    {
+      "id": "PAR-120",
+      "area": "secrets",
+      "capability": "OIDC claim and exchange parity: `iss`, PR `sub`, environment `sub`, `aud` default, `ref_protected`, `ref_type`, `job_workflow_ref`, `runner_environment`, `?audience=`, TTL, error shapes",
+      "provenance": "B",
+      "status": "partial",
+      "wave": 2,
+      "track": [
+        "T3"
+      ],
+      "security": [
+        "S9"
+      ],
+      "decision": "",
+      "acceptance": "A provider trust policy written for either platform validates a Threads token; the `environment` claim appears only when a job names one",
+      "docs_refs": [
+        "docs/features/21_parity_master.md §4.7",
+        "docs/threads.md §5"
+      ],
+      "tests": []
+    },
+    {
+      "id": "PAR-130",
+      "area": "environments",
+      "capability": "`environment`/`environment.url` expression substitution (or a named parse error, never a literal bucket key)",
+      "provenance": "B",
+      "status": "missing",
+      "wave": 2,
+      "track": [
+        "T1"
+      ],
+      "security": [],
+      "decision": "",
+      "acceptance": "`environment: ${{ matrix.env }}` resolves; an unresolvable reference is the file's named error",
+      "docs_refs": [
+        "docs/features/21_parity_master.md §4.8",
+        "docs/threads.md §5.6"
+      ],
+      "tests": []
+    },
+    {
+      "id": "PAR-131",
+      "area": "environments",
+      "capability": "Protection parity: wait timer, ≤6 required reviewers, prevent-self-review, deployment branch/tag policy, team reviewers",
+      "provenance": "B",
+      "status": "partial",
+      "wave": 2,
+      "track": [
+        "T3"
+      ],
+      "security": [],
+      "decision": "",
+      "acceptance": "All five are enforced and shown on the deployment; a team member's approval counts",
+      "docs_refs": [
+        "docs/features/21_parity_master.md §4.8",
+        "docs/threads.md §5.6"
+      ],
+      "tests": []
+    },
+    {
+      "id": "PAR-132",
+      "area": "environments",
+      "capability": "Deployment records: per-environment history, `deployment_status`, environment URL on the repo page",
+      "provenance": "G",
+      "status": "partial",
+      "wave": 3,
+      "track": [
+        "T3",
+        "T6"
+      ],
+      "security": [],
+      "decision": "",
+      "acceptance": "Each deployment has a state history and a working URL link",
+      "docs_refs": [
+        "docs/features/21_parity_master.md §4.8",
+        "docs/threads.md §5.6"
+      ],
+      "tests": []
+    },
+    {
+      "id": "PAR-133",
+      "area": "environments",
+      "capability": "`deployments` permission and deployment API (`POST /deployments`, statuses)",
+      "provenance": "G",
+      "status": "missing",
+      "wave": 3,
+      "track": [
+        "T3"
+      ],
+      "security": [
+        "S10"
+      ],
+      "decision": "",
+      "acceptance": "A workflow-created deployment appears in the UI with its statuses; a token without `deployments: write` is refused",
+      "docs_refs": [
+        "docs/features/21_parity_master.md §4.8",
+        "docs/threads.md §5.6"
+      ],
+      "tests": []
+    },
+    {
+      "id": "PAR-134",
+      "area": "environments",
+      "capability": "Environment UI parity: deployments, secrets, variables and protection-rule tabs",
+      "provenance": "G",
+      "status": "partial",
+      "wave": 3,
+      "track": [
+        "T6"
+      ],
+      "security": [],
+      "decision": "",
+      "acceptance": "All four surfaces exist and write; mobile and desktop checks pass",
+      "docs_refs": [
+        "docs/features/21_parity_master.md §4.8",
+        "docs/threads.md §5.6"
+      ],
+      "tests": []
+    },
+    {
+      "id": "PAR-135",
+      "area": "environments",
+      "capability": "Pending-deployment UX: run-list badge, reviewer notification, approval audit entry",
+      "provenance": "G",
+      "status": "partial",
+      "wave": 2,
+      "track": [
+        "T6"
+      ],
+      "security": [],
+      "decision": "",
+      "acceptance": "A reviewer is notified, the badge names the environment, the audit names who approved what",
+      "docs_refs": [
+        "docs/features/21_parity_master.md §4.8",
+        "docs/threads.md §5.6"
+      ],
+      "tests": []
+    },
+    {
+      "id": "PAR-136",
+      "area": "environments",
+      "capability": "Deployment queuing: a second deployment to a busy environment serializes instead of failing",
+      "provenance": "G",
+      "status": "missing",
+      "wave": 3,
+      "track": [
+        "T3"
+      ],
+      "security": [],
+      "decision": "",
+      "acceptance": "Two concurrent deploys to one environment run in trigger order, the second visibly queued",
+      "docs_refs": [
+        "docs/features/21_parity_master.md §4.8",
+        "docs/threads.md §5.6"
+      ],
+      "tests": []
+    },
+    {
+      "id": "PAR-137",
+      "area": "environments",
+      "capability": "Environment verify-and-close: secret precedence, fork exclusion, and \"Threads exceeds Forgejo (no environment syntax)\"",
+      "provenance": "F",
+      "status": "have",
+      "wave": 1,
+      "track": [
+        "T7"
+      ],
+      "security": [],
+      "decision": "",
+      "acceptance": "Existing tests are named in the matrix rows; the row states the exceedance so nobody builds Forgejo parity work here",
+      "docs_refs": [
+        "docs/features/21_parity_master.md §4.8",
+        "docs/threads.md §5.6"
+      ],
+      "tests": [
+        "TestEnvironmentSecretsPrecedence",
+        "TestEnvironmentForkRunNeverGetsSecrets",
+        "TestEnvironmentHoldsUntilReviewerApproves",
+        "TestEnvironmentUndefinedFailsClosed"
+      ],
+      "verify_only": true,
+      "notes": "Verified in Wave 1d. Threads EXCEEDS Forgejo here: Forgejo has no environment syntax at all, while Threads has environment records, required reviewers, secret precedence (environment wins over repository) and fork exclusion. No Forgejo-parity work belongs in this row; it is a verify-and-close."
+    },
+    {
+      "id": "PAR-150",
+      "area": "concurrency",
+      "capability": "Implicit supersede: a new push / PR `synchronize` cancels the superseded in-flight run of that workflow+ref when no `concurrency` block exists",
+      "provenance": "F",
+      "status": "have",
+      "wave": 1,
+      "track": [
+        "T3"
+      ],
+      "security": [],
+      "decision": "",
+      "acceptance": "Two rapid pushes leave one in-flight run; the superseded run reads `cancelled` with a reason naming the superseding run",
+      "docs_refs": [
+        "docs/features/21_parity_master.md §4.9",
+        "docs/threads.md §3.1"
+      ],
+      "tests": [
+        "TestSupersedeSameRefCancelsTheOlderRun",
+        "TestSupersedeSkipsRunsWithAConcurrencyGroup",
+        "TestSupersedeNewGroupedRunLeavesTheOlderGroupFreeRunAlone",
+        "TestSupersedePRSynchronizeOnly",
+        "TestSupersedeLeavesOtherRefsAndWorkflowsAlone",
+        "TestSupersedeLeavesTerminalRunsAndOtherEventsAlone",
+        "TestSupersedeCancelsPendingApprovalPredecessor",
+        "TestCancelIsIdempotent",
+        "TestAdoptRunHeadIsForwardOnly",
+        "TestSupersedeConcurrentCreationsLeaveOneLiveRun",
+        "TestSupersedeKeysOnTheFullRef"
+      ],
+      "notes": "Wave 1d. One CAS'd head record per (workflow file, ref), forward-only on the run id; the loser cancels itself. A run that declares a concurrency group neither adopts a head nor is implicitly cancelled (reconciled with PAR-152 in code and docs/threads.md §3.1a). Budget: one GET + one conditional PUT issued in a goroutine overlapping the checks mirror/enqueue; zero for dispatches, schedules, PR opened/reopened and any grouped workflow. Tags are a distinct ref: the head key is the full ref, so refs/tags/v1 and refs/heads/v1 never supersede each other (TestTagAndBranchSameShortNameAreIndependent)."
+    },
+    {
+      "id": "PAR-151",
+      "area": "concurrency",
+      "capability": "`cancel-in-progress` as an expression; `group` reading `vars`/`inputs`/`matrix`/`github`",
+      "provenance": "B",
+      "status": "partial",
+      "wave": 2,
+      "track": [
+        "T1"
+      ],
+      "security": [],
+      "decision": "",
+      "acceptance": "`cancel-in-progress: ${{ github.ref_name != 'main' }}` behaves as documented; an unresolvable group still fails closed",
+      "docs_refs": [
+        "docs/features/21_parity_master.md §4.9",
+        "docs/threads.md §3.1"
+      ],
+      "tests": []
+    },
+    {
+      "id": "PAR-152",
+      "area": "concurrency",
+      "capability": "Group semantics: cancel the *pending* run by default, `cancel-in-progress: false` sequences, `queue: single` / `max`",
+      "provenance": "G",
+      "status": "partial",
+      "wave": 2,
+      "track": [
+        "T3"
+      ],
+      "security": [],
+      "decision": "",
+      "acceptance": "Three rapid pushes to one group leave one running and one pending; sequencing runs in trigger order to completion",
+      "docs_refs": [
+        "docs/features/21_parity_master.md §4.9",
+        "docs/threads.md §3.1"
+      ],
+      "tests": []
+    },
+    {
+      "id": "PAR-153",
+      "area": "concurrency",
+      "capability": "Per-repository and per-organization concurrency caps",
+      "provenance": "G",
+      "status": "missing",
+      "wave": 3,
+      "track": [
+        "T3"
+      ],
+      "security": [],
+      "decision": "",
+      "acceptance": "A cap of 2 queues a third run with exactly one named reason",
+      "docs_refs": [
+        "docs/features/21_parity_master.md §4.9",
+        "docs/threads.md §3.1"
+      ],
+      "tests": []
+    },
+    {
+      "id": "PAR-154",
+      "area": "concurrency",
+      "capability": "Schedule operations: next-fire in UI/API, enable/disable without a commit, operator-visible watermark",
+      "provenance": "G",
+      "status": "partial",
+      "wave": 4,
+      "track": [
+        "T6"
+      ],
+      "security": [],
+      "decision": "",
+      "acceptance": "The page shows the next fire per cron and a disable takes effect immediately",
+      "docs_refs": [
+        "docs/features/21_parity_master.md §4.9",
+        "docs/threads.md §3.1"
+      ],
+      "tests": []
+    },
+    {
+      "id": "PAR-155",
+      "area": "concurrency",
+      "capability": "Run prioritization",
+      "provenance": "F",
+      "status": "missing",
+      "wave": 4,
+      "track": [
+        "T3"
+      ],
+      "security": [],
+      "decision": "",
+      "acceptance": "A prioritized run's jobs are claimed before older queued work; the ordering is documented",
+      "docs_refs": [
+        "docs/features/21_parity_master.md §4.9",
+        "docs/threads.md §3.1"
+      ],
+      "tests": []
+    },
+    {
+      "id": "PAR-156",
+      "area": "concurrency",
+      "capability": "Queue observability: exactly one named reason per queued job (no runner, labels unmatched, group held, approval, capacity)",
+      "provenance": "G",
+      "status": "partial",
+      "wave": 3,
+      "track": [
+        "T6"
+      ],
+      "security": [],
+      "decision": "",
+      "acceptance": "Every queued job shows exactly one named reason, and the reason changes when the cause clears",
+      "docs_refs": [
+        "docs/features/21_parity_master.md §4.9",
+        "docs/threads.md §3.1"
+      ],
+      "tests": []
+    },
+    {
+      "id": "PAR-157",
+      "area": "concurrency",
+      "capability": "Per-repository CI pause/resume with in-flight jobs finishing",
+      "provenance": "G",
+      "status": "missing",
+      "wave": 4,
+      "track": [
+        "T3"
+      ],
+      "security": [],
+      "decision": "",
+      "acceptance": "A paused repo claims nothing and resumes cleanly",
+      "docs_refs": [
+        "docs/features/21_parity_master.md §4.9",
+        "docs/threads.md §3.1"
+      ],
+      "tests": []
+    },
+    {
+      "id": "PAR-158",
+      "area": "concurrency",
+      "capability": "Retention parity: configurable ceiling (≥90 days), keep-forever, separate run/log and artifact windows with artifact expiry defaults",
+      "provenance": "B",
+      "status": "partial",
+      "wave": 2,
+      "track": [
+        "T5"
+      ],
+      "security": [],
+      "decision": "",
+      "acceptance": "A 90-day setting is honoured and reported; an artifact outlives its run only when its own window allows; keep-forever works",
+      "docs_refs": [
+        "docs/features/21_parity_master.md §4.9",
+        "docs/threads.md §3.1"
+      ],
+      "tests": []
+    },
+    {
+      "id": "PAR-159",
+      "area": "concurrency",
+      "capability": "GC parity: expired artifacts, unreferenced blobs, cache eviction, reclaimed bytes per family",
+      "provenance": "G",
+      "status": "partial",
+      "wave": 2,
+      "track": [
+        "T5"
+      ],
+      "security": [],
+      "decision": "",
+      "acceptance": "GC reclaims and reports the bytes it freed per family; a dry run reports the same numbers without deleting",
+      "docs_refs": [
+        "docs/features/21_parity_master.md §4.9",
+        "docs/threads.md §3.1"
+      ],
+      "tests": []
+    },
+    {
+      "id": "PAR-170",
+      "area": "runners",
+      "capability": "Hosted-label semantics: `ubuntu-latest` (and friends) via a documented operator mapping; `runs-on: {group:, labels:}`",
+      "provenance": "B",
+      "status": "have",
+      "wave": 1,
+      "track": [
+        "T3"
+      ],
+      "security": [
+        "S11"
+      ],
+      "acceptance": "A `ubuntu-latest` corpus job runs with zero edits on an instance whose operator mapped the label; an unmapped label queues with a named reason",
+      "docs_refs": [
+        "docs/features/21_parity_master.md §4.10",
+        "docs/threads.md §8"
+      ],
+      "tests": [
+        "TestHostedLabelExpansion",
+        "TestHostedLabelScheduling"
+      ],
+      "notes": "Landed on main (14cc2f89). ubuntu-latest/ubuntu-24.04|22.04|20.04 expand at enqueue onto the self-hosted + linux set, so an alias still requires every expanded label and cannot widen a runner; windows-*/macos-* stay the D-15 named non-goal. weave/publish-github.yml's ubuntu-latest now schedules."
+    },
+    {
+      "id": "PAR-171",
+      "area": "runners",
+      "capability": "Label→backend+image mapping (`name:docker://image`, `name:lxc://template`, `name:host`)",
+      "provenance": "F",
+      "status": "partial",
+      "wave": 2,
+      "track": [
+        "T3"
+      ],
+      "security": [
+        "S11",
+        "S17"
+      ],
+      "decision": "",
+      "acceptance": "A runner declaring `ubuntu-latest:docker://node:lts` runs that job in that image",
+      "docs_refs": [
+        "docs/features/21_parity_master.md §4.10",
+        "docs/threads.md §8"
+      ],
+      "tests": []
+    },
+    {
+      "id": "PAR-172",
+      "area": "runners",
+      "capability": "Registration scopes: instance, organization, user, repository",
+      "provenance": "F",
+      "status": "partial",
+      "wave": 3,
+      "track": [
+        "T3"
+      ],
+      "security": [],
+      "decision": "",
+      "acceptance": "An org-scoped runner serves only that org and appears in its repositories' lists",
+      "docs_refs": [
+        "docs/features/21_parity_master.md §4.10",
+        "docs/threads.md §8"
+      ],
+      "tests": []
+    },
+    {
+      "id": "PAR-173",
+      "area": "runners",
+      "capability": "Ephemeral runners: one job, then the record and credential are gone",
+      "provenance": "F",
+      "status": "missing",
+      "wave": 3,
+      "track": [
+        "T3"
+      ],
+      "security": [],
+      "decision": "",
+      "acceptance": "The record is gone after one job and its credential is rejected",
+      "docs_refs": [
+        "docs/features/21_parity_master.md §4.10",
+        "docs/threads.md §8"
+      ],
+      "tests": []
+    },
+    {
+      "id": "PAR-174",
+      "area": "runners",
+      "capability": "Managed runner pool (ephemeral, container-backed, autoscaled) so a fresh instance runs queued jobs unattended",
+      "provenance": "G",
+      "status": "missing",
+      "wave": 3,
+      "track": [
+        "T3"
+      ],
+      "security": [
+        "S11"
+      ],
+      "decision": "D-14",
+      "acceptance": "A fresh spindle boots and a queued job runs unattended inside the documented bounds",
+      "docs_refs": [
+        "docs/features/21_parity_master.md §4.10",
+        "docs/threads.md §8"
+      ],
+      "tests": []
+    },
+    {
+      "id": "PAR-175",
+      "area": "runners",
+      "capability": "Runner groups with org/repo visibility and inherited labels",
+      "provenance": "G",
+      "status": "missing",
+      "wave": 3,
+      "track": [
+        "T3"
+      ],
+      "security": [],
+      "decision": "",
+      "acceptance": "A group's runner is claimable only by allowed repositories, with inherited labels matched",
+      "docs_refs": [
+        "docs/features/21_parity_master.md §4.10",
+        "docs/threads.md §8"
+      ],
+      "tests": []
+    },
+    {
+      "id": "PAR-176",
+      "area": "runners",
+      "capability": "Larger-runner sizing (per-job cpu/memory) or a named queue reason",
+      "provenance": "G",
+      "status": "missing",
+      "wave": 3,
+      "track": [
+        "T3"
+      ],
+      "security": [],
+      "decision": "",
+      "acceptance": "A job asking 4cpu/16GB lands on a matching runner or is queued with that exact reason",
+      "docs_refs": [
+        "docs/features/21_parity_master.md §4.10",
+        "docs/threads.md §8"
+      ],
+      "tests": []
+    },
+    {
+      "id": "PAR-177",
+      "area": "runners",
+      "capability": "Stock toolchain images (node/python/go/rust/docker CLI + buildx) published and documented",
+      "provenance": "G",
+      "status": "missing",
+      "wave": 3,
+      "track": [
+        "T3",
+        "T8"
+      ],
+      "security": [
+        "S2"
+      ],
+      "decision": "",
+      "acceptance": "The JS matrix, Go build and docker build corpus rows run on stock images",
+      "docs_refs": [
+        "docs/features/21_parity_master.md §4.10",
+        "docs/threads.md §8"
+      ],
+      "tests": []
+    },
+    {
+      "id": "PAR-178",
+      "area": "runners",
+      "capability": "Isolation parity: concurrent jobs share no namespace, and the capacity model is documented",
+      "provenance": "G",
+      "status": "partial",
+      "wave": 3,
+      "track": [
+        "T3"
+      ],
+      "security": [
+        "S11"
+      ],
+      "decision": "D-14",
+      "acceptance": "Two concurrent jobs cannot see each other's processes or volumes; the doc states which setting buys which guarantee",
+      "docs_refs": [
+        "docs/features/21_parity_master.md §4.10",
+        "docs/threads.md §8"
+      ],
+      "tests": []
+    },
+    {
+      "id": "PAR-179",
+      "area": "runners",
+      "capability": "Operator policy knobs: `container.privileged`, `network`, `valid_volumes`, `docker_host`, `runner.timeout` — each with a safe default",
+      "provenance": "F",
+      "status": "partial",
+      "wave": 2,
+      "track": [
+        "T3"
+      ],
+      "security": [
+        "S2",
+        "S12"
+      ],
+      "decision": "D-8",
+      "acceptance": "Each knob exists with a documented default; `privileged` is refused unless the runner opted in",
+      "docs_refs": [
+        "docs/features/21_parity_master.md §4.10",
+        "docs/threads.md §8"
+      ],
+      "tests": []
+    },
+    {
+      "id": "PAR-180",
+      "area": "runners",
+      "capability": "Offline registration (config file, no browser) and multi-scope from one process",
+      "provenance": "F",
+      "status": "missing",
+      "wave": 4,
+      "track": [
+        "T3"
+      ],
+      "security": [],
+      "decision": "",
+      "acceptance": "A runner registers from a config file and serves two scopes from one process",
+      "docs_refs": [
+        "docs/features/21_parity_master.md §4.10",
+        "docs/threads.md §8"
+      ],
+      "tests": []
+    },
+    {
+      "id": "PAR-181",
+      "area": "runners",
+      "capability": "Fleet operations: list/drain/revoke, zero-downtime rotation",
+      "provenance": "G",
+      "status": "partial",
+      "wave": 4,
+      "track": [
+        "T3"
+      ],
+      "security": [],
+      "decision": "",
+      "acceptance": "Draining finishes in-flight jobs and claims nothing new; revocation is a real 401",
+      "docs_refs": [
+        "docs/features/21_parity_master.md §4.10",
+        "docs/threads.md §8"
+      ],
+      "tests": []
+    },
+    {
+      "id": "PAR-182",
+      "area": "runners",
+      "capability": "**Non-goal:** LXC and unisolated host backends; hosted Windows/macOS runners (D-15)",
+      "provenance": "B",
+      "status": "missing",
+      "wave": 4,
+      "track": [
+        "T8"
+      ],
+      "security": [
+        "S17"
+      ],
+      "decision": "D-15",
+      "acceptance": "The matrix rows carry the non-goal, its reason and the named signatory; a workflow asking for one is a named refusal",
+      "docs_refs": [
+        "docs/features/21_parity_master.md §4.10",
+        "docs/threads.md §8"
+      ],
+      "tests": []
+    },
+    {
+      "id": "PAR-190",
+      "area": "observability",
+      "capability": "Log fidelity: `##[group]` folding, per-step timing, whole-run log download (txt/zip), streaming that survives session expiry",
+      "provenance": "B",
+      "status": "partial",
+      "wave": 2,
+      "track": [
+        "T2",
+        "T6"
+      ],
+      "security": [
+        "S15"
+      ],
+      "decision": "",
+      "acceptance": "Grouped logs collapse; a zip download contains every job's log; an expired session reconnects instead of dying",
+      "docs_refs": [
+        "docs/features/21_parity_master.md §4.11",
+        "docs/threads.md §2.3"
+      ],
+      "tests": []
+    },
+    {
+      "id": "PAR-191",
+      "area": "observability",
+      "capability": "Run graph UI: job DAG with live status, matrix cells grouped under their job, per-step drill-down",
+      "provenance": "G",
+      "status": "partial",
+      "wave": 2,
+      "track": [
+        "T6"
+      ],
+      "security": [],
+      "decision": "",
+      "acceptance": "A matrix run renders one row per cell with its check and duration; the DAG shows blocked dependents",
+      "docs_refs": [
+        "docs/features/21_parity_master.md §4.11",
+        "docs/threads.md §2.3"
+      ],
+      "tests": []
+    },
+    {
+      "id": "PAR-192",
+      "area": "observability",
+      "capability": "Checks parity: per-check annotations, re-run from the PR panel, per-branch required-check config, check-run API accepting annotations; check-context naming decision recorded",
+      "provenance": "B",
+      "status": "partial",
+      "wave": 3,
+      "track": [
+        "T6"
+      ],
+      "security": [],
+      "decision": "",
+      "acceptance": "An external CI posts annotated checks that gate the merge; the naming decision names the contexts required checks use",
+      "docs_refs": [
+        "docs/features/21_parity_master.md §4.11",
+        "docs/threads.md §2.3"
+      ],
+      "tests": []
+    },
+    {
+      "id": "PAR-193",
+      "area": "observability",
+      "capability": "Workflow/runs API and badges (`…/badge.svg`)",
+      "provenance": "G",
+      "status": "partial",
+      "wave": 3,
+      "track": [
+        "T6"
+      ],
+      "security": [],
+      "decision": "",
+      "acceptance": "A README badge reflects the branch's latest conclusion; the API lists/filters runs",
+      "docs_refs": [
+        "docs/features/21_parity_master.md §4.11",
+        "docs/threads.md §2.3"
+      ],
+      "tests": []
+    },
+    {
+      "id": "PAR-194",
+      "area": "observability",
+      "capability": "Run-list filtering parity: branch, event, status, workflow, actor, with pagination",
+      "provenance": "G",
+      "status": "partial",
+      "wave": 3,
+      "track": [
+        "T6"
+      ],
+      "security": [],
+      "decision": "",
+      "acceptance": "The documented filter set narrows the list correctly, and the page stays usable at 390 px",
+      "docs_refs": [
+        "docs/features/21_parity_master.md §4.11",
+        "docs/threads.md §2.3"
+      ],
+      "tests": []
+    },
+    {
+      "id": "PAR-195",
+      "area": "observability",
+      "capability": "Cancel/rerun granularity: whole run, single job, force-cancel, and a \"cancelled by X\" record",
+      "provenance": "G",
+      "status": "partial",
+      "wave": 3,
+      "track": [
+        "T3",
+        "T6"
+      ],
+      "security": [],
+      "decision": "",
+      "acceptance": "Cancelling one job leaves its siblings running; the record names the actor",
+      "docs_refs": [
+        "docs/features/21_parity_master.md §4.11",
+        "docs/threads.md §2.3"
+      ],
+      "tests": []
+    },
+    {
+      "id": "PAR-196",
+      "area": "observability",
+      "capability": "Authoring affordances: validate-on-save with key-level errors, schema-assisted editor",
+      "provenance": "G",
+      "status": "missing",
+      "wave": 4,
+      "track": [
+        "T6"
+      ],
+      "security": [],
+      "decision": "",
+      "acceptance": "An invalid key is reported in the editor, not only after a push; the message names key and file",
+      "docs_refs": [
+        "docs/features/21_parity_master.md §4.11",
+        "docs/threads.md §2.3"
+      ],
+      "tests": []
+    },
+    {
+      "id": "PAR-197",
+      "area": "observability",
+      "capability": "Notifications parity: failure notifications (UI/webhook/email) and per-user workflow subscriptions",
+      "provenance": "B",
+      "status": "partial",
+      "wave": 4,
+      "track": [
+        "T3",
+        "T6"
+      ],
+      "security": [],
+      "decision": "",
+      "acceptance": "A failed watched workflow notifies its subscribers once, with the run link",
+      "docs_refs": [
+        "docs/features/21_parity_master.md §4.11",
+        "docs/threads.md §2.3"
+      ],
+      "tests": []
+    },
+    {
+      "id": "PAR-198",
+      "area": "observability",
+      "capability": "CLI parity: `threads run --ref` with inputs, `threads watch`, run/job listing",
+      "provenance": "G",
+      "status": "partial",
+      "wave": 4,
+      "track": [
+        "T6"
+      ],
+      "security": [],
+      "decision": "",
+      "acceptance": "The CLI dispatches with inputs and follows the run to completion; exit codes match the API",
+      "docs_refs": [
+        "docs/features/21_parity_master.md §4.11",
+        "docs/threads.md §2.3"
+      ],
+      "tests": []
+    },
+    {
+      "id": "PAR-199",
+      "area": "observability",
+      "capability": "`spindle threads validate` offline validation with the same errors the server reports",
+      "provenance": "F",
+      "status": "missing",
+      "wave": 2,
+      "track": [
+        "T1",
+        "T6"
+      ],
+      "security": [],
+      "decision": "",
+      "acceptance": "A file validates offline with byte-identical error text to the server for a table of bad files",
+      "docs_refs": [
+        "docs/features/21_parity_master.md §4.11",
+        "docs/threads.md §2.3"
+      ],
+      "tests": []
+    },
+    {
+      "id": "PAR-200",
+      "area": "conformance",
+      "capability": "Conformance corpus + harness (`internal/e2e/parity_test.go`, `testdata/parity/{forgejo,github}`) driven through discovery → run → checks → artifacts",
+      "provenance": "B",
+      "status": "partial",
+      "wave": 1,
+      "track": [
+        "T7"
+      ],
+      "security": [],
+      "decision": "",
+      "acceptance": "`make parity` runs the corpus; a deliberately broken row makes it fail; a Forgejo corpus entry runs unmodified after conversion",
+      "docs_refs": [
+        "docs/features/21_parity_master.md §4.12",
+        "docs/features/21_parity_master.md §9"
+      ],
+      "tests": [
+        "TestParityCorpusParsesAndPlans",
+        "TestParityCorpusTriggerSemantics",
+        "TestParityGoldensMatchTheirStamps",
+        "TestE2E_ParityExecution"
+      ],
+      "notes": "Wave 1d: the corpus (the four Weave/Scriobh Forgejo files), the SOURCE stamps, the importer-produced goldens and the parse/plan + trigger tiers are committed and run in -short. After the 1a/1b/1c/importer/tag merges ALL FOUR convert, parse and plan with zero UNTRANSLATED constructs, and scriobh-release keeps its four matrix cells; the tags-only file is driven by a tag and does not fire on a branch. The execution tier (a real runner + docker) is opt-in (SPINDLE_PARITY_EXEC=1, make parity-exec). Still partial on the plan's definition: the corpus does not yet RUN unmodified end to end (images, network, a runner), and the GitHub half waits on a GitHub-side corpus with converted goldens."
+    },
+    {
+      "id": "PAR-201",
+      "area": "conformance",
+      "capability": "`make parity` gate: no `missing` row, no `partial` without a wave or decision, no `have` row without an existing, passing named test",
+      "provenance": "B",
+      "status": "have",
+      "wave": 1,
+      "track": [
+        "T7"
+      ],
+      "security": [],
+      "decision": "",
+      "acceptance": "Removing a named test from the tree fails the gate with the row id; adding a row without a test fails",
+      "docs_refs": [
+        "docs/features/21_parity_master.md §4.12",
+        "docs/features/21_parity_master.md §9"
+      ],
+      "tests": [
+        "TestParityGateRejectsAGreenRowWithoutATest",
+        "TestParityGateRejectsAMissingNamedTest",
+        "TestParityGateRejectsUnplannedRowsAndNonGoals",
+        "TestParityGatePlanIDSetMustMatch",
+        "TestParityMatrixIsFresh"
+      ],
+      "notes": "Wave 1d. `make parity` runs the gate and the corpus parse tier; CI runs it in the gate job (no docker). `make parity-closed` adds the plan's §9 closure rule (no missing row) — a separate mode because Wave 1 lands with later waves still missing by design."
+    },
+    {
+      "id": "PAR-202",
+      "area": "conformance",
+      "capability": "Living matrix (`docs/features/parity/parity.json` + generated `matrix.md`) with the docs-revision stamp; docs drift corrected",
+      "provenance": "B",
+      "status": "have",
+      "wave": 1,
+      "track": [
+        "T8"
+      ],
+      "security": [],
+      "decision": "",
+      "acceptance": "Every `PAR-` id appears once; the stamp names both docs revisions; `docs/threads.md` §11 matches §5.5/§5.6 and `15_threads.md` §2.6/§2.7",
+      "docs_refs": [
+        "docs/features/21_parity_master.md §4.12",
+        "docs/features/21_parity_master.md §9"
+      ],
+      "tests": [
+        "TestParityMatrixCoversEveryPlanRow",
+        "TestParityMatrixIsFresh",
+        "TestParityGateRejectsUnplannedRowsAndNonGoals"
+      ],
+      "notes": "Wave 1d. docs/features/parity/parity.json holds all 119 plan rows with the docs-revision stamp; matrix.md is generated by internal/devtools/paritygate and the gate fails a stale or hand-edited copy. The plan's finding that docs/threads.md §11 still claimed \"no OIDC / no environments\" is no longer true at this baseline (the §11 rewrite landed in 3491c8a7); §11 was re-read against §5.5/§5.6 and 15_threads.md §2.6/§2.7 in this change."
+    }
+  ]
+}

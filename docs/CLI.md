@@ -10,8 +10,8 @@
 
 | Kind | Commands | Needs |
 |---|---|---|
-| **Operator-local** | `serve`, `compact`, `bundle`, `repo`, `access`, `wal`, `synth`, `import`, `mirror`, `config`, `doctor`, `version` | the config file / `SPINDLE__*` env and the data dir (store, cache) |
-| **JSON-API client** | `auth`, `user`, `org`, `issue`, `pr`, `release`, `checks`, `packages`, `threads`, `file`, `search`, `api` | `--server` and a token; no store access, no data dir |
+| **Operator-local** | `serve`, `compact`, `bundle`, `repo`, `access`, `wal`, `synth`, `import`, `mirror`, `config`, `doctor`, `version`, `threads import` | the config file / `SPINDLE__*` env and the data dir (store, cache); `threads import` needs only a repository checkout |
+| **JSON-API client** | `auth`, `user`, `org`, `issue`, `pr`, `release`, `checks`, `packages`, `threads` (`list`/`show`/`run`/`cancel`/`rerun`), `file`, `search`, `api` | `--server` and a token; no store access, no data dir |
 | **Runner protocol client** | `runner serve` | a runner token and a Docker daemon; no store, no data dir |
 | **Shell plumbing** | `completion`, `help` | nothing (the tables are compiled in) |
 
@@ -155,12 +155,84 @@ command's usage line and flags (flags may follow positionals, `gh`-style).
 | `release` | `list`, `show`, `create`, `delete`, `upload` |
 | `checks` | `list`, `status REPO [REF]` |
 | `packages` | `list`, `show`, `delete` |
-| `threads` | `list`, `show`, `run`, `cancel`, `rerun` |
+| `threads` | `list`, `show`, `run`, `cancel`, `rerun`, and the operator-local `import` (§5.3) |
 | `file` | `put`, `create`, `delete` (one text file as one commit — the browser editor's write path) |
 | `runner` | `serve` (see [`FEATURES.md`](FEATURES.md#33-runners) and [`threads.md`](threads.md#81-flags-and-environment)) |
 | `search` | `search QUERY [--owner OWNER \| -R OWNER/REPO] [--ref REF] [--regex] [--case] [--word] [--path PATHSPEC]… [--limit N] [--json]` — code search in one repository (the default branch, or `--ref`) or across an owner's readable repositories. It is a standalone command, not a group: `-R`/`SPINDLE_REPO` selects repository scope, `--owner` owner scope, and exactly one is required (v1 has no instance-wide code search). `--limit` is kept matches per repository (1..200). The command pins `type=code`; issue search has no CLI surface yet. |
 | `api` | `api [-X METHOD] [-d DATA] [-H 'K: V'] [-json] PATH` — one authenticated request; `-d` takes a literal, `@FILE` or `-` for stdin |
 | `completion` | `completion bash\|zsh\|fish` — generated from the same dispatch table |
+
+### 5.3 `threads import` — the one-way workflow importer
+
+`threads import` is the migration path from a Forgejo or GitHub workflow directory to
+`.spindle/workflows/` ([`WORKFLOWS.md` §10](WORKFLOWS.md#10-migrating-from-forgejo)). It lives in the
+`threads` group because that is where an operator looks for it, but it is **operator-local**: it
+reads a checkout on disk and needs no server, token or data dir — never `--server`, never `-R`.
+
+```
+spindle threads import --from forgejo|github --repo DIR
+                       [--path PATH] [--out DIR]
+                       [--apply [--branch NAME] [--allow-partial]] [--json]
+```
+
+| Flag | Meaning |
+|---|---|
+| `--from forgejo\|github` | the source dialect (required): `.github/workflows` or `.github/workflows` |
+| `--repo DIR` | the repository checkout to read (required) |
+| `--path PATH` | import one source file or directory instead of the platform's workflow directory; repo-relative or absolute, and it must stay inside the repository |
+| `--out DIR` | write the converted files under `DIR` (the same repo-relative layout: `DIR/.spindle/workflows/<name>.yml`) |
+| `--apply` | commit the converted files on a **new branch**; mutually exclusive with `--out` |
+| `--branch NAME` | the branch name (default `spindle/import-<platform>-<UTC timestamp>`) |
+| `--allow-partial` | let `--apply` commit a conversion that has untranslated constructs |
+| `--json` | print the machine report instead of the files |
+
+**What it writes.** Nothing in the repository by default: the converted YAML goes to stdout, one
+`# ==> .spindle/workflows/<name>.yml (from <source>)` header per file, and the human report goes to
+stderr (so a redirect keeps clean YAML). `--out` writes the files under a directory you name.
+`--apply` creates the branch (from the current `HEAD`), switches to it, writes
+`.spindle/workflows/*.yml`, commits, and stops — leaving you on the new branch. It never pushes,
+never forces, refuses a dirty working tree, refuses an existing branch, refuses the current branch,
+and refuses to run outside the repository root.
+
+**Output format.** The converted file is a Spindle workflow with a two-line conversion banner at the
+top. Source comments are preserved. Every construct the target language cannot express is marked
+`# UNTRANSLATED: <path>: <reason>` at its own site, and an untranslatable step or job is replaced by
+one that **fails** with the reason — a lossy conversion cannot produce a green run. The file content
+carries no timestamp, so converting the same source twice produces the same bytes.
+
+**The `--json` report.**
+
+```json
+{
+  "platform": "forgejo",
+  "repo": ".",
+  "applied": false,
+  "partial": true,
+  "files": [{
+    "source": ".github/workflows/release.yml",
+    "output": ".spindle/workflows/release.yml",
+    "translated": 41,
+    "parses": true,
+    "untranslated": [{"path": "on.push.paths", "construct": "on.push.paths", "reason": "path filters are not supported; filter inside the job"}],
+    "notes": [{"path": "jobs.prepare.runs-on", "construct": "runs-on: docker", "reason": "mapped to the default runner labels [self-hosted, linux, docker]"}]
+  }]
+}
+```
+
+`parses` is always `true` for a file that was produced: every output is validated with the real
+parser, and a file that does not parse is an error naming the construct, never a warning. `partial`
+is `true` when any file has an untranslated construct.
+
+**Exit codes** (the §4 contract):
+
+| Code | Meaning |
+|---|---|
+| **0** | every source converted with no untranslated construct (and, with `--apply`, committed) |
+| **1** | at least one untranslated construct (the file is still written), or a conversion/git error |
+| **2** | usage: a missing `--from`/`--repo`, an unknown platform, `--apply` with `--out`, an unexpected argument |
+
+`--apply` on a partial conversion exits **1** and creates no branch; pass `--allow-partial` when you
+have reviewed the named gaps and want the branch anyway.
 
 ## 6. Examples
 

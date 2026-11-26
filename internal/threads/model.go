@@ -7,6 +7,8 @@ import (
 	"regexp"
 	"strings"
 	"time"
+
+	"github.com/crueber/spindle/internal/threads/workflow"
 )
 
 // Sentinel errors (the 07 §2 plain-text/status mapping, same class set the
@@ -170,6 +172,17 @@ type Run struct {
 	DeniedBy     string   `json:"denied_by,omitempty"`
 	DeniedAt     *string  `json:"denied_at,omitempty"`
 
+	// CancelReason names why the run left the live states, and CancelledBy who
+	// (or what) did it: CancelReasonOperator for a maintainer's cancel,
+	// CancelReasonSupersede for a newer push / PR synchronize (SupersededBy
+	// names that run, PAR-150), CancelReasonConcurrency for a group's
+	// `cancel-in-progress`. Both are empty on a run that ended on its own, and
+	// the FIRST cancel wins: a later cancel of an already-terminal run never
+	// rewrites them (cancel is idempotent).
+	CancelReason string `json:"cancel_reason,omitempty"`
+	CancelledBy  string `json:"cancelled_by,omitempty"`
+	SupersededBy string `json:"superseded_by,omitempty"`
+
 	// DurationSeconds is a DERIVED read-model field (never stored, never CAS'd):
 	// the wall time from StartedAt to CompletedAt, or to now while the run is
 	// live. The run page and the API both read it.
@@ -276,9 +289,13 @@ type ServiceSpec struct {
 	Volumes    []string          `json:"volumes,omitempty"`
 }
 
-// StrategySpec is the job's matrix product and fail-fast flag.
+// StrategySpec is the job's matrix declaration and fail-fast flag. Matrix holds
+// the axes; Include/Exclude carry GitHub's matrix lists so the server expands
+// exactly the cells the parser accepted (docs/WORKFLOWS.md §5.2).
 type StrategySpec struct {
 	Matrix   map[string][]string `json:"matrix,omitempty"`
+	Include  []map[string]string `json:"include,omitempty"`
+	Exclude  []map[string]string `json:"exclude,omitempty"`
 	FailFast *bool               `json:"fail_fast,omitempty"`
 }
 
@@ -379,6 +396,22 @@ const (
 const (
 	ApprovalFork        = "fork"
 	ApprovalEnvironment = "environment"
+)
+
+// Cancel reasons (Run.CancelReason): who ended a live run, so a superseded run
+// says WHY instead of looking like an operator's decision. These are record
+// values, not display strings; the page/API renders them.
+const (
+	// CancelReasonOperator is a maintainer's cancel (Run.CancelledBy is the
+	// principal).
+	CancelReasonOperator = "operator"
+	// CancelReasonSupersede is implicit supersede (PAR-150): a newer push, or a
+	// PR synchronize, cancelled the run of an older commit of the same
+	// workflow+ref. Run.SupersededBy names the newer run.
+	CancelReasonSupersede = "supersede"
+	// CancelReasonConcurrency is a concurrency group's `cancel-in-progress`
+	// taking the group from the holder run (docs/threads.md §3.1).
+	CancelReasonConcurrency = "concurrency"
 )
 
 // specWorkflow returns the spec-carried workflow name, falling back to the run
@@ -488,15 +521,29 @@ type RunPage struct {
 type CreateOpts struct {
 	// Branch is the pushed branch (push) or the PR target branch
 	// (pull_request) as a plain name ("main"). It selects push/PR trigger
-	// filters.
+	// filters. A tag push has no branch: the caller leaves it empty and
+	// names the tag in RefName.
 	Branch string
+	// RefName is the triggering ref's SHORT name — the branch name, the tag
+	// name for a tag push, or the PR target branch — and is what the
+	// `on.push.branches`/`on.push.tags` globs match (after RefKind picks the
+	// filter). Empty falls back to Branch, so every caller that predates tag
+	// runs keeps its meaning.
+	RefName string
+	// RefKind names the kind of ref the event was delivered for: a branch
+	// (the zero value) or a tag. Only a push distinguishes them; a tag
+	// selects `on.push.tags` and is otherwise treated as a branch so a
+	// non-push event can never state a ref kind it does not have.
+	RefKind workflow.RefKind
 	// Action is the pull_request lifecycle action being delivered: opened,
 	// synchronize or reopened (workflow.PullRequestTypes). It is required for
 	// a pull_request and selects the `on.pull_request.types` filter; the
 	// other events ignore it. An action Threads cannot emit is ErrInvalid, so
 	// a caller cannot quietly create a run for an unknown edge.
 	Action string
-	// Ref is the triggering ref ("refs/heads/main"); optional.
+	// Ref is the triggering ref ("refs/heads/main", "refs/tags/v1.2.3");
+	// optional. It is what `github.ref` (and the job OIDC token's ref) report,
+	// so a tag run keeps its refs/tags/ prefix here and nowhere in Branch.
 	Ref string
 	// BaseBranch/BaseCommit identify the trusted revision for a fork PR
 	// (the base branch tip). BaseCommit is preferred when set; otherwise

@@ -103,6 +103,25 @@ e2e: ## smart-HTTP end-to-end against the real git binary
 a11y: web ## rendered accessibility smoke: headless Chromium over CDP (fixed page set; skips without a browser, CI sets SPINDLE_A11Y=1)
 	$(T15) $(GO) test -count=1 -timeout 10m -run 'TestA11y' -v ./internal/e2e/
 
+# The parity gate (docs/features/21_parity_master.md §9, PAR-201). Integrity
+# mode: the matrix must be structurally sound, every `have` row must name a test
+# that exists, the plan's id set must match, and matrix.md must be a fresh
+# render. It needs NO docker — the corpus parse/plan tier runs in -short.
+parity: ## parity gate + corpus parse/plan tier (no docker; the PR gate)
+	$(GO) run ./internal/devtools/paritygate -check
+	$(T15) $(GO) test -count=1 -timeout 10m -run 'TestParity' ./internal/e2e/
+
+# The plan's definition of done (§9): no `missing` row at all. Run when a wave
+# closes, not on every PR — Wave 1 lands with later waves still planned-missing.
+parity-closed: ## parity closure check: fail on any `missing` row (§9 definition of done)
+	$(GO) run ./internal/devtools/paritygate -check -strict
+	$(T15) $(GO) test -count=1 -timeout 10m -run 'TestParity' ./internal/e2e/
+
+# The execution tier is opt-in: it boots a server and a runner and executes a
+# corpus-shaped workflow in real containers, which the PR gate must not require.
+parity-exec: ## parity execution tier: a corpus-shaped workflow runs to success (needs docker + docker CLI)
+	SPINDLE_PARITY_EXEC=1 $(T15) $(GO) test -count=1 -timeout 15m -run 'TestE2E_ParityExecution' -v ./internal/e2e/
+
 backup-drill: ## restore drill: seed, snapshot, restore into an empty instance, compare every surface (docs/BACKUP.md)
 	$(T15) $(GO) test -count=1 -timeout 15m -run TestE2E_BackupRestoreDrill -v ./internal/e2e/
 
@@ -132,9 +151,9 @@ clean: ## remove build artifacts
 	rm -rf $(BINARY) .cover web/dist dist
 	mkdir -p web/dist && touch web/dist/.keep
 
-ci: vet test race cover contract sim e2e a11y ## everything that must be green before a merge (09: contract + e2e gate the collab seams too; a11y is the rendered floor, skipping only where no browser exists)
+ci: vet test race cover contract sim e2e parity a11y ## everything that must be green before a merge (09: contract + e2e gate the collab seams too; parity is the conformance gate, no docker; a11y is the rendered floor, skipping only where no browser exists)
 
 help: ## show targets
 	@grep -E '^[a-zA-Z0-9_-]+:.*## ' $(MAKEFILE_LIST) | awk 'BEGIN{FS=":.*## "}{printf "  \033[36m%-14s\033[0m %s\n", $$1, $$2}'
 
-.PHONY: web build fmt vet test test-go test-web race cover sim contract contract-fs contract-s3 e2e a11y backup-drill image dev-store dev-store-stop site site-preview site-check clean ci help landing-gifs
+.PHONY: web build fmt vet test test-go test-web race cover sim contract contract-fs contract-s3 e2e a11y parity parity-closed parity-exec backup-drill image dev-store dev-store-stop site site-preview site-check clean ci help landing-gifs

@@ -423,34 +423,9 @@ func (c *Container) UnmarshalYAML(node *yaml.Node) error {
 	}
 }
 
-// Matrix is `strategy.matrix`: a simple product of scalar axes. include/
-// exclude and nested objects are the documented v1 limit (a parse error).
-type Matrix map[string][]string
-
-// UnmarshalYAML decodes the axis → list mapping.
-func (m *Matrix) UnmarshalYAML(node *yaml.Node) error {
-	if node.Kind != yaml.MappingNode {
-		return fmt.Errorf("strategy.matrix must be a mapping of axis to list")
-	}
-	out := make(Matrix, len(node.Content)/2)
-	for i := 0; i+1 < len(node.Content); i += 2 {
-		axis, val := node.Content[i].Value, node.Content[i+1]
-		switch axis {
-		case "include", "exclude":
-			return fmt.Errorf("strategy.matrix.%s is not supported (v1 is a simple product)", axis)
-		}
-		list, err := scalarList(val)
-		if err != nil {
-			return fmt.Errorf("strategy.matrix.%s: %w", axis, err)
-		}
-		out[axis] = list
-	}
-	*m = out
-	return nil
-}
-
-// Strategy is the job's matrix. FailFast is carried; expansion and the
-// fail-fast policy are the scheduler's (pass B).
+// Strategy is the job's matrix. FailFast is carried; expansion (matrix.go) is
+// shared by the parser's bound check and the server's job expansion, and the
+// fail-fast policy is the scheduler's.
 type Strategy struct {
 	Matrix   Matrix `yaml:"matrix"`
 	FailFast *bool  `yaml:"fail-fast"`
@@ -520,6 +495,35 @@ func (e *Environment) Validate(job string) error {
 	return nil
 }
 
+// Needs is `jobs.<key>.needs`: one job key (`needs: test`) or a list
+// (`needs: [test, build]`). Both spellings mean the same dependency set.
+type Needs []string
+
+// UnmarshalYAML accepts the scalar and sequence spellings.
+func (n *Needs) UnmarshalYAML(node *yaml.Node) error {
+	switch node.Kind {
+	case yaml.ScalarNode:
+		if isNull(node) {
+			*n = nil
+			return nil
+		}
+		*n = Needs{node.Value}
+		return nil
+	case yaml.SequenceNode:
+		out := make(Needs, 0, len(node.Content))
+		for _, item := range node.Content {
+			if item.Kind != yaml.ScalarNode {
+				return fmt.Errorf("needs entries must be job names")
+			}
+			out = append(out, item.Value)
+		}
+		*n = out
+		return nil
+	default:
+		return fmt.Errorf("needs: expected a job name or a list of job names")
+	}
+}
+
 // Job is one unit of work. Steps run inside `Container` (or the runner's
 // default image) on one workspace. A job-level `uses` names a reusable
 // workflow instead of steps; it is accepted and carried, execution is pass B/C.
@@ -533,7 +537,7 @@ type Job struct {
 	Services        map[string]Service `yaml:"services"`
 	Env             map[string]string  `yaml:"env"`
 	Steps           []Step             `yaml:"steps"`
-	Needs           []string           `yaml:"needs"`
+	Needs           Needs              `yaml:"needs"`
 	If              string             `yaml:"if"`
 	TimeoutMinutes  int                `yaml:"timeout-minutes"`
 	ContinueOnError bool               `yaml:"continue-on-error"`
@@ -629,9 +633,26 @@ func Parse(src []byte) (*Workflow, error) {
 			return nil, fmt.Errorf("workflow: %w", err)
 		}
 	}
+	// Workflow-level env is copied verbatim by the runner (only a step's env
+	// values are substituted), so a `${{ … }}` here is a parse error too
+	// (docs/WORKFLOWS.md §6.2).
+	if err := validateStructuralEnv("env", w.Env); err != nil {
+		return nil, err
+	}
 	for name, job := range w.Jobs {
+		// Structural fields (runs-on, container/service images, environment) and
+		// the job/container/service env layers are read before a matrix cell or
+		// dispatch input exists and are never substituted, so a `${{ … }}` there
+		// is this file's parse error rather than a literal that queues the job
+		// against no runner (docs/WORKFLOWS.md §6.2).
+		if err := validateStructuralFields(name, &job); err != nil {
+			return nil, err
+		}
 		reusable := strings.TrimSpace(job.Uses) != ""
 		if err := job.Environment.Validate(name); err != nil {
+			return nil, err
+		}
+		if err := validateStrategy(name, job.Strategy); err != nil {
 			return nil, err
 		}
 		if !reusable {
@@ -641,6 +662,13 @@ func Parse(src []byte) (*Workflow, error) {
 			if len(job.Steps) == 0 {
 				return nil, fmt.Errorf("%w: %s", ErrNoSteps, name)
 			}
+		}
+		axes := strategyAxes(job.Strategy)
+		if err := ValidateTemplate(job.Name, TemplateScope{Axes: axes, Inputs: inputNames}); err != nil {
+			return nil, fmt.Errorf("workflow: job %s name: %w", name, err)
+		}
+		if err := ValidateIf(job.If, TemplateScope{Axes: axes, Inputs: inputNames, Needs: job.Needs, JobIf: true}); err != nil {
+			return nil, fmt.Errorf("workflow: job %s if: %w", name, err)
 		}
 		stepIDs := map[string]bool{}
 		// declared grows in step order: a step may only read outputs of an
@@ -659,11 +687,16 @@ func Parse(src []byte) (*Workflow, error) {
 			if err := validateStepFieldRefs(name, i, step, job.Needs, declared); err != nil {
 				return nil, err
 			}
+			if err := validateStepTemplates(name, i, step, TemplateScope{
+				Axes: axes, Inputs: inputNames, Steps: declared, Needs: job.Needs,
+			}); err != nil {
+				return nil, err
+			}
 			if step.ID != "" {
 				declared = append(declared, strings.ToLower(step.ID))
 			}
 		}
-		if err := validateJobOutputs(name, job, inputNames, strategyAxes(job.Strategy)); err != nil {
+		if err := validateJobOutputs(name, job, inputNames, axes); err != nil {
 			return nil, err
 		}
 		for _, need := range job.Needs {
@@ -745,21 +778,14 @@ func dispatchInputNames(d *DispatchTrigger) []string {
 	return out
 }
 
-// strategyAxes lists a strategy's usable matrix axes, sorted (an empty axis
-// contributes no cell, so it is not a declared axis).
+// strategyAxes lists a strategy's usable matrix fields, sorted: the declared
+// axes and the keys an include entry names (a `${{ matrix.<key> }}` reference
+// may read either).
 func strategyAxes(s *Strategy) []string {
-	if s == nil || len(s.Matrix) == 0 {
+	if s == nil {
 		return nil
 	}
-	out := make([]string, 0, len(s.Matrix))
-	for axis, vals := range s.Matrix {
-		if len(vals) == 0 {
-			continue
-		}
-		out = append(out, axis)
-	}
-	sort.Strings(out)
-	return out
+	return s.Matrix.FieldNames()
 }
 
 // ParseFile reads and parses one workflow file.
@@ -788,23 +814,78 @@ func Files(root string) ([]string, error) {
 	return out, nil
 }
 
+// validateStrategy bounds one job's matrix at parse time.
+func validateStrategy(jobName string, s *Strategy) error {
+	if s == nil {
+		return nil
+	}
+	if err := s.Matrix.Validate(); err != nil {
+		return fmt.Errorf("workflow: job %s: %w", jobName, err)
+	}
+	return nil
+}
+
+// RefKind is the kind of git ref an event is delivered for. A push to a branch
+// and a push to a tag are different triggers (on.push.branches vs
+// on.push.tags), so the caller must say which one it is delivering; passing a
+// branch name for a tag push would silently match the wrong filter.
+type RefKind uint8
+
+const (
+	// RefBranch is a `refs/heads/*` ref (the only kind the push hook delivers
+	// today).
+	RefBranch RefKind = iota
+	// RefTag is a `refs/tags/*` ref.
+	RefTag
+)
+
+// String renders the kind for error messages and records.
+func (k RefKind) String() string {
+	if k == RefTag {
+		return "tag"
+	}
+	return "branch"
+}
+
+// fires applies one push trigger to a ref. GitHub's rule, implemented exactly:
+//
+//   - a branch push is filtered by `branches`; when only `tags` is declared a
+//     branch push does not fire (`on.push.tags` never matches a branch);
+//   - a tag push is filtered by `tags`; when only `branches` is declared a tag
+//     push does not fire;
+//   - a bare `on: push` (neither list) fires on both.
+func (p *PushTrigger) fires(kind RefKind, name string) bool {
+	if kind == RefTag {
+		if len(p.Tags) > 0 {
+			return matchAny(p.Tags, name)
+		}
+		return len(p.Branches) == 0
+	}
+	if len(p.Branches) > 0 {
+		return matchAny(p.Branches, name)
+	}
+	return len(p.Tags) == 0
+}
+
 // Fires reports whether the workflow triggers on an event. event is one of
 // "push", "pull_request", "workflow_dispatch"; schedule is handled by the
-// scheduler. branch may be empty (no filter applies). action is the
+// scheduler. kind names the ref kind (a branch or a tag) and matters only for
+// push. ref is the short ref name: the branch name, the tag name, or the PR
+// target branch; it may be empty (no filter applies). action is the
 // pull_request lifecycle action the caller is delivering (opened, synchronize,
 // reopened) and is ignored by the other events; a pull_request event with no
 // recorded action matches only an unfiltered trigger, because a `types` filter
 // can only be decided from a known action.
-func (w *Workflow) Fires(event, branch, action string) bool {
+func (w *Workflow) Fires(event string, kind RefKind, ref, action string) bool {
 	switch event {
 	case "push":
 		if w.On.Push == nil && !w.On.PushSet {
 			return false
 		}
 		if w.On.Push == nil {
-			return true // `push:` with no filters: every branch
+			return true // `push:` with no filters: every branch and tag
 		}
-		return matchAny(w.On.Push.Branches, branch)
+		return w.On.Push.fires(kind, ref)
 	case "pull_request":
 		if w.On.PullRequest == nil && !w.On.PullRequestSet {
 			return false
@@ -812,7 +893,7 @@ func (w *Workflow) Fires(event, branch, action string) bool {
 		if w.On.PullRequest == nil {
 			return true // `pull_request:` with no filters: every target branch
 		}
-		if !matchAny(w.On.PullRequest.Branches, branch) {
+		if !matchAny(w.On.PullRequest.Branches, ref) {
 			return false
 		}
 		return matchPRType(w.On.PullRequest.Types, action)

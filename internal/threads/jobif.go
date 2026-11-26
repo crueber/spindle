@@ -17,8 +17,9 @@ import (
 // plus the job-level ones that exist here — `github.*`, `matrix.*`, `inputs.*`,
 // `env.*`, `needs.<job>.result`, `needs.<job>.outputs.<name>` (a successful
 // dependency's reported outputs), and success()/failure()/cancelled() derived
-// from the dependency results. `steps.*` is a runner context and reads empty
-// here.
+// from the dependency results. `steps.*` is a runner context and is rejected at
+// parse time in a job-level `if:` (it reads empty if a stored workflow reaches
+// the evaluator).
 //
 // Two moments decide a condition:
 //   - run creation / approval / rerun: a job with no `needs:` is decided
@@ -114,13 +115,27 @@ func githubContext(run *Run, workflow string) map[string]string {
 	}
 	return map[string]string{
 		"ref":        ref,
-		"ref_name":   run.Branch,
+		"ref_name":   runRefName(run),
 		"sha":        run.Commit,
 		"event_name": run.Event,
 		"workflow":   workflow,
 		"repository": run.Repo,
 		"run_id":     run.ID,
+		"actor":      run.Actor,
 	}
+}
+
+// runRefName is `github.ref_name`: the tag name for a tag push ("v1.2.3" out
+// of "refs/tags/v1.2.3"), otherwise the branch name. A pull request's identity
+// is its BASE branch (matching `github.ref`'s GITHUB_REF rule, 15 §3.5), so its
+// refs/pull/<n>/head Ref never leaks the PR number here. A run with neither
+// answers "" — never the ref with its prefix stripped blindly. The caller
+// (githubContext) has already handled a nil run.
+func runRefName(run *Run) string {
+	if tag, ok := strings.CutPrefix(strings.TrimSpace(run.Ref), "refs/tags/"); ok {
+		return tag
+	}
+	return strings.TrimSpace(run.Branch)
 }
 
 // jobIdentifier is the GITHUB_JOB spelling of a job record (its id).

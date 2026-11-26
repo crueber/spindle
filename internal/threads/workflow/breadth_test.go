@@ -104,7 +104,7 @@ func TestParseBroadShapes(t *testing.T) {
 	if build.Strategy == nil || build.Strategy.FailFast == nil || *build.Strategy.FailFast {
 		t.Fatalf("strategy = %+v", build.Strategy)
 	}
-	if len(build.Strategy.Matrix["go"]) != 2 || len(build.Strategy.Matrix["os"]) != 1 {
+	if len(build.Strategy.Matrix.Axes["go"]) != 2 || len(build.Strategy.Matrix.Axes["os"]) != 1 {
 		t.Fatalf("matrix = %+v", build.Strategy.Matrix)
 	}
 	if build.Permissions["contents"] != "write" {
@@ -136,7 +136,7 @@ func TestParseOnStringAndList(t *testing.T) {
 	if err != nil {
 		t.Fatalf("list on: %v", err)
 	}
-	if !w.Fires("push", "main", "") || !w.Fires("pull_request", "dev", "opened") || w.Fires("workflow_dispatch", "", "") {
+	if !w.Fires("push", RefBranch, "main", "") || !w.Fires("pull_request", RefBranch, "dev", "opened") || w.Fires("workflow_dispatch", RefBranch, "", "") {
 		t.Fatalf("list triggers = %+v", w.On)
 	}
 	w, err = Parse([]byte("on: workflow_dispatch\njobs:\n  a:\n    runs-on: l\n    steps:\n      - run: x\n"))
@@ -154,7 +154,7 @@ func TestParseOnStringAndList(t *testing.T) {
 	if err != nil || !w.On.ScheduleSet || len(w.On.Schedule) != 1 {
 		t.Fatalf("schedule mapping = %+v, %v", w.On, err)
 	}
-	if !w.Fires("schedule", "", "") {
+	if !w.Fires("schedule", RefBranch, "", "") {
 		t.Fatal("a schedule workflow must answer Fires(schedule)")
 	}
 	// An unsupported cron is a parse error, not a dead trigger.
@@ -216,8 +216,11 @@ func TestParseMatrixLimits(t *testing.T) {
 	if _, err := Parse(src("        go: [1.26]")); err != nil {
 		t.Fatalf("simple matrix: %v", err)
 	}
-	if _, err := Parse(src("        include:\n          - go: 1.27")); err == nil {
-		t.Fatal("matrix include accepted (v1 is a simple product)")
+	if _, err := Parse(src("        include:\n          - go: 1.27")); err != nil {
+		t.Fatalf("matrix include rejected: %v", err)
+	}
+	if _, err := Parse(src("        include:\n          - go: [1.26, 1.27]")); err == nil {
+		t.Fatal("array-valued include entry accepted")
 	}
 	if _, err := Parse(src("        go:\n          version: 1.27")); err == nil {
 		t.Fatal("nested matrix value accepted")

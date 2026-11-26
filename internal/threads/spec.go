@@ -88,11 +88,26 @@ func strategySpec(in *workflow.Strategy) *StrategySpec {
 		return nil
 	}
 	out := &StrategySpec{FailFast: in.FailFast}
-	if len(in.Matrix) > 0 {
-		out.Matrix = make(map[string][]string, len(in.Matrix))
-		for axis, values := range in.Matrix {
+	if len(in.Matrix.Axes) > 0 {
+		out.Matrix = make(map[string][]string, len(in.Matrix.Axes))
+		for axis, values := range in.Matrix.Axes {
 			out.Matrix[axis] = append([]string{}, values...)
 		}
+	}
+	for _, combo := range in.Matrix.Include {
+		out.Include = append(out.Include, comboCopy(combo))
+	}
+	for _, combo := range in.Matrix.Exclude {
+		out.Exclude = append(out.Exclude, comboCopy(combo))
+	}
+	return out
+}
+
+// comboCopy copies one matrix include/exclude object.
+func comboCopy(in workflow.MatrixCombination) map[string]string {
+	out := make(map[string]string, len(in))
+	for key, value := range in {
+		out[key] = value
 	}
 	return out
 }

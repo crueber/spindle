@@ -11,6 +11,7 @@ import (
 
 	"github.com/crueber/spindle/internal/server/auth"
 	"github.com/crueber/spindle/internal/store"
+	"github.com/crueber/spindle/internal/threads/workflow"
 )
 
 // Pass B2 server-side surface: matrix expansion, concurrency groups, fail-fast
@@ -97,12 +98,16 @@ func TestMatrixExpansionBounds(t *testing.T) {
 		b.WriteString("        a" + string(rune('a'+i)) + ": [\"1\", \"2\", \"3\", \"4\", \"5\", \"6\", \"7\", \"8\"]\n")
 	}
 	b.WriteString("    steps:\n      - run: true\n")
+	// The parser bounds the declaration, so the file is reported broken and
+	// creates no run (a run record cannot be unbounded).
+	if _, err := workflow.Parse([]byte(b.String())); err == nil {
+		t.Fatal("expected the parser to refuse an over-large matrix")
+	}
 	e.git.files = map[string]map[string][]byte{}
 	e.git.add(testSHA, ".spindle/workflows/big.yml", b.String())
-	if _, err := e.svc.CreateRun(ctx(), "o/r", testSHA, EventPush, CreateOpts{}); err == nil {
-		t.Fatal("expected the expansion bound to be enforced")
+	if runs, err := e.svc.CreateRun(ctx(), "o/r", testSHA, EventPush, CreateOpts{}); err != nil || len(runs) != 0 {
+		t.Fatalf("CreateRun = %d runs, %v; want none and no error", len(runs), err)
 	}
-	_ = b
 }
 
 // twoRuns creates two runs of the same workflow so they contend for a group.
@@ -317,6 +322,11 @@ func TestFetchPayloadCarriesCheckoutURL(t *testing.T) {
 	}
 	if job.Checkout == nil || job.Checkout.URL != "https://spindle.example.com/o/r.git" || !job.Checkout.ReadOnly {
 		t.Fatalf("checkout = %+v", job.Checkout)
+	}
+	// The same canonical origin reaches the job as GITHUB_SERVER_URL (PAR-111):
+	// it is the proxy-facing origin the runner reached, not a hardcoded host.
+	if job.ServerURL != "https://spindle.example.com" {
+		t.Fatalf("server_url = %q", job.ServerURL)
 	}
 }
 

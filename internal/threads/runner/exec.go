@@ -184,6 +184,10 @@ func (e *Executor) Execute(ctx context.Context, in ExecInput, stream *Streamer) 
 		jobCtx, cancel = context.WithTimeout(ctx, plan.Timeout)
 		defer cancel()
 	}
+	// The plan's own secret values join the stream's mask list: a substituted
+	// `${{ secrets.X }}` is masked in the log exactly like the env-delivered
+	// token, whatever the payload's mask list carried (docs/threads.md §3.6).
+	stream.addMask(plan.Mask)
 	stream.Systemf("spindle: job %s (%s) attempt %d on %s", in.Job.JobID, in.Job.Context, plan.Attempt, plan.Image)
 	// The checkout base is stated once at job start: an operator debugging a
 	// container that cannot resolve the origin needs the URL and its
@@ -202,6 +206,10 @@ func (e *Executor) Execute(ctx context.Context, in ExecInput, stream *Streamer) 
 	anyFailed := false
 	hardFailure := false
 	steps := newStepOutcomes()
+	// The job's command files ($GITHUB_ENV / $GITHUB_PATH): accumulated across
+	// the steps that already ran and layered onto each later step's environment
+	// (docs/threads.md §3.10). Nothing here touches the runner process.
+	cmds := newCommandFiles()
 	for i := range plan.Steps {
 		step := plan.Steps[i]
 		if jobCtx.Err() != nil || stream.Cancelled() {
@@ -226,7 +234,7 @@ func (e *Executor) Execute(ctx context.Context, in ExecInput, stream *Streamer) 
 			stream.Systemf("spindle: step %q: %v", step.Name, rerr)
 		} else {
 			step = resolved
-			outcome, inner = e.runStep(jobCtx, plan, step, stream, steps, nil, hardFailure)
+			outcome, inner = e.runStep(jobCtx, plan, step, stream, steps, nil, hardFailure, cmds)
 		}
 		steps.record(step, outcome)
 		res.Steps = append(res.Steps, outcome)
@@ -560,7 +568,7 @@ func (s *localScope) addOutputs(id string, outs map[string]string) error {
 
 // runStep executes one step (or one composite action and its inner steps) and
 // returns the step's own result plus the inner results, in execution order.
-func (e *Executor) runStep(ctx context.Context, plan *Plan, step StepPlan, stream *Streamer, steps *stepOutcomes, scope *localScope, hardFailure bool) (threads.StepResult, []threads.StepResult) {
+func (e *Executor) runStep(ctx context.Context, plan *Plan, step StepPlan, stream *Streamer, steps *stepOutcomes, scope *localScope, hardFailure bool, cmds *commandFiles) (threads.StepResult, []threads.StepResult) {
 	out := threads.StepResult{Number: step.Index + 1, ID: step.LocalID, Name: step.Name}
 	if step.ID != "" {
 		out.ID = step.ID // a top-level id is what the job's steps.<id> names
@@ -578,7 +586,7 @@ func (e *Executor) runStep(ctx context.Context, plan *Plan, step StepPlan, strea
 		return out, nil
 	}
 	if step.Kind == "composite" {
-		return e.runCompositeStep(ctx, plan, step, stream, steps, scope, hardFailure)
+		return e.runCompositeStep(ctx, plan, step, stream, steps, scope, hardFailure, cmds)
 	}
 	if step.Kind == "unsupported" {
 		out.Conclusion = threads.JobFailure
@@ -593,7 +601,22 @@ func (e *Executor) runStep(ctx context.Context, plan *Plan, step StepPlan, strea
 		// first has its output file copied out).
 		defer e.removeActionContainer(plan, step)
 	}
-	if err := e.runStepCommand(ctx, plan, step, stream); err != nil {
+	// The command-file state of the steps that already ran is layered onto this
+	// step's argv (env values) and command (PATH prepending). A docker action's
+	// argv is the image's own and is never wrapped.
+	step = applyCommandFiles(plan, step, cmds)
+	err = e.runStepCommand(ctx, plan, step, stream)
+	// The command files are processed for the step that just ran, whatever its
+	// conclusion: a step that writes an env var and then fails still changed the
+	// job environment for the steps after it (GitHub's rule).
+	if cerr := e.collectCommandFiles(ctx, plan, step, cmds, stream); cerr != nil {
+		if err == nil {
+			err = &stepError{code: -1, msg: cerr.Error()}
+		} else {
+			stream.Systemf("spindle: step %q: %v", step.Name, cerr)
+		}
+	}
+	if err != nil {
 		out.DurationMS = time.Since(started).Milliseconds()
 		if ctx.Err() != nil || stream.Cancelled() {
 			out.Conclusion = threads.JobCancelled
@@ -652,7 +675,7 @@ func (e *Executor) storeStepOutputs(step StepPlan, outs map[string]string, steps
 // A failing inner step (without its own continue-on-error) fails the caller and
 // skips the rest of the action; the caller's continue-on-error then decides
 // whether the job tolerates it.
-func (e *Executor) runCompositeStep(ctx context.Context, plan *Plan, step StepPlan, stream *Streamer, steps *stepOutcomes, parent *localScope, hardFailure bool) (threads.StepResult, []threads.StepResult) {
+func (e *Executor) runCompositeStep(ctx context.Context, plan *Plan, step StepPlan, stream *Streamer, steps *stepOutcomes, parent *localScope, hardFailure bool, cmds *commandFiles) (threads.StepResult, []threads.StepResult) {
 	out := threads.StepResult{Number: step.Index + 1, ID: step.ID, Name: step.Name}
 	if step.LocalID != "" {
 		out.ID = step.LocalID
@@ -694,7 +717,7 @@ func (e *Executor) runCompositeStep(ctx context.Context, plan *Plan, step StepPl
 			stream.Systemf("spindle: %s step %q: %v", step.Name, child.Name, rerr)
 			continue
 		}
-		childRes, childInner := e.runStep(cctx, plan, resolved, stream, steps, scope, hardFailure || failed)
+		childRes, childInner := e.runStep(cctx, plan, resolved, stream, steps, scope, hardFailure || failed, cmds)
 		inner = append(inner, childRes)
 		inner = append(inner, childInner...)
 		scope.record(resolved.LocalID, childRes.Conclusion, conclusionOf(childRes, resolved.ContinueOnError))
@@ -717,7 +740,7 @@ func (e *Executor) runCompositeStep(ctx context.Context, plan *Plan, step StepPl
 			out.Conclusion = threads.JobCancelled
 		default:
 			// Evaluate the action's declared outputs over its own steps.
-			outs, oerr := evalCompositeOutputs(step.Composite.Outputs, scope.outputs)
+			outs, oerr := evalCompositeOutputs(plan, step.Composite.Outputs, scope.outputs)
 			if oerr != nil {
 				out.Conclusion = threads.JobFailure
 				out.Error = stream.Mask(oerr.Error())
@@ -742,9 +765,11 @@ func conclusionOf(res threads.StepResult, tolerated bool) string {
 }
 
 // evalCompositeOutputs evaluates a composite action's `outputs:` mapping over
-// its own steps' outputs. A reference to a step that never published its
-// output is a named error (fail closed), like a job output.
-func evalCompositeOutputs(templates map[string]string, local map[string]map[string]string) (map[string]string, error) {
+// its own steps' outputs. The mapping is a substituted site like any other
+// (docs/threads.md §3.6), so `github.*`, `matrix.*`, `env.*` and a secret
+// resolve here too; a reference to a step that never published its output is a
+// named error (fail closed), like a job output.
+func evalCompositeOutputs(plan *Plan, templates map[string]string, local map[string]map[string]string) (map[string]string, error) {
 	if len(templates) == 0 {
 		return nil, nil
 	}
@@ -755,7 +780,7 @@ func evalCompositeOutputs(templates map[string]string, local map[string]map[stri
 	sort.Strings(names)
 	out := make(map[string]string, len(names))
 	for _, name := range names {
-		val, err := threads.SubstituteOutputs(templates[name], local, nil)
+		val, err := plan.expandValue(templates[name], plan.Env, local, true)
 		if err != nil {
 			return nil, fmt.Errorf("action output %q: %v", name, err)
 		}
@@ -820,7 +845,7 @@ func (e *Executor) runStepCommand(ctx context.Context, plan *Plan, step StepPlan
 		for name, value := range plan.Secrets {
 			fullEnv = append(fullEnv, name+"="+value)
 		}
-		fullEnv = append(fullEnv, credentialEnv(plan, step.EnvFrom)...)
+		fullEnv = append(fullEnv, credentialEnv(plan, step.EnvFrom, step.EnvSecret)...)
 	}
 	code, err := e.Docker.Stream(stepCtx, fullEnv, stream, step.Argv...)
 	if stepCtx.Err() == context.DeadlineExceeded && ctx.Err() == nil {
@@ -868,19 +893,13 @@ func (e *Executor) removeActionContainer(plan *Plan, step StepPlan) {
 // adds the action's own step ids and outputs (an action-local id shadows a job
 // id of the same name — the action is its own namespace).
 func (e *Executor) exprContext(plan *Plan, hardFailure bool, stream *Streamer, steps *stepOutcomes, scope *localScope) ExprContext {
-	github := map[string]string{
-		"ref":        plan.Env["GITHUB_REF"],
-		"ref_name":   plan.Env["GITHUB_REF_NAME"],
-		"sha":        plan.Env["GITHUB_SHA"],
-		"event_name": plan.Env["GITHUB_EVENT_NAME"],
-		"workflow":   plan.Env["GITHUB_WORKFLOW"],
-		"job":        plan.Env["GITHUB_JOB"],
-		"repository": plan.Env["GITHUB_REPOSITORY"],
-		"run_id":     plan.Env["GITHUB_RUN_ID"],
-	}
 	ctx := ExprContext{
 		Success: !hardFailure, Failure: hardFailure, Cancelled: stream.Cancelled(),
-		GitHub: github, Matrix: plan.Matrix, Inputs: plan.Inputs, Env: plan.Env,
+		GitHub: plan.githubValues(), Matrix: plan.Matrix, Inputs: plan.Inputs, Env: plan.Env,
+		// A step `if:` reads the run's secrets on a trusted run (empty on a fork)
+		// and the job token under its GitHub/Forgejo names, the same values a
+		// step field substitutes (docs/threads.md §3.7).
+		Secrets: plan.secretValues(),
 	}
 	if steps != nil {
 		ctx.Steps, ctx.StepConclusions = steps.Outcome, steps.Conclusion

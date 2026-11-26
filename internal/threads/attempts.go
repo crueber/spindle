@@ -386,20 +386,57 @@ func (s *Service) CancelRun(ctx context.Context, repo, runID string, p auth.Prin
 	if err := s.requireRole(ctx, owner, name, p, "write"); err != nil {
 		return nil, err
 	}
-	return s.cancelRunSystem(ctx, owner, name, runID)
+	return s.cancelRun(ctx, owner, name, runID, cancelWhy{
+		Actor:  strings.TrimSpace(p.Name),
+		Reason: CancelReasonOperator,
+	})
 }
 
-// cancelRunSystem is the terminal cancel path without a principal: the
-// operator's CancelRun after its gate, and concurrency `cancel-in-progress`
-// (which cancels the run holding a group). One implementation, so the two can
-// never disagree about what cancelling means.
+// cancelWhy records who cancelled a run and why. A zero value is a bare system
+// cancel (the approval-deny path, which already stamps DeniedBy/DeniedAt on the
+// header).
+type cancelWhy struct {
+	// Actor is the principal name for an operator cancel ("" = system).
+	Actor string
+	// Reason is one of the CancelReason* values ("" = leave the header alone).
+	Reason string
+	// SupersededBy names the newer run for CancelReasonSupersede.
+	SupersededBy string
+}
+
+// cancelRunSystem is the terminal cancel path without a principal: concurrency
+// `cancel-in-progress` (which cancels the run holding a group) and the approval
+// deny. One implementation, so the two can never disagree about what
+// cancelling means.
 func (s *Service) cancelRunSystem(ctx context.Context, owner, name, runID string) (*Run, error) {
+	return s.cancelRun(ctx, owner, name, runID, cancelWhy{})
+}
+
+// cancelRun is the ONE terminal cancel path (operator, supersede,
+// cancel-in-progress, approval deny). It is idempotent: a run that is already
+// terminal is returned untouched, so a cancel that races another (or is
+// retried) never rewrites the record — in particular the first reason wins.
+// A queued job is cancelled immediately; a running job carries CancelRequested
+// until its runner acks, so the run may fold back to `running` for a moment.
+func (s *Service) cancelRun(ctx context.Context, owner, name, runID string, why cancelWhy) (*Run, error) {
 	run, err := s.loadRun(ctx, owner, name, runID)
 	if err != nil {
 		return nil, err
 	}
 	if run == nil {
 		return nil, fmt.Errorf("%w: unknown run %q", ErrNotFound, runID)
+	}
+	if terminal(run.State) {
+		return run, nil // already ended: idempotent, first reason wins
+	}
+	if why.Reason != "" {
+		stamped, serr := s.stampCancel(ctx, owner, name, runID, why)
+		if serr != nil {
+			return nil, serr
+		}
+		if stamped != nil {
+			run = stamped
+		}
 	}
 	jobs, err := s.loadJobs(ctx, owner, name, runID)
 	if err != nil {
@@ -418,9 +455,15 @@ func (s *Service) cancelRunSystem(ctx context.Context, owner, name, runID string
 			s.setEntryCancel(ctx, owner, name, job.QueueSeq, true)
 			continue
 		}
-		if _, uerr := s.UpdateJob(ctx, repoID(owner, name), runID, job.ID, JobUpdate{
-			State: JobCancelled, CancelRequested: boolPtr(false),
-		}); uerr != nil {
+		update := JobUpdate{State: JobCancelled, CancelRequested: boolPtr(false)}
+		// A queued job never ran, so the reason belongs on the job too: the run
+		// page renders it as "why this job did not execute" instead of leaving
+		// the reader to guess. A running job's reason is the run header's (its
+		// attempt ends through the runner's ack).
+		if why.Reason == CancelReasonSupersede && why.SupersededBy != "" {
+			update.Reason = "superseded by run " + why.SupersededBy
+		}
+		if _, uerr := s.UpdateJob(ctx, repoID(owner, name), runID, job.ID, update); uerr != nil {
 			return nil, uerr
 		}
 		s.setEntryCancel(ctx, owner, name, job.QueueSeq, false)
@@ -429,6 +472,39 @@ func (s *Service) cancelRunSystem(ctx context.Context, owner, name, runID string
 		return nil, ferr
 	}
 	return s.loadRun(ctx, owner, name, runID)
+}
+
+// stampCancel writes the cancel reason onto a live run header (CAS). It is
+// write-once: a header that already carries a reason keeps the first writer's
+// (an operator's cancel is not relabelled by a later supersede), which is what
+// makes the whole path idempotent. It returns the updated header, or nil when
+// nothing was written.
+func (s *Service) stampCancel(ctx context.Context, owner, name, runID string, why cancelWhy) (*Run, error) {
+	local := s.nowUTC().Format(dateTimeFmt)
+	var updated *Run
+	_, err := s.casUpdate(ctx, RunKey(owner, name, runID), 5, func(cur []byte, _ store.Version) ([]byte, bool, error) {
+		if cur == nil {
+			return nil, false, fmt.Errorf("%w: unknown run %q", ErrNotFound, runID)
+		}
+		var r Run
+		if jerr := json.Unmarshal(cur, &r); jerr != nil {
+			return nil, false, fmt.Errorf("%w: run %s: %v", ErrCorrupt, runID, jerr)
+		}
+		if r.CancelReason != "" || terminal(r.State) {
+			return nil, false, nil // first reason wins
+		}
+		r.CancelReason = why.Reason
+		r.CancelledBy = why.Actor
+		r.SupersededBy = why.SupersededBy
+		r.UpdatedAt = local
+		r.Version++
+		updated = &r
+		return mustJSON(&r), true, nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return updated, nil
 }
 
 // RerunRun creates a new attempt for every job of a run (repo write role):

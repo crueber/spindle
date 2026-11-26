@@ -1,0 +1,94 @@
+# Converted from a forgejo workflow by `spindle threads import --from forgejo`.
+# This is a Spindle workflow: review the conversion report; untranslated constructs are marked below.
+name: CI
+on:
+  push:
+    branches: [main, 'phase-*']
+  pull_request:
+env:
+  CHECKOUT: |
+    git config --global --add safe.directory '*'
+    git init -q . && git remote add origin "${SPINDLE_SERVER}/${GITHUB_REPOSITORY}.git"
+    git -c "http.extraHeader=Authorization: token ${FORGEJO_TOKEN}" fetch -q --depth 1 origin "${GITHUB_SHA}"
+    git checkout -q FETCH_HEAD
+jobs:
+  test:
+    runs-on:
+      - self-hosted
+      - linux
+      - docker
+    container:
+      image: golang:1.27.4
+    steps:
+      - name: Checkout
+        env:
+          FORGEJO_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: eval "$CHECKOUT"
+      - run: go mod download
+      - name: Format and module hygiene
+        run: |
+          test -z "$(gofmt -l .)" || { echo "gofmt needed:"; gofmt -l .; exit 1; }
+          go mod tidy -diff
+      - run: go vet ./...
+      - run: go test ./... -count=1
+      - name: Template lint
+        run: go test ./internal/web -run 'TestPagesRenderAndRespectCSP|TestUnknownPageFails' -count=1
+      - name: Contrast
+        run: |
+          command -v python3 >/dev/null || { echo "python3 is required for the contrast check"; exit 1; }
+          ./scripts/check-contrast.py
+      - name: Generated skill
+        run: |
+          go run ./cmd/scriobh-skillgen
+          git diff --exit-code -- internal/skill/data
+      - run: go build ./...
+  editor:
+    runs-on:
+      - self-hosted
+      - linux
+      - docker
+    container:
+      image: node:22-bookworm
+    steps:
+      - name: Checkout
+        env:
+          FORGEJO_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: eval "$CHECKOUT"
+      - name: Build and test the editor bundle
+        run: |
+          cd web/editor
+          npm ci --no-audit --no-fund
+          npm test
+          node build.mjs
+          git diff --exit-code -- ../../internal/web/static/editor.js
+  container:
+    # DAEMONLESS build. Job containers never receive /var/run/docker.sock, so
+    # the image is built with buildah using vfs + chroot isolation.
+    runs-on:
+      - self-hosted
+      - linux
+      - docker
+    needs: [test]
+    if: github.event_name == 'push'
+    container:
+      image: quay.io/buildah/stable:latest
+    steps:
+      - name: Checkout
+        env:
+          FORGEJO_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          if command -v apk >/dev/null 2>&1; then apk add --no-cache git >/dev/null
+          elif command -v microdnf >/dev/null 2>&1; then microdnf install -y git >/dev/null
+          elif command -v dnf >/dev/null 2>&1; then dnf install -y git >/dev/null
+          fi
+          eval "$CHECKOUT"
+      - name: Build the runtime image
+        run: |
+          mkdir -p /etc/containers /var/lib/containers /var/tmp/containers
+          printf '[storage]\ndriver="vfs"\nrunroot="/var/tmp/containers"\ngraphroot="/var/lib/containers"\n' > /etc/containers/storage.conf
+          buildah bud --storage-driver vfs --isolation=chroot --target runtime \
+            -t github.com/crueber-depracated/scriobh:ci .
+      - name: Check the image is non-root
+        run: |
+          buildah --storage-driver vfs inspect --format '{{.OCIv1.Config.User}}' github.com/crueber-depracated/scriobh:ci | tee /tmp/user
+          grep -q 'nonroot' /tmp/user

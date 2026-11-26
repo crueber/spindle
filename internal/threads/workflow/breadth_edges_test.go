@@ -82,10 +82,10 @@ func TestParseUnmarshalEdges(t *testing.T) {
 	if err != nil {
 		t.Fatalf("scalar matrix axis: %v", err)
 	}
-	if got := w.Jobs["a"].Strategy.Matrix["go"]; len(got) != 1 || got[0] != "1.26" {
+	if got := w.Jobs["a"].Strategy.Matrix.Axes["go"]; len(got) != 1 || got[0] != "1.26" {
 		t.Fatalf("scalar axis = %v", got)
 	}
-	if got := w.Jobs["a"].Strategy.Matrix["empty"]; len(got) != 0 {
+	if got := w.Jobs["a"].Strategy.Matrix.Axes["empty"]; len(got) != 0 {
 		t.Fatalf("null axis = %v", got)
 	}
 	if _, err := parseJob(t, "    runs-on: l\n    strategy:\n      matrix:\n        go: [a, [b]]\n    steps:\n      - run: x\n"); err == nil {
@@ -108,7 +108,7 @@ func TestFiresPullRequestAbsent(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if w.Fires("pull_request", "main", "opened") {
+	if w.Fires("pull_request", RefBranch, "main", "opened") {
 		t.Fatal("push-only workflow fired on pull_request")
 	}
 }

@@ -175,7 +175,7 @@ on:
 jobs:
   broken:
     runs-on: linux
-    if: contains(github.ref, 'main')
+    if: '!github.ref'
     steps:
       - run: echo hi
   fine:
@@ -193,7 +193,7 @@ func TestJobIfUnsupportedExpressionFailsTheJob(t *testing.T) {
 	if broken.State != JobFailure {
 		t.Fatalf("broken = %q, want failure", broken.State)
 	}
-	if !strings.Contains(broken.Reason, "if:") || !strings.Contains(broken.Reason, "contains") {
+	if !strings.Contains(broken.Reason, "if:") || !strings.Contains(broken.Reason, "not a boolean") {
 		t.Fatalf("reason = %q, want the expression error", broken.Reason)
 	}
 	if e.pendingJobIDs(t)["j-broken"] {

@@ -75,9 +75,9 @@ func (s *Service) admitConcurrency(ctx context.Context, owner, repo, runID strin
 		if !spec.Concurrency.CancelInProgress {
 			return false, nil
 		}
-		// Cancel the holder run through the operator's terminal path, which
-		// folds it and releases this group; the next iteration takes it.
-		if _, cerr := s.cancelRunSystem(ctx, owner, repo, holder); cerr != nil {
+		// Cancel the holder run through the shared terminal path, which folds it
+		// and releases this group; the next iteration takes it.
+		if _, cerr := s.cancelRun(ctx, owner, repo, holder, cancelWhy{Reason: CancelReasonConcurrency}); cerr != nil {
 			return false, cerr
 		}
 	}

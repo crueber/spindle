@@ -31,6 +31,7 @@ import (
 	"github.com/crueber/spindle/internal/server/auth"
 	"github.com/crueber/spindle/internal/store"
 	"github.com/crueber/spindle/internal/threads"
+	"github.com/crueber/spindle/internal/threads/workflow"
 	"github.com/crueber/spindle/internal/wal"
 )
 
@@ -196,9 +197,11 @@ func threadsRun(svc *threads.Service, repo, sha, event string, opts threads.Crea
 	}()
 }
 
-// threadsOnPushOf builds the on-push run-creation hook (15 §2): each landed
-// branch ref creates the runs its workflow files trigger on. Deletes and
-// non-branch refs are skipped, and a push authenticated by a Threads job token
+// threadsOnPushOf builds the on-push run-creation hook (15 §2, §6.1): each
+// landed branch or tag ref creates the runs its workflow files trigger on — a
+// branch push matches `on.push.branches` by the branch name, a tag push matches
+// `on.push.tags` by the tag name and carries no branch. Deletes, notes and
+// other refs are skipped, and a push authenticated by a Threads job token
 // (byJob) creates nothing at all: GitHub's GITHUB_TOKEN rule — a job's own
 // `git push` must never retrigger workflows, or a `contents: write` workflow
 // rebuilds itself forever (the round-3 audit's loop). Nil service → nil hook.
@@ -212,13 +215,15 @@ func threadsOnPushOf(c *collabWiring) func(id git.RepoId, refs []server.PushedRe
 			return // a job token's push never starts a workflow run
 		}
 		for _, ref := range refs {
-			branch, ok := threadsRefTarget(ref)
+			name, kind, ok := threadsRefTarget(ref)
 			if !ok {
-				continue // tag/other ref or a delete: no run
+				continue // notes, pull refs or a delete: no run
 			}
-			threadsRun(svc, id.String(), ref.New, threads.EventPush, threads.CreateOpts{
-				Branch: branch, Ref: ref.Ref, Actor: "push",
-			})
+			opts := threads.CreateOpts{RefName: name, RefKind: kind, Ref: ref.Ref, Actor: "push"}
+			if kind == workflow.RefBranch {
+				opts.Branch = name // a tag run has no branch; its tag is the RefName
+			}
+			threadsRun(svc, id.String(), ref.New, threads.EventPush, opts)
 		}
 	}
 }
@@ -305,14 +310,21 @@ func onPushHookOf(c *collabWiring) func(id git.RepoId, refs []server.PushedRef, 
 	}
 }
 
-// threadsRefTarget reports whether a landed ref starts a Threads run: only
-// refs/heads/ creates/updates do (tags, notes and deletes do not).
-func threadsRefTarget(ref server.PushedRef) (string, bool) {
-	branch, ok := strings.CutPrefix(ref.Ref, "refs/heads/")
-	if !ok || branch == "" || isZeroOID(ref.New) {
-		return "", false
+// threadsRefTarget reports whether a landed ref starts a Threads run, and if
+// so, the ref's short name and kind (15 §6.1): a `refs/heads/…` create/update
+// is a branch push and a `refs/tags/…` create/update is a tag push. Notes,
+// pull refs and deletes (all-zero new oid) start nothing.
+func threadsRefTarget(ref server.PushedRef) (string, workflow.RefKind, bool) {
+	if isZeroOID(ref.New) {
+		return "", workflow.RefBranch, false
 	}
-	return branch, true
+	if branch, ok := strings.CutPrefix(ref.Ref, "refs/heads/"); ok && branch != "" {
+		return branch, workflow.RefBranch, true
+	}
+	if tag, ok := strings.CutPrefix(ref.Ref, "refs/tags/"); ok && tag != "" {
+		return tag, workflow.RefTag, true
+	}
+	return "", workflow.RefBranch, false
 }
 
 // isZeroOID reports a delete command's all-zero new oid (40 or 64 hex zeros).

@@ -4,6 +4,9 @@ import (
 	"errors"
 	"strings"
 	"testing"
+
+	"github.com/crueber/spindle/internal/server/auth"
+	"github.com/crueber/spindle/internal/threads/workflow"
 )
 
 // Workflow discovery (15 §1/§7): single/multiple/none, malformed is a visible
@@ -185,12 +188,12 @@ func TestSelectFilesTriggerMatrix(t *testing.T) {
 		{"bogus", "", "", "", 0},                    // unknown event: no match
 	}
 	for _, tc := range cases {
-		got := SelectFiles(files, tc.event, tc.branch, tc.action, tc.want)
+		got := SelectFiles(files, tc.event, workflow.RefBranch, tc.branch, tc.action, tc.want)
 		if len(got) != tc.n {
 			t.Errorf("SelectFiles(%s,%q,%q,%q) = %d, want %d", tc.event, tc.branch, tc.action, tc.want, len(got), tc.n)
 		}
 	}
-	if got := SelectFiles(files, EventDispatch, "", "", ".spindle/workflows/ci.yml"); len(got) != 1 {
+	if got := SelectFiles(files, EventDispatch, workflow.RefBranch, "", "", ".spindle/workflows/ci.yml"); len(got) != 1 {
 		t.Errorf("dispatch by full path = %d, want 1", len(got))
 	}
 }
@@ -248,4 +251,73 @@ func TestJobIDForCollisions(t *testing.T) {
 	if got := jobIDFor("!!!", used); got != "j-unnamed" {
 		t.Fatalf("empty slug id = %q", got)
 	}
+}
+
+// TestDiscoverIgnoresForeignWorkflowDirs is PAR-001's acceptance: the only
+// discovered location is .spindle/workflows, and a repository whose CI lives in
+// .github/workflows is a no-workflow repository — zero files, no run. It pins
+// both layers: a GitReader that (wrongly) hands back a foreign path is filtered
+// by workflowPath, and a real tree with only a foreign directory yields nothing
+// at all, so no trigger can ever create a run from it.
+//
+// The acceptance line's "named hint pointing at `spindle threads import`" is the
+// migration banner, which is PAR-003 (Wave 2): it is a page-only projection on an
+// explicit request, deliberately not a discovery path, so it is not asserted
+// here.
+func TestDiscoverIgnoresForeignWorkflowDirs(t *testing.T) {
+	foreign := ".github/workflows/ci.yml"
+	body := "name: CI\non: [push]\njobs:\n  build:\n    runs-on: linux\n    steps:\n      - run: echo hi\n"
+
+	t.Run("a reader that returns a foreign path is filtered", func(t *testing.T) {
+		g := newFakeGit()
+		g.list = []string{foreign, ".github/workflows/ci.yml", ".spindle/workflows/notes.txt"}
+		files, err := Discover(ctx(), g, "o/r", testSHA)
+		if err != nil {
+			t.Fatalf("Discover: %v", err)
+		}
+		if len(files) != 0 {
+			t.Fatalf("discovered %d files from foreign directories: %+v", len(files), files)
+		}
+	})
+
+	t.Run("a repository with only a forgejo directory creates no run", func(t *testing.T) {
+		e := newTestEnv(t)
+		// Replace the fixture with the foreign-only tree: the derived listing
+		// contains just the .forgejo path.
+		e.git = newFakeGit()
+		e.svc.Git = e.git
+		e.git.add(testSHA, foreign, body)
+
+		files, err := Discover(ctx(), e.git, "o/r", testSHA)
+		if err != nil {
+			t.Fatalf("Discover: %v", err)
+		}
+		if len(files) != 0 {
+			t.Fatalf("Discover returned %+v", files)
+		}
+		runs, err := e.svc.CreateRun(ctx(), "o/r", testSHA, EventPush, CreateOpts{
+			Branch: "main", Ref: "refs/heads/main", Actor: "writer",
+		})
+		if err != nil {
+			t.Fatalf("CreateRun: %v", err)
+		}
+		if len(runs) != 0 {
+			t.Fatalf("a foreign workflow directory created %d runs", len(runs))
+		}
+		list, err := e.svc.ListWorkflows(ctx(), "o/r", testSHA, auth.Principal{Name: "writer"})
+		if err != nil {
+			t.Fatalf("ListWorkflows: %v", err)
+		}
+		if len(list.Workflows) != 0 {
+			t.Fatalf("the workflow list shows foreign files: %+v", list.Workflows)
+		}
+		// Nothing was written to the run family either.
+		ids, err := e.svc.runIDs(ctx(), "o", "r")
+		if err != nil {
+			t.Fatalf("runIDs: %v", err)
+		}
+		if len(ids) != 0 {
+			t.Fatalf("run records exist for a no-workflow repo: %v", ids)
+		}
+	})
 }

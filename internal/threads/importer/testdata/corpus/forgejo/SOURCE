@@ -1,0 +1,9 @@
+# The conformance corpus (docs/features/21_parity_master.md §1): the operator's
+# own Forgejo workflows, copied byte for byte. The importer's golden tests read
+# these files; the parity harness (PAR-200) converts them once and runs them.
+#
+# repository                           path                                commit                                     fetched
+crueber/weave                         .github/workflows/ci.yml           5b2526d42ab076d1b80c39b60c13372994c23bdf   2026-11-26
+crueber/weave                         .github/workflows/publish-github.yml 5b2526d42ab076d1b80c39b60c13372994c23bdf  2026-11-26
+crueber/scriobh                       .github/workflows/ci.yml           034c9a50d40ea5c0404cfe5a66b3f3782d3068a4   2026-11-26
+crueber/scriobh                       .github/workflows/release.yml      034c9a50d40ea5c0404cfe5a66b3f3782d3068a4   2026-11-26

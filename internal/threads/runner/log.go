@@ -35,6 +35,7 @@ type Streamer struct {
 	jobRef  string
 	attempt int
 	mask    []string
+	maskMu  sync.RWMutex
 	logger  *slog.Logger
 	cancel  context.CancelFunc
 
@@ -116,7 +117,35 @@ func (s *Streamer) Cancelled() bool {
 // Mask replaces every secret value in s (best effort, the same rule the server
 // applies: exact substrings, longest first, values under 4 bytes skipped).
 func (s *Streamer) Mask(text string) string {
-	return maskValues(text, s.mask)
+	s.maskMu.RLock()
+	mask := s.mask
+	s.maskMu.RUnlock()
+	return maskValues(text, mask)
+}
+
+// addMask registers values with the mask list after the streamer started: the
+// plan adds every secret it can substitute, so a `${{ secrets.X }}` spliced
+// into a script is masked exactly like a variable delivered from the plan's
+// environment, even when the payload's own mask list named it not at all.
+func (s *Streamer) addMask(values []string) {
+	if len(values) == 0 {
+		return
+	}
+	s.maskMu.Lock()
+	defer s.maskMu.Unlock()
+	seen := make(map[string]bool, len(s.mask)+len(values))
+	for _, v := range s.mask {
+		seen[v] = true
+	}
+	merged := append([]string(nil), s.mask...)
+	for _, v := range values {
+		if v == "" || seen[v] {
+			continue
+		}
+		seen[v] = true
+		merged = append(merged, v)
+	}
+	s.mask = merged
 }
 
 // maskValues is the shared masking rule.
@@ -190,7 +219,7 @@ func (s *Streamer) flush() {
 		s.last = time.Now()
 		s.mu.Unlock()
 
-		text := maskValues(string(chunk[:n]), s.mask)
+		text := s.Mask(string(chunk[:n]))
 		if !s.send(seq, text) {
 			return
 		}

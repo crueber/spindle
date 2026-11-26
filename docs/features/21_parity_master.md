@@ -60,8 +60,9 @@ Three properties make that checkable rather than rhetorical:
    to `matrix.md`, checked by `make parity` (§9). A row is green only when its acceptance test is committed
    and passing.
 3. **No silent acceptance.** A key we do not implement is a named parse error or a named refusal — never
-   inert. This is the one rule both source cards agree on and the baseline already follows for `matrix.include`
-   and `pull_request.types`; the plan extends it to `permissions` scopes, container keys and workflow commands.
+   inert. This is the one rule both source cards agree on and the baseline already follows for
+   `pull_request.types` and container keys; the plan extends it to `permissions` scopes, remote action
+   forms and workflow commands.
 
 **Priority classes** (kept from both cards, and they still bind):
 
@@ -72,6 +73,35 @@ Three properties make that checkable rather than rhetorical:
 
 Waves are ordered by *when a real repository stops needing its old CI*, not by priority alone: priority
 decides order **inside** a wave.
+
+### 1.1 Wave 1 outcome (2026-11-26)
+
+Wave 1 is merged. The changes on `main`, in landing order:
+
+| Merge | What landed |
+|---|---|
+| `e4a3f949` | syntax core: `on.push.tags`, `needs: <string>`, `matrix.include`/`exclude` with GitHub's merge rules, `startsWith`/`contains`/`format`, the closed `github`/`forgejo`/`forge` fields including `actor`, `secrets.*` validation, and `${{ }}` validation in every documented step site |
+| `14cc2f89` | runner env: `GITHUB_TOKEN`/`FORGEJO_TOKEN` alias the scoped job token, `GITHUB_SERVER_URL`/`GITHUB_API_URL`, `ubuntu-latest` label mapping, checkout `fetch-tags`/`ref`/`path`, `$GITHUB_ENV`/`$GITHUB_PATH` with protected-name refusals, and job `continue-on-error` with GitHub semantics (Forgejo divergence recorded, D-4) |
+| `6ce73cf9` | the one-way importer (`spindle threads import --from forgejo\|github`), `--apply` on a branch only |
+| `19549aa8` | tag pushes create runs, `github.ref_name` is the tag, and a tag/branch pair with the same short name is independent |
+| `96276b4d` | implicit supersede (a newer push on the same full ref cancels the older in-flight run; concurrency groups reconciled) and `make parity` with the living matrix |
+| `df8464b5` | runtime substitution in step fields (`github.*`, `env.*`, `secrets.*`, `matrix.*`, `inputs.*`, steps/needs outputs; one pass; absent supported value empty, undeclared output an error), the run ref carried to the container so a tag job sees the tag in `GITHUB_REF`/`GITHUB_REF_NAME`, and secrets masked |
+
+**The corpus.** All four real Weave/Scriobh workflows convert, parse and plan with **zero refusals**; the
+tags-only file fires on a matching tag and on nothing else, and `scriobh-release` keeps its four
+`include` cells. The goldens are the importer's own output (`f13a2bc0`).
+
+**The matrix** (`docs/features/parity/parity.json`, 119 rows) at Wave 1 close: **20 `have`**, **50
+`partial`**, **49 `missing`** (no `non-goal` yet). Wave 1 owns 24 rows: 20 green and 4 still `partial` —
+`PAR-030` (substitution in `runs-on`/`container.*`/`services.*`), `PAR-032` (the remaining `github.*`
+identity/ref fields), `PAR-056` (an expression-valued `continue-on-error`), and `PAR-200` (the corpus does
+not yet run unmodified end to end, and the GitHub half of the corpus is absent). Wave 2 owns the other
+56 rows (30 `partial`, 26 `missing`).
+
+**What remains for Wave 2.** Finish the four Wave-1 partials above; then the Wave-2 items that need the
+D-2/D-3/D-5/D-10 machinery — `pull_request_target`, `workflow_run`, remote `uses:` with the allowlist and
+SHA pinning, and the cache service — plus the trigger/context/command long tail the matrix assigns to that
+wave. The matrix is the list; this paragraph only names the themes.
 
 ---
 
@@ -100,7 +130,7 @@ unconditionally, and it changes the shape of several source-card items.
   the corpus proves. That is a compatibility promise, not an identity: `${{ github.* }}`, `GITHUB_*` env
   vars, `actions/checkout`, `FORGEJO_*` aliases and `forgejo.*`/`forge.*` contexts are **compatibility
   aliases**, documented in one table (WORKFLOWS §12a) with the canonical spelling beside each.
-- **Decision D-1 (needs operator sign-off):** introduce **`spindle.*`** as the canonical expression context
+- **Decision D-1 (decided 2026-11-26 — approved):** introduce **`spindle.*`** as the canonical expression context
   and `SPINDLE_*` as the canonical env vars, with `github.*`/`forgejo.*`/`forge.*` and their env spellings
   kept as value-identical aliases. Rationale: `SPINDLE_*` already exists beside `GITHUB_*` in
   `runner/plan.go:540-594`, so the aliasing machinery is already there and costs nothing; without a canonical
@@ -539,7 +569,9 @@ conflict the default is the **secure compatible subset** — never a silent weak
 needs the weaker behaviour becomes an operator knob, off by default.
 
 Verdict scale: **safe as specified** (build it as written) · **compatible subset** (build the secure subset
-and record the divergence) · **needs operator decision** (blocked on a named signatory).
+and record the divergence) · **decided** (the operator chose an option on 2026-11-26; the choice and its
+one-line rationale are recorded in the verdict and indexed in §7.18). Every item that needed a signatory
+has one; where an earlier draft said `needs operator decision`, the chosen option is recorded instead.
 
 ### S1 — Remote and marketplace actions (`uses: owner/repo[/path]@ref`, full URLs)
 
@@ -559,8 +591,9 @@ and record the divergence) · **needs operator decision** (blocked on a named si
 - **Residual.** An allowlisted action's upstream compromise is trusted until the pinned SHA is bumped; the
   action still reads the job's secrets (inherent to the model, and stated in WORKFLOWS: *an action is code
   with your job's privileges*).
-- **Verdict.** **compatible subset** — needs operator decision **D-5** (default mode and the initial
-  allowlist).
+- **Verdict.** **compatible subset — decided 2026-11-26 (D-5):** ship `allowlist` mode with `require_sha`
+  outside the allowlist and the mirror optional; resolution and revocation stay as controlled above, so
+  the supply-chain control does not depend on an operator remembering to turn it on.
 
 ### S2 — Docker-in-job
 
@@ -578,7 +611,9 @@ and record the divergence) · **needs operator decision** (blocked on a named si
 - **Residual.** A socket-granted runner's jobs are node-root-equivalent by construction — that is the
   operator's declaration, not a workflow's. Daemonless builds depend on host kernel features and fail
   visibly where they are unavailable.
-- **Verdict.** **compatible subset** — needs operator decision **D-8**.
+- **Verdict.** **compatible subset — decided 2026-11-26 (D-8):** daemonless builders are the parity path;
+  a host socket or privilege grant is a **runner declaration** an operator makes once, never a key a
+  workflow can ask for, so an anonymous PR can never widen its own isolation.
 
 ### S3 — `${{ }}` in `run`, `with` and `env`
 
@@ -630,8 +665,9 @@ and record the divergence) · **needs operator decision** (blocked on a named si
   and an audit entry.
 - **Residual.** A `run:` step can `git fetch` the head itself and execute it; no plan-time inspection sees
   inside a script. That is why the default is off, and why enabling it is an explicit, audited operator act.
-- **Verdict.** **needs operator decision D-2** (enable per repository? and whether the second switch may
-  ever be on).
+- **Verdict.** **compatible subset — decided 2026-11-26 (D-2):** per-repository opt-in, head checkout
+  behind a second switch, both audited. Off by default keeps the pwn-request off an instance that never
+  asks for it; the second switch makes the deliberate case reviewable instead of impossible.
 
 ### S6 — Cache
 
@@ -648,8 +684,9 @@ and record the divergence) · **needs operator decision** (blocked on a named si
 - **Residual.** A same-repository PR from someone with write can poison what main reads — that actor already
   has write, so there is no escalation. A cache entry used as a binary is still attacker-influenced code if
   the workflow executes it; documented.
-- **Verdict.** **compatible subset** — needs operator decision **D-10** (PR-to-PR cache visibility, default
-  none; and the size budget).
+- **Verdict.** **compatible subset — decided 2026-11-26 (D-10):** PR-scoped writes, no PR-to-PR reads,
+  discard at merge. A PR run can warm its own namespace and read its base, never feed another PR, so a
+  merged cache entry always has a trusted author.
 
 ### S7 — Artifacts (same-run and cross-run)
 
@@ -666,8 +703,9 @@ and record the divergence) · **needs operator decision** (blocked on a named si
   the human control. Artifact bytes are never masked — stated in the guide.
 - **Residual.** An approved workflow_run that downloads and executes a fork artifact is a deliberate act by
   a maintainer; the approval names the run.
-- **Verdict.** **compatible subset** — needs operator decision **D-3** (untrusted-parent policy: approve
-  per run, or refuse cross-run consumption from untrusted parents entirely).
+- **Verdict.** **compatible subset — decided 2026-11-26 (D-3):** approval per run for an untrusted
+  parent's artifact, never automatic and never for a secrets-bearing job. The human decides with the
+  parent run named, so a fork artifact can cross into a trusted job only as a deliberate act.
 
 ### S8 — Reusable workflows
 
@@ -682,8 +720,9 @@ and record the divergence) · **needs operator decision** (blocked on a named si
   callee's file is fetched at run creation and embedded, never read at execution time.
 - **Residual.** The callee still runs with the job token and the secrets explicitly passed; allowlisting an
   organization's workflows is a trust decision the operator makes once.
-- **Verdict.** **compatible subset** — needs operator decision **D-6** (whether `inherit` may ever cross a
-  repository boundary inside one organization — recommended: no).
+- **Verdict.** **compatible subset — decided 2026-11-26 (D-6):** `secrets: inherit` never crosses a
+  repository boundary, even inside one organization. Same-repository inheritance is a closed set, and a
+  cross-repo callee must list its secrets explicitly — the one shape that is exfiltration by default.
 
 ### S9 — OIDC claims
 
@@ -714,9 +753,10 @@ and record the divergence) · **needs operator decision** (blocked on a named si
   and one repository, expires with the job, and a push made with it starts no workflow.
 - **Residual.** A workflow that needs write and gets `403` must be edited — a named failure with the missing
   scope, not a silent downgrade.
-- **Verdict.** **compatible subset** — needs operator decisions **D-11** (which scopes may exist at all:
-  each new scope widens the job token) and **D-12** (the default level for a workflow with no `permissions:`
-  block, and the written Forgejo divergence).
+- **Verdict.** **compatible subset — decided 2026-11-26 (D-11, D-12):** only scopes with a real surface
+  exist, every other scope is refused by name; a workflow with no `permissions:` gets `contents: read`,
+  and Forgejo's implicit write stays refused. Each scope is one capability, so the token can never be
+  wider than the key that asked for it.
 
 ### S11 — Runner isolation, capacity and the managed pool
 
@@ -731,8 +771,9 @@ and record the divergence) · **needs operator decision** (blocked on a named si
   hard bounds (max workers, max queue age) and a drain path.
 - **Residual.** The Docker daemon remains the isolation boundary; a kernel escape in one container is the
   node.
-- **Verdict.** **safe as specified** at capacity 1; **needs operator decision D-14** for the pool (enable,
-  bounds, fork policy).
+- **Verdict.** **safe as specified — decided 2026-11-26 (D-14):** no managed pool; capacity 1 is the
+  untrusted path, and a capacity-N runner opts in explicitly. Unattended execution of untrusted code is
+  not a default an instance can drift into.
 
 ### S12 — `container.options`, volumes and privilege
 
@@ -762,8 +803,9 @@ and record the divergence) · **needs operator decision** (blocked on a named si
   head trees, and are classified untrusted exactly like the head they contain.
 - **Residual.** A maintainer who approves a fork run accepts its code. A job-token push from a fork run
   remains impossible.
-- **Verdict.** **safe as specified** — with **D-13** confirming that a per-repository
-  `send_write_tokens` switch exists at all (off by default, maintain+ to flip, audited).
+- **Verdict.** **safe as specified — decided 2026-11-26 (D-13):** a per-repository `send_write_tokens`
+  switch exists, off by default, flippable by `maintain` or above, and audited. A fork run stays read-only
+  unless a maintainer writes that decision down.
 
 ### S14 — The importer
 
@@ -778,7 +820,9 @@ and record the divergence) · **needs operator decision** (blocked on a named si
   cannot translate; prints a unified diff; the report lists every dropped, renamed or approximated key.
 - **Residual.** A translated file can still differ semantically where a compatible subset was chosen; the
   report names each one and the operator reviews the diff.
-- **Verdict.** **safe as specified**.
+- **Verdict.** **safe as specified — decided 2026-11-26 (D-9):** `--apply` may commit the conversion on
+  a **new branch only** — never the current branch, never the default branch, never a force push — so the
+  importer can produce a reviewable change but can never rewrite what it did not write.
 
 ### S15 — Masking, annotations and summaries
 
@@ -791,7 +835,7 @@ and record the divergence) · **needs operator decision** (blocked on a named si
   through the existing server-side markdown sanitizer (`internal/webui/mdsanitize.go`), so the XSS boundary
   does not move. `add-mask` only ever adds. `stop-commands` requires an unguessable token and is per-step.
 - **Residual.** Masking stays exact-substring and best effort.
-- **Verdict.** **safe as specified** — the importer's default is read-only; **D-9** confirms that `--apply` may commit on a new branch and never on the default branch.
+- **Verdict.** **safe as specified**.
 
 ### S16 — Step `background`, `wait`, `wait-all`, `cancel` and `parallel`
 
@@ -807,8 +851,9 @@ and record the divergence) · **needs operator decision** (blocked on a named si
   one unit in the log; a leaked process fails the job's cleanup and is reported, never silently inherited.
 - **Residual.** Two parallel steps writing one file race — the documented GitHub behaviour, and the same
   warning the docs carry.
-- **Verdict.** **needs operator decision D-7** (build it, or record it as a non-goal with the corpus
-  expectation adjusted — it is a 2026 doc-revision key, not a 2023-era one).
+- **Verdict.** **decided 2026-11-26 (D-7):** build background/parallel steps with the process-group
+  kill above. The parity win is real for dev servers and sidecar builds, and the process-group rule is
+  what keeps a background process from outliving the step that started it.
 
 ### S17 — Non-goals that are also security positions
 
@@ -821,18 +866,20 @@ and record the divergence) · **needs operator decision** (blocked on a named si
   (`runs-on: windows-latest` queues with a reason that names the non-goal), so nobody waits on a job that
   will never run. The corpus expectations are adjusted in the same row.
 - **Residual.** A repository that genuinely needs a macOS build keeps that job in its old CI.
-- **Verdict.** **needs operator decision D-15** (the three non-goals, named as a block).
+- **Verdict.** **decided 2026-11-26 (D-15):** approve all three non-goals, each refused by name. An
+  unisolated host backend, a Windows/macOS fleet we cannot isolate, and an attestation trust root we do
+  not operate are infrastructure promises, not compatibility gaps.
 
 ---
 
-### 7.18 Decision index (the operator gate)
+### 7.18 Decision record (operator decisions, 2026-11-26)
 
-Fifteen decisions need a named signatory before their items can turn green. A decision closes when the
-operator replies on the master card; the matrix row then carries `approved_by` and the date, and the item
-moves. Until then the row stays `partial` with `decision: D-n` — a `needs operator decision` verdict is a
-gate, not a blocker on the other 100+ items.
+The operator decided all fifteen on **2026-11-26**. Each verdict above now carries the chosen option and
+its one-line rationale; this table is the index. A decision closes when the operator replies on the master
+card; the matrix row then carries `approved_by` and the date, and the item moves. Until the implementation
+lands, a row may still read `partial` with `decision: D-n` — the decision is settled, the code is not.
 
-| ID | Decision | From | Blocks | Recommendation |
+| ID | Decision | From | Blocks | Chosen (2026-11-26) |
 |---|---|---|---|---|
 | D-1 | Canonical `spindle.*` expression context + `SPINDLE_*` env, with `github.*`/`forgejo.*` as aliases | §2.2 | PAR-004 | Introduce it; the aliasing already exists and parity is unaffected |
 | D-2 | `pull_request_target` at all; and head checkout inside it | S5 | PAR-015 | Per-repository opt-in, head checkout behind a second switch, both audited |
@@ -840,7 +887,7 @@ gate, not a blocker on the other 100+ items.
 | D-4 | Job-level `continue-on-error` keeps GitHub semantics where Forgejo documents "ignored" | §9 | PAR-056 | Keep GitHub behaviour, record the divergence |
 | D-5 | Remote/marketplace actions: default mode and the initial allowlist | S1 | PAR-070, PAR-071, PAR-074 | `allowlist` mode, SHA required outside it, mirror optional |
 | D-6 | `secrets: inherit` across a repository boundary | S8 | PAR-076 | Refuse across repositories, even inside one organization |
-| D-7 | Step `background`/`wait`/`wait-all`/`cancel`/`parallel` | S16 | PAR-080 | Build it with process-group kill, or record the non-goal |
+| D-7 | Step `background`/`wait`/`wait-all`/`cancel`/`parallel` | S16 | PAR-080 | Build it, with process-group kill on every exit path |
 | D-8 | Docker-in-job: daemonless only, or a runner-level daemon/privilege grant | S2 | PAR-081, PAR-179 | Daemonless default; the grant is a runner declaration, never a workflow one |
 | D-9 | The importer may commit a converted file on a new branch | S14 | PAR-002 | Yes, `--apply` on a branch, never the default branch, never force |
 | D-10 | Cache trust boundaries (fork/PR writes) and the size budget | S6 | PAR-095, PAR-096 | PR-scoped writes, no PR-to-PR reads, discard at merge |
@@ -860,15 +907,15 @@ the matrix carries the row, the refusal is named, and the corpus expectation is 
 |---|---|---|---|
 | N1 | …read `.github/workflows/` or `.github/workflows/` at run time, in any mode | Product rule: Threads runs Spindle workflows. A second discovery path splits the product, doubles the parser surface, and makes "which file ran?" ambiguous. The importer is the migration (`PAR-002`) | **given** (the operator's product rule) |
 | N2 | …present a Forgejo workflow as a supported format or use "Forgejo workflow" as product language | Same rule. Compatibility is documented as aliases (§2.2), not identity | **given** (product rule) |
-| N3 | …trust an arbitrary `uses:` with no resolution record and no policy | A marketplace without pinning, an audit record and a revocation path is a supply-chain hole with a UI (`PAR-070`, S1) | needs **D-5** |
+| N3 | …trust an arbitrary `uses:` with no resolution record and no policy | A marketplace without pinning, an audit record and a revocation path is a supply-chain hole with a UI (`PAR-070`, S1) | **given** (D-5, 2026-11-26) |
 | N4 | …accept a key we do not implement as inert | Silent acceptance is how `permissions` became a false promise. Named parse error or named refusal, always | policy, no sign-off needed |
-| N5 | …let a workflow ask for `--privileged`, `--cap-add`, `--device`, `--security-opt`, host mounts, or the docker socket | Each is node-root from an anonymous PR (`PAR-081`, `PAR-179`, S2, S12). A runner may be granted the socket by its operator; a *workflow* never may | needs **D-8** (confirm the refusal as the permanent position) |
-| N6 | …run a job unisolated on the host or in LXC; host Windows/macOS runners; artifact attestations | No isolation story / no fleet / no sigstore trust root (`PAR-182`, S17) | needs **D-15** |
+| N5 | …let a workflow ask for `--privileged`, `--cap-add`, `--device`, `--security-opt`, host mounts, or the docker socket | Each is node-root from an anonymous PR (`PAR-081`, `PAR-179`, S2, S12). A runner may be granted the socket by its operator; a *workflow* never may | **given** (D-8, 2026-11-26 — the refusal is permanent) |
+| N6 | …run a job unisolated on the host or in LXC; host Windows/macOS runners; artifact attestations | No isolation story / no fleet / no sigstore trust root (`PAR-182`, S17) | **given** (D-15, 2026-11-26) |
 | N7 | …put a secret in argv (`container.entrypoint`, `command`, `options`) or in the plan payload when a name suffices | argv is host-visible; the payload is in the bucket (S3) | policy, no sign-off needed |
-| N8 | …pass `secrets: inherit` to a cross-repository reusable workflow | Exfiltration by design (S8) | needs **D-6** (confirm) |
-| N9 | …enable `pull_request_target` or untrusted-parent cross-run artifact consumption by default | The pwn-request and untrusted-artifact vectors (S5, S7) | needs **D-2 / D-3** |
+| N8 | …pass `secrets: inherit` to a cross-repository reusable workflow | Exfiltration by design (S8) | **given** (D-6, 2026-11-26) |
+| N9 | …enable `pull_request_target` or untrusted-parent cross-run artifact consumption by default | The pwn-request and untrusted-artifact vectors (S5, S7) | **given** (D-2/D-3, 2026-11-26 — opt-in and approval, never default) |
 | N10 | …implement merge-queue semantics in this plan | Owned by card `01a1fe8a26df000000c260ec351713`; here only the `merge_group` trigger rides on it (`PAR-016`) | out of scope, no sign-off |
-| N11 | …give a workflow an implicit write token "because Forgejo does" | The whole point of a scoped token (S10) | needs **D-12** (confirm the divergence) |
+| N11 | …give a workflow an implicit write token "because Forgejo does" | The whole point of a scoped token (S10) | **given** (D-12, 2026-11-26 — `contents: read` default) |
 
 ---
 
@@ -1160,3 +1207,16 @@ rule and must not be built.
 | 1b env + token | PAR-110, 111, 114, 170 | T3 | A job step sees `GITHUB_TOKEN`, `FORGEJO_TOKEN`, `GITHUB_SERVER_URL`; `ubuntu-latest` schedules |
 | 1c execution | PAR-073, 090, 091 | T2 | `fetch-tags: true` checkout; `$GITHUB_ENV`/`$GITHUB_PATH` visible to the next step only |
 | 1d semantics + proof | PAR-150, 056, 002, 200, 201, 202; verify rows PAR-001, PAR-082, PAR-137 | T3/T1/T7/T8 | Two rapid pushes leave one run; importer goldens; `make parity` green for the Forgejo corpus |
+
+- **NEW (2026-11-26) — the gate ships in two modes, and the corpus tightens itself.** §9 says the
+  gate fails on a `missing` row; taken literally, `make parity` could not be green in Wave 1 (the
+  later waves are `missing` by design), which would make the merge gate permanently red and the
+  rule the first thing anyone disables. So `make parity` (in `make ci`) enforces *integrity* — a
+  `have` row needs an existing test, every gap is planned, the plan and the matrix agree on the id
+  set, the render is fresh — and `make parity-closed` enforces the §9 *closure* rule (no `missing`
+  row). The corpus mirrors it: a file blocked by an open row must fail with its documented refusal,
+  and the entry flips to the strict assertion in the change that closes the row. The other
+  deviation from this document's text: the four Forgejo corpus files need no dialect translation
+  (their syntax is the accepted syntax), so their converted goldens are byte-identical to the
+  sources and `SOURCE.json` records that; `TestParityImporterReproducesGoldens` turns the claim into
+  the importer's own output the moment PAR-002 lands.

@@ -1,0 +1,91 @@
+# Publish this repository to GitHub: one squash commit per publish.
+#
+#   Forgejo -> crueber/weave -> Actions -> "publish to github" -> Run workflow
+#
+# Pressing the button is the whole release process. Pick a version bump (patch, minor, major): that
+# number of the highest vX.Y.Z tag, on this repository or on the GitHub target, goes up and the lower
+# numbers reset. Pick `none` to publish an exact tag typed in the field instead.
+#
+# It exports the current tree, rewrites every reference to github.com, installs the GitHub Actions
+# that build the image (GHCR) and the CLI release (GitHub Releases), and pushes ONE new commit on top
+# of the GitHub repository's main. That commit squashes every development commit since the previous
+# publish (its message lists them and records the source commit). Detailed history stays here.
+#
+# REQUIRED SECRET (Forgejo, repository settings -> Actions -> Secrets)
+#   PUBLISH_GITHUB_TOKEN : a GitHub PAT with `repo` (and `workflow`, to push .github/workflows) on the
+#                          target repository. Read by the script from the environment, never argv.
+name: publish to github
+on:
+  workflow_dispatch:
+    inputs:
+      # Gitea/Forgejo REQUIRES a `type` on every input. Without it the Run-workflow form renders
+      # "Invalid input type ''" against both fields and refuses to submit, which looks like a
+      # required-value error rather than a schema error.
+      bump:
+        description: 'Version bump for the release tag'
+        type: choice
+        options:
+          - patch
+          - minor
+          - major
+          - none
+        default: patch
+      tag:
+        description: 'Exact tag, used when the bump is none (e.g. v1.2.3); a bump wins when both are set'
+        required: false
+        default: ''
+        type: string
+      repo:
+        description: 'Target GitHub repository, owner/name'
+        required: true
+        default: 'crueber/weave'
+        type: string
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0   # full history: the publish summarises every commit since the last publish
+          fetch-tags: true
+      - name: publish
+        env:
+          GITHUB_TOKEN: ${{ secrets.PUBLISH_GITHUB_TOKEN }}
+          BUMP: ${{ github.event.inputs.bump }}
+          INPUT_TAG: ${{ github.event.inputs.tag }}
+          TARGET: ${{ github.event.inputs.repo }}
+        run: |
+          set -eu
+          BUMP=${BUMP:-patch}
+          [ -n "$GITHUB_TOKEN" ] || { echo "PUBLISH_GITHUB_TOKEN is not set on this repository"; exit 1; }
+          chmod +x scripts/publish-to-github.sh
+          case "$BUMP" in
+            none)
+              [ -n "${INPUT_TAG:-}" ] || { echo "bump is none: type an exact tag (e.g. v1.2.3) in the tag field" >&2; exit 1; }
+              VERSION="$INPUT_TAG"
+              ;;
+            patch|minor|major) ;;
+            *) echo "unknown bump: ${BUMP}" >&2; exit 1 ;;
+          esac
+          if [ "$BUMP" != "none" ]; then
+            # highest vX.Y.Z across this repository and the GitHub target, then the chosen bump
+            git fetch --tags --quiet origin 2>/dev/null || true
+            LATEST=$( { git tag --list 'v[0-9]*'
+                        GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=http.extraHeader GIT_CONFIG_VALUE_0="Authorization: Basic $(printf 'x-access-token:%s' "$GITHUB_TOKEN" | base64 -w0)" \
+                          git ls-remote --tags --refs "https://github.com/${TARGET}.git" 2>/dev/null | sed 's#.*refs/tags/##'
+                      } | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | sort -V | tail -n1 )
+            if [ -z "$LATEST" ]; then
+              VERSION=v0.0.1
+            else
+              IFS=. read -r MA MI PA <<<"${LATEST#v}"
+              case "$BUMP" in
+                major) MA=$((MA + 1)); MI=0; PA=0 ;;
+                minor) MI=$((MI + 1)); PA=0 ;;
+                patch) PA=$((PA + 1)) ;;
+              esac
+              VERSION="v${MA}.${MI}.${PA}"
+            fi
+            echo "bump ${BUMP} from ${LATEST:-no tag} -> $VERSION"
+          fi
+          ./scripts/publish-to-github.sh --repo "$TARGET" --version "$VERSION" --apply

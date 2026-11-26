@@ -34,10 +34,11 @@ with knowledge they already have.
 ## 1. Scope
 
 - **Workflow files:** `.spindle/workflows/*.yml` at the commit being built, parsed by
-  `internal/threads/workflow` (`gopkg.in/yaml.v3`, the one package allowed to import it — AGENTS law 1,
-  amended 2026-11-20). Unknown keys are rejected, not ignored, and rejection is **per file**: the
-  error belongs to that workflow only and is shown in the UI/API (§2.1). No cross-forge file
-  fallback (`.github/`, `.forgejo/` are not read) — one documented location.
+  `internal/threads/workflow` (`gopkg.in/yaml.v3`, the one package family allowed to import it —
+  AGENTS law 1, amended 2026-11-20; the one-way importer `internal/threads/importer` is the other
+  member, amended 2026-11-26 for PAR-002). Unknown keys are rejected, not ignored, and rejection is
+  **per file**: the error belongs to that workflow only and is shown in the UI/API (§2.1). No
+  cross-forge file fallback (`.github/`, `.forgejo/` are not read) — one documented location.
 - **Accepted workflow syntax (v1):** `on` as a string, a list, or a mapping with
   `push.branches/tags`, `pull_request.branches/types` (types filtered against the emitted
   `opened`/`synchronize`/`reopened` set, validated at parse time), `workflow_dispatch.inputs` (typed
@@ -760,7 +761,8 @@ long-poll), so there is no separate liveness ping.
 `owner/repo/run/job`): the protocol table's `{id}` cannot be a bare job id, because two runs may both
 own a job called `build`. The path's ref and attempt must match the token's claims (defence in
 depth). The fetch payload is self-contained: repo/run/job ids, attempt, commit, event, branch,
-workflow, trust class, `spec`, the check context, `secrets` + `mask` (trusted runs only),
+workflow, trust class, `spec`, the check context, `server_url` (the canonical origin the job exposes
+as `GITHUB_SERVER_URL`/`GITHUB_API_URL`, PAR-111), `secrets` + `mask` (trusted runs only),
 `secrets_denied`, the folded `needs_outputs` of a dependent job (§4.1), and the lease. Declaring
 labels is how a runner says what it *is*; fetching is how it says it is *alive*; both are one write
 per call at most.
@@ -1922,3 +1924,118 @@ classes and wrap at narrow widths; verified at 1440×900 and ~390×844 with
   overlap that in one label, so Forgejo-shaped examples (`runs-on: [self-hosted, linux]`,
   `ubuntu-latest`) never matched and every doc/test example now names the real set or a matching
   subset.
+
+- **NEW (2026-11-26) — Actions parity wave 1b/1c: token aliases, server addresses, command files,
+  hosted labels, checkout inputs** (`docs/features/21_parity_master.md` PAR-110/111/114/170/073/090/091,
+  D-4/D-12). (a) **One token, three spellings.** The attempt credential is also delivered as
+  `GITHUB_TOKEN`/`FORGEJO_TOKEN` and resolves as `${{ secrets.GITHUB_TOKEN }}`; nothing new is minted,
+  so scopes and lifetime cannot diverge. An authored `env:` value for those names wins (a workflow
+  publishing with its own PAT keeps it — `publish-github.yml` does), and the secret name is reserved
+  to the job token. Delivery stays name-only and the token joins `mask`. (b) **Addresses come from
+  the configuration, never a literal host.** The fetch payload carries `server_url` (the same
+  resolved base as the checkout: `server.public_url`, else the request origin with
+  `X-Forwarded-Proto`), and the runner exports `GITHUB_SERVER_URL`,
+  `GITHUB_API_URL` (`<origin>/api/v1`) and `FORGEJO_SERVER_URL`; `${{ github.server_url }}` resolves
+  to the same value. The closed `github.*` vocabulary (wave 1a) gains exactly `server_url` and
+  `api_url` for this — the parser accepts them in every alias spelling, the runner substitutes them
+  in step fields, and a **job-level** `if:` still reads them empty (the server's context predates
+  the fields). This supersedes the earlier "no hosted labels" note above for the hosted Linux
+  spelling only: `ubuntu-latest`/`ubuntu-24.04|22.04|20.04` now expand at enqueue onto the
+  `self-hosted` + `linux` set (PAR-170) — a replacement that still requires every expanded label, so
+  an alias cannot widen a runner's declared capabilities; `windows-*`/`macos-*` stay unmapped as the
+  D-15 non-goal, and the image remains the operator's `--image` (label→image is PAR-171). (c) **The
+  environment default is recorded, not changed** (PAR-114/D-12): no `permissions:` means
+  `contents: read` and a push is refused with a 403 naming that scope, diverging from Forgejo's
+  implicit write. (d) **Job-level `continue-on-error` keeps GitHub semantics** (PAR-056/D-4): the job
+  record stays `failure`+`tolerated`, the run fold and `needs.<job>.result` read success, dependents
+  run — Forgejo's "ignored" is the recorded divergence. (e) **Command files are per-step paths in
+  the job container**, collected after the step and layered onto the NEXT step's `docker exec`
+  (env) or a `sh -c` wrapper (PATH prepend) — never the runner's process environment, so concurrent
+  jobs cannot see each other; values are one `NAME=VALUE`/directory per line (no heredoc: GitHub
+  documents none for these files), protected names are refused by name (runner namespaces, `CI`,
+  `PATH`, startup hooks), caps are enforced, and a `docker://` action receives none of it (same rule
+  as secrets). (f) **Checkout inputs grow to `ref`/`path`/`fetch-tags`** with an explicit, pinned
+  argv and `--no-tags` made explicit; every unsupported documented input is refused by name with
+  its alternative rather than silently ignored.
+
+- **NEW (2026-11-26) — the importer is a one-way converter, not a second discovery path.** PAR-002
+  (`docs/features/21_parity_master.md` §2.3): `.github/workflows/` and `.github/workflows/` stay
+  unread by the engine (PAR-001); `spindle threads import` reads them once, on an operator command,
+  and emits `.spindle/workflows/<name>.yml`. (a) **Refuse, never guess.** Every construct the target
+  language cannot express is a report entry *and* a `# UNTRANSLATED:` comment at its own site, and
+  the command exits non-zero even though the file is written; `--apply` refuses to commit a partial
+  conversion without `--allow-partial`. A step or job with no translation is replaced by one that
+  fails with the reason, so a lossy conversion can never look green. (b) **The target grammar has one
+  implementation.** Every generated file is validated with `workflow.Parse`; a failure is an importer
+  error naming the construct, never a warning. The translator walks the parsed YAML node tree (not a
+  second schema) so comments, key order and anchors survive; anchors are materialized and mechanical
+  rewrites (`needs: test` → `needs: [test]`, scalar branch filters → lists, `runs-on: docker` → the
+  default labels, `github.event.inputs.x` → `inputs.x`, `$GITHUB_SERVER_URL` → `$SPINDLE_SERVER`,
+  `${{ secrets.X }}` in a `run:` → `${X}`) are report *notes*. (c) **Read-only by default.**
+  `--apply` creates a new branch (`spindle/import-<platform>-<timestamp>`), writes and commits there,
+  and stops: no push, no force, never the current branch, and it refuses a dirty work tree so an
+  operator's uncommitted work cannot be folded into the conversion. (d) **Untrusted input.** Source
+  files are text with a 1 MiB cap; discovery and output paths are resolved and required to stay inside
+  the repository (a symlink out of it is refused); the source directory is never written. (e) **The
+  yaml.v3 boundary widens by exactly one package.** `internal/threads/importer` imports it for the
+  same reason `internal/threads/workflow` does — both parse a YAML workflow document (AGENTS law 1,
+  amended in the same change); no other package may.
+- **NEW (2026-11-26) — implicit supersede is one CAS'd head record per (workflow file, ref), not a
+  scan.** (PAR-150, `docs/threads.md` §3.1a.) (a) **Why a head record.** "Cancel the run of the
+  commit this push replaces" needs the previous run of the pair, and a run-family LIST is a hot-path
+  scan law 4/6 forbid. One small record (`threads/supersede/<wf>.<ref>.json`) names the newest run;
+  the writer that advances it is told what it displaced, and a writer that finds a *newer* id there
+  has itself been superseded and cancels itself. That single forward-only rule (run ids are
+  time-ordered) closes the read-then-cancel window without a lock. (b) **Adoption is after the run
+  header, cancellation after the enqueue.** The header stays the run's commit point, and a head id
+  can never name a run whose header is not visible; applying the cancel last means a run this
+  creation superseded is always inspectable before it is terminated. (c) **The two concurrency rules
+  are reconciled explicitly, not stacked.** A run that declares a `concurrency:` group neither
+  adopts a head nor is implicitly cancelled: the group is the workflow's explicit serialisation
+  choice (PAR-152), and implicitly cancelling its holder would make `cancel-in-progress: false` a
+  lie. Implicit supersede is the group-free default; the group is the override. (d) **One cancel
+  path.** Operator cancel, supersede, `cancel-in-progress` and the approval deny all call
+  `cancelRun`, which is idempotent and keeps the first reason (`cancel_reason`/`cancelled_by`/
+  `superseded_by` on the header, the reason on a superseded run's queued jobs). (e) **Budget.** A
+  group-free push/PR run adds one GET + one conditional PUT of the head, issued in its own goroutine
+  concurrently with the checks mirror and the enqueue; dispatches, schedules, PR `opened`/`reopened`
+  and every grouped workflow add none, and the cancel is the pre-existing terminal path paid only
+  when an older live run exists.
+- **NEW (2026-11-26) — the parity matrix has two modes, because Wave 1 lands with planned gaps.**
+  (PAR-201, `docs/go/15_testing.md` §6.8.) §9 of the parity master plan says the gate fails on a
+  `missing` row; taken literally that makes `make parity` red for every later wave, so the CI gate
+  enforces *integrity* (green needs an existing test, every gap planned, the plan/matrix id sets
+  agree, the render fresh) and `make parity-closed` enforces the plan's *closure* rule (no `missing`
+  row). The closure mode is the definition of done, not a per-PR gate. The corpus harness mirrors
+  the same discipline: a file blocked by an open row must fail with its documented refusal, and the
+  entry flips to the strict shape assertion in the change that closes the row.
+- **NEW (2026-11-26) — Actions parity wave 1d: one substitution pass in every step site**
+  (`docs/features/21_parity_master.md`; docs/threads.md §3.6, docs/WORKFLOWS.md §6.2). (a) **One
+  value set per step.** The runner feeds `workflow.TemplateValues{GitHub, Matrix, Inputs, Env,
+  Secrets, Steps, Needs}` to `workflow.Substitute` for `name`, `run`, `if`, `shell`,
+  `working-directory`, `env:` values, `with:` values, a composite action's `outputs:` and a job's
+  `outputs:` — replacing the earlier matrix/inputs-only path plus the two ad-hoc cases (a
+  whole-value step `env:` secret and the two server addresses). `github.*` is the closed field set
+  captured from the runner's built-ins before any authored `env:` overlay (so `env: GITHUB_SHA: …`
+  cannot change `${{ github.sha }}`); `env.*` is the authored layer at the site, the step's own
+  values resolving against the layer below them; `secrets.*` is the job's secret map plus the
+  reserved token aliases. (b) **The payload carries the actor.** `FetchResult.Actor` (the run's
+  `actor`) is exposed as `GITHUB_ACTOR` and `${{ github.actor }}`, so a step `if:` and a step field
+  read the same value a job-level `if:` reads on the server. (c) **Empty vs error.** An absent
+  supported value expands empty (an unset env name, a missing secret, no actor, no origin); an
+  undeclared `steps.<id>.outputs.<name>` / `needs.<job>.outputs.<name>` fails the step naming the
+  reference. The plan-time preview defers output spans (nothing has run yet) and the executor
+  resolves the authored template once, immediately before the step runs, so a substituted value is
+  never rescanned. (d) **Masking follows substitution.** Every secret the plan can substitute joins
+  the stream's mask list at job start (`Streamer.addMask`, mutex-guarded), so an embedded
+  `${{ secrets.X }}` spliced into a script prints `***` exactly like a variable delivered from the
+  plan's environment. A whole-value step `env:` entry keeps the stronger by-NAME delivery (no
+  secret in argv).
+  (e) **A tag run's ref reaches the container.** The fetch payload carries the run's full `ref`
+  (`refs/heads/main`, `refs/tags/v1.2.3`), and the runner derives `GITHUB_REF`/`SPINDLE_REF` and
+  `GITHUB_REF_NAME` from it: a tag run has no branch, so the old branch-only derivation left both
+  variables empty while the server-side `github.*` was already correct. A pull request keeps its
+  BASE branch (the payload's `refs/pull/<n>/head` is not a job's identity — the same rule the OIDC
+  token's `ref` claim applies), and a payload with neither a ref nor a branch answers empty, never
+  `refs/heads/`. `GITHUB_REF_TYPE` is deliberately not invented: `ref_type` is not in the closed
+  vocabulary.

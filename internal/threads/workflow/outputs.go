@@ -110,9 +110,9 @@ func validateJobOutputs(jobName string, job Job, inputNames, axes []string) erro
 						ErrBadOutput, jobName, name, ref.Raw, listOrNone(declared))
 				}
 			case "needs":
-				if !containsExactFold(job.Needs, ref.Job) {
+				if !containsExactFold([]string(job.Needs), ref.Job) {
 					return fmt.Errorf("%w: job %s: outputs.%s: ${{ %s }} names no `needs:` dependency of this job (declared: %s)",
-						ErrBadOutput, jobName, name, ref.Raw, listOrNone(job.Needs))
+						ErrBadOutput, jobName, name, ref.Raw, listOrNone([]string(job.Needs)))
 				}
 			case "matrix":
 				if !containsExact(axes, ref.Key) {
@@ -138,7 +138,7 @@ func validateJobOutputs(jobName string, job Job, inputNames, axes []string) erro
 // what the position can resolve: a step may only read the output of a step
 // declared BEFORE it, and a needed job must be one the job declares. Catching
 // the typo at parse time beats failing the step mid-run.
-func validateStepFieldRefs(jobName string, index int, step Step, needs, declared []string) error {
+func validateStepFieldRefs(jobName string, index int, step Step, needs Needs, declared []string) error {
 	fields := []struct {
 		name  string
 		value string
@@ -176,9 +176,9 @@ func validateStepFieldRefs(jobName string, index int, step Step, needs, declared
 						ErrBadOutput, jobName, index+1, field.name, ref.Raw, listOrNone(declared))
 				}
 			case "needs":
-				if !containsExactFold(needs, ref.Job) {
+				if !containsExactFold([]string(needs), ref.Job) {
 					return fmt.Errorf("%w: job %s step %d: %s: ${{ %s }} names no `needs:` dependency of this job (declared: %s)",
-						ErrBadOutput, jobName, index+1, field.name, ref.Raw, listOrNone(needs))
+						ErrBadOutput, jobName, index+1, field.name, ref.Raw, listOrNone([]string(needs)))
 				}
 			}
 		}

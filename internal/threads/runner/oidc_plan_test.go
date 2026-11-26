@@ -51,11 +51,11 @@ func TestBuildPlanIDTokenRequestEnvironment(t *testing.T) {
 		t.Fatal("request token leaked into docker exec argv")
 	}
 	// The value is supplied by the executor's environment.
-	values := strings.Join(credentialEnv(p, step.EnvFrom), " ")
+	values := strings.Join(credentialEnv(p, step.EnvFrom, step.EnvSecret), " ")
 	if !strings.Contains(values, "SPINDLE_ID_TOKEN_REQUEST_TOKEN="+job.IDToken.RequestToken) ||
 		!strings.Contains(values, "ACTIONS_ID_TOKEN_REQUEST_TOKEN="+job.IDToken.RequestToken) ||
 		!strings.Contains(values, "SPINDLE_JOB_TOKEN=wjt_test") {
-		t.Fatalf("credential env = %v", credentialEnv(p, step.EnvFrom))
+		t.Fatalf("credential env = %v", credentialEnv(p, step.EnvFrom, step.EnvSecret))
 	}
 	// It is masked in the runner's own log stream.
 	found := false
@@ -112,7 +112,7 @@ func TestBuildPlanIDTokenNotGivenToDockerActions(t *testing.T) {
 }
 
 func TestCredentialEnvNilPlan(t *testing.T) {
-	if got := credentialEnv(nil, []string{"SPINDLE_JOB_TOKEN"}); got != nil {
+	if got := credentialEnv(nil, []string{"SPINDLE_JOB_TOKEN"}, nil); got != nil {
 		t.Fatalf("credentialEnv(nil) = %v", got)
 	}
 }

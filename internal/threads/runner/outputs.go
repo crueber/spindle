@@ -227,7 +227,7 @@ func evaluateJobOutputs(plan *Plan, steps *stepOutcomes) (map[string]string, err
 	sort.Strings(names)
 	out := make(map[string]string, len(names))
 	for _, name := range names {
-		val, err := threads.SubstituteOutputs(plan.OutputTemplates[name], steps.Outputs, plan.Needs)
+		val, err := plan.expandValue(plan.OutputTemplates[name], plan.Env, steps.Outputs, true)
 		if err != nil {
 			return nil, fmt.Errorf("job output %q: %v", name, err)
 		}

@@ -49,7 +49,7 @@ func TestEvalIf(t *testing.T) {
 func TestEvalIfErrorsAreExplicit(t *testing.T) {
 	ctx := ExprContext{Success: true}
 	for _, expr := range []string{
-		"contains(github.ref, 'x')",
+		"endsWith(github.ref, 'x')",
 		"nope == 'x'",
 		"github.ref ==",
 		"'unterminated",

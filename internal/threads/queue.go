@@ -147,7 +147,11 @@ func (s *Service) enqueueJob(ctx context.Context, owner, repo string, job *Job, 
 	return entry, nil
 }
 
-// jobLabels is the normalized label set the queue matches on.
+// jobLabels is the normalized label set the queue matches on. A well-known
+// hosted label (`ubuntu-latest` and friends) is expanded onto the spindle label
+// set that provides the same contract before matching (labels.go, PAR-170): the
+// job still requires every label of that set, so an alias never bypasses a
+// runner's declared capabilities.
 func jobLabels(job *Job) []string {
 	var out []string
 	if job.Spec != nil {
@@ -156,7 +160,7 @@ func jobLabels(job *Job) []string {
 	if len(out) == 0 && job.RunsOn != "" {
 		out = strings.Split(job.RunsOn, ",")
 	}
-	return normalizeLabels(out)
+	return ExpandRunsOn(out)
 }
 
 // normalizeLabels lowercases, trims and de-duplicates a label set, sorted.

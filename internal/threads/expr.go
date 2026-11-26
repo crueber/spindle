@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
+
+	"github.com/crueber/spindle/internal/threads/workflow"
 )
 
 // `if:` expressions (15 §1/§4, extended 2026-11-21). v1 evaluates the small,
@@ -11,11 +13,18 @@ import (
 // language:
 //
 //	success()  failure()  always()  cancelled()
-//	github.<field>  matrix.<axis>  inputs.<name>  env.<NAME>
+//	startsWith(a, b)  contains(a, b)  format('{0}', a, …)
+//	github.<field>  forgejo.<field>  forge.<field>  github.event.inputs.<name>
+//	matrix.<key>  inputs.<name>  env.<NAME>  secrets.<NAME>
 //	steps.<id>.outcome  steps.<id>.conclusion  steps.<id>.outputs.<name>
 //	needs.<job>.result  needs.<job>.outputs.<name>
 //	'literal'  true  false
 //	!  ==  !=  &&  ||  ( )
+//
+// The github field set is closed (workflow.GitHubFields): a field the engine
+// does not provide is an evaluation error naming the set, never an empty value.
+// secrets.<name> reads the run's secret map (empty on an untrusted run, which
+// is GitHub's rule: the reference resolves, the value is absent).
 //
 // Anything else is an evaluation ERROR, and the caller fails the step (or the
 // job) with a clear message (never silently skipped): a workflow author must be
@@ -50,12 +59,18 @@ type ExprContext struct {
 	// empty on the runner (a job never sees a dependency's record).
 	Needs        map[string]string
 	NeedsOutputs map[string]map[string]string
+	// Secrets maps a secret name to its value for a trusted run. A reference to
+	// an absent secret reads empty (never the literal `secrets.<name>` text).
+	Secrets map[string]string
 }
 
 // EvalIf evaluates one condition. An empty condition means "success()" (the
 // implicit default), which is what makes a plain step list run in order.
 func EvalIf(expr string, c ExprContext) (bool, error) {
 	expr = strings.TrimSpace(expr)
+	if inner, ok := wholeIfSpan(expr); ok {
+		expr = strings.TrimSpace(inner)
+	}
 	if expr == "" {
 		return c.Success, nil
 	}
@@ -193,45 +208,133 @@ func (p *exprParser) parsePrimary() (value, error) {
 	case "true", "false":
 		return value{s: strings.ToLower(word)}, nil
 	}
-	if strings.HasSuffix(word, "(") || strings.HasSuffix(word, "()") {
-		if !strings.HasSuffix(word, "()") {
-			return value{}, fmt.Errorf("if: unsupported function call %q", word)
+	if p.pos < len(p.src) && p.src[p.pos] == '(' {
+		p.pos++
+		args, err := p.parseArgs()
+		if err != nil {
+			return value{}, err
 		}
-		fn := strings.ToLower(strings.TrimSuffix(word, "()"))
-		switch fn {
-		case "success":
-			return value{s: strconv.FormatBool(p.ctx.Success)}, nil
-		case "failure":
-			return value{s: strconv.FormatBool(p.ctx.Failure)}, nil
-		case "always":
-			return value{s: "true"}, nil
-		case "cancelled", "canceled":
-			return value{s: strconv.FormatBool(p.ctx.Cancelled)}, nil
-		}
-		return value{}, fmt.Errorf("if: unsupported function %q", fn)
+		return p.call(strings.ToLower(word), args)
 	}
+	return p.reference(word)
+}
+
+// reference resolves one dotted value.
+func (p *exprParser) reference(word string) (value, error) {
 	raw := strings.Split(word, ".")
 	if len(raw) < 2 {
 		// A bare identifier is the `true` shorthand only.
 		return value{}, fmt.Errorf("if: unknown identifier %q", word)
 	}
 	switch strings.ToLower(raw[0]) {
-	case "github":
-		return value{s: p.ctx.GitHub[strings.ToLower(raw[1])]}, nil
+	case "github", "forgejo", "forge":
+		return p.githubValue(raw[0], raw)
 	case "matrix":
-		return value{s: p.ctx.Matrix[strings.ToLower(raw[1])]}, nil
+		return value{s: p.ctx.Matrix[strings.Join(raw[1:], ".")]}, nil
 	case "inputs":
 		// Input names are case-sensitive (workflow_dispatch declares them).
 		return value{s: p.ctx.Inputs[strings.Join(raw[1:], ".")]}, nil
 	case "env":
 		// Env names are case-sensitive (FOO, not foo).
 		return value{s: p.ctx.Env[strings.Join(raw[1:], ".")]}, nil
+	case "secrets":
+		if len(raw) != 2 || !workflow.ValidSecretName(raw[1]) {
+			return value{}, fmt.Errorf("if: secrets.%s is not a valid secret reference (the form is secrets.<name>)", strings.Join(raw[1:], "."))
+		}
+		return value{s: secretValue(p.ctx.Secrets, raw[1])}, nil
 	case "steps":
 		return p.stepValue(raw)
 	case "needs":
 		return p.needsValue(raw)
 	}
-	return value{}, fmt.Errorf("if: unknown context %q", raw[0])
+	return value{}, fmt.Errorf("if: unknown context %q (supported: %s)", raw[0], strings.Join(workflow.TemplateSupported, ", "))
+}
+
+// githubValue resolves the github/forgejo/forge context against the closed
+// field set, plus `event.inputs.<name>`.
+func (p *exprParser) githubValue(context string, raw []string) (value, error) {
+	if len(raw) >= 4 && strings.EqualFold(raw[1], "event") && strings.EqualFold(raw[2], "inputs") {
+		return value{s: p.ctx.Inputs[strings.Join(raw[3:], ".")]}, nil
+	}
+	if len(raw) != 2 {
+		return value{}, fmt.Errorf("if: only %s.<field> is supported (supported: %s)", context, strings.Join(workflow.GitHubFields, ", "))
+	}
+	field := strings.ToLower(raw[1])
+	if !workflow.ValidGitHubField(field) {
+		return value{}, fmt.Errorf("if: %s.%s is not a supported context field (supported: %s)", context, raw[1], strings.Join(workflow.GitHubFields, ", "))
+	}
+	return value{s: p.ctx.GitHub[field]}, nil
+}
+
+// parseArgs reads a function call's arguments through the closing ")".
+func (p *exprParser) parseArgs() ([]value, error) {
+	var args []value
+	p.skipSpace()
+	if p.consume(")") {
+		return args, nil
+	}
+	for {
+		arg, err := p.parseOr()
+		if err != nil {
+			return nil, err
+		}
+		args = append(args, arg)
+		p.skipSpace()
+		if p.consume(")") {
+			return args, nil
+		}
+		if !p.consume(",") {
+			return nil, fmt.Errorf("if: expected , or ) in a function call")
+		}
+	}
+}
+
+// call evaluates one function.
+func (p *exprParser) call(name string, args []value) (value, error) {
+	arity := func(want int, usage string) error {
+		if len(args) != want {
+			return fmt.Errorf("if: %s takes %d argument(s), got %d (usage: %s)", name, want, len(args), usage)
+		}
+		return nil
+	}
+	switch name {
+	case "success":
+		if err := arity(0, "success()"); err != nil {
+			return value{}, err
+		}
+		return value{s: strconv.FormatBool(p.ctx.Success)}, nil
+	case "failure":
+		if err := arity(0, "failure()"); err != nil {
+			return value{}, err
+		}
+		return value{s: strconv.FormatBool(p.ctx.Failure)}, nil
+	case "always":
+		if err := arity(0, "always()"); err != nil {
+			return value{}, err
+		}
+		return value{s: "true"}, nil
+	case "cancelled", "canceled":
+		if err := arity(0, "cancelled()"); err != nil {
+			return value{}, err
+		}
+		return value{s: strconv.FormatBool(p.ctx.Cancelled)}, nil
+	case "startswith":
+		if err := arity(2, "startsWith(text, prefix)"); err != nil {
+			return value{}, err
+		}
+		return value{s: strconv.FormatBool(strings.HasPrefix(args[0].s, args[1].s))}, nil
+	case "contains":
+		if err := arity(2, "contains(text, search)"); err != nil {
+			return value{}, err
+		}
+		return value{s: strconv.FormatBool(strings.Contains(args[0].s, args[1].s))}, nil
+	case "format":
+		if len(args) == 0 {
+			return value{}, fmt.Errorf("if: format needs at least one argument (usage: format('{0}-{1}', a, b))")
+		}
+		return value{s: formatValue(args[0].s, args[1:])}, nil
+	}
+	return value{}, fmt.Errorf("if: unsupported function %q (supported: %s)", name, strings.Join(workflow.IfFunctions, ", "))
 }
 
 // stepValue resolves steps.<id>.outcome / .conclusion / .outputs.<name>. An
@@ -302,13 +405,7 @@ func (p *exprParser) parseWord() string {
 		}
 		break
 	}
-	word := p.src[start:p.pos]
-	// A function call: the parser consumed the name, now the "()" pair.
-	if p.pos+1 < len(p.src) && p.src[p.pos] == '(' && p.src[p.pos+1] == ')' {
-		p.pos += 2
-		word += "()"
-	}
-	return word
+	return p.src[start:p.pos]
 }
 
 func (p *exprParser) skipSpace() {
@@ -323,4 +420,71 @@ func (p *exprParser) consume(tok string) bool {
 		return true
 	}
 	return false
+}
+
+// wholeIfSpan returns the inside of s when s is exactly one `${{ … }}` span.
+// `if: ${{ inputs.flag }}` is the documented substitution spelling; writing an
+// expression with operators inside the braces is not supported (workflow's
+// ValidateIf says so at parse time).
+func wholeIfSpan(s string) (string, bool) {
+	if !strings.HasPrefix(s, "${{") || !strings.HasSuffix(s, "}}") {
+		return "", false
+	}
+	inner := s[len("${{") : len(s)-len("}}")]
+	if strings.Contains(inner, "}}") {
+		return "", false
+	}
+	return inner, true
+}
+
+// secretValue resolves a secret name, case-insensitively.
+func secretValue(secrets map[string]string, name string) string {
+	if val, ok := secrets[name]; ok {
+		return val
+	}
+	for key, val := range secrets {
+		if strings.EqualFold(key, name) {
+			return val
+		}
+	}
+	return ""
+}
+
+// formatValue implements GitHub's format(): {N} refers to the Nth argument,
+// {{ and }} are literal braces.
+func formatValue(format string, args []value) string {
+	var b strings.Builder
+	for i := 0; i < len(format); i++ {
+		switch format[i] {
+		case '{':
+			if i+1 < len(format) && format[i+1] == '{' {
+				b.WriteByte('{')
+				i++
+				continue
+			}
+			end := strings.IndexByte(format[i+1:], '}')
+			if end < 0 {
+				b.WriteByte('{')
+				continue
+			}
+			index := strings.TrimSpace(format[i+1 : i+1+end])
+			n, err := strconv.Atoi(index)
+			if err != nil || n < 0 || n >= len(args) {
+				b.WriteString(format[i : i+2+end])
+			} else {
+				b.WriteString(args[n].s)
+			}
+			i += 1 + end
+		case '}':
+			if i+1 < len(format) && format[i+1] == '}' {
+				b.WriteByte('}')
+				i++
+				continue
+			}
+			b.WriteByte('}')
+		default:
+			b.WriteByte(format[i])
+		}
+	}
+	return b.String()
 }

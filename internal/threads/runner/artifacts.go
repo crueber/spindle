@@ -70,9 +70,9 @@ func parseUploadArtifact(p *Plan, with map[string]string) (*ArtifactStep, error)
 	for key, val := range with {
 		switch strings.ToLower(strings.TrimSpace(key)) {
 		case "name":
-			step.Name = subst(p, strings.TrimSpace(val))
+			step.Name = strings.TrimSpace(val)
 		case "path":
-			patterns, err := splitArtifactPatterns(subst(p, val))
+			patterns, err := splitArtifactPatterns(val)
 			if err != nil {
 				return nil, err
 			}
@@ -109,9 +109,9 @@ func parseDownloadArtifact(p *Plan, with map[string]string) (*ArtifactStep, erro
 	for key, val := range with {
 		switch strings.ToLower(strings.TrimSpace(key)) {
 		case "name":
-			step.Name = subst(p, strings.TrimSpace(val))
+			step.Name = strings.TrimSpace(val)
 		case "path":
-			dir := strings.TrimSpace(subst(p, val))
+			dir := strings.TrimSpace(val)
 			if dir == "" {
 				dir = "."
 			}

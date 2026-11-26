@@ -1,0 +1,52 @@
+{
+  "entries": [
+    {
+      "slug": "weave-ci",
+      "system": "forgejo",
+      "repository": "crueber/weave",
+      "path": ".github/workflows/ci.yml",
+      "commit": "5b2526d42ab076d1b80c39b60c13372994c23bdf",
+      "fetched": "2026-11-26",
+      "sha256": "9b181267ff4befce4e19d047a77be869654c8f3e2cec6194f94bf9e4ac7a7e4a",
+      "golden_sha256": "3676127f8ce6af5a68ab00dead16c14939f91b2f99f572bde259795c9b2f4def",
+      "importer_commit": "19549aa8",
+      "translation": "runs-on: docker mapped to the default runner labels; needs: <job> rewritten to a list; $GITHUB_SERVER_URL rewritten to the canonical $SPINDLE_SERVER"
+    },
+    {
+      "slug": "weave-publish-github",
+      "system": "forgejo",
+      "repository": "crueber/weave",
+      "path": ".github/workflows/publish-github.yml",
+      "commit": "5b2526d42ab076d1b80c39b60c13372994c23bdf",
+      "fetched": "2026-11-26",
+      "sha256": "39e4b90240bb45f23a4502b7918ae1040b569ff9b6dc10df001fd3e0b43aaf53",
+      "golden_sha256": "8dcecfad5f4d746df370fbad880621dfc772e2b7bd9fee1a43fd84c86e063e28",
+      "importer_commit": "19549aa8",
+      "translation": "actions/checkout@v4 lost its @ref (the built-in takes none); github.event.inputs.* rewritten to inputs.*; ubuntu-latest carried verbatim (the runner maps it at enqueue)"
+    },
+    {
+      "slug": "scriobh-ci",
+      "system": "forgejo",
+      "repository": "crueber/scriobh",
+      "path": ".github/workflows/ci.yml",
+      "commit": "034c9a50d40ea5c0404cfe5a66b3f3782d3068a4",
+      "fetched": "2026-11-26",
+      "sha256": "08ae835fbd5dbd8681ed05dd1c625d1ab3bca90ea2d41b4899e7c9d154527e9d",
+      "golden_sha256": "8fb666c246928c686154bee5f24f75aeaae21333140cc01f7c04a9adedc09380",
+      "importer_commit": "19549aa8",
+      "translation": "runs-on: docker mapped to the default runner labels; needs: <job> rewritten to a list; $GITHUB_SERVER_URL rewritten to $SPINDLE_SERVER"
+    },
+    {
+      "slug": "scriobh-release",
+      "system": "forgejo",
+      "repository": "crueber/scriobh",
+      "path": ".github/workflows/release.yml",
+      "commit": "034c9a50d40ea5c0404cfe5a66b3f3782d3068a4",
+      "fetched": "2026-11-26",
+      "sha256": "33892b35499741b5ec66967a20684bd666c15ace356c2fe1a511515cbf8d0e1b",
+      "golden_sha256": "02e1556cdf92efe4148a2e2259ff571b2340b12b980aa1229b1c7178ba2d743f",
+      "importer_commit": "19549aa8",
+      "translation": "runs-on/needs/$GITHUB_SERVER_URL/inputs aliases as above; strategy.matrix.include translated verbatim (gopkg.in/yaml.v3 node tree), so the cli job keeps its four cells"
+    }
+  ]
+}

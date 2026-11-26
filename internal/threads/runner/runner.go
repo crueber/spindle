@@ -303,7 +303,14 @@ func (r *Runner) runJob(ctx context.Context, job *threads.FetchResult) {
 	}
 	jobCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
-	stream := NewStreamer(r.client, start.Token, job.JobRef, job.Attempt, job.Mask, cancel, log)
+	// The attempt token is a bearer credential and is now also exposed to the
+	// job as GITHUB_TOKEN/FORGEJO_TOKEN, so it is masked in this runner's log
+	// stream exactly like a repository secret (best effort, docs/threads.md §5.3).
+	mask := append([]string(nil), job.Mask...)
+	if start.Token != "" {
+		mask = append(mask, start.Token)
+	}
+	stream := NewStreamer(r.client, start.Token, job.JobRef, job.Attempt, mask, cancel, log)
 	log.Info("threads runner: job started", "workflow", job.Workflow, "commit", job.Commit, "check", job.Context)
 
 	res := r.exec.Execute(jobCtx, ExecInput{Job: job, AttemptToken: start.Token, Caps: start.Artifacts}, stream)

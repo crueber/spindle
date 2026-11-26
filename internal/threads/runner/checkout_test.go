@@ -36,7 +36,7 @@ func stubGit(t *testing.T, output string, code int) string {
 // returns its combined output plus exit code.
 func runCheckoutScript(t *testing.T, p *Plan, stubDir string) (string, int) {
 	t.Helper()
-	script := checkoutScript(p, "1")
+	script := checkoutScript(p, checkoutOpts{Depth: "1"})
 	cmd := exec.Command("sh", "-e", "-c", script)
 	cmd.Env = append(os.Environ(), "PATH="+stubDir+":"+os.Getenv("PATH"), "SPINDLE_JOB_TOKEN=wjt_test")
 	out, err := cmd.CombinedOutput()

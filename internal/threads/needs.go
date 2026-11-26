@@ -215,7 +215,7 @@ func foldNeeds(needs map[string][]string, byID map[string]*Job) needFacts {
 				facts.Waiting = true
 				continue
 			}
-			result = worseResult(result, dep.State)
+			result = worseResult(result, dependencyResult(dep))
 			if dep.State == JobSuccess {
 				for name, val := range dep.Outputs {
 					merged[name] = val
@@ -239,6 +239,21 @@ func foldNeeds(needs map[string][]string, byID map[string]*Job) needFacts {
 		facts.Outputs[key] = merged
 	}
 	return facts
+}
+
+// dependencyResult is a dependency's state as `needs.<job>.result` reports it.
+// A failed job whose `continue-on-error` is true reads `success` (GitHub's
+// rule; the job record itself keeps `failure` and Job.Tolerated, D-4), so a
+// dependent job's default `success()` condition still runs and
+// `needs.<job>.result` never contradicts the run conclusion.
+func dependencyResult(dep *Job) string {
+	if dep == nil {
+		return ""
+	}
+	if dep.State == JobFailure && dep.Tolerated {
+		return JobSuccess
+	}
+	return dep.State
 }
 
 // worseResult is the precedence order of a folded dependency result.
@@ -304,7 +319,7 @@ func (s *Service) dependentVerdict(ctx context.Context, owner, repo string, entr
 				return jobIfRun, "", derr
 			}
 			if dep != nil {
-				facts.Results[id] = dep.State
+				facts.Results[id] = dependencyResult(dep)
 			}
 		}
 	}

@@ -82,7 +82,7 @@ jobs:
   build:
     runs-on: linux
     needs: [lint]
-    if: contains(needs.lint.result, 'success')
+    if: '!needs.lint.result'
     steps:
       - run: echo build
 `

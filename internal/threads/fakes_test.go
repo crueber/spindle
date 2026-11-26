@@ -139,11 +139,17 @@ type checkReport struct {
 }
 
 type fakeChecks struct {
+	// mu makes the capture goroutine-safe: run creation may be driven from
+	// several goroutines (the supersede race test), and the real CheckSink is a
+	// store client, so the fixture must tolerate concurrency too.
+	mu      sync.Mutex
 	reports []checkReport
 	err     error
 }
 
 func (f *fakeChecks) Report(_ context.Context, repo, sha, checkContext, state, description string, startedAt, completedAt *string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	if f.err != nil {
 		return f.err
 	}
@@ -152,6 +158,13 @@ func (f *fakeChecks) Report(_ context.Context, repo, sha, checkContext, state, d
 		Description: description, StartedAt: startedAt, CompletedAt: completedAt,
 	})
 	return nil
+}
+
+// snapshot copies the captured reports (call it after the goroutines joined).
+func (f *fakeChecks) snapshot() []checkReport {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]checkReport(nil), f.reports...)
 }
 
 // --- env -------------------------------------------------------------------

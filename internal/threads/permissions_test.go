@@ -57,6 +57,51 @@ func TestJobPermissionsWriteAndAll(t *testing.T) {
 	}
 }
 
+// TestPAR114NoPermissionsDefaultsToContentsRead pins the recorded divergence
+// (PAR-114, D-12; docs/threads.md §5.3, docs/WORKFLOWS.md §7.2): a workflow with
+// NO `permissions:` block gets `contents: read` here — the opposite of Forgejo's
+// implicit-write token, which ignores `permissions` entirely. A workflow relying
+// on the implicit write is therefore refused by the server with the named
+// "no push permission (workflow permissions: contents: read)" error rather than
+// silently downgraded or silently upgraded. The default is an operator decision
+// (`threads.default_permissions`, D-12) and is NOT changed here.
+func TestPAR114NoPermissionsDefaultsToContentsRead(t *testing.T) {
+	e := newTestEnv(t)
+	e.git.add(testSHA, ".spindle/workflows/ci.yml", `name: CI
+on: [push]
+jobs:
+  build:
+    runs-on: linux
+    steps:
+      - run: echo
+`)
+	run := e.mustCreate(t)[0]
+	_, view := startJob(t, e, run)
+	if got := view.Permissions["contents"]; got != PermRead {
+		t.Fatalf("no-permissions job token = contents: %q, want read (PAR-114/D-12)", got)
+	}
+	if containsScope(view.Scopes, ScopePush) {
+		t.Fatalf("a no-permissions job token carries push: %v", view.Scopes)
+	}
+	// A Forgejo workflow that grants write and no longer declares the scopes it
+	// does not use still gets exactly what it declares.
+	e.git.add(testSHA, ".spindle/workflows/ci.yml", `name: CI
+on: [push]
+permissions:
+  issues: write
+jobs:
+  build:
+    runs-on: linux
+    steps:
+      - run: echo
+`)
+	run2 := e.mustCreate(t)[0]
+	_, view2 := startJob(t, e, run2)
+	if got := view2.Permissions["contents"]; got != PermRead || containsScope(view2.Scopes, ScopePush) {
+		t.Fatalf("issues-only job = %+v scopes %v, want contents: read and no push", view2.Permissions, view2.Scopes)
+	}
+}
+
 // TestForkRunCannotEscalate pins the trust-class rule: a fork run is read-only
 // no matter what its workflow declares (the base-branch workflow it runs may be
 // perfectly permissive).

@@ -107,7 +107,9 @@ func (s *Service) GC(ctx context.Context, owner, repo string) (int, error) {
 // CreateRun creates one run per workflow file that fires on the event, reading
 // the workflow files from the repository at the trust-selected commit (15 §2):
 //
-//   - push: the pushed commit's files, trusted.
+//   - push: the pushed commit's files, trusted. A push is delivered for a
+//     branch (on.push.branches, branch name in Branch) or a tag (on.push.tags,
+//     tag name in RefName, no branch).
 //   - pull_request, same repository: the head commit's files, trusted.
 //   - pull_request, fork: the BASE branch's files, untrusted (no secrets later).
 //   - workflow_dispatch: the resolved commit's files, trusted.
@@ -187,7 +189,8 @@ func (s *Service) CreateRun(ctx context.Context, repo, commit, event string, opt
 		slog.Warn("threads: workflow files failed to parse; their workflows are disabled, the rest still run",
 			"repo", repo, "commit", workflowCommit, "files", paths)
 	}
-	matched := SelectFiles(files, event, strings.TrimSpace(opts.Branch), action, want)
+	kind, refName, _ := refTargetOf(event, opts)
+	matched := SelectFiles(files, event, kind, refName, action, want)
 	if len(matched) == 0 {
 		if event == EventDispatch && want != "" {
 			return nil, fmt.Errorf("%w: no workflow_dispatch workflow named %q", ErrNotFound, want)
@@ -217,9 +220,30 @@ func (s *Service) CreateRun(ctx context.Context, repo, commit, event string, opt
 	return runs, nil
 }
 
+// refTargetOf resolves the ref a CreateOpts describes: kind and name are what
+// the trigger globs read (`on.push.branches` by branch, `on.push.tags` by tag),
+// and branch is what the run header records. Only a push carries a kind — every
+// other event is branch-shaped, so a caller cannot state a kind it does not
+// have. A tag push has NO branch (Run.Branch stays empty; the tag lives in
+// Run.Ref), which is what keeps a tag named `v1` off any branch-shaped field
+// downstream. Name falls back to Branch when the caller set only that.
+func refTargetOf(event string, opts CreateOpts) (workflow.RefKind, string, string) {
+	kind := workflow.RefBranch
+	branch := strings.TrimSpace(opts.Branch)
+	if event == EventPush && opts.RefKind == workflow.RefTag {
+		kind, branch = workflow.RefTag, ""
+	}
+	name := strings.TrimSpace(opts.RefName)
+	if name == "" {
+		name = branch
+	}
+	return kind, name, branch
+}
+
 // createOne writes one workflow file's run: jobs, then the header, then the
 // checks mirrors (a queued check must never exist for a run nobody can see).
 func (s *Service) createOne(ctx context.Context, owner, repo, sha, event string, opts CreateOpts, f *WorkflowFile, workflowCommit string, trusted bool, attempt int, actor string, gate bool) (*Run, error) {
+	_, _, branch := refTargetOf(event, opts)
 	now := s.nowUTC().Format(dateTimeFmt)
 	runID, err := newRunID(s.nowUTC())
 	if err != nil {
@@ -235,7 +259,7 @@ func (s *Service) createOne(ctx context.Context, owner, repo, sha, event string,
 	// context. It is written after the jobs (the header is the commit point).
 	run := &Run{
 		ID: runID, Repo: repoID(owner, repo), Commit: sha, Event: event,
-		Branch: strings.TrimSpace(opts.Branch), Ref: strings.TrimSpace(opts.Ref),
+		Branch: branch, Ref: strings.TrimSpace(opts.Ref),
 		Workflow: f.Name, WorkflowPath: f.Path, WorkflowCommit: workflowCommit,
 		WorkflowDigest: f.Digest, Trusted: trusted, State: RunQueued, Actor: actor,
 		Attempt:   attempt,
@@ -273,7 +297,7 @@ func (s *Service) createOne(ctx context.Context, owner, repo, sha, event string,
 				Context:   CheckContext(spec.Workflow, inst.Name),
 				RunsOn:    strings.Join(spec.RunsOn, ", "),
 				Container: containerImage(spec.Container),
-				Needs:     nonNilStr(def.Needs),
+				Needs:     nonNilStr([]string(def.Needs)),
 				Spec:      spec,
 				Attempt:   attempt,
 				Trusted:   trusted,
@@ -365,10 +389,29 @@ func (s *Service) createOne(ctx context.Context, owner, repo, sha, event string,
 		}
 		return nil, perr
 	}
+	// Implicit supersede (PAR-150): the head for this (workflow, ref) is adopted
+	// in its own goroutine here — immediately after the run header committed, so
+	// a head id always names a visible run, and concurrently with the checks
+	// mirror and the enqueue, so the adoption adds no sequential round trip to
+	// creation. Its verdict is applied after the enqueue, so a superseded run is
+	// always inspectable before it is cancelled. A run the workflow gave a
+	// concurrency group, or an event that does not supersede, starts nothing.
+	supersede := s.startSupersede(ctx, owner, repo, run, event, opts.Action)
 	for _, job := range jobs {
 		if cerr := s.reportCheck(ctx, run, job); cerr != nil {
 			return nil, cerr
 		}
+	}
+	settle := func() (*Run, error) {
+		// The adoption overlapped the checks/enqueue writes; joining it here
+		// keeps it out of series with them.
+		if cancelled := s.finishSupersede(ctx, owner, repo, run, supersede); cancelled != nil {
+			run = cancelled
+		}
+		if !allQueued(jobs) || terminal(run.State) {
+			return s.settleDecidedJobs(ctx, owner, repo, runID)
+		}
+		return run, nil
 	}
 	if run.State == RunPendingApproval {
 		// The approval gate IS the queue: the jobs exist (the page, the checks
@@ -376,6 +419,12 @@ func (s *Service) createOne(ctx context.Context, owner, repo, sha, event string,
 		// until ApproveRun enqueues them — the fork gate (15 §5.2) and an
 		// environment's required reviewers share this state machine
 		// (docs/PLAN-THREADS-ENVIRONMENTS.md §6). No wake: nothing to claim.
+		//
+		// Supersede still applies: the newer commit replaces the older run's
+		// work, and cancelling it is right even though THIS run waits.
+		if cancelled := s.finishSupersede(ctx, owner, repo, run, supersede); cancelled != nil {
+			run = cancelled
+		}
 		return run, nil
 	}
 	// Enqueue AFTER the run header (the header is the commit point, so a runner
@@ -397,10 +446,7 @@ func (s *Service) createOne(ctx context.Context, owner, repo, sha, event string,
 	// runner poll, and a run whose every job was decided has nothing left to
 	// wait for. Settle it now rather than leaving the run at "queued" until a
 	// probe happens to visit it (a deployment with no runner included).
-	if !allQueued(jobs) {
-		return s.settleDecidedJobs(ctx, owner, repo, runID)
-	}
-	return run, nil
+	return settle()
 }
 
 // settleDecidedJobs cascades the jobs a condition or dependency decided before
@@ -504,7 +550,7 @@ func (s *Service) DispatchRun(ctx context.Context, repo, ref, workflowRef string
 		if derr != nil {
 			return nil, derr
 		}
-		target := SelectFiles(files, EventDispatch, "", "", workflowRef)
+		target := SelectFiles(files, EventDispatch, workflow.RefBranch, "", "", workflowRef)
 		if len(target) == 0 {
 			if broken := brokenWorkflowFiles(files, workflowRef); len(broken) > 0 {
 				return nil, fmt.Errorf("%w: %s: %s", ErrUnprocessable, broken[0].Path, broken[0].Error)

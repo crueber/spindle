@@ -176,18 +176,19 @@ func workflowName(p string, w *workflow.Workflow) string {
 
 // SelectFiles applies the trigger match (15 §1: push, pull_request,
 // workflow_dispatch; schedule is the maintainer's job and never fires here).
-// branch is the push branch or the PR target branch; an empty branch makes a
-// branch-filtered trigger match everything (workflow.Fires' documented
-// empty-filter rule). action is the pull_request lifecycle action being
-// delivered, which `types` filters on. want restricts a dispatch to one file by
-// basename or repository-relative path. Files that failed to parse never match.
-func SelectFiles(files []*WorkflowFile, event, branch, action, want string) []*WorkflowFile {
+// kind names the ref kind (branch or tag; only push distinguishes them) and ref
+// is the push branch, the tag name or the PR target branch — an empty ref does
+// not match a filtered trigger. action is the pull_request lifecycle action
+// being delivered, which `types` filters on. want restricts a dispatch to one
+// file by basename or repository-relative path. Files that failed to parse
+// never match.
+func SelectFiles(files []*WorkflowFile, event string, kind workflow.RefKind, ref, action, want string) []*WorkflowFile {
 	out := make([]*WorkflowFile, 0, len(files))
 	for _, f := range files {
 		if f.Workflow == nil {
 			continue // per-file isolation: a broken file creates no run
 		}
-		if !f.Workflow.Fires(event, branch, action) {
+		if !f.Workflow.Fires(event, kind, ref, action) {
 			continue
 		}
 		if want != "" && !matchesWorkflow(f, want) {

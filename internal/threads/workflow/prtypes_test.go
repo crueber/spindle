@@ -36,12 +36,12 @@ func TestPullRequestTypesMatrix(t *testing.T) {
 		}
 		for _, action := range actions {
 			want := action == typ
-			if got := w.Fires("pull_request", "main", action); got != want {
+			if got := w.Fires("pull_request", RefBranch, "main", action); got != want {
 				t.Errorf("types: [%s] Fires(%s) = %v, want %v", typ, action, got, want)
 			}
 		}
 		// A filter never matches an event whose action is unknown.
-		if w.Fires("pull_request", "main", "") {
+		if w.Fires("pull_request", RefBranch, "main", "") {
 			t.Errorf("types: [%s] fired for an empty action", typ)
 		}
 	}
@@ -51,7 +51,7 @@ func TestPullRequestTypesMatrix(t *testing.T) {
 		t.Fatalf("multi-type: %v", err)
 	}
 	for action, want := range map[string]bool{"opened": true, "synchronize": false, "reopened": true} {
-		if got := w.Fires("pull_request", "main", action); got != want {
+		if got := w.Fires("pull_request", RefBranch, "main", action); got != want {
 			t.Errorf("types: [opened, reopened] Fires(%s) = %v, want %v", action, got, want)
 		}
 	}
@@ -70,7 +70,7 @@ func TestPullRequestTypesDefault(t *testing.T) {
 			t.Fatalf("%s: %v", name, err)
 		}
 		for _, action := range PullRequestTypes {
-			if !w.Fires("pull_request", "main", action) {
+			if !w.Fires("pull_request", RefBranch, "main", action) {
 				t.Errorf("%s: did not fire on the default action %s", name, action)
 			}
 		}

@@ -81,32 +81,81 @@ func TestFires(t *testing.T) {
 		t.Fatal(err)
 	}
 	cases := []struct {
-		event, branch, action string
-		want                  bool
+		event, ref string
+		kind       RefKind
+		action     string
+		want       bool
 	}{
-		{"push", "main", "", true},
-		{"push", "feature/x", "", false},
-		{"push", "release/1.2", "", true},
-		{"pull_request", "main", "opened", true},
-		{"pull_request", "dev", "opened", false},
-		{"workflow_dispatch", "", "", true},
-		{"schedule", "", "", false},
-		{"unknown", "", "", false},
+		{"push", "main", RefBranch, "", true},
+		{"push", "feature/x", RefBranch, "", false},
+		{"push", "release/1.2", RefBranch, "", true},
+		{"push", "v1.2.3", RefTag, "", false}, // branches-only: tags never fire
+		{"pull_request", "main", RefBranch, "opened", true},
+		{"pull_request", "dev", RefBranch, "opened", false},
+		{"workflow_dispatch", "", RefBranch, "", true},
+		{"schedule", "", RefBranch, "", false},
+		{"unknown", "", RefBranch, "", false},
 	}
 	for _, tc := range cases {
-		if got := w.Fires(tc.event, tc.branch, tc.action); got != tc.want {
-			t.Errorf("Fires(%q,%q,%q) = %v, want %v", tc.event, tc.branch, tc.action, got, tc.want)
+		if got := w.Fires(tc.event, tc.kind, tc.ref, tc.action); got != tc.want {
+			t.Errorf("Fires(%q,%v,%q,%q) = %v, want %v", tc.event, tc.kind, tc.ref, tc.action, got, tc.want)
 		}
 	}
 	// A workflow with no trigger block never fires.
 	empty := &Workflow{Jobs: map[string]Job{}}
-	if empty.Fires("push", "main", "") || empty.Fires("workflow_dispatch", "", "") {
+	if empty.Fires("push", RefBranch, "main", "") || empty.Fires("workflow_dispatch", RefBranch, "", "") {
 		t.Error("triggerless workflow fired")
 	}
-	// No branch filter matches every branch.
+	// No branch filter matches every branch — and a bare push also fires on a
+	// tag (GitHub's rule: `on: push` means both kinds).
 	all := &Workflow{On: Triggers{Push: &PushTrigger{}}}
-	if !all.Fires("push", "anything", "") {
+	if !all.Fires("push", RefBranch, "anything", "") {
 		t.Error("empty filter did not match")
+	}
+	if !all.Fires("push", RefTag, "v1", "") {
+		t.Error("a bare push must fire on a tag")
+	}
+}
+
+// TestPushTagSemantics pins PAR-010/PAR-011: a tag push fires `tags` globs, and
+// a tags-only trigger never matches a branch push (the old empty-`branches`
+// rule made it fire on every branch).
+func TestPushTagSemantics(t *testing.T) {
+	cases := []struct {
+		name, trigger string
+		kind          RefKind
+		ref           string
+		want          bool
+	}{
+		{"tags only, branch push", "tags: [\"v*\"]", RefBranch, "main", false},
+		{"tags only, matching tag", "tags: [\"v*\"]", RefTag, "v1.2.3", true},
+		{"tags only, other tag", "tags: [\"v*\"]", RefTag, "nightly", false},
+		{"branches only, matching branch", "branches: [main]", RefBranch, "main", true},
+		{"branches only, tag push", "branches: [main]", RefTag, "main", false},
+		{"both filters, branch", "branches: [main]\n    tags: [\"v*\"]", RefBranch, "main", true},
+		{"both filters, tag", "branches: [main]\n    tags: [\"v*\"]", RefTag, "v9", true},
+		{"both filters, wrong tag", "branches: [main]\n    tags: [\"v*\"]", RefTag, "nightly", false},
+		{"mirror glob", "tags: [\"release/*\"]", RefTag, "release/1.0", true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			src := "on:\n  push:\n    " + tc.trigger + "\njobs:\n  a:\n    runs-on: l\n    steps:\n      - run: x\n"
+			w, err := Parse([]byte(src))
+			if err != nil {
+				t.Fatalf("Parse: %v", err)
+			}
+			if got := w.Fires("push", tc.kind, tc.ref, ""); got != tc.want {
+				t.Fatalf("%v push %q = %v, want %v", tc.kind, tc.ref, got, tc.want)
+			}
+		})
+	}
+	// A bare `on: push` with no filters fires on both kinds.
+	w, err := Parse([]byte("on: push\njobs:\n  a:\n    runs-on: l\n    steps:\n      - run: x\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !w.Fires("push", RefBranch, "main", "") || !w.Fires("push", RefTag, "v1", "") {
+		t.Fatal("bare push must fire on branches and tags")
 	}
 }
 

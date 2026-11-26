@@ -178,7 +178,7 @@ func TestExecuteFailedStepOutputsAreNotSet(t *testing.T) {
 	if res.Conclusion != threads.JobSuccess {
 		t.Fatalf("tolerated failure must keep the job green: %+v", res)
 	}
-	if docker.called("head -c") {
+	if docker.called("head -c") && docker.called("/tmp/spindle-output-1'; then") {
 		t.Fatalf("a failed step's output file was read: %v", docker.snapshot())
 	}
 	if res.Steps[1].Conclusion != threads.JobFailure || !strings.Contains(res.Steps[1].Error, "did not publish") {

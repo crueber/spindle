@@ -100,12 +100,15 @@ shared issue/PR numbering space) is
 Threads runs CI from `.spindle/workflows/<name>.yml` in the repository. Writing one — the key
 reference, recipes, the Forgejo migration cookbook and a troubleshooting tree — is
 [`WORKFLOWS.md`](WORKFLOWS.md); the exhaustive reference is [`threads.md`](threads.md).
-Workflow files are triggered by `push`, `pull_request` (opened/synchronize/reopened),
+Workflow files are triggered by `push` (branch and tag pushes, filtered independently by
+`branches` and `tags`), `pull_request` (opened/synchronize/reopened),
 `workflow_dispatch` with typed inputs, and
 `schedule` (five-field UTC cron); jobs run in containers with services, `needs:` ordering,
-`strategy.matrix` and `concurrency` groups, report into the checks surface that gates merges, and
+`strategy.matrix` (including GitHub's `include`/`exclude` merge rules) and `concurrency` groups,
+report into the checks surface that gates merges, and
 stream logs over SSE with cancel and rerun. `permissions:` mints a scoped job token
-(`$SPINDLE_JOB_TOKEN`) and, with `id-token: write` on a trusted run, a short-lived audience-scoped
+(`$SPINDLE_JOB_TOKEN`, also delivered as `$GITHUB_TOKEN`/`$FORGEJO_TOKEN`) and, with
+`id-token: write` on a trusted run, a short-lived audience-scoped
 OIDC ID token for cloud providers; repository secrets are write-only and masked (never exposed to
 fork PRs), and first-time fork contributors need approval. Deployment environments add required
 reviewers and environment-scoped secrets: a job names one with `environment:`, and nothing starts —
@@ -135,7 +138,9 @@ A run is **trusted** or **untrusted**, and that is server-side policy a file can
 | `workflow_dispatch` | the resolved ref's commit | yes | yes | per `permissions` |
 | `schedule` | the default branch tip | yes | yes | per `permissions` |
 
-`push` fires for `refs/heads/<branch>` only (tags and branch deletes create no run). Secrets are
+`push` fires for `refs/heads/<branch>` and for `refs/tags/<tag>`, filtered independently by
+`branches` and `tags` (a tags-only trigger never matches a branch push, and the reverse); branch and
+tag deletes create no run, and neither does a notes ref. Secrets are
 managed in **Settings → Secrets** or the API, are write-only (the API returns names and timestamps,
 never values), are stored sealed with AES-256-GCM, and are injected as environment variables of
 their own name in every step of every job. Masking is server-side and best-effort: exact substring
