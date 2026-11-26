@@ -294,7 +294,10 @@ Four facts, each with its text reading:
    `"Last release 3mo ago"` from `Facts.LastReleaseAt` (`releases/latest.json`,
    §3.5) or `"No release yet"` when `ReleasesKnown && Releases == 0`. When
    `ReleasesKnown` is false, or a count exists without a stamp, the release row
-   is omitted — never a guessed date.
+   is omitted — never a guessed date. Every relative age on the card is rendered
+   against the **request clock** (`relTimeAt`), so a fixture-pinned clock is
+   deterministic; the absolute RFC 3339 stamp stays on the `<time datetime>`
+   attribute.
 4. **Language mix** — a thin stacked bar plus the text list (top 4 + `Other`,
    `"Go 84% · JavaScript 9% · CSS 7%"`). The bar is `aria-hidden` decoration on
    the `--pd-text-2` token with descending opacity; the percentages are in the

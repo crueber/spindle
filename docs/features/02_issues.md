@@ -67,6 +67,11 @@ the events a PR thread also uses (comments, references, reactions).
 
 Immutability (P3): `num`, `author`, `created_at` never change after `Create`; everything else is CAS-mutable through the two-step.
 
+Unknown top-level keys are **carried, not stripped**, by every writer that is not this package's owner: a
+reader that rewrites the header (`internal/pulls.appendEvent`) or a `{"next": N}` allocator
+(`internal/pulls.allocNum`) captures every key it does not name on read and re-emits it on write, so an
+additive field added here survives a PR write untouched (law 5; `## Decisions`).
+
 ### 1.2 Event objects (immutable, `PutMode::Create`, P3)
 
 Common envelope on every event object; `seq` matches the key digits:
@@ -520,6 +525,27 @@ bucket is the truth; a stale projection is the documented consequence above).
 > (`internal/webui/*.go` + `internal/webui/templates/**`) or, where the mechanism was
 > client-only (cache windows, view-tracking effects), in the server render; the decisions
 > themselves are unchanged.
+
+- **The thread header and the number allocator are lossless mirrors too (2026-11-26, P6 follow-up).**
+  `internal/pulls` is a second writer of two more 02 documents, and both rewrites were whitelist
+  mirrors: `appendEvent` re-marshaled `thread.json` from `pulls.Thread`, and `allocNum` unmarshaled
+  `{"next": N}` into `pulls.Counter` and marshaled `Counter{Next+1}` back. Any key those structs did
+  not name was stripped by an ordinary PR write or number allocation — the same defect class P6 fixed
+  for `issues/index.json` (`20_search.md` decision 16), one additive field away from silently deleting
+  02's or 04's next field. Both types now use **exactly the P6 mechanism**: an unexported
+  `unknown map[string]json.RawMessage`, the alias-type `UnmarshalJSON`/`MarshalJSON` pair, and the
+  shared `captureUnknownJSON`/`appendUnknownJSON`/`ownsJSONKey` helpers, with their owned key lists in
+  `threadJSONKeys`/`counterJSONKeys`. `allocNum` now increments the decoded `Counter` in place and
+  marshals that value, so the extra keys survive the read-modify-write rather than only a no-op write.
+  **No helper was extracted** for the four wrappers (Card, Index, Thread, Counter): the capture/append
+  pair already is the shared mechanism, and the wrapper cannot be shared without an alias type per
+  struct (the alias exists precisely to stop `json.Marshal` recursing into the method). A wrapper is
+  six lines and its key list is the type's own; a generic/reflection helper would trade that clarity
+  for a mechanism readers must decode. Revisit only if a fifth mirror appears.
+  `internal/pulls/mirror_roundtrip_test.go` drives the real write paths (`AddComment` → `appendEvent`,
+  `OpenPR` → `allocNum`) and pins an object, an array, a string, a number, a bool and a `null` value
+  surviving byte-identically, the known fields still advancing, the no-extras byte shape, and the
+  malformed-decode path. Law 5 applies to every writer of a shared JSON document, not only its owner.
 
 - **Create carries metadata in ONE write (2026-11-21, CLI audit).** `POST …/api/issues` now accepts
   `labels`, `assignees` and `milestone` alongside `title`/`body` (same triage gate as the PATCH).

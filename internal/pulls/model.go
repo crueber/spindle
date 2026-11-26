@@ -180,12 +180,16 @@ type ForkDoc struct {
 	Version          int     `json:"version"`
 }
 
-// Thread is the shared P3 header as pulls reads it (02 owns the shape;
-// unknown fields ignored on read — PR threads carry no PR fields by
-// contract, §2.1). Only the fields pulls needs are modeled. The three
-// review-owned fields (04 §7) are preserved opaquely: pulls round-trips
-// them verbatim on every header write but never interprets them (04 owns
-// the semantics; the merge-time gate reads the events, never this cache).
+// Thread is the shared P3 header as pulls reads it (02 owns the shape, §1.1;
+// PR threads carry no PR fields by contract, §2.1). Only the fields pulls
+// needs are modeled, and every key it does not name is captured on decode and
+// re-emitted on encode: appendEvent rewrites thread.json on every PR write, so
+// a whitelist mirror would strip the NEXT additive field 02 or 04 adds — the
+// same defect class the index mirror fixed in P6. Law 5: additive JSON fields
+// round-trip unchanged. The three review-owned fields (04 §7) are preserved
+// opaquely: pulls round-trips them verbatim on every header write but never
+// interprets them (04 owns the semantics; the merge-time gate reads the
+// events, never this cache).
 type Thread struct {
 	Num          int      `json:"num"`
 	Kind         string   `json:"kind"`
@@ -210,6 +214,8 @@ type Thread struct {
 	NextReviewSeq int             `json:"next_review_seq,omitempty"`
 	NextThreadNum int             `json:"next_thread_num,omitempty"`
 	ReviewSummary json.RawMessage `json:"review_summary,omitempty"`
+
+	unknown map[string]json.RawMessage
 }
 
 // Card is the shared P4 index projection as pulls reads it (02 owns the
@@ -261,16 +267,18 @@ type Index struct {
 
 // ---- lossless JSON mirror (law 5) -------------------------------------------
 //
-// pulls is the second writer of repos/<o>/<r>/issues/index.json (02 owns the
-// shape). Every field it does not name is captured on decode and re-emitted on
-// encode, so an additive field added by a later writer survives the PR path.
-// The known fields keep their struct order and exact output; unknown keys are
-// appended in sorted order, and a document with no unknown keys marshals to the
-// same bytes as the plain struct (no bookkeeping field leaks into the wire).
+// pulls is a second writer of three shared 02 documents: issues/index.json,
+// issues/<num>/thread.json and meta/next_num (02 owns all three shapes). Every
+// field it does not name is captured on decode and re-emitted on encode, so an
+// additive field added by a later writer survives the PR path. The known fields
+// keep their struct order and exact output; unknown keys are appended in sorted
+// order, and a document with no unknown keys marshals to the same bytes as the
+// plain struct (no bookkeeping field leaks into the wire).
 
-// cardJSONKeys / indexJSONKeys are the JSON names the structs above own. A key
-// that matches one of them (encoding/json matches field names case-insensitively
-// too) is never treated as an unknown, so a re-emit can never duplicate it.
+// cardJSONKeys / indexJSONKeys / threadJSONKeys / counterJSONKeys are the JSON
+// names the structs above own. A key that matches one of them (encoding/json
+// matches field names case-insensitively too) is never treated as an unknown,
+// so a re-emit can never duplicate it.
 var (
 	cardJSONKeys = []string{
 		"num", "kind", "title", "state", "state_reason", "labels", "assignees",
@@ -280,6 +288,13 @@ var (
 		"version", "compacted_through", "open", "closed_recent",
 		"card_version", "pinned",
 	}
+	threadJSONKeys = []string{
+		"num", "kind", "title", "state", "state_reason", "author", "created_at",
+		"updated_at", "labels", "assignees", "milestone", "participants",
+		"next_event_seq", "comment_count", "reaction_summary", "version",
+		"next_review_seq", "next_thread_num", "review_summary",
+	}
+	counterJSONKeys = []string{"next"}
 )
 
 // UnmarshalJSON decodes the known card fields and keeps every other key.
@@ -332,6 +347,59 @@ func (ix Index) MarshalJSON() ([]byte, error) {
 		return nil, err
 	}
 	return appendUnknownJSON(base, ix.unknown, indexJSONKeys)
+}
+
+// UnmarshalJSON decodes the known thread fields and keeps every other key.
+func (t *Thread) UnmarshalJSON(data []byte) error {
+	type threadJSON Thread
+	var known threadJSON
+	if err := json.Unmarshal(data, &known); err != nil {
+		return err
+	}
+	unknown, err := captureUnknownJSON(data, threadJSONKeys)
+	if err != nil {
+		return err
+	}
+	*t = Thread(known)
+	t.unknown = unknown
+	return nil
+}
+
+// MarshalJSON re-emits the known thread fields plus every captured unknown key.
+func (t Thread) MarshalJSON() ([]byte, error) {
+	type threadJSON Thread
+	base, err := json.Marshal(threadJSON(t))
+	if err != nil {
+		return nil, err
+	}
+	return appendUnknownJSON(base, t.unknown, threadJSONKeys)
+}
+
+// UnmarshalJSON decodes the known counter fields and keeps every other key, so
+// the allocator's read-modify-write cannot strip an additive key.
+func (c *Counter) UnmarshalJSON(data []byte) error {
+	type counterJSON Counter
+	var known counterJSON
+	if err := json.Unmarshal(data, &known); err != nil {
+		return err
+	}
+	unknown, err := captureUnknownJSON(data, counterJSONKeys)
+	if err != nil {
+		return err
+	}
+	*c = Counter(known)
+	c.unknown = unknown
+	return nil
+}
+
+// MarshalJSON re-emits `next` plus every captured unknown key.
+func (c Counter) MarshalJSON() ([]byte, error) {
+	type counterJSON Counter
+	base, err := json.Marshal(counterJSON(c))
+	if err != nil {
+		return nil, err
+	}
+	return appendUnknownJSON(base, c.unknown, counterJSONKeys)
 }
 
 // inheritUnknown carries old's captured keys onto c (a re-projection of the
@@ -412,8 +480,15 @@ func ownsJSONKey(key string, known []string) bool {
 }
 
 // Counter is the shared {"next": N} allocator shape (P2).
+//
+// allocNum increments it on every PR open, and that read-modify-write rewrites
+// the whole object: unknown keys are captured on decode and re-emitted, so an
+// additive field a future 02 writer adds survives the allocation rather than
+// vanishing on the next PR. Law 5: additive JSON fields round-trip unchanged.
 type Counter struct {
 	Next int `json:"next"`
+
+	unknown map[string]json.RawMessage
 }
 
 // Event is one shared P3 immutable event as pulls writes it (opened,

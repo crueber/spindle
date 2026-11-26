@@ -97,8 +97,11 @@ shared issue/PR numbering space) is
 
 ## 3. Threads (CI)
 
-Threads runs CI from `.spindle/workflows/<name>.yml` in the repository. Workflow files are triggered
-by `push`, `pull_request` (opened/synchronize/reopened), `workflow_dispatch` with typed inputs, and
+Threads runs CI from `.spindle/workflows/<name>.yml` in the repository. Writing one — the key
+reference, recipes, the Forgejo migration cookbook and a troubleshooting tree — is
+[`WORKFLOWS.md`](WORKFLOWS.md); the exhaustive reference is [`threads.md`](threads.md).
+Workflow files are triggered by `push`, `pull_request` (opened/synchronize/reopened),
+`workflow_dispatch` with typed inputs, and
 `schedule` (five-field UTC cron); jobs run in containers with services, `needs:` ordering,
 `strategy.matrix` and `concurrency` groups, report into the checks surface that gates merges, and
 stream logs over SSE with cancel and rerun. `permissions:` mints a scoped job token

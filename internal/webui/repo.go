@@ -1120,7 +1120,8 @@ type repoCommit struct {
 	Subject string
 	Author  string
 	Initial string
-	When    string // RFC 3339, rendered through the rel helper
+	When    string // RFC 3339, the machine-readable stamp
+	WhenAgo string // When rendered against the request clock
 	SHA     string
 	Href    string
 }
@@ -1234,11 +1235,13 @@ func (s *Server) repoTree(w http.ResponseWriter, r *http.Request) {
 	// Commit strip: the newest commit on the resolved ref. Same rule — chrome.
 	if cp, cerr := s.env.API.Repo.Commits(ctx, rq.id, res.SHA, "", 0, 1); cerr == nil && len(cp.Commits) > 0 {
 		cm := cp.Commits[0]
+		when := cm.AuthorDate.Format(time.RFC3339)
 		data.Latest = &repoCommit{
 			Subject: cm.Subject,
 			Author:  cm.Author,
 			Initial: initialOf(cm.Author),
-			When:    cm.AuthorDate.Format(time.RFC3339),
+			When:    when,
+			WhenAgo: relTimeAt(when, s.env.now()),
 			SHA:     cm.SHA,
 			Href:    "/" + c.Full + "/commit/" + cm.SHA,
 		}

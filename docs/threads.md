@@ -174,6 +174,10 @@ The run id is in the page URL and in `spindle threads list acme/widgets`.
 
 ## 3. Workflow reference
 
+> **Writing a workflow?** [`WORKFLOWS.md`](WORKFLOWS.md) is the authoring guide: compact key
+> tables, recipes, the Forgejo migration cookbook and a troubleshooting tree. This section is the
+> exhaustive reference it links into.
+
 The parser is strict: **an unknown key is an error for that file**, never a silently ignored typo.
 A file that does not parse creates no runs of its own and does not affect the other files — its error
 is listed in the Threads page's **Workflows** section (anchored `#workflow-<slug>`) and in
@@ -1215,7 +1219,9 @@ and secret names, never a value:
 - fires for `refs/heads/<branch>` only: tags and branch deletes create no run;
 - `on.push.branches` filters on the branch name with exact names and `*` wildcards (`release/*`);
   there is no `!` negation and no `**`; an empty filter matches every branch;
-- `on.push.tags` is accepted by the parser and **never fires** (tag pushes are not run);
+- `on.push.tags` is accepted by the parser and **never fires** (tag pushes are not run); a
+  trigger with only `tags` and no `branches` has an empty branch filter, which matches **every
+  branch push** — do not use it;
 - the workflow file is read at the pushed commit, so a push that changes both code and workflow uses
   the new workflow;
 - a pull request **merge** creates a `push` run for the base branch (the merge commit), because the
@@ -1917,10 +1923,9 @@ Plainly, so nobody plans around them:
   `strategy.matrix.include/exclude`, no `strategy.max-parallel`.
 - **No GitHub expression language** beyond §3.7; `${{ }}` is not substituted in scripts for
   `github.*`, `env.*` or `secrets.*` — use the environment variables.
-- **No OIDC / cloud credentials, no environments or protection rules, no approvals other than the
-  first-time-fork gate.**
-- **No per-job CPU/memory limits** and no workflow-declared container `entrypoint`/`command`/`ports`
-  (the runner owns the container's lifetime; limits come from the daemon).
+- **No per-job resource knobs beyond `container.options`** (`--cpus`, `--memory`, `--shm-size`,
+  `--ulimit nofile=…`), and no workflow-declared container `entrypoint`/`command`/`ports` (the
+  runner owns the container's lifetime; the daemon's own limits still apply).
 - **No server-side per-repository concurrency cap**; the only caps are runner capacity, concurrency
   groups, the 256-cell matrix product and the 3-attempt queue limit.
 - **No checks re-run separate from a job re-run**, and no log retention beyond the run's own window.

@@ -48,10 +48,15 @@ type codePulse struct {
 	ContributorLine string
 
 	// Cadence: the page's head-commit time and the newest release stamp.
-	LastCommit   string // RFC 3339; empty = omit the row
-	ReleaseRow   bool
-	ReleaseStamp string // RFC 3339 when the row is a date
-	ReleaseText  string // "No release yet" when ReleasesKnown && Releases == 0
+	// The Ago strings are derived with the request clock (never the wall clock),
+	// so a fixture-pinned clock renders the same text whenever the test runs;
+	// the absolute RFC 3339 stamp stays the machine-readable value.
+	LastCommit    string // RFC 3339; empty = omit the row
+	LastCommitAgo string // relative age of LastCommit against the request clock
+	ReleaseRow    bool
+	ReleaseStamp  string // RFC 3339 when the row is a date
+	ReleaseAgo    string // relative age of ReleaseStamp against the request clock
+	ReleaseText   string // "No release yet" when ReleasesKnown && Releases == 0
 
 	// Language mix: text list (top 4 + Other) plus the decorative bar.
 	Languages    []pulseLang
@@ -103,6 +108,7 @@ func buildCodePulse(p *insights.Projection, latest *repoCommit, repo *RepoChrome
 
 	if latest != nil && latest.When != "" {
 		cp.LastCommit = latest.When
+		cp.LastCommitAgo = relTimeAt(latest.When, now)
 	}
 	if p.Facts.ReleasesKnown {
 		switch {
@@ -112,6 +118,7 @@ func buildCodePulse(p *insights.Projection, latest *repoCommit, repo *RepoChrome
 		case p.Facts.LastReleaseAt != "":
 			cp.ReleaseRow = true
 			cp.ReleaseStamp = p.Facts.LastReleaseAt
+			cp.ReleaseAgo = relTimeAt(p.Facts.LastReleaseAt, now)
 		}
 	}
 

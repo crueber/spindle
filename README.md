@@ -196,6 +196,7 @@ Full manual: [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md) · the laws and field le
 | [docs/CLI.md](docs/CLI.md) | Every command, flag, repo selector and exit code. |
 | [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md) | Prerequisites, build, package map, tests, CI and the publish flow. |
 | [docs/threads.md](docs/threads.md) | The Threads reference: workflow keys, triggers, containers, secrets, runner flags, troubleshooting. |
+| [docs/WORKFLOWS.md](docs/WORKFLOWS.md) | Writing workflows: the key reference, recipes, the Forgejo migration cookbook and a troubleshooting tree. |
 | [docs/BACKUP.md](docs/BACKUP.md) | Backup and restore procedure, the mid-push caveat, RPO/RTO, post-restore checks. |
 | [docs/UPGRADE.md](docs/UPGRADE.md) | Moving a running instance to a new build, including the config preflight. |
 | [docs/features/](docs/features/README.md) | The collaboration layer's planning contracts and as-built records. |

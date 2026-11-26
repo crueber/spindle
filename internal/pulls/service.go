@@ -25,16 +25,18 @@ func (s *Service) allocNum(ctx context.Context, owner, repo string) (int, error)
 	key := CounterKey(owner, repo)
 	var num int
 	_, err := s.casUpdate(ctx, key, 10, func(cur []byte, ver store.Version) ([]byte, bool, error) {
-		next := 1
+		c := Counter{Next: 1}
 		if cur != nil {
-			var c Counter
 			if jerr := json.Unmarshal(cur, &c); jerr != nil || c.Next < 1 {
 				return nil, false, fmt.Errorf("%w: meta/next_num: corrupt", ErrCorrupt)
 			}
-			next = c.Next
 		}
-		num = next
-		raw, _ := json.Marshal(Counter{Next: next + 1})
+		num = c.Next
+		// Increment in place: the decode captured every key this struct does
+		// not name, so the CAS write re-emits them instead of stripping an
+		// additive counter field (law 5).
+		c.Next++
+		raw, _ := json.Marshal(c)
 		return raw, true, nil
 	})
 	if err != nil {

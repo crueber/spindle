@@ -65,7 +65,7 @@
       <div class="mb-2 flex items-center gap-2 border border-[var(--pd-line)] bg-[var(--pd-surface)] px-3 py-1.5 text-[11px]">
         <span class="grid h-5 w-5 shrink-0 place-items-center rounded-full bg-[var(--pd-raised)] font-mono text-[10px] text-[var(--pd-text-2)]" aria-hidden="true">{{.Data.Latest.Initial}}</span>
         <a class="link min-w-0 truncate font-medium" href="{{.Data.Latest.Href}}">{{.Data.Latest.Subject}}</a>
-        <span class="hidden shrink-0 font-mono text-[var(--pd-muted)] sm:inline">{{.Data.Latest.Author}} · <time datetime="{{.Data.Latest.When}}">{{rel .Data.Latest.When}}</time></span>
+        <span class="hidden shrink-0 font-mono text-[var(--pd-muted)] sm:inline">{{.Data.Latest.Author}} · <time datetime="{{.Data.Latest.When}}">{{.Data.Latest.WhenAgo}}</time></span>
         <a class="link ml-auto shrink-0 font-mono" href="{{.Data.Latest.Href}}" title="Commit {{.Data.Latest.SHA}}">{{shortsha .Data.Latest.SHA}}</a>
       </div>
       {{end}}
@@ -153,10 +153,10 @@
         {{end}}
         <div class="kv">
           {{if .Data.Pulse.LastCommit}}
-          <div class="kv-row"><span class="kv-key">Last commit</span><span class="kv-val"><time datetime="{{.Data.Pulse.LastCommit}}" title="{{.Data.Pulse.LastCommit}}">{{rel .Data.Pulse.LastCommit}}</time></span></div>
+          <div class="kv-row"><span class="kv-key">Last commit</span><span class="kv-val"><time datetime="{{.Data.Pulse.LastCommit}}" title="{{.Data.Pulse.LastCommit}}">{{.Data.Pulse.LastCommitAgo}}</time></span></div>
           {{end}}
           {{if .Data.Pulse.ReleaseRow}}
-          <div class="kv-row"><span class="kv-key">Last release</span><span class="kv-val">{{if .Data.Pulse.ReleaseStamp}}<time datetime="{{.Data.Pulse.ReleaseStamp}}" title="{{.Data.Pulse.ReleaseStamp}}">{{rel .Data.Pulse.ReleaseStamp}}</time>{{else}}{{.Data.Pulse.ReleaseText}}{{end}}</span></div>
+          <div class="kv-row"><span class="kv-key">Last release</span><span class="kv-val">{{if .Data.Pulse.ReleaseStamp}}<time datetime="{{.Data.Pulse.ReleaseStamp}}" title="{{.Data.Pulse.ReleaseStamp}}">{{.Data.Pulse.ReleaseAgo}}</time>{{else}}{{.Data.Pulse.ReleaseText}}{{end}}</span></div>
           {{end}}
         </div>
         {{if .Data.Pulse.HasLanguages}}

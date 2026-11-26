@@ -1,0 +1,1083 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self'; media-src 'self'; font-src 'self'; connect-src 'none'; object-src 'none'; base-uri 'self'; form-action 'none'">
+<meta name="referrer" content="no-referrer">
+<meta name="color-scheme" content="dark light">
+<meta name="theme-color" content="#0f1113" media="(prefers-color-scheme: dark)">
+<meta name="theme-color" content="#ffffff" media="(prefers-color-scheme: light)">
+<title>Threads workflows — writing CI for spindle</title>
+<meta name="description" content="How to write a Threads workflow for spindle: the key reference, triggers, matrices and concurrency, containers and services, actions, secrets, approvals, recipes, migration from Forgejo and troubleshooting.">
+<link rel="canonical" href="https://crueber.github.io/spindle/workflows.html">
+<meta property="og:type" content="article">
+<meta property="og:site_name" content="spindle">
+<meta property="og:title" content="Threads workflows — writing CI for spindle">
+<meta property="og:description" content="The authoring guide for spindle's CI: keys, triggers, matrices, containers, actions, secrets, recipes, Forgejo migration and troubleshooting.">
+<meta property="og:url" content="https://crueber.github.io/spindle/workflows.html">
+<meta property="og:image" content="https://crueber.github.io/spindle/img/og.png">
+<meta property="og:image:type" content="image/png">
+<meta property="og:image:width" content="1200">
+<meta property="og:image:height" content="630">
+<meta property="og:image:alt" content="The spindle repository page: header, branch selector, latest commit and file tree.">
+<meta name="twitter:card" content="summary_large_image">
+<meta name="twitter:title" content="Threads workflows — writing CI for spindle">
+<meta name="twitter:description" content="Keys, triggers, matrices, containers, actions, secrets, recipes, Forgejo migration and troubleshooting for spindle's CI.">
+<meta name="twitter:image" content="https://crueber.github.io/spindle/img/og.png">
+<meta name="twitter:image:alt" content="The spindle repository page with its header, latest commit and file tree.">
+<script src="theme-init.js"></script>
+<link rel="icon" href="favicon.svg" type="image/svg+xml">
+<link rel="stylesheet" href="style.css">
+<script src="site.js" defer></script>
+</head>
+<body>
+<a class="skip" href="#main">Skip to content</a>
+
+<header class="site-head">
+  <div class="wrap head-in">
+    <a class="brand" href="index.html" aria-label="spindle, back to the home page">
+      <span class="brand-mark" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="3.5" y="3.5" width="17" height="17" rx="1.5"/><path d="M12 3.5v5M12 15.5v5M3.5 12h5M15.5 12h5"/><rect class="dot" x="10" y="10" width="4" height="4" stroke="none"/></svg></span>
+      <span>spindle</span>
+    </a>
+    <nav class="nav" aria-label="Sections">
+      <a href="index.html#tour">Tour</a>
+      <a href="index.html#why">Why</a>
+      <a href="index.html#deploy">Deploy</a>
+      <a href="index.html#cli">CLI</a>
+      <a href="workflows.html" aria-current="page">Workflows</a>
+      <a href="index.html#docs">Docs</a>
+    </nav>
+    <div class="head-end">
+      <a class="gh-link" href="https://github.com/crueber/spindle" aria-label="spindle on GitHub">
+        <svg viewBox="0 0 16 16" aria-hidden="true"><path fill="currentColor" d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"/></svg>
+        <span>GitHub</span>
+      </a>
+      <div class="theme" role="group" aria-label="Colour palette">
+        <button type="button" data-theme-set="dark" aria-pressed="true" aria-label="Dark palette">DK</button>
+        <button type="button" data-theme-set="light" aria-pressed="false" aria-label="Light palette">LT</button>
+        <button type="button" data-theme-set="hc-dark" aria-pressed="false" aria-label="High-contrast dark palette">HC</button>
+      </div>
+    </div>
+  </div>
+</header>
+
+<main id="main">
+
+  <!-- ============================================================ hero -->
+  <section class="hero" id="top" aria-labelledby="wf-title">
+    <div class="wrap hero-grid">
+      <div class="prose">
+        <p class="eyebrow"><span class="tick" aria-hidden="true"></span>Threads</p>
+        <h1 id="wf-title">CI that lives <span>in the repository.</span></h1>
+        <p class="lede">A workflow is a file at <code>.spindle/workflows/ci.yml</code>. A push, a pull
+          request, a schedule or a button creates a run; registered runners execute each job in its
+          own container; every job reports one check into the surface that already gates merges.
+          No marketplace, no cache engine, no second service to operate — and no state outside the
+          object store.</p>
+        <div class="cta">
+          <a class="btn primary" href="#quickstart">Write the first one <span class="arr" aria-hidden="true">→</span></a>
+          <a class="btn" href="#migrate">Migrate from Forgejo</a>
+          <a class="btn" href="https://github.com/crueber/spindle/blob/main/docs/WORKFLOWS.md">Full guide</a>
+        </div>
+      </div>
+      <figure class="code" aria-label="A complete workflow file">
+        <div class="code-bar"><span>.spindle/workflows/ci.yml</span><span class="state">complete file</span></div>
+        <pre tabindex="0"><code><span class="k">name:</span> CI
+<span class="k">on:</span> [push, pull_request]
+<span class="k">jobs:</span>
+  <span class="k">test:</span>
+    <span class="k">runs-on:</span> [self-hosted, linux, docker]
+    <span class="k">container:</span> golang:1.27
+    <span class="k">steps:</span>
+      - <span class="k">uses:</span> actions/checkout
+      - <span class="k">run:</span> go vet ./...
+      - <span class="k">run:</span> go test ./... -count=1</code></pre>
+      </figure>
+    </div>
+  </section>
+
+  <section class="measured" aria-label="At a glance">
+    <ul class="wrap measured-in">
+      <li class="measure"><b>4 triggers</b><span>push, pull request, dispatch, schedule</span></li>
+      <li class="measure"><b>3 built-ins</b><span>checkout, upload and download artifacts</span></li>
+      <li class="measure"><b>256</b><span>matrix cells per job, at most</span></li>
+      <li class="measure"><b>1 container</b><span>per job, removed on every exit path</span></li>
+      <li class="measure"><a href="#reference">The key reference <span aria-hidden="true">→</span></a><span>every accepted key, in four tables</span></li>
+    </ul>
+  </section>
+
+  <nav class="wrap tocbar" aria-label="On this page">
+    <a href="#quickstart">Quickstart</a>
+    <a href="#reference">Keys</a>
+    <a href="#triggers">Triggers</a>
+    <a href="#jobs">Jobs &amp; matrices</a>
+    <a href="#runtime">Containers</a>
+    <a href="#actions">Actions</a>
+    <a href="#secrets">Secrets</a>
+    <a href="#approvals">Approvals</a>
+    <a href="#artifacts">Artifacts</a>
+    <a href="#recipes">Recipes</a>
+    <a href="#migrate">Migration</a>
+    <a href="#trouble">Troubleshooting</a>
+  </nav>
+
+  <!-- ======================================================== quickstart -->
+  <section class="section" id="quickstart" aria-labelledby="quickstart-title">
+    <div class="wrap docbody">
+      <header class="sec-head">
+        <p class="eyebrow"><span class="tick" aria-hidden="true"></span>Quickstart</p>
+        <h2 id="quickstart-title">Two files, one runner, one check.</h2>
+        <p class="sec-lede">The workflow goes in the repository. The runner is a process you start
+          once. The first push that carries the file triggers it — the workflow is read from the
+          pushed commit.</p>
+      </header>
+
+      <div class="split">
+        <div>
+          <h3 class="subhead">1. Commit the workflow</h3>
+          <div class="prose">
+            <p>Only <code>.spindle/workflows/*.yml</code> and <code>*.yaml</code> are read: one
+              directory, no nesting, no fallback to another CI's directory. Each file is capped at
+              1 MiB. A file that does not parse creates no runs; its error is shown in the
+              repository's Threads page while the other files keep running.</p>
+            <p>The file below is complete. It runs on every branch push and every pull request,
+              inside a Go image, and reports the check <code>threads/ci/test</code>.</p>
+          </div>
+        </div>
+        <figure class="code">
+          <div class="code-bar"><span>.spindle/workflows/ci.yml</span><span class="state">valid</span></div>
+          <pre tabindex="0"><code><span class="k">name:</span> CI
+<span class="k">on:</span>
+  <span class="k">push:</span>
+    <span class="k">branches:</span> [main]
+  <span class="k">pull_request:</span>
+    <span class="k">branches:</span> [main]
+<span class="k">permissions:</span>
+  <span class="k">contents:</span> read
+<span class="k">jobs:</span>
+  <span class="k">test:</span>
+    <span class="k">runs-on:</span> [self-hosted, linux, docker]
+    <span class="k">container:</span> golang:1.27
+    <span class="k">steps:</span>
+      - <span class="k">uses:</span> actions/checkout
+      - <span class="k">run:</span> go test ./... -count=1</code></pre>
+        </figure>
+      </div>
+
+      <h3 class="subhead">2. Start a runner</h3>
+      <div class="prose">
+        <p>A host administrator mints a one-time registration token at
+          <code>/admin/runners</code>, together with the runner's repository policy: every
+          repository, or an allowlist of <code>owner/name</code> and <code>owner/*</code> patterns.
+          On the runner host — Docker is required, and <code>DOCKER_HOST</code> names the daemon —
+          exchange the token once and then serve:</p>
+      </div>
+      <figure class="code">
+        <div class="code-bar"><span>shell</span><span class="state">runner host</span></div>
+        <pre tabindex="0"><code>spindle --server https://git.example.com runner serve \
+  --register wrg_… \
+  --token-file /etc/spindle/runner.token \
+  --labels self-hosted,linux,docker --name build-1 --capacity 1
+
+# afterwards the token file is enough
+spindle --server https://git.example.com runner serve \
+  --token-file /etc/spindle/runner.token \
+  --labels self-hosted,linux,docker --name build-1 --capacity 1</code></pre>
+      </figure>
+      <p class="note">Labels are exact strings matched as a subset: a job's <code>runs-on</code>
+        must be contained in the runner's declared set. <code>ubuntu-latest</code> is not special
+        here unless a runner declares it. Capacity <code>1</code> keeps one job per daemon, which
+        is the isolation-preserving shape for untrusted code. The runner declares and then
+        long-polls; a claim is a compare-and-swap on the queue entry, so any number of runners
+        need no coordinator, and fetching is the heartbeat.</p>
+
+      <h3 class="subhead">3. Watch it</h3>
+      <div class="prose">
+        <p>The repository's <b>Threads</b> page lists runs, the per-file parse errors and the
+          <b>Run workflow</b> control. One run page shows jobs, <code>runs-on</code>, the runner,
+          the check context, step results, artifacts and a live log per job. The commit page shows
+          the same checks in its <b>Checks</b> panel, and the JSON API and
+          <code>spindle threads</code> verbs return the same state.</p>
+      </div>
+    </div>
+  </section>
+
+  <!-- ========================================================= reference -->
+  <section class="section alt" id="reference" aria-labelledby="reference-title">
+    <div class="wrap docbody">
+      <header class="sec-head">
+        <p class="eyebrow"><span class="tick" aria-hidden="true"></span>Key reference</p>
+        <h2 id="reference-title">Every key the parser accepts.</h2>
+        <p class="sec-lede">The parser is strict. An unknown key is a parse error for that file —
+          never a silently ignored typo. There is no <code>defaults:</code> block, no
+          <code>paths:</code> filter, no matrix <code>include</code>/<code>exclude</code> and no
+          <code>max-parallel</code>.</p>
+      </header>
+
+      <h3 class="subhead">Top level</h3>
+      <div class="tablewrap" role="region" tabindex="0" aria-labelledby="cap-top">
+        <table class="ref">
+          <caption id="cap-top" class="sr-only">Top-level workflow keys</caption>
+          <thead><tr><th>Key</th><th>Type</th><th>Default</th><th>What it does</th></tr></thead>
+          <tbody>
+            <tr><td><code>name</code></td><td>string</td><td>file stem</td><td>Display name and the <code>&lt;workflow&gt;</code> segment of every check context.</td></tr>
+            <tr><td><code>on</code></td><td>name, list or mapping</td><td>—</td><td>Triggers; a file with no <code>on</code> parses but never fires.</td></tr>
+            <tr><td><code>env</code></td><td>map[string]string</td><td>empty</td><td>Merged under job and step <code>env</code>. Scalars are coerced to text; a nested value is an error.</td></tr>
+            <tr><td><code>concurrency</code></td><td>name or <code>{group, cancel-in-progress}</code></td><td>none</td><td>One in-flight run per group per repository.</td></tr>
+            <tr><td><code>permissions</code></td><td>mapping or <code>read-all</code>/<code>write-all</code></td><td>instance default (<code>read</code>)</td><td>Scopes the job token. Only <code>contents</code> and <code>id-token</code> change behaviour.</td></tr>
+            <tr><td><code>jobs</code></td><td>map[string]job</td><td>required</td><td>At least one job.</td></tr>
+          </tbody>
+        </table>
+      </div>
+
+      <h3 class="subhead">Triggers</h3>
+      <div class="tablewrap" role="region" tabindex="0" aria-labelledby="cap-triggers">
+        <table class="ref">
+          <caption id="cap-triggers" class="sr-only">Supported triggers and filters</caption>
+          <thead><tr><th>Trigger</th><th>Keys</th><th>Fires when</th></tr></thead>
+          <tbody>
+            <tr><td><code>push</code></td><td><code>branches</code>, <code>tags</code></td><td>A branch push matching <code>branches</code>. <code>tags</code> is accepted but <b>never fires</b>.</td></tr>
+            <tr><td><code>pull_request</code></td><td><code>branches</code>, <code>types</code></td><td><code>opened</code>, <code>synchronize</code> (head moved) or <code>reopened</code> on a PR targeting a matching branch. <code>closed</code> and <code>labeled</code> are parse errors.</td></tr>
+            <tr><td><code>workflow_dispatch</code></td><td><code>inputs</code></td><td>A manual dispatch from the UI, API or CLI. Input types: <code>string</code>, <code>boolean</code>, <code>choice</code>.</td></tr>
+            <tr><td><code>schedule</code></td><td><code>- cron: "…"</code></td><td>The maintainer's sweep, on the default branch only. Five fields, UTC.</td></tr>
+          </tbody>
+        </table>
+      </div>
+
+      <h3 class="subhead">Job</h3>
+      <div class="tablewrap" role="region" tabindex="0" aria-labelledby="cap-job">
+        <table class="ref">
+          <caption id="cap-job" class="sr-only">Job keys</caption>
+          <thead><tr><th>Key</th><th>Type</th><th>Default</th><th>What it does</th></tr></thead>
+          <tbody>
+            <tr><td><code>runs-on</code></td><td>label or list</td><td>required</td><td>The runner must declare every label, case-insensitive and exact. No wildcards.</td></tr>
+            <tr><td><code>container</code></td><td>image or mapping</td><td>runner <code>--image</code></td><td><code>image</code>, <code>env</code>, <code>options</code> are applied; <code>ports</code>, <code>command</code>, <code>entrypoint</code>, <code>volumes</code> are not.</td></tr>
+            <tr><td><code>services</code></td><td>map[id]service</td><td>none</td><td>Sidecars on the job network, reachable at their id (the container port).</td></tr>
+            <tr><td><code>needs</code></td><td>list of jobs</td><td>none</td><td>Must exist and be acyclic. A matrix dependency waits for every cell.</td></tr>
+            <tr><td><code>if</code></td><td>expression</td><td><code>success()</code> over <code>needs</code></td><td>Decided by the server before the job is claimable. False means skipped.</td></tr>
+            <tr><td><code>strategy.matrix</code></td><td>map[axis][]scalar</td><td>none</td><td>A simple product; <code>include</code>/<code>exclude</code> are errors; 256 cells max.</td></tr>
+            <tr><td><code>strategy.fail-fast</code></td><td>bool</td><td><code>true</code></td><td>A failed cell cancels its siblings.</td></tr>
+            <tr><td><code>outputs</code></td><td>map[name]template</td><td>none</td><td>Values a dependent reads as <code>needs.&lt;job&gt;.outputs.&lt;name&gt;</code>.</td></tr>
+            <tr><td><code>environment</code></td><td>name or <code>{name, url}</code></td><td>none</td><td>A deployment target with reviewers and environment secrets.</td></tr>
+            <tr><td><code>timeout-minutes</code></td><td>int</td><td>unbounded</td><td>Cancels the job and removes its containers.</td></tr>
+            <tr><td><code>continue-on-error</code></td><td>bool</td><td><code>false</code></td><td>The job stays a failure, but the run conclusion follows the other jobs.</td></tr>
+            <tr><td><code>uses</code>/<code>with</code></td><td>string/map</td><td>—</td><td>Reusable workflow: parses, then fails as not supported in v1.</td></tr>
+          </tbody>
+        </table>
+      </div>
+
+      <h3 class="subhead">Step</h3>
+      <div class="tablewrap" role="region" tabindex="0" aria-labelledby="cap-step">
+        <table class="ref">
+          <caption id="cap-step" class="sr-only">Step keys</caption>
+          <thead><tr><th>Key</th><th>Type</th><th>Default</th><th>What it does</th></tr></thead>
+          <tbody>
+            <tr><td><code>id</code></td><td>identifier</td><td>—</td><td>Letters, digits, <code>_</code>, <code>-</code>; not starting with a digit; unique in the job. Required to publish outputs.</td></tr>
+            <tr><td><code>run</code></td><td>string</td><td>—</td><td>Exactly one of <code>run</code> and <code>uses</code>.</td></tr>
+            <tr><td><code>uses</code></td><td>action</td><td>—</td><td>A built-in, a local action (<code>./…</code>) or <code>docker://image</code>.</td></tr>
+            <tr><td><code>with</code></td><td>map[string]string</td><td>—</td><td>Action inputs. An undeclared key fails the step.</td></tr>
+            <tr><td><code>shell</code></td><td><code>sh</code>, <code>bash</code>, <code>python</code>, <code>pwsh</code>, <code>cmd</code></td><td><code>sh</code></td><td><code>sh</code> is <code>sh -e -c</code>; <code>bash</code> is <code>bash -eo pipefail -c</code>.</td></tr>
+            <tr><td><code>working-directory</code></td><td>path</td><td>workspace</td><td>Relative joins the workspace; absolute wins.</td></tr>
+            <tr><td><code>env</code></td><td>map[string]string</td><td>empty</td><td>Overrides job and container <code>env</code>.</td></tr>
+            <tr><td><code>if</code></td><td>expression</td><td><code>success()</code></td><td>The small documented subset. An unsupported expression fails the step, never skips it.</td></tr>
+            <tr><td><code>continue-on-error</code></td><td>bool</td><td><code>false</code></td><td>The step may fail without failing the job; its result is still a failure.</td></tr>
+            <tr><td><code>timeout-minutes</code></td><td>int</td><td>remaining job time</td><td>On expiry the job container is killed and the step reports <code>timed out</code>.</td></tr>
+          </tbody>
+        </table>
+      </div>
+
+      <p class="note">A step with both <code>run</code> and <code>uses</code>, or neither, is a
+        parse error. A failed step skips the rest of the job unless it opted into
+        <code>continue-on-error</code>.</p>
+    </div>
+  </section>
+
+  <!-- ========================================================== triggers -->
+  <section class="section" id="triggers" aria-labelledby="triggers-title">
+    <div class="wrap docbody">
+      <header class="sec-head">
+        <p class="eyebrow"><span class="tick" aria-hidden="true"></span>Triggers</p>
+        <h2 id="triggers-title">Four events, no tag pushes.</h2>
+        <p class="sec-lede">Filters are deliberately small: branch globs use <code>*</code> only,
+          there is no path filter, and a tag push creates no run — so a release process is
+          dispatched, not tag-triggered.</p>
+      </header>
+
+      <div class="split">
+        <div class="prose">
+          <p><b>Push.</b> Fires for <code>refs/heads/&lt;branch&gt;</code>. <code>branches</code>
+            matches exact names and <code>*</code> wildcards (<code>release/*</code>); no negation,
+            no <code>**</code>. A merged pull request creates a push run for the base branch. A push
+            authenticated by a job token creates nothing.</p>
+          <p><b>Pull request.</b> <code>branches</code> filters the target. <code>types</code> is a
+            closed vocabulary: <code>opened</code>, <code>synchronize</code>,
+            <code>reopened</code>. A same-repository PR runs the head commit's file, trusted, with
+            secrets. A fork PR runs the <b>base branch's</b> file, untrusted, with no secrets and a
+            read-only token.</p>
+          <p><b>Dispatch.</b> Typed inputs from the UI, the API
+            (<code>POST …/api/threads</code>) or <code>spindle threads run</code>. Inputs must
+            match the declared schema or the call is <code>422</code>.</p>
+          <p><b>Schedule.</b> Five fields, UTC. Supported: <code>*</code>, numbers, ranges, steps
+            (<code>*/15</code>, <code>a-b/N</code>) and comma lists. Names, macros,
+            <code>L</code>/<code>W</code>/<code>#</code> and six-field expressions are parse
+            errors.</p>
+        </div>
+        <figure class="code">
+          <div class="code-bar"><span>manual dispatch with typed inputs</span><span class="state">valid</span></div>
+          <pre tabindex="0"><code><span class="k">name:</span> Deploy
+<span class="k">on:</span>
+  <span class="k">workflow_dispatch:</span>
+    <span class="k">inputs:</span>
+      <span class="k">environment:</span>
+        <span class="k">description:</span> target environment
+        <span class="k">type:</span> choice
+        <span class="k">options:</span> [staging, production]
+        <span class="k">required:</span> true
+        <span class="k">default:</span> staging
+      <span class="k">dry_run:</span>
+        <span class="k">description:</span> skip the deploy
+        <span class="k">type:</span> boolean
+        <span class="k">default:</span> false
+<span class="k">jobs:</span>
+  <span class="k">deploy:</span>
+    <span class="k">runs-on:</span> linux
+    <span class="k">environment:</span> production
+    <span class="k">steps:</span>
+      - <span class="k">uses:</span> actions/checkout
+      - <span class="k">name:</span> deploy
+        <span class="k">if:</span> inputs.dry_run != 'true'
+        <span class="k">run:</span> ./deploy.sh --target "${{ inputs.environment }}"</code></pre>
+        </figure>
+      </div>
+      <p class="note">Structural fields — <code>runs-on</code>, <code>container.image</code>,
+        <code>environment</code> — and workflow/job/container <code>env</code> do not take
+        <code>${{ }}</code>. A dispatch input can choose the environment name only if the job names
+        it literally.</p>
+    </div>
+  </section>
+
+  <!-- ============================================================== jobs -->
+  <section class="section alt" id="jobs" aria-labelledby="jobs-title">
+    <div class="wrap docbody">
+      <header class="sec-head">
+        <p class="eyebrow"><span class="tick" aria-hidden="true"></span>Jobs</p>
+        <h2 id="jobs-title">Dependencies, matrices, one lock.</h2>
+        <p class="sec-lede">A job with no <code>if</code> runs only when every dependency
+          succeeded. Failures propagate as <code>skipped</code>, never as a silent green. A matrix
+          is a simple product. A concurrency group admits one run at a time.</p>
+      </header>
+
+      <div class="split">
+        <figure class="code">
+          <div class="code-bar"><span>needs, matrix and concurrency</span><span class="state">valid</span></div>
+          <pre tabindex="0"><code><span class="k">name:</span> Build
+<span class="k">on:</span>
+  <span class="k">push:</span>
+    <span class="k">branches:</span> [main]
+<span class="k">concurrency:</span>
+  <span class="k">group:</span> ci-${{ github.ref }}
+  <span class="k">cancel-in-progress:</span> true
+<span class="k">jobs:</span>
+  <span class="k">test:</span>
+    <span class="k">runs-on:</span> linux
+    <span class="k">container:</span> golang:1.27
+    <span class="k">strategy:</span>
+      <span class="k">fail-fast:</span> false
+      <span class="k">matrix:</span>
+        <span class="k">go:</span> ["1.26", "1.27"]
+    <span class="k">steps:</span>
+      - <span class="k">uses:</span> actions/checkout
+      - <span class="k">run:</span> go test ./...
+        <span class="k">env:</span>
+          <span class="k">GO_VERSION:</span> ${{ matrix.go }}
+  <span class="k">package:</span>
+    <span class="k">needs:</span> [test]
+    <span class="k">runs-on:</span> linux
+    <span class="k">steps:</span>
+      - <span class="k">run:</span> echo "only after every test cell"
+  <span class="k">notify:</span>
+    <span class="k">needs:</span> [test, package]
+    <span class="k">if:</span> failure()
+    <span class="k">runs-on:</span> linux
+    <span class="k">steps:</span>
+      - <span class="k">run:</span> echo "something above failed"</code></pre>
+        </figure>
+        <div class="prose">
+          <p><b>Propagation.</b> A failed, cancelled or skipped dependency skips its dependents and
+            records the reason. A true <code>if</code> runs anyway: <code>always()</code>,
+            <code>failure()</code> or <code>needs.test.result == 'failure'</code>.
+            <code>if: false</code> disables a job without deleting it.</p>
+          <p><b>Matrix.</b> Simple product of scalar axes, expanded in alphabetical axis order,
+            values in declaration order. Every cell gets its own job id, check context and
+            <code>MATRIX_&lt;AXIS&gt;</code> variable. The product is capped at 256.</p>
+          <p><b>Fail-fast.</b> On by default: a failed cell cancels its siblings. A job-level
+            <code>continue-on-error: true</code> suppresses that, because the failure is
+            tolerated.</p>
+          <p><b>Concurrency.</b> One in-flight run per group per repository. A workflow-level group
+            belongs to the run, so sibling jobs do not serialize each other.
+            <code>cancel-in-progress: true</code> cancels the holder. A group that cannot resolve is
+            a parse error or a <code>422</code> — never a literal fallback.</p>
+        </div>
+      </div>
+
+      <h3 class="subhead">The expression subset</h3>
+      <div class="prose">
+        <p>A step <code>if</code> can read <code>success()</code>, <code>failure()</code>,
+          <code>always()</code>, <code>cancelled()</code>, <code>github.ref</code>,
+          <code>github.ref_name</code>, <code>github.sha</code>, <code>github.event_name</code>,
+          <code>github.workflow</code>, <code>github.job</code>, <code>github.repository</code>,
+          <code>github.run_id</code>, <code>matrix.*</code>, <code>inputs.*</code>,
+          <code>env.*</code>, <code>steps.&lt;id&gt;.outcome</code>,
+          <code>.conclusion</code> and <code>.outputs.*</code>, with
+          <code>! == != &amp;&amp; || ( )</code> and string literals. A job <code>if</code> adds
+          <code>needs.&lt;job&gt;.result</code> and <code>needs.&lt;job&gt;.outputs.*</code>.</p>
+        <p>There is no <code>contains</code>, <code>startsWith</code>, <code>endsWith</code> or
+          <code>format</code>. An unsupported expression is an evaluation error: the step or job
+          fails with the message rather than being silently skipped.</p>
+      </div>
+    </div>
+  </section>
+
+  <!-- =========================================================== runtime -->
+  <section class="section" id="runtime" aria-labelledby="runtime-title">
+    <div class="wrap docbody">
+      <header class="sec-head">
+        <p class="eyebrow"><span class="tick" aria-hidden="true"></span>Execution surface</p>
+        <h2 id="runtime-title">One container, one workspace, your services.</h2>
+        <p class="sec-lede">Every job gets exactly one container and one workspace volume. Steps are
+          <code>docker exec</code> invocations inside it, so the toolchain and network namespace
+          persist. Services are sidecars on that job's network.</p>
+      </header>
+
+      <div class="split">
+        <div class="prose">
+          <p><b>Image.</b> <code>container:</code> names it; without one the runner's
+            <code>--image</code> is used (default <code>alpine/git</code>, which carries
+            <code>git</code> for checkout). The image must provide what your steps call — a
+            distroless or scratch image has no shell.</p>
+          <p><b>Workspace.</b> A per-job volume at <code>/spindle/workspace</code>. The runner
+            mounts nothing else. Workflow-supplied volumes are refused: a bind mount is host
+            filesystem access.</p>
+          <p><b>Services.</b> Each entry is one sidecar, reachable at its key on the container
+            port: <code>postgres:5432</code>, never a host port. The runner waits for a declared
+            port or the image's own <code>HEALTHCHECK</code>; 60 seconds without readiness fails the
+            job naming the service.</p>
+          <p><b>Environment.</b> Lowest to highest: runner built-ins, workflow
+            <code>env</code>, job <code>env</code>, container <code>env</code>, step
+            <code>env</code>, then secrets by name. Scripts read <code>$GITHUB_SHA</code>,
+            <code>$GITHUB_REF</code>, <code>$GITHUB_WORKSPACE</code> and the rest; they do
+            <b>not</b> get <code>${{ }}</code> substitution.</p>
+          <p><b>Checkout.</b> <code>uses: actions/checkout</code> runs inside the container and
+            clones the run's exact commit with the job token, shallow unless
+            <code>fetch-depth: 0</code>. Any job that pushes needs the full clone. The clone URL
+            must be reachable from inside the container.</p>
+        </div>
+        <figure class="code">
+          <div class="code-bar"><span>a database service and sized container</span><span class="state">valid</span></div>
+          <pre tabindex="0"><code><span class="k">name:</span> integration
+<span class="k">on:</span> push
+<span class="k">jobs:</span>
+  <span class="k">test:</span>
+    <span class="k">runs-on:</span> [self-hosted, linux, docker]
+    <span class="k">container:</span>
+      <span class="k">image:</span> golang:1.27
+      <span class="k">options:</span> "--cpus 2 --memory 2g --shm-size 512m"
+    <span class="k">services:</span>
+      <span class="k">postgres:</span>
+        <span class="k">image:</span> postgres:17
+        <span class="k">env:</span>
+          <span class="k">POSTGRES_PASSWORD:</span> ci
+          <span class="k">POSTGRES_DB:</span> test
+        <span class="k">ports:</span>
+          - "5432"
+    <span class="k">steps:</span>
+      - <span class="k">uses:</span> actions/checkout
+      - <span class="k">name:</span> test
+        <span class="k">env:</span>
+          <span class="k">PGHOST:</span> postgres
+          <span class="k">PGUSER:</span> postgres
+          <span class="k">PGPASSWORD:</span> ci
+        <span class="k">run:</span> go test ./...</code></pre>
+        </figure>
+      </div>
+      <p class="note">The <code>options</code> allowlist is small: <code>--cpus</code>,
+        <code>--memory</code>, <code>--memory-swap</code>, <code>--shm-size</code>,
+        <code>--ulimit nofile=…</code>, <code>--init</code>, <code>--read-only</code>,
+        <code>--user</code>, <code>--workdir</code>. <code>--privileged</code>,
+        <code>--cap-add</code>, <code>--device</code>, <code>--security-opt</code>, every
+        namespace flag and every mount are refused, at run creation and again at plan time.</p>
+    </div>
+  </section>
+
+  <!-- =========================================================== actions -->
+  <section class="section alt" id="actions" aria-labelledby="actions-title">
+    <div class="wrap docbody">
+      <header class="sec-head">
+        <p class="eyebrow"><span class="tick" aria-hidden="true"></span>Steps &amp; actions</p>
+        <h2 id="actions-title">Three built-ins, local actions, images.</h2>
+        <p class="sec-lede">There is no marketplace. <code>uses:</code> resolves to the three
+          built-ins, a repository-local action, or a container image — and nothing else.</p>
+      </header>
+
+      <div class="tablewrap" role="region" tabindex="0" aria-labelledby="cap-uses">
+        <table class="ref">
+          <caption id="cap-uses" class="sr-only">Accepted uses spellings</caption>
+          <thead><tr><th><code>uses:</code></th><th>What happens</th></tr></thead>
+          <tbody>
+            <tr><td><code>actions/checkout</code></td><td>Built-in checkout inside the job container. <code>actions/checkout@v4</code> also resolves; everything after <code>@</code> is ignored.</td></tr>
+            <tr><td><code>actions/upload-artifact</code></td><td>Upload files from the job container to the run.</td></tr>
+            <tr><td><code>actions/download-artifact</code></td><td>Download an artifact of the same run, under <code>path</code>.</td></tr>
+            <tr><td><code>./.spindle/actions/&lt;name&gt;</code></td><td>A repository-local action, resolved at run creation from the run commit (composite or docker).</td></tr>
+            <tr><td><code>docker://image[:tag|@sha256:…]</code></td><td>Run the image as its own container on the job network, with the workspace volume.</td></tr>
+            <tr><td>anything else</td><td>The step fails: there is no marketplace for remote actions. That includes setup and cache actions.</td></tr>
+          </tbody>
+        </table>
+      </div>
+
+      <div class="split">
+        <div class="prose">
+          <p><b>Composite actions.</b> <code>runs.steps</code> expand in place; each <code>run</code>
+            step must name <code>shell:</code>; an inner <code>uses</code> may only be another local
+            action or <code>docker://</code>. The caller's <code>with:</code> values become
+            <code>INPUT_&lt;NAME&gt;</code> environment variables, and an undeclared input is a
+            named refusal. Nesting is capped at 10 and cycles are refused.</p>
+          <p><b><code>docker://</code> steps.</b> The image runs as its own container, gets the step
+            environment and <code>INPUT_*</code>, and <b>never</b> the job token or a repository
+            secret. Its <code>$SPINDLE_OUTPUT</code> is copied out and published under the calling
+            step's id.</p>
+          <p><b>Outputs.</b> <code>echo "name=value" &gt;&gt; "$SPINDLE_OUTPUT"</code> (or a
+            heredoc). Caps: 50 per step, 100 per job, 64 KiB per value. A reference to an output
+            that was never published fails the step naming it.</p>
+        </div>
+        <figure class="code">
+          <div class="code-bar"><span>a local composite action in use</span><span class="state">valid</span></div>
+          <pre tabindex="0"><code><span class="k">name:</span> build
+<span class="k">on:</span> push
+<span class="k">jobs:</span>
+  <span class="k">build:</span>
+    <span class="k">runs-on:</span> linux
+    <span class="k">steps:</span>
+      - <span class="k">uses:</span> actions/checkout
+      - <span class="k">id:</span> tools
+        <span class="k">uses:</span> ./.spindle/actions/tools
+        <span class="k">with:</span>
+          <span class="k">version:</span> "2.0"
+      - <span class="k">run:</span> |
+          "${{ steps.tools.outputs.bin }}" --version
+      - <span class="k">uses:</span> docker://alpine:3.20
+        <span class="k">with:</span>
+          <span class="k">who:</span> world</code></pre>
+        </figure>
+      </div>
+      <p class="note"><code>actions/cache</code> does not exist. Every job starts cold; reuse a
+        registry image or install in a <code>run</code> step. Artifacts move files between jobs of
+        <b>one run</b>; they cannot cross runs.</p>
+    </div>
+  </section>
+
+  <!-- =========================================================== secrets -->
+  <section class="section" id="secrets" aria-labelledby="secrets-title">
+    <div class="wrap docbody">
+      <header class="sec-head">
+        <p class="eyebrow"><span class="tick" aria-hidden="true"></span>Secrets &amp; permissions</p>
+        <h2 id="secrets-title">Secrets are environment variables.</h2>
+        <p class="sec-lede">A repository secret is injected under its own name into every step of a
+          trusted run. <code>${{ secrets.NAME }}</code> is not substituted — read <code>$NAME</code>.
+          The job token is automatic, short-lived and scoped to one attempt.</p>
+      </header>
+
+      <div class="split">
+        <figure class="code">
+          <div class="code-bar"><span>a secret and the job token</span><span class="state">valid</span></div>
+          <pre tabindex="0"><code><span class="k">name:</span> push a build branch
+<span class="k">on:</span>
+  <span class="k">push:</span>
+    <span class="k">branches:</span> [main]
+<span class="k">permissions:</span>
+  <span class="k">contents:</span> write
+<span class="k">jobs:</span>
+  <span class="k">publish:</span>
+    <span class="k">runs-on:</span> linux
+    <span class="k">steps:</span>
+      - <span class="k">uses:</span> actions/checkout
+        <span class="k">with:</span>
+          <span class="k">fetch-depth:</span> 0
+      - <span class="k">name:</span> push
+        <span class="k">run:</span> |
+          git config user.name ci
+          git config user.email ci@example.com
+          date &gt; build.txt
+          git add build.txt
+          git commit -q -m "ci: build"
+          git push origin HEAD:refs/heads/ci-output</code></pre>
+        </figure>
+        <div class="prose">
+          <p><b>Writing.</b> Settings → Secrets, or
+            <code>PUT …/api/threads/secrets/{name}</code>. Write-only: the API returns names and
+            timestamps, never a value. Names match <code>[A-Za-z_][A-Za-z0-9_]{0,63}</code>;
+            values are 1 B – 64 KiB.</p>
+          <p><b>Reading.</b> The value is an ordinary environment variable. Guard it:
+            <code>${TOKEN:?TOKEN is not set}</code> turns a missing secret into a clear failure
+            instead of an empty string.</p>
+          <p><b>Masking.</b> Best effort, server-side: exact substring replacement in log lines;
+            values shorter than 4 bytes are skipped. Encoded or split values print. Never write a
+            secret into an output or an artifact — both are data, not logs.</p>
+          <p><b>Fork runs.</b> No secrets at all. The payload carries an empty set; a fork can never
+            opt in by editing the file.</p>
+          <p><b>The job token.</b> <code>$SPINDLE_JOB_TOKEN</code> always reads its own repository.
+            <code>contents: write</code> adds push. A fork is pinned to read. A protected ref still
+            refuses it, because the principal is <code>ci:&lt;runner&gt;</code>, not the user. A
+            push with it starts no workflow, so a workflow cannot rebuild itself forever.</p>
+        </div>
+      </div>
+
+      <h3 class="subhead" id="approvals">Approvals and environments</h3>
+      <div class="prose">
+        <p>A fork pull request from a first-time contributor is created
+          <code>pending_approval</code>: jobs written, checks pending, nothing enqueued. A
+          <code>maintain</code> or admin approves or denies on the run page (or
+          <code>POST …/api/threads/{run}/approve|deny</code>). The gate applies when the actor has
+          no previously merged PR in the repository; a same-repository PR is never gated. Nobody
+          approves, nothing runs — there is no timeout.</p>
+        <p>An <b>environment</b> is a deployment target with up to 10 required reviewers (write or
+          more) and its own secrets. A job names one with <code>environment: production</code>; the
+          run pauses until a listed reviewer or a repo admin approves. Environment secrets override
+          repository secrets of the same name, reach only a trusted run with an approved deployment,
+          and never reach a fork run. A job naming an undefined environment fails that job.</p>
+        <p><b>OIDC.</b> <code>permissions: id-token: write</code> on a trusted run supplies
+          <code>SPINDLE_ID_TOKEN_REQUEST_URL</code> and a request token; <code>POST</code> an
+          audience for a five-minute signed JWT. <code>write-all</code> deliberately does not grant
+          it.</p>
+      </div>
+    </div>
+  </section>
+
+  <!-- ========================================================= artifacts -->
+  <section class="section alt" id="artifacts" aria-labelledby="artifacts-title">
+    <div class="wrap docbody">
+      <header class="sec-head">
+        <p class="eyebrow"><span class="tick" aria-hidden="true"></span>Artifacts, schedules, retention</p>
+        <h2 id="artifacts-title">Files between jobs; a clock that fires once.</h2>
+      </header>
+      <div class="split">
+        <figure class="code">
+          <div class="code-bar"><span>upload in one job, download in the next</span><span class="state">valid</span></div>
+          <pre tabindex="0"><code><span class="k">name:</span> artifacts
+<span class="k">on:</span> push
+<span class="k">jobs:</span>
+  <span class="k">build:</span>
+    <span class="k">runs-on:</span> linux
+    <span class="k">steps:</span>
+      - <span class="k">uses:</span> actions/checkout
+      - <span class="k">run:</span> make dist
+      - <span class="k">uses:</span> actions/upload-artifact
+        <span class="k">with:</span>
+          <span class="k">name:</span> build-out
+          <span class="k">path:</span> |
+            dist
+            coverage/*.out
+          <span class="k">if-no-files-found:</span> error
+          <span class="k">retention-days:</span> 7
+  <span class="k">verify:</span>
+    <span class="k">needs:</span> [build]
+    <span class="k">runs-on:</span> linux
+    <span class="k">steps:</span>
+      - <span class="k">uses:</span> actions/download-artifact
+        <span class="k">with:</span>
+          <span class="k">name:</span> build-out
+          <span class="k">path:</span> dist
+      - <span class="k">run:</span> ./scripts/verify-release.sh dist</code></pre>
+        </figure>
+        <div class="prose">
+          <p><b>Artifacts.</b> Same run only. Names are unique per run and limited to letters,
+            digits, <code>.</code>, <code>_</code> and <code>-</code>. Paths are workspace-relative:
+            exact file, directory, <code>*</code>/<code>?</code> within a segment,
+            <code>**</code> across segments, or <code>.</code>. Only regular files; symlinks are
+            not followed. The image needs <code>find</code> and <code>tar</code>. Caps: 256 MiB
+            per file, 2 GiB per run, 1000 files per artifact.</p>
+          <p><b>Schedules.</b> Default branch only; a process with the <code>maintain</code> role
+            must be running. A CAS'd watermark fires each tick at most once, so a restart does not
+            duplicate a deploy and a crash loses one tick rather than repeating it. There is no
+            "run now": dispatch the file.</p>
+          <p><b>Retention.</b> A terminal run is deleted after <code>threads.retention</code>
+            (default 30 days); logs, jobs and artifacts go with it. <b>Checks do not</b>, so an old
+            required check still gates a merge. <code>retention-days</code> may shorten an
+            artifact's window, never extend the run's.</p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- =========================================================== recipes -->
+  <section class="section" id="recipes" aria-labelledby="recipes-title">
+    <div class="wrap docbody">
+      <header class="sec-head">
+        <p class="eyebrow"><span class="tick" aria-hidden="true"></span>Recipes</p>
+        <h2 id="recipes-title">The shapes that cover most CI.</h2>
+      </header>
+
+      <h3 class="subhead">Test-only CI for Go</h3>
+      <figure class="code">
+        <div class="code-bar"><span>copy, commit, done</span><span class="state">valid</span></div>
+        <pre tabindex="0"><code><span class="k">name:</span> CI
+<span class="k">on:</span>
+  <span class="k">push:</span>
+    <span class="k">branches:</span> [main]
+  <span class="k">pull_request:</span>
+    <span class="k">branches:</span> [main]
+<span class="k">permissions:</span>
+  <span class="k">contents:</span> read
+<span class="k">jobs:</span>
+  <span class="k">test:</span>
+    <span class="k">runs-on:</span> [self-hosted, linux, docker]
+    <span class="k">container:</span> golang:1.27
+    <span class="k">timeout-minutes:</span> 20
+    <span class="k">steps:</span>
+      - <span class="k">uses:</span> actions/checkout
+      - <span class="k">run:</span> go mod download
+      - <span class="k">name:</span> formatting
+        <span class="k">run:</span> test -z "$(gofmt -l .)"
+      - <span class="k">run:</span> go vet ./...
+      - <span class="k">run:</span> go test ./... -count=1</code></pre>
+      </figure>
+
+      <h3 class="subhead">Tag a release from a dispatch</h3>
+      <div class="prose">
+        <p>Tag pushes never start a run. A release is a manual dispatch, and the job creates the
+          tag; the resulting tag push is deliberately silent.</p>
+      </div>
+      <figure class="code">
+        <div class="code-bar"><span>release tagging</span><span class="state">valid</span></div>
+        <pre tabindex="0"><code><span class="k">name:</span> Release
+<span class="k">on:</span>
+  <span class="k">workflow_dispatch:</span>
+    <span class="k">inputs:</span>
+      <span class="k">version:</span>
+        <span class="k">description:</span> "Tag to create, e.g. v1.4.0"
+        <span class="k">required:</span> true
+        <span class="k">type:</span> string
+<span class="k">permissions:</span>
+  <span class="k">contents:</span> write
+<span class="k">jobs:</span>
+  <span class="k">tag:</span>
+    <span class="k">runs-on:</span> [self-hosted, linux, docker]
+    <span class="k">container:</span> golang:1.27
+    <span class="k">steps:</span>
+      - <span class="k">uses:</span> actions/checkout
+        <span class="k">with:</span>
+          <span class="k">fetch-depth:</span> 0
+      - <span class="k">name:</span> validate and tag
+        <span class="k">env:</span>
+          <span class="k">VERSION:</span> ${{ inputs.version }}
+        <span class="k">run:</span> |
+          case "$VERSION" in v[0-9]*.[0-9]*.[0-9]*) ;; *) echo "not a vX.Y.Z tag" &gt;&amp;2; exit 1 ;; esac
+          git tag -a "$VERSION" -m "release $VERSION"
+          git push origin "refs/tags/$VERSION"</code></pre>
+      </figure>
+
+      <h3 class="subhead">Build an image without a Docker socket</h3>
+      <div class="prose">
+        <p>A job container never receives a Docker socket, so <code>docker build</code> has no
+          daemon to talk to. Use a daemonless builder image. Whether it can create namespaces is a
+          property of the runner host — the job cannot request <code>--privileged</code> or
+          capabilities.</p>
+      </div>
+      <figure class="code">
+        <div class="code-bar"><span>buildah, daemonless</span><span class="state">valid</span></div>
+        <pre tabindex="0"><code><span class="k">name:</span> image
+<span class="k">on:</span>
+  <span class="k">push:</span>
+    <span class="k">branches:</span> [main]
+<span class="k">jobs:</span>
+  <span class="k">image:</span>
+    <span class="k">runs-on:</span> [self-hosted, linux, docker]
+    <span class="k">container:</span>
+      <span class="k">image:</span> quay.io/buildah/stable:latest
+      <span class="k">options:</span> "--ulimit nofile=65536:65536"
+    <span class="k">steps:</span>
+      - <span class="k">uses:</span> actions/checkout
+      - <span class="k">name:</span> build
+        <span class="k">run:</span> |
+          mkdir -p /etc/containers /var/lib/containers /var/tmp/containers
+          printf '[storage]\ndriver="vfs"\nrunroot="/var/tmp/containers"\ngraphroot="/var/lib/containers"\n' &gt; /etc/containers/storage.conf
+          buildah bud --storage-driver vfs --isolation=chroot -t registry.example.com/acme/app:"$GITHUB_SHA" .
+      - <span class="k">name:</span> push
+        <span class="k">run:</span> |
+          test -n "${REGISTRY_TOKEN:?REGISTRY_TOKEN is not set}"
+          buildah --storage-driver vfs login -u "$REGISTRY_USER" -p "$REGISTRY_TOKEN" registry.example.com
+          buildah --storage-driver vfs push registry.example.com/acme/app:"$GITHUB_SHA"</code></pre>
+      </figure>
+    </div>
+  </section>
+
+  <!-- ========================================================= migration -->
+  <section class="section alt" id="migrate" aria-labelledby="migrate-title">
+    <div class="wrap docbody">
+      <header class="sec-head">
+        <p class="eyebrow"><span class="tick" aria-hidden="true"></span>Migration</p>
+        <h2 id="migrate-title">From a Forgejo workflow to Threads.</h2>
+        <p class="sec-lede">Tests translate almost mechanically. Publishing needs a plan, because
+          four things have no equivalent: tag triggers, path filters, matrix
+          <code>include</code>, and a daemonless builder's host capabilities.</p>
+      </header>
+
+      <h3 class="subhead">The translation table</h3>
+      <div class="tablewrap" role="region" tabindex="0" aria-labelledby="cap-translate">
+        <table class="ref">
+          <caption id="cap-translate" class="sr-only">Forgejo workflow to Threads translation</caption>
+          <thead><tr><th>In a Forgejo workflow</th><th>In Threads</th><th>Note</th></tr></thead>
+          <tbody>
+            <tr><td><code>on: push / pull_request / schedule</code></td><td>same</td><td>Same shapes. Branch globs are <code>*</code> only.</td></tr>
+            <tr><td><code>on: push: tags: ["v*"]</code></td><td>nothing</td><td>Tag pushes never fire. Use <code>workflow_dispatch</code>.</td></tr>
+            <tr><td><code>on: push: paths:</code></td><td>parse error</td><td>Filter in a step, or split workflows by directory.</td></tr>
+            <tr><td><code>runs-on: docker</code></td><td><code>[self-hosted, linux, docker]</code></td><td>Labels are exact and subset-matched.</td></tr>
+            <tr><td><code>runs-on: ubuntu-latest</code></td><td>a label a runner declares</td><td><code>ubuntu-latest</code> is not special.</td></tr>
+            <tr><td><code>container: {image: …}</code></td><td>same</td><td>Digest pins are honoured and may be required by policy.</td></tr>
+            <tr><td><code>uses: actions/checkout@v4</code></td><td><code>uses: actions/checkout</code></td><td>Built-in. The <code>@v4</code> suffix is accepted and ignored.</td></tr>
+            <tr><td><code>with: fetch-tags: true</code></td><td><code>git fetch --tags</code> in a step</td><td>Checkout supports <code>fetch-depth</code> only.</td></tr>
+            <tr><td>setup-go, setup-node, setup-buildx</td><td>a base image or a <code>run:</code> step</td><td>No marketplace actions.</td></tr>
+            <tr><td><code>actions/cache</code></td><td>nothing</td><td>No cache; bake dependencies into an image.</td></tr>
+            <tr><td><code>${{ secrets.NAME }}</code></td><td><code>$NAME</code></td><td>Secrets are environment variables, not template values.</td></tr>
+            <tr><td><code>${{ secrets.GITHUB_TOKEN }}</code></td><td><code>$SPINDLE_JOB_TOKEN</code></td><td>Automatic, scoped to the job.</td></tr>
+            <tr><td><code>github.event.inputs.x</code></td><td><code>inputs.x</code></td><td>Dispatch inputs only.</td></tr>
+            <tr><td><code>github.actor</code></td><td>nothing</td><td>No actor context; use a secret or a fixed robot name.</td></tr>
+            <tr><td><code>$GITHUB_SERVER_URL</code></td><td><code>$SPINDLE_SERVER</code></td><td>The repository is <code>$GITHUB_REPOSITORY</code> on both.</td></tr>
+            <tr><td><code>$GITHUB_OUTPUT</code></td><td>same (<code>$SPINDLE_OUTPUT</code>)</td><td><code>name=value</code> or a heredoc.</td></tr>
+            <tr><td><code>$GITHUB_ENV</code> / <code>$GITHUB_PATH</code></td><td>nothing</td><td>Job outputs + <code>needs</code>; absolute paths or <code>export PATH</code>.</td></tr>
+            <tr><td><code>matrix.include</code></td><td>a simple product, or one job per case</td><td><code>include</code>/<code>exclude</code> are parse errors.</td></tr>
+            <tr><td><code>startsWith(...)</code> in <code>if</code></td><td><code>==</code> comparisons</td><td>No <code>startsWith</code>/<code>contains</code>.</td></tr>
+          </tbody>
+        </table>
+      </div>
+
+      <h3 class="subhead">Weave: a test job</h3>
+      <div class="split">
+        <figure class="code">
+          <div class="code-bar"><span>Forgejo workflow</span><span class="state">original</span></div>
+          <pre tabindex="0"><code>jobs:
+  test:
+    runs-on: docker
+    container:
+      image: golang:1.27@sha256:01aa…
+    steps:
+      - name: Checkout
+        env:
+          FORGEJO_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: eval "$CHECKOUT"
+      - run: go vet ./...
+      - run: go test ./... -count=1</code></pre>
+        </figure>
+        <figure class="code">
+          <div class="code-bar"><span>Threads</span><span class="state">translated</span></div>
+          <pre tabindex="0"><code>name: CI
+on:
+  push:
+    branches: [main]
+  pull_request:
+jobs:
+  test:
+    runs-on: [self-hosted, linux, docker]
+    container:
+      image: golang:1.27@sha256:01aa…
+    steps:
+      - uses: actions/checkout
+      - run: go vet ./...
+      - run: go test ./... -count=1</code></pre>
+        </figure>
+      </div>
+      <p class="note">The custom <code>CHECKOUT</code> script existed because the image had no
+        Node for a JavaScript checkout action. The built-in checkout runs in the job container, so
+        the token plumbing, the <code>git init</code> and the <code>http.extraHeader</code> all
+        disappear. <code>secrets.GITHUB_TOKEN</code> is not needed.</p>
+
+      <h3 class="subhead">Scriobh: a matrix release</h3>
+      <div class="prose">
+        <p>The original builds four OS/arch pairs with <code>matrix.include</code>. Threads has no
+          <code>include</code>, so the four combinations become one <code>target</code> axis and
+          the step splits it. The cells, the artifacts and the names are the same.</p>
+      </div>
+      <div class="split">
+        <figure class="code">
+          <div class="code-bar"><span>Forgejo workflow</span><span class="state">original</span></div>
+          <pre tabindex="0"><code>strategy:
+  fail-fast: false
+  matrix:
+    include:
+      - { goos: linux,  goarch: amd64 }
+      - { goos: linux,  goarch: arm64 }
+      - { goos: darwin, goarch: arm64 }
+      - { goos: windows, goarch: amd64 }
+steps:
+  - name: Checkout
+    run: eval "$CHECKOUT"
+  - name: Build
+    env:
+      GOOS: ${{ matrix.goos }}
+      GOARCH: ${{ matrix.goarch }}
+    run: CGO_ENABLED=0 GOOS=$GOOS GOARCH=$GOARCH go build -o dist/app</code></pre>
+        </figure>
+        <figure class="code">
+          <div class="code-bar"><span>Threads</span><span class="state">translated</span></div>
+          <pre tabindex="0"><code>strategy:
+  fail-fast: false
+  matrix:
+    target: [linux-amd64, linux-arm64, darwin-arm64, windows-amd64]
+steps:
+  - uses: actions/checkout
+  - name: build
+    env:
+      TARGET: ${{ matrix.target }}
+    run: |
+      GOOS=${TARGET%-*}
+      GOARCH=${TARGET##*-}
+      CGO_ENABLED=0 GOOS=$GOOS GOARCH=$GOARCH go build -o dist/app
+  - uses: actions/upload-artifact
+    with:
+      name: dist-${{ matrix.target }}
+      path: dist/app</code></pre>
+        </figure>
+      </div>
+      <p class="note">Each artifact name is unique per run because <code>target</code> is part of
+        it. The four cells are exactly the original four; no extra combinations are built.</p>
+
+      <h3 class="subhead">What has no equivalent</h3>
+      <div class="tablewrap" role="region" tabindex="0" aria-labelledby="cap-noequiv">
+        <table class="ref">
+          <caption id="cap-noequiv" class="sr-only">Unsupported constructs and their workarounds</caption>
+          <thead><tr><th>Construct</th><th>Why</th><th>Workaround</th></tr></thead>
+          <tbody>
+            <tr><td>tag-triggered release</td><td>tag pushes create no run</td><td>dispatch a <code>version</code> input; create the tag in the job</td></tr>
+            <tr><td><code>on.push.paths</code></td><td>not in the parser</td><td>filter with <code>git diff --name-only</code>, or split directories</td></tr>
+            <tr><td><code>matrix.include</code></td><td>parser refuses it</td><td>one axis of composite values, split in the step</td></tr>
+            <tr><td><code>max-parallel</code></td><td>not in the parser</td><td>no equivalent; concurrency caps runs, not cells</td></tr>
+            <tr><td><code>$GITHUB_ENV</code></td><td>not implemented</td><td>job <code>outputs</code> + <code>needs.&lt;job&gt;.outputs</code></td></tr>
+            <tr><td><code>$GITHUB_PATH</code></td><td>not implemented</td><td>absolute paths, or <code>export PATH</code> in the same step</td></tr>
+            <tr><td><code>github.actor</code></td><td>no actor context</td><td>a fixed robot user secret</td></tr>
+            <tr><td><code>docker build</code> in a job</td><td>no Docker socket</td><td>buildah or another daemonless builder; or keep it in Forgejo</td></tr>
+            <tr><td><code>--privileged</code> / <code>--cap-add</code></td><td>refused by the runner</td><td>the runner host must permit the build without per-job flags</td></tr>
+            <tr><td>Forgejo release/asset API</td><td>different API</td><td>spindle's releases API, or keep publishing in Forgejo during migration</td></tr>
+          </tbody>
+        </table>
+      </div>
+
+      <h3 class="subhead">The safe order</h3>
+      <ol class="steps">
+        <li><span class="n">1</span><div><h3>Tests only</h3><p>Replace the custom checkout with the built-in one. Read-only, no secrets. This proves labels, image, checkout reachability and duration before anything can be damaged.</p></div></li>
+        <li><span class="n">2</span><div><h3>Matrix and services</h3><p>Prove every cell and the database sidecar, still read-only.</p></div></li>
+        <li><span class="n">3</span><div><h3>Artifact-producing jobs</h3><p>Build, upload, download and verify inside Threads. Still no credentials.</p></div></li>
+        <li><span class="n">4</span><div><h3>Keep publishing where it is</h3><p>Move the credential only after the spindle job has produced the same bytes twice; run both once in parallel and compare digests, not logs.</p></div></li>
+        <li><span class="n">5</span><div><h3>Retire the old workflow</h3><p>Only after a release shipped from Threads. The rollback is re-enabling the old file — one revert.</p></div></li>
+      </ol>
+    </div>
+  </section>
+
+  <!-- ============================================================= trouble -->
+  <section class="section" id="trouble" aria-labelledby="trouble-title">
+    <div class="wrap docbody">
+      <header class="sec-head">
+        <p class="eyebrow"><span class="tick" aria-hidden="true"></span>Troubleshooting</p>
+        <h2 id="trouble-title">Start where it stopped.</h2>
+        <p class="sec-lede">The evidence is on the run page: the job's <code>reason</code>, its
+          <code>runs-on</code>, the checkout URL, the step result, and the log. Read those before
+          changing the file.</p>
+      </header>
+
+      <div class="tablewrap" role="region" tabindex="0" aria-labelledby="cap-trouble">
+        <table class="ref">
+          <caption id="cap-trouble" class="sr-only">Symptom, cause and fix</caption>
+          <thead><tr><th>Symptom</th><th>Cause</th><th>Fix</th></tr></thead>
+          <tbody>
+            <tr><td>No run after a push</td><td>No workflow at that commit; the event or branch does not match; the file failed to parse; the ref was a tag or a delete; the push used a job token</td><td>Threads → Workflows lists files and parse errors; tags and deletes never fire; job-token pushes are suppressed</td></tr>
+            <tr><td>A file is rejected</td><td>Unknown key, bad type, unsupported cron, <code>paths</code>, <code>matrix.include</code>, both <code>run</code> and <code>uses</code>, a bad <code>needs</code></td><td>The error names the file and key; fix that file only — the others keep running</td></tr>
+            <tr><td>Run stays queued</td><td>No active runner; labels are not a superset; a fork run with no fork-opted runner; capacity full; a concurrency group is held</td><td><code>/admin/runners</code>: an active runner with the labels and a recent last-seen; the run page shows <code>runs-on</code></td></tr>
+            <tr><td>Job failed before any step</td><td>Image refused by policy; a bad container option; an undefined environment; an unresolvable local action</td><td>The job's <code>reason</code> names the field and value</td></tr>
+            <tr><td>Checkout fails</td><td>The image has no <code>git</code>; the clone URL is unreachable from the container; the commit is missing</td><td>Use an image with git; read the reachability diagnostic; set the server's public URL</td></tr>
+            <tr><td>Push from a job refused</td><td>Shallow clone; <code>contents: read</code>; protected ref; non-fast-forward</td><td><code>fetch-depth: 0</code>, <code>contents: write</code>, a fast-forward, or relax the policy</td></tr>
+            <tr><td>Secret is empty</td><td>Fork/untrusted run; no secrets key configured; wrong name; used <code>${{ secrets.X }}</code></td><td>The run shows an <code>untrusted</code> chip; names are exact; read <code>$X</code></td></tr>
+            <tr><td>“did not publish the output”</td><td>The step failed, was skipped, ran later, or wrote a different name</td><td>Check <code>steps.&lt;id&gt;.outcome</code> and the exact name in <code>$SPINDLE_OUTPUT</code></td></tr>
+            <tr><td>Artifact upload: no files</td><td>The pattern matched nothing, or the working directory is wrong</td><td>The log names the patterns; use <code>if-no-files-found: warn</code> when empty is allowed</td></tr>
+            <tr><td>Image pull failed</td><td>The daemon cannot reach the mirror, the credential is refused, or the repository is absent</td><td>Read the <code>spindle:</code> diagnostic: daemon DNS/TLS, <code>$DOCKER_CONFIG</code>, mirror repository key</td></tr>
+            <tr><td>Run is pending_approval</td><td>The first-time-fork gate, or an environment with reviewers</td><td>A maintainer or listed reviewer approves on the run page</td></tr>
+            <tr><td>Approval never arrives</td><td>No reviewer decided; there is no timeout and no auto-approval</td><td>A listed reviewer or repo admin must decide; a deleted environment fails closed</td></tr>
+            <tr><td>Schedule never fires</td><td>Bad cron; not on the default branch; no maintainer role; the tick already fired</td><td>Fix and merge to the default branch; run a maintainer; dispatch for “now”</td></tr>
+            <tr><td>Required check stays pending</td><td>Its job was never claimed</td><td>A runner must claim it; the merge stays blocked by design</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============================================================== docs -->
+  <section class="section alt" id="docs" aria-labelledby="docs-title">
+    <div class="wrap docbody">
+      <header class="sec-head">
+        <p class="eyebrow"><span class="tick" aria-hidden="true"></span>Read further</p>
+        <h2 id="docs-title">The guide and the reference.</h2>
+        <p class="sec-lede">This page is the newcomer's path. The repository has the complete keys,
+          the operator depth and the design record.</p>
+      </header>
+      <div class="links">
+        <a class="linkcard" href="https://github.com/crueber/spindle/blob/main/docs/WORKFLOWS.md">
+          <span class="lc-t">WORKFLOWS <span class="arr" aria-hidden="true">→</span></span>
+          <p>The authoring guide: every key, recipes, the Forgejo cookbook and the troubleshooting tree.</p>
+        </a>
+        <a class="linkcard" href="https://github.com/crueber/spindle/blob/main/docs/threads.md">
+          <span class="lc-t">THREADS <span class="arr" aria-hidden="true">→</span></span>
+          <p>The exhaustive reference: triggers, containers, secrets, runner flags, retention.</p>
+        </a>
+        <a class="linkcard" href="https://github.com/crueber/spindle/blob/main/docs/features/15_threads.md">
+          <span class="lc-t">DESIGN <span class="arr" aria-hidden="true">→</span></span>
+          <p>Protocol, bucket shapes, security reasoning and every decision with its rationale.</p>
+        </a>
+      </div>
+      <div class="cta">
+        <a class="btn primary" href="index.html">Back to spindle <span class="arr" aria-hidden="true">→</span></a>
+        <a class="btn" href="https://github.com/crueber/spindle">Source on GitHub</a>
+      </div>
+    </div>
+  </section>
+</main>
+
+<footer class="foot">
+  <div class="wrap foot-in">
+    <div>
+      <div class="foot-brand">
+        <span class="brand-mark" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="3.5" y="3.5" width="17" height="17" rx="1.5"/><path d="M12 3.5v5M12 15.5v5M3.5 12h5M15.5 12h5"/><rect class="dot" x="10" y="10" width="4" height="4" stroke="none"/></svg></span>
+        <span>spindle</span>
+      </div>
+      <p class="foot-tag">A complete git host in Go. The object store is the only database; instances are disposable.</p>
+      <div class="foot-legal">
+        <p><a href="https://github.com/crueber/spindle/blob/main/LICENSE">MIT</a> © 2026 Christopher Rueber</p>
+        <p>Political advocacy isn't welcome here — see the <a href="https://github.com/crueber/spindle/blob/main/CODE_OF_CONDUCT.md">Code of Conduct</a></p>
+        <p>Built on <a href="https://github.com/tobi/walgit">walgit</a>. Thank you, Tobi.</p>
+      </div>
+    </div>
+
+    <nav aria-label="Project links">
+      <h2>Project</h2>
+      <ul class="foot-links">
+        <li><a href="https://github.com/crueber/spindle">Source on GitHub</a></li>
+        <li><a href="https://github.com/crueber/spindle/releases">Releases</a></li>
+        <li><a href="https://github.com/crueber/spindle/pkgs/container/spindle">Container image (GHCR)</a></li>
+        <li><a href="https://github.com/crueber/spindle/blob/main/CODE_OF_CONDUCT.md">Code of Conduct</a></li>
+        <li><a href="https://github.com/tobi/walgit">Acknowledgements: walgit, by Tobi Lütke</a></li>
+      </ul>
+    </nav>
+
+    <div>
+      <h2>Docs</h2>
+      <ul class="foot-links">
+        <li><a href="https://github.com/crueber/spindle/tree/main/docs">Documentation index</a></li>
+        <li><a href="https://github.com/crueber/spindle/blob/main/docs/WORKFLOWS.md">Workflow guide</a></li>
+        <li><a href="https://github.com/crueber/spindle/blob/main/docs/threads.md">Threads reference</a></li>
+        <li><a href="https://github.com/crueber/spindle/blob/main/docs/CLI.md">CLI reference</a></li>
+        <li><a href="https://github.com/crueber/spindle/blob/main/docs/EVIDENCE.md">Evidence and harnesses</a></li>
+      </ul>
+    </div>
+
+    <p class="foot-note"><span>Server-rendered Go · htmx 2.0.4, vendored · no client framework</span><span>No trackers, no external requests.</span></p>
+  </div>
+</footer>
+</body>
+</html>

@@ -65,6 +65,13 @@ func pulseProjection() *insights.Projection {
 // request clock so the card's relative strings are deterministic.
 func bindPulse(t *testing.T, f *repoFixture, p *insights.Projection, found bool) {
 	t.Helper()
+	bindPulseAt(t, f, p, found, pulseNow)
+}
+
+// bindPulseAt is bindPulse with an explicit request clock (the independence
+// test pins a clock far from the wall clock).
+func bindPulseAt(t *testing.T, f *repoFixture, p *insights.Projection, found bool, now time.Time) {
+	t.Helper()
 	old := repoDeps
 	repoDeps = RepoDeps{
 		Insights: func(context.Context, string, string) (*insights.Projection, bool, error) {
@@ -73,12 +80,19 @@ func bindPulse(t *testing.T, f *repoFixture, p *insights.Projection, found bool)
 		RoleOf: func(context.Context, string, string, auth.Principal) identity.Role { return identity.RoleRead },
 	}
 	t.Cleanup(func() { repoDeps = old })
-	f.s.env.Now = func() time.Time { return pulseNow }
+	f.s.env.Now = func() time.Time { return now }
 }
 
 // pulseFixture is a Code page with a newest commit at pulseNow - 2 days so the
 // cadence row has the page's own head-commit time.
 func pulseFixture(t *testing.T, p *insights.Projection, found bool) (*repoFixture, string) {
+	t.Helper()
+	return pulseFixtureAt(t, p, found, pulseNow)
+}
+
+// pulseFixtureAt is pulseFixture against an explicit request clock; the newest
+// commit is placed two days before that clock.
+func pulseFixtureAt(t *testing.T, p *insights.Projection, found bool, now time.Time) (*repoFixture, string) {
 	t.Helper()
 	f := newRepoFixture(t, true)
 	f.view.tree = api.TreeResult{
@@ -87,9 +101,9 @@ func pulseFixture(t *testing.T, p *insights.Projection, found bool) (*repoFixtur
 	}
 	f.view.commits = api.CommitPage{SHA: strings.Repeat("a", 40), Commits: []api.Commit{{
 		SHA: strings.Repeat("a", 40), Subject: "pulse", Author: "ada",
-		AuthorDate: pulseNow.Add(-48 * time.Hour),
+		AuthorDate: now.Add(-48 * time.Hour),
 	}}}
-	bindPulse(t, f, p, found)
+	bindPulseAt(t, f, p, found, now)
 	return f, f.mustGet("/demo/spindle", 200)
 }
 
@@ -164,6 +178,16 @@ func TestCodePulseFullProjection(t *testing.T) {
 	} {
 		if !strings.Contains(body, want) {
 			t.Errorf("pulse card missing %q", want)
+		}
+	}
+	// The visible text is a request-clock rendering; the machine-readable
+	// stamps stay on the <time> elements.
+	for _, want := range []string{
+		`datetime="2026-11-23T12:00:00Z"`, // head commit: pulseNow - 48h
+		`datetime="2026-08-25T12:00:00Z"`, // last release
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("pulse page missing absolute stamp %q", want)
 		}
 	}
 	if strings.Contains(body, "Bus factor") || strings.Contains(body, "bus factor") {
@@ -241,6 +265,55 @@ func nodesIn(n *html.Node, tag string) []*html.Node {
 		}
 	})
 	return out
+}
+
+// TestCodePulseAgesFollowRequestClock is the date-bomb guard: the card's
+// relative ages (and the same page's commit strip) must render against the
+// request clock, never the wall clock. The clock is pinned 400 days past the
+// projection's stamps, so wall-clock rendering reads them as future and emits
+// "just now" — only the request clock yields the expected "2d ago"/"3mo ago".
+// Before the fix this test failed for the same reason
+// TestCodePulseFullProjection did once the real date moved past pulseNow+48h.
+func TestCodePulseAgesFollowRequestClock(t *testing.T) {
+	clock := pulseNow.Add(400 * 24 * time.Hour)
+	p := pulseProjection()
+	p.ComputedAt = clock.Add(-12 * time.Minute).Format(time.RFC3339)
+	p.Facts.LastReleaseAt = clock.Add(-90 * 24 * time.Hour).Format(time.RFC3339)
+
+	_, body := pulseFixtureAt(t, p, true, clock)
+	for _, want := range []string{"2d ago", "3mo ago", "computed 12m ago"} {
+		if !strings.Contains(body, want) {
+			t.Errorf("pulse card missing %q with a request clock 400 days from the wall clock", want)
+		}
+	}
+	// The commit strip above the file table is on the same page and carries
+	// the same fixture-pinned head-commit stamp: it follows the request clock
+	// too, so both it and the pulse row read "2d ago".
+	doc := parsePage(t, body)
+	var twoDay, threeMonth int
+	for _, tm := range nodesIn(doc, "time") {
+		switch nodeText(tm) {
+		case "2d ago":
+			twoDay++
+		case "3mo ago":
+			threeMonth++
+		}
+	}
+	if twoDay < 2 {
+		t.Errorf("<time> elements reading \"2d ago\" = %d, want the commit strip and the pulse row", twoDay)
+	}
+	if threeMonth < 1 {
+		t.Errorf("<time> elements reading \"3mo ago\" = %d, want the pulse release row", threeMonth)
+	}
+	// The absolute stamps remain the machine-readable value.
+	for _, want := range []string{
+		`datetime="` + clock.Add(-48*time.Hour).Format(time.RFC3339) + `"`,
+		`datetime="` + clock.Add(-90*24*time.Hour).Format(time.RFC3339) + `"`,
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("pulse page missing absolute stamp %q", want)
+		}
+	}
 }
 
 func TestCodePulseCappedContributors(t *testing.T) {

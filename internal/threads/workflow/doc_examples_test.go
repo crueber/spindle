@@ -64,6 +64,38 @@ func fencedBlocks(doc, info string) []string {
 	return out
 }
 
+// workflowsGuidePath is the authoring guide, relative to this package.
+const workflowsGuidePath = "../../../docs/WORKFLOWS.md"
+
+// TestWorkflowsGuideExamplesParse pins docs/WORKFLOWS.md to the parser. A ```yaml block is a
+// complete spindle workflow and must parse; ```yaml-action is action metadata and must parse with
+// ParseAction; ```yaml-forgejo is another CI system's original, kept beside its spindle
+// translation and deliberately not parsed here (it is the thing being migrated away from).
+func TestWorkflowsGuideExamplesParse(t *testing.T) {
+	raw, err := os.ReadFile(filepath.Clean(workflowsGuidePath))
+	if err != nil {
+		t.Fatalf("read %s: %v", workflowsGuidePath, err)
+	}
+	workflows := fencedBlocks(string(raw), "yaml")
+	if len(workflows) == 0 {
+		t.Fatalf("%s carries no fenced yaml examples", workflowsGuidePath)
+	}
+	for i, block := range workflows {
+		if _, perr := Parse([]byte(block)); perr != nil {
+			t.Errorf("%s yaml block %d does not parse: %v\n%s", workflowsGuidePath, i+1, perr, block)
+		}
+	}
+	actions := fencedBlocks(string(raw), "yaml-action")
+	if len(actions) == 0 {
+		t.Fatalf("%s carries no fenced yaml-action example", workflowsGuidePath)
+	}
+	for i, block := range actions {
+		if _, perr := ParseAction([]byte(block)); perr != nil {
+			t.Errorf("%s yaml-action block %d does not parse: %v\n%s", workflowsGuidePath, i+1, perr, block)
+		}
+	}
+}
+
 // TestDocUnsupportedSpellings pins the reference's "not supported" claims: each spelling the doc
 // says is a parse error must really be one, so the section cannot rot into wishful thinking.
 func TestDocUnsupportedSpellings(t *testing.T) {
