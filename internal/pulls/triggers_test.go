@@ -56,22 +56,23 @@ func TestPullEventsOpenedSynchronizeReopened(t *testing.T) {
 		t.Fatalf("synchronize events = %+v", events)
 	}
 
-	// Closing must never fire a CI trigger.
+	// Closing is the fourth edge (PAR-014).
 	closed := StateClosed
 	if _, _, err := e.svc.UpdatePR(ctx(), "o", "r", th.Num, writer(), PRPatch{State: &closed}); err != nil {
 		t.Fatalf("close: %v", err)
 	}
-	if got := pullEvents(got, mu); len(got) != 2 {
-		t.Fatalf("close fired a trigger: %+v", got)
+	events = pullEvents(got, mu)
+	if len(events) != 3 || events[2].Action != "closed" || events[2].State != StateClosed {
+		t.Fatalf("closed events = %+v", events)
 	}
 
-	// Reopening is the third edge.
+	// Reopening is another edge.
 	open := StateOpen
 	if _, _, err := e.svc.UpdatePR(ctx(), "o", "r", th.Num, writer(), PRPatch{State: &open}); err != nil {
 		t.Fatalf("reopen: %v", err)
 	}
 	events = pullEvents(got, mu)
-	if len(events) != 3 || events[2].Action != "reopened" || events[2].HeadSHA != newHead {
+	if len(events) != 4 || events[3].Action != "reopened" || events[3].HeadSHA != newHead {
 		t.Fatalf("reopened events = %+v", events)
 	}
 }
@@ -286,5 +287,108 @@ func TestJobTokenRefEventNeverSynchronizes(t *testing.T) {
 	}
 	if syncs != 1 {
 		t.Fatalf("synchronize events = %d, want 1", syncs)
+	}
+}
+
+// TestPullEventsDraftAndEditEdges pins the PAR-014 vocabulary the pulls service
+// emits besides the three base edges: ready_for_review, converted_to_draft and
+// edited.
+func TestPullEventsDraftAndEditEdges(t *testing.T) {
+	e := newTestEnv()
+	got, mu := recordPullEvents(e)
+	th, _ := openBasic(t, e, "o", "r")
+
+	draft := true
+	if _, _, err := e.svc.UpdatePR(ctx(), "o", "r", th.Num, writer(), PRPatch{Draft: &draft}); err != nil {
+		t.Fatalf("to draft: %v", err)
+	}
+	ready := false
+	if _, _, err := e.svc.UpdatePR(ctx(), "o", "r", th.Num, writer(), PRPatch{Draft: &ready}); err != nil {
+		t.Fatalf("ready: %v", err)
+	}
+	title := "Renamed"
+	if _, _, err := e.svc.UpdatePR(ctx(), "o", "r", th.Num, writer(), PRPatch{Title: &title}); err != nil {
+		t.Fatalf("edit: %v", err)
+	}
+	events := pullEvents(got, mu)
+	actions := make([]string, 0, len(events))
+	for _, ev := range events {
+		actions = append(actions, ev.Action)
+	}
+	for _, want := range []string{"converted_to_draft", "ready_for_review", "edited"} {
+		found := false
+		for _, a := range actions {
+			if a == want {
+				found = true
+			}
+		}
+		if !found {
+			t.Fatalf("no %s edge in %v", want, actions)
+		}
+	}
+	for _, ev := range events {
+		if ev.Action == "ready_for_review" && ev.Draft {
+			t.Fatal("ready_for_review carried draft=true")
+		}
+		if ev.Action == "converted_to_draft" && !ev.Draft {
+			t.Fatal("converted_to_draft carried draft=false")
+		}
+	}
+}
+
+// TestPullEventsClosedOnMerge pins that a merge is also the `closed` edge.
+func TestPullEventsClosedOnMerge(t *testing.T) {
+	e := newTestEnv()
+	e.roles.Roles["merger@example.com"] = "maintain"
+	got, mu := recordPullEvents(e)
+	openBasic(t, e, "o", "r")
+	seedMergeable(t, e, hexSHA(1), hexSHA(2))
+	if _, err := e.svc.StartMerge(ctx(), "o", "r", 1, maintainer(), MergeInput{Strategy: StrategyMerge}, ""); err != nil {
+		t.Fatalf("StartMerge: %v", err)
+	}
+	done := waitTask(5*time.Second, func() *TaskRecord { return e.svc.MergeTask("o", "r") })
+	if done == nil || done.State != TaskOK {
+		t.Fatalf("merge task = %+v", done)
+	}
+	events := pullEvents(got, mu)
+	if len(events) == 0 || events[len(events)-1].Action != "closed" || !events[len(events)-1].Merged {
+		t.Fatalf("merge events = %+v", events)
+	}
+}
+
+// TestPRTriggerInfoAndNilSink pins the narrow trigger projection and the
+// nil-record guards of the lifecycle helper.
+func TestPRTriggerInfoAndNilSink(t *testing.T) {
+	e := newTestEnv()
+	th, pr := openBasic(t, e, "o", "r")
+	info, ok := e.svc.PRTriggerInfo(ctx(), "o", "r", th.Num)
+	if !ok || info.Num != th.Num || info.HeadSHA != pr.Head.SHA || info.BaseSHA != pr.Base.SHA ||
+		info.Title != th.Title || info.Author != th.Author || info.Fork {
+		t.Fatalf("info = %+v", info)
+	}
+	if _, ok := e.svc.PRTriggerInfo(ctx(), "o", "r", 999); ok {
+		t.Fatal("unknown PR projected")
+	}
+	// The helper tolerates nil records (a deleted PR raced the write).
+	e.svc.emitPullLifecycle(ctx(), "o/r", nil, pr, "edited", "ada")
+	e.svc.emitPullLifecycle(ctx(), "o/r", th, nil, "edited", "ada")
+}
+
+// TestPRTriggerInfoFork pins the fork flag on the trigger projection.
+func TestPRTriggerInfoFork(t *testing.T) {
+	e := newTestEnv()
+	e.roles.Roles["jane@example.com"] = "write"
+	e.seedRefs("o/r", map[string]string{"refs/heads/main": hexSHA(1)})
+	e.seedRefs("f/r", map[string]string{"refs/heads/feat": hexSHA(9)})
+	e.git.ReachableMap = map[string]bool{hexSHA(9): false}
+	th, _, err := e.svc.OpenPR(ctx(), "o", "r", writer(), OpenInput{
+		Title: "fork work", BaseRef: "refs/heads/main", HeadRef: "refs/heads/feat", Fork: &ForkInfo{Repo: "f/r"},
+	}, "")
+	if err != nil {
+		t.Fatalf("OpenPR: %v", err)
+	}
+	info, ok := e.svc.PRTriggerInfo(ctx(), "o", "r", th.Num)
+	if !ok || !info.Fork || info.HeadRepo != "f/r" {
+		t.Fatalf("fork info = %+v", info)
 	}
 }

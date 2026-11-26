@@ -40,6 +40,10 @@ const (
 	// workspace cannot delete another step's outputs and nothing in the checkout
 	// shows up as untracked.
 	outputFilePrefix = "/tmp/spindle-output-"
+	// MaxOutputDelimiterLen bounds a heredoc delimiter. GitHub's guidance is a
+	// random value; a delimiter longer than this is a mistake (or an attempt to
+	// smuggle data through the marker line), never a legitimate output name.
+	MaxOutputDelimiterLen = 128
 )
 
 // outputFilePath is the in-container output file of one step (index is the
@@ -78,6 +82,12 @@ func parseOutputFile(data []byte) (map[string]string, error) {
 			}
 			if delim == "" {
 				return nil, fmt.Errorf("line %d: %q uses a heredoc with no delimiter (write name<<DELIMITER)", i+1, name)
+			}
+			if len(delim) > MaxOutputDelimiterLen {
+				return nil, fmt.Errorf("line %d: the heredoc delimiter for %q is %d bytes, over the cap of %d (use a short random value)", i+1, name, len(delim), MaxOutputDelimiterLen)
+			}
+			if strings.ContainsAny(delim, "\x00\r\n") {
+				return nil, fmt.Errorf("line %d: the heredoc delimiter for %q carries a control character", i+1, name)
 			}
 			var value []string
 			closed := false

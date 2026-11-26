@@ -24,17 +24,17 @@ func TestGlobMatchMatrix(t *testing.T) {
 		{"a*", "a", true},
 	}
 	for _, tc := range cases {
-		if got := globMatch(tc.pattern, tc.name); got != tc.want {
-			t.Errorf("globMatch(%q,%q) = %v, want %v", tc.pattern, tc.name, got, tc.want)
+		if got := testGlob(tc.pattern, tc.name); got != tc.want {
+			t.Errorf("testGlob(%q,%q) = %v, want %v", tc.pattern, tc.name, got, tc.want)
 		}
 	}
-	if !matchAny(nil, "x") {
+	if !testMatchAny(nil, "x") {
 		t.Error("empty filter must match")
 	}
-	if !matchAny([]string{"dev", "release/*"}, "release/2") {
+	if !testMatchAny([]string{"dev", "release/*"}, "release/2") {
 		t.Error("second pattern did not match")
 	}
-	if matchAny([]string{"dev"}, "main") {
+	if testMatchAny([]string{"dev"}, "main") {
 		t.Error("unexpected match")
 	}
 }

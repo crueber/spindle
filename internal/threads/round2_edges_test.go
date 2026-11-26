@@ -23,12 +23,12 @@ func TestScheduleWatermarkReadEdges(t *testing.T) {
 	if err != nil || doc == nil || len(doc.Fired) != 0 {
 		t.Fatalf("absent watermark = %+v, %v", doc, err)
 	}
-	body := `{"fired":{"ci.yml|0 3 * * *":1700000000},"version":2}`
+	body := `{"fired":{"ci.yml|0 3 * * *|":"2026-11-14T18:13"},"version":2}`
 	if _, err := store.PutBytes(ctx(), e.store, ScheduleKey("o", "r"), []byte(body), store.PutOptions{Mode: store.PutCreate}); err != nil {
 		t.Fatal(err)
 	}
 	doc, err = e.svc.LoadScheduleWatermark(ctx(), "o", "r")
-	if err != nil || doc.Fired["ci.yml|0 3 * * *"] != 1700000000 {
+	if err != nil || doc.Fired["ci.yml|0 3 * * *|"] != "2026-11-14T18:13" {
 		t.Fatalf("valid watermark = %+v, %v", doc, err)
 	}
 	// A JSON null map decodes to an empty map (never a nil panic downstream).
@@ -297,7 +297,7 @@ func TestDeleteDeadRunnerFailurePin(t *testing.T) {
 	}
 	fs.fail("delete", 0)
 	res := &GCResult{}
-	e.svc.deleteDeadRunners(ctx(), e.svc.nowUTC().Add(-30*24*time.Hour), res)
+	e.svc.deleteDeadRunners(ctx(), e.svc.nowUTC().Add(-30*24*time.Hour), true, res)
 	if res.RunnersDeleted != 0 {
 		t.Fatalf("a failed delete was counted: %+v", res)
 	}
@@ -322,11 +322,11 @@ func TestDenyRunCancelFailure(t *testing.T) {
 func TestClaimScheduleTickPruneAndLimit(t *testing.T) {
 	e := newTestEnv(t)
 	// Seed two entries, then claim a third while pruning to only that one.
-	seed := `{"fired":{"a.yml|0 3 * * *":100,"b.yml|0 3 * * *":200},"version":1}`
+	seed := `{"fired":{"a.yml|0 3 * * *|":"slot-a","b.yml|0 3 * * *|":"slot-b"},"version":1}`
 	if _, err := store.PutBytes(ctx(), e.store, ScheduleKey("o", "r"), []byte(seed), store.PutOptions{Mode: store.PutCreate}); err != nil {
 		t.Fatal(err)
 	}
-	won, err := e.svc.claimScheduleTick(ctx(), "o", "r", "c.yml|0 3 * * *", 300, map[string]bool{"c.yml|0 3 * * *": true})
+	won, err := e.svc.claimScheduleTick(ctx(), "o", "r", "c.yml|0 3 * * *|", "slot-c", map[string]bool{"c.yml|0 3 * * *|": true})
 	if err != nil || !won {
 		t.Fatalf("claim = %v, %v", won, err)
 	}
@@ -334,19 +334,19 @@ func TestClaimScheduleTickPruneAndLimit(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(doc.Fired) != 1 || doc.Fired["c.yml|0 3 * * *"] != 300 {
+	if len(doc.Fired) != 1 || doc.Fired["c.yml|0 3 * * *|"] != "slot-c" {
 		t.Fatalf("watermark = %+v, want only the new entry", doc.Fired)
 	}
 	// A full document refuses a new entry (fail closed, never an unbounded
 	// object).
-	full := &ScheduleWatermark{Fired: map[string]int64{}}
+	full := &ScheduleWatermark{Fired: map[string]string{}}
 	for i := 0; i < scheduleKeyLimit; i++ {
-		full.Fired["x"+itoa(i)+"|0 0 * * *"] = 1
+		full.Fired["x"+itoa(i)+"|0 0 * * *|"] = "slot"
 	}
 	if _, err := store.PutBytes(ctx(), e.store, ScheduleKey("o", "r"), mustJSON(full), store.PutOptions{Mode: store.PutOverwrite}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := e.svc.claimScheduleTick(ctx(), "o", "r", "new|0 0 * * *", 2, nil); err == nil {
+	if _, err := e.svc.claimScheduleTick(ctx(), "o", "r", "new|0 0 * * *|", "slot", nil); err == nil {
 		t.Fatal("a full watermark accepted another entry")
 	}
 }

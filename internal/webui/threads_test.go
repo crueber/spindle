@@ -824,3 +824,21 @@ func TestThreadsFiltersAndGateVerbs(t *testing.T) {
 		}
 	}
 }
+
+// TestThreadDispatchEnvironmentPicker pins PAR-023's UI half: an
+// environment-typed input renders as a select whose options are the
+// repository's environment names.
+func TestThreadDispatchEnvironmentPicker(t *testing.T) {
+	data := threadsListData{Workflows: []threadWorkflowRow{{
+		Path: ".spindle/workflows/deploy.yml", Name: "Deploy", Dispatch: true,
+		Inputs: []threads.DispatchInput{{Name: "environment", Type: "environment", Required: true}},
+	}}}
+	threadDispatchModel(&data, "", nil, []string{"staging", "production"})
+	if len(data.DispatchInputs) != 1 {
+		t.Fatalf("inputs = %+v", data.DispatchInputs)
+	}
+	row := data.DispatchInputs[0]
+	if row.Type != "environment" || len(row.Options) != 2 || row.Options[1] != "production" {
+		t.Fatalf("environment row = %+v (want a picker of the repo environments)", row)
+	}
+}

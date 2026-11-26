@@ -493,11 +493,7 @@ func (s *Service) OpenPR(ctx context.Context, owner, repo string, actor auth.Pri
 	}
 	// CI trigger (Threads pass A): a new PR starts its pull_request runs.
 	// Post-commit, on the same lifecycle edge the notify/SSE seams use.
-	s.pullEvent(ctx, PullEvent{
-		Repo: baseRepo, Action: "opened", Num: num,
-		BaseRef: in.BaseRef, HeadRef: in.HeadRef, HeadSHA: headSHA,
-		HeadRepo: repoName(headOwner, headRepo), Fork: !sameRepo, Actor: who,
-	})
+	s.emitPullLifecycle(ctx, baseRepo, th, pr, "opened", who)
 	return th, pr, nil
 }
 
@@ -1080,14 +1076,12 @@ func (s *Service) UpdatePR(ctx context.Context, owner, repo string, num int, act
 		}
 		s.emit(ctx, NotifyEvent{Repo: repoName(owner, repo), Class: class, Actor: who, PullNum: num, Recipients: prParticipants(th, who)})
 		s.stream(ctx, StreamEvent{Name: "pull", Repo: repoName(owner, repo), Action: action, Num: num, Title: th.Title, State: th.State, Author: th.Author, BaseRef: pr.Base.Ref, HeadRef: pr.Head.Ref, HeadSHA: pr.Head.SHA})
-		// CI trigger (Threads pass A): reopening an open PR starts its
-		// pull_request runs. Closing never does.
+		// CI trigger: opening and closing are both lifecycle edges now
+		// (PAR-014). A fork's close still runs the base file untrusted.
 		if to == StateOpen {
-			s.pullEvent(ctx, PullEvent{
-				Repo: repoName(owner, repo), Action: "reopened", Num: num,
-				BaseRef: pr.Base.Ref, HeadRef: pr.Head.Ref, HeadSHA: pr.Head.SHA,
-				HeadRepo: pr.Head.Repo, Fork: pr.Fork != nil, Actor: who,
-			})
+			s.emitPullLifecycle(ctx, repoName(owner, repo), th, pr, "reopened", who)
+		} else {
+			s.emitPullLifecycle(ctx, repoName(owner, repo), th, pr, "closed", who)
 		}
 	}
 	if p.Body != nil || draft != nil {
@@ -1150,6 +1144,13 @@ func (s *Service) UpdatePR(ctx context.Context, owner, repo string, num int, act
 		}
 		s.emit(ctx, NotifyEvent{Repo: repoName(owner, repo), Class: class, Actor: who, PullNum: num, Recipients: prParticipants(th, who)})
 		s.stream(ctx, StreamEvent{Name: "pull", Repo: repoName(owner, repo), Action: action, Num: num, Title: th.Title, State: th.State, Author: th.Author, BaseRef: pr.Base.Ref, HeadRef: pr.Head.Ref, HeadSHA: pr.Head.SHA})
+		pr.Draft = *draft
+		s.emitPullLifecycle(ctx, repoName(owner, repo), th, pr, action, who)
+	}
+	// A title or body edit is the `edited` edge (a body edit reaches here with
+	// p.Body, the pr.json update is the owned delta above).
+	if title != nil || p.Body != nil {
+		s.emitPullLifecycle(ctx, repoName(owner, repo), th, pr, "edited", who)
 	}
 	if p.Metadata != nil {
 		// 02 owns the thread-metadata fields: this call is its only writer
@@ -1259,4 +1260,41 @@ func (s *Service) emitMentioned(ctx context.Context, owner, repo string, num int
 		return
 	}
 	s.emit(ctx, NotifyEvent{Repo: repoName(owner, repo), Class: "mentioned", Actor: actor, PullNum: num, Recipients: recips})
+}
+
+// TriggerInfo is the narrow projection the CI trigger adapter reads for a PR
+// metadata edge (labeled/assigned/…): the identifiers a run needs, without the
+// event window or the mergeability probe a full GetPR performs. ok=false means
+// the PR vanished between the metadata write and the trigger.
+type TriggerInfo struct {
+	Num      int
+	Title    string
+	State    string
+	Author   string
+	BaseRef  string
+	BaseSHA  string
+	HeadRef  string
+	HeadSHA  string
+	HeadRepo string
+	Draft    bool
+	Merged   bool
+	Fork     bool
+}
+
+// PRTriggerInfo reads the trigger projection (two exact-key GETs).
+func (s *Service) PRTriggerInfo(ctx context.Context, owner, repo string, num int) (TriggerInfo, bool) {
+	th, _, err := s.loadThread(ctx, owner, repo, num)
+	if err != nil || th == nil || th.Kind != "pr" {
+		return TriggerInfo{}, false
+	}
+	pr, _, err := s.loadPR(ctx, owner, repo, num)
+	if err != nil || pr == nil {
+		return TriggerInfo{}, false
+	}
+	return TriggerInfo{
+		Num: th.Num, Title: th.Title, State: th.State, Author: th.Author,
+		BaseRef: pr.Base.Ref, BaseSHA: pr.Base.SHA,
+		HeadRef: pr.Head.Ref, HeadSHA: pr.Head.SHA, HeadRepo: pr.Head.Repo,
+		Draft: pr.Draft, Merged: pr.Merged, Fork: pr.Fork != nil,
+	}, true
 }

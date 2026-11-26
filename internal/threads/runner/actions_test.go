@@ -83,7 +83,7 @@ func TestBuildPlanExpandsCompositeAction(t *testing.T) {
 		"--env INPUT_VERSION=2.0", // with: overrides the default
 		"--env INPUT_DRY_RUN=",    // a declared input with no default is present and empty
 		"--env SPINDLE_JOB_TOKEN", // a composite run step is repository code: token like any script
-		"bash -eo pipefail -c",
+		"bash --noprofile --norc -eo pipefail -c",
 	} {
 		if !strings.Contains(argv, want) {
 			t.Errorf("install argv missing %q\nargv: %s", want, argv)

@@ -776,20 +776,32 @@ type SettingsEnvironmentPanel struct {
 	Enabled bool
 	Rows    []SettingsEnvironment
 	// Drafts survive a rejected write (never a secret value).
-	NewName      string
-	NewReviewers string
-	NewSecret    string
-	Error        string
+	NewName              string
+	NewReviewers         string
+	NewTeams             string
+	NewWaitMinutes       string
+	NewPreventSelfReview bool
+	NewBranches          string
+	NewSecret            string
+	Error                string
 }
 
-// SettingsEnvironment is one environment row plus its secret names.
+// SettingsEnvironment is one environment row plus its secret names and its
+// protection rules (PAR-131): team reviewers, the wait timer, prevent
+// self-review and the deployment branch/tag policy.
 type SettingsEnvironment struct {
-	Name          string
-	Reviewers     []string
-	ReviewersText string
-	Secrets       []SettingsSecret
-	CreatedAt     string
-	UpdatedAt     string
+	Name              string
+	Reviewers         []string
+	ReviewersText     string
+	Teams             []string
+	TeamsText         string
+	WaitMinutes       int
+	PreventSelfReview bool
+	Branches          []string
+	BranchesText      string
+	Secrets           []SettingsSecret
+	CreatedAt         string
+	UpdatedAt         string
 }
 
 // SettingsDanger is the Danger Zone tab.
@@ -2092,6 +2104,10 @@ func settingsRestoreRepoValues(page *SettingsRepoPage, r *http.Request, action s
 		}
 		page.Environments.NewName = get("environment_name")
 		page.Environments.NewReviewers = get("environment_reviewers")
+		page.Environments.NewTeams = get("environment_teams")
+		page.Environments.NewWaitMinutes = get("environment_wait_minutes")
+		page.Environments.NewPreventSelfReview = get("environment_prevent_self_review") != ""
+		page.Environments.NewBranches = get("environment_branches")
 		page.Environments.NewSecret = get("environment_secret_name")
 	case SettingsActionWebhookCreate:
 		if page.AdminData == nil {

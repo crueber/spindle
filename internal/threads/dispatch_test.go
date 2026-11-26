@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/crueber/spindle/internal/server/auth"
+	"github.com/crueber/spindle/internal/threads/workflow"
 )
 
 // workflow_dispatch inputs (15 §1/§6, round 2): the dispatch API accepts,
@@ -272,7 +273,7 @@ jobs:
 	if got := workflowLabel(nil); got != "the workflow" {
 		t.Fatalf("workflowLabel(nil) = %q", got)
 	}
-	if _, err := resolveDispatchInputs(&WorkflowFile{}, map[string]string{"x": "1"}); !errors.Is(err, ErrUnprocessable) {
+	if _, err := resolveDispatchInputs(&WorkflowFile{}, map[string]string{"x": "1"}, nil); !errors.Is(err, ErrUnprocessable) {
 		t.Fatalf("unknown input on an undeclared workflow = %v", err)
 	}
 }
@@ -299,4 +300,30 @@ func TestDurationHelpers(t *testing.T) {
 	// fillDurations tolerates a nil run and nil jobs (defensive projection).
 	e := newTestEnv(t)
 	e.svc.fillDurations(nil, []*Job{nil})
+}
+
+// TestDispatchInputTypesExtended pins PAR-023: number coercion and the
+// environment picker's server-side validation (an `environment` value must name
+// an existing repository environment).
+func TestDispatchInputTypesExtended(t *testing.T) {
+	f := &WorkflowFile{Path: "deploy.yml", Workflow: &workflow.Workflow{
+		On: workflow.Triggers{WorkflowDispatch: &workflow.DispatchTrigger{Inputs: map[string]workflow.Input{
+			"replicas":    {Type: "number"},
+			"environment": {Type: "environment", Required: true},
+		}}},
+	}}
+	envs := []string{"staging", "production"}
+	got, err := resolveDispatchInputs(f, map[string]string{"replicas": "3", "environment": "production"}, envs)
+	if err != nil {
+		t.Fatalf("valid dispatch: %v", err)
+	}
+	if got["replicas"] != "3" || got["environment"] != "production" {
+		t.Fatalf("effective = %+v", got)
+	}
+	if _, err := resolveDispatchInputs(f, map[string]string{"replicas": "three", "environment": "production"}, envs); !errors.Is(err, ErrUnprocessable) {
+		t.Fatalf("non-numeric number err = %v", err)
+	}
+	if _, err := resolveDispatchInputs(f, map[string]string{"replicas": "3", "environment": "moon"}, envs); !errors.Is(err, ErrUnprocessable) {
+		t.Fatalf("unknown environment err = %v", err)
+	}
 }

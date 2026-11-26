@@ -318,21 +318,21 @@ func TestStepEdgeCases(t *testing.T) {
 	// An if error fails the step with the message.
 	step := plan.Steps[1]
 	step.If = "!github.ref"
-	res, _ := exec.runStep(context.Background(), plan, step, stream, nil, nil, false, newCommandFiles())
+	res, _ := exec.runStep(context.Background(), plan, step, stream, nil, nil, false, newCommandFiles(), newJobCommands(stream), &jobSummary{})
 	if res.Conclusion != threads.JobFailure || !strings.Contains(res.Error, "if:") {
 		t.Fatalf("if error = %+v", res)
 	}
 	// A skip under a false condition.
 	step = plan.Steps[2]
 	step.If = "false"
-	if res, _ := exec.runStep(context.Background(), plan, step, stream, nil, nil, false, newCommandFiles()); res.Conclusion != "skipped" {
+	if res, _ := exec.runStep(context.Background(), plan, step, stream, nil, nil, false, newCommandFiles(), newJobCommands(stream), &jobSummary{}); res.Conclusion != "skipped" {
 		t.Fatalf("skip = %+v", res)
 	}
 	// An unsupported action fails with its reason.
 	step = plan.Steps[1]
 	step.Kind = "unsupported"
 	step.SkipReason = "nope"
-	if res, _ := exec.runStep(context.Background(), plan, step, stream, nil, nil, false, newCommandFiles()); res.Conclusion != threads.JobFailure || res.Error != "nope" {
+	if res, _ := exec.runStep(context.Background(), plan, step, stream, nil, nil, false, newCommandFiles(), newJobCommands(stream), &jobSummary{}); res.Conclusion != threads.JobFailure || res.Error != "nope" {
 		t.Fatalf("unsupported = %+v", res)
 	}
 	if stepExitCode(os.ErrNotExist) != -1 {
@@ -484,7 +484,7 @@ func TestExprStepsAndUnknownContext(t *testing.T) {
 	if _, err := EvalIf("steps.a.result == 'x'", ctx); err == nil {
 		t.Fatal("only steps.<id>.outcome is supported")
 	}
-	if _, err := EvalIf("vars.TOKEN == 'x'", ctx); err == nil {
+	if _, err := EvalIf("nope.TOKEN == 'x'", ctx); err == nil {
 		t.Fatal("an unknown context must error")
 	}
 	if _, err := EvalIf("!env.MAYBE", ExprContext{Env: map[string]string{"MAYBE": "maybe"}}); err == nil {

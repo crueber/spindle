@@ -74,14 +74,20 @@ func (s *Service) resolveCloneCredential(ctx context.Context, token string) (aut
 	if lerr != nil {
 		return auth.Principal{}, &auth.AuthError{Kind: auth.ErrInvalid, Why: "invalid job token"}, true
 	}
-	job, _, jerr := s.loadJobAndRun(ctx, owner, repo, claims.Run, claims.Job)
+	job, run, jerr := s.loadJobAndRun(ctx, owner, repo, claims.Run, claims.Job)
 	if jerr != nil || job == nil || job.Attempt != claims.Attempt || terminal(job.State) {
 		return auth.Principal{}, &auth.AuthError{Kind: auth.ErrInvalid, Why: "job token revoked"}, true
 	}
+	// The platform-API half of the authority (PAR-113): the same effective
+	// permission map that minted the token's git scopes, recomputed from the
+	// job record so revocation and a rewritten spec cannot drift from the
+	// signature. A fork run is untrusted, so this is always `contents: read`.
+	trusted := job.Trusted && (run == nil || run.Trusted)
 	return auth.Principal{
-		Name:    ClonePrincipalName(claims.Runner),
-		JobRepo: claims.Repo,
-		JobPush: claims.Allows(ScopePush),
+		Name:     ClonePrincipalName(claims.Runner),
+		JobRepo:  claims.Repo,
+		JobPush:  claims.Allows(ScopePush),
+		JobPerms: s.EffectivePermissions(job.Spec, trusted),
 	}, nil, true
 }
 

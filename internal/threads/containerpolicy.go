@@ -50,7 +50,9 @@ package threads
 import (
 	"fmt"
 	"sort"
+	"strconv"
 	"strings"
+	"time"
 )
 
 // containerOption is one allowlisted docker create flag.
@@ -79,6 +81,46 @@ var containerOptionAllowlist = map[string]containerOption{
 	"-u":            {value: true},
 	"--workdir":     {value: true},
 	"-w":            {value: true},
+	// Service health checks (PAR-078): the command runs INSIDE the service
+	// container and the interval/timeout/retries drive docker's own probe, so
+	// they are in-container confinement knobs, not host capabilities. They are
+	// the documented way to gate a job on a database being ready
+	// (`--health-cmd pg_isready`), and the runner's readiness wait reads the
+	// result through `docker inspect`.
+	"--health-cmd":          {value: true, valid: validHealthCommand},
+	"--health-interval":     {value: true, valid: validHealthDuration},
+	"--health-timeout":      {value: true, valid: validHealthDuration},
+	"--health-retries":      {value: true, valid: validHealthRetries},
+	"--health-start-period": {value: true, valid: validHealthDuration},
+}
+
+// validHealthCommand admits one in-container health command. It is a COMMAND,
+// so spaces and shell punctuation are legitimate (`pg_isready -U postgres`);
+// it may not be empty or look like another flag, and a control character is
+// refused because the value is one argv element.
+func validHealthCommand(v string) bool {
+	if strings.TrimSpace(v) == "" || strings.HasPrefix(v, "-") {
+		return false
+	}
+	for _, r := range v {
+		if r == 0 || r == '\r' || r == '\n' {
+			return false
+		}
+	}
+	return true
+}
+
+// validHealthDuration admits a positive Go duration (`10s`, `1m30s`), which is
+// exactly what docker's flag parser accepts.
+func validHealthDuration(v string) bool {
+	d, err := time.ParseDuration(v)
+	return err == nil && d > 0
+}
+
+// validHealthRetries admits a positive integer retry count.
+func validHealthRetries(v string) bool {
+	n, err := strconv.Atoi(v)
+	return err == nil && n > 0 && n <= 1000
 }
 
 // validUlimitValue admits only the nofile key ("nofile=1024" or
@@ -183,7 +225,7 @@ func checkWorkflowOptions(field, options string) *ContainerOptionRefusal {
 			i++
 		}
 		okValue := validGenericOptionValue(value)
-		if okValue && spec.valid != nil {
+		if spec.valid != nil {
 			okValue = spec.valid(value)
 		}
 		if !okValue {
@@ -196,8 +238,15 @@ func checkWorkflowOptions(field, options string) *ContainerOptionRefusal {
 
 // optionValueHint names the accepted argument shape for a refusal.
 func optionValueHint(name string) string {
-	if name == "--ulimit" {
+	switch name {
+	case "--ulimit":
 		return "only a nofile=… limit"
+	case "--health-cmd":
+		return "one in-container command (quoted if it has spaces)"
+	case "--health-interval", "--health-timeout", "--health-start-period":
+		return "a positive duration, e.g. 10s or 1m30s"
+	case "--health-retries":
+		return "a positive retry count"
 	}
 	return "one non-empty value that is not another flag"
 }

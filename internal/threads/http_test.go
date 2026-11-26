@@ -257,13 +257,14 @@ func TestExposedCoversRoutes(t *testing.T) {
 		claimedOnly bool
 	}
 	samples := map[string]sample{
-		"/{owner}/{repo}/api/threads":               {http.MethodGet, "/o/r/api/threads", false},
-		"/{owner}/{repo}/api/threads/workflows":     {http.MethodGet, "/o/r/api/threads/workflows", false},
-		"/{owner}/{repo}/api/threads/{run}":         {http.MethodGet, "/o/r/api/threads/" + run.ID, false},
-		"/{owner}/{repo}/api/threads/{run}/cancel":  {http.MethodPost, "/o/r/api/threads/" + run.ID + "/cancel", false},
-		"/{owner}/{repo}/api/threads/{run}/rerun":   {http.MethodPost, "/o/r/api/threads/" + run.ID + "/rerun", false},
-		"/{owner}/{repo}/api/threads/{run}/approve": {http.MethodPost, "/o/r/api/threads/" + run.ID + "/approve", false},
-		"/{owner}/{repo}/api/threads/{run}/deny":    {http.MethodPost, "/o/r/api/threads/" + run.ID + "/deny", false},
+		"/{owner}/{repo}/api/threads":                    {http.MethodGet, "/o/r/api/threads", false},
+		"/{owner}/{repo}/api/threads/workflows":          {http.MethodGet, "/o/r/api/threads/workflows", false},
+		"/{owner}/{repo}/api/threads/{run}":              {http.MethodGet, "/o/r/api/threads/" + run.ID, false},
+		"/{owner}/{repo}/api/threads/{run}/cancel":       {http.MethodPost, "/o/r/api/threads/" + run.ID + "/cancel", false},
+		"/{owner}/{repo}/api/threads/{run}/rerun":        {http.MethodPost, "/o/r/api/threads/" + run.ID + "/rerun", false},
+		"/{owner}/{repo}/api/threads/{run}/rerun-failed": {http.MethodPost, "/o/r/api/threads/" + run.ID + "/rerun-failed", false},
+		"/{owner}/{repo}/api/threads/{run}/approve":      {http.MethodPost, "/o/r/api/threads/" + run.ID + "/approve", false},
+		"/{owner}/{repo}/api/threads/{run}/deny":         {http.MethodPost, "/o/r/api/threads/" + run.ID + "/deny", false},
 		"/{owner}/{repo}/api/threads/{run}/jobs/{job}/log": {
 			http.MethodGet, "/o/r/api/threads/" + run.ID + "/jobs/" + jid + "/log?accept=json", false},
 		"/{owner}/{repo}/api/threads/{run}/artifacts":     {http.MethodGet, "/o/r/api/threads/" + run.ID + "/artifacts", false},
@@ -273,6 +274,10 @@ func TestExposedCoversRoutes(t *testing.T) {
 		"/api/v1/admin/runners/{id}/policy":               {http.MethodPost, "/api/v1/admin/runners/" + minted.ID + "/policy", false},
 		"/{owner}/{repo}/api/threads/secrets":             {http.MethodGet, "/o/r/api/threads/secrets", false},
 		"/{owner}/{repo}/api/threads/secrets/{name}":      {http.MethodPut, "/o/r/api/threads/secrets/TOKEN", false},
+		"/{owner}/{repo}/api/threads/variables":           {http.MethodGet, "/o/r/api/threads/variables", false},
+		"/{owner}/{repo}/api/threads/variables/{name}":    {http.MethodPut, "/o/r/api/threads/variables/REGION", false},
+		"/api/v1/orgs/{org}/threads/variables":            {http.MethodGet, "/api/v1/orgs/acme/threads/variables", false},
+		"/api/v1/orgs/{org}/threads/variables/{name}":     {http.MethodPut, "/api/v1/orgs/acme/threads/variables/REGION", false},
 		"/{owner}/{repo}/api/threads/environments":        {http.MethodGet, "/o/r/api/threads/environments", false},
 		"/{owner}/{repo}/api/threads/environments/{name}": {http.MethodPut, "/o/r/api/threads/environments/prod", false},
 		"/{owner}/{repo}/api/threads/environments/{name}/secrets": {

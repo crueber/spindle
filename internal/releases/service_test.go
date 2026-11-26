@@ -82,6 +82,19 @@ func TestPutReleaseGates(t *testing.T) {
 	if _, _, err := x.svc.PutRelease(ctx(), "o", "r", writer(), "v1", ReleaseInput{Body: strptr(strings.Repeat("x", MaxBodyBytes+1))}, ""); !isErr(err, ErrInvalid) {
 		t.Fatalf("overlong body: %v", err)
 	}
+	// PAR-112: a Threads job token's release authority is `contents: write`,
+	// not whatever repository role its scopes imply, and only in its own repo.
+	prOnly := auth.Principal{Name: "ci:r1", JobRepo: "o/r", JobPerms: map[string]string{"pull-requests": "write"}}
+	if err := x.svc.requireRole(ctx(), "o", "r", prOnly, "write"); !isErr(err, ErrForbidden) {
+		t.Fatalf("pull-requests: write job release = %v, want ErrForbidden", err)
+	}
+	contentsWrite := auth.Principal{Name: "ci:r1", JobRepo: "o/r", JobPerms: map[string]string{"contents": "write"}}
+	if err := x.svc.requireRole(ctx(), "o", "r", contentsWrite, "write"); err != nil {
+		t.Fatalf("contents: write job release = %v", err)
+	}
+	if err := x.svc.requireRole(ctx(), "o", "other", contentsWrite, "write"); !isErr(err, ErrForbidden) {
+		t.Fatal("job token reached another repository's releases")
+	}
 }
 
 func TestPutReleaseCreatePublish(t *testing.T) {

@@ -113,16 +113,19 @@ func githubContext(run *Run, workflow string) map[string]string {
 	if ref == "" && strings.TrimSpace(run.Branch) != "" {
 		ref = "refs/heads/" + strings.TrimSpace(run.Branch)
 	}
-	return map[string]string{
-		"ref":        ref,
-		"ref_name":   runRefName(run),
-		"sha":        run.Commit,
-		"event_name": run.Event,
-		"workflow":   workflow,
-		"repository": run.Repo,
-		"run_id":     run.ID,
-		"actor":      run.Actor,
+	fields := EventFieldsOf(run.EventPayload)
+	if fields == nil {
+		fields = map[string]string{}
 	}
+	fields["ref"] = ref
+	fields["ref_name"] = runRefName(run)
+	fields["sha"] = run.Commit
+	fields["event_name"] = run.Event
+	fields["workflow"] = workflow
+	fields["repository"] = run.Repo
+	fields["run_id"] = run.ID
+	fields["actor"] = run.Actor
+	return fields
 }
 
 // runRefName is `github.ref_name`: the tag name for a tag push ("v1.2.3" out

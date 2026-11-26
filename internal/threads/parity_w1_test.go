@@ -151,7 +151,6 @@ func TestEvalIfFunctions(t *testing.T) {
 		"format()",
 		"github.head_ref == 'x'",
 		"secrets.1BAD == 'x'",
-		"vars.X == 'x'",
 	} {
 		if _, err := EvalIf(expr, ctx); err == nil {
 			t.Errorf("EvalIf(%q) accepted an unsupported expression", expr)

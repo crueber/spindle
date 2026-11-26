@@ -24,6 +24,20 @@ import (
 	"time"
 )
 
+// a11yThreadsWorkflow is the Threads fixture: a push run whose job targets the
+// `production` environment the harness creates (reviewer + wait timer), so the
+// run is created pending_approval and the new pending-deployment surfaces
+// render for the floor's probes.
+const a11yThreadsWorkflow = `name: Deploy
+on: [push]
+jobs:
+  ship:
+    runs-on: linux
+    environment: production
+    steps:
+      - run: echo deploying
+`
+
 // a11yViewport is one viewport the page set is checked at. The narrow one is
 // AGENTS.md §2's ~390 px mobile check; the desktop one catches controls that are
 // hidden (and therefore unnamed) only at small widths.
@@ -228,6 +242,9 @@ func TestA11yPreflight(t *testing.T) {
 	if os.Getenv("SPINDLE_A11Y") != "1" {
 		t.Skip("a11y smoke is opt-in locally: make a11y; CI sets SPINDLE_A11Y=1")
 	}
+	if cdpEndpoint() != "" {
+		return // an operator-supplied CDP endpoint is the browser
+	}
 	bin, err := findChromium()
 	if err != nil {
 		t.Fatalf("SPINDLE_A11Y=1 requires a browser: %v", err)
@@ -270,6 +287,36 @@ func TestA11yRenderedPages(t *testing.T) {
 	g.run(work, "push", "origin", "refs/tags/v1")
 	mustAPI(t, "PUT", repoLane+"/releases/v1", `{"name":"v1","body":"first release"}`, adminTok)
 
+	// Threads (PAR-135): an environment with a reviewer AND a wait timer, and a
+	// workflow that names it, so the run list renders the held-deployment badge
+	// and the run page renders the approval banner (who, what and until when).
+	// The reviewer must hold write in the repository (the save-time rule), so
+	// the fixture grants alice maintain.
+	acl := mustAPI(t, "GET", repoLane+"/access", "", adminTok)
+	ver, _ := acl["version"].(float64)
+	mustAPI(t, "PUT", repoLane+"/access", fmt.Sprintf(
+		`{"version":%d,"visibility":"public","role_bindings":[{"subject":"user:alice","role":"maintain"}]}`,
+		int(ver)), adminTok)
+	mustAPI(t, "PUT", repoLane+"/threads/environments/production",
+		`{"required_reviewers":["alice"],"wait_timer_seconds":600}`, adminTok)
+	// The fixture is on the feature branch; the workflow must land on main.
+	g.run(work, "checkout", "main")
+	g.commitFile(work, ".spindle/workflows/ci.yml", a11yThreadsWorkflow, "threads workflow")
+	g.run(work, "push", "origin", "main")
+	var threadRunID string
+	pollUntil(t, 60*time.Second, "the held Threads run", func() bool {
+		res := mustAPI(t, "GET", repoLane+"/threads?n=5", "", adminTok)
+		runs, _ := res["runs"].([]any)
+		for _, r := range runs {
+			m, _ := r.(map[string]any)
+			if m["state"] == "pending_approval" {
+				threadRunID, _ = m["id"].(string)
+				return threadRunID != ""
+			}
+		}
+		return false
+	})
+
 	// ---- browser: sign in as an admin through the stub IdP -------------------
 	base := fmt.Sprintf("http://walgit.localhost:%d", s.port)
 	b := launchBrowser(t)
@@ -305,6 +352,9 @@ func TestA11yRenderedPages(t *testing.T) {
 		// span and masthead search box the rendered floor covers.
 		{"repo search", "/" + owner + "/" + repo + "/search?q=fixture"},
 		{"owner search", "/search?owner=" + owner + "&q=fixture&type=code"},
+		{"threads", "/" + owner + "/" + repo + "/threads"},
+		{"thread run (held deployment)", "/" + owner + "/" + repo + "/threads/" + threadRunID},
+		{"repo settings environments", "/" + owner + "/" + repo + "/settings/environments"},
 		{"admin", "/admin"},
 		{"admin config", "/admin/config"},
 	}

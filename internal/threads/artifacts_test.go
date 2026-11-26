@@ -236,11 +236,19 @@ func TestArtifactRetentionShortensNeverExtends(t *testing.T) {
 	if !got.Equal(want) {
 		t.Fatalf("expiry = %s, want %s", got, want)
 	}
-	// A retention-days longer than the run's window does NOT extend it.
+	// PAR-158: the artifact windows are separate from the run window. A
+	// retention-days LONGER than the run's window belongs to the artifact and
+	// lets it outlive the run (the run is reclaimed at 30 days, the artifact at
+	// its own 90).
 	long := e.finalizeArtifactNamed(t, claims, "long", 90)
+	longCreated, _ := time.Parse(dateTimeFmt, long.CreatedAt)
 	gotLong, _ := time.Parse(dateTimeFmt, long.ExpiresAt)
-	if gotLong.After(runExpiry(run, e.svc.retention())) {
-		t.Fatalf("retention-days extended the run window: %s > %s", gotLong, runExpiry(run, e.svc.retention()))
+	wantLong := longCreated.Add(90 * 24 * time.Hour)
+	if !gotLong.Equal(wantLong) {
+		t.Fatalf("long expiry = %s, want %s", gotLong, wantLong)
+	}
+	if !gotLong.After(runExpiry(run, e.svc.retention())) {
+		t.Fatalf("a 90-day artifact window did not outlive the 30-day run window")
 	}
 	// The expired short artifact is 404 to a reader and absent from the list,
 	// even before GC frees its bytes.
@@ -405,8 +413,9 @@ func TestArtifactGCReclaimsBlobsAndList(t *testing.T) {
 		t.Fatalf("artifacts after short expiry = %v", left)
 	}
 
-	// Deleting the run reclaims its remaining artifact: no manifest, no blob
-	// under the run's artifact prefix.
+	// PAR-158: the run window and the artifact window are SEPARATE. Deleting
+	// the run while the remaining artifact's own window is still open keeps
+	// its manifest and blobs (the expiry row reclaims them later).
 	if _, err := e.svc.deleteRun(ctx(), "o", "r", run.ID); err != nil {
 		t.Fatalf("deleteRun: %v", err)
 	}
@@ -415,14 +424,27 @@ func TestArtifactGCReclaimsBlobsAndList(t *testing.T) {
 		keys = append(keys, m.Key)
 		return nil
 	})
-	if len(keys) != 0 {
-		t.Fatalf("blobs survived the run delete: %v", keys)
+	if len(keys) == 0 {
+		t.Fatalf("an artifact inside its own window was reclaimed with the run")
 	}
 	_ = short
-	// And the expiry index drops stale rows on the next pass.
+	// When the artifact's window closes, the expiry row reclaims the bytes and
+	// reports them under the artifact family.
+	e.advance(31 * 24 * time.Hour)
 	res = &GCResult{}
-	if err := e.svc.expireArtifacts(ctx(), "o", "r", e.now.Add(48*time.Hour), res); err != nil {
+	if err := e.svc.expireArtifacts(ctx(), "o", "r", e.now, res); err != nil {
 		t.Fatalf("second expire: %v", err)
+	}
+	if res.ArtifactsDeleted != 1 || res.ArtifactBytes == 0 {
+		t.Fatalf("outliving artifact was not reclaimed at its own expiry: %+v", res)
+	}
+	keys = nil
+	_ = e.svc.Store.List(ctx(), ArtifactPrefix("o", "r", run.ID), "", func(m store.ObjectMeta) error {
+		keys = append(keys, m.Key)
+		return nil
+	})
+	if len(keys) != 0 {
+		t.Fatalf("blobs survived their own window: %v", keys)
 	}
 }
 
@@ -577,7 +599,7 @@ func TestArtifactServiceErrorBranches(t *testing.T) {
 	if artifactExpired(bad, e.now) {
 		t.Fatal("an unparseable created_at expired")
 	}
-	if artifactExpiresAt(run, bad, time.Hour, e.now).IsZero() {
+	if artifactExpiresAt(run, bad, time.Hour, time.Hour, e.now).IsZero() {
 		t.Fatal("artifactExpiresAt returned the zero time")
 	}
 	// humanBytes covers all four unit bands.

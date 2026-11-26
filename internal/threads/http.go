@@ -28,12 +28,17 @@ var ExposedTemplates = []string{
 	"/{owner}/{repo}/api/threads/{run}",
 	"/{owner}/{repo}/api/threads/{run}/cancel",
 	"/{owner}/{repo}/api/threads/{run}/rerun",
+	"/{owner}/{repo}/api/threads/{run}/rerun-failed",
 	"/{owner}/{repo}/api/threads/{run}/approve",
 	"/{owner}/{repo}/api/threads/{run}/deny",
 	"/{owner}/{repo}/api/threads/{run}/jobs/{job}/log",
 	"/{owner}/{repo}/api/threads/{run}/artifacts",
 	"/{owner}/{repo}/api/threads/secrets",
 	"/{owner}/{repo}/api/threads/secrets/{name}",
+	"/{owner}/{repo}/api/threads/variables",
+	"/{owner}/{repo}/api/threads/variables/{name}",
+	"/api/v1/orgs/{org}/threads/variables",
+	"/api/v1/orgs/{org}/threads/variables/{name}",
 	"/{owner}/{repo}/api/threads/environments",
 	"/{owner}/{repo}/api/threads/environments/{name}",
 	"/{owner}/{repo}/api/threads/environments/{name}/secrets",
@@ -89,6 +94,11 @@ func (h *Handler) Handle(w http.ResponseWriter, r *http.Request) bool {
 	// The runner protocol is top-level (/api/v1/threads/…): runners are
 	// infrastructure, not users, so their paths are not repo-scoped.
 	if segs[0] == "api" || segs[0] == "api-browser" {
+		// Organization variables (PAR-035) are owner-scoped, not repo-scoped:
+		// /api[-browser]/v1/orgs/{org}/threads/variables[/{name}].
+		if len(segs) >= 6 && segs[1] == "v1" && segs[2] == "orgs" && segs[4] == "threads" && segs[5] == "variables" {
+			return h.handleOrgVariables(w, r, segs[3], segs[6:])
+		}
 		if len(segs) >= 4 && segs[1] == "v1" && segs[2] == "admin" && segs[3] == "runners" {
 			// The instance runner fleet is a HOST-ADMIN surface, not a repo
 			// lane: /api[-browser]/v1/admin/runners[/*] (both lanes, like every
@@ -265,6 +275,20 @@ func (h *Handler) handleRepo(w http.ResponseWriter, r *http.Request, repo string
 			methodNotAllowed(w, "PUT", "DELETE")
 		}
 		return true
+	case rest[0] == "variables":
+		switch {
+		case len(rest) == 1 && r.Method == http.MethodGet:
+			h.listVariables(w, r, repo)
+		case len(rest) == 2 && r.Method == http.MethodPut:
+			h.putVariable(w, r, repo, rest[1])
+		case len(rest) == 2 && r.Method == http.MethodDelete:
+			h.deleteVariable(w, r, repo, rest[1])
+		case len(rest) == 1:
+			methodNotAllowed(w, "GET")
+		default:
+			methodNotAllowed(w, "PUT", "DELETE")
+		}
+		return true
 	case rest[0] == "environments":
 		h.environments(w, r, repo, rest[1:])
 		return true
@@ -281,6 +305,13 @@ func (h *Handler) handleRepo(w http.ResponseWriter, r *http.Request, repo string
 			return true
 		}
 		h.rerunRun(w, r, repo, rest[0])
+		return true
+	case len(rest) == 2 && rest[1] == "rerun-failed":
+		if r.Method != http.MethodPost {
+			methodNotAllowed(w, "POST")
+			return true
+		}
+		h.rerunFailedRun(w, r, repo, rest[0])
 		return true
 	case len(rest) == 2 && (rest[1] == "approve" || rest[1] == "deny"):
 		if r.Method != http.MethodPost {

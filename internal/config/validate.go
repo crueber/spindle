@@ -113,10 +113,38 @@ func checkEventSinks(c *Config) []error {
 // checkThreads (15_threads.md §8): the retention window must be a real window
 // (a negative value would delete everything the pass can see) and the default
 // job permission must be one of the two levels a token can be scoped to.
+//
+// PAR-179 bounds, with the same numbers the Threads retention pass enforces:
+// the run/log and artifact windows are 1 day…1 year (a 90-day setting is the
+// documented parity case; keep_forever is the unbounded spelling), a requeue
+// ceiling is 1…20, and the base job lease is 5m…30m (the effective lease is
+// capped at 30m because log frames renew it).
+const (
+	threadsMinRetention     = 24 * time.Hour
+	threadsMaxRetention     = 365 * 24 * time.Hour
+	threadsMaxQueueAttempts = 20
+	threadsMinJobLease      = 5 * time.Minute
+	threadsMaxJobLease      = 30 * time.Minute
+)
+
 func checkThreads(c *Config) []error {
 	var errs []error
 	if time.Duration(c.Threads.Retention) < 0 {
 		errs = append(errs, fmt.Errorf("threads.retention must not be negative (got %s); leave it unset for the 30d default", time.Duration(c.Threads.Retention)))
+	} else if r := time.Duration(c.Threads.Retention); r > 0 && (r < threadsMinRetention || r > threadsMaxRetention) {
+		errs = append(errs, fmt.Errorf("threads.retention must be between %s and %s (got %s); use threads.keep_forever for an unbounded window",
+			threadsMinRetention, threadsMaxRetention, r))
+	}
+	if r := time.Duration(c.Threads.ArtifactRetention); r != 0 && (r < threadsMinRetention || r > threadsMaxRetention) {
+		errs = append(errs, fmt.Errorf("threads.artifact_retention must be between %s and %s (got %s), or unset to follow threads.retention",
+			threadsMinRetention, threadsMaxRetention, r))
+	}
+	if n := c.Threads.MaxQueueAttempts; n < 0 || n > threadsMaxQueueAttempts {
+		errs = append(errs, fmt.Errorf("threads.max_queue_attempts must be 1…%d (got %d)", threadsMaxQueueAttempts, n))
+	}
+	if l := time.Duration(c.Threads.JobLease); l != 0 && (l < threadsMinJobLease || l > threadsMaxJobLease) {
+		errs = append(errs, fmt.Errorf("threads.job_lease must be between %s and %s (got %s)",
+			threadsMinJobLease, threadsMaxJobLease, l))
 	}
 	switch strings.ToLower(strings.TrimSpace(c.Threads.DefaultPermissions)) {
 	case "", "read", "write":

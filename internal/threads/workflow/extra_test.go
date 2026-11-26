@@ -54,8 +54,8 @@ func TestGlobMatchEdges(t *testing.T) {
 		{"a*b*c", "ayybyyc", true},
 	}
 	for _, tc := range cases {
-		if got := globMatch(tc.pattern, tc.s); got != tc.want {
-			t.Errorf("globMatch(%q,%q) = %v, want %v", tc.pattern, tc.s, got, tc.want)
+		if got := testGlob(tc.pattern, tc.s); got != tc.want {
+			t.Errorf("testGlob(%q,%q) = %v, want %v", tc.pattern, tc.s, got, tc.want)
 		}
 	}
 }

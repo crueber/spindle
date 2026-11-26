@@ -194,12 +194,15 @@ type Options struct {
 	LiveImport *config.LiveImport
 }
 
-// PushedRef is one ref that landed in a client push. Ref is the full ref name
+// PushedRef is one ref that landed in a client push. Old is the pre-image oid
+// (the zero oid for a new ref) so a path-filtered trigger can diff the push;
+// Ref is the full ref name
 // ("refs/heads/main"); New is the new commit sha (all-zero for a delete — the
 // hook decides whether a delete is interesting; Threads does not create runs
 // for one). It is a value copy, safe to hand to a goroutine.
 type PushedRef struct {
 	Ref string
+	Old string
 	New string
 }
 

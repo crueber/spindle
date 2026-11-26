@@ -21,13 +21,17 @@ func buildSpec(wfName string, wf *workflow.Workflow, def workflow.Job, inputs ma
 		TimeoutMinutes:  def.TimeoutMinutes,
 		ContinueOnError: def.ContinueOnError,
 		Permissions:     mergePermissions(wf.Permissions, def.Permissions),
-		Strategy:        strategySpec(def.Strategy),
-		Concurrency:     concurrencySpec(wf, def),
-		Uses:            strings.TrimSpace(def.Uses),
-		With:            nonNilMap(def.With),
-		Inputs:          nonNilMap(inputs),
-		Outputs:         nonNilMap(def.Outputs),
-		Steps:           stepSpecs(def.Steps),
+		// The Forgejo OIDC key is a grant: workflow or job may set it, and a
+		// job cannot turn the workflow's grant off with a boolean (`permissions:
+		// id-token: none` is the denial spelling).
+		EnableOpenIDConnect: def.EnableOpenIDConnect || (wf != nil && wf.EnableOpenIDConnect),
+		Strategy:            strategySpec(def.Strategy),
+		Concurrency:         concurrencySpec(wf, def),
+		Uses:                strings.TrimSpace(def.Uses),
+		With:                nonNilMap(def.With),
+		Inputs:              nonNilMap(inputs),
+		Outputs:             nonNilMap(def.Outputs),
+		Steps:               stepSpecs(def.Steps),
 	}
 	if def.Environment != nil {
 		spec.Environment = &EnvironmentSpec{
@@ -136,13 +140,21 @@ func serviceSpecs(in map[string]workflow.Service) map[string]ServiceSpec {
 			Image:      svc.Image,
 			Env:        nonNilMap(svc.Env),
 			Ports:      nonNilStr(svc.Ports),
-			Command:    nonNilStr(svc.Command),
+			Command:    serviceCommand(svc),
 			Entrypoint: nonNilStr(svc.Entrypoint),
 			Options:    svc.Options,
 			Volumes:    nonNilStr(svc.Volumes),
 		}
 	}
 	return out
+}
+
+// serviceCommand merges the `command`/`cmd` spellings (command wins).
+func serviceCommand(svc workflow.Service) []string {
+	if len(svc.Command) > 0 {
+		return nonNilStr(svc.Command)
+	}
+	return nonNilStr(svc.Cmd)
 }
 
 // stepSpecs copies every step field a runner must execute.

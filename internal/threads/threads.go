@@ -146,6 +146,30 @@ type Service struct {
 	// restricted builds) records nothing. A failure is logged, never fatal: the
 	// mutation is committed and must not be reverted by an audit outage.
 	Audit func(ctx context.Context, actor, action, target, detail string) error
+	// TeamRoster resolves an organization team to its member principals
+	// (environment team reviewers, PAR-131). Identity satisfies it through
+	// composition; nil means a record naming team reviewers is refused at save
+	// and fails closed at creation (a hold nobody could release).
+	TeamRoster TeamRoster
+	// NotifyDeployment delivers the pending-deployment notice to a held
+	// environment's reviewers (PAR-135). Composition translates it onto
+	// internal/notify; nil records nothing and never blocks the hold.
+	NotifyDeployment func(ctx context.Context, ev DeploymentNotice)
+	// MaxQueueAttempts is the job-requeue ceiling (threads.max_queue_attempts;
+	// 0 selects MaxQueueAttempts).
+	MaxQueueAttempts int
+	// JobLease is the base claim lease (threads.job_lease; 0 selects 15m). A
+	// job's own timeout adds its grace window, and the lease is capped at 30m.
+	JobLease time.Duration
+	// ArtifactRetention is the artifact window (threads.artifact_retention; 0
+	// selects the run window). A longer value lets artifacts outlive their run.
+	ArtifactRetention time.Duration
+	// KeepForever disables run/log/artifact reclamation (threads.keep_forever).
+	KeepForever bool
+	// OrgAdmin enforces organization ownership for the org-variable API
+	// (identity.Service.CheckOrgOwner's shape). Nil makes an org-variable write
+	// unavailable except to a host admin; composition binds it.
+	OrgAdmin func(ctx context.Context, org string, p auth.Principal) *auth.AuthError
 
 	// runnerSweep gates the instance runner family's retention: the family is
 	// instance-wide, so one process-wide hourly gate keeps the per-repository
@@ -265,6 +289,15 @@ func (s *Service) roleOf(ctx context.Context, owner, repo string, p auth.Princip
 func (s *Service) requireRole(ctx context.Context, owner, repo string, p auth.Principal, want string) error {
 	if p.Admin {
 		return nil
+	}
+	// A Threads job token is never an operator of Threads (PAR-112, D-11):
+	// dispatching a run, cancelling/rerunning one, approving, or managing
+	// environments/secrets are the `actions: write` / maintain / admin
+	// capabilities, none of which the scope vocabulary grants (all are refused
+	// by name). Without this a `contents: write` job could dispatch its own
+	// workflow and route around the job-push suppression rule.
+	if p.JobRepo != "" {
+		return fmt.Errorf("%w: a job token cannot act on the Threads operator surface", ErrForbidden)
 	}
 	if roleRank(s.roleOf(ctx, owner, repo, p)) >= roleRank(want) {
 		return nil

@@ -7,7 +7,7 @@ Source of truth: [`parity.json`](parity.json) (one row per `PAR-` id). The plan 
 [`21_parity_master.md`](../21_parity_master.md). Regenerate with
 `go run ./internal/devtools/paritygate -check=false`; gate with `make parity`.
 
-**119 rows** — 21 have · 49 partial · 49 missing · 0 non-goal.
+**119 rows** — 45 have · 37 partial · 37 missing · 0 non-goal.
 A `have` row is green only because its acceptance test is committed and named here;
 the gate fails a green row whose test is missing from the tree.
 
@@ -26,18 +26,18 @@ the gate fails a green row whose test is missing from the tree.
 |---|---|---|---|---|---|---|
 | PAR-010 | `on.push.tags` fires on tag pushes (`refs/tags/*`) with tag globs and `GITHUB_REF=refs/tags/X` | have | 1 | T1 |  | `TestPushTagSemantics`<br>`TestPushRefKindSelectsTrigger`<br>`TestTagRunRecordsRefAndNoBranch`<br>`TestParityCorpusTriggerSemantics` |
 | PAR-011 | A tags-only trigger stops matching every branch push | have | 1 | T1 |  | `TestPushTagSemantics`<br>`TestPushRefKindSelectsTrigger`<br>`TestParityCorpusTriggerSemantics` |
-| PAR-012 | `on.push.paths` / `paths-ignore` (and `pull_request.paths`) with `**`, ANDed with `branches` | missing | 2 | T1+T3 |  | — |
-| PAR-013 | Filter glob dialect: `*`, `**`, `?`, `+`, ordered `!` negation, `branches-ignore`/`tags-ignore` | partial | 2 | T1 |  | — |
-| PAR-014 | Full `pull_request.types` vocabulary and its emitters (closed, labeled, ready_for_review, review_requested, …) | partial | 2 | T3 |  | — |
+| PAR-012 | `on.push.paths` / `paths-ignore` (and `pull_request.paths`) with `**`, ANDed with `branches` | have | 2 | T1+T3 |  | `TestPushPathsFilterAndBudget`<br>`TestPullRequestPathsFilterUsesMergeBase` |
+| PAR-013 | Filter glob dialect: `*`, `**`, `?`, `+`, ordered `!` negation, `branches-ignore`/`tags-ignore` | have | 2 | T1 |  | `TestFilterDialect`<br>`TestFilterOrderedNegation`<br>`TestFilterParseErrors`<br>`TestPushPathsFilter` |
+| PAR-014 | Full `pull_request.types` vocabulary and its emitters (closed, labeled, ready_for_review, review_requested, …) | have | 2 | T3 |  | `TestPullRequestTypesMatrix`<br>`TestPullEventsOpenedSynchronizeReopened`<br>`TestPullEventsDraftAndEditEdges`<br>`TestPullEventsClosedOnMerge`<br>`TestThreadEventsCoverIssueEdges` |
 | PAR-015 | `pull_request_target`: base-tip file, base secrets, write token, head fetchable | missing · D-2 | 2 | T3 | S5 | — |
 | PAR-016 | `merge_group` trigger wired to the merge-queue card (no queue semantics here) | missing | 3 | T3 |  | — |
-| PAR-017 | `release` trigger (created/published/edited/deleted/prereleased/released) with `event.release.*` | missing | 2 | T3 |  | — |
+| PAR-017 | `release` trigger (created/published/edited/deleted/prereleased/released) with `event.release.*` | have | 2 | T3 |  | `TestReleaseEventsEmitDocumentedActions` |
 | PAR-018 | `repository_dispatch` with `types` + `client_payload`, reachable from API/CLI/scoped token | missing | 3 | T3 | S10 | — |
 | PAR-019 | `workflow_run` (workflows/types/branches filters, upstream run + artifacts) with the untrusted-trigger rule | missing · D-3 | 3 | T3 | S7 | — |
-| PAR-020 | `issues`, `issue_comment`, `pull_request_review`(+`_comment`), `label`, `milestone`, `discussion`(+`_comment`) | missing | 2 | T3 |  | — |
+| PAR-020 | `issues`, `issue_comment`, `pull_request_review`(+`_comment`), `label`, `milestone`, `discussion`(+`_comment`) | partial | 2 | T3 |  | — |
 | PAR-021 | Repository/check/deploy triggers: create/delete, fork, watch, status, check_run/check_suite, deployment(+_status), registry_package, gollum, page_build, branch_protection_rule, public | missing | 3 | T3 |  | — |
-| PAR-022 | Cron parity: names, `@daily`-family macros, `L`/`W`/`#`, per-entry `timezone:` with the DST rule; non-default-branch schedules ignored | partial | 2 | T1 |  | — |
-| PAR-023 | Dispatch input types `environment` and `number` plus the `github.event.inputs.*` alias | partial | 2 | T1+T6 |  | — |
+| PAR-022 | Cron parity: names, `@daily`-family macros, `L`/`W`/`#`, per-entry `timezone:` with the DST rule; non-default-branch schedules ignored | have | 2 | T1 |  | `TestCronMacrosAndNames`<br>`TestCronLastNearestAndNth`<br>`TestCronTimezoneDST`<br>`TestSweepScheduleSkipsDisabledAndUnscheduledFiles` |
+| PAR-023 | Dispatch input types `environment` and `number` plus the `github.event.inputs.*` alias | have | 2 | T1+T6 |  | `TestDispatchInputTypesExtended`<br>`TestThreadDispatchEnvironmentPicker`<br>`TestDispatchInputsTypesDefaultsAndRecording` |
 | PAR-024 | PR merge-ref semantics: the simulated merge commit (`refs/pull/N/merge`) is what runs | missing | 3 | T3 | S13 | — |
 
 ## expressions
@@ -47,9 +47,9 @@ the gate fails a green row whose test is missing from the tree.
 | PAR-030 | `${{ }}` in every documented site: run, with, env, name, if, shell, working-directory, runs-on, container.*, services.*, environment, defaults, outputs, concurrency | partial | 1 | T1 | S3 | `TestSubstituteGitHubInEverySite`<br>`TestSubstituteEnvLayers`<br>`TestSubstituteMatrixAndInputs`<br>`TestSubstituteStepAndNeedsOutputs`<br>`TestStepIfReadsActorAndSecret`<br>`TestSubstituteIsOnePass`<br>`TestSubstituteInCompositeAction`<br>`TestSubstituteRejectsAMalformedSpan`<br>`TestSubstitutionSites` |
 | PAR-031 | `secrets.*` as an expression, empty (never literal) on an untrusted run | have | 1 | T1 | S3 S13 | `TestSecretsReferences`<br>`TestSecretsGitHubTokenResolvesByName`<br>`TestRepositorySecretResolvesByNameOnly`<br>`TestEmbeddedSecretReferenceIsSplicedAndMasked`<br>`TestMaskCoversTheJobToken`<br>`TestSubstitutedSecretIsMaskedInTheLog`<br>`TestSubstituteIsOnePass`<br>`TestEnvironmentForkRunNeverGetsSecrets` |
 | PAR-032 | `github`/`forgejo`/`forge` contexts: full documented field set, identical values; identity/ref fields (actor, actor_id, triggering_actor, ref_type, ref_protected, head_ref, base_ref, run_number, run_attempt, workflow_ref, workflow_sha, action_path, action_ref, repository_owner(+_id)) | partial | 1 | T1 |  | `TestGitHubContextFields`<br>`TestServerAddressFieldsAreInTheClosedSet`<br>`TestTagRunJobIfSeesTheTag` |
-| PAR-033 | `github.event` payload + `GITHUB_EVENT_PATH`/`FORGEJO_EVENT_PATH` JSON | missing | 2 | T1 |  | — |
-| PAR-034 | `runner` context and `RUNNER_OS/ARCH/NAME/TEMP/TOOL_CACHE/ENVIRONMENT/DEBUG` | missing | 2 | T2 |  | — |
-| PAR-035 | `vars` context with repository/organization/user/environment variables, documented precedence, reserved-name refusal | missing | 2 | T3 |  | — |
+| PAR-033 | `github.event` payload + `GITHUB_EVENT_PATH`/`FORGEJO_EVENT_PATH` JSON | have | 2 | T1 |  | `TestEventPayloadProjection`<br>`TestExecuteWritesEventFile`<br>`TestPlanEventRunnerAndVarsContexts` |
+| PAR-034 | `runner` context and `RUNNER_OS/ARCH/NAME/TEMP/TOOL_CACHE/ENVIRONMENT/DEBUG` | have | 2 | T2 |  | `TestPlanEventRunnerAndVarsContexts`<br>`TestExecuteWritesEventFile` |
+| PAR-035 | `vars` context with repository/organization/user/environment variables, documented precedence, reserved-name refusal | have | 2 | T3 |  | `TestVariablesScopeAndSecrecy`<br>`TestPlanEventRunnerAndVarsContexts` |
 | PAR-036 | `env` context in expressions (workflow → job → container → step layering, visible to `if:`) | have | 2 | T1 |  | `TestStepIfReadsTheLayeredEnv`<br>`TestSubstituteEnvLayers`<br>`TestSubstituteGitHubInEverySite` |
 | PAR-037 | Expression functions: contains, startsWith, endsWith, format, join, toJSON, fromJSON, hashFiles, case | have | 1 | T1 |  | `TestEvalIfFunctions`<br>`TestEvalIfFunctionEdges`<br>`TestSubstitutionSites`<br>`TestValidateIf` |
 | PAR-038 | Operators: loose cross-type equality, `<`/`<=`/`>`/`>=`, `[ ]` index, property access, `*`/object filters, value-returning logical and/or (the operand, not a boolean) | partial | 2 | T1 |  | — |
@@ -70,7 +70,7 @@ the gate fails a green row whose test is missing from the tree.
 | PAR-056 | `continue-on-error` as an expression, and the Forgejo divergence recorded (D-4) | partial · D-4 | 1 | T1 |  | `TestContinueOnErrorJobKeepsTheRunGreen`<br>`TestContinueOnErrorDependentRuns`<br>`TestDependencyResultToleratesOnlyAFailedToleratedJob` |
 | PAR-057 | `run-name` (expression-valued run title) | missing | 4 | T6 |  | — |
 | PAR-058 | Job `if:` may read `secrets` and `vars`; an untrusted run reads an empty secrets context | missing | 2 | T1 | S13 | — |
-| PAR-059 | Re-run failed jobs only, preserving successful jobs and their checks | missing | 2 | T3 |  | — |
+| PAR-059 | Re-run failed jobs only, preserving successful jobs and their checks | have | 2 | T3 |  | `TestRerunFailedOnlyPreservesSuccessfulJobs`<br>`TestRerunFailedRefusesAGreenRun`<br>`TestFailedRerunSelection` |
 
 ## steps
 
@@ -80,12 +80,12 @@ the gate fails a green row whose test is missing from the tree.
 | PAR-071 | JavaScript actions (`runs.using: node20` / `node24`): `INPUT_*`, `GITHUB_OUTPUT`/`GITHUB_STATE`, pre/post hooks with pre-if/post-if | missing | 2 | T4 | S1 | — |
 | PAR-072 | Docker/Dockerfile actions: no `action.yml`, `runs.args`, `with.args`/`with.entrypoint`; `docker://` args parity | partial | 2 | T4 | S12 | — |
 | PAR-073 | `actions/checkout` full input set: ref, repository, path, fetch-depth, fetch-tags, submodules, token, persist-credentials, clean, sparse-checkout | have | 1 | T2 | S10 | `TestCheckoutInputArgv`<br>`TestCheckoutOptionsParse`<br>`TestBuildPlanCheckoutRefusesAnUnsupportedInput`<br>`TestCheckoutScriptRunsThePinnedArgvUnderARealShell` |
-| PAR-074 | Composite parity: `${{ inputs.* }}`, `github.action_path`, nested remote `uses:`, per-step env layering, output threading | partial | 2 | T4 |  | — |
-| PAR-075 | Reusable workflows, local: `on.workflow_call` (typed inputs, secrets, outputs) + `jobs.<id>.uses`/`with`/`secrets:` | missing | 2 | T3 | S8 | — |
+| PAR-074 | Composite parity: `${{ inputs.* }}`, `github.action_path`, nested remote `uses:`, per-step env layering, output threading | partial | 2 | T4 |  | `TestExecuteCompositeAction`<br>`TestExecuteCompositeIfAndFailure`<br>`TestExecuteCompositeContinueOnError`<br>`TestResolveStepHandlesEverySubstitutionSite` |
+| PAR-075 | Reusable workflows, local: `on.workflow_call` (typed inputs, secrets, outputs) + `jobs.<id>.uses`/`with`/`secrets:` | partial · D-6 | 2 | T3 | S8 | `TestLocalReusableWorkflowExpandsJobs`<br>`TestLocalReusableWorkflowNested`<br>`TestReusableCallerRefusals`<br>`TestE2E_ThreadsWave2RunnerSurfaces` |
 | PAR-076 | Reusable workflows, cross-repo/remote: SHA-pinned resolution, explicit secrets only, 10-level cap | missing · D-6 | 3 | T3 | S8 | — |
 | PAR-077 | `container` keys applied, not inert: credentials, ports, init, tty, entrypoint, command | partial | 3 | T2 | S12 | — |
-| PAR-078 | `services.<id>` parity: Forgejo's `cmd` spelling, credentials, `--health-*` options and readiness gating | partial | 2 | T2 |  | — |
-| PAR-079 | `steps[*].shell` as an arbitrary command with `{0}`; `node`/`python` aliases; bash→sh fallback | partial | 2 | T2 |  | — |
+| PAR-078 | `services.<id>` parity: Forgejo's `cmd` spelling, credentials, `--health-*` options and readiness gating | partial | 2 | T2 |  | `TestServiceHealthOptionsReachDockerCreate`<br>`TestServiceHealthRefusals`<br>`TestServiceUnhealthyFailsTheJob`<br>`TestServiceReadinessTimeoutNamesTheService`<br>`TestE2E_ThreadsWave2RunnerSurfaces` |
+| PAR-079 | `steps[*].shell` as an arbitrary command with `{0}`; `node`/`python` aliases; bash→sh fallback | have | 2 | T2 |  | `TestBuildPlanDefaultImageAndShells`<br>`TestCustomShellWritesTheScriptFile`<br>`TestBashFallsBackToSh`<br>`TestCustomShellWithoutPlaceholderIsRefused` |
 | PAR-080 | Step `background`/`wait`/`wait-all`/`cancel`/`parallel` (new keys) — or an approved non-goal (D-7) | missing · D-7 | 3 | T2 |  | — |
 | PAR-081 | Docker-in-job: daemonless builders documented as the parity path; optional runner-level daemon/privilege grant | partial · D-8 | 2 | T2 | S2 | — |
 | PAR-082 | Built-in action surface verify-and-close (`docker://` never receives secrets or the job token; digest policy) | have (1V) | 1 | T7 | S13 | `TestBuildPlanDockerActionArgv`<br>`TestExecuteForkDockerActionGetsNoSecrets`<br>`TestBuildPlanActionImagePolicy`<br>`TestBuildPlanRequireDigest`<br>`TestImagePolicyRequireDigest` |
@@ -96,9 +96,9 @@ the gate fails a green row whose test is missing from the tree.
 |---|---|---|---|---|---|---|
 | PAR-090 | `$GITHUB_ENV`/`$FORGEJO_ENV`: later steps only, heredoc, caps, protected-name refusal | have | 1 | T2 | S4 | `TestParseEnvFile`<br>`TestApplyCommandFiles`<br>`TestExecuteCommandFilesAffectLaterStepsOnly`<br>`TestExecuteCommandFileRefusalFailsTheStep` |
 | PAR-091 | `$GITHUB_PATH`/`$FORGEJO_PATH` | have | 1 | T2 | S4 | `TestParsePathFile`<br>`TestApplyCommandFiles` |
-| PAR-092 | `$GITHUB_STEP_SUMMARY` (1 MiB/step, sanitized markdown) and `$GITHUB_STATE` for pre/post | missing | 2 | T2 | S4 S15 | — |
-| PAR-093 | Workflow commands: `::error`/`::warning`/`::notice` with file/line/col/title, `::group::`/`::endgroup::`, `::add-mask::`, `::stop-commands::`, `::set-output` if honoured | missing | 2 | T2 | S15 | — |
-| PAR-094 | `$GITHUB_OUTPUT` heredoc, caps and collision rules (last wins; malformed line is a named failure) | partial | 2 | T2 |  | — |
+| PAR-092 | `$GITHUB_STEP_SUMMARY` (1 MiB/step, sanitized markdown) and `$GITHUB_STATE` for pre/post | partial | 2 | T2 | S4 S15 | `TestJobSummaryCaps`<br>`TestCollectStepSummary`<br>`TestExecuteCollectsSummaryAndAnnotations`<br>`TestThreadRunPageRendersAnnotationsAndSummary`<br>`TestE2E_ThreadsWave2RunnerSurfaces` |
+| PAR-093 | Workflow commands: `::error`/`::warning`/`::notice` with file/line/col/title, `::group::`/`::endgroup::`, `::add-mask::`, `::stop-commands::`, `::set-output` if honoured | have | 2 | T2 | S15 | `TestParseWorkflowCommand`<br>`TestWorkflowCommandAnnotations`<br>`TestWorkflowCommandGroupsAndStop`<br>`TestWorkflowCommandAddMaskCannotUnmask`<br>`TestWorkflowCommandSetOutputAndUnsupported`<br>`TestWorkflowCommandCaps`<br>`TestCompleteStoresAnnotationsAndSummary`<br>`TestE2E_ThreadsWave2RunnerSurfaces` |
+| PAR-094 | `$GITHUB_OUTPUT` heredoc, caps and collision rules (last wins; malformed line is a named failure) | have | 2 | T2 |  | `TestParseOutputFile`<br>`TestParseOutputFileErrors`<br>`TestParseOutputFileCaps`<br>`TestExecuteStepOutputsFlow`<br>`TestExecuteSetOutputAliasMerges` |
 | PAR-095 | Cache service: key/restore-keys, branch and default-branch scope, `cache-hit`, eviction, size budget | missing · D-10 | 2 | T4 | S6 | — |
 | PAR-096 | `setup-*` cache integration (`cache: npm` / `pip` / `go`) on the cache service | missing | 2 | T4 | S6 | — |
 | PAR-097 | Artifact v4 inputs: overwrite, compression-level, include-hidden-files, pattern, merge-multiple, artifact-ids, 255-char names, no-name download-all | partial | 2 | T5 | S7 | — |
@@ -111,26 +111,26 @@ the gate fails a green row whose test is missing from the tree.
 |---|---|---|---|---|---|---|
 | PAR-110 | Automatic token aliases: `FORGEJO_TOKEN`/`GITHUB_TOKEN` in env, `secrets.GITHUB_TOKEN`, `forgejo.token` | have | 1 | T3 | S10 | `TestJobTokenAliasesReachEveryScriptStep`<br>`TestSecretsGitHubTokenResolvesByName`<br>`TestReservedTokenSecretCannotShadowTheJobToken`<br>`TestAuthoredTokenEnvBeatsTheAlias` |
 | PAR-111 | Server/API addresses: `GITHUB_SERVER_URL`, `GITHUB_API_URL`, `FORGEJO_SERVER_URL` env and `github.server_url`/`api_url`/`graphql_url`/`retention_days` | have | 1 | T3 |  | `TestServerURLsFromPayload`<br>`TestServerURLsFallBackToTheRunner`<br>`TestGitHubServerURLSubstitution`<br>`TestServerAddressFieldsAreInTheClosedSet` |
-| PAR-112 | Permission scopes: every documented scope drives a real capability or is refused by name | partial · D-12 | 2 | T3 | S10 | — |
-| PAR-113 | Job token as a scoped platform API credential (comment, label, release, package) | partial | 2 | T3 | S10 | — |
+| PAR-112 | Permission scopes: every documented scope drives a real capability or is refused by name | have | 2 | T3 | S10 | `TestPAR112PermissionScopeVocabulary`<br>`TestPAR112ScopeMatrixDrivesCapabilities` |
+| PAR-113 | Job token as a scoped platform API credential (comment, label, release, package) | have | 2 | T3 | S10 | `TestPAR113JobTokenScopedAPICredential`<br>`TestPAR113JobTokenExpiryAndRevocation`<br>`TestE2E_ThreadsJobTokenScopes` |
 | PAR-114 | Token default recorded: scoped + `contents: read`; Forgejo's implicit-write token is an approved divergence | have | 1 | T3 | S10 | `TestPAR114NoPermissionsDefaultsToContentsRead`<br>`TestJobPermissionsDefaults`<br>`TestForkRunCannotEscalate` |
 | PAR-115 | Organization and user secret scopes with documented precedence and repository policy | missing | 2 | T3 |  | — |
 | PAR-116 | Secret availability in `env`/`with`/`if`; fork runs empty; masking completeness (`::add-mask::`, annotations, summaries) | partial | 2 | T3 | S13 S15 | — |
 | PAR-117 | Non-secret `env` variables (repository/organization/environment) alongside environment secrets | missing | 2 | T3 |  | — |
 | PAR-118 | Fork token policy: per-repo send-write-tokens setting, `pull_request_target` trust split, first-run approval | partial · D-13 | 3 | T3 | S13 | — |
-| PAR-119 | OIDC enable-key parity: `enable-openid-connect: true` beside `permissions: id-token: write` | missing | 2 | T1 | S9 | — |
-| PAR-120 | OIDC claim and exchange parity: `iss`, PR `sub`, environment `sub`, `aud` default, `ref_protected`, `ref_type`, `job_workflow_ref`, `runner_environment`, `?audience=`, TTL, error shapes | partial | 2 | T3 | S9 | — |
+| PAR-119 | OIDC enable-key parity: `enable-openid-connect: true` beside `permissions: id-token: write` | have | 2 | T1 | S9 | `TestPAR119EnableOpenIDConnectKey`<br>`TestPAR119EnableOpenIDConnectMintsToken`<br>`TestPAR119ExplicitNoneBeatsEnableKey`<br>`TestPAR119EnableKeyNeverMintsForAFork` |
+| PAR-120 | OIDC claim and exchange parity: `iss`, PR `sub`, environment `sub`, `aud` default, `ref_protected`, `ref_type`, `job_workflow_ref`, `runner_environment`, `?audience=`, TTL, error shapes | have | 2 | T3 | S9 | `TestPAR120EnvironmentClaimAndSubject`<br>`TestPAR120AudienceQuerySpelling`<br>`TestPAR120TagRefTypeAndProtectedRef`<br>`TestPAR120BranchIsNotProtectedByATagRule`<br>`TestOIDCSameRepoPullRequestUsesPullRequestSubject` |
 
 ## environments
 
 | ID | Capability | Status | Wave | Track | Security | Tests |
 |---|---|---|---|---|---|---|
-| PAR-130 | `environment`/`environment.url` expression substitution (or a named parse error, never a literal bucket key) | missing | 2 | T1 |  | — |
-| PAR-131 | Protection parity: wait timer, ≤6 required reviewers, prevent-self-review, deployment branch/tag policy, team reviewers | partial | 2 | T3 |  | — |
+| PAR-130 | `environment`/`environment.url` expression substitution (or a named parse error, never a literal bucket key) | have | 2 | T1 |  | `TestEnvironmentExpressionInNameIsANamedParseError`<br>`TestParseEnvironmentShapes`<br>`TestEnvironmentDeploymentBranchPolicy` |
+| PAR-131 | Protection parity: wait timer, ≤6 required reviewers, prevent-self-review, deployment branch/tag policy, team reviewers | have | 2 | T3 |  | `TestEnvironmentProtectionRulesRoundTrip`<br>`TestEnvironmentEveryReviewerMustApprove`<br>`TestEnvironmentPreventSelfReviewRefusesTheActor`<br>`TestEnvironmentAdminApprovalBypassesTheSet`<br>`TestEnvironmentTeamReviewerApproves`<br>`TestEnvironmentDeploymentBranchPolicy`<br>`TestEnvironmentWaitTimerHoldsTheClaim`<br>`TestEnvironmentApprovalPlusTimer`<br>`TestE2E_ThreadsApprovalSupersedeAndCancel` |
 | PAR-132 | Deployment records: per-environment history, `deployment_status`, environment URL on the repo page | partial | 3 | T3+T6 |  | — |
 | PAR-133 | `deployments` permission and deployment API (`POST /deployments`, statuses) | missing | 3 | T3 | S10 | — |
 | PAR-134 | Environment UI parity: deployments, secrets, variables and protection-rule tabs | partial | 3 | T6 |  | — |
-| PAR-135 | Pending-deployment UX: run-list badge, reviewer notification, approval audit entry | partial | 2 | T6 |  | — |
+| PAR-135 | Pending-deployment UX: run-list badge, reviewer notification, approval audit entry | have | 2 | T6 |  | `TestPendingDeploymentNotifiesReviewers`<br>`TestThreadsListPendingBadges`<br>`TestThreadRunPageWaitTimerAndApprovals`<br>`TestEnvironmentTabRendersProtectionRules`<br>`TestE2E_ThreadsApprovalSupersedeAndCancel` |
 | PAR-136 | Deployment queuing: a second deployment to a busy environment serializes instead of failing | missing | 3 | T3 |  | — |
 | PAR-137 | Environment verify-and-close: secret precedence, fork exclusion, and "Threads exceeds Forgejo (no environment syntax)" | have (1V) | 1 | T7 |  | `TestEnvironmentSecretsPrecedence`<br>`TestEnvironmentForkRunNeverGetsSecrets`<br>`TestEnvironmentHoldsUntilReviewerApproves`<br>`TestEnvironmentUndefinedFailsClosed` |
 
@@ -140,21 +140,21 @@ the gate fails a green row whose test is missing from the tree.
 |---|---|---|---|---|---|---|
 | PAR-150 | Implicit supersede: a new push / PR `synchronize` cancels the superseded in-flight run of that workflow+ref when no `concurrency` block exists | have | 1 | T3 |  | `TestSupersedeSameRefCancelsTheOlderRun`<br>`TestSupersedeSkipsRunsWithAConcurrencyGroup`<br>`TestSupersedeNewGroupedRunLeavesTheOlderGroupFreeRunAlone`<br>`TestSupersedePRSynchronizeOnly`<br>`TestSupersedeLeavesOtherRefsAndWorkflowsAlone`<br>`TestSupersedeLeavesTerminalRunsAndOtherEventsAlone`<br>`TestSupersedeCancelsPendingApprovalPredecessor`<br>`TestCancelIsIdempotent`<br>`TestAdoptRunHeadIsForwardOnly`<br>`TestSupersedeConcurrentCreationsLeaveOneLiveRun`<br>`TestSupersedeKeysOnTheFullRef` |
 | PAR-151 | `cancel-in-progress` as an expression; `group` reading `vars`/`inputs`/`matrix`/`github` | partial | 2 | T1 |  | — |
-| PAR-152 | Group semantics: cancel the *pending* run by default, `cancel-in-progress: false` sequences, `queue: single` / `max` | partial | 2 | T3 |  | — |
+| PAR-152 | Group semantics: cancel the *pending* run by default, `cancel-in-progress: false` sequences, `queue: single` / `max` | have | 2 | T3 |  | `TestConcurrencyPendingRunReplacesTheOlderPending`<br>`TestConcurrencyPendingSlotBlocksALaterRun`<br>`TestConcurrencyCancelInProgressCancelsAtCreation`<br>`TestConcurrencyPendingRunCreatedBehindAHolder`<br>`TestConcurrencyGroupFreeRunIsNotPending`<br>`TestE2E_ThreadsApprovalSupersedeAndCancel` |
 | PAR-153 | Per-repository and per-organization concurrency caps | missing | 3 | T3 |  | — |
 | PAR-154 | Schedule operations: next-fire in UI/API, enable/disable without a commit, operator-visible watermark | partial | 4 | T6 |  | — |
 | PAR-155 | Run prioritization | missing | 4 | T3 |  | — |
 | PAR-156 | Queue observability: exactly one named reason per queued job (no runner, labels unmatched, group held, approval, capacity) | partial | 3 | T6 |  | — |
 | PAR-157 | Per-repository CI pause/resume with in-flight jobs finishing | missing | 4 | T3 |  | — |
-| PAR-158 | Retention parity: configurable ceiling (≥90 days), keep-forever, separate run/log and artifact windows with artifact expiry defaults | partial | 2 | T5 |  | — |
-| PAR-159 | GC parity: expired artifacts, unreferenced blobs, cache eviction, reclaimed bytes per family | partial | 2 | T5 |  | — |
+| PAR-158 | Retention parity: configurable ceiling (≥90 days), keep-forever, separate run/log and artifact windows with artifact expiry defaults | have | 2 | T5 |  | `TestRetentionDryRunMatchesApply`<br>`TestArtifactOutlivesItsRunWhenItsWindowAllows`<br>`TestKeepForeverReclaimsNothing`<br>`TestThreadsKnobDefaults`<br>`TestValidateThreadsKnobs` |
+| PAR-159 | GC parity: expired artifacts, unreferenced blobs, cache eviction, reclaimed bytes per family | have | 2 | T5 |  | `TestRetentionDryRunMatchesApply`<br>`TestRetentionNeverDeletesAnAttachedRun`<br>`TestArtifactOutlivesItsRunWhenItsWindowAllows`<br>`TestRetainDeletesOldTerminalRunsKeepsTheRest` |
 
 ## runners
 
 | ID | Capability | Status | Wave | Track | Security | Tests |
 |---|---|---|---|---|---|---|
 | PAR-170 | Hosted-label semantics: `ubuntu-latest` (and friends) via a documented operator mapping; `runs-on: {group:, labels:}` | have | 1 | T3 | S11 | `TestHostedLabelExpansion`<br>`TestHostedLabelScheduling` |
-| PAR-171 | Label→backend+image mapping (`name:docker://image`, `name:lxc://template`, `name:host`) | partial | 2 | T3 | S11 S17 | — |
+| PAR-171 | Label→backend+image mapping (`name:docker://image`, `name:lxc://template`, `name:host`) | have | 2 | T3 | S11 S17 | `TestParseRunnerLabels`<br>`TestRunnerLabelImageMappingReachesThePayload`<br>`TestRegisterStoresLabelImages` |
 | PAR-172 | Registration scopes: instance, organization, user, repository | partial | 3 | T3 |  | — |
 | PAR-173 | Ephemeral runners: one job, then the record and credential are gone | missing | 3 | T3 |  | — |
 | PAR-174 | Managed runner pool (ephemeral, container-backed, autoscaled) so a fresh instance runs queued jobs unattended | missing · D-14 | 3 | T3 | S11 | — |

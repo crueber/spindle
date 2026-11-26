@@ -309,7 +309,6 @@ func TestValidateIf(t *testing.T) {
 		{"inputs.nope == 'x'", "not a declared workflow_dispatch input"},
 		{"steps.ghost.outcome == 'success'", "not declared before this one"},
 		{"needs.ghost.result == 'success'", "no `needs:` dependency"},
-		{"vars.X == 'y'", "unknown context"},
 		{"@", "expected a value"},
 		{"${{ inputs.mode }} == 'x'", "whole condition"},
 		{"false ||", "expected a value"},

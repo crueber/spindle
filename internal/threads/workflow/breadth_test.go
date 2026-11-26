@@ -33,7 +33,7 @@ concurrency:
   cancel-in-progress: true
 permissions:
   contents: read
-  packages: write
+  issues: write
 jobs:
   build:
     runs-on: [linux, docker]
@@ -74,7 +74,7 @@ func TestParseBroadShapes(t *testing.T) {
 	if w.Concurrency == nil || w.Concurrency.Group != "ci-${{ github.ref }}" || !w.Concurrency.CancelInProgress {
 		t.Fatalf("workflow concurrency = %+v", w.Concurrency)
 	}
-	if w.Permissions["contents"] != "read" || w.Permissions["packages"] != "write" {
+	if w.Permissions["contents"] != "read" || w.Permissions["issues"] != "write" {
 		t.Fatalf("workflow permissions = %+v", w.Permissions)
 	}
 	d := w.On.WorkflowDispatch
@@ -157,9 +157,12 @@ func TestParseOnStringAndList(t *testing.T) {
 	if !w.Fires("schedule", RefBranch, "", "") {
 		t.Fatal("a schedule workflow must answer Fires(schedule)")
 	}
-	// An unsupported cron is a parse error, not a dead trigger.
-	if _, err := Parse([]byte("on:\n  schedule:\n    - cron: \"0 3 * * MON\"\njobs:\n  a:\n    runs-on: l\n    steps:\n      - run: x\n")); err == nil {
-		t.Fatal("named weekday accepted in cron")
+	// A named weekday is the documented cron surface; an unknown one is not.
+	if _, err := Parse([]byte("on:\n  schedule:\n    - cron: \"0 3 * * MON\"\njobs:\n  a:\n    runs-on: l\n    steps:\n      - run: x\n")); err != nil {
+		t.Fatalf("named weekday rejected: %v", err)
+	}
+	if _, err := Parse([]byte("on:\n  schedule:\n    - cron: \"0 3 * * FUNDAY\"\njobs:\n  a:\n    runs-on: l\n    steps:\n      - run: x\n")); err == nil {
+		t.Fatal("unknown weekday name accepted in cron")
 	}
 	// An unknown event is a typo, not a feature.
 	if _, err := Parse([]byte("on: [push, teleport]\njobs:\n  a:\n    runs-on: l\n    steps:\n      - run: x\n")); err == nil {
@@ -252,7 +255,7 @@ func TestParseUnknownJobKeyStillRejected(t *testing.T) {
 	for name, frag := range map[string]string{
 		"job":   "    runson: x",
 		"top":   "unknown: 1",
-		"push":  "    push:\n      paths: [x]",
+		"push":  "    push:\n      pathsx: [x]",
 		"steps": "    steps:\n      - run: x\n        shellx: bash",
 	} {
 		src := "name: n\non:\n  push:\njobs:\n  a:\n    runs-on: l\n    steps:\n      - run: x\n"

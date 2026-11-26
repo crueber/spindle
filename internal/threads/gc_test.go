@@ -289,53 +289,25 @@ func TestRetentionStoreFaultsFailClosed(t *testing.T) {
 		}
 	})
 
-	t.Run("deleteRun surfaces the queue-entry delete", func(t *testing.T) {
+	t.Run("deleteRun surfaces a delete failure", func(t *testing.T) {
 		e, _ := retentionEnv(t)
 		run := e.mustCreate(t)[0]
-		jobs := mustJobs(t, e, run.ID)
-		// Give the job a QueueSeq (only a claim records one) so deleteRun
-		// reaches the exact-key queue delete.
-		if _, err := e.svc.casUpdate(context.Background(), JobKey("o", "r", run.ID, jobs[0].ID), 5, func(cur []byte, _ store.Version) ([]byte, bool, error) {
-			var job Job
-			if jerr := json.Unmarshal(cur, &job); jerr != nil {
-				return nil, false, jerr
-			}
-			job.QueueSeq = "0000000000000000001-abc123"
-			job.Version++
-			return mustJSON(&job), true, nil
-		}); err != nil {
-			t.Fatal(err)
-		}
 		fs := &faultStore{Memory: e.store}
 		e.svc.Store = fs
-		// The first delete is deleteJob's job record; the second is the queue
-		// entry. Fail from the second on.
-		fs.fail("delete", 1)
+		fs.fail("delete", 0)
 		if _, err := e.svc.deleteRun(context.Background(), "o", "r", run.ID); err == nil {
-			t.Fatal("a failing queue-entry delete did not fail the run delete")
+			t.Fatal("a failing object delete did not fail the run delete")
 		}
 	})
 
-	t.Run("deleteJob surfaces listing and delete failures", func(t *testing.T) {
+	t.Run("deleteRun surfaces listing and artifact-read failures", func(t *testing.T) {
 		e, _ := retentionEnv(t)
 		run := e.mustCreate(t)[0]
-		jobs := mustJobs(t, e, run.ID)
-		job := jobs[0]
 		fs := &faultStore{Memory: e.store}
 		e.svc.Store = fs
 		fs.fail("list", 0)
-		if _, err := e.svc.deleteJob(context.Background(), "o", "r", run.ID, job); err == nil {
-			t.Fatal("a failing log listing did not fail the job delete")
-		}
-		// One log frame so the delete path runs, then fail that delete.
-		fs.clear()
-		if _, err := store.PutBytes(context.Background(), fs, LogKey("o", "r", run.ID, job.ID, 1, 1),
-			[]byte("x\n"), store.PutOptions{Mode: store.PutCreate}); err != nil {
-			t.Fatal(err)
-		}
-		fs.fail("delete", 0)
-		if _, err := e.svc.deleteJob(context.Background(), "o", "r", run.ID, job); err == nil {
-			t.Fatal("a failing log delete did not fail the job delete")
+		if _, err := e.svc.deleteRun(context.Background(), "o", "r", run.ID); err == nil {
+			t.Fatal("a failing run-prefix listing did not fail the run delete")
 		}
 	})
 
@@ -350,16 +322,26 @@ func TestRetentionStoreFaultsFailClosed(t *testing.T) {
 		e.svc.Store = fs
 		fs.fail("get", 0)
 		res := &GCResult{}
-		e.svc.dropQueueEntries(context.Background(), "o", "r", map[string]bool{"gone": true}, res)
+		e.svc.dropQueueEntries(context.Background(), "o", "r", map[string]bool{"gone": true}, true, res)
 		if res.QueueDeleted != 0 {
 			t.Fatalf("unreadable entry counted: %+v", res)
 		}
 		res = &GCResult{}
 		fs.clear()
 		fs.fail("delete", 0)
-		e.svc.dropQueueEntries(context.Background(), "o", "r", map[string]bool{"gone": true}, res)
+		e.svc.dropQueueEntries(context.Background(), "o", "r", map[string]bool{"gone": true}, true, res)
 		if res.QueueDeleted != 0 {
 			t.Fatalf("undeletable entry counted: %+v", res)
+		}
+		// A DRY RUN counts the same entry and deletes nothing.
+		res = &GCResult{}
+		fs.clear()
+		e.svc.dropQueueEntries(context.Background(), "o", "r", map[string]bool{"gone": true}, false, res)
+		if res.QueueDeleted != 1 {
+			t.Fatalf("dry-run entry = %+v, want 1 planned", res)
+		}
+		if _, _, err := store.GetBytes(context.Background(), fs, key, store.GetOptions{}); err != nil {
+			t.Fatalf("dry run deleted the queue entry: %v", err)
 		}
 	})
 
@@ -368,14 +350,14 @@ func TestRetentionStoreFaultsFailClosed(t *testing.T) {
 		// The cap already reached: no listing at all.
 		res := &GCResult{RunnersDeleted: retentionRunners}
 		e.svc.runnerSweep = &runnerSweepGate{}
-		e.svc.deleteDeadRunners(context.Background(), *now, res)
+		e.svc.deleteDeadRunners(context.Background(), *now, true, res)
 		// A listing failure.
 		fs := newFaultStore()
 		e.store = fs.Memory
 		e.svc.Store = fs
 		fs.fail("list", 0)
 		e.svc.runnerSweep = &runnerSweepGate{}
-		e.svc.deleteDeadRunners(context.Background(), *now, &GCResult{})
+		e.svc.deleteDeadRunners(context.Background(), *now, true, &GCResult{})
 		// An unreadable record (valid key, get fault).
 		fs.clear()
 		e.store = fs.Memory
@@ -385,7 +367,7 @@ func TestRetentionStoreFaultsFailClosed(t *testing.T) {
 		}
 		fs.fail("get", 0)
 		e.svc.runnerSweep = &runnerSweepGate{}
-		e.svc.deleteDeadRunners(context.Background(), *now, &GCResult{})
+		e.svc.deleteDeadRunners(context.Background(), *now, true, &GCResult{})
 		// A dead runner whose record delete succeeds but whose credential
 		// delete fails: the failure is skipped, the delete is counted.
 		fs.clear()
@@ -399,7 +381,7 @@ func TestRetentionStoreFaultsFailClosed(t *testing.T) {
 		fs.fail("delete", 1)
 		res = &GCResult{}
 		e.svc.runnerSweep = &runnerSweepGate{}
-		e.svc.deleteDeadRunners(context.Background(), *now, res)
+		e.svc.deleteDeadRunners(context.Background(), *now, true, res)
 		if res.RunnersDeleted != 1 || res.CredentialsDeleted != 0 {
 			t.Fatalf("credential-delete failure = %+v, want the record counted only", res)
 		}

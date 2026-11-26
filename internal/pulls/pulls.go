@@ -174,15 +174,33 @@ type Streamer func(ctx context.Context, ev StreamEvent)
 type PullEvent struct {
 	// Repo is the base repository ("owner/name") the PR targets.
 	Repo string
-	// Action is opened|synchronize|reopened.
+	// Action is one of the pull_request lifecycle actions the threads parser
+	// accepts: opened, synchronize, reopened, closed, edited, ready_for_review,
+	// converted_to_draft (plus the metadata actions emitted by the issues
+	// service's shared thread sink: labeled, unlabeled, assigned, unassigned,
+	// milestoned, demilestoned).
 	Action string
 	Num    int
 	// BaseRef is the target branch (no refs/ prefix); HeadRef/HeadSHA name
-	// the revision being built. HeadRepo differs from Repo for a fork PR.
+	// the revision being built. BaseSHA is the target tip the changed-path
+	// filter diffs against (the merge-base rule). HeadRepo differs from Repo
+	// for a fork PR.
 	BaseRef  string
+	BaseSHA  string
 	HeadRef  string
 	HeadSHA  string
 	HeadRepo string
+	// Title/State/Draft/Merged carry the payload projection, so the run's
+	// `github.event.pull_request.*` is built without a second read.
+	Title  string
+	State  string
+	Draft  bool
+	Merged bool
+	// Label/Assignee/Milestone name the metadata value a labeled/unlabeled/
+	// assigned/unassigned/milestoned/demilestoned event carries ("" otherwise).
+	Label     string
+	Assignee  string
+	Milestone string
 	// Fork is the trust class input: a cross-repository head runs the base
 	// branch's workflow files untrusted (15 §2).
 	Fork  bool
@@ -510,6 +528,22 @@ func (s *Service) pullEvent(ctx context.Context, ev PullEvent) {
 		return
 	}
 	s.PullEvents(ctx, ev)
+}
+
+// emitPullLifecycle fills the payload-bearing fields from the current records
+// and delivers one lifecycle event. Every action-edge emitter goes through it,
+// so a new edge cannot forget the base sha or the draft/state projection.
+func (s *Service) emitPullLifecycle(ctx context.Context, repo string, th *Thread, pr *PRDoc, action, actor string) {
+	if th == nil || pr == nil {
+		return
+	}
+	s.pullEvent(ctx, PullEvent{
+		Repo: repo, Action: action, Num: th.Num,
+		BaseRef: pr.Base.Ref, BaseSHA: pr.Base.SHA,
+		HeadRef: pr.Head.Ref, HeadSHA: pr.Head.SHA, HeadRepo: pr.Head.Repo,
+		Title: th.Title, State: th.State, Draft: pr.Draft, Merged: pr.Merged,
+		Fork: pr.Fork != nil, Actor: actor,
+	})
 }
 
 // branchPublished delivers one server-side branch publish, nil-safe.

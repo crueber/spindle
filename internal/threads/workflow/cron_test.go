@@ -128,9 +128,8 @@ func TestCronRejectsUnsupportedSyntax(t *testing.T) {
 		"",
 		"* * * *",
 		"* * * * * *",
-		"@daily",
-		"0 3 * * MON",
-		"0 3 * * mon-fri",
+		"@every 5m",
+		"0 3 * * FUNDAY",
 		"*/0 * * * *",
 		"60 * * * *",
 		"0 24 * * *",
@@ -140,8 +139,8 @@ func TestCronRejectsUnsupportedSyntax(t *testing.T) {
 		"5-1 * * * *",
 		"1,,2 * * * *",
 		"a * * * *",
-		"0 0 L * *",
-		"0 0 * * 5#2",
+		"L 0 * * *",
+		"0 0 * * 5#9",
 	}
 	for _, expr := range bad {
 		if _, err := ParseCron(expr); err == nil {
@@ -162,8 +161,8 @@ func TestScheduleEntriesValidatedAtParse(t *testing.T) {
 	if _, err := Parse([]byte("on:\n  schedule: []\njobs:\n  a:\n    runs-on: l\n    steps:\n      - run: x\n")); err == nil {
 		t.Fatal("empty schedule accepted")
 	}
-	if _, err := Parse([]byte("on:\n  schedule:\n    - cron: \"0 3 * * MON\"\njobs:\n  a:\n    runs-on: l\n    steps:\n      - run: x\n")); err == nil {
-		t.Fatal("named weekday accepted")
+	if _, err := Parse([]byte("on:\n  schedule:\n    - cron: \"0 3 * * FUNDAY\"\njobs:\n  a:\n    runs-on: l\n    steps:\n      - run: x\n")); err == nil {
+		t.Fatal("unknown weekday accepted")
 	}
 }
 

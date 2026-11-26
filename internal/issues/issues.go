@@ -165,6 +165,26 @@ type Emitter func(ctx context.Context, ev NotifyEvent)
 // feature event names.
 type Streamer func(ctx context.Context, ev StreamEvent)
 
+// ThreadEvent is one CI trigger edge the issues service owns. Kind is "issue"
+// (the `issues` trigger) or "pr" (the metadata half of `pull_request`); Action
+// is the lifecycle action; Extra names the single label/assignee/milestone the
+// edge carries ("" otherwise). CommentBody is set for an issue_comment created
+// edge and is already the raw text (the Threads adapter bounds it).
+type ThreadEvent struct {
+	Repo         string
+	Kind         string
+	Action       string
+	Num          int
+	Actor        string
+	Title        string
+	State        string
+	Author       string
+	Labels       []string
+	Extra        string
+	CommentBody  string
+	CommentActor string
+}
+
 // Service is the issues store client: all bucket I/O for numbering,
 // threads, events, the index, labels, and milestones. Construct with New;
 // Roles/Auth may be nil in tests that exercise pure parsers.
@@ -185,6 +205,10 @@ type Service struct {
 	Notify Emitter
 	// Stream receives issue/issue_event live updates (nil = no-op).
 	Stream Streamer
+	// ThreadEvents receives the trigger edges the issues service owns
+	// (`on.issues`, `on.issue_comment`, and the metadata half of
+	// `on.pull_request`). Composition routes them to Threads; nil is a no-op.
+	ThreadEvents func(ctx context.Context, ev ThreadEvent)
 
 	// Moderation is the consumer-owned block gate (PLAN-V2 §M.5). Every
 	// interaction verb below consults it after role resolution and before

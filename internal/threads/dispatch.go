@@ -20,7 +20,7 @@ import (
 // none was declared).
 type DispatchInput struct {
 	Name        string   `json:"name"`
-	Type        string   `json:"type"` // string | choice | boolean
+	Type        string   `json:"type"` // string | choice | boolean | number | environment
 	Description string   `json:"description,omitempty"`
 	Required    bool     `json:"required"`
 	Default     string   `json:"default,omitempty"`
@@ -70,8 +70,12 @@ func dispatchInputs(f *WorkflowFile) []DispatchInput {
 // inline.
 //
 // Types: string accepts anything; boolean accepts true/false (any case,
-// normalized to "true"/"false"); choice must be one of the declared options.
-func resolveDispatchInputs(f *WorkflowFile, supplied map[string]string) (map[string]string, error) {
+// normalized to "true"/"false"); choice must be one of the declared options;
+// number must be a decimal number (kept as authored, GitHub exposes the string
+// form to `event.inputs`); environment must name an existing repository
+// environment (environments is the resolved list; nil means the repository has
+// none).
+func resolveDispatchInputs(f *WorkflowFile, supplied map[string]string, environments []string) (map[string]string, error) {
 	declared := map[string]workflow.Input{}
 	if f != nil && f.Workflow != nil && f.Workflow.On.WorkflowDispatch != nil {
 		declared = f.Workflow.On.WorkflowDispatch.Inputs
@@ -127,6 +131,24 @@ func resolveDispatchInputs(f *WorkflowFile, supplied map[string]string) (map[str
 					ErrUnprocessable, name, strings.Join(in.Options, ", "), raw)
 			}
 			effective[name] = raw
+		case "number":
+			if _, nerr := strconv.ParseFloat(raw, 64); nerr != nil {
+				return nil, fmt.Errorf("%w: input %q must be a number, got %q", ErrUnprocessable, name, raw)
+			}
+			effective[name] = raw
+		case "environment":
+			ok := false
+			for _, env := range environments {
+				if raw == env {
+					ok = true
+					break
+				}
+			}
+			if !ok {
+				return nil, fmt.Errorf("%w: input %q must name a repository environment (declared: %s), got %q",
+					ErrUnprocessable, name, strings.Join(environments, ", "), raw)
+			}
+			effective[name] = raw
 		default:
 			effective[name] = raw
 		}
@@ -135,6 +157,21 @@ func resolveDispatchInputs(f *WorkflowFile, supplied map[string]string) (map[str
 		return nil, nil
 	}
 	return effective, nil
+}
+
+// declaresEnvironmentInput reports whether a workflow declares an
+// `environment`-typed input (the dispatch path then resolves the repository's
+// environment names for validation and the picker).
+func declaresEnvironmentInput(f *WorkflowFile) bool {
+	if f == nil || f.Workflow == nil || f.Workflow.On.WorkflowDispatch == nil {
+		return false
+	}
+	for _, in := range f.Workflow.On.WorkflowDispatch.Inputs {
+		if inputType(in) == "environment" {
+			return true
+		}
+	}
+	return false
 }
 
 // inputType normalizes a declared input type (the parser's default is string).

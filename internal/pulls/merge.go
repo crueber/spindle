@@ -410,6 +410,9 @@ func (s *Service) runMerge(ctx context.Context, owner, repo string, num int, act
 	}
 	s.emit(ctx, NotifyEvent{Repo: repoName(owner, repo), Class: "merged", Actor: who, PullNum: num, Recipients: prParticipants(th, who)})
 	s.stream(ctx, StreamEvent{Name: "pull", Repo: repoName(owner, repo), Action: "merged", Num: num, Title: th.Title, State: th.State, Author: th.Author, BaseRef: pr.Base.Ref, HeadRef: pr.Head.Ref, HeadSHA: newSHA})
+	// The merge is also the `closed` pull_request edge (PAR-014); the run
+	// builds the live head and reports the base branch's push separately.
+	s.emitPullLifecycle(ctx, repoName(owner, repo), th, pr, "closed", who)
 	rec.notice("merged as %s; closed issues %v", shortSHA(newSHA), closed)
 	// Step 7: head cleanup — same-repo heads only (fork heads are never
 	// deleted by the base repo), policy-checked like any ref delete.

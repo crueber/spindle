@@ -52,6 +52,38 @@ func TestThreadRunPageRenderOperatorVerbs(t *testing.T) {
 	)
 }
 
+func TestThreadRunPageRendersAnnotationsAndSummary(t *testing.T) {
+	bindChromeProjections(t)
+	run := threadsFixtureRun()
+	job := threadsFixtureJob(run)
+	job.Annotations = []threads.Annotation{{
+		Level: "error", Message: "<script>alert(1)</script> & broke", File: "main.go",
+		Line: 3, Col: 2, Title: "Build", Step: "test",
+	}}
+	job.Summary = "## Result\n\n<script>alert('x')</script>\n\n```mermaid\ngraph TD; A-->B;\n```\n"
+	BindThreads(ThreadsDeps{
+		Get: func(context.Context, string, string, string, auth.Principal) (*threads.RunView, error) {
+			return &threads.RunView{Run: run, Jobs: []*threads.Job{job}}, nil
+		},
+		Workflows: func(context.Context, string, string, string, auth.Principal) (*threads.WorkflowList, error) {
+			return &threads.WorkflowList{Workflows: []*threads.WorkflowState{}}, nil
+		},
+	})
+	t.Cleanup(func() { BindThreads(ThreadsDeps{}) })
+	f := newCollabFixture(t)
+	f.principal = auth.Principal{Name: "ada", Write: true}
+	f.view.summary = busySummary()
+	rec := f.get("/acme/widgets/threads/" + run.ID)
+	wantStatus(t, rec, http.StatusOK)
+	body := rec.Body.String()
+	wantContains(t, rec, "Annotations", "main.go:3:2", "Build", "step summary", "graph TD;")
+	// The annotation message and the summary are DATA: the raw <script> must
+	// never reach the page as markup.
+	if strings.Contains(body, "<script>alert") {
+		t.Fatalf("a workflow-command payload was rendered as markup:\n%s", body)
+	}
+}
+
 func TestThreadRunPageVerbsGateOnRole(t *testing.T) {
 	bindChromeProjections(t)
 	run := threadsFixtureRun()

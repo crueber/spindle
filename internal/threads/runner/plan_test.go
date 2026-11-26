@@ -165,7 +165,7 @@ func TestBuildPlanSteps(t *testing.T) {
 		"--env STEP=1",
 		"--env TOKEN", // secret by NAME, never by value
 		p.Names.Container,
-		"bash -eo pipefail -c go test ./...",
+		"bash --noprofile --norc -eo pipefail -c go test ./...",
 	} {
 		if !strings.Contains(argv, want) {
 			t.Errorf("exec argv missing %q\nargv: %s", want, argv)
@@ -223,19 +223,35 @@ func TestBuildPlanDefaultImageAndShells(t *testing.T) {
 	cases := map[string]string{
 		"":         "sh -e -c",
 		"sh":       "sh -e -c",
-		"bash":     "bash -eo pipefail -c",
-		"bash {0}": "bash -eo pipefail -c",
-		"python":   "python3 -c",
+		"bash":     "bash --noprofile --norc -eo pipefail -c",
+		"bash {0}": "bash",
+		"python":   "python -c",
+		"python3":  "python3 -c",
 		"pwsh":     "pwsh -command",
-		"cmd":      "cmd /c",
+		"cmd":      "cmd /D /E:ON /V:OFF /S /C",
 	}
 	for shell, want := range cases {
-		argv, err := shellCommand(shell, "echo x")
+		argv, _, err := shellCommand(shell, "echo x", "/tmp/spindle-step-1")
 		if err != nil {
 			t.Fatalf("shell %q: %v", shell, err)
 		}
 		if got := strings.Join(argv, " "); !strings.HasPrefix(got, want) {
 			t.Errorf("shell %q = %q, want prefix %q", shell, got, want)
+		}
+	}
+	// A custom shell command is an argv template with exactly one {0}; the
+	// script is written to a file and the placeholder is substituted.
+	argv, file, err := shellCommand("dash -e {0}", "echo x", "/tmp/spindle-step-7")
+	if err != nil || !file {
+		t.Fatalf("custom shell = %v, file=%v", err, file)
+	}
+	if got := strings.Join(argv, " "); got != "dash -e /tmp/spindle-step-7" {
+		t.Fatalf("custom shell argv = %q", got)
+	}
+	// A template with no {0} — or two — is a named step error, never a guess.
+	for _, bad := range []string{"dash -e", "sh {0} {0}", "{0}"} {
+		if _, _, err := shellCommand(bad, "echo x", "/tmp/s"); err == nil {
+			t.Errorf("shell %q was accepted", bad)
 		}
 	}
 }
@@ -333,5 +349,44 @@ func TestBuildPlanSubstitutesInputs(t *testing.T) {
 	}
 	if ok, _ := EvalIf("inputs.dry_run == 'true'", ExprContext{Success: true, Inputs: map[string]string{"dry_run": "false"}}); ok {
 		t.Fatal("a false input value satisfied the condition")
+	}
+}
+
+// TestPlanEventRunnerAndVarsContexts pins PAR-033/PAR-034/PAR-035 at the plan
+// boundary: the documented event fields and runner fields resolve, the event
+// JSON is carried, and the path variables reach the container environment.
+func TestPlanEventRunnerAndVarsContexts(t *testing.T) {
+	job := fixtureJob()
+	job.EventPayload = map[string]any{
+		"action": "published",
+		"release": map[string]any{"tag_name": "v1.2.3", "assets": []any{
+			map[string]any{"name": "bin.tgz", "size": float64(12)},
+		}},
+	}
+	job.Vars = map[string]string{"REGION": "eu"}
+	p, err := BuildPlan(PlanInput{Job: job, AttemptToken: "t", RunnerName: "runner-7"})
+	if err != nil {
+		t.Fatalf("BuildPlan: %v", err)
+	}
+	if p.GitHub["event.action"] != "published" || p.GitHub["event.release.tag_name"] != "v1.2.3" {
+		t.Fatalf("event context = %+v", p.GitHub)
+	}
+	if p.GitHub["event.release.assets"] != "bin.tgz" {
+		t.Fatalf("asset projection = %q", p.GitHub["event.release.assets"])
+	}
+	if p.Runner["os"] != "Linux" || p.Runner["name"] != "runner-7" || p.Runner["temp"] != RunnerTemp {
+		t.Fatalf("runner context = %+v", p.Runner)
+	}
+	if p.Vars["REGION"] != "eu" {
+		t.Fatalf("vars = %+v", p.Vars)
+	}
+	if len(p.EventJSON) == 0 || p.ContainerEnv["GITHUB_EVENT_PATH"] != EventPath ||
+		p.ContainerEnv["FORGEJO_EVENT_PATH"] != EventPath || p.ContainerEnv["RUNNER_TEMP"] != RunnerTemp {
+		t.Fatalf("event/runner env = %+v", p.ContainerEnv)
+	}
+	// The runner context is a substitution site, not just a map.
+	got, err := p.substitute("${{ runner.os }}-${{ vars.REGION }}-${{ github.event.action }}", p.stepValues(p.Env, nil, true))
+	if err != nil || got != "Linux-eu-published" {
+		t.Fatalf("substitute = %q, %v", got, err)
 	}
 }

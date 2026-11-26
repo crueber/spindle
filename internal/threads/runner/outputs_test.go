@@ -59,6 +59,8 @@ func TestParseOutputFileErrors(t *testing.T) {
 		{"bad name", "bad name=value\n", "invalid output name"},
 		{"empty heredoc delimiter", "x<<\n", "no delimiter"},
 		{"unterminated heredoc", "x<<EOF\na\n", "never closed"},
+		{"over-long heredoc delimiter", "x<<" + strings.Repeat("d", MaxOutputDelimiterLen+1) + "\nv\n" + strings.Repeat("d", MaxOutputDelimiterLen+1) + "\n", "over the cap"},
+		{"malformed line names the line number", "ok=1\nnonsense\n", "line 2"},
 	}
 	for _, tc := range cases {
 		_, err := parseOutputFile([]byte(tc.in))
@@ -140,6 +142,30 @@ func TestExecuteStepOutputsFlow(t *testing.T) {
 	}
 	if res.Outputs["digest"] != "abc123" || res.Outputs["body"] != "line one\nline two" {
 		t.Fatalf("job outputs = %#v", res.Outputs)
+	}
+}
+
+// TestExecuteSetOutputAliasMerges pins the deprecated `::set-output::` channel
+// (PAR-094/PAR-093): its values join the step's outputs, and a name written
+// through BOTH channels keeps the $GITHUB_OUTPUT value (the supported channel).
+func TestExecuteSetOutputAliasMerges(t *testing.T) {
+	docker := &fakeDocker{
+		streamOutput: "::set-output name=tag::v1\n::set-output name=note::from-command\n",
+		runOutputs:   []runOutput{{match: "spindle-output-1", out: "tag=from-file\n"}},
+	}
+	job := fixtureJob()
+	job.Spec.Services = nil
+	job.Spec.Matrix = nil
+	job.Spec.Steps = []threads.StepSpec{
+		{ID: "build", Name: "build", Run: "make"},
+		{Name: "use", Run: "echo ${{ steps.build.outputs.tag }}-${{ steps.build.outputs.note }}"},
+	}
+	res := executorWith(docker).Execute(context.Background(), ExecInput{Job: job, AttemptToken: "t"}, quietStream(t))
+	if res.Conclusion != threads.JobSuccess {
+		t.Fatalf("conclusion = %s (%s)", res.Conclusion, res.Error)
+	}
+	if !docker.called("echo from-file-from-command") {
+		t.Fatalf("set-output merge missing: %v", docker.snapshot())
 	}
 }
 

@@ -45,6 +45,14 @@ func TestJobPermissionsWriteAndAll(t *testing.T) {
 	if all["contents"] != PermWrite {
 		t.Fatalf("write-all perms = %v", all)
 	}
+	// write-all must never grant cloud identity (S10): id-token is asked for
+	// by name, and an `all` baseline never sets it.
+	if _, ok := all["id-token"]; ok {
+		t.Fatalf("write-all granted id-token: %v", all)
+	}
+	if all["issues"] != PermWrite || all["pull-requests"] != PermWrite {
+		t.Fatalf("write-all baseline = %v, want every baseline scope at write", all)
+	}
 	// A specific key overrides the all baseline.
 	narrow := e.svc.EffectivePermissions(&Spec{Permissions: map[string]string{"all": "write-all", "contents": "read"}}, true)
 	if narrow["contents"] != PermRead {
@@ -54,6 +62,52 @@ func TestJobPermissionsWriteAndAll(t *testing.T) {
 	odd := e.svc.EffectivePermissions(&Spec{Permissions: map[string]string{"contents": "administrator"}}, true)
 	if odd["contents"] != PermRead {
 		t.Fatalf("unknown level perms = %v, want the default", odd)
+	}
+}
+
+// TestPAR112ScopeMatrixDrivesCapabilities pins that every supported scope
+// changes a real capability (the other half of the matrix test: the parser
+// accepts exactly these, and each one is wired here).
+func TestPAR112ScopeMatrixDrivesCapabilities(t *testing.T) {
+	e := newTestEnv(t)
+	cases := []struct {
+		name  string
+		perms map[string]string
+		push  bool
+		id    bool
+	}{
+		{name: "contents read", perms: map[string]string{"contents": "read"}},
+		{name: "contents write", perms: map[string]string{"contents": "write"}, push: true},
+		{name: "issues write is not push", perms: map[string]string{"issues": "write"}},
+		{name: "pull-requests write is not push", perms: map[string]string{"pull-requests": "write"}},
+		{name: "id-token write", perms: map[string]string{"id-token": "write"}, id: true},
+		{name: "id-token none", perms: map[string]string{"id-token": "none"}},
+		{name: "write-all never id-token", perms: map[string]string{"all": "write-all"}, push: true},
+		{name: "all write with id-token none", perms: map[string]string{"all": "write-all", "id-token": "none"}, push: true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			spec := &Spec{Permissions: tc.perms}
+			perms := e.svc.EffectivePermissions(spec, true)
+			if got := containsScope(PermissionScopes(perms), ScopePush); got != tc.push {
+				t.Fatalf("push scope = %v, want %v (perms %v)", got, tc.push, perms)
+			}
+			if got := e.svc.IDTokenAllowed(spec, true); got != tc.id {
+				t.Fatalf("id-token allowed = %v, want %v (perms %v)", got, tc.id, perms)
+			}
+			// The trust class always wins: no fork run gets push or identity.
+			fork := e.svc.EffectivePermissions(spec, false)
+			if containsScope(PermissionScopes(fork), ScopePush) || e.svc.IDTokenAllowed(spec, false) {
+				t.Fatalf("fork perms = %v granted push/identity", fork)
+			}
+		})
+	}
+	// enable-openid-connect is the second spelling for the same grant.
+	if !e.svc.IDTokenAllowed(&Spec{EnableOpenIDConnect: true}, true) {
+		t.Fatal("enable-openid-connect did not grant the OIDC exchange")
+	}
+	if e.svc.IDTokenAllowed(&Spec{EnableOpenIDConnect: true, Permissions: map[string]string{"id-token": "none"}}, true) {
+		t.Fatal("an explicit id-token: none was overridden by enable-openid-connect")
 	}
 }
 

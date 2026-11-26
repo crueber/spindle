@@ -30,7 +30,6 @@ import (
 	"errors"
 	"fmt"
 	"regexp"
-	"sort"
 	"strings"
 
 	"gopkg.in/yaml.v3"
@@ -584,6 +583,11 @@ func (t *translator) workflow(doc *yaml.Node) error {
 			t.concurrencyAt(doc, i, "concurrency", false, nil)
 		case "permissions":
 			t.permissionsAt(doc, i, "permissions")
+		case "enable-openid-connect":
+			if doc.Content[i+1].Tag != "!!bool" {
+				t.drop(doc, i, t.untranslatedAt("enable-openid-connect", "enable-openid-connect", "expected true or false"))
+				i -= 2
+			}
 		default:
 			reason := "not part of the Spindle workflow schema"
 			if key.Value == "run-name" {
@@ -628,12 +632,12 @@ func (t *translator) stringMapAt(m *yaml.Node, i int, path string) {
 	}
 }
 
-// permissionsAt carries the permission map. Only contents and id-token drive a
-// capability; the rest parse and are inert until the scopes land
-// (docs/threads.md §5.3), so they are called out rather than silently trusted.
+// permissionsAt carries the permission map. A scope this server enforces is
+// copied verbatim (canonical spelling); a scope it does not is DROPPED and
+// named in the report, because the emitted file must parse (PAR-112: an
+// unsupported scope is a named error, never inert).
 func (t *translator) permissionsAt(m *yaml.Node, i int, path string) {
 	val := m.Content[i+1]
-	inert := map[string]bool{}
 	switch val.Kind {
 	case yaml.ScalarNode:
 		if isNull(val) {
@@ -647,22 +651,28 @@ func (t *translator) permissionsAt(m *yaml.Node, i int, path string) {
 				j -= 2
 				continue
 			}
-			if name != "contents" && name != "id-token" && name != "all" {
-				inert[name] = true
+			if name == "all" {
+				lv := strings.ToLower(strings.TrimSpace(val.Content[j+1].Value))
+				if lv != "read-all" && lv != "write-all" {
+					t.drop(val, j, t.untranslatedAt(path+".all", "permissions.all", "expected read-all or write-all"))
+					j -= 2
+				}
+				continue
+			}
+			canonical, ok, why := workflow.CanonicalPermissionScope(name)
+			if !ok {
+				t.drop(val, j, t.untranslatedAt(path+"."+name, "permissions."+name, why))
+				j -= 2
+				continue
+			}
+			if _, lerr := workflow.ValidatePermissionLevel(canonical, val.Content[j+1].Value); lerr != nil {
+				t.drop(val, j, t.untranslatedAt(path+"."+name, "permissions."+name, lerr.Error()))
+				j -= 2
 			}
 		}
 	default:
 		t.drop(m, i, t.untranslatedAt(path, "permissions", "expected a mapping or read-all/write-all"))
 		return
-	}
-	if len(inert) > 0 {
-		names := make([]string, 0, len(inert))
-		for name := range inert {
-			names = append(names, name)
-		}
-		sort.Strings(names)
-		t.note(path, "permissions: "+strings.Join(names, ", "),
-			"parses but drives no capability yet; only contents and id-token are enforced")
 	}
 	t.translated++
 }

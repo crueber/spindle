@@ -200,6 +200,90 @@ type StepResult struct {
 	DurationMS int64  `json:"duration_ms,omitempty"`
 }
 
+// Annotation is one workflow-command annotation (PAR-093,
+// docs/WORKFLOWS.md §6.7): `::error file=a.go,line=3,col=2,title=t::message`.
+// The runner parses the command from the job's output; the server stores it on
+// the job record and states its count in the commit's check description. The
+// message is DATA: it is masked by the runner, bounded here, and rendered
+// escaped by the page — it is never markup and never a command.
+type Annotation struct {
+	// Level is error, warning or notice.
+	Level string `json:"level"`
+	// Message is the annotation body (already masked by the runner).
+	Message string `json:"message"`
+	// Title is the optional `title=` property.
+	Title string `json:"title,omitempty"`
+	// File/Line/EndLine/Col/EndColumn anchor the annotation at a source
+	// location; zero means "not stated".
+	File      string `json:"file,omitempty"`
+	Line      int    `json:"line,omitempty"`
+	EndLine   int    `json:"end_line,omitempty"`
+	Col       int    `json:"col,omitempty"`
+	EndColumn int    `json:"end_column,omitempty"`
+	// Step is the step's display name (and id, when it had one), so the page
+	// can group annotations by the step that produced them.
+	Step string `json:"step,omitempty"`
+}
+
+// Annotation caps (docs/WORKFLOWS.md §6.7): GitHub's 10-per-step/50-per-job
+// shape, with the message and title bounded so one command cannot enlarge a
+// job record.
+const (
+	MaxAnnotationsPerStep = 10
+	MaxAnnotationsPerJob  = 50
+	MaxAnnotationMessage  = 4096
+	MaxAnnotationTitle    = 256
+	MaxAnnotationFile     = 512
+	MaxAnnotationStep     = 256
+	// MaxJobSummaryBytes bounds the job's collected step summary. GitHub caps
+	// one step at 1 MiB and 20 summaries per job; spindle keeps those and adds
+	// a total bound so a job record cannot grow without limit (the runner and
+	// the server enforce the same number).
+	MaxJobSummaryBytes = 4 << 20
+)
+
+// ValidAnnotationLevel reports whether an annotation level is one the UI knows.
+func ValidAnnotationLevel(level string) bool {
+	switch level {
+	case "error", "warning", "notice":
+		return true
+	}
+	return false
+}
+
+// ValidateAnnotations bounds and checks one complete payload's annotations. It
+// normalizes nothing: an unknown level is ErrInvalid (a runner bug, never a
+// silent drop), and every string is truncated to its documented cap because a
+// long annotation is data, not a reason to fail a job that otherwise finished.
+func ValidateAnnotations(in []Annotation) ([]Annotation, error) {
+	if len(in) == 0 {
+		return nil, nil
+	}
+	if len(in) > MaxAnnotationsPerJob {
+		return nil, fmt.Errorf("more than %d annotations", MaxAnnotationsPerJob)
+	}
+	out := make([]Annotation, 0, len(in))
+	for _, a := range in {
+		if !ValidAnnotationLevel(a.Level) {
+			return nil, fmt.Errorf("annotation level must be error|warning|notice, got %q", a.Level)
+		}
+		a.Message = truncate(a.Message, MaxAnnotationMessage)
+		a.Title = truncate(a.Title, MaxAnnotationTitle)
+		a.File = truncate(a.File, MaxAnnotationFile)
+		a.Step = truncate(a.Step, MaxAnnotationStep)
+		for _, n := range []*int{&a.Line, &a.EndLine, &a.Col, &a.EndColumn} {
+			if *n < 0 {
+				*n = 0
+			}
+			if *n > 1_000_000 {
+				*n = 1_000_000
+			}
+		}
+		out = append(out, a)
+	}
+	return out, nil
+}
+
 // CompleteInput is the complete request body.
 type CompleteInput struct {
 	Conclusion string       `json:"conclusion"`
@@ -208,6 +292,13 @@ type CompleteInput struct {
 	// `outputs:` templates (docs/threads.md §3.9). Only a successful job's
 	// outputs are stored; a failed or cancelled job exposes none.
 	Outputs map[string]string `json:"outputs,omitempty"`
+	// Annotations are the workflow-command annotations the attempt produced
+	// (PAR-093), and Summary is the step summary markdown (PAR-092). Both are
+	// bounded again here: a bugging runner must not enlarge a job record past
+	// the documented caps (the total request body is bounded by the HTTP
+	// handler).
+	Annotations []Annotation `json:"annotations,omitempty"`
+	Summary     string       `json:"summary,omitempty"`
 }
 
 // CompleteView is the complete answer.
@@ -260,8 +351,19 @@ func (s *Service) Complete(ctx context.Context, claims AttemptClaims, in Complet
 			return nil, fmt.Errorf("%w: %v", ErrInvalid, oerr)
 		}
 	}
+	// Workflow-command annotations and the step summary are attempt artefacts:
+	// the runner already bounded them, and the server bounds them again so a
+	// bugging runner cannot enlarge a job record. A failed job still keeps its
+	// annotations (that is the point: the error annotation explains the
+	// failure); the summary is kept for every conclusion a runner reported.
+	annotations, aerr := ValidateAnnotations(in.Annotations)
+	if aerr != nil {
+		return nil, fmt.Errorf("%w: %v", ErrInvalid, aerr)
+	}
+	summary := truncate(in.Summary, MaxJobSummaryBytes)
 	updated, uerr := s.UpdateJob(ctx, repoID(owner, repo), claims.Run, claims.Job, JobUpdate{
 		State: state, StepResults: steps, Outputs: outputs, CancelRequested: boolPtr(false),
+		Annotations: annotations, Summary: &summary,
 	})
 	if uerr != nil {
 		return nil, uerr
@@ -514,6 +616,27 @@ func (s *Service) stampCancel(ctx context.Context, owner, name, runID string, wh
 // created must be honoured by the re-run button), so a re-run of an
 // environment-gated deployment is held again for a fresh decision.
 func (s *Service) RerunRun(ctx context.Context, repo, runID string, p auth.Principal) (*Run, error) {
+	return s.rerun(ctx, repo, runID, p, false)
+}
+
+// RerunFailedRun is PAR-059: GitHub's "re-run failed jobs". It starts a new
+// attempt (the run's attempt advances, exactly like a whole-run re-run) for the
+// FAILED jobs and their transitive dependents only. A successful job that is
+// not downstream of a failure keeps its state, its attempt, its step results
+// and its green check — the checks surface is only rewritten for the jobs that
+// actually run again. A dependent is re-run even when it previously succeeded:
+// its input (the failed job) is about to change, so its old result is not a
+// fact about the new attempt.
+//
+// The failed-set shape is documented in docs/threads.md §9.1: failed jobs plus
+// every job whose `needs:` names one (transitively). A run with no failed job
+// is a named conflict, never a no-op success. The image, container-option and
+// environment gates are re-applied exactly like a whole-run re-run.
+func (s *Service) RerunFailedRun(ctx context.Context, repo, runID string, p auth.Principal) (*Run, error) {
+	return s.rerun(ctx, repo, runID, p, true)
+}
+
+func (s *Service) rerun(ctx context.Context, repo, runID string, p auth.Principal, onlyFailed bool) (*Run, error) {
 	owner, name, err := splitRepo(repo)
 	if err != nil {
 		return nil, err
@@ -532,11 +655,19 @@ func (s *Service) RerunRun(ctx context.Context, repo, runID string, p auth.Princ
 	if err != nil {
 		return nil, err
 	}
-	now := s.nowUTC().Format(dateTimeFmt)
-	requeue := make([]*Job, 0, len(jobs))
+	targets := jobs
+	if onlyFailed {
+		targets = failedRerunSet(jobs)
+		if len(targets) == 0 {
+			return nil, fmt.Errorf("%w: run %s has no failed jobs to re-run (use the full re-run to run every job again)", ErrConflict, runID)
+		}
+	}
+	nowAt := s.nowUTC()
+	now := nowAt.Format(dateTimeFmt)
+	requeue := make([]*Job, 0, len(targets))
 	var gated []string
 	anyRefused := false
-	for _, job := range jobs {
+	for _, job := range targets {
 		if job.State == JobRunning {
 			return nil, fmt.Errorf("%w: job %s is still running; cancel it first", ErrConflict, job.ID)
 		}
@@ -563,7 +694,7 @@ func (s *Service) RerunRun(ctx context.Context, repo, runID string, p auth.Princ
 		// Re-decide the deployment against the CURRENT environment record: an
 		// undefined environment fails the job closed, a reviewed one holds the
 		// re-run for a new approval (the previous decision is not transferable).
-		held, eerr := s.applyEnvironmentDecision(ctx, owner, name, next, now)
+		held, eerr := s.applyEnvironmentDecision(ctx, owner, name, next, run, nowAt)
 		if eerr != nil {
 			return nil, eerr
 		}
@@ -648,6 +779,55 @@ func (s *Service) RerunRun(ctx context.Context, repo, runID string, p auth.Princ
 		return s.settleDecidedJobs(ctx, owner, name, runID)
 	}
 	return run, nil
+}
+
+// failedRerunSet is PAR-059's selection: every failed job plus every job that
+// (transitively) needs one. Dependents are found through the workflow job keys
+// the records carry, so matrix cells of one key are all dependents of a failed
+// key (a dependent waits for every cell). Anything else — a successful job
+// beside the failure, a cancelled matrix sibling — is not in the set: its
+// record, attempt and check stay exactly as they were.
+func failedRerunSet(jobs []*Job) []*Job {
+	if len(jobs) == 0 {
+		return nil
+	}
+	keyIDs := needsIndex(jobs)
+	selected := make(map[string]bool, len(jobs))
+	for _, j := range jobs {
+		if j.State == JobFailure {
+			selected[j.ID] = true
+		}
+	}
+	for changed := true; changed; {
+		changed = false
+		for _, j := range jobs {
+			if selected[j.ID] {
+				continue
+			}
+			for _, key := range j.Needs {
+				needs := keyIDs[key]
+				hit := false
+				for _, id := range needs {
+					if selected[id] {
+						hit = true
+						break
+					}
+				}
+				if hit {
+					selected[j.ID] = true
+					changed = true
+					break
+				}
+			}
+		}
+	}
+	out := make([]*Job, 0, len(selected))
+	for _, j := range jobs { // workflow order: the record order is stable
+		if selected[j.ID] {
+			out = append(out, j)
+		}
+	}
+	return out
 }
 
 // --- log reads --------------------------------------------------------------

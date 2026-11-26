@@ -110,6 +110,8 @@ type Executor struct {
 	DefaultImage string
 	WorkspaceDir string
 	ServerURL    string
+	// RunnerName is the registered runner's name (runner.name / RUNNER_NAME).
+	RunnerName string
 	// Images is the runner's image-source policy (--image-prefix/-all,
 	// --image-pull, --image-require-digest); zero = today's behaviour.
 	Images ImageConfig
@@ -137,7 +139,11 @@ type Result struct {
 	// Outputs are the job's declared outputs, resolved from the collected step
 	// outputs (nil for a job that did not succeed or declares none).
 	Outputs map[string]string
-	Error   string
+	// Annotations are the workflow-command annotations the attempt produced
+	// (PAR-093); Summary is the collected step summary markdown (PAR-092).
+	Annotations []threads.Annotation
+	Summary     string
+	Error       string
 }
 
 func (e *Executor) log() *slog.Logger {
@@ -160,6 +166,7 @@ func (e *Executor) Execute(ctx context.Context, in ExecInput, stream *Streamer) 
 		WorkspaceDir: e.WorkspaceDir,
 		Images:       e.Images,
 		ServerURL:    e.ServerURL,
+		RunnerName:   e.RunnerName,
 		Caps:         in.Caps,
 	})
 	if err != nil {
@@ -168,6 +175,11 @@ func (e *Executor) Execute(ctx context.Context, in ExecInput, stream *Streamer) 
 		stream.Systemf("spindle: cannot plan job: %v", err)
 		return res
 	}
+	// Workflow-command annotations and the step summary live for the whole
+	// attempt and are reported on EVERY return path (a hard failure still
+	// carries the annotations that explain it).
+	jobCmds := newJobCommands(stream)
+	summary := &jobSummary{}
 	defer func() {
 		if r := recover(); r != nil {
 			res.Conclusion = threads.JobFailure
@@ -175,6 +187,8 @@ func (e *Executor) Execute(ctx context.Context, in ExecInput, stream *Streamer) 
 			stream.Systemf("spindle: runner panic: %v", r)
 			e.log().Error("threads runner: panic in job", "job", plan.JobRef, "panic", r)
 		}
+		res.Annotations = jobCmds.annotations
+		res.Summary = summary.text()
 		e.cleanup(plan)
 	}()
 
@@ -200,6 +214,11 @@ func (e *Executor) Execute(ctx context.Context, in ExecInput, stream *Streamer) 
 	if err := e.setup(jobCtx, plan, stream); err != nil {
 		res.Conclusion = e.failOrCancel(jobCtx, stream, err)
 		res.Error = err.Error()
+		// A setup failure (a service that never became ready, a container that
+		// could not be created) must be visible in the job's own log: the
+		// conclusion is reported without a free-text error, so a silent log would
+		// leave the reader guessing (docs/threads.md §4.2).
+		stream.Systemf("spindle: %v", err)
 		return res
 	}
 
@@ -234,7 +253,7 @@ func (e *Executor) Execute(ctx context.Context, in ExecInput, stream *Streamer) 
 			stream.Systemf("spindle: step %q: %v", step.Name, rerr)
 		} else {
 			step = resolved
-			outcome, inner = e.runStep(jobCtx, plan, step, stream, steps, nil, hardFailure, cmds)
+			outcome, inner = e.runStep(jobCtx, plan, step, stream, steps, nil, hardFailure, cmds, jobCmds, summary)
 		}
 		steps.record(step, outcome)
 		res.Steps = append(res.Steps, outcome)
@@ -347,6 +366,24 @@ func (e *Executor) setup(ctx context.Context, plan *Plan, stream *Streamer) erro
 		if err := e.waitService(ctx, svc); err != nil {
 			return err
 		}
+	}
+	return e.writeJobFiles(ctx, plan)
+}
+
+// writeJobFiles seeds the container's per-job files before the first step: the
+// event JSON ($GITHUB_EVENT_PATH) and the writable runner directories. The
+// payload is bounded (64 KiB) and public by construction, so it travels as one
+// exec argument; it is never read from the repository or the network.
+func (e *Executor) writeJobFiles(ctx context.Context, plan *Plan) error {
+	payload := string(plan.EventJSON)
+	if payload == "" {
+		payload = "{}"
+	}
+	_, stderr, code, err := e.Docker.Run(ctx, nil, "exec", plan.Names.Container, "sh", "-c",
+		`mkdir -p "$1" "$2" && chmod 0777 "$1" "$2" && printf '%s' "$3" > "$4" && chmod 0644 "$4"`,
+		"sh", RunnerTemp, RunnerToolCache, payload, EventPath)
+	if err != nil || code != 0 {
+		return fmt.Errorf("write the job event file: exit %d: %v: %s", code, err, strings.TrimSpace(stderr))
 	}
 	return nil
 }
@@ -568,7 +605,7 @@ func (s *localScope) addOutputs(id string, outs map[string]string) error {
 
 // runStep executes one step (or one composite action and its inner steps) and
 // returns the step's own result plus the inner results, in execution order.
-func (e *Executor) runStep(ctx context.Context, plan *Plan, step StepPlan, stream *Streamer, steps *stepOutcomes, scope *localScope, hardFailure bool, cmds *commandFiles) (threads.StepResult, []threads.StepResult) {
+func (e *Executor) runStep(ctx context.Context, plan *Plan, step StepPlan, stream *Streamer, steps *stepOutcomes, scope *localScope, hardFailure bool, cmds *commandFiles, jobCmds *jobCommands, summary *jobSummary) (threads.StepResult, []threads.StepResult) {
 	out := threads.StepResult{Number: step.Index + 1, ID: step.LocalID, Name: step.Name}
 	if step.ID != "" {
 		out.ID = step.ID // a top-level id is what the job's steps.<id> names
@@ -586,7 +623,7 @@ func (e *Executor) runStep(ctx context.Context, plan *Plan, step StepPlan, strea
 		return out, nil
 	}
 	if step.Kind == "composite" {
-		return e.runCompositeStep(ctx, plan, step, stream, steps, scope, hardFailure, cmds)
+		return e.runCompositeStep(ctx, plan, step, stream, steps, scope, hardFailure, cmds, jobCmds, summary)
 	}
 	if step.Kind == "unsupported" {
 		out.Conclusion = threads.JobFailure
@@ -601,11 +638,30 @@ func (e *Executor) runStep(ctx context.Context, plan *Plan, step StepPlan, strea
 		// first has its output file copied out).
 		defer e.removeActionContainer(plan, step)
 	}
+	// A custom `shell:` command reads its script from a file: write it before
+	// the step runs, and fall back to sh when a `bash` step's image has no bash
+	// (PAR-079). This runs BEFORE the command-file wrapper: the fallback
+	// rebuilds the command tail, and rebuilding after PATH had been prepended
+	// would drop the wrapper.
+	step, skerr := e.prepareStepScript(ctx, plan, step, stream)
+	if skerr != nil {
+		out.DurationMS = time.Since(started).Milliseconds()
+		out.Conclusion = threads.JobFailure
+		out.Error = stream.Mask(skerr.Error())
+		stream.Systemf("spindle: step %q: %v", step.Name, skerr)
+		stream.StepEnd(step, threads.JobFailure, -1, out.DurationMS)
+		return out, nil
+	}
 	// The command-file state of the steps that already ran is layered onto this
 	// step's argv (env values) and command (PATH prepending). A docker action's
 	// argv is the image's own and is never wrapped.
 	step = applyCommandFiles(plan, step, cmds)
-	err = e.runStepCommand(ctx, plan, step, stream)
+	// Workflow commands are parsed out of the step's own output (PAR-093): the
+	// sink consumes `::name::` lines, records annotations/masks and forwards
+	// everything else to the log.
+	sink := newCommandSink(stream, jobCmds, step)
+	err = e.runStepCommand(ctx, plan, step, sink, stream)
+	sink.Close()
 	// The command files are processed for the step that just ran, whatever its
 	// conclusion: a step that writes an env var and then fails still changed the
 	// job environment for the steps after it (GitHub's rule).
@@ -614,6 +670,16 @@ func (e *Executor) runStep(ctx context.Context, plan *Plan, step StepPlan, strea
 			err = &stepError{code: -1, msg: cerr.Error()}
 		} else {
 			stream.Systemf("spindle: step %q: %v", step.Name, cerr)
+		}
+	}
+	// The step summary is collected for a step that succeeded AND one that
+	// failed (a failing step's summary explains it): a read/cap error fails a
+	// step that otherwise succeeded, never a step that already failed.
+	if serr := e.collectStepSummary(ctx, plan, step, summary, stream); serr != nil {
+		if err == nil {
+			err = &stepError{code: -1, msg: serr.Error()}
+		} else {
+			stream.Systemf("spindle: step %q: %v", step.Name, serr)
 		}
 	}
 	if err != nil {
@@ -637,6 +703,18 @@ func (e *Executor) runStep(ctx context.Context, plan *Plan, step StepPlan, strea
 	if step.ID != "" || step.LocalID != "" {
 		outs, oerr := e.collectStepOutputs(ctx, plan, step)
 		if oerr == nil {
+			// The deprecated `::set-output::` alias shares the output namespace;
+			// a name written through BOTH channels keeps the $GITHUB_OUTPUT value
+			// (the supported channel wins, documented in docs/WORKFLOWS.md §6.5).
+			for name, val := range sink.setOutputs {
+				if _, ok := outs[name]; ok {
+					continue
+				}
+				if outs == nil {
+					outs = map[string]string{}
+				}
+				outs[name] = val
+			}
 			oerr = e.storeStepOutputs(step, outs, steps, scope)
 		}
 		if oerr != nil {
@@ -675,7 +753,7 @@ func (e *Executor) storeStepOutputs(step StepPlan, outs map[string]string, steps
 // A failing inner step (without its own continue-on-error) fails the caller and
 // skips the rest of the action; the caller's continue-on-error then decides
 // whether the job tolerates it.
-func (e *Executor) runCompositeStep(ctx context.Context, plan *Plan, step StepPlan, stream *Streamer, steps *stepOutcomes, parent *localScope, hardFailure bool, cmds *commandFiles) (threads.StepResult, []threads.StepResult) {
+func (e *Executor) runCompositeStep(ctx context.Context, plan *Plan, step StepPlan, stream *Streamer, steps *stepOutcomes, parent *localScope, hardFailure bool, cmds *commandFiles, jobCmds *jobCommands, summary *jobSummary) (threads.StepResult, []threads.StepResult) {
 	out := threads.StepResult{Number: step.Index + 1, ID: step.ID, Name: step.Name}
 	if step.LocalID != "" {
 		out.ID = step.LocalID
@@ -717,7 +795,7 @@ func (e *Executor) runCompositeStep(ctx context.Context, plan *Plan, step StepPl
 			stream.Systemf("spindle: %s step %q: %v", step.Name, child.Name, rerr)
 			continue
 		}
-		childRes, childInner := e.runStep(cctx, plan, resolved, stream, steps, scope, hardFailure || failed, cmds)
+		childRes, childInner := e.runStep(cctx, plan, resolved, stream, steps, scope, hardFailure || failed, cmds, jobCmds, summary)
 		inner = append(inner, childRes)
 		inner = append(inner, childInner...)
 		scope.record(resolved.LocalID, childRes.Conclusion, conclusionOf(childRes, resolved.ContinueOnError))
@@ -824,7 +902,7 @@ func stepExitCode(err error) int {
 // NAME`), never in argv; a docker action gets NEITHER: its environment is
 // entirely in the argv (`--env K=V`), because the image is third-party code and
 // a fork run still receives no secrets (15 §5.2).
-func (e *Executor) runStepCommand(ctx context.Context, plan *Plan, step StepPlan, stream *Streamer) error {
+func (e *Executor) runStepCommand(ctx context.Context, plan *Plan, step StepPlan, out io.Writer, stream *Streamer) error {
 	stepCtx := ctx
 	if step.Timeout > 0 {
 		var cancel context.CancelFunc
@@ -847,7 +925,7 @@ func (e *Executor) runStepCommand(ctx context.Context, plan *Plan, step StepPlan
 		}
 		fullEnv = append(fullEnv, credentialEnv(plan, step.EnvFrom, step.EnvSecret)...)
 	}
-	code, err := e.Docker.Stream(stepCtx, fullEnv, stream, step.Argv...)
+	code, err := e.Docker.Stream(stepCtx, fullEnv, out, step.Argv...)
 	if stepCtx.Err() == context.DeadlineExceeded && ctx.Err() == nil {
 		// The step timed out: kill the container so the process cannot outlive
 		// it, then report the timeout.
@@ -869,6 +947,57 @@ func (e *Executor) runStepCommand(ctx context.Context, plan *Plan, step StepPlan
 		return &stepError{code: code, msg: fmt.Sprintf("exit code %d", code)}
 	}
 	return nil
+}
+
+// prepareStepScript finishes a script step's argv at execution time (PAR-079):
+//
+//   - a custom `shell:` command reads its script from a file, written here with
+//     `docker exec -i` so the script never becomes one huge argv element;
+//   - `shell: bash` on an image without bash falls back to `sh -e` with a log
+//     line (GitHub's documented Linux fallback), instead of failing every step
+//     on an alpine image with exit 127.
+//
+// Both are container-side facts, so they cannot be decided at plan time (the
+// plan is also shown before a container exists).
+func (e *Executor) prepareStepScript(ctx context.Context, plan *Plan, step StepPlan, stream *Streamer) (StepPlan, error) {
+	if step.Kind != "run" {
+		return step, nil
+	}
+	if strings.EqualFold(strings.TrimSpace(step.Shell), "bash") && !e.containerHasCommand(ctx, plan, "bash") {
+		cmd, needsFile, err := shellCommand("sh", step.Run, step.ScriptFile)
+		if err != nil {
+			return step, err
+		}
+		stream.Systemf("spindle: bash is not installed in this image; step %q falls back to sh -e", step.Name)
+		step = replaceStepCommand(step, plan.Names.Container, cmd)
+		if !needsFile {
+			step.ScriptFile = ""
+		}
+	}
+	if step.ScriptFile == "" {
+		return step, nil
+	}
+	code, err := e.Docker.StreamIn(ctx, nil, strings.NewReader(step.Run), io.Discard,
+		"exec", "-i", plan.Names.Container, "sh", "-c", "cat > "+shQuote(step.ScriptFile))
+	if err != nil || code != 0 {
+		msg := ""
+		if err != nil {
+			msg = err.Error()
+		}
+		if msg == "" {
+			msg = fmt.Sprintf("exit %d", code)
+		}
+		return step, fmt.Errorf("could not write the step's script file %s: %s", step.ScriptFile, msg)
+	}
+	return step, nil
+}
+
+// containerHasCommand reports whether a command is on the job container's PATH.
+// The probe is a shell builtin (`command -v`), so it needs nothing but the
+// container's own sh.
+func (e *Executor) containerHasCommand(ctx context.Context, plan *Plan, name string) bool {
+	_, _, code, err := e.Docker.Run(ctx, nil, "exec", plan.Names.Container, "sh", "-c", "command -v "+shQuote(name)+" >/dev/null 2>&1")
+	return err == nil && code == 0
 }
 
 // killJobContainer kills the job container (a step timeout's process-tree kill).
@@ -895,7 +1024,8 @@ func (e *Executor) removeActionContainer(plan *Plan, step StepPlan) {
 func (e *Executor) exprContext(plan *Plan, hardFailure bool, stream *Streamer, steps *stepOutcomes, scope *localScope) ExprContext {
 	ctx := ExprContext{
 		Success: !hardFailure, Failure: hardFailure, Cancelled: stream.Cancelled(),
-		GitHub: plan.githubValues(), Matrix: plan.Matrix, Inputs: plan.Inputs, Env: plan.Env,
+		GitHub: plan.githubValues(), Runner: plan.Runner, Vars: plan.Vars,
+		Matrix: plan.Matrix, Inputs: plan.Inputs, Env: plan.Env,
 		// A step `if:` reads the run's secrets on a trusted run (empty on a fork)
 		// and the job token under its GitHub/Forgejo names, the same values a
 		// step field substitutes (docs/threads.md §3.7).

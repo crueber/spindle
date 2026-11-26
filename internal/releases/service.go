@@ -101,6 +101,7 @@ func (s *Service) PutRelease(ctx context.Context, owner, repo string, p auth.Pri
 	var out *Release
 	var created bool
 	var published bool
+	var beforeDraft, beforePrerelease bool
 	_, err = s.casUpdate(ctx, key, 8, func(cur []byte, ver store.Version) ([]byte, bool, error) {
 		if expectedVer != "" && expectedVer != "*" && cur != nil && ver != expectedVer {
 			return nil, false, fmt.Errorf("%w: release %q changed; reload and retry", ErrConflict, tag)
@@ -149,6 +150,7 @@ func (s *Service) PutRelease(ctx context.Context, owner, repo string, p auth.Pri
 		if perr != nil {
 			return nil, false, perr
 		}
+		beforeDraft, beforePrerelease = r.Draft, r.Prerelease
 		if target != "" {
 			// The declared target only seeds a not-yet-existing tag; it is
 			// immutable afterwards like tag/tag_sha.
@@ -184,13 +186,30 @@ func (s *Service) PutRelease(ctx context.Context, owner, repo string, p auth.Pri
 	if err != nil {
 		return nil, false, err
 	}
+	action := "edited"
+	switch {
+	case created && out.Draft:
+		action = "created"
+	case published || (created && !out.Draft):
+		action = "published"
+		if out.Prerelease {
+			action = "prereleased"
+		}
+	case !created && beforePrerelease && !out.Prerelease && !out.Draft:
+		action = "released"
+	case !created && !out.Draft && beforeDraft:
+		action = "published"
+	case !created && out.Draft && !beforeDraft:
+		action = "unpublished"
+	}
 	if published {
 		s.updateLatestPointer(ctx, owner, repo, out.Tag, out.CreatedAt)
 		s.emit(ctx, NotifyEvent{Repo: repoName(owner, repo), Tag: out.Tag, Actor: normPrincipal(p.Name)})
 		s.stream(ctx, StreamEvent{Name: "release", Repo: repoName(owner, repo), Action: "published", Tag: out.Tag})
 	} else {
-		s.stream(ctx, StreamEvent{Name: "release", Repo: repoName(owner, repo), Action: "edited", Tag: out.Tag})
+		s.stream(ctx, StreamEvent{Name: "release", Repo: repoName(owner, repo), Action: action, Tag: out.Tag})
 	}
+	s.releaseEvent(ctx, owner, repo, out, action, p.Name)
 	return out, created, nil
 }
 
@@ -586,6 +605,7 @@ func (s *Service) DeleteRelease(ctx context.Context, owner, repo string, p auth.
 		s.repairLatestPointer(ctx, owner, repo, best.Tag, best.CreatedAt)
 	}
 	s.stream(ctx, StreamEvent{Name: "release", Repo: repoName(owner, repo), Action: "deleted", Tag: tag})
+	s.releaseEvent(ctx, owner, repo, &Release{Tag: tag}, "deleted", p.Name)
 	return nil
 }
 

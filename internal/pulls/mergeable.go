@@ -427,11 +427,11 @@ func (s *Service) HandleRefEvent(ctx context.Context, owner, repo string, ev Ref
 					// not start a run for a sha the PR has left behind.
 					// A job-token push (ByJob) never synchronizes.
 					if moved && !ev.ByJob {
-						s.pullEvent(ctx, PullEvent{
-							Repo: repoName(owner, repo), Action: "synchronize", Num: pr.Num,
-							BaseRef: pr.Base.Ref, HeadRef: pr.Head.Ref, HeadSHA: ev.New,
-							HeadRepo: pr.Head.Repo, Fork: pr.Fork != nil, Actor: "push",
-						})
+						// The applied head is the event's new sha; the helper's
+						// pr snapshot may still name the pre-image, so deliver
+						// the event's sha explicitly (the same sha the run builds).
+						pr.Head.SHA = ev.New
+						s.emitPullLifecycle(ctx, repoName(owner, repo), th, pr, "synchronize", "push")
 					}
 				}
 			}

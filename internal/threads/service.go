@@ -49,8 +49,17 @@ func ResetKindsForTest() {
 
 // MaxQueueAttempts bounds requeues of one job: past it the job fails rather
 // than cycling forever (12_runner D3's attempts cap, now backed by attempts
-// instead of a counter field).
+// instead of a counter field). It is the default of threads.max_queue_attempts
+// (PAR-179); a configured value replaces it within bounds checked at load.
 const MaxQueueAttempts = 3
+
+// maxAttempts is the effective requeue ceiling (threads.max_queue_attempts).
+func (s *Service) maxAttempts() int {
+	if s != nil && s.MaxQueueAttempts > 0 {
+		return s.MaxQueueAttempts
+	}
+	return MaxQueueAttempts
+}
 
 // GC is the threads-gc body (Seam 5): it requeues lapsed claims, fails a job
 // that has exhausted its attempts, and trims retired entries out of the queue
@@ -82,7 +91,7 @@ func (s *Service) GC(ctx context.Context, owner, repo string) (int, error) {
 		if entry.State != QueueClaimed || !s.claimExpired(entry) {
 			continue
 		}
-		if entry.Attempt >= MaxQueueAttempts {
+		if entry.Attempt >= s.maxAttempts() {
 			if _, uerr := s.UpdateJob(ctx, repoID(owner, repo), entry.RunID, entry.JobID, JobUpdate{
 				State: JobFailure, CancelRequested: boolPtr(false),
 			}); uerr != nil && !errors.Is(uerr, ErrNotFound) {
@@ -139,12 +148,16 @@ func (s *Service) CreateRun(ctx context.Context, repo, commit, event string, opt
 				strings.Join(workflow.PullRequestTypes, ", "), action)
 		}
 	}
+	if _, perr := EncodeEventPayload(opts.EventPayload); perr != nil {
+		return nil, perr
+	}
 	if s.Git == nil {
 		return nil, fmt.Errorf("%w: git backend not wired", ErrUnavailable)
 	}
 	// Trust class (15 §2/§5): the server decides, a workflow cannot opt in.
 	workflowCommit, trusted := sha, true
-	if event == EventPullReq && opts.Fork {
+	switch {
+	case event == EventPullReq && opts.Fork:
 		trusted = false
 		workflowCommit = strings.TrimSpace(opts.BaseCommit)
 		if workflowCommit == "" {
@@ -165,6 +178,15 @@ func (s *Service) CreateRun(ctx context.Context, repo, commit, event string, opt
 			return nil, nerr
 		}
 		workflowCommit = normalized
+	case event == EventRelease || event == EventIssues || event == EventIssueComment:
+		// GitHub's rule for the repository-level events: the workflow file is
+		// read from the DEFAULT branch, never from the release tag or the
+		// commenter's checkout. A release run still reports the tag commit.
+		defaultCommit, rerr := s.Git.ResolveRef(ctx, repo, "HEAD")
+		if rerr != nil {
+			return nil, rerr
+		}
+		workflowCommit = defaultCommit
 	}
 	files, err := Discover(ctx, s.Git, repo, workflowCommit)
 	if err != nil {
@@ -190,7 +212,37 @@ func (s *Service) CreateRun(ctx context.Context, repo, commit, event string, opt
 			"repo", repo, "commit", workflowCommit, "files", paths)
 	}
 	kind, refName, _ := refTargetOf(event, opts)
-	matched := SelectFiles(files, event, kind, refName, action, want)
+	// Path filters (PAR-012): the diff is computed ONCE per event and only when
+	// a parsed workflow actually declares a path filter — a repository without
+	// them pays zero extra git subprocesses and zero store round trips. The
+	// changed-file set then selects the files.
+	var changed []string
+	pathsKnown := false
+	if NeedsChangedPaths(files, event) {
+		dr, ok := s.Git.(DiffReader)
+		if !ok {
+			return nil, fmt.Errorf("%w: path filters need a git reader that can diff", ErrUnavailable)
+		}
+		from := strings.TrimSpace(opts.BaseSHA)
+		mergeBase := false
+		if event == EventPullReq && from == "" && strings.TrimSpace(opts.BaseBranch) != "" {
+			base := strings.TrimPrefix(strings.TrimSpace(opts.BaseBranch), "refs/heads/")
+			resolved, rerr := s.Git.ResolveRef(ctx, repo, "refs/heads/"+base)
+			if rerr != nil {
+				return nil, rerr
+			}
+			from = resolved
+		}
+		if event == EventPullReq && from != "" {
+			mergeBase = true
+		}
+		changed, err = dr.DiffNames(ctx, repo, from, sha, mergeBase)
+		if err != nil {
+			return nil, err
+		}
+		pathsKnown = true
+	}
+	matched := SelectFilesWithChanges(files, event, kind, refName, action, want, changed, pathsKnown)
 	if len(matched) == 0 {
 		if event == EventDispatch && want != "" {
 			return nil, fmt.Errorf("%w: no workflow_dispatch workflow named %q", ErrNotFound, want)
@@ -244,7 +296,8 @@ func refTargetOf(event string, opts CreateOpts) (workflow.RefKind, string, strin
 // checks mirrors (a queued check must never exist for a run nobody can see).
 func (s *Service) createOne(ctx context.Context, owner, repo, sha, event string, opts CreateOpts, f *WorkflowFile, workflowCommit string, trusted bool, attempt int, actor string, gate bool) (*Run, error) {
 	_, _, branch := refTargetOf(event, opts)
-	now := s.nowUTC().Format(dateTimeFmt)
+	nowAt := s.nowUTC()
+	now := nowAt.Format(dateTimeFmt)
 	runID, err := newRunID(s.nowUTC())
 	if err != nil {
 		return nil, fmt.Errorf("%w: mint run id: %v", ErrUnavailable, err)
@@ -262,9 +315,10 @@ func (s *Service) createOne(ctx context.Context, owner, repo, sha, event string,
 		Branch: branch, Ref: strings.TrimSpace(opts.Ref),
 		Workflow: f.Name, WorkflowPath: f.Path, WorkflowCommit: workflowCommit,
 		WorkflowDigest: f.Digest, Trusted: trusted, State: RunQueued, Actor: actor,
-		Attempt:   attempt,
-		Inputs:    runInputs(opts),
-		CreatedAt: now, UpdatedAt: now, Version: 1,
+		Attempt:      attempt,
+		Inputs:       runInputs(opts),
+		EventPayload: opts.EventPayload,
+		CreatedAt:    now, UpdatedAt: now, Version: 1,
 	}
 	used := map[string]bool{}
 	jobs := make([]*Job, 0, len(jobKeys))
@@ -274,18 +328,27 @@ func (s *Service) createOne(ctx context.Context, owner, repo, sha, event string,
 	// checked-out code and a base-branch workflow can never execute an action
 	// file from another ref (docs/threads.md §3.4a).
 	resolver := newActionResolver(s.Git, repoID(owner, repo), sha)
-	// The group/name templates expand against the run's own context: the header
-	// exists before the job loop (it is written after), and a branch name in a
-	// group is what keeps a push on one branch off another branch's key.
-	ec := expandContext{GitHub: githubContext(run, f.Name), Inputs: groupInputs(f.Workflow, opts.Inputs)}
-	for _, key := range jobKeys {
-		def := f.Workflow.Jobs[key]
-		display := strings.TrimSpace(def.Name)
-		if display == "" {
-			display = key
+	// The job list is expanded first: a local reusable-workflow caller is
+	// replaced IN PLACE by its callee's jobs (PAR-075, docs/threads.md §3.4b).
+	// The expansion is decided at run creation — the runner never sees a
+	// `uses:` job — and a bad reference is a failed job with a named reason,
+	// never a run-wide failure.
+	plan, perr := s.planJobDefs(ctx, repoID(owner, repo), sha, f, opts.Inputs)
+	if perr != nil {
+		return nil, perr
+	}
+	for _, jd := range plan {
+		def := jd.def
+		display := jd.name
+		base := buildSpec(jd.wfName, jd.wf, def, jd.inputs)
+		if jd.cap != nil {
+			// PAR-075: a callee may narrow permissions, never widen them.
+			base.Permissions = downgradePermissions(jd.cap, base.Permissions)
 		}
-		base := buildSpec(f.Name, f.Workflow, def, opts.Inputs)
-		instances, xerr := expandJobSpec(key, display, base, ec)
+		// A callee's names/groups expand against the run's github context and
+		// the call's inputs (the caller's `with:` values).
+		ec := expandContext{GitHub: githubContext(run, f.Name), Inputs: groupInputs(jd.wf, jd.inputs)}
+		instances, xerr := expandJobSpec(jd.key, display, base, ec)
 		if xerr != nil {
 			return nil, xerr
 		}
@@ -297,7 +360,7 @@ func (s *Service) createOne(ctx context.Context, owner, repo, sha, event string,
 				Context:   CheckContext(spec.Workflow, inst.Name),
 				RunsOn:    strings.Join(spec.RunsOn, ", "),
 				Container: containerImage(spec.Container),
-				Needs:     nonNilStr([]string(def.Needs)),
+				Needs:     nonNilStr(jd.needs),
 				Spec:      spec,
 				Attempt:   attempt,
 				Trusted:   trusted,
@@ -305,11 +368,19 @@ func (s *Service) createOne(ctx context.Context, owner, repo, sha, event string,
 				CreatedAt: now, UpdatedAt: now,
 				Version: 1,
 			}
+			// A refused `uses:` (a foreign repository, a missing file, a caller
+			// key that describes a runner job) is a failed job with the named
+			// reason; nothing is enqueued and no runner is asked to interpret it.
+			if jd.refusal != "" {
+				job.State = JobFailure
+				job.CompletedAt = &now
+				job.Reason = jd.refusal
+			}
 			// A job with no `needs:` can be decided now: nothing about it can
 			// change between creation and a runner's claim, so a false `if:` is
 			// written `skipped` (never enqueued) instead of being re-evaluated
 			// by every probe. A dependent job is decided by the needs cascade.
-			if len(def.Needs) == 0 {
+			if len(jd.needs) == 0 && job.State == JobQueued {
 				if verdict, reason, _ := evaluateJobIf(job, run, needFacts{}); verdict != jobIfRun {
 					job.State = JobSkipped
 					job.CompletedAt = &now
@@ -351,7 +422,7 @@ func (s *Service) createOne(ctx context.Context, owner, repo, sha, event string,
 			// §5): an undefined environment fails the job (fail closed), a defined
 			// one carries its deployment record, and one with required reviewers
 			// holds the run until a listed reviewer (or a repo admin) decides.
-			if _, eerr := s.applyEnvironmentDecision(ctx, owner, repo, job, now); eerr != nil {
+			if _, eerr := s.applyEnvironmentDecision(ctx, owner, repo, job, run, nowAt); eerr != nil {
 				return nil, eerr
 			}
 			// The display list is built after resolution: a composite action is
@@ -425,6 +496,11 @@ func (s *Service) createOne(ctx context.Context, owner, repo, sha, event string,
 		if cancelled := s.finishSupersede(ctx, owner, repo, run, supersede); cancelled != nil {
 			run = cancelled
 		}
+		// PAR-135: a held deployment tells its reviewers it is waiting (best
+		// effort; the hold and its badge exist with or without the notice).
+		if run.State == RunPendingApproval && run.ApprovalKind == ApprovalEnvironment {
+			s.notifyPendingDeployment(ctx, owner, repo, run, s.pendingReviewers(ctx, owner, repo, run.Environments))
+		}
 		return run, nil
 	}
 	// Enqueue AFTER the run header (the header is the commit point, so a runner
@@ -442,6 +518,37 @@ func (s *Service) createOne(ctx context.Context, owner, repo, sha, event string,
 		}
 	}
 	fetchHub.wake(repoID(owner, repo))
+	// PAR-152: a grouped workflow registers in its group's single pending slot
+	// when another run holds it (one group read per declared group) and stamps
+	// the group on its header so the page never shows a silent spinner. This
+	// runs AFTER the header commit and the enqueue: the cancellations it can
+	// perform (cancel-in-progress, pending-cancel) must never destroy a live run
+	// for a run that then fails to be created, and a group read or record
+	// problem must never turn a created run into an error (the claim path
+	// re-applies the rule and fails closed). A run the fork/environment gate
+	// holds is not queued at all, so it neither waits in nor displaces a group
+	// until it is approved.
+	if run.State == RunQueued {
+		if pendingGroup, perr := s.prepareRunGroups(ctx, owner, repo, run, jobs); perr != nil {
+			slog.Warn("threads: concurrency group preparation", "repo", repoID(owner, repo), "run", runID, "err", perr)
+		} else if pendingGroup != "" {
+			run.PendingGroup = pendingGroup
+			if _, uerr := s.casUpdate(ctx, RunKey(owner, repo, runID), 3, func(cur []byte, _ store.Version) ([]byte, bool, error) {
+				var r Run
+				if jerr := json.Unmarshal(cur, &r); jerr != nil {
+					return nil, false, jerr
+				}
+				if r.State != RunQueued {
+					return nil, false, nil // it started/ended meanwhile: no wait to show
+				}
+				r.PendingGroup = pendingGroup
+				r.Version++
+				return mustJSON(&r), true, nil
+			}); uerr != nil {
+				slog.Warn("threads: pending group stamp", "repo", repoID(owner, repo), "run", runID, "err", uerr)
+			}
+		}
+	}
 	// A job decided at creation (a false `if:`) can doom its dependents with no
 	// runner poll, and a run whose every job was decided has nothing left to
 	// wait for. Settle it now rather than leaving the run at "queued" until a
@@ -504,6 +611,12 @@ func (s *Service) reportCheck(ctx context.Context, run *Run, job *Job) error {
 		desc = fmt.Sprintf("%s / %s · environment %s (run %s)",
 			job.specWorkflow(run.Workflow), job.Name, job.Deployment.Environment, run.ID)
 	}
+	// Workflow-command annotations are stated on the commit's check: the full
+	// text lives on the job record (the run page), and the commit reader sees
+	// how many the attempt produced (PAR-093).
+	if n := len(job.Annotations); n > 0 {
+		desc = fmt.Sprintf("%s · %d annotation(s)", desc, n)
+	}
 	if len([]rune(desc)) > 256 {
 		desc = string([]rune(desc)[:253]) + "…"
 	}
@@ -557,7 +670,14 @@ func (s *Service) DispatchRun(ctx context.Context, repo, ref, workflowRef string
 			}
 			return nil, fmt.Errorf("%w: no workflow_dispatch workflow named %q", ErrNotFound, workflowRef)
 		}
-		resolved, verr := resolveDispatchInputs(target[0], inputs)
+		var environments []string
+		if declaresEnvironmentInput(target[0]) {
+			environments, derr = s.environmentNameList(ctx, owner, name)
+			if derr != nil {
+				return nil, derr
+			}
+		}
+		resolved, verr := resolveDispatchInputs(target[0], inputs, environments)
 		if verr != nil {
 			return nil, verr
 		}
@@ -567,8 +687,13 @@ func (s *Service) DispatchRun(ctx context.Context, repo, ref, workflowRef string
 	if rest, ok := strings.CutPrefix(ref, "refs/heads/"); ok {
 		branch = rest
 	}
+	payload := map[string]any{"action": "workflow_dispatch"}
+	if ins := eventInputs(effective); ins != nil {
+		payload["inputs"] = ins
+	}
 	return s.CreateRun(ctx, repo, commit, EventDispatch, CreateOpts{
 		Branch: branch, Ref: ref, Actor: string(p.Name), Workflow: workflowRef, Inputs: effective,
+		EventPayload: payload,
 	})
 }
 
@@ -884,6 +1009,12 @@ type JobUpdate struct {
 	RunnerName      string
 	CancelRequested *bool
 	StepResults     []StepResult
+	// Annotations replaces the job's annotations when non-nil (complete); a
+	// rerun clears them through ClearTimings.
+	Annotations []Annotation
+	// Summary replaces the job's step summary when non-nil (complete); a rerun
+	// clears it through ClearTimings.
+	Summary *string
 	// Outputs replaces the job's reported outputs when non-nil (complete); a
 	// rerun clears them through ClearTimings.
 	Outputs     map[string]string
@@ -953,6 +1084,12 @@ func (s *Service) UpdateJob(ctx context.Context, repo, runID, jobID string, up J
 		if up.StepResults != nil {
 			job.StepResults = up.StepResults
 		}
+		if up.Annotations != nil {
+			job.Annotations = up.Annotations
+		}
+		if up.Summary != nil {
+			job.Summary = *up.Summary
+		}
 		if up.Outputs != nil {
 			job.Outputs = up.Outputs
 		}
@@ -969,6 +1106,8 @@ func (s *Service) UpdateJob(ctx context.Context, repo, runID, jobID string, up J
 			job.RunnerName = ""
 			job.StepResults = nil
 			job.Outputs = nil
+			job.Annotations = nil
+			job.Summary = ""
 			job.Reason = ""
 		}
 		// The reason is applied AFTER the reset: a caller that clears an
@@ -1072,6 +1211,11 @@ func (s *Service) foldRun(ctx context.Context, owner, repo, runID string) ([]*Jo
 		run.State = state
 		run.UpdatedAt = now
 		run.StartedAt = earliestStart(jobs)
+		if state != RunQueued {
+			// The run left the queue (running or terminal): it is no longer
+			// waiting on a concurrency group.
+			run.PendingGroup = ""
+		}
 		if terminal(state) {
 			run.CompletedAt = &now
 			released = append([]string(nil), run.Concurrency...)

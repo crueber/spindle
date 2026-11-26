@@ -106,6 +106,39 @@ D-2/D-3/D-5/D-10 machinery — `pull_request_target`, `workflow_run`, remote `us
 SHA pinning, and the cache service — plus the trigger/context/command long tail the matrix assigns to that
 wave. The matrix is the list; this paragraph only names the themes.
 
+### 1.2 Wave 2 outcome (2026-11-26)
+
+Wave 2 is merged. The changes on `main`, in landing order:
+
+| Merge | What landed |
+|---|---|
+| `3dd07cbd` | the closed `permissions:` vocabulary (`contents`, `issues`, `pull-requests`, `id-token`; `read-all`/`write-all`; every other scope a named parse error), the job token as a scoped platform-API credential, and `enable-openid-connect` with the fixed OIDC claim set, subject templates, required audience and five-minute TTL |
+| `bb1b6222` (#789) | runner surfaces: rerun-failed, arbitrary `shell: <cmd> {0}` plus `python`/`python3`, service health gates, `$GITHUB_STEP_SUMMARY` (and workflow commands, groups, `add-mask`, `stop-commands`, `set-output`, debug), the hardened `$GITHUB_OUTPUT` heredoc, repository-local reusable workflows, and composite limits |
+| `aca7b492` | environments (`environment:` forms, a structural `${{ }}` parse error, wait timer / team reviewers / prevent-self-review / deployment branch+tag allowlist), pending-deployment UX, concurrency's one running + one pending slot with pending-cancel, the two retention windows and GC live-run guard, `name:docker://…` runner labels, and operator limits |
+| `5b801214` | `paths`/`paths-ignore` and the filter dialect, the full emitted `pull_request.types`, `release`, `issues` and `issue_comment`, cron names/macros/`L`/`NW`/`#`/per-entry timezone, dispatch `number`/`environment`, the bounded `github.event.*` payload plus `$GITHUB_EVENT_PATH`, `runner.*`/`RUNNER_*`, and `vars.*` |
+
+**The matrix** (`docs/features/parity/parity.json`, 119 rows) at Wave 2 close: **45 `have`**, **37
+`partial`**, **37 `missing`**, no `non-goal`. Wave 2 owns 56 rows: 25 green, 17 `partial`, 14 `missing`.
+
+**Three parser gaps carried as follow-ups** (named in their matrix rows, never accepted-and-inert):
+
+- `on.workflow_call` typed inputs and `jobs.<id>.secrets` for reusable workflows (`PAR-075`): a
+  repository-local callee's jobs expand correctly, but `with:`, callee `outputs:` and secret passing
+  are refused by name.
+- `github.action_path` (`PAR-074`): a composite action that reads it is a named parse error rather
+  than an empty value.
+- `services.<id>.credentials` (`PAR-078`): the pull identity remains the runner's, supplied by its
+  docker config or mirror (`--image-prefix`).
+
+**What remains for Wave 3.** The Wave-2 rows still open, in clusters: `pull_request_target`
+(`PAR-015`) and the rest of the issue/review/label/milestone trigger family (`PAR-020`); remote and
+JavaScript actions (`PAR-070`, `PAR-071`), Dockerfile-action inputs (`PAR-072`) and the composite/
+reusable tail above (`PAR-074`, `PAR-075`); the cache service (`PAR-095`, `PAR-096`); matrix/runner
+shape gaps — `max-parallel`, `runs-on` substitution, `defaults.run`, timeout parity, `hashFiles`
+(`PAR-052`…`PAR-055`, `PAR-041`); org/user secrets and non-secret variables (`PAR-115`, `PAR-117`);
+operator policy (`PAR-179`) and the UI-shaped rows (`PAR-190`, `PAR-191`); and offline validation
+(`PAR-199`). The matrix is still the list.
+
 ---
 
 ## 2. The product rule: Spindle workflows only

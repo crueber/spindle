@@ -181,3 +181,14 @@ func TestFiles(t *testing.T) {
 		t.Fatalf("ParseFile: %v", err)
 	}
 }
+
+// testGlob / testMatchAny are thin wrappers over the compiled filter, so the
+// existing matching tables exercise the shipped dialect.
+func testGlob(pattern, name string) bool {
+	f, err := compileFilter([]string{pattern}, false)
+	return err == nil && f.Match(name)
+}
+
+func testMatchAny(patterns []string, name string) bool {
+	return matchAnyList(patterns, name)
+}

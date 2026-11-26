@@ -1248,8 +1248,14 @@ func (s SettingsServices) repoEnvironments(ctx context.Context, owner, repo stri
 	for _, env := range list {
 		row := SettingsEnvironment{
 			Name: env.Name, Reviewers: env.RequiredReviewers,
-			ReviewersText: strings.Join(env.RequiredReviewers, ", "),
-			CreatedAt:     env.CreatedAt, UpdatedAt: env.UpdatedAt,
+			ReviewersText:     strings.Join(env.RequiredReviewers, ", "),
+			Teams:             env.TeamReviewers,
+			TeamsText:         strings.Join(env.TeamReviewers, ", "),
+			WaitMinutes:       env.WaitTimerSeconds / 60,
+			PreventSelfReview: env.PreventSelfReview,
+			Branches:          env.DeploymentBranches,
+			BranchesText:      strings.Join(env.DeploymentBranches, ", "),
+			CreatedAt:         env.CreatedAt, UpdatedAt: env.UpdatedAt,
 		}
 		secrets, serr := envs.ListEnvironmentSecrets(ctx, owner+"/"+repo, env.Name, p)
 		if serr != nil {
@@ -1271,8 +1277,23 @@ func (s SettingsServices) putEnvironment(ctx context.Context, owner, repo string
 		return SettingsWriteResult{}, settingsWriteErr(http.StatusServiceUnavailable, "the Threads service is not configured")
 	}
 	reviewers := settingsReviewerList(w.Get("environment_reviewers"))
-	if _, err := envs.PutEnvironment(ctx, owner+"/"+repo, w.Get("environment_name"),
-		threads.EnvironmentInput{RequiredReviewers: reviewers}, p); err != nil {
+	waitMinutes := 0
+	if raw := strings.TrimSpace(w.Get("environment_wait_minutes")); raw != "" {
+		n, err := strconv.Atoi(raw)
+		if err != nil || n < 0 {
+			return SettingsWriteResult{}, settingsWriteErr(http.StatusBadRequest,
+				"the wait timer is a whole number of minutes (0 disables it)")
+		}
+		waitMinutes = n
+	}
+	in := threads.EnvironmentInput{
+		RequiredReviewers:  reviewers,
+		TeamReviewers:      settingsReviewerList(w.Get("environment_teams")),
+		WaitTimerSeconds:   waitMinutes * 60,
+		PreventSelfReview:  w.Get("environment_prevent_self_review") != "",
+		DeploymentBranches: settingsReviewerList(w.Get("environment_branches")),
+	}
+	if _, err := envs.PutEnvironment(ctx, owner+"/"+repo, w.Get("environment_name"), in, p); err != nil {
 		return SettingsWriteResult{}, settingsWriteErr(settingsThreadsStatus(err), err.Error())
 	}
 	return SettingsWriteResult{Notice: "environment saved"}, nil

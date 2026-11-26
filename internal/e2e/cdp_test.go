@@ -127,15 +127,32 @@ func browserSkipOrFail(t *testing.T, format string, args ...any) {
 // browser costs a second instead of a server build and a fixture seed.
 func requireBrowser(t *testing.T) {
 	t.Helper()
+	if cdpEndpoint() != "" {
+		return
+	}
 	if _, err := findChromium(); err != nil {
 		browserSkipOrFail(t, "%v", err)
 	}
 }
 
+// cdpEndpoint is the operator's override: an already-running CDP server
+// (e.g. a headless browser served over the DevTools protocol) that the smoke
+// should connect to instead of launching Chromium itself. Useful where the
+// local Chromium build lacks system libraries but a CDP-speaking browser is
+// available. The value is a devtools endpoint ("http://127.0.0.1:9222").
+func cdpEndpoint() string { return strings.TrimSpace(os.Getenv("SPINDLE_CDP_URL")) }
+
 // launchBrowser starts headless Chromium with a throwaway profile and returns
-// it once the DevTools endpoint is known.
+// it once the DevTools endpoint is known. With SPINDLE_CDP_URL set it connects
+// to that already-running CDP endpoint and owns no process (so it kills none).
 func launchBrowser(t *testing.T) *devBrowser {
 	t.Helper()
+	if endpoint := cdpEndpoint(); endpoint != "" {
+		b := &devBrowser{t: t, devtools: endpoint, logs: &lockedBuffer{}, done: make(chan struct{})}
+		close(b.done)
+		t.Cleanup(b.close)
+		return b
+	}
 	bin, err := findChromium()
 	if err != nil {
 		browserSkipOrFail(t, "%v", err)

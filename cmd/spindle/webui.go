@@ -454,6 +454,11 @@ func wireCollabPages(apiEnv *api.Env, c *collabWiring) {
 		td.Dispatch = func(ctx context.Context, owner, repo, ref, workflow string, inputs map[string]string, p auth.Principal) ([]*threads.Run, error) {
 			return th.DispatchRun(ctx, owner+"/"+repo, ref, workflow, inputs, p)
 		}
+		// The `environment`-typed dispatch input's picker (PAR-023): the
+		// repository's environment names, resolved server-side.
+		td.Environments = func(ctx context.Context, owner, repo string, p auth.Principal) ([]string, error) {
+			return th.EnvironmentNames(ctx, owner+"/"+repo, p)
+		}
 		// Artifact ZIP download (15 §2.5): the service resolves the read gate
 		// and the expiry; the page only writes the archive.
 		td.OpenArtifact = func(ctx context.Context, owner, repo, runID, name string, p auth.Principal) (*threads.ArtifactDownload, error) {

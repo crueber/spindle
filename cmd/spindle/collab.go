@@ -268,6 +268,13 @@ func buildCollab(st store.ObjectStore, cfg *config.Config, reg *wal.Registry, ap
 	if c.threadsSvc != nil && c.pullsSvc != nil {
 		c.threadsSvc.Approvals = threadsApprovals{svc: c.pullsSvc, ident: c.ident, cfg: cfg}
 	}
+	// Environment team reviewers (PAR-131): the team directory is identity's,
+	// reached through threads' narrow TeamRoster seam (threads never imports
+	// identity's team store directly). A nil identity leaves the seam unwired,
+	// and an environment naming a team then fails closed at save/creation.
+	if c.threadsSvc != nil && c.ident != nil {
+		c.threadsSvc.TeamRoster = threadsTeamRoster{ident: c.ident}
+	}
 	// Runner administration is a host-admin mutation and is audited in the
 	// host audit family (docs/PLAN-INSTANCE-RUNNERS.md §4). A nil moderation
 	// service (tests) records nothing.
@@ -285,6 +292,15 @@ func buildCollab(st store.ObjectStore, cfg *config.Config, reg *wal.Registry, ap
 	if c.pullsSvc != nil {
 		c.pullsSvc.PullEvents = threadsPullEventOf(c)
 		c.pullsSvc.BranchPublished = threadsBranchPublishedOf(c)
+	}
+	// Issues and PR metadata edges (PAR-020/PAR-014): the shared thread sink
+	// routes `on.issues`, `on.issue_comment` and a PR's labeled/assigned/
+	// milestoned transitions to the same run-creation path.
+	if c.issuesSvc != nil && c.threadsSvc != nil {
+		c.issuesSvc.ThreadEvents = threadsIssueEventOf(c)
+	}
+	if c.threadsSvc != nil {
+		c.threadsSvc.OrgAdmin = c.ident.CheckOrgOwner
 	}
 	// Issue #505: the summary checks-existence projection behind the Env
 	// hook (api renders ChecksSummary without importing the feature, law
@@ -311,6 +327,9 @@ func buildCollab(st store.ObjectStore, cfg *config.Config, reg *wal.Registry, ap
 	// latest pointer, and changelog autodraft. Publish fan-out rides
 	// internal/notify through the nil-safe seams bound below (P8).
 	c.releasesSvc, c.releasesHandler = newReleasesService(st, c.ident, reg, cfg.Git.Binary, cfg.Cache.Dir, int64(cfg.Releases.MaxAssetBytes))
+	if c.releasesSvc != nil && c.threadsSvc != nil {
+		c.releasesSvc.ReleaseEvents = threadsReleaseEventOf(c)
+	}
 	// Feature 14 packages (docs/features/14): the OCI Distribution
 	// registry at /v2/* (a top-level namespace, not a repo lane), over
 	// the same store and P6 roles. The bucket prefix is spindle-only.
@@ -400,6 +419,16 @@ func buildCollab(st store.ObjectStore, cfg *config.Config, reg *wal.Registry, ap
 	// synchronously (P8) from this boot forward.
 	c.notifySvc, c.notifyHandler = newNotifyService(st, c.ident)
 	wireNotifyFanout(c.notifySvc, c.issuesSvc, c.pullsSvc, c.reviewSvc, c.checksSvc)
+	// Pending deployments (PAR-135): a held run notifies the environment's
+	// required reviewers through the same notify service, as a repo-level
+	// review request. Best effort — the hold is visible on the run page with or
+	// without the notice.
+	if c.threadsSvc != nil && c.notifySvc != nil {
+		n := c.notifySvc
+		c.threadsSvc.NotifyDeployment = func(ctx context.Context, ev threads.DeploymentNotice) {
+			n.EmitDeployment(ctx, ev.Repo, ev.RunID, ev.Workflow, ev.Environments, ev.Reviewers, ev.Actor, ev.At)
+		}
+	}
 	wireReleasesFanout(c.releasesSvc, c.notifySvc)
 	wireSocialForks(c.socialSvc, c.pullsSvc)
 	// Feature M1: one moderation service satisfies every consumer-owned

@@ -94,6 +94,11 @@ Performance claims (scale, latency shape) are **evidence-backed**: measured entr
   Publishing is the button, not a mirror: `bump` (patch/minor/major) or `bump: none` + an exact `tag`
   (Weave's process); a publish whose exported tree is unchanged produces a tag only, never an empty
   commit.
+- **CI installs nothing at run time; the toolchain is a prepped image.** The merge gate once ran
+  `apt-get update && apt-get install git nodejs npm build-essential chromium …` on every push and pull
+  request, hammering the Debian mirrors and paying the download each run. It now runs
+  `github.com/crueber/spindle-ci@sha256:…` from `docker/ci.Dockerfile`, pinned by digest. Adding
+  `apt-get` to a job step is a regression: rebuild the image and move the digest.
 - **The publish sanitizer rewrites hosts, never facts.** `scripts/publish-to-github.sh` once rewrote
   `.forgejo/workflows` → `.github/workflows` in *every* file; in the published tree that turned the
   importer's Go fixture map into duplicate keys, so `v0.10.0`'s tag CI failed `go vet` while the local tree

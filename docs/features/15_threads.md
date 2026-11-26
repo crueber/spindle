@@ -40,16 +40,19 @@ with knowledge they already have.
   **per file**: the error belongs to that workflow only and is shown in the UI/API (§2.1). No
   cross-forge file fallback (`.github/`, `.forgejo/` are not read) — one documented location.
 - **Accepted workflow syntax (v1):** `on` as a string, a list, or a mapping with
-  `push.branches/tags`, `pull_request.branches/types` (types filtered against the emitted
-  `opened`/`synchronize`/`reopened` set, validated at parse time), `workflow_dispatch.inputs` (typed
-  string/choice/boolean with required/default/options) and `schedule.cron`; `concurrency`
+  `push.branches/tags/paths` (and the `*-ignore` twins), `pull_request.branches/paths/types` (types
+  filtered against the emitted lifecycle set, validated at parse time), `release.types`,
+  `issues.types`, `issue_comment.types`, `workflow_dispatch.inputs` (typed
+  string/choice/boolean/number/environment with required/default/options) and
+  `schedule.cron` (+ `timezone`); `concurrency`
   (group + cancel-in-progress); `permissions` (mapping or read-all/write-all); job `runs-on`
   (scalar or list), `container` (image or mapping), `services`, `env`, `if`, `needs`,
   `timeout-minutes`, `continue-on-error`, `strategy.matrix` (a simple product) with `fail-fast`, and
   a job-level `uses`/`with` (reusable workflow). Anything else is a parse error for that file.
-- **Triggers v1:** `push`, `pull_request` (opened/synchronize/reopened, with `types` filtering that
-  closed vocabulary), `workflow_dispatch` (manual, from the UI/API), `schedule` (cron, evaluated by
-  the maintainer role).
+- **Triggers v1 (Wave 2 extends the vocabulary):** `push` (branches/tags/paths), `pull_request`
+  (every emitted lifecycle action, with `types` filtering that closed vocabulary), `release`,
+  `issues`, `issue_comment`, `workflow_dispatch` (manual, from the UI/API), `schedule` (cron,
+  evaluated by the maintainer role).
 - **Jobs:** `runs-on` labels matched against registered runners; `container:` image override;
   `services:` (sidecar containers); `steps:` with `run:` and `uses: actions/checkout` (our own
   checkout action, see §4); `env`, `if`, `needs`, `timeout-minutes`, `continue-on-error`, and a step
@@ -107,19 +110,23 @@ error and creates no run, while every other file still runs and still creates it
 all-or-nothing failure mode measured in the 2026-11-21 audit is gone). The per-file error is
 surfaced by the Threads page and `GET …/api/threads/workflows`.
 
-**Triggers (as wired).** `push`, `pull_request`, `workflow_dispatch` and (round 2, pass 2)
-`schedule` create runs:
+**Triggers (as wired).** `push`, `pull_request`, `workflow_dispatch`, `schedule` and (Wave 2)
+`release`, `issues` and `issue_comment` create runs:
 
 | event | workflow revision | `trusted` |
 |---|---|---|
 | `push` (client push) | the pushed commit | `true` |
 | `push` (PR merge, server-side publish) | the merge commit | `true` |
-| `pull_request` opened/synchronize/reopened, same repository | the head commit | `true` |
-| `pull_request` opened/synchronize/reopened, fork | the **base branch tip** (resolved `refs/heads/<base>`) | `false` |
+| `pull_request` (any emitted lifecycle action), same repository | the head commit | `true` |
+| `pull_request` (any emitted lifecycle action), fork | the **base branch tip** (resolved `refs/heads/<base>`) | `false` |
 | `workflow_dispatch` | the resolved ref's commit | `true` |
 | `schedule` (maintainer cron) | the default branch tip | `true` |
+| `release` | the default branch tip (the run reports the tag commit) | `true` |
+| `issues` / `issue_comment` | the default branch tip | `true` |
 
-`pull_request` never fires on close. The three edges are emitted by `internal/pulls` next to its
+`pull_request` fires on `opened`, `synchronize`, `reopened`, `closed` (including a merge), `edited`,
+`ready_for_review`, `converted_to_draft` and the metadata actions; the PR edges are emitted by
+`internal/pulls` next to its
 existing notify/SSE lifecycle seams (`PullEvents`); the merge commit rides `BranchPublished`, the
 hook the merge task calls after its base-ref publish — server-side publishes never enter the client
 push pipeline, so without it a merge built nothing. Composition binds both to the same
@@ -146,12 +153,14 @@ parser records key presence (`PushSet`/`PullRequestSet`) because a null YAML val
 nil pointer. `schedule` never creates a run here (the maintainer evaluates cron in T4).
 
 `pull_request.types` is a real filter over a closed vocabulary. The pulls `PullEvents` seam emits
-exactly `opened`, `synchronize` and `reopened`, so `internal/threads/workflow` validates `types`
-against that set at parse time (an unsupported name, or `types: []`, is that file's parse error
-naming the supported set) and `Workflow.Fires`/`SelectFiles` take the delivered action, matching a
-run only when it is listed. `CreateRun` requires a pull_request `Action` and rejects one outside the
-set, so no caller can create a run for an edge pulls never emits. An absent `types` keeps the
-default: every emitted action.
+`opened`, `synchronize`, `reopened`, `closed` (including a merge), `edited`, `ready_for_review` and
+`converted_to_draft`; the shared issues thread sink supplies `labeled`, `unlabeled`, `assigned`,
+`unassigned`, `milestoned` and `demilestoned`. `internal/threads/workflow` validates `types` against
+that set at parse time (an unsupported name, or `types: []`, is that file's parse error naming the
+supported set) and `Workflow.Fires`/`SelectFiles` take the delivered action, matching a run only when
+it is listed. `CreateRun` requires a pull_request `Action` and rejects one outside the set, so no
+caller can create a run for an edge no service emits. An absent `types` keeps the default: every
+emitted action.
 
 **Run record** — `repos/<o>/<r>/threads/runs/<run_id>.json`, JSON, Create-only when created
 (state transitions CAS-update it), RFC 3339 UTC:
@@ -385,11 +394,12 @@ repos/<o>/<r>/meta/merged_authors.json              merged-PR author projection 
 
 The parser validates cron; the **maintainer evaluates it**. Both halves are new:
 
-- **Syntax (parse time).** `schedule: - cron: "…"` accepts the documented five-field UTC subset:
-  `*`, a number, a range `a-b`, a step `*/N`, `a-b/N` or `n/N`, and comma lists of those. Field
-  ranges are minute 0–59, hour 0–23, day-of-month 1–31, month 1–12, day-of-week 0–6 with `7` as
-  Sunday's alias. Anything else — month/weekday **names** (`MON`), `@daily` macros, `L`/`W`/`#`,
-  six fields with seconds — is **that file's parse error** (`workflow.ParseCron` in
+- **Syntax (parse time).** `schedule: - cron: "…"` accepts the documented five-field subset:
+  `*`, a number, a range `a-b`, a step `*/N`, `a-b/N` or `n/N`, comma lists, month/weekday names,
+  the `@daily`-family macros, `L`/`L-N`/`NW`/`DL`/`D#n`, and a per-entry `timezone:` (IANA, UTC
+  when absent). Field ranges are minute 0–59, hour 0–23, day-of-month 1–31, month 1–12,
+  day-of-week 0–6 with `7` as Sunday's alias. An unknown macro/name, a six-field expression with
+  seconds, or an invalid timezone is **that file's parse error** (`workflow.ParseCron` in
   `internal/threads/workflow/cron.go`), so the file's other triggers never silently stop working and
   a schedule can never be silently dead. A bare `on: schedule` with no entries and an empty
   `schedule: []` are errors too. Day-of-month and day-of-week follow the classic Vixie rule (both
@@ -398,9 +408,11 @@ The parser validates cron; the **maintainer evaluates it**. Both halves are new:
   (`internal/threads/schedule.go`, `cmd/spindle/threads_sweep.go`) resolves the default branch (one
   `git rev-parse HEAD` + one `symbolic-ref`), discovers the workflow files at that commit (the same
   per-file discovery the UI uses), and for every `(path, cron)` entry computes the **most recent
-  tick at or before now** (`Cron.Prev`). The watermark object
-  `repos/<o>/<r>/threads/schedule.json` holds `"<path>|<cron>" → unix second` of the last fired tick;
-  an entry fires only when that tick is strictly greater.
+  tick at or before now** (`Cron.PrevIn` on the entry's zone). The watermark object
+  `repos/<o>/<r>/threads/schedule.json` holds `"<path>|<cron>|<timezone>" → the local wall-clock
+  slot` of the last fired tick. A slot is the scheduled local minute, so a DST fall-back hour (two
+  instants, one local minute) fires once, and a spring-forward local time (which does not exist)
+  has no slot at all.
 - **The watermark CAS is the commit point (never double-fire).** Firing is a CAS `PutUpdate` of the
   watermark; the winner then creates the run. Two instances sweeping the same minute race on one
   version — the loser reads the advanced watermark and creates nothing — and a **restart** (a fresh

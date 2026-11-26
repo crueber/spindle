@@ -29,6 +29,7 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/crueber/spindle/internal/server/auth"
 	"github.com/crueber/spindle/internal/store"
@@ -39,9 +40,22 @@ import (
 type EnvironmentDoc struct {
 	Name string `json:"name"`
 	// RequiredReviewers are principals (lowercased) who must approve a
-	// deployment. Empty means no approval is required (the job runs like any
-	// other, still with no secrets for a fork run).
+	// deployment. Empty (with no team reviewers and no wait timer) means no
+	// approval is required (the job runs like any other, still with no secrets
+	// for a fork run).
 	RequiredReviewers []string `json:"required_reviewers,omitempty"`
+	// TeamReviewers are organization teams ("org/team") whose members must
+	// approve; the members are resolved at save and at each decision (PAR-131).
+	TeamReviewers []string `json:"team_reviewers,omitempty"`
+	// WaitTimerSeconds delays every deployment's start after creation
+	// (0…21600 = GitHub's 6-hour ceiling).
+	WaitTimerSeconds int `json:"wait_timer_seconds,omitempty"`
+	// PreventSelfReview refuses the run's own actor as an approver.
+	PreventSelfReview bool `json:"prevent_self_review,omitempty"`
+	// DeploymentBranches is the deployment branch/tag policy: empty = every
+	// ref; otherwise the run's ref must match one pattern (exact names and
+	// `*`, matched against the short branch/tag name and the full ref).
+	DeploymentBranches []string `json:"deployment_branches,omitempty"`
 	// Secrets is the allowlist of environment secret names. Values live sealed
 	// under the environment's secret prefix; this list is what the resolver
 	// reads (no LIST).
@@ -54,20 +68,28 @@ type EnvironmentDoc struct {
 
 // EnvironmentView is the wire/API shape: names and timestamps, never a value.
 type EnvironmentView struct {
-	Name              string   `json:"name"`
-	RequiredReviewers []string `json:"required_reviewers"`
-	Secrets           []string `json:"secrets"`
-	CreatedBy         string   `json:"created_by,omitempty"`
-	CreatedAt         string   `json:"created_at"`
-	UpdatedAt         string   `json:"updated_at"`
-	Version           int      `json:"version"`
+	Name               string   `json:"name"`
+	RequiredReviewers  []string `json:"required_reviewers"`
+	TeamReviewers      []string `json:"team_reviewers,omitempty"`
+	WaitTimerSeconds   int      `json:"wait_timer_seconds,omitempty"`
+	PreventSelfReview  bool     `json:"prevent_self_review,omitempty"`
+	DeploymentBranches []string `json:"deployment_branches,omitempty"`
+	Secrets            []string `json:"secrets"`
+	CreatedBy          string   `json:"created_by,omitempty"`
+	CreatedAt          string   `json:"created_at"`
+	UpdatedAt          string   `json:"updated_at"`
+	Version            int      `json:"version"`
 }
 
-// EnvironmentInput is the create/update body. Only the reviewer set is
-// editable; secret names change through the secret endpoints so the record's
-// allowlist and the stored ciphertexts cannot drift.
+// EnvironmentInput is the create/update body. Only the protection rules are
+// editable here; secret names change through the secret endpoints so the
+// record's allowlist and the stored ciphertexts cannot drift.
 type EnvironmentInput struct {
-	RequiredReviewers []string `json:"required_reviewers"`
+	RequiredReviewers  []string `json:"required_reviewers"`
+	TeamReviewers      []string `json:"team_reviewers,omitempty"`
+	WaitTimerSeconds   int      `json:"wait_timer_seconds,omitempty"`
+	PreventSelfReview  bool     `json:"prevent_self_review,omitempty"`
+	DeploymentBranches []string `json:"deployment_branches,omitempty"`
 }
 
 // EnvironmentKey returns repos/<o>/<r>/threads/environments/<name>.json.
@@ -96,13 +118,13 @@ func normalizeEnvironmentName(name string) (string, error) {
 }
 
 // normalizeReviewers validates the reviewer list: principals with at least
-// write access, deduped, lowercased, at most maxEnvironmentReviewers entries.
+// write access, deduped, lowercased, at most MaxEnvironmentReviewers entries.
 // Validation happens at SAVE time (the task's rule): a name nobody can resolve
 // to write is ErrInvalid, never a silently ignored reviewer a deployment would
 // then wait for forever.
 func (s *Service) normalizeReviewers(ctx context.Context, owner, repo string, in []string) ([]string, error) {
-	if len(in) > maxEnvironmentReviewers {
-		return nil, fmt.Errorf("%w: at most %d required reviewers", ErrInvalid, maxEnvironmentReviewers)
+	if len(in) > MaxEnvironmentReviewers {
+		return nil, fmt.Errorf("%w: at most %d required reviewers", ErrInvalid, MaxEnvironmentReviewers)
 	}
 	seen := map[string]bool{}
 	out := make([]string, 0, len(in))
@@ -125,8 +147,8 @@ func (s *Service) normalizeReviewers(ctx context.Context, owner, repo string, in
 	return out, nil
 }
 
-// maxEnvironmentReviewers bounds one environment's reviewer list.
-const maxEnvironmentReviewers = 10
+// maxEnvironmentReviewers is kept as the internal alias of the exported limit.
+const maxEnvironmentReviewers = MaxEnvironmentReviewers
 
 // PutEnvironment creates or replaces one environment record (maintain+, audited).
 func (s *Service) PutEnvironment(ctx context.Context, repo, name string, in EnvironmentInput, p auth.Principal) (*EnvironmentView, error) {
@@ -142,6 +164,23 @@ func (s *Service) PutEnvironment(ctx context.Context, repo, name string, in Envi
 		return nil, err
 	}
 	reviewers, err := s.normalizeReviewers(ctx, owner, rname, in.RequiredReviewers)
+	if err != nil {
+		return nil, err
+	}
+	teams, err := s.normalizeTeamReviewers(ctx, in.TeamReviewers)
+	if err != nil {
+		return nil, err
+	}
+	// GitHub's ceiling is six reviewers OR teams in total: a seventh is a named
+	// error, not a silently truncated gate.
+	if len(reviewers)+len(teams) > MaxEnvironmentReviewers {
+		return nil, fmt.Errorf("%w: at most %d required reviewers and teams together (got %d)",
+			ErrInvalid, MaxEnvironmentReviewers, len(reviewers)+len(teams))
+	}
+	if in.WaitTimerSeconds < 0 || in.WaitTimerSeconds > MaxEnvironmentWaitSeconds {
+		return nil, fmt.Errorf("%w: wait timer must be 0…%d seconds (6 hours)", ErrInvalid, MaxEnvironmentWaitSeconds)
+	}
+	branches, err := normalizeDeploymentBranches(in.DeploymentBranches)
 	if err != nil {
 		return nil, err
 	}
@@ -161,6 +200,10 @@ func (s *Service) PutEnvironment(ctx context.Context, repo, name string, in Envi
 			doc.CreatedBy = truncate(strings.ToLower(strings.TrimSpace(p.Name)), 100)
 		}
 		doc.RequiredReviewers = reviewers
+		doc.TeamReviewers = teams
+		doc.WaitTimerSeconds = in.WaitTimerSeconds
+		doc.PreventSelfReview = in.PreventSelfReview
+		doc.DeploymentBranches = branches
 		doc.UpdatedAt = now
 		doc.Version++
 		out = doc
@@ -174,7 +217,7 @@ func (s *Service) PutEnvironment(ctx context.Context, repo, name string, in Envi
 		action = AuditEnvironmentCreate
 	}
 	s.auditAdmin(ctx, p.Name, action, "environment:"+name,
-		fmt.Sprintf("reviewers=%d", len(reviewers)))
+		fmt.Sprintf("reviewers=%d teams=%d wait=%ds branches=%d", len(reviewers), len(teams), in.WaitTimerSeconds, len(branches)))
 	return environmentView(out), nil
 }
 
@@ -282,6 +325,40 @@ func (s *Service) ListEnvironments(ctx context.Context, repo string, p auth.Prin
 	return out, nil
 }
 
+// environmentNameList resolves the repository's environment names without the
+// settings role gate: the dispatch form is visible to write-role users and an
+// environment NAME is not a secret. It is one bounded LIST, and only on a
+// dispatch that declares an `environment` input.
+func (s *Service) environmentNameList(ctx context.Context, owner, repo string) ([]string, error) {
+	prefix := EnvironmentsPrefix(owner, repo)
+	names := []string{}
+	if err := s.Store.List(ctx, prefix, "", func(m store.ObjectMeta) error {
+		rest := strings.TrimPrefix(m.Key, prefix)
+		if strings.HasSuffix(rest, ".json") && !strings.Contains(rest, "/") {
+			names = append(names, strings.TrimSuffix(rest, ".json"))
+		}
+		return nil
+	}); err != nil {
+		return nil, err
+	}
+	sort.Strings(names)
+	return names, nil
+}
+
+// EnvironmentNames is the dispatch picker's read (PAR-023): names only, behind
+// the repository READ gate (a name is not a secret, and a write-role
+// dispatcher may not hold `maintain`).
+func (s *Service) EnvironmentNames(ctx context.Context, repo string, p auth.Principal) ([]string, error) {
+	owner, rname, err := splitRepo(repo)
+	if err != nil {
+		return nil, err
+	}
+	if err := s.requireRead(ctx, owner, rname, p); err != nil {
+		return nil, err
+	}
+	return s.environmentNameList(ctx, owner, rname)
+}
+
 // loadEnvironment reads one record exactly (no LIST). A nil doc, nil error means
 // "no such environment".
 func (s *Service) loadEnvironment(ctx context.Context, owner, repo, name string) (*EnvironmentDoc, error) {
@@ -303,6 +380,8 @@ func environmentView(doc *EnvironmentDoc) *EnvironmentView {
 	}
 	return &EnvironmentView{
 		Name: doc.Name, RequiredReviewers: nonNilStr(doc.RequiredReviewers), Secrets: nonNilStr(doc.Secrets),
+		TeamReviewers: nonNilStr(doc.TeamReviewers), WaitTimerSeconds: doc.WaitTimerSeconds,
+		PreventSelfReview: doc.PreventSelfReview, DeploymentBranches: nonNilStr(doc.DeploymentBranches),
 		CreatedBy: doc.CreatedBy, CreatedAt: doc.CreatedAt, UpdatedAt: doc.UpdatedAt, Version: doc.Version,
 	}
 }
@@ -600,8 +679,10 @@ func uniqueEnvNames(in []string) []string {
 
 // applyEnvironmentDecision resolves one job's environment at creation and
 // reports whether that job requires an approval hold. An undefined environment
-// fails the job (fail closed); a defined one carries the deployment record.
-func (s *Service) applyEnvironmentDecision(ctx context.Context, owner, repo string, job *Job, now string) (bool, error) {
+// fails the job (fail closed); a defined one whose branch/tag policy refuses the
+// run's ref fails the job with a named reason; a defined one carries the
+// deployment record with its resolved approver set and wait-timer deadline.
+func (s *Service) applyEnvironmentDecision(ctx context.Context, owner, repo string, job *Job, run *Run, now time.Time) (bool, error) {
 	if job.Spec == nil || job.Spec.Environment == nil {
 		return false, nil
 	}
@@ -610,27 +691,57 @@ func (s *Service) applyEnvironmentDecision(ctx context.Context, owner, repo stri
 	if err != nil {
 		return false, err
 	}
+	nowStr := now.Format(dateTimeFmt)
 	if doc == nil {
 		if job.State == JobQueued {
 			job.State = JobFailure
-			job.CompletedAt = &now
+			job.CompletedAt = &nowStr
 			job.Reason = fmt.Sprintf("environment %q is not defined in this repository (create it in Settings → Environments)", env)
 		}
 		return false, nil
 	}
+	// Deployment branch/tag policy (PAR-131): a ref the environment does not
+	// allow fails the job with a named reason — the same fail-closed shape as an
+	// undefined environment, so nothing ever deploys from a forbidden ref.
+	if allowed, reason := deploymentRefAllowed(doc.DeploymentBranches, run, env); !allowed {
+		job.Deployment = &Deployment{Environment: env, URL: job.Spec.Environment.URL, State: DeploymentFailed}
+		if job.State == JobQueued {
+			job.State = JobFailure
+			job.CompletedAt = &nowStr
+			job.Reason = reason
+		}
+		return false, nil
+	}
+	approvers, aerr := s.deploymentApprovers(ctx, doc)
+	if aerr != nil {
+		// An unresolvable team requirement fails the deployment closed: a hold
+		// nobody can satisfy would show a spinner forever (law 7).
+		job.Deployment = &Deployment{Environment: env, URL: job.Spec.Environment.URL, State: DeploymentFailed}
+		if job.State == JobQueued {
+			job.State = JobFailure
+			job.CompletedAt = &nowStr
+			job.Reason = aerr.Error()
+		}
+		return false, nil
+	}
 	state := DeploymentNotRequired
-	if len(doc.RequiredReviewers) > 0 {
+	if len(approvers) > 0 {
 		state = DeploymentPending
 	}
-	job.Deployment = &Deployment{Environment: env, URL: job.Spec.Environment.URL, State: state}
+	job.Deployment = &Deployment{
+		Environment: env, URL: job.Spec.Environment.URL, State: state,
+		RequiredApprovers: approvers, WaitUntil: waitUntilFor(doc, now),
+		PreventSelfReview: doc.PreventSelfReview, TriggeredBy: strings.ToLower(strings.TrimSpace(run.Actor)),
+	}
 	return state == DeploymentPending && job.State == JobQueued, nil
 }
 
 // guardDeploymentSecrets is the payload-side half of the gate: a job whose
 // environment requires reviewers must carry an APPROVED deployment record
-// before its secrets are resolved. Unreachable through the queue (an approval
-// enqueues), but a claim racing a deletion or a stale queue entry must fail
-// closed rather than run a deployment nobody approved.
+// before its secrets are resolved, and no deployment may resolve them before
+// its wait timer elapses. Unreachable through the queue (an approval enqueues,
+// the claim path honours the timer), but a claim racing a deletion or a stale
+// queue entry must fail closed rather than run a deployment nobody approved.
 func (s *Service) guardDeploymentSecrets(ctx context.Context, owner, repo string, job *Job) error {
 	if job == nil || job.Spec == nil || job.Spec.Environment == nil {
 		return nil
@@ -643,19 +754,28 @@ func (s *Service) guardDeploymentSecrets(ctx context.Context, owner, repo string
 	if doc == nil {
 		return fmt.Errorf("%w: environment %q no longer exists", ErrNotFound, env)
 	}
-	if len(doc.RequiredReviewers) == 0 {
-		return nil
+	approvers, aerr := s.deploymentApprovers(ctx, doc)
+	if aerr != nil {
+		return aerr
 	}
-	if job.Deployment == nil || job.Deployment.State != DeploymentApproved {
-		return fmt.Errorf("%w: deployment to environment %q is not approved", ErrForbidden, env)
+	if len(approvers) > 0 {
+		if job.Deployment == nil || job.Deployment.State != DeploymentApproved {
+			return fmt.Errorf("%w: deployment to environment %q is not approved", ErrForbidden, env)
+		}
+	}
+	if waiting, until := deploymentWaitRemaining(job, s.nowUTC()); waiting {
+		return fmt.Errorf("%w: deployment to environment %q waits until %s (wait timer)", ErrConflict, env, until)
 	}
 	return nil
 }
 
 // holdsForEnvironment reports whether a principal may DECIDE a run held by an
-// environment: a repo admin always may; otherwise the principal must be listed
-// as a required reviewer of EVERY gated environment, and hold at least write
-// (a read/anonymous principal can never decide, whatever a stale list says).
+// environment: a repo admin always may; otherwise the principal must be in the
+// environment's CURRENT required-approver set (its direct reviewers plus the
+// members of its team reviewers), and hold at least write (a read/anonymous
+// principal can never decide, whatever a stale list says). The live record is
+// the authority, exactly like GitHub's protection rules: a roster edit applies
+// to the next decision.
 func (s *Service) holdsForEnvironment(ctx context.Context, owner, repo string, p auth.Principal, run *Run) error {
 	role := "admin"
 	if !p.Admin {
@@ -681,8 +801,12 @@ func (s *Service) holdsForEnvironment(ctx context.Context, owner, repo string, p
 			// release it (and approval then fails the job — see ApproveRun).
 			return fmt.Errorf("%w: environment %q no longer exists; an admin must decide this run", ErrForbidden, env)
 		}
+		approvers, aerr := s.deploymentApprovers(ctx, doc)
+		if aerr != nil {
+			return fmt.Errorf("%w: %v", ErrForbidden, aerr)
+		}
 		listed := false
-		for _, reviewer := range doc.RequiredReviewers {
+		for _, reviewer := range approvers {
 			if reviewer == who {
 				listed = true
 				break

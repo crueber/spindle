@@ -516,3 +516,49 @@ func authedGet(target string) *http.Request {
 	req.Header.Set("X-Test-Principal", "bob")
 	return req
 }
+
+// TestReleaseEventsEmitDocumentedActions pins PAR-017's emitter vocabulary: a
+// draft create is `created`, publishing is `published`, a prerelease publish is
+// `prereleased`, and a delete is `deleted`.
+func TestReleaseEventsEmitDocumentedActions(t *testing.T) {
+	roles := newFakeRoles()
+	roles.grant("o", "r", "ada", "write")
+	roles.grant("o", "r", "ada", "maintain")
+	s := New(store.NewMemory(), roles)
+	s.Git = newFakeGit()
+	s.Dirs = &fakeDirs{dir: t.TempDir()}
+	s.Git.(*fakeGit).tags["v1"] = "1111111111111111111111111111111111111111"
+	s.Git.(*fakeGit).tags["v2"] = "2222222222222222222222222222222222222222"
+	var got []ReleaseEvent
+	s.ReleaseEvents = func(_ context.Context, ev ReleaseEvent) { got = append(got, ev) }
+	who := auth.Principal{Name: "ada", Write: true}
+	draft, pub, pre := true, false, true
+
+	if _, _, err := s.PutRelease(ctx(), "o", "r", who, "v1", ReleaseInput{Draft: &draft}, ""); err != nil {
+		t.Fatalf("draft create: %v", err)
+	}
+	if _, _, err := s.PutRelease(ctx(), "o", "r", who, "v1", ReleaseInput{Draft: &pub}, ""); err != nil {
+		t.Fatalf("publish: %v", err)
+	}
+	if _, _, err := s.PutRelease(ctx(), "o", "r", who, "v2", ReleaseInput{Prerelease: &pre}, ""); err != nil {
+		t.Fatalf("prerelease: %v", err)
+	}
+	if err := s.DeleteRelease(ctx(), "o", "r", who, "v2"); err != nil {
+		t.Fatalf("delete: %v", err)
+	}
+	actions := make([]string, 0, len(got))
+	for _, ev := range got {
+		actions = append(actions, ev.Action)
+	}
+	for _, want := range []string{"created", "published", "prereleased", "deleted"} {
+		found := false
+		for _, a := range actions {
+			if a == want {
+				found = true
+			}
+		}
+		if !found {
+			t.Fatalf("no %s event in %v", want, actions)
+		}
+	}
+}

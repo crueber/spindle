@@ -43,9 +43,15 @@ type Workflow struct {
 	Env  map[string]string `yaml:"env"`
 	Jobs map[string]Job    `yaml:"jobs"`
 	// Concurrency and Permissions are workflow-level defaults; a job may
-	// override either. Carried into the job spec; not enforced yet.
+	// override either. Permissions drive the job token's authority (PAR-112).
 	Concurrency *Concurrency `yaml:"concurrency"`
 	Permissions Permissions  `yaml:"permissions"`
+	// EnableOpenIDConnect is the Forgejo spelling for a job that may exchange
+	// an OIDC ID token (PAR-119): `enable-openid-connect: true` beside
+	// `permissions: id-token: write`. It is a permission, not a feature
+	// toggle: a fork run never gets a token whatever it says, and an explicit
+	// `id-token: none` wins over it.
+	EnableOpenIDConnect bool `yaml:"enable-openid-connect"`
 }
 
 // Triggers selects the events that start a run. A workflow with no triggers is
@@ -62,6 +68,12 @@ type Triggers struct {
 	PullRequest      *PRTrigger       `yaml:"pull_request"`
 	WorkflowDispatch *DispatchTrigger `yaml:"workflow_dispatch"`
 	Schedule         []CronEntry      `yaml:"schedule"`
+	// Release, Issues and IssueComment are the event services' triggers
+	// (PAR-017, PAR-020): each names the lifecycle actions its owning service
+	// actually emits, and an unemittable type is a parse error.
+	Release      *TypeTrigger `yaml:"release"`
+	Issues       *TypeTrigger `yaml:"issues"`
+	IssueComment *TypeTrigger `yaml:"issue_comment"`
 	// DispatchSet records that the key was PRESENT even as null
 	// (`workflow_dispatch:` with no value decodes to a nil pointer).
 	DispatchSet bool `yaml:"-"`
@@ -73,6 +85,11 @@ type Triggers struct {
 	// ScheduleSet records `schedule:` presence (the entries may be empty;
 	// cron evaluation is the maintainer role's, not the parser's).
 	ScheduleSet bool `yaml:"-"`
+	// ReleaseSet/IssuesSet/IssueCommentSet are the same presence rule for the
+	// three typed triggers.
+	ReleaseSet      bool `yaml:"-"`
+	IssuesSet       bool `yaml:"-"`
+	IssueCommentSet bool `yaml:"-"`
 }
 
 // UnmarshalYAML accepts the scalar, sequence and mapping forms of `on`. The
@@ -107,9 +124,12 @@ func (t *Triggers) UnmarshalYAML(node *yaml.Node) error {
 			case "push":
 				t.PushSet = true
 				if !isNull(val) {
-					if err = checkKeys(val, "branches", "tags"); err == nil {
+					if err = checkKeys(val, "branches", "branches-ignore", "tags", "tags-ignore", "paths", "paths-ignore"); err == nil {
 						var p PushTrigger
 						if err = val.Decode(&p); err == nil {
+							err = p.validate()
+						}
+						if err == nil {
 							t.Push = &p
 						}
 					}
@@ -117,13 +137,52 @@ func (t *Triggers) UnmarshalYAML(node *yaml.Node) error {
 			case "pull_request":
 				t.PullRequestSet = true
 				if !isNull(val) {
-					if err = checkKeys(val, "branches", "types"); err == nil {
+					if err = checkKeys(val, "branches", "branches-ignore", "types", "paths", "paths-ignore"); err == nil {
 						var p PRTrigger
 						if err = val.Decode(&p); err == nil {
-							err = validatePRTypes(p.Types)
+							err = p.validate()
 						}
 						if err == nil {
 							t.PullRequest = &p
+						}
+					}
+				}
+			case "release":
+				t.ReleaseSet = true
+				if !isNull(val) {
+					if err = checkKeys(val, "types"); err == nil {
+						var r TypeTrigger
+						if err = val.Decode(&r); err == nil {
+							err = validateTypeFilter("release", r.Types, ReleaseTypes)
+						}
+						if err == nil {
+							t.Release = &r
+						}
+					}
+				}
+			case "issues":
+				t.IssuesSet = true
+				if !isNull(val) {
+					if err = checkKeys(val, "types"); err == nil {
+						var r TypeTrigger
+						if err = val.Decode(&r); err == nil {
+							err = validateTypeFilter("issues", r.Types, IssuesTypes)
+						}
+						if err == nil {
+							t.Issues = &r
+						}
+					}
+				}
+			case "issue_comment":
+				t.IssueCommentSet = true
+				if !isNull(val) {
+					if err = checkKeys(val, "types"); err == nil {
+						var r TypeTrigger
+						if err = val.Decode(&r); err == nil {
+							err = validateTypeFilter("issue_comment", r.Types, IssueCommentTypes)
+						}
+						if err == nil {
+							t.IssueComment = &r
 						}
 					}
 				}
@@ -172,46 +231,149 @@ func (t *Triggers) enable(name string) error {
 		// `on: schedule` without `- cron:` entries has nothing to evaluate;
 		// the mapping form is the only legal spelling.
 		return fmt.Errorf("on: schedule requires a list of `- cron: \"…\"` entries")
+	case "release":
+		t.ReleaseSet = true
+	case "issues":
+		t.IssuesSet = true
+	case "issue_comment":
+		t.IssueCommentSet = true
 	default:
 		return fmt.Errorf("on: unknown trigger %q", name)
 	}
 	return nil
 }
 
-// PushTrigger may filter branches/tags by simple globs (`main`, `release/*`).
+// PushTrigger filters branch/tag pushes and the changed paths that fire them.
+// The `*-ignore` spellings are exclusion lists; a trigger may not name both
+// forms of the same dimension (the include form with `!` is the way to mix).
 type PushTrigger struct {
-	Branches []string `yaml:"branches"`
-	Tags     []string `yaml:"tags"`
+	Branches       []string `yaml:"branches"`
+	BranchesIgnore []string `yaml:"branches-ignore"`
+	Tags           []string `yaml:"tags"`
+	TagsIgnore     []string `yaml:"tags-ignore"`
+	Paths          []string `yaml:"paths"`
+	PathsIgnore    []string `yaml:"paths-ignore"`
 }
 
-// PRTrigger may filter the target branches and the lifecycle actions.
+// PRTrigger may filter the target branches, the changed paths and the
+// lifecycle actions.
 type PRTrigger struct {
-	Branches []string `yaml:"branches"`
+	Branches       []string `yaml:"branches"`
+	BranchesIgnore []string `yaml:"branches-ignore"`
+	Paths          []string `yaml:"paths"`
+	PathsIgnore    []string `yaml:"paths-ignore"`
 	// Types filters the pull_request lifecycle actions. The vocabulary is
 	// closed: only the actions the pulls service actually emits can be named
 	// (PullRequestTypes). An absent or empty filter fires on every emitted
-	// action; a named filter fires only on the listed ones, so `types:
-	// [closed]` must be a parse error rather than a workflow that can never
-	// run (15_threads.md §3.2, §6.2).
+	// action; a named filter fires only on the listed ones, so an action the
+	// service never emits must be a parse error rather than a workflow that
+	// can never run (15_threads.md §3.2, §6.2).
+	Types []string `yaml:"types"`
+}
+
+// TypeTrigger is one typed event trigger (`release`, `issues`,
+// `issue_comment`). An absent/empty `types` fires on every action the owning
+// service emits.
+type TypeTrigger struct {
 	Types []string `yaml:"types"`
 }
 
 // PullRequestTypes is the closed set of pull_request lifecycle actions Threads
-// can emit, in emission order. The pulls service emits exactly these through
-// its PullEvents seam (internal/pulls/pulls.go PullEvent): opened, synchronize
-// (an applied new head commit) and reopened. A close never starts work and no
-// label event exists, so `closed`/`labeled` are rejected at parse time instead
-// of being accepted and ignored.
-var PullRequestTypes = []string{"opened", "synchronize", "reopened"}
+// emits. The pulls service emits exactly these through its PullEvents seam
+// (internal/pulls/pulls.go PullEvent) plus the PR metadata edges: opened,
+// synchronize (an applied new head commit), reopened, closed, edited,
+// ready_for_review, converted_to_draft, labeled, unlabeled, assigned,
+// unassigned, milestoned, demilestoned.
+var PullRequestTypes = []string{
+	"opened", "synchronize", "reopened", "closed", "edited",
+	"ready_for_review", "converted_to_draft",
+	"labeled", "unlabeled", "assigned", "unassigned",
+	"milestoned", "demilestoned",
+}
+
+// ReleaseTypes is the closed set of release lifecycle actions the releases
+// service emits: created (a draft), published, edited, deleted, prereleased,
+// released (the prerelease flag cleared) and unpublished (published → draft).
+var ReleaseTypes = []string{"created", "published", "edited", "deleted", "prereleased", "released", "unpublished"}
+
+// IssuesTypes is the closed set of issue lifecycle actions the issues service
+// emits.
+var IssuesTypes = []string{"opened", "edited", "closed", "reopened", "labeled", "unlabeled", "assigned", "unassigned", "milestoned", "demilestoned"}
+
+// IssueCommentTypes is the closed set of issue-comment actions the issues
+// service emits. Comment editing and deletion are not implemented, so those
+// unemittable actions stay parse errors.
+var IssueCommentTypes = []string{"created"}
+
+// validateFilters closes the two filter lists that cannot coexist and compiles
+// every pattern (a malformed pattern is the file's parse error).
+func (p *PushTrigger) validate() error {
+	if len(p.Branches) > 0 && len(p.BranchesIgnore) > 0 {
+		return fmt.Errorf("push: `branches` and `branches-ignore` cannot be used together (use `branches` with a `!` pattern to exclude)")
+	}
+	if len(p.Tags) > 0 && len(p.TagsIgnore) > 0 {
+		return fmt.Errorf("push: `tags` and `tags-ignore` cannot be used together (use `tags` with a `!` pattern to exclude)")
+	}
+	if len(p.Paths) > 0 && len(p.PathsIgnore) > 0 {
+		return fmt.Errorf("push: `paths` and `paths-ignore` cannot be used together (use `paths` with a `!` pattern to exclude)")
+	}
+	for _, list := range [][]string{p.Branches, p.Paths} {
+		if _, err := compileFilter(list, false); err != nil {
+			return fmt.Errorf("push: %v", err)
+		}
+	}
+	for _, list := range [][]string{p.BranchesIgnore, p.TagsIgnore, p.PathsIgnore} {
+		if _, err := compileFilter(list, true); err != nil {
+			return fmt.Errorf("push: %v", err)
+		}
+	}
+	if _, err := compileFilter(p.Tags, false); err != nil {
+		return fmt.Errorf("push: %v", err)
+	}
+	return nil
+}
+
+// validate closes the PR trigger's filter lists and the types vocabulary.
+func (p *PRTrigger) validate() error {
+	if len(p.Branches) > 0 && len(p.BranchesIgnore) > 0 {
+		return fmt.Errorf("pull_request: `branches` and `branches-ignore` cannot be used together (use `branches` with a `!` pattern to exclude)")
+	}
+	if len(p.Paths) > 0 && len(p.PathsIgnore) > 0 {
+		return fmt.Errorf("pull_request: `paths` and `paths-ignore` cannot be used together (use `paths` with a `!` pattern to exclude)")
+	}
+	if _, err := compileFilter(p.Branches, false); err != nil {
+		return fmt.Errorf("pull_request: %v", err)
+	}
+	if _, err := compileFilter(p.BranchesIgnore, true); err != nil {
+		return fmt.Errorf("pull_request: %v", err)
+	}
+	if _, err := compileFilter(p.Paths, false); err != nil {
+		return fmt.Errorf("pull_request: %v", err)
+	}
+	if _, err := compileFilter(p.PathsIgnore, true); err != nil {
+		return fmt.Errorf("pull_request: %v", err)
+	}
+	return validateTypeFilter("pull_request", p.Types, PullRequestTypes)
+}
+
+// validateTypeFilter closes one typed trigger's vocabulary. An empty list (a
+// present `types: []`) matches nothing, so it is rejected; an absent list fires
+// on every emitted action.
+func validateTypeFilter(trigger string, types, supported []string) error {
+	if len(types) == 0 && types != nil {
+		return fmt.Errorf("%s.types: an empty list matches no action; omit `types` to fire on every emitted action", trigger)
+	}
+	for _, t := range types {
+		if !containsFold(supported, t) {
+			return fmt.Errorf("%s.types: unsupported type %q (supported: %s)", trigger, t, strings.Join(supported, ", "))
+		}
+	}
+	return nil
+}
 
 // ValidPullRequestType reports whether action is one Threads can emit.
 func ValidPullRequestType(action string) bool {
-	for _, t := range PullRequestTypes {
-		if t == action {
-			return true
-		}
-	}
-	return false
+	return containsFold(PullRequestTypes, action)
 }
 
 // DispatchTrigger is the manual trigger. Inputs are the typed
@@ -282,9 +444,12 @@ type Schedule struct {
 }
 
 // CronEntry is one schedule element. The list shape mirrors GitHub's
-// `schedule: - cron: "0 3 * * *"`.
+// `schedule: - cron: "0 3 * * *"`. Timezone is the documented per-entry IANA
+// zone; empty means UTC. The DST rule is in cron.go (a missed local time is
+// skipped, a repeated one fires once).
 type CronEntry struct {
-	Cron string `yaml:"cron"`
+	Cron     string `yaml:"cron"`
+	Timezone string `yaml:"timezone"`
 }
 
 // Concurrency is a concurrency group: scalar group name or the mapping with
@@ -319,38 +484,6 @@ func (c *Concurrency) UnmarshalYAML(node *yaml.Node) error {
 		return nil
 	default:
 		return fmt.Errorf("concurrency: expected a group name or a mapping")
-	}
-}
-
-// Permissions is the GITHUB_TOKEN permission map. The scalar shorthand
-// (`read-all` / `write-all` / `{}`) is normalized to a single "all" entry.
-// Accepted and carried into the job spec; not enforced yet (there is no job
-// token in pass A).
-type Permissions map[string]string
-
-// UnmarshalYAML accepts the scalar shorthand and the mapping form.
-func (p *Permissions) UnmarshalYAML(node *yaml.Node) error {
-	switch node.Kind {
-	case yaml.ScalarNode:
-		if isNull(node) {
-			*p = nil
-			return nil
-		}
-		*p = Permissions{"all": node.Value}
-		return nil
-	case yaml.MappingNode:
-		out := make(Permissions, len(node.Content)/2)
-		for i := 0; i+1 < len(node.Content); i += 2 {
-			val := node.Content[i+1]
-			if val.Kind != yaml.ScalarNode {
-				return fmt.Errorf("permissions.%s must be a scalar", node.Content[i].Value)
-			}
-			out[node.Content[i].Value] = val.Value
-		}
-		*p = out
-		return nil
-	default:
-		return fmt.Errorf("permissions: expected a mapping or read-all/write-all")
 	}
 }
 
@@ -553,11 +686,18 @@ type Job struct {
 	Strategy    *Strategy    `yaml:"strategy"`
 	Concurrency *Concurrency `yaml:"concurrency"`
 	Permissions Permissions  `yaml:"permissions"`
+	// EnableOpenIDConnect is the job-level Forgejo spelling (PAR-119); it is
+	// ORed with the workflow-level value (a job cannot turn the workflow's
+	// grant off with a boolean, but `permissions: id-token: none` denies it).
+	EnableOpenIDConnect bool `yaml:"enable-openid-connect"`
 }
 
 // Service is a sidecar container reachable by its key on the job network.
 type Service struct {
-	Image      string            `yaml:"image"`
+	Image string `yaml:"image"`
+	// Cmd is Forgejo's spelling of `command`; both are carried and the runner
+	// applies the same argv tail.
+	Cmd        []string          `yaml:"cmd"`
 	Env        map[string]string `yaml:"env"`
 	Ports      []string          `yaml:"ports"`
 	Command    []string          `yaml:"command"`
@@ -744,15 +884,17 @@ func checkStepID(job string, index int, id string, seen map[string]bool) error {
 	return nil
 }
 
-// validateDispatch checks the typed workflow_dispatch inputs (v1 types:
-// string/choice/boolean; choice needs options).
+// validateDispatch checks the typed workflow_dispatch inputs (types:
+// string/choice/boolean/number/environment; choice needs options; an
+// environment input's options are the repository's environment names, resolved
+// at dispatch time).
 func validateDispatch(d *DispatchTrigger) error {
 	if d == nil {
 		return nil
 	}
 	for name, in := range d.Inputs {
 		switch in.Type {
-		case "", "string", "boolean":
+		case "", "string", "boolean", "number", "environment":
 		case "choice":
 			if len(in.Options) == 0 {
 				return fmt.Errorf("workflow: workflow_dispatch input %q is a choice with no options", name)
@@ -856,15 +998,35 @@ func (k RefKind) String() string {
 //   - a bare `on: push` (neither list) fires on both.
 func (p *PushTrigger) fires(kind RefKind, name string) bool {
 	if kind == RefTag {
-		if len(p.Tags) > 0 {
-			return matchAny(p.Tags, name)
+		if len(p.Tags) > 0 || len(p.TagsIgnore) > 0 {
+			return matchFilter(p.Tags, p.TagsIgnore, name)
 		}
-		return len(p.Branches) == 0
+		return len(p.Branches) == 0 && len(p.BranchesIgnore) == 0
 	}
-	if len(p.Branches) > 0 {
-		return matchAny(p.Branches, name)
+	if len(p.Branches) > 0 || len(p.BranchesIgnore) > 0 {
+		return matchFilter(p.Branches, p.BranchesIgnore, name)
 	}
-	return len(p.Tags) == 0
+	return len(p.Tags) == 0 && len(p.TagsIgnore) == 0
+}
+
+// matchFilter applies an include list or an exclude list to one name. A
+// compile error (only possible for a hand-built trigger) matches nothing.
+func matchFilter(include, exclude []string, name string) bool {
+	if len(include) > 0 {
+		f, err := compileFilter(include, false)
+		if err != nil {
+			return false
+		}
+		return f.Match(name)
+	}
+	if len(exclude) > 0 {
+		f, err := compileFilter(exclude, true)
+		if err != nil {
+			return false
+		}
+		return f.Match(name)
+	}
+	return true
 }
 
 // Fires reports whether the workflow triggers on an event. event is one of
@@ -877,6 +1039,13 @@ func (p *PushTrigger) fires(kind RefKind, name string) bool {
 // recorded action matches only an unfiltered trigger, because a `types` filter
 // can only be decided from a known action.
 func (w *Workflow) Fires(event string, kind RefKind, ref, action string) bool {
+	return w.FiresWithChanges(event, kind, ref, action, nil, false)
+}
+
+// FiresWithChanges is Fires plus the changed-file set a path-filtered trigger
+// needs. known is false when the caller did not compute a diff; a trigger that
+// declares `paths`/`paths-ignore` then does not fire (fail closed).
+func (w *Workflow) FiresWithChanges(event string, kind RefKind, ref, action string, changed []string, known bool) bool {
 	switch event {
 	case "push":
 		if w.On.Push == nil && !w.On.PushSet {
@@ -885,7 +1054,10 @@ func (w *Workflow) Fires(event string, kind RefKind, ref, action string) bool {
 		if w.On.Push == nil {
 			return true // `push:` with no filters: every branch and tag
 		}
-		return w.On.Push.fires(kind, ref)
+		if !w.On.Push.fires(kind, ref) {
+			return false
+		}
+		return matchPaths(w.On.Push.Paths, w.On.Push.PathsIgnore, changed, known)
 	case "pull_request":
 		if w.On.PullRequest == nil && !w.On.PullRequestSet {
 			return false
@@ -893,10 +1065,19 @@ func (w *Workflow) Fires(event string, kind RefKind, ref, action string) bool {
 		if w.On.PullRequest == nil {
 			return true // `pull_request:` with no filters: every target branch
 		}
-		if !matchAny(w.On.PullRequest.Branches, ref) {
+		if !matchFilter(w.On.PullRequest.Branches, w.On.PullRequest.BranchesIgnore, ref) {
 			return false
 		}
-		return matchPRType(w.On.PullRequest.Types, action)
+		if !matchPRType(w.On.PullRequest.Types, action) {
+			return false
+		}
+		return matchPaths(w.On.PullRequest.Paths, w.On.PullRequest.PathsIgnore, changed, known)
+	case "release":
+		return typedFires(w.On.ReleaseSet, w.On.Release, action)
+	case "issues":
+		return typedFires(w.On.IssuesSet, w.On.Issues, action)
+	case "issue_comment":
+		return typedFires(w.On.IssueCommentSet, w.On.IssueComment, action)
 	case "workflow_dispatch":
 		return w.On.DispatchSet
 	case "schedule":
@@ -926,24 +1107,25 @@ func (w *Workflow) Events() []string {
 	if w.On.ScheduleSet {
 		out = append(out, "schedule")
 	}
+	if w.On.Release != nil || w.On.ReleaseSet {
+		out = append(out, "release")
+	}
+	if w.On.Issues != nil || w.On.IssuesSet {
+		out = append(out, "issues")
+	}
+	if w.On.IssueComment != nil || w.On.IssueCommentSet {
+		out = append(out, "issue_comment")
+	}
 	return out
 }
 
-// validatePRTypes closes the pull_request `types` vocabulary. A type Threads
-// never emits would make the trigger silently dead, so it is this file's parse
-// error naming the supported set. An empty list is rejected for the same
-// reason: it matches nothing.
-func validatePRTypes(types []string) error {
-	if len(types) == 0 && types != nil {
-		return fmt.Errorf("pull_request.types: an empty list matches no action; omit `types` to fire on every emitted action")
+// typedFires applies one typed trigger's `types` filter (an absent trigger
+// behind the presence flag fires, an absent filter fires on every action).
+func typedFires(set bool, trigger *TypeTrigger, action string) bool {
+	if trigger == nil {
+		return set
 	}
-	for _, t := range types {
-		if !ValidPullRequestType(t) {
-			return fmt.Errorf("pull_request.types: unsupported type %q (supported: %s)", t,
-				strings.Join(PullRequestTypes, ", "))
-		}
-	}
-	return nil
+	return matchPRType(trigger.Types, action)
 }
 
 // matchPRType applies a validated `types` filter. An absent filter matches
@@ -954,44 +1136,11 @@ func matchPRType(types []string, action string) bool {
 		return true
 	}
 	for _, t := range types {
-		if t == action && action != "" {
+		if action != "" && strings.EqualFold(t, action) {
 			return true
 		}
 	}
 	return false
-}
-
-// matchAny implements the simple glob set CI authors expect: exact names and
-// one-or-more `*` wildcards. An empty filter matches everything.
-func matchAny(patterns []string, name string) bool {
-	if len(patterns) == 0 {
-		return true
-	}
-	for _, p := range patterns {
-		if globMatch(p, name) {
-			return true
-		}
-	}
-	return false
-}
-
-func globMatch(pattern, s string) bool {
-	parts := strings.Split(pattern, "*")
-	if len(parts) == 1 {
-		return pattern == s
-	}
-	if !strings.HasPrefix(s, parts[0]) {
-		return false
-	}
-	s = s[len(parts[0]):]
-	for i := 1; i < len(parts)-1; i++ {
-		idx := strings.Index(s, parts[i])
-		if idx < 0 {
-			return false
-		}
-		s = s[idx+len(parts[i]):]
-	}
-	return strings.HasSuffix(s, parts[len(parts)-1])
 }
 
 // checkAcyclic rejects a job graph whose `needs` form a cycle (a run that can

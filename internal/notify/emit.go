@@ -130,6 +130,10 @@ func classReason(class string) string {
 		return ReasonMentioned
 	case "review_requested":
 		return ReasonReviewRequested
+	case "deployment_pending":
+		// A deployment hold is a review request to the environment's required
+		// reviewers (PAR-135); it is never a "subscribed" fan-out.
+		return ReasonReviewRequested
 	case "moderation":
 		return ReasonModeration
 	default:
@@ -160,7 +164,7 @@ func classAction(class, override string) string {
 		return ActionAssigned
 	case "mentioned":
 		return ActionMentioned
-	case "review_requested", "review_request_removed":
+	case "review_requested", "review_request_removed", "deployment_pending":
 		return ActionReviewRequested
 	case "review_submitted", "review_dismissed":
 		return ActionReviewPosted

@@ -327,7 +327,34 @@ func TestExecuteDockerActionGetsNoCommandFiles(t *testing.T) {
 	if image == "" {
 		t.Fatalf("no docker action ran: %v", docker.snapshot())
 	}
-	if strings.Contains(image, "TAG=v1") || strings.Contains(image, "PATH=") {
+	if strings.Contains(image, "TAG=v1") || strings.Contains(image, "GITHUB_ENV=") || strings.Contains(image, "GITHUB_PATH=") {
 		t.Fatalf("a docker action received command-file state: %s", image)
+	}
+}
+
+// TestExecuteWritesEventFile pins PAR-033 at execution: the job's event JSON is
+// written into the container before the first step, at the path every step
+// reads from GITHUB_EVENT_PATH.
+func TestExecuteWritesEventFile(t *testing.T) {
+	job := fixtureJob()
+	job.Spec.Services = nil
+	job.Checkout = nil
+	job.EventPayload = map[string]any{"action": "opened", "pull_request": map[string]any{"number": float64(7)}}
+	job.Spec.Steps = []threads.StepSpec{{Name: "noop", Run: "true"}}
+	d := &fakeDocker{}
+	res := executorWith(d).Execute(context.Background(), ExecInput{Job: job, AttemptToken: "t"}, quietStream(t))
+	if res.Conclusion != threads.JobSuccess {
+		t.Fatalf("conclusion = %s (%+v) err=%s calls=%v", res.Conclusion, res.Steps, res.Error, d.snapshot())
+	}
+	found := false
+	for _, call := range d.snapshot() {
+		if strings.Contains(call, EventPath) && strings.Contains(call, `"action":"opened"`) &&
+			strings.Contains(call, `"number":7`) && strings.Contains(call, "printf") &&
+			strings.Contains(call, RunnerTemp) && strings.Contains(call, "chmod 0777") {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("event file write not observed: %v", d.snapshot())
 	}
 }

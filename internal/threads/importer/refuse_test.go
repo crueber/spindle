@@ -55,15 +55,15 @@ func TestTranslateRefusals(t *testing.T) {
 		},
 		{
 			name:             "scalar unknown trigger",
-			src:              top("on: release\n"),
-			wantUntranslated: []string{"on.release"},
-			contain:          []string{"# UNTRANSLATED: on.release"},
+			src:              top("on: merge_group\n"),
+			wantUntranslated: []string{"on.merge_group"},
+			contain:          []string{"# UNTRANSLATED: on.merge_group"},
 		},
 		{
 			name:             "list unknown trigger",
-			src:              top("on: [push, release]\n"),
-			wantUntranslated: []string{"on.release"},
-			contain:          []string{"on:\n  # UNTRANSLATED: on.release", "- push"},
+			src:              top("on: [push, merge_group]\n"),
+			wantUntranslated: []string{"on.merge_group"},
+			contain:          []string{"on:\n  # UNTRANSLATED: on.merge_group", "- push"},
 		},
 		{
 			name:             "bare schedule in list",
@@ -77,32 +77,11 @@ func TestTranslateRefusals(t *testing.T) {
 		},
 		{
 			name:             "unknown trigger mapping",
-			src:              top("on:\n  release:\n    types: [published]\n"),
-			wantUntranslated: []string{"on.release"},
-			absent:           []string{"\n  release:"},
+			src:              top("on:\n  merge_group:\n    types: [checks_requested]\n"),
+			wantUntranslated: []string{"on.merge_group"},
+			absent:           []string{"\n  merge_group:"},
 		},
-		{
-			name:             "push paths",
-			src:              top("on:\n  push:\n    branches: [main]\n    paths: ['src/**']\n"),
-			wantUntranslated: []string{"on.push.paths"},
-			contain:          []string{"branches: [main]"},
-			absent:           []string{"\n    paths:"},
-		},
-		{
-			name:             "push paths-ignore",
-			src:              top("on:\n  push:\n    paths-ignore: ['docs/**']\n"),
-			wantUntranslated: []string{"on.push.paths-ignore"},
-		},
-		{
-			name:             "push branches-ignore",
-			src:              top("on:\n  push:\n    branches-ignore: [wip]\n"),
-			wantUntranslated: []string{"on.push.branches-ignore"},
-		},
-		{
-			name:             "push tags-ignore",
-			src:              top("on:\n  push:\n    tags-ignore: [nightly]\n"),
-			wantUntranslated: []string{"on.push.tags-ignore"},
-		},
+
 		{
 			name:             "push filter wrong shape",
 			src:              top("on:\n  push:\n    branches:\n      a: b\n"),
@@ -116,13 +95,13 @@ func TestTranslateRefusals(t *testing.T) {
 		},
 		{
 			name:             "pr type filtered",
-			src:              top("on:\n  pull_request:\n    types: [opened, synchronize, closed]\n"),
+			src:              top("on:\n  pull_request:\n    types: [opened, synchronize, deleted]\n"),
 			wantUntranslated: []string{"on.pull_request.types"},
 			contain:          []string{"types:", "- opened", "- synchronize"},
 		},
 		{
 			name:             "pr types all refused",
-			src:              top("on:\n  pull_request:\n    types: [closed]\n"),
+			src:              top("on:\n  pull_request:\n    types: [deleted]\n"),
 			wantUntranslated: []string{"on.pull_request.types", "on.pull_request.types"},
 			absent:           []string{"\n    types:"},
 		},
@@ -131,11 +110,7 @@ func TestTranslateRefusals(t *testing.T) {
 			src:              top("on:\n  pull_request:\n    types: opened\n"),
 			wantUntranslated: []string{"on.pull_request.types"},
 		},
-		{
-			name:             "pr paths",
-			src:              top("on:\n  pull_request:\n    paths: [x]\n"),
-			wantUntranslated: []string{"on.pull_request.paths"},
-		},
+
 		{
 			name:             "pr unknown key",
 			src:              top("on:\n  pull_request:\n    labels: [x]\n"),
@@ -158,7 +133,7 @@ func TestTranslateRefusals(t *testing.T) {
 		},
 		{
 			name:             "dispatch input type",
-			src:              top("on:\n  workflow_dispatch:\n    inputs:\n      env:\n        type: environment\n        options: [a, b]\n"),
+			src:              top("on:\n  workflow_dispatch:\n    inputs:\n      env:\n        type: colour\n        options: [a, b]\n"),
 			wantUntranslated: []string{"on.workflow_dispatch.inputs.env.type"},
 			contain:          []string{"type: string", "options: [a, b]"},
 			wantNotes:        []string{"on.workflow_dispatch.inputs.env.type"},
@@ -246,10 +221,10 @@ func TestTranslateRefusals(t *testing.T) {
 			wantUntranslated: []string{"on.7"},
 		},
 		{
-			name:      "permissions inert scope note",
-			src:       top("on: push\npermissions:\n  contents: read\n  issues: write\n"),
-			wantNotes: []string{"permissions"},
-			contain:   []string{"issues: write", "contents: read"},
+			name:             "permissions unsupported scope is refused by name",
+			src:              top("on: push\npermissions:\n  contents: read\n  packages: write\n"),
+			wantUntranslated: []string{"permissions.packages"},
+			contain:          []string{"contents: read"},
 		},
 		{
 			name:             "permissions value wrong shape",

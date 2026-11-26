@@ -36,7 +36,7 @@ func TestTranslateEmptyShapes(t *testing.T) {
 		{"needs null", "on: push\njobs:\n  a:\n    runs-on: x\n    needs:\n    steps:\n      - run: 'true'\n"},
 		{"branches null", "on:\n  push:\n    branches:\njobs:\n  a:\n    runs-on: x\n    steps:\n      - run: 'true'\n"},
 		{"tags scalar", "on:\n  push:\n    tags: v*\njobs:\n  a:\n    runs-on: x\n    steps:\n      - run: 'true'\n"},
-		{"flow mapping with refusal", "on: {push: {branches: [main], paths: ['x/**']}}\njobs:\n  a:\n    runs-on: x\n    steps:\n      - run: 'true'\n"},
+		{"flow mapping with refusal", "on: {push: {branches: [main], pathz: ['x/**']}}\njobs:\n  a:\n    runs-on: x\n    steps:\n      - run: 'true'\n"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -52,7 +52,7 @@ func TestTranslateEmptyShapes(t *testing.T) {
 				if len(res.Untranslated) != 1 {
 					t.Errorf("untranslated = %+v", res.Untranslated)
 				}
-				if !strings.Contains(string(res.Output), "# UNTRANSLATED: on.push.paths") {
+				if !strings.Contains(string(res.Output), "# UNTRANSLATED: on.push.pathz") {
 					t.Errorf("the refusal comment is missing:\n%s", res.Output)
 				}
 				return

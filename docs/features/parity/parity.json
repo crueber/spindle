@@ -154,7 +154,7 @@
       "area": "triggers",
       "capability": "`on.push.paths` / `paths-ignore` (and `pull_request.paths`) with `**`, ANDed with `branches`",
       "provenance": "B",
-      "status": "missing",
+      "status": "have",
       "wave": 2,
       "track": [
         "T1",
@@ -167,14 +167,18 @@
         "docs/features/21_parity_master.md §4.2",
         "docs/threads.md §3.2"
       ],
-      "tests": []
+      "tests": [
+        "TestPushPathsFilterAndBudget",
+        "TestPullRequestPathsFilterUsesMergeBase"
+      ],
+      "notes": "Paths/paths-ignore for push and pull_request, ANDed with branches; one name-only git diff per event, and only when a parsed workflow declares a path filter (zero when none does). The diff is old..new for a push and base...head (merge base) for a PR."
     },
     {
       "id": "PAR-013",
       "area": "triggers",
       "capability": "Filter glob dialect: `*`, `**`, `?`, `+`, ordered `!` negation, `branches-ignore`/`tags-ignore`",
       "provenance": "B",
-      "status": "partial",
+      "status": "have",
       "wave": 2,
       "track": [
         "T1"
@@ -186,14 +190,20 @@
         "docs/features/21_parity_master.md §4.2",
         "docs/threads.md §3.2"
       ],
-      "tests": []
+      "tests": [
+        "TestFilterDialect",
+        "TestFilterOrderedNegation",
+        "TestFilterParseErrors",
+        "TestPushPathsFilter"
+      ],
+      "notes": "The documented dialect only: * stops at /, ** crosses it, ?/+ quantify the preceding character, ordered ! negation; branches-ignore/tags-ignore/paths-ignore are exclusion lists. A malformed pattern is the file parse error."
     },
     {
       "id": "PAR-014",
       "area": "triggers",
       "capability": "Full `pull_request.types` vocabulary and its emitters (closed, labeled, ready_for_review, review_requested, …)",
       "provenance": "B",
-      "status": "partial",
+      "status": "have",
       "wave": 2,
       "track": [
         "T3"
@@ -205,7 +215,14 @@
         "docs/features/21_parity_master.md §4.2",
         "docs/threads.md §3.2"
       ],
-      "tests": []
+      "tests": [
+        "TestPullRequestTypesMatrix",
+        "TestPullEventsOpenedSynchronizeReopened",
+        "TestPullEventsDraftAndEditEdges",
+        "TestPullEventsClosedOnMerge",
+        "TestThreadEventsCoverIssueEdges"
+      ],
+      "notes": "The pulls service emits opened, synchronize, reopened, closed (including a merge), edited, ready_for_review and converted_to_draft; the shared issues thread sink emits labeled/unlabeled/assigned/unassigned/milestoned/demilestoned. An unemittable type stays a parse error."
     },
     {
       "id": "PAR-015",
@@ -252,7 +269,7 @@
       "area": "triggers",
       "capability": "`release` trigger (created/published/edited/deleted/prereleased/released) with `event.release.*`",
       "provenance": "B",
-      "status": "missing",
+      "status": "have",
       "wave": 2,
       "track": [
         "T3"
@@ -264,7 +281,10 @@
         "docs/features/21_parity_master.md §4.2",
         "docs/threads.md §3.2"
       ],
-      "tests": []
+      "tests": [
+        "TestReleaseEventsEmitDocumentedActions"
+      ],
+      "notes": "The releases service emits created (draft), published, edited, deleted, prereleased, released and unpublished. A run reads the workflow from the default branch, reports the tag commit, and carries release.tag_name plus a capped asset list in the payload."
     },
     {
       "id": "PAR-018",
@@ -313,7 +333,7 @@
       "area": "triggers",
       "capability": "`issues`, `issue_comment`, `pull_request_review`(+`_comment`), `label`, `milestone`, `discussion`(+`_comment`)",
       "provenance": "B",
-      "status": "missing",
+      "status": "partial",
       "wave": 2,
       "track": [
         "T3"
@@ -325,7 +345,8 @@
         "docs/features/21_parity_master.md §4.2",
         "docs/threads.md §3.2"
       ],
-      "tests": []
+      "tests": [],
+      "notes": "Wave 2 closes issues and issue_comment (types: opened/edited/closed/reopened/labeled/unlabeled/assigned/unassigned/milestoned/demilestoned; issue_comment: created) from the issues service, with the default-branch rule and payload. pull_request_review(+_comment), label, milestone and discussion triggers remain Wave 3."
     },
     {
       "id": "PAR-021",
@@ -351,7 +372,7 @@
       "area": "triggers",
       "capability": "Cron parity: names, `@daily`-family macros, `L`/`W`/`#`, per-entry `timezone:` with the DST rule; non-default-branch schedules ignored",
       "provenance": "B",
-      "status": "partial",
+      "status": "have",
       "wave": 2,
       "track": [
         "T1"
@@ -363,14 +384,20 @@
         "docs/features/21_parity_master.md §4.2",
         "docs/threads.md §3.2"
       ],
-      "tests": []
+      "tests": [
+        "TestCronMacrosAndNames",
+        "TestCronLastNearestAndNth",
+        "TestCronTimezoneDST",
+        "TestSweepScheduleSkipsDisabledAndUnscheduledFiles"
+      ],
+      "notes": "Names, @daily-family macros, L/L-N/W/DL/D#n and per-entry timezone (IANA, embedded tzdata) are supported. A DST spring-forward local time has no tick; a fall-back repeated local time is one slot and fires once. Non-default-branch schedules never fire (the sweep reads the default branch)."
     },
     {
       "id": "PAR-023",
       "area": "triggers",
       "capability": "Dispatch input types `environment` and `number` plus the `github.event.inputs.*` alias",
       "provenance": "G",
-      "status": "partial",
+      "status": "have",
       "wave": 2,
       "track": [
         "T1",
@@ -383,7 +410,12 @@
         "docs/features/21_parity_master.md §4.2",
         "docs/threads.md §3.2"
       ],
-      "tests": []
+      "tests": [
+        "TestDispatchInputTypesExtended",
+        "TestThreadDispatchEnvironmentPicker",
+        "TestDispatchInputsTypesDefaultsAndRecording"
+      ],
+      "notes": "string/boolean/choice/number/environment. A number must parse as a decimal; an environment must name an existing repository environment and renders as a picker. inputs.x and github.event.inputs.x read the same map."
     },
     {
       "id": "PAR-024",
@@ -502,7 +534,7 @@
       "area": "expressions",
       "capability": "`github.event` payload + `GITHUB_EVENT_PATH`/`FORGEJO_EVENT_PATH` JSON",
       "provenance": "B",
-      "status": "missing",
+      "status": "have",
       "wave": 2,
       "track": [
         "T1"
@@ -515,14 +547,19 @@
         "docs/threads.md §3.6",
         "docs/threads.md §3.7"
       ],
-      "tests": []
+      "tests": [
+        "TestEventPayloadProjection",
+        "TestExecuteWritesEventFile",
+        "TestPlanEventRunnerAndVarsContexts"
+      ],
+      "notes": "A bounded (64 KiB cap, 4 KiB body, 100-row list) documented payload is stored on the run, projected into github.event.* (a closed field set) and written to $GITHUB_EVENT_PATH/$FORGEJO_EVENT_PATH before the first step."
     },
     {
       "id": "PAR-034",
       "area": "expressions",
       "capability": "`runner` context and `RUNNER_OS/ARCH/NAME/TEMP/TOOL_CACHE/ENVIRONMENT/DEBUG`",
       "provenance": "B",
-      "status": "missing",
+      "status": "have",
       "wave": 2,
       "track": [
         "T2"
@@ -535,14 +572,18 @@
         "docs/threads.md §3.6",
         "docs/threads.md §3.7"
       ],
-      "tests": []
+      "tests": [
+        "TestPlanEventRunnerAndVarsContexts",
+        "TestExecuteWritesEventFile"
+      ],
+      "notes": "runner.os/arch/name/temp/tool_cache/environment/debug resolve; RUNNER_* env vars are set and /tmp/spindle-temp + /tmp/spindle-tool-cache are created writable before the first step."
     },
     {
       "id": "PAR-035",
       "area": "expressions",
       "capability": "`vars` context with repository/organization/user/environment variables, documented precedence, reserved-name refusal",
       "provenance": "B",
-      "status": "missing",
+      "status": "have",
       "wave": 2,
       "track": [
         "T3"
@@ -555,7 +596,11 @@
         "docs/threads.md §3.6",
         "docs/threads.md §3.7"
       ],
-      "tests": []
+      "tests": [
+        "TestVariablesScopeAndSecrecy",
+        "TestPlanEventRunnerAndVarsContexts"
+      ],
+      "notes": "Repository and organization variables (repository wins), stored sealed, listed by name only, masked in logs, resolved for trusted jobs; GITHUB_/SPINDLE_/FORGEJO_/RUNNER_ prefixes are refused at save. The API is .../api/threads/variables and /api/v1/orgs/{org}/threads/variables."
     },
     {
       "id": "PAR-036",
@@ -888,7 +933,7 @@
       "area": "jobs",
       "capability": "Re-run failed jobs only, preserving successful jobs and their checks",
       "provenance": "B",
-      "status": "missing",
+      "status": "have",
       "wave": 2,
       "track": [
         "T3"
@@ -901,7 +946,12 @@
         "docs/threads.md §3.3",
         "docs/threads.md §3.5"
       ],
-      "tests": []
+      "tests": [
+        "TestRerunFailedOnlyPreservesSuccessfulJobs",
+        "TestRerunFailedRefusesAGreenRun",
+        "TestFailedRerunSelection"
+      ],
+      "notes": "Landed 2026-11-26: RerunFailedRun/RerunRun share one path (attempts.go); the selection is failed jobs plus their transitive dependents, an independent successful job keeps its state, attempt, step results and green check. Exposed as POST /{o}/{r}/api/threads/{run}/rerun-failed; the page/CLI verb is the T6 follow-up."
     },
     {
       "id": "PAR-070",
@@ -1009,14 +1059,20 @@
         "docs/features/21_parity_master.md §4.5",
         "docs/threads.md §3.4"
       ],
-      "tests": []
+      "tests": [
+        "TestExecuteCompositeAction",
+        "TestExecuteCompositeIfAndFailure",
+        "TestExecuteCompositeContinueOnError",
+        "TestResolveStepHandlesEverySubstitutionSite"
+      ],
+      "notes": "Composite inputs (INPUT_*), per-step env layering, nested LOCAL actions, output threading and the depth/cycle caps are enforced and tested. Two documented limits remain: `${{ github.action_path }}` is not in the parser's closed github.* field set (workflow/template.go GitHubFields) and nested remote `uses:` is refused by the parser (validateCompositeUses), so the row cannot close until the syntax track adds the field and remote-action resolution (D-5, T4)."
     },
     {
       "id": "PAR-075",
       "area": "steps",
       "capability": "Reusable workflows, local: `on.workflow_call` (typed inputs, secrets, outputs) + `jobs.<id>.uses`/`with`/`secrets:`",
       "provenance": "B",
-      "status": "missing",
+      "status": "partial",
       "wave": 2,
       "track": [
         "T3"
@@ -1024,13 +1080,19 @@
       "security": [
         "S8"
       ],
-      "decision": "",
+      "decision": "D-6",
       "acceptance": "The documented chain runs, each callee is visible on the run page, its output is consumable, permissions are downgrade-only",
       "docs_refs": [
         "docs/features/21_parity_master.md §4.5",
         "docs/threads.md §3.4"
       ],
-      "tests": []
+      "tests": [
+        "TestLocalReusableWorkflowExpandsJobs",
+        "TestLocalReusableWorkflowNested",
+        "TestReusableCallerRefusals",
+        "TestE2E_ThreadsWave2RunnerSurfaces"
+      ],
+      "notes": "Local expansion landed 2026-11-26 (internal/threads/reusable.go): jobs.<id>.uses: ./.spindle/workflows/x.yml expands the callee's jobs in place as `<caller> / <callee>` records with rewritten needs, inherited caller needs/if, same-repo secrets and downgrade-only permissions; cross-repository uses is refused by name (D-6) and nesting is capped at 4. BLOCKED ON T1: on.workflow_call and jobs.<id>.secrets are not in the parser, so typed inputs/outputs declarations and `with:` are named refusals today, and a caller cannot reference a callee job's output (the needs.<job> reference is validated against the caller file's own keys)."
     },
     {
       "id": "PAR-076",
@@ -1091,14 +1153,21 @@
         "docs/features/21_parity_master.md §4.5",
         "docs/threads.md §3.4"
       ],
-      "tests": []
+      "tests": [
+        "TestServiceHealthOptionsReachDockerCreate",
+        "TestServiceHealthRefusals",
+        "TestServiceUnhealthyFailsTheJob",
+        "TestServiceReadinessTimeoutNamesTheService",
+        "TestE2E_ThreadsWave2RunnerSurfaces"
+      ],
+      "notes": "The acceptance line is closed: `options: --health-cmd \"pg_isready\" --health-interval 10s --health-timeout 5s --health-retries 5` is allowlisted (containerpolicy.go), reaches docker create, and the readiness wait fails the job naming the service on unhealthy or a 60 s miss. Forgejo's `cmd:` spelling and registry `credentials:` are still YAML parse errors (the parser's Service struct has no such fields), so the row stays partial pending T1."
     },
     {
       "id": "PAR-079",
       "area": "steps",
       "capability": "`steps[*].shell` as an arbitrary command with `{0}`; `node`/`python` aliases; bash→sh fallback",
       "provenance": "B",
-      "status": "partial",
+      "status": "have",
       "wave": 2,
       "track": [
         "T2"
@@ -1110,7 +1179,13 @@
         "docs/features/21_parity_master.md §4.5",
         "docs/threads.md §3.4"
       ],
-      "tests": []
+      "tests": [
+        "TestBuildPlanDefaultImageAndShells",
+        "TestCustomShellWritesTheScriptFile",
+        "TestBashFallsBackToSh",
+        "TestCustomShellWithoutPlaceholderIsRefused"
+      ],
+      "notes": "Landed 2026-11-26: named shells (sh -e, bash --noprofile --norc -eo pipefail, python/python3, pwsh/powershell, cmd), an arbitrary `<cmd> {0}` template split into argv words with the script written to /tmp/spindle-step-<n>, and the bash→sh fallback with a log line. A template without exactly one {0} is a named step failure."
     },
     {
       "id": "PAR-080",
@@ -1238,7 +1313,7 @@
       "area": "commands",
       "capability": "`$GITHUB_STEP_SUMMARY` (1 MiB/step, sanitized markdown) and `$GITHUB_STATE` for pre/post",
       "provenance": "B",
-      "status": "missing",
+      "status": "partial",
       "wave": 2,
       "track": [
         "T2"
@@ -1254,14 +1329,21 @@
         "docs/threads.md §3.8",
         "docs/threads.md §3.9"
       ],
-      "tests": []
+      "tests": [
+        "TestJobSummaryCaps",
+        "TestCollectStepSummary",
+        "TestExecuteCollectsSummaryAndAnnotations",
+        "TestThreadRunPageRendersAnnotationsAndSummary",
+        "TestE2E_ThreadsWave2RunnerSurfaces"
+      ],
+      "notes": "$GITHUB_STEP_SUMMARY landed 2026-11-26: collected per step (1 MiB/step, 20/job, 4 MiB joined), masked, stored on the job record and rendered by the server's sanitizing markdown renderer on the run page (a mermaid fence is a code block). $GITHUB_STATE is a documented subset refusal: no pre/post hooks exist, so no state file is provided and ::save-state:: is a named warning instead of an inert surface."
     },
     {
       "id": "PAR-093",
       "area": "commands",
       "capability": "Workflow commands: `::error`/`::warning`/`::notice` with file/line/col/title, `::group::`/`::endgroup::`, `::add-mask::`, `::stop-commands::`, `::set-output` if honoured",
       "provenance": "B",
-      "status": "missing",
+      "status": "have",
       "wave": 2,
       "track": [
         "T2"
@@ -1276,14 +1358,24 @@
         "docs/threads.md §3.8",
         "docs/threads.md §3.9"
       ],
-      "tests": []
+      "tests": [
+        "TestParseWorkflowCommand",
+        "TestWorkflowCommandAnnotations",
+        "TestWorkflowCommandGroupsAndStop",
+        "TestWorkflowCommandAddMaskCannotUnmask",
+        "TestWorkflowCommandSetOutputAndUnsupported",
+        "TestWorkflowCommandCaps",
+        "TestCompleteStoresAnnotationsAndSummary",
+        "TestE2E_ThreadsWave2RunnerSurfaces"
+      ],
+      "notes": "Landed 2026-11-26 (runner/workflowcmd.go): error/warning/notice with file/line/col/title, group/endgroup, add-mask (permanent, 128/job), stop-commands, the deprecated set-output alias, debug, and a visible warning for every unimplemented name. Escaping is GitHub's; one line is buffered to 64 KiB; 10/step and 50/job annotations; payloads masked before storage. Annotations live on the job record and the check description states their count; the full per-annotation commit list is PAR-192 (checks annotation sink)."
     },
     {
       "id": "PAR-094",
       "area": "commands",
       "capability": "`$GITHUB_OUTPUT` heredoc, caps and collision rules (last wins; malformed line is a named failure)",
       "provenance": "B",
-      "status": "partial",
+      "status": "have",
       "wave": 2,
       "track": [
         "T2"
@@ -1296,7 +1388,14 @@
         "docs/threads.md §3.8",
         "docs/threads.md §3.9"
       ],
-      "tests": []
+      "tests": [
+        "TestParseOutputFile",
+        "TestParseOutputFileErrors",
+        "TestParseOutputFileCaps",
+        "TestExecuteStepOutputsFlow",
+        "TestExecuteSetOutputAliasMerges"
+      ],
+      "notes": "The heredoc form, last-wins, caps and a named line error were already implemented; Wave 2 adds the delimiter bound (128 bytes, named failure), the line-anchored malformed-line test, and the deprecated ::set-output:: merge (the $GITHUB_OUTPUT value wins a collision)."
     },
     {
       "id": "PAR-095",
@@ -1463,7 +1562,7 @@
       "area": "secrets",
       "capability": "Permission scopes: every documented scope drives a real capability or is refused by name",
       "provenance": "B",
-      "status": "partial",
+      "status": "have",
       "wave": 2,
       "track": [
         "T3"
@@ -1475,16 +1574,21 @@
       "acceptance": "`issues: write` lets a job comment; an unimplemented scope is a parse error naming it (never inert)",
       "docs_refs": [
         "docs/features/21_parity_master.md §4.7",
-        "docs/threads.md §5"
+        "docs/threads.md §5.3.1",
+        "docs/WORKFLOWS.md §7.2"
       ],
-      "tests": []
+      "tests": [
+        "TestPAR112PermissionScopeVocabulary",
+        "TestPAR112ScopeMatrixDrivesCapabilities"
+      ],
+      "notes": "Closed in Wave 2 (D-11/D-12). `permissions:` is a closed vocabulary: contents, issues, pull-requests (pull_requests alias), id-token; read-all/write-all set the three repo baselines and never id-token. Every other GitHub/Forgejo scope is a named parse error listing the supported set; the importer drops it and names it in the report. The exact matrix is docs/threads.md §5.3.1 / docs/WORKFLOWS.md §7.2."
     },
     {
       "id": "PAR-113",
       "area": "secrets",
       "capability": "Job token as a scoped platform API credential (comment, label, release, package)",
       "provenance": "G",
-      "status": "partial",
+      "status": "have",
       "wave": 2,
       "track": [
         "T3"
@@ -1496,9 +1600,15 @@
       "acceptance": "A workflow comments on its own PR over HTTP with `$GITHUB_TOKEN`; the same token is refused another repository",
       "docs_refs": [
         "docs/features/21_parity_master.md §4.7",
-        "docs/threads.md §5"
+        "docs/threads.md §5.3.1",
+        "docs/WORKFLOWS.md §7.2"
       ],
-      "tests": []
+      "tests": [
+        "TestPAR113JobTokenScopedAPICredential",
+        "TestPAR113JobTokenExpiryAndRevocation",
+        "TestE2E_ThreadsJobTokenScopes"
+      ],
+      "notes": "Closed in Wave 2. The wjt_ attempt token authenticates the platform API through the same Seam 2 credential path; identity resolves JobPerms (computed once from the job record) into the minimum repo role (issues:write→triage, contents/pull-requests:write→write, read→read, never admin) and only inside JobRepo. Tests drive the real issues HTTP surface: comment allowed, label allowed only with issues:write, 403 for another repository, 403 after expiry/revocation, admin denied (cannot mint another credential). The docker e2e proves a read-scoped token cannot push while a write-scoped one can. Beyond the role tier, the commit-status API and the Threads operator surface (dispatch/cancel/approve) refuse a job token entirely, and releases need contents: write."
     },
     {
       "id": "PAR-114",
@@ -1612,7 +1722,7 @@
       "area": "secrets",
       "capability": "OIDC enable-key parity: `enable-openid-connect: true` beside `permissions: id-token: write`",
       "provenance": "F",
-      "status": "missing",
+      "status": "have",
       "wave": 2,
       "track": [
         "T1"
@@ -1624,16 +1734,23 @@
       "acceptance": "A Forgejo workflow with both spellings parses and mints a token with zero edits",
       "docs_refs": [
         "docs/features/21_parity_master.md §4.7",
-        "docs/threads.md §5"
+        "docs/threads.md §5.5",
+        "docs/WORKFLOWS.md §7.2"
       ],
-      "tests": []
+      "tests": [
+        "TestPAR119EnableOpenIDConnectKey",
+        "TestPAR119EnableOpenIDConnectMintsToken",
+        "TestPAR119ExplicitNoneBeatsEnableKey",
+        "TestPAR119EnableKeyNeverMintsForAFork"
+      ],
+      "notes": "Closed in Wave 2. `enable-openid-connect: true` parses at workflow and job level and grants the same exchange as `permissions: id-token: write`; an explicit `id-token: none` denies, fork runs never qualify, write-all never implies it. The importer carries the key."
     },
     {
       "id": "PAR-120",
       "area": "secrets",
       "capability": "OIDC claim and exchange parity: `iss`, PR `sub`, environment `sub`, `aud` default, `ref_protected`, `ref_type`, `job_workflow_ref`, `runner_environment`, `?audience=`, TTL, error shapes",
       "provenance": "B",
-      "status": "partial",
+      "status": "have",
       "wave": 2,
       "track": [
         "T3"
@@ -1645,16 +1762,23 @@
       "acceptance": "A provider trust policy written for either platform validates a Threads token; the `environment` claim appears only when a job names one",
       "docs_refs": [
         "docs/features/21_parity_master.md §4.7",
-        "docs/threads.md §5"
+        "docs/threads.md §5.5"
       ],
-      "tests": []
+      "tests": [
+        "TestPAR120EnvironmentClaimAndSubject",
+        "TestPAR120AudienceQuerySpelling",
+        "TestPAR120TagRefTypeAndProtectedRef",
+        "TestPAR120BranchIsNotProtectedByATagRule",
+        "TestOIDCSameRepoPullRequestUsesPullRequestSubject"
+      ],
+      "notes": "Closed in Wave 2. Closed claim set (struct): issuer from server.public_url, audience required (body or ?audience=), subject templates repo:o/r:ref:<ref> / :environment:<name> / :pull_request, ref_type, ref_protected (blanket protect rule in policy.json), job_workflow_ref, runner_environment=self-hosted, environment only when the job names one; 5-minute TTL, per-attempt rate-limited request token, signing key separate from the session/attempt keys."
     },
     {
       "id": "PAR-130",
       "area": "environments",
       "capability": "`environment`/`environment.url` expression substitution (or a named parse error, never a literal bucket key)",
       "provenance": "B",
-      "status": "missing",
+      "status": "have",
       "wave": 2,
       "track": [
         "T1"
@@ -1666,14 +1790,19 @@
         "docs/features/21_parity_master.md §4.8",
         "docs/threads.md §5.6"
       ],
-      "tests": []
+      "tests": [
+        "TestEnvironmentExpressionInNameIsANamedParseError",
+        "TestParseEnvironmentShapes",
+        "TestEnvironmentDeploymentBranchPolicy"
+      ],
+      "notes": "Wave 2. The documented forms are the bare name and `{name, url}` (url must be absolute http(s)); a `${{ … }}` in either is refused with a named parse error naming the field (the structural-field rule, docs/threads.md §3.6 / WORKFLOWS §2.3), so the parity answer is the documented fail-closed one: an expression never becomes a literal bucket key. TestParseEnvironmentShapes (internal/threads/workflow) covers the accepted shapes."
     },
     {
       "id": "PAR-131",
       "area": "environments",
       "capability": "Protection parity: wait timer, ≤6 required reviewers, prevent-self-review, deployment branch/tag policy, team reviewers",
       "provenance": "B",
-      "status": "partial",
+      "status": "have",
       "wave": 2,
       "track": [
         "T3"
@@ -1685,7 +1814,18 @@
         "docs/features/21_parity_master.md §4.8",
         "docs/threads.md §5.6"
       ],
-      "tests": []
+      "tests": [
+        "TestEnvironmentProtectionRulesRoundTrip",
+        "TestEnvironmentEveryReviewerMustApprove",
+        "TestEnvironmentPreventSelfReviewRefusesTheActor",
+        "TestEnvironmentAdminApprovalBypassesTheSet",
+        "TestEnvironmentTeamReviewerApproves",
+        "TestEnvironmentDeploymentBranchPolicy",
+        "TestEnvironmentWaitTimerHoldsTheClaim",
+        "TestEnvironmentApprovalPlusTimer",
+        "TestE2E_ThreadsApprovalSupersedeAndCancel"
+      ],
+      "notes": "Wave 2. Enforcement points: creation (applyEnvironmentDecision — undefined env, branch/tag policy, resolved approver snapshot, wait-timer deadline), approval (ApproveRun/recordDeploymentApproval — one approval per required principal, prevent-self-review refusal, admin bypass, partial approval stays pending), claim (queue.claimEntry refuses before wait_until) and payload (guardDeploymentSecrets re-checks both). Limits: six reviewers AND teams together, a 6-hour timer, a team must resolve at save. Protection is evaluated against the LIVE record (a roster edit applies to the next decision)."
     },
     {
       "id": "PAR-132",
@@ -1752,7 +1892,7 @@
       "area": "environments",
       "capability": "Pending-deployment UX: run-list badge, reviewer notification, approval audit entry",
       "provenance": "G",
-      "status": "partial",
+      "status": "have",
       "wave": 2,
       "track": [
         "T6"
@@ -1764,7 +1904,14 @@
         "docs/features/21_parity_master.md §4.8",
         "docs/threads.md §5.6"
       ],
-      "tests": []
+      "tests": [
+        "TestPendingDeploymentNotifiesReviewers",
+        "TestThreadsListPendingBadges",
+        "TestThreadRunPageWaitTimerAndApprovals",
+        "TestEnvironmentTabRendersProtectionRules",
+        "TestE2E_ThreadsApprovalSupersedeAndCancel"
+      ],
+      "notes": "Wave 2. The run list carries a badge naming the environment (`awaiting deployment · production`) plus a cancel control for writers; the run page names who approved, who is still awaited and the wait-timer deadline; the required reviewers receive one repo-level review request per hold (notify.EmitDeployment, class deployment_pending); every approval/denial is an audit entry naming the principal and whether it was partial. Both surfaces are text-labelled, not colour-only."
     },
     {
       "id": "PAR-136",
@@ -1860,14 +2007,15 @@
         "docs/features/21_parity_master.md §4.9",
         "docs/threads.md §3.1"
       ],
-      "tests": []
+      "tests": [],
+      "notes": "Wave 2 left this row OPEN on a cross-track seam: `concurrency.cancel-in-progress` is still a YAML bool in internal/threads/workflow/workflow.go (a `${{ … }}` value is a parse error, so it fails closed but does not resolve). Needed from the parser track (T1): carry the raw string in workflow.Concurrency (e.g. CancelInProgressExpr) and pass it through threads.concurrencySpec; threads then evaluates it at creation with the documented context set (github.*/inputs.*/matrix.*), failing run creation on an unresolvable reference. The group half (`${{ }}` in group with vars/inputs/matrix/github) is already resolved at creation (ExpandGroup) and covered by PAR-152's tests."
     },
     {
       "id": "PAR-152",
       "area": "concurrency",
       "capability": "Group semantics: cancel the *pending* run by default, `cancel-in-progress: false` sequences, `queue: single` / `max`",
       "provenance": "G",
-      "status": "partial",
+      "status": "have",
       "wave": 2,
       "track": [
         "T3"
@@ -1879,7 +2027,15 @@
         "docs/features/21_parity_master.md §4.9",
         "docs/threads.md §3.1"
       ],
-      "tests": []
+      "tests": [
+        "TestConcurrencyPendingRunReplacesTheOlderPending",
+        "TestConcurrencyPendingSlotBlocksALaterRun",
+        "TestConcurrencyCancelInProgressCancelsAtCreation",
+        "TestConcurrencyPendingRunCreatedBehindAHolder",
+        "TestConcurrencyGroupFreeRunIsNotPending",
+        "TestE2E_ThreadsApprovalSupersedeAndCancel"
+      ],
+      "notes": "Wave 2. The group record gained a single `pending` slot: a newer run replaces (cancels) the run already waiting, a live pending run blocks a later run from jumping ahead, the holder's terminal fold clears both slots, and `cancel-in-progress: true` cancels the holder at CREATION (not at the next claim). The run header carries `pending_group` while it waits (cleared when it leaves queued), which the run list and run page render. `queue: single` is this documented model (one running, one pending); a `queue:` key is not parsed and `max` remains PAR-153's cap work. The expression form of cancel-in-progress is PAR-151."
     },
     {
       "id": "PAR-153",
@@ -1981,7 +2137,7 @@
       "area": "concurrency",
       "capability": "Retention parity: configurable ceiling (≥90 days), keep-forever, separate run/log and artifact windows with artifact expiry defaults",
       "provenance": "B",
-      "status": "partial",
+      "status": "have",
       "wave": 2,
       "track": [
         "T5"
@@ -1993,14 +2149,21 @@
         "docs/features/21_parity_master.md §4.9",
         "docs/threads.md §3.1"
       ],
-      "tests": []
+      "tests": [
+        "TestRetentionDryRunMatchesApply",
+        "TestArtifactOutlivesItsRunWhenItsWindowAllows",
+        "TestKeepForeverReclaimsNothing",
+        "TestThreadsKnobDefaults",
+        "TestValidateThreadsKnobs"
+      ],
+      "notes": "Wave 2. Two independent windows: threads.retention (run/logs, default 30d) and threads.artifact_retention (artifacts, default = the run window), each validated 24h…8760h, so a 90-day setting is ordinary and reported (GCResult.RetentionDays/ArtifactDays). An artifact's expiry is its own (upload retention-days else the artifact window) and is NOT bounded by the run: an artifact may outlive its run and is reclaimed by its expiry row. threads.keep_forever skips run/log/artifact reclamation (dead runner records still pruned). The retention-days table in docs/threads.md §3.4 was corrected."
     },
     {
       "id": "PAR-159",
       "area": "concurrency",
       "capability": "GC parity: expired artifacts, unreferenced blobs, cache eviction, reclaimed bytes per family",
       "provenance": "G",
-      "status": "partial",
+      "status": "have",
       "wave": 2,
       "track": [
         "T5"
@@ -2012,7 +2175,13 @@
         "docs/features/21_parity_master.md §4.9",
         "docs/threads.md §3.1"
       ],
-      "tests": []
+      "tests": [
+        "TestRetentionDryRunMatchesApply",
+        "TestRetentionNeverDeletesAnAttachedRun",
+        "TestArtifactOutlivesItsRunWhenItsWindowAllows",
+        "TestRetainDeletesOldTerminalRunsKeepsTheRest"
+      ],
+      "notes": "Wave 2. GCResult reports reclaimed bytes per family (run, job, log, artifact, queue, runner) summing to BytesFreed; PlanRetention is a dry run walking the same objects with identical counts/bytes and no deletes (pinned by TestRetentionDryRunMatchesApply). Safety rule: a run is reclaimed only when terminal, past the window AND unattached — any job lease in the future pins it (TestRetentionNeverDeletesAnAttachedRun); idempotent, and the per-repository cadence gate repeats rather than skips after a restart (cmd/spindle/threads_sweep_test.go)."
     },
     {
       "id": "PAR-170",
@@ -2043,7 +2212,7 @@
       "area": "runners",
       "capability": "Label→backend+image mapping (`name:docker://image`, `name:lxc://template`, `name:host`)",
       "provenance": "F",
-      "status": "partial",
+      "status": "have",
       "wave": 2,
       "track": [
         "T3"
@@ -2058,7 +2227,12 @@
         "docs/features/21_parity_master.md §4.10",
         "docs/threads.md §8"
       ],
-      "tests": []
+      "tests": [
+        "TestParseRunnerLabels",
+        "TestRunnerLabelImageMappingReachesThePayload",
+        "TestRegisterStoresLabelImages"
+      ],
+      "notes": "Wave 2. The declared forms are `name:docker://image` (honoured: the job runs in that image when the workflow named no container.image of its own — the workflow's explicit image wins), a plain label, and `lxc://template` / `host` refused BY NAME as the D-15 non-goals. The mapping is stored on the registry record, echoed by register/declare and /admin/runners, and delivered with the job (label_images) while the server applies the selected image to the payload. The label part is still a normal label, so PAR-170's hosted expansion still governs matching: a runner must declare the expanded set too."
     },
     {
       "id": "PAR-172",
@@ -2220,7 +2394,8 @@
         "docs/features/21_parity_master.md §4.10",
         "docs/threads.md §8"
       ],
-      "tests": []
+      "tests": [],
+      "notes": "Wave 2 landed the LIMITS half with documented defaults and validated bounds (threads.retention / artifact_retention 24h…8760h, keep_forever, max_queue_attempts 1…20, job_lease 5m…30m; tests TestValidateThreadsKnobs, TestThreadsKnobDefaults and the reflected Configuration-page schema). The container half of this row (`container.privileged` gated by a runner opt-in, `network`, `valid_volumes`, `docker_host`) is internal/threads/containerpolicy.go + the runner package, owned by the runner track (T2): today `--privileged` and every namespace/mount flag are refused unconditionally, which is safe but not the documented opt-in shape."
     },
     {
       "id": "PAR-180",

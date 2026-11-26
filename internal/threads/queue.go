@@ -449,6 +449,13 @@ func (s *Service) claimEntry(ctx context.Context, owner, repo string, entry *Que
 	if err != nil || job == nil || run == nil {
 		return nil, err
 	}
+	// A deployment wait timer (PAR-131) holds the job without consuming an
+	// attempt and without a claim write: the entry stays queued, the run page
+	// names the deadline, and the next probe after it offers the job. Checked
+	// before the CAS so a waiting job is not churned every poll.
+	if waiting, _ := deploymentWaitRemaining(job, s.nowUTC()); waiting {
+		return nil, nil
+	}
 	// Tenancy under the claim CAS (the authority, like the fork gate below): a
 	// stale hint row or a hostile entry can never hand a repository's code to a
 	// runner the admin did not allow. The job stays queued for an eligible
@@ -511,9 +518,10 @@ func (s *Service) releaseClaim(ctx context.Context, owner, repo string, claim *C
 }
 
 // leaseFor is the claim lease: the job's timeout plus a grace window, floored
-// at 15 minutes and capped at 30 minutes (log frames renew it).
+// at the configured base lease (threads.job_lease, default 15 minutes) and
+// capped at 30 minutes (log frames renew it).
 func (s *Service) leaseFor(job *Job) time.Duration {
-	lease := 15 * time.Minute
+	lease := s.jobLease()
 	if job.Spec != nil && job.Spec.TimeoutMinutes > 0 {
 		lease = time.Duration(job.Spec.TimeoutMinutes)*time.Minute + 5*time.Minute
 	}
@@ -521,6 +529,14 @@ func (s *Service) leaseFor(job *Job) time.Duration {
 		lease = 30 * time.Minute
 	}
 	return lease
+}
+
+// jobLease is the configured base lease (threads.job_lease), default 15m.
+func (s *Service) jobLease() time.Duration {
+	if s != nil && s.JobLease > 0 {
+		return s.JobLease
+	}
+	return 15 * time.Minute
 }
 
 // requeueEntry moves one expired claim to a new attempt: the job record first

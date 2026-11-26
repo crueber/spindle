@@ -32,10 +32,15 @@ type fakeGit struct {
 	mu    sync.Mutex
 	lists int
 	reads int
+	// diffs scripts DiffNames by "<from>..<to>" / "<from>...<to>" key; diffErr
+	// fails the diff, and diffCalls observes the path-filter budget.
+	diffs     map[string][]string
+	diffErr   error
+	diffCalls int
 }
 
 func newFakeGit() *fakeGit {
-	return &fakeGit{files: map[string]map[string][]byte{}, refs: map[string]string{}}
+	return &fakeGit{files: map[string]map[string][]byte{}, refs: map[string]string{}, diffs: map[string][]string{}}
 }
 
 func (f *fakeGit) add(commit, path string, body string) {
@@ -88,6 +93,25 @@ func (f *fakeGit) ResolveRef(_ context.Context, _ string, ref string) (string, e
 		return "", fmt.Errorf("%w: unknown ref %q", ErrNotFound, ref)
 	}
 	return sha, nil
+}
+
+// DiffNames implements the optional DiffReader (path filters).
+func (f *fakeGit) DiffNames(_ context.Context, _, from, to string, mergeBase bool) ([]string, error) {
+	f.mu.Lock()
+	f.diffCalls++
+	key := from + ".." + to
+	if mergeBase {
+		key = from + "..." + to
+	}
+	paths, ok := f.diffs[key]
+	f.mu.Unlock()
+	if f.diffErr != nil {
+		return nil, f.diffErr
+	}
+	if !ok {
+		return nil, fmt.Errorf("%w: no diff fixture for %s", ErrNotFound, key)
+	}
+	return append([]string(nil), paths...), nil
 }
 
 // DefaultBranch is the optional scheduler extension (round-2 pass 2).

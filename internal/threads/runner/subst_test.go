@@ -58,7 +58,7 @@ func TestSubstituteGitHubInEverySite(t *testing.T) {
 	}
 	argv := strings.Join(step.Argv, " ")
 	for _, want := range []string{
-		"bash -eo pipefail -c echo refs/heads/main crueber " + job.Commit,
+		"bash --noprofile --norc -eo pipefail -c echo refs/heads/main crueber " + job.Commit,
 		"--env REF=refs/heads/main",
 		"--env ACTOR=crueber",
 	} {

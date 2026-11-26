@@ -107,7 +107,7 @@ func TestDocUnsupportedSpellings(t *testing.T) {
 		src  string
 	}{
 		{"defaults block", valid("defaults:\n  run:\n    shell: bash\n")},
-		{"push paths filter", "name: X\non:\n  push:\n    paths: [src/**]\njobs:\n  a:\n    runs-on: linux\n    steps:\n      - run: echo hi\n"},
+		{"push paths typo", "name: X\non:\n  push:\n    pathz: [src/**]\njobs:\n  a:\n    runs-on: linux\n    steps:\n      - run: echo hi\n"},
 		{"step id starting with a digit", "name: X\non: push\njobs:\n  a:\n    runs-on: linux\n    steps:\n      - id: 1build\n        run: echo hi\n"},
 		{"step id with a dot", "name: X\non: push\njobs:\n  a:\n    runs-on: linux\n    steps:\n      - id: unit.test\n        run: echo hi\n"},
 		{"duplicate step id", "name: X\non: push\njobs:\n  a:\n    runs-on: linux\n    steps:\n      - id: build\n        run: echo one\n      - id: build\n        run: echo two\n"},
@@ -116,8 +116,8 @@ func TestDocUnsupportedSpellings(t *testing.T) {
 		{"unknown trigger", "name: X\non: [tag]\njobs:\n  a:\n    runs-on: linux\n    steps:\n      - run: echo hi\n"},
 		{"bare on schedule", "name: X\non: [schedule]\njobs:\n  a:\n    runs-on: linux\n    steps:\n      - run: echo hi\n"},
 		{"empty schedule list", "name: X\non:\n  schedule: []\njobs:\n  a:\n    runs-on: linux\n    steps:\n      - run: echo hi\n"},
-		{"cron macro", "name: X\non:\n  schedule:\n    - cron: \"@daily\"\njobs:\n  a:\n    runs-on: linux\n    steps:\n      - run: echo hi\n"},
-		{"cron weekday name", "name: X\non:\n  schedule:\n    - cron: \"0 3 * * MON\"\njobs:\n  a:\n    runs-on: linux\n    steps:\n      - run: echo hi\n"},
+		{"cron unknown macro", "name: X\non:\n  schedule:\n    - cron: \"@sometimes\"\njobs:\n  a:\n    runs-on: linux\n    steps:\n      - run: echo hi\n"},
+		{"cron bad weekday name", "name: X\non:\n  schedule:\n    - cron: \"0 3 * * FUNDAY\"\njobs:\n  a:\n    runs-on: linux\n    steps:\n      - run: echo hi\n"},
 		{"cron with seconds", "name: X\non:\n  schedule:\n    - cron: \"0 0 3 * * *\"\njobs:\n  a:\n    runs-on: linux\n    steps:\n      - run: echo hi\n"},
 		{"step with run and uses", "name: X\non: push\njobs:\n  a:\n    runs-on: linux\n    steps:\n      - run: echo hi\n        uses: actions/checkout\n"},
 		{"needs unknown job", "name: X\non: push\njobs:\n  a:\n    runs-on: linux\n    needs: [nope]\n    steps:\n      - run: echo hi\n"},

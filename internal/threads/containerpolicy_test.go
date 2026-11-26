@@ -241,3 +241,59 @@ func TestContainerOptionGateTrustClasses(t *testing.T) {
 		})
 	}
 }
+
+// TestServiceHealthOptionValidators pins the merged services health knobs
+// (PAR-078): the command stays one in-container argv element and the numeric/
+// duration values match docker's own parsers.
+func TestServiceHealthOptionValidators(t *testing.T) {
+	for _, tc := range []struct {
+		value string
+		want  bool
+	}{
+		{"pg_isready -U postgres", true},
+		{"true", true},
+		{"", false},
+		{"   ", false},
+		{"--privileged", false},
+		{"a\nb", false},
+		{"a\rb", false},
+		{"a\x00b", false},
+	} {
+		if got := validHealthCommand(tc.value); got != tc.want {
+			t.Errorf("validHealthCommand(%q) = %v", tc.value, got)
+		}
+	}
+	for _, tc := range []struct {
+		value string
+		want  bool
+	}{
+		{"10s", true}, {"1m30s", true}, {"0s", false}, {"-1s", false}, {"nope", false},
+	} {
+		if got := validHealthDuration(tc.value); got != tc.want {
+			t.Errorf("validHealthDuration(%q) = %v", tc.value, got)
+		}
+	}
+	for _, tc := range []struct {
+		value string
+		want  bool
+	}{
+		{"3", true}, {"1000", true}, {"0", false}, {"-1", false}, {"1001", false}, {"x", false},
+	} {
+		if got := validHealthRetries(tc.value); got != tc.want {
+			t.Errorf("validHealthRetries(%q) = %v", tc.value, got)
+		}
+	}
+	if !validUlimitValue("nofile=1024:2048") || validUlimitValue("nproc=4") {
+		t.Fatal("validUlimitValue")
+	}
+	for _, tc := range []struct {
+		value string
+		want  bool
+	}{
+		{"x", true}, {"", false}, {"-x", false}, {"a b", false}, {"a\x7f", false},
+	} {
+		if got := validGenericOptionValue(tc.value); got != tc.want {
+			t.Errorf("validGenericOptionValue(%q) = %v", tc.value, got)
+		}
+	}
+}

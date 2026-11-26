@@ -174,6 +174,26 @@ type StreamEvent struct {
 	Tag    string `json:"tag"`
 }
 
+// releaseEvent delivers one lifecycle edge nil-safely.
+func (s *Service) releaseEvent(ctx context.Context, owner, repo string, r *Release, action, actor string) {
+	if s.ReleaseEvents == nil || r == nil {
+		return
+	}
+	assets := make([]ReleaseAssetRow, 0, len(r.Assets))
+	for _, a := range r.Assets {
+		assets = append(assets, ReleaseAssetRow{Name: a.Name, Size: a.Size})
+	}
+	published := ""
+	if r.PublishedAt != nil {
+		published = *r.PublishedAt
+	}
+	s.ReleaseEvents(ctx, ReleaseEvent{
+		Repo: repoName(owner, repo), Action: action, Tag: r.Tag, Name: r.Name,
+		Target: r.TagSHA, Draft: r.Draft, Prerelease: r.Prerelease,
+		Actor: normPrincipal(actor), Assets: assets, TagSHA: r.TagSHA, PublishedAt: published,
+	})
+}
+
 // Streamer appends StreamEvents to the repo's SSE stream. Nil-safe;
 // composition wires the real stream.
 type Streamer func(ctx context.Context, ev StreamEvent)
@@ -209,7 +229,36 @@ type Service struct {
 	// nil makes pending-tag publishing 503 rather than silently dropping the
 	// tag. Called exactly on the draft→publish transition.
 	CreateTag func(ctx context.Context, owner, repo, name, sha string, p auth.Principal) error
+	// ReleaseEvents receives the release lifecycle edges the `on.release`
+	// trigger consumes (PAR-017). Nil is a no-op.
+	ReleaseEvents ReleaseEventSink
 }
+
+// ReleaseEvent is one release lifecycle edge. Action is exactly one of
+// created|published|edited|deleted|prereleased|released|unpublished — the
+// vocabulary the workflow parser accepts.
+type ReleaseEvent struct {
+	Repo        string
+	Action      string
+	Tag         string
+	Name        string
+	Target      string
+	Draft       bool
+	Prerelease  bool
+	Actor       string
+	Assets      []ReleaseAssetRow
+	TagSHA      string
+	PublishedAt string
+}
+
+// ReleaseAssetRow is one asset in an event (name + size; never bytes).
+type ReleaseAssetRow struct {
+	Name string
+	Size int64
+}
+
+// ReleaseEventSink receives ReleaseEvents synchronously after the commit.
+type ReleaseEventSink func(ctx context.Context, ev ReleaseEvent)
 
 // New builds a Service over st.
 func New(st store.ObjectStore, roles RoleService) *Service {
@@ -367,6 +416,16 @@ func (s *Service) roleOf(ctx context.Context, owner, repo string, p auth.Princip
 func (s *Service) requireRole(ctx context.Context, owner, repo string, p auth.Principal, want string) error {
 	if p.Admin {
 		return nil
+	}
+	// A Threads job token's release authority is exactly `contents: write`
+	// (GitHub's rule, PAR-112): its repository role also covers PR and issue
+	// work, so being a writer is not by itself a release capability, and it
+	// never reaches another repository.
+	if p.JobRepo != "" {
+		if strings.EqualFold(p.JobRepo, owner+"/"+repo) && p.JobPerms["contents"] == "write" {
+			return nil
+		}
+		return fmt.Errorf("%w: need contents: write for a job token", ErrForbidden)
 	}
 	got := s.roleOf(ctx, owner, repo, p)
 	if roleRank(got) >= roleRank(want) {

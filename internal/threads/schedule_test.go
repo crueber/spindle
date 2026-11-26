@@ -2,6 +2,7 @@ package threads
 
 import (
 	"context"
+	"errors"
 	"sync"
 	"testing"
 	"time"
@@ -156,7 +157,7 @@ func TestSweepScheduleSkipsDisabledAndUnscheduledFiles(t *testing.T) {
 	e.git.add(testSHA, ".spindle/workflows/pushonly.yml",
 		"name: push only\non: [push]\njobs:\n  a:\n    runs-on: l\n    steps:\n      - run: x\n")
 	e.git.add(testSHA, ".spindle/workflows/badcron.yml",
-		"name: bad cron\non:\n  schedule:\n    - cron: \"0 3 * * MON\"\njobs:\n  a:\n    runs-on: l\n    steps:\n      - run: x\n")
+		"name: bad cron\non:\n  schedule:\n    - cron: \"0 3 * * FUNDAY\"\njobs:\n  a:\n    runs-on: l\n    steps:\n      - run: x\n")
 
 	res, err := e.svc.SweepSchedule(context.Background(), "o", "r", nil)
 	if err != nil {
@@ -227,9 +228,9 @@ func TestScheduleEntriesProjection(t *testing.T) {
 	}
 	w := &workflow.Workflow{}
 	w.On.ScheduleSet = true
-	w.On.Schedule = []workflow.CronEntry{{Cron: "0 3 * * *"}, {Cron: "0 3 * * MON"}}
+	w.On.Schedule = []workflow.CronEntry{{Cron: "0 3 * * *"}, {Cron: "0 3 * * FUNDAY"}}
 	entries := ScheduleEntries(w)
-	want := []string{"0 3 * * *", "0 3 * * MON (unsupported)"}
+	want := []string{"0 3 * * *", "0 3 * * FUNDAY (unsupported)"}
 	if len(entries) != len(want) {
 		t.Fatalf("entries = %v, want %v", entries, want)
 	}
@@ -237,5 +238,77 @@ func TestScheduleEntriesProjection(t *testing.T) {
 		if entries[i] != want[i] {
 			t.Fatalf("entries = %v, want %v", entries, want)
 		}
+	}
+}
+
+// TestSweepScheduleTimezone pins the per-entry timezone: 03:00 Berlin fires at
+// 02:00 UTC, and the local slot is what the watermark stores.
+func TestSweepScheduleTimezone(t *testing.T) {
+	at := time.Date(2026, 11, 21, 2, 0, 20, 0, time.UTC) // 03:00 CET
+	e, _ := scheduleEnv(t, at)
+	e.git.add(testSHA, ".spindle/workflows/berlin.yml", `name: berlin
+on:
+  schedule:
+    - cron: "0 3 * * *"
+      timezone: Europe/Berlin
+jobs:
+  a:
+    runs-on: l
+    steps:
+      - run: x
+`)
+	res, err := e.svc.SweepSchedule(context.Background(), "o", "r", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Evaluated < 1 || res.Fired < 1 {
+		t.Fatalf("sweep = %+v", res)
+	}
+	wm, err := e.svc.LoadScheduleWatermark(context.Background(), "o", "r")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := wm.Fired[".spindle/workflows/berlin.yml|0 3 * * *|Europe/Berlin"]; got != "2026-11-21T03:00" {
+		t.Fatalf("watermark slot = %q", got)
+	}
+}
+
+// TestScheduleWatermarkCorrupt pins the fail-closed read of a damaged
+// watermark document.
+func TestScheduleWatermarkCorrupt(t *testing.T) {
+	e := newTestEnv(t)
+	if _, err := store.PutBytes(ctx(), e.store, ScheduleKey("o", "r"), []byte(`{"fired":`), store.PutOptions{Mode: store.PutCreate}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := e.svc.LoadScheduleWatermark(ctx(), "o", "r"); !errors.Is(err, ErrCorrupt) {
+		t.Fatalf("corrupt watermark = %v, want ErrCorrupt", err)
+	}
+	if _, err := e.svc.SweepSchedule(context.Background(), "o", "does-not-exist", nil); err != nil {
+		t.Fatalf("empty repo sweep = %v", err)
+	}
+}
+
+// TestScheduleSmallArms covers the no-reader branch and the nil-error helper.
+func TestScheduleSmallArms(t *testing.T) {
+	bare := &Service{}
+	if branch, ref := bare.scheduleBranch(context.Background(), "o/r"); branch != "" || ref != "" {
+		t.Fatalf("no reader = %q, %q", branch, ref)
+	}
+	if isNotFoundLike(nil) {
+		t.Fatal("nil is not a not-found")
+	}
+	if entries := ScheduleEntries(nil); len(entries) != 0 {
+		t.Fatalf("nil entries = %v", entries)
+	}
+}
+
+// TestSweepScheduleCancelled pins the context checks inside the sweep.
+func TestSweepScheduleCancelled(t *testing.T) {
+	at := time.Date(2026, 11, 21, 3, 0, 20, 0, time.UTC)
+	e, _ := scheduleEnv(t, at)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, err := e.svc.SweepSchedule(ctx, "o", "r", nil); err == nil {
+		t.Fatal("a canceled sweep reported success")
 	}
 }

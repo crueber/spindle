@@ -233,7 +233,20 @@ func (s *Service) CreateIssue(ctx context.Context, owner, repo string, actor aut
 	if nt != nil {
 		th = nt
 	}
+	s.threadEvent(ctx, ThreadEvent{
+		Repo: repoName(owner, repo), Kind: "issue", Action: "opened", Num: num,
+		Actor: normPrincipal(actor.Name), Title: th.Title, State: th.State, Author: th.Author,
+		Labels: append([]string(nil), th.Labels...),
+	})
 	return th, ev, nil
+}
+
+// threadEvent delivers one trigger edge nil-safely.
+func (s *Service) threadEvent(ctx context.Context, ev ThreadEvent) {
+	if s.ThreadEvents == nil {
+		return
+	}
+	s.ThreadEvents(ctx, ev)
 }
 
 // resolveIssueMeta validates the optional create metadata and returns the
@@ -342,6 +355,11 @@ func (s *Service) AddComment(ctx context.Context, owner, repo string, num int, a
 	s.emitSubscribed(ctx, owner, repo, th, who, "commented")
 	s.emitMentioned(ctx, owner, repo, num, who, body)
 	s.stream(ctx, StreamEvent{Name: "issue_event", Repo: repoName(owner, repo), IssueNum: num, Seq: ev.Seq})
+	s.threadEvent(ctx, ThreadEvent{
+		Repo: repoName(owner, repo), Kind: "issue_comment", Action: "created", Num: num,
+		Actor: who, Title: th.Title, State: th.State, Author: th.Author,
+		Labels: append([]string(nil), th.Labels...), CommentBody: body, CommentActor: who,
+	})
 	return ev, nil
 }
 
@@ -596,6 +614,8 @@ func (s *Service) patchThread(ctx context.Context, owner, repo string, num int, 
 		}); err != nil {
 			return nil, err
 		}
+		s.threadEvent(ctx, ThreadEvent{Repo: repoName(owner, repo), Kind: kind, Action: "edited", Num: num,
+			Actor: who, Title: th.Title, State: th.State, Author: th.Author, Labels: append([]string(nil), th.Labels...)})
 	}
 	if labels != nil {
 		added, removed := diffStr(th.Labels, *labels)
@@ -610,6 +630,14 @@ func (s *Service) patchThread(ctx context.Context, owner, repo string, num int, 
 		}); err != nil {
 			return nil, err
 		}
+		for _, name := range added {
+			s.threadEvent(ctx, ThreadEvent{Repo: repoName(owner, repo), Kind: kind, Action: "labeled", Num: num,
+				Actor: who, Title: th.Title, State: th.State, Author: th.Author, Extra: name, Labels: append([]string(nil), th.Labels...)})
+		}
+		for _, name := range removed {
+			s.threadEvent(ctx, ThreadEvent{Repo: repoName(owner, repo), Kind: kind, Action: "unlabeled", Num: num,
+				Actor: who, Title: th.Title, State: th.State, Author: th.Author, Extra: name, Labels: append([]string(nil), th.Labels...)})
+		}
 	}
 	if assignees != nil {
 		added, removed := diffStr(th.Assignees, *assignees)
@@ -623,6 +651,14 @@ func (s *Service) patchThread(ctx context.Context, owner, repo string, num int, 
 			return &Event{Seq: seq, Type: EventAssigneesChanged, Actor: who, At: now, Added: added, Removed: removed}, nil
 		}); err != nil {
 			return nil, err
+		}
+		for _, a := range added {
+			s.threadEvent(ctx, ThreadEvent{Repo: repoName(owner, repo), Kind: kind, Action: "assigned", Num: num,
+				Actor: who, Title: th.Title, State: th.State, Author: th.Author, Extra: a})
+		}
+		for _, a := range removed {
+			s.threadEvent(ctx, ThreadEvent{Repo: repoName(owner, repo), Kind: kind, Action: "unassigned", Num: num,
+				Actor: who, Title: th.Title, State: th.State, Author: th.Author, Extra: a})
 		}
 		for _, a := range addedAssignees {
 			s.emit(ctx, NotifyEvent{Repo: repoName(owner, repo), Class: "assigned", Actor: who, IssueNum: num, Recipients: []string{a}})
@@ -642,6 +678,12 @@ func (s *Service) patchThread(ctx context.Context, owner, repo string, num int, 
 			return nil, err
 		}
 		s.moveMilestone(ctx, owner, repo, th.State, from, to)
+		mileAction := "demilestoned"
+		if to != nil {
+			mileAction = "milestoned"
+		}
+		s.threadEvent(ctx, ThreadEvent{Repo: repoName(owner, repo), Kind: kind, Action: mileAction, Num: num,
+			Actor: who, Title: th.Title, State: th.State, Author: th.Author, Extra: ptrOrEmpty(to)})
 	}
 	if state != nil {
 		from := th.State
@@ -669,6 +711,12 @@ func (s *Service) patchThread(ctx context.Context, owner, repo string, num int, 
 				s.bumpMilestone(ctx, owner, repo, *th.Milestone, +1, -1)
 			}
 		}
+		stateAction := "reopened"
+		if to == StateClosed {
+			stateAction = "closed"
+		}
+		s.threadEvent(ctx, ThreadEvent{Repo: repoName(owner, repo), Kind: kind, Action: stateAction, Num: num,
+			Actor: who, Title: th.Title, State: th.State, Author: th.Author, Labels: append([]string(nil), th.Labels...)})
 	}
 	s.updateIndex(ctx, owner, repo, cardOf(th))
 	if title != nil || labels != nil || assignees != nil || milestone != nil || state != nil {
@@ -1898,4 +1946,12 @@ func diffStr(old, new []string) ([]string, []string) {
 		removed = []string{}
 	}
 	return added, removed
+}
+
+// ptrOrEmpty renders a *string for an event detail ("" when nil).
+func ptrOrEmpty(p *string) string {
+	if p == nil {
+		return ""
+	}
+	return *p
 }

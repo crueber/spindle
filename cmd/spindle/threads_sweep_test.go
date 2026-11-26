@@ -391,10 +391,10 @@ func TestScheduleSweeperFirstTickIsTheNextMinute(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	fired := wm.Fired[".spindle/workflows/nightly.yml|* * * * *"]
-	want := time.Date(2026, 11, 21, 8, 38, 0, 0, time.UTC).Unix()
+	fired := wm.Fired[".spindle/workflows/nightly.yml|* * * * *|"]
+	want := "2026-11-21T08:38"
 	if fired != want {
-		t.Fatalf("watermark = %d, want %d (tick 08:38 not one minute later)", fired, want)
+		t.Fatalf("watermark = %q, want %q (tick 08:38 not one minute later)", fired, want)
 	}
 	// Inside the same minute the gate stays closed.
 	now = now.Add(30 * time.Second)

@@ -81,6 +81,12 @@ func (t *translator) triggers(m *yaml.Node, i int) {
 				} else {
 					j -= 2
 				}
+			case "release", "issues", "issue_comment":
+				if t.typedTrigger(val, j, path, ev.Value) {
+					t.translated++
+				} else {
+					j -= 2
+				}
 			default:
 				t.drop(val, j, t.untranslatedAt(path, ev.Value, "not a trigger Threads can emit"))
 				j -= 2
@@ -107,19 +113,10 @@ func (t *translator) pushTrigger(m *yaml.Node, i int, path string) bool {
 		f := val.Content[j]
 		p := path + "." + f.Value
 		switch f.Value {
-		case "branches", "tags":
+		case "branches", "tags", "branches-ignore", "tags-ignore", "paths", "paths-ignore":
 			if !t.scalarListAt(val, j, p, "on.push."+f.Value) {
 				j -= 2
 			}
-		case "paths":
-			t.drop(val, j, t.untranslatedAt(p, "on.push.paths", "path filters are not supported; filter inside the job with `git diff --name-only`"))
-			j -= 2
-		case "paths-ignore":
-			t.drop(val, j, t.untranslatedAt(p, "on.push.paths-ignore", "path filters are not supported; filter inside the job with `git diff --name-only`"))
-			j -= 2
-		case "branches-ignore", "tags-ignore":
-			t.drop(val, j, t.untranslatedAt(p, "on.push."+f.Value, "an ignore filter is not supported; enumerate the branches/tags to include"))
-			j -= 2
 		default:
 			t.drop(val, j, t.untranslatedAt(p, "on.push."+f.Value, "not part of the Spindle push-trigger schema"))
 			j -= 2
@@ -148,17 +145,14 @@ func (t *translator) pullRequestTrigger(m *yaml.Node, i int, path string) bool {
 		f := val.Content[j]
 		p := path + "." + f.Value
 		switch f.Value {
-		case "branches":
-			if !t.scalarListAt(val, j, p, "on.pull_request.branches") {
+		case "branches", "branches-ignore", "paths", "paths-ignore":
+			if !t.scalarListAt(val, j, p, "on.pull_request."+f.Value) {
 				j -= 2
 			}
 		case "types":
 			if !t.typesAt(val, j, p) {
 				j -= 2
 			}
-		case "paths", "paths-ignore":
-			t.drop(val, j, t.untranslatedAt(p, "on.pull_request."+f.Value, "path filters are not supported; filter inside the job with `git diff --name-only`"))
-			j -= 2
 		default:
 			t.drop(val, j, t.untranslatedAt(p, "on.pull_request."+f.Value, "not part of the Spindle pull-request trigger schema"))
 			j -= 2
@@ -182,7 +176,7 @@ func (t *translator) typesAt(m *yaml.Node, i int, path string) bool {
 			continue
 		}
 		t.dropItem(val, j, t.untranslatedAt(path, "pull_request.types: "+name,
-			"Threads emits opened, synchronize and reopened only; this action never fires"))
+			"Threads emits exactly the actions in pull_request.types; this one never fires"))
 		j--
 	}
 	if len(val.Content) == 0 {
@@ -279,7 +273,7 @@ func (t *translator) inputsAt(m *yaml.Node, i int, path string) {
 					k -= 2
 					continue
 				}
-				if text != "" && text != "string" && text != "boolean" && text != "choice" {
+				if text != "" && text != "string" && text != "boolean" && text != "choice" && text != "number" && text != "environment" {
 					t.note(fp, "input type "+text, "carried as a string input: the type is not supported yet")
 					setScalar(value, "string")
 					t.untranslated = append(t.untranslated, Item{Path: fp, Construct: "input type " + oneLine(text),
@@ -369,12 +363,17 @@ func (t *translator) scheduleTrigger(m *yaml.Node, i int, path string) bool {
 			j--
 			continue
 		}
-		if len(entry.Content) != 2 || entry.Content[0].Value != "cron" {
-			t.dropItem(val, j, t.untranslatedAt(p, "schedule entry", "each entry must have exactly one `cron:` key"))
+		if len(entry.Content) != 2 && len(entry.Content) != 4 {
+			t.dropItem(val, j, t.untranslatedAt(p, "schedule entry", "each entry must have `cron:` and an optional `timezone:`"))
 			j--
 			continue
 		}
-		expr, ok := scalarText(entry.Content[1])
+		if mapIndex(entry, "cron") < 0 || (len(entry.Content) == 4 && mapIndex(entry, "timezone") < 0) {
+			t.dropItem(val, j, t.untranslatedAt(p, "schedule entry", "each entry must have `cron:` and an optional `timezone:`"))
+			j--
+			continue
+		}
+		expr, ok := scalarText(mapValue(entry, "cron"))
 		if !ok {
 			t.dropItem(val, j, t.untranslatedAt(p, "cron", "the expression must be a string"))
 			j--
@@ -385,11 +384,80 @@ func (t *translator) scheduleTrigger(m *yaml.Node, i int, path string) bool {
 			j--
 			continue
 		}
+		if tz := mapValue(entry, "timezone"); tz != nil {
+			text, ok := scalarText(tz)
+			if !ok {
+				t.dropItem(val, j, t.untranslatedAt(p, "timezone", "expected an IANA timezone name"))
+				j--
+				continue
+			}
+			if _, err := (workflow.CronEntry{Cron: expr, Timezone: text}).Location(); err != nil {
+				t.dropItem(val, j, t.untranslatedAt(p, "timezone: "+text, err.Error()))
+				j--
+				continue
+			}
+		}
 		t.translated++
 	}
 	if len(val.Content) == 0 {
 		t.drop(m, i, t.untranslatedAt(path, "on.schedule", "no cron entry survived conversion; the trigger is removed"))
 		return false
+	}
+	return true
+}
+
+// typedTrigger translates a release/issues/issue_comment trigger: only `types`
+// is part of the schema, and every type is checked against the set the owning
+// service emits (a type that can never fire is dropped by name).
+func (t *translator) typedTrigger(m *yaml.Node, i int, path, event string) bool {
+	val := m.Content[i+1]
+	if isNull(val) {
+		return true
+	}
+	if val.Kind != yaml.MappingNode {
+		t.drop(m, i, t.untranslatedAt(path, event, "the filters must be a mapping"))
+		return false
+	}
+	supported := map[string][]string{
+		"release":       workflow.ReleaseTypes,
+		"issues":        workflow.IssuesTypes,
+		"issue_comment": workflow.IssueCommentTypes,
+	}[event]
+	for j := 0; j < len(val.Content); j += 2 {
+		f := val.Content[j]
+		p := path + "." + f.Value
+		if f.Value != "types" {
+			t.drop(val, j, t.untranslatedAt(p, "on."+event+"."+f.Value, "not part of the Spindle trigger schema"))
+			j -= 2
+			continue
+		}
+		tv := val.Content[j+1]
+		if tv.Kind != yaml.SequenceNode {
+			t.drop(val, j, t.untranslatedAt(p, "on."+event+".types", "expected a list of lifecycle actions"))
+			j -= 2
+			continue
+		}
+		for k := 0; k < len(tv.Content); k++ {
+			name, ok := scalarText(tv.Content[k])
+			valid := false
+			for _, s := range supported {
+				if ok && s == name {
+					valid = true
+					break
+				}
+			}
+			if valid {
+				t.translated++
+				continue
+			}
+			t.dropItem(tv, k, t.untranslatedAt(p, event+".types: "+name,
+				"the "+event+" service never emits this action"))
+			k--
+		}
+		if len(tv.Content) == 0 {
+			t.drop(val, j, t.untranslatedAt(p, "on."+event+".types", "an empty type list matches nothing; omit `types` to fire on every emitted action"))
+			j -= 2
+		}
 	}
 	return true
 }

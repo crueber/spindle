@@ -162,6 +162,15 @@ func (s *Service) ReportStatus(ctx context.Context, owner, repo, sha string, p a
 		}
 		creator = normPrincipal(p.Name)
 	} else {
+		// A Threads job token never reports commit statuses over HTTP: the
+		// `checks` and `statuses` scopes are refused by name (PAR-112, D-11), so
+		// the token's repository role must not be enough on its own — otherwise
+		// a `contents: write` job could forge the very check context that gates
+		// its own merge. A job's own check runs are written in-process by Threads
+		// (RecordStatus), which never passes through this path.
+		if p.JobRepo != "" {
+			return nil, fmt.Errorf("%w: a job token cannot report commit statuses", ErrForbidden)
+		}
 		if err := s.requireRole(ctx, owner, repo, p, "write"); err != nil {
 			return nil, err
 		}

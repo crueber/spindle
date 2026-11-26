@@ -43,11 +43,14 @@ var (
 // Events v1 fires on (15 §1). `schedule` is created only by the maintainer's
 // cron evaluation (SweepSchedule): a push/dispatch path never fabricates one.
 const (
-	EventPush       = "push"
-	EventPullReq    = "pull_request"
-	EventDispatch   = "workflow_dispatch"
-	EventSchedule   = "schedule" // created by SweepSchedule, never by Discover
-	defaultRunActor = "spindle"
+	EventPush         = "push"
+	EventPullReq      = "pull_request"
+	EventDispatch     = "workflow_dispatch"
+	EventSchedule     = "schedule" // created by SweepSchedule, never by Discover
+	EventRelease      = "release"
+	EventIssues       = "issues"
+	EventIssueComment = "issue_comment"
+	defaultRunActor   = "spindle"
 )
 
 // Run states. T1 creates every run in RunQueued; UpdateJob moves it (T2 will
@@ -147,11 +150,23 @@ type Run struct {
 	// Inputs are the workflow_dispatch input values this run was dispatched
 	// with (nil for push/PR runs); the job specs carry the same map.
 	Inputs map[string]string `json:"inputs,omitempty"`
+	// EventPayload is the bounded, documented event body (PAR-033) the run's jobs
+	// read as `github.event.*` and as $GITHUB_EVENT_PATH. It is built by the
+	// trigger's emitter with a fixed field set and size cap — never a copy of
+	// an arbitrary request body.
+	EventPayload map[string]any `json:"event_payload,omitempty"`
 	// Concurrency lists the distinct concurrency groups this run holds while
 	// in flight (15 §4, pass B2). It is written at creation and read by the
 	// claim path (one in-flight run per group) and by the terminal fold, which
 	// releases exactly these keys.
 	Concurrency []string `json:"concurrency,omitempty"`
+	// PendingGroup names the concurrency group this run is WAITING for when a
+	// newer run of the same group is ahead of it (PAR-152): GitHub allows one
+	// running and one pending run per group, and the newer pending run cancels
+	// the older pending one. It is set at creation (one group read) and cleared
+	// when the run leaves `queued`, so the run page can say what it waits for
+	// instead of showing a silent spinner (law 7).
+	PendingGroup string `json:"pending_group,omitempty"`
 
 	CreatedAt   string  `json:"created_at"`
 	UpdatedAt   string  `json:"updated_at"`
@@ -225,8 +240,14 @@ type Spec struct {
 	If              string            `json:"if,omitempty"`
 	TimeoutMinutes  int               `json:"timeout_minutes,omitempty"`
 	ContinueOnError bool              `json:"continue_on_error,omitempty"`
-	// Permissions is carried for the future job token; NOT enforced in pass A.
+	// Permissions is the merged workflow+job `permissions:` map; EffectivePermissions
+	// resolves it with the instance default (tokens.go). The keys are the closed
+	// scope vocabulary the parser accepts (PAR-112).
 	Permissions map[string]string `json:"permissions,omitempty"`
+	// EnableOpenIDConnect carries the Forgejo `enable-openid-connect` key
+	// (PAR-119). It grants the OIDC exchange only when the run is trusted and
+	// `id-token` is not explicitly denied.
+	EnableOpenIDConnect bool `json:"enable_openid_connect,omitempty"`
 	// Strategy is the matrix product + fail-fast flag. The scheduler expands
 	// it at run creation (pass B2): every expanded job carries one cell in
 	// Matrix and the fail-fast flag rides the whole product.
@@ -371,6 +392,14 @@ type EnvironmentSpec struct {
 // and when. It lives on the job record (no separate family), so a run page and
 // an API reader see the same fact and the retention pass deletes it with the
 // job.
+//
+// Protection parity (PAR-131) adds the facts a deployment is gated on:
+// RequiredApprovers is the reviewer set resolved at creation (direct reviewers
+// plus each team's members) and RE-resolved from the live environment record at
+// every decision, so a roster edit applies to the next approval exactly like
+// GitHub's protection rules; Approvals records each principal whose approval has
+// landed; WaitUntil is the wait timer's deadline, which starts at creation and
+// must pass before the job may be claimed.
 type Deployment struct {
 	Environment string  `json:"environment"`
 	URL         string  `json:"url,omitempty"`
@@ -379,6 +408,21 @@ type Deployment struct {
 	ApprovedAt  *string `json:"approved_at,omitempty"`
 	DeniedBy    string  `json:"denied_by,omitempty"`
 	DeniedAt    *string `json:"denied_at,omitempty"`
+	// RequiredApprovers is every principal who must approve (direct reviewers
+	// plus team members, lowercased, sorted, deduped). Empty with a
+	// non-nil WaitUntil is a timer-only hold.
+	RequiredApprovers []string `json:"required_approvers,omitempty"`
+	// Approvals are the principals whose approval landed, oldest first.
+	Approvals []string `json:"approvals,omitempty"`
+	// WaitUntil is the earliest claim time (`wait timer`), RFC 3339; nil when
+	// the environment declares no timer.
+	WaitUntil *string `json:"wait_until,omitempty"`
+	// PreventSelfReview records the environment's rule for THIS deployment,
+	// so the page can say why the triggering actor cannot approve it.
+	PreventSelfReview bool `json:"prevent_self_review,omitempty"`
+	// TriggeredBy is the run's actor, the principal a prevent-self-review
+	// environment refuses.
+	TriggeredBy string `json:"triggered_by,omitempty"`
 }
 
 // Deployment states. `not_required` is an environment with no required
@@ -466,6 +510,17 @@ type Job struct {
 	LeaseUntil *string `json:"lease_until,omitempty"`
 	// StepResults are the runner-reported step outcomes from complete.
 	StepResults []StepResult `json:"step_results,omitempty"`
+	// Annotations are the workflow-command annotations the runner collected
+	// from the attempt's log (`::error`/`::warning`/`::notice`, PAR-093): the
+	// job page shows them, and the check mirror states their count on the
+	// commit. Bounded by MaxAnnotationsPerJob; a rerun clears them with the
+	// rest of the attempt.
+	Annotations []Annotation `json:"annotations,omitempty"`
+	// Summary is the job's step summary ($GITHUB_STEP_SUMMARY, PAR-092),
+	// collected after each step, capped per step and per job. It is markdown,
+	// rendered by the server's sanitizing renderer — never passed through as
+	// HTML.
+	Summary string `json:"summary,omitempty"`
 	// Outputs are the job outputs the runner reported on complete, after
 	// evaluating the spec's `outputs:` templates against the step outputs
 	// (docs/threads.md §3.9). A dependent job reads them as
@@ -550,6 +605,18 @@ type CreateOpts struct {
 	// the service resolves refs/heads/<BaseBranch>.
 	BaseBranch string
 	BaseCommit string
+	// BaseSHA is the pre-image the changed-path filter diffs against: the
+	// old oid of a push, or the PR's base commit (a merge-base diff). Empty
+	// means "no pre-image" (a brand-new ref, where the pushed commit's own
+	// change set is used). It is read only when a workflow declares
+	// `paths`/`paths-ignore`, so a repository without path filters pays no
+	// diff at all (PAR-012 budget).
+	BaseSHA string
+	// EventPayload is the bounded event body a workflow reads through
+	// `github.event.*` and $GITHUB_EVENT_PATH (PAR-033). It is built by the
+	// emitter (push/pull/release/issue/…) with a documented field set, never
+	// copied from a request.
+	EventPayload map[string]any
 	// Fork marks a pull_request from a forked repository: base-branch
 	// workflow revision, Trusted=false (15 §2).
 	Fork bool
@@ -582,7 +649,8 @@ func normalizeSHA(sha string) (string, error) {
 // validEvent reports the events CreateRun accepts.
 func validEvent(event string) bool {
 	switch event {
-	case EventPush, EventPullReq, EventDispatch, EventSchedule:
+	case EventPush, EventPullReq, EventDispatch, EventSchedule,
+		EventRelease, EventIssues, EventIssueComment:
 		return true
 	}
 	return false

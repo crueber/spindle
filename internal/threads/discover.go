@@ -183,12 +183,19 @@ func workflowName(p string, w *workflow.Workflow) string {
 // file by basename or repository-relative path. Files that failed to parse
 // never match.
 func SelectFiles(files []*WorkflowFile, event string, kind workflow.RefKind, ref, action, want string) []*WorkflowFile {
+	return SelectFilesWithChanges(files, event, kind, ref, action, want, nil, false)
+}
+
+// SelectFilesWithChanges is SelectFiles plus the changed-path set. known is
+// false when no diff was computed; a `paths`/`paths-ignore` trigger then does
+// not fire (fail closed).
+func SelectFilesWithChanges(files []*WorkflowFile, event string, kind workflow.RefKind, ref, action, want string, changed []string, known bool) []*WorkflowFile {
 	out := make([]*WorkflowFile, 0, len(files))
 	for _, f := range files {
 		if f.Workflow == nil {
 			continue // per-file isolation: a broken file creates no run
 		}
-		if !f.Workflow.Fires(event, kind, ref, action) {
+		if !f.Workflow.FiresWithChanges(event, kind, ref, action, changed, known) {
 			continue
 		}
 		if want != "" && !matchesWorkflow(f, want) {
@@ -197,6 +204,28 @@ func SelectFiles(files []*WorkflowFile, event string, kind workflow.RefKind, ref
 		out = append(out, f)
 	}
 	return out
+}
+
+// NeedsChangedPaths reports whether any parsed file declares a path filter for
+// the event. It is the budget gate: only then does CreateRun spend the one
+// name-only git diff (zero store round trips).
+func NeedsChangedPaths(files []*WorkflowFile, event string) bool {
+	for _, f := range files {
+		if f.Workflow == nil {
+			continue
+		}
+		switch event {
+		case EventPush:
+			if p := f.Workflow.On.Push; p != nil && (len(p.Paths) > 0 || len(p.PathsIgnore) > 0) {
+				return true
+			}
+		case EventPullReq:
+			if p := f.Workflow.On.PullRequest; p != nil && (len(p.Paths) > 0 || len(p.PathsIgnore) > 0) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // matchesWorkflow accepts a basename ("ci.yml") or the repository-relative

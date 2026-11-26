@@ -39,6 +39,11 @@ const runnerVersion = "1"
 // escaping headroom).
 const maxProtocolBody = 2 * MaxLogFrame
 
+// maxCompleteBody bounds the complete payload: a job may report up to
+// MaxJobSummaryBytes of step summary plus its annotations and step results, so
+// the generic protocol bound (a log frame pair) is too small for this one call.
+const maxCompleteBody = MaxJobSummaryBytes + 2*MaxLogFrame
+
 // handleTop answers /api/v1/threads/… (the runner protocol). It reports false
 // for anything else, so the core api mux answers.
 func (h *Handler) handleTop(w http.ResponseWriter, r *http.Request, segs []string) bool {
@@ -314,7 +319,7 @@ func (h *Handler) attemptComplete(w http.ResponseWriter, r *http.Request, ref st
 		return
 	}
 	var in CompleteInput
-	if !decodeStrict(w, r, maxProtocolBody, map[string]bool{"conclusion": true, "steps": true, "outputs": true}, &in) {
+	if !decodeStrict(w, r, maxCompleteBody, map[string]bool{"conclusion": true, "steps": true, "outputs": true, "annotations": true, "summary": true}, &in) {
 		return
 	}
 	view, err := h.Svc.Complete(r.Context(), claims, in)
@@ -480,6 +485,120 @@ func (h *Handler) deleteSecret(w http.ResponseWriter, r *http.Request, repo, nam
 	w.WriteHeader(http.StatusNoContent)
 }
 
+// variables is the repository-variable surface (PAR-035): list names, put a
+// value (write-only), delete. Values are never echoed.
+func (h *Handler) variables(w http.ResponseWriter, r *http.Request, repo string, rest []string) {
+	switch {
+	case len(rest) == 0 && r.Method == http.MethodGet:
+		h.listVariables(w, r, repo)
+	case len(rest) == 1 && r.Method == http.MethodPut:
+		h.putVariable(w, r, repo, rest[0])
+	case len(rest) == 1 && r.Method == http.MethodDelete:
+		h.deleteVariable(w, r, repo, rest[0])
+	default:
+		methodNotAllowed(w, "GET", "PUT", "DELETE")
+	}
+}
+
+func (h *Handler) listVariables(w http.ResponseWriter, r *http.Request, repo string) {
+	p, aerr := h.principal(r)
+	if aerr != nil {
+		writeErr(w, aerr)
+		return
+	}
+	vars, err := h.Svc.ListVariables(r.Context(), repo, p)
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"variables": vars, "enabled": h.Svc.SecretsEnabled()})
+}
+
+func (h *Handler) putVariable(w http.ResponseWriter, r *http.Request, repo, name string) {
+	p, aerr := h.principal(r)
+	if aerr != nil {
+		writeErr(w, aerr)
+		return
+	}
+	var in struct {
+		Value string `json:"value"`
+	}
+	if !decodeStrict(w, r, 128<<10, map[string]bool{"value": true}, &in) {
+		return
+	}
+	if err := h.Svc.SetVariable(r.Context(), repo, name, in.Value, p); err != nil {
+		writeErr(w, err)
+		return
+	}
+	w.Header().Set("Cache-Control", "no-store")
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func (h *Handler) deleteVariable(w http.ResponseWriter, r *http.Request, repo, name string) {
+	p, aerr := h.principal(r)
+	if aerr != nil {
+		writeErr(w, aerr)
+		return
+	}
+	if err := h.Svc.DeleteVariable(r.Context(), repo, name, p); err != nil {
+		writeErr(w, err)
+		return
+	}
+	w.Header().Set("Cache-Control", "no-store")
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// handleOrgVariables is the organization-scope twin (org owner only).
+func (h *Handler) handleOrgVariables(w http.ResponseWriter, r *http.Request, org string, rest []string) bool {
+	switch {
+	case len(rest) == 0 && r.Method == http.MethodGet:
+		p, aerr := h.principal(r)
+		if aerr != nil {
+			writeErr(w, aerr)
+			return true
+		}
+		vars, err := h.Svc.ListOrgVariables(r.Context(), org, p)
+		if err != nil {
+			writeErr(w, err)
+			return true
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"variables": vars, "enabled": h.Svc.SecretsEnabled()})
+	case len(rest) == 1 && r.Method == http.MethodPut:
+		p, aerr := h.principal(r)
+		if aerr != nil {
+			writeErr(w, aerr)
+			return true
+		}
+		var in struct {
+			Value string `json:"value"`
+		}
+		if !decodeStrict(w, r, 128<<10, map[string]bool{"value": true}, &in) {
+			return true
+		}
+		if err := h.Svc.SetOrgVariable(r.Context(), org, rest[0], in.Value, p); err != nil {
+			writeErr(w, err)
+			return true
+		}
+		w.Header().Set("Cache-Control", "no-store")
+		w.WriteHeader(http.StatusNoContent)
+	case len(rest) == 1 && r.Method == http.MethodDelete:
+		p, aerr := h.principal(r)
+		if aerr != nil {
+			writeErr(w, aerr)
+			return true
+		}
+		if err := h.Svc.DeleteOrgVariable(r.Context(), org, rest[0], p); err != nil {
+			writeErr(w, err)
+			return true
+		}
+		w.Header().Set("Cache-Control", "no-store")
+		w.WriteHeader(http.StatusNoContent)
+	default:
+		methodNotAllowed(w, "GET", "PUT", "DELETE")
+	}
+	return true
+}
+
 // cancelRun / rerunRun are the operator verbs (repo write role).
 func (h *Handler) cancelRun(w http.ResponseWriter, r *http.Request, repo, runID string) {
 	p, aerr := h.principal(r)
@@ -495,6 +614,9 @@ func (h *Handler) cancelRun(w http.ResponseWriter, r *http.Request, repo, runID 
 	writeJSON(w, http.StatusOK, map[string]any{"run": run})
 }
 
+// rerunRun and rerunFailedRun are the operator verbs (repo write role):
+// `rerun` restarts every job, `rerun-failed` only the failed jobs and their
+// dependents (PAR-059, docs/threads.md §9.1).
 func (h *Handler) rerunRun(w http.ResponseWriter, r *http.Request, repo, runID string) {
 	p, aerr := h.principal(r)
 	if aerr != nil {
@@ -502,6 +624,20 @@ func (h *Handler) rerunRun(w http.ResponseWriter, r *http.Request, repo, runID s
 		return
 	}
 	run, err := h.Svc.RerunRun(r.Context(), repo, runID, p)
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	writeJSON(w, http.StatusCreated, map[string]any{"run": run})
+}
+
+func (h *Handler) rerunFailedRun(w http.ResponseWriter, r *http.Request, repo, runID string) {
+	p, aerr := h.principal(r)
+	if aerr != nil {
+		writeErr(w, aerr)
+		return
+	}
+	run, err := h.Svc.RerunFailedRun(r.Context(), repo, runID, p)
 	if err != nil {
 		writeErr(w, err)
 		return

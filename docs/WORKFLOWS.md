@@ -105,18 +105,26 @@ metadata and matrix axes. A file with an unknown key runs nothing and is reporte
 | `name` | string | file stem | display name and the `<workflow>` segment of every check context |
 | `on` | event name, list, or mapping | — | triggers; a file with no `on` parses but never fires |
 | `env` | map[string]string | empty | variables merged **under** job/step `env`; scalars are coerced to text (`COUNT: 3` → `"3"`), a nested value is a parse error |
-| `concurrency` | string or `{group, cancel-in-progress}` | none | one in-flight run per group per repository (§5.4) |
-| `permissions` | mapping, or `read-all` / `write-all` | instance `threads.default_permissions` (`read`) | scopes the job token; only `contents` and `id-token` have an effect (§7) |
+| `concurrency` | string or `{group, cancel-in-progress}` | none | one running and one pending run per group per repository (§5.4) |
+| `permissions` | mapping, or `read-all` / `write-all` | instance `threads.default_permissions` (`read`) | the job token's authority: `contents`, `issues`, `pull-requests`, `id-token`; any other scope is a parse error (§7.2) |
+| `enable-openid-connect` | bool | false | Forgejo's spelling for the OIDC grant; the same grant as `permissions: id-token: write` (§7.2) |
 | `jobs` | map[string]job | **required** | at least one job |
 
 ### 2.2 `on`
 
 | Trigger | Accepted keys | Fires when |
 |---|---|---|
-| `push` | `branches`, `tags` | a branch push matching `branches`, a tag push matching `tags`; a trigger that names only `tags` does **not** fire on a branch push (§3.1) |
-| `pull_request` | `branches`, `types` | the listed lifecycle actions on a PR targeting a matching branch |
+| `push` | `branches`, `branches-ignore`, `tags`, `tags-ignore`, `paths`, `paths-ignore` | a branch push matching `branches`, a tag push matching `tags`, and (when declared) a changed-file set matching `paths`; a trigger that names only `tags` does **not** fire on a branch push (§3.1) |
+| `pull_request` | `branches`, `branches-ignore`, `paths`, `paths-ignore`, `types` | the listed lifecycle actions on a PR targeting a matching branch whose changed files match `paths` |
 | `workflow_dispatch` | `inputs` | a manual dispatch from the UI, API or CLI |
-| `schedule` | a list of `- cron: "…"` | the maintainer's cron sweep, default branch only |
+| `release` | `types` | a release lifecycle action emitted by the releases service (§3.6) |
+| `issues` | `types` | an issue lifecycle action emitted by the issues service (§3.6) |
+| `issue_comment` | `types` | a new issue comment (the only emitted action) (§3.6) |
+| `schedule` | a list of `- cron: "…"`, optional `timezone:` | the maintainer's cron sweep, default branch only |
+
+`branches`/`tags`/`paths` and their `*-ignore` twins are exclusion/include pairs: a trigger may not
+name both forms of the same dimension (use the include form with `!` to mix). All four pattern lists
+use the dialect in §3.1.
 
 `on` accepts all three spellings. A bare key is a real trigger:
 
@@ -145,10 +153,15 @@ jobs:
 | Field | Type | Notes |
 |---|---|---|
 | `description` | string | shown on the Run workflow form |
-| `type` | `string` \| `boolean` \| `choice` | default `string`; anything else is a parse error |
+| `type` | `string` \| `boolean` \| `choice` \| `number` \| `environment` | default `string`; anything else is a parse error |
 | `required` | bool | a missing required value is `422` naming the input |
-| `default` | scalar | kept as text; a boolean default reads `"true"` / `"false"` |
-| `options` | list of strings | **required** for `choice`; a value outside the list is `422` |
+| `default` | scalar | kept as text; a boolean default reads `"true"` / `"false"`, a number default its decimal text |
+| `options` | list of strings | **required** for `choice`; a value outside the list is `422`. An `environment` input's options are the repository's environment names, resolved at dispatch time and rendered as a picker |
+
+`number` accepts a decimal number (the value is carried as its authored text, which is also what
+`github.event.inputs.<name>` reads). `environment` must name an existing repository environment;
+`${{ inputs.environment }}` is the name. `inputs.<name>` and `github.event.inputs.<name>` are the
+same value for every type.
 
 ### 2.3 A job
 
@@ -156,6 +169,7 @@ jobs:
 |---|---|---|---|
 | `name` | string | job key | display name and the `<job>` segment of the check context; `${{ matrix.* }}` / `${{ inputs.* }}` are filled in |
 | `runs-on` | label or list | **required** unless `uses` | the runner must declare **every** label, case-insensitive and exact (no wildcards). The hosted Linux labels (`ubuntu-latest`, `ubuntu-24.04`, `ubuntu-22.04`, `ubuntu-20.04`) map onto `self-hosted` + `linux` (§8.2); `windows-*`/`macos-*` are unmapped |
+| `enable-openid-connect` | bool | false | job-level spelling of the OIDC grant (§7.2) |
 | `container` | image string or mapping | runner `--image` (`alpine/git:latest`) | one container for the job; fields below |
 | `services` | map[id]service | none | sidecars on the job network, reachable at their id |
 | `env` | map[string]string | empty | overrides workflow `env` |
@@ -170,7 +184,7 @@ jobs:
 | `steps` | list | **required** unless `uses` | §4 |
 | `concurrency` | group or mapping | workflow default | job-level wins |
 | `permissions` | mapping or shorthand | workflow default | job-level wins |
-| `uses` / `with` | string / map | — | reusable workflow: parses, then the job fails with "not supported in v1". Do not plan around it. |
+| `uses` / `with` | string / map | — | call a repository-local workflow (`./.spindle/workflows/<name>.yml`); the callee's jobs join the run in place (§4.5). `with:` — and therefore `on.workflow_call` typed inputs — is still refused by name, and a cross-repository reference is refused (D-6). |
 
 **Structural fields and the env layers above a step take literal values only.** The runner reads a
 workflow/job/container/service `env` value verbatim — only a **step** `env:` is substituted — and
@@ -183,9 +197,11 @@ Container mapping keys: `image` (required in practice), `env`, `ports`, `command
 `options`, `volumes`. Only `image`, `env` and `options` are applied; `ports`, `command`,
 `entrypoint` and `volumes` are accepted and not applied — the runner owns the container's
 lifetime and mounts only its workspace volume. `options` is checked against a small allowlist
-(§4.5).
+(§4.4a), and may carry docker's `--health-*` readiness flags for a service (§4.2 of the reference).
 
-A service entry takes `image`, `env`, `ports`, `command`, `entrypoint`, `options`, `volumes`.
+A service entry takes `image`, `env`, `ports`, `command` (Forgejo spelling `cmd`),
+`entrypoint`, `options`, `volumes`. `credentials` is not accepted yet: the pull identity belongs to
+the runner, not the workflow.
 
 ### 2.4 A step
 
@@ -198,7 +214,7 @@ A service entry takes `image`, `env`, `ports`, `command`, `entrypoint`, `options
 | `with` | map[string]string | — | action inputs; an unknown key fails the step |
 | `env` | map[string]string | empty | overrides job/container env |
 | `if` | expression | `success()` | the subset in §6.3 |
-| `shell` | `sh` (default), `bash`, `python`/`python3`, `pwsh`/`powershell`, `cmd` | `sh` | the interpreter; `sh` runs `sh -e -c`, `bash` runs `bash -eo pipefail -c` |
+| `shell` | `sh` (default), `bash`, `python`, `python3`, `pwsh`/`powershell`, `cmd`, or a custom `<command> {0}` template | `sh -e` | the interpreter; `sh` runs `sh -e -c`, `bash` runs `bash --noprofile --norc -eo pipefail -c` (falling back to `sh -e` with a log line when the image has no bash), a custom template is split into argv words with `{0}` replaced by a script file (§4.1) |
 | `working-directory` | path | the workspace | relative joins the workspace; absolute wins |
 | `continue-on-error` | bool | false | step may fail without failing the job (result still `failure`) |
 | `timeout-minutes` | int | remaining job time | on expiry the job container is killed and the step reports `timed out` |
@@ -210,9 +226,10 @@ A failed step without `continue-on-error` skips the rest of the job (each record
 **Refused** — a parse error naming the key, so the file creates no runs:
 
 - `defaults:` (workflow, job or step);
-- `on.push.paths` / `paths-ignore`, and `pull_request.paths`;
-- `on.pull_request.types` values other than `opened`, `synchronize`, `reopened` (and an empty
-  list);
+- an `on.pull_request.types`/`on.release.types`/`on.issues.types`/`on.issue_comment.types` value the
+  owning service never emits, or an empty `types: []` list;
+- naming both an include filter and its `*-ignore` twin (`branches` + `branches-ignore`,
+  `paths` + `paths-ignore`, `tags` + `tags-ignore`);
 - `strategy.max-parallel`; an `include`/`exclude` entry whose value is a list or a nested object;
 - a `${{ … }}` reference outside the documented vocabulary — an unknown context, an unknown
   `github.*` field, an undeclared matrix key or dispatch input, a malformed `secrets.<name>`, an
@@ -227,14 +244,18 @@ A failed step without `continue-on-error` skips the rest of the job (each record
 - a duplicate step id, or one starting with a digit;
 - a `needs:` naming a missing job, or a cycle;
 - a job without `runs-on` (unless it is a reusable `uses` job) or without `steps`;
+- a `permissions` scope this server cannot enforce (`packages`, `checks`, `actions`,
+  `deployments`, `statuses`, …) — a named parse error listing the supported set (§7.2); a scope is
+  never accepted and then ignored;
 - an unknown trigger name (`on: [tag]`), `on: schedule` without `- cron:` entries, and any cron
   outside the subset (§8).
 
 **Accepted but inert** — the file parses and runs, but the key changes nothing:
 
-- `permissions` keys other than `contents` and `id-token` (`actions: write`,
-  `packages: write`, … parse and do nothing);
-- `container.ports` / `command` / `entrypoint` / `volumes` and the `services.*` equivalents.
+- `container.ports` / `command` / `entrypoint` / `volumes` (the job container's lifetime is the
+  runner's). A **service's** `env`, `ports`, `command`, `entrypoint`, `options` and `volumes` are
+  applied (§4.2 of the reference: a service is a sidecar, not the job container), except `volumes`,
+  which the container-option policy refuses.
 
 No trigger is inert: every accepted trigger key now changes what fires (§3).
 
@@ -262,9 +283,26 @@ jobs:
     push;
   - naming both filters each kind separately; naming neither fires on every branch and tag.
 - Branch and tag deletes create no run.
-- `branches`/`tags` match exact names and `*` wildcards only (`release/*`). There is no `!`
-  negation and no `**`. An absent or empty filter for the kind being delivered matches every
-  ref of that kind.
+- The filter dialect is the documented Actions cheat sheet:
+
+  | Pattern | Matches |
+  |---|---|
+  | `*` | zero or more characters, **not** `/` |
+  | `**` | zero or more characters, including `/` |
+  | `?` | zero or one of the preceding character (`v?` matches `` and `v`) |
+  | `+` | one or more of the preceding character |
+  | `!pattern` | negation; patterns are evaluated in order and the **last** match decides |
+
+  `branches-ignore`/`tags-ignore`/`paths-ignore` are exclusion lists (a name fires when no entry
+  matches); naming both the include list and its ignore twin is a parse error. An absent or empty
+  filter for the dimension being delivered matches every ref of that kind.
+
+- `paths`/`paths-ignore` select a push (or PR) by its **changed files**. A docs-only commit never
+  fires a `paths: ['src/**']` workflow; a mixed commit does. A `paths`-only trigger uses the pushed
+  commit's diff (a new ref has no pre-image, so its own change set is used); a PR uses
+  `base...head` (the merge base). A path-filtered trigger does not fire when no diff can be computed
+  (fail closed). One name-only `git diff` is spent per event, and only when a discovered workflow
+  declares a path filter — there is no store round trip for the filter.
 - **The push hook delivers both kinds.** A landed `refs/heads/…` create matches `branches`, a
   landed `refs/tags/…` create matches `tags`; a delete of either starts nothing. A tag run has no
   branch: `github.ref` is the full `refs/tags/v1.2.3`, `github.ref_name` is `v1.2.3`, and
@@ -297,9 +335,12 @@ jobs:
 ```
 
 - `branches` filters the **target** branch.
-- `types` selects lifecycle actions. Absent = all three. The vocabulary is closed:
-  `opened`, `synchronize` (only when the head actually moved), `reopened`. `closed`, `labeled`
-  and the rest are parse errors; a closing PR never starts work.
+- `types` selects lifecycle actions. Absent = every emitted action. The vocabulary is closed to what
+  the pulls service emits: `opened`, `synchronize` (only when the head actually moved), `reopened`,
+  `closed` (including a merge), `edited` (title/body), `ready_for_review`, `converted_to_draft`,
+  `labeled`, `unlabeled`, `assigned`, `unassigned`, `milestoned`, `demilestoned`. An unemittable
+  type (`deleted`, `locked`, …) is a parse error naming the supported set.
+- `paths`/`paths-ignore` filter the PR's changed files (the merge-base diff), exactly like a push.
 - Same repository: the head commit's workflow runs, **trusted**, with secrets.
 - Fork: the **base branch's** workflow file runs at the base tip, **untrusted**, no secrets,
   read-only job token; a first-time contributor's run may wait for approval (§7.3).
@@ -361,15 +402,27 @@ jobs:
       - run: ./scripts/nightly.sh
 ```
 
-Five fields, **UTC**: `minute hour day-of-month month day-of-week`. Supported: `*`, a number, a
-range `a-b`, a step `*/N`, `a-b/N`, `n/N` (from `n` to the field maximum every `N`), and comma
-lists. Not supported (parse error): weekday/month names, `@daily` macros, `L`/`W`/`#`, and a
-six-field expression with seconds.
+Five fields: `minute hour day-of-month month day-of-week`, **UTC** unless the entry names a
+`timezone:`. Supported:
 
-Behaviour: default branch tip only; a process with the `maintain` role must be running; at most
-once per tick (a CAS'd watermark), so a restart does not re-fire and a crash between the
-watermark and run creation loses that tick rather than duplicating a deploy. There is no
-"run now" — dispatch the workflow manually. See [`threads.md` §6.4](threads.md#64-schedule).
+- `*`, a number, a range `a-b`, a step `*/N`, `a-b/N`, `n/N` (from `n` to the field maximum every
+  `N`), and comma lists;
+- three-letter month and weekday names (`JAN-DEC`, `SUN-SAT`) and `7` as Sunday;
+- the `@yearly`/`@annually`/`@monthly`/`@weekly`/`@daily`/`@midnight`/`@hourly` macros;
+- `L` (last day of month), `L-N`, `NW` (nearest weekday), `DL` (last weekday of month) and `D#n`
+  (nth weekday);
+- `timezone:` per entry (an IANA name such as `Europe/Berlin`; absent means UTC).
+
+Not supported (parse error): a six-field expression with seconds, an unknown macro, an unknown
+name, and an invalid timezone.
+
+DST follows the local wall clock: a local time skipped by a spring-forward has **no tick that day**;
+a local time repeated by a fall-back is **one slot and fires once** (the watermark coalesces it).
+Behaviour: default branch tip only (a schedule on any other branch never fires); a process with the
+`maintain` role must be running; at most once per tick (a CAS'd watermark), so a restart does not
+re-fire and a crash between the watermark and run creation loses that tick rather than duplicating a
+deploy. There is no "run now" — dispatch the workflow manually. See
+[`threads.md` §6.4](threads.md#64-schedule).
 
 ### 3.5 What starts a run: the summary
 
@@ -380,6 +433,43 @@ watermark and run creation loses that tick rather than duplicating a deploy. The
 | `pull_request` (fork) | same | **no** | **none** | the **base branch tip** |
 | `workflow_dispatch` | UI / API / CLI | yes | yes | the resolved ref |
 | `schedule` | maintainer sweep | yes | yes | the default branch tip |
+| `release` | the releases service | yes | yes | the **default branch tip** (the run reports the tag commit) |
+| `issues` / `issue_comment` | the issues service | yes | yes | the **default branch tip** |
+
+### 3.6 `release`, `issues` and `issue_comment`
+
+```yaml
+name: Announce
+on:
+  release:
+    types: [published]
+  issues:
+    types: [opened, closed]
+  issue_comment:
+    types: [created]
+jobs:
+  announce:
+    runs-on: linux
+    steps:
+      - run: |
+          echo "action=${{ github.event.action }}"
+          jq -r '.release.tag_name // .issue.number' "$GITHUB_EVENT_PATH"
+```
+
+- **Emitters, not a wish list.** A `types` entry the owning service never emits is a parse error:
+  - `release`: `created` (a draft), `published`, `edited`, `deleted`, `prereleased` (a prerelease
+    published), `released` (a published prerelease's flag cleared), `unpublished` (published →
+    draft);
+  - `issues`: `opened`, `edited`, `closed`, `reopened`, `labeled`, `unlabeled`, `assigned`,
+    `unassigned`, `milestoned`, `demilestoned`;
+  - `issue_comment`: `created` only (comment editing/deletion is not implemented).
+- The workflow file is read from the **default branch tip**, never from the release tag or the
+  commenter's checkout. A release run's `commit`/`GITHUB_SHA` is the tag's commit; an issue run's is
+  the default branch tip.
+- The event payload is a bounded projection: a free-text comment body is capped at 4 KiB, an asset
+  or label list at 100 entries, and the encoded JSON at 64 KiB (an over-cap payload is a creation
+  error, never a silent truncation). Read the full record with `jq` from
+  `$GITHUB_EVENT_PATH`; `github.event.*` is the documented subset (§6.2).
 
 ## 4. Steps and actions
 
@@ -412,8 +502,14 @@ jobs:
         run: npm test
 ```
 
-- `sh` is `sh -e -c`; `bash` is `bash -eo pipefail -c`; `python` is `python3 -c`. `pwsh` and
-  `cmd` are accepted but need the interpreter in the image.
+- `sh` is `sh -e -c`; `bash` is `bash --noprofile --norc -eo pipefail -c`; `python`/`python3`
+  map to `python -c` / `python3 -c`; `pwsh` and `cmd` are accepted but need the interpreter in the
+  image. If the image has no **bash**, a `shell: bash` step falls back to `sh -e` and prints one
+  log line saying so (GitHub's Linux fallback) instead of failing with exit 127.
+- An arbitrary command template is allowed if it contains exactly one `{0}`: `shell: dash -e {0}`,
+  `shell: perl {0}`. The template is split into argv words — it is never handed to a shell — and the
+  runner writes the script to a per-step file in the container and substitutes its path. A template
+  with no `{0}`, two of them, or one that starts with `{0}`, is a named step failure.
 - Quoting is the shell's. `$NAME` is a container environment variable (workflow/job/step `env`,
   a secret, or a built-in); every `${{ … }}` reference is substituted **before** the shell sees the
   script — `matrix.*`, `inputs.*`, `github.*`, `env.*`, `secrets.*` and step/needs outputs alike
@@ -541,18 +637,25 @@ runs:
 ```
 
 - `runs.using` is `composite` or `docker`; `node20` and friends are refused.
-- Composite steps expand in place. A composite `run:` step **must** name `shell:`; `uses:` may
-  be another local action or `docker://`, never a built-in or a marketplace action.
+- Composite steps expand in place. A composite `run:` step **must** name `shell:` (any form §4.1
+  accepts, including a custom `{0}` template); `uses:` may be another local action or
+  `docker://`, never a built-in or a marketplace action.
 - `with:` values become `INPUT_<NAME>` (`dry run` → `INPUT_DRY_RUN`); an undeclared input is a
   named refusal; read inputs from the environment, not `${{ inputs.* }}`.
-- Nesting is capped at 10 and cycles are refused.
+- Per-step `env:` layers: the job/container layer, then the caller's `env:`, then the inner step's
+  own; an inner `if:` sees the layer below it. The action's `outputs:` mapping is evaluated over its
+  own steps and published under the calling step's id (output threading).
+- Nesting is capped at 10 and cycles are refused (both at run creation and again at plan time).
+- `${{ github.action_path }}` is **not** accepted yet: the parser's closed `github.*` field set does
+  not include it, so a composite that reads it is a named parse error (tracked with the identity
+  fields), never an empty string.
 - A `docker://` step (or docker action) runs as its own container with the workspace volume and
   the step environment plus `INPUT_*` — **never** the job token and never a repository secret.
   Its `$SPINDLE_OUTPUT` file is copied out and published under the calling step's id.
 - Every `docker://` image goes through the same server image policy as a job container
   (`threads.image_allow_prefixes`, `threads.image_require_digest`).
 
-### 4.5 Container options
+### 4.4a Container options
 
 `container.options` / `services.<id>.options` accept only:
 
@@ -576,6 +679,61 @@ jobs:
       - uses: actions/checkout
       - run: go test ./...
 ```
+
+### 4.5 Reusable workflows (same repository)
+
+A job can call another workflow file in the same repository instead of declaring steps:
+
+```yaml
+jobs:
+  test:
+    runs-on: linux
+    steps:
+      - run: go test ./...
+  deploy:
+    needs: [test]
+    uses: ./.spindle/workflows/deploy.yml
+    permissions:
+      contents: read
+```
+
+`deploy.yml` is a normal workflow file **without an `on:` block** in this wave:
+
+```yaml
+name: Deploy
+jobs:
+  plan:
+    runs-on: linux
+    steps:
+      - run: echo plan
+  apply:
+    needs: [plan]
+    runs-on: linux
+    steps:
+      - run: echo apply
+```
+
+The callee's jobs join the same run as `deploy / plan` and `deploy / apply`, with their own checks
+and logs. `needs:` inside the callee is rewritten to the expanded keys; a callee job without `needs:`
+inherits the caller's; the caller's `if:` is conjoined with each callee job's condition.
+
+Rules:
+
+- the reference must be `./.spindle/workflows/<name>.yml|.yaml`. A cross-repository or remote
+  `uses:` (`owner/repo/...@ref`) is **refused by name** (decision D-6: secrets never cross a
+  repository boundary).
+- a caller job is a call, not a runner job: `steps`, `runs-on`, `container`, `services`, `env`,
+  `strategy`, `timeout-minutes`, `concurrency`, `environment`, `outputs` are named refusals.
+- `permissions:` is downgrade-only: every callee scope is capped at the caller's effective scope.
+  A scope the caller does not grant is `none` for the callee.
+- secrets are the repository's own — a same-repository callee sees the same set the caller would.
+- `with:` is **refused by name** in this wave: `${{ inputs.* }}` needs `on.workflow_call` typed
+  inputs, which the parser does not accept yet, and a value nobody can read would be inert. The
+  same gap means a callee's workflow-level `outputs:` cannot be declared, and a caller cannot read a
+  callee job's output with `needs.…` (that reference is validated against the caller file's own job
+  keys). The callee job's output is still recorded on its job record and visible in the API.
+- nesting is capped at 4 levels; a deeper chain is a named refusal. A missing or unparseable
+  callee fails that job with the reason and the rest of the run continues.
 
 ## 5. Jobs, dependencies, matrix, concurrency
 
@@ -720,9 +878,15 @@ jobs:
       - run: ./deploy.sh
 ```
 
-- One in-flight **run** per group per repository. A run's sibling jobs do not serialize each
-  other (the group belongs to the run).
-- `cancel-in-progress: true` cancels the run holding the group and takes it.
+- One in-flight **run** per group per repository, and **one pending run** behind it (GitHub's
+  rule). A run's sibling jobs do not serialize each other (the group belongs to the run).
+- A newer run that wants a held group becomes the pending run and **cancels the run that was
+  already pending** — only one run waits, so three rapid pushes leave one running and one
+  pending, never two waiting.
+- `cancel-in-progress: true` cancels the run holding the group (and any pending run) as soon as
+  the new run is created, then takes the group.
+- `cancel-in-progress: false` (the default) sequences in trigger order: the holder finishes, the
+  pending run starts, and a later run replaces the pending one.
 - The group is expanded at run creation and is a bucket key. A reference that cannot exist is a
   **parse error**; a supported reference with no value for this run (an input without a
   default) fails run creation with `422`. It never falls back to literal text.
@@ -731,7 +895,9 @@ jobs:
 - `group: ci-${{ github.ref }}` is the usual idiom: without the ref, `cancel-in-progress: true`
   on a push to any branch cancels `main`.
 - Enforcement is at **claim/admission**: a job whose group is held waits in the queue; no runner
-  sees it until the group is free.
+  sees it until the group is free. The run header names the group it waits for
+  (`pending_group`), so the run page and the run list say why a run has not started. A grouped
+  run is never implicitly superseded: the group itself is the explicit serialisation choice (§5.4).
 
 #### If you do not declare a group: the newer push wins
 
@@ -766,7 +932,10 @@ repository secrets are added last, by name. Every step sees:
 | `GITHUB_REPOSITORY` / `SPINDLE_REPO` | `owner/repo` |
 | `GITHUB_SHA` / `SPINDLE_SHA` | the run's commit |
 | `GITHUB_REF` / `SPINDLE_REF` | the triggering ref: `refs/heads/<branch>` (a PR: the base branch, never its stored `refs/pull/<n>/head`), or `refs/tags/<tag>` for a tag push, where `GITHUB_REF_NAME` is the tag |
-| `GITHUB_REF_NAME` / `GITHUB_EVENT_NAME` | the ref's short name (branch, tag, or PR base branch) / `push`, `pull_request`, `workflow_dispatch`, `schedule` |
+| `GITHUB_REF_NAME` / `GITHUB_EVENT_NAME` | the ref's short name (branch, tag, or PR base branch) / `push`, `pull_request`, `workflow_dispatch`, `schedule`, `release`, `issues`, `issue_comment` |
+| `GITHUB_EVENT_PATH` / `FORGEJO_EVENT_PATH` | `/tmp/spindle-event.json`: the bounded event payload, written before the first step |
+| `RUNNER_OS`, `RUNNER_ARCH`, `RUNNER_NAME`, `RUNNER_TEMP`, `RUNNER_TOOL_CACHE`, `RUNNER_ENVIRONMENT`, `RUNNER_DEBUG` | `Linux`, `X64`/`ARM64`/…, the registered runner name, writable `/tmp/spindle-temp` and `/tmp/spindle-tool-cache`, `self-hosted`, `0` |
+| `SPINDLE_EVENT_PATH`, `SPINDLE_RUNNER_*` | the same values in spindle spelling |
 | `GITHUB_WORKFLOW`, `GITHUB_JOB`, `GITHUB_RUN_ID` | workflow, job, run |
 | `GITHUB_ACTOR` | the principal that triggered the run (absent when the run has none); the same value `${{ github.actor }}` reads |
 | `GITHUB_WORKSPACE` / `SPINDLE_WORKSPACE` | `/spindle/workspace` |
@@ -818,6 +987,9 @@ Each reference resolves at run time:
 |---|---|
 | `github.<field>` / `forgejo.<field>` / `forge.<field>` | the run's `event_name`, `sha`, `ref`, `ref_name`, `repository`, `workflow`, `job`, `run_id`, `actor`, plus the two server addresses `server_url`/`api_url` (§6.1); the aliases are value-identical |
 | `github.event.inputs.<name>` | the dispatch input's value (same as `inputs.<name>`); the name must be declared |
+| `github.event.<field>` | a documented payload field: `action`, `ref`, `before`/`after`, `repository.*`, `sender.login`, `pull_request.*` (`number`, `title`, `state`, `draft`, `merged`, `user.login`, `head.*`, `base.*`), `release.tag_name`/`name`/`draft`/`prerelease`/`target_commitish`/`author.login`/`assets`, `issue.number`/`title`/`state`/`user.login`/`labels`, `comment.body`/`user.login`. The set is closed; the full JSON is at `$GITHUB_EVENT_PATH` |
+| `runner.<field>` | `os`, `arch`, `name`, `temp`, `tool_cache`, `environment`, `debug` (step sites and step `if:` only) |
+| `vars.<name>` | a repository variable (overriding an organization variable of the same name); values are masked in the log |
 | `matrix.<key>` | the cell's value; the key must be an axis or an `include` key |
 | `inputs.<name>` | the dispatch input's value; the name must be declared |
 | `env.<NAME>` | the authored environment at that layer (runner built-ins → workflow → job → container → step, the step layer winning); a variable a step wrote to `$GITHUB_ENV` is runtime state for later steps, not part of the context |
@@ -951,8 +1123,14 @@ jobs:
 ```
 
 Format: `name=value`, or a heredoc `name<<EOF` … `EOF`. A repeated name keeps the last value.
-A malformed line is a named step failure. Caps: 50 per step, 100 per job, 64 KiB per value,
-1 MiB per job.
+A malformed line is a named step failure, and the error names the line. The heredoc delimiter is
+matched exactly on its own line and is capped at 128 bytes (use a short random value); an
+unterminated heredoc or an empty delimiter is a named failure too. Caps: 50 per step, 100 per job,
+64 KiB per value, 1 MiB per job.
+
+The deprecated `::set-output name=NAME::VALUE` alias (GitHub disabled it) is still honoured: the
+value joins the same namespace and a name written both ways keeps the `$GITHUB_OUTPUT` value. A
+step without an `id:` discards it with a warning.
 
 Reading is **fail-closed**: a reference to an unknown step id, or to an output the step did not
 publish, fails the step naming the reference. Inside a native `if:`, an unpublished output of a
@@ -1001,6 +1179,55 @@ jobs:
   written to these files is handed to every later step — move secrets between jobs as secrets
   instead.
 
+### 6.6a Step summaries
+
+Every repository-code step gets `$GITHUB_STEP_SUMMARY` (alias `$SPINDLE_STEP_SUMMARY`), a file it
+may append markdown to. The runner reads it at step end (success or failure) and the run page
+renders the joined result in a **step summary** panel through the same sanitizing markdown renderer
+as a README; a ```` ```mermaid ```` block is shown as a code block, never executed.
+
+```yaml-fragment
+      - name: report
+        run: echo "### Tests passed :white_check_mark:" >> "$GITHUB_STEP_SUMMARY"
+```
+
+Limits: 1 MiB per step, 20 summaries per job, 4 MiB joined. An oversized summary fails a step that
+otherwise succeeded (on a failed step it is only logged). `docker://` actions do not receive the
+file.
+
+`$GITHUB_STATE` is **not** provided: it exists for an action's pre→post hand-off and this engine
+runs no pre/post hooks yet. `::save-state::` is answered with a named warning, so nothing is
+accepted-and-inert.
+
+### 6.7 Workflow commands
+
+Lines of the form `::name key=value::message` in a step's output are workflow commands:
+
+```yaml-fragment
+      - run: |
+          echo "::notice title=Build::artifacts are ready"
+          echo "::group::tests"
+          go test ./...
+          echo "::endgroup::"
+          echo "::error file=main.go,line=3,col=2::the handler is wrong"
+          echo "::warning::deprecated call"
+```
+
+| Command | Effect |
+|---|---|
+| `::error::` / `::warning::` / `::notice::` | an annotation on the job (properties `file`, `line`, `endLine`, `col`, `endColumn`, `title`), shown on the run page and counted on the commit's check description. An `error` annotation does **not** fail the step |
+| `::group::` / `::endgroup::` | log group markers; an unclosed group is closed at step end |
+| `::add-mask::VALUE` | adds VALUE to the job's log mask permanently — there is no unmask. Under 4 bytes it is recorded but not applied. At most 128 masks |
+| `::stop-commands::TOKEN` / `::TOKEN::` | stop/resume command parsing around untrusted output |
+| `::set-output name=NAME::VALUE` | deprecated output alias (§6.5) |
+| `::debug::` | a debug log line |
+| anything else | a visible warning naming it; the line stays in the log |
+
+Escapes: `%25`→`%`, `%0A`/`%0D`→newline/CR; properties also `%3A`→`:` and `%2C`→`,`. One output
+line is buffered to at most 64 KiB (longer is plain text, never parsed mid-line); annotation
+messages/titles/paths are capped; 10 annotations per step and 50 per job are kept; every payload is
+masked before storage and rendering. Annotation text is data, escaped by the page.
+
 ## 7. Secrets, permissions, environments
 
 ### 7.1 Repository secrets
@@ -1045,20 +1272,51 @@ What an author must do:
 Every step receives `$SPINDLE_JOB_TOKEN`, scoped to one attempt of one job in one repository:
 
 - always read of its own repository;
-- push to that repository only when the **effective** `permissions` say `contents: write`
-  (workflow merged with job, job wins, over `threads.default_permissions`); `contents: read`,
-  `none`, or no `permissions` at all means no push;
-- a fork run is pinned to `read` regardless of the file;
+- the **effective** `permissions` map (workflow merged with job, job wins, over
+  `threads.default_permissions`) decides everything else. It is a closed vocabulary: a scope this
+  server cannot enforce is a **named parse error**, never an inert key;
+- a fork run is pinned to `contents: read` regardless of the file;
 - a protected ref still refuses it, because the token is a `ci:<runner>` principal, not the
   user;
 - it expires with the job and is revoked at completion; a push authenticated by it starts no
   workflow.
+
+**The scope matrix** (PAR-112, D-11; the authority is the same for git and for the platform API):
+
+| Scope | Levels | The token may |
+|---|---|---|
+| `contents` | `read` / `write` / `none` | clone/fetch; `write` also pushes to the one repository |
+| `issues` | `read` / `write` / `none` | read issues; `write` = triage (label, assign, close others' issues, manage labels/milestones) |
+| `pull-requests` (`pull_requests` accepted) | `read` / `write` / `none` | read PRs; `write` = write role (open/update PRs, create releases) |
+| `id-token` | `write` / `none` | exchange for an OIDC ID token (trusted runs only; §7.2a) |
+| `read-all` / `write-all` | shorthand | baseline for the three repo scopes only — **never** `id-token` |
+
+Anything else — `actions`, `attestations`, `checks`, `deployments`, `discussions`, `metadata`,
+`models`, `packages`, `pages`, `repository-projects`, `security-events`, `statuses`, `wiki`, or a
+typo — is refused at parse time with the supported set named. A job token never becomes a user, has
+no session, and its implied repository role never reaches admin, so it cannot mint another
+credential; a write to any other repository is a `403`.
+
+Within the repository the scopes imply an ordered role (read → triage → write): a `contents: write`
+token also has triage actions, a `pull-requests: write` token does not reach releases (those need
+`contents: write`), the commit-status API always refuses a job token (`checks`/`statuses` are refused
+scopes, so a job cannot forge a required check), the registry push gate ignores the job identity
+(`packages` is refused), and the Threads operator surface (dispatch, cancel/rerun, approvals,
+environments/secrets) never accepts a job token.
+
+> Divergence recorded: spindle lets any reader comment on an issue, so a `contents: read` job token
+> can post a comment. Triage/write actions still require their scope.
 
 The same credential is also `$GITHUB_TOKEN` and `$FORGEJO_TOKEN` in every step, and
 `${{ secrets.GITHUB_TOKEN }}` resolves to it everywhere `secrets.*` does (§6.2) — one token, no
 second mint; as a whole-value `env:` entry it is still delivered by name (never argv). An `env:`
 value you set for `GITHUB_TOKEN` wins (a workflow publishing to GitHub with its own PAT keeps the
 PAT), the secret name `GITHUB_TOKEN` is reserved, and the value is masked in the log.
+
+**Reusable workflows are downgrade-only.** A callee job's declared scopes are capped at the caller
+job's effective scope (§4.5): a callee can narrow what the caller grants, never widen it, and a
+scope the caller does not grant is `none` for every callee job. A caller with no `permissions:`
+block therefore grants `contents: read` and nothing else, whatever the callee asks for.
 
 **No `permissions:` = `contents: read`.** That is a recorded divergence from Forgejo, whose token is
 implicitly write-capable and ignores `permissions` (D-12): a workflow relying on the implicit write
@@ -1094,8 +1352,32 @@ jobs:
 write it into `.git/config` or argv. If a push needs a different credential (one that *should*
 trigger CI), use a secret instead — a job-token push deliberately starts nothing.
 
-OIDC (`permissions: id-token: write`, trusted runs only) is available for cloud identity; its
-env vars and claim set are [`threads.md` §5.5](threads.md#55-job-oidc-tokens-cloud-identity).
+The token works against the platform API too (comment on an issue/PR, label, release):
+
+```yaml
+name: comment
+on: [push]
+permissions:
+  issues: write
+jobs:
+  comment:
+    runs-on: linux
+    steps:
+      - run: |
+          curl -sS -X POST -H "Authorization: Bearer $GITHUB_TOKEN" \
+            -H 'Content-Type: application/json' \
+            -d '{"body":"built by CI"}' \
+            "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/api/issues/1/comments"
+```
+
+**OIDC.** `permissions: id-token: write` or the Forgejo `enable-openid-connect: true` lets a
+**trusted** job exchange a short-lived, audience-scoped ID token. The audience is required (body
+`{"audience":"…"}` or `?audience=…`), the subject binds the repository plus its ref — or its
+environment when the job names one, or `:pull_request` for a PR run — and
+`ref_type`/`ref_protected`/`job_workflow_ref`/`runner_environment` are part of the closed claim set.
+A fork run never gets one, `write-all` never implies it, and `id-token: none` denies it. The full
+contract (claim table, subject templates, TTL, rate limit) is
+[`threads.md` §5.5](threads.md#55-job-oidc-tokens-cloud-identity).
 
 ### 7.3 Approval gates
 
@@ -1129,11 +1411,32 @@ jobs:
       - run: ./deploy.sh
 ```
 
-Create it in **Settings → Environments** (maintain+) with up to 10 reviewers, each holding
-write or more (checked when saved). A job naming a **defined** environment with reviewers makes
-the run `pending_approval` (`approval_kind: environment`) and nothing is enqueued until a listed
-reviewer or a repo admin approves. A denied deployment fails only the deployment jobs. A job
-naming an **undefined** environment fails with a message naming Settings → Environments.
+The two documented forms are the bare name (`environment: production`) and the mapping above;
+`name` is required and `url`, when present, must be an absolute `http(s)` URL. Both are read
+**before** any matrix cell or dispatch input exists, so a `${{ … }}` in either is this file's
+parse error — an expression there never reaches a bucket key (PAR-130).
+
+Create it in **Settings → Environments** (maintain+) with the protection rules GitHub documents:
+
+| Rule | Behaviour |
+|---|---|
+| required reviewers | up to **six** principals **and** teams together, each principal holding write or more (checked when saved); every one of them must approve |
+| team reviewers | `org/team`; the team must resolve (checked when saved), and its members at decision time must approve |
+| wait timer | 0–360 minutes, counted from deployment creation; the job cannot start before it elapses, even with every approval in |
+| prevent self-review | the principal who triggered the run cannot approve its deployment |
+| deployment branches and tags | exact names and `*` patterns; empty allows every ref; a deployment from any other ref **fails** with a named reason (it is not held for approval) |
+
+A job naming a **defined** environment with any of the first three rules makes the run
+`pending_approval` (`approval_kind: environment`) and nothing is enqueued until every required
+reviewer (or a repo admin, who bypasses the reviewer set) approves. A partial approval is
+recorded on the deployment and the run stays pending, naming who is still awaited. A denied
+deployment fails only the deployment jobs. A job naming an **undefined** environment fails with a
+message naming Settings → Environments.
+
+An approval is not enough if the wait timer has not elapsed: the claim path refuses to offer the
+job until the deadline, and the run page and the API name that deadline (`wait_until`). This is
+the one hold with no reviewer in it, and it is why a deploy cannot "start immediately" after an
+approval when the environment declares a timer.
 
 Environment secrets override repository secrets of the same name, are delivered only to a job
 that names the environment in a trusted run with an approved deployment, and a fork run never
@@ -1143,13 +1446,25 @@ receives them.
 
 ### 8.1 Retention
 
-`threads.retention` (default **720h = 30 days**) deletes a **terminal** run once its completion
-(or creation, if it never started) is older than the window. Jobs, log frames and queue entries
-go with it; **checks do not**, so an old required check still gates a merge. A queued, running
-or `pending_approval` run is never swept, whatever its age. There is no "keep forever" spelling.
+Retention has **two windows**, both operator knobs (`threads.retention`, default **720h =
+30 days**, and `threads.artifact_retention`, default: the run window; each valid 24h…8760h):
 
-Artifacts expire at `min(run expiry, created + retention-days)`. The sweeper removes their
-blobs and manifests with the run.
+- the **run window** deletes a **terminal** run once its completion (or creation, if it never
+  started) is older than the window. Jobs, log frames and queue entries go with it; **checks do
+  not**, so an old required check still gates a merge. A queued, running or `pending_approval`
+  run is never swept, whatever its age, and neither is a run with a job whose lease is still
+  live (a stale fold must not delete the log a runner is writing);
+- the **artifact window** is the artifact's own lifetime: created plus its `retention-days`
+  when the upload declared one, otherwise created plus `threads.artifact_retention`. An
+  artifact whose window is longer than the run's **outlives its run** — deleting the run leaves
+  its manifest and blobs, and the expiry row reclaims them at their own time.
+
+`threads.keep_forever = true` reclaims neither run/logs nor artifacts (dead runner records are
+still pruned — infrastructure, not history). A 90-day setting is a normal value, not a ceiling.
+
+The sweeper reports bytes reclaimed **per family** (run, job, log, artifact, queue, runner) and
+`POST …/api/v1/admin/gc` (or the admin GC page) can run a **dry run**: identical counts and
+bytes, nothing deleted.
 
 ### 8.2 The runner, in brief
 
@@ -1158,6 +1473,7 @@ blobs and manifests with the run.
 | minting | `/admin/runners` (browser, host admin) → `wrg_` registration token, 15 min, with a repository policy (`all` or up to 50 `owner/name` / `owner/*` patterns) |
 | start | `spindle --server URL runner serve --register wrg_… --token-file F --labels … --name … --capacity N` |
 | labels | exact, comma-separated, matched as a **subset**, case-insensitive; default `self-hosted,linux,docker` |
+| label → image | Forgejo's `name:docker://image` spelling (e.g. `ubuntu-latest:docker://node:lts`): a job whose `runs-on` names that label and names no `container.image` runs in that image. `lxc://` and `host` are refused by name (D-15 non-goals) |
 | capacity | default `1`; N jobs share the daemon and are **not** isolated from each other |
 | Docker | required; `DOCKER_HOST` names the daemon; the host socket needs `--allow-host-docker` |
 | fork runs | off by default; a runner needs `--allow-fork-runs` **and** the repository allowed |
@@ -1475,9 +1791,10 @@ The examples below are derived from working repositories (Weave and Scriobh), no
 
 | Forgejo | Threads | Notes |
 |---|---|---|
-| `on: push/pull_request/schedule` | same | same shapes; `branches` globs are `*` only |
+| `on: push/pull_request/schedule` | same | same shapes and the documented filter dialect (§3.1) |
 | `on: push: tags: ["v*"]` | same | a tag push matching the glob starts the run (§3.1); the importer converts the filter as written, and a tags-only trigger never matches a branch push |
-| `on: push: paths:` | **refused** | path filters are not in the parser; filter inside a `run:` step, or split workflows by directory |
+| `on: push: paths:` / `paths-ignore:` | same | the changed-file filter (§3.1); an `on.pull_request.paths` filter is the merge-base diff |
+| `on: release` / `issues` / `issue_comment` | same | each `types:` is the emitter vocabulary in §3.6; the run reads the default branch's file |
 | `runs-on: docker` | `runs-on: [self-hosted, linux, docker]` | labels are exact; match a runner's declared set |
 | `runs-on: ubuntu-latest` | same spelling | mapped to `self-hosted` + `linux` and scheduled on the stock runner; no image change (`windows-*`/`macos-*` stay queued, D-15) |
 | `container: {image: …}` | same | digest pins are honoured and may be required by policy |
@@ -1491,6 +1808,9 @@ The examples below are derived from working repositories (Weave and Scriobh), no
 | `forgejo.*` / `forge.*` | `github.*` | value-identical aliases |
 | `$GITHUB_SERVER_URL` | same spelling | also `$GITHUB_API_URL` (`/api/v1`), `$FORGEJO_SERVER_URL` and `${{ github.server_url }}`; `$SPINDLE_SERVER` is the same origin (§6.1) |
 | `github.event.inputs.x` | `github.event.inputs.x` or `inputs.x` | dispatch inputs only; the input must be declared |
+| `github.event.*` | same | the documented payload projection (§6.2); `jq` at `$GITHUB_EVENT_PATH` reads the whole record |
+| `vars.X` | same | repository/org variables; repository wins, values are masked |
+| `runner.os`, `runner.arch`, `runner.temp`, … | same | the runner context (§6.2); Linux containers only |
 | `$GITHUB_OUTPUT` | same (`$SPINDLE_OUTPUT`) | `name=value` or heredoc |
 | `$GITHUB_ENV` | same spelling (alias `$FORGEJO_ENV`) | later steps of the same job only (§6.6) |
 | `$GITHUB_PATH` | same spelling (alias `$FORGEJO_PATH`) | prepended to the next step's PATH (§6.6) |
@@ -1985,16 +2305,17 @@ the answer where the other gaps are listed.
 
 | Source construct | Why it is refused, or what it does today | What to do in the Spindle workflow |
 |---|---|---|
-| `on:` any trigger other than `push`, `pull_request`, `workflow_dispatch`, `schedule` (`release`, `merge_group`, `repository_dispatch`, `workflow_run`, `pull_request_target`, `workflow_call`, …) | the engine cannot emit the event, so the run would never happen | dispatch the work (`workflow_dispatch`) or start it from a `push`; the trigger is removed |
-| `on.push.paths` / `paths-ignore`, `on.pull_request.paths` / `paths-ignore` | path filters are not in the parser (a hand-written file is a parse error) | filter inside the job (`git diff --name-only "$BASE" HEAD`) or split the workflow by directory |
-| `on.push.branches-ignore` / `tags-ignore` | no ignore filter | enumerate the branches/tags to include |
-| `pull_request.types` values other than `opened`, `synchronize`, `reopened` | the pulls service emits only those actions | the unsupported values are dropped (the supported ones are kept); restructure around the emitted actions |
+| `on:` any trigger other than `push`, `pull_request`, `workflow_dispatch`, `schedule`, `release`, `issues`, `issue_comment` (`merge_group`, `repository_dispatch`, `workflow_run`, `pull_request_target`, `workflow_call`, …) | the engine cannot emit the event, so the run would never happen | dispatch the work (`workflow_dispatch`) or start it from a `push`; the trigger is removed |
+| `on.push.paths` / `paths-ignore`, `on.pull_request.paths` / `paths-ignore` | **supported**: the changed-file filter (§3.1) for a push (pre-image diff) and a PR (merge-base diff) | nothing to change |
+| `on.push.branches-ignore` / `tags-ignore` | **supported**: exclusion lists, and the include form with `!` mixes both (§3.1) | nothing to change |
+| `pull_request.types` values the services never emit (`deleted`, `locked`, …) | the services emit exactly the vocabulary in §3.2 | the unsupported values are dropped (the supported ones are kept); restructure around the emitted actions |
 | `strategy.max-parallel` | no per-job cell cap | none; a concurrency group caps *runs*, not cells |
 | object-valued matrix **axes** (`matrix.os: [{name: …}]`) | the target's axes are scalars | a scalar axis (`os: [linux, darwin]`) or one `include:` object per combination; the axis is kept as one placeholder cell so references parse, and the job gets a step that fails |
 | `defaults:` (workflow or job) | not in the parser | set `shell` / `working-directory` on each step |
 | `run-name:` | not supported yet | the workflow `name` |
-| job `uses:` (reusable workflow) and `on.workflow_call` | reusable workflows are not implemented | the job becomes one step that fails with the reason; inline the callee's steps or use a `workflow_dispatch` chain |
-| job `secrets:` | no reusable-workflow secret passing | repository secrets are injected by name |
+| job `uses:` naming a **repository-local** workflow | **supported** (§4.5): `./.spindle/workflows/<name>.yml`, callee jobs expanded into the run, nesting ≤ 4, `permissions:` downgrade-only | nothing to change; remove the callee's `on:` block |
+| `on.workflow_call`, a caller's `with:`/`secrets:`, and a callee's declared `outputs:` | not in the parser yet (PAR-075) | inline the values, read the callee job's recorded outputs from the API, or use a `workflow_dispatch` chain |
+| a cross-repository `uses:` (`owner/repo/…@ref`) | decision D-6: secrets never cross a repository boundary | vendor the steps into this repository, or chain through `workflow_dispatch` |
 | remote / marketplace `uses:` (`owner/repo@ref`, a URL) — including `actions/cache` and the `setup-*` actions | there is no marketplace and no cache engine (and each action is code with the job's privileges) | a base image or a `run:` step; install a toolchain in the step; bake dependencies into the image or accept a cold workspace; a repository-local `uses: ./action`; or `uses: docker://image` |
 | `container.credentials`, `services.<id>.credentials` | the pull identity belongs to the runner, not the file | the runner's docker config / mirror |
 | `environment` whose `name` is an expression or is not a valid name, or whose `url` is not an absolute http(s) URL | the name is a bucket key and the URL is rendered as a link | a literal name; the URL literal or omitted |
@@ -2002,8 +2323,8 @@ the answer where the other gaps are listed.
 | a concurrency `group` the target cannot expand (`${{ env.* }}`, `${{ secrets.* }}`, an undeclared axis or dispatch input) | the group is a lock; it fails closed rather than degrading to literal text | a group built from `github.*`, a declared matrix axis, or a declared input |
 | `timeout-minutes`, `continue-on-error`, `strategy.fail-fast` as expressions | the target takes a literal number/boolean | a literal, or one job per case |
 | an unknown key anywhere (the parser is strict) | it would be a typo the engine ignores | fix or remove it |
-| a dispatch input type other than `string`/`boolean`/`choice` (e.g. `environment`, `number`) | the target has no such type | carried as a **string** input (the name still resolves) with the original type named |
-| a cron entry the scheduler cannot evaluate | the target scheduler would reject the file | rewrite the schedule; the entry is dropped by name |
+| a dispatch input type other than `string`/`boolean`/`choice`/`number`/`environment` | the target has no such type | carried as a **string** input (the name still resolves) with the original type named |
+| a cron entry the scheduler cannot evaluate (an unknown macro/name/zone, seconds) | the target scheduler rejects the file | rewrite the schedule; the entry is dropped by name |
 | **supported** — `on.push.tags` / a tags-only trigger | a landed tag push matching an `on.push.tags` glob starts a run (§3.1); the importer converts the filter as written, and a tags-only trigger never matches a **branch** push | nothing to change; dispatch with a `version` input if one manual release path is preferred (§9.5) |
 | **carried** — `$GITHUB_ENV` | implemented for later steps of the same job only (§6.6) | nothing to change; a step cannot read its own write — use a local variable |
 | **carried** — `$GITHUB_PATH` | implemented, prepended to the next step's PATH (§6.6) | nothing to change; it never replaces the image's PATH |
@@ -2079,7 +2400,7 @@ Start at the first row that describes what you see; each branch names the eviden
 | Symptom | Cause | Fix |
 |---|---|---|
 | **No run at all after a push** | no workflow file at that commit; `on:` does not match the ref's kind/glob (a tags-only trigger on a branch push, or the reverse); the file failed to parse; the ref was a delete or a notes ref; the push used a job token | Threads → **Workflows** lists files at the default tip with their parse errors; deletes and notes refs never fire; a job-token push is suppressed |
-| **A file is rejected** | unknown key, bad type, unsupported cron, `paths`, an unsupported `${{ }}` reference or `if:` function, a matrix over 256 cells, both `run` and `uses`, a bad `needs:`/step id | the error names the file/key; fix that file only — the others keep running |
+| **A file is rejected** | unknown key, bad type, unsupported cron, a `types` value the service never emits, an unsupported `${{ }}` reference or `if:` function, a matrix over 256 cells, both `run` and `uses`, a bad `needs:`/step id | the error names the file/key; fix that file only — the others keep running |
 | **Run stays `queued`, jobs `not started`** | no active runner; labels are not a superset of `runs-on`; a fork run with no `--allow-fork-runs`; capacity full; a concurrency group is held | `/admin/runners`: an `active` runner with a recent last-seen and the labels; the run page shows `runs-on`; check the other run holding the group |
 | **Job failed before any step** | image refused (`threads.image_allow_prefixes` / `image_require_digest`), a bad container option, an undefined `environment`, an unresolvable local action | the job's `reason` names the field and value; fix the file or the policy |
 | **Job fails at checkout** | image has no `git`; the clone URL is unreachable from the container; the commit does not exist | use an image with `git` (default `alpine/git`); read the checkout URL and the reachability diagnostic; set `server.public_url` |
@@ -2132,9 +2453,10 @@ If you come from a hosted CI system, these are the surprises, in the order they 
    onto `self-hosted` + `linux`; Windows/macOS labels do not map at all.
 10. **Fork PRs are read-only by policy.** No secrets, a read-only token, the base branch's
     workflow file, and possibly an approval gate — the file cannot opt out.
-11. **`permissions` is narrow.** Only `contents` and `id-token` change anything; the rest parse
-    and do nothing, and no `permissions:` means `contents: read` (Forgejo's implicit write is a
-    recorded divergence).
+11. **`permissions` is a closed vocabulary.** `contents`, `issues`, `pull-requests` and
+    `id-token` are the only scopes, and each drives a real capability (the job token is also a
+    scoped API credential); any other scope is a named parse error, never accepted-and-inert.
+    No `permissions:` means `contents: read` (Forgejo's implicit write is a recorded divergence).
 12. **Everything is in the bucket.** There is no queue server and no local state; a restart
     loses warmth, not runs.
 

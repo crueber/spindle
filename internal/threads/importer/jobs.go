@@ -86,6 +86,11 @@ func (t *translator) job(name string, node *yaml.Node) {
 			t.concurrencyAt(node, i, p, true, axes)
 		case "permissions":
 			t.permissionsAt(node, i, p)
+		case "enable-openid-connect":
+			if node.Content[i+1].Tag != "!!bool" {
+				t.drop(node, i, t.untranslatedAt(p, "enable-openid-connect", "expected true or false"))
+				i -= 2
+			}
 		default:
 			reason := "not part of the Spindle job schema"
 			if key.Value == "defaults" {

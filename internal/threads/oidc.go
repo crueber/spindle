@@ -17,6 +17,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/crueber/spindle/internal/policy"
 	"github.com/crueber/spindle/internal/store"
 )
 
@@ -140,9 +141,10 @@ type oidcDiscovery struct {
 	ClaimsSupported                  []string `json:"claims_supported"`
 }
 
-// idTokenClaims is the exact claim set (PLAN-THREADS-OIDC §4). A struct, not a
-// map, so the wire shape is pinned and cannot grow an accidentally-exported
-// field.
+// idTokenClaims is the exact claim set (PLAN-THREADS-OIDC §4, PAR-120). A
+// struct, not a map, so the wire shape is pinned and cannot grow an
+// accidentally-exported field — no claim is ever copied from user data except
+// `aud` (validated printable text) and `environment` (a parser-pinned name).
 type idTokenClaims struct {
 	Iss             string `json:"iss"`
 	Sub             string `json:"sub"`
@@ -154,12 +156,21 @@ type idTokenClaims struct {
 	Repository      string `json:"repository"`
 	RepositoryOwner string `json:"repository_owner"`
 	Ref             string `json:"ref"`
+	RefType         string `json:"ref_type"`
+	RefProtected    bool   `json:"ref_protected"`
 	SHA             string `json:"sha"`
 	Workflow        string `json:"workflow"`
+	JobWorkflowRef  string `json:"job_workflow_ref"`
 	Job             string `json:"job"`
 	RunID           string `json:"run_id"`
 	RunAttempt      int    `json:"run_attempt"`
 	EventName       string `json:"event_name"`
+	// RunnerEnvironment is always "self-hosted" (Threads has no hosted fleet;
+	// the claim exists so a provider policy written for GitHub matches).
+	RunnerEnvironment string `json:"runner_environment"`
+	// Environment appears ONLY when the job names one, and then the subject is
+	// the environment subject instead of the ref subject (PAR-120).
+	Environment string `json:"environment,omitempty"`
 }
 
 // oidcJWTHeader is the RS256 JOSE header.
@@ -697,9 +708,8 @@ func (s *Service) ExchangeIDToken(ctx context.Context, ref string, attempt int, 
 	if !trusted {
 		return "", fmt.Errorf("%w: fork runs never receive an ID token", ErrForbidden)
 	}
-	perms := s.EffectivePermissions(job.Spec, trusted)
-	if perms["id-token"] != PermWrite {
-		return "", fmt.Errorf("%w: the job does not declare id-token: write", ErrForbidden)
+	if !s.IDTokenAllowed(job.Spec, trusted) {
+		return "", fmt.Errorf("%w: the job does not declare id-token: write (or enable-openid-connect)", ErrForbidden)
 	}
 	if run == nil {
 		return "", fmt.Errorf("%w: unknown run %q", ErrNotFound, runID)
@@ -725,21 +735,93 @@ func (s *Service) ExchangeIDToken(ctx context.Context, ref string, attempt int, 
 	if jerr != nil {
 		return "", jerr
 	}
+	// Subject template (PAR-120, docs/threads.md §5.5):
+	//
+	//	environment job   repo:<o>/<r>:environment:<name>
+	//	pull_request      repo:<o>/<r>:pull_request
+	//	push/tag/dispatch repo:<o>/<r>:ref:<full ref>
+	//
+	// An environment subject outranks the ref so an environment-scoped cloud
+	// role cannot be assumed from a branch. The environment name is
+	// parser-pinned to [A-Za-z0-9][A-Za-z0-9._-]{0,63}, so it cannot inject a
+	// separator into the subject.
+	environment := ""
+	if job.Spec != nil && job.Spec.Environment != nil {
+		environment = strings.TrimSpace(job.Spec.Environment.Name)
+	}
+	sub := "repo:" + repoID(owner, repo) + ":ref:" + refValue
+	switch {
+	case environment != "":
+		sub = "repo:" + repoID(owner, repo) + ":environment:" + environment
+	case run.Event == EventPullReq:
+		sub = "repo:" + repoID(owner, repo) + ":pull_request"
+	}
 	claims := idTokenClaims{
 		Iss: issuer, Aud: aud, Iat: iat, Nbf: iat, Exp: iat + int64(oidcTokenTTL/time.Second),
-		Sub:             "repo:" + repoID(owner, repo) + ":ref:" + refValue,
+		Sub:             sub,
 		JTI:             jti,
 		Repository:      repoID(owner, repo),
 		RepositoryOwner: owner,
 		Ref:             refValue,
+		RefType:         oidcRefType(refValue),
+		RefProtected:    s.refProtected(ctx, owner, repo, refValue),
 		SHA:             run.Commit,
 		Workflow:        run.Workflow,
+		JobWorkflowRef:  oidcJobWorkflowRef(repoID(owner, repo), run.WorkflowPath, refValue),
 		Job:             job.Key,
 		RunID:           run.ID,
 		RunAttempt:      run.Attempt,
 		EventName:       run.Event,
+
+		RunnerEnvironment: "self-hosted",
+		Environment:       environment,
 	}
 	return set.sign(claims)
+}
+
+// oidcRefType is the `ref_type` claim: branch or tag (never a PR ref).
+func oidcRefType(ref string) string {
+	if strings.HasPrefix(ref, "refs/tags/") {
+		return "tag"
+	}
+	return "branch"
+}
+
+// oidcJobWorkflowRef renders `job_workflow_ref` in GitHub's documented form:
+// `<owner>/<repo>/<workflow path>@<ref>`. Empty when the run did not record a
+// path (an older record), so the claim is omitted rather than guessed.
+func oidcJobWorkflowRef(repo, workflowPath, ref string) string {
+	path := strings.TrimPrefix(strings.TrimSpace(workflowPath), "/")
+	if path == "" {
+		return ""
+	}
+	return repo + "/" + path + "@" + ref
+}
+
+// refProtected reports whether a `protect` rule covers the ref for a blanket
+// pusher (S9: a provider may require a protected ref). The authority is the
+// repository's own policy.json, read once per exchange (one exact-key GET on a
+// rare path, never cached — a protection change applies to the next exchange).
+// A missing or unparseable policy reports false: the claim grants less trust,
+// so an error fails closed for the provider's decision.
+func (s *Service) refProtected(ctx context.Context, owner, repo, ref string) bool {
+	if s == nil || s.Store == nil || ref == "" {
+		return false
+	}
+	raw, _, err := s.getJSON(ctx, "repos/"+owner+"/"+repo+"/policy.json")
+	if err != nil || raw == nil {
+		return false
+	}
+	doc, perr := policy.Parse(raw)
+	if perr != nil {
+		return false
+	}
+	for _, rule := range policy.MatchingRules(doc, policy.Request{Ref: ref, Op: policy.OpUpdate}) {
+		if pe := rule.Protect(); pe != nil && len(pe.RestrictOps) > 0 {
+			return true
+		}
+	}
+	return false
 }
 
 // newJTI mints a random replay identifier (hex, 16 bytes).

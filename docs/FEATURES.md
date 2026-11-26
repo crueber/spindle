@@ -101,19 +101,25 @@ Threads runs CI from `.spindle/workflows/<name>.yml` in the repository. Writing 
 reference, recipes, the Forgejo migration cookbook and a troubleshooting tree — is
 [`WORKFLOWS.md`](WORKFLOWS.md); the exhaustive reference is [`threads.md`](threads.md).
 Workflow files are triggered by `push` (branch and tag pushes, filtered independently by
-`branches` and `tags`), `pull_request` (opened/synchronize/reopened),
-`workflow_dispatch` with typed inputs, and
-`schedule` (five-field UTC cron); jobs run in containers with services, `needs:` ordering,
-`strategy.matrix` (including GitHub's `include`/`exclude` merge rules) and `concurrency` groups,
+`branches`/`tags` and by changed files through `paths`/`paths-ignore`), `pull_request` (the full
+emitted lifecycle vocabulary: opened/synchronize/reopened, closed/merged, edited,
+ready_for_review/converted_to_draft, labeled/unlabeled, assigned/unassigned,
+milestoned/demilestoned), `release`, `issues`, `issue_comment`, `workflow_dispatch` with typed
+inputs (`string`, `boolean`, `choice`, `number`, `environment`), and `schedule` (five-field cron
+with names, macros, `L`/`NW`/`#` and a per-entry timezone); jobs run in containers with services,
+`needs:` ordering, `strategy.matrix` (including GitHub's `include`/`exclude` merge rules),
+repository-local reusable workflows and `concurrency` groups (one running plus one pending run),
 report into the checks surface that gates merges, and
-stream logs over SSE with cancel and rerun. `permissions:` mints a scoped job token
-(`$SPINDLE_JOB_TOKEN`, also delivered as `$GITHUB_TOKEN`/`$FORGEJO_TOKEN`) and, with
-`id-token: write` on a trusted run, a short-lived audience-scoped
-OIDC ID token for cloud providers; repository secrets are write-only and masked (never exposed to
-fork PRs), and first-time fork contributors need approval. Deployment environments add required
-reviewers and environment-scoped secrets: a job names one with `environment:`, and nothing starts —
-and no environment secret is resolved — until a listed reviewer or a repo admin approves the
-deployment (Settings → Environments).
+stream logs over SSE with cancel, rerun and rerun-failed. `permissions:` mints a scoped job token
+(`$SPINDLE_JOB_TOKEN`, also delivered as `$GITHUB_TOKEN`/`$FORGEJO_TOKEN`) whose closed vocabulary
+(`contents`, `issues`, `pull-requests`, `id-token`) is also its platform-API authority, and, with
+`id-token: write` (or Forgejo's `enable-openid-connect: true`) on a trusted run, a short-lived
+audience-scoped OIDC ID token for cloud providers; repository secrets are write-only and masked
+(never exposed to fork PRs), and first-time fork contributors need approval. Deployment
+environments add required reviewers (users or teams, at most six), a wait timer,
+prevent-self-review, a deployment branch/tag allowlist and environment-scoped secrets: a job names
+one with `environment:`, and nothing starts — and no environment secret is resolved — until every
+listed reviewer (or a repo admin) approves the deployment (Settings → Environments).
 
 Runs, jobs and steps, from the outside in: one **run** per workflow file per event (the file pinned
 to a path, commit and sha256), one **job** per `jobs:` key or matrix cell (one container, one
@@ -137,6 +143,8 @@ A run is **trusted** or **untrusted**, and that is server-side policy a file can
 | `pull_request`, fork | the **base branch tip** | no | none | `contents: read` |
 | `workflow_dispatch` | the resolved ref's commit | yes | yes | per `permissions` |
 | `schedule` | the default branch tip | yes | yes | per `permissions` |
+| `release` | the **default branch tip** (the run reports the tag commit) | yes | yes | per `permissions` |
+| `issues` / `issue_comment` | the **default branch tip** | yes | yes | per `permissions` |
 
 `push` fires for `refs/heads/<branch>` and for `refs/tags/<tag>`, filtered independently by
 `branches` and `tags` (a tags-only trigger never matches a branch push, and the reverse); branch and
@@ -162,10 +170,11 @@ trusted run only, then `SPINDLE_ID_TOKEN_REQUEST_URL` + `SPINDLE_ID_TOKEN_REQUES
 `ACTIONS_*` spellings) let the job `POST {"audience": "…"}` for an RS256 five-minute JWT whose
 issuer is `server.public_url`, with `sub` = `repo:<owner>/<name>:ref:<ref>` and the run/job claims
 ([`threads.md`](threads.md#55-job-oidc-tokens-cloud-identity)). Environments are repository-scoped
-deployment targets with required reviewers (write or more, checked when saved, at most 10) and their
-own secrets, which override repository secrets of the same name and reach only a job that names the
-environment in a trusted run with an approved deployment; the run is created `pending_approval` and
-nothing is enqueued until a listed reviewer or a repo admin decides
+deployment targets with required reviewers (users or teams, write or more, checked when saved, at
+most six) and their own secrets, which override repository secrets of the same name and reach only a
+job that names the environment in a trusted run with an approved deployment; the run is created
+`pending_approval` and nothing is enqueued until every listed reviewer (or a repo admin) decides.
+Wait timers, prevent-self-review, and the deployment branch/tag allowlist are part of the same gate
 ([`threads.md`](threads.md#56-deployment-environments)).
 
 ### 3.2 Steps and actions

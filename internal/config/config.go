@@ -473,6 +473,20 @@ type Threads struct {
 	// mutable). Default false; turning it on breaks every tag-named workflow,
 	// so it is a deliberate rollout.
 	ImageRequireDigest bool `toml:"image_require_digest"`
+	// ArtifactRetention is the artifact window (PAR-158), separate from
+	// Retention: an artifact whose own window is longer OUTLIVES its run.
+	// Zero selects the run window (today's behaviour); valid 24h…8760h.
+	ArtifactRetention Duration `toml:"artifact_retention"`
+	// KeepForever disables run/log/artifact reclamation entirely (PAR-158).
+	// Dead runner records are still pruned: infrastructure, not history.
+	KeepForever bool `toml:"keep_forever"`
+	// MaxQueueAttempts bounds a job's requeues before it fails (PAR-179;
+	// default 3, valid 1…20). Zero selects the default.
+	MaxQueueAttempts int `toml:"max_queue_attempts"`
+	// JobLease is the base runner claim lease (PAR-179; default 15m, valid
+	// 5m…30m). A job's own timeout adds its grace window; the effective lease
+	// is capped at 30m because log frames renew it.
+	JobLease Duration `toml:"job_lease"`
 }
 
 // Import bounds the repository-import surface (docs/features/10 §6:
@@ -634,6 +648,12 @@ func Defaults() *Config {
 			// would break CI on the first push after the upgrade).
 			ImageAllowPrefixes: nil,
 			ImageRequireDigest: false,
+			// The artifact window defaults to the run window (unchanged
+			// behaviour); keep_forever off; 3 attempts and a 15m lease.
+			ArtifactRetention: 0,
+			KeepForever:       false,
+			MaxQueueAttempts:  3,
+			JobLease:          Duration(15 * time.Minute),
 		},
 		Placement: Placement{Serve: []string{"*"}, Maintain: []string{"*"}},
 		Compaction: Compaction{

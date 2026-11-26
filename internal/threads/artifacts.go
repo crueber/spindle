@@ -463,15 +463,19 @@ func (s *Service) FinalizeArtifact(ctx context.Context, claims AttemptClaims, in
 		}
 		return nil, perr
 	}
-	// A retention-days that really shortens the run's window gets an index key
-	// so Retain can reclaim it before the run ages out. A longer one does not:
-	// the run's expiry bounds it, and the run's deletion takes the artifact.
-	if days > 0 {
-		short := now.Add(time.Duration(days) * 24 * time.Hour)
+	// Every artifact gets an expiry-index row carrying its own lifetime
+	// (PAR-158): the artifact window is the per-artifact `retention-days` when
+	// one was declared, else threads.artifact_retention (defaulting to the run
+	// window). A longer window than the run's means the artifact OUTLIVES the
+	// run: deleting the run leaves the bytes, and this index row is how Retain
+	// later reclaims them (its reclaimed bytes are reported under the artifact
+	// family). A `keep_forever` instance writes no row and reclaims nothing.
+	if !s.KeepForever {
 		run, rerr := s.loadRun(ctx, owner, repo, claims.Run)
-		if rerr == nil && run != nil && short.Before(runExpiry(run, s.retention())) {
-			body, _ := json.Marshal(artifactExpiryIndex{Run: claims.Run, Name: name, Expires: short.Format(dateTimeFmt)})
-			_ = s.putCreate(ctx, ArtifactExpiryKey(owner, repo, claims.Run, name, short), body)
+		if rerr == nil && run != nil {
+			expiry := artifactExpiresAt(run, art, s.retention(), s.artifactRetention(), now)
+			body, _ := json.Marshal(artifactExpiryIndex{Run: claims.Run, Name: name, Expires: expiry.Format(dateTimeFmt)})
+			_ = s.putCreate(ctx, ArtifactExpiryKey(owner, repo, claims.Run, name, expiry), body)
 		}
 	}
 	if run, rerr := s.loadRun(ctx, owner, repo, claims.Run); rerr == nil && run != nil {
@@ -610,7 +614,7 @@ func (s *Service) runArtifactViews(ctx context.Context, owner, repo string, run 
 
 // artifactView fills the derived expiry.
 func (s *Service) artifactView(run *Run, a *Artifact, now time.Time) *ArtifactView {
-	return &ArtifactView{Artifact: *a, ExpiresAt: artifactExpiresAt(run, a, s.retention(), now).Format(dateTimeFmt)}
+	return &ArtifactView{Artifact: *a, ExpiresAt: artifactExpiresAt(run, a, s.retention(), s.artifactRetention(), now).Format(dateTimeFmt)}
 }
 
 // runExpiry is when the run's whole record ages out: CompletedAt (or
@@ -627,18 +631,37 @@ func runExpiry(run *Run, retention time.Duration) time.Time {
 	return at.Add(retention)
 }
 
-// artifactExpiresAt is min(run expiry, created + retention-days): a
-// per-artifact window can only shorten the run's.
-func artifactExpiresAt(run *Run, a *Artifact, retention time.Duration, now time.Time) time.Time {
+// artifactRetention is the artifact window (threads.artifact_retention),
+// defaulting to the run window. A longer value is the documented way an
+// artifact outlives its run (PAR-158).
+func (s *Service) artifactRetention() time.Duration {
+	if s != nil && s.ArtifactRetention > 0 {
+		return s.ArtifactRetention
+	}
+	return s.retention()
+}
+
+// artifactExpiresAt is the artifact's OWN lifetime: created plus its
+// `retention-days` when one was declared, else created plus the artifact window
+// (threads.artifact_retention). It is deliberately not bounded by the run's
+// expiry: the two windows are separate, and `deleteRun` only reclaims an
+// artifact whose own window has closed.
+func artifactExpiresAt(run *Run, a *Artifact, retention, artifactRetention time.Duration, now time.Time) time.Time {
 	created, err := time.Parse(dateTimeFmt, strings.TrimSpace(a.CreatedAt))
 	if err != nil {
 		created = now
 	}
-	expiry := runExpiry(run, retention)
-	if sret := time.Duration(a.RetentionDays) * 24 * time.Hour; a.RetentionDays > 0 && created.Add(sret).Before(expiry) {
-		expiry = created.Add(sret)
+	_ = run // retained for the signature: the run no longer bounds the artifact
+	if a.RetentionDays > 0 {
+		return created.Add(time.Duration(a.RetentionDays) * 24 * time.Hour)
 	}
-	return expiry
+	if artifactRetention <= 0 {
+		artifactRetention = retention
+	}
+	if artifactRetention <= 0 {
+		artifactRetention = DefaultRetention
+	}
+	return created.Add(artifactRetention)
 }
 
 // artifactExpired reports a per-artifact window that has closed. A zero
@@ -841,19 +864,39 @@ func WriteArtifactZip(ctx context.Context, w io.Writer, dl *ArtifactDownload) er
 // the repo's expiry index (ONE prefix LIST, maintainer only) and deletes the
 // manifest, its blobs and the index key. An index entry whose run or artifact
 // is already gone is dropped; a second pass deletes nothing.
+// expireArtifacts runs one expiry pass in APPLY mode (the historical entry
+// point used by tests); retain uses expireArtifactsMode so a dry run can report
+// the same numbers without deleting.
 func (s *Service) expireArtifacts(ctx context.Context, owner, repo string, now time.Time, res *GCResult) error {
+	return s.expireArtifactsMode(ctx, owner, repo, now, true, nil, res)
+}
+
+// expireArtifactsMode reclaims the artifacts whose own window closed. One
+// prefix LIST per pass over the expiry index (PAR-158/159): a due row deletes
+// the manifest, its blobs and the row, reporting the artifact family's bytes.
+// A dry run reports the same counts/bytes and deletes nothing.
+func (s *Service) expireArtifactsMode(ctx context.Context, owner, repo string, now time.Time, apply bool, skipRuns map[string]bool, res *GCResult) error {
 	type entry struct {
 		key string
 		idx artifactExpiryIndex
 	}
 	var due []entry
 	if err := s.Store.List(ctx, ArtifactExpiryPrefix(owner, repo), "", func(m store.ObjectMeta) error {
+		if !apply && len(due) >= retentionBatch {
+			return nil
+		}
 		raw, _, err := s.getJSON(ctx, m.Key)
 		if err != nil || raw == nil {
 			return nil // an unreadable index row never fails the sweep
 		}
 		var idx artifactExpiryIndex
 		if jerr := json.Unmarshal(raw, &idx); jerr != nil {
+			return nil
+		}
+		// An artifact of a run this same pass already reclaimed (or kept for its
+		// own window) was handled by the run walk; counting it here would report
+		// it twice in a dry run, where the run's expiry rows still exist.
+		if skipRuns[idx.Run] {
 			return nil
 		}
 		at, perr := time.Parse(dateTimeFmt, strings.TrimSpace(idx.Expires))
@@ -872,7 +915,22 @@ func (s *Service) expireArtifacts(ctx context.Context, owner, repo string, now t
 			return ctx.Err()
 		}
 		if !validArtifactName(e.idx.Name) || !runIDRe.MatchString(e.idx.Run) {
-			_ = s.Store.Delete(ctx, e.key, "")
+			if apply {
+				_ = s.Store.Delete(ctx, e.key, "")
+			}
+			continue
+		}
+		if !apply {
+			// Size the artifact without deleting: manifest + blobs, exactly what
+			// an apply pass would free.
+			var freed int64
+			_ = s.Store.List(ctx, ArtifactDir(owner, repo, e.idx.Run, e.idx.Name), "", func(m store.ObjectMeta) error {
+				freed += m.Size
+				return nil
+			})
+			res.ArtifactsDeleted++
+			res.ArtifactBytes += freed
+			res.BytesFreed += freed
 			continue
 		}
 		n, derr := s.deleteArtifact(ctx, owner, repo, e.idx.Run, e.idx.Name)
@@ -881,6 +939,7 @@ func (s *Service) expireArtifacts(ctx context.Context, owner, repo string, now t
 		}
 		res.ArtifactsDeleted++
 		res.ArtifactBytes += n
+		res.BytesFreed += n
 		if derr := s.Store.Delete(ctx, e.key, ""); derr != nil && !store.IsNotFound(derr) {
 			return derr
 		}

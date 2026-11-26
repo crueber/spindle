@@ -57,6 +57,10 @@ type ThreadsDeps struct {
 	// checks the repository read gate and the expiry, so the page handler never
 	// decides access itself (15 §2.5).
 	OpenArtifact func(ctx context.Context, owner, repo, runID, name string, p auth.Principal) (*threads.ArtifactDownload, error)
+	// Environments lists the repository's environment names for the
+	// `environment`-typed dispatch picker (PAR-023). Nil leaves the picker
+	// empty; the service still validates the submitted value.
+	Environments func(ctx context.Context, owner, repo string, p auth.Principal) ([]string, error)
 }
 
 var threadsDeps ThreadsDeps
@@ -101,6 +105,14 @@ type threadRunRow struct {
 	DurationSeconds int64
 	// Actor is the trigger principal (the run-list actor filter and column).
 	Actor string
+	// PendingEnvironments names the deployments a held run waits for, and
+	// ApprovalKind says whether the hold is a deployment or the fork gate
+	// (PAR-135: the badge names the environment, never a bare "pending").
+	PendingEnvironments []string
+	ApprovalKind        string
+	// PendingGroup is the concurrency group this run waits for (PAR-152), so a
+	// queued run behind another says why instead of showing a silent spinner.
+	PendingGroup string
 }
 
 // threadsListData is the run-list page model.
@@ -199,7 +211,7 @@ func (s *Server) threadsList(w http.ResponseWriter, r *http.Request) {
 	}
 	data.CanWrite = threadCanWrite(r.Context(), rc, p)
 	data.DispatchRef = threadDispatchDefaultRef(rc)
-	threadDispatchModel(&data, r.URL.Query().Get("dispatch"), nil)
+	threadDispatchModel(&data, r.URL.Query().Get("dispatch"), nil, threadEnvironmentNames(r.Context(), rc, p, data.Workflows))
 	if threadsDeps.List == nil {
 		data.Error = "threads service not wired"
 		s.pageRepo(w, r, p, s.collabChrome(r, rc, p), http.StatusServiceUnavailable, "collab/threads", "Threads", data)
@@ -225,6 +237,8 @@ func (s *Server) threadsList(w http.ResponseWriter, r *http.Request) {
 			Event: run.Event, Workflow: run.Workflow, Branch: run.Branch,
 			State: run.State, Trusted: run.Trusted, UpdatedAt: run.UpdatedAt,
 			DurationSeconds: run.DurationSeconds, Actor: run.Actor,
+			PendingEnvironments: run.Environments, ApprovalKind: run.ApprovalKind,
+			PendingGroup: run.PendingGroup,
 		})
 	}
 	if data.More && len(page.Runs) > 0 {
@@ -236,7 +250,7 @@ func (s *Server) threadsList(w http.ResponseWriter, r *http.Request) {
 // threadDispatchModel fills the Run workflow model: the dispatchable files, the
 // selected one's declared inputs, and (when submitted != nil) the values the
 // dispatcher posted, so an inline error re-render keeps them.
-func threadDispatchModel(data *threadsListData, selected string, submitted map[string]string) {
+func threadDispatchModel(data *threadsListData, selected string, submitted map[string]string, environments []string) {
 	selected = strings.TrimSpace(selected)
 	var chosen *threadWorkflowRow
 	for i := range data.Workflows {
@@ -267,11 +281,42 @@ func threadDispatchModel(data *threadsListData, selected string, submitted map[s
 			Required: in.Required, Default: in.Default, Options: in.Options,
 			Value: in.Default,
 		}
+		if in.Type == "environment" {
+			// The picker's choices are the repository's environments, resolved
+			// server-side (the workflow file names no options).
+			row.Options = environments
+		}
 		if submitted != nil {
 			row.Value = submitted[in.Name]
 		}
 		data.DispatchInputs = append(data.DispatchInputs, row)
 	}
+}
+
+// threadEnvironmentNames resolves the picker list for an `environment` input,
+// and only when a discovered workflow actually declares one (no LIST for the
+// ordinary dispatch page).
+func threadEnvironmentNames(ctx context.Context, rc collabRepo, p auth.Principal, workflows []threadWorkflowRow) []string {
+	if threadsDeps.Environments == nil {
+		return nil
+	}
+	needed := false
+	for _, wf := range workflows {
+		for _, in := range wf.Inputs {
+			if in.Type == "environment" {
+				needed = true
+				break
+			}
+		}
+	}
+	if !needed {
+		return nil
+	}
+	names, err := threadsDeps.Environments(ctx, rc.Owner, rc.Name, p)
+	if err != nil {
+		return nil
+	}
+	return names
 }
 
 // threadDispatchLabel is the select option text: the workflow's display name
@@ -370,7 +415,7 @@ func (s *Server) threadsDispatch(w http.ResponseWriter, r *http.Request) {
 	for _, wf := range data.Workflows {
 		data.FilterWorkflowOptions = append(data.FilterWorkflowOptions, wf.Name)
 	}
-	threadDispatchModel(&data, workflow, submitted)
+	threadDispatchModel(&data, workflow, submitted, threadEnvironmentNames(r.Context(), rc, p, data.Workflows))
 	if threadsDeps.List != nil {
 		if page, lerr := threadsDeps.List(r.Context(), rc.Owner, rc.Name, p, "", 50, threads.RunFilter{}); lerr == nil {
 			data.More = page.More

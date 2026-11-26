@@ -41,7 +41,7 @@
           {{if .Required}}<span class="text-[var(--pd-warn)]" aria-label="required">*</span>{{end}}
           {{with .Description}}<span class="muted font-normal">— {{.}}</span>{{end}}
         </label>
-        {{if eq .Type "choice"}}
+        {{if or (eq .Type "choice") (eq .Type "environment")}}
         <select class="input" id="threads-input-{{.Name}}" name="input.{{.Name}}">
           {{range .Options}}<option value="{{.}}"{{if eq . $in.Value}} selected{{end}}>{{.}}</option>{{end}}
         </select>
@@ -127,11 +127,24 @@
         {{template "collab_check_dot" (runDot .State)}}
         <a class="link text-sm font-medium" href="{{.Href}}">{{.Workflow}}</a>
         <span class="chip chip-neutral">{{.State}}</span>
+        {{if eq .State "pending_approval"}}
+          {{if .PendingEnvironments}}<span class="chip chip-draft" title="a deployment is held for approval; the run page names the reviewers">awaiting deployment{{if gt (len .PendingEnvironments) 1}}s{{end}} <span class="mono">{{range $i, $e := .PendingEnvironments}}{{if $i}}, {{end}}{{$e}}{{end}}</span></span>
+          {{else}}<span class="chip chip-draft" title="the fork-gate hold: a maintainer must approve this run">awaiting maintainer</span>{{end}}
+        {{end}}
+        {{with .PendingGroup}}<span class="chip chip-neutral" title="one run at a time in a concurrency group; this run waits its turn">group <span class="mono">{{.}}</span> · waiting</span>{{end}}
         {{if not .Trusted}}<span class="chip chip-draft" title="fork pull request: base-branch workflow, no secrets">untrusted</span>{{end}}
         <span class="muted text-xs">{{.Event}}{{with .Branch}} · {{.}}{{end}}{{with .Actor}} · {{.}}{{end}}</span>
         <a class="link mono text-xs" href="/{{$d.Repo.Full}}/commit/{{.Commit}}">{{.ShortCommit}}</a>
         {{with .DurationSeconds}}<span class="muted text-xs">{{duration .}}</span>{{end}}
         <span class="muted ml-auto shrink-0 text-xs">{{template "collab_time" .UpdatedAt}}</span>
+        {{/* A held run is cancellable from the list (PAR-135): a reviewer who
+             cannot approve can still stop the work without opening the run.
+             The service re-checks the write role, so this is an affordance. */}}
+        {{if $d.CanWrite}}{{if or (eq .State "pending_approval") (eq .State "queued") (eq .State "running")}}
+        <form method="post" action="/{{$d.Repo.Full}}/threads/{{.ID}}/cancel" class="shrink-0">
+          <button type="submit" class="link text-xs">cancel</button>
+        </form>
+        {{end}}{{end}}
       </div>
     </li>
     {{end}}

@@ -42,6 +42,8 @@ type ExprContext struct {
 	Failure   bool
 	Cancelled bool
 	GitHub    map[string]string
+	Runner    map[string]string
+	Vars      map[string]string
 	Matrix    map[string]string
 	Inputs    map[string]string
 	Env       map[string]string
@@ -229,6 +231,13 @@ func (p *exprParser) reference(word string) (value, error) {
 	switch strings.ToLower(raw[0]) {
 	case "github", "forgejo", "forge":
 		return p.githubValue(raw[0], raw)
+	case "runner":
+		if len(raw) != 2 || !workflow.ValidRunnerField(raw[1]) {
+			return value{}, fmt.Errorf("if: runner.%s is not a supported runner field (supported: %s)", strings.Join(raw[1:], "."), strings.Join(workflow.RunnerFields, ", "))
+		}
+		return value{s: p.ctx.Runner[strings.ToLower(raw[1])]}, nil
+	case "vars":
+		return value{s: lookupVar(p.ctx.Vars, strings.Join(raw[1:], "."))}, nil
 	case "matrix":
 		return value{s: p.ctx.Matrix[strings.Join(raw[1:], ".")]}, nil
 	case "inputs":
@@ -255,6 +264,13 @@ func (p *exprParser) reference(word string) (value, error) {
 func (p *exprParser) githubValue(context string, raw []string) (value, error) {
 	if len(raw) >= 4 && strings.EqualFold(raw[1], "event") && strings.EqualFold(raw[2], "inputs") {
 		return value{s: p.ctx.Inputs[strings.Join(raw[3:], ".")]}, nil
+	}
+	if len(raw) >= 3 && strings.EqualFold(raw[1], "event") {
+		path := strings.Join(raw[2:], ".")
+		if !workflow.ValidEventField(path) {
+			return value{}, fmt.Errorf("if: %s.event.%s is not a supported event field (supported: %s)", context, path, strings.Join(workflow.EventFields, ", "))
+		}
+		return value{s: p.ctx.GitHub["event."+strings.ToLower(path)]}, nil
 	}
 	if len(raw) != 2 {
 		return value{}, fmt.Errorf("if: only %s.<field> is supported (supported: %s)", context, strings.Join(workflow.GitHubFields, ", "))
@@ -487,4 +503,18 @@ func formatValue(format string, args []value) string {
 		}
 	}
 	return b.String()
+}
+
+// lookupVar resolves `vars.<name>` case-insensitively (stored names are the
+// canonical spelling; the reference is authored).
+func lookupVar(values map[string]string, name string) string {
+	if val, ok := values[name]; ok {
+		return val
+	}
+	for key, val := range values {
+		if strings.EqualFold(key, name) {
+			return val
+		}
+	}
+	return ""
 }

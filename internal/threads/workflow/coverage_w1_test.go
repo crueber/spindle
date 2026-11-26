@@ -124,7 +124,7 @@ func TestSubstituteErrors(t *testing.T) {
 	if _, err := Substitute("${{ github.ref", TemplateValues{}); err == nil || !strings.Contains(err.Error(), "unterminated") {
 		t.Fatalf("unterminated = %v", err)
 	}
-	if _, err := Substitute("${{ vars.X }}", TemplateValues{}); err == nil || !strings.Contains(err.Error(), "unknown context") {
+	if _, err := Substitute("${{ nope.X }}", TemplateValues{}); err == nil || !strings.Contains(err.Error(), "unknown context") {
 		t.Fatalf("unknown context = %v", err)
 	}
 	if _, err := Substitute("${{ needs.ghost.outputs.x }}", TemplateValues{}); err == nil || !strings.Contains(err.Error(), "no needs dependency") {

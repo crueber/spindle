@@ -25,7 +25,7 @@ func prWorkflow(types string) string {
 func TestPullRequestTypesMatrix(t *testing.T) {
 	// The vocabulary itself is pinned: the actions Threads emits are exactly
 	// these three (internal/pulls PullEvent).
-	if got, want := strings.Join(PullRequestTypes, ","), "opened,synchronize,reopened"; got != want {
+	if got, want := strings.Join(PullRequestTypes, ","), "opened,synchronize,reopened,closed,edited,ready_for_review,converted_to_draft,labeled,unlabeled,assigned,unassigned,milestoned,demilestoned"; got != want {
 		t.Fatalf("PullRequestTypes = %q, want %q", got, want)
 	}
 	actions := PullRequestTypes
@@ -81,7 +81,7 @@ func TestPullRequestTypesDefault(t *testing.T) {
 // emits is this file's parse error naming the supported set, never a silently
 // dead trigger. `types: []` matches nothing, so it is rejected too.
 func TestPullRequestTypesRejected(t *testing.T) {
-	for _, types := range []string{"[closed]", "[labeled]", "[assigned, closed]", "[]", "[Opened]"} {
+	for _, types := range []string{"[deleted]", "[locked]", "[assigned, deleted]", "[]"} {
 		_, err := Parse([]byte(prWorkflow(types)))
 		if err == nil {
 			t.Errorf("types: %s accepted", types)

@@ -333,6 +333,17 @@ func (s *Service) Resolve(ctx context.Context, owner, repo string, p auth.Princi
 		doc = SynthesizeDefault(owner)
 	}
 	best := Role("")
+	// A Threads job token (PAR-113) is a repository-scoped credential, not a
+	// user: its platform authority is the minimum repo role its effective
+	// `permissions:` imply, and it never exists outside JobRepo. Returning
+	// early here keeps the token out of bindings/roster resolution entirely —
+	// the ci:<runner> principal is not (and must not become) a collaborator.
+	if p.JobRepo != "" {
+		if !strings.EqualFold(strings.TrimSpace(p.JobRepo), owner+"/"+repo) {
+			return "", doc
+		}
+		return jobTokenRole(p), doc
+	}
 	if !p.Anonymous {
 		for _, b := range doc.RoleBindings {
 			var match bool
@@ -364,6 +375,40 @@ func (s *Service) Resolve(ctx context.Context, owner, repo string, p auth.Princi
 		best = RoleRead
 	}
 	return best, doc
+}
+
+// jobTokenRole maps a Threads job token's effective permission map onto the
+// minimum repository role it implies (PAR-112/PAR-113, S10). The mapping is
+// deliberately one-way and never reaches admin: a job token can read, comment,
+// triage issues/PRs, and — with `contents: write`/`pull-requests: write` — act
+// as a writer (open PRs, create releases; the push itself is gated separately
+// by the `push` git scope). Minting credentials (checks tokens, invites,
+// access.json, repo settings) requires a role this function never returns.
+//
+// A token that asks for no repo scope (only `id-token: write`, or
+// `permissions: {}`) resolves to no role: its clone still works through the git
+// grant, but the platform API is denied.
+func jobTokenRole(p auth.Principal) Role {
+	level := func(scope string) string {
+		return strings.ToLower(strings.TrimSpace(p.JobPerms[scope]))
+	}
+	write := func(scope string) bool {
+		l := level(scope)
+		return l == "write"
+	}
+	read := func(scope string) bool {
+		l := level(scope)
+		return l == "read" || l == "write"
+	}
+	switch {
+	case write("contents"), write("pull-requests"), write("pull_requests"):
+		return RoleWrite
+	case write("issues"):
+		return RoleTriage
+	case read("contents"), read("issues"), read("pull-requests"), read("pull_requests"), p.JobPush:
+		return RoleRead
+	}
+	return ""
 }
 
 // orgRosterRole resolves the principal's roster role in the owning org

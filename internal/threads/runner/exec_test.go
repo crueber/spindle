@@ -250,7 +250,7 @@ func TestStepTimeoutKillsTheContainer(t *testing.T) {
 	}
 	step := plan.Steps[1]
 	step.Timeout = 80 * time.Millisecond
-	err = exec.runStepCommand(context.Background(), plan, step, stream)
+	err = exec.runStepCommand(context.Background(), plan, step, stream, stream)
 	if err == nil || !strings.Contains(err.Error(), "timed out") {
 		t.Fatalf("err = %v", err)
 	}

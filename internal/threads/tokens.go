@@ -14,6 +14,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/crueber/spindle/internal/threads/workflow"
 )
 
 // Token shapes (15 §3, the 12_runner D4 families re-expressed for Threads).
@@ -75,6 +77,15 @@ const (
 // `permissions:` at all (threads.default_permissions; "read" unless configured).
 const DefaultJobPermissions = PermRead
 
+// baselineScopes are the scopes `read-all`/`write-all` set a baseline for.
+// `id-token` is deliberately absent: write-all must never mint cloud identity
+// (S10) — a job asks for it by name.
+var baselineScopes = []string{
+	workflow.ScopeContents,
+	workflow.ScopeIssues,
+	workflow.ScopePullRequest,
+}
+
 // normalizePerm maps the accepted spellings onto none|read|write.
 func normalizePerm(v string) string {
 	switch strings.ToLower(strings.TrimSpace(v)) {
@@ -89,38 +100,127 @@ func normalizePerm(v string) string {
 }
 
 // EffectivePermissions resolves the permissions a job token is scoped to: the
-// job spec's merged map over the instance default (`all`/`read-all`/`write-all`
-// set the baseline, a specific key overrides it). A fork run is ALWAYS
-// `contents: read` — the trust class wins over anything the workflow asked for
-// (15 §2/§5: the fork's workflow runs from the base branch, untrusted).
+// job spec's merged map over the instance default. `all`/`read-all`/`write-all`
+// set the baseline for every baseline scope (never `id-token`); a specific key
+// overrides it. A fork run is ALWAYS `contents: read` — the trust class wins
+// over anything the workflow asked for (15 §2/§5: the fork's workflow runs from
+// the base branch, untrusted).
+//
+// The scope vocabulary is closed at parse time (workflow.Permissions); this
+// resolver is deliberately defensive anyway, because a spec can be read back
+// from the bucket and an unknown level must never widen access.
 func (s *Service) EffectivePermissions(spec *Spec, trusted bool) map[string]string {
+	if !trusted {
+		return map[string]string{workflow.ScopeContents: PermRead}
+	}
 	def := PermRead
 	if s.DefaultPermissions != "" {
 		if n := normalizePerm(s.DefaultPermissions); n != "" {
 			def = n
 		}
 	}
-	if !trusted {
-		return map[string]string{"contents": PermRead}
-	}
-	out := map[string]string{"contents": def}
+	out := map[string]string{workflow.ScopeContents: def}
 	if spec == nil {
 		return out
 	}
-	if all, ok := spec.Permissions["all"]; ok {
+	if all, ok := spec.Permissions[workflow.KeyAll]; ok {
 		if n := normalizePerm(all); n != "" {
-			out["contents"] = n
+			for _, scope := range baselineScopes {
+				out[scope] = n
+			}
 		}
 	}
 	for k, v := range spec.Permissions {
-		if k == "all" {
+		if k == workflow.KeyAll {
 			continue
+		}
+		canonical, ok, _ := workflow.CanonicalPermissionScope(k)
+		if !ok {
+			continue // a scope the parser refuses never reaches a token
 		}
 		n := normalizePerm(v)
 		if n == "" {
 			continue // an unrecognised level never widens access
 		}
-		out[k] = n
+		out[canonical] = n
+	}
+	return out
+}
+
+// IDTokenAllowed reports whether a job may exchange an OIDC ID token. Two
+// spellings mean the same thing (PAR-119): `permissions: id-token: write` and
+// the Forgejo key `enable-openid-connect: true`. An explicit `id-token: none`
+// denies regardless of the boolean, an untrusted run never qualifies, and a
+// `write-all` baseline never implies it (S10).
+func (s *Service) IDTokenAllowed(spec *Spec, trusted bool) bool {
+	if !trusted {
+		return false
+	}
+	perms := s.EffectivePermissions(spec, trusted)
+	if v, ok := perms[workflow.ScopeIDToken]; ok {
+		return v == PermWrite
+	}
+	return spec != nil && spec.EnableOpenIDConnect
+}
+
+// permissionRank orders the three levels for a downgrade (PAR-075).
+func permissionRank(level string) int {
+	switch level {
+	case PermWrite:
+		return 2
+	case PermRead:
+		return 1
+	}
+	return 0 // none or absent: not granted
+}
+
+// downgradePermissions caps a reusable workflow's declared scopes at its
+// caller's effective scopes: the callee may narrow, never widen. A scope the
+// caller does not grant is `none` for the callee, whatever the callee asks for
+// (a caller with no `permissions:` block grants the instance default baseline).
+// Scope spellings are canonicalized exactly as EffectivePermissions does it, so
+// "what the token gets" and "what the caller may grant" cannot disagree.
+func downgradePermissions(cap, declared map[string]string) map[string]string {
+	if len(cap) == 0 && len(declared) == 0 {
+		return nil
+	}
+	out := make(map[string]string, len(declared)+1)
+	if all, ok := declared[workflow.KeyAll]; ok {
+		if n := normalizePerm(all); n != "" {
+			for _, scope := range baselineScopes {
+				limit := normalizePerm(cap[scope])
+				if permissionRank(n) > permissionRank(limit) {
+					out[scope] = limit
+				} else {
+					out[scope] = n
+				}
+			}
+		}
+	}
+	for k, v := range declared {
+		if k == workflow.KeyAll {
+			continue
+		}
+		canonical, ok, _ := workflow.CanonicalPermissionScope(k)
+		if !ok {
+			continue
+		}
+		callee := normalizePerm(v)
+		if callee == "" {
+			callee = PermNone
+		}
+		limit := normalizePerm(cap[canonical])
+		if permissionRank(callee) > permissionRank(limit) {
+			out[canonical] = limit
+		} else {
+			out[canonical] = callee
+		}
+	}
+	if _, ok := out[workflow.ScopeContents]; !ok {
+		out[workflow.ScopeContents] = cap[workflow.ScopeContents]
+	}
+	if out[workflow.ScopeContents] == "" {
+		out[workflow.ScopeContents] = PermRead
 	}
 	return out
 }
@@ -136,10 +236,12 @@ func containsScope(scopes []string, want string) bool {
 }
 
 // PermissionScopes maps an effective permission map onto git scopes: `push`
-// only when `contents: write`.
+// only when `contents: write`. The platform-API half of the authority is the
+// repository role the same map implies (internal/identity jobTokenRole),
+// computed at the credential boundary.
 func PermissionScopes(perms map[string]string) []string {
 	out := []string{}
-	if perms["contents"] == PermWrite {
+	if perms[workflow.ScopeContents] == PermWrite {
 		out = append(out, ScopePush)
 	}
 	return out

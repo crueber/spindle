@@ -41,6 +41,41 @@ var GitHubFields = []string{
 	"run_id", "server_url", "sha", "workflow",
 }
 
+// EventFields is the closed `github.event.*` (and forgejo/forge alias) field
+// set Threads documents (PAR-033). The event JSON written to
+// $GITHUB_EVENT_PATH carries the complete payload; the expression context is
+// this bounded, documented projection — an arbitrary path would be a silent
+// empty value, which is the acceptance failure the closed vocabulary exists to
+// prevent. `github.event.inputs.<name>` is handled separately.
+var EventFields = []string{
+	"action",
+	"after", "before", "forced", "ref",
+	"repository.name", "repository.full_name", "repository.owner.login",
+	"repository.default_branch", "repository.private",
+	"sender.login",
+	"pull_request.number", "pull_request.state", "pull_request.title",
+	"pull_request.draft", "pull_request.merged",
+	"pull_request.user.login",
+	"pull_request.head.ref", "pull_request.head.sha", "pull_request.head.repo.full_name",
+	"pull_request.base.ref", "pull_request.base.sha", "pull_request.base.repo.full_name",
+	"release.tag_name", "release.name", "release.draft", "release.prerelease",
+	"release.target_commitish", "release.author.login", "release.assets",
+	"issue.number", "issue.title", "issue.state", "issue.user.login",
+	"issue.labels",
+	"comment.id", "comment.body", "comment.user.login",
+	"comment.author_association",
+}
+
+// RunnerFields is the closed `runner.*` context (PAR-034).
+var RunnerFields = []string{"os", "arch", "name", "temp", "tool_cache", "environment", "debug"}
+
+// ValidRunnerField reports whether field is in the closed runner.* set.
+func ValidRunnerField(field string) bool { return containsFold(RunnerFields, field) }
+
+// ValidEventField reports whether path (without the `event.` prefix) is in the
+// closed github.event.* set.
+func ValidEventField(path string) bool { return containsFold(EventFields, path) }
+
 // GroupGitHubFields is the subset a concurrency group may read: the group is
 // expanded before a job exists, so `github.job` has no value there.
 var GroupGitHubFields = []string{
@@ -52,8 +87,9 @@ var TemplateSupported = []string{
 	"github.ref", "github.ref_name", "github.repository", "github.workflow",
 	"github.event_name", "github.sha", "github.run_id", "github.job",
 	"github.actor", "github.server_url", "github.api_url",
-	"github.event.inputs.<name>",
+	"github.event.inputs.<name>", "github.event.<field>",
 	"forgejo.<field>", "forge.<field> (the github.* set)",
+	"runner.<field>", "vars.<name>",
 	"matrix.<axis>", "inputs.<name>", "env.<NAME>", "secrets.<NAME>",
 	"steps.<id>.outputs.<name>", "needs.<job>.outputs.<name>",
 }
@@ -176,6 +212,24 @@ func splitRef(expr string) (*TemplateRef, bool) {
 			return &TemplateRef{Context: context, Key: "event.inputs." + name}, true
 		}
 	}
+	// `github.event.<path>` is a documented-event-field reference; the path is
+	// validated against EventFields by validateRef (an arbitrary path is the
+	// parse error, never an empty value).
+	if len(segments) >= 3 && isGitHubContext(strings.TrimSpace(segments[0])) &&
+		strings.EqualFold(strings.TrimSpace(segments[1]), "event") {
+		path := make([]string, 0, len(segments)-2)
+		for _, seg := range segments[2:] {
+			if !templateIdent(strings.TrimSpace(seg)) {
+				return nil, false
+			}
+			path = append(path, strings.TrimSpace(seg))
+		}
+		if len(path) == 1 && strings.EqualFold(path[0], "inputs") {
+			return nil, false // the bare `event.inputs` is not a field
+		}
+		context := strings.ToLower(strings.TrimSpace(segments[0]))
+		return &TemplateRef{Context: context, Key: "event." + strings.Join(path, ".")}, true
+	}
 	dot := strings.IndexByte(expr, '.')
 	if dot <= 0 || dot == len(expr)-1 {
 		return nil, false
@@ -282,9 +336,33 @@ func validateRef(ref TemplateRef, scope TemplateScope) error {
 			}
 			return nil
 		}
+		if path, ok := eventFieldName(ref.Key); ok {
+			if !ValidEventField(path) {
+				return fmt.Errorf("${{ %s.%s }} is not a supported event field (supported: %s)",
+					ref.Context, ref.Key, strings.Join(EventFields, ", "))
+			}
+			return nil
+		}
 		if !ValidGitHubField(ref.Key) {
 			return fmt.Errorf("${{ %s.%s }} is not a supported context field (supported: %s)",
 				ref.Context, ref.Key, strings.Join(GitHubFields, ", "))
+		}
+		return nil
+	case "runner":
+		if scope.JobIf {
+			return fmt.Errorf("${{ runner.%s }} is not available in a job-level if: (the runner is chosen after the job is eligible; use a step if:)", ref.Key)
+		}
+		if !ValidRunnerField(ref.Key) {
+			return fmt.Errorf("${{ runner.%s }} is not a supported runner field (supported: %s)",
+				ref.Key, strings.Join(RunnerFields, ", "))
+		}
+		return nil
+	case "vars":
+		if scope.JobIf {
+			return fmt.Errorf("${{ vars.%s }} is not available in a job-level if: (variables are resolved when the job is claimed; use a step if:)", ref.Key)
+		}
+		if !templateIdent(ref.Key) {
+			return fmt.Errorf("${{ vars.%s }} is not a valid variable name", ref.Key)
 		}
 		return nil
 	case "matrix":
@@ -334,6 +412,20 @@ func eventInputName(key string) (string, bool) {
 		return "", false
 	}
 	return key[len(prefix):], true
+}
+
+// eventFieldName reports whether a github-context key is an `event.<path>`
+// reference (not the inputs alias), returning the path.
+func eventFieldName(key string) (string, bool) {
+	const prefix = "event."
+	if len(key) <= len(prefix) || !strings.EqualFold(key[:len(prefix)], prefix) {
+		return "", false
+	}
+	rest := key[len(prefix):]
+	if strings.EqualFold(rest, "inputs") || strings.HasPrefix(strings.ToLower(rest), "inputs.") {
+		return "", false
+	}
+	return rest, true
 }
 
 // ValidateGroupTemplate checks a concurrency group's references against what
@@ -476,6 +568,8 @@ func FillContext(s, context string, vals map[string]string) string {
 // declared is an error, never an empty string (docs/threads.md §3.9).
 type TemplateValues struct {
 	GitHub  map[string]string
+	Runner  map[string]string
+	Vars    map[string]string
 	Matrix  map[string]string
 	Inputs  map[string]string
 	Env     map[string]string
@@ -544,6 +638,10 @@ func lookupValue(ref TemplateRef, vals TemplateValues) (string, bool) {
 		return vals.GitHub[strings.ToLower(ref.Key)], true
 	}
 	switch ref.Context {
+	case "runner":
+		return vals.Runner[strings.ToLower(ref.Key)], true
+	case "vars":
+		return lookupFold(vals.Vars, ref.Key), true
 	case "matrix":
 		return vals.Matrix[ref.Key], true
 	case "inputs":
@@ -552,6 +650,20 @@ func lookupValue(ref TemplateRef, vals TemplateValues) (string, bool) {
 		return vals.Env[ref.Key], true
 	}
 	return "", false
+}
+
+// lookupFold resolves an authored name case-insensitively (variables are
+// referenced in mixed case and stored canonically).
+func lookupFold(values map[string]string, name string) string {
+	if val, ok := values[name]; ok {
+		return val
+	}
+	for key, val := range values {
+		if strings.EqualFold(key, name) {
+			return val
+		}
+	}
+	return ""
 }
 
 // lookupSecret resolves a secret by name, case-insensitively (secret names are

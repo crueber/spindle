@@ -52,17 +52,23 @@ func ScheduleKey(owner, repo string) string {
 	return "repos/" + owner + "/" + repo + "/threads/schedule.json"
 }
 
-// ScheduleWatermark is the persisted last-fired state: one unix second per
-// (workflow path, cron expression) entry.
+// ScheduleWatermark is the persisted last-fired state: one LOCAL wall-clock
+// slot per (workflow path, cron expression, timezone) entry. A slot is the
+// scheduled local minute ("2006-01-02T15:04"), which is what makes the DST
+// fall-back hour fire once: both instants name the same slot, and the second
+// sees it already claimed. A spring-forward gap has no slot at all.
 type ScheduleWatermark struct {
-	// Fired maps "<path>|<cron>" → the unix second of the last fired tick.
-	Fired     map[string]int64 `json:"fired"`
-	UpdatedAt string           `json:"updated_at"`
-	Version   int              `json:"version"`
+	// Fired maps "<path>|<cron>|<timezone>" → the last fired local slot.
+	Fired     map[string]string `json:"fired"`
+	UpdatedAt string            `json:"updated_at"`
+	Version   int               `json:"version"`
 }
 
-// scheduleEntryKey renders one watermark key.
-func scheduleEntryKey(path, cron string) string { return path + "|" + strings.TrimSpace(cron) }
+// scheduleEntryKey renders one watermark key (the timezone is part of it: the
+// same cron under two zones targets two different local minutes).
+func scheduleEntryKey(path, cron, timezone string) string {
+	return path + "|" + strings.TrimSpace(cron) + "|" + strings.TrimSpace(timezone)
+}
 
 // ScheduleSweep is what one pass did (the summary notice).
 type ScheduleSweep struct {
@@ -116,7 +122,8 @@ func (s *Service) SweepSchedule(ctx context.Context, owner, repo string, log Tas
 	type due struct {
 		path string
 		cron string
-		tick int64
+		tz   string
+		slot string
 	}
 	var dues []due
 	seen := map[string]bool{}
@@ -137,13 +144,18 @@ func (s *Service) SweepSchedule(ctx context.Context, owner, repo string, log Tas
 				res.Skipped = append(res.Skipped, f.Path+" ("+perr.Error()+")")
 				continue
 			}
-			key := scheduleEntryKey(f.Path, entry.Cron)
+			loc, lerr := entry.Location()
+			if lerr != nil {
+				res.Skipped = append(res.Skipped, f.Path+" ("+lerr.Error()+")")
+				continue
+			}
+			key := scheduleEntryKey(f.Path, entry.Cron, entry.Timezone)
 			seen[key] = true
-			tick, ok := parsed.Prev(now)
+			tick, ok := parsed.PrevIn(now, loc)
 			if !ok {
 				continue
 			}
-			dues = append(dues, due{path: f.Path, cron: entry.Cron, tick: tick.Unix()})
+			dues = append(dues, due{path: f.Path, cron: entry.Cron, tz: entry.Timezone, slot: parsed.Slot(tick)})
 		}
 	}
 	if len(dues) == 0 {
@@ -163,8 +175,8 @@ func (s *Service) SweepSchedule(ctx context.Context, owner, repo string, log Tas
 		if log != nil {
 			log.Progress("schedules", uint64(i+1), uint64(len(dues)), "entry")
 		}
-		key := scheduleEntryKey(d.path, d.cron)
-		won, cerr := s.claimScheduleTick(ctx, owner, repo, key, d.tick, seen)
+		key := scheduleEntryKey(d.path, d.cron, d.tz)
+		won, cerr := s.claimScheduleTick(ctx, owner, repo, key, d.slot, seen)
 		if cerr != nil {
 			return res, cerr
 		}
@@ -212,22 +224,21 @@ func (s *Service) scheduleBranch(ctx context.Context, repo string) (branch, ref 
 // across instances and restarts. prune is the set of keys the current sweep saw;
 // entries no longer present in any workflow file are dropped from the document
 // so a deleted schedule cannot resurrect (and the object cannot grow forever).
-func (s *Service) claimScheduleTick(ctx context.Context, owner, repo, key string, tick int64, prune map[string]bool) (bool, error) {
+func (s *Service) claimScheduleTick(ctx context.Context, owner, repo, key, slot string, prune map[string]bool) (bool, error) {
 	keyName := ScheduleKey(owner, repo)
 	won := false
 	_, err := s.casUpdate(ctx, keyName, 6, func(cur []byte, _ store.Version) ([]byte, bool, error) {
 		won = false
-		doc := &ScheduleWatermark{Fired: map[string]int64{}}
+		doc := &ScheduleWatermark{Fired: map[string]string{}}
 		if cur != nil {
 			if jerr := json.Unmarshal(cur, doc); jerr != nil {
 				return nil, false, fmt.Errorf("%w: schedule watermark: %v", ErrCorrupt, jerr)
 			}
 		}
 		if doc.Fired == nil {
-			doc.Fired = map[string]int64{}
+			doc.Fired = map[string]string{}
 		}
-		last, ok := doc.Fired[key]
-		if ok && last >= tick {
+		if last, ok := doc.Fired[key]; ok && last == slot {
 			return nil, false, nil // already fired (another instance won)
 		}
 		for k := range doc.Fired {
@@ -238,7 +249,7 @@ func (s *Service) claimScheduleTick(ctx context.Context, owner, repo, key string
 		if len(doc.Fired) >= scheduleKeyLimit {
 			return nil, false, fmt.Errorf("%w: more than %d scheduled workflow entries", ErrUnprocessable, scheduleKeyLimit)
 		}
-		doc.Fired[key] = tick
+		doc.Fired[key] = slot
 		doc.UpdatedAt = s.nowUTC().Format(dateTimeFmt)
 		doc.Version++
 		won = true
@@ -257,7 +268,7 @@ func (s *Service) LoadScheduleWatermark(ctx context.Context, owner, repo string)
 	if err != nil {
 		return nil, err
 	}
-	doc := &ScheduleWatermark{Fired: map[string]int64{}}
+	doc := &ScheduleWatermark{Fired: map[string]string{}}
 	if raw == nil {
 		return doc, nil
 	}
@@ -265,7 +276,7 @@ func (s *Service) LoadScheduleWatermark(ctx context.Context, owner, repo string)
 		return nil, fmt.Errorf("%w: schedule watermark: %v", ErrCorrupt, jerr)
 	}
 	if doc.Fired == nil {
-		doc.Fired = map[string]int64{}
+		doc.Fired = map[string]string{}
 	}
 	return doc, nil
 }

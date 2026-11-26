@@ -29,6 +29,12 @@ type Principal struct {
 	// the workflow's `permissions: contents: write`.
 	JobRepo string
 	JobPush bool
+	// JobPerms is the effective `permissions:` map the attempt token was minted
+	// under (canonical scope → none|read|write). It is the platform-API half of
+	// the token's authority (PAR-112/PAR-113): the identity Resolve maps it to
+	// the minimum repository role its scopes imply, once, at the credential
+	// boundary. Nil for every non-job credential.
+	JobPerms map[string]string
 }
 
 // Anonymous is the unauthenticated principal (name "anonymous", no write, no admin).

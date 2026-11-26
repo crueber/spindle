@@ -26,7 +26,9 @@ import (
 	"github.com/crueber/spindle/internal/config"
 	"github.com/crueber/spindle/internal/git"
 	"github.com/crueber/spindle/internal/identity"
+	"github.com/crueber/spindle/internal/issues"
 	"github.com/crueber/spindle/internal/pulls"
+	"github.com/crueber/spindle/internal/releases"
 	"github.com/crueber/spindle/internal/server"
 	"github.com/crueber/spindle/internal/server/auth"
 	"github.com/crueber/spindle/internal/store"
@@ -66,6 +68,12 @@ func newThreadsService(st store.ObjectStore, ident *identity.Service, checksSvc 
 		// applied at run creation over container.image and services.*.image.
 		svc.ImageAllowPrefixes = cfg.Threads.ImageAllowPrefixes
 		svc.ImageRequireDigest = cfg.Threads.ImageRequireDigest
+		// Operator knobs (PAR-179): the artifact window (separate from run
+		// retention), keep-forever, the requeue ceiling and the base job lease.
+		svc.ArtifactRetention = time.Duration(cfg.Threads.ArtifactRetention)
+		svc.KeepForever = cfg.Threads.KeepForever
+		svc.MaxQueueAttempts = cfg.Threads.MaxQueueAttempts
+		svc.JobLease = time.Duration(cfg.Threads.JobLease)
 	}
 	// Protocol keys (15 §5.3): server.secrets_key wins over the session secret;
 	// without either, attempt tokens are process-local and repository secrets
@@ -90,6 +98,29 @@ func newThreadsService(st store.ObjectStore, ident *identity.Service, checksSvc 
 		svc.Checks = threadsCheckSink{svc: checksSvc}
 	}
 	return svc, &threads.Handler{Svc: svc}
+}
+
+// threadsTeamRoster adapts the Threads TeamRoster seam onto identity's team
+// records (PAR-131 environment team reviewers). A missing team resolves to no
+// members, which the Threads validator refuses by name (fail closed) rather
+// than holding a deployment nobody can release.
+type threadsTeamRoster struct {
+	ident *identity.Service
+}
+
+// TeamMembers returns one team's member principals.
+func (t threadsTeamRoster) TeamMembers(ctx context.Context, org, team string) ([]string, error) {
+	if t.ident == nil {
+		return nil, fmt.Errorf("threads: team directory not wired")
+	}
+	tm, _, err := t.ident.GetTeam(ctx, org, team)
+	if err != nil {
+		return nil, err
+	}
+	if tm == nil {
+		return nil, nil
+	}
+	return append([]string{}, tm.Members...), nil
 }
 
 // threadsApprovals adapts the Threads ApprovalPolicy seam onto pulls'
@@ -219,7 +250,13 @@ func threadsOnPushOf(c *collabWiring) func(id git.RepoId, refs []server.PushedRe
 			if !ok {
 				continue // notes, pull refs or a delete: no run
 			}
-			opts := threads.CreateOpts{RefName: name, RefKind: kind, Ref: ref.Ref, Actor: "push"}
+			opts := threads.CreateOpts{
+				RefName: name, RefKind: kind, Ref: ref.Ref, Actor: "push",
+				// The pre-image is what a `paths:` filter diffs against; a new
+				// ref leaves it empty (the pushed commit's own change set).
+				BaseSHA:      ref.Old,
+				EventPayload: threads.PushEventPayload(id.String(), ref.Ref, ref.Old, ref.New, "push"),
+			}
 			if kind == workflow.RefBranch {
 				opts.Branch = name // a tag run has no branch; its tag is the RefName
 			}
@@ -242,15 +279,143 @@ func threadsPullEventOf(c *collabWiring) pulls.PullEventSink {
 		// ev.BaseRef arrives as the PR's base ref ("refs/heads/main"); Branch is
 		// the plain name every trigger filter and the base-branch resolution
 		// expect (a fork run resolves refs/heads/<BaseBranch>). Action is the
-		// lifecycle edge (opened/synchronize/reopened) the `types` filter
-		// reads; pulls never emits close, so a `types: [closed]` workflow is a
-		// parse error rather than a dead trigger.
+		// lifecycle edge the `types` filter reads; BaseSHA is the merge-base
+		// side of the changed-path filter.
 		base := threadsBranchName(ev.BaseRef)
 		threadsRun(svc, ev.Repo, ev.HeadSHA, threads.EventPullReq, threads.CreateOpts{
 			Branch: base, Action: ev.Action, Ref: fmt.Sprintf("refs/pull/%d/head", ev.Num),
-			BaseBranch: base, Fork: ev.Fork, Actor: ev.Actor,
+			BaseBranch: base, BaseSHA: ev.BaseSHA, Fork: ev.Fork, Actor: ev.Actor,
+			EventPayload: threads.PullEventPayload(ev.Repo, ev.Action, ev.Num, ev.Title, ev.State,
+				authorOfPull(ev), ev.BaseRef, ev.BaseSHA, ev.HeadRef, ev.HeadSHA, ev.HeadRepo,
+				ev.Draft, ev.Merged, ev.Fork, ev.Actor),
 		})
 	}
+}
+
+// authorOfPull is the sender on a lifecycle event (the PR author is in the
+// payload's pull_request.user in the feature package; the projection here uses
+// the actor for sender, which is what github.event.sender means).
+func authorOfPull(ev pulls.PullEvent) string { return ev.Actor }
+
+// threadsIssueEventOf routes the issues service's trigger edges (PAR-020): an
+// `issues` action, an `issue_comment` created edge, and the pull_request
+// metadata half (labeled/assigned/milestoned) for a PR thread. Every run reads
+// the DEFAULT branch's workflow files (CreateRun owns that rule) and carries
+// the documented payload.
+func threadsIssueEventOf(c *collabWiring) func(ctx context.Context, ev issues.ThreadEvent) {
+	if c == nil || c.threadsSvc == nil {
+		return nil
+	}
+	svc := c.threadsSvc
+	return func(ctx context.Context, ev issues.ThreadEvent) {
+		repo := ev.Repo
+		if ev.Kind == "pr" {
+			info, ok := pullsTriggerInfo(ctx, c, repo, ev.Num)
+			if !ok {
+				return // the PR was deleted between the write and the trigger
+			}
+			base := threadsBranchName(info.BaseRef)
+			threadsRun(svc, repo, info.HeadSHA, threads.EventPullReq, threads.CreateOpts{
+				Action: ev.Action, Branch: base, BaseBranch: base, BaseSHA: info.BaseSHA,
+				Fork: info.Fork, Ref: fmt.Sprintf("refs/pull/%d/head", info.Num), Actor: ev.Actor,
+				EventPayload: threads.PullEventPayload(repo, ev.Action, info.Num, info.Title, info.State,
+					info.Author, info.BaseRef, info.BaseSHA, info.HeadRef, info.HeadSHA, info.HeadRepo,
+					info.Draft, info.Merged, info.Fork, ev.Actor),
+			})
+			return
+		}
+		event := threads.EventIssues
+		payload := threads.IssueEventPayload(repo, ev.Action, ev.Actor, ev.Num, ev.Title, ev.State, ev.Labels)
+		if ev.Kind == "issue_comment" {
+			event = threads.EventIssueComment
+			payload = threads.IssueCommentEventPayload(repo, ev.Action, ev.Actor, ev.CommentBody,
+				ev.Num, ev.Title, ev.State, ev.Labels, ev.CommentActor)
+		}
+		// GitHub's repository-level events read the workflow from the default
+		// branch; CreateRun enforces that for the file, and the run reports the
+		// default branch tip as its commit.
+		commit, branch := defaultBranchTarget(ctx, c, repo)
+		if commit == "" {
+			return
+		}
+		opts := threads.CreateOpts{Actor: ev.Actor, Action: ev.Action, EventPayload: payload}
+		if branch != "" {
+			opts.Branch = branch
+			opts.Ref = "refs/heads/" + branch
+		}
+		threadsRun(svc, repo, commit, event, opts)
+	}
+}
+
+// pullsTriggerInfo reads the PR identifiers for a metadata trigger (two
+// exact-key GETs). A missing PR drops the event (it was deleted mid-write).
+func pullsTriggerInfo(ctx context.Context, c *collabWiring, repo string, num int) (pulls.TriggerInfo, bool) {
+	if c == nil || c.pullsSvc == nil {
+		return pulls.TriggerInfo{}, false
+	}
+	owner, name, ok := strings.Cut(repo, "/")
+	if !ok {
+		return pulls.TriggerInfo{}, false
+	}
+	return c.pullsSvc.PRTriggerInfo(ctx, owner, name, num)
+}
+
+// threadsReleaseEventOf routes the releases service's edges (PAR-017): the
+// workflow comes from the default branch, the run reports the release tag's
+// commit, and the payload carries the tag and asset list.
+func threadsReleaseEventOf(c *collabWiring) releases.ReleaseEventSink {
+	if c == nil || c.threadsSvc == nil {
+		return nil
+	}
+	svc := c.threadsSvc
+	return func(ctx context.Context, ev releases.ReleaseEvent) {
+		assets := make([]threads.ReleaseAsset, 0, len(ev.Assets))
+		for _, a := range ev.Assets {
+			assets = append(assets, threads.ReleaseAsset{Name: a.Name, Size: a.Size})
+		}
+		commit := ev.TagSHA
+		if commit == "" {
+			// A deleted release has no tag object any more; the default branch
+			// is the only commit that still exists, and CreateRun reads the
+			// workflow there regardless.
+			commit = defaultBranchSHA(ctx, c, ev.Repo)
+		}
+		if commit == "" {
+			return
+		}
+		threadsRun(svc, ev.Repo, commit, threads.EventRelease, threads.CreateOpts{
+			Actor: ev.Actor, Action: ev.Action, Ref: "refs/tags/" + ev.Tag, RefName: ev.Tag, Branch: "",
+			EventPayload: threads.ReleaseEventPayload(ev.Repo, ev.Action, ev.Tag, ev.Name,
+				ev.TagSHA, ev.Actor, ev.Draft, ev.Prerelease, assets),
+		})
+	}
+}
+
+// defaultBranchTarget resolves the default branch tip and its short name for a
+// repository-level event.
+func defaultBranchTarget(ctx context.Context, c *collabWiring, repo string) (sha, branch string) {
+	sha = defaultBranchSHA(ctx, c, repo)
+	if sha == "" {
+		return "", ""
+	}
+	if br, ok := c.threadsSvc.Git.(threads.DefaultBranchReader); ok {
+		if name, err := br.DefaultBranch(ctx, repo); err == nil {
+			branch = threadsBranchName(name)
+		}
+	}
+	return sha, branch
+}
+
+// defaultBranchSHA resolves the default branch tip for a release-deleted edge.
+func defaultBranchSHA(ctx context.Context, c *collabWiring, repo string) string {
+	if c == nil || c.threadsSvc == nil || c.threadsSvc.Git == nil {
+		return ""
+	}
+	sha, err := c.threadsSvc.Git.ResolveRef(ctx, repo, "HEAD")
+	if err != nil {
+		return ""
+	}
+	return sha
 }
 
 // threadsBranchName strips a refs/heads/ prefix (the trigger filters and the
@@ -271,13 +436,14 @@ func threadsBranchPublishedOf(c *collabWiring) pulls.BranchPublishedSink {
 		return nil
 	}
 	svc := c.threadsSvc
-	return func(_ context.Context, repo, ref, _, newSHA string) {
+	return func(_ context.Context, repo, ref, oldSHA, newSHA string) {
 		branch, ok := strings.CutPrefix(ref, "refs/heads/")
 		if !ok || branch == "" || isZeroOID(newSHA) {
 			return
 		}
 		threadsRun(svc, repo, newSHA, threads.EventPush, threads.CreateOpts{
-			Branch: branch, Ref: ref, Actor: "merge",
+			Branch: branch, Ref: ref, Actor: "merge", BaseSHA: oldSHA,
+			EventPayload: threads.PushEventPayload(repo, ref, oldSHA, newSHA, "merge"),
 		})
 	}
 }

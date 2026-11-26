@@ -347,8 +347,10 @@ func (s *Server) pushPipeline(ctx context.Context, id git.RepoId, p auth.Princip
 	report := git.Report{UnpackOK: true, Sideband: managedReq.Has("side-band-64k")}
 	landed := false
 	newOf := make(map[string]string, len(managedReq.Commands))
+	oldOf := make(map[string]string, len(managedReq.Commands))
 	for _, c := range managedReq.Commands {
 		newOf[c.Ref] = c.New
+		oldOf[c.Ref] = c.Old
 	}
 	var landedRefs []PushedRef
 	for _, c := range managed {
@@ -360,7 +362,7 @@ func (s *Server) pushPipeline(ctx context.Context, id git.RepoId, p auth.Princip
 		} else {
 			report.Refs = append(report.Refs, git.RefReport{Ref: rr.Name, OK: true})
 			landed = true
-			landedRefs = append(landedRefs, PushedRef{Ref: rr.Name, New: newOf[rr.Name]})
+			landedRefs = append(landedRefs, PushedRef{Ref: rr.Name, Old: oldOf[rr.Name], New: newOf[rr.Name]})
 		}
 	}
 	_, _ = out.Write(report.EncodeReport())

@@ -24,6 +24,9 @@ type fakeEnvThreads struct {
 	secrets map[string][]threads.SecretView
 	calls   []string
 	enabled bool
+	// last is the input of the most recent PutEnvironment (the protection
+	// rules' write path, PAR-131).
+	last threads.EnvironmentInput
 }
 
 func newFakeEnvThreads() *fakeEnvThreads {
@@ -52,7 +55,12 @@ func (f *fakeEnvThreads) ListEnvironments(context.Context, string, auth.Principa
 
 func (f *fakeEnvThreads) PutEnvironment(_ context.Context, _ string, name string, in threads.EnvironmentInput, _ auth.Principal) (*threads.EnvironmentView, error) {
 	f.calls = append(f.calls, "put:"+name+":"+strings.Join(in.RequiredReviewers, ","))
-	return &threads.EnvironmentView{Name: name, RequiredReviewers: in.RequiredReviewers}, nil
+	f.last = in
+	return &threads.EnvironmentView{
+		Name: name, RequiredReviewers: in.RequiredReviewers, TeamReviewers: in.TeamReviewers,
+		WaitTimerSeconds: in.WaitTimerSeconds, PreventSelfReview: in.PreventSelfReview,
+		DeploymentBranches: in.DeploymentBranches,
+	}, nil
 }
 
 func (f *fakeEnvThreads) DeleteEnvironment(_ context.Context, _ string, name string, _ auth.Principal) error {

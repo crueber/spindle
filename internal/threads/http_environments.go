@@ -86,8 +86,14 @@ func (h *Handler) getEnvironment(w http.ResponseWriter, r *http.Request, repo, n
 	writeJSON(w, http.StatusOK, map[string]any{"environment": env, "enabled": h.Svc.SecretsEnabled()})
 }
 
-// putEnvironment accepts {required_reviewers:[…]}; the reviewers are validated
-// against the repository role ladder at save time.
+// putEnvironment accepts the protection rules (PAR-131):
+//
+//	{"required_reviewers":[…], "team_reviewers":["org/team"],
+//	 "wait_timer_seconds":600, "prevent_self_review":true,
+//	 "deployment_branches":["main","release/*"]}
+//
+// The reviewers are validated against the repository role ladder at save time
+// and the limits are named (six reviewers+teams, a 6-hour timer).
 func (h *Handler) putEnvironment(w http.ResponseWriter, r *http.Request, repo, name string) {
 	p, aerr := h.principal(r)
 	if aerr != nil {
@@ -95,7 +101,10 @@ func (h *Handler) putEnvironment(w http.ResponseWriter, r *http.Request, repo, n
 		return
 	}
 	var in EnvironmentInput
-	if !decodeStrict(w, r, 64<<10, map[string]bool{"required_reviewers": true}, &in) {
+	if !decodeStrict(w, r, 64<<10, map[string]bool{
+		"required_reviewers": true, "team_reviewers": true, "wait_timer_seconds": true,
+		"prevent_self_review": true, "deployment_branches": true,
+	}, &in) {
 		return
 	}
 	env, err := h.Svc.PutEnvironment(r.Context(), repo, name, in, p)

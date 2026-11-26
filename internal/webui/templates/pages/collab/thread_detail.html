@@ -40,11 +40,21 @@
     <span class="mono">{{range $i, $e := .Approval.Environments}}{{if $i}}, {{end}}{{$e}}{{end}}</span>: the deployment is held and
     has not executed, and its environment secrets are not resolved.
     {{with .Approval.Reviewers}}Required: <span class="mono">{{range $i, $r := .}}{{if $i}}, {{end}}{{$r}}{{end}}</span>. {{end}}
+    {{with .Approval.Approvals}}Approved so far: <span class="mono">{{range $i, $r := .}}{{if $i}}, {{end}}{{$r}}{{end}}</span>. {{end}}
+    {{with .Approval.WaitingFor}}Still awaiting: <span class="mono">{{range $i, $r := .}}{{if $i}}, {{end}}{{$r}}{{end}}</span>. {{end}}
+    {{with .Approval.WaitUntil}}The wait timer lets it start no earlier than <span class="mono">{{.}}</span>. {{end}}
+    {{if .Approval.PreventSelfReview}}This environment prevents self-review, so {{.Run.Actor}} (who triggered the run) cannot approve it.{{end}}
     {{if .CanApprove}}Approve it to queue it, or deny it to fail the deployment.{{end}}
     {{else}}
     waiting for a maintainer: this is a first-time contributor's fork pull request, so the run is held
     and has not executed. {{if .CanApprove}}Approve it to queue it, or deny it to cancel it.{{end}}
     {{end}}
+  </p>
+  {{else if .Run.PendingGroup}}
+  <p class="warn-line mb-3 text-xs" role="status">
+    waiting for concurrency group <span class="mono">{{.Run.PendingGroup}}</span>: another run of this
+    workflow holds the group, and one run runs at a time. This run starts when the group frees (or a
+    newer run of the group replaces it, which is what <code class="mono">cancel-in-progress: false</code> means).
   </p>
   {{else if .Approval.ApprovedBy}}
   <p class="muted mb-3 text-xs">approved by {{.Approval.ApprovedBy}}{{with .Approval.ApprovedAt}} · {{template "collab_time" .}}{{end}}</p>
@@ -102,7 +112,8 @@
         {{with .Container}}<span class="muted text-xs">· {{.}}</span>{{end}}
         {{with .Deployment}}
         <span class="chip chip-draft" title="deployment environment">env <span class="mono">{{.Environment}}</span></span>
-        <span class="muted text-xs">deployment {{.State}}{{with .ApprovedBy}} · approved by {{.}}{{end}}{{with .DeniedBy}} · denied by {{.}}{{end}}</span>
+        <span class="muted text-xs">deployment {{.State}}{{with .ApprovedBy}} · approved by {{.}}{{end}}{{with .DeniedBy}} · denied by {{.}}{{end}}{{with .WaitUntil}} · wait timer until {{.}}{{end}}</span>
+        {{with .Approvals}}<span class="muted text-xs">· approved by <span class="mono">{{range $i, $a := .}}{{if $i}}, {{end}}{{$a}}{{end}}</span></span>{{else}}{{with .RequiredApprovers}}<span class="muted text-xs">· awaiting <span class="mono">{{range $i, $a := .}}{{if $i}}, {{end}}{{$a}}{{end}}</span></span>{{end}}{{end}}
         {{with .URL}}<a class="link text-xs" href="{{.}}" rel="noopener noreferrer" target="_blank">{{.}}</a>{{end}}
         {{end}}
         {{if .RunnerName}}<span class="muted text-xs">· runner <span class="mono">{{.RunnerName}}</span></span>{{else if .Runner}}<span class="muted text-xs">· runner <span class="mono">{{.Runner}}</span></span>{{end}}
@@ -131,6 +142,25 @@
         </li>
         {{end}}
       </ul>
+      {{end}}
+      {{if .Annotations}}
+      <ul class="divide-y divide-[color:var(--pd-line)] border-t border-[color:var(--pd-line)]" aria-label="Annotations">
+        {{range .Annotations}}
+        <li class="flex flex-wrap items-center gap-2 px-3 py-1.5 text-xs">
+          <span class="chip chip-neutral">{{.Level}}</span>
+          {{with .Title}}<span class="font-medium">{{.}}</span>{{end}}
+          {{if .File}}<code class="mono text-[11px]">{{.File}}{{if .Line}}:{{.Line}}{{if .Col}}:{{.Col}}{{end}}{{end}}</code>{{end}}
+          <span class="min-w-0 flex-1 whitespace-pre-wrap text-[11px]">{{.Message}}</span>
+          {{with .Step}}<span class="muted text-[11px]">· {{.}}</span>{{end}}
+        </li>
+        {{end}}
+      </ul>
+      {{end}}
+      {{with .Summary}}
+      <details class="border-t border-[color:var(--pd-line)] px-3 py-2">
+        <summary class="cursor-pointer text-xs font-medium">step summary</summary>
+        <div class="markdown-body mt-2 text-sm">{{md .}}</div>
+      </details>
       {{end}}
     </li>
     {{end}}

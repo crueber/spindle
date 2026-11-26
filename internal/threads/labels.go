@@ -1,6 +1,7 @@
 package threads
 
 import (
+	"fmt"
 	"sort"
 	"strings"
 )
@@ -62,4 +63,112 @@ func HostedAliasNames() []string {
 	}
 	sort.Strings(names)
 	return names
+}
+
+// Runner label→image mapping (PAR-171, docs/threads.md §8.2).
+//
+// Forgejo's runner config declares a label with the backend that serves it:
+//
+//	labels:
+//	  - ubuntu-latest:docker://node:lts
+//	  - self-hosted
+//
+// Threads keeps the executable half that is in scope — a CONTAINER image — and
+// refuses the two that are not, by name: `lxc://` (LXC backend) and `host`
+// (unisolated host execution) are the D-15 non-goals, so a runner that asks for
+// one is a named configuration error rather than a silent fallback to docker.
+// A third-party `docker://` image is the runner operator's declaration (the
+// same trust class as its `--image` default), and the server honours it by
+// putting the image in the job payload when the workflow named no
+// `container.image` of its own: the workflow's explicit image always wins.
+//
+// The label part is still a normal label — a job's `runs-on` must match it (and
+// the hosted-label expansion of PAR-170 still applies) — so the mapping never
+// widens what a runner is offered.
+
+// RunnerLabelMapping is the parsed declaration: the plain labels, the
+// label→image map, and nothing for the refused backends.
+type RunnerLabelMapping struct {
+	Labels []string
+	Images map[string]string
+}
+
+// ParseRunnerLabels splits Forgejo's `label:backend` spellings. The documented
+// forms are `name:docker://image` (honoured), `name:lxc://template` and `name`
+// (plain label; `host` is the refused host backend). An unrecognized
+// `label:backend` is ErrInvalid naming the entry — never a label silently
+// containing a colon, which could never match a workflow.
+func ParseRunnerLabels(in []string) (RunnerLabelMapping, error) {
+	var out RunnerLabelMapping
+	images := map[string]string{}
+	for _, raw := range in {
+		entry := strings.TrimSpace(raw)
+		if entry == "" {
+			continue
+		}
+		label, backend, hasBackend := strings.Cut(entry, ":")
+		label = strings.ToLower(strings.TrimSpace(label))
+		if !hasBackend {
+			out.Labels = append(out.Labels, label)
+			continue
+		}
+		backend = strings.TrimSpace(backend)
+		switch {
+		case strings.HasPrefix(backend, "docker://"):
+			image := strings.TrimSpace(strings.TrimPrefix(backend, "docker://"))
+			if image == "" || strings.ContainsAny(image, " \t\r\n") {
+				return RunnerLabelMapping{}, fmt.Errorf("%w: label %q has no image after docker://", ErrInvalid, raw)
+			}
+			if label == "" {
+				return RunnerLabelMapping{}, fmt.Errorf("%w: label %q has no label name", ErrInvalid, raw)
+			}
+			out.Labels = append(out.Labels, label)
+			images[label] = image
+		case strings.HasPrefix(backend, "lxc://"):
+			return RunnerLabelMapping{}, fmt.Errorf("%w: label %q asks for the LXC backend, which is a documented non-goal (D-15/PAR-182); declare a docker:// image",
+				ErrInvalid, raw)
+		case backend == "host" || strings.HasPrefix(backend, "host://"):
+			return RunnerLabelMapping{}, fmt.Errorf("%w: label %q asks for unisolated host execution, which is a documented non-goal (D-15/PAR-182); declare a docker:// image",
+				ErrInvalid, raw)
+		default:
+			return RunnerLabelMapping{}, fmt.Errorf("%w: label %q names backend %q; the documented forms are name:docker://image, name:lxc://template (refused) and a plain label",
+				ErrInvalid, raw, backend)
+		}
+	}
+	if len(images) == 0 {
+		images = nil
+	}
+	out.Images = images
+	out.Labels = normalizeLabels(out.Labels)
+	if len(out.Labels) == 0 {
+		out.Labels = []string{"self-hosted"}
+	}
+	return out, nil
+}
+
+// runnerImageFor returns the image the runner's label mapping assigns to one
+// job, using the job's AUTHORED runs-on labels in order (the first mapped label
+// wins, so the declaration order in `runs-on` is the tie-break).
+func runnerImageFor(images map[string]string, runsOn []string) string {
+	for _, label := range runsOn {
+		if image, ok := images[strings.ToLower(strings.TrimSpace(label))]; ok {
+			return image
+		}
+	}
+	return ""
+}
+
+// jobRunsOn is a job's authored `runs-on` labels (the spec's list, falling back
+// to the display string) — the spelling a runner's label mapping is keyed on.
+func jobRunsOn(job *Job) []string {
+	if job == nil {
+		return nil
+	}
+	if job.Spec != nil && len(job.Spec.RunsOn) > 0 {
+		return job.Spec.RunsOn
+	}
+	if strings.TrimSpace(job.RunsOn) != "" {
+		return strings.Split(job.RunsOn, ",")
+	}
+	return nil
 }

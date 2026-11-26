@@ -4,6 +4,8 @@ import (
 	"errors"
 	"strings"
 	"testing"
+
+	"github.com/crueber/spindle/internal/server/auth"
 )
 
 // Report flow (§2 steps 1–4): validate → Create-or-CAS → index → SSE +
@@ -60,6 +62,18 @@ func TestReportAuth(t *testing.T) {
 		_, err := e.svc.ReportStatus(ctx(), "o", "r", sha, reader(), "", ReportInput{Context: "ci", State: StateSuccess})
 		if !errors.Is(err, ErrForbidden) {
 			t.Fatalf("err = %v", err)
+		}
+	})
+	t.Run("job token 403", func(t *testing.T) {
+		// PAR-112: `checks`/`statuses` are refused scopes, so a job token's
+		// repository role must not let it forge a check over HTTP.
+		e := newTestEnv()
+		e.roles.Roles["sam@example.com"] = "write"
+		e.knowSHA(sha)
+		job := auth.Principal{Name: "ci:r1", JobRepo: "o/r", JobPerms: map[string]string{"contents": "write"}}
+		_, err := e.svc.ReportStatus(ctx(), "o", "r", sha, job, "", ReportInput{Context: "ci", State: StateSuccess})
+		if !errors.Is(err, ErrForbidden) {
+			t.Fatalf("job token status = %v, want ErrForbidden", err)
 		}
 	})
 	t.Run("unknown sha 404", func(t *testing.T) {

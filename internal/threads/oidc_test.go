@@ -309,19 +309,28 @@ func TestOIDCExchangeClaimsAndSignature(t *testing.T) {
 		"repository":       "o/r",
 		"repository_owner": "o",
 		"ref":              "refs/heads/main",
+		"ref_type":         "branch",
+		"ref_protected":    false,
 		"sha":              testSHA,
 		"workflow":         "OIDC",
 		"job":              rec.Key,
 		"run_id":           run.ID,
 		"event_name":       "push",
+		// PAR-120 additions: the claim set is pinned, and the environment
+		// claim is absent on a job that names no environment.
+		"job_workflow_ref":   "o/r/.spindle/workflows/ci.yml@refs/heads/main",
+		"runner_environment": "self-hosted",
 	}
 	for k, v := range want {
 		if claims[k] != v {
 			t.Fatalf("claim %s = %#v, want %#v (all: %+v)", k, claims[k], v, claims)
 		}
 	}
-	if got := len(claims); got != 16 {
-		t.Fatalf("claim count = %d, want the exact 16-claim set: %+v", got, claims)
+	if _, found := claims["environment"]; found {
+		t.Fatalf("environment claim present on a job without an environment: %+v", claims)
+	}
+	if got := len(claims); got != 20 {
+		t.Fatalf("claim count = %d, want the exact 20-claim set: %+v", got, claims)
 	}
 	exp, _ := claims["exp"].(float64)
 	iat, _ := claims["iat"].(float64)
@@ -618,7 +627,11 @@ func TestOIDCExchangeRequiresStore(t *testing.T) {
 	}
 }
 
-func TestOIDCSameRepoPullRequestUsesBaseRef(t *testing.T) {
+// TestOIDCSameRepoPullRequestUsesPullRequestSubject pins the PR subject
+// (PAR-120): `repo:<o>/<r>:pull_request` — a provider can scope a policy to PR
+// runs without trusting the PR head's ref — while the `ref`/`sha` claims stay
+// the base branch the run was built against (matching GITHUB_REF).
+func TestOIDCSameRepoPullRequestUsesPullRequestSubject(t *testing.T) {
 	e, _ := oidcEnv(t, oidcWorkflow)
 	runs, err := e.svc.CreateRun(ctx(), "o/r", testSHA, EventPullReq, CreateOpts{
 		Branch: "main", Action: "opened", Ref: "refs/pull/7/head", BaseBranch: "main", Actor: "writer",
@@ -631,8 +644,8 @@ func TestOIDCSameRepoPullRequestUsesBaseRef(t *testing.T) {
 		t.Fatalf("same-repo PR payload = trusted %v, id-token %v", job.Trusted, job.IDToken)
 	}
 	_, _, claims := exchangeOK(t, e, job, "aud")
-	if claims["ref"] != "refs/heads/main" || claims["sub"] != "repo:o/r:ref:refs/heads/main" {
-		t.Fatalf("PR ref = %v / %v, want the base branch", claims["ref"], claims["sub"])
+	if claims["ref"] != "refs/heads/main" || claims["sub"] != "repo:o/r:pull_request" {
+		t.Fatalf("PR ref = %v / %v, want the base branch ref and the pull_request subject", claims["ref"], claims["sub"])
 	}
 	if claims["event_name"] != "pull_request" {
 		t.Fatalf("event_name = %v", claims["event_name"])
@@ -647,12 +660,10 @@ func TestOIDCRetentionDropsRequestRecords(t *testing.T) {
 	if raw, _, err := e.svc.getJSON(ctx(), key); err != nil || raw == nil {
 		t.Fatalf("request record missing before delete: %v", err)
 	}
-	jobRec, _, err := e.svc.loadJobAndRun(ctx(), "o", "r", run.ID, payload.JobID)
-	if err != nil || jobRec == nil {
-		t.Fatalf("load job: %v", err)
-	}
-	if _, err := e.svc.deleteJob(ctx(), "o", "r", run.ID, jobRec); err != nil {
-		t.Fatalf("deleteJob: %v", err)
+	// The retention pass reclaims the whole run prefix, id-token request
+	// records included (one LIST, not a per-job family walk).
+	if _, err := e.svc.deleteRun(ctx(), "o", "r", run.ID); err != nil {
+		t.Fatalf("deleteRun: %v", err)
 	}
 	if raw, _, err := e.svc.getJSON(ctx(), key); err != nil || raw != nil {
 		t.Fatalf("request record survived retention: %s, %v", raw, err)

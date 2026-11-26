@@ -134,6 +134,7 @@ func New(cfg Config) (*Runner, error) {
 			WorkspaceDir: cfg.WorkspaceDir,
 			Images:       images,
 			ServerURL:    cfg.ServerOrigin,
+			RunnerName:   cfg.Name,
 			Logger:       cfg.Logger,
 			Artifacts:    client,
 		}
@@ -329,6 +330,7 @@ func (r *Runner) runJob(ctx context.Context, job *threads.FetchResult) {
 	defer doneCancel()
 	view, cerr := r.client.Complete(doneCtx, start.Token, job.JobRef, job.Attempt, threads.CompleteInput{
 		Conclusion: conclusion, Steps: res.Steps, Outputs: res.Outputs,
+		Annotations: res.Annotations, Summary: res.Summary,
 	})
 	switch {
 	case cerr == nil:

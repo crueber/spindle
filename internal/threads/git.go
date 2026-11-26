@@ -63,6 +63,73 @@ func (g *SubprocessGit) ListWorkflowFiles(ctx context.Context, repo, commit stri
 	return paths, nil
 }
 
+// DiffReader is the optional GitReader extension the path filters use. It is a
+// separate interface so every test fake that predates path filtering keeps
+// compiling; a reader without it cannot evaluate a path-filtered trigger and
+// such a trigger fails closed (never fires).
+type DiffReader interface {
+	// DiffNames returns the repository-relative paths changed between two
+	// commits. An empty from lists the files a root/new commit introduces.
+	// mergeBase compares from...to (the PR rule: the merge base).
+	DiffNames(ctx context.Context, repo, from, to string, mergeBase bool) ([]string, error)
+}
+
+// DiffNames runs one name-only diff (PAR-012). The list is capped at the same
+// bound as a workflow read; a truncated list is an error, never a partial
+// filter decision.
+func (g *SubprocessGit) DiffNames(ctx context.Context, repo, from, to string, mergeBase bool) ([]string, error) {
+	to = strings.ToLower(strings.TrimSpace(to))
+	if _, err := normalizeSHA(to); err != nil {
+		return nil, err
+	}
+	from = strings.ToLower(strings.TrimSpace(from))
+	var argv []string
+	switch {
+	case mergeBase:
+		if _, err := normalizeSHA(from); err != nil {
+			return nil, fmt.Errorf("%w: a merge-base diff needs a full base commit", ErrInvalid)
+		}
+		argv = []string{"diff", "--name-only", "-z", from + "..." + to}
+	case from != "" && !zeroOID(from):
+		if _, err := normalizeSHA(from); err != nil {
+			return nil, err
+		}
+		argv = []string{"diff", "--name-only", "-z", from, to}
+	default:
+		// A new ref has no pre-image; diff-tree lists the commit's own change
+		// set (all files for a root commit).
+		argv = []string{"diff-tree", "--root", "--no-commit-id", "--name-only", "-r", "-z", to}
+	}
+	out, truncated, err := g.run(ctx, repo, argv)
+	if err != nil {
+		return nil, notFoundIfExit(err)
+	}
+	if truncated {
+		return nil, fmt.Errorf("%w: the changed-file list at %s is larger than %d bytes", ErrUnprocessable, to, maxWorkflowBytes)
+	}
+	raw := strings.Split(strings.TrimRight(out, "\x00"), "\x00")
+	paths := make([]string, 0, len(raw))
+	for _, p := range raw {
+		if p != "" {
+			paths = append(paths, p)
+		}
+	}
+	return paths, nil
+}
+
+// zeroOID reports git's all-zero id (a ref create/delete pre-image).
+func zeroOID(sha string) bool {
+	if sha == "" {
+		return true
+	}
+	for _, c := range sha {
+		if c != '0' {
+			return false
+		}
+	}
+	return true
+}
+
 // ReadFile runs `git show <commit>:<path>`.
 func (g *SubprocessGit) ReadFile(ctx context.Context, repo, commit, p string) ([]byte, error) {
 	if _, err := normalizeSHA(commit); err != nil {

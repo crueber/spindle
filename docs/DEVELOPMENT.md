@@ -257,6 +257,24 @@ set; it does not replace looking at the page you changed.
 
 ## CI and publishing
 
+### The CI toolchain is a prepped image — no apt in a job
+
+The merge gate runs in `github.com/crueber/spindle-ci@sha256:…`, built from
+[`docker/ci.Dockerfile`](../docker/ci.Dockerfile): Debian sid plus git (2.5x), node, npm, gcc,
+`openssh-client`, chromium and the DejaVu fonts, installed once at image build. The gate does not
+install packages. `apt-get` in a job step is a regression: it hits the Debian mirrors on every push,
+pays the download on every run, and makes a green gate depend on a mirror being reachable.
+
+When a pin moves, rebuild and re-pin the digest:
+
+```sh
+docker build -f docker/ci.Dockerfile -t github.com/crueber/spindle-ci:sid-$(date +%Y%m%d) .
+docker push ghcr.io/crueber/spindle-ci:sid-$(date +%Y%m%d)
+docker inspect --format='{{index .RepoDigests 0}}' github.com/crueber/spindle-ci:sid-$(date +%Y%m%d)
+# copy the @sha256:… into .forgejo/workflows/ci.yml (container.image)
+```
+
+
 CI runs on Forgejo Actions (`.forgejo/workflows/ci.yml`) on every pull request, every push to `main` and
 every `v*` tag. Each job builds the web itself — the runner rejects the artifact actions, and the Go build
 embeds `web/dist` anyway.

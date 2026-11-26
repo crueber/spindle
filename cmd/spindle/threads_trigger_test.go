@@ -8,7 +8,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/crueber/spindle/internal/issues"
 	"github.com/crueber/spindle/internal/pulls"
+	"github.com/crueber/spindle/internal/releases"
 	"github.com/crueber/spindle/internal/server/auth"
 	"github.com/crueber/spindle/internal/store"
 	"github.com/crueber/spindle/internal/threads"
@@ -205,5 +207,108 @@ func TestThreadTriggerSinksNilWithoutWiring(t *testing.T) {
 	}
 	if threadsPullEventOf(&collabWiring{}) != nil || threadsBranchPublishedOf(&collabWiring{}) != nil {
 		t.Fatal("a wiring without a threads service must yield nil trigger sinks")
+	}
+}
+
+// releaseWorkflow is the release trigger's file (read from the default branch).
+const releaseWorkflow = `name: Release
+on:
+  release:
+    types: [published]
+jobs:
+  announce:
+    runs-on: linux
+    steps:
+      - run: echo "${{ github.event.release.tag_name }}"
+`
+
+// issueWorkflow fires on issues and issue_comment.
+const issueWorkflow = `name: Issues
+on: [issues, issue_comment]
+jobs:
+  triage:
+    runs-on: linux
+    steps:
+      - run: echo "${{ github.event.action }}"
+`
+
+// TestReleaseSinkCreatesRun pins PAR-017 through the real composition adapter:
+// a release event creates a run from the default branch file and carries the
+// tag plus the asset list in the payload.
+func TestReleaseSinkCreatesRun(t *testing.T) {
+	defaultSHA := strings.Repeat("d", 40)
+	tagSHA := strings.Repeat("e", 40)
+	g := newTriggerGit()
+	g.refs["HEAD"] = defaultSHA
+	g.add(defaultSHA, ".spindle/workflows/release.yml", releaseWorkflow)
+	svc := triggerService(t, g)
+	sink := threadsReleaseEventOf(&collabWiring{threadsSvc: svc})
+	if sink == nil {
+		t.Fatal("nil release sink with a service wired")
+	}
+	sink(context.Background(), releases.ReleaseEvent{
+		Repo: "o/r", Action: "published", Tag: "v1.2.3", Name: "One", TagSHA: tagSHA,
+		Actor: "ada", Assets: []releases.ReleaseAssetRow{{Name: "bin.tgz", Size: 12}},
+	})
+	runs := awaitRuns(t, svc, 1)
+	run := runs[0]
+	if run.Event != threads.EventRelease || run.Commit != tagSHA || run.WorkflowCommit != defaultSHA {
+		t.Fatalf("release run = %+v", run)
+	}
+	fields := threads.EventFieldsOf(run.EventPayload)
+	if fields["event.release.tag_name"] != "v1.2.3" || fields["event.action"] != "published" {
+		t.Fatalf("payload fields = %+v", fields)
+	}
+	if got := fields["event.release.assets"]; got != "bin.tgz" {
+		t.Fatalf("assets projection = %q", got)
+	}
+}
+
+// TestIssueSinksCreateRuns pins PAR-020 through composition: an issue action
+// and an issue comment each create a run from the default branch file with the
+// documented payload.
+func TestIssueSinksCreateRuns(t *testing.T) {
+	defaultSHA := strings.Repeat("f", 40)
+	g := newTriggerGit()
+	g.refs["HEAD"] = defaultSHA
+	g.add(defaultSHA, ".spindle/workflows/issues.yml", issueWorkflow)
+	svc := triggerService(t, g)
+	sink := threadsIssueEventOf(&collabWiring{threadsSvc: svc})
+	if sink == nil {
+		t.Fatal("nil issue sink with a service wired")
+	}
+	sink(context.Background(), issues.ThreadEvent{
+		Repo: "o/r", Kind: "issue", Action: "opened", Num: 5, Actor: "ada",
+		Title: "It broke", State: "open", Author: "ada", Labels: []string{"bug"},
+	})
+	runs := awaitRuns(t, svc, 1)
+	if runs[0].Event != threads.EventIssues || runs[0].Commit != defaultSHA {
+		t.Fatalf("issue run = %+v", runs[0])
+	}
+	if got := threads.EventFieldsOf(runs[0].EventPayload)["event.issue.number"]; got != "5" {
+		t.Fatalf("issue payload number = %q", got)
+	}
+	sink(context.Background(), issues.ThreadEvent{
+		Repo: "o/r", Kind: "issue_comment", Action: "created", Num: 5, Actor: "bob",
+		Title: "It broke", State: "open", Author: "ada",
+		CommentBody: "me too", CommentActor: "bob",
+	})
+	deadline := time.Now().Add(3 * time.Second)
+	for {
+		page, err := svc.ListRuns(context.Background(), "o/r", auth.Principal{Name: "reader"}, "", 50)
+		if err == nil {
+			for _, run := range page.Runs {
+				if run.Event == threads.EventIssueComment {
+					if got := threads.EventFieldsOf(run.EventPayload)["event.comment.body"]; got != "me too" {
+						t.Fatalf("comment payload = %q", got)
+					}
+					return
+				}
+			}
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("no issue_comment run: %v", err)
+		}
+		time.Sleep(5 * time.Millisecond)
 	}
 }

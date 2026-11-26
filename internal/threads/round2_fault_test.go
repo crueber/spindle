@@ -209,7 +209,7 @@ func TestDropQueueEntriesEdges(t *testing.T) {
 		t.Fatal(err)
 	}
 	res := &GCResult{}
-	e.svc.dropQueueEntries(ctx(), "o", "r", map[string]bool{"gone": true}, res)
+	e.svc.dropQueueEntries(ctx(), "o", "r", map[string]bool{"gone": true}, true, res)
 	if res.QueueDeleted != 0 {
 		t.Fatalf("corrupt entry counted: %+v", res)
 	}
@@ -217,7 +217,7 @@ func TestDropQueueEntriesEdges(t *testing.T) {
 	fs := newFaultStore()
 	e.svc.Store = fs
 	fs.fail("list", 0)
-	e.svc.dropQueueEntries(ctx(), "o", "r", map[string]bool{"gone": true}, res)
+	e.svc.dropQueueEntries(ctx(), "o", "r", map[string]bool{"gone": true}, true, res)
 }
 
 // TestDeleteDeadRunnersEdges pins the tolerant paths of the runner sweep.
@@ -228,12 +228,12 @@ func TestDeleteDeadRunnersEdges(t *testing.T) {
 		t.Fatal(err)
 	}
 	res := &GCResult{}
-	e.svc.deleteDeadRunners(ctx(), time.Now().Add(-time.Hour), res)
+	e.svc.deleteDeadRunners(ctx(), time.Now().Add(-time.Hour), true, res)
 	if res.RunnersDeleted != 0 {
 		t.Fatalf("corrupt runner counted: %+v", res)
 	}
 	// A cancelled context stops the loop.
 	cctx, cancel := context.WithCancel(ctx())
 	cancel()
-	e.svc.deleteDeadRunners(cctx, time.Now().Add(-time.Hour), res)
+	e.svc.deleteDeadRunners(cctx, time.Now().Add(-time.Hour), true, res)
 }

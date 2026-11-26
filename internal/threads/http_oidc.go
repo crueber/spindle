@@ -67,8 +67,9 @@ func (h *Handler) serveDiscovery(w http.ResponseWriter, r *http.Request) {
 		ScopesSupported:                  []string{"openid"},
 		ClaimsSupported: []string{
 			"iss", "sub", "aud", "exp", "iat", "nbf", "jti", "repository",
-			"repository_owner", "ref", "sha", "workflow", "job", "run_id",
-			"run_attempt", "event_name",
+			"repository_owner", "ref", "ref_type", "ref_protected", "sha",
+			"workflow", "job_workflow_ref", "job", "run_id", "run_attempt",
+			"event_name", "runner_environment", "environment",
 		},
 	}
 	// Discovery and JWKS are cacheable: keys rotate at most every 90 days, and
@@ -103,18 +104,26 @@ func (h *Handler) exchangeIDToken(w http.ResponseWriter, r *http.Request, ref st
 		writePlain(w, http.StatusUnauthorized, "id-token takes the job's request token (SPINDLE_ID_TOKEN_REQUEST_TOKEN), not the job token")
 		return
 	}
+	// The audience is accepted in the body GitHub clients send and in the
+	// `?audience=` query GitHub's request URL uses (PAR-120); both spellings
+	// are validated identically by ExchangeIDToken. A body is optional when the
+	// query names the audience.
 	var in struct {
 		Audience string `json:"audience"`
 	}
-	if !decodeStrict(w, r, 4<<10, map[string]bool{"audience": true}, &in) {
-		return
+	aud := strings.TrimSpace(r.URL.Query().Get("audience"))
+	if aud == "" {
+		if !decodeStrict(w, r, 4<<10, map[string]bool{"audience": true}, &in) {
+			return
+		}
+		aud = in.Audience
 	}
 	iss := h.issuerBase(r)
 	if iss == "" {
 		writePlain(w, http.StatusServiceUnavailable, "no public origin configured for the OIDC issuer")
 		return
 	}
-	token, err := h.Svc.ExchangeIDToken(r.Context(), ref, attempt, bearer, in.Audience, iss)
+	token, err := h.Svc.ExchangeIDToken(r.Context(), ref, attempt, bearer, aud, iss)
 	if err != nil {
 		writeErr(w, err)
 		return

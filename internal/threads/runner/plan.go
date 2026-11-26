@@ -6,6 +6,7 @@ import (
 	"fmt"
 	neturl "net/url"
 	"regexp"
+	"runtime"
 	"sort"
 	"strconv"
 	"strings"
@@ -206,6 +207,8 @@ type PlanInput struct {
 	// server.public_url / request-derived base wins because it is the address job
 	// containers can reach — PAR-111).
 	ServerURL string
+	// RunnerName is the registered runner's name (`runner.name`).
+	RunnerName string
 	// Caps is the server's artifact cap advertisement (ExecInput.Caps).
 	Caps threads.ArtifactCaps
 }
@@ -274,9 +277,18 @@ type Plan struct {
 	// GitHub is the resolved `github.*` context of this job (docs/threads.md
 	// §3.6): the runner built-ins, captured BEFORE any authored `env:` overlay
 	// so a workflow that sets GITHUB_SHA in `env:` cannot change what
-	// `${{ github.sha }}` means, plus the run's actor. It is the one source of
-	// the `github.<field>` substitution and of a step `if:` reading it.
+	// `${{ github.sha }}` means, plus the run's actor and the documented
+	// `github.event.*` projection. It is the one source of the
+	// `github.<field>` substitution and of a step `if:` reading it.
 	GitHub map[string]string
+	// Vars is the resolved `vars.*` context (repository variables override
+	// organization variables). Values are masked like secrets.
+	Vars map[string]string
+	// Runner is the resolved `runner.*` context (PAR-034).
+	Runner map[string]string
+	// EventJSON is the bounded event payload written verbatim to
+	// $GITHUB_EVENT_PATH before the first step.
+	EventJSON []byte
 	// Needs is the folded output map of the job's `needs:` dependencies (the
 	// server materializes it at claim time). Step fields read it as
 	// `${{ needs.<job>.outputs.<name> }}`.
@@ -348,6 +360,14 @@ type StepPlan struct {
 	// ($SPINDLE_OUTPUT, aliased as $GITHUB_OUTPUT). Only a step with an id is
 	// collected (docs/threads.md §3.9).
 	OutputPath string
+	// SummaryPath is the in-container file this step may write its step
+	// summary to ($GITHUB_STEP_SUMMARY, PAR-092). It is collected after every
+	// step, capped per step (docs/threads.md §3.9a).
+	SummaryPath string
+	// ScriptFile is the in-container script path for a CUSTOM `shell:` command
+	// (one containing `{0}`). Empty for a named shell, whose script travels on
+	// the interpreter's command line (PAR-079).
+	ScriptFile string
 	// EnvFile/PathFile are this step's command files ($GITHUB_ENV and
 	// $GITHUB_PATH, with the Forgejo alias names). Their effects reach LATER
 	// steps of the same job only (docs/threads.md §3.10). Both are empty for a
@@ -476,6 +496,33 @@ func BuildPlan(in PlanInput) (*Plan, error) {
 		serverBase = canonicalServerURL(in.ServerURL)
 	}
 	buildEnv := builtinEnv(job, ws, serverBase, matrix)
+	runnerName := strings.TrimSpace(in.RunnerName)
+	if runnerName == "" {
+		runnerName = "spindle-runner"
+	}
+	// Runner context and the event file (PAR-033/PAR-034). The path variables
+	// are set before the container exists, so every step (and the shell that
+	// runs it) sees the same file.
+	for k, v := range map[string]string{
+		"RUNNER_NAME":                runnerName,
+		"RUNNER_OS":                  "Linux",
+		"RUNNER_ARCH":                runnerContext(buildEnv, runnerName)["arch"],
+		"RUNNER_TEMP":                RunnerTemp,
+		"RUNNER_TOOL_CACHE":          RunnerToolCache,
+		"RUNNER_ENVIRONMENT":         "self-hosted",
+		"RUNNER_DEBUG":               "0",
+		"GITHUB_EVENT_PATH":          EventPath,
+		"FORGEJO_EVENT_PATH":         EventPath,
+		"SPINDLE_EVENT_PATH":         EventPath,
+		"SPINDLE_RUNNER_NAME":        runnerName,
+		"SPINDLE_RUNNER_OS":          "Linux",
+		"SPINDLE_RUNNER_ARCH":        runnerContext(buildEnv, runnerName)["arch"],
+		"SPINDLE_RUNNER_TEMP":        RunnerTemp,
+		"SPINDLE_RUNNER_TOOL_CACHE":  RunnerToolCache,
+		"SPINDLE_RUNNER_ENVIRONMENT": "self-hosted",
+	} {
+		buildEnv[k] = v
+	}
 	// The `github.*` context is captured from the runner's own built-ins BEFORE
 	// an authored `env:` overlay: the context is the run's identity, not a
 	// variable a workflow may redefine (docs/threads.md §3.6).
@@ -532,6 +579,15 @@ func BuildPlan(in PlanInput) (*Plan, error) {
 		}
 	}
 
+	eventFields := threads.EventFieldsOf(job.EventPayload)
+	for k, v := range eventFields {
+		github[k] = v
+	}
+	eventJSON, eerr := threads.EncodeEventPayload(job.EventPayload)
+	if eerr != nil {
+		return nil, eerr
+	}
+	runnerCtx := runnerContext(buildEnv, runnerName)
 	p := &Plan{
 		JobRef: job.JobRef, Attempt: job.Attempt,
 		Names: names, Workspace: ws, Image: image, RequestedImage: requestedImage,
@@ -541,6 +597,7 @@ func BuildPlan(in PlanInput) (*Plan, error) {
 		JobToken:            in.AttemptToken,
 		IDTokenRequestToken: idTokenRequestToken,
 		Matrix:              matrix, Inputs: inputs, Env: jobEnv, GitHub: github,
+		Vars: job.Vars, Runner: runnerCtx, EventJSON: eventJSON,
 		Needs:        job.NeedsOutputs,
 		ArtifactCaps: in.Caps,
 		Actions:      spec.Actions,
@@ -757,6 +814,44 @@ func builtinEnv(job *threads.FetchResult, ws, serverURL string, matrix map[strin
 	}
 	return env
 }
+
+// EventPath is where every job writes its event JSON. It lives in the
+// container's /tmp (not the workspace), so a `git clean` cannot remove it.
+const EventPath = "/tmp/spindle-event.json"
+
+// runnerContext builds the `runner.*` context (PAR-034) from the runner's own
+// identity and the fixed Linux/arch of a job container.
+func runnerContext(env map[string]string, name string) map[string]string {
+	osName := "Linux"
+	arch := runtime.GOARCH
+	switch arch {
+	case "amd64":
+		arch = "X64"
+	case "arm64":
+		arch = "ARM64"
+	case "386":
+		arch = "X86"
+	case "arm":
+		arch = "ARM"
+	}
+	return map[string]string{
+		"os":          osName,
+		"arch":        arch,
+		"name":        name,
+		"temp":        RunnerTemp,
+		"tool_cache":  RunnerToolCache,
+		"environment": "self-hosted",
+		"debug":       env["RUNNER_DEBUG"],
+	}
+}
+
+// RunnerTemp / RunnerToolCache are the in-container directories a job may
+// write to and cache tools in; setup creates both (mode 0777, so a job user
+// without root can write).
+const (
+	RunnerTemp      = "/tmp/spindle-temp"
+	RunnerToolCache = "/tmp/spindle-tool-cache"
+)
 
 // canonicalServerURL normalises a configured spindle origin: an absolute
 // http(s) URL with no trailing slash. Anything else is "" (the variables are
@@ -1243,6 +1338,7 @@ func stepPlan(p *Plan, index int, st threads.StepSpec, ctx expandCtx, next *int)
 	sp.OutputIndex = *next
 	*next++
 	sp.OutputPath = outputFilePath(sp.OutputIndex)
+	sp.SummaryPath = summaryFilePath(sp.OutputIndex)
 	sp.EnvFile, sp.PathFile = commandFilePaths(sp.OutputIndex)
 	if st.TimeoutMinutes > 0 {
 		sp.Timeout = time.Duration(st.TimeoutMinutes) * time.Minute
@@ -1420,6 +1516,14 @@ func resolveStep(p *Plan, sp StepPlan, outputs map[string]map[string]string, str
 		env[OutputEnvVar] = sp.OutputPath
 		env[OutputEnvAlias] = sp.OutputPath
 	}
+	// The step summary file (PAR-092): every repository-code step may write
+	// markdown here; the runner collects it after the step and joins it into the
+	// job summary. A docker:// action gets none — its image is third-party code
+	// and the job summary is rendered on the job page.
+	if sp.SummaryPath != "" && !isDocker && sp.Composite == nil {
+		env[SummaryEnvVar] = sp.SummaryPath
+		env[SummaryEnvAlias] = sp.SummaryPath
+	}
 	// The command files are pointed at a per-step path the same way. A docker://
 	// action has none (its image never receives the job's environment layer, and
 	// a value written into a third-party image would have to be trusted to come
@@ -1452,11 +1556,15 @@ func resolveStep(p *Plan, sp StepPlan, outputs map[string]map[string]string, str
 		planUses(p, &sp, t.Uses, with, env)
 	default:
 		sp.Kind = "run"
-		cmd, cerr := shellCommand(sp.Shell, sp.Run)
+		cmd, needsFile, cerr := shellCommand(sp.Shell, sp.Run, stepScriptPath(sp.OutputIndex))
 		if cerr != nil {
 			sp.Kind = "unsupported"
 			sp.SkipReason = cerr.Error()
 			break
+		}
+		sp.ScriptFile = ""
+		if needsFile {
+			sp.ScriptFile = stepScriptPath(sp.OutputIndex)
 		}
 		sp.Argv = execArgv(p, sp.WorkingDirectory, env, sp.EnvFrom, sp.EnvSecret, cmd)
 	}
@@ -1539,6 +1647,8 @@ func copyStrings(in map[string]string) map[string]string {
 func (p *Plan) stepValues(env map[string]string, outputs map[string]map[string]string, strict bool) workflow.TemplateValues {
 	vals := workflow.TemplateValues{
 		GitHub:  p.githubValues(),
+		Runner:  p.Runner,
+		Vars:    p.Vars,
 		Matrix:  p.Matrix,
 		Inputs:  p.Inputs,
 		Env:     env,
@@ -2062,26 +2172,104 @@ func execArgv(p *Plan, workdir string, env map[string]string, from []string, sec
 	return argv
 }
 
-// shellCommand maps a workflow `shell:` onto an argv prefix.
-func shellCommand(shell, script string) ([]string, error) {
-	name := strings.TrimSpace(shell)
+// The `shell:` vocabulary (docs/WORKFLOWS.md §4.1, PAR-079).
+//
+// A named shell maps onto the platform's argv with the documented defaults:
+// `sh -e`, `bash -eo pipefail`, `python`/`python3`, `pwsh`/`powershell`, `cmd`.
+// Anything else is an arbitrary command template that MUST contain exactly one
+// `{0}` placeholder (GitHub's documented custom-shell form): the runner writes
+// the step's script to a file inside the job container and substitutes its
+// path. A template without `{0}` is a named step error — never a guess about
+// where the script should go, and never "append the script to argv".
+//
+// The script file exists only for the custom form: a named shell keeps the
+// script on the interpreter's command line (`-c`), which is the argv the
+// runner has always produced and needs no extra container round trip.
+const (
+	// shellScriptPrefix is the per-step in-container script path. The flat
+	// step index is unique across composite expansion (like the output file),
+	// so two steps of one job can never read each other's script.
+	shellScriptPrefix = "/tmp/spindle-step-"
+)
+
+// stepScriptPath is the in-container path of one step's script file.
+func stepScriptPath(index int) string {
+	return shellScriptPrefix + strconv.Itoa(index+1)
+}
+
+// shellCommand maps a workflow `shell:` onto argv. The returned bool reports
+// whether the script must be written to scriptPath first (the custom form);
+// a named shell carries the script inline and never touches the file.
+func shellCommand(shell, script, scriptPath string) ([]string, bool, error) {
+	trimmed := strings.TrimSpace(shell)
+	name := trimmed
 	if i := strings.IndexByte(name, ' '); i >= 0 {
-		name = name[:i] // "bash {0}" and friends: the interpreter is enough
+		name = name[:i]
 	}
-	switch strings.ToLower(name) {
-	case "", "sh":
-		return []string{"sh", "-e", "-c", script}, nil
-	case "bash":
-		return []string{"bash", "-eo", "pipefail", "-c", script}, nil
-	case "python", "python3":
-		return []string{"python3", "-c", script}, nil
-	case "pwsh", "powershell":
-		return []string{"pwsh", "-command", script}, nil
-	case "cmd":
-		return []string{"cmd", "/c", script}, nil
-	default:
-		return nil, fmt.Errorf("unsupported shell %q (v1: sh, bash, python, pwsh, cmd)", shell)
+	// A named shell accepts the alias alone or with its one `{0}` placeholder
+	// (`bash`, `bash {0}`); anything else is the arbitrary command form below,
+	// so `sh {0} {0}` is refused instead of silently dropping an argument.
+	if extra := strings.TrimSpace(trimmed[len(name):]); extra == "" || extra == "{0}" {
+		switch strings.ToLower(name) {
+		case "", "sh":
+			return []string{"sh", "-e", "-c", script}, false, nil
+		case "bash":
+			return []string{"bash", "--noprofile", "--norc", "-eo", "pipefail", "-c", script}, false, nil
+		case "python":
+			return []string{"python", "-c", script}, false, nil
+		case "python3":
+			return []string{"python3", "-c", script}, false, nil
+		case "pwsh", "powershell":
+			return []string{"pwsh", "-command", script}, false, nil
+		case "cmd":
+			return []string{"cmd", "/D", "/E:ON", "/V:OFF", "/S", "/C", script}, false, nil
+		}
 	}
+	// The arbitrary form: split the template into words (no shell expansion —
+	// the template is the workflow's own argv, never a string handed to a
+	// shell), and require exactly one `{0}` after a real command word.
+	words := threads.SplitOptions(trimmed)
+	if len(words) == 0 || words[0] == "" || words[0] == "{0}" {
+		return nil, false, fmt.Errorf("unsupported shell %q: a custom shell needs a command that reads the script, like `dash -e {0}` (named shells: sh, bash, python, python3, pwsh, powershell, cmd)", shell)
+	}
+	placed := 0
+	argv := make([]string, 0, len(words))
+	for _, word := range words {
+		for strings.Contains(word, "{0}") {
+			i := strings.Index(word, "{0}")
+			word = word[:i] + scriptPath + word[i+len("{0}"):]
+			placed++
+		}
+		argv = append(argv, word)
+	}
+	if placed != 1 {
+		return nil, false, fmt.Errorf("unsupported shell %q: a custom shell command must contain exactly one {0} placeholder for the script file (named shells: sh, bash, python, python3, pwsh, powershell, cmd)", shell)
+	}
+	if len(argv) == 0 || argv[0] == "" {
+		return nil, false, fmt.Errorf("unsupported shell %q: names no command", shell)
+	}
+	return argv, true, nil
+}
+
+// replaceStepCommand swaps the command tail of one docker exec argv, keeping
+// its environment prefix. It is the one place a step's argv is rebuilt after
+// planning (the bash→sh fallback), so the fallback cannot drop an env layer.
+func replaceStepCommand(step StepPlan, container string, cmd []string) StepPlan {
+	idx := -1
+	for i, arg := range step.Argv {
+		if arg == container {
+			idx = i
+			break
+		}
+	}
+	if idx < 0 {
+		return step // an argv shape this helper does not own: never mangle it
+	}
+	argv := make([]string, 0, idx+1+len(cmd))
+	argv = append(argv, step.Argv[:idx+1]...)
+	argv = append(argv, cmd...)
+	step.Argv = argv
+	return step
 }
 
 // containerDir resolves a workflow working-directory inside the container: an

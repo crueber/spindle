@@ -72,7 +72,7 @@ func TestPullRequestTypesDefaultFiresEveryAction(t *testing.T) {
 // supported set; the sibling workflow still runs.
 func TestPullRequestUnsupportedTypeIsPerFileError(t *testing.T) {
 	e := newTestEnv(t)
-	src := strings.Replace(prTypedWorkflowYAML, "[opened]", "[closed]", 1)
+	src := strings.Replace(prTypedWorkflowYAML, "[opened]", "[deleted]", 1)
 	e.git.add(testSHA, ".spindle/workflows/closed.yml", src)
 	files, err := Discover(ctx(), e.git, "o/r", testSHA)
 	if err != nil {
@@ -87,7 +87,7 @@ func TestPullRequestUnsupportedTypeIsPerFileError(t *testing.T) {
 		if f.Workflow != nil || !strings.Contains(f.Error, "unsupported type") {
 			t.Fatalf("closed.yml = %+v (want a parse error naming the unsupported type)", f)
 		}
-		for _, supported := range []string{"opened", "synchronize", "reopened"} {
+		for _, supported := range []string{"opened", "synchronize", "reopened", "closed"} {
 			if !strings.Contains(f.Error, supported) {
 				t.Errorf("error %q does not name the supported type %q", f.Error, supported)
 			}
@@ -112,14 +112,14 @@ func TestPullRequestUnsupportedTypeIsPerFileError(t *testing.T) {
 // cannot invent an edge whose `types` filter would silently never match.
 func TestPullRequestActionRejected(t *testing.T) {
 	e := newTestEnv(t)
-	for _, action := range []string{"", "closed", "labeled"} {
+	for _, action := range []string{"", "deleted", "locked"} {
 		_, err := e.svc.CreateRun(ctx(), "o/r", testSHA, EventPullReq,
 			CreateOpts{Branch: "main", BaseBranch: "main", Action: action})
 		if !errors.Is(err, ErrInvalid) {
 			t.Errorf("action %q: err = %v, want ErrInvalid", action, err)
 			continue
 		}
-		for _, supported := range []string{"opened", "synchronize", "reopened"} {
+		for _, supported := range []string{"opened", "synchronize", "reopened", "closed"} {
 			if !strings.Contains(err.Error(), supported) {
 				t.Errorf("action %q: error %q does not name %q", action, err, supported)
 			}

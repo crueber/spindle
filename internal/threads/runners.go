@@ -210,19 +210,24 @@ type RunnerJobRef struct {
 // RunnerDoc is one instance runner's registry record (labels + capacity +
 // liveness; never a secret).
 type RunnerDoc struct {
-	ID              string        `json:"id"`
-	Name            string        `json:"name"`
-	Labels          []string      `json:"labels"`
-	Capacity        int           `json:"capacity"`
-	State           string        `json:"state"`
-	DeclaredVersion string        `json:"declared_version,omitempty"`
-	RegisteredBy    string        `json:"registered_by,omitempty"`
-	CreatedAt       string        `json:"created_at"`
-	RegisteredAt    *string       `json:"registered_at,omitempty"`
-	LastSeenAt      *string       `json:"last_seen_at,omitempty"`
-	RevokedAt       *string       `json:"revoked_at,omitempty"`
-	CurrentJob      *RunnerJobRef `json:"current_job,omitempty"`
-	LeaseUntil      *string       `json:"lease_until,omitempty"`
+	ID       string   `json:"id"`
+	Name     string   `json:"name"`
+	Labels   []string `json:"labels"`
+	Capacity int      `json:"capacity"`
+	State    string   `json:"state"`
+	// LabelImages is the Forgejo-style label→image mapping the runner declared
+	// ("ubuntu-latest:docker://node:lts", PAR-171). A job whose runs-on names a
+	// mapped label and whose workflow named no container.image runs in that
+	// image; the declared labels remain the match set.
+	LabelImages     map[string]string `json:"label_images,omitempty"`
+	DeclaredVersion string            `json:"declared_version,omitempty"`
+	RegisteredBy    string            `json:"registered_by,omitempty"`
+	CreatedAt       string            `json:"created_at"`
+	RegisteredAt    *string           `json:"registered_at,omitempty"`
+	LastSeenAt      *string           `json:"last_seen_at,omitempty"`
+	RevokedAt       *string           `json:"revoked_at,omitempty"`
+	CurrentJob      *RunnerJobRef     `json:"current_job,omitempty"`
+	LeaseUntil      *string           `json:"lease_until,omitempty"`
 	// AllowAll / Repos are the ADMIN-SET repository tenancy policy, copied from
 	// the registration token at mint and re-applied at registration. The claim
 	// filter reads them and nothing on the runner side can write them
@@ -362,19 +367,20 @@ func mintConflict(err error) error {
 
 // RunnerView is one row of GET /api/v1/admin/runners (never a secret).
 type RunnerView struct {
-	ID              string        `json:"id"`
-	Name            string        `json:"name"`
-	Labels          []string      `json:"labels"`
-	Capacity        int           `json:"capacity"`
-	State           string        `json:"state"`
-	DeclaredVersion string        `json:"declared_version,omitempty"`
-	RegisteredBy    string        `json:"registered_by,omitempty"`
-	CreatedAt       string        `json:"created_at"`
-	RegisteredAt    *string       `json:"registered_at,omitempty"`
-	LastSeenAt      *string       `json:"last_seen_at,omitempty"`
-	RevokedAt       *string       `json:"revoked_at,omitempty"`
-	CurrentJob      *RunnerJobRef `json:"current_job,omitempty"`
-	AllowForkRuns   bool          `json:"allow_fork_runs"`
+	ID              string            `json:"id"`
+	Name            string            `json:"name"`
+	Labels          []string          `json:"labels"`
+	LabelImages     map[string]string `json:"label_images,omitempty"`
+	Capacity        int               `json:"capacity"`
+	State           string            `json:"state"`
+	DeclaredVersion string            `json:"declared_version,omitempty"`
+	RegisteredBy    string            `json:"registered_by,omitempty"`
+	CreatedAt       string            `json:"created_at"`
+	RegisteredAt    *string           `json:"registered_at,omitempty"`
+	LastSeenAt      *string           `json:"last_seen_at,omitempty"`
+	RevokedAt       *string           `json:"revoked_at,omitempty"`
+	CurrentJob      *RunnerJobRef     `json:"current_job,omitempty"`
+	AllowForkRuns   bool              `json:"allow_fork_runs"`
 	// AllowAll / Repos are the admin-set tenancy policy. Both absent is the
 	// honest reading "no repository" (a record from before tenancy), never
 	// "all repositories".
@@ -413,7 +419,7 @@ func (s *Service) ListRunners(ctx context.Context, p auth.Principal) ([]RunnerVi
 			return nil, fmt.Errorf("%w: %s: %v", ErrCorrupt, key, jerr)
 		}
 		out = append(out, RunnerView{
-			ID: doc.ID, Name: doc.Name, Labels: nonNilStr(doc.Labels), Capacity: doc.Capacity,
+			ID: doc.ID, Name: doc.Name, Labels: nonNilStr(doc.Labels), LabelImages: doc.LabelImages, Capacity: doc.Capacity,
 			State: doc.State, DeclaredVersion: doc.DeclaredVersion, RegisteredBy: doc.RegisteredBy,
 			CreatedAt: doc.CreatedAt, RegisteredAt: doc.RegisteredAt, LastSeenAt: doc.LastSeenAt,
 			RevokedAt: doc.RevokedAt, CurrentJob: doc.CurrentJob, AllowForkRuns: doc.AllowForkRuns,
@@ -633,6 +639,9 @@ type RegisterResult struct {
 	RunnerID string   `json:"runner_id"`
 	Token    string   `json:"token"`
 	Labels   []string `json:"labels"`
+	// LabelImages echoes the parsed label→image map (PAR-171): the runner states
+	// which image each mapped label serves, and the server honours it.
+	LabelImages map[string]string `json:"label_images,omitempty"`
 	// AllowForkRuns echoes the recorded opt-in so the runner can state its
 	// effective policy in startup output.
 	AllowForkRuns bool `json:"allow_fork_runs"`
@@ -670,10 +679,11 @@ func (s *Service) Register(ctx context.Context, in RegisterInput) (*RegisterResu
 	if runner == nil || runner.State == RunnerRevoked {
 		return nil, fmt.Errorf("%w: runner is revoked", ErrUnauthorized)
 	}
-	labels := normalizeLabels(in.Labels)
-	if len(labels) == 0 {
-		labels = []string{"self-hosted"}
+	parsed, lerr := ParseRunnerLabels(in.Labels)
+	if lerr != nil {
+		return nil, lerr
 	}
+	labels := parsed.Labels
 	principal := strings.TrimSpace(runner.RegisteredBy)
 	if principal == "" {
 		principal = "runner"
@@ -727,6 +737,7 @@ func (s *Service) Register(ctx context.Context, in RegisterInput) (*RegisterResu
 			d.Name = truncate(n, 100)
 		}
 		d.Labels = labels
+		d.LabelImages = parsed.Images
 		if c := clampCapacity(in.Capacity); c > 0 {
 			d.Capacity = c
 		}
@@ -746,7 +757,7 @@ func (s *Service) Register(ctx context.Context, in RegisterInput) (*RegisterResu
 	}
 	pol := RunnerPolicy{AllowAll: tok.AllowAll, Repos: tok.Repos}
 	return &RegisterResult{
-		RunnerID: id, Token: runnerToken, Labels: labels,
+		RunnerID: id, Token: runnerToken, Labels: labels, LabelImages: parsed.Images,
 		AllowForkRuns: in.AllowForkRuns, Policy: pol,
 	}, nil
 }
@@ -779,10 +790,11 @@ type DeclareInput struct {
 
 // DeclareView is the declare answer.
 type DeclareView struct {
-	RunnerID string   `json:"runner_id"`
-	State    string   `json:"state"`
-	Labels   []string `json:"labels"`
-	Capacity int      `json:"capacity"`
+	RunnerID    string            `json:"runner_id"`
+	State       string            `json:"state"`
+	Labels      []string          `json:"labels"`
+	LabelImages map[string]string `json:"label_images,omitempty"`
+	Capacity    int               `json:"capacity"`
 	// LeaseSeconds is the claim lease the server will grant.
 	LeaseSeconds int `json:"lease_seconds"`
 	// AllowForkRuns echoes what the registry now records.
@@ -796,7 +808,11 @@ type DeclareView struct {
 // liveness record: fetching is the heartbeat, declare states what the runner
 // is).
 func (s *Service) Declare(ctx context.Context, runner *runnerAuth, in DeclareInput) (*DeclareView, error) {
-	labels := normalizeLabels(in.Labels)
+	parsed, lerr := ParseRunnerLabels(in.Labels)
+	if lerr != nil {
+		return nil, lerr
+	}
+	labels := parsed.Labels
 	now := s.nowUTC().Format(dateTimeFmt)
 	key := RunnerKey(runner.Doc.ID)
 	_, err := s.casUpdate(ctx, key, 5, func(cur []byte, _ store.Version) ([]byte, bool, error) {
@@ -812,6 +828,7 @@ func (s *Service) Declare(ctx context.Context, runner *runnerAuth, in DeclareInp
 		}
 		if len(labels) > 0 {
 			d.Labels = labels
+			d.LabelImages = parsed.Images
 		}
 		if v := truncate(strings.TrimSpace(in.Version), 64); v != "" {
 			d.DeclaredVersion = v
@@ -830,7 +847,8 @@ func (s *Service) Declare(ctx context.Context, runner *runnerAuth, in DeclareInp
 	}
 	return &DeclareView{
 		RunnerID: runner.Doc.ID, State: runner.Doc.State, Labels: nonNilStr(runner.Doc.Labels),
-		Capacity: runner.Doc.Capacity, LeaseSeconds: int((15 * time.Minute).Seconds()),
+		LabelImages: runner.Doc.LabelImages,
+		Capacity:    runner.Doc.Capacity, LeaseSeconds: int(s.jobLease().Seconds()),
 		AllowForkRuns: runner.Doc.AllowForkRuns, Policy: runner.Doc.policy(),
 	}, nil
 }
@@ -860,7 +878,16 @@ type FetchResult struct {
 	// (docs/threads.md §3.5/§3.6), the same value a job-level `if:` reads on
 	// the server side.
 	Actor string `json:"actor,omitempty"`
-	Spec  *Spec  `json:"spec"`
+	// EventPayload is the bounded, documented event body (PAR-033): the runner
+	// writes it to $GITHUB_EVENT_PATH and projects its fields into
+	// `github.event.*`. Nil for a run with no payload (a synthetic dispatch).
+	EventPayload map[string]any `json:"event_payload,omitempty"`
+	// Vars are the resolved repository and organization variables (PAR-035),
+	// with the documented precedence repository > organization. They are
+	// resolved server-side and masked like a secret value; the workflow reads
+	// them as `${{ vars.<name> }}`.
+	Vars map[string]string `json:"vars,omitempty"`
+	Spec *Spec             `json:"spec"`
 	// Checkout tells the runner where to clone from. URL is the runner-facing
 	// repository URL (derived from the fetch request's host, so a reverse proxy
 	// works); the credential is the attempt token (read scope, ci:<runner>
@@ -880,6 +907,11 @@ type FetchResult struct {
 	Mask          []string          `json:"mask"`
 	SecretsDenied bool              `json:"secrets_denied"`
 	LeaseUntil    string            `json:"lease_until"`
+	// LabelImages is the runner's declared label→image map (PAR-171), echoed so
+	// the runner can state it in its log. The SELECTED image is already applied
+	// to Spec.Container.Image below; this map is the declaration, not a second
+	// instruction.
+	LabelImages map[string]string `json:"label_images,omitempty"`
 	// Permissions is the effective job-token permission map (workflow
 	// `permissions:` over the instance default; a fork is always contents:read)
 	// and Scopes the git scopes the attempt token will carry. The runner needs
@@ -1060,18 +1092,38 @@ func (s *Service) fetchPayload(ctx context.Context, owner, repo string, runner *
 		Attempt: job.Attempt, Commit: claim.Run.Commit, Event: claim.Run.Event, Branch: claim.Run.Branch,
 		Ref:      claim.Run.Ref,
 		Workflow: claim.Run.Workflow, Trusted: claim.Run.Trusted, Context: job.Context, Spec: job.Spec,
-		Actor:   claim.Run.Actor,
-		Secrets: map[string]string{}, Mask: []string{},
+		Actor:        claim.Run.Actor,
+		EventPayload: claim.Run.EventPayload,
+		Secrets:      map[string]string{}, Mask: []string{},
+	}
+	// Label→image mapping (PAR-171): when the runner declared
+	// `ubuntu-latest:docker://node:lts` and this job's authored runs-on names
+	// that label, the job runs in that image — but only when the workflow named
+	// no container.image of its own (the workflow's explicit choice always
+	// wins). The spec is copied before the injection so the stored job record
+	// is untouched.
+	if image := runnerImageFor(runner.Doc.LabelImages, jobRunsOn(job)); image != "" && job.Spec != nil {
+		spec := *job.Spec
+		if spec.Container == nil {
+			spec.Container = &ContainerSpec{Image: image}
+		} else {
+			container := *spec.Container
+			container.Image = image
+			spec.Container = &container
+		}
+		res.Spec = &spec
+		res.LabelImages = runner.Doc.LabelImages
 	}
 	trusted := claim.Run.Trusted && job.Trusted
 	perms := s.EffectivePermissions(job.Spec, trusted)
 	res.Permissions = perms
 	res.Scopes = attemptScopes(PermissionScopes(perms))
 	// The job OIDC request token (docs/PLAN-THREADS-OIDC.md): only a trusted
-	// job that declares `id-token: write` gets one, and only when the instance
-	// has an origin the job container can reach (server.public_url, or the
-	// request-derived base). A fork run is untrusted and never reaches here.
-	if trusted && perms["id-token"] == PermWrite {
+	// job that declares `id-token: write` or `enable-openid-connect: true`
+	// gets one, and only when the instance has an origin the job container can
+	// reach (server.public_url, or the request-derived base). A fork run is
+	// untrusted and never reaches here.
+	if s.IDTokenAllowed(job.Spec, trusted) {
 		base := strings.TrimSpace(checkoutBase)
 		if base == "" {
 			base = strings.TrimSpace(s.CheckoutBaseURL)
@@ -1108,6 +1160,21 @@ func (s *Service) fetchPayload(ctx context.Context, owner, repo string, runner *
 	if !trusted {
 		res.SecretsDenied = true
 		return res, nil
+	}
+	// Variables (PAR-035) resolve for a trusted job exactly like secrets (same
+	// sealing, same masking); an untrusted run gets none.
+	vars, verr := s.variableValues(ctx, owner, repo)
+	if verr != nil {
+		return nil, verr
+	}
+	if len(vars) > 0 {
+		res.Vars = vars
+		for _, value := range vars {
+			if value != "" {
+				res.Mask = append(res.Mask, value)
+			}
+		}
+		sort.Strings(res.Mask)
 	}
 	values, err := s.secretValues(ctx, owner, repo)
 	if err != nil {

@@ -32,7 +32,33 @@
         <label class="mb-1 block text-sm font-medium" for="environment-reviewers">Required reviewers</label>
         <input class="input mono md:max-w-md" id="environment-reviewers" name="environment_reviewers" type="text"
                value="{{.NewReviewers}}" placeholder="ada, grace">
-        <p class="muted mt-1 text-[11px]">Comma-separated principals with write access or higher. Leave empty for no approval gate.</p>
+        <p class="muted mt-1 text-[11px]">Comma-separated principals with write access or higher. Leave empty for no approval gate. At most six reviewers and teams together.</p>
+      </div>
+      <div>
+        <label class="mb-1 block text-sm font-medium" for="environment-teams">Team reviewers</label>
+        <input class="input mono md:max-w-md" id="environment-teams" name="environment_teams" type="text"
+               value="{{.NewTeams}}" placeholder="acme/releasers">
+        <p class="muted mt-1 text-[11px]">Comma-separated teams as <code class="mono">org/team</code>. Each team must exist; its members at decision time must approve.</p>
+      </div>
+      <div class="grid gap-3 sm:grid-cols-2">
+        <div>
+          <label class="mb-1 block text-sm font-medium" for="environment-wait">Wait timer (minutes)</label>
+          <input class="input mono md:max-w-[10rem]" id="environment-wait" name="environment_wait_minutes" type="number"
+                 min="0" max="360" step="1" value="{{.NewWaitMinutes}}" placeholder="0">
+          <p class="muted mt-1 text-[11px]">0 disables it. The timer starts when a deployment is created and holds it before it can start (max 360 minutes).</p>
+        </div>
+        <div>
+          <label class="mb-1 block text-sm font-medium" for="environment-branches">Deployment branches and tags</label>
+          <input class="input mono md:max-w-md" id="environment-branches" name="environment_branches" type="text"
+                 value="{{.NewBranches}}" placeholder="main, release/*">
+          <p class="muted mt-1 text-[11px]">Comma-separated patterns (exact names and <code class="mono">*</code>). Empty allows every ref; a deployment from any other ref fails closed.</p>
+        </div>
+      </div>
+      <div class="flex items-start gap-2">
+        <input class="mt-0.5 h-4 w-4 check" id="environment-self-review" name="environment_prevent_self_review" type="checkbox"{{if .NewPreventSelfReview}} checked{{end}}>
+        <label class="text-sm" for="environment-self-review">Prevent self-review
+          <span class="muted block text-[11px]">The principal who triggered the run cannot approve its deployment; another required reviewer must.</span>
+        </label>
       </div>
     </div>
     <div class="mt-2"><button type="submit" class="btn primary whitespace-nowrap">save environment</button></div>
@@ -46,11 +72,15 @@
     <div class="card">
       <div class="flex flex-wrap items-center gap-2 px-3 py-2">
         <h3 class="text-sm font-semibold tracking-tight mono">{{.Name}}</h3>
-        {{if .Reviewers}}<span class="chip chip-neutral">{{len .Reviewers}} required reviewer{{if ne (len .Reviewers) 1}}s{{end}}</span>{{else}}<span class="chip chip-draft">no approval required</span>{{end}}
+        {{if .Reviewers}}<span class="chip chip-neutral">{{len .Reviewers}} required reviewer{{if ne (len .Reviewers) 1}}s{{end}}</span>{{else}}{{if .Teams}}<span class="chip chip-neutral">{{len .Teams}} team reviewer{{if ne (len .Teams) 1}}s{{end}}</span>{{else}}<span class="chip chip-draft">no approval required</span>{{end}}{{end}}
+        {{if .WaitMinutes}}<span class="chip chip-neutral">{{.WaitMinutes}} min wait timer</span>{{end}}
+        {{if .PreventSelfReview}}<span class="chip chip-neutral">self-review blocked</span>{{end}}
         <span class="muted ml-auto text-[11px] mono">{{.UpdatedAt}}</span>
       </div>
       <div class="border-t border-[color:var(--pd-line)] px-3 py-2 text-sm">
         <p class="muted text-xs">reviewers: {{if .Reviewers}}<span class="mono">{{.ReviewersText}}</span>{{else}}—{{end}}</p>
+        {{if .Teams}}<p class="muted text-xs">team reviewers: <span class="mono">{{.TeamsText}}</span></p>{{end}}
+        <p class="muted text-xs">deployment refs: {{if .Branches}}<span class="mono">{{.BranchesText}}</span>{{else}}all branches and tags{{end}}</p>
       </div>
       <div class="border-t border-[color:var(--pd-line)] px-3 py-2">
         <h4 class="mb-1 text-xs font-semibold uppercase tracking-wide">Secrets</h4>
