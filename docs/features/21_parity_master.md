@@ -40,8 +40,11 @@ conversion that the product performs explicitly (never by reading another system
 
 Three properties make that checkable rather than rhetorical:
 
-1. **A committed conformance corpus.** `internal/e2e/testdata/parity/` holds byte-for-byte copies of real
-   workflows plus a `SOURCE` stamp (repository, path, commit SHA, fetch date):
+1. **A committed conformance corpus.** `internal/e2e/testdata/parity/` holds byte copies of real
+   workflows plus a `SOURCE` stamp (repository, path, commit SHA, fetch date) — byte copies with one
+   sanitization: the private host is rewritten to `git.example.com` in every copied source and golden, so
+   the publish transform (which rewrites that host in every text file) cannot change their bytes and break
+   the stamped hashes:
    - **Forgejo (the operator's own, first):** `weave/.forgejo/workflows/ci.yml`,
      `weave/.forgejo/workflows/publish-github.yml`, `scriobh/.forgejo/workflows/ci.yml`,
      `scriobh/.forgejo/workflows/release.yml`.

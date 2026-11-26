@@ -10,14 +10,35 @@ produce. `internal/e2e/parity_test.go` is the harness; `make parity` runs it.
 forgejo/
   SOURCE.json                 one stamp per file: repository, path, commit, fetch date,
                               source sha256, golden sha256, importer revision, translation
-  <slug>.source.yml           the byte copy, exactly as the repository served it
+                              (+ a note recording the host neutralization)
+  <slug>.source.yml           the byte copy, sanitized: the upstream host is git.example.com
   <slug>.yml                  the CONVERTED file (the importer's output)
 spindle/
   parity-smoke.yml            the execution tier's fixture (corpus-shaped, cheap to run)
 ```
 
-`<slug>.source.yml` is never edited. If the upstream repository changes, add a
-new file with a new stamp; the old one is history.
+`<slug>.source.yml` is never edited by hand. If the upstream repository changes,
+add a new file with a new stamp; the old one is history. Stamps move only through
+the `-update` path, which reconverts every source through the real importer and
+rewrites the goldens and `SOURCE.json` from the bytes it wrote:
+
+```
+go test ./internal/e2e -run TestParityGoldensMatchTheirStamps -update
+```
+
+## The host is neutralized
+
+The copies are real workflows from the operator's private forge, but the host is
+not: every reference to the private host became `git.example.com` in both the
+source and the converted golden. This is a publication requirement, not
+cosmetics — the publish transform rewrites the private host to the public forge
+in **every** text file, fixtures included, so a fixture that carried it would be
+rewritten on the way to the published tree and
+`TestParityGoldensMatchTheirStamps` would fail there while passing locally (it
+did, on the published `v0.10.0`). The repository, path, commit and fetch date in
+`SOURCE.json` are real provenance; only the host is neutralized.
+`TestParityFixturesCarryNoPrivateHost` fails if any file under this tree (or the
+importer's `testdata`) names the private host again.
 
 ## Tiers
 

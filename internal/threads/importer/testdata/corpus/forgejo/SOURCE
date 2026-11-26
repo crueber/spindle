@@ -1,6 +1,11 @@
 # The conformance corpus (docs/features/21_parity_master.md §1): the operator's
-# own Forgejo workflows, copied byte for byte. The importer's golden tests read
-# these files; the parity harness (PAR-200) converts them once and runs them.
+# own Forgejo workflows, copied byte for byte except for the host, which is
+# neutralized to git.example.com in every copied file and its golden — the
+# publish transform rewrites the private host in every text file, so a fixture
+# carrying it would be rewritten on the way out and its SHA stamp would stop
+# matching. The repository and commit provenance below is real. The importer's
+# golden tests read these files; the parity harness (PAR-200) converts them once
+# and runs them.
 #
 # repository                           path                                commit                                     fetched
 crueber/weave                         .forgejo/workflows/ci.yml           5b2526d42ab076d1b80c39b60c13372994c23bdf   2026-11-26

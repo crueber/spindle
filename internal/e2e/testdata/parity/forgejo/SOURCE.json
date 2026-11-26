@@ -7,9 +7,9 @@
       "path": ".forgejo/workflows/ci.yml",
       "commit": "5b2526d42ab076d1b80c39b60c13372994c23bdf",
       "fetched": "2026-11-26",
-      "sha256": "9b181267ff4befce4e19d047a77be869654c8f3e2cec6194f94bf9e4ac7a7e4a",
-      "golden_sha256": "3676127f8ce6af5a68ab00dead16c14939f91b2f99f572bde259795c9b2f4def",
-      "importer_commit": "19549aa8",
+      "sha256": "25852bf5401f03f744b2aee9ed31d8f99c18f335f161124dd72ccf9cfb3db0a4",
+      "golden_sha256": "e945c832f47925317c5637553f69bac3e1011f4aa9de93873864d73e55e7b4dd",
+      "importer_commit": "2d471da8",
       "translation": "runs-on: docker mapped to the default runner labels; needs: <job> rewritten to a list; $GITHUB_SERVER_URL rewritten to the canonical $SPINDLE_SERVER"
     },
     {
@@ -21,7 +21,7 @@
       "fetched": "2026-11-26",
       "sha256": "39e4b90240bb45f23a4502b7918ae1040b569ff9b6dc10df001fd3e0b43aaf53",
       "golden_sha256": "8dcecfad5f4d746df370fbad880621dfc772e2b7bd9fee1a43fd84c86e063e28",
-      "importer_commit": "19549aa8",
+      "importer_commit": "2d471da8",
       "translation": "actions/checkout@v4 lost its @ref (the built-in takes none); github.event.inputs.* rewritten to inputs.*; ubuntu-latest carried verbatim (the runner maps it at enqueue)"
     },
     {
@@ -31,9 +31,9 @@
       "path": ".forgejo/workflows/ci.yml",
       "commit": "034c9a50d40ea5c0404cfe5a66b3f3782d3068a4",
       "fetched": "2026-11-26",
-      "sha256": "08ae835fbd5dbd8681ed05dd1c625d1ab3bca90ea2d41b4899e7c9d154527e9d",
-      "golden_sha256": "8fb666c246928c686154bee5f24f75aeaae21333140cc01f7c04a9adedc09380",
-      "importer_commit": "19549aa8",
+      "sha256": "73ad45c5be819401de5a8063f85162a405b4924c9d4f2b5aba52d5d13131ff12",
+      "golden_sha256": "0f2280f515ca13b03f0bbcbe969b8f37dacc2d81eacdc5214ba7d925bc61a300",
+      "importer_commit": "2d471da8",
       "translation": "runs-on: docker mapped to the default runner labels; needs: <job> rewritten to a list; $GITHUB_SERVER_URL rewritten to $SPINDLE_SERVER"
     },
     {
@@ -43,10 +43,11 @@
       "path": ".forgejo/workflows/release.yml",
       "commit": "034c9a50d40ea5c0404cfe5a66b3f3782d3068a4",
       "fetched": "2026-11-26",
-      "sha256": "33892b35499741b5ec66967a20684bd666c15ace356c2fe1a511515cbf8d0e1b",
-      "golden_sha256": "02e1556cdf92efe4148a2e2259ff571b2340b12b980aa1229b1c7178ba2d743f",
-      "importer_commit": "19549aa8",
+      "sha256": "4240b2cc5cebd4260c79a1c7b48a952b160efe6f5e27d719261e2e2ad696e27c",
+      "golden_sha256": "ee9e4940095a0ef2bd2de5dc9ac58ae82935a38350ed91f65705e91052607ef3",
+      "importer_commit": "2d471da8",
       "translation": "runs-on/needs/$GITHUB_SERVER_URL/inputs aliases as above; strategy.matrix.include translated verbatim (gopkg.in/yaml.v3 node tree), so the cli job keeps its four cells"
     }
-  ]
+  ],
+  "note": "Sanitized for publication: the upstream host is rewritten to the neutral git.example.com in every copied source and converted golden, so the publish transform (which rewrites that host in every text file) cannot change these bytes and break the stamps. The repository, path, commit and fetch date are real provenance; only the host is neutralized. Regenerate with go test ./internal/e2e -run TestParityGoldensMatchTheirStamps -update."
 }

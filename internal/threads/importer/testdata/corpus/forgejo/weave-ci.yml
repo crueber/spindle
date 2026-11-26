@@ -54,7 +54,7 @@ jobs:
           # create kernel keyrings inside a job container, and overlay-on-overlay is not permitted.
           mkdir -p /etc/containers /var/lib/containers /var/tmp/containers
           printf '[storage]\ndriver="vfs"\nrunroot="/var/tmp/containers"\ngraphroot="/var/lib/containers"\n' > /etc/containers/storage.conf
-          IMG=github.com/crueber/weave
+          IMG=git.example.com/crueber/weave
           case "$GITHUB_REF" in refs/tags/v*) VERSION="${GITHUB_REF#refs/tags/}" ;; *) VERSION="$GITHUB_SHA" ;; esac
           buildah bud --storage-driver vfs --isolation=chroot \
             --build-arg "VERSION=$VERSION" -t "$IMG:$GITHUB_SHA" -t "$IMG:latest" .
@@ -65,10 +65,10 @@ jobs:
           REGISTRY_TOKEN: ${{ secrets.REGISTRY_TOKEN }}
         run: |
           [ -n "$REGISTRY_TOKEN" ] || { echo "REGISTRY_USER / REGISTRY_TOKEN secrets are required"; exit 1; }
-          IMG=github.com/crueber/weave
+          IMG=git.example.com/crueber/weave
           # buildah login persists in the job container's ~/.config/containers/auth.json, so the push
           # in this same container is authenticated.
-          buildah login -u "$REGISTRY_USER" -p "$REGISTRY_TOKEN" github.com
+          buildah login -u "$REGISTRY_USER" -p "$REGISTRY_TOKEN" git.example.com
           # Every buildah call must name the vfs driver explicitly: buildah 1.45 (the pinned image) no
           # longer picks up the store from /etc/containers/storage.conf in a later step's shell, so a
           # bare `buildah push` reports "image not known" for an image the Build step just tagged.
@@ -116,7 +116,7 @@ jobs:
           TAG="${GITHUB_REF#refs/tags/}"
           API="${GITHUB_SERVER_URL}/api/v1/repos/${GITHUB_REPOSITORY}"
           AUTH="Authorization: token ${REGISTRY_TOKEN}"
-          BODY='{"tag_name":"'"$TAG"'","name":"Weave '"$TAG"'","body":"CLI: curl -fsSL '"${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}"'/releases/download/'"$TAG"'/install.sh | sh  (Windows: install.ps1). Archives weave_*_<os>_<arch> contain the CLI, shell completions and the agent skill; weave-server-linux-* are the full server binaries; verify with SHA256SUMS.txt (ed25519-signed: SHA256SUMS.txt.sig, check with weave verify-release). Container image: github.com/crueber/weave:'"$TAG"'"}'
+          BODY='{"tag_name":"'"$TAG"'","name":"Weave '"$TAG"'","body":"CLI: curl -fsSL '"${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}"'/releases/download/'"$TAG"'/install.sh | sh  (Windows: install.ps1). Archives weave_*_<os>_<arch> contain the CLI, shell completions and the agent skill; weave-server-linux-* are the full server binaries; verify with SHA256SUMS.txt (ed25519-signed: SHA256SUMS.txt.sig, check with weave verify-release). Container image: git.example.com/crueber/weave:'"$TAG"'"}'
           RESP=$(curl -sS -X POST -H "$AUTH" -H 'Content-Type: application/json' -d "$BODY" "$API/releases")
           ID=$(echo "$RESP" | sed -n 's/^{"id":\([0-9]*\).*/\1/p')
           if [ -z "$ID" ]; then

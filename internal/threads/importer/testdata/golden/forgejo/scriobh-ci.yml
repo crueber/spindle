@@ -87,8 +87,8 @@ jobs:
           mkdir -p /etc/containers /var/lib/containers /var/tmp/containers
           printf '[storage]\ndriver="vfs"\nrunroot="/var/tmp/containers"\ngraphroot="/var/lib/containers"\n' > /etc/containers/storage.conf
           buildah bud --storage-driver vfs --isolation=chroot --target runtime \
-            -t github.com/crueber-depracated/scriobh:ci .
+            -t git.example.com/crueber-depracated/scriobh:ci .
       - name: Check the image is non-root
         run: |
-          buildah --storage-driver vfs inspect --format '{{.OCIv1.Config.User}}' github.com/crueber-depracated/scriobh:ci | tee /tmp/user
+          buildah --storage-driver vfs inspect --format '{{.OCIv1.Config.User}}' git.example.com/crueber-depracated/scriobh:ci | tee /tmp/user
           grep -q 'nonroot' /tmp/user

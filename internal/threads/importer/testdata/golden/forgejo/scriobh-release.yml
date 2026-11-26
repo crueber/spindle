@@ -122,7 +122,7 @@ jobs:
           GOARCH: ${{ matrix.goarch }}
         run: |
           set -eu
-          ldflags="-s -w -X main.version=$TAG -X github.com/crueber/scriobh/internal/server.version=$TAG"
+          ldflags="-s -w -X main.version=$TAG -X git.example.com/crueber/scriobh/internal/server.version=$TAG"
           name="scriobh-$TAG-$GOOS-$GOARCH"
           mkdir -p "dist/$name"
           CGO_ENABLED=0 GOOS=$GOOS GOARCH=$GOARCH go build -trimpath -ldflags "$ldflags" -o "dist/$name/scriobh" ./cmd/scriobh
@@ -180,7 +180,7 @@ jobs:
           for arch in amd64 arm64; do
             dir="image-$arch"
             mkdir -p "$dir/data"
-            CGO_ENABLED=0 GOOS=linux GOARCH=$arch go build -trimpath -ldflags "-s -w -X main.version=$TAG -X github.com/crueber/scriobh/internal/server.version=$TAG" -o "$dir/scriobh" ./cmd/scriobh
+            CGO_ENABLED=0 GOOS=linux GOARCH=$arch go build -trimpath -ldflags "-s -w -X main.version=$TAG -X git.example.com/crueber/scriobh/internal/server.version=$TAG" -o "$dir/scriobh" ./cmd/scriobh
             cp Dockerfile.release "$dir/Dockerfile"
           done
       - name: Build and push the image
@@ -191,11 +191,11 @@ jobs:
           REGISTRY_AUTH_FILE: /var/tmp/containers/auth.json
         run: |
           set -eu
-          image="github.com/${GITHUB_REPOSITORY}"
+          image="git.example.com/${GITHUB_REPOSITORY}"
           authfile="$REGISTRY_AUTH_FILE"
           mkdir -p /etc/containers /var/lib/containers /var/tmp/containers
           printf '[storage]\ndriver="vfs"\nrunroot="/var/tmp/containers"\ngraphroot="/var/lib/containers"\n' > /etc/containers/storage.conf
-          printf '%s' "$REGISTRY_TOKEN" | buildah login --authfile "$authfile" -u "$REGISTRY_USER" --password-stdin github.com
+          printf '%s' "$REGISTRY_TOKEN" | buildah login --authfile "$authfile" -u "$REGISTRY_USER" --password-stdin git.example.com
           for arch in amd64 arm64; do
             buildah --storage-driver vfs bud --isolation=chroot --arch "$arch" -f "image-$arch/Dockerfile" -t "$image:$TAG-$arch" "image-$arch"
             buildah --storage-driver vfs push --authfile "$authfile" "$image:$TAG-$arch" "docker://$image:$TAG-$arch"

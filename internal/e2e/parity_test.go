@@ -21,14 +21,26 @@
 // dispatch-input aliases, and an UNTRANSLATED marker for matrix.include), so the
 // goldens differ from their sources; the stamp records why, and
 // TestParityImporterReproducesGoldens proves the importer still produces them.
+//
+// The copies are sanitized: the upstream host is rewritten to the neutral
+// `git.example.com` in every source and golden. The repository, path and commit
+// provenance is real, but the host is not: the publish transform rewrites the
+// private estate's host in every text file, so a fixture that carried it would
+// be rewritten on the way out and its byte stamps would stop matching. Run
+// `go test ./internal/e2e -run TestParityGoldensMatchTheirStamps -update` to
+// regenerate the goldens and restamp SOURCE.json from the sources through the
+// real importer; TestParityFixturesCarryNoPrivateHost keeps the host out.
 package e2e
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"flag"
 	"fmt"
+	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -56,7 +68,9 @@ type paritySource struct {
 	SHA256     string `json:"sha256"`
 	// GoldenSHA256 pins the converted file the importer must reproduce.
 	GoldenSHA256 string `json:"golden_sha256"`
-	// ImporterCommit is the importer revision the golden came from.
+	// ImporterCommit is the importer revision the golden came from: the last
+	// commit that changed the importer's production code (test and testdata
+	// changes cannot move a converted byte, so they do not move this).
 	ImporterCommit string `json:"importer_commit"`
 	// Translation records what the conversion changes (empty = path move only).
 	Translation string `json:"translation"`
@@ -64,7 +78,18 @@ type paritySource struct {
 
 type parityStamp struct {
 	Entries []paritySource `json:"entries"`
+	// Note records corpus-wide provenance the per-entry fields cannot: the host
+	// neutralization every copied file carries so the publish transform cannot
+	// rewrite its bytes.
+	Note string `json:"note,omitempty"`
 }
+
+// update regenerates what the corpus pins
+// (`go test ./internal/e2e -run TestParityGoldensMatchTheirStamps -update`): the
+// converted goldens come from the sources through the real importer and
+// SOURCE.json is restamped from the bytes it just wrote. It is the only
+// supported way to move a stamp.
+var update = flag.Bool("update", false, "regenerate the converted goldens and restamp SOURCE.json")
 
 // parityJob is one expected YAML job: its key and its step count.
 type parityJob struct {
@@ -215,6 +240,9 @@ func sha256Hex(raw []byte) string {
 // explains it, and TestParityImporterReproducesGoldens proves the importer still
 // produces it.
 func TestParityGoldensMatchTheirStamps(t *testing.T) {
+	if *update {
+		updateParityGoldens(t)
+	}
 	stamp := readStamp(t, "forgejo")
 	bySlug := map[string]paritySource{}
 	for _, e := range stamp.Entries {
@@ -261,6 +289,170 @@ func TestParityGoldensMatchTheirStamps(t *testing.T) {
 	}
 	for slug := range bySlug {
 		t.Fatalf("%s: stamped but not driven by the harness", slug)
+	}
+}
+
+// updateParityGoldens is the -update path: it converts every corpus source with
+// the real importer, writes the converted golden, and restamps SOURCE.json with
+// the source hash, the golden hash and the importer revision. The test's ordinary
+// assertions then run against the bytes it just wrote, so an update that the
+// harness cannot reproduce fails in the same invocation.
+func updateParityGoldens(t *testing.T) {
+	t.Helper()
+	bin := buildSpindle(t)
+	stamp := readStamp(t, "forgejo")
+	declared := make(map[string]parityEntry, len(corpus()))
+	for _, entry := range corpus() {
+		declared[entry.Slug] = entry
+	}
+	for i := range stamp.Entries {
+		src := &stamp.Entries[i]
+		entry, ok := declared[src.Slug]
+		if !ok {
+			t.Fatalf("%s: stamped but not driven by the harness", src.Slug)
+		}
+		source, err := os.ReadFile(filepath.Join(parityDir, "forgejo", src.Slug+".source.yml"))
+		if err != nil {
+			t.Fatalf("%s: read source: %v", src.Slug, err)
+		}
+		converted, out, cerr := convertWithImporter(t, bin, src.Slug, source)
+		if cerr != nil && len(entry.ExpectUntranslated) == 0 {
+			t.Fatalf("%s: threads import: %v\n%s", src.Slug, cerr, out)
+		}
+		goldenPath := filepath.Join(parityDir, "forgejo", src.Slug+".yml")
+		if err := os.WriteFile(goldenPath, converted, 0o644); err != nil {
+			t.Fatalf("%s: write golden: %v", src.Slug, err)
+		}
+		src.SHA256 = sha256Hex(source)
+		src.GoldenSHA256 = sha256Hex(converted)
+		t.Logf("%s: sha256=%s golden_sha256=%s", src.Slug, src.SHA256, src.GoldenSHA256)
+	}
+	if rev := importerRevision(t); rev != "" {
+		for i := range stamp.Entries {
+			stamp.Entries[i].ImporterCommit = rev
+		}
+		t.Logf("importer_commit=%s", rev)
+	}
+	if err := writeStamp(filepath.Join(parityDir, "forgejo", "SOURCE.json"), stamp); err != nil {
+		t.Fatalf("write SOURCE.json: %v", err)
+	}
+}
+
+// writeStamp encodes SOURCE.json the way it is committed: two-space indent, no
+// HTML escaping (the translations name `<job>` and `$GITHUB_SERVER_URL`), and a
+// trailing newline.
+func writeStamp(path string, stamp parityStamp) error {
+	var buf bytes.Buffer
+	enc := json.NewEncoder(&buf)
+	enc.SetEscapeHTML(false)
+	enc.SetIndent("", "  ")
+	if err := enc.Encode(stamp); err != nil {
+		return err
+	}
+	return os.WriteFile(path, buf.Bytes(), 0o644)
+}
+
+// importerRevision names the revision whose importer produced the goldens: the
+// last commit that changed the importer's production code. Test and testdata
+// changes cannot move a converted byte, so they do not move this either. Returns
+// "" when git cannot answer (an exported tarball), and then the stamp keeps the
+// value it had.
+func importerRevision(t *testing.T) string {
+	t.Helper()
+	root, err := repoRoot()
+	if err != nil {
+		t.Logf("importer revision: %v (stamp unchanged)", err)
+		return ""
+	}
+	cmd := exec.Command("git", "log", "-1", "--format=%H", "HEAD", "--",
+		"internal/threads/importer",
+		":(exclude)internal/threads/importer/testdata",
+		":(exclude)internal/threads/importer/*_test.go")
+	cmd.Dir = root
+	out, err := cmd.Output()
+	if err != nil {
+		t.Logf("importer revision: git log: %v (stamp unchanged)", err)
+		return ""
+	}
+	rev := strings.TrimSpace(string(out))
+	if len(rev) > 8 {
+		rev = rev[:8]
+	}
+	return rev
+}
+
+// convertWithImporter runs the documented invocation
+// (`spindle threads import --from forgejo --repo DIR --path FILE --out DIR`) over
+// one source body and returns the converted file and the command's output. A
+// construct the importer cannot translate exits 1 after writing the file; the
+// caller decides whether that refusal is declared. The source must come back
+// untouched.
+func convertWithImporter(t *testing.T, bin, slug string, source []byte) (converted, output []byte, err error) {
+	t.Helper()
+	tree := t.TempDir()
+	rel := filepath.Join(".forgejo", "workflows", slug+".yml")
+	in := filepath.Join(tree, rel)
+	if werr := os.MkdirAll(filepath.Dir(in), 0o755); werr != nil {
+		t.Fatal(werr)
+	}
+	if werr := os.WriteFile(in, source, 0o644); werr != nil {
+		t.Fatal(werr)
+	}
+	outDir := filepath.Join(tree, "out")
+	cmd := exec.Command(bin, "threads", "import", "--from", "forgejo", "--repo", tree, "--path", rel, "--out", outDir)
+	cmd.Dir = tree
+	cmd.Env = append(os.Environ(), "HOME="+tree)
+	output, err = cmd.CombinedOutput()
+	converted, rerr := os.ReadFile(filepath.Join(outDir, ".spindle", "workflows", slug+".yml"))
+	if rerr != nil {
+		t.Fatalf("%s: the importer wrote no converted file: %v\n%s", slug, rerr, output)
+	}
+	if after, _ := os.ReadFile(in); string(after) != string(source) {
+		t.Fatalf("%s: the importer modified its source file", slug)
+	}
+	return converted, output, err
+}
+
+// TestParityFixturesCarryNoPrivateHost keeps the corpus publishable. The publish
+// transform rewrites the private estate's host to the public forge in every text
+// file under the tree, fixtures included, so a fixture carrying it is rewritten
+// on the way out and its byte stamps stop matching — the published v0.10.0 tree
+// failed TestParityGoldensMatchTheirStamps exactly that way while the same file
+// passed locally. The copies carry a neutral host (git.example.com) instead;
+// this guard is the tripwire for a future copy-paste.
+func TestParityFixturesCarryNoPrivateHost(t *testing.T) {
+	// The token is assembled at run time: spelled out, this guard would itself
+	// trip the publish gate, which refuses a tree where any file still names the
+	// private estate (including the file that guards against it).
+	needle := "pack" + "den"
+	root, err := repoRoot()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tree := range []string{
+		filepath.Join(root, "internal", "e2e", "testdata", "parity"),
+		filepath.Join(root, "internal", "threads", "importer", "testdata"),
+	} {
+		err := filepath.WalkDir(tree, func(path string, d fs.DirEntry, werr error) error {
+			if werr != nil {
+				return werr
+			}
+			if d.IsDir() {
+				return nil
+			}
+			body, rerr := os.ReadFile(path)
+			if rerr != nil {
+				return rerr
+			}
+			if strings.Contains(strings.ToLower(string(body)), needle) {
+				rel, _ := filepath.Rel(root, path)
+				t.Errorf("%s names the private host: fixtures must carry the neutral host (git.example.com), or the publish transform rewrites their bytes and the stamps stop matching", rel)
+			}
+			return nil
+		})
+		if err != nil {
+			t.Fatalf("walk %s: %v", tree, err)
+		}
 	}
 }
 
@@ -541,32 +733,12 @@ func TestParityImporterReproducesGoldens(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			tree := t.TempDir()
-			rel := filepath.Join(".forgejo", "workflows", entry.Slug+".yml")
-			in := filepath.Join(tree, rel)
-			if werr := os.MkdirAll(filepath.Dir(in), 0o755); werr != nil {
-				t.Fatal(werr)
-			}
-			if werr := os.WriteFile(in, source, 0o644); werr != nil {
-				t.Fatal(werr)
-			}
-			outDir := filepath.Join(tree, "out")
-			cmd := exec.Command(bin, "threads", "import", "--from", "forgejo", "--repo", tree, "--path", rel, "--out", outDir)
-			cmd.Dir = tree
-			cmd.Env = append(os.Environ(), "HOME="+tree)
-			out, cerr := cmd.CombinedOutput()
+			converted, out, cerr := convertWithImporter(t, bin, entry.Slug, source)
 			if cerr != nil && len(entry.ExpectUntranslated) == 0 {
 				t.Fatalf("threads import: %v\n%s", cerr, out)
 			}
-			converted, rerr := os.ReadFile(filepath.Join(outDir, ".spindle", "workflows", entry.Slug+".yml"))
-			if rerr != nil {
-				t.Fatalf("the importer wrote no converted file: %v\n%s", rerr, out)
-			}
 			if string(converted) != string(golden) {
 				t.Fatalf("the importer's output differs from the committed golden; update the golden and its stamp in the same change:\n--- golden\n%s\n--- importer\n%s", golden, converted)
-			}
-			if after, _ := os.ReadFile(in); string(after) != string(source) {
-				t.Fatal("the importer modified its source file")
 			}
 		})
 	}
