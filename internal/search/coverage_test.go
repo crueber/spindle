@@ -55,8 +55,8 @@ func TestOwnerScopeIssueSections(t *testing.T) {
 	if ans.Code != nil {
 		t.Fatal("type=issues must not run code")
 	}
-	if iss.scope != (IssueScope{Owner: "acme", Repo: "a"}) {
-		t.Fatalf("issue scope = %+v, want acme/a", iss.scope)
+	if got := iss.scopeOf(); got != (IssueScope{Owner: "acme", Repo: "a"}) {
+		t.Fatalf("issue scope = %+v, want acme/a", got)
 	}
 	if len(ans.Issues.Repos) != 1 || ans.Issues.Repos[0].Status != StatusOK {
 		t.Fatalf("issue repos = %+v", ans.Issues.Repos)

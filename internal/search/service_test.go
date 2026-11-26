@@ -373,11 +373,11 @@ func TestSearchIssueSectionSeam(t *testing.T) {
 	if ans.Issues == nil || ans.Issues.Hits == nil {
 		t.Fatal("issues section / hits must never be nil")
 	}
-	if iss.scope != (IssueScope{Owner: "acme", Repo: "app"}) {
-		t.Fatalf("issue scope = %+v", iss.scope)
+	if got, want := iss.scopeOf(), (IssueScope{Owner: "acme", Repo: "app"}); got != want {
+		t.Fatalf("issue scope = %+v, want %+v", got, want)
 	}
-	if iss.got.Text != "crash" || !iss.got.CaseExact || !iss.got.Body || iss.got.Limit != 3 {
-		t.Fatalf("issue query = %+v", iss.got)
+	if got := iss.queryOf(); got.Text != "crash" || !got.CaseExact || !got.Body || got.Limit != 3 {
+		t.Fatalf("issue query = %+v", got)
 	}
 	if ans.Code != nil {
 		t.Fatal("type=issues must not run a code search")

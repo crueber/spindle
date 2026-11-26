@@ -178,7 +178,11 @@ func (f *fakeGit) callCount() int {
 
 // ---- issue searcher (P4 seam) ------------------------------------------------
 
+// fakeIssues is called once per candidate from the owner-scope fan-out
+// (search.go issueOwner), so every mutable field is mutex-guarded and the
+// recorded last call is read through the accessors below.
 type fakeIssues struct {
+	mu      sync.Mutex
 	section IssueSection
 	err     error
 	got     IssueQuery
@@ -186,11 +190,39 @@ type fakeIssues struct {
 }
 
 func (f *fakeIssues) SearchIssues(_ context.Context, scope IssueScope, q IssueQuery) (IssueSection, error) {
+	f.mu.Lock()
 	f.scope, f.got = scope, q
-	if f.err != nil {
-		return IssueSection{}, f.err
+	sec, err := cloneIssueSection(f.section), f.err
+	f.mu.Unlock()
+
+	if err != nil {
+		return IssueSection{}, err
 	}
-	return f.section, nil
+	return sec, nil
+}
+
+// scopeOf / queryOf return the last recorded call (last writer wins across the
+// fan-out; the assertions that read them use a single candidate).
+func (f *fakeIssues) scopeOf() IssueScope {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.scope
+}
+
+func (f *fakeIssues) queryOf() IssueQuery {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.got
+}
+
+// cloneIssueSection hands every call its own hits slice: the service's
+// normalizeIssueSection writes Labels in place, so sharing one backing array
+// across concurrent calls would race even with the lock held on the fake.
+func cloneIssueSection(sec IssueSection) IssueSection {
+	out := sec
+	out.Hits = append([]IssueHit(nil), sec.Hits...)
+	out.Repos = append([]IssueRepo(nil), sec.Repos...)
+	return out
 }
 
 // ---- real git fixtures -------------------------------------------------------
