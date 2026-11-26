@@ -105,6 +105,31 @@ func cardNodes(doc *html.Node) []*html.Node {
 	return out
 }
 
+// contributorBlock returns the pulse card's centered contributor container and
+// its two <p> lines (nil when the projection has no contributor share).
+func contributorBlock(t *testing.T, doc *html.Node) (*html.Node, []*html.Node) {
+	t.Helper()
+	cards := cardNodes(doc)
+	if len(cards) != 1 {
+		t.Fatalf("card eyebrows = %d, want 1", len(cards))
+	}
+	// cardNodes returns the eyebrow; the card container is its parent.
+	card := cards[0].Parent
+	var blocks []*html.Node
+	walk(card, func(n *html.Node) {
+		if n.Data == "div" && strings.Contains(attr(n, "class"), "text-center") {
+			blocks = append(blocks, n)
+		}
+	})
+	if len(blocks) == 0 {
+		return nil, nil
+	}
+	if len(blocks) != 1 {
+		t.Fatalf("centered contributor blocks = %d, want 1", len(blocks))
+	}
+	return blocks[0], nodesIn(blocks[0], "p")
+}
+
 func nodeText(n *html.Node) string {
 	var b strings.Builder
 	var rec func(*html.Node)
@@ -144,28 +169,33 @@ func TestCodePulseFullProjection(t *testing.T) {
 	if strings.Contains(body, "Bus factor") || strings.Contains(body, "bus factor") {
 		t.Error("the card must not call the contributor share a bus factor")
 	}
-	// The share is the row's value; the count is a caption line beneath it,
-	// never a kv value (which would read as a suffix to the percentage).
+	// The share and the count are ONE centered two-line block: the label and
+	// the share share a line, the count is the second line, and neither line
+	// is a kv row split to the card's edges.
 	doc := parsePage(t, body)
-	var caption *html.Node
+	block, lines := contributorBlock(t, doc)
+	if block == nil {
+		t.Fatal("no centered contributor block")
+	}
+	if len(lines) != 2 {
+		t.Fatalf("contributor block lines = %d, want 2", len(lines))
+	}
+	if got := strings.TrimSpace(nodeText(lines[0])); got != "Top contributor 80%" {
+		t.Errorf("line 1 = %q, want %q", got, "Top contributor 80%")
+	}
+	if got := strings.TrimSpace(nodeText(lines[1])); got != "3 contributors" {
+		t.Errorf("line 2 = %q, want %q", got, "3 contributors")
+	}
+	// The pair is not a kv row (no far-edge split, no ml-auto).
 	walk(doc, func(n *html.Node) {
-		if n.Data == "p" && strings.TrimSpace(nodeText(n)) == "3 contributors" {
-			caption = n
+		if n.Data == "div" && strings.Contains(attr(n, "class"), "kv-row") &&
+			strings.Contains(nodeText(n), "Top contributor") {
+			t.Error("the contributor pair must not be a kv row")
 		}
-		if n.Data == "span" && strings.Contains(attr(n, "class"), "kv-val") &&
-			strings.TrimSpace(nodeText(n)) == "3 contributors" {
-			t.Error("the contributor count must not be a kv value")
+		if strings.Contains(attr(n, "class"), "ml-auto") && strings.Contains(nodeText(n), "contributors") {
+			t.Error("the contributor pair must not be pushed to the card edge")
 		}
 	})
-	if caption == nil {
-		t.Error("the contributor count is not a caption line")
-	}
-	if !strings.Contains(body, ">Top contributor</span>") || !strings.Contains(body, ">80%</span>") {
-		t.Error("the share is not the top-contributor row's value")
-	}
-	if strings.Contains(body, "80% · 3 contributors") {
-		t.Error("the share and the count must not share a line")
-	}
 	// The sparkline is inline SVG with an accessible name stating range and
 	// totals; the text repeats the fact.
 	svg := nodesWithAttr(doc, "role", "img")
@@ -219,28 +249,18 @@ func TestCodePulseCappedContributors(t *testing.T) {
 	p.Windows["90"].ContributorsTotal = 60
 	_, body := pulseFixture(t, p, true)
 	doc := parsePage(t, body)
-	text := nodeText(doc)
-	if !strings.Contains(text, "60+ contributors") {
-		t.Errorf("capped contributors did not render 60+: %s", body)
+	block, lines := contributorBlock(t, doc)
+	if block == nil {
+		t.Fatalf("no centered contributor block: %s", body)
 	}
-	caption, kvValue := false, false
-	walk(doc, func(n *html.Node) {
-		txt := strings.TrimSpace(nodeText(n))
-		switch {
-		case n.Data == "p" && txt == "60+ contributors":
-			caption = true
-		case n.Data == "span" && strings.Contains(attr(n, "class"), "kv-val") && txt == "60+ contributors":
-			kvValue = true
-		}
-	})
-	if !caption {
-		t.Errorf("capped count is not a caption line: %s", body)
+	if len(lines) != 2 {
+		t.Fatalf("contributor block lines = %d, want 2", len(lines))
 	}
-	if kvValue {
-		t.Errorf("capped count must not be a kv value: %s", body)
+	if got := strings.TrimSpace(nodeText(lines[0])); got != "Top contributor 80%" {
+		t.Errorf("line 1 = %q, want %q", got, "Top contributor 80%")
 	}
-	if !strings.Contains(body, ">80%</span>") {
-		t.Errorf("capped count lost the share line: %s", body)
+	if got := strings.TrimSpace(nodeText(lines[1])); got != "60+ contributors" {
+		t.Errorf("line 2 = %q, want %q", got, "60+ contributors")
 	}
 }
 
@@ -290,7 +310,7 @@ func TestCodePulseOldProjectionHidesLanguageRow(t *testing.T) {
 	if strings.Contains(body, "Last release") {
 		t.Error("a release count without a stamp must omit the dated row")
 	}
-	if !strings.Contains(body, "10 commits · 90d") || !strings.Contains(body, ">Top contributor</span>") {
+	if !strings.Contains(body, "10 commits · 90d") || !strings.Contains(body, "Top contributor 80%") {
 		t.Error("old projection lost the rows it still has")
 	}
 }
@@ -340,8 +360,8 @@ func TestCodePulseNoCommitsNoContributorBlock(t *testing.T) {
 	if strings.Contains(body, "Top contributor") {
 		t.Error("a zero-commit window must omit the top-contributor block")
 	}
-	if strings.Contains(body, "Bus factor") {
-		t.Error("a zero-commit window must omit the contributor block entirely")
+	if strings.Contains(body, "contributors") {
+		t.Error("a zero-commit window must omit the contributor count line")
 	}
 	if !strings.Contains(body, "0 commits · 90d") {
 		t.Error("the zero-total momentum line must still be honest")

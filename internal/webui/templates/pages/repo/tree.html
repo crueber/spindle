@@ -145,11 +145,13 @@
           </svg>
           <div class="mono mt-0.5 text-[10px] text-[var(--pd-muted)]">last 30 days · UTC</div>
         </div>
+        {{if .Data.Pulse.TopShare}}
+        <div class="mb-1.5 text-center leading-snug">
+          <p class="mono text-[11.5px] text-[var(--pd-text-2)]">Top contributor {{.Data.Pulse.TopShare}}</p>
+          <p class="mono text-[11.5px] text-[var(--pd-text-2)]">{{.Data.Pulse.ContributorLine}}</p>
+        </div>
+        {{end}}
         <div class="kv">
-          {{if .Data.Pulse.TopShare}}
-          <div class="kv-row"><span class="kv-key">Top contributor</span><span class="kv-val">{{.Data.Pulse.TopShare}}</span></div>
-          <p class="mt-0.5 text-[11.5px] leading-snug text-[var(--pd-text-2)]">{{.Data.Pulse.ContributorLine}}</p>
-          {{end}}
           {{if .Data.Pulse.LastCommit}}
           <div class="kv-row"><span class="kv-key">Last commit</span><span class="kv-val"><time datetime="{{.Data.Pulse.LastCommit}}" title="{{.Data.Pulse.LastCommit}}">{{rel .Data.Pulse.LastCommit}}</time></span></div>
           {{end}}

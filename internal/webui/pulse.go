@@ -40,10 +40,10 @@ type codePulse struct {
 	SparkPoints string
 	SparkLabel  string
 
-	// Top contributor (90-day window): TopShare is the value of the
-	// "Top contributor" row ("78%") and ContributorLine is the caption line
-	// beneath it ("3 contributors", "60+ contributors" when capped). Both
-	// empty means the block is omitted (a zero-commit window).
+	// Top contributor (90-day window): one centered two-line block. TopShare
+	// is the share appended to the "Top contributor" label on line 1 ("78%")
+	// and ContributorLine is line 2 ("3 contributors", "60+ contributors"
+	// when capped). Both empty means the block is omitted (zero commits).
 	TopShare        string
 	ContributorLine string
 
