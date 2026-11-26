@@ -460,7 +460,7 @@ bucket; the zero-config dev loop never touches it.
 ## 8. CI pipeline
 
 Development happens on Forgejo; GitHub is a distribution channel. The pipeline is expressed as
-GitHub Actions (`.github/workflows/ci.yml`) and is the merge gate: web (stylesheet + islands + SDK) →
+Forgejo Actions (`.forgejo/workflows/ci.yml`) and is the merge gate: web (stylesheet + islands + SDK) →
 `go vet` → `-race` → the headless JS tests (`node --test`) → cover gate (D7) → e2e (real git ≥ 2.47) → store
 contract (filesystem + memory ALWAYS per D4; S3 against a rustfs service) → image build + container
 contract. `make web` builds both web artifacts; JS tests import source and need no build.
@@ -537,7 +537,7 @@ curl -fsSL https://github.com/crueber/spindle/raw/main/scripts/install.sh | sh
 - **Header names stay `X-Walgit-*` (including the `walgit_session` cookie in the auth cache key) and the token prefix stays `wgt_`** — the nginx contract and users' stored credentials are the edge-compat surface; renaming would silently invalidate deployed edge configs and credential helpers.
 - **Dev-rig rustfs keys/bucket keep the Rust values (`walgit-dev` / `walgit-dev-secret`, bucket `walgit-test`)** — muscle-memory continuity for contributors coming from the Rust rig; local-only credentials.
 - **Nix flake packaging not ported** — the flake was a Rust toolchain convenience; Go's static cross-build plus the Dockerfile covers the same ground without a second packaging system (revisit only on demand).
-- **CI is a Makefile + GitHub Actions pipeline, not GitHub Actions** — the repo lives on Forgejo; the Actions service block covers the rustfs contract job, and GitHub only receives the published squash commit (where its own Actions run the same gate and build the image).
+- **CI is a Makefile + Forgejo Actions pipeline, not GitHub Actions** — the repo lives on Forgejo; the Actions service block covers the rustfs contract job, and GitHub only receives the published squash commit (where its own Actions run the same gate and build the image).
 - **NEW (2026-09-05) — server-side TLS removed; the proxy terminates it** (Forgejo #165, §3.4): spindle listens plain HTTP (h2c) and never loads a cert — the `server.tls.*` keys, the §3.2/§3.3 `[server.tls]` examples, and the install.sh CA-download step are all gone. The one-box and production shapes put Caddy/nginx in front (minimal snippets in §3.4) with `X-Forwarded-Proto: https` so recipes advertise `https://`; `server.public_url` pins the external origin. Rationale: every inbound flow works behind a terminating proxy and outbound HTTPS (OIDC, webhooks, S3) validates against the system roots — owning an in-process TLS stack bought nothing.
 - **`install.sh` is served from the Forgejo raw URL** — the Rust edge example leaves the installer out of the open-route set; keeping it repo-hosted avoids inventing a new public server route in the Go rewrite.
 - **Divergence (2026-08-31), applied in this revision:**

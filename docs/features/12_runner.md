@@ -34,7 +34,7 @@ zero amendments; the one reserve amendment is drafted, not proposed.
   redaction, `secret_set` presence-only task params.
 - **Caps precedent**: `[import]` bounds section (max bytes, timeouts) — the pattern for §7 abuse caps.
 - **Lived experience**: this repo's own CI has run on Forgejo for years (Woodpecker until 2026-09,
-  GitHub Actions after) — the plan cites that operator experience where marked (LIVED).
+  Forgejo Actions after) — the plan cites that operator experience where marked (LIVED).
 
 ## 1. Prior-art research (borrowed vs invented)
 
@@ -68,7 +68,7 @@ reusable-workflow supply chain). v1 defines a deliberately small job schema (D5)
 
 ### 1.2 Gitea / Forgejo `act_runner` (from knowledge + LIVED operator experience)
 
-`act_runner` (the daemon behind GitHub Actions): register with a token minted in site/repo settings
+`act_runner` (the daemon behind Forgejo Actions): register with a token minted in site/repo settings
 (`act_runner register --token … --labels …`), then long-poll the Forgejo server for tasks matching
 its labels, execute each job as containers (one container per step, Docker or Podman), stream logs
 back over the same connection, report completion. Key observations:

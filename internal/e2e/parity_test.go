@@ -235,7 +235,7 @@ func TestParityGoldensMatchTheirStamps(t *testing.T) {
 		if src.Repository == "" || src.Path == "" || src.Commit == "" || src.Fetched == "" {
 			t.Fatalf("%s: incomplete stamp %+v", e.Slug, src)
 		}
-		if !strings.HasPrefix(src.Path, ".github/workflows/") {
+		if !strings.HasPrefix(src.Path, ".forgejo/workflows/") {
 			t.Fatalf("%s: stamp path %q is not a Forgejo workflow", e.Slug, src.Path)
 		}
 		if src.GoldenSHA256 == "" || src.ImporterCommit == "" || src.Translation == "" {

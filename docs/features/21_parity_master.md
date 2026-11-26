@@ -7,7 +7,7 @@ they list is still the requirement), and this document is what an agent implemen
 
 | Field | Value |
 |---|---|
-| Source card A (Forgejo) | `01a21819b2e6000000a918a3b0fdea` — "Threads: GitHub Actions parity (100%)", 69 items, 10 lists |
+| Source card A (Forgejo) | `01a21819b2e6000000a918a3b0fdea` — "Threads: Forgejo Actions parity (100%)", 69 items, 10 lists |
 | Source card B (GitHub) | `01a2181c57750000003249765b2a61` — "Threads: GitHub Actions parity (100%)", 90 items, 10 lists |
 | Master card | `01a218365e4f000000fa0fe360ab27` — "Threads: parity master plan (Forgejo-first)", Spindle board, Backlog, label `Epic`, assigned `crueber` |
 | Items reconciled | 159 source items → **119** canonical entries (`PAR-001` … `PAR-202`): 43 source items fold into a shared entry, 3 entries are born in reconciliation (§10), one checklist item is superseded by the product rule, and the gaps in the numbering are intentional |
@@ -42,9 +42,9 @@ Three properties make that checkable rather than rhetorical:
 
 1. **A committed conformance corpus.** `internal/e2e/testdata/parity/` holds byte-for-byte copies of real
    workflows plus a `SOURCE` stamp (repository, path, commit SHA, fetch date):
-   - **Forgejo (the operator's own, first):** `weave/.github/workflows/ci.yml`,
-     `weave/.github/workflows/publish-github.yml`, `scriobh/.github/workflows/ci.yml`,
-     `scriobh/.github/workflows/release.yml`.
+   - **Forgejo (the operator's own, first):** `weave/.forgejo/workflows/ci.yml`,
+     `weave/.forgejo/workflows/publish-github.yml`, `scriobh/.forgejo/workflows/ci.yml`,
+     `scriobh/.forgejo/workflows/release.yml`.
    - **GitHub (4–6 real public workflows, per the GitHub card's audit — re-verify and pin the SHA at fetch
      time):** `actions/starter-workflows` `ci/node.js.yml`; `goreleaser/goreleaser`
      `.github/workflows/build.yml`; `actions/upload-artifact` `.github/workflows/test.yml`;
@@ -113,7 +113,7 @@ unconditionally, and it changes the shape of several source-card items.
 ### 2.1 Discovery
 
 - The only discovered location is **`.spindle/workflows/*.yml` / `*.yaml`** — one directory, no nesting,
-  at the commit being built. `.github/workflows/` and `.github/workflows/` are **never read**, not as a
+  at the commit being built. `.forgejo/workflows/` and `.github/workflows/` are **never read**, not as a
   fallback, not as a migration mode, not behind a config flag. The engine has no code path that opens a
   foreign directory. (Baseline: already true; `internal/threads/discover.go`,
   `GitReader.ListWorkflowFiles`. This is `PAR-001`, a verify-and-close row.)
@@ -155,8 +155,8 @@ a converter:
   conversion report is asserted: a key that cannot be translated must appear in the report, never vanish.
 
 **Superseded source items** (and named in a comment on both cards): Forgejo card list *Triggers & events*
-item 1 ("read `.github/workflows/*.{yml,yaml}` (and the `.github/workflows` fallback) as well as
-`.spindle/workflows`") and Top-10 gap 4 ("No `.github/workflows` discovery — P1 (blocks every file)"); the
+item 1 ("read `.forgejo/workflows/*.{yml,yaml}` (and the `.github/workflows` fallback) as well as
+`.spindle/workflows`") and Top-10 gap 4 ("No `.forgejo/workflows` discovery — P1 (blocks every file)"); the
 GitHub card has no discovery item, so its *Conformance harness* item (corpus under
 `internal/threads/testdata/github-corpus/`) and its *living matrix* item (`docs/features/21_github_parity.md`)
 are re-pointed at this document and at `.spindle/workflows/`.
@@ -222,7 +222,7 @@ matrix JSON's `priority` field so a row can be re-ordered without renumbering.
 
 | ID | Capability | Prov | Status | W | Track | Acceptance | Sec |
 |---|---|---|---|---|---|---|---|
-| PAR-001 | One discovered location: `.spindle/workflows/*.{yml,yaml}`, no foreign fallback, ever | F | have | 1V | T3 | A repo containing only `.github/workflows/ci.yml` yields zero workflow files and a named hint pointing at `threads import` | S14 |
+| PAR-001 | One discovered location: `.spindle/workflows/*.{yml,yaml}`, no foreign fallback, ever | F | have | 1V | T3 | A repo containing only `.forgejo/workflows/ci.yml` yields zero workflow files and a named hint pointing at `threads import` | S14 |
 | PAR-002 | One-way importer `spindle threads import` (converted file + report + golden diff) | F | missing | 1 | T1 | Converting the 4 Forgejo corpus files produces files that parse and a committed golden per file; an untranslatable key is named in the report and exits non-zero | S14 |
 | PAR-003 | Migration banner: a foreign workflow directory is *shown* with the importer command, never run | — | missing | 2 | T6 | The Threads page lists the foreign files and the exact `spindle threads import` invocation; no run is created by visiting it | S14 |
 | PAR-004 | Canonical `spindle.*` context / `SPINDLE_*` env with `github.*`/`forgejo.*` as aliases (D-1) | — | partial | 2 | T1 | `spindle.ref`, `spindle.event_name` and `github.ref`, `forgejo.ref` resolve to the identical value in one table test | — |
@@ -905,7 +905,7 @@ the matrix carries the row, the refusal is named, and the corpus expectation is 
 
 | # | We will not… | Reason | Sign-off |
 |---|---|---|---|
-| N1 | …read `.github/workflows/` or `.github/workflows/` at run time, in any mode | Product rule: Threads runs Spindle workflows. A second discovery path splits the product, doubles the parser surface, and makes "which file ran?" ambiguous. The importer is the migration (`PAR-002`) | **given** (the operator's product rule) |
+| N1 | …read `.forgejo/workflows/` or `.github/workflows/` at run time, in any mode | Product rule: Threads runs Spindle workflows. A second discovery path splits the product, doubles the parser surface, and makes "which file ran?" ambiguous. The importer is the migration (`PAR-002`) | **given** (the operator's product rule) |
 | N2 | …present a Forgejo workflow as a supported format or use "Forgejo workflow" as product language | Same rule. Compatibility is documented as aliases (§2.2), not identity | **given** (product rule) |
 | N3 | …trust an arbitrary `uses:` with no resolution record and no policy | A marketplace without pinning, an audit record and a revocation path is a supply-chain hole with a UI (`PAR-070`, S1) | **given** (D-5, 2026-11-26) |
 | N4 | …accept a key we do not implement as inert | Silent acceptance is how `permissions` became a false promise. Named parse error or named refusal, always | policy, no sign-off needed |
@@ -1004,7 +1004,7 @@ rule and must not be built.
 
 | Item | Short | → |
 |---|---|---|
-| F1.1 | Discovery of `.github/workflows` (+ `.github/workflows` fallback) | **superseded** → PAR-002, PAR-001, PAR-003 |
+| F1.1 | Discovery of `.forgejo/workflows` (+ `.github/workflows` fallback) | **superseded** → PAR-002, PAR-001, PAR-003 |
 | F1.2 | `on.push.tags` fires; tags-only stops firing on branches | PAR-010, PAR-011 |
 | F1.3 | `push.paths`/`paths-ignore` | PAR-012 |
 | F1.4 | full `pull_request.types` | PAR-014 |
@@ -1192,7 +1192,7 @@ rule and must not be built.
 | 2 | Job-level `continue-on-error` is implemented here but **ignored** by Forgejo (P0: match or record) | `continue-on-error` is baseline and must be expression-valued | Keep GitHub semantics; record the Forgejo divergence (`PAR-056`, D-4). Removing a working behaviour to match a doc would silently change a green run to red |
 | 3 | Forgejo's token has repo **write** and ignores `permissions`; Threads defaults to read (P1: match or record) | `permissions` must drive real capabilities, read default implied | Secure subset wins: scoped token, read default, Forgejo implicit-write is a written divergence (`PAR-112`/`PAR-114`, D-12) |
 | 4 | Forgejo cancels the previous run on push/PR-synchronize when `concurrency` is absent (P0) | `concurrency` queues where GitHub cancels the pending run (P2), and pending-cancel is required | One supersede model: `PAR-150` (no block → supersede) + `PAR-152` (in a group, cancel pending by default) |
-| 5 | Discovery of `.github/workflows` (+ `.github/` fallback) is P1 and "blocks every file" | No discovery item; corpus under `internal/threads/testdata/github-corpus/` | Product rule: no foreign discovery. Importer (`PAR-002`), corpus converted, one corpus root `internal/e2e/testdata/parity/` |
+| 5 | Discovery of `.forgejo/workflows` (+ `.github/` fallback) is P1 and "blocks every file" | No discovery item; corpus under `internal/threads/testdata/github-corpus/` | Product rule: no foreign discovery. Importer (`PAR-002`), corpus converted, one corpus root `internal/e2e/testdata/parity/` |
 | 6 | Doc path `docs/features/16_actions_parity.md` | Doc path `docs/features/21_github_parity.md` | `16` is moderation; one document `21_parity_master.md` + generated matrix (preamble) |
 | 7 | Corpus at `internal/e2e/testdata/forgejo/` | Corpus at `internal/threads/testdata/github-corpus/` | `internal/e2e/testdata/parity/{forgejo,github}/`, one harness |
 | 8 | "Artifacts: have" | Artifact v4 input parity missing, cross-run missing | Not a contradiction (same-run vs v4 surface); union → `PAR-097`, `PAR-098` |

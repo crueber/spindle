@@ -502,7 +502,7 @@ func TestOutputPath(t *testing.T) {
 		want string
 		ok   bool
 	}{
-		{".github/workflows/ci.yml", ".spindle/workflows/ci.yml", true},
+		{".forgejo/workflows/ci.yml", ".spindle/workflows/ci.yml", true},
 		{".github/workflows/release.yaml", ".spindle/workflows/release.yml", true},
 		{"ci.yaml", ".spindle/workflows/ci.yml", true},
 		{".yml", "", false},

@@ -2,7 +2,7 @@
 // Spindle workflow (`PAR-002`, docs/features/21_parity_master.md §2.3).
 //
 // It is a one-way migration aid, not a second runtime. The engine never reads
-// `.github/workflows/` or `.github/workflows/` (PAR-001): those directories are
+// `.forgejo/workflows/` or `.github/workflows/` (PAR-001): those directories are
 // read here, once, by an operator command, and the converted file is an
 // ordinary `.spindle/workflows/<name>.yml`. The importer never executes the
 // source, never edits the source directory, and is read-only unless asked to
@@ -84,7 +84,7 @@ type profile struct {
 
 var profiles = map[Platform]profile{
 	Forgejo: {
-		dir:      ".github/workflows",
+		dir:      ".forgejo/workflows",
 		labels:   map[string][]string{"docker": {"self-hosted", "linux", "docker"}},
 		fallback: []string{"self-hosted", "linux", "docker"},
 		hosted: map[string]string{

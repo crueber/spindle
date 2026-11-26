@@ -174,7 +174,7 @@ The run id is in the page URL and in `spindle threads list acme/widgets`.
 
 ### 2.4 Migrating in a Forgejo or GitHub workflow
 
-Threads only ever runs `.spindle/workflows`; it does not read `.github/workflows` or
+Threads only ever runs `.spindle/workflows`; it does not read `.forgejo/workflows` or
 `.github/workflows` at run time (not as a fallback, not behind a flag). The migration is an explicit,
 one-way conversion:
 

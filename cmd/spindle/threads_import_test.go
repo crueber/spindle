@@ -62,7 +62,7 @@ func TestThreadsImportDryRun(t *testing.T) {
 	if code != exitOK {
 		t.Fatalf("exit = %d\nstdout:\n%s\nstderr:\n%s", code, stdout, stderr)
 	}
-	if !strings.Contains(stdout, "# ==> .spindle/workflows/ci.yml (from .github/workflows/ci.yml)") {
+	if !strings.Contains(stdout, "# ==> .spindle/workflows/ci.yml (from .forgejo/workflows/ci.yml)") {
 		t.Errorf("dry run does not announce the target:\n%s", stdout)
 	}
 	if !strings.Contains(stdout, "name: CI") {

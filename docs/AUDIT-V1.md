@@ -12,7 +12,7 @@ audits against the merged fixes — **a verdict flips only on fresh rendered evi
 | Area | Round 1 | Round 2 (re-audit) | Evidence |
 |---|---|---|---|
 | CLI vs `gh` | PASS WITH FAILS (5) | **PASS** — all five fixed, independently reproduced | `/tmp/opencode/aud2-cli/` (7) |
-| Threads vs GitHub Actions | FAIL — T1 only, no runner | **PARTIAL (close)** — real CI, real gating; pass 1 (`fix/threads-triggers`) closed PR-head delivery/ordering, `needs:`, dispatch inputs + UI and cancelled/`in_progress` checks; pass 2 (`fix/threads-runtime`) closed schedule, retention/GC, `permissions`/job token, the approval gate and the UI leftovers; round 3 (`fix/threads-retention-filters`) closed multi-repo retention and the filter layout and fixed three smaller gaps (job-token push loop, `skipped` state, first cron tick); only artifacts/caches (declared not-v1) remain | `/tmp/opencode/aud2-threads/`, `/tmp/opencode/aud3-threads.md` |
+| Threads vs Forgejo Actions | FAIL — T1 only, no runner | **PARTIAL (close)** — real CI, real gating; pass 1 (`fix/threads-triggers`) closed PR-head delivery/ordering, `needs:`, dispatch inputs + UI and cancelled/`in_progress` checks; pass 2 (`fix/threads-runtime`) closed schedule, retention/GC, `permissions`/job token, the approval gate and the UI leftovers; round 3 (`fix/threads-retention-filters`) closed multi-repo retention and the filter layout and fixed three smaller gaps (job-token push loop, `skipped` state, first cron tick); only artifacts/caches (declared not-v1) remain | `/tmp/opencode/aud2-threads/`, `/tmp/opencode/aud3-threads.md` |
 | Packages vs GHCR/OCI | protocol PASS / product FAIL (5) | **PASS** — protocol + product (one new page panic found and fixed) | `/tmp/opencode/aud2-packages/` |
 | Web parity | FAIL — 5 breakages | **PASS on the five; 1 new gate hole** (authenticated non-admin) | `/tmp/opencode/aud2-web/` |
 | Foundations / security | PASS with 5 defects | **PASS** — F1–F5 closed, no regressions | `/tmp/opencode/aud2-foundations/` (73) |
@@ -73,7 +73,7 @@ Secondary: `pr diff`, `pr close`, `-R`/`SPINDLE_REPO`, `checks status refs/heads
 
 ---
 
-## Threads vs GitHub Actions (`audit-threads.md`)
+## Threads vs Forgejo Actions (`audit-threads.md`)
 
 **Verdict: FAIL — not at parity, and it cannot gate a merge green today.** What shipped is the T1
 milestone: bucket-native run/job records plus a checks mirror. There is no runner, no executor, no
@@ -492,7 +492,7 @@ HTML; `/setup` shows two primaries (header Login + body Save — outside the rep
 
 ### Threads (`aud2-threads.md`, round 2)
 
-**Verdict: PARTIAL — Threads runs real CI and gates merges, but it is not yet at GitHub Actions parity.** Verified live with a real `spindle runner serve`, real containers and a real browser:
+**Verdict: PARTIAL — Threads runs real CI and gates merges, but it is not yet at Forgejo Actions parity.** Verified live with a real `spindle runner serve`, real containers and a real browser:
 
 **Passing:** push → two jobs execute, checks `pending` (with `started_at`) → `success`, SSE logs stream in the browser at 1440 and 390; a failing step → check `failure` → the merge is refused (`blocked on threads/ci/lint (failure)`), a fix commit → merge `ok`, and the **merge commit gets its own push run** (the round-1 hole); PR open/reopen fire one run each and close fires none; a fork PR runs the **base-tip** workflow with `trusted=false`, `secret is []`, and a push with its job token is rejected with no ref landing (a trusted run logs `secret is [***]`); per-file workflow isolation (8 shapes, matrix → 4 cells, list `runs-on`, mapping container, permissions, concurrency, job `uses`; one bad file errors alone); services sidecar aliasing; cancel/rerun to attempt 2; 4 runners × 8 jobs claimed exactly once (2/2/2/2, 9 s, zero leftovers).
 
@@ -635,7 +635,7 @@ seven clean; two FAILs and three smaller gaps were dispatched to
   eligible at once. Test: `TestScheduleSweeperFirstTickIsTheNextMinute` (08:37:57 fires 08:37; the
   next pass at 08:38:00 fires 08:38, not 08:39).
 
-Still behind GitHub Actions after this pass, unchanged and declared: artifacts/caches (not v1), the
+Still behind Forgejo Actions after this pass, unchanged and declared: artifacts/caches (not v1), the
 action marketplace / reusable workflows / OIDC / environments (out of scope), and two recorded
 observations not fixed here — the run page shows *declared* permissions on a fork run that is pinned
 to read (the effective scopes are in the fetch/start answer), and cancel latency remains one

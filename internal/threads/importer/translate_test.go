@@ -93,9 +93,9 @@ func TestCorpusSourceProvenance(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, upstream := range []string{
-		".github/workflows/ci.yml",
-		".github/workflows/publish-github.yml",
-		".github/workflows/release.yml",
+		".forgejo/workflows/ci.yml",
+		".forgejo/workflows/publish-github.yml",
+		".forgejo/workflows/release.yml",
 		"crueber/weave",
 		"crueber/scriobh",
 		"5b2526d42ab076d1b80c39b60c13372994c23bdf",

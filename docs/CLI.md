@@ -177,7 +177,7 @@ spindle threads import --from forgejo|github --repo DIR
 
 | Flag | Meaning |
 |---|---|
-| `--from forgejo\|github` | the source dialect (required): `.github/workflows` or `.github/workflows` |
+| `--from forgejo\|github` | the source dialect (required): `.forgejo/workflows` or `.github/workflows` |
 | `--repo DIR` | the repository checkout to read (required) |
 | `--path PATH` | import one source file or directory instead of the platform's workflow directory; repo-relative or absolute, and it must stay inside the repository |
 | `--out DIR` | write the converted files under `DIR` (the same repo-relative layout: `DIR/.spindle/workflows/<name>.yml`) |
@@ -209,7 +209,7 @@ carries no timestamp, so converting the same source twice produces the same byte
   "applied": false,
   "partial": true,
   "files": [{
-    "source": ".github/workflows/release.yml",
+    "source": ".forgejo/workflows/release.yml",
     "output": ".spindle/workflows/release.yml",
     "translated": 41,
     "parses": true,

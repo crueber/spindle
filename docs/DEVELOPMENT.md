@@ -112,7 +112,7 @@ The non-Go trees:
 | `internal/webui/templates/` | `base.html`, `partials/`, and `pages/<group>/*.html` — one template set per page. |
 | `Dockerfile` | Three stages: web build → static Go binary → alpine + git runtime, nonroot. |
 | `compose.yaml`, `compose.standalone.yml`, `compose.dev-idp.yml` | The S3 rig (spindle + rustfs + bucket provisioning), the standalone filesystem stack, and the dev IdP profile. |
-| `.github/workflows/` | `ci.yml`, the merge gate and image publish described below. |
+| `.forgejo/workflows/` | `ci.yml`, the merge gate and image publish described below. |
 | `Makefile` | The only task runner; every tier and CI entry point is a target. |
 | `scripts/` | `ci-s3-bucket.sh` (provisions the contract bucket; the store never creates buckets) and the publish tooling. |
 
@@ -257,7 +257,7 @@ set; it does not replace looking at the page you changed.
 
 ## CI and publishing
 
-CI runs on GitHub Actions (`.github/workflows/ci.yml`) on every pull request, every push to `main` and
+CI runs on Forgejo Actions (`.forgejo/workflows/ci.yml`) on every pull request, every push to `main` and
 every `v*` tag. Each job builds the web itself — the runner rejects the artifact actions, and the Go build
 embeds `web/dist` anyway.
 

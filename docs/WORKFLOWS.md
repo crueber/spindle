@@ -1446,7 +1446,7 @@ runner copies them under the calling step's id.
 
 ## 10. Migrating from Forgejo
 
-Threads never reads `.github/workflows/` or `.github/workflows/` — not as a fallback, not behind a
+Threads never reads `.forgejo/workflows/` or `.github/workflows/` — not as a fallback, not behind a
 flag. The migration is an explicit, **one-way conversion** performed by the `spindle` binary:
 
 ```sh
@@ -1503,7 +1503,7 @@ The examples below are derived from working repositories (Weave and Scriobh), no
 
 ### 10.2 Weave: tests, then a daemonless image
 
-**Original** (`.github/workflows/ci.yml`, excerpt):
+**Original** (`.forgejo/workflows/ci.yml`, excerpt):
 
 ```yaml-forgejo
 jobs:
@@ -1705,7 +1705,7 @@ in the script.
 
 ### 10.3 Scriobh: multi-job tests and a matrix release
 
-**Original** (`.github/workflows/ci.yml`, the editor job):
+**Original** (`.forgejo/workflows/ci.yml`, the editor job):
 
 ```yaml-forgejo
 jobs:
@@ -1757,7 +1757,7 @@ Translations: `branches: [main, 'phase-*']` is unchanged (a `*` glob); the Node 
 unchanged; checkout and the token handling disappear. `npm ci` needs no cache action — a cold
 run is slower, which is the accepted trade (no `actions/cache`).
 
-**Original** (`.github/workflows/release.yml`, release job):
+**Original** (`.forgejo/workflows/release.yml`, release job):
 
 ```yaml-forgejo
 on:

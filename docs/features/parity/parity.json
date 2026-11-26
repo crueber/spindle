@@ -21,7 +21,7 @@
         "S14"
       ],
       "decision": "",
-      "acceptance": "A repo containing only `.github/workflows/ci.yml` yields zero workflow files and a named hint pointing at `threads import`",
+      "acceptance": "A repo containing only `.forgejo/workflows/ci.yml` yields zero workflow files and a named hint pointing at `threads import`",
       "docs_refs": [
         "docs/features/21_parity_master.md §4.1",
         "docs/threads.md §3",

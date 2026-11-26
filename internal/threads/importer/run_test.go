@@ -253,7 +253,7 @@ func TestRunApplyFromSubdirectory(t *testing.T) {
 	if err := os.MkdirAll(sub, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := Run(context.Background(), Options{Repo: sub, Platform: Forgejo, Apply: true, Path: filepath.Join(root, ".github/workflows/ci.yml")}); err == nil ||
+	if _, err := Run(context.Background(), Options{Repo: sub, Platform: Forgejo, Apply: true, Path: filepath.Join(root, ".forgejo/workflows/ci.yml")}); err == nil ||
 		!strings.Contains(err.Error(), "repository root") {
 		t.Fatalf("err = %v, want a repository-root refusal", err)
 	}

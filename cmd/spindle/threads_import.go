@@ -37,7 +37,7 @@ func runThreadsImport(ctx context.Context, c *cli, args []string) int {
 		w := c.stderr()
 		fmt.Fprintln(w, "usage: spindle threads import --from forgejo|github --repo DIR [--path PATH] [--out DIR] [--apply [--branch NAME] [--allow-partial]] [--json]")
 		fmt.Fprintln(w)
-		fmt.Fprintln(w, "Convert .github/workflows or .github/workflows into .spindle/workflows.")
+		fmt.Fprintln(w, "Convert .forgejo/workflows or .github/workflows into .spindle/workflows.")
 		fmt.Fprintln(w, "Read-only by default; --apply commits on a new branch and never pushes.")
 		fmt.Fprintln(w, "A construct that cannot be translated is marked `# UNTRANSLATED:` and exits 1.")
 		fmt.Fprintln(w)

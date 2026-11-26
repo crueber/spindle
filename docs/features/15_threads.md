@@ -1959,7 +1959,7 @@ classes and wrap at narrow widths; verified at 1440×900 and ~390×844 with
   its alternative rather than silently ignored.
 
 - **NEW (2026-11-26) — the importer is a one-way converter, not a second discovery path.** PAR-002
-  (`docs/features/21_parity_master.md` §2.3): `.github/workflows/` and `.github/workflows/` stay
+  (`docs/features/21_parity_master.md` §2.3): `.forgejo/workflows/` and `.github/workflows/` stay
   unread by the engine (PAR-001); `spindle threads import` reads them once, on an operator command,
   and emits `.spindle/workflows/<name>.yml`. (a) **Refuse, never guess.** Every construct the target
   language cannot express is a report entry *and* a `# UNTRANSLATED:` comment at its own site, and

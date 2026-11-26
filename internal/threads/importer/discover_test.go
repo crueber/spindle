@@ -32,13 +32,13 @@ func repoTree(t *testing.T, files map[string]string) string {
 
 func TestDiscoverDefaultDirs(t *testing.T) {
 	root := repoTree(t, map[string]string{
-		".github/workflows/ci.yml":       "on: push\n",
-		".github/workflows/release.yaml": "on: push\n",
-		".github/workflows/notes.md":     "not a workflow\n",
-		".github/workflows/nested/x.yml": "on: push\n",
-		".github/workflows/ci.yml":       "on: push\n",
-		".github/workflows/other.yml":    "on: push\n",
-		".github/workflows/.hidden.yml":  "on: push\n",
+		".forgejo/workflows/ci.yml":       "on: push\n",
+		".forgejo/workflows/release.yaml": "on: push\n",
+		".forgejo/workflows/notes.md":     "not a workflow\n",
+		".forgejo/workflows/nested/x.yml": "on: push\n",
+		".github/workflows/ci.yml":        "on: push\n",
+		".github/workflows/other.yml":     "on: push\n",
+		".forgejo/workflows/.hidden.yml":  "on: push\n",
 	})
 	srcs, err := Discover(root, Forgejo, "")
 	if err != nil {
@@ -48,7 +48,7 @@ func TestDiscoverDefaultDirs(t *testing.T) {
 	for _, s := range srcs {
 		rels = append(rels, s.Rel)
 	}
-	want := ".github/workflows/.hidden.yml,.github/workflows/ci.yml,.github/workflows/release.yaml"
+	want := ".forgejo/workflows/.hidden.yml,.forgejo/workflows/ci.yml,.forgejo/workflows/release.yaml"
 	if strings.Join(rels, ",") != want {
 		t.Errorf("forgejo sources = %v, want %s", rels, want)
 	}
@@ -63,8 +63,8 @@ func TestDiscoverDefaultDirs(t *testing.T) {
 
 func TestDiscoverExplicitPath(t *testing.T) {
 	root := repoTree(t, map[string]string{
-		".github/workflows/ci.yml": "on: push\n",
-		"ci/release.yml":           "on: push\n",
+		".forgejo/workflows/ci.yml": "on: push\n",
+		"ci/release.yml":            "on: push\n",
 	})
 	// Relative file.
 	srcs, err := Discover(root, Forgejo, "ci/release.yml")
@@ -85,7 +85,7 @@ func TestDiscoverExplicitPath(t *testing.T) {
 
 func TestDiscoverRefusesEscapes(t *testing.T) {
 	root := repoTree(t, map[string]string{
-		".github/workflows/ci.yml": "on: push\n",
+		".forgejo/workflows/ci.yml": "on: push\n",
 	})
 	outside := t.TempDir()
 	secret := filepath.Join(outside, "secret.yml")
@@ -98,7 +98,7 @@ func TestDiscoverRefusesEscapes(t *testing.T) {
 		}
 	}
 	// A symlink whose name looks local but points outside is refused.
-	link := filepath.Join(root, ".github/workflows/evil.yml")
+	link := filepath.Join(root, ".forgejo/workflows/evil.yml")
 	if err := os.Symlink(secret, link); err != nil {
 		t.Skipf("symlinks unavailable: %v", err)
 	}
@@ -106,7 +106,7 @@ func TestDiscoverRefusesEscapes(t *testing.T) {
 		t.Error("a symlink escaping the repository was accepted")
 	}
 	// A symlink to a file inside the repository is resolved and accepted.
-	inside := filepath.Join(root, ".github/workflows/real.yml")
+	inside := filepath.Join(root, ".forgejo/workflows/real.yml")
 	if err := os.WriteFile(inside, []byte("on: push\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -128,7 +128,7 @@ func TestDiscoverRefusesEscapes(t *testing.T) {
 }
 
 func TestDiscoverNoWorkflows(t *testing.T) {
-	root := repoTree(t, map[string]string{".github/workflows/x.md": "nope"})
+	root := repoTree(t, map[string]string{".forgejo/workflows/x.md": "nope"})
 	if _, err := Discover(root, Forgejo, ""); !errors.Is(err, ErrNoWorkflows) {
 		t.Fatalf("err = %v, want ErrNoWorkflows", err)
 	}
@@ -155,7 +155,7 @@ func TestDiscoverBadRoots(t *testing.T) {
 }
 
 func TestDiscoverRootIsSymlink(t *testing.T) {
-	real := repoTree(t, map[string]string{".github/workflows/ci.yml": "on: push\n"})
+	real := repoTree(t, map[string]string{".forgejo/workflows/ci.yml": "on: push\n"})
 	link := filepath.Join(t.TempDir(), "link")
 	if err := os.Symlink(real, link); err != nil {
 		t.Skipf("symlinks unavailable: %v", err)

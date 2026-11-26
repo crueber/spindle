@@ -90,10 +90,15 @@ Performance claims (scale, latency shape) are **evidence-backed**: measured entr
 - **Tests that spawn git pin their identity.** Annotated tags and `commit-tree` need an author/committer; runners and containers have no global git config. `TestMain` in `internal/git` and `internal/maintain` sets `GIT_AUTHOR_*`/`GIT_COMMITTER_*` for spawned subprocesses only. Reproduce environment gaps with `env -i PATH=… HOME=/tmp/nohome go test …`.
 - **Fresh clones compile.** `web/dist/.keep` is tracked because `go:embed all:dist` fails on a missing directory — never gitignore it away, and build the web BEFORE `go test` in CI (the embed shell is what `/admin` 200s on).
 - **Tailwind `@source` paths are relative to the CSS file, and a missing one is silent.** `web/src/app.css` scans `../../internal/webui/templates`; the image's web stage copies only `web/`, so the relative path pointed at nothing, Tailwind emitted a smaller `app.css` containing the `@apply` components (`.brand`, `.btn`) and none of the utilities the templates use, and the deployed site rendered unstyled while every dev/CI build (whole tree present) passed. The web stage now copies the template tree to the resolved path and the build (`Dockerfile` + `make web`) greps for `max-w-6xl`/`.flex{`. Any new `@source` outside `web/` needs the same treatment; file-exists checks do not catch an empty scan.
-- **Development builds and publishing are separate steps.** Every pull request and push to `main` runs `.github/workflows/ci.yml` (the full gate) and publishes the image `ghcr.io/crueber/spindle:latest` (plus the commit SHA, and the version on `v*` tags). Keep the package name stable: it is the pull path users have. README "Run with docker compose" documents pulling.
+- **Development builds and publishing are separate steps.** Every pull request and push to `main` runs `.forgejo/workflows/ci.yml` (the full gate) and publishes the image `ghcr.io/crueber/spindle:latest` (plus the commit SHA, and the version on `v*` tags). Keep the package name stable: it is the pull path users have. README "Run with docker compose" documents pulling.
   Publishing is the button, not a mirror: `bump` (patch/minor/major) or `bump: none` + an exact `tag`
   (Weave's process); a publish whose exported tree is unchanged produces a tag only, never an empty
   commit.
+- **The publish sanitizer rewrites hosts, never facts.** `scripts/publish-to-github.sh` once rewrote
+  `.forgejo/workflows` → `.github/workflows` in *every* file; in the published tree that turned the
+  importer's Go fixture map into duplicate keys, so `v0.10.0`'s tag CI failed `go vet` while the local tree
+  was green. Names of the CI system and the foreign workflow directory are facts (the importer reads it);
+  leave them, and run `go vet` on the exported tree before pushing.
 - **The publish tree is the tracked set — `.gitignore` must not subtract from it.** The published
   copy is `git archive HEAD` re-committed under a fresh `git init`, so an ignore rule that matches a
   tracked path silently drops it (the stale `covergate/` rule removed a whole package from a
@@ -324,7 +329,7 @@ Makefile            the only task runner: web, build, fmt, vet, test, race, cove
 Dockerfile          three-stage image (web build → static Go binary → alpine+git runtime, nonroot)
 compose*.y(ml)      compose.standalone.yml = spindle alone (filesystem store); compose.yaml = spindle +
                     rustfs + create-bucket (the S3 rig, also `make dev-store`); both build from source
-.github/workflows  CI: ci.yml = the merge gate + image to ghcr.io/crueber/spindle:latest
+.forgejo/workflows  CI: ci.yml = the merge gate + image to ghcr.io/crueber/spindle:latest
 scripts/ci-s3-bucket.sh  makes the S3 contract bucket exist (curl SigV4, no aws-cli)
 ```
 

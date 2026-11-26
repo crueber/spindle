@@ -255,7 +255,7 @@ func TestJobIDForCollisions(t *testing.T) {
 
 // TestDiscoverIgnoresForeignWorkflowDirs is PAR-001's acceptance: the only
 // discovered location is .spindle/workflows, and a repository whose CI lives in
-// .github/workflows is a no-workflow repository — zero files, no run. It pins
+// .forgejo/workflows is a no-workflow repository — zero files, no run. It pins
 // both layers: a GitReader that (wrongly) hands back a foreign path is filtered
 // by workflowPath, and a real tree with only a foreign directory yields nothing
 // at all, so no trigger can ever create a run from it.
@@ -265,7 +265,7 @@ func TestJobIDForCollisions(t *testing.T) {
 // explicit request, deliberately not a discovery path, so it is not asserted
 // here.
 func TestDiscoverIgnoresForeignWorkflowDirs(t *testing.T) {
-	foreign := ".github/workflows/ci.yml"
+	foreign := ".forgejo/workflows/ci.yml"
 	body := "name: CI\non: [push]\njobs:\n  build:\n    runs-on: linux\n    steps:\n      - run: echo hi\n"
 
 	t.Run("a reader that returns a foreign path is filtered", func(t *testing.T) {
