@@ -21,7 +21,10 @@
 //	    RepoScheduled:  the settings-describe recipe (strategies, this_host,
 //	                    upstream follow, effective fields).
 //	    RepoMirror:     mirror.Service.Get (Doc -> view) + view.NextSync/FormatLastResult.
-//	    RepoPushMirror: pushmirror.Service.Get + sdk View (has_secret/secret_hint).
+//	                    "sync now" starts the mirror-sync task and returns the
+//	                    shared task card (it never moves next_sync_at).
+//	    RepoPushMirror: pushmirror.Service.Get + sdk View (has_secret/secret_hint);
+//	                    "sync now" renders the same card for mirror-push-sync.
 //	    RepoPolicy:     policy store read (the same doc policy.put writes).
 //	    RepoConfig:     api.RepoView.Settings + SettingsHistory.
 //	    RepoAccess:     identity.Service.GetAccess (version, visibility, bindings)
@@ -371,18 +374,35 @@ type SettingsOption struct {
 }
 
 // SettingsMirror is the pull-mirror container.
+//
+// The two stamp rows are formatted for a reader, never a raw RFC3339 string:
+// NextSync is the relative phrase plus the absolute UTC stamp ("in 10h ·
+// 2026-11-27 00:00 UTC"), LastSynced its absolute stamp ("2026-11-26 13:19
+// UTC · 1m ago"), and the *ISO fields carry the machine value for the
+// <time datetime title> pair only. A manual sync never moves NextSync — that
+// is the next SCHEDULED fire, and the panel says so.
 type SettingsMirror struct {
-	Configured bool
-	Upstream   string
-	Status     string
-	NextSync   string
-	LastSynced string
-	LastResult string
-	Failures   int
-	Schedule   string
-	Presets    []SettingsOption
-	Note       string
-	Error      string
+	Configured  bool
+	Upstream    string
+	Status      string
+	NextSync    string
+	NextSyncISO string
+	// NextSyncTitle is the <time title> sentence: the absolute stamp plus
+	// "scheduled; manual syncs don't move it".
+	NextSyncTitle   string
+	LastSynced      string
+	LastSyncedISO   string
+	LastSyncedTitle string
+	LastResult      string
+	Failures        int
+	Schedule        string
+	Presets         []SettingsOption
+	// Task is the sync this submit just started (or attached to): the shared
+	// task card follows it to its terminal state and then refreshes the
+	// panel, so the new last-sync facts appear without a manual reload.
+	Task  *SettingsTask
+	Note  string
+	Error string
 }
 
 // SettingsPushMirror is the push-mirror container.
@@ -397,15 +417,22 @@ type SettingsPushMirror struct {
 	Fingerprint string
 	HostKey     string
 	NextSync    string
-	LastSynced  string
-	LastResult  string
-	Schedule    string
-	Presets     []SettingsOption
-	AuthKinds   []SettingsOption
-	PublicKey   string
-	KnownHosts  string
-	Note        string
-	Error       string
+	NextSyncISO string
+	// NextSyncTitle mirrors SettingsMirror's (the same <time title> sentence).
+	NextSyncTitle   string
+	LastSynced      string
+	LastSyncedISO   string
+	LastSyncedTitle string
+	LastResult      string
+	Schedule        string
+	Presets         []SettingsOption
+	AuthKinds       []SettingsOption
+	PublicKey       string
+	KnownHosts      string
+	// Task is the "sync now" this submit started, exactly as the pull block's.
+	Task  *SettingsTask
+	Note  string
+	Error string
 }
 
 // SettingsPolicy is the Push policy tab.
@@ -780,13 +807,16 @@ type SettingsDanger struct {
 // (the shared ops/SSE pattern; islands/tasks.js consumes it). ID/Stream are the
 // task's own id and attach URL; Next is where a successful task goes when the
 // record's repo is not the destination (a repository transfer's record is keyed
-// by the SOURCE).
+// by the SOURCE). Refresh is an optional in-app URL the card re-fetches into
+// the settings panel once the task succeeds (a mirror sync's last-sync facts),
+// so the operator never has to reload by hand; empty = no refresh.
 type SettingsTask struct {
-	ID     string
-	Kind   string
-	Stream string
-	Next   string
-	Title  string
+	ID      string
+	Kind    string
+	Stream  string
+	Next    string
+	Title   string
+	Refresh string
 }
 
 // SettingsRepoWrite is one settings mutation. Action selects the operation; a
@@ -1870,12 +1900,27 @@ func (s *Server) settingsRepoWrite(w http.ResponseWriter, r *http.Request) {
 	}
 	// A started background task renders its live card in place (the source page
 	// stops existing when a transfer commits, so a 303 would race the move).
+	// The mirror tab's "sync now" is the same contract — its card streams the
+	// fire and then refreshes the panel with the new last-sync facts.
 	if werrRes.Task != nil {
 		page := s.settingsRepoPage(r, p, owner, name, tab, role, true)
-		if page.DangerData == nil {
-			page.DangerData = &SettingsDanger{FullName: owner + "/" + name}
+		switch {
+		case tab == "mirror" && action == SettingsActionMirrorSync:
+			if page.Mirror == nil {
+				page.Mirror = &SettingsMirror{}
+			}
+			page.Mirror.Task = werrRes.Task
+		case tab == "mirror" && action == SettingsActionPushSync:
+			if page.Push == nil {
+				page.Push = &SettingsPushMirror{}
+			}
+			page.Push.Task = werrRes.Task
+		default:
+			if page.DangerData == nil {
+				page.DangerData = &SettingsDanger{FullName: owner + "/" + name}
+			}
+			page.DangerData.Task = werrRes.Task
 		}
-		page.DangerData.Task = werrRes.Task
 		page.Notice = werrRes.Notice
 		s.pageRepo(w, r, p, page.Chrome, http.StatusOK, "settings/repo", "Settings", page)
 		return

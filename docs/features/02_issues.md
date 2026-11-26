@@ -67,10 +67,13 @@ the events a PR thread also uses (comments, references, reactions).
 
 Immutability (P3): `num`, `author`, `created_at` never change after `Create`; everything else is CAS-mutable through the two-step.
 
-Unknown top-level keys are **carried, not stripped**, by every writer that is not this package's owner: a
-reader that rewrites the header (`internal/pulls.appendEvent`) or a `{"next": N}` allocator
-(`internal/pulls.allocNum`) captures every key it does not name on read and re-emits it on write, so an
-additive field added here survives a PR write untouched (law 5; `## Decisions`).
+Unknown top-level keys are **carried, not stripped**, by every 02 write path, owner or not:
+`internal/issues`' own `allocNum`, `allocMilestoneID` and `appendEvent`, and the second writers
+`internal/pulls.appendEvent` and `internal/pulls.allocNum`, all decode through types that capture every
+key 02 does not name and re-emit it on write. A whitelist `{"next": N}` allocator or a thread rewrite
+would delete an additive field on the first ordinary issue create, milestone create, comment or PR write
+— including 04's `next_review_seq`/`next_thread_num`/`review_summary` when a `#N` reference lands an
+event on a PR thread. Law 5; see `## Decisions`.
 
 ### 1.2 Event objects (immutable, `PutMode::Create`, P3)
 
@@ -1019,3 +1022,29 @@ bucket is the truth; a stale projection is the documented consequence above).
   `internal/pulls/lockmode_test.go`, `internal/review/lockmode_test.go` (all refuses writer/reader/admin; collaborators
   admits writer + admin and refuses reader; gate errors fail closed), `internal/webui/parity_pages_test.go` (mode select,
   banner text, live vs disabled composer). Rendered proof: verify in a real browser at desktop and ~390 px, both themes.
+
+- **The owner's own mirrors are lossless too: the two counters and the thread header (2026-11-26, P6 follow-up).**
+  `internal/issues` is the owner of `meta/next_num`, `meta/milestones/index.json` and
+  `issues/<num>/thread.json`, but all three were whitelist mirrors on the write side: `allocNum` and
+  `allocMilestoneID` unmarshaled into `Counter{Next}` and marshaled `Counter{Next+1}` back, and
+  `appendEvent` re-marshaled the header from `issues.Thread`. Any additive key another writer puts on
+  those documents was therefore stripped by an ordinary issue create, milestone create or comment —
+  the defect class P6 fixed for `issues/index.json` and #770 fixed for the pulls-side mirrors.
+  `Counter` and `Thread` now use **exactly that mechanism**: an unexported
+  `unknown map[string]json.RawMessage`, the alias-type `UnmarshalJSON`/`MarshalJSON` pair, and the
+  shared `captureUnknownJSON`/`appendUnknownJSON`/`ownsJSONKey` helpers, with their owned key lists in
+  `threadJSONKeys`/`counterJSONKeys`. Both allocators decode, increment in place and marshal that
+  value, so extras survive the read-modify-write rather than only a no-op write. **Verified, not
+  assumed:** the thread writer was not lossless, and the gap was live — `writeRefs` runs `appendEvent`
+  against a referenced PR thread, so before this change an issue comment containing `#N` deleted 04's
+  `next_review_seq`/`next_thread_num`/`review_summary` from that PR header. The helpers are
+  **duplicated per package, not exported across a seam**: `internal/pulls` already carries its own copy
+  (#770), the capture/append pair is the shared mechanism, and the per-type wrapper is six lines whose
+  key list is the type's own. `internal/issues/mirror_roundtrip_test.go` drives the real write paths
+  (`CreateIssue`, `CreateMilestone`, `AddComment` → `appendEvent`) and pins an object, an array, a
+  string, a number, a bool and a `null` surviving byte-identically on both counter objects and on the
+  header, the known fields still advancing, the no-extras byte shape, and the malformed-decode path.
+  Scope note: the same latent shape remains on `issues/index.json` (Index/Card), `meta/labels.json`
+  (LabelSet) and `meta/milestones/<id>.json` (Milestone), whose read-modify-writes are all 02's own;
+  they are left to a follow-up so this change stays one logical counter/header fix. Law 5 applies to
+  the owner's writers, not only to mirrors.

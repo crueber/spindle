@@ -1058,14 +1058,34 @@ func TestSettingsSeamsMirrorSyncAndErrors(t *testing.T) {
 	if _, err := mirror.Create(ctx, h.store, "acme", "monorepo", "https://example.com/acme/monorepo.git", "daily"); err != nil {
 		t.Fatalf("mirror.Create: %v", err)
 	}
-	// The task id is narrated; without a registry the fire fails fast in the
-	// background (this harness has no git registry) — never a blocked request.
+	// Without a task table the fire has no record to attach to: the click
+	// still answers its notice (the no-JS fallback) and redirects, never a
+	// silent success and never a card pointing at an id the stream 404s.
 	code, _, body = seamsPost(t, h, "/acme/monorepo/settings/mirror", url.Values{
 		"mirror_action": {"sync"}, "token": {"t"},
 	})
 	if code != http.StatusSeeOther {
-		t.Fatalf("mirror sync = %d (%s)", code, body)
+		t.Fatalf("mirror sync without a task table = %d (%s)", code, body)
 	}
+	// With the task table the click renders the shared card, attached to the
+	// WAL record (NOT the service's own msync- id, which /api/tasks 404s) and
+	// pointing at a refresh of this tab for the new last-sync facts.
+	h.apiE.Tasks = mirrorRunningTasks{rec: api.TaskRecord{ID: "t-mirror", Kind: mirror.KindMirrorSync}}
+	code, _, body = seamsPost(t, h, "/acme/monorepo/settings/mirror", url.Values{
+		"mirror_action": {"sync"}, "token": {"t"},
+	})
+	if code != http.StatusOK {
+		t.Fatalf("mirror sync with a task table = %d, want the card page (%s)", code, body)
+	}
+	settingsMustContain(t, body, `data-task-id="t-mirror"`, "sync card id")
+	settingsMustContain(t, body, `data-task-stream="/acme/monorepo/api/tasks/t-mirror"`, "sync card stream")
+	settingsMustContain(t, body, `data-task-refresh="/acme/monorepo/settings/mirror?notice=`, "sync card refresh")
+	settingsMustContain(t, body, `data-task-noun="sync"`, "sync card noun")
+	settingsMustContain(t, body, `data-task-return="/acme/monorepo/settings/mirror"`, "sync card return")
+	settingsMustContain(t, body, `aria-live="polite"`, "sync card announces")
+	settingsMustContain(t, body, "syncing from https://example.com/acme/monorepo.git", "card title")
+	settingsMustContain(t, body, "sync started (task msync-", "the no-JS notice stays")
+	settingsMustContain(t, body, "<noscript>", "no-JS fallback line")
 	// Removing a mirror twice: the second is 404.
 	if code, _, _ = seamsPost(t, h, "/acme/monorepo/settings/mirror", url.Values{"mirror_action": {"remove"}}); code != http.StatusSeeOther {
 		t.Fatalf("remove = %d", code)
@@ -1073,6 +1093,175 @@ func TestSettingsSeamsMirrorSyncAndErrors(t *testing.T) {
 	if code, _, _ = seamsPost(t, h, "/acme/monorepo/settings/mirror", url.Values{"mirror_action": {"remove"}}); code != http.StatusNotFound {
 		t.Fatalf("remove twice = %d, want 404", code)
 	}
+}
+
+// mirrorRunningTasks is a task table with one running record of a kind: the
+// discovery a "sync now" click performs before it renders the card.
+type mirrorRunningTasks struct{ rec api.TaskRecord }
+
+func (m mirrorRunningTasks) Ops() []api.OpSpec { return nil }
+func (m mirrorRunningTasks) List(context.Context, git.RepoId) ([]api.TaskRecord, []api.TaskRecord, error) {
+	return []api.TaskRecord{m.rec}, nil, nil
+}
+func (m mirrorRunningTasks) Get(context.Context, git.RepoId, string) (api.TaskRecord, bool, error) {
+	return api.TaskRecord{}, false, nil
+}
+func (m mirrorRunningTasks) Begin(context.Context, git.RepoId, string, map[string]string) (api.TaskStream, error) {
+	return api.TaskStream{}, nil
+}
+func (m mirrorRunningTasks) Attach(context.Context, git.RepoId, string) (api.TaskStream, bool, error) {
+	return api.TaskStream{}, false, nil
+}
+
+// TestSettingsSeamsMirrorStamps pins the tab's reader-facing stamps: the
+// relative phrase plus the absolute UTC spelling, the machine value only in the
+// datetime/title attributes, and the schedule sentence that keeps "sync now"
+// from reading as a pending scheduled fire.
+func TestSettingsSeamsMirrorStamps(t *testing.T) {
+	h := newSeamsHarness(t)
+	ctx := context.Background()
+	if _, err := mirror.Create(ctx, h.store, "acme", "monorepo", "https://example.com/acme/monorepo.git", "daily"); err != nil {
+		t.Fatalf("mirror.Create: %v", err)
+	}
+	// Last success one minute before the harness clock (2026-11-20T10:00Z);
+	// the daily preset anchors the next fire at 2026-11-21T00:00Z.
+	if err := mirror.RecordAttempt(ctx, h.store, "acme", "monorepo", true, "",
+		time.Date(2026, 11, 20, 9, 59, 0, 0, time.UTC)); err != nil {
+		t.Fatalf("mirror.RecordAttempt: %v", err)
+	}
+	if _, err := pushmirror.Create(ctx, h.store, "acme", "monorepo",
+		"https://example.com/backup/monorepo.git", pushmirror.AuthNone, "", "daily"); err != nil {
+		t.Fatalf("pushmirror.Create: %v", err)
+	}
+	if err := pushmirror.RecordAttempt(ctx, h.store, "acme", "monorepo", true, "",
+		time.Date(2026, 11, 20, 9, 59, 0, 0, time.UTC)); err != nil {
+		t.Fatalf("pushmirror.RecordAttempt: %v", err)
+	}
+	code, body := seamsGet(t, h, "/acme/monorepo/settings/mirror")
+	if code != http.StatusOK {
+		t.Fatalf("GET mirror = %d (%s)", code, body)
+	}
+	settingsMustContain(t, body, "next scheduled sync", "schedule label")
+	settingsMustContain(t, body, "in 14h · 2026-11-21 00:00 UTC", "next fire: relative + UTC")
+	settingsMustContain(t, body, `datetime="2026-11-21T00:00:00Z"`, "next fire machine stamp")
+	settingsMustContain(t, body, "manual syncs don&#39;t move it", "next fire title sentence")
+	settingsMustContain(t, body, "2026-11-20 09:59 UTC · 1m ago", "last sync: absolute + age")
+	settingsMustContain(t, body, `datetime="2026-11-20T09:59:00Z"`, "last sync machine stamp")
+	settingsMustContain(t, body, "A manual sync runs immediately and does not move the next scheduled sync.", "schedule sentence")
+	settingsMustNotContain(t, body, ">2026-11-21T00:00:00Z<", "raw stamp in visible text")
+	settingsMustNotContain(t, body, ">2026-11-20T09:59:00Z<", "raw last-sync stamp in visible text")
+	// Both blocks are labelled: the push block reads the same way.
+	if n := strings.Count(body, "next scheduled sync</dt>"); n != 2 {
+		t.Fatalf("next scheduled sync labels = %d, want pull + push", n)
+	}
+}
+
+// TestSettingsMirrorStampHelpers pins the edge states the tab must never
+// render as a blank cell or a raw RFC3339 string.
+func TestSettingsMirrorStampHelpers(t *testing.T) {
+	now := time.Date(2026, 11, 20, 10, 0, 0, 0, time.UTC)
+	if v, iso, title := settingsLastSynced("", now); v != "never" || iso != "" || title != "" {
+		t.Fatalf("never synced = %q/%q/%q", v, iso, title)
+	}
+	// An unparseable stamp is shown verbatim (never invented, never dropped).
+	if v, iso, _ := settingsLastSynced("yesterday", now); v != "yesterday" || iso != "" {
+		t.Fatalf("unparseable last sync = %q/%q", v, iso)
+	}
+	// A due mirror has no machine stamp: the phrase alone, no <time> pair.
+	if v, iso, title := settingsNextSync(api.MirrorView{Due: true, LastSyncedAt: "x"}, now); v != "due now" || iso != "" || title != "" {
+		t.Fatalf("due next sync = %q/%q/%q", v, iso, title)
+	}
+	// An unparseable NextSyncAt degrades to the honest phrase.
+	if v, iso, _ := settingsNextSync(api.MirrorView{NextSyncAt: "nope"}, now); v != "unknown" || iso != "" {
+		t.Fatalf("unknown next sync = %q/%q", v, iso)
+	}
+	// The full stamp pair: relative + UTC, the machine value separate.
+	v, iso, title := settingsNextSync(api.MirrorView{NextSyncAt: "2026-11-21T00:00:00Z"}, now)
+	if v != "in 14h · 2026-11-21 00:00 UTC" || iso != "2026-11-21T00:00:00Z" || !strings.Contains(title, "manual syncs don't move it") {
+		t.Fatalf("next sync = %q/%q/%q", v, iso, title)
+	}
+	if settingsSyncTask("acme", "monorepo", "mirror-sync", "t", api.TaskRecord{}, false) != nil {
+		t.Fatal("a missing record must render no card")
+	}
+}
+
+// TestSettingsSyncTaskRecordDiscovery pins the task-record lookup the "sync
+// now" card depends on: no table / a broken table / a foreign kind / an
+// expired budget all answer "no card" quickly instead of blocking the click.
+func TestSettingsSyncTaskRecordDiscovery(t *testing.T) {
+	ctx := context.Background()
+	now := time.Date(2026, 11, 20, 10, 0, 0, 0, time.UTC)
+	svc := SettingsServices{Now: func() time.Time { return now }, TaskWait: 20 * time.Millisecond}
+	start := time.Now()
+	if _, found := svc.syncTaskRecord(ctx, "acme", "monorepo", "mirror-sync", start); found {
+		t.Fatal("no task table must answer not-found")
+	}
+	svc.API = &api.Env{Tasks: mirrorRunningTasks{rec: api.TaskRecord{ID: "t1", Kind: "other"}}}
+	if _, found := svc.syncTaskRecord(ctx, "acme", "monorepo", "mirror-sync", start); found {
+		t.Fatal("a foreign kind is not the fire's record")
+	}
+	svc.API.Tasks = mirrorRunningTasks{rec: api.TaskRecord{ID: "t1", Kind: "mirror-sync"}}
+	if rec, found := svc.syncTaskRecord(ctx, "acme", "monorepo", "mirror-sync", start); !found || rec.ID != "t1" {
+		t.Fatalf("running record = %+v/%v", rec, found)
+	}
+	// A finished record answers only when it started at/after the click: an
+	// already-in-sync fire can complete before the first poll, and the record
+	// is then in `recent`, not `running`.
+	ok := true
+	finished := api.TaskRecord{ID: "t2", Kind: "mirror-sync", Started: start.Add(time.Hour).Format(time.RFC3339Nano), OK: &ok}
+	svc.API.Tasks = mirrorRecentTasks{rec: finished}
+	if rec, found := svc.syncTaskRecord(ctx, "acme", "monorepo", "mirror-sync", start); !found || rec.ID != "t2" {
+		t.Fatalf("fresh finished record = %+v/%v", rec, found)
+	}
+	stale := finished
+	stale.ID = "t3"
+	stale.Started = start.Add(-time.Hour).Format(time.RFC3339Nano)
+	svc.API.Tasks = mirrorRecentTasks{rec: stale}
+	if _, found := svc.syncTaskRecord(ctx, "acme", "monorepo", "mirror-sync", start); found {
+		t.Fatal("a previous fire's finished record is not this click's outcome")
+	}
+	// A canceled request (the operator navigated away) never waits the budget.
+	dead, cancel := context.WithCancel(ctx)
+	cancel()
+	svc.API.Tasks = strayTasks{}
+	if _, found := svc.syncTaskRecord(dead, "acme", "monorepo", "mirror-sync", start); found {
+		t.Fatal("canceled ctx must not find a record")
+	}
+}
+
+// strayTasks is a task table that never reports a running record and errors.
+type strayTasks struct{}
+
+func (strayTasks) Ops() []api.OpSpec { return nil }
+func (strayTasks) List(context.Context, git.RepoId) ([]api.TaskRecord, []api.TaskRecord, error) {
+	return nil, nil, errors.New("table down")
+}
+func (strayTasks) Get(context.Context, git.RepoId, string) (api.TaskRecord, bool, error) {
+	return api.TaskRecord{}, false, nil
+}
+func (strayTasks) Begin(context.Context, git.RepoId, string, map[string]string) (api.TaskStream, error) {
+	return api.TaskStream{}, nil
+}
+func (strayTasks) Attach(context.Context, git.RepoId, string) (api.TaskStream, bool, error) {
+	return api.TaskStream{}, false, nil
+}
+
+// mirrorRecentTasks is a table whose only record is already finished (the
+// recent ring), the shape a fast no-op fire leaves behind.
+type mirrorRecentTasks struct{ rec api.TaskRecord }
+
+func (mirrorRecentTasks) Ops() []api.OpSpec { return nil }
+func (m mirrorRecentTasks) List(context.Context, git.RepoId) ([]api.TaskRecord, []api.TaskRecord, error) {
+	return nil, []api.TaskRecord{m.rec}, nil
+}
+func (mirrorRecentTasks) Get(context.Context, git.RepoId, string) (api.TaskRecord, bool, error) {
+	return api.TaskRecord{}, false, nil
+}
+func (mirrorRecentTasks) Begin(context.Context, git.RepoId, string, map[string]string) (api.TaskStream, error) {
+	return api.TaskStream{}, nil
+}
+func (mirrorRecentTasks) Attach(context.Context, git.RepoId, string) (api.TaskStream, bool, error) {
+	return api.TaskStream{}, false, nil
 }
 
 func TestSettingsSeamsPushSyncAndErrors(t *testing.T) {
@@ -1086,10 +1275,18 @@ func TestSettingsSeamsPushSyncAndErrors(t *testing.T) {
 		"https://example.com/backup/monorepo.git", pushmirror.AuthNone, "", "daily"); err != nil {
 		t.Fatalf("pushmirror.Create: %v", err)
 	}
+	// The push "sync now" is the same card contract, attached to
+	// mirror-push-sync's own record.
+	h.apiE.Tasks = mirrorRunningTasks{rec: api.TaskRecord{ID: "t-push", Kind: pushmirror.KindPushMirrorSync}}
 	code, _, body = seamsPost(t, h, "/acme/monorepo/settings/mirror", url.Values{"push_action": {"sync"}})
-	if code != http.StatusSeeOther {
-		t.Fatalf("push sync = %d (%s)", code, body)
+	if code != http.StatusOK {
+		t.Fatalf("push sync = %d, want the card page (%s)", code, body)
 	}
+	settingsMustContain(t, body, `data-task-id="t-push"`, "push card id")
+	settingsMustContain(t, body, `data-task-stream="/acme/monorepo/api/tasks/t-push"`, "push card stream")
+	settingsMustContain(t, body, `data-task-noun="push sync"`, "push card noun")
+	settingsMustContain(t, body, "pushing to https://example.com/backup/monorepo.git", "push card title")
+	settingsMustNotContain(t, body, `data-task-id="t-mirror"`, "push card is not the pull one")
 	// An unknown auth-kind on save is the feature's 400.
 	code, _, body = seamsPost(t, h, "/acme/monorepo/settings/mirror", url.Values{
 		"push_action": {"schedule"}, "schedule": {"daily"}, "auth_kind": {"kerberos"},

@@ -12,7 +12,11 @@
 // Optional attributes: data-task-next (where a successful task goes — a
 // repo-transfer's destination, which the record itself cannot name because the
 // record's repo is the SOURCE), data-task-return (the failure link, default the
-// import form), data-task-noun (the word in the sentences, default "import").
+// import form), data-task-noun (the word in the sentences, default "import"),
+// and data-task-refresh (an in-app URL re-fetched into the settings panel once
+// the task succeeds — a mirror sync's new last-sync facts — so the operator
+// does not have to reload by hand). A card with data-task-refresh never
+// navigates on success: the record's repo IS the page it is on.
 //
 // `data-task-id` is the **import/service id** — the id the status endpoint
 // accepts (repoimport stamps it on the wire; the WAL table's own id stays
@@ -35,6 +39,9 @@ import { connect } from "./sse.js";
 
 /** MAX_RETRIES bounds consecutive transport errors before the card gives up. */
 export const MAX_RETRIES = 5;
+
+/** REFRESH_DELAY_MS lets the operator read "complete" before the panel swaps. */
+export const REFRESH_DELAY_MS = 1200;
 
 function num(v) {
   if (v === null || v === undefined || v === "") return null;
@@ -72,17 +79,28 @@ export function taskBars(progress, fallbackLabel = "") {
 
 /**
  * taskDone reads the verdict off a frame:
- *   kind "result" → "ok"; "error" → "failed";
+ *   kind "result" → the record's own `ok` when it carries one (a task that
+ *                   finished before the client attached is replayed as a
+ *                   record + result, and a failed record must not read as a
+ *                   success), else "ok" (the runner's success signal);
+ *   kind "error"  → "failed";
  *   kind "task"   → "ok"/"failed" only once the record carries `finished`.
  * Anything else is still "running" — never guess a terminal state.
  */
 export function taskDone(kind, record) {
-  if (kind === "result") return "ok";
+  if (kind === "result") return recordVerdict(record) ?? "ok";
   if (kind === "error") return "failed";
   // Only a task record carries a verdict; anything else is still running.
   if (kind !== "task") return "running";
-  if (!record || typeof record !== "object" || !record.finished) return "running";
-  return record.ok === false ? "failed" : "ok";
+  return recordVerdict(record) ?? "running";
+}
+
+/** recordVerdict is a record's own ok flag, also when nested under `task`. */
+function recordVerdict(record) {
+  if (!record || typeof record !== "object") return null;
+  const rec = record.task && typeof record.task === "object" ? record.task : record;
+  if (!rec || !rec.finished) return null;
+  return rec.ok === false ? "failed" : "ok";
 }
 
 const REPO_PATH = /^[A-Za-z0-9._-]+\/[A-Za-z0-9._-]+$/;
@@ -114,24 +132,41 @@ export function taskTarget(explicit, payload, record) {
   return taskRedirect(payload) || taskRedirect(record);
 }
 
-/** taskFailureText is the honest one-line reason for a failed import. */
-export function taskFailureText(kind, payload) {
+/** taskFailureText is the honest one-line reason for a failed task; the
+ * fallback names the card's noun ("import failed", "sync failed") instead of
+ * borrowing the import wording on another task kind. */
+export function taskFailureText(kind, payload, noun = "import") {
   if (kind === "error" && payload && typeof payload === "object") {
     const message = String(payload.message ?? "").trim();
     const status = num(payload.status);
     if (message) return status ? `${message} (${status})` : message;
   }
-  if (kind === "task" && payload && typeof payload === "object") {
-    const summary = String(payload.summary ?? "").trim();
+  if (payload && typeof payload === "object") {
+    // A finished record's summary is the reason (task packet or a replayed
+    // result envelope, which nests the record under `task`).
+    const rec = payload.task && typeof payload.task === "object" ? payload.task : payload;
+    const summary = String(rec.summary ?? "").trim();
     if (summary) return summary;
   }
-  return "import failed";
+  return `${noun} failed`;
 }
 
 /** taskLogTail returns the record's log tail as an array of lines. */
 export function taskLogTail(record) {
   const tail = record && Array.isArray(record.log_tail) ? record.log_tail : [];
   return tail.map((line) => String(line ?? "")).filter((line) => line !== "");
+}
+
+/**
+ * taskRefreshURL reads `data-task-refresh`: an in-app path (leading "/") the
+ * card re-fetches into its panel after a successful task. Anything else — an
+ * absolute URL, a protocol-relative "//host", a bare relative path — is
+ * refused (""), so a card can never become an off-site navigation.
+ */
+export function taskRefreshURL(value) {
+  const v = String(value ?? "").trim();
+  if (!v.startsWith("/") || v.startsWith("//")) return "";
+  return v;
 }
 
 // --- DOM wiring ---------------------------------------------------------------
@@ -248,6 +283,20 @@ function start(card) {
 
   const noun = (card.getAttribute("data-task-noun") || "import").trim() || "import";
   const back = (card.getAttribute("data-task-return") || "").trim();
+  const refresh = taskRefreshURL(card.getAttribute("data-task-refresh"));
+
+  // refreshPanel re-fetches the card's own panel in place through htmx (the
+  // page is server-rendered, so a swap IS the new facts). Without htmx the
+  // same URL is a plain navigation — never a silent no-op.
+  const refreshPanel = () => {
+    const panel = card.closest("#settings-panel");
+    const htmx = typeof window !== "undefined" ? window.htmx : null;
+    if (panel && htmx && typeof htmx.ajax === "function") {
+      htmx.ajax("GET", refresh, { target: panel, swap: "outerHTML", select: "#settings-panel" });
+      return;
+    }
+    window.location.assign(refresh);
+  };
 
   const settle = (kind, payload) => {
     if (finished) return;
@@ -255,6 +304,14 @@ function start(card) {
     stop();
     card.dataset.taskState = "done";
     if (taskDone(kind, payload) === "ok") {
+      // A card that refreshes its own panel never navigates: the task's repo
+      // is the page the operator is already on (a mirror's sync), so
+      // `data-task-refresh` wins over the record's repo destination.
+      if (refresh) {
+        note("ok", `${noun} complete — refreshing the panel`);
+        setTimeout(refreshPanel, REFRESH_DELAY_MS);
+        return;
+      }
       const target = taskTarget(card.getAttribute("data-task-next"), payload, lastRecord);
       if (target) {
         setBar({ label: noun, text: "complete", percent: 100 });
@@ -267,7 +324,7 @@ function start(card) {
         : { label: "explore repositories", url: "/explore" });
       return;
     }
-    note("failed", taskFailureText(kind, payload),
+    note("failed", taskFailureText(kind, payload, noun),
       back ? { label: "go back", url: back } : { label: "back to the import form", url: "/import" });
     setLog(taskLogTail(lastRecord));
   };

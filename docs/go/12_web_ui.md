@@ -541,9 +541,11 @@ actions require a typed confirmation (`data-danger-confirm`), re-validated serve
 **A write that starts a task answers 200 with the page and a live card, not a 303** — when the
 resource the page describes stops existing before the task commits (the Danger-Zone **Transfer**:
 the source path is gone the moment the move lands, so a redirect would race it). `SettingsWriteResult.Task`
-(`SettingsTask{ID, Kind, Stream, Next, Title}`) renders `data-task-id`/`data-task-stream` on the same
+(`SettingsTask{ID, Kind, Stream, Next, Title, Refresh}`) renders `data-task-id`/`data-task-stream` on the same
 `tasks` island the `/import` card uses, with `data-task-next` (the destination), `data-task-return`
-(the settings tab) and `data-task-noun="transfer"`. The card streams the task's narration through
+(the settings tab), `data-task-noun="transfer"` and optional `data-task-refresh` (an in-app URL the
+card re-fetches into the settings panel once the task succeeds — a mirror sync's new last-sync
+facts, so the page never needs a manual reload). The card streams the task's narration through
 `GET …/api/tasks/{id}` (SSE) and opens the destination only after the terminal record is OK — the
 task's verification step, not the form submit, is the "done" signal.
 

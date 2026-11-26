@@ -12,6 +12,7 @@ import (
 	"net/url"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/crueber/spindle/internal/git"
 	"github.com/crueber/spindle/internal/policy"
@@ -831,6 +832,34 @@ func TestPumpTaskStreamExported(t *testing.T) {
 	}
 	if PumpTaskStream(nopFlushWriter{}, r, TaskStream{}) {
 		t.Fatal("a writer without Flush must be refused")
+	}
+}
+
+// TestPumpTaskStreamFinishedAttach pins the attach-to-a-finished-task shape
+// (internal/mirror.Endpoint's card after a fast "sync now"): no live Updates
+// channel, only the terminal outcome. The pump must emit the record and the
+// result and RETURN — ranging the nil channel blocked the stream forever.
+func TestPumpTaskStreamFinishedAttach(t *testing.T) {
+	done := make(chan TaskDone, 1)
+	rec := TaskRecord{ID: "t3", Kind: "mirror-sync", Repo: "acme/mono"}
+	done <- TaskDone{Record: rec}
+	w := httptest.NewRecorder()
+	r := httptest.NewRequest("GET", "/acme/mono/api/tasks/t3", nil)
+	r.Header.Set("Accept", "text/event-stream")
+	pumped := make(chan bool, 1)
+	go func() { pumped <- PumpTaskStream(w, r, TaskStream{Record: rec, Done: done}) }()
+	select {
+	case ok := <-pumped:
+		if !ok {
+			t.Fatal("a flushing writer must be accepted")
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("the pump blocked on a finished task's nil Updates channel")
+	}
+	for _, want := range []string{"event: task", "event: result", `"id":"t3"`} {
+		if !strings.Contains(w.Body.String(), want) {
+			t.Fatalf("pump missing %s: %s", want, w.Body.String())
+		}
 	}
 }
 

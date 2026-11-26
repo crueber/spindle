@@ -478,12 +478,19 @@ type RepoChrome struct {
 	Forks              int
 	CanSyncFork        bool
 
-	MirrorBadge     string
-	MirrorTitle     string
-	MirrorNext      string
-	PushMirrorBadge string
-	PushMirrorTitle string
-	PushMirrorNext  string
+	MirrorBadge string
+	MirrorTitle string
+	MirrorNext  string
+	// MirrorNextISO/MirrorNextTitle carry the machine stamp and the
+	// "scheduled; manual syncs don't move it" sentence for the header's
+	// <time datetime title> pair (the visible text is the relative phrase).
+	MirrorNextISO       string
+	MirrorNextTitle     string
+	PushMirrorBadge     string
+	PushMirrorTitle     string
+	PushMirrorNext      string
+	PushMirrorNextISO   string
+	PushMirrorNextTitle string
 
 	// ForkSync is the last sync-fork outcome (nil = never run on this fork).
 	ForkSync *ForkSyncView
@@ -671,6 +678,8 @@ func (s *Server) buildRepoChrome(r *http.Request, rq repoRequest, sum api.Summar
 		if v, ok := repoDeps.Mirror(c.Owner, c.Name); ok {
 			c.MirrorBadge = "mirror · pull-only"
 			c.MirrorNext = nextSyncText(v, s.env.now())
+			c.MirrorNextISO = v.NextSyncAt
+			c.MirrorNextTitle = mirrorNextTitle(v.NextSyncAt, c.MirrorNext)
 			c.MirrorTitle = strings.TrimSpace(v.UpstreamURL + " · " + c.MirrorNext)
 		}
 	}
@@ -678,6 +687,8 @@ func (s *Server) buildRepoChrome(r *http.Request, rq repoRequest, sum api.Summar
 		if v, ok := repoDeps.PushMirror(c.Owner, c.Name); ok {
 			c.PushMirrorBadge = "mirror · push"
 			c.PushMirrorNext = nextSyncText2(v, s.env.now())
+			c.PushMirrorNextISO = v.NextSyncAt
+			c.PushMirrorNextTitle = mirrorNextTitle(v.NextSyncAt, c.PushMirrorNext)
 			c.PushMirrorTitle = strings.TrimSpace(v.UpstreamURL + " · " + c.PushMirrorNext)
 		}
 	}
@@ -852,40 +863,73 @@ func (s *Server) repoSSHURL(r *http.Request, full string) string {
 	return "ssh://git@" + hostPort + "/" + full + ".git"
 }
 
-// nextSyncText phrases a pull-mirror next fire (web/src/lib/mirror.js
-// formatNextSync) from the SERVER clock — the page carries the absolute stamp
-// in its title, so staleness is visible, never silent.
-func nextSyncText(m api.MirrorView, now time.Time) string {
+// nextSyncPhrase phrases the gap to a mirror's next SCHEDULED fire ("in 10h")
+// from the SERVER clock — the one relative-time implementation for the repo
+// header and the settings tab (web/src/lib/mirror.js formatNextSync is the
+// pre-migration twin). A manual sync never moves that fire, so the phrase is
+// about the schedule, not about the sync that was just started.
+func nextSyncPhrase(m api.MirrorView, now time.Time) string {
 	if m.Due || m.NextSyncAt == "" {
 		if m.LastSyncedAt != "" {
-			return "sync due"
+			return "due now"
 		}
-		return "never synced — first sync pending"
+		return "first sync pending"
 	}
 	at, err := time.Parse(time.RFC3339, m.NextSyncAt)
 	if err != nil {
-		return "next sync unknown"
+		return "unknown"
 	}
 	d := at.Sub(now)
 	if d <= 0 {
-		return "sync due"
+		return "due now"
 	}
 	mins := int(d.Minutes())
 	switch {
 	case mins < 1:
-		return "next sync < 1m"
+		return "in <1m"
 	case mins < 60:
-		return fmt.Sprintf("next sync in %dm", mins)
+		return fmt.Sprintf("in %dm", mins)
 	case mins < 48*60:
-		return fmt.Sprintf("next sync in %dh", mins/60)
+		return fmt.Sprintf("in %dh", mins/60)
 	default:
-		return fmt.Sprintf("next sync in %dd", mins/60/24)
+		return fmt.Sprintf("in %dd", mins/60/24)
 	}
 }
 
+// nextSyncText is the repo header's spelling of nextSyncPhrase. It says
+// "next scheduled sync" — a manual "sync now" runs immediately and never
+// moves this fire, so "next sync in 10h" read as if the click were pending.
+// The header carries the absolute stamp in the <time datetime title> pair.
+func nextSyncText(m api.MirrorView, now time.Time) string {
+	switch p := nextSyncPhrase(m, now); p {
+	case "due now":
+		return "scheduled sync due now"
+	case "first sync pending":
+		return "never synced — first sync pending"
+	case "unknown":
+		return "next scheduled sync unknown"
+	default:
+		return "next scheduled sync " + p
+	}
+}
+
+// mirrorNextTitle is the <time title> for the header's next-fire label: the
+// absolute stamp plus what it means. A due/never state has no stamp, so the
+// phrase itself is the title.
+func mirrorNextTitle(iso, phrase string) string {
+	if iso == "" {
+		return phrase
+	}
+	return iso + " · scheduled; manual syncs don't move it"
+}
+
 // nextSyncText2 phrases a push-mirror next fire (formatPushNextSync: one
-// spelling for both mirror kinds — the badge wording is shared).
+// spelling for both mirror kinds — the badge wording is shared). An off
+// schedule has no next fire at all, so it says so instead of "due now".
 func nextSyncText2(m api.PushMirrorView, now time.Time) string {
+	if m.Schedule == "" {
+		return "no schedule — syncs on push"
+	}
 	return nextSyncText(api.MirrorView{
 		UpstreamURL:  m.UpstreamURL,
 		NextSyncAt:   m.NextSyncAt,

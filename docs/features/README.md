@@ -46,6 +46,7 @@ commits are ordinary git objects; a PR's *head* is an ordinary ref published thr
 | [`18_repo_insights.md`](18_repo_insights.md) | Repository Insights: **shipped** — a cached pulse projection (commits, contributors, code frequency, issue/PR counts, existing facts) with an honest no-traffic statement | — (bucket + git; reads 02/03/05/07/14/15 families) |
 | [`19_static_sites.md`](19_static_sites.md) | Static sites: **shipped** — a repository's tree published read-only from a dedicated static hostname on its own listener (`<static-host>/{owner}/{repo}/…`), Pages-like resolution, cookie-less origin ⇒ public repos only, no build step | — (bucket + git; config `[static_sites]`/`[static_site]`) |
 | [`20_search.md`](20_search.md) | Code search (and issue/PR text search): **shipped** — `git grep` at a resolved sha on the serving copy (no index in v1), repo and bounded owner scopes, honest caps, issue/PR metadata and bounded body/comment scan with moderation redaction; the two pages, `spindle search` and the SDK | 01, 02, 03 (issues/PR text), 04_git §17 |
+| [`21_parity_master.md`](21_parity_master.md) | Threads Actions parity: **the work order** — one reconciled, security-reviewed plan for the Forgejo and GitHub parity cards (119 `PAR-` entries, Forgejo-first waves, eight parallel work tracks, the operator-decision gate); the per-row matrix is generated data (`parity/`) | 15 |
 
 ## Shared primitives (normative for every feature doc)
 

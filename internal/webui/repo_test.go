@@ -558,6 +558,31 @@ func TestRepoTreeEmptyRepoIsAGuide(t *testing.T) {
 	}
 }
 
+// TestRepoMirrorHeaderNextSyncTime pins the header wording and its machine
+// stamp: "next scheduled sync" (a manual sync never moves it) with the absolute
+// fire in datetime/title, so the relative phrase is never the only fact.
+func TestRepoMirrorHeaderNextSyncTime(t *testing.T) {
+	f := newRepoFixture(t, true)
+	old := repoDeps
+	t.Cleanup(func() { repoDeps = old })
+	// +30s keeps the whole-hour phrase stable while the render runs.
+	next := time.Now().Add(10*time.Hour + 30*time.Second).UTC().Truncate(time.Second)
+	repoDeps = RepoDeps{Mirror: func(owner, repo string) (api.MirrorView, bool) {
+		return api.MirrorView{UpstreamURL: "https://upstream.example/x.git", NextSyncAt: next.Format(time.RFC3339)}, true
+	}}
+	body := f.mustGet("/demo/spindle", http.StatusOK)
+	if !strings.Contains(body, "next scheduled sync in 10h") {
+		t.Fatalf("header next sync wording missing: %s", body)
+	}
+	stamp := next.Format(time.RFC3339)
+	if !strings.Contains(body, `<time datetime="`+stamp+`" title="`+stamp+` · scheduled; manual syncs don&#39;t move it">next scheduled sync in 10h</time>`) {
+		t.Fatalf("header time element missing its machine stamp: %s", body)
+	}
+	if strings.Contains(body, "next sync in 10h") {
+		t.Fatal("header still uses the ambiguous 'next sync' wording")
+	}
+}
+
 func TestRepoEmptyMirrorNeverShowsPushGuide(t *testing.T) {
 	f := newRepoFixture(t, true)
 	f.view.summary = api.SummaryData{Health: api.RepoHealthEmpty}
@@ -1207,7 +1232,7 @@ func TestRepoChromeProjectsHeader(t *testing.T) {
 			return api.ForkSummary{Parent: "up/parent", Count: 4}, true
 		},
 		PushMirror: func(owner, repo string) (api.PushMirrorView, bool) {
-			return api.PushMirrorView{UpstreamURL: "https://push.example/x.git", Due: true, LastSyncedAt: "2026-01-01T00:00:00Z"}, true
+			return api.PushMirrorView{UpstreamURL: "https://push.example/x.git", Schedule: "daily", Due: true, LastSyncedAt: "2026-01-01T00:00:00Z"}, true
 		},
 		Fsck: func(owner, repo string) (api.FsckInfo, bool) {
 			return api.FsckInfo{MissingTotal: 9}, true
@@ -1220,7 +1245,7 @@ func TestRepoChromeProjectsHeader(t *testing.T) {
 		"fork of",
 		"/up/parent",
 		"mirror · push",
-		"sync due",
+		"scheduled sync due now",
 		"9 missing",
 		"Settings → WAL",
 		"http://example.test/demo/spindle.git",
@@ -1346,17 +1371,57 @@ func TestNextSyncText(t *testing.T) {
 		m    api.MirrorView
 		want string
 	}{
-		{"due", api.MirrorView{Due: true, LastSyncedAt: "x"}, "sync due"},
+		{"due", api.MirrorView{Due: true, LastSyncedAt: "x"}, "scheduled sync due now"},
+		{"due-no-stamp", api.MirrorView{LastSyncedAt: "x"}, "scheduled sync due now"},
 		{"never", api.MirrorView{}, "never synced — first sync pending"},
-		{"minutes", api.MirrorView{NextSyncAt: now.Add(30 * time.Minute).Format(time.RFC3339)}, "next sync in 30m"},
-		{"hours", api.MirrorView{NextSyncAt: now.Add(5 * time.Hour).Format(time.RFC3339)}, "next sync in 5h"},
-		{"days", api.MirrorView{NextSyncAt: now.Add(72 * time.Hour).Format(time.RFC3339)}, "next sync in 3d"},
-		{"unknown", api.MirrorView{NextSyncAt: "not-a-time"}, "next sync unknown"},
+		{"minutes", api.MirrorView{NextSyncAt: now.Add(30 * time.Minute).Format(time.RFC3339)}, "next scheduled sync in 30m"},
+		{"hours", api.MirrorView{NextSyncAt: now.Add(5 * time.Hour).Format(time.RFC3339)}, "next scheduled sync in 5h"},
+		{"days", api.MirrorView{NextSyncAt: now.Add(72 * time.Hour).Format(time.RFC3339)}, "next scheduled sync in 3d"},
+		{"past", api.MirrorView{NextSyncAt: now.Add(-time.Minute).Format(time.RFC3339)}, "scheduled sync due now"},
+		{"unknown", api.MirrorView{NextSyncAt: "not-a-time"}, "next scheduled sync unknown"},
 	}
 	for _, tc := range cases {
 		if got := nextSyncText(tc.m, now); got != tc.want {
 			t.Errorf("%s: nextSyncText = %q, want %q", tc.name, got, tc.want)
 		}
+	}
+	// nextSyncPhrase is the one relative-time implementation the settings tab
+	// reuses; it is the header's text without the "next scheduled sync" prefix.
+	for _, tc := range []struct {
+		name string
+		m    api.MirrorView
+		want string
+	}{
+		{"due", api.MirrorView{Due: true, LastSyncedAt: "x"}, "due now"},
+		{"no-stamp", api.MirrorView{LastSyncedAt: "x"}, "due now"},
+		{"never", api.MirrorView{}, "first sync pending"},
+		{"sub-minute", api.MirrorView{NextSyncAt: now.Add(20 * time.Second).Format(time.RFC3339)}, "in <1m"},
+		{"minutes", api.MirrorView{NextSyncAt: now.Add(30 * time.Minute).Format(time.RFC3339)}, "in 30m"},
+		{"hours", api.MirrorView{NextSyncAt: now.Add(5 * time.Hour).Format(time.RFC3339)}, "in 5h"},
+		{"past", api.MirrorView{NextSyncAt: now.Add(-time.Minute).Format(time.RFC3339)}, "due now"},
+		{"unknown", api.MirrorView{NextSyncAt: "not-a-time"}, "unknown"},
+	} {
+		if got := nextSyncPhrase(tc.m, now); got != tc.want {
+			t.Errorf("%s: nextSyncPhrase = %q, want %q", tc.name, got, tc.want)
+		}
+	}
+	// The header title names the schedule, never the manual click.
+	if got := mirrorNextTitle("2026-11-27T00:00:00Z", "next scheduled sync in 10h"); got != "2026-11-27T00:00:00Z · scheduled; manual syncs don't move it" {
+		t.Errorf("mirrorNextTitle = %q", got)
+	}
+	if got := mirrorNextTitle("", "scheduled sync due now"); got != "scheduled sync due now" {
+		t.Errorf("due mirrorNextTitle = %q", got)
+	}
+	// A push mirror with no schedule has no next fire: say that, never
+	// "due now" (which would promise a scheduled fire that cannot happen).
+	if got := nextSyncText2(api.PushMirrorView{Schedule: "", LastSyncedAt: now.Format(time.RFC3339)}, now); got != "no schedule — syncs on push" {
+		t.Errorf("off-schedule push next sync = %q", got)
+	}
+	if got := nextSyncText2(api.PushMirrorView{Schedule: "daily", NextSyncAt: now.Add(3 * time.Hour).Format(time.RFC3339)}, now); got != "next scheduled sync in 3h" {
+		t.Errorf("scheduled push next sync = %q", got)
+	}
+	if v, iso, _ := settingsPushNext(api.MirrorView{LastSyncedAt: now.Format(time.RFC3339)}, "", now); v != "no schedule — syncs on push" || iso != "" {
+		t.Errorf("off-schedule push row = %q/%q", v, iso)
 	}
 }
 
@@ -1938,7 +2003,7 @@ func TestRepoHelperRemainders(t *testing.T) {
 		t.Errorf("fmtSize(1<<50) = %q", got)
 	}
 	now := time.Date(2026, 1, 2, 3, 0, 0, 0, time.UTC)
-	if got := nextSyncText(api.MirrorView{NextSyncAt: now.Add(20 * time.Second).Format(time.RFC3339)}, now); got != "next sync < 1m" {
+	if got := nextSyncText(api.MirrorView{NextSyncAt: now.Add(20 * time.Second).Format(time.RFC3339)}, now); got != "next scheduled sync in <1m" {
 		t.Errorf("sub-minute next sync = %q", got)
 	}
 	// repoSSHURL: an unparseable base has no host → no advertisement; an IPv6
@@ -2146,9 +2211,9 @@ func TestRepoRemainingBranches(t *testing.T) {
 	if !strings.Contains(body, "git clone ssh://git@example.test:2222/demo/spindle.git") {
 		t.Error("SSH clone command missing from the empty guide")
 	}
-	// A past next-sync stamp without the due flag still reads "sync due".
+	// A past next-sync stamp without the due flag still reads "due now".
 	now := time.Date(2026, 1, 2, 3, 0, 0, 0, time.UTC)
-	if got := nextSyncText(api.MirrorView{NextSyncAt: now.Add(-time.Minute).Format(time.RFC3339)}, now); got != "sync due" {
+	if got := nextSyncText(api.MirrorView{NextSyncAt: now.Add(-time.Minute).Format(time.RFC3339)}, now); got != "scheduled sync due now" {
 		t.Errorf("past next sync = %q", got)
 	}
 	// Large sizes round to whole units (>= 100).

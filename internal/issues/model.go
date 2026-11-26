@@ -85,6 +85,14 @@ type Thread struct {
 	CommentCount    int                       `json:"comment_count"`
 	ReactionSummary map[string]map[string]int `json:"reaction_summary"`
 	Version         int                       `json:"version"`
+
+	// unknown carries every top-level key this struct does not name, captured
+	// on decode and re-emitted on encode: appendEvent rewrites the whole
+	// header on every comment/reference/reaction, and the header is shared
+	// with 03 (pulls) and 04 (review) writers. A whitelist rewrite strips the
+	// NEXT additive field those owners add (the P6 defect class); law 5 says
+	// additive JSON fields round-trip unchanged. See the mirror section below.
+	unknown map[string]json.RawMessage
 }
 
 // Card is the list projection (§2): the header minus version,
@@ -211,8 +219,154 @@ type Milestone struct {
 }
 
 // Counter is the {"next": N} allocator shape (P2 counter + milestone ids).
+// Both allocation paths (allocNum, allocMilestoneID) rewrite this object
+// wholesale, so unknown keys are captured on decode and re-emitted on encode:
+// any additive counter field a future writer adds survives the allocation
+// instead of vanishing on the next issue create or milestone create (law 5).
 type Counter struct {
 	Next int `json:"next"`
+
+	unknown map[string]json.RawMessage
+}
+
+// ---- lossless JSON mirrors (law 5) -------------------------------------------
+//
+// Two 02-owned documents are read-modify-written by ordinary writes in this
+// package: issues/<num>/thread.json (appendEvent rewrites the header — and 03
+// and 04 also write it) and the {"next": N} counters (allocNum,
+// allocMilestoneID rewrite the number). A whitelist struct would strip the
+// NEXT additive field on the first ordinary write, exactly the defect class the
+// P6 index mirror fixed (03's index.json) and #770 fixed for pulls' thread and
+// counter mirrors. Every field the structs above do not name is therefore
+// captured on decode and re-emitted on encode. The known fields keep their
+// struct order and exact output; unknown keys are appended in sorted order, and
+// a document with no unknown keys marshals to the same bytes as the plain
+// struct (no bookkeeping field leaks into the wire).
+
+// threadJSONKeys / counterJSONKeys are the JSON names the structs above own. A
+// key that matches one of them (encoding/json matches field names
+// case-insensitively too) is never treated as an unknown, so a re-emit can
+// never duplicate it.
+var (
+	threadJSONKeys = []string{
+		"num", "kind", "title", "state", "state_reason", "author", "created_at",
+		"updated_at", "labels", "assignees", "milestone", "participants",
+		"next_event_seq", "comment_count", "reaction_summary", "version",
+	}
+	counterJSONKeys = []string{"next"}
+)
+
+// UnmarshalJSON decodes the known thread fields and keeps every other key.
+func (t *Thread) UnmarshalJSON(data []byte) error {
+	type threadJSON Thread
+	var known threadJSON
+	if err := json.Unmarshal(data, &known); err != nil {
+		return err
+	}
+	unknown, err := captureUnknownJSON(data, threadJSONKeys)
+	if err != nil {
+		return err
+	}
+	*t = Thread(known)
+	t.unknown = unknown
+	return nil
+}
+
+// MarshalJSON re-emits the known thread fields plus every captured unknown key.
+func (t Thread) MarshalJSON() ([]byte, error) {
+	type threadJSON Thread
+	base, err := json.Marshal(threadJSON(t))
+	if err != nil {
+		return nil, err
+	}
+	return appendUnknownJSON(base, t.unknown, threadJSONKeys)
+}
+
+// UnmarshalJSON decodes the known counter fields and keeps every other key.
+func (c *Counter) UnmarshalJSON(data []byte) error {
+	type counterJSON Counter
+	var known counterJSON
+	if err := json.Unmarshal(data, &known); err != nil {
+		return err
+	}
+	unknown, err := captureUnknownJSON(data, counterJSONKeys)
+	if err != nil {
+		return err
+	}
+	*c = Counter(known)
+	c.unknown = unknown
+	return nil
+}
+
+// MarshalJSON re-emits `next` plus every captured unknown key.
+func (c Counter) MarshalJSON() ([]byte, error) {
+	type counterJSON Counter
+	base, err := json.Marshal(counterJSON(c))
+	if err != nil {
+		return nil, err
+	}
+	return appendUnknownJSON(base, c.unknown, counterJSONKeys)
+}
+
+// captureUnknownJSON returns the object keys that known does not own. A null or
+// empty object yields nil (nothing to re-emit).
+func captureUnknownJSON(data []byte, known []string) (map[string]json.RawMessage, error) {
+	var all map[string]json.RawMessage
+	if err := json.Unmarshal(data, &all); err != nil {
+		return nil, err
+	}
+	for k := range all {
+		if ownsJSONKey(k, known) {
+			delete(all, k)
+		}
+	}
+	if len(all) == 0 {
+		return nil, nil
+	}
+	return all, nil
+}
+
+// appendUnknownJSON inserts the unknown keys into the JSON object base without
+// touching a known key. It returns base unchanged when there is nothing extra,
+// so a document without extras is byte-identical to the plain struct's output.
+func appendUnknownJSON(base []byte, unknown map[string]json.RawMessage, known []string) ([]byte, error) {
+	keys := make([]string, 0, len(unknown))
+	for k := range unknown {
+		if !ownsJSONKey(k, known) {
+			keys = append(keys, k)
+		}
+	}
+	if len(keys) == 0 {
+		return base, nil
+	}
+	if len(base) == 0 || base[len(base)-1] != '}' {
+		return nil, fmt.Errorf("issues: marshal object: base is not a JSON object")
+	}
+	sort.Strings(keys) // stable output; JSON object order is not semantic
+	out := make([]byte, 0, len(base)+len(keys)*16)
+	out = append(out, base[:len(base)-1]...)
+	for _, k := range keys {
+		kb, err := json.Marshal(k)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, ',')
+		out = append(out, kb...)
+		out = append(out, ':')
+		out = append(out, unknown[k]...)
+	}
+	return append(out, '}'), nil
+}
+
+// ownsJSONKey reports whether key names one of the struct's JSON fields. The
+// comparison folds case because encoding/json does.
+func ownsJSONKey(key string, known []string) bool {
+	for _, k := range known {
+		if strings.EqualFold(key, k) {
+			return true
+		}
+	}
+	return false
 }
 
 // --- validation -----------------------------------------------------------

@@ -183,12 +183,26 @@ POST   /api/v1/repos/mirrors (+ /api-browser/v1 twin) → {source_url, owner, na
 ## 6. UI
 
 - Repo header: `mirror · pull-only` badge (tooltip: upstream + next
-  sync) + next-sync/due line next to the title — rendered from the
-  shared summary, no extra fetch.
+  sync) + a `next scheduled sync in 10h` line next to the title, wrapped in
+  `<time datetime title>` with the absolute fire and "scheduled; manual
+  syncs don't move it" — rendered from the shared summary, no extra fetch.
 - Settings → Mirror tab (in the sidebar after Scheduled tasks): status
-  table (upstream, next fire, last synced/result, backoff), schedule
-  preset picker, Sync-now (optional memory-only token, force checkbox,
-  polled status), create form on non-mirrors, removal.
+  table (upstream, next **scheduled** fire as the relative phrase plus the
+  absolute UTC stamp, last synced as absolute UTC + age, last result,
+  backoff), schedule preset picker, Sync-now (optional memory-only token,
+  force checkbox), create form on non-mirrors, removal.
+- **"Sync now" is a visible task (as-built, 2026-11-26).** The click starts
+  the `mirror-sync` task and renders the SAME live card the Danger tab's
+  transfer uses (`data-task-id`/`data-task-stream`, `web/src/islands/
+  tasks.js`): phase bars, the log tail, and an honest terminal state (a
+  failure names its reason instead of a silent spinner). On success the card
+  re-fetches the mirror tab into the panel (`data-task-refresh`), so the new
+  `last_synced`/`last_result` appear without a manual reload. The push
+  block's "sync now" is the identical contract for `mirror-push-sync`. A
+  manual fire does NOT move `next_sync_at` — it is immediate, and the panel
+  labels the remaining time "next scheduled sync" with one muted line saying
+  so. The write's notice stays the no-JS fallback (it names the async id the
+  mirror API resolves) and the card carries a `<noscript>` line.
 - New repository → mirror-from-URL mode (source + preset → create twin
   → navigate to the repo). Schedule presets only — no freeform cron
   anywhere. Both themes ship together (dark default); the built bundle
@@ -293,3 +307,26 @@ see §6).
   probe failure — the `writeAuthErr` shape). Rationale: mirror creation
   is repo creation through another door; leaving it host-write-only kept
   the exact namespace squat #346 closed everywhere else.
+- **(j) Manual sync is an attachable task with a visible outcome
+  (2026-11-26, UX defect report).** The Settings → Mirror "sync now" used to
+  answer a one-line notice and redirect, so a successful fire looked like
+  nothing happened ("the header still says next sync in 10h"). It now returns
+  the shared `SettingsTask` card (the Danger tab's transfer contract, one
+  transport: `islands/tasks.js` over the `/api/tasks/{id}` SSE stream) and
+  refreshes the panel on success. The card attaches to the WAL task record,
+  not the service's own `msync-…` async id — `/api/tasks/{id}` only knows the
+  table's ids — so the page resolves the running `mirror-sync` record (bounded
+  discovery; the `(repo, kind)` single-flight means joining a fire already
+  running is the record the operator wants). The tab and header now say
+  "next scheduled sync" and format both stamps in UTC (`in 10h · 2026-11-27
+  00:00 UTC`, `2026-11-26 13:19 UTC · 1m ago`), because a manual sync never
+  moves `next_sync_at` and the old wording read as a pending click.
+  Verified rendered end to end at 1280×900 and 390×844 against a local
+  instance (card live → terminal "sync complete", panel refreshed to the new
+  last-sync stamp, no console errors, no page-level horizontal pan). The
+  shared stream also learned to attach to a task that finished before the
+  client arrived (a nil Updates channel blocked the pump — the exact silent
+  spinner law 7 forbids), and a replayed failed record no longer reads as a
+  success.
+  Rationale: presentation only — no change to the sync engine, the schedule
+  semantics, or the wire contract.

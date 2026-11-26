@@ -102,6 +102,10 @@ type SettingsServices struct {
 
 	// Now is the clock for derived timestamps (tests pin it).
 	Now func() time.Time
+	// TaskWait bounds how long a "sync now" click waits for the fire's task
+	// record to appear in the task table (the service starts it on a detached
+	// goroutine). Zero uses the default (2s); the card is the only consumer.
+	TaskWait time.Duration
 }
 
 // settingsHistoryLimit bounds the config-history list the page renders.
@@ -147,6 +151,123 @@ func (d *SettingsDeps) BindSettingsServices(s SettingsServices) {
 
 func (s SettingsServices) repoID(owner, repo string) git.RepoId {
 	return git.RepoId{Owner: owner, Name: repo}
+}
+
+// settingsNextSync formats the next scheduled fire for the settings tab:
+// the shared relative phrase plus the absolute UTC stamp ("in 10h · 2026-11-27
+// 00:00 UTC"). iso is the machine value for <time datetime>; title spells out
+// that a manual sync does not move this schedule. The relative half is
+// nextSyncPhrase — the same implementation the repo header uses, never a second
+// relative-time formatter.
+func settingsNextSync(m api.MirrorView, now time.Time) (value, iso, title string) {
+	phrase := nextSyncPhrase(m, now)
+	iso = m.NextSyncAt
+	at, err := time.Parse(time.RFC3339, iso)
+	if iso == "" || err != nil {
+		return phrase, "", ""
+	}
+	stamp := settingsUTCStamp(at)
+	return phrase + " · " + stamp, iso, iso + " · scheduled; manual syncs don't move it"
+}
+
+// settingsPushNext is the push block's next-sync row: the pull formatter
+// except for an off schedule, which has no next fire at all (every push fans
+// out immediately) — never "due now", which would promise a scheduled fire.
+func settingsPushNext(m api.MirrorView, schedule string, now time.Time) (value, iso, title string) {
+	if schedule == "" {
+		return "no schedule — syncs on push", "", ""
+	}
+	return settingsNextSync(m, now)
+}
+
+// settingsLastSynced formats the last successful sync: the absolute UTC stamp
+// plus its age ("2026-11-26 13:19 UTC · 1m ago"). A blank/unparseable stamp
+// renders the honest "never" rather than an empty cell.
+func settingsLastSynced(stamp string, now time.Time) (value, iso, title string) {
+	if stamp == "" {
+		return "never", "", ""
+	}
+	at, err := time.Parse(time.RFC3339, stamp)
+	if err != nil {
+		return stamp, "", ""
+	}
+	value = settingsUTCStamp(at)
+	if age := relTimeAt(stamp, now); age != "" {
+		value += " · " + age
+	}
+	return value, stamp, settingsUTCStamp(at) + " · last successful sync"
+}
+
+// settingsUTCStamp renders one instant as "2026-11-27 00:00 UTC" — the
+// reader's spelling; the RFC3339 form lives only in the datetime/title
+// attributes.
+func settingsUTCStamp(t time.Time) string {
+	return t.UTC().Format("2006-01-02 15:04") + " UTC"
+}
+
+// settingsSyncTask is the card a just-spawned mirror fire renders. title names
+// the direction; refresh re-fetches the settings tab once the task succeeds so
+// the last-sync facts land without a manual reload (its notice is what a direct
+// GET of that URL shows at the top of the tab).
+func settingsSyncTask(owner, repo, kind, title string, rec api.TaskRecord, found bool) *SettingsTask {
+	if !found {
+		return nil
+	}
+	base := "/" + url.PathEscape(owner) + "/" + url.PathEscape(repo)
+	return &SettingsTask{
+		ID:      rec.ID,
+		Kind:    kind,
+		Stream:  base + "/api/tasks/" + url.PathEscape(rec.ID),
+		Title:   title,
+		Refresh: base + "/settings/mirror?notice=" + url.QueryEscape("sync complete — the last-sync facts below are current"),
+	}
+}
+
+// syncTaskRecord resolves the task-table record a fire just started as. The
+// service's SyncAsync mints its OWN async id ("msync-…"/"psync-…"), which the
+// shared /api/tasks/{id} stream does not know, so the card must attach to the
+// WAL record. SyncAsync starts the body on a detached goroutine (it loads the
+// sidecar before the table installs the record), so this polls the repo's
+// tasks for the kind — bounded, and the single-flight means at most one such
+// record exists: joining a fire already running is exactly the card the
+// operator needs. start is the click's instant: a FINISHED record older than
+// that is a previous fire (an already-in-sync no-op can complete before the
+// first poll), never this click's outcome.
+func (s SettingsServices) syncTaskRecord(ctx context.Context, owner, repo, kind string, start time.Time) (api.TaskRecord, bool) {
+	if s.API == nil || s.API.Tasks == nil {
+		return api.TaskRecord{}, false
+	}
+	wait := s.TaskWait
+	if wait <= 0 {
+		wait = 2 * time.Second
+	}
+	deadline := time.Now().Add(wait)
+	for {
+		running, recent, err := s.API.Tasks.List(ctx, s.repoID(owner, repo))
+		if err == nil {
+			for _, rec := range append(running, recent...) {
+				if rec.Kind != kind {
+					continue
+				}
+				if rec.OK != nil {
+					// Finished: only this click's fire may answer.
+					at, perr := time.Parse(time.RFC3339Nano, rec.Started)
+					if perr != nil || at.Before(start) {
+						continue
+					}
+				}
+				return rec, true
+			}
+		}
+		if ctx.Err() != nil || !time.Now().Before(deadline) {
+			return api.TaskRecord{}, false
+		}
+		select {
+		case <-ctx.Done():
+			return api.TaskRecord{}, false
+		case <-time.After(10 * time.Millisecond):
+		}
+	}
 }
 
 // --- reads -------------------------------------------------------------------
@@ -310,12 +431,18 @@ func (s SettingsServices) repoMirror(ctx context.Context, owner, repo string) (*
 	if doc == nil {
 		return out, nil
 	}
-	v := mirror.ViewOf(doc, s.now())
+	now := s.now()
+	v := mirror.ViewOf(doc, now)
 	out.Configured = true
 	out.Upstream = v.UpstreamURL
 	out.Schedule = v.Schedule
-	out.NextSync = v.NextSyncAt
-	out.LastSynced = v.LastSyncedAt
+	out.NextSync, out.NextSyncISO, out.NextSyncTitle = settingsNextSync(api.MirrorView{
+		UpstreamURL:  v.UpstreamURL,
+		NextSyncAt:   v.NextSyncAt,
+		LastSyncedAt: v.LastSyncedAt,
+		Due:          v.Due,
+	}, now)
+	out.LastSynced, out.LastSyncedISO, out.LastSyncedTitle = settingsLastSynced(v.LastSyncedAt, now)
 	out.LastResult = v.LastResult
 	out.Failures = v.ConsecutiveFailures
 	return out, nil
@@ -338,7 +465,8 @@ func (s SettingsServices) repoPushMirror(ctx context.Context, owner, repo string
 	if serr != nil {
 		return nil, serr
 	}
-	v := pushmirror.ViewOf(doc, sec, s.now())
+	now := s.now()
+	v := pushmirror.ViewOf(doc, sec, now)
 	out.Configured = true
 	out.Upstream = v.UpstreamURL
 	out.AuthKind = v.AuthKind
@@ -348,8 +476,13 @@ func (s SettingsServices) repoPushMirror(ctx context.Context, owner, repo string
 	out.SecretHint = v.SecretHint
 	out.Fingerprint = v.KeyFingerprint
 	out.HostKey = v.HostKeyFingerprint
-	out.NextSync = v.NextSyncAt
-	out.LastSynced = v.LastSyncedAt
+	out.NextSync, out.NextSyncISO, out.NextSyncTitle = settingsPushNext(api.MirrorView{
+		UpstreamURL:  v.UpstreamURL,
+		NextSyncAt:   v.NextSyncAt,
+		LastSyncedAt: v.LastSyncedAt,
+		Due:          v.Due,
+	}, v.Schedule, now)
+	out.LastSynced, out.LastSyncedISO, out.LastSyncedTitle = settingsLastSynced(v.LastSyncedAt, now)
 	out.LastResult = v.LastResult
 	out.Schedule = v.Schedule
 	out.PublicKey = v.PublicKey
@@ -948,8 +1081,17 @@ func (s SettingsServices) syncMirror(ctx context.Context, owner, repo string, w 
 	if doc == nil {
 		return SettingsWriteResult{}, settingsWriteErr(http.StatusNotFound, "not a mirror")
 	}
+	start := time.Now()
 	id := s.Mirror.Svc.SyncAsync(ctx, owner, repo, w.Get("token"), w.Get("force") == "true")
-	return SettingsWriteResult{Notice: "sync started (task " + id + ")"}, nil
+	// The click answers with the fire's own card (law 7: a sync is long work,
+	// so it is a task with progress, not a toast); the notice stays the no-JS
+	// fallback and names the async id the mirror API resolves.
+	notice := "sync started (task " + id + ")"
+	rec, found := s.syncTaskRecord(ctx, owner, repo, mirror.KindMirrorSync, start)
+	return SettingsWriteResult{
+		Notice: notice,
+		Task:   settingsSyncTask(owner, repo, mirror.KindMirrorSync, "syncing from "+strings.TrimSpace(doc.UpstreamURL), rec, found),
+	}, nil
 }
 
 func (s SettingsServices) removeMirror(ctx context.Context, owner, repo string) (SettingsWriteResult, *SettingsWriteError) {
@@ -1017,8 +1159,14 @@ func (s SettingsServices) syncPush(ctx context.Context, owner, repo string, w Se
 	if doc == nil {
 		return SettingsWriteResult{}, settingsWriteErr(http.StatusNotFound, "no push mirror configured")
 	}
+	start := time.Now()
 	id := s.Push.Svc.SyncAsync(ctx, owner, repo, w.Get("force") == "true")
-	return SettingsWriteResult{Notice: "push sync started (task " + id + ")"}, nil
+	notice := "push sync started (task " + id + ")"
+	rec, found := s.syncTaskRecord(ctx, owner, repo, pushmirror.KindPushMirrorSync, start)
+	return SettingsWriteResult{
+		Notice: notice,
+		Task:   settingsSyncTask(owner, repo, pushmirror.KindPushMirrorSync, "pushing to "+strings.TrimSpace(doc.UpstreamURL), rec, found),
+	}, nil
 }
 
 func (s SettingsServices) removePush(ctx context.Context, owner, repo string) (SettingsWriteResult, *SettingsWriteError) {

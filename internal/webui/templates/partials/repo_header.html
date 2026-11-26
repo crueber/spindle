@@ -43,8 +43,8 @@
     <div class="repo-meta mt-1.5 flex flex-wrap items-center gap-x-3 gap-y-1 font-mono text-[11px] text-[var(--pd-muted)]">
       <span>{{.Branches}} {{plural .Branches "branch" "branches"}}</span>
       <span>{{.Tags}} {{plural .Tags "tag" "tags"}}</span>
-      {{if .MirrorNext}}<span>{{.MirrorNext}}</span>{{end}}
-      {{if .PushMirrorNext}}<span>{{.PushMirrorNext}}</span>{{end}}
+      {{if .MirrorNext}}{{if .MirrorNextISO}}<time datetime="{{.MirrorNextISO}}" title="{{.MirrorNextTitle}}">{{.MirrorNext}}</time>{{else}}<span title="{{.MirrorNextTitle}}">{{.MirrorNext}}</span>{{end}}{{end}}
+      {{if .PushMirrorNext}}{{if .PushMirrorNextISO}}<time datetime="{{.PushMirrorNextISO}}" title="{{.PushMirrorNextTitle}}">{{.PushMirrorNext}}</time>{{else}}<span title="{{.PushMirrorNextTitle}}">{{.PushMirrorNext}}</span>{{end}}{{end}}
     </div>
   </div>
 

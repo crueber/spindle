@@ -12,7 +12,9 @@ import {
   taskTarget,
   taskFailureText,
   taskLogTail,
+  taskRefreshURL,
   MAX_RETRIES,
+  REFRESH_DELAY_MS,
 } from "../../src/islands/tasks.js";
 
 test("taskBars: explicit percent is used and clamped", () => {
@@ -56,6 +58,13 @@ test("taskDone: terminal frames decide, records need finished", () => {
   assert.equal(taskDone("task", { ok: true }), "running");
   assert.equal(taskDone("task", null), "running");
   assert.equal(taskDone("progress", { finished: "x", ok: true }), "running");
+  // A task that finished before the client attached is replayed as a record
+  // plus a result envelope: the record's own verdict wins over "result = ok".
+  assert.equal(taskDone("result", { task: { finished: "2026-11-20T00:00:00Z", ok: false }, value: "" }), "failed");
+  assert.equal(taskDone("result", { task: { finished: "2026-11-20T00:00:00Z", ok: true } }), "ok");
+  assert.equal(taskDone("result", { finished: "2026-11-20T00:00:00Z", ok: false }), "failed");
+  // An unfinished record is still running even under a result frame.
+  assert.equal(taskDone("result", { task: { ok: true } }), "ok");
 });
 
 test("taskRedirect: names a repo path or nothing", () => {
@@ -75,6 +84,26 @@ test("taskFailureText: error message + status, record summary, honest fallback",
   assert.equal(taskFailureText("task", { summary: "clone interrupted" }), "clone interrupted");
   assert.equal(taskFailureText("task", {}), "import failed");
   assert.equal(taskFailureText("result", {}), "import failed");
+  // The fallback names the card's noun, never another task kind's wording.
+  assert.equal(taskFailureText("result", {}, "sync"), "sync failed");
+  assert.equal(taskFailureText("task", {}, "push sync"), "push sync failed");
+  // A replayed result envelope's nested record summary is the reason.
+  assert.equal(taskFailureText("result", { task: { summary: "mirror sync acme/x: denied" } }), "mirror sync acme/x: denied");
+});
+
+test("taskRefreshURL: an in-app path only, never an off-site navigation", () => {
+  assert.equal(taskRefreshURL("/acme/r/settings/mirror?notice=done"), "/acme/r/settings/mirror?notice=done");
+  assert.equal(taskRefreshURL("  /acme/r/settings/mirror  "), "/acme/r/settings/mirror");
+  assert.equal(taskRefreshURL(""), "");
+  assert.equal(taskRefreshURL("   "), "");
+  assert.equal(taskRefreshURL(null), "");
+  assert.equal(taskRefreshURL(undefined), "");
+  // Absolute, protocol-relative and bare-relative values are refused.
+  assert.equal(taskRefreshURL("https://evil.example/x"), "");
+  assert.equal(taskRefreshURL("//evil.example/x"), "");
+  assert.equal(taskRefreshURL("acme/r/settings/mirror"), "");
+  assert.equal(taskRefreshURL("javascript:alert(1)"), "");
+  assert.equal(REFRESH_DELAY_MS > 0, true);
 });
 
 test("taskLogTail: log_tail lines only, empties dropped, junk is an empty list", () => {

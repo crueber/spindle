@@ -35,11 +35,14 @@
     <dl class="grid grid-cols-1 gap-x-6 gap-y-1 text-sm sm:grid-cols-[minmax(10rem,30%)_1fr]">
       <dt class="eyebrow">upstream</dt><dd class="break-all mono text-xs">{{.Upstream}}</dd>
       <dt class="eyebrow">status</dt><dd><span class="chip chip-neutral">mirror · pull-only</span></dd>
-      <dt class="eyebrow">next sync</dt><dd>{{.NextSync}}</dd>
-      <dt class="eyebrow">last synced</dt><dd>{{.LastSynced}}</dd>
+      <dt class="eyebrow">next scheduled sync</dt>
+      <dd>{{if .NextSyncISO}}<time datetime="{{.NextSyncISO}}" title="{{.NextSyncTitle}}">{{.NextSync}}</time>{{else}}{{.NextSync}}{{end}}</dd>
+      <dt class="eyebrow">last synced</dt>
+      <dd>{{if .LastSyncedISO}}<time datetime="{{.LastSyncedISO}}" title="{{.LastSyncedTitle}}">{{.LastSynced}}</time>{{else}}{{.LastSynced}}{{end}}</dd>
       <dt class="eyebrow">last result</dt><dd class="break-words">{{.LastResult}}</dd>
       {{if .Failures}}<dt class="eyebrow">consecutive failures</dt><dd>{{.Failures}} — backing off</dd>{{end}}
     </dl>
+    <p class="muted mt-2 text-[11px]">A manual sync runs immediately and does not move the next scheduled sync.</p>
     <form class="mt-3 flex flex-wrap items-end gap-3" method="post" action="/{{$.Owner}}/{{$.Name}}/settings/mirror"
           hx-post="/{{$.Owner}}/{{$.Name}}/settings/mirror" hx-target="#settings-panel" hx-select="#settings-panel" hx-swap="outerHTML"
           aria-label="Mirror schedule">
@@ -67,6 +70,36 @@
         <button type="submit" class="btn">sync now</button>
       </div>
     </form>
+    {{/* The click starts a mirror-sync task: the shared card (islands/tasks.js)
+         streams its bars/log to a terminal state, then refreshes this panel so
+         the new last-sync facts appear without a manual reload. The notice
+         above stays the no-JS fallback. */}}
+    {{with .Task}}
+    <div class="mt-3 grid gap-2" aria-label="Sync progress" aria-live="polite"
+         data-task-id="{{.ID}}" data-task-stream="{{.Stream}}"
+         data-task-return="/{{$.Owner}}/{{$.Name}}/settings/mirror"
+         data-task-refresh="{{.Refresh}}"
+         data-task-noun="sync" data-task-labels="{{.Title}}">
+      <p class="text-sm font-medium">{{.Title}}</p>
+      <div data-task-bars class="grid gap-2">
+        <div class="grid gap-1">
+          <div class="flex flex-wrap items-baseline gap-2 text-sm"><span class="font-medium">starting…</span></div>
+          <div class="h-1.5 overflow-hidden rounded bg-[var(--pd-raised)]" role="progressbar"
+               aria-label="sync progress" aria-valuemin="0" aria-valuemax="100">
+            <div class="h-full w-1/6 bg-[var(--pd-accent)]"></div>
+          </div>
+        </div>
+      </div>
+      <pre data-task-log class="code-view max-h-64 min-h-[2rem] overflow-y-auto p-2" aria-label="Sync log"></pre>
+      <p class="muted text-[11px]">
+        The sync keeps running if you navigate away. Task
+        <a class="link mono" href="{{.Stream}}">{{.ID}}</a> —
+        <a class="link" href="{{.Stream}}">follow its progress</a>
+        (the same URL with <code class="mono">Accept: text/event-stream</code>).
+      </p>
+      <noscript><p class="muted text-[11px]">JavaScript is off: the sync is still running — reload this page or open the task link above to check it.</p></noscript>
+    </div>
+    {{end}}
     <form class="mt-3" method="post" action="/{{$.Owner}}/{{$.Name}}/settings/mirror"
           hx-post="/{{$.Owner}}/{{$.Name}}/settings/mirror" hx-target="#settings-panel" hx-select="#settings-panel" hx-swap="outerHTML">
       <input type="hidden" name="mirror_action" value="remove">
@@ -133,10 +166,13 @@
       <dt class="eyebrow">auth</dt><dd>{{.AuthLabel}}{{if .Username}} · {{.Username}}{{end}}{{if .HasSecret}} · secret stored ({{.SecretHint}}){{else}} · no secret stored{{end}}</dd>
       {{if .Fingerprint}}<dt class="eyebrow">deploy key fingerprint</dt><dd class="break-all mono text-xs">{{.Fingerprint}}</dd>{{end}}
       {{if .HostKey}}<dt class="eyebrow">host key</dt><dd class="break-all mono text-xs">{{.HostKey}}</dd>{{end}}
-      <dt class="eyebrow">sync</dt><dd>{{.NextSync}}</dd>
-      <dt class="eyebrow">last synced</dt><dd>{{.LastSynced}}</dd>
+      <dt class="eyebrow">next scheduled sync</dt>
+      <dd>{{if .NextSyncISO}}<time datetime="{{.NextSyncISO}}" title="{{.NextSyncTitle}}">{{.NextSync}}</time>{{else}}{{.NextSync}}{{end}}</dd>
+      <dt class="eyebrow">last synced</dt>
+      <dd>{{if .LastSyncedISO}}<time datetime="{{.LastSyncedISO}}" title="{{.LastSyncedTitle}}">{{.LastSynced}}</time>{{else}}{{.LastSynced}}{{end}}</dd>
       <dt class="eyebrow">last result</dt><dd class="break-words">{{.LastResult}}</dd>
     </dl>
+    <p class="muted mt-2 text-[11px]">A manual sync pushes immediately and does not move the next scheduled sync.</p>
     <form class="mt-3 grid gap-3" method="post" action="/{{$.Owner}}/{{$.Name}}/settings/mirror"
           hx-post="/{{$.Owner}}/{{$.Name}}/settings/mirror" hx-target="#settings-panel" hx-select="#settings-panel" hx-swap="outerHTML"
           aria-label="Push mirror schedule and secrets">
@@ -195,6 +231,32 @@
       <label class="flex items-center gap-2 text-sm"><input type="checkbox" name="force" value="true" class="h-4 w-4 check"> force</label>
       <button type="submit" class="btn">sync now</button>
     </form>
+    {{with .Task}}
+    <div class="mt-3 grid gap-2" aria-label="Push sync progress" aria-live="polite"
+         data-task-id="{{.ID}}" data-task-stream="{{.Stream}}"
+         data-task-return="/{{$.Owner}}/{{$.Name}}/settings/mirror"
+         data-task-refresh="{{.Refresh}}"
+         data-task-noun="push sync" data-task-labels="{{.Title}}">
+      <p class="text-sm font-medium">{{.Title}}</p>
+      <div data-task-bars class="grid gap-2">
+        <div class="grid gap-1">
+          <div class="flex flex-wrap items-baseline gap-2 text-sm"><span class="font-medium">starting…</span></div>
+          <div class="h-1.5 overflow-hidden rounded bg-[var(--pd-raised)]" role="progressbar"
+               aria-label="push sync progress" aria-valuemin="0" aria-valuemax="100">
+            <div class="h-full w-1/6 bg-[var(--pd-accent)]"></div>
+          </div>
+        </div>
+      </div>
+      <pre data-task-log class="code-view max-h-64 min-h-[2rem] overflow-y-auto p-2" aria-label="Push sync log"></pre>
+      <p class="muted text-[11px]">
+        The push keeps running if you navigate away. Task
+        <a class="link mono" href="{{.Stream}}">{{.ID}}</a> —
+        <a class="link" href="{{.Stream}}">follow its progress</a>
+        (the same URL with <code class="mono">Accept: text/event-stream</code>).
+      </p>
+      <noscript><p class="muted text-[11px]">JavaScript is off: the push is still running — reload this page or open the task link above to check it.</p></noscript>
+    </div>
+    {{end}}
     <form class="mt-3" method="post" action="/{{$.Owner}}/{{$.Name}}/settings/mirror"
           hx-post="/{{$.Owner}}/{{$.Name}}/settings/mirror" hx-target="#settings-panel" hx-select="#settings-panel" hx-swap="outerHTML">
       <input type="hidden" name="push_action" value="remove">

@@ -203,9 +203,15 @@ func (s *SSE) PumpTaskStream(st TaskStream) {
 		s.Event("error", mustJSON(sseError{Status: 409, Message: "task runs on " + st.Other.Hostname}))
 		return
 	}
-	for p := range st.Updates {
-		if !s.Event(p.Kind, packetJSON(p)) {
-			return
+	// A task that already finished when the client attached carries no live
+	// channel (nil Updates): its terminal outcome is all there is, and ranging
+	// a nil channel would block the stream forever (the card then spins on a
+	// task that is done — the exact silent-waiting failure law 7 forbids).
+	if st.Updates != nil {
+		for p := range st.Updates {
+			if !s.Event(p.Kind, packetJSON(p)) {
+				return
+			}
 		}
 	}
 	done, ok := <-st.Done
