@@ -250,7 +250,7 @@
       "area": "triggers",
       "capability": "`merge_group` trigger wired to the merge-queue card (no queue semantics here)",
       "provenance": "G",
-      "status": "missing",
+      "status": "partial",
       "wave": 3,
       "track": [
         "T3"
@@ -262,7 +262,11 @@
         "docs/features/21_parity_master.md §4.2",
         "docs/threads.md §3.2"
       ],
-      "tests": []
+      "tests": [
+        "TestMergeGroupRefusedByName",
+        "TestRefusedTriggerNames"
+      ],
+      "notes": "Wave 3. `merge_group` is a NAMED PARSE ERROR naming the missing merge queue, never an accepted-and-inert trigger: the queue itself is the separate Spindle backlog card \"Merge queue\", and this row turns `have` when that card lands the emitter with the documented ref shape `refs/heads/gh-readonly-queue/<base>/pr-<n>-<sha>` whose checks gate the merge. Nothing here implements queue semantics."
     },
     {
       "id": "PAR-017",
@@ -291,7 +295,7 @@
       "area": "triggers",
       "capability": "`repository_dispatch` with `types` + `client_payload`, reachable from API/CLI/scoped token",
       "provenance": "G",
-      "status": "missing",
+      "status": "have",
       "wave": 3,
       "track": [
         "T3"
@@ -305,14 +309,20 @@
         "docs/features/21_parity_master.md §4.2",
         "docs/threads.md §3.2"
       ],
-      "tests": []
+      "tests": [
+        "TestRepositoryDispatchTriggerAndPayload",
+        "TestRepositoryDispatchAPI",
+        "TestValidateClientPayloadBounds",
+        "TestRepositoryDispatchParseAndFires"
+      ],
+      "notes": "Wave 3. `POST /{o}/{r}/api/threads/dispatches` takes event_type + a bounded client_payload (10 top-level keys, depth 4, scalar leaves, 64 KiB) and runs the default branch only. The write role is the gate (anonymous 401, read 403, job token 403 by requireRole), and the payload reaches `github.event.client_payload.<key>`. Answer 202 with the started runs."
     },
     {
       "id": "PAR-019",
       "area": "triggers",
       "capability": "`workflow_run` (workflows/types/branches filters, upstream run + artifacts) with the untrusted-trigger rule",
       "provenance": "G",
-      "status": "missing",
+      "status": "partial",
       "wave": 3,
       "track": [
         "T3"
@@ -326,7 +336,15 @@
         "docs/features/21_parity_master.md §4.2",
         "docs/threads.md §3.2"
       ],
-      "tests": []
+      "tests": [
+        "TestWorkflowRunTriggerAndChainCap",
+        "TestWorkflowRunUntrustedParentRequiresApproval",
+        "TestWorkflowRunDefaultTypeIsCompleted",
+        "TestWorkflowRunParseAndFilters",
+        "TestCrossRunRefusedWhileWorkflowRunHeld",
+        "TestE2E_ThreadsCrossRunArtifactNeedsApproval"
+      ],
+      "notes": "Wave 3. The trigger, workflows/types/branches filters, requested/completed emitters, the depth-3 chain cap and the D-3 approval hold for an untrusted parent all land. The documented cross-run hand-off now has its tests: `TestCrossRunRefusedWhileWorkflowRunHeld` refuses every cross-run read with a named 409 (naming the held parent) and releases it after the approval decision, and `TestE2E_ThreadsCrossRunArtifactNeedsApproval` downloads the upstream artifact after a maintainer decision. PARTIAL: the cross-run download API itself is the artifacts track's (PAR-098/PAR-099); this row pins the trigger-side hold it must consume."
     },
     {
       "id": "PAR-020",
@@ -353,7 +371,7 @@
       "area": "triggers",
       "capability": "Repository/check/deploy triggers: create/delete, fork, watch, status, check_run/check_suite, deployment(+_status), registry_package, gollum, page_build, branch_protection_rule, public",
       "provenance": "G",
-      "status": "missing",
+      "status": "partial",
       "wave": 3,
       "track": [
         "T3"
@@ -365,7 +383,12 @@
         "docs/features/21_parity_master.md §4.2",
         "docs/threads.md §3.2"
       ],
-      "tests": []
+      "tests": [
+        "TestRefTriggerFamily",
+        "TestRefusedTriggerNames",
+        "TestDeploymentEventsCreateFollowUps"
+      ],
+      "notes": "Wave 3. EMITTED: create/delete (push hook, ref + ref_type, job-token pushes suppressed), deployment/deployment_status (Threads deployment records; pending/in_progress/failure). REFUSED BY NAME at parse: merge_group, fork, watch, status, check_run, check_suite, registry_package, gollum, page_build, branch_protection_rule, public. PARTIAL: check_run/check_suite would require an app-check emitter distinct from the Threads mirror (a follow-up card), and watch needs a star event seam; neither is accepted inertly."
     },
     {
       "id": "PAR-022",
@@ -422,7 +445,7 @@
       "area": "triggers",
       "capability": "PR merge-ref semantics: the simulated merge commit (`refs/pull/N/merge`) is what runs",
       "provenance": "G",
-      "status": "missing",
+      "status": "have",
       "wave": 3,
       "track": [
         "T3"
@@ -436,7 +459,12 @@
         "docs/features/21_parity_master.md §4.2",
         "docs/threads.md §3.2"
       ],
-      "tests": []
+      "tests": [
+        "TestPullRequestRunsTheMergeCommit",
+        "TestPullRequestMergeFallbackKeepsTheHead",
+        "TestSubprocessGitMergeCommit"
+      ],
+      "notes": "Wave 3. The merge commit is computed server-side (`git merge-tree --write-tree` + `git commit-tree`, docs/go/04_git.md §14a), reported as refs/pull/<n>/merge and GITHUB_SHA, and the workflow file still comes from the head (same repo) or the base (fork), so a fork run never executes the contributor's file. A conflict falls back to the head/refs/pull/<n>/head and the payload sets merge_commit_sha only when a real merge exists. The commit is derived state in the serving copy (reproducible, not a WAL ref)."
     },
     {
       "id": "PAR-030",
@@ -1060,19 +1088,23 @@
         "docs/threads.md §3.4"
       ],
       "tests": [
+        "TestCompositeActionReadsActionPath",
+        "TestActionPathOutsideCompositeIsRefused",
+        "TestCompositeActionTemplateRefusals",
         "TestExecuteCompositeAction",
         "TestExecuteCompositeIfAndFailure",
         "TestExecuteCompositeContinueOnError",
-        "TestResolveStepHandlesEverySubstitutionSite"
+        "TestResolveStepHandlesEverySubstitutionSite",
+        "TestCompositeStepGetsActionPath"
       ],
-      "notes": "Composite inputs (INPUT_*), per-step env layering, nested LOCAL actions, output threading and the depth/cycle caps are enforced and tested. Two documented limits remain: `${{ github.action_path }}` is not in the parser's closed github.* field set (workflow/template.go GitHubFields) and nested remote `uses:` is refused by the parser (validateCompositeUses), so the row cannot close until the syntax track adds the field and remote-action resolution (D-5, T4)."
+      "notes": "Wave 3 closed the parser half of PAR-074: `github.action_path` is in the closed field set and is accepted only in a composite action's own steps, where it is per composite level (the contract for the runner is `<workspace>/<action dir>` for the innermost action whose step runs; stated in docs/threads.md §3.4a). Composite `inputs.*` references are validated against the action's declarations, composite output templates may read only its own steps, and nested local `uses:`/the depth-10 cap are pinned. Still open: nested remote `uses:` inside a composite (named refusal) and the cosign-installer corpus acceptance, which also needs the remote-action resolver (D-5). The runner half landed in the Wave-3 advanced-runner change: each composite level stamps `StepTemplate.ActionPath = <workspace>/<action dir>` and `resolveStep` supplies it, so a nested action sees its own path (TestCompositeStepGetsActionPath)."
     },
     {
       "id": "PAR-075",
       "area": "steps",
       "capability": "Reusable workflows, local: `on.workflow_call` (typed inputs, secrets, outputs) + `jobs.<id>.uses`/`with`/`secrets:`",
       "provenance": "B",
-      "status": "partial",
+      "status": "have",
       "wave": 2,
       "track": [
         "T3"
@@ -1087,19 +1119,24 @@
         "docs/threads.md §3.4"
       ],
       "tests": [
+        "TestReusableCallInputsSecretsOutputs",
+        "TestReusableCallRefusals",
+        "TestReusableUnknownOutputRefusedByName",
+        "TestReusableCallCycleRefused",
+        "TestReusableSecretsFilteredAtClaim",
+        "TestWorkflowCallParses",
+        "TestNormalizeCallInputs",
         "TestLocalReusableWorkflowExpandsJobs",
-        "TestLocalReusableWorkflowNested",
-        "TestReusableCallerRefusals",
-        "TestE2E_ThreadsWave2RunnerSurfaces"
+        "TestE2E_ThreadsReusableWorkflowChain"
       ],
-      "notes": "Local expansion landed 2026-11-26 (internal/threads/reusable.go): jobs.<id>.uses: ./.spindle/workflows/x.yml expands the callee's jobs in place as `<caller> / <callee>` records with rewritten needs, inherited caller needs/if, same-repo secrets and downgrade-only permissions; cross-repository uses is refused by name (D-6) and nesting is capped at 4. BLOCKED ON T1: on.workflow_call and jobs.<id>.secrets are not in the parser, so typed inputs/outputs declarations and `with:` are named refusals today, and a caller cannot reference a callee job's output (the needs.<job> reference is validated against the caller file's own keys)."
+      "notes": "Closed 2026-11-27 (Wave 3): `on.workflow_call` typed inputs (string/boolean/number with required/default), declared secrets (required), and output templates over `jobs.<id>.outputs.<x>` are parsed and enforced; a caller's `with:` is expanded once at run creation (github.*/inputs.* only) and checked by name/type; `jobs.<id>.secrets` is an explicit name→`${{ secrets.SOURCE }}` map or `inherit` (same repository only — cross-repository inherit is a D-6 parse error); the callee's declared outputs are readable as `needs.<caller>.outputs.<name>` (folded from the callee jobs' reported outputs) and an undeclared name fails the reading job by name; the callee's secret set is closed to its declarations and filtered at claim time; nesting is capped at 4 with (repo,path) cycle detection. A callee must declare `on.workflow_call`. Tests: internal/threads/reusable_wave3_test.go, internal/threads/workflow/workflow_call_test.go, and the e2e chain (inputs, renamed secret, output)."
     },
     {
       "id": "PAR-076",
       "area": "steps",
       "capability": "Reusable workflows, cross-repo/remote: SHA-pinned resolution, explicit secrets only, 10-level cap",
       "provenance": "G",
-      "status": "missing",
+      "status": "partial",
       "wave": 3,
       "track": [
         "T3"
@@ -1113,7 +1150,16 @@
         "docs/features/21_parity_master.md §4.5",
         "docs/threads.md §3.4"
       ],
-      "tests": []
+      "tests": [
+        "TestReusableCrossRepoResolvesAndAudits",
+        "TestReusableCrossRepoRefusals",
+        "TestReusableInheritAcrossRepositoriesIsAParseError",
+        "TestReusableRemoteWithoutSecretsGetsNone",
+        "TestReusableHelpers",
+        "TestE2E_ThreadsReusableCrossRepoRefused",
+        "TestReusableCrossRepoInheritIsRefused"
+      ],
+      "notes": "Wave 3 landed the safe subset: `owner/repo/.spindle/workflows/x.yml@<40-hex commit>` resolves from this instance when the callee repository is readable without credentials (a private callee is refused by name — the authority to read it is not carried by the run), a branch/tag ref is refused, permissions are downgrade-only, secrets are explicit only (`inherit` refused by D-6 at parse and again at expansion), the claim's secret map is filtered to the listed names, and every call writes one `reusable_cross_repo` host-audit record. Still open: the matrix's 10-level cap (this engine keeps the documented 4-level cap, so \"nesting 11 is refused\" is refined to \"nesting 5 is refused\"), and an execution e2e of a pinned remote callee (resolution is unit-tested; the e2e covers the refusals)."
     },
     {
       "id": "PAR-077",
@@ -1141,7 +1187,7 @@
       "area": "steps",
       "capability": "`services.<id>` parity: Forgejo's `cmd` spelling, credentials, `--health-*` options and readiness gating",
       "provenance": "B",
-      "status": "partial",
+      "status": "have",
       "wave": 2,
       "track": [
         "T2"
@@ -1158,9 +1204,13 @@
         "TestServiceHealthRefusals",
         "TestServiceUnhealthyFailsTheJob",
         "TestServiceReadinessTimeoutNamesTheService",
+        "TestSmallWave2Helpers",
+        "TestRegistryAuthLoginUsesStdinAndPrivateConfig",
+        "TestRegistryMasksRedactTheJobLog",
+        "TestPrepareRegistryAuthEdges",
         "TestE2E_ThreadsWave2RunnerSurfaces"
       ],
-      "notes": "The acceptance line is closed: `options: --health-cmd \"pg_isready\" --health-interval 10s --health-timeout 5s --health-retries 5` is allowlisted (containerpolicy.go), reaches docker create, and the readiness wait fails the job naming the service on unhealthy or a 60 s miss. Forgejo's `cmd:` spelling and registry `credentials:` are still YAML parse errors (the parser's Service struct has no such fields), so the row stays partial pending T1."
+      "notes": "Closed: the documented postgres service with `--health-cmd pg_isready` gates the job and a 60 s miss fails the job naming the service; Forgejo's `cmd:` spelling is the argv tail (command wins). `services.<id>.credentials` is refused, and registry auth is runner-owned: `--registry-auth-file` (0600) is logged in with `docker login --password-stdin` into a private temporary DOCKER_CONFIG, the password joins the job mask list, and the directory is removed when the runner stops. The parser refuses the field as an unknown key, which names it; the reason is documented in docs/threads.md §4.2 and docs/WORKFLOWS.md §2.3."
     },
     {
       "id": "PAR-079",
@@ -1192,10 +1242,11 @@
       "area": "steps",
       "capability": "Step `background`/`wait`/`wait-all`/`cancel`/`parallel` (new keys) — or an approved non-goal (D-7)",
       "provenance": "G",
-      "status": "missing",
+      "status": "have",
       "wave": 3,
       "track": [
-        "T2"
+        "T2",
+        "T1"
       ],
       "security": [],
       "decision": "D-7",
@@ -1204,7 +1255,26 @@
         "docs/features/21_parity_master.md §4.5",
         "docs/threads.md §3.4"
       ],
-      "tests": []
+      "tests": [
+        "TestStepExecutionKeysParse",
+        "TestStepExecutionKeysRefused",
+        "TestCompositeActionRefusesExecutionKeys",
+        "TestStepExecutionKeysReachStepSpec",
+        "TestPlanBackgroundControlAndParallel",
+        "TestPlanBackgroundRefusals",
+        "TestExecuteBackgroundWaited",
+        "TestExecuteBackgroundFailureSurfacedAtWait",
+        "TestExecuteBackgroundFailureSurfacedAtJobEnd",
+        "TestExecuteBackgroundKilledAtJobEnd",
+        "TestExecuteBackgroundCancelStep",
+        "TestBackgroundTimeoutKillsTheGroup",
+        "TestExecuteParallelMembersRunConcurrently",
+        "TestExecuteParallelMemberFailureFailsGroup",
+        "TestExecuteParallelLogsInMemberOrder",
+        "TestDockerBackgroundTreeKilledOnTimeout",
+        "TestDockerParallelPairOverlaps"
+      ],
+      "notes": "Closed 2026-11-27: the parser accepts exactly the runner model (`background` bool with an `id`; `wait` id/`all`; `wait-all` bool; `cancel` id/`all`; `parallel` a non-empty list of ordinary steps), refuses the invalid combinations by name at parse time (mutually exclusive control keys, control with run/uses or an id, unknown/forward refs, background without id or on a built-in action, group with run/uses/no members/background/control/nested members, duplicate ids, composite bodies), and copies every field recursively in `stepSpecs` so the value reaches `threads.StepSpec`. The runner owns execution: process-group kill (setsid) on wait/cancel/timeout/job end, failure surfacing at the wait or job end, parallel member ordering and continue-on-error. A local `uses: ./…` background is accepted by the parser and refused at plan time by name when the action is composite (the action file is only known then)."
     },
     {
       "id": "PAR-081",
@@ -1225,7 +1295,14 @@
         "docs/features/21_parity_master.md §4.5",
         "docs/threads.md §3.4"
       ],
-      "tests": []
+      "tests": [
+        "TestDockerInJobRemedy",
+        "TestDockerDaemonlessBuildWithKaniko",
+        "TestDockerHostGrant",
+        "TestDefaultPolicyRefusesWorkflowPrivilege",
+        "TestServerPolicyDefersGrantableShapes"
+      ],
+      "notes": "Daemonless is the documented parity path: a kaniko job builds inside the job container with no socket (TestDockerDaemonlessBuildWithKaniko), buildah is documented with its kernel prerequisite, and a `docker` step on a job without an endpoint fails with exit 127 plus the remedy naming the daemonless path and --docker-host. A workflow asking for the socket itself is refused by the container policy. The operator grant is --docker-host (job container only; never a service or docker action) and cannot be combined with --allow-fork-runs. Remaining for T7: the buildah corpus job that pushes to a registry (kaniko is covered here; the corpus needs a registry fixture)."
     },
     {
       "id": "PAR-082",
@@ -1402,7 +1479,7 @@
       "area": "commands",
       "capability": "Cache service: key/restore-keys, branch and default-branch scope, `cache-hit`, eviction, size budget",
       "provenance": "B",
-      "status": "missing",
+      "status": "have",
       "wave": 2,
       "track": [
         "T4"
@@ -1414,17 +1491,26 @@
       "acceptance": "Run 2 restores run 1's cache; a miss is not a failure; lookup order is a test table; a fork run cannot write a base-readable entry",
       "docs_refs": [
         "docs/features/21_parity_master.md §4.6",
-        "docs/threads.md §3.8",
-        "docs/threads.md §3.9"
+        "docs/threads.md §3.4c",
+        "docs/WORKFLOWS.md §6.4a"
       ],
-      "tests": []
+      "tests": [
+        "TestCacheScopeMatrix",
+        "TestCacheRoundTripAcrossRunsAndRestoreKeys",
+        "TestCachePRIsolation",
+        "TestCacheRetentionReclaimsAndLiveRunSurvives",
+        "TestParseCacheStepTable",
+        "TestRestoreCache",
+        "TestE2E_ThreadsCacheSaveRestoreAndForkIsolation"
+      ],
+      "notes": "Content-addressed store-backed engine (internal/actionscache) + scope policy (internal/threads/cache.go). Scopes: default / branch:<name> / pr:<n> / pr:<n>:untrusted; a tag run is read-only. Limits: 1 GiB entry, 5 GiB repo budget, 256 entries, 7-day idle window (threads.cache_*). Eviction is oldest-saved-first inside the index CAS. `cache-hit` is exact-key only."
     },
     {
       "id": "PAR-096",
       "area": "commands",
       "capability": "`setup-*` cache integration (`cache: npm` / `pip` / `go`) on the cache service",
       "provenance": "G",
-      "status": "missing",
+      "status": "partial",
       "wave": 2,
       "track": [
         "T4"
@@ -1436,17 +1522,20 @@
       "acceptance": "`setup-node` with `cache: npm` restores and saves with no separate cache step",
       "docs_refs": [
         "docs/features/21_parity_master.md §4.6",
-        "docs/threads.md §3.8",
-        "docs/threads.md §3.9"
+        "docs/threads.md §3.4c.1",
+        "docs/WORKFLOWS.md §6.4a"
       ],
-      "tests": []
+      "tests": [
+        "TestSetupCacheRecipes"
+      ],
+      "notes": "The cache HALF is complete and the setup-* refusal quotes the exact actions/cache recipe per ecosystem (npm/pip/go). The setup actions themselves remain marketplace JavaScript actions (PAR-070/PAR-071), so setup-java/dotnet/ruby are refused by name."
     },
     {
       "id": "PAR-097",
       "area": "commands",
       "capability": "Artifact v4 inputs: overwrite, compression-level, include-hidden-files, pattern, merge-multiple, artifact-ids, 255-char names, no-name download-all",
       "provenance": "B",
-      "status": "partial",
+      "status": "have",
       "wave": 2,
       "track": [
         "T5"
@@ -1458,17 +1547,27 @@
       "acceptance": "`pattern: dist-*` with `merge-multiple: true` yields one merged tree; a no-name download fetches all",
       "docs_refs": [
         "docs/features/21_parity_master.md §4.6",
-        "docs/threads.md §3.8",
-        "docs/threads.md §3.9"
+        "docs/threads.md §3.4",
+        "docs/WORKFLOWS.md §6.4"
       ],
-      "tests": []
+      "tests": [
+        "TestParseUploadArtifactV4Inputs",
+        "TestParseDownloadArtifactV4Inputs",
+        "TestDownloadMultipleAndMergeMultiple",
+        "TestArtifactOverwriteReplacesBlobAndManifest",
+        "TestArtifactCompressionLevelShapesTheZip",
+        "TestArtifactNameIsUpTo255Bytes",
+        "TestArtifactIDsAreStable",
+        "TestZipSlipManifestPathIsRejected"
+      ],
+      "notes": "Upload: overwrite (prepare-then-stream), include-hidden-files, compression-level (0..9, ZIP only), 255-byte names. Download: pattern, artifact-ids, merge-multiple, no-name download-all, per-artifact subdirectories. Stable numeric artifact id."
     },
     {
       "id": "PAR-098",
       "area": "commands",
       "capability": "Cross-run artifacts (download from another run id, same repository only)",
       "provenance": "G",
-      "status": "missing",
+      "status": "have",
       "wave": 3,
       "track": [
         "T5"
@@ -1480,17 +1579,26 @@
       "acceptance": "A `workflow_run` job downloads the upstream artifact; a cross-repository request is refused by name",
       "docs_refs": [
         "docs/features/21_parity_master.md §4.6",
-        "docs/threads.md §3.8",
-        "docs/threads.md §3.9"
+        "docs/threads.md §3.4 (Cross-run artifacts)",
+        "docs/WORKFLOWS.md §6.4"
       ],
-      "tests": []
+      "tests": [
+        "TestCrossRunHoldAndApproval",
+        "TestCrossRunDownloadGate",
+        "TestCrossRunForkIsRefusedByName",
+        "TestCrossRunApprovalRefusal",
+        "TestCrossRunSourceEdges",
+        "TestE2E_ThreadsCrossRunArtifactNeedsApproval",
+        "TestCrossRunRefusedWhileWorkflowRunHeld"
+      ],
+      "notes": "D-3: a run-id consumer is held in pending_approval (approval_kind cross_run), a maintainer decision is re-validated and audited, and every cross-run list/manifest/blob read is audited. A fork run and a secrets-bearing (repository/environment secret) job are refused by name; a cross-repository source is structurally impossible and refused by name. A run held on its untrusted workflow_run parent (approval_kind workflow_run, PAR-019) refuses every cross-run read with 409 naming the parent until that approval lands."
     },
     {
       "id": "PAR-099",
       "area": "commands",
       "capability": "Artifact list/delete API, page list and a sweep report",
       "provenance": "G",
-      "status": "partial",
+      "status": "have",
       "wave": 3,
       "track": [
         "T5"
@@ -1502,10 +1610,16 @@
       "acceptance": "Bytes freed are reported per family; a delete removes blob and manifest",
       "docs_refs": [
         "docs/features/21_parity_master.md §4.6",
-        "docs/threads.md §3.8",
-        "docs/threads.md §3.9"
+        "docs/threads.md §2.3",
+        "docs/threads.md §9.2"
       ],
-      "tests": []
+      "tests": [
+        "TestArtifactDeleteAPI",
+        "TestArtifactDryRunReclaimAndPhantomManifest",
+        "TestArtifactV4HTTPHandlers",
+        "TestArtifactManifestReadRejectsZipSlipPaths"
+      ],
+      "notes": "List (retention-aware), manifest read and DELETE (write role, bytes_freed). The sweep reports the artifact family (artifacts=… artifact=…B) and a dry run reports the same numbers. The run page lists artifacts with ZIP links."
     },
     {
       "id": "PAR-110",
@@ -1701,7 +1815,7 @@
       "area": "secrets",
       "capability": "Fork token policy: per-repo send-write-tokens setting, `pull_request_target` trust split, first-run approval",
       "provenance": "G",
-      "status": "partial",
+      "status": "have",
       "wave": 3,
       "track": [
         "T3"
@@ -1715,7 +1829,12 @@
         "docs/features/21_parity_master.md §4.7",
         "docs/threads.md §5"
       ],
-      "tests": []
+      "tests": [
+        "TestForkWriteTokenPolicy",
+        "TestSettingsRequireMaintainAndAudit",
+        "TestPullRequestTargetHeadCheckoutNeedsSecondSwitch"
+      ],
+      "notes": "Wave 3. Per-repository `settings.json` carries send_write_tokens (off by default), pull_request_target and pr_target_allow_head_checkout (D-2), all maintain+ and audited per changed switch. The decision is recorded on each affected run (write_tokens) and the run page says so; a fork run still never gets secrets or an id-token."
     },
     {
       "id": "PAR-119",
@@ -2042,7 +2161,7 @@
       "area": "concurrency",
       "capability": "Per-repository and per-organization concurrency caps",
       "provenance": "G",
-      "status": "missing",
+      "status": "partial",
       "wave": 3,
       "track": [
         "T3"
@@ -2054,7 +2173,10 @@
         "docs/features/21_parity_master.md §4.9",
         "docs/threads.md §3.1"
       ],
-      "tests": []
+      "tests": [
+        "TestConcurrencyCapHoldsAndReleases"
+      ],
+      "notes": "Wave 3. PARTIAL: the PER-REPOSITORY cap lands (`concurrency_cap` (0…500). A run created above the cap is written with its jobs and pending checks but NOT enqueued, and its header carries hold_reason. A terminal fold releases the oldest held run (one LIST per fold, only when a cap is configured). Admission is a heuristic, not a lock; the reason is always visible. The per-ORGANIZATION cap in this row's capability is not implemented (a follow-up: it needs the org ownership seam); the row turns `have` when it lands."
     },
     {
       "id": "PAR-154",
@@ -2099,7 +2221,7 @@
       "area": "concurrency",
       "capability": "Queue observability: exactly one named reason per queued job (no runner, labels unmatched, group held, approval, capacity)",
       "provenance": "G",
-      "status": "partial",
+      "status": "have",
       "wave": 3,
       "track": [
         "T6"
@@ -2111,7 +2233,10 @@
         "docs/features/21_parity_master.md §4.9",
         "docs/threads.md §3.1"
       ],
-      "tests": []
+      "tests": [
+        "TestQueueReasons"
+      ],
+      "notes": "Wave 3. Every queued job gets exactly one derived queue_reason (approval / capacity / needs / group / runner availability) in the API and the run page chip. Read-model only; it changes when the cause clears. Runner availability reads the instance registry once per run page."
     },
     {
       "id": "PAR-157",
@@ -2379,7 +2504,7 @@
       "area": "runners",
       "capability": "Operator policy knobs: `container.privileged`, `network`, `valid_volumes`, `docker_host`, `runner.timeout` — each with a safe default",
       "provenance": "F",
-      "status": "partial",
+      "status": "have",
       "wave": 2,
       "track": [
         "T3"
@@ -2394,8 +2519,19 @@
         "docs/features/21_parity_master.md §4.10",
         "docs/threads.md §8"
       ],
-      "tests": [],
-      "notes": "Wave 2 landed the LIMITS half with documented defaults and validated bounds (threads.retention / artifact_retention 24h…8760h, keep_forever, max_queue_attempts 1…20, job_lease 5m…30m; tests TestValidateThreadsKnobs, TestThreadsKnobDefaults and the reflected Configuration-page schema). The container half of this row (`container.privileged` gated by a runner opt-in, `network`, `valid_volumes`, `docker_host`) is internal/threads/containerpolicy.go + the runner package, owned by the runner track (T2): today `--privileged` and every namespace/mount flag are refused unconditionally, which is safe but not the documented opt-in shape."
+      "tests": [
+        "TestValidateThreadsKnobs",
+        "TestThreadsKnobDefaults",
+        "TestValidateContainerPolicyKnobs",
+        "TestServerPolicyDefersGrantableShapes",
+        "TestRunnerPolicyGrants",
+        "TestOperatorNetworkKnob",
+        "TestDockerHostGrant",
+        "TestDefaultPolicyRefusesWorkflowPrivilege",
+        "TestValidVolumesAllowlist",
+        "TestRunnerRefusesHostGrantWithForkRuns"
+      ],
+      "notes": "Both halves exist with documented defaults. Limits: threads.retention/artifact_retention 24h…8760h, keep_forever, max_queue_attempts 1…20, job_lease 5m…30m. Container half (runner): --container-privileged, --container-network, --container-valid-volume (repeatable globs) and --docker-host, each validated at startup and re-applied at plan time; the server defers those grantable shapes to the runner, which refuses them by name unless its operator opted in. A granting runner refuses --allow-fork-runs. The /admin/runners \"unsafe\" marker for a socket/privilege-granted runner is T6 UI work; the runner-side exclusion is enforced here."
     },
     {
       "id": "PAR-180",

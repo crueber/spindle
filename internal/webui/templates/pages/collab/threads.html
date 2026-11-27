@@ -10,6 +10,42 @@
   </div>
 
   {{if .Error}}<p class="err-line" role="alert">{{.Error}}</p>{{end}}
+  {{with .Notice}}<p class="notice-line mb-3 text-xs" role="status">{{.}}</p>{{end}}
+
+  {{if or .CanMaintain .Settings}}
+  <section class="card mb-4" id="threads-settings" aria-labelledby="threads-settings-heading">
+    <h3 id="threads-settings-heading" class="px-3 pt-2 text-sm font-semibold">Repository triggers &amp; limits</h3>
+    <p class="muted mb-2 px-3 text-xs">
+      These switches are per repository and audited. <code class="mono">pull_request_target</code> is
+      off by default (D-2); a fork run is read-only unless <code class="mono">send_write_tokens</code>
+      is on (D-13); a concurrency cap queues a run that would exceed it, naming the reason.
+    </p>
+    {{if .SettingsError}}<p class="err-line px-3 pb-2 text-xs" role="alert">{{.SettingsError}}</p>{{end}}
+    <form method="post" action="/{{$d.Repo.Full}}/threads/settings" class="space-y-2 px-3 pb-3">
+      <label class="flex items-start gap-2 text-xs">
+        <input type="checkbox" name="pull_request_target" {{if and .Settings .Settings.PullRequestTarget}}checked{{end}} {{if not .CanMaintain}}disabled{{end}}>
+        <span><span class="mono">pull_request_target</span> — run the base-branch workflow with base secrets for a PR (off by default).</span>
+      </label>
+      <label class="flex items-start gap-2 text-xs">
+        <input type="checkbox" name="pr_target_allow_head_checkout" {{if and .Settings .Settings.PRTargetAllowHeadCheckout}}checked{{end}} {{if not .CanMaintain}}disabled{{end}}>
+        <span><span class="mono">pr_target_allow_head_checkout</span> — allow an <span class="mono">actions/checkout</span> of the PR head inside <span class="mono">pull_request_target</span> (a second, separately audited decision; requires the switch above).</span>
+      </label>
+      <label class="flex items-start gap-2 text-xs">
+        <input type="checkbox" name="send_write_tokens" {{if and .Settings .Settings.SendWriteTokens}}checked{{end}} {{if not .CanMaintain}}disabled{{end}}>
+        <span><span class="mono">send_write_tokens</span> — give a fork run the write scopes its workflow asks for (off by default; never secrets or an id-token).</span>
+      </label>
+      <div class="flex flex-wrap items-end gap-2">
+        <label class="grid gap-1 text-xs">
+          <span class="eyebrow">Concurrency cap</span>
+          <input class="input mono" type="number" min="0" max="500" name="concurrency_cap"
+                 value="{{if .Settings}}{{.Settings.ConcurrencyCap}}{{else}}0{{end}}" {{if not .CanMaintain}}disabled{{end}}>
+        </label>
+        <span class="muted text-[11px]">0 = unlimited; a run above the cap waits and says so.</span>
+        {{if .CanMaintain}}<button type="submit" class="btn">save switches</button>{{end}}
+      </div>
+    </form>
+  </section>
+  {{end}}
 
   {{if .CanWrite}}
   <section class="card mb-4" id="threads-dispatch" aria-labelledby="threads-dispatch-heading">
@@ -132,6 +168,9 @@
           {{else}}<span class="chip chip-draft" title="the fork-gate hold: a maintainer must approve this run">awaiting maintainer</span>{{end}}
         {{end}}
         {{with .PendingGroup}}<span class="chip chip-neutral" title="one run at a time in a concurrency group; this run waits its turn">group <span class="mono">{{.}}</span> · waiting</span>{{end}}
+        {{with .HoldReason}}<span class="chip chip-draft" title="the repository's concurrency cap is full; this run starts when a slot frees">held · <span class="mono">{{.}}</span></span>{{end}}
+        {{if .PRTarget}}<span class="chip chip-draft" title="pull_request_target: the base-branch workflow runs with base secrets (D-2)">pr_target</span>{{end}}
+        {{if .WriteTokens}}<span class="chip chip-draft" title="this fork run got write tokens because a maintainer enabled send_write_tokens (D-13)">write tokens</span>{{end}}
         {{if not .Trusted}}<span class="chip chip-draft" title="fork pull request: base-branch workflow, no secrets">untrusted</span>{{end}}
         <span class="muted text-xs">{{.Event}}{{with .Branch}} · {{.}}{{end}}{{with .Actor}} · {{.}}{{end}}</span>
         <a class="link mono text-xs" href="/{{$d.Repo.Full}}/commit/{{.Commit}}">{{.ShortCommit}}</a>

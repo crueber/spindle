@@ -32,12 +32,18 @@ import (
 // are named parse errors today. `github.event.inputs.<name>` is accepted
 // separately (see splitRef).
 //
+// `action_path` is in the set because a composite action's own steps read it
+// (PAR-074), but it is NOT a global value: TemplateScope.ActionPath gates it, so
+// a workflow step, a job `if:` or an output template that reads it is a named
+// parse error rather than the empty string. The runner supplies the per-composite
+// value (docs/WORKFLOWS.md §4.3, docs/threads.md §3.4a).
+//
 // `server_url`/`api_url` are the spindle server addresses (PAR-111,
 // docs/threads.md §3.5): the runner substitutes them from its environment. They
 // are accepted here so a validated workflow can read them; a job-level `if:`
 // does not resolve them yet (the server's context predates the fields).
 var GitHubFields = []string{
-	"actor", "api_url", "event_name", "job", "ref", "ref_name", "repository",
+	"action_path", "actor", "api_url", "event_name", "job", "ref", "ref_name", "repository",
 	"run_id", "server_url", "sha", "workflow",
 }
 
@@ -64,6 +70,13 @@ var EventFields = []string{
 	"issue.labels",
 	"comment.id", "comment.body", "comment.user.login",
 	"comment.author_association",
+	"workflow_run.id", "workflow_run.name", "workflow_run.event",
+	"workflow_run.status", "workflow_run.conclusion", "workflow_run.run_attempt",
+	"workflow_run.head_branch", "workflow_run.head_sha", "workflow_run.workflow_id",
+	"deployment.id", "deployment.environment", "deployment.ref", "deployment.sha",
+	"deployment.task", "deployment.creator.login",
+	"deployment_status.state", "deployment_status.description",
+	"deployment_status.creator.login",
 }
 
 // RunnerFields is the closed `runner.*` context (PAR-034).
@@ -72,9 +85,22 @@ var RunnerFields = []string{"os", "arch", "name", "temp", "tool_cache", "environ
 // ValidRunnerField reports whether field is in the closed runner.* set.
 func ValidRunnerField(field string) bool { return containsFold(RunnerFields, field) }
 
+// clientPayloadPrefix is the one wildcard branch of the closed event-field
+// vocabulary: `github.event.client_payload.<key>` names a repository_dispatch
+// value, whose keys are the dispatcher's (bounded by validateClientPayload).
+const clientPayloadPrefix = "client_payload."
+
 // ValidEventField reports whether path (without the `event.` prefix) is in the
-// closed github.event.* set.
-func ValidEventField(path string) bool { return containsFold(EventFields, path) }
+// closed github.event.* set. A `client_payload.<key>` path is valid when the key
+// is an identifier; it resolves only when the current payload carries it (an
+// absent client key is empty, exactly like an absent input).
+func ValidEventField(path string) bool {
+	path = strings.TrimSpace(path)
+	if rest, ok := strings.CutPrefix(strings.ToLower(path), clientPayloadPrefix); ok {
+		return templateIdent(rest) && len(rest) <= 64
+	}
+	return containsFold(EventFields, path)
+}
 
 // GroupGitHubFields is the subset a concurrency group may read: the group is
 // expanded before a job exists, so `github.job` has no value there.
@@ -87,6 +113,7 @@ var TemplateSupported = []string{
 	"github.ref", "github.ref_name", "github.repository", "github.workflow",
 	"github.event_name", "github.sha", "github.run_id", "github.job",
 	"github.actor", "github.server_url", "github.api_url",
+	"github.action_path (a composite action's own steps only)",
 	"github.event.inputs.<name>", "github.event.<field>",
 	"forgejo.<field>", "forge.<field> (the github.* set)",
 	"runner.<field>", "vars.<name>",
@@ -193,11 +220,12 @@ func splitRef(expr string) (*TemplateRef, bool) {
 		context := strings.ToLower(strings.TrimSpace(segments[0]))
 		owner := strings.TrimSpace(segments[1])
 		output := strings.TrimSpace(segments[3])
-		if (context == "steps" || context == "needs") && templateIdent(owner) && templateIdent(output) {
+		if (context == "steps" || context == "needs" || context == "jobs") && templateIdent(owner) && templateIdent(output) {
 			ref := &TemplateRef{Context: context, Key: owner + ".outputs." + output, Output: output}
 			if context == "steps" {
 				ref.Step = owner
 			} else {
+				// needs.<job> and jobs.<id> both name a job key.
 				ref.Job = owner
 			}
 			return ref, true
@@ -291,7 +319,8 @@ func TemplateRefs(s string) ([]TemplateRef, error) {
 type TemplateScope struct {
 	// Axes are the job's matrix keys (axes plus include keys).
 	Axes []string
-	// Inputs are the workflow's declared workflow_dispatch input names.
+	// Inputs are the workflow's declared workflow_dispatch and workflow_call
+	// input names.
 	Inputs []string
 	// Steps are the lowercased ids of the steps declared before the site
 	// (`if:` only; an output reference is validated separately by step order).
@@ -301,6 +330,24 @@ type TemplateScope struct {
 	// JobIf marks a job-level `if:`: secrets are not available there yet
 	// (a step `if:` and step substitutions do read them).
 	JobIf bool
+	// ActionPath permits `${{ github.action_path }}`: only a composite
+	// action's own steps have a per-action value for it (PAR-074).
+	ActionPath bool
+	// CallWith marks a reusable-caller `with:` value. It is expanded at run
+	// creation, so only `github.*` and `inputs.*` resolve there — no secrets,
+	// steps, needs, matrix, runner, vars or env.
+	CallWith bool
+	// CallOutput marks an `on.workflow_call.outputs.<name>.value` template:
+	// only `jobs.<id>.outputs.<name>` resolves there.
+	CallOutput bool
+	// Jobs maps a job key to its declared output names. It is set only for an
+	// output value (CallOutput) and is what closes a `jobs.` reference.
+	Jobs map[string][]string
+	// SecretNames closes `secrets.*` to a workflow_call callee's declarations;
+	// SecretsClosed is false for an ordinary workflow (the repository's secrets
+	// are addressable by name).
+	SecretNames   []string
+	SecretsClosed bool
 }
 
 // ValidateTemplate checks every `${{ … }}` span in a substituted site against
@@ -327,8 +374,26 @@ func ValidateTemplate(s string, scope TemplateScope) error {
 
 // validateRef checks one reference against a scope.
 func validateRef(ref TemplateRef, scope TemplateScope) error {
+	if scope.CallOutput && ref.Context != "jobs" {
+		return fmt.Errorf("%s is not available in a workflow_call output value (only jobs.<id>.outputs.<name> resolves there)",
+			ref.Raw)
+	}
+	if scope.CallWith {
+		switch ref.Context {
+		case "github", "forgejo", "forge", "inputs":
+		default:
+			return fmt.Errorf("%s is not available in a reusable-workflow `with:` value (supported: github.*, inputs.*; the value is expanded when the run is created, before any step, matrix, secret or variable exists)", ref.Raw)
+		}
+	}
 	switch ref.Context {
 	case "github", "forgejo", "forge":
+		if strings.EqualFold(ref.Key, "action_path") {
+			if !scope.ActionPath {
+				return fmt.Errorf("${{ %s.action_path }} is only available in a composite action's own steps (it is the action's directory; a workflow step has none)",
+					ref.Context)
+			}
+			return nil
+		}
 		if name, ok := eventInputName(ref.Key); ok {
 			if !containsExact(scope.Inputs, name) {
 				return fmt.Errorf("${{ %s.%s }} is not a declared workflow_dispatch input (declared: %s)",
@@ -386,6 +451,10 @@ func validateRef(ref TemplateRef, scope TemplateScope) error {
 		if !ValidSecretName(ref.Key) {
 			return fmt.Errorf("${{ secrets.%s }} is not a valid secret reference (the form is secrets.<name>; names match [A-Za-z_][A-Za-z0-9_]*)", ref.Key)
 		}
+		if scope.SecretsClosed && !containsExact(scope.SecretNames, ref.Key) {
+			return fmt.Errorf("${{ secrets.%s }} is not declared by this workflow's `on.workflow_call.secrets` (declared: %s); a called workflow receives only the secrets its interface declares",
+				ref.Key, listOrNone(scope.SecretNames))
+		}
 		return nil
 	case "steps":
 		if !containsExact(scope.Steps, strings.ToLower(ref.Step)) {
@@ -397,6 +466,19 @@ func validateRef(ref TemplateRef, scope TemplateScope) error {
 		if !containsExactFold([]string(scope.Needs), ref.Job) {
 			return fmt.Errorf("${{ %s }} names no `needs:` dependency of this job (declared: %s)",
 				ref.Raw, listOrNone(scope.Needs))
+		}
+		return nil
+	case "jobs":
+		if !scope.CallOutput {
+			return fmt.Errorf("%s is only available in an `on.workflow_call.outputs.<name>.value` template (a job output is read elsewhere as needs.<job>.outputs.<name>)", ref.Raw)
+		}
+		outputs, ok := scope.Jobs[ref.Job]
+		if !ok {
+			return fmt.Errorf("${{ %s }} names no job of this file", ref.Raw)
+		}
+		if !containsExact(outputs, ref.Output) {
+			return fmt.Errorf("${{ %s }}: job %s does not declare the output %q (declared: %s)",
+				ref.Raw, ref.Job, ref.Output, listOrNone(outputs))
 		}
 		return nil
 	}
@@ -600,6 +682,18 @@ func Substitute(s string, vals TemplateValues) (string, error) {
 			continue
 		}
 		ref := *p.ref
+		// github.action_path is a per-composite-step value the RUNNER supplies
+		// (the parser accepts it only inside an action's steps). An absent value
+		// is a named error, never the empty string: silently emptying it would
+		// run an action from the wrong directory.
+		if isGitHubContext(ref.Context) && strings.EqualFold(ref.Key, "action_path") {
+			val, ok := vals.GitHub["action_path"]
+			if !ok {
+				return "", fmt.Errorf("%s has no value at this site: github.action_path is supplied by the runner for each composite action's own steps", ref.Raw)
+			}
+			b.WriteString(val)
+			continue
+		}
 		switch ref.Context {
 		case "steps", "needs":
 			owner, values, label := ref.Step, vals.Steps, "step"
@@ -880,4 +974,138 @@ func listOrNone(names []string) string {
 		return "none"
 	}
 	return strings.Join(names, ", ")
+}
+
+// wholeSecretRef reports whether value is exactly one `${{ secrets.<name> }}`
+// span and returns the secret name. A literal is not a secret reference: a
+// `jobs.<id>.secrets` value must name where a secret comes FROM, or the file
+// would carry the value itself (docs/threads.md §3.4b).
+func wholeSecretRef(value string) (string, bool) {
+	trimmed := strings.TrimSpace(value)
+	if !strings.HasPrefix(trimmed, "${{") || !strings.HasSuffix(trimmed, "}}") {
+		return "", false
+	}
+	inner := strings.TrimSpace(trimmed[len("${{") : len(trimmed)-len("}}")])
+	if inner == "" || strings.Contains(inner, "${{") || strings.Contains(inner, "}}") {
+		return "", false
+	}
+	ref, ok := splitRef(inner)
+	if !ok || ref.Context != "secrets" || !ValidSecretName(ref.Key) {
+		return "", false
+	}
+	return ref.Key, true
+}
+
+// CallOutputRefs returns the `jobs.<id>.outputs.<name>` references in an
+// `on.workflow_call.outputs.<name>.value` template. It is the only context that
+// may appear there; a span naming anything else is left to ValidateTemplate's
+// scope check, which refuses it by name.
+func CallOutputRefs(s string) ([]TemplateRef, error) {
+	var out []TemplateRef
+	for rest := s; ; {
+		i := strings.Index(rest, "${{")
+		if i < 0 {
+			return out, nil
+		}
+		after := rest[i+3:]
+		j := strings.Index(after, "}}")
+		if j < 0 {
+			return nil, fmt.Errorf("unterminated ${{ expression")
+		}
+		expr := strings.TrimSpace(after[:j])
+		if ref, ok := splitRef(expr); ok && ref.Context == "jobs" {
+			ref.Raw = "${{ " + expr + " }}"
+			out = append(out, *ref)
+		}
+		rest = after[j+2:]
+	}
+}
+
+// SubstituteCallOutputs evaluates one `on.workflow_call.outputs.<name>.value`
+// template against the callee jobs' reported outputs (a job key → its outputs,
+// keyed the way the callee's file names the job). It is strict, like a step's
+// output reference: a job the template names but the call did not run, or an
+// output the job did not publish, is an error naming the reference. The server
+// calls it when it folds a caller job's outputs for `needs.<caller>.outputs.*`.
+func SubstituteCallOutputs(s string, jobs map[string]map[string]string) (string, error) {
+	if !strings.Contains(s, "${{") {
+		return s, nil
+	}
+	parts, err := splitTemplate(s)
+	if err != nil {
+		return "", err
+	}
+	var b strings.Builder
+	for _, p := range parts {
+		if p.ref == nil {
+			b.WriteString(p.literal)
+			continue
+		}
+		ref := *p.ref
+		if ref.Context != "jobs" {
+			return "", fmt.Errorf("unknown context %q in ${{ %s }} (a workflow_call output reads jobs.<id>.outputs.<name>)",
+				ref.Context, ref.Raw)
+		}
+		outs, ok := jobs[ref.Job]
+		if !ok {
+			return "", fmt.Errorf("%s: no job with id %q in this call", ref.Raw, ref.Job)
+		}
+		val, ok := outs[ref.Output]
+		if !ok {
+			return "", fmt.Errorf("%s: job %q did not publish the output %q", ref.Raw, ref.Job, ref.Output)
+		}
+		b.WriteString(val)
+	}
+	return b.String(), nil
+}
+
+// NeedsOutputNames returns every `needs.<job>.outputs.<name>` reference in s
+// (a template or an `if:` expression). The server uses it at run creation to
+// check a caller job's output names against the callee's declaration; the
+// parser's own validation only knows the caller file's job keys.
+func NeedsOutputNames(s string) ([]TemplateRef, error) {
+	var out []TemplateRef
+	for i := 0; ; {
+		j := strings.Index(s[i:], "needs.")
+		if j < 0 {
+			return out, nil
+		}
+		start := i + j
+		// A reference must start at a boundary, not inside an identifier
+		// (`myneeds.x` is not a reference).
+		if start > 0 && isIdentByte(s[start-1]) {
+			i = start + len("needs.")
+			continue
+		}
+		rest := s[start:]
+		end := 0
+		for end < len(rest) && isRefByte(rest[end]) {
+			end++
+		}
+		ref, ok := splitRef(rest[:end])
+		if ok && ref.Context == "needs" {
+			ref.Raw = rest[:end]
+			out = append(out, *ref)
+		}
+		i = start + end
+		if end == 0 {
+			i++
+		}
+	}
+}
+
+// isIdentByte reports whether b can continue an identifier (or a `${{` span).
+func isIdentByte(b byte) bool {
+	switch {
+	case b >= 'a' && b <= 'z', b >= 'A' && b <= 'Z', b >= '0' && b <= '9':
+		return true
+	case b == '_' || b == '-':
+		return true
+	}
+	return false
+}
+
+// isRefByte reports whether b can continue a dotted reference.
+func isRefByte(b byte) bool {
+	return isIdentByte(b) || b == '.'
 }

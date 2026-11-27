@@ -3,6 +3,7 @@ package threads
 import (
 	"encoding/json"
 	"fmt"
+	"regexp"
 	"sort"
 	"strings"
 
@@ -76,8 +77,190 @@ func PullEventPayload(repo, action string, num int, title, state, author, baseRe
 	}
 }
 
-// ReleaseAsset is one asset row in the event payload (name + size only: the
-// download URLs are server-relative and the bytes are not part of an event).
+// RepositoryDispatchEventPayload builds the `repository_dispatch` payload
+// (PAR-018). `client_payload` is the caller's bounded object (the API validates
+// it before creation); the event reaches a workflow as
+// `github.event.client_payload.<key>` and as $GITHUB_EVENT_PATH.
+func RepositoryDispatchEventPayload(repo, eventType string, client map[string]any, actor string) map[string]any {
+	cp := map[string]any{}
+	for k, v := range client {
+		cp[k] = v
+	}
+	return map[string]any{
+		"action":         eventType,
+		"event_type":     eventType,
+		"repository":     repositoryProjection(repo),
+		"sender":         map[string]any{"login": actor},
+		"client_payload": cp,
+	}
+}
+
+// WorkflowRunParent is the bounded projection of an upstream run carried by a
+// `workflow_run` payload (PAR-019). Artifact ids and URLs are deliberately
+// absent: cross-run artifact access is a separate, approved API (D-3), not
+// something an event payload grants.
+type WorkflowRunParent struct {
+	ID         string
+	Name       string
+	Event      string
+	Status     string
+	Conclusion string
+	RunAttempt int
+	HeadBranch string
+	HeadSHA    string
+	WorkflowID string
+	Repository string
+	Actor      string
+}
+
+// WorkflowRunEventPayload builds the `workflow_run` payload.
+func WorkflowRunEventPayload(action string, parent WorkflowRunParent) map[string]any {
+	status := "completed"
+	if action == "requested" {
+		status = "queued"
+	}
+	return map[string]any{
+		"action":     action,
+		"repository": repositoryProjection(parent.Repository),
+		"sender":     map[string]any{"login": parent.Actor},
+		"workflow_run": map[string]any{
+			"id":          parent.ID,
+			"name":        parent.Name,
+			"event":       parent.Event,
+			"status":      status,
+			"conclusion":  parent.Conclusion,
+			"run_attempt": parent.RunAttempt,
+			"head_branch": parent.HeadBranch,
+			"head_sha":    parent.HeadSHA,
+			"workflow_id": parent.WorkflowID,
+			"repository":  map[string]any{"full_name": parent.Repository},
+		},
+	}
+}
+
+// RefEventPayload builds the `create`/`delete` payload (PAR-021): the ref and
+// its type, nothing about content (a deleted ref has no readable tip).
+func RefEventPayload(repo, ref, refType, actor string) map[string]any {
+	return map[string]any{
+		"ref":        ref,
+		"ref_type":   refType,
+		"repository": repositoryProjection(repo),
+		"sender":     map[string]any{"login": actor},
+	}
+}
+
+// DeploymentEventPayload builds the `deployment` / `deployment_status` payload
+// (PAR-021). The run and job ids identify the record; no artifact or secret is
+// named.
+func DeploymentEventPayload(repo, actor, environment, ref, sha, runID, jobID, state, description string) map[string]any {
+	payload := map[string]any{
+		"repository": repositoryProjection(repo),
+		"sender":     map[string]any{"login": actor},
+		"deployment": map[string]any{
+			"id":          jobID,
+			"environment": environment,
+			"ref":         ref,
+			"sha":         sha,
+			"task":        "deploy",
+			"creator":     map[string]any{"login": actor},
+			"run_id":      runID,
+		},
+	}
+	if state != "" {
+		payload["deployment_status"] = map[string]any{
+			"state":       state,
+			"description": truncateBody(description),
+			"creator":     map[string]any{"login": actor},
+		}
+	}
+	return payload
+}
+
+// repositoryProjection is the shared repository object in every payload.
+func repositoryProjection(repo string) map[string]any {
+	return map[string]any{
+		"full_name": repo,
+		"name":      repoNamePart(repo),
+		"owner":     map[string]any{"login": ownerPart(repo)},
+	}
+}
+
+// maxClientPayloadKeys is GitHub's bound on a dispatch's top-level properties.
+// The byte cap is the shared event-payload cap (64 KiB), enforced on the whole
+// payload after projection.
+const maxClientPayloadKeys = 10
+
+// maxClientPayloadDepth bounds nested objects/arrays inside client_payload: a
+// dispatch is a trigger, not a data channel, and a deep document is a way to
+// make every run's header large.
+const maxClientPayloadDepth = 4
+
+// ValidateClientPayload bounds a repository_dispatch client_payload before any
+// run exists. It accepts JSON objects with scalar leaves (string, bool, number,
+// null) and nested objects/arrays up to the documented depth, at most
+// maxClientPayloadKeys top-level properties and 64 KiB encoded. Anything else
+// is a named 422 — never a silently truncated event.
+func ValidateClientPayload(raw map[string]any) (map[string]any, error) {
+	if raw == nil {
+		return map[string]any{}, nil
+	}
+	if len(raw) > maxClientPayloadKeys {
+		return nil, fmt.Errorf("%w: client_payload has %d top-level properties (max %d)", ErrUnprocessable, len(raw), maxClientPayloadKeys)
+	}
+	out := make(map[string]any, len(raw))
+	for key, val := range raw {
+		if !clientPayloadKeyRe.MatchString(key) {
+			return nil, fmt.Errorf("%w: client_payload key %q must match [A-Za-z0-9_-]{1,64}", ErrUnprocessable, key)
+		}
+		if err := validateClientValue(val, 1); err != nil {
+			return nil, fmt.Errorf("%w: client_payload.%s: %v", ErrUnprocessable, key, err)
+		}
+		out[key] = val
+	}
+	rawJSON, err := json.Marshal(out)
+	if err != nil {
+		return nil, fmt.Errorf("%w: client_payload: %v", ErrUnprocessable, err)
+	}
+	if len(rawJSON) > maxEventPayloadBytes {
+		return nil, fmt.Errorf("%w: client_payload is %d bytes, over the %d-byte cap", ErrTooLarge, len(rawJSON), maxEventPayloadBytes)
+	}
+	return out, nil
+}
+
+// clientPayloadKeyRe is the client_payload key charset (an identifier the
+// expression parser can name).
+var clientPayloadKeyRe = regexp.MustCompile(`^[A-Za-z0-9_-]{1,64}$`)
+
+// validateClientValue bounds nesting and leaf types.
+func validateClientValue(val any, depth int) error {
+	if depth > maxClientPayloadDepth {
+		return fmt.Errorf("nesting exceeds %d levels", maxClientPayloadDepth)
+	}
+	switch v := val.(type) {
+	case nil, string, bool, float64:
+		return nil
+	case map[string]any:
+		for k, item := range v {
+			if len(k) > 64 || k == "" {
+				return fmt.Errorf("nested key %q is not a valid name (1…64 bytes)", k)
+			}
+			if err := validateClientValue(item, depth+1); err != nil {
+				return err
+			}
+		}
+		return nil
+	case []any:
+		for _, item := range v {
+			if err := validateClientValue(item, depth+1); err != nil {
+				return err
+			}
+		}
+		return nil
+	default:
+		return fmt.Errorf("unsupported value type %T (expected string, boolean, number, null, object or array)", val)
+	}
+}
+
 type ReleaseAsset struct {
 	Name string `json:"name"`
 	Size int64  `json:"size"`
@@ -207,6 +390,15 @@ func EventFieldsOf(payload map[string]any) map[string]string {
 		if val, ok := payloadPath(payload, field); ok {
 			if s, ok := eventScalar(val); ok {
 				out["event."+field] = s
+			}
+		}
+	}
+	// repository_dispatch's client_payload keys are the dispatcher's, so they
+	// are projected dynamically (the one wildcard in the closed vocabulary).
+	if cp, ok := payload["client_payload"].(map[string]any); ok {
+		for key, val := range cp {
+			if s, ok := eventScalar(val); ok {
+				out["event.client_payload."+key] = s
 			}
 		}
 	}

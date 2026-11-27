@@ -161,7 +161,7 @@ func serviceCommand(svc workflow.Service) []string {
 func stepSpecs(in []workflow.Step) []StepSpec {
 	out := make([]StepSpec, 0, len(in))
 	for _, st := range in {
-		out = append(out, StepSpec{
+		spec := StepSpec{
 			ID:               st.ID,
 			Name:             st.Name,
 			Run:              st.Run,
@@ -173,7 +173,15 @@ func stepSpecs(in []workflow.Step) []StepSpec {
 			WorkingDirectory: st.WorkingDirectory,
 			ContinueOnError:  st.ContinueOnError,
 			TimeoutMinutes:   st.TimeoutMinutes,
-		})
+			Background:       st.Background,
+			Wait:             strings.TrimSpace(st.Wait),
+			WaitAll:          st.WaitAll,
+			Cancel:           strings.TrimSpace(st.Cancel),
+		}
+		if len(st.Parallel) > 0 {
+			spec.Parallel = stepSpecs(st.Parallel)
+		}
+		out = append(out, spec)
 	}
 	return out
 }

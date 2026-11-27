@@ -6,7 +6,9 @@
     {{template "collab_check_dot" (runDot .Run.State)}}
     <span class="chip chip-neutral">{{.Run.State}}</span>
     {{if not .Run.Trusted}}<span class="chip chip-draft" title="fork pull request: base-branch workflow, no secrets">untrusted</span>{{end}}
-    <span class="muted text-xs">{{.Run.Event}}{{with .Run.Branch}} · {{.}}{{end}}</span>
+    {{if .Run.PRTarget}}<span class="chip chip-draft" title="pull_request_target: the workflow file and secrets are the BASE branch's (D-2)">pr_target</span>{{end}}
+    {{if .Run.WriteTokens}}<span class="chip chip-draft" title="a maintainer enabled send_write_tokens, so this fork run's token carries write scopes (D-13)">write tokens</span>{{end}}
+    <span class="muted text-xs">{{.Run.Event}}{{with .Run.Branch}} · {{.}}{{end}}{{with .Run.Ref}} · <span class="mono">{{.}}</span>{{end}}</span>
     <a class="link mono text-xs" href="{{.CommitHref}}">{{.ShortCommit}}</a>
     <span class="ml-auto flex flex-wrap items-center justify-end gap-x-4 gap-y-1">
       {{if and .CanApprove .Approval.Pending}}
@@ -45,6 +47,10 @@
     {{with .Approval.WaitUntil}}The wait timer lets it start no earlier than <span class="mono">{{.}}</span>. {{end}}
     {{if .Approval.PreventSelfReview}}This environment prevents self-review, so {{.Run.Actor}} (who triggered the run) cannot approve it.{{end}}
     {{if .CanApprove}}Approve it to queue it, or deny it to fail the deployment.{{end}}
+    {{else if eq .Approval.Kind "cross_run"}}
+    waiting for a maintainer: this run downloads another run's artifacts (<span class="mono">run-id</span>),
+    so it is held and has not executed. {{if .CanApprove}}Approve it to allow the cross-run read
+    (audited), or deny it to cancel it.{{end}}
     {{else}}
     waiting for a maintainer: this is a first-time contributor's fork pull request, so the run is held
     and has not executed. {{if .CanApprove}}Approve it to queue it, or deny it to cancel it.{{end}}
@@ -55,6 +61,11 @@
     waiting for concurrency group <span class="mono">{{.Run.PendingGroup}}</span>: another run of this
     workflow holds the group, and one run runs at a time. This run starts when the group frees (or a
     newer run of the group replaces it, which is what <code class="mono">cancel-in-progress: false</code> means).
+  </p>
+  {{else if .Run.HoldReason}}
+  <p class="warn-line mb-3 text-xs" role="status">
+    held: <span class="mono">{{.Run.HoldReason}}</span>. The jobs are written and their checks are
+    pending, but nothing is queued for a runner; this run starts when a slot frees.
   </p>
   {{else if .Approval.ApprovedBy}}
   <p class="muted mb-3 text-xs">approved by {{.Approval.ApprovedBy}}{{with .Approval.ApprovedAt}} · {{template "collab_time" .}}{{end}}</p>
@@ -108,6 +119,7 @@
         <code class="mono text-xs">{{.Context}}</code>
         <span class="chip chip-neutral" {{if .Tolerated}}title="continue-on-error: this job failed, but the run is not failed by it"{{end}}>{{.State}}{{if .Tolerated}} · tolerated{{end}}</span>
         {{with .Reason}}<span class="muted text-xs" title="why the job did not run">· {{.}}</span>{{end}}
+        {{with .QueueReason}}<span class="chip chip-neutral" title="why this job has not started">queued · {{.}}</span>{{end}}
         <span class="muted text-xs">runs-on {{.RunsOn}}</span>
         {{with .Container}}<span class="muted text-xs">· {{.}}</span>{{end}}
         {{with .Deployment}}

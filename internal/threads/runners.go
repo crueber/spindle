@@ -1115,7 +1115,8 @@ func (s *Service) fetchPayload(ctx context.Context, owner, repo string, runner *
 		res.LabelImages = runner.Doc.LabelImages
 	}
 	trusted := claim.Run.Trusted && job.Trusted
-	perms := s.EffectivePermissions(job.Spec, trusted)
+	writeTokens := claim.Run.WriteTokens && !trusted
+	perms := s.EffectivePermissionsFor(job.Spec, trusted, writeTokens)
 	res.Permissions = perms
 	res.Scopes = attemptScopes(PermissionScopes(perms))
 	// The job OIDC request token (docs/PLAN-THREADS-OIDC.md): only a trusted
@@ -1180,6 +1181,12 @@ func (s *Service) fetchPayload(ctx context.Context, owner, repo string, runner *
 	if err != nil {
 		return nil, err
 	}
+	// PAR-075/D-6: an expanded callee receives exactly the secrets its call
+	// passes (the same-repository implicit set or `inherit`, or the explicit
+	// name map). A cross-repository call that lists nothing gets nothing, and a
+	// secret the callee does not declare never reaches it. An ordinary job has
+	// no reusable secret set and keeps the repository's secrets.
+	values = reusableSecretValues(job.Spec, values)
 	// Environment secrets override repository secrets by name (GitHub's rule,
 	// docs/PLAN-THREADS-ENVIRONMENTS.md §4). They are resolved only for a job
 	// that names an environment, only for a TRUSTED run, and only when the

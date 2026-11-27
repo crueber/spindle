@@ -16,6 +16,7 @@ var supportedEvents = map[string]bool{
 	"push":              true,
 	"pull_request":      true,
 	"workflow_dispatch": true,
+	"workflow_call":     true,
 	"schedule":          true,
 }
 
@@ -87,6 +88,12 @@ func (t *translator) triggers(m *yaml.Node, i int) {
 				} else {
 					j -= 2
 				}
+			case "workflow_call":
+				if t.workflowCallTrigger(val, j, path) {
+					t.translated++
+				} else {
+					j -= 2
+				}
 			default:
 				t.drop(val, j, t.untranslatedAt(path, ev.Value, "not a trigger Threads can emit"))
 				j -= 2
@@ -95,6 +102,31 @@ func (t *translator) triggers(m *yaml.Node, i int) {
 	default:
 		t.drop(m, i, t.untranslatedAt("on", "on", "expected a string, a list, or a mapping"))
 	}
+}
+
+// workflowCallTrigger carries `on.workflow_call` as written when the target's
+// parser accepts it (PAR-075): typed inputs, declared secrets and outputs are
+// the callee's interface and the contract a caller is checked against. An
+// unsupported declaration is dropped with the parser's own reason, so the
+// converted file stays parseable and the report names what was lost.
+func (t *translator) workflowCallTrigger(m *yaml.Node, i int, path string) bool {
+	val := m.Content[i+1]
+	if isNull(val) {
+		t.translated++
+		return true
+	}
+	if val.Kind != yaml.MappingNode {
+		t.drop(m, i, t.untranslatedAt(path, "on.workflow_call", "the callable declaration must be a mapping (inputs, secrets, outputs)"))
+		return false
+	}
+	var call workflow.WorkflowCallTrigger
+	if err := val.Decode(&call); err != nil {
+		t.drop(m, i, t.untranslatedAt(path, "on.workflow_call", err.Error()))
+		return false
+	}
+	t.note(path, "on.workflow_call",
+		"carried as written; the callee's typed inputs, declared secrets and output templates are its interface")
+	return true
 }
 
 // pushTrigger keeps the branch and tag filters the target accepts and refuses

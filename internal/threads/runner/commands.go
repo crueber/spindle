@@ -75,6 +75,46 @@ func newCommandFiles() *commandFiles {
 	return &commandFiles{env: map[string]string{}, pathSet: map[string]bool{}}
 }
 
+// clone copies the accumulated state. A background step and each parallel
+// member run against their own clone (they must not mutate the job's state from
+// another goroutine); the caller merges it back in step order when the step is
+// joined, so concurrent writes stay deterministic.
+func (c *commandFiles) clone() *commandFiles {
+	cp := &commandFiles{
+		env:      make(map[string]string, len(c.env)),
+		path:     append([]string(nil), c.path...),
+		pathSet:  make(map[string]bool, len(c.pathSet)),
+		envBytes: c.envBytes,
+	}
+	for k, v := range c.env {
+		cp.env[k] = v
+	}
+	for k, v := range c.pathSet {
+		cp.pathSet[k] = v
+	}
+	return cp
+}
+
+// mergeFrom layers another clone's additions onto c, enforcing the same caps.
+// Values the clone left unchanged are re-applied idempotently (last write wins
+// inside a background/parallel step, and the merge order decides between two).
+func (c *commandFiles) mergeFrom(other *commandFiles) error {
+	if other == nil {
+		return nil
+	}
+	addedEnv := make(map[string]string, len(other.env))
+	for k, v := range other.env {
+		if cur, ok := c.env[k]; ok && cur == v {
+			continue
+		}
+		addedEnv[k] = v
+	}
+	if err := c.addEnv(addedEnv); err != nil {
+		return err
+	}
+	return c.addPath(other.path)
+}
+
 // addEnv merges one step's $GITHUB_ENV values, enforcing the per-value,
 // per-job count and byte caps before anything is stored. A duplicate name keeps
 // the last value written (later steps win, as on GitHub).
@@ -286,7 +326,7 @@ func applyCommandFiles(p *Plan, step StepPlan, cmds *commandFiles) StepPlan {
 // container and merges them into the job state. A malformed file is a named
 // error: when the step itself succeeded, the error fails the step (never a
 // silent drop); when it already failed, the caller only logs it.
-func (e *Executor) collectCommandFiles(ctx context.Context, p *Plan, step StepPlan, cmds *commandFiles, stream *Streamer) error {
+func (e *Executor) collectCommandFiles(ctx context.Context, p *Plan, step StepPlan, cmds *commandFiles, stream StepStream) error {
 	if p == nil || cmds == nil || (step.EnvFile == "" && step.PathFile == "") {
 		return nil
 	}

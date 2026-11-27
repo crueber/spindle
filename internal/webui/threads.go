@@ -21,6 +21,7 @@ import (
 	"net/url"
 	"path"
 	"regexp"
+	"strconv"
 	"strings"
 
 	"github.com/crueber/spindle/internal/server/auth"
@@ -61,6 +62,11 @@ type ThreadsDeps struct {
 	// `environment`-typed dispatch picker (PAR-023). Nil leaves the picker
 	// empty; the service still validates the submitted value.
 	Environments func(ctx context.Context, owner, repo string, p auth.Principal) ([]string, error)
+	// Settings/UpdateSettings are the per-repository Threads switches (PAR-015,
+	// PAR-118, PAR-153). The service enforces maintain+ and audits every change;
+	// the page renders the values and the form.
+	Settings       func(ctx context.Context, owner, repo string, p auth.Principal) (*threads.SettingsView, error)
+	UpdateSettings func(ctx context.Context, owner, repo string, in threads.SettingsInput, p auth.Principal) (*threads.SettingsView, error)
 }
 
 var threadsDeps ThreadsDeps
@@ -78,6 +84,7 @@ func (s *Server) mountThreads() {
 	m := &s.mux
 	m.HandleFunc("GET /{owner}/{repo}/threads", s.threadsList)
 	m.HandleFunc("POST /{owner}/{repo}/threads/dispatch", s.threadsDispatch)
+	m.HandleFunc("POST /{owner}/{repo}/threads/settings", s.threadsSettings)
 	m.HandleFunc("GET /{owner}/{repo}/threads/{run}", s.threadRun)
 	m.HandleFunc("GET /{owner}/{repo}/threads/{run}/artifacts/{artifact}", s.threadArtifactDownload)
 	m.HandleFunc("POST /{owner}/{repo}/threads/{run}/cancel", s.threadRunCancel)
@@ -113,6 +120,13 @@ type threadRunRow struct {
 	// PendingGroup is the concurrency group this run waits for (PAR-152), so a
 	// queued run behind another says why instead of showing a silent spinner.
 	PendingGroup string
+	// HoldReason names a capacity hold (PAR-153); PRTarget/WriteTokens carry
+	// the two per-repository security decisions a reader must see (PAR-015,
+	// PAR-118). Ref is the triggering ref (refs/pull/N/merge for a PR).
+	HoldReason  string
+	PRTarget    bool
+	WriteTokens bool
+	Ref         string
 }
 
 // threadsListData is the run-list page model.
@@ -154,6 +168,13 @@ type threadsListData struct {
 	// FilterWorkflowOptions is the workflow select's option list (the
 	// discovered workflows plus the active value when it is not discovered).
 	FilterWorkflowOptions []string
+
+	// Settings is the repository's Threads switches (PAR-015/PAR-118/PAR-153);
+	// CanMaintain gates the edit form (the service re-checks and audits).
+	Settings      *threads.SettingsView
+	SettingsError string
+	CanMaintain   bool
+	Notice        string
 
 	Error string
 }
@@ -210,6 +231,15 @@ func (s *Server) threadsList(w http.ResponseWriter, r *http.Request) {
 		data.FilterWorkflowOptions = append(data.FilterWorkflowOptions, wf.Name)
 	}
 	data.CanWrite = threadCanWrite(r.Context(), rc, p)
+	data.CanMaintain = threadCanMaintain(r.Context(), rc, p)
+	data.Notice = r.URL.Query().Get("notice")
+	if threadsDeps.Settings != nil {
+		if settings, serr := threadsDeps.Settings(r.Context(), rc.Owner, rc.Name, p); serr == nil {
+			data.Settings = settings
+		} else {
+			data.SettingsError = serr.Error()
+		}
+	}
 	data.DispatchRef = threadDispatchDefaultRef(rc)
 	threadDispatchModel(&data, r.URL.Query().Get("dispatch"), nil, threadEnvironmentNames(r.Context(), rc, p, data.Workflows))
 	if threadsDeps.List == nil {
@@ -238,7 +268,8 @@ func (s *Server) threadsList(w http.ResponseWriter, r *http.Request) {
 			State: run.State, Trusted: run.Trusted, UpdatedAt: run.UpdatedAt,
 			DurationSeconds: run.DurationSeconds, Actor: run.Actor,
 			PendingEnvironments: run.Environments, ApprovalKind: run.ApprovalKind,
-			PendingGroup: run.PendingGroup,
+			PendingGroup: run.PendingGroup, HoldReason: run.HoldReason,
+			PRTarget: run.PRTarget, WriteTokens: run.WriteTokens, Ref: run.Ref,
 		})
 	}
 	if data.More && len(page.Runs) > 0 {
@@ -431,6 +462,49 @@ func (s *Server) threadsDispatch(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	s.pageRepo(w, r, p, s.collabChrome(r, rc, p), status, "collab/threads", "Threads", data)
+}
+
+// threadsSettings answers POST …/threads/settings: the per-repository Threads
+// switches. The service enforces maintain+ and audits every changed switch, so
+// the form is an affordance, never the gate. A refusal is a plain error page
+// that names the rule (e.g. the head-checkout switch needs pull_request_target).
+func (s *Server) threadsSettings(w http.ResponseWriter, r *http.Request) {
+	rc, p, ok := s.collabEnv(w, r)
+	if !ok {
+		return
+	}
+	if !sameOrigin(r) {
+		s.collabError(w, r, http.StatusForbidden, "cross-origin write refused")
+		return
+	}
+	if err := r.ParseForm(); err != nil {
+		s.collabError(w, r, http.StatusBadRequest, "unreadable form")
+		return
+	}
+	if threadsDeps.UpdateSettings == nil {
+		s.collabError(w, r, http.StatusServiceUnavailable, "threads service not wired")
+		return
+	}
+	cap := 0
+	if raw := strings.TrimSpace(r.PostForm.Get("concurrency_cap")); raw != "" {
+		parsed, cerr := strconv.Atoi(raw)
+		if cerr != nil || parsed < 0 || parsed > 500 {
+			s.collabError(w, r, http.StatusBadRequest, "concurrency_cap must be an integer 0..500")
+			return
+		}
+		cap = parsed
+	}
+	in := threads.SettingsInput{
+		SendWriteTokens:           r.PostForm.Get("send_write_tokens") == "on",
+		PullRequestTarget:         r.PostForm.Get("pull_request_target") == "on",
+		PRTargetAllowHeadCheckout: r.PostForm.Get("pr_target_allow_head_checkout") == "on",
+		ConcurrencyCap:            cap,
+	}
+	if _, err := threadsDeps.UpdateSettings(r.Context(), rc.Owner, rc.Name, in, p); err != nil {
+		s.collabError(w, r, collabErrStatus(err), err.Error())
+		return
+	}
+	http.Redirect(w, r, "/"+rc.Full+"/threads?notice="+url.QueryEscape("threads settings saved"), http.StatusSeeOther)
 }
 
 // threadRunData is the run-detail page model.

@@ -842,3 +842,38 @@ func TestThreadDispatchEnvironmentPicker(t *testing.T) {
 		t.Fatalf("environment row = %+v (want a picker of the repo environments)", row)
 	}
 }
+
+// TestThreadsSettingsPanelRenders pins the per-repository triggers/limits form
+// (PAR-015/PAR-118/PAR-153): the switches are visible with their values and
+// post to the page route; the service (not the form) is the gate.
+func TestThreadsSettingsPanelRenders(t *testing.T) {
+	bindChromeProjections(t)
+	run := threadsFixtureRun()
+	bindThreadsFixture(t, run)
+	BindThreads(ThreadsDeps{
+		List: func(_ context.Context, _, _ string, _ auth.Principal, _ string, _ int, _ threads.RunFilter) (*threads.RunPage, error) {
+			return &threads.RunPage{Runs: []*threads.Run{run}}, nil
+		},
+		Role: func(context.Context, string, string, auth.Principal) (string, error) { return "maintain", nil },
+		Settings: func(context.Context, string, string, auth.Principal) (*threads.SettingsView, error) {
+			return &threads.SettingsView{PullRequestTarget: true, SendWriteTokens: false, ConcurrencyCap: 2}, nil
+		},
+		UpdateSettings: func(context.Context, string, string, threads.SettingsInput, auth.Principal) (*threads.SettingsView, error) {
+			return &threads.SettingsView{}, nil
+		},
+	})
+	t.Cleanup(func() { BindThreads(ThreadsDeps{}) })
+	f := newCollabFixture(t)
+	f.view.summary = busySummary()
+	rec := f.get("/acme/widgets/threads")
+	wantStatus(t, rec, http.StatusOK)
+	wantContains(t, rec,
+		"Repository triggers",
+		`action="/acme/widgets/threads/settings"`,
+		`name="pull_request_target"`,
+		`name="send_write_tokens"`,
+		`name="pr_target_allow_head_checkout"`,
+		`name="concurrency_cap"`,
+		`value="2"`,
+		"save switches")
+}

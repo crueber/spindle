@@ -64,32 +64,56 @@ type Workflow struct {
 // because a bare `push:` / `pull_request:` / `workflow_dispatch:` key is a
 // real trigger that decodes to a nil pointer.
 type Triggers struct {
-	Push             *PushTrigger     `yaml:"push"`
-	PullRequest      *PRTrigger       `yaml:"pull_request"`
-	WorkflowDispatch *DispatchTrigger `yaml:"workflow_dispatch"`
-	Schedule         []CronEntry      `yaml:"schedule"`
+	Push              *PushTrigger     `yaml:"push"`
+	PullRequest       *PRTrigger       `yaml:"pull_request"`
+	PullRequestTarget *PRTrigger       `yaml:"pull_request_target"`
+	WorkflowDispatch  *DispatchTrigger `yaml:"workflow_dispatch"`
+	Schedule          []CronEntry      `yaml:"schedule"`
 	// Release, Issues and IssueComment are the event services' triggers
 	// (PAR-017, PAR-020): each names the lifecycle actions its owning service
 	// actually emits, and an unemittable type is a parse error.
 	Release      *TypeTrigger `yaml:"release"`
 	Issues       *TypeTrigger `yaml:"issues"`
 	IssueComment *TypeTrigger `yaml:"issue_comment"`
+	// WorkflowCall makes this file a reusable workflow (PAR-075): its typed
+	// inputs, declared secrets and outputs are the contract a caller's
+	// `jobs.<id>.uses` is checked against. The key never starts a run.
+	WorkflowCall *WorkflowCallTrigger `yaml:"workflow_call"`
+	// RepositoryDispatch is the API-dispatched custom event (PAR-018): its
+	// `types` are the caller's event_type strings, bounded by a closed charset.
+	RepositoryDispatch *RepositoryDispatchTrigger `yaml:"repository_dispatch"`
+	// WorkflowRun follows another workflow run (PAR-019). It filters on the
+	// upstream workflow's NAME, the lifecycle type and the upstream head branch.
+	WorkflowRun *WorkflowRunTrigger `yaml:"workflow_run"`
+	// Create/Delete are the git ref lifecycle events emitted by the server's
+	// push hook (PAR-021). The other repository/check/deploy names are refused
+	// at parse time by name (RefusedTriggers) rather than accepted inertly.
+	CreateSet           bool `yaml:"-"`
+	DeleteSet           bool `yaml:"-"`
+	DeploymentSet       bool `yaml:"-"`
+	DeploymentStatusSet bool `yaml:"-"`
 	// DispatchSet records that the key was PRESENT even as null
 	// (`workflow_dispatch:` with no value decodes to a nil pointer).
 	DispatchSet bool `yaml:"-"`
-	// PushSet/PullRequestSet are the same presence rule for the two
-	// branch-filtered triggers: `push:` with no value is legal and means
-	// "every branch", but it decodes to a nil pointer.
-	PushSet        bool `yaml:"-"`
-	PullRequestSet bool `yaml:"-"`
+	// PushSet/PullRequestSet/PullRequestTargetSet are the same presence rule
+	// for the branch-filtered triggers: `push:` with no value is legal and
+	// means "every branch", but it decodes to a nil pointer.
+	PushSet              bool `yaml:"-"`
+	PullRequestSet       bool `yaml:"-"`
+	PullRequestTargetSet bool `yaml:"-"`
 	// ScheduleSet records `schedule:` presence (the entries may be empty;
 	// cron evaluation is the maintainer role's, not the parser's).
 	ScheduleSet bool `yaml:"-"`
-	// ReleaseSet/IssuesSet/IssueCommentSet are the same presence rule for the
-	// three typed triggers.
-	ReleaseSet      bool `yaml:"-"`
-	IssuesSet       bool `yaml:"-"`
-	IssueCommentSet bool `yaml:"-"`
+	// ReleaseSet/IssuesSet/IssueCommentSet/RepositoryDispatchSet/WorkflowRunSet
+	// are the same presence rule for the typed triggers.
+	ReleaseSet            bool `yaml:"-"`
+	IssuesSet             bool `yaml:"-"`
+	IssueCommentSet       bool `yaml:"-"`
+	RepositoryDispatchSet bool `yaml:"-"`
+	WorkflowRunSet        bool `yaml:"-"`
+	// WorkflowCallSet records `on.workflow_call` presence even as a bare null
+	// (`workflow_call:` with no body is a legal callable with no inputs).
+	WorkflowCallSet bool `yaml:"-"`
 }
 
 // UnmarshalYAML accepts the scalar, sequence and mapping forms of `on`. The
@@ -146,6 +170,65 @@ func (t *Triggers) UnmarshalYAML(node *yaml.Node) error {
 							t.PullRequest = &p
 						}
 					}
+				}
+			case "pull_request_target":
+				t.PullRequestTargetSet = true
+				if !isNull(val) {
+					if err = checkKeys(val, "branches", "branches-ignore", "types", "paths", "paths-ignore"); err == nil {
+						var p PRTrigger
+						if err = val.Decode(&p); err == nil {
+							err = p.validate()
+						}
+						if err == nil {
+							t.PullRequestTarget = &p
+						}
+					}
+				}
+			case "repository_dispatch":
+				t.RepositoryDispatchSet = true
+				if !isNull(val) {
+					if err = checkKeys(val, "types"); err == nil {
+						var r RepositoryDispatchTrigger
+						if err = val.Decode(&r); err == nil {
+							err = r.validate()
+						}
+						if err == nil {
+							t.RepositoryDispatch = &r
+						}
+					}
+				}
+			case "workflow_run":
+				t.WorkflowRunSet = true
+				if !isNull(val) {
+					if err = checkKeys(val, "workflows", "types", "branches", "branches-ignore"); err == nil {
+						var w WorkflowRunTrigger
+						if err = val.Decode(&w); err == nil {
+							err = w.validate()
+						}
+						if err == nil {
+							t.WorkflowRun = &w
+						}
+					}
+				}
+			case "create":
+				t.CreateSet = true
+				if !isNull(val) {
+					err = checkKeys(val)
+				}
+			case "delete":
+				t.DeleteSet = true
+				if !isNull(val) {
+					err = checkKeys(val)
+				}
+			case "deployment":
+				t.DeploymentSet = true
+				if !isNull(val) {
+					err = checkKeys(val)
+				}
+			case "deployment_status":
+				t.DeploymentStatusSet = true
+				if !isNull(val) {
+					err = checkKeys(val)
 				}
 			case "release":
 				t.ReleaseSet = true
@@ -204,8 +287,24 @@ func (t *Triggers) UnmarshalYAML(node *yaml.Node) error {
 					// never a silently dead schedule.
 					err = validateCronEntries(t.Schedule)
 				}
+			case "workflow_call":
+				t.WorkflowCallSet = true
+				// `workflow_call:` with no body is a legal callable with no
+				// declared inputs/secrets/outputs, so it still gets a non-nil
+				// declaration (the call contract, just empty).
+				call := &WorkflowCallTrigger{}
+				if !isNull(val) {
+					if err = val.Decode(call); err != nil {
+						return err
+					}
+				}
+				t.WorkflowCall = call
 			default:
-				err = fmt.Errorf("on: unknown trigger %q", key)
+				if why, refused := RefusedTriggers[key]; refused {
+					err = fmt.Errorf("on: %s: %s", key, why)
+				} else {
+					err = fmt.Errorf("on: unknown trigger %q", key)
+				}
 			}
 			if err != nil {
 				return err
@@ -225,6 +324,8 @@ func (t *Triggers) enable(name string) error {
 		t.PushSet = true
 	case "pull_request":
 		t.PullRequestSet = true
+	case "pull_request_target":
+		t.PullRequestTargetSet = true
 	case "workflow_dispatch":
 		t.DispatchSet = true
 	case "schedule":
@@ -237,10 +338,51 @@ func (t *Triggers) enable(name string) error {
 		t.IssuesSet = true
 	case "issue_comment":
 		t.IssueCommentSet = true
+	case "workflow_call":
+		t.WorkflowCallSet = true
+		t.WorkflowCall = &WorkflowCallTrigger{}
+	case "repository_dispatch":
+		t.RepositoryDispatchSet = true
+	case "workflow_run":
+		t.WorkflowRunSet = true
+	case "create":
+		t.CreateSet = true
+	case "delete":
+		t.DeleteSet = true
+	case "deployment":
+		t.DeploymentSet = true
+	case "deployment_status":
+		t.DeploymentStatusSet = true
 	default:
+		if why, refused := RefusedTriggers[name]; refused {
+			return fmt.Errorf("on: %s: %s", name, why)
+		}
 		return fmt.Errorf("on: unknown trigger %q", name)
 	}
 	return nil
+}
+
+// RefusedTriggers names the GitHub event triggers this engine does not emit,
+// with the reason. They are a NAMED parse error, never accepted-and-inert (the
+// master plan's one rule both parity cards agree on): a workflow that would
+// silently never run is a lie about the CI it replaced.
+//
+// PAR-016 (`merge_group`) is here because the merge queue is a separate
+// backlog item: when a queue lands it becomes an emitter with the documented
+// `refs/heads/gh-readonly-queue/<base>/pr-<n>-<sha>` ref shape. Until then the
+// trigger cannot fire, so it is refused by name.
+var RefusedTriggers = map[string]string{
+	"merge_group":            "this instance has no merge queue (the Spindle \"Merge queue\" backlog item owns it), so a merge_group run cannot be emitted",
+	"fork":                   "spindle has no fork event emitter",
+	"watch":                  "spindle has no watch (star) event emitter",
+	"status":                 "spindle's check surface reports check runs, not legacy commit statuses",
+	"check_run":              "spindle does not emit check_run events (its Threads mirror writes checks, it does not publish app check runs)",
+	"check_suite":            "spindle does not emit check_suite events (its Threads mirror writes checks, it does not publish app check suites)",
+	"registry_package":       "spindle's OCI registry does not emit registry_package events",
+	"gollum":                 "spindle has no wiki",
+	"page_build":             "spindle serves static sites from committed bytes; it has no page build",
+	"branch_protection_rule": "spindle has no branch-protection-rule event emitter",
+	"public":                 "spindle has no repository visibility-change event emitter",
 }
 
 // PushTrigger filters branch/tag pushes and the changed paths that fire them.
@@ -277,6 +419,86 @@ type PRTrigger struct {
 type TypeTrigger struct {
 	Types []string `yaml:"types"`
 }
+
+// RepositoryDispatchTrigger is `on.repository_dispatch` (PAR-018). `types` are
+// the event_type strings a dispatcher may send; they are the caller's names,
+// so the charset is bounded (a bucket/API key must stay sane) but the
+// vocabulary is not closed. An empty list matches nothing, so it is refused.
+type RepositoryDispatchTrigger struct {
+	Types []string `yaml:"types"`
+}
+
+// validate bounds the dispatch type strings. GitHub allows any event_type up
+// to 100 characters; the same bound keeps a payload projection predictable.
+func (r *RepositoryDispatchTrigger) validate() error {
+	if len(r.Types) == 0 && r.Types != nil {
+		return fmt.Errorf("repository_dispatch.types: an empty list matches no event_type; omit `types` to fire on every dispatch")
+	}
+	for _, typ := range r.Types {
+		if err := validateDispatchType(typ); err != nil {
+			return fmt.Errorf("repository_dispatch.types: %v", err)
+		}
+	}
+	return nil
+}
+
+// dispatchTypeRe is the event_type charset (`[A-Za-z0-9._-]`, 1…100).
+var dispatchTypeRe = regexp.MustCompile(`^[A-Za-z0-9._-]{1,100}$`)
+
+// validateDispatchType checks one repository_dispatch event_type.
+func validateDispatchType(typ string) error {
+	if !dispatchTypeRe.MatchString(typ) {
+		return fmt.Errorf("%q is not a valid event_type (expected [A-Za-z0-9._-]{1,100})", typ)
+	}
+	return nil
+}
+
+// ValidDispatchType reports whether a dispatcher's event_type is well formed.
+func ValidDispatchType(typ string) bool { return validateDispatchType(typ) == nil }
+
+// WorkflowRunTypes is the closed set of workflow_run lifecycle types Threads
+// emits: `requested` when the upstream run is created and `completed` when it
+// folds terminal. `in_progress` is documented by GitHub but Threads does not
+// emit it, so naming it is refused rather than accepted inertly.
+var WorkflowRunTypes = []string{"requested", "completed"}
+
+// WorkflowRunTrigger is `on.workflow_run` (PAR-019): a follow-up workflow
+// filtered by the upstream workflow's name, the lifecycle type and the
+// upstream head branch.
+type WorkflowRunTrigger struct {
+	Workflows      []string `yaml:"workflows"`
+	Types          []string `yaml:"types"`
+	Branches       []string `yaml:"branches"`
+	BranchesIgnore []string `yaml:"branches-ignore"`
+}
+
+// validate closes the workflow_run filters. `workflows` entries are names, not
+// globs (GitHub's rule), so an empty name is refused; the branches lists use
+// the shared filter dialect.
+func (w *WorkflowRunTrigger) validate() error {
+	if len(w.Branches) > 0 && len(w.BranchesIgnore) > 0 {
+		return fmt.Errorf("workflow_run: `branches` and `branches-ignore` cannot be used together (use `branches` with a `!` pattern to exclude)")
+	}
+	for _, name := range w.Workflows {
+		if strings.TrimSpace(name) == "" {
+			return fmt.Errorf("workflow_run.workflows: an empty workflow name matches nothing")
+		}
+	}
+	if len(w.Workflows) > maxWorkflowRunWorkflows {
+		return fmt.Errorf("workflow_run.workflows: at most %d names", maxWorkflowRunWorkflows)
+	}
+	if _, err := compileFilter(w.Branches, false); err != nil {
+		return fmt.Errorf("workflow_run: %v", err)
+	}
+	if _, err := compileFilter(w.BranchesIgnore, true); err != nil {
+		return fmt.Errorf("workflow_run: %v", err)
+	}
+	return validateTypeFilter("workflow_run", w.Types, WorkflowRunTypes)
+}
+
+// maxWorkflowRunWorkflows bounds the name filter (a workflow file naming a
+// hundred upstreams is a mistake, not a design).
+const maxWorkflowRunWorkflows = 20
 
 // PullRequestTypes is the closed set of pull_request lifecycle actions Threads
 // emits. The pulls service emits exactly these through its PullEvents seam
@@ -682,6 +904,11 @@ type Job struct {
 	// Reusable workflow (accepted and carried; no runs-on/steps required).
 	Uses string            `yaml:"uses"`
 	With map[string]string `yaml:"with"`
+	// Secrets is the reusable call's secret set (PAR-075): an explicit
+	// `name: ${{ secrets.SOURCE }}` map, or `inherit`. A nil pointer means the
+	// caller declared no block (same repository: the implicit full set; cross
+	// repository: none). On an ordinary job the key is a parse error.
+	Secrets *JobSecrets `yaml:"secrets"`
 	// Strategy/Concurrency/Permissions are carried into the spec.
 	Strategy    *Strategy    `yaml:"strategy"`
 	Concurrency *Concurrency `yaml:"concurrency"`
@@ -723,6 +950,23 @@ type Step struct {
 	WorkingDirectory string            `yaml:"working-directory"`
 	ContinueOnError  bool              `yaml:"continue-on-error"`
 	TimeoutMinutes   int               `yaml:"timeout-minutes"`
+	// Background starts this step asynchronously in its own session/process
+	// group (PAR-080). It needs an `id`, and is accepted on a run step, a
+	// docker:// step, or a local `uses: ./…` action (the runner refuses a local
+	// composite at plan time, when the action kind is known).
+	Background bool `yaml:"background"`
+	// Wait names a background step started earlier, or "all"; it is a control
+	// step (no run/uses, no id) that joins the process and fails when it failed.
+	Wait string `yaml:"wait"`
+	// WaitAll is the boolean spelling of `wait: all`.
+	WaitAll bool `yaml:"wait-all"`
+	// Cancel names a background step started earlier, or "all"; the control
+	// step succeeds once the process group is gone.
+	Cancel string `yaml:"cancel"`
+	// Parallel holds ordinary run/uses steps that execute concurrently as one
+	// unit. A nil slice means the key is absent; an empty non-nil slice
+	// (`parallel: []`) is refused as a group with no members.
+	Parallel []Step `yaml:"parallel"`
 }
 
 // Errors returned by Parse. They are values so tests and the UI can match.
@@ -738,6 +982,10 @@ var (
 	ErrBadOutput      = errors.New("workflow: invalid job outputs")
 	ErrBadEnvironment = errors.New("workflow: invalid environment")
 	ErrCycle          = errors.New("workflow: job dependencies form a cycle")
+	// ErrStepExecution marks an invalid PAR-080 step shape (a control step with
+	// a process, a parallel group with an invalid member, a background without
+	// an id or an addressable target). The message names the rule.
+	ErrStepExecution = errors.New("workflow: invalid step execution")
 )
 
 // Parse decodes and validates one workflow file.
@@ -767,7 +1015,7 @@ func Parse(src []byte) (*Workflow, error) {
 	// Concurrency groups are expanded into bucket keys (the lock that decides
 	// which run executes), so a reference that would not resolve is THIS file's
 	// parse error — never a literal fallback (round-2 audit; 15 §4).
-	inputNames := dispatchInputNames(w.On.WorkflowDispatch)
+	inputNames := callInputNames(&w)
 	if w.Concurrency != nil {
 		if err := ValidateGroupTemplate(w.Concurrency.Group, nil, inputNames, true); err != nil {
 			return nil, fmt.Errorf("workflow: %w", err)
@@ -789,6 +1037,27 @@ func Parse(src []byte) (*Workflow, error) {
 			return nil, err
 		}
 		reusable := strings.TrimSpace(job.Uses) != ""
+		// A call's keys are meaningful only on a `uses:` job: `with:` and
+		// `secrets:` on a runner job would be accepted-and-inert values.
+		if len(job.With) > 0 && !reusable {
+			return nil, fmt.Errorf("workflow: job %s declares `with:` but no `uses:` (a `with:` value is the callee's input; a job that runs steps has none)", name)
+		}
+		if job.Secrets != nil {
+			if !reusable {
+				return nil, fmt.Errorf("workflow: job %s declares `secrets:` but no `uses:` (a `secrets:` block passes secrets to a reusable workflow)", name)
+			}
+			if job.Secrets.Inherit && !isLocalReusableUses(job.Uses) {
+				// D-6: a cross-repository callee receives only explicitly
+				// listed secrets; `inherit` across a repository boundary is
+				// exfiltration by design.
+				return nil, fmt.Errorf("workflow: job %s (uses: %s): `secrets: inherit` is refused for a cross-repository callee (decision D-6: a secret never crosses a repository boundary without being listed explicitly); list each secret under `secrets:`", name, job.Uses)
+			}
+		}
+		if reusable {
+			if err := ValidateCallWith(job.With, inputNames); err != nil {
+				return nil, fmt.Errorf("workflow: job %s: %w", name, err)
+			}
+		}
 		if err := job.Environment.Validate(name); err != nil {
 			return nil, err
 		}
@@ -803,40 +1072,75 @@ func Parse(src []byte) (*Workflow, error) {
 				return nil, fmt.Errorf("%w: %s", ErrNoSteps, name)
 			}
 		}
-		axes := strategyAxes(job.Strategy)
-		if err := ValidateTemplate(job.Name, TemplateScope{Axes: axes, Inputs: inputNames}); err != nil {
+		scope := TemplateScope{
+			Axes: strategyAxes(job.Strategy), Inputs: inputNames,
+			SecretNames: callSecretNames(&w), SecretsClosed: w.On.WorkflowCall != nil,
+		}
+		if err := ValidateTemplate(job.Name, scope); err != nil {
 			return nil, fmt.Errorf("workflow: job %s name: %w", name, err)
 		}
-		if err := ValidateIf(job.If, TemplateScope{Axes: axes, Inputs: inputNames, Needs: job.Needs, JobIf: true}); err != nil {
+		if err := ValidateIf(job.If, TemplateScope{
+			Axes: scope.Axes, Inputs: inputNames, Needs: job.Needs, JobIf: true,
+			SecretNames: scope.SecretNames, SecretsClosed: scope.SecretsClosed,
+		}); err != nil {
 			return nil, fmt.Errorf("workflow: job %s if: %w", name, err)
 		}
 		stepIDs := map[string]bool{}
+		// backgroundIDs names the background steps started so far, in
+		// declaration order: a wait/cancel control step may only name one of
+		// them (the runner's plan keeps exactly this ordering).
+		backgroundIDs := map[string]bool{}
 		// declared grows in step order: a step may only read outputs of an
 		// earlier step (docs/threads.md §3.9).
 		declared := make([]string, 0, len(job.Steps))
 		for i, step := range job.Steps {
-			if step.Run != "" && step.Uses != "" {
-				return nil, fmt.Errorf("%w: %s step %d", ErrBothStep, name, i+1)
-			}
-			if step.Run == "" && step.Uses == "" {
-				return nil, fmt.Errorf("%w: %s step %d", ErrNoStepVerb, name, i+1)
-			}
 			if err := checkStepID(name, i, step.ID, stepIDs); err != nil {
+				return nil, err
+			}
+			if err := validateStepExecution(name, i, step, backgroundIDs); err != nil {
 				return nil, err
 			}
 			if err := validateStepFieldRefs(name, i, step, job.Needs, declared); err != nil {
 				return nil, err
 			}
 			if err := validateStepTemplates(name, i, step, TemplateScope{
-				Axes: axes, Inputs: inputNames, Steps: declared, Needs: job.Needs,
+				Axes: scope.Axes, Inputs: inputNames, Steps: declared, Needs: job.Needs,
+				SecretNames: scope.SecretNames, SecretsClosed: scope.SecretsClosed,
 			}); err != nil {
 				return nil, err
 			}
 			if step.ID != "" {
 				declared = append(declared, strings.ToLower(step.ID))
 			}
+			// Parallel members are ordinary steps: validate their ids,
+			// references and templates too. A member cannot read another
+			// member's outputs (they run concurrently and their outputs land
+			// after the group), so their ids enter `declared` only after the
+			// whole group, for the steps that follow it.
+			groupIDs := make([]string, 0, len(step.Parallel))
+			for j, member := range step.Parallel {
+				if err := checkStepID(name, i, member.ID, stepIDs); err != nil {
+					return nil, fmt.Errorf("job %s step %d parallel member %d: %w", name, i+1, j+1, err)
+				}
+				if err := validateStepFieldRefs(name, i, member, job.Needs, declared); err != nil {
+					return nil, fmt.Errorf("job %s step %d parallel member %d: %w", name, i+1, j+1, err)
+				}
+				if err := validateStepTemplates(name, i, member, TemplateScope{
+					Axes: scope.Axes, Inputs: inputNames, Steps: declared, Needs: job.Needs,
+					SecretNames: scope.SecretNames, SecretsClosed: scope.SecretsClosed,
+				}); err != nil {
+					return nil, fmt.Errorf("job %s step %d parallel member %d: %w", name, i+1, j+1, err)
+				}
+				if member.ID != "" {
+					groupIDs = append(groupIDs, strings.ToLower(member.ID))
+				}
+			}
+			declared = append(declared, groupIDs...)
+			if step.Background {
+				backgroundIDs[strings.ToLower(step.ID)] = true
+			}
 		}
-		if err := validateJobOutputs(name, job, inputNames, axes); err != nil {
+		if err := validateJobOutputs(name, job, inputNames, scope.Axes); err != nil {
 			return nil, err
 		}
 		for _, need := range job.Needs {
@@ -850,10 +1154,42 @@ func Parse(src []byte) (*Workflow, error) {
 			}
 		}
 	}
+	// The callee's output interface is closed here, where every job and its
+	// declared outputs are known (PAR-075).
+	if err := ValidateCallOutputs(&w); err != nil {
+		return nil, fmt.Errorf("workflow: %w", err)
+	}
 	if err := checkAcyclic(w.Jobs); err != nil {
 		return nil, err
 	}
 	return &w, nil
+}
+
+// ValidateCallWith checks a reusable caller's `with:` values: only `github.*`
+// and `inputs.*` resolve there, because the value is expanded when the run is
+// created (before any step, matrix, secret or variable exists). Literals are
+// carried as written. The importer calls it too, so a foreign `with:` value the
+// target cannot expand is refused at import time instead of making the whole
+// converted file unparseable.
+func ValidateCallWith(with map[string]string, inputNames []string) error {
+	names := make([]string, 0, len(with))
+	for name := range with {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	for _, name := range names {
+		if err := ValidateTemplate(with[name], TemplateScope{Inputs: inputNames, CallWith: true}); err != nil {
+			return fmt.Errorf("with.%s: %w", name, err)
+		}
+	}
+	return nil
+}
+
+// isLocalReusableUses reports whether a `uses:` names a file inside this
+// repository (`./…`), as opposed to a cross-repository reference. The forms are
+// disjoint by construction: a local path must start with `./`.
+func isLocalReusableUses(uses string) bool {
+	return strings.HasPrefix(strings.TrimSpace(uses), "./")
 }
 
 // checkStepID validates one step's `id:` (GitHub-style: letters, digits, `_`
@@ -881,6 +1217,101 @@ func checkStepID(job string, index int, id string, seen map[string]bool) error {
 		return fmt.Errorf("%w: job %s: duplicate step id %q", ErrBadStepID, job, id)
 	}
 	seen[key] = true
+	return nil
+}
+
+// stepControl reports whether a step is a PAR-080 control step (wait/cancel):
+// it runs no process and owns no id.
+func stepControl(st Step) bool {
+	return strings.TrimSpace(st.Wait) != "" || st.WaitAll || strings.TrimSpace(st.Cancel) != ""
+}
+
+// backgroundCapable reports whether the step's authored form can be a
+// background step. The runner accepts a run step and a docker step; a local
+// `uses: ./…` may be a docker or composite action, and only the action file
+// (resolved at run creation) can tell them apart — the runner refuses a
+// composite there by name, so the parser accepts the form and leaves that one
+// decision to the plan.
+func backgroundCapable(st Step) bool {
+	if strings.TrimSpace(st.Run) != "" {
+		return true
+	}
+	uses := strings.ToLower(strings.TrimSpace(st.Uses))
+	return strings.HasPrefix(uses, "docker://") || strings.HasPrefix(uses, "./")
+}
+
+// validateStepExecution checks the PAR-080 execution keys of one workflow step
+// against the runner's model (internal/threads/runner/plan.go): a control step
+// runs no process and names an earlier background; a parallel group is a
+// top-level list of ordinary members; a background step is addressable and is a
+// run/docker step. Every refusal is named and fail-closed.
+func validateStepExecution(job string, index int, st Step, background map[string]bool) error {
+	where := fmt.Sprintf("job %s step %d", job, index+1)
+	control := stepControl(st)
+	parallel := st.Parallel != nil
+	if parallel {
+		if control {
+			return fmt.Errorf("%w: %s: a parallel group cannot also wait or cancel", ErrStepExecution, where)
+		}
+		if st.Background {
+			return fmt.Errorf("%w: %s: a parallel group cannot itself be background", ErrStepExecution, where)
+		}
+		if st.Run != "" || st.Uses != "" {
+			return fmt.Errorf("%w: %s: a parallel group takes only member steps, not run/uses", ErrStepExecution, where)
+		}
+		if len(st.Parallel) == 0 {
+			return fmt.Errorf("%w: %s: a parallel group has no member steps", ErrStepExecution, where)
+		}
+		for j, member := range st.Parallel {
+			if member.Background || stepControl(member) || member.Parallel != nil {
+				return fmt.Errorf("%w: %s parallel member %d: a member is an ordinary run/uses step (background, wait/cancel and nested parallel are refused)", ErrStepExecution, where, j+1)
+			}
+			switch {
+			case member.Run != "" && member.Uses != "":
+				return fmt.Errorf("%w: %s parallel member %d", ErrBothStep, where, j+1)
+			case member.Run == "" && member.Uses == "":
+				return fmt.Errorf("%w: %s parallel member %d", ErrNoStepVerb, where, j+1)
+			}
+		}
+		return nil
+	}
+	if control {
+		wait, cancel := strings.TrimSpace(st.Wait), strings.TrimSpace(st.Cancel)
+		if wait != "" && (st.WaitAll || cancel != "") || st.WaitAll && cancel != "" {
+			return fmt.Errorf("%w: %s: wait, wait-all and cancel are mutually exclusive", ErrStepExecution, where)
+		}
+		if strings.TrimSpace(st.Run) != "" || strings.TrimSpace(st.Uses) != "" {
+			return fmt.Errorf("%w: %s: a wait/cancel step runs no process, so run/uses is refused", ErrStepExecution, where)
+		}
+		if strings.TrimSpace(st.ID) != "" {
+			return fmt.Errorf("%w: %s: a wait/cancel step runs no process and cannot own an id", ErrStepExecution, where)
+		}
+		for _, ref := range []string{wait, cancel} {
+			ref = strings.TrimSpace(ref)
+			if ref == "" || strings.EqualFold(ref, "all") {
+				continue
+			}
+			if !background[strings.ToLower(ref)] {
+				return fmt.Errorf("%w: %s: names background step %q, which is not a background step started earlier", ErrStepExecution, where, ref)
+			}
+		}
+		return nil
+	}
+	// An ordinary (or background) step.
+	switch {
+	case st.Run != "" && st.Uses != "":
+		return fmt.Errorf("%w: %s", ErrBothStep, where)
+	case st.Run == "" && st.Uses == "":
+		return fmt.Errorf("%w: %s", ErrNoStepVerb, where)
+	}
+	if st.Background {
+		if strings.TrimSpace(st.ID) == "" {
+			return fmt.Errorf("%w: %s: a background step needs an id so a later step can wait for or cancel it", ErrStepExecution, where)
+		}
+		if !backgroundCapable(st) {
+			return fmt.Errorf("%w: %s: background is accepted only on a run or docker step", ErrStepExecution, where)
+		}
+	}
 	return nil
 }
 
@@ -1030,14 +1461,13 @@ func matchFilter(include, exclude []string, name string) bool {
 }
 
 // Fires reports whether the workflow triggers on an event. event is one of
-// "push", "pull_request", "workflow_dispatch"; schedule is handled by the
-// scheduler. kind names the ref kind (a branch or a tag) and matters only for
-// push. ref is the short ref name: the branch name, the tag name, or the PR
-// target branch; it may be empty (no filter applies). action is the
-// pull_request lifecycle action the caller is delivering (opened, synchronize,
-// reopened) and is ignored by the other events; a pull_request event with no
-// recorded action matches only an unfiltered trigger, because a `types` filter
-// can only be decided from a known action.
+// "push", "pull_request", "pull_request_target", "workflow_dispatch",
+// "repository_dispatch", "workflow_run", "create", "delete", "deployment",
+// "deployment_status"; schedule is handled by the scheduler. kind names the
+// ref kind (a branch or a tag) and matters only for push. ref is the short ref
+// name: the branch name, the tag name, the PR target branch, or the upstream
+// run's head branch (workflow_run); it may be empty (no filter applies). action
+// is the lifecycle action/type the caller is delivering.
 func (w *Workflow) Fires(event string, kind RefKind, ref, action string) bool {
 	return w.FiresWithChanges(event, kind, ref, action, nil, false)
 }
@@ -1046,7 +1476,30 @@ func (w *Workflow) Fires(event string, kind RefKind, ref, action string) bool {
 // needs. known is false when the caller did not compute a diff; a trigger that
 // declares `paths`/`paths-ignore` then does not fire (fail closed).
 func (w *Workflow) FiresWithChanges(event string, kind RefKind, ref, action string, changed []string, known bool) bool {
-	switch event {
+	return w.FiresMatching(Match{
+		Event: event, Kind: kind, Ref: ref, Action: action, Changed: changed, ChangedKnown: known,
+	})
+}
+
+// Match is one event delivery as the trigger selector sees it. It exists
+// because workflow_run filters on facts that are not a ref (the upstream
+// workflow's name), and widening FiresWithChanges' positional signature would
+// make every caller's meaning depend on argument order.
+type Match struct {
+	Event        string
+	Kind         RefKind
+	Ref          string
+	Action       string
+	Changed      []string
+	ChangedKnown bool
+	// UpstreamWorkflow is the upstream run's workflow display name, read only
+	// by on.workflow_run.workflows.
+	UpstreamWorkflow string
+}
+
+// FiresMatching applies every trigger's filters to one delivery.
+func (w *Workflow) FiresMatching(m Match) bool {
+	switch m.Event {
 	case "push":
 		if w.On.Push == nil && !w.On.PushSet {
 			return false
@@ -1054,30 +1507,52 @@ func (w *Workflow) FiresWithChanges(event string, kind RefKind, ref, action stri
 		if w.On.Push == nil {
 			return true // `push:` with no filters: every branch and tag
 		}
-		if !w.On.Push.fires(kind, ref) {
+		if !w.On.Push.fires(m.Kind, m.Ref) {
 			return false
 		}
-		return matchPaths(w.On.Push.Paths, w.On.Push.PathsIgnore, changed, known)
-	case "pull_request":
-		if w.On.PullRequest == nil && !w.On.PullRequestSet {
+		return matchPaths(w.On.Push.Paths, w.On.Push.PathsIgnore, m.Changed, m.ChangedKnown)
+	case "pull_request", "pull_request_target":
+		trigger, set := w.On.PullRequest, w.On.PullRequestSet
+		if m.Event == "pull_request_target" {
+			trigger, set = w.On.PullRequestTarget, w.On.PullRequestTargetSet
+		}
+		if trigger == nil && !set {
 			return false
 		}
-		if w.On.PullRequest == nil {
+		if trigger == nil {
 			return true // `pull_request:` with no filters: every target branch
 		}
-		if !matchFilter(w.On.PullRequest.Branches, w.On.PullRequest.BranchesIgnore, ref) {
+		if !matchFilter(trigger.Branches, trigger.BranchesIgnore, m.Ref) {
 			return false
 		}
-		if !matchPRType(w.On.PullRequest.Types, action) {
+		if !matchPRType(trigger.Types, m.Action) {
 			return false
 		}
-		return matchPaths(w.On.PullRequest.Paths, w.On.PullRequest.PathsIgnore, changed, known)
+		return matchPaths(trigger.Paths, trigger.PathsIgnore, m.Changed, m.ChangedKnown)
 	case "release":
-		return typedFires(w.On.ReleaseSet, w.On.Release, action)
+		return typedFires(w.On.ReleaseSet, w.On.Release, m.Action)
 	case "issues":
-		return typedFires(w.On.IssuesSet, w.On.Issues, action)
+		return typedFires(w.On.IssuesSet, w.On.Issues, m.Action)
 	case "issue_comment":
-		return typedFires(w.On.IssueCommentSet, w.On.IssueComment, action)
+		return typedFires(w.On.IssueCommentSet, w.On.IssueComment, m.Action)
+	case "repository_dispatch":
+		if w.On.RepositoryDispatch == nil {
+			return w.On.RepositoryDispatchSet
+		}
+		return matchPRType(w.On.RepositoryDispatch.Types, m.Action)
+	case "workflow_run":
+		if w.On.WorkflowRun == nil {
+			return w.On.WorkflowRunSet && strings.EqualFold(m.Action, "completed")
+		}
+		return w.On.WorkflowRun.fires(m)
+	case "create":
+		return w.On.CreateSet
+	case "delete":
+		return w.On.DeleteSet
+	case "deployment":
+		return w.On.DeploymentSet
+	case "deployment_status":
+		return w.On.DeploymentStatusSet
 	case "workflow_dispatch":
 		return w.On.DispatchSet
 	case "schedule":
@@ -1088,6 +1563,34 @@ func (w *Workflow) FiresWithChanges(event string, kind RefKind, ref, action stri
 	default:
 		return false
 	}
+}
+
+// fires applies the workflow_run filters: the upstream workflow NAME (exact,
+// case-insensitive — GitHub's `workflows` is a name list, not a glob), the
+// lifecycle type and the upstream head branch.
+func (w *WorkflowRunTrigger) fires(m Match) bool {
+	// GitHub's default type is `completed` (not "every emitted type"), so an
+	// omitted `types:` must NOT also fire on `requested`.
+	if len(w.Types) == 0 {
+		if !strings.EqualFold(m.Action, "completed") {
+			return false
+		}
+	} else if !matchPRType(w.Types, m.Action) {
+		return false
+	}
+	if len(w.Workflows) > 0 {
+		found := false
+		for _, name := range w.Workflows {
+			if strings.EqualFold(strings.TrimSpace(name), strings.TrimSpace(m.UpstreamWorkflow)) {
+				found = true
+				break
+			}
+		}
+		if !found {
+			return false
+		}
+	}
+	return matchFilter(w.Branches, w.BranchesIgnore, m.Ref)
 }
 
 // Events lists the trigger names the workflow declares, in a stable display
@@ -1115,6 +1618,27 @@ func (w *Workflow) Events() []string {
 	}
 	if w.On.IssueComment != nil || w.On.IssueCommentSet {
 		out = append(out, "issue_comment")
+	}
+	if w.On.PullRequestTarget != nil || w.On.PullRequestTargetSet {
+		out = append(out, "pull_request_target")
+	}
+	if w.On.RepositoryDispatch != nil || w.On.RepositoryDispatchSet {
+		out = append(out, "repository_dispatch")
+	}
+	if w.On.WorkflowRun != nil || w.On.WorkflowRunSet {
+		out = append(out, "workflow_run")
+	}
+	if w.On.CreateSet {
+		out = append(out, "create")
+	}
+	if w.On.DeleteSet {
+		out = append(out, "delete")
+	}
+	if w.On.DeploymentSet {
+		out = append(out, "deployment")
+	}
+	if w.On.DeploymentStatusSet {
+		out = append(out, "deployment_status")
 	}
 	return out
 }

@@ -146,6 +146,11 @@ type Service struct {
 	// restricted builds) records nothing. A failure is logged, never fatal: the
 	// mutation is committed and must not be reverted by an audit outage.
 	Audit func(ctx context.Context, actor, action, target, detail string) error
+	// RunDetached launches a follow-up trigger (workflow_run, deployment_status)
+	// off the emitting request/completion path. Composition sets it to a
+	// goroutine launcher with its own bounded context; nil runs the work inline
+	// so unit tests are deterministic. See the Concurrency note in threads.go.
+	RunDetached func(func())
 	// TeamRoster resolves an organization team to its member principals
 	// (environment team reviewers, PAR-131). Identity satisfies it through
 	// composition; nil means a record naming team reviewers is refused at save
@@ -164,6 +169,14 @@ type Service struct {
 	// ArtifactRetention is the artifact window (threads.artifact_retention; 0
 	// selects the run window). A longer value lets artifacts outlive their run.
 	ArtifactRetention time.Duration
+	// MaxCacheBytes / MaxCacheEntryBytes / CacheRetention / MaxCacheEntries
+	// bound the cache service (threads.cache_*; docs/threads.md §3.4c). Zero
+	// selects the actionscache defaults (5 GiB per repository, 1 GiB per entry,
+	// 7 days, 256 entries).
+	MaxCacheBytes      int64
+	MaxCacheEntryBytes int64
+	CacheRetention     time.Duration
+	MaxCacheEntries    int
 	// KeepForever disables run/log/artifact reclamation (threads.keep_forever).
 	KeepForever bool
 	// OrgAdmin enforces organization ownership for the org-variable API
@@ -212,6 +225,29 @@ func (s *Service) nowUTC() time.Time {
 	}
 	return s.Now().UTC()
 }
+
+// detach runs one follow-up trigger off the current call path when composition
+// supplied RunDetached; without it (tests) the work runs inline. The detached
+// body gets its own bounded context: a workflow_run emission must not inherit a
+// request deadline, and it must not be able to outlive its own budget.
+func (s *Service) detach(f func(ctx context.Context)) {
+	if f == nil {
+		return
+	}
+	run := func() {
+		ctx, cancel := context.WithTimeout(context.Background(), threadFollowUpTimeout)
+		defer cancel()
+		f(ctx)
+	}
+	if s.RunDetached != nil {
+		s.RunDetached(run)
+		return
+	}
+	run()
+}
+
+// threadFollowUpTimeout bounds one follow-up trigger's discovery + creation.
+const threadFollowUpTimeout = 60 * time.Second
 
 // --- key helpers (bucket-relative; 15 §2) ---------------------------------
 

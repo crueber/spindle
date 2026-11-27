@@ -13,6 +13,11 @@ import (
 	"github.com/crueber/spindle/internal/threads"
 )
 
+// ContainerPolicy is the operator's container-grant type (threads.ContainerPolicy),
+// re-exported so the runner CLI configures it without importing the service
+// package directly.
+type ContainerPolicy = threads.ContainerPolicy
+
 // Runner is the long-poll loop over the INSTANCE queue (15 §3/§4,
 // docs/PLAN-INSTANCE-RUNNERS.md): it is registered once by a host
 // administrator and every fetch is a global claim, so the same runner may be
@@ -39,6 +44,7 @@ type Runner struct {
 	cfg    Config
 	client *Client
 	exec   *Executor
+	auth   *RegistryAuth
 
 	fatalMu sync.Mutex
 	fatal   error
@@ -70,6 +76,15 @@ type Config struct {
 	ImagePrefixAll     bool
 	ImagePull          string
 	ImageRequireDigest bool
+
+	// Policy is the operator's container grants (PAR-179, D-8): privilege,
+	// a shared network, a workflow-volume allowlist and a docker endpoint.
+	// The zero value is the fail-closed default.
+	Policy threads.ContainerPolicy
+	// RegistryAuthFile is the runner-owned registry credential file
+	// (PAR-078): `registry username password` per line, 0600. Empty = the
+	// daemon's ambient docker config.
+	RegistryAuthFile string
 
 	FetchWait  time.Duration
 	BackoffMin time.Duration
@@ -122,6 +137,19 @@ func New(cfg Config) (*Runner, error) {
 	if hostDocker && !cfg.AllowHostDocker {
 		return nil, fmt.Errorf("runner: the configured docker daemon exposes the host root filesystem (DOCKER_HOST unix:///var/run/docker.sock); pass --allow-host-docker to acknowledge, or point DOCKER_HOST at a per-runner docker:dind daemon")
 	}
+	// The operator's container grants are validated before anything dials the
+	// server, and a grant that widens a job's isolation is never combined with
+	// fork runs (D-8: a workflow can never widen its own isolation).
+	if err := threads.ValidateContainerPolicy(cfg.Policy); err != nil {
+		return nil, fmt.Errorf("runner: %v", err)
+	}
+	if cfg.AllowForkRuns && (cfg.Policy.Privileged || cfg.Policy.DockerHost != "") {
+		return nil, fmt.Errorf("runner: --allow-fork-runs cannot be combined with --container-privileged or --docker-host: a runner that grants host-level capability must never execute untrusted fork code (D-8)")
+	}
+	auth, aerr := PrepareRegistryAuth(context.Background(), cfg.DockerBin, cfg.RegistryAuthFile)
+	if aerr != nil {
+		return nil, fmt.Errorf("runner: %v", aerr)
+	}
 	client := cfg.Client
 	if client == nil {
 		client = NewClient(cfg.ServerURL, cfg.Token)
@@ -129,7 +157,7 @@ func New(cfg Config) (*Runner, error) {
 	exec := cfg.Executor
 	if exec == nil {
 		exec = &Executor{
-			Docker:       &DockerCLIProcess{Bin: cfg.DockerBin},
+			Docker:       &DockerCLIProcess{Bin: cfg.DockerBin, Env: auth.Env()},
 			DefaultImage: cfg.DefaultImage,
 			WorkspaceDir: cfg.WorkspaceDir,
 			Images:       images,
@@ -137,7 +165,12 @@ func New(cfg Config) (*Runner, error) {
 			RunnerName:   cfg.Name,
 			Logger:       cfg.Logger,
 			Artifacts:    client,
+			Policy:       cfg.Policy,
+			RegistryAuth: auth,
+			Caches:       client,
 		}
+	} else if exec.RegistryAuth == nil {
+		exec.RegistryAuth = auth
 	}
 	if exec.Images == (ImageConfig{}) {
 		exec.Images = images
@@ -145,13 +178,16 @@ func New(cfg Config) (*Runner, error) {
 	if exec.Artifacts == nil {
 		exec.Artifacts = client
 	}
+	if exec.Caches == nil {
+		exec.Caches = client
+	}
 	if exec.WorkspaceDir == "" {
 		exec.WorkspaceDir = cfg.WorkspaceDir
 	}
 	if exec.DefaultImage == "" {
 		exec.DefaultImage = cfg.DefaultImage
 	}
-	return &Runner{cfg: cfg, client: client, exec: exec}, nil
+	return &Runner{cfg: cfg, client: client, exec: exec, auth: auth}, nil
 }
 
 // hostDockerExposed reports the default host-socket configuration: an unset
@@ -171,6 +207,9 @@ func hostDockerExposed(_ string) bool {
 // returns the first fatal error (a rejected credential) and nil on a clean
 // stop.
 func (r *Runner) Run(ctx context.Context) error {
+	if r.auth != nil {
+		defer r.auth.Cleanup()
+	}
 	if err := r.declare(ctx); err != nil {
 		return err
 	}
@@ -314,7 +353,7 @@ func (r *Runner) runJob(ctx context.Context, job *threads.FetchResult) {
 	stream := NewStreamer(r.client, start.Token, job.JobRef, job.Attempt, mask, cancel, log)
 	log.Info("threads runner: job started", "workflow", job.Workflow, "commit", job.Commit, "check", job.Context)
 
-	res := r.exec.Execute(jobCtx, ExecInput{Job: job, AttemptToken: start.Token, Caps: start.Artifacts}, stream)
+	res := r.exec.Execute(jobCtx, ExecInput{Job: job, AttemptToken: start.Token, Caps: start.Artifacts, CacheCaps: start.Caches}, stream)
 
 	// SIGTERM (or the job context) makes this a cancel, not a failure: the
 	// containers are already gone (Execute's deferred cleanup).

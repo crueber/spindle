@@ -228,6 +228,9 @@ func (h *Handler) attemptOp(w http.ResponseWriter, r *http.Request, ref, nRaw st
 		case "artifacts":
 			h.attemptArtifacts(w, r, ref, attempt, nil)
 			return
+		case "cache":
+			h.attemptCache(w, r, ref, attempt, nil)
+			return
 		case "id-token":
 			if r.Method != http.MethodPost {
 				methodNotAllowed(w, "POST")
@@ -239,6 +242,10 @@ func (h *Handler) attemptOp(w http.ResponseWriter, r *http.Request, ref, nRaw st
 	}
 	if len(op) >= 1 && op[0] == "artifacts" {
 		h.attemptArtifacts(w, r, ref, attempt, op[1:])
+		return
+	}
+	if len(op) >= 1 && op[0] == "cache" {
+		h.attemptCache(w, r, ref, attempt, op[1:])
 		return
 	}
 	writePlain(w, http.StatusNotFound, "unknown attempt operation")

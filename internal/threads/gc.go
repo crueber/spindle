@@ -123,6 +123,10 @@ type GCResult struct {
 	// (with their run, or through their own expiry window).
 	ArtifactsDeleted int   `json:"artifacts_deleted"`
 	ArtifactBytes    int64 `json:"artifact_bytes"`
+	// CachesDeleted / CacheBytes count cache entries and payload bytes
+	// reclaimed (expiry, the repo budget, and orphans from a lost index CAS).
+	CachesDeleted int   `json:"caches_deleted"`
+	CacheBytes    int64 `json:"cache_bytes"`
 	// QueueDeleted counts completed queue entries removed with their run.
 	QueueDeleted int `json:"queue_deleted"`
 	// RunnersDeleted / CredentialsDeleted count registry rows and their
@@ -152,10 +156,10 @@ func (r GCResult) String() string {
 	if r.KeepForever {
 		mode = " (keep forever)"
 	}
-	return fmt.Sprintf("requeued=%d runs=%d jobs=%d logs=%d artifacts=%d queue=%d runners=%d credentials=%d freed=%dB (run=%dB job=%dB log=%dB artifact=%dB queue=%dB runner=%dB) windows=%dd/%dd%s",
-		r.Requeued, r.RunsDeleted, r.JobsDeleted, r.LogsDeleted, r.ArtifactsDeleted, r.QueueDeleted,
+	return fmt.Sprintf("requeued=%d runs=%d jobs=%d logs=%d artifacts=%d caches=%d queue=%d runners=%d credentials=%d freed=%dB (run=%dB job=%dB log=%dB artifact=%dB cache=%dB queue=%dB runner=%dB) windows=%dd/%dd%s",
+		r.Requeued, r.RunsDeleted, r.JobsDeleted, r.LogsDeleted, r.ArtifactsDeleted, r.CachesDeleted, r.QueueDeleted,
 		r.RunnersDeleted, r.CredentialsDeleted, r.BytesFreed,
-		r.RunBytes, r.JobBytes, r.LogBytes, r.ArtifactBytes, r.QueueBytes, r.RunnerBytes,
+		r.RunBytes, r.JobBytes, r.LogBytes, r.ArtifactBytes, r.CacheBytes, r.QueueBytes, r.RunnerBytes,
 		r.RetentionDays, r.ArtifactDays, mode)
 }
 
@@ -259,6 +263,11 @@ func (s *Service) retain(ctx context.Context, owner, repo string, apply bool, lo
 	// per-run enumeration).
 	if eerr := s.expireArtifactsMode(ctx, owner, repo, now, apply, gone, res); eerr != nil {
 		return res, eerr
+	}
+	// The cache family (PAR-095): expiry, the repo budget and orphan payloads.
+	// Its own index is the read, so a repository with no caches pays one probe.
+	if cerr := s.reclaimCaches(ctx, owner, repo, apply, res); cerr != nil {
+		return res, cerr
 	}
 	s.deleteDeadRunners(ctx, cutoff, apply, res)
 

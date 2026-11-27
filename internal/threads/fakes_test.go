@@ -20,7 +20,9 @@ import (
 // the discovery seam's scripted stand-in (the real reader is pinned against a
 // real git dir in git_test.go).
 type fakeGit struct {
-	files   map[string]map[string][]byte
+	files map[string]map[string][]byte
+	// scoped is repo\x00commit → path → bytes for cross-repository reads.
+	scoped  map[string]map[string][]byte
 	refs    map[string]string
 	list    []string // overrides the derived list when non-nil
 	listErr error
@@ -37,10 +39,21 @@ type fakeGit struct {
 	diffs     map[string][]string
 	diffErr   error
 	diffCalls int
+	// merges scripts MergeCommit by "<base>..<head>"; mergeErr fails it (a
+	// conflicting merge) and mergeCalls observes the PAR-024 work.
+	merges     map[string]string
+	mergeErr   error
+	mergeCalls int
 }
 
 func newFakeGit() *fakeGit {
-	return &fakeGit{files: map[string]map[string][]byte{}, refs: map[string]string{}, diffs: map[string][]string{}}
+	return &fakeGit{
+		files:  map[string]map[string][]byte{},
+		scoped: map[string]map[string][]byte{},
+		refs:   map[string]string{},
+		diffs:  map[string][]string{},
+		merges: map[string]string{},
+	}
 }
 
 func (f *fakeGit) add(commit, path string, body string) {
@@ -48,6 +61,16 @@ func (f *fakeGit) add(commit, path string, body string) {
 		f.files[commit] = map[string][]byte{}
 	}
 	f.files[commit][path] = []byte(body)
+}
+
+// addIn adds a file to ONE repository (the cross-repository reusable-workflow
+// seam reads another repository's commit, which the flat map cannot express).
+func (f *fakeGit) addIn(repo, commit, path string, body string) {
+	key := repo + "\x00" + commit
+	if f.scoped[key] == nil {
+		f.scoped[key] = map[string][]byte{}
+	}
+	f.scoped[key][path] = []byte(body)
 }
 
 func (f *fakeGit) ListWorkflowFiles(_ context.Context, _ string, commit string) ([]string, error) {
@@ -70,12 +93,19 @@ func (f *fakeGit) ListWorkflowFiles(_ context.Context, _ string, commit string) 
 	return out, nil
 }
 
-func (f *fakeGit) ReadFile(_ context.Context, _ string, commit, path string) ([]byte, error) {
+func (f *fakeGit) ReadFile(_ context.Context, repo, commit, path string) ([]byte, error) {
 	f.mu.Lock()
 	f.reads++
 	f.mu.Unlock()
 	if f.readErr != nil {
 		return nil, f.readErr
+	}
+	if scoped := f.scoped[repo+"\x00"+commit]; scoped != nil {
+		body, ok := scoped[path]
+		if !ok {
+			return nil, fmt.Errorf("%w: %s", ErrNotFound, path)
+		}
+		return body, nil
 	}
 	body, ok := f.files[commit][path]
 	if !ok {
@@ -119,6 +149,21 @@ func (f *fakeGit) DefaultBranch(_ context.Context, _ string) (string, error) {
 	return f.branch, nil
 }
 
+// MergeCommit implements MergeRefReader (PAR-024) from the scripted map.
+func (f *fakeGit) MergeCommit(_ context.Context, _, base, head string) (string, error) {
+	f.mu.Lock()
+	f.mergeCalls++
+	sha, ok := f.merges[base+".."+head]
+	f.mu.Unlock()
+	if f.mergeErr != nil {
+		return "", f.mergeErr
+	}
+	if !ok {
+		return "", fmt.Errorf("%w: no merge fixture for %s..%s", ErrNotFound, base, head)
+	}
+	return sha, nil
+}
+
 // --- fake roles ------------------------------------------------------------
 
 type fakeRoles struct {
@@ -134,6 +179,9 @@ func (f *fakeRoles) Resolve(_ context.Context, _, _ string, p auth.Principal) (i
 		return identity.Role(r), nil
 	}
 	if p.Anonymous {
+		if f.public {
+			return identity.RoleRead, nil
+		}
 		return "", nil
 	}
 	return identity.RoleRead, nil

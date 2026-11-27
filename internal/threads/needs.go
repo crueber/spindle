@@ -63,6 +63,14 @@ func needsIndex(jobs []*Job) map[string][]string {
 			key = j.Spec.MatrixGroup
 		}
 		idx[key] = append(idx[key], j.ID)
+		// A reusable-workflow caller has no job record of its own, but a later
+		// job may name it in `needs:`. Indexing every callee job under the
+		// caller key makes the dependency wait for the whole call and lets the
+		// fold expose the callee's declared outputs as the caller's outputs
+		// (PAR-075; callOutputs).
+		if j.Spec != nil && j.Spec.Call != nil && j.Spec.Call.Caller != "" && j.Spec.Call.Caller != key {
+			idx[j.Spec.Call.Caller] = append(idx[j.Spec.Call.Caller], j.ID)
+		}
 	}
 	for k := range idx {
 		sort.Strings(idx[k])
@@ -226,6 +234,15 @@ func foldNeeds(needs map[string][]string, byID map[string]*Job) needFacts {
 		// discard what successful siblings contributed.
 		if result != JobSuccess {
 			merged = map[string]string{}
+		}
+		// A reusable-workflow caller's interface is the callee's declared
+		// outputs, not its jobs' internal outputs (PAR-075): evaluate the
+		// templates over the callee jobs' reported outputs. This replaces the
+		// union above for a call key.
+		if result == JobSuccess {
+			if outs, ok := callOutputs(key, ids, byID); ok {
+				merged = outs
+			}
 		}
 		facts.Results[key] = result
 		// Keep the key even when it contributes nothing (a failed dependency,

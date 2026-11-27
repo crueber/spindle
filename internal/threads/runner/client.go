@@ -303,3 +303,146 @@ func (c *Client) doMaybe(ctx context.Context, method, path, bearer string, in an
 func isFatal(err error) bool {
 	return errors.Is(err, ErrUnauthorized) || errors.Is(err, ErrSuperseded)
 }
+
+// --- cache transport (PAR-095) ---------------------------------------------
+
+// cachePath is the attempt-scoped cache sub-tree.
+func cachePath(jobRef string, attempt int, rest ...string) string {
+	base := attemptPath(jobRef, attempt, "cache")
+	for _, seg := range rest {
+		base += "/" + seg
+	}
+	return base
+}
+
+// CacheLookup asks the server for a restore candidate.
+func (c *Client) CacheLookup(ctx context.Context, token, jobRef string, attempt int, in threads.CacheLookupInput) (*threads.CacheView, error) {
+	var out threads.CacheView
+	if err := c.do(ctx, http.MethodPost, cachePath(jobRef, attempt, "lookup"), token, in, &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
+// GetCacheBlob streams one cache payload back; the caller closes the body.
+func (c *Client) GetCacheBlob(ctx context.Context, token, jobRef string, attempt int, sha string) (io.ReadCloser, int64, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.BaseURL+cachePath(jobRef, attempt, "blobs", sha), nil)
+	if err != nil {
+		return nil, 0, err
+	}
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("X-Spindle-Runner", ProtocolVersion)
+	// A cache payload can be large: no client timeout on the streaming client.
+	hc := &http.Client{Timeout: 0}
+	resp, err := hc.Do(req)
+	if err != nil {
+		return nil, 0, err
+	}
+	if resp.StatusCode < 200 || resp.StatusCode > 299 {
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+		resp.Body.Close()
+		return nil, 0, apiErrorFrom(resp.StatusCode, body)
+	}
+	return resp.Body, resp.ContentLength, nil
+}
+
+// PutCacheBlob uploads one content-addressed payload.
+func (c *Client) PutCacheBlob(ctx context.Context, token, jobRef string, attempt int, sha string, size int64, body io.Reader) error {
+	path := cachePath(jobRef, attempt, "blobs", sha) + "?size=" + strconv.FormatInt(size, 10)
+	req, err := http.NewRequestWithContext(ctx, http.MethodPut, c.BaseURL+path, body)
+	if err != nil {
+		return err
+	}
+	req.ContentLength = size
+	req.Header.Set("Content-Type", "application/octet-stream")
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("Accept", "application/json")
+	req.Header.Set("X-Spindle-Runner", ProtocolVersion)
+	resp, err := c.HTTP.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	raw, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	if resp.StatusCode < 200 || resp.StatusCode > 299 {
+		return apiErrorFrom(resp.StatusCode, raw)
+	}
+	return nil
+}
+
+// SaveCache commits one cache entry.
+func (c *Client) SaveCache(ctx context.Context, token, jobRef string, attempt int, in threads.SaveCacheInput) (*threads.CacheView, error) {
+	var out threads.CacheView
+	if err := c.do(ctx, http.MethodPost, cachePath(jobRef, attempt, "save"), token, in, &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
+// PrepareArtifact opens an upload (overwrite deletes the existing artifact
+// before the blobs are streamed, PAR-097).
+func (c *Client) PrepareArtifact(ctx context.Context, token, jobRef string, attempt int, name string, overwrite bool) (bool, error) {
+	var out struct {
+		Existed bool `json:"existed"`
+	}
+	body := map[string]any{"overwrite": overwrite}
+	if err := c.do(ctx, http.MethodPost, artifactPath(jobRef, attempt, name, "prepare"), token, body, &out); err != nil {
+		return false, err
+	}
+	return out.Existed, nil
+}
+
+// ArtifactList lists a run's artifacts (the download-all/pattern/ids path).
+func (c *Client) ArtifactList(ctx context.Context, token, jobRef string, attempt int, runID string) ([]*threads.Artifact, error) {
+	path := attemptPath(jobRef, attempt, "artifacts")
+	if runID != "" {
+		path += "?run_id=" + neturl.QueryEscape(runID)
+	}
+	var out struct {
+		Artifacts []*threads.Artifact `json:"artifacts"`
+	}
+	if err := c.do(ctx, http.MethodGet, path, token, nil, &out); err != nil {
+		return nil, err
+	}
+	return out.Artifacts, nil
+}
+
+// ArtifactManifestFromRun reads one artifact's manifest, optionally from another
+// run of the same repository (the D-3 gate is the server's).
+func (c *Client) ArtifactManifestFromRun(ctx context.Context, token, jobRef string, attempt int, runID, name string) (*threads.Artifact, error) {
+	path := artifactPath(jobRef, attempt, name)
+	if runID != "" {
+		path += "?run_id=" + neturl.QueryEscape(runID)
+	}
+	var out threads.Artifact
+	if err := c.do(ctx, http.MethodGet, path, token, nil, &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
+// GetArtifactBlobFromRun streams one file of an artifact, optionally from
+// another run.
+func (c *Client) GetArtifactBlobFromRun(ctx context.Context, token, jobRef string, attempt int, runID, name string, index int) (io.ReadCloser, int64, error) {
+	path := artifactPath(jobRef, attempt, name, "blobs", strconv.Itoa(index))
+	if runID != "" {
+		path += "?run_id=" + neturl.QueryEscape(runID)
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.BaseURL+path, nil)
+	if err != nil {
+		return nil, 0, err
+	}
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("X-Spindle-Runner", ProtocolVersion)
+	hc := &http.Client{Timeout: 0}
+	resp, err := hc.Do(req)
+	if err != nil {
+		return nil, 0, err
+	}
+	if resp.StatusCode < 200 || resp.StatusCode > 299 {
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+		resp.Body.Close()
+		return nil, 0, apiErrorFrom(resp.StatusCode, body)
+	}
+	return resp.Body, resp.ContentLength, nil
+}

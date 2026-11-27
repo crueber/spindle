@@ -1,11 +1,13 @@
 package threads
 
 import (
+	"context"
 	"fmt"
 	"sort"
 	"strconv"
 	"strings"
 
+	"github.com/crueber/spindle/internal/server/auth"
 	"github.com/crueber/spindle/internal/threads/workflow"
 )
 
@@ -61,6 +63,68 @@ func dispatchInputs(f *WorkflowFile) []DispatchInput {
 		out = append(out, item)
 	}
 	return out
+}
+
+// RepositoryDispatch creates the runs a `repository_dispatch` (PAR-018)
+// triggers: the workflow comes from the default branch (the repository-event
+// rule), the event_type selects the workflow's `types`, and the bounded
+// client_payload is exposed as `github.event.client_payload.*`. A caller needs
+// the write role (GitHub's `contents: write`): a Threads job token is refused
+// by requireRole, so a workflow cannot dispatch itself around the job-push
+// suppression.
+func (s *Service) RepositoryDispatch(ctx context.Context, repo, eventType string, clientPayload map[string]any, ref string, p auth.Principal) ([]*Run, error) {
+	owner, name, err := splitRepo(repo)
+	if err != nil {
+		return nil, err
+	}
+	if err := s.requireRole(ctx, owner, name, p, "write"); err != nil {
+		return nil, err
+	}
+	eventType = strings.TrimSpace(eventType)
+	if !workflow.ValidDispatchType(eventType) {
+		return nil, fmt.Errorf("%w: event_type must match [A-Za-z0-9._-]{1,100}", ErrInvalid)
+	}
+	payload, verr := ValidateClientPayload(clientPayload)
+	if verr != nil {
+		return nil, verr
+	}
+	if s.Git == nil {
+		return nil, fmt.Errorf("%w: git backend not wired", ErrUnavailable)
+	}
+	// GitHub's repository_dispatch always runs from the default branch; a
+	// caller's `ref` is accepted only when it resolves to the default branch's
+	// commit, so a dispatch can never run a workflow file from a branch another
+	// actor controls.
+	ref = strings.TrimSpace(ref)
+	defaultSHA, rerr := s.Git.ResolveRef(ctx, repo, "HEAD")
+	if rerr != nil {
+		return nil, rerr
+	}
+	if ref == "" {
+		if br, ok := s.Git.(DefaultBranchReader); ok {
+			if branch, berr := br.DefaultBranch(ctx, repo); berr == nil && strings.TrimSpace(branch) != "" {
+				ref = "refs/heads/" + strings.TrimPrefix(strings.TrimSpace(branch), "refs/heads/")
+			}
+		}
+	}
+	if ref != "" {
+		target, terr := s.Git.ResolveRef(ctx, repo, ref)
+		if terr != nil {
+			return nil, fmt.Errorf("%w: %v", ErrUnprocessable, terr)
+		}
+		if target != defaultSHA {
+			return nil, fmt.Errorf("%w: repository_dispatch runs the default branch; %q does not resolve to its tip", ErrUnprocessable, ref)
+		}
+	}
+	branch := ""
+	if rest, ok := strings.CutPrefix(ref, "refs/heads/"); ok {
+		branch = rest
+	}
+	actor := strings.TrimSpace(p.Name)
+	return s.CreateRun(ctx, repo, defaultSHA, EventRepositoryDispatch, CreateOpts{
+		Action: eventType, Branch: branch, Ref: ref, RefName: branch, Actor: actor,
+		EventPayload: RepositoryDispatchEventPayload(repo, eventType, payload, actor),
+	})
 }
 
 // resolveDispatchInputs validates the dispatcher's values against the declared

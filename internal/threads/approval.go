@@ -59,7 +59,10 @@ func (s *Service) needsApproval(ctx context.Context, owner, repo, actor string, 
 	if s == nil || !s.ApproveFirstTimeForks {
 		return false
 	}
-	if event != EventPullReq || !opts.Fork {
+	if event != EventPullReq && event != EventPullTarget {
+		return false
+	}
+	if !opts.Fork {
 		return false
 	}
 	actor = strings.TrimSpace(actor)
@@ -118,6 +121,15 @@ func (s *Service) ApproveRun(ctx context.Context, repo, runID string, p auth.Pri
 	jobs, err := s.loadJobs(ctx, owner, name, runID)
 	if err != nil {
 		return nil, err
+	}
+	// The cross-run gate (D-3): the maintainer's approval is re-validated
+	// against the run's jobs, and the decision is audited. A refusal names the
+	// condition and leaves the run pending (a fixable decision, never a silent
+	// deny).
+	if run.ApprovalKind == ApprovalCrossRun {
+		if reason := crossRunApprovalRefusal(run, jobs); reason != "" {
+			return nil, fmt.Errorf("%w: %s", ErrForbidden, reason)
+		}
 	}
 	approvedBy := strings.TrimSpace(p.Name)
 	approvedAt := s.nowUTC().Format(dateTimeFmt)
@@ -191,6 +203,10 @@ func (s *Service) ApproveRun(ctx context.Context, repo, runID string, p auth.Pri
 		for _, env := range run.Environments {
 			s.auditAdmin(ctx, p.Name, AuditEnvironmentApprove, "environment:"+env, "run="+runID+" approved_by="+approvedBy)
 		}
+	}
+	if run.ApprovalKind == ApprovalCrossRun {
+		s.auditAdmin(ctx, p.Name, "threads.artifact.cross_run.approve", "run="+runID,
+			"repo="+repoID(owner, name)+" approved_by="+approvedBy)
 	}
 	// A job decided before approval (a false `if:`) dooms its dependents and
 	// may leave the run with nothing to run; settle it once the gate is open.
@@ -355,6 +371,13 @@ func (s *Service) patchDeployment(ctx context.Context, owner, name, runID string
 		return nil, err
 	}
 	*job = *next
+	// PAR-021: the approval/denial is a deployment_status transition. The run
+	// header is reloaded for the payload's ids; a read failure simply skips the
+	// event (the record is already committed).
+	if run, rerr := s.loadRun(ctx, owner, name, runID); rerr == nil && run != nil {
+		state := deploymentStatusState(dep.State)
+		s.emitDeploymentEvents(run, job, state, reason)
+	}
 	return next, nil
 }
 

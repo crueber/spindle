@@ -25,6 +25,8 @@ import (
 var ExposedTemplates = []string{
 	"/{owner}/{repo}/api/threads",
 	"/{owner}/{repo}/api/threads/workflows",
+	"/{owner}/{repo}/api/threads/dispatches",
+	"/{owner}/{repo}/api/threads/settings",
 	"/{owner}/{repo}/api/threads/{run}",
 	"/{owner}/{repo}/api/threads/{run}/cancel",
 	"/{owner}/{repo}/api/threads/{run}/rerun",
@@ -33,6 +35,9 @@ var ExposedTemplates = []string{
 	"/{owner}/{repo}/api/threads/{run}/deny",
 	"/{owner}/{repo}/api/threads/{run}/jobs/{job}/log",
 	"/{owner}/{repo}/api/threads/{run}/artifacts",
+	"/{owner}/{repo}/api/threads/{run}/artifacts/{name}",
+	"/{owner}/{repo}/api/threads/caches",
+	"/{owner}/{repo}/api/threads/caches/{id}",
 	"/{owner}/{repo}/api/threads/secrets",
 	"/{owner}/{repo}/api/threads/secrets/{name}",
 	"/{owner}/{repo}/api/threads/variables",
@@ -58,6 +63,10 @@ var ExposedTemplates = []string{
 	"/api/v1/threads/jobs/{ref}/attempt/{n}/artifacts",
 	"/api/v1/threads/jobs/{ref}/attempt/{n}/artifacts/{name}",
 	"/api/v1/threads/jobs/{ref}/attempt/{n}/artifacts/{name}/blobs/{index}",
+	"/api/v1/threads/jobs/{ref}/attempt/{n}/artifacts/{name}/prepare",
+	"/api/v1/threads/jobs/{ref}/attempt/{n}/cache/lookup",
+	"/api/v1/threads/jobs/{ref}/attempt/{n}/cache/save",
+	"/api/v1/threads/jobs/{ref}/attempt/{n}/cache/blobs/{sha}",
 }
 
 // Authenticator resolves the request principal through Seam 2 (the server
@@ -261,6 +270,35 @@ func (h *Handler) handleRepo(w http.ResponseWriter, r *http.Request, repo string
 		}
 		h.listWorkflows(w, r, repo)
 		return true
+	case rest[0] == "caches":
+		switch {
+		case len(rest) == 1 && r.Method == http.MethodGet:
+			h.listCaches(w, r, repo)
+		case len(rest) == 2 && r.Method == http.MethodDelete:
+			h.deleteCache(w, r, repo, rest[1])
+		case len(rest) == 1:
+			methodNotAllowed(w, "GET")
+		default:
+			methodNotAllowed(w, "DELETE")
+		}
+		return true
+	case len(rest) == 1 && rest[0] == "dispatches":
+		if r.Method != http.MethodPost {
+			methodNotAllowed(w, "POST")
+			return true
+		}
+		h.repositoryDispatch(w, r, repo)
+		return true
+	case len(rest) == 1 && rest[0] == "settings":
+		switch r.Method {
+		case http.MethodGet:
+			h.getSettings(w, r, repo)
+		case http.MethodPut:
+			h.putSettings(w, r, repo)
+		default:
+			methodNotAllowed(w, "GET", "PUT")
+		}
+		return true
 	case rest[0] == "secrets":
 		switch {
 		case len(rest) == 1 && r.Method == http.MethodGet:
@@ -333,6 +371,9 @@ func (h *Handler) handleRepo(w http.ResponseWriter, r *http.Request, repo string
 			return true
 		}
 		h.listArtifacts(w, r, repo, rest[0])
+		return true
+	case len(rest) == 3 && rest[1] == "artifacts":
+		h.artifactRead(w, r, repo, rest[0], rest[2])
 		return true
 	case len(rest) == 1:
 		if r.Method != http.MethodGet {
@@ -435,6 +476,71 @@ func (h *Handler) dispatch(w http.ResponseWriter, r *http.Request, repo string) 
 		return
 	}
 	writeJSON(w, http.StatusCreated, map[string]any{"runs": runs})
+}
+
+// repositoryDispatch answers POST …/api/threads/dispatches (PAR-018): GitHub's
+// `POST /repos/{owner}/{repo}/dispatches` shape, on the spaced Threads lane.
+// The write role is the gate (GitHub's contents: write); a job token is refused
+// by the service. The answer is 202 with the runs it started, because the
+// trigger is asynchronous and "accepted" is the honest status.
+func (h *Handler) repositoryDispatch(w http.ResponseWriter, r *http.Request, repo string) {
+	p, aerr := h.principal(r)
+	if aerr != nil {
+		writeErr(w, aerr)
+		return
+	}
+	var body struct {
+		EventType     string         `json:"event_type"`
+		ClientPayload map[string]any `json:"client_payload"`
+		Ref           string         `json:"ref"`
+	}
+	if !decodeStrict(w, r, 1<<20, map[string]bool{"event_type": true, "client_payload": true, "ref": true}, &body) {
+		return
+	}
+	runs, err := h.Svc.RepositoryDispatch(r.Context(), repo, body.EventType, body.ClientPayload, body.Ref, p)
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	writeJSON(w, http.StatusAccepted, map[string]any{"runs": runs})
+}
+
+// getSettings answers GET …/api/threads/settings (read gate).
+func (h *Handler) getSettings(w http.ResponseWriter, r *http.Request, repo string) {
+	p, aerr := h.principal(r)
+	if aerr != nil {
+		writeErr(w, aerr)
+		return
+	}
+	view, err := h.Svc.GetSettings(r.Context(), repo, p)
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, view)
+}
+
+// putSettings answers PUT …/api/threads/settings (maintain+; the service
+// re-checks and audits every changed switch).
+func (h *Handler) putSettings(w http.ResponseWriter, r *http.Request, repo string) {
+	p, aerr := h.principal(r)
+	if aerr != nil {
+		writeErr(w, aerr)
+		return
+	}
+	var in SettingsInput
+	if !decodeStrict(w, r, 64<<10, map[string]bool{
+		"send_write_tokens": true, "pull_request_target": true,
+		"pr_target_allow_head_checkout": true, "concurrency_cap": true,
+	}, &in) {
+		return
+	}
+	view, err := h.Svc.UpdateSettings(r.Context(), repo, in, p)
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, view)
 }
 
 // coerceInputs turns the JSON input map into the string map the workflow

@@ -788,6 +788,32 @@ and other forges' directories are ignored). The `<commit>:<path>` form rejects p
 `:` (ambiguous with the tree-ish separator). These calls are control-plane, event-rate reads —
 never on a git hot path — and they never write a ref, object, or worktree.
 
+## 14a. Threads merge-ref commit (PAR-024, feature-owned)
+
+A `pull_request` run reports a **simulated merge commit** so a conflict that only exists after the
+merge is red. The commit is built from git plumbing in the same serving copy, under the §14 pool and
+timeouts, with the same bounded stdout/stderr and ctx discipline:
+
+```
+git merge-tree --write-tree <base_sha> <head_sha>
+git commit-tree <tree> -p <base_sha> -p <head_sha> -m "Merge <head> into <base>"
+```
+
+Notes pinned by tests (`internal/threads/git_test.go`):
+
+- `merge-tree --write-tree` exits 1 on a conflict and prints the (partial) tree; that is **not** an
+  object read failure — the caller (`threads.SubprocessGit.MergeCommit`) returns the conflict class
+  and `CreateRun` falls back to the head commit and `refs/pull/<n>/head`. Never fabricate a sha.
+- `commit-tree` runs with a **fixed identity and date** (`spindle <spindle@localhost>`,
+  `946684800 +0000`) so the same base+head pair mints the same commit: repeated PR events reuse one
+  object and a rerun never reports a different sha for identical trees.
+- The commit is **derived state**: it is not published through the WAL and it is not a durable ref.
+  It lives in the serving copy's object database so a job's checkout by sha can fetch it; after a
+  serving-copy wipe the next PR event rebuilds the same commit. The run header records the sha and
+  `refs/pull/<n>/merge`; nothing reads the ref name as a ref.
+- Neither command writes a ref or a worktree, and no user string reaches argv: both inputs are
+  full-sha-validated first, and the message is built from them.
+
 ## 15. Server-side commit plumbing (browser file edit, docs/features/17)
 
 `internal/webedit` mints one commit from plumbing only — no worktree, no branch movement, no checkout —

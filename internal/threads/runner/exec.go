@@ -11,6 +11,7 @@ import (
 	"os/exec"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/crueber/spindle/internal/threads"
@@ -34,6 +35,9 @@ type DockerCLI interface {
 type DockerCLIProcess struct {
 	// Bin is the docker (or podman) binary; "docker" when empty.
 	Bin string
+	// Env is the base environment added to every invocation (the runner's
+	// private DOCKER_CONFIG, PAR-078). Per-call env is appended after it.
+	Env []string
 }
 
 func (d *DockerCLIProcess) bin() string {
@@ -46,7 +50,7 @@ func (d *DockerCLIProcess) bin() string {
 // Run implements DockerCLI.
 func (d *DockerCLIProcess) Run(ctx context.Context, env []string, argv ...string) (string, string, int, error) {
 	cmd := exec.CommandContext(ctx, d.bin(), argv...)
-	cmd.Env = append(os.Environ(), env...)
+	cmd.Env = append(append(os.Environ(), d.Env...), env...)
 	var out, errb bytes.Buffer
 	cmd.Stdout = &out
 	cmd.Stderr = &errb
@@ -66,7 +70,7 @@ func (d *DockerCLIProcess) Stream(ctx context.Context, env []string, w io.Writer
 // StreamIn implements DockerCLI.
 func (d *DockerCLIProcess) StreamIn(ctx context.Context, env []string, r io.Reader, w io.Writer, argv ...string) (int, error) {
 	cmd := exec.CommandContext(ctx, d.bin(), argv...)
-	cmd.Env = append(os.Environ(), env...)
+	cmd.Env = append(append(os.Environ(), d.Env...), env...)
 	cmd.Stdin = r
 	cmd.Stdout = w
 	cmd.Stderr = w
@@ -121,6 +125,15 @@ type Executor struct {
 	// Artifacts is the artifact transport (the protocol Client). Nil makes an
 	// artifact step fail with a named error.
 	Artifacts ArtifactClient
+	// Policy is the runner operator's container grants (PAR-179). The zero
+	// value is the fail-closed default.
+	Policy threads.ContainerPolicy
+	// RegistryAuth is the runner-owned pull identity (PAR-078); nil = use the
+	// daemon's ambient docker config.
+	RegistryAuth *RegistryAuth
+	// Caches is the cache transport (the protocol Client). Nil makes a cache
+	// step fail with a named error.
+	Caches CacheClient
 }
 
 // ExecInput is one claimed job.
@@ -130,6 +143,9 @@ type ExecInput struct {
 	// Caps is the server's artifact cap advertisement (StartView.Artifacts);
 	// zero values fall back to the service defaults.
 	Caps threads.ArtifactCaps
+	// CacheCaps is the server's cache limit advertisement
+	// (StartView.Caches); zero values fall back to the service defaults.
+	CacheCaps threads.CacheCaps
 }
 
 // Result is the job's conclusion and per-step outcomes.
@@ -168,6 +184,8 @@ func (e *Executor) Execute(ctx context.Context, in ExecInput, stream *Streamer) 
 		ServerURL:    e.ServerURL,
 		RunnerName:   e.RunnerName,
 		Caps:         in.Caps,
+		Policy:       e.Policy,
+		CacheCaps:    in.CacheCaps,
 	})
 	if err != nil {
 		res.Conclusion = threads.JobFailure
@@ -180,6 +198,22 @@ func (e *Executor) Execute(ctx context.Context, in ExecInput, stream *Streamer) 
 	// carries the annotations that explain it).
 	jobCmds := newJobCommands(stream)
 	summary := &jobSummary{}
+	// Registry credentials are the runner's, never a workflow's: their secret
+	// values join the job's mask list so an accidental echo is redacted
+	// (PAR-078).
+	stream.addMask(e.RegistryMasks())
+	var bg *backgroundSet
+	// The job timeout is registered BEFORE the cleanup defer so the cleanup
+	// (which kills the background processes and reports a leak) runs FIRST:
+	// defer order is LIFO, and a canceled jobCtx would let a background worker
+	// observe cancellation and exit before the job-end kill could prove whether
+	// its process group actually stopped (D-7). The pass must see a live ctx.
+	jobCtx := ctx
+	if plan.Timeout > 0 {
+		var cancel context.CancelFunc
+		jobCtx, cancel = context.WithTimeout(ctx, plan.Timeout)
+		defer cancel()
+	}
 	defer func() {
 		if r := recover(); r != nil {
 			res.Conclusion = threads.JobFailure
@@ -187,17 +221,31 @@ func (e *Executor) Execute(ctx context.Context, in ExecInput, stream *Streamer) 
 			stream.Systemf("spindle: runner panic: %v", r)
 			e.log().Error("threads runner: panic in job", "job", plan.JobRef, "panic", r)
 		}
-		res.Annotations = jobCmds.annotations
+		// Background processes are killed at job end UNCONDITIONALLY (D-7):
+		// before the containers the deferred cleanup removes.
+		if bg != nil {
+			failed, leaked := bg.finishAll()
+			res.Steps = bg.mergeResults(res.Steps)
+			if len(leaked) > 0 {
+				if res.Conclusion == threads.JobSuccess {
+					res.Conclusion = threads.JobFailure
+				}
+				res.Error = joinErrors(res.Error, strings.Join(leaked, "; "))
+				stream.Systemf("spindle: %s", strings.Join(leaked, "; "))
+			}
+			if len(failed) > 0 {
+				if res.Conclusion == threads.JobSuccess {
+					res.Conclusion = threads.JobFailure
+				}
+				res.Error = joinErrors(res.Error, strings.Join(failed, "; "))
+				stream.Systemf("spindle: %s", strings.Join(failed, "; "))
+			}
+		}
+		res.Annotations = jobCmds.snapshot()
 		res.Summary = summary.text()
 		e.cleanup(plan)
 	}()
 
-	jobCtx := ctx
-	if plan.Timeout > 0 {
-		var cancel context.CancelFunc
-		jobCtx, cancel = context.WithTimeout(ctx, plan.Timeout)
-		defer cancel()
-	}
 	// The plan's own secret values join the stream's mask list: a substituted
 	// `${{ secrets.X }}` is masked in the log exactly like the env-delivered
 	// token, whatever the payload's mask list carried (docs/threads.md §3.6).
@@ -229,6 +277,15 @@ func (e *Executor) Execute(ctx context.Context, in ExecInput, stream *Streamer) 
 	// the steps that already ran and layered onto each later step's environment
 	// (docs/threads.md §3.10). Nothing here touches the runner process.
 	cmds := newCommandFiles()
+	// Background/parallel bookkeeping (PAR-080): created after setup so a
+	// background step can rely on the job container existing.
+	bg = newBackgroundSet(e, plan, stream, steps, cmds, jobCmds, summary)
+	// Docker-in-job (PAR-081/D-8): state once, at the top, what "docker build
+	// works" means on this job — the failure remedy for a `docker: not found`
+	// exit repeats it.
+	if plan.DockerHost == "" {
+		stream.Systemf("spindle: no docker daemon or socket is attached to this job (D-8); use a daemonless builder in the job image (kaniko, or buildah with --storage-driver=vfs --isolation=chroot)")
+	}
 	for i := range plan.Steps {
 		step := plan.Steps[i]
 		if jobCtx.Err() != nil || stream.Cancelled() {
@@ -253,7 +310,7 @@ func (e *Executor) Execute(ctx context.Context, in ExecInput, stream *Streamer) 
 			stream.Systemf("spindle: step %q: %v", step.Name, rerr)
 		} else {
 			step = resolved
-			outcome, inner = e.runStep(jobCtx, plan, step, stream, steps, nil, hardFailure, cmds, jobCmds, summary)
+			outcome, inner = e.runStep(jobCtx, plan, step, stream, bg, steps, nil, hardFailure, cmds, jobCmds, summary)
 		}
 		steps.record(step, outcome)
 		res.Steps = append(res.Steps, outcome)
@@ -296,6 +353,9 @@ func (e *Executor) Execute(ctx context.Context, in ExecInput, stream *Streamer) 
 	case anyFailed && hardFailure:
 		res.Conclusion = threads.JobFailure
 	default:
+		// The deferred `actions/cache` saves (a restore-keys fallback stays
+		// green; only the deferred team's turn happens here).
+		e.runDeferredCaches(jobCtx, plan, stream)
 		// A continue-on-error failure keeps the job green (GitHub's semantics);
 		// the step result still records the failure.
 		res.Conclusion = threads.JobSuccess
@@ -316,6 +376,19 @@ func (e *Executor) Execute(ctx context.Context, in ExecInput, stream *Streamer) 
 		}
 	}
 	return res
+}
+
+// joinErrors appends one job-level error to another without losing either
+// (a cleanup failure must be visible even when the job already failed).
+func joinErrors(existing, add string) string {
+	existing, add = strings.TrimSpace(existing), strings.TrimSpace(add)
+	switch {
+	case existing == "":
+		return add
+	case add == "":
+		return existing
+	}
+	return existing + "; " + add
 }
 
 // outputNames lists an output map's names, sorted, for a log line (values may
@@ -341,8 +414,12 @@ func (e *Executor) failOrCancel(ctx context.Context, stream *Streamer, err error
 // setup creates the network, services and the job container, and waits for the
 // services to be reachable.
 func (e *Executor) setup(ctx context.Context, plan *Plan, stream *Streamer) error {
-	if err := e.docker(ctx, stream, nil, "network", "create", plan.Names.Network); err != nil {
-		return fmt.Errorf("create job network: %w", err)
+	// A shared operator network (PAR-179) is used as-is; the per-job network is
+	// only created when nothing else names one.
+	if plan.NetworkMode == plan.Names.Network {
+		if err := e.docker(ctx, stream, nil, "network", "create", plan.Names.Network); err != nil {
+			return fmt.Errorf("create job network: %w", err)
+		}
 	}
 	if err := e.docker(ctx, stream, nil, "volume", "create", plan.Names.Volume); err != nil {
 		return fmt.Errorf("create workspace volume: %w", err)
@@ -470,6 +547,9 @@ func lastPortMapping(out string) string {
 // (`steps.<id>.outcome`, `steps.<id>.conclusion`, `steps.<id>.outputs.<name>`),
 // which is how a workflow branches on an earlier result.
 type stepOutcomes struct {
+	// mu guards every map: a background step and each member of a parallel
+	// group record from their own goroutine (PAR-080).
+	mu         sync.Mutex
 	Outcome    map[string]string
 	Conclusion map[string]string
 	Outputs    map[string]map[string]string
@@ -495,6 +575,16 @@ func (o *stepOutcomes) record(step StepPlan, result threads.StepResult) {
 	if step.ID == "" {
 		return
 	}
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	o.recordLocked(step, result)
+}
+
+// recordLocked is record for a caller already holding mu.
+func (o *stepOutcomes) recordLocked(step StepPlan, result threads.StepResult) {
+	if step.ID == "" {
+		return
+	}
 	outcome := result.Conclusion
 	o.Outcome[step.ID] = outcome
 	conclusion := outcome
@@ -507,11 +597,43 @@ func (o *stepOutcomes) record(step StepPlan, result threads.StepResult) {
 	}
 }
 
+// setFinal records a background step's final outcome after its placeholder
+// ("running") was recorded when it started.
+func (o *stepOutcomes) setFinal(step StepPlan, result threads.StepResult) {
+	o.record(step, result)
+}
+
+// snapshot copies the three context maps for a reader that must not race a
+// concurrent writer (a step `if:` while a background step publishes outputs).
+func (o *stepOutcomes) snapshot() (outcome, conclusion map[string]string, outputs map[string]map[string]string) {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	outcome = make(map[string]string, len(o.Outcome))
+	conclusion = make(map[string]string, len(o.Conclusion))
+	outputs = make(map[string]map[string]string, len(o.Outputs))
+	for k, v := range o.Outcome {
+		outcome[k] = v
+	}
+	for k, v := range o.Conclusion {
+		conclusion[k] = v
+	}
+	for id, outs := range o.Outputs {
+		cp := make(map[string]string, len(outs))
+		for k, v := range outs {
+			cp[k] = v
+		}
+		outputs[id] = cp
+	}
+	return outcome, conclusion, outputs
+}
+
 // addOutputs merges one step's outputs into the job context, enforcing the
 // per-job count and byte caps (a runaway job cannot fill the job record). The
 // caps are checked before anything is merged, so a refused collection leaves no
 // partial outputs behind (the step fails).
 func (o *stepOutcomes) addOutputs(id string, outs map[string]string) error {
+	o.mu.Lock()
+	defer o.mu.Unlock()
 	cur := o.Outputs[id]
 	if cur == nil {
 		cur = map[string]string{}
@@ -605,7 +727,9 @@ func (s *localScope) addOutputs(id string, outs map[string]string) error {
 
 // runStep executes one step (or one composite action and its inner steps) and
 // returns the step's own result plus the inner results, in execution order.
-func (e *Executor) runStep(ctx context.Context, plan *Plan, step StepPlan, stream *Streamer, steps *stepOutcomes, scope *localScope, hardFailure bool, cmds *commandFiles, jobCmds *jobCommands, summary *jobSummary) (threads.StepResult, []threads.StepResult) {
+// A background step is started and reported as `running`; its final result
+// replaces that placeholder when it is waited for or the job ends (PAR-080).
+func (e *Executor) runStep(ctx context.Context, plan *Plan, step StepPlan, stream StepStream, bg *backgroundSet, steps *stepOutcomes, scope *localScope, hardFailure bool, cmds *commandFiles, jobCmds *jobCommands, summary *jobSummary) (threads.StepResult, []threads.StepResult) {
 	out := threads.StepResult{Number: step.Index + 1, ID: step.LocalID, Name: step.Name}
 	if step.ID != "" {
 		out.ID = step.ID // a top-level id is what the job's steps.<id> names
@@ -622,17 +746,43 @@ func (e *Executor) runStep(ctx context.Context, plan *Plan, step StepPlan, strea
 		stream.Systemf("spindle: step %q skipped (if: %s)", step.Name, step.If)
 		return out, nil
 	}
-	if step.Kind == "composite" {
-		return e.runCompositeStep(ctx, plan, step, stream, steps, scope, hardFailure, cmds, jobCmds, summary)
-	}
-	if step.Kind == "unsupported" {
+	switch step.Kind {
+	case "composite":
+		return e.runCompositeStep(ctx, plan, step, stream, bg, steps, scope, hardFailure, cmds, jobCmds, summary)
+	case "control":
+		return e.runControlStep(ctx, stream, bg, step)
+	case "parallel":
+		return e.runParallelStep(ctx, plan, step, stream, steps, hardFailure, cmds, jobCmds, summary)
+	case "unsupported":
 		out.Conclusion = threads.JobFailure
 		out.Error = step.SkipReason
 		stream.Systemf("spindle: step %q: %s", step.Name, step.SkipReason)
 		return out, nil
 	}
+	if step.Background {
+		if bg == nil {
+			out.Conclusion = threads.JobFailure
+			out.Error = "internal: background step outside a job"
+			return out, nil
+		}
+		return bg.start(ctx, step, stream, steps, cmds, jobCmds, summary), nil
+	}
 	stream.StepStart(step)
 	started := time.Now()
+	res := e.runStepBody(ctx, plan, step, stream, steps, scope, cmds, jobCmds, summary, started)
+	stream.StepEnd(step, res.Conclusion, res.ExitCode, res.DurationMS)
+	return res, nil
+}
+
+// runStepBody executes one resolved, conditioned step's process and collects
+// its command files, summary and outputs. It emits no StepStart/StepEnd: the
+// caller owns those, so a background step can announce its start immediately
+// and emit its end when the job waits for it (or the job ends).
+func (e *Executor) runStepBody(ctx context.Context, plan *Plan, step StepPlan, stream StepStream, steps *stepOutcomes, scope *localScope, cmds *commandFiles, jobCmds *jobCommands, summary *jobSummary, started time.Time) (out threads.StepResult) {
+	out = threads.StepResult{Number: step.Index + 1, ID: step.LocalID, Name: step.Name}
+	if step.ID != "" {
+		out.ID = step.ID
+	}
 	if step.Kind == "docker" {
 		// The action container is removed on every path (a successful step
 		// first has its output file copied out).
@@ -649,8 +799,7 @@ func (e *Executor) runStep(ctx context.Context, plan *Plan, step StepPlan, strea
 		out.Conclusion = threads.JobFailure
 		out.Error = stream.Mask(skerr.Error())
 		stream.Systemf("spindle: step %q: %v", step.Name, skerr)
-		stream.StepEnd(step, threads.JobFailure, -1, out.DurationMS)
-		return out, nil
+		return out
 	}
 	// The command-file state of the steps that already ran is layered onto this
 	// step's argv (env values) and command (PATH prepending). A docker action's
@@ -660,7 +809,7 @@ func (e *Executor) runStep(ctx context.Context, plan *Plan, step StepPlan, strea
 	// sink consumes `::name::` lines, records annotations/masks and forwards
 	// everything else to the log.
 	sink := newCommandSink(stream, jobCmds, step)
-	err = e.runStepCommand(ctx, plan, step, sink, stream)
+	err := e.runStepCommand(ctx, plan, step, sink, stream)
 	sink.Close()
 	// The command files are processed for the step that just ran, whatever its
 	// conclusion: a step that writes an env var and then fails still changed the
@@ -686,14 +835,12 @@ func (e *Executor) runStep(ctx context.Context, plan *Plan, step StepPlan, strea
 		out.DurationMS = time.Since(started).Milliseconds()
 		if ctx.Err() != nil || stream.Cancelled() {
 			out.Conclusion = threads.JobCancelled
-			stream.StepEnd(step, threads.JobCancelled, -1, out.DurationMS)
-			return out, nil
+			return out
 		}
 		out.Conclusion = threads.JobFailure
 		out.ExitCode = stepExitCode(err)
 		out.Error = stream.Mask(err.Error())
-		stream.StepEnd(step, threads.JobFailure, out.ExitCode, out.DurationMS)
-		return out, nil
+		return out
 	}
 	out.DurationMS = time.Since(started).Milliseconds()
 	// Collect what the step wrote to its output file. Only a step that
@@ -721,13 +868,29 @@ func (e *Executor) runStep(ctx context.Context, plan *Plan, step StepPlan, strea
 			out.Conclusion = threads.JobFailure
 			out.Error = stream.Mask(oerr.Error())
 			stream.Systemf("spindle: step %q: %v", step.Name, oerr)
-			stream.StepEnd(step, threads.JobFailure, -1, out.DurationMS)
-			return out, nil
+			return out
 		}
 	}
+	// A cache step's own outputs: `cache-hit` is "true" only on an EXACT key
+	// match (GitHub's rule), so a restore-keys fallback reads "false".
+	if cacheStepKind(step.Kind) && (step.ID != "" || step.LocalID != "") {
+		if outs := cacheHitOutput(step); len(outs) > 0 {
+			if oerr := e.storeStepOutputs(step, outs, steps, scope); oerr != nil {
+				out.Conclusion = threads.JobFailure
+				out.Error = stream.Mask(oerr.Error())
+				stream.Systemf("spindle: step %q: %v", step.Name, oerr)
+				stream.StepEnd(step, threads.JobFailure, -1, out.DurationMS)
+				return out
+			}
+		}
+	}
+	// `actions/cache` saves at the end of the job, not here: the files the step
+	// asked to cache are usually written by the steps AFTER it.
+	if step.Kind == "cache" && step.Cache != nil && !step.Cache.LookupOnly {
+		plan.deferCacheSave(step.Cache)
+	}
 	out.Conclusion = threads.JobSuccess
-	stream.StepEnd(step, threads.JobSuccess, 0, out.DurationMS)
-	return out, nil
+	return out
 }
 
 // storeStepOutputs publishes one step's collected outputs: an action-local id
@@ -753,7 +916,7 @@ func (e *Executor) storeStepOutputs(step StepPlan, outs map[string]string, steps
 // A failing inner step (without its own continue-on-error) fails the caller and
 // skips the rest of the action; the caller's continue-on-error then decides
 // whether the job tolerates it.
-func (e *Executor) runCompositeStep(ctx context.Context, plan *Plan, step StepPlan, stream *Streamer, steps *stepOutcomes, parent *localScope, hardFailure bool, cmds *commandFiles, jobCmds *jobCommands, summary *jobSummary) (threads.StepResult, []threads.StepResult) {
+func (e *Executor) runCompositeStep(ctx context.Context, plan *Plan, step StepPlan, stream StepStream, bg *backgroundSet, steps *stepOutcomes, parent *localScope, hardFailure bool, cmds *commandFiles, jobCmds *jobCommands, summary *jobSummary) (threads.StepResult, []threads.StepResult) {
 	out := threads.StepResult{Number: step.Index + 1, ID: step.ID, Name: step.Name}
 	if step.LocalID != "" {
 		out.ID = step.LocalID
@@ -795,7 +958,7 @@ func (e *Executor) runCompositeStep(ctx context.Context, plan *Plan, step StepPl
 			stream.Systemf("spindle: %s step %q: %v", step.Name, child.Name, rerr)
 			continue
 		}
-		childRes, childInner := e.runStep(cctx, plan, resolved, stream, steps, scope, hardFailure || failed, cmds, jobCmds, summary)
+		childRes, childInner := e.runStep(cctx, plan, resolved, stream, bg, steps, scope, hardFailure || failed, cmds, jobCmds, summary)
 		inner = append(inner, childRes)
 		inner = append(inner, childInner...)
 		scope.record(resolved.LocalID, childRes.Conclusion, conclusionOf(childRes, resolved.ContinueOnError))
@@ -870,13 +1033,25 @@ func evalCompositeOutputs(plan *Plan, templates map[string]string, local map[str
 	return out, nil
 }
 
-// outputContext is the step-output map of a mid-run context (nil-safe for the
-// unit tests that drive one step without a job).
+// outputContext is a snapshot of the step-output map of a mid-run context
+// (nil-safe for the unit tests that drive one step without a job). It is a
+// copy because a background step may publish outputs while a later step is
+// resolved.
 func outputContext(steps *stepOutcomes) map[string]map[string]string {
 	if steps == nil {
 		return nil
 	}
-	return steps.Outputs
+	steps.mu.Lock()
+	defer steps.mu.Unlock()
+	out := make(map[string]map[string]string, len(steps.Outputs))
+	for id, outs := range steps.Outputs {
+		cp := make(map[string]string, len(outs))
+		for k, v := range outs {
+			cp[k] = v
+		}
+		out[id] = cp
+	}
+	return out
 }
 
 // stepError carries the docker exit code through the error path.
@@ -902,9 +1077,13 @@ func stepExitCode(err error) int {
 // NAME`), never in argv; a docker action gets NEITHER: its environment is
 // entirely in the argv (`--env K=V`), because the image is third-party code and
 // a fork run still receives no secrets (15 §5.2).
-func (e *Executor) runStepCommand(ctx context.Context, plan *Plan, step StepPlan, out io.Writer, stream *Streamer) error {
+func (e *Executor) runStepCommand(ctx context.Context, plan *Plan, step StepPlan, out io.Writer, stream StepStream) error {
 	stepCtx := ctx
-	if step.Timeout > 0 {
+	// A BACKGROUND step's timeout is owned by its backgroundSet timer: it kills
+	// the step's process group and then cancels this context, so the exec
+	// returns after the group is gone. Wrapping it in a second deadline here
+	// would cancel the CLI first and could leave the in-container tree alive.
+	if step.Timeout > 0 && !step.Background {
 		var cancel context.CancelFunc
 		stepCtx, cancel = context.WithTimeout(ctx, step.Timeout)
 		defer cancel()
@@ -916,6 +1095,10 @@ func (e *Executor) runStepCommand(ctx context.Context, plan *Plan, step StepPlan
 		return e.uploadArtifact(stepCtx, plan, step, stream)
 	case "artifact-download":
 		return e.downloadArtifact(stepCtx, plan, step, stream)
+	case "cache", "cache-restore":
+		return e.restoreCache(stepCtx, plan, step, stream)
+	case "cache-save":
+		return e.saveCache(stepCtx, plan, step, stream)
 	}
 	var fullEnv []string
 	if step.Kind != "docker" {
@@ -927,26 +1110,48 @@ func (e *Executor) runStepCommand(ctx context.Context, plan *Plan, step StepPlan
 	}
 	code, err := e.Docker.Stream(stepCtx, fullEnv, out, step.Argv...)
 	if stepCtx.Err() == context.DeadlineExceeded && ctx.Err() == nil {
-		// The step timed out: kill the container so the process cannot outlive
-		// it, then report the timeout.
-		if step.Kind == "docker" {
-			e.removeActionContainer(plan, step)
-		} else {
-			e.killJobContainer(plan)
+		// The step timed out. A FOREGROUND step's process tree is killed by
+		// killing the container it runs in (the only reliable in-container kill).
+		// A BACKGROUND step is already in its own session: its timeout timer kills
+		// that process group (background.go), and killing the job container here
+		// would take every later step with it.
+		if !step.Background {
+			if step.Kind == "docker" {
+				e.removeActionContainer(plan, step)
+			} else {
+				e.killJobContainer(plan)
+			}
 		}
 		return &stepError{code: -1, msg: fmt.Sprintf("timed out after %s", step.Timeout)}
 	}
-	if err != nil {
+	if code != 0 {
 		msg := fmt.Sprintf("exit code %d", code)
-		if code < 0 {
+		if err != nil {
 			msg = err.Error()
+		}
+		// Docker-in-job (PAR-081/D-8): a `docker` command in an image without a
+		// daemon exits 127. Name the daemonless path and the operator grant, so
+		// the reader is not left with "not found".
+		if code == 127 && plan.DockerHost == "" && mentionsDocker(step.Run) {
+			msg = fmt.Sprintf("exit code %d: this job has no docker daemon or socket (D-8); build with a daemonless builder in the job image (kaniko, or buildah --storage-driver=vfs --isolation=chroot), or run on a runner whose operator granted --docker-host", code)
 		}
 		return &stepError{code: code, msg: msg}
 	}
-	if code != 0 {
-		return &stepError{code: code, msg: fmt.Sprintf("exit code %d", code)}
+	if err != nil {
+		return &stepError{code: -1, msg: err.Error()}
 	}
 	return nil
+}
+
+// mentionsDocker reports whether a script invokes a docker-family CLI (the
+// daemonless remedy is relevant only then).
+func mentionsDocker(script string) bool {
+	for _, word := range []string{"docker ", "docker-compose", "podman "} {
+		if strings.Contains(script, word) {
+			return true
+		}
+	}
+	return false
 }
 
 // prepareStepScript finishes a script step's argv at execution time (PAR-079):
@@ -959,7 +1164,7 @@ func (e *Executor) runStepCommand(ctx context.Context, plan *Plan, step StepPlan
 //
 // Both are container-side facts, so they cannot be decided at plan time (the
 // plan is also shown before a container exists).
-func (e *Executor) prepareStepScript(ctx context.Context, plan *Plan, step StepPlan, stream *Streamer) (StepPlan, error) {
+func (e *Executor) prepareStepScript(ctx context.Context, plan *Plan, step StepPlan, stream StepStream) (StepPlan, error) {
 	if step.Kind != "run" {
 		return step, nil
 	}
@@ -1021,7 +1226,7 @@ func (e *Executor) removeActionContainer(plan *Plan, step StepPlan) {
 // ids of the steps that already ran; scope, when inside a composite action,
 // adds the action's own step ids and outputs (an action-local id shadows a job
 // id of the same name — the action is its own namespace).
-func (e *Executor) exprContext(plan *Plan, hardFailure bool, stream *Streamer, steps *stepOutcomes, scope *localScope) ExprContext {
+func (e *Executor) exprContext(plan *Plan, hardFailure bool, stream StepStream, steps *stepOutcomes, scope *localScope) ExprContext {
 	ctx := ExprContext{
 		Success: !hardFailure, Failure: hardFailure, Cancelled: stream.Cancelled(),
 		GitHub: plan.githubValues(), Runner: plan.Runner, Vars: plan.Vars,
@@ -1032,8 +1237,9 @@ func (e *Executor) exprContext(plan *Plan, hardFailure bool, stream *Streamer, s
 		Secrets: plan.secretValues(),
 	}
 	if steps != nil {
-		ctx.Steps, ctx.StepConclusions = steps.Outcome, steps.Conclusion
-		ctx.Outputs = steps.Outputs
+		outcome, conclusion, outputs := steps.snapshot()
+		ctx.Steps, ctx.StepConclusions = outcome, conclusion
+		ctx.Outputs = outputs
 	}
 	if scope != nil {
 		ctx.Steps = mergeOutcomes(ctx.Steps, scope.outcome)

@@ -527,6 +527,12 @@ func (t *translator) rewrite(n *yaml.Node, path string, runBody bool) {
 func (t *translator) rewriteText(n *yaml.Node, path string, runBody bool) {
 	text := n.Value
 	out := text
+	// A failure script is generated text: its quoted reason may itself contain a
+	// `${{ … }}` span (the construct that was refused). Rewriting it would
+	// corrupt the message and can even produce a span the parser rejects.
+	if runBody && strings.HasPrefix(strings.TrimSpace(text), "echo 'spindle: UNTRANSLATED:") {
+		return
+	}
 
 	if runBody {
 		out = secretInRunRe.ReplaceAllStringFunc(out, func(m string) string {

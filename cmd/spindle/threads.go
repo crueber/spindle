@@ -71,6 +71,10 @@ func newThreadsService(st store.ObjectStore, ident *identity.Service, checksSvc 
 		// Operator knobs (PAR-179): the artifact window (separate from run
 		// retention), keep-forever, the requeue ceiling and the base job lease.
 		svc.ArtifactRetention = time.Duration(cfg.Threads.ArtifactRetention)
+		svc.MaxCacheBytes = int64(cfg.Threads.CacheMaxBytes)
+		svc.MaxCacheEntryBytes = int64(cfg.Threads.CacheMaxEntryBytes)
+		svc.CacheRetention = time.Duration(cfg.Threads.CacheRetention)
+		svc.MaxCacheEntries = cfg.Threads.CacheMaxEntries
 		svc.KeepForever = cfg.Threads.KeepForever
 		svc.MaxQueueAttempts = cfg.Threads.MaxQueueAttempts
 		svc.JobLease = time.Duration(cfg.Threads.JobLease)
@@ -94,6 +98,10 @@ func newThreadsService(st store.ObjectStore, ident *identity.Service, checksSvc 
 		g.SetDirs(&pullsDirs{reg: reg})
 	}
 	svc.Git = g
+	// Follow-up triggers (workflow_run, deployment_status) run off the emitting
+	// request/completion path: a follow-up's discovery+creation must not extend
+	// the job-complete or push call. Tests leave this nil and run inline.
+	svc.RunDetached = func(f func()) { go f() }
 	if checksSvc != nil {
 		svc.Checks = threadsCheckSink{svc: checksSvc}
 	}
@@ -246,6 +254,25 @@ func threadsOnPushOf(c *collabWiring) func(id git.RepoId, refs []server.PushedRe
 			return // a job token's push never starts a workflow run
 		}
 		for _, ref := range refs {
+			// PAR-021: a ref deletion is a `delete` event. A delete has no new
+			// commit, so the run reports the default branch tip (the only
+			// revision that is certain to be readable); the payload names the
+			// deleted ref. The push-shaped branch below skips deletes.
+			if isZeroOID(ref.New) {
+				if name, refType, ok := threadsRefType(ref); ok {
+					commit := defaultBranchSHA(context.Background(), c, id.String())
+					if commit == "" {
+						commit = ref.Old
+					}
+					if commit != "" {
+						threadsRun(svc, id.String(), commit, threads.EventDelete, threads.CreateOpts{
+							RefName: name, Ref: ref.Ref, Actor: "push",
+							EventPayload: threads.RefEventPayload(id.String(), ref.Ref, refType, "push"),
+						})
+					}
+				}
+				continue
+			}
 			name, kind, ok := threadsRefTarget(ref)
 			if !ok {
 				continue // notes, pull refs or a delete: no run
@@ -261,8 +288,30 @@ func threadsOnPushOf(c *collabWiring) func(id git.RepoId, refs []server.PushedRe
 				opts.Branch = name // a tag run has no branch; its tag is the RefName
 			}
 			threadsRun(svc, id.String(), ref.New, threads.EventPush, opts)
+			// PAR-021: the matching `create` edge (a new branch or tag). The
+			// payload is the ref lifecycle projection, not the push payload.
+			if isZeroOID(ref.Old) {
+				if _, refType, ok := threadsRefType(ref); ok {
+					threadsRun(svc, id.String(), ref.New, threads.EventCreate, threads.CreateOpts{
+						Branch: opts.Branch, RefName: name, Ref: ref.Ref, Actor: "push",
+						EventPayload: threads.RefEventPayload(id.String(), ref.Ref, refType, "push"),
+					})
+				}
+			}
 		}
 	}
+}
+
+// threadsRefType names a ref's GitHub `ref_type` ("branch" or "tag") for the
+// create/delete payload. Anything else (notes, pull refs) is not an event.
+func threadsRefType(ref server.PushedRef) (name, refType string, ok bool) {
+	if branch, ok := strings.CutPrefix(ref.Ref, "refs/heads/"); ok && branch != "" {
+		return branch, "branch", true
+	}
+	if tag, ok := strings.CutPrefix(ref.Ref, "refs/tags/"); ok && tag != "" {
+		return tag, "tag", true
+	}
+	return "", "", false
 }
 
 // threadsPullEventOf builds the pull_request trigger sink (15 §1): opened,
@@ -276,18 +325,43 @@ func threadsPullEventOf(c *collabWiring) pulls.PullEventSink {
 	}
 	svc := c.threadsSvc
 	return func(_ context.Context, ev pulls.PullEvent) {
+		// D-10: a merged pull request's cache is discarded. Closed-without-merge
+		// keeps its cache until the retention window (a reopen restores it);
+		// the discard is detached so the merge write is never delayed by it.
+		if ev.Action == "closed" && ev.Merged && ev.Num > 0 {
+			repo, num := ev.Repo, ev.Num
+			go func() {
+				ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+				defer cancel()
+				if _, err := svc.DiscardPRCaches(ctx, repo, num); err != nil {
+					slog.Warn("threads: discard merged pull request cache", "repo", repo, "pr", num, "err", err)
+				}
+			}()
+		}
 		// ev.BaseRef arrives as the PR's base ref ("refs/heads/main"); Branch is
 		// the plain name every trigger filter and the base-branch resolution
 		// expect (a fork run resolves refs/heads/<BaseBranch>). Action is the
 		// lifecycle edge the `types` filter reads; BaseSHA is the merge-base
-		// side of the changed-path filter.
+		// side of the changed-path filter. PullNumber is what the merge-ref
+		// semantics (PAR-024) name refs/pull/<n>/merge after.
 		base := threadsBranchName(ev.BaseRef)
+		payload := threads.PullEventPayload(ev.Repo, ev.Action, ev.Num, ev.Title, ev.State,
+			authorOfPull(ev), ev.BaseRef, ev.BaseSHA, ev.HeadRef, ev.HeadSHA, ev.HeadRepo,
+			ev.Draft, ev.Merged, ev.Fork, ev.Actor)
 		threadsRun(svc, ev.Repo, ev.HeadSHA, threads.EventPullReq, threads.CreateOpts{
 			Branch: base, Action: ev.Action, Ref: fmt.Sprintf("refs/pull/%d/head", ev.Num),
 			BaseBranch: base, BaseSHA: ev.BaseSHA, Fork: ev.Fork, Actor: ev.Actor,
-			EventPayload: threads.PullEventPayload(ev.Repo, ev.Action, ev.Num, ev.Title, ev.State,
-				authorOfPull(ev), ev.BaseRef, ev.BaseSHA, ev.HeadRef, ev.HeadSHA, ev.HeadRepo,
-				ev.Draft, ev.Merged, ev.Fork, ev.Actor),
+			PullNumber: ev.Num, EventPayload: payload,
+		})
+		// D-2: pull_request_target is a second trigger over the same PR edges,
+		// running the BASE tip's file with base secrets. CreateRun refuses it
+		// unless the repository enabled the switch (and returns no runs, not an
+		// error, when it is off), so the emitter is unconditional and the gate
+		// stays in one place.
+		threadsRun(svc, ev.Repo, ev.HeadSHA, threads.EventPullTarget, threads.CreateOpts{
+			Branch: base, Action: ev.Action, Ref: fmt.Sprintf("refs/pull/%d/head", ev.Num),
+			BaseBranch: base, BaseSHA: ev.BaseSHA, PullHeadSHA: ev.HeadSHA, Fork: ev.Fork,
+			Actor: ev.Actor, PullNumber: ev.Num, EventPayload: payload,
 		})
 	}
 }
@@ -318,6 +392,11 @@ func threadsIssueEventOf(c *collabWiring) func(ctx context.Context, ev issues.Th
 			threadsRun(svc, repo, info.HeadSHA, threads.EventPullReq, threads.CreateOpts{
 				Action: ev.Action, Branch: base, BaseBranch: base, BaseSHA: info.BaseSHA,
 				Fork: info.Fork, Ref: fmt.Sprintf("refs/pull/%d/head", info.Num), Actor: ev.Actor,
+				// The metadata half of pull_request takes the same merge-ref path
+				// as the lifecycle edges (PAR-024): the PR number is what CreateRun
+				// names refs/pull/<n>/merge after. Without it a labeled/assigned/
+				// milestoned delivery silently ran the head commit.
+				PullNumber: info.Num,
 				EventPayload: threads.PullEventPayload(repo, ev.Action, info.Num, info.Title, info.State,
 					info.Author, info.BaseRef, info.BaseSHA, info.HeadRef, info.HeadSHA, info.HeadRepo,
 					info.Draft, info.Merged, info.Fork, ev.Actor),

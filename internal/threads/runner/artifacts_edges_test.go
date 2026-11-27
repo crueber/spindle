@@ -94,6 +94,25 @@ func (c *clientStub) ArtifactManifest(context.Context, string, string, int, stri
 }
 
 func (c *clientStub) GetArtifactBlob(context.Context, string, string, int, string, int) (io.ReadCloser, int64, error) {
+	return c.GetArtifactBlobFromRun(context.Background(), "", "", 0, "", "", 0)
+}
+
+func (c *clientStub) PrepareArtifact(context.Context, string, string, int, string, bool) (bool, error) {
+	return false, c.putErr
+}
+
+func (c *clientStub) ArtifactList(context.Context, string, string, int, string) ([]*threads.Artifact, error) {
+	if c.manifest == nil {
+		return nil, nil
+	}
+	return []*threads.Artifact{c.manifest}, nil
+}
+
+func (c *clientStub) ArtifactManifestFromRun(context.Context, string, string, int, string, string) (*threads.Artifact, error) {
+	return c.manifest, nil
+}
+
+func (c *clientStub) GetArtifactBlobFromRun(context.Context, string, string, int, string, string, int) (io.ReadCloser, int64, error) {
 	if c.getErr != nil {
 		return nil, 0, c.getErr
 	}

@@ -139,6 +139,59 @@ shape gaps — `max-parallel`, `runs-on` substitution, `defaults.run`, timeout p
 operator policy (`PAR-179`) and the UI-shaped rows (`PAR-190`, `PAR-191`); and offline validation
 (`PAR-199`). The matrix is still the list.
 
+### 1.3 Wave 3 outcome (2026-11-27)
+
+Wave 3 is merged. The changes on `main`, in landing order:
+
+| Merge | What landed |
+|---|---|
+| `2ba1cd52` | reusable workflows with a typed interface: `on.workflow_call` inputs (`string`/`boolean`/`number`, `required`/`default`), declared secrets and output templates; `with:`/`secrets:`/`inherit` (same repository only; cross-repository `inherit` refused, D-6), caller-readable outputs, a 4-level cap with cycle detection, and cross-repository calls pinned to a commit with explicit secrets and an audit record; `${{ github.action_path }}` for every composite level |
+| `f5cd5a05` | advanced runner surfaces: background/`wait`/`wait-all`/`cancel`/`parallel` steps with process-group kill on every exit path (D-7), daemonless docker (kaniko/buildah, no socket), `services.<id>.credentials` refused by name with runner-owned registry auth (`--registry-auth-file`), and the operator container grants `--container-privileged`/`--container-network`/`--container-valid-volume`/`--docker-host`, refused in combination with `--allow-fork-runs` (PAR-179, D-8) |
+| `1b8f2b89` | the cache service (D-10): `actions/cache` save/restore with `restore-keys`, the `default`/`branch:<n>`/`pr:<n>`/`pr:<n>:untrusted` scopes, no PR→PR reads, fork writes confined, merged-PR scopes discarded, 1 GiB per entry / 5 GiB per repository / 256 entries / 7-day idle eviction; artifact v4 inputs, cross-run artifacts behind the `workflow_run`/D-3 approval hold (409 naming the parent), the delete API, retention-aware 404s and zip-slip rejection; `setup-*` cache recipes named in their refusal |
+| `5f138f14` | GitHub-only triggers and merge semantics: `repository_dispatch` (bounded payload, write gate, default branch), `workflow_run` plus the `requested`/`completed` edges and approval hold, `merge_group` as a named refusal until the merge queue card, merge-ref semantics (`refs/pull/N/merge` and the computed merge commit as `GITHUB_SHA`), `create`/`delete`/`deployment`/`deployment_status`, `pull_request_target` per D-2, per-repository `send_write_tokens` (D-13), per-repository caps and one named queue reason per job |
+| `c701d547` | the parser accepts the runner's background/`wait`/`parallel` model, so the D-7 keys are authorable rather than a runner-only shape |
+
+Supporting commits in the same wave: `28961a27`/`d367adff`/`b18041b8`/`de16e2a0`/`b8d2b9e5` (the
+per-track implementations), `589e9132` (`action_path` runner half), `4afbd921` (background kill
+ordering under a job timeout), `8aae80d8` (the `workflow_run` hold's 409), `2070accd` (the e2e keys a
+PR run on its payload head), and `5b0536d9`/`a0fa98a1` (matrix regeneration).
+
+**The matrix** (`docs/features/parity/parity.json`, 119 rows) at Wave 3 close: **57 `have`**, **36
+`partial`**, **26 `missing`**, no `non-goal`. Wave 3 owns 29 rows: **7 green** (`PAR-018`, `PAR-024`,
+`PAR-080`, `PAR-098`, `PAR-099`, `PAR-118`, `PAR-156`), **14 partial** and **8 missing**. The wave also
+closed five Wave-2 rows: `PAR-075`, `PAR-078`, `PAR-095`, `PAR-097` and `PAR-179`. Eighteen rows moved
+in total — twelve to green, six to partial (`PAR-016`, `PAR-019`, `PAR-021`, `PAR-076`, `PAR-096`,
+`PAR-153`).
+
+**Carried partials (named, not silent).**
+
+- **Nested remote `uses:`** — a remote marketplace action inside a composite is still refused; the
+  remote-action resolver is PAR-070/PAR-074 (Wave 4). Nested reusable calls themselves resolve
+  (`owner/repo/…@sha`, explicit secrets), which is what `PAR-076` landed.
+- **Cross-repository execution e2e** — `PAR-076`'s pinned remote callee is unit-tested (resolution,
+  secrets, audit, refusals); the execution e2e of a pinned remote callee is not, and is the row's
+  remaining acceptance gap.
+- **`setup-*` green pending marketplace actions** — `PAR-096`'s cache half is complete and each
+  refusal quotes the recipe; the setup actions are marketplace JavaScript (PAR-070/PAR-071), so the
+  row cannot turn green before the JavaScript runtime does.
+- **Per-organization caps** — `PAR-153` landed the per-repository `concurrency_cap` (0…500) with a
+  named hold reason; the per-organization cap needs the org ownership seam and remains open.
+- **`merge_group`** — `PAR-016` is a named parse error until the separate **Merge queue** card lands
+  the emitter and its `refs/heads/gh-readonly-queue/<base>/pr-<n>-<sha>` ref; no queue semantics are
+  implemented here.
+- `PAR-019`'s documented cross-run hand-off now has its test
+  (`TestCrossRunRefusedWhileWorkflowRunHeld`), and its note records that trigger-side contract; the
+  row stays partial for the cross-run API's own home (PAR-098/PAR-099).
+
+**What remains for Wave 4.** The 10 Wave-4 rows: `run-name` (`PAR-057`), schedule operations
+(`PAR-154`), prioritization (`PAR-155`), CI pause (`PAR-157`), offline registration (`PAR-180`), fleet
+operations (`PAR-181`), the signed non-goal row (`PAR-182`), authoring affordances (`PAR-196`),
+notifications (`PAR-197`) and CLI parity (`PAR-198`). The Wave-3 rows still missing are a separate,
+deferred cluster, not silently folded into Wave 4: `job`/`jobs`/`strategy` contexts (`PAR-039`),
+deployments permission/API and queuing (`PAR-133`, `PAR-136`), environment UI (`PAR-134`), and the
+runner set (`PAR-172`…`PAR-178`: registration scopes, ephemeral runners, managed pool, groups,
+sizing, stock images, isolation). They belong to their own runner/deployment cards.
+
 ---
 
 ## 2. The product rule: Spindle workflows only
@@ -1026,6 +1079,26 @@ here are the reconciliations this document performed on its sources.*
   the product rule requires *instead* of discovery. `PAR-111` (`GITHUB_SERVER_URL`/`GITHUB_API_URL` as env
   vars) is implied by both cards' corpus but listed by neither. `PAR-011` is not new: it is the second half
   of Forgejo item F1.2, split out because it fails independently.
+- **NEW (2026-11-27) — Wave 3 closes the GitHub-only trigger surface by emitting what exists and refusing
+  the rest by name.** `repository_dispatch`, `workflow_run`, `create`/`delete`, `deployment`/
+  `deployment_status` and `pull_request_target` are emitters; `merge_group`, `fork`, `watch`, `status`,
+  `check_run`, `check_suite`, `registry_package`, `gollum`, `page_build`, `branch_protection_rule` and
+  `public` are named parse errors with the missing surface in the message. Accepting an unemittable
+  trigger would make a migrated workflow look healthy while never running, which is the one rule both
+  source cards agree on. `PAR-016` therefore stays `partial` until the separate Merge queue card lands the
+  queue and its documented ref shape.
+- **NEW (2026-11-27) — the PR merge ref is a derived commit, not a published ref.** `pull_request` runs
+  the server-computed merge commit (`git merge-tree --write-tree` + `git commit-tree` with a fixed
+  identity/date) and reports `refs/pull/<n>/merge`; the commit lives in the serving copy so a checkout by
+  sha works, and the same base+head mints the same sha. It is not WAL state and not a durable ref: after a
+  serving-copy wipe the next PR event rebuilds it. A conflicting merge falls back to the head and
+  `refs/pull/<n>/head` and says so — never a fabricated merge sha.
+- **NEW (2026-11-27) — the per-repository trigger switches are a Threads-owned settings record, not
+  `RepoSettings`.** `send_write_tokens`, `pull_request_target`, `pr_target_allow_head_checkout` and
+  `concurrency_cap` live in `repos/<o>/<r>/threads/settings.json` with their own `…/api/threads/settings`
+  endpoint and Threads-page form, because they are Threads engine policy (audit verbs, maintain+ floor,
+  capacity release) rather than repository metadata. Every changed switch is audited individually; the
+  head-checkout switch cannot be set without `pull_request_target`.
 
 ---
 

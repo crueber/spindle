@@ -48,23 +48,30 @@ func TestLocalReusablePathTable(t *testing.T) {
 		"./.spindle/workflows/../workflows/x.yml": ".spindle/workflows/x.yml",
 	}
 	for in, want := range ok {
-		got, err := localReusablePath(in)
-		if err != nil || got != want {
-			t.Errorf("%q = %q, %v; want %q", in, got, err, want)
+		ref, err := parseReusableUses(in)
+		if err != nil || ref.Remote || ref.Path != want {
+			t.Errorf("%q = %+v, %v; want local %q", in, ref, err, want)
 		}
+	}
+	remote, err := parseReusableUses("acme/other/.spindle/workflows/deploy.yml@1111111111111111111111111111111111111111")
+	if err != nil || !remote.Remote || remote.Owner != "acme" || remote.Repo != "other" ||
+		remote.Path != ".spindle/workflows/deploy.yml" || remote.Commit != strings.Repeat("1", 40) {
+		t.Fatalf("remote ref = %+v, %v", remote, err)
 	}
 	bad := map[string]string{
 		"":                                       "empty",
-		"acme/other/.spindle/workflows/x.yml@v1": "D-6",
-		"docker://alpine:3.20":                   "D-6",
-		"https://example.com/x.yml":              "D-6",
-		".spindle/workflows/x.yml":               "must start with `./`",
-		"./../escape.yml":                        "inside this repository",
-		"./.spindle/actions/x.yml":               "is not in .spindle/workflows/",
-		"./.spindle/workflows/x.txt":             "must name a .yml or .yaml file",
+		"docker://alpine:3.20":                   "not a workflow file",
+		"https://example.com/x.yml":              "not a workflow file",
+		".spindle/workflows/x.yml":               "is neither",
+		"acme/other/.spindle/workflows/x.yml@v1": "pinned to a full 40-character commit SHA",
+		"acme/other/.spindle/workflows/x.yml":    "is neither",
+		"acme/other/.github/workflows/x.yml@1111111111111111111111111111111111111111": "is not in .spindle/workflows/",
+		"./../escape.yml":            "inside this repository",
+		"./.spindle/actions/x.yml":   "is not in .spindle/workflows/",
+		"./.spindle/workflows/x.txt": "must name a .yml or .yaml file",
 	}
 	for in, want := range bad {
-		if _, err := localReusablePath(in); err == nil || !strings.Contains(err.Error(), want) {
+		if _, err := parseReusableUses(in); err == nil || !strings.Contains(err.Error(), want) {
 			t.Errorf("%q: err = %v, want %q", in, err, want)
 		}
 	}
@@ -97,7 +104,7 @@ jobs:
 `
 	e2 := newTestEnv(t)
 	e2.git.add(testSHA, ".spindle/workflows/ci.yml", broken)
-	e2.git.add(testSHA, ".spindle/workflows/broken.yml", "name: Broken\njobs: {}\n")
+	e2.git.add(testSHA, ".spindle/workflows/broken.yml", "name: Broken\non: {workflow_call: {}}\njobs: {}\n")
 	jobs2, err := e2.svc.loadJobs(ctx(), "o", "r", e2.mustCreate(t)[0].ID)
 	if err != nil {
 		t.Fatal(err)
@@ -122,13 +129,14 @@ jobs:
 	e.git.add(testSHA, ".spindle/workflows/ci.yml", caller)
 	for i := 1; i <= MaxReusableDepth; i++ {
 		body := `name: L` + string(rune('0'+i)) + `
+on: {workflow_call: {}}
 jobs:
   l` + string(rune('0'+i)) + `:
     uses: ./.spindle/workflows/l` + string(rune('0'+i+1)) + `.yml
 `
 		e.git.add(testSHA, ".spindle/workflows/l"+string(rune('0'+i))+".yml", body)
 	}
-	e.git.add(testSHA, ".spindle/workflows/l5.yml", "name: L5\njobs:\n  leaf:\n    runs-on: linux\n    steps:\n      - run: echo leaf\n")
+	e.git.add(testSHA, ".spindle/workflows/l5.yml", "name: L5\non: {workflow_call: {}}\njobs:\n  leaf:\n    runs-on: linux\n    steps:\n      - run: echo leaf\n")
 	jobs, err := e.svc.loadJobs(ctx(), "o", "r", e.mustCreate(t)[0].ID)
 	if err != nil {
 		t.Fatal(err)

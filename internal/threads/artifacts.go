@@ -2,6 +2,7 @@ package threads
 
 import (
 	"archive/zip"
+	"compress/flate"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -63,10 +64,13 @@ const (
 	DefaultMaxArtifactBytesPerFile int64 = 256 << 20 // 256 MiB
 	// MaxArtifactFiles bounds the files one artifact may hold.
 	MaxArtifactFiles = 1000
-	// MaxArtifactNameLen bounds an artifact name (it is a key segment).
-	MaxArtifactNameLen = 128
+	// MaxArtifactNameLen bounds an artifact name (it is a key segment;
+	// upload-artifact v4's documented ceiling is 255 bytes).
+	MaxArtifactNameLen = 255
 	// MaxArtifactPathLen bounds one manifest path.
 	MaxArtifactPathLen = 1024
+	// DefaultArtifactCompressionLevel is upload-artifact v4's default (6).
+	DefaultArtifactCompressionLevel = 6
 	// MaxArtifactRetentionDays is GitHub's ceiling for `retention-days`; a
 	// larger value is a named step error, not a silent clamp.
 	MaxArtifactRetentionDays = 90
@@ -93,6 +97,22 @@ func validArtifactName(name string) bool {
 	return true
 }
 
+// artifactID derives an artifact's numeric id: the first 8 bytes of
+// sha256(run + "/" + name), masked positive. It is stable across reads (no
+// counter to keep consistent) and collision-free in practice inside one run.
+func artifactID(runID, name string) int64 {
+	sum := sha256.Sum256([]byte(runID + "/" + name))
+	var v uint64
+	for i := 0; i < 8; i++ {
+		v = v<<8 | uint64(sum[i])
+	}
+	id := int64(v & (1<<62 - 1))
+	if id == 0 {
+		id = 1
+	}
+	return id
+}
+
 // ArtifactFile is one file inside an artifact. Index names its blob object;
 // SHA256 is what the server computed while receiving it (the server never
 // trusts a client-supplied digest).
@@ -105,6 +125,10 @@ type ArtifactFile struct {
 
 // Artifact is the stored manifest, repos/<o>/<r>/threads/runs/<run>/artifacts/<name>/manifest.json.
 type Artifact struct {
+	// ID is the artifact's stable numeric identifier inside its run
+	// (`artifact-ids` on download; PAR-097). It is derived from (run, name) so
+	// it survives a manifest read without a counter anywhere.
+	ID      int64          `json:"id"`
 	Name    string         `json:"name"`
 	Run     string         `json:"run"`
 	Job     string         `json:"job"`
@@ -116,8 +140,12 @@ type Artifact struct {
 	TotalSize int64 `json:"total_size"`
 	// RetentionDays is the per-artifact window when one was declared; 0 means
 	// "the run's window". It only ever SHORTENS that window.
-	RetentionDays int    `json:"retention_days,omitempty"`
-	CreatedAt     string `json:"created_at"`
+	RetentionDays int `json:"retention_days,omitempty"`
+	// CompressionLevel is `compression-level` (0 = store, 1..9 = deflate),
+	// defaulting to 6 like upload-artifact v4. It shapes the ZIP download only;
+	// the stored blobs are always the raw bytes.
+	CompressionLevel int    `json:"compression_level"`
+	CreatedAt        string `json:"created_at"`
 	// Trusted mirrors the run's trust class at upload time (documentation for
 	// readers; it changes no access rule — the run's own class is the gate).
 	Trusted bool `json:"trusted"`
@@ -142,9 +170,16 @@ type ArtifactBlobView struct {
 // A runner reports paths and sizes; the digests it sends are informational
 // (the server's stored digests are authoritative and win).
 type ArtifactFinalizeInput struct {
-	Name          string         `json:"name"`
-	Files         []ArtifactFile `json:"files"`
-	RetentionDays int            `json:"retention_days,omitempty"`
+	Name  string         `json:"name"`
+	Files []ArtifactFile `json:"files"`
+	// Overwrite replaces an existing artifact of the same name in the same run
+	// (`overwrite: true`). Without it a second upload of one name is
+	// ErrConflict, never a silent replace.
+	Overwrite     bool `json:"overwrite,omitempty"`
+	RetentionDays int  `json:"retention_days,omitempty"`
+	// CompressionLevel is 0 (store) or 1..9 (deflate), applied to the ZIP
+	// download. Nil selects GitHub's default (6), matching upload-artifact v4.
+	CompressionLevel *int `json:"compression_level,omitempty"`
 }
 
 // --- keys ------------------------------------------------------------------
@@ -352,6 +387,39 @@ func (c *countingReader) Read(p []byte) (int, error) {
 	return n, err
 }
 
+// PrepareArtifactUpload opens one artifact upload. With overwrite=true it
+// removes any artifact of that name in the run BEFORE the runner streams the
+// new blobs: the blob keys are (attempt, index) scoped, so a replace must free
+// them first or the second upload would adopt the first one's bytes. Without
+// overwrite it only reports whether the name is taken (the runner fails fast).
+func (s *Service) PrepareArtifactUpload(ctx context.Context, claims AttemptClaims, name string, overwrite bool) (bool, error) {
+	if _, err := s.verifyAttempt(ctx, claims, ScopeArtifact); err != nil {
+		return false, err
+	}
+	name = strings.TrimSpace(name)
+	if !validArtifactName(name) {
+		return false, fmt.Errorf("%w: invalid artifact name %q", ErrInvalid, name)
+	}
+	owner, repo, err := splitRepo(claims.Repo)
+	if err != nil {
+		return false, err
+	}
+	existing, lerr := s.loadArtifact(ctx, owner, repo, claims.Run, name)
+	if lerr != nil {
+		return false, lerr
+	}
+	if existing == nil {
+		return false, nil
+	}
+	if !overwrite {
+		return true, fmt.Errorf("%w: artifact %q already exists in run %s (artifact names are unique per run; pass overwrite: true to replace it)", ErrConflict, name, claims.Run)
+	}
+	if _, derr := s.deleteArtifact(ctx, owner, repo, claims.Run, name); derr != nil {
+		return true, derr
+	}
+	return true, nil
+}
+
 // FinalizeArtifact commits one artifact. The manifest is Create-only, so a
 // second upload of the same name in the same run is ErrConflict. Before the
 // commit, the blobs of this attempt are verified with one prefix LIST: a
@@ -413,7 +481,16 @@ func (s *Service) FinalizeArtifact(ctx context.Context, claims AttemptClaims, in
 	var used int64
 	for _, a := range existing {
 		if a.Name == name {
-			return nil, fmt.Errorf("%w: artifact %q already exists in run %s (artifact names are unique per run; a second upload fails)", ErrConflict, name, claims.Run)
+			if !in.Overwrite {
+				return nil, fmt.Errorf("%w: artifact %q already exists in run %s (artifact names are unique per run; pass overwrite: true to replace it)", ErrConflict, name, claims.Run)
+			}
+			// A replace must FREE the blob keys before the new bytes are
+			// streamed (the keys are attempt-scoped, so a late delete would
+			// remove the bytes this upload just sent). `overwrite: true` in the
+			// finalize body therefore means "the upload was opened with
+			// PrepareArtifactUpload(overwrite=true)"; without that call the
+			// replace cannot be completed safely.
+			return nil, fmt.Errorf("%w: artifact %q still exists in run %s; open the upload with prepare(overwrite: true) before streaming its blobs", ErrConflict, name, claims.Run)
 		}
 		used += a.TotalSize
 	}
@@ -447,11 +524,20 @@ func (s *Service) FinalizeArtifact(ctx context.Context, claims AttemptClaims, in
 	if days < 0 || days > MaxArtifactRetentionDays {
 		return nil, fmt.Errorf("%w: retention-days must be 0 (the run's window) or 1..%d", ErrInvalid, MaxArtifactRetentionDays)
 	}
+	level := DefaultArtifactCompressionLevel
+	if in.CompressionLevel != nil {
+		level = *in.CompressionLevel
+		if level < 0 || level > 9 {
+			return nil, fmt.Errorf("%w: compression-level must be 0 (store) or 1..9", ErrInvalid)
+		}
+	}
 	now := s.nowUTC()
 	art := &Artifact{
+		ID:   artifactID(claims.Run, name),
 		Name: name, Run: claims.Run, Job: claims.Job, Attempt: claims.Attempt,
 		Files: files, TotalSize: total, RetentionDays: days,
-		CreatedAt: now.Format(dateTimeFmt), Trusted: job.Trusted,
+		CompressionLevel: level,
+		CreatedAt:        now.Format(dateTimeFmt), Trusted: job.Trusted,
 	}
 	raw, merr := json.Marshal(art)
 	if merr != nil {
@@ -614,6 +700,12 @@ func (s *Service) runArtifactViews(ctx context.Context, owner, repo string, run 
 
 // artifactView fills the derived expiry.
 func (s *Service) artifactView(run *Run, a *Artifact, now time.Time) *ArtifactView {
+	if a.ID == 0 {
+		// A manifest written before PAR-097 has no id: derive the same stable
+		// value a new manifest would carry, so `artifact-ids` works for old
+		// artifacts too.
+		a.ID = artifactID(a.Run, a.Name)
+	}
 	return &ArtifactView{Artifact: *a, ExpiresAt: artifactExpiresAt(run, a, s.retention(), s.artifactRetention(), now).Format(dateTimeFmt)}
 }
 
@@ -827,10 +919,27 @@ func (s *Service) ArtifactBlobForJob(ctx context.Context, claims AttemptClaims, 
 // shipping bad bytes.
 func WriteArtifactZip(ctx context.Context, w io.Writer, dl *ArtifactDownload) error {
 	zw := zip.NewWriter(w)
+	// compression-level (PAR-097): 0 stores, 1..9 tune deflate. The level is a
+	// property of the artifact, so the same bytes always download the same way.
+	method := zip.Store
+	if level := dl.Artifact.CompressionLevel; level > 0 {
+		method = zip.Deflate
+		zw.RegisterCompressor(zip.Deflate, func(out io.Writer) (io.WriteCloser, error) {
+			return flate.NewWriter(out, level)
+		})
+	}
 	for _, f := range dl.Files() {
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
+		// A manifest is server-validated at upload; this is the download-side
+		// gate for a record written by an older or buggy producer. A path that
+		// escapes the archive root must never become a zip entry (zip-slip).
+		clean, perr := cleanArtifactPath(f.Path)
+		if perr != nil {
+			return fmt.Errorf("%w: artifact %q: %v", ErrCorrupt, dl.name, perr)
+		}
+		f.Path = clean
 		body, size, err := dl.Open(ctx, f)
 		if err != nil {
 			return err
@@ -840,7 +949,7 @@ func WriteArtifactZip(ctx context.Context, w io.Writer, dl *ArtifactDownload) er
 			return fmt.Errorf("%w: artifact %q: file %q is %s in the bucket, the manifest says %s",
 				ErrCorrupt, dl.name, f.Path, humanBytes(size), humanBytes(f.Size))
 		}
-		entry, zerr := zw.CreateHeader(&zip.FileHeader{Name: f.Path, Method: zip.Deflate, Modified: time.Now()})
+		entry, zerr := zw.CreateHeader(&zip.FileHeader{Name: f.Path, Method: method, Modified: time.Now()})
 		if zerr != nil {
 			_ = body.Close()
 			return zerr
@@ -990,4 +1099,234 @@ func humanBytes(n int64) string {
 	default:
 		return fmt.Sprintf("%d B", n)
 	}
+}
+
+// --- deletion API (PAR-099) --------------------------------------------------
+
+// GetArtifact is the reader's manifest view (the API's per-artifact read).
+func (s *Service) GetArtifact(ctx context.Context, repo, runID, name string, p auth.Principal) (*ArtifactView, error) {
+	owner, rname, err := splitRepo(repo)
+	if err != nil {
+		return nil, err
+	}
+	if err := s.requireRead(ctx, owner, rname, p); err != nil {
+		return nil, err
+	}
+	if !runIDRe.MatchString(strings.TrimSpace(runID)) {
+		return nil, fmt.Errorf("%w: unknown run %q", ErrNotFound, runID)
+	}
+	run, lerr := s.loadRun(ctx, owner, rname, runID)
+	if lerr != nil {
+		return nil, lerr
+	}
+	if run == nil {
+		return nil, fmt.Errorf("%w: unknown run %q", ErrNotFound, runID)
+	}
+	art, lerr := s.loadArtifact(ctx, owner, rname, runID, name)
+	if lerr != nil {
+		return nil, lerr
+	}
+	if art == nil {
+		return nil, fmt.Errorf("%w: unknown artifact %q", ErrNotFound, name)
+	}
+	if artifactExpired(art, s.nowUTC()) {
+		return nil, fmt.Errorf("%w: artifact %q expired (retention-days %d)", ErrNotFound, name, art.RetentionDays)
+	}
+	return s.artifactView(run, art, s.nowUTC()), nil
+}
+
+// DeleteArtifact removes one artifact on a repository writer's request and
+// reports the bytes freed (blobs + manifest). The deletion is the same one the
+// expiry sweep performs, so a deleted artifact leaves no manifest and no blob
+// behind — the acceptance check for PAR-099.
+func (s *Service) DeleteArtifact(ctx context.Context, repo, runID, name string, p auth.Principal) (int64, error) {
+	owner, rname, err := splitRepo(repo)
+	if err != nil {
+		return 0, err
+	}
+	if err := s.requireRole(ctx, owner, rname, p, "write"); err != nil {
+		return 0, err
+	}
+	if !runIDRe.MatchString(strings.TrimSpace(runID)) {
+		return 0, fmt.Errorf("%w: unknown run %q", ErrNotFound, runID)
+	}
+	run, lerr := s.loadRun(ctx, owner, rname, runID)
+	if lerr != nil {
+		return 0, lerr
+	}
+	if run == nil {
+		return 0, fmt.Errorf("%w: unknown run %q", ErrNotFound, runID)
+	}
+	if !validArtifactName(strings.TrimSpace(name)) {
+		return 0, fmt.Errorf("%w: unknown artifact %q", ErrNotFound, name)
+	}
+	art, lerr := s.loadArtifact(ctx, owner, rname, runID, name)
+	if lerr != nil {
+		return 0, lerr
+	}
+	if art == nil {
+		return 0, fmt.Errorf("%w: unknown artifact %q", ErrNotFound, name)
+	}
+	freed, derr := s.deleteArtifact(ctx, owner, rname, runID, name)
+	if derr != nil {
+		return 0, derr
+	}
+	s.auditAdmin(ctx, p.Name, "threads.artifact.delete", "artifact:"+runID+"/"+name, "repo="+repo)
+	return freed, nil
+}
+
+// --- cross-run reads (PAR-098, D-3) -----------------------------------------
+
+// crossRunSource resolves the run a download names and enforces the D-3 gate on
+// the CONSUMING run: trusted, approved for cross-run consumption, and never a
+// fork. The source must be a run of the same repository (the key layout makes a
+// cross-repository read structurally impossible — the consumer's own prefix is
+// the only one it can reach — and the explicit check names the refusal).
+func (s *Service) crossRunSource(ctx context.Context, claims AttemptClaims, sourceRun string) (*Run, string, string, error) {
+	consumer, owner, repo, err := s.attemptRun(ctx, claims)
+	if err != nil {
+		return nil, "", "", err
+	}
+	sourceRun = strings.TrimSpace(sourceRun)
+	if sourceRun == "" {
+		return nil, "", "", fmt.Errorf("%w: a cross-run download needs a run id", ErrInvalid)
+	}
+	if sourceRun == claims.Run {
+		// Same run is the ordinary path; it needs no approval at all.
+		return consumer, owner, repo, nil
+	}
+	// The workflow_run trigger's hold (PAR-019, D-3): while the consuming run
+	// waits for a maintainer to approve its untrusted parent, a cross-run
+	// artifact download (or attaching a run-id input) is REFUSED with a 409 that
+	// names the parent run — it is not merely "not yet approved". This predicate
+	// is the artifacts API authorization boundary; every cross-run path goes
+	// through here.
+	if err := workflowRunHoldRefusal(consumer); err != nil {
+		return nil, "", "", err
+	}
+	if !consumer.Trusted {
+		return nil, "", "", fmt.Errorf("%w: a fork run cannot download another run's artifacts (D-3)", ErrForbidden)
+	}
+	// An approved workflow_run run has already had its D-3 decision (the
+	// maintainer approved the untrusted-parent hold for this exact run), so that
+	// approval satisfies cross-run consumption; the dedicated cross_run hold is
+	// the other spelling.
+	approved := consumer.ApprovedAt != nil && strings.TrimSpace(*consumer.ApprovedAt) != ""
+	crossRunKind := consumer.ApprovalKind == ApprovalCrossRun || consumer.ApprovalKind == approvalWorkflowRunKind
+	if !approved || !crossRunKind {
+		return nil, "", "", fmt.Errorf("%w: downloading another run's artifacts requires an approval on this run (D-3)", ErrForbidden)
+	}
+	if !runIDRe.MatchString(sourceRun) {
+		return nil, "", "", fmt.Errorf("%w: unknown source run %q", ErrNotFound, sourceRun)
+	}
+	source, lerr := s.loadRun(ctx, owner, repo, sourceRun)
+	if lerr != nil {
+		return nil, "", "", lerr
+	}
+	if source == nil {
+		return nil, "", "", fmt.Errorf("%w: unknown source run %q", ErrNotFound, sourceRun)
+	}
+	return source, owner, repo, nil
+}
+
+// ArtifactListForJob lists the artifacts a job may download: its own run's, or
+// (with the D-3 gate) another run's in the same repository.
+func (s *Service) ArtifactListForJob(ctx context.Context, claims AttemptClaims, sourceRun string) ([]*Artifact, error) {
+	if _, err := s.verifyAttempt(ctx, claims, ScopeArtifact); err != nil {
+		return nil, err
+	}
+	sourceRun = strings.TrimSpace(sourceRun)
+	if sourceRun == "" || sourceRun == claims.Run {
+		owner, repo, err := splitRepo(claims.Repo)
+		if err != nil {
+			return nil, err
+		}
+		return s.loadArtifacts(ctx, owner, repo, claims.Run)
+	}
+	source, owner, repo, err := s.crossRunSource(ctx, claims, sourceRun)
+	if err != nil {
+		return nil, err
+	}
+	s.auditAdmin(ctx, claims.Runner, "threads.artifact.cross_run.list", "run="+claims.Run,
+		"source="+source.ID+" repo="+claims.Repo)
+	return s.loadArtifacts(ctx, owner, repo, source.ID)
+}
+
+// ArtifactManifestForJobFromRun opens one artifact for a job, either its own
+// run's (no gate) or another run's (the D-3 approval, audited).
+func (s *Service) ArtifactManifestForJobFromRun(ctx context.Context, claims AttemptClaims, sourceRun, name string) (*Artifact, error) {
+	if _, err := s.verifyAttempt(ctx, claims, ScopeArtifact); err != nil {
+		return nil, err
+	}
+	sourceRun = strings.TrimSpace(sourceRun)
+	if sourceRun == "" || sourceRun == claims.Run {
+		return s.ArtifactManifestForJob(ctx, claims, name)
+	}
+	source, owner, repo, err := s.crossRunSource(ctx, claims, sourceRun)
+	if err != nil {
+		return nil, err
+	}
+	art, lerr := s.loadArtifact(ctx, owner, repo, source.ID, name)
+	if lerr != nil {
+		return nil, lerr
+	}
+	if art == nil {
+		return nil, fmt.Errorf("%w: unknown artifact %q in run %s", ErrNotFound, name, source.ID)
+	}
+	// Retention-aware 404s apply to a cross-run read exactly like a read of the
+	// run page (an expired artifact is gone even before GC frees it).
+	if artifactExpired(art, s.nowUTC()) {
+		return nil, fmt.Errorf("%w: artifact %q expired (retention-days %d)", ErrNotFound, name, art.RetentionDays)
+	}
+	s.auditAdmin(ctx, claims.Runner, "threads.artifact.cross_run.read", "run="+claims.Run,
+		"source="+source.ID+" artifact="+name+" repo="+claims.Repo)
+	return art, nil
+}
+
+// ArtifactBlobForJobFromRun streams one blob of a source run under the same
+// gate as the manifest read. The index must be listed by that artifact's
+// manifest, so the token cannot read an arbitrary bucket key.
+func (s *Service) ArtifactBlobForJobFromRun(ctx context.Context, claims AttemptClaims, sourceRun, name string, index int) (io.ReadCloser, *ArtifactFile, error) {
+	if _, err := s.verifyAttempt(ctx, claims, ScopeArtifact); err != nil {
+		return nil, nil, err
+	}
+	sourceRun = strings.TrimSpace(sourceRun)
+	if sourceRun == "" || sourceRun == claims.Run {
+		return s.ArtifactBlobForJob(ctx, claims, name, index)
+	}
+	art, err := s.ArtifactManifestForJobFromRun(ctx, claims, sourceRun, name)
+	if err != nil {
+		return nil, nil, err
+	}
+	// Every later blob read re-evaluates the gate too (the approval could have
+	// been revoked between the manifest and the blobs).
+	if _, _, _, gerr := s.crossRunSource(ctx, claims, sourceRun); gerr != nil {
+		return nil, nil, gerr
+	}
+	owner, repo, serr := splitRepo(claims.Repo)
+	if serr != nil {
+		return nil, nil, serr
+	}
+	for _, f := range art.Files {
+		if f.Index != index {
+			continue
+		}
+		key := ArtifactBlobKey(owner, repo, art.Run, art.Name, art.Attempt, f.Index)
+		res, oerr := s.Store.Get(ctx, key, store.GetOptions{})
+		if oerr != nil {
+			return nil, nil, oerr
+		}
+		obj, ok := res.(store.Object)
+		if !ok {
+			return nil, nil, fmt.Errorf("%w: unexpected object result", ErrCorrupt)
+		}
+		if obj.Meta.Size != f.Size {
+			_ = obj.Body.Close()
+			return nil, nil, fmt.Errorf("%w: artifact %q: blob %d is %s, the manifest says %s",
+				ErrCorrupt, name, index, humanBytes(obj.Meta.Size), humanBytes(f.Size))
+		}
+		file := f
+		return obj.Body, &file, nil
+	}
+	return nil, nil, fmt.Errorf("%w: artifact %q has no file %d", ErrNotFound, name, index)
 }

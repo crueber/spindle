@@ -158,6 +158,20 @@ func checkThreads(c *Config) []error {
 	if c.Threads.MaxArtifactBytesPerFile < 0 {
 		errs = append(errs, fmt.Errorf("threads.max_artifact_bytes_per_file must not be negative (got %d)", c.Threads.MaxArtifactBytesPerFile))
 	}
+	// Cache service bounds (PAR-095). A zero selects the documented default; a
+	// negative value is meaningless and refused by name.
+	if c.Threads.CacheMaxBytes < 0 {
+		errs = append(errs, fmt.Errorf("threads.cache_max_bytes must not be negative (got %d)", c.Threads.CacheMaxBytes))
+	}
+	if c.Threads.CacheMaxEntryBytes < 0 {
+		errs = append(errs, fmt.Errorf("threads.cache_max_entry_bytes must not be negative (got %d)", c.Threads.CacheMaxEntryBytes))
+	}
+	if r := time.Duration(c.Threads.CacheRetention); r < 0 {
+		errs = append(errs, fmt.Errorf("threads.cache_retention must not be negative (got %s)", r))
+	}
+	if n := c.Threads.CacheMaxEntries; n < 0 {
+		errs = append(errs, fmt.Errorf("threads.cache_max_entries must not be negative (got %d)", n))
+	}
 	// Image allowlist (PLAN-ARTIFACT-KEEPER §5.2): each entry is a literal
 	// host[:port]/path prefix. An error names the key AND the row so the
 	// settings page can mark it; a scheme or a trailing slash is the classic

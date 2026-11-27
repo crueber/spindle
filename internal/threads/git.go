@@ -194,6 +194,12 @@ func (g *SubprocessGit) SetDirs(d runner) { g.dirs = d }
 // to ErrNotFound for the "unknown revision/path" family and ErrUnavailable for
 // anything else — never a panic, never misreported as absent.
 func (g *SubprocessGit) run(ctx context.Context, repo string, argv []string) (string, bool, error) {
+	return g.runEnv(ctx, repo, argv, nil)
+}
+
+// runEnv is run with extra environment entries (the merge commit pins its
+// author/committer identity and date so the derived commit is reproducible).
+func (g *SubprocessGit) runEnv(ctx context.Context, repo string, argv, extraEnv []string) (string, bool, error) {
 	dir, derr := g.dirOf(ctx, repo)
 	if derr != nil {
 		return "", false, derr
@@ -214,7 +220,7 @@ func (g *SubprocessGit) run(ctx context.Context, repo string, argv []string) (st
 	defer cancel()
 	cmd := exec.CommandContext(cctx, g.Binary, argv...)
 	cmd.Dir = dir
-	cmd.Env = []string{"PATH=" + os.Getenv("PATH"), "GIT_TERMINAL_PROMPT=0", "GIT_DIR=" + dir}
+	cmd.Env = append([]string{"PATH=" + os.Getenv("PATH"), "GIT_TERMINAL_PROMPT=0", "GIT_DIR=" + dir}, extraEnv...)
 	stdout := &capBuffer{limit: maxWorkflowBytes + 1}
 	var stderr boundedStderr
 	cmd.Stdout = stdout
@@ -233,6 +239,55 @@ func (g *SubprocessGit) run(ctx context.Context, repo string, argv []string) (st
 		return "", false, &gitExitError{code: exitErr.ExitCode(), stderr: strings.TrimSpace(stderr.String())}
 	}
 	return "", false, fmt.Errorf("%w: git %s: %v", ErrUnavailable, argv[0], runErr)
+}
+
+// --- PAR-024: the simulated merge commit ------------------------------------
+
+// mergeCommitEpoch pins the derived merge commit's date so the same base+head
+// pair always mints the same commit: repeated PR events reuse one object (git's
+// content addressing), and the rerun never reports a different sha for
+// identical trees. 2000-01-01T00:00:00Z.
+const mergeCommitEpoch = "946684800 +0000"
+
+// MergeCommit builds the pull_request merge commit in the repository's serving
+// copy and returns its sha (docs/go/04_git.md §14a):
+//
+//	git merge-tree --write-tree <base> <head>
+//	git commit-tree <tree> -p <base> -p <head> -m "Merge <head> into <base>"
+//
+// The commit is DERIVED state: it is not published through the WAL and not a
+// durable ref, exactly like a trial merge. It exists in the serving copy so a
+// job's checkout by sha can fetch it; after a serving-copy wipe the next PR
+// event rebuilds the same commit. A conflicting merge is an error (the caller
+// falls back to the head commit and says so).
+func (g *SubprocessGit) MergeCommit(ctx context.Context, repo, base, head string) (string, error) {
+	if !shaRe.MatchString(strings.ToLower(strings.TrimSpace(base))) || !shaRe.MatchString(strings.ToLower(strings.TrimSpace(head))) {
+		return "", fmt.Errorf("%w: merge-ref inputs must be full commit shas", ErrInvalid)
+	}
+	base, head = strings.ToLower(strings.TrimSpace(base)), strings.ToLower(strings.TrimSpace(head))
+	out, _, err := g.run(ctx, repo, []string{"merge-tree", "--write-tree", base, head})
+	if err != nil {
+		return "", fmt.Errorf("%w: merge-tree %s..%s: %v", ErrUnprocessable, base, head, err)
+	}
+	lines := strings.Split(strings.TrimSpace(out), "\n")
+	if len(lines) == 0 || !shaRe.MatchString(strings.TrimSpace(lines[0])) {
+		return "", fmt.Errorf("%w: merge-tree produced no tree", ErrCorrupt)
+	}
+	tree := strings.TrimSpace(lines[0])
+	msg := "Merge " + head + " into " + base
+	sha, _, cerr := g.runEnv(ctx, repo, []string{"commit-tree", tree, "-p", base, "-p", head, "-m", msg}, []string{
+		"GIT_AUTHOR_NAME=spindle", "GIT_AUTHOR_EMAIL=spindle@localhost",
+		"GIT_COMMITTER_NAME=spindle", "GIT_COMMITTER_EMAIL=spindle@localhost",
+		"GIT_AUTHOR_DATE=" + mergeCommitEpoch, "GIT_COMMITTER_DATE=" + mergeCommitEpoch,
+	})
+	if cerr != nil {
+		return "", fmt.Errorf("%w: commit-tree %s: %v", ErrUnavailable, tree, cerr)
+	}
+	sha = strings.TrimSpace(sha)
+	if !shaRe.MatchString(sha) {
+		return "", fmt.Errorf("%w: commit-tree produced %q", ErrCorrupt, sha)
+	}
+	return sha, nil
 }
 
 // gitExitError is a non-zero git exit (the object/ref/path did not resolve —

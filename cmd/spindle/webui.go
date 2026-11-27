@@ -464,6 +464,15 @@ func wireCollabPages(apiEnv *api.Env, c *collabWiring) {
 		td.OpenArtifact = func(ctx context.Context, owner, repo, runID, name string, p auth.Principal) (*threads.ArtifactDownload, error) {
 			return th.OpenArtifact(ctx, owner+"/"+repo, runID, name, p)
 		}
+		// Per-repository triggers & limits (PAR-015/PAR-118/PAR-153): the page
+		// form calls the same service verbs as the JSON API; the service enforces
+		// maintain+ and audits every changed switch.
+		td.Settings = func(ctx context.Context, owner, repo string, p auth.Principal) (*threads.SettingsView, error) {
+			return th.GetSettings(ctx, owner+"/"+repo, p)
+		}
+		td.UpdateSettings = func(ctx context.Context, owner, repo string, in threads.SettingsInput, p auth.Principal) (*threads.SettingsView, error) {
+			return th.UpdateSettings(ctx, owner+"/"+repo, in, p)
+		}
 		if c.ident != nil {
 			ident := c.ident
 			td.Role = func(ctx context.Context, owner, repo string, p auth.Principal) (string, error) {

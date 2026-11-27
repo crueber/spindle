@@ -83,11 +83,12 @@ func (s *Service) resolveCloneCredential(ctx context.Context, token string) (aut
 	// job record so revocation and a rewritten spec cannot drift from the
 	// signature. A fork run is untrusted, so this is always `contents: read`.
 	trusted := job.Trusted && (run == nil || run.Trusted)
+	writeTokens := run != nil && run.WriteTokens && !trusted
 	return auth.Principal{
 		Name:     ClonePrincipalName(claims.Runner),
 		JobRepo:  claims.Repo,
 		JobPush:  claims.Allows(ScopePush),
-		JobPerms: s.EffectivePermissions(job.Spec, trusted),
+		JobPerms: s.EffectivePermissionsFor(job.Spec, trusted, writeTokens),
 	}, nil, true
 }
 

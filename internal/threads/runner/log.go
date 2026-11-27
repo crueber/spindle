@@ -123,6 +123,9 @@ func (s *Streamer) Mask(text string) string {
 	return maskValues(text, mask)
 }
 
+// root is the StepStream seam: a nested buffer writes here.
+func (s *Streamer) root() *Streamer { return s }
+
 // addMask registers values with the mask list after the streamer started: the
 // plan adds every secret it can substitute, so a `${{ secrets.X }}` spliced
 // into a script is masked exactly like a variable delivered from the plan's

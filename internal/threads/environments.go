@@ -733,6 +733,11 @@ func (s *Service) applyEnvironmentDecision(ctx context.Context, owner, repo stri
 		RequiredApprovers: approvers, WaitUntil: waitUntilFor(doc, now),
 		PreventSelfReview: doc.PreventSelfReview, TriggeredBy: strings.ToLower(strings.TrimSpace(run.Actor)),
 	}
+	// PAR-021: a deployment record transition is a `deployment` +
+	// `deployment_status` event. It is emitted off the creation path (detach)
+	// and the follow-up chain cap bounds a deployment_status workflow that
+	// itself deploys.
+	s.emitDeploymentEvents(run, job, deploymentStatusState(state), "")
 	return state == DeploymentPending && job.State == JobQueued, nil
 }
 

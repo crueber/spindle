@@ -38,6 +38,9 @@ type StartView struct {
 	// Artifacts advertises the instance's artifact caps so the runner refuses
 	// an over-cap upload before streaming it (15 §2.5).
 	Artifacts ArtifactCaps `json:"artifacts"`
+	// Caches advertises the cache service's limits (PAR-095) for the same
+	// reason: a runner refuses an oversized entry before streaming it.
+	Caches CacheCaps `json:"caches"`
 }
 
 // Start marks the attempt running and issues its short-lived wjt_ token. The
@@ -72,7 +75,11 @@ func (s *Service) Start(ctx context.Context, runner *runnerAuth, ref string, att
 		return nil, fmt.Errorf("%w: job already %s", ErrConflict, job.State)
 	}
 	trusted := job.Trusted && (run == nil || run.Trusted)
-	perms := s.EffectivePermissions(job.Spec, trusted)
+	// PAR-118/D-13: a fork run whose repository enabled send_write_tokens gets
+	// the permissions its workflow asks for; the OIDC exchange stays refused by
+	// IDTokenAllowed's untrusted rule.
+	writeTokens := run != nil && run.WriteTokens && !trusted
+	perms := s.EffectivePermissionsFor(job.Spec, trusted, writeTokens)
 	gitScopes := PermissionScopes(perms)
 	claims := AttemptClaims{
 		Repo: repoID(owner, repo), Run: runID, Job: jobID, Attempt: attempt,
@@ -91,6 +98,7 @@ func (s *Service) Start(ctx context.Context, runner *runnerAuth, ref string, att
 		RunID: runID, JobID: jobID, Attempt: attempt,
 		Permissions: perms, Scopes: claims.Scopes,
 		Artifacts: s.ArtifactCaps(),
+		Caches:    s.CacheCaps(),
 	}, nil
 }
 
@@ -738,6 +746,11 @@ func (s *Service) rerun(ctx context.Context, repo, runID string, p auth.Principa
 			r.State = RunPendingApproval
 			r.ApprovalKind = ApprovalEnvironment
 			r.Environments = uniqueEnvNames(gated)
+		} else if anyJobWantsCrossRun(jobs) {
+			// A re-run consumes another run's artifacts again, so it is a new
+			// D-3 decision: hold it exactly like the original creation.
+			r.State = RunPendingApproval
+			r.ApprovalKind = ApprovalCrossRun
 		}
 		r.Version++
 		run = &r
@@ -745,9 +758,10 @@ func (s *Service) rerun(ctx context.Context, repo, runID string, p auth.Principa
 	}); cerr != nil {
 		return nil, cerr
 	}
-	if len(gated) > 0 {
+	if len(gated) > 0 || (run != nil && run.ApprovalKind == ApprovalCrossRun) {
 		// The hold IS the queue: no runner may claim a deployment nobody
-		// approved.
+		// approved, and no runner may consume another run's artifacts before the
+		// D-3 decision.
 		return run, nil
 	}
 	idx := needsIndex(jobs)

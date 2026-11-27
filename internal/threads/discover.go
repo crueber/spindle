@@ -190,12 +190,20 @@ func SelectFiles(files []*WorkflowFile, event string, kind workflow.RefKind, ref
 // false when no diff was computed; a `paths`/`paths-ignore` trigger then does
 // not fire (fail closed).
 func SelectFilesWithChanges(files []*WorkflowFile, event string, kind workflow.RefKind, ref, action, want string, changed []string, known bool) []*WorkflowFile {
+	return SelectFilesMatching(files, workflow.Match{
+		Event: event, Kind: kind, Ref: ref, Action: action, Changed: changed, ChangedKnown: known,
+	}, want)
+}
+
+// SelectFilesMatching is SelectFiles with the full delivery (a workflow_run
+// carries its upstream workflow name, which is neither a ref nor an action).
+func SelectFilesMatching(files []*WorkflowFile, m workflow.Match, want string) []*WorkflowFile {
 	out := make([]*WorkflowFile, 0, len(files))
 	for _, f := range files {
 		if f.Workflow == nil {
 			continue // per-file isolation: a broken file creates no run
 		}
-		if !f.Workflow.FiresWithChanges(event, kind, ref, action, changed, known) {
+		if !f.Workflow.FiresMatching(m) {
 			continue
 		}
 		if want != "" && !matchesWorkflow(f, want) {
@@ -219,8 +227,12 @@ func NeedsChangedPaths(files []*WorkflowFile, event string) bool {
 			if p := f.Workflow.On.Push; p != nil && (len(p.Paths) > 0 || len(p.PathsIgnore) > 0) {
 				return true
 			}
-		case EventPullReq:
-			if p := f.Workflow.On.PullRequest; p != nil && (len(p.Paths) > 0 || len(p.PathsIgnore) > 0) {
+		case EventPullReq, EventPullTarget:
+			trigger := f.Workflow.On.PullRequest
+			if event == EventPullTarget {
+				trigger = f.Workflow.On.PullRequestTarget
+			}
+			if trigger != nil && (len(trigger.Paths) > 0 || len(trigger.PathsIgnore) > 0) {
 				return true
 			}
 		}

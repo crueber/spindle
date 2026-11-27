@@ -473,6 +473,18 @@ type Threads struct {
 	// mutable). Default false; turning it on breaks every tag-named workflow,
 	// so it is a deliberate rollout.
 	ImageRequireDigest bool `toml:"image_require_digest"`
+	// CacheMaxBytes is the per-repository cache budget (PAR-095,
+	// threads.cache_max_bytes); 0 selects 5 GiB. Eviction is oldest-saved-first
+	// inside that budget.
+	CacheMaxBytes ByteSize `toml:"cache_max_bytes"`
+	// CacheMaxEntryBytes bounds one cache entry (threads.cache_max_entry_bytes;
+	// 0 selects 1 GiB, clamped to CacheMaxBytes).
+	CacheMaxEntryBytes ByteSize `toml:"cache_max_entry_bytes"`
+	// CacheRetention is the idle window after which an unused cache entry is
+	// reclaimed (threads.cache_retention; 0 selects 7 days).
+	CacheRetention Duration `toml:"cache_retention"`
+	// CacheMaxEntries bounds one repository's cache index (0 selects 256).
+	CacheMaxEntries int `toml:"cache_max_entries"`
 	// ArtifactRetention is the artifact window (PAR-158), separate from
 	// Retention: an artifact whose own window is longer OUTLIVES its run.
 	// Zero selects the run window (today's behaviour); valid 24h…8760h.
@@ -651,9 +663,15 @@ func Defaults() *Config {
 			// The artifact window defaults to the run window (unchanged
 			// behaviour); keep_forever off; 3 attempts and a 15m lease.
 			ArtifactRetention: 0,
-			KeepForever:       false,
-			MaxQueueAttempts:  3,
-			JobLease:          Duration(15 * time.Minute),
+			// The cache service (PAR-095): 5 GiB per repository, 1 GiB per
+			// entry, 256 entries, 7 days idle.
+			CacheMaxBytes:      5 << 30,
+			CacheMaxEntryBytes: 1 << 30,
+			CacheRetention:     Duration(7 * 24 * time.Hour),
+			CacheMaxEntries:    256,
+			KeepForever:        false,
+			MaxQueueAttempts:   3,
+			JobLease:           Duration(15 * time.Minute),
 		},
 		Placement: Placement{Serve: []string{"*"}, Maintain: []string{"*"}},
 		Compaction: Compaction{

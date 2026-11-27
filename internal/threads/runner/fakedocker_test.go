@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"time"
 )
 
 // fakeDocker is the subprocess-boundary recorder: it asserts argv exactly and
@@ -26,6 +27,9 @@ type fakeDocker struct {
 	blockOn string
 	// streamByMatch scripts per-command exit codes for Stream calls.
 	streamByMatch []runOutput
+	// delayByMatch sleeps before a Stream call whose argv contains the key (a
+	// real background gets time to finish/fail before the job ends).
+	delayByMatch map[string]time.Duration
 	// streamInOutput is written by StreamIn after it drains stdin (the upload
 	// tar fixture); streamInErr makes StreamIn fail after draining.
 	streamInOutput []byte
@@ -104,11 +108,29 @@ func (f *fakeDocker) StreamIn(ctx context.Context, env []string, r io.Reader, w 
 	for _, o := range matches {
 		if strings.Contains(joined, o.match) {
 			code = o.code
+			if o.out != "" {
+				out = o.out
+			}
 		}
 	}
 	if block != "" && strings.Contains(joined, block) {
 		<-ctx.Done()
 		return -1, ctx.Err()
+	}
+	f.mu.Lock()
+	delay := time.Duration(0)
+	for m, d := range f.delayByMatch {
+		if strings.Contains(joined, m) {
+			delay = d
+		}
+	}
+	f.mu.Unlock()
+	if delay > 0 {
+		select {
+		case <-ctx.Done():
+			return -1, ctx.Err()
+		case <-time.After(delay):
+		}
 	}
 	if len(inOutput) > 0 {
 		_, _ = w.Write(inOutput)

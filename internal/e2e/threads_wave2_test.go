@@ -40,6 +40,8 @@ jobs:
 `
 
 const wave2Callee = `name: Deploy
+on:
+  workflow_call:
 jobs:
   plan:
     runs-on: linux

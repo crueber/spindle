@@ -72,6 +72,71 @@ func newGitReader(t *testing.T, dir string) *SubprocessGit {
 	return g
 }
 
+// TestSubprocessGitMergeCommit pins PAR-024's derived merge commit against real
+// git: merge-tree writes the tree, commit-tree mints a two-parent commit, the
+// result is reproducible, and a conflicting merge is an error (the caller then
+// falls back to the head).
+func TestSubprocessGitMergeCommit(t *testing.T) {
+	dir, head := gitFixture(t)
+	runGit := func(argv ...string) string {
+		t.Helper()
+		cmd := exec.Command("git", argv...)
+		cmd.Dir = dir
+		cmd.Env = append(os.Environ(),
+			"GIT_AUTHOR_NAME=Test", "GIT_AUTHOR_EMAIL=test@example.com",
+			"GIT_COMMITTER_NAME=Test", "GIT_COMMITTER_EMAIL=test@example.com",
+			"HOME="+t.TempDir(),
+		)
+		out, err := cmd.CombinedOutput()
+		if err != nil {
+			t.Fatalf("git %s: %v\n%s", strings.Join(argv, " "), err, out)
+		}
+		return strings.TrimSpace(string(out))
+	}
+	// A second branch from head with an independent file.
+	runGit("checkout", "-q", "-b", "feature")
+	if err := os.WriteFile(filepath.Join(dir, "feature.txt"), []byte("feature\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runGit("add", "-A")
+	runGit("commit", "-q", "-m", "feature")
+	feature := runGit("rev-parse", "HEAD")
+
+	g := newGitReader(t, dir)
+	merge, err := g.MergeCommit(context.Background(), "o/r", head, feature)
+	if err != nil {
+		t.Fatalf("MergeCommit: %v", err)
+	}
+	again, err := g.MergeCommit(context.Background(), "o/r", head, feature)
+	if err != nil || again != merge {
+		t.Fatalf("MergeCommit is not reproducible: %s vs %s (%v)", merge, again, err)
+	}
+	parents := strings.Fields(runGit("rev-list", "--parents", "-n", "1", merge))
+	if len(parents) != 3 {
+		t.Fatalf("merge commit parents = %v", parents)
+	}
+	// A conflicting merge (both sides editing one file) is refused.
+	runGit("checkout", "-q", head)
+	runGit("checkout", "-q", "-b", "side-a")
+	if err := os.WriteFile(filepath.Join(dir, ".spindle", "workflows", "ci.yml"), []byte("side a\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runGit("add", "-A")
+	runGit("commit", "-q", "-m", "side a")
+	sideA := runGit("rev-parse", "HEAD")
+	runGit("checkout", "-q", head)
+	runGit("checkout", "-q", "-b", "side-b")
+	if err := os.WriteFile(filepath.Join(dir, ".spindle", "workflows", "ci.yml"), []byte("side b\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runGit("add", "-A")
+	runGit("commit", "-q", "-m", "side b")
+	sideB := runGit("rev-parse", "HEAD")
+	if _, err := g.MergeCommit(context.Background(), "o/r", sideA, sideB); err == nil {
+		t.Fatal("a conflicting merge must return an error")
+	}
+}
+
 func TestSubprocessGitListAndRead(t *testing.T) {
 	dir, head := gitFixture(t)
 	g := newGitReader(t, dir)

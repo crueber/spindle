@@ -87,8 +87,11 @@ func TestE2E_ThreadsCheckoutFailureNamesTheUnreachableURL(t *testing.T) {
 	if strings.Contains(logText, "checkout succeeded") {
 		t.Fatalf("a step ran after a failed checkout:\n%s", logText)
 	}
-	// The runner console states the resolved base too (once per job).
-	if console := runner.logs.String(); !strings.Contains(console, "job checkout") || !strings.Contains(console, wantCheckout) {
-		t.Fatalf("runner console lacks the checkout base %s:\n%s", wantCheckout, console)
-	}
+	// The runner console states the resolved base too (once per job). The
+	// console bytes are copied from the runner's stderr by another goroutine,
+	// so read it bounded rather than once; both facts stay required.
+	pollUntil(t, 30*time.Second, "the runner console to state the checkout base", func() bool {
+		console := runner.logs.String()
+		return strings.Contains(console, "job checkout") && strings.Contains(console, wantCheckout)
+	})
 }

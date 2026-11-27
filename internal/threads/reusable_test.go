@@ -22,6 +22,8 @@ jobs:
 `
 
 const reusableCalleeYAML = `name: Deploy
+on:
+  workflow_call:
 jobs:
   plan:
     runs-on: linux
@@ -99,11 +101,13 @@ jobs:
     uses: ./.spindle/workflows/middle.yml
 `
 	middle := `name: Middle
+on: {workflow_call: {}}
 jobs:
   inner:
     uses: ./.spindle/workflows/inner.yml
 `
 	inner := `name: Inner
+on: {workflow_call: {}}
 jobs:
   ship:
     runs-on: linux
@@ -137,14 +141,14 @@ func TestReusableCallerRefusals(t *testing.T) {
 		wantSub string
 	}{
 		{
-			name: "cross-repository",
+			name: "cross-repository-mutable-ref",
 			caller: `name: C
 on: {push: {branches: [main]}}
 jobs:
   deploy:
     uses: acme/other/.spindle/workflows/deploy.yml@v1
 `,
-			wantSub: "D-6",
+			wantSub: "pinned to a full 40-character commit SHA",
 		},
 		{
 			name: "missing-callee",
@@ -182,6 +186,23 @@ jobs:
 `,
 			callee:  reusableCalleeYAML,
 			wantSub: "may not declare `steps`",
+		},
+		{
+			name: "callee-without-workflow-call",
+			caller: `name: C
+on: {push: {branches: [main]}}
+jobs:
+  deploy:
+    uses: ./.spindle/workflows/deploy.yml
+`,
+			callee: `name: Deploy
+jobs:
+  plan:
+    runs-on: linux
+    steps:
+      - run: echo planning
+`,
+			wantSub: "is not a reusable workflow",
 		},
 	}
 	for _, c := range cases {

@@ -6,6 +6,7 @@ import (
 	"io"
 	"strconv"
 	"strings"
+	"sync"
 
 	"github.com/crueber/spindle/internal/threads"
 	"github.com/crueber/spindle/internal/threads/workflow"
@@ -121,7 +122,10 @@ func parseWorkflowCommand(line string) (workflowCommand, bool) {
 // the step in flight. It is owned by the executor's single goroutine, so no
 // lock is needed (like stepOutcomes).
 type jobCommands struct {
-	stream      *Streamer
+	stream *Streamer
+	// mu guards every field: a parallel group's members each parse their own
+	// output and record annotations from their own goroutine (PAR-080).
+	mu          sync.Mutex
 	annotations []threads.Annotation
 	masks       int
 	unknown     int
@@ -154,6 +158,8 @@ func (j *jobCommands) addAnnotation(a threads.Annotation, stepName string, stepC
 		stepName = stepName[:threads.MaxAnnotationStep]
 	}
 	a.Step = stepName
+	j.mu.Lock()
+	defer j.mu.Unlock()
 	if *stepCount >= threads.MaxAnnotationsPerStep {
 		return fmt.Errorf("over the cap of %d annotations per step", threads.MaxAnnotationsPerStep)
 	}
@@ -165,6 +171,13 @@ func (j *jobCommands) addAnnotation(a threads.Annotation, stepName string, stepC
 	return nil
 }
 
+// snapshot copies the annotations for the completion report.
+func (j *jobCommands) snapshot() []threads.Annotation {
+	j.mu.Lock()
+	defer j.mu.Unlock()
+	return append([]threads.Annotation(nil), j.annotations...)
+}
+
 // addMask registers one `::add-mask::` value. A mask is permanent (there is no
 // unmask command, and nothing removes an entry), and the list is bounded. A
 // value under 4 bytes is still recorded but the log masker ignores it (masking
@@ -173,6 +186,8 @@ func (j *jobCommands) addMask(value string) error {
 	if value == "" {
 		return fmt.Errorf("::add-mask:: needs a value")
 	}
+	j.mu.Lock()
+	defer j.mu.Unlock()
 	if j.masks >= MaxMaskValues {
 		return fmt.Errorf("over the cap of %d masks per job", MaxMaskValues)
 	}

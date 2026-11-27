@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
+	"sync"
 
 	"github.com/crueber/spindle/internal/threads"
 )
@@ -54,6 +55,7 @@ func summaryFilePath(index int) string {
 
 // jobSummary accumulates one job's step summaries.
 type jobSummary struct {
+	mu      sync.Mutex
 	parts   []string
 	bytes   int
 	entries int
@@ -66,6 +68,8 @@ func (s *jobSummary) add(stepName, text string) error {
 	if strings.TrimSpace(text) == "" {
 		return nil
 	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	if len(text) > MaxStepSummaryBytes {
 		return fmt.Errorf("step summary is %d bytes, over the cap of %d bytes per step", len(text), MaxStepSummaryBytes)
 	}
@@ -88,7 +92,12 @@ func (s *jobSummary) add(stepName, text string) error {
 
 // text joins the collected summaries ("" when none).
 func (s *jobSummary) text() string {
-	if s == nil || len(s.parts) == 0 {
+	if s == nil {
+		return ""
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if len(s.parts) == 0 {
 		return ""
 	}
 	return strings.Join(s.parts, "\n")
@@ -99,7 +108,7 @@ func (s *jobSummary) text() string {
 // wrote no summary). A malformed or oversized file is a named step error when
 // the step otherwise succeeded; when it already failed, the caller only logs
 // it, because the step's own failure is the more useful message.
-func (e *Executor) collectStepSummary(ctx context.Context, plan *Plan, step StepPlan, summary *jobSummary, stream *Streamer) error {
+func (e *Executor) collectStepSummary(ctx context.Context, plan *Plan, step StepPlan, summary *jobSummary, stream StepStream) error {
 	if plan == nil || summary == nil || step.SummaryPath == "" {
 		return nil
 	}

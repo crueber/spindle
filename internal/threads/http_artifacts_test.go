@@ -73,7 +73,7 @@ func TestHTTPArtifactUploadFlow(t *testing.T) {
 		t.Fatalf("duplicate finalize = %d: %s", rec.Code, rec.Body.String())
 	}
 	// Unknown body keys are refused (fail closed).
-	rec = doAuth(h, http.MethodPost, base, `{"name":"x","files":[],"overwrite":true}`, tok)
+	rec = doAuth(h, http.MethodPost, base, `{"name":"x","files":[],"bogus":true}`, tok)
 	if rec.Code != http.StatusBadRequest || !strings.Contains(rec.Body.String(), "unknown field") {
 		t.Fatalf("unknown finalize key = %d: %s", rec.Code, rec.Body.String())
 	}
@@ -145,7 +145,7 @@ func TestHTTPArtifactRouteErrors(t *testing.T) {
 		{"finalize bad json", http.MethodPost, base, `{`, tok, http.StatusBadRequest},
 		{"manifest unknown", http.MethodGet, base + "/nope", "", tok, http.StatusNotFound},
 		{"manifest wrong method", http.MethodPost, base + "/build", "", tok, http.StatusMethodNotAllowed},
-		{"finalize wrong method", http.MethodGet, base, "", tok, http.StatusMethodNotAllowed},
+		{"finalize wrong method", http.MethodPut, base, "", tok, http.StatusMethodNotAllowed},
 		{"unknown subroute", http.MethodGet, base + "/build/other", "", tok, http.StatusNotFound},
 		{"unknown subroute deep", http.MethodGet, base + "/build/blobs/0/extra/more", "", tok, http.StatusNotFound},
 		{"list unknown run", http.MethodGet, "/o/r/api/threads/0000000000000000001-abcdef/artifacts", "", "", http.StatusNotFound},

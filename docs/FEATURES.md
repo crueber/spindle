@@ -104,18 +104,25 @@ Workflow files are triggered by `push` (branch and tag pushes, filtered independ
 `branches`/`tags` and by changed files through `paths`/`paths-ignore`), `pull_request` (the full
 emitted lifecycle vocabulary: opened/synchronize/reopened, closed/merged, edited,
 ready_for_review/converted_to_draft, labeled/unlabeled, assigned/unassigned,
-milestoned/demilestoned), `release`, `issues`, `issue_comment`, `workflow_dispatch` with typed
-inputs (`string`, `boolean`, `choice`, `number`, `environment`), and `schedule` (five-field cron
-with names, macros, `L`/`NW`/`#` and a per-entry timezone); jobs run in containers with services,
+milestoned/demilestoned; every edge's run is the server-computed merge commit), `pull_request_target`
+(per-repository opt-in, D-2), `repository_dispatch`, `workflow_run` (with a per-run approval hold for
+an untrusted parent), `create`/`delete`, `deployment`/`deployment_status`, `release`, `issues`,
+`issue_comment`, `workflow_dispatch` with typed inputs (`string`, `boolean`, `choice`, `number`,
+`environment`), and `schedule` (five-field cron with names, macros, `L`/`NW`/`#` and a per-entry
+timezone); jobs run in containers with services,
 `needs:` ordering, `strategy.matrix` (including GitHub's `include`/`exclude` merge rules),
-repository-local reusable workflows and `concurrency` groups (one running plus one pending run),
+reusable workflows — local or SHA-pinned cross-repository, with typed `on.workflow_call` inputs,
+secrets and outputs — and `concurrency` groups (one running plus one pending run),
 report into the checks surface that gates merges, and
-stream logs over SSE with cancel, rerun and rerun-failed. `permissions:` mints a scoped job token
-(`$SPINDLE_JOB_TOKEN`, also delivered as `$GITHUB_TOKEN`/`$FORGEJO_TOKEN`) whose closed vocabulary
-(`contents`, `issues`, `pull-requests`, `id-token`) is also its platform-API authority, and, with
-`id-token: write` (or Forgejo's `enable-openid-connect: true`) on a trusted run, a short-lived
-audience-scoped OIDC ID token for cloud providers; repository secrets are write-only and masked
-(never exposed to fork PRs), and first-time fork contributors need approval. Deployment
+stream logs over SSE with cancel, rerun and rerun-failed. `actions/cache` is built in with
+trust-class scopes (default/branch/PR/fork, D-10), and artifacts take the v4 inputs, support a
+maintainer-approved cross-run read (D-3), and have a list/download/delete API. `permissions:` mints a
+scoped job token (`$SPINDLE_JOB_TOKEN`, also delivered as `$GITHUB_TOKEN`/`$FORGEJO_TOKEN`) whose
+closed vocabulary (`contents`, `issues`, `pull-requests`, `id-token`) is also its platform-API
+authority, and, with `id-token: write` (or Forgejo's `enable-openid-connect: true`) on a trusted run,
+a short-lived audience-scoped OIDC ID token for cloud providers; repository secrets are write-only and
+masked (never exposed to fork PRs; a fork's token is `contents: read` unless the repository enabled
+the audited `send_write_tokens` switch), and first-time fork contributors need approval. Deployment
 environments add required reviewers (users or teams, at most six), a wait timer,
 prevent-self-review, a deployment branch/tag allowlist and environment-scoped secrets: a job names
 one with `environment:`, and nothing starts — and no environment secret is resolved — until every
@@ -145,6 +152,10 @@ A run is **trusted** or **untrusted**, and that is server-side policy a file can
 | `schedule` | the default branch tip | yes | yes | per `permissions` |
 | `release` | the **default branch tip** (the run reports the tag commit) | yes | yes | per `permissions` |
 | `issues` / `issue_comment` | the **default branch tip** | yes | yes | per `permissions` |
+| `pull_request_target` (opt-in, D-2) | the **base branch tip** | yes | yes | per `permissions` (a head checkout needs the second switch) |
+| `repository_dispatch` | the **default branch tip** | yes | yes | per `permissions` |
+| `workflow_run` | the **default branch tip** | yes unless the upstream was untrusted, which holds the run | yes | per `permissions` |
+| `create` / `delete`, `deployment` / `deployment_status` | the **default branch tip** | yes | yes | per `permissions` |
 
 `push` fires for `refs/heads/<branch>` and for `refs/tags/<tag>`, filtered independently by
 `branches` and `tags` (a tags-only trigger never matches a branch push, and the reverse); branch and
@@ -179,13 +190,16 @@ Wait timers, prevent-self-review, and the deployment branch/tag allowlist are pa
 
 ### 3.2 Steps and actions
 
-A step is a `run:` command or a `uses:` of the built-in `actions/checkout`,
-`actions/upload-artifact` or `actions/download-artifact`, a **local composite action**
-(`uses: ./.spindle/actions/setup`, resolved at run creation from the run commit), or a
-**`docker://` image** (`uses: docker://alpine:3.20`). There is **no remote action marketplace** —
-`owner/repo@ref` is refused with "there is no marketplace" — and **no cache action**
-(`actions/cache` is not implemented, so every job starts from a cold workspace). Artifacts pass files
-between jobs of the same run. The reference is
+A step is a `run:` command (or a group: `background`/`wait`/`cancel`/`parallel`, D-7) or a `uses:`
+of the built-in `actions/checkout`, `actions/upload-artifact`, `actions/download-artifact` or
+`actions/cache` (+ `/restore`, `/save`), a **local composite action**
+(`uses: ./.spindle/actions/setup`, resolved at run creation from the run commit; `github.action_path`
+is the innermost action's directory), or a **`docker://` image** (`uses: docker://alpine:3.20`).
+There is **no remote action marketplace** — `owner/repo@ref` is refused with "there is no
+marketplace" — and the `setup-*` actions are refused by name with the exact `actions/cache` recipe
+that replaces their cache half. Artifacts pass files between jobs of the same run, and another run of
+the same repository only behind the cross-run approval (D-3); caches persist a workspace tree across
+runs with trust-class scopes. The reference is
 [§3.4 steps](threads.md#34-steps) and
 [§3.4a local actions and docker images](threads.md#34a-local-actions-and-docker-images).
 
@@ -232,10 +246,19 @@ jobs:
 The default job image is `alpine/git:latest` (it carries `git`, which checkout needs inside the job
 container). `--capacity 1` per runner is the isolation-preserving default for untrusted code; scale
 out with more runners rather than a bigger capacity. A job that pushes must check out with
-`fetch-depth: 0`. A job with a label no runner declares simply stays queued — the run page shows its
-`runs-on` and `/admin/runners` shows the declared sets. Every flag and its `SPINDLE_RUNNER_*`
+`fetch-depth: 0`. A job with a label no runner declares simply stays queued — the run page names the
+one `queue_reason` (no runner, labels unmatched, all busy, a fork with no fork-opted runner, a cap or
+approval hold) and `/admin/runners` shows the declared sets. Every flag and its `SPINDLE_RUNNER_*`
 environment variable is tabulated in [`threads.md`](threads.md#81-flags-and-environment); there is
 deliberately no repository-policy flag.
+
+Container capability is the operator's, never the workflow's: `--container-privileged`,
+`--container-network`, `--container-valid-volume` and `--docker-host` each admit one shape for every
+job the runner takes, and a runner that grants privilege or a docker endpoint refuses
+`--allow-fork-runs`. A private image pull uses the runner's own identity — its daemon config, an
+`--image-prefix` mirror, or `--registry-auth-file` (password on stdin) — never workflow
+`services.*.credentials`. Daemonless image builds (kaniko, buildah) need no grant; `docker build`
+needs `--docker-host` on a disposable host.
 
 ### 3.4 Runner in a container
 
@@ -295,7 +318,13 @@ that then runs. The mirror these keys pair with is
 - **Fork runs are off by default.** A fork PR runs the base branch's workflow file with a read-only
   checkout and no secrets, but its step scripts are the fork's code; only a runner started with
   `--allow-fork-runs` (on a disposable host) accepts one. Without such a runner the fork job stays
-  queued.
+  queued. A repository-level `send_write_tokens` switch (maintain+, audited) can widen the fork
+  token's scopes — never its secrets and never `id-token`.
+- **Capability grants are runner-side and mutually exclusive with fork runs.** A workflow cannot ask
+  for `--privileged`, a host volume or a docker endpoint; an operator can grant them to a runner, and
+  a runner that grants privilege or a docker endpoint refuses `--allow-fork-runs`. Private image
+  credentials are the runner's (`--registry-auth-file`, password on stdin into a private
+  `DOCKER_CONFIG`), never a workflow field.
 - The image allowlist and digest rule are hygiene, not isolation (above), and only
   admin-registered runners exist at all — the browser mint at `/admin/runners` is the entire
   authorization to execute instance jobs.

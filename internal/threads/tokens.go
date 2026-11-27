@@ -48,14 +48,18 @@ const (
 	// blob / finalize an artifact, and download an artifact of the SAME run
 	// (15 §2.5). It is not a repository read and never reaches another run.
 	ScopeArtifact = "artifact"
+	// ScopeCache authorises the job channel's cache operations (PAR-095). The
+	// scope a job may read or write is derived from its run, never from the
+	// request, so the token carries no scope choice of its own.
+	ScopeCache = "cache"
 )
 
 // attemptScopes is the control scope set every attempt token carries (log,
-// complete, cancel, artifact) plus the git scopes derived from the job's
+// complete, cancel, artifact, cache) plus the git scopes derived from the job's
 // effective permissions. `push` is present only when `contents` resolves to
 // write.
 func attemptScopes(scopes []string) []string {
-	out := []string{ScopeLog, ScopeComplete, ScopeCancel, ScopeRead, ScopeArtifact}
+	out := []string{ScopeLog, ScopeComplete, ScopeCancel, ScopeRead, ScopeArtifact, ScopeCache}
 	for _, sc := range scopes {
 		if sc == ScopePush {
 			out = append(out, ScopePush)
@@ -110,7 +114,17 @@ func normalizePerm(v string) string {
 // resolver is deliberately defensive anyway, because a spec can be read back
 // from the bucket and an unknown level must never widen access.
 func (s *Service) EffectivePermissions(spec *Spec, trusted bool) map[string]string {
-	if !trusted {
+	return s.EffectivePermissionsFor(spec, trusted, false)
+}
+
+// EffectivePermissionsFor is EffectivePermissions with the fork-run write-token
+// decision (PAR-118, D-13). writeTokens is only consulted for an UNTRUSTED run:
+// turning the repository switch on lets a fork run's token carry the scopes its
+// workflow asks for (never id-token — IDTokenAllowed still refuses), while a
+// trusted run is governed by `permissions:` alone exactly as before. With the
+// switch off (the default) an untrusted run is `contents: read`.
+func (s *Service) EffectivePermissionsFor(spec *Spec, trusted, writeTokens bool) map[string]string {
+	if !trusted && !writeTokens {
 		return map[string]string{workflow.ScopeContents: PermRead}
 	}
 	def := PermRead

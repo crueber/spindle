@@ -92,20 +92,30 @@ func TestContainerOptionPolicyBenignSet(t *testing.T) {
 	}
 }
 
-// TestContainerOptionPolicyFieldNames pins the service field spelling: the
-// refusal must say exactly which sidecar carries the option.
+// TestContainerOptionPolicyFieldNames pins the service field spelling and the
+// server's split: a grantable flag is deferred to the runner (so a granting
+// runner can serve it), a permanent one is refused at creation.
 func TestContainerOptionPolicyFieldNames(t *testing.T) {
 	spec := &Spec{
 		Services: map[string]ServiceSpec{
-			"postgres": {Image: "postgres:17", Options: "--privileged"},
+			"postgres": {Image: "postgres:17", Options: "--device /dev/sda"},
 		},
 	}
 	r := containerOptionRefusalReason(spec)
-	if r == nil || r.Field != "services.postgres.options" || !strings.Contains(r.Reason, "--privileged") {
+	if r == nil || r.Field != "services.postgres.options" || !strings.Contains(r.Reason, "--device") {
 		t.Fatalf("refusal = %+v", r)
 	}
+	// A grantable flag is accepted at creation under the server policy; the
+	// runner's own policy is the enforcement point (tested in the runner
+	// package).
 	spec = &Spec{Services: map[string]ServiceSpec{
-		"postgres": {Image: "postgres:17", Volumes: []string{"/var/run/docker.sock:/var/run/docker.sock"}},
+		"postgres": {Image: "postgres:17", Options: "--privileged"},
+	}}
+	if r := containerOptionRefusalReason(spec); r != nil {
+		t.Fatalf("--privileged must be deferred to the runner, got %+v", r)
+	}
+	spec = &Spec{Services: map[string]ServiceSpec{
+		"postgres": {Image: "postgres:17", Volumes: []string{"/:/host"}},
 	}}
 	r = containerOptionRefusalReason(spec)
 	if r == nil || r.Field != "services.postgres.volumes" {
@@ -166,11 +176,11 @@ func TestContainerOptionGateRefusesAtCreation(t *testing.T) {
 		field     string
 		token     string
 	}{
-		{"container privileged", "      options: --privileged", "", "container.options", "--privileged"},
 		{"container pid host", "      options: '--pid=host'", "", "container.options", "--pid=host"},
-		{"container volume", "      volumes:\n        - /:/host", "", "container.volumes", "/:/host"},
-		{"service cap add", "", "        options: --cap-add=ALL", "services.redis.options", "--cap-add=ALL"},
-		{"service volume", "", "        volumes:\n          - /var/run/docker.sock:/var/run/docker.sock", "services.redis.volumes", "docker.sock"},
+		{"container device", "      options: --device /dev/sda", "", "container.options", "--device"},
+		{"container root volume", "      volumes:\n        - /:/host", "", "container.volumes", "/:/host"},
+		{"service security opt", "", "        options: --security-opt seccomp=unconfined", "services.redis.options", "--security-opt"},
+		{"service relative volume", "", "        volumes:\n          - ./data:/data", "services.redis.volumes", "./data"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			e := containerOptionEnv(t, tc.container, tc.service)
@@ -194,6 +204,32 @@ func TestContainerOptionGateRefusesAtCreation(t *testing.T) {
 	}
 }
 
+// TestContainerOptionGateDefersGrantableFlags pins the PAR-179 split: the
+// server accepts the grantable shapes (privilege, a well-formed host volume, a
+// socket mount) so a runner that declares the capability can be offered the
+// job; the runner's plan-time policy is the enforcement point (see the runner
+// package's TestDefaultPolicyRefusesWorkflowPrivilege).
+func TestContainerOptionGateDefersGrantableFlags(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		container string
+		service   string
+	}{
+		{"container privileged", "      options: --privileged", ""},
+		{"container host volume", "      volumes:\n        - /srv/cache:/cache:ro", ""},
+		{"service cap add", "", "        options: --cap-add=NET_ADMIN"},
+		{"service socket volume", "", "        volumes:\n          - /var/run/docker.sock:/var/run/docker.sock"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			e := containerOptionEnv(t, tc.container, tc.service)
+			run, job := createForClass(t, e, runClasses()[0])
+			if job.State != JobQueued || job.Reason != "" || run.State != RunQueued {
+				t.Fatalf("job = %s (%q) run = %s, want queued", job.State, job.Reason, run.State)
+			}
+		})
+	}
+}
+
 // TestContainerOptionGateAllowsResourceFlags pins that the benign set reaches a
 // runner (queued, no reason).
 func TestContainerOptionGateAllowsResourceFlags(t *testing.T) {
@@ -209,7 +245,7 @@ func TestContainerOptionGateAllowsResourceFlags(t *testing.T) {
 // TestContainerOptionGateReappliesOnRerun: a refused job stays refused, with
 // the same named reason, when an attempt is requested (the gate is shared).
 func TestContainerOptionGateReappliesOnRerun(t *testing.T) {
-	e := containerOptionEnv(t, "      options: --privileged", "")
+	e := containerOptionEnv(t, "      options: --device /dev/sda", "")
 	run, job := createForClass(t, e, runClasses()[0])
 	if job.State != JobFailure {
 		t.Fatalf("job = %s (%q)", job.State, job.Reason)

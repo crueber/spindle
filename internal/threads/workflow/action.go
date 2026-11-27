@@ -328,7 +328,8 @@ func decodeActionSteps(node *yaml.Node, out *[]Step) error {
 	steps := make([]Step, 0, len(node.Content))
 	for i, item := range node.Content {
 		if err := checkKeys(item, "id", "name", "run", "uses", "with", "env", "if", "shell",
-			"working-directory", "continue-on-error", "timeout-minutes"); err != nil {
+			"working-directory", "continue-on-error", "timeout-minutes",
+			"background", "wait", "wait-all", "cancel", "parallel"); err != nil {
 			return fmt.Errorf("action.runs.steps[%d]: %w", i, err)
 		}
 		var st Step
@@ -385,6 +386,9 @@ func (a *Action) validateComposite() error {
 	declared := make([]string, 0, len(a.Runs.Steps))
 	for i, st := range a.Runs.Steps {
 		where := fmt.Sprintf("action.runs.steps[%d]", i+1)
+		if st.Background || stepControl(st) || st.Parallel != nil {
+			return fmt.Errorf("%s: background, wait/cancel and parallel steps are not accepted inside a composite action", where)
+		}
 		run, uses := strings.TrimSpace(st.Run), strings.TrimSpace(st.Uses)
 		switch {
 		case run != "" && uses != "":
@@ -431,6 +435,56 @@ func (a *Action) validateComposite() error {
 			if !containsFold(declared, ref.Step) {
 				return fmt.Errorf("action.outputs.%s: no step with id %q in this action (declared: %s)", name, ref.Step, listOrNone(declared))
 			}
+		}
+	}
+	return a.validateCompositeTemplates()
+}
+
+// validateCompositeTemplates closes every substituted string of a composite
+// action's steps with the action's own scope: its declared inputs, the step ids
+// declared before the site, and `github.action_path` (PAR-074). Action metadata
+// is parsed before a run exists, so an unsupported reference is THIS file's
+// error rather than an empty string at execution time. A workflow step, a job
+// `if:` and an output template cannot read `action_path`; only these steps can,
+// and each composite level supplies its own value (the runner's contract).
+func (a *Action) validateCompositeTemplates() error {
+	declared := make([]string, 0, len(a.Runs.Steps))
+	for i, st := range a.Runs.Steps {
+		where := fmt.Sprintf("action.runs.steps[%d]", i+1)
+		scope := TemplateScope{Inputs: a.DeclaredInputs(), Steps: declared, ActionPath: true}
+		type field struct{ name, value string }
+		fields := []field{
+			{where + " name", st.Name},
+			{where + " run", st.Run},
+			{where + " shell", st.Shell},
+			{where + " working-directory", st.WorkingDirectory},
+		}
+		envKeys := make([]string, 0, len(st.Env))
+		for k := range st.Env {
+			envKeys = append(envKeys, k)
+		}
+		sort.Strings(envKeys)
+		for _, k := range envKeys {
+			fields = append(fields, field{where + " env." + k, st.Env[k]})
+		}
+		withKeys := make([]string, 0, len(st.With))
+		for k := range st.With {
+			withKeys = append(withKeys, k)
+		}
+		sort.Strings(withKeys)
+		for _, k := range withKeys {
+			fields = append(fields, field{where + " with." + k, st.With[k]})
+		}
+		for _, f := range fields {
+			if err := ValidateTemplate(f.value, scope); err != nil {
+				return fmt.Errorf("%s: %w", f.name, err)
+			}
+		}
+		if err := ValidateIf(st.If, scope); err != nil {
+			return fmt.Errorf("%s if: %w", where, err)
+		}
+		if st.ID != "" {
+			declared = append(declared, strings.ToLower(st.ID))
 		}
 	}
 	return nil

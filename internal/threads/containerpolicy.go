@@ -46,14 +46,180 @@ package threads
 // creation (a failed job with a Reason naming the field and the option, the
 // image-policy shape), and the runner re-checks at plan time so an older or
 // bypassed server can never hand it a hostile argv.
+//
+// PAR-179/D-8 adds the runner OPERATOR's grants (ContainerPolicy). The server's
+// creation-time policy (ServerContainerPolicy) accepts the GRANTABLE shapes —
+// `--privileged`, `--cap-add` and a well-formed workflow volume — so they can
+// reach a runner that declares the capability; permanent refusals (devices,
+// security options, host namespaces, malformed/root volumes) are refused at
+// both ends. The runner's own policy is the only place a host-level grant is
+// decided, and it runs before any container, network or volume exists. A
+// runner that grants privilege or a docker endpoint never accepts fork runs
+// (refused at startup), so an anonymous PR can never widen its own isolation.
 
 import (
 	"fmt"
+	"path"
+	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
 	"time"
 )
+
+// ContainerPolicy is the runner OPERATOR's declared container grants
+// (PAR-179, D-8). The zero value is the historical fail-closed policy: every
+// workflow-controllable flag outside the resource/confinement allowlist is
+// refused and every workflow volume is refused.
+//
+// The knobs are runner declarations, never workflow ones:
+//
+//	Privileged    admit `--privileged` and `--cap-add` in a workflow's options
+//	                  (a runner granting this never accepts fork runs)
+//	Network       a named docker network job/service/action containers join
+//	                  instead of the per-job network ("" = per-job; host/none/
+//	                  container:* are refused at startup)
+//	ValidVolumes  absolute host paths (or path.Match globs) a workflow
+//	                  `volumes:` source may bind; empty = every volume refused
+//	DockerHost    a docker endpoint exposed to the JOB container only
+//	                  (unix:///abs/socket or tcp://host:port); empty = no access
+//
+// DeferGrantable is the SERVER's mode: it accepts the grantable flags and
+// volumes so a granting runner can be offered the job, and leaves the host-level
+// refusal to the runner's plan-time check (which runs before any container,
+// network or volume exists). Permanent refusals — devices, security options,
+// host namespaces, mounts outside ValidVolumes — are refused at both ends.
+type ContainerPolicy struct {
+	Privileged     bool
+	DeferGrantable bool
+	Network        string
+	ValidVolumes   []string
+	DockerHost     string
+}
+
+// ServerContainerPolicy is the creation-time policy: grantable shapes are
+// accepted so they can reach a runner that declares the capability, permanent
+// ones are refused. A refused job fails at creation with a named Reason.
+func ServerContainerPolicy() ContainerPolicy { return ContainerPolicy{DeferGrantable: true} }
+
+// validContainerNetworkName matches a docker network name (the operator's knob).
+func validContainerNetworkName(name string) bool {
+	if name == "" || len(name) > 128 {
+		return false
+	}
+	for i, r := range name {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9':
+		case r == '-' || r == '_' || r == '.':
+			if i == 0 {
+				return false
+			}
+		default:
+			return false
+		}
+	}
+	return true
+}
+
+// ValidateContainerPolicy validates a runner's declared policy at startup. A
+// bad knob is a startup error naming it, never a job that fails hours later.
+func ValidateContainerPolicy(p ContainerPolicy) error {
+	if p.Network != "" {
+		switch strings.ToLower(p.Network) {
+		case "host", "none", "bridge", "default":
+			return fmt.Errorf("container network %q is refused: the operator knob names a user-defined docker network (job isolation is the per-job network when unset)", p.Network)
+		}
+		if strings.HasPrefix(p.Network, "container:") || strings.HasPrefix(p.Network, "service:") {
+			return fmt.Errorf("container network %q is refused: a workflow host namespace is never a runner default", p.Network)
+		}
+		if !validContainerNetworkName(p.Network) {
+			return fmt.Errorf("container network %q is not a valid docker network name", p.Network)
+		}
+	}
+	for _, pattern := range p.ValidVolumes {
+		pat := strings.TrimSpace(pattern)
+		if pat == "" || !filepath.IsAbs(pat) || strings.ContainsRune(pat, 0) || strings.Contains(pat, "..") {
+			return fmt.Errorf("valid volume pattern %q is refused: it must be an absolute host path (or a path.Match glob) without '..'", pattern)
+		}
+	}
+	if p.DockerHost != "" {
+		host := strings.TrimSpace(p.DockerHost)
+		switch {
+		case strings.HasPrefix(host, "unix://"):
+			pth := strings.TrimPrefix(host, "unix://")
+			if !filepath.IsAbs(pth) || strings.Contains(pth, "..") || strings.ContainsAny(pth, ",\n") {
+				return fmt.Errorf("docker host %q is refused: unix:// takes an absolute socket path without ','", p.DockerHost)
+			}
+		case strings.HasPrefix(host, "tcp://"):
+			addr := strings.TrimPrefix(host, "tcp://")
+			if addr == "" || strings.ContainsAny(addr, " /\\") {
+				return fmt.Errorf("docker host %q is refused: tcp:// takes host:port", p.DockerHost)
+			}
+		default:
+			return fmt.Errorf("docker host %q is refused: use unix:///absolute/socket or tcp://host:port", p.DockerHost)
+		}
+	}
+	return nil
+}
+
+// allowsVolume reports whether a workflow volume spec may bind under this
+// policy, and the refusal reason when it may not.
+func (p ContainerPolicy) allowsVolume(field, spec string) (bool, string) {
+	if !p.DeferGrantable && len(p.ValidVolumes) == 0 {
+		return false, fmt.Sprintf("%s declares volume %q, which is refused: workflow-supplied mounts are never allowed unless the runner operator allow-lists the host path (--container-valid-volume); the runner provides its own workspace volume", field, spec)
+	}
+	src, dst, opts, ok := splitVolumeSpec(spec)
+	if !ok {
+		return false, fmt.Sprintf("%s declares volume %q, which is refused: expected source:target[:options]", field, spec)
+	}
+	if !filepath.IsAbs(src) || !filepath.IsAbs(dst) || strings.Contains(src, "..") {
+		return false, fmt.Sprintf("%s declares volume %q, which is refused: only an absolute host source and an absolute container target are accepted (a named volume or relative path could collide with another job's state)", field, spec)
+	}
+	if src == "/" {
+		return false, fmt.Sprintf("%s declares volume %q, which is refused: the host root is never a valid volume", field, spec)
+	}
+	if !validVolumeOptions(opts) {
+		return false, fmt.Sprintf("%s declares volume %q, which is refused: volume options are limited to ro/rw/z/Z/copy/nocopy", field, spec)
+	}
+	if p.DeferGrantable {
+		return true, ""
+	}
+	clean := filepath.Clean(src)
+	for _, pattern := range p.ValidVolumes {
+		if ok, _ := path.Match(pattern, clean); ok {
+			return true, ""
+		}
+	}
+	return false, fmt.Sprintf("%s declares volume %q, which is refused: source %q is not in the runner's --container-valid-volume allowlist (%s)", field, spec, clean, strings.Join(p.ValidVolumes, ", "))
+}
+
+// splitVolumeSpec parses docker's source:target[:options] volume spelling.
+func splitVolumeSpec(spec string) (source, target, options string, ok bool) {
+	parts := strings.SplitN(spec, ":", 3)
+	if len(parts) < 2 || parts[0] == "" || parts[1] == "" {
+		return "", "", "", false
+	}
+	source, target = parts[0], parts[1]
+	if len(parts) == 3 {
+		options = parts[2]
+	}
+	return source, target, options, true
+}
+
+// validVolumeOptions admits only mount semantics that cannot widen access.
+func validVolumeOptions(opts string) bool {
+	if opts == "" {
+		return true
+	}
+	for _, opt := range strings.Split(opts, ",") {
+		switch strings.TrimSpace(opt) {
+		case "ro", "rw", "z", "Z", "copy", "nocopy":
+		default:
+			return false
+		}
+	}
+	return true
+}
 
 // containerOption is one allowlisted docker create flag.
 type containerOption struct {
@@ -177,25 +343,36 @@ func AllowedContainerOptions() []string {
 	return out
 }
 
-// CheckWorkflowContainerOptions validates one workflow-controlled container.
-// field is the record prefix ("container" or "services.<id>"); the returned
-// refusal names field+".options" or field+".volumes".
+// CheckWorkflowContainerOptions validates one workflow-controlled container
+// under the historical fail-closed policy (every grant refused). It is the
+// default the tests and callers that do not carry a runner policy use.
 func CheckWorkflowContainerOptions(field, options string, volumes []string) *ContainerOptionRefusal {
-	if r := checkWorkflowOptions(field+".options", options); r != nil {
+	return CheckWorkflowContainerOptionsWith(ContainerPolicy{}, field, options, volumes)
+}
+
+// CheckWorkflowContainerOptionsWith validates one workflow-controlled
+// container under a policy: the server's at creation (grantable shapes deferred
+// to the runner) and a runner's own at plan time (where the host-level grant is
+// decided). field is the record prefix ("container" or "services.<id>").
+func CheckWorkflowContainerOptionsWith(pol ContainerPolicy, field, options string, volumes []string) *ContainerOptionRefusal {
+	if r := checkWorkflowOptionsWith(pol, field+".options", options); r != nil {
 		return r
 	}
-	if len(volumes) > 0 {
-		v := volumes[0]
-		return &ContainerOptionRefusal{
-			Field: field + ".volumes", Option: v,
-			Reason: fmt.Sprintf("%s declares volume %q, which is refused: workflow-supplied mounts are never allowed (the runner provides its own workspace volume; a bind mount of a host path is host filesystem access, not a job resource)", field+".volumes", v),
+	for _, v := range volumes {
+		if ok, reason := pol.allowsVolume(field+".volumes", v); !ok {
+			return &ContainerOptionRefusal{Field: field + ".volumes", Option: v, Reason: reason}
 		}
 	}
 	return nil
 }
 
+// grantableOption reports a workflow flag that a runner operator may grant.
+func grantableOption(name string) bool {
+	return name == "--privileged" || name == "--cap-add"
+}
+
 // checkWorkflowOptions walks the flag string exactly as the runner will.
-func checkWorkflowOptions(field, options string) *ContainerOptionRefusal {
+func checkWorkflowOptionsWith(pol ContainerPolicy, field, options string) *ContainerOptionRefusal {
 	tokens := SplitOptions(options)
 	for i := 0; i < len(tokens); i++ {
 		tok := tokens[i]
@@ -204,8 +381,33 @@ func checkWorkflowOptions(field, options string) *ContainerOptionRefusal {
 		}
 		name, inline, hasInline := containerOptionToken(tok)
 		spec, ok := containerOptionAllowlist[name]
+		if !ok && grantableOption(name) {
+			if !pol.DeferGrantable && !pol.Privileged {
+				reason := fmt.Sprintf("%s carries %q, which is refused: privileged mode and added capabilities are not granted on this runner; its operator must set --container-privileged (and such a runner is excluded from fork runs, D-8)", field, tok)
+				return &ContainerOptionRefusal{Field: field, Option: tok, Reason: reason}
+			}
+			// A grantable flag still takes a real value and is never another
+			// flag; validating it keeps the argv well-formed. `--privileged`
+			// takes no value at all (docker refuses `--privileged=true`).
+			if name == "--privileged" && hasInline {
+				reason := fmt.Sprintf("%s carries %q, which is refused: --privileged takes no value", field, tok)
+				return &ContainerOptionRefusal{Field: field, Option: tok, Reason: reason}
+			}
+			if hasInline && !validGenericOptionValue(inline) {
+				reason := fmt.Sprintf("%s carries %q, which is refused: the value is not one docker token", field, tok)
+				return &ContainerOptionRefusal{Field: field, Option: tok, Reason: reason}
+			}
+			if !hasInline && name == "--cap-add" {
+				if i+1 >= len(tokens) || !validGenericOptionValue(tokens[i+1]) {
+					reason := fmt.Sprintf("%s carries %q without a capability name", field, tok)
+					return &ContainerOptionRefusal{Field: field, Option: tok, Reason: reason}
+				}
+				i++
+			}
+			continue
+		}
 		if !ok {
-			reason := fmt.Sprintf("%s carries %q, which is refused: workflow container options are limited to resource/confinement flags (%s); privileged mode, host namespaces, added capabilities, devices, security options and mounts are never workflow-controlled", field, tok, strings.Join(AllowedContainerOptions(), ", "))
+			reason := fmt.Sprintf("%s carries %q, which is refused: workflow container options are limited to resource/confinement flags (%s); host namespaces, devices, security options and mounts are never workflow-controlled", field, tok, strings.Join(AllowedContainerOptions(), ", "))
 			return &ContainerOptionRefusal{Field: field, Option: tok, Reason: reason}
 		}
 		if !spec.value {
@@ -313,15 +515,18 @@ func SplitOptions(s string) []string {
 	return out
 }
 
-// containerOptionRefusalReason applies the policy to a job spec's container and
-// every service. A nil refusal means the job may run. Sorted service ids give a
-// deterministic refusal for a job with two offending sidecars.
+// containerOptionRefusalReason applies the SERVER creation-time policy to a
+// job spec's container and every service. A nil refusal means the job may be
+// created; grantable flags and allow-listed volumes are deferred to the runner
+// that claims it. Sorted service ids give a deterministic refusal for a job with
+// two offending sidecars.
 func containerOptionRefusalReason(spec *Spec) *ContainerOptionRefusal {
+	pol := ServerContainerPolicy()
 	if spec == nil {
 		return nil
 	}
 	if spec.Container != nil {
-		if r := CheckWorkflowContainerOptions("container", spec.Container.Options, spec.Container.Volumes); r != nil {
+		if r := CheckWorkflowContainerOptionsWith(pol, "container", spec.Container.Options, spec.Container.Volumes); r != nil {
 			return r
 		}
 	}
@@ -332,7 +537,7 @@ func containerOptionRefusalReason(spec *Spec) *ContainerOptionRefusal {
 	sort.Strings(ids)
 	for _, id := range ids {
 		svc := spec.Services[id]
-		if r := CheckWorkflowContainerOptions("services."+id, svc.Options, svc.Volumes); r != nil {
+		if r := CheckWorkflowContainerOptionsWith(pol, "services."+id, svc.Options, svc.Volumes); r != nil {
 			return r
 		}
 	}

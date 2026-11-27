@@ -211,6 +211,10 @@ type PlanInput struct {
 	RunnerName string
 	// Caps is the server's artifact cap advertisement (ExecInput.Caps).
 	Caps threads.ArtifactCaps
+	// Policy is the runner operator's container grants (PAR-179).
+	Policy threads.ContainerPolicy
+	// CacheCaps is the server's cache cap advertisement (ExecInput.CacheCaps).
+	CacheCaps threads.CacheCaps
 }
 
 // Names are the docker object names of one job attempt.
@@ -228,6 +232,10 @@ type Plan struct {
 	Names   Names
 	// Workspace is the in-container working directory.
 	Workspace string
+	// NetworkMode is the docker network the job, its services and docker
+	// actions join: the per-job network unless the operator's container policy
+	// names one (PAR-179).
+	NetworkMode string
 	// Image is the reference actually created (after the image-prefix
 	// rewrite); RequestedImage is what the workflow (or --image) named, and
 	// differs only when the rewrite changed it.
@@ -299,6 +307,18 @@ type Plan struct {
 	OutputTemplates map[string]string
 	// ArtifactCaps are the server's upload caps (zero = the service defaults).
 	ArtifactCaps threads.ArtifactCaps
+	// Policy is the runner operator's container grants (PAR-179). The zero
+	// value is the fail-closed default.
+	Policy threads.ContainerPolicy
+	// DockerHost is the docker endpoint granted to the JOB container only
+	// ("" = none). It is never given to a docker action, a service or a step
+	// environment built by a workflow.
+	DockerHost string
+	// CacheCaps are the server's cache limits (zero = the service defaults).
+	CacheCaps threads.CacheCaps
+	// deferred are the `actions/cache` saves performed at the end of a green
+	// job (docs/threads.md §3.4c). Per-plan, so concurrent jobs never share it.
+	deferred []*CacheStep
 	// Actions are the repository-local action definitions embedded in the job
 	// payload at creation (docs/threads.md §3.4a). They are pinned to the run
 	// commit; the runner never reads a repository, so an expansion can never
@@ -393,11 +413,22 @@ type StepPlan struct {
 	// Artifact is set for the two built-in artifact actions (15 §2.5):
 	// upload-artifact / download-artifact.
 	Artifact *ArtifactStep
+	// Cache is set for the built-in cache actions (PAR-095): actions/cache,
+	// actions/cache/restore and actions/cache/save.
+	Cache *CacheStep
 	// Template holds the step's fields after the plan-time matrix/inputs
 	// substitution and before the run-time `steps.<id>.outputs.*`
 	// substitution. The executor re-resolves the step against the outputs
 	// collected so far before it runs (ResolveStep).
 	Template *StepTemplate
+	// Background markers and the control-step directives (PAR-080).
+	Background bool
+	Wait       string
+	WaitAll    bool
+	Cancel     string
+	// Parallel is the resolved member list of a `parallel:` group. The group's
+	// Kind is "parallel"; members run concurrently and are reported in order.
+	Parallel []StepPlan
 }
 
 // CompositePlan is one expanded local composite action.
@@ -446,6 +477,11 @@ type StepTemplate struct {
 	// inner step: it resolves first, so the step's own `env:` reads the layer
 	// below it.
 	Inherited map[string]string
+	// ActionPath is the in-container directory of the composite action this
+	// step belongs to (PAR-074): the value `${{ github.action_path }}` has in a
+	// composite action's OWN steps. Empty for a workflow step, where the parser
+	// refuses the reference.
+	ActionPath string
 }
 
 // BuildPlan validates the spec and resolves one job into docker argv.
@@ -471,6 +507,9 @@ func BuildPlan(in PlanInput) (*Plan, error) {
 		requestedImage = image
 	}
 	if err := ValidateImageConfig(in.Images); err != nil {
+		return nil, err
+	}
+	if err := threads.ValidateContainerPolicy(in.Policy); err != nil {
 		return nil, err
 	}
 	// The image-prefix rewrite applies to the runner's own default image too:
@@ -588,10 +627,17 @@ func BuildPlan(in PlanInput) (*Plan, error) {
 		return nil, eerr
 	}
 	runnerCtx := runnerContext(buildEnv, runnerName)
+	networkMode := names.Network
+	if in.Policy.Network != "" {
+		networkMode = in.Policy.Network
+	}
 	p := &Plan{
 		JobRef: job.JobRef, Attempt: job.Attempt,
 		Names: names, Workspace: ws, Image: image, RequestedImage: requestedImage,
+		NetworkMode: networkMode,
 		Images:      in.Images,
+		Policy:      in.Policy,
+		DockerHost:  strings.TrimSpace(in.Policy.DockerHost),
 		CheckoutSHA: job.Commit, Secrets: secretEnv, Mask: mask,
 		ServerURL:           serverBase,
 		JobToken:            in.AttemptToken,
@@ -600,6 +646,7 @@ func BuildPlan(in PlanInput) (*Plan, error) {
 		Vars: job.Vars, Runner: runnerCtx, EventJSON: eventJSON,
 		Needs:        job.NeedsOutputs,
 		ArtifactCaps: in.Caps,
+		CacheCaps:    in.CacheCaps,
 		Actions:      spec.Actions,
 	}
 	// The job's output templates stay as authored: every reference (github,
@@ -645,6 +692,9 @@ func BuildPlan(in PlanInput) (*Plan, error) {
 			return nil, err
 		}
 		p.Steps = append(p.Steps, planned...)
+	}
+	if err := validateBackgroundPlan(p.Steps); err != nil {
+		return nil, err
 	}
 	return p, nil
 }
@@ -954,7 +1004,7 @@ func headerValue(v string) string {
 func containerArgv(p *Plan, spec *threads.Spec) ([]string, error) {
 	argv := []string{
 		"create", "--name", p.Names.Container,
-		"--network", p.Names.Network,
+		"--network", p.NetworkMode,
 		"--network-alias", "job",
 		"--add-host", "host.docker.internal:host-gateway",
 		"--workdir", p.Workspace,
@@ -966,15 +1016,25 @@ func containerArgv(p *Plan, spec *threads.Spec) ([]string, error) {
 		"--mount", "type=volume,source=" + p.Names.Volume + ",target=" + p.Workspace,
 	}
 	if spec.Container != nil {
-		// The workflow's options and volumes pass the secure-by-default
-		// allowlist BEFORE a single argv element is produced: a refused job
-		// must not start (docs/threads.md §8.7).
-		if err := checkWorkflowContainer("container", spec.Container.Options, spec.Container.Volumes); err != nil {
+		// The workflow's options and volumes pass the runner operator's policy
+		// BEFORE a single argv element is produced: a refused job must not
+		// start (docs/threads.md §8.7).
+		if err := checkWorkflowContainer(p.Policy, "container", spec.Container.Options, spec.Container.Volumes); err != nil {
 			return nil, err
 		}
 		argv = append(argv, splitOptions(spec.Container.Options)...)
 		for _, v := range spec.Container.Volumes {
 			argv = append(argv, "--volume", v)
+		}
+	}
+	// The operator's docker-endpoint grant (PAR-179/D-8) reaches the JOB
+	// container only. A unix socket is bind-mounted at the same path (a
+	// tcp:// endpoint needs only the environment), and the grant wins over an
+	// authored DOCKER_HOST. Docker-action containers and services never receive
+	// it (dockerRunArgv excludes it and services get no job env).
+	if p.DockerHost != "" {
+		if sock, ok := strings.CutPrefix(p.DockerHost, "unix://"); ok {
+			argv = append(argv, "--mount", "type=bind,source="+sock+",target="+sock)
 		}
 	}
 	keys := make([]string, 0, len(p.ContainerEnv))
@@ -984,6 +1044,9 @@ func containerArgv(p *Plan, spec *threads.Spec) ([]string, error) {
 	sort.Strings(keys)
 	for _, k := range keys {
 		argv = append(argv, "--env", k+"="+p.ContainerEnv[k])
+	}
+	if p.DockerHost != "" {
+		argv = append(argv, "--env", "DOCKER_HOST="+p.DockerHost)
 	}
 	// The runner owns the container's lifetime command (GitHub's runner does
 	// the same): the image entrypoint is overridden so the container idles
@@ -1006,12 +1069,12 @@ func servicePlan(p *Plan, id string, svc threads.ServiceSpec) (ServicePlan, erro
 	}
 	// A sidecar's options and mounts are workflow-controlled exactly like the
 	// job container's, and they land on the same daemon (docs/threads.md §8.7).
-	if err := checkWorkflowContainer("services."+id, svc.Options, svc.Volumes); err != nil {
+	if err := checkWorkflowContainer(p.Policy, "services."+id, svc.Options, svc.Volumes); err != nil {
 		return ServicePlan{}, err
 	}
 	argv := []string{
 		"create", "--name", name,
-		"--network", p.Names.Network,
+		"--network", p.NetworkMode,
 		"--network-alias", id,
 		"--pull=" + p.Images.pull(),
 	}
@@ -1073,13 +1136,25 @@ type expandCtx struct {
 	parent  string
 	env     map[string]string
 	workdir string
+	// actionDir is the in-container directory of the composite action whose
+	// own steps are being planned (`${{ github.action_path }}`, PAR-074); empty
+	// for a workflow step.
+	actionDir string
 }
 
 // planStep resolves one authored step into one or more plans. A plain step is
 // one plan; a local composite action becomes one composite plan holding its
-// expanded inner steps (recursively), which the executor runs in order. next is
-// the flat execution index (unique output files for inner steps).
+// expanded inner steps (recursively), which the executor runs in order; a
+// `parallel:` group becomes one group plan holding its members; a control step
+// (`wait`/`wait-all`/`cancel`) becomes one directive. next is the flat execution
+// index (unique output files for inner steps).
 func planStep(p *Plan, index int, st threads.StepSpec, ctx expandCtx, next *int) ([]StepPlan, error) {
+	if len(st.Parallel) > 0 {
+		return planParallelStep(p, index, st, ctx, next)
+	}
+	if isControlStep(st) {
+		return planControlStep(p, index, st, ctx)
+	}
 	uses := strings.TrimSpace(st.Uses)
 	if threads.IsLocalAction(uses) {
 		return planLocalAction(p, index, st, ctx, next)
@@ -1092,6 +1167,122 @@ func planStep(p *Plan, index int, st threads.StepSpec, ctx expandCtx, next *int)
 		return nil, err
 	}
 	return []StepPlan{sp}, nil
+}
+
+// isControlStep reports a step that only waits for or cancels background work.
+func isControlStep(st threads.StepSpec) bool {
+	return strings.TrimSpace(st.Wait) != "" || st.WaitAll || strings.TrimSpace(st.Cancel) != ""
+}
+
+// planControlStep plans a `wait`/`wait-all`/`cancel` directive. It executes no
+// process, allocates no output file and therefore does not advance the flat
+// index; it is resolved (name/if) and run by the executor against the job's
+// background set.
+func planControlStep(p *Plan, index int, st threads.StepSpec, ctx expandCtx) ([]StepPlan, error) {
+	wait, cancel := strings.TrimSpace(st.Wait), strings.TrimSpace(st.Cancel)
+	if wait != "" && (st.WaitAll || cancel != "") || st.WaitAll && cancel != "" {
+		return nil, fmt.Errorf("step %d: wait, wait-all and cancel are mutually exclusive", index+1)
+	}
+	if strings.TrimSpace(st.Run) != "" || strings.TrimSpace(st.Uses) != "" {
+		return nil, fmt.Errorf("step %d: a wait/cancel step runs no process, so run/uses is refused", index+1)
+	}
+	sp := StepPlan{
+		Index: index, Parent: ctx.parent, Kind: "control",
+		ID:              strings.ToLower(strings.TrimSpace(st.ID)),
+		ContinueOnError: st.ContinueOnError,
+		Wait:            wait, WaitAll: st.WaitAll, Cancel: cancel,
+		Template: &StepTemplate{Name: st.Name, If: st.If},
+	}
+	return []StepPlan{sp}, nil
+}
+
+// planParallelStep plans a `parallel:` group: every member is an ordinary
+// run/uses step, each with its own output file, and the group is one unit in
+// the log and the job's step list. Nested groups and background/control members
+// are refused by name (a two-level concurrency model is not documented, and a
+// background member would have no job-end ordering).
+func planParallelStep(p *Plan, index int, st threads.StepSpec, ctx expandCtx, next *int) ([]StepPlan, error) {
+	if ctx.depth != 1 {
+		return nil, fmt.Errorf("step %d: parallel groups are not accepted inside a composite action", index+1)
+	}
+	if st.Background || isControlStep(st) {
+		return nil, fmt.Errorf("step %d: a parallel group cannot itself be background, wait or cancel", index+1)
+	}
+	if strings.TrimSpace(st.Run) != "" || strings.TrimSpace(st.Uses) != "" {
+		return nil, fmt.Errorf("step %d: a parallel group takes only member steps, not run/uses", index+1)
+	}
+	group := StepPlan{
+		Index: index, Parent: ctx.parent, Kind: "parallel",
+		ID:              strings.ToLower(strings.TrimSpace(st.ID)),
+		ContinueOnError: st.ContinueOnError,
+		Template:        &StepTemplate{Name: st.Name, If: st.If},
+	}
+	for i, child := range st.Parallel {
+		if child.Background || isControlStep(child) || len(child.Parallel) > 0 {
+			return nil, fmt.Errorf("step %d: parallel member %d: a member is an ordinary run/uses step (background, wait/cancel and nested parallel are refused)", index+1, i+1)
+		}
+		if strings.TrimSpace(child.Run) == "" && strings.TrimSpace(child.Uses) == "" {
+			return nil, fmt.Errorf("step %d: parallel member %d has neither run nor uses", index+1, i+1)
+		}
+		planned, err := planStep(p, index, child, ctx, next)
+		if err != nil {
+			return nil, fmt.Errorf("step %d: parallel member %d: %w", index+1, i+1, err)
+		}
+		group.Parallel = append(group.Parallel, planned...)
+	}
+	if len(group.Parallel) == 0 {
+		return nil, fmt.Errorf("step %d: a parallel group has no member steps", index+1)
+	}
+	return []StepPlan{group}, nil
+}
+
+// validateBackgroundPlan enforces PAR-080's structure after planning: a
+// background step is addressable, a control step names a background step that
+// runs earlier, and neither appears inside a composite action (where the
+// executor has no job-end ordering for it).
+func validateBackgroundPlan(steps []StepPlan) error {
+	background := map[string]bool{}
+	var walk func(steps []StepPlan, inComposite bool) error
+	walk = func(steps []StepPlan, inComposite bool) error {
+		for _, st := range steps {
+			if inComposite && (st.Background || st.Kind == "control" || st.Kind == "parallel") {
+				return fmt.Errorf("step %d: background, wait/cancel and parallel steps are not accepted inside a composite action", st.Index+1)
+			}
+			switch st.Kind {
+			case "control":
+				if st.ID != "" {
+					return fmt.Errorf("step %d: a wait/cancel step runs no process and cannot own an id", st.Index+1)
+				}
+				for _, ref := range []string{st.Wait, st.Cancel} {
+					if ref == "" || strings.EqualFold(ref, "all") {
+						continue
+					}
+					if !background[strings.ToLower(ref)] {
+						return fmt.Errorf("step %d: names background step %q, which is not a background step started earlier", st.Index+1, ref)
+					}
+				}
+			case "parallel":
+				// Members are ordinary steps; nothing to validate here.
+			default:
+				if st.Background {
+					if st.ID == "" {
+						return fmt.Errorf("step %d: a background step needs an id so a later step can wait for or cancel it", st.Index+1)
+					}
+					if st.Kind != "run" && st.Kind != "docker" {
+						return fmt.Errorf("step %d: background is accepted only on a run or docker step", st.Index+1)
+					}
+					background[st.ID] = true
+				}
+			}
+			if st.Composite != nil {
+				if err := walk(st.Composite.Steps, true); err != nil {
+					return err
+				}
+			}
+		}
+		return nil
+	}
+	return walk(steps, false)
 }
 
 // planLocalAction expands a `uses: ./<path>` step: a composite action becomes
@@ -1175,7 +1366,8 @@ func planCompositeStep(p *Plan, index int, st threads.StepSpec, def threads.Acti
 	caller := StepPlan{
 		Index: index, Parent: ctx.parent, ID: strings.ToLower(strings.TrimSpace(st.ID)),
 		Kind: "composite", Uses: st.Uses, ContinueOnError: st.ContinueOnError,
-		Composite: &CompositePlan{Path: dir, Outputs: def.Outputs},
+		Background: st.Background,
+		Composite:  &CompositePlan{Path: dir, Outputs: def.Outputs},
 		Template: &StepTemplate{
 			Name: st.Name, If: st.If, Uses: st.Uses,
 		},
@@ -1183,7 +1375,8 @@ func planCompositeStep(p *Plan, index int, st threads.StepSpec, def threads.Acti
 	if st.TimeoutMinutes > 0 {
 		caller.Timeout = time.Duration(st.TimeoutMinutes) * time.Minute
 	}
-	inner := expandCtx{depth: ctx.depth + 1, parent: parent, env: childEnv, workdir: base}
+	inner := expandCtx{depth: ctx.depth + 1, parent: parent, env: childEnv, workdir: base,
+		actionDir: containerDir(p.Workspace, dir)}
 	inner.stack = append(append([]string{}, ctx.stack...), dir)
 	for i, child := range def.Steps {
 		planned, err := planStep(p, index, child, inner, next)
@@ -1231,6 +1424,7 @@ func planDockerStep(p *Plan, index int, st threads.StepSpec, dp *DockerPlan, wit
 		Index: index, Parent: ctx.parent, Kind: "docker", Uses: st.Uses,
 		ID:              strings.ToLower(strings.TrimSpace(st.ID)),
 		ContinueOnError: st.ContinueOnError, Docker: dp,
+		Background: st.Background,
 		Template: &StepTemplate{
 			Name:             st.Name,
 			If:               st.If,
@@ -1239,6 +1433,7 @@ func planDockerStep(p *Plan, index int, st threads.StepSpec, dp *DockerPlan, wit
 			With:             copyStrings(with),
 			Env:              copyStrings(env),
 			Inherited:        copyStrings(ctx.env),
+			ActionPath:       ctx.actionDir,
 		},
 	}
 	if st.TimeoutMinutes > 0 {
@@ -1327,12 +1522,14 @@ func stepPlan(p *Plan, index int, st threads.StepSpec, ctx expandCtx, next *int)
 		With:             copyStrings(st.With),
 		Env:              copyStrings(env),
 		Inherited:        copyStrings(ctx.env),
+		ActionPath:       ctx.actionDir,
 	}
 	sp := StepPlan{
 		Index:           index,
 		Parent:          ctx.parent,
 		ID:              strings.ToLower(strings.TrimSpace(st.ID)),
 		ContinueOnError: st.ContinueOnError,
+		Background:      st.Background,
 		Template:        tmpl,
 	}
 	sp.OutputIndex = *next
@@ -1391,7 +1588,7 @@ func resolveStep(p *Plan, sp StepPlan, outputs map[string]map[string]string, str
 	for k, v := range p.Env {
 		lower[k] = v
 	}
-	inherited, err := p.resolveEnvLayer(t.Inherited, lower, outputs, strict)
+	inherited, err := p.resolveEnvLayer(t.Inherited, lower, outputs, strict, t.ActionPath)
 	if err != nil {
 		return sp, err
 	}
@@ -1437,7 +1634,7 @@ func resolveStep(p *Plan, sp StepPlan, outputs map[string]map[string]string, str
 	}
 	sort.Strings(sp.StepEnv)
 	expand := func(s string) (string, error) {
-		return p.expandValue(s, values, outputs, strict)
+		return p.expandValueAt(s, values, outputs, strict, t.ActionPath)
 	}
 	name, err := expand(t.Name)
 	if err != nil {
@@ -1449,6 +1646,12 @@ func resolveStep(p *Plan, sp StepPlan, outputs map[string]map[string]string, str
 	sp.Name = name
 	if sp.If, err = expand(t.If); err != nil {
 		return sp, err
+	}
+	// A control step and a parallel group run no command of their own: the
+	// executor resolves their members/directives at execution time. Returning
+	// here keeps the run/uses branch below from turning them into a `sh -c ""`.
+	if sp.Kind == "control" || sp.Kind == "parallel" {
+		return sp, nil
 	}
 	if sp.Run, err = expand(t.Run); err != nil {
 		return sp, err
@@ -1464,7 +1667,7 @@ func resolveStep(p *Plan, sp StepPlan, outputs map[string]map[string]string, str
 	}
 	sp.Uses = t.Uses
 	sp.WorkingDirectory = containerDir(p.Workspace, wd)
-	sp.Kind, sp.SkipReason, sp.Argv, sp.Artifact = "", "", nil, nil
+	sp.Kind, sp.SkipReason, sp.Argv, sp.Artifact, sp.Cache = "", "", nil, nil, nil
 	with := make(map[string]string, len(t.With))
 	for _, k := range sortedKeys(t.With) {
 		val, verr := expand(t.With[k])
@@ -1593,7 +1796,7 @@ func dockerActionName(p *Plan, outputIndex int) string {
 func dockerRunArgv(p *Plan, sp StepPlan, env map[string]string) []string {
 	argv := []string{
 		"run", "--name", dockerActionName(p, sp.OutputIndex),
-		"--network", p.Names.Network,
+		"--network", p.NetworkMode,
 		"--add-host", "host.docker.internal:host-gateway",
 		"--workdir", sp.WorkingDirectory,
 		"--pull=" + p.Images.pull(),
@@ -1606,9 +1809,11 @@ func dockerRunArgv(p *Plan, sp StepPlan, env map[string]string) []string {
 	for k := range env {
 		// Never: neither the job token nor any OIDC request material is part
 		// of a docker action's environment (the image is third-party code).
+		// DOCKER_HOST is the runner operator's grant to the JOB container, and
+		// a third-party action never inherits it (PAR-179/D-8).
 		if k == "SPINDLE_JOB_TOKEN" || k == "SPINDLE_ID_TOKEN_REQUEST_URL" ||
 			k == "ACTIONS_ID_TOKEN_REQUEST_URL" || k == "SPINDLE_ID_TOKEN_REQUEST_TOKEN" ||
-			k == "ACTIONS_ID_TOKEN_REQUEST_TOKEN" {
+			k == "ACTIONS_ID_TOKEN_REQUEST_TOKEN" || k == "DOCKER_HOST" {
 			continue
 		}
 		keys = append(keys, k)
@@ -1673,7 +1878,23 @@ func (p *Plan) substitute(s string, vals workflow.TemplateValues) (string, error
 // expandValue expands one step/site field against the environment layer at that
 // site (strict selects the execution rule; see resolveStep).
 func (p *Plan) expandValue(s string, env map[string]string, outputs map[string]map[string]string, strict bool) (string, error) {
+	return p.expandValueAt(s, env, outputs, strict, "")
+}
+
+// expandValueAt is expandValue with a per-step `github.action_path` override: a
+// composite action's own steps read the action's in-container directory
+// (PAR-074), and every other site has no such value (the parser refuses the
+// reference outside an action's steps).
+func (p *Plan) expandValueAt(s string, env map[string]string, outputs map[string]map[string]string, strict bool, actionPath string) (string, error) {
 	vals := p.stepValues(env, outputs, strict)
+	if actionPath != "" {
+		gh := make(map[string]string, len(vals.GitHub)+1)
+		for k, v := range vals.GitHub {
+			gh[k] = v
+		}
+		gh["action_path"] = actionPath
+		vals.GitHub = gh
+	}
 	if strict {
 		return p.substitute(s, vals)
 	}
@@ -1684,7 +1905,7 @@ func (p *Plan) expandValue(s string, env map[string]string, outputs map[string]m
 // below it. A whole-value `${{ secrets.X }}` entry reads the secret's value
 // here; the delivery rule (by NAME, never argv) belongs to the step's own
 // `env:` block and is applied by resolveStep.
-func (p *Plan) resolveEnvLayer(layer, lower map[string]string, outputs map[string]map[string]string, strict bool) (map[string]string, error) {
+func (p *Plan) resolveEnvLayer(layer, lower map[string]string, outputs map[string]map[string]string, strict bool, actionPath string) (map[string]string, error) {
 	if len(layer) == 0 {
 		return nil, nil
 	}
@@ -1829,6 +2050,29 @@ func planUses(p *Plan, sp *StepPlan, uses string, with map[string]string, env ma
 		}
 		sp.Kind = "artifact-download"
 		sp.Artifact = step
+	case cacheAction, cacheRestoreAction, cacheSaveAction:
+		step, err := parseCacheStep(base, uses, with)
+		if err != nil {
+			sp.Kind = "unsupported"
+			sp.SkipReason = err.Error()
+			return
+		}
+		switch base {
+		case cacheSaveAction:
+			sp.Kind = "cache-save"
+		case cacheRestoreAction:
+			sp.Kind = "cache-restore"
+		default:
+			sp.Kind = "cache"
+		}
+		sp.Cache = step
+	case "actions/setup-node", "actions/setup-go", "actions/setup-python", "actions/setup-java", "actions/setup-dotnet", "actions/setup-ruby":
+		// PAR-096: a setup-* action is marketplace code (a JS action with its
+		// own runtime), which this runner does not execute. The cache half IS
+		// supported: the refusal names the exact actions/cache step that
+		// replaces it, with the canonical key shape for that ecosystem.
+		sp.Kind = "unsupported"
+		sp.SkipReason = setupCacheRecipe(base, with)
 	default:
 		sp.Kind = "unsupported"
 		sp.SkipReason = fmt.Sprintf("unsupported action %q: spindle runs the built-in set (actions/checkout, actions/upload-artifact, actions/download-artifact), repository-local actions (uses: ./<path>) and docker:// images; there is no marketplace for remote actions", uses)
@@ -2308,12 +2552,12 @@ func splitOptions(s string) []string {
 	return threads.SplitOptions(s)
 }
 
-// checkWorkflowContainer applies the server's container option/mount allowlist
-// at plan time (defence in depth: the job must not start even if it was created
-// by an older or bypassed server). field is the record prefix the diagnostic
-// names ("container" or "services.<id>").
-func checkWorkflowContainer(field, options string, volumes []string) error {
-	if r := threads.CheckWorkflowContainerOptions(field, options, volumes); r != nil {
+// checkWorkflowContainer applies the container option/mount policy at plan time
+// with the runner's own grants (defence in depth: the job must not start even
+// if it was created by an older or bypassed server). field is the record prefix
+// the diagnostic names ("container" or "services.<id>").
+func checkWorkflowContainer(pol threads.ContainerPolicy, field, options string, volumes []string) error {
+	if r := threads.CheckWorkflowContainerOptionsWith(pol, field, options, volumes); r != nil {
 		return fmt.Errorf("%s", r.Reason)
 	}
 	return nil

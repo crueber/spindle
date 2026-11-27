@@ -31,8 +31,14 @@ import (
 
 	"github.com/crueber/spindle/internal/api"
 	"github.com/crueber/spindle/internal/config"
+	"github.com/crueber/spindle/internal/forksync"
+	"github.com/crueber/spindle/internal/identity"
+	"github.com/crueber/spindle/internal/mirror"
+	"github.com/crueber/spindle/internal/pushmirror"
+	"github.com/crueber/spindle/internal/repoimport"
 	"github.com/crueber/spindle/internal/server"
 	"github.com/crueber/spindle/internal/store"
+	"github.com/crueber/spindle/internal/threads"
 	"github.com/crueber/spindle/internal/wal"
 )
 
@@ -187,6 +193,18 @@ func TestPushFastPathZeroCollabRoundTrips(t *testing.T) {
 	defer reg.Close()
 	engine := server.NewWalEngine(reg, cfg)
 	env := api.NewEnv(cs, &repoRegistry{reg: reg, st: cs}, cfg, engine, "test", "test")
+
+	// -count=N re-runs this test in one process; the Seam-5 kind registries are
+	// process-global and panic on a duplicate, so each run starts and ends
+	// clean (the production contract stays panic-on-duplicate).
+	for _, reset := range []func(){
+		threads.ResetKindsForTest, identity.ResetKindsForTest,
+		forksync.ResetKindsForTest, mirror.ResetKindsForTest,
+		pushmirror.ResetKindsForTest, repoimport.ResetKindsForTest,
+	} {
+		reset()
+		t.Cleanup(reset)
+	}
 
 	// The shipped composition: every feature package mounted, require_read
 	// gate wired, mirror guard wired — the push below runs through all of it.

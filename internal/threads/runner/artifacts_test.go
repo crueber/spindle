@@ -89,7 +89,8 @@ func TestPlanArtifactStepNamedErrors(t *testing.T) {
 		{"bad name", artifactJob(map[string]string{"path": "d", "name": "a/b"}, nil), 0, "must use letters"},
 		{"absolute path", artifactJob(map[string]string{"path": "/etc/passwd"}, nil), 0, "must be relative to the workspace"},
 		{"climbing path", artifactJob(map[string]string{"path": "../secret"}, nil), 0, "escapes the workspace"},
-		{"unknown download key", artifactJob(map[string]string{"path": "d"}, map[string]string{"pattern": "x"}), 1, `unsupported with key "pattern"`},
+		{"unknown download key", artifactJob(map[string]string{"path": "d"}, map[string]string{"nope": "x"}), 1, `unsupported with key "nope"`},
+		{"bad download pattern", artifactJob(map[string]string{"path": "d"}, map[string]string{"pattern": "dist/[abc"}), 1, "invalid pattern"},
 		{"climbing destination", artifactJob(map[string]string{"path": "d"}, map[string]string{"path": "../../etc"}), 1, "escapes the workspace"},
 	}
 	for _, tc := range cases {
@@ -105,7 +106,7 @@ func TestPlanArtifactStepNamedErrors(t *testing.T) {
 	// A marketplace action still says so.
 	p, _ := BuildPlan(PlanInput{Job: &threads.FetchResult{Spec: &threads.Spec{Version: threads.SpecVersion, RunsOn: []string{"x"},
 		Steps: []threads.StepSpec{{Uses: "actions/setup-node"}}}}, AttemptToken: "t"})
-	if p.Steps[0].Kind != "unsupported" || !strings.Contains(p.Steps[0].SkipReason, "no marketplace") {
+	if p.Steps[0].Kind != "unsupported" || !strings.Contains(p.Steps[0].SkipReason, "marketplace JavaScript action") {
 		t.Fatalf("marketplace step = %+v", p.Steps[0])
 	}
 }
@@ -136,7 +137,7 @@ func TestMatchArtifactPaths(t *testing.T) {
 			"dist/a.txt", "dist/app.js", "dist/sub/b.txt", "dist/sub/deep/c.js"}},
 	}
 	for _, tc := range cases {
-		got, err := matchArtifactPaths(files, tc.patterns)
+		got, err := matchArtifactPaths(files, tc.patterns, false)
 		if err != nil {
 			t.Fatalf("%s: %v", tc.name, err)
 		}
@@ -144,7 +145,7 @@ func TestMatchArtifactPaths(t *testing.T) {
 			t.Fatalf("%s = %v, want %v", tc.name, got, tc.want)
 		}
 	}
-	if _, err := matchArtifactPaths(files, []string{"dist/[abc"}); err == nil {
+	if _, err := matchArtifactPaths(files, []string{"dist/[abc"}, false); err == nil {
 		t.Fatal("unterminated character class accepted")
 	}
 }
@@ -157,6 +158,11 @@ type fakeArtifacts struct {
 	finalized *threads.ArtifactFinalizeInput
 	manifest  *threads.Artifact
 	readErr   error
+	// list overrides the download-all answer; body overrides the blob bytes.
+	list              []*threads.Artifact
+	body              string
+	prepared          int
+	preparedOverwrite bool
 }
 
 func newFakeArtifacts() *fakeArtifacts {
@@ -196,6 +202,42 @@ func (f *fakeArtifacts) ArtifactManifest(_ context.Context, _, _ string, _ int, 
 	return f.manifest, nil
 }
 
+func (f *fakeArtifacts) PrepareArtifact(_ context.Context, _, _ string, _ int, _ string, overwrite bool) (bool, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.prepared++
+	f.preparedOverwrite = overwrite
+	existed := f.manifest != nil
+	if existed {
+		f.manifest = nil
+		f.uploaded = map[string]string{}
+	}
+	return existed, nil
+}
+
+func (f *fakeArtifacts) ArtifactList(_ context.Context, _, _ string, _ int, _ string) ([]*threads.Artifact, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.readErr != nil {
+		return nil, f.readErr
+	}
+	if f.list != nil {
+		return f.list, nil
+	}
+	if f.manifest == nil {
+		return nil, nil
+	}
+	return []*threads.Artifact{f.manifest}, nil
+}
+
+func (f *fakeArtifacts) ArtifactManifestFromRun(ctx context.Context, token, ref string, attempt int, _, name string) (*threads.Artifact, error) {
+	return f.ArtifactManifest(ctx, token, ref, attempt, name)
+}
+
+func (f *fakeArtifacts) GetArtifactBlobFromRun(ctx context.Context, token, ref string, attempt int, _, name string, index int) (io.ReadCloser, int64, error) {
+	return f.GetArtifactBlob(ctx, token, ref, attempt, name, index)
+}
+
 func (f *fakeArtifacts) GetArtifactBlob(_ context.Context, _, _ string, _ int, name string, index int) (io.ReadCloser, int64, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -204,7 +246,10 @@ func (f *fakeArtifacts) GetArtifactBlob(_ context.Context, _, _ string, _ int, n
 	}
 	for _, file := range f.manifest.Files {
 		if file.Index == index {
-			body := f.uploaded[file.Path]
+			body := f.body
+			if body == "" {
+				body = f.uploaded[file.Path]
+			}
 			return io.NopCloser(strings.NewReader(body)), int64(len(body)), nil
 		}
 	}

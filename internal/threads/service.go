@@ -139,14 +139,31 @@ func (s *Service) CreateRun(ctx context.Context, repo, commit, event string, opt
 		return nil, err
 	}
 	if !validEvent(event) {
-		return nil, fmt.Errorf("%w: event must be push|pull_request|workflow_dispatch|schedule, got %q", ErrInvalid, event)
+		return nil, fmt.Errorf("%w: event is not one Threads emits, got %q", ErrInvalid, event)
 	}
 	action := strings.TrimSpace(opts.Action)
-	if event == EventPullReq {
+	if event == EventPullReq || event == EventPullTarget {
 		if !workflow.ValidPullRequestType(action) {
-			return nil, fmt.Errorf("%w: pull_request action must be one of %s, got %q", ErrInvalid,
+			return nil, fmt.Errorf("%w: %s action must be one of %s, got %q", ErrInvalid, event,
 				strings.Join(workflow.PullRequestTypes, ", "), action)
 		}
+	}
+	if event == EventRepositoryDispatch {
+		if !workflow.ValidDispatchType(action) {
+			return nil, fmt.Errorf("%w: repository_dispatch event_type is required and must match [A-Za-z0-9._-]{1,100}, got %q", ErrInvalid, action)
+		}
+	}
+	if event == EventWorkflowRun {
+		if !containsFoldString(workflow.WorkflowRunTypes, action) {
+			return nil, fmt.Errorf("%w: workflow_run type must be one of %s, got %q", ErrInvalid,
+				strings.Join(workflow.WorkflowRunTypes, ", "), action)
+		}
+		if opts.ChainDepth > maxWorkflowRunChain {
+			return nil, fmt.Errorf("%w: workflow_run chain depth %d exceeds the %d-run cap (a follow-up chain must terminate)", ErrUnprocessable, opts.ChainDepth, maxWorkflowRunChain)
+		}
+	}
+	if (event == EventDeployment || event == EventDeploymentStatus) && opts.ChainDepth > maxWorkflowRunChain {
+		return nil, fmt.Errorf("%w: deployment event chain depth %d exceeds the %d-run cap", ErrUnprocessable, opts.ChainDepth, maxWorkflowRunChain)
 	}
 	if _, perr := EncodeEventPayload(opts.EventPayload); perr != nil {
 		return nil, perr
@@ -154,8 +171,13 @@ func (s *Service) CreateRun(ctx context.Context, repo, commit, event string, opt
 	if s.Git == nil {
 		return nil, fmt.Errorf("%w: git backend not wired", ErrUnavailable)
 	}
+	// Per-repository switches (PAR-015/PAR-118/PAR-153): one exact-key GET per
+	// event (run creation is off the push path, so this is not a hot-path
+	// read). An unreadable record fails closed — every switch off.
+	policy := s.loadRepoPolicy(ctx, owner, name)
 	// Trust class (15 §2/§5): the server decides, a workflow cannot opt in.
 	workflowCommit, trusted := sha, true
+	pullTarget := false
 	switch {
 	case event == EventPullReq && opts.Fork:
 		trusted = false
@@ -178,15 +200,79 @@ func (s *Service) CreateRun(ctx context.Context, repo, commit, event string, opt
 			return nil, nerr
 		}
 		workflowCommit = normalized
-	case event == EventRelease || event == EventIssues || event == EventIssueComment:
+	case event == EventPullTarget:
+		// D-2: pull_request_target runs the BASE branch's file with base
+		// secrets. It is off unless a maintainer enabled it per repository,
+		// and the run always reports the base tip (never the head).
+		if !policy.pullTarget {
+			return []*Run{}, nil
+		}
+		pullTarget = true
+		base := strings.TrimPrefix(strings.TrimSpace(opts.BaseBranch), "refs/heads/")
+		if base == "" {
+			return nil, fmt.Errorf("%w: pull_request_target needs its base branch", ErrInvalid)
+		}
+		resolved := strings.TrimSpace(opts.BaseCommit)
+		if resolved == "" {
+			r, rerr := s.Git.ResolveRef(ctx, repo, "refs/heads/"+base)
+			if rerr != nil {
+				return nil, rerr
+			}
+			resolved = r
+		}
+		normalized, nerr := normalizeSHA(resolved)
+		if nerr != nil {
+			return nil, nerr
+		}
+		workflowCommit, sha = normalized, normalized
+		opts.Branch, opts.Ref = base, "refs/heads/"+base
+	case event == EventRelease || event == EventIssues || event == EventIssueComment ||
+		event == EventRepositoryDispatch || event == EventWorkflowRun ||
+		event == EventCreate || event == EventDelete ||
+		event == EventDeployment || event == EventDeploymentStatus:
 		// GitHub's rule for the repository-level events: the workflow file is
-		// read from the DEFAULT branch, never from the release tag or the
-		// commenter's checkout. A release run still reports the tag commit.
+		// read from the DEFAULT branch, never from the release tag, the
+		// commenter's checkout or a deleted ref. A release run still reports
+		// the tag commit; a create/delete run reports the ref it names.
 		defaultCommit, rerr := s.Git.ResolveRef(ctx, repo, "HEAD")
 		if rerr != nil {
 			return nil, rerr
 		}
 		workflowCommit = defaultCommit
+		// GITHUB_BRANCH/GITHUB_REF for these events are the DEFAULT branch, not
+		// the ref the event names (a create/delete payload carries that in
+		// `ref`). The reader may be absent in tests; the caller's Branch then
+		// stays as-is.
+		if event == EventWorkflowRun || event == EventCreate || event == EventDelete ||
+			event == EventDeployment || event == EventDeploymentStatus {
+			if br, ok := s.Git.(DefaultBranchReader); ok {
+				if name, berr := br.DefaultBranch(ctx, repo); berr == nil && strings.TrimSpace(name) != "" {
+					opts.Branch = shortRefName(name)
+					if event != EventCreate && event != EventDelete {
+						opts.Ref = "refs/heads/" + opts.Branch
+					}
+				}
+			}
+		}
+	}
+	headSHA := sha
+	// Merge-ref semantics (PAR-024): a pull_request runs the server-side
+	// simulated merge commit, so a conflict that only exists after the merge
+	// goes red. The commit is computed from base + head by git (never read from
+	// the contributor), made in the serving copy, and reported as
+	// refs/pull/<n>/merge. If the merge conflicts (or the reader cannot build
+	// one) the run falls back to the head commit and says so in the payload —
+	// fail closed, never a fabricated sha.
+	if event == EventPullReq && opts.PullNumber > 0 {
+		if mergeSHA, ok := s.mergeRefCommit(ctx, repo, opts, headSHA, policy); ok {
+			sha = mergeSHA
+			opts.Ref = fmt.Sprintf("refs/pull/%d/merge", opts.PullNumber)
+			if opts.EventPayload != nil {
+				if pr, isMap := opts.EventPayload["pull_request"].(map[string]any); isMap {
+					pr["merge_commit_sha"] = mergeSHA
+				}
+			}
+		}
 	}
 	files, err := Discover(ctx, s.Git, repo, workflowCommit)
 	if err != nil {
@@ -225,7 +311,7 @@ func (s *Service) CreateRun(ctx context.Context, repo, commit, event string, opt
 		}
 		from := strings.TrimSpace(opts.BaseSHA)
 		mergeBase := false
-		if event == EventPullReq && from == "" && strings.TrimSpace(opts.BaseBranch) != "" {
+		if (event == EventPullReq || event == EventPullTarget) && from == "" && strings.TrimSpace(opts.BaseBranch) != "" {
 			base := strings.TrimPrefix(strings.TrimSpace(opts.BaseBranch), "refs/heads/")
 			resolved, rerr := s.Git.ResolveRef(ctx, repo, "refs/heads/"+base)
 			if rerr != nil {
@@ -233,16 +319,25 @@ func (s *Service) CreateRun(ctx context.Context, repo, commit, event string, opt
 			}
 			from = resolved
 		}
-		if event == EventPullReq && from != "" {
+		if event == EventPullReq || event == EventPullTarget {
 			mergeBase = true
 		}
-		changed, err = dr.DiffNames(ctx, repo, from, sha, mergeBase)
+		to := headSHA
+		if event == EventPullTarget && strings.TrimSpace(opts.PullHeadSHA) != "" {
+			to = strings.TrimSpace(opts.PullHeadSHA)
+		}
+		changed, err = dr.DiffNames(ctx, repo, from, to, mergeBase)
 		if err != nil {
 			return nil, err
 		}
 		pathsKnown = true
 	}
-	matched := SelectFilesWithChanges(files, event, kind, refName, action, want, changed, pathsKnown)
+	match := workflow.Match{
+		Event: event, Kind: kind, Ref: refName, Action: action,
+		Changed: changed, ChangedKnown: pathsKnown,
+		UpstreamWorkflow: strings.TrimSpace(opts.UpstreamWorkflow),
+	}
+	matched := SelectFilesMatching(files, match, want)
 	if len(matched) == 0 {
 		if event == EventDispatch && want != "" {
 			return nil, fmt.Errorf("%w: no workflow_dispatch workflow named %q", ErrNotFound, want)
@@ -259,15 +354,29 @@ func (s *Service) CreateRun(ctx context.Context, repo, commit, event string, opt
 	}
 	// First-time-contributor gate (15 §5.2): decided once per event, before any
 	// run exists, so every workflow file of one fork PR is held or released
-	// together.
+	// together. A workflow_run whose parent was untrusted is held too (D-3):
+	// approval per run, never automatic.
 	gate := s.needsApproval(ctx, owner, name, actor, opts, event)
+	approvalKind := ApprovalFork
+	if event == EventWorkflowRun && !opts.ParentTrusted {
+		gate, approvalKind = true, ApprovalWorkflowRun
+	}
+	// PAR-019 budget gate: the revision's own discovery already tells us
+	// whether any file declares workflow_run, so a repository with no follower
+	// pays nothing for the requested/completed emitters.
+	followers := declaresWorkflowRun(files)
 	runs := make([]*Run, 0, len(matched))
 	for _, f := range matched {
-		run, rerr := s.createOne(ctx, owner, name, sha, event, opts, f, workflowCommit, trusted, attempt, actor, gate)
+		run, rerr := s.createOne(ctx, owner, name, sha, event, opts, f, workflowCommit, trusted, attempt, actor, gate, approvalKind, policy, pullTarget, followers)
 		if rerr != nil {
 			return nil, rerr
 		}
 		runs = append(runs, run)
+		// PAR-019: the upstream `requested` edge. A store/git failure is logged
+		// and never fails the run that was just created.
+		if followers && run.State != RunPendingApproval {
+			s.detach(func(ctx context.Context) { s.emitWorkflowRun(ctx, run, "requested") })
+		}
 	}
 	return runs, nil
 }
@@ -294,7 +403,7 @@ func refTargetOf(event string, opts CreateOpts) (workflow.RefKind, string, strin
 
 // createOne writes one workflow file's run: jobs, then the header, then the
 // checks mirrors (a queued check must never exist for a run nobody can see).
-func (s *Service) createOne(ctx context.Context, owner, repo, sha, event string, opts CreateOpts, f *WorkflowFile, workflowCommit string, trusted bool, attempt int, actor string, gate bool) (*Run, error) {
+func (s *Service) createOne(ctx context.Context, owner, repo, sha, event string, opts CreateOpts, f *WorkflowFile, workflowCommit string, trusted bool, attempt int, actor string, gate bool, approvalKind string, policy repoPolicy, pullTarget, followers bool) (*Run, error) {
 	_, _, branch := refTargetOf(event, opts)
 	nowAt := s.nowUTC()
 	now := nowAt.Format(dateTimeFmt)
@@ -319,8 +428,19 @@ func (s *Service) createOne(ctx context.Context, owner, repo, sha, event string,
 		Inputs:       runInputs(opts),
 		EventPayload: opts.EventPayload,
 		CreatedAt:    now, UpdatedAt: now, Version: 1,
+		// PAR-118/D-13: a fork run's write capability is the repository
+		// switch's decision, recorded on the run it affects. A trusted run
+		// never needs the flag (its `permissions:` governs it).
+		WriteTokens:          !trusted && policy.sendWriteTokens,
+		ParentRunID:          strings.TrimSpace(opts.ParentRunID),
+		ParentTrusted:        opts.ParentTrusted,
+		ChainDepth:           opts.ChainDepth,
+		PRTarget:             pullTarget,
+		WorkflowRunFollowers: followers,
+		RepoConcurrencyCap:   policy.cap,
 	}
 	used := map[string]bool{}
+	crossRun := false
 	jobs := make([]*Job, 0, len(jobKeys))
 	// One resolver per workflow file: its jobs share action directories, and a
 	// definition is read from git once. It is pinned to the RUN commit (the
@@ -333,7 +453,10 @@ func (s *Service) createOne(ctx context.Context, owner, repo, sha, event string,
 	// The expansion is decided at run creation — the runner never sees a
 	// `uses:` job — and a bad reference is a failed job with a named reason,
 	// never a run-wide failure.
-	plan, perr := s.planJobDefs(ctx, repoID(owner, repo), sha, f, opts.Inputs)
+	plan, perr := s.planJobDefs(ctx, repoID(owner, repo), sha, f, opts.Inputs, planContext{
+		github: githubContext(run, f.Name), actor: actor, runID: runID,
+		runRepo: repoID(owner, repo),
+	})
 	if perr != nil {
 		return nil, perr
 	}
@@ -341,6 +464,11 @@ func (s *Service) createOne(ctx context.Context, owner, repo, sha, event string,
 		def := jd.def
 		display := jd.name
 		base := buildSpec(jd.wfName, jd.wf, def, jd.inputs)
+		// PAR-075: the call context and the closed secret set ride the job
+		// spec, so the runner's claim gets exactly the secrets the call passes
+		// and the needs fold can evaluate the caller's outputs.
+		base.Call = jd.call
+		base.ReusableSecrets = jd.secrets
 		if jd.cap != nil {
 			// PAR-075: a callee may narrow permissions, never widen them.
 			base.Permissions = downgradePermissions(jd.cap, base.Permissions)
@@ -418,6 +546,32 @@ func (s *Service) createOne(ctx context.Context, owner, repo, sha, event string,
 					job.Reason = reason
 				}
 			}
+			// Cross-run artifact consumption (PAR-098, D-3): a fork run and a
+			// secrets-bearing job are refused by name here, and any remaining
+			// consumer holds the run for a maintainer's approval below. Decided
+			// before the job record is written, so no queue entry ever exists for
+			// a refused job.
+			if job.State == JobQueued {
+				if reason := crossRunJobRefusal(job, trusted); reason != "" {
+					job.State = JobFailure
+					job.CompletedAt = &now
+					job.Reason = reason
+				} else if jobWantsCrossRun(job) {
+					crossRun = true
+				}
+				// D-2's second switch: a pull_request_target job that names the PR
+				// head in actions/checkout is refused at plan time unless the
+				// repository enabled `pr_target_allow_head_checkout`. A run step can
+				// still fetch the head itself (the residual S5 records); this is the
+				// plan-time refusal for the declarative form.
+				if job.State == JobQueued && pullTarget && !policy.prTargetHead {
+					if reason, refused := prTargetHeadCheckoutRefusal(spec); refused {
+						job.State = JobFailure
+						job.CompletedAt = &now
+						job.Reason = reason
+					}
+				}
+			}
 			// The deployment-environment decision (docs/PLAN-THREADS-ENVIRONMENTS.md
 			// §5): an undefined environment fails the job (fail closed), a defined
 			// one carries its deployment record, and one with required reviewers
@@ -445,13 +599,21 @@ func (s *Service) createOne(ctx context.Context, owner, repo, sha, event string,
 	// WHICH deployment is waiting instead of a generic "pending approval".
 	if gate {
 		run.State = RunPendingApproval
-		run.ApprovalKind = ApprovalFork
+		run.ApprovalKind = approvalKind
 	}
 	gatedEnvs := pendingEnvironments(jobs)
 	if len(gatedEnvs) > 0 {
 		run.State = RunPendingApproval
 		run.ApprovalKind = ApprovalEnvironment
 		run.Environments = gatedEnvs
+	}
+	// The cross-run hold (D-3). An environment hold takes precedence (its
+	// reviewers decide a stricter gate); a run that needs BOTH is documented as
+	// unsupported and its cross-run step is refused at the download with the
+	// rule named, never silently allowed.
+	if crossRun && run.State != RunPendingApproval {
+		run.State = RunPendingApproval
+		run.ApprovalKind = ApprovalCrossRun
 	}
 	body, _ := json.Marshal(run) // cannot fail: the record is pure JSON types
 	if perr := s.putCreate(ctx, RunKey(owner, repo, runID), body); perr != nil {
@@ -460,6 +622,22 @@ func (s *Service) createOne(ctx context.Context, owner, repo, sha, event string,
 		}
 		return nil, perr
 	}
+	// PAR-153: the per-repository concurrency cap. A run created while the cap
+	// is saturated keeps its jobs queued (not enqueued) and names the reason on
+	// its header; releaseHeldRuns enqueues it when a slot frees. The count is
+	// one LIST, and only when the repository configured a cap (0 = unlimited),
+	// so an ordinary repository pays nothing.
+	heldByCap := false
+	if policy.cap > 0 && run.State == RunQueued {
+		held, herr := s.applyCapacityGate(ctx, owner, repo, runID, policy.cap, now)
+		if herr != nil {
+			return nil, herr
+		}
+		if held {
+			run.HoldReason = capacityHoldReason(policy.cap)
+			heldByCap = true
+		}
+	}
 	// Implicit supersede (PAR-150): the head for this (workflow, ref) is adopted
 	// in its own goroutine here — immediately after the run header committed, so
 	// a head id always names a visible run, and concurrently with the checks
@@ -467,11 +645,18 @@ func (s *Service) createOne(ctx context.Context, owner, repo, sha, event string,
 	// creation. Its verdict is applied after the enqueue, so a superseded run is
 	// always inspectable before it is cancelled. A run the workflow gave a
 	// concurrency group, or an event that does not supersede, starts nothing.
-	supersede := s.startSupersede(ctx, owner, repo, run, event, opts.Action)
+	// A capacity-held run supersedes nothing: it is not in flight.
+	var supersede *supersedePending
+	if !heldByCap {
+		supersede = s.startSupersede(ctx, owner, repo, run, event, opts.Action)
+	}
 	for _, job := range jobs {
 		if cerr := s.reportCheck(ctx, run, job); cerr != nil {
 			return nil, cerr
 		}
+	}
+	if heldByCap {
+		return run, nil
 	}
 	settle := func() (*Run, error) {
 		// The adoption overlapped the checks/enqueue writes; joining it here
@@ -740,6 +925,7 @@ func (s *Service) GetRun(ctx context.Context, repo, runID string, p auth.Princip
 		return nil, aerr
 	}
 	s.fillDurations(run, jobs)
+	s.annotateQueueReasons(ctx, owner, name, run, jobs)
 	av := s.ApprovalFor(ctx, owner, name, run, p)
 	return &RunView{Run: run, Jobs: jobs, Artifacts: arts, Approval: &av}, nil
 }
@@ -1191,6 +1377,7 @@ func (s *Service) foldRun(ctx context.Context, owner, repo, runID string) ([]*Jo
 	now := s.nowUTC().Format(dateTimeFmt)
 	key := RunKey(owner, repo, runID)
 	var released []string
+	becameTerminal := false
 	_, err = s.casUpdate(ctx, key, 5, func(cur []byte, _ store.Version) ([]byte, bool, error) {
 		if cur == nil {
 			return nil, false, fmt.Errorf("%w: unknown run %q", ErrNotFound, runID)
@@ -1207,6 +1394,9 @@ func (s *Service) foldRun(ctx context.Context, owner, repo, runID string) ([]*Jo
 		// (that would release it without a decision).
 		if run.State == RunPendingApproval && state == RunQueued {
 			return nil, false, nil
+		}
+		if terminal(state) && !terminal(run.State) {
+			becameTerminal = true
 		}
 		run.State = state
 		run.UpdatedAt = now
@@ -1228,6 +1418,21 @@ func (s *Service) foldRun(ctx context.Context, owner, repo, runID string) ([]*Jo
 	})
 	if err == nil && len(released) > 0 {
 		s.releaseConcurrency(ctx, owner, repo, runID, released)
+	}
+	if err == nil && becameTerminal {
+		// A terminal run freed one cap slot (PAR-153): admit the oldest held
+		// run. This is the one place a held run is released; a lost release is
+		// repaired by the next terminal fold.
+		if run, rerr := s.loadRun(ctx, owner, repo, runID); rerr == nil && run != nil {
+			if run.RepoConcurrencyCap > 0 {
+				s.releaseHeldRuns(ctx, owner, repo)
+			}
+			if run.WorkflowRunFollowers {
+				// PAR-019: the `completed` edge. It is detached: a follow-up's
+				// discovery/creation must not extend the completing job's call.
+				s.detach(func(ctx context.Context) { s.emitWorkflowRun(ctx, run, "completed") })
+			}
+		}
 	}
 	return jobs, err
 }

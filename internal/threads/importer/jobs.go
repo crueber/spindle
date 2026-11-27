@@ -2,10 +2,13 @@ package importer
 
 import (
 	"fmt"
+	pathpkg "path"
 	"sort"
 	"strings"
 
 	"gopkg.in/yaml.v3"
+
+	"github.com/crueber/spindle/internal/threads/workflow"
 )
 
 // jobs translates every job. `strategy` is handled first because a job-level
@@ -80,8 +83,13 @@ func (t *translator) job(name string, node *yaml.Node) {
 		case "with":
 			t.stringMapAt(node, i, p)
 		case "uses":
-			t.reusableJobAt(node, i, base)
-			i -= 2
+			if t.reusableJobAt(node, i, base) {
+				i -= 2
+			}
+		case "secrets":
+			if t.jobSecretsAt(node, i, p, base) {
+				i -= 2
+			}
 		case "concurrency":
 			t.concurrencyAt(node, i, p, true, axes)
 		case "permissions":
@@ -96,14 +104,15 @@ func (t *translator) job(name string, node *yaml.Node) {
 			if key.Value == "defaults" {
 				reason = "job defaults.run is not supported yet; set shell/working-directory on each step"
 			}
-			if key.Value == "secrets" {
-				reason = "secrets passed to a reusable workflow are not supported; pass them as repository secrets"
-			}
 			t.drop(node, i, t.untranslatedAt(p, key.Value, reason))
 			i -= 2
 		}
 	}
-	t.ensureRunnable(name, node, base)
+	// A reusable-workflow caller is a CALL, not a runner job: it has no steps
+	// and no runs-on, so the runnable-shape repair must not touch it.
+	if mapIndex(node, "uses") < 0 {
+		t.ensureRunnable(name, node, base)
+	}
 	if matrixLoss {
 		t.failJob(node, base+".strategy",
 			"the matrix declaration could not be fully converted; see the UNTRANSLATED comments")
@@ -183,27 +192,159 @@ func (t *translator) failingJob(node *yaml.Node, path, construct, reason string)
 	t.translated++
 }
 
-// reusableJobAt refuses a reusable-workflow job (`jobs.<id>.uses`). The engine
-// does not run reusable workflows yet, and a job with `uses` has no steps, so it
-// becomes a job that fails with the named reason instead of a job that silently
-// does nothing.
-func (t *translator) reusableJobAt(node *yaml.Node, i int, base string) {
-	uses, _ := scalarText(node.Content[i+1])
-	reason := "reusable workflows are not supported yet; this job is replaced by a step that fails"
-	t.drop(node, i, t.untranslatedAt(base+".uses", "uses: "+uses, reason))
-	j := mapIndex(node, "steps")
-	if j < 0 {
-		key := &yaml.Node{Kind: yaml.ScalarNode, Tag: "!!str", Value: "steps"}
-		val := &yaml.Node{Kind: yaml.SequenceNode, Tag: "!!seq"}
-		node.Content = append(node.Content, key, val)
-		j = mapIndex(node, "steps")
+// reusableJobAt carries a reusable-workflow job (`jobs.<id>.uses`) when the
+// target's full contract supports it (PAR-075/PAR-076): a local
+// `./.spindle/workflows/<f>.yml` path or a cross-repository
+// `owner/repo/.spindle/workflows/<f>.yml@<40-hex sha>`. Anything the engine
+// refuses — a foreign directory, a mutable ref, a caller key that describes a
+// runner job, a `with:` value that cannot be expanded at creation — replaces
+// the job with one that fails and says why. It reports whether it removed a
+// key/value pair (the caller's loop compensates).
+func (t *translator) reusableJobAt(node *yaml.Node, i int, base string) bool {
+	uses, ok := scalarText(node.Content[i+1])
+	if !ok || strings.TrimSpace(uses) == "" {
+		reason := "a reusable-workflow reference must be a string"
+		t.drop(node, i, t.untranslatedAt(base+".uses", "uses", reason))
+		t.failingJob(node, base, "uses", reason)
+		return true
 	}
-	steps := node.Content[j+1]
-	if steps.Kind != yaml.SequenceNode {
-		setSequence(steps, nil)
+	reason := reusableUsesRefusal(uses)
+	if reason == "" {
+		// A caller job's other keys are refused by the engine at run creation;
+		// carrying one would produce a file that looks converted but fails at
+		// the first run.
+		for _, key := range []string{"runs-on", "steps", "container", "services", "env", "strategy",
+			"timeout-minutes", "concurrency", "environment", "outputs"} {
+			if j := mapIndex(node, key); j >= 0 {
+				reason = "`" + key + "` is not allowed on a reusable-workflow caller job (the callee's jobs own it)"
+				break
+			}
+		}
 	}
-	steps.Content = nil
-	appendFailureStep(steps, base+": "+reason+" (uses: "+uses+")")
+	if reason == "" {
+		if j := mapIndex(node, "with"); j >= 0 {
+			if err := workflow.ValidateCallWith(scalarMap(node.Content[j+1]), t.inputNames); err != nil {
+				reason = "the target expands a `with:` value at run creation: " + err.Error()
+			}
+		}
+	}
+	if reason != "" {
+		// Replace the whole job: a caller with an unsupported key would be a
+		// file that parses but fails at every run. The failure step names the
+		// reason, and the report path is the `uses:` key the author can find.
+		t.failingJob(node, base+".uses", "uses: "+uses, reason)
+		return true
+	}
+	t.note(base+".uses", "uses: "+uses,
+		"carried as a reusable-workflow call; the callee must declare `on.workflow_call` and its inputs/secrets/outputs are its interface")
+	t.translated++
+	return false
+}
+
+// jobSecretsAt carries a caller's `secrets:` block. A same-repository
+// `inherit` is the documented implicit set; `inherit` to a cross-repository
+// callee is refused by name (D-6) and the block is dropped, so the call passes
+// no secret rather than the whole repository. An explicit map is carried as
+// written (the parser validates every value is `${{ secrets.<name> }}`).
+func (t *translator) jobSecretsAt(node *yaml.Node, i int, path, base string) bool {
+	if mapIndex(node, "uses") < 0 {
+		reason := "`secrets:` is only valid on a reusable-workflow caller job (a job that runs steps receives the repository's secrets by name)"
+		t.drop(node, i, t.untranslatedAt(path, "secrets", reason))
+		return true
+	}
+	val := node.Content[i+1]
+	if val.Kind == yaml.ScalarNode && !isNull(val) && strings.EqualFold(strings.TrimSpace(val.Value), "inherit") {
+		if !strings.HasPrefix(strings.TrimSpace(nodeValue(node, "uses")), "./") {
+			reason := "`secrets: inherit` is refused for a cross-repository callee (decision D-6: a secret never crosses a repository boundary without being listed explicitly); the block is dropped, so the call passes no secret — list each secret explicitly"
+			t.drop(node, i, t.untranslatedAt(path, "secrets: inherit", reason))
+			return true
+		}
+		t.translated++
+		return false
+	}
+	if val.Kind != yaml.MappingNode {
+		reason := "`secrets:` must be `inherit` or a mapping of name: ${{ secrets.NAME }}"
+		t.drop(node, i, t.untranslatedAt(path, "secrets", reason))
+		return true
+	}
+	t.translated++
+	return false
+}
+
+// reusableUsesRefusal mirrors the target's `uses:` vocabulary: a local path in
+// .spindle/workflows, or a pinned cross-repository workflow. A Docker image, a
+// URL, a foreign workflow directory and a mutable ref are named refusals.
+func reusableUsesRefusal(uses string) string {
+	raw := strings.TrimSpace(uses)
+	if strings.HasPrefix(raw, "./") {
+		clean := pathpkg.Clean(strings.TrimPrefix(raw, "./"))
+		if clean == "." || strings.HasPrefix(clean, "../") || pathpkg.IsAbs(clean) {
+			return "a local reusable workflow must be a path inside this repository"
+		}
+		if pathpkg.Dir(clean) != workflow.Dir {
+			return "a reusable workflow is only read from " + workflow.Dir + "/"
+		}
+		switch pathpkg.Ext(clean) {
+		case ".yml", ".yaml":
+			return ""
+		}
+		return "a reusable workflow must be a .yml or .yaml file"
+	}
+	lower := strings.ToLower(raw)
+	if strings.HasPrefix(lower, "docker://") || strings.HasPrefix(raw, "http://") || strings.HasPrefix(raw, "https://") {
+		return "only a workflow file is callable, not an image or a URL"
+	}
+	at := strings.LastIndexByte(raw, '@')
+	if at <= 0 || at == len(raw)-1 {
+		return "a cross-repository reusable workflow must be pinned to a commit: owner/repo/.spindle/workflows/<name>.yml@<40-hex sha>"
+	}
+	commit := raw[at+1:]
+	if len(commit) != 40 {
+		return "a cross-repository reusable workflow must be pinned to a full 40-character commit SHA (a branch or tag changes under the run)"
+	}
+	for _, r := range commit {
+		if !(r >= '0' && r <= '9' || r >= 'a' && r <= 'f' || r >= 'A' && r <= 'F') {
+			return "a cross-repository reusable workflow must be pinned to a full 40-character commit SHA"
+		}
+	}
+	parts := strings.SplitN(raw[:at], "/", 3)
+	if len(parts) != 3 || parts[0] == "" || parts[1] == "" {
+		return "a cross-repository reusable workflow is owner/repo/.spindle/workflows/<name>.yml@<40-hex sha>"
+	}
+	clean := pathpkg.Clean(parts[2])
+	if pathpkg.Dir(clean) != workflow.Dir {
+		return "a reusable workflow is only read from " + workflow.Dir + "/ (a foreign workflow directory is never read)"
+	}
+	switch pathpkg.Ext(clean) {
+	case ".yml", ".yaml":
+		return ""
+	}
+	return "a reusable workflow must be a .yml or .yaml file"
+}
+
+// scalarMap reads a mapping of scalar values into a map without rewriting the
+// node (validation only).
+func scalarMap(n *yaml.Node) map[string]string {
+	if n == nil || n.Kind != yaml.MappingNode {
+		return nil
+	}
+	out := make(map[string]string, len(n.Content)/2)
+	for i := 0; i+1 < len(n.Content); i += 2 {
+		if val, ok := scalarText(n.Content[i+1]); ok {
+			out[n.Content[i].Value] = val
+		}
+	}
+	return out
+}
+
+// nodeValue returns one job mapping's scalar value ("" when absent).
+func nodeValue(node *yaml.Node, key string) string {
+	i := mapIndex(node, key)
+	if i < 0 {
+		return ""
+	}
+	val, _ := scalarText(node.Content[i+1])
+	return val
 }
 
 // strategyAt carries matrix, include/exclude and fail-fast. It reports whether

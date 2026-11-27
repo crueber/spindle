@@ -318,10 +318,22 @@ func TestTranslateRefusals(t *testing.T) {
 			contain:          []string{"UNTRANSLATED: jobs.build", "exit 1"},
 		},
 		{
-			name:             "reusable job",
-			src:              "on: push\njobs:\n  call:\n    uses: ./.spindle/workflows/other.yml\n    with:\n      x: y\n",
+			name:             "reusable job with a foreign reference",
+			src:              "on: push\njobs:\n  call:\n    uses: ./.github/workflows/other.yml\n",
 			wantUntranslated: []string{"jobs.call.uses"},
 			contain:          []string{"UNTRANSLATED: jobs.call.uses", "exit 1"},
+		},
+		{
+			name:             "reusable job with a mutable ref",
+			src:              "on: push\njobs:\n  call:\n    uses: acme/other/.spindle/workflows/x.yml@main\n",
+			wantUntranslated: []string{"jobs.call.uses"},
+			contain:          []string{"40-character commit SHA"},
+		},
+		{
+			name:             "reusable job with a caller key",
+			src:              "on: push\njobs:\n  call:\n    uses: ./.spindle/workflows/other.yml\n    runs-on: linux\n",
+			wantUntranslated: []string{"jobs.call.uses"},
+			contain:          []string{"not allowed on a reusable-workflow caller job"},
 		},
 		{
 			name:             "job secrets",

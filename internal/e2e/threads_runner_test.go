@@ -143,6 +143,19 @@ func (s *syncBuffer) String() string {
 	return s.b.String()
 }
 
+// waitForConsole waits (bounded) for the runner console to carry marker. The
+// runner logs "job complete" only after its completion write returns, so a run
+// record that already reads success does not yet imply the console line exists;
+// a single read races the runner process (v0.11.1's tag gate flaked on exactly
+// that). The marker itself stays a hard requirement: pollUntil fails the test
+// when it never arrives, so a lost line is a failure, not a longer wait.
+func waitForConsole(t *testing.T, runner *runnerProc, marker string) {
+	t.Helper()
+	pollUntil(t, 30*time.Second, fmt.Sprintf("the runner console to carry %q", marker), func() bool {
+		return strings.Contains(runner.logs.String(), marker)
+	})
+}
+
 // mintRunnerToken mints an instance-scoped registration token through the
 // host-admin API (repoLane is kept for call-site readability; the route is
 // instance-scoped).
@@ -380,9 +393,7 @@ func TestE2E_ThreadsRunnerExecutesJobs(t *testing.T) {
 			t.Fatalf("log stream misses %q:\n%s", want, logText)
 		}
 	}
-	if !strings.Contains(runner.logs.String(), "job complete") {
-		t.Fatalf("runner console lacks a completion:\n%s", runner.logs.String())
-	}
+	waitForConsole(t, runner, "job complete")
 }
 
 // TestE2E_ThreadsFailingJobBlocksTheMerge proves the gate: a failing step yields
@@ -669,7 +680,5 @@ jobs:
 	if strings.Contains(logText, "fork-must-not-see-this") {
 		t.Fatal("the repository secret leaked into a fork run's log")
 	}
-	if !strings.Contains(runner.logs.String(), "job complete") {
-		t.Fatalf("runner console lacks a completion:\n%s", runner.logs.String())
-	}
+	waitForConsole(t, runner, "job complete")
 }

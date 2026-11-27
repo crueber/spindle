@@ -256,9 +256,18 @@ func TestExposedCoversRoutes(t *testing.T) {
 		// the surface claims the path).
 		claimedOnly bool
 	}
+	// notFoundOK marks routes whose correct answer for an empty fixture is 404
+	// (an artifact/cache entry that does not exist): the sample then only
+	// asserts the path is CLAIMED, which is what this test is about.
+	notFoundOK := map[string]bool{
+		"/{owner}/{repo}/api/threads/{run}/artifacts/{name}": true,
+		"/{owner}/{repo}/api/threads/caches/{id}":            true,
+	}
 	samples := map[string]sample{
 		"/{owner}/{repo}/api/threads":                    {http.MethodGet, "/o/r/api/threads", false},
 		"/{owner}/{repo}/api/threads/workflows":          {http.MethodGet, "/o/r/api/threads/workflows", false},
+		"/{owner}/{repo}/api/threads/dispatches":         {http.MethodPost, "/o/r/api/threads/dispatches", false},
+		"/{owner}/{repo}/api/threads/settings":           {http.MethodGet, "/o/r/api/threads/settings", false},
 		"/{owner}/{repo}/api/threads/{run}":              {http.MethodGet, "/o/r/api/threads/" + run.ID, false},
 		"/{owner}/{repo}/api/threads/{run}/cancel":       {http.MethodPost, "/o/r/api/threads/" + run.ID + "/cancel", false},
 		"/{owner}/{repo}/api/threads/{run}/rerun":        {http.MethodPost, "/o/r/api/threads/" + run.ID + "/rerun", false},
@@ -267,7 +276,11 @@ func TestExposedCoversRoutes(t *testing.T) {
 		"/{owner}/{repo}/api/threads/{run}/deny":         {http.MethodPost, "/o/r/api/threads/" + run.ID + "/deny", false},
 		"/{owner}/{repo}/api/threads/{run}/jobs/{job}/log": {
 			http.MethodGet, "/o/r/api/threads/" + run.ID + "/jobs/" + jid + "/log?accept=json", false},
-		"/{owner}/{repo}/api/threads/{run}/artifacts":     {http.MethodGet, "/o/r/api/threads/" + run.ID + "/artifacts", false},
+		"/{owner}/{repo}/api/threads/{run}/artifacts": {http.MethodGet, "/o/r/api/threads/" + run.ID + "/artifacts", false},
+		"/{owner}/{repo}/api/threads/{run}/artifacts/{name}": {
+			http.MethodGet, "/o/r/api/threads/" + run.ID + "/artifacts/build", false},
+		"/{owner}/{repo}/api/threads/caches":              {http.MethodGet, "/o/r/api/threads/caches", false},
+		"/{owner}/{repo}/api/threads/caches/{id}":         {http.MethodDelete, "/o/r/api/threads/caches/abc", false},
 		"/api/v1/admin/runners":                           {http.MethodGet, "/api/v1/admin/runners", false},
 		"/api/v1/admin/runners/tokens":                    {http.MethodPost, "/api/v1/admin/runners/tokens", false},
 		"/api/v1/admin/runners/{id}":                      {http.MethodDelete, "/api/v1/admin/runners/" + minted.ID, false},
@@ -298,6 +311,14 @@ func TestExposedCoversRoutes(t *testing.T) {
 			http.MethodGet, "/api/v1/threads/jobs/jr_x/attempt/1/artifacts/build", true},
 		"/api/v1/threads/jobs/{ref}/attempt/{n}/artifacts/{name}/blobs/{index}": {
 			http.MethodGet, "/api/v1/threads/jobs/jr_x/attempt/1/artifacts/build/blobs/0", true},
+		"/api/v1/threads/jobs/{ref}/attempt/{n}/artifacts/{name}/prepare": {
+			http.MethodPost, "/api/v1/threads/jobs/jr_x/attempt/1/artifacts/build/prepare", true},
+		"/api/v1/threads/jobs/{ref}/attempt/{n}/cache/lookup": {
+			http.MethodPost, "/api/v1/threads/jobs/jr_x/attempt/1/cache/lookup", true},
+		"/api/v1/threads/jobs/{ref}/attempt/{n}/cache/save": {
+			http.MethodPost, "/api/v1/threads/jobs/jr_x/attempt/1/cache/save", true},
+		"/api/v1/threads/jobs/{ref}/attempt/{n}/cache/blobs/{sha}": {
+			http.MethodGet, "/api/v1/threads/jobs/jr_x/attempt/1/cache/blobs/" + strings.Repeat("a", 64), true},
 	}
 	if len(samples) != len(ExposedTemplates) {
 		t.Fatalf("ExposedTemplates = %v (samples out of date)", ExposedTemplates)
@@ -326,8 +347,11 @@ func TestExposedCoversRoutes(t *testing.T) {
 			}
 			continue
 		}
-		if rec.Code == http.StatusNotFound || rec.Code == http.StatusMethodNotAllowed {
+		if rec.Code == http.StatusMethodNotAllowed {
 			t.Fatalf("%s: sample answered %d", tmpl, rec.Code)
+		}
+		if rec.Code == http.StatusNotFound && !notFoundOK[tmpl] {
+			t.Fatalf("%s: sample answered 404", tmpl)
 		}
 	}
 	// /api-browser twin.

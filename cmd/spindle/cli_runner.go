@@ -44,6 +44,11 @@ func runRunnerServe(ctx context.Context, c *cli, args []string) int {
 		allowHostDocker    bool
 		allowForkRuns      bool
 		fetchTimeout       int
+		containerPriv      bool
+		containerNetwork   string
+		containerVolumes   stringList
+		dockerHost         string
+		registryAuthFile   string
 	)
 	fs.IntVar(&capacity, "capacity", envInt("SPINDLE_RUNNER_CAPACITY", 1), "concurrent jobs this runner keeps in flight (default 1)")
 	fs.StringVar(&labels, "labels", envStr("SPINDLE_RUNNER_LABELS", "self-hosted,linux,docker"), "comma-separated labels the runner declares")
@@ -59,6 +64,11 @@ func runRunnerServe(ctx context.Context, c *cli, args []string) int {
 	fs.BoolVar(&allowHostDocker, "allow-host-docker", envBool("SPINDLE_RUNNER_ALLOW_HOST_DOCKER"), "acknowledge that DOCKER_HOST exposes the host root filesystem (required for the default socket)")
 	fs.BoolVar(&allowForkRuns, "allow-fork-runs", envBool("SPINDLE_RUNNER_ALLOW_FORK_RUNS"), "execute fork pull-request code on this runner (default off; only on a disposable host)")
 	fs.IntVar(&fetchTimeout, "fetch-timeout", 20, "long-poll seconds per fetch (1–30)")
+	fs.BoolVar(&containerPriv, "container-privileged", envBool("SPINDLE_RUNNER_CONTAINER_PRIVILEGED"), "grant workflows --privileged/--cap-add on this runner (never with --allow-fork-runs)")
+	fs.StringVar(&containerNetwork, "container-network", envStr("SPINDLE_RUNNER_CONTAINER_NETWORK", ""), "user-defined docker network jobs join instead of the per-job network")
+	fs.Var(&containerVolumes, "container-valid-volume", "host path or glob a workflow volume may bind (repeatable; off when unset)")
+	fs.StringVar(&dockerHost, "docker-host", envStr("SPINDLE_RUNNER_DOCKER_HOST", ""), "docker endpoint exposed to the JOB container only: unix:///absolute/socket or tcp://host:port (never with --allow-fork-runs)")
+	fs.StringVar(&registryAuthFile, "registry-auth-file", envStr("SPINDLE_RUNNER_REGISTRY_AUTH_FILE", ""), "0600 file of `registry username password` lines for private pulls (password via stdin)")
 	pos, exit := parseAPI(fs, args)
 	if exit != parseContinue {
 		return exit
@@ -116,9 +126,14 @@ func runRunnerServe(ctx context.Context, c *cli, args []string) int {
 		ImagePrefix: imagePrefix, ImagePrefixAll: imagePrefixAll,
 		ImagePull: imagePull, ImageRequireDigest: imageRequireDigest,
 		AllowForkRuns: allowForkRuns,
-		ServerOrigin:  serverURL,
-		FetchWait:     time.Duration(clamp(fetchTimeout, 1, 30)) * time.Second,
-		Logger:        logger,
+		Policy: runner.ContainerPolicy{
+			Privileged: containerPriv, Network: containerNetwork,
+			ValidVolumes: containerVolumes, DockerHost: dockerHost,
+		},
+		RegistryAuthFile: registryAuthFile,
+		ServerOrigin:     serverURL,
+		FetchWait:        time.Duration(clamp(fetchTimeout, 1, 30)) * time.Second,
+		Logger:           logger,
 	})
 	if err != nil {
 		fmt.Fprintf(c.stderr(), "spindle runner serve: %v\n", err)
@@ -170,6 +185,18 @@ func envBool(name string) bool {
 	return false
 }
 
+// stringList is a repeatable string flag (--container-valid-volume).
+type stringList []string
+
+func (s *stringList) String() string { return strings.Join(*s, ",") }
+
+func (s *stringList) Set(v string) error {
+	if v = strings.TrimSpace(v); v != "" {
+		*s = append(*s, v)
+	}
+	return nil
+}
+
 // clamp bounds an int.
 func clamp(n, lo, hi int) int {
 	if n < lo {
@@ -186,6 +213,6 @@ var runnerGroup = &apiGroup{
 	help: "Threads instance runners: serve jobs",
 	commands: []apiCommand{
 		{name: "serve", usage: "spindle runner serve [--capacity N] [--labels a,b] [--register TOKEN]", help: "run jobs: declare, fetch globally, execute in docker, stream logs (SIGTERM stops cleanly)",
-			flags: []string{"capacity", "labels", "name", "register", "token-file", "docker", "image", "image-prefix", "image-prefix-all", "image-pull", "image-require-digest", "allow-host-docker", "allow-fork-runs", "fetch-timeout"}, run: runRunnerServe},
+			flags: []string{"capacity", "labels", "name", "register", "token-file", "docker", "image", "image-prefix", "image-prefix-all", "image-pull", "image-require-digest", "allow-host-docker", "allow-fork-runs", "fetch-timeout", "container-privileged", "container-network", "container-valid-volume", "docker-host", "registry-auth-file"}, run: runRunnerServe},
 	},
 }

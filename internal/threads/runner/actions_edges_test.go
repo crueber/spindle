@@ -151,7 +151,7 @@ func TestExecuteCompositeEdgeFailures(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	out, _ := exec.runStep(context.Background(), plan, StepPlan{Index: 0, Kind: "composite", Name: "x"}, quietStream(t), nil, nil, false, newCommandFiles(), newJobCommands(quietStream(t)), &jobSummary{})
+	out, _ := exec.runStep(context.Background(), plan, StepPlan{Index: 0, Kind: "composite", Name: "x"}, quietStream(t), nil, nil, nil, false, newCommandFiles(), newJobCommands(quietStream(t)), &jobSummary{})
 	if out.Conclusion != threads.JobFailure || !strings.Contains(out.Error, "no expansion") {
 		t.Fatalf("no expansion = %+v", out)
 	}
@@ -206,7 +206,7 @@ func TestExecuteCompositeTimeout(t *testing.T) {
 		time.Sleep(150 * time.Millisecond)
 		// Nothing: the composite's own deadline fires. The parent stays alive.
 	}()
-	res, _ := executorWith(d).runStep(ctx, plan, plan.Steps[0], stream, newStepOutcomes(), nil, false, newCommandFiles(), newJobCommands(quietStream(t)), &jobSummary{})
+	res, _ := executorWith(d).runStep(ctx, plan, plan.Steps[0], stream, nil, newStepOutcomes(), nil, false, newCommandFiles(), newJobCommands(quietStream(t)), &jobSummary{})
 	if res.Conclusion != threads.JobFailure || !strings.Contains(res.Error, "timed out after") {
 		t.Fatalf("timeout = %+v", res)
 	}

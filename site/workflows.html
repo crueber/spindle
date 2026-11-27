@@ -9,12 +9,12 @@
 <meta name="theme-color" content="#0f1113" media="(prefers-color-scheme: dark)">
 <meta name="theme-color" content="#ffffff" media="(prefers-color-scheme: light)">
 <title>Threads workflows — writing CI for spindle</title>
-<meta name="description" content="How to write a Threads workflow for spindle: the key reference, triggers including tag pushes, matrices with include and exclude, substitutions, containers and services, actions, secrets, approvals, recipes, migration from Forgejo and GitHub, and troubleshooting.">
+<meta name="description" content="How to write a Threads workflow for spindle: the key reference, triggers including tag pushes and repository dispatch, matrices, substitutions, containers and services, reusable workflows, cache, artifacts, secrets, approvals, recipes, migration from Forgejo and GitHub, and troubleshooting.">
 <link rel="canonical" href="https://crueber.github.io/spindle/workflows.html">
 <meta property="og:type" content="article">
 <meta property="og:site_name" content="spindle">
 <meta property="og:title" content="Threads workflows — writing CI for spindle">
-<meta property="og:description" content="The authoring guide for spindle's CI: keys, triggers including tags, matrices, substitution, containers, actions, secrets, recipes, Forgejo migration and troubleshooting.">
+<meta property="og:description" content="The authoring guide for spindle's CI: keys, triggers, matrices, reusable workflows, cache, artifacts, containers, actions, secrets, recipes, Forgejo migration and troubleshooting.">
 <meta property="og:url" content="https://crueber.github.io/spindle/workflows.html">
 <meta property="og:image" content="https://crueber.github.io/spindle/img/og.png">
 <meta property="og:image:type" content="image/png">
@@ -23,7 +23,7 @@
 <meta property="og:image:alt" content="The spindle repository page: header, branch selector, latest commit and file tree.">
 <meta name="twitter:card" content="summary_large_image">
 <meta name="twitter:title" content="Threads workflows — writing CI for spindle">
-<meta name="twitter:description" content="Keys, triggers including tags, matrices, substitution, containers, actions, secrets, recipes, Forgejo migration and troubleshooting for spindle's CI.">
+<meta name="twitter:description" content="Keys, triggers, matrices, reusable workflows, cache, artifacts, containers, actions, secrets, recipes, Forgejo migration and troubleshooting for spindle's CI.">
 <meta name="twitter:image" content="https://crueber.github.io/spindle/img/og.png">
 <meta name="twitter:image:alt" content="The spindle repository page with its header, latest commit and file tree.">
 <script src="theme-init.js"></script>
@@ -71,10 +71,10 @@
         <p class="eyebrow"><span class="tick" aria-hidden="true"></span>Threads</p>
         <h1 id="wf-title">CI that lives <span>in the repository.</span></h1>
         <p class="lede">A workflow is a file at <code>.spindle/workflows/ci.yml</code>. A branch push, a
-          tag push, a pull request, a release, an issue, a schedule or a button creates a run;
-          registered runners execute each job in its own container; every job reports one check into
-          the surface that already gates merges. No marketplace, no cache engine, no second service to
-          operate — and no state outside the object store.</p>
+          tag push, a pull request, a release, an issue, a schedule, an API dispatch or a button
+          creates a run; registered runners execute each job in its own container; every job reports
+          one check into the surface that already gates merges. No marketplace, a cache scoped to the
+          run's trust class, no second service to operate — and no state outside the object store.</p>
         <div class="cta">
           <a class="btn primary" href="#quickstart">Write the first one <span class="arr" aria-hidden="true">→</span></a>
           <a class="btn" href="#migrate">Migrate from Forgejo</a>
@@ -99,10 +99,10 @@
 
   <section class="measured" aria-label="At a glance">
     <ul class="wrap measured-in">
-      <li class="measure"><b>7 events</b><span>push, pull request, release, issues, comment, dispatch, schedule</span></li>
-      <li class="measure"><b>3 built-ins</b><span>checkout, upload and download artifacts</span></li>
+      <li class="measure"><b>14 events</b><span>push, pull request, target, dispatch, upstream run, create/delete, deployment, release, issues, comment, schedule</span></li>
+      <li class="measure"><b>4 built-ins</b><span>checkout, upload and download artifacts, cache</span></li>
       <li class="measure"><b>256</b><span>matrix cells per job, at most</span></li>
-      <li class="measure"><b>1 container</b><span>per job, removed on every exit path</span></li>
+      <li class="measure"><b>4 levels</b><span>reusable workflows, local or SHA-pinned cross-repository</span></li>
       <li class="measure"><a href="#reference">The key reference <span aria-hidden="true">→</span></a><span>every accepted key, in five tables</span></li>
     </ul>
   </section>
@@ -117,6 +117,7 @@
     <a href="#secrets">Secrets</a>
     <a href="#approvals">Approvals</a>
     <a href="#artifacts">Artifacts</a>
+    <a href="#cache">Cache</a>
     <a href="#operations">Operations</a>
     <a href="#recipes">Recipes</a>
     <a href="#migrate">Migration</a>
@@ -217,8 +218,8 @@ spindle --server https://git.example.com runner serve \
         <h2 id="reference-title">Every key the parser accepts.</h2>
         <p class="sec-lede">The parser is strict. An unknown key is a parse error for that file —
           never a silently ignored typo. There is no <code>defaults:</code> block and no
-          <code>max-parallel</code>; <code>paths:</code> and repository-local reusable workflows are
-          supported, with the limits named in the tables.</p>
+          <code>max-parallel</code>; <code>paths:</code> and typed reusable workflows (local, or
+          SHA-pinned on this instance) are supported, with the limits named in the tables.</p>
       </header>
 
       <h3 class="subhead">Top level</h3>
@@ -246,14 +247,26 @@ spindle --server https://git.example.com runner serve \
           <tbody>
             <tr><td><code>push</code></td><td><code>branches</code>, <code>branches-ignore</code>, <code>tags</code>, <code>tags-ignore</code>, <code>paths</code>, <code>paths-ignore</code></td><td>A branch push matching <code>branches</code> or a tag push matching <code>tags</code>, and — when declared — a changed-file set matching <code>paths</code>. The ref filters are independent: a tags-only trigger never matches a branch push, and a branches-only trigger never matches a tag.</td></tr>
             <tr><td><code>pull_request</code></td><td><code>branches</code>, <code>branches-ignore</code>, <code>paths</code>, <code>paths-ignore</code>, <code>types</code></td><td>Any emitted lifecycle action on a PR targeting a matching branch whose changed files match; no <code>types</code> means every emitted action. The vocabulary is closed to <code>opened</code>, <code>synchronize</code>, <code>reopened</code>, <code>closed</code> (including a merge), <code>edited</code>, <code>ready_for_review</code>, <code>converted_to_draft</code>, <code>labeled</code>, <code>unlabeled</code>, <code>assigned</code>, <code>unassigned</code>, <code>milestoned</code>, <code>demilestoned</code>; anything the service never emits is a parse error.</td></tr>
+            <tr><td><code>pull_request_target</code></td><td>same as <code>pull_request</code></td><td>The same PR edges, but the <strong>base branch's</strong> file runs with base secrets and a write token. Off per repository by default; enabling it is a maintainer switch, and a declarative head checkout needs a second switch (both audited).</td></tr>
+            <tr><td><code>repository_dispatch</code></td><td><code>types</code></td><td><code>POST …/api/threads/dispatches</code> with the write role. <code>event_type</code> selects a type; <code>client_payload</code> is a bounded object read as <code>github.event.client_payload.*</code>. Runs the default branch.</td></tr>
+            <tr><td><code>workflow_run</code></td><td><code>workflows</code>, <code>types</code>, <code>branches</code>, <code>branches-ignore</code></td><td>Another workflow's run edge, matched by upstream workflow name and head branch; omitted <code>types</code> means <code>completed</code>. An untrusted upstream holds the follow-up for approval.</td></tr>
+            <tr><td><code>create</code> / <code>delete</code></td><td>none</td><td>A branch or tag created or deleted by a push (<code>ref</code> and <code>ref_type</code> in the payload). A job-token push starts nothing.</td></tr>
+            <tr><td><code>deployment</code> / <code>deployment_status</code></td><td>none</td><td>A deployment record is created, or changes state (<code>pending</code>, <code>in_progress</code>, <code>failure</code>).</td></tr>
             <tr><td><code>release</code></td><td><code>types</code></td><td>A release lifecycle action: <code>created</code>, <code>published</code>, <code>edited</code>, <code>deleted</code>, <code>prereleased</code>, <code>released</code>, <code>unpublished</code>.</td></tr>
             <tr><td><code>issues</code></td><td><code>types</code></td><td><code>opened</code>, <code>edited</code>, <code>closed</code>, <code>reopened</code>, <code>labeled</code>, <code>unlabeled</code>, <code>assigned</code>, <code>unassigned</code>, <code>milestoned</code>, <code>demilestoned</code>.</td></tr>
             <tr><td><code>issue_comment</code></td><td><code>types</code></td><td><code>created</code> only; comment editing and deletion are not implemented.</td></tr>
             <tr><td><code>workflow_dispatch</code></td><td><code>inputs</code></td><td>A manual dispatch from the UI, API or CLI. Input types: <code>string</code>, <code>boolean</code>, <code>choice</code>, <code>number</code>, <code>environment</code>.</td></tr>
+            <tr><td><code>workflow_call</code></td><td><code>inputs</code>, <code>secrets</code>, <code>outputs</code></td><td>A reusable workflow's typed interface (the callee side). The key never starts a run by itself.</td></tr>
             <tr><td><code>schedule</code></td><td><code>- cron: "…"</code>, optional <code>timezone:</code></td><td>The maintainer's sweep, on the default branch only. Five fields; names, <code>@daily</code>-family macros, <code>L</code>/<code>NW</code>/<code>#</code> and a per-entry timezone are supported.</td></tr>
           </tbody>
         </table>
       </div>
+      <p class="note"><code>merge_group</code>, <code>fork</code>, <code>watch</code>,
+        <code>status</code>, <code>check_run</code>/<code>check_suite</code>, <code>registry_package</code>,
+        <code>gollum</code>, <code>page_build</code>, <code>branch_protection_rule</code> and
+        <code>public</code> are <b>named parse errors</b>: this engine does not emit them, and a trigger
+        that can never fire is not accepted. <code>merge_group</code> returns when the merge-queue
+        feature lands.</p>
 
       <h3 class="subhead">Job</h3>
       <div class="tablewrap" role="region" tabindex="0" aria-labelledby="cap-job">
@@ -262,8 +275,8 @@ spindle --server https://git.example.com runner serve \
           <thead><tr><th>Key</th><th>Type</th><th>Default</th><th>What it does</th></tr></thead>
           <tbody>
             <tr><td><code>runs-on</code></td><td>label or list</td><td>required</td><td>The runner must declare every label, case-insensitive and exact. No wildcards.</td></tr>
-            <tr><td><code>container</code></td><td>image or mapping</td><td>runner <code>--image</code></td><td><code>image</code>, <code>env</code>, <code>options</code> are applied; <code>ports</code>, <code>command</code>, <code>entrypoint</code>, <code>volumes</code> are not.</td></tr>
-            <tr><td><code>services</code></td><td>map[id]service</td><td>none</td><td>Sidecars on the job network, reachable at their id (the container port).</td></tr>
+            <tr><td><code>container</code></td><td>image or mapping</td><td>runner <code>--image</code></td><td><code>image</code>, <code>env</code>, <code>options</code> are applied; <code>ports</code>, <code>command</code> and <code>entrypoint</code> are accepted and not applied. <code>volumes</code> are refused unless the runner's operator allow-lists the host path.</td></tr>
+            <tr><td><code>services</code></td><td>map[id]service</td><td>none</td><td>Sidecars on the job network, reachable at their id (the container port). <code>credentials</code> is refused by name: the pull identity is the runner's.</td></tr>
             <tr><td><code>needs</code></td><td>one job key, or a list</td><td>none</td><td><code>needs: test</code> and <code>needs: [test]</code> are identical. Must exist and be acyclic. A matrix dependency waits for every cell.</td></tr>
             <tr><td><code>if</code></td><td>expression</td><td><code>success()</code> over <code>needs</code></td><td>Decided by the server before the job is claimable. False means skipped.</td></tr>
             <tr><td><code>strategy.matrix</code></td><td>axes plus <code>include</code>/<code>exclude</code></td><td>none</td><td>Product of scalar axes with GitHub's merge rules; an include-only matrix is one cell per entry; 256 cells max.</td></tr>
@@ -274,7 +287,7 @@ spindle --server https://git.example.com runner serve \
             <tr><td><code>continue-on-error</code></td><td>bool</td><td><code>false</code></td><td>GitHub semantics: the job stays a failure, but the run conclusion follows the other jobs; dependents run and <code>needs.&lt;job&gt;.result</code> reads <code>success</code>.</td></tr>
             <tr><td><code>permissions</code></td><td>mapping or shorthand</td><td>workflow default</td><td>The closed scope vocabulary; job-level wins.</td></tr>
             <tr><td><code>enable-openid-connect</code></td><td>bool</td><td>workflow default</td><td>The job-level OIDC grant; an explicit <code>id-token: none</code> wins.</td></tr>
-            <tr><td><code>uses</code>/<code>with</code></td><td>string/map</td><td>—</td><td>Call a repository-local workflow (<code>./.spindle/workflows/name.yml</code>); its jobs join the run. <code>with:</code> and cross-repository calls are refused by name.</td></tr>
+            <tr><td><code>uses</code>/<code>with</code>/<code>secrets</code></td><td>string/map/map</td><td>—</td><td>Call a reusable workflow: <code>./.spindle/workflows/name.yml</code>, or <code>owner/repo/.spindle/workflows/name.yml@&lt;40-hex sha&gt;</code> when the callee is publicly readable. The callee must declare <code>on.workflow_call</code>; its typed inputs, secrets and outputs are the call's interface. Cross-repository calls take explicit secrets only (<code>inherit</code> is refused there) and are audited.</td></tr>
           </tbody>
         </table>
       </div>
@@ -294,7 +307,11 @@ spindle --server https://git.example.com runner serve \
             <tr><td><code>env</code></td><td>map[string]string</td><td>empty</td><td>Overrides job and container <code>env</code>.</td></tr>
             <tr><td><code>if</code></td><td>expression</td><td><code>success()</code></td><td>The small documented subset. An unsupported expression fails the step, never skips it.</td></tr>
             <tr><td><code>continue-on-error</code></td><td>bool</td><td><code>false</code></td><td>The step may fail without failing the job; its result is still a failure.</td></tr>
-            <tr><td><code>timeout-minutes</code></td><td>int</td><td>remaining job time</td><td>On expiry the job container is killed and the step reports <code>timed out</code>.</td></tr>
+            <tr><td><code>timeout-minutes</code></td><td>int</td><td>remaining job time</td><td>On expiry the step's container, or a background step's process group, is killed and the step reports <code>timed out</code>.</td></tr>
+            <tr><td><code>background</code></td><td>bool</td><td><code>false</code></td><td>Start the step asynchronously in its own session and process group; needs an <code>id</code>. Only on a <code>run</code>, <code>docker://</code> or local docker action.</td></tr>
+            <tr><td><code>wait</code> / <code>wait-all</code></td><td>background id or <code>all</code> / bool</td><td>—</td><td>Join one or every outstanding background step; the wait fails if that step failed.</td></tr>
+            <tr><td><code>cancel</code></td><td>background id or <code>all</code></td><td>—</td><td>Terminate the step's process group (SIGTERM, then SIGKILL). The job end kills every remaining background on every path.</td></tr>
+            <tr><td><code>parallel</code></td><td>list of steps</td><td>—</td><td>Run the members concurrently as one unit, reported in declaration order; the group shares the workspace.</td></tr>
           </tbody>
         </table>
       </div>
@@ -327,7 +344,10 @@ spindle --server https://git.example.com runner serve \
           <code>forgejo.*</code>/<code>forge.*</code> aliases), the bounded
           <code>github.event.*</code> payload, <code>runner.*</code>, <code>vars.*</code> (repository
           over organization, sealed and masked),
-          <code>env.*</code> and <code>secrets.*</code>. A job <code>name</code> and a concurrency
+          <code>env.*</code> and <code>secrets.*</code>. Inside a composite action's own steps,
+          <code>github.action_path</code> is that action's directory, per nesting level; a workflow
+          step, a job <code>if:</code> or an output template that reads it is a parse error. A job
+          <code>name</code> and a concurrency
           <code>group</code> read <code>github.*</code> and <code>inputs.*</code> only (a job-level
           group also reads its matrix axes) — not <code>env.*</code>, <code>secrets.*</code>,
           <code>runner.*</code>, <code>vars.*</code> or outputs. The rule for a
@@ -352,12 +372,14 @@ spindle --server https://git.example.com runner serve \
     <div class="wrap docbody">
       <header class="sec-head">
         <p class="eyebrow"><span class="tick" aria-hidden="true"></span>Triggers</p>
-        <h2 id="triggers-title">Seven events, filtered by ref and path.</h2>
+        <h2 id="triggers-title">Fourteen events, filtered by ref and path.</h2>
         <p class="sec-lede">Filters use the documented Actions glob dialect — <code>*</code>,
           <code>**</code>, <code>?</code>, <code>+</code> and an ordered <code>!</code> — and
           <code>paths</code> narrows a run to the changed files. A push carries one kind of ref, so
           the two push filters are independent — a tags-only workflow never runs on a branch, and a
-          branches-only workflow never runs on a tag.</p>
+          branches-only workflow never runs on a tag. The GitHub-only events each read their workflow
+          from the default branch (a <code>pull_request_target</code> reads the base tip) and name
+          their own trust rule.</p>
       </header>
 
       <div class="split">
@@ -389,7 +411,46 @@ spindle --server https://git.example.com runner serve \
             <code>milestoned</code>, <code>demilestoned</code>. Omit <code>types</code> to fire on
             every emitted action. A same-repository PR runs the head commit's file, trusted, with
             secrets. A fork PR runs the <b>base branch's</b> file, untrusted, with no secrets and a
-            read-only token.</p>
+            read-only token, unless the repository opted in to <code>send_write_tokens</code>
+            (maintain+, audited): then the fork token carries the scopes the file declares, still
+            never secrets and never <code>id-token</code>.</p>
+          <p><b>Merge refs.</b> Every pull request edge — the code edges (opened, synchronize,
+            reopened, closed, edited, ready_for_review, converted_to_draft) and the metadata-only
+            edges (labeled/unlabeled, assigned/unassigned, milestoned/demilestoned) — pins the
+            <b>server-computed merge commit</b> of base and head, with
+            <code>refs/pull/&lt;n&gt;/merge</code>
+            as the run's ref and <code>${{ github.ref }}</code>, with <code>GITHUB_SHA</code> and the
+            check's commit reading the merge commit — so a failure that only exists after the merge
+            goes red. The job's <code>GITHUB_REF</code> variable keeps
+            the base branch, which is the documented job identity. If the merge conflicts, or the git
+            reader cannot build one, the run falls back to the head commit and
+            <code>refs/pull/&lt;n&gt;/head</code> and says so in the log. The workflow file is still the
+            head's (same repository) or the base's (fork), never the contributor's file for a fork.</p>
+          <p><b><code>pull_request_target</code>.</b> The same edges, but the base branch's file runs
+            with base secrets and a write token. It is <b>off by default</b> per repository; a
+            maintainer enables it on the Threads page and the change is audited. Inside it, an
+            <code>actions/checkout</code> naming a <code>ref</code> or another <code>repository</code>
+            fails at plan time unless a second, separately audited switch
+            (<code>pr_target_allow_head_checkout</code>) is on. A <code>run:</code> step can still
+            fetch the head itself; that residual is why the default is off.</p>
+          <p><b>Repository dispatch.</b> <code>POST …/api/threads/dispatches</code> with
+            <code>{"event_type":"deploy","client_payload":{…}}</code> and the write role. The event
+            type selects <code>types</code>; the payload is an object of at most 10 top-level keys,
+            nesting at most 4 levels, 64 KiB encoded, exposed as
+            <code>github.event.client_payload.*</code>. It runs the default branch only, and the
+            answer is <code>202 {"runs":[…]}</code>.</p>
+          <p><b>Following another run.</b> <code>workflow_run</code> matches upstream workflow
+            <b>names</b> (not globs), the upstream head branch, and <code>requested</code> or
+            <code>completed</code> (<code>completed</code> when omitted). Its file comes from the
+            default branch, and a chain stops at depth 3. An untrusted upstream (a fork PR) holds the
+            follow-up at <code>pending_approval</code> until a maintainer approves; while that hold is
+            pending, a cross-run artifact read is refused with <code>409</code> naming the parent run.</p>
+          <p><b>Repository and deployment events.</b> <code>create</code>/<code>delete</code> fire for
+            a branch or tag created/deleted by a push, with <code>ref</code> and <code>ref_type</code>
+            in the payload. <code>deployment</code> fires when a job's deployment record is created;
+            <code>deployment_status</code> when it is decided (<code>pending</code>,
+            <code>in_progress</code>, <code>failure</code>). Both read the default branch's file, and a
+            push authenticated by a job token starts none of them.</p>
           <p><b>Release and issues.</b> <code>release</code> fires on
             <code>created</code>/<code>published</code>/<code>edited</code>/<code>deleted</code>/
             <code>prereleased</code>/<code>released</code>/<code>unpublished</code>;
@@ -561,7 +622,10 @@ spindle --server https://git.example.com runner serve \
             docker's <code>--health-cmd</code>, <code>--health-interval</code>,
             <code>--health-timeout</code>, <code>--health-retries</code> and
             <code>--health-start-period</code> flags (they run inside the service container); a
-            malformed probe is refused before the container is created.</p>
+            malformed probe is refused before the container is created. A registry
+            <code>credentials:</code> block is refused by name: the pull identity is the runner's
+            (its daemon config, an image mirror, or <code>--registry-auth-file</code>) and the
+            password is piped on stdin, never argv or a log line.</p>
           <p><b>Environment.</b> Lowest to highest: runner built-ins, workflow
             <code>env</code>, job <code>env</code>, container <code>env</code>, step
             <code>env</code>, then secrets by name. Scripts read <code>$GITHUB_SHA</code>,
@@ -615,9 +679,25 @@ spindle --server https://git.example.com runner serve \
         <code>--memory</code>, <code>--memory-swap</code>, <code>--shm-size</code>,
         <code>--ulimit nofile=…</code>, <code>--init</code>, <code>--read-only</code>,
         <code>--user</code>, <code>--workdir</code>, and docker's in-container
-        <code>--health-*</code> flags. <code>--privileged</code>,
-        <code>--cap-add</code>, <code>--device</code>, <code>--security-opt</code>, every
-        namespace flag and every mount are refused, at run creation and again at plan time.</p>
+        <code>--health-*</code> flags. <code>--cap-add</code>, <code>--device</code>,
+        <code>--security-opt</code>, every namespace flag and every mount are refused by default, at
+        run creation and again at plan time.</p>
+      <p class="note"><b>Runner grants are the operator's.</b> A workflow never widens its own
+        isolation. Three knobs let a runner operator admit shapes for every job it takes:
+        <code>--container-privileged</code> (admits <code>--privileged</code> and
+        <code>--cap-add</code>), <code>--container-valid-volume &lt;glob&gt;</code> (admits a volume
+        whose absolute host source matches), and <code>--container-network</code> (a user-defined
+        network; <code>host</code>, <code>none</code> and namespace modes are refused). A grantable
+        shape on a runner that did not opt in fails at plan time, naming the missing flag. A fourth,
+        <code>--docker-host</code>, gives the job a docker endpoint (below). A runner
+        that grants privilege or <code>--docker-host</code> refuses <code>--allow-fork-runs</code>,
+        so an untrusted PR can never reach a widened runner.</p>
+      <p class="note"><b>No Docker socket.</b> A job container gets no socket and no daemon by
+        default, so <code>docker build</code> exits 127 with the daemonless remedy in the message.
+        Build with kaniko (no privileges, no socket) or buildah on a host whose kernel allows user
+        namespaces — the image is the workflow's choice, the capability is the host's. A runner whose
+        operator passed <code>--docker-host</code> exposes an endpoint to the <b>job container only</b>;
+        that job is root-equivalent on the runner, and such a runner never accepts fork runs.</p>
     </div>
   </section>
 
@@ -626,9 +706,10 @@ spindle --server https://git.example.com runner serve \
     <div class="wrap docbody">
       <header class="sec-head">
         <p class="eyebrow"><span class="tick" aria-hidden="true"></span>Steps &amp; actions</p>
-        <h2 id="actions-title">Three built-ins, local actions, images.</h2>
-        <p class="sec-lede">There is no marketplace. <code>uses:</code> resolves to the three
-          built-ins, a repository-local action, or a container image — and nothing else.</p>
+        <h2 id="actions-title">Four built-ins, local actions, images.</h2>
+        <p class="sec-lede">There is no marketplace. <code>uses:</code> resolves to the built-ins, a
+          repository-local action, or a container image — and the setup helpers are refused with the
+          cache recipe that replaces them.</p>
       </header>
 
       <div class="tablewrap" role="region" tabindex="0" aria-labelledby="cap-uses">
@@ -637,11 +718,13 @@ spindle --server https://git.example.com runner serve \
           <thead><tr><th><code>uses:</code></th><th>What happens</th></tr></thead>
           <tbody>
             <tr><td><code>actions/checkout</code></td><td>Built-in checkout inside the job container. <code>actions/checkout@v4</code> also resolves; everything after <code>@</code> is ignored.</td></tr>
-            <tr><td><code>actions/upload-artifact</code></td><td>Upload files from the job container to the run.</td></tr>
-            <tr><td><code>actions/download-artifact</code></td><td>Download an artifact of the same run, under <code>path</code>.</td></tr>
+            <tr><td><code>actions/upload-artifact</code></td><td>Upload files from the job container to the run. v4 inputs are supported; see <a href="#artifacts">Artifacts</a>.</td></tr>
+            <tr><td><code>actions/download-artifact</code></td><td>Download an artifact of the same run — or, with a maintainer approval, another run of the same repository.</td></tr>
+            <tr><td><code>actions/cache</code></td><td>Restore now and save at the end of a green job; <code>/restore</code> and <code>/save</code> are the split forms. See <a href="#cache">Cache</a>.</td></tr>
             <tr><td><code>./.spindle/actions/&lt;name&gt;</code></td><td>A repository-local action, resolved at run creation from the run commit (composite or docker).</td></tr>
             <tr><td><code>docker://image[:tag|@sha256:…]</code></td><td>Run the image as its own container on the job network, with the workspace volume.</td></tr>
-            <tr><td>anything else</td><td>The step fails: there is no marketplace for remote actions. That includes setup and cache actions.</td></tr>
+            <tr><td><code>actions/setup-node</code>, <code>setup-go</code>, <code>setup-python</code></td><td>Refused by name, quoting the exact <code>actions/cache</code> recipe for that ecosystem's cache half.</td></tr>
+            <tr><td>anything else</td><td>The step fails: there is no marketplace for remote actions.</td></tr>
           </tbody>
         </table>
       </div>
@@ -651,8 +734,10 @@ spindle --server https://git.example.com runner serve \
           <p><b>Composite actions.</b> <code>runs.steps</code> expand in place; each <code>run</code>
             step must name <code>shell:</code>; an inner <code>uses</code> may only be another local
             action or <code>docker://</code>. The caller's <code>with:</code> values become
-            <code>INPUT_&lt;NAME&gt;</code> environment variables, and an undeclared input is a
-            named refusal. Nesting is capped at 10 and cycles are refused.</p>
+            <code>INPUT_&lt;NAME&gt;</code> environment variables and <code>${{ inputs.* }}</code>
+            fields; an undeclared input is a named refusal. <code>${{ github.action_path }}</code> is
+            the innermost action's own directory, per level. Nesting is capped at 10 and cycles are
+            refused.</p>
           <p><b><code>docker://</code> steps.</b> The image runs as its own container, gets the step
             environment and <code>INPUT_*</code>, and <b>never</b> the job token or a repository
             secret. Its <code>$SPINDLE_OUTPUT</code> is copied out and published under the calling
@@ -693,9 +778,80 @@ spindle --server https://git.example.com runner serve \
           <span class="k">who:</span> world</code></pre>
         </figure>
       </div>
-      <p class="note"><code>actions/cache</code> does not exist. Every job starts cold; reuse a
-        registry image or install in a <code>run</code> step. Artifacts move files between jobs of
-        <b>one run</b>; they cannot cross runs.</p>
+      <p class="note"><code>actions/cache</code> is built in and scoped to the run's trust class
+        (<a href="#cache">Cache</a>). Artifacts move files between jobs of one run; another run of
+        the same repository is readable only behind the cross-run approval
+        (<a href="#artifacts">Artifacts</a>).</p>
+
+      <h3 class="subhead">Reusable workflows: a typed interface.</h3>
+      <div class="split">
+        <figure class="code">
+          <div class="code-bar"><span>caller and callee</span><span class="state">valid</span></div>
+          <pre tabindex="0"><code><span class="k"># .spindle/workflows/ci.yml</span>
+<span class="k">jobs:</span>
+  <span class="k">deploy:</span>
+    <span class="k">uses:</span> ./.spindle/workflows/deploy.yml
+    <span class="k">with:</span>
+      <span class="k">target:</span> production
+    <span class="k">secrets:</span>
+      <span class="k">REGISTRY_TOKEN:</span> ${{ secrets.REGISTRY_SECRET }}
+  <span class="k">smoke:</span>
+    <span class="k">needs:</span> [deploy]
+    <span class="k">runs-on:</span> linux
+    <span class="k">steps:</span>
+      - <span class="k">run:</span> curl "${{ needs.deploy.outputs.url }}"</code></pre>
+        </figure>
+        <div class="prose">
+          <p>A job can call another workflow instead of declaring steps. The callee declares
+            <code>on.workflow_call</code>: typed <code>inputs</code> (<code>string</code>,
+            <code>boolean</code>, <code>number</code>, with <code>required</code>/<code>default</code>),
+            declared <code>secrets</code> and <code>outputs</code> templates. Its jobs join the same
+            run as <code>deploy / release</code>, with their own checks and logs.</p>
+          <p><code>with:</code> is expanded once at run creation from <code>github.*</code> and the
+            caller's <code>inputs.*</code>; an unknown input, a missing required one, or a value that
+            does not parse as its declared type is a named refusal. <code>secrets:</code> is an
+            explicit <code>callee: ${{ secrets.SOURCE }}</code> map or <code>inherit</code>; a
+            same-repository callee with no block gets the repository's secrets, and a
+            cross-repository callee gets none by default. <code>inherit</code> never crosses a
+            repository boundary. <code>permissions:</code> is downgrade-only.</p>
+          <p><b>Cross-repository calls</b> are
+            <code>owner/repo/.spindle/workflows/x.yml@&lt;40-hex sha&gt;</code>: public on this
+            instance, a full commit (never a branch or tag), explicit secrets only, and each call
+            writes an audit record naming caller, callee and commit. Nesting is capped at 4 levels and
+            a cycle is refused. Not supported, each a named refusal: a matrix caller, environment
+            secrets inherited by a callee, and a <code>needs.</code> reference to a nested call's job.</p>
+        </div>
+      </div>
+
+      <h3 class="subhead">Background and parallel steps.</h3>
+      <div class="split">
+        <figure class="code">
+          <div class="code-bar"><span>a dev server and two linters</span><span class="state">valid</span></div>
+          <pre tabindex="0"><code><span class="k">steps:</span>
+  - <span class="k">id:</span> server
+    <span class="k">run:</span> ./bin/dev-server
+    <span class="k">background:</span> true
+  - <span class="k">run:</span> ./bin/smoke
+  - <span class="k">cancel:</span> server
+  - <span class="k">name:</span> linters
+    <span class="k">parallel:</span>
+      - <span class="k">run:</span> ./bin/lint-go
+      - <span class="k">run:</span> ./bin/lint-web</code></pre>
+        </figure>
+        <div class="prose">
+          <p><code>background: true</code> starts a step asynchronously while later steps run;
+            <code>wait: &lt;id&gt;</code> (or <code>wait-all: true</code>) joins it and fails when it
+            failed, <code>cancel: &lt;id&gt;</code> terminates it, and the job end kills every
+            remaining background on every conclusion. Each runs in its own session and process group
+            inside the job container (<code>setsid</code> must be in the image), so a kill reaches
+            every child; the runner verifies none survived and fails the job rather than leaking it.</p>
+          <p><code>parallel:</code> runs its members concurrently and reports them in declaration
+            order. They share the workspace, so two members writing one file race. A member failure
+            fails the group unless that member has <code>continue-on-error</code>. A background step
+            needs an <code>id</code>; <code>wait</code>, <code>wait-all</code> and <code>cancel</code>
+            are control keys, mutually exclusive, and are refused inside composite actions.</p>
+        </div>
+      </div>
     </div>
   </section>
 
@@ -750,7 +906,9 @@ spindle --server https://git.example.com runner serve \
             values shorter than 4 bytes are skipped. Encoded or split values print. Never write a
             secret into an output or an artifact — both are data, not logs.</p>
           <p><b>Fork runs.</b> No secrets at all. The payload carries an empty set; a fork can never
-            opt in by editing the file.</p>
+            opt in by editing the file. A repository may opt in to <code>send_write_tokens</code>
+            (maintain+, audited) so the fork run's token carries the scopes its file declares — never
+            secrets and never an id-token, and the run page records the decision.</p>
           <p><b>The job token.</b> <code>$SPINDLE_JOB_TOKEN</code> always reads its own repository;
             <code>$GITHUB_TOKEN</code> and <code>$FORGEJO_TOKEN</code> are the same token under their
             familiar spellings, and an authored <code>env:</code> value of that name wins.
@@ -772,7 +930,10 @@ spindle --server https://git.example.com runner serve \
           <code>pending_approval</code>: jobs written, checks pending, nothing enqueued. A
           <code>maintain</code> or admin approves or denies on the run page (or
           <code>POST …/api/threads/{run}/approve|deny</code>). The gate applies when the actor has
-          no previously merged PR in the repository; a same-repository PR is never gated. Nobody
+          no previously merged PR in the repository; a same-repository PR is never gated. A
+          <code>workflow_run</code> whose upstream run was untrusted is held the same way
+          (<code>approval_kind: workflow_run</code>), and while that hold is pending a cross-run
+          artifact read answers <code>409</code> naming the parent run. Nobody
           approves, nothing runs — there is no timeout.</p>
         <p>An <b>environment</b> is a deployment target with up to six required reviewers (users or
           <code>org/team</code>, each needing write or more, checked when the environment is saved),
@@ -803,8 +964,8 @@ spindle --server https://git.example.com runner serve \
   <section class="section alt" id="artifacts" aria-labelledby="artifacts-title">
     <div class="wrap docbody">
       <header class="sec-head">
-        <p class="eyebrow"><span class="tick" aria-hidden="true"></span>Artifacts, schedules, retention</p>
-        <h2 id="artifacts-title">Files between jobs; a clock that fires once.</h2>
+        <p class="eyebrow"><span class="tick" aria-hidden="true"></span>Artifacts, cache, schedules, retention</p>
+        <h2 id="artifacts-title">Files between runs; a clock that fires once.</h2>
       </header>
       <div class="split">
         <figure class="code">
@@ -836,12 +997,30 @@ spindle --server https://git.example.com runner serve \
       - <span class="k">run:</span> ./scripts/verify-release.sh dist</code></pre>
         </figure>
         <div class="prose">
-          <p><b>Artifacts.</b> Same run only. Names are unique per run and limited to letters,
-            digits, <code>.</code>, <code>_</code> and <code>-</code>. Paths are workspace-relative:
-            exact file, directory, <code>*</code>/<code>?</code> within a segment,
-            <code>**</code> across segments, or <code>.</code>. Only regular files; symlinks are
-            not followed. The image needs <code>find</code> and <code>tar</code>. Caps: 256 MiB
-            per file, 2 GiB per run, 1000 files per artifact.</p>
+          <p><b>Artifacts.</b> Names are unique per run (letters, digits, <code>.</code>,
+            <code>_</code>, <code>-</code>; up to 255 bytes). Paths are workspace-relative: exact
+            file, directory, <code>*</code>/<code>?</code> within a segment, <code>**</code> across
+            segments, or <code>.</code>. Only regular files; symlinks are not followed. The image
+            needs <code>find</code> and <code>tar</code>. Caps: 256 MiB per file, 2 GiB per run,
+            1000 files per artifact.</p>
+          <p><b>v4 inputs.</b> Upload: <code>overwrite</code>, <code>include-hidden-files</code>,
+            <code>compression-level</code>. Download: <code>pattern</code>,
+            <code>artifact-ids</code>, <code>merge-multiple</code>, and <code>run-id</code>.
+            <code>github-token</code> and <code>repository</code> are refused by name — the job
+            token is used and an artifact never crosses a repository.</p>
+          <p><b>Cross-run consumption.</b> A <code>run-id</code> names another run of the
+            <b>same repository</b>; it is never automatic. The consuming run is held at
+            <code>pending_approval</code> until a maintainer approves (a fork run, or a job holding a
+            repository/environment secret, is refused by name), and every cross-run read is audited.
+            While a <code>workflow_run</code> parent hold is pending, the read is
+            <code>409</code> naming the parent run.</p>
+          <p><b>List, download, delete.</b> <code>GET …/api/threads/{run}/artifacts</code> lists
+            (<code>id</code>, <code>name</code>, <code>files</code>, <code>total_size</code>,
+            <code>created_at</code>, <code>expires_at</code>), <code>GET …/artifacts/{name}</code>
+            returns one manifest, and <code>DELETE …/artifacts/{name}</code> needs the write role and
+            reports <code>bytes_freed</code>. A closed retention window is a <code>404</code> on both
+            reads even before GC runs; a manifest path that escapes the archive root is refused on
+            extraction and on the ZIP writer, so a corrupt record cannot become a zip-slip.</p>
           <p><b>Schedules.</b> Default branch only; a process with the <code>maintain</code> role
             must be running. A CAS'd watermark fires each tick at most once, so a restart does not
             duplicate a deploy and a crash loses one tick rather than repeating it. There is no
@@ -854,6 +1033,59 @@ spindle --server https://git.example.com runner serve \
             that produced it. <code>threads.keep_forever = true</code> reclaims neither. A queued,
             running or pending-approval run is never swept, and neither is a run with a live job
             lease; the GC report names bytes per family and has a dry run that deletes nothing.</p>
+        </div>
+      </div>
+
+      <h3 class="subhead" id="cache">Cache: a workspace tree across runs.</h3>
+      <div class="split">
+        <figure class="code">
+          <div class="code-bar"><span>restore a dependency cache</span><span class="state">valid</span></div>
+          <pre tabindex="0"><code><span class="k">name:</span> cache
+<span class="k">on:</span> push
+<span class="k">jobs:</span>
+  <span class="k">build:</span>
+    <span class="k">runs-on:</span> linux
+    <span class="k">steps:</span>
+      - <span class="k">uses:</span> actions/checkout
+      - <span class="k">name:</span> keep npm inside the workspace
+        <span class="k">run:</span> echo "npm_config_cache=.npm" &gt;&gt; "$GITHUB_ENV"
+      - <span class="k">uses:</span> actions/cache
+        <span class="k">id:</span> cache
+        <span class="k">with:</span>
+          <span class="k">path:</span> .npm
+          <span class="k">key:</span> npm-${{ runner.os }}-${{ github.ref_name }}-${{ github.sha }}
+          <span class="k">restore-keys:</span> |
+            npm-${{ runner.os }}-${{ github.ref_name }}-
+      - <span class="k">if:</span> steps.cache.outputs.cache-hit != 'true'
+        <span class="k">run:</span> npm ci</code></pre>
+        </figure>
+        <div class="prose">
+          <p><b>What it does.</b> <code>actions/cache</code> restores at the step and saves at the
+            end of a <b>green</b> job (<code>/save</code> saves now, <code>/restore</code> never
+            saves). Keys are exact; <code>restore-keys</code> (up to 10 prefixes) fall back to the
+            most recent matching entry. The step publishes <code>cache-hit</code> — <code>"true"</code>
+            only on an exact key match — and a miss is silent success unless
+            <code>fail-on-cache-miss</code> is set. <code>path</code> must be workspace-relative
+            (absolute paths and <code>~</code> are refused): point the tool at <code>.npm</code>,
+            <code>.cache/pip</code>, <code>GOCACHE</code> and cache that directory.</p>
+          <p><b>Scopes and isolation.</b> A default-branch run reads and writes
+            <code>default</code>; another branch reads and writes its own branch and reads
+            <code>default</code>; a same-repository PR reads and writes <code>pr:&lt;n&gt;</code>
+            and reads its base; a fork's entry lives in <code>pr:&lt;n&gt;:untrusted</code>, which
+            no trusted run reads; a tag run is read-only. A PR can never write a base-readable
+            entry, and no PR reads another PR's cache. A merged PR's scopes are discarded. Content is
+            addressed and integrity-checked, so a key collision can only select bytes the writer
+            actually produced.</p>
+          <p><b>Limits.</b> 1 GiB per entry, a 5 GiB repository budget (oldest-first eviction), 256
+            entries, and a 7-day idle window — all operator keys under <code>[threads]</code>
+            (<code>cache_max_entry_bytes</code>, <code>cache_max_bytes</code>,
+            <code>cache_max_entries</code>, <code>cache_retention</code>). The cache is derived
+            data, never an artifact: the sweeper reclaims expired entries and orphaned payloads.</p>
+          <p><b>setup-* recipes.</b> The setup actions are marketplace JavaScript and stay refused,
+            but their cache half is a recipe: <code>npm_config_cache: .npm</code> plus a cache of
+            <code>.npm</code>; <code>GOCACHE</code>/<code>GOMODCACHE</code> under <code>.cache/</code>
+            plus both cached; <code>PIP_CACHE_DIR: .cache/pip</code> plus that cached. Other
+            ecosystems are refused by name.</p>
         </div>
       </div>
     </div>
@@ -892,6 +1124,15 @@ spindle --server https://git.example.com runner serve \
             committed Forgejo corpus: every green row must name a test that exists, every gap must be
             planned, and the generated matrix must be fresh. It needs no docker and no network; the
             execution tier is opt-in (<code>make parity-exec</code>).</p>
+          <p><b>No silent queue.</b> Every queued job names exactly one reason, in the order that
+            matters: an approval hold (<code>awaiting approval</code>, with the environment, the
+            first-time fork contributor or the untrusted upstream named), the repository's
+            <code>concurrency_cap</code> hold, a live <code>needs:</code> dependency, the pending
+            concurrency group, then runner availability — <code>no runner is registered</code>,
+            <code>no runner matches labels …</code>, <code>fork runs are disabled on every matching
+            runner</code>, <code>all matching runners are busy</code> or
+            <code>waiting for a matching runner</code>. The field is derived on read, so it changes
+            the moment the cause clears.</p>
         </div>
         <figure class="code">
           <div class="code-bar"><span>tag-triggered and scoped by ref</span><span class="state">valid</span></div>
@@ -1032,8 +1273,9 @@ spindle --server https://git.example.com runner serve \
         <h2 id="migrate-title">From a Forgejo workflow to Threads.</h2>
         <p class="sec-lede">Most of a workflow translates mechanically, and the importer does it for
           you: convert, review the report, commit on a branch, run. What still needs a plan is the
-          marketplace and cache actions, the reusable-workflow input/secret tail, and a daemonless
-          builder's host capabilities.</p>
+          marketplace's setup actions, the executable half of a remote action, and a daemonless
+          builder's host capabilities — the cache, artifacts, reusable workflows and pull-request
+          triggers now translate.</p>
       </header>
 
       <div class="prose">
@@ -1077,8 +1319,9 @@ spindle threads import --from forgejo --repo . --apply        # commit on a new 
             <tr><td><code>container: {image: …}</code></td><td>same</td><td>Digest pins are honoured and may be required by policy.</td></tr>
             <tr><td><code>uses: actions/checkout@v4</code></td><td><code>uses: actions/checkout</code></td><td>Built-in. The <code>@v4</code> suffix is accepted and ignored.</td></tr>
             <tr><td><code>with: fetch-tags: true</code></td><td>same</td><td>Checkout supports <code>fetch-depth</code>, <code>fetch-tags</code>, <code>ref</code> and <code>path</code>.</td></tr>
-            <tr><td>setup-go, setup-node, setup-buildx</td><td>a base image or a <code>run:</code> step</td><td>No marketplace actions.</td></tr>
-            <tr><td><code>actions/cache</code></td><td>nothing</td><td>No cache; bake dependencies into an image.</td></tr>
+            <tr><td>setup-go, setup-node, setup-python</td><td>a base image or a <code>run:</code> step plus <code>actions/cache</code></td><td>The refusal names the exact cache recipe for the cache half; the action itself is marketplace code.</td></tr>
+            <tr><td><code>actions/cache</code></td><td>same spelling</td><td>Built in: <code>path</code>/<code>key</code>/<code>restore-keys</code>; keep <code>path</code> inside the workspace. A PR's writes stay PR-scoped.</td></tr>
+            <tr><td><code>on.workflow_call</code>, <code>with:</code>, <code>secrets:</code></td><td>same</td><td>Typed inputs, declared secrets and output templates are the call's interface; a cross-repository call is pinned to a full SHA with explicit secrets.</td></tr>
             <tr><td><code>${{ secrets.NAME }}</code></td><td>same, or <code>$NAME</code></td><td>Secrets are environment variables and substituted; a whole-value <code>env:</code> entry is delivered by name.</td></tr>
             <tr><td><code>${{ secrets.GITHUB_TOKEN }}</code></td><td><code>$GITHUB_TOKEN</code> / <code>$SPINDLE_JOB_TOKEN</code></td><td>One automatic, scoped job token under both spellings.</td></tr>
             <tr><td><code>github.event.inputs.x</code></td><td><code>inputs.x</code></td><td>Dispatch inputs only.</td></tr>
@@ -1192,13 +1435,11 @@ steps:
           <thead><tr><th>Construct</th><th>Why</th><th>Workaround</th></tr></thead>
           <tbody>
             <tr><td>remote / marketplace <code>uses:</code></td><td>no marketplace, and an action is code with the job's privileges</td><td>a base image, a <code>run:</code> step, a local action, or <code>docker://</code></td></tr>
-            <tr><td>reusable workflows, cross-repository</td><td>secrets never cross a repository boundary (D-6)</td><td>a repository-local <code>./.spindle/workflows/…</code> call, or a <code>workflow_dispatch</code> chain</td></tr>
-            <tr><td><code>on.workflow_call</code>, a caller's <code>with:</code>/<code>secrets:</code>, a callee's <code>outputs</code></td><td>not in the parser yet (PAR-075); a local callee's jobs still expand into the run</td><td>inline the values or read the callee job's recorded outputs from the API</td></tr>
-            <tr><td><code>${{ github.action_path }}</code> in a composite action</td><td>not in the closed <code>github.*</code> field set yet (PAR-074)</td><td>use a path relative to the workspace, or a <code>run:</code> step</td></tr>
-            <tr><td><code>services.&lt;id&gt;.credentials</code></td><td>the pull identity belongs to the runner (PAR-078)</td><td>the runner's docker config or its <code>--image-prefix</code> mirror</td></tr>
+            <tr><td>reusable workflows, <b>remote</b></td><td>there is no URL or remote-action resolver; a cross-repository callee must be public here, SHA-pinned and called with explicit secrets (D-6)</td><td>a pinned <code>owner/repo/.spindle/workflows/x.yml@&lt;sha&gt;</code> call, a local call, or a <code>workflow_dispatch</code> chain</td></tr>
+            <tr><td><code>services.&lt;id&gt;.credentials</code></td><td>refused by name: the pull identity belongs to the runner (PAR-078)</td><td>the runner's docker config, its <code>--image-prefix</code> mirror, or <code>--registry-auth-file</code></td></tr>
             <tr><td><code>max-parallel</code></td><td>not in the parser</td><td>no equivalent; concurrency caps runs, not cells</td></tr>
-            <tr><td><code>docker build</code> in a job</td><td>no Docker socket</td><td>buildah or another daemonless builder; or keep it in Forgejo</td></tr>
-            <tr><td><code>--privileged</code> / <code>--cap-add</code></td><td>refused by the runner</td><td>the runner host must permit the build without per-job flags</td></tr>
+            <tr><td><code>docker build</code> in a job</td><td>no Docker socket by default</td><td>kaniko or buildah (daemonless); a runner whose operator granted <code>--docker-host</code> only, and it refuses fork runs</td></tr>
+            <tr><td><code>--privileged</code> / <code>--cap-add</code></td><td>refused unless the runner's operator passed <code>--container-privileged</code></td><td>the runner host must permit the build without per-job flags</td></tr>
             <tr><td>Forgejo release/asset API</td><td>different API</td><td>spindle's releases API, or keep publishing in Forgejo during migration</td></tr>
           </tbody>
         </table>
@@ -1233,15 +1474,20 @@ steps:
           <tbody>
             <tr><td>No run after a push</td><td>No workflow at that commit; the event or branch/tag does not match (a tags-only trigger on a branch push, a branches-only trigger on a tag); the file failed to parse; the ref was a delete or notes ref; the push used a job token</td><td>Threads → Workflows lists files and parse errors; deletes and notes refs never fire; job-token pushes are suppressed</td></tr>
             <tr><td>A file is rejected</td><td>Unknown key, bad type, unsupported cron, a <code>types</code> value the service never emits, an unsupported <code>${{ }}</code> reference or <code>if:</code> function, a matrix over 256 cells, both <code>run</code> and <code>uses</code>, a bad <code>needs</code></td><td>The error names the file and key; fix that file only — the others keep running</td></tr>
-            <tr><td>Run stays queued</td><td>No active runner; labels are not a superset; a fork run with no fork-opted runner; capacity full; a concurrency group is held</td><td><code>/admin/runners</code>: an active runner with the labels and a recent last-seen; the run page shows <code>runs-on</code></td></tr>
-            <tr><td>Job failed before any step</td><td>Image refused by policy; a bad container option; an undefined environment; an unresolvable local action</td><td>The job's <code>reason</code> names the field and value</td></tr>
+            <tr><td>Run stays queued</td><td>The job's <code>queue_reason</code> names it: no runner registered; labels are not a superset; a fork run with no fork-opted runner; all matching runners busy; a capacity hold; a live <code>needs:</code> dependency; a concurrency group held</td><td>Read the chip on the run page — it names the one cause to act on; <code>/admin/runners</code> shows labels, capacity and last-seen</td></tr>
+            <tr><td>Job failed before any step</td><td>Image refused by policy; a bad container option or a runner grant it did not opt into; an undefined environment; an unresolvable local action; a malformed reusable call</td><td>The job's <code>reason</code> names the field and value; a missing runner grant names the flag</td></tr>
             <tr><td>Checkout fails</td><td>The image has no <code>git</code>; the clone URL is unreachable from the container; the commit is missing</td><td>Use an image with git; read the reachability diagnostic; set the server's public URL</td></tr>
             <tr><td>Push from a job refused</td><td>Shallow clone; <code>contents: read</code>; protected ref; non-fast-forward</td><td><code>fetch-depth: 0</code>, <code>contents: write</code>, a fast-forward, or relax the policy</td></tr>
             <tr><td>Secret is empty</td><td>Fork/untrusted run; no secrets key configured; wrong name; a whole-value reference in a non-step site</td><td>The run shows an <code>untrusted</code> chip; names are exact; <code>$X</code> and <code>${{ secrets.X }}</code> both work in a step</td></tr>
             <tr><td>“did not publish the output”</td><td>The step failed, was skipped, ran later, or wrote a different name</td><td>Check <code>steps.&lt;id&gt;.outcome</code> and the exact name in <code>$SPINDLE_OUTPUT</code></td></tr>
             <tr><td>Artifact upload: no files</td><td>The pattern matched nothing, or the working directory is wrong</td><td>The log names the patterns; use <code>if-no-files-found: warn</code> when empty is allowed</td></tr>
-            <tr><td>Image pull failed</td><td>The daemon cannot reach the mirror, the credential is refused, or the repository is absent</td><td>Read the <code>spindle:</code> diagnostic: daemon DNS/TLS, <code>$DOCKER_CONFIG</code>, mirror repository key</td></tr>
-            <tr><td>Run is pending_approval</td><td>The first-time-fork gate, or an environment with reviewers</td><td>A maintainer or listed reviewer approves on the run page</td></tr>
+            <tr><td>Artifact download is 404</td><td>The retention window closed, or the name/id does not belong to that run</td><td>List the run's artifacts — an expired artifact is 404 before GC frees it; re-run the producer if the bytes are still needed</td></tr>
+            <tr><td>Cross-run download is 409 naming the parent</td><td>The consuming run is a <code>workflow_run</code> follow-up whose upstream was untrusted, so its approval hold is still pending</td><td>A maintainer approves that run (the approval releases both the run and cross-run consumption); a fork run or a secrets-bearing job is refused outright</td></tr>
+            <tr><td>Cache never hits</td><td><code>path</code> is absolute or <code>~</code>; the key changes every run; a PR/fork scope cannot read the entry you expect</td><td>Point the tool at a workspace directory (<code>.npm</code>, <code>.cache/pip</code>); build the key from <code>runner.os</code>/branch, not <code>github.sha</code>, and use <code>restore-keys</code></td></tr>
+            <tr><td><code>docker build</code> exits 127</td><td>The job has no docker socket or daemon by default</td><td>Use a daemonless builder (kaniko, or buildah with vfs/chroot) or a runner whose operator granted <code>--docker-host</code>; that runner never takes fork runs</td></tr>
+            <tr><td>Image pull failed</td><td>The daemon cannot reach the mirror, the credential is refused, or the repository is absent</td><td>Read the <code>spindle:</code> diagnostic: daemon DNS/TLS, <code>$DOCKER_CONFIG</code>, mirror repository key; a private pull is the runner's (<code>--registry-auth-file</code>), not a workflow credential</td></tr>
+            <tr><td>Run is pending_approval</td><td>The first-time-fork gate, an environment with reviewers, an untrusted <code>workflow_run</code> upstream, or a cross-run artifact read</td><td>A maintainer or listed reviewer approves on the run page; the page names which hold applies</td></tr>
+            <tr><td><code>pull_request_target</code> does nothing</td><td>The repository switch is off (the default), or a head checkout is refused</td><td>A maintainer enables it on the Threads page (audited); a declarative head checkout needs the second switch</td></tr>
             <tr><td>Run was cancelled with no human</td><td>A newer push to the same workflow and ref superseded it</td><td>The run names its successor (<code>superseded_by</code>) and the reason <code>supersede</code>; open the successor, or give the workflow its own <code>concurrency:</code> group</td></tr>
             <tr><td>Approval never arrives</td><td>No reviewer decided; there is no timeout and no auto-approval</td><td>A listed reviewer or repo admin must decide; a deleted environment fails closed</td></tr>
             <tr><td>Schedule never fires</td><td>Bad cron; not on the default branch; no maintainer role; the tick already fired</td><td>Fix and merge to the default branch; run a maintainer; dispatch for “now”</td></tr>

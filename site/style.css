@@ -148,7 +148,8 @@ code { font-size: 0.9em; }
   border-radius: 2px;
   background: var(--pd-raised);
   color: var(--pd-text);
-  white-space: nowrap;
+  white-space: normal;
+  overflow-wrap: anywhere;
 }
 
 a {
@@ -206,6 +207,10 @@ a:hover { text-decoration-thickness: 2px; }
   background: var(--pd-surface);
   border-bottom: 1px solid var(--pd-line);
 }
+
+/* Anchor targets clear the sticky header (two rows on narrow screens). */
+[id] { scroll-margin-top: 76px; }
+@media (max-width: 720px) { [id] { scroll-margin-top: 112px; } }
 
 .head-in {
   display: flex;
@@ -928,7 +933,8 @@ html:not(.concepts-ready) .concept-play { display: none; }
   border-radius: 2px;
   background: var(--pd-raised);
   color: var(--pd-text);
-  white-space: nowrap;
+  white-space: normal;
+  overflow-wrap: anywhere;
 }
 .prose b { color: var(--pd-text); font-weight: 600; }
 

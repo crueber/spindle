@@ -45,12 +45,25 @@ var (
 const (
 	EventPush         = "push"
 	EventPullReq      = "pull_request"
+	EventPullTarget   = "pull_request_target"
 	EventDispatch     = "workflow_dispatch"
 	EventSchedule     = "schedule" // created by SweepSchedule, never by Discover
 	EventRelease      = "release"
 	EventIssues       = "issues"
 	EventIssueComment = "issue_comment"
-	defaultRunActor   = "spindle"
+	// EventRepositoryDispatch is the API-dispatched custom event (PAR-018).
+	EventRepositoryDispatch = "repository_dispatch"
+	// EventWorkflowRun follows another run's lifecycle (PAR-019).
+	EventWorkflowRun = "workflow_run"
+	// EventCreate/EventDelete are the git ref lifecycle events (PAR-021),
+	// emitted by the push hook for a branch or tag creation/deletion.
+	EventCreate = "create"
+	EventDelete = "delete"
+	// EventDeployment/EventDeploymentStatus come from the environment
+	// deployment records Threads itself writes (PAR-021).
+	EventDeployment       = "deployment"
+	EventDeploymentStatus = "deployment_status"
+	defaultRunActor       = "spindle"
 )
 
 // Run states. T1 creates every run in RunQueued; UpdateJob moves it (T2 will
@@ -167,6 +180,39 @@ type Run struct {
 	// when the run leaves `queued`, so the run page can say what it waits for
 	// instead of showing a silent spinner (law 7).
 	PendingGroup string `json:"pending_group,omitempty"`
+	// HoldReason names a capacity hold (PAR-153): a run created while the
+	// repository's concurrency cap is saturated keeps its jobs queued (not
+	// enqueued) and says why, instead of appearing ready and never starting.
+	// It is cleared when the run is released into the queue.
+	HoldReason string `json:"hold_reason,omitempty"`
+	// WriteTokens records the fork-run write-token decision (PAR-118, D-13):
+	// the repository's send_write_tokens switch was ON when this untrusted run
+	// was created, so its job tokens may carry write scopes. It is false for
+	// every trusted run (they are governed by `permissions:` alone) and is the
+	// one place a fork run's write capability is written down and audited.
+	WriteTokens bool `json:"write_tokens,omitempty"`
+	// ParentRunID/ParentTrusted record the upstream run of a workflow_run
+	// trigger (PAR-019). A run whose parent is untrusted is held for approval
+	// before it can consume cross-run artifacts (D-3); ChainDepth bounds the
+	// follow-up chain (a workflow_run run that triggers another) at
+	// maxWorkflowRunChain.
+	ParentRunID   string `json:"parent_run_id,omitempty"`
+	ParentTrusted bool   `json:"parent_trusted,omitempty"`
+	ChainDepth    int    `json:"chain_depth,omitempty"`
+	// PRTarget marks a pull_request_target run (PAR-015, D-2): the workflow
+	// file and secrets are the BASE branch's, and the run page carries the
+	// badge that says so.
+	PRTarget bool `json:"pr_target,omitempty"`
+	// WorkflowRunFollowers records that the revision this run was created from
+	// declares `on.workflow_run`. It is the budget gate for the follow-up
+	// emitters: a repository with no follower pays no extra discovery on the
+	// create or complete path (PAR-019).
+	WorkflowRunFollowers bool `json:"workflow_run_followers,omitempty"`
+	// RepoConcurrencyCap is the repository cap in force when the run was
+	// created (0 = none). The terminal fold uses it as the budget gate for
+	// releaseHeldRuns: an uncapped repository pays no settings read on every
+	// completion.
+	RepoConcurrencyCap int `json:"repo_concurrency_cap,omitempty"`
 
 	CreatedAt   string  `json:"created_at"`
 	UpdatedAt   string  `json:"updated_at"`
@@ -266,6 +312,16 @@ type Spec struct {
 	// and carried; execution is pass B/C.
 	Uses string            `json:"uses,omitempty"`
 	With map[string]string `json:"with,omitempty"`
+	// Call is the reusable call this job was expanded from (PAR-075; nil for a
+	// plain job): the caller job key and the callee's declared output templates.
+	// Every callee job of one call carries it, so the needs fold can evaluate
+	// the caller's outputs from the callee jobs' reported outputs.
+	Call *callSpec `json:"call,omitempty"`
+	// ReusableSecrets is the closed secret set an expanded callee receives
+	// (PAR-075/D-6; nil for an ordinary job, which receives the repository's
+	// secrets). Inherit is same-repository only; Names maps a callee-visible
+	// name to the repository secret it comes from.
+	ReusableSecrets *reusableSecrets `json:"reusable_secrets,omitempty"`
 	// Inputs are the resolved workflow_dispatch input values for this run
 	// (declared defaults merged with what the dispatcher supplied). The runner
 	// substitutes ${{ inputs.<name> }} and exposes them to `if` as
@@ -344,6 +400,25 @@ type StepSpec struct {
 	ContinueOnError bool `json:"continue_on_error,omitempty"`
 	// TimeoutMinutes bounds one step; zero means the remaining job time.
 	TimeoutMinutes int `json:"timeout_minutes,omitempty"`
+	// Background starts this step asynchronously and continues with the next
+	// step (PAR-080). It requires an `id:` so a later step can wait for or
+	// cancel it, and is accepted only on a run/docker step (never inside a
+	// reusable/composite body or a parallel group). The process is started in
+	// its own session/process group and killed (SIGTERM then SIGKILL) when it
+	// is waited for, cancelled, times out, or the job ends.
+	Background bool `json:"background,omitempty"`
+	// Wait names a background step id to wait for, or "all" for every
+	// outstanding one. The control step fails when the waited step failed.
+	Wait string `json:"wait,omitempty"`
+	// WaitAll is the boolean spelling of `wait: all`.
+	WaitAll bool `json:"wait_all,omitempty"`
+	// Cancel names a background step id to terminate, or "all". The control
+	// step succeeds once the process group is gone.
+	Cancel string `json:"cancel,omitempty"`
+	// Parallel holds steps that run concurrently as one unit (PAR-080). The
+	// group fails when a member fails without continue-on-error; member outputs
+	// are recorded in declaration order after the group completes.
+	Parallel []StepSpec `json:"parallel,omitempty"`
 }
 
 // ActionSpec is one repository-local action definition, resolved from the run
@@ -438,8 +513,15 @@ const (
 
 // Approval kinds (Run.ApprovalKind): which hold is on the run.
 const (
-	ApprovalFork        = "fork"
+	ApprovalFork = "fork"
+	// ApprovalCrossRun holds a run whose workflow downloads another run's
+	// artifact (D-3): consumption is a maintain decision, never automatic.
+	ApprovalCrossRun    = "cross_run"
 	ApprovalEnvironment = "environment"
+	// ApprovalWorkflowRun holds a workflow_run whose upstream run was
+	// untrusted (PAR-019, D-3): its jobs do not start, and cross-run artifact
+	// consumption is refused, until a maintainer approves it.
+	ApprovalWorkflowRun = "workflow_run"
 )
 
 // Cancel reasons (Run.CancelReason): who ended a live run, so a superseded run
@@ -502,6 +584,12 @@ type Job struct {
 	// a job that was never claimed). It is how attempt traffic finds the entry
 	// without a queue probe.
 	QueueSeq string `json:"queue_seq,omitempty"`
+	// QueueReason is a DERIVED read-model field (never stored): exactly one
+	// named reason a queued job has not started (PAR-156) — approval, a
+	// capacity hold, a concurrency group, `needs:`, or runner/label
+	// availability. It is filled by GetRun, so the API and the run page say
+	// the same thing.
+	QueueReason string `json:"queue_reason,omitempty"`
 	// CancelRequested carries the operator's cancel signal until the attempt
 	// acknowledges it (15 §3: the runner is busy, so its writes are the
 	// control channel).
@@ -633,6 +721,27 @@ type CreateOpts struct {
 	Inputs map[string]string
 	// Attempt starts at 1 (a requeue bumps it; T2 owns requeueing).
 	Attempt int
+	// ParentRunID/ParentTrusted carry a workflow_run upstream (PAR-019).
+	// ParentTrusted=false means the upstream run was untrusted (a fork PR), so
+	// this follow-up is held for maintainer approval before its jobs start
+	// (D-3: never automatic, and cross-run artifact consumption waits for it).
+	ParentRunID   string
+	ParentTrusted bool
+	// ChainDepth is the workflow_run chain depth (0 for a non-follow-up run).
+	// It bounds a chain at maxWorkflowRunChain.
+	ChainDepth int
+	// PullNumber is the PR number a pull_request event is about. It is used
+	// for the merge-ref semantics (PAR-024): the run reports
+	// refs/pull/<n>/merge and the server-computed merge commit when the git
+	// reader can produce one.
+	PullNumber int
+	// PullHeadSHA is the PR head commit for a pull_request_target delivery. The
+	// run itself reports the BASE tip, but a `paths:` filter still diffs the
+	// PR's changed files (the only reason the head sha is needed).
+	PullHeadSHA string
+	// UpstreamWorkflow is the upstream run's workflow display name for a
+	// workflow_run delivery (on.workflow_run.workflows matches it).
+	UpstreamWorkflow string
 }
 
 // --- state helpers ---------------------------------------------------------
@@ -649,8 +758,10 @@ func normalizeSHA(sha string) (string, error) {
 // validEvent reports the events CreateRun accepts.
 func validEvent(event string) bool {
 	switch event {
-	case EventPush, EventPullReq, EventDispatch, EventSchedule,
-		EventRelease, EventIssues, EventIssueComment:
+	case EventPush, EventPullReq, EventPullTarget, EventDispatch, EventSchedule,
+		EventRelease, EventIssues, EventIssueComment,
+		EventRepositoryDispatch, EventWorkflowRun,
+		EventCreate, EventDelete, EventDeployment, EventDeploymentStatus:
 		return true
 	}
 	return false

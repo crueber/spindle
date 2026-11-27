@@ -123,6 +123,32 @@ func TestThreadRunPageWaitTimerAndApprovals(t *testing.T) {
 		}
 	}
 
+	// A cross-run hold names its own rule, never the fork wording (PAR-098).
+	cross := threadsFixtureRun()
+	cross.State = threads.RunPendingApproval
+	cross.ApprovalKind = threads.ApprovalCrossRun
+	crossApproval := threads.ApprovalView{Pending: true, Kind: threads.ApprovalCrossRun, CanDecide: true}
+	BindThreads(ThreadsDeps{
+		Get: func(context.Context, string, string, string, auth.Principal) (*threads.RunView, error) {
+			return &threads.RunView{Run: cross, Jobs: []*threads.Job{threadsFixtureJob(cross)}, Approval: &crossApproval}, nil
+		},
+		Workflows: func(context.Context, string, string, string, auth.Principal) (*threads.WorkflowList, error) {
+			return &threads.WorkflowList{Workflows: []*threads.WorkflowState{}}, nil
+		},
+		Role: func(context.Context, string, string, auth.Principal) (string, error) { return "write", nil },
+	})
+	rec = f.get("/acme/widgets/threads/" + cross.ID)
+	wantStatus(t, rec, http.StatusOK)
+	crossBody := bodyText(rec)
+	for _, want := range []string{"downloads another run's artifacts", "run-id", "audited"} {
+		if !strings.Contains(crossBody, want) {
+			t.Fatalf("cross-run hold page lacks %q\n%s", want, crossBody)
+		}
+	}
+	if strings.Contains(crossBody, "first-time contributor") {
+		t.Fatalf("a cross-run hold rendered the fork wording\n%s", crossBody)
+	}
+
 	// A concurrency wait renders the group banner instead of an approval one.
 	run2 := threadsFixtureRun()
 	run2.State = threads.RunQueued
