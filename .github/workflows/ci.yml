@@ -34,113 +34,94 @@ jobs:
         run: node --test "web/test/unit/*.test.js"
 
   gate:
+    # The prepped toolchain image (docker/ci.Dockerfile): git 2.5x, node, npm, gcc,
+    # openssh-client, chromium and the fonts are installed once, at image build. The
+    # GitHub workflow installs nothing at run time — no apt, no PPA, no Chrome
+    # repository. Rebuild and re-pin the digest when docker/ci.Dockerfile moves.
     runs-on: ubuntu-latest
+    container:
+      image: ghcr.io/crueber/spindle-ci@sha256:21d0314ddf33a0a5938aaa27d07d755927a67d0500a9beb89d5c90a1051a50cc
+      credentials:
+        username: ${{ secrets.GHCR_USER }}
+        password: ${{ secrets.GHCR_TOKEN }}
     steps:
       - uses: actions/checkout@v4
-      - uses: pnpm/action-setup@v4
-        with:
-          version: 11
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 22
-          cache: pnpm
-          cache-dependency-path: web/pnpm-lock.yaml
       - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
           cache: true
-      # The suite needs git >= 2.47 (internal/e2e) and the stock runner image is older
-      # than that; the git-core PPA is the fastest way to a current git.
-      - name: git >= 2.47
-        run: |
-          sudo add-apt-repository -y ppa:git-core/ppa
-          sudo apt-get update -qq
-          sudo apt-get install -y -qq git
-          git --version
+      - name: pnpm
+        run: corepack enable && corepack prepare pnpm@11.25.0 --activate
       - name: build the web once (go:embed all:dist)
         run: |
           pnpm --dir web install --frozen-lockfile
           make web
           touch web/dist/.keep
+      # Several tests assert that an unwritable/read-only path FAILS. Root bypasses
+      # permission bits, so the suite runs as a normal user — the same shape as the
+      # development gate (docs/go/15_testing.md §6.1).
+      - name: unprivileged test user
+        run: |
+          useradd -m -u 1001 ci
+          chown -R ci:ci .
       - name: gofmt + go vet + go build
-        run: make -o web vet
+        run: su -s /bin/sh -c "cd '$PWD' && HOME=/home/ci PATH='$PATH' make -o web vet" ci
       - name: fast tier under the race detector
-        # PRs race the packages that own shared state; a push to main runs the
-        # full tier (docs/go/15_testing.md §6.1).
+        # PRs race the packages that own shared state; a push to main (or a tag) runs
+        # the full tier (docs/go/15_testing.md §6.1).
         run: |
           case "${{ github.event_name }}" in
             push|workflow_dispatch) target=race ;;
             *) target=race-pr ;;
           esac
-          make -o web $target
-      - name: coverage gate (≥95 % per internal package, D7)
-        run: make cover
+          su -s /bin/sh -c "cd '$PWD' && HOME=/home/ci PATH='$PATH' make -o web $target" ci
+      - name: coverage gate (>=95 % per internal package, D7)
+        run: su -s /bin/sh -c "cd '$PWD' && HOME=/home/ci PATH='$PATH' make cover" ci
       - name: smart-HTTP end-to-end against the real git binary
-        run: make e2e
+        run: su -s /bin/sh -c "cd '$PWD' && HOME=/home/ci PATH='$PATH' make e2e" ci
       - name: store contract — memory + filesystem (always)
-        run: make contract
+        run: su -s /bin/sh -c "cd '$PWD' && HOME=/home/ci PATH='$PATH' make contract" ci
+      - name: parity gate + corpus parse tier (no docker)
+        run: su -s /bin/sh -c "cd '$PWD' && HOME=/home/ci PATH='$PATH' make -o web parity" ci
 
   a11y:
     # The rendered accessibility floor (AGENTS.md §2, docs/go/15_testing.md §6.6): the
     # real binary driven through headless Chromium over CDP across the fixed page set at
-    # 390 px and desktop. Its own job because it needs a browser; after the gate so a
-    # red gate does not pay for one. This is the same tier the development gate runs —
-    # `make a11y` with SPINDLE_A11Y=1, where a missing or broken browser is a FAILURE,
-    # never a skip (internal/e2e/a11y_test.go TestA11yPreflight).
+    # 390 px and desktop. Same prepped image, same unprivileged user; the browser is
+    # in the image, not installed here. A missing or broken browser is a FAILURE, never
+    # a skip (internal/e2e/a11y_test.go TestA11yPreflight).
     runs-on: ubuntu-latest
     needs: gate
+    container:
+      image: ghcr.io/crueber/spindle-ci@sha256:21d0314ddf33a0a5938aaa27d07d755927a67d0500a9beb89d5c90a1051a50cc
+      credentials:
+        username: ${{ secrets.GHCR_USER }}
+        password: ${{ secrets.GHCR_TOKEN }}
     env:
       SPINDLE_A11Y: "1"
-      # Name the binary instead of relying on the PATH probe: the fix must be visible
-      # in this file, not inferred from the runner image.
-      SPINDLE_CHROMIUM: /usr/bin/google-chrome-stable
+      # Debian chromium in the image; a job container has no user namespaces for the
+      # sandbox, so the CI-only no-sandbox switch is required (same as the dev gate).
+      SPINDLE_CHROMIUM: /usr/bin/chromium
+      SPINDLE_CHROMIUM_NO_SANDBOX: "1"
     steps:
       - uses: actions/checkout@v4
-      - uses: pnpm/action-setup@v4
-        with:
-          version: 11
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 22
-          cache: pnpm
-          cache-dependency-path: web/pnpm-lock.yaml
       - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
           cache: true
-      - name: git >= 2.47
-        # The e2e harness asserts a modern git before it drives the pages
-        # (requireModernGit); the stock runner image is older than that.
-        run: |
-          sudo add-apt-repository -y ppa:git-core/ppa
-          sudo apt-get update -qq
-          sudo apt-get install -y -qq git
-          git --version
-      - name: Chromium (the browser the floor needs)
-        # The development gate installs Debian's `chromium` into a job container. A
-        # hosted GitHub runner is an Ubuntu 24.04 VM, where `chromium` is only a snap
-        # stub that cannot start in CI; Google Chrome is a Chromium build and speaks
-        # the same DevTools protocol surface the test drives (`make a11y` also probes
-        # google-chrome-stable on PATH). Install it from Google's apt repository so the
-        # browser is provisioned by this job, not assumed from the image. No
-        # SPINDLE_CHROMIUM_NO_SANDBOX here: that exists because a job container has no
-        # user namespaces; the VM runs the browser with its sandbox on.
-        run: |
-          sudo install -d -m 0755 /etc/apt/keyrings
-          curl -fsSL https://dl.google.com/linux/linux_signing_key.pub \
-            | sudo gpg --batch --yes --dearmor -o /etc/apt/keyrings/google-chrome.gpg
-          echo "deb [arch=amd64 signed-by=/etc/apt/keyrings/google-chrome.gpg] https://dl.google.com/linux/chrome/deb/ stable main" \
-            | sudo tee /etc/apt/sources.list.d/google-chrome.list >/dev/null
-          sudo apt-get update -qq
-          sudo apt-get install -y -qq --no-install-recommends google-chrome-stable fonts-dejavu-core
-          google-chrome-stable --version
+      - name: pnpm
+        run: corepack enable && corepack prepare pnpm@11.25.0 --activate
       - name: build the web once (go:embed all:dist)
         run: |
           pnpm --dir web install --frozen-lockfile
           make web
           touch web/dist/.keep
+      - name: unprivileged test user
+        run: |
+          useradd -m -u 1001 ci
+          chown -R ci:ci .
       - name: rendered accessibility smoke (headless Chromium over CDP)
-        run: make -o web a11y
+        run: su -s /bin/sh -c "cd '$PWD' && HOME=/home/ci PATH='$PATH' SPINDLE_A11Y=1 SPINDLE_CHROMIUM=/usr/bin/chromium SPINDLE_CHROMIUM_NO_SANDBOX=1 make -o web a11y" ci
 
   s3-contract:
     runs-on: ubuntu-latest
