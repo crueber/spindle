@@ -2509,7 +2509,9 @@ and secret names, never a value:
   approver has approved (a partial approval is recorded and leaves the run pending; a second
   approval by a principal who has already approved is a no-op, and approving a run that is no
   longer pending is `409`). With **no available reviewer the run simply stays pending** — there is
-  no timeout and no auto-approval.
+  no timeout and no auto-approval. The approval hold is also a **claim-path** gate: the deployment
+  record's `pending` state refuses a claim independently of the run header, so a stale queue entry
+  can never hand a gated job to a runner before a reviewer decides.
 - **Denied** fails exactly the deployment jobs, with `deployment to environment "production" denied by
   <who>`; the run's other jobs continue so the failure reads beside the build.
 - **Secrets** are stored exactly like repository secrets (AES-256-GCM, write-only) but bound to the

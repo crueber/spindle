@@ -5,13 +5,15 @@
 package e2e
 
 import (
+	"fmt"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
 
 const deployWorkflowE2E = `name: Deploy
-on: [push, workflow_dispatch]
+on: workflow_dispatch
 jobs:
   build:
     runs-on: linux
@@ -56,15 +58,23 @@ func TestE2E_ThreadsDeploymentsQueueAndJobCancel(t *testing.T) {
 	g.run(work, "remote", "add", "origin", s.gitURL(owner, repo))
 	g.runAuth(work, chainAliceTok, "push", "-u", "origin", "main")
 
+	// Alice may write (she is the principal the environment names as reviewer).
+	access := mustAPI(t, "GET", lane+"/access", "", chainAliceTok)
+	ver, _ := access["version"].(float64)
+	mustAPI(t, "PUT", lane+"/access", fmt.Sprintf(
+		`{"version":%d,"visibility":"public","role_bindings":[{"subject":%q,"role":"maintain"}]}`,
+		int(ver), "user:alice"), chainAliceTok)
+
 	// The environment must exist before a deployment can target it (fail
 	// closed, the same rule a job naming an undefined one follows).
 	mustAPI(t, "PUT", lane+"/threads/environments/production",
 		`{}`, chainAliceTok)
+	// workflow-env has a required reviewer, so its deployment is the hold the
+	// assertions below observe. The workflow is dispatch-only: the push that
+	// lands the file must not create a competing run that would legitimately
+	// occupy this environment's serialization slot first.
 	mustAPI(t, "PUT", lane+"/threads/environments/workflow-env",
-		`{}`, chainAliceTok)
-	// The push above may have raced the environment record; dispatch the same
-	// workflow now that the environment exists, so the job-deployment half runs
-	// a real run creation path with a defined environment.
+		`{"required_reviewers":["alice"]}`, chainAliceTok)
 	mustAPI(t, "POST", lane+"/threads", `{"workflow":"deploy.yml","ref":"main"}`, chainAliceTok)
 
 	// Two API deployments to one environment: the first holds it, the second is
@@ -111,17 +121,34 @@ func TestE2E_ThreadsDeploymentsQueueAndJobCancel(t *testing.T) {
 	view := mustAPI(t, "GET", lane+"/threads/"+runID, "", chainAliceTok)
 	jobs, _ := view["jobs"].([]any)
 	var shipID, deployment string
+	var shipJob map[string]any
 	for _, jraw := range jobs {
 		job, _ := jraw.(map[string]any)
 		if job["name"] != "ship" {
 			continue
 		}
+		shipJob = job
 		shipID, _ = job["id"].(string)
 		dep, _ := job["deployment"].(map[string]any)
 		deployment, _ = dep["deployment_id"].(string)
 	}
 	if shipID == "" || deployment == "" {
 		t.Fatalf("ship job has no deployment record: %v", jobs)
+	}
+	// The hold is recorded before the job can be claimed: the run says
+	// pending_approval / environment, the approval projection is pending, and
+	// the job's own queue reason names the environment's reviewers. This is the
+	// marker the UI shows; a lost hold would fail here, not merely later.
+	runDoc, _ := view["run"].(map[string]any)
+	if runDoc["state"] != "pending_approval" || runDoc["approval_kind"] != "environment" {
+		t.Fatalf("held run = %v", runDoc)
+	}
+	approval, _ := view["approval"].(map[string]any)
+	if approval["pending"] != true {
+		t.Fatalf("approval projection = %v", view["approval"])
+	}
+	if reason, _ := shipJob["queue_reason"].(string); !strings.HasPrefix(reason, "awaiting approval of deployment to workflow-env") {
+		t.Fatalf("ship queue reason = %q", reason)
 	}
 	record := mustAPI(t, "GET", lane+"/threads/deployments/"+deployment, "", chainAliceTok)
 	recordDoc, _ := record["deployment"].(map[string]any)

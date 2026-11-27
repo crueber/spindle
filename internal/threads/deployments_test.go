@@ -1546,3 +1546,30 @@ func TestEnvironmentVariableIdempotenceAndQueueFailures(t *testing.T) {
 	}
 	e.svc.failEnvironmentQueue(ctx(), "o", "r", "gone")
 }
+
+// TestClaimRefusesAPendingDeploymentEntry is the claim-path half of the hold:
+// creation never enqueues a pending deployment (the run is pending_approval),
+// but even a stale/hostile queue entry must not hand the gated job to a runner
+// before a reviewer decides. Before the guard this fabricated entry reached the
+// claim write and produced a Claim.
+func TestClaimRefusesAPendingDeploymentEntry(t *testing.T) {
+	f := newEnvFixture(t)
+	f.putEnvironment(t, "production", "writer")
+	run := f.deployRun(t, CreateOpts{})
+	ship := envJob(t, f.testEnv, run.ID)
+	if ship.Deployment == nil || ship.Deployment.State != DeploymentPending {
+		t.Fatalf("ship deployment = %+v", ship.Deployment)
+	}
+	// Fabricate the stale entry a buggy enqueue (or a crash between the job
+	// write and the run hold) would leave behind; the claim probe must refuse it.
+	if _, err := f.svc.enqueueJob(ctx(), "o", "r", ship, nil); err != nil {
+		t.Fatalf("enqueue stale entry: %v", err)
+	}
+	claim, err := f.svc.claimLoop(ctx(), "o", "r", needsRunner(), needsRunner().Labels)
+	if err != nil {
+		t.Fatalf("claimLoop: %v", err)
+	}
+	if claim != nil {
+		t.Fatalf("a pending deployment was claimed: %+v", claim)
+	}
+}

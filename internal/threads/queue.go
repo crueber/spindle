@@ -572,6 +572,14 @@ func (s *Service) claimEntry(ctx context.Context, owner, repo string, entry *Que
 	if job.Deployment != nil && job.Deployment.QueuePosition > 0 {
 		return nil, nil
 	}
+	// An approval hold is not claimable, full stop. Creation never enqueues a
+	// pending deployment (the run is `pending_approval`), but a stale or hostile
+	// queue entry must not be able to hand a gated job to a runner before its
+	// reviewers decide: the deployment record is the authority here, exactly
+	// like the wait timer and queue position above.
+	if job.Deployment != nil && job.Deployment.State == DeploymentPending {
+		return nil, nil
+	}
 	// Tenancy under the claim CAS (the authority, like the fork gate below): a
 	// stale hint row or a hostile entry can never hand a repository's code to a
 	// runner the admin did not allow. The job stays queued for an eligible
