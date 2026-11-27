@@ -15,9 +15,11 @@ import (
 //     at run creation (ExpandGroup: an absent value is an error, never an empty
 //     key);
 //   - every other substituted site (step name, run, shell, working-directory,
-//     env/with values, a job name and job outputs) is validated at parse time
-//     against the same closed vocabulary, then expanded at run time by the
-//     server or runner (Substitute);
+//     env/with values, a job name, job outputs and a `runs-on` label) is
+//     validated at parse time against the same closed vocabulary, then
+//     expanded at run time by the server or runner (Substitute). A span may be
+//     a plain reference OR a whole expression (PAR-038); `runs-on` and defaults
+//     have their own narrower validators (flow.go);
 //   - a job `name` is display-only, so FillTemplate fills what it can and
 //     leaves the rest visible.
 //
@@ -170,10 +172,17 @@ type TemplateRef struct {
 	Output string
 }
 
-// templatePart is one literal run or one reference of a template string.
+// templatePart is one literal run, one reference, or one expression span of a
+// template string. A part is a reference when its span is exactly
+// `context.key`; any other span is carried as an expression and evaluated by
+// the shared evaluator (PAR-038).
 type templatePart struct {
 	literal string
 	ref     *TemplateRef
+	// expr is the inside of a `${{ … }}` span that is not a plain reference
+	// (an operator expression, a function call, an indexed access). It is only
+	// produced by splitTemplateExpr.
+	expr string
 }
 
 // splitTemplate splits s into literal runs and references. A `${{` with no
@@ -181,6 +190,17 @@ type templatePart struct {
 // function call), is an error: the caller decides whether that fails the file
 // (a group or a substituted site) or leaves the text visible (a job name).
 func splitTemplate(s string) ([]templatePart, error) {
+	return splitTemplateParts(s, false)
+}
+
+// splitTemplateExpr is splitTemplate for a site that accepts a full expression
+// span: a span that is not a plain reference becomes an expr part instead of an
+// error.
+func splitTemplateExpr(s string) ([]templatePart, error) {
+	return splitTemplateParts(s, true)
+}
+
+func splitTemplateParts(s string, allowExpr bool) ([]templatePart, error) {
 	var parts []templatePart
 	for {
 		i := strings.Index(s, "${{")
@@ -199,13 +219,20 @@ func splitTemplate(s string) ([]templatePart, error) {
 			return nil, fmt.Errorf("unterminated ${{ expression")
 		}
 		expr := strings.TrimSpace(rest[:j])
+		if expr == "" {
+			return nil, fmt.Errorf("${{ }} is empty")
+		}
 		ref, ok := splitRef(expr)
-		if !ok {
+		switch {
+		case ok:
+			ref.Raw = "${{ " + expr + " }}"
+			parts = append(parts, templatePart{ref: ref})
+		case allowExpr:
+			parts = append(parts, templatePart{expr: expr})
+		default:
 			return nil, fmt.Errorf("${{ %s }} is not a supported reference (supported: %s)",
 				expr, strings.Join(TemplateSupported, ", "))
 		}
-		ref.Raw = "${{ " + expr + " }}"
-		parts = append(parts, templatePart{ref: ref})
 		s = rest[j+2:]
 	}
 }
@@ -215,6 +242,12 @@ func splitTemplate(s string) ([]templatePart, error) {
 // `github.event.inputs.<name>` (with the forgejo/forge aliases) — and checks
 // every segment is an identifier.
 func splitRef(expr string) (*TemplateRef, bool) {
+	// `github['sha']` is property access, the same value as `github.sha`
+	// (PAR-038). Normalise the bracket spelling before segmentation so one
+	// representation reaches validation and evaluation.
+	if normalized, ok := normalizeIndexedRef(expr); ok {
+		expr = normalized
+	}
 	segments := strings.Split(expr, ".")
 	if len(segments) == 4 && strings.EqualFold(strings.TrimSpace(segments[2]), "outputs") {
 		context := strings.ToLower(strings.TrimSpace(segments[0]))
@@ -268,6 +301,51 @@ func splitRef(expr string) (*TemplateRef, bool) {
 		return nil, false
 	}
 	return &TemplateRef{Context: context, Key: key}, true
+}
+
+// normalizeIndexedRef rewrites `context['key']` property accesses to the
+// dotted form and rejects a malformed bracket. A bare numeric index is refused:
+// the expression language has no arrays.
+func normalizeIndexedRef(expr string) (string, bool) {
+	if !strings.Contains(expr, "[") {
+		return expr, true
+	}
+	var b strings.Builder
+	for i := 0; i < len(expr); {
+		if expr[i] != '[' {
+			b.WriteByte(expr[i])
+			i++
+			continue
+		}
+		i++
+		for i < len(expr) && (expr[i] == ' ' || expr[i] == '\t') {
+			i++
+		}
+		if i >= len(expr) || (expr[i] != '\'' && expr[i] != '"') {
+			return "", false
+		}
+		quote := expr[i]
+		i++
+		start := i
+		for i < len(expr) && expr[i] != quote {
+			i++
+		}
+		if i >= len(expr) {
+			return "", false
+		}
+		key := strings.TrimSpace(expr[start:i])
+		i++
+		for i < len(expr) && (expr[i] == ' ' || expr[i] == '\t') {
+			i++
+		}
+		if i >= len(expr) || expr[i] != ']' || !templateIdent(key) {
+			return "", false
+		}
+		i++
+		b.WriteByte('.')
+		b.WriteString(key)
+	}
+	return b.String(), true
 }
 
 // isGitHubContext reports whether context is the canonical github context or
@@ -348,25 +426,50 @@ type TemplateScope struct {
 	// are addressable by name).
 	SecretNames   []string
 	SecretsClosed bool
+	// Site names the authored position (PAR-040): the context availability
+	// table is keyed by it, so a context outside the documented set for that
+	// key is a named parse error. The zero value is a step field; the legacy
+	// JobIf/CallWith/CallOutput booleans take precedence when set (they predate
+	// the explicit site).
+	Site Site
+}
+
+// effectiveSite resolves a scope onto the availability table.
+func (sc TemplateScope) effectiveSite() Site {
+	switch {
+	case sc.CallOutput:
+		return SiteCallOutput
+	case sc.CallWith:
+		return SiteCallWith
+	case sc.JobIf:
+		return SiteJobIf
+	}
+	return sc.Site
 }
 
 // ValidateTemplate checks every `${{ … }}` span in a substituted site against
-// the closed vocabulary. A span must be one reference — an expression with
-// operators or a function call is only supported in `if:` (ValidateIf).
+// the closed vocabulary. A span may be one reference or, at a site that admits
+// expressions, a full expression (PAR-038); both are validated with the same
+// availability table the evaluator uses, so a condition accepted at parse time
+// can always be evaluated.
 func ValidateTemplate(s string, scope TemplateScope) error {
 	if !strings.Contains(s, "${{") {
 		return nil
 	}
-	parts, err := splitTemplate(s)
+	parts, err := splitTemplateExpr(s)
 	if err != nil {
 		return err
 	}
 	for _, p := range parts {
-		if p.ref == nil {
-			continue
-		}
-		if err := validateRef(*p.ref, scope); err != nil {
-			return err
+		switch {
+		case p.ref != nil:
+			if err := validateRef(*p.ref, scope); err != nil {
+				return err
+			}
+		case p.expr != "":
+			if err := validateExpr(p.expr, scope); err != nil {
+				return err
+			}
 		}
 	}
 	return nil
@@ -384,6 +487,12 @@ func validateRef(ref TemplateRef, scope TemplateScope) error {
 		default:
 			return fmt.Errorf("%s is not available in a reusable-workflow `with:` value (supported: github.*, inputs.*; the value is expanded when the run is created, before any step, matrix, secret or variable exists)", ref.Raw)
 		}
+	}
+	if ref.Context == "jobs" && !scope.CallOutput {
+		return fmt.Errorf("%s is only available in an `on.workflow_call.outputs.<name>.value` template (a job output is read elsewhere as needs.<job>.outputs.<name>)", ref.Raw)
+	}
+	if site := scope.effectiveSite(); !contextAvailable(site, ref.Context) {
+		return fmt.Errorf("%s is not available in %s (available contexts: %s)", ref.Raw, site, listOrNone(SiteContexts(site)))
 	}
 	switch ref.Context {
 	case "github", "forgejo", "forge":
@@ -423,9 +532,6 @@ func validateRef(ref TemplateRef, scope TemplateScope) error {
 		}
 		return nil
 	case "vars":
-		if scope.JobIf {
-			return fmt.Errorf("${{ vars.%s }} is not available in a job-level if: (variables are resolved when the job is claimed; use a step if:)", ref.Key)
-		}
 		if !templateIdent(ref.Key) {
 			return fmt.Errorf("${{ vars.%s }} is not a valid variable name", ref.Key)
 		}
@@ -445,9 +551,6 @@ func validateRef(ref TemplateRef, scope TemplateScope) error {
 	case "env":
 		return nil // env names are authored at run time; a missing one reads empty
 	case "secrets":
-		if scope.JobIf {
-			return fmt.Errorf("${{ secrets.%s }} is not available in a job-level if: (use a step if:, or a step env value)", ref.Key)
-		}
 		if !ValidSecretName(ref.Key) {
 			return fmt.Errorf("${{ secrets.%s }} is not a valid secret reference (the form is secrets.<name>; names match [A-Za-z_][A-Za-z0-9_]*)", ref.Key)
 		}
@@ -596,14 +699,25 @@ func FillTemplate(s string, github, matrix, inputs map[string]string) string {
 	if !strings.Contains(s, "${{") {
 		return s
 	}
-	parts, err := splitTemplate(s)
+	parts, err := splitTemplateExpr(s)
 	if err != nil {
 		return s
 	}
+	scope := EvalScope{GitHub: github, Matrix: matrix, Inputs: inputs, Site: SiteJobName}
 	var b strings.Builder
 	for _, p := range parts {
-		if p.ref == nil {
+		if p.literal != "" {
 			b.WriteString(p.literal)
+			continue
+		}
+		if p.expr != "" {
+			// Display-only: an expression the cell cannot evaluate stays visible
+			// (exactly like an unresolved reference), never an empty name.
+			if val, eerr := EvalString(p.expr, scope); eerr == nil {
+				b.WriteString(val)
+			} else {
+				b.WriteString("${{ " + p.expr + " }}")
+			}
 			continue
 		}
 		if val, ok := lookupRef(*p.ref, github, matrix, inputs); ok {
@@ -658,27 +772,62 @@ type TemplateValues struct {
 	Secrets map[string]string
 	Steps   map[string]map[string]string
 	Needs   map[string]map[string]string
+	// NeedResults maps a `needs:` job key to its folded result, so a
+	// `needs.<job>.result` expression resolves in a step field and a step if:.
+	NeedResults map[string]string
+	// StepOutcomes/StepConclusions are a step field's `steps.<id>.outcome`
+	// context at execution time (a condition always has them; a plan-time
+	// preview has none).
+	StepOutcomes    map[string]string
+	StepConclusions map[string]string
+	// HashFiles is the runner's workspace walker for `hashFiles(...)`
+	// (PAR-041); nil at a server-side site.
+	HashFiles func(patterns []string) (string, error)
+}
+
+// evalScope adapts one substitution site's values to the expression evaluator.
+// Step/needs outputs are strict there exactly as in a condition: an id that was
+// never declared is an error, never an empty string.
+func (vals TemplateValues) evalScope() EvalScope {
+	return EvalScope{
+		GitHub: vals.GitHub, Runner: vals.Runner, Vars: vals.Vars,
+		Matrix: vals.Matrix, Inputs: vals.Inputs, Env: vals.Env,
+		Secrets: vals.Secrets, Outputs: vals.Steps, NeedsOutputs: vals.Needs,
+		Needs: vals.NeedResults,
+		Steps: vals.StepOutcomes, StepConclusions: vals.StepConclusions,
+		HashFiles: vals.HashFiles, Site: SiteStepField,
+	}
 }
 
 // Substitute replaces every supported `${{ … }}` reference in s with its value
 // in ONE pass: a substituted value is data and is never rescanned for another
-// reference. It is what the runner calls for `run`, `with`, `env`, `name`,
-// `shell`, `working-directory` and (through FillOutputs' callers) job outputs;
-// the parse-time validators guarantee every span is a supported reference, so
-// this returns an error only for an unterminated span, an unsupported context,
-// or a `steps`/`needs` output the job never declared.
+// reference. A span may be a whole expression too (PAR-038). It is what the
+// runner calls for `run`, `with`, `env`, `name`, `shell`, `working-directory`
+// and (through FillOutputs' callers) job outputs; the parse-time validators
+// guarantee every span is supported, so this returns an error only for an
+// unterminated span, an unsupported context/function, or a `steps`/`needs`
+// output the job never declared.
 func Substitute(s string, vals TemplateValues) (string, error) {
 	if !strings.Contains(s, "${{") {
 		return s, nil
 	}
-	parts, err := splitTemplate(s)
+	parts, err := splitTemplateExpr(s)
 	if err != nil {
 		return "", err
 	}
+	scope := vals.evalScope()
 	var b strings.Builder
 	for _, p := range parts {
-		if p.ref == nil {
+		if p.literal != "" {
 			b.WriteString(p.literal)
+			continue
+		}
+		if p.expr != "" {
+			out, eerr := EvalString(p.expr, scope)
+			if eerr != nil {
+				return "", eerr
+			}
+			b.WriteString(out)
 			continue
 		}
 		ref := *p.ref
@@ -744,34 +893,6 @@ func lookupValue(ref TemplateRef, vals TemplateValues) (string, bool) {
 		return vals.Env[ref.Key], true
 	}
 	return "", false
-}
-
-// lookupFold resolves an authored name case-insensitively (variables are
-// referenced in mixed case and stored canonically).
-func lookupFold(values map[string]string, name string) string {
-	if val, ok := values[name]; ok {
-		return val
-	}
-	for key, val := range values {
-		if strings.EqualFold(key, name) {
-			return val
-		}
-	}
-	return ""
-}
-
-// lookupSecret resolves a secret by name, case-insensitively (secret names are
-// authored once and referenced from anywhere).
-func lookupSecret(secrets map[string]string, name string) string {
-	if val, ok := secrets[name]; ok {
-		return val
-	}
-	for key, val := range secrets {
-		if strings.EqualFold(key, name) {
-			return val
-		}
-	}
-	return ""
 }
 
 // StepOutputRefs returns the `steps.<id>.outputs.<name>` references in s and

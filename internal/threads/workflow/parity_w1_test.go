@@ -175,7 +175,6 @@ func TestSecretsReferences(t *testing.T) {
 		"      - run: echo ${{ secrets }}\n",
 		"      - run: echo ${{ secrets.a.b }}\n",
 		"      - run: echo ${{ secrets.1BAD }}\n",
-		"      - run: echo ${{ secrets.TOKEN || 'x' }}\n",
 	}
 	for _, site := range bad {
 		_, err := Parse([]byte(src(site)))
@@ -288,8 +287,13 @@ func TestValidateIf(t *testing.T) {
 		"startsWith(github.ref, 'refs/tags/v')",
 		"contains(github.ref, 'main') && !failure()",
 		"format('{0}-{1}', matrix.go, inputs.mode) == '1.27-fast'",
-		"steps.build.outcome == 'success'",
+		"endsWith(github.ref, 'refs/heads/main')",
 		"needs.prepare.result == 'success' || always()",
+		"github['sha'] == github.sha",
+		"1 == '1' && true == 'true'",
+		"'2' < '10' && 'a' < 'b'",
+		"secrets.TOKEN != ''",
+		"steps.build.outcome == 'success'",
 		"github.event.inputs.mode == 'fast'",
 		"secrets.TOKEN != ''",
 		"${{ inputs.mode }}",
@@ -301,7 +305,7 @@ func TestValidateIf(t *testing.T) {
 		}
 	}
 	bad := []struct{ expr, want string }{
-		{"endsWith(github.ref, 'x')", "unsupported function"},
+		{"toJSON(github)", "unsupported function"},
 		{"startsWith(github.ref)", "takes 2 argument"},
 		{"format()", "at least one argument"},
 		{"github.head_ref == 'x'", "not a supported context field"},
@@ -319,11 +323,24 @@ func TestValidateIf(t *testing.T) {
 			t.Errorf("ValidateIf(%q) = %v, want %q", tc.expr, err, tc.want)
 		}
 	}
-	// A job-level if: cannot read secrets yet (PAR-058 is a later wave).
+	// A job-level if: may read secrets and vars (PAR-058), but not runner or
+	// steps (neither exists at the server's decision point).
 	jobScope := scope
 	jobScope.JobIf = true
-	if err := ValidateIf("secrets.TOKEN != ''", jobScope); err == nil || !strings.Contains(err.Error(), "not available in a job-level if") {
-		t.Fatalf("job secrets = %v, want the named limitation", err)
+	if err := ValidateIf("secrets.TOKEN != '' && vars.REGION == 'eu'", jobScope); err != nil {
+		t.Fatalf("job secrets/vars = %v, want accepted", err)
+	}
+	if err := ValidateIf("runner.os == 'Linux'", jobScope); err == nil || !strings.Contains(err.Error(), "not available") {
+		t.Fatalf("job runner = %v, want the named limitation", err)
+	}
+	if err := ValidateIf("steps.build.outcome == 'success'", jobScope); err == nil || !strings.Contains(err.Error(), "not available") {
+		t.Fatalf("job steps = %v, want the named limitation", err)
+	}
+	if err := ValidateIf("needs.prepare.result == 'success' || always()", jobScope); err != nil {
+		t.Fatalf("job needs result = %v", err)
+	}
+	if err := ValidateIf("needs.ghost.result == 'success'", jobScope); err == nil || !strings.Contains(err.Error(), "no `needs:` dependency") {
+		t.Fatalf("job ghost need = %v", err)
 	}
 }
 

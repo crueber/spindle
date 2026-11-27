@@ -121,6 +121,8 @@ type ReportInput struct {
 	Description string
 	StartedAt   *string
 	CompletedAt *string
+	// Annotations are the check-run findings the report carries (PAR-192).
+	Annotations []Annotation
 }
 
 // ReportStatus records one CI line item (§2 steps 1–4): validate context,
@@ -217,6 +219,9 @@ func validateReportInput(sha string, in ReportInput) (fullSHA string, started, c
 	if err := validDescription(in.Description); err != nil {
 		return "", nil, nil, err
 	}
+	if _, aerr := ValidateAnnotations(in.Annotations); aerr != nil {
+		return "", nil, nil, aerr
+	}
 	started, err = parseOptTime(in.StartedAt, "started_at")
 	if err != nil {
 		return "", nil, nil, err
@@ -248,7 +253,8 @@ func (s *Service) recordResolved(ctx context.Context, owner, repo, fullSHA, crea
 	fresh := &StatusDoc{
 		SHA: fullSHA, Context: in.Context, State: in.State,
 		TargetURL: in.TargetURL, Description: in.Description,
-		StartedAt: started, CompletedAt: completed,
+		Annotations: normalizeAnnotations(in.Annotations),
+		StartedAt:   started, CompletedAt: completed,
 		Creator: creator, CreatedAt: now, UpdatedAt: now, Version: 1,
 	}
 	if LiveState(in.State) {
@@ -273,6 +279,7 @@ func (s *Service) recordResolved(ctx context.Context, owner, repo, fullSHA, crea
 			curDoc.State = in.State
 			curDoc.TargetURL = in.TargetURL
 			curDoc.Description = in.Description
+			curDoc.Annotations = normalizeAnnotations(in.Annotations)
 			curDoc.StartedAt = started
 			curDoc.CompletedAt = completed
 			if LiveState(in.State) {

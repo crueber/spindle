@@ -4,16 +4,17 @@ package workflow
 // `container.image`, `services.<id>.image`, `environment` (`name`/`url`) and
 // the `env` maps above the step layer (workflow, job, container, service).
 //
-// None of them is a substitution site (docs/WORKFLOWS.md §6.2;
-// docs/threads.md §3.6): the structural fields are chosen before any matrix
-// cell or dispatch input exists, and a job/container/service `env` value is
-// handed to the runner verbatim (only a STEP `env:` value is substituted).
-// Waves before this one accepted a `${{ … }}` span and carried it verbatim,
+// `runs-on` is the ONE sanctioned exception (PAR-053): its labels are validated
+// by validateRunsOn and expanded per matrix cell before the job record is
+// written. Every other field here is not a substitution site
+// (docs/WORKFLOWS.md §6.2a; docs/threads.md §3.6): it is chosen before any
+// matrix cell or dispatch input exists, and a job/container/service `env` value
+// is handed to the runner verbatim (only a STEP `env:` value is substituted).
+// Waves before PAR-053 accepted a `${{ … }}` span and carried it verbatim,
 // which is the silent-acceptance failure the strict parser exists to prevent: a
-// job whose `runs-on` is the literal text `${{ matrix.os }}` matches no runner
-// and queues forever, the image gate compares a literal string, and an
-// unexpanded env value reaches the process environment as text. Fail closed at
-// parse time instead; substitution for these fields is PAR-053, not this pass.
+// `container.image` of `debian:${{ matrix.variant }}` hands the image gate a
+// literal string and an unexpanded env value reaches the process environment as
+// text. Fail closed at parse time instead.
 
 import (
 	"errors"
@@ -37,19 +38,12 @@ const (
 )
 
 // validateStructuralFields rejects any `${{` span in one job's structural
-// fields, naming the field's path from the document root. A literal value —
-// including one that merely contains `{` — is unchanged.
+// fields, naming the field's path from the document root. `runs-on` is the ONE
+// sanctioned exception (PAR-053): its labels are validated separately and
+// expanded per matrix cell. A literal value — including one that merely
+// contains `{` — is unchanged.
 func validateStructuralFields(jobKey string, job *Job) error {
 	base := "jobs." + jobKey
-	for i, label := range job.RunsOn {
-		field := base + ".runs-on"
-		if len(job.RunsOn) > 1 {
-			field = fmt.Sprintf("%s.runs-on[%d]", base, i)
-		}
-		if err := rejectStructuralExpression(field, label); err != nil {
-			return err
-		}
-	}
 	if err := validateStructuralEnv(base+".env", job.Env); err != nil {
 		return err
 	}

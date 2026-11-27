@@ -104,8 +104,10 @@ func TestBuildPlanExpandsCompositeAction(t *testing.T) {
 	if image.Kind != "docker" || image.Docker == nil || image.Docker.Image != "alpine:3.20" {
 		t.Fatalf("image step = %+v", image)
 	}
-	if got := strings.Join(image.Argv, " "); !strings.Contains(got, "--env INPUT_ARGS=--check") {
-		t.Fatalf("docker image argv = %q", got)
+	if got := strings.Join(image.Argv, " "); !strings.HasSuffix(got, " alpine:3.20 --check") || strings.Contains(got, "INPUT_ARGS") {
+		// PAR-072: `with.args` overrides a docker:// image's CMD (it is not an
+		// input).
+		t.Fatalf("docker image argv = %q, want the image followed by args: --check (and no INPUT_ARGS)", got)
 	}
 	// Unique flat output files: inner steps share the caller's display index.
 	seen := map[string]bool{}

@@ -800,8 +800,37 @@ type SettingsEnvironment struct {
 	Branches          []string
 	BranchesText      string
 	Secrets           []SettingsSecret
-	CreatedAt         string
-	UpdatedAt         string
+	// Vars are the environment's non-secret variable names (values are never
+	// read back; PAR-117/PAR-134).
+	Vars []SettingsSecret
+	// Deployments are the environment's newest deployment records (PAR-132):
+	// state, ref, creator, URL and the state history count.
+	Deployments []SettingsDeployment
+	CreatedAt   string
+	UpdatedAt   string
+}
+
+// SettingsDeployment is one deployment row on the Environments tab.
+type SettingsDeployment struct {
+	ID        string
+	State     string
+	Ref       string
+	SHA       string
+	Creator   string
+	URL       string
+	RunID     string
+	Queue     string
+	CreatedAt string
+	UpdatedAt string
+	Statuses  []SettingsDeploymentStatus
+}
+
+// SettingsDeploymentStatus is one history entry (newest first on the page).
+type SettingsDeploymentStatus struct {
+	State       string
+	Description string
+	Creator     string
+	CreatedAt   string
 }
 
 // SettingsDanger is the Danger Zone tab.
@@ -847,43 +876,45 @@ func (w SettingsRepoWrite) Get(key string) string { return w.Values[key] }
 
 // Write actions (the seam's vocabulary).
 const (
-	SettingsActionAccess                  = "access"
-	SettingsActionConfig                  = "config"
-	SettingsActionConfigClear             = "config-clear"
-	SettingsActionDelete                  = "delete"
-	SettingsActionGeneral                 = "general"
-	SettingsActionInviteCancel            = "invite-cancel"
-	SettingsActionInviteCreate            = "invite-create"
-	SettingsActionMirrorPut               = "mirror-put"
-	SettingsActionMirrorRemove            = "mirror-remove"
-	SettingsActionMirrorSchedule          = "mirror-schedule"
-	SettingsActionMirrorSync              = "mirror-sync"
-	SettingsActionPolicy                  = "policy"
-	SettingsActionPolicyDryRun            = "policy-dryrun"
-	SettingsActionPolicyRemove            = "policy-remove"
-	SettingsActionProtection              = "protection"
-	SettingsActionPushKeygen              = "pushmirror-keygen"
-	SettingsActionPushPut                 = "pushmirror-put"
-	SettingsActionPushRemove              = "pushmirror-remove"
-	SettingsActionPushSchedule            = "pushmirror-schedule"
-	SettingsActionPushSync                = "pushmirror-sync"
-	SettingsActionScheduled               = "scheduled"
-	SettingsActionSecretDelete            = "secret-delete"
-	SettingsActionSecretPut               = "secret-put"
-	SettingsActionEnvironmentPut          = "environment-put"
-	SettingsActionEnvironmentDelete       = "environment-delete"
-	SettingsActionEnvironmentSecretPut    = "environment-secret-put"
-	SettingsActionEnvironmentSecretDelete = "environment-secret-delete"
-	SettingsActionTokenCreate             = "token-create"
-	SettingsActionTokenRevoke             = "token-revoke"
-	SettingsActionTransfer                = "transfer"
-	SettingsActionWebhookCreate           = "webhook-create"
-	SettingsActionWebhookDelete           = "webhook-delete"
-	SettingsActionWebhookPing             = "webhook-ping"
-	SettingsActionWebhookRedeliver        = "webhook-redeliver"
-	SettingsActionWebhookRotate           = "webhook-rotate"
-	SettingsActionWebhookToggle           = "webhook-toggle"
-	SettingsActionWebhookUpdate           = "webhook-update"
+	SettingsActionAccess                    = "access"
+	SettingsActionConfig                    = "config"
+	SettingsActionConfigClear               = "config-clear"
+	SettingsActionDelete                    = "delete"
+	SettingsActionGeneral                   = "general"
+	SettingsActionInviteCancel              = "invite-cancel"
+	SettingsActionInviteCreate              = "invite-create"
+	SettingsActionMirrorPut                 = "mirror-put"
+	SettingsActionMirrorRemove              = "mirror-remove"
+	SettingsActionMirrorSchedule            = "mirror-schedule"
+	SettingsActionMirrorSync                = "mirror-sync"
+	SettingsActionPolicy                    = "policy"
+	SettingsActionPolicyDryRun              = "policy-dryrun"
+	SettingsActionPolicyRemove              = "policy-remove"
+	SettingsActionProtection                = "protection"
+	SettingsActionPushKeygen                = "pushmirror-keygen"
+	SettingsActionPushPut                   = "pushmirror-put"
+	SettingsActionPushRemove                = "pushmirror-remove"
+	SettingsActionPushSchedule              = "pushmirror-schedule"
+	SettingsActionPushSync                  = "pushmirror-sync"
+	SettingsActionScheduled                 = "scheduled"
+	SettingsActionSecretDelete              = "secret-delete"
+	SettingsActionSecretPut                 = "secret-put"
+	SettingsActionEnvironmentPut            = "environment-put"
+	SettingsActionEnvironmentDelete         = "environment-delete"
+	SettingsActionEnvironmentSecretPut      = "environment-secret-put"
+	SettingsActionEnvironmentSecretDelete   = "environment-secret-delete"
+	SettingsActionEnvironmentVariablePut    = "environment-variable-put"
+	SettingsActionEnvironmentVariableDelete = "environment-variable-delete"
+	SettingsActionTokenCreate               = "token-create"
+	SettingsActionTokenRevoke               = "token-revoke"
+	SettingsActionTransfer                  = "transfer"
+	SettingsActionWebhookCreate             = "webhook-create"
+	SettingsActionWebhookDelete             = "webhook-delete"
+	SettingsActionWebhookPing               = "webhook-ping"
+	SettingsActionWebhookRedeliver          = "webhook-redeliver"
+	SettingsActionWebhookRotate             = "webhook-rotate"
+	SettingsActionWebhookToggle             = "webhook-toggle"
+	SettingsActionWebhookUpdate             = "webhook-update"
 )
 
 // ---------------------------------------------------------------------------
@@ -1780,6 +1811,10 @@ func (s *Server) settingsRepoWrite(w http.ResponseWriter, r *http.Request) {
 				action = SettingsActionEnvironmentSecretPut
 			case "secret-delete":
 				action = SettingsActionEnvironmentSecretDelete
+			case "variable-put":
+				action = SettingsActionEnvironmentVariablePut
+			case "variable-delete":
+				action = SettingsActionEnvironmentVariableDelete
 			default:
 				action = SettingsActionEnvironmentDelete
 			}
@@ -2096,7 +2131,7 @@ func settingsRestoreRepoValues(page *SettingsRepoPage, r *http.Request, action s
 			page.AdminData = &SettingsAdmin{}
 		}
 		page.AdminData.NewName = get("name")
-	case SettingsActionEnvironmentPut, SettingsActionEnvironmentSecretPut:
+	case SettingsActionEnvironmentPut, SettingsActionEnvironmentSecretPut, SettingsActionEnvironmentVariablePut:
 		// A rejected environment write re-renders the tab with the typed values
 		// (never a secret value: the value input is empty by design).
 		if page.Environments == nil {

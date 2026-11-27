@@ -260,7 +260,7 @@ func (e *Executor) Execute(ctx context.Context, in ExecInput, stream *Streamer) 
 	}
 
 	if err := e.setup(jobCtx, plan, stream); err != nil {
-		res.Conclusion = e.failOrCancel(jobCtx, stream, err)
+		res.Conclusion = e.failOrCancel(jobCtx, ctx, stream, err)
 		res.Error = err.Error()
 		// A setup failure (a service that never became ready, a container that
 		// could not be created) must be visible in the job's own log: the
@@ -269,6 +269,12 @@ func (e *Executor) Execute(ctx context.Context, in ExecInput, stream *Streamer) 
 		stream.Systemf("spindle: %v", err)
 		return res
 	}
+
+	// hashFiles (PAR-041) walks the workspace inside the job container. The
+	// cache lives for this attempt and is invalidated after every step, so two
+	// calls in one step see one walk and a later step sees the files it made.
+	hashCache := newHashFilesCache()
+	plan.HashFiles = e.hashFilesFunc(jobCtx, plan, hashCache)
 
 	anyFailed := false
 	hardFailure := false
@@ -280,6 +286,10 @@ func (e *Executor) Execute(ctx context.Context, in ExecInput, stream *Streamer) 
 	// Background/parallel bookkeeping (PAR-080): created after setup so a
 	// background step can rely on the job container existing.
 	bg = newBackgroundSet(e, plan, stream, steps, cmds, jobCmds, summary)
+	// Action post hooks run after the main steps — including after a hard
+	// failure and before the deferred cleanup (this defer is registered later,
+	// so it runs first). A post hook's result can still fail the job.
+	defer e.runPostSteps(jobCtx, plan, stream, steps, cmds, jobCmds, summary, &res)
 	// Docker-in-job (PAR-081/D-8): state once, at the top, what "docker build
 	// works" means on this job — the failure remedy for a `docker: not found`
 	// exit repeats it.
@@ -289,16 +299,21 @@ func (e *Executor) Execute(ctx context.Context, in ExecInput, stream *Streamer) 
 	for i := range plan.Steps {
 		step := plan.Steps[i]
 		if jobCtx.Err() != nil || stream.Cancelled() {
+			state := threads.JobCancelled
+			if jobTimedOut(jobCtx, ctx) {
+				state = threads.JobTimedOut
+			}
 			outcome := threads.StepResult{
-				Number: step.Index + 1, ID: step.ID, Name: step.Name, Conclusion: threads.JobCancelled,
+				Number: step.Index + 1, ID: step.ID, Name: step.Name, Conclusion: state,
 			}
 			steps.record(step, outcome)
 			res.Steps = append(res.Steps, outcome)
 			continue
 		}
-		// Every step is re-resolved against the outputs collected so far: a
-		// reference that names a step which never published that output is a
-		// named step error (docs §3.9), never an empty substitution.
+		// Every step is re-resolved against the outputs/outcomes collected so
+		// far: a reference that names a step which never published that output
+		// is a named step error (docs §3.9), never an empty substitution.
+		plan.StepOutcomes, plan.StepConclusions, _ = steps.snapshot()
 		resolved, rerr := plan.ResolveStep(step, outputContext(steps))
 		var outcome threads.StepResult
 		var inner []threads.StepResult
@@ -313,12 +328,13 @@ func (e *Executor) Execute(ctx context.Context, in ExecInput, stream *Streamer) 
 			outcome, inner = e.runStep(jobCtx, plan, step, stream, bg, steps, nil, hardFailure, cmds, jobCmds, summary)
 		}
 		steps.record(step, outcome)
+		hashCache.invalidate() // the step may have changed the workspace
 		res.Steps = append(res.Steps, outcome)
 		// A composite action's inner step results follow its summary row (the
 		// page shows the expanded steps, docs/threads.md §3.4a).
 		res.Steps = append(res.Steps, inner...)
 		switch outcome.Conclusion {
-		case threads.JobFailure:
+		case threads.JobFailure, threads.JobTimedOut:
 			anyFailed = true
 			if !step.ContinueOnError {
 				hardFailure = true
@@ -337,7 +353,9 @@ func (e *Executor) Execute(ctx context.Context, in ExecInput, stream *Streamer) 
 				}
 				res.Conclusion = threads.JobFailure
 				res.Error = outcome.Error
-				if jobCtx.Err() != nil || stream.Cancelled() {
+				if jobTimedOut(jobCtx, ctx) {
+					res.Conclusion = threads.JobTimedOut
+				} else if jobCtx.Err() != nil || stream.Cancelled() {
 					res.Conclusion = threads.JobCancelled
 				}
 				return res
@@ -348,6 +366,8 @@ func (e *Executor) Execute(ctx context.Context, in ExecInput, stream *Streamer) 
 		}
 	}
 	switch {
+	case jobTimedOut(jobCtx, ctx):
+		res.Conclusion = threads.JobTimedOut
 	case stream.Cancelled() || jobCtx.Err() != nil:
 		res.Conclusion = threads.JobCancelled
 	case anyFailed && hardFailure:
@@ -365,6 +385,7 @@ func (e *Executor) Execute(ctx context.Context, in ExecInput, stream *Streamer) 
 	// a named error (the job fails) rather than an empty value crossing a job
 	// boundary (docs/threads.md §3.9).
 	if res.Conclusion == threads.JobSuccess {
+		plan.StepOutcomes, plan.StepConclusions, _ = steps.snapshot()
 		outs, oerr := evaluateJobOutputs(plan, steps)
 		if oerr != nil {
 			res.Conclusion = threads.JobFailure
@@ -404,11 +425,21 @@ func outputNames(outs map[string]string) string {
 
 // failOrCancel classifies a setup error: a cancelled context is a cancel, not a
 // failure.
-func (e *Executor) failOrCancel(ctx context.Context, stream *Streamer, err error) string {
+func (e *Executor) failOrCancel(ctx, parent context.Context, stream *Streamer, err error) string {
+	if jobTimedOut(ctx, parent) {
+		return threads.JobTimedOut
+	}
 	if ctx.Err() != nil || stream.Cancelled() {
 		return threads.JobCancelled
 	}
 	return threads.JobFailure
+}
+
+// jobTimedOut distinguishes the job's OWN deadline from an operator cancel: a
+// job context past its deadline while the parent (runner) context is still
+// alive reads `timed_out` (PAR-055), never `cancelled`.
+func jobTimedOut(jobCtx, parent context.Context) bool {
+	return jobCtx != nil && jobCtx.Err() == context.DeadlineExceeded && (parent == nil || parent.Err() == nil)
 }
 
 // setup creates the network, services and the job container, and waits for the
@@ -456,9 +487,12 @@ func (e *Executor) writeJobFiles(ctx context.Context, plan *Plan) error {
 	if payload == "" {
 		payload = "{}"
 	}
+	// The runner-owned action directories live in the container's own rootfs
+	// (not the workspace volume), so a checked-out repository can never
+	// pre-create them or point one at a symlink.
 	_, stderr, code, err := e.Docker.Run(ctx, nil, "exec", plan.Names.Container, "sh", "-c",
-		`mkdir -p "$1" "$2" && chmod 0777 "$1" "$2" && printf '%s' "$3" > "$4" && chmod 0644 "$4"`,
-		"sh", RunnerTemp, RunnerToolCache, payload, EventPath)
+		`mkdir -p "$1" "$2" "$5" "$6" && chmod 0777 "$1" "$2" "$5" "$6" && printf '%s' "$3" > "$4" && chmod 0644 "$4"`,
+		"sh", RunnerTemp, RunnerToolCache, payload, EventPath, threads.RemoteActionsRoot, threads.RemoteStateRoot)
 	if err != nil || code != 0 {
 		return fmt.Errorf("write the job event file: exit %d: %v: %s", code, err, strings.TrimSpace(stderr))
 	}
@@ -588,7 +622,7 @@ func (o *stepOutcomes) recordLocked(step StepPlan, result threads.StepResult) {
 	outcome := result.Conclusion
 	o.Outcome[step.ID] = outcome
 	conclusion := outcome
-	if outcome == threads.JobFailure && step.ContinueOnError {
+	if (outcome == threads.JobFailure || outcome == threads.JobTimedOut) && step.ContinueOnError {
 		conclusion = threads.JobSuccess
 	}
 	o.Conclusion[step.ID] = conclusion
@@ -746,6 +780,14 @@ func (e *Executor) runStep(ctx context.Context, plan *Plan, step StepPlan, strea
 		stream.Systemf("spindle: step %q skipped (if: %s)", step.Name, step.If)
 		return out, nil
 	}
+	// The step STARTED: a post hook registered for it must run even if the
+	// main program fails (GitHub's rule; PAR-071).
+	plan.markRan(step.OutputIndex)
+	// A fetched action's resolution record is stated once per job: the author
+	// sees the source, the ref, the pinned commit and the content digest.
+	if step.Origin != nil {
+		plan.logAction(stream, step.Origin)
+	}
 	switch step.Kind {
 	case "composite":
 		return e.runCompositeStep(ctx, plan, step, stream, bg, steps, scope, hardFailure, cmds, jobCmds, summary)
@@ -793,6 +835,39 @@ func (e *Executor) runStepBody(ctx context.Context, plan *Plan, step StepPlan, s
 	// (PAR-079). This runs BEFORE the command-file wrapper: the fallback
 	// rebuilds the command tail, and rebuilding after PATH had been prepended
 	// would drop the wrapper.
+	// A remote action materializes its pinned content before anything runs, and
+	// a JavaScript action's declared runtime is probed before the first node
+	// step (a missing runtime is a named failure, never a skip). A Dockerfile
+	// action is built on the runner host before its container is created.
+	if step.Node != nil {
+		if err := e.materializeAction(ctx, plan, step.Node.Dir, step.Name, step.Node.Files); err != nil {
+			out.DurationMS = time.Since(started).Milliseconds()
+			out.Conclusion = threads.JobFailure
+			out.Error = stream.Mask(err.Error())
+			return out
+		}
+		if err := e.ensureNodeRuntime(ctx, plan, step.Node.Using, step.Name); err != nil {
+			out.DurationMS = time.Since(started).Milliseconds()
+			out.Conclusion = threads.JobFailure
+			out.Error = stream.Mask(err.Error())
+			stream.Systemf("spindle: step %q: %v", step.Name, err)
+			return out
+		}
+	}
+	if step.Docker != nil && step.Docker.Dockerfile != "" {
+		image, berr := e.buildDockerfileAction(ctx, plan, step, stream)
+		if berr != nil {
+			out.DurationMS = time.Since(started).Milliseconds()
+			out.Conclusion = threads.JobFailure
+			out.Error = stream.Mask(berr.Error())
+			stream.Systemf("spindle: step %q: %v", step.Name, berr)
+			return out
+		}
+		step.Docker.Image = image
+		if step.Docker.ImageIndex >= 0 && step.Docker.ImageIndex < len(step.Argv) {
+			step.Argv[step.Docker.ImageIndex] = image
+		}
+	}
 	step, skerr := e.prepareStepScript(ctx, plan, step, stream)
 	if skerr != nil {
 		out.DurationMS = time.Since(started).Milliseconds()
@@ -838,6 +913,9 @@ func (e *Executor) runStepBody(ctx context.Context, plan *Plan, step StepPlan, s
 			return out
 		}
 		out.Conclusion = threads.JobFailure
+		if se, ok := err.(*stepError); ok && se.timedOut {
+			out.Conclusion = threads.JobTimedOut
+		}
 		out.ExitCode = stepExitCode(err)
 		out.Error = stream.Mask(err.Error())
 		return out
@@ -934,6 +1012,15 @@ func (e *Executor) runCompositeStep(ctx context.Context, plan *Plan, step StepPl
 	}
 	started := time.Now()
 	scope := newLocalScope()
+	if len(step.Composite.Files) > 0 {
+		if merr := e.materializeAction(ctx, plan, step.Composite.Dir, step.Name, step.Composite.Files); merr != nil {
+			out.DurationMS = time.Since(started).Milliseconds()
+			out.Conclusion = threads.JobFailure
+			out.Error = merr.Error()
+			stream.Systemf("spindle: step %q: %v", step.Name, merr)
+			return out, nil
+		}
+	}
 	stream.Systemf("spindle: step %d: %s (composite action %s)", step.Index+1, step.Name, step.Composite.Path)
 	var inner []threads.StepResult
 	failed := false
@@ -946,6 +1033,23 @@ func (e *Executor) runCompositeStep(ctx context.Context, plan *Plan, step StepPl
 			scope.record(child.LocalID, "skipped", "skipped")
 			inner = append(inner, skipped)
 			continue
+		}
+		// A composite action's own steps read the ACTION's inputs as
+		// `${{ inputs.* }}` (PAR-074); the caller's resolved values are known
+		// only now (they may read an earlier step's outputs).
+		if child.Template != nil && len(step.Composite.Inputs) > 0 {
+			child.Template.ActionInputs = step.Composite.Inputs
+			child.Template.ThirdParty = step.Composite.ThirdParty
+			// The action's declared inputs are the INPUT_* layer of every inner
+			// step; their values are only final now (a caller's `with:` may read
+			// an earlier step's output), so the plan-time copy is replaced
+			// rather than expanded against this action's own inputs.
+			if child.Template.Env == nil {
+				child.Template.Env = map[string]string{}
+			}
+			for name, val := range step.Composite.Inputs {
+				child.Template.Env[workflow.InputEnvName(name)] = val
+			}
 		}
 		resolved, rerr := plan.ResolveChildStep(child, outputContext(steps), scope.outputs)
 		if rerr != nil {
@@ -962,7 +1066,7 @@ func (e *Executor) runCompositeStep(ctx context.Context, plan *Plan, step StepPl
 		inner = append(inner, childRes)
 		inner = append(inner, childInner...)
 		scope.record(resolved.LocalID, childRes.Conclusion, conclusionOf(childRes, resolved.ContinueOnError))
-		if childRes.Conclusion == threads.JobFailure && !resolved.ContinueOnError {
+		if (childRes.Conclusion == threads.JobFailure || childRes.Conclusion == threads.JobTimedOut) && !resolved.ContinueOnError {
 			failed = true
 			out.Conclusion = threads.JobFailure
 			out.Error = childRes.Error
@@ -975,7 +1079,7 @@ func (e *Executor) runCompositeStep(ctx context.Context, plan *Plan, step StepPl
 			// The composite's own timeout expired: the job container is killed
 			// like any other step timeout (the only reliable in-container kill).
 			e.killJobContainer(plan)
-			out.Conclusion = threads.JobFailure
+			out.Conclusion = threads.JobTimedOut
 			out.Error = fmt.Sprintf("timed out after %s", step.Timeout)
 		case ctx.Err() != nil || stream.Cancelled():
 			out.Conclusion = threads.JobCancelled
@@ -999,7 +1103,7 @@ func (e *Executor) runCompositeStep(ctx context.Context, plan *Plan, step StepPl
 
 // conclusionOf applies the continue-on-error rule to one inner step's outcome.
 func conclusionOf(res threads.StepResult, tolerated bool) string {
-	if res.Conclusion == threads.JobFailure && tolerated {
+	if (res.Conclusion == threads.JobFailure || res.Conclusion == threads.JobTimedOut) && tolerated {
 		return threads.JobSuccess
 	}
 	return res.Conclusion
@@ -1058,6 +1162,9 @@ func outputContext(steps *stepOutcomes) map[string]map[string]string {
 type stepError struct {
 	code int
 	msg  string
+	// timedOut marks the step's own `timeout-minutes` expiry (PAR-055): the
+	// step conclusion is `timed_out`, distinct from a non-zero exit.
+	timedOut bool
 }
 
 func (s *stepError) Error() string { return s.msg }
@@ -1102,9 +1209,14 @@ func (e *Executor) runStepCommand(ctx context.Context, plan *Plan, step StepPlan
 	}
 	var fullEnv []string
 	if step.Kind != "docker" {
-		fullEnv = make([]string, 0, len(plan.Secrets)+2)
-		for name, value := range plan.Secrets {
-			fullEnv = append(fullEnv, name+"="+value)
+		// Repository secrets reach a repository-code step by name; a fetched
+		// action's code gets only its declared `env:` interface (D-5). The
+		// declared interface is credentialEnv, which is always applied.
+		if !step.ThirdParty {
+			fullEnv = make([]string, 0, len(plan.Secrets)+2)
+			for name, value := range plan.Secrets {
+				fullEnv = append(fullEnv, name+"="+value)
+			}
 		}
 		fullEnv = append(fullEnv, credentialEnv(plan, step.EnvFrom, step.EnvSecret)...)
 	}
@@ -1122,7 +1234,7 @@ func (e *Executor) runStepCommand(ctx context.Context, plan *Plan, step StepPlan
 				e.killJobContainer(plan)
 			}
 		}
-		return &stepError{code: -1, msg: fmt.Sprintf("timed out after %s", step.Timeout)}
+		return &stepError{code: -1, msg: fmt.Sprintf("timed out after %s", step.Timeout), timedOut: true}
 	}
 	if code != 0 {
 		msg := fmt.Sprintf("exit code %d", code)
@@ -1234,7 +1346,8 @@ func (e *Executor) exprContext(plan *Plan, hardFailure bool, stream StepStream, 
 		// A step `if:` reads the run's secrets on a trusted run (empty on a fork)
 		// and the job token under its GitHub/Forgejo names, the same values a
 		// step field substitutes (docs/threads.md §3.7).
-		Secrets: plan.secretValues(),
+		Secrets: plan.secretValues(), HashFiles: plan.HashFiles, Site: workflow.SiteStepIf,
+		Needs: plan.NeedsResults, NeedsOutputs: plan.Needs,
 	}
 	if steps != nil {
 		outcome, conclusion, outputs := steps.snapshot()
@@ -1332,6 +1445,9 @@ func (e *Executor) cleanup(plan *Plan) {
 	// failed step is removed here too.
 	for _, step := range plan.dockerSteps() {
 		_, _, _, _ = e.Docker.Run(ctx, nil, "rm", "-f", dockerActionName(plan, step.OutputIndex))
+	}
+	for _, image := range plan.builtImageList() {
+		_, _, _, _ = e.Docker.Run(ctx, nil, "image", "rm", "-f", image)
 	}
 	_, _, _, _ = e.Docker.Run(ctx, nil, "network", "rm", plan.Names.Network)
 	_, _, _, _ = e.Docker.Run(ctx, nil, "volume", "rm", "-f", plan.Names.Volume)

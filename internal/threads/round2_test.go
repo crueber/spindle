@@ -332,7 +332,7 @@ func TestPermissionNormalizationEdges(t *testing.T) {
 // TestRunFilterMatching pins the list filter predicates (workflow by name or
 // path, case-insensitive; state and actor).
 func TestRunFilterMatching(t *testing.T) {
-	run := &Run{Workflow: "CI", WorkflowPath: ".spindle/workflows/ci.yml", State: RunSuccess, Actor: "alice"}
+	run := &Run{Workflow: "CI", WorkflowPath: ".spindle/workflows/ci.yml", State: RunSuccess, Actor: "alice", Branch: "main", Event: EventPush, Commit: strings.Repeat("a", 40)}
 	cases := []struct {
 		f    RunFilter
 		want bool
@@ -345,6 +345,12 @@ func TestRunFilterMatching(t *testing.T) {
 		{RunFilter{State: "failure"}, false},
 		{RunFilter{Actor: "ALICE"}, true},
 		{RunFilter{Actor: "bob"}, false},
+		{RunFilter{Branch: "main"}, true},
+		{RunFilter{Branch: "dev"}, false},
+		{RunFilter{Event: "push"}, true},
+		{RunFilter{Event: "pull_request"}, false},
+		{RunFilter{Commit: strings.Repeat("a", 40)}, true},
+		{RunFilter{Commit: strings.Repeat("b", 40)}, false},
 	}
 	for _, tc := range cases {
 		if got := tc.f.match(run); got != tc.want {

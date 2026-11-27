@@ -2,7 +2,7 @@
 {{with .Data}}{{$d := .}}
 <div class="thread-detail">
   <div class="mb-3 flex flex-wrap items-center gap-2">
-    <h2 class="text-xl font-semibold tracking-tight">{{.Run.Workflow}}</h2>
+    <h2 class="text-xl font-semibold tracking-tight">{{if .Run.Title}}{{.Run.Title}}{{else}}{{.Run.Workflow}}{{end}}</h2>
     {{template "collab_check_dot" (runDot .Run.State)}}
     <span class="chip chip-neutral">{{.Run.State}}</span>
     {{if not .Run.Trusted}}<span class="chip chip-draft" title="fork pull request: base-branch workflow, no secrets">untrusted</span>{{end}}
@@ -120,6 +120,8 @@
         <span class="chip chip-neutral" {{if .Tolerated}}title="continue-on-error: this job failed, but the run is not failed by it"{{end}}>{{.State}}{{if .Tolerated}} · tolerated{{end}}</span>
         {{with .Reason}}<span class="muted text-xs" title="why the job did not run">· {{.}}</span>{{end}}
         {{with .QueueReason}}<span class="chip chip-neutral" title="why this job has not started">queued · {{.}}</span>{{end}}
+        {{with .CancelledBy}}<span class="chip chip-draft" title="a single-job cancel names the actor">cancelled by {{.}}</span>{{end}}
+        {{if .ForceCancelled}}<span class="chip chip-draft" title="forced cancel: terminal before the runner acknowledged">forced</span>{{end}}
         <span class="muted text-xs">runs-on {{.RunsOn}}</span>
         {{with .Container}}<span class="muted text-xs">· {{.}}</span>{{end}}
         {{with .Deployment}}
@@ -130,6 +132,15 @@
         {{end}}
         {{if .RunnerName}}<span class="muted text-xs">· runner <span class="mono">{{.RunnerName}}</span></span>{{else if .Runner}}<span class="muted text-xs">· runner <span class="mono">{{.Runner}}</span></span>{{end}}
         {{with .Spec}}{{with .Permissions}}<span class="muted text-xs">· permissions {{range $k, $v := .}}{{$k}}={{$v}} {{end}}</span>{{end}}{{end}}
+        {{if $d.CanWrite}}{{if or (eq .State "queued") (eq .State "running")}}
+        <form method="post" action="/{{$d.Repo.Full}}/threads/{{$d.Run.ID}}/jobs/{{.ID}}/cancel" class="shrink-0">
+          <button type="submit" class="link text-xs">cancel job</button>
+        </form>
+        <form method="post" action="/{{$d.Repo.Full}}/threads/{{$d.Run.ID}}/jobs/{{.ID}}/cancel" class="shrink-0">
+          <input type="hidden" name="force" value="on">
+          <button type="submit" class="link text-xs" title="end the job at once, without waiting for the runner">force cancel</button>
+        </form>
+        {{end}}{{end}}
         <span class="muted ml-auto text-xs">{{with duration .DurationSeconds}}took {{.}} · {{end}}{{with .StartedAt}}{{template "collab_time" .}}{{else}}not started{{end}}</span>
       </div>
       {{if .Steps}}

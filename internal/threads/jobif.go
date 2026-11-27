@@ -1,8 +1,11 @@
 package threads
 
 import (
+	"context"
 	"fmt"
 	"strings"
+
+	wf "github.com/crueber/spindle/internal/threads/workflow"
 )
 
 // Job-level `if:` and `continue-on-error` (15 §4.1, 2026-11-21). Both keys are
@@ -28,6 +31,12 @@ import (
 //   - the `needs:` cascade (needs.go): a dependent is decided once every
 //     dependency is terminal, so `needs.<job>.result` is a fact.
 //
+// PAR-058: a job `if:` may read `secrets.*` and `vars.*`. A trusted run reads
+// the decrypted values; an untrusted (fork) run reads an EMPTY secrets map —
+// the reference resolves, the value is absent, and the condition is false
+// rather than an error. The values are never logged: only the authored
+// expression appears in the job's `reason`.
+//
 // A job with a non-empty `if:` that evaluates TRUE runs even when a dependency
 // failed — that is the point of writing `if: always()` or
 // `if: needs.build.result == 'failure'`. A job without one keeps the default:
@@ -49,7 +58,20 @@ const (
 // the job's `needs:` (results and outputs); it is empty for a job with no
 // dependencies. run supplies the github.* context and may be a header the
 // caller has not written yet (run creation).
+// jobIfValues are the extra server-side contexts a job `if:` may read
+// (PAR-058). An untrusted run gets an empty Secrets map, never an error.
+type jobIfValues struct {
+	Secrets map[string]string
+	Vars    map[string]string
+}
+
 func evaluateJobIf(job *Job, run *Run, facts needFacts) (jobIfVerdict, string, error) {
+	return evaluateJobIfWith(job, run, facts, jobIfValues{})
+}
+
+// evaluateJobIfWith is evaluateJobIf with the decrypted secrets/vars the server
+// resolved for this run (PAR-058).
+func evaluateJobIfWith(job *Job, run *Run, facts needFacts, extra jobIfValues) (jobIfVerdict, string, error) {
 	if job == nil {
 		return jobIfRun, "", nil
 	}
@@ -68,7 +90,7 @@ func evaluateJobIf(job *Job, run *Run, facts needFacts) (jobIfVerdict, string, e
 		return jobIfRun, "", nil
 	}
 	expr = SubstituteInputs(SubstituteMatrix(expr, specMatrix(job)), specInputs(job))
-	ctx := jobIfContext(job, run, facts)
+	ctx := jobIfContextWith(job, run, facts, extra)
 	ok, err := EvalIf(expr, ctx)
 	if err != nil {
 		return jobIfError, err.Error(), err
@@ -79,19 +101,52 @@ func evaluateJobIf(job *Job, run *Run, facts needFacts) (jobIfVerdict, string, e
 	return jobIfRun, "", nil
 }
 
+// loadJobIfValues resolves the PAR-058 contexts a job `if:` may read. An
+// untrusted run gets an empty secrets map (never a store read, never an error);
+// the values are used for the decision only and never logged.
+func (s *Service) loadJobIfValues(ctx context.Context, owner, repo string, job *Job, run *Run) (jobIfValues, error) {
+	var out jobIfValues
+	if job == nil || job.Spec == nil {
+		return out, nil
+	}
+	if job.Spec.IfSecrets {
+		if run != nil && run.Trusted {
+			vals, err := s.secretValues(ctx, owner, repo)
+			if err != nil {
+				return out, err
+			}
+			out.Secrets = vals
+		} else {
+			out.Secrets = map[string]string{}
+		}
+	}
+	if job.Spec.IfVars {
+		vals, err := s.variableValues(ctx, owner, repo)
+		if err != nil {
+			return out, err
+		}
+		out.Vars = vals
+	}
+	return out, nil
+}
+
 // jobIfContext builds the `if` context of one job record. The github.* keys are
 // the same ones the runner exposes to a step (plan.go builtinEnv), so a
 // condition written once behaves the same at job and step level.
 func jobIfContext(job *Job, run *Run, facts needFacts) ExprContext {
-	workflow := ""
+	return jobIfContextWith(job, run, facts, jobIfValues{})
+}
+
+func jobIfContextWith(job *Job, run *Run, facts needFacts, extra jobIfValues) ExprContext {
+	wfName := ""
 	if run != nil {
-		workflow = run.Workflow
+		wfName = run.Workflow
 	}
 	if job != nil {
-		workflow = job.specWorkflow(workflow)
+		wfName = job.specWorkflow(wfName)
 	}
 	success, failure, cancelled := needsSummary(facts.Results)
-	github := githubContext(run, workflow)
+	github := githubContext(run, wfName)
 	if run != nil {
 		github["job"] = jobIdentifier(job)
 	}
@@ -99,6 +154,7 @@ func jobIfContext(job *Job, run *Run, facts needFacts) ExprContext {
 		Success: success, Failure: failure, Cancelled: cancelled,
 		GitHub: github, Matrix: specMatrix(job), Inputs: specInputs(job),
 		Env: specEnv(job), Needs: facts.Results, NeedsOutputs: facts.Outputs,
+		Secrets: extra.Secrets, Vars: extra.Vars, Site: wf.SiteJobIf,
 	}
 }
 
@@ -157,7 +213,7 @@ func needsSummary(results map[string]string) (success, failure, cancelled bool) 
 		switch res {
 		case JobSuccess:
 			// neutral
-		case JobFailure:
+		case JobFailure, JobTimedOut:
 			success, failure = false, true
 		case JobCancelled:
 			success, cancelled = false, true

@@ -83,6 +83,11 @@ const (
 	// RunPendingApproval is the first-time-contributor gate (15 §5.2): the run
 	// exists with its jobs written but NOT enqueued until a maintainer approves.
 	RunPendingApproval = "pending_approval"
+	// RunTimedOut is a job whose `timeout-minutes` expired (PAR-055). It is a
+	// terminal, non-green conclusion distinct from an operator cancel (which
+	// reads `cancelled`); the checks mirror maps it to `failure`, because the
+	// checks state enum has no timed-out value.
+	RunTimedOut = "timed_out"
 )
 
 // Job states (the same vocabulary as a run; a job is the unit the checks
@@ -94,6 +99,7 @@ const (
 	JobFailure   = RunFailure
 	JobCancelled = RunCancelled
 	JobSkipped   = RunSkipped
+	JobTimedOut  = RunTimedOut
 )
 
 // KindThreadsGC is the Seam 5 task kind reserved for run/log retention
@@ -146,6 +152,9 @@ type Run struct {
 	// Workflow is the display name (the YAML `name`, falling back to the
 	// file basename); WorkflowPath is the repository-relative file path.
 	Workflow string `json:"workflow"`
+	// Title is the rendered `run-name:` (PAR-057), bounded to one line. Empty
+	// when the workflow declares none; a list page then shows Workflow.
+	Title string `json:"title,omitempty"`
 	// WorkflowPath is the file the run was created from, and WorkflowCommit
 	// is the commit that file was read at. They differ for a fork pull
 	// request: the run builds Commit but reads the file at the BASE branch's
@@ -163,6 +172,11 @@ type Run struct {
 	// Inputs are the workflow_dispatch input values this run was dispatched
 	// with (nil for push/PR runs); the job specs carry the same map.
 	Inputs map[string]string `json:"inputs,omitempty"`
+	// Priority is the run's claim priority (PAR-155, 0…MaxRunPriority).
+	// Higher values are claimed first; equal priorities are FIFO by enqueue
+	// sequence. It is set only by a manual dispatch (`priority` in the API or
+	// `--priority` in the CLI); every event-driven run is priority 0.
+	Priority int `json:"priority,omitempty"`
 	// EventPayload is the bounded, documented event body (PAR-033) the run's jobs
 	// read as `github.event.*` and as $GITHUB_EVENT_PATH. It is built by the
 	// trigger's emitter with a fixed field set and size cap — never a copy of
@@ -213,6 +227,11 @@ type Run struct {
 	// releaseHeldRuns: an uncapped repository pays no settings read on every
 	// completion.
 	RepoConcurrencyCap int `json:"repo_concurrency_cap,omitempty"`
+	// ActionLoads is the remote-action resolution record (PAR-070): every
+	// action this run resolved, with its source, ref, pinned commit and content
+	// digest. It is written once at creation (deduplicated across jobs) and is
+	// the audit trail an operator reads from the run header.
+	ActionLoads []ActionLoad `json:"action_loads,omitempty"`
 
 	CreatedAt   string  `json:"created_at"`
 	UpdatedAt   string  `json:"updated_at"`
@@ -282,10 +301,19 @@ type Spec struct {
 	Container *ContainerSpec         `json:"container,omitempty"`
 	Services  map[string]ServiceSpec `json:"services,omitempty"`
 	// Env is the merged workflow+job environment (job wins).
-	Env             map[string]string `json:"env,omitempty"`
-	If              string            `json:"if,omitempty"`
-	TimeoutMinutes  int               `json:"timeout_minutes,omitempty"`
-	ContinueOnError bool              `json:"continue_on_error,omitempty"`
+	Env map[string]string `json:"env,omitempty"`
+	If  string            `json:"if,omitempty"`
+	// IfSecrets/IfVars record that the job-level `if:` names secrets.* or
+	// vars.* (PAR-058). The server reads/decrypts them only when flagged, so an
+	// ordinary job pays no secret LIST at eligibility time.
+	IfSecrets      bool `json:"if_secrets,omitempty"`
+	IfVars         bool `json:"if_vars,omitempty"`
+	TimeoutMinutes int  `json:"timeout_minutes,omitempty"`
+	// TimeoutExpr is the authored `timeout-minutes: ${{ … }}` expression,
+	// evaluated per matrix cell at run creation (PAR-055). Empty for a literal
+	// (or an absent key, which defaults to DefaultJobTimeoutMinutes).
+	TimeoutExpr     string `json:"timeout_expr,omitempty"`
+	ContinueOnError bool   `json:"continue_on_error,omitempty"`
 	// Permissions is the merged workflow+job `permissions:` map; EffectivePermissions
 	// resolves it with the instance default (tokens.go). The keys are the closed
 	// scope vocabulary the parser accepts (PAR-112).
@@ -337,10 +365,11 @@ type Spec struct {
 	// `${{ inputs.<name> }}`; the parser validates the references.
 	Outputs map[string]string `json:"outputs,omitempty"`
 	Steps   []StepSpec        `json:"steps"`
-	// Actions are the repository-local action definitions this job's steps use
-	// (directly or nested), resolved from the run commit and embedded so the
-	// runner needs no repository access (docs/threads.md §3.4a). Keyed by
-	// repository-relative directory.
+	// Actions are the repository-local and resolved remote action definitions
+	// this job's steps use (directly or nested), resolved from the run commit
+	// (local) or from a pinned action source (remote) and embedded so the
+	// runner needs no repository access (docs/threads.md §3.4a/§3.4d). Keyed by
+	// repository-relative directory (local) or "remote://<identity>@<commit>".
 	Actions map[string]ActionSpec `json:"actions,omitempty"`
 }
 
@@ -374,6 +403,9 @@ type StrategySpec struct {
 	Include  []map[string]string `json:"include,omitempty"`
 	Exclude  []map[string]string `json:"exclude,omitempty"`
 	FailFast *bool               `json:"fail_fast,omitempty"`
+	// MaxParallel bounds how many cells of this matrix run at once (PAR-052);
+	// 0 means no per-matrix bound.
+	MaxParallel int `json:"max_parallel,omitempty"`
 }
 
 // ConcurrencySpec is one concurrency group.
@@ -400,6 +432,9 @@ type StepSpec struct {
 	ContinueOnError bool `json:"continue_on_error,omitempty"`
 	// TimeoutMinutes bounds one step; zero means the remaining job time.
 	TimeoutMinutes int `json:"timeout_minutes,omitempty"`
+	// TimeoutExpr is an authored `timeout-minutes: ${{ … }}` expression,
+	// evaluated per matrix cell at run creation (PAR-055).
+	TimeoutExpr string `json:"timeout_expr,omitempty"`
 	// Background starts this step asynchronously and continues with the next
 	// step (PAR-080). It requires an `id:` so a later step can wait for or
 	// cancel it, and is accepted only on a run/docker step (never inside a
@@ -421,15 +456,19 @@ type StepSpec struct {
 	Parallel []StepSpec `json:"parallel,omitempty"`
 }
 
-// ActionSpec is one repository-local action definition, resolved from the run
-// commit and embedded in the job payload (docs/threads.md §3.4a). The runner
-// never reads the repository: the definition it executes is exactly the one the
-// run was created with, so a later commit (or an earlier step editing the file)
-// cannot change it.
+// ActionSpec is one action definition, resolved at run creation and embedded
+// in the job payload (docs/threads.md §3.4a/§3.4d). The runner never reads the
+// repository or the network for an action: the definition it executes is
+// exactly the one the run was created with, so a later commit (or an earlier
+// step editing the file) cannot change it. Remote actions carry their fetched
+// file set and the resolution record; the runner materializes the content
+// under an immutable digest directory before executing it.
 type ActionSpec struct {
-	// Path is the repository-relative directory (".spindle/actions/setup").
+	// Path is the repository-relative directory (".spindle/actions/setup") for
+	// a local action, or the absolute in-container directory
+	// ("/spindle/remote-actions/<digest>") for a remote one.
 	Path string `json:"path"`
-	// Using is "composite" or "docker".
+	// Using is "composite", "docker", "node20" or "node24".
 	Using string `json:"using"`
 	// Inputs are the declared inputs; the runner turns them into INPUT_* env.
 	Inputs map[string]ActionInputSpec `json:"inputs,omitempty"`
@@ -439,11 +478,54 @@ type ActionSpec struct {
 	// Steps are the composite body (composite actions only).
 	Steps []StepSpec `json:"steps,omitempty"`
 	// Image is the docker image with the docker:// prefix stripped (docker
-	// actions only); Entrypoint/Args/Env come from the action metadata.
+	// actions only). Dockerfile actions name a path inside the action
+	// directory and set Dockerfile (PAR-072): the image is built, so there is
+	// no registry reference to pin — the action content digest pins it.
 	Image      string            `json:"image,omitempty"`
+	Dockerfile bool              `json:"dockerfile,omitempty"`
 	Entrypoint []string          `json:"entrypoint,omitempty"`
 	Args       []string          `json:"args,omitempty"`
 	Env        map[string]string `json:"env,omitempty"`
+	// Main/Pre/Post are the node action's program paths (action-relative);
+	// PreIf/PostIf are its hook conditions.
+	Main   string `json:"main,omitempty"`
+	Pre    string `json:"pre,omitempty"`
+	Post   string `json:"post,omitempty"`
+	PreIf  string `json:"pre_if,omitempty"`
+	PostIf string `json:"post_if,omitempty"`
+	// Files is the fetched action content (remote actions only), paths
+	// relative to Path.
+	Files []ActionFile `json:"files,omitempty"`
+	// Origin records where the action came from and what was verified.
+	Origin *ActionOrigin `json:"origin,omitempty"`
+	// ThirdParty marks remote action code. It receives NO implicit job token
+	// and no secret beyond its declared `with:`/`env:` interface (D-5).
+	ThirdParty bool `json:"third_party,omitempty"`
+}
+
+// ActionFile is one fetched action file. Data is base64 in JSON ([]byte), so a
+// binary asset round-trips exactly.
+type ActionFile struct {
+	Path string `json:"path"`
+	Mode uint32 `json:"mode"`
+	Data []byte `json:"data"`
+}
+
+// ActionOrigin is one remote action's resolution record: the source, the ref,
+// the commit it resolved to, and the content digest. It is the audit trail the
+// run header carries (Run.ActionLoads).
+type ActionOrigin struct {
+	Source     string `json:"source"` // "instance" or the configured source host
+	Repository string `json:"repository"`
+	Path       string `json:"path,omitempty"`
+	Ref        string `json:"ref"`
+	Commit     string `json:"commit"`
+	Digest     string `json:"digest"`
+	Using      string `json:"using"`
+	// Policy is the decision that allowed it ("sha-pinned" or "allowlisted").
+	Policy string `json:"policy"`
+	// AllowEntry is the matched allowlist entry (empty when sha-pinned).
+	AllowEntry string `json:"allow_entry,omitempty"`
 }
 
 // ActionInputSpec is one declared action input (the default is the YAML scalar
@@ -452,6 +534,21 @@ type ActionInputSpec struct {
 	Default    string `json:"default,omitempty"`
 	HasDefault bool   `json:"has_default,omitempty"`
 	Required   bool   `json:"required,omitempty"`
+}
+
+// ActionLoad is one remote action's resolution record in the run header. It is
+// deliberately flat: the page, the API and an audit reader all consume the same
+// fields, and nothing here is secret material.
+type ActionLoad struct {
+	Source     string `json:"source"`
+	Repository string `json:"repository"`
+	Path       string `json:"path,omitempty"`
+	Ref        string `json:"ref"`
+	Commit     string `json:"commit"`
+	Digest     string `json:"digest"`
+	Using      string `json:"using"`
+	Policy     string `json:"policy"`
+	AllowEntry string `json:"allow_entry,omitempty"`
 }
 
 // EnvironmentSpec is a job's deployment environment (docs/threads.md §3.3):
@@ -498,6 +595,21 @@ type Deployment struct {
 	// TriggeredBy is the run's actor, the principal a prevent-self-review
 	// environment refuses.
 	TriggeredBy string `json:"triggered_by,omitempty"`
+	// QueuePosition is the deployment's place in its environment's serialized
+	// queue (PAR-136): 0 = it holds the environment (or it is not deployment
+	// gated), 1..N = it waits behind that many earlier deployments. The claim
+	// path refuses a job with a non-zero position, and the run page/API name
+	// the environment and the position instead of showing a silent spinner.
+	QueuePosition int `json:"queue_position,omitempty"`
+	// QueueReason is the visible sentence for a queued deployment ("environment
+	// \"prod\" is busy: deployment … runs first"). It is stored at creation and
+	// refreshed by the read model so a promotion clears it.
+	QueueReason string `json:"queue_reason,omitempty"`
+	// DeploymentID is the per-environment deployment record this job's gate
+	// writes to (PAR-132): `<run>/<job>` deployments share the API's history
+	// family, so the environment page lists workflow and API deployments
+	// together.
+	DeploymentID string `json:"deployment_id,omitempty"`
 }
 
 // Deployment states. `not_required` is an environment with no required
@@ -538,6 +650,9 @@ const (
 	// CancelReasonConcurrency is a concurrency group's `cancel-in-progress`
 	// taking the group from the holder run (docs/threads.md §3.1).
 	CancelReasonConcurrency = "concurrency"
+	// CancelReasonForce marks a forced single-job cancel (PAR-195): the record
+	// is terminal at once, before the runner acknowledges.
+	CancelReasonForce = "force"
 )
 
 // specWorkflow returns the spec-carried workflow name, falling back to the run
@@ -590,10 +705,21 @@ type Job struct {
 	// availability. It is filled by GetRun, so the API and the run page say
 	// the same thing.
 	QueueReason string `json:"queue_reason,omitempty"`
+	// Priority is the job's claim priority (PAR-155), inherited from the run.
+	// Higher claims first; 0 is the default and ties break on enqueue order.
+	Priority int `json:"priority,omitempty"`
 	// CancelRequested carries the operator's cancel signal until the attempt
 	// acknowledges it (15 §3: the runner is busy, so its writes are the
 	// control channel).
 	CancelRequested bool `json:"cancel_requested,omitempty"`
+	// CancelledBy / CancelReason / ForceCancelled record a single-job cancel
+	// (PAR-195). The run header keeps its own CancelledBy; a job cancel names
+	// the actor on the job so "cancelled by X" survives beside siblings that
+	// keep running. ForceCancelled marks a forced cancel of a running attempt
+	// (the job is terminal before the runner acknowledges).
+	CancelledBy    string `json:"cancelled_by,omitempty"`
+	CancelReason   string `json:"cancel_reason,omitempty"`
+	ForceCancelled bool   `json:"force_cancelled,omitempty"`
 	// LeaseUntil mirrors the claim lease for the UI.
 	LeaseUntil *string `json:"lease_until,omitempty"`
 	// StepResults are the runner-reported step outcomes from complete.
@@ -719,6 +845,10 @@ type CreateOpts struct {
 	// (already validated against the workflow's declared schema). They are
 	// recorded on the run header and merged into every job's spec.
 	Inputs map[string]string
+	// Priority is the scheduler priority (PAR-155) for a manual dispatch.
+	// 0 (the default) is normal; 1…MaxRunPriority claims before older queued
+	// work. It never bypasses a hold, a paused repository or a trust gate.
+	Priority int
 	// Attempt starts at 1 (a requeue bumps it; T2 owns requeueing).
 	Attempt int
 	// ParentRunID/ParentTrusted carry a workflow_run upstream (PAR-019).
@@ -770,7 +900,7 @@ func validEvent(event string) bool {
 // validRunState reports the run state enum.
 func validRunState(state string) bool {
 	switch state {
-	case RunQueued, RunRunning, RunSuccess, RunFailure, RunCancelled, RunSkipped, RunPendingApproval:
+	case RunQueued, RunRunning, RunSuccess, RunFailure, RunCancelled, RunSkipped, RunTimedOut, RunPendingApproval:
 		return true
 	}
 	return false
@@ -783,7 +913,7 @@ func validJobState(state string) bool {
 
 // terminal reports a state no further transition leaves (T1's run fold).
 func terminal(state string) bool {
-	return state == RunSuccess || state == RunFailure || state == RunCancelled || state == RunSkipped
+	return state == RunSuccess || state == RunFailure || state == RunCancelled || state == RunSkipped || state == RunTimedOut
 }
 
 // checkState maps a job state onto the checks status enum (05 §2:
@@ -803,6 +933,10 @@ func checkState(jobState string) string {
 		return "cancelled"
 	case JobSkipped:
 		return "skipped"
+	case JobTimedOut:
+		// The checks vocabulary (05 §2) has no timed-out state; a job timeout is
+		// a failed check, named `timed_out` on the job record itself.
+		return "failure"
 	case JobRunning:
 		return "in_progress"
 	default:
@@ -830,7 +964,7 @@ func foldRunState(jobs []*Job) string {
 		if j.State != JobQueued {
 			allQueued = false
 		}
-		if j.State == JobFailure && !j.Tolerated {
+		if (j.State == JobFailure || j.State == JobTimedOut) && !j.Tolerated {
 			anyFailed = true
 		}
 		if j.State == JobCancelled {

@@ -23,6 +23,22 @@
     <code class="mono text-xs">{{.Context}}</code>
     <span class="chip chip-neutral">{{.State}}</span>
     {{with .Description}}<span class="muted min-w-0 flex-1 truncate text-xs">{{.}}</span>{{end}}
+    {{if .Annotations}}
+    <details class="w-full text-xs">
+      <summary class="cursor-pointer text-muted">{{len .Annotations}} annotation{{if ne (len .Annotations) 1}}s{{end}}</summary>
+      <ul class="mt-1 space-y-1">
+        {{range .Annotations}}
+        {{$a := .}}
+        <li class="flex flex-wrap items-center gap-2">
+          <span class="chip chip-neutral">{{.Level}}</span>
+          {{with $a.File}}<code class="mono text-[11px]">{{.}}{{if $a.Line}}:{{$a.Line}}{{end}}</code>{{end}}
+          {{with .Title}}<span class="font-medium">{{.}}</span>{{end}}
+          <span class="min-w-0 flex-1 whitespace-pre-wrap text-[11px]">{{.Message}}</span>
+        </li>
+        {{end}}
+      </ul>
+    </details>
+    {{end}}
     {{with .TargetURL}}<a class="link text-xs" href="{{.}}" target="_blank" rel="noreferrer">details</a>{{end}}
     <span class="muted ml-auto shrink-0 text-xs">{{.Creator}} · {{template "collab_time" .UpdatedAt}}</span>
   </li>

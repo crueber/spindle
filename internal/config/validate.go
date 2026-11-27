@@ -9,6 +9,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/crueber/spindle/internal/actions"
 )
 
 // Validate runs every §5 rule, plus the always-on authentication rule
@@ -181,6 +183,24 @@ func checkThreads(c *Config) []error {
 		if err := validateImageAllowPrefix(prefix); err != nil {
 			errs = append(errs, fmt.Errorf("threads.image_allow_prefixes[%d]: %v", i, err))
 		}
+	}
+	// Remote-action policy (PAR-070/D-5). The policy package owns the rules so
+	// the resolver and the config loader cannot disagree about what an entry
+	// means.
+	policy := actions.Policy{
+		Mode: actions.Mode(c.Threads.Actions.Mode), Allow: c.Threads.Actions.Allow,
+		RequireSHA: c.Threads.Actions.RequireSHA,
+	}
+	if err := policy.Validate(); err != nil {
+		errs = append(errs, err)
+	}
+	if src := strings.TrimSpace(c.Threads.Actions.Source); src != "" {
+		if _, err := actions.NewHTTPSource(src, actions.DefaultLimits()); err != nil {
+			errs = append(errs, err)
+		}
+	}
+	if c.Threads.Actions.MaxBytes < 0 {
+		errs = append(errs, fmt.Errorf("threads.actions.max_bytes must not be negative (got %d)", c.Threads.Actions.MaxBytes))
 	}
 	return errs
 }

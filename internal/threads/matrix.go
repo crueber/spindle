@@ -65,6 +65,43 @@ func expandMatrix(s *StrategySpec) []matrixCell {
 	return out
 }
 
+// stepExprs reports whether any step (or parallel member) has an
+// expression-valued timeout, so a job without one pays no copy.
+func stepExprs(steps []StepSpec) bool {
+	for _, st := range steps {
+		if st.TimeoutExpr != "" || stepExprs(st.Parallel) {
+			return true
+		}
+	}
+	return false
+}
+
+// evalStepTimeouts resolves every expression-valued step timeout for one matrix
+// cell. The slice is copied before mutation: the spec's steps are shared by all
+// cells of the product.
+func evalStepTimeouts(steps []StepSpec, github, matrix, inputs map[string]string) ([]StepSpec, error) {
+	out := make([]StepSpec, len(steps))
+	copy(out, steps)
+	for i := range out {
+		if out[i].TimeoutExpr != "" {
+			mins, err := workflow.EvalMinutes(out[i].TimeoutExpr, github, matrix, inputs)
+			if err != nil {
+				return nil, fmt.Errorf("step timeout-minutes: %w", err)
+			}
+			out[i].TimeoutMinutes = mins
+			out[i].TimeoutExpr = ""
+		}
+		if len(out[i].Parallel) > 0 {
+			parallel, err := evalStepTimeouts(out[i].Parallel, github, matrix, inputs)
+			if err != nil {
+				return nil, err
+			}
+			out[i].Parallel = parallel
+		}
+	}
+	return out, nil
+}
+
 // matrixGroupKey is the base job key a matrix expansion belongs to. It is
 // carried on the spec so fail-fast can cancel exactly the sibling cells (a run
 // may hold several matrix jobs).
@@ -162,6 +199,34 @@ func expandJobSpec(key, display string, base *Spec, ec expandContext) ([]jobInst
 			spec.Matrix = cell.Values
 		}
 		spec.MatrixGroup = matrixGroupKey(key, size)
+		// `runs-on` labels are the ONE structural field a matrix may vary
+		// (PAR-053): resolve them for this cell before the job record is
+		// written, so the queue matches the real label set.
+		labels, lerr := workflow.ExpandRunsOn(spec.RunsOn, ec.GitHub, cell.Values, ec.Inputs)
+		if lerr != nil {
+			return nil, lerr
+		}
+		spec.RunsOn = labels
+		// A job timeout is a literal or one expression (PAR-055); a job that
+		// names none gets GitHub's 360-minute default.
+		if spec.TimeoutExpr != "" {
+			mins, terr := workflow.EvalMinutes(spec.TimeoutExpr, ec.GitHub, cell.Values, ec.Inputs)
+			if terr != nil {
+				return nil, fmt.Errorf("workflow: job %s timeout-minutes: %w", key, terr)
+			}
+			spec.TimeoutMinutes = mins
+			spec.TimeoutExpr = ""
+		}
+		if spec.TimeoutMinutes == 0 {
+			spec.TimeoutMinutes = workflow.DefaultJobTimeoutMinutes
+		}
+		if stepExprs(spec.Steps) {
+			steps, serr := evalStepTimeouts(spec.Steps, ec.GitHub, cell.Values, ec.Inputs)
+			if serr != nil {
+				return nil, fmt.Errorf("workflow: job %s: %w", key, serr)
+			}
+			spec.Steps = steps
+		}
 		// The concurrency group may name a matrix axis ("build-${{ matrix.go }}")
 		// or the run's ref ("ci-${{ github.ref }}"): each cell gets its own
 		// expanded group, which is what keeps a matrix parallel and a branch's

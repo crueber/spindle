@@ -8,9 +8,11 @@ import (
 	"os"
 	"os/exec"
 	"runtime"
+	"strconv"
 	"strings"
 	"time"
 
+	"github.com/crueber/spindle/internal/actions"
 	"github.com/crueber/spindle/internal/threads/workflow"
 )
 
@@ -148,6 +150,92 @@ func (g *SubprocessGit) ReadFile(ctx context.Context, repo, commit, p string) ([
 	return []byte(out), nil
 }
 
+// ReadFileUpTo is ReadFile with an explicit size cap, for action content (a
+// bundled JavaScript action is larger than a workflow file).
+func (g *SubprocessGit) ReadFileUpTo(ctx context.Context, repo, commit, p string, max int64) ([]byte, error) {
+	if _, err := normalizeSHA(commit); err != nil {
+		return nil, err
+	}
+	if p == "" || strings.HasPrefix(p, "-") || strings.Contains(p, ":") {
+		return nil, fmt.Errorf("%w: invalid action path %q", ErrUnprocessable, p)
+	}
+	if max <= 0 {
+		max = maxWorkflowBytes
+	}
+	limit := int(max) + 1
+	if limit < maxWorkflowBytes+1 || limit < 0 {
+		limit = maxWorkflowBytes + 1
+	}
+	out, truncated, err := g.runEnvLimit(ctx, repo, []string{"show", commit + ":" + p}, nil, limit)
+	if err != nil {
+		return nil, notFoundIfExit(err)
+	}
+	if truncated {
+		return nil, fmt.Errorf("%w: %s is larger than %d bytes", ErrUnprocessable, p, max)
+	}
+	return []byte(out), nil
+}
+
+// maxActionTreeBytes bounds one `git ls-tree` listing of an action directory.
+const maxActionTreeBytes = 64 << 20
+
+// ListTree runs
+//
+//	git ls-tree -r -z --long <commit> -- <dir>
+//
+// and returns the regular files under dir. A symlink or submodule is returned
+// with its mode so the caller can refuse it by name; the listing itself never
+// follows either. A missing directory is an empty list (the caller names the
+// "no metadata" refusal).
+func (g *SubprocessGit) ListTree(ctx context.Context, repo, commit, dir string) ([]actions.TreeEntry, error) {
+	if _, err := normalizeSHA(commit); err != nil {
+		return nil, err
+	}
+	if strings.HasPrefix(dir, "-") || strings.Contains(dir, ":") || strings.Contains(dir, "\x00") {
+		return nil, fmt.Errorf("%w: invalid action directory %q", ErrUnprocessable, dir)
+	}
+	argv := []string{"ls-tree", "-r", "-z", "--long", commit}
+	if dir != "" {
+		argv = append(argv, "--", dir)
+	}
+	out, truncated, err := g.runEnvLimit(ctx, repo, argv, nil, maxActionTreeBytes+1)
+	if err != nil {
+		if nf := notFoundIfExit(err); errors.Is(nf, ErrNotFound) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	if truncated {
+		return nil, fmt.Errorf("%w: the action tree at %s is larger than %d bytes", ErrUnprocessable, dir, maxActionTreeBytes)
+	}
+	entries := make([]actions.TreeEntry, 0, 16)
+	for _, rec := range strings.Split(strings.TrimRight(out, "\x00"), "\x00") {
+		if rec == "" {
+			continue
+		}
+		meta, p, ok := strings.Cut(rec, "\t")
+		if !ok || p == "" {
+			continue
+		}
+		fields := strings.Fields(meta)
+		if len(fields) < 4 {
+			continue
+		}
+		mode, merr := strconv.ParseUint(fields[0], 8, 32)
+		if merr != nil {
+			continue
+		}
+		size := int64(-1)
+		if fields[3] != "-" {
+			if n, serr := strconv.ParseInt(fields[3], 10, 64); serr == nil {
+				size = n
+			}
+		}
+		entries = append(entries, actions.TreeEntry{Path: p, Mode: uint32(mode), Size: size})
+	}
+	return entries, nil
+}
+
 // ResolveRef runs `git rev-parse --verify --quiet <ref>^{commit}`.
 func (g *SubprocessGit) ResolveRef(ctx context.Context, repo, ref string) (string, error) {
 	ref = strings.TrimSpace(ref)
@@ -200,6 +288,12 @@ func (g *SubprocessGit) run(ctx context.Context, repo string, argv []string) (st
 // runEnv is run with extra environment entries (the merge commit pins its
 // author/committer identity and date so the derived commit is reproducible).
 func (g *SubprocessGit) runEnv(ctx context.Context, repo string, argv, extraEnv []string) (string, bool, error) {
+	return g.runEnvLimit(ctx, repo, argv, extraEnv, maxWorkflowBytes+1)
+}
+
+// runEnvLimit is runEnv with an explicit stdout cap, for the action reader
+// (a bundled JavaScript action is legitimately larger than a workflow file).
+func (g *SubprocessGit) runEnvLimit(ctx context.Context, repo string, argv, extraEnv []string, limit int) (string, bool, error) {
 	dir, derr := g.dirOf(ctx, repo)
 	if derr != nil {
 		return "", false, derr
@@ -221,7 +315,7 @@ func (g *SubprocessGit) runEnv(ctx context.Context, repo string, argv, extraEnv 
 	cmd := exec.CommandContext(cctx, g.Binary, argv...)
 	cmd.Dir = dir
 	cmd.Env = append([]string{"PATH=" + os.Getenv("PATH"), "GIT_TERMINAL_PROMPT=0", "GIT_DIR=" + dir}, extraEnv...)
-	stdout := &capBuffer{limit: maxWorkflowBytes + 1}
+	stdout := &capBuffer{limit: limit}
 	var stderr boundedStderr
 	cmd.Stdout = stdout
 	cmd.Stderr = &stderr

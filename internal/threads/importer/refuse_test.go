@@ -41,19 +41,6 @@ type translateCase struct {
 func TestTranslateRefusals(t *testing.T) {
 	cases := []translateCase{
 		{
-			name:             "run-name",
-			src:              top("on: push\nrun-name: run ${{ github.ref }}\n"),
-			wantUntranslated: []string{"run-name"},
-			absent:           []string{"\nrun-name:"},
-			contain:          []string{"# UNTRANSLATED: run-name"},
-		},
-		{
-			name:             "top-level defaults",
-			src:              top("on: push\ndefaults:\n  run:\n    shell: bash\n"),
-			wantUntranslated: []string{"defaults"},
-			absent:           []string{"\ndefaults:"},
-		},
-		{
 			name:             "scalar unknown trigger",
 			src:              top("on: merge_group\n"),
 			wantUntranslated: []string{"on.merge_group"},
@@ -341,11 +328,6 @@ func TestTranslateRefusals(t *testing.T) {
 			wantUntranslated: []string{"jobs.build.secrets"},
 		},
 		{
-			name:             "job defaults",
-			src:              jobDoc("    runs-on: linux\n    defaults:\n      run:\n        shell: bash\n    steps:\n      - run: 'true'\n"),
-			wantUntranslated: []string{"jobs.build.defaults"},
-		},
-		{
 			name:             "job unknown key",
 			src:              jobDoc("    runs-on: linux\n    strategy2: x\n    steps:\n      - run: 'true'\n"),
 			wantUntranslated: []string{"jobs.build.strategy2"},
@@ -536,11 +518,6 @@ func TestTranslateRefusals(t *testing.T) {
 			name:             "matrix object cell",
 			src:              jobDoc("    runs-on: linux\n    strategy:\n      matrix:\n        os:\n          - {name: linux}\n    steps:\n      - run: 'true'\n"),
 			wantUntranslated: []string{"jobs.build.strategy.matrix.os"},
-		},
-		{
-			name:             "matrix max-parallel",
-			src:              jobDoc("    runs-on: linux\n    strategy:\n      max-parallel: 2\n      matrix:\n        os: [a]\n    steps:\n      - run: 'true'\n"),
-			wantUntranslated: []string{"jobs.build.strategy.max-parallel"},
 		},
 		{
 			name:             "strategy fail-fast expression",

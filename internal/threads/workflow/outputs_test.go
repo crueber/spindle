@@ -52,17 +52,17 @@ func TestParseJobOutputsRejects(t *testing.T) {
 			func(s string) string {
 				return strings.Replace(s, "steps.build.outputs.digest", "steps.ghost.outputs.digest", 1)
 			},
-			"names no step id",
+			"names a step that is not declared before this one",
 		},
 		{
 			"unknown axis",
 			func(s string) string { return strings.Replace(s, "${{ matrix.go }}", "${{ matrix.node }}", 1) },
-			"not a declared matrix axis",
+			"not a declared matrix key",
 		},
 		{
 			"unsupported context",
-			func(s string) string { return strings.Replace(s, "${{ matrix.go }}", "${{ github.sha }}", 1) },
-			"not supported",
+			func(s string) string { return strings.Replace(s, "${{ matrix.go }}", "${{ nope.x }}", 1) },
+			"not available",
 		},
 		{
 			"bad output name",

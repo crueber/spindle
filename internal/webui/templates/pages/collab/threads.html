@@ -41,9 +41,156 @@
                  value="{{if .Settings}}{{.Settings.ConcurrencyCap}}{{else}}0{{end}}" {{if not .CanMaintain}}disabled{{end}}>
         </label>
         <span class="muted text-[11px]">0 = unlimited; a run above the cap waits and says so.</span>
-        {{if .CanMaintain}}<button type="submit" class="btn">save switches</button>{{end}}
+      </div>
+      <label class="flex items-start gap-2 text-xs">
+        <input type="checkbox" name="ci_paused" value="1" {{if and .Settings .Settings.CIPaused}}checked{{end}} {{if not .CanMaintain}}disabled{{end}}>
+        <span><span class="mono">pause CI</span> — in-flight jobs finish; nothing new is claimed until you resume (PAR-157).</span>
+      </label>
+      <label class="grid gap-1 text-xs" for="threads-notify-webhook">
+        <span class="eyebrow">Failure notification webhook (optional)</span>
+        <input class="input mono" id="threads-notify-webhook" type="url" name="notify_webhook"
+               value="{{if .Settings}}{{.Settings.NotifyWebhook}}{{end}}" placeholder="https://hooks.example/threads"
+               {{if not .CanMaintain}}disabled{{end}}>
+        <span class="muted text-[11px]">One POST per failed run, with its link. Empty = off. Subscribers also get an in-app notice.</span>
+      </label>
+      <div>
+        {{if .CanMaintain}}<button type="submit" class="btn whitespace-nowrap">save switches</button>{{end}}
       </div>
     </form>
+  </section>
+  {{end}}
+
+  {{if or .Schedules .SchedulesError}}
+  <section class="card mb-4" id="threads-schedules" aria-labelledby="threads-schedules-heading">
+    <div class="flex flex-wrap items-center gap-2 px-3 pt-2">
+      <h3 id="threads-schedules-heading" class="text-sm font-semibold">Schedules</h3>
+      <span class="muted text-xs">next fire, last fired and coalesced ticks from the persisted watermark</span>
+    </div>
+    {{if .ScheduleNotice}}<p class="notice-line px-3 pt-1 text-xs" role="status">{{.ScheduleNotice}}</p>{{end}}
+    {{if .ScheduleError}}<p class="err-line px-3 pt-1 text-xs" role="alert">{{.ScheduleError}}</p>{{end}}
+    {{if .SchedulesError}}<p class="err-line px-3 pb-2 text-xs" role="alert">{{.SchedulesError}}</p>{{else}}
+    <ul class="divide-y divide-[var(--pd-border)]">
+      {{range .Schedules.Entries}}
+      <li class="flex flex-col gap-1 px-3 py-2 text-xs">
+        <div class="flex flex-wrap items-center gap-2">
+          <code class="mono min-w-0 break-all">{{.Path}}</code>
+          <span class="chip chip-neutral mono whitespace-nowrap">{{.Cron}}</span>
+          {{with .Timezone}}<span class="chip chip-neutral">{{.}}</span>{{end}}
+          {{if .Disabled}}<span class="chip chip-draft">disabled</span>{{else if not .Valid}}<span class="chip chip-draft">invalid cron</span>{{else}}<span class="chip chip-neutral">enabled</span>{{end}}
+          {{if .MissedTicks}}<span class="chip chip-draft whitespace-nowrap" title="missed ticks are coalesced into the next single run">{{.MissedTicks}} missed</span>{{end}}
+        </div>
+        <div class="flex flex-wrap items-center gap-x-3 gap-y-1">
+          <span class="muted">next <span class="mono break-all">{{if .NextFire}}{{.NextFire}}{{else}}—{{end}}</span></span>
+          <span class="muted">last <span class="mono break-all">{{if .LastFired}}{{.LastFired}}{{else}}never{{end}}</span></span>
+          {{if $d.CanMaintain}}
+          <span class="flex flex-wrap items-center gap-3">
+            <form method="post" action="/{{$d.Repo.Full}}/threads/schedule" class="shrink-0">
+              <input type="hidden" name="path" value="{{.Path}}">
+              <input type="hidden" name="cron" value="{{.Cron}}">
+              <input type="hidden" name="timezone" value="{{.Timezone}}">
+              <input type="hidden" name="action" value="{{if .Disabled}}enable{{else}}disable{{end}}">
+              <button type="submit" class="link whitespace-nowrap text-xs">{{if .Disabled}}enable{{else}}disable{{end}}</button>
+            </form>
+            <form method="post" action="/{{$d.Repo.Full}}/threads/schedule" class="shrink-0">
+              <input type="hidden" name="path" value="{{.Path}}">
+              <input type="hidden" name="cron" value="{{.Cron}}">
+              <input type="hidden" name="timezone" value="{{.Timezone}}">
+              <input type="hidden" name="action" value="run-now">
+              <button type="submit" class="link whitespace-nowrap text-xs">run now</button>
+            </form>
+          </span>
+          {{end}}
+        </div>
+      </li>
+      {{end}}
+    </ul>
+    {{if not .Schedules.Entries}}<p class="muted px-3 pb-3 text-xs">No workflow at the default branch declares <code class="mono">schedule:</code>.</p>{{end}}
+    {{end}}
+  </section>
+  {{end}}
+
+  {{if .Queue}}
+  <section class="card mb-4" id="threads-queue" aria-labelledby="threads-queue-heading">
+    <div class="flex flex-wrap items-center gap-2 px-3 pt-2">
+      <h3 id="threads-queue-heading" class="text-sm font-semibold">Claim order</h3>
+      <span class="muted text-xs">priority descending, then FIFO by enqueue sequence</span>
+      {{if .Queue.Paused}}<span class="chip chip-draft">CI paused</span>{{end}}
+    </div>
+    {{if .Queue.Rows}}
+    <ol class="divide-y divide-[var(--pd-border)]">
+      {{range .Queue.Rows}}
+      <li class="flex flex-wrap items-center gap-2 px-3 py-2 text-xs">
+        <span class="muted mono">{{.Priority}}</span>
+        <span class="mono min-w-0 truncate">{{.JobID}}</span>
+        <span class="chip chip-neutral">{{.State}}</span>
+        <span class="muted mono min-w-0 truncate">{{range $i, $l := .Labels}}{{if $i}}, {{end}}{{$l}}{{end}}</span>
+        {{if .Fork}}<span class="chip chip-draft">fork</span>{{end}}
+      </li>
+      {{end}}
+    </ol>
+    {{else}}<p class="muted px-3 pb-3 text-xs">Nothing is pending.</p>{{end}}
+    {{with .QueueError}}<p class="err-line px-3 pb-2 text-xs" role="alert">{{.}}</p>{{end}}
+  </section>
+  {{end}}
+
+  {{if or .Subscription .Notifications}}
+  <section class="card mb-4" id="threads-notifications" aria-labelledby="threads-notifications-heading">
+    <div class="px-3 pt-2">
+      <h3 id="threads-notifications-heading" class="text-sm font-semibold">Notifications</h3>
+      <p class="muted mt-1 text-xs">A watched repository notifies you once per failed run, with a link. Email is not configured on this instance.</p>
+      {{if .Subscription}}
+      <form method="post" action="/{{$d.Repo.Full}}/threads/subscribe" class="mt-2">
+        <input type="hidden" name="subscribed" value="{{if .Subscription.Subscribed}}0{{else}}1{{end}}">
+        <button type="submit" class="btn whitespace-nowrap">{{if .Subscription.Subscribed}}unwatch this repository{{else}}watch failed runs{{end}}</button>
+      </form>
+      {{end}}
+    </div>
+    {{with .NotificationsErr}}<p class="err-line px-3 text-xs" role="alert">{{.}}</p>{{end}}
+    {{if .Notifications}}
+    <ul class="divide-y divide-[var(--pd-border)]">
+      {{range .Notifications}}
+      <li class="flex flex-wrap items-center gap-2 px-3 py-2 text-xs">
+        {{if not .Read}}<span class="chip chip-draft" aria-label="unread">new</span>{{end}}
+        <a class="link min-w-0 truncate" href="{{.Link}}">{{.Title}}</a>
+        <span class="muted ml-auto shrink-0">{{.CreatedAt}}</span>
+      </li>
+      {{end}}
+    </ul>
+    <form method="post" action="/{{$d.Repo.Full}}/threads/notifications/read" class="px-3 pb-3 pt-1">
+      <button type="submit" class="link whitespace-nowrap text-xs">mark all read</button>
+    </form>
+    {{else}}<p class="muted px-3 pb-3 text-xs">No unread notifications.</p>{{end}}
+  </section>
+  {{end}}
+
+  {{if .CanWrite}}
+  <section class="card mb-4" id="threads-editor" aria-labelledby="threads-editor-heading">
+    <h3 id="threads-editor-heading" class="px-3 pt-2 text-sm font-semibold">Validate a workflow before pushing</h3>
+    <p class="muted mb-2 px-3 text-xs">Paste a file (or one you are editing) and validate it with the same parser a push uses. Errors name the YAML key and the line.</p>
+    <form method="post" action="/{{$d.Repo.Full}}/threads/validate" class="space-y-2 px-3 pb-3">
+      <label class="grid gap-1 text-xs" for="threads-validate-file">
+        <span class="eyebrow">File path (the message names it)</span>
+        <input class="input mono" id="threads-validate-file" name="file" type="text"
+               value="{{if .ValidateResult}}{{.ValidateResult.File}}{{else}}.spindle/workflows/ci.yml{{end}}">
+      </label>
+      <label class="grid gap-1 text-xs" for="threads-validate-source">
+        <span class="eyebrow">Workflow YAML</span>
+        <textarea class="input mono min-h-40" id="threads-validate-source" name="source" rows="10" spellcheck="false" placeholder="name: ci&#10;on: [push]&#10;jobs: ...">{{.ValidateSource}}</textarea>
+      </label>
+      <div><button type="submit" class="btn">validate</button></div>
+    </form>
+    {{with .ValidateResult}}
+    <div class="px-3 pb-3 text-xs" role="status">
+      {{if .OK}}<p class="notice-line">Valid: no parse errors.</p>{{else}}
+      <p class="err-line">Not valid — {{len .Issues}} issue(s):</p>
+      <ul class="space-y-1">
+        {{range .Issues}}
+        <li><code class="mono">{{if .Key}}{{.Key}}{{else}}{{.File}}{{end}}</code>{{if .Line}} <span class="muted">line {{.Line}}</span>{{end}} — {{.Message}}</li>
+        {{end}}
+      </ul>
+      {{end}}
+    </div>
+    {{end}}
   </section>
   {{end}}
 
@@ -129,7 +276,7 @@
        `span.block` wrapper keeps a form control's intrinsic height when it is
        itself a grid item (12 §Run-list filters). */}}
   <form method="get" action="/{{$d.Repo.Full}}/threads"
-        class="card mb-3 grid grid-cols-2 gap-x-3 gap-y-2 p-3 sm:grid-cols-4"
+        class="card mb-3 grid grid-cols-2 gap-x-3 gap-y-2 p-3 sm:grid-cols-3 lg:grid-cols-6"
         aria-label="filter runs">
     <label class="grid min-w-0 gap-1">
       <span class="eyebrow">Workflow</span>
@@ -144,6 +291,17 @@
         <option value="">any</option>
         {{range .States}}<option value="{{.}}"{{if eq . $d.FilterState}} selected{{end}}>{{.}}</option>{{end}}
       </select></span>
+    </label>
+    <label class="grid min-w-0 gap-1">
+      <span class="eyebrow">Event</span>
+      <span class="block min-w-0"><select class="input" id="threads-filter-event" name="event">
+        <option value="">any</option>
+        {{range .Events}}<option value="{{.}}"{{if eq . $d.FilterEvent}} selected{{end}}>{{.}}</option>{{end}}
+      </select></span>
+    </label>
+    <label class="grid min-w-0 gap-1">
+      <span class="eyebrow">Branch</span>
+      <span class="block min-w-0"><input class="input mono" id="threads-filter-branch" name="branch" type="text" value="{{.FilterBranch}}" placeholder="any"></span>
     </label>
     <label class="grid min-w-0 gap-1">
       <span class="eyebrow">Actor</span>
@@ -161,7 +319,8 @@
     <li class="card">
       <div class="flex flex-wrap items-center gap-2 px-3 py-2">
         {{template "collab_check_dot" (runDot .State)}}
-        <a class="link text-sm font-medium" href="{{.Href}}">{{.Workflow}}</a>
+        <a class="link text-sm font-medium" href="{{.Href}}">{{if .Title}}{{.Title}}{{else}}{{.Workflow}}{{end}}</a>
+        {{if and .Title (ne .Title .Workflow)}}<span class="muted text-xs">{{.Workflow}}</span>{{end}}
         <span class="chip chip-neutral">{{.State}}</span>
         {{if eq .State "pending_approval"}}
           {{if .PendingEnvironments}}<span class="chip chip-draft" title="a deployment is held for approval; the run page names the reviewers">awaiting deployment{{if gt (len .PendingEnvironments) 1}}s{{end}} <span class="mono">{{range $i, $e := .PendingEnvironments}}{{if $i}}, {{end}}{{$e}}{{end}}</span></span>

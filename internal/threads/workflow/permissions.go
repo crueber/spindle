@@ -30,6 +30,10 @@ const (
 	ScopeIssues      = "issues"
 	ScopePullRequest = "pull-requests"
 	ScopeIDToken     = "id-token"
+	// ScopeDeployments is the deployment API (PAR-133): `write` creates a
+	// deployment and its statuses for the run's repository; `read` lists them.
+	// It never grants the Threads operator surface (dispatch/cancel/approve).
+	ScopeDeployments = "deployments"
 	// KeyAll is the shorthand baseline key produced by `read-all`/`write-all`.
 	KeyAll = "all"
 )
@@ -46,6 +50,7 @@ var permissionScopes = map[string]permissionScope{
 	ScopeContents:    {levels: []string{"read", "write"}, surface: "git read/push of the run's repository"},
 	ScopeIssues:      {levels: []string{"read", "write"}, surface: "the repository's issue surface (write = triage)"},
 	ScopePullRequest: {levels: []string{"read", "write"}, surface: "the pull-request surface (write = write role)"},
+	ScopeDeployments: {levels: []string{"read", "write"}, surface: "the deployment API (write = create deployments and statuses)"},
 	ScopeIDToken:     {levels: []string{"write"}, surface: "OIDC ID-token exchange (trusted runs only)"},
 }
 
@@ -62,7 +67,6 @@ var refusedScopes = map[string]string{
 	"actions":             "the run cancel/rerun API is not a job-token capability",
 	"attestations":        "artifact attestations are a non-goal (D-15)",
 	"checks":              "the check-run API accepts a dedicated CI token, not the job token",
-	"deployments":         "the deployment API is not implemented yet (PAR-133)",
 	"discussions":         "there is no discussion surface",
 	"models":              "there is no model-registry surface",
 	"packages":            "the OCI registry authenticates a registry token, not the job token",

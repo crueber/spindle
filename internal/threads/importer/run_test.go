@@ -23,10 +23,10 @@ jobs:
       - run: go test ./...
 `
 
-// partialWorkflow converts with one refusal (run-name).
+// partialWorkflow converts with one refusal (an unknown top-level key).
 const partialWorkflow = `name: Release
 on: push
-run-name: release ${{ github.ref }}
+x-release-channel: stable
 jobs:
   build:
     runs-on: docker

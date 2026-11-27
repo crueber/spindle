@@ -49,7 +49,7 @@ func TestEvalIf(t *testing.T) {
 func TestEvalIfErrorsAreExplicit(t *testing.T) {
 	ctx := ExprContext{Success: true}
 	for _, expr := range []string{
-		"endsWith(github.ref, 'x')",
+		"toJSON(github)",
 		"nope == 'x'",
 		"github.ref ==",
 		"'unterminated",
@@ -116,15 +116,18 @@ func TestEvalIfStepAndNeedsContexts(t *testing.T) {
 	}
 }
 
-// TestValueTruthy pins the literal coercion (0/empty false, 1/true true).
+// TestValueTruthy pins the literal coercion (0/empty false, 1/true true) and
+// the strict refusal of a non-boolean condition.
 func TestValueTruthy(t *testing.T) {
-	if b, err := (value{s: "0"}).truthy(); err != nil || b {
-		t.Fatal("truthy(0)")
+	for _, tc := range []struct {
+		expr string
+		want bool
+	}{{"0", false}, {"1", true}, {"false", false}, {"true", true}} {
+		if got, err := EvalIf(tc.expr, ExprContext{}); err != nil || got != tc.want {
+			t.Fatalf("EvalIf(%q) = %v, %v", tc.expr, got, err)
+		}
 	}
-	if b, err := (value{s: "1"}).truthy(); err != nil || !b {
-		t.Fatal("truthy(1)")
-	}
-	if _, err := (value{s: "maybe"}).truthy(); err == nil {
-		t.Fatal("truthy(maybe) must error")
+	if _, err := EvalIf("'maybe'", ExprContext{}); err == nil {
+		t.Fatal("a non-boolean condition must error")
 	}
 }

@@ -14,6 +14,7 @@ package webui
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"log/slog"
 	"mime"
@@ -42,6 +43,9 @@ type ThreadsDeps struct {
 	// write role, so a reader's POST is a real 403 (the API's own gate).
 	Cancel func(ctx context.Context, owner, repo, runID string, p auth.Principal) error
 	Rerun  func(ctx context.Context, owner, repo, runID string, p auth.Principal) error
+	// CancelJob is the per-job cancel (PAR-195): force=false signals a running
+	// attempt, force=true ends it at once. The service re-checks the write role.
+	CancelJob func(ctx context.Context, owner, repo, runID, jobID string, force bool, p auth.Principal) error
 	// Dispatch is the manual trigger (15 §6, round 2): the page's Run workflow
 	// form posts ref + workflow + declared inputs through the SAME service call
 	// as POST …/api/threads. The service re-checks the write role, so the form
@@ -67,6 +71,19 @@ type ThreadsDeps struct {
 	// the page renders the values and the form.
 	Settings       func(ctx context.Context, owner, repo string, p auth.Principal) (*threads.SettingsView, error)
 	UpdateSettings func(ctx context.Context, owner, repo string, in threads.SettingsInput, p auth.Principal) (*threads.SettingsView, error)
+	// Wave-4 operations (PAR-154/PAR-155/PAR-157/PAR-196/PAR-197). Each is the
+	// same service call the JSON twin uses, so the page cannot disagree about
+	// gating or shape.
+	ListSchedules   func(ctx context.Context, owner, repo string, p auth.Principal) (*threads.ScheduleList, error)
+	SetSchedule     func(ctx context.Context, repo string, id threads.ScheduleEntryID, enabled bool, p auth.Principal) (*threads.ScheduleStatus, error)
+	RunScheduleNow  func(ctx context.Context, repo string, id threads.ScheduleEntryID, p auth.Principal) ([]*threads.Run, error)
+	SetPaused       func(ctx context.Context, repo string, paused bool, p auth.Principal) (*threads.SettingsView, error)
+	Queue           func(ctx context.Context, repo string, p auth.Principal) (*threads.QueueSnapshot, error)
+	Subscription    func(ctx context.Context, repo string, p auth.Principal) (*threads.SubscriptionView, error)
+	SetSubscription func(ctx context.Context, repo string, subscribed bool, workflows []string, p auth.Principal) (*threads.SubscriptionView, error)
+	Notifications   func(ctx context.Context, p auth.Principal, limit int) ([]threads.Notification, error)
+	MarkRead        func(ctx context.Context, p auth.Principal) error
+	Validate        func(ctx context.Context, repo string, p auth.Principal, file string, src []byte) (*threads.WorkflowValidation, error)
 }
 
 var threadsDeps ThreadsDeps
@@ -83,11 +100,18 @@ func init() { registerGroup((*Server).mountThreads) }
 func (s *Server) mountThreads() {
 	m := &s.mux
 	m.HandleFunc("GET /{owner}/{repo}/threads", s.threadsList)
+	m.HandleFunc("GET /{owner}/{repo}/threads/badge.svg", s.threadBadge)
 	m.HandleFunc("POST /{owner}/{repo}/threads/dispatch", s.threadsDispatch)
 	m.HandleFunc("POST /{owner}/{repo}/threads/settings", s.threadsSettings)
+	m.HandleFunc("POST /{owner}/{repo}/threads/schedule", s.threadsSchedule)
+	m.HandleFunc("POST /{owner}/{repo}/threads/pause", s.threadsPause)
+	m.HandleFunc("POST /{owner}/{repo}/threads/subscribe", s.threadsSubscribe)
+	m.HandleFunc("POST /{owner}/{repo}/threads/notifications/read", s.threadsNotificationsRead)
+	m.HandleFunc("POST /{owner}/{repo}/threads/validate", s.threadsValidate)
 	m.HandleFunc("GET /{owner}/{repo}/threads/{run}", s.threadRun)
 	m.HandleFunc("GET /{owner}/{repo}/threads/{run}/artifacts/{artifact}", s.threadArtifactDownload)
 	m.HandleFunc("POST /{owner}/{repo}/threads/{run}/cancel", s.threadRunCancel)
+	m.HandleFunc("POST /{owner}/{repo}/threads/{run}/jobs/{job}/cancel", s.threadJobCancel)
 	m.HandleFunc("POST /{owner}/{repo}/threads/{run}/rerun", s.threadRunRerun)
 	m.HandleFunc("POST /{owner}/{repo}/threads/{run}/approve", s.threadRunApprove)
 	m.HandleFunc("POST /{owner}/{repo}/threads/{run}/deny", s.threadRunDeny)
@@ -103,10 +127,12 @@ type threadRunRow struct {
 	ShortCommit string
 	Event       string
 	Workflow    string
-	Branch      string
-	State       string
-	Trusted     bool
-	UpdatedAt   string
+	// Title is the rendered `run-name:` (PAR-057); empty when none.
+	Title     string
+	Branch    string
+	State     string
+	Trusted   bool
+	UpdatedAt string
 	// DurationSeconds is the run's derived wall time (0 = not started or too
 	// short to render).
 	DurationSeconds int64
@@ -158,12 +184,16 @@ type threadsListData struct {
 	DispatchError    string
 	DispatchNotice   string
 
-	// Run-list filters (round-2 pass 2): workflow · state · actor. The form is
-	// a plain GET, so the filter lives in the URL and a link keeps it.
+	// Run-list filters (round-2 pass 2; wave 4 adds branch and event):
+	// workflow · state · actor · branch · event. The form is a plain GET, so
+	// the filter lives in the URL and a link keeps it.
 	FilterWorkflow string
 	FilterState    string
 	FilterActor    string
+	FilterBranch   string
+	FilterEvent    string
 	States         []string
+	Events         []string
 	FilterActive   bool
 	// FilterWorkflowOptions is the workflow select's option list (the
 	// discovered workflows plus the active value when it is not discovered).
@@ -175,6 +205,19 @@ type threadsListData struct {
 	SettingsError string
 	CanMaintain   bool
 	Notice        string
+	// Wave-4 operations (PAR-154/PAR-155/PAR-157/PAR-196/PAR-197).
+	Schedules        *threads.ScheduleList
+	SchedulesError   string
+	Queue            *threads.QueueSnapshot
+	QueueError       string
+	Subscription     *threads.SubscriptionView
+	Notifications    []threads.Notification
+	NotificationsErr string
+	ValidateResult   *threads.WorkflowValidation
+	ValidateFile     string
+	ValidateSource   string
+	ScheduleError    string
+	ScheduleNotice   string
 
 	Error string
 }
@@ -222,11 +265,9 @@ func (s *Server) threadsList(w http.ResponseWriter, r *http.Request) {
 		After:       r.URL.Query().Get("after"),
 	}
 	data.Workflows, data.WorkflowsError = threadWorkflowRows(r.Context(), rc, p)
-	data.States = []string{threads.RunQueued, threads.RunRunning, threads.RunPendingApproval, threads.RunSuccess, threads.RunFailure, threads.RunCancelled, threads.RunSkipped}
-	data.FilterWorkflow = strings.TrimSpace(r.URL.Query().Get("workflow"))
-	data.FilterState = strings.TrimSpace(r.URL.Query().Get("state"))
-	data.FilterActor = strings.TrimSpace(r.URL.Query().Get("actor"))
-	data.FilterActive = data.FilterWorkflow != "" || data.FilterState != "" || data.FilterActor != ""
+	data.States = threadRunStates()
+	data.Events = threadRunEvents()
+	threadApplyFilter(&data, r)
 	for _, wf := range data.Workflows {
 		data.FilterWorkflowOptions = append(data.FilterWorkflowOptions, wf.Name)
 	}
@@ -240,6 +281,45 @@ func (s *Server) threadsList(w http.ResponseWriter, r *http.Request) {
 			data.SettingsError = serr.Error()
 		}
 	}
+	// Wave-4 read models. A schedule/queue read is repository-scoped (the
+	// service re-checks); notifications are the signed-in user's own inbox.
+	if threadsDeps.ListSchedules != nil {
+		if list, lerr := threadsDeps.ListSchedules(r.Context(), rc.Owner, rc.Name, p); lerr == nil {
+			data.Schedules = list
+		} else {
+			data.SchedulesError = lerr.Error()
+		}
+	}
+	if threadsDeps.Queue != nil {
+		if q, qerr := threadsDeps.Queue(r.Context(), rc.Full, p); qerr == nil {
+			data.Queue = q
+		} else {
+			data.QueueError = qerr.Error()
+		}
+	}
+	if threadsDeps.Subscription != nil && !p.Anonymous {
+		if sub, serr := threadsDeps.Subscription(r.Context(), rc.Full, p); serr == nil {
+			data.Subscription = sub
+		}
+	}
+	if threadsDeps.Notifications != nil && !p.Anonymous {
+		if notes, nerr := threadsDeps.Notifications(r.Context(), p, 10); nerr == nil {
+			data.Notifications = notes
+		} else {
+			data.NotificationsErr = nerr.Error()
+		}
+	}
+	data.ScheduleError = r.URL.Query().Get("schedule_error")
+	data.ScheduleNotice = r.URL.Query().Get("schedule_notice")
+	if v := r.URL.Query().Get("validate"); v != "" {
+		// A validation result survives the redirect as a compact JSON blob
+		// (the editor's answer is small and display-only; the source text is
+		// not round-tripped to avoid putting a body in a URL).
+		var res threads.WorkflowValidation
+		if json.Unmarshal([]byte(v), &res) == nil {
+			data.ValidateResult = &res
+		}
+	}
 	data.DispatchRef = threadDispatchDefaultRef(rc)
 	threadDispatchModel(&data, r.URL.Query().Get("dispatch"), nil, threadEnvironmentNames(r.Context(), rc, p, data.Workflows))
 	if threadsDeps.List == nil {
@@ -249,6 +329,7 @@ func (s *Server) threadsList(w http.ResponseWriter, r *http.Request) {
 	}
 	page, err := threadsDeps.List(r.Context(), rc.Owner, rc.Name, p, data.After, 50, threads.RunFilter{
 		Workflow: data.FilterWorkflow, State: data.FilterState, Actor: data.FilterActor,
+		Branch: data.FilterBranch, Event: data.FilterEvent,
 	})
 	if err != nil {
 		if st := collabErrStatus(err); st == http.StatusNotFound || st == http.StatusUnauthorized || st == http.StatusForbidden {
@@ -264,7 +345,7 @@ func (s *Server) threadsList(w http.ResponseWriter, r *http.Request) {
 		data.Rows = append(data.Rows, threadRunRow{
 			ID: run.ID, Short: shortRunID(run.ID), Href: "/" + rc.Full + "/threads/" + run.ID,
 			Commit: run.Commit, ShortCommit: shortSHA(run.Commit),
-			Event: run.Event, Workflow: run.Workflow, Branch: run.Branch,
+			Event: run.Event, Workflow: run.Workflow, Title: run.Title, Branch: run.Branch,
 			State: run.State, Trusted: run.Trusted, UpdatedAt: run.UpdatedAt,
 			DurationSeconds: run.DurationSeconds, Actor: run.Actor,
 			PendingEnvironments: run.Environments, ApprovalKind: run.ApprovalKind,
@@ -276,6 +357,30 @@ func (s *Server) threadsList(w http.ResponseWriter, r *http.Request) {
 		data.OlderHref = pagerHref(r, "after", page.Runs[len(page.Runs)-1].ID)
 	}
 	s.pageRepo(w, r, p, s.collabChrome(r, rc, p), http.StatusOK, "collab/threads", "Threads", data)
+}
+
+// threadApplyFilter fills the run-list filter model from the query (one place,
+// so the list and its error re-render cannot disagree).
+func threadApplyFilter(data *threadsListData, r *http.Request) {
+	q := r.URL.Query()
+	data.FilterWorkflow = strings.TrimSpace(q.Get("workflow"))
+	data.FilterState = strings.TrimSpace(q.Get("state"))
+	data.FilterActor = strings.TrimSpace(q.Get("actor"))
+	data.FilterBranch = strings.TrimSpace(q.Get("branch"))
+	data.FilterEvent = strings.TrimSpace(q.Get("event"))
+	data.FilterActive = data.FilterWorkflow != "" || data.FilterState != "" || data.FilterActor != "" ||
+		data.FilterBranch != "" || data.FilterEvent != ""
+}
+
+// threadRunStates is the state filter's option list.
+func threadRunStates() []string {
+	return []string{threads.RunQueued, threads.RunRunning, threads.RunPendingApproval, threads.RunSuccess, threads.RunFailure, threads.RunCancelled, threads.RunSkipped}
+}
+
+// threadRunEvents is the event filter's option list (the triggers this engine
+// emits; a filter never offers an event that cannot occur).
+func threadRunEvents() []string {
+	return []string{"push", "pull_request", "pull_request_target", "workflow_dispatch", "workflow_run", "schedule", "repository_dispatch", "release", "create", "delete", "deployment", "deployment_status", "issues", "issue_comment"}
 }
 
 // threadDispatchModel fills the Run workflow model: the dispatchable files, the
@@ -438,11 +543,9 @@ func (s *Server) threadsDispatch(w http.ResponseWriter, r *http.Request) {
 		CanWrite: true, DispatchError: err.Error(), DispatchRef: ref,
 	}
 	data.Workflows, data.WorkflowsError = threadWorkflowRows(r.Context(), rc, p)
-	data.States = []string{threads.RunQueued, threads.RunRunning, threads.RunPendingApproval, threads.RunSuccess, threads.RunFailure, threads.RunCancelled, threads.RunSkipped}
-	data.FilterWorkflow = strings.TrimSpace(r.URL.Query().Get("workflow"))
-	data.FilterState = strings.TrimSpace(r.URL.Query().Get("state"))
-	data.FilterActor = strings.TrimSpace(r.URL.Query().Get("actor"))
-	data.FilterActive = data.FilterWorkflow != "" || data.FilterState != "" || data.FilterActor != ""
+	data.States = threadRunStates()
+	data.Events = threadRunEvents()
+	threadApplyFilter(&data, r)
 	for _, wf := range data.Workflows {
 		data.FilterWorkflowOptions = append(data.FilterWorkflowOptions, wf.Name)
 	}
@@ -454,7 +557,7 @@ func (s *Server) threadsDispatch(w http.ResponseWriter, r *http.Request) {
 				data.Rows = append(data.Rows, threadRunRow{
 					ID: run.ID, Short: shortRunID(run.ID), Href: "/" + rc.Full + "/threads/" + run.ID,
 					Commit: run.Commit, ShortCommit: shortSHA(run.Commit),
-					Event: run.Event, Workflow: run.Workflow, Branch: run.Branch,
+					Event: run.Event, Workflow: run.Workflow, Title: run.Title, Branch: run.Branch,
 					State: run.State, Trusted: run.Trusted, UpdatedAt: run.UpdatedAt,
 					DurationSeconds: run.DurationSeconds,
 				})
@@ -499,6 +602,8 @@ func (s *Server) threadsSettings(w http.ResponseWriter, r *http.Request) {
 		PullRequestTarget:         r.PostForm.Get("pull_request_target") == "on",
 		PRTargetAllowHeadCheckout: r.PostForm.Get("pr_target_allow_head_checkout") == "on",
 		ConcurrencyCap:            cap,
+		CIPaused:                  r.PostForm.Get("ci_paused") == "1",
+		NotifyWebhook:             strings.TrimSpace(r.PostForm.Get("notify_webhook")),
 	}
 	if _, err := threadsDeps.UpdateSettings(r.Context(), rc.Owner, rc.Name, in, p); err != nil {
 		s.collabError(w, r, collabErrStatus(err), err.Error())
@@ -663,6 +768,38 @@ func (s *Server) threadRunCancel(w http.ResponseWriter, r *http.Request) {
 // threadRunRerun answers POST …/threads/{run}/rerun from the page.
 func (s *Server) threadRunRerun(w http.ResponseWriter, r *http.Request) {
 	s.threadRunVerb(w, r, threadsDeps.Rerun, "re-run queued")
+}
+
+// threadJobCancel answers POST …/threads/{run}/jobs/{job}/cancel (PAR-195).
+// The optional `force=on` form value forces the job terminal at once.
+func (s *Server) threadJobCancel(w http.ResponseWriter, r *http.Request) {
+	rc, p, ok := s.collabEnv(w, r)
+	if !ok {
+		return
+	}
+	if !sameOrigin(r) {
+		s.collabError(w, r, http.StatusForbidden, "cross-origin write refused")
+		return
+	}
+	if threadsDeps.CancelJob == nil {
+		s.collabError(w, r, http.StatusServiceUnavailable, "threads service not wired")
+		return
+	}
+	if err := r.ParseForm(); err != nil {
+		s.collabError(w, r, http.StatusBadRequest, "unreadable form")
+		return
+	}
+	runID, jobID := r.PathValue("run"), r.PathValue("job")
+	force := r.PostForm.Get("force") == "on"
+	notice := "job cancel requested"
+	if force {
+		notice = "job force-cancelled"
+	}
+	if err := threadsDeps.CancelJob(r.Context(), rc.Owner, rc.Name, runID, jobID, force, p); err != nil {
+		s.collabError(w, r, collabErrStatus(err), err.Error())
+		return
+	}
+	http.Redirect(w, r, "/"+rc.Full+"/threads/"+url.PathEscape(runID)+"?notice="+url.QueryEscape(notice), http.StatusSeeOther)
 }
 
 // threadRunApprove answers POST …/threads/{run}/approve (the gate's release).

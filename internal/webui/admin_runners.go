@@ -54,6 +54,13 @@ type AdminRunnerTenancyDeps struct {
 	// CASes only allow_all/repos and audits it). actor is the verified
 	// administrator's name: the page gate has already run.
 	SetPolicy func(ctx context.Context, id string, in threads.RunnerPolicy, actor string) (threads.RunnerPolicy, error)
+	// Fleet operations (PAR-181): drain finishes the current job and claims
+	// nothing new; resume undoes it; rotate returns the new credential exactly
+	// once; deregister deletes the record and credential.
+	Drain      func(ctx context.Context, id string, p auth.Principal) error
+	Resume     func(ctx context.Context, id string, p auth.Principal) error
+	Rotate     func(ctx context.Context, id string, p auth.Principal) (*threads.RunnerTokenRotation, error)
+	Deregister func(ctx context.Context, id string, p auth.Principal) error
 }
 
 var runnerTenancy AdminRunnerTenancyDeps
@@ -132,6 +139,8 @@ type AdminRunnerRow struct {
 	// PolicyWired is true when the in-place edit seam is bound; false renders
 	// the record read-only (the honest not-wired note, never a dead form).
 	PolicyWired bool
+	// FleetWired is true when drain/resume/rotate/deregister are bound.
+	FleetWired bool
 }
 
 // PolicyText is the row's tenancy reading, in FULL. The fleet is a grid of
@@ -237,7 +246,15 @@ type AdminRunnersView struct {
 	// PolicyWired is true when the in-place policy edit is bound; false renders
 	// each row's recorded policy read-only instead of a dead form.
 	PolicyWired bool
-	Rows        []AdminRunnerRow
+	// FleetWired is true when drain/resume/rotate/deregister are bound.
+	FleetWired bool
+	// RotatedToken is the one-time credential from the rotate that just
+	// rendered this page, and RotatedOldUntil is the overlap deadline. Like the
+	// mint answer it is rendered in place and never put in a URL.
+	RotatedToken    string
+	RotatedRunnerID string
+	RotatedOldUntil string
+	Rows            []AdminRunnerRow
 	// NewRunnerToken is the one-time registration token from the mint that just
 	// rendered this page; Expires is its TTL. They are never in a URL.
 	NewRunnerToken string
@@ -267,6 +284,7 @@ func markPolicyWired(view *AdminRunnersView) {
 	}
 	for i := range view.Rows {
 		view.Rows[i].PolicyWired = view.PolicyWired
+		view.Rows[i].FleetWired = view.FleetWired
 	}
 }
 
@@ -281,6 +299,7 @@ func (s *Server) adminRunnersPage(w http.ResponseWriter, r *http.Request) {
 		Tab:         adminRunnersTab(r.URL.Query().Get("tab")),
 		MintWired:   runnerTenancy.Mint != nil,
 		PolicyWired: runnerTenancy.SetPolicy != nil,
+		FleetWired:  runnerTenancy.Drain != nil && runnerTenancy.Resume != nil && runnerTenancy.Rotate != nil && runnerTenancy.Deregister != nil,
 	}
 	d := adminDeps()
 	if d.Runners == nil {
@@ -499,6 +518,86 @@ func (s *Server) adminRunnerRevoke(w http.ResponseWriter, r *http.Request) {
 	redirectPage(w, r, "/admin/runners?revoked=1&tab=fleet")
 }
 
+// adminRunnerFleet answers the drain/resume/rotate/deregister POSTs. A rotation
+// renders the new credential IN PLACE (like the mint answer) so the secret
+// never enters a URL or the browser history; every other verb redirects with a
+// notice.
+func (s *Server) adminRunnerFleet(w http.ResponseWriter, r *http.Request, verb string) {
+	p, page, ok := s.requireAdminPage(w, r, "runners")
+	if !ok {
+		return
+	}
+	if !settingsSameOrigin(r) {
+		s.errorPage(w, r, http.StatusForbidden, "a cross-origin form submission is refused")
+		return
+	}
+	if err := r.ParseForm(); err != nil {
+		s.errorPage(w, r, http.StatusBadRequest, "form parse failed")
+		return
+	}
+	id := strings.ToLower(strings.TrimSpace(r.PostFormValue("id")))
+	if id == "" {
+		s.errorPage(w, r, http.StatusBadRequest, "a runner id is required")
+		return
+	}
+	var err error
+	var rotated *threads.RunnerTokenRotation
+	switch verb {
+	case "drain":
+		if runnerTenancy.Drain == nil {
+			s.errorPage(w, r, http.StatusServiceUnavailable, "fleet operations are not wired on this build")
+			return
+		}
+		err = runnerTenancy.Drain(r.Context(), id, p)
+	case "resume":
+		if runnerTenancy.Resume == nil {
+			s.errorPage(w, r, http.StatusServiceUnavailable, "fleet operations are not wired on this build")
+			return
+		}
+		err = runnerTenancy.Resume(r.Context(), id, p)
+	case "rotate":
+		if runnerTenancy.Rotate == nil {
+			s.errorPage(w, r, http.StatusServiceUnavailable, "fleet operations are not wired on this build")
+			return
+		}
+		rotated, err = runnerTenancy.Rotate(r.Context(), id, p)
+	case "deregister":
+		if runnerTenancy.Deregister == nil {
+			s.errorPage(w, r, http.StatusServiceUnavailable, "fleet operations are not wired on this build")
+			return
+		}
+		err = runnerTenancy.Deregister(r.Context(), id, p)
+	}
+	s.adminShell(p, page, "runners")
+	view := &AdminRunnersView{
+		Tab: "fleet", Wired: adminDeps().Runners != nil, MintWired: runnerTenancy.Mint != nil,
+		PolicyWired: runnerTenancy.SetPolicy != nil, FleetWired: runnerTenancy.Drain != nil,
+	}
+	if rotated != nil {
+		view.RotatedToken, view.RotatedRunnerID, view.RotatedOldUntil = rotated.Token, rotated.RunnerID, rotated.PreviousUntil
+	}
+	if d := adminDeps(); d.Runners != nil {
+		if rows, rerr := d.Runners(r.Context(), p); rerr == nil {
+			view.Rows = rows
+		}
+	}
+	markPolicyWired(view)
+	page.RunnerSecurity = adminRunnerSecurity(s.env.Cfg)
+	page.Runners = view
+	if err != nil {
+		page.Error = err.Error()
+		s.adminRender(w, r, p, collabErrStatus(err), page)
+		return
+	}
+	page.Notice = map[string]string{
+		"drain":      "runner draining: its current job finishes and it claims nothing new",
+		"resume":     "runner active again",
+		"rotate":     "credential rotated: copy the new token now, it is shown once",
+		"deregister": "runner deregistered: record and credential deleted",
+	}[verb]
+	s.adminRender(w, r, p, http.StatusOK, page)
+}
+
 // ChipClass / ChipLabel map a registry state onto the shared chip classes and
 // its TEXT label (state is never colour-only).
 func (r AdminRunnerRow) ChipClass() string {
@@ -507,6 +606,8 @@ func (r AdminRunnerRow) ChipClass() string {
 		return "chip-open"
 	case "revoked":
 		return "chip-closed"
+	case "draining":
+		return "chip-draft"
 	default:
 		return "chip chip-neutral"
 	}
@@ -514,7 +615,7 @@ func (r AdminRunnerRow) ChipClass() string {
 
 func (r AdminRunnerRow) ChipLabel() string {
 	switch r.State {
-	case "active", "revoked":
+	case "active", "revoked", "draining":
 		return r.State
 	default:
 		return "pending"

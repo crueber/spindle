@@ -161,9 +161,13 @@ type CollabDeps struct {
 	UpdateBranch func(ctx context.Context, owner, repo string, num int, actor auth.Principal, expectedHeadSHA string) (*pulls.TaskRecord, error)
 
 	// internal/review
-	ReviewsList     func(ctx context.Context, owner, repo string, num int, p auth.Principal, after, n int) (*review.ListResult, error)
-	ReviewSubmit    func(ctx context.Context, owner, repo string, num int, actor auth.Principal, in review.SubmitInput) (*review.ReviewEvent, []*review.ThreadHeader, *review.ReviewSummary, error)
-	ReviewDismiss   func(ctx context.Context, owner, repo string, num, seq int, actor auth.Principal, reason string) (*review.ReviewEvent, *review.ReviewSummary, error)
+	ReviewsList   func(ctx context.Context, owner, repo string, num int, p auth.Principal, after, n int) (*review.ListResult, error)
+	ReviewSubmit  func(ctx context.Context, owner, repo string, num int, actor auth.Principal, in review.SubmitInput) (*review.ReviewEvent, []*review.ThreadHeader, *review.ReviewSummary, error)
+	ReviewDismiss func(ctx context.Context, owner, repo string, num, seq int, actor auth.Principal, reason string) (*review.ReviewEvent, *review.ReviewSummary, error)
+	// ThreadsLatest finds the newest Threads run reporting one commit, so the
+	// PR panel can offer "re-run" beside the check list (PAR-192). Nil hides
+	// the control.
+	ThreadsLatest   func(ctx context.Context, owner, repo, commit string, p auth.Principal) (*threads.Run, error)
 	ThreadsList     func(ctx context.Context, owner, repo string, num int, p auth.Principal, resolved *bool, after string, n int) (*review.ThreadListResult, error)
 	ThreadGet       func(ctx context.Context, owner, repo string, num int, tid string, p auth.Principal, after, n int) (*review.ThreadView, error)
 	ThreadOpen      func(ctx context.Context, owner, repo string, num int, actor auth.Principal, anchor review.Anchor, body string) (*review.ThreadHeader, error)
@@ -3064,8 +3068,13 @@ type pullData struct {
 	ThreadsMore bool
 	Index       []threadCard
 
-	Checks            *checks.CombinedView
-	CheckPill         checkPillView
+	Checks    *checks.CombinedView
+	CheckPill checkPillView
+	// ThreadsRunID/ThreadsCanRerun are the PR panel's re-run affordance
+	// (PAR-192): the newest Threads run that reported this merge/head sha, and
+	// whether the viewer holds write (the service re-checks on the verb).
+	ThreadsRunID      string
+	ThreadsCanRerun   bool
 	ZeroChecks        bool
 	ZeroChecksTitle   string
 	RequiredChecks    []string
@@ -3312,6 +3321,16 @@ func (s *Server) renderPull(w http.ResponseWriter, r *http.Request, rc collabRep
 			data.Checks = cv
 			data.ZeroChecks = len(cv.Statuses) == 0
 			data.CheckPill = checkPillFor(rc.Owner, rc.Name, cv.SHA, cv.State, data.ZeroChecks)
+		}
+	}
+	// PAR-192: the PR panel's re-run control. It names the Threads run that
+	// reported this sha; a non-Threads (external CI) context has no run and the
+	// control is absent rather than a dead button.
+	if collabDeps.ThreadsLatest != nil && head != "" && !rc.Anonymous {
+		if run, rerr := collabDeps.ThreadsLatest(ctx, rc.Owner, rc.Name, head, p); rerr == nil && run != nil {
+			data.ThreadsRunID = run.ID
+			role := collabDeps.RoleOf(ctx, rc.Owner, rc.Name, p)
+			data.ThreadsCanRerun = settingsRoleAtLeast(string(role), "write")
 		}
 	}
 	var pol *policy.Document

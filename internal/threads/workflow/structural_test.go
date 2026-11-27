@@ -27,16 +27,6 @@ func TestStructuralFieldsRejectExpressions(t *testing.T) {
 		path string
 	}{
 		{
-			name: "runs-on scalar",
-			job:  "    runs-on: ${{ matrix.os }}\n    steps:\n      - run: echo hi\n",
-			path: "jobs.build.runs-on",
-		},
-		{
-			name: "runs-on list element",
-			job:  "    runs-on: [self-hosted, \"${{ matrix.arch }}\"]\n    steps:\n      - run: echo hi\n",
-			path: "jobs.build.runs-on[1]",
-		},
-		{
 			name: "container scalar image",
 			job:  "    runs-on: linux\n    container: \"debian:${{ matrix.variant }}\"\n    steps:\n      - run: echo hi\n",
 			path: "jobs.build.container.image",
@@ -87,7 +77,7 @@ func TestStructuralFieldsRejectExpressions(t *testing.T) {
 			name: "repro from the parity matrix",
 			job: "    runs-on: ${{ matrix.os }}\n    container:\n      image: debian:${{ matrix.variant }}\n" +
 				"    strategy:\n      matrix: {os: [linux], variant: [bookworm]}\n    steps:\n      - run: echo hi\n",
-			path: "jobs.build.runs-on",
+			path: "jobs.build.container.image",
 		},
 	}
 	for _, tc := range cases {
@@ -254,7 +244,7 @@ func TestStructuralFieldsOnReusableJob(t *testing.T) {
 	src := "name: R\non: [push]\njobs:\n  call:\n    uses: ./.spindle/workflows/callee.yml\n" +
 		"    runs-on: ${{ matrix.os }}\n"
 	_, err := Parse([]byte(src))
-	if !errors.Is(err, ErrStructuralExpression) {
-		t.Fatalf("err = %v, want ErrStructuralExpression", err)
+	if err == nil || !strings.Contains(err.Error(), "not a declared matrix key") {
+		t.Fatalf("err = %v, want the named matrix-key error", err)
 	}
 }

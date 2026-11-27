@@ -56,14 +56,17 @@ func TestRunnerGroupHelpListsImageFlags(t *testing.T) {
 
 func TestRunnerAdminVerbsAreGone(t *testing.T) {
 	// Administration is OIDC/browser-only (AGENTS law 9): the CLI's machine
-	// credentials cannot mint, list or revoke. The verbs must not come back as
-	// dead 403-only commands.
+	// credentials cannot mint, list or revoke. The runner-authenticated fleet
+	// verbs (drain/resume/rotate/deregister) are different: they use the runner's
+	// OWN credential, so they are present and never a 403-only admin command.
 	names := map[string]bool{}
 	for _, cmd := range runnerGroup.commands {
 		names[cmd.name] = true
 	}
-	if len(runnerGroup.commands) != 1 || !names["serve"] {
-		t.Fatalf("runner group commands = %v, want only serve", names)
+	for _, want := range []string{"serve", "drain", "resume", "rotate", "deregister", "images", "pool"} {
+		if !names[want] {
+			t.Fatalf("runner group is missing %q (have %v)", want, names)
+		}
 	}
 	for _, verb := range []string{"token", "list", "revoke"} {
 		if names[verb] {

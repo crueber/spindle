@@ -182,8 +182,28 @@ var threadsGroup = &apiGroup{
 			flags: []string{"json", "limit"}, run: runThreadsList},
 		{name: "show", usage: "spindle threads show OWNER/REPO RUN", help: "one CI run and its jobs",
 			flags: []string{"json"}, run: runThreadsShow},
-		{name: "run", usage: "spindle threads run OWNER/REPO WORKFLOW --ref REF", help: "dispatch a workflow run",
-			flags: []string{"json", "quiet", "ref"}, run: runThreadsRun},
+		{name: "run", usage: "spindle threads run OWNER/REPO WORKFLOW --ref REF [--input k=v]... [--priority N]", help: "dispatch a workflow run",
+			flags: []string{"json", "quiet", "ref", "input", "priority"}, run: runThreadsRun},
+		{name: "watch", usage: "spindle threads watch OWNER/REPO RUN [--interval 2s]", help: "follow a run to its conclusion; exit 0 success, 1 failure, 130 cancelled",
+			flags: []string{"json", "interval"}, run: runThreadsWatch},
+		{name: "jobs", usage: "spindle threads jobs OWNER/REPO RUN", help: "list one run's jobs and their states",
+			flags: []string{"json"}, run: runThreadsJobs},
+		{name: "schedule list", usage: "spindle threads schedule list OWNER/REPO", help: "list cron entries with next fire, watermark and switches (PAR-154)",
+			flags: []string{"json"}, run: runThreadsScheduleList},
+		{name: "schedule enable", usage: "spindle threads schedule enable OWNER/REPO --path FILE --cron CRON [--timezone TZ]", help: "enable an entry without a commit",
+			flags: []string{"json", "path", "cron", "timezone"}, run: runThreadsScheduleEnable(true)},
+		{name: "schedule disable", usage: "spindle threads schedule disable OWNER/REPO --path FILE --cron CRON [--timezone TZ]", help: "disable an entry without a commit",
+			flags: []string{"json", "path", "cron", "timezone"}, run: runThreadsScheduleEnable(false)},
+		{name: "schedule run", usage: "spindle threads schedule run OWNER/REPO --path FILE --cron CRON [--timezone TZ]", help: "run an entry now (manual trigger)",
+			flags: []string{"json", "path", "cron", "timezone"}, run: runThreadsScheduleRun},
+		{name: "pause", usage: "spindle threads pause OWNER/REPO", help: "pause CI: claim nothing new, let in-flight jobs finish (PAR-157)",
+			flags: []string{"json", "quiet"}, run: runThreadsPause(true)},
+		{name: "resume", usage: "spindle threads resume OWNER/REPO", help: "resume CI after a pause",
+			flags: []string{"json", "quiet"}, run: runThreadsPause(false)},
+		{name: "queue", usage: "spindle threads queue OWNER/REPO", help: "show the pending window in claim order (priority, then FIFO)",
+			flags: []string{"json"}, run: runThreadsQueue},
+		{name: "explain", usage: "spindle threads explain FILE", help: "summarise a local workflow: triggers, jobs, runs-on, needs (PAR-196)",
+			flags: []string{"json"}, run: runThreadsExplain},
 		{name: "cancel", usage: "spindle threads cancel OWNER/REPO RUN", help: "cancel a run (queued jobs now, a running job at its runner's ack)",
 			flags: []string{"json", "quiet"}, run: runThreadsCancel},
 		{name: "rerun", usage: "spindle threads rerun OWNER/REPO RUN", help: "rerun a run as a new attempt",
@@ -286,7 +306,11 @@ func runThreadsRun(ctx context.Context, c *cli, args []string) int {
 	fs := newAPIFlagSet(c, "threads run")
 	f.add(fs)
 	var ref string
+	var priority int
+	var inputs repeatable
 	fs.StringVar(&ref, "ref", "", "git ref to run (required: the API resolves it to a commit)")
+	fs.Var(&inputs, "input", "workflow_dispatch input k=v (repeatable)")
+	fs.IntVar(&priority, "priority", 0, "claim priority 0..10 (higher claims first; PAR-155)")
 	pos, exit := parseAPI(fs, args)
 	if exit != parseContinue {
 		return exit
@@ -298,6 +322,22 @@ func runThreadsRun(ctx context.Context, c *cli, args []string) int {
 	if strings.TrimSpace(ref) == "" {
 		fmt.Fprintln(c.stderr(), "spindle: --ref is required (the dispatch API resolves it to a commit)")
 		return exitArg
+	}
+	body := map[string]any{"ref": ref, "workflow": workflow}
+	if priority != 0 {
+		body["priority"] = priority
+	}
+	if len(inputs) > 0 {
+		parsed := map[string]string{}
+		for _, raw := range inputs {
+			k, v, found := strings.Cut(raw, "=")
+			if !found || strings.TrimSpace(k) == "" {
+				fmt.Fprintf(c.stderr(), "spindle: --input %q is not k=v\n", raw)
+				return exitArg
+			}
+			parsed[strings.TrimSpace(k)] = v
+		}
+		body["inputs"] = parsed
 	}
 	a, err := newAPIClient(c, f)
 	if err != nil {
@@ -312,8 +352,7 @@ func runThreadsRun(ctx context.Context, c *cli, args []string) int {
 			State    string `json:"state"`
 		} `json:"runs"`
 	}
-	raw, err := a.callInto(ctx, "POST", threadsPath(owner, repo), nil,
-		map[string]string{"ref": ref, "workflow": workflow}, &out)
+	raw, err := a.callInto(ctx, "POST", threadsPath(owner, repo), nil, body, &out)
 	if err != nil {
 		return a.fail(err)
 	}

@@ -71,10 +71,32 @@ func NewClient(baseURL, token string) *Client {
 	}
 }
 
+// RunnerOptions is the registration/declare statement (PAR-173/PAR-176): the
+// runner's name, labels, capacity, fork opt-in, single-job declaration and
+// declared size ceiling. It never carries the repository policy (the admin's).
+type RunnerOptions struct {
+	Name           string
+	Labels         []string
+	Capacity       int
+	AllowForkRuns  bool
+	Ephemeral      bool
+	MaxCPUs        float64
+	MaxMemoryBytes int64
+}
+
 // Register consumes a one-time registration token and returns the long-lived
 // runner credential (the one response that carries a secret).
 func (c *Client) Register(ctx context.Context, regToken, name string, labels []string, capacity int, allowForkRuns bool) (*threads.RegisterResult, error) {
-	body := map[string]any{"token": regToken, "name": name, "labels": labels, "capacity": capacity, "allow_fork_runs": allowForkRuns}
+	return c.RegisterRunner(ctx, regToken, RunnerOptions{Name: name, Labels: labels, Capacity: capacity, AllowForkRuns: allowForkRuns})
+}
+
+// RegisterRunner is Register with the full declaration.
+func (c *Client) RegisterRunner(ctx context.Context, regToken string, opts RunnerOptions) (*threads.RegisterResult, error) {
+	body := map[string]any{
+		"token": regToken, "name": opts.Name, "labels": opts.Labels, "capacity": opts.Capacity,
+		"allow_fork_runs": opts.AllowForkRuns, "ephemeral": opts.Ephemeral,
+		"max_cpus": opts.MaxCPUs, "max_memory_bytes": opts.MaxMemoryBytes,
+	}
 	var out threads.RegisterResult
 	if err := c.do(ctx, http.MethodPost, "/api/v1/threads/runners/register", "", body, &out); err != nil {
 		return nil, err
@@ -82,15 +104,50 @@ func (c *Client) Register(ctx context.Context, regToken, name string, labels []s
 	return &out, nil
 }
 
-// Declare records the runner's version, label set and capacity (the runner's
-// liveness statement; fetching is the heartbeat).
+// Declare records the runner's version and declaration (the runner's liveness
+// statement; fetching is the heartbeat).
 func (c *Client) Declare(ctx context.Context, version string, labels []string, capacity int, allowForkRuns bool) (*threads.DeclareView, error) {
+	return c.DeclareRunner(ctx, version, RunnerOptions{Labels: labels, Capacity: capacity, AllowForkRuns: allowForkRuns})
+}
+
+// DeclareRunner is Declare with the full declaration.
+func (c *Client) DeclareRunner(ctx context.Context, version string, opts RunnerOptions) (*threads.DeclareView, error) {
 	var out threads.DeclareView
 	if err := c.do(ctx, http.MethodPost, "/api/v1/threads/runners/declare", c.Token,
-		map[string]any{"version": version, "labels": labels, "capacity": capacity, "allow_fork_runs": allowForkRuns}, &out); err != nil {
+		map[string]any{
+			"version": version, "labels": opts.Labels, "capacity": opts.Capacity,
+			"allow_fork_runs": opts.AllowForkRuns, "ephemeral": opts.Ephemeral,
+			"max_cpus": opts.MaxCPUs, "max_memory_bytes": opts.MaxMemoryBytes,
+		}, &out); err != nil {
 		return nil, err
 	}
 	return &out, nil
+}
+
+// Drain asks the server to stop offering this runner new jobs while the current
+// one finishes (PAR-181).
+func (c *Client) Drain(ctx context.Context) error {
+	return c.do(ctx, http.MethodPost, "/api/v1/threads/runners/drain", c.Token, nil, nil)
+}
+
+// Resume undoes a drain.
+func (c *Client) Resume(ctx context.Context) error {
+	return c.do(ctx, http.MethodPost, "/api/v1/threads/runners/resume", c.Token, nil, nil)
+}
+
+// Rotate issues a new credential with an overlap window; the caller writes it
+// to its token file before the old one expires.
+func (c *Client) Rotate(ctx context.Context) (*threads.RunnerTokenRotation, error) {
+	var out threads.RunnerTokenRotation
+	if err := c.do(ctx, http.MethodPost, "/api/v1/threads/runners/rotate", c.Token, nil, &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
+// Deregister removes this runner's record and credential.
+func (c *Client) Deregister(ctx context.Context) error {
+	return c.do(ctx, http.MethodPost, "/api/v1/threads/runners/deregister", c.Token, nil, nil)
 }
 
 // Fetch long-polls for one job. (nil, nil) means the poll expired (204).

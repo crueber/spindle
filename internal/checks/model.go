@@ -92,17 +92,110 @@ const StreamName = "check"
 
 // StatusDoc is one checks/<sha>/<context>.json record (§2 schema).
 type StatusDoc struct {
-	SHA         string  `json:"sha"`
-	Context     string  `json:"context"`
-	State       string  `json:"state"`
-	TargetURL   string  `json:"target_url,omitempty"`
-	Description string  `json:"description,omitempty"`
-	StartedAt   *string `json:"started_at,omitempty"`
-	CompletedAt *string `json:"completed_at,omitempty"`
-	Creator     string  `json:"creator"`
-	CreatedAt   string  `json:"created_at"`
-	UpdatedAt   string  `json:"updated_at"`
-	Version     int     `json:"version"`
+	SHA         string `json:"sha"`
+	Context     string `json:"context"`
+	State       string `json:"state"`
+	TargetURL   string `json:"target_url,omitempty"`
+	Description string `json:"description,omitempty"`
+	// Annotations are the per-check findings an external CI attached to this
+	// report (PAR-192). They are data: bounded, escaped by the renderer, and
+	// never interpreted as markup. The latest report replaces the set (one
+	// report is one check run, GitHub's model).
+	Annotations []Annotation `json:"annotations,omitempty"`
+	StartedAt   *string      `json:"started_at,omitempty"`
+	CompletedAt *string      `json:"completed_at,omitempty"`
+	Creator     string       `json:"creator"`
+	CreatedAt   string       `json:"created_at"`
+	UpdatedAt   string       `json:"updated_at"`
+	Version     int          `json:"version"`
+}
+
+// Annotation is one check annotation (PAR-192): level error|warning|notice with
+// an optional file/line anchor and a bounded message. The checks surface keeps
+// its own type instead of importing internal/threads so the feature packages
+// stay independent (the 14 seam rule).
+type Annotation struct {
+	Level      string `json:"level"`
+	Message    string `json:"message"`
+	Title      string `json:"title,omitempty"`
+	File       string `json:"file,omitempty"`
+	Line       int    `json:"line,omitempty"`
+	EndLine    int    `json:"end_line,omitempty"`
+	Col        int    `json:"col,omitempty"`
+	EndColumn  int    `json:"end_column,omitempty"`
+	RawDetails string `json:"raw_details,omitempty"`
+}
+
+// Annotation bounds (GitHub's check-run limits, docs/threads.md §2.3).
+const (
+	MaxAnnotationsPerReport = 50
+	MaxAnnotationMessage    = 4096
+	MaxAnnotationTitle      = 256
+	MaxAnnotationFile       = 512
+	MaxAnnotationRaw        = 4096
+)
+
+// ValidateAnnotations bounds one report's annotations. An unknown level is an
+// error (never a silent drop); long text is truncated because an annotation is
+// display data, not a reason to reject an otherwise valid check.
+func ValidateAnnotations(in []Annotation) ([]Annotation, error) {
+	if len(in) == 0 {
+		return nil, nil
+	}
+	if len(in) > MaxAnnotationsPerReport {
+		return nil, fmt.Errorf("%w: at most %d annotations per report", ErrInvalid, MaxAnnotationsPerReport)
+	}
+	out := make([]Annotation, 0, len(in))
+	for _, a := range in {
+		a.Level = strings.ToLower(strings.TrimSpace(a.Level))
+		switch a.Level {
+		case "error", "warning", "notice":
+		default:
+			return nil, fmt.Errorf("%w: annotation level must be error|warning|notice, got %q", ErrInvalid, a.Level)
+		}
+		if strings.TrimSpace(a.Message) == "" {
+			return nil, fmt.Errorf("%w: annotation message is required", ErrInvalid)
+		}
+		a.Message = truncateRunes(a.Message, MaxAnnotationMessage)
+		a.Title = truncateRunes(a.Title, MaxAnnotationTitle)
+		a.File = truncateRunes(a.File, MaxAnnotationFile)
+		a.RawDetails = truncateRunes(a.RawDetails, MaxAnnotationRaw)
+		for _, n := range []*int{&a.Line, &a.EndLine, &a.Col, &a.EndColumn} {
+			if *n < 0 {
+				*n = 0
+			}
+			if *n > 1_000_000 {
+				*n = 1_000_000
+			}
+		}
+		out = append(out, a)
+	}
+	return out, nil
+}
+
+// normalizeAnnotations validates and returns the bounded set (the caller has
+// already checked it; this is the storage projection, never a second policy).
+func normalizeAnnotations(in []Annotation) []Annotation {
+	if len(in) == 0 {
+		return nil
+	}
+	out, err := ValidateAnnotations(in)
+	if err != nil {
+		return nil
+	}
+	return out
+}
+
+// truncateRunes bounds a string at n runes (never splitting a multibyte rune).
+func truncateRunes(s string, n int) string {
+	if n <= 0 || len(s) <= n {
+		return s
+	}
+	r := []rune(s)
+	if len(r) <= n {
+		return s
+	}
+	return string(r[:n])
 }
 
 // IndexContext is one context row of a sha entry in checks/index.json.

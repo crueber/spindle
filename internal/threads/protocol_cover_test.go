@@ -167,7 +167,7 @@ func TestQueueHelpers(t *testing.T) {
 		t.Fatalf("enqueueJob = %+v, %v", entry, err)
 	}
 	// appendHead is idempotent for an already-listed seq.
-	if err := e.svc.appendHead(ctx(), "o", "r", entry.Seq); err != nil {
+	if err := e.svc.appendHead(ctx(), "o", "r", entry.Seq, 0); err != nil {
 		t.Fatalf("appendHead duplicate: %v", err)
 	}
 	head, _, err := e.svc.loadHead(ctx(), "o", "r")

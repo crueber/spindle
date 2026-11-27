@@ -62,6 +62,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/crueber/spindle/internal/actions"
 	"github.com/crueber/spindle/internal/git"
 	"github.com/crueber/spindle/internal/identity"
 	"github.com/crueber/spindle/internal/server/auth"
@@ -134,6 +135,18 @@ type Service struct {
 	// no restriction (the compatible default).
 	ImageAllowPrefixes []string
 	ImageRequireDigest bool
+	// ActionPolicy / ActionSource / ActionMaxBytes are the remote-action policy
+	// (PAR-070, D-5): allowlist mode with SHA required outside the allowlist by
+	// default, this instance as the only source unless ActionSource names one,
+	// and a bounded fetch. Policy.SHA outside the allowlist is enforced at run
+	// creation, and the decision lands on the run header (Run.ActionLoads).
+	ActionPolicy   actions.Policy
+	ActionSource   string
+	ActionMaxBytes int64
+	// ActionDigests remembers commit → content digest across runs: a source
+	// that serves different bytes for the same commit is a refusal, never a
+	// cache hit. Nil is replaced with a bounded guard on first use.
+	ActionDigests *actions.DigestGuard
 	// CheckoutBaseURL is the configured public origin (server.public_url) used
 	// for the runner-facing checkout URL. It wins over the request origin
 	// because it is the operator's declaration of the address JOB CONTAINERS
@@ -199,7 +212,10 @@ type Service struct {
 // keyring (attempt tokens live exactly as long as the jobs they authorise);
 // composition replaces it with the configured one via SetKeyring.
 func New(st store.ObjectStore, roles RoleService) *Service {
-	s := &Service{Store: st, Roles: roles, Now: time.Now, oidcCache: &oidcKeyCache{}}
+	s := &Service{Store: st, Roles: roles, Now: time.Now, oidcCache: &oidcKeyCache{},
+		// One instance-wide guard, created once: the run path only READS it
+		// (concurrent run creations must not race on a lazy assignment).
+		ActionDigests: actions.NewDigestGuard(0)}
 	if k, err := NewKeyring("", ""); err == nil {
 		s.keys = k
 	}

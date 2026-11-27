@@ -260,8 +260,10 @@ func TestExposedCoversRoutes(t *testing.T) {
 	// (an artifact/cache entry that does not exist): the sample then only
 	// asserts the path is CLAIMED, which is what this test is about.
 	notFoundOK := map[string]bool{
-		"/{owner}/{repo}/api/threads/{run}/artifacts/{name}": true,
-		"/{owner}/{repo}/api/threads/caches/{id}":            true,
+		"/{owner}/{repo}/api/threads/{run}/artifacts/{name}":    true,
+		"/{owner}/{repo}/api/threads/caches/{id}":               true,
+		"/{owner}/{repo}/api/threads/deployments/{id}":          true,
+		"/{owner}/{repo}/api/threads/deployments/{id}/statuses": true,
 	}
 	samples := map[string]sample{
 		"/{owner}/{repo}/api/threads":                    {http.MethodGet, "/o/r/api/threads", false},
@@ -276,6 +278,8 @@ func TestExposedCoversRoutes(t *testing.T) {
 		"/{owner}/{repo}/api/threads/{run}/deny":         {http.MethodPost, "/o/r/api/threads/" + run.ID + "/deny", false},
 		"/{owner}/{repo}/api/threads/{run}/jobs/{job}/log": {
 			http.MethodGet, "/o/r/api/threads/" + run.ID + "/jobs/" + jid + "/log?accept=json", false},
+		"/{owner}/{repo}/api/threads/{run}/jobs/{job}/cancel": {
+			http.MethodPost, "/o/r/api/threads/" + run.ID + "/jobs/" + jid + "/cancel", false},
 		"/{owner}/{repo}/api/threads/{run}/artifacts": {http.MethodGet, "/o/r/api/threads/" + run.ID + "/artifacts", false},
 		"/{owner}/{repo}/api/threads/{run}/artifacts/{name}": {
 			http.MethodGet, "/o/r/api/threads/" + run.ID + "/artifacts/build", false},
@@ -285,7 +289,18 @@ func TestExposedCoversRoutes(t *testing.T) {
 		"/api/v1/admin/runners/tokens":                    {http.MethodPost, "/api/v1/admin/runners/tokens", false},
 		"/api/v1/admin/runners/{id}":                      {http.MethodDelete, "/api/v1/admin/runners/" + minted.ID, false},
 		"/api/v1/admin/runners/{id}/policy":               {http.MethodPost, "/api/v1/admin/runners/" + minted.ID + "/policy", false},
+		"/api/v1/admin/runner-groups":                     {http.MethodGet, "/api/v1/admin/runner-groups", false},
+		"/api/v1/admin/runner-groups/{id}":                {http.MethodDelete, "/api/v1/admin/runner-groups/build", false},
 		"/{owner}/{repo}/api/threads/secrets":             {http.MethodGet, "/o/r/api/threads/secrets", false},
+		"/{owner}/{repo}/api/threads/schedules":           {http.MethodGet, "/o/r/api/threads/schedules", false},
+		"/{owner}/{repo}/api/threads/schedules/enable":    {http.MethodPost, "/o/r/api/threads/schedules/enable", false},
+		"/{owner}/{repo}/api/threads/schedules/run-now":   {http.MethodPost, "/o/r/api/threads/schedules/run-now", false},
+		"/{owner}/{repo}/api/threads/pause":               {http.MethodPost, "/o/r/api/threads/pause", false},
+		"/{owner}/{repo}/api/threads/queue":               {http.MethodGet, "/o/r/api/threads/queue", false},
+		"/{owner}/{repo}/api/threads/notifications":       {http.MethodGet, "/o/r/api/threads/notifications", false},
+		"/{owner}/{repo}/api/threads/notifications/read":  {http.MethodPost, "/o/r/api/threads/notifications/read", false},
+		"/{owner}/{repo}/api/threads/subscription":        {http.MethodGet, "/o/r/api/threads/subscription", false},
+		"/{owner}/{repo}/api/threads/validate":            {http.MethodPost, "/o/r/api/threads/validate", false},
 		"/{owner}/{repo}/api/threads/secrets/{name}":      {http.MethodPut, "/o/r/api/threads/secrets/TOKEN", false},
 		"/{owner}/{repo}/api/threads/variables":           {http.MethodGet, "/o/r/api/threads/variables", false},
 		"/{owner}/{repo}/api/threads/variables/{name}":    {http.MethodPut, "/o/r/api/threads/variables/REGION", false},
@@ -297,9 +312,23 @@ func TestExposedCoversRoutes(t *testing.T) {
 			http.MethodGet, "/o/r/api/threads/environments/prod/secrets", false},
 		"/{owner}/{repo}/api/threads/environments/{name}/secrets/{secret}": {
 			http.MethodPut, "/o/r/api/threads/environments/prod/secrets/TOKEN", false},
+		"/{owner}/{repo}/api/threads/environments/{name}/variables": {
+			http.MethodGet, "/o/r/api/threads/environments/prod/variables", false},
+		"/{owner}/{repo}/api/threads/environments/{name}/variables/{variable}": {
+			http.MethodPut, "/o/r/api/threads/environments/prod/variables/REGION", false},
+		"/{owner}/{repo}/api/threads/deployments": {
+			http.MethodGet, "/o/r/api/threads/deployments", false},
+		"/{owner}/{repo}/api/threads/deployments/{id}": {
+			http.MethodGet, "/o/r/api/threads/deployments/d-nope", false},
+		"/{owner}/{repo}/api/threads/deployments/{id}/statuses": {
+			http.MethodPost, "/o/r/api/threads/deployments/d-nope/statuses", false},
 		"/api/v1/threads/runners/register":                {http.MethodPost, "/api/v1/threads/runners/register", true},
 		"/api/v1/threads/runners/declare":                 {http.MethodPost, "/api/v1/threads/runners/declare", true},
 		"/api/v1/threads/runners/fetch":                   {http.MethodPost, "/api/v1/threads/runners/fetch", true},
+		"/api/v1/threads/runners/drain":                   {http.MethodPost, "/api/v1/threads/runners/drain", true},
+		"/api/v1/threads/runners/resume":                  {http.MethodPost, "/api/v1/threads/runners/resume", true},
+		"/api/v1/threads/runners/rotate":                  {http.MethodPost, "/api/v1/threads/runners/rotate", true},
+		"/api/v1/threads/runners/deregister":              {http.MethodPost, "/api/v1/threads/runners/deregister", true},
 		"/api/v1/threads/jobs/{ref}/attempt/{n}/start":    {http.MethodPost, "/api/v1/threads/jobs/jr_x/attempt/1/start", true},
 		"/api/v1/threads/jobs/{ref}/attempt/{n}/log":      {http.MethodPost, "/api/v1/threads/jobs/jr_x/attempt/1/log", true},
 		"/api/v1/threads/jobs/{ref}/attempt/{n}/complete": {http.MethodPost, "/api/v1/threads/jobs/jr_x/attempt/1/complete", true},

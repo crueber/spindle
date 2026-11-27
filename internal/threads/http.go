@@ -27,6 +27,15 @@ var ExposedTemplates = []string{
 	"/{owner}/{repo}/api/threads/workflows",
 	"/{owner}/{repo}/api/threads/dispatches",
 	"/{owner}/{repo}/api/threads/settings",
+	"/{owner}/{repo}/api/threads/schedules",
+	"/{owner}/{repo}/api/threads/schedules/enable",
+	"/{owner}/{repo}/api/threads/schedules/run-now",
+	"/{owner}/{repo}/api/threads/pause",
+	"/{owner}/{repo}/api/threads/queue",
+	"/{owner}/{repo}/api/threads/notifications",
+	"/{owner}/{repo}/api/threads/notifications/read",
+	"/{owner}/{repo}/api/threads/subscription",
+	"/{owner}/{repo}/api/threads/validate",
 	"/{owner}/{repo}/api/threads/{run}",
 	"/{owner}/{repo}/api/threads/{run}/cancel",
 	"/{owner}/{repo}/api/threads/{run}/rerun",
@@ -34,6 +43,7 @@ var ExposedTemplates = []string{
 	"/{owner}/{repo}/api/threads/{run}/approve",
 	"/{owner}/{repo}/api/threads/{run}/deny",
 	"/{owner}/{repo}/api/threads/{run}/jobs/{job}/log",
+	"/{owner}/{repo}/api/threads/{run}/jobs/{job}/cancel",
 	"/{owner}/{repo}/api/threads/{run}/artifacts",
 	"/{owner}/{repo}/api/threads/{run}/artifacts/{name}",
 	"/{owner}/{repo}/api/threads/caches",
@@ -48,13 +58,24 @@ var ExposedTemplates = []string{
 	"/{owner}/{repo}/api/threads/environments/{name}",
 	"/{owner}/{repo}/api/threads/environments/{name}/secrets",
 	"/{owner}/{repo}/api/threads/environments/{name}/secrets/{secret}",
+	"/{owner}/{repo}/api/threads/environments/{name}/variables",
+	"/{owner}/{repo}/api/threads/environments/{name}/variables/{variable}",
+	"/{owner}/{repo}/api/threads/deployments",
+	"/{owner}/{repo}/api/threads/deployments/{id}",
+	"/{owner}/{repo}/api/threads/deployments/{id}/statuses",
 	"/api/v1/admin/runners",
 	"/api/v1/admin/runners/tokens",
 	"/api/v1/admin/runners/{id}",
 	"/api/v1/admin/runners/{id}/policy",
+	"/api/v1/admin/runner-groups",
+	"/api/v1/admin/runner-groups/{id}",
 	"/api/v1/threads/runners/register",
 	"/api/v1/threads/runners/declare",
 	"/api/v1/threads/runners/fetch",
+	"/api/v1/threads/runners/drain",
+	"/api/v1/threads/runners/resume",
+	"/api/v1/threads/runners/rotate",
+	"/api/v1/threads/runners/deregister",
 	"/api/v1/threads/jobs/{ref}/attempt/{n}/start",
 	"/api/v1/threads/jobs/{ref}/attempt/{n}/log",
 	"/api/v1/threads/jobs/{ref}/attempt/{n}/complete",
@@ -107,6 +128,9 @@ func (h *Handler) Handle(w http.ResponseWriter, r *http.Request) bool {
 		// /api[-browser]/v1/orgs/{org}/threads/variables[/{name}].
 		if len(segs) >= 6 && segs[1] == "v1" && segs[2] == "orgs" && segs[4] == "threads" && segs[5] == "variables" {
 			return h.handleOrgVariables(w, r, segs[3], segs[6:])
+		}
+		if len(segs) >= 4 && segs[1] == "v1" && segs[2] == "admin" && segs[3] == "runner-groups" {
+			return h.runnerGroups(w, r, segs[4:])
 		}
 		if len(segs) >= 4 && segs[1] == "v1" && segs[2] == "admin" && segs[3] == "runners" {
 			// The instance runner fleet is a HOST-ADMIN surface, not a repo
@@ -299,6 +323,72 @@ func (h *Handler) handleRepo(w http.ResponseWriter, r *http.Request, repo string
 			methodNotAllowed(w, "GET", "PUT")
 		}
 		return true
+	case len(rest) == 1 && rest[0] == "schedules":
+		if r.Method != http.MethodGet {
+			methodNotAllowed(w, "GET")
+			return true
+		}
+		h.listSchedules(w, r, repo)
+		return true
+	case len(rest) == 2 && rest[0] == "schedules" && rest[1] == "enable":
+		if r.Method != http.MethodPost {
+			methodNotAllowed(w, "POST")
+			return true
+		}
+		h.scheduleEnable(w, r, repo)
+		return true
+	case len(rest) == 2 && rest[0] == "schedules" && rest[1] == "run-now":
+		if r.Method != http.MethodPost {
+			methodNotAllowed(w, "POST")
+			return true
+		}
+		h.scheduleRunNow(w, r, repo)
+		return true
+	case len(rest) == 1 && rest[0] == "pause":
+		if r.Method != http.MethodPost {
+			methodNotAllowed(w, "POST")
+			return true
+		}
+		h.pauseRepo(w, r, repo)
+		return true
+	case len(rest) == 1 && rest[0] == "queue":
+		if r.Method != http.MethodGet {
+			methodNotAllowed(w, "GET")
+			return true
+		}
+		h.queueSnapshot(w, r, repo)
+		return true
+	case len(rest) == 1 && rest[0] == "notifications":
+		if r.Method != http.MethodGet {
+			methodNotAllowed(w, "GET")
+			return true
+		}
+		h.listNotifications(w, r)
+		return true
+	case len(rest) == 2 && rest[0] == "notifications" && rest[1] == "read":
+		if r.Method != http.MethodPost {
+			methodNotAllowed(w, "POST")
+			return true
+		}
+		h.markNotificationsRead(w, r)
+		return true
+	case len(rest) == 1 && rest[0] == "subscription":
+		switch r.Method {
+		case http.MethodGet:
+			h.getSubscription(w, r, repo)
+		case http.MethodPut:
+			h.putSubscription(w, r, repo)
+		default:
+			methodNotAllowed(w, "GET", "PUT")
+		}
+		return true
+	case len(rest) == 1 && rest[0] == "validate":
+		if r.Method != http.MethodPost {
+			methodNotAllowed(w, "POST")
+			return true
+		}
+		h.validateWorkflow(w, r, repo)
+		return true
 	case rest[0] == "secrets":
 		switch {
 		case len(rest) == 1 && r.Method == http.MethodGet:
@@ -329,6 +419,9 @@ func (h *Handler) handleRepo(w http.ResponseWriter, r *http.Request, repo string
 		return true
 	case rest[0] == "environments":
 		h.environments(w, r, repo, rest[1:])
+		return true
+	case rest[0] == "deployments":
+		h.deployments(w, r, repo, rest[1:])
 		return true
 	case len(rest) == 2 && rest[1] == "cancel":
 		if r.Method != http.MethodPost {
@@ -364,6 +457,13 @@ func (h *Handler) handleRepo(w http.ResponseWriter, r *http.Request, repo string
 			return true
 		}
 		h.streamLog(w, r, repo, rest[0], rest[2])
+		return true
+	case len(rest) == 4 && rest[1] == "jobs" && rest[3] == "cancel":
+		if r.Method != http.MethodPost {
+			methodNotAllowed(w, "POST")
+			return true
+		}
+		h.cancelJob(w, r, repo, rest[0], rest[2])
 		return true
 	case len(rest) == 2 && rest[1] == "artifacts":
 		if r.Method != http.MethodGet {
@@ -408,10 +508,16 @@ func (h *Handler) listRuns(w http.ResponseWriter, r *http.Request, repo string) 
 		}
 		n = parsed
 	}
+	state := strings.TrimSpace(q.Get("state"))
+	if state == "" {
+		state = strings.TrimSpace(q.Get("status")) // documented alias
+	}
 	f := RunFilter{
 		Workflow: strings.TrimSpace(q.Get("workflow")),
-		State:    strings.TrimSpace(q.Get("state")),
+		State:    state,
 		Actor:    strings.TrimSpace(q.Get("actor")),
+		Branch:   strings.TrimSpace(q.Get("branch")),
+		Event:    strings.TrimSpace(q.Get("event")),
 	}
 	page, err := h.Svc.ListRunsFiltered(r.Context(), repo, p, q.Get("after"), n, f)
 	if err != nil {
@@ -461,8 +567,9 @@ func (h *Handler) dispatch(w http.ResponseWriter, r *http.Request, repo string) 
 		Workflow string         `json:"workflow"`
 		Ref      string         `json:"ref"`
 		Inputs   map[string]any `json:"inputs"`
+		Priority int            `json:"priority"`
 	}
-	if !decodeStrict(w, r, 1<<20, map[string]bool{"workflow": true, "ref": true, "inputs": true}, &body) {
+	if !decodeStrict(w, r, 1<<20, map[string]bool{"workflow": true, "ref": true, "inputs": true, "priority": true}, &body) {
 		return
 	}
 	inputs, ierr := coerceInputs(body.Inputs)
@@ -470,7 +577,7 @@ func (h *Handler) dispatch(w http.ResponseWriter, r *http.Request, repo string) 
 		writeErr(w, ierr)
 		return
 	}
-	runs, err := h.Svc.DispatchRun(r.Context(), repo, body.Ref, body.Workflow, inputs, p)
+	runs, err := h.Svc.DispatchRunWithPriority(r.Context(), repo, body.Ref, body.Workflow, inputs, body.Priority, p)
 	if err != nil {
 		writeErr(w, err)
 		return

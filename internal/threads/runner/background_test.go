@@ -277,7 +277,7 @@ func TestBackgroundTimeoutKillsTheGroup(t *testing.T) {
 		t.Fatalf("placeholder = %+v", out)
 	}
 	res := bg.lookup("server").wait(context.Background())
-	if res.Conclusion != threads.JobFailure || !strings.Contains(res.Error, "timed out") {
+	if res.Conclusion != threads.JobTimedOut || !strings.Contains(res.Error, "timed out") {
 		t.Fatalf("timeout result = %+v", res)
 	}
 	if !docker.called("kill -TERM") {

@@ -42,6 +42,14 @@ func QueueHeadKey(owner, repo string) string {
 	return QueuePrefix(owner, repo) + "head.json"
 }
 
+// MatrixAdmissionKey returns the per-run matrix admission record
+// (PAR-052): repos/<o>/<r>/threads/runs/<run>/matrix.json. It lives beside the
+// job records, not in the queue prefix, so the queue index and GC never read it
+// as a queue entry.
+func MatrixAdmissionKey(owner, repo, runID string) string {
+	return "repos/" + owner + "/" + repo + "/threads/runs/" + runID + "/matrix.json"
+}
+
 // RunnersPrefix returns threads/runners/ (the instance registry family).
 func RunnersPrefix() string { return "threads/runners/" }
 

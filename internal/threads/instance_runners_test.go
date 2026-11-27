@@ -308,7 +308,7 @@ func TestQueueIndexBoundAndReconcile(t *testing.T) {
 	if _, err := store.PutBytes(ctx(), e.store, QueueIndexKey(), mustJSON(full), store.PutOptions{Mode: store.PutCreate}); err != nil {
 		t.Fatalf("seed: %v", err)
 	}
-	if err := e.svc.appendQueueIndex(ctx(), "o/r", "r1", "j-build", []string{"linux"}, false, "now"); !errors.Is(err, ErrUnavailable) {
+	if err := e.svc.appendQueueIndex(ctx(), "o/r", "r1", "j-build", []string{"linux"}, false, 0, "now"); !errors.Is(err, ErrUnavailable) {
 		t.Fatalf("full index append = %v, want ErrUnavailable", err)
 	}
 	// Reconcile rebuilds the repository's rows from authoritative queue entries.

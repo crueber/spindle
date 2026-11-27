@@ -139,7 +139,7 @@ neither cache class of §9.2 applies — sha-addressed does NOT mean immutable h
 
 | Method + path | Auth (P6) | Request → response | Seam / notes |
 |---|---|---|---|
-| `POST /{o}/{r}/api/checks/statuses/{sha}` | CI token (`checks:write` on this repo) **or** repo `write` role | `{context, state, target_url?, description?, started_at?, completed_at?}` → `200` full status record | `internal/checks` RouteProvider; `400` bad context/state/URL; `404` unknown sha (not a commit); `409` state not in the enum |
+| `POST /{o}/{r}/api/checks/statuses/{sha}` | CI token (`checks:write` on this repo) **or** repo `write` role | `{context, state, target_url?, description?, started_at?, completed_at?, annotations?}` → `200` full status record | `internal/checks` RouteProvider; `400` bad context/state/URL/annotation level; `404` unknown sha (not a commit); `409` state not in the enum |
 | `GET /{o}/{r}/api/checks/statuses/{sha}` | read | `{sha, statuses: []}` (context-sorted) | no-store; LIST under `checks/<sha>/` + bounded parallel GETs |
 | `GET /{o}/{r}/api/checks/{sha}` | read | combined view (§5): `{sha, state, total_counts, statuses: []}` | no-store |
 | `GET /{o}/{r}/api/checks?after=&n=` | read | `{checks: [{sha, state, contexts: []}], more}` — index page, name-cursor `after`, `n` default 50 max 200 | P5 paginated index read |

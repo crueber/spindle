@@ -23,8 +23,10 @@ func TestRenewLeaseWritesThenCoalesces(t *testing.T) {
 	if until := e.svc.renewLease(ctx(), "o", "r", claim.Entry, claim.Job); until != nil {
 		t.Fatalf("a fresh lease was rewritten: %v", until)
 	}
-	// Past half the window it writes, and a second call coalesces again.
-	e.advance(10 * time.Minute)
+	// Past half the window it writes, and a second call coalesces again. The
+	// window is the 30-minute cap (the default 360-minute job timeout), so half
+	// is 15 minutes.
+	e.advance(20 * time.Minute)
 	until := e.svc.renewLease(ctx(), "o", "r", claim.Entry, claim.Job)
 	if until == nil {
 		t.Fatal("a half-lapsed lease was not renewed")

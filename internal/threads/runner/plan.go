@@ -10,6 +10,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/crueber/spindle/internal/threads"
@@ -299,8 +300,10 @@ type Plan struct {
 	EventJSON []byte
 	// Needs is the folded output map of the job's `needs:` dependencies (the
 	// server materializes it at claim time). Step fields read it as
-	// `${{ needs.<job>.outputs.<name> }}`.
-	Needs map[string]map[string]string
+	// `${{ needs.<job>.outputs.<name> }}`; NeedsResults carries the folded
+	// results for `${{ needs.<job>.result }}`.
+	Needs        map[string]map[string]string
+	NeedsResults map[string]string
 	// OutputTemplates are the job's declared `outputs:` templates (matrix and
 	// inputs already substituted), evaluated against the collected step
 	// outputs when the job finishes (docs/threads.md §3.9).
@@ -319,11 +322,96 @@ type Plan struct {
 	// deferred are the `actions/cache` saves performed at the end of a green
 	// job (docs/threads.md §3.4c). Per-plan, so concurrent jobs never share it.
 	deferred []*CacheStep
-	// Actions are the repository-local action definitions embedded in the job
-	// payload at creation (docs/threads.md §3.4a). They are pinned to the run
-	// commit; the runner never reads a repository, so an expansion can never
-	// pick up a file from another ref.
+	// Actions are the repository-local and resolved remote action definitions
+	// embedded in the job payload at creation (docs/threads.md §3.4a/§3.4d).
+	// They are pinned to the run commit (local) or to a resolved commit + content
+	// digest (remote); the runner never reads a repository or the network for an
+	// action, so an expansion can never pick up a file from another ref.
 	Actions map[string]threads.ActionSpec
+	// HashFiles is the job container's workspace walker (PAR-041), installed by
+	// the executor once the container exists. Nil at plan time (the preview
+	// leaves those spans authored).
+	HashFiles func(patterns []string) (string, error)
+	// StepOutcomes/StepConclusions are the steps resolved so far, for a field
+	// expression that reads `steps.<id>.outcome`/`.conclusion` (PAR-038). The
+	// executor refreshes them before each ResolveStep.
+	StepOutcomes    map[string]string
+	StepConclusions map[string]string
+	// Posts are the action post hooks (PAR-071), run in reverse after the last
+	// main step — including after a hard failure.
+	Posts []PostPlan
+	// exec is the per-execution mutable state (materialized actions, ran steps,
+	// built images). A pointer keeps Plan copyable and one job's execution from
+	// sharing state with another.
+	exec *planExec
+}
+
+// planExec is the per-execution state of one plan.
+type planExec struct {
+	mu            sync.Mutex
+	ran           map[int]bool
+	materialized  map[string]bool
+	builtImages   []string
+	loggedActions map[string]bool
+	probedNode    bool
+	nodeVersion   string
+	nodeErr       error
+}
+
+// markRan records that the step at OutputIndex started executing (it may have
+// failed; a post hook still runs for a failed main).
+func (p *Plan) markRan(index int) {
+	if p == nil || p.exec == nil {
+		return
+	}
+	p.exec.mu.Lock()
+	p.exec.ran[index] = true
+	p.exec.mu.Unlock()
+}
+
+// wasRan reports whether the step at OutputIndex started.
+func (p *Plan) wasRan(index int) bool {
+	if p == nil || p.exec == nil {
+		return false
+	}
+	p.exec.mu.Lock()
+	defer p.exec.mu.Unlock()
+	return p.exec.ran[index]
+}
+
+// markMaterialized reports whether dir was already extracted; the first caller
+// gets false and is responsible for extracting it.
+func (p *Plan) markMaterialized(dir string) bool {
+	if p == nil || p.exec == nil {
+		return true
+	}
+	p.exec.mu.Lock()
+	defer p.exec.mu.Unlock()
+	if p.exec.materialized[dir] {
+		return true
+	}
+	p.exec.materialized[dir] = true
+	return false
+}
+
+// addBuiltImage records a Dockerfile action image for job-end cleanup.
+func (p *Plan) addBuiltImage(image string) {
+	if p == nil || p.exec == nil {
+		return
+	}
+	p.exec.mu.Lock()
+	p.exec.builtImages = append(p.exec.builtImages, image)
+	p.exec.mu.Unlock()
+}
+
+// builtImages returns the images built for this job.
+func (p *Plan) builtImageList() []string {
+	if p == nil || p.exec == nil {
+		return nil
+	}
+	p.exec.mu.Lock()
+	defer p.exec.mu.Unlock()
+	return append([]string{}, p.exec.builtImages...)
 }
 
 // ServicePlan is one sidecar.
@@ -368,10 +456,21 @@ type StepPlan struct {
 	// visible to the action's other steps and its outputs: mapping, never to
 	// the job's steps.<id> context.
 	LocalID string
-	// Composite is set on a step that expands into a local composite action:
+	// Composite is set on a step that expands into a composite action:
 	// the inner steps run in order and the action's declared outputs are
 	// evaluated afterwards.
 	Composite *CompositePlan
+	// Node is set on a JavaScript action step (PAR-071): the action's pinned
+	// file set, its main program, and its pre/post hooks.
+	Node *NodePlan
+	// ThirdParty marks code fetched from an action source (a remote action's
+	// node program, or the run steps inside a remote composite). It receives
+	// no implicit job token, no OIDC request token and no repository secrets:
+	// only its declared `with:`/`env:` interface (D-5).
+	ThirdParty bool
+	// Origin is the resolution record of a fetched action (source, ref, pinned
+	// commit, content digest): the executor states it once per job in the log.
+	Origin *threads.ActionOrigin
 	// Docker is set on a docker:// step (and a local docker action): the image
 	// actually run (after the runner's prefix rewrite) and the metadata's
 	// entrypoint/args/env.
@@ -431,25 +530,82 @@ type StepPlan struct {
 	Parallel []StepPlan
 }
 
-// CompositePlan is one expanded local composite action.
+// CompositePlan is one expanded composite action.
 type CompositePlan struct {
-	// Path is the repository-relative action directory.
+	// Path is the action directory as authored (repository-relative for a
+	// local action).
 	Path string
+	// Dir is the absolute in-container directory the action's own steps see
+	// as `github.action_path` (`<workspace>/<path>` for a local action,
+	// `/spindle/remote-actions/<digest>` for a remote one).
+	Dir string
+	// Files is the fetched content a remote action must materialize before
+	// its steps run (empty for a local action: the checkout already has it).
+	Files []threads.ActionFile
 	// Steps are the action's steps, expanded recursively in order.
 	Steps []StepPlan
 	// Outputs maps the action's declared output names to the templates
 	// evaluated over its own steps' outputs.
 	Outputs map[string]string
+	// Inputs are the caller's resolved input values: the action's steps read
+	// them as `${{ inputs.<name> }}` (PAR-074).
+	Inputs map[string]string
+	// ThirdParty marks a remote composite: its run steps get no implicit
+	// credential.
+	ThirdParty bool
+}
+
+// NodePlan is one JavaScript action invocation (PAR-071).
+type NodePlan struct {
+	// Dir is the absolute in-container action directory.
+	Dir string
+	// Main is the program file, relative to Dir.
+	Main string
+	// Using is node20 or node24 (the minimum runtime the action declares).
+	Using string
+	// StatePath is this action's $GITHUB_STATE file, shared by pre, main and
+	// post.
+	StatePath string
+	// Pre/Post are the hook programs and their conditions ("" = always()).
+	Pre, Post     string
+	PreIf, PostIf string
+	// Files is the fetched content the runner materializes before the pre
+	// hook (or the main program) runs.
+	Files []threads.ActionFile
+}
+
+// PostPlan is one action post hook: the step to run at the end of the job and
+// the OutputIndex of the main step that must have started for it to run. Posts
+// run in reverse order after the last main step, including after a failure.
+type PostPlan struct {
+	Step StepPlan
+	Gate int
 }
 
 // DockerPlan is one docker action invocation's metadata.
 type DockerPlan struct {
 	// Path is the local action directory ("" for an inline docker:// step).
 	Path string
+	// Dir is the absolute in-container action directory (remote actions).
+	Dir string
+	// Files is the fetched content (remote actions): a Dockerfile action is
+	// built from it on the runner host before the container starts.
+	Files []threads.ActionFile
+	// Dockerfile is the action-relative Dockerfile path when this action
+	// builds its own image (PAR-072); "" for a registry image.
+	Dockerfile string
+	// ThirdParty marks fetched action code (registry image or Dockerfile).
+	ThirdParty bool
+	// Origin is the fetched action's resolution record (nil for docker:// and
+	// local actions).
+	Origin *threads.ActionOrigin
 	// Image is the reference actually run (after --image-prefix);
 	// RequestedImage is what the workflow or metadata named.
 	Image          string
 	RequestedImage string
+	// ImageIndex is the position of the image in the `docker run` argv, so a
+	// built Dockerfile action can substitute the tag after `docker build`.
+	ImageIndex int
 	// Entrypoint/Args/Env come from the action metadata (docker actions only)
 	// and are empty for an inline docker:// step: the image's own entrypoint
 	// and command are used then.
@@ -482,6 +638,12 @@ type StepTemplate struct {
 	// composite action's OWN steps. Empty for a workflow step, where the parser
 	// refuses the reference.
 	ActionPath string
+	// ActionInputs are the enclosing action's input values: the `inputs.*`
+	// context inside a composite action's steps (PAR-074). Empty for a workflow
+	// step, where `inputs.*` is the dispatch input set.
+	ActionInputs map[string]string
+	// ThirdParty marks a step inside a fetched action: no implicit credential.
+	ThirdParty bool
 }
 
 // BuildPlan validates the spec and resolves one job into docker argv.
@@ -634,6 +796,7 @@ func BuildPlan(in PlanInput) (*Plan, error) {
 	p := &Plan{
 		JobRef: job.JobRef, Attempt: job.Attempt,
 		Names: names, Workspace: ws, Image: image, RequestedImage: requestedImage,
+		exec:        &planExec{ran: map[int]bool{}, materialized: map[string]bool{}},
 		NetworkMode: networkMode,
 		Images:      in.Images,
 		Policy:      in.Policy,
@@ -645,6 +808,7 @@ func BuildPlan(in PlanInput) (*Plan, error) {
 		Matrix:              matrix, Inputs: inputs, Env: jobEnv, GitHub: github,
 		Vars: job.Vars, Runner: runnerCtx, EventJSON: eventJSON,
 		Needs:        job.NeedsOutputs,
+		NeedsResults: job.NeedsResults,
 		ArtifactCaps: in.Caps,
 		CacheCaps:    in.CacheCaps,
 		Actions:      spec.Actions,
@@ -1140,6 +1304,12 @@ type expandCtx struct {
 	// own steps are being planned (`${{ github.action_path }}`, PAR-074); empty
 	// for a workflow step.
 	actionDir string
+	// actionInputs are the enclosing action's resolved input values, the
+	// `inputs.*` context for `${{ inputs.<name> }}` (PAR-074).
+	actionInputs map[string]string
+	// thirdParty marks steps inside a fetched (remote) action: no implicit
+	// token, no OIDC request token, no repository secrets (D-5).
+	thirdParty bool
 }
 
 // planStep resolves one authored step into one or more plans. A plain step is
@@ -1159,8 +1329,11 @@ func planStep(p *Plan, index int, st threads.StepSpec, ctx expandCtx, next *int)
 	if threads.IsLocalAction(uses) {
 		return planLocalAction(p, index, st, ctx, next)
 	}
+	if threads.IsRemoteAction(uses) {
+		return planRemoteAction(p, index, st, ctx, next)
+	}
 	if image := threads.DockerUsesImage(uses); image != "" {
-		return planDockerStep(p, index, st, &DockerPlan{RequestedImage: image}, st.With, ctx, next)
+		return planDockerStep(p, index, st, &DockerPlan{RequestedImage: image}, copyStrings(st.With), ctx, next)
 	}
 	sp, err := stepPlan(p, index, st, ctx, next)
 	if err != nil {
@@ -1285,10 +1458,169 @@ func validateBackgroundPlan(steps []StepPlan) error {
 	return walk(steps, false)
 }
 
-// planLocalAction expands a `uses: ./<path>` step: a composite action becomes
-// a CompositePlan, a docker action a single docker step. Both definitions were
-// embedded in the payload at creation; a definition the payload does not carry
-// is a named plan error (the job fails before any container starts).
+// planRemoteAction expands one embedded remote action (PAR-070/071/072/074).
+// The server rewrote its `uses:` to RemoteActionPrefix+key and embedded the
+// fetched, digest-pinned definition; a definition the payload does not carry is
+// a named plan error (the job fails before any container starts).
+func planRemoteAction(p *Plan, index int, st threads.StepSpec, ctx expandCtx, next *int) ([]StepPlan, error) {
+	uses := strings.TrimSpace(st.Uses)
+	def, ok := p.Actions[uses]
+	if !ok {
+		return nil, fmt.Errorf("step %d (uses: %s): remote action is not in the job payload (the run was created without its fetched definition)", index+1, uses)
+	}
+	if def.Origin != nil {
+		// The resolution record is stated in the job log: the author sees the
+		// commit and digest the action was pinned to.
+		// (No stream here — the executor logs it when the step starts.)
+	}
+	switch def.Using {
+	case "composite":
+		return planCompositeStep(p, index, st, def, ctx, next)
+	case "docker":
+		return planRemoteDockerAction(p, index, st, def, ctx, next)
+	case "node20", "node24":
+		return planNodeAction(p, index, st, def, ctx, next)
+	default:
+		return nil, fmt.Errorf("step %d (uses: %s): remote action has unsupported using %q", index+1, uses, def.Using)
+	}
+}
+
+// planRemoteDockerAction plans a docker action fetched from an action source:
+// a registry image (image-gated here, exactly like a local docker action) or a
+// Dockerfile the runner builds (PAR-072).
+func planRemoteDockerAction(p *Plan, index int, st threads.StepSpec, def threads.ActionSpec, ctx expandCtx, next *int) ([]StepPlan, error) {
+	uses := strings.TrimSpace(st.Uses)
+	with, bad := actionWith(def, st.With)
+	if len(bad) > 0 {
+		return nil, fmt.Errorf("step %d (uses: %s): input %q is not declared by the action", index+1, uses, bad[0])
+	}
+	dp := &DockerPlan{
+		Path: def.Path, Dir: def.Path, Files: def.Files,
+		ThirdParty: true, Origin: def.Origin, RequestedImage: def.Image, Entrypoint: def.Entrypoint,
+		Args: def.Args, Env: def.Env,
+	}
+	if def.Dockerfile {
+		// A Dockerfile action is pinned by the action content digest, not by a
+		// registry digest; the image gate has nothing to resolve yet. The built
+		// image is local-only (never pushed), so there is no mutable reference.
+		dp.Dockerfile, dp.RequestedImage = def.Image, ""
+	}
+	return planDockerStep(p, index, st, dp, with, ctx, next)
+}
+
+// planNodeAction plans a JavaScript action (PAR-071): an optional pre hook, the
+// main program, and a post hook registered for the end of the job. The runtime
+// is the job image's node — the action declares a minimum version, and the
+// executor refuses by name when the image has none (never a silent skip).
+func planNodeAction(p *Plan, index int, st threads.StepSpec, def threads.ActionSpec, ctx expandCtx, next *int) ([]StepPlan, error) {
+	uses := strings.TrimSpace(st.Uses)
+	with, bad := actionWith(def, st.With)
+	if len(bad) > 0 {
+		return nil, fmt.Errorf("step %d (uses: %s): input %q is not declared by the action", index+1, uses, bad[0])
+	}
+	if strings.TrimSpace(def.Main) == "" {
+		return nil, fmt.Errorf("step %d (uses: %s): the action declares no main program", index+1, uses)
+	}
+	dir := def.Path
+	if dir == "" {
+		return nil, fmt.Errorf("step %d (uses: %s): the action has no directory", index+1, uses)
+	}
+	// The caller's env applies to the action; INPUT_* wins so an env block
+	// cannot silently shadow an input (the composite rule).
+	childEnv := withoutInputs(ctx.env)
+	for k, v := range st.Env {
+		childEnv[k] = v
+	}
+	for k, v := range inputEnv(def.Inputs, with) {
+		childEnv[k] = v
+	}
+	name := strings.TrimSpace(st.Name)
+	if name == "" {
+		name = dir
+		if def.Origin != nil {
+			name = def.Origin.Repository
+			if def.Origin.Path != "" {
+				name = name + "/" + def.Origin.Path
+			}
+		}
+	}
+	statePath := fmt.Sprintf("%s/%d", threads.RemoteStateRoot, *next)
+	var out []StepPlan
+	if def.Pre != "" {
+		preIdx := *next
+		*next++
+		pre := StepPlan{
+			Index: index, OutputIndex: preIdx, Parent: ctx.parent,
+			Name: name + " (pre)", Kind: "node", Uses: st.Uses, ThirdParty: true,
+			ContinueOnError: st.ContinueOnError,
+			If:              hookIf(st.If, def.PreIf),
+			Node:            &NodePlan{Dir: dir, Main: def.Pre, Using: def.Using, StatePath: statePath, Files: def.Files},
+			Template: &StepTemplate{Name: name + " (pre)", If: hookIf(st.If, def.PreIf),
+				Uses: st.Uses, ActionPath: dir, Env: childEnv},
+		}
+		pre.OutputPath = outputFilePath(preIdx)
+		pre.EnvFile, pre.PathFile = commandFilePaths(preIdx)
+		resolved, err := resolveStep(p, pre, nil, false)
+		if err != nil {
+			return nil, fmt.Errorf("step %d (uses: %s) pre: %w", index+1, uses, err)
+		}
+		out = append(out, resolved)
+	}
+	mainIdx := *next
+	*next++
+	main := StepPlan{
+		Index: index, OutputIndex: mainIdx, Parent: ctx.parent,
+		ID: strings.ToLower(strings.TrimSpace(st.ID)), Name: name,
+		Kind: "node", Uses: st.Uses, ThirdParty: true, Origin: def.Origin,
+		ContinueOnError: st.ContinueOnError,
+		Node:            &NodePlan{Dir: dir, Main: def.Main, Using: def.Using, StatePath: statePath, Files: def.Files},
+		Template:        &StepTemplate{Name: name, If: st.If, Uses: st.Uses, ActionPath: dir, Env: childEnv},
+	}
+	if st.TimeoutMinutes > 0 {
+		main.Timeout = time.Duration(st.TimeoutMinutes) * time.Minute
+	}
+	main.OutputPath = outputFilePath(mainIdx)
+	main.SummaryPath = summaryFilePath(mainIdx)
+	main.EnvFile, main.PathFile = commandFilePaths(mainIdx)
+	resolved, err := resolveStep(p, main, nil, false)
+	if err != nil {
+		return nil, fmt.Errorf("step %d (uses: %s): %w", index+1, uses, err)
+	}
+	out = append(out, resolved)
+	if def.Post != "" {
+		post := StepPlan{
+			Index: index, OutputIndex: *next, Parent: ctx.parent,
+			Name: name + " (post)", Kind: "node", Uses: st.Uses, ThirdParty: true,
+			Node: &NodePlan{Dir: dir, Main: def.Post, Using: def.Using, StatePath: statePath, Files: def.Files},
+			Template: &StepTemplate{Name: name + " (post)", If: def.PostIf,
+				Uses: st.Uses, ActionPath: dir, Env: childEnv},
+		}
+		post.OutputPath = outputFilePath(post.OutputIndex)
+		*next++
+		resolvedPost, perr := resolveStep(p, post, nil, false)
+		if perr != nil {
+			return nil, fmt.Errorf("step %d (uses: %s) post: %w", index+1, uses, perr)
+		}
+		p.Posts = append(p.Posts, PostPlan{Step: resolvedPost, Gate: mainIdx})
+	}
+	return out, nil
+}
+
+// hookIf combines a step condition with a pre-if/post-if. An empty condition is
+// true; a status function (always(), success(), failure(), cancelled()) is a
+// valid if-expression.
+func hookIf(stepIf, hook string) string {
+	s, h := strings.TrimSpace(stepIf), strings.TrimSpace(hook)
+	switch {
+	case s == "":
+		return h
+	case h == "":
+		return s
+	default:
+		return "(" + s + ") && (" + h + ")"
+	}
+}
+
 func planLocalAction(p *Plan, index int, st threads.StepSpec, ctx expandCtx, next *int) ([]StepPlan, error) {
 	uses := strings.TrimSpace(st.Uses)
 	dir, err := threads.LocalActionDir(uses)
@@ -1340,6 +1672,12 @@ func planCompositeStep(p *Plan, index int, st threads.StepSpec, def threads.Acti
 	name := strings.TrimSpace(st.Name)
 	if name == "" {
 		name = dir
+		if def.Origin != nil {
+			name = def.Origin.Repository
+			if def.Origin.Path != "" {
+				name = name + "/" + def.Origin.Path
+			}
+		}
 	}
 	parent := name
 	if ctx.parent != "" {
@@ -1367,16 +1705,22 @@ func planCompositeStep(p *Plan, index int, st threads.StepSpec, def threads.Acti
 		Index: index, Parent: ctx.parent, ID: strings.ToLower(strings.TrimSpace(st.ID)),
 		Kind: "composite", Uses: st.Uses, ContinueOnError: st.ContinueOnError,
 		Background: st.Background,
-		Composite:  &CompositePlan{Path: dir, Outputs: def.Outputs},
+		Composite: &CompositePlan{Path: dir, Dir: containerDir(p.Workspace, dir), Outputs: def.Outputs,
+			Files: def.Files, Inputs: with, ThirdParty: def.ThirdParty},
 		Template: &StepTemplate{
-			Name: st.Name, If: st.If, Uses: st.Uses,
+			Name: name, If: st.If, Uses: st.Uses,
+			With: copyStrings(st.With), ActionInputs: copyStrings(ctx.actionInputs),
 		},
 	}
+	if def.ThirdParty {
+		caller.ThirdParty = true
+	}
+	caller.Origin = def.Origin
 	if st.TimeoutMinutes > 0 {
 		caller.Timeout = time.Duration(st.TimeoutMinutes) * time.Minute
 	}
 	inner := expandCtx{depth: ctx.depth + 1, parent: parent, env: childEnv, workdir: base,
-		actionDir: containerDir(p.Workspace, dir)}
+		actionDir: containerDir(p.Workspace, dir), actionInputs: with, thirdParty: ctx.thirdParty || def.ThirdParty}
 	inner.stack = append(append([]string{}, ctx.stack...), dir)
 	for i, child := range def.Steps {
 		planned, err := planStep(p, index, child, inner, next)
@@ -1401,12 +1745,36 @@ func planCompositeStep(p *Plan, index int, st threads.StepSpec, def threads.Acti
 // the network, volume or any container exists, so a refusal fails the job with
 // nothing started.
 func planDockerStep(p *Plan, index int, st threads.StepSpec, dp *DockerPlan, with map[string]string, ctx expandCtx, next *int) ([]StepPlan, error) {
-	image := RewriteImage(strings.TrimSpace(dp.RequestedImage), p.Images)
-	if image == "" {
-		return nil, fmt.Errorf("step %d: docker action %q has no image", index+1, st.Uses)
+	// A docker:// step (and only an inline one) accepts with.args/entrypoint:
+	// they override the image's own command and are not inputs (PAR-072).
+	dp.ImageIndex = -1
+	image := ""
+	if dp.Dockerfile == "" {
+		image = RewriteImage(strings.TrimSpace(dp.RequestedImage), p.Images)
+		if image == "" {
+			return nil, fmt.Errorf("step %d: docker action %q has no image", index+1, st.Uses)
+		}
+		if p.Images.RequireDigest && !HasImageDigest(image) {
+			return nil, fmt.Errorf("step %d (uses: %s): %s", index+1, st.Uses, requireDigestError("action", image))
+		}
 	}
-	if p.Images.RequireDigest && !HasImageDigest(image) {
-		return nil, fmt.Errorf("step %d (uses: %s): %s", index+1, st.Uses, requireDigestError("action", image))
+	if dp.Path == "" {
+		// An inline docker:// step: with.args / with.entrypoint are the
+		// documented overrides (PAR-072), not action inputs.
+		if raw, ok := with["args"]; ok {
+			dp.Args = splitArgs(raw)
+			delete(with, "args")
+		}
+		if raw, ok := with["entrypoint"]; ok {
+			dp.Entrypoint = splitArgs(raw)
+			delete(with, "entrypoint")
+		}
+	}
+	if dp.Dockerfile != "" && image == "" {
+		// The built tag is only known at execution time; the argv carries a
+		// placeholder so the image's position is stable (and the image gate
+		// already knows a Dockerfile action has no registry reference).
+		image = dockerfilePlaceholder
 	}
 	dp.Image = image
 	env := withoutInputs(ctx.env)
@@ -1423,7 +1791,7 @@ func planDockerStep(p *Plan, index int, st threads.StepSpec, dp *DockerPlan, wit
 	sp := StepPlan{
 		Index: index, Parent: ctx.parent, Kind: "docker", Uses: st.Uses,
 		ID:              strings.ToLower(strings.TrimSpace(st.ID)),
-		ContinueOnError: st.ContinueOnError, Docker: dp,
+		ContinueOnError: st.ContinueOnError, Docker: dp, Origin: dp.Origin,
 		Background: st.Background,
 		Template: &StepTemplate{
 			Name:             st.Name,
@@ -1434,8 +1802,11 @@ func planDockerStep(p *Plan, index int, st threads.StepSpec, dp *DockerPlan, wit
 			Env:              copyStrings(env),
 			Inherited:        copyStrings(ctx.env),
 			ActionPath:       ctx.actionDir,
+			ActionInputs:     copyStrings(ctx.actionInputs),
+			ThirdParty:       ctx.thirdParty || dp.ThirdParty,
 		},
 	}
+	sp.ThirdParty = ctx.thirdParty || dp.ThirdParty
 	if st.TimeoutMinutes > 0 {
 		sp.Timeout = time.Duration(st.TimeoutMinutes) * time.Minute
 	}
@@ -1446,7 +1817,56 @@ func planDockerStep(p *Plan, index int, st threads.StepSpec, dp *DockerPlan, wit
 	if err != nil {
 		return nil, err
 	}
+	// Remember where the image sits in the argv: a Dockerfile action's image
+	// tag is only known after the build at execution time.
+	if resolved.Docker != nil && resolved.Docker.Image != "" {
+		for i, arg := range resolved.Argv {
+			if arg == resolved.Docker.Image {
+				resolved.Docker.ImageIndex = i
+			}
+		}
+	}
 	return []StepPlan{resolved}, nil
+}
+
+// dockerfilePlaceholder is the argv token a Dockerfile action's image occupies
+// until `docker build` produces the tag at execution time.
+const dockerfilePlaceholder = "spindle-local-dockerfile-action"
+
+// splitArgs splits a with.args / with.entrypoint value into words, honouring
+// single and double quotes (GitHub's docker:// rule). An unterminated quote
+// takes the rest as one word rather than dropping it.
+func splitArgs(raw string) []string {
+	var out []string
+	var cur strings.Builder
+	var quote rune
+	inWord := false
+	for _, r := range raw {
+		switch {
+		case quote != 0:
+			if r == quote {
+				quote = 0
+			} else {
+				cur.WriteRune(r)
+			}
+		case r == '\'' || r == '"':
+			quote = r
+			inWord = true
+		case r == ' ' || r == '\t' || r == '\n':
+			if inWord || cur.Len() > 0 {
+				out = append(out, cur.String())
+				cur.Reset()
+				inWord = false
+			}
+		default:
+			cur.WriteRune(r)
+			inWord = true
+		}
+	}
+	if inWord || cur.Len() > 0 {
+		out = append(out, cur.String())
+	}
+	return out
 }
 
 // withoutInputs copies env without an enclosing action's INPUT_* entries.
@@ -1523,8 +1943,11 @@ func stepPlan(p *Plan, index int, st threads.StepSpec, ctx expandCtx, next *int)
 		Env:              copyStrings(env),
 		Inherited:        copyStrings(ctx.env),
 		ActionPath:       ctx.actionDir,
+		ActionInputs:     copyStrings(ctx.actionInputs),
+		ThirdParty:       ctx.thirdParty,
 	}
 	sp := StepPlan{
+		ThirdParty:      ctx.thirdParty,
 		Index:           index,
 		Parent:          ctx.parent,
 		ID:              strings.ToLower(strings.TrimSpace(st.ID)),
@@ -1588,7 +2011,7 @@ func resolveStep(p *Plan, sp StepPlan, outputs map[string]map[string]string, str
 	for k, v := range p.Env {
 		lower[k] = v
 	}
-	inherited, err := p.resolveEnvLayer(t.Inherited, lower, outputs, strict, t.ActionPath)
+	inherited, err := p.resolveEnvLayerInputs(t.Inherited, lower, outputs, strict, t.ActionPath, t.ActionInputs)
 	if err != nil {
 		return sp, err
 	}
@@ -1634,7 +2057,7 @@ func resolveStep(p *Plan, sp StepPlan, outputs map[string]map[string]string, str
 	}
 	sort.Strings(sp.StepEnv)
 	expand := func(s string) (string, error) {
-		return p.expandValueAt(s, values, outputs, strict, t.ActionPath)
+		return p.expandValueAtInputs(s, values, outputs, strict, t.ActionPath, t.ActionInputs)
 	}
 	name, err := expand(t.Name)
 	if err != nil {
@@ -1687,7 +2110,11 @@ func resolveStep(p *Plan, sp StepPlan, outputs map[string]map[string]string, str
 	// A composite action's `run:` steps are repository code (the same trust as
 	// a workflow script), so they do receive it like any other run step.
 	isDocker := sp.Docker != nil || threads.DockerUsesImage(t.Uses) != ""
-	if p.JobToken != "" && !isDocker && sp.Composite == nil {
+	// A fetched action's code is third-party: it never receives the job token,
+	// the OIDC request token or the repository secret set (D-5). Its declared
+	// inputs and `env:` block are the only interface it has.
+	thirdParty := sp.ThirdParty || t.ThirdParty
+	if p.JobToken != "" && !isDocker && sp.Composite == nil && !thirdParty {
 		// The token is delivered under every spelling a workflow expects:
 		// SPINDLE_JOB_TOKEN, GitHub's GITHUB_TOKEN and Forgejo's FORGEJO_TOKEN —
 		// one credential, aliased, never a second token (PAR-110). An authored
@@ -1707,11 +2134,17 @@ func resolveStep(p *Plan, sp StepPlan, outputs map[string]map[string]string, str
 	// repository-code steps by NAME (value from the docker client's
 	// environment), never to a docker action image (third-party code), and
 	// never in argv. The URL is already in the container env (builtinEnv).
-	if p.IDTokenRequestToken != "" && !isDocker && sp.Composite == nil {
+	if p.IDTokenRequestToken != "" && !isDocker && sp.Composite == nil && !thirdParty {
 		env["SPINDLE_ID_TOKEN_REQUEST_TOKEN"] = ""
 		sp.EnvFrom = append(sp.EnvFrom, "SPINDLE_ID_TOKEN_REQUEST_TOKEN")
 		env["ACTIONS_ID_TOKEN_REQUEST_TOKEN"] = ""
 		sp.EnvFrom = append(sp.EnvFrom, "ACTIONS_ID_TOKEN_REQUEST_TOKEN")
+	}
+	// A composite action's own steps see the action directory under both
+	// spellings: `${{ github.action_path }}` (substituted into the fields, PAR-074)
+	// and the GITHUB_ACTION_PATH environment variable a script may read.
+	if t.ActionPath != "" {
+		env["GITHUB_ACTION_PATH"] = t.ActionPath
 	}
 	// Every step gets the output file GitHub-style; only a step with an id is
 	// collected (an anonymous step's writes are discarded, as on GitHub).
@@ -1740,10 +2173,29 @@ func resolveStep(p *Plan, sp StepPlan, outputs map[string]map[string]string, str
 		env[PathFileAlias] = sp.PathFile
 	}
 	switch {
+	case sp.Node != nil:
+		// A JavaScript action (PAR-071): the job image's node runs the action's
+		// pinned program with its declared inputs. GITHUB_ACTION_PATH points at
+		// the materialized action directory; GITHUB_STATE is the per-action
+		// file pre/main/post share. The executor probes the runtime before the
+		// first node step and refuses by name when the image has none.
+		sp.Kind = "node"
+		for name, val := range with {
+			env[workflow.InputEnvName(name)] = val
+		}
+		env["GITHUB_ACTION_PATH"] = sp.Node.Dir
+		env["GITHUB_ACTION"] = sp.Name
+		env["GITHUB_STATE"] = sp.Node.StatePath
+		cmd := []string{"node", sp.Node.Dir + "/" + sp.Node.Main}
+		sp.Argv = execArgv(p, p.Workspace, env, sp.EnvFrom, sp.EnvSecret, cmd, !thirdParty)
 	case sp.Composite != nil:
 		// Expanded at plan time; the composite itself has no command. The
-		// children were planned against this step's inputs.
+		// children were planned against this step's inputs; the resolved
+		// values (a `with:` entry may read an earlier step's output) replace
+		// the plan-time copy so `${{ inputs.* }}` inside the action is the
+		// caller's actual value (PAR-074).
 		sp.Kind = "composite"
+		sp.Composite.Inputs = with
 	case isDocker:
 		sp.Kind = "docker"
 		if sp.Docker == nil {
@@ -1769,7 +2221,7 @@ func resolveStep(p *Plan, sp StepPlan, outputs map[string]map[string]string, str
 		if needsFile {
 			sp.ScriptFile = stepScriptPath(sp.OutputIndex)
 		}
-		sp.Argv = execArgv(p, sp.WorkingDirectory, env, sp.EnvFrom, sp.EnvSecret, cmd)
+		sp.Argv = execArgv(p, sp.WorkingDirectory, env, sp.EnvFrom, sp.EnvSecret, cmd, !thirdParty)
 	}
 	return sp, nil
 }
@@ -1851,13 +2303,17 @@ func copyStrings(in map[string]string) map[string]string {
 // false for the plan-time preview, where no step has published anything yet.
 func (p *Plan) stepValues(env map[string]string, outputs map[string]map[string]string, strict bool) workflow.TemplateValues {
 	vals := workflow.TemplateValues{
-		GitHub:  p.githubValues(),
-		Runner:  p.Runner,
-		Vars:    p.Vars,
-		Matrix:  p.Matrix,
-		Inputs:  p.Inputs,
-		Env:     env,
-		Secrets: p.secretValues(),
+		GitHub:          p.githubValues(),
+		Runner:          p.Runner,
+		Vars:            p.Vars,
+		Matrix:          p.Matrix,
+		Inputs:          p.Inputs,
+		Env:             env,
+		Secrets:         p.secretValues(),
+		NeedResults:     p.NeedsResults,
+		HashFiles:       p.HashFiles,
+		StepOutcomes:    p.StepOutcomes,
+		StepConclusions: p.StepConclusions,
 	}
 	if strict {
 		vals.Steps = outputs
@@ -1886,7 +2342,17 @@ func (p *Plan) expandValue(s string, env map[string]string, outputs map[string]m
 // (PAR-074), and every other site has no such value (the parser refuses the
 // reference outside an action's steps).
 func (p *Plan) expandValueAt(s string, env map[string]string, outputs map[string]map[string]string, strict bool, actionPath string) (string, error) {
+	return p.expandValueAtInputs(s, env, outputs, strict, actionPath, nil)
+}
+
+// expandValueAtInputs is expandValueAt with the enclosing action's inputs as
+// the `inputs.*` context (PAR-074: a composite action's steps read the action's
+// own inputs, not the workflow_dispatch input set).
+func (p *Plan) expandValueAtInputs(s string, env map[string]string, outputs map[string]map[string]string, strict bool, actionPath string, inputs map[string]string) (string, error) {
 	vals := p.stepValues(env, outputs, strict)
+	if len(inputs) > 0 {
+		vals.Inputs = inputs
+	}
 	if actionPath != "" {
 		gh := make(map[string]string, len(vals.GitHub)+1)
 		for k, v := range vals.GitHub {
@@ -1905,7 +2371,10 @@ func (p *Plan) expandValueAt(s string, env map[string]string, outputs map[string
 // below it. A whole-value `${{ secrets.X }}` entry reads the secret's value
 // here; the delivery rule (by NAME, never argv) belongs to the step's own
 // `env:` block and is applied by resolveStep.
-func (p *Plan) resolveEnvLayer(layer, lower map[string]string, outputs map[string]map[string]string, strict bool, actionPath string) (map[string]string, error) {
+
+// resolveEnvLayerInputs is resolveEnvLayer with the enclosing action's inputs
+// as the `inputs.*` context.
+func (p *Plan) resolveEnvLayerInputs(layer, lower map[string]string, outputs map[string]map[string]string, strict bool, actionPath string, inputs map[string]string) (map[string]string, error) {
 	if len(layer) == 0 {
 		return nil, nil
 	}
@@ -1915,7 +2384,7 @@ func (p *Plan) resolveEnvLayer(layer, lower map[string]string, outputs map[strin
 			out[k], _ = p.secretValue(name)
 			continue
 		}
-		val, err := p.expandValue(headerValue(layer[k]), lower, outputs, strict)
+		val, err := p.expandValueAtInputs(headerValue(layer[k]), lower, outputs, strict, actionPath, inputs)
 		if err != nil {
 			return nil, err
 		}
@@ -1937,8 +2406,9 @@ func sortedKeys(m map[string]string) []string {
 
 // previewValue is the plan-time expansion of one field: everything a reference
 // can resolve without a step having run, with the `steps`/`needs` output spans
-// left exactly as authored. Those are resolved by ResolveStep immediately
-// before the step executes (the plan preview is not what runs).
+// (and hashFiles, which needs the running container) left exactly as authored.
+// Those are resolved by ResolveStep immediately before the step executes (the
+// plan preview is not what runs).
 func (p *Plan) previewValue(s string, vals workflow.TemplateValues) (string, error) {
 	if !strings.Contains(s, "${{") {
 		return s, nil
@@ -1980,7 +2450,9 @@ func deferOutputRefs(s string) (string, []string) {
 			return b.String(), spans
 		}
 		span := s[i : i+3+j+2]
-		if isOutputRef(span) {
+		lower := strings.ToLower(span)
+		if isOutputRef(span) || strings.Contains(lower, "hashfiles(") ||
+			strings.Contains(lower, "steps.") || strings.Contains(lower, "needs.") {
 			b.WriteString(outputSentinel(len(spans)))
 			spans = append(spans, span)
 		} else {
@@ -2031,7 +2503,7 @@ func planUses(p *Plan, sp *StepPlan, uses string, with map[string]string, env ma
 		if p.JobToken != "" && !containsString(sp.EnvFrom, "SPINDLE_JOB_TOKEN") {
 			sp.EnvFrom = append(sp.EnvFrom, "SPINDLE_JOB_TOKEN")
 		}
-		sp.Argv = execArgv(p, p.Workspace, env, sp.EnvFrom, sp.EnvSecret, []string{"sh", "-e", "-c", sp.Run})
+		sp.Argv = execArgv(p, p.Workspace, env, sp.EnvFrom, sp.EnvSecret, []string{"sh", "-e", "-c", sp.Run}, true)
 	case "actions/upload-artifact":
 		step, err := parseUploadArtifact(p, with)
 		if err != nil {
@@ -2373,7 +2845,7 @@ func credentialEnv(p *Plan, from []string, secretEnv map[string]string) []string
 // values are appended as `--env NAME` (the value is supplied through the docker
 // client's own environment, so it never appears in argv) and masked in the log
 // stream.
-func execArgv(p *Plan, workdir string, env map[string]string, from []string, secretEnv map[string]string, cmd []string) []string {
+func execArgv(p *Plan, workdir string, env map[string]string, from []string, secretEnv map[string]string, cmd []string, withSecrets bool) []string {
 	argv := []string{"exec", "--workdir", workdir}
 	keys := make([]string, 0, len(env))
 	for k := range env {
@@ -2386,13 +2858,15 @@ func execArgv(p *Plan, workdir string, env map[string]string, from []string, sec
 	for _, k := range keys {
 		argv = append(argv, "--env", k+"="+env[k])
 	}
-	secretNames := make([]string, 0, len(p.Secrets))
-	for name := range p.Secrets {
-		secretNames = append(secretNames, name)
-	}
-	sort.Strings(secretNames)
-	for _, name := range secretNames {
-		argv = append(argv, "--env", name)
+	if withSecrets {
+		secretNames := make([]string, 0, len(p.Secrets))
+		for name := range p.Secrets {
+			secretNames = append(secretNames, name)
+		}
+		sort.Strings(secretNames)
+		for _, name := range secretNames {
+			argv = append(argv, "--env", name)
+		}
 	}
 	// Bare `--env NAME`: the value comes from the docker CLI's own environment
 	// (the executor sets it from the plan's token), so it never appears in argv

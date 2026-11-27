@@ -28,6 +28,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 
 	"gopkg.in/yaml.v3"
@@ -41,7 +42,14 @@ type Workflow struct {
 	Name string            `yaml:"name"`
 	On   Triggers          `yaml:"on"`
 	Env  map[string]string `yaml:"env"`
-	Jobs map[string]Job    `yaml:"jobs"`
+	// RunName is the run title template (PAR-057): rendered at run creation
+	// from github.* and inputs.*. It is display-only, bounded, and never used
+	// as a key.
+	RunName string `yaml:"run-name"`
+	// Defaults is the workflow-level `defaults.run` block (PAR-054): a job's
+	// own defaults override it key by key, and a step's own key wins over both.
+	Defaults *Defaults      `yaml:"defaults"`
+	Jobs     map[string]Job `yaml:"jobs"`
 	// Concurrency and Permissions are workflow-level defaults; a job may
 	// override either. Permissions drive the job token's authority (PAR-112).
 	Concurrency *Concurrency `yaml:"concurrency"`
@@ -732,6 +740,8 @@ func (l *Labels) UnmarshalYAML(node *yaml.Node) error {
 		}
 		*l = out
 		return nil
+	case yaml.MappingNode:
+		return fmt.Errorf("runs-on: the `{group:, labels:}` form is not supported (a runner group is not a spindle concept; write the label list directly, e.g. `runs-on: [self-hosted, linux]` or `runs-on: ${{ matrix.os }}`)")
 	default:
 		return fmt.Errorf("runs-on: expected a label or a list of labels")
 	}
@@ -784,7 +794,75 @@ func (c *Container) UnmarshalYAML(node *yaml.Node) error {
 type Strategy struct {
 	Matrix   Matrix `yaml:"matrix"`
 	FailFast *bool  `yaml:"fail-fast"`
+	// MaxParallel bounds how many cells of this matrix run at once (PAR-052):
+	// nil means no limit beyond the runner fleet, and the scheduler admits
+	// cells in expansion order.
+	MaxParallel *int `yaml:"max-parallel"`
 }
+
+// Defaults is a `defaults:` block (PAR-054). Only `run` is accepted, at
+// workflow and job level; a step-level `defaults:` is an unknown key.
+type Defaults struct {
+	Run *RunDefaults `yaml:"run"`
+}
+
+// RunDefaults is `defaults.run`: the shell and working directory a run step
+// inherits when it names neither. Both are literals by decision — a context or
+// expression in either is a parse error naming the key — and a step-level key
+// still wins.
+type RunDefaults struct {
+	Shell            string `yaml:"shell"`
+	WorkingDirectory string `yaml:"working-directory"`
+}
+
+// DefaultJobTimeoutMinutes is GitHub's default job timeout (PAR-055): a job
+// that names none is bounded at 360 minutes.
+const DefaultJobTimeoutMinutes = 360
+
+// MaxTimeoutMinutes is the documented upper bound for a job or step timeout.
+const MaxTimeoutMinutes = 360
+
+// Minutes is a `timeout-minutes:` value: a positive integer literal or one
+// whole `${{ … }}` expression, evaluated per matrix cell before the run record
+// is written (PAR-055).
+type Minutes struct {
+	// Value is the literal (0 when the key is absent or expression-valued).
+	Value int
+	// Expr is the inside of the `${{ … }}` span, "" for a literal.
+	Expr string
+	// Present records that the key was authored (an explicit 0 is invalid,
+	// while an absent key means "use the default").
+	Present bool
+}
+
+// UnmarshalYAML accepts an integer or one whole expression span.
+func (m *Minutes) UnmarshalYAML(node *yaml.Node) error {
+	if node.Kind != yaml.ScalarNode || isNull(node) {
+		return fmt.Errorf("timeout-minutes: expected an integer or a ${{ … }} expression")
+	}
+	raw := strings.TrimSpace(node.Value)
+	if inner, ok := wholeSpan(raw); ok {
+		if strings.TrimSpace(inner) == "" {
+			return fmt.Errorf("timeout-minutes: ${{ }} is empty")
+		}
+		m.Expr = strings.TrimSpace(inner)
+		m.Present = true
+		return nil
+	}
+	n, err := strconv.Atoi(raw)
+	if err != nil {
+		return fmt.Errorf("timeout-minutes: expected an integer or a ${{ … }} expression, got %q", node.Value)
+	}
+	m.Value = n
+	m.Present = true
+	return nil
+}
+
+// Int returns the literal value (0 when bound to an expression).
+func (m Minutes) Int() int { return m.Value }
+
+// Set reports whether the key was authored at all.
+func (m Minutes) Set() bool { return m.Present }
 
 // Environment is a job's deployment environment
 // (`jobs.<key>.environment`, docs/PLAN-THREADS-ENVIRONMENTS.md): a bare name
@@ -887,15 +965,20 @@ type Job struct {
 	RunsOn Labels `yaml:"runs-on"`
 	// Environment is the deployment environment this job targets (nil when the
 	// job names none: an ordinary job is unchanged).
-	Environment     *Environment       `yaml:"environment"`
-	Container       *Container         `yaml:"container"`
-	Services        map[string]Service `yaml:"services"`
-	Env             map[string]string  `yaml:"env"`
-	Steps           []Step             `yaml:"steps"`
-	Needs           Needs              `yaml:"needs"`
-	If              string             `yaml:"if"`
-	TimeoutMinutes  int                `yaml:"timeout-minutes"`
-	ContinueOnError bool               `yaml:"continue-on-error"`
+	Environment *Environment       `yaml:"environment"`
+	Container   *Container         `yaml:"container"`
+	Services    map[string]Service `yaml:"services"`
+	Env         map[string]string  `yaml:"env"`
+	Steps       []Step             `yaml:"steps"`
+	Needs       Needs              `yaml:"needs"`
+	If          string             `yaml:"if"`
+	// TimeoutMinutes bounds the whole job (PAR-055): a literal or one whole
+	// expression, defaulted to 360 at run creation.
+	TimeoutMinutes Minutes `yaml:"timeout-minutes"`
+	// Defaults is the job-level `defaults.run` block (PAR-054); it overrides
+	// the workflow's per key, and a step's own key wins.
+	Defaults        *Defaults `yaml:"defaults"`
+	ContinueOnError bool      `yaml:"continue-on-error"`
 	// Outputs are the job's declared output templates
 	// (`name: ${{ steps.<id>.outputs.<x> }}`), evaluated by the runner once the
 	// steps finish and reported on complete (docs/threads.md §3.9). A dependent
@@ -949,7 +1032,7 @@ type Step struct {
 	Shell            string            `yaml:"shell"`
 	WorkingDirectory string            `yaml:"working-directory"`
 	ContinueOnError  bool              `yaml:"continue-on-error"`
-	TimeoutMinutes   int               `yaml:"timeout-minutes"`
+	TimeoutMinutes   Minutes           `yaml:"timeout-minutes"`
 	// Background starts this step asynchronously in its own session/process
 	// group (PAR-080). It needs an `id`, and is accepted on a run step, a
 	// docker:// step, or a local `uses: ./…` action (the runner refuses a local
@@ -986,6 +1069,8 @@ var (
 	// a process, a parallel group with an invalid member, a background without
 	// an id or an addressable target). The message names the rule.
 	ErrStepExecution = errors.New("workflow: invalid step execution")
+	// ErrBadTimeout marks a `timeout-minutes` outside 1…360 (PAR-055).
+	ErrBadTimeout = errors.New("workflow: invalid timeout")
 )
 
 // Parse decodes and validates one workflow file.
@@ -1027,6 +1112,14 @@ func Parse(src []byte) (*Workflow, error) {
 	if err := validateStructuralEnv("env", w.Env); err != nil {
 		return nil, err
 	}
+	if err := validateDefaults("defaults", w.Defaults); err != nil {
+		return nil, err
+	}
+	// `run-name` is a display-only title (PAR-057): github.* and inputs.*
+	// resolve; any other context is this file's parse error.
+	if err := ValidateTemplate(w.RunName, TemplateScope{Inputs: inputNames, Site: SiteRunName}); err != nil {
+		return nil, fmt.Errorf("workflow: run-name: %w", err)
+	}
 	for name, job := range w.Jobs {
 		// Structural fields (runs-on, container/service images, environment) and
 		// the job/container/service env layers are read before a matrix cell or
@@ -1034,6 +1127,19 @@ func Parse(src []byte) (*Workflow, error) {
 		// is this file's parse error rather than a literal that queues the job
 		// against no runner (docs/WORKFLOWS.md §6.2).
 		if err := validateStructuralFields(name, &job); err != nil {
+			return nil, err
+		}
+		if err := validateDefaults("jobs."+name+".defaults", job.Defaults); err != nil {
+			return nil, err
+		}
+		if err := validateRunsOn(name, job.RunsOn, TemplateScope{
+			Axes: strategyAxes(job.Strategy), Inputs: inputNames,
+		}); err != nil {
+			return nil, err
+		}
+		if err := validateTimeout(name, job.TimeoutMinutes, TemplateScope{
+			Axes: strategyAxes(job.Strategy), Inputs: inputNames, Site: SiteJobTimeout,
+		}); err != nil {
 			return nil, err
 		}
 		reusable := strings.TrimSpace(job.Uses) != ""
@@ -1076,6 +1182,7 @@ func Parse(src []byte) (*Workflow, error) {
 			Axes: strategyAxes(job.Strategy), Inputs: inputNames,
 			SecretNames: callSecretNames(&w), SecretsClosed: w.On.WorkflowCall != nil,
 		}
+		scope.Site = SiteJobName
 		if err := ValidateTemplate(job.Name, scope); err != nil {
 			return nil, fmt.Errorf("workflow: job %s name: %w", name, err)
 		}
@@ -1106,6 +1213,7 @@ func Parse(src []byte) (*Workflow, error) {
 			if err := validateStepTemplates(name, i, step, TemplateScope{
 				Axes: scope.Axes, Inputs: inputNames, Steps: declared, Needs: job.Needs,
 				SecretNames: scope.SecretNames, SecretsClosed: scope.SecretsClosed,
+				Site: SiteStepField,
 			}); err != nil {
 				return nil, err
 			}
@@ -1128,6 +1236,7 @@ func Parse(src []byte) (*Workflow, error) {
 				if err := validateStepTemplates(name, i, member, TemplateScope{
 					Axes: scope.Axes, Inputs: inputNames, Steps: declared, Needs: job.Needs,
 					SecretNames: scope.SecretNames, SecretsClosed: scope.SecretsClosed,
+					Site: SiteStepField,
 				}); err != nil {
 					return nil, fmt.Errorf("job %s step %d parallel member %d: %w", name, i+1, j+1, err)
 				}
@@ -1394,6 +1503,14 @@ func validateStrategy(jobName string, s *Strategy) error {
 	}
 	if err := s.Matrix.Validate(); err != nil {
 		return fmt.Errorf("workflow: job %s: %w", jobName, err)
+	}
+	if s.MaxParallel != nil {
+		if *s.MaxParallel < 1 || *s.MaxParallel > MaxMatrixCells {
+			return fmt.Errorf("workflow: job %s strategy.max-parallel must be 1…%d, got %d", jobName, MaxMatrixCells, *s.MaxParallel)
+		}
+		if !s.Matrix.Enabled() {
+			return fmt.Errorf("workflow: job %s declares strategy.max-parallel without a matrix (it bounds cell admission, so there is nothing to bound)", jobName)
+		}
 	}
 	return nil
 }

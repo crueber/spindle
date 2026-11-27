@@ -21,6 +21,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/crueber/spindle/internal/actions"
 	"github.com/crueber/spindle/internal/api"
 	"github.com/crueber/spindle/internal/checks"
 	"github.com/crueber/spindle/internal/config"
@@ -68,6 +69,16 @@ func newThreadsService(st store.ObjectStore, ident *identity.Service, checksSvc 
 		// applied at run creation over container.image and services.*.image.
 		svc.ImageAllowPrefixes = cfg.Threads.ImageAllowPrefixes
 		svc.ImageRequireDigest = cfg.Threads.ImageRequireDigest
+		// Remote actions (PAR-070/D-5): the allowlist policy, the optional
+		// external source and the per-action byte bound. The default is
+		// allowlist mode with a SHA required outside it, so a mutable ref from
+		// a repository the operator did not approve is a named refusal.
+		svc.ActionPolicy = actions.Policy{
+			Mode: actions.Mode(cfg.Threads.Actions.Mode), Allow: cfg.Threads.Actions.Allow,
+			RequireSHA: cfg.Threads.Actions.RequireSHA,
+		}
+		svc.ActionSource = cfg.Threads.Actions.Source
+		svc.ActionMaxBytes = int64(cfg.Threads.Actions.MaxBytes)
 		// Operator knobs (PAR-179): the artifact window (separate from run
 		// retention), keep-forever, the requeue ceiling and the base job lease.
 		svc.ArtifactRetention = time.Duration(cfg.Threads.ArtifactRetention)

@@ -103,11 +103,12 @@ func TestPlanArtifactStepNamedErrors(t *testing.T) {
 			t.Fatalf("%s = %q (%s), want %q", tc.name, step.Kind, step.SkipReason, tc.wants)
 		}
 	}
-	// A marketplace action still says so.
+	// A setup action the runner could not resolve (no action source in this
+	// payload) still names the exact cache replacement (PAR-096).
 	p, _ := BuildPlan(PlanInput{Job: &threads.FetchResult{Spec: &threads.Spec{Version: threads.SpecVersion, RunsOn: []string{"x"},
 		Steps: []threads.StepSpec{{Uses: "actions/setup-node"}}}}, AttemptToken: "t"})
-	if p.Steps[0].Kind != "unsupported" || !strings.Contains(p.Steps[0].SkipReason, "marketplace JavaScript action") {
-		t.Fatalf("marketplace step = %+v", p.Steps[0])
+	if p.Steps[0].Kind != "unsupported" || !strings.Contains(p.Steps[0].SkipReason, "actions/cache") {
+		t.Fatalf("setup step = %+v", p.Steps[0])
 	}
 }
 

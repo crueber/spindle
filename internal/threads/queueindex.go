@@ -56,6 +56,9 @@ type QueueIndexEntry struct {
 	// runner that did not opt in to fork runs, so the hint never offers what
 	// the per-repository claim would refuse.
 	Fork bool `json:"fork,omitempty"`
+	// Priority is the run's claim priority (PAR-155). claimGlobal orders rows
+	// by priority descending, then enqueue time — the documented queue order.
+	Priority int `json:"priority,omitempty"`
 }
 
 // QueueIndex is threads/queue/index.json.
@@ -84,7 +87,7 @@ func (s *Service) loadQueueIndex(ctx context.Context) (*QueueIndex, store.Versio
 // appendQueueIndex adds one queued job to the hint. A full index refuses the
 // append (the caller logs it; the job stays queued and the reconciler repairs
 // the row). Idempotent per (repo, run, job).
-func (s *Service) appendQueueIndex(ctx context.Context, repo, runID, jobID string, labels []string, fork bool, at string) error {
+func (s *Service) appendQueueIndex(ctx context.Context, repo, runID, jobID string, labels []string, fork bool, priority int, at string) error {
 	if repo == "" || runID == "" || jobID == "" {
 		return nil
 	}
@@ -105,6 +108,7 @@ func (s *Service) appendQueueIndex(ctx context.Context, repo, runID, jobID strin
 		}
 		idx.Queued = append(nonNilQueueRows(idx.Queued), QueueIndexEntry{
 			Repo: repo, RunID: runID, JobID: jobID, Labels: normalizeLabels(labels), CreatedAt: at, Fork: fork,
+			Priority: priority,
 		})
 		idx.UpdatedAt = s.nowUTC().Format(dateTimeFmt)
 		idx.Version++
@@ -184,11 +188,22 @@ func (s *Service) claimGlobal(ctx context.Context, runner *RunnerDoc, labels []s
 	}
 	seen := map[string]bool{}
 	probed := 0
-	for _, row := range idx.Queued {
+	// Claim order (PAR-155): priority descending, then enqueue time ascending
+	// (the index is appended in enqueue order, so CreatedAt is the FIFO key).
+	// The order is the documented one; the per-repository entry CAS is still
+	// the only authority.
+	rows := append([]QueueIndexEntry{}, idx.Queued...)
+	sort.SliceStable(rows, func(i, j int) bool {
+		if rows[i].Priority != rows[j].Priority {
+			return rows[i].Priority > rows[j].Priority
+		}
+		return rows[i].CreatedAt < rows[j].CreatedAt
+	})
+	for _, row := range rows {
 		if probed >= queueGlobalProbeMax {
 			break
 		}
-		if seen[row.Repo] || !runner.AllowsRepo(row.Repo) || !labelsMatch(labels, row.Labels) {
+		if seen[row.Repo] || !runner.CanServeRepo(row.Repo) || runner.IsDraining() || !labelsMatch(runner.EffectiveLabels(), row.Labels) {
 			continue
 		}
 		if row.Fork && !runner.AllowForkRuns {
@@ -251,6 +266,7 @@ func (s *Service) ReconcileQueueIndex(ctx context.Context, owner, repo string) (
 		fresh[entry.RunID+"\x00"+entry.JobID] = QueueIndexEntry{
 			Repo: repoID, RunID: entry.RunID, JobID: entry.JobID,
 			Labels: normalizeLabels(entry.Labels), CreatedAt: entry.EnqueuedAt, Fork: entry.Fork,
+			Priority: entry.Priority,
 		}
 	}
 	changed := 0

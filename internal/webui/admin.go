@@ -622,6 +622,10 @@ func (s *Server) mountAdmin() {
 	m.HandleFunc("POST /admin/runners", s.adminRunnerMint)
 	m.HandleFunc("POST /admin/runners/policy", s.adminRunnerPolicy)
 	m.HandleFunc("POST /admin/runners/revoke", s.adminRunnerRevoke)
+	m.HandleFunc("POST /admin/runners/drain", func(w http.ResponseWriter, r *http.Request) { s.adminRunnerFleet(w, r, "drain") })
+	m.HandleFunc("POST /admin/runners/resume", func(w http.ResponseWriter, r *http.Request) { s.adminRunnerFleet(w, r, "resume") })
+	m.HandleFunc("POST /admin/runners/rotate", func(w http.ResponseWriter, r *http.Request) { s.adminRunnerFleet(w, r, "rotate") })
+	m.HandleFunc("POST /admin/runners/deregister", func(w http.ResponseWriter, r *http.Request) { s.adminRunnerFleet(w, r, "deregister") })
 	// The users and organizations directory (PLAN-ADMIN §3.7): bounded reads
 	// plus the audited deactivate/reactivate pair. The account travels in the
 	// body (a literal multi-segment /admin path would overlap the repo

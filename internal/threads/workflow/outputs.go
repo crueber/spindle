@@ -98,36 +98,11 @@ func validateJobOutputs(jobName string, job Job, inputNames, axes []string) erro
 	}
 	sort.Strings(names)
 	for _, name := range names {
-		refs, err := TemplateRefs(job.Outputs[name])
-		if err != nil {
+		if err := ValidateTemplate(job.Outputs[name], TemplateScope{
+			Axes: axes, Inputs: inputNames, Steps: declared, Needs: []string(job.Needs),
+			Site: SiteJobOutputs,
+		}); err != nil {
 			return fmt.Errorf("%w: job %s: outputs.%s: %v", ErrBadOutput, jobName, name, err)
-		}
-		for _, ref := range refs {
-			switch ref.Context {
-			case "steps":
-				if !containsExact(declared, strings.ToLower(ref.Step)) {
-					return fmt.Errorf("%w: job %s: outputs.%s: ${{ %s }} names no step id of this job (declared: %s)",
-						ErrBadOutput, jobName, name, ref.Raw, listOrNone(declared))
-				}
-			case "needs":
-				if !containsExactFold([]string(job.Needs), ref.Job) {
-					return fmt.Errorf("%w: job %s: outputs.%s: ${{ %s }} names no `needs:` dependency of this job (declared: %s)",
-						ErrBadOutput, jobName, name, ref.Raw, listOrNone([]string(job.Needs)))
-				}
-			case "matrix":
-				if !containsExact(axes, ref.Key) {
-					return fmt.Errorf("%w: job %s: outputs.%s: ${{ matrix.%s }} is not a declared matrix axis (declared: %s)",
-						ErrBadOutput, jobName, name, ref.Key, listOrNone(axes))
-				}
-			case "inputs":
-				if !containsExact(inputNames, ref.Key) {
-					return fmt.Errorf("%w: job %s: outputs.%s: ${{ inputs.%s }} is not a declared workflow_dispatch input (declared: %s)",
-						ErrBadOutput, jobName, name, ref.Key, listOrNone(inputNames))
-				}
-			default:
-				return fmt.Errorf("%w: job %s: outputs.%s: ${{ %s }} is not supported (supported: steps.<id>.outputs.<name>, needs.<job>.outputs.<name>, matrix.<axis>, inputs.<name>)",
-					ErrBadOutput, jobName, name, ref.Raw)
-			}
 		}
 	}
 	return nil

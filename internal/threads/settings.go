@@ -20,11 +20,18 @@ package threads
 //
 // PAR-153 (`concurrency_cap`): 0 = unlimited; 1…maxRepoConcurrencyCap queues a
 // run that would exceed the cap, naming the reason on the run.
+//
+// PAR-157 (`ci_paused`): a paused repository claims nothing. In-flight jobs run
+// to completion (a pause is not a cancel), and newly created runs queue with
+// the named reason "CI is paused for this repository" until a maintainer
+// resumes. The pause marker is mirrored onto the queue head so the claim path
+// stays one GET (queue.go), and the switch itself is audited.
 
 import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"strings"
 
 	"github.com/crueber/spindle/internal/server/auth"
@@ -38,6 +45,8 @@ const (
 	AuditRepoPullTarget      = "repo_pull_request_target"
 	AuditRepoPRTargetHead    = "repo_pr_target_head_checkout"
 	AuditRepoConcurrencyCap  = "repo_concurrency_cap"
+	AuditRepoCIPause         = "repo_ci_pause"
+	AuditRepoNotifyWebhook   = "repo_notify_webhook"
 )
 
 // maxRepoConcurrencyCap bounds the per-repository cap (GitHub's ceiling for
@@ -68,6 +77,12 @@ type SettingsDoc struct {
 	// (0 = unlimited). A run created above the cap is held with a named
 	// reason and released when a slot frees (PAR-153).
 	ConcurrencyCap int `json:"concurrency_cap,omitempty"`
+	// CIPaused stops the repository claiming new jobs (PAR-157). In-flight
+	// jobs keep running; queued jobs wait under a named reason. Off by default.
+	CIPaused bool `json:"ci_paused,omitempty"`
+	// NotifyWebhook is the failure-notification endpoint (PAR-197): one POST
+	// per failed run, with the run link. Empty = no outbound notification.
+	NotifyWebhook string `json:"notify_webhook,omitempty"`
 
 	UpdatedBy string `json:"updated_by,omitempty"`
 	UpdatedAt string `json:"updated_at"`
@@ -80,6 +95,8 @@ type SettingsView struct {
 	PullRequestTarget         bool   `json:"pull_request_target"`
 	PRTargetAllowHeadCheckout bool   `json:"pr_target_allow_head_checkout"`
 	ConcurrencyCap            int    `json:"concurrency_cap"`
+	CIPaused                  bool   `json:"ci_paused"`
+	NotifyWebhook             string `json:"notify_webhook,omitempty"`
 	UpdatedBy                 string `json:"updated_by,omitempty"`
 	UpdatedAt                 string `json:"updated_at,omitempty"`
 	Version                   int    `json:"version,omitempty"`
@@ -87,10 +104,12 @@ type SettingsView struct {
 
 // SettingsInput is the PUT body: a full replacement of the editable fields.
 type SettingsInput struct {
-	SendWriteTokens           bool `json:"send_write_tokens"`
-	PullRequestTarget         bool `json:"pull_request_target"`
-	PRTargetAllowHeadCheckout bool `json:"pr_target_allow_head_checkout"`
-	ConcurrencyCap            int  `json:"concurrency_cap"`
+	SendWriteTokens           bool   `json:"send_write_tokens"`
+	PullRequestTarget         bool   `json:"pull_request_target"`
+	PRTargetAllowHeadCheckout bool   `json:"pr_target_allow_head_checkout"`
+	ConcurrencyCap            int    `json:"concurrency_cap"`
+	CIPaused                  bool   `json:"ci_paused"`
+	NotifyWebhook             string `json:"notify_webhook,omitempty"`
 }
 
 // view projects the record for the API/page.
@@ -101,7 +120,8 @@ func (d *SettingsDoc) view() SettingsView {
 	return SettingsView{
 		SendWriteTokens: d.SendWriteTokens, PullRequestTarget: d.PullRequestTarget,
 		PRTargetAllowHeadCheckout: d.PRTargetAllowHeadCheckout,
-		ConcurrencyCap:            d.ConcurrencyCap, UpdatedBy: d.UpdatedBy, UpdatedAt: d.UpdatedAt, Version: d.Version,
+		ConcurrencyCap:            d.ConcurrencyCap, CIPaused: d.CIPaused, NotifyWebhook: d.NotifyWebhook,
+		UpdatedBy: d.UpdatedBy, UpdatedAt: d.UpdatedAt, Version: d.Version,
 	}
 }
 
@@ -127,6 +147,7 @@ type repoPolicy struct {
 	pullTarget      bool
 	prTargetHead    bool
 	cap             int
+	ciPaused        bool
 }
 
 // loadRepoPolicy reads the settings and folds them into the booleans the
@@ -142,6 +163,7 @@ func (s *Service) loadRepoPolicy(ctx context.Context, owner, repo string) repoPo
 		pullTarget:      doc.PullRequestTarget,
 		prTargetHead:    doc.PRTargetAllowHeadCheckout && doc.PullRequestTarget,
 		cap:             doc.ConcurrencyCap,
+		ciPaused:        doc.CIPaused,
 	}
 }
 
@@ -181,6 +203,10 @@ func (s *Service) UpdateSettings(ctx context.Context, repo string, in SettingsIn
 	if in.ConcurrencyCap < 0 || in.ConcurrencyCap > maxRepoConcurrencyCap {
 		return nil, fmt.Errorf("%w: concurrency_cap must be 0..%d", ErrInvalid, maxRepoConcurrencyCap)
 	}
+	webhook, werr := validateNotifyWebhook(in.NotifyWebhook)
+	if werr != nil {
+		return nil, werr
+	}
 	now := s.nowUTC().Format(dateTimeFmt)
 	key := SettingsKey(owner, name)
 	var before SettingsDoc
@@ -195,9 +221,11 @@ func (s *Service) UpdateSettings(ctx context.Context, repo string, in SettingsIn
 		next := SettingsDoc{
 			SendWriteTokens: in.SendWriteTokens, PullRequestTarget: in.PullRequestTarget,
 			PRTargetAllowHeadCheckout: in.PRTargetAllowHeadCheckout, ConcurrencyCap: in.ConcurrencyCap,
-			UpdatedBy: strings.TrimSpace(p.Name), UpdatedAt: now,
+			CIPaused:      in.CIPaused,
+			NotifyWebhook: webhook,
+			UpdatedBy:     strings.TrimSpace(p.Name), UpdatedAt: now,
 		}
-		if cur == nil && !in.SendWriteTokens && !in.PullRequestTarget && !in.PRTargetAllowHeadCheckout && in.ConcurrencyCap == 0 {
+		if cur == nil && !in.SendWriteTokens && !in.PullRequestTarget && !in.PRTargetAllowHeadCheckout && in.ConcurrencyCap == 0 && !in.CIPaused && webhook == "" {
 			return nil, false, nil // nothing set and nothing stored: no record needed
 		}
 		next.Version = before.Version + 1
@@ -226,6 +254,64 @@ func (s *Service) UpdateSettings(ctx context.Context, repo string, in SettingsIn
 	if before.ConcurrencyCap != in.ConcurrencyCap {
 		s.auditAdmin(ctx, p.Name, AuditRepoConcurrencyCap, "repo:"+repoID(owner, name),
 			fmt.Sprintf("concurrency_cap=%d", in.ConcurrencyCap))
+	}
+	if before.CIPaused != in.CIPaused {
+		s.auditAdmin(ctx, p.Name, AuditRepoCIPause, "repo:"+repoID(owner, name),
+			fmt.Sprintf("ci_paused=%t", in.CIPaused))
+	}
+	if before.NotifyWebhook != webhook {
+		s.auditAdmin(ctx, p.Name, AuditRepoNotifyWebhook, "repo:"+repoID(owner, name),
+			fmt.Sprintf("notify_webhook_set=%t", webhook != ""))
+	}
+	// Mirror the pause marker onto the queue head so a claim probe refuses the
+	// repository without a settings read (PAR-157, the one-GET claim path).
+	if before.CIPaused != in.CIPaused {
+		if herr := s.setHeadPaused(ctx, owner, name, in.CIPaused); herr != nil {
+			slog.Warn("threads: pause marker", "repo", repoID(owner, name), "paused", in.CIPaused, "err", herr)
+		}
+	}
+	v := written.view()
+	return &v, nil
+}
+
+// SetCIPaused flips only the repository pause switch (PAR-157), leaving every
+// other setting untouched. It is the CLI/API affordance beside the full
+// settings form: a caller that pauses CI must not have to resend the other
+// switches (and risk clearing one). Maintain+ and audited.
+func (s *Service) SetCIPaused(ctx context.Context, repo string, paused bool, p auth.Principal) (*SettingsView, error) {
+	owner, name, err := splitRepo(repo)
+	if err != nil {
+		return nil, err
+	}
+	if err := s.requireRole(ctx, owner, name, p, "maintain"); err != nil {
+		return nil, err
+	}
+	now := s.nowUTC().Format(dateTimeFmt)
+	var before bool
+	var written SettingsDoc
+	_, err = s.casUpdate(ctx, SettingsKey(owner, name), 5, func(cur []byte, _ store.Version) ([]byte, bool, error) {
+		if cur != nil {
+			if jerr := json.Unmarshal(cur, &written); jerr != nil {
+				return nil, false, fmt.Errorf("%w: threads settings: %v", ErrCorrupt, jerr)
+			}
+		}
+		before = written.CIPaused
+		if before == paused {
+			return nil, false, nil
+		}
+		written.CIPaused = paused
+		written.UpdatedBy, written.UpdatedAt = strings.TrimSpace(p.Name), now
+		written.Version++
+		return mustJSON(&written), true, nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	if before != paused {
+		s.auditAdmin(ctx, p.Name, AuditRepoCIPause, "repo:"+repoID(owner, name), fmt.Sprintf("ci_paused=%t", paused))
+		if herr := s.setHeadPaused(ctx, owner, name, paused); herr != nil {
+			slog.Warn("threads: pause marker", "repo", repoID(owner, name), "paused", paused, "err", herr)
+		}
 	}
 	v := written.view()
 	return &v, nil

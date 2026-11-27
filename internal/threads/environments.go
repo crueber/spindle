@@ -59,7 +59,11 @@ type EnvironmentDoc struct {
 	// Secrets is the allowlist of environment secret names. Values live sealed
 	// under the environment's secret prefix; this list is what the resolver
 	// reads (no LIST).
-	Secrets   []string `json:"secrets,omitempty"`
+	Secrets []string `json:"secrets,omitempty"`
+	// Vars is the allowlist of non-secret environment variable names
+	// (PAR-117). Values are sealed like repository variables and override
+	// repository variables of the same name at claim time.
+	Vars      []string `json:"vars,omitempty"`
 	CreatedBy string   `json:"created_by,omitempty"`
 	CreatedAt string   `json:"created_at"`
 	UpdatedAt string   `json:"updated_at"`
@@ -75,6 +79,7 @@ type EnvironmentView struct {
 	PreventSelfReview  bool     `json:"prevent_self_review,omitempty"`
 	DeploymentBranches []string `json:"deployment_branches,omitempty"`
 	Secrets            []string `json:"secrets"`
+	Vars               []string `json:"vars"`
 	CreatedBy          string   `json:"created_by,omitempty"`
 	CreatedAt          string   `json:"created_at"`
 	UpdatedAt          string   `json:"updated_at"`
@@ -105,6 +110,11 @@ func EnvironmentsPrefix(owner, repo string) string {
 // EnvironmentSecretKey returns repos/<o>/<r>/threads/environments/<name>/secrets/<secret>.json.
 func EnvironmentSecretKey(owner, repo, env, secret string) string {
 	return EnvironmentsPrefix(owner, repo) + env + "/secrets/" + secret + ".json"
+}
+
+// EnvironmentVariableKey returns repos/<o>/<r>/threads/environments/<name>/vars/<var>.json.
+func EnvironmentVariableKey(owner, repo, env, variable string) string {
+	return EnvironmentsPrefix(owner, repo) + env + "/vars/" + variable + ".json"
 }
 
 // normalizeEnvironmentName validates an environment name (the same charset the
@@ -240,8 +250,8 @@ func (s *Service) DeleteEnvironment(ctx context.Context, repo, name string, p au
 	// record so a crash leaves a record that still names them, never orphaned
 	// ciphertext nobody can find.
 	var keys []string
-	if lerr := s.Store.List(ctx, EnvironmentsPrefix(owner, rname)+name+"/secrets/", "", func(m store.ObjectMeta) error {
-		if strings.HasSuffix(m.Key, ".json") {
+	if lerr := s.Store.List(ctx, EnvironmentsPrefix(owner, rname)+name+"/", "", func(m store.ObjectMeta) error {
+		if strings.HasSuffix(m.Key, ".json") && (strings.Contains(m.Key, "/secrets/") || strings.Contains(m.Key, "/vars/")) {
 			keys = append(keys, m.Key)
 		}
 		return nil
@@ -256,8 +266,93 @@ func (s *Service) DeleteEnvironment(ctx context.Context, repo, name string, p au
 	if derr := s.Store.Delete(ctx, EnvironmentKey(owner, rname, name), ""); derr != nil {
 		return derr
 	}
+	// PAR-136: a deleted environment must not leave deployments queued behind a
+	// slot that no longer exists. Every waiting deployment fails closed with a
+	// named reason, then the queue object is removed.
+	s.failEnvironmentQueue(ctx, owner, rname, name)
 	s.auditAdmin(ctx, p.Name, AuditEnvironmentDelete, "environment:"+name, "secrets="+fmt.Sprint(len(keys)))
 	return nil
+}
+
+// failEnvironmentQueue terminalises every deployment (job or API) that was
+// waiting on a deleted environment and removes the queue object. Best effort:
+// the record deletion is the commit point, and a missed transition is repaired
+// when the job's claim fails closed on the missing environment.
+func (s *Service) failEnvironmentQueue(ctx context.Context, owner, repo, env string) {
+	q, err := s.loadEnvironmentQueue(ctx, owner, repo, env)
+	if err == nil && q != nil {
+		tokens := make([]string, 0, len(q.Entries)+1)
+		if q.Holder != "" {
+			tokens = append(tokens, q.Holder)
+		}
+		for _, entry := range q.Entries {
+			tokens = append(tokens, entry.Token)
+		}
+		now := s.nowUTC().Format(dateTimeFmt)
+		for _, token := range tokens {
+			if rest, ok := strings.CutPrefix(token, "job:"); ok {
+				runID, jobID, ok := strings.Cut(rest, ":")
+				if !ok {
+					continue
+				}
+				job, run, lerr := s.loadJobAndRun(ctx, owner, repo, runID, jobID)
+				if lerr != nil || job == nil || terminal(job.State) {
+					continue
+				}
+				// A pending_approval run keeps its existing contract: deletion
+				// fails the deployment closed at the decision/claim, not here (a
+				// reviewer may still deny, and the page explains the state).
+				if run != nil && run.State == RunPendingApproval {
+					continue
+				}
+				// Only a queued waiter is failed here; a running attempt already
+				// carries its payload and ends through its own path.
+				if job.State != JobQueued {
+					continue
+				}
+				dep := Deployment{Environment: env, State: DeploymentFailed}
+				if job.Deployment != nil {
+					dep = *job.Deployment
+					dep.State, dep.QueuePosition, dep.QueueReason = DeploymentFailed, 0, ""
+				}
+				_, _ = s.UpdateJob(ctx, repoID(owner, repo), runID, jobID, JobUpdate{
+					State: JobFailure, Deployment: &dep,
+					Reason: fmt.Sprintf("environment %q was deleted while the deployment was queued", env),
+				})
+				continue
+			}
+			id, ok := strings.CutPrefix(token, "dep:")
+			if !ok {
+				continue
+			}
+			doc, derr := s.loadDeployment(ctx, owner, repo, id)
+			if derr != nil || doc == nil || terminalDeploymentState(doc.State) {
+				continue
+			}
+			doc.State = DeploymentStateFailure
+			doc.QueuePosition, doc.QueueReason = 0, ""
+			doc.Statuses = appendDeploymentStatus(doc.Statuses, DeploymentStatus{
+				State: DeploymentStateFailure, Creator: "threads", CreatedAt: now,
+				Description: fmt.Sprintf("environment %q was deleted while the deployment was queued", env),
+			})
+			doc.UpdatedAt = now
+			doc.Version++
+			_, _ = s.casUpdate(ctx, DeploymentKey(owner, repo, id), 5, func(cur []byte, _ store.Version) ([]byte, bool, error) {
+				if cur == nil {
+					return nil, false, nil
+				}
+				var live DeploymentDoc
+				if jerr := json.Unmarshal(cur, &live); jerr != nil {
+					return nil, false, nil
+				}
+				live.State, live.QueuePosition, live.QueueReason = doc.State, 0, ""
+				live.Statuses, live.UpdatedAt = doc.Statuses, doc.UpdatedAt
+				live.Version++
+				return mustJSON(&live), true, nil
+			})
+		}
+	}
+	_ = s.Store.Delete(ctx, EnvironmentQueueKey(owner, repo, env), "")
 }
 
 // GetEnvironment reads one record (maintain+ — it names secret names).
@@ -380,6 +475,7 @@ func environmentView(doc *EnvironmentDoc) *EnvironmentView {
 	}
 	return &EnvironmentView{
 		Name: doc.Name, RequiredReviewers: nonNilStr(doc.RequiredReviewers), Secrets: nonNilStr(doc.Secrets),
+		Vars:          nonNilStr(doc.Vars),
 		TeamReviewers: nonNilStr(doc.TeamReviewers), WaitTimerSeconds: doc.WaitTimerSeconds,
 		PreventSelfReview: doc.PreventSelfReview, DeploymentBranches: nonNilStr(doc.DeploymentBranches),
 		CreatedBy: doc.CreatedBy, CreatedAt: doc.CreatedAt, UpdatedAt: doc.UpdatedAt, Version: doc.Version,
@@ -601,6 +697,258 @@ func (s *Service) DeleteEnvironmentSecret(ctx context.Context, repo, env, name s
 	return nil
 }
 
+// --- environment variables (PAR-117) ----------------------------------------
+
+// envVariableAAD binds one environment variable ciphertext to (repo,
+// environment, name), so it cannot be replayed as a repository variable or
+// under another environment.
+func envVariableAAD(repo, env, name string) []byte {
+	return []byte("spindle/threads/environment-variable/v1\x00" + repo + "\x00" + env + "\x00" + name)
+}
+
+// sealEnvironmentVariable seals one value with the variable envelope.
+func (s *Service) sealEnvironmentVariable(repo, env, name, value string) (string, error) {
+	if !s.keys.SecretsEnabled() {
+		return "", fmt.Errorf("%w: variables need server.secrets_key or server.auth.session_secret", ErrUnavailable)
+	}
+	gcm := gcmFor(s.keys.Seal)
+	nonce, err := randomBytes(gcm.NonceSize())
+	if err != nil {
+		return "", fmt.Errorf("%w: nonce: %v", ErrUnavailable, err)
+	}
+	return base64.StdEncoding.EncodeToString(gcm.Seal(nonce, nonce, []byte(value), envVariableAAD(repo, env, name))), nil
+}
+
+// openEnvironmentVariable opens one stored value.
+func (s *Service) openEnvironmentVariable(repo, env, name, sealed string) (string, error) {
+	if !s.keys.SecretsEnabled() {
+		return "", fmt.Errorf("%w: variables need server.secrets_key or server.auth.session_secret", ErrUnavailable)
+	}
+	raw, err := base64.StdEncoding.DecodeString(sealed)
+	if err != nil {
+		return "", fmt.Errorf("%w: environment variable %s/%s: bad envelope", ErrCorrupt, env, name)
+	}
+	gcm := gcmFor(s.keys.Seal)
+	if len(raw) < gcm.NonceSize() {
+		return "", fmt.Errorf("%w: environment variable %s/%s: short envelope", ErrCorrupt, env, name)
+	}
+	nonce, body := raw[:gcm.NonceSize()], raw[gcm.NonceSize():]
+	plain, oerr := gcm.Open(nil, nonce, body, envVariableAAD(repo, env, name))
+	if oerr != nil {
+		return "", fmt.Errorf("%w: environment variable %s/%s: cannot be opened (wrong key or corrupt)", ErrCorrupt, env, name)
+	}
+	return string(plain), nil
+}
+
+// ListEnvironmentVariables lists one environment's variable names (maintain+;
+// values never returned).
+func (s *Service) ListEnvironmentVariables(ctx context.Context, repo, env string, p auth.Principal) ([]VariableView, error) {
+	owner, rname, err := splitRepo(repo)
+	if err != nil {
+		return nil, err
+	}
+	if err := s.requireRole(ctx, owner, rname, p, "maintain"); err != nil {
+		return nil, err
+	}
+	env, err = normalizeEnvironmentName(env)
+	if err != nil {
+		return nil, err
+	}
+	doc, err := s.loadEnvironment(ctx, owner, rname, env)
+	if err != nil {
+		return nil, err
+	}
+	if doc == nil {
+		return nil, fmt.Errorf("%w: unknown environment %q", ErrNotFound, env)
+	}
+	out := []VariableView{}
+	for _, name := range doc.Vars {
+		raw, _, gerr := s.getJSON(ctx, EnvironmentVariableKey(owner, rname, env, name))
+		if gerr != nil {
+			return nil, gerr
+		}
+		if raw == nil {
+			continue
+		}
+		var entry VariableValue
+		if jerr := json.Unmarshal(raw, &entry); jerr != nil {
+			return nil, fmt.Errorf("%w: environment variable %s/%s: %v", ErrCorrupt, env, name, jerr)
+		}
+		out = append(out, VariableView{Name: entry.Name, CreatedBy: entry.CreatedBy, CreatedAt: entry.CreatedAt, UpdatedAt: entry.UpdatedAt})
+	}
+	return out, nil
+}
+
+// SetEnvironmentVariable stores (or replaces) one environment variable and
+// adds its name to the record's allowlist (maintain+, audited). The record is
+// updated first, exactly like a secret: a ciphertext no record names is
+// unreachable, while a listed name with no value is skipped.
+func (s *Service) SetEnvironmentVariable(ctx context.Context, repo, env, name, value string, p auth.Principal) error {
+	owner, rname, err := splitRepo(repo)
+	if err != nil {
+		return err
+	}
+	if err := s.requireRole(ctx, owner, rname, p, "maintain"); err != nil {
+		return err
+	}
+	env, err = normalizeEnvironmentName(env)
+	if err != nil {
+		return err
+	}
+	name, err = normalizeVariableName(name)
+	if err != nil {
+		return err
+	}
+	if !s.SecretsEnabled() {
+		return fmt.Errorf("%w: variables need server.secrets_key or server.auth.session_secret", ErrUnavailable)
+	}
+	if len(value) > 64<<10 {
+		return fmt.Errorf("%w: variable value must be ≤ 64 KiB", ErrInvalid)
+	}
+	sealed, serr := s.sealEnvironmentVariable(repoID(owner, rname), env, name, value)
+	if serr != nil {
+		return serr
+	}
+	now := s.nowUTC().Format(dateTimeFmt)
+	doc, err := s.loadEnvironment(ctx, owner, rname, env)
+	if err != nil {
+		return err
+	}
+	if doc == nil {
+		return fmt.Errorf("%w: unknown environment %q", ErrNotFound, env)
+	}
+	if derr := s.addEnvironmentVariableName(ctx, owner, rname, env, name, now); derr != nil {
+		return derr
+	}
+	key := EnvironmentVariableKey(owner, rname, env, name)
+	_, err = s.casUpdate(ctx, key, 5, func(cur []byte, _ store.Version) ([]byte, bool, error) {
+		entry := &VariableValue{Name: name, CreatedAt: now}
+		if cur != nil {
+			if jerr := json.Unmarshal(cur, entry); jerr != nil {
+				return nil, false, fmt.Errorf("%w: environment variable %s/%s: %v", ErrCorrupt, env, name, jerr)
+			}
+		}
+		entry.Sealed = sealed
+		entry.UpdatedAt = now
+		entry.CreatedBy = truncate(strings.ToLower(strings.TrimSpace(p.Name)), 100)
+		return mustJSON(entry), true, nil
+	})
+	if err != nil {
+		return err
+	}
+	s.auditAdmin(ctx, p.Name, AuditEnvironmentVariableSet, "environment:"+env, "variable="+name)
+	return nil
+}
+
+// addEnvironmentVariableName adds name to the record's variable allowlist
+// (CAS, idempotent).
+func (s *Service) addEnvironmentVariableName(ctx context.Context, owner, repo, env, name, now string) error {
+	_, err := s.casUpdate(ctx, EnvironmentKey(owner, repo, env), 5, func(cur []byte, _ store.Version) ([]byte, bool, error) {
+		if cur == nil {
+			return nil, false, fmt.Errorf("%w: unknown environment %q", ErrNotFound, env)
+		}
+		var doc EnvironmentDoc
+		if jerr := json.Unmarshal(cur, &doc); jerr != nil {
+			return nil, false, fmt.Errorf("%w: environment %s: %v", ErrCorrupt, env, jerr)
+		}
+		for _, existing := range doc.Vars {
+			if existing == name {
+				return nil, false, nil
+			}
+		}
+		doc.Vars = append(doc.Vars, name)
+		sort.Strings(doc.Vars)
+		doc.UpdatedAt = now
+		doc.Version++
+		return mustJSON(&doc), true, nil
+	})
+	return err
+}
+
+// DeleteEnvironmentVariable removes one variable and drops its name from the
+// allowlist (maintain+, audited; absent is not an error).
+func (s *Service) DeleteEnvironmentVariable(ctx context.Context, repo, env, name string, p auth.Principal) error {
+	owner, rname, err := splitRepo(repo)
+	if err != nil {
+		return err
+	}
+	if err := s.requireRole(ctx, owner, rname, p, "maintain"); err != nil {
+		return err
+	}
+	env, err = normalizeEnvironmentName(env)
+	if err != nil {
+		return err
+	}
+	name, err = normalizeVariableName(name)
+	if err != nil {
+		return err
+	}
+	if derr := s.Store.Delete(ctx, EnvironmentVariableKey(owner, rname, env, name), ""); derr != nil {
+		return derr
+	}
+	now := s.nowUTC().Format(dateTimeFmt)
+	_, err = s.casUpdate(ctx, EnvironmentKey(owner, rname, env), 5, func(cur []byte, _ store.Version) ([]byte, bool, error) {
+		if cur == nil {
+			return nil, false, nil
+		}
+		var doc EnvironmentDoc
+		if jerr := json.Unmarshal(cur, &doc); jerr != nil {
+			return nil, false, fmt.Errorf("%w: environment %s: %v", ErrCorrupt, env, jerr)
+		}
+		kept := doc.Vars[:0]
+		for _, existing := range doc.Vars {
+			if existing != name {
+				kept = append(kept, existing)
+			}
+		}
+		doc.Vars = kept
+		doc.UpdatedAt = now
+		doc.Version++
+		return mustJSON(&doc), true, nil
+	})
+	if err != nil {
+		return err
+	}
+	s.auditAdmin(ctx, p.Name, AuditEnvironmentVariableDelete, "environment:"+env, "variable="+name)
+	return nil
+}
+
+// environmentVariableValues resolves one environment's non-secret variables
+// for a trusted job payload (PAR-117). They override repository/organization
+// variables of the same name at the claim merge, exactly like GitHub.
+func (s *Service) environmentVariableValues(ctx context.Context, owner, repo, env string) (map[string]string, error) {
+	out := map[string]string{}
+	if !s.SecretsEnabled() {
+		return out, nil
+	}
+	doc, err := s.loadEnvironment(ctx, owner, repo, env)
+	if err != nil {
+		return nil, err
+	}
+	if doc == nil {
+		return nil, fmt.Errorf("%w: environment %q no longer exists", ErrNotFound, env)
+	}
+	for _, name := range doc.Vars {
+		raw, _, gerr := s.getJSON(ctx, EnvironmentVariableKey(owner, repo, env, name))
+		if gerr != nil {
+			return nil, gerr
+		}
+		if raw == nil {
+			continue
+		}
+		var entry VariableValue
+		if jerr := json.Unmarshal(raw, &entry); jerr != nil {
+			return nil, fmt.Errorf("%w: environment variable %s/%s: %v", ErrCorrupt, env, name, jerr)
+		}
+		value, oerr := s.openEnvironmentVariable(repoID(owner, repo), env, entry.Name, entry.Sealed)
+		if oerr != nil {
+			return nil, oerr
+		}
+		out[entry.Name] = value
+	}
+	return out, nil
+}
+
 // environmentSecretValues decrypts one environment's secrets for a trusted job
 // payload. A missing environment or an unreadable envelope fails the fetch
 // (fail closed: a job that silently lost its secrets is worse than a clear
@@ -732,13 +1080,51 @@ func (s *Service) applyEnvironmentDecision(ctx context.Context, owner, repo stri
 		Environment: env, URL: job.Spec.Environment.URL, State: state,
 		RequiredApprovers: approvers, WaitUntil: waitUntilFor(doc, now),
 		PreventSelfReview: doc.PreventSelfReview, TriggeredBy: strings.ToLower(strings.TrimSpace(run.Actor)),
+		DeploymentID: jobDeploymentID(job.RunID, job.ID),
 	}
+	// PAR-136: every environment deployment takes the environment's
+	// serialization slot in trigger order. A second deployment waits (position
+	// 1..N) instead of running beside the first; the claim path refuses a
+	// queued position and the visible reason names the holder. A full queue is
+	// a named refusal on the job — never a silent overwrite or a parallel run.
+	token := "job:" + job.RunID + ":" + job.ID
+	position, reason, qerr := s.acquireEnvironmentSlot(ctx, owner, repo, env, token, jobDeploymentLabel(run, job, env), job.RunID, job.ID)
+	if qerr != nil {
+		job.Deployment.State = DeploymentFailed
+		if job.State == JobQueued {
+			job.State = JobFailure
+			job.CompletedAt = &nowStr
+			job.Reason = qerr.Error()
+		}
+		return false, nil
+	}
+	job.Deployment.QueuePosition = position
+	if position > 0 {
+		job.Deployment.QueueReason = reason
+	}
+	s.syncJobDeployment(ctx, owner, repo, job, run)
 	// PAR-021: a deployment record transition is a `deployment` +
 	// `deployment_status` event. It is emitted off the creation path (detach)
 	// and the follow-up chain cap bounds a deployment_status workflow that
 	// itself deploys.
 	s.emitDeploymentEvents(run, job, deploymentStatusState(state), "")
 	return state == DeploymentPending && job.State == JobQueued, nil
+}
+
+// jobDeploymentLabel is the visible queue holder label ("run … / job …").
+func jobDeploymentLabel(run *Run, job *Job, env string) string {
+	runID := ""
+	if run != nil {
+		runID = run.ID
+	}
+	name := ""
+	if job != nil {
+		name = job.Name
+		if name == "" {
+			name = job.Key
+		}
+	}
+	return fmt.Sprintf("deployment for job %q in environment %q (run %s)", name, env, runID)
 }
 
 // guardDeploymentSecrets is the payload-side half of the gate: a job whose

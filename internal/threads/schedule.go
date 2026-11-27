@@ -80,6 +80,12 @@ type ScheduleSweep struct {
 	// cannot exist in a freshly parsed file: the parser rejects them; one can
 	// only survive from a record written before validation).
 	Skipped []string `json:"skipped,omitempty"`
+	// Disabled counts entries an operator disabled (PAR-154): they are reported,
+	// never fired.
+	Disabled int `json:"disabled,omitempty"`
+	// Coalesced counts missed ticks folded into a single fired run: the sweeper
+	// fires once per entry per pass, never a backlog (PAR-154).
+	Coalesced int `json:"coalesced,omitempty"`
 	// Runs are the runs this pass created, in fire order.
 	Runs []*Run `json:"runs,omitempty"`
 }
@@ -108,6 +114,17 @@ func (s *Service) SweepSchedule(ctx context.Context, owner, repo string, log Tas
 		return res, nil
 	}
 	repoPath := repoID(owner, repo)
+	// The operator switches and the watermark are one exact-key GET each, read
+	// once per pass (PAR-154). A switch read failure fails CLOSED: nothing is
+	// auto-fired rather than ignoring an operator's disable.
+	overrides, oerr := s.scheduleOverridesForSweep(ctx, owner, repo)
+	if oerr != nil {
+		return res, oerr
+	}
+	watermark, werr := s.LoadScheduleWatermark(ctx, owner, repo)
+	if werr != nil {
+		return res, werr
+	}
 	commit, err := s.Git.ResolveRef(ctx, repoPath, "HEAD")
 	if err != nil {
 		if isNotFoundLike(err) {
@@ -120,10 +137,11 @@ func (s *Service) SweepSchedule(ctx context.Context, owner, repo string, log Tas
 		return res, derr
 	}
 	type due struct {
-		path string
-		cron string
-		tz   string
-		slot string
+		path   string
+		cron   string
+		tz     string
+		slot   string
+		missed int
 	}
 	var dues []due
 	seen := map[string]bool{}
@@ -151,11 +169,18 @@ func (s *Service) SweepSchedule(ctx context.Context, owner, repo string, log Tas
 			}
 			key := scheduleEntryKey(f.Path, entry.Cron, entry.Timezone)
 			seen[key] = true
+			if o, ok := overrides[key]; ok && o.Disabled {
+				res.Disabled++
+				continue
+			}
 			tick, ok := parsed.PrevIn(now, loc)
 			if !ok {
 				continue
 			}
-			dues = append(dues, due{path: f.Path, cron: entry.Cron, tz: entry.Timezone, slot: parsed.Slot(tick)})
+			dues = append(dues, due{
+				path: f.Path, cron: entry.Cron, tz: entry.Timezone, slot: parsed.Slot(tick),
+				missed: coalescedTicks(parsed, loc, watermark.Fired[key], now),
+			})
 		}
 	}
 	if len(dues) == 0 {
@@ -193,10 +218,12 @@ func (s *Service) SweepSchedule(ctx context.Context, owner, repo string, log Tas
 			continue
 		}
 		res.Fired += len(runs)
+		res.Coalesced += d.missed
 		res.Runs = append(res.Runs, runs...)
 	}
-	if log != nil && res.Fired > 0 {
-		log.Notice(fmt.Sprintf("threads-schedule %s: %d run(s) from %d entr(ies)", repoPath, res.Fired, res.Evaluated))
+	if log != nil && (res.Fired > 0 || res.Coalesced > 0 || res.Disabled > 0) {
+		log.Notice(fmt.Sprintf("threads-schedule %s: %d run(s) from %d entr(ies), %d coalesced tick(s), %d disabled",
+			repoPath, res.Fired, res.Evaluated, res.Coalesced, res.Disabled))
 	}
 	return res, nil
 }

@@ -47,6 +47,12 @@ func adminRunnerDeps() testDeps {
 		}
 		return pol, nil
 	}
+	deps.RunnerTenancy.Drain = func(context.Context, string, auth.Principal) error { return nil }
+	deps.RunnerTenancy.Resume = func(context.Context, string, auth.Principal) error { return nil }
+	deps.RunnerTenancy.Rotate = func(_ context.Context, id string, _ auth.Principal) (*threads.RunnerTokenRotation, error) {
+		return &threads.RunnerTokenRotation{RunnerID: id, Token: "wrt_new.secret", PreviousUntil: "2026-11-22T10:15:00Z"}, nil
+	}
+	deps.RunnerTenancy.Deregister = func(context.Context, string, auth.Principal) error { return nil }
 	return deps
 }
 

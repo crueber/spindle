@@ -271,6 +271,16 @@
         {{end}}
         {{with .RequiredText}}<p class="muted mt-1 text-xs">required: {{.}}</p>{{end}}
         {{with .CheckBlockersText}}<p class="warn-line">blocking merge: {{.}}</p>{{end}}
+        {{if .ThreadsRunID}}
+        <div class="mt-2 flex flex-wrap items-center gap-2">
+          <a class="link text-xs" href="/{{$d.Repo.Full}}/threads/{{.ThreadsRunID}}">open the Threads run</a>
+          {{if .ThreadsCanRerun}}
+          <form method="post" action="/{{$d.Repo.Full}}/threads/{{.ThreadsRunID}}/rerun">
+            <button type="submit" class="btn px-2 py-1 text-xs">re-run checks</button>
+          </form>
+          {{end}}
+        </div>
+        {{end}}
       </div>
 
       <div class="p-3" aria-label="Merge">

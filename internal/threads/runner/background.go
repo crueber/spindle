@@ -294,7 +294,7 @@ func (b *bgStep) join() threads.StepResult {
 	b.buf.flush()
 	switch {
 	case timedOut:
-		res.Conclusion = threads.JobFailure
+		res.Conclusion = threads.JobTimedOut
 		res.ExitCode = -1
 		res.Error = fmt.Sprintf("timed out after %s", b.step.Timeout)
 	case !ended:
@@ -384,7 +384,7 @@ func (s *backgroundSet) finishAll() (failed []string, leaked []string) {
 			}
 		}
 		res := b.join()
-		if res.Conclusion == threads.JobFailure && !b.step.ContinueOnError {
+		if (res.Conclusion == threads.JobFailure || res.Conclusion == threads.JobTimedOut) && !b.step.ContinueOnError {
 			errText := res.Error
 			if errText == "" {
 				errText = fmt.Sprintf("exit code %d", res.ExitCode)
@@ -460,7 +460,7 @@ func (e *Executor) runControlStep(ctx context.Context, stream StepStream, bg *ba
 	var failures []string
 	for _, b := range targets {
 		res := b.wait(ctx)
-		if res.Conclusion == threads.JobFailure {
+		if res.Conclusion == threads.JobFailure || res.Conclusion == threads.JobTimedOut {
 			msg := res.Error
 			if msg == "" {
 				msg = fmt.Sprintf("exit code %d", res.ExitCode)
@@ -557,7 +557,7 @@ func (e *Executor) runParallelStep(ctx context.Context, plan *Plan, step StepPla
 		out.Conclusion = threads.JobSuccess
 		var failures []string
 		for i, m := range members {
-			if m.res.Conclusion != threads.JobFailure || m.step.ContinueOnError {
+			if (m.res.Conclusion != threads.JobFailure && m.res.Conclusion != threads.JobTimedOut) || m.step.ContinueOnError {
 				continue
 			}
 			msg := m.res.Error

@@ -33,6 +33,13 @@ func basicAuth(cred string) string {
 // containers use).
 func threadsServer(t *testing.T, publicURL ...string) *e2eServer {
 	t.Helper()
+	return threadsServerWithConfig(t, "", publicURL...)
+}
+
+// threadsServerWithConfig is threadsServer with an extra spindle.toml block
+// appended (a scenario that needs threads.* policy).
+func threadsServerWithConfig(t *testing.T, extra string, publicURL ...string) *e2eServer {
+	t.Helper()
 	bin := buildSpindle(t)
 	dataDir := t.TempDir()
 	port := freePort(t)
@@ -57,7 +64,9 @@ root = %q
 
 [cache]
 dir = %q
-`, port, pub, p.configBlock(), filepath.Join(dataDir, "store"), filepath.Join(dataDir, "cache")))
+
+%s
+`, port, pub, p.configBlock(), filepath.Join(dataDir, "store"), filepath.Join(dataDir, "cache"), extra))
 	s := startServer(t, bin, dataDir, port)
 	t.Cleanup(s.stop)
 	return s

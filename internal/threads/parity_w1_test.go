@@ -146,7 +146,7 @@ func TestEvalIfFunctions(t *testing.T) {
 		t.Fatalf("whole span = %v, %v", ok, err)
 	}
 	for _, expr := range []string{
-		"endsWith(github.ref, 'v1')",
+		"toJSON(github)",
 		"startsWith(github.ref)",
 		"format()",
 		"github.head_ref == 'x'",

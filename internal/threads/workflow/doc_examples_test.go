@@ -106,13 +106,11 @@ func TestDocUnsupportedSpellings(t *testing.T) {
 		name string
 		src  string
 	}{
-		{"defaults block", valid("defaults:\n  run:\n    shell: bash\n")},
 		{"push paths typo", "name: X\non:\n  push:\n    pathz: [src/**]\njobs:\n  a:\n    runs-on: linux\n    steps:\n      - run: echo hi\n"},
 		{"step id starting with a digit", "name: X\non: push\njobs:\n  a:\n    runs-on: linux\n    steps:\n      - id: 1build\n        run: echo hi\n"},
 		{"step id with a dot", "name: X\non: push\njobs:\n  a:\n    runs-on: linux\n    steps:\n      - id: unit.test\n        run: echo hi\n"},
 		{"duplicate step id", "name: X\non: push\njobs:\n  a:\n    runs-on: linux\n    steps:\n      - id: build\n        run: echo one\n      - id: build\n        run: echo two\n"},
 		{"matrix include with an array value", "name: X\non: push\njobs:\n  a:\n    runs-on: linux\n    strategy:\n      matrix:\n        include:\n          - go: [\"1.26\", \"1.27\"]\n    steps:\n      - run: echo hi\n"},
-		{"strategy max-parallel", "name: X\non: push\njobs:\n  a:\n    runs-on: linux\n    strategy:\n      max-parallel: 2\n    steps:\n      - run: echo hi\n"},
 		{"unknown trigger", "name: X\non: [tag]\njobs:\n  a:\n    runs-on: linux\n    steps:\n      - run: echo hi\n"},
 		{"bare on schedule", "name: X\non: [schedule]\njobs:\n  a:\n    runs-on: linux\n    steps:\n      - run: echo hi\n"},
 		{"empty schedule list", "name: X\non:\n  schedule: []\njobs:\n  a:\n    runs-on: linux\n    steps:\n      - run: echo hi\n"},

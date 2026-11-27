@@ -36,6 +36,8 @@ const (
 	queueReasonWaitingRunner    = "waiting for a matching runner"
 	queueReasonBusyRunner       = "all matching runners are busy"
 	queueReasonForkRunner       = "fork runs are disabled on every matching runner"
+	queueReasonPaused           = "CI is paused for this repository"
+	queueReasonDraining         = "every matching runner is draining"
 )
 
 // annotateQueueReasons fills Job.QueueReason on the read-model copies.
@@ -82,6 +84,16 @@ func (s *Service) annotateQueueReasons(ctx context.Context, owner, repo string, 
 		}
 		return
 	}
+	// PAR-157: a paused repository is the fact to act on before runner
+	// availability. One settings GET, only for a run that has queued work.
+	if doc, derr := s.loadSettings(ctx, owner, repo); derr == nil && doc != nil && doc.CIPaused {
+		for _, job := range jobs {
+			if job != nil && job.State == JobQueued {
+				job.QueueReason = queueReasonPaused
+			}
+		}
+		return
+	}
 	// Runner availability is one registry LIST; only read it when a job has no
 	// earlier reason, so an approval-held or grouped run never pays it.
 	runnersLoaded := false
@@ -102,6 +114,14 @@ func (s *Service) annotateQueueReasons(ctx context.Context, owner, repo string, 
 		if job == nil || job.State != JobQueued {
 			continue
 		}
+		if job.Deployment != nil && job.Deployment.QueuePosition > 0 {
+			reason := job.Deployment.QueueReason
+			if reason == "" {
+				reason = fmt.Sprintf("waiting for environment %q (deployment %d in line)", job.Deployment.Environment, job.Deployment.QueuePosition)
+			}
+			job.QueueReason = reason
+			continue
+		}
 		if waiting := waitingNeeds(job, jobs); len(waiting) > 0 {
 			job.QueueReason = "waiting for " + strings.Join(waiting, ", ")
 			continue
@@ -110,8 +130,34 @@ func (s *Service) annotateQueueReasons(ctx context.Context, owner, repo string, 
 			job.QueueReason = fmt.Sprintf("waiting for concurrency group %q", run.PendingGroup)
 			continue
 		}
+		if reason := matrixSlotReason(job, jobs); reason != "" {
+			job.QueueReason = reason
+			continue
+		}
 		job.QueueReason = runnerReason(loadRunners(), job, run)
 	}
+}
+
+// matrixSlotReason is the PAR-052 admission reason: a queued cell whose matrix
+// group already has `max-parallel` cells in flight. It reads the job list the
+// page already has, so it adds no store round trip.
+func matrixSlotReason(job *Job, jobs []*Job) string {
+	if job == nil || job.Spec == nil || job.Spec.Strategy == nil || job.Spec.Strategy.MaxParallel <= 0 || job.Spec.MatrixGroup == "" {
+		return ""
+	}
+	active := 0
+	for _, other := range jobs {
+		if other == nil || other.Spec == nil || other.Spec.MatrixGroup != job.Spec.MatrixGroup {
+			continue
+		}
+		if other.State == JobRunning || (other.State == JobQueued && other.LeaseUntil != nil) {
+			active++
+		}
+	}
+	if active < job.Spec.Strategy.MaxParallel {
+		return ""
+	}
+	return fmt.Sprintf("waiting for a matrix slot (max-parallel %d)", job.Spec.Strategy.MaxParallel)
 }
 
 // waitingNeeds names the job's non-terminal dependencies ('needs:' gate).
@@ -144,19 +190,38 @@ func runnerReason(runners []*RunnerDoc, job *Job, run *Run) string {
 	}
 	matching := make([]*RunnerDoc, 0, len(runners))
 	for _, r := range runners {
-		if r == nil || r.RevokedAt != nil {
+		if r == nil || r.RevokedAt != nil || r.IsDraining() {
 			continue
 		}
-		if !r.AllowsRepo(job.Repo) {
+		if !r.CanServeRepo(job.Repo) {
 			continue
 		}
-		if labelsMatch(r.Labels, labels) {
+		if labelsMatch(r.EffectiveLabels(), labels) {
 			matching = append(matching, r)
 		}
 	}
 	if len(matching) == 0 {
+		if reason := nonGoalLabelReason(labels); reason != "" {
+			return reason
+		}
+		// A fleet that is entirely draining says so rather than pretending the
+		// labels are unmatched (PAR-181).
+		if anyDrainingForRepo(runners, job.Repo) {
+			return queueReasonDraining
+		}
 		return fmt.Sprintf("no runner matches labels %s", strings.Join(labels, ", "))
 	}
+	size := JobSizeOf(job)
+	sized := matching[:0]
+	for _, r := range matching {
+		if RunnerOffers(r, size) {
+			sized = append(sized, r)
+		}
+	}
+	if len(sized) == 0 {
+		return fmt.Sprintf("no matching runner offers %s", size.Describe())
+	}
+	matching = sized
 	fork := !run.Trusted || !job.Trusted
 	forkCapable := 0
 	for _, r := range matching {
@@ -181,6 +246,17 @@ func runnerReason(runners []*RunnerDoc, job *Job, run *Run) string {
 		return queueReasonBusyRunner
 	}
 	return queueReasonWaitingRunner
+}
+
+// anyDrainingForRepo reports whether at least one draining runner is eligible
+// for the repository (used only for the read-model reason).
+func anyDrainingForRepo(runners []*RunnerDoc, repo string) bool {
+	for _, r := range runners {
+		if r != nil && r.RevokedAt == nil && r.IsDraining() && r.CanServeRepo(repo) {
+			return true
+		}
+	}
+	return false
 }
 
 // loadRunnerDocsForReasons reads the instance runner registry for the read

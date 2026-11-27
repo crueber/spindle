@@ -20,10 +20,12 @@ import (
 // environment surface (the concrete *threads.Service does both; this fake proves
 // the type-assertion binding). It deliberately depends on no other test file.
 type fakeEnvThreads struct {
-	envs    []threads.EnvironmentView
-	secrets map[string][]threads.SecretView
-	calls   []string
-	enabled bool
+	envs        []threads.EnvironmentView
+	secrets     map[string][]threads.SecretView
+	vars        map[string][]threads.VariableView
+	deployments map[string][]*threads.DeploymentDoc
+	calls       []string
+	enabled     bool
 	// last is the input of the most recent PutEnvironment (the protection
 	// rules' write path, PAR-131).
 	last threads.EnvironmentInput
@@ -31,8 +33,10 @@ type fakeEnvThreads struct {
 
 func newFakeEnvThreads() *fakeEnvThreads {
 	return &fakeEnvThreads{
-		secrets: map[string][]threads.SecretView{},
-		enabled: true,
+		secrets:     map[string][]threads.SecretView{},
+		vars:        map[string][]threads.VariableView{},
+		deployments: map[string][]*threads.DeploymentDoc{},
+		enabled:     true,
 	}
 }
 
@@ -83,6 +87,27 @@ func (f *fakeEnvThreads) DeleteEnvironmentSecret(_ context.Context, _ string, en
 }
 
 func (f *fakeEnvThreads) SecretsEnabled() bool { return f.enabled }
+
+// Environment variables (PAR-117): the optional half; the tab renders the
+// controls because this fake implements it.
+func (f *fakeEnvThreads) ListEnvironmentVariables(_ context.Context, _ string, env string, _ auth.Principal) ([]threads.VariableView, error) {
+	return f.vars[env], nil
+}
+
+func (f *fakeEnvThreads) SetEnvironmentVariable(_ context.Context, _ string, env, name, _ string, _ auth.Principal) error {
+	f.calls = append(f.calls, "variable-put:"+env+":"+name)
+	return nil
+}
+
+func (f *fakeEnvThreads) DeleteEnvironmentVariable(_ context.Context, _ string, env, name string, _ auth.Principal) error {
+	f.calls = append(f.calls, "variable-delete:"+env+":"+name)
+	return nil
+}
+
+// Deployments (PAR-132): the optional history read.
+func (f *fakeEnvThreads) ListDeployments(_ context.Context, _ string, environment string, _ auth.Principal, _ string, _ int) (*threads.DeploymentPage, error) {
+	return &threads.DeploymentPage{Deployments: f.deployments[environment]}, nil
+}
 
 // envSettingsServer wires the settings group over the fake environment service.
 func envSettingsServer(t *testing.T, role string, fake *fakeEnvThreads) *Server {

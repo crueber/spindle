@@ -53,6 +53,21 @@ func (h *Handler) environments(w http.ResponseWriter, r *http.Request, repo stri
 		default:
 			methodNotAllowed(w, "PUT", "DELETE")
 		}
+	case len(path) == 2 && path[1] == "variables":
+		if r.Method != http.MethodGet {
+			methodNotAllowed(w, "GET")
+			return
+		}
+		h.listEnvironmentVariables(w, r, repo, path[0])
+	case len(path) == 3 && path[1] == "variables":
+		switch r.Method {
+		case http.MethodPut:
+			h.putEnvironmentVariable(w, r, repo, path[0], path[2])
+		case http.MethodDelete:
+			h.deleteEnvironmentVariable(w, r, repo, path[0], path[2])
+		default:
+			methodNotAllowed(w, "PUT", "DELETE")
+		}
 	default:
 		writePlain(w, http.StatusNotFound, "not found")
 	}
@@ -169,6 +184,53 @@ func (h *Handler) deleteEnvironmentSecret(w http.ResponseWriter, r *http.Request
 		return
 	}
 	if err := h.Svc.DeleteEnvironmentSecret(r.Context(), repo, name, secret, p); err != nil {
+		writeErr(w, err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func (h *Handler) listEnvironmentVariables(w http.ResponseWriter, r *http.Request, repo, name string) {
+	p, aerr := h.principal(r)
+	if aerr != nil {
+		writeErr(w, aerr)
+		return
+	}
+	vars, err := h.Svc.ListEnvironmentVariables(r.Context(), repo, name, p)
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"variables": vars, "enabled": h.Svc.SecretsEnabled()})
+}
+
+// putEnvironmentVariable takes {value} and never echoes it.
+func (h *Handler) putEnvironmentVariable(w http.ResponseWriter, r *http.Request, repo, name, variable string) {
+	p, aerr := h.principal(r)
+	if aerr != nil {
+		writeErr(w, aerr)
+		return
+	}
+	var in struct {
+		Value string `json:"value"`
+	}
+	if !decodeStrict(w, r, 64<<10, map[string]bool{"value": true}, &in) {
+		return
+	}
+	if err := h.Svc.SetEnvironmentVariable(r.Context(), repo, name, variable, in.Value, p); err != nil {
+		writeErr(w, err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func (h *Handler) deleteEnvironmentVariable(w http.ResponseWriter, r *http.Request, repo, name, variable string) {
+	p, aerr := h.principal(r)
+	if aerr != nil {
+		writeErr(w, aerr)
+		return
+	}
+	if err := h.Svc.DeleteEnvironmentVariable(r.Context(), repo, name, variable, p); err != nil {
 		writeErr(w, err)
 		return
 	}

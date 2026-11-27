@@ -583,6 +583,14 @@ func (t *translator) workflow(doc *yaml.Node) error {
 				t.drop(doc, i, t.untranslatedAt("name", "name", "a workflow name must be a string"))
 				i -= 2
 			}
+		case "run-name":
+			if !t.runNameAt(doc, i, "run-name") {
+				i -= 2
+			}
+		case "defaults":
+			if !t.defaultsAt(doc, i, "defaults") {
+				i -= 2
+			}
 		case "env":
 			t.stringMapAt(doc, i, "env")
 		case "concurrency":
@@ -595,14 +603,7 @@ func (t *translator) workflow(doc *yaml.Node) error {
 				i -= 2
 			}
 		default:
-			reason := "not part of the Spindle workflow schema"
-			if key.Value == "run-name" {
-				reason = "a runtime run name is not supported yet"
-			}
-			if key.Value == "defaults" {
-				reason = "defaults.run is not supported yet; set shell/working-directory on each step"
-			}
-			t.drop(doc, i, t.untranslatedAt(key.Value, key.Value, reason))
+			t.drop(doc, i, t.untranslatedAt(key.Value, key.Value, "not part of the Spindle workflow schema"))
 			i -= 2
 		}
 	}
@@ -614,6 +615,53 @@ func (t *translator) workflow(doc *yaml.Node) error {
 }
 
 // --- shared mapping shapes -------------------------------------------------
+
+// runNameAt keeps `run-name:` when it is a scalar. The target renders it from
+// github.*/inputs.* at run creation; the final Parse validates the expression, so
+// an unsupported context is a conversion error rather than a silent drop.
+func (t *translator) runNameAt(m *yaml.Node, i int, path string) bool {
+	val := m.Content[i+1]
+	if _, ok := scalarText(val); !ok {
+		t.drop(m, i, t.untranslatedAt(path, "run-name", "a run name must be a string"))
+		return false
+	}
+	t.translated++
+	return true
+}
+
+// defaultsAt keeps a `defaults:` block the target understands: a mapping whose
+// only key is `run`, whose only keys are `shell`/`working-directory`, and whose
+// values are literal strings (PAR-054). Any other shape is dropped as a unit,
+// because the target would refuse the file.
+func (t *translator) defaultsAt(m *yaml.Node, i int, path string) bool {
+	val := m.Content[i+1]
+	bad := func(reason string) bool {
+		t.drop(m, i, t.untranslatedAt(path, "defaults", reason))
+		return false
+	}
+	if val.Kind != yaml.MappingNode {
+		return bad("defaults must be a mapping with a `run:` block")
+	}
+	if len(val.Content) != 2 || val.Content[0].Value != "run" {
+		return bad("only defaults.run.shell and defaults.run.working-directory are supported")
+	}
+	run := val.Content[1]
+	if run.Kind != yaml.MappingNode {
+		return bad("defaults.run must be a mapping")
+	}
+	for j := 0; j+1 < len(run.Content); j += 2 {
+		key := run.Content[j].Value
+		if key != "shell" && key != "working-directory" {
+			return bad("only defaults.run.shell and defaults.run.working-directory are supported")
+		}
+		text, ok := scalarText(run.Content[j+1])
+		if !ok || strings.Contains(text, "${{") {
+			return bad("defaults.run values are literals (no ${{ }} span)")
+		}
+	}
+	t.translated++
+	return true
+}
 
 // stringMapAt keeps a mapping of scalar values (env, with, container.env).
 func (t *translator) stringMapAt(m *yaml.Node, i int, path string) {

@@ -48,6 +48,8 @@ type Runner struct {
 
 	fatalMu sync.Mutex
 	fatal   error
+	// stop cancels the whole run after a one-job (ephemeral) worker finishes.
+	stop func()
 }
 
 // Config is the runner's settings (flags/env in cmd/spindle/cli_runner.go).
@@ -69,6 +71,14 @@ type Config struct {
 	// records the flag; the runner also refuses one it was handed anyway
 	// (defence in depth, docs/threads.md §8.7).
 	AllowForkRuns bool
+	// Ephemeral makes this a single-job worker (PAR-173): the process exits
+	// after one completed job and the server deletes the record and credential.
+	// Capacity must be 1.
+	Ephemeral bool
+	// MaxCPUs / MaxMemoryBytes are the declared job ceiling (PAR-176); zero
+	// means undeclared.
+	MaxCPUs        float64
+	MaxMemoryBytes int64
 	// ImagePrefix/ImagePrefixAll/ImagePull/ImageRequireDigest are the
 	// image-source policy (docs/threads.md §8.1/§8.6). Empty/zero values keep
 	// today's behaviour.
@@ -111,6 +121,12 @@ func New(cfg Config) (*Runner, error) {
 	}
 	if cfg.Capacity > threads.MaxRunnerCapacity {
 		cfg.Capacity = threads.MaxRunnerCapacity
+	}
+	if cfg.Ephemeral && cfg.Capacity != 1 {
+		return nil, fmt.Errorf("runner: an ephemeral runner is a one-job worker; capacity must be 1 (got %d)", cfg.Capacity)
+	}
+	if err := threads.ValidateRunnerSizing(cfg.MaxCPUs, cfg.MaxMemoryBytes); err != nil {
+		return nil, fmt.Errorf("runner: %v", err)
 	}
 	if cfg.FetchWait <= 0 {
 		cfg.FetchWait = 20 * time.Second
@@ -213,9 +229,15 @@ func (r *Runner) Run(ctx context.Context) error {
 	if err := r.declare(ctx); err != nil {
 		return err
 	}
+	// An ephemeral worker exits after its one job: cancel the whole run (and
+	// every other worker, of which there is exactly one) from runJob's tail.
+	runCtx, cancel := context.WithCancel(ctx)
+	r.stop = cancel
+	defer cancel()
+	ctx = runCtx
 	r.cfg.Logger.Info("threads runner: serving",
 		"server", r.cfg.ServerURL, "labels", strings.Join(r.cfg.Labels, ","), "capacity", r.cfg.Capacity,
-		"allow_fork_runs", r.cfg.AllowForkRuns)
+		"allow_fork_runs", r.cfg.AllowForkRuns, "ephemeral", r.cfg.Ephemeral)
 	var wg sync.WaitGroup
 	for i := 0; i < r.cfg.Capacity; i++ {
 		wg.Add(1)
@@ -239,7 +261,10 @@ func (r *Runner) Run(ctx context.Context) error {
 func (r *Runner) declare(ctx context.Context) error {
 	backoff := r.cfg.BackoffMin
 	for {
-		view, err := r.client.Declare(ctx, r.cfg.Version, r.cfg.Labels, r.cfg.Capacity, r.cfg.AllowForkRuns)
+		view, err := r.client.DeclareRunner(ctx, r.cfg.Version, RunnerOptions{
+			Labels: r.cfg.Labels, Capacity: r.cfg.Capacity, AllowForkRuns: r.cfg.AllowForkRuns,
+			Ephemeral: r.cfg.Ephemeral, MaxCPUs: r.cfg.MaxCPUs, MaxMemoryBytes: r.cfg.MaxMemoryBytes,
+		})
 		if err == nil {
 			// The repository policy is the ADMIN's (set at the mint); the runner
 			// states it and cannot change it (docs/threads.md §8.7).
@@ -381,6 +406,12 @@ func (r *Runner) runJob(ctx context.Context, job *threads.FetchResult) {
 	default:
 		log.Error("threads runner: complete failed", "conclusion", conclusion, "err", cerr)
 	}
+	// A one-job worker is spent after its conclusion is reported. The server
+	// deletes the record and credential; this process exits.
+	if r.cfg.Ephemeral && r.stop != nil {
+		log.Info("threads runner: ephemeral job finished; exiting")
+		r.stop()
+	}
 }
 
 // setFatal records a stop-the-world condition (a revoked credential).
@@ -414,4 +445,10 @@ func nextBackoff(d, max time.Duration) time.Duration {
 func Register(ctx context.Context, serverURL, regToken, name string, labels []string, capacity int, allowForkRuns bool) (*threads.RegisterResult, error) {
 	client := NewClient(serverURL, "")
 	return client.Register(ctx, regToken, name, labels, capacity, allowForkRuns)
+}
+
+// RegisterRunner is Register with the full declaration (ephemeral, sizing).
+func RegisterRunner(ctx context.Context, serverURL, regToken string, opts RunnerOptions) (*threads.RegisterResult, error) {
+	client := NewClient(serverURL, "")
+	return client.RegisterRunner(ctx, regToken, opts)
 }

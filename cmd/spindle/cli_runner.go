@@ -49,12 +49,22 @@ func runRunnerServe(ctx context.Context, c *cli, args []string) int {
 		containerVolumes   stringList
 		dockerHost         string
 		registryAuthFile   string
+		ephemeral          bool
+		maxCPUs            float64
+		maxMemory          string
+		configPath         string
+		registerFile       string
 	)
 	fs.IntVar(&capacity, "capacity", envInt("SPINDLE_RUNNER_CAPACITY", 1), "concurrent jobs this runner keeps in flight (default 1)")
 	fs.StringVar(&labels, "labels", envStr("SPINDLE_RUNNER_LABELS", "self-hosted,linux,docker"), "comma-separated labels the runner declares")
 	fs.StringVar(&name, "name", envStr("SPINDLE_RUNNER_NAME", ""), "runner name (recorded at registration)")
 	fs.StringVar(&register, "register", "", "consume a registration token (wrg_…) and store the returned runner token, then serve")
+	fs.StringVar(&registerFile, "register-file", "", "read the one-time registration token from a 0600 file (keeps it out of argv)")
+	fs.StringVar(&configPath, "config", "", "offline registration: a TOML file of [[runner]] entries (one process may serve several scopes)")
 	fs.StringVar(&tokenFile, "token-file", envStr("SPINDLE_RUNNER_TOKEN_FILE", ""), "file holding the runner token (0600); SPINDLE_RUNNER_TOKEN wins when set")
+	fs.BoolVar(&ephemeral, "ephemeral", envBool("SPINDLE_RUNNER_EPHEMERAL"), "one-job worker: exit after a single job; the server deletes the record and credential (PAR-173)")
+	fs.Float64Var(&maxCPUs, "max-cpus", 0, "declared CPU ceiling this runner offers (PAR-176; 0 = undeclared)")
+	fs.StringVar(&maxMemory, "max-memory", "", "declared memory ceiling this runner offers, e.g. 16GiB (PAR-176; empty = undeclared)")
 	fs.StringVar(&dockerBin, "docker", envStr("SPINDLE_RUNNER_DOCKER", "docker"), "docker CLI binary")
 	fs.StringVar(&image, "image", envStr("SPINDLE_RUNNER_IMAGE", runner.DefaultImage), "default job image when the workflow names none")
 	fs.StringVar(&imagePrefix, "image-prefix", envStr("SPINDLE_RUNNER_IMAGE_PREFIX", ""), "registry mirror prefix host[:port]/path every workflow image is rewritten under (off when empty)")
@@ -91,6 +101,39 @@ func runRunnerServe(ctx context.Context, c *cli, args []string) int {
 		fmt.Fprintf(c.stderr(), "spindle: %v\n", err)
 		return exitErr
 	}
+	// Offline registration (PAR-180) is its own path: one file, one or more
+	// [[runner]] entries, one process.
+	if configPath != "" {
+		return runRunnerConfig(ctx, c, configPath, serverURL, runnerShared{
+			Version: version(), DockerBin: dockerBin, DefaultImage: image,
+			AllowHostDocker: allowHostDocker, ImagePrefix: imagePrefix, ImagePrefixAll: imagePrefixAll,
+			ImagePull: imagePull, ImageRequireDigest: imageRequireDigest, AllowForkRuns: allowForkRuns,
+			Policy: runner.ContainerPolicy{
+				Privileged: containerPriv, Network: containerNetwork,
+				ValidVolumes: containerVolumes, DockerHost: dockerHost,
+			},
+			RegistryAuthFile: registryAuthFile,
+			FetchWait:        time.Duration(clamp(fetchTimeout, 1, 30)) * time.Second,
+			Logger:           slog.New(slog.NewTextHandler(c.stderr(), &slog.HandlerOptions{Level: slog.LevelInfo})),
+		})
+	}
+	memoryBytes, merr := parseRunnerMemory(maxMemory)
+	if merr != nil {
+		fmt.Fprintf(c.stderr(), "spindle runner serve: %v\n", merr)
+		return exitArg
+	}
+	if registerFile != "" {
+		if register != "" {
+			fmt.Fprintln(c.stderr(), "spindle runner serve: pass --register or --register-file, not both")
+			return exitArg
+		}
+		raw, rerr := readSecretFile(registerFile)
+		if rerr != nil {
+			fmt.Fprintf(c.stderr(), "spindle runner serve: read registration file: %v\n", rerr)
+			return exitErr
+		}
+		register = raw
+	}
 	labelList := splitLabels(labels)
 	token := strings.TrimSpace(os.Getenv("SPINDLE_RUNNER_TOKEN"))
 	if token == "" && tokenFile != "" && register == "" {
@@ -102,14 +145,17 @@ func runRunnerServe(ctx context.Context, c *cli, args []string) int {
 		token = strings.TrimSpace(string(b))
 	}
 	if register != "" {
-		res, rerr := runner.Register(ctx, serverURL, strings.TrimSpace(register), name, labelList, capacity, allowForkRuns)
+		res, rerr := runner.RegisterRunner(ctx, serverURL, strings.TrimSpace(register), runner.RunnerOptions{
+			Name: name, Labels: labelList, Capacity: capacity, AllowForkRuns: allowForkRuns,
+			Ephemeral: ephemeral, MaxCPUs: maxCPUs, MaxMemoryBytes: memoryBytes,
+		})
 		if rerr != nil {
 			fmt.Fprintf(c.stderr(), "spindle runner serve: register: %v\n", rerr)
 			return exitErr
 		}
 		token = res.Token
 		if tokenFile != "" {
-			if werr := os.WriteFile(tokenFile, []byte(res.Token+"\n"), 0o600); werr != nil {
+			if werr := writeSecretFile(tokenFile, res.Token); werr != nil {
 				fmt.Fprintf(c.stderr(), "spindle runner serve: save token: %v\n", werr)
 				return exitErr
 			}
@@ -122,6 +168,7 @@ func runRunnerServe(ctx context.Context, c *cli, args []string) int {
 	rn, err := runner.New(runner.Config{
 		ServerURL: serverURL, Token: token, Name: name, Labels: labelList,
 		Capacity: capacity, Version: version(),
+		Ephemeral: ephemeral, MaxCPUs: maxCPUs, MaxMemoryBytes: memoryBytes,
 		DockerBin: dockerBin, DefaultImage: image, AllowHostDocker: allowHostDocker,
 		ImagePrefix: imagePrefix, ImagePrefixAll: imagePrefixAll,
 		ImagePull: imagePull, ImageRequireDigest: imageRequireDigest,
@@ -210,9 +257,21 @@ func clamp(n, lo, hi int) int {
 
 var runnerGroup = &apiGroup{
 	name: "runner",
-	help: "Threads instance runners: serve jobs",
+	help: "Threads instance runners: serve jobs, drain/rotate/deregister, stock images",
 	commands: []apiCommand{
-		{name: "serve", usage: "spindle runner serve [--capacity N] [--labels a,b] [--register TOKEN]", help: "run jobs: declare, fetch globally, execute in docker, stream logs (SIGTERM stops cleanly)",
-			flags: []string{"capacity", "labels", "name", "register", "token-file", "docker", "image", "image-prefix", "image-prefix-all", "image-pull", "image-require-digest", "allow-host-docker", "allow-fork-runs", "fetch-timeout", "container-privileged", "container-network", "container-valid-volume", "docker-host", "registry-auth-file"}, run: runRunnerServe},
+		{name: "serve", usage: "spindle runner serve [--config FILE | --capacity N --labels a,b --register TOKEN]", help: "run jobs: declare, fetch globally, execute in docker, stream logs (SIGTERM stops cleanly)",
+			flags: []string{"capacity", "labels", "name", "register", "register-file", "config", "token-file", "ephemeral", "max-cpus", "max-memory", "docker", "image", "image-prefix", "image-prefix-all", "image-pull", "image-require-digest", "allow-host-docker", "allow-fork-runs", "fetch-timeout", "container-privileged", "container-network", "container-valid-volume", "docker-host", "registry-auth-file"}, run: runRunnerServe},
+		{name: "drain", usage: "spindle runner drain [--token-file FILE]", help: "finish the current job and claim nothing new (runner credential)", run: func(ctx context.Context, c *cli, args []string) int { return runRunnerFleetVerb(ctx, c, args, "drain") }},
+		{name: "resume", usage: "spindle runner resume [--token-file FILE]", help: "undo a drain (runner credential)", run: func(ctx context.Context, c *cli, args []string) int {
+			return runRunnerFleetVerb(ctx, c, args, "resume")
+		}},
+		{name: "rotate", usage: "spindle runner rotate [--token-file FILE]", help: "rotate the credential with a zero-downtime overlap window (runner credential)", run: func(ctx context.Context, c *cli, args []string) int {
+			return runRunnerFleetVerb(ctx, c, args, "rotate")
+		}},
+		{name: "deregister", usage: "spindle runner deregister [--token-file FILE]", help: "delete this runner's record and credential (runner credential)", run: func(ctx context.Context, c *cli, args []string) int {
+			return runRunnerFleetVerb(ctx, c, args, "deregister")
+		}},
+		{name: "images", usage: "spindle runner images", help: "print the stock toolchain image catalogue and the --labels line", run: runRunnerImages},
+		{name: "pool", usage: "spindle runner pool", help: "refused by name: managed autoscaling is off by default (D-14)", run: runRunnerPool},
 	},
 }

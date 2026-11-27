@@ -267,7 +267,7 @@ func dependencyResult(dep *Job) string {
 	if dep == nil {
 		return ""
 	}
-	if dep.State == JobFailure && dep.Tolerated {
+	if (dep.State == JobFailure || dep.State == JobTimedOut) && dep.Tolerated {
 		return JobSuccess
 	}
 	return dep.State
@@ -285,8 +285,10 @@ func worseResult(current, next string) string {
 			return 2
 		case JobFailure:
 			return 3
-		default:
+		case JobTimedOut:
 			return 4
+		default:
+			return 5
 		}
 	}
 	if rank(next) > rank(current) {
@@ -340,7 +342,11 @@ func (s *Service) dependentVerdict(ctx context.Context, owner, repo string, entr
 			}
 		}
 	}
-	verdict, reason, verr := evaluateJobIf(job, run, facts)
+	extra, xerr := s.loadJobIfValues(ctx, owner, repo, job, run)
+	if xerr != nil {
+		return jobIfRun, "", xerr
+	}
+	verdict, reason, verr := evaluateJobIfWith(job, run, facts, extra)
 	if verr != nil {
 		return jobIfError, reason, nil
 	}
@@ -411,7 +417,12 @@ func (s *Service) skipBlockedDependents(ctx context.Context, owner, repo, runID 
 					reason: "needs: a dependency record could not be read"})
 				continue
 			}
-			verdict, reason, _ := evaluateJobIf(j, run, facts)
+			extra, xerr := s.loadJobIfValues(ctx, owner, repo, j, run)
+			if xerr != nil {
+				victims = append(victims, victim{id: j.ID, state: JobFailure, reason: xerr.Error()})
+				continue
+			}
+			verdict, reason, _ := evaluateJobIfWith(j, run, facts, extra)
 			switch verdict {
 			case jobIfSkip:
 				victims = append(victims, victim{id: j.ID, state: JobSkipped, reason: reason})

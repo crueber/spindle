@@ -19,7 +19,7 @@ func fixture(t *testing.T) (*Doc, ValidateOptions) {
 	if err != nil {
 		t.Fatalf("load parity.json: %v", err)
 	}
-	tests, err := ScanTests(filepath.Join("..", ".."))
+	tests, err := ScanTests(filepath.Join("..", "..", ".."))
 	if err != nil {
 		t.Fatalf("scan tests: %v", err)
 	}

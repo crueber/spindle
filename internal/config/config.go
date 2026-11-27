@@ -499,6 +499,31 @@ type Threads struct {
 	// 5m…30m). A job's own timeout adds its grace window; the effective lease
 	// is capped at 30m because log frames renew it.
 	JobLease Duration `toml:"job_lease"`
+	// Actions is the remote-action policy (PAR-070/D-5, docs/threads.md
+	// §3.4d). It governs `uses: owner/repo[/path]@ref`: default-deny via an
+	// allowlist, a full commit SHA required outside it, this instance as the
+	// only source unless `source` names one, and a bounded fetch.
+	Actions ThreadsActions `toml:"actions"`
+}
+
+// ThreadsActions is the remote-action policy (threads.actions.*).
+type ThreadsActions struct {
+	// Mode is deny | allowlist | open. `allowlist` (the default) permits a
+	// mutable ref only for an entry in Allow; `deny` refuses every remote
+	// action; `open` accepts mutable refs everywhere (an explicit weakening).
+	Mode string `toml:"mode"`
+	// Allow lists approved repositories: `owner/repo`, `owner/*`, `*`, or
+	// `host/owner/repo` for the configured source host.
+	Allow []string `toml:"allow"`
+	// RequireSHA requires a full 40-character commit SHA for a mutable ref
+	// outside Allow (default true — D-5's decided shape).
+	RequireSHA bool `toml:"require_sha"`
+	// Source is the optional external action source, a Forgejo/Gitea-compatible
+	// base URL (https://git.example.com). Empty resolves from THIS instance.
+	Source string `toml:"source"`
+	// MaxBytes bounds one fetched action's content (default 16 MiB; 0 selects
+	// the default).
+	MaxBytes ByteSize `toml:"max_bytes"`
 }
 
 // Import bounds the repository-import surface (docs/features/10 §6:
@@ -672,6 +697,16 @@ func Defaults() *Config {
 			KeepForever:        false,
 			MaxQueueAttempts:   3,
 			JobLease:           Duration(15 * time.Minute),
+			// Remote actions (PAR-070/D-5): allowlist mode, deny by default,
+			// SHA required outside the allowlist, this instance as the only
+			// source, 16 MiB per action.
+			Actions: ThreadsActions{
+				Mode:       "allowlist",
+				Allow:      nil,
+				RequireSHA: true,
+				Source:     "",
+				MaxBytes:   16 << 20,
+			},
 		},
 		Placement: Placement{Serve: []string{"*"}, Maintain: []string{"*"}},
 		Compaction: Compaction{

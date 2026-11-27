@@ -1989,6 +1989,7 @@ type commitCheckRow struct {
 	TargetURL       string
 	Creator         string
 	UpdatedAt       string
+	Annotations     []checks.Annotation
 	DurationSeconds int64
 }
 
@@ -2715,6 +2716,7 @@ func commitChecks(ctx context.Context, owner, repo, sha string, p auth.Principal
 		rows = append(rows, commitCheckRow{
 			Context: st.Context, State: st.State, Description: st.Description,
 			TargetURL: st.TargetURL, Creator: st.Creator, UpdatedAt: st.UpdatedAt,
+			Annotations:     st.Annotations,
 			DurationSeconds: checksDuration(st.StartedAt, st.CompletedAt),
 		})
 	}

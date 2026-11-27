@@ -566,7 +566,7 @@ func reusableCallerRefusal(caller workflow.Job) string {
 		return "a reusable-workflow caller job may not declare `env`: a called workflow does not inherit the caller's environment (pass a `with:` input instead)"
 	case caller.Strategy != nil:
 		return "a reusable-workflow caller job may not declare `strategy`: a matrix caller is not supported in this wave (put the matrix in the callee, or call once per cell)"
-	case caller.TimeoutMinutes != 0:
+	case caller.TimeoutMinutes.Set():
 		return "a reusable-workflow caller job may not declare `timeout-minutes`; set it on the callee's jobs"
 	case caller.Concurrency != nil:
 		return "a reusable-workflow caller job may not declare `concurrency`; set it on the callee's jobs"

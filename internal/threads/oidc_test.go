@@ -452,13 +452,14 @@ func TestOIDCRequestTokenExpiresAndRevokes(t *testing.T) {
 	if _, err := e.svc.ExchangeIDToken(ctx(), job.JobRef, job.Attempt, job.IDToken.RequestToken, "aud", "https://spindle.example"); err != nil {
 		t.Fatalf("first exchange: %v", err)
 	}
-	// Past the request token's lifetime (the 2h default attempt TTL).
-	*now = now.Add(3 * time.Hour)
+	// Past the request token's lifetime. The attempt TTL follows the job
+	// timeout (PAR-055: the 360-minute default), so it is 6h10m here.
+	*now = now.Add(7 * time.Hour)
 	if _, err := e.svc.ExchangeIDToken(ctx(), job.JobRef, job.Attempt, job.IDToken.RequestToken, "aud", "https://spindle.example"); !errors.Is(err, ErrUnauthorized) {
 		t.Fatalf("expired exchange = %v, want ErrUnauthorized", err)
 	}
 	// A finished job revokes its token even inside the TTL.
-	*now = now.Add(-3 * time.Hour)
+	*now = now.Add(-7 * time.Hour)
 	if _, err := e.svc.UpdateJob(ctx(), "o/r", run.ID, job.JobID, JobUpdate{State: JobSuccess}); err != nil {
 		t.Fatalf("complete: %v", err)
 	}

@@ -81,6 +81,9 @@ func (h *Handler) handleTop(w http.ResponseWriter, r *http.Request, segs []strin
 			}
 			h.runnerFetch(w, r)
 			return true
+		case "drain", "resume", "rotate", "deregister":
+			h.runnerSelf(w, r, rest[1:])
+			return true
 		}
 		writePlain(w, http.StatusNotFound, "unknown runner endpoint")
 		return true
@@ -106,6 +109,8 @@ func (h *Handler) handleAdminRunners(w http.ResponseWriter, r *http.Request, res
 		h.mintRunnerToken(w, r)
 	case len(rest) == 2 && rest[1] == "policy" && r.Method == http.MethodPost:
 		h.setRunnerPolicy(w, r, rest[0])
+	case len(rest) == 2 && (rest[1] == "drain" || rest[1] == "resume" || rest[1] == "rotate-token" || rest[1] == "deregister" || rest[1] == "group"):
+		h.runnerFleetVerb(w, r, rest[0], rest[1:])
 	case len(rest) == 1 && r.Method == http.MethodDelete:
 		h.revokeRunner(w, r, rest[0])
 	case len(rest) == 0:
@@ -114,6 +119,8 @@ func (h *Handler) handleAdminRunners(w http.ResponseWriter, r *http.Request, res
 		methodNotAllowed(w, "POST")
 	case len(rest) == 2 && rest[1] == "policy":
 		methodNotAllowed(w, "POST")
+	case len(rest) == 2:
+		writePlain(w, http.StatusNotFound, "unknown runner operation")
 	default:
 		methodNotAllowed(w, "DELETE")
 	}
@@ -123,7 +130,11 @@ func (h *Handler) handleAdminRunners(w http.ResponseWriter, r *http.Request, res
 // runnerRegister consumes a registration token once.
 func (h *Handler) runnerRegister(w http.ResponseWriter, r *http.Request) {
 	var in RegisterInput
-	if !decodeStrict(w, r, maxProtocolBody, map[string]bool{"token": true, "name": true, "labels": true, "capacity": true, "allow_fork_runs": true}, &in) {
+	if !decodeStrict(w, r, maxProtocolBody, map[string]bool{
+		"token": true, "name": true, "labels": true, "capacity": true,
+		"allow_fork_runs": true, "ephemeral": true,
+		"max_cpus": true, "max_memory_bytes": true,
+	}, &in) {
 		return
 	}
 	if h.Svc == nil || h.Svc.Store == nil {
@@ -146,7 +157,10 @@ func (h *Handler) runnerDeclare(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var in DeclareInput
-	if !decodeStrict(w, r, 16<<10, map[string]bool{"version": true, "labels": true, "capacity": true, "allow_fork_runs": true}, &in) {
+	if !decodeStrict(w, r, 16<<10, map[string]bool{
+		"version": true, "labels": true, "capacity": true, "allow_fork_runs": true,
+		"ephemeral": true, "max_cpus": true, "max_memory_bytes": true,
+	}, &in) {
 		return
 	}
 	view, derr := h.Svc.Declare(r.Context(), auth, in)
@@ -387,7 +401,7 @@ func (h *Handler) mintRunnerToken(w http.ResponseWriter, r *http.Request) {
 	// form sets it: {name?, allow_all, repos}. Neither field is accepted on the
 	// runner protocol, so a runner cannot widen its own tenancy.
 	var in MintInput
-	if !decodeStrict(w, r, 16<<10, map[string]bool{"name": true, "allow_all": true, "repos": true}, &in) {
+	if !decodeStrict(w, r, 16<<10, map[string]bool{"name": true, "allow_all": true, "repos": true, "group": true}, &in) {
 		return
 	}
 	tok, err := h.Svc.MintRegistrationToken(r.Context(), p, in)
@@ -619,6 +633,31 @@ func (h *Handler) cancelRun(w http.ResponseWriter, r *http.Request, repo, runID 
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"run": run})
+}
+
+// cancelJob is POST …/threads/{run}/jobs/{job}/cancel (PAR-195). The optional
+// body {"force":true} makes the job terminal at once; without it a running
+// attempt receives the normal cancel signal.
+func (h *Handler) cancelJob(w http.ResponseWriter, r *http.Request, repo, runID, jobID string) {
+	p, aerr := h.principal(r)
+	if aerr != nil {
+		writeErr(w, aerr)
+		return
+	}
+	var in struct {
+		Force bool `json:"force"`
+	}
+	if r.ContentLength != 0 {
+		if !decodeStrict(w, r, 4<<10, map[string]bool{"force": true}, &in) {
+			return
+		}
+	}
+	job, err := h.Svc.CancelJob(r.Context(), repo, runID, jobID, in.Force, p)
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"job": job})
 }
 
 // rerunRun and rerunFailedRun are the operator verbs (repo write role):

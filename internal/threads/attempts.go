@@ -381,13 +381,15 @@ func (s *Service) Complete(ctx context.Context, claims AttemptClaims, in Complet
 	// terminal path the operator uses, so a running sibling acks on its next
 	// write. A job-level `continue-on-error` tolerates the failure, so it must
 	// not fail fast either.
-	if state == JobFailure && job.Spec != nil && !job.Spec.ContinueOnError && job.Spec.MatrixGroup != "" &&
+	if (state == JobFailure || state == JobTimedOut) && job.Spec != nil && !job.Spec.ContinueOnError && job.Spec.MatrixGroup != "" &&
 		(job.Spec.Strategy == nil || job.Spec.Strategy.FailFast == nil || *job.Spec.Strategy.FailFast) {
 		if ferr := s.cancelMatrixSiblings(ctx, owner, repo, claims.Run, claims.Job, job.Spec.MatrixGroup); ferr != nil {
 			return nil, ferr
 		}
 	}
 	s.finishEntry(ctx, owner, repo, job.QueueSeq)
+	// PAR-173: a single-job runner is consumed by this completion.
+	s.retireEphemeralRunner(ctx, claims.Runner)
 	run, _ := s.loadRun(ctx, owner, repo, claims.Run)
 	runState := state
 	if run != nil {
@@ -418,6 +420,7 @@ func (s *Service) AckCancel(ctx context.Context, claims AttemptClaims) (*Complet
 		state = updated.State
 	}
 	s.finishEntry(ctx, owner, repo, job.QueueSeq)
+	s.retireEphemeralRunner(ctx, claims.Runner)
 	run, _ := s.loadRun(ctx, owner, repo, claims.Run)
 	runState := state
 	if run != nil {
@@ -461,10 +464,12 @@ func conclusionState(c string) (string, error) {
 		return JobSuccess, nil
 	case JobFailure:
 		return JobFailure, nil
+	case JobTimedOut:
+		return JobTimedOut, nil
 	case JobCancelled:
 		return JobCancelled, nil
 	}
-	return "", fmt.Errorf("%w: conclusion must be success|failure|cancelled", ErrInvalid)
+	return "", fmt.Errorf("%w: conclusion must be success|failure|timed_out|cancelled", ErrInvalid)
 }
 
 // normalizeConclusion lowercases and normalizes the two spellings of cancelled.
@@ -474,6 +479,8 @@ func normalizeConclusion(c string) string {
 		return JobSuccess
 	case "failure", "failed", "error":
 		return JobFailure
+	case "timed_out", "timed-out", "timeout":
+		return JobTimedOut
 	case "cancelled", "canceled":
 		return JobCancelled
 	}
@@ -500,6 +507,75 @@ func (s *Service) CancelRun(ctx context.Context, repo, runID string, p auth.Prin
 		Actor:  strings.TrimSpace(p.Name),
 		Reason: CancelReasonOperator,
 	})
+}
+
+// CancelJob cancels one job (PAR-195, repo write role). Non-force: a queued
+// job is cancelled immediately and a running job receives the cancel signal
+// until its runner acknowledges (the same control channel CancelRun uses).
+// Force: the job is terminal at once — the record says it was force-cancelled,
+// and a later runner write is refused as "job already cancelled" rather than
+// silently rewriting the history. Siblings are never touched.
+func (s *Service) CancelJob(ctx context.Context, repo, runID, jobID string, force bool, p auth.Principal) (*Job, error) {
+	owner, name, err := splitRepo(repo)
+	if err != nil {
+		return nil, err
+	}
+	if err := s.requireRole(ctx, owner, name, p, "write"); err != nil {
+		return nil, err
+	}
+	job, _, err := s.loadJobAndRun(ctx, owner, name, runID, jobID)
+	if err != nil {
+		return nil, err
+	}
+	if job == nil {
+		return nil, fmt.Errorf("%w: unknown job %q", ErrNotFound, jobID)
+	}
+	if terminal(job.State) {
+		return job, nil // idempotent: the first cancel wins
+	}
+	actor := strings.TrimSpace(p.Name)
+	reason := CancelReasonOperator
+	if force {
+		reason = CancelReasonForce
+	}
+	up := JobUpdate{CancelledBy: actor, CancelReason: reason}
+	if force || job.State != JobRunning {
+		up.State = JobCancelled
+		up.CancelRequested = boolPtr(false)
+		up.ForceCancelled = boolPtr(force)
+		up.Reason = "cancelled by " + actor
+		if force {
+			up.Reason += " (forced)"
+		}
+		updated, uerr := s.UpdateJob(ctx, repoID(owner, name), runID, jobID, up)
+		if uerr != nil {
+			return nil, uerr
+		}
+		s.setEntryCancel(ctx, owner, name, job.QueueSeq, false)
+		s.finishEntry(ctx, owner, name, job.QueueSeq)
+		return updated, nil
+	}
+	up.CancelRequested = boolPtr(true)
+	updated, uerr := s.UpdateJob(ctx, repoID(owner, name), runID, jobID, up)
+	if uerr != nil {
+		return nil, uerr
+	}
+	s.setEntryCancel(ctx, owner, name, job.QueueSeq, true)
+	return updated, nil
+}
+
+// jobCancelUpdate is the one shape both cancel paths write for a queued job:
+// terminal state, the actor and the reason. Keeping it in one helper is what
+// makes "one cancellation path" true for the run and job verbs.
+func jobCancelUpdate(actor, reason string, force bool) JobUpdate {
+	up := JobUpdate{State: JobCancelled, CancelRequested: boolPtr(false), CancelledBy: actor, CancelReason: reason, ForceCancelled: boolPtr(force)}
+	if strings.TrimSpace(actor) != "" {
+		up.Reason = "cancelled by " + strings.TrimSpace(actor)
+		if force {
+			up.Reason += " (forced)"
+		}
+	}
+	return up
 }
 
 // cancelWhy records who cancelled a run and why. A zero value is a bare system
@@ -558,18 +634,19 @@ func (s *Service) cancelRun(ctx context.Context, owner, name, runID string, why 
 		}
 		if job.State == JobRunning {
 			if _, uerr := s.UpdateJob(ctx, repoID(owner, name), runID, job.ID, JobUpdate{
-				CancelRequested: boolPtr(true),
+				CancelRequested: boolPtr(true), CancelledBy: why.Actor, CancelReason: why.Reason,
 			}); uerr != nil {
 				return nil, uerr
 			}
 			s.setEntryCancel(ctx, owner, name, job.QueueSeq, true)
 			continue
 		}
-		update := JobUpdate{State: JobCancelled, CancelRequested: boolPtr(false)}
+		update := jobCancelUpdate(why.Actor, why.Reason, false)
 		// A queued job never ran, so the reason belongs on the job too: the run
 		// page renders it as "why this job did not execute" instead of leaving
 		// the reader to guess. A running job's reason is the run header's (its
-		// attempt ends through the runner's ack).
+		// attempt ends through the runner's ack). Supersede keeps its own
+		// sentence, which names the newer run.
 		if why.Reason == CancelReasonSupersede && why.SupersededBy != "" {
 			update.Reason = "superseded by run " + why.SupersededBy
 		}
@@ -770,7 +847,11 @@ func (s *Service) rerun(ctx context.Context, repo, runID string, p auth.Principa
 		// job with no `needs:` is decided here (a dependent is decided by the
 		// cascade once its dependencies conclude).
 		if len(job.Needs) == 0 {
-			if verdict, reason, _ := evaluateJobIf(job, run, needFacts{}); verdict != jobIfRun {
+			extra, xerr := s.loadJobIfValues(ctx, owner, repo, job, run)
+			if xerr != nil {
+				return nil, xerr
+			}
+			if verdict, reason, _ := evaluateJobIfWith(job, run, needFacts{}, extra); verdict != jobIfRun {
 				state := JobSkipped
 				if verdict == jobIfError {
 					state = JobFailure
@@ -808,7 +889,7 @@ func failedRerunSet(jobs []*Job) []*Job {
 	keyIDs := needsIndex(jobs)
 	selected := make(map[string]bool, len(jobs))
 	for _, j := range jobs {
-		if j.State == JobFailure {
+		if j.State == JobFailure || j.State == JobTimedOut {
 			selected[j.ID] = true
 		}
 	}

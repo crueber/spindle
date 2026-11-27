@@ -118,8 +118,8 @@ func TestContextVocabularyEdges(t *testing.T) {
 	if err := ValidateTemplate("${{ runner.os }}", TemplateScope{JobIf: true}); err == nil {
 		t.Fatal("runner.os accepted in a job-level if")
 	}
-	if err := ValidateTemplate("${{ vars.X }}", TemplateScope{JobIf: true}); err == nil {
-		t.Fatal("vars.X accepted in a job-level if")
+	if err := ValidateTemplate("${{ vars.X }}", TemplateScope{JobIf: true}); err != nil {
+		t.Fatalf("vars.X refused in a job-level if: %v", err)
 	}
 	if err := ValidateTemplate("${{ github.event.release.tag_name }}", TemplateScope{}); err != nil {
 		t.Fatalf("event ref: %v", err)

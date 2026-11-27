@@ -558,3 +558,97 @@ func TestDocumentNodeCommentsSurvive(t *testing.T) {
 		t.Error("the header comment was lost")
 	}
 }
+
+// TestFlowKeysTranslate pins the Wave-4 importer hand-off: run-name, defaults
+// and strategy.max-parallel now parse in the target, so the converter carries
+// them instead of reporting UNTRANSLATED.
+func TestFlowKeysTranslate(t *testing.T) {
+	src := `name: Flow
+on: push
+run-name: deploy ${{ github.ref_name }} by ${{ github.actor }}
+defaults:
+  run:
+    shell: bash
+    working-directory: src
+jobs:
+  build:
+    runs-on: linux
+    defaults:
+      run:
+        shell: sh
+    strategy:
+      max-parallel: 2
+      matrix:
+        os: [linux, darwin]
+    steps:
+      - run: "true"
+`
+	res := okTranslate(t, GitHub, src)
+	if len(res.Untranslated) != 0 {
+		t.Fatalf("flow keys were refused: %+v\n%s", res.Untranslated, res.Output)
+	}
+	out := string(res.Output)
+	for _, want := range []string{"run-name: deploy", "defaults:", "max-parallel: 2", "working-directory: src"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("output misses %q:\n%s", want, out)
+		}
+	}
+	// The converted file's defaults and run-name are the target's own shapes.
+	parsed, err := workflow.Parse(res.Output)
+	if err != nil {
+		t.Fatal(err)
+	}
+	title, err := workflow.RenderRunName(parsed.RunName, map[string]string{"ref_name": "main", "actor": "ada"}, nil)
+	if err != nil || title != "deploy main by ada" {
+		t.Fatalf("run-name = %q, %v", title, err)
+	}
+	shell, wd := workflow.DefaultsFor(parsed, nil)
+	if shell != "bash" || wd != "src" {
+		t.Fatalf("defaults = %q/%q", shell, wd)
+	}
+}
+
+// TestFlowKeysRefusedByShape keeps the fail-closed rule for the forms the engine
+// still refuses: a defaults value with a span, an unknown defaults key, and a
+// max-parallel without a matrix.
+func TestFlowKeysRefusedByShape(t *testing.T) {
+	cases := []struct{ name, src, want string }{
+		{
+			"defaults expression",
+			top("on: push\ndefaults:\n  run:\n    shell: ${{ matrix.os }}\n"),
+			"defaults",
+		},
+		{
+			"defaults unknown key",
+			top("on: push\ndefaults:\n  run:\n    shell: bash\n    timeout: 5\n"),
+			"defaults",
+		},
+		{
+			"max-parallel without matrix",
+			jobDoc("    runs-on: linux\n    strategy:\n      max-parallel: 2\n    steps:\n      - run: 'true'\n"),
+			"jobs.build.strategy.max-parallel",
+		},
+		{
+			"max-parallel not an int",
+			jobDoc("    runs-on: linux\n    strategy:\n      max-parallel: many\n      matrix:\n        os: [linux]\n    steps:\n      - run: 'true'\n"),
+			"jobs.build.strategy.max-parallel",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			res, err := Translate(GitHub, []byte(tc.src))
+			if err != nil {
+				t.Fatalf("Translate: %v", err)
+			}
+			found := false
+			for _, u := range res.Untranslated {
+				if strings.Contains(u.Path, tc.want) {
+					found = true
+				}
+			}
+			if !found {
+				t.Fatalf("%s not refused: %+v\n%s", tc.want, res.Untranslated, res.Output)
+			}
+		})
+	}
+}

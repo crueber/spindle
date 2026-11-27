@@ -118,15 +118,24 @@ stream logs over SSE with cancel, rerun and rerun-failed. `actions/cache` is bui
 trust-class scopes (default/branch/PR/fork, D-10), and artifacts take the v4 inputs, support a
 maintainer-approved cross-run read (D-3), and have a list/download/delete API. `permissions:` mints a
 scoped job token (`$SPINDLE_JOB_TOKEN`, also delivered as `$GITHUB_TOKEN`/`$FORGEJO_TOKEN`) whose
-closed vocabulary (`contents`, `issues`, `pull-requests`, `id-token`) is also its platform-API
-authority, and, with `id-token: write` (or Forgejo's `enable-openid-connect: true`) on a trusted run,
+closed vocabulary (`contents`, `issues`, `pull-requests`, `deployments`, `id-token`) is also its
+platform-API authority, and, with `id-token: write` (or Forgejo's `enable-openid-connect: true`) on a
+trusted run,
 a short-lived audience-scoped OIDC ID token for cloud providers; repository secrets are write-only and
 masked (never exposed to fork PRs; a fork's token is `contents: read` unless the repository enabled
 the audited `send_write_tokens` switch), and first-time fork contributors need approval. Deployment
 environments add required reviewers (users or teams, at most six), a wait timer,
-prevent-self-review, a deployment branch/tag allowlist and environment-scoped secrets: a job names
-one with `environment:`, and nothing starts — and no environment secret is resolved — until every
-listed reviewer (or a repo admin) approves the deployment (Settings → Environments).
+prevent-self-review, a deployment branch/tag allowlist, environment-scoped secrets and variables:
+a job names one with `environment:`, and nothing starts — and no environment secret is resolved —
+until every listed reviewer (or a repo admin) approves the deployment (Settings → Environments).
+Deployments are records with statuses and a serialization slot per environment, readable and
+writable through `…/api/threads/deployments` under the `deployments` token scope. Schedules can be
+disabled/enabled and run on demand, CI can be paused, and a manual dispatch may set a queue
+priority; failed runs notify watchers in-app (with an optional webhook). Checks carry annotations,
+a per-workflow badge and run-list filters, and one job can be cancelled without its siblings.
+Runners declare a capacity, an optional one-job (ephemeral) mode and CPU/memory ceilings; groups
+narrow what a runner sees; drain/resume/rotate/deregister operate the fleet; a managed pool,
+hosted Windows/macOS, LXC/host backends and artifact attestations are signed non-goals (D-14/D-15).
 
 Runs, jobs and steps, from the outside in: one **run** per workflow file per event (the file pinned
 to a path, commit and sha256), one **job** per `jobs:` key or matrix cell (one container, one
@@ -194,14 +203,18 @@ A step is a `run:` command (or a group: `background`/`wait`/`cancel`/`parallel`,
 of the built-in `actions/checkout`, `actions/upload-artifact`, `actions/download-artifact` or
 `actions/cache` (+ `/restore`, `/save`), a **local composite action**
 (`uses: ./.spindle/actions/setup`, resolved at run creation from the run commit; `github.action_path`
-is the innermost action's directory), or a **`docker://` image** (`uses: docker://alpine:3.20`).
-There is **no remote action marketplace** — `owner/repo@ref` is refused with "there is no
-marketplace" — and the `setup-*` actions are refused by name with the exact `actions/cache` recipe
-that replaces their cache half. Artifacts pass files between jobs of the same run, and another run of
-the same repository only behind the cross-run approval (D-3); caches persist a workspace tree across
-runs with trust-class scopes. The reference is
-[§3.4 steps](threads.md#34-steps) and
-[§3.4a local actions and docker images](threads.md#34a-local-actions-and-docker-images).
+is the innermost action's directory), a **`docker://` image** (`uses: docker://alpine:3.20`), or a
+**remote action** (`owner/repo[/path]@ref`, a URL, or a `setup-*`) when the instance's
+`[threads.actions]` policy admits it: the server pins the ref to a commit, hashes the content,
+embeds it in the job and records both on the run (`action_loads`); the runner never fetches. The
+policy defaults to allowlist mode with a full commit SHA required outside it — never an implicit
+marketplace trust. JavaScript (`node20`/`node24`, with a declared runtime minimum), Dockerfile/
+registry and nested remote composite actions are supported; a local composite's metadata still
+refuses a remote `uses:` by name. Artifacts pass files between jobs of the same run, and another run
+of the same repository only behind the cross-run approval (D-3); caches persist a workspace tree
+across runs with trust-class scopes. The reference is
+[§3.4 steps](threads.md#34-steps), [§3.4a local actions and docker images](threads.md#34a-local-actions-and-docker-images)
+and [§3.4e remote actions](threads.md#34e-remote-actions-par-070071072074).
 
 ### 3.3 Runners
 
@@ -259,6 +272,15 @@ job the runner takes, and a runner that grants privilege or a docker endpoint re
 `--image-prefix` mirror, or `--registry-auth-file` (password on stdin) — never workflow
 `services.*.credentials`. Daemonless image builds (kaniko, buildah) need no grant; `docker build`
 needs `--docker-host` on a disposable host.
+
+A fleet is more than a list of processes: an admin-set **runner group** adds inherited labels and a
+visibility allowlist (intersected with the runner's own policy, so a group can only narrow);
+`--ephemeral` makes a one-job worker whose record and credential are deleted after its terminal
+attempt; `--max-cpus`/`--max-memory` declare a ceiling that becomes an exact queue reason. One
+process can serve several `[[runner]]` scopes from a `--config` file (0600 credentials), and
+`runner drain|resume|rotate|deregister` are ordinary operations (rotation keeps a 15-minute overlap).
+`spindle runner images` prints the stock toolchain catalogue; the images are upstream toolchains, not
+published by spindle (PAR-177). The reference is [`threads.md` §8.3a–8.3b](threads.md#83a-registration-scopes-and-runner-groups-par-172par-175).
 
 ### 3.4 Runner in a container
 

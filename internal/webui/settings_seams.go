@@ -73,6 +73,40 @@ type environmentAdmin interface {
 	SecretsEnabled() bool
 }
 
+// environmentVariables is the optional environment-variable half (PAR-117). A
+// service without it keeps the tab's protection/secrets surface and renders no
+// variable controls; composition binds *threads.Service, which implements it.
+type environmentVariables interface {
+	ListEnvironmentVariables(ctx context.Context, repo, env string, p auth.Principal) ([]threads.VariableView, error)
+	SetEnvironmentVariable(ctx context.Context, repo, env, name, value string, p auth.Principal) error
+	DeleteEnvironmentVariable(ctx context.Context, repo, env, name string, p auth.Principal) error
+}
+
+// environmentDeployments is the optional deployment-history read (PAR-132).
+type environmentDeployments interface {
+	ListDeployments(ctx context.Context, repo, environment string, p auth.Principal, after string, n int) (*threads.DeploymentPage, error)
+}
+
+// environmentVariablesFor returns the bound variable surface, or nil.
+func (s SettingsServices) environmentVariablesFor() environmentVariables {
+	e := s.environments()
+	if e == nil {
+		return nil
+	}
+	v, _ := e.(environmentVariables)
+	return v
+}
+
+// environmentDeploymentsFor returns the bound deployment surface, or nil.
+func (s SettingsServices) environmentDeploymentsFor() environmentDeployments {
+	e := s.environments()
+	if e == nil {
+		return nil
+	}
+	d, _ := e.(environmentDeployments)
+	return d
+}
+
 // environments returns the bound environment surface (nil when unwired). A
 // typed-nil *threads.Service (a restricted build wires the settings pages with
 // no Threads service) is treated as unwired, so the tab renders its honest card
@@ -708,7 +742,8 @@ func (s SettingsServices) repoWrite(ctx context.Context, owner, repo string, p a
 	seamRole := identity.RoleAdmin
 	switch w.Action {
 	case SettingsActionEnvironmentPut, SettingsActionEnvironmentDelete,
-		SettingsActionEnvironmentSecretPut, SettingsActionEnvironmentSecretDelete:
+		SettingsActionEnvironmentSecretPut, SettingsActionEnvironmentSecretDelete,
+		SettingsActionEnvironmentVariablePut, SettingsActionEnvironmentVariableDelete:
 		seamRole = identity.RoleMaintain
 	}
 	if s.Ident != nil {
@@ -868,6 +903,10 @@ func (s SettingsServices) repoWrite(ctx context.Context, owner, repo string, p a
 		return s.putEnvironmentSecret(ctx, owner, repo, p, w)
 	case SettingsActionEnvironmentSecretDelete:
 		return s.deleteEnvironmentSecret(ctx, owner, repo, p, w)
+	case SettingsActionEnvironmentVariablePut:
+		return s.putEnvironmentVariable(ctx, owner, repo, p, w)
+	case SettingsActionEnvironmentVariableDelete:
+		return s.deleteEnvironmentVariable(ctx, owner, repo, p, w)
 	case SettingsActionWebhookCreate:
 		return s.createWebhook(ctx, owner, repo, p, w)
 	case SettingsActionWebhookUpdate:
@@ -1264,9 +1303,55 @@ func (s SettingsServices) repoEnvironments(ctx context.Context, owner, repo stri
 		for _, sec := range secrets {
 			row.Secrets = append(row.Secrets, SettingsSecret{Name: sec.Name, CreatedAt: sec.CreatedAt, UpdatedAt: sec.UpdatedAt})
 		}
+		vars, verr := []threads.VariableView{}, error(nil)
+		if v := s.environmentVariablesFor(); v != nil {
+			vars, verr = v.ListEnvironmentVariables(ctx, owner+"/"+repo, env.Name, p)
+			if verr != nil {
+				return nil, verr
+			}
+		}
+		for _, v := range vars {
+			row.Vars = append(row.Vars, SettingsSecret{Name: v.Name, CreatedAt: v.CreatedAt, UpdatedAt: v.UpdatedAt})
+		}
+		// PAR-132: the environment page lists the same deployment records the
+		// API serves. A bounded page (20) keeps the settings tab cheap; the API
+		// and the run page are the deep view.
+		if d := s.environmentDeploymentsFor(); d != nil {
+			if page, derr := d.ListDeployments(ctx, owner+"/"+repo, env.Name, p, "", 20); derr == nil && page != nil {
+				for _, dep := range page.Deployments {
+					row.Deployments = append(row.Deployments, settingsDeployment(dep))
+				}
+			}
+		}
 		out.Rows = append(out.Rows, row)
 	}
 	return out, nil
+}
+
+// settingsDeployment maps one deployment record onto the page row (newest
+// status first, bounded to five so one record cannot enlarge the tab).
+func settingsDeployment(doc *threads.DeploymentDoc) SettingsDeployment {
+	row := SettingsDeployment{
+		ID: doc.ID, State: doc.State, Ref: doc.Ref, SHA: doc.SHA, Creator: doc.Creator,
+		URL: doc.URL, RunID: doc.RunID, CreatedAt: doc.CreatedAt, UpdatedAt: doc.UpdatedAt,
+	}
+	if doc.QueuePosition > 0 {
+		row.Queue = doc.QueueReason
+		if row.Queue == "" {
+			row.Queue = "queued"
+		}
+	}
+	start := len(doc.Statuses) - 5
+	if start < 0 {
+		start = 0
+	}
+	for i := len(doc.Statuses) - 1; i >= start; i-- {
+		st := doc.Statuses[i]
+		row.Statuses = append(row.Statuses, SettingsDeploymentStatus{
+			State: st.State, Description: st.Description, Creator: st.Creator, CreatedAt: st.CreatedAt,
+		})
+	}
+	return row
 }
 
 // putEnvironment creates or replaces one environment record (maintain floor,
@@ -1334,6 +1419,31 @@ func (s SettingsServices) deleteEnvironmentSecret(ctx context.Context, owner, re
 		return SettingsWriteResult{}, settingsWriteErr(settingsThreadsStatus(err), err.Error())
 	}
 	return SettingsWriteResult{Notice: "environment secret deleted"}, nil
+}
+
+// putEnvironmentVariable stores one environment-scoped non-secret variable.
+func (s SettingsServices) putEnvironmentVariable(ctx context.Context, owner, repo string, p auth.Principal, w SettingsRepoWrite) (SettingsWriteResult, *SettingsWriteError) {
+	envs := s.environmentVariablesFor()
+	if envs == nil {
+		return SettingsWriteResult{}, settingsWriteErr(http.StatusServiceUnavailable, "environment variables are not wired on this build")
+	}
+	if err := envs.SetEnvironmentVariable(ctx, owner+"/"+repo, w.Get("id"),
+		w.Get("environment_variable_name"), w.Get("environment_variable_value"), p); err != nil {
+		return SettingsWriteResult{}, settingsWriteErr(settingsThreadsStatus(err), err.Error())
+	}
+	return SettingsWriteResult{Notice: "environment variable stored (write-only — the value can never be read back)"}, nil
+}
+
+// deleteEnvironmentVariable removes one environment-scoped variable.
+func (s SettingsServices) deleteEnvironmentVariable(ctx context.Context, owner, repo string, p auth.Principal, w SettingsRepoWrite) (SettingsWriteResult, *SettingsWriteError) {
+	envs := s.environmentVariablesFor()
+	if envs == nil {
+		return SettingsWriteResult{}, settingsWriteErr(http.StatusServiceUnavailable, "environment variables are not wired on this build")
+	}
+	if err := envs.DeleteEnvironmentVariable(ctx, owner+"/"+repo, w.Get("id"), w.Get("environment_variable_name"), p); err != nil {
+		return SettingsWriteResult{}, settingsWriteErr(settingsThreadsStatus(err), err.Error())
+	}
+	return SettingsWriteResult{Notice: "environment variable deleted"}, nil
 }
 
 // settingsReviewerList splits the reviewers textarea/CSV into names.

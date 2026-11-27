@@ -4,6 +4,7 @@ import (
 	"fmt"
 	pathpkg "path"
 	"sort"
+	"strconv"
 	"strings"
 
 	"gopkg.in/yaml.v3"
@@ -90,6 +91,10 @@ func (t *translator) job(name string, node *yaml.Node) {
 			if t.jobSecretsAt(node, i, p, base) {
 				i -= 2
 			}
+		case "defaults":
+			if !t.defaultsAt(node, i, p) {
+				i -= 2
+			}
 		case "concurrency":
 			t.concurrencyAt(node, i, p, true, axes)
 		case "permissions":
@@ -100,11 +105,7 @@ func (t *translator) job(name string, node *yaml.Node) {
 				i -= 2
 			}
 		default:
-			reason := "not part of the Spindle job schema"
-			if key.Value == "defaults" {
-				reason = "job defaults.run is not supported yet; set shell/working-directory on each step"
-			}
-			t.drop(node, i, t.untranslatedAt(p, key.Value, reason))
+			t.drop(node, i, t.untranslatedAt(p, key.Value, "not part of the Spindle job schema"))
 			i -= 2
 		}
 	}
@@ -378,8 +379,20 @@ func (t *translator) strategyAt(node *yaml.Node, i int, path string) (lossy bool
 				j -= 2
 			}
 		case "max-parallel":
-			t.drop(val, j, t.untranslatedAt(p, "strategy.max-parallel", "a per-job cell cap is not supported; a concurrency group caps runs, not cells"))
-			j -= 2
+			raw := strings.TrimSpace(val.Content[j+1].Value)
+			n, err := strconv.Atoi(raw)
+			if val.Content[j+1].Tag != "!!int" {
+				err = fmt.Errorf("not an integer")
+			}
+			if err != nil || n < 1 || n > workflow.MaxMatrixCells {
+				t.drop(val, j, t.untranslatedAt(p, "strategy.max-parallel", "max-parallel must be an integer 1…256"))
+				j -= 2
+			} else if mapIndex(val, "matrix") < 0 {
+				t.drop(val, j, t.untranslatedAt(p, "strategy.max-parallel", "max-parallel needs a matrix; there is nothing to bound"))
+				j -= 2
+			} else {
+				t.translated++
+			}
 		default:
 			t.drop(val, j, t.untranslatedAt(p, "strategy."+key.Value, "not part of the Spindle strategy schema"))
 			j -= 2

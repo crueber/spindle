@@ -155,9 +155,9 @@ command's usage line and flags (flags may follow positionals, `gh`-style).
 | `release` | `list`, `show`, `create`, `delete`, `upload` |
 | `checks` | `list`, `status REPO [REF]` |
 | `packages` | `list`, `show`, `delete` |
-| `threads` | `list`, `show`, `run`, `cancel`, `rerun`, and the operator-local `import` (§5.3) |
+| `threads` | `list`, `show`, `jobs`, `run` (`--ref`, repeatable `--input`, `--priority`), `watch`, `cancel`, `rerun`, `schedule list\|enable\|disable\|run`, `pause`, `resume`, `queue`, the operator-local `explain` and `import` (§5.3) |
 | `file` | `put`, `create`, `delete` (one text file as one commit — the browser editor's write path) |
-| `runner` | `serve` (see [`FEATURES.md`](FEATURES.md#33-runners) and [`threads.md`](threads.md#81-flags-and-environment)) |
+| `runner` | `serve` (`--config` offline registration, `--ephemeral`), `drain`, `resume`, `rotate`, `deregister`, `images`, and the named `pool` refusal (see [`threads.md`](threads.md#81-flags-and-environment), §8.3a/§8.3b) |
 | `search` | `search QUERY [--owner OWNER \| -R OWNER/REPO] [--ref REF] [--regex] [--case] [--word] [--path PATHSPEC]… [--limit N] [--json]` — code search in one repository (the default branch, or `--ref`) or across an owner's readable repositories. It is a standalone command, not a group: `-R`/`SPINDLE_REPO` selects repository scope, `--owner` owner scope, and exactly one is required (v1 has no instance-wide code search). `--limit` is kept matches per repository (1..200). The command pins `type=code`; issue search has no CLI surface yet. |
 | `api` | `api [-X METHOD] [-d DATA] [-H 'K: V'] [-json] PATH` — one authenticated request; `-d` takes a literal, `@FILE` or `-` for stdin |
 | `completion` | `completion bash\|zsh\|fish` — generated from the same dispatch table |
@@ -303,10 +303,30 @@ spindle packages delete you/demo sha256:<digest>
 
 ```sh
 spindle threads list you/demo
-spindle threads run you/demo ci --ref main
+spindle threads run you/demo ci --ref main --input mode=fast --priority 5
+spindle threads watch you/demo 17          # exit 0 success, 1 failure, 130 cancelled
+spindle threads jobs you/demo 17
 spindle threads show you/demo 17 --json
 spindle threads cancel you/demo 17
 spindle threads rerun you/demo 17
+spindle threads queue you/demo             # claim order: priority, then FIFO
+spindle threads pause you/demo
+spindle threads resume you/demo
+spindle threads schedule list you/demo
+spindle threads schedule disable you/demo --path .spindle/workflows/ci.yml --cron "0 3 * * *"
+spindle threads schedule run you/demo --path .spindle/workflows/ci.yml --cron "0 3 * * *"
+spindle threads explain .spindle/workflows/ci.yml
+```
+
+**Fleet operations.** These use the runner's own credential, so they need no admin session. The
+host-admin verbs (mint/list/revoke/policy/group) stay in the browser and the JSON admin lane.
+
+```sh
+spindle runner drain --token-file /etc/spindle/runner.token
+spindle runner resume --token-file /etc/spindle/runner.token
+spindle runner rotate --token-file /etc/spindle/runner.token   # overlap window, no downtime
+spindle runner deregister --token-file /etc/spindle/runner.token
+spindle runner images                                          # stock toolchain catalogue
 ```
 
 **Run a CI runner.** The registration token is minted in the browser at `/admin/runners`; the

@@ -112,7 +112,7 @@ func TestQueueIndexErrorPaths(t *testing.T) {
 	if _, _, err := e.svc.loadQueueIndex(ctx()); err == nil {
 		t.Fatal("corrupt index load must fail")
 	}
-	if err := e.svc.appendQueueIndex(ctx(), "o/r", "r", "j", []string{"linux"}, false, "now"); err == nil {
+	if err := e.svc.appendQueueIndex(ctx(), "o/r", "r", "j", []string{"linux"}, false, 0, "now"); err == nil {
 		t.Fatal("append onto a corrupt index must fail")
 	}
 	runner := &RunnerDoc{ID: "rnridx000001", Labels: []string{"linux"}, AllowAll: true, State: RunnerActive}
@@ -317,7 +317,7 @@ func TestInstanceRunnerEntropyAndHintGuards(t *testing.T) {
 	randRead = prev
 
 	// The hint helpers tolerate empty/nil inputs.
-	if err := e.svc.appendQueueIndex(ctx(), "", "", "", nil, false, ""); err != nil {
+	if err := e.svc.appendQueueIndex(ctx(), "", "", "", nil, false, 0, ""); err != nil {
 		t.Fatalf("empty append = %v", err)
 	}
 	e.svc.removeQueueIndexRows(ctx(), nil)
@@ -325,7 +325,7 @@ func TestInstanceRunnerEntropyAndHintGuards(t *testing.T) {
 	if _, err := store.PutBytes(ctx(), e.store, QueueHeadKey("o", "r"), []byte("{"), store.PutOptions{Mode: store.PutOverwrite}); err != nil {
 		t.Fatalf("seed: %v", err)
 	}
-	if err := e.svc.appendHead(ctx(), "o", "r", "0000000000000000009-abc"); err == nil {
+	if err := e.svc.appendHead(ctx(), "o", "r", "0000000000000000009-abc", 0); err == nil {
 		t.Fatal("corrupt head append must fail")
 	}
 }

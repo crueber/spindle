@@ -427,10 +427,10 @@ func TestWaitServiceContextCancelled(t *testing.T) {
 	stream := quietStream(t)
 	cctx, ccancel := context.WithCancel(context.Background())
 	ccancel()
-	if got := exec.failOrCancel(cctx, stream, os.ErrDeadlineExceeded); got != threads.JobCancelled {
+	if got := exec.failOrCancel(cctx, context.Background(), stream, os.ErrDeadlineExceeded); got != threads.JobCancelled {
 		t.Fatalf("failOrCancel = %s", got)
 	}
-	if got := exec.failOrCancel(context.Background(), stream, os.ErrDeadlineExceeded); got != threads.JobFailure {
+	if got := exec.failOrCancel(context.Background(), context.Background(), stream, os.ErrDeadlineExceeded); got != threads.JobFailure {
 		t.Fatalf("failOrCancel = %s", got)
 	}
 }

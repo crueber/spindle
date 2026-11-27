@@ -40,9 +40,10 @@ import (
 
 // Runner states.
 const (
-	RunnerPending = "pending"
-	RunnerActive  = "active"
-	RunnerRevoked = "revoked"
+	RunnerPending  = "pending"
+	RunnerActive   = "active"
+	RunnerDraining = "draining"
+	RunnerRevoked  = "revoked"
 )
 
 // RegistrationTTL bounds an unused registration token (15 minutes: long enough
@@ -64,9 +65,18 @@ const (
 // Audit action verbs the instance runner admin surface records in the host
 // audit family (never invented for a read).
 const (
-	AuditRunnerTokenMint = "runner_token_mint"
-	AuditRunnerRevoke    = "runner_revoke"
-	AuditRunnerPolicy    = "runner_policy"
+	AuditRunnerTokenMint    = "runner_token_mint"
+	AuditRunnerRevoke       = "runner_revoke"
+	AuditRunnerPolicy       = "runner_policy"
+	AuditRunnerDrain        = "runner_drain"
+	AuditRunnerResume       = "runner_resume"
+	AuditRunnerRotate       = "runner_token_rotate"
+	AuditRunnerDeregister   = "runner_deregister"
+	AuditRunnerEphemeralEnd = "runner_ephemeral_retire"
+	AuditRunnerGroupCreate  = "runner_group_create"
+	AuditRunnerGroupUpdate  = "runner_group_update"
+	AuditRunnerGroupDelete  = "runner_group_delete"
+	AuditRunnerGroupAssign  = "runner_group_assign"
 )
 
 // MaxRunnerPolicyRepos bounds one runner's repository allowlist. A larger list
@@ -186,18 +196,112 @@ func (d *RunnerDoc) AllowsRepo(repo string) bool {
 	return d.policy().AllowsRepo(repo)
 }
 
+// CanServeRepo is the claim authority for tenancy PLUS group visibility: the
+// runner's admin-set policy must allow the repository, and when the runner
+// belongs to a group the group's visibility must allow it too. A group can only
+// narrow what the runner's own policy allows (PAR-175); it can never widen it,
+// because the intersection is taken here and the policy is never rewritten.
+func (d *RunnerDoc) CanServeRepo(repo string) bool {
+	if d == nil || !d.AllowsRepo(repo) {
+		return false
+	}
+	if strings.TrimSpace(d.Group) == "" {
+		return true
+	}
+	return RunnerPolicy{AllowAll: d.GroupAllowAll, Repos: d.GroupRepos}.AllowsRepo(repo)
+}
+
+// EffectiveLabels is the labels a job's `runs-on` is matched against: the
+// runner's declared set plus the labels inherited from its group (PAR-175).
+func (d *RunnerDoc) EffectiveLabels() []string {
+	if d == nil {
+		return nil
+	}
+	if len(d.GroupLabels) == 0 {
+		return d.Labels
+	}
+	out := make([]string, 0, len(d.Labels)+len(d.GroupLabels))
+	out = append(out, d.Labels...)
+	out = append(out, d.GroupLabels...)
+	return normalizeLabels(out)
+}
+
+// IsDraining reports whether the runner is in the drain state (PAR-181): it
+// finishes its current job and claims nothing new, but its credential still
+// authenticates so the completion can be reported.
+func (d *RunnerDoc) IsDraining() bool {
+	return d != nil && d.State == RunnerDraining
+}
+
+// RunnerScope is the derived registration scope of a runner (PAR-172):
+// instance (all repositories), organization (one owner's namespace) or
+// repository (named repositories). A spindle owner is either a user or an
+// organization; both are an owner namespace, so the Forgejo "user" scope is the
+// same shape as the organization scope here and is reported as such.
+const (
+	RunnerScopeInstance = "instance"
+	RunnerScopeOrg      = "organization"
+	RunnerScopeRepo     = "repository"
+	// RunnerScopeNone is a record with no policy (written before tenancy): it is
+	// offered nothing, so reporting it as instance-scoped would be a lie.
+	RunnerScopeNone = "none"
+)
+
+// Scope derives the runner's registration scope from its admin-set policy.
+// Mixed patterns report the narrowest common name: any `owner/name` makes it a
+// repository-scoped runner; an all-`owner/*` list is organization-scoped.
+func (p RunnerPolicy) Scope() string {
+	switch {
+	case p.AllowAll:
+		return RunnerScopeInstance
+	case len(p.Repos) == 0:
+		return RunnerScopeNone // a legacy record: no repository allowed
+	}
+	for _, pat := range p.Repos {
+		if !strings.HasSuffix(pat, "/*") {
+			return RunnerScopeRepo
+		}
+	}
+	return RunnerScopeOrg
+}
+
+// DescribeScope is the human/audit reading of Scope for a pattern list
+// ("instance · all repositories", "organization · acme", "repository · acme/mono").
+func (p RunnerPolicy) DescribeScope() string {
+	scope := p.Scope()
+	switch scope {
+	case RunnerScopeOrg:
+		owners := make([]string, 0, len(p.Repos))
+		for _, pat := range p.Repos {
+			if owner := strings.TrimSuffix(pat, "/*"); owner != pat {
+				owners = append(owners, owner)
+			}
+		}
+		sort.Strings(owners)
+		return scope + " · " + strings.Join(owners, ",")
+	case RunnerScopeRepo:
+		return scope + " · " + strings.Join(p.Repos, ",")
+	case RunnerScopeNone:
+		return "none · no repository allowed"
+	default:
+		return scope + " · all repositories"
+	}
+}
+
 // Audit action verbs for deployment environments (docs/PLAN-THREADS-ENVIRONMENTS.md
 // §8): every environment mutation and every deployment decision is recorded in
 // the host audit family. The target names the environment; no secret value ever
 // reaches the detail.
 const (
-	AuditEnvironmentCreate       = "environment_create"
-	AuditEnvironmentUpdate       = "environment_update"
-	AuditEnvironmentDelete       = "environment_delete"
-	AuditEnvironmentSecretSet    = "environment_secret_set"
-	AuditEnvironmentSecretDelete = "environment_secret_delete"
-	AuditEnvironmentApprove      = "environment_approve"
-	AuditEnvironmentDeny         = "environment_deny"
+	AuditEnvironmentCreate         = "environment_create"
+	AuditEnvironmentUpdate         = "environment_update"
+	AuditEnvironmentDelete         = "environment_delete"
+	AuditEnvironmentSecretSet      = "environment_secret_set"
+	AuditEnvironmentSecretDelete   = "environment_secret_delete"
+	AuditEnvironmentVariableSet    = "environment_variable_set"
+	AuditEnvironmentVariableDelete = "environment_variable_delete"
+	AuditEnvironmentApprove        = "environment_approve"
+	AuditEnvironmentDeny           = "environment_deny"
 )
 
 // RunnerJobRef names the job a runner currently leases (display state).
@@ -241,7 +345,26 @@ type RunnerDoc struct {
 	// authority, and a run with no eligible runner simply stays queued
 	// (docs/threads.md §8.7).
 	AllowForkRuns bool `json:"allow_fork_runs,omitempty"`
-	Version       int  `json:"version"`
+	// Ephemeral marks a single-job runner (PAR-173): after its first terminal
+	// job the registry record and credential are deleted, so a compromised
+	// disposable worker leaves no reusable credential. The runner process also
+	// exits after one job; the server-side deletion is the authority.
+	Ephemeral bool `json:"ephemeral,omitempty"`
+	// Group is the admin-assigned runner group id (PAR-175). GroupLabels is the
+	// group's inherited label set MATERIALIZED here when the group changes, so
+	// the claim path still reads one record. GroupAllowAll/GroupRepos are the
+	// group's visibility, intersected with the runner's own policy — a group
+	// can only narrow what a runner may serve, never widen it.
+	Group         string   `json:"group,omitempty"`
+	GroupLabels   []string `json:"group_labels,omitempty"`
+	GroupAllowAll bool     `json:"group_allow_all,omitempty"`
+	GroupRepos    []string `json:"group_repos,omitempty"`
+	// MaxCPUs / MaxMemoryBytes are the operator's declared job ceiling
+	// (PAR-176). Zero means "undeclared" (the daemon's limits apply); a job
+	// asking for more than a declaring runner offers is not offered to it.
+	MaxCPUs        float64 `json:"max_cpus,omitempty"`
+	MaxMemoryBytes int64   `json:"max_memory_bytes,omitempty"`
+	Version        int     `json:"version"`
 }
 
 // runnerTokenDoc is threads/runners/tokens/<id>.json: a single-use registration
@@ -263,13 +386,18 @@ type runnerTokenDoc struct {
 }
 
 // RunnerCredential is threads/runners/credentials/<id>.json: hash only,
-// revocable, and it names a runner id — never a repository.
+// revocable, and it names a runner id — never a repository. PreviousHash is the
+// overlap window of a zero-downtime rotation (PAR-181): the old credential keeps
+// working until PreviousValidUntil, so a runner can fetch its new token and
+// rewrite its token file without ever holding a dead credential.
 type RunnerCredential struct {
-	ID        string  `json:"id"`
-	TokenHash string  `json:"token_hash"`
-	CreatedAt string  `json:"created_at"`
-	RevokedAt *string `json:"revoked_at,omitempty"`
-	Version   int     `json:"version"`
+	ID                 string  `json:"id"`
+	TokenHash          string  `json:"token_hash"`
+	PreviousHash       string  `json:"previous_hash,omitempty"`
+	PreviousValidUntil *string `json:"previous_valid_until,omitempty"`
+	CreatedAt          string  `json:"created_at"`
+	RevokedAt          *string `json:"revoked_at,omitempty"`
+	Version            int     `json:"version"`
 }
 
 // --- host-admin surface ------------------------------------------------------
@@ -302,6 +430,10 @@ func requireHostAdmin(p auth.Principal) error {
 // only the resulting token.
 type MintInput struct {
 	Name string `json:"name"`
+	// Group assigns the new runner to an existing runner group (PAR-175). The
+	// group's labels and visibility are materialized on the registry record; a
+	// group can only narrow the policy below.
+	Group string `json:"group,omitempty"`
 	RunnerPolicyInput
 }
 
@@ -337,6 +469,19 @@ func (s *Service) MintRegistrationToken(ctx context.Context, p auth.Principal, i
 		ID: id, Name: display, State: RunnerPending, Labels: []string{}, Capacity: runnerCapacityMin,
 		AllowAll: pol.AllowAll, Repos: pol.Repos,
 		RegisteredBy: principal, CreatedAt: now.Format(dateTimeFmt), Version: 1,
+	}
+	// An admin-chosen group copies its inherited labels and visibility onto the
+	// record (PAR-175). A group that does not exist is refused before anything
+	// is written.
+	if gid := strings.ToLower(strings.TrimSpace(in.Group)); gid != "" {
+		g, gerr := s.loadRunnerGroup(ctx, gid)
+		if gerr != nil {
+			return nil, gerr
+		}
+		if g == nil {
+			return nil, fmt.Errorf("%w: unknown runner group %q", ErrNotFound, gid)
+		}
+		applyRunnerGroup(doc, g)
 	}
 	tok := &runnerTokenDoc{
 		ID: id, Name: display, TokenHash: hash, CreatedBy: principal,
@@ -386,6 +531,16 @@ type RunnerView struct {
 	// "all repositories".
 	AllowAll bool     `json:"allow_all"`
 	Repos    []string `json:"repos,omitempty"`
+	// Scope is the derived registration scope (PAR-172) and ScopeDetail its
+	// human reading. Ephemeral/Group/Draining are the fleet operations state
+	// (PAR-173/PAR-175/PAR-181).
+	Scope          string   `json:"scope"`
+	ScopeDetail    string   `json:"scope_detail"`
+	Ephemeral      bool     `json:"ephemeral"`
+	Group          string   `json:"group,omitempty"`
+	GroupLabels    []string `json:"group_labels,omitempty"`
+	MaxCPUs        float64  `json:"max_cpus,omitempty"`
+	MaxMemoryBytes int64    `json:"max_memory_bytes,omitempty"`
 }
 
 // ListRunners lists the instance fleet (host admin; one bounded prefix LIST
@@ -424,6 +579,9 @@ func (s *Service) ListRunners(ctx context.Context, p auth.Principal) ([]RunnerVi
 			CreatedAt: doc.CreatedAt, RegisteredAt: doc.RegisteredAt, LastSeenAt: doc.LastSeenAt,
 			RevokedAt: doc.RevokedAt, CurrentJob: doc.CurrentJob, AllowForkRuns: doc.AllowForkRuns,
 			AllowAll: doc.AllowAll, Repos: nonNilStr(doc.Repos),
+			Scope: doc.policy().Scope(), ScopeDetail: doc.policy().DescribeScope(),
+			Ephemeral: doc.Ephemeral, Group: doc.Group, GroupLabels: nonNilStr(doc.GroupLabels),
+			MaxCPUs: doc.MaxCPUs, MaxMemoryBytes: doc.MaxMemoryBytes,
 		})
 	}
 	return out, nil
@@ -630,6 +788,13 @@ type RegisterInput struct {
 	// AllowForkRuns records the runner's opt-in to executing fork pull-request
 	// code (default false: a fork run is never offered to it).
 	AllowForkRuns bool `json:"allow_fork_runs"`
+	// Ephemeral declares a single-job runner (PAR-173): the server retires the
+	// record and credential after its first terminal job.
+	Ephemeral bool `json:"ephemeral"`
+	// MaxCPUs / MaxMemoryBytes declare the job size this runner offers
+	// (PAR-176). Zero means undeclared (the daemon's limits apply).
+	MaxCPUs        float64 `json:"max_cpus,omitempty"`
+	MaxMemoryBytes int64   `json:"max_memory_bytes,omitempty"`
 }
 
 // RegisterResult is the register answer: the long-lived runner token, shown
@@ -645,6 +810,10 @@ type RegisterResult struct {
 	// AllowForkRuns echoes the recorded opt-in so the runner can state its
 	// effective policy in startup output.
 	AllowForkRuns bool `json:"allow_fork_runs"`
+	// Ephemeral echoes the single-job declaration (PAR-173).
+	Ephemeral      bool    `json:"ephemeral"`
+	MaxCPUs        float64 `json:"max_cpus,omitempty"`
+	MaxMemoryBytes int64   `json:"max_memory_bytes,omitempty"`
 	// Policy echoes the admin-set tenancy it must operate under (read-only:
 	// the runner states it, it cannot change it).
 	Policy RunnerPolicy `json:"policy"`
@@ -693,6 +862,7 @@ func (s *Service) Register(ctx context.Context, in RegisterInput) (*RegisterResu
 		return nil, fmt.Errorf("%w: mint: %v", ErrUnavailable, merr)
 	}
 	now := s.nowUTC().Format(dateTimeFmt)
+	maxCPUs, maxMemory := clampRunnerSizing(in.MaxCPUs, in.MaxMemoryBytes)
 	// Credential first: the token's single consumption is the CAS below, and a
 	// lost credential create (another registration won the id) is a 401.
 	cred := &RunnerCredential{ID: id, TokenHash: runnerHash, CreatedAt: now, Version: 1}
@@ -742,6 +912,8 @@ func (s *Service) Register(ctx context.Context, in RegisterInput) (*RegisterResu
 			d.Capacity = c
 		}
 		d.AllowForkRuns = in.AllowForkRuns
+		d.Ephemeral = in.Ephemeral
+		d.MaxCPUs, d.MaxMemoryBytes = maxCPUs, maxMemory
 		// The policy is the admin mint's, re-applied from the token record so a
 		// drift between the pending registry entry and the token cannot widen
 		// tenancy. Nothing the runner sent is consulted.
@@ -758,7 +930,9 @@ func (s *Service) Register(ctx context.Context, in RegisterInput) (*RegisterResu
 	pol := RunnerPolicy{AllowAll: tok.AllowAll, Repos: tok.Repos}
 	return &RegisterResult{
 		RunnerID: id, Token: runnerToken, Labels: labels, LabelImages: parsed.Images,
-		AllowForkRuns: in.AllowForkRuns, Policy: pol,
+		AllowForkRuns: in.AllowForkRuns, Ephemeral: in.Ephemeral,
+		MaxCPUs: maxCPUs, MaxMemoryBytes: maxMemory,
+		Policy: pol,
 	}, nil
 }
 
@@ -786,6 +960,14 @@ type DeclareInput struct {
 	// AllowForkRuns is the runner's current opt-in; declare is idempotent, so a
 	// restart without the flag turns it off (fail closed).
 	AllowForkRuns bool `json:"allow_fork_runs"`
+	// Ephemeral is the single-job declaration (PAR-173); declare is idempotent
+	// like every other field, so a restart without it returns to a long-lived
+	// runner.
+	Ephemeral bool `json:"ephemeral"`
+	// MaxCPUs / MaxMemoryBytes are the operator's declared job ceiling
+	// (PAR-176); zero means undeclared.
+	MaxCPUs        float64 `json:"max_cpus,omitempty"`
+	MaxMemoryBytes int64   `json:"max_memory_bytes,omitempty"`
 }
 
 // DeclareView is the declare answer.
@@ -799,6 +981,13 @@ type DeclareView struct {
 	LeaseSeconds int `json:"lease_seconds"`
 	// AllowForkRuns echoes what the registry now records.
 	AllowForkRuns bool `json:"allow_fork_runs"`
+	// Ephemeral echoes the single-job declaration.
+	Ephemeral      bool    `json:"ephemeral"`
+	MaxCPUs        float64 `json:"max_cpus,omitempty"`
+	MaxMemoryBytes int64   `json:"max_memory_bytes,omitempty"`
+	// Draining reports whether the runner is finishing its last job and
+	// claiming nothing new (PAR-181).
+	Draining bool `json:"draining"`
 	// Policy echoes the admin-set repository tenancy the claim filter enforces.
 	// Declare never changes it (an administrator edits it at /admin/runners).
 	Policy RunnerPolicy `json:"policy"`
@@ -814,6 +1003,7 @@ func (s *Service) Declare(ctx context.Context, runner *runnerAuth, in DeclareInp
 	}
 	labels := parsed.Labels
 	now := s.nowUTC().Format(dateTimeFmt)
+	maxCPUs, maxMemory := clampRunnerSizing(in.MaxCPUs, in.MaxMemoryBytes)
 	key := RunnerKey(runner.Doc.ID)
 	_, err := s.casUpdate(ctx, key, 5, func(cur []byte, _ store.Version) ([]byte, bool, error) {
 		if cur == nil {
@@ -837,6 +1027,8 @@ func (s *Service) Declare(ctx context.Context, runner *runnerAuth, in DeclareInp
 			d.Capacity = c
 		}
 		d.AllowForkRuns = in.AllowForkRuns
+		d.Ephemeral = in.Ephemeral
+		d.MaxCPUs, d.MaxMemoryBytes = maxCPUs, maxMemory
 		d.LastSeenAt = &now
 		d.Version++
 		runner.Doc = &d
@@ -849,7 +1041,10 @@ func (s *Service) Declare(ctx context.Context, runner *runnerAuth, in DeclareInp
 		RunnerID: runner.Doc.ID, State: runner.Doc.State, Labels: nonNilStr(runner.Doc.Labels),
 		LabelImages: runner.Doc.LabelImages,
 		Capacity:    runner.Doc.Capacity, LeaseSeconds: int(s.jobLease().Seconds()),
-		AllowForkRuns: runner.Doc.AllowForkRuns, Policy: runner.Doc.policy(),
+		AllowForkRuns: runner.Doc.AllowForkRuns, Ephemeral: runner.Doc.Ephemeral,
+		MaxCPUs: runner.Doc.MaxCPUs, MaxMemoryBytes: runner.Doc.MaxMemoryBytes,
+		Draining: runner.Doc.IsDraining(),
+		Policy:   runner.Doc.policy(),
 	}, nil
 }
 
@@ -925,6 +1120,11 @@ type FetchResult struct {
 	// a name). The runner substitutes them as
 	// `${{ needs.<job>.outputs.<name> }}` (docs/threads.md §3.9).
 	NeedsOutputs map[string]map[string]string `json:"needs_outputs,omitempty"`
+	// NeedsResults are the same dependencies' results (success|failure|
+	// cancelled|skipped|timed_out), keyed by the workflow job key, so a step
+	// `if:`/field can read `needs.<job>.result` (PAR-038). A matrix dependency
+	// folds to the worst cell.
+	NeedsResults map[string]string `json:"needs_results,omitempty"`
 	// IDToken is the job's OIDC request token (docs/threads.md §5.5), present
 	// ONLY for a trusted job whose effective permissions say `id-token: write`.
 	// The plaintext token exists solely here and in the job's environment; the
@@ -1153,10 +1353,11 @@ func (s *Service) fetchPayload(ctx context.Context, owner, repo string, runner *
 	// A dependent job's `needs.<job>.outputs.<name>` values are materialized at
 	// claim time: the spec is written at run creation, before a dependency can
 	// have finished, so the payload is the only honest place for them.
-	if needs, nerr := s.claimNeedsOutputs(ctx, owner, repo, claim); nerr != nil {
+	if needs, results, nerr := s.claimNeeds(ctx, owner, repo, claim); nerr != nil {
 		return nil, nerr
-	} else if len(needs) > 0 {
+	} else {
 		res.NeedsOutputs = needs
+		res.NeedsResults = results
 	}
 	if !trusted {
 		res.SecretsDenied = true
@@ -1176,6 +1377,31 @@ func (s *Service) fetchPayload(ctx context.Context, owner, repo string, runner *
 			}
 		}
 		sort.Strings(res.Mask)
+	}
+	// PAR-117: a trusted job that names an environment also gets that
+	// environment's non-secret variables, which override repository/organization
+	// variables of the same name. They are sealed and masked exactly like
+	// variables (the stricter posture this product chose), and an unreadable
+	// record fails the claim closed rather than silently resolving a different
+	// value.
+	if job.Spec != nil && job.Spec.Environment != nil {
+		envName := strings.TrimSpace(job.Spec.Environment.Name)
+		envVars, eerr := s.environmentVariableValues(ctx, owner, repo, envName)
+		if eerr != nil {
+			return nil, eerr
+		}
+		if len(envVars) > 0 {
+			if res.Vars == nil {
+				res.Vars = map[string]string{}
+			}
+			for name, value := range envVars {
+				res.Vars[name] = value
+				if value != "" {
+					res.Mask = append(res.Mask, value)
+				}
+			}
+			sort.Strings(res.Mask)
+		}
 	}
 	values, err := s.secretValues(ctx, owner, repo)
 	if err != nil {
@@ -1213,21 +1439,22 @@ func (s *Service) fetchPayload(ctx context.Context, owner, repo string, runner *
 	return res, nil
 }
 
-// claimNeedsOutputs folds the current dependency records into the outputs map a
-// dependent job's payload carries. Only a successful dependency contributes (a
-// failed/cancelled/skipped one exposes none), and a matrix dependency is the
-// union of its cells with the LAST cell in job-id order winning a collision —
+// claimNeeds folds the current dependency records into the outputs AND results
+// a dependent job's payload carries. Only a successful dependency contributes
+// outputs (a failed/cancelled/skipped one exposes none); every dependency has a
+// result. A matrix dependency's outputs are the union of its cells with the LAST
+// cell in job-id order winning a collision, and its result is the worst cell —
 // the same rule the server's job-`if:` fold applies.
-func (s *Service) claimNeedsOutputs(ctx context.Context, owner, repo string, claim *Claim) (map[string]map[string]string, error) {
+func (s *Service) claimNeeds(ctx context.Context, owner, repo string, claim *Claim) (map[string]map[string]string, map[string]string, error) {
 	if claim == nil || len(claim.Entry.NeedKeys) == 0 {
-		return nil, nil
+		return nil, nil, nil
 	}
 	byID := make(map[string]*Job, len(claim.Entry.Needs))
 	for _, ids := range claim.Entry.NeedKeys {
 		for _, id := range ids {
 			dep, err := s.loadJobCached(ctx, owner, repo, claim.Entry.RunID, id, nil)
 			if err != nil {
-				return nil, err
+				return nil, nil, err
 			}
 			if dep != nil {
 				byID[id] = dep
@@ -1235,7 +1462,7 @@ func (s *Service) claimNeedsOutputs(ctx context.Context, owner, repo string, cla
 		}
 	}
 	facts := foldNeeds(claim.Entry.NeedKeys, byID)
-	return facts.Outputs, nil
+	return facts.Outputs, facts.Results, nil
 }
 
 // --- credential/runner resolution -------------------------------------------
@@ -1265,7 +1492,15 @@ func (s *Service) authorizeRunner(ctx context.Context, bearer string) (*runnerAu
 	if cred.RevokedAt != nil {
 		return nil, fmt.Errorf("%w: runner token revoked", ErrUnauthorized)
 	}
-	if !verifySecret(secret, cred.TokenHash) {
+	// A rotated-away credential keeps working for the overlap window, so a
+	// worker can finish its job and rewrite its token file (PAR-181).
+	oldValid := false
+	if cred.PreviousHash != "" && cred.PreviousValidUntil != nil {
+		if until, perr := time.Parse(dateTimeFmt, *cred.PreviousValidUntil); perr == nil && s.nowUTC().Before(until) {
+			oldValid = true
+		}
+	}
+	if !verifySecret(secret, cred.TokenHash) && !(oldValid && verifySecret(secret, cred.PreviousHash)) {
 		return nil, fmt.Errorf("%w: bad runner token", ErrUnauthorized)
 	}
 	doc, _, derr := s.loadRunner(ctx, id)

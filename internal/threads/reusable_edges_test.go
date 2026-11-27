@@ -25,7 +25,7 @@ func TestReusableCallerRefusalTable(t *testing.T) {
 		{"services", workflow.Job{Services: map[string]workflow.Service{"db": {Image: "x"}}}, "`services`"},
 		{"env", workflow.Job{Env: map[string]string{"A": "b"}}, "`env`"},
 		{"strategy", workflow.Job{Strategy: strat}, "`strategy`"},
-		{"timeout", workflow.Job{TimeoutMinutes: 5}, "`timeout-minutes`"},
+		{"timeout", workflow.Job{TimeoutMinutes: workflow.Minutes{Value: 5, Present: true}}, "`timeout-minutes`"},
 		{"concurrency", workflow.Job{Concurrency: conc}, "`concurrency`"},
 		{"environment", workflow.Job{Environment: nonNil("prod")}, "`environment`"},
 		{"outputs", workflow.Job{Outputs: map[string]string{"x": "y"}}, "`outputs`"},

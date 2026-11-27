@@ -207,7 +207,7 @@ func TestExecuteCompositeTimeout(t *testing.T) {
 		// Nothing: the composite's own deadline fires. The parent stays alive.
 	}()
 	res, _ := executorWith(d).runStep(ctx, plan, plan.Steps[0], stream, nil, newStepOutcomes(), nil, false, newCommandFiles(), newJobCommands(quietStream(t)), &jobSummary{})
-	if res.Conclusion != threads.JobFailure || !strings.Contains(res.Error, "timed out after") {
+	if res.Conclusion != threads.JobTimedOut || !strings.Contains(res.Error, "timed out after") {
 		t.Fatalf("timeout = %+v", res)
 	}
 	if !d.called("kill " + plan.Names.Container) {

@@ -254,6 +254,9 @@ func TestStepTimeoutKillsTheContainer(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "timed out") {
 		t.Fatalf("err = %v", err)
 	}
+	if se, ok := err.(*stepError); !ok || !se.timedOut {
+		t.Fatalf("a step timeout must carry the timed_out marker, got %#v", err)
+	}
 	if !d.called("kill " + plan.Names.Container) {
 		t.Fatalf("a timed-out step must kill its container: %v", d.snapshot())
 	}

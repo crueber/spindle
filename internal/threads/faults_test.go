@@ -132,7 +132,7 @@ func TestFaultsOnQueueOps(t *testing.T) {
 	if _, _, err := e.svc.loadEntry(ctx(), "o", "r", "x"); err == nil {
 		t.Fatal("loadEntry with a failing get must fail")
 	}
-	if err := e.svc.appendHead(ctx(), "o", "r", "new"); err == nil {
+	if err := e.svc.appendHead(ctx(), "o", "r", "new", 0); err == nil {
 		t.Fatal("appendHead with a failing get must fail")
 	}
 	fs.fail("list", 0)

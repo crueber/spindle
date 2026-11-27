@@ -18,7 +18,10 @@ func buildSpec(wfName string, wf *workflow.Workflow, def workflow.Job, inputs ma
 		Services:        serviceSpecs(def.Services),
 		Env:             mergeEnv(wf.Env, def.Env),
 		If:              def.If,
-		TimeoutMinutes:  def.TimeoutMinutes,
+		IfSecrets:       strings.Contains(strings.ToLower(def.If), "secrets."),
+		IfVars:          strings.Contains(strings.ToLower(def.If), "vars."),
+		TimeoutMinutes:  def.TimeoutMinutes.Int(),
+		TimeoutExpr:     def.TimeoutMinutes.Expr,
 		ContinueOnError: def.ContinueOnError,
 		Permissions:     mergePermissions(wf.Permissions, def.Permissions),
 		// The Forgejo OIDC key is a grant: workflow or job may set it, and a
@@ -33,6 +36,10 @@ func buildSpec(wfName string, wf *workflow.Workflow, def workflow.Job, inputs ma
 		Outputs:             nonNilMap(def.Outputs),
 		Steps:               stepSpecs(def.Steps),
 	}
+	// Workflow/job `defaults.run` fill the steps that name neither key; a
+	// step-level value still wins (PAR-054).
+	shell, wd := workflow.DefaultsFor(wf, &def)
+	applyStepDefaults(spec.Steps, shell, wd)
 	if def.Environment != nil {
 		spec.Environment = &EnvironmentSpec{
 			Name: strings.TrimSpace(def.Environment.Name),
@@ -86,12 +93,15 @@ func concurrencySpec(wf *workflow.Workflow, def workflow.Job) *ConcurrencySpec {
 	return nil
 }
 
-// strategySpec copies the matrix product and fail-fast flag.
+// strategySpec copies the matrix product, fail-fast flag and admission bound.
 func strategySpec(in *workflow.Strategy) *StrategySpec {
 	if in == nil {
 		return nil
 	}
 	out := &StrategySpec{FailFast: in.FailFast}
+	if in.MaxParallel != nil {
+		out.MaxParallel = *in.MaxParallel
+	}
 	if len(in.Matrix.Axes) > 0 {
 		out.Matrix = make(map[string][]string, len(in.Matrix.Axes))
 		for axis, values := range in.Matrix.Axes {
@@ -105,6 +115,29 @@ func strategySpec(in *workflow.Strategy) *StrategySpec {
 		out.Exclude = append(out.Exclude, comboCopy(combo))
 	}
 	return out
+}
+
+// applyStepDefaults fills steps that declare neither a shell nor a working
+// directory from `defaults.run` (PAR-054). A parallel group is a container of
+// ordinary steps, so its members inherit too; a composite action's inner steps
+// are defined by its own action file and never inherit the caller's defaults.
+func applyStepDefaults(steps []StepSpec, shell, workingDir string) {
+	for i := range steps {
+		st := &steps[i]
+		// GitHub applies defaults.run to RUN steps only; a `uses:` step has its
+		// own action metadata and must not inherit a caller's shell.
+		if st.Run != "" {
+			if st.Shell == "" && shell != "" {
+				st.Shell = shell
+			}
+			if st.WorkingDirectory == "" && workingDir != "" {
+				st.WorkingDirectory = workingDir
+			}
+		}
+		if len(st.Parallel) > 0 {
+			applyStepDefaults(st.Parallel, shell, workingDir)
+		}
+	}
 }
 
 // comboCopy copies one matrix include/exclude object.
@@ -172,7 +205,8 @@ func stepSpecs(in []workflow.Step) []StepSpec {
 			Shell:            st.Shell,
 			WorkingDirectory: st.WorkingDirectory,
 			ContinueOnError:  st.ContinueOnError,
-			TimeoutMinutes:   st.TimeoutMinutes,
+			TimeoutMinutes:   st.TimeoutMinutes.Int(),
+			TimeoutExpr:      st.TimeoutMinutes.Expr,
 			Background:       st.Background,
 			Wait:             strings.TrimSpace(st.Wait),
 			WaitAll:          st.WaitAll,

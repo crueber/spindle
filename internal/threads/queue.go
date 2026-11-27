@@ -81,6 +81,16 @@ type QueueEntry struct {
 	// is a hint copied from the job at enqueue, and the job record re-checked
 	// under the claim CAS stays the authority (docs/threads.md §8.7).
 	Fork bool `json:"fork,omitempty"`
+	// Priority is the run's claim priority (PAR-155), copied from the job at
+	// enqueue. Higher claims first; the head's ordering map is the queue's
+	// projection of it, and the job record stays the authority at claim time.
+	Priority int `json:"priority,omitempty"`
+	// MatrixGroup is the YAML job key a matrix cell belongs to, and
+	// MaxParallel its `strategy.max-parallel` bound (PAR-052). Both are copied
+	// from the job at enqueue; 0/"" means "not a bounded matrix cell", which
+	// pays no admission read.
+	MatrixGroup string `json:"matrix_group,omitempty"`
+	MaxParallel int    `json:"max_parallel,omitempty"`
 
 	EnqueuedAt string  `json:"enqueued_at"`
 	ClaimedAt  *string `json:"claimed_at,omitempty"`
@@ -94,11 +104,20 @@ type QueueEntry struct {
 type QueueHead struct {
 	// Seq is the last allocated sequence.
 	Seq string `json:"seq"`
-	// Pending lists live sequence numbers, oldest first, bounded to
-	// queueWindowMax.
-	Pending   []string `json:"pending"`
-	UpdatedAt string   `json:"updated_at"`
-	Version   int      `json:"version"`
+	// Pending lists live sequence numbers, ordered by claim priority (PAR-155)
+	// and then by sequence (FIFO). It is bounded to queueWindowMax.
+	Pending []string `json:"pending"`
+	// Priority maps a pending sequence to its run's priority so the head can
+	// order claims without reading every entry (the claim path stays one GET).
+	// A sequence absent from the map is priority 0.
+	Priority map[string]int `json:"priority,omitempty"`
+	// Paused mirrors the repository's `ci_paused` switch (PAR-157): the claim
+	// probe refuses the repository from this one object, without a settings
+	// read on the hot path. The settings record remains the authority; the
+	// marker is written by UpdateSettings and repaired by a pause/resume.
+	Paused    bool   `json:"paused,omitempty"`
+	UpdatedAt string `json:"updated_at"`
+	Version   int    `json:"version"`
 }
 
 // newQueueSeq mints one queue sequence.
@@ -125,7 +144,9 @@ func (s *Service) enqueueJob(ctx context.Context, owner, repo string, job *Job, 
 	entry := &QueueEntry{
 		Seq: seq, RunID: job.RunID, JobID: job.ID,
 		Labels: jobLabels(job), Needs: needIDs(needs), NeedKeys: needs, Attempt: job.Attempt, State: QueueQueued,
-		Fork:       !job.Trusted,
+		Fork:        !job.Trusted,
+		Priority:    job.Priority,
+		MatrixGroup: matrixGroupOf(job), MaxParallel: maxParallelOf(job),
 		EnqueuedAt: now, Version: 1,
 	}
 	body, _ := json.Marshal(entry) // cannot fail: the record is pure JSON types
@@ -135,13 +156,13 @@ func (s *Service) enqueueJob(ctx context.Context, owner, repo string, job *Job, 
 		}
 		return nil, perr
 	}
-	if herr := s.appendHead(ctx, owner, repo, seq); herr != nil {
+	if herr := s.appendHead(ctx, owner, repo, seq, entry.Priority); herr != nil {
 		return entry, herr
 	}
 	// The global hint is what lets an instance runner find this repository. A
 	// failed append is logged by the caller and repaired by
 	// threads-queue-reconcile; the job remains queued either way.
-	if ierr := s.appendQueueIndex(ctx, repoID(owner, repo), job.RunID, job.ID, entry.Labels, entry.Fork, now); ierr != nil {
+	if ierr := s.appendQueueIndex(ctx, repoID(owner, repo), job.RunID, job.ID, entry.Labels, entry.Fork, entry.Priority, now); ierr != nil {
 		return entry, ierr
 	}
 	return entry, nil
@@ -197,8 +218,10 @@ func labelsMatch(runner, job []string) bool {
 	return true
 }
 
-// appendHead CAS-appends one sequence to the head's pending window.
-func (s *Service) appendHead(ctx context.Context, owner, repo, seq string) error {
+// appendHead CAS-appends one sequence to the head's pending window, recording
+// its claim priority. The window is kept in claim order: priority descending,
+// then sequence ascending (FIFO within one priority).
+func (s *Service) appendHead(ctx context.Context, owner, repo, seq string, priority int) error {
 	key := QueueHeadKey(owner, repo)
 	_, err := s.casUpdate(ctx, key, 5, func(cur []byte, _ store.Version) ([]byte, bool, error) {
 		head := &QueueHead{}
@@ -218,7 +241,55 @@ func (s *Service) appendHead(ctx context.Context, owner, repo, seq string) error
 		if len(head.Pending) >= queueWindowMax {
 			return nil, false, fmt.Errorf("%w: queue head window is full", ErrUnavailable)
 		}
+		if head.Priority == nil {
+			head.Priority = map[string]int{}
+		}
+		if priority != 0 {
+			head.Priority[seq] = priority
+		}
 		head.Pending = append(head.Pending, seq)
+		sortQueuePending(head)
+		head.UpdatedAt = s.nowUTC().Format(dateTimeFmt)
+		head.Version++
+		body, _ := json.Marshal(head) // cannot fail: the record is pure JSON types
+		return body, true, nil
+	})
+	return err
+}
+
+// sortQueuePending orders the head's window for claiming: highest priority
+// first, then the oldest sequence. The queue sequence sorts by enqueue time, so
+// the tie-break is FIFO.
+func sortQueuePending(head *QueueHead) {
+	if head == nil {
+		return
+	}
+	sort.SliceStable(head.Pending, func(i, j int) bool {
+		pi, pj := head.Priority[head.Pending[i]], head.Priority[head.Pending[j]]
+		if pi != pj {
+			return pi > pj
+		}
+		return head.Pending[i] < head.Pending[j]
+	})
+}
+
+// setHeadPaused mirrors the repository's pause switch onto the queue head. It
+// creates the head when absent so a pause before the first enqueue is still
+// enforced on the next claim. A CAS loss is harmless: UpdateSettings logs it
+// and the settings record remains the authority for the read model.
+func (s *Service) setHeadPaused(ctx context.Context, owner, repo string, paused bool) error {
+	key := QueueHeadKey(owner, repo)
+	_, err := s.casUpdate(ctx, key, 5, func(cur []byte, _ store.Version) ([]byte, bool, error) {
+		head := &QueueHead{}
+		if cur != nil {
+			if jerr := json.Unmarshal(cur, head); jerr != nil {
+				return nil, false, fmt.Errorf("%w: queue head: %v", ErrCorrupt, jerr)
+			}
+		}
+		if head.Paused == paused {
+			return nil, false, nil
+		}
+		head.Paused = paused
 		head.UpdatedAt = s.nowUTC().Format(dateTimeFmt)
 		head.Version++
 		body, _ := json.Marshal(head) // cannot fail: the record is pure JSON types
@@ -240,7 +311,7 @@ func (s *Service) loadHead(ctx context.Context, owner, repo string) (*QueueHead,
 	if jerr := json.Unmarshal(raw, &head); jerr != nil {
 		return nil, "", fmt.Errorf("%w: queue head: %v", ErrCorrupt, jerr)
 	}
-	sort.Strings(head.Pending)
+	sortQueuePending(&head)
 	return &head, ver, nil
 }
 
@@ -267,6 +338,9 @@ func (s *Service) trimHead(ctx context.Context, owner, repo string, drop map[str
 		}
 		if len(kept) == len(head.Pending) {
 			return nil, false, nil
+		}
+		for seq := range drop {
+			delete(head.Priority, seq)
 		}
 		head.Pending = append([]string{}, kept...)
 		head.UpdatedAt = s.nowUTC().Format(dateTimeFmt)
@@ -322,6 +396,20 @@ func (s *Service) claimLoopSkip(ctx context.Context, owner, repo string, runner 
 	if err != nil || head == nil {
 		return nil, err
 	}
+	// PAR-157: a paused repository claims nothing. The pause marker rides the
+	// head (one GET, the same object the probe already reads), so the settings
+	// record is not on the hot path; in-flight jobs are untouched.
+	if head.Paused {
+		return nil, nil
+	}
+	// A draining runner finishes its job and claims nothing new (PAR-181).
+	if runner.IsDraining() {
+		return nil, nil
+	}
+	matchLabels := labels
+	if groupLabels := runner.EffectiveLabels(); len(groupLabels) > 0 {
+		matchLabels = normalizeLabels(append(append([]string{}, labels...), groupLabels...))
+	}
 	drop := map[string]bool{}
 	indexDrop := map[string]QueueIndexEntry{}
 	jobs := jobCache{}
@@ -357,7 +445,7 @@ func (s *Service) claimLoopSkip(ctx context.Context, owner, repo string, runner 
 			}
 			continue // offered on the next probe (the head still lists it)
 		}
-		if !labelsMatch(labels, entry.Labels) {
+		if !labelsMatch(matchLabels, entry.Labels) {
 			continue
 		}
 		// Fork runs need an opted-in runner. The entry is NOT retired: the job
@@ -411,10 +499,31 @@ func (s *Service) claimLoopSkip(ctx context.Context, owner, repo string, runner 
 				continue
 			}
 		}
+		// Matrix admission (PAR-052): a bounded cell is offered only while its
+		// group has a free slot. A refused cell stays queued and does not consume
+		// the probe's claim budget; a slot taken here is released if the claim
+		// CAS loses the race below.
+		admitted := false
+		if entry.MaxParallel > 0 && entry.MatrixGroup != "" {
+			ok, aerr := s.admitMatrixCell(ctx, owner, repo, entry)
+			if aerr != nil {
+				return nil, aerr
+			}
+			if !ok {
+				continue
+			}
+			admitted = true
+		}
 		attempts++
 		gained, cerr := s.claimEntry(ctx, owner, repo, entry, ver, runner)
 		if cerr != nil {
+			if admitted {
+				s.releaseMatrixCell(ctx, owner, repo, entry.RunID, entry.MatrixGroup, entry.JobID)
+			}
 			return nil, cerr
+		}
+		if gained == nil && admitted {
+			s.releaseMatrixCell(ctx, owner, repo, entry.RunID, entry.MatrixGroup, entry.JobID)
 		}
 		if gained != nil {
 			// A claimed entry stays in the window until it finishes: the head
@@ -456,11 +565,29 @@ func (s *Service) claimEntry(ctx context.Context, owner, repo string, entry *Que
 	if waiting, _ := deploymentWaitRemaining(job, s.nowUTC()); waiting {
 		return nil, nil
 	}
+	// A deployment queue position (PAR-136) holds the job without consuming an
+	// attempt: the environment serializes its deployments, so a waiter becomes
+	// claimable only when the release path promotes it (the queue document is
+	// the authority, this snapshot is its record).
+	if job.Deployment != nil && job.Deployment.QueuePosition > 0 {
+		return nil, nil
+	}
 	// Tenancy under the claim CAS (the authority, like the fork gate below): a
 	// stale hint row or a hostile entry can never hand a repository's code to a
 	// runner the admin did not allow. The job stays queued for an eligible
 	// runner.
 	if !runner.AllowsRepo(repoID(owner, repo)) {
+		return nil, nil
+	}
+	// The group's visibility narrows the runner's policy (PAR-175); a group can
+	// never widen it.
+	if !runner.CanServeRepo(repoID(owner, repo)) {
+		return nil, nil
+	}
+	// A draining runner claims nothing (PAR-181), and a runner that declares a
+	// ceiling is not handed a job larger than it offers (PAR-176). Both leave
+	// the job queued for another runner.
+	if runner.IsDraining() || !RunnerOffers(runner, JobSizeOf(job)) {
 		return nil, nil
 	}
 	// Fork gating under the claim CAS (the authority): a hostile or stale entry
@@ -549,6 +676,9 @@ func (s *Service) requeueEntry(ctx context.Context, owner, repo string, entry *Q
 	}); err != nil && !errors.Is(err, ErrNotFound) {
 		return err
 	}
+	if entry.MaxParallel > 0 && entry.MatrixGroup != "" {
+		s.releaseMatrixCell(ctx, owner, repo, entry.RunID, entry.MatrixGroup, entry.JobID)
+	}
 	next := *entry
 	next.State = QueueQueued
 	next.Attempt = attempt
@@ -607,7 +737,8 @@ func (s *Service) finishEntry(ctx context.Context, owner, repo, seq string) {
 	}
 	key := QueueEntryKey(owner, repo, seq)
 	now := s.nowUTC().Format(dateTimeFmt)
-	var runID, jobID string
+	var runID, jobID, matrixGroup string
+	var maxParallel int
 	_, _ = s.casUpdate(ctx, key, 3, func(cur []byte, _ store.Version) ([]byte, bool, error) {
 		if cur == nil {
 			return nil, false, nil
@@ -616,7 +747,7 @@ func (s *Service) finishEntry(ctx context.Context, owner, repo, seq string) {
 		if jerr := json.Unmarshal(cur, &e); jerr != nil {
 			return nil, false, fmt.Errorf("%w: queue entry: %v", ErrCorrupt, jerr)
 		}
-		runID, jobID = e.RunID, e.JobID
+		runID, jobID, matrixGroup, maxParallel = e.RunID, e.JobID, e.MatrixGroup, e.MaxParallel
 		if e.State == QueueDone {
 			return nil, false, nil
 		}
@@ -630,6 +761,9 @@ func (s *Service) finishEntry(ctx context.Context, owner, repo, seq string) {
 	s.trimHead(ctx, owner, repo, map[string]bool{seq: true})
 	if runID != "" {
 		s.removeQueueIndexJob(ctx, repoID(owner, repo), runID, jobID)
+	}
+	if maxParallel > 0 && matrixGroup != "" {
+		s.releaseMatrixCell(ctx, owner, repo, runID, matrixGroup, jobID)
 	}
 }
 
@@ -732,3 +866,26 @@ func (h *queueHub) wake(repo string) {
 
 // ptr is a convenience for *string fields.
 func ptr(s string) *string { return &s }
+
+// QueueRow is one pending job as the queue API/page renders it, in CLAIM order
+// (PAR-155): highest priority first, then oldest sequence.
+type QueueRow struct {
+	Seq        string   `json:"seq"`
+	RunID      string   `json:"run_id"`
+	JobID      string   `json:"job_id"`
+	Priority   int      `json:"priority"`
+	Labels     []string `json:"labels"`
+	State      string   `json:"state"`
+	Fork       bool     `json:"fork,omitempty"`
+	Attempt    int      `json:"attempt"`
+	EnqueuedAt string   `json:"enqueued_at"`
+}
+
+// QueueSnapshot is the repository's pending window in claim order, plus the
+// pause marker. It is a read (repository read role); the head is bounded, so
+// the cost is one head GET plus one GET per pending entry.
+type QueueSnapshot struct {
+	Repo   string     `json:"repo"`
+	Paused bool       `json:"paused"`
+	Rows   []QueueRow `json:"rows"`
+}

@@ -253,16 +253,18 @@ func (h *Handler) reportStatus(w http.ResponseWriter, r *http.Request, owner, re
 		return
 	}
 	var body struct {
-		Context     string  `json:"context"`
-		State       string  `json:"state"`
-		TargetURL   string  `json:"target_url"`
-		Description string  `json:"description"`
-		StartedAt   *string `json:"started_at"`
-		CompletedAt *string `json:"completed_at"`
+		Context     string       `json:"context"`
+		State       string       `json:"state"`
+		TargetURL   string       `json:"target_url"`
+		Description string       `json:"description"`
+		StartedAt   *string      `json:"started_at"`
+		CompletedAt *string      `json:"completed_at"`
+		Annotations []Annotation `json:"annotations"`
 	}
 	if !decodeStrict(w, r, 1<<20, map[string]bool{
 		"context": true, "state": true, "target_url": true,
 		"description": true, "started_at": true, "completed_at": true,
+		"annotations": true,
 	}, &body) {
 		return
 	}
@@ -270,6 +272,7 @@ func (h *Handler) reportStatus(w http.ResponseWriter, r *http.Request, owner, re
 	st, err := h.Svc.ReportStatus(r.Context(), owner, repo, sha, p, secret, ReportInput{
 		Context: body.Context, State: body.State, TargetURL: body.TargetURL,
 		Description: body.Description, StartedAt: body.StartedAt, CompletedAt: body.CompletedAt,
+		Annotations: body.Annotations,
 	})
 	if err != nil {
 		writeErr(w, err)

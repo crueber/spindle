@@ -124,6 +124,34 @@ func (p ImagePolicy) checkStepImages(spec *Spec, steps []StepSpec, parent string
 			}
 			continue
 		}
+		if IsRemoteAction(uses) {
+			key := strings.TrimSpace(uses)
+			if indexOf(visiting, key) >= 0 || depth > maxActionWalkDepth {
+				continue
+			}
+			def, ok := spec.Actions[key]
+			if !ok {
+				continue
+			}
+			switch def.Using {
+			case workflow.ActionUsingDocker:
+				// A Dockerfile action builds locally and is pinned by its
+				// content digest; only a registry image is an image reference
+				// the operator's registry policy can speak about.
+				if def.Dockerfile || def.Image == "" {
+					continue
+				}
+				if refusal, err := p.checkImage(def.Image, source+" (uses: "+uses+")"); err != nil || refusal != nil {
+					return refusal, err
+				}
+			case "composite":
+				if refusal, err := p.checkStepImages(spec, def.Steps, source+" (uses: "+uses+")",
+					append(visiting, key), depth+1); err != nil || refusal != nil {
+					return refusal, err
+				}
+			}
+			continue
+		}
 		if !IsLocalAction(uses) {
 			continue
 		}

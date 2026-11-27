@@ -393,6 +393,18 @@ func wireCollabPages(apiEnv *api.Env, c *collabWiring) {
 			d.ChecksCombined = ck.Combined
 			d.ChecksStatuses = ck.GetStatuses
 		}
+		if c.threadsSvc != nil {
+			// PAR-192: the PR panel's re-run control reads the newest Threads
+			// run reporting the PR's head/merge commit.
+			th := c.threadsSvc
+			d.ThreadsLatest = func(ctx context.Context, owner, repo, commit string, p auth.Principal) (*threads.Run, error) {
+				page, err := th.ListRunsFiltered(ctx, owner+"/"+repo, p, "", 1, threads.RunFilter{Commit: commit})
+				if err != nil || page == nil || len(page.Runs) == 0 {
+					return nil, err
+				}
+				return page.Runs[0], nil
+			}
+		}
 		if rel := c.releasesSvc; rel != nil {
 			// The header's GAP is closed: ListReleasePage is the exported page
 			// read over the same rows ListReleases returns.
@@ -435,6 +447,10 @@ func wireCollabPages(apiEnv *api.Env, c *collabWiring) {
 			_, err := th.CancelRun(ctx, owner+"/"+repo, runID, p)
 			return err
 		}
+		td.CancelJob = func(ctx context.Context, owner, repo, runID, jobID string, force bool, p auth.Principal) error {
+			_, err := th.CancelJob(ctx, owner+"/"+repo, runID, jobID, force, p)
+			return err
+		}
 		td.Rerun = func(ctx context.Context, owner, repo, runID string, p auth.Principal) error {
 			_, err := th.RerunRun(ctx, owner+"/"+repo, runID, p)
 			return err
@@ -473,6 +489,28 @@ func wireCollabPages(apiEnv *api.Env, c *collabWiring) {
 		td.UpdateSettings = func(ctx context.Context, owner, repo string, in threads.SettingsInput, p auth.Principal) (*threads.SettingsView, error) {
 			return th.UpdateSettings(ctx, owner+"/"+repo, in, p)
 		}
+		// Wave-4 operations: the page calls the service verbs, never a second
+		// implementation (PAR-154/PAR-155/PAR-157/PAR-196/PAR-197).
+		td.ListSchedules = th.ListSchedules
+		td.SetSchedule = func(ctx context.Context, repo string, id threads.ScheduleEntryID, enabled bool, p auth.Principal) (*threads.ScheduleStatus, error) {
+			return th.SetScheduleEnabled(ctx, repo, id, enabled, p)
+		}
+		td.RunScheduleNow = th.RunScheduleNow
+		td.SetPaused = func(ctx context.Context, repo string, paused bool, p auth.Principal) (*threads.SettingsView, error) {
+			return th.SetCIPaused(ctx, repo, paused, p)
+		}
+		td.Queue = func(ctx context.Context, repo string, p auth.Principal) (*threads.QueueSnapshot, error) {
+			return th.QueueSnapshotForRepo(ctx, repo, p)
+		}
+		td.Subscription = func(ctx context.Context, repo string, p auth.Principal) (*threads.SubscriptionView, error) {
+			return th.GetSubscription(ctx, repo, p)
+		}
+		td.SetSubscription = func(ctx context.Context, repo string, subscribed bool, workflows []string, p auth.Principal) (*threads.SubscriptionView, error) {
+			return th.SetSubscription(ctx, repo, subscribed, workflows, p)
+		}
+		td.Notifications = th.ListNotifications
+		td.MarkRead = th.MarkNotificationsRead
+		td.Validate = th.ValidateWorkflowForRepo
 		if c.ident != nil {
 			ident := c.ident
 			td.Role = func(ctx context.Context, owner, repo string, p auth.Principal) (string, error) {
@@ -665,6 +703,18 @@ func wireAdminPages(cfg *config.Config, boot server.BootState, apiEnv *api.Env, 
 				return tok.ID, tok.Token, tok.ExpiresAt, nil
 			},
 			SetPolicy: th.SetRunnerPolicy,
+			Drain: func(ctx context.Context, id string, p auth.Principal) error {
+				return th.DrainRunner(ctx, id, p)
+			},
+			Resume: func(ctx context.Context, id string, p auth.Principal) error {
+				return th.ResumeRunner(ctx, id, p)
+			},
+			Rotate: func(ctx context.Context, id string, p auth.Principal) (*threads.RunnerTokenRotation, error) {
+				return th.RotateRunnerToken(ctx, id, p)
+			},
+			Deregister: func(ctx context.Context, id string, p auth.Principal) error {
+				return th.DeregisterRunner(ctx, id, p)
+			},
 		})
 		d.RevokeRunner = func(ctx context.Context, id string, p auth.Principal) error {
 			return th.RevokeRunner(ctx, id, p)

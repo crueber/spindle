@@ -52,6 +52,15 @@
             <span class="chip chip-draft">{{len .Rows}}</span>
           </div>
           {{if .PolicyError}}<p class="err-line mb-3" id="admin-runner-policy-error" role="alert">{{.PolicyError}}</p>{{end}}
+          {{if .RotatedToken}}
+          <div class="card mb-3 border-l-2 border-l-[var(--pd-warn)] p-3 text-sm" id="admin-runner-rotated-card">
+            <strong class="font-semibold">New credential for <span class="mono">{{.RotatedRunnerID}}</span> — copy now, shown once.</strong>
+            <p class="mt-1 break-all mono text-xs" id="admin-runner-rotated-token">{{.RotatedToken}}</p>
+            <button type="button" class="btn mt-2" data-copy="#admin-runner-rotated-token">copy</button>
+            <p class="muted mt-1 text-[11px]">The previous credential keeps working until {{.RotatedOldUntil}}, so a
+              job in flight is not cut off; write this into the runner's token file before then.</p>
+          </div>
+          {{end}}
           {{if not .Wired}}
           <div class="card p-4"><p class="muted text-sm">{{if .Error}}{{.Error}}{{else}}The Threads runner service is not wired on this build.{{end}}</p></div>
           {{else if .Rows}}
@@ -210,6 +219,29 @@
 
   {{if not .IsRevoked}}
   <div class="mt-3 flex flex-col gap-2 border-t border-[var(--pd-line)] pt-3">
+    {{if .FleetWired}}
+    <div class="flex flex-wrap items-center gap-2">
+      {{if eq .State "draining"}}
+      <form method="post" action="/admin/runners/resume" class="shrink-0">
+        <input type="hidden" name="id" value="{{.ID}}">
+        <button type="submit" class="btn text-xs">resume</button>
+      </form>
+      {{else}}
+      <form method="post" action="/admin/runners/drain" class="shrink-0">
+        <input type="hidden" name="id" value="{{.ID}}">
+        <button type="submit" class="btn text-xs">drain</button>
+      </form>
+      {{end}}
+      <form method="post" action="/admin/runners/rotate" class="shrink-0">
+        <input type="hidden" name="id" value="{{.ID}}">
+        <button type="submit" class="btn text-xs">rotate credential</button>
+      </form>
+      <form method="post" action="/admin/runners/deregister" class="shrink-0">
+        <input type="hidden" name="id" value="{{.ID}}">
+        <button type="submit" class="btn text-xs">deregister</button>
+      </form>
+    </div>
+    {{end}}
     {{if .PolicyWired}}
     <details class="min-w-0"{{if .PolicyOpen}} open{{end}}>
       <summary class="link inline-flex min-h-6 cursor-pointer items-center text-xs">change policy…</summary>

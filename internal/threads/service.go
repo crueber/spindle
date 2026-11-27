@@ -70,6 +70,11 @@ func (s *Service) GC(ctx context.Context, owner, repo string) (int, error) {
 	if s == nil || s.Store == nil {
 		return 0, nil
 	}
+	// Deployment retention is independent of the queue head: a repository with
+	// no queued work still ages out terminal deployment records.
+	if _, derr := s.pruneDeployments(ctx, owner, repo); derr != nil {
+		return 0, derr
+	}
 	head, _, err := s.loadHead(ctx, owner, repo)
 	if err != nil {
 		return 0, err
@@ -438,6 +443,16 @@ func (s *Service) createOne(ctx context.Context, owner, repo, sha, event string,
 		PRTarget:             pullTarget,
 		WorkflowRunFollowers: followers,
 		RepoConcurrencyCap:   policy.cap,
+		Priority:             opts.Priority,
+	}
+	// The run title (PAR-057): `run-name:` rendered once, from the same
+	// github.* view a job-level `if:` reads plus the resolved inputs. It is
+	// display-only, so a reference with no value renders empty rather than
+	// failing the run.
+	if title, terr := workflow.RenderRunName(f.Workflow.RunName, githubContext(run, f.Name), runInputs(opts)); terr != nil {
+		slog.Warn("threads: run-name", "repo", repoID(owner, repo), "run", runID, "err", terr)
+	} else {
+		run.Title = title
 	}
 	used := map[string]bool{}
 	crossRun := false
@@ -447,7 +462,7 @@ func (s *Service) createOne(ctx context.Context, owner, repo, sha, event string,
 	// head the runner checks out), so a fork PR's local actions are the fork's
 	// checked-out code and a base-branch workflow can never execute an action
 	// file from another ref (docs/threads.md §3.4a).
-	resolver := newActionResolver(s.Git, repoID(owner, repo), sha)
+	resolver := s.newRunActionResolver(repoID(owner, repo), sha)
 	// The job list is expanded first: a local reusable-workflow caller is
 	// replaced IN PLACE by its callee's jobs (PAR-075, docs/threads.md §3.4b).
 	// The expansion is decided at run creation — the runner never sees a
@@ -493,6 +508,7 @@ func (s *Service) createOne(ctx context.Context, owner, repo, sha, event string,
 				Attempt:   attempt,
 				Trusted:   trusted,
 				State:     JobQueued,
+				Priority:  opts.Priority,
 				CreatedAt: now, UpdatedAt: now,
 				Version: 1,
 			}
@@ -509,7 +525,12 @@ func (s *Service) createOne(ctx context.Context, owner, repo, sha, event string,
 			// written `skipped` (never enqueued) instead of being re-evaluated
 			// by every probe. A dependent job is decided by the needs cascade.
 			if len(jd.needs) == 0 && job.State == JobQueued {
-				if verdict, reason, _ := evaluateJobIf(job, run, needFacts{}); verdict != jobIfRun {
+				extra, xerr := s.loadJobIfValues(ctx, owner, repo, job, run)
+				if xerr != nil {
+					job.State = JobFailure
+					job.CompletedAt = &now
+					job.Reason = xerr.Error()
+				} else if verdict, reason, _ := evaluateJobIfWith(job, run, needFacts{}, extra); verdict != jobIfRun {
 					job.State = JobSkipped
 					job.CompletedAt = &now
 					job.Reason = reason
@@ -615,6 +636,11 @@ func (s *Service) createOne(ctx context.Context, owner, repo, sha, event string,
 		run.State = RunPendingApproval
 		run.ApprovalKind = ApprovalCrossRun
 	}
+	// The remote-action resolution record (PAR-070): every action this run
+	// fetched, with its pinned commit and content digest. It is written on the
+	// header before the run is visible, so a run can never execute an action it
+	// did not record.
+	run.ActionLoads = resolver.loadsFor()
 	body, _ := json.Marshal(run) // cannot fail: the record is pure JSON types
 	if perr := s.putCreate(ctx, RunKey(owner, repo, runID), body); perr != nil {
 		if store.IsPreconditionFailed(perr) {
@@ -818,9 +844,24 @@ func (s *Service) reportCheck(ctx context.Context, run *Run, job *Job) error {
 // workflow_dispatch.inputs schema, §1). A mismatch is ErrUnprocessable (422)
 // and the message names the offending input.
 func (s *Service) DispatchRun(ctx context.Context, repo, ref, workflowRef string, inputs map[string]string, p auth.Principal) ([]*Run, error) {
+	return s.DispatchRunWithPriority(ctx, repo, ref, workflowRef, inputs, 0, p)
+}
+
+// MaxRunPriority bounds a manual dispatch's priority (PAR-155). The range is
+// small on purpose: priority is a tie-break for an operator's urgent run, not a
+// scheduler policy language.
+const MaxRunPriority = 10
+
+// DispatchRunWithPriority is DispatchRun with the PAR-155 priority. The
+// priority never bypasses a hold, a paused repository, a trust gate or a
+// capacity cap: it only orders claimable work.
+func (s *Service) DispatchRunWithPriority(ctx context.Context, repo, ref, workflowRef string, inputs map[string]string, priority int, p auth.Principal) ([]*Run, error) {
 	owner, name, err := splitRepo(repo)
 	if err != nil {
 		return nil, err
+	}
+	if priority < 0 || priority > MaxRunPriority {
+		return nil, fmt.Errorf("%w: priority must be 0..%d", ErrInvalid, MaxRunPriority)
 	}
 	if err := s.requireRole(ctx, owner, name, p, "write"); err != nil {
 		return nil, err
@@ -878,7 +919,7 @@ func (s *Service) DispatchRun(ctx context.Context, repo, ref, workflowRef string
 	}
 	return s.CreateRun(ctx, repo, commit, EventDispatch, CreateOpts{
 		Branch: branch, Ref: ref, Actor: string(p.Name), Workflow: workflowRef, Inputs: effective,
-		EventPayload: payload,
+		EventPayload: payload, Priority: priority,
 	})
 }
 
@@ -970,15 +1011,24 @@ func elapsedSeconds(started, completed *string, now time.Time) int64 {
 }
 
 // RunFilter narrows the run list (round-2 pass 2: the list's workflow, state
-// and actor filters). Empty fields do not filter.
+// and actor filters; wave 4 adds branch and event — PAR-194). Empty fields do
+// not filter.
 type RunFilter struct {
 	Workflow string
 	State    string
 	Actor    string
+	Branch   string
+	Event    string
+	// Commit narrows to the run(s) reporting one commit. It is not a public
+	// list filter; the PR page uses it to find the Threads run behind a check
+	// sha and offer its re-run control (PAR-192).
+	Commit string
 }
 
 // empty reports whether nothing is filtered.
-func (f RunFilter) empty() bool { return f.Workflow == "" && f.State == "" && f.Actor == "" }
+func (f RunFilter) empty() bool {
+	return f.Workflow == "" && f.State == "" && f.Actor == "" && f.Branch == "" && f.Event == "" && f.Commit == ""
+}
 
 // match reports whether one run satisfies the filter.
 func (f RunFilter) match(r *Run) bool {
@@ -989,6 +1039,15 @@ func (f RunFilter) match(r *Run) bool {
 		return false
 	}
 	if f.Actor != "" && !strings.EqualFold(r.Actor, f.Actor) {
+		return false
+	}
+	if f.Branch != "" && !strings.EqualFold(r.Branch, f.Branch) {
+		return false
+	}
+	if f.Event != "" && !strings.EqualFold(r.Event, f.Event) {
+		return false
+	}
+	if f.Commit != "" && !strings.EqualFold(r.Commit, f.Commit) {
 		return false
 	}
 	return true
@@ -1214,6 +1273,12 @@ type JobUpdate struct {
 	// approval/denial decision, or a rerun's re-decision). Nil leaves it alone:
 	// a plain requeue must not forget an approval the job already carried.
 	Deployment *Deployment
+	// CancelledBy/CancelReason/ForceCancelled record a single-job cancel
+	// (PAR-195). They are only written by the cancellation path; a rerun clears
+	// them with ClearTimings.
+	CancelledBy    string
+	CancelReason   string
+	ForceCancelled *bool
 }
 
 // UpdateJob CAS-updates one job record, mirrors the new state into the checks
@@ -1295,6 +1360,9 @@ func (s *Service) UpdateJob(ctx context.Context, repo, runID, jobID string, up J
 			job.Annotations = nil
 			job.Summary = ""
 			job.Reason = ""
+			job.CancelledBy = ""
+			job.CancelReason = ""
+			job.ForceCancelled = false
 		}
 		// The reason is applied AFTER the reset: a caller that clears an
 		// attempt's timings and states a new refusal (a policy re-check on
@@ -1305,6 +1373,15 @@ func (s *Service) UpdateJob(ctx context.Context, repo, runID, jobID string, up J
 		if up.Deployment != nil {
 			dep := *up.Deployment
 			job.Deployment = &dep
+		}
+		if up.CancelledBy != "" {
+			job.CancelledBy = up.CancelledBy
+		}
+		if up.CancelReason != "" {
+			job.CancelReason = up.CancelReason
+		}
+		if up.ForceCancelled != nil {
+			job.ForceCancelled = *up.ForceCancelled
 		}
 		switch {
 		case up.StartedAt != nil:
@@ -1326,7 +1403,7 @@ func (s *Service) UpdateJob(ctx context.Context, repo, runID, jobID string, up J
 		// ignores — that is how a reader tells "failed but tolerated" from
 		// "succeeded". Recomputed from the final state, so a successful retry
 		// or a requeue clears it.
-		job.Tolerated = job.State == JobFailure && job.Spec != nil && job.Spec.ContinueOnError
+		job.Tolerated = (job.State == JobFailure || job.State == JobTimedOut) && job.Spec != nil && job.Spec.ContinueOnError
 		job.Version++
 		body, _ := json.Marshal(&job) // cannot fail: the record is pure JSON types
 		updated = &job
@@ -1344,7 +1421,20 @@ func (s *Service) UpdateJob(ctx context.Context, repo, runID, jobID string, up J
 	if ferr != nil {
 		return nil, ferr
 	}
+	// PAR-132: mirror the deployment decision into the environment's history
+	// (best effort — the job record is the execution authority).
+	s.syncJobDeployment(ctx, owner, name, updated, run)
 	if terminal(updated.State) {
+		// PAR-136: a terminal deployment releases the environment slot and
+		// promotes the next waiter (a job loses its queue position, an API
+		// deployment moves from queued to pending). A cancellation of a queued
+		// deployment removes it from the wait list.
+		if updated.Deployment != nil {
+			if _, rerr := s.releaseEnvironmentSlot(ctx, owner, name, updated.Deployment.Environment,
+				"job:"+runID+":"+jobID); rerr != nil {
+				slog.Default().Warn("threads: release environment slot", "env", updated.Deployment.Environment, "err", rerr)
+			}
+		}
 		// The lease is over: drop it from the runner registry's display state
 		// (best effort; the runner may be gone) and from the global hint.
 		s.clearRunnerCurrentJob(ctx, updated.Runner, repoID(owner, name), runID, jobID)
@@ -1431,6 +1521,11 @@ func (s *Service) foldRun(ctx context.Context, owner, repo, runID string) ([]*Jo
 				// PAR-019: the `completed` edge. It is detached: a follow-up's
 				// discovery/creation must not extend the completing job's call.
 				s.detach(func(ctx context.Context) { s.emitWorkflowRun(ctx, run, "completed") })
+			}
+			// PAR-197: a failed run notifies its subscribers once, off the fold.
+			// The notification's deterministic key makes a repeat a no-op.
+			if run.State == RunFailure {
+				s.detach(func(ctx context.Context) { s.notifyRunFailure(ctx, owner, repo, run.ID) })
 			}
 		}
 	}

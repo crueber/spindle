@@ -24,7 +24,7 @@ jobs:
 `
 
 const cliImportPartial = `name: Release
-run-name: release ${{ github.ref }}
+x-release-channel: stable
 on: push
 jobs:
   build:

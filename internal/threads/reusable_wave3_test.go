@@ -472,6 +472,7 @@ func TestReusableCallSpecSurvivesJSON(t *testing.T) {
 // never a template).
 func TestWorkflowCallWithTemplatesResolveAtCreation(t *testing.T) {
 	e := newTestEnv(t)
+	e.git.add(testSHA, ".spindle/workflows/deploy.yml", wave3Callee)
 	e.git.add(testSHA, ".spindle/workflows/ci.yml", `name: C
 on: {push: {branches: [main]}}
 jobs:
@@ -481,32 +482,21 @@ jobs:
       target: ${{ github.sha }}
       dry-run: ${{ github.event_name == 'push' && 'true' || 'false' }}
 `)
-	// The second value is an expression, which a with: value does not accept:
-	// the file must not create a run.
+	// PAR-038: a with: value is a substitution site, so a whole expression is
+	// evaluated once, at creation, over github.* and inputs.*.
 	runs, err := e.svc.CreateRun(ctx(), "o/r", testSHA, EventPush, CreateOpts{Branch: "main", Ref: "refs/heads/main"})
 	if err != nil {
 		t.Fatalf("CreateRun: %v", err)
 	}
-	if len(runs) != 0 {
-		t.Fatalf("an expression with: value was accepted: %+v", runs)
+	if len(runs) != 1 {
+		t.Fatalf("runs = %+v, want the expression with: value accepted", runs)
 	}
-	// A reference-only value expands.
-	e2 := newTestEnv(t)
-	e2.git.add(testSHA, ".spindle/workflows/deploy.yml", wave3Callee)
-	e2.git.add(testSHA, ".spindle/workflows/ci.yml", `name: C
-on: {push: {branches: [main]}}
-jobs:
-  deploy:
-    uses: ./.spindle/workflows/deploy.yml
-    with:
-      target: ${{ github.sha }}
-`)
-	jobs, jerr := e2.svc.loadJobs(ctx(), "o", "r", e2.mustCreate(t)[0].ID)
+	jobs, jerr := e.svc.loadJobs(ctx(), "o", "r", runs[0].ID)
 	if jerr != nil || len(jobs) != 1 {
 		t.Fatalf("jobs = %+v %v", jobs, jerr)
 	}
-	if jobs[0].Spec.Inputs["target"] != testSHA {
-		t.Fatalf("target = %q", jobs[0].Spec.Inputs["target"])
+	if jobs[0].Spec.Inputs["target"] != testSHA || jobs[0].Spec.Inputs["dry-run"] != "true" {
+		t.Fatalf("inputs = %+v", jobs[0].Spec.Inputs)
 	}
 }
 

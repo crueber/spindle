@@ -78,12 +78,48 @@
         <span class="muted ml-auto text-[11px] mono">{{.UpdatedAt}}</span>
       </div>
       <div class="border-t border-[color:var(--pd-line)] px-3 py-2 text-sm">
-        <p class="muted text-xs">reviewers: {{if .Reviewers}}<span class="mono">{{.ReviewersText}}</span>{{else}}—{{end}}</p>
-        {{if .Teams}}<p class="muted text-xs">team reviewers: <span class="mono">{{.TeamsText}}</span></p>{{end}}
-        <p class="muted text-xs">deployment refs: {{if .Branches}}<span class="mono">{{.BranchesText}}</span>{{else}}all branches and tags{{end}}</p>
+        <details open>
+          <summary class="cursor-pointer text-xs font-semibold uppercase tracking-wide">Protection rules</summary>
+          <div class="mt-2 space-y-1">
+            <p class="muted text-xs">reviewers: {{if .Reviewers}}<span class="mono">{{.ReviewersText}}</span>{{else}}—{{end}}</p>
+            {{if .Teams}}<p class="muted text-xs">team reviewers: <span class="mono">{{.TeamsText}}</span></p>{{end}}
+            <p class="muted text-xs">deployment refs: {{if .Branches}}<span class="mono">{{.BranchesText}}</span>{{else}}all branches and tags{{end}}</p>
+          </div>
+        </details>
       </div>
       <div class="border-t border-[color:var(--pd-line)] px-3 py-2">
-        <h4 class="mb-1 text-xs font-semibold uppercase tracking-wide">Secrets</h4>
+        <details>
+          <summary class="cursor-pointer text-xs font-semibold uppercase tracking-wide">Deployments{{if .Deployments}} <span class="muted font-normal normal-case">({{len .Deployments}})</span>{{end}}</summary>
+          {{if .Deployments}}
+          <div class="mt-2 overflow-x-auto">
+            <table class="data-table">
+              <thead><tr><th scope="col">state</th><th scope="col">ref</th><th scope="col">creator</th><th scope="col">created</th></tr></thead>
+              <tbody>
+                {{range .Deployments}}
+                <tr>
+                  <td><span class="chip chip-neutral">{{.State}}</span>{{with .Queue}}<span class="muted block text-[11px]">{{.}}</span>{{end}}</td>
+                  <td class="mono text-xs">{{.Ref}}</td>
+                  <td class="muted text-xs">{{with .Creator}}{{.}}{{else}}—{{end}}</td>
+                  <td class="muted tabular text-[11px] mono">{{.CreatedAt}}</td>
+                </tr>
+                {{if .Statuses}}
+                <tr><td colspan="4" class="muted text-[11px]">
+                  history:
+                  {{range $i, $st := .Statuses}}{{if $i}} · {{end}}<span class="mono">{{$st.State}}</span>{{with $st.Creator}} by {{.}}{{end}}
+                  {{end}}
+                </td></tr>
+                {{end}}
+                {{end}}
+              </tbody>
+            </table>
+          </div>
+          {{else}}<p class="muted mt-2 text-xs">no deployments recorded for this environment yet.</p>{{end}}
+        </details>
+      </div>
+      <div class="border-t border-[color:var(--pd-line)] px-3 py-2">
+        <details>
+          <summary class="cursor-pointer text-xs font-semibold uppercase tracking-wide">Secrets{{if .Secrets}} <span class="muted font-normal normal-case">({{len .Secrets}})</span>{{end}}</summary>
+          <div class="mt-2">
         {{if .Secrets}}
         <div class="overflow-x-auto">
           <table class="data-table">
@@ -123,6 +159,55 @@
             <button type="submit" class="btn whitespace-nowrap">add secret</button>
           </div>
         </form>
+          </div>
+        </details>
+      </div>
+      <div class="border-t border-[color:var(--pd-line)] px-3 py-2">
+        <details>
+          <summary class="cursor-pointer text-xs font-semibold uppercase tracking-wide">Variables{{if .Vars}} <span class="muted font-normal normal-case">({{len .Vars}})</span>{{end}}</summary>
+          <div class="mt-2">
+            <p class="muted mb-2 text-[11px]">Non-secret values a job that names this environment reads as <code class="mono">vars.NAME</code>. They override repository and organization variables of the same name. Stored write-only and masked in logs, like secrets.</p>
+            {{if .Vars}}
+            <div class="overflow-x-auto">
+              <table class="data-table">
+                <thead><tr><th scope="col">name</th><th scope="col">value</th><th scope="col">updated</th><th scope="col"></th></tr></thead>
+                <tbody>
+                  {{range .Vars}}
+                  <tr>
+                    <td class="mono font-medium">{{.Name}}</td>
+                    <td class="muted mono text-xs">•••••• (set)</td>
+                    <td class="tabular muted text-[11px] mono">{{.UpdatedAt}}</td>
+                    <td>
+                      <form method="post" action="/{{$.Owner}}/{{$.Name}}/settings/environments/{{$env.Name}}"
+                            hx-post="/{{$.Owner}}/{{$.Name}}/settings/environments/{{$env.Name}}" hx-target="#settings-panel" hx-select="#settings-panel" hx-swap="outerHTML">
+                        <input type="hidden" name="environment_action" value="variable-delete">
+                        <input type="hidden" name="environment_variable_name" value="{{.Name}}">
+                        <button type="submit" class="link text-xs">delete</button>
+                      </form>
+                    </td>
+                  </tr>
+                  {{end}}
+                </tbody>
+              </table>
+            </div>
+            {{else}}<p class="muted text-xs">no environment variables stored.</p>{{end}}
+            <form class="mt-2 grid gap-2" method="post" action="/{{$.Owner}}/{{$.Name}}/settings/environments/{{.Name}}"
+                  hx-post="/{{$.Owner}}/{{$.Name}}/settings/environments/{{.Name}}" hx-target="#settings-panel" hx-select="#settings-panel" hx-swap="outerHTML">
+              <input type="hidden" name="environment_action" value="variable-put">
+              <div class="grid gap-2 sm:flex sm:flex-wrap sm:items-end">
+                <div class="min-w-0 sm:flex-1">
+                  <label class="mb-1 block text-xs font-medium" for="env-{{.Name}}-variable-name">variable name</label>
+                  <input class="input mono" id="env-{{.Name}}-variable-name" name="environment_variable_name" type="text" required placeholder="DEPLOY_REGION" pattern="[A-Za-z_][A-Za-z0-9_]{0,63}">
+                </div>
+                <div class="min-w-0 sm:flex-1">
+                  <label class="mb-1 block text-xs font-medium" for="env-{{.Name}}-variable-value">value</label>
+                  <input class="input" id="env-{{.Name}}-variable-value" name="environment_variable_value" type="password" required autocomplete="new-password">
+                </div>
+                <button type="submit" class="btn whitespace-nowrap">add variable</button>
+              </div>
+            </form>
+          </div>
+        </details>
       </div>
       <div class="flex flex-wrap items-center justify-end gap-3 border-t border-[color:var(--pd-line)] px-3 py-2">
         <form method="post" action="/{{$.Owner}}/{{$.Name}}/settings/environments/{{.Name}}"
