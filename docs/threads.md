@@ -32,8 +32,8 @@ A workflow may be **trusted** or **untrusted**:
 
 - trusted: `push`, same-repository `pull_request`, `pull_request_target` (when the repository enabled
   it), `workflow_dispatch`, `schedule`, `repository_dispatch`, `workflow_run` (unless its upstream
-  was untrusted), `create`/`delete`, `deployment`/`deployment_status` — repository secrets are
-  delivered and `permissions:` decides the job token's scopes;
+  was untrusted), `create`/`delete`, `deployment`/`deployment_status` — secrets of all three scopes
+  are delivered and `permissions:` decides the job token's scopes;
 - untrusted: a **fork** `pull_request` — the workflow file is read from the base branch, no secrets
   are delivered, the token is `contents: read` (unless the repository enabled `send_write_tokens`,
   D-13), and a first-time contributor's run waits for a maintainer's approval. A `workflow_run`
@@ -230,6 +230,31 @@ construct it cannot express is listed in the report and marked `# UNTRANSLATED:`
 the converted file, and the command exits non-zero even though the file is written. Nothing is
 pushed, and the source directory is never edited. The full translation table, the refusal list and
 the review workflow are in [`WORKFLOWS.md` §10](WORKFLOWS.md#10-migrating-from-forgejo).
+
+**The migration banner (PAR-003).** Until the converted files are on the default branch, the
+`/{owner}/{repo}/threads` page shows a banner: when the repository has `.forgejo/workflows` or
+`.github/workflows` files and no `.spindle/workflows`, it lists the foreign files and prints the
+exact command to convert them (`spindle threads import --from forgejo --repo .`, or `--from github`).
+The banner reads those directories **for display only**, on that page request: nothing is parsed,
+imported or run, no run is created by visiting the page, and the engine still has no code path that
+reads a foreign directory (§3.6).
+
+**Checking a converted file offline (PAR-199).** `spindle threads validate` runs the server's own
+validator, so its messages are the ones a push (and the page's editor) would report:
+
+```sh
+spindle threads validate .spindle/workflows/ci.yml   # one file
+spindle threads validate .spindle/workflows          # every *.yml/*.yaml file directly inside
+spindle threads validate --repo .                    # ./.spindle/workflows of a checkout
+spindle threads validate - < ci.yml                  # stdin
+spindle threads validate --repo . --json             # the machine report
+```
+
+Exit **0** when every file parses, **1** when any file is invalid (each issue prints
+`file:line: key: message`) or a target cannot be read, **2** for a usage error. `threads explain`
+remains the neighbouring verb: it summarises what a valid file will do, while `validate` answers
+whether it parses at all. The full contract (flags, report shape) is in
+[`CLI.md` §5.4](CLI.md#54-threads-validate--offline-workflow-validation).
 
 ## 3. Workflow reference
 
@@ -793,7 +818,7 @@ jobs:
 | `pattern` | download | a glob over artifact NAMES (`dist-*`) | — | selects every artifact whose name matches; mutually exclusive with `name` and `artifact-ids` |
 | `artifact-ids` | download | comma-separated positive integers | — | selects by each artifact's stable `id` (the list API and the run page show it) |
 | `merge-multiple` | download | `true`, `false` | `false` | extracts every selected artifact into ONE tree instead of one directory per artifact. It needs `pattern` or `artifact-ids` (a single named artifact already lands in `path`) |
-| `run-id` | download | another run's id in THIS repository | this run | **cross-run consumption requires an approval** (§3.4, *Cross-run artifacts*): the consuming run is held in `pending_approval` and a maintainer must approve it. A fork run and a job holding a repository/environment secret are refused by name |
+| `run-id` | download | another run's id in THIS repository | this run | **cross-run consumption requires an approval** (§3.4, *Cross-run artifacts*): the consuming run is held in `pending_approval` and a maintainer must approve it. A fork run and a job holding an organization/repository/environment secret are refused by name |
 
 The v4 inputs that do not make sense here are refused **by name** rather than ignored:
 `github-token` (the step already authenticates with the job token) and `repository` (an artifact can
@@ -908,8 +933,8 @@ action file from another ref. The run page shows the expanded steps before anyth
 definition is *not* re-read when a step runs: if an earlier step edits `action.yml` in the workspace,
 this run still executes the pinned definition (the next run, at a new commit, uses the new file).
 What is **not** sandboxed is the action's `run:` scripts: they execute in the job container as
-repository code, with the same trust as a workflow script step (the job token and repository secrets
-that a script step receives). A compromised composite action file is a compromised job; review it
+repository code, with the same trust as a workflow script step (the job token and secrets that a
+script step receives). A compromised composite action file is a compromised job; review it
 like a workflow file. A fork pull request resolves the local actions from the **PR head** (the
 checked-out commit) and the run is untrusted: no secrets, no push credential — and a docker action
 never receives either regardless (§5.2).
@@ -1089,11 +1114,12 @@ key):
 - **`secrets:`** is an explicit `callee-name: ${{ secrets.SOURCE }}` map (a literal is a parse error)
   or `inherit`. The callee's `on.workflow_call.secrets` is its closed set: `secrets.<name>` for an
   undeclared name is a parse error, and a `required` declaration the call does not pass is a named
-  refusal. A same-repository callee with no `secrets:` block receives the repository's secrets
-  (implicit inherit); a cross-repository callee with no block receives **none**.
+  refusal. A same-repository callee with no `secrets:` block receives the run's resolved secret set
+  (all three scopes, §5.1b; implicit inherit); a cross-repository callee with no block receives
+  **none**.
 - **`secrets: inherit` never crosses a repository boundary** (decision **D-6**): it is a named
   refusal. A cross-repository callee receives exactly the listed secrets, renamed to its own
-  declarations; the claim's secret map is filtered to that set, so no other repository secret
+  declarations; the claim's secret map is filtered to that set, so no other secret
   reaches the callee's process. A nested call only passes on secrets its own caller handed it: a
   name remapped at each level resolves transitively to the run repository's secret, and a callee
   cannot name a secret that never reached it.
@@ -1328,7 +1354,7 @@ parser, because the remote shape is wider (`node20`/`node24`, a Dockerfile `imag
 by the workflow parser exactly as before.
 
 There is no implicit credential anywhere in this path. A remote action never receives the job token,
-the OIDC request token, or the repository secret set: only its declared `with:` inputs and its own
+the OIDC request token, or the secret set: only its declared `with:` inputs and its own
 `env:` block (and an explicitly passed `${{ secrets.X }}` in `env:` is the declared interface). A
 `docker://`/Dockerfile action gets no token at all, exactly like the local rule.
 
@@ -1381,7 +1407,7 @@ in `/admin/config`), the run header, and the job `reason` when a reference is re
 
 
 Precedence, lowest first: runner built-ins → workflow `env` → job `env` → container `env` → step
-`env`; repository secrets are added last, by name. Every step sees:
+`env`; secrets are added last, by name. Every step sees:
 
 | Variable | Value |
 |---|---|
@@ -1411,7 +1437,7 @@ Precedence, lowest first: runner built-ins → workflow `env` → job `env` → 
 | `ACTIONS_ID_TOKEN_REQUEST_URL`, `ACTIONS_ID_TOKEN_REQUEST_TOKEN` | the same two values under GitHub's spelling (§5.5) |
 | `SPINDLE_OUTPUT` | the per-step output file (§3.9): `/tmp/spindle-output-<n>`, writable, initially absent |
 | `GITHUB_OUTPUT` | the same path under the GitHub-compatible spelling |
-| each repository secret | by its own name, trusted runs only (§5.1) |
+| each organization/repository/environment secret | by its own name, trusted runs only; environment > repository > organization (§5.1) |
 
 One reference has a stronger delivery rule than the environment:
 
@@ -1444,17 +1470,35 @@ a named parse error, never an empty value:
 
 | Site | Available contexts |
 |---|---|
-| step field / step `if:` | `github`, `runner`, `vars`, `matrix`, `inputs`, `env`, `secrets`, `steps`, `needs` |
-| job `if:` | `github`, `vars`, `matrix`, `inputs`, `env`, `secrets`, `needs` |
-| job `name` | `github`, `vars`, `matrix`, `inputs` |
-| job `concurrency.group` | `github`, `matrix`, `inputs` |
+| step field / step `if:` | `github`, `runner`, `vars`, `matrix`, `strategy`, `job`, `inputs`, `env`, `secrets`, `steps`, `needs` |
+| job `if:` | `github`, `vars`, `matrix`, `inputs`, `env`, `secrets`, `needs` (no `runner`, no `steps`, no `strategy`, no `job`) |
+| job `name` | `github`, `vars`, `matrix`, `strategy`, `inputs` |
+| job `concurrency.group` | `github`, `matrix`, `strategy`, `inputs` |
 | workflow `concurrency.group` | `github`, `inputs` |
-| job `outputs` | `github`, `runner`, `vars`, `matrix`, `inputs`, `env`, `secrets`, `steps`, `needs` |
-| `runs-on` / `timeout-minutes` | `github`, `matrix`, `inputs` |
+| job `outputs` | `github`, `runner`, `vars`, `matrix`, `strategy`, `inputs`, `env`, `secrets`, `steps`, `needs` |
+| `runs-on` / `timeout-minutes` | `github`, `matrix`, `strategy`, `inputs` |
 | `run-name` | `github`, `inputs` |
 | `defaults.run.*` | none (literals) |
 | reusable caller `with:` | `github`, `inputs` |
 | `workflow_call` output value | `jobs.<id>.outputs.<name>` only |
+
+**`job` and `strategy` (PAR-039).** Two per-cell contexts complete the expression vocabulary:
+
+- `job.status` is the running job's status — `success`, `failure` or `cancelled` — at the moment the
+  step that reads it starts. It follows exactly the rule `success()`/`failure()` follows: a step
+  failure tolerated by `continue-on-error` leaves the job a **success** (the step's own `outcome` is
+  still `failure`, §3.7), and a cancel reads `cancelled`. It exists only in a step — its fields and
+  its `if:` — because only then is there a job status to read; a job `if:`, a job name or a `run-name`
+  that names it is a parse error.
+- `strategy.job-index` (zero-based) and `strategy.job-total` describe the matrix cell; `fail-fast`
+  is the declared flag (default `true`); `max-parallel` is the declared bound or, when the matrix
+  declares none, the number of cells (spindle admits every cell up to the 256 cap). A **plain job** —
+  no `strategy.matrix` — has an empty strategy context, so those four fields read the empty string
+  (never the literal `${{ … }}` text); a matrix cell's values are fixed at run creation and are the
+  same in its name, its lock key, its `runs-on`, its timeouts and its steps. `strategy` is not
+  readable in the job's own `if:` (that condition decides whether the cell is created at all), and
+  no strategy field may appear in a workflow-level `concurrency.group` (it expands once per run,
+  before any cell exists).
 
 **`runs-on` is the one structural field a matrix may vary** (PAR-053): a label may be a whole
 `${{ matrix.<axis> }}`, `${{ inputs.<name> }}` or `${{ github.<field> }}` span, expanded per cell
@@ -1470,12 +1514,16 @@ server addresses `server_url`/`api_url` of §3.5, and — inside a composite act
 `action_path`, §3.4a), `github.event.inputs.<name>`,
 `env.<NAME>`, `secrets.<name>`, `github.event.<field>` (the documented payload projection: `action`,
 `ref`, `before`/`after`, `repository.*`, `sender.login`, `pull_request.*`, `release.*`, `issue.*`,
-`comment.*`), `runner.<field>` (`os`, `arch`, `name`, `temp`, `tool_cache`, `environment`, `debug`)
-and `vars.<name>` (repository variables, repository over organization; values masked in the log).
+`comment.*`), `runner.<field>` (`os`, `arch`, `name`, `temp`, `tool_cache`, `environment`, `debug`),
+`vars.<name>` (variables: environment over repository over organization, values masked in the log),
+`job.status` and `strategy.<field>` (`job-index`, `job-total`, `fail-fast`, `max-parallel`, above).
 The vocabulary is closed and checked at parse time: an unknown context or field, an undeclared
 matrix key or dispatch input, or a malformed `secrets.<name>` is that file's error naming the
-supported set — never a literal that reaches a shell. `runner.*` and `vars.*` are step-site
-contexts; a job-level `if:` that names one is a parse error saying so.
+supported set — never a literal that reaches a shell. `runner.*` is a runner-site context (a step,
+or a job output evaluated after the steps); `job.*` is readable only in a step; `strategy.*` is
+readable wherever a matrix cell exists but not in the job's own `if:` (which decides whether the
+cell is created); and `vars.*` and `secrets.*` are readable in a job-level `if:` as well as a step
+(PAR-058). A reference outside its site's set is a parse error saying so.
 
 The runner resolves a site's references in **one pass**: a substituted value is data, never a
 template, so a secret whose body happens to contain `${{ github.ref }}` stays exactly that text.
@@ -1547,8 +1595,11 @@ set above) in a job `if:`:
 success()  failure()  always()  cancelled()   (canceled() is accepted too)
 startsWith(text, prefix)  endsWith(text, suffix)  contains(text, search)
 format('{0}-{1}', a, b)  join(value, separator)  hashFiles(pattern, …)
+toJSON(value)  fromJSON(string)   case(...) is NOT a function in this language
 github.<field>  forgejo.<field>  forge.<field>  github.event.inputs.<name>
 matrix.<key>  inputs.<name>  env.<NAME>  secrets.<NAME>  vars.<NAME>
+job.status  strategy.job-index  strategy.job-total  strategy.fail-fast
+strategy.max-parallel
 github.action_path   (a composite action's own steps only, §3.4a)
 steps.<id>.outcome  steps.<id>.conclusion  steps.<id>.outputs.<name>
 needs.<job>.result  needs.<job>.outputs.<name>
@@ -1564,6 +1615,18 @@ The `github`/`forgejo`/`forge` fields are the closed set `event_name`, `sha`, `r
 `{N}` argument indexes and `{{`/`}}` for literal braces. `secrets.<name>` reads the run's secret
 map (empty on an untrusted run, never the literal text).
 
+`toJSON(value)` renders compact JSON with `json.Marshal` semantics (no HTML escaping inside
+strings) and object keys in sorted order, so one value always renders the same bytes. A string is
+quoted, a number/boolean/null is itself, a filtered list is an array, and a **bare context**
+(`github`, `forgejo`/`forge`, `runner`, `vars`, `matrix`, `inputs`, `env`, `secrets`, `job`,
+`strategy`, `steps`, `needs`) is its object — the dotted `github` keys nest (`event.inputs.mode`
+sits at `event.inputs.mode`), and a substitution whose whole span is a context renders the same
+JSON. `fromJSON(string)` parses one JSON document into the expression model (object, array, string,
+number, boolean, null); invalid JSON is a **named error**, never an empty value. A parsed object or
+array is readable with the index syntax — `fromJSON(steps.x.outputs.payload).key == 'v'`,
+`fromJSON('[1,2]')[0]` — and `contains()`/`join()` accept a parsed array. `case(...)` is not a
+function in this language.
+
 **Precedence**, tightest first: `!`, comparisons, `&&`, `||`; parentheses group. Comparisons are
 non-associative.
 
@@ -1575,7 +1638,7 @@ non-associative.
   boolean;
 - an empty `if` means `success()`, so a plain step list runs in order;
 - `success()`/`failure()` describe the **job** status: a step failure tolerated by
-  `continue-on-error` does not flip them;
+  `continue-on-error` does not flip them, and `job.status` (§3.6) reads the same fact;
 - `steps.<id>.outcome` is the step's raw result (`success`, `failure`, `cancelled`, `skipped`,
   `timed_out`) and `steps.<id>.conclusion` is that result after the step's `continue-on-error` (a
   tolerated failure's conclusion is `success`). A step that did not run is recorded too. Step ids
@@ -1588,10 +1651,10 @@ non-associative.
   invalidated after a completed step. **No match is the empty string**; over **1000 files** or
   **100 MiB** is a named error. It is a named parse error in a job-level `if:` (there is no
   workspace before a runner is chosen);
-- anything else — `toJSON(...)`, a nested object, an unknown context or `github` field, an
-  undeclared matrix key/input, a wrong argument count — is a **parse error for the file** (the
-  same expression also fails the step or job at evaluation time if a stored workflow reaches it),
-  never a silent skip;
+- anything else — `case(...)` (not a function in this language), an unknown context or `github`
+  field, an undeclared matrix key/input, a wrong argument count — is a **parse error for the file**
+  (the same expression also fails the step or job at evaluation time if a stored workflow reaches
+  it), never a silent skip;
 - `steps.<id>.outputs.<name>` reads the output a step published through its output file (§3.9). A
   step that ran but did not publish that name reads empty, so `if: steps.x.outputs.y == ''` works;
   an `<id>` that is not a step of the job is an evaluation **error** naming it (a typo must never
@@ -2117,14 +2180,23 @@ Managed in **Settings → Secrets** (admin only) or the API — write-only, neve
 
 - names match `[A-Za-z_][A-Za-z0-9_]{0,63}`; values are 1 byte – 64 KiB;
 - a secret is exposed to **trusted** runs only, as an environment variable of its own name in every
-  step of every job in the run;
+  step of a job that resolves it (an environment secret only in the job that names the environment);
 - a fork run gets none: its payload carries `secrets: {}` and `secrets_denied: true`;
-- masking is server-side and **best effort**: exact substring replacement of each value (values
-  shorter than 4 bytes are skipped) in every log frame and step result. A runner that encodes,
-  splits or derives a value defeats it;
-- masking covers LOG LINES only. A step output (`$SPINDLE_OUTPUT`, §3.9) is data: it is stored on the
-  job record and substituted into a dependent job verbatim, so never put a secret in an output and
-  never echo one into an output file. Pass it as a secret to the dependent job instead;
+- precedence is **environment > repository > organization** (§5.1b): an environment secret wins over a
+  repository secret of the same name, which wins over an organization secret's;
+- masking is server-side and **best effort**. The server and the runner share ONE rule
+  (`threads.MaskValues`): a value of 4+ bytes is replaced wherever it appears, longest value first; a
+  **multi-line** value is masked whole and line by line (a streamer that splits a frame cannot make a
+  line leak); a value **shorter than 4 bytes** is replaced only as a whole token (bounded by
+  non-identifier bytes, so `ab` in `crab` survives while `code=ab` is masked). An encoded, split or
+  derived value still prints — there is no in-band redaction guarantee;
+- masking covers every place a runner can echo a value before it is STORED: log frames, step results
+  (the error text), workflow-command annotations and the step summary. The runner applies it as it
+  streams; the server re-applies it on `AppendLog` and on `complete`, so a bugging or older runner
+  cannot write a value into the bucket. A step output (`$SPINDLE_OUTPUT`, §3.9) stays data by design:
+  it is stored on the job record and substituted into a dependent job verbatim, so never put a secret
+  in an output and never echo one into an output file. Pass it as a secret to the dependent job
+  instead;
 - secrets are stored sealed (AES-256-GCM, bound to repository + name). Without
   `server.secrets_key` or `server.auth.session_secret` the store fails closed: the secrets API
   answers `503`, Settings → Secrets explains which key to set, and attempt tokens are signed with a
@@ -2142,13 +2214,54 @@ value is sealed, never returned, and masked in the log). Read one as `${{ vars.<
 | `DELETE` | `/{o}/{r}/api/threads/variables/{name}` | `204` (admin) |
 | `GET`/`PUT`/`DELETE` | `/api/v1/orgs/{org}/threads/variables[/{name}]` | the same, org owner only |
 
-- precedence: **repository over organization** of the same name; only trusted jobs receive them;
+- precedence: **environment > repository > organization** (the same order secrets take, §5.1b): a
+  job that names an environment gets its variables over the repository's, which win over the
+  organization's of the same name; only trusted jobs receive them;
 - names match `[A-Za-z_][A-Za-z0-9_]{0,63}`; `GITHUB_`, `SPINDLE_`, `FORGEJO_` and `RUNNER_`
   prefixes are reserved and refused at save (a variable must not shadow the platform's own
   identity);
-- resolution is two exact-key GETs on the claim path (organization then repository), never a LIST;
-- `vars.*` is a step-site context: a job-level `if:` may not read it (the job is held before the
-  values are resolved) — a parse error says so.
+- resolution is two exact-key GETs on the claim path (organization then repository), plus the
+  environment's own document when the job names one — never a LIST;
+- `vars.*` is readable in a step field, a step `if:`, a job `name`, a job `outputs:` value and a
+  **job-level `if:`** (PAR-058): the server resolves the values when it decides eligibility, so a
+  false condition is not an error. It is not readable where no variable value is resolved —
+  `runs-on`, a concurrency group, `run-name`, or a timeout — and a parse error names that site.
+
+### 5.1b Organization secrets
+
+The same write-only surface at the organization scope, for a credential several repositories share
+(PAR-115). Managed in **Settings → Secrets** on the organization page (owner only) or the API:
+
+| Method | Path | Body / answer |
+|---|---|---|
+| `GET` | `/api/v1/orgs/{org}/threads/secrets` | `{secrets: [{name, visibility, repositories, created_at, updated_at}], enabled}` — policy and timestamps, never a value |
+| `PUT` | `/api/v1/orgs/{org}/threads/secrets/{name}` | `{"value": "…", "visibility": "all"\|"selected", "repositories": ["api"]}` → `204` |
+| `DELETE` | `/api/v1/orgs/{org}/threads/secrets/{name}` | `204` |
+
+- **Precedence is environment > repository > organization.** A repository secret of the same name
+  wins over the organization's; an environment secret wins over both. A variable is never a secret and
+  vice versa: `${{ vars.X }}` and `${{ env.X }}` cannot read one.
+- **Repository policy.** `visibility: "all"` (the default) resolves in every repository the
+  organization owns. `visibility: "selected"` resolves only in the listed repositories (bare names, or
+  `org/name`); **an unselected repository gets nothing** — not an empty value, not the name.
+- Only **trusted** runs resolve them, exactly like repository secrets; a fork run's payload carries
+  none. Organization secrets are masked with the same rule (§5.1), and a secret's scope is recorded on
+  the job as `secret_scopes` (name → `organization`/`repository`/`environment`) so the run page says
+  WHERE a credential came from and never WHAT it was.
+- Storage is ONE sealed document per organization (`orgs/<org>/threads/secrets.json`, bounded at 100
+  entries) so a claim resolves the whole organization scope with a single GET — never a LIST over the
+  org prefix and never one GET per secret. The envelope's AAD binds `org:<org>` + name, so an
+  organization secret cannot be replayed as a repository secret (or the reverse) even when both hold a
+  name.
+- Authorization is the org ownership seam (`CheckOrgOwner`, host admin bypasses) on every read and
+  write, and each write is audited by name and policy — never a value. A caller who is not an owner
+  gets a real `403`; an unauthenticated caller gets `401`; neither is a `404` that would confirm or
+  deny that a secret exists.
+- **There is no user scope, deliberately.** A run executes as the REPOSITORY, not as a person: an
+  actor is who triggered it, but the credential belongs to the repository. A per-user secret would let
+  one contributor's personal credential be read by a workflow they did not write, which is exactly the
+  confusion the scope model removes. This is the same decision variables took (§5.1a), and it is
+  recorded as D-22.
 
 ### 5.2 The check every run passes through
 
@@ -3705,9 +3818,9 @@ Plainly, so nobody plans around them:
   supported by the engine and translated by the importer (§3.1/§3.3); a defaults value with a
   `${{ }}` span or a max-parallel without a matrix is a named refusal.
 - **No GitHub expression language** beyond §3.7 (`startsWith`, `endsWith`, `contains`, `format`,
-  `join`, `hashFiles`, ordered comparisons, value-returning `&&`/`||`, index syntax and the
-  documented `needs.*`/`steps.*` filters are in; `toJSON`, `fromJSON` and the remaining functions
-  are parse errors). `${{ }}` substitution itself is complete: `github.*` (the closed field set,
+  `join`, `toJSON`, `fromJSON`, `hashFiles`, ordered comparisons, value-returning `&&`/`||`, index
+  syntax and the documented `needs.*`/`steps.*` filters are in; `case` is not a function in this
+  language and is a parse error). `${{ }}` substitution itself is complete: `github.*` (the closed field set,
   `actor`, `github.action_path` inside a composite and the two server addresses included), `env.*`,
   `secrets.*` (embedded too), `matrix.*`, `inputs.*`, `vars.*`, `runner.*` and `steps`/`needs`
   outputs all resolve in the sites §3.6 lists, in one pass. `runs-on` labels are a substitution

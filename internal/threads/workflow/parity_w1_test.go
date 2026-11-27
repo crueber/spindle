@@ -172,7 +172,7 @@ func TestSecretsReferences(t *testing.T) {
 		}
 	}
 	bad := []string{
-		"      - run: echo ${{ secrets }}\n",
+		"      - run: echo ${{ secrets[''] }}\n",
 		"      - run: echo ${{ secrets.a.b }}\n",
 		"      - run: echo ${{ secrets.1BAD }}\n",
 	}
@@ -305,7 +305,7 @@ func TestValidateIf(t *testing.T) {
 		}
 	}
 	bad := []struct{ expr, want string }{
-		{"toJSON(github)", "unsupported function"},
+		{"case(github.ref, 'a')", "unsupported function"},
 		{"startsWith(github.ref)", "takes 2 argument"},
 		{"format()", "at least one argument"},
 		{"github.head_ref == 'x'", "not a supported context field"},

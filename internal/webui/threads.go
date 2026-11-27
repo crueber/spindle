@@ -38,6 +38,11 @@ type ThreadsDeps struct {
 	// state at commit ("" = the default branch tip). It is the page's error
 	// surface: a broken file is a row with its error, never a silent no-op.
 	Workflows func(ctx context.Context, owner, repo, commit string, p auth.Principal) (*threads.WorkflowList, error)
+	// Foreign is the migration banner's read (PAR-003): the files under
+	// `.forgejo/workflows`/`.github/workflows` at the default branch tip, shown
+	// with the exact `spindle threads import` command. It is display only —
+	// nothing is parsed, imported or run — and nil leaves the hint off.
+	Foreign func(ctx context.Context, owner, repo, commit string, p auth.Principal) (*threads.ForeignWorkflows, error)
 	// Cancel/Rerun are the operator verbs (15 §3). The page handler gates on
 	// the repository read role to reach the tab; the service re-checks the
 	// write role, so a reader's POST is a real 403 (the API's own gate).
@@ -170,6 +175,10 @@ type threadsListData struct {
 	// list). WorkflowsError reports a discovery failure without hiding runs.
 	Workflows      []threadWorkflowRow
 	WorkflowsError string
+	// Migration is the migration banner (PAR-003): set only when the repository
+	// has foreign workflow files and no `.spindle/workflows`, so the reader is
+	// told to run `spindle threads import`. It is a hint — no run is created.
+	Migration *threadMigration
 
 	// Run workflow (round 2): the manual dispatch control. Dispatch lists the
 	// files that declare `workflow_dispatch`; DispatchSelected is the file whose
@@ -240,6 +249,20 @@ type threadDispatchInput struct {
 	Value       string // submitted (or default) value on a re-render
 }
 
+// threadMigration is the migration banner's page model (PAR-003).
+type threadMigration struct {
+	Groups []threadMigrationGroup
+}
+
+// threadMigrationGroup is one foreign directory: its platform, its directory,
+// the files the page lists and the exact importer command.
+type threadMigrationGroup struct {
+	Platform string
+	Dir      string
+	Files    []string
+	Command  string
+}
+
 // threadWorkflowRow is one discovered workflow file.
 type threadWorkflowRow struct {
 	Path     string
@@ -265,6 +288,7 @@ func (s *Server) threadsList(w http.ResponseWriter, r *http.Request) {
 		After:       r.URL.Query().Get("after"),
 	}
 	data.Workflows, data.WorkflowsError = threadWorkflowRows(r.Context(), rc, p)
+	data.Migration = threadMigrationHint(r.Context(), rc, p, data.Workflows)
 	data.States = threadRunStates()
 	data.Events = threadRunEvents()
 	threadApplyFilter(&data, r)
@@ -882,6 +906,36 @@ func threadWorkflowRows(ctx context.Context, rc collabRepo, p auth.Principal) ([
 		})
 	}
 	return rows, ""
+}
+
+// threadMigrationHint builds the migration banner (PAR-003): a repository with
+// foreign workflow files and no `.spindle/workflows` gets the files and the
+// exact importer command. It is display-only — the hint lists a directory, and
+// nothing here creates a run. Any failure (or an unwired seam) leaves the hint
+// off rather than breaking the page.
+func threadMigrationHint(ctx context.Context, rc collabRepo, p auth.Principal, workflows []threadWorkflowRow) *threadMigration {
+	if threadsDeps.Foreign == nil || len(workflows) > 0 {
+		return nil
+	}
+	found, err := threadsDeps.Foreign(ctx, rc.Owner, rc.Name, "", p)
+	if err != nil || found.Empty() {
+		return nil
+	}
+	out := &threadMigration{}
+	add := func(platform, dir string, files []string) {
+		if len(files) == 0 {
+			return
+		}
+		out.Groups = append(out.Groups, threadMigrationGroup{
+			Platform: platform, Dir: dir, Files: files, Command: threads.ImportCommand(platform),
+		})
+	}
+	add("forgejo", ".forgejo/workflows", found.Forgejo)
+	add("github", ".github/workflows", found.GitHub)
+	if len(out.Groups) == 0 {
+		return nil
+	}
+	return out
 }
 
 // threadDeclaresDispatch reports the manual trigger from the discovery trigger

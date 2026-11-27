@@ -312,8 +312,11 @@ func (e *Executor) Execute(ctx context.Context, in ExecInput, stream *Streamer) 
 		}
 		// Every step is re-resolved against the outputs/outcomes collected so
 		// far: a reference that names a step which never published that output
-		// is a named step error (docs §3.9), never an empty substitution.
+		// is a named step error (docs §3.9), never an empty substitution. The
+		// plan's `job.status` is refreshed first so `${{ job.status }}` in a
+		// step field reads what the step's own `if:` would read (PAR-039).
 		plan.StepOutcomes, plan.StepConclusions, _ = steps.snapshot()
+		plan.JobStatus = jobStatusValue(hardFailure, stream)
 		resolved, rerr := plan.ResolveStep(step, outputContext(steps))
 		var outcome threads.StepResult
 		var inner []threads.StepResult
@@ -1332,6 +1335,19 @@ func (e *Executor) removeActionContainer(plan *Plan, step StepPlan) {
 	_, _, _, _ = e.Docker.Run(ctx, nil, "rm", "-f", dockerActionName(plan, step.OutputIndex))
 }
 
+// jobStatusValue is `job.status` for one step (PAR-039): cancelled when the run
+// was cancelled, failure only after a step failed WITHOUT continue-on-error,
+// success otherwise (GitHub's three values).
+func jobStatusValue(hardFailure bool, stream StepStream) string {
+	if stream != nil && stream.Cancelled() {
+		return threads.JobCancelled
+	}
+	if hardFailure {
+		return threads.JobFailure
+	}
+	return threads.JobSuccess
+}
+
 // exprContext builds the `if` context for one step. hardFailure reports whether
 // an earlier step failed WITHOUT continue-on-error (success()/failure() follow
 // the job status, which a tolerated failure does not change). steps carries the
@@ -1343,6 +1359,10 @@ func (e *Executor) exprContext(plan *Plan, hardFailure bool, stream StepStream, 
 		Success: !hardFailure, Failure: hardFailure, Cancelled: stream.Cancelled(),
 		GitHub: plan.githubValues(), Runner: plan.Runner, Vars: plan.Vars,
 		Matrix: plan.Matrix, Inputs: plan.Inputs, Env: plan.Env,
+		// `job.status` (PAR-039) follows the same rule as success()/failure():
+		// a step tolerated by continue-on-error leaves the job a success.
+		Job:      map[string]string{"status": jobStatusValue(hardFailure, stream)},
+		Strategy: plan.Strategy,
 		// A step `if:` reads the run's secrets on a trusted run (empty on a fork)
 		// and the job token under its GitHub/Forgejo names, the same values a
 		// step field substitutes (docs/threads.md §3.7).

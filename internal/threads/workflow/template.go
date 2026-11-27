@@ -84,8 +84,26 @@ var EventFields = []string{
 // RunnerFields is the closed `runner.*` context (PAR-034).
 var RunnerFields = []string{"os", "arch", "name", "temp", "tool_cache", "environment", "debug"}
 
+// JobFields is the closed `job` context (PAR-039). GitHub documents more
+// (`check_run_id`, `container.*`, `services.*`); Threads has no value for them,
+// so each is a named parse error naming this set rather than an empty string.
+// `job.status` is the one field the engine resolves: success, failure or
+// cancelled, folded over the steps that already ran (a step tolerated by
+// `continue-on-error` does not make the job a failure).
+var JobFields = []string{"status"}
+
+// StrategyFields is the closed `strategy` context (PAR-039): the matrix cell's
+// index and count, its fail-fast flag and its max-parallel bound.
+var StrategyFields = []string{"fail-fast", "job-index", "job-total", "max-parallel"}
+
 // ValidRunnerField reports whether field is in the closed runner.* set.
 func ValidRunnerField(field string) bool { return containsFold(RunnerFields, field) }
+
+// ValidJobField reports whether field is in the closed job.* set.
+func ValidJobField(field string) bool { return containsFold(JobFields, field) }
+
+// ValidStrategyField reports whether field is in the closed strategy.* set.
+func ValidStrategyField(field string) bool { return containsFold(StrategyFields, field) }
 
 // clientPayloadPrefix is the one wildcard branch of the closed event-field
 // vocabulary: `github.event.client_payload.<key>` names a repository_dispatch
@@ -120,6 +138,7 @@ var TemplateSupported = []string{
 	"forgejo.<field>", "forge.<field> (the github.* set)",
 	"runner.<field>", "vars.<name>",
 	"matrix.<axis>", "inputs.<name>", "env.<NAME>", "secrets.<NAME>",
+	"job.status", "strategy.<field>",
 	"steps.<id>.outputs.<name>", "needs.<job>.outputs.<name>",
 }
 
@@ -542,6 +561,18 @@ func validateRef(ref TemplateRef, scope TemplateScope) error {
 				ref.Key, listOrNone(scope.Axes))
 		}
 		return nil
+	case "strategy":
+		if !ValidStrategyField(ref.Key) {
+			return fmt.Errorf("${{ strategy.%s }} is not a supported strategy field (supported: %s)",
+				ref.Key, strings.Join(StrategyFields, ", "))
+		}
+		return nil
+	case "job":
+		if !ValidJobField(ref.Key) {
+			return fmt.Errorf("${{ job.%s }} is not a supported job field (supported: %s)",
+				ref.Key, strings.Join(JobFields, ", "))
+		}
+		return nil
 	case "inputs":
 		if !containsExact(scope.Inputs, ref.Key) {
 			return fmt.Errorf("${{ inputs.%s }} is not a declared workflow_dispatch input (declared: %s)",
@@ -651,6 +682,15 @@ func ValidateGroupTemplate(group string, matrixAxes, inputNames []string, workfl
 				return fmt.Errorf("concurrency.group: ${{ matrix.%s }} is not a declared matrix axis of this job (declared: %s)",
 					ref.Key, listOrNone(matrixAxes))
 			}
+		case "strategy":
+			if workflowLevel {
+				return fmt.Errorf("concurrency.group: ${{ strategy.%s }} is not available in a workflow-level group (it expands once per run, before any matrix cell; move `concurrency` into the job, or drop the reference)",
+					ref.Key)
+			}
+			if !ValidStrategyField(ref.Key) {
+				return fmt.Errorf("concurrency.group: ${{ strategy.%s }} is not a supported strategy field (supported: %s)",
+					ref.Key, strings.Join(StrategyFields, ", "))
+			}
 		case "inputs":
 			if !containsExact(inputNames, ref.Key) {
 				return fmt.Errorf("concurrency.group: ${{ inputs.%s }} is not a declared workflow_dispatch input (declared: %s)",
@@ -669,6 +709,13 @@ func ValidateGroupTemplate(group string, matrixAxes, inputNames []string, workfl
 // a group is the lock, so it must never degrade to a literal or to an empty
 // segment.
 func ExpandGroup(group string, github, matrix, inputs map[string]string) (string, error) {
+	return ExpandGroupWithStrategy(group, github, matrix, inputs, nil)
+}
+
+// ExpandGroupWithStrategy is ExpandGroup plus the job's `strategy.*` context
+// (PAR-039): a job-level group may read strategy.job-index and friends, so two
+// cells of one matrix can hold distinct locks.
+func ExpandGroupWithStrategy(group string, github, matrix, inputs, strategy map[string]string) (string, error) {
 	if !strings.Contains(group, "${{") {
 		return group, nil
 	}
@@ -682,7 +729,7 @@ func ExpandGroup(group string, github, matrix, inputs map[string]string) (string
 			b.WriteString(p.literal)
 			continue
 		}
-		val, ok := lookupRef(*p.ref, github, matrix, inputs)
+		val, ok := lookupRefStrategy(*p.ref, github, matrix, inputs, strategy)
 		if !ok {
 			return "", fmt.Errorf("concurrency.group: ${{ %s.%s }} resolved to nothing for this run (supported: %s)",
 				p.ref.Context, p.ref.Key, strings.Join(TemplateSupported, ", "))
@@ -696,6 +743,12 @@ func ExpandGroup(group string, github, matrix, inputs map[string]string) (string
 // exactly as written. A malformed template is returned unchanged. It is the
 // lenient form for display names.
 func FillTemplate(s string, github, matrix, inputs map[string]string) string {
+	return FillTemplateWithStrategy(s, github, matrix, inputs, nil)
+}
+
+// FillTemplateWithStrategy is FillTemplate plus the matrix cell's `strategy.*`
+// context (PAR-039), so a job name may render strategy.job-index.
+func FillTemplateWithStrategy(s string, github, matrix, inputs, strategy map[string]string) string {
 	if !strings.Contains(s, "${{") {
 		return s
 	}
@@ -703,7 +756,7 @@ func FillTemplate(s string, github, matrix, inputs map[string]string) string {
 	if err != nil {
 		return s
 	}
-	scope := EvalScope{GitHub: github, Matrix: matrix, Inputs: inputs, Site: SiteJobName}
+	scope := EvalScope{GitHub: github, Matrix: matrix, Inputs: inputs, Strategy: strategy, Site: SiteJobName}
 	var b strings.Builder
 	for _, p := range parts {
 		if p.literal != "" {
@@ -720,7 +773,7 @@ func FillTemplate(s string, github, matrix, inputs map[string]string) string {
 			}
 			continue
 		}
-		if val, ok := lookupRef(*p.ref, github, matrix, inputs); ok {
+		if val, ok := lookupRefStrategy(*p.ref, github, matrix, inputs, strategy); ok {
 			b.WriteString(val)
 		} else {
 			b.WriteString(p.ref.Raw)
@@ -770,8 +823,14 @@ type TemplateValues struct {
 	Inputs  map[string]string
 	Env     map[string]string
 	Secrets map[string]string
-	Steps   map[string]map[string]string
-	Needs   map[string]map[string]string
+	// Job is the `job` context (PAR-039): status = success|failure|cancelled
+	// at the moment the site is resolved.
+	Job map[string]string
+	// Strategy is the `strategy` context (PAR-039): job-index, job-total,
+	// fail-fast, max-parallel of this job's matrix cell.
+	Strategy map[string]string
+	Steps    map[string]map[string]string
+	Needs    map[string]map[string]string
 	// NeedResults maps a `needs:` job key to its folded result, so a
 	// `needs.<job>.result` expression resolves in a step field and a step if:.
 	NeedResults map[string]string
@@ -793,6 +852,7 @@ func (vals TemplateValues) evalScope() EvalScope {
 		GitHub: vals.GitHub, Runner: vals.Runner, Vars: vals.Vars,
 		Matrix: vals.Matrix, Inputs: vals.Inputs, Env: vals.Env,
 		Secrets: vals.Secrets, Outputs: vals.Steps, NeedsOutputs: vals.Needs,
+		Job: vals.Job, Strategy: vals.Strategy,
 		Needs: vals.NeedResults,
 		Steps: vals.StepOutcomes, StepConclusions: vals.StepConclusions,
 		HashFiles: vals.HashFiles, Site: SiteStepField,
@@ -891,6 +951,10 @@ func lookupValue(ref TemplateRef, vals TemplateValues) (string, bool) {
 		return vals.Inputs[ref.Key], true
 	case "env":
 		return vals.Env[ref.Key], true
+	case "job":
+		return vals.Job[strings.ToLower(ref.Key)], true
+	case "strategy":
+		return vals.Strategy[strings.ToLower(ref.Key)], true
 	}
 	return "", false
 }
@@ -1037,6 +1101,11 @@ func fillFrom(s string, pick func(*TemplateRef) (map[string]map[string]string, s
 
 // lookupRef resolves one reference against the contexts a group may name.
 func lookupRef(ref TemplateRef, github, matrix, inputs map[string]string) (string, bool) {
+	return lookupRefStrategy(ref, github, matrix, inputs, nil)
+}
+
+// lookupRefStrategy is lookupRef plus the job's `strategy.*` context (PAR-039).
+func lookupRefStrategy(ref TemplateRef, github, matrix, inputs, strategy map[string]string) (string, bool) {
 	var val string
 	var ok bool
 	switch {
@@ -1052,6 +1121,8 @@ func lookupRef(ref TemplateRef, github, matrix, inputs map[string]string) (strin
 		val, ok = matrix[ref.Key]
 	case ref.Context == "inputs":
 		val, ok = inputs[ref.Key]
+	case ref.Context == "strategy":
+		val, ok = strategy[strings.ToLower(ref.Key)]
 	}
 	return val, ok && strings.TrimSpace(val) != ""
 }

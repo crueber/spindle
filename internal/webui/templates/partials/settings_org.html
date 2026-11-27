@@ -274,6 +274,83 @@
 {{template "webhooks-panel" .}}
 {{end}}
 
+{{/* Secrets (PAR-115): organization-scoped secrets with a repository policy.
+   Write-only — a value is sealed at rest and never rendered back; the table
+   shows names, policy and timestamps. Precedence (docs/threads.md §5.1b):
+   environment > repository > organization. A "selected" secret reaches only
+   the repositories listed, so an unselected repository gets nothing at all.
+   390px: fields full width, the table scrolls in place. */}}
+{{define "settings-org-secrets"}}
+<section class="card p-4" aria-label="Organization secrets">
+  <h2 class="card-header">Organization secrets</h2>
+  <p class="muted mb-2 text-sm">Write-only: values are encrypted at rest (AES-GCM) and can never be read back. A secret resolves in the repositories its policy selects for a <strong>trusted</strong> run; a repository secret of the same name wins, and an environment secret wins over both. Fork pull requests never receive any. Logs, annotations and step summaries are masked best effort.</p>
+  {{if not .SecretWired}}
+  <p class="muted text-sm">The Threads secret store is not wired on this build.</p>
+  {{else if not .SecretEnabled}}
+  <div class="border-l-2 border-l-[var(--pd-warn)] p-3 text-sm">
+    <strong class="font-semibold">Organization secrets are unavailable.</strong>
+    <p class="muted mt-1 text-xs">Set <code class="mono">server.secrets_key</code> (or <code class="mono">server.auth.session_secret</code>) to enable at-rest encryption.</p>
+  </div>
+  {{else}}
+  <form class="mt-2 grid gap-3" method="post" action="/{{.Org}}/settings"
+        hx-post="/{{.Org}}/settings" hx-target="#settings-panel" hx-select="#settings-panel" hx-swap="outerHTML">
+    <input type="hidden" name="org_action" value="org-secret-put">
+    <div class="grid gap-3 sm:grid-cols-2">
+      <div>
+        <label class="mb-1 block text-sm font-medium" for="org-secret-name">Name</label>
+        <input class="input mono" id="org-secret-name" name="secret_name" type="text" required placeholder="DEPLOY_TOKEN" value="{{.NewSecretName}}" pattern="[A-Za-z_][A-Za-z0-9_]{0,63}">
+      </div>
+      <div>
+        <label class="mb-1 block text-sm font-medium" for="org-secret-value">Value</label>
+        <input class="input" id="org-secret-value" name="secret_value" type="password" required autocomplete="new-password">
+      </div>
+      <div>
+        <label class="mb-1 block text-sm font-medium" for="org-secret-visibility">Repository access</label>
+        <select class="input w-auto" id="org-secret-visibility" name="secret_visibility">
+          <option value="all"{{if ne .NewSecretVis "selected"}} selected{{end}}>all repositories</option>
+          <option value="selected"{{if eq .NewSecretVis "selected"}} selected{{end}}>selected repositories</option>
+        </select>
+      </div>
+      <div>
+        <label class="mb-1 block text-sm font-medium" for="org-secret-repositories">Selected repositories</label>
+        <input class="input mono" id="org-secret-repositories" name="secret_repositories" type="text" placeholder="api, web" value="{{.NewSecretRepo}}">
+        <p class="muted mt-1 text-[11px]">Comma- or space-separated repository names. Required when access is "selected"; ignored for "all".</p>
+      </div>
+    </div>
+    <p class="muted text-[11px]">Stored sealed; submitting an existing name replaces its value and policy.</p>
+    {{if .SecretError}}<p class="err-line" role="alert">{{.SecretError}}</p>{{end}}
+    <div><button type="submit" class="btn primary whitespace-nowrap">save secret</button></div>
+  </form>
+  {{if .Secrets}}
+  <div class="mt-3 overflow-x-auto">
+    <table class="data-table">
+      <thead><tr><th scope="col">name</th><th scope="col">access</th><th scope="col">updated</th><th scope="col"></th></tr></thead>
+      <tbody>
+        {{range .Secrets}}
+        <tr>
+          <td class="mono font-medium">{{.Name}}</td>
+          <td class="text-xs">
+            {{if eq .Visibility "selected"}}<span class="mono">{{.Repositories}}</span>{{else}}all repositories{{end}}
+          </td>
+          <td class="tabular muted text-[11px] mono">{{.UpdatedAt}}</td>
+          <td>
+            <form method="post" action="/{{$.Org}}/settings"
+                  hx-post="/{{$.Org}}/settings" hx-target="#settings-panel" hx-select="#settings-panel" hx-swap="outerHTML">
+              <input type="hidden" name="org_action" value="org-secret-delete">
+              <input type="hidden" name="id" value="{{.Name}}">
+              <button type="submit" class="link text-xs">delete</button>
+            </form>
+          </td>
+        </tr>
+        {{end}}
+      </tbody>
+    </table>
+  </div>
+  {{else}}<p class="muted mt-3 text-sm">no organization secrets stored.</p>{{end}}
+  {{end}}
+</section>
+{{end}}
+
 {{define "settings-org-activity"}}
 {{/* The live prepend is the islands group's SSE reader; data-sse names the
      stream kind, and the endpoint lands with the org-activity view. */}}

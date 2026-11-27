@@ -140,6 +140,14 @@ func TestAttemptStoreFailurePaths(t *testing.T) {
 	if _, err := e.svc.AppendLog(ctx(), claims, 1, "hello"); err == nil {
 		t.Fatal("a corrupt secret must fail the log write")
 	}
+	// Complete masks annotations and the summary with the same value set, so
+	// the same corrupt envelope fails IT too: masking is not optional.
+	if _, err := e.svc.Complete(ctx(), claims, CompleteInput{Conclusion: "success"}); err == nil {
+		t.Fatal("a corrupt secret must fail the complete write")
+	}
+	if err := fs.Delete(ctx(), SecretKey("o", "r", "BROKEN"), ""); err != nil {
+		t.Fatalf("remove the corrupt record: %v", err)
+	}
 	// Complete a job as success (the conclusion mapping's happy path).
 	if _, err := e.svc.Complete(ctx(), claims, CompleteInput{Conclusion: "success"}); err != nil {
 		t.Fatalf("complete: %v", err)

@@ -58,6 +58,7 @@ type cli struct {
 	repo       string    // explicit -R OWNER/REPO ("" = SPINDLE_REPO/env or the positional)
 	out        io.Writer // stdout override for tests (nil = os.Stdout)
 	errOut     io.Writer // stderr override for tests (nil = os.Stderr)
+	in         io.Reader // stdin override for tests (nil = os.Stdin)
 }
 
 // stdout/stderr are the command output streams (test-injectable).
@@ -73,6 +74,14 @@ func (c *cli) stderr() io.Writer {
 		return c.errOut
 	}
 	return os.Stderr
+}
+
+// stdin is the command's input stream (test-injectable).
+func (c *cli) stdin() io.Reader {
+	if c != nil && c.in != nil {
+		return c.in
+	}
+	return os.Stdin
 }
 
 var subcommands []command

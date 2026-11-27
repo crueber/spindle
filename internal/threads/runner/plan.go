@@ -283,6 +283,14 @@ type Plan struct {
 	Matrix map[string]string
 	Inputs map[string]string
 	Env    map[string]string
+	// Strategy is this job's `strategy.*` context (PAR-039): job-index,
+	// job-total, fail-fast and max-parallel of its matrix cell; nil for a
+	// plain job (every strategy reference then reads empty).
+	Strategy map[string]string
+	// JobStatus is `job.status` as the step being resolved sees it (PAR-039):
+	// success, failure after a step failed WITHOUT continue-on-error, or
+	// cancelled. The executor refreshes it before each step.
+	JobStatus string
 	// GitHub is the resolved `github.*` context of this job (docs/threads.md
 	// §3.6): the runner built-ins, captured BEFORE any authored `env:` overlay
 	// so a workflow that sets GITHUB_SHA in `env:` cannot change what
@@ -806,7 +814,9 @@ func BuildPlan(in PlanInput) (*Plan, error) {
 		JobToken:            in.AttemptToken,
 		IDTokenRequestToken: idTokenRequestToken,
 		Matrix:              matrix, Inputs: inputs, Env: jobEnv, GitHub: github,
-		Vars: job.Vars, Runner: runnerCtx, EventJSON: eventJSON,
+		Strategy:  threads.StrategyContextOf(spec),
+		JobStatus: threads.JobSuccess,
+		Vars:      job.Vars, Runner: runnerCtx, EventJSON: eventJSON,
 		Needs:        job.NeedsOutputs,
 		NeedsResults: job.NeedsResults,
 		ArtifactCaps: in.Caps,
@@ -2296,6 +2306,15 @@ func copyStrings(in map[string]string) map[string]string {
 	return out
 }
 
+// jobStatus is the `job.status` this plan's next step reads (PAR-039): the
+// status the executor last observed, defaulting to success.
+func (p *Plan) jobStatus() string {
+	if p.JobStatus == "" {
+		return threads.JobSuccess
+	}
+	return p.JobStatus
+}
+
 // stepValues is the complete runtime value set of one substitution site
 // (docs/threads.md §3.6): the resolved `github.*` context, the job's matrix
 // cell and dispatch inputs, the environment layer at the site, the job's
@@ -2310,6 +2329,8 @@ func (p *Plan) stepValues(env map[string]string, outputs map[string]map[string]s
 		Inputs:          p.Inputs,
 		Env:             env,
 		Secrets:         p.secretValues(),
+		Job:             map[string]string{"status": p.jobStatus()},
+		Strategy:        p.Strategy,
 		NeedResults:     p.NeedsResults,
 		HashFiles:       p.HashFiles,
 		StepOutcomes:    p.StepOutcomes,

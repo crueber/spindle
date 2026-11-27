@@ -510,11 +510,11 @@ func TestEvalStepTimeoutsRecursesAndFails(t *testing.T) {
 		{TimeoutExpr: "matrix.m"},
 		{Parallel: []StepSpec{{TimeoutExpr: "matrix.m"}}},
 	}
-	out, err := evalStepTimeouts(steps, nil, map[string]string{"m": "7"}, nil)
+	out, err := evalStepTimeouts(steps, nil, map[string]string{"m": "7"}, nil, nil)
 	if err != nil || out[0].TimeoutMinutes != 7 || out[0].TimeoutExpr != "" || out[1].Parallel[0].TimeoutMinutes != 7 {
 		t.Fatalf("eval = %+v, %v", out, err)
 	}
-	if _, err := evalStepTimeouts([]StepSpec{{TimeoutExpr: "matrix.nope"}}, nil, nil, nil); err == nil {
+	if _, err := evalStepTimeouts([]StepSpec{{TimeoutExpr: "matrix.nope"}}, nil, nil, nil, nil); err == nil {
 		t.Fatal("an unresolvable step timeout was accepted")
 	}
 	if stepExprs([]StepSpec{{TimeoutMinutes: 5}}) {
@@ -544,7 +544,7 @@ func TestLoadJobIfValuesTrustedLeaves(t *testing.T) {
 
 func TestEvalStepTimeoutsParallelError(t *testing.T) {
 	steps := []StepSpec{{Parallel: []StepSpec{{TimeoutExpr: "matrix.nope"}}}}
-	if _, err := evalStepTimeouts(steps, nil, nil, nil); err == nil {
+	if _, err := evalStepTimeouts(steps, nil, nil, nil, nil); err == nil {
 		t.Fatal("a parallel member's bad timeout was accepted")
 	}
 	if stepExprs([]StepSpec{{Parallel: []StepSpec{{TimeoutExpr: "matrix.m"}}}}) != true {

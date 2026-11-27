@@ -306,6 +306,8 @@ func TestExposedCoversRoutes(t *testing.T) {
 		"/{owner}/{repo}/api/threads/variables/{name}":    {http.MethodPut, "/o/r/api/threads/variables/REGION", false},
 		"/api/v1/orgs/{org}/threads/variables":            {http.MethodGet, "/api/v1/orgs/acme/threads/variables", false},
 		"/api/v1/orgs/{org}/threads/variables/{name}":     {http.MethodPut, "/api/v1/orgs/acme/threads/variables/REGION", false},
+		"/api/v1/orgs/{org}/threads/secrets":              {http.MethodGet, "/api/v1/orgs/acme/threads/secrets", false},
+		"/api/v1/orgs/{org}/threads/secrets/{name}":       {http.MethodPut, "/api/v1/orgs/acme/threads/secrets/TOKEN", false},
 		"/{owner}/{repo}/api/threads/environments":        {http.MethodGet, "/o/r/api/threads/environments", false},
 		"/{owner}/{repo}/api/threads/environments/{name}": {http.MethodPut, "/o/r/api/threads/environments/prod", false},
 		"/{owner}/{repo}/api/threads/environments/{name}/secrets": {

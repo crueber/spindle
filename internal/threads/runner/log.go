@@ -6,8 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"sort"
-	"strings"
 	"sync"
 	"time"
 
@@ -151,20 +149,12 @@ func (s *Streamer) addMask(values []string) {
 	s.mask = merged
 }
 
-// maskValues is the shared masking rule.
+// maskValues is the shared masking rule (docs/threads.md §5.1): the server
+// package owns the one implementation so a frame masked here and a frame
+// masked before storage (AppendLog, Complete) cannot differ — including the
+// multi-line and short-value rules.
 func maskValues(text string, values []string) string {
-	if text == "" || len(values) == 0 {
-		return text
-	}
-	sorted := append([]string(nil), values...)
-	sort.Slice(sorted, func(i, j int) bool { return len(sorted[i]) > len(sorted[j]) })
-	for _, v := range sorted {
-		if len(v) < 4 {
-			continue
-		}
-		text = strings.ReplaceAll(text, v, "***")
-	}
-	return text
+	return threads.MaskValues(text, values)
 }
 
 // Close flushes the remaining buffer and stops the flusher. Idempotent.

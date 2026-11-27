@@ -21,6 +21,7 @@ import (
 	"github.com/crueber/spindle/internal/server"
 	"github.com/crueber/spindle/internal/server/auth"
 	"github.com/crueber/spindle/internal/store"
+	"github.com/crueber/spindle/internal/threads"
 	"github.com/crueber/spindle/internal/webui"
 )
 
@@ -154,7 +155,7 @@ func TestOrgInviteLinkOneShotAcceptGrantsRoleAndCancelConflicts(t *testing.T) {
 	cfg := config.Defaults()
 	ident := identity.New(store.NewMemory(), cfg)
 	write := orgWriteFn(ident)
-	view := orgViewFn(ident, nil)
+	view := orgViewFn(ident, nil, nil)
 	ctx := context.Background()
 	owner := auth.Principal{Name: "alice@example.com", Write: true}
 	if _, err := ident.CreateOrg(ctx, "acme", "Acme", "", owner.Name); err != nil {
@@ -418,5 +419,79 @@ func TestOrgWriteSeamCoversEveryForm(t *testing.T) {
 	res, werr = write(ctx, "acme", owner, webui.SettingsOrgWrite{Action: webui.SettingsOrgDelete})
 	if werr != nil || res.Redirect != "/" {
 		t.Fatalf("delete = %+v %+v", res, werr)
+	}
+}
+
+// TestOrgSecretPageSeamAndView is PAR-115 through composition: the org Settings
+// → Secrets write seam and the org page read share the Threads service's verbs,
+// the owner gate is the identity seam, and a value never appears in the view.
+func TestOrgSecretPageSeamAndView(t *testing.T) {
+	cfg := config.Defaults()
+	ctx := context.Background()
+	ident := identity.New(store.NewMemory(), cfg)
+	owner := auth.Principal{Name: "alice@example.com", Write: true}
+	if _, err := ident.CreateOrg(ctx, "acme", "Acme", "", owner.Name); err != nil {
+		t.Fatalf("create org: %v", err)
+	}
+	th := threads.New(store.NewMemory(), nil)
+	k, kerr := threads.NewKeyring(strings.Repeat("z", 32), "")
+	if kerr != nil {
+		t.Fatalf("keyring: %v", kerr)
+	}
+	th.SetKeyring(k)
+	th.OrgAdmin = ident.CheckOrgOwner
+	write := orgSecretWriteFn(th)
+	put := func(name, value, visibility, repos string) (webui.SettingsWriteResult, *webui.SettingsWriteError) {
+		return write(ctx, "acme", owner, webui.SettingsOrgWrite{
+			Action: webui.SettingsOrgSecretPut,
+			Values: map[string]string{
+				"secret_name": name, "secret_value": value,
+				"secret_visibility": visibility, "secret_repositories": repos,
+			},
+		})
+	}
+	if _, werr := put("ORG_TOKEN", "seam-value-1234", "all", ""); werr != nil {
+		t.Fatalf("put: %+v", werr)
+	}
+	if _, werr := put("ONLY_API", "seam-selected-1234", "selected", "api, acme/web"); werr != nil {
+		t.Fatalf("put selected: %+v", werr)
+	}
+	// Validation failures map onto a 422 the page renders.
+	if _, werr := put("BAD", "x", "selected", ""); werr == nil || werr.Status != http.StatusUnprocessableEntity {
+		t.Fatalf("selected without repos = %+v", werr)
+	}
+	if _, werr := put("", "x", "all", ""); werr == nil || werr.Status != http.StatusUnprocessableEntity {
+		t.Fatalf("empty name = %+v", werr)
+	}
+	// A non-owner is refused (the service's own gate, not the page's).
+	if _, werr := write(ctx, "acme", auth.Principal{Name: "bob@example.com"},
+		webui.SettingsOrgWrite{Action: webui.SettingsOrgSecretPut, Values: map[string]string{"secret_name": "X", "secret_value": "y"}}); werr == nil || werr.Status != http.StatusForbidden {
+		t.Fatalf("non-owner = %+v", werr)
+	}
+	// The page view carries names and policy only.
+	page, err := orgViewFn(ident, nil, th)(ctx, "acme", owner)
+	if err != nil || page == nil {
+		t.Fatalf("org view: %v", err)
+	}
+	if !page.SecretWired || !page.SecretEnabled || len(page.Secrets) != 2 {
+		t.Fatalf("secrets panel = wired=%v enabled=%v rows=%+v", page.SecretWired, page.SecretEnabled, page.Secrets)
+	}
+	for _, row := range page.Secrets {
+		if strings.Contains(row.Name, "seam-") || strings.Contains(row.Repositories, "seam-") {
+			t.Fatalf("the page view carries a value: %+v", row)
+		}
+		if row.Name == "ONLY_API" && row.Visibility != "selected" {
+			t.Fatalf("policy = %+v", row)
+		}
+	}
+	// The delete action removes by name; unknown actions are a 400.
+	res, werr := write(ctx, "acme", owner, webui.SettingsOrgWrite{
+		Action: webui.SettingsOrgSecretDelete, Values: map[string]string{"id": "ORG_TOKEN"},
+	})
+	if werr != nil || res.Notice == "" {
+		t.Fatalf("delete = %+v, %+v", res, werr)
+	}
+	if _, werr := write(ctx, "acme", owner, webui.SettingsOrgWrite{Action: "nope"}); werr == nil || werr.Status != http.StatusBadRequest {
+		t.Fatalf("unknown action = %+v", werr)
 	}
 }

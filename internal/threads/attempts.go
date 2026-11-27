@@ -159,15 +159,15 @@ func (s *Service) AppendLog(ctx context.Context, claims AttemptClaims, seq int, 
 	}
 	body := text
 	if job.Trusted {
-		values, verr := s.secretValues(ctx, owner, repo)
+		// The mask set is every value the job itself could read (org, repo and
+		// environment secrets, and the variables with the same posture), so a
+		// frame that prints an organization secret is masked exactly like one
+		// that prints a repository secret.
+		vals, verr := s.jobMaskValues(ctx, owner, repo, job)
 		if verr != nil {
 			return nil, verr
 		}
-		vals := make([]string, 0, len(values))
-		for _, v := range values {
-			vals = append(vals, v)
-		}
-		body = maskSecrets(body, vals)
+		body = maskSecretValues(body, vals)
 	}
 	key := LogKey(owner, repo, claims.Run, claims.Job, claims.Attempt, seq)
 	_, perr := store.PutBytes(ctx, s.Store, key, []byte(body),
@@ -342,6 +342,31 @@ func (s *Service) Complete(ctx context.Context, claims AttemptClaims, in Complet
 	if len(steps) > 512 {
 		return nil, fmt.Errorf("%w: too many step results", ErrInvalid)
 	}
+	annotations := in.Annotations
+	summary := in.Summary
+	// Masking runs HERE, before storage, for the same reason it runs on a log
+	// frame: an annotation, a step error and a step summary are the three other
+	// places a runner can echo a value. The runner already masked them; the
+	// server re-masks with the job's full value set (organization, repository
+	// and environment secrets, and the variables with the same posture) so a
+	// bugging or older runner cannot write a value into the bucket. An
+	// untrusted job was given no value to leak and is left untouched.
+	if job.Trusted {
+		mask, merr := s.jobMaskValues(ctx, owner, repo, job)
+		if merr != nil {
+			return nil, merr
+		}
+		for i := range steps {
+			steps[i].Error = maskSecretValues(steps[i].Error, mask)
+		}
+		for i := range annotations {
+			annotations[i].Message = maskSecretValues(annotations[i].Message, mask)
+			annotations[i].Title = maskSecretValues(annotations[i].Title, mask)
+		}
+		if summary != "" {
+			summary = maskSecretValues(summary, mask)
+		}
+	}
 	for i := range steps {
 		steps[i].Conclusion = normalizeConclusion(steps[i].Conclusion)
 		steps[i].Error = truncate(steps[i].Error, 512)
@@ -364,11 +389,11 @@ func (s *Service) Complete(ctx context.Context, claims AttemptClaims, in Complet
 	// bugging runner cannot enlarge a job record. A failed job still keeps its
 	// annotations (that is the point: the error annotation explains the
 	// failure); the summary is kept for every conclusion a runner reported.
-	annotations, aerr := ValidateAnnotations(in.Annotations)
+	annotations, aerr := ValidateAnnotations(annotations)
 	if aerr != nil {
 		return nil, fmt.Errorf("%w: %v", ErrInvalid, aerr)
 	}
-	summary := truncate(in.Summary, MaxJobSummaryBytes)
+	summary = truncate(summary, MaxJobSummaryBytes)
 	updated, uerr := s.UpdateJob(ctx, repoID(owner, repo), claims.Run, claims.Job, JobUpdate{
 		State: state, StepResults: steps, Outputs: outputs, CancelRequested: boolPtr(false),
 		Annotations: annotations, Summary: &summary,
@@ -376,6 +401,7 @@ func (s *Service) Complete(ctx context.Context, claims AttemptClaims, in Complet
 	if uerr != nil {
 		return nil, uerr
 	}
+	s.forgetJobMask(repoID(owner, repo), claims.Run, claims.Job, job.Attempt)
 	// fail-fast: a failed matrix cell cancels its siblings (GitHub's default
 	// is on; `fail-fast: false` opts out). The sibling cancel rides the same
 	// terminal path the operator uses, so a running sibling acks on its next
@@ -419,6 +445,7 @@ func (s *Service) AckCancel(ctx context.Context, claims AttemptClaims) (*Complet
 		}
 		state = updated.State
 	}
+	s.forgetJobMask(repoID(owner, repo), claims.Run, claims.Job, job.Attempt)
 	s.finishEntry(ctx, owner, repo, job.QueueSeq)
 	s.retireEphemeralRunner(ctx, claims.Runner)
 	run, _ := s.loadRun(ctx, owner, repo, claims.Run)

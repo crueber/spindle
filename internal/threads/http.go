@@ -54,6 +54,8 @@ var ExposedTemplates = []string{
 	"/{owner}/{repo}/api/threads/variables/{name}",
 	"/api/v1/orgs/{org}/threads/variables",
 	"/api/v1/orgs/{org}/threads/variables/{name}",
+	"/api/v1/orgs/{org}/threads/secrets",
+	"/api/v1/orgs/{org}/threads/secrets/{name}",
 	"/{owner}/{repo}/api/threads/environments",
 	"/{owner}/{repo}/api/threads/environments/{name}",
 	"/{owner}/{repo}/api/threads/environments/{name}/secrets",
@@ -124,10 +126,15 @@ func (h *Handler) Handle(w http.ResponseWriter, r *http.Request) bool {
 	// The runner protocol is top-level (/api/v1/threads/…): runners are
 	// infrastructure, not users, so their paths are not repo-scoped.
 	if segs[0] == "api" || segs[0] == "api-browser" {
-		// Organization variables (PAR-035) are owner-scoped, not repo-scoped:
-		// /api[-browser]/v1/orgs/{org}/threads/variables[/{name}].
-		if len(segs) >= 6 && segs[1] == "v1" && segs[2] == "orgs" && segs[4] == "threads" && segs[5] == "variables" {
-			return h.handleOrgVariables(w, r, segs[3], segs[6:])
+		// Organization variables and secrets (PAR-035, PAR-115) are owner-scoped,
+		// not repo-scoped: /api[-browser]/v1/orgs/{org}/threads/{variables,secrets}[/{name}].
+		if len(segs) >= 6 && segs[1] == "v1" && segs[2] == "orgs" && segs[4] == "threads" {
+			switch segs[5] {
+			case "variables":
+				return h.handleOrgVariables(w, r, segs[3], segs[6:])
+			case "secrets":
+				return h.handleOrgSecrets(w, r, segs[3], segs[6:])
+			}
 		}
 		if len(segs) >= 4 && segs[1] == "v1" && segs[2] == "admin" && segs[3] == "runner-groups" {
 			return h.runnerGroups(w, r, segs[4:])

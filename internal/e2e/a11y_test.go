@@ -38,6 +38,18 @@ jobs:
       - run: echo deploying
 `
 
+// a11yForeignWorkflow is the migration banner's fixture (PAR-003): a valid
+// workflow in a forgejo-shaped directory, which the page lists (display only)
+// beside the importer command. The engine never runs it.
+const a11yForeignWorkflow = `name: CI
+on: [push]
+jobs:
+  build:
+    runs-on: linux
+    steps:
+      - run: echo hi
+`
+
 // a11yViewport is one viewport the page set is checked at. The narrow one is
 // AGENTS.md §2's ~390 px mobile check; the desktop one catches controls that are
 // hidden (and therefore unnamed) only at small widths.
@@ -317,6 +329,25 @@ func TestA11yRenderedPages(t *testing.T) {
 		return false
 	})
 
+	// Organization secrets (PAR-115): an organization with one stored secret
+	// renders the Settings → Secrets tab's write-only form and policy table.
+	orgName := "a11yorg"
+	mustAPI(t, "POST", s.base+"/api/v1/orgs",
+		fmt.Sprintf(`{"org":%q,"display_name":"A11y Org"}`, orgName), adminTok)
+	if st, body := apiCall(t, "PUT", s.base+"/api/v1/orgs/"+orgName+"/threads/secrets/ORG_TOKEN",
+		`{"value":"a11y-org-secret-value"}`, adminTok); st != 204 {
+		t.Fatalf("seed org secret = %d: %s", st, body)
+	}
+
+	// The migration banner (PAR-003): a second repository whose only workflow
+	// directory is a foreign one, so the Threads page renders the banner (files
+	// plus the importer command) and the floor lays it out at both viewports.
+	foreignRepo := uniqueRepo("a11y-foreign")
+	foreignWork, _ := pushFreshRepo(t, g, s, foreignRepo, "README.md",
+		"# a11y foreign fixture\n\nOnly a Forgejo workflow directory; no .spindle/workflows.\n")
+	g.commitFile(foreignWork, ".forgejo/workflows/ci.yml", a11yForeignWorkflow, "foreign workflow")
+	g.run(foreignWork, "push", "origin", "main")
+
 	// ---- browser: sign in as an admin through the stub IdP -------------------
 	base := fmt.Sprintf("http://walgit.localhost:%d", s.port)
 	b := launchBrowser(t)
@@ -353,8 +384,10 @@ func TestA11yRenderedPages(t *testing.T) {
 		{"repo search", "/" + owner + "/" + repo + "/search?q=fixture"},
 		{"owner search", "/search?owner=" + owner + "&q=fixture&type=code"},
 		{"threads", "/" + owner + "/" + repo + "/threads"},
+		{"threads (migration banner)", "/" + owner + "/" + foreignRepo + "/threads"},
 		{"thread run (held deployment)", "/" + owner + "/" + repo + "/threads/" + threadRunID},
 		{"repo settings environments", "/" + owner + "/" + repo + "/settings/environments"},
+		{"org settings secrets", "/" + orgName + "/settings?tab=secrets"},
 		{"admin", "/admin"},
 		{"admin config", "/admin/config"},
 	}
@@ -485,6 +518,7 @@ func a11yServer(t *testing.T) (*e2eServer, *oidp, string) {
 listen = "0.0.0.0:%d"
 public_url = %q
 auto_create_on_push = true
+secrets_key = "0123456789abcdef0123456789abcdef"
 
 %s
 [store]

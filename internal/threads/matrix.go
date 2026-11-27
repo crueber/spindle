@@ -2,6 +2,7 @@ package threads
 
 import (
 	"fmt"
+	"strconv"
 	"strings"
 
 	"github.com/crueber/spindle/internal/threads/workflow"
@@ -79,12 +80,12 @@ func stepExprs(steps []StepSpec) bool {
 // evalStepTimeouts resolves every expression-valued step timeout for one matrix
 // cell. The slice is copied before mutation: the spec's steps are shared by all
 // cells of the product.
-func evalStepTimeouts(steps []StepSpec, github, matrix, inputs map[string]string) ([]StepSpec, error) {
+func evalStepTimeouts(steps []StepSpec, github, matrix, inputs, strategy map[string]string) ([]StepSpec, error) {
 	out := make([]StepSpec, len(steps))
 	copy(out, steps)
 	for i := range out {
 		if out[i].TimeoutExpr != "" {
-			mins, err := workflow.EvalMinutes(out[i].TimeoutExpr, github, matrix, inputs)
+			mins, err := workflow.EvalMinutesWithStrategy(out[i].TimeoutExpr, github, matrix, inputs, strategy)
 			if err != nil {
 				return nil, fmt.Errorf("step timeout-minutes: %w", err)
 			}
@@ -92,7 +93,7 @@ func evalStepTimeouts(steps []StepSpec, github, matrix, inputs map[string]string
 			out[i].TimeoutExpr = ""
 		}
 		if len(out[i].Parallel) > 0 {
-			parallel, err := evalStepTimeouts(out[i].Parallel, github, matrix, inputs)
+			parallel, err := evalStepTimeouts(out[i].Parallel, github, matrix, inputs, strategy)
 			if err != nil {
 				return nil, err
 			}
@@ -116,6 +117,48 @@ func matrixGroupKey(key string, cells int) string {
 // usable axis or an include entry.
 func matrixIsMatrix(s *StrategySpec) bool {
 	return strategyMatrix(s).Enabled()
+}
+
+// strategyContextFor is one cell's `strategy.*` context (PAR-039): job-index and
+// job-total only exist for a matrix job, fail-fast defaults to true, and
+// max-parallel reads the declared bound or the product's size (spindle's
+// effective bound: every cell may run at once). A plain job has no cell, so its
+// context is empty and every strategy reference reads empty.
+func strategyContextFor(s *StrategySpec, index, total int) map[string]string {
+	return strategyContextIf(matrixIsMatrix(s), s, index, total)
+}
+
+// strategyContextIf is strategyContextFor with the matrix check hoisted, for a
+// caller expanding many cells of one declaration.
+func strategyContextIf(isMatrix bool, s *StrategySpec, index, total int) map[string]string {
+	if !isMatrix {
+		return nil
+	}
+	ctx := map[string]string{
+		"job-index": strconv.Itoa(index),
+		"job-total": strconv.Itoa(total),
+		"fail-fast": "true",
+	}
+	if s != nil && s.FailFast != nil && !*s.FailFast {
+		ctx["fail-fast"] = "false"
+	}
+	maxParallel := total
+	if s != nil && s.MaxParallel > 0 {
+		maxParallel = s.MaxParallel
+	}
+	ctx["max-parallel"] = strconv.Itoa(maxParallel)
+	return ctx
+}
+
+// StrategyContextOf is the `strategy.*` context of one stored job record
+// (PAR-039). The server writes MatrixIndex/MatrixTotal at expansion time and
+// the runner reads them back, so both ends resolve the same values; a plain job
+// (part of no matrix) has no strategy context at all.
+func StrategyContextOf(spec *Spec) map[string]string {
+	if spec == nil || spec.MatrixTotal <= 0 {
+		return nil
+	}
+	return strategyContextFor(spec.Strategy, spec.MatrixIndex, spec.MatrixTotal)
 }
 
 // validateMatrixProduct bounds the expansion (a workflow cannot ask one event
@@ -192,17 +235,29 @@ func expandJobSpec(key, display string, base *Spec, ec expandContext) ([]jobInst
 		suffix = false
 	}
 	out := make([]jobInstance, 0, len(cells))
-	for _, cell := range cells {
+	isMatrix := matrixIsMatrix(strat)
+	for i, cell := range cells {
 		spec := *base // shallow copy: env/steps/maps are read-only after creation
 		spec.Matrix = nil
 		if len(cell.Values) > 0 {
 			spec.Matrix = cell.Values
 		}
+		spec.MatrixIndex = i
+		spec.MatrixTotal = len(cells)
+		if !isMatrix {
+			// A job with no matrix has exactly one empty cell; it carries no
+			// strategy context (PAR-039), so leave the index/total at zero.
+			spec.MatrixIndex, spec.MatrixTotal = 0, 0
+		}
+		// The cell's `strategy.*` context (PAR-039): resolved here, once, so
+		// runs-on, the job name, its lock key and its timeouts all read the
+		// same values the runner substitutes in the steps.
+		strategy := strategyContextIf(isMatrix, strat, i, len(cells))
 		spec.MatrixGroup = matrixGroupKey(key, size)
 		// `runs-on` labels are the ONE structural field a matrix may vary
 		// (PAR-053): resolve them for this cell before the job record is
 		// written, so the queue matches the real label set.
-		labels, lerr := workflow.ExpandRunsOn(spec.RunsOn, ec.GitHub, cell.Values, ec.Inputs)
+		labels, lerr := workflow.ExpandRunsOnWithStrategy(spec.RunsOn, ec.GitHub, cell.Values, ec.Inputs, strategy)
 		if lerr != nil {
 			return nil, lerr
 		}
@@ -210,7 +265,7 @@ func expandJobSpec(key, display string, base *Spec, ec expandContext) ([]jobInst
 		// A job timeout is a literal or one expression (PAR-055); a job that
 		// names none gets GitHub's 360-minute default.
 		if spec.TimeoutExpr != "" {
-			mins, terr := workflow.EvalMinutes(spec.TimeoutExpr, ec.GitHub, cell.Values, ec.Inputs)
+			mins, terr := workflow.EvalMinutesWithStrategy(spec.TimeoutExpr, ec.GitHub, cell.Values, ec.Inputs, strategy)
 			if terr != nil {
 				return nil, fmt.Errorf("workflow: job %s timeout-minutes: %w", key, terr)
 			}
@@ -221,7 +276,7 @@ func expandJobSpec(key, display string, base *Spec, ec expandContext) ([]jobInst
 			spec.TimeoutMinutes = workflow.DefaultJobTimeoutMinutes
 		}
 		if stepExprs(spec.Steps) {
-			steps, serr := evalStepTimeouts(spec.Steps, ec.GitHub, cell.Values, ec.Inputs)
+			steps, serr := evalStepTimeouts(spec.Steps, ec.GitHub, cell.Values, ec.Inputs, strategy)
 			if serr != nil {
 				return nil, fmt.Errorf("workflow: job %s: %w", key, serr)
 			}
@@ -233,14 +288,14 @@ func expandJobSpec(key, display string, base *Spec, ec expandContext) ([]jobInst
 		// runs off another branch's key.
 		if spec.Concurrency != nil {
 			conc := *spec.Concurrency
-			group, gerr := ExpandGroup(conc.Group, ec.GitHub, cell.Values, ec.Inputs)
+			group, gerr := ExpandGroupWithStrategy(conc.Group, ec.GitHub, cell.Values, ec.Inputs, strategy)
 			if gerr != nil {
 				return nil, gerr
 			}
 			conc.Group = group
 			spec.Concurrency = &conc
 		}
-		name := ExpandJobName(display, ec.GitHub, cell.Values, ec.Inputs)
+		name := ExpandJobNameWithStrategy(display, ec.GitHub, cell.Values, ec.Inputs, strategy)
 		suffixText := cell.Suffix
 		if !suffix || suffixText == "" {
 			suffixText = ""

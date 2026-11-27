@@ -47,6 +47,17 @@ jobs:
           test "$A" = "$B"
           test -z "$C"
           echo "hash-ok $A"
+  json:
+    runs-on: linux
+    steps:
+      - name: round trip
+        if: fromJSON(toJSON(github)).event_name == 'push'
+        run: |
+          test '${{ toJSON(fromJSON('{"a":[1,2]}')) }}' = '{"a":[1,2]}'
+          echo json-ok
+      - name: json gate off
+        if: fromJSON(toJSON(github)).event_name == 'pull_request'
+        run: exit 1
   bounded:
     needs: [hash]
     runs-on: linux
@@ -136,6 +147,15 @@ func TestE2E_ThreadsWave4ExpressionsAndFlow(t *testing.T) {
 	hashLog := sseLog(t, fmt.Sprintf("%s/threads/%s/jobs/j-hash/log", repoLane, runID), chainAliceTok)
 	if !strings.Contains(hashLog, "hash-ok ") {
 		t.Fatalf("hash log misses the deterministic check:\n%s", hashLog)
+	}
+	// toJSON/fromJSON evaluate in a real step `if:` and a real `run:` span; the
+	// false branch would have exited 1, so the job's success proves the gate.
+	if st := jobState(run, "j-json"); st == nil || st["state"] != "success" {
+		t.Fatalf("j-json = %v\njobs: %v", st, run.Jobs)
+	}
+	jsonLog := sseLog(t, fmt.Sprintf("%s/threads/%s/jobs/j-json/log", repoLane, runID), chainAliceTok)
+	if !strings.Contains(jsonLog, "json-ok") {
+		t.Fatalf("json log misses the round-trip check:\n%s", jsonLog)
 	}
 	// run-name is on the record (and therefore in the list and the API).
 	if title, _ := run.Run["title"].(string); title != "Wave 4 push on main" {

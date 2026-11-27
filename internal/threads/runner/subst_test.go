@@ -360,6 +360,58 @@ func TestTagRunPlanCarriesTheTagRef(t *testing.T) {
 	}
 }
 
+// TestSecretEnvAndVarsNamespacesDoNotConfuse pins PAR-116's namespace rule: a
+// name that exists in `secrets`, `vars` AND the authored `env` reads from the
+// context the reference names. In particular `${{ env.TOKEN }}` can never be a
+// way to read a secret (the env context is the authored layer only, built
+// before substitution), and `${{ vars.TOKEN }}` never reads a sealed secret.
+func TestSecretEnvAndVarsNamespacesDoNotConfuse(t *testing.T) {
+	job := substJob()
+	job.Secrets = map[string]string{"TOKEN": "secret-value-1234"}
+	job.Vars = map[string]string{"TOKEN": "vars-value-1234"}
+	job.Spec.Env = map[string]string{"TOKEN": "env-value-1234"}
+	job.Spec.Steps = []threads.StepSpec{{
+		Name: "names", Run: "echo ${{ secrets.TOKEN }} ${{ vars.TOKEN }} ${{ env.TOKEN }}",
+	}}
+	p, err := BuildPlan(PlanInput{Job: job, AttemptToken: "wjt_x"})
+	if err != nil {
+		t.Fatalf("BuildPlan: %v", err)
+	}
+	argv := strings.Join(p.Steps[0].Argv, " ")
+	if !strings.Contains(argv, "echo secret-value-1234 vars-value-1234 env-value-1234") {
+		t.Fatalf("namespaces confused:\n%s", argv)
+	}
+	// A step `env:` that names a secret is delivered by NAME (never argv), and
+	// the metric is the credential environment.
+	job.Spec.Steps = []threads.StepSpec{{
+		Name: "mapped", Run: "echo run", Env: map[string]string{"MAPPED": "${{ secrets.TOKEN }}"},
+	}}
+	p, err = BuildPlan(PlanInput{Job: job, AttemptToken: "wjt_x"})
+	if err != nil {
+		t.Fatalf("BuildPlan: %v", err)
+	}
+	step := p.Steps[0]
+	line := strings.Join(step.Argv, " ")
+	if strings.Contains(line, "secret-value-1234") {
+		t.Fatalf("a mapped secret reached argv: %s", line)
+	}
+	if got, ok := envOf(credentialEnv(p, step.EnvFrom, step.EnvSecret), "MAPPED"); !ok || got != "secret-value-1234" {
+		t.Fatalf("MAPPED = %q present=%v", got, ok)
+	}
+	// An untrusted plan's secret context is empty: every reference reads the
+	// empty string, never the literal text and never a value.
+	job.Trusted = false
+	job.Secrets = map[string]string{}
+	job.Spec.Steps = []threads.StepSpec{{Name: "empty", Run: "echo [${{ secrets.TOKEN }}]"}}
+	p, err = BuildPlan(PlanInput{Job: job, AttemptToken: "wjt_x"})
+	if err != nil {
+		t.Fatalf("BuildPlan: %v", err)
+	}
+	if got := strings.Join(p.Steps[0].Argv, " "); !strings.Contains(got, "echo []") {
+		t.Fatalf("untrusted secret reference = %s", got)
+	}
+}
+
 // TestSubstitutedSecretIsMaskedInTheLog pins masking: a `${{ secrets.X }}`
 // spliced into `run:` reaches argv (as on GitHub) and the log stream masks it —
 // even though the streamer was built without the payload's mask list, because

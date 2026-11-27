@@ -569,7 +569,7 @@ func (h *Handler) deleteVariable(w http.ResponseWriter, r *http.Request, repo, n
 	w.WriteHeader(http.StatusNoContent)
 }
 
-// handleOrgVariables is the organization-scope twin (org owner only).
+// handleOrgVariables is the organization-variable twin (org owner only).
 func (h *Handler) handleOrgVariables(w http.ResponseWriter, r *http.Request, org string, rest []string) bool {
 	switch {
 	case len(rest) == 0 && r.Method == http.MethodGet:
@@ -609,6 +609,62 @@ func (h *Handler) handleOrgVariables(w http.ResponseWriter, r *http.Request, org
 			return true
 		}
 		if err := h.Svc.DeleteOrgVariable(r.Context(), org, rest[0], p); err != nil {
+			writeErr(w, err)
+			return true
+		}
+		w.Header().Set("Cache-Control", "no-store")
+		w.WriteHeader(http.StatusNoContent)
+	default:
+		methodNotAllowed(w, "GET", "PUT", "DELETE")
+	}
+	return true
+}
+
+// handleOrgSecrets is the organization-secret surface (PAR-115, org owner
+// only): list names and policies, put a value (write-only), delete. A value is
+// never echoed, and the repository policy travels with the write.
+func (h *Handler) handleOrgSecrets(w http.ResponseWriter, r *http.Request, org string, rest []string) bool {
+	switch {
+	case len(rest) == 0 && r.Method == http.MethodGet:
+		p, aerr := h.principal(r)
+		if aerr != nil {
+			writeErr(w, aerr)
+			return true
+		}
+		secrets, err := h.Svc.ListOrgSecrets(r.Context(), org, p)
+		if err != nil {
+			writeErr(w, err)
+			return true
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"secrets": secrets, "enabled": h.Svc.SecretsEnabled()})
+	case len(rest) == 1 && r.Method == http.MethodPut:
+		p, aerr := h.principal(r)
+		if aerr != nil {
+			writeErr(w, aerr)
+			return true
+		}
+		var in struct {
+			Value        string   `json:"value"`
+			Visibility   string   `json:"visibility"`
+			Repositories []string `json:"repositories"`
+		}
+		if !decodeStrict(w, r, 128<<10, map[string]bool{"value": true, "visibility": true, "repositories": true}, &in) {
+			return true
+		}
+		scope := OrgSecretScope{Visibility: in.Visibility, Repositories: in.Repositories}
+		if err := h.Svc.SetOrgSecret(r.Context(), org, rest[0], in.Value, scope, p); err != nil {
+			writeErr(w, err)
+			return true
+		}
+		w.Header().Set("Cache-Control", "no-store")
+		w.WriteHeader(http.StatusNoContent)
+	case len(rest) == 1 && r.Method == http.MethodDelete:
+		p, aerr := h.principal(r)
+		if aerr != nil {
+			writeErr(w, aerr)
+			return true
+		}
+		if err := h.Svc.DeleteOrgSecret(r.Context(), org, rest[0], p); err != nil {
 			writeErr(w, err)
 			return true
 		}

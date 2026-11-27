@@ -283,7 +283,7 @@ spindle --server https://git.example.com runner serve \
           <caption id="cap-job" class="sr-only">Job keys</caption>
           <thead><tr><th>Key</th><th>Type</th><th>Default</th><th>What it does</th></tr></thead>
           <tbody>
-            <tr><td><code>runs-on</code></td><td>label or list</td><td>required</td><td>The runner must declare every label, case-insensitive and exact. No wildcards. A label may be a <code>${{ matrix.* }}</code>, <code>${{ inputs.* }}</code> or <code>${{ github.* }}</code> span — the one structural field a matrix may vary — expanded per cell before the job is written.</td></tr>
+            <tr><td><code>runs-on</code></td><td>label or list</td><td>required</td><td>The runner must declare every label, case-insensitive and exact. No wildcards. A label may be a <code>${{ matrix.* }}</code>, <code>${{ strategy.* }}</code>, <code>${{ inputs.* }}</code> or <code>${{ github.* }}</code> span — the one structural field a matrix may vary — expanded per cell before the job is written.</td></tr>
             <tr><td><code>defaults</code></td><td><code>{run: {shell, working-directory}}</code></td><td>workflow <code>defaults</code></td><td>This job's run-step defaults; a step's own key still wins.</td></tr>
             <tr><td><code>container</code></td><td>image or mapping</td><td>runner <code>--image</code></td><td><code>image</code>, <code>env</code>, <code>options</code> are applied; <code>ports</code>, <code>command</code> and <code>entrypoint</code> are accepted and not applied. <code>volumes</code> are refused unless the runner's operator allow-lists the host path.</td></tr>
             <tr><td><code>services</code></td><td>map[id]service</td><td>none</td><td>Sidecars on the job network, reachable at their id (the container port). <code>credentials</code> is refused by name: the pull identity is the runner's.</td></tr>
@@ -294,7 +294,7 @@ spindle --server https://git.example.com runner serve \
             <tr><td><code>strategy.max-parallel</code></td><td>int (<code>1…256</code>)</td><td>no per-matrix bound</td><td>How many cells of this matrix run at once; cells are admitted in expansion order and the rest wait queued. Refused without a matrix.</td></tr>
             <tr><td><code>outputs</code></td><td>map[name]template</td><td>none</td><td>Values a dependent reads as <code>needs.&lt;job&gt;.outputs.&lt;name&gt;</code>.</td></tr>
             <tr><td><code>environment</code></td><td>name or <code>{name, url}</code></td><td>none</td><td>A deployment target with reviewers, a wait timer, a branch/tag allowlist and its own secrets and variables. Takes a literal name; a <code>${{ }}</code> span here is a parse error. Deployments to one environment serialize in a single visible slot (<a href="#deployments">Deployments</a>).</td></tr>
-            <tr><td><code>timeout-minutes</code></td><td>int or one <code>${{ }}</code> expression</td><td><code>360</code></td><td>Cancels the job and removes its containers; the conclusion reads <code>timed_out</code>, distinct from an operator <code>cancelled</code>. The expression resolves per cell from <code>github.*</code>, <code>matrix.*</code> and <code>inputs.*</code> and must be <code>1…360</code>.</td></tr>
+            <tr><td><code>timeout-minutes</code></td><td>int or one <code>${{ }}</code> expression</td><td><code>360</code></td><td>Cancels the job and removes its containers; the conclusion reads <code>timed_out</code>, distinct from an operator <code>cancelled</code>. The expression resolves per cell from <code>github.*</code>, <code>matrix.*</code>, <code>strategy.*</code> and <code>inputs.*</code> and must be <code>1…360</code>.</td></tr>
             <tr><td><code>continue-on-error</code></td><td>bool</td><td><code>false</code></td><td>GitHub semantics: the job stays a failure, but the run conclusion follows the other jobs; dependents run and <code>needs.&lt;job&gt;.result</code> reads <code>success</code>.</td></tr>
             <tr><td><code>permissions</code></td><td>mapping or shorthand</td><td>workflow default</td><td>The closed scope vocabulary; job-level wins.</td></tr>
             <tr><td><code>enable-openid-connect</code></td><td>bool</td><td>workflow default</td><td>The job-level OIDC grant; an explicit <code>id-token: none</code> wins.</td></tr>
@@ -355,15 +355,22 @@ spindle --server https://git.example.com runner serve \
       <div class="prose">
         <p>Every <b>step</b> site above also reads <code>github.*</code> (and the identical
           <code>forgejo.*</code>/<code>forge.*</code> aliases), the bounded
-          <code>github.event.*</code> payload, <code>runner.*</code>, <code>vars.*</code> (repository
-          over organization, sealed and masked),
-          <code>env.*</code> and <code>secrets.*</code>. Inside a composite action's own steps,
+          <code>github.event.*</code> payload, <code>runner.*</code>, <code>vars.*</code>
+          (environment over repository over organization, sealed and masked),
+          <code>env.*</code> and <code>secrets.*</code>. A step field and a step <code>if:</code>
+          additionally read <code>strategy.*</code> — <code>job-index</code> (zero-based),
+          <code>job-total</code>, <code>fail-fast</code> and <code>max-parallel</code> describe the
+          matrix cell, and a plain job has an empty strategy context — and <code>job.status</code>,
+          the running job's status (<code>success</code>, <code>failure</code>,
+          <code>cancelled</code>; a failure tolerated by <code>continue-on-error</code> still reads
+          <code>success</code>). Inside a composite action's own steps,
           <code>github.action_path</code> is that action's directory, per nesting level; a workflow
           step, a job <code>if:</code> or an output template that reads it is a parse error. A job
-          <code>name</code> and a concurrency
-          <code>group</code> read <code>github.*</code> and <code>inputs.*</code> only (a job-level
-          group also reads its matrix axes) — not <code>env.*</code>, <code>secrets.*</code>,
-          <code>runner.*</code>, <code>vars.*</code> or outputs. The rule for a
+          <code>name</code> and a job-level concurrency <code>group</code> read <code>github.*</code>,
+          <code>inputs.*</code> and, per cell, <code>matrix.*</code> and <code>strategy.*</code> —
+          not <code>env.*</code>, <code>secrets.*</code>, <code>runner.*</code>, <code>vars.*</code>,
+          <code>job.*</code> or outputs (a workflow-level group reads <code>github.*</code> and
+          <code>inputs.*</code> only: no cell exists yet). The rule for a
           missing value has two halves:</p>
         <ul>
           <li><b>An absent supported value expands empty:</b> an unset <code>env.NAME</code>, a secret
@@ -377,12 +384,15 @@ spindle --server https://git.example.com runner serve \
           at evaluation. A step field or a step <code>if:</code> reads every context above; a job
           <code>if:</code> reads <code>github</code>, <code>vars</code>, <code>matrix</code>,
           <code>inputs</code>, <code>env</code>, <code>secrets</code> and <code>needs</code> (no
-          <code>runner</code>, no <code>steps</code>); a job <code>name</code> reads
-          <code>github</code>, <code>vars</code>, <code>matrix</code>, <code>inputs</code>; a
+          <code>runner</code>, no <code>steps</code>, no <code>strategy</code>, no
+          <code>job</code>) — <code>vars.*</code> and <code>secrets.*</code> included, because the
+          server resolves them when it decides eligibility, with an empty secrets map on an untrusted
+          run; a job <code>name</code> reads <code>github</code>, <code>vars</code>,
+          <code>matrix</code>, <code>strategy</code>, <code>inputs</code>; a
           <code>runs-on</code> label and a <code>timeout-minutes</code> read <code>github</code>,
-          <code>matrix</code>, <code>inputs</code>; <code>run-name</code> and a reusable caller's
-          <code>with:</code> read <code>github</code> and <code>inputs</code>. A reference outside
-          its site's set is a named error, never an empty value.</p>
+          <code>matrix</code>, <code>strategy</code>, <code>inputs</code>; <code>run-name</code> and
+          a reusable caller's <code>with:</code> read <code>github</code> and <code>inputs</code>. A
+          reference outside its site's set is a named error, never an empty value.</p>
       </div>
       <p class="note">Expansion is one pass, so a substituted value is data, never a template: a
         secret whose body contains <code>${{ github.ref }}</code> stays exactly that text. Secrets are
@@ -605,10 +615,13 @@ spindle --server https://git.example.com runner serve \
         <p>One evaluator serves every <code>if:</code> and every <code>${{ … }}</code> site. It
           reads <code>success()</code>, <code>failure()</code>, <code>always()</code>,
           <code>cancelled()</code>, <code>startsWith</code>, <code>endsWith</code>,
-          <code>contains</code>, <code>format</code>, <code>join</code> and
+          <code>contains</code>, <code>format</code>, <code>join</code>,
+          <code>toJSON</code>, <code>fromJSON</code> and
           <code>hashFiles</code>; <code>github.*</code> (and the identical
           <code>forgejo.*</code>/<code>forge.*</code> aliases), <code>github.event.*</code>,
-          <code>runner.*</code>, <code>vars.*</code>, <code>matrix.*</code>, <code>inputs.*</code>,
+          <code>runner.*</code>, <code>vars.*</code>, <code>matrix.*</code>, <code>strategy.*</code>,
+          <code>job.*</code> (the last two only at their documented sites, above),
+          <code>inputs.*</code>,
           <code>env.*</code>, <code>secrets.*</code>, and <code>steps.*</code>/<code>needs.*</code>
           outcomes, conclusions and outputs.</p>
         <p>The operators are <code>!</code>, <code>==</code>/<code>!=</code>, ordered
@@ -622,13 +635,16 @@ spindle --server https://git.example.com runner serve \
         <p><code>hashFiles('**/go.sum')</code> runs in the job container against the workspace
           (glob dialect, leading <code>!</code> excludes, sorted deterministic hashing); it is
           available in step sites and job outputs, and a named refusal in a job <code>if:</code>.
-          No match is the empty string; a walk over 1000 files or 100 MiB is a named error.</p>
+          No match is the empty string; a walk over 1000 files or 100 MiB is a named error.
+          <code>toJSON(value)</code> renders deterministic JSON (sorted keys, no HTML escaping) for
+          any value, a bare context included; <code>fromJSON(string)</code> parses a JSON document
+          (invalid JSON is a named error) and a parsed object/array is indexed with
+          <code>.key</code>/<code>['key']</code>/<code>[0]</code>.</p>
         <p>A job <code>if:</code> adds <code>needs.&lt;job&gt;.result</code> and
           <code>needs.&lt;job&gt;.outputs.*</code> and may read <code>secrets.*</code>/<code>vars.*</code>
           (empty on an untrusted run). An unsupported function or expression is a parse or evaluation
-          error naming it — never a silently skipped job. <code>toJSON</code>,
-          <code>fromJSON</code>, <code>case</code> and the rest of the hosted function set remain
-          named parse errors.</p>
+          error naming it — never a silently skipped job. <code>case(...)</code> is not a function in
+          this language, so it stays a named parse error.</p>
       </div>
     </div>
   </section>
@@ -939,8 +955,9 @@ spindle --server https://git.example.com runner serve \
       <header class="sec-head">
         <p class="eyebrow"><span class="tick" aria-hidden="true"></span>Secrets &amp; permissions</p>
         <h2 id="secrets-title">Secrets are environment variables.</h2>
-        <p class="sec-lede">A repository secret is injected under its own name into every step of a
-          trusted run. <code>${{ secrets.NAME }}</code> is substituted too, and a whole-value
+        <p class="sec-lede">A secret — organization, repository or environment scoped — is injected
+          under its own name into every step of a trusted run, the tightest scope winning.
+          <code>${{ secrets.NAME }}</code> is substituted too, and a whole-value
           <code>env:</code> entry is delivered by name so the value never reaches argv. The job token
           is automatic, short-lived and scoped to one attempt.</p>
       </header>
@@ -980,9 +997,24 @@ spindle --server https://git.example.com runner serve \
             embedded in a script it is spliced and masked. Guard it:
             <code>${TOKEN:?TOKEN is not set}</code> turns a missing secret into a clear failure
             instead of an empty string.</p>
-          <p><b>Masking.</b> Best effort, server-side: exact substring replacement in log lines;
-            values shorter than 4 bytes are skipped. Encoded or split values print. Never write a
-            secret into an output or an artifact — both are data, not logs.</p>
+          <p><b>Scopes and precedence.</b> A secret lives at one of three scopes, and the tightest
+            wins: <b>environment &gt; repository &gt; organization</b>. Organization secrets are
+            managed in Settings → Secrets on the organization page (owner only) or
+            <code>/api/v1/orgs/{org}/threads/secrets</code>; each carries a repository policy —
+            <code>visibility: "all"</code> (the default) or <code>"selected"</code> with a list — and
+            an unselected repository gets nothing, not even the name. The supplying scope is recorded
+            on the job as <code>secret_scopes</code> (name →
+            <code>organization</code>/<code>repository</code>/<code>environment</code>), so the run
+            page says where a credential came from and never what it was. There is deliberately
+            <b>no user scope</b> (D-22): a run executes as the repository, not as a person, so a
+            per-user credential would be readable by any workflow in it. Variables
+            (<code>vars.*</code>) follow the same order.</p>
+          <p><b>Masking.</b> Best effort, one rule shared by the server and the runner: a value of 4+
+            bytes is replaced wherever it appears (longest first); a <b>multi-line</b> value is masked
+            whole and line by line; a value shorter than 4 bytes only as a whole token. The server
+            re-masks every stored frame and step result, so an older runner cannot write a value into
+            the bucket. Encoded, split or derived values still print. Never write a secret into an
+            output or an artifact — both are data, not logs.</p>
           <p><b>Fork runs.</b> No secrets at all. The payload carries an empty set; a fork can never
             opt in by editing the file. A repository may opt in to <code>send_write_tokens</code>
             (maintain+, audited) so the fork run's token carries the scopes its file declares — never
@@ -1022,7 +1054,8 @@ spindle --server https://git.example.com runner serve \
           <code>environment: production</code>; the run is created <code>pending_approval</code>,
           nothing is enqueued, and it starts only after every required reviewer (or a repo admin)
           approves and the timer elapses. A run from a ref outside the allowlist fails that
-          deployment job by name. Environment secrets override repository secrets of the same name,
+          deployment job by name. Environment secrets override repository and organization secrets of
+          the same name,
           reach only a trusted run with an approved deployment, and never reach a fork run;
           environment variables resolve as <code>${{ vars.NAME }}</code> and override repository and
           organization variables of the same name. A job naming an undefined environment fails that
@@ -1476,7 +1509,8 @@ spindle --server https://git.example.com runner serve \
         <div class="code-bar"><span>shell</span><span class="state">read-only by default</span></div>
         <pre tabindex="0"><code>spindle threads import --from forgejo --repo .                # dry run: print the conversion
 spindle threads import --from github --repo . --json          # the report, for machines
-spindle threads import --from forgejo --repo . --apply        # commit on a new branch</code></pre>
+spindle threads import --from forgejo --repo . --apply        # commit on a new branch
+spindle threads validate --repo .                             # check the committed files offline</code></pre>
       </figure>
       <div class="prose">
         <p>The command is read-only by default, never edits the source directory and never pushes.
@@ -1485,6 +1519,18 @@ spindle threads import --from forgejo --repo . --apply        # commit on a new 
           <code>--apply</code> refuses to commit unless you pass <code>--allow-partial</code>.
           <code>--apply</code> commits on a new branch only — never the current branch, never the
           default branch, never a force push.</p>
+        <p><b>The banner while you migrate.</b> A repository that still carries
+          <code>.forgejo/workflows</code> or <code>.github/workflows</code> and no
+          <code>.spindle/workflows</code> sees a banner on its Threads page: the foreign files it
+          found and the exact command to convert them. It is display-only — the page lists a
+          directory, parses and imports nothing, and creates no run; discovery still opens
+          <code>.spindle/workflows</code> alone.</p>
+        <p><b>Checking a conversion offline.</b>
+          <code>spindle threads validate [PATH|-] [--repo DIR] [--json]</code> runs the server's own
+          validator, so its <code>file:line: key: message</code> is what a push would report: a file,
+          a directory of direct <code>*.yml</code>/<code>*.yaml</code> children, stdin, or
+          <code>--repo</code> for <code>DIR/.spindle/workflows</code>. It exits 0 when every file
+          parses, 1 when one is invalid or unreadable, and 2 for a usage error.</p>
         <p>The committed conformance corpus is the proof: all <b>four</b> real Weave/Scriobh
           workflows convert with <b>zero refusals</b>, parse, and plan. One construct still needs a
           manual rewrite: an <b>object-valued matrix axis</b>

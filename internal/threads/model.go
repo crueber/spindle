@@ -330,6 +330,12 @@ type Spec struct {
 	// plain job. The runner substitutes ${{ matrix.<axis> }} in step fields and
 	// exposes the values through the `matrix` context of `if`.
 	Matrix map[string]string `json:"matrix,omitempty"`
+	// MatrixIndex/MatrixTotal are the cell's 0-based position in expansion
+	// order and the product's size (PAR-039), so `strategy.job-index` and
+	// `strategy.job-total` resolve in a step. A plain job carries 0/0 and an
+	// empty strategy context.
+	MatrixIndex int `json:"matrix_index,omitempty"`
+	MatrixTotal int `json:"matrix_total,omitempty"`
 	// MatrixGroup is the YAML job key a matrix cell belongs to ("" for a plain
 	// job). fail-fast cancels exactly the sibling cells of the same group.
 	MatrixGroup string `json:"matrix_group,omitempty"`
@@ -740,6 +746,12 @@ type Job struct {
 	// (docs/threads.md §3.9). A dependent job reads them as
 	// `needs.<job>.outputs.<name>`; a job that did not succeed exposes none.
 	Outputs map[string]string `json:"outputs,omitempty"`
+	// SecretScopes records, per secret NAME, which scope supplied the value
+	// this attempt read: "organization", "repository" or "environment"
+	// (PAR-115). It is provenance, never a value: the page can say where a
+	// credential came from, and the matrix rows pin the precedence order.
+	// Written when the job is claimed, empty for an untrusted run.
+	SecretScopes map[string]string `json:"secret_scopes,omitempty"`
 	// Reason is why the job did not execute its steps, or why it is not green
 	// when no runner reported: a false job-level `if:`, a blocked `needs:`, or
 	// an `if:` the subset cannot evaluate. Written by the server only; empty on

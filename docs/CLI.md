@@ -10,7 +10,7 @@
 
 | Kind | Commands | Needs |
 |---|---|---|
-| **Operator-local** | `serve`, `compact`, `bundle`, `repo`, `access`, `wal`, `synth`, `import`, `mirror`, `config`, `doctor`, `version`, `threads import` | the config file / `SPINDLE__*` env and the data dir (store, cache); `threads import` needs only a repository checkout |
+| **Operator-local** | `serve`, `compact`, `bundle`, `repo`, `access`, `wal`, `synth`, `import`, `mirror`, `config`, `doctor`, `version`, `threads import`, `threads explain`, `threads validate` | the config file / `SPINDLE__*` env and the data dir (store, cache); `threads import`/`explain`/`validate` need only a checkout (or a file) |
 | **JSON-API client** | `auth`, `user`, `org`, `issue`, `pr`, `release`, `checks`, `packages`, `threads` (`list`/`show`/`run`/`cancel`/`rerun`), `file`, `search`, `api` | `--server` and a token; no store access, no data dir |
 | **Runner protocol client** | `runner serve` | a runner token and a Docker daemon; no store, no data dir |
 | **Shell plumbing** | `completion`, `help` | nothing (the tables are compiled in) |
@@ -155,7 +155,7 @@ command's usage line and flags (flags may follow positionals, `gh`-style).
 | `release` | `list`, `show`, `create`, `delete`, `upload` |
 | `checks` | `list`, `status REPO [REF]` |
 | `packages` | `list`, `show`, `delete` |
-| `threads` | `list`, `show`, `jobs`, `run` (`--ref`, repeatable `--input`, `--priority`), `watch`, `cancel`, `rerun`, `schedule list\|enable\|disable\|run`, `pause`, `resume`, `queue`, the operator-local `explain` and `import` (§5.3) |
+| `threads` | `list`, `show`, `jobs`, `run` (`--ref`, repeatable `--input`, `--priority`), `watch`, `cancel`, `rerun`, `schedule list\|enable\|disable\|run`, `pause`, `resume`, `queue`, the operator-local `explain`, `import` and `validate` (§5.3/§5.4) |
 | `file` | `put`, `create`, `delete` (one text file as one commit — the browser editor's write path) |
 | `runner` | `serve` (`--config` offline registration, `--ephemeral`), `drain`, `resume`, `rotate`, `deregister`, `images`, and the named `pool` refusal (see [`threads.md`](threads.md#81-flags-and-environment), §8.3a/§8.3b) |
 | `search` | `search QUERY [--owner OWNER \| -R OWNER/REPO] [--ref REF] [--regex] [--case] [--word] [--path PATHSPEC]… [--limit N] [--json]` — code search in one repository (the default branch, or `--ref`) or across an owner's readable repositories. It is a standalone command, not a group: `-R`/`SPINDLE_REPO` selects repository scope, `--owner` owner scope, and exactly one is required (v1 has no instance-wide code search). `--limit` is kept matches per repository (1..200). The command pins `type=code`; issue search has no CLI surface yet. |
@@ -233,6 +233,56 @@ is `true` when any file has an untranslated construct.
 
 `--apply` on a partial conversion exits **1** and creates no branch; pass `--allow-partial` when you
 have reviewed the named gaps and want the branch anyway.
+
+The report ends with the next step: `spindle threads validate <output>`, the offline check below,
+and a note that the Threads page keeps its migration banner until the converted files are committed
+under `.spindle/workflows`.
+
+### 5.4 `threads validate` — offline workflow validation
+
+`threads validate` answers one question: **does this workflow parse, and if not, which key on which
+line?** It is operator-local (no server, token or data dir), and it runs the server's own validator —
+the same `workflow.Parse` the push path and the page's authoring pane use — so its messages are
+byte-identical to what a push would report.
+
+```
+spindle threads validate [PATH|-] [--repo DIR] [--json]
+```
+
+| Argument | Meaning |
+|---|---|
+| `PATH` | one workflow file, a directory of direct `*.yml`/`*.yaml` children, or `-` for stdin |
+| `--repo DIR` | validate `DIR/.spindle/workflows` (the one discovered location, PAR-001); mutually exclusive with `PATH` |
+| `--json` | print the machine report instead of the human lines |
+
+**Human output.** A valid file prints `<path>: ok`; an invalid file prints one line per issue as
+`<path>:<line>: <key>: <message>` (the line and key are dropped when the parser cannot attribute
+them). A multi-file run ends with `<n> file(s): <m> invalid`.
+
+**`--json`.** One entry per file, each the server validator's own shape:
+
+```json
+{
+  "ok": false,
+  "files": [{
+    "file": ".spindle/workflows/ci.yml",
+    "ok": false,
+    "issues": [{"file": ".spindle/workflows/ci.yml", "key": "jobs.build.runs-on", "line": 6, "message": "..."}]
+  }]
+}
+```
+
+**Exit codes** (the §4 contract):
+
+| Code | Meaning |
+|---|---|
+| **0** | every checked file parses |
+| **1** | at least one file is invalid, or a target cannot be read (a missing path, an empty directory, a `--repo` without `.spindle/workflows`) |
+| **2** | usage: no `PATH` and no `--repo`, both at once, a second positional, or a bad flag |
+
+`threads explain` is the neighbouring verb and is unchanged: it summarises a *valid* file's
+triggers, jobs, `runs-on` and `needs`; `validate` checks whether a file is valid at all. The two
+share the parser and the validator, not their output.
 
 ## 6. Examples
 
@@ -316,6 +366,9 @@ spindle threads schedule list you/demo
 spindle threads schedule disable you/demo --path .spindle/workflows/ci.yml --cron "0 3 * * *"
 spindle threads schedule run you/demo --path .spindle/workflows/ci.yml --cron "0 3 * * *"
 spindle threads explain .spindle/workflows/ci.yml
+spindle threads validate .spindle/workflows/ci.yml   # offline: same parser as a push
+spindle threads validate --repo .                    # ./.spindle/workflows
+spindle threads validate --repo . --json
 ```
 
 **Fleet operations.** These use the runner's own credential, so they need no admin session. The

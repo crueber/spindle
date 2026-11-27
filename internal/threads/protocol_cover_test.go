@@ -411,14 +411,18 @@ func TestSecretsEdges(t *testing.T) {
 		t.Fatal("a different key must not open the envelope")
 	}
 	e.svc.SetKeyring(oldKey)
-	// The masker skips short values and prefers the longest.
-	if got := maskSecrets("abc", []string{"abc"}); got != "abc" {
-		t.Fatalf("short values must not be masked: %q", got)
+	// The masker masks a short value only as a whole token, and prefers the
+	// longest value first (PAR-116).
+	if got := maskSecretValues("abc", []string{"abc"}); got != "***" {
+		t.Fatalf("a standalone short value must be masked: %q", got)
 	}
-	if got := maskSecrets("abcdefgh", []string{"abcd", "abcdefg"}); got != "***h" {
+	if got := maskSecretValues("own-abc", []string{"abc"}); got != "own-abc" {
+		t.Fatalf("a short value inside a longer token must not be masked: %q", got)
+	}
+	if got := maskSecretValues("abcdefgh", []string{"abcd", "abcdefg"}); got != "***h" {
 		t.Fatalf("longest-first masking = %q", got)
 	}
-	if got := maskSecrets("", []string{"abcd"}); got != "" {
+	if got := maskSecretValues("", []string{"abcd"}); got != "" {
 		t.Fatal("empty input")
 	}
 	// A disabled instance answers 503 on the API.

@@ -206,6 +206,10 @@ type Service struct {
 	// private key + rendered JWKS). A pointer keeps Service copyable; New
 	// installs it, and a literal Service falls back to a throwaway cache.
 	oidcCache *oidcKeyCache
+	// maskCache remembers each job attempt's mask list (secrets + variables)
+	// across log frames, step results and annotations. A pointer keeps Service
+	// copyable; a literal Service resolves the list on every call.
+	maskCache *maskCache
 }
 
 // New builds a Service over st. The protocol keys default to a process-local
@@ -213,6 +217,7 @@ type Service struct {
 // composition replaces it with the configured one via SetKeyring.
 func New(st store.ObjectStore, roles RoleService) *Service {
 	s := &Service{Store: st, Roles: roles, Now: time.Now, oidcCache: &oidcKeyCache{},
+		maskCache: newMaskCache(),
 		// One instance-wide guard, created once: the run path only READS it
 		// (concurrent run creations must not race on a lazy assignment).
 		ActionDigests: actions.NewDigestGuard(0)}

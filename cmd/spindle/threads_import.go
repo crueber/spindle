@@ -128,4 +128,12 @@ func printImportReport(c *cli, rep *importer.Report, contentOnStdout bool) {
 	if rep.Applied {
 		fmt.Fprintf(w, "committed on branch %s (not pushed)\n", rep.Branch)
 	}
+	// The importer's report links the operator to the two neighbouring
+	// surfaces (PAR-003 / PAR-199): the Threads page keeps its migration banner
+	// until the converted files are on the default branch, and `threads
+	// validate` checks a converted file offline with the server's parser.
+	if len(rep.Files) > 0 {
+		fmt.Fprintf(w, "next: spindle threads validate %s\n", rep.Files[0].Output)
+		fmt.Fprintln(w, "the Threads page shows the migration banner until the converted files are committed under .spindle/workflows")
+	}
 }

@@ -204,6 +204,11 @@ var threadsGroup = &apiGroup{
 			flags: []string{"json"}, run: runThreadsQueue},
 		{name: "explain", usage: "spindle threads explain FILE", help: "summarise a local workflow: triggers, jobs, runs-on, needs (PAR-196)",
 			flags: []string{"json"}, run: runThreadsExplain},
+		// validate is operator-local and the neighbouring verb to explain: it
+		// runs the server's own parser and reports every issue with file:line
+		// (PAR-199). It shares the validator, not the output.
+		{name: "validate", usage: "spindle threads validate [PATH|-] [--repo DIR] [--json]", help: "validate a workflow file, directory or stdin offline with the server's parser (PAR-199)",
+			flags: []string{"repo", "json"}, run: runThreadsValidate},
 		{name: "cancel", usage: "spindle threads cancel OWNER/REPO RUN", help: "cancel a run (queued jobs now, a running job at its runner's ack)",
 			flags: []string{"json", "quiet"}, run: runThreadsCancel},
 		{name: "rerun", usage: "spindle threads rerun OWNER/REPO RUN", help: "rerun a run as a new attempt",

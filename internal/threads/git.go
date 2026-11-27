@@ -65,6 +65,41 @@ func (g *SubprocessGit) ListWorkflowFiles(ctx context.Context, repo, commit stri
 	return paths, nil
 }
 
+// ListDir runs
+//
+//	git ls-tree -z --name-only -r <commit> -- <dir>
+//
+// and returns the files under the directory (repository-relative paths). It is
+// the migration banner's read (PAR-003): a foreign workflow directory is
+// LISTED for display, never read into discovery. A missing directory is empty
+// output (nil, nil), not an error.
+func (g *SubprocessGit) ListDir(ctx context.Context, repo, commit, dir string) ([]string, error) {
+	if _, err := normalizeSHA(commit); err != nil {
+		return nil, err
+	}
+	if dir == "" || strings.HasPrefix(dir, "-") || strings.Contains(dir, ":") || strings.Contains(dir, "\x00") {
+		return nil, fmt.Errorf("%w: invalid directory %q", ErrUnprocessable, dir)
+	}
+	out, truncated, err := g.run(ctx, repo, []string{"ls-tree", "-z", "--name-only", "-r", commit, "--", dir})
+	if err != nil {
+		if nf := notFoundIfExit(err); errors.Is(nf, ErrNotFound) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	if truncated {
+		return nil, fmt.Errorf("%w: the listing of %s is larger than %d bytes", ErrUnprocessable, dir, maxWorkflowBytes)
+	}
+	raw := strings.Split(strings.TrimRight(out, "\x00"), "\x00")
+	paths := make([]string, 0, len(raw))
+	for _, p := range raw {
+		if p != "" {
+			paths = append(paths, p)
+		}
+	}
+	return paths, nil
+}
+
 // DiffReader is the optional GitReader extension the path filters use. It is a
 // separate interface so every test fake that predates path filtering keeps
 // compiling; a reader without it cannot evaluate a path-filtered trigger and

@@ -14,6 +14,12 @@ package workflow
 // only once a job has a runner, and `secrets` is readable in a job-level `if:`
 // (PAR-058) but not in a name or a lock key (neither is a place a secret value
 // may become visible).
+//
+// `job` and `strategy` (PAR-039) follow GitHub's rows: `job.status` describes
+// the job WHILE its steps run, so it exists only in a step field and a step
+// `if:`; `strategy` describes the matrix cell and is readable wherever a cell
+// exists (a job name, its lock key, its outputs, runs-on and timeouts) but not
+// in a job-level `if:`, which decides whether a cell is created at all.
 
 // Site names one authored position that may carry a `${{ … }}` span.
 type Site int
@@ -110,6 +116,16 @@ var contextAvailability = map[string]map[Site]bool{
 	"steps":   setOf(SiteStepField, SiteStepIf, SiteJobOutputs),
 	"needs":   setOf(SiteStepField, SiteStepIf, SiteJobIf, SiteJobOutputs),
 	"jobs":    setOf(SiteCallOutput),
+	// job.status (PAR-039) is the running job's own status, so only a step
+	// (its fields and its condition) may read it.
+	"job": setOf(SiteStepField, SiteStepIf),
+	// strategy.* (PAR-039) describes the matrix cell: a plain job has an empty
+	// strategy context, and a job-level `if:` may not read it (it runs before
+	// the cell exists — GitHub's own row).
+	"strategy": setOf(
+		SiteStepField, SiteStepIf, SiteJobName, SiteJobGroup, SiteJobOutputs,
+		SiteRunsOn, SiteJobTimeout, SiteStepTimeout,
+	),
 }
 
 // setOf is a tiny literal constructor (no dependency, no mutable global).
@@ -123,7 +139,7 @@ func setOf(sites ...Site) map[Site]bool {
 
 // SiteContexts lists the contexts a site may read, in documentation order.
 func SiteContexts(site Site) []string {
-	order := []string{"github", "runner", "vars", "matrix", "inputs", "env", "secrets", "steps", "needs", "jobs"}
+	order := []string{"github", "runner", "vars", "matrix", "strategy", "job", "inputs", "env", "secrets", "steps", "needs", "jobs"}
 	out := make([]string, 0, len(order))
 	for _, context := range order {
 		if contextAvailability[context][site] {

@@ -263,7 +263,8 @@ A failed step without `continue-on-error` skips the rest of the job (each record
   workflow/job/container/service `env` value, is a parse error naming the field; these take a
   literal (a step `env:` is the one env layer that substitutes), or one job per value (§6.2);
 - an `if:` function outside `success`, `failure`, `always`, `cancelled`, `startsWith`,
-  `endsWith`, `contains`, `format`, `join`, `hashFiles` (§5.3);
+  `endsWith`, `contains`, `format`, `join`, `toJSON`, `fromJSON`, `hashFiles` (§5.3); `case(...)`
+  is not a function in this language;
 - a step with both `run` and `uses`, or neither;
 - a duplicate step id, or one starting with a digit;
 - a `needs:` naming a missing job, or a cycle;
@@ -1134,8 +1135,11 @@ One expression language serves an `if:` and a substituted `${{ … }}` span (§6
 success()  failure()  always()  cancelled()   (canceled() is accepted)
 startsWith(text, prefix)  endsWith(text, suffix)  contains(text, search)
 format('{0}-{1}', a, b)  join(value, separator)  hashFiles(pattern, …)
+toJSON(value)  fromJSON(string)
 github.<field>  forgejo.<field>  forge.<field>  github.event.inputs.<name>
 matrix.<axis>  inputs.<name>  env.<NAME>  secrets.<NAME>  vars.<NAME>
+strategy.job-index  strategy.job-total  strategy.fail-fast  strategy.max-parallel
+job.status
 runner.<field>  steps.<id>.outcome  steps.<id>.conclusion
 steps.<id>.outputs.<name>  needs.<job>.result  needs.<job>.outputs.<name>
 !  ==  !=  <  <=  >  >=  &&  ||  (  )
@@ -1157,8 +1161,19 @@ renders `prod` in a substitution slot. `!` and every comparison produce a boolea
 
 **Functions.** `format` uses `{N}` argument indexes and `{{`/`}}` for literal braces;
 `contains` is a substring test on text and a membership test on a list; `join` joins a list with
-the separator; `hashFiles` is described in §6.2. Anything else — `toJSON`, `fromJSON`, `case`, a
-nested object, an unknown context — is a **parse error for the file** (and an evaluation error
+the separator; `hashFiles` is described in §6.2. `toJSON(value)` renders compact JSON with
+`json.Marshal` semantics (no HTML escaping inside strings) and object keys in sorted order, so the
+same value always renders the same bytes: a string is quoted, a number/boolean/null is itself, a
+filtered list is an array, and a **bare context** (`github`, `forgejo`/`forge`, `runner`, `vars`,
+`matrix`, `inputs`, `env`, `secrets`, `job`, `strategy`, `steps`, `needs`) is its object — a dotted
+`github` key becomes a nested object (`toJSON(github)` contains `event.inputs.mode` at
+`event.inputs.mode`). A substitution whose whole span is a context renders the same JSON.
+`fromJSON(string)` parses one JSON document into the expression model — object, array, string,
+number, boolean or null — and an invalid document is a **named error**, never an empty value. A
+parsed object or array is readable with the same index syntax as a reference:
+`fromJSON(steps.x.outputs.payload).key == 'v'`, `fromJSON('[...]')[0]`, and `contains()`/`join()`
+accept a parsed array. `case(...)` is **not** a function in this language. Anything else — an
+unknown function, an unknown context — is a **parse error for the file** (and an evaluation error
 if a stale file reaches a job), never a silent skip.
 
 **Job-level `if:`** is decided by the server before a runner exists. It adds
@@ -1247,7 +1262,7 @@ That is Forgejo's rule and it is on by default. Two things to know as an author:
 ### 6.1 `env` layering and built-ins
 
 Lowest to highest: runner built-ins → workflow `env` → job `env` → container `env` → step `env`;
-repository secrets are added last, by name. Every step sees:
+secrets are added last, by name. Every step sees:
 
 | Variable | Value |
 |---|---|
@@ -1273,7 +1288,7 @@ repository secrets are added last, by name. Every step sees:
 | `GITHUB_ENV` / `FORGEJO_ENV`, `GITHUB_PATH` / `FORGEJO_PATH` | this step's command files (§6.6) |
 | `SPINDLE_OUTPUT` / `GITHUB_OUTPUT` | the step output file (§6.5) |
 | `SPINDLE_ID_TOKEN_REQUEST_URL` / `…_TOKEN` (and `ACTIONS_*`) | OIDC exchange, `id-token: write` only |
-| each repository/environment secret | by its own name, trusted runs only |
+| each organization/repository/environment secret | by its own name, trusted runs only; environment > repository > organization (§7.1) |
 
 Not provided: `GITHUB_STATE` (there are no `pre`/`post` hooks) and the `github.token` /
 `forgejo.token` context field (a parse error; use `$GITHUB_TOKEN` in a script). A workflow migrating
@@ -1290,15 +1305,15 @@ contexts: …)`), never an empty value. The table is the contract; the test
 
 | Site | Available contexts |
 |---|---|
-| step `name`, `run`, `with` values, `env` values, `shell`, `working-directory` | `github`, `runner`, `vars`, `matrix`, `inputs`, `env`, `secrets`, `steps`, `needs` |
+| step `name`, `run`, `with` values, `env` values, `shell`, `working-directory` | `github`, `runner`, `vars`, `matrix`, `strategy`, `job`, `inputs`, `env`, `secrets`, `steps`, `needs` |
 | step `if:` | same as a step field |
-| job `if:` | `github`, `vars`, `matrix`, `inputs`, `env`, `secrets`, `needs` (no `runner`, no `steps`) |
-| job `name` | `github`, `vars`, `matrix`, `inputs` |
-| job-level `concurrency.group` | `github`, `matrix`, `inputs` |
+| job `if:` | `github`, `vars`, `matrix`, `inputs`, `env`, `secrets`, `needs` (no `runner`, no `steps`, no `strategy`, no `job`) |
+| job `name` | `github`, `vars`, `matrix`, `strategy`, `inputs` |
+| job-level `concurrency.group` | `github`, `matrix`, `strategy`, `inputs` |
 | workflow-level `concurrency.group` | `github`, `inputs` (no matrix exists yet) |
-| job `outputs` values | `github`, `runner`, `vars`, `matrix`, `inputs`, `env`, `secrets`, `steps`, `needs` |
-| `runs-on` label | `github`, `matrix`, `inputs` |
-| job/step `timeout-minutes` | `github`, `matrix`, `inputs` |
+| job `outputs` values | `github`, `runner`, `vars`, `matrix`, `strategy`, `inputs`, `env`, `secrets`, `steps`, `needs` |
+| `runs-on` label | `github`, `matrix`, `strategy`, `inputs` |
+| job/step `timeout-minutes` | `github`, `matrix`, `strategy`, `inputs` |
 | `run-name` | `github`, `inputs` |
 | `defaults.run.*` | none (literals only) |
 | reusable caller `with:` | `github`, `inputs` |
@@ -1309,6 +1324,15 @@ additionally requires the step to be declared **before** the site (a later step'
 unknown); `needs.*` requires the job to be a declared dependency. Both a dependency's
 `outputs.<name>` and its `result` are available in a step field, a step `if:` and a job-output
 template (the runner payload carries the folded results as well as the outputs).
+
+**`job` and `strategy` (`PAR-039`).** `job.status` is the running job's status at the moment the
+step that reads it starts — `success`, `failure` or `cancelled` — and it follows the same rule as
+`success()`/`failure()`: a step failure tolerated by `continue-on-error` leaves the job a **success**.
+It is readable only in a step. `strategy.job-index` (zero-based) and `strategy.job-total` describe
+the matrix cell, `fail-fast` is the declared flag (default `true`) and `max-parallel` is the declared
+bound or the cell count; a plain job (no matrix) has an empty strategy context, so those fields read
+the empty string. A matrix cell's strategy values are fixed at run creation and are identical in its
+name, lock key, `runs-on`, timeouts and steps.
 
 **`runs-on` is the one structural field a matrix may vary** (PAR-053): each label may be a whole
 `${{ matrix.<axis> }}`, `${{ inputs.<name> }}` or `${{ github.<field> }}` reference and is expanded
@@ -1327,14 +1351,18 @@ Each reference resolves at run time:
 | `github.event.inputs.<name>` | the dispatch input's value (same as `inputs.<name>`); the name must be declared |
 | `github.event.<field>` | a documented payload field: `action`, `ref`, `before`/`after`, `repository.*`, `sender.login`, `pull_request.*` (`number`, `title`, `state`, `draft`, `merged`, `user.login`, `head.*`, `base.*`), `release.tag_name`/`name`/`draft`/`prerelease`/`target_commitish`/`author.login`/`assets`, `issue.number`/`title`/`state`/`user.login`/`labels`, `comment.body`/`user.login`. The set is closed; the full JSON is at `$GITHUB_EVENT_PATH` |
 | `runner.<field>` | `os`, `arch`, `name`, `temp`, `tool_cache`, `environment`, `debug` (step sites and step `if:` only) |
-| `vars.<name>` | a repository variable (overriding an organization variable of the same name); values are masked in the log |
+| `vars.<name>` | a variable: environment over repository over organization of the same name; values are masked in the log |
 | `matrix.<key>` | the cell's value; the key must be an axis or an `include` key |
+| `strategy.job-index` / `strategy.job-total` / `strategy.fail-fast` / `strategy.max-parallel` | the matrix cell's position (zero-based), the cell count, the fail-fast flag (default `true`) and the declared bound (or the cell count); empty for a plain job |
+| `job.status` | the running job's status (`success`, `failure`, `cancelled`); a `continue-on-error` failure leaves it `success` |
 | `inputs.<name>` | the dispatch input's value; the name must be declared |
 | `env.<NAME>` | the authored environment at that layer (runner built-ins → workflow → job → container → step, the step layer winning); a variable a step wrote to `$GITHUB_ENV` is runtime state for later steps, not part of the context |
-| `secrets.<name>` | the repository secret's value on a trusted run, empty on an untrusted one or an unknown name — **never the literal text**; case-insensitive, and the reserved aliases `GITHUB_TOKEN`/`FORGEJO_TOKEN` are the job token |
+| `secrets.<name>` | the secret's value on a trusted run, resolved **environment > repository > organization** (§7.1); empty on an untrusted one or an unknown name — **never the literal text**; case-insensitive, and the reserved aliases `GITHUB_TOKEN`/`FORGEJO_TOKEN` are the job token |
 | `steps.<id>.outputs.<name>` / `needs.<job>.outputs.<name>` | the published output (strict: an unknown id or output is an error) |
 | `needs.*.result`, `needs.*.outputs.<name>`, `steps.*.outcome`, `steps.*.conclusion`, `steps.*.outputs.<name>` | a list in name order; `contains()` is a membership test and `join()` renders it |
 | `hashFiles('pattern', …)` | the SHA-256 of the sorted matched file list in the job workspace; no match is the **empty string**, and a walk over 1000 files or 100 MiB is a named error. Patterns are workspace-relative (`*`/`?` stay in one segment, `**` crosses), a leading `!` excludes, only regular files count, and the value is cached for the current step (a completed step invalidates it). Runner sites only (§6.3a) |
+| `toJSON(value)` | compact, deterministic JSON for any expression value: a string is quoted (`'a<b'` → `"a<b"`, never HTML-escaped), a number/boolean/null stays itself, a filtered list is an array, an object has its keys sorted, and a bare context is its (nested) object. Available at every expression site |
+| `fromJSON(string)` | parses one JSON document into the expression model (object, array, string, number, boolean, null); a parsed object/array is indexed with `.key`/`['key']`/`[0]`. Invalid JSON is a **named error**, never an empty value. Available at every expression site |
 
 Every site's references are expanded in **one pass**, so a substituted value is data, never a
 template: a secret or output whose body contains `${{ github.ref }}` stays exactly that text. The
@@ -1421,7 +1449,27 @@ jobs:
 `steps.<id>.outcome` is the raw result (`success`, `failure`, `cancelled`, `skipped`);
 `.conclusion` is that result after `continue-on-error`. A step that did not run is recorded too.
 Step ids are case-insensitive. `success()` / `failure()` describe the **job** status, so a
-tolerated failure does not flip them.
+tolerated failure does not flip them — and `job.status` reads the same fact as a value:
+
+```yaml
+name: job status and strategy
+on: [push]
+jobs:
+  test:
+    runs-on: linux
+    strategy:
+      fail-fast: false
+      max-parallel: 2
+      matrix:
+        go: ["1.26", "1.27"]
+    steps:
+      - name: flaky check
+        run: ./maybe-flaky.sh
+        continue-on-error: true
+      - name: still green
+        if: job.status == 'success'
+        run: echo "cell ${{ strategy.job-index }} of ${{ strategy.job-total }} is happy"
+```
 
 ### 6.4 Artifacts
 
@@ -1477,8 +1525,8 @@ refused by name (the job token is used, and an artifact never crosses a reposito
 `name`, every artifact of the run is downloaded.
 
 **Cross-run consumption (D-3).** A `run-id` step holds the consuming run in `pending_approval`: a
-maintainer must approve it (a fork run, or a job that references a repository/environment secret, is
-refused by name), and every cross-run read is audited. Its source must be a run of the same
+maintainer must approve it (a fork run, or a job that references an organization/repository/environment
+secret, is refused by name), and every cross-run read is audited. Its source must be a run of the same
 repository.
 
 Patterns: exact file, directory (recursive), `*`/`?` within a segment, `**` across segments,
@@ -1679,10 +1727,12 @@ masked before storage and rendering. Annotation text is data, escaped by the pag
 
 ## 7. Secrets, permissions, environments
 
-### 7.1 Repository secrets
+### 7.1 Repository, organization and environment secrets
 
-Managed in **Settings → Secrets** (admin) or `/{o}/{r}/api/threads/secrets` — write-only, never
-readable back. Names match `[A-Za-z_][A-Za-z0-9_]{0,63}`; values 1 B – 64 KiB.
+A secret lives at one of three scopes — **organization**, **repository** or **environment** — and
+the tightest scope wins. Managed in **Settings → Secrets** (repository: admin) or
+`/{o}/{r}/api/threads/secrets` — write-only, never readable back. Names match
+`[A-Za-z_][A-Za-z0-9_]{0,63}`; values 1 B – 64 KiB.
 
 A secret is injected as an **environment variable of its own name** in every step of every job
 of a **trusted** run:
@@ -1712,8 +1762,28 @@ What an author must do:
   container's argv.
 - Expect nothing on a **fork** run (`secrets: {}`). Guard with `${VAR:?message}` so a missing
   secret is a clear failure.
-- Masking is best effort: exact substring replacement in log lines, values under 4 bytes skipped.
-  A value that is encoded, split or derived will print. Never echo a secret.
+- **Organization scope (PAR-115).** Settings → Secrets on the organization page (owner only) or
+  `/api/v1/orgs/{org}/threads/secrets[/{name}]`. Every write carries a repository policy:
+  `visibility: "all"` (the default) resolves in every repository the organization owns, and
+  `visibility: "selected"` resolves only in the listed repositories — an unselected repository gets
+  nothing, not an empty value and not the name. Only a trusted run resolves one, exactly like a
+  repository secret.
+- **Precedence is environment > repository > organization.** A repository secret wins over the
+  organization's of the same name; a job that names an environment gets that environment's secret
+  over both (§7.4). The scope each delivered value came from is recorded on the job as
+  `secret_scopes` (name → `organization`/`repository`/`environment`), so a run page can say *where*
+  a credential came from and never *what* it was. Variables (`vars.*`) follow the same order.
+- **There is no user scope, deliberately (D-22).** A run executes as the **repository**, not as a
+  person: `github.actor` is who triggered it, but the credential belongs to the repository. A
+  per-user secret would let one contributor's personal credential be read by a workflow they did
+  not write, which is the confusion the three scopes exist to remove.
+- Masking is best effort and **one rule** shared by the server and the runner
+  (`threads.MaskValues`): a value of 4+ bytes is replaced wherever it appears, longest first; a
+  **multi-line** value is masked whole and line by line, so a streamer that splits a frame cannot
+  make a line leak; a value **shorter than 4 bytes** is masked only as a whole token. The runner
+  masks as it streams and the server re-masks on every stored frame and step result, so an older
+  or buggy runner cannot write a value into the bucket. An encoded, split or derived value still
+  prints — never echo a secret.
 - Never put a secret in an **output** or an artifact: both are data and are not rewritten.
 
 ### 7.2 The job token and `permissions`
@@ -1890,11 +1960,11 @@ job until the deadline, and the run page and the API name that deadline (`wait_u
 the one hold with no reviewer in it, and it is why a deploy cannot "start immediately" after an
 approval when the environment declares a timer.
 
-Environment secrets override repository secrets of the same name, are delivered only to a job
-that names the environment in a trusted run with an approved deployment, and a fork run never
-receives them. An environment also carries non-secret **variables**: `${{ vars.NAME }}` resolves
-organization → repository → environment, the environment winning, with the same sealed write-only
-storage and reserved prefixes refused.
+Environment secrets override repository and organization secrets of the same name (§7.1), are
+delivered only to a job that names the environment in a trusted run with an approved deployment,
+and a fork run never receives them. An environment also carries non-secret **variables**:
+`${{ vars.NAME }}` resolves organization → repository → environment, the environment winning, with
+the same sealed write-only storage and reserved prefixes refused.
 
 **Deployments are records with a queue.** Every deployment — a job that named `environment:`, or an
 external CI creating one through the API — is a record with its environment, ref, sha, creator,
@@ -2266,6 +2336,12 @@ directory; a hosted Linux `runs-on` label such as `ubuntu-latest` is carried ver
 onto `self-hosted` + `linux` at enqueue, while `windows-*`/`macos-*` stay unmapped). The command is
 read-only by default, never executes the source, never edits the source directory, never pushes, and
 never commits to your current branch.
+
+While the repository has a foreign workflow directory and no `.spindle/workflows`, its **Threads page
+shows a migration banner**: the foreign files it found and the exact importer command to run. The
+banner is a hint — it parses and imports nothing and creates no run. After a conversion,
+`spindle threads validate --repo .` checks the committed files with the server's own parser, so the
+error text is the one a push (and the page's editor) would report.
 
 **It refuses to guess.** Everything the target language can express is translated; everything else is
 listed in the conversion report **and** marked `# UNTRANSLATED:` at its own site in the converted
@@ -2868,6 +2944,9 @@ carries them and the job fails with the option named.
    ```sh
    spindle threads import --from forgejo --repo . --apply
    # created spindle/import-forgejo-20261126T101500Z; nothing pushed
+
+   # Check exactly what a push would parse, offline (exit 0 = every file valid).
+   spindle threads validate --repo .
    ```
    `--apply` refuses a working tree with uncommitted changes, refuses an existing branch, refuses
    the current branch, refuses a branch name git rejects, and refuses a conversion with any
@@ -2944,9 +3023,9 @@ If you come from a hosted CI system, these are the surprises, in the order they 
    not — only a step `env:` is: a span there is a parse error naming the field, not a literal that
    reaches the runner or the process environment.
 5. **The expression language is small and closed.** `success/failure/always/cancelled`,
-   `startsWith`, `endsWith`, `contains`, `format`, `join`, `hashFiles`, comparisons, value-returning
-   `&&`/`||` and parentheses; the only filters are the documented `needs.*`/`steps.*` forms. An
-   unsupported expression is a parse error rather than a skipped job.
+   `startsWith`, `endsWith`, `contains`, `format`, `join`, `toJSON`, `fromJSON`, `hashFiles`,
+   comparisons, value-returning `&&`/`||` and parentheses; the only filters are the documented
+   `needs.*`/`steps.*` forms. An unsupported expression is a parse error rather than a skipped job.
 6. **Tag pushes start a run only when a workflow opts in.** `on.push.tags` has GitHub's
    semantics and a landed tag push fires the matching files; a workflow with no `tags` filter (or
    `branches` only) still ignores tags, so a repository that wants a release workflow declares one.

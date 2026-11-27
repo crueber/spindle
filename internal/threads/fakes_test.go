@@ -44,6 +44,8 @@ type fakeGit struct {
 	merges     map[string]string
 	mergeErr   error
 	mergeCalls int
+	// dirErr fails the migration banner's ListDir (PAR-003).
+	dirErr error
 }
 
 func newFakeGit() *fakeGit {
@@ -123,6 +125,23 @@ func (f *fakeGit) ResolveRef(_ context.Context, _ string, ref string) (string, e
 		return "", fmt.Errorf("%w: unknown ref %q", ErrNotFound, ref)
 	}
 	return sha, nil
+}
+
+// ListDir implements the optional TreeLister the migration banner reads
+// (PAR-003): the files under one directory at one commit.
+func (f *fakeGit) ListDir(_ context.Context, _, commit, dir string) ([]string, error) {
+	if f.dirErr != nil {
+		return nil, f.dirErr
+	}
+	prefix := dir + "/"
+	var out []string
+	for p := range f.files[commit] {
+		if len(p) > len(prefix) && p[:len(prefix)] == prefix {
+			out = append(out, p)
+		}
+	}
+	sort.Strings(out)
+	return out, nil
 }
 
 // DiffNames implements the optional DiffReader (path filters).

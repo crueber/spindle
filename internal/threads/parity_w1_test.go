@@ -114,6 +114,12 @@ func TestEvalIfFunctions(t *testing.T) {
 		{"secrets.MISSING == ''", true},     // absent secret reads empty, never the literal
 		{"forgejo.actor == github.actor", true},
 		{"github.event.inputs.mode == 'fast'", true},
+		// PAR-037 JSON conformance cases.
+		{`toJSON(matrix) == '{"go":"1.27"}'`, true},
+		{`toJSON(inputs) == '{"mode":"fast"}'`, true},
+		{`fromJSON('{"a":[1,2]}').a[0] == 1`, true},
+		{`toJSON(fromJSON('{"a":1}')) == '{"a":1}'`, true},
+		{`contains(fromJSON('["x","y"]'), 'y')`, true},
 	}
 	for _, tc := range cases {
 		got, err := EvalIf(tc.expr, ctx)
@@ -146,7 +152,8 @@ func TestEvalIfFunctions(t *testing.T) {
 		t.Fatalf("whole span = %v, %v", ok, err)
 	}
 	for _, expr := range []string{
-		"toJSON(github)",
+		"case('a', 'b')",
+		"toJSON()",
 		"startsWith(github.ref)",
 		"format()",
 		"github.head_ref == 'x'",
@@ -198,6 +205,10 @@ func TestEvalIfFunctionEdges(t *testing.T) {
 		{"format('{{x}}')", "{x}"},
 		{"contains('abc', 'b')", "true"},
 		{"startsWith('abc', 'ab')", "true"},
+		{`toJSON('a<b')`, `"a<b"`},
+		{`toJSON(fromJSON('{"b":1,"a":2}'))`, `{"a":2,"b":1}`},
+		{`fromJSON('{"n":null}')['n']`, ""},
+		{`fromJSON('[true,false]')[1]`, "false"},
 	}
 	for _, tc := range cases {
 		got, err := EvalIf(tc.expr+" == '"+tc.want+"'", ctx)
@@ -218,10 +229,8 @@ func TestEvalIfFunctionEdges(t *testing.T) {
 		"(@)",
 		"format()",
 		"format('{0}', 'a' 'b')",
-		"github",
 		"github.event",
 		"github.event.inputs",
-		"secrets",
 		"secrets.A.B",
 		"contains('a')",
 		"always(1)",

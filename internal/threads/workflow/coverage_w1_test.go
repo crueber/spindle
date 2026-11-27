@@ -111,7 +111,7 @@ func TestValidateIfErrorShapes(t *testing.T) {
 		{"!", "expected a value"},
 		{"'unterminated", "unterminated string"},
 		{"${{ }}", "is empty"},
-		{"github == 'x'", "unknown identifier"},
+		{"bogus == 'x'", "unknown identifier"},
 	} {
 		err := ValidateIf(tc.expr, scope)
 		if err == nil || !strings.Contains(err.Error(), tc.want) {

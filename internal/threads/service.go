@@ -1262,10 +1262,14 @@ type JobUpdate struct {
 	Summary *string
 	// Outputs replaces the job's reported outputs when non-nil (complete); a
 	// rerun clears them through ClearTimings.
-	Outputs     map[string]string
-	LeaseUntil  *string
-	StartedAt   *string
-	CompletedAt *string
+	Outputs map[string]string
+	// SecretScopes records the secret-name → scope map a claim resolved
+	// (PAR-115). Non-nil replaces the record; a rerun clears it through the
+	// claim path (a new attempt resolves its own scopes).
+	SecretScopes map[string]string
+	LeaseUntil   *string
+	StartedAt    *string
+	CompletedAt  *string
 	// Reason records why the job did not execute (a false job-level `if:`, a
 	// blocked `needs:`, an unsupported condition). A rerun clears it.
 	Reason string
@@ -1344,6 +1348,9 @@ func (s *Service) UpdateJob(ctx context.Context, repo, runID, jobID string, up J
 		if up.Outputs != nil {
 			job.Outputs = up.Outputs
 		}
+		if up.SecretScopes != nil {
+			job.SecretScopes = up.SecretScopes
+		}
 		if up.LeaseUntil != nil {
 			job.LeaseUntil = up.LeaseUntil
 		}
@@ -1357,6 +1364,7 @@ func (s *Service) UpdateJob(ctx context.Context, repo, runID, jobID string, up J
 			job.RunnerName = ""
 			job.StepResults = nil
 			job.Outputs = nil
+			job.SecretScopes = nil
 			job.Annotations = nil
 			job.Summary = ""
 			job.Reason = ""

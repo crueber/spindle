@@ -31,7 +31,13 @@ import (
 // ExpandGroup resolves a concurrency group template against one job's context.
 // The returned error wraps ErrUnprocessable and names the unresolved key.
 func ExpandGroup(tmpl string, github, matrix, inputs map[string]string) (string, error) {
-	group, err := workflow.ExpandGroup(tmpl, github, matrix, inputs)
+	return ExpandGroupWithStrategy(tmpl, github, matrix, inputs, nil)
+}
+
+// ExpandGroupWithStrategy is ExpandGroup plus the job cell's `strategy.*`
+// context (PAR-039).
+func ExpandGroupWithStrategy(tmpl string, github, matrix, inputs, strategy map[string]string) (string, error) {
+	group, err := workflow.ExpandGroupWithStrategy(tmpl, github, matrix, inputs, strategy)
 	if err != nil {
 		return "", fmt.Errorf("%w: %v", ErrUnprocessable, err)
 	}
@@ -42,7 +48,13 @@ func ExpandGroup(tmpl string, github, matrix, inputs map[string]string) (string,
 // display-only (nothing locks on it), so it is filled leniently: an unresolved
 // reference stays visible instead of failing an otherwise runnable job.
 func ExpandJobName(name string, github, matrix, inputs map[string]string) string {
-	return workflow.FillTemplate(name, github, matrix, inputs)
+	return ExpandJobNameWithStrategy(name, github, matrix, inputs, nil)
+}
+
+// ExpandJobNameWithStrategy is ExpandJobName plus the cell's `strategy.*`
+// context (PAR-039).
+func ExpandJobNameWithStrategy(name string, github, matrix, inputs, strategy map[string]string) string {
+	return workflow.FillTemplateWithStrategy(name, github, matrix, inputs, strategy)
 }
 
 // jobNameNamesMatrix reports whether a display template already names a matrix

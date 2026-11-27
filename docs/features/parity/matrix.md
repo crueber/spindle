@@ -7,7 +7,7 @@ Source of truth: [`parity.json`](parity.json) (one row per `PAR-` id). The plan 
 [`21_parity_master.md`](../21_parity_master.md). Regenerate with
 `go run ./internal/devtools/paritygate -check=false`; gate with `make parity`.
 
-**119 rows** — 92 have · 20 partial · 5 missing · 2 non-goal.
+**119 rows** — 97 have · 20 partial · 0 missing · 2 non-goal.
 A `have` row is green only because its acceptance test is committed and named here;
 the gate fails a green row whose test is missing from the tree.
 
@@ -17,7 +17,7 @@ the gate fails a green row whose test is missing from the tree.
 |---|---|---|---|---|---|---|
 | PAR-001 | One discovered location: `.spindle/workflows/*.{yml,yaml}`, no foreign fallback, ever | have (1V) | 1 | T3 | S14 | `TestDiscoverIgnoresForeignWorkflowDirs`<br>`TestDiscoverNoFilesIsNotAnError` |
 | PAR-002 | One-way importer `spindle threads import` (converted file + report + golden diff) | have | 1 | T1 | S14 | `TestCorpusGolden`<br>`TestParityImporterReproducesGoldens`<br>`TestRunApplyRefusesUntranslated` |
-| PAR-003 | Migration banner: a foreign workflow directory is *shown* with the importer command, never run | missing | 2 | T6 | S14 | — |
+| PAR-003 | Migration banner: a foreign workflow directory is *shown* with the importer command, never run | have | 2 | T6 | S14 | `TestListForeignWorkflows`<br>`TestListForeignWorkflowsNoForeignDirs`<br>`TestSubprocessGitListDir`<br>`TestThreadsMigrationBannerRenders`<br>`TestThreadsMigrationBannerHiddenWhenWorkflowsExist` |
 | PAR-004 | Canonical `spindle.*` context / `SPINDLE_*` env with `github.*`/`forgejo.*` as aliases (D-1) | partial · D-1 | 2 | T1 |  | — |
 
 ## triggers
@@ -29,7 +29,7 @@ the gate fails a green row whose test is missing from the tree.
 | PAR-012 | `on.push.paths` / `paths-ignore` (and `pull_request.paths`) with `**`, ANDed with `branches` | have | 2 | T1+T3 |  | `TestPushPathsFilterAndBudget`<br>`TestPullRequestPathsFilterUsesMergeBase` |
 | PAR-013 | Filter glob dialect: `*`, `**`, `?`, `+`, ordered `!` negation, `branches-ignore`/`tags-ignore` | have | 2 | T1 |  | `TestFilterDialect`<br>`TestFilterOrderedNegation`<br>`TestFilterParseErrors`<br>`TestPushPathsFilter` |
 | PAR-014 | Full `pull_request.types` vocabulary and its emitters (closed, labeled, ready_for_review, review_requested, …) | have | 2 | T3 |  | `TestPullRequestTypesMatrix`<br>`TestPullEventsOpenedSynchronizeReopened`<br>`TestPullEventsDraftAndEditEdges`<br>`TestPullEventsClosedOnMerge`<br>`TestThreadEventsCoverIssueEdges` |
-| PAR-015 | `pull_request_target`: base-tip file, base secrets, write token, head fetchable | missing · D-2 | 2 | T3 | S5 | — |
+| PAR-015 | `pull_request_target`: base-tip file, base secrets, write token, head fetchable | have | 2 | T3 | S5 | `internal/e2e/threads_pr_target_test.go#TestE2E_ThreadsPullRequestTarget`<br>`internal/threads/wave3_triggers_test.go#TestPullRequestTargetOffByDefault`<br>`internal/threads/wave3_triggers_test.go#TestPullRequestTargetHeadCheckoutNeedsSecondSwitch`<br>`internal/threads/wave3_triggers_test.go#TestPRTargetHeadCheckoutRefusalShapes` |
 | PAR-016 | `merge_group` trigger wired to the merge-queue card (no queue semantics here) | partial | 3 | T3 |  | `TestMergeGroupRefusedByName`<br>`TestRefusedTriggerNames` |
 | PAR-017 | `release` trigger (created/published/edited/deleted/prereleased/released) with `event.release.*` | have | 2 | T3 |  | `TestReleaseEventsEmitDocumentedActions` |
 | PAR-018 | `repository_dispatch` with `types` + `client_payload`, reachable from API/CLI/scoped token | have | 3 | T3 | S10 | `TestRepositoryDispatchTriggerAndPayload`<br>`TestRepositoryDispatchAPI`<br>`TestValidateClientPayloadBounds`<br>`TestRepositoryDispatchParseAndFires` |
@@ -51,9 +51,9 @@ the gate fails a green row whose test is missing from the tree.
 | PAR-034 | `runner` context and `RUNNER_OS/ARCH/NAME/TEMP/TOOL_CACHE/ENVIRONMENT/DEBUG` | have | 2 | T2 |  | `TestPlanEventRunnerAndVarsContexts`<br>`TestExecuteWritesEventFile` |
 | PAR-035 | `vars` context with repository/organization/user/environment variables, documented precedence, reserved-name refusal | have | 2 | T3 |  | `TestVariablesScopeAndSecrecy`<br>`TestPlanEventRunnerAndVarsContexts` |
 | PAR-036 | `env` context in expressions (workflow → job → container → step layering, visible to `if:`) | have | 2 | T1 |  | `TestStepIfReadsTheLayeredEnv`<br>`TestSubstituteEnvLayers`<br>`TestSubstituteGitHubInEverySite` |
-| PAR-037 | Expression functions: contains, startsWith, endsWith, format, join, toJSON, fromJSON, hashFiles, case | have | 1 | T1 |  | `TestEvalIfFunctions`<br>`TestEvalIfFunctionEdges`<br>`TestSubstitutionSites`<br>`TestValidateIf` |
+| PAR-037 | Expression functions: contains, startsWith, endsWith, format, join, toJSON, fromJSON, hashFiles, case | partial | 1 | T1 |  | `TestEvalIfFunctions`<br>`TestEvalIfFunctionEdges`<br>`TestSubstitutionSites`<br>`TestValidateIf`<br>`TestToJSONAndFromJSONEvaluation`<br>`TestFromJSONErrors`<br>`TestJSONFunctionParseTime`<br>`TestWorkflowJSONFunctionsParseAndEvaluate` |
 | PAR-038 | Operators: loose cross-type equality, `<`/`<=`/`>`/`>=`, `[ ]` index, property access, `*`/object filters, value-returning logical and/or (the operand, not a boolean) | have | 2 | T1 |  | `TestEvalIfOperatorsAndFilters`<br>`TestExpressionOperatorsAccepted`<br>`TestSubstituteExpressions` |
-| PAR-039 | `job`/`jobs`/`strategy` contexts (`job.status`, `strategy.job-index`, `job-total`, `max-parallel`) | missing | 3 | T1 |  | — |
+| PAR-039 | `job`/`jobs`/`strategy` contexts (`job.status`, `strategy.job-index`, `job-total`, `max-parallel`) | have | 3 | T1 |  | `TestJobAndStrategyContextsParse`<br>`TestJobAndStrategyContextAvailability`<br>`TestJobAndStrategyEvaluate`<br>`TestStrategyExpansionHelpers`<br>`TestStrategyGroupTemplateValidation`<br>`TestStrategyContextPerCell`<br>`TestJobStatusAfterToleratedFailure`<br>`TestPlanCarriesStrategyAndJobStatus` |
 | PAR-040 | Per-key context availability, fail-closed with a named error (never a literal, never an empty string) | have | 2 | T1 |  | `TestContextAvailabilityMatrix`<br>`TestContextAvailabilityAtRuntime` |
 | PAR-041 | `hashFiles` workspace walk in the job container (patterns, cache, caps) | have | 2 | T2 |  | `TestHashFilesOneWalkPerStep`<br>`TestHashFilesNoMatchIsEmptyAndCapsAreNamed`<br>`TestE2E_ThreadsWave4ExpressionsAndFlow` |
 
@@ -114,8 +114,8 @@ the gate fails a green row whose test is missing from the tree.
 | PAR-112 | Permission scopes: every documented scope drives a real capability or is refused by name | have | 2 | T3 | S10 | `TestPAR112PermissionScopeVocabulary`<br>`TestPAR112ScopeMatrixDrivesCapabilities` |
 | PAR-113 | Job token as a scoped platform API credential (comment, label, release, package) | have | 2 | T3 | S10 | `TestPAR113JobTokenScopedAPICredential`<br>`TestPAR113JobTokenExpiryAndRevocation`<br>`TestE2E_ThreadsJobTokenScopes` |
 | PAR-114 | Token default recorded: scoped + `contents: read`; Forgejo's implicit-write token is an approved divergence | have | 1 | T3 | S10 | `TestPAR114NoPermissionsDefaultsToContentsRead`<br>`TestJobPermissionsDefaults`<br>`TestForkRunCannotEscalate` |
-| PAR-115 | Organization and user secret scopes with documented precedence and repository policy | missing | 2 | T3 |  | — |
-| PAR-116 | Secret availability in `env`/`with`/`if`; fork runs empty; masking completeness (`::add-mask::`, annotations, summaries) | partial | 2 | T3 | S13 S15 | — |
+| PAR-115 | Organization and user secret scopes with documented precedence and repository policy | have | 2 | T3 |  | `internal/threads/secrets_org_test.go#TestOrgSecretScopeAndPrecedence`<br>`internal/threads/secrets_org_test.go#TestOrgSecretEnvironmentWinsOverEverything`<br>`internal/threads/secrets_org_test.go#TestOrgSecretAuthorizationAndValidation`<br>`internal/threads/secrets_org_test.go#TestOrgSecretHTTP`<br>`internal/threads/secrets_org_test.go#TestFetchRecordsSecretScopesAndMasksOrgValues`<br>`internal/e2e/threads_secrets_test.go#TestE2E_ThreadsSecretScopesAndMasking` |
+| PAR-116 | Secret availability in `env`/`with`/`if`; fork runs empty; masking completeness (`::add-mask::`, annotations, summaries) | have | 2 | T3 | S13 S15 | `internal/threads/secrets_org_test.go#TestMaskingCoversMultiLineAndShortValues`<br>`internal/threads/secrets_org_test.go#TestFetchRecordsSecretScopesAndMasksOrgValues`<br>`internal/threads/secrets_org_test.go#TestUntrustedRunGetsNoSecretAndNoScope`<br>`internal/threads/runner/subst_test.go#TestSecretEnvAndVarsNamespacesDoNotConfuse`<br>`internal/threads/runner/subst_test.go#TestSubstitutedSecretIsMaskedInTheLog`<br>`internal/threads/runner/log_test.go#TestStreamerMasksSecretsBeforeSending`<br>`internal/e2e/threads_secrets_test.go#TestE2E_ThreadsSecretScopesAndMasking`<br>`internal/e2e/threads_runner_test.go#TestE2E_ThreadsForkPRSafety` |
 | PAR-117 | Non-secret `env` variables (repository/organization/environment) alongside environment secrets | have | 4 | T3 |  | `TestEnvironmentVariablesOverrideRepositoryVariables` |
 | PAR-118 | Fork token policy: per-repo send-write-tokens setting, `pull_request_target` trust split, first-run approval | have | 3 | T3 | S13 | `TestForkWriteTokenPolicy`<br>`TestSettingsRequireMaintainAndAudit`<br>`TestPullRequestTargetHeadCheckoutNeedsSecondSwitch` |
 | PAR-119 | OIDC enable-key parity: `enable-openid-connect: true` beside `permissions: id-token: write` | have | 2 | T1 | S9 | `TestPAR119EnableOpenIDConnectKey`<br>`TestPAR119EnableOpenIDConnectMintsToken`<br>`TestPAR119ExplicitNoneBeatsEnableKey`<br>`TestPAR119EnableKeyNeverMintsForAFork` |
@@ -180,7 +180,7 @@ the gate fails a green row whose test is missing from the tree.
 | PAR-196 | Authoring affordances: validate-on-save with key-level errors, schema-assisted editor | have | 4 | T6 |  | `TestValidateWorkflowNamesKeyAndFile`<br>`TestHTTPWave4Validate`<br>`TestAuthoringDirectEdges` |
 | PAR-197 | Notifications parity: failure notifications (UI/webhook/email) and per-user workflow subscriptions | partial | 4 | T3+T6 |  | `TestNotificationsNotifySubscribersOnce`<br>`TestNotificationWebhookAndMarkRead` |
 | PAR-198 | CLI parity: `threads run --ref` with inputs, `threads watch`, run/job listing | have | 4 | T6 |  | `TestThreadsRunInputsAndPriority`<br>`TestThreadsWatchExitCodes`<br>`TestThreadsScheduleVerbs`<br>`TestThreadsExplainLocalFile` |
-| PAR-199 | `spindle threads validate` offline validation with the same errors the server reports | missing | 2 | T1+T6 |  | — |
+| PAR-199 | `spindle threads validate` offline validation with the same errors the server reports | have | 2 | T1+T6 |  | `TestThreadsValidateValidFile`<br>`TestThreadsValidateMatchesTheServerErrorText`<br>`TestThreadsValidateJSON`<br>`TestThreadsValidateDirectoryAndRepoFlag`<br>`TestThreadsValidateStdin`<br>`TestThreadsValidateUsage` |
 
 ## conformance
 

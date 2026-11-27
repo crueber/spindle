@@ -100,7 +100,7 @@ func TestStreamerMasksSecretsBeforeSending(t *testing.T) {
 	defer srv.Close()
 	stream := NewStreamer(NewClient(srv.URL, "wjt_x"), "wjt_x", "jr_acme", 1,
 		[]string{"sup3r-s3cret", "ab"}, func() {}, nil)
-	stream.Write([]byte("value=sup3r-s3cret and ab\n"))
+	stream.Write([]byte("value=sup3r-s3cret and ab; the word crab keeps its letters\n"))
 	stream.Close()
 	rec.mu.Lock()
 	defer rec.mu.Unlock()
@@ -112,8 +112,13 @@ func TestStreamerMasksSecretsBeforeSending(t *testing.T) {
 	if !strings.Contains(rec.frames[1], "***") {
 		t.Fatalf("mask marker missing: %q", rec.frames[1])
 	}
-	if strings.Contains(rec.frames[1], "*** and ***") {
-		t.Fatalf("a 2-byte value must not be masked (it would shred the log): %q", rec.frames[1])
+	// PAR-116: a value under 4 bytes is masked as a whole token, never inside a
+	// longer word — the log keeps its words and still loses the credential.
+	if !strings.Contains(rec.frames[1], "and ***") {
+		t.Fatalf("a standalone 2-byte value must be masked: %q", rec.frames[1])
+	}
+	if !strings.Contains(rec.frames[1], "crab") {
+		t.Fatalf("a 2-byte value inside a longer word must not be masked: %q", rec.frames[1])
 	}
 }
 

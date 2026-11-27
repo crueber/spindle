@@ -35,7 +35,10 @@ package workflow
 // `contains()` and `join()` consume. Any other `*` position is a named error.
 
 import (
+	"bytes"
+	"encoding/json"
 	"fmt"
+	"io"
 	"sort"
 	"strconv"
 	"strings"
@@ -65,6 +68,16 @@ type EvalScope struct {
 	// to the dependency's outputs. Both are empty on the runner.
 	Needs        map[string]string
 	NeedsOutputs map[string]map[string]string
+	// Job is the `job` context (PAR-039): `status` is success, failure or
+	// cancelled, the job's status as the step that reads it starts. A step
+	// tolerated by continue-on-error leaves the job a success, exactly like
+	// success()/failure().
+	Job map[string]string
+	// Strategy is the `strategy` context (PAR-039): job-index, job-total,
+	// fail-fast and max-parallel of the matrix cell this job is. A plain job
+	// has no cell, so the map is empty and every strategy reference reads
+	// empty (the documented absent-value rule).
+	Strategy map[string]string
 	// Secrets is the run's secret map. A reference to an absent secret reads
 	// empty (never the literal text); an untrusted run's map is empty.
 	Secrets map[string]string
@@ -125,29 +138,61 @@ func EvalString(expr string, c EvalScope) (string, error) {
 	return v.text(), nil
 }
 
-// exprValue is one scalar or one filtered list. The engine has no objects: a
-// context is a flat name→string map, exactly like the runner's environment.
+// valueKind distinguishes the typed values ofJSON/fromJSON introduce from an
+// authored string. The expression language used to be strings-only; the
+// structured values exist ONLY so `toJSON`/`fromJSON` can carry a context or a
+// parsed document faithfully (a number stays a number, a boolean stays a
+// boolean). Comparison semantics are unchanged: every scalar still compares as
+// its text.
+type valueKind uint8
+
+const (
+	kindString valueKind = iota // an authored/environment string (the zero value)
+	kindNumber                  // a numeric literal or a fromJSON number
+	kindBool                    // true/false literal or a fromJSON boolean
+	kindNull                    // the JSON null from fromJSON
+	kindObject                  // an object (a whole context, or fromJSON)
+)
+
+// exprValue is one scalar, one filtered list, or one structured value. The
+// engine's contexts are flat name→string maps; toJSON flattens/nests them into
+// an object deterministically and fromJSON parses into the same shapes.
 type exprValue struct {
 	s      string
 	list   []exprValue
 	isList bool
+	kind   valueKind
+	obj    map[string]exprValue
 }
 
-func scalar(s string) exprValue { return exprValue{s: s} }
+func scalar(s string) exprValue                    { return exprValue{s: s} }
+func numberValue(s string) exprValue               { return exprValue{s: s, kind: kindNumber} }
+func boolValue(b bool) exprValue                   { return exprValue{s: strconv.FormatBool(b), kind: kindBool} }
+func nullValue() exprValue                         { return exprValue{kind: kindNull} }
+func objectValue(m map[string]exprValue) exprValue { return exprValue{kind: kindObject, obj: m} }
 func listValue(items []exprValue) exprValue {
 	return exprValue{list: items, isList: true}
 }
 
-// text renders the value for a substitution site or a function argument.
+// text renders the value for a substitution site or a function argument. An
+// object renders as deterministic JSON, the same bytes toJSON produces, so a
+// whole-context span is never a Go map dump.
 func (v exprValue) text() string {
-	if !v.isList {
-		return v.s
+	if v.isList {
+		parts := make([]string, len(v.list))
+		for i, item := range v.list {
+			parts[i] = item.text()
+		}
+		return strings.Join(parts, ",")
 	}
-	parts := make([]string, len(v.list))
-	for i, item := range v.list {
-		parts[i] = item.text()
+	if v.kind == kindObject {
+		out, err := v.toJSON()
+		if err != nil {
+			return ""
+		}
+		return out
 	}
-	return strings.Join(parts, ",")
+	return v.s
 }
 
 // truthy applies the documented boolean rule. A non-boolean, non-numeric
@@ -157,6 +202,12 @@ func (v exprValue) text() string {
 func (v exprValue) truthy() (bool, error) {
 	if v.isList {
 		return len(v.list) > 0, nil
+	}
+	switch v.kind {
+	case kindObject:
+		return len(v.obj) > 0, nil
+	case kindNull:
+		return false, nil
 	}
 	switch strings.ToLower(strings.TrimSpace(v.s)) {
 	case "", "false", "0":
@@ -176,6 +227,12 @@ func (v exprValue) logical() bool {
 	if v.isList {
 		return len(v.list) > 0
 	}
+	switch v.kind {
+	case kindObject:
+		return len(v.obj) > 0
+	case kindNull:
+		return false
+	}
 	switch strings.ToLower(strings.TrimSpace(v.s)) {
 	case "", "false", "0":
 		return false
@@ -185,7 +242,7 @@ func (v exprValue) logical() bool {
 
 // number reports whether the value is numeric for an ordering comparison.
 func (v exprValue) number() (float64, bool) {
-	if v.isList {
+	if v.isList || v.kind == kindObject || v.kind == kindNull {
 		return 0, false
 	}
 	s := strings.TrimSpace(v.s)
@@ -200,7 +257,8 @@ func (v exprValue) number() (float64, bool) {
 }
 
 // equalValue is the documented loose equality: text-wise and case-insensitive
-// (true == 'true'), list-wise for filters.
+// (true == 'true'), list-wise for filters, and deep for objects (so a parsed
+// document compares to the value it came from).
 func equalValue(a, b exprValue) bool {
 	if a.isList || b.isList {
 		if !a.isList || !b.isList || len(a.list) != len(b.list) {
@@ -208,6 +266,18 @@ func equalValue(a, b exprValue) bool {
 		}
 		for i := range a.list {
 			if !equalValue(a.list[i], b.list[i]) {
+				return false
+			}
+		}
+		return true
+	}
+	if a.kind == kindObject || b.kind == kindObject {
+		if a.kind != kindObject || b.kind != kindObject || len(a.obj) != len(b.obj) {
+			return false
+		}
+		for key, av := range a.obj {
+			bv, ok := b.obj[key]
+			if !ok || !equalValue(av, bv) {
 				return false
 			}
 		}
@@ -350,11 +420,13 @@ func (p *exprParser) parsePrimary() (exprValue, error) {
 		return exprValue{}, fmt.Errorf("expected a value at %q", p.src[p.pos:])
 	}
 	switch strings.ToLower(word) {
-	case "true", "false":
-		return scalar(strings.ToLower(word)), nil
+	case "true":
+		return boolValue(true), nil
+	case "false":
+		return boolValue(false), nil
 	}
 	if isNumberLiteral(word) {
-		return scalar(word), nil
+		return numberValue(word), nil
 	}
 	if p.pos < len(p.src) && p.src[p.pos] == '(' {
 		p.pos++
@@ -362,11 +434,20 @@ func (p *exprParser) parsePrimary() (exprValue, error) {
 		if err != nil {
 			return exprValue{}, err
 		}
-		return p.call(strings.ToLower(word), args)
+		v, cerr := p.call(strings.ToLower(word), args)
+		if cerr != nil {
+			return exprValue{}, cerr
+		}
+		// fromJSON(...) returns a value a workflow reads: `.key`, `['key']` and
+		// `[0]` address it like a reference (PAR-037).
+		return p.applyIndexes(v)
 	}
 	path, err := p.parseIndexes(strings.Split(word, "."))
 	if err != nil {
 		return exprValue{}, err
+	}
+	if len(path) == 1 {
+		return p.contextValue(path[0])
 	}
 	return p.reference(path)
 }
@@ -409,6 +490,415 @@ func (p *exprParser) parseIndexes(path []string) ([]string, error) {
 	}
 }
 
+// isObjectContext reports whether a context can be read as a whole object.
+// These are the contexts whose value is a map, so a bare name (`github`,
+// `matrix`, `steps`) is a value (toJSON serializes it) while any other bare
+// word stays an unknown identifier.
+func isObjectContext(name string) bool {
+	switch strings.ToLower(name) {
+	case "github", "forgejo", "forge", "runner", "vars", "matrix", "inputs",
+		"env", "secrets", "job", "strategy", "steps", "needs":
+		return true
+	}
+	return false
+}
+
+// contextValue resolves a BARE context name to its whole object (PAR-037): the
+// value toJSON serializes and a workflow can compare with fromJSON.
+func (p *exprParser) contextValue(name string) (exprValue, error) {
+	context := strings.ToLower(name)
+	if !isObjectContext(context) {
+		return exprValue{}, fmt.Errorf("unknown identifier %q", name)
+	}
+	if !contextAvailable(p.ctx.Site, context) {
+		return exprValue{}, fmt.Errorf("%s is not available in %s (available contexts: %s)", name, p.ctx.Site, strings.Join(SiteContexts(p.ctx.Site), ", "))
+	}
+	switch context {
+	case "github", "forgejo", "forge":
+		return nestedObject(p.ctx.GitHub), nil
+	case "runner":
+		return stringObject(p.ctx.Runner), nil
+	case "vars":
+		return stringObject(p.ctx.Vars), nil
+	case "matrix":
+		return stringObject(p.ctx.Matrix), nil
+	case "inputs":
+		return stringObject(p.ctx.Inputs), nil
+	case "env":
+		return stringObject(p.ctx.Env), nil
+	case "secrets":
+		return stringObject(p.ctx.Secrets), nil
+	case "job":
+		return stringObject(p.ctx.Job), nil
+	case "strategy":
+		return stringObject(p.ctx.Strategy), nil
+	case "steps":
+		return stepsObject(p.ctx), nil
+	case "needs":
+		return needsObject(p.ctx), nil
+	}
+	return exprValue{}, fmt.Errorf("unknown context %q", name)
+}
+
+// stringObject turns a flat name→string context into an object of strings. The
+// values stay strings: an authored matrix value is text on this platform, so
+// toJSON(matrix) quotes it (the documented deviation from GitHub's typed YAML).
+func stringObject(values map[string]string) exprValue {
+	m := make(map[string]exprValue, len(values))
+	for key, val := range values {
+		m[key] = scalar(val)
+	}
+	return objectValue(m)
+}
+
+// nestedObject turns the github context's flat dotted keys (`event.inputs.mode`,
+// `event.release.tag_name`) into the nested document toJSON(github) renders.
+func nestedObject(values map[string]string) exprValue {
+	root := map[string]exprValue{}
+	for key, val := range values {
+		segments := strings.Split(key, ".")
+		cur := root
+		for i, segment := range segments {
+			if i == len(segments)-1 {
+				cur[segment] = scalar(val)
+				break
+			}
+			next, ok := cur[segment]
+			if !ok || next.kind != kindObject {
+				next = objectValue(map[string]exprValue{})
+				cur[segment] = next
+			}
+			cur = next.obj
+		}
+	}
+	return objectValue(root)
+}
+
+// stepsObject is the steps context as data: one entry per step id with its
+// outcome, conclusion and published outputs.
+func stepsObject(c EvalScope) exprValue {
+	ids := make([]string, 0, len(c.Steps)+len(c.StepConclusions)+len(c.Outputs))
+	seen := map[string]bool{}
+	for _, values := range []map[string]string{c.Steps, c.StepConclusions} {
+		for id := range values {
+			if !seen[id] {
+				seen[id] = true
+				ids = append(ids, id)
+			}
+		}
+	}
+	for id := range c.Outputs {
+		if !seen[id] {
+			seen[id] = true
+			ids = append(ids, id)
+		}
+	}
+	out := make(map[string]exprValue, len(ids))
+	for _, id := range ids {
+		entry := map[string]exprValue{}
+		if v, ok := c.Steps[id]; ok {
+			entry["outcome"] = scalar(v)
+		}
+		if v, ok := c.StepConclusions[id]; ok {
+			entry["conclusion"] = scalar(v)
+		}
+		if len(c.Outputs[id]) > 0 {
+			entry["outputs"] = stringObject(c.Outputs[id])
+		}
+		out[id] = objectValue(entry)
+	}
+	return objectValue(out)
+}
+
+// needsObject is the needs context as data: one entry per dependency with its
+// result and reported outputs.
+func needsObject(c EvalScope) exprValue {
+	ids := make([]string, 0, len(c.Needs)+len(c.NeedsOutputs))
+	seen := map[string]bool{}
+	for id := range c.Needs {
+		seen[id] = true
+		ids = append(ids, id)
+	}
+	for id := range c.NeedsOutputs {
+		if !seen[id] {
+			ids = append(ids, id)
+		}
+	}
+	out := make(map[string]exprValue, len(ids))
+	for _, id := range ids {
+		entry := map[string]exprValue{}
+		if v, ok := c.Needs[id]; ok {
+			entry["result"] = scalar(v)
+		}
+		if len(c.NeedsOutputs[id]) > 0 {
+			entry["outputs"] = stringObject(c.NeedsOutputs[id])
+		}
+		out[id] = objectValue(entry)
+	}
+	return objectValue(out)
+}
+
+// applyIndexes reads a `.key` / `['key']` / `[0]` chain after a function call
+// (fromJSON returns a document a workflow indexes).
+func (p *exprParser) applyIndexes(v exprValue) (exprValue, error) {
+	for {
+		p.skipSpace()
+		if p.pos >= len(p.src) {
+			return v, nil
+		}
+		switch p.src[p.pos] {
+		case '[':
+			p.pos++
+			p.skipSpace()
+			if p.pos >= len(p.src) {
+				return exprValue{}, fmt.Errorf("missing ] in property access")
+			}
+			var err error
+			if p.src[p.pos] == '\'' || p.src[p.pos] == '"' {
+				key, kerr := p.parseString()
+				if kerr != nil {
+					return exprValue{}, kerr
+				}
+				p.skipSpace()
+				if !p.consume("]") {
+					return exprValue{}, fmt.Errorf("missing ] after a property key")
+				}
+				v, err = memberValue(v, key.s)
+			} else {
+				start := p.pos
+				for p.pos < len(p.src) && ((p.src[p.pos] >= '0' && p.src[p.pos] <= '9') || p.src[p.pos] == '-') {
+					p.pos++
+				}
+				if start == p.pos {
+					return exprValue{}, fmt.Errorf("property access must be a quoted key or an integer index, as in value['key'] or value[0]")
+				}
+				idx, aerr := strconv.Atoi(p.src[start:p.pos])
+				if aerr != nil {
+					return exprValue{}, fmt.Errorf("%q is not an integer index", p.src[start:p.pos])
+				}
+				p.skipSpace()
+				if !p.consume("]") {
+					return exprValue{}, fmt.Errorf("missing ] after an index")
+				}
+				v, err = indexValue(v, idx)
+			}
+			if err != nil {
+				return exprValue{}, err
+			}
+		case '.':
+			p.pos++
+			next := p.parseWord()
+			if next == "" {
+				return exprValue{}, fmt.Errorf("expected a property name after .")
+			}
+			for _, segment := range strings.Split(next, ".") {
+				if segment == "" || segment == "*" {
+					return exprValue{}, fmt.Errorf("%q is not a property name (object filters are not supported on a parsed value)", next)
+				}
+				val, err := memberValue(v, segment)
+				if err != nil {
+					return exprValue{}, err
+				}
+				v = val
+			}
+		default:
+			return v, nil
+		}
+	}
+}
+
+// memberValue reads one property of a structured value. A missing object key
+// reads null (the platform's rule, so toJSON of an absent key is `null`), while
+// reading a property of a scalar is a named error.
+// valueNoun names a value's shape for an error message.
+func valueNoun(v exprValue) string {
+	switch {
+	case v.isList:
+		return "a list"
+	case v.kind == kindObject:
+		return "an object"
+	case v.kind == kindNull:
+		return "null"
+	case v.kind == kindNumber:
+		return "a number"
+	case v.kind == kindBool:
+		return "a boolean"
+	}
+	return "a string"
+}
+
+func memberValue(v exprValue, key string) (exprValue, error) {
+	switch {
+	case v.isList:
+		if idx, err := strconv.Atoi(key); err == nil {
+			return indexValue(v, idx)
+		}
+		return exprValue{}, fmt.Errorf("cannot read property %q of a list (use an integer index)", key)
+	case v.kind == kindObject:
+		if val, ok := v.obj[key]; ok {
+			return val, nil
+		}
+		return nullValue(), nil
+	case v.kind == kindNull:
+		return nullValue(), nil
+	}
+	return exprValue{}, fmt.Errorf("cannot read property %q of %s", key, valueNoun(v))
+}
+
+// indexValue reads one array element. An out-of-range index reads null.
+func indexValue(v exprValue, idx int) (exprValue, error) {
+	switch {
+	case v.isList:
+		if idx < 0 || idx >= len(v.list) {
+			return nullValue(), nil
+		}
+		return v.list[idx], nil
+	case v.kind == kindNull:
+		return nullValue(), nil
+	case v.kind == kindObject:
+		return exprValue{}, fmt.Errorf("cannot read index %d of an object (use a quoted key)", idx)
+	}
+	return exprValue{}, fmt.Errorf("cannot read index %d of %s", idx, valueNoun(v))
+}
+
+func (v exprValue) toJSON() (string, error) {
+	var b strings.Builder
+	if err := writeJSONValue(&b, v); err != nil {
+		return "", err
+	}
+	return b.String(), nil
+}
+
+// writeJSONValue renders compact JSON with `json.Marshal` semantics but WITHOUT
+// HTML escaping (a `<` inside a string stays `<`). Object keys are sorted, so
+// two evaluations of one value are byte-identical.
+func writeJSONValue(b *strings.Builder, v exprValue) error {
+	switch {
+	case v.isList:
+		b.WriteByte('[')
+		for i, item := range v.list {
+			if i > 0 {
+				b.WriteByte(',')
+			}
+			if err := writeJSONValue(b, item); err != nil {
+				return err
+			}
+		}
+		b.WriteByte(']')
+	case v.kind == kindObject:
+		keys := make([]string, 0, len(v.obj))
+		for key := range v.obj {
+			keys = append(keys, key)
+		}
+		sort.Strings(keys)
+		b.WriteByte('{')
+		for i, key := range keys {
+			if i > 0 {
+				b.WriteByte(',')
+			}
+			b.WriteString(jsonString(key))
+			b.WriteByte(':')
+			if err := writeJSONValue(b, v.obj[key]); err != nil {
+				return err
+			}
+		}
+		b.WriteByte('}')
+	case v.kind == kindNumber:
+		if !validJSONNumber(v.s) {
+			return fmt.Errorf("%q is not a JSON number", v.s)
+		}
+		b.WriteString(v.s)
+	case v.kind == kindBool:
+		b.WriteString(v.s)
+	case v.kind == kindNull:
+		b.WriteString("null")
+	default:
+		b.WriteString(jsonString(v.s))
+	}
+	return nil
+}
+
+// jsonString quotes one JSON string without HTML escaping.
+func jsonString(s string) string {
+	var buf bytes.Buffer
+	enc := json.NewEncoder(&buf)
+	enc.SetEscapeHTML(false)
+	_ = enc.Encode(s) // encoding a string cannot fail
+	return strings.TrimSuffix(buf.String(), "\n")
+}
+
+// validJSONNumber reports whether a numeric-literal spelling is exactly one
+// valid JSON number (ParseFloat also accepts Inf/NaN and a decoder stops at a
+// trailing digit, which JSON does not).
+func validJSONNumber(s string) bool {
+	dec := json.NewDecoder(strings.NewReader(s))
+	dec.UseNumber()
+	var value any
+	if err := dec.Decode(&value); err != nil {
+		return false
+	}
+	if _, ok := value.(json.Number); !ok {
+		return false
+	}
+	var extra any
+	return dec.Decode(&extra) == io.EOF
+}
+
+// fromJSONValue parses one JSON document into the expression value model.
+func fromJSONValue(s string) (exprValue, error) {
+	dec := json.NewDecoder(strings.NewReader(s))
+	dec.UseNumber()
+	var raw any
+	if err := dec.Decode(&raw); err != nil {
+		return exprValue{}, fmt.Errorf("fromJSON: invalid JSON: %w", err)
+	}
+	var trailing any
+	if err := dec.Decode(&trailing); err != io.EOF {
+		if err == nil {
+			return exprValue{}, fmt.Errorf("fromJSON: invalid JSON: unexpected trailing value")
+		}
+		return exprValue{}, fmt.Errorf("fromJSON: invalid JSON: %w", err)
+	}
+	return jsonValue(raw)
+}
+
+// jsonValue maps a decoded JSON document onto an expression value: an object is
+// an object, an array a list, and a number stays a number (its original
+// spelling is preserved, so a round trip is stable).
+func jsonValue(raw any) (exprValue, error) {
+	switch v := raw.(type) {
+	case nil:
+		return nullValue(), nil
+	case bool:
+		return boolValue(v), nil
+	case json.Number:
+		return numberValue(v.String()), nil
+	case string:
+		return scalar(v), nil
+	case []any:
+		items := make([]exprValue, len(v))
+		for i, item := range v {
+			converted, err := jsonValue(item)
+			if err != nil {
+				return exprValue{}, err
+			}
+			items[i] = converted
+		}
+		return listValue(items), nil
+	case map[string]any:
+		obj := make(map[string]exprValue, len(v))
+		for key, item := range v {
+			converted, err := jsonValue(item)
+			if err != nil {
+				return exprValue{}, err
+			}
+			obj[key] = converted
+		}
+		return objectValue(obj), nil
+	}
+	return exprValue{}, fmt.Errorf("fromJSON: unsupported JSON value %T", raw)
+}
+
 // reference resolves one dotted path, including the documented filters.
 func (p *exprParser) reference(path []string) (exprValue, error) {
 	if len(path) < 2 {
@@ -436,6 +926,16 @@ func (p *exprParser) reference(path []string) (exprValue, error) {
 			return exprValue{}, fmt.Errorf("matrix.%s is not a valid matrix reference (the form is matrix.<axis>)", strings.Join(path[1:], "."))
 		}
 		return scalar(p.ctx.Matrix[path[1]]), nil
+	case "strategy":
+		if pathHasFilter(path) || len(path) != 2 || !ValidStrategyField(path[1]) {
+			return exprValue{}, fmt.Errorf("strategy.%s is not a supported strategy field (supported: %s)", strings.Join(path[1:], "."), strings.Join(StrategyFields, ", "))
+		}
+		return scalar(p.ctx.Strategy[strings.ToLower(path[1])]), nil
+	case "job":
+		if pathHasFilter(path) || len(path) != 2 || !ValidJobField(path[1]) {
+			return exprValue{}, fmt.Errorf("job.%s is not a supported job field (supported: %s)", strings.Join(path[1:], "."), strings.Join(JobFields, ", "))
+		}
+		return scalar(p.ctx.Job[strings.ToLower(path[1])]), nil
 	case "inputs":
 		if pathHasFilter(path) || len(path) != 2 {
 			return exprValue{}, fmt.Errorf("inputs.%s is not a valid input reference (the form is inputs.<name>)", strings.Join(path[1:], "."))
@@ -720,6 +1220,23 @@ func (p *exprParser) call(name string, args []exprValue) (exprValue, error) {
 			return exprValue{}, fmt.Errorf("format needs at least one argument (usage: format('{0}-{1}', a, b))")
 		}
 		return scalar(formatValue(args[0].text(), args[1:])), nil
+	case "tojson":
+		if err := arity(1, "toJSON(value)"); err != nil {
+			return exprValue{}, err
+		}
+		out, jerr := args[0].toJSON()
+		if jerr != nil {
+			return exprValue{}, fmt.Errorf("toJSON: %w", jerr)
+		}
+		return scalar(out), nil
+	case "fromjson":
+		if err := arity(1, "fromJSON(string)"); err != nil {
+			return exprValue{}, err
+		}
+		if args[0].isList || args[0].kind != kindString {
+			return exprValue{}, fmt.Errorf("fromJSON takes a JSON string, not %s", valueNoun(args[0]))
+		}
+		return fromJSONValue(args[0].s)
 	case "hashfiles":
 		if len(args) == 0 {
 			return exprValue{}, fmt.Errorf("hashFiles needs at least one pattern (usage: hashFiles('**/go.sum')")

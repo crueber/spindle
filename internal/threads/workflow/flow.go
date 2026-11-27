@@ -77,13 +77,19 @@ func validateRunsOn(jobName string, labels Labels, scope TemplateScope) error {
 // that resolves to nothing is an error naming the label (a job must never queue
 // against the empty string); the caller fails run creation.
 func ExpandRunsOn(labels []string, github, matrix, inputs map[string]string) ([]string, error) {
+	return ExpandRunsOnWithStrategy(labels, github, matrix, inputs, nil)
+}
+
+// ExpandRunsOnWithStrategy is ExpandRunsOn plus the matrix cell's `strategy.*`
+// context (PAR-039).
+func ExpandRunsOnWithStrategy(labels []string, github, matrix, inputs, strategy map[string]string) ([]string, error) {
 	out := make([]string, len(labels))
 	for i, label := range labels {
 		if !strings.Contains(label, "${{") {
 			out[i] = label
 			continue
 		}
-		val, err := Substitute(label, TemplateValues{GitHub: github, Matrix: matrix, Inputs: inputs})
+		val, err := Substitute(label, TemplateValues{GitHub: github, Matrix: matrix, Inputs: inputs, Strategy: strategy})
 		if err != nil {
 			return nil, fmt.Errorf("runs-on[%d]: %w", i, err)
 		}
@@ -115,7 +121,13 @@ func validateTimeout(where string, m Minutes, scope TemplateScope) error {
 // non-numeric or out-of-range result fails run creation (fail closed): the job
 // must not be created with a timeout the author did not mean.
 func EvalMinutes(expr string, github, matrix, inputs map[string]string) (int, error) {
-	out, err := EvalString(expr, EvalScope{GitHub: github, Matrix: matrix, Inputs: inputs})
+	return EvalMinutesWithStrategy(expr, github, matrix, inputs, nil)
+}
+
+// EvalMinutesWithStrategy is EvalMinutes plus the matrix cell's `strategy.*`
+// context (PAR-039).
+func EvalMinutesWithStrategy(expr string, github, matrix, inputs, strategy map[string]string) (int, error) {
+	out, err := EvalString(expr, EvalScope{GitHub: github, Matrix: matrix, Inputs: inputs, Strategy: strategy})
 	if err != nil {
 		return 0, err
 	}

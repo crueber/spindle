@@ -112,7 +112,8 @@ an untrusted parent), `create`/`delete`, `deployment`/`deployment_status`, `rele
 timezone); jobs run in containers with services,
 `needs:` ordering, `strategy.matrix` (including GitHub's `include`/`exclude` merge rules),
 reusable workflows — local or SHA-pinned cross-repository, with typed `on.workflow_call` inputs,
-secrets and outputs — and `concurrency` groups (one running plus one pending run),
+secrets and outputs — per-cell `job.status` and `strategy.*` contexts, and `concurrency` groups (one
+running plus one pending run),
 report into the checks surface that gates merges, and
 stream logs over SSE with cancel, rerun and rerun-failed. `actions/cache` is built in with
 trust-class scopes (default/branch/PR/fork, D-10), and artifacts take the v4 inputs, support a
@@ -121,8 +122,11 @@ scoped job token (`$SPINDLE_JOB_TOKEN`, also delivered as `$GITHUB_TOKEN`/`$FORG
 closed vocabulary (`contents`, `issues`, `pull-requests`, `deployments`, `id-token`) is also its
 platform-API authority, and, with `id-token: write` (or Forgejo's `enable-openid-connect: true`) on a
 trusted run,
-a short-lived audience-scoped OIDC ID token for cloud providers; repository secrets are write-only and
-masked (never exposed to fork PRs; a fork's token is `contents: read` unless the repository enabled
+a short-lived audience-scoped OIDC ID token for cloud providers; secrets are write-only and masked,
+at three scopes — organization (with an `all`/`selected` repository policy), repository and
+environment — resolved environment > repository > organization and recorded on the job by scope
+only, with no user scope by decision (D-22), and never exposed to fork PRs (a fork's token is
+`contents: read` unless the repository enabled
 the audited `send_write_tokens` switch), and first-time fork contributors need approval. Deployment
 environments add required reviewers (users or teams, at most six), a wait timer,
 prevent-self-review, a deployment branch/tag allowlist, environment-scoped secrets and variables:
@@ -169,12 +173,19 @@ A run is **trusted** or **untrusted**, and that is server-side policy a file can
 `push` fires for `refs/heads/<branch>` and for `refs/tags/<tag>`, filtered independently by
 `branches` and `tags` (a tags-only trigger never matches a branch push, and the reverse); branch and
 tag deletes create no run, and neither does a notes ref. Secrets are
-managed in **Settings → Secrets** or the API, are write-only (the API returns names and timestamps,
-never values), are stored sealed with AES-256-GCM, and are injected as environment variables of
-their own name in every step of every job. Masking is server-side and best-effort: exact substring
-replacement in log frames and step results, skipping values shorter than 4 bytes — a runner that
-encodes, splits or derives a value defeats it, and step outputs (`$SPINDLE_OUTPUT`) are data, not
-logs, so a secret must never go into one. A fork run's payload carries `secrets: {}` and
+managed in **Settings → Secrets** on the repository or organization page, or the API, at
+**organization** (an `all`/`selected` repository policy), **repository** and **environment** scope;
+they are write-only (the API returns names and timestamps, never values), stored sealed with
+AES-256-GCM, and injected as environment variables of their own name in every step of every job.
+Precedence is **environment > repository > organization**, and the supplying scope is recorded on the
+job as `secret_scopes` (never a value); there is deliberately **no user scope** (D-22: a run executes
+as the repository, not a person). Masking is server-side and best-effort under one rule shared with
+the runner: a value of 4+ bytes is replaced wherever it appears (longest first), a **multi-line**
+value is masked whole and line by line, and a value **shorter than 4 bytes** only as a whole token;
+the server re-masks every stored frame and step result, so an older runner cannot write a value into
+the bucket. A runner that encodes, splits or derives a value still defeats it, and step outputs
+(`$SPINDLE_OUTPUT`) are data, not logs, so a secret must never go into one. A fork run's payload
+carries `secrets: {}` and
 `secrets_denied: true`. The job token is scoped to one attempt of one job in one repository:
 always read of its own repository, plus push only when the effective `permissions:` say
 `contents: write` — and a push authenticated by it never starts a workflow run, so a
@@ -182,8 +193,19 @@ always read of its own repository, plus push only when the effective `permission
 created `pending_approval` (jobs written, checks mirrored as `pending`, nothing enqueued) and waits
 for a maintainer's approve or deny unless the author already has a merged PR in the repository.
 Details: [`threads.md`](threads.md#51-repository-secrets),
+[`threads.md` §5.1b](threads.md#51b-organization-secrets),
 [`threads.md`](threads.md#52-the-check-every-run-passes-through),
 [`threads.md`](threads.md#53-the-job-token), [`threads.md`](threads.md#54-the-approval-gate).
+
+**Migrating and checking a file.** A repository that still carries only `.forgejo/workflows` or
+`.github/workflows` gets a display-only **migration banner** on its Threads page: the foreign files
+it found and the exact `spindle threads import --from forgejo --repo .` (or `--from github`)
+command. The banner parses and imports nothing and creates no run, and the engine still opens only
+`.spindle/workflows`. The one-way importer writes the converted files and a report;
+`spindle threads validate [PATH|-] [--repo DIR] [--json]` then checks them offline with the server's
+own validator, so the `file:line: key: message` text is the one a push (and the page editor) would
+report. It exits 0 when every file parses, 1 when one is invalid or unreadable, and 2 for a usage
+error.
 
 Job OIDC tokens are off unless the job asks: `permissions: id-token: write` (never `write-all`), a
 trusted run only, then `SPINDLE_ID_TOKEN_REQUEST_URL` + `SPINDLE_ID_TOKEN_REQUEST_TOKEN` (and the
@@ -191,8 +213,9 @@ trusted run only, then `SPINDLE_ID_TOKEN_REQUEST_URL` + `SPINDLE_ID_TOKEN_REQUES
 issuer is `server.public_url`, with `sub` = `repo:<owner>/<name>:ref:<ref>` and the run/job claims
 ([`threads.md`](threads.md#55-job-oidc-tokens-cloud-identity)). Environments are repository-scoped
 deployment targets with required reviewers (users or teams, write or more, checked when saved, at
-most six) and their own secrets, which override repository secrets of the same name and reach only a
-job that names the environment in a trusted run with an approved deployment; the run is created
+most six) and their own secrets, which override repository and organization secrets of the same name
+and reach only a job that names the environment in a trusted run with an approved deployment; the
+run is created
 `pending_approval` and nothing is enqueued until every listed reviewer (or a repo admin) decides.
 Wait timers, prevent-self-review, and the deployment branch/tag allowlist are part of the same gate
 ([`threads.md`](threads.md#56-deployment-environments)).

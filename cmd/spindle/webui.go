@@ -440,6 +440,12 @@ func wireCollabPages(apiEnv *api.Env, c *collabWiring) {
 		td.Workflows = func(ctx context.Context, owner, repo, commit string, p auth.Principal) (*threads.WorkflowList, error) {
 			return th.ListWorkflows(ctx, owner+"/"+repo, commit, p)
 		}
+		// The migration banner (PAR-003): foreign workflow files are LISTED for
+		// display only, with the exact `threads import` command. Nothing is
+		// parsed, imported or run.
+		td.Foreign = func(ctx context.Context, owner, repo, commit string, p auth.Principal) (*threads.ForeignWorkflows, error) {
+			return th.ListForeignWorkflows(ctx, owner+"/"+repo, commit, p)
+		}
 		// Operator verbs (15 §3): the page and the JSON API run the same
 		// service calls (the page gate is only the read gate; the service
 		// re-checks the write role).
@@ -605,7 +611,7 @@ func wireSettingsPages(cfg *config.Config, boot server.BootState, apiEnv *api.En
 			Now:     time.Now,
 		})
 		if c.ident != nil && apiEnv != nil {
-			d.OrgView = orgViewFn(c.ident, c.notifySvc)
+			d.OrgView = orgViewFn(c.ident, c.notifySvc, c.threadsSvc)
 		}
 		if c.ident != nil {
 			// WP9 G2: every org settings form (profile/avatar, members,
@@ -618,6 +624,12 @@ func wireSettingsPages(cfg *config.Config, boot server.BootState, apiEnv *api.En
 			// The org Webhooks tab (WP6.2) is composition-owned: the same
 			// notify service the JSON twins call, one adapter.
 			d.OrgWebhookWrite = orgWebhookWriteFn(c.notifySvc)
+		}
+		if c.threadsSvc != nil {
+			// The org Secrets tab (PAR-115) is the Threads organization-secret
+			// surface: the same verbs the /api/v1/orgs/{org}/threads/secrets
+			// routes call, one adapter.
+			d.OrgSecretWrite = orgSecretWriteFn(c.threadsSvc)
 		}
 		// Feature M3 (PLAN-V2 §M.3): Settings → Reports reads and writes the
 		// same moderation verbs the JSON twins call.
@@ -1209,7 +1221,7 @@ func adminAuthTestFn() func(context.Context, string, string, string) (*webui.Adm
 
 // orgViewFn projects one organisation's settings page from the identity
 // surface (+ the notify activity log) the API's org handlers read.
-func orgViewFn(ident *identity.Service, notes *notify.Service) func(context.Context, string, auth.Principal) (*webui.SettingsOrgPage, error) {
+func orgViewFn(ident *identity.Service, notes *notify.Service, th *threads.Service) func(context.Context, string, auth.Principal) (*webui.SettingsOrgPage, error) {
 	return func(ctx context.Context, org string, p auth.Principal) (*webui.SettingsOrgPage, error) {
 		doc, err := ident.GetOrg(ctx, org)
 		if err != nil || doc == nil {
@@ -1323,12 +1335,99 @@ func orgViewFn(ident *identity.Service, notes *notify.Service) func(context.Cont
 				}
 			}
 		}
+		// Org Secrets tab (PAR-115): the same name/policy read the JSON surface
+		// serves, for an owner only (the tab is owner-gated like invitations).
+		// A nil Threads service leaves the tab's honest "not wired" card; a
+		// read error leaves the panel empty and is stated on the tab rather
+		// than failing the whole page.
+		if th != nil && page.CanManage {
+			page.SecretWired = true
+			page.SecretEnabled = th.SecretsEnabled()
+			if secrets, serr := th.ListOrgSecrets(ctx, org, p); serr == nil {
+				for _, sec := range secrets {
+					row := webui.SettingsOrgSecret{
+						Name: sec.Name, Visibility: sec.Visibility, CreatedBy: sec.CreatedBy,
+						UpdatedAt: sec.UpdatedAt,
+					}
+					if sec.Visibility == "selected" {
+						row.Repositories = strings.Join(sec.Repositories, ", ")
+					}
+					page.Secrets = append(page.Secrets, row)
+				}
+			}
+		}
 		return page, nil
 	}
 }
 
-// orgOwnerGate returns the page write error for a failed org-owner check
-// (nil = allowed). Host admins pass exactly like the API's CheckOrgOwner;
+// orgSecretWriteFn adapts the Threads organization-secret verbs onto the org
+// Settings → Secrets tab (PAR-115). The service re-checks org ownership itself
+// (host admin wins), so the adapter adds only the form parsing and the status
+// mapping; a value is passed straight through and never logged.
+func orgSecretWriteFn(th *threads.Service) func(context.Context, string, auth.Principal, webui.SettingsOrgWrite) (webui.SettingsWriteResult, *webui.SettingsWriteError) {
+	return func(ctx context.Context, org string, p auth.Principal, w webui.SettingsOrgWrite) (webui.SettingsWriteResult, *webui.SettingsWriteError) {
+		switch w.Action {
+		case webui.SettingsOrgSecretPut:
+			name := strings.TrimSpace(w.Get("secret_name"))
+			value := w.Get("secret_value")
+			if name == "" || value == "" {
+				return webui.SettingsWriteResult{}, orgWebhookErr(http.StatusUnprocessableEntity, "a secret name and value are required")
+			}
+			scope := threads.OrgSecretScope{
+				Visibility:   w.Get("secret_visibility"),
+				Repositories: splitRepoList(w.Get("secret_repositories")),
+			}
+			if err := th.SetOrgSecret(ctx, org, name, value, scope, p); err != nil {
+				return webui.SettingsWriteResult{}, orgWebhookErr(orgSecretStatus(err), err.Error())
+			}
+			return webui.SettingsWriteResult{Notice: "organization secret saved"}, nil
+		case webui.SettingsOrgSecretDelete:
+			name := strings.TrimSpace(w.Get("id"))
+			if name == "" {
+				return webui.SettingsWriteResult{}, orgWebhookErr(http.StatusUnprocessableEntity, "a secret name is required")
+			}
+			if err := th.DeleteOrgSecret(ctx, org, name, p); err != nil {
+				return webui.SettingsWriteResult{}, orgWebhookErr(orgSecretStatus(err), err.Error())
+			}
+			return webui.SettingsWriteResult{Notice: "organization secret deleted"}, nil
+		default:
+			return webui.SettingsWriteResult{}, orgWebhookErr(http.StatusBadRequest, "unknown organization secret action")
+		}
+	}
+}
+
+// splitRepoList splits a comma/whitespace-separated repository list.
+func splitRepoList(s string) []string {
+	fields := strings.FieldsFunc(s, func(r rune) bool {
+		return r == ',' || r == ' ' || r == '\t' || r == '\n' || r == '\r' || r == ';'
+	})
+	out := make([]string, 0, len(fields))
+	for _, f := range fields {
+		if v := strings.TrimSpace(f); v != "" {
+			out = append(out, v)
+		}
+	}
+	return out
+}
+
+// orgSecretStatus maps a threads error onto the page's status.
+func orgSecretStatus(err error) int {
+	switch {
+	case errors.Is(err, threads.ErrInvalid):
+		return http.StatusUnprocessableEntity
+	case errors.Is(err, threads.ErrForbidden):
+		return http.StatusForbidden
+	case errors.Is(err, threads.ErrUnauthorized):
+		return http.StatusUnauthorized
+	case errors.Is(err, threads.ErrUnavailable):
+		return http.StatusServiceUnavailable
+	case errors.Is(err, threads.ErrNotFound):
+		return http.StatusNotFound
+	}
+	return http.StatusInternalServerError
+}
+
+// orgOwnerGate returns the page write error for a failed org-owner check// (nil = allowed). Host admins pass exactly like the API's CheckOrgOwner;
 // the page handler checked the tab, but every seam re-checks its own
 // authority because the seam is public (the SettingsServices.repoWrite rule).
 func orgOwnerGate(aerr *auth.AuthError) *webui.SettingsWriteError {

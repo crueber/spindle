@@ -1112,6 +1112,79 @@ func settingsOrgFakes(canManage bool) *settingsFakes {
 	}}
 }
 
+// TestSettingsOrgSecretsTab pins the PAR-115 surface: the owner-only tab
+// renders the write-only policy form and the policy column, and its writes
+// reach the composition-owned seam. A non-owner never sees it.
+func TestSettingsOrgSecretsTab(t *testing.T) {
+	f := settingsOrgFakes(true)
+	view := f.deps.OrgView
+	f.deps.OrgView = func(ctx context.Context, org string, p auth.Principal) (*SettingsOrgPage, error) {
+		page, err := view(ctx, org, p)
+		if err != nil || page == nil {
+			return page, err
+		}
+		page.SecretWired = true
+		page.SecretEnabled = true
+		page.Secrets = []SettingsOrgSecret{
+			{Name: "ORG_TOKEN", Visibility: "all", CreatedBy: "alice", UpdatedAt: "2026-11-27T00:00:00Z"},
+			{Name: "ONLY_API", Visibility: "selected", Repositories: "api, web", CreatedBy: "alice", UpdatedAt: "2026-11-27T00:00:00Z"},
+		}
+		return page, nil
+	}
+	written := ""
+	var refuse *SettingsWriteError
+	f.deps.OrgSecretWrite = func(_ context.Context, _ string, _ auth.Principal, w SettingsOrgWrite) (SettingsWriteResult, *SettingsWriteError) {
+		written = w.Action + ":" + w.Get("secret_name") + ":" + w.Get("id")
+		if refuse != nil {
+			return SettingsWriteResult{}, refuse
+		}
+		return SettingsWriteResult{Notice: "ok"}, nil
+	}
+	s := newSettingsServer(t, f)
+	rec := settingsDo(t, s, http.MethodGet, "/acme/settings?tab=secrets", nil, nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("secrets tab = %d", rec.Code)
+	}
+	body := rec.Body.String()
+	for _, want := range []string{
+		"Organization secrets", "Write-only", "secret_name", "secret_value",
+		"secret_visibility", "secret_repositories", "ORG_TOKEN",
+		"all repositories", "api, web", "org-secret-put",
+	} {
+		settingsMustContain(t, body, want, "org secrets tab")
+	}
+	rec = settingsDo(t, s, http.MethodPost, "/acme/settings", url.Values{
+		"org_action": {"org-secret-put"}, "secret_name": {"NEW"}, "secret_value": {"v"},
+		"secret_visibility": {"selected"}, "secret_repositories": {"api"},
+	}, nil)
+	if rec.Code != http.StatusSeeOther || written != SettingsOrgSecretPut+":NEW:" {
+		t.Fatalf("put = %d (%q)", rec.Code, written)
+	}
+	rec = settingsDo(t, s, http.MethodPost, "/acme/settings", url.Values{
+		"org_action": {"org-secret-delete"}, "id": {"ORG_TOKEN"},
+	}, nil)
+	if rec.Code != http.StatusSeeOther || written != SettingsOrgSecretDelete+"::ORG_TOKEN" {
+		t.Fatalf("delete = %d (%q)", rec.Code, written)
+	}
+	// A refused write re-renders the name the operator typed (never the value).
+	refuse = settingsWriteErr(http.StatusUnprocessableEntity, "a selected secret needs a repository")
+	rec = settingsDo(t, s, http.MethodPost, "/acme/settings", url.Values{
+		"org_action": {"org-secret-put"}, "secret_name": {"KEPT"}, "secret_value": {"v"}, "secret_visibility": {"selected"},
+	}, nil)
+	if rec.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("refused put = %d", rec.Code)
+	}
+	if !strings.Contains(rec.Body.String(), `value="KEPT"`) || strings.Contains(rec.Body.String(), ">v<") {
+		t.Fatalf("the refused form did not keep the draft name (or leaked the value)")
+	}
+	// The tab is owner-only; an unwired seam says so instead of rendering a
+	// form nobody can submit.
+	nonOwner := newSettingsServer(t, settingsOrgFakes(false))
+	if rec := settingsDo(t, nonOwner, http.MethodGet, "/acme/settings?tab=secrets", nil, nil); rec.Code != http.StatusForbidden {
+		t.Fatalf("non-owner secrets tab = %d", rec.Code)
+	}
+}
+
 func TestSettingsOrgNonOwnerReadOnlyTabs(t *testing.T) {
 	s := newSettingsServer(t, settingsOrgFakes(false))
 	rec := settingsDo(t, s, http.MethodGet, "/acme/settings", nil, nil)
@@ -1418,7 +1491,7 @@ func TestSettingsRoleAndTabHelpers(t *testing.T) {
 	if len(nav) != 3 {
 		t.Fatalf("non-owner nav = %d entries, want 3 (invitation reads are owner-only)", len(nav))
 	}
-	if len(settingsOrgNav("acme", "profile", true)) != 7 {
+	if len(settingsOrgNav("acme", "profile", true)) != 8 {
 		t.Fatal("owner nav")
 	}
 }

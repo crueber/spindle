@@ -65,7 +65,7 @@
       "area": "discovery",
       "capability": "Migration banner: a foreign workflow directory is *shown* with the importer command, never run",
       "provenance": "none",
-      "status": "missing",
+      "status": "have",
       "wave": 2,
       "track": [
         "T6"
@@ -80,7 +80,14 @@
         "docs/threads.md \u00a73",
         "docs/WORKFLOWS.md"
       ],
-      "tests": []
+      "tests": [
+        "TestListForeignWorkflows",
+        "TestListForeignWorkflowsNoForeignDirs",
+        "TestSubprocessGitListDir",
+        "TestThreadsMigrationBannerRenders",
+        "TestThreadsMigrationBannerHiddenWhenWorkflowsExist"
+      ],
+      "notes": "Landed (Wave 5). The Threads page shows a migration banner when the default branch has `.forgejo/workflows` or `.github/workflows` files and no `.spindle/workflows`: it lists the foreign files (YAML only, direct children) and prints the exact `spindle threads import --from <platform> --repo .` command. The read is display-only — `threads.Service.ListForeignWorkflows` lists a directory, nothing parses or imports it, and the page request creates no run; the engine still discovers only `.spindle/workflows` (PAR-001). A listing failure renders no banner rather than breaking the page, and `spindle threads import`'s report now ends with the `threads validate` next step."
     },
     {
       "id": "PAR-004",
@@ -229,7 +236,7 @@
       "area": "triggers",
       "capability": "`pull_request_target`: base-tip file, base secrets, write token, head fetchable",
       "provenance": "B",
-      "status": "missing",
+      "status": "have",
       "wave": 2,
       "track": [
         "T3"
@@ -243,7 +250,13 @@
         "docs/features/21_parity_master.md \u00a74.2",
         "docs/threads.md \u00a73.2"
       ],
-      "tests": []
+      "tests": [
+        "internal/e2e/threads_pr_target_test.go#TestE2E_ThreadsPullRequestTarget",
+        "internal/threads/wave3_triggers_test.go#TestPullRequestTargetOffByDefault",
+        "internal/threads/wave3_triggers_test.go#TestPullRequestTargetHeadCheckoutNeedsSecondSwitch",
+        "internal/threads/wave3_triggers_test.go#TestPRTargetHeadCheckoutRefusalShapes"
+      ],
+      "notes": "Engine: the base-tip file and base commit (`PRTarget`, `Trusted`), the plan-time head-checkout refusal behind the second switch, and base secrets resolved by the ordinary trusted path. Proof: a real runner executes a fork pull request_target run \u2014 the base workflow file runs, the HEAD file never does, the base repository secret resolves and is masked, and the commit's `threads/<workflow>/<job>` check reads success."
     },
     {
       "id": "PAR-016",
@@ -660,7 +673,7 @@
       "area": "expressions",
       "capability": "Expression functions: contains, startsWith, endsWith, format, join, toJSON, fromJSON, hashFiles, case",
       "provenance": "B",
-      "status": "have",
+      "status": "partial",
       "wave": 1,
       "track": [
         "T1"
@@ -676,9 +689,13 @@
         "TestEvalIfFunctions",
         "TestEvalIfFunctionEdges",
         "TestSubstitutionSites",
-        "TestValidateIf"
+        "TestValidateIf",
+        "TestToJSONAndFromJSONEvaluation",
+        "TestFromJSONErrors",
+        "TestJSONFunctionParseTime",
+        "TestWorkflowJSONFunctionsParseAndEvaluate"
       ],
-      "notes": "Landed on main (e4a3f949). startsWith/contains/endsWith/format/join/toJSON/fromJSON/case evaluate in `if:` and are validated in every substituted site; an unknown function is a named parse error. hashFiles stays PAR-041 (job-container walk)."
+      "notes": "The matrix note was an overclaim and is now true for toJSON/fromJSON. toJSON(value) renders compact JSON with json.Marshal semantics but no HTML escaping and sorted object keys (deterministic); a bare context (github/matrix/steps/...) is its nested object; fromJSON(string) parses one document into the expression model and a parsed object/array is indexed with .key/['key']/[0]; invalid JSON is a named error. Both are validated at parse time and evaluated at run time at every expression site. `case` is NOT implemented and is not documented in docs/threads.md, docs/WORKFLOWS.md, or the platform's function set (GitHub/Forgejo have no case()); it stays a named parse error rather than invented semantics, which is why this row is partial, not have. hashFiles stays PAR-041 (job-container walk)."
     },
     {
       "id": "PAR-038",
@@ -709,7 +726,7 @@
       "area": "expressions",
       "capability": "`job`/`jobs`/`strategy` contexts (`job.status`, `strategy.job-index`, `job-total`, `max-parallel`)",
       "provenance": "G",
-      "status": "missing",
+      "status": "have",
       "wave": 3,
       "track": [
         "T1"
@@ -722,7 +739,17 @@
         "docs/threads.md \u00a73.6",
         "docs/threads.md \u00a73.7"
       ],
-      "tests": []
+      "tests": [
+        "TestJobAndStrategyContextsParse",
+        "TestJobAndStrategyContextAvailability",
+        "TestJobAndStrategyEvaluate",
+        "TestStrategyExpansionHelpers",
+        "TestStrategyGroupTemplateValidation",
+        "TestStrategyContextPerCell",
+        "TestJobStatusAfterToleratedFailure",
+        "TestPlanCarriesStrategyAndJobStatus"
+      ],
+      "notes": "Landed (Wave 5). `job` and `strategy` are closed contexts in the shared evaluator and the parser: `job.status` (success/failure/cancelled, a continue-on-error failure stays success) is readable in a step field and a step `if:`; `strategy.job-index`, `job-total`, `fail-fast` and `max-parallel` are readable at every cell-scoped site (step field/if, job name, job concurrency group, job outputs, runs-on, job/step timeouts). An unknown field, a job-level `if:` naming either context, or a workflow-level group naming strategy is a named parse error. A plain job has an empty strategy context (references read empty). The server writes MatrixIndex/MatrixTotal on each cell and the runner reads the same strategy context for substitution."
     },
     {
       "id": "PAR-040",
@@ -1831,26 +1858,34 @@
       "area": "secrets",
       "capability": "Organization and user secret scopes with documented precedence and repository policy",
       "provenance": "B",
-      "status": "missing",
+      "status": "have",
       "wave": 2,
       "track": [
         "T3"
       ],
       "security": [],
-      "decision": "",
+      "decision": "D-22",
       "acceptance": "An org secret resolves in every org repo; a repo secret of the same name wins; an unselected repo gets nothing",
       "docs_refs": [
         "docs/features/21_parity_master.md \u00a74.7",
         "docs/threads.md \u00a75"
       ],
-      "tests": []
+      "tests": [
+        "internal/threads/secrets_org_test.go#TestOrgSecretScopeAndPrecedence",
+        "internal/threads/secrets_org_test.go#TestOrgSecretEnvironmentWinsOverEverything",
+        "internal/threads/secrets_org_test.go#TestOrgSecretAuthorizationAndValidation",
+        "internal/threads/secrets_org_test.go#TestOrgSecretHTTP",
+        "internal/threads/secrets_org_test.go#TestFetchRecordsSecretScopesAndMasksOrgValues",
+        "internal/e2e/threads_secrets_test.go#TestE2E_ThreadsSecretScopesAndMasking"
+      ],
+      "notes": "Organization secrets: one sealed document per org (`orgs/<org>/threads/secrets.json`, bound to `org:<org>` + name), API + org Settings tab, org-owner gate and audit. Precedence is environment > repository > organization; a per-secret repository policy is `all` or `selected`, and an unselected repository receives nothing. The USER scope is declined by D-22 (a run executes as the repository, not a person). Each job records `secret_scopes` (name -> scope), never a value."
     },
     {
       "id": "PAR-116",
       "area": "secrets",
       "capability": "Secret availability in `env`/`with`/`if`; fork runs empty; masking completeness (`::add-mask::`, annotations, summaries)",
       "provenance": "B",
-      "status": "partial",
+      "status": "have",
       "wave": 2,
       "track": [
         "T3"
@@ -1865,7 +1900,17 @@
         "docs/features/21_parity_master.md \u00a74.7",
         "docs/threads.md \u00a75"
       ],
-      "tests": []
+      "tests": [
+        "internal/threads/secrets_org_test.go#TestMaskingCoversMultiLineAndShortValues",
+        "internal/threads/secrets_org_test.go#TestFetchRecordsSecretScopesAndMasksOrgValues",
+        "internal/threads/secrets_org_test.go#TestUntrustedRunGetsNoSecretAndNoScope",
+        "internal/threads/runner/subst_test.go#TestSecretEnvAndVarsNamespacesDoNotConfuse",
+        "internal/threads/runner/subst_test.go#TestSubstitutedSecretIsMaskedInTheLog",
+        "internal/threads/runner/log_test.go#TestStreamerMasksSecretsBeforeSending",
+        "internal/e2e/threads_secrets_test.go#TestE2E_ThreadsSecretScopesAndMasking",
+        "internal/e2e/threads_runner_test.go#TestE2E_ThreadsForkPRSafety"
+      ],
+      "notes": "Availability at every site the table allows (step field/if, job if, job outputs) is enforced by the parser; a fork run's payload carries no secrets, so `${{ secrets.X }}` reads empty and the env var is unset. Masking is ONE rule shared by server and runner (threads.MaskValues): 4+ byte values anywhere, multi-line values whole and line by line, 1-3 byte values as whole tokens only. The server re-masks log frames, step errors, annotations and the step summary before storage (AppendLog, complete); `::add-mask::` adds at the streamer. `secrets: inherit` is same-repository only (D-6). Residual, documented: an encoded/split/derived value still prints, and step outputs stay data."
     },
     {
       "id": "PAR-117",
@@ -1887,7 +1932,7 @@
       "tests": [
         "TestEnvironmentVariablesOverrideRepositoryVariables"
       ],
-      "notes": "Wave 4 for the environment scope; repository (PAR-035) and organization variables already existed. ${{ vars.X }} resolves org → repo → environment with the environment winning; env and vars never collide (separate namespaces) and a reserved GITHUB_/SPINDLE_/FORGEJO_/RUNNER_ prefix is refused at save. Values keep the sealed write-only posture."
+      "notes": "Wave 4 for the environment scope; repository (PAR-035) and organization variables already existed. ${{ vars.X }} resolves org \u2192 repo \u2192 environment with the environment winning; env and vars never collide (separate namespaces) and a reserved GITHUB_/SPINDLE_/FORGEJO_/RUNNER_ prefix is refused at save. Values keep the sealed write-only posture."
     },
     {
       "id": "PAR-118",
@@ -2050,7 +2095,7 @@
         "TestEnvironmentTabsRenderDeploymentsAndVariables",
         "TestE2E_ThreadsDeploymentsQueueAndJobCancel"
       ],
-      "notes": "Wave 4. Every deployment — workflow-job or API — is one record under repos/<o>/<r>/threads/deployments/<id>.json with the environment, ref/sha, creator, run/job binding, latest state and a bounded (100) status history. The environment page lists the newest 20 per environment; the API lists/pages all. Terminal records age out with threads.retention (GC), never a live or queued one. The environment URL is stored on the deployment and linked by the run page."
+      "notes": "Wave 4. Every deployment \u2014 workflow-job or API \u2014 is one record under repos/<o>/<r>/threads/deployments/<id>.json with the environment, ref/sha, creator, run/job binding, latest state and a bounded (100) status history. The environment page lists the newest 20 per environment; the API lists/pages all. Terminal records age out with threads.retention (GC), never a live or queued one. The environment URL is stored on the deployment and linked by the run page."
     },
     {
       "id": "PAR-133",
@@ -2077,7 +2122,7 @@
         "TestDeploymentRequiresAnExistingEnvironmentAndPolicy",
         "TestE2E_ThreadsDeploymentsQueueAndJobCancel"
       ],
-      "notes": "Wave 4. POST /{o}/{r}/api/threads/deployments and …/{id}/statuses accept the documented fields; GET list/get are read-gated. Authorization: a repo write role, or a job token scoped to its own repository with deployments: write (read for list/get) — a contents: write token and another repository are 403. The workflow parser now accepts `deployments` (the old named refusal removed) and the token never reaches the operator surface."
+      "notes": "Wave 4. POST /{o}/{r}/api/threads/deployments and \u2026/{id}/statuses accept the documented fields; GET list/get are read-gated. Authorization: a repo write role, or a job token scoped to its own repository with deployments: write (read for list/get) \u2014 a contents: write token and another repository are 403. The workflow parser now accepts `deployments` (the old named refusal removed) and the token never reaches the operator surface."
     },
     {
       "id": "PAR-134",
@@ -2101,7 +2146,7 @@
         "TestEnvironmentTabRendersAndWrites",
         "TestEnvironmentVariablesOverrideRepositoryVariables"
       ],
-      "notes": "Wave 4. Each environment card carries four labelled surfaces — protection rules, deployments (state + history), secrets and variables — all writable through the maintain-floor settings seam; the page and API share the service methods. The variable surface is environment-scoped (PAR-117). Rendered at desktop and ~390 px with the shared details/table patterns; no page-level horizontal pan."
+      "notes": "Wave 4. Each environment card carries four labelled surfaces \u2014 protection rules, deployments (state + history), secrets and variables \u2014 all writable through the maintain-floor settings seam; the page and API share the service methods. The variable surface is environment-scoped (PAR-117). Rendered at desktop and ~390 px with the shared details/table patterns; no page-level horizontal pan."
     },
     {
       "id": "PAR-135",
@@ -2151,7 +2196,7 @@
         "TestJobDeploymentQueueSerializesRuns",
         "TestE2E_ThreadsDeploymentsQueueAndJobCancel"
       ],
-      "notes": "Wave 4. One environment slot object (environments/<name>/queue.json) serializes deployments in trigger order: the first holds it, later ones carry a queue_position and one visible reason naming the holder. The claim path refuses a queued job; a terminal holder promotes the next waiter (job loses its position, API deployment goes queued→pending). A cancelled waiter is removed. Bounded at 100 waiters with a named 409."
+      "notes": "Wave 4. One environment slot object (environments/<name>/queue.json) serializes deployments in trigger order: the first holds it, later ones carry a queue_position and one visible reason naming the holder. The claim path refuses a queued job; a terminal holder promotes the next waiter (job loses its position, API deployment goes queued\u2192pending). A cancelled waiter is removed. Bounded at 100 waiters with a named 409."
     },
     {
       "id": "PAR-137",
@@ -2815,7 +2860,7 @@
         "TestPullPanelOffersThreadsRerun",
         "TestEnvironmentTabsRenderDeploymentsAndVariables"
       ],
-      "notes": "Wave 4. The check-run report accepts annotations (error|warning|notice with file/line/col/title, ≤50, bounded and escaped), stores them with the report, and every read returns them; they never change the state the merge gate reads. The PR Checks panel names the Threads run behind the sha and offers re-run to a writer. Per-branch required checks already union require_checks over matching ref rules. Naming decision recorded in docs/threads.md §5.8: Threads contexts are threads/<workflow>/<job>, external CI names its own."
+      "notes": "Wave 4. The check-run report accepts annotations (error|warning|notice with file/line/col/title, \u226450, bounded and escaped), stores them with the report, and every read returns them; they never change the state the merge gate reads. The PR Checks panel names the Threads run behind the sha and offers re-run to a writer. Per-branch required checks already union require_checks over matching ref rules. Naming decision recorded in docs/threads.md \u00a75.8: Threads contexts are threads/<workflow>/<job>, external CI names its own."
     },
     {
       "id": "PAR-193",
@@ -2887,7 +2932,7 @@
         "TestThreadJobCancelControl",
         "TestE2E_ThreadsDeploymentsQueueAndJobCancel"
       ],
-      "notes": "Wave 4. POST …/{run}/jobs/{job}/cancel (optional force) cancels exactly one job; siblings keep running. Non-force running attempts get the cancel signal and end on ack; force is terminal at once and a later complete is a 409. The job records cancelled_by/cancel_reason/force_cancelled and the first cancel wins. The page renders both controls and the actor; the run verb remains the whole-run path."
+      "notes": "Wave 4. POST \u2026/{run}/jobs/{job}/cancel (optional force) cancels exactly one job; siblings keep running. Non-force running attempts get the cancel signal and end on ack; force is terminal at once and a later complete is a 409. The job records cancelled_by/cancel_reason/force_cancelled and the first cancel wins. The page renders both controls and the actor; the run verb remains the whole-run path."
     },
     {
       "id": "PAR-196",
@@ -2967,7 +3012,7 @@
       "area": "observability",
       "capability": "`spindle threads validate` offline validation with the same errors the server reports",
       "provenance": "F",
-      "status": "missing",
+      "status": "have",
       "wave": 2,
       "track": [
         "T1",
@@ -2978,9 +3023,18 @@
       "acceptance": "A file validates offline with byte-identical error text to the server for a table of bad files",
       "docs_refs": [
         "docs/features/21_parity_master.md \u00a74.11",
-        "docs/threads.md \u00a72.3"
+        "docs/threads.md \u00a72.4",
+        "docs/CLI.md \u00a75.4"
       ],
-      "tests": []
+      "tests": [
+        "TestThreadsValidateValidFile",
+        "TestThreadsValidateMatchesTheServerErrorText",
+        "TestThreadsValidateJSON",
+        "TestThreadsValidateDirectoryAndRepoFlag",
+        "TestThreadsValidateStdin",
+        "TestThreadsValidateUsage"
+      ],
+      "notes": "Landed (Wave 5). `spindle threads validate [PATH|-] [--repo DIR] [--json]` is operator-local and runs `threads.ValidateWorkflowSource` — the same parser/validator the push path and the authoring pane use — so error text is byte-identical to the server's (pin: TestThreadsValidateMatchesTheServerErrorText over a bad-file table). PATH is a file, a directory of direct *.yml/*.yaml children, or `-` for stdin; `--repo DIR` validates DIR/.spindle/workflows. Human output is `file:line: key: message`; `--json` returns the server's WorkflowValidation shape. Exit 0 valid, 1 invalid/unreadable, 2 usage. `threads explain` is unchanged and shares the parser, not the output."
     },
     {
       "id": "PAR-200",

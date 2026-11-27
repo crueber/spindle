@@ -452,7 +452,7 @@ func TestEnvironmentSecretsPrecedence(t *testing.T) {
 	if ship.Secrets["REPO_ONLY"] != "repo-only-value" {
 		t.Fatalf("the repository secret was dropped: %+v", ship.Secrets)
 	}
-	masked := maskSecrets("a env-token-value b repo-only-value", ship.Mask)
+	masked := maskSecretValues("a env-token-value b repo-only-value", ship.Mask)
 	if strings.Contains(masked, "env-token-value") || strings.Contains(masked, "repo-only-value") {
 		t.Fatalf("mask = %q", masked)
 	}

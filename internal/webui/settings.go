@@ -129,6 +129,10 @@ type SettingsDeps struct {
 	// rest of the org page is owned by identity; a nil OrgWebhookWrite
 	// renders the Webhooks tab degraded, exactly like a nil service elsewhere.
 	OrgWebhookWrite func(ctx context.Context, org string, p auth.Principal, w SettingsOrgWrite) (SettingsWriteResult, *SettingsWriteError)
+	// OrgSecretWrite handles the org Secrets tab (PAR-115): the Threads
+	// service's organization-secret verbs. Separate from OrgWrite for the same
+	// reason as the webhooks seam — the data is owned by threads, not identity.
+	OrgSecretWrite func(ctx context.Context, org string, p auth.Principal, w SettingsOrgWrite) (SettingsWriteResult, *SettingsWriteError)
 }
 
 // SettingsWriteResult is a successful mutation's one-shot output: the notice
@@ -945,6 +949,27 @@ type SettingsOrgPage struct {
 	NewURL        string
 	NewEvents     string
 	WebhookPanel  *SettingsWebhookPanel
+
+	// Secrets is the org Secrets tab (PAR-115): write-only org-scoped secrets
+	// with their repository policy. SecretWired/SecretEnabled mirror the
+	// repository tab's honest "not wired"/"unavailable" cards.
+	SecretWired   bool
+	SecretEnabled bool
+	Secrets       []SettingsOrgSecret
+	NewSecretName string
+	NewSecretVis  string
+	NewSecretRepo string
+	SecretError   string
+}
+
+// SettingsOrgSecret is one organization secret row (name, policy, timestamps —
+// never a value).
+type SettingsOrgSecret struct {
+	Name         string
+	Visibility   string
+	Repositories string
+	CreatedBy    string
+	UpdatedAt    string
 }
 
 // SettingsOrgProfile is the Profile tab.
@@ -1031,6 +1056,10 @@ const (
 	SettingsOrgWebhookPing      = "webhook-ping"
 	SettingsOrgWebhookDelete    = "webhook-delete"
 	SettingsOrgWebhookRedeliver = "webhook-redeliver"
+
+	// Org Secrets tab actions (PAR-115).
+	SettingsOrgSecretPut    = "org-secret-put"
+	SettingsOrgSecretDelete = "org-secret-delete"
 )
 
 // settingsIsOrgWebhookAction reports whether an org_action belongs to the
@@ -1039,6 +1068,16 @@ func settingsIsOrgWebhookAction(action string) bool {
 	switch action {
 	case SettingsOrgWebhookCreate, SettingsOrgWebhookToggle, SettingsOrgWebhookRotate,
 		SettingsOrgWebhookPing, SettingsOrgWebhookDelete, SettingsOrgWebhookRedeliver:
+		return true
+	}
+	return false
+}
+
+// settingsIsOrgSecretAction reports whether an org_action belongs to the
+// composition-owned Secrets tab (the OrgSecretWrite seam, PAR-115).
+func settingsIsOrgSecretAction(action string) bool {
+	switch action {
+	case SettingsOrgSecretPut, SettingsOrgSecretDelete:
 		return true
 	}
 	return false
@@ -1105,6 +1144,7 @@ var settingsOrgTabs = []settingsTab{
 	{ID: "profile", Label: "Profile"},
 	{ID: "members", Label: "Members"},
 	{ID: "teams", Label: "Teams"},
+	{ID: "secrets", Label: "Secrets", MinRead: "admin"},
 	{ID: "invitations", Label: "Invitations", MinRead: "admin"},
 	{ID: "webhooks", Label: "Webhooks", MinRead: "admin"},
 	{ID: "activity", Label: "Activity", MinRead: "admin"},
@@ -2321,6 +2361,12 @@ func (s *Server) settingsOrgSubmit(w http.ResponseWriter, r *http.Request) {
 	var res SettingsWriteResult
 	var werr *SettingsWriteError
 	switch {
+	case settingsIsOrgSecretAction(action):
+		if d.OrgSecretWrite == nil {
+			werr = settingsWriteErr(http.StatusServiceUnavailable, "organization secrets are not wired on this build")
+		} else {
+			res, werr = d.OrgSecretWrite(r.Context(), org, p, wr)
+		}
 	case settingsIsOrgWebhookAction(action):
 		if d.OrgWebhookWrite == nil {
 			werr = settingsWriteErr(http.StatusServiceUnavailable, "org webhooks are not wired on this build")
@@ -2336,6 +2382,13 @@ func (s *Server) settingsOrgSubmit(w http.ResponseWriter, r *http.Request) {
 		view.Tab = tab
 		view.Nav = settingsOrgNav(org, tab, true)
 		view.Error = werr.Message
+		if tab == "secrets" {
+			// Keep the name and policy the operator typed (never the value).
+			view.SecretError = werr.Message
+			view.NewSecretName = wr.Get("secret_name")
+			view.NewSecretVis = wr.Get("secret_visibility")
+			view.NewSecretRepo = wr.Get("secret_repositories")
+		}
 		if view.WebhookPanel != nil {
 			view.WebhookPanel.Error = werr.Message
 		}
@@ -2393,6 +2446,8 @@ func settingsOrgTabForAction(action string) string {
 		return "teams"
 	case SettingsOrgInviteMake, SettingsOrgInviteRm:
 		return "invitations"
+	case SettingsOrgSecretPut, SettingsOrgSecretDelete:
+		return "secrets"
 	case SettingsOrgWebhookCreate, SettingsOrgWebhookToggle, SettingsOrgWebhookRotate,
 		SettingsOrgWebhookPing, SettingsOrgWebhookDelete, SettingsOrgWebhookRedeliver:
 		return "webhooks"

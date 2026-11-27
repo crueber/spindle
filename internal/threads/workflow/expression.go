@@ -3,6 +3,7 @@ package workflow
 import (
 	"fmt"
 	"sort"
+	"strconv"
 	"strings"
 )
 
@@ -40,6 +41,8 @@ var ifFunctions = []ifFunction{
 	{"contains", 2, "contains(text, search)"},
 	{"format", -1, "format('{0}-{1}', a, b)"},
 	{"join", 2, "join(value, separator)"},
+	{"tojson", 1, "toJSON(value)"},
+	{"fromjson", 1, "fromJSON(string)"},
 	{"hashfiles", -1, "hashFiles('**/go.sum')"},
 }
 
@@ -55,7 +58,8 @@ type ifFunction struct {
 // and docs.
 var IfFunctions = []string{
 	"success()", "failure()", "always()", "cancelled()", "startsWith()",
-	"endsWith()", "contains()", "format()", "join()", "hashFiles()",
+	"endsWith()", "contains()", "format()", "join()", "toJSON()",
+	"fromJSON()", "hashFiles()",
 }
 
 // ValidateIf checks one `if:` expression against the scope. An empty string is
@@ -193,7 +197,11 @@ func (v *ifValidator) parsePrimary() error {
 	}
 	if v.pos < len(v.src) && v.src[v.pos] == '(' {
 		v.pos++
-		return v.parseCall(strings.ToLower(word))
+		if err := v.parseCall(strings.ToLower(word)); err != nil {
+			return err
+		}
+		// A function result can be indexed: `fromJSON('…').key`, `[0]`.
+		return v.parseAccessSuffix()
 	}
 	path := strings.Split(word, ".")
 	for {
@@ -226,10 +234,82 @@ func (v *ifValidator) parsePrimary() error {
 			}
 			path = append(path, strings.Split(next, ".")...)
 		default:
-			return v.validateReference(path, strings.Join(path, "."))
+			return v.validatePath(path)
 		}
 	}
+	return v.validatePath(path)
+}
+
+// validatePath checks a reference, or a BARE context name (a whole object a
+// function can take, as in toJSON(github)).
+func (v *ifValidator) validatePath(path []string) error {
+	if len(path) == 1 {
+		return v.validateBareContext(path[0])
+	}
 	return v.validateReference(path, strings.Join(path, "."))
+}
+
+// validateBareContext checks a whole-context reference.
+func (v *ifValidator) validateBareContext(name string) error {
+	context := strings.ToLower(name)
+	if !isObjectContext(context) {
+		return fmt.Errorf("unknown identifier %q", name)
+	}
+	if !contextAvailable(v.scope.effectiveSite(), context) {
+		return fmt.Errorf("%s is not available in %s (available contexts: %s)",
+			name, v.scope.effectiveSite(), listOrNone(SiteContexts(v.scope.effectiveSite())))
+	}
+	return nil
+}
+
+// parseAccessSuffix consumes the `.key` / `['key']` / `[0]` chain after a
+// function call, mirroring the evaluator.
+func (v *ifValidator) parseAccessSuffix() error {
+	for {
+		v.skipSpace()
+		if v.pos >= len(v.src) {
+			return nil
+		}
+		switch v.src[v.pos] {
+		case '[':
+			v.pos++
+			v.skipSpace()
+			if v.pos >= len(v.src) {
+				return fmt.Errorf("missing ] in property access")
+			}
+			if v.src[v.pos] == '\'' || v.src[v.pos] == '"' {
+				if err := v.parseString(); err != nil {
+					return err
+				}
+			} else {
+				start := v.pos
+				for v.pos < len(v.src) && ((v.src[v.pos] >= '0' && v.src[v.pos] <= '9') || v.src[v.pos] == '-') {
+					v.pos++
+				}
+				if start == v.pos {
+					return fmt.Errorf("property access must be a quoted key or an integer index, as in value['key'] or value[0]")
+				}
+				if _, err := strconv.Atoi(v.src[start:v.pos]); err != nil {
+					return fmt.Errorf("%q is not an integer index", v.src[start:v.pos])
+				}
+			}
+			v.skipSpace()
+			if !v.consume("]") {
+				return fmt.Errorf("missing ] after an index")
+			}
+		case '.':
+			v.pos++
+			next := v.parseWord()
+			if next == "" {
+				return fmt.Errorf("expected a property name after .")
+			}
+			if strings.Contains(next, "*") {
+				return fmt.Errorf("%q is not a property name (object filters are not supported on a parsed value)", next)
+			}
+		default:
+			return nil
+		}
+	}
 }
 
 // parseCall validates one function call and its arguments.
@@ -343,6 +423,16 @@ func (v *ifValidator) validateReference(path []string, word string) error {
 	case "matrix":
 		if len(path) != 2 || !containsExact(v.scope.Axes, path[1]) {
 			return fmt.Errorf("%s is not a declared matrix key (declared: %s)", word, listOrNone(v.scope.Axes))
+		}
+		return nil
+	case "strategy":
+		if len(path) != 2 || !ValidStrategyField(path[1]) {
+			return fmt.Errorf("%s is not a supported strategy field (supported: %s)", word, strings.Join(StrategyFields, ", "))
+		}
+		return nil
+	case "job":
+		if len(path) != 2 || !ValidJobField(path[1]) {
+			return fmt.Errorf("%s is not a supported job field (supported: %s)", word, strings.Join(JobFields, ", "))
 		}
 		return nil
 	case "inputs":

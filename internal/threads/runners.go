@@ -1098,8 +1098,13 @@ type FetchResult struct {
 	ServerURL string `json:"server_url,omitempty"`
 	// Secrets are decrypted ONLY for a trusted run (15 §5); a fork run carries
 	// an empty map and SecretsDenied=true.
-	Secrets       map[string]string `json:"secrets"`
-	Mask          []string          `json:"mask"`
+	Secrets map[string]string `json:"secrets"`
+	Mask    []string          `json:"mask"`
+	// SecretScopes is the provenance of each delivered secret: name → scope
+	// ("organization", "repository", "environment"). It travels with the
+	// payload so a runner log and an operator see WHERE a credential came
+	// from; it never carries a value (PAR-115).
+	SecretScopes  map[string]string `json:"secret_scopes,omitempty"`
 	SecretsDenied bool              `json:"secrets_denied"`
 	LeaseUntil    string            `json:"lease_until"`
 	// LabelImages is the runner's declared label→image map (PAR-171), echoed so
@@ -1403,7 +1408,7 @@ func (s *Service) fetchPayload(ctx context.Context, owner, repo string, runner *
 			sort.Strings(res.Mask)
 		}
 	}
-	values, err := s.secretValues(ctx, owner, repo)
+	values, scopes, err := s.resolvedSecrets(ctx, owner, repo)
 	if err != nil {
 		return nil, err
 	}
@@ -1413,8 +1418,16 @@ func (s *Service) fetchPayload(ctx context.Context, owner, repo string, runner *
 	// secret the callee does not declare never reaches it. An ordinary job has
 	// no reusable secret set and keeps the repository's secrets.
 	values = reusableSecretValues(job.Spec, values)
-	// Environment secrets override repository secrets by name (GitHub's rule,
-	// docs/PLAN-THREADS-ENVIRONMENTS.md §4). They are resolved only for a job
+	// A filtered-out secret must not keep a scope record: the record names what
+	// the job actually received.
+	for name := range scopes {
+		if _, ok := values[name]; !ok {
+			delete(scopes, name)
+		}
+	}
+	// Environment secrets override repository and organization secrets by name
+	// (GitHub's rule, docs/PLAN-THREADS-ENVIRONMENTS.md §4; the precedence is
+	// ENVIRONMENT > REPOSITORY > ORGANIZATION). They are resolved only for a job
 	// that names an environment, only for a TRUSTED run, and only when the
 	// deployment is approved (or required no approval) — guardDeploymentSecrets
 	// fails the fetch closed otherwise, so a deployment nobody approved can
@@ -1429,6 +1442,7 @@ func (s *Service) fetchPayload(ctx context.Context, owner, repo string, runner *
 		}
 		for name, value := range envVals {
 			values[name] = value
+			scopes[name] = SecretScopeEnvironment
 		}
 	}
 	for name, value := range values {
@@ -1436,6 +1450,16 @@ func (s *Service) fetchPayload(ctx context.Context, owner, repo string, runner *
 		res.Mask = append(res.Mask, value)
 	}
 	sort.Strings(res.Mask)
+	res.SecretScopes = scopes
+	// The run records WHERE each secret came from (never what it was). The
+	// write is on the attempt the runner is about to execute, so the run page
+	// and the API can name the scope; a store failure fails the fetch rather
+	// than handing out credentials whose provenance nobody recorded.
+	if len(scopes) > 0 {
+		if _, uerr := s.UpdateJob(ctx, id, claim.Entry.RunID, claim.Entry.JobID, JobUpdate{SecretScopes: scopes}); uerr != nil {
+			return nil, uerr
+		}
+	}
 	return res, nil
 }
 

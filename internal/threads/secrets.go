@@ -9,7 +9,10 @@ import (
 	"fmt"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
+	"sync"
+	"time"
 
 	"github.com/crueber/spindle/internal/server/auth"
 	"github.com/crueber/spindle/internal/store"
@@ -60,8 +63,11 @@ func normalizeSecretName(name string) (string, error) {
 	return name, nil
 }
 
-// sealSecret encrypts one value with AES-GCM, binding it to (repo, name).
-func (s *Service) sealSecret(repo, name, value string) (string, error) {
+// sealSecret encrypts one value with AES-GCM, binding it to (scope, name). The
+// repository scope passes the repository id; an organization secret passes
+// "org:<org>", so a ciphertext can never be replayed under another scope even
+// when both hold a secret of the same name.
+func (s *Service) sealSecret(scope, name, value string) (string, error) {
 	if !s.keys.SecretsEnabled() {
 		return "", fmt.Errorf("%w: repository secrets need server.secrets_key or server.auth.session_secret", ErrUnavailable)
 	}
@@ -70,12 +76,12 @@ func (s *Service) sealSecret(repo, name, value string) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("%w: nonce: %v", ErrUnavailable, err)
 	}
-	sealed := gcm.Seal(nonce, nonce, []byte(value), secretAAD(repo, name))
+	sealed := gcm.Seal(nonce, nonce, []byte(value), secretAAD(scope, name))
 	return base64.StdEncoding.EncodeToString(sealed), nil
 }
 
 // openSecret decrypts one stored value (trusted runs + the log masker only).
-func (s *Service) openSecret(repo, name, sealed string) (string, error) {
+func (s *Service) openSecret(scope, name, sealed string) (string, error) {
 	if !s.keys.SecretsEnabled() {
 		return "", fmt.Errorf("%w: repository secrets need server.secrets_key or server.auth.session_secret", ErrUnavailable)
 	}
@@ -88,7 +94,7 @@ func (s *Service) openSecret(repo, name, sealed string) (string, error) {
 		return "", fmt.Errorf("%w: secret %s: short envelope", ErrCorrupt, name)
 	}
 	nonce, body := raw[:gcm.NonceSize()], raw[gcm.NonceSize():]
-	plain, oerr := gcm.Open(nil, nonce, body, secretAAD(repo, name))
+	plain, oerr := gcm.Open(nil, nonce, body, secretAAD(scope, name))
 	if oerr != nil {
 		return "", fmt.Errorf("%w: secret %s: cannot be opened (wrong key or corrupt)", ErrCorrupt, name)
 	}
@@ -212,11 +218,57 @@ func (s *Service) DeleteSecret(ctx context.Context, repo, name string, p auth.Pr
 	return s.Store.Delete(ctx, SecretKey(owner, rname, name), "")
 }
 
-// secretValues decrypts every secret of one repository, for a trusted job
-// payload and the log masker. A single unreadable envelope fails the fetch
-// (fail closed: a job that silently lost its secrets is worse than a clear
-// error an operator can fix).
+// Secret scope labels recorded on a job (Job.SecretScopes) and in the fetch
+// payload: the scope a resolved value came from, never the value.
+const (
+	SecretScopeOrganization = "organization"
+	SecretScopeRepository   = "repository"
+	SecretScopeEnvironment  = "environment"
+)
+
+// secretValues decrypts every secret a trusted job of this repository reads,
+// with the documented precedence: organization first, then repository (a
+// repository secret of the same name wins). Environment secrets override both
+// at claim time (fetchPayload), because only the job's spec names one. A single
+// unreadable envelope fails the fetch (fail closed: a job that silently lost its
+// secrets is worse than a clear error an operator can fix).
 func (s *Service) secretValues(ctx context.Context, owner, repo string) (map[string]string, error) {
+	values, _, err := s.resolvedSecrets(ctx, owner, repo)
+	return values, err
+}
+
+// resolvedSecrets is secretValues plus the scope each value came from. Both
+// scopes are resolved before the caller filters for a reusable callee, so a
+// filtered-out secret loses its scope record too (fetchPayload reconciles).
+func (s *Service) resolvedSecrets(ctx context.Context, owner, repo string) (map[string]string, map[string]string, error) {
+	values := map[string]string{}
+	scopes := map[string]string{}
+	if !s.SecretsEnabled() {
+		return values, scopes, nil
+	}
+	org, oerr := s.orgSecretValues(ctx, owner, repo)
+	if oerr != nil {
+		return nil, nil, oerr
+	}
+	for name, value := range org {
+		values[name] = value
+		scopes[name] = SecretScopeOrganization
+	}
+	repoVals, rerr := s.repoSecretValues(ctx, owner, repo)
+	if rerr != nil {
+		return nil, nil, rerr
+	}
+	for name, value := range repoVals {
+		values[name] = value
+		scopes[name] = SecretScopeRepository
+	}
+	return values, scopes, nil
+}
+
+// repoSecretValues decrypts one repository's own secrets (the historical
+// per-name object layout; a LIST here is the repository prefix the caller
+// already owns).
+func (s *Service) repoSecretValues(ctx context.Context, owner, repo string) (map[string]string, error) {
 	if !s.SecretsEnabled() {
 		return map[string]string{}, nil
 	}
@@ -251,20 +303,259 @@ func (s *Service) secretValues(ctx context.Context, owner, repo string) (map[str
 	return out, nil
 }
 
-// maskSecrets replaces every occurrence of every secret value in one log frame
-// (best effort, documented: exact substring matches only, longest first so a
-// value that contains another is fully replaced).
-func maskSecrets(text string, values []string) string {
+// maskSecretValues replaces every occurrence of every secret value in one log
+// frame (best effort, documented: exact matches, plus the two refinements the
+// PAR-116 evidence pins):
+//   - a value of 4+ bytes is replaced wherever it appears, longest value first
+//     so a value that contains another is fully replaced;
+//   - a MULTI-LINE value is also masked line by line, because a tool that
+//     prints it with its newlines and a streamer that splits a frame can hand
+//     the masker one line at a time;
+//   - a value SHORTER than 4 bytes is replaced only as a whole token (bounded
+//     by non-identifier bytes), so a 1–3 byte secret is masked where it is
+//     used without shredding every word that happens to contain it.
+//
+// MaskValues is the ONE masking rule, exported for the runner process: both
+// the server (before a frame/annotation/summary is stored) and the runner
+// (before a frame leaves the process) apply it, so the two layers cannot spell
+// masking differently.
+func MaskValues(text string, values []string) string { return maskSecretValues(text, values) }
+
+func maskSecretValues(text string, values []string) string {
 	if text == "" || len(values) == 0 {
 		return text
 	}
-	sorted := append([]string(nil), values...)
-	sort.Slice(sorted, func(i, j int) bool { return len(sorted[i]) > len(sorted[j]) })
-	for _, v := range sorted {
+	for _, v := range maskPatterns(values) {
 		if len(v) < 4 {
-			continue // a 1–3 byte value would shred the log
+			text = replaceToken(text, v)
+			continue
 		}
 		text = strings.ReplaceAll(text, v, "***")
 	}
 	return text
+}
+
+// maskPatterns expands the raw values into the patterns the masker applies,
+// longest first: the value itself plus, for a multi-line value, each non-empty
+// line long enough to be masked (both as printed and trimmed).
+func maskPatterns(values []string) []string {
+	seen := map[string]bool{}
+	out := make([]string, 0, len(values))
+	add := func(v string) {
+		if v == "" || seen[v] {
+			return
+		}
+		seen[v] = true
+		out = append(out, v)
+	}
+	for _, v := range values {
+		if v == "" {
+			continue
+		}
+		add(v)
+		if !strings.ContainsAny(v, "\r\n") {
+			continue
+		}
+		for _, line := range strings.FieldsFunc(v, func(r rune) bool { return r == '\n' || r == '\r' }) {
+			if len(line) >= 4 {
+				add(line)
+			}
+			if trimmed := strings.TrimSpace(line); trimmed != line && len(trimmed) >= 4 {
+				add(trimmed)
+			}
+		}
+	}
+	sort.SliceStable(out, func(i, j int) bool { return len(out[i]) > len(out[j]) })
+	return out
+}
+
+// replaceToken masks a short value only where it stands alone: the byte before
+// and after it is not an identifier character. Overlaps are handled by
+// advancing one byte on a rejected match.
+func replaceToken(text, v string) string {
+	if text == "" || v == "" {
+		return text
+	}
+	var b strings.Builder
+	b.Grow(len(text))
+	for i := 0; i < len(text); {
+		j := strings.Index(text[i:], v)
+		if j < 0 {
+			b.WriteString(text[i:])
+			break
+		}
+		j += i
+		beforeOK := j == 0 || !identifierByte(text[j-1])
+		after := j + len(v)
+		afterOK := after == len(text) || !identifierByte(text[after])
+		b.WriteString(text[i:j])
+		if beforeOK && afterOK {
+			b.WriteString("***")
+			i = after
+			continue
+		}
+		b.WriteByte(text[j])
+		i = j + 1
+	}
+	return b.String()
+}
+
+// identifierByte reports whether c can be part of an identifier (the token
+// boundary rule the short-value masker uses). '-', '.', and ':' count as
+// intra-token bytes, so a short value inside a hyphenated or dotted word
+// ("own-abc", "v1.abc") or in front of a separator ("s3://bucket",
+// "key:value") is not a false positive; a value that stands alone between
+// whitespace, quotes, '=' or brackets still is.
+func identifierByte(c byte) bool {
+	return c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= '0' && c <= '9' ||
+		c == '_' || c == '-' || c == '.' || c == ':'
+}
+
+// --- the per-job mask set ----------------------------------------------------
+
+// maskCache remembers one job attempt's mask list for the life of the job. A
+// log frame, a step summary and an annotation set all need the same values, and
+// re-resolving (one LIST plus every envelope, plus the environment and variable
+// documents) on every 256 KiB frame would be a cost with no correctness gain:
+// the job received its values at claim time, so a value written after the claim
+// was never in that job's environment. The cache is memory only (law 4: warmth),
+// bounded, and a pointer so Service stays copyable in tests.
+type maskCache struct {
+	mu      sync.Mutex
+	entries map[string]maskCacheEntry
+}
+
+type maskCacheEntry struct {
+	values []string
+	at     time.Time
+}
+
+const (
+	maskCacheTTL = 30 * time.Minute
+	maskCacheMax = 512
+	// maxMaskValues bounds one job's mask list (a mask is applied per frame, so
+	// an unbounded list is a CPU knife — the runner applies the same bound).
+	maxMaskValues = 256
+)
+
+func newMaskCache() *maskCache {
+	return &maskCache{entries: map[string]maskCacheEntry{}}
+}
+
+func (c *maskCache) get(key string, now time.Time) ([]string, bool) {
+	if c == nil {
+		return nil, false
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	entry, ok := c.entries[key]
+	if !ok || now.Sub(entry.at) > maskCacheTTL {
+		delete(c.entries, key)
+		return nil, false
+	}
+	return entry.values, true
+}
+
+func (c *maskCache) put(key string, values []string, now time.Time) {
+	if c == nil {
+		return
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if len(c.entries) >= maskCacheMax {
+		for k, entry := range c.entries {
+			if now.Sub(entry.at) > maskCacheTTL {
+				delete(c.entries, k)
+			}
+		}
+		if len(c.entries) >= maskCacheMax {
+			// Still full: drop an arbitrary entry. Every entry is a cache hit
+			// that costs one resolution to rebuild, never a correctness loss.
+			for k := range c.entries {
+				delete(c.entries, k)
+				break
+			}
+		}
+	}
+	c.entries[key] = maskCacheEntry{values: values, at: now}
+}
+
+// forget drops one attempt's cached mask (complete, cancel, rerun).
+func (c *maskCache) forget(key string) {
+	if c == nil {
+		return
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	delete(c.entries, key)
+}
+
+// maskCacheKey is one attempt's cache identity.
+func maskCacheKey(repo, runID, jobID string, attempt int) string {
+	return repo + "|" + runID + "|" + jobID + "|" + strconv.Itoa(attempt)
+}
+
+// jobMaskValues is the complete value set a trusted job's log frames, step
+// summary, annotations and step errors are masked with: every secret the job
+// could read (organization, repository and the environment it names) plus every
+// variable and environment variable, which carry the same posture. An untrusted
+// job has no values at all. The result is cached per attempt.
+func (s *Service) jobMaskValues(ctx context.Context, owner, repo string, job *Job) ([]string, error) {
+	if job == nil {
+		return nil, nil
+	}
+	key := maskCacheKey(repoID(owner, repo), job.RunID, job.ID, job.Attempt)
+	if cached, ok := s.maskCache.get(key, s.nowUTC()); ok {
+		return cached, nil
+	}
+	seen := map[string]bool{}
+	values := make([]string, 0, 8)
+	add := func(v string) {
+		if v == "" || seen[v] || len(values) >= maxMaskValues {
+			return
+		}
+		seen[v] = true
+		values = append(values, v)
+	}
+	secrets, _, serr := s.resolvedSecrets(ctx, owner, repo)
+	if serr != nil {
+		return nil, serr
+	}
+	for _, v := range secrets {
+		add(v)
+	}
+	vars, verr := s.variableValues(ctx, owner, repo)
+	if verr != nil {
+		return nil, verr
+	}
+	for _, v := range vars {
+		add(v)
+	}
+	if job.Spec != nil && job.Spec.Environment != nil {
+		envName := strings.TrimSpace(job.Spec.Environment.Name)
+		if envName != "" {
+			envSecrets, eerr := s.environmentSecretValues(ctx, owner, repo, envName)
+			if eerr != nil {
+				return nil, eerr
+			}
+			for _, v := range envSecrets {
+				add(v)
+			}
+			envVars, eerr := s.environmentVariableValues(ctx, owner, repo, envName)
+			if eerr != nil {
+				return nil, eerr
+			}
+			for _, v := range envVars {
+				add(v)
+			}
+		}
+	}
+	sort.Strings(values)
+	s.maskCache.put(key, values, s.nowUTC())
+	return values, nil
+}
+
+// forgetJobMask drops one attempt's cached mask.
+func (s *Service) forgetJobMask(repo, runID, jobID string, attempt int) {
+	s.maskCache.forget(maskCacheKey(repo, runID, jobID, attempt))
 }
