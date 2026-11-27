@@ -34,6 +34,7 @@ var banned = []string{
 var workflowGlobs = []string{
 	".forgejo/workflows/*.yml",
 	"scripts/publish/*.yml",
+	".github/workflows/*.yml",
 }
 
 func repoRoot(t *testing.T) string {
@@ -90,12 +91,24 @@ func TestCIInstallsNothingAtRunTime(t *testing.T) {
 // bare runner with preinstalled-but-older tools.
 func TestGitHubGateRunsThePreppedImage(t *testing.T) {
 	root := repoRoot(t)
-	path := filepath.Join(root, "scripts", "publish", "ci.yml")
-	raw, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatalf("read %s: %v", path, err)
+	// The source tree carries the template; the published tree carries the rendered
+	// workflow. Both must pin the image, so accept either location.
+	candidates := []string{
+		filepath.Join(root, "scripts", "publish", "ci.yml"),
+		filepath.Join(root, ".github", "workflows", "ci.yml"),
 	}
-	body := string(raw)
+	var body string
+	var err error
+	for _, path := range candidates {
+		var raw []byte
+		if raw, err = os.ReadFile(path); err == nil {
+			body = string(raw)
+			break
+		}
+	}
+	if body == "" {
+		t.Fatalf("no CI workflow found at %v: %v", candidates, err)
+	}
 	if !strings.Contains(body, "spindle-ci@sha256:") {
 		t.Error("scripts/publish/ci.yml does not pin the prepped CI image by digest")
 	}
