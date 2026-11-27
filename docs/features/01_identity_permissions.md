@@ -370,6 +370,19 @@ read-only shadow), but no prefix ever has two writers and the source's
 disappearance is monotonic. A push racing the delete pass is reported with the
 residue count (`409 … N object(s) remain`), never silently stranded.
 
+**The old path is 404 from the commit on, never 503.** Authority transfers at
+the destination-manifest ACK, so the source serving handle is flushed **at that
+commit point** (before the objects go) and again after the delete pass — a read
+that lands between the pre-copy flush and the manifest delete can re-open the
+handle while the manifest still exists. The engine closes the remaining window:
+the freshness conditional GET of `manifest.pb` is the existence probe
+(`docs/go/05_wal_engine.md` §5.2 step 1), so an absent manifest under a live
+handle is `WalErrNotFound` (404), never a store fault (503). Before that rule,
+the moved-away path answered 503 for as long as the stale handle lived — the
+intermittent `TestE2E_RepoTransferTaskMovesEveryFamily` failure (`old path
+summary = 503`), not a test race: the task was complete and the assertion was
+right.
+
 **Re-runnable after a crash (bucket truth, not task memory).** A retry converges
 from three observable states:
 
@@ -392,7 +405,7 @@ destination is a `409` on the request path (not a task that fails later).
 | parent `meta/forks.json` row | `internal/pulls` (**seam**) | `ChildMoved`: one CAS renaming the moved child's row; an absent index/row writes nothing (the #457 ghost rule). |
 | child `fork.json` `parent`/`root` | `internal/pulls` (**seam**) | `ParentMoved`: enumerates the **moved** index (it travelled with the prefix) and CASes each child's pointers old→new; a child whose provenance is gone is skipped, a corrupt one fails the pass. Load-bearing: `wal/forkread.go`'s pack fallback and `maintain/forknet.go`'s GC walk follow these pointers. |
 | `packages/registry/**` | `internal/packages` | travels with the prefix; T1 adds `RepoMoved` to drop the per-repo sweep bookkeeping (due clock + just-finalized blob grace) for both ids — the only cross-reference the registry has. Verification asserts every source registry key reappeared at the destination. |
-| serving copy + listing cache | `internal/wal` | new `(*Registry).Invalidate(id)`: drops the in-memory handle, removes the local `<cache.dir>/<owner>/<name>.git`, and invalidates the 30 s listing snapshot — **without touching bucket objects** (the non-destructive twin of `Delete`). Called on the source before the copy pass (quiesce) and on both ids afterwards. |
+| serving copy + listing cache | `internal/wal` | new `(*Registry).Invalidate(id)`: drops the in-memory handle, removes the local `<cache.dir>/<owner>/<name>.git`, and invalidates the 30 s listing snapshot — **without touching bucket objects** (the non-destructive twin of `Delete`). Called on the source before the copy pass (quiesce) **and at the commit point** (destination-manifest ACK), and on both ids after the move. |
 | `access.json` | identity | unchanged from v1: owner-subject rewrite (`user:<src>` dropped, `user:<dst>`/admin added for user destinations), corrupt bytes carried opaquely, missing → the destination's synthesized default for user destinations only. |
 | stars/watches (`users/<p>/starred`, `users/<p>/watching`) | `internal/social` | **not rewritten** — the rows cannot be found without a users LIST (forbidden). The `/{user}/starred` page already skips rows whose manifest is missing and the moved `social.json` counters carry forward; documented residue, self-healing when users un-star/re-star at the new path. |
 

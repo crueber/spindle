@@ -200,7 +200,11 @@ func (h *RepoHandle) Sync(ctx context.Context, lvl SyncLevel) (*ReadGuard, error
 
 Algorithm (per sync):
 
-**1. Freshness check.** Unless within `wal.freshness_ttl` (default 0 = always check) of `freshAt`: known version → conditional GET of `manifest.pb` (`304 Unchanged` → done); unknown version → unconditional GET (absent → `ErrNotFound`). Under `syncMu`, **try-lock first**; on failure measure queue wait and block — and if the wait exceeds `telemetry.lock_wait_warn`, WARN with lock name, repo, and wait ms (§5.9). After a successful fetch apply the monotonic revision guard: `manifest.Revision <= heldRev` → discard body, update `freshAt` only.
+**1. Freshness check.** Unless within `wal.freshness_ttl` (default 0 = always check) of `freshAt`:
+known version → conditional GET of `manifest.pb` (`304 Unchanged` → done; **absent → `ErrNotFound`** —
+the read IS the existence probe, so a repository deleted or moved away under a live handle answers
+404, never a store fault (`WalErrNotFound` is the class every caller maps to 404)); unknown version →
+unconditional GET (absent → `ErrNotFound`). Under `syncMu`, **try-lock first**; on failure measure queue wait and block — and if the wait exceeds `telemetry.lock_wait_warn`, WARN with lock name, repo, and wait ms (§5.9). After a successful fetch apply the monotonic revision guard: `manifest.Revision <= heldRev` → discard body, update `freshAt` only.
 
 **2. applyDelta.** If `manifest.Checkpoint != nil && manifest.Checkpoint.Seq > state.AppliedSeq` → GET `refs.pb` at the checkpoint key, write it directly into `packed-refs` (sorted, `head_target` applied to HEAD; `peeled` entries written as `<oid> peeled` lines per 04_git.md), set `state.AppliedSeq = checkpoint.Seq`, and bump the checkpoint-time cache. Then replay the log tail: fetch ALL segment objects overlapping `(applied_seq, head_seq]` in parallel (chunks of 16 goroutines, each segment GET a goroutine), decode each with partial-tail tolerance (§5.3 framing: stop at the first incomplete trailing frame, not an error), merge all entries, sort by `seq`, and apply in order:
 
@@ -585,3 +589,16 @@ Background prefetch (from §6.2): after a refs-only sync, if `wal.prefetch_packs
   the no-children path is byte-identical to the old wipe. Pinned by
   `TestDelete451*` (table, multi-level chain, absorb, tombstone GC) plus
   `TestE2E_ForkDeleteKeepsChildrenWorking` (real-git clone/push/reads post-delete).
+
+- **NEW (2026-11-27) — a vanished manifest is `ErrNotFound` on the conditional
+  read too (transfer old-path 503).** §5.2 step 1's conditional GET is also the
+  existence probe: when `manifest.pb` disappears under a live handle (the
+  repo-transfer delete pass, a repo delete racing a cached handle) the absent
+  key now answers `WalErrNotFound`, not `WalErrStore`. The old code wrapped
+  every conditional-GET error as a store fault, so the moved-away path answered
+  `503` until something dropped the handle — the intermittent
+  `TestE2E_RepoTransferTaskMovesEveryFamily` failure. No wire or budget shape
+  changed (same one GET; the absent arm is the failure path). Pinned by
+  `TestSync_VanishedManifestIsNotFound`, the identity
+  `TestTransferOldPathIs404EvenIfAHandleRacesTheDelete` (a handle opened inside
+  the manifest-delete window) and the transfer flush ordering test.

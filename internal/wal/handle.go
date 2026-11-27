@@ -142,6 +142,15 @@ func (h *RepoHandle) freshenManifest(ctx context.Context) error {
 	if h.version != "" {
 		res, err := h.reg.st.Get(ctx, key, store.GetOptions{IfNoneMatch: store.Version(h.version)})
 		if err != nil {
+			// The conditional read doubles as the existence probe (law 4): a
+			// manifest that vanished under a live handle means the repository
+			// is gone — the repo-transfer delete pass, or a delete racing a
+			// cached handle. That is NOT-FOUND, never a store fault: mapping
+			// it to WalErrStore made the old path of a completed move answer
+			// 503 until something dropped the handle.
+			if store.IsNotFound(err) {
+				return ErrNotFound(h.ID)
+			}
 			return &WalError{Kind: WalErrStore, Detail: key, Wrapped: err}
 		}
 		switch r := res.(type) {

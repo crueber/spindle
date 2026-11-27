@@ -16,6 +16,7 @@ import (
 	"github.com/crueber/spindle/internal/sizecatalog"
 	"github.com/crueber/spindle/internal/store"
 	"github.com/crueber/spindle/internal/store/proto"
+	"github.com/crueber/spindle/internal/wal"
 )
 
 // --- fakes ------------------------------------------------------------------
@@ -41,6 +42,27 @@ func (f *fakeServing) VerifyRepo(ctx context.Context, id string) error {
 	defer f.mu.Unlock()
 	f.verified = append(f.verified, id)
 	return f.failVerify
+}
+
+// manifestAwareServing records, per id, how many Invalidate calls saw the
+// repo's manifest already absent from the bucket — the evidence that the
+// handle was flushed at/after the move's commit point, not only before the
+// copy pass.
+type manifestAwareServing struct {
+	fakeServing
+	st               store.ObjectStore
+	goneAtInvalidate map[string]int
+}
+
+func (m *manifestAwareServing) Invalidate(id string) error {
+	owner, repo, ok := strings.Cut(id, "/")
+	if ok {
+		present, err := store.Exists(context.Background(), m.st, store.RepoPrefix(owner, repo)+manifestName)
+		if err == nil && !present {
+			m.goneAtInvalidate[id]++
+		}
+	}
+	return m.fakeServing.Invalidate(id)
 }
 
 // fakeForks is a faithful enough ForkMover: it keeps the parent index and the
@@ -269,6 +291,111 @@ func catalogRow(t *testing.T, svc *Service, id string) *proto.RepoCatalogEntry {
 }
 
 // --- tests ------------------------------------------------------------------
+
+// deleteHookStore runs hook before the underlying delete, so a test can act
+// inside a specific delete window (the transfer's manifest delete).
+type deleteHookStore struct {
+	store.ObjectStore
+	hook func(key string)
+}
+
+func (d *deleteHookStore) Delete(ctx context.Context, key string, token store.Version) error {
+	if d.hook != nil {
+		d.hook(key)
+	}
+	return d.ObjectStore.Delete(ctx, key, token)
+}
+
+// TestTransferOldPathIs404EvenIfAHandleRacesTheDelete reproduces the e2e
+// race deterministically: a read opens the SOURCE serving handle in the
+// window between the pre-copy flush and the manifest delete (the maintainer
+// sweep or a client request does this in production). Before the fix that
+// handle survived the task, and the old path answered 503 — the freshness
+// conditional GET on an absent manifest surfaced as a store fault — while the
+// destination served. The contract: once the move commits, the old id is not
+// a repository, whatever raced it.
+func TestTransferOldPathIs404EvenIfAHandleRacesTheDelete(t *testing.T) {
+	f := newTransferFix(t)
+	reg := f.reg
+	f.svc.Serving = reg
+	ctx := f.ctx
+
+	raced := false
+	f.svc.Store = &deleteHookStore{ObjectStore: f.svc.Store, hook: func(key string) {
+		if key != store.RepoPrefix("acme", "r1")+manifestName {
+			return
+		}
+		// The racing read: the manifest is still there this instant, so the
+		// registry caches a handle for the source that outlives it.
+		if _, err := reg.Open(ctx, "acme/r1"); err == nil {
+			raced = true
+		}
+	}}
+
+	if err := f.svc.TransferRepo(ctx, "acme", "r1", "beta", "r1"); err != nil {
+		t.Fatalf("TransferRepo: %v", err)
+	}
+	if !raced {
+		t.Fatal("fixture never opened the source handle in the delete window")
+	}
+	// The destination is served; the old path is gone — not-erroring is not
+	// enough, it must be the NOT-FOUND class (the HTTP layer's 404).
+	syncRepo := func(id string) error {
+		h, err := reg.Open(ctx, id)
+		if err != nil {
+			return err
+		}
+		g, err := h.Sync(ctx, wal.LevelRefs)
+		if err != nil {
+			return err
+		}
+		g.Release()
+		return nil
+	}
+	if err := syncRepo("beta/r1"); err != nil {
+		t.Fatalf("destination sync after the move: %v", err)
+	}
+	// isNotFound is the HTTP mapping's own predicate (WalEngine.open adopts a
+	// store not-found as the engine's): anything else is a 503-class fault.
+	isNotFound := func(err error) bool {
+		var we *wal.WalError
+		return store.IsNotFound(err) || (errors.As(err, &we) && we.Kind == wal.WalErrNotFound)
+	}
+	err := syncRepo("acme/r1")
+	if err == nil {
+		t.Fatal("old path still syncs after the move")
+	}
+	if !isNotFound(err) {
+		t.Fatalf("old path sync = %v, want not-found (404), never a store fault (503)", err)
+	}
+	if _, err := reg.Open(ctx, "acme/r1"); err == nil {
+		t.Fatal("registry still hands out a handle for the moved-away id")
+	} else if !isNotFound(err) {
+		t.Fatalf("old path open = %v, want not-found", err)
+	}
+}
+
+// TestTransferSourceHandleFlushedAfterCommit pins the ordering the old path
+// depends on: the source serving handle is dropped once the move commits, at
+// or after the point where the source manifest is gone — not only in the
+// pre-copy flush. A handle re-opened between that flush and the manifest
+// delete used to survive the task, and the old path then answered 503 (a
+// store fault from the freshness conditional GET on an absent manifest)
+// instead of 404. The engine half of the fix (a vanished manifest under a
+// live handle is NOT-FOUND) lives in internal/wal's sync tests; this test
+// proves the move stops handing the stale handle out in the first place.
+func TestTransferSourceHandleFlushedAfterCommit(t *testing.T) {
+	f := newTransferFix(t)
+	sv := &manifestAwareServing{st: f.svc.Store, goneAtInvalidate: map[string]int{}}
+	f.svc.Serving = sv
+	if err := f.svc.TransferRepo(f.ctx, "acme", "r1", "beta", "r1"); err != nil {
+		t.Fatalf("TransferRepo: %v", err)
+	}
+	if sv.goneAtInvalidate["acme/r1"] == 0 {
+		t.Fatalf("source handle never flushed after the move committed (invalidations: %v); "+
+			"a handle re-opened during the copy window stays cached and the old path answers 503, want 404", sv.invalid)
+	}
+}
 
 // TestTransferTaskFamilies is the completeness proof: catalog row, both fork
 // directions, packages and serving copies all follow the move, and the old

@@ -480,9 +480,13 @@ func (s *Service) transferRun(ctx context.Context, n Narrator, req TransferReque
 	}
 
 	// Phase 6: flush both serving copies and the access cache; the next open of
-	// either id reads bucket truth.
+	// either id reads bucket truth. The source is flushed again here because a
+	// request between the commit-point flush and the manifest delete can
+	// re-open its handle (the manifest was still present then); after the
+	// delete no new source handle can be born, so this flush is authoritative.
 	s.access.invalidate(req.SrcOwner, req.SrcRepo)
 	s.access.invalidate(req.DstOwner, req.DstRepo)
+	s.quiesce(ctx, req.SrcOwner, req.SrcRepo, n)
 	s.quiesce(ctx, req.DstOwner, req.DstRepo, n)
 	if s.Serving != nil {
 		// Re-open the destination so the verified state is the live handle.
@@ -622,6 +626,14 @@ func (s *Service) transferMovePass(ctx context.Context, n Narrator, st *transfer
 	}
 	st.committed = true
 	n.Notice("move committed at " + st.req.DestinationID() + " (" + fmt.Sprint(len(body)) + " objects)")
+	// Authority transferred at the destination manifest ACK: drop the source
+	// serving handle AT the commit point, before any object it referenced
+	// goes (the doc's one-writer rule). A request in the window between this
+	// flush and the source manifest delete can re-open the handle, so phase 6
+	// flushes the source again — and the engine's freshness check answers
+	// not-found for a manifest that vanished under a live handle, so the old
+	// path is 404 from the commit on, never a 503.
+	s.quiesce(ctx, st.req.SrcOwner, st.req.SrcRepo, n)
 
 	// Delete pass: manifest first (authority transfers), then the objects.
 	if err := s.Store.Delete(ctx, srcManifestKey, ""); err != nil && !store.IsNotFound(err) {
@@ -657,6 +669,10 @@ func (s *Service) transferResidue(ctx context.Context, n Narrator, st *transferS
 		}
 	}
 	st.committed = true
+	// The source manifest already left in the run that committed this move;
+	// flushing here closes the same window the fresh move closes at its commit
+	// point (a handle re-opened before the manifest delete).
+	s.quiesce(ctx, st.req.SrcOwner, st.req.SrcRepo, n)
 	if len(keys) > 0 {
 		n.Notice("deleting " + fmt.Sprint(len(keys)) + " reproduced source residue object(s)")
 	}

@@ -4,6 +4,7 @@ package wal
 
 import (
 	"context"
+	"errors"
 
 	"github.com/crueber/spindle/internal/config"
 	"strings"
@@ -63,6 +64,51 @@ func TestSync_LevelsAndFreshness(t *testing.T) {
 	g.Release()
 	if st.condGETs != before {
 		t.Fatalf("TTL-fresh sync issued %d conditional GETs, want 0", st.condGETs-before)
+	}
+}
+
+// TestSync_VanishedManifestIsNotFound pins the ordering contract every caller
+// relies on once a manifest is gone (the repo-transfer delete pass, a repo
+// delete): a handle still cached for that id answers NOT-FOUND, never a store
+// fault. The warm branch of the freshness check is a conditional GET, and an
+// absent key comes back as a store NotFound — mapping that to WalErrStore made
+// the old path of a COMPLETED move answer 503 until the handle was dropped.
+func TestSync_VanishedManifestIsNotFound(t *testing.T) {
+	r, st := newTestRegistry(t)
+	ctx := context.Background()
+	h, err := r.Create(ctx, "acme/api", git.Sha1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Publish + sync so the handle holds a manifest version: the next freshness
+	// check is the conditional-GET branch, not the unknown-version one.
+	oid := strings.Repeat("d", 40)
+	if _, err := h.Publish(ctx, PublishRequest{Txn: refTxn("refs/heads/main", git.Sha1.ZeroHex(), oid), Synced: true}); err != nil {
+		t.Fatal(err)
+	}
+	if g, serr := h.Sync(ctx, LevelRefs); serr != nil {
+		t.Fatalf("warm sync: %v", serr)
+	} else {
+		g.Release()
+	}
+
+	// The manifest disappears under the cached handle (the transfer's delete
+	// pass runs immediately after the destination manifest ACKs).
+	if err := st.Delete(ctx, "repos/acme/api/manifest.pb", ""); err != nil {
+		t.Fatalf("delete manifest: %v", err)
+	}
+
+	_, err = h.Sync(ctx, LevelRefs)
+	if err == nil {
+		t.Fatal("sync of a vanished repo succeeded")
+	}
+	var we *WalError
+	if !errors.As(err, &we) {
+		t.Fatalf("sync error = %v (%T), want *wal.WalError", err, err)
+	}
+	if we.Kind != WalErrNotFound {
+		t.Fatalf("sync of a vanished repo = %v (kind %d, detail %s), want WalErrNotFound (404), never a store fault (503)",
+			err, we.Kind, we.Detail)
 	}
 }
 
