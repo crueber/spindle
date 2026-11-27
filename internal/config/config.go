@@ -504,6 +504,33 @@ type Threads struct {
 	// allowlist, a full commit SHA required outside it, this instance as the
 	// only source unless `source` names one, and a bounded fetch.
 	Actions ThreadsActions `toml:"actions"`
+	// SMTP is the failure-notification mailer (PAR-197/D-27). It is OFF when
+	// host is empty, which is the default: a configured instance sends one
+	// message per (subscriber, failed run) to the subscriber's verified email
+	// address, with the same failure-only event filter and the same masking as
+	// the in-app inbox. Credentials are only accepted over TLS.
+	SMTP ThreadsSMTP `toml:"smtp"`
+}
+
+// ThreadsSMTP is the stdlib SMTP notifier (threads.smtp.*, D-27). Host empty
+// disables the channel entirely; when set, From and a TLS mode are required.
+type ThreadsSMTP struct {
+	// Host is the SMTP server hostname; empty disables email.
+	Host string `toml:"host"`
+	// Port is the server port (0 selects 587 for starttls, 465 for implicit).
+	Port int `toml:"port"`
+	// From is the envelope/From address; required when Host is set.
+	From string `toml:"from"`
+	// Username and Password authenticate with PLAIN, only over TLS. Leave both
+	// empty for an unauthenticated relay. Prefer the env overlay for Password:
+	// SPINDLE__THREADS__SMTP__PASSWORD.
+	Username string `toml:"username"`
+	Password string `toml:"password"`
+	// TLS is starttls (default), implicit (SMTPS) or none. `none` is only for
+	// a trusted loopback relay: it is refused when a username is set.
+	TLS string `toml:"tls"`
+	// Timeout bounds one delivery (default 10s).
+	Timeout Duration `toml:"timeout"`
 }
 
 // ThreadsActions is the remote-action policy (threads.actions.*).
@@ -707,6 +734,9 @@ func Defaults() *Config {
 				Source:     "",
 				MaxBytes:   16 << 20,
 			},
+			// Email notifications are off by default (D-27); the remaining
+			// defaults describe the shape a configured mailer takes.
+			SMTP: ThreadsSMTP{Host: "", Port: 0, From: "", TLS: "starttls", Timeout: Duration(10 * time.Second)},
 		},
 		Placement: Placement{Serve: []string{"*"}, Maintain: []string{"*"}},
 		Compaction: Compaction{

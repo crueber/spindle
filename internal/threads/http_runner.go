@@ -319,13 +319,27 @@ func (h *Handler) attemptLog(w http.ResponseWriter, r *http.Request, ref string,
 		return
 	}
 	var in struct {
-		Seq  int    `json:"seq"`
-		Text string `json:"text"`
+		Seq        int    `json:"seq"`
+		Time       string `json:"time"`
+		Stream     string `json:"stream"`
+		Kind       string `json:"kind"`
+		Text       string `json:"text"`
+		Step       int    `json:"step"`
+		Name       string `json:"name"`
+		Conclusion string `json:"conclusion"`
+		ExitCode   int    `json:"exit_code"`
+		DurationMS int64  `json:"duration_ms"`
 	}
-	if !decodeStrict(w, r, maxProtocolBody, map[string]bool{"seq": true, "text": true}, &in) {
+	if !decodeStrict(w, r, maxProtocolBody, map[string]bool{
+		"seq": true, "time": true, "stream": true, "kind": true, "text": true,
+		"step": true, "name": true, "conclusion": true, "exit_code": true, "duration_ms": true,
+	}, &in) {
 		return
 	}
-	view, err := h.Svc.AppendLog(r.Context(), claims, in.Seq, in.Text)
+	view, err := h.Svc.AppendLog(r.Context(), claims, in.Seq, LogRecord{
+		Time: in.Time, Stream: in.Stream, Kind: in.Kind, Text: in.Text, Step: in.Step,
+		Name: in.Name, Conclusion: in.Conclusion, ExitCode: in.ExitCode, DurationMS: in.DurationMS,
+	})
 	if err != nil {
 		writeErr(w, err)
 		return
@@ -616,6 +630,48 @@ func (h *Handler) handleOrgVariables(w http.ResponseWriter, r *http.Request, org
 		w.WriteHeader(http.StatusNoContent)
 	default:
 		methodNotAllowed(w, "GET", "PUT", "DELETE")
+	}
+	return true
+}
+
+// handleOrgSettings is the organization-level Threads settings surface
+// (PAR-153): GET the cap, PUT a full replacement. Org owner only, audited.
+func (h *Handler) handleOrgSettings(w http.ResponseWriter, r *http.Request, org string, rest []string) bool {
+	if len(rest) != 0 {
+		writePlain(w, http.StatusNotFound, "not found")
+		return true
+	}
+	switch r.Method {
+	case http.MethodGet:
+		p, aerr := h.principal(r)
+		if aerr != nil {
+			writeErr(w, aerr)
+			return true
+		}
+		view, err := h.Svc.GetOrgSettings(r.Context(), org, p)
+		if err != nil {
+			writeErr(w, err)
+			return true
+		}
+		writeJSON(w, http.StatusOK, view)
+	case http.MethodPut:
+		p, aerr := h.principal(r)
+		if aerr != nil {
+			writeErr(w, aerr)
+			return true
+		}
+		var in OrgSettingsInput
+		if !decodeStrict(w, r, 16<<10, map[string]bool{"concurrency_cap": true}, &in) {
+			return true
+		}
+		view, err := h.Svc.SetOrgSettings(r.Context(), org, in, p)
+		if err != nil {
+			writeErr(w, err)
+			return true
+		}
+		writeJSON(w, http.StatusOK, view)
+	default:
+		methodNotAllowed(w, "GET", "PUT")
 	}
 	return true
 }

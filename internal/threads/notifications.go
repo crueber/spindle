@@ -2,23 +2,24 @@ package threads
 
 // Run notifications (PAR-197).
 //
-// Threads notifications come in two documented channels:
+// Threads notifications come in three documented channels:
 //
 //   - the in-app inbox: a signed-in user subscribes to a repository's runs
 //     (all workflows or a named set) and gets ONE durable notification per
 //     failed run, with the run link. The record is keyed by the run id, so a
 //     re-fold or a retry can never notify twice;
 //   - a repository webhook: `notify_webhook` on the Threads settings record, a
-//     single POST with the run summary and link. It is off by default.
-//
-// Email is deliberately not implemented: this instance runs no mailer, so a
-// "subscribe by email" control would promise a delivery that cannot happen.
-// The named gap is recorded in docs/threads.md §9 rather than an inert form.
+//     single POST with the run summary and link. It is off by default;
+//   - email (D-27): the same inbox record, delivered to the subscriber's
+//     verified address through the operator-configured stdlib SMTP mailer
+//     (threads.smtp.*). Off by default, and sent only when the inbox record was
+//     just created, so it inherits the once-per-(user, run) guarantee; the
+//     message is masked with the run's job mask values (smtp.go).
 //
 // Delivery is detached from the fold (an unavailable webhook must never delay a
 // run completing) and best effort: a failed notification is logged, not
 // retried into a loop. The subscriber's record is the durable fact; the webhook
-// is the outbound hint.
+// and email are outbound hints.
 
 import (
 	"bytes"
@@ -54,6 +55,7 @@ type Notification struct {
 	Repo     string `json:"repo"`
 	RunID    string `json:"run_id"`
 	Workflow string `json:"workflow,omitempty"`
+	Branch   string `json:"branch,omitempty"`
 	State    string `json:"state"`
 	Title    string `json:"title"`
 	// Link is the run page path (relative), so a rendered inbox never has to
@@ -256,19 +258,29 @@ func (s *Service) notifyRunFailure(ctx context.Context, owner, repo, runID strin
 			users = append(users, user)
 		}
 		sort.Strings(users)
+		var emailMask emailMaskState
 		for _, user := range users {
 			if !subs.Subscribers[user].watches(run) {
 				continue
 			}
 			note := &Notification{
 				ID: runID, User: user, Repo: repoID(owner, repo), RunID: runID,
-				Workflow: run.Workflow, State: run.State,
+				Workflow: run.Workflow, Branch: run.Branch, State: run.State,
 				Title:     fmt.Sprintf("%s failed on %s", run.Workflow, run.Branch),
 				Link:      fmt.Sprintf("/%s/%s/threads/%s", owner, repo, runID),
 				CreatedAt: s.nowUTC().Format(dateTimeFmt),
 			}
-			if derr := s.putCreate(ctx, NotificationKey(user, runID), mustJSON(note)); derr != nil && !store.IsPreconditionFailed(derr) {
+			created := false
+			if derr := s.putCreate(ctx, NotificationKey(user, runID), mustJSON(note)); derr == nil {
+				created = true
+			} else if !store.IsPreconditionFailed(derr) {
 				slog.Warn("threads: notification write", "user", user, "run", runID, "err", derr)
+			}
+			// PAR-197/D-27: email is the third channel and rides the same
+			// created-once inbox record, so a repeat never sends a second
+			// message. It is off unless threads.smtp.host is configured.
+			if created {
+				s.notifyByEmail(ctx, owner, repo, note, &emailMask)
 			}
 		}
 	}

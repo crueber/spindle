@@ -83,6 +83,15 @@ type Triggers struct {
 	Release      *TypeTrigger `yaml:"release"`
 	Issues       *TypeTrigger `yaml:"issues"`
 	IssueComment *TypeTrigger `yaml:"issue_comment"`
+	// PullRequestReview and PullRequestReviewComment are the review service's
+	// edges (PAR-020): a submitted/dismissed review and a created inline
+	// review comment. Label and Milestone are the issues service's definition
+	// lifecycle (a label or milestone created/edited/deleted by triage), which
+	// is distinct from the PR/issue `labeled`/`milestoned` metadata edges.
+	PullRequestReview        *TypeTrigger `yaml:"pull_request_review"`
+	PullRequestReviewComment *TypeTrigger `yaml:"pull_request_review_comment"`
+	Label                    *TypeTrigger `yaml:"label"`
+	Milestone                *TypeTrigger `yaml:"milestone"`
 	// WorkflowCall makes this file a reusable workflow (PAR-075): its typed
 	// inputs, declared secrets and outputs are the contract a caller's
 	// `jobs.<id>.uses` is checked against. The key never starts a run.
@@ -100,6 +109,16 @@ type Triggers struct {
 	DeleteSet           bool `yaml:"-"`
 	DeploymentSet       bool `yaml:"-"`
 	DeploymentStatusSet bool `yaml:"-"`
+	// ForkSet/WatchSet are the fork and star events (PAR-021): both are
+	// emitted by the services that own the transition (pulls, social), so a
+	// bare key is a real trigger with no filters.
+	ForkSet  bool `yaml:"-"`
+	WatchSet bool `yaml:"-"`
+	// CheckRun names the external-CI check-run edges (PAR-021):
+	// created/completed. Threads' own mirrored check is the run itself, not an
+	// app check-run event, so it never re-fires this trigger.
+	CheckRun    *TypeTrigger `yaml:"check_run"`
+	CheckRunSet bool         `yaml:"-"`
 	// DispatchSet records that the key was PRESENT even as null
 	// (`workflow_dispatch:` with no value decodes to a nil pointer).
 	DispatchSet bool `yaml:"-"`
@@ -114,11 +133,15 @@ type Triggers struct {
 	ScheduleSet bool `yaml:"-"`
 	// ReleaseSet/IssuesSet/IssueCommentSet/RepositoryDispatchSet/WorkflowRunSet
 	// are the same presence rule for the typed triggers.
-	ReleaseSet            bool `yaml:"-"`
-	IssuesSet             bool `yaml:"-"`
-	IssueCommentSet       bool `yaml:"-"`
-	RepositoryDispatchSet bool `yaml:"-"`
-	WorkflowRunSet        bool `yaml:"-"`
+	ReleaseSet                  bool `yaml:"-"`
+	IssuesSet                   bool `yaml:"-"`
+	IssueCommentSet             bool `yaml:"-"`
+	PullRequestReviewSet        bool `yaml:"-"`
+	PullRequestReviewCommentSet bool `yaml:"-"`
+	LabelSet                    bool `yaml:"-"`
+	MilestoneSet                bool `yaml:"-"`
+	RepositoryDispatchSet       bool `yaml:"-"`
+	WorkflowRunSet              bool `yaml:"-"`
 	// WorkflowCallSet records `on.workflow_call` presence even as a bare null
 	// (`workflow_call:` with no body is a legal callable with no inputs).
 	WorkflowCallSet bool `yaml:"-"`
@@ -238,6 +261,29 @@ func (t *Triggers) UnmarshalYAML(node *yaml.Node) error {
 				if !isNull(val) {
 					err = checkKeys(val)
 				}
+			case "fork":
+				t.ForkSet = true
+				if !isNull(val) {
+					err = checkKeys(val)
+				}
+			case "watch":
+				t.WatchSet = true
+				if !isNull(val) {
+					err = checkKeys(val)
+				}
+			case "check_run":
+				t.CheckRunSet = true
+				if !isNull(val) {
+					if err = checkKeys(val, "types"); err == nil {
+						var r TypeTrigger
+						if err = val.Decode(&r); err == nil {
+							err = validateTypeFilter("check_run", r.Types, CheckRunTypes)
+						}
+						if err == nil {
+							t.CheckRun = &r
+						}
+					}
+				}
 			case "release":
 				t.ReleaseSet = true
 				if !isNull(val) {
@@ -274,6 +320,58 @@ func (t *Triggers) UnmarshalYAML(node *yaml.Node) error {
 						}
 						if err == nil {
 							t.IssueComment = &r
+						}
+					}
+				}
+			case "pull_request_review":
+				t.PullRequestReviewSet = true
+				if !isNull(val) {
+					if err = checkKeys(val, "types"); err == nil {
+						var r TypeTrigger
+						if err = val.Decode(&r); err == nil {
+							err = validateTypeFilter("pull_request_review", r.Types, ReviewTypes)
+						}
+						if err == nil {
+							t.PullRequestReview = &r
+						}
+					}
+				}
+			case "pull_request_review_comment":
+				t.PullRequestReviewCommentSet = true
+				if !isNull(val) {
+					if err = checkKeys(val, "types"); err == nil {
+						var r TypeTrigger
+						if err = val.Decode(&r); err == nil {
+							err = validateTypeFilter("pull_request_review_comment", r.Types, ReviewCommentTypes)
+						}
+						if err == nil {
+							t.PullRequestReviewComment = &r
+						}
+					}
+				}
+			case "label":
+				t.LabelSet = true
+				if !isNull(val) {
+					if err = checkKeys(val, "types"); err == nil {
+						var r TypeTrigger
+						if err = val.Decode(&r); err == nil {
+							err = validateTypeFilter("label", r.Types, LabelTypes)
+						}
+						if err == nil {
+							t.Label = &r
+						}
+					}
+				}
+			case "milestone":
+				t.MilestoneSet = true
+				if !isNull(val) {
+					if err = checkKeys(val, "types"); err == nil {
+						var r TypeTrigger
+						if err = val.Decode(&r); err == nil {
+							err = validateTypeFilter("milestone", r.Types, MilestoneTypes)
+						}
+						if err == nil {
+							t.Milestone = &r
 						}
 					}
 				}
@@ -346,6 +444,14 @@ func (t *Triggers) enable(name string) error {
 		t.IssuesSet = true
 	case "issue_comment":
 		t.IssueCommentSet = true
+	case "pull_request_review":
+		t.PullRequestReviewSet = true
+	case "pull_request_review_comment":
+		t.PullRequestReviewCommentSet = true
+	case "label":
+		t.LabelSet = true
+	case "milestone":
+		t.MilestoneSet = true
 	case "workflow_call":
 		t.WorkflowCallSet = true
 		t.WorkflowCall = &WorkflowCallTrigger{}
@@ -361,6 +467,12 @@ func (t *Triggers) enable(name string) error {
 		t.DeploymentSet = true
 	case "deployment_status":
 		t.DeploymentStatusSet = true
+	case "fork":
+		t.ForkSet = true
+	case "watch":
+		t.WatchSet = true
+	case "check_run":
+		t.CheckRunSet = true
 	default:
 		if why, refused := RefusedTriggers[name]; refused {
 			return fmt.Errorf("on: %s: %s", name, why)
@@ -380,17 +492,17 @@ func (t *Triggers) enable(name string) error {
 // `refs/heads/gh-readonly-queue/<base>/pr-<n>-<sha>` ref shape. Until then the
 // trigger cannot fire, so it is refused by name.
 var RefusedTriggers = map[string]string{
-	"merge_group":            "this instance has no merge queue (the Spindle \"Merge queue\" backlog item owns it), so a merge_group run cannot be emitted",
-	"fork":                   "spindle has no fork event emitter",
-	"watch":                  "spindle has no watch (star) event emitter",
-	"status":                 "spindle's check surface reports check runs, not legacy commit statuses",
-	"check_run":              "spindle does not emit check_run events (its Threads mirror writes checks, it does not publish app check runs)",
-	"check_suite":            "spindle does not emit check_suite events (its Threads mirror writes checks, it does not publish app check suites)",
-	"registry_package":       "spindle's OCI registry does not emit registry_package events",
-	"gollum":                 "spindle has no wiki",
-	"page_build":             "spindle serves static sites from committed bytes; it has no page build",
-	"branch_protection_rule": "spindle has no branch-protection-rule event emitter",
-	"public":                 "spindle has no repository visibility-change event emitter",
+	"merge_group":                "this instance has no merge queue (the Spindle \"Merge queue\" backlog item owns it), so a merge_group run cannot be emitted",
+	"status":                     "spindle's check surface reports check runs, not legacy commit statuses",
+	"check_suite":                "spindle has no app check-suite object: its checks mirror writes individual check runs (the check_run event is emitted for an external CI report), so a check_suite run cannot be emitted",
+	"registry_package":           "spindle's OCI registry does not emit registry_package events",
+	"gollum":                     "spindle has no wiki",
+	"page_build":                 "spindle serves static sites from committed bytes; it has no page build",
+	"branch_protection_rule":     "spindle has no branch-protection-rule event emitter",
+	"public":                     "spindle has no repository visibility-change event emitter",
+	"discussion":                 "spindle has no discussion surface, so a discussion run cannot be emitted",
+	"discussion_comment":         "spindle has no discussion surface, so a discussion_comment run cannot be emitted",
+	"pull_request_review_thread": "spindle emits pull_request_review and pull_request_review_comment; resolving an inline thread is not a separate trigger",
 }
 
 // PushTrigger filters branch/tag pushes and the changed paths that fire them.
@@ -534,6 +646,32 @@ var IssuesTypes = []string{"opened", "edited", "closed", "reopened", "labeled", 
 // service emits. Comment editing and deletion are not implemented, so those
 // unemittable actions stay parse errors.
 var IssueCommentTypes = []string{"created"}
+
+// ReviewTypes is the closed set of pull_request_review actions the review
+// service emits: submitted (a review posted) and dismissed (a maintainer
+// dismissal). Review editing is not implemented, so `edited` is a parse error.
+var ReviewTypes = []string{"submitted", "dismissed"}
+
+// ReviewCommentTypes is the closed set of pull_request_review_comment actions
+// the review service emits: created for a new inline thread or reply. Comment
+// editing and deletion are not implemented, so those stay parse errors.
+var ReviewCommentTypes = []string{"created"}
+
+// LabelTypes is the closed set of label-definition actions the issues service
+// emits (a label created, edited or deleted — NOT the `labeled` PR/issue edge).
+var LabelTypes = []string{"created", "edited", "deleted"}
+
+// MilestoneTypes is the closed set of milestone-definition actions the issues
+// service emits. `opened`/`closed` are the state transitions; `edited` is any
+// other field change; `deleted` removes the milestone.
+var MilestoneTypes = []string{"created", "opened", "closed", "edited", "deleted"}
+
+// CheckRunTypes is the closed set of check_run actions the checks service
+// emits for an external CI report: created when the check run first appears and
+// completed when it reaches a terminal state. `rerequested` and
+// `requested_action` are not implemented, so naming them is refused rather than
+// accepted inertly.
+var CheckRunTypes = []string{"created", "completed"}
 
 // validateFilters closes the two filter lists that cannot coexist and compiles
 // every pattern (a malformed pattern is the file's parse error).
@@ -686,8 +824,10 @@ type CronEntry struct {
 // `cancel-in-progress`. Carried into the spec; the scheduler enforcement is
 // pass B.
 type Concurrency struct {
-	Group            string `yaml:"group"`
-	CancelInProgress bool   `yaml:"cancel-in-progress"`
+	Group string `yaml:"group"`
+	// CancelInProgress is a literal or one whole `${{ … }}` expression
+	// (PAR-151), evaluated at run creation per matrix cell.
+	CancelInProgress BoolExpr `yaml:"cancel-in-progress"`
 }
 
 // UnmarshalYAML accepts `concurrency: ci-main` and the mapping form.
@@ -704,11 +844,11 @@ func (c *Concurrency) UnmarshalYAML(node *yaml.Node) error {
 			return err
 		}
 		var raw struct {
-			Group            string `yaml:"group"`
-			CancelInProgress bool   `yaml:"cancel-in-progress"`
+			Group            string   `yaml:"group"`
+			CancelInProgress BoolExpr `yaml:"cancel-in-progress"`
 		}
 		if err := node.Decode(&raw); err != nil {
-			return err
+			return fmt.Errorf("concurrency.cancel-in-progress: %w", err)
 		}
 		c.Group, c.CancelInProgress = raw.Group, raw.CancelInProgress
 		return nil
@@ -751,8 +891,10 @@ func (l *Labels) UnmarshalYAML(node *yaml.Node) error {
 func (l Labels) String() string { return strings.Join(l, ", ") }
 
 // Container is a job container: the scalar image shorthand or the mapping with
-// env/ports/command/entrypoint/options/volumes. v1 carries the mapping; the
-// executor is pass B.
+// env/ports/command/entrypoint/options/volumes. Every mapping key is applied by
+// the runner (docs/threads.md §4.1); `credentials` is carried so the server can
+// refuse it BY NAME with the registry-identity policy, rather than failing the
+// whole file on an unknown key.
 type Container struct {
 	Image      string            `yaml:"image"`
 	Env        map[string]string `yaml:"env"`
@@ -761,9 +903,40 @@ type Container struct {
 	Entrypoint []string          `yaml:"entrypoint"`
 	Options    string            `yaml:"options"`
 	Volumes    []string          `yaml:"volumes"`
+	// Credentials is Forgejo's registry-credential mapping. It is parsed so the
+	// refusal can name the field (the pull identity is the runner operator's,
+	// docs/threads.md §8.6), never applied.
+	Credentials *ContainerCredentials `yaml:"credentials"`
 }
 
-// UnmarshalYAML accepts `container: golang:1.27` and the mapping form.
+// ContainerCredentials is `container.credentials`: Forgejo's spelling for a
+// workflow-supplied registry login.
+type ContainerCredentials struct {
+	Username string `yaml:"username"`
+	Password string `yaml:"password"`
+}
+
+// UnmarshalYAML accepts only the documented two keys.
+func (c *ContainerCredentials) UnmarshalYAML(node *yaml.Node) error {
+	if node.Kind != yaml.MappingNode {
+		return fmt.Errorf("credentials: expected a mapping with username and password")
+	}
+	if err := checkKeys(node, "username", "password"); err != nil {
+		return fmt.Errorf("credentials: %w", err)
+	}
+	type raw ContainerCredentials
+	var r raw
+	if err := node.Decode(&r); err != nil {
+		return fmt.Errorf("credentials: %w", err)
+	}
+	*c = ContainerCredentials(r)
+	return nil
+}
+
+// UnmarshalYAML accepts `container: golang:1.27` and the mapping form. GitHub's
+// documented scalar-or-list spellings are accepted for ports/command/entrypoint
+// (`command: /bin/sh -c 'sleep infinity'` is the spelling authors use), and every
+// accepted key is applied by the runner.
 func (c *Container) UnmarshalYAML(node *yaml.Node) error {
 	switch node.Kind {
 	case yaml.ScalarNode:
@@ -773,15 +946,48 @@ func (c *Container) UnmarshalYAML(node *yaml.Node) error {
 		c.Image = node.Value
 		return nil
 	case yaml.MappingNode:
-		if err := checkKeys(node, "image", "env", "ports", "command", "entrypoint", "options", "volumes"); err != nil {
-			return err
+		if err := checkKeys(node, "image", "env", "ports", "command", "entrypoint", "options", "volumes", "credentials"); err != nil {
+			return fmt.Errorf("container: %w", err)
 		}
-		type raw Container
+		type raw struct {
+			Image       string                `yaml:"image"`
+			Env         map[string]string     `yaml:"env"`
+			Ports       yaml.Node             `yaml:"ports"`
+			Command     yaml.Node             `yaml:"command"`
+			Entrypoint  yaml.Node             `yaml:"entrypoint"`
+			Options     string                `yaml:"options"`
+			Volumes     []string              `yaml:"volumes"`
+			Credentials *ContainerCredentials `yaml:"credentials"`
+		}
 		var r raw
 		if err := node.Decode(&r); err != nil {
-			return err
+			return fmt.Errorf("container: %w", err)
 		}
-		*c = Container(r)
+		out := Container{Image: r.Image, Env: r.Env, Options: r.Options, Volumes: r.Volumes, Credentials: r.Credentials}
+		for _, field := range []struct {
+			name string
+			node yaml.Node
+			dst  *[]string
+			cmd  bool
+		}{
+			{"ports", r.Ports, &out.Ports, false},
+			{"command", r.Command, &out.Command, true},
+			{"entrypoint", r.Entrypoint, &out.Entrypoint, true},
+		} {
+			if field.node.Kind == 0 {
+				continue
+			}
+			var err error
+			if field.cmd {
+				err = DecodeCommandWords(&field.node, field.dst)
+			} else {
+				err = decodeStringOrList(&field.node, field.dst)
+			}
+			if err != nil {
+				return fmt.Errorf("container.%s: %w", field.name, err)
+			}
+		}
+		*c = out
 		return nil
 	default:
 		return fmt.Errorf("container: expected an image or a mapping")
@@ -863,6 +1069,48 @@ func (m Minutes) Int() int { return m.Value }
 
 // Set reports whether the key was authored at all.
 func (m Minutes) Set() bool { return m.Present }
+
+// BoolExpr is a boolean field that accepts a literal `true`/`false` or one
+// whole `${{ … }}` expression (PAR-056 `continue-on-error`, PAR-151
+// `concurrency.cancel-in-progress`). An expression is evaluated per matrix cell
+// before the job record is written, from the same cell values as the rest of
+// the strategy, so one cell can differ from another.
+type BoolExpr struct {
+	// Value is the literal (false when the key is absent or expression-valued).
+	Value bool
+	// Expr is the inside of the `${{ … }}` span, "" for a literal.
+	Expr string
+	// Present records that the key was authored.
+	Present bool
+}
+
+// UnmarshalYAML accepts a YAML boolean or one whole expression span.
+func (b *BoolExpr) UnmarshalYAML(node *yaml.Node) error {
+	if node.Kind != yaml.ScalarNode || isNull(node) {
+		return fmt.Errorf("expected true, false or a ${{ … }} expression")
+	}
+	raw := strings.TrimSpace(node.Value)
+	if inner, ok := wholeSpan(raw); ok {
+		if strings.TrimSpace(inner) == "" {
+			return fmt.Errorf("${{ }} is empty")
+		}
+		b.Expr = strings.TrimSpace(inner)
+		b.Present = true
+		return nil
+	}
+	switch strings.ToLower(raw) {
+	case "true":
+		b.Value, b.Present = true, true
+		return nil
+	case "false":
+		b.Value, b.Present = false, true
+		return nil
+	}
+	return fmt.Errorf("expected true, false or a ${{ … }} expression, got %q", node.Value)
+}
+
+// Bool returns the literal value (false when bound to an expression).
+func (b BoolExpr) Bool() bool { return b.Value }
 
 // Environment is a job's deployment environment
 // (`jobs.<key>.environment`, docs/PLAN-THREADS-ENVIRONMENTS.md): a bare name
@@ -977,8 +1225,10 @@ type Job struct {
 	TimeoutMinutes Minutes `yaml:"timeout-minutes"`
 	// Defaults is the job-level `defaults.run` block (PAR-054); it overrides
 	// the workflow's per key, and a step's own key wins.
-	Defaults        *Defaults `yaml:"defaults"`
-	ContinueOnError bool      `yaml:"continue-on-error"`
+	Defaults *Defaults `yaml:"defaults"`
+	// ContinueOnError tolerates this job's failure: a literal `true`/`false` or
+	// one whole `${{ … }}` expression evaluated per matrix cell (PAR-056).
+	ContinueOnError BoolExpr `yaml:"continue-on-error"`
 	// Outputs are the job's declared output templates
 	// (`name: ${{ steps.<id>.outputs.<x> }}`), evaluated by the runner once the
 	// steps finish and reported on complete (docs/threads.md §3.9). A dependent
@@ -1105,6 +1355,12 @@ func Parse(src []byte) (*Workflow, error) {
 		if err := ValidateGroupTemplate(w.Concurrency.Group, nil, inputNames, true); err != nil {
 			return nil, fmt.Errorf("workflow: %w", err)
 		}
+		// `cancel-in-progress` may be one expression (PAR-151); a workflow-level
+		// value expands once per run, so only github.* and inputs.* resolve.
+		if err := validateBoolExpr("workflow: concurrency.cancel-in-progress", w.Concurrency.CancelInProgress,
+			TemplateScope{Inputs: inputNames, Site: SiteWorkflowConcurrencyCancel}); err != nil {
+			return nil, err
+		}
 	}
 	// Workflow-level env is copied verbatim by the runner (only a step's env
 	// values are substituted), so a `${{ … }}` here is a parse error too
@@ -1137,9 +1393,24 @@ func Parse(src []byte) (*Workflow, error) {
 		}); err != nil {
 			return nil, err
 		}
+		// `container.image` joins `runs-on` as a substituted structural field
+		// (PAR-030): it is expanded per cell before the job record, so the image
+		// gate sees the real tag rather than the authored span.
+		if err := validateContainerImage(name, job.Container, TemplateScope{
+			Axes: strategyAxes(job.Strategy), Inputs: inputNames,
+		}); err != nil {
+			return nil, err
+		}
 		if err := validateTimeout(name, job.TimeoutMinutes, TemplateScope{
 			Axes: strategyAxes(job.Strategy), Inputs: inputNames, Site: SiteJobTimeout,
 		}); err != nil {
+			return nil, err
+		}
+		// `continue-on-error` may be one expression (PAR-056): it is evaluated
+		// per matrix cell at run creation, from the same cell values as the rest
+		// of the strategy.
+		if err := validateBoolExpr(fmt.Sprintf("workflow: job %s continue-on-error", name), job.ContinueOnError,
+			TemplateScope{Axes: strategyAxes(job.Strategy), Inputs: inputNames, Site: SiteJobContinueOnError}); err != nil {
 			return nil, err
 		}
 		reusable := strings.TrimSpace(job.Uses) != ""
@@ -1260,6 +1531,12 @@ func Parse(src []byte) (*Workflow, error) {
 		if job.Concurrency != nil {
 			if err := ValidateGroupTemplate(job.Concurrency.Group, strategyAxes(job.Strategy), inputNames, false); err != nil {
 				return nil, fmt.Errorf("workflow: job %s: %w", name, err)
+			}
+			// A job-level expression-valued cancel-in-progress describes the
+			// matrix cell, so it reads the same contexts as a job group (PAR-151).
+			if err := validateBoolExpr(fmt.Sprintf("workflow: job %s concurrency.cancel-in-progress", name), job.Concurrency.CancelInProgress,
+				TemplateScope{Axes: strategyAxes(job.Strategy), Inputs: inputNames, Site: SiteJobConcurrencyCancel}); err != nil {
+				return nil, err
 			}
 		}
 	}
@@ -1652,6 +1929,16 @@ func (w *Workflow) FiresMatching(m Match) bool {
 		return typedFires(w.On.IssuesSet, w.On.Issues, m.Action)
 	case "issue_comment":
 		return typedFires(w.On.IssueCommentSet, w.On.IssueComment, m.Action)
+	case "pull_request_review":
+		return typedFires(w.On.PullRequestReviewSet, w.On.PullRequestReview, m.Action)
+	case "pull_request_review_comment":
+		return typedFires(w.On.PullRequestReviewCommentSet, w.On.PullRequestReviewComment, m.Action)
+	case "label":
+		return typedFires(w.On.LabelSet, w.On.Label, m.Action)
+	case "milestone":
+		return typedFires(w.On.MilestoneSet, w.On.Milestone, m.Action)
+	case "check_run":
+		return typedFires(w.On.CheckRunSet, w.On.CheckRun, m.Action)
 	case "repository_dispatch":
 		if w.On.RepositoryDispatch == nil {
 			return w.On.RepositoryDispatchSet
@@ -1670,6 +1957,10 @@ func (w *Workflow) FiresMatching(m Match) bool {
 		return w.On.DeploymentSet
 	case "deployment_status":
 		return w.On.DeploymentStatusSet
+	case "fork":
+		return w.On.ForkSet
+	case "watch":
+		return w.On.WatchSet
 	case "workflow_dispatch":
 		return w.On.DispatchSet
 	case "schedule":
@@ -1735,6 +2026,27 @@ func (w *Workflow) Events() []string {
 	}
 	if w.On.IssueComment != nil || w.On.IssueCommentSet {
 		out = append(out, "issue_comment")
+	}
+	if w.On.PullRequestReview != nil || w.On.PullRequestReviewSet {
+		out = append(out, "pull_request_review")
+	}
+	if w.On.PullRequestReviewComment != nil || w.On.PullRequestReviewCommentSet {
+		out = append(out, "pull_request_review_comment")
+	}
+	if w.On.Label != nil || w.On.LabelSet {
+		out = append(out, "label")
+	}
+	if w.On.Milestone != nil || w.On.MilestoneSet {
+		out = append(out, "milestone")
+	}
+	if w.On.CheckRun != nil || w.On.CheckRunSet {
+		out = append(out, "check_run")
+	}
+	if w.On.ForkSet {
+		out = append(out, "fork")
+	}
+	if w.On.WatchSet {
+		out = append(out, "watch")
 	}
 	if w.On.PullRequestTarget != nil || w.On.PullRequestTargetSet {
 		out = append(out, "pull_request_target")

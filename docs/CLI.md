@@ -157,7 +157,7 @@ command's usage line and flags (flags may follow positionals, `gh`-style).
 | `packages` | `list`, `show`, `delete` |
 | `threads` | `list`, `show`, `jobs`, `run` (`--ref`, repeatable `--input`, `--priority`), `watch`, `cancel`, `rerun`, `schedule list\|enable\|disable\|run`, `pause`, `resume`, `queue`, the operator-local `explain`, `import` and `validate` (§5.3/§5.4) |
 | `file` | `put`, `create`, `delete` (one text file as one commit — the browser editor's write path) |
-| `runner` | `serve` (`--config` offline registration, `--ephemeral`), `drain`, `resume`, `rotate`, `deregister`, `images`, and the named `pool` refusal (see [`threads.md`](threads.md#81-flags-and-environment), §8.3a/§8.3b) |
+| `runner` | `serve` (`--config` offline registration, `--ephemeral`), `drain`, `resume`, `rotate`, `deregister`, `images [--label L]` (the stock catalogue, or one label resolved by name), and the named `pool` refusal (see [`threads.md`](threads.md#81-flags-and-environment), §8.3a/§8.3b) |
 | `search` | `search QUERY [--owner OWNER \| -R OWNER/REPO] [--ref REF] [--regex] [--case] [--word] [--path PATHSPEC]… [--limit N] [--json]` — code search in one repository (the default branch, or `--ref`) or across an owner's readable repositories. It is a standalone command, not a group: `-R`/`SPINDLE_REPO` selects repository scope, `--owner` owner scope, and exactly one is required (v1 has no instance-wide code search). `--limit` is kept matches per repository (1..200). The command pins `type=code`; issue search has no CLI surface yet. |
 | `api` | `api [-X METHOD] [-d DATA] [-H 'K: V'] [-json] PATH` — one authenticated request; `-d` takes a literal, `@FILE` or `-` for stdin |
 | `completion` | `completion bash\|zsh\|fish` — generated from the same dispatch table |
@@ -380,6 +380,7 @@ spindle runner resume --token-file /etc/spindle/runner.token
 spindle runner rotate --token-file /etc/spindle/runner.token   # overlap window, no downtime
 spindle runner deregister --token-file /etc/spindle/runner.token
 spindle runner images                                          # stock toolchain catalogue
+spindle runner images --label go                               # one label, or a refusal by name
 ```
 
 **Run a CI runner.** The registration token is minted in the browser at `/admin/runners`; the

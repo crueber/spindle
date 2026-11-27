@@ -74,9 +74,9 @@
           tag push, a pull request, a release, an issue, a schedule, an API dispatch or a button
           creates a run; registered runners execute each job in its own container; every job reports
           one check into the surface that already gates merges. No public marketplace to trust
-          blindly — remote actions resolve only under an operator allowlist and are pinned and
-          audited — a cache scoped to the run's trust class, no second service to operate — and no
-          state outside the object store.</p>
+          blindly — remote actions resolve only under an operator policy (default-deny) and are
+          pinned and audited — a cache scoped to the run's trust class, no second service to
+          operate — and no state outside the object store.</p>
         <div class="cta">
           <a class="btn primary" href="#quickstart">Write the first one <span class="arr" aria-hidden="true">→</span></a>
           <a class="btn" href="#migrate">Migrate from Forgejo</a>
@@ -101,7 +101,7 @@
 
   <section class="measured" aria-label="At a glance">
     <ul class="wrap measured-in">
-      <li class="measure"><b>15 events</b><span>push, pull request, target, dispatch, upstream run, create/delete, deployment, release, issues, comment, schedule</span></li>
+      <li class="measure"><b>22 events</b><span>push, pull request and target, review, issue, label, milestone, fork, star, check run, dispatch, upstream run, create/delete, deployment, release, schedule</span></li>
       <li class="measure"><b>4 built-ins</b><span>checkout, upload and download artifacts, cache — plus allowlisted remote actions</span></li>
       <li class="measure"><b>256</b><span>matrix cells per job, at most</span></li>
       <li class="measure"><b>4 levels</b><span>reusable workflows, local or SHA-pinned cross-repository</span></li>
@@ -123,9 +123,11 @@
     <a href="#artifacts">Artifacts</a>
     <a href="#cache">Cache</a>
     <a href="#operations">Operations</a>
+    <a href="#notifications">Notifications</a>
     <a href="#fleet">Fleet</a>
     <a href="#recipes">Recipes</a>
     <a href="#migrate">Migration</a>
+    <a href="#limits">Limits</a>
     <a href="#trouble">Troubleshooting</a>
   </nav>
 
@@ -201,7 +203,9 @@ spindle --server https://git.example.com runner serve \
         long-polls; a claim is a compare-and-swap on the queue entry, so any number of runners
         need no coordinator, and fetching is the heartbeat. A label may carry Forgejo's
         <code>name:docker://image</code> spelling (<code>ubuntu-latest:docker://node:lts</code>) to
-        supply the image when the workflow names no <code>container.image</code>; <code>lxc://</code>
+        supply the image when the workflow names no <code>container.image</code>; with no mapping, a
+        stock label (<code>node</code>, <code>go</code>, …) resolves to a digest-pinned image
+        (<a href="#fleet-stock">Stock toolchain labels</a>); <code>lxc://</code>
         and <code>host</code> backends are refused at declare time.</p>
 
       <h3 class="subhead">3. Watch it</h3>
@@ -223,10 +227,11 @@ spindle --server https://git.example.com runner serve \
         <h2 id="reference-title">Every key the parser accepts.</h2>
         <p class="sec-lede">The parser is strict. An unknown key is a parse error for that file —
           never a silently ignored typo. <code>run-name</code>, <code>defaults</code>,
-          <code>strategy.max-parallel</code>, expression-valued <code>timeout-minutes</code> and
-          <code>runs-on</code> substitution are accepted; <code>paths:</code> and typed reusable
-          workflows (local, or SHA-pinned on this instance) are supported, with the limits named in
-          the tables.</p>
+          <code>strategy.max-parallel</code>, expression-valued <code>timeout-minutes</code>,
+          <code>continue-on-error</code> and <code>cancel-in-progress</code>, and
+          <code>runs-on</code>/<code>container.image</code> substitution are accepted;
+          <code>paths:</code> and typed reusable workflows (local, or SHA-pinned on this instance)
+          are supported, with the limits named in the tables.</p>
       </header>
 
       <h3 class="subhead">Top level</h3>
@@ -240,7 +245,7 @@ spindle --server https://git.example.com runner serve \
             <tr><td><code>run-name</code></td><td>string with <code>${{ }}</code></td><td>workflow <code>name</code></td><td>The run title in the run list, page and API; rendered once at creation from <code>github.*</code> and <code>inputs.*</code>, one bounded line.</td></tr>
             <tr><td><code>env</code></td><td>map[string]string</td><td>empty</td><td>Merged under job and step <code>env</code>. Scalars are coerced to text; a nested value is an error.</td></tr>
             <tr><td><code>defaults</code></td><td><code>{run: {shell, working-directory}}</code></td><td>none</td><td>Shell and working directory every <code>run</code> step inherits; a job's block overrides per key and a step's own key wins. Both are literals.</td></tr>
-            <tr><td><code>concurrency</code></td><td>name or <code>{group, cancel-in-progress}</code></td><td>none</td><td>One running and one pending run per group per repository.</td></tr>
+            <tr><td><code>concurrency</code></td><td>name or <code>{group, cancel-in-progress}</code></td><td>none</td><td>One running and one pending run per group per repository. <code>cancel-in-progress</code> takes a literal boolean or one <code>${{ }}</code> expression, resolved per cell at creation.</td></tr>
             <tr><td><code>permissions</code></td><td>mapping or <code>read-all</code>/<code>write-all</code></td><td>instance default (<code>read</code>)</td><td>A closed vocabulary: <code>contents</code>, <code>issues</code>, <code>pull-requests</code>, <code>deployments</code>, <code>id-token</code>. Any other scope is a named parse error.</td></tr>
             <tr><td><code>enable-openid-connect</code></td><td>bool</td><td><code>false</code></td><td>The Forgejo spelling of the OIDC grant; the same grant as <code>permissions: id-token: write</code>.</td></tr>
             <tr><td><code>jobs</code></td><td>map[string]job</td><td>required</td><td>At least one job.</td></tr>
@@ -264,18 +269,28 @@ spindle --server https://git.example.com runner serve \
             <tr><td><code>release</code></td><td><code>types</code></td><td>A release lifecycle action: <code>created</code>, <code>published</code>, <code>edited</code>, <code>deleted</code>, <code>prereleased</code>, <code>released</code>, <code>unpublished</code>.</td></tr>
             <tr><td><code>issues</code></td><td><code>types</code></td><td><code>opened</code>, <code>edited</code>, <code>closed</code>, <code>reopened</code>, <code>labeled</code>, <code>unlabeled</code>, <code>assigned</code>, <code>unassigned</code>, <code>milestoned</code>, <code>demilestoned</code>.</td></tr>
             <tr><td><code>issue_comment</code></td><td><code>types</code></td><td><code>created</code> only; comment editing and deletion are not implemented.</td></tr>
+            <tr><td><code>pull_request_review</code></td><td><code>types</code> (<code>submitted</code>, <code>dismissed</code>)</td><td>A review submitted or dismissed by the review service. The run uses the PR's merge ref and the same fork trust rule as <code>pull_request</code>.</td></tr>
+            <tr><td><code>pull_request_review_comment</code></td><td><code>types</code> (<code>created</code>)</td><td>A new inline review thread or reply, including the threads a review opens on submission.</td></tr>
+            <tr><td><code>label</code></td><td><code>types</code> (<code>created</code>, <code>edited</code>, <code>deleted</code>)</td><td>A label <b>definition</b> changed by triage — not the <code>labeled</code> PR/issue metadata edge.</td></tr>
+            <tr><td><code>milestone</code></td><td><code>types</code> (<code>created</code>, <code>opened</code>, <code>closed</code>, <code>edited</code>, <code>deleted</code>)</td><td>A milestone definition changed; a state flip is <code>opened</code>/<code>closed</code> and any other field edit is <code>edited</code>.</td></tr>
+            <tr><td><code>fork</code></td><td>none</td><td>A fork completed on the <b>original</b> repository, default branch; the payload carries <code>forkee</code>.</td></tr>
+            <tr><td><code>watch</code></td><td>none (<code>action: started</code>)</td><td>A first star; a repeat star or an unstar emits nothing.</td></tr>
+            <tr><td><code>check_run</code></td><td><code>types</code> (<code>created</code>, <code>completed</code>)</td><td>An <b>external</b> CI report on the checks surface. Threads' own mirrored check is the run itself and never re-fires this trigger.</td></tr>
             <tr><td><code>workflow_dispatch</code></td><td><code>inputs</code></td><td>A manual dispatch from the UI, API or CLI. Input types: <code>string</code>, <code>boolean</code>, <code>choice</code>, <code>number</code>, <code>environment</code>.</td></tr>
             <tr><td><code>workflow_call</code></td><td><code>inputs</code>, <code>secrets</code>, <code>outputs</code></td><td>A reusable workflow's typed interface (the callee side). The key never starts a run by itself.</td></tr>
             <tr><td><code>schedule</code></td><td><code>- cron: "…"</code>, optional <code>timezone:</code></td><td>The maintainer's sweep, on the default branch only. Five fields; names, <code>@daily</code>-family macros, <code>L</code>/<code>NW</code>/<code>#</code> and a per-entry timezone are supported.</td></tr>
           </tbody>
         </table>
       </div>
-      <p class="note"><code>merge_group</code>, <code>fork</code>, <code>watch</code>,
-        <code>status</code>, <code>check_run</code>/<code>check_suite</code>, <code>registry_package</code>,
-        <code>gollum</code>, <code>page_build</code>, <code>branch_protection_rule</code> and
-        <code>public</code> are <b>named parse errors</b>: this engine does not emit them, and a trigger
-        that can never fire is not accepted. <code>merge_group</code> returns when the merge-queue
-        feature lands.</p>
+      <p class="note"><code>merge_group</code>, <code>status</code>, <code>check_suite</code>,
+        <code>registry_package</code>, <code>gollum</code>, <code>page_build</code>,
+        <code>branch_protection_rule</code>, <code>public</code>, <code>discussion</code> and
+        <code>discussion_comment</code> are <b>named parse errors</b>: this engine has no emitter for
+        them, and a trigger that can never fire is not accepted. <code>pull_request_review_thread</code>
+        is also refused, because resolving an inline thread is not a separate event here.
+        <code>merge_group</code> is the one held open by a separate plan item: the Merge queue card
+        owns the queue and the <code>refs/heads/gh-readonly-queue/…</code> ref, so the trigger stays a
+        named refusal until that lands.</p>
 
       <h3 class="subhead">Job</h3>
       <div class="tablewrap" role="region" tabindex="0" aria-labelledby="cap-job">
@@ -283,9 +298,9 @@ spindle --server https://git.example.com runner serve \
           <caption id="cap-job" class="sr-only">Job keys</caption>
           <thead><tr><th>Key</th><th>Type</th><th>Default</th><th>What it does</th></tr></thead>
           <tbody>
-            <tr><td><code>runs-on</code></td><td>label or list</td><td>required</td><td>The runner must declare every label, case-insensitive and exact. No wildcards. A label may be a <code>${{ matrix.* }}</code>, <code>${{ strategy.* }}</code>, <code>${{ inputs.* }}</code> or <code>${{ github.* }}</code> span — the one structural field a matrix may vary — expanded per cell before the job is written.</td></tr>
+            <tr><td><code>runs-on</code></td><td>label or list</td><td>required</td><td>The runner must declare every label, case-insensitive and exact. No wildcards. A label may be a <code>${{ matrix.* }}</code>, <code>${{ strategy.* }}</code>, <code>${{ inputs.* }}</code> or <code>${{ spindle.* }}</code> span — one of the two structural fields a matrix may vary, with <code>container.image</code> — expanded per cell before the job is written.</td></tr>
             <tr><td><code>defaults</code></td><td><code>{run: {shell, working-directory}}</code></td><td>workflow <code>defaults</code></td><td>This job's run-step defaults; a step's own key still wins.</td></tr>
-            <tr><td><code>container</code></td><td>image or mapping</td><td>runner <code>--image</code></td><td><code>image</code>, <code>env</code>, <code>options</code> are applied; <code>ports</code>, <code>command</code> and <code>entrypoint</code> are accepted and not applied. <code>volumes</code> are refused unless the runner's operator allow-lists the host path.</td></tr>
+            <tr><td><code>container</code></td><td>image or mapping</td><td>runner <code>--image</code></td><td><code>image</code>, <code>env</code>, <code>options</code>, <code>ports</code>, <code>command</code> and <code>entrypoint</code> are applied. <code>ports</code> publishes each container port on an ephemeral loopback address (a fixed host port is refused); <code>entrypoint</code>/<code>command</code> own the container's process, and an early exit is a named failure. <code>volumes</code> need the runner's <code>--container-valid-volume</code> allowlist, and <code>credentials</code> is refused by name — the pull identity is the runner's, never a workflow password (D-23).</td></tr>
             <tr><td><code>services</code></td><td>map[id]service</td><td>none</td><td>Sidecars on the job network, reachable at their id (the container port). <code>credentials</code> is refused by name: the pull identity is the runner's.</td></tr>
             <tr><td><code>needs</code></td><td>one job key, or a list</td><td>none</td><td><code>needs: test</code> and <code>needs: [test]</code> are identical. Must exist and be acyclic. A matrix dependency waits for every cell.</td></tr>
             <tr><td><code>if</code></td><td>expression</td><td><code>success()</code> over <code>needs</code></td><td>Decided by the server before the job is claimable. False means skipped. It may read <code>secrets.*</code> and <code>vars.*</code>; an untrusted run reads an empty secrets map, and no value reaches the reason or the log.</td></tr>
@@ -295,7 +310,7 @@ spindle --server https://git.example.com runner serve \
             <tr><td><code>outputs</code></td><td>map[name]template</td><td>none</td><td>Values a dependent reads as <code>needs.&lt;job&gt;.outputs.&lt;name&gt;</code>.</td></tr>
             <tr><td><code>environment</code></td><td>name or <code>{name, url}</code></td><td>none</td><td>A deployment target with reviewers, a wait timer, a branch/tag allowlist and its own secrets and variables. Takes a literal name; a <code>${{ }}</code> span here is a parse error. Deployments to one environment serialize in a single visible slot (<a href="#deployments">Deployments</a>).</td></tr>
             <tr><td><code>timeout-minutes</code></td><td>int or one <code>${{ }}</code> expression</td><td><code>360</code></td><td>Cancels the job and removes its containers; the conclusion reads <code>timed_out</code>, distinct from an operator <code>cancelled</code>. The expression resolves per cell from <code>github.*</code>, <code>matrix.*</code>, <code>strategy.*</code> and <code>inputs.*</code> and must be <code>1…360</code>.</td></tr>
-            <tr><td><code>continue-on-error</code></td><td>bool</td><td><code>false</code></td><td>GitHub semantics: the job stays a failure, but the run conclusion follows the other jobs; dependents run and <code>needs.&lt;job&gt;.result</code> reads <code>success</code>.</td></tr>
+            <tr><td><code>continue-on-error</code></td><td>bool or one <code>${{ }}</code> expression</td><td><code>false</code></td><td>GitHub semantics: the job stays a failure, but the run conclusion follows the other jobs; dependents run and <code>needs.&lt;job&gt;.result</code> reads <code>success</code>. One expression is resolved per matrix cell at creation.</td></tr>
             <tr><td><code>permissions</code></td><td>mapping or shorthand</td><td>workflow default</td><td>The closed scope vocabulary; job-level wins.</td></tr>
             <tr><td><code>enable-openid-connect</code></td><td>bool</td><td>workflow default</td><td>The job-level OIDC grant; an explicit <code>id-token: none</code> wins.</td></tr>
             <tr><td><code>uses</code>/<code>with</code>/<code>secrets</code></td><td>string/map/map</td><td>—</td><td>Call a reusable workflow: <code>./.spindle/workflows/name.yml</code>, or <code>owner/repo/.spindle/workflows/name.yml@&lt;40-hex sha&gt;</code> when the callee is publicly readable. The callee must declare <code>on.workflow_call</code>; its typed inputs, secrets and outputs are the call's interface. Cross-repository calls take explicit secrets only (<code>inherit</code> is refused there) and are audited.</td></tr>
@@ -313,7 +328,7 @@ spindle --server https://git.example.com runner serve \
             <tr><td><code>run</code></td><td>string</td><td>—</td><td>Exactly one of <code>run</code> and <code>uses</code>.</td></tr>
             <tr><td><code>uses</code></td><td>action</td><td>—</td><td>A built-in, a local action (<code>./…</code>), <code>docker://image</code>, or a remote <code>owner/repo[/path]@ref</code> / full URL when the instance's action policy admits it (<a href="#actions-policy">Action policy</a>).</td></tr>
             <tr><td><code>with</code></td><td>map[string]string</td><td>—</td><td>Action inputs. An undeclared key fails the step.</td></tr>
-            <tr><td><code>shell</code></td><td><code>sh</code>, <code>bash</code>, <code>python</code>, <code>python3</code>, <code>pwsh</code>, <code>cmd</code>, or a <code>&lt;cmd&gt; {0}</code> template</td><td><code>sh</code></td><td><code>sh</code> is <code>sh -e -c</code>; <code>bash</code> is <code>bash -eo pipefail -c</code>; a custom template is split into argv with <code>{0}</code> replaced by a script file.</td></tr>
+            <tr><td><code>shell</code></td><td><code>bash</code>, <code>sh</code>, <code>python</code>, <code>python3</code>, <code>pwsh</code>, <code>cmd</code>, or a <code>&lt;cmd&gt; {0}</code> template</td><td><code>bash</code></td><td>A <code>run</code> step with no <code>shell:</code> uses <code>bash --noprofile --norc -eo pipefail -c</code>, the familiar Linux default; on an image without bash it falls back to <code>sh -e -c</code> and says so. <code>sh</code> is <code>sh -e -c</code>; a custom template is split into argv with <code>{0}</code> replaced by a script file.</td></tr>
             <tr><td><code>working-directory</code></td><td>path</td><td>workspace</td><td>Relative joins the workspace; absolute wins.</td></tr>
             <tr><td><code>env</code></td><td>map[string]string</td><td>empty</td><td>Overrides job and container <code>env</code>.</td></tr>
             <tr><td><code>if</code></td><td>expression</td><td><code>success()</code></td><td>The small documented subset. An unsupported expression fails the step, never skips it.</td></tr>
@@ -345,17 +360,19 @@ spindle --server https://git.example.com runner serve \
             <tr><td>step <code>name</code>, <code>run</code>, <code>if</code>, <code>shell</code>, <code>working-directory</code></td><td>yes</td><td>yes</td></tr>
             <tr><td>step <code>env</code> and <code>with</code> values</td><td>yes</td><td>yes</td></tr>
             <tr><td>a job's <code>outputs</code> values</td><td>yes</td><td>yes (steps of the same job, <code>needs</code> dependencies)</td></tr>
-            <tr><td><code>runs-on</code> labels, job/step <code>timeout-minutes</code></td><td>yes (per cell)</td><td>no</td></tr>
+            <tr><td><code>runs-on</code> labels, job/step <code>timeout-minutes</code>, job <code>continue-on-error</code>, <code>concurrency.cancel-in-progress</code></td><td>yes (per cell)</td><td>no</td></tr>
             <tr><td><code>run-name</code></td><td><code>inputs.*</code> only</td><td>no</td></tr>
             <tr><td>concurrency <code>group</code> and a job <code>name</code></td><td>yes</td><td>no (computed before any step runs)</td></tr>
-            <tr><td>workflow/job/container/service <code>env</code>, <code>container.image</code>, <code>services.*.image</code>, <code>environment</code>, <code>defaults.run.*</code></td><td>no</td><td>no</td></tr>
+            <tr><td><code>container.image</code></td><td>yes (per cell — one of the two structural exceptions)</td><td>no</td></tr>
+            <tr><td>workflow/job/container/service <code>env</code>, <code>services.*.image</code>, <code>environment</code>, <code>defaults.run.*</code></td><td>no</td><td>no</td></tr>
           </tbody>
         </table>
       </div>
       <div class="prose">
-        <p>Every <b>step</b> site above also reads <code>github.*</code> (and the identical
-          <code>forgejo.*</code>/<code>forge.*</code> aliases), the bounded
-          <code>github.event.*</code> payload, <code>runner.*</code>, <code>vars.*</code>
+        <p>Every <b>step</b> site above reads <code>spindle.*</code> — the canonical run context —
+          and its value-identical <code>github.*</code>/<code>forgejo.*</code>/<code>forge.*</code>
+          aliases: one closed field set and one availability table, so an imported file cannot change
+          meaning. It also reads the bounded <code>github.event.*</code> payload, <code>runner.*</code>, <code>vars.*</code>
           (environment over repository over organization, sealed and masked),
           <code>env.*</code> and <code>secrets.*</code>. A step field and a step <code>if:</code>
           additionally read <code>strategy.*</code> — <code>job-index</code> (zero-based),
@@ -405,14 +422,14 @@ spindle --server https://git.example.com runner serve \
     <div class="wrap docbody">
       <header class="sec-head">
         <p class="eyebrow"><span class="tick" aria-hidden="true"></span>Triggers</p>
-        <h2 id="triggers-title">Fifteen events, filtered by ref and path.</h2>
+        <h2 id="triggers-title">Twenty-two events, filtered by ref and path.</h2>
         <p class="sec-lede">Filters use the documented Actions glob dialect — <code>*</code>,
           <code>**</code>, <code>?</code>, <code>+</code> and an ordered <code>!</code> — and
           <code>paths</code> narrows a run to the changed files. A push carries one kind of ref, so
           the two push filters are independent — a tags-only workflow never runs on a branch, and a
-          branches-only workflow never runs on a tag. The GitHub-only events each read their workflow
-          from the default branch (a <code>pull_request_target</code> reads the base tip) and name
-          their own trust rule.</p>
+          branches-only workflow never runs on a tag. The default-branch events each read their
+          workflow from the default branch (a <code>pull_request_target</code> reads the base tip)
+          and name their own trust rule.</p>
       </header>
 
       <div class="split">
@@ -490,6 +507,18 @@ spindle --server https://git.example.com runner serve \
             <code>issues</code> on its emitted lifecycle actions; and <code>issue_comment</code> on
             <code>created</code>. These runs read the workflow from the <b>default branch tip</b>,
             never from the tag or the commenter, and a release run still reports the tag's commit.</p>
+          <p><b>Review, definition, fork, star and check-run events.</b>
+            <code>pull_request_review</code> (<code>submitted</code>, <code>dismissed</code>) and
+            <code>pull_request_review_comment</code> (<code>created</code>) come from the review
+            service; they run from the PR's merge ref with the same fork trust rule as a
+            <code>pull_request</code>, so a fork PR's review run is untrusted and reads the base
+            workflow file. <code>label</code> and <code>milestone</code> are definition events from
+            triage — a label created/edited/deleted, a milestone created/opened/closed/edited/deleted
+            — not the <code>labeled</code>/<code>milestoned</code> metadata edges, and they run the
+            default branch's file. <code>fork</code> fires on the original repository after the fork
+            task commits, <code>watch</code> on a first star, and <code>check_run</code>
+            (<code>created</code>, <code>completed</code>) only for an external CI report — Threads'
+            own mirrored check is the run itself, so a workflow cannot trigger a copy of itself.</p>
           <p><b>Dispatch.</b> Typed inputs from the UI, the API
             (<code>POST …/api/threads</code>) or <code>spindle threads run</code> (with repeatable
             <code>--input k=v</code>). Types are <code>string</code>, <code>boolean</code>,
@@ -531,10 +560,11 @@ spindle --server https://git.example.com runner serve \
         <span class="k">run:</span> ./deploy.sh --target "${{ inputs.environment }}"</code></pre>
         </figure>
       </div>
-      <p class="note">Structural fields — <code>runs-on</code>, <code>container.image</code>,
-        <code>environment</code> — and workflow/job/container <code>env</code> do not take
-        <code>${{ }}</code>. A dispatch input can choose the environment name only if the job names
-        it literally.</p>
+      <p class="note">Structural fields are literals except two, which take one per-cell expression:
+        <code>runs-on</code> and <code>container.image</code>. <code>environment</code>,
+        <code>services.*.image</code>, <code>defaults.run.*</code> and the workflow/job/container
+        <code>env</code> layers are literal — a dispatch input can choose the environment name only
+        if the job names it literally.</p>
     </div>
   </section>
 
@@ -602,7 +632,8 @@ spindle --server https://git.example.com runner serve \
             <code>needs.&lt;job&gt;.result</code> reading <code>success</code>.</p>
           <p><b>Concurrency.</b> One <b>running</b> and one <b>pending</b> run per group per
             repository, GitHub's rule. A newer run replaces the pending one (never a queue of stale
-            commits); <code>cancel-in-progress: true</code> cancels the holder as soon as the new run
+            commits); <code>cancel-in-progress: true</code> — or one <code>${{ }}</code> expression
+            that resolves to true per cell — cancels the holder as soon as the new run
             is created. A workflow-level group belongs to the run, so sibling jobs do not serialize
             each other, and the run header names the group it waits for (<code>pending_group</code>)
             instead of showing a silent spinner. A group that cannot resolve is a parse error or a
@@ -617,8 +648,9 @@ spindle --server https://git.example.com runner serve \
           <code>cancelled()</code>, <code>startsWith</code>, <code>endsWith</code>,
           <code>contains</code>, <code>format</code>, <code>join</code>,
           <code>toJSON</code>, <code>fromJSON</code> and
-          <code>hashFiles</code>; <code>github.*</code> (and the identical
-          <code>forgejo.*</code>/<code>forge.*</code> aliases), <code>github.event.*</code>,
+          <code>hashFiles</code>; <code>spindle.*</code> — the canonical context — and its
+          value-identical <code>github.*</code>/<code>forgejo.*</code>/<code>forge.*</code> aliases,
+          <code>github.event.*</code>,
           <code>runner.*</code>, <code>vars.*</code>, <code>matrix.*</code>, <code>strategy.*</code>,
           <code>job.*</code> (the last two only at their documented sites, above),
           <code>inputs.*</code>,
@@ -664,8 +696,11 @@ spindle --server https://git.example.com runner serve \
         <div class="prose">
           <p><b>Image.</b> <code>container:</code> names it; without one the runner's
             <code>--image</code> is used (default <code>alpine/git</code>, which carries
-            <code>git</code> for checkout). The image must provide what your steps call — a
-            distroless or scratch image has no shell.</p>
+            <code>git</code> for checkout). A stock toolchain label (<code>ubuntu-latest</code>,
+            <code>node</code>, <code>python</code>, <code>go</code>, <code>rust</code>,
+            <code>docker</code>) resolves to a digest-pinned upstream image when neither the workflow
+            nor the runner declares one — see <a href="#fleet-stock">Stock toolchain labels</a>. The
+            image must provide what your steps call — a distroless or scratch image has no shell.</p>
           <p><b>Workspace.</b> A per-job volume at <code>/spindle/workspace</code>. The runner
             mounts nothing else. Workflow-supplied volumes are refused: a bind mount is host
             filesystem access.</p>
@@ -689,8 +724,10 @@ spindle --server https://git.example.com runner serve \
             substitution. <code>$GITHUB_EVENT_PATH</code> names the bounded event payload, and
             <code>$RUNNER_OS</code>, <code>$RUNNER_ARCH</code>, <code>$RUNNER_NAME</code> and
             <code>$RUNNER_TEMP</code> describe the runner. <code>$GITHUB_STEP_SUMMARY</code> collects
-            markdown for the run page; <code>$GITHUB_STATE</code> is not provided (no pre/post
-            hooks). <code>$GITHUB_TOKEN</code> and <code>$FORGEJO_TOKEN</code> alias the
+            markdown for the run page; <code>$GITHUB_STATE</code> is a JavaScript action's pre→post
+            hand-off (the pre hook's <code>NAME=VALUE</code> lines reach the post hook as
+            <code>STATE_&lt;name&gt;</code>; a <code>run</code> step has no post phase, so the file is
+            not exposed there). <code>$GITHUB_TOKEN</code> and <code>$FORGEJO_TOKEN</code> alias the
             scoped job token. A step may write later steps' variables through
             <code>$GITHUB_ENV</code> and prepend to <code>PATH</code> through
             <code>$GITHUB_PATH</code>; protected names are refused by name.</p>
@@ -734,8 +771,10 @@ spindle --server https://git.example.com runner serve \
         <code>--ulimit nofile=…</code>, <code>--init</code>, <code>--read-only</code>,
         <code>--user</code>, <code>--workdir</code>, and docker's in-container
         <code>--health-*</code> flags. <code>--cap-add</code>, <code>--device</code>,
-        <code>--security-opt</code>, every namespace flag and every mount are refused by default, at
-        run creation and again at plan time.</p>
+        <code>--security-opt</code>, <code>--tty</code>, every namespace flag and every mount are
+        refused by default, at run creation and again at plan time. The workflow-owned process keys
+        (<code>entrypoint</code>, <code>command</code>, <code>ports</code>) are separate declared
+        fields, not free-form options.</p>
       <p class="note"><b>Runner grants are the operator's.</b> A workflow never widens its own
         isolation. Three knobs let a runner operator admit shapes for every job it takes:
         <code>--container-privileged</code> (admits <code>--privileged</code> and
@@ -743,9 +782,9 @@ spindle --server https://git.example.com runner serve \
         whose absolute host source matches), and <code>--container-network</code> (a user-defined
         network; <code>host</code>, <code>none</code> and namespace modes are refused). A grantable
         shape on a runner that did not opt in fails at plan time, naming the missing flag. A fourth,
-        <code>--docker-host</code>, gives the job a docker endpoint (below). A runner
-        that grants privilege or <code>--docker-host</code> refuses <code>--allow-fork-runs</code>,
-        so an untrusted PR can never reach a widened runner.</p>
+        <code>--docker-host</code>, gives the job a docker endpoint (below). <b>Every</b> container
+        grant — privilege, docker endpoint, shared network, volume allowlist — refuses
+        <code>--allow-fork-runs</code>, so an untrusted PR can never reach a widened runner.</p>
       <p class="note"><b>No Docker socket.</b> A job container gets no socket and no daemon by
         default, so <code>docker build</code> exits 127 with the daemonless remedy in the message.
         Build with kaniko (no privileges, no socket) or buildah on a host whose kernel allows user
@@ -1275,9 +1314,16 @@ spindle --server https://git.example.com runner serve \
             Image, container-option and environment gates are re-applied to every re-run job, and a
             gated deployment is held for a fresh approval.</p>
           <p><b>Conformance.</b> <code>make parity</code> runs the living matrix gate and the
-            committed Forgejo corpus: every green row must name a test that exists, every gap must be
-            planned, and the generated matrix must be fresh. It needs no docker and no network; the
-            execution tier is opt-in (<code>make parity-exec</code>).</p>
+            committed corpus: every green row must name a test that exists, the plan's id set must
+            match, and the generated matrix must be a fresh render. At the last close the matrix is
+            <b>119 rows — 116 <code>have</code>, one <code>partial</code> (the merge-queue trigger),
+            no <code>missing</code>, two signed non-goals</b>. It needs no docker and no network.
+            <code>make parity-exec</code> is the opt-in <b>execution tier</b>: it boots a server and a
+            runner, executes the committed golden of a real publish workflow byte-unmodified, then
+            builds, pushes and pulls a small image through a local <code>registry:2</code> with a
+            daemonless builder (no socket in the job). It needs a Docker daemon and is deliberately
+            not in the CI gate, because every CI job is itself a container with no daemon; when the
+            tier is requested, a missing daemon is a failure, not a skip.</p>
           <p><b>Schedules.</b> The Threads page lists every entry with its next fire, its persisted
             watermark and any coalesced ticks. Each row has <b>disable/enable</b> (no commit, audited)
             and <b>run now</b> (allowed on a disabled entry, audited):
@@ -1295,9 +1341,10 @@ spindle --server https://git.example.com runner serve \
             (<code>GET …/threads/badge.svg?workflow=…&amp;branch=…</code>), and <b>run-list filters</b>
             (<code>workflow</code>, <code>state</code>, <code>branch</code>, <code>event</code>,
             <code>actor</code>; a bounded scan, with <code>more</code> saying whether it was capped).
-            A failed run notifies watchers: one durable in-app notice per (user, run), plus one
-            optional repository webhook POST — email is not offered on this instance. A <b>single
-            job</b> can be cancelled without ending its siblings
+            A failed run notifies watchers through the three channels in
+            <a href="#notifications">Notifications</a> — the in-app inbox, an optional repository
+            webhook, and email when the operator configures it. A <b>single job</b> can be cancelled
+            without ending its siblings
             (<code>POST …/threads/{run}/jobs/{job}/cancel</code>); a non-forced cancel ends through the
             runner's ack, a forced one is terminal at once.</p>
           <p><b>No silent queue.</b> Every queued job names exactly one reason, in the order the read
@@ -1330,6 +1377,36 @@ spindle --server https://git.example.com runner serve \
       - <span class="k">run:</span> echo "releasing $GITHUB_REF_NAME at $GITHUB_SHA"</code></pre>
         </figure>
       </div>
+
+      <h3 class="subhead" id="notifications">Notifications: in-app, webhook, email.</h3>
+      <div class="prose">
+        <p>A signed-in user <b>watches</b> a repository (the page toggle, or
+          <code>PUT …/api/threads/subscription</code>) and gets one notice per failed run, never one
+          per retry or state fold. All three channels share the failure-only filter and the run link,
+          and the outbound messages carry the run's job mask values; the inbox record's key is the
+          dedupe, so a run produces at most one message per subscriber.</p>
+      </div>
+      <div class="prose">
+        <ul>
+          <li><b>in-app inbox</b> — on with a watch. One durable record per (user, run) in the
+            Threads panel and <code>GET …/api/threads/notifications</code>; <i>mark all read</i> is a
+            POST.</li>
+          <li><b>repository webhook</b> — off. The repository's <code>notify_webhook</code> switch
+            sends one POST with the run summary and link.</li>
+          <li><b>email</b> — <b>off</b>. A standard-library SMTP notifier, enabled with
+            <code>threads.smtp.host</code> (plus <code>from</code>, and optional <code>port</code>,
+            <code>username</code>/<code>password</code>, <code>tls</code>, <code>timeout</code>). One
+            message per subscriber and failed run to the subscriber's verified address, masked like
+            the log; an unresolvable mask list skips the email rather than sending it unmasked.
+            Credentials are refused over a plaintext connection, and a delivery failure is logged,
+            never retried into a loop.</li>
+        </ul>
+      </div>
+      <p class="note">The inbox is the durable fact; the webhook and email are outbound hints
+        detached from the run's completion, so an unavailable mail server cannot delay a run folding.
+        There is no user-scope secret (D-22): a run executes as the repository, so a per-user
+        credential would have no honest reader.</p>
+
       <p class="note">A job-token push never starts a workflow, so a tag created by a CI job is
         silent by design. A branch and a tag named <code>v1</code> never share a supersede key: the
         key includes the <code>refs/heads/</code> or <code>refs/tags/</code> prefix.</p>
@@ -1358,11 +1435,40 @@ spindle --server https://git.example.com runner serve \
             <tr><td>runner group</td><td>Inherited labels plus a visibility allowlist, intersected with the runner's own policy — a group can only narrow. Admin-set, never runner-set.</td></tr>
             <tr><td><code>runner serve --config FILE</code></td><td>Several <code>[[runner]]</code> scopes from one process, each with its own 0600 credential file.</td></tr>
             <tr><td><code>runner drain|resume|rotate|deregister</code></td><td>Finish and claim nothing new / undo it / rotate with a 15-minute overlap / delete the record and credential. <code>rotate</code> and <code>drain</code> never leave a worker holding a dead token.</td></tr>
-            <tr><td><code>runner images</code></td><td>Prints the stock toolchain catalogue (node, python, go, rust, docker CLI, Ubuntu) and the matching <code>--labels</code> line. The images are upstream toolchains, not published by spindle — <code>--image-prefix</code> points an air-gapped instance at its own mirror.</td></tr>
+            <tr><td><code>runner images [--label L]</code></td><td>Prints the stock toolchain catalogue (Ubuntu, node, python, go, rust, docker CLI — each pinned by manifest digest) and the matching <code>--labels</code> line. <code>--label go</code> resolves one label and refuses an unknown label by name. The images are upstream toolchains; spindle publishes and mirrors none — <code>--image-prefix</code> points an air-gapped instance at its own mirror.</td></tr>
+            <tr><td><code>threads validate [PATH|-]</code></td><td>Offline validation with the server's own parser: a file, a directory of direct <code>*.yml</code>/<code>*.yaml</code> children, stdin, or <code>--repo DIR</code> for <code>DIR/.spindle/workflows</code>; <code>--json</code> for the machine report. Exit 0 valid, 1 invalid or unreadable, 2 usage.</td></tr>
             <tr><td><code>threads explain FILE</code></td><td>Offline summary of a local workflow: triggers, jobs, <code>runs-on</code>, <code>needs</code> — the same parser the push path uses, with key paths and lines.</td></tr>
           </tbody>
         </table>
       </div>
+
+      <h3 class="subhead" id="fleet-stock">Stock toolchain labels.</h3>
+      <div class="prose">
+        <p>A workflow that names one of these labels and no <code>container.image</code> runs in the
+          upstream image, pinned by <b>manifest digest</b> at fetch time — a mutable tag never decides
+          the bytes. The catalogue is data, not magic: <code>spindle runner images</code> prints it
+          with the exact digests and the <code>--labels</code> line, and <code>--label go</code>
+          resolves one entry.</p>
+      </div>
+      <div class="tablewrap" role="region" tabindex="0" aria-labelledby="cap-stock">
+        <table class="ref">
+          <caption id="cap-stock" class="sr-only">Stock toolchain labels</caption>
+          <thead><tr><th><code>runs-on</code> label</th><th>Pinned upstream image</th><th>Toolchain</th></tr></thead>
+          <tbody>
+            <tr><td><code>ubuntu-latest</code></td><td><code>ubuntu:24.04@sha256:…</code></td><td>base Ubuntu 24.04</td></tr>
+            <tr><td><code>node</code></td><td><code>node:22-bookworm@sha256:…</code></td><td>Node.js 22 LTS + npm</td></tr>
+            <tr><td><code>python</code></td><td><code>python:3.13-bookworm@sha256:…</code></td><td>CPython 3.13 + pip</td></tr>
+            <tr><td><code>go</code></td><td><code>golang:1.25-bookworm@sha256:…</code></td><td>Go 1.25 toolchain</td></tr>
+            <tr><td><code>rust</code></td><td><code>rust:1-bookworm@sha256:…</code></td><td>Rust stable + cargo</td></tr>
+            <tr><td><code>docker</code></td><td><code>docker:27-cli@sha256:…</code></td><td>docker CLI + buildx (daemonless builds)</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <p class="note">Precedence: an explicit <code>container.image</code> wins; otherwise a runner's
+        own <code>label:docker://…</code> mapping wins; otherwise the stock entry. A typo is never a
+        silent fallback — <code>spindle runner images --label typo</code> refuses by name, and a job
+        whose label no runner declares stays queued with a reason. spindle publishes no images of its
+        own; an air-gapped instance reaches the same bytes through its mirror (<code>--image-prefix</code>).</p>
 
       <div class="prose">
         <p><b>Non-goals, refused by name.</b> There is no managed pool: <code>spindle runner pool</code>
@@ -1374,8 +1480,8 @@ spindle --server https://git.example.com runner serve \
           <code>threads.NonGoals()</code> and pinned by a test, not merely omitted.</p>
       </div>
       <p class="note">The fleet is operator state, not workflow syntax. A workflow cannot add a
-        runner, widen a grant or change its own isolation; a runner that grants privilege or a docker
-        endpoint refuses fork runs. The full flag table, tenancy and the dedicated-worker topology are
+        runner, widen a grant or change its own isolation; a runner with any container grant refuses
+        fork runs. The full flag table, tenancy and the dedicated-worker topology are
         in the reference (<a href="https://github.com/crueber/spindle/blob/main/docs/threads.md">threads.md §8</a>).</p>
     </div>
   </section>
@@ -1675,7 +1781,7 @@ steps:
           <tbody>
             <tr><td>remote / marketplace <code>uses:</code></td><td>resolved, pinned and audited by the engine under the instance policy (default-deny); the one-way importer will not rewrite the line</td><td>keep the remote line by hand after import, or use a base image, a <code>run:</code> step, a local action, or <code>docker://</code></td></tr>
             <tr><td>reusable workflows, <b>remote</b></td><td>a cross-repository callee must be public here, SHA-pinned and called with explicit secrets (D-6)</td><td>a pinned <code>owner/repo/.spindle/workflows/x.yml@&lt;sha&gt;</code> call, a local call, or a <code>workflow_dispatch</code> chain</td></tr>
-            <tr><td><code>services.&lt;id&gt;.credentials</code></td><td>refused by name: the pull identity belongs to the runner (PAR-078)</td><td>the runner's docker config, its <code>--image-prefix</code> mirror, or <code>--registry-auth-file</code></td></tr>
+            <tr><td><code>container.credentials</code> / <code>services.&lt;id&gt;.credentials</code></td><td>refused by name (D-23): the pull identity belongs to the runner, not the file (PAR-077/PAR-078)</td><td>the runner's docker config, its <code>--image-prefix</code> mirror, or <code>--registry-auth-file</code></td></tr>
             <tr><td>hosted <code>windows-*</code> / <code>macos-*</code> runners</td><td>a signed non-goal (D-15); the label queues with a reason naming it</td><td>a Linux job, or run that job where the platform lives</td></tr>
             <tr><td><code>docker build</code> in a job</td><td>no Docker socket by default</td><td>kaniko or buildah (daemonless); a runner whose operator granted <code>--docker-host</code> only, and it refuses fork runs</td></tr>
             <tr><td><code>--privileged</code> / <code>--cap-add</code></td><td>refused unless the runner's operator passed <code>--container-privileged</code></td><td>the runner host must permit the build without per-job flags</td></tr>
@@ -1695,8 +1801,74 @@ steps:
     </div>
   </section>
 
+  <!-- ============================================================== limits -->
+  <section class="section" id="limits" aria-labelledby="limits-title">
+    <div class="wrap docbody">
+      <header class="sec-head">
+        <p class="eyebrow"><span class="tick" aria-hidden="true"></span>Limits</p>
+        <h2 id="limits-title">What is not here, named.</h2>
+        <p class="sec-lede">The conformance matrix closes with no silent gaps: every row is green, a
+          named clause, or a signed non-goal. This is the short list of what you might expect and will
+          not find — each refused by name rather than accepted and ignored.</p>
+      </header>
+
+      <div class="prose">
+        <ul>
+          <li><b>merge_group / merge queue</b> — the one remaining <code>partial</code> row
+            (<code>PAR-016</code>): the separate Merge queue card owns the emitter and the
+            <code>refs/heads/gh-readonly-queue/…</code> ref, so the trigger is a named parse error
+            until it lands. Gate on the pull-request run; the queue entry will start a run when the
+            card ships.</li>
+          <li><b>Hosted Windows/macOS, LXC or host backends, artifact attestations</b> — signed
+            non-goals (D-15): there is no isolated Windows/macOS fleet, an unisolated host backend is
+            a cross-tenant hole, and attestations need a sigstore trust root this instance does not
+            operate. A <code>windows-*</code>/<code>macos-*</code> label queues with a reason naming
+            the non-goal; <code>lxc://</code>/<code>host</code> are declare-time errors;
+            <code>permissions: attestations</code> is a parse refusal.</li>
+          <li><b>Managed runner pool</b> — signed non-goal (D-14): unattended execution of untrusted
+            code at scale is not a default an instance can drift into.
+            <code>spindle runner pool</code> refuses by name; use ephemeral or capacity-1 workers
+            under your own supervisor.</li>
+          <li><b>User-scope secrets</b> — declined (D-22): a run executes as the repository, not a
+            person, so a per-user credential would be readable by any workflow in it. Organization,
+            repository and environment scopes exist; environment is the tightest.</li>
+          <li><b>Workflow-supplied registry login</b> (<code>container.credentials</code>,
+            <code>services.*.credentials</code>) — refused (D-23): the password would travel in the
+            job payload and argv, and the pull identity belongs to the runner. Use the runner's
+            docker config, an <code>--image-prefix</code> mirror, or
+            <code>--registry-auth-file</code>.</li>
+          <li><b>Docker socket in a job</b> — no daemon by default, so <code>docker build</code>
+            exits 127 with a named remedy. Use kaniko or buildah (daemonless), or a runner whose
+            operator granted <code>--docker-host</code> — which refuses fork runs.</li>
+          <li><b><code>case(...)</code> in an expression</b> — not a function in this language or the
+            platforms it is compatible with; accepting it would invent semantics. Use <code>if:</code>
+            conditions, or a <code>run:</code> shell <code>case</code>.</li>
+          <li><b>Expressions in structural fields</b> — only <code>runs-on</code> and
+            <code>container.image</code> substitute per cell; <code>services.*.image</code>,
+            <code>environment</code>, <code>defaults.run.*</code> and the workflow/job/container
+            <code>env</code> layers stay literal. Name the value literally, or create one job per
+            case.</li>
+          <li><b>Email out of the box</b> — off until an operator configures
+            <code>threads.smtp.*</code>; there is no implicit mailer and no dependency for one.
+            Enable it, or keep the in-app inbox and webhook.</li>
+          <li><b><code>make parity-exec</code> in CI</b> — needs a Docker daemon; every CI job is
+            itself a container with no daemon. Run it on a developer host or an operator's host-mode
+            runner.</li>
+          <li><b>The committed corpus</b> — four real workflows from the operator's own repositories,
+            converted with committed goldens. The public GitHub half of the original plan is not
+            committed; each GitHub-only row is proved by its own unit or e2e test. Treat the matrix
+            as the checklist; the corpus is the end-to-end proof, not the whole surface.</li>
+        </ul>
+      </div>
+      <p class="note">Nothing on this list is silently inert: an unsupported trigger, key, function or
+        structural span is a parse error or a failed job with a reason naming it. The full matrix and
+        every acceptance test live beside the plan
+        (<a href="https://github.com/crueber/spindle/blob/main/docs/features/21_parity_master.md">21_parity_master.md</a>).</p>
+    </div>
+  </section>
+
   <!-- ============================================================= trouble -->
-  <section class="section" id="trouble" aria-labelledby="trouble-title">
+  <section class="section alt" id="trouble" aria-labelledby="trouble-title">
     <div class="wrap docbody">
       <header class="sec-head">
         <p class="eyebrow"><span class="tick" aria-hidden="true"></span>Troubleshooting</p>
@@ -1712,7 +1884,7 @@ steps:
           <thead><tr><th>Symptom</th><th>Cause</th><th>Fix</th></tr></thead>
           <tbody>
             <tr><td>No run after a push</td><td>No workflow at that commit; the event or branch/tag does not match (a tags-only trigger on a branch push, a branches-only trigger on a tag); the file failed to parse; the ref was a delete or notes ref; the push used a job token</td><td>Threads → Workflows lists files and parse errors; deletes and notes refs never fire; job-token pushes are suppressed</td></tr>
-            <tr><td>A file is rejected</td><td>Unknown key, bad type, unsupported cron, a <code>types</code> value the service never emits, an unsupported <code>${{ }}</code> reference or <code>if:</code> function, a matrix over 256 cells, both <code>run</code> and <code>uses</code>, a bad <code>needs</code></td><td>The error names the file and key; fix that file only — the others keep running</td></tr>
+            <tr><td>A file is rejected</td><td>Unknown key, bad type, unsupported cron, a <code>types</code> value the service never emits, an unsupported <code>${{ }}</code> reference or <code>if:</code> function, a matrix over 256 cells, both <code>run</code> and <code>uses</code>, a bad <code>needs</code></td><td>The error names the file and key; fix that file only — the others keep running. Reproduce it offline with <code>spindle threads validate --repo .</code>, which prints the same <code>file:line: key: message</code> as a push.</td></tr>
             <tr><td>Run stays queued</td><td>The job's <code>queue_reason</code> names it: no runner registered; labels are not a superset; a fork run with no fork-opted runner; all matching runners busy; a declared CPU/memory ceiling; CI pause; a deployment slot; a capacity hold; a live <code>needs:</code> dependency; a <code>max-parallel</code> slot; a concurrency group held</td><td>Read the chip on the run page — it names the one cause to act on; <code>/admin/runners</code> shows labels, capacity and last-seen; <code>spindle threads queue</code> shows the order</td></tr>
             <tr><td>A remote action is refused</td><td>The instance's action policy does not admit the reference: a mutable tag or branch outside the allowlist, <code>mode = "deny"</code>, or a changed digest under a pinned commit</td><td>The reason names the reference, the policy key and both remedies: pin a full 40-hex commit, or add the repository to <code>threads.actions.allow</code></td></tr>
             <tr><td>Job failed before any step</td><td>Image refused by policy; a bad container option or a runner grant it did not opt into; an undefined environment; an unresolvable local action; a malformed reusable call</td><td>The job's <code>reason</code> names the field and value; a missing runner grant names the flag</td></tr>
@@ -1732,6 +1904,7 @@ steps:
             <tr><td>Approval never arrives</td><td>No reviewer decided; there is no timeout and no auto-approval</td><td>A listed reviewer or repo admin must decide; a deleted environment fails closed</td></tr>
             <tr><td>Schedule never fires</td><td>Bad cron; not on the default branch; no maintainer role; the tick already fired; the entry is disabled</td><td>Fix and merge to the default branch; run a maintainer; check the entry's switch, or use <b>run now</b> / <code>spindle threads schedule run</code></td></tr>
             <tr><td>A deployment is queued behind another</td><td>One deployment holds the environment's serialization slot; the record names the holder</td><td>Wait for the holder to reach a terminal state (the next waiter is promoted), or cancel the queued deployment</td></tr>
+            <tr><td>No email after a failed run</td><td>Email is off by default: <code>threads.smtp.host</code> is unset, or the subscriber has no verified address, or the run is not watched by them</td><td>The in-app inbox and webhook still fire; an operator enables email under <code>threads.smtp.*</code> (credentials require TLS)</td></tr>
             <tr><td>Required check stays pending</td><td>Its job was never claimed</td><td>A runner must claim it; the merge stays blocked by design</td></tr>
           </tbody>
         </table>
@@ -1740,7 +1913,7 @@ steps:
   </section>
 
   <!-- ============================================================== docs -->
-  <section class="section alt" id="docs" aria-labelledby="docs-title">
+  <section class="section" id="docs" aria-labelledby="docs-title">
     <div class="wrap docbody">
       <header class="sec-head">
         <p class="eyebrow"><span class="tick" aria-hidden="true"></span>Read further</p>

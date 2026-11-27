@@ -87,14 +87,14 @@
         "TestThreadsMigrationBannerRenders",
         "TestThreadsMigrationBannerHiddenWhenWorkflowsExist"
       ],
-      "notes": "Landed (Wave 5). The Threads page shows a migration banner when the default branch has `.forgejo/workflows` or `.github/workflows` files and no `.spindle/workflows`: it lists the foreign files (YAML only, direct children) and prints the exact `spindle threads import --from <platform> --repo .` command. The read is display-only — `threads.Service.ListForeignWorkflows` lists a directory, nothing parses or imports it, and the page request creates no run; the engine still discovers only `.spindle/workflows` (PAR-001). A listing failure renders no banner rather than breaking the page, and `spindle threads import`'s report now ends with the `threads validate` next step."
+      "notes": "Landed (Wave 5). The Threads page shows a migration banner when the default branch has `.forgejo/workflows` or `.github/workflows` files and no `.spindle/workflows`: it lists the foreign files (YAML only, direct children) and prints the exact `spindle threads import --from <platform> --repo .` command. The read is display-only \u2014 `threads.Service.ListForeignWorkflows` lists a directory, nothing parses or imports it, and the page request creates no run; the engine still discovers only `.spindle/workflows` (PAR-001). A listing failure renders no banner rather than breaking the page, and `spindle threads import`'s report now ends with the `threads validate` next step."
     },
     {
       "id": "PAR-004",
       "area": "discovery",
       "capability": "Canonical `spindle.*` context / `SPINDLE_*` env with `github.*`/`forgejo.*` as aliases (D-1)",
       "provenance": "none",
-      "status": "partial",
+      "status": "have",
       "wave": 2,
       "track": [
         "T1"
@@ -107,7 +107,12 @@
         "docs/threads.md \u00a73",
         "docs/WORKFLOWS.md"
       ],
-      "tests": []
+      "tests": [
+        "TestSpindleContextAliasesAreValueIdentical",
+        "TestSpindleAliasIsDocumentedInParserErrors",
+        "TestGitHubContextFieldValues"
+      ],
+      "notes": "`spindle.*` is now the documented, canonical run context with `github.*`/`forgejo.*`/`forge.*` as value-identical aliases (D-1): one closed field set, one availability table, one evaluator. `${{ spindle.ref }}`, `${{ github.ref }}` and `${{ forgejo.ref }}` resolve to the identical value in a substitution site, an `if:` and a concurrency group (TestSpindleContextAliasesAreValueIdentical). The `SPINDLE_*` environment variables (SPINDLE_REF/SHA/EVENT/WORKFLOW/\u2026) predate this row and are unchanged. An imported workflow keeps its meaning: the alias is a spelling, not a wider vocabulary (TestSpindleAliasIsDocumentedInParserErrors)."
     },
     {
       "id": "PAR-010",
@@ -335,7 +340,7 @@
       "area": "triggers",
       "capability": "`workflow_run` (workflows/types/branches filters, upstream run + artifacts) with the untrusted-trigger rule",
       "provenance": "G",
-      "status": "partial",
+      "status": "have",
       "wave": 3,
       "track": [
         "T3"
@@ -355,16 +360,17 @@
         "TestWorkflowRunDefaultTypeIsCompleted",
         "TestWorkflowRunParseAndFilters",
         "TestCrossRunRefusedWhileWorkflowRunHeld",
-        "TestE2E_ThreadsCrossRunArtifactNeedsApproval"
+        "TestE2E_ThreadsCrossRunArtifactNeedsApproval",
+        "TestE2EWorkflowRunUntrustedParentArtifactDownload"
       ],
-      "notes": "Wave 3. The trigger, workflows/types/branches filters, requested/completed emitters, the depth-3 chain cap and the D-3 approval hold for an untrusted parent all land. The documented cross-run hand-off now has its tests: `TestCrossRunRefusedWhileWorkflowRunHeld` refuses every cross-run read with a named 409 (naming the held parent) and releases it after the approval decision, and `TestE2E_ThreadsCrossRunArtifactNeedsApproval` downloads the upstream artifact after a maintainer decision. PARTIAL: the cross-run download API itself is the artifacts track's (PAR-098/PAR-099); this row pins the trigger-side hold it must consume."
+      "notes": "Wave 6 closes the metadata clause. The trigger, workflows/types/branches filters, requested/completed emitters, the depth-3 chain cap and the D-3 approval hold for an untrusted parent all land. The acceptance is pinned end to end by TestE2EWorkflowRunUntrustedParentArtifactDownload: a fork pull_request run publishes an artifact, the workflow_run follow-up is created pending_approval (its jobs stay queued and nothing runs), a maintainer approves it, and the approved follow-up downloads the parent artifact via `run-id: ${{ github.event.workflow_run.id }}` and asserts the bytes. The cross-run API and its held-409 refusal are TestCrossRunRefusedWhileWorkflowRunHeld and TestE2E_ThreadsCrossRunArtifactNeedsApproval (PAR-098/PAR-099)."
     },
     {
       "id": "PAR-020",
       "area": "triggers",
       "capability": "`issues`, `issue_comment`, `pull_request_review`(+`_comment`), `label`, `milestone`, `discussion`(+`_comment`)",
       "provenance": "B",
-      "status": "partial",
+      "status": "have",
       "wave": 2,
       "track": [
         "T3"
@@ -376,15 +382,25 @@
         "docs/features/21_parity_master.md \u00a74.2",
         "docs/threads.md \u00a73.2"
       ],
-      "tests": [],
-      "notes": "Wave 2 closes issues and issue_comment (types: opened/edited/closed/reopened/labeled/unlabeled/assigned/unassigned/milestoned/demilestoned; issue_comment: created) from the issues service, with the default-branch rule and payload. pull_request_review(+_comment), label, milestone and discussion triggers remain Wave 3."
+      "tests": [
+        "TestNewTriggerVocabulary",
+        "TestNewRefusedTriggerNames",
+        "TestLabelMilestoneTriggersCreateDefaultBranchRuns",
+        "TestReviewTriggersCreatePullFamilyRuns",
+        "TestLabelDefinitionTriggers",
+        "TestMilestoneDefinitionTriggers",
+        "TestReviewTriggerEdges",
+        "TestPullCommentTriggerEdge",
+        "TestE2EWave6TriggerEdges"
+      ],
+      "notes": "Wave 6 closes the family. EMITTED by the owning service: `issues` and `issue_comment` (issues; a PR conversation comment now also emits issue_comment from pulls), `pull_request_review` (submitted/dismissed), `pull_request_review_comment` (created, including inline threads opened by a review), `label` (created/edited/deleted) and `milestone` (created/opened/closed/edited/deleted). The review triggers use the PR merge ref and the fork trust rule; the issue_comment PR half and the label/milestone definitions read the default branch. `discussion` and `discussion_comment` are NAMED refusals (this instance has no discussion surface), and `pull_request_review_thread` is refused by name (thread resolution is not a separate trigger). Every accepted type is closed to the service's real vocabulary, so an unemittable action is a parse error."
     },
     {
       "id": "PAR-021",
       "area": "triggers",
       "capability": "Repository/check/deploy triggers: create/delete, fork, watch, status, check_run/check_suite, deployment(+_status), registry_package, gollum, page_build, branch_protection_rule, public",
       "provenance": "G",
-      "status": "partial",
+      "status": "have",
       "wave": 3,
       "track": [
         "T3"
@@ -397,11 +413,17 @@
         "docs/threads.md \u00a73.2"
       ],
       "tests": [
-        "TestRefTriggerFamily",
+        "TestNewTriggerVocabulary",
         "TestRefusedTriggerNames",
-        "TestDeploymentEventsCreateFollowUps"
+        "TestRefTriggerFamily",
+        "TestDeploymentEventsCreateFollowUps",
+        "TestForkWatchCheckRunTriggers",
+        "TestCheckRunTriggerEdges",
+        "TestWatchTriggerOnFirstStar",
+        "TestForkTriggerEdgeShape",
+        "TestE2EWave6TriggerEdges"
       ],
-      "notes": "Wave 3. EMITTED: create/delete (push hook, ref + ref_type, job-token pushes suppressed), deployment/deployment_status (Threads deployment records; pending/in_progress/failure). REFUSED BY NAME at parse: merge_group, fork, watch, status, check_run, check_suite, registry_package, gollum, page_build, branch_protection_rule, public. PARTIAL: check_run/check_suite would require an app-check emitter distinct from the Threads mirror (a follow-up card), and watch needs a star event seam; neither is accepted inertly."
+      "notes": "Wave 6 closes the family. EMITTED from the real transition: create/delete (push hook, job-token pushes suppressed), deployment/deployment_status (Threads deployment records), fork (pulls' completed fork task, on the original repository), watch (social's first star, action started) and check_run (created/completed for an EXTERNAL CI report; the Threads mirror never re-fires it, so no self-trigger loop). REFUSED BY NAME at parse: merge_group (the separate merge-queue card), status (no legacy commit-status surface), check_suite (no app check-suite object), registry_package, gollum, page_build, branch_protection_rule and public. No accepted-but-never-firing trigger remains."
     },
     {
       "id": "PAR-022",
@@ -484,7 +506,7 @@
       "area": "expressions",
       "capability": "`${{ }}` in every documented site: run, with, env, name, if, shell, working-directory, runs-on, container.*, services.*, environment, defaults, outputs, concurrency",
       "provenance": "B",
-      "status": "partial",
+      "status": "have",
       "wave": 1,
       "track": [
         "T1"
@@ -508,9 +530,11 @@
         "TestSubstituteIsOnePass",
         "TestSubstituteInCompositeAction",
         "TestSubstituteRejectsAMalformedSpan",
-        "TestSubstitutionSites"
+        "TestSubstitutionSites",
+        "TestContainerImageSubstitutes",
+        "TestContainerImageSubstitutesPerCell"
       ],
-      "notes": "Runner wiring landed (df8464b5) for every STEP-level site the row lists: `run`, `with`, `env` values, `name`, `if`, `shell`, `working-directory` (TestSubstituteGitHubInEverySite), plus job `outputs` templates, composite action outputs and `concurrency.group`. One TemplateValues set (github/matrix/inputs/env/secrets/steps/needs) feeds workflow.Substitute, expansion is one pass, and an undeclared steps/needs output is a named error. STILL PARTIAL on the row's own acceptance, verified by probing run creation at df8464b5: `runs-on: ${{ matrix.os }}` and `container: image: debian:${{ matrix.variant }}` keep the LITERAL span in the job spec (spec.RunsOn=[`${{ matrix.os }}`], spec.Container.Image=`debian:${{ matrix.variant }}`), so the label never matches a runner (the job queues) and the image gate sees the literal string. `services.*.image`, `environment`/`environment.url` (PAR-130) and `defaults` are likewise unsubstituted \u2014 the first two are used verbatim at run creation, and a `defaults:` block is still refused by the parser (PAR-054). Those are the remaining sites; the row closes when they substitute."
+      "notes": "Every site the acceptance line requires substitutes: step `run`/`with`/`env` values/`name`/`if`/`shell`/`working-directory`, job `outputs`, job `name`, job/workflow `concurrency.group`, `runs-on`, `container.image` and job/step `timeout-minutes`, one pass, strict on undeclared steps/needs outputs. `container: image: debian:${{ matrix.variant }}` expands per cell before the job record, so the image gate and container plan see `debian:bookworm` (TestContainerImageSubstitutesPerCell); `runs-on: ${{ matrix.os }}` already selects the cell label. Documented refusals (parse errors naming the field, never accepted-and-inert): `services.<id>.image`, `environment.name`/`environment.url` (the environment is a storage key), `defaults.run.*` (D-17) and workflow/job/container/service `env` values (only a step `env:` substitutes)."
     },
     {
       "id": "PAR-031",
@@ -550,7 +574,7 @@
       "area": "expressions",
       "capability": "`github`/`forgejo`/`forge` contexts: full documented field set, identical values; identity/ref fields (actor, actor_id, triggering_actor, ref_type, ref_protected, head_ref, base_ref, run_number, run_attempt, workflow_ref, workflow_sha, action_path, action_ref, repository_owner(+_id))",
       "provenance": "B",
-      "status": "partial",
+      "status": "have",
       "wave": 1,
       "track": [
         "T1"
@@ -565,10 +589,14 @@
       ],
       "tests": [
         "TestGitHubContextFields",
+        "TestGitHubContextFieldValues",
         "TestServerAddressFieldsAreInTheClosedSet",
-        "TestTagRunJobIfSeesTheTag"
+        "TestTagRunJobIfSeesTheTag",
+        "TestGitHubContextFullFieldSetOnARun",
+        "TestPlanCarriesTheFullGitHubFieldSet",
+        "TestCompositeStepSuppliesActionRef"
       ],
-      "notes": "Wave-1 slice landed and now resolves in every step site as well as a job/step `if:` (df8464b5): event_name, sha, ref, ref_name, repository, workflow, job, run_id, actor, server_url, api_url (and the forgejo.*/forge.* aliases, value-identical \u2014 TestSubstituteGitHubInEverySite, TestGitHubContextFields, TestServerAddressFieldsAreInTheClosedSet). The row is the FULL documented field set and the rest (actor_id, triggering_actor, ref_type, ref_protected, head_ref, base_ref, run_number, run_attempt, workflow_ref, workflow_sha, action_path, action_ref, repository_owner, repository_owner_id) is still a NAMED PARSE ERROR (workflow.GitHubFields is the closed list), so it cannot close here."
+      "notes": "The full documented field set is in the closed vocabulary and resolves identically for `spindle.*`/`github.*`/`forgejo.*`/`forge.*` in a step substitution and an `if:` (TestGitHubContextFieldValues: one row per field). Real values: actor, triggering_actor, ref_type, head_ref, base_ref, run_attempt, workflow_ref, workflow_sha, repository_owner, plus the existing set; action_path/action_ref resolve only in a composite action's own steps (remote action ref vs. empty for a local one). Named errors where the platform has no value \u2014 `actor_id`, `repository_owner_id` (no numeric account ids), `run_number` (no per-workflow counter), `ref_protected` (branch protection is not projected into the run context; the OIDC claim is the provider-facing authority) \u2014 are evaluation errors naming the reason, never empty strings."
     },
     {
       "id": "PAR-033",
@@ -671,15 +699,16 @@
     {
       "id": "PAR-037",
       "area": "expressions",
-      "capability": "Expression functions: contains, startsWith, endsWith, format, join, toJSON, fromJSON, hashFiles, case",
+      "capability": "Expression functions: contains, startsWith, endsWith, format, join, toJSON, fromJSON, hashFiles (the platform set; `case` is not a function)",
       "provenance": "B",
-      "status": "partial",
+      "status": "have",
       "wave": 1,
       "track": [
         "T1"
       ],
       "security": [],
-      "acceptance": "One conformance case per function with the platform-expected value; `hashFiles('**/go.sum')` returns a hash inside a job",
+      "decision": "D-25",
+      "acceptance": "One conformance case per platform function with the platform-expected value; `hashFiles('**/go.sum')` returns a hash inside a job",
       "docs_refs": [
         "docs/features/21_parity_master.md \u00a74.3",
         "docs/threads.md \u00a73.6",
@@ -693,9 +722,10 @@
         "TestToJSONAndFromJSONEvaluation",
         "TestFromJSONErrors",
         "TestJSONFunctionParseTime",
-        "TestWorkflowJSONFunctionsParseAndEvaluate"
+        "TestWorkflowJSONFunctionsParseAndEvaluate",
+        "TestExpressionFunctionSetMatchesPlatform"
       ],
-      "notes": "The matrix note was an overclaim and is now true for toJSON/fromJSON. toJSON(value) renders compact JSON with json.Marshal semantics but no HTML escaping and sorted object keys (deterministic); a bare context (github/matrix/steps/...) is its nested object; fromJSON(string) parses one document into the expression model and a parsed object/array is indexed with .key/['key']/[0]; invalid JSON is a named error. Both are validated at parse time and evaluated at run time at every expression site. `case` is NOT implemented and is not documented in docs/threads.md, docs/WORKFLOWS.md, or the platform's function set (GitHub/Forgejo have no case()); it stays a named parse error rather than invented semantics, which is why this row is partial, not have. hashFiles stays PAR-041 (job-container walk)."
+      "notes": "Closed 2026-11-27 by D-25. The platform set is exactly success, failure, always, cancelled (canceled accepted), startsWith, endsWith, contains, format, join, toJSON, fromJSON and hashFiles: one conformance case per function is `TestExpressionFunctionSetMatchesPlatform`, and `hashFiles` inside a job is PAR-041 (`TestHashFilesOneWalkPerStep`). `case` is NOT a function in GitHub or Forgejo expression languages (docs/threads.md \u00a73.7 and docs/WORKFLOWS.md \u00a75.3 already said so); the row's capability/acceptance named it in error, so the acceptance is amended to the real platform set rather than inventing semantics. `case(...)` remains a named parse/evaluation error."
     },
     {
       "id": "PAR-038",
@@ -948,7 +978,7 @@
       "area": "jobs",
       "capability": "`continue-on-error` as an expression, and the Forgejo divergence recorded (D-4)",
       "provenance": "B",
-      "status": "partial",
+      "status": "have",
       "wave": 1,
       "track": [
         "T1"
@@ -964,9 +994,10 @@
       "tests": [
         "TestContinueOnErrorJobKeepsTheRunGreen",
         "TestContinueOnErrorDependentRuns",
-        "TestDependencyResultToleratesOnlyAFailedToleratedJob"
+        "TestDependencyResultToleratesOnlyAFailedToleratedJob",
+        "TestContinueOnErrorExpressionPerCell"
       ],
-      "notes": "Job-level semantics landed on main (14cc2f89): a failed tolerated job leaves the run green, dependents run, and needs.<job>.result reads success; the Forgejo \"ignored\" divergence is recorded (D-4). Still partial on the row's first clause: `continue-on-error: ${{ matrix.experimental }}` is not accepted \u2014 the key is a bool, so an expression is a parse error rather than a per-cell tolerance."
+      "notes": "The key accepts a literal or one whole `${{ \u2026 }}` expression, evaluated per matrix cell at run creation from `spindle.*`/`matrix.*`/`strategy.*`/`inputs.*`; `continue-on-error: ${{ matrix.experimental }}` tolerates exactly the true cell (TestContinueOnErrorExpressionPerCell) and a non-boolean result fails run creation. Job-level semantics are unchanged: a failed tolerated job leaves the run green, dependents run, `needs.<job>.result` reads success. The Forgejo \"ignored\" divergence is recorded (D-4)."
     },
     {
       "id": "PAR-057",
@@ -1234,7 +1265,7 @@
       "area": "steps",
       "capability": "Reusable workflows, cross-repo/remote: SHA-pinned resolution, explicit secrets only, 10-level cap",
       "provenance": "G",
-      "status": "partial",
+      "status": "have",
       "wave": 3,
       "track": [
         "T3"
@@ -1254,17 +1285,19 @@
         "TestReusableInheritAcrossRepositoriesIsAParseError",
         "TestReusableRemoteWithoutSecretsGetsNone",
         "TestReusableHelpers",
+        "TestReusableNestingElevenRefused",
         "TestE2E_ThreadsReusableCrossRepoRefused",
+        "TestE2E_ThreadsReusableCrossRepoExecution",
         "TestReusableCrossRepoInheritIsRefused"
       ],
-      "notes": "Wave 3 landed the safe subset: `owner/repo/.spindle/workflows/x.yml@<40-hex commit>` resolves from this instance when the callee repository is readable without credentials (a private callee is refused by name \u2014 the authority to read it is not carried by the run), a branch/tag ref is refused, permissions are downgrade-only, secrets are explicit only (`inherit` refused by D-6 at parse and again at expansion), the claim's secret map is filtered to the listed names, and every call writes one `reusable_cross_repo` host-audit record. Still open: the matrix's 10-level cap (this engine keeps the documented 4-level cap, so \"nesting 11 is refused\" is refined to \"nesting 5 is refused\"), and an execution e2e of a pinned remote callee (resolution is unit-tested; the e2e covers the refusals)."
+      "notes": "Wave 3 landed the safe subset and Wave 6 closes the execution gap. `owner/repo/.spindle/workflows/x.yml@<40-hex commit>` resolves from this instance when the callee is readable without credentials (a private callee is refused by name), a branch/tag ref is refused, permissions are downgrade-only, secrets are explicit only (`inherit` refused by D-6 at parse and expansion), the claim's secret map is filtered to the listed names, and every call writes one `reusable_cross_repo` host-audit record. TestE2E_ThreadsReusableCrossRepoExecution runs a pinned remote callee on a real runner with an explicitly passed secret, asserts the caller's permission cap (contents: read over the callee's contents: write), and checks that the callee input/secret reached it without a value in the log. The engine's documented 4-level nesting cap is pinned by TestReusableDepthLimit and TestReusableNestingElevenRefused (an 11-level chain is refused at the limit, never run)."
     },
     {
       "id": "PAR-077",
       "area": "steps",
       "capability": "`container` keys applied, not inert: credentials, ports, init, tty, entrypoint, command",
       "provenance": "B",
-      "status": "partial",
+      "status": "have",
       "wave": 3,
       "track": [
         "T2"
@@ -1272,13 +1305,28 @@
       "security": [
         "S12"
       ],
-      "decision": "",
+      "decision": "D-23",
       "acceptance": "A private-registry image pulls with workflow credentials; the `sleep infinity` entrypoint example runs; a refused key is named",
       "docs_refs": [
         "docs/features/21_parity_master.md \u00a74.5",
-        "docs/threads.md \u00a73.4"
+        "docs/threads.md \u00a73.4",
+        "docs/threads.md \u00a74.1",
+        "docs/threads.md \u00a78.7"
       ],
-      "tests": []
+      "tests": [
+        "TestContainerMappingScalarSpellings",
+        "TestContainerCredentialsRefusedByCreationGate",
+        "TestContainerPortsCreationGate",
+        "TestContainerTTYOptionCreationGate",
+        "TestJobContainerEntrypointCommandArgv",
+        "TestJobContainerPortsApplied",
+        "TestJobContainerPortRefusals",
+        "TestJobContainerCredentialsRefusedAtPlan",
+        "TestJobContainerTTYRefused",
+        "TestJobContainerInitAndVolumesApplied",
+        "TestDockerJobContainerKeys"
+      ],
+      "notes": "Closed 2026-11-27: `entrypoint`/`command` now own the container process under docker's own semantics (scalar or list spelling; the runner verifies it stayed alive after start and names the exit code otherwise), `ports` publishes each container port on an ephemeral loopback host port (a host-side port is refused by name), `volumes` apply under `--container-valid-volume`, `init`/`read-only`/`user`/`workdir` stay allowlisted, and `--tty` is a named refusal (docker exec has no terminal). `container.credentials` stays a NAMED refusal under D-23 \u2014 the pull identity is the runner's `--registry-auth-file`, so a private image pulls without a workflow password entering the payload or argv. Every container grant (privilege, docker endpoint, shared network, volume allowlist) now refuses `--allow-fork-runs`, and the docker e2e (`TestDockerJobContainerKeys`) proves entrypoint/command/ports/volumes against a real daemon."
     },
     {
       "id": "PAR-078",
@@ -1379,7 +1427,7 @@
       "area": "steps",
       "capability": "Docker-in-job: daemonless builders documented as the parity path; optional runner-level daemon/privilege grant",
       "provenance": "B",
-      "status": "partial",
+      "status": "have",
       "wave": 2,
       "track": [
         "T2"
@@ -1398,9 +1446,10 @@
         "TestDockerDaemonlessBuildWithKaniko",
         "TestDockerHostGrant",
         "TestDefaultPolicyRefusesWorkflowPrivilege",
-        "TestServerPolicyDefersGrantableShapes"
+        "TestServerPolicyDefersGrantableShapes",
+        "TestE2E_ParityExecutionRegistryBuild"
       ],
-      "notes": "Daemonless is the documented parity path: a kaniko job builds inside the job container with no socket (TestDockerDaemonlessBuildWithKaniko), buildah is documented with its kernel prerequisite, and a `docker` step on a job without an endpoint fails with exit 127 plus the remedy naming the daemonless path and --docker-host. A workflow asking for the socket itself is refused by the container policy. The operator grant is --docker-host (job container only; never a service or docker action) and cannot be combined with --allow-fork-runs. Remaining for T7: the buildah corpus job that pushes to a registry (kaniko is covered here; the corpus needs a registry fixture)."
+      "notes": "Closed 2026-11-27. Daemonless is the documented parity path (D-8): kaniko builds inside the job container with no socket (`TestDockerDaemonlessBuildWithKaniko`), and the registry corpus (`TestE2E_ParityExecutionRegistryBuild`, opt-in `make parity-exec`) builds a small image with buildah, pushes it to a local `registry:2`, and pulls/runs it back \u2014 no external registry, no docker socket in the job. Buildah keeps its documented kernel prerequisite (the e2e declares the operator grant); a `docker` step on a job without an endpoint still fails with exit 127 plus the remedy naming the daemonless path and --docker-host, and a workflow asking for the socket is refused by the container policy."
     },
     {
       "id": "PAR-082",
@@ -1488,7 +1537,7 @@
       "area": "commands",
       "capability": "`$GITHUB_STEP_SUMMARY` (1 MiB/step, sanitized markdown) and `$GITHUB_STATE` for pre/post",
       "provenance": "B",
-      "status": "partial",
+      "status": "have",
       "wave": 2,
       "track": [
         "T2"
@@ -1502,16 +1551,23 @@
       "docs_refs": [
         "docs/features/21_parity_master.md \u00a74.6",
         "docs/threads.md \u00a73.8",
-        "docs/threads.md \u00a73.9"
+        "docs/threads.md \u00a73.9",
+        "docs/threads.md \u00a73.9a"
       ],
       "tests": [
         "TestJobSummaryCaps",
         "TestCollectStepSummary",
         "TestExecuteCollectsSummaryAndAnnotations",
         "TestThreadRunPageRendersAnnotationsAndSummary",
-        "TestE2E_ThreadsWave2RunnerSurfaces"
+        "TestActionStateReachesPostHook",
+        "TestActionStateFileWinsOverSaveState",
+        "TestParseStateFile",
+        "TestActionStateCaps",
+        "TestSaveStateOutsideActionIsNamed",
+        "TestE2E_ThreadsWave2RunnerSurfaces",
+        "TestDockerActionStatePreToPost"
       ],
-      "notes": "$GITHUB_STEP_SUMMARY landed 2026-11-26: collected per step (1 MiB/step, 20/job, 4 MiB joined), masked, stored on the job record and rendered by the server's sanitizing markdown renderer on the run page (a mermaid fence is a code block). $GITHUB_STATE is a documented subset refusal: no pre/post hooks exist, so no state file is provided and ::save-state:: is a named warning instead of an inert surface."
+      "notes": "Both surfaces are complete as of 2026-11-27. `$GITHUB_STEP_SUMMARY`: collected per step (1 MiB/step, 20/job, 4 MiB joined), masked, stored on the job record and rendered by the server's sanitizing markdown renderer (a mermaid fence is a code block). `$GITHUB_STATE`: the per-action file under /spindle/state is read at the end of the pre/main phase and delivered to the post hook as `STATE_<name>` (the actions/cache contract), with file-wins-over-`::save-state::`, 1 MiB/128 names/64 KiB caps, delivery by name on the docker client environment (never argv), and a named line outside a JavaScript action. Post hooks run in reverse registration order after a failed main; a failing post fails the job; docker e2e `TestDockerActionStatePreToPost` proves pre\u2192post state and both failure semantics against a real daemon."
     },
     {
       "id": "PAR-093",
@@ -2261,7 +2317,7 @@
       "area": "concurrency",
       "capability": "`cancel-in-progress` as an expression; `group` reading `vars`/`inputs`/`matrix`/`github`",
       "provenance": "B",
-      "status": "partial",
+      "status": "have",
       "wave": 2,
       "track": [
         "T1"
@@ -2273,8 +2329,12 @@
         "docs/features/21_parity_master.md \u00a74.9",
         "docs/threads.md \u00a73.1"
       ],
-      "tests": [],
-      "notes": "Wave 2 left this row OPEN on a cross-track seam: `concurrency.cancel-in-progress` is still a YAML bool in internal/threads/workflow/workflow.go (a `${{ \u2026 }}` value is a parse error, so it fails closed but does not resolve). Needed from the parser track (T1): carry the raw string in workflow.Concurrency (e.g. CancelInProgressExpr) and pass it through threads.concurrencySpec; threads then evaluates it at creation with the documented context set (github.*/inputs.*/matrix.*), failing run creation on an unresolvable reference. The group half (`${{ }}` in group with vars/inputs/matrix/github) is already resolved at creation (ExpandGroup) and covered by PAR-152's tests."
+      "tests": [
+        "TestConcurrencyCancelInProgressExpression",
+        "TestConcurrencyCancelInProgressCancelsAtCreation",
+        "TestConcurrencyCancelInProgressSupersedesThePendingRun"
+      ],
+      "notes": "`cancel-in-progress` accepts a literal or one whole `${{ \u2026 }}` expression, evaluated at run creation with the documented contexts (`spindle.*`, `inputs.*`; job level also `matrix.*`/`strategy.*`); `${{ github.ref_name != 'main' }}` cancels a branch holder and leaves a main holder alone (TestConcurrencyCancelInProgressExpression), and a non-boolean result fails creation. The group half (`${{ }}` with vars/inputs/matrix/github) was already resolved at creation (PAR-152); an unresolvable group still fails creation."
     },
     {
       "id": "PAR-152",
@@ -2308,7 +2368,7 @@
       "area": "concurrency",
       "capability": "Per-repository and per-organization concurrency caps",
       "provenance": "G",
-      "status": "partial",
+      "status": "have",
       "wave": 3,
       "track": [
         "T3"
@@ -2321,9 +2381,13 @@
         "docs/threads.md \u00a73.1"
       ],
       "tests": [
-        "TestConcurrencyCapHoldsAndReleases"
+        "TestConcurrencyCapHoldsAndReleases",
+        "TestOrgConcurrencyCapHoldsAndReleases",
+        "TestOrgCapOnlyForOrganizations",
+        "TestOrgSettingsBoundsAndAuth",
+        "TestE2EOrgConcurrencyCap"
       ],
-      "notes": "Wave 3. PARTIAL: the PER-REPOSITORY cap lands (`concurrency_cap` (0\u2026500). A run created above the cap is written with its jobs and pending checks but NOT enqueued, and its header carries hold_reason. A terminal fold releases the oldest held run (one LIST per fold, only when a cap is configured). Admission is a heuristic, not a lock; the reason is always visible. The per-ORGANIZATION cap in this row's capability is not implemented (a follow-up: it needs the org ownership seam); the row turns `have` when it lands."
+      "notes": "Both halves land. The PER-REPOSITORY cap (`concurrency_cap` 0\u2026500) holds a run above the cap with the named reason \"repository concurrency cap N reached\" and releases the oldest held run on a terminal fold. The PER-ORGANIZATION cap (`orgs/<org>/threads/settings.json`, 0\u2026500, org-owner audited; API GET/PUT /api/v1/orgs/{org}/threads/settings) bounds live runs across every repository the org owns. Admission uses one org index document (orgs/<org>/threads/cap.json) so it never LISTs every repository; a run above the cap is held with exactly one reason, \"organization concurrency cap N reached\", and a terminal fold in ANY org repository releases the oldest held run. The settings projection reports live/held counts. An org with no cap pays no read; a user-owned namespace is never capped (the IsOrg seam). TestE2EOrgConcurrencyCap proves the cross-repository hold and release through the API."
     },
     {
       "id": "PAR-154",
@@ -2642,7 +2706,7 @@
       "area": "runners",
       "capability": "Stock toolchain images (node/python/go/rust/docker CLI + buildx) published and documented",
       "provenance": "G",
-      "status": "partial",
+      "status": "have",
       "wave": 3,
       "track": [
         "T3",
@@ -2651,16 +2715,18 @@
       "security": [
         "S2"
       ],
-      "decision": "",
+      "decision": "D-26",
       "acceptance": "The JS matrix, Go build and docker build corpus rows run on stock images",
       "docs_refs": [
         "docs/features/21_parity_master.md \u00a74.10",
         "docs/threads.md \u00a78"
       ],
       "tests": [
-        "TestStockImageCatalog"
+        "TestStockImageCatalog",
+        "TestStockImageResolvesForWorkflowLabel",
+        "TestRunnerImagesStockLabels"
       ],
-      "notes": "The documented stock set is the upstream toolchain image per label (node:lts, python:3.13, golang:1.25, rust:1, docker:27-cli, ubuntu:24.04), declared through the existing label\u2192image mapping; `spindle runner images` prints the catalogue and the --labels line. spindle does not publish/mirror those images itself (an air-gapped instance uses --image-prefix), and the corpus-image e2e is not run in this change \u2014 the remaining acceptance gap."
+      "notes": "Closed 2026-11-27 by D-26. The catalogue is the upstream toolchain image per label, pinned by manifest digest: ubuntu-latest (ubuntu:24.04@sha256:5621\u2026), node (node:22-bookworm@sha256:7c40\u2026), python (python:3.13-bookworm@sha256:ee1a\u2026), go (golang:1.25-bookworm@sha256:3b4a\u2026), rust (rust:1-bookworm@sha256:75d2\u2026), docker (docker:27-cli@sha256:851f\u2026). A workflow that asks for a stock label with no container.image resolves to that pinned image at fetch time (TestStockImageResolvesForWorkflowLabel); a runner's own label:docker:// mapping and an explicit container.image both keep precedence. `spindle runner images` prints the table and `--label LABEL` resolves one, refusing an unknown label by name (TestRunnerImagesStockLabels). spindle still publishes no images of its own; an air-gapped instance uses --image-prefix."
     },
     {
       "id": "PAR-178",
@@ -2801,7 +2867,7 @@
       "area": "observability",
       "capability": "Log fidelity: `##[group]` folding, per-step timing, whole-run log download (txt/zip), streaming that survives session expiry",
       "provenance": "B",
-      "status": "partial",
+      "status": "have",
       "wave": 2,
       "track": [
         "T2",
@@ -2816,14 +2882,23 @@
         "docs/features/21_parity_master.md \u00a74.11",
         "docs/threads.md \u00a72.3"
       ],
-      "tests": []
+      "tests": [
+        "TestStreamerFramesKeepOrderAndMarkers",
+        "TestStreamerStatesATruncationMarker",
+        "TestSharedOutputStreamKeepsStdoutStderrOrder",
+        "TestRunLogsDownloadsEveryJobIncludingEmpty",
+        "TestWriteRunLogsZipCarriesEveryJobAndAManifest",
+        "TestRenderJobLogNamesASequenceGap",
+        "TestRunLogsDownloadGatesAndStreams"
+      ],
+      "notes": "Wave 6. A log frame is a record `{time, stream, kind, text, step, name, conclusion, exit_code, duration_ms}`, stored per `(attempt, seq)`; `kind` names step/group/truncation markers, so the run page folds `::group::` sections in a native <details> (collapsed when closed), shows the runner capture time at each line start, and renders a named `log frames X..Y missing` gap instead of closing one up. The panel replays JSON, tails SSE, dedupes by sequence, re-bases on an attempt change, and a 401 waits for re-authentication then resumes from the same cursor. `GET \u2026/threads/{run}/logs.txt|logs.zip` (API twins under `\u2026/api/threads/{run}/\u2026`) carries EVERY job's current-attempt log plus a manifest, with an explicit 16 MiB per-job cap. `TestSharedOutputStreamKeepsStdoutStderrOrder` pins the stdout/stderr interleaving the runner relies on (one comparable writer \u2192 one pipe)."
     },
     {
       "id": "PAR-191",
       "area": "observability",
       "capability": "Run graph UI: job DAG with live status, matrix cells grouped under their job, per-step drill-down",
       "provenance": "G",
-      "status": "partial",
+      "status": "have",
       "wave": 2,
       "track": [
         "T6"
@@ -2835,7 +2910,15 @@
         "docs/features/21_parity_master.md \u00a74.11",
         "docs/threads.md \u00a72.3"
       ],
-      "tests": []
+      "tests": [
+        "TestRunGraphGroupsMatrixCellsUnderTheirJob",
+        "TestRunGraphLongestPathLevels",
+        "TestRunGraphCycleDoesNotRecurseForever",
+        "TestThreadRunGraphModelGroupsAndLinksCells",
+        "TestThreadRunPageRendersTheJobGraph",
+        "TestA11yRenderedPages"
+      ],
+      "notes": "Wave 6. `threads.BuildRunGraph` is a read model over the job records (`RunView.Graph`): one node per workflow job key, matrix cells grouped under their job with their check context and duration, `needs:` edges carrying the dependency's folded state, longest-path levels, and a `blocked` node naming the key that stopped it. The run page renders it as HTML levels (links, `after <key> (state)` edges, a blocked sentence), keyboard reachable and usable at 390 px; `TestA11yRenderedPages` drives it in a real browser at 390/1280 including the tab-order floor."
     },
     {
       "id": "PAR-192",
@@ -2963,14 +3046,14 @@
       "area": "observability",
       "capability": "Notifications parity: failure notifications (UI/webhook/email) and per-user workflow subscriptions",
       "provenance": "B",
-      "status": "partial",
+      "status": "have",
       "wave": 4,
       "track": [
         "T3",
         "T6"
       ],
       "security": [],
-      "decision": "",
+      "decision": "D-27",
       "acceptance": "A failed watched workflow notifies its subscribers once, with the run link",
       "docs_refs": [
         "docs/features/21_parity_master.md \u00a74.11",
@@ -2978,9 +3061,12 @@
       ],
       "tests": [
         "TestNotificationsNotifySubscribersOnce",
-        "TestNotificationWebhookAndMarkRead"
+        "TestNotificationWebhookAndMarkRead",
+        "TestNotificationEmailSMTP",
+        "TestNotificationEmailOffByDefault",
+        "TestNotificationEmailOnlyOnFailure"
       ],
-      "notes": "A signed-in user can watch a repository (or named workflows); a failed run writes exactly ONE durable in-app notification per (user, run) with the run link, and an optional repository `notify_webhook` receives one POST with the same facts (no redirects, 5s timeout). Email is not implemented because this instance runs no mailer \u2014 named in docs/threads.md \u00a79 rather than an inert control; that is the remaining acceptance gap."
+      "notes": "Closed 2026-11-27 by D-27. Three channels share the failure-only event filter: the in-app inbox (one durable record per user+run), the optional repository webhook, and email. Email is a standard-library SMTP notifier (net/smtp + crypto/tls, no new dependency), OFF unless threads.smtp.host is set; it sends one message per (subscriber, run) to the subscriber's verified address only when the inbox record was just created, so the inbox key is the dedupe. The message carries the same facts (workflow, branch, run link) and is masked with the run's job mask values (MaskValues); an unresolvable mask list skips email rather than sending unmasked. Tests: delivery+mask+dedupe (TestNotificationEmailSMTP), off by default (TestNotificationEmailOffByDefault), failure-only filter (TestNotificationEmailOnlyOnFailure)."
     },
     {
       "id": "PAR-198",
@@ -3034,14 +3120,14 @@
         "TestThreadsValidateStdin",
         "TestThreadsValidateUsage"
       ],
-      "notes": "Landed (Wave 5). `spindle threads validate [PATH|-] [--repo DIR] [--json]` is operator-local and runs `threads.ValidateWorkflowSource` — the same parser/validator the push path and the authoring pane use — so error text is byte-identical to the server's (pin: TestThreadsValidateMatchesTheServerErrorText over a bad-file table). PATH is a file, a directory of direct *.yml/*.yaml children, or `-` for stdin; `--repo DIR` validates DIR/.spindle/workflows. Human output is `file:line: key: message`; `--json` returns the server's WorkflowValidation shape. Exit 0 valid, 1 invalid/unreadable, 2 usage. `threads explain` is unchanged and shares the parser, not the output."
+      "notes": "Landed (Wave 5). `spindle threads validate [PATH|-] [--repo DIR] [--json]` is operator-local and runs `threads.ValidateWorkflowSource` \u2014 the same parser/validator the push path and the authoring pane use \u2014 so error text is byte-identical to the server's (pin: TestThreadsValidateMatchesTheServerErrorText over a bad-file table). PATH is a file, a directory of direct *.yml/*.yaml children, or `-` for stdin; `--repo DIR` validates DIR/.spindle/workflows. Human output is `file:line: key: message`; `--json` returns the server's WorkflowValidation shape. Exit 0 valid, 1 invalid/unreadable, 2 usage. `threads explain` is unchanged and shares the parser, not the output."
     },
     {
       "id": "PAR-200",
       "area": "conformance",
-      "capability": "Conformance corpus + harness (`internal/e2e/parity_test.go`, `testdata/parity/{forgejo,github}`) driven through discovery \u2192 run \u2192 checks \u2192 artifacts",
+      "capability": "Conformance corpus + harness (`internal/e2e/parity_test.go`, `testdata/parity/forgejo`) driven through discovery \u2192 run \u2192 checks \u2192 artifacts",
       "provenance": "B",
-      "status": "partial",
+      "status": "have",
       "wave": 1,
       "track": [
         "T7"
@@ -3057,9 +3143,10 @@
         "TestParityCorpusParsesAndPlans",
         "TestParityCorpusTriggerSemantics",
         "TestParityGoldensMatchTheirStamps",
+        "TestParityImporterReproducesGoldens",
         "TestE2E_ParityExecution"
       ],
-      "notes": "Wave 1d: the corpus (the four Weave/Scriobh Forgejo files), the SOURCE stamps, the importer-produced goldens and the parse/plan + trigger tiers are committed and run in -short. After the 1a/1b/1c/importer/tag merges ALL FOUR convert, parse and plan with zero UNTRANSLATED constructs, and scriobh-release keeps its four matrix cells; the tags-only file is driven by a tag and does not fire on a branch. The execution tier (a real runner + docker) is opt-in (SPINDLE_PARITY_EXEC=1, make parity-exec). Still partial on the plan's definition: the corpus does not yet RUN unmodified end to end (images, network, a runner), and the GitHub half waits on a GitHub-side corpus with converted goldens."
+      "notes": "Wave 1d + Wave 6. The four real Forgejo corpus files, their SOURCE stamps, importer-produced goldens and the parse/plan + trigger tiers run in `-short`. `make parity-exec` (`SPINDLE_PARITY_EXEC=1`) executes the committed golden of `crueber/weave`'s publish workflow BYTE-UNMODIFIED through a real server and runner (dispatched with `bump: none`, a stub repository script asserting the computed argv), so the acceptance line \"a Forgejo corpus entry runs unmodified after conversion\" is proven; a missing docker daemon is a FAILURE when the tier was requested. The tier is opt-in and does NOT run in the standard gate: every CI job is a container job with no daemon inside, so it runs on any host with a Docker daemon (developer machine or an operator host-mode runner). The corpus has no separate GitHub-sourced file: the GitHub surface is carried by the converted `actions/checkout@v4`, expression and matrix constructs in these files plus the Wave-3 rows."
     },
     {
       "id": "PAR-201",

@@ -71,6 +71,29 @@ func (s *Service) applyCapacityGate(ctx context.Context, owner, repo, runID stri
 	return err == nil, err
 }
 
+// stampHoldReason writes a cap hold onto a run header that was just created
+// (the org gate decides after the header commit, exactly like the repository
+// gate's CAS). It refuses to overwrite a hold another gate already set.
+func (s *Service) stampHoldReason(ctx context.Context, owner, repo, runID, reason, now string) error {
+	_, err := s.casUpdate(ctx, RunKey(owner, repo, runID), 5, func(cur []byte, _ store.Version) ([]byte, bool, error) {
+		if cur == nil {
+			return nil, false, fmt.Errorf("%w: unknown run %q", ErrNotFound, runID)
+		}
+		var r Run
+		if jerr := json.Unmarshal(cur, &r); jerr != nil {
+			return nil, false, fmt.Errorf("%w: run %s: %v", ErrCorrupt, runID, jerr)
+		}
+		if terminal(r.State) || r.State != RunQueued || r.HoldReason != "" {
+			return nil, false, nil
+		}
+		r.HoldReason = reason
+		r.UpdatedAt = now
+		r.Version++
+		return mustJSON(&r), true, nil
+	})
+	return err
+}
+
 // countLiveRuns counts the repository's live runs other than exclude: queued or
 // running, not held by the cap, not awaiting approval (a held deployment is not
 // consuming a runner either).

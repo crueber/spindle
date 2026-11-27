@@ -362,13 +362,29 @@ current attempt — a superseded attempt is a 409 by identity, never by timestam
 is a clear 401).
 
 **Logs.** `log` stores one frame per `(attempt, seq)` at `…/log/<attempt:03d>-<seq:019d>` (Create;
-412 = already stored, so a retry is idempotent). Frames are capped at 256 KiB, masked before the
-write (see §5.3), and read back by a prefix LIST (a human path). The viewer attaches over SSE:
+412 = already stored, so a retry is idempotent). A frame is a **record**, not a bare chunk:
+`{time, stream, kind, text, step?, name?, conclusion?, exit_code?, duration_ms?}`. `time` is the
+runner's RFC 3339 capture time, `stream` is `output` or `system`, and `kind` names the structural
+marker (`step_start`, `step_end`, `group_start`, `group_end`, `truncated`); a frame with no `kind` is
+captured output. Frames are capped at 256 KiB, masked before the write (see §5.3), and read back by a
+prefix LIST (a human path). A frame the server refuses after its retries is counted by the runner and
+stated in the next successful frame (or at close), and a sequence gap is ALSO rendered by the reader
+as `log frames X..Y missing` — a dropped frame is never silent. The viewer attaches over SSE:
 `GET …/api/threads/{run}/jobs/{job}/log` with `Accept: text/event-stream` replays stored frames as
 `event: log` and tails new ones every second, ending with `event: done` when the job is terminal (a
 `?accept=json` or plain request answers one bounded JSON window instead). The run page renders one
 panel per job and the `threadlog.js` island consumes that stream (the same fetch-stream transport as
-every other island; no new transport, no EventSource).
+every other island; no new transport, no EventSource). The island dedupes by `(attempt, seq)`,
+re-bases its cursor when a re-run changes the attempt, renders a group as a native `<details>` that
+collapses when it closes, stamps each line start with the frame's time, and on a 401 waits for
+re-authentication and resumes from the same cursor instead of dying.
+
+**Whole-run log download (PAR-190).** `GET …/threads/{run}/logs.txt` and `…/logs.zip` (the API twins
+`GET …/api/threads/{run}/logs.txt|logs.zip`) assemble EVERY job's current-attempt log under the
+repository read gate: markers become readable lines, a sequence gap is named, a job with no output
+still gets an entry saying so, and the zip carries `logs/<job-id>-<slug>.txt` plus `manifest.txt`.
+One job entry is capped at 16 MiB with the cap named in the entry — a visible cap, never a silent
+truncation.
 
 **Cancel and rerun.** Cancel marks every job: an unclaimed job goes `cancelled` immediately, a
 running one carries `cancel_requested` until its attempt acknowledges (`cancel`, or the flag on a
@@ -761,7 +777,7 @@ long-poll), so there is no separate liveness ping.
 | `POST /api/v1/threads/runners/declare` | `Bearer wrt_…` | `{version, labels, capacity}` → `200 {runner_id, state, labels, capacity, lease_seconds}` |
 | `POST /api/v1/threads/runners/fetch?timeout=` | `Bearer wrt_…` | empty → `200` job payload (global claim), or `204` when the poll (≤ 30 s, default 20) expires |
 | `POST /api/v1/threads/jobs/{ref}/attempt/{n}/start` | `Bearer wrt_…` | empty → `200 {token, expires_at, repo, run_id, job_id, attempt}` |
-| `POST /api/v1/threads/jobs/{ref}/attempt/{n}/log` | `Bearer wjt_…` | `{seq, text}` → `200 {seq, state, cancel, lease_until?}` |
+| `POST /api/v1/threads/jobs/{ref}/attempt/{n}/log` | `Bearer wjt_…` | `{seq, time, stream, kind, text, step?, name?, conclusion?, exit_code?, duration_ms?}` → `200 {seq, state, cancel, lease_until?}` |
 | `POST /api/v1/threads/jobs/{ref}/attempt/{n}/complete` | `Bearer wjt_…` | `{conclusion, steps[], outputs?}` → `200 {repo, run_id, job_id, state, run_state}` |
 | `POST /api/v1/threads/jobs/{ref}/attempt/{n}/cancel` | `Bearer wjt_…` | empty → `200 {state, run_state}` (the ack) |
 | `POST /api/v1/threads/jobs/{ref}/attempt/{n}/artifacts` | `Bearer wjt_…` | `{name, files:[{path,size,sha256,index}], retention_days?}` → `201` artifact view (409 when the name exists in the run) |
@@ -996,11 +1012,14 @@ runner knows nothing about ordering: `internal/threads/needs.go` owns the gate, 
 the end of every terminal job transition, and a terminal job wakes the fetch hub so a dependent is
 claimed immediately. The workflow parser rejects a `needs` name that is not a job (`ErrBadNeeds`).
 
-**Logs, cancel, completion.** One frame writer per attempt: a single flusher goroutine merges
-stdout/stderr, splits at 32 KiB (the server's cap is 256 KiB), assigns monotonically increasing
-`seq`s, masks every known secret value (and masks step error text) and POSTs each frame; a retry is
-idempotent by sequence, and a frame the server rejects after three attempts is dropped with a
-warning. A 25 s idle heartbeat frame keeps the claim lease alive and is the cancel channel: a log
+**Logs, cancel, completion.** One frame writer per attempt: a single flusher goroutine drains one
+typed record queue (output bytes, runner system lines, step/group/truncation markers), preserving the
+order the job wrote them; stdout and stderr share one comparable writer, so `os/exec` gives both
+descriptors one pipe and the child's write order is the log's order. Output splits at 32 KiB (the
+server's cap is 256 KiB), `seq`s increase monotonically, every known secret value is masked (and step
+error text too) and each frame is POSTed; a retry is idempotent by sequence, and a frame the server
+rejects after three attempts is counted, stated in the next successful frame (or at close) and visible
+as a sequence gap in the reader. A 25 s idle heartbeat frame keeps the claim lease alive and is the cancel channel: a log
 answer with `cancel: true` cancels the job context immediately, so a cancelled step dies even
 mid-command. `complete` posts the job conclusion plus per-step results (number, name, conclusion,
 exit code, duration) on a fresh context, so a SIGTERM-time cancellation still reports. **Cleanup runs
@@ -1150,7 +1169,7 @@ and the service still enforces the write role. The previous dead `/api#threads` 
 |---|---|
 | `/admin/runners` | host admin: mint an instance registration token (copy-once panel), list name/id/labels/capacity/state/last seen/current job, revoke. Settings → Runners is deleted (2026-11-22). |
 | Settings → Secrets | add/replace (name + password field), list `name / •••••• (set) / updated`, delete. When the keyring is absent the panel explains `server.secrets_key` instead of offering a form. |
-| Run page | cancel run / re-run buttons (write role only — the affordance, with the service as the gate), per-job step results, and one live-log panel per job (`data-threadlog` + URL; the island replays then tails). |
+| Run page | the job graph (PAR-191: dependency levels, matrix cells with their check and duration, `after` edges, blocked dependents), cancel run / re-run buttons (write role only — the affordance, with the service as the gate), per-job step results, one live-log panel per job (`data-threadlog` + URL; the island replays then tails), and the whole-run log download (`.txt` / `.zip`). |
 | CLI | **`spindle runner serve`** only (pass B2: the runner process itself — flags/env in §4.1; `--register` bootstraps an instance credential after a browser mint, SIGTERM stops cleanly). There are no `token|list|revoke` verbs: the CLI exposes no admin commands (static machine credentials never administer; a user `wgt_` token re-derives its owner's admin verdict on the API). |
 | JSON API | §3.1: the runner protocol plus the admin runner/secret routes, cancel and rerun, and the log window (`GET …/jobs/{job}/log`, SSE or `?accept=json`). |
 
@@ -1291,6 +1310,49 @@ classes and wrap at narrow widths; verified at 1440×900 and ~390×844 with
 - **Rendered:** run page live logs at desktop and ~390 px; no page-level horizontal scroll.
 
 ## 8. Decisions & deviations
+
+- **NEW (2026-11-27) — the expression function set is the platform's real set (D-25), and `case` is
+  not a function.** The parity row's capability/acceptance named `case` alongside the real functions,
+  but neither GitHub nor Forgejo defines `case()` (and this engine never did); inventing it would be
+  semantics, not parity. The row is amended to success/failure/always/cancelled (canceled accepted),
+  startsWith/endsWith/contains/format/join, toJSON/fromJSON and hashFiles, with one conformance case
+  per function in `TestExpressionFunctionSetMatchesPlatform`. `case(...)` stays a named
+  parse/evaluation error; `hashFiles`'s in-container walk remains PAR-041.
+
+- **NEW (2026-11-27) — stock labels resolve to digest-pinned upstream images (D-26).** The catalogue
+  (`threads.StockImages`) is public upstream images pinned by manifest digest (ubuntu 24.04, node 22,
+  python 3.13, Go 1.25, Rust 1, docker 27-cli). A workflow that names a stock label and no
+  `container.image` receives that pinned image in its job payload; a runner's own
+  `label:docker://…` mapping still applies (PAR-171); with no mapping, an explicit
+  `container.image` wins over the stock catalogue. The server never
+  invents an image outside the catalogue, `spindle runner images --label` refuses an unknown label by
+  name, and spindle still publishes/mirrors nothing (air-gapped hosts use `--image-prefix`).
+
+- **NEW (2026-11-27) — failure email is a stdlib SMTP notifier, off by default (D-27).** The third
+  notification channel uses `net/smtp` + `crypto/tls` only (no dependency) and is enabled by
+  `threads.smtp.host`. It shares the inbox's failure-only event filter and rides the inbox record's
+  deterministic key, so a message is sent only when that record is first created (one per subscriber
+  per run). The body carries the same facts (workflow, branch, run link) and is masked with the run's
+  job mask values; if the mask list cannot be resolved the email is skipped rather than sent
+  unmasked. Credentials are refused over a plaintext connection. The config keys and bounds are in
+  `docs/go/11_config_cli.md`; the operator-facing description is `docs/threads.md` §9.1a.
+
+- **NEW (2026-11-27) — the default step shell is bash (D-24), and a log frame is a record.**
+  (a) **Default shell.** A workflow written for GitHub or Forgejo runs a step with no `shell:` under
+  bash on Linux; spindle documented `sh -e`. The corpus execution tier proved the cost: the real
+  `weave-publish-github` workflow uses a `<<<` here-string and could not execute, so the "runs
+  unmodified after conversion" acceptance line was unreachable. The default is now
+  `bash --noprofile --norc -eo pipefail -c`, with `shell: sh` still available, and an image without
+  bash falls back to `sh -e` with one log line (the same fallback an authored `shell: bash` always
+  had). (b) **Literal-block env values travel verbatim.** The planner flattened authored `env:` values
+  to one line, which turned the corpus's multi-line `CHECKOUT: |` script into a broken `git`
+  invocation. An env value is data; only HTTP header values are single-line. (c) **`Authorization:
+  token` is Bearer.** Forgejo/GitHub spell a CI token that way, and the corpus fetch idiom uses it;
+  it is the same credential, not a second authentication path. (d) **A log frame is a record.**
+  `{time, stream, kind, text, …}` lets the reader render step boundaries and `::group::` folds and
+  name a sequence gap; a bare text chunk made the page guess and let a dropped frame disappear.
+  (e) **A non-root job gets a writable HOME** (`/tmp/spindle-home`): docker's default `HOME=/` made
+  `git config --global` fail for every corpus workflow, and an authored `env: HOME` still wins.
 
 - **NEW (2026-11-23) — deployment environments reuse the approval state machine, run-scoped.**
   (a) **One hold, not a second state machine.** A run naming a reviewed environment is created in the

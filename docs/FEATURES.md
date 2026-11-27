@@ -107,7 +107,10 @@ ready_for_review/converted_to_draft, labeled/unlabeled, assigned/unassigned,
 milestoned/demilestoned; every edge's run is the server-computed merge commit), `pull_request_target`
 (per-repository opt-in, D-2), `repository_dispatch`, `workflow_run` (with a per-run approval hold for
 an untrusted parent), `create`/`delete`, `deployment`/`deployment_status`, `release`, `issues`,
-`issue_comment`, `workflow_dispatch` with typed inputs (`string`, `boolean`, `choice`, `number`,
+`issue_comment`, `pull_request_review` and `pull_request_review_comment`, the label and milestone
+**definition** events, `fork`, `watch`, `check_run` (an external CI report only — Threads' own
+mirrored check never re-fires it), `workflow_dispatch` with typed inputs (`string`, `boolean`,
+`choice`, `number`,
 `environment`), and `schedule` (five-field cron with names, macros, `L`/`NW`/`#` and a per-entry
 timezone); jobs run in containers with services,
 `needs:` ordering, `strategy.matrix` (including GitHub's `include`/`exclude` merge rules),
@@ -135,7 +138,8 @@ until every listed reviewer (or a repo admin) approves the deployment (Settings 
 Deployments are records with statuses and a serialization slot per environment, readable and
 writable through `…/api/threads/deployments` under the `deployments` token scope. Schedules can be
 disabled/enabled and run on demand, CI can be paused, and a manual dispatch may set a queue
-priority; failed runs notify watchers in-app (with an optional webhook). Checks carry annotations,
+priority; failed runs notify watchers in-app (with an optional webhook, and an operator-configured
+SMTP email channel that is off by default, D-27). Checks carry annotations,
 a per-workflow badge and run-list filters, and one job can be cancelled without its siblings.
 Runners declare a capacity, an optional one-job (ephemeral) mode and CPU/memory ceilings; groups
 narrow what a runner sees; drain/resume/rotate/deregister operate the fleet; a managed pool,
@@ -280,7 +284,10 @@ jobs:
 ```
 
 The default job image is `alpine/git:latest` (it carries `git`, which checkout needs inside the job
-container). `--capacity 1` per runner is the isolation-preserving default for untrusted code; scale
+container); a stock label (`ubuntu-latest`, `node`, `python`, `go`, `rust`, `docker`) with no
+`container.image` resolves to a digest-pinned upstream image, and `spindle runner images --label`
+resolves one entry and refuses an unknown label by name. `--capacity 1` per runner is the
+isolation-preserving default for untrusted code; scale
 out with more runners rather than a bigger capacity. A job that pushes must check out with
 `fetch-depth: 0`. A job with a label no runner declares simply stays queued — the run page names the
 one `queue_reason` (no runner, labels unmatched, all busy, a fork with no fork-opted runner, a cap or
@@ -290,7 +297,7 @@ deliberately no repository-policy flag.
 
 Container capability is the operator's, never the workflow's: `--container-privileged`,
 `--container-network`, `--container-valid-volume` and `--docker-host` each admit one shape for every
-job the runner takes, and a runner that grants privilege or a docker endpoint refuses
+job the runner takes, and any one of them refuses
 `--allow-fork-runs`. A private image pull uses the runner's own identity — its daemon config, an
 `--image-prefix` mirror, or `--registry-auth-file` (password on stdin) — never workflow
 `services.*.credentials`. Daemonless image builds (kaniko, buildah) need no grant; `docker build`

@@ -153,6 +153,34 @@ func (s *Service) CreateRun(ctx context.Context, repo, commit, event string, opt
 				strings.Join(workflow.PullRequestTypes, ", "), action)
 		}
 	}
+	if event == EventPullReview {
+		if !containsFoldString(workflow.ReviewTypes, action) {
+			return nil, fmt.Errorf("%w: pull_request_review type must be one of %s, got %q", ErrInvalid,
+				strings.Join(workflow.ReviewTypes, ", "), action)
+		}
+	}
+	if event == EventPullReviewComment {
+		if !containsFoldString(workflow.ReviewCommentTypes, action) {
+			return nil, fmt.Errorf("%w: pull_request_review_comment type must be one of %s, got %q", ErrInvalid,
+				strings.Join(workflow.ReviewCommentTypes, ", "), action)
+		}
+	}
+	if event == EventLabel || event == EventMilestone {
+		supported := workflow.LabelTypes
+		if event == EventMilestone {
+			supported = workflow.MilestoneTypes
+		}
+		if action != "" && !containsFoldString(supported, action) {
+			return nil, fmt.Errorf("%w: %s type must be one of %s, got %q", ErrInvalid, event,
+				strings.Join(supported, ", "), action)
+		}
+	}
+	if event == EventCheckRun {
+		if !containsFoldString(workflow.CheckRunTypes, action) {
+			return nil, fmt.Errorf("%w: check_run type must be one of %s, got %q", ErrInvalid,
+				strings.Join(workflow.CheckRunTypes, ", "), action)
+		}
+	}
 	if event == EventRepositoryDispatch {
 		if !workflow.ValidDispatchType(action) {
 			return nil, fmt.Errorf("%w: repository_dispatch event_type is required and must match [A-Za-z0-9._-]{1,100}, got %q", ErrInvalid, action)
@@ -180,11 +208,15 @@ func (s *Service) CreateRun(ctx context.Context, repo, commit, event string, opt
 	// event (run creation is off the push path, so this is not a hot-path
 	// read). An unreadable record fails closed — every switch off.
 	policy := s.loadRepoPolicy(ctx, owner, name)
+	// PAR-153: the per-organization cap is read only when the owner is an
+	// organization (the IsOrg seam gates the read; a user-owned repository
+	// pays nothing).
+	orgLimit := s.orgCap(ctx, owner)
 	// Trust class (15 §2/§5): the server decides, a workflow cannot opt in.
 	workflowCommit, trusted := sha, true
 	pullTarget := false
 	switch {
-	case event == EventPullReq && opts.Fork:
+	case (event == EventPullReq || event == EventPullReview || event == EventPullReviewComment) && opts.Fork:
 		trusted = false
 		workflowCommit = strings.TrimSpace(opts.BaseCommit)
 		if workflowCommit == "" {
@@ -192,7 +224,7 @@ func (s *Service) CreateRun(ctx context.Context, repo, commit, event string, opt
 			// resolve to the same tip.
 			base := strings.TrimPrefix(strings.TrimSpace(opts.BaseBranch), "refs/heads/")
 			if base == "" {
-				return nil, fmt.Errorf("%w: a fork pull_request needs its base branch", ErrInvalid)
+				return nil, fmt.Errorf("%w: a fork %s needs its base branch", ErrInvalid, event)
 			}
 			resolved, rerr := s.Git.ResolveRef(ctx, repo, "refs/heads/"+base)
 			if rerr != nil {
@@ -234,7 +266,9 @@ func (s *Service) CreateRun(ctx context.Context, repo, commit, event string, opt
 	case event == EventRelease || event == EventIssues || event == EventIssueComment ||
 		event == EventRepositoryDispatch || event == EventWorkflowRun ||
 		event == EventCreate || event == EventDelete ||
-		event == EventDeployment || event == EventDeploymentStatus:
+		event == EventDeployment || event == EventDeploymentStatus ||
+		event == EventLabel || event == EventMilestone || event == EventCheckRun ||
+		event == EventFork || event == EventWatch:
 		// GitHub's rule for the repository-level events: the workflow file is
 		// read from the DEFAULT branch, never from the release tag, the
 		// commenter's checkout or a deleted ref. A release run still reports
@@ -249,7 +283,9 @@ func (s *Service) CreateRun(ctx context.Context, repo, commit, event string, opt
 		// `ref`). The reader may be absent in tests; the caller's Branch then
 		// stays as-is.
 		if event == EventWorkflowRun || event == EventCreate || event == EventDelete ||
-			event == EventDeployment || event == EventDeploymentStatus {
+			event == EventDeployment || event == EventDeploymentStatus ||
+			event == EventLabel || event == EventMilestone || event == EventCheckRun ||
+			event == EventFork || event == EventWatch {
 			if br, ok := s.Git.(DefaultBranchReader); ok {
 				if name, berr := br.DefaultBranch(ctx, repo); berr == nil && strings.TrimSpace(name) != "" {
 					opts.Branch = shortRefName(name)
@@ -268,7 +304,7 @@ func (s *Service) CreateRun(ctx context.Context, repo, commit, event string, opt
 	// refs/pull/<n>/merge. If the merge conflicts (or the reader cannot build
 	// one) the run falls back to the head commit and says so in the payload —
 	// fail closed, never a fabricated sha.
-	if event == EventPullReq && opts.PullNumber > 0 {
+	if (event == EventPullReq || event == EventPullReview || event == EventPullReviewComment) && opts.PullNumber > 0 {
 		if mergeSHA, ok := s.mergeRefCommit(ctx, repo, opts, headSHA, policy); ok {
 			sha = mergeSHA
 			opts.Ref = fmt.Sprintf("refs/pull/%d/merge", opts.PullNumber)
@@ -372,7 +408,7 @@ func (s *Service) CreateRun(ctx context.Context, repo, commit, event string, opt
 	followers := declaresWorkflowRun(files)
 	runs := make([]*Run, 0, len(matched))
 	for _, f := range matched {
-		run, rerr := s.createOne(ctx, owner, name, sha, event, opts, f, workflowCommit, trusted, attempt, actor, gate, approvalKind, policy, pullTarget, followers)
+		run, rerr := s.createOne(ctx, owner, name, sha, event, opts, f, workflowCommit, trusted, attempt, actor, gate, approvalKind, policy, orgLimit, pullTarget, followers)
 		if rerr != nil {
 			return nil, rerr
 		}
@@ -408,7 +444,7 @@ func refTargetOf(event string, opts CreateOpts) (workflow.RefKind, string, strin
 
 // createOne writes one workflow file's run: jobs, then the header, then the
 // checks mirrors (a queued check must never exist for a run nobody can see).
-func (s *Service) createOne(ctx context.Context, owner, repo, sha, event string, opts CreateOpts, f *WorkflowFile, workflowCommit string, trusted bool, attempt int, actor string, gate bool, approvalKind string, policy repoPolicy, pullTarget, followers bool) (*Run, error) {
+func (s *Service) createOne(ctx context.Context, owner, repo, sha, event string, opts CreateOpts, f *WorkflowFile, workflowCommit string, trusted bool, attempt int, actor string, gate bool, approvalKind string, policy repoPolicy, orgLimit int, pullTarget, followers bool) (*Run, error) {
 	_, _, branch := refTargetOf(event, opts)
 	nowAt := s.nowUTC()
 	now := nowAt.Format(dateTimeFmt)
@@ -443,6 +479,7 @@ func (s *Service) createOne(ctx context.Context, owner, repo, sha, event string,
 		PRTarget:             pullTarget,
 		WorkflowRunFollowers: followers,
 		RepoConcurrencyCap:   policy.cap,
+		OrgConcurrencyCap:    orgLimit,
 		Priority:             opts.Priority,
 	}
 	// The run title (PAR-057): `run-name:` rendered once, from the same
@@ -661,6 +698,25 @@ func (s *Service) createOne(ctx context.Context, owner, repo, sha, event string,
 		}
 		if held {
 			run.HoldReason = capacityHoldReason(policy.cap)
+			heldByCap = true
+		}
+	}
+	// PAR-153: the per-organization cap. It applies only to a run the
+	// repository cap admitted (a run already waiting for a repository slot is
+	// not consuming an organization slot), and only when the owner is an
+	// organization (orgLimit > 0). The reason is distinct from the
+	// repository's, and every queued job reports exactly one of them.
+	if !heldByCap && orgLimit > 0 && run.State == RunQueued {
+		held, herr := s.applyOrgCapGate(ctx, owner, repoID(owner, repo), runID, orgLimit, now)
+		if herr != nil {
+			return nil, herr
+		}
+		if held {
+			reason := orgCapacityHoldReason(orgLimit)
+			if serr := s.stampHoldReason(ctx, owner, repo, runID, reason, now); serr != nil {
+				return nil, serr
+			}
+			run.HoldReason = reason
 			heldByCap = true
 		}
 	}
@@ -968,7 +1024,7 @@ func (s *Service) GetRun(ctx context.Context, repo, runID string, p auth.Princip
 	s.fillDurations(run, jobs)
 	s.annotateQueueReasons(ctx, owner, name, run, jobs)
 	av := s.ApprovalFor(ctx, owner, name, run, p)
-	return &RunView{Run: run, Jobs: jobs, Artifacts: arts, Approval: &av}, nil
+	return &RunView{Run: run, Jobs: jobs, Artifacts: arts, Approval: &av, Graph: BuildRunGraph(jobs)}, nil
 }
 
 // fillDurations sets the derived DurationSeconds on a run and its jobs (a read
@@ -1524,6 +1580,9 @@ func (s *Service) foldRun(ctx context.Context, owner, repo, runID string) ([]*Jo
 		if run, rerr := s.loadRun(ctx, owner, repo, runID); rerr == nil && run != nil {
 			if run.RepoConcurrencyCap > 0 {
 				s.releaseHeldRuns(ctx, owner, repo)
+			}
+			if run.OrgConcurrencyCap > 0 {
+				s.releaseOrgHeldRuns(ctx, owner, repoID(owner, repo), runID)
 			}
 			if run.WorkflowRunFollowers {
 				// PAR-019: the `completed` edge. It is detached: a follow-up's

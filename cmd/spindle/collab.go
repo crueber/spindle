@@ -299,8 +299,26 @@ func buildCollab(st store.ObjectStore, cfg *config.Config, reg *wal.Registry, ap
 	if c.issuesSvc != nil && c.threadsSvc != nil {
 		c.issuesSvc.ThreadEvents = threadsIssueEventOf(c)
 	}
+	// Review triggers (PAR-020): a submitted/dismissed review and a created
+	// inline comment create PR-family runs (merge ref, fork trust rule).
+	if c.reviewSvc != nil && c.threadsSvc != nil {
+		c.reviewSvc.ReviewEvents = threadsReviewEventOf(c)
+		c.reviewSvc.ReviewCommentEvents = threadsReviewCommentEventOf(c)
+	}
+	// Fork and PR conversation-comment triggers (PAR-021/PAR-020): the pulls
+	// service owns the transitions; the run reads the default branch's file.
+	if c.pullsSvc != nil && c.threadsSvc != nil {
+		c.pullsSvc.ForkEvents = threadsForkEventOf(c)
+		c.pullsSvc.PullCommentEvents = threadsPullCommentEventOf(c)
+	}
+	// check_run (PAR-021): only an EXTERNAL CI report reaches this seam; the
+	// Threads mirror never fires it (the checks service filters by creator).
+	if c.checksSvc != nil && c.threadsSvc != nil {
+		c.checksSvc.CheckRunEvents = threadsCheckRunEventOf(c)
+	}
 	if c.threadsSvc != nil {
 		c.threadsSvc.OrgAdmin = c.ident.CheckOrgOwner
+		c.threadsSvc.IsOrg = c.ident.IsOrg
 	}
 	// Issue #505: the summary checks-existence projection behind the Env
 	// hook (api renders ChecksSummary without importing the feature, law
@@ -411,6 +429,11 @@ func buildCollab(st store.ObjectStore, cfg *config.Config, reg *wal.Registry, ap
 	// internal/notify (06 §6); the fork counter binds onto pulls
 	// below (07 §6).
 	c.socialSvc, c.socialHandler = newSocialService(st, c.ident)
+	// The `watch` trigger (PAR-021): a star on a repository that declares
+	// on.watch creates a default-branch run.
+	if c.socialSvc != nil && c.threadsSvc != nil {
+		c.socialSvc.WatchEvents = threadsWatchEventOf(c)
+	}
 	// Feature 06 notifications (docs/features/06): the fan-out
 	// layer — notification objects, per-user indexes, the activity
 	// log, per-user SSE, repo webhooks, retention. The REAL

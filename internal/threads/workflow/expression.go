@@ -381,13 +381,13 @@ func (v *ifValidator) validateReference(path []string, word string) error {
 		return v.validateStepPath(path, word)
 	case "needs":
 		return v.validateNeedPath(path, word)
-	case "github", "forgejo", "forge":
+	case "spindle", "github", "forgejo", "forge":
 		if pathHasFilter(path) {
 			return fmt.Errorf("%s: object filters are not supported on the github context", word)
 		}
-		if len(path) == 2 && strings.EqualFold(path[1], "action_path") {
+		if len(path) == 2 && (strings.EqualFold(path[1], "action_path") || strings.EqualFold(path[1], "action_ref")) {
 			if !v.scope.ActionPath {
-				return fmt.Errorf("${{ %s.action_path }} is only available in a composite action's own steps (it is the action's directory; a workflow step has none)", context)
+				return fmt.Errorf("${{ %s.%s }} is only available in a composite action's own steps (it describes the action being run; a workflow step has none)", context, strings.ToLower(path[1]))
 			}
 			return nil
 		}
@@ -406,7 +406,7 @@ func (v *ifValidator) validateReference(path []string, word string) error {
 			return nil
 		}
 		if len(path) != 2 || !ValidGitHubField(path[1]) {
-			return fmt.Errorf("%s is not a supported context field (supported: %s)",
+			return fmt.Errorf("%s is not a supported context field (supported: %s; spindle.* is canonical, github.*/forgejo.*/forge.* are value-identical aliases)",
 				word, strings.Join(GitHubFields, ", "))
 		}
 		return nil

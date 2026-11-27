@@ -17,11 +17,7 @@ import (
 // if-no-files-found, caps, and the tar streams in both directions.
 
 // streamText reads a streamer's buffered log (test helper).
-func streamText(s *Streamer) string {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return s.buf.String()
-}
+func streamText(s *Streamer) string { return queuedText(s) }
 
 // artifactJob is a fetch payload with the two artifact steps.
 func artifactJob(uploadWith, downloadWith map[string]string) *threads.FetchResult {

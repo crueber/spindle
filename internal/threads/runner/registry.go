@@ -4,9 +4,10 @@ package runner
 //
 // The pull identity belongs to the RUNNER, never to a workflow. A private job or
 // service image is reachable because the runner operator configured a registry
-// credential, not because the workflow carries `credentials:` — a
-// workflow-supplied password would travel in the job payload (the bucket) and in
-// docker create argv, which is exactly what N7 forbids.
+// credential, not because the workflow carries `credentials:` (which the
+// creation gate refuses by name, D-23) — a workflow-supplied password would
+// travel in the job payload (the bucket) and in docker create argv, which is
+// exactly what N7 forbids.
 //
 // The credential file is `registry username password` per line (0600; a
 // group/world-readable file is refused). At startup the runner logs in ONCE into

@@ -105,7 +105,7 @@ jobs:
 		t.Fatal("dispatch presence not recorded")
 	}
 	job := w.Jobs["build"]
-	if job.Container == nil || job.Container.Image != "golang:1.27" || job.TimeoutMinutes.Value != 30 || !job.ContinueOnError {
+	if job.Container == nil || job.Container.Image != "golang:1.27" || job.TimeoutMinutes.Value != 30 || !job.ContinueOnError.Bool() {
 		t.Fatalf("job = %+v", job)
 	}
 	if svc := job.Services["db"]; svc.Image != "postgres:16" || len(svc.Ports) != 1 {

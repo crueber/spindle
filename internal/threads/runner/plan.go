@@ -226,6 +226,14 @@ type Names struct {
 	Services  map[string]string // service id → container name
 }
 
+// ContainerLifetimeKeepAlive / ContainerLifetimeWorkflow name who owns the job
+// container's process (PAR-077): the runner's keep-alive, or the workflow's
+// `container.entrypoint`/`command`.
+const (
+	ContainerLifetimeKeepAlive = "keep-alive"
+	ContainerLifetimeWorkflow  = "workflow"
+)
+
 // Plan is one fully-resolved job.
 type Plan struct {
 	JobRef  string
@@ -261,6 +269,14 @@ type Plan struct {
 
 	// ContainerArgv is `docker create …` minus the leading "docker".
 	ContainerArgv []string
+	// ContainerLifetime records who owns the container's process: the runner's
+	// keep-alive (the default) or the workflow's `entrypoint`/`command`
+	// (PAR-077). The executor verifies a workflow-owned container stayed up.
+	ContainerLifetime string
+	// ContainerPorts are the job container's validated `container.ports`
+	// entries (container side), each published on an ephemeral loopback host
+	// port. Stated in the job log so the mapping is observable.
+	ContainerPorts []string
 	// ContainerEnv is the job-level environment the container itself carries.
 	ContainerEnv map[string]string
 	// Services in declaration order (sorted by id).
@@ -364,6 +380,9 @@ type planExec struct {
 	probedNode    bool
 	nodeVersion   string
 	nodeErr       error
+	// state is the per-action `$GITHUB_STATE` hand-off (PAR-092), keyed by the
+	// action invocation's state file path.
+	state *actionState
 }
 
 // markRan records that the step at OutputIndex started executing (it may have
@@ -509,6 +528,10 @@ type StepPlan struct {
 	// receives at exec time: `env: FORGEJO_TOKEN: ${{ secrets.GITHUB_TOKEN }}`
 	// delivers the alias BY NAME, so no secret value ever reaches argv.
 	EnvSecret map[string]string
+	// EnvState is the `STATE_<name>` environment of a post hook (PAR-092). Its
+	// values are supplied by NAME on the docker CLI's own environment, exactly
+	// like a secret: a state value can be a token, so it never enters argv.
+	EnvState map[string]string
 	// Argv is `docker exec …` minus the leading "docker" (or `docker run …`
 	// for a docker action).
 	Argv []string
@@ -577,6 +600,9 @@ type NodePlan struct {
 	// Pre/Post are the hook programs and their conditions ("" = always()).
 	Pre, Post     string
 	PreIf, PostIf string
+	// IsPost marks the end-of-job hook: it receives the state saved by the
+	// pre/main phases as `STATE_<name>` environment variables (PAR-092).
+	IsPost bool
 	// Files is the fetched content the runner materializes before the pre
 	// hook (or the main program) runs.
 	Files []threads.ActionFile
@@ -646,6 +672,10 @@ type StepTemplate struct {
 	// composite action's OWN steps. Empty for a workflow step, where the parser
 	// refuses the reference.
 	ActionPath string
+	// ActionRef is the source ref of the action this composite step belongs to
+	// (PAR-032): `github.action_ref` is the resolved ref for a remote action and
+	// empty for a local one, exactly as GitHub reports it.
+	ActionRef string
 	// ActionInputs are the enclosing action's input values: the `inputs.*`
 	// context inside a composite action's steps (PAR-074). Empty for a workflow
 	// step, where `inputs.*` is the dispatch input set.
@@ -682,6 +712,13 @@ func BuildPlan(in PlanInput) (*Plan, error) {
 	if err := threads.ValidateContainerPolicy(in.Policy); err != nil {
 		return nil, err
 	}
+	// Defence in depth for the creation gate: a spec that carries a
+	// workflow-supplied registry login is refused here too, so an older or
+	// bypassed server can never hand a runner a password in the payload
+	// (PAR-077, N7/D-23).
+	if reason := threads.ContainerCredentialsRefusalReason(spec); reason != "" {
+		return nil, fmt.Errorf("%s", reason)
+	}
 	// The image-prefix rewrite applies to the runner's own default image too:
 	// a mirror covers "the workflow named nothing" exactly like it covers a
 	// workflow-named image (docs/threads.md §8.6).
@@ -713,11 +750,17 @@ func BuildPlan(in PlanInput) (*Plan, error) {
 	// are set before the container exists, so every step (and the shell that
 	// runs it) sees the same file.
 	for k, v := range map[string]string{
-		"RUNNER_NAME":                runnerName,
-		"RUNNER_OS":                  "Linux",
-		"RUNNER_ARCH":                runnerContext(buildEnv, runnerName)["arch"],
-		"RUNNER_TEMP":                RunnerTemp,
-		"RUNNER_TOOL_CACHE":          RunnerToolCache,
+		"RUNNER_NAME":       runnerName,
+		"RUNNER_OS":         "Linux",
+		"RUNNER_ARCH":       runnerContext(buildEnv, runnerName)["arch"],
+		"RUNNER_TEMP":       RunnerTemp,
+		"RUNNER_TOOL_CACHE": RunnerToolCache,
+		// A writable HOME: docker gives a non-root user HOME=/ (the rootfs), so
+		// `git config --global` (and every tool with a dotfile cache) fails with a
+		// permission error. GitHub's runner gives jobs a real home; the job's own
+		// directories are the spindle equivalent. An authored `env: HOME` still
+		// wins (the step env overlays the container env).
+		"HOME":                       RunnerHome,
 		"RUNNER_ENVIRONMENT":         "self-hosted",
 		"RUNNER_DEBUG":               "0",
 		"GITHUB_EVENT_PATH":          EventPath,
@@ -736,8 +779,11 @@ func BuildPlan(in PlanInput) (*Plan, error) {
 	// an authored `env:` overlay: the context is the run's identity, not a
 	// variable a workflow may redefine (docs/threads.md §3.6).
 	github := githubContext(buildEnv)
+	// An authored env value is DATA and travels verbatim: a literal block
+	// (`CHECKOUT: |`) is a multi-line script the corpus files rely on, and an
+	// argv element carries newlines to docker unchanged.
 	for k, v := range spec.Env {
-		buildEnv[k] = headerValue(v)
+		buildEnv[k] = v
 	}
 	jobEnv := map[string]string{}
 	for k, v := range buildEnv {
@@ -804,7 +850,7 @@ func BuildPlan(in PlanInput) (*Plan, error) {
 	p := &Plan{
 		JobRef: job.JobRef, Attempt: job.Attempt,
 		Names: names, Workspace: ws, Image: image, RequestedImage: requestedImage,
-		exec:        &planExec{ran: map[int]bool{}, materialized: map[string]bool{}},
+		exec:        &planExec{ran: map[int]bool{}, materialized: map[string]bool{}, state: newActionState()},
 		NetworkMode: networkMode,
 		Images:      in.Images,
 		Policy:      in.Policy,
@@ -893,18 +939,48 @@ func jobNames(job *threads.FetchResult) Names {
 // addresses) is the empty string — an absent supported value expands empty.
 func githubContext(env map[string]string) map[string]string {
 	return map[string]string{
-		"ref":        env["GITHUB_REF"],
-		"ref_name":   env["GITHUB_REF_NAME"],
-		"sha":        env["GITHUB_SHA"],
-		"event_name": env["GITHUB_EVENT_NAME"],
-		"workflow":   env["GITHUB_WORKFLOW"],
-		"job":        env["GITHUB_JOB"],
-		"repository": env["GITHUB_REPOSITORY"],
-		"run_id":     env["GITHUB_RUN_ID"],
-		"actor":      env["GITHUB_ACTOR"],
-		"server_url": env["GITHUB_SERVER_URL"],
-		"api_url":    env["GITHUB_API_URL"],
+		"ref":              env["GITHUB_REF"],
+		"ref_name":         env["GITHUB_REF_NAME"],
+		"ref_type":         env["GITHUB_REF_TYPE"],
+		"sha":              env["GITHUB_SHA"],
+		"event_name":       env["GITHUB_EVENT_NAME"],
+		"workflow":         env["GITHUB_WORKFLOW"],
+		"workflow_ref":     env["GITHUB_WORKFLOW_REF"],
+		"workflow_sha":     env["GITHUB_WORKFLOW_SHA"],
+		"job":              env["GITHUB_JOB"],
+		"repository":       env["GITHUB_REPOSITORY"],
+		"repository_owner": env["GITHUB_REPOSITORY_OWNER"],
+		"run_id":           env["GITHUB_RUN_ID"],
+		"run_attempt":      env["GITHUB_RUN_ATTEMPT"],
+		"actor":            env["GITHUB_ACTOR"],
+		"triggering_actor": env["GITHUB_TRIGGERING_ACTOR"],
+		"head_ref":         env["GITHUB_HEAD_REF"],
+		"base_ref":         env["GITHUB_BASE_REF"],
+		"server_url":       env["GITHUB_SERVER_URL"],
+		"api_url":          env["GITHUB_API_URL"],
 	}
+}
+
+// repoOwner is the owner segment of "<owner>/<repo>" ("" when malformed).
+func repoOwner(repo string) string {
+	owner, _, ok := strings.Cut(strings.TrimSpace(repo), "/")
+	if !ok {
+		return ""
+	}
+	return owner
+}
+
+// refType is `github.ref_type`: tag or branch for a real ref, "" when the run
+// recorded none (never the guess "branch" for an empty ref).
+func refType(ref string) string {
+	ref = strings.TrimSpace(ref)
+	switch {
+	case ref == "":
+		return ""
+	case strings.HasPrefix(ref, "refs/tags/"):
+		return "tag"
+	}
+	return "branch"
 }
 
 // secretValues is the secrets context of this job: the decrypted repository and
@@ -1009,6 +1085,30 @@ func builtinEnv(job *threads.FetchResult, ws, serverURL string, matrix map[strin
 	// the reference expands empty.
 	if actor := strings.TrimSpace(job.Actor); actor != "" {
 		env["GITHUB_ACTOR"] = actor
+		// A re-run keeps its triggering actor; spindle has no separate "re-run
+		// by" identity, so the two fields carry the same real value (PAR-032).
+		env["GITHUB_TRIGGERING_ACTOR"] = actor
+	}
+	// The rest of the documented identity/ref fields (PAR-032): the values the
+	// fetch payload carries, in GitHub's spelling so a script and the
+	// `github.*` context agree.
+	env["GITHUB_REPOSITORY_OWNER"] = repoOwner(job.Repo)
+	env["GITHUB_RUN_ATTEMPT"] = fmt.Sprint(job.Attempt)
+	if ref := env["GITHUB_REF"]; ref != "" {
+		env["GITHUB_REF_TYPE"] = refType(ref)
+	}
+	if path := strings.TrimSpace(job.WorkflowPath); path != "" && ref != "" {
+		env["GITHUB_WORKFLOW_REF"] = job.Repo + "/" + strings.TrimPrefix(path, "/") + "@" + ref
+	}
+	if sha := strings.TrimSpace(job.WorkflowCommit); sha != "" {
+		env["GITHUB_WORKFLOW_SHA"] = sha
+	}
+	// A pull request's head and base branch names are payload values; every
+	// other event leaves them unset (GitHub's rule), so the references expand
+	// empty rather than guessing a branch.
+	if pr := threads.EventFieldsOf(job.EventPayload); pr != nil {
+		env["GITHUB_HEAD_REF"] = pr["event.pull_request.head.ref"]
+		env["GITHUB_BASE_REF"] = pr["event.pull_request.base.ref"]
 	}
 	if serverURL != "" {
 		env["SPINDLE_SERVER"] = serverURL
@@ -1075,6 +1175,7 @@ func runnerContext(env map[string]string, name string) map[string]string {
 const (
 	RunnerTemp      = "/tmp/spindle-temp"
 	RunnerToolCache = "/tmp/spindle-tool-cache"
+	RunnerHome      = "/tmp/spindle-home"
 )
 
 // canonicalServerURL normalises a configured spindle origin: an absolute
@@ -1168,13 +1269,15 @@ func envName(s string) string {
 	return b.String()
 }
 
-// headerValue keeps env values single-line (a CR/LF would corrupt docker's
-// option parsing).
-func headerValue(v string) string {
-	return strings.NewReplacer("\r", "", "\n", " ").Replace(v)
-}
+// containerLifetimeKeepAlive is the script the runner uses to keep a job
+// container alive across steps when the workflow does not own the lifetime.
+const containerLifetimeKeepAlive = "trap 'exit 0' TERM INT; while :; do sleep 3600; done"
 
-// containerArgv builds `docker create` for the job container.
+// containerArgv builds `docker create` for the job container. Every
+// workflow-controllable mapping key is applied here or refused by name
+// (docs/threads.md §4.1): options and volumes through the policy, ports as an
+// ephemeral loopback publish, and entrypoint/command as the container's own
+// process (when absent the runner keeps the container alive across steps).
 func containerArgv(p *Plan, spec *threads.Spec) ([]string, error) {
 	argv := []string{
 		"create", "--name", p.Names.Container,
@@ -1200,6 +1303,18 @@ func containerArgv(p *Plan, spec *threads.Spec) ([]string, error) {
 		for _, v := range spec.Container.Volumes {
 			argv = append(argv, "--volume", v)
 		}
+		// `container.ports` is an ephemeral LOOPBACK publish, exactly like a
+		// service's readiness port: the container port is reachable on the job
+		// network (and from its own loopback) and a fixed host port is never
+		// opened, so two concurrent jobs cannot collide (PAR-077).
+		for _, raw := range spec.Container.Ports {
+			port, err := threads.ParseJobContainerPort(raw)
+			if err != nil {
+				return nil, err
+			}
+			argv = append(argv, "--publish", port.Publish)
+			p.ContainerPorts = append(p.ContainerPorts, port.Container)
+		}
 	}
 	// The operator's docker-endpoint grant (PAR-179/D-8) reaches the JOB
 	// container only. A unix socket is bind-mounted at the same path (a
@@ -1222,11 +1337,35 @@ func containerArgv(p *Plan, spec *threads.Spec) ([]string, error) {
 	if p.DockerHost != "" {
 		argv = append(argv, "--env", "DOCKER_HOST="+p.DockerHost)
 	}
-	// The runner owns the container's lifetime command (GitHub's runner does
-	// the same): the image entrypoint is overridden so the container idles
-	// across steps.
-	argv = append(argv, "--entrypoint", "/bin/sh", p.Image,
-		"-c", "trap 'exit 0' TERM INT; while :; do sleep 3600; done")
+	// The container's lifetime process (PAR-077). With no `entrypoint` and no
+	// `command` the runner owns it: the image entrypoint is overridden so the
+	// container idles across steps (GitHub's runner does the same). A workflow
+	// that names either key owns it instead, with docker's own semantics:
+	//
+	//	entrypoint: [exe, arg…] + command   →  --entrypoint exe image arg… command…
+	//	command: [arg…]                     →  image <image ENTRYPOINT> arg…
+	//
+	// and the executor verifies the container is still running after start,
+	// because `docker exec` into an exited container is not a useful failure.
+	var ep, cmd []string
+	if spec.Container != nil {
+		ep, cmd = spec.Container.Entrypoint, spec.Container.Command
+	}
+	switch {
+	case len(ep) > 0:
+		p.ContainerLifetime = ContainerLifetimeWorkflow
+		argv = append(argv, "--entrypoint", ep[0], p.Image)
+		argv = append(argv, ep[1:]...)
+		argv = append(argv, cmd...)
+	case len(cmd) > 0:
+		p.ContainerLifetime = ContainerLifetimeWorkflow
+		argv = append(argv, p.Image)
+		argv = append(argv, cmd...)
+	default:
+		p.ContainerLifetime = ContainerLifetimeKeepAlive
+		argv = append(argv, "--entrypoint", "/bin/sh", p.Image,
+			"-c", containerLifetimeKeepAlive)
+	}
 	return argv, nil
 }
 
@@ -1279,7 +1418,7 @@ func servicePlan(p *Plan, id string, svc threads.ServiceSpec) (ServicePlan, erro
 	}
 	sort.Strings(keys)
 	for _, k := range keys {
-		argv = append(argv, "--env", k+"="+headerValue(svc.Env[k]))
+		argv = append(argv, "--env", k+"="+svc.Env[k])
 	}
 	if spec := splitOptions(svc.Options); len(spec) > 0 {
 		argv = append(argv, spec...)
@@ -1314,6 +1453,9 @@ type expandCtx struct {
 	// own steps are being planned (`${{ github.action_path }}`, PAR-074); empty
 	// for a workflow step.
 	actionDir string
+	// actionRef is that action's source ref (`${{ github.action_ref }}`,
+	// PAR-032): the resolved ref for a remote action, empty for a local one.
+	actionRef string
 	// actionInputs are the enclosing action's resolved input values, the
 	// `inputs.*` context for `${{ inputs.<name> }}` (PAR-074).
 	actionInputs map[string]string
@@ -1601,7 +1743,7 @@ func planNodeAction(p *Plan, index int, st threads.StepSpec, def threads.ActionS
 		post := StepPlan{
 			Index: index, OutputIndex: *next, Parent: ctx.parent,
 			Name: name + " (post)", Kind: "node", Uses: st.Uses, ThirdParty: true,
-			Node: &NodePlan{Dir: dir, Main: def.Post, Using: def.Using, StatePath: statePath, Files: def.Files},
+			Node: &NodePlan{Dir: dir, Main: def.Post, Using: def.Using, StatePath: statePath, IsPost: true, Files: def.Files},
 			Template: &StepTemplate{Name: name + " (post)", If: def.PostIf,
 				Uses: st.Uses, ActionPath: dir, Env: childEnv},
 		}
@@ -1657,6 +1799,15 @@ func planLocalAction(p *Plan, index int, st threads.StepSpec, ctx expandCtx, nex
 	default:
 		return nil, fmt.Errorf("step %d (uses: %s): local action %q has unsupported using %q", index+1, uses, dir, def.Using)
 	}
+}
+
+// actionRefOf is `github.action_ref` for a composite action's own steps: the
+// resolved source ref for a fetched action and empty for a local one (PAR-032).
+func actionRefOf(def threads.ActionSpec) string {
+	if def.Origin == nil {
+		return ""
+	}
+	return strings.TrimSpace(def.Origin.Ref)
 }
 
 // planCompositeStep expands a local composite action in place. The caller's
@@ -1719,6 +1870,7 @@ func planCompositeStep(p *Plan, index int, st threads.StepSpec, def threads.Acti
 			Files: def.Files, Inputs: with, ThirdParty: def.ThirdParty},
 		Template: &StepTemplate{
 			Name: name, If: st.If, Uses: st.Uses,
+			ActionPath: ctx.actionDir, ActionRef: ctx.actionRef,
 			With: copyStrings(st.With), ActionInputs: copyStrings(ctx.actionInputs),
 		},
 	}
@@ -1730,7 +1882,8 @@ func planCompositeStep(p *Plan, index int, st threads.StepSpec, def threads.Acti
 		caller.Timeout = time.Duration(st.TimeoutMinutes) * time.Minute
 	}
 	inner := expandCtx{depth: ctx.depth + 1, parent: parent, env: childEnv, workdir: base,
-		actionDir: containerDir(p.Workspace, dir), actionInputs: with, thirdParty: ctx.thirdParty || def.ThirdParty}
+		actionDir: containerDir(p.Workspace, dir), actionRef: actionRefOf(def),
+		actionInputs: with, thirdParty: ctx.thirdParty || def.ThirdParty}
 	inner.stack = append(append([]string{}, ctx.stack...), dir)
 	for i, child := range def.Steps {
 		planned, err := planStep(p, index, child, inner, next)
@@ -1789,7 +1942,7 @@ func planDockerStep(p *Plan, index int, st threads.StepSpec, dp *DockerPlan, wit
 	dp.Image = image
 	env := withoutInputs(ctx.env)
 	for k, v := range dp.Env {
-		env[k] = headerValue(v)
+		env[k] = v
 	}
 	for k, v := range st.Env {
 		env[k] = v
@@ -1953,6 +2106,7 @@ func stepPlan(p *Plan, index int, st threads.StepSpec, ctx expandCtx, next *int)
 		Env:              copyStrings(env),
 		Inherited:        copyStrings(ctx.env),
 		ActionPath:       ctx.actionDir,
+		ActionRef:        ctx.actionRef,
 		ActionInputs:     copyStrings(ctx.actionInputs),
 		ThirdParty:       ctx.thirdParty,
 	}
@@ -2021,7 +2175,7 @@ func resolveStep(p *Plan, sp StepPlan, outputs map[string]map[string]string, str
 	for k, v := range p.Env {
 		lower[k] = v
 	}
-	inherited, err := p.resolveEnvLayerInputs(t.Inherited, lower, outputs, strict, t.ActionPath, t.ActionInputs)
+	inherited, err := p.resolveEnvLayerInputs(t.Inherited, lower, outputs, strict, t.ActionPath, t.ActionRef, t.ActionInputs)
 	if err != nil {
 		return sp, err
 	}
@@ -2055,10 +2209,10 @@ func resolveStep(p *Plan, sp StepPlan, outputs map[string]map[string]string, str
 			values[k] = value
 			continue
 		}
-		// The authored value is flattened first (an authored newline would be a
-		// typo); a substituted OUTPUT value keeps its newlines — it is one argv
-		// element to docker, and a multi-line output is legitimate data.
-		val, verr := p.expandValue(headerValue(t.Env[k]), lower, outputs, strict)
+		// An authored value travels verbatim (a literal block is a legitimate
+		// multi-line value), and so does a substituted OUTPUT value — it is one
+		// argv element to docker.
+		val, verr := p.expandValue(t.Env[k], lower, outputs, strict)
 		if verr != nil {
 			return sp, verr
 		}
@@ -2067,7 +2221,7 @@ func resolveStep(p *Plan, sp StepPlan, outputs map[string]map[string]string, str
 	}
 	sort.Strings(sp.StepEnv)
 	expand := func(s string) (string, error) {
-		return p.expandValueAtInputs(s, values, outputs, strict, t.ActionPath, t.ActionInputs)
+		return p.expandValueAtInputs(s, values, outputs, strict, t.ActionPath, t.ActionRef, t.ActionInputs)
 	}
 	name, err := expand(t.Name)
 	if err != nil {
@@ -2363,23 +2517,27 @@ func (p *Plan) expandValue(s string, env map[string]string, outputs map[string]m
 // (PAR-074), and every other site has no such value (the parser refuses the
 // reference outside an action's steps).
 func (p *Plan) expandValueAt(s string, env map[string]string, outputs map[string]map[string]string, strict bool, actionPath string) (string, error) {
-	return p.expandValueAtInputs(s, env, outputs, strict, actionPath, nil)
+	return p.expandValueAtInputs(s, env, outputs, strict, actionPath, "", nil)
 }
 
 // expandValueAtInputs is expandValueAt with the enclosing action's inputs as
 // the `inputs.*` context (PAR-074: a composite action's steps read the action's
 // own inputs, not the workflow_dispatch input set).
-func (p *Plan) expandValueAtInputs(s string, env map[string]string, outputs map[string]map[string]string, strict bool, actionPath string, inputs map[string]string) (string, error) {
+func (p *Plan) expandValueAtInputs(s string, env map[string]string, outputs map[string]map[string]string, strict bool, actionPath, actionRef string, inputs map[string]string) (string, error) {
 	vals := p.stepValues(env, outputs, strict)
 	if len(inputs) > 0 {
 		vals.Inputs = inputs
 	}
 	if actionPath != "" {
-		gh := make(map[string]string, len(vals.GitHub)+1)
+		gh := make(map[string]string, len(vals.GitHub)+2)
 		for k, v := range vals.GitHub {
 			gh[k] = v
 		}
+		// Both per-composite values are present inside the action, even when the
+		// ref is empty: a local action legitimately has no source ref, and the
+		// empty value is the documented answer, not a missing one (PAR-032).
 		gh["action_path"] = actionPath
+		gh["action_ref"] = actionRef
 		vals.GitHub = gh
 	}
 	if strict {
@@ -2395,7 +2553,7 @@ func (p *Plan) expandValueAtInputs(s string, env map[string]string, outputs map[
 
 // resolveEnvLayerInputs is resolveEnvLayer with the enclosing action's inputs
 // as the `inputs.*` context.
-func (p *Plan) resolveEnvLayerInputs(layer, lower map[string]string, outputs map[string]map[string]string, strict bool, actionPath string, inputs map[string]string) (map[string]string, error) {
+func (p *Plan) resolveEnvLayerInputs(layer, lower map[string]string, outputs map[string]map[string]string, strict bool, actionPath, actionRef string, inputs map[string]string) (map[string]string, error) {
 	if len(layer) == 0 {
 		return nil, nil
 	}
@@ -2405,7 +2563,7 @@ func (p *Plan) resolveEnvLayerInputs(layer, lower map[string]string, outputs map
 			out[k], _ = p.secretValue(name)
 			continue
 		}
-		val, err := p.expandValueAtInputs(headerValue(layer[k]), lower, outputs, strict, actionPath, inputs)
+		val, err := p.expandValueAtInputs(layer[k], lower, outputs, strict, actionPath, actionRef, inputs)
 		if err != nil {
 			return nil, err
 		}
@@ -2950,7 +3108,13 @@ func shellCommand(shell, script, scriptPath string) ([]string, bool, error) {
 	// so `sh {0} {0}` is refused instead of silently dropping an argument.
 	if extra := strings.TrimSpace(trimmed[len(name):]); extra == "" || extra == "{0}" {
 		switch strings.ToLower(name) {
-		case "", "sh":
+		case "":
+			// The default shell is GitHub/Forgejo's Linux default, not sh: a real
+			// workflow written for either platform may use bash syntax without
+			// declaring `shell:`, and a corpus file that does is the parity
+			// contract. The bash→sh fallback below still covers a busybox image.
+			return []string{"bash", "--noprofile", "--norc", "-eo", "pipefail", "-c", script}, false, nil
+		case "sh":
 			return []string{"sh", "-e", "-c", script}, false, nil
 		case "bash":
 			return []string{"bash", "--noprofile", "--norc", "-eo", "pipefail", "-c", script}, false, nil

@@ -1066,8 +1066,13 @@ type FetchResult struct {
 	// is not a job's identity).
 	Ref      string `json:"ref,omitempty"`
 	Workflow string `json:"workflow"`
-	Trusted  bool   `json:"trusted"`
-	Context  string `json:"context"`
+	// WorkflowPath and WorkflowCommit identify the workflow file this job was
+	// created from (the base tip for a fork pull request), so the runner can
+	// expose `github.workflow_ref` and `github.workflow_sha` (PAR-032).
+	WorkflowPath   string `json:"workflow_path,omitempty"`
+	WorkflowCommit string `json:"workflow_commit,omitempty"`
+	Trusted        bool   `json:"trusted"`
+	Context        string `json:"context"`
 	// Actor is the principal that triggered the run (the run's `actor`): the
 	// runner exposes it as GITHUB_ACTOR and as `${{ github.actor }}`
 	// (docs/threads.md §3.5/§3.6), the same value a job-level `if:` reads on
@@ -1296,7 +1301,9 @@ func (s *Service) fetchPayload(ctx context.Context, owner, repo string, runner *
 		JobRef:  JobRef(id, claim.Entry.RunID, claim.Entry.JobID),
 		Attempt: job.Attempt, Commit: claim.Run.Commit, Event: claim.Run.Event, Branch: claim.Run.Branch,
 		Ref:      claim.Run.Ref,
-		Workflow: claim.Run.Workflow, Trusted: claim.Run.Trusted, Context: job.Context, Spec: job.Spec,
+		Workflow: claim.Run.Workflow, WorkflowPath: claim.Run.WorkflowPath,
+		WorkflowCommit: claim.Run.WorkflowCommit,
+		Trusted:        claim.Run.Trusted, Context: job.Context, Spec: job.Spec,
 		Actor:        claim.Run.Actor,
 		EventPayload: claim.Run.EventPayload,
 		Secrets:      map[string]string{}, Mask: []string{},
@@ -1307,6 +1314,7 @@ func (s *Service) fetchPayload(ctx context.Context, owner, repo string, runner *
 	// no container.image of its own (the workflow's explicit choice always
 	// wins). The spec is copied before the injection so the stored job record
 	// is untouched.
+	injected := false
 	if image := runnerImageFor(runner.Doc.LabelImages, jobRunsOn(job)); image != "" && job.Spec != nil {
 		spec := *job.Spec
 		if spec.Container == nil {
@@ -1318,6 +1326,19 @@ func (s *Service) fetchPayload(ctx context.Context, owner, repo string, runner *
 		}
 		res.Spec = &spec
 		res.LabelImages = runner.Doc.LabelImages
+		injected = true
+	}
+	// Stock toolchain images (PAR-177/D-26): a plain `runs-on: go` (or node,
+	// python, rust, docker, ubuntu-latest) resolves to the catalogue's pinned
+	// upstream image when the workflow named no container.image and the runner
+	// declared no image for the label. The runner's own mapping above wins, and
+	// an explicit container.image is never touched.
+	if !injected && job.Spec != nil && job.Spec.Container == nil {
+		if img, ok := stockImageForRunsOn(jobRunsOn(job)); ok {
+			spec := *job.Spec
+			spec.Container = &ContainerSpec{Image: img.Image}
+			res.Spec = &spec
+		}
 	}
 	trusted := claim.Run.Trusted && job.Trusted
 	writeTokens := claim.Run.WriteTokens && !trusted

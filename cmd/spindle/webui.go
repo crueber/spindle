@@ -486,6 +486,10 @@ func wireCollabPages(apiEnv *api.Env, c *collabWiring) {
 		td.OpenArtifact = func(ctx context.Context, owner, repo, runID, name string, p auth.Principal) (*threads.ArtifactDownload, error) {
 			return th.OpenArtifact(ctx, owner+"/"+repo, runID, name, p)
 		}
+		// Whole-run log download (PAR-190): every job's log in one archive.
+		td.RunLogs = func(ctx context.Context, owner, repo, runID string, p auth.Principal) (*threads.RunLogBundle, error) {
+			return th.RunLogs(ctx, owner+"/"+repo, runID, p)
+		}
 		// Per-repository triggers & limits (PAR-015/PAR-118/PAR-153): the page
 		// form calls the same service verbs as the JSON API; the service enforces
 		// maintain+ and audits every changed switch.

@@ -59,7 +59,7 @@ func (s *Service) needsApproval(ctx context.Context, owner, repo, actor string, 
 	if s == nil || !s.ApproveFirstTimeForks {
 		return false
 	}
-	if event != EventPullReq && event != EventPullTarget {
+	if event != EventPullReq && event != EventPullTarget && event != EventPullReview && event != EventPullReviewComment {
 		return false
 	}
 	if !opts.Fork {

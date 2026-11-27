@@ -192,10 +192,22 @@ type Service struct {
 	MaxCacheEntries    int
 	// KeepForever disables run/log/artifact reclamation (threads.keep_forever).
 	KeepForever bool
+	// SMTP is the failure-notification mailer (PAR-197/D-27). Zero (empty Host)
+	// disables email; composition maps threads.smtp.* onto it.
+	SMTP SMTPConfig
+	// EmailFor resolves a subscriber's verified email address. Composition
+	// binds identity.Service.EmailForUsername; nil leaves email undelivered
+	// even when SMTP is configured.
+	EmailFor func(ctx context.Context, username string) (string, error)
 	// OrgAdmin enforces organization ownership for the org-variable API
 	// (identity.Service.CheckOrgOwner's shape). Nil makes an org-variable write
 	// unavailable except to a host admin; composition binds it.
 	OrgAdmin func(ctx context.Context, org string, p auth.Principal) *auth.AuthError
+	// IsOrg reports whether an owner namespace is an organization (PAR-153:
+	// the org-level concurrency cap applies only to org-owned repositories).
+	// Nil means no owner is treated as an organization; composition binds
+	// identity.Service.IsOrg.
+	IsOrg func(ctx context.Context, owner string) (bool, error)
 
 	// runnerSweep gates the instance runner family's retention: the family is
 	// instance-wide, so one process-wide hourly gate keeps the per-repository

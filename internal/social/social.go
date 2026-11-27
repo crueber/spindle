@@ -120,6 +120,18 @@ type RoleService interface {
 // anonymous.
 type Authenticator func(r *http.Request) (auth.Principal, *auth.AuthError)
 
+// WatchEvent is one `watch` trigger edge (PAR-021): GitHub's star action is
+// `started`. Unstarring has no watch action, so it emits nothing.
+type WatchEvent struct {
+	Repo   string // owner/name
+	Actor  string
+	Action string // started
+}
+
+// WatchEventSink receives the star trigger edge synchronously after the star
+// commits. Nil = no-op; composition detaches the run work.
+type WatchEventSink func(ctx context.Context, ev WatchEvent)
+
 // Service is the social store client: star/watch records, the CAS'd
 // counters, and starred lists. Construct with New; Roles may be nil in
 // tests that exercise pure paths (nil Roles falls back to principal
@@ -145,6 +157,10 @@ type Service struct {
 	// (nil shards) skips mutual exclusion and relies on CAS alone
 	// (degraded but safe — service_test pins the path).
 	starShards *[starShardCount]sync.Mutex
+
+	// WatchEvents receives the `watch` (star) trigger edge (PAR-021);
+	// unstarring emits nothing. Nil = no-op.
+	WatchEvents WatchEventSink
 }
 
 // starShardCount is the stripe count for the Star gate (issue #97): fixed

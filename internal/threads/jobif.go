@@ -3,6 +3,7 @@ package threads
 import (
 	"context"
 	"fmt"
+	"strconv"
 	"strings"
 
 	wf "github.com/crueber/spindle/internal/threads/workflow"
@@ -175,12 +176,30 @@ func githubContext(run *Run, workflow string) map[string]string {
 	}
 	fields["ref"] = ref
 	fields["ref_name"] = runRefName(run)
+	fields["ref_type"] = oidcRefType(ref)
 	fields["sha"] = run.Commit
 	fields["event_name"] = run.Event
 	fields["workflow"] = workflow
 	fields["repository"] = run.Repo
+	fields["repository_owner"] = ownerPart(run.Repo)
 	fields["run_id"] = run.ID
+	fields["run_attempt"] = strconv.Itoa(run.Attempt)
 	fields["actor"] = run.Actor
+	// A re-run keeps its triggering actor: spindle has no separate "re-run by"
+	// identity, so the two fields carry the same real value (PAR-032).
+	fields["triggering_actor"] = run.Actor
+	// The workflow file's own identity: the path it was read from at the commit
+	// it was read at (a fork PR reads the base tip, which is what these mean).
+	// Without a ref the `@<ref>` suffix would be malformed, so the field stays
+	// empty (a real value, not a broken one).
+	if ref != "" {
+		fields["workflow_ref"] = oidcJobWorkflowRef(run.Repo, run.WorkflowPath, ref)
+	}
+	fields["workflow_sha"] = run.WorkflowCommit
+	// A pull request's head and base branch names come from the bounded event
+	// payload; every other event leaves them empty, exactly as GitHub does.
+	fields["head_ref"] = fields["event.pull_request.head.ref"]
+	fields["base_ref"] = fields["event.pull_request.base.ref"]
 	return fields
 }
 

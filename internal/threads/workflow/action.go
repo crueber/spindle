@@ -366,6 +366,58 @@ func decodeStringOrList(node *yaml.Node, out *[]string) error {
 	}
 }
 
+// DecodeCommandWords decodes a container entrypoint/command value. The list
+// form is taken verbatim; GitHub's scalar form is one command line, so it is
+// split into argv words with quote awareness (`command: -c "sleep infinity"` is
+// two words, exactly the argv docker would receive). Only the scalar form is
+// split: a list element is one argument even when it contains a space.
+func DecodeCommandWords(node *yaml.Node, out *[]string) error {
+	if node.Kind == yaml.ScalarNode && !isNull(node) {
+		*out = splitCommandWords(node.Value)
+		return nil
+	}
+	return decodeStringOrList(node, out)
+}
+
+// splitCommandWords splits one command line into argv words. Quoting is honoured
+// (single or double quotes group a word and are removed), whitespace outside
+// quotes separates words, and a backslash is a literal character (the same rule
+// as the runner's container-option splitter, so "what the parser recorded" and
+// "what docker receives" cannot disagree).
+func splitCommandWords(s string) []string {
+	var out []string
+	var cur strings.Builder
+	quote := byte(0)
+	inWord := false
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		switch {
+		case quote != 0:
+			if c == quote {
+				quote = 0
+			} else {
+				cur.WriteByte(c)
+			}
+		case c == '\'' || c == '"':
+			quote = c
+			inWord = true
+		case c == ' ' || c == '\t' || c == '\n':
+			if inWord {
+				out = append(out, cur.String())
+				cur.Reset()
+				inWord = false
+			}
+		default:
+			cur.WriteByte(c)
+			inWord = true
+		}
+	}
+	if inWord {
+		out = append(out, cur.String())
+	}
+	return out
+}
+
 // validate applies the rules that need the whole action (not one node).
 func (a *Action) validate() error {
 	switch a.Runs.Using {

@@ -254,7 +254,7 @@ func TestFetchRecordsSecretScopesAndMasksOrgValues(t *testing.T) {
 		Runner: runner.ID, Scopes: attemptScopes(nil), Exp: f.now.Add(time.Hour).Unix(),
 	})
 	claims, _ := f.svc.parseAttemptToken(tok, f.now)
-	if _, err := f.svc.AppendLog(ctx(), claims, 1, "prints org-secret-value and repo-secret-value"); err != nil {
+	if _, err := f.svc.AppendLog(ctx(), claims, 1, LogRecord{Text: "prints org-secret-value and repo-secret-value"}); err != nil {
 		t.Fatalf("append: %v", err)
 	}
 	frames, err := f.svc.LogFrames(ctx(), "o/r", run.ID, claim.Entry.JobID, claim.Entry.Attempt, 0, 100, f.admin)

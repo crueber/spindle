@@ -32,10 +32,20 @@ package threads
 // because the rest of its keys (core, nproc, memlock, …) are node-level knobs,
 // not job sizing.
 //
-// Volumes are refused outright in this version: the runner adds its own
-// workspace volume itself, and a workflow-supplied bind mount is host
-// filesystem access, not a job resource. A later decision may admit named
-// volumes; a host path must never be one of them.
+// Volumes are refused unless the runner operator allow-lists the host path
+// (ContainerPolicy.ValidVolumes, PAR-179): a workflow-supplied bind mount is
+// host filesystem access, and a host path must never be implied.
+//
+// Two job-container mapping keys are NOT options and are handled here too:
+//
+//   - `container.ports` is applied as a `--publish 127.0.0.1::<port>`: an
+//     EPHEMERAL loopback mapping, exactly like a service's readiness port, so
+//     concurrent jobs cannot collide and no fixed host port is opened. A
+//     host-side port (`8080:80`) is refused by name.
+//   - `container.credentials` is refused by name (N7/D-23): the pull identity
+//     is the runner operator's registry credential, never a workflow secret —
+//     a workflow password would travel in the job payload (the bucket) and in
+//     `docker create` argv.
 //
 // Both spellings are parsed exactly as the runner splits the string
 // (SplitOptions): `--opt=value` and `--opt value`, quoting included. A bare
@@ -380,6 +390,13 @@ func checkWorkflowOptionsWith(pol ContainerPolicy, field, options string) *Conta
 			continue
 		}
 		name, inline, hasInline := containerOptionToken(tok)
+		// A TTY is never granted: the runner's steps are `docker exec` without a
+		// terminal, so a TTY on the container would be an accepted-but-inert
+		// surface. It is named, with the in-container remedy (PAR-077).
+		if name == "--tty" || name == "-t" {
+			reason := fmt.Sprintf("%s carries %q, which is refused: steps run with `docker exec` and no terminal, so a container TTY would be inert; run a command that needs one through `script -qc '<command>' /dev/null` instead", field, tok)
+			return &ContainerOptionRefusal{Field: field, Option: tok, Reason: reason}
+		}
 		spec, ok := containerOptionAllowlist[name]
 		if !ok && grantableOption(name) {
 			if !pol.DeferGrantable && !pol.Privileged {
@@ -453,6 +470,86 @@ func optionValueHint(name string) string {
 	return "one non-empty value that is not another flag"
 }
 
+// JobContainerPort is one validated `container.ports` entry (PAR-077).
+type JobContainerPort struct {
+	// Container is the port on the job container ("8080", "53/udp") — the
+	// spelling a service on the job network dials.
+	Container string
+	// Publish is the `docker create --publish` argument: an ephemeral loopback
+	// host port (`127.0.0.1::8080`), never a fixed one.
+	Publish string
+}
+
+// ParseJobContainerPort validates one `container.ports` entry. A host-side port
+// is refused by name: a fixed host port collides between concurrent jobs on one
+// runner and opens a port on the runner host, while the job reaches its own
+// container over loopback and a service reaches it over the job network anyway.
+func ParseJobContainerPort(raw string) (JobContainerPort, error) {
+	spec := strings.TrimSpace(raw)
+	if spec == "" {
+		return JobContainerPort{}, fmt.Errorf("container.ports declares an empty port")
+	}
+	if strings.Contains(spec, ":") {
+		return JobContainerPort{}, fmt.Errorf("container.ports declares %q, which is refused: give the container port only (e.g. \"8080\"); the runner publishes it on an ephemeral loopback host port so concurrent jobs never collide and no fixed host port is opened", spec)
+	}
+	num, proto := spec, ""
+	if i := strings.IndexByte(spec, '/'); i >= 0 {
+		num, proto = spec[:i], strings.ToLower(strings.TrimSpace(spec[i+1:]))
+		if proto != "tcp" && proto != "udp" {
+			return JobContainerPort{}, fmt.Errorf("container.ports declares %q, which is refused: the protocol is tcp or udp", spec)
+		}
+	}
+	n, err := strconv.Atoi(num)
+	if err != nil || n < 1 || n > 65535 {
+		return JobContainerPort{}, fmt.Errorf("container.ports declares %q, which is refused: expected a container port number, 1…65535", spec)
+	}
+	port := JobContainerPort{Container: strconv.Itoa(n), Publish: "127.0.0.1::" + strconv.Itoa(n)}
+	if proto != "" {
+		port.Container += "/" + proto
+		port.Publish += "/" + proto
+	}
+	return port, nil
+}
+
+// containerCredentialRefusal is the job-level refusal for a workflow-supplied
+// registry login (N7/D-23). A pull identity is the runner operator's
+// `--registry-auth-file`, never the workflow's: the password would otherwise
+// travel in the job payload (the bucket) and in docker create's environment.
+func containerCredentialRefusal(spec *Spec) *ContainerOptionRefusal {
+	if spec == nil || spec.Container == nil || spec.Container.Credentials == nil {
+		return nil
+	}
+	return &ContainerOptionRefusal{
+		Field:  "container.credentials",
+		Option: "credentials",
+		Reason: "container.credentials is refused: the registry pull identity is the runner operator's own credential (--registry-auth-file), never a workflow-supplied password — it would travel in the job payload (the bucket) and in docker create's environment; configure the runner's registry credential instead (docs/threads.md §8.6)",
+	}
+}
+
+// ContainerCredentialsRefusalReason is the named refusal for a workflow
+// registry credential, or "" when the spec carries none. The server's creation
+// gate and the runner's plan check read the same text.
+func ContainerCredentialsRefusalReason(spec *Spec) string {
+	if r := containerCredentialRefusal(spec); r != nil {
+		return r.Reason
+	}
+	return ""
+}
+
+// containerPortsRefusal is the job-level refusal for an invalid
+// `container.ports` entry (a host-side port, a bad protocol or range).
+func containerPortsRefusal(spec *Spec) *ContainerOptionRefusal {
+	if spec == nil || spec.Container == nil {
+		return nil
+	}
+	for _, raw := range spec.Container.Ports {
+		if _, err := ParseJobContainerPort(raw); err != nil {
+			return &ContainerOptionRefusal{Field: "container.ports", Option: raw, Reason: err.Error()}
+		}
+	}
+	return nil
+}
+
 // containerOptionToken splits one token into its flag name and inline value:
 // "--memory=512m" → ("--memory", "512m", true), "-m512m" → ("-m", "512m", true),
 // "--init" → ("--init", "", false).
@@ -524,6 +621,12 @@ func containerOptionRefusalReason(spec *Spec) *ContainerOptionRefusal {
 	pol := ServerContainerPolicy()
 	if spec == nil {
 		return nil
+	}
+	if r := containerCredentialRefusal(spec); r != nil {
+		return r
+	}
+	if r := containerPortsRefusal(spec); r != nil {
+		return r
 	}
 	if spec.Container != nil {
 		if r := CheckWorkflowContainerOptionsWith(pol, "container", spec.Container.Options, spec.Container.Volumes); r != nil {

@@ -114,3 +114,77 @@ job_lease = "20m"
 		t.Fatalf("decoded = %+v", c.Threads)
 	}
 }
+
+// TestThreadsSMTP (PAR-197/D-27): email is off by default, and a configured
+// mailer is validated by name — a typo cannot look enabled while never
+// delivering.
+func TestThreadsSMTP(t *testing.T) {
+	c := Defaults()
+	if c.Threads.SMTP.Host != "" {
+		t.Fatalf("smtp defaults on: %+v", c.Threads.SMTP)
+	}
+	if got := time.Duration(c.Threads.SMTP.Timeout); got != 10*time.Second {
+		t.Fatalf("smtp timeout default = %s", got)
+	}
+	if _, errs := Validate(validOIDC()); len(errs) != 0 {
+		t.Fatalf("defaults must validate: %v", errs)
+	}
+	for _, tc := range []struct {
+		name   string
+		mutate func(*Config)
+		want   string // error fragment; "" = valid
+	}{
+		{"off", func(c *Config) {}, ""},
+		{"configured starttls", func(c *Config) {
+			c.Threads.SMTP = ThreadsSMTP{Host: "smtp.example.com", From: "ci@example.com", TLS: "starttls"}
+		}, ""},
+		{"configured implicit", func(c *Config) {
+			c.Threads.SMTP = ThreadsSMTP{Host: "smtp.example.com", From: "Spindle <ci@example.com>", TLS: "implicit", Username: "ci", Password: "x"}
+		}, ""},
+		{"configured none", func(c *Config) {
+			c.Threads.SMTP = ThreadsSMTP{Host: "127.0.0.1", From: "ci@example.com", TLS: "none"}
+		}, ""},
+		{"unknown tls", func(c *Config) {
+			c.Threads.SMTP = ThreadsSMTP{Host: "smtp.example.com", From: "ci@example.com", TLS: "ssl"}
+		}, "threads.smtp.tls"},
+		{"host without from", func(c *Config) {
+			c.Threads.SMTP = ThreadsSMTP{Host: "smtp.example.com"}
+		}, "threads.smtp.from"},
+		{"bad from", func(c *Config) {
+			c.Threads.SMTP = ThreadsSMTP{Host: "smtp.example.com", From: "not-an-address"}
+		}, "threads.smtp.from"},
+		{"from without host", func(c *Config) {
+			c.Threads.SMTP = ThreadsSMTP{From: "ci@example.com"}
+		}, "threads.smtp.host"},
+		{"credential without tls", func(c *Config) {
+			c.Threads.SMTP = ThreadsSMTP{Host: "smtp.example.com", From: "ci@example.com", TLS: "none", Username: "ci", Password: "x"}
+		}, "credentials are never sent"},
+		{"username without password", func(c *Config) {
+			c.Threads.SMTP = ThreadsSMTP{Host: "smtp.example.com", From: "ci@example.com", TLS: "starttls", Username: "ci"}
+		}, "must be set together"},
+		{"port out of range", func(c *Config) {
+			c.Threads.SMTP = ThreadsSMTP{Host: "smtp.example.com", From: "ci@example.com", Port: 70000}
+		}, "threads.smtp.port"},
+		{"host with scheme", func(c *Config) {
+			c.Threads.SMTP = ThreadsSMTP{Host: "smtp://example.com", From: "ci@example.com"}
+		}, "bare hostname"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			c := validOIDC()
+			tc.mutate(c)
+			_, errs := Validate(c)
+			if tc.want == "" {
+				if len(errs) != 0 {
+					t.Fatalf("must validate: %v", errs)
+				}
+				return
+			}
+			for _, err := range errs {
+				if strings.Contains(err.Error(), tc.want) {
+					return
+				}
+			}
+			t.Fatalf("errors %v miss %q", errs, tc.want)
+		})
+	}
+}

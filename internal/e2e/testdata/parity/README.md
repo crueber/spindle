@@ -60,7 +60,14 @@ importer's `testdata`) names the private host again.
   no branch.
 - **execution** (`TestE2E_ParityExecution`, opt-in: `SPINDLE_PARITY_EXEC=1`,
   `make parity-exec`): a real server plus a real runner execute a corpus-shaped
-  workflow to success in containers. The PR gate never runs it.
+  workflow AND the committed golden of `weave-publish-github.yml` — the real
+  Forgejo workflow, byte-unmodified — to success in containers. The repository's
+  `scripts/publish-to-github.sh` is a stub that asserts the argv the workflow
+  computed, so the publish side effect stays out of the test. A missing docker
+  daemon is a FAILURE when the tier was requested, never a skip. It runs on any
+  host with a Docker daemon (a developer machine or an operator host-mode
+  runner); the standard gate is container jobs with no daemon, so it never runs
+  there.
 - **importer** (`TestParityImporterReproducesGoldens`, skipped until
   `internal/threads/importer` exists and skipped in `-short`): runs
   `spindle threads import --from forgejo --repo DIR --path FILE --out DIR` on each

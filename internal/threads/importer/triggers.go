@@ -13,11 +13,18 @@ import (
 // refused by name: a trigger the engine cannot emit would be a workflow that
 // silently never runs (docs/WORKFLOWS.md §2.2).
 var supportedEvents = map[string]bool{
-	"push":              true,
-	"pull_request":      true,
-	"workflow_dispatch": true,
-	"workflow_call":     true,
-	"schedule":          true,
+	"push":                        true,
+	"pull_request":                true,
+	"workflow_dispatch":           true,
+	"workflow_call":               true,
+	"schedule":                    true,
+	"release":                     true,
+	"issues":                      true,
+	"issue_comment":               true,
+	"pull_request_review":         true,
+	"pull_request_review_comment": true,
+	"label":                       true,
+	"milestone":                   true,
 }
 
 // triggers translates `on`, in all three spellings it accepts.
@@ -82,7 +89,9 @@ func (t *translator) triggers(m *yaml.Node, i int) {
 				} else {
 					j -= 2
 				}
-			case "release", "issues", "issue_comment":
+			case "fork", "watch":
+				t.translated++ // a bare trigger with no filters
+			case "release", "issues", "issue_comment", "pull_request_review", "pull_request_review_comment", "label", "milestone", "check_run":
 				if t.typedTrigger(val, j, path, ev.Value) {
 					t.translated++
 				} else {
@@ -451,9 +460,13 @@ func (t *translator) typedTrigger(m *yaml.Node, i int, path, event string) bool 
 		return false
 	}
 	supported := map[string][]string{
-		"release":       workflow.ReleaseTypes,
-		"issues":        workflow.IssuesTypes,
-		"issue_comment": workflow.IssueCommentTypes,
+		"release":                     workflow.ReleaseTypes,
+		"issues":                      workflow.IssuesTypes,
+		"issue_comment":               workflow.IssueCommentTypes,
+		"pull_request_review":         workflow.ReviewTypes,
+		"pull_request_review_comment": workflow.ReviewCommentTypes,
+		"label":                       workflow.LabelTypes,
+		"milestone":                   workflow.MilestoneTypes,
 	}[event]
 	for j := 0; j < len(val.Content); j += 2 {
 		f := val.Content[j]

@@ -45,7 +45,14 @@ func threadsServerWithConfig(t *testing.T, extra string, publicURL ...string) *e
 	port := freePort(t)
 	pub := ""
 	if len(publicURL) > 0 && publicURL[0] != "" {
-		pub = fmt.Sprintf("public_url = %q\n", publicURL[0])
+		// A `%d` in the base is the chosen port, so a scenario can hand the
+		// containers a host-reachable origin (host.docker.internal) without
+		// knowing the port before the server boots.
+		base := publicURL[0]
+		if strings.Contains(base, "%d") {
+			base = fmt.Sprintf(base, port)
+		}
+		pub = fmt.Sprintf("public_url = %q\n", base)
 	}
 	p := newOIDP(t)
 	chainAliceTok = p.idToken(chainAlice, "spindle-admin")
@@ -83,12 +90,30 @@ func requireDocker(t *testing.T) {
 	}
 }
 
+// requireDockerTier is requireDocker for a tier that was explicitly requested
+// (SPINDLE_PARITY_EXEC=1): a missing daemon is a FAILURE, never a silent skip,
+// so `make parity-exec` cannot go green without executing anything.
+func requireDockerTier(t *testing.T) {
+	t.Helper()
+	if out, err := exec.Command("docker", "info", "--format", "{{.ServerVersion}}").CombinedOutput(); err != nil {
+		t.Fatalf("the execution tier was requested but no docker daemon answered: %v (%s)", err, strings.TrimSpace(string(out)))
+	}
+}
+
 // startThreadsRunner boots `spindle runner serve` as a subprocess and returns a
 // stop function (SIGTERM, which the runner handles by cancelling in-flight jobs,
 // cleaning containers and reporting them cancelled). The harness runner is a
 // disposable test host, so it opts in to fork runs: the fork suites exercise
 // execution, while the default-off gating is pinned by the threads unit tests.
 func startThreadsRunner(t *testing.T, bin, serverURL, registerToken, labels string, capacity int) *runnerProc {
+	t.Helper()
+	return startThreadsRunnerImage(t, bin, serverURL, registerToken, labels, capacity, "alpine/git:latest")
+}
+
+// startThreadsRunnerImage is startThreadsRunner with an explicit job image (a
+// workflow that needs a shell the image must provide — the corpus entry uses
+// bash, which alpine/git does not carry).
+func startThreadsRunnerImage(t *testing.T, bin, serverURL, registerToken, labels string, capacity int, image string) *runnerProc {
 	t.Helper()
 	tokenFile := filepath.Join(t.TempDir(), "runner.token")
 	cmd := exec.Command(bin, "runner", "serve",
@@ -99,7 +124,7 @@ func startThreadsRunner(t *testing.T, bin, serverURL, registerToken, labels stri
 		"--capacity", fmt.Sprint(capacity),
 		"--allow-host-docker",
 		"--allow-fork-runs",
-		"--image", "alpine/git:latest",
+		"--image", image,
 		"--fetch-timeout", "5")
 	cmd.Env = append(os.Environ(), "HOME="+t.TempDir())
 	logs := &syncBuffer{}
@@ -268,10 +293,27 @@ func sseLog(t *testing.T, url, token string) string {
 			data := strings.TrimPrefix(line, "data: ")
 			if event == "log" {
 				var frame struct {
-					Text string `json:"text"`
+					Kind       string `json:"kind"`
+					Step       int    `json:"step"`
+					Name       string `json:"name"`
+					Conclusion string `json:"conclusion"`
+					Text       string `json:"text"`
 				}
 				if json.Unmarshal([]byte(data), &frame) == nil {
-					text.WriteString(frame.Text)
+					switch frame.Kind {
+					case "step_start":
+						fmt.Fprintf(&text, "\n▸ step %d: %s\n", frame.Step, frame.Name)
+					case "step_end":
+						fmt.Fprintf(&text, "\n◂ step %d: %s\n", frame.Step, frame.Conclusion)
+					case "group_start":
+						fmt.Fprintf(&text, "\n▸ group: %s\n", frame.Name)
+					case "group_end":
+						text.WriteString("\n◂ group end\n")
+					case "truncated":
+						text.WriteString(frame.Text + "\n")
+					default:
+						text.WriteString(frame.Text)
+					}
 				}
 			}
 			if event == "done" {

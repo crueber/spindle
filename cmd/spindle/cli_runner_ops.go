@@ -248,13 +248,26 @@ func runRunnerFleetVerb(ctx context.Context, c *cli, args []string, verb string)
 // runRunnerImages prints the stock toolchain catalogue and the --labels line
 // that declares it (PAR-177).
 func runRunnerImages(ctx context.Context, c *cli, args []string) int {
-	pos, exit := parseAPI(newAPIFlagSet(c, "runner images"), args)
+	fs := newAPIFlagSet(c, "runner images")
+	label := fs.String("label", "", "resolve one stock label to its pinned image (unknown labels are refused by name)")
+	pos, exit := parseAPI(fs, args)
 	if exit != parseContinue {
 		return exit
 	}
 	if len(pos) > 0 {
 		fmt.Fprintf(c.stderr(), "spindle runner images: unexpected argument %q\n", pos[0])
 		return exitArg
+	}
+	if strings.TrimSpace(*label) != "" {
+		img, err := threads.StockImageFor(*label)
+		if err != nil {
+			fmt.Fprintf(c.stderr(), "spindle runner images: %v\n", err)
+			return exitArg
+		}
+		t := newTable(c.stdout(), "LABEL", "IMAGE", "TOOLCHAIN")
+		t.row(img.Label, img.Image, img.Toolchain)
+		t.flush()
+		return exitOK
 	}
 	t := newTable(c.stdout(), "LABEL", "IMAGE", "TOOLCHAIN")
 	for _, img := range threads.StockImages() {

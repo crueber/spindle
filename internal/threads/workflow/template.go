@@ -27,26 +27,51 @@ import (
 // support is THAT FILE'S PARSE ERROR naming the supported set, never a literal
 // that silently reaches the shell or a lock key.
 
-// GitHubFields is the closed `github.*` (and `forgejo.*`/`forge.*`) field set a
-// template or an `if:` expression may read. It is the Actions-compatible field
-// set the parity corpus uses; the remaining documented fields (actor_id,
-// triggering_actor, ref_type, head_ref, workflow_ref, …) are a later wave and
-// are named parse errors today. `github.event.inputs.<name>` is accepted
-// separately (see splitRef).
+// GitHubFields is the closed `spindle.*` (canonical) / `github.*` / `forgejo.*`
+// / `forge.*` (value-identical aliases, D-1/PAR-004) field set a template or an
+// `if:` expression may read. `github.event.inputs.<name>` is accepted separately
+// (see splitRef).
 //
-// `action_path` is in the set because a composite action's own steps read it
-// (PAR-074), but it is NOT a global value: TemplateScope.ActionPath gates it, so
-// a workflow step, a job `if:` or an output template that reads it is a named
-// parse error rather than the empty string. The runner supplies the per-composite
-// value (docs/WORKFLOWS.md §4.3, docs/threads.md §3.4a).
+// `action_path`/`action_ref` are in the set because a composite action's own
+// steps read them (PAR-074), but they are NOT global values:
+// TemplateScope.ActionPath gates them, so a workflow step, a job `if:` or an
+// output template that reads one is a named parse error rather than the empty
+// string. The runner supplies the per-composite values (docs/WORKFLOWS.md §4.3,
+// docs/threads.md §3.4a).
 //
 // `server_url`/`api_url` are the spindle server addresses (PAR-111,
 // docs/threads.md §3.5): the runner substitutes them from its environment. They
 // are accepted here so a validated workflow can read them; a job-level `if:`
 // does not resolve them yet (the server's context predates the fields).
+//
+// A field that is accepted but has no value in a Threads run (there are no
+// numeric account ids and no per-workflow run counter) is a NAMED evaluation
+// error, never the empty string: GitHubFieldUnavailable names the reason.
 var GitHubFields = []string{
-	"action_path", "actor", "api_url", "event_name", "job", "ref", "ref_name", "repository",
-	"run_id", "server_url", "sha", "workflow",
+	"action_path", "action_ref", "actor", "actor_id", "api_url", "base_ref",
+	"event_name", "head_ref", "job", "ref", "ref_name", "ref_protected",
+	"ref_type", "repository", "repository_owner", "repository_owner_id",
+	"run_attempt", "run_id", "run_number", "server_url", "sha",
+	"triggering_actor", "workflow", "workflow_ref", "workflow_sha",
+}
+
+// githubUnavailableFields is the accepted-but-unresolvable subset. Each entry
+// is a documented fact about the spindle data model, not a placeholder: a
+// reference that would silently read "" changes a condition, so evaluation
+// names the reason instead (PAR-032's "never an inert value" rule).
+var githubUnavailableFields = map[string]string{
+	"actor_id":            "spindle has no numeric account id; read `github.actor` (the login) instead",
+	"repository_owner_id": "spindle has no numeric account id; read `github.repository_owner` (the login) instead",
+	"run_number":          "spindle records a run id and an attempt, not GitHub's per-workflow run counter; read `github.run_id` or `github.run_attempt`",
+	"ref_protected":       "spindle does not project branch protection into the run context; the OIDC `ref_protected` claim is the provider-facing authority",
+}
+
+// GitHubFieldUnavailable reports whether an accepted github.* field has no
+// value in a Threads run, and why. A workflow that reads one is an evaluation
+// error naming the field and the reason (fail closed), never an empty string.
+func GitHubFieldUnavailable(field string) (string, bool) {
+	reason, ok := githubUnavailableFields[strings.ToLower(strings.TrimSpace(field))]
+	return reason, ok
 }
 
 // EventFields is the closed `github.event.*` (and forgejo/forge alias) field
@@ -130,12 +155,10 @@ var GroupGitHubFields = []string{
 
 // TemplateSupported is the closed reference set, for error messages.
 var TemplateSupported = []string{
-	"github.ref", "github.ref_name", "github.repository", "github.workflow",
-	"github.event_name", "github.sha", "github.run_id", "github.job",
-	"github.actor", "github.server_url", "github.api_url",
-	"github.action_path (a composite action's own steps only)",
-	"github.event.inputs.<name>", "github.event.<field>",
-	"forgejo.<field>", "forge.<field> (the github.* set)",
+	"spindle.<field> (github.*/forgejo.*/forge.* are value-identical aliases; fields: " + strings.Join(GitHubFields, ", ") + ")",
+	"spindle.event.inputs.<name>", "spindle.event.<field>",
+	"spindle.action_path (a composite action's own steps only)",
+	"spindle.action_ref (a composite action's own steps only)",
 	"runner.<field>", "vars.<name>",
 	"matrix.<axis>", "inputs.<name>", "env.<NAME>", "secrets.<NAME>",
 	"job.status", "strategy.<field>",
@@ -367,11 +390,13 @@ func normalizeIndexedRef(expr string) (string, bool) {
 	return b.String(), true
 }
 
-// isGitHubContext reports whether context is the canonical github context or
-// one of its compatibility aliases (they name the same values).
+// isGitHubContext reports whether context is the canonical spindle context or
+// one of its compatibility aliases (they name the same values: D-1/PAR-004).
+// `spindle` is the documented spelling; `github`, `forgejo` and `forge` are
+// value-identical aliases so an imported workflow never changes meaning.
 func isGitHubContext(context string) bool {
 	switch strings.ToLower(strings.TrimSpace(context)) {
-	case "github", "forgejo", "forge":
+	case "spindle", "github", "forgejo", "forge":
 		return true
 	}
 	return false
@@ -502,9 +527,9 @@ func validateRef(ref TemplateRef, scope TemplateScope) error {
 	}
 	if scope.CallWith {
 		switch ref.Context {
-		case "github", "forgejo", "forge", "inputs":
+		case "spindle", "github", "forgejo", "forge", "inputs":
 		default:
-			return fmt.Errorf("%s is not available in a reusable-workflow `with:` value (supported: github.*, inputs.*; the value is expanded when the run is created, before any step, matrix, secret or variable exists)", ref.Raw)
+			return fmt.Errorf("%s is not available in a reusable-workflow `with:` value (supported: spindle.*, inputs.*; the value is expanded when the run is created, before any step, matrix, secret or variable exists)", ref.Raw)
 		}
 	}
 	if ref.Context == "jobs" && !scope.CallOutput {
@@ -514,11 +539,11 @@ func validateRef(ref TemplateRef, scope TemplateScope) error {
 		return fmt.Errorf("%s is not available in %s (available contexts: %s)", ref.Raw, site, listOrNone(SiteContexts(site)))
 	}
 	switch ref.Context {
-	case "github", "forgejo", "forge":
-		if strings.EqualFold(ref.Key, "action_path") {
+	case "spindle", "github", "forgejo", "forge":
+		if strings.EqualFold(ref.Key, "action_path") || strings.EqualFold(ref.Key, "action_ref") {
 			if !scope.ActionPath {
-				return fmt.Errorf("${{ %s.action_path }} is only available in a composite action's own steps (it is the action's directory; a workflow step has none)",
-					ref.Context)
+				return fmt.Errorf("${{ %s.%s }} is only available in a composite action's own steps (it describes the action being run; a workflow step has none)",
+					ref.Context, strings.ToLower(ref.Key))
 			}
 			return nil
 		}
@@ -537,7 +562,7 @@ func validateRef(ref TemplateRef, scope TemplateScope) error {
 			return nil
 		}
 		if !ValidGitHubField(ref.Key) {
-			return fmt.Errorf("${{ %s.%s }} is not a supported context field (supported: %s)",
+			return fmt.Errorf("${{ %s.%s }} is not a supported context field (supported: %s; spindle.* is canonical, github.*/forgejo.*/forge.* are value-identical aliases)",
 				ref.Context, ref.Key, strings.Join(GitHubFields, ", "))
 		}
 		return nil
@@ -664,7 +689,7 @@ func ValidateGroupTemplate(group string, matrixAxes, inputNames []string, workfl
 		}
 		ref := p.ref
 		switch ref.Context {
-		case "github", "forgejo", "forge":
+		case "spindle", "github", "forgejo", "forge":
 			if _, ok := eventInputName(ref.Key); ok {
 				return fmt.Errorf("concurrency.group: ${{ %s.%s }} is not available; write ${{ inputs.<name> }} (supported: %s)",
 					ref.Context, ref.Key, strings.Join(TemplateSupported, ", "))
@@ -891,17 +916,26 @@ func Substitute(s string, vals TemplateValues) (string, error) {
 			continue
 		}
 		ref := *p.ref
-		// github.action_path is a per-composite-step value the RUNNER supplies
-		// (the parser accepts it only inside an action's steps). An absent value
-		// is a named error, never the empty string: silently emptying it would
-		// run an action from the wrong directory.
-		if isGitHubContext(ref.Context) && strings.EqualFold(ref.Key, "action_path") {
-			val, ok := vals.GitHub["action_path"]
+		// github.action_path/action_ref are per-composite-step values the
+		// RUNNER supplies (the parser accepts them only inside an action's
+		// steps). An absent value is a named error, never the empty string:
+		// silently emptying one would run an action from the wrong directory or
+		// report the wrong source ref.
+		if isGitHubContext(ref.Context) && (strings.EqualFold(ref.Key, "action_path") || strings.EqualFold(ref.Key, "action_ref")) {
+			field := strings.ToLower(ref.Key)
+			val, ok := vals.GitHub[field]
 			if !ok {
-				return "", fmt.Errorf("%s has no value at this site: github.action_path is supplied by the runner for each composite action's own steps", ref.Raw)
+				return "", fmt.Errorf("%s has no value at this site: github.%s is supplied by the runner for each composite action's own steps", ref.Raw, field)
 			}
 			b.WriteString(val)
 			continue
+		}
+		// An accepted field the run model cannot value is a named error, never
+		// the empty string (PAR-032: no inert field).
+		if isGitHubContext(ref.Context) {
+			if reason, unavailable := GitHubFieldUnavailable(ref.Key); unavailable {
+				return "", fmt.Errorf("%s has no value in this run: %s.%s: %s", ref.Raw, ref.Context, strings.ToLower(ref.Key), reason)
+			}
 		}
 		switch ref.Context {
 		case "steps", "needs":

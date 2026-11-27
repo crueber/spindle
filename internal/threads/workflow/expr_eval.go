@@ -118,6 +118,31 @@ func EvalIf(expr string, c EvalScope) (bool, error) {
 	return b, nil
 }
 
+// EvalBool evaluates one expression's (inside the `${{ … }}` span) truth value,
+// using the documented boolean rule: true/false/1/0/empty, never a silent guess
+// for any other text. It is the evaluator behind an expression-valued
+// `continue-on-error` (PAR-056) and `concurrency.cancel-in-progress` (PAR-151).
+func EvalBool(expr string, c EvalScope) (bool, error) {
+	expr = strings.TrimSpace(expr)
+	if expr == "" {
+		return false, fmt.Errorf("${{ }} is empty")
+	}
+	p := &exprParser{src: expr, ctx: c}
+	v, err := p.parseOr()
+	if err != nil {
+		return false, fmt.Errorf("${{ %s }}: %w", expr, err)
+	}
+	p.skipSpace()
+	if p.pos != len(p.src) {
+		return false, fmt.Errorf("${{ %s }}: unexpected %q", expr, p.src[p.pos:])
+	}
+	b, terr := v.truthy()
+	if terr != nil {
+		return false, fmt.Errorf("${{ %s }}: %w", expr, terr)
+	}
+	return b, nil
+}
+
 // EvalString evaluates one `${{ … }}` expression and renders its value as the
 // text a substitution site receives. A boolean renders "true"/"false"; a list
 // renders its members comma-joined (the form `format()` and a shell see).
@@ -496,7 +521,7 @@ func (p *exprParser) parseIndexes(path []string) ([]string, error) {
 // word stays an unknown identifier.
 func isObjectContext(name string) bool {
 	switch strings.ToLower(name) {
-	case "github", "forgejo", "forge", "runner", "vars", "matrix", "inputs",
+	case "spindle", "github", "forgejo", "forge", "runner", "vars", "matrix", "inputs",
 		"env", "secrets", "job", "strategy", "steps", "needs":
 		return true
 	}
@@ -514,7 +539,7 @@ func (p *exprParser) contextValue(name string) (exprValue, error) {
 		return exprValue{}, fmt.Errorf("%s is not available in %s (available contexts: %s)", name, p.ctx.Site, strings.Join(SiteContexts(p.ctx.Site), ", "))
 	}
 	switch context {
-	case "github", "forgejo", "forge":
+	case "spindle", "github", "forgejo", "forge":
 		return nestedObject(p.ctx.GitHub), nil
 	case "runner":
 		return stringObject(p.ctx.Runner), nil
@@ -909,7 +934,7 @@ func (p *exprParser) reference(path []string) (exprValue, error) {
 		return exprValue{}, fmt.Errorf("%s is not available in %s (available contexts: %s)", strings.Join(path, "."), p.ctx.Site, strings.Join(SiteContexts(p.ctx.Site), ", "))
 	}
 	switch context {
-	case "github", "forgejo", "forge":
+	case "spindle", "github", "forgejo", "forge":
 		return p.githubValue(context, path)
 	case "runner":
 		if pathHasFilter(path) || len(path) != 2 || !ValidRunnerField(path[1]) {
@@ -980,7 +1005,10 @@ func (p *exprParser) githubValue(context string, path []string) (exprValue, erro
 	}
 	field := strings.ToLower(path[1])
 	if !ValidGitHubField(field) {
-		return exprValue{}, fmt.Errorf("%s.%s is not a supported context field (supported: %s)", context, path[1], strings.Join(GitHubFields, ", "))
+		return exprValue{}, fmt.Errorf("%s.%s is not a supported context field (supported: %s; spindle.* is canonical, github.*/forgejo.*/forge.* are value-identical aliases)", context, path[1], strings.Join(GitHubFields, ", "))
+	}
+	if reason, unavailable := GitHubFieldUnavailable(field); unavailable {
+		return exprValue{}, fmt.Errorf("%s.%s has no value in this run: %s", context, field, reason)
 	}
 	return scalar(p.ctx.GitHub[field]), nil
 }

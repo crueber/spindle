@@ -16,7 +16,7 @@ Test framework: stdlib `testing` only. No testify, no gomock (dependency policy,
 | sim | `make sim` → `go test -count=1 -timeout 15m ./internal/sim/...` | fault-injection over one truth store, one `FaultStore` **per instance link** (§3, §4) | the consistency proof; deterministic under a seed |
 | e2e | `make e2e` → `go test -count=1 ./internal/e2e/...` | real git clients against the running spindle server (smart HTTP, receive/upload-pack, bundle-uri, WAL) **plus the first-run/bootstrap lifecycle scenarios (§5.3)** plus the collaboration full chain (§5.4) | ~60 s; run whenever git-path, boot-path, or collab-path code changes |
 | a11y | `make a11y` → `go test -count=1 -run TestA11y ./internal/e2e/` | the rendered accessibility floor over a fixed page set: real instance, admin sign-in through the in-test IdP, headless Chromium over CDP at 390 px **and** desktop (§6.6) | needs a browser: skips without one locally, `SPINDLE_A11Y=1` makes a missing browser a **failure** (CI); never in the fast tier |
-| parity | `make parity` → `go run ./internal/devtools/paritygate -check` + `go test -run TestParity ./internal/e2e/` | the Threads conformance gate and corpus (§6.8): matrix integrity + the four Forgejo corpus files through the parser and the engine's run-creation path | **no docker, no network**; the execution tier is opt-in (`make parity-exec`, `SPINDLE_PARITY_EXEC=1`); `make parity-closed` adds the plan's closure rule |
+| parity | `make parity` → `go run ./internal/devtools/paritygate -check` + `go test -run TestParity ./internal/e2e/` | the Threads conformance gate and corpus (§6.8): matrix integrity + the four Forgejo corpus files through the parser and the engine's run-creation path | **no docker, no network**; the execution tier is opt-in (`make parity-exec`, `SPINDLE_PARITY_EXEC=1`) and executes the committed golden of a real Forgejo workflow (byte-unmodified) through a server + runner in containers — it needs a host docker daemon, which the standard gate's container jobs do not have; `make parity-closed` adds the plan's closure rule |
 | lint/vet | `make vet` → `go vet ./...` && `gofmt -l` && `go build ./...` | Go equivalent of Rust's `-D warnings`: `go vet` output, any `gofmt -l` line, or any build warning fails the gate | zero findings |
 | race | PR: `make race-pr` → `-race` over the concurrency-owning packages; push to main: `make race` → `-race ./...` (both `-timeout 10m`, watchdog `timeout 1800`) | full fast tier under the race detector (§6) | zero races; the PR tier races where shared state lives because `internal/webui` is a large render suite that owns no shared state (§6.7); main is the complete set |
 | cover | `make cover` | per-package statement coverage of every `internal/...` package, ≥ 95% fail-under (§7) | CI-enforced; new code lands with tests (D7) |
@@ -446,9 +446,10 @@ artefacts make that mechanical (`docs/features/21_parity_master.md` §1/§9):
 
 Deliberate split, and why it is not a loophole: **the PR gate never needs docker**. The
 execution tier (`TestE2E_ParityExecution`, `make parity-exec`) boots a server and a runner and
-runs a corpus-shaped workflow to success; it needs `SPINDLE_PARITY_EXEC=1` and a daemon, so it
-runs where a runner is available (an operator machine, a self-hosted CI job), never on the merge
-gate. `make parity-closed` is not a tier: it is the plan's §9 closure check (no `missing` row),
+executes the committed golden of a real Forgejo workflow (byte-unmodified) to success; it needs
+`SPINDLE_PARITY_EXEC=1` and a daemon, so it runs where a daemon is available (a developer machine,
+an operator host-mode runner), never on the merge gate — every gate job is a container job with no
+daemon inside. `make parity-closed` is not a tier: it is the plan's §9 closure check (no `missing` row),
 run when a wave closes.
 
 ## 7. Makefile — every tier is a target

@@ -28,7 +28,7 @@ func failingCreate(t *testing.T, detail string, images ImageConfig) (string, *th
 	if res.Conclusion != threads.JobFailure {
 		t.Fatalf("conclusion = %s, want failure", res.Conclusion)
 	}
-	return stream.buf.String(), job
+	return queuedText(stream), job
 }
 
 func TestImageCreateDiagnostics(t *testing.T) {
@@ -123,7 +123,7 @@ func TestImageCreateDiagnosticCoversAService(t *testing.T) {
 	if res.Conclusion != threads.JobFailure {
 		t.Fatalf("conclusion = %s", res.Conclusion)
 	}
-	log := stream.buf.String()
+	log := queuedText(stream)
 	for _, want := range []string{
 		"image not found: ak.example/dockerhub/redis:7",
 		"rewrote redis:7 to ak.example/dockerhub/redis:7",
@@ -179,7 +179,7 @@ func TestImageDiagnosticUntouchedRefAndPullNever(t *testing.T) {
 	if res := ex.Execute(context.Background(), ExecInput{Job: job, AttemptToken: "wjt_token_value"}, stream); res.Conclusion != threads.JobFailure {
 		t.Fatalf("conclusion = %s", res.Conclusion)
 	}
-	log := stream.buf.String()
+	log := queuedText(stream)
 	for _, want := range []string{
 		"image not found: ghcr.io/a/b:t",
 		"names its own registry and was used as written (--image-prefix-all is off)",

@@ -7,6 +7,7 @@ import (
 
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/crueber/spindle/internal/server/auth"
 	"github.com/crueber/spindle/internal/store"
@@ -138,12 +139,23 @@ type LogView struct {
 // AppendLog stores one immutable log frame (idempotent by attempt+sequence) and
 // reports the cancel signal. Frames are masked server-side before they land
 // (best effort, 15 §5.3).
-func (s *Service) AppendLog(ctx context.Context, claims AttemptClaims, seq int, text string) (*LogView, error) {
+func (s *Service) AppendLog(ctx context.Context, claims AttemptClaims, seq int, rec LogRecord) (*LogView, error) {
 	if seq < 1 || seq > 1_000_000_000 {
 		return nil, fmt.Errorf("%w: seq must be 1..1e9", ErrInvalid)
 	}
-	if len(text) > MaxLogFrame {
+	if len(rec.Text) > MaxLogFrame {
 		return nil, fmt.Errorf("%w: log frame exceeds 256 KiB", ErrInvalid)
+	}
+	if !logRecordKinds[rec.Kind] {
+		return nil, fmt.Errorf("%w: unknown log frame kind %q", ErrInvalid, rec.Kind)
+	}
+	if rec.Stream != "" && rec.Stream != "output" && rec.Stream != "system" {
+		return nil, fmt.Errorf("%w: unknown log frame stream %q", ErrInvalid, rec.Stream)
+	}
+	if rec.Time != "" {
+		if _, err := time.Parse(time.RFC3339Nano, rec.Time); err != nil {
+			return nil, fmt.Errorf("%w: log frame time %q is not RFC 3339", ErrInvalid, rec.Time)
+		}
 	}
 	job, err := s.verifyAttempt(ctx, claims, ScopeLog)
 	if err != nil {
@@ -157,7 +169,7 @@ func (s *Service) AppendLog(ctx context.Context, claims AttemptClaims, seq int, 
 	if terminal(job.State) && job.State != JobRunning {
 		return &LogView{Seq: seq, State: job.State, Cancel: job.State == JobCancelled}, nil
 	}
-	body := text
+	body := rec
 	if job.Trusted {
 		// The mask set is every value the job itself could read (org, repo and
 		// environment secrets, and the variables with the same posture), so a
@@ -167,11 +179,16 @@ func (s *Service) AppendLog(ctx context.Context, claims AttemptClaims, seq int, 
 		if verr != nil {
 			return nil, verr
 		}
-		body = maskSecretValues(body, vals)
+		body.Text = maskSecretValues(body.Text, vals)
+		body.Name = maskSecretValues(body.Name, vals)
+	}
+	raw, merr := json.Marshal(body)
+	if merr != nil {
+		return nil, merr
 	}
 	key := LogKey(owner, repo, claims.Run, claims.Job, claims.Attempt, seq)
-	_, perr := store.PutBytes(ctx, s.Store, key, []byte(body),
-		store.PutOptions{Mode: store.PutCreate, ContentType: "text/plain; charset=utf-8"})
+	_, perr := store.PutBytes(ctx, s.Store, key, raw,
+		store.PutOptions{Mode: store.PutCreate, ContentType: "application/json"})
 	if perr != nil && !store.IsPreconditionFailed(perr) {
 		return nil, perr
 	}
@@ -954,10 +971,53 @@ func failedRerunSet(jobs []*Job) []*Job {
 
 // --- log reads --------------------------------------------------------------
 
-// LogFrame is one stored log frame.
+// Log record kinds. A frame with Kind "" carries captured output; every other
+// kind is a runner-emitted marker a reader renders structurally instead of
+// guessing from the text (PAR-190: step boundaries and order, group folding).
+const (
+	LogKindStepStart = "step_start"
+	LogKindStepEnd   = "step_end"
+	LogKindGroup     = "group_start"
+	LogKindGroupEnd  = "group_end"
+	LogKindTruncated = "truncated"
+)
+
+// logRecordKinds is the closed marker vocabulary. A record naming anything else
+// is refused at the write boundary, never stored and rendered as a stranger.
+var logRecordKinds = map[string]bool{
+	"": true, LogKindStepStart: true, LogKindStepEnd: true,
+	LogKindGroup: true, LogKindGroupEnd: true, LogKindTruncated: true,
+}
+
+// LogRecord is one frame's stored body (the runner protocol's `log` payload).
+// Text is the captured bytes or a marker's explanation; Stream says whether the
+// runner emitted it ("system") or it came from the job process ("output"); Kind
+// names a structural marker; Time is the runner's capture time (RFC 3339 UTC).
+type LogRecord struct {
+	Time       string `json:"time,omitempty"`
+	Stream     string `json:"stream,omitempty"`
+	Kind       string `json:"kind,omitempty"`
+	Text       string `json:"text"`
+	Step       int    `json:"step,omitempty"`
+	Name       string `json:"name,omitempty"`
+	Conclusion string `json:"conclusion,omitempty"`
+	ExitCode   int    `json:"exit_code,omitempty"`
+	DurationMS int64  `json:"duration_ms,omitempty"`
+}
+
+// LogFrame is one stored log frame plus the key-derived sequence and attempt.
 type LogFrame struct {
-	Seq  int    `json:"seq"`
-	Text string `json:"text"`
+	Seq        int    `json:"seq"`
+	Attempt    int    `json:"attempt,omitempty"`
+	Time       string `json:"time,omitempty"`
+	Stream     string `json:"stream,omitempty"`
+	Kind       string `json:"kind,omitempty"`
+	Text       string `json:"text"`
+	Step       int    `json:"step,omitempty"`
+	Name       string `json:"name,omitempty"`
+	Conclusion string `json:"conclusion,omitempty"`
+	ExitCode   int    `json:"exit_code,omitempty"`
+	DurationMS int64  `json:"duration_ms,omitempty"`
 }
 
 // LogPage is one bounded window of a job's log.
@@ -1011,7 +1071,21 @@ func (s *Service) LogFrames(ctx context.Context, repo, runID, jobID string, atte
 			}
 			return gerr
 		}
-		page.Frames = append(page.Frames, LogFrame{Seq: seq, Text: string(raw)})
+		var rec LogRecord
+		if jerr := json.Unmarshal(raw, &rec); jerr != nil {
+			// A frame that cannot be decoded is never skipped silently: it is a
+			// visible, sequenced line saying the bytes are unreadable.
+			page.Frames = append(page.Frames, LogFrame{
+				Seq: seq, Attempt: attempt, Kind: LogKindTruncated,
+				Text: fmt.Sprintf("spindle: log frame %d is unreadable: %v", seq, jerr),
+			})
+			return nil
+		}
+		page.Frames = append(page.Frames, LogFrame{
+			Seq: seq, Attempt: attempt, Time: rec.Time, Stream: rec.Stream, Kind: rec.Kind,
+			Text: rec.Text, Step: rec.Step, Name: rec.Name, Conclusion: rec.Conclusion,
+			ExitCode: rec.ExitCode, DurationMS: rec.DurationMS,
+		})
 		return nil
 	})
 	if err != nil {

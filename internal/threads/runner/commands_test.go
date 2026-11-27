@@ -222,11 +222,11 @@ func TestExecuteCommandFilesAffectLaterStepsOnly(t *testing.T) {
 	var first, second, third string
 	for _, call := range calls {
 		switch {
-		case strings.HasSuffix(call, "sh -e -c write"):
+		case strings.HasSuffix(call, "bash --noprofile --norc -eo pipefail -c write"):
 			first = call
-		case strings.HasSuffix(call, "sh -e -c read"):
+		case strings.HasSuffix(call, "bash --noprofile --norc -eo pipefail -c read"):
 			second = call
-		case strings.HasSuffix(call, "sh -e -c read-again"):
+		case strings.HasSuffix(call, "bash --noprofile --norc -eo pipefail -c read-again"):
 			third = call
 		}
 	}
@@ -278,7 +278,7 @@ func TestExecuteCommandFileRefusalFailsTheStep(t *testing.T) {
 // tolerated failure's later steps see the variable.
 func TestExecuteEnvFileOnAFailedStepStillApplies(t *testing.T) {
 	docker := &fakeDocker{
-		streamByMatch: []runOutput{{match: "sh -e -c fail", code: 1}},
+		streamByMatch: []runOutput{{match: "bash --noprofile --norc -eo pipefail -c fail", code: 1}},
 		runOutputs:    []runOutput{{match: "/tmp/spindle-command-1-env", out: "AFTER=failure\n"}},
 	}
 	job := fixtureJob()
@@ -293,7 +293,7 @@ func TestExecuteEnvFileOnAFailedStepStillApplies(t *testing.T) {
 	}
 	var after string
 	for _, call := range docker.snapshot() {
-		if strings.HasSuffix(call, "sh -e -c after") {
+		if strings.HasSuffix(call, "bash --noprofile --norc -eo pipefail -c after") {
 			after = call
 		}
 	}

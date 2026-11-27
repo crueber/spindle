@@ -201,9 +201,12 @@ func (j *jobCommands) addMask(value string) error {
 // replaced by the runner's own line, so the raw `::error::` syntax never
 // reaches a rendered page as if it were content.
 type commandSink struct {
-	dst  io.Writer
+	dst  markerSink
 	job  *jobCommands
 	step StepPlan
+	// state is the plan's per-action `$GITHUB_STATE` map (PAR-092): nil outside
+	// a JavaScript action, where `::save-state::` has no post hook to reach.
+	state *actionState
 	// setOutputs holds `::set-output name=x::value` values (the deprecated
 	// alias), merged into the step's collected outputs when it finishes.
 	setOutputs map[string]string
@@ -217,8 +220,16 @@ type commandSink struct {
 	skipping bool
 }
 
+// markerSink is the write side a command sink needs: plain text plus the two
+// structural markers `::group::`/`::endgroup::` produce (PAR-190 group folding).
+type markerSink interface {
+	Write(p []byte) (int, error)
+	Group(name string)
+	GroupEnd()
+}
+
 // newCommandSink builds one step's sink writing to dst.
-func newCommandSink(dst io.Writer, job *jobCommands, step StepPlan) *commandSink {
+func newCommandSink(dst markerSink, job *jobCommands, step StepPlan) *commandSink {
 	return &commandSink{dst: dst, job: job, step: step, setOutputs: map[string]string{}}
 }
 
@@ -303,7 +314,7 @@ func (w *commandSink) handle(line string) {
 		// original line still reaches the log.
 		if w.job.unknown < MaxUnknownCommands {
 			w.job.unknown++
-			w.system("spindle: unsupported workflow command ::%s:: (ignored; supported: error, warning, notice, group, endgroup, add-mask, stop-commands, set-output, debug)", cmd.Name)
+			w.system("spindle: unsupported workflow command ::%s:: (ignored; supported: error, warning, notice, group, endgroup, add-mask, stop-commands, set-output, save-state, debug)", cmd.Name)
 		}
 		w.text(line)
 	}
@@ -317,7 +328,7 @@ func (w *commandSink) run(cmd workflowCommand) bool {
 		return true
 	case "group":
 		w.groups = append(w.groups, cmd.Message)
-		w.system("▸ group: %s", oneLine(cmd.Message))
+		w.dst.Group(oneLine(cmd.Message))
 		return true
 	case "endgroup":
 		if len(w.groups) == 0 {
@@ -351,7 +362,7 @@ func (w *commandSink) run(cmd workflowCommand) bool {
 		w.system("· %s", cmd.Message)
 		return true
 	case "save-state":
-		w.system("spindle: ::save-state:: is not available here: a job runs no pre/post hooks (documented subset, docs/WORKFLOWS.md §6.6a)")
+		w.saveState(cmd)
 		return true
 	case "set-env", "add-path":
 		w.system("spindle: ::%s:: was removed by GitHub and is not supported; use $GITHUB_ENV / $GITHUB_PATH", cmd.Name)
@@ -360,13 +371,37 @@ func (w *commandSink) run(cmd workflowCommand) bool {
 	return false
 }
 
+// saveState implements the deprecated `::save-state name=X::value` spelling of
+// a `$GITHUB_STATE` write (PAR-092). It feeds the SAME map the file feeds, so
+// the post hook receives `STATE_X` either way; a step that is not a JavaScript
+// action has no post hook, and says so by name instead of accepting the value
+// into nowhere.
+func (w *commandSink) saveState(cmd workflowCommand) {
+	name := strings.TrimSpace(cmd.Props["name"])
+	if name == "" {
+		w.system("spindle: ::save-state:: needs a name property")
+		return
+	}
+	if w.state == nil || w.step.Node == nil || w.step.Node.StatePath == "" {
+		w.system("spindle: ::save-state:: is ignored here: state exists to reach an action's post hook, and this step is not a JavaScript action (write the value to $GITHUB_OUTPUT or $GITHUB_ENV instead)")
+		return
+	}
+	if err := w.state.set(w.step.Node.StatePath, name, cmd.Message); err != nil {
+		w.system("spindle: ::save-state:: refused: %v", err)
+		return
+	}
+	// The name is a fact; the VALUE is action data and may be a token, so the
+	// confirmation never prints it.
+	w.system("spindle: saved state %q for the post hook", name)
+}
+
 // closeGroup emits the end marker of the innermost open group.
 func (w *commandSink) closeGroup() {
 	if len(w.groups) == 0 {
 		return
 	}
 	w.groups = w.groups[:len(w.groups)-1]
-	w.system("◂ group end")
+	w.dst.GroupEnd()
 }
 
 // annotation turns one error/warning/notice command into an annotation and a

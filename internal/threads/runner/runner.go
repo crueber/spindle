@@ -154,13 +154,30 @@ func New(cfg Config) (*Runner, error) {
 		return nil, fmt.Errorf("runner: the configured docker daemon exposes the host root filesystem (DOCKER_HOST unix:///var/run/docker.sock); pass --allow-host-docker to acknowledge, or point DOCKER_HOST at a per-runner docker:dind daemon")
 	}
 	// The operator's container grants are validated before anything dials the
-	// server, and a grant that widens a job's isolation is never combined with
-	// fork runs (D-8: a workflow can never widen its own isolation).
+	// server, and ANY grant that widens a job's isolation is never combined
+	// with fork runs (D-8: a workflow can never widen its own isolation). A
+	// shared network reaches other containers and a volume allowlist reaches
+	// host paths, exactly like privilege or a docker endpoint.
 	if err := threads.ValidateContainerPolicy(cfg.Policy); err != nil {
 		return nil, fmt.Errorf("runner: %v", err)
 	}
-	if cfg.AllowForkRuns && (cfg.Policy.Privileged || cfg.Policy.DockerHost != "") {
-		return nil, fmt.Errorf("runner: --allow-fork-runs cannot be combined with --container-privileged or --docker-host: a runner that grants host-level capability must never execute untrusted fork code (D-8)")
+	if cfg.AllowForkRuns {
+		var grants []string
+		if cfg.Policy.Privileged {
+			grants = append(grants, "--container-privileged")
+		}
+		if cfg.Policy.DockerHost != "" {
+			grants = append(grants, "--docker-host")
+		}
+		if cfg.Policy.Network != "" {
+			grants = append(grants, "--container-network")
+		}
+		if len(cfg.Policy.ValidVolumes) > 0 {
+			grants = append(grants, "--container-valid-volume")
+		}
+		if len(grants) > 0 {
+			return nil, fmt.Errorf("runner: --allow-fork-runs cannot be combined with %s: a runner that grants host-level capability must never execute untrusted fork code (D-8)", strings.Join(grants, ", "))
+		}
 	}
 	auth, aerr := PrepareRegistryAuth(context.Background(), cfg.DockerBin, cfg.RegistryAuthFile)
 	if aerr != nil {

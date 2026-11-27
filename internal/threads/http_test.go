@@ -2,6 +2,7 @@ package threads
 
 import (
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -276,6 +277,10 @@ func TestExposedCoversRoutes(t *testing.T) {
 		"/{owner}/{repo}/api/threads/{run}/rerun-failed": {http.MethodPost, "/o/r/api/threads/" + run.ID + "/rerun-failed", false},
 		"/{owner}/{repo}/api/threads/{run}/approve":      {http.MethodPost, "/o/r/api/threads/" + run.ID + "/approve", false},
 		"/{owner}/{repo}/api/threads/{run}/deny":         {http.MethodPost, "/o/r/api/threads/" + run.ID + "/deny", false},
+		"/{owner}/{repo}/api/threads/{run}/logs.zip": {
+			http.MethodGet, "/o/r/api/threads/" + run.ID + "/logs.zip", false},
+		"/{owner}/{repo}/api/threads/{run}/logs.txt": {
+			http.MethodGet, "/o/r/api/threads/" + run.ID + "/logs.txt", false},
 		"/{owner}/{repo}/api/threads/{run}/jobs/{job}/log": {
 			http.MethodGet, "/o/r/api/threads/" + run.ID + "/jobs/" + jid + "/log?accept=json", false},
 		"/{owner}/{repo}/api/threads/{run}/jobs/{job}/cancel": {
@@ -308,6 +313,7 @@ func TestExposedCoversRoutes(t *testing.T) {
 		"/api/v1/orgs/{org}/threads/variables/{name}":     {http.MethodPut, "/api/v1/orgs/acme/threads/variables/REGION", false},
 		"/api/v1/orgs/{org}/threads/secrets":              {http.MethodGet, "/api/v1/orgs/acme/threads/secrets", false},
 		"/api/v1/orgs/{org}/threads/secrets/{name}":       {http.MethodPut, "/api/v1/orgs/acme/threads/secrets/TOKEN", false},
+		"/api/v1/orgs/{org}/threads/settings":             {http.MethodGet, "/api/v1/orgs/acme/threads/settings", false},
 		"/{owner}/{repo}/api/threads/environments":        {http.MethodGet, "/o/r/api/threads/environments", false},
 		"/{owner}/{repo}/api/threads/environments/{name}": {http.MethodPut, "/o/r/api/threads/environments/prod", false},
 		"/{owner}/{repo}/api/threads/environments/{name}/secrets": {
@@ -389,5 +395,67 @@ func TestExposedCoversRoutes(t *testing.T) {
 	rec := httptest.NewRecorder()
 	if !h.Handle(rec, httptest.NewRequest(http.MethodGet, "/o/r/api-browser/threads", nil)) {
 		t.Fatal("api-browser twin not claimed")
+	}
+}
+
+// TestRunLogsAPI pins the whole-run download's HTTP shape and gate: both formats
+// are attachments named after the run, and an unknown run is a real 404 (never
+// an empty archive that reads like a run with no output).
+func TestRunLogsAPI(t *testing.T) {
+	e, h, _ := newHTTP(t)
+	run := e.mustCreate(t)[0]
+	for _, tc := range []struct{ path, ctype string }{
+		{"/o/r/api/threads/" + run.ID + "/logs.txt", "text/plain; charset=utf-8"},
+		{"/o/r/api/threads/" + run.ID + "/logs.zip", "application/zip"},
+	} {
+		rec := do(h, http.MethodGet, tc.path, "")
+		if rec.Code != http.StatusOK {
+			t.Fatalf("%s = %d: %s", tc.path, rec.Code, rec.Body.String())
+		}
+		if got := rec.Header().Get("Content-Type"); got != tc.ctype {
+			t.Fatalf("%s content-type = %q", tc.path, got)
+		}
+		if cd := rec.Header().Get("Content-Disposition"); !strings.Contains(cd, run.ID) {
+			t.Fatalf("%s disposition = %q, want the run id", tc.path, cd)
+		}
+	}
+	rec := do(h, http.MethodGet, "/o/r/api/threads/1795176002000000000-nope/logs.zip", "")
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("unknown run = %d, want 404", rec.Code)
+	}
+}
+
+// failingHTTPWriter accepts headers and then fails every body write, which is a
+// client that went away mid-download: the handler must not PANIC or re-render
+// into the archive; it logs the aborted copy.
+type failingHTTPWriter struct {
+	hdr  http.Header
+	code int
+}
+
+func (w *failingHTTPWriter) Header() http.Header {
+	if w.hdr == nil {
+		w.hdr = http.Header{}
+	}
+	return w.hdr
+}
+func (w *failingHTTPWriter) WriteHeader(code int) { w.code = code }
+func (w *failingHTTPWriter) Write([]byte) (int, error) {
+	return 0, errors.New("client gone")
+}
+
+func TestRunLogsAPISurvivesAWriteFailure(t *testing.T) {
+	e, h, _ := newHTTP(t)
+	run := e.mustCreate(t)[0]
+	for _, path := range []string{
+		"/o/r/api/threads/" + run.ID + "/logs.zip",
+		"/o/r/api/threads/" + run.ID + "/logs.txt",
+	} {
+		w := &failingHTTPWriter{}
+		req := httptest.NewRequest(http.MethodGet, path, nil)
+		h.ServeHTTP(w, req)
+		if w.code != http.StatusOK {
+			t.Fatalf("%s status = %d", path, w.code)
+		}
 	}
 }

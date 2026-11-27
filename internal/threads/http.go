@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log/slog"
 	"math"
 	"net/http"
 	"net/url"
@@ -42,6 +43,8 @@ var ExposedTemplates = []string{
 	"/{owner}/{repo}/api/threads/{run}/rerun-failed",
 	"/{owner}/{repo}/api/threads/{run}/approve",
 	"/{owner}/{repo}/api/threads/{run}/deny",
+	"/{owner}/{repo}/api/threads/{run}/logs.zip",
+	"/{owner}/{repo}/api/threads/{run}/logs.txt",
 	"/{owner}/{repo}/api/threads/{run}/jobs/{job}/log",
 	"/{owner}/{repo}/api/threads/{run}/jobs/{job}/cancel",
 	"/{owner}/{repo}/api/threads/{run}/artifacts",
@@ -56,6 +59,7 @@ var ExposedTemplates = []string{
 	"/api/v1/orgs/{org}/threads/variables/{name}",
 	"/api/v1/orgs/{org}/threads/secrets",
 	"/api/v1/orgs/{org}/threads/secrets/{name}",
+	"/api/v1/orgs/{org}/threads/settings",
 	"/{owner}/{repo}/api/threads/environments",
 	"/{owner}/{repo}/api/threads/environments/{name}",
 	"/{owner}/{repo}/api/threads/environments/{name}/secrets",
@@ -134,6 +138,8 @@ func (h *Handler) Handle(w http.ResponseWriter, r *http.Request) bool {
 				return h.handleOrgVariables(w, r, segs[3], segs[6:])
 			case "secrets":
 				return h.handleOrgSecrets(w, r, segs[3], segs[6:])
+			case "settings":
+				return h.handleOrgSettings(w, r, segs[3], segs[6:])
 			}
 		}
 		if len(segs) >= 4 && segs[1] == "v1" && segs[2] == "admin" && segs[3] == "runner-groups" {
@@ -458,6 +464,13 @@ func (h *Handler) handleRepo(w http.ResponseWriter, r *http.Request, repo string
 		}
 		h.approvalRun(w, r, repo, rest[0], rest[1] == "approve")
 		return true
+	case len(rest) == 2 && (rest[1] == "logs.zip" || rest[1] == "logs.txt"):
+		if r.Method != http.MethodGet {
+			methodNotAllowed(w, "GET")
+			return true
+		}
+		h.runLogs(w, r, repo, rest[0], rest[1] == "logs.zip")
+		return true
 	case len(rest) == 4 && rest[1] == "jobs" && rest[3] == "log":
 		if r.Method != http.MethodGet {
 			methodNotAllowed(w, "GET")
@@ -685,4 +698,44 @@ func coerceInputs(in map[string]any) (map[string]string, error) {
 		}
 	}
 	return out, nil
+}
+
+// runLogs answers the whole-run download (PAR-190): every job's current-attempt
+// log, as one text file or one zip. The service resolves the read gate; the
+// handler only names the file and copies the archive.
+func (h *Handler) runLogs(w http.ResponseWriter, r *http.Request, repo, runID string, asZip bool) {
+	p, aerr := h.principal(r)
+	if aerr != nil {
+		writeErr(w, aerr)
+		return
+	}
+	bundle, err := h.Svc.RunLogs(r.Context(), repo, runID, p)
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	name := "logs"
+	if bundle.Run != nil && bundle.Run.ID != "" {
+		name = bundle.Run.ID + "-logs"
+	}
+	hdr := w.Header()
+	hdr.Set("Cache-Control", "no-store")
+	hdr.Set("X-Content-Type-Options", "nosniff")
+	if asZip {
+		hdr.Set("Content-Type", "application/zip")
+		hdr.Set("Content-Disposition", `attachment; filename="`+name+`.zip"`)
+		w.WriteHeader(http.StatusOK)
+		if werr := WriteRunLogsZip(w, bundle); werr != nil {
+			// Headers are spent; the failed copy is logged, never rendered into
+			// the archive's bytes.
+			slog.Default().Warn("threads: log zip aborted", "run", runID, "err", werr)
+		}
+		return
+	}
+	hdr.Set("Content-Type", "text/plain; charset=utf-8")
+	hdr.Set("Content-Disposition", `attachment; filename="`+name+`.txt"`)
+	w.WriteHeader(http.StatusOK)
+	if werr := WriteRunLogsText(w, bundle); werr != nil {
+		slog.Default().Warn("threads: log download aborted", "run", runID, "err", werr)
+	}
 }

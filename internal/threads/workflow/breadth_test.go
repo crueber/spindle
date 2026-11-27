@@ -71,7 +71,7 @@ func TestParseBroadShapes(t *testing.T) {
 	if got := w.Events(); strings.Join(got, ",") != "push,pull_request,workflow_dispatch" {
 		t.Fatalf("events = %v", got)
 	}
-	if w.Concurrency == nil || w.Concurrency.Group != "ci-${{ github.ref }}" || !w.Concurrency.CancelInProgress {
+	if w.Concurrency == nil || w.Concurrency.Group != "ci-${{ github.ref }}" || !w.Concurrency.CancelInProgress.Bool() {
 		t.Fatalf("workflow concurrency = %+v", w.Concurrency)
 	}
 	if w.Permissions["contents"] != "read" || w.Permissions["issues"] != "write" {

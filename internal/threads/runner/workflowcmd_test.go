@@ -1,7 +1,6 @@
 package runner
 
 import (
-	"bytes"
 	"strings"
 	"testing"
 
@@ -59,7 +58,7 @@ func TestWorkflowCommandAnnotations(t *testing.T) {
 	stream := quietStream(t)
 	stream.addMask([]string{"hunter2"})
 	job := newJobCommands(stream)
-	var dst bytes.Buffer
+	var dst markerBuffer
 	sink := newCommandSink(&dst, job, StepPlan{Index: 0, ID: "build", Name: "build"})
 	_, _ = sink.Write([]byte("normal line\n::error file=a.go,line=3,col=2,title=Oops::hunter2 failed\n::warning::careful\n"))
 	if err := sink.Close(); err != nil {
@@ -96,7 +95,7 @@ func TestWorkflowCommandAnnotations(t *testing.T) {
 func TestWorkflowCommandGroupsAndStop(t *testing.T) {
 	stream := quietStream(t)
 	job := newJobCommands(stream)
-	var dst bytes.Buffer
+	var dst markerBuffer
 	sink := newCommandSink(&dst, job, StepPlan{Name: "s"})
 	_, _ = sink.Write([]byte("::group::inner\nlog\n::stop-commands::secret-token\n::error::not a command\n::wrong-token::\n::secret-token::\n::notice::resumed\n"))
 	_ = sink.Close()
@@ -125,7 +124,7 @@ func TestWorkflowCommandGroupsAndStop(t *testing.T) {
 func TestWorkflowCommandAddMaskCannotUnmask(t *testing.T) {
 	stream := quietStream(t)
 	job := newJobCommands(stream)
-	var dst bytes.Buffer
+	var dst markerBuffer
 	sink := newCommandSink(&dst, job, StepPlan{Name: "s"})
 	_, _ = sink.Write([]byte("::add-mask::topsecret-value\n::add-mask::\n"))
 	_ = sink.Close()
@@ -152,7 +151,7 @@ func TestWorkflowCommandAddMaskCannotUnmask(t *testing.T) {
 func TestWorkflowCommandSetOutputAndUnsupported(t *testing.T) {
 	stream := quietStream(t)
 	job := newJobCommands(stream)
-	var dst bytes.Buffer
+	var dst markerBuffer
 	sink := newCommandSink(&dst, job, StepPlan{ID: "build", Name: "build"})
 	_, _ = sink.Write([]byte("::set-output name=tag::v1.2.3\n::save-state name=x::1\n::set-env name=X::y\n::frobnicate::hello\n"))
 	_ = sink.Close()
@@ -160,7 +159,7 @@ func TestWorkflowCommandSetOutputAndUnsupported(t *testing.T) {
 		t.Fatalf("set-output = %q", got)
 	}
 	text := dst.String()
-	for _, want := range []string{"no pre/post hooks", "removed by GitHub", "unsupported workflow command ::frobnicate::"} {
+	for _, want := range []string{"is ignored here", "removed by GitHub", "unsupported workflow command ::frobnicate::"} {
 		if !strings.Contains(text, want) {
 			t.Fatalf("log misses %q:\n%s", want, text)
 		}
@@ -183,7 +182,7 @@ func TestWorkflowCommandSetOutputAndUnsupported(t *testing.T) {
 func TestWorkflowCommandCaps(t *testing.T) {
 	stream := quietStream(t)
 	job := newJobCommands(stream)
-	var dst bytes.Buffer
+	var dst markerBuffer
 	sink := newCommandSink(&dst, job, StepPlan{Name: "s"})
 	var b strings.Builder
 	for i := 0; i < threads.MaxAnnotationsPerStep+5; i++ {
@@ -206,7 +205,7 @@ func TestWorkflowCommandCaps(t *testing.T) {
 		long.WriteByte('x')
 	}
 	long.WriteString("\n")
-	var dst2 bytes.Buffer
+	var dst2 markerBuffer
 	sink2 := newCommandSink(&dst2, job, StepPlan{Name: "s"})
 	_, _ = sink2.Write([]byte(long.String()))
 	_ = sink2.Close()
@@ -223,7 +222,7 @@ func TestWorkflowCommandCaps(t *testing.T) {
 func TestWorkflowCommandInvalidAnnotationIsNumber(t *testing.T) {
 	stream := quietStream(t)
 	job := newJobCommands(stream)
-	var dst bytes.Buffer
+	var dst markerBuffer
 	sink := newCommandSink(&dst, job, StepPlan{Name: "s"})
 	_, _ = sink.Write([]byte("::error file=./a%0Ab.go,line=nope::-1\n"))
 	_ = sink.Close()

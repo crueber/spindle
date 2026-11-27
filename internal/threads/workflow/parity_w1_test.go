@@ -1,6 +1,7 @@
 package workflow
 
 import (
+	"reflect"
 	"strings"
 	"testing"
 )
@@ -187,12 +188,17 @@ func TestSecretsReferences(t *testing.T) {
 // TestGitHubContextFields pins PAR-032: every accepted github/forgejo field is
 // valid in a substituted site and in if:, and an unknown field names the set.
 func TestGitHubContextFields(t *testing.T) {
-	fields := []string{"event_name", "sha", "ref", "ref_name", "repository", "workflow", "job", "run_id", "actor"}
+	fields := GitHubFields
 	src := func(site string) string {
 		return "name: G\non: push\njobs:\n  a:\n    runs-on: l\n    steps:\n" + site
 	}
 	for _, field := range fields {
-		for _, context := range []string{"github", "forgejo", "forge"} {
+		if field == "action_path" || field == "action_ref" {
+			// Gated to a composite action's own steps (checked below); a
+			// workflow step that reads one is a named parse error.
+			continue
+		}
+		for _, context := range []string{"spindle", "github", "forgejo", "forge"} {
 			step := "      - env:\n          V: ${{ " + context + "." + field + " }}\n        run: true\n"
 			if _, err := Parse([]byte(src(step))); err != nil {
 				t.Fatalf("%s.%s rejected: %v", context, field, err)
@@ -201,6 +207,15 @@ func TestGitHubContextFields(t *testing.T) {
 			if _, err := Parse([]byte(src(ifStep))); err != nil {
 				t.Fatalf("%s.%s in if rejected: %v", context, field, err)
 			}
+		}
+	}
+	// The two per-composite fields are accepted only inside an action's steps.
+	for _, field := range []string{"action_path", "action_ref"} {
+		if err := ValidateTemplate("${{ spindle."+field+" }}", TemplateScope{ActionPath: true}); err != nil {
+			t.Fatalf("composite %s rejected: %v", field, err)
+		}
+		if err := ValidateTemplate("${{ spindle."+field+" }}", TemplateScope{}); err == nil || !strings.Contains(err.Error(), "composite action") {
+			t.Fatalf("%s outside a composite action = %v, want the named refusal", field, err)
 		}
 	}
 	// The event.inputs form requires a declared input.
@@ -215,13 +230,63 @@ func TestGitHubContextFields(t *testing.T) {
 	}
 	// An unknown field is an error naming the supported set, never empty.
 	for _, site := range []string{
-		"      - env:\n          V: ${{ github.head_ref }}\n        run: true\n",
-		"      - if: github.head_ref == 'x'\n        run: true\n",
+		"      - env:\n          V: ${{ github.token }}\n        run: true\n",
+		"      - if: github.token == 'x'\n        run: true\n",
 	} {
 		_, err := Parse([]byte(src(site)))
-		if err == nil || !strings.Contains(err.Error(), "github.head_ref") || !strings.Contains(err.Error(), "event_name") {
+		if err == nil || !strings.Contains(err.Error(), "github.token") || !strings.Contains(err.Error(), "event_name") {
 			t.Fatalf("unknown field = %v, want the field and the set named", err)
 		}
+	}
+}
+
+// TestGitHubContextFieldValues is PAR-032's one-row-per-field table: every
+// documented field resolves in a step substitution AND in an `if:` to the same
+// value. A field the run model cannot value is the SAME named error in both
+// places (never an empty string), and a field the event does not carry (head_ref
+// on a push) is empty, exactly as GitHub documents.
+func TestGitHubContextFieldValues(t *testing.T) {
+	github := map[string]string{
+		"ref": "refs/heads/main", "ref_name": "main", "ref_type": "branch",
+		"sha": "abc123", "event_name": "push", "workflow": "CI",
+		"workflow_ref": "o/r/.spindle/workflows/ci.yml@refs/heads/main",
+		"workflow_sha": "wfsha", "job": "build", "repository": "o/r",
+		"repository_owner": "o", "run_id": "run1", "run_attempt": "2",
+		"actor": "ada", "triggering_actor": "ada", "head_ref": "", "base_ref": "",
+		"server_url": "https://s.example", "api_url": "https://s.example/api/v1",
+	}
+	values := TemplateValues{GitHub: github}
+	for _, field := range GitHubFields {
+		if field == "action_path" || field == "action_ref" {
+			continue // per-composite, covered by TestGitHubContextFields
+		}
+		t.Run(field, func(t *testing.T) {
+			scope := EvalScope{GitHub: github, Site: SiteStepIf}
+			want, unavailable := GitHubFieldUnavailable(field)
+			if unavailable {
+				if _, err := Substitute("${{ spindle."+field+" }}", values); err == nil || !strings.Contains(err.Error(), want) {
+					t.Fatalf("step %s = %v, want the named error %q", field, err, want)
+				}
+				if _, err := EvalString("spindle."+field, scope); err == nil || !strings.Contains(err.Error(), want) {
+					t.Fatalf("if: %s = %v, want the named error %q", field, err, want)
+				}
+				return
+			}
+			for _, context := range []string{"spindle", "github", "forgejo", "forge"} {
+				got, err := Substitute("${{ "+context+"."+field+" }}", values)
+				if err != nil || got != github[field] {
+					t.Fatalf("step %s.%s = %q, %v (want %q)", context, field, got, err, github[field])
+				}
+				ev, eerr := EvalString(context+"."+field, scope)
+				if eerr != nil || ev != github[field] {
+					t.Fatalf("if: %s.%s = %q, %v (want %q)", context, field, ev, eerr, github[field])
+				}
+			}
+			// The same field in a real condition: every spelling compares equal.
+			if ok, cerr := EvalIf("spindle."+field+" == github."+field+" && github."+field+" == forgejo."+field, scope); cerr != nil || !ok {
+				t.Fatalf("if: %s alias equality = %v, %v", field, ok, cerr)
+			}
+		})
 	}
 }
 
@@ -308,7 +373,7 @@ func TestValidateIf(t *testing.T) {
 		{"case(github.ref, 'a')", "unsupported function"},
 		{"startsWith(github.ref)", "takes 2 argument"},
 		{"format()", "at least one argument"},
-		{"github.head_ref == 'x'", "not a supported context field"},
+		{"github.token == 'x'", "not a supported context field"},
 		{"matrix.nope == 'x'", "not a declared matrix key"},
 		{"inputs.nope == 'x'", "not a declared workflow_dispatch input"},
 		{"steps.ghost.outcome == 'success'", "not declared before this one"},
@@ -387,5 +452,91 @@ jobs:
 `
 	if _, err := Parse([]byte(good)); err != nil {
 		t.Fatalf("declared references rejected: %v", err)
+	}
+}
+
+// TestExpressionFunctionSetMatchesPlatform pins PAR-037 to the platform's REAL
+// function set (D-25). The row's original acceptance named `case`, which is not
+// a function in GitHub's or Forgejo's expression language (and is documented as
+// absent here); the set below is the one both platforms define. Every entry has
+// a conformance value, and `case` stays a named parse error rather than an
+// invented function.
+func TestExpressionFunctionSetMatchesPlatform(t *testing.T) {
+	wantNames := []string{
+		"success", "failure", "always", "cancelled", "canceled",
+		"startswith", "endswith", "contains", "format", "join",
+		"tojson", "fromjson", "hashfiles",
+	}
+	gotNames := make([]string, len(ifFunctions))
+	for i, fn := range ifFunctions {
+		gotNames[i] = fn.name
+	}
+	if !reflect.DeepEqual(gotNames, wantNames) {
+		t.Fatalf("ifFunctions = %v, want the platform set %v", gotNames, wantNames)
+	}
+	// IfFunctions is the user-facing spelling; it lists the canonical names and
+	// the parser accepts `canceled` as a synonym, so it appears once.
+	for _, name := range wantNames {
+		if name == "canceled" {
+			continue
+		}
+		found := false
+		for _, usage := range IfFunctions {
+			if strings.HasPrefix(strings.ToLower(usage), name+"(") {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Fatalf("IfFunctions misses %q: %v", name, IfFunctions)
+		}
+	}
+	if len(IfFunctions) != len(wantNames)-1 {
+		t.Fatalf("IfFunctions = %v", IfFunctions)
+	}
+
+	scope := EvalScope{
+		Success: true,
+		HashFiles: func(patterns []string) (string, error) {
+			if len(patterns) != 1 || patterns[0] != "**/go.sum" {
+				t.Fatalf("hashFiles patterns = %v", patterns)
+			}
+			return "sha256:platform-hash", nil
+		},
+	}
+	cases := []struct{ expr, want string }{
+		{"success()", "true"},
+		{"failure()", "false"},
+		{"always()", "true"},
+		{"cancelled()", "false"},
+		{"canceled()", "false"},
+		{"startsWith('refs/heads/main', 'refs/heads/')", "true"},
+		{"endsWith('refs/heads/main', '/main')", "true"},
+		{"contains('refs/heads/main', 'heads')", "true"},
+		{"format('{0}/{1}', 'owner', 'repo')", "owner/repo"},
+		{`join(fromJSON('["a","b"]'), "+")`, "a+b"},
+		{`toJSON(fromJSON('{"b":1,"a":2}'))`, `{"a":2,"b":1}`},
+		{`fromJSON('[1,2]')[1]`, "2"},
+		{"hashFiles('**/go.sum')", "sha256:platform-hash"},
+	}
+	for _, tc := range cases {
+		got, err := EvalString(tc.expr, scope)
+		if err != nil {
+			t.Errorf("EvalString(%q): %v", tc.expr, err)
+			continue
+		}
+		if got != tc.want {
+			t.Errorf("EvalString(%q) = %q, want %q", tc.expr, got, tc.want)
+		}
+	}
+	// `case` is not in the platform language: it stays a named refusal, at both
+	// evaluation and parse time, instead of being invented.
+	for _, expr := range []string{"case('a', 'b')", "case(github.ref, 'a', 'b')"} {
+		if _, err := EvalString(expr, scope); err == nil || !strings.Contains(err.Error(), "unsupported function") {
+			t.Errorf("EvalString(%q) = %v, want an unsupported-function error", expr, err)
+		}
+	}
+	if err := ValidateIf("case(github.ref, 'a')", TemplateScope{}); err == nil || !strings.Contains(err.Error(), "unsupported function") {
+		t.Errorf("ValidateIf(case) = %v, want an unsupported-function error", err)
 	}
 }

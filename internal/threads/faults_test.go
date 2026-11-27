@@ -268,11 +268,11 @@ func TestFaultsOnAttempts(t *testing.T) {
 	}
 	// Log write failure (the frame write) fails the call.
 	fs.fail("put", 0)
-	if _, err := e.svc.AppendLog(ctx(), parsed, 1, "hello world"); err == nil {
+	if _, err := e.svc.AppendLog(ctx(), parsed, 1, LogRecord{Text: "hello world"}); err == nil {
 		t.Fatal("AppendLog with a failing write must fail")
 	}
 	fs.clear()
-	if _, err := e.svc.AppendLog(ctx(), parsed, 1, "hello world"); err != nil {
+	if _, err := e.svc.AppendLog(ctx(), parsed, 1, LogRecord{Text: "hello world"}); err != nil {
 		t.Fatalf("AppendLog: %v", err)
 	}
 	// Complete with a failing job CAS.

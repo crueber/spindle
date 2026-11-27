@@ -101,6 +101,87 @@ func ExpandRunsOnWithStrategy(labels []string, github, matrix, inputs, strategy 
 	return out, nil
 }
 
+// validateContainerImage checks a job `container.image` (PAR-030). It is a
+// substituted structural field like `runs-on`: a literal, or a value with
+// whole `${{ … }}` spans naming a matrix axis, a declared input or a github
+// field. Every other structural field (a service image, `environment`, a
+// workflow/job/container env value) is still a named parse error.
+func validateContainerImage(jobName string, c *Container, scope TemplateScope) error {
+	if c == nil {
+		return nil
+	}
+	// An empty image is a carried shape (a `container:` mapping with no image
+	// runs the runner's default image), so only a `${{ … }}` span is checked.
+	if err := ValidateTemplate(c.Image, TemplateScope{
+		Axes: scope.Axes, Inputs: scope.Inputs, Site: SiteContainerImage,
+	}); err != nil {
+		return fmt.Errorf("workflow: job %s container.image: %w", jobName, err)
+	}
+	return nil
+}
+
+// ExpandContainerImage resolves one `container.image` for a matrix cell
+// (PAR-030). An image that resolves to nothing is an error naming the value: a
+// job must never start against the empty image, and the image gate must see the
+// real tag rather than the authored span.
+func ExpandContainerImage(image string, github, matrix, inputs map[string]string) (string, error) {
+	return ExpandContainerImageWithStrategy(image, github, matrix, inputs, nil)
+}
+
+// ExpandContainerImageWithStrategy is ExpandContainerImage plus the matrix
+// cell's `strategy.*` context (PAR-039).
+func ExpandContainerImageWithStrategy(image string, github, matrix, inputs, strategy map[string]string) (string, error) {
+	if !strings.Contains(image, "${{") {
+		return image, nil
+	}
+	// A container image is structural: an absent reference must fail the run,
+	// never leave `debian:` (an empty tag) to the image gate. Every reference is
+	// therefore resolved strictly, exactly like a concurrency group's key.
+	parts, err := splitTemplate(image)
+	if err != nil {
+		return "", fmt.Errorf("container.image: %w", err)
+	}
+	var b strings.Builder
+	for _, p := range parts {
+		if p.ref == nil {
+			b.WriteString(p.literal)
+			continue
+		}
+		if p.ref.Context == "spindle" || p.ref.Context == "github" || p.ref.Context == "forgejo" || p.ref.Context == "forge" {
+			if reason, unavailable := GitHubFieldUnavailable(p.ref.Key); unavailable {
+				return "", fmt.Errorf("container.image: %s: %s", p.ref.Raw, reason)
+			}
+		}
+		val, ok := lookupRefStrategy(*p.ref, github, matrix, inputs, strategy)
+		if !ok {
+			return "", fmt.Errorf("container.image: ${{ %s.%s }} resolved to nothing for this matrix cell", p.ref.Context, p.ref.Key)
+		}
+		b.WriteString(val)
+	}
+	return b.String(), nil
+}
+
+// validateBoolExpr checks one expression-valued boolean field (PAR-056,
+// PAR-151): a literal is unchanged, a whole `${{ … }}` expression is validated
+// against the site's availability table (a reference the position cannot read
+// is that file's parse error, never an empty value).
+func validateBoolExpr(where string, b BoolExpr, scope TemplateScope) error {
+	if b.Expr == "" {
+		return nil
+	}
+	if err := validateExpr(b.Expr, scope); err != nil {
+		return fmt.Errorf("%s: %w", where, err)
+	}
+	return nil
+}
+
+// EvalBoolExpr evaluates one expression-valued boolean for a matrix cell. A
+// result that is not a boolean is an error (fail closed): a job must never
+// become tolerated — or a run silently cancel its holder — on a mistaken value.
+func EvalBoolExpr(expr string, github, matrix, inputs, strategy map[string]string) (bool, error) {
+	return EvalBool(expr, EvalScope{GitHub: github, Matrix: matrix, Inputs: inputs, Strategy: strategy})
+}
+
 // validateTimeout checks one `timeout-minutes` value (PAR-055). An expression
 // must be one whole span and is validated against the site's contexts; a
 // literal must be 1…360.

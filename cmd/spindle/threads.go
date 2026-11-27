@@ -30,8 +30,10 @@ import (
 	"github.com/crueber/spindle/internal/issues"
 	"github.com/crueber/spindle/internal/pulls"
 	"github.com/crueber/spindle/internal/releases"
+	"github.com/crueber/spindle/internal/review"
 	"github.com/crueber/spindle/internal/server"
 	"github.com/crueber/spindle/internal/server/auth"
+	"github.com/crueber/spindle/internal/social"
 	"github.com/crueber/spindle/internal/store"
 	"github.com/crueber/spindle/internal/threads"
 	"github.com/crueber/spindle/internal/threads/workflow"
@@ -89,6 +91,19 @@ func newThreadsService(st store.ObjectStore, ident *identity.Service, checksSvc 
 		svc.KeepForever = cfg.Threads.KeepForever
 		svc.MaxQueueAttempts = cfg.Threads.MaxQueueAttempts
 		svc.JobLease = time.Duration(cfg.Threads.JobLease)
+		// Failure-notification email (PAR-197/D-27): off when host is empty.
+		svc.SMTP = threads.SMTPConfig{
+			Host:     cfg.Threads.SMTP.Host,
+			Port:     cfg.Threads.SMTP.Port,
+			From:     cfg.Threads.SMTP.From,
+			Username: cfg.Threads.SMTP.Username,
+			Password: cfg.Threads.SMTP.Password,
+			TLS:      cfg.Threads.SMTP.TLS,
+			Timeout:  time.Duration(cfg.Threads.SMTP.Timeout),
+		}
+	}
+	if ident != nil {
+		svc.EmailFor = ident.EmailForUsername
 	}
 	// Protocol keys (15 §5.3): server.secrets_key wins over the session secret;
 	// without either, attempt tokens are process-local and repository secrets
@@ -394,6 +409,44 @@ func threadsIssueEventOf(c *collabWiring) func(ctx context.Context, ev issues.Th
 	svc := c.threadsSvc
 	return func(ctx context.Context, ev issues.ThreadEvent) {
 		repo := ev.Repo
+		// PAR-020: label and milestone DEFINITIONS are repository-level events
+		// (default-branch file), not thread metadata.
+		if ev.Kind == "label" || ev.Kind == "milestone" {
+			commit, branch := defaultBranchTarget(ctx, c, repo)
+			if commit == "" {
+				return
+			}
+			opts := threads.CreateOpts{Actor: ev.Actor, Action: ev.Action}
+			if branch != "" {
+				opts.Branch = branch
+				opts.Ref = "refs/heads/" + branch
+			}
+			var event string
+			var payload map[string]any
+			if ev.Kind == "label" {
+				if ev.Label == nil {
+					return
+				}
+				event = threads.EventLabel
+				payload = threads.LabelEventPayload(repo, ev.Action, ev.Actor,
+					ev.Label.Name, ev.Label.Color, ev.Label.Description)
+			} else {
+				if ev.Milestone == nil {
+					return
+				}
+				due := ""
+				if ev.Milestone.DueOn != nil {
+					due = *ev.Milestone.DueOn
+				}
+				event = threads.EventMilestone
+				payload = threads.MilestoneEventPayload(repo, ev.Action, ev.Actor,
+					ev.Milestone.ID, ev.Milestone.Title, ev.Milestone.State,
+					ev.Milestone.Description, due)
+			}
+			opts.EventPayload = payload
+			threadsRun(svc, repo, commit, event, opts)
+			return
+		}
 		if ev.Kind == "pr" {
 			info, ok := pullsTriggerInfo(ctx, c, repo, ev.Num)
 			if !ok {
@@ -448,6 +501,172 @@ func pullsTriggerInfo(ctx context.Context, c *collabWiring, repo string, num int
 		return pulls.TriggerInfo{}, false
 	}
 	return c.pullsSvc.PRTriggerInfo(ctx, owner, name, num)
+}
+
+// threadsReviewEventOf routes the review service's `pull_request_review` edge
+// (PAR-020): the PR identifiers come from pulls' trigger projection, so the
+// run uses the same merge ref and trust rule as the pull_request family.
+func threadsReviewEventOf(c *collabWiring) review.ReviewEventSink {
+	if c == nil || c.threadsSvc == nil {
+		return nil
+	}
+	svc := c.threadsSvc
+	return func(ctx context.Context, ev review.ReviewTriggerEvent) {
+		info, ok := pullsTriggerInfo(ctx, c, ev.Repo, ev.Num)
+		if !ok {
+			return // the PR was deleted between the write and the trigger
+		}
+		base := threadsBranchName(info.BaseRef)
+		payload := threads.ReviewEventPayload(ev.Repo, ev.Action, ev.Actor, ev.Reviewer,
+			ev.State, ev.Body, ev.CommitSHA, info.Num, info.BaseRef, info.HeadRef, info.HeadSHA, info.HeadRepo)
+		threadsRun(svc, ev.Repo, info.HeadSHA, threads.EventPullReview, threads.CreateOpts{
+			Action: ev.Action, Branch: base, BaseBranch: base, BaseSHA: info.BaseSHA,
+			Fork: info.Fork, Ref: fmt.Sprintf("refs/pull/%d/head", info.Num), Actor: ev.Actor,
+			PullNumber: info.Num, EventPayload: payload,
+		})
+	}
+}
+
+// threadsReviewCommentEventOf routes the review service's
+// `pull_request_review_comment` edge (PAR-020): one created inline comment.
+func threadsReviewCommentEventOf(c *collabWiring) review.ReviewCommentEventSink {
+	if c == nil || c.threadsSvc == nil {
+		return nil
+	}
+	svc := c.threadsSvc
+	return func(ctx context.Context, ev review.ReviewCommentTriggerEvent) {
+		info, ok := pullsTriggerInfo(ctx, c, ev.Repo, ev.Num)
+		if !ok {
+			return
+		}
+		base := threadsBranchName(info.BaseRef)
+		payload := threads.ReviewCommentEventPayload(ev.Repo, ev.Action, ev.Author, ev.Body,
+			ev.TID, ev.Anchor.Path, ev.Anchor.Side, ev.Anchor.CommitSHA, reviewAnchorLine(ev.Anchor),
+			info.Num, info.BaseRef, info.HeadRef, info.HeadSHA, info.HeadRepo)
+		threadsRun(svc, ev.Repo, info.HeadSHA, threads.EventPullReviewComment, threads.CreateOpts{
+			Action: ev.Action, Branch: base, BaseBranch: base, BaseSHA: info.BaseSHA,
+			Fork: info.Fork, Ref: fmt.Sprintf("refs/pull/%d/head", info.Num), Actor: ev.Author,
+			PullNumber: info.Num, EventPayload: payload,
+		})
+	}
+}
+
+// reviewAnchorLine is the line the comment's anchor names: the NEW side's
+// start for an added line, the OLD side's for a removed one.
+func reviewAnchorLine(a review.Anchor) int {
+	if strings.EqualFold(strings.TrimSpace(a.Side), "OLD") {
+		return a.OldStart
+	}
+	return a.NewStart
+}
+
+// threadsPullCommentEventOf routes a PR conversation comment to `issue_comment`
+// (PAR-020): GitHub's issue_comment covers PR comments as well as issue ones,
+// and the run reads the default branch's file like every repository-level
+// event.
+func threadsPullCommentEventOf(c *collabWiring) pulls.PullCommentEventSink {
+	if c == nil || c.threadsSvc == nil {
+		return nil
+	}
+	svc := c.threadsSvc
+	return func(ctx context.Context, ev pulls.PullCommentEvent) {
+		commit, branch := defaultBranchTarget(ctx, c, ev.Repo)
+		if commit == "" {
+			return
+		}
+		payload := threads.IssueCommentEventPayload(ev.Repo, "created", ev.Actor, ev.Body,
+			ev.Num, ev.Title, ev.State, ev.Labels, ev.Actor)
+		// A PR comment's issue object carries the pull_request marker, which is
+		// how a workflow distinguishes it from an issue comment.
+		if issue, ok := payload["issue"].(map[string]any); ok {
+			issue["pull_request"] = map[string]any{"number": ev.Num}
+		}
+		opts := threads.CreateOpts{Actor: ev.Actor, Action: "created", EventPayload: payload}
+		if branch != "" {
+			opts.Branch = branch
+			opts.Ref = "refs/heads/" + branch
+		}
+		threadsRun(svc, ev.Repo, commit, threads.EventIssueComment, opts)
+	}
+}
+
+// threadsForkEventOf routes a completed fork to the `fork` trigger (PAR-021),
+// fired on the ORIGINAL repository with the default branch's file.
+func threadsForkEventOf(c *collabWiring) pulls.ForkEventSink {
+	if c == nil || c.threadsSvc == nil {
+		return nil
+	}
+	svc := c.threadsSvc
+	return func(ctx context.Context, ev pulls.ForkEvent) {
+		commit, branch := defaultBranchTarget(ctx, c, ev.Source)
+		if commit == "" {
+			return
+		}
+		opts := threads.CreateOpts{Actor: ev.Actor, EventPayload: threads.ForkEventPayload(ev.Source, ev.Actor, ev.Forkee)}
+		if branch != "" {
+			opts.Branch = branch
+			opts.Ref = "refs/heads/" + branch
+		}
+		threadsRun(svc, ev.Source, commit, threads.EventFork, opts)
+	}
+}
+
+// threadsWatchEventOf routes a star to the `watch` trigger (PAR-021).
+func threadsWatchEventOf(c *collabWiring) social.WatchEventSink {
+	if c == nil || c.threadsSvc == nil {
+		return nil
+	}
+	svc := c.threadsSvc
+	return func(ctx context.Context, ev social.WatchEvent) {
+		commit, branch := defaultBranchTarget(ctx, c, ev.Repo)
+		if commit == "" {
+			return
+		}
+		opts := threads.CreateOpts{Actor: ev.Actor, Action: ev.Action, EventPayload: threads.WatchEventPayload(ev.Repo, ev.Actor, ev.Action)}
+		if branch != "" {
+			opts.Branch = branch
+			opts.Ref = "refs/heads/" + branch
+		}
+		threadsRun(svc, ev.Repo, commit, threads.EventWatch, opts)
+	}
+}
+
+// threadsCheckRunEventOf routes an external CI report to `check_run`
+// (PAR-021). The workflow file is the DEFAULT branch's (a repository-level
+// event), so a report can never make the instance execute a contributor's
+// commit; the payload carries the reported head sha.
+func threadsCheckRunEventOf(c *collabWiring) checks.CheckRunEventSink {
+	if c == nil || c.threadsSvc == nil {
+		return nil
+	}
+	svc := c.threadsSvc
+	return func(ctx context.Context, ev checks.CheckRunEvent) {
+		commit, branch := defaultBranchTarget(ctx, c, ev.Repo)
+		if commit == "" {
+			return
+		}
+		conclusion := ""
+		switch ev.State {
+		case checks.StateSuccess:
+			conclusion = "success"
+		case checks.StateFailure:
+			conclusion = "failure"
+		case checks.StateCancelled:
+			conclusion = "cancelled"
+		}
+		status := "in_progress"
+		if ev.Action == "completed" || !checks.LiveState(ev.State) {
+			status = "completed"
+		}
+		payload := threads.CheckRunEventPayload(ev.Repo, ev.Action, ev.SHA, ev.Context,
+			status, conclusion, ev.TargetURL, ev.Description, ev.Creator, ev.Annotations)
+		opts := threads.CreateOpts{Actor: ev.Creator, Action: ev.Action, EventPayload: payload}
+		if branch != "" {
+			opts.Branch = branch
+			opts.Ref = "refs/heads/" + branch
+		}
+		threadsRun(svc, ev.Repo, commit, threads.EventCheckRun, opts)
+	}
 }
 
 // threadsReleaseEventOf routes the releases service's edges (PAR-017): the

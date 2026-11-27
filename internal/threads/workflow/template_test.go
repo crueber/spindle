@@ -90,12 +90,12 @@ func TestParseConcurrencyGroupRejectsUnresolvableRefs(t *testing.T) {
 		{
 			name:        "unknown context names the supported set",
 			concurrency: `"ci-${{ env.BRANCH }}"`,
-			want:        []string{"concurrency.group", "env.BRANCH", "github.ref, github.ref_name, github.repository", "matrix.<axis>", "inputs.<name>"},
+			want:        []string{"concurrency.group", "env.BRANCH", "spindle.<field>", "matrix.<axis>", "inputs.<name>"},
 		},
 		{
 			name:        "unknown github field",
 			concurrency: `"ci-${{ github.head_ref }}"`,
-			want:        []string{"concurrency.group", "github.head_ref", "not supported", "github.ref"},
+			want:        []string{"concurrency.group", "github.head_ref", "not supported", "fields:"},
 		},
 		{
 			name:        "operator expression is not a reference",

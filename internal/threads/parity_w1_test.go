@@ -156,7 +156,7 @@ func TestEvalIfFunctions(t *testing.T) {
 		"toJSON()",
 		"startsWith(github.ref)",
 		"format()",
-		"github.head_ref == 'x'",
+		"github.token == 'x'",
 		"secrets.1BAD == 'x'",
 	} {
 		if _, err := EvalIf(expr, ctx); err == nil {

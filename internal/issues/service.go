@@ -1591,6 +1591,10 @@ func (s *Service) CreateLabel(ctx context.Context, owner, repo string, actor aut
 	if err != nil {
 		return nil, err
 	}
+	s.threadEvent(ctx, ThreadEvent{
+		Repo: repoName(owner, repo), Kind: "label", Action: "created",
+		Actor: normPrincipal(actor.Name), Label: created,
+	})
 	return created, nil
 }
 
@@ -1637,6 +1641,10 @@ func (s *Service) UpdateLabel(ctx context.Context, owner, repo string, actor aut
 	if err != nil {
 		return nil, err
 	}
+	s.threadEvent(ctx, ThreadEvent{
+		Repo: repoName(owner, repo), Kind: "label", Action: "edited",
+		Actor: normPrincipal(actor.Name), Label: updated,
+	})
 	return updated, nil
 }
 
@@ -1653,6 +1661,7 @@ func (s *Service) DeleteLabel(ctx context.Context, owner, repo string, actor aut
 	if err := s.requireRole(ctx, owner, repo, actor, string(identity.RoleTriage)); err != nil {
 		return 0, err
 	}
+	var removed *Label
 	_, err := s.casUpdate(ctx, LabelsKey(owner, repo), 5, func(cur []byte, ver store.Version) ([]byte, bool, error) {
 		if cur == nil {
 			return nil, false, fmt.Errorf("%w: unknown label %q", ErrNotFound, name)
@@ -1665,6 +1674,8 @@ func (s *Service) DeleteLabel(ctx context.Context, owner, repo string, actor aut
 		found := false
 		for _, l := range ls.Labels {
 			if strings.EqualFold(l.Name, name) {
+				cp := l
+				removed = &cp
 				found = true
 				continue
 			}
@@ -1683,6 +1694,12 @@ func (s *Service) DeleteLabel(ctx context.Context, owner, repo string, actor aut
 	})
 	if err != nil {
 		return 0, err
+	}
+	if removed != nil {
+		s.threadEvent(ctx, ThreadEvent{
+			Repo: repoName(owner, repo), Kind: "label", Action: "deleted",
+			Actor: normPrincipal(actor.Name), Label: removed,
+		})
 	}
 	// Compensating events over the index hot window.
 	ix, _, lerr := s.loadIndex(ctx, owner, repo)
@@ -1764,6 +1781,10 @@ func (s *Service) CreateMilestone(ctx context.Context, owner, repo string, actor
 		return nil, err
 	}
 	m.Percent = 0
+	s.threadEvent(ctx, ThreadEvent{
+		Repo: repoName(owner, repo), Kind: "milestone", Action: "created",
+		Actor: normPrincipal(actor.Name), Milestone: m,
+	})
 	return m, nil
 }
 
@@ -1783,6 +1804,7 @@ func (s *Service) UpdateMilestone(ctx context.Context, owner, repo string, actor
 	if m == nil {
 		return nil, fmt.Errorf("%w: unknown milestone", ErrNotFound)
 	}
+	prevState := m.State
 	if title != nil {
 		t, verr := validateMilestoneTitle(*title)
 		if verr != nil {
@@ -1814,6 +1836,17 @@ func (s *Service) UpdateMilestone(ctx context.Context, owner, repo string, actor
 		return nil, err
 	}
 	m.Percent = milestonePercent(m.OpenIssues, m.ClosedIssues)
+	action := "edited"
+	switch {
+	case prevState != StateClosed && m.State == StateClosed:
+		action = "closed"
+	case prevState == StateClosed && m.State != StateClosed:
+		action = "opened"
+	}
+	s.threadEvent(ctx, ThreadEvent{
+		Repo: repoName(owner, repo), Kind: "milestone", Action: action,
+		Actor: normPrincipal(actor.Name), Milestone: m,
+	})
 	return m, nil
 }
 
@@ -1844,6 +1877,10 @@ func (s *Service) DeleteMilestone(ctx context.Context, owner, repo string, actor
 		}
 		return derr
 	}
+	s.threadEvent(ctx, ThreadEvent{
+		Repo: repoName(owner, repo), Kind: "milestone", Action: "deleted",
+		Actor: normPrincipal(actor.Name), Milestone: m,
+	})
 	// Compensating clears over every thread referencing the id. The index
 	// hot window covers the common case; the LIST scan covers compacted
 	// history (delete is rare — correctness over round trips here).

@@ -80,6 +80,10 @@
     · triggered by {{.Run.Actor}}
     · {{template "collab_time" .Run.CreatedAt}}
     {{with duration .Run.DurationSeconds}}· took {{.}}{{end}}
+    · logs
+    <a class="link" href="{{.LogsTxtHref}}" download>download all (.txt)</a>
+    <a class="link" href="{{.LogsZipHref}}" download>zip</a>
+    <span class="text-[11px]">(every job's log, current attempt)</span>
   </p>
 
   {{if .WorkflowError}}
@@ -109,10 +113,83 @@
   </section>
   {{end}}
 
+  {{with .Graph}}
+  <section class="mb-4" aria-labelledby="run-graph-title">
+    <div class="mb-1 flex flex-wrap items-baseline gap-2">
+      <h3 id="run-graph-title" class="text-sm font-semibold tracking-tight">Job graph</h3>
+      <span class="muted text-xs">{{.Nodes}} job{{if ne .Nodes 1}}s{{end}} · {{.Edges}} dependenc{{if ne .Edges 1}}ies{{else}}y{{end}}</span>
+    </div>
+    <p class="muted mb-2 text-xs">
+      A node waits on the jobs it names under <span class="mono">after</span>; a dependency that did not
+      succeed is named on the node it blocks, so a held job is never a silent spinner.
+    </p>
+    <ol class="flex flex-wrap items-start gap-3" aria-label="Jobs by dependency level">
+      {{range .Levels}}
+      <li class="min-w-56 flex-1 space-y-2">
+        <h4 class="eyebrow">level {{.Level}}</h4>
+        <ul class="space-y-2">
+          {{range .Nodes}}
+          <li class="card px-3 py-2">
+            <div class="flex flex-wrap items-center gap-2">
+              {{template "collab_check_dot" (runDot .State)}}
+              <a id="graph-{{.Key}}" class="link text-sm font-medium" href="{{.Href}}">{{.Name}}</a>
+              <span class="chip chip-neutral">{{.State}}</span>
+              {{if .Blocked}}<span class="chip chip-draft" title="a dependency did not succeed">blocked</span>{{end}}
+              {{if .Multi}}<span class="muted text-xs">{{len .Cells}} cells</span>{{end}}
+            </div>
+            {{if .Needs}}
+            <p class="muted mt-1 text-xs">
+              after
+              {{range $i, $n := .Needs}}{{if $i}} · {{end}}<a class="link mono" href="#graph-{{$n.Key}}">{{$n.Key}}</a>
+              <span{{if not $n.OK}} class="text-[var(--pd-danger)]"{{end}}>({{$n.State}})</span>{{end}}
+            </p>
+            {{end}}
+            {{if .Blocked}}
+            <p class="err-line mt-1 text-xs" role="status">
+              blocked by
+              <span class="mono">{{range $i, $k := .BlockedBy}}{{if $i}}, {{end}}{{$k}}{{end}}</span>:
+              this job cannot run until every dependency succeeds.
+            </p>
+            {{else}}{{with .Reason}}<p class="muted mt-1 text-xs">{{.}}</p>{{end}}{{end}}
+            {{if .Multi}}
+            <details class="mt-1">
+              <summary class="cursor-pointer text-xs font-medium">cells ({{len .Cells}})</summary>
+              <ul class="mt-1 divide-y divide-[color:var(--pd-line)]">
+                {{range .Cells}}
+                <li class="flex flex-wrap items-center gap-2 py-1 text-xs">
+                  {{template "collab_check_dot" (runDot .State)}}
+                  <a class="link" href="{{.Href}}">{{.Name}}</a>
+                  {{with .Matrix}}<span class="mono text-[11px]">{{.}}</span>{{end}}
+                  <span class="chip chip-neutral">{{.State}}{{if .Tolerated}} · tolerated{{end}}</span>
+                  <span class="muted mono text-[11px]">{{.Context}}</span>
+                  <span class="muted ml-auto text-xs">{{with duration .DurationSeconds}}{{.}}{{else}}not started{{end}}</span>
+                </li>
+                {{end}}
+              </ul>
+            </details>
+            {{else if .Cells}}
+            {{with index .Cells 0}}
+            <p class="muted mt-1 text-xs">
+              <span class="mono">{{.Context}}</span>
+              · {{with duration .DurationSeconds}}{{.}}{{else}}not started{{end}}
+              {{with .QueueReason}}· queued: {{.}}{{end}}
+              {{with .Reason}}· {{.}}{{end}}
+            </p>
+            {{end}}
+            {{end}}
+          </li>
+          {{end}}
+        </ul>
+      </li>
+      {{end}}
+    </ol>
+  </section>
+  {{end}}
+
   {{if .Jobs}}
-  <ul class="space-y-2">
+  <ul class="space-y-2" id="run-jobs">
     {{range .Jobs}}
-    <li class="card">
+    <li class="card" id="job-{{.ID}}">
       <div class="flex flex-wrap items-center gap-2 px-3 py-2">
         {{template "collab_check_dot" (runDot .State)}}
         <span class="text-sm font-medium">{{.Name}}</span>
@@ -193,9 +270,11 @@
     {{range .JobLogs}}
     <details class="card" {{if .Live}}open{{end}}>
       <summary class="cursor-pointer px-3 py-2 text-sm font-medium">log · <code class="mono text-xs">{{.JobID}}</code> <span class="muted text-xs">({{.State}})</span></summary>
-      <pre class="mono max-h-96 min-w-0 overflow-auto whitespace-pre-wrap break-words border-t border-[color:var(--pd-line)] p-3 text-[11px] leading-relaxed"
+      <div class="mono thread-log max-h-96 min-w-0 overflow-auto whitespace-pre-wrap break-words border-t border-[color:var(--pd-line)] p-3 text-[11px] leading-relaxed"
            data-threadlog="{{.JobID}}" data-threadlog-url="{{.LogURL}}" data-threadlog-live="{{if .Live}}1{{else}}0{{end}}"
-           aria-live="polite">loading log…</pre>
+           role="region" tabindex="0" aria-label="log for {{.JobID}}" aria-live="polite">
+        <p class="thread-log-note">loading log…</p>
+      </div>
     </details>
     {{end}}
   </section>

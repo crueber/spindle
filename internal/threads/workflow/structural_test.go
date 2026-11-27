@@ -1,13 +1,14 @@
 package workflow
 
-// structural_test.go — the structural fields (`runs-on`, `container.image`,
-// `services.<id>.image`, `environment`) and the env layers above a step
-// (workflow, job, container, service) never take `${{ … }}`:
-// docs/WORKFLOWS.md §6.2. A span there is a named parse error, because the
-// structural value is chosen before a matrix cell or dispatch input exists and
-// an env value at those layers is copied verbatim — accepting one can only
-// queue a job against a literal label, hand the image gate a literal string, or
-// put `${{ … }}` into the process environment.
+// structural_test.go — the structural fields and the env layers above a step.
+// `runs-on` and `container.image` substitute per matrix cell (PAR-053/PAR-030);
+// `services.<id>.image`, `environment` and the workflow/job/container/service
+// `env` layers never take `${{ … }}`: docs/WORKFLOWS.md §6.2. A span there is a
+// named parse error, because the value is chosen before a matrix cell exists
+// and an env value at those layers is copied verbatim — accepting one can only
+// hand the image gate a literal string or put `${{ … }}` into the process
+// environment. A container image without a declared axis is still refused by
+// the same closed-vocabulary check (it names the missing axis).
 
 import (
 	"errors"
@@ -26,16 +27,6 @@ func TestStructuralFieldsRejectExpressions(t *testing.T) {
 		job  string
 		path string
 	}{
-		{
-			name: "container scalar image",
-			job:  "    runs-on: linux\n    container: \"debian:${{ matrix.variant }}\"\n    steps:\n      - run: echo hi\n",
-			path: "jobs.build.container.image",
-		},
-		{
-			name: "container mapping image",
-			job:  "    runs-on: linux\n    container:\n      image: \"debian:${{ matrix.variant }}\"\n    steps:\n      - run: echo hi\n",
-			path: "jobs.build.container.image",
-		},
 		{
 			name: "service image",
 			job:  "    runs-on: linux\n    services:\n      db:\n        image: \"postgres:${{ matrix.pg }}\"\n    steps:\n      - run: echo hi\n",
@@ -70,14 +61,6 @@ func TestStructuralFieldsRejectExpressions(t *testing.T) {
 			name: "service env value",
 			job:  "    runs-on: linux\n    services:\n      db:\n        image: postgres:17\n        env:\n          FOO: ${{ secrets.DSN }}\n    steps:\n      - run: echo hi\n",
 			path: "jobs.build.services.db.env.FOO",
-		},
-		{
-			// The defect's repro: accepted, then carried verbatim, so the run
-			// queued against no runner and the image gate saw a literal.
-			name: "repro from the parity matrix",
-			job: "    runs-on: ${{ matrix.os }}\n    container:\n      image: debian:${{ matrix.variant }}\n" +
-				"    strategy:\n      matrix: {os: [linux], variant: [bookworm]}\n    steps:\n      - run: echo hi\n",
-			path: "jobs.build.container.image",
 		},
 	}
 	for _, tc := range cases {
@@ -246,5 +229,41 @@ func TestStructuralFieldsOnReusableJob(t *testing.T) {
 	_, err := Parse([]byte(src))
 	if err == nil || !strings.Contains(err.Error(), "not a declared matrix key") {
 		t.Fatalf("err = %v, want the named matrix-key error", err)
+	}
+}
+
+// TestContainerImageSubstitutes pins PAR-030's container half: the image is a
+// substituted structural field (a matrix axis, an input or a github field),
+// expanded per cell to the real tag, while an undeclared axis and every other
+// structural field stay named parse errors.
+func TestContainerImageSubstitutes(t *testing.T) {
+	src := structuralWorkflow("    runs-on: linux\n" +
+		"    container:\n      image: \"debian:${{ matrix.variant }}\"\n" +
+		"    strategy:\n      matrix: {variant: [bookworm, trixie]}\n" +
+		"    steps:\n      - run: echo hi\n")
+	w, err := Parse([]byte(src))
+	if err != nil {
+		t.Fatalf("container image expression rejected: %v", err)
+	}
+	image, err := ExpandContainerImageWithStrategy(w.Jobs["build"].Container.Image,
+		map[string]string{"ref": "refs/heads/main"}, map[string]string{"variant": "trixie"}, nil, nil)
+	if err != nil || image != "debian:trixie" {
+		t.Fatalf("expanded image = %q, %v", image, err)
+	}
+	// The shorthand and the mapping are the same field.
+	scalar := structuralWorkflow("    runs-on: linux\n    container: \"golang:${{ matrix.go }}\"\n" +
+		"    strategy:\n      matrix: {go: [\"1.27\"]}\n    steps:\n      - run: echo hi\n")
+	if _, err := Parse([]byte(scalar)); err != nil {
+		t.Fatalf("shorthand container image rejected: %v", err)
+	}
+	// An undeclared axis is the closed-vocabulary error, never a literal.
+	undeclared := structuralWorkflow("    runs-on: linux\n    container:\n      image: \"debian:${{ matrix.nope }}\"\n    steps:\n      - run: echo hi\n")
+	if _, err := Parse([]byte(undeclared)); err == nil || !strings.Contains(err.Error(), "not a declared matrix key") {
+		t.Fatalf("undeclared axis = %v, want the named matrix-key error", err)
+	}
+	// An unresolvable-but-valid input fails expansion rather than reaching the
+	// image gate as the empty string.
+	if _, err := ExpandContainerImage("debian:${{ inputs.variant }}", nil, nil, map[string]string{}); err == nil {
+		t.Fatal("an empty image resolution was accepted")
 	}
 }

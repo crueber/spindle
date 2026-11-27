@@ -110,3 +110,32 @@ func TestCustomShellWithoutPlaceholderIsRefused(t *testing.T) {
 		t.Fatalf("step = %+v", p.Steps[0])
 	}
 }
+
+// TestDefaultShellIsBashWithTheShFallback pins the default-shell parity rule:
+// GitHub and Forgejo run a step with no authored `shell:` under bash, and a
+// real corpus workflow relies on that (the publish entry's `<<<` here-string).
+// An image without bash still runs, with the documented `sh -e` fallback and a
+// log line — never a silent interpreter switch.
+func TestDefaultShellIsBashWithTheShFallback(t *testing.T) {
+	d := &fakeDocker{}
+	stream := quietStream(t)
+	if res := executorWith(d).Execute(context.Background(), ExecInput{Job: shellJob("", "echo hi"), AttemptToken: "wjt_token_value"}, stream); res.Conclusion != threads.JobSuccess {
+		t.Fatalf("conclusion = %s", res.Conclusion)
+	}
+	if !d.called("bash --noprofile --norc -eo pipefail -c echo hi") {
+		t.Fatalf("the default step did not run under bash: %v", d.snapshot())
+	}
+
+	d2 := &fakeDocker{runOutputs: []runOutput{{match: "command -v 'bash'", code: 1}}}
+	stream2, frames := recordingStream(t)
+	if res := executorWith(d2).Execute(context.Background(), ExecInput{Job: shellJob("", "echo hi"), AttemptToken: "wjt_token_value"}, stream2); res.Conclusion != threads.JobSuccess {
+		t.Fatalf("fallback conclusion = %s", res.Conclusion)
+	}
+	stream2.Close()
+	if !d2.called(" sh -e -c echo hi") {
+		t.Fatalf("fallback argv = %v", d2.snapshot())
+	}
+	if !strings.Contains(frames(), "bash is not installed in this image") {
+		t.Fatalf("the fallback was silent: %q", frames())
+	}
+}

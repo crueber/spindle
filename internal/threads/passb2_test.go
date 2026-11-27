@@ -216,7 +216,7 @@ func TestConcurrencyCancelInProgressCancelsTheOlderRun(t *testing.T) {
 		t.Fatalf("start: %v", err)
 	}
 	claims, _ := e.svc.parseAttemptToken(start.Token, e.svc.nowUTC())
-	view, lerr := e.svc.AppendLog(ctx(), claims, 1, "still running")
+	view, lerr := e.svc.AppendLog(ctx(), claims, 1, LogRecord{Text: "still running"})
 	if lerr != nil || !view.Cancel {
 		t.Fatalf("log answer = %+v %v, want cancel=true", view, lerr)
 	}

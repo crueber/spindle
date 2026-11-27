@@ -12,18 +12,19 @@ import (
 // authors expect; concurrency is the job's, falling back to the workflow's.
 func buildSpec(wfName string, wf *workflow.Workflow, def workflow.Job, inputs map[string]string) *Spec {
 	spec := &Spec{
-		Version:         SpecVersion,
-		Workflow:        wfName,
-		RunsOn:          append([]string{}, def.RunsOn...),
-		Services:        serviceSpecs(def.Services),
-		Env:             mergeEnv(wf.Env, def.Env),
-		If:              def.If,
-		IfSecrets:       strings.Contains(strings.ToLower(def.If), "secrets."),
-		IfVars:          strings.Contains(strings.ToLower(def.If), "vars."),
-		TimeoutMinutes:  def.TimeoutMinutes.Int(),
-		TimeoutExpr:     def.TimeoutMinutes.Expr,
-		ContinueOnError: def.ContinueOnError,
-		Permissions:     mergePermissions(wf.Permissions, def.Permissions),
+		Version:             SpecVersion,
+		Workflow:            wfName,
+		RunsOn:              append([]string{}, def.RunsOn...),
+		Services:            serviceSpecs(def.Services),
+		Env:                 mergeEnv(wf.Env, def.Env),
+		If:                  def.If,
+		IfSecrets:           strings.Contains(strings.ToLower(def.If), "secrets."),
+		IfVars:              strings.Contains(strings.ToLower(def.If), "vars."),
+		TimeoutMinutes:      def.TimeoutMinutes.Int(),
+		TimeoutExpr:         def.TimeoutMinutes.Expr,
+		ContinueOnError:     def.ContinueOnError.Bool(),
+		ContinueOnErrorExpr: def.ContinueOnError.Expr,
+		Permissions:         mergePermissions(wf.Permissions, def.Permissions),
 		// The Forgejo OIDC key is a grant: workflow or job may set it, and a
 		// job cannot turn the workflow's grant off with a boolean (`permissions:
 		// id-token: none` is the denial spelling).
@@ -86,9 +87,17 @@ func mergePermissions(base, over workflow.Permissions) map[string]string {
 func concurrencySpec(wf *workflow.Workflow, def workflow.Job) *ConcurrencySpec {
 	switch {
 	case def.Concurrency != nil:
-		return &ConcurrencySpec{Group: def.Concurrency.Group, CancelInProgress: def.Concurrency.CancelInProgress}
+		return &ConcurrencySpec{
+			Group:                def.Concurrency.Group,
+			CancelInProgress:     def.Concurrency.CancelInProgress.Bool(),
+			CancelInProgressExpr: def.Concurrency.CancelInProgress.Expr,
+		}
 	case wf != nil && wf.Concurrency != nil:
-		return &ConcurrencySpec{Group: wf.Concurrency.Group, CancelInProgress: wf.Concurrency.CancelInProgress}
+		return &ConcurrencySpec{
+			Group:                wf.Concurrency.Group,
+			CancelInProgress:     wf.Concurrency.CancelInProgress.Bool(),
+			CancelInProgressExpr: wf.Concurrency.CancelInProgress.Expr,
+		}
 	}
 	return nil
 }
@@ -151,7 +160,7 @@ func comboCopy(in workflow.MatrixCombination) map[string]string {
 
 // containerSpec copies the job container's mapping fields.
 func containerSpec(in *workflow.Container) *ContainerSpec {
-	return &ContainerSpec{
+	out := &ContainerSpec{
 		Image:      in.Image,
 		Env:        nonNilMap(in.Env),
 		Ports:      nonNilStr(in.Ports),
@@ -160,6 +169,13 @@ func containerSpec(in *workflow.Container) *ContainerSpec {
 		Options:    in.Options,
 		Volumes:    nonNilStr(in.Volumes),
 	}
+	if in.Credentials != nil {
+		out.Credentials = &RegistryCredentialsSpec{
+			Username: in.Credentials.Username,
+			Password: in.Credentials.Password,
+		}
+	}
+	return out
 }
 
 // serviceSpecs copies the sidecars (nil when none: no empty map on the wire).

@@ -51,6 +51,21 @@ const (
 	EventRelease      = "release"
 	EventIssues       = "issues"
 	EventIssueComment = "issue_comment"
+	// EventPullReview/EventPullReviewComment are the review service's edges
+	// (PAR-020): a submitted/dismissed review and a created inline comment.
+	EventPullReview        = "pull_request_review"
+	EventPullReviewComment = "pull_request_review_comment"
+	// EventLabel/EventMilestone are the issues service's definition lifecycle
+	// (PAR-020), distinct from the `labeled`/`milestoned` PR/issue metadata.
+	EventLabel     = "label"
+	EventMilestone = "milestone"
+	// EventCheckRun is an external CI report on the checks surface (PAR-021).
+	// Threads' own mirror is the run, not an app check-run event.
+	EventCheckRun = "check_run"
+	// EventFork/EventWatch come from pulls' fork completion and social's star
+	// (PAR-021). Both run the default branch's file.
+	EventFork  = "fork"
+	EventWatch = "watch"
 	// EventRepositoryDispatch is the API-dispatched custom event (PAR-018).
 	EventRepositoryDispatch = "repository_dispatch"
 	// EventWorkflowRun follows another run's lifecycle (PAR-019).
@@ -227,6 +242,10 @@ type Run struct {
 	// releaseHeldRuns: an uncapped repository pays no settings read on every
 	// completion.
 	RepoConcurrencyCap int `json:"repo_concurrency_cap,omitempty"`
+	// OrgConcurrencyCap is the organization cap in force when the run was
+	// created (0 = none/user-owned). The terminal fold uses it as the budget
+	// gate for releaseOrgHeldRuns.
+	OrgConcurrencyCap int `json:"org_concurrency_cap,omitempty"`
 	// ActionLoads is the remote-action resolution record (PAR-070): every
 	// action this run resolved, with its source, ref, pinned commit and content
 	// digest. It is written once at creation (deduplicated across jobs) and is
@@ -314,6 +333,10 @@ type Spec struct {
 	// (or an absent key, which defaults to DefaultJobTimeoutMinutes).
 	TimeoutExpr     string `json:"timeout_expr,omitempty"`
 	ContinueOnError bool   `json:"continue_on_error,omitempty"`
+	// ContinueOnErrorExpr is the authored `continue-on-error: ${{ … }}`
+	// expression, evaluated per matrix cell at run creation (PAR-056). Empty for
+	// a literal (or an absent key).
+	ContinueOnErrorExpr string `json:"continue_on_error_expr,omitempty"`
 	// Permissions is the merged workflow+job `permissions:` map; EffectivePermissions
 	// resolves it with the instance default (tokens.go). The keys are the closed
 	// scope vocabulary the parser accepts (PAR-112).
@@ -388,6 +411,18 @@ type ContainerSpec struct {
 	Entrypoint []string          `json:"entrypoint,omitempty"`
 	Options    string            `json:"options,omitempty"`
 	Volumes    []string          `json:"volumes,omitempty"`
+	// Credentials is the authored `container.credentials` mapping. It travels
+	// only so the creation gate can refuse it BY NAME (the pull identity is the
+	// runner operator's, docs/threads.md §8.6): a job that carries it is never
+	// created, so a runner never sees it.
+	Credentials *RegistryCredentialsSpec `json:"credentials,omitempty"`
+}
+
+// RegistryCredentialsSpec is one authored registry login (Forgejo's
+// `container.credentials`). It is never resolved and never applied.
+type RegistryCredentialsSpec struct {
+	Username string `json:"username,omitempty"`
+	Password string `json:"password,omitempty"`
 }
 
 // ServiceSpec is one sidecar container.
@@ -418,6 +453,10 @@ type StrategySpec struct {
 type ConcurrencySpec struct {
 	Group            string `json:"group"`
 	CancelInProgress bool   `json:"cancel_in_progress,omitempty"`
+	// CancelInProgressExpr is the authored `cancel-in-progress: ${{ … }}`
+	// expression, evaluated per matrix cell at run creation (PAR-151). Empty
+	// for a literal (or an absent key).
+	CancelInProgressExpr string `json:"cancel_in_progress_expr,omitempty"`
 }
 
 // StepSpec is one complete workflow step.
@@ -789,6 +828,10 @@ type RunView struct {
 	Jobs      []*Job          `json:"jobs"`
 	Artifacts []*ArtifactView `json:"artifacts"`
 	Approval  *ApprovalView   `json:"approval,omitempty"`
+	// Graph is the job dependency DAG (PAR-191): one node per workflow job key,
+	// matrix cells grouped under their job, edges from `needs:` and the folded
+	// state of every edge. Derived from Jobs, never stored.
+	Graph *RunGraph `json:"graph,omitempty"`
 }
 
 // RunPage is GET …/api/threads: newest-first, cursor-paged by run id.
@@ -903,7 +946,9 @@ func validEvent(event string) bool {
 	case EventPush, EventPullReq, EventPullTarget, EventDispatch, EventSchedule,
 		EventRelease, EventIssues, EventIssueComment,
 		EventRepositoryDispatch, EventWorkflowRun,
-		EventCreate, EventDelete, EventDeployment, EventDeploymentStatus:
+		EventCreate, EventDelete, EventDeployment, EventDeploymentStatus,
+		EventPullReview, EventPullReviewComment, EventLabel, EventMilestone,
+		EventCheckRun, EventFork, EventWatch:
 		return true
 	}
 	return false

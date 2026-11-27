@@ -131,6 +131,12 @@ Copied from Rust spec §15.1; key names, defaults, and meanings are **normative 
 | `threads.max_artifact_bytes_per_run` | `2GiB` | per-run total for published artifacts (sum of every artifact of the run; enforced on upload, finalize and download; 15 §2.5). A named `413` states the cap and this key |
 | `threads.max_artifact_bytes_per_file` | `256MiB` | one artifact file; clamped down to the per-run value when larger. A named `413` states the cap and this key |
 | `threads.default_permissions` | `"read"` | the job token's `contents` level when a workflow declares no `permissions:` (`read` \| `write`); a fork run is always `read` (15 §5) |
+| `threads.smtp.host` | `""` (off) | SMTP server for failure-notification email (PAR-197/D-27). Empty disables the channel; a half-set `from`/`username`/`password` without a host is a validation error |
+| `threads.smtp.port` | `0` | `0` selects 587 for `starttls`, 465 for `implicit`; otherwise 1…65535 |
+| `threads.smtp.from` | `""` | envelope/From address, required when `host` is set (a display name is accepted) |
+| `threads.smtp.username` / `password` | `""` / `""` | optional PLAIN auth; both set together, and refused with `tls = none`. Prefer `SPINDLE__THREADS__SMTP__PASSWORD` for the secret |
+| `threads.smtp.tls` | `"starttls"` | `starttls` (default), `implicit` (SMTPS), or `none` for a trusted loopback relay (no credentials) |
+| `threads.smtp.timeout` | `"10s"` | bound on one delivery; a non-positive value selects the default |
 | `upstream.git` / `upstream.lfs` / `upstream.token_env` / `upstream.follow` | — | repair source; LFS read-through; token env var (never the token); refs kept equal |
 | `git.binary` | `"git"` | path to git binary (spindle always execs it; see 04_git.md) |
 | `git.upload_pack_engine` | `"auto"` | `auto` = stock git wherever packs are local/mounted; remote-served bases per 04_git.md |

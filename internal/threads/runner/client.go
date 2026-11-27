@@ -176,9 +176,12 @@ func (c *Client) Start(ctx context.Context, jobRef string, attempt int) (*thread
 
 // Log appends one frame (idempotent by seq). The answer carries the cancel
 // signal the operator set (the busy runner's control channel).
-func (c *Client) Log(ctx context.Context, token, jobRef string, attempt, seq int, text string) (*threads.LogView, error) {
+func (c *Client) Log(ctx context.Context, token, jobRef string, attempt, seq int, rec threads.LogRecord) (*threads.LogView, error) {
 	var out threads.LogView
-	body := map[string]any{"seq": seq, "text": text}
+	body := struct {
+		Seq int `json:"seq"`
+		threads.LogRecord
+	}{Seq: seq, LogRecord: rec}
 	if err := c.do(ctx, http.MethodPost, attemptPath(jobRef, attempt, "log"), token, body, &out); err != nil {
 		return nil, err
 	}

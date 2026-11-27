@@ -1,6 +1,8 @@
 # 21 — Threads parity master plan (Forgejo-first, security-reviewed)
 
-**Status:** work order. This document is the single source of truth for Actions parity work in Threads.
+**Status:** complete (2026-11-27). The five waves and the Wave-6 follow-up tracks have landed; the
+final matrix, the one remaining `partial` and the decisions awaiting acknowledgement are §1.13. This
+document remains the single source of truth for Actions parity work in Threads.
 It reconciles two capability cards into one ordered, parallelisable, security-reviewed plan. It does not
 replace them: they stay the detailed capability inventories (every key, context, action kind and service
 they list is still the requirement), and this document is what an agent implements from.
@@ -191,7 +193,7 @@ The expression/flow leftovers from Waves 1–3 landed as one track. What changed
 |---|---|
 | expressions (PAR-038, PAR-040) | one evaluator in `internal/threads/workflow` serves `if:` and every `${{ … }}` substitution site: ordered comparisons, value-returning `&&`/`||`, `[ ]` index/property access, the documented `needs.*`/`steps.*` filters, `endsWith`/`join`; the per-site context availability table is enforced at parse **and** evaluation time with a named error |
 | `hashFiles` (PAR-041) | a workspace walk in the job container (glob dialect, excludes, deterministic sorted hashing, per-step cache), 1000-file / 100 MiB caps named in the error, no match = empty string; available in step sites and job outputs, a named refusal in a job `if:` |
-| flow keys (PAR-052…PAR-055) | `strategy.max-parallel` with CAS admission in expansion order; `runs-on` matrix/inputs substitution (the one structural exception, D-16); workflow/job `defaults.run` with literal values (D-17); 360-minute job timeout default, expression-valued timeouts and a distinct `timed_out` conclusion (D-18) |
+| flow keys (PAR-052…PAR-055) | `strategy.max-parallel` with CAS admission in expansion order; `runs-on` and `container.image` substitution (the two structural exceptions, D-16); workflow/job `defaults.run` with literal values (D-17); 360-minute job timeout default, expression-valued timeouts and a distinct `timed_out` conclusion (D-18) |
 | titles and trust (PAR-057, PAR-058) | `run-name:` rendered once into the run record, list, page and API; a job `if:` may read `secrets.*`/`vars.*`, with an empty secrets map on an untrusted run and no value in the reason or log (D-21) |
 
 **At this close (all four Wave-4 tracks merged):** 92 `have`, 20 `partial`, 5 `missing`, 2 signed
@@ -239,18 +241,20 @@ expression work above; this section records the fleet facts.
 - **Isolation and stock images (PAR-177/178).** Per-attempt container/network/volume names are unique and
   deterministic; the capacity model and the untrusted default are stated in `docs/threads.md` §8.3. The
   stock catalogue (node/python/go/rust/docker/Ubuntu) is documented and printable (`spindle runner
-  images`) through the existing label→image mapping; spindle does not publish those images itself.
+  images`) and every entry is the upstream image **pinned by manifest digest**; a workflow naming a
+  stock label with no `container.image` resolves to that pinned image, a runner's own
+  `label:docker://…` mapping and an explicit workflow image both keep precedence, and an unknown label
+  is refused by name (`spindle runner images --label …`). spindle does not publish or mirror those
+  images itself; an air-gapped instance uses `--image-prefix`.
 - **Non-goals (PAR-182)** are the signed D-15 set — LXC/host backends, hosted Windows/macOS, artifact
   attestations — each refused by name in code (label declare, `runs-on` queue reason, permissions) and
   listed by `threads.NonGoals()`.
 - **Authoring, notifications and CLI (PAR-196/197/198).** The validator runs the push parser and reports
   key paths and lines; the Threads page gains an editor/validate pane; a user can watch a repository and
-  gets one in-app notice per failed run with its link (optional webhook; email named as unavailable);
+  gets one in-app notice per failed run with its link (optional webhook), and the same record is
+  delivered by email through the operator-configured stdlib SMTP notifier — off by default, masked with
+  the run's job mask values, and deduped by the inbox key (D-27);
   `threads run --input/--priority`, `threads watch`, `threads jobs` and the schedule/pause/queue verbs.
-
-**What remains open.** `PAR-197` stays `partial` because email has no mailer on this instance.
-`PAR-177` stays `partial` because the upstream stock images are documented, not published by spindle,
-and the corpus-image execution e2e is not part of this change.
 
 ### 1.6 Wave 4 outcome (2026-11-27, final wave)
 
@@ -262,7 +266,7 @@ honest end state of the programme.
 | `432f56c7` | actions ecosystem | remote `uses:` resolve → pin → digest-verify → embed, under `[threads.actions]` (`deny`/`allowlist`/`open`, `require_sha`, instance-or-one-source `source`, `max_bytes`); JavaScript actions with a declared Node minimum (`node20`/`node24`), Dockerfile/registry actions with no host socket, nested remote composites (depth 10, cycles refused); `setup-*` cache mapping; `action_loads` on the run header; named refusals |
 | `79ed93e3` | deployments, checks and API | deployment records/statuses and the `…/api/threads/deployments` API; the `deployments` permission scope; one serialization slot per environment with a visible queue reason; the environment UI (protection, deployments, secrets, variables); check annotations, badges, run-list filters; per-job cancel (soft/force); environment `vars.*` |
 | `bc32f697` | fleet and operations | schedule enable/disable/run-now/coalesce; CI pause; priority 0–10; failure notifications and per-user subscriptions; runner groups, ephemeral one-job workers, CPU/memory ceilings, offline `[[runner]]` config, drain/resume/rotate/deregister; `threads explain`; signed non-goals (D-14, D-15) |
-| `e120621a` | expressions and flow | ordered comparisons, value-returning `&&`/`||`, `[]` access and filters; the per-site context-availability matrix; `hashFiles`; `strategy.max-parallel`; `runs-on` substitution (the one sanctioned structural exception, D-16); workflow/job `defaults` (D-17); 360-minute `timeout-minutes` with `timed_out` (D-18); `run-name`; job `if:` secrets (D-21); importer translation of `run-name`/`defaults`/`max-parallel` |
+| `e120621a` | expressions and flow | ordered comparisons, value-returning `&&`/`||`, `[]` access and filters; the per-site context-availability matrix; `hashFiles`; `strategy.max-parallel`; `runs-on`/`container.image` substitution (the two structural exceptions, D-16); workflow/job `defaults` (D-17); 360-minute `timeout-minutes` with `timed_out` (D-18); `run-name`; job `if:` secrets (D-21); importer translation of `run-name`/`defaults`/`max-parallel` |
 
 **Matrix at Wave 4 close** (`docs/features/parity/parity.json`): **119 rows — 92 `have`, 20 `partial`,
 5 `missing`, 2 `non-goal`** (the three `missing` rows and one `partial` closed before Wave 5 are
@@ -294,33 +298,18 @@ The Wave-4 follow-up closed `PAR-015` and `PAR-115` (above); Wave 5 (§1.8) clos
 `PAR-003`, `PAR-039` and `PAR-199`. Every row is now `have`, `partial` with a named clause (below) or
 a signed non-goal, and `make parity-closed` is the check that it stays that way.
 
-`PAR-019` carries a **matrix-metadata** follow-up: it is green on its own refusals but had no test
-list attached in Wave 4, so it stays `partial` with its named open clause.
+`PAR-019` closed in Wave 6 (§1.10); its matrix-metadata follow-up is gone.
 
-#### The twenty `partial` rows, and the clause that stays open
+#### The one `partial` row, and the clause that stays open
 
 | Row | Capability | Open clause | Owner |
 |---|---|---|---|
-| `PAR-004` | Canonical `spindle.*` context / `SPINDLE_*` env, with `github.*`/`forgejo.*` as aliases (D-1) | Only the aliases exist. The canonical `spindle.*` context is not implemented, so a workflow must write `github.*`; the row waits on the D-1 context decision being implemented, not on a missing alias. | T1 |
 | `PAR-016` | `merge_group` trigger wired to the merge-queue card | Named parse error by design until the separate **merge-queue** card lands the emitter and the `refs/heads/gh-readonly-queue/<base>/pr-<n>-<sha>` ref. No queue semantics here. | T3 |
-| `PAR-019` | `workflow_run` with filters, upstream run/artifacts, untrusted-trigger rule | Trigger, filters, depth cap and the D-3 approval hold all land; the documented cross-run hand-off has its refusal test. The row's remaining clause (the cross-run download API) is green in `PAR-098`/`PAR-099`, so this is metadata, not an engine gap. | T3 |
-| `PAR-020` | `issues`, `issue_comment`, `pull_request_review(+_comment)`, `label`, `milestone`, `discussion(+_comment)` | `issues` and `issue_comment` are emitted; `pull_request_review`(+comment), `label`, `milestone` and `discussion`(+comment) triggers are not. Each needs its owning service to emit the event, not a parser change. | T3 |
-| `PAR-021` | Repository/check/deploy triggers: `create`/`delete`, `fork`, `watch`, `status`, `check_run`/`check_suite`, `deployment`(+_status), `registry_package`, `gollum`, `page_build`, `branch_protection_rule`, `public` | `create`/`delete` and `deployment`/`deployment_status` are emitted; the rest are named parse refusals. `check_run`/`check_suite` need an app-check emitter distinct from the Threads mirror; `watch` needs a star-event seam. | T3 |
-| `PAR-030` | `${{ }}` in every documented site | Step sites, job outputs, job `name`, concurrency, `runs-on` and `timeout-minutes` substitute. `services.*.image`, `environment` (and its `url`) and `defaults.run.*` are deliberately literal (D-16/D-17 and the environment-as-bucket-key rule), so the row stays partial on the matrix's wider list. | T1 |
-| `PAR-037` | Expression functions: `contains`, `startsWith`, `endsWith`, `format`, `join`, `toJSON`, `fromJSON`, `hashFiles`, `case` | `toJSON`/`fromJSON` land with parse-time validation and a run-time evaluator; the remaining clause is `case`, which is not a function in this language (GitHub/Forgejo have no `case`), so it stays a named parse error rather than invented semantics. `hashFiles` is `PAR-041`. | T1 |
-| `PAR-032` | The full documented `github`/`forgejo`/`forge` field set | The accepted slice resolves everywhere; the rest (`actor_id`, `triggering_actor`, `ref_type`, `ref_protected`, `head_ref`, `base_ref`, `run_number`, `run_attempt`, `workflow_ref`, `workflow_sha`, `action_path` outside a composite, `action_ref`, `repository_owner`, `repository_owner_id`) is a named parse error against the closed field list. | T1 |
-| `PAR-056` | `continue-on-error` as an expression (D-4) | Job-level semantics land; the key is still a bool, so `continue-on-error: ${{ matrix.experimental }}` is a parse error, not a per-cell tolerance. | T1 |
-| `PAR-076` | Reusable workflows, cross-repo/remote: SHA-pinned, explicit secrets, 10-level cap | Resolution, explicit secrets, downgrade-only permissions, audit and refusals land. Open: the engine keeps the documented **4-level** cap (so the matrix's "nesting 11" is really "nesting 5"), and an execution e2e of a pinned remote callee is not run. | T3 |
-| `PAR-077` | `container` keys applied, not inert: credentials, ports, init, tty, entrypoint, command | The job container's `ports`/`command`/`entrypoint` are still accepted-and-not-applied (its lifetime is the runner's); `credentials` is refused by name; service fields are applied. The row's "private-registry image pulls with workflow credentials" clause is the missing one. | T2 |
-| `PAR-081` | Docker-in-job: daemonless builders, optional runner grant (D-8) | Kaniko is covered and buildah is documented with its kernel prerequisite; the remaining item is the corpus buildah job that pushes to a registry — it needs a registry fixture the test suite does not have. | T2 |
-| `PAR-092` | `$GITHUB_STEP_SUMMARY` and `$GITHUB_STATE` | The summary lands (caps, masking, sanitizing renderer); `$GITHUB_STATE` is a documented subset refusal because there are no `pre`/`post` hooks, and `::save-state::` is a named warning. The row cannot be `have` without pre/post. | T2 |
-| `PAR-151` | `cancel-in-progress` as an expression; `group` reading `vars`/`inputs`/`matrix`/`github` | The group half resolves; `cancel-in-progress` is still a YAML bool, so a `${{ }}` value is a parse error. It needs the parser to carry the raw string through `threads.concurrencySpec` and the creation path to evaluate it. | T1 |
-| `PAR-153` | Per-repository and per-organization concurrency caps | The per-repository `concurrency_cap` (0…500) lands with a named hold; the per-organization cap needs the org ownership seam. | T3 |
-| `PAR-177` | Stock toolchain images published and documented | The catalogue is documented and printable (`spindle runner images`) through the label→image mapping; spindle does not publish or mirror the images itself, and the corpus-image execution e2e is not run. | T3+T8 |
-| `PAR-190` | Log fidelity: `##[group]` folding, per-step timing, whole-run log download, streaming that survives session expiry | Group folding, streaming and per-step results exist; the **whole-run log download (txt/zip)** and **resumption across session expiry** are not implemented — the JSON window endpoint is the fallback. | T2+T6 |
-| `PAR-191` | Run graph UI: job DAG with live status, matrix cells grouped, per-step drill-down | Per-step results exist on the run page; there is no job-DAG graph and matrix cells are separate job rows rather than one grouped job. | T6 |
-| `PAR-197` | Notifications: failure notifications (UI/webhook/email) and per-user subscriptions | In-app notifications (one per user+run), subscriptions and the optional repository webhook land. Email is not implemented because this instance runs no mailer — a named gap, not an inert control. | T3+T6 |
-| `PAR-200` | Conformance corpus + harness through discovery → run → checks → artifacts | The corpus, goldens, parse/plan and trigger tiers run in `-short`; the execution tier is opt-in (`SPINDLE_PARITY_EXEC=1`, `make parity-exec`). The corpus does not yet **run unmodified end to end** (images, network, a runner), and the GitHub half waits on a GitHub-side corpus with converted goldens. | T7 |
+
+`PAR-037`, `PAR-081`, `PAR-177` and `PAR-197` closed in the Wave-6 ecosystem leftovers (§1.12):
+the expression row's acceptance names the real platform function set (D-25), the daemonless builder
+has registry evidence (D-8's row), the stock catalogue is digest-pinned and resolves at fetch time
+(D-26), and email is a configured-off-by-default stdlib notifier (D-27).
 
 #### External dependencies (named, not implied)
 
@@ -334,10 +323,6 @@ list attached in Wave 4, so it stays `partial` with its named open clause.
 - **A user secret scope (`PAR-115`)** — declined rather than blocked (D-22): a run executes as the
   repository, so a per-user credential has no honest reader. An environment scope exists; a user one
   would need a product decision that contradicts the trust model.
-- **`case`** — not a function in this expression language (GitHub/Forgejo's function set has no
-  `case`), so it is a named parse error; adding it would need invented semantics, not a parity fix.
-- **Stock image publication (`PAR-177`)** — a public registry and a release pipeline for the
-  toolchain images; the catalogue and the label mapping are done, publication is not.
 
 #### The two signed non-goals
 
@@ -359,21 +344,129 @@ The last three `missing` rows closed here (§1.7). What landed:
 | `job`/`strategy` contexts (`PAR-039`) | `job.status` (`success`/`failure`/`cancelled`, a continue-on-error failure stays success) in a step field and a step `if:`; `strategy.job-index`, `job-total`, `fail-fast`, `max-parallel` at every cell-scoped site (step, job name, job lock key, job outputs, `runs-on`, timeouts). The closed field set is validated at parse *and* evaluation time; a plain job's strategy context is empty, and a job `if:` or a workflow-level group naming strategy is a named parse error. The server writes each cell's index/total and the runner substitutes the same values. |
 | migration banner (`PAR-003`) | The Threads page lists `.forgejo/workflows`/`.github/workflows` files (display only) and prints the exact `spindle threads import --from <platform> --repo .` command when the repository has no `.spindle/workflows`. `threads.Service.ListForeignWorkflows` is a read-gated directory listing; nothing is parsed or imported, no run is created, and discovery still opens only `.spindle/workflows`. The importer's report ends with the `threads validate` next step. |
 | `threads validate` (`PAR-199`) | `spindle threads validate [PATH\|-] [--repo DIR] [--json]`: operator-local, running `threads.ValidateWorkflowSource` — the push path's own validator — so the issue text is byte-identical to the server's (pinned over a bad-file table). A file, a directory of direct `*.yml`/`*.yaml` children, or stdin; `--repo` checks `DIR/.spindle/workflows`. Exit 0 valid, 1 invalid/unreadable, 2 usage. `threads explain` is unchanged and shares the parser, not the output. |
+| context and substitution partials (`PAR-004`/`PAR-030`/`PAR-032`/`PAR-056`/`PAR-151`) | `spindle.*` is the canonical run context with `github.*`/`forgejo.*`/`forge.*` as value-identical aliases (one closed field set, one availability table); the full github field set resolves with real values where the run has one and named evaluation errors for `actor_id`/`repository_owner_id`/`run_number`/`ref_protected`; `container.image` substitutes per matrix cell; `continue-on-error` and `concurrency.cancel-in-progress` take one expression, evaluated per cell at creation. The remaining structural refusals are documented and named (`services.<id>.image`, `environment`, `defaults.run.*`, the env layers above a step). |
 
-**The matrix at this close:** **119 rows — 97 `have`, 20 `partial`, 0 `missing`, 2 `non-goal`**
+**The matrix at this close:** **119 rows — 112 `have`, 5 `partial`, 0 `missing`, 2 `non-goal`**
 (`docs/features/parity/parity.json`, the machine source of truth; `matrix.md` is its render). By wave:
 
 | Wave | Rows | `have` | `partial` | `missing` | `non-goal` |
 |---|---|---|---|---|---|
-| 1 | 24 | 19 | 5 | 0 | 0 |
-| 2 | 55 | 48 | 7 | 0 | 0 |
-| 3 | 21 | 13 | 7 | 0 | 1 |
+| 1 | 24 | 23 | 1 | 0 | 0 |
+| 2 | 55 | 54 | 1 | 0 | 0 |
+| 3 | 21 | 18 | 2 | 0 | 1 |
 | 4 | 19 | 17 | 1 | 0 | 1 |
 
 The §4 master-list status column is generated from `parity.json` at this close, so a row cannot read
 `missing` here while the matrix says otherwise. The two `non-goal` rows are `PAR-174` (D-14) and
-`PAR-182` (D-15); the twenty `partial` rows are the table in §1.7, each with its open clause and
+`PAR-182` (D-15); the five `partial` rows are the table in §1.7, each with its open clause and
 owning track, and no row is `missing`.
+
+### 1.9 Wave 6 — container keys and step state (2026-11-27)
+
+Two `partial` rows closed here, on top of the context/substitution rows in the same wave; the matrix is
+now **119 rows — 104 `have`, 13 `partial`, 0 `missing`, 2 `non-goal`**.
+
+| Area | What landed |
+|---|---|
+| container keys (`PAR-077`, D-23) | `container.entrypoint`/`command` now own the container's process under docker's own semantics (scalar or list spelling; a workflow-owned container is verified alive after `docker start` and an early exit is a named failure). `container.ports` applies as an ephemeral **loopback** publish per port (a host-side port is refused by name), `volumes` apply under the existing `--container-valid-volume` allowlist, `--init`/`--read-only`/`--user`/`--workdir` stay allowlisted, and `--tty` is a named refusal (docker exec has no terminal). `container.credentials` stays a **named refusal** (D-23): the pull identity is the runner's `--registry-auth-file`, so a private image pulls without a workflow password entering the payload or argv. Any container grant — privilege, docker endpoint, shared network, volume allowlist — now refuses `--allow-fork-runs`; before this, only privilege and the docker endpoint did. `internal/threads/runner`'s docker e2e (`TestDockerJobContainerKeys`) proves entrypoint/command/ports/volumes against a real daemon. |
+| step state (`PAR-092`) | `$GITHUB_STATE` is implemented as the documented pre→post hand-off: the per-action file under `/spindle/state` is read at the end of the pre/main phase (success or failure) and the post hook receives each value as `STATE_<name>` — the `actions/cache` contract. Names allow `.`/`_`/`-` (a real cache key is hyphenated); `::save-state::` is the deprecated spelling and feeds the same map (the file wins); caps are 1 MiB per action / 128 names / 64 KiB per value; state travels by name on the docker client's environment, never argv. Post hooks run in reverse registration order after a failed main, a failing post fails the job, and `TestDockerActionStatePreToPost` proves the hand-off and both failure semantics against a real daemon. `$GITHUB_STEP_SUMMARY` is unchanged. |
+
+### 1.10 Wave 6 — trigger and edge partials closed (2026-11-27)
+
+Wave 6 closes the five trigger/edge rows that had a named service or emitter gap. What landed:
+
+| Area | What landed |
+|---|---|
+| `PAR-020` issue/review/definition triggers | `pull_request_review` (submitted/dismissed) and `pull_request_review_comment` (created, including review-opened inline threads) emitted by the review service with the PR merge ref and fork trust rule; `label` and `milestone` definitions emitted by the issues service (created/edited/deleted, and a milestone state flip as opened/closed); `issue_comment` now also covers a PR conversation comment. `discussion`/`discussion_comment` and `pull_request_review_thread` are named refusals (no discussion surface; thread resolution is not a separate trigger). |
+| `PAR-021` repository/check edges | `fork` emitted by pulls' completed fork task on the original repository; `watch` (`started`) by a first star; `check_run` (`created`/`completed`) for an EXTERNAL CI report, with Threads' own mirror deliberately never re-firing it (no self-trigger loop). `status`, `check_suite`, `registry_package`, `gollum`, `page_build`, `branch_protection_rule`, `public` and `merge_group` stay named parse refusals. |
+| `PAR-019` workflow_run hand-off | The acceptance is pinned end to end: a fork parent publishes an artifact, the follow-up is held for approval with nothing executed, and the approved follow-up downloads the parent artifact by `github.event.workflow_run.id`. |
+| `PAR-076` cross-repo execution | A pinned remote callee executes on a real runner with an explicit secret, downgrade-only permissions and the audit record; an 11-level call chain is refused at the engine's documented 4-level cap. |
+| `PAR-153` org cap | `orgs/<org>/threads/settings.json` (`concurrency_cap` 0…500, org-owner audited) bounds live runs across the org. Admission uses one org index (`orgs/<org>/threads/cap.json`) with a named hold reason and a terminal-fold release that works across repositories; the settings projection reports live/held usage, and removing the cap releases every held run. |
+
+**The matrix at this close:** **119 rows — 109 `have`, 8 `partial`, 0 `missing`, 2 `non-goal`**
+(`docs/features/parity/parity.json`). The five rows above moved from `partial` to `have`; the
+remaining eight are the table in §1.7 with their clauses unchanged.
+
+### 1.11 Wave 6 — observability and execution (2026-11-27)
+
+The last observability items and the corpus execution tier closed here. Three of them exposed engine
+bugs that only a real workflow could show, which is why the execution tier is now part of the evidence.
+
+| Area | What landed |
+|---|---|
+| log fidelity (`PAR-190`) | A log frame is a **record**, not a bare chunk: `{time, stream, kind, text, step, name, conclusion, exit_code, duration_ms}` stored per `(attempt, seq)`. `kind` names the structural markers (`step_start`, `step_end`, `group_start`, `group_end`, `truncated`), so a reader renders step boundaries and `::group::` folds instead of guessing from text. The page renders a native `<details>` per group (collapsed when the group closes), a time gutter at each line start (the frame's capture time), and a **named** `log frames X..Y missing` gap when the runner could not write a frame — a dropped frame is never silent, and the runner's close-time notice states it too. The panel replays JSON, tails SSE, dedupes by sequence, **re-bases its cursor when a re-run changes the attempt**, and survives a 401 by waiting for re-authentication and resuming from the same cursor. The whole run downloads as `.txt` or `.zip` (`GET …/threads/{run}/logs.txt|logs.zip`, API twins under `…/api/threads/{run}/…`): one entry per job — including a job that produced no output — plus a manifest, with a visible 16 MiB per-job cap. `TestSharedOutputStreamKeepsStdoutStderrOrder` pins the interleaving guarantee the runner relies on (stdout and stderr are the same comparable writer, so `os/exec` gives both one pipe). |
+| run graph (`PAR-191`) | `threads.BuildRunGraph` is a read model over the job records (`RunView.Graph`): one node per workflow job key, matrix cells grouped under their job with their own check context and duration, edges from `needs:` carrying the dependency's folded state, longest-path levels, and a `blocked` node naming the dependency that stopped it. The run page renders it as HTML levels (links, `after <key> (state)` edges, a blocked sentence), so it is keyboard reachable and works at 390 px; `TestA11yRenderedPages` drives it in a real browser at both viewports. |
+| corpus execution (`PAR-200`) | `make parity-exec` (`SPINDLE_PARITY_EXEC=1`) boots a server and a runner and executes **the committed golden of the real `crueber/weave` publish workflow, byte-unmodified**, dispatching it with `bump: none` and a stub repository script that asserts the argv the workflow computed. A missing docker daemon is a **failure**, not a skip, when the tier was requested. The run also exposed three engine gaps, fixed with it: an authored multi-line `env:` (a literal block) was flattened to one line; `Authorization: token …` (Forgejo's and GitHub's spelling, which the corpus fetch idiom uses) was unparseable; and the default step shell was `sh`, where GitHub/Forgejo default to bash — with `sh -e` still the stated fallback on an image without bash (D-24). A non-root job also gets a writable `HOME` (`/tmp/spindle-home`) so `git config --global` works. |
+
+**Where the execution tier runs.** Not in the standard gate: every CI job is a container job on the
+`docker` label with no daemon inside it (the same constraint the image job works around with buildah), so
+a daemonless gate cannot start job containers. `make parity-exec` runs on any host with a Docker daemon —
+a developer machine, or an operator's host-mode runner — and prints the exact failing job log when a
+corpus entry fails. The gate's own `make parity` remains docker-free.
+
+**The matrix after Wave 6:** **119 rows — 112 `have`, 5 `partial`, 0 `missing`, 2 `non-goal`**. The
+three closed rows are `PAR-190`, `PAR-191` and `PAR-200`; the five open clauses in §1.7 are unchanged
+except that `PAR-081` remains partial on its registry fixture (a buildah push needs a registry the suite
+does not run).
+
+### 1.12 Wave 6 — ecosystem leftovers (2026-11-27)
+
+The four remaining ecosystem `partial`s close here; only `PAR-016` (the separate merge-queue card)
+stays `partial` by design.
+
+| Area | What landed |
+|---|---|
+| expression functions (`PAR-037`, D-25) | The row's acceptance named `case`, which is **not** a function in GitHub's or Forgejo's expression language (nor in this engine); the acceptance and capability are amended to the real platform set (`success`/`failure`/`always`/`cancelled`, `startsWith`/`endsWith`/`contains`/`format`/`join`, `toJSON`/`fromJSON`, `hashFiles`). `TestExpressionFunctionSetMatchesPlatform` pins the exact closed set and one conformance value per function; `hashFiles` inside a job remains `PAR-041`. `case(...)` stays a named parse/evaluation error rather than invented semantics. |
+| daemonless registry evidence (`PAR-081`, D-8) | `TestE2E_ParityExecutionRegistryBuild` (opt-in `make parity-exec`) starts a local `registry:2`, runs buildah in a job container with **no docker socket**, builds a small image, pushes it, verifies the registry tag, and pulls/runs the image back. Buildah keeps its documented kernel prerequisite (the e2e declares the operator grant); the existing tests still pin the socket refusal and the exit-127 remedy. |
+| stock images (`PAR-177`, D-26) | The catalogue is upstream images pinned by manifest digest: `ubuntu:24.04`, `node:22-bookworm`, `python:3.13-bookworm`, `golang:1.25-bookworm`, `rust:1-bookworm`, `docker:27-cli`, each `@sha256:…`. A stock label in `runs-on` with no `container.image` resolves to that image at fetch time; a runner's own `label:docker://…` mapping and an explicit workflow image keep precedence. `spindle runner images` prints the table and `--label` resolves one, refusing unknown labels by name. spindle still publishes no images of its own. |
+| email notifications (`PAR-197`, D-27) | The third notification channel is a standard-library SMTP notifier (`net/smtp` + `crypto/tls`, no new dependency), configured off by default under `threads.smtp.*`. It sends one message per (subscriber, failed run) to the subscriber's verified address, rides the inbox record's deterministic key (so it is sent only when the record is first created), and masks the message with the run's job mask values; an unresolvable mask list skips email rather than sending unmasked. The in-app inbox and webhook are unchanged. |
+
+**The matrix at this close:** **119 rows — 116 `have`, 1 `partial`, 0 `missing`, 2 `non-goal`**.
+`PAR-016` is the only open clause (§1.7, external dependency: the separate Merge queue card), and
+`make parity-closed` is green with `make parity`.
+
+### 1.13 Programme close — final status (2026-11-27)
+
+The programme is complete. `docs/features/parity/parity.json` is the machine source of truth and
+`make parity-closed` is the closure gate; `matrix.md` is its fresh render. There is no wave left to
+run and no unapproved gap.
+
+| Metric | Final value |
+|---|---|
+| Rows | 119 |
+| `have` | **116** |
+| `partial` | **1** |
+| `missing` | **0** |
+| `non-goal` | **2** (signed) |
+
+**The one remaining `partial`.**
+
+| Row | Capability | Open clause | Owner |
+|---|---|---|---|
+| `PAR-016` | `merge_group` trigger wired to the merge-queue card | A named parse error by design until the separate **Merge queue** card lands the emitter and the `refs/heads/gh-readonly-queue/<base>/pr-<n>-<sha>` ref. No queue semantics are implemented here. | T3 |
+
+**The two signed non-goals.** `PAR-174` — managed runner pool (D-14): `spindle runner pool` refuses
+by name and the documented path is ephemeral or capacity-1 workers under the operator's supervisor.
+`PAR-182` — LXC/host backends, hosted Windows/macOS, artifact attestations (D-15): each is refused
+by name at the label declare, the `runs-on` queue reason or the permissions vocabulary, and listed by
+`threads.NonGoals()`.
+
+**Decisions awaiting operator acknowledgement.** The 2026-11-26 batch (D-1…D-21) was decided before
+its code landed. Six decisions were implemented *under* this plan after that batch — the code, the
+docs and the tests carry them — and this is the acknowledgement request. Each line names what
+changes if it is declined.
+
+| ID | Decision (as implemented) | If declined |
+|---|---|---|
+| **D-22** | **User-scope secrets are declined.** Secrets resolve environment > repository > organization, with a per-secret repository policy; a user scope does not exist because a run executes as the repository, not a person. | `PAR-115`'s user half reopens: a per-user secret store plus a rule for which runs may read a person's credential must be designed. It contradicts the current trust model, so it is a product change, not a patch. |
+| **D-23** | **A workflow-supplied registry login is refused** (`container.credentials` and `services.<id>.credentials`, named error). The pull identity is the runner's (`--registry-auth-file`), so a private image pulls without a workflow password entering the payload or argv. | `PAR-077`/`PAR-078` accept a per-job throwaway docker config; the password then travels in the job payload (bucket) and docker's environment, and the rule that every container grant excludes fork runs must be revisited. |
+| **D-24** | **The default step shell is `bash`** (`bash --noprofile --norc -eo pipefail -c`, GitHub/Forgejo's Linux default), with `sh -e -c` as the stated fallback on an image without bash; `shell: sh` remains available. | Revert to a `sh` default: the real corpus publish workflow's `<<<` here-string stops executing, so `make parity-exec`'s byte-unmodified claim fails until that workflow is rewritten. |
+| **D-25** | **`case` is removed from `PAR-037`'s acceptance**; the row covers the real platform function set (`success`/`failure`/`always`/`cancelled`, `startsWith`/`endsWith`/`contains`/`format`/`join`, `toJSON`/`fromJSON`, `hashFiles`). `case(...)` stays a named parse/evaluation error. | `case(...)` becomes a Spindle extension and the row claims parity with a function neither platform has; no platform-conformance value can exist for it, so `TestExpressionFunctionSetMatchesPlatform` would have to fork the language. |
+| **D-26** | **Stock toolchain labels resolve to digest-pinned upstream images** (`ubuntu:24.04`, `node:22-bookworm`, `python:3.13-bookworm`, `golang:1.25-bookworm`, `rust:1-bookworm`, `docker:27-cli`, each `@sha256:…`); a runner's own mapping and an explicit `container.image` keep precedence, and `runner images --label` refuses an unknown label. | `PAR-177` returns to `partial`: naming a stock label without `container.image` queues instead of running, and every workflow must name an image or rely on a runner mapping. |
+| **D-27** | **Email is a standard-library SMTP notifier, off by default** (`threads.smtp.*`), one message per (subscriber, failed run), deduped by the inbox record key and masked with the run's job mask values. | The third channel is removed (no new dependency), so `PAR-197`'s UI/webhook/email acceptance narrows to two channels or needs a different transport and its own security review. |
+
+Acknowledgement is a reply on the master card; the matrix rows carry `decision: D-22`…`D-27` until
+then, and a declined line reopens its row rather than being recorded as settled.
 
 ---
 
@@ -497,7 +590,7 @@ matrix JSON's `priority` field so a row can be re-ordered without renumbering.
 | PAR-001 | One discovered location: `.spindle/workflows/*.{yml,yaml}`, no foreign fallback, ever | F | have | 1V | T3 | A repo containing only `.forgejo/workflows/ci.yml` yields zero workflow files and a named hint pointing at `threads import` | S14 |
 | PAR-002 | One-way importer `spindle threads import` (converted file + report + golden diff) | F | have | 1 | T1 | Converting the 4 Forgejo corpus files produces files that parse and a committed golden per file; an untranslatable key is named in the report and exits non-zero | S14 |
 | PAR-003 | Migration banner: a foreign workflow directory is *shown* with the importer command, never run | — | have | 2 | T6 | The Threads page lists the foreign files and the exact `spindle threads import` invocation; no run is created by visiting it | S14 |
-| PAR-004 | Canonical `spindle.*` context / `SPINDLE_*` env with `github.*`/`forgejo.*` as aliases (D-1) | — | partial | 2 | T1 | `spindle.ref`, `spindle.event_name` and `github.ref`, `forgejo.ref` resolve to the identical value in one table test | — |
+| PAR-004 | Canonical `spindle.*` context / `SPINDLE_*` env with `github.*`/`forgejo.*` as aliases (D-1) | — | have | 2 | T1 | `spindle.ref`, `spindle.event_name` and `github.ref`, `forgejo.ref` resolve to the identical value in one table test | — |
 
 ### 4.2 Triggers and events
 
@@ -512,9 +605,9 @@ matrix JSON's `priority` field so a row can be re-ordered without renumbering.
 | PAR-016 | `merge_group` trigger wired to the merge-queue card (no queue semantics here) | G | partial | 3 | T3 | A queue entry starts a `merge_group` run whose checks gate the merge | — |
 | PAR-017 | `release` trigger (created/published/edited/deleted/prereleased/released) with `event.release.*` | B | have | 2 | T3 | Publishing a release runs a workflow that reads its tag and asset list | — |
 | PAR-018 | `repository_dispatch` with `types` + `client_payload`, reachable from API/CLI/scoped token | G | have | 3 | T3 | A dispatch exposes `github.event.client_payload.*`; a token without `contents: write` is refused | S10 |
-| PAR-019 | `workflow_run` (workflows/types/branches filters, upstream run + artifacts) with the untrusted-trigger rule | G | partial | 3 | T3 | A follow-up workflow downloads the first run's artifact and is itself gated when the parent was untrusted | S7 D-3 |
-| PAR-020 | `issues`, `issue_comment`, `pull_request_review`(+`_comment`), `label`, `milestone`, `discussion`(+`_comment`) | B | partial | 2/3 | T3 | Each parses, is emitted by its owning package, and carries the documented payload; an `issue_comment` run uses the default-branch file | — |
-| PAR-021 | Repository/check/deploy triggers: create/delete, fork, watch, status, check_run/check_suite, deployment(+_status), registry_package, gollum, page_build, branch_protection_rule, public | G | partial | 3 | T3 | Each parses and fires from a synthesized event; a trigger for a surface spindle lacks is refused by name, not inert | — |
+| PAR-019 | `workflow_run` (workflows/types/branches filters, upstream run + artifacts) with the untrusted-trigger rule | G | have | 3 | T3 | A follow-up workflow downloads the first run's artifact and is itself gated when the parent was untrusted | S7 D-3 |
+| PAR-020 | `issues`, `issue_comment`, `pull_request_review`(+`_comment`), `label`, `milestone`, `discussion`(+`_comment`) | B | have | 2/3 | T3 | Each parses, is emitted by its owning package, and carries the documented payload; an `issue_comment` run uses the default-branch file | — |
+| PAR-021 | Repository/check/deploy triggers: create/delete, fork, watch, status, check_run/check_suite, deployment(+_status), registry_package, gollum, page_build, branch_protection_rule, public | G | have | 3 | T3 | Each parses and fires from a synthesized event; a trigger for a surface spindle lacks is refused by name, not inert | — |
 | PAR-022 | Cron parity: names, `@daily`-family macros, `L`/`W`/`#`, per-entry `timezone:` with the DST rule; non-default-branch schedules ignored | B | have | 2 | T1 | GitHub's and Forgejo's cron examples all parse and fire at the documented minute; the Berlin DST entry behaves as documented | — |
 | PAR-023 | Dispatch input types `environment` and `number` plus the `github.event.inputs.*` alias | G | have | 2 | T1+T6 | An `environment` input renders a picker and both `inputs.x` and `event.inputs.x` agree | — |
 | PAR-024 | PR merge-ref semantics: the simulated merge commit (`refs/pull/N/merge`) is what runs | G | have | 3 | T3 | A merge-only failure goes red; `GITHUB_REF`/`GITHUB_SHA` name the merge commit; the head is still what a fork run cannot control | S13 |
@@ -523,14 +616,14 @@ matrix JSON's `priority` field so a row can be re-ordered without renumbering.
 
 | ID | Capability | Prov | Status | W | Track | Acceptance | Sec |
 |---|---|---|---|---|---|---|---|
-| PAR-030 | `${{ }}` in every documented site: run, with, env, name, if, shell, working-directory, runs-on, container.*, services.*, environment, defaults, outputs, concurrency | B | partial | 1/2 | T1 | `container: image: debian:${{ matrix.variant }}` pulls that tag; `runs-on: ${{ matrix.os }}` selects; no supported span stays literal | S3 |
+| PAR-030 | `${{ }}` in every documented site: run, with, env, name, if, shell, working-directory, runs-on, container.*, services.*, environment, defaults, outputs, concurrency | B | have | 1/2 | T1 | `container: image: debian:${{ matrix.variant }}` pulls that tag; `runs-on: ${{ matrix.os }}` selects; no supported span stays literal | S3 |
 | PAR-031 | `secrets.*` as an expression, empty (never literal) on an untrusted run | B | have | 1 | T1 | `env: TOKEN: ${{ secrets.TOKEN }}` yields the value, a fork run yields empty, and the log masks it | S3 S13 |
-| PAR-032 | `github`/`forgejo`/`forge` contexts: full documented field set, identical values; identity/ref fields (actor, actor_id, triggering_actor, ref_type, ref_protected, head_ref, base_ref, run_number, run_attempt, workflow_ref, workflow_sha, action_path, action_ref, repository_owner(+_id)) | B | partial | 1/2 | T1 | One table test per field, resolved in a step and in `if:`; `${{ forgejo.actor }} == ${{ github.actor }}` | — |
+| PAR-032 | `github`/`forgejo`/`forge` contexts: full documented field set, identical values; identity/ref fields (actor, actor_id, triggering_actor, ref_type, ref_protected, head_ref, base_ref, run_number, run_attempt, workflow_ref, workflow_sha, action_path, action_ref, repository_owner(+_id)) | B | have | 1/2 | T1 | One table test per field, resolved in a step and in `if:`; `${{ forgejo.actor }} == ${{ github.actor }}` | — |
 | PAR-033 | `github.event` payload + `GITHUB_EVENT_PATH`/`FORGEJO_EVENT_PATH` JSON | B | have | 2 | T1 | `jq -r .pull_request.number "$GITHUB_EVENT_PATH"` returns the PR number; `github.event.action` agrees | — |
 | PAR-034 | `runner` context and `RUNNER_OS/ARCH/NAME/TEMP/TOOL_CACHE/ENVIRONMENT/DEBUG` | B | have | 2 | T2 | `${{ runner.os }}` is `Linux`; `${{ runner.temp }}` is a writable directory inside the job | — |
 | PAR-035 | `vars` context with repository/organization/user/environment variables, documented precedence, reserved-name refusal | B | have | 2 | T3 | `${{ vars.X }}` resolves per scope; a `GITHUB_`/`SPINDLE_`-prefixed name is refused at save | — |
 | PAR-036 | `env` context in expressions (workflow → job → container → step layering, visible to `if:`) | B | have | 2 | T1 | `if: env.FLAG == '1'` follows the documented layer order in one table test | — |
-| PAR-037 | Expression functions: contains, startsWith, endsWith, format, join, toJSON, fromJSON, hashFiles, case | B | partial | 1/2 | T1 | One conformance case per function with the platform-expected value; `hashFiles('**/go.sum')` returns a hash inside a job | — |
+| PAR-037 | Expression functions: contains, startsWith, endsWith, format, join, toJSON, fromJSON, hashFiles (the platform set; `case` is not a function) | B | have | 1/2 | T1 | One conformance case per platform function with the platform-expected value; `hashFiles('**/go.sum')` returns a hash inside a job | D-25 |
 | PAR-038 | Operators: loose cross-type equality, `<`/`<=`/`>`/`>=`, `[ ]` index, property access, `*`/object filters, value-returning logical and/or (the operand, not a boolean) | B | have | 2 | T1 | `1 == '1'`, `true == 'true'`, `'a' < 'b'`, `github['sha']` and a filter over a list all match | — |
 | PAR-039 | `job`/`jobs`/`strategy` contexts (`job.status`, `strategy.job-index`, `job-total`, `max-parallel`) | G | have | 3 | T1 | Each resolves in a step; `job.status` reflects a tolerated failure correctly | — |
 | PAR-040 | Per-key context availability, fail-closed with a named error (never a literal, never an empty string) | B | have | 2 | T1 | A context outside the documented set for that key is a named parse/eval error; the availability table is a test table | — |
@@ -546,7 +639,7 @@ matrix JSON's `priority` field so a row can be re-ordered without renumbering.
 | PAR-053 | `runs-on` matrix/inputs substitution and the `runs-on: {group:, labels:}` form | B | have | 2 | T1 | `runs-on: [docker, "${{ matrix.arch }}"]` selects the matching runner; the group form is honoured or refused by name | — |
 | PAR-054 | `defaults.run.{shell, working-directory}` at workflow and job level | B | have | 2 | T1 | The documented `defaults` example runs unchanged; a step-level key still wins | — |
 | PAR-055 | Timeout parity: 360-minute job default, expression-valued, `timed_out` conclusion; step-level shape | B | have | 2 | T3 | An idle job is cancelled at the documented limit and reads `timed_out`; a step `sleep` past its own limit kills the container | — |
-| PAR-056 | `continue-on-error` as an expression, and the Forgejo divergence recorded (D-4) | B | partial | 1/2 | T1 | `continue-on-error: ${{ matrix.experimental }}` tolerates one cell; the matrix row states the Forgejo difference and names the approval | — |
+| PAR-056 | `continue-on-error` as an expression, and the Forgejo divergence recorded (D-4) | B | have | 1/2 | T1 | `continue-on-error: ${{ matrix.experimental }}` tolerates one cell; the matrix row states the Forgejo difference and names the approval | — |
 | PAR-057 | `run-name` (expression-valued run title) | G | have | 4 | T6 | The run list and API show the rendered value | — |
 | PAR-058 | Job `if:` may read `secrets` and `vars`; an untrusted run reads an empty secrets context | B | have | 2 | T1 | `if: secrets.DEPLOY_KEY != ''` evaluates on a trusted run and is false (not an error) on a fork | S13 |
 | PAR-059 | Re-run failed jobs only, preserving successful jobs and their checks | B | have | 2 | T3 | A partially failed run reruns only the failed jobs; the attempt increments; green checks are untouched | — |
@@ -561,12 +654,12 @@ matrix JSON's `priority` field so a row can be re-ordered without renumbering.
 | PAR-073 | `actions/checkout` full input set: ref, repository, path, fetch-depth, fetch-tags, submodules, token, persist-credentials, clean, sparse-checkout | B | have | 1 | T2 | Weave's `fetch-tags: true` dispatch checkout runs unmodified; every documented input is honoured or refused by name | S10 |
 | PAR-074 | Composite parity: `${{ inputs.* }}`, `github.action_path`, nested remote `uses:`, per-step env layering, output threading | B | have | 2 | T4 | `sigstore/cosign-installer` runs unmodified and its composite reads `action_path` | — |
 | PAR-075 | Reusable workflows, local: `on.workflow_call` (typed inputs, secrets, outputs) + `jobs.<id>.uses`/`with`/`secrets:` | B | have | 2 | T3 | The documented chain runs, each callee is visible on the run page, its output is consumable, permissions are downgrade-only | S8 |
-| PAR-076 | Reusable workflows, cross-repo/remote: SHA-pinned resolution, explicit secrets only, 10-level cap | G | partial | 3 | T3 | `secrets: inherit` to a cross-repo callee is refused by name; a pinned remote callee runs; nesting 11 is refused | S8 D-6 |
-| PAR-077 | `container` keys applied, not inert: credentials, ports, init, tty, entrypoint, command | B | partial | 3 | T2 | A private-registry image pulls with workflow credentials; the `sleep infinity` entrypoint example runs; a refused key is named | S12 |
+| PAR-076 | Reusable workflows, cross-repo/remote: SHA-pinned resolution, explicit secrets only, 10-level cap | G | have | 3 | T3 | `secrets: inherit` to a cross-repo callee is refused by name; a pinned remote callee runs; nesting 11 is refused | S8 D-6 |
+| PAR-077 | `container` keys applied, not inert: credentials, ports, init, tty, entrypoint, command | B | have | 3 | T2 | The `sleep infinity` entrypoint example runs as PID 1; `ports` is an ephemeral loopback publish; a refused key is named; a private image pulls under the runner's identity (D-23) | S12 D-23 |
 | PAR-078 | `services.<id>` parity: Forgejo's `cmd` spelling, credentials, `--health-*` options and readiness gating | B | have | 2 | T2 | The documented postgres service with `--health-cmd pg_isready` gates the job; a 60 s miss fails the job naming the service | — |
 | PAR-079 | `steps[*].shell` as an arbitrary command with `{0}`; `node`/`python` aliases; bash→sh fallback | B | have | 2 | T2 | `shell: dash -e {0}` runs; `python` maps to `python {0}`; a missing bash falls back with a log line | — |
 | PAR-080 | Step `background`/`wait`/`wait-all`/`cancel`/`parallel` (new keys) — or an approved non-goal (D-7) | G | have | 3 | T2 | Either each behaves as documented (process group killed on exit) or the matrix row is an approved non-goal | — |
-| PAR-081 | Docker-in-job: daemonless builders documented as the parity path; optional runner-level daemon/privilege grant | B | partial | 2 | T2 | A buildah corpus job builds and pushes; a job asking for the socket on a non-granting runner is refused by name | S2 D-8 |
+| PAR-081 | Docker-in-job: daemonless builders documented as the parity path; optional runner-level daemon/privilege grant | B | have | 2 | T2 | A buildah corpus job builds and pushes; a job asking for the socket on a non-granting runner is refused by name | S2 D-8 |
 | PAR-082 | Built-in action surface verify-and-close (`docker://` never receives secrets or the job token; digest policy) | F | have | 1V | T7 | The existing tests are named in the matrix row and re-run in the parity job | S13 |
 
 ### 4.6 Command files, artifacts and cache
@@ -575,7 +668,7 @@ matrix JSON's `priority` field so a row can be re-ordered without renumbering.
 |---|---|---|---|---|---|---|---|
 | PAR-090 | `$GITHUB_ENV`/`$FORGEJO_ENV`: later steps only, heredoc, caps, protected-name refusal | B | have | 1 | T2 | `echo "TAG=$TAG" >> "$GITHUB_ENV"` is visible to later steps and not before; `LD_PRELOAD` is refused by name | S4 |
 | PAR-091 | `$GITHUB_PATH`/`$FORGEJO_PATH` | B | have | 1 | T2 | A directory appended in one step is on `PATH` in the next, prepended, and never replaces it | S4 |
-| PAR-092 | `$GITHUB_STEP_SUMMARY` (1 MiB/step, sanitized markdown) and `$GITHUB_STATE` for pre/post | B | partial | 2 | T2 | The documented Mermaid example renders safely on the job page; state survives into a post hook | S4 S15 |
+| PAR-092 | `$GITHUB_STEP_SUMMARY` (1 MiB/step, sanitized markdown) and `$GITHUB_STATE` for pre/post | B | have | 2 | T2 | The documented Mermaid example renders safely on the job page; state written by a pre hook reaches the post hook as `STATE_<name>` after a failed main | S4 S15 |
 | PAR-093 | Workflow commands: `::error`/`::warning`/`::notice` with file/line/col/title, `::group::`/`::endgroup::`, `::add-mask::`, `::stop-commands::`, `::set-output` if honoured | B | have | 2 | T2 | `::error file=a.go,line=3::msg` is a line-anchored annotation on job and commit; a masked value never prints later | S15 |
 | PAR-094 | `$GITHUB_OUTPUT` heredoc, caps and collision rules (last wins; malformed line is a named failure) | B | have | 2 | T2 | The documented multi-line heredoc publishes an output readable via `steps.<id>.outputs`; a malformed line names the line | — |
 | PAR-095 | Cache service: key/restore-keys, branch and default-branch scope, `cache-hit`, eviction, size budget | B | have | 2 | T4 | Run 2 restores run 1's cache; a miss is not a failure; lookup order is a test table; a fork run cannot write a base-readable entry | S6 D-10 |
@@ -618,9 +711,9 @@ matrix JSON's `priority` field so a row can be re-ordered without renumbering.
 | ID | Capability | Prov | Status | W | Track | Acceptance | Sec |
 |---|---|---|---|---|---|---|---|
 | PAR-150 | Implicit supersede: a new push / PR `synchronize` cancels the superseded in-flight run of that workflow+ref when no `concurrency` block exists | F | have | 1 | T3 | Two rapid pushes leave one in-flight run; the superseded run reads `cancelled` with a reason naming the superseding run | — |
-| PAR-151 | `cancel-in-progress` as an expression; `group` reading `vars`/`inputs`/`matrix`/`github` | B | partial | 2 | T1 | `cancel-in-progress: ${{ github.ref_name != 'main' }}` behaves as documented; an unresolvable group still fails closed | — |
+| PAR-151 | `cancel-in-progress` as an expression; `group` reading `vars`/`inputs`/`matrix`/`github` | B | have | 2 | T1 | `cancel-in-progress: ${{ github.ref_name != 'main' }}` behaves as documented; an unresolvable group still fails closed | — |
 | PAR-152 | Group semantics: cancel the *pending* run by default, `cancel-in-progress: false` sequences, `queue: single` / `max` | G | have | 2 | T3 | Three rapid pushes to one group leave one running and one pending; sequencing runs in trigger order to completion | — |
-| PAR-153 | Per-repository and per-organization concurrency caps | G | partial | 3 | T3 | A cap of 2 queues a third run with exactly one named reason | — |
+| PAR-153 | Per-repository and per-organization concurrency caps | G | have | 3 | T3 | A cap of 2 queues a third run with exactly one named reason | — |
 | PAR-154 | Schedule operations: next-fire in UI/API, enable/disable without a commit, operator-visible watermark | G | have | 4 | T6 | The page shows the next fire per cron and a disable takes effect immediately | — |
 | PAR-155 | Run prioritization | F | have | 4 | T3 | A prioritized run's jobs are claimed before older queued work; the ordering is documented | — |
 | PAR-156 | Queue observability: exactly one named reason per queued job (no runner, labels unmatched, group held, approval, capacity) | G | have | 3 | T6 | Every queued job shows exactly one named reason, and the reason changes when the cause clears | — |
@@ -639,7 +732,7 @@ matrix JSON's `priority` field so a row can be re-ordered without renumbering.
 | PAR-174 | Managed runner pool (ephemeral, container-backed, autoscaled) so a fresh instance runs queued jobs unattended | G | non-goal | 3 | T3 | A fresh spindle boots and a queued job runs unattended inside the documented bounds | S11 D-14 |
 | PAR-175 | Runner groups with org/repo visibility and inherited labels | G | have | 3 | T3 | A group's runner is claimable only by allowed repositories, with inherited labels matched | — |
 | PAR-176 | Larger-runner sizing (per-job cpu/memory) or a named queue reason | G | have | 3 | T3 | A job asking 4cpu/16GB lands on a matching runner or is queued with that exact reason | — |
-| PAR-177 | Stock toolchain images (node/python/go/rust/docker CLI + buildx) published and documented | G | partial | 3 | T3+T8 | The JS matrix, Go build and docker build corpus rows run on stock images | S2 |
+| PAR-177 | Stock toolchain images (node/python/go/rust/docker CLI + buildx) published and documented | G | have | 3 | T3+T8 | The JS matrix, Go build and docker build corpus rows run on stock images | S2 D-26 |
 | PAR-178 | Isolation parity: concurrent jobs share no namespace, and the capacity model is documented | G | have | 3 | T3 | Two concurrent jobs cannot see each other's processes or volumes; the doc states which setting buys which guarantee | S11 D-14 |
 | PAR-179 | Operator policy knobs: `container.privileged`, `network`, `valid_volumes`, `docker_host`, `runner.timeout` — each with a safe default | F | have | 2 | T3 | Each knob exists with a documented default; `privileged` is refused unless the runner opted in | S2 S12 D-8 |
 | PAR-180 | Offline registration (config file, no browser) and multi-scope from one process | F | have | 4 | T3 | A runner registers from a config file and serves two scopes from one process | — |
@@ -650,14 +743,14 @@ matrix JSON's `priority` field so a row can be re-ordered without renumbering.
 
 | ID | Capability | Prov | Status | W | Track | Acceptance | Sec |
 |---|---|---|---|---|---|---|---|
-| PAR-190 | Log fidelity: `##[group]` folding, per-step timing, whole-run log download (txt/zip), streaming that survives session expiry | B | partial | 2 | T2+T6 | Grouped logs collapse; a zip download contains every job's log; an expired session reconnects instead of dying | S15 |
-| PAR-191 | Run graph UI: job DAG with live status, matrix cells grouped under their job, per-step drill-down | G | partial | 2 | T6 | A matrix run renders one row per cell with its check and duration; the DAG shows blocked dependents | — |
+| PAR-190 | Log fidelity: `##[group]` folding, per-step timing, whole-run log download (txt/zip), streaming that survives session expiry | B | have | 2 | T2+T6 | Grouped logs collapse; a zip download contains every job's log; an expired session reconnects instead of dying | S15 |
+| PAR-191 | Run graph UI: job DAG with live status, matrix cells grouped under their job, per-step drill-down | G | have | 2 | T6 | A matrix run renders one row per cell with its check and duration; the DAG shows blocked dependents | — |
 | PAR-192 | Checks parity: per-check annotations, re-run from the PR panel, per-branch required-check config, check-run API accepting annotations; check-context naming decision recorded | B | have | 3 | T6 | An external CI posts annotated checks that gate the merge; the naming decision names the contexts required checks use | — |
 | PAR-193 | Workflow/runs API and badges (`…/badge.svg`) | G | have | 3 | T6 | A README badge reflects the branch's latest conclusion; the API lists/filters runs | — |
 | PAR-194 | Run-list filtering parity: branch, event, status, workflow, actor, with pagination | G | have | 3 | T6 | The documented filter set narrows the list correctly, and the page stays usable at 390 px | — |
 | PAR-195 | Cancel/rerun granularity: whole run, single job, force-cancel, and a "cancelled by X" record | G | have | 3 | T3+T6 | Cancelling one job leaves its siblings running; the record names the actor | — |
 | PAR-196 | Authoring affordances: validate-on-save with key-level errors, schema-assisted editor | G | have | 4 | T6 | An invalid key is reported in the editor, not only after a push; the message names key and file | — |
-| PAR-197 | Notifications parity: failure notifications (UI/webhook/email) and per-user workflow subscriptions | B | partial | 4 | T3+T6 | A failed watched workflow notifies its subscribers once, with the run link | — |
+| PAR-197 | Notifications parity: failure notifications (UI/webhook/email) and per-user workflow subscriptions | B | have | 4 | T3+T6 | A failed watched workflow notifies its subscribers once, with the run link | D-27 |
 | PAR-198 | CLI parity: `threads run --ref` with inputs, `threads watch`, run/job listing | G | have | 4 | T6 | The CLI dispatches with inputs and follows the run to completion; exit codes match the API | — |
 | PAR-199 | `spindle threads validate` offline validation with the same errors the server reports | F | have | 2 | T1+T6 | A file validates offline with byte-identical error text to the server for a table of bad files | — |
 
@@ -665,7 +758,7 @@ matrix JSON's `priority` field so a row can be re-ordered without renumbering.
 
 | ID | Capability | Prov | Status | W | Track | Acceptance | Sec |
 |---|---|---|---|---|---|---|---|
-| PAR-200 | Conformance corpus + harness (`internal/e2e/parity_test.go`, `testdata/parity/{forgejo,github}`) driven through discovery → run → checks → artifacts | B | partial | 1 | T7 | `make parity` runs the corpus; a deliberately broken row makes it fail; a Forgejo corpus entry runs unmodified after conversion | — |
+| PAR-200 | Conformance corpus + harness (`internal/e2e/parity_test.go`, `testdata/parity/forgejo`) driven through discovery → run → checks → artifacts | B | have | 1 | T7 | `make parity` runs the corpus; a deliberately broken row makes it fail; a Forgejo corpus entry runs unmodified after conversion | — |
 | PAR-201 | `make parity` gate: no `missing` row, no `partial` without a wave or decision, no `have` row without an existing, passing named test | B | have | 1 | T7 | Removing a named test from the tree fails the gate with the row id; adding a row without a test fails | — |
 | PAR-202 | Living matrix (`docs/features/parity/parity.json` + generated `matrix.md`) with the docs-revision stamp; docs drift corrected | B | have | 1 | T8 | Every `PAR-` id appears once; the stamp names both docs revisions; `docs/threads.md` §11 matches §5.5/§5.6 and `15_threads.md` §2.6/§2.7 | — |
 
@@ -1144,14 +1237,17 @@ has one; where an earlier draft said `needs operator decision`, the chosen optio
 
 ---
 
-### 7.18 Decision record (operator decisions, 2026-11-26)
+### 7.18 Decision record (operator decisions, 2026-11-26 and 2026-11-27)
 
-The operator decided all fifteen on **2026-11-26**. Each verdict above now carries the chosen option and
-its one-line rationale; this table is the index. A decision closes when the operator replies on the master
-card; the matrix row then carries `approved_by` and the date, and the item moves. Until the implementation
-lands, a row may still read `partial` with `decision: D-n` — the decision is settled, the code is not.
+The operator decided **D-1…D-21** on **2026-11-26**. Each verdict above carries the chosen option and
+its one-line rationale; this table is the index. A decision closes when the operator replies on the
+master card; the matrix row then carries `approved_by` and the date, and the item moves. Until the
+implementation lands, a row may still read `partial` with `decision: D-n` — the decision is settled,
+the code is not. **D-22…D-27 were implemented under the plan on 2026-11-27 and are awaiting
+acknowledgement**; §1.13 lists each with what changes if it is declined. Until acknowledged, their
+rows keep `decision: D-n` and the code keeps the documented shape.
 
-| ID | Decision | From | Blocks | Chosen (2026-11-26) |
+| ID | Decision | From | Blocks | Chosen / implemented |
 |---|---|---|---|---|
 | D-1 | Canonical `spindle.*` expression context + `SPINDLE_*` env, with `github.*`/`forgejo.*` as aliases | §2.2 | PAR-004 | Introduce it; the aliasing already exists and parity is unaffected |
 | D-2 | `pull_request_target` at all; and head checkout inside it | S5 | PAR-015 | Per-repository opt-in, head checkout behind a second switch, both audited |
@@ -1168,13 +1264,18 @@ lands, a row may still read `partial` with `decision: D-n` — the decision is s
 | D-13 | A per-repository `send_write_tokens` switch for fork runs | S13 | PAR-118 | Exists, off by default, maintain+, audited |
 | D-14 | Managed runner pool, and capacity > 1 for untrusted jobs | S11 | PAR-174, PAR-178 | Pool off by default; capacity 1 is the untrusted path |
 | D-15 | The non-goal block: LXC/host backends, hosted Windows/macOS, artifact attestations | S17 | PAR-182 | Approve all three; each is refused by name |
-| D-16 | Which structural field a matrix may vary | §4.4 | PAR-053 | Only `runs-on`; every other structural field keeps the literal rule, and the `{group:, labels:}` form is refused by name |
+| D-16 | Which structural field a matrix may vary | §4.4 | PAR-053, PAR-030 | `runs-on` **and `container.image`** substitute per cell (amended by PAR-030: the acceptance line requires `container: image: debian:${{ matrix.variant }}` to pull that tag, and the image gate must see the resolved image, not the authored span); every other structural field keeps the literal rule, and the `{group:, labels:}` form is refused by name |
 | D-17 | `defaults.run` and expressions | §4.4 | PAR-054 | Literals only, as GitHub documents; a span there is a parse error, a step key still substitutes and wins |
 | D-18 | The job timeout default and its conclusion | §4.4 | PAR-055 | 360-minute default, `1…360`, expression-valued; the job reads `timed_out` while the checks mirror maps it to `failure` (the checks enum has no timed-out state) |
 | D-19 | Matrix admission without a hot-path store round trip for ordinary jobs | §4.4 | PAR-052 | A per-run CAS record, read/written only by a matrix that declares `max-parallel`; slots are released on finish, requeue and a lost claim |
 | D-20 | `hashFiles` caps and the no-match value | §4.3 | PAR-041 | In-container walk, 1000 files / 100 MiB caps named in the error, no match is the empty string, cached per step and invalidated after a step |
 | D-21 | A job `if:` reading secrets | S13 | PAR-058 | Allowed; a trusted run reads decrypted values, an untrusted run reads an empty map (false, not an error), nothing is logged |
 | D-22 | Organization and user secret scopes, precedence and repository policy | §4.7 | PAR-115 | Organization secrets exist with a per-secret repository policy (`all`/`selected`), resolved environment > repository > organization, recorded on the job by scope only; the USER scope is declined (a run executes as the repository, not a person) |
+| D-23 | A workflow-supplied registry login (`container.credentials`) | S12 | PAR-077 | **Refuse by name**, and keep the pull identity the runner operator's (`--registry-auth-file`): a workflow password would travel in the job payload (the bucket) and in docker create's environment, and every grant that widens isolation already excludes fork runs. A private image still pulls — as the runner, with its own credential. **Needs operator sign-off**: the row's "with workflow credentials" clause is narrowed to "pulls under the runner's credential" |
+| D-24 | The default step shell when a workflow authors no `shell:` | §4.5 | PAR-079 (amendment), PAR-200 | **bash**, GitHub/Forgejo's Linux default (`bash --noprofile --norc -eo pipefail -c`), with `sh -e` as the stated fallback on an image without bash. The earlier `sh` default was a documented deviation that made a real corpus workflow (a `<<<` here-string) unexecutable; `shell: sh` remains available. |
+| D-25 | The expression-function set for PAR-037 (`case` is not a platform function) | §4.3 | PAR-037 (amendment) | Amend the row's capability/acceptance from "`… hashFiles, case`" to the real GitHub/Forgejo set (success/failure/always/cancelled/canceled, startsWith/endsWith/contains/format/join, toJSON/fromJSON, hashFiles). `case` is not in either platform's language and is not invented here; it stays a named parse/evaluation error. Every real function has a conformance case in `TestExpressionFunctionSetMatchesPlatform`. |
+| D-26 | Stock toolchain labels resolve to digest-pinned upstream images | §4.10 | PAR-177 | The catalogue is public upstream images pinned by manifest digest (ubuntu 24.04, node 22, python 3.13, Go 1.25, Rust 1, docker 27-cli); a stock `runs-on` label with no `container.image` resolves to that image at fetch time. A runner's own `label:docker://…` mapping still applies (PAR-171); with no mapping, an explicit workflow image wins over the stock catalogue, and an unknown label is refused by name. spindle does not publish or mirror images; `--image-prefix` covers air-gapped hosts. |
+| D-27 | Email as a third failure-notification channel | §9.1a | PAR-197 | Implement a dependency-free SMTP notifier (stdlib `net/smtp` + `crypto/tls`) configured off by default under `threads.smtp.*`. It uses the same failure-only event filter as the inbox, sends only when the inbox record is first created (the record key is the dedupe), and masks the message with the run's job mask values; an unresolvable mask list skips email rather than sending unmasked. Credentials require TLS. |
 
 
 ## 8. What we will not do

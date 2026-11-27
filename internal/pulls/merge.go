@@ -1105,6 +1105,12 @@ func (s *Service) runFork(ctx context.Context, owner, repo string, in ForkInput,
 		}
 	}
 	s.emit(ctx, NotifyEvent{Repo: repoName(owner, repo), Class: "forked", Actor: who, PullNum: 0, Recipients: []string{}})
+	// PAR-021: the `fork` trigger fires on the ORIGINAL repository once the
+	// fork objects and the parent index are committed; a task retry that sees
+	// the index already listing the child still reaches here, so the run may
+	// be created twice (runs are immutable; a duplicate is visible, never a
+	// data loss).
+	s.forkEvent(ctx, ForkEvent{Source: repoName(owner, repo), Forkee: child, Actor: who})
 	return nil
 }
 

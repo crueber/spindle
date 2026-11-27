@@ -117,9 +117,13 @@ parity-closed: ## parity closure check: fail on any `missing` row (§9 definitio
 	$(GO) run ./internal/devtools/paritygate -check -strict
 	$(T15) $(GO) test -count=1 -timeout 10m -run 'TestParity' ./internal/e2e/
 
-# The execution tier is opt-in: it boots a server and a runner and executes a
-# corpus-shaped workflow in real containers, which the PR gate must not require.
-parity-exec: ## parity execution tier: a corpus-shaped workflow runs to success (needs docker + docker CLI)
+# The execution tier is opt-in: it boots a server and a runner, executes a
+# corpus-shaped workflow AND the committed golden of a real Forgejo workflow
+# (byte-unmodified) in real containers, and builds/pushes/pulls a daemonless
+# image through a local registry:2 — which the PR gate must not require (its
+# jobs are containers with no daemon). SPINDLE_PARITY_EXEC=1 makes a missing
+# daemon a failure, not a skip.
+parity-exec: ## parity execution tier: corpus execution + a daemonless registry build (needs a host docker daemon + docker CLI)
 	SPINDLE_PARITY_EXEC=1 $(T15) $(GO) test -count=1 -timeout 15m -run 'TestE2E_ParityExecution' -v ./internal/e2e/
 
 backup-drill: ## restore drill: seed, snapshot, restore into an empty instance, compare every surface (docs/BACKUP.md)

@@ -22,6 +22,7 @@ import (
 	"net/url"
 	"path"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 
@@ -67,6 +68,9 @@ type ThreadsDeps struct {
 	// checks the repository read gate and the expiry, so the page handler never
 	// decides access itself (15 §2.5).
 	OpenArtifact func(ctx context.Context, owner, repo, runID, name string, p auth.Principal) (*threads.ArtifactDownload, error)
+	// RunLogs assembles EVERY job's current-attempt log for the whole-run
+	// download (PAR-190). The service resolves the repository read gate.
+	RunLogs func(ctx context.Context, owner, repo, runID string, p auth.Principal) (*threads.RunLogBundle, error)
 	// Environments lists the repository's environment names for the
 	// `environment`-typed dispatch picker (PAR-023). Nil leaves the picker
 	// empty; the service still validates the submitted value.
@@ -115,6 +119,8 @@ func (s *Server) mountThreads() {
 	m.HandleFunc("POST /{owner}/{repo}/threads/validate", s.threadsValidate)
 	m.HandleFunc("GET /{owner}/{repo}/threads/{run}", s.threadRun)
 	m.HandleFunc("GET /{owner}/{repo}/threads/{run}/artifacts/{artifact}", s.threadArtifactDownload)
+	m.HandleFunc("GET /{owner}/{repo}/threads/{run}/logs.zip", s.threadRunLogsZip)
+	m.HandleFunc("GET /{owner}/{repo}/threads/{run}/logs.txt", s.threadRunLogsText)
 	m.HandleFunc("POST /{owner}/{repo}/threads/{run}/cancel", s.threadRunCancel)
 	m.HandleFunc("POST /{owner}/{repo}/threads/{run}/jobs/{job}/cancel", s.threadJobCancel)
 	m.HandleFunc("POST /{owner}/{repo}/threads/{run}/rerun", s.threadRunRerun)
@@ -664,6 +670,15 @@ type threadRunData struct {
 	// Notice is the ?notice= text a verb redirect carries (cancel/rerun/
 	// dispatch feedback).
 	Notice string
+	// Graph is the run's job dependency DAG (PAR-191): one node per workflow
+	// job key, matrix cells grouped under their job, each node linked to its
+	// job card. It is the service's own read model, never a second fold.
+	Graph *threadRunGraph
+	// LogsZipHref/LogsTxtHref download EVERY job's log (PAR-190); the service
+	// resolves the read gate and the archive is built from the same frames the
+	// panels tail.
+	LogsZipHref string
+	LogsTxtHref string
 	// JobLogs is one live-log panel per job (the island attaches by URL over
 	// the existing SSE transport — no new transport, 15 §6).
 	JobLogs []threadJobLog
@@ -673,6 +688,59 @@ type threadRunData struct {
 	// Error is the page-level error text (empty on a clean render); the empty
 	// section uses it to avoid claiming "no jobs" for a failed read.
 	Error string
+}
+
+// threadRunGraph is the page's DAG model: nodes grouped by dependency level so
+// the template can lay them out left to right (and stack them at ~390 px).
+type threadRunGraph struct {
+	Levels []threadRunGraphLevel
+	Nodes  int
+	Edges  int
+}
+
+// threadRunGraphLevel is one dependency depth.
+type threadRunGraphLevel struct {
+	Level int
+	Nodes []threadRunGraphNode
+}
+
+// threadRunGraphNode is one workflow job and its cells.
+type threadRunGraphNode struct {
+	Key       string
+	Name      string
+	State     string
+	Href      string
+	Blocked   bool
+	BlockedBy []string
+	Reason    string
+	Needs     []threadRunGraphNeed
+	Cells     []threadRunGraphCell
+	// Multi is true for a matrix job (or a reusable call): the cells render in
+	// one disclosed group under the job, so "one row per cell" is still visible
+	// without turning the graph into N nodes.
+	Multi bool
+}
+
+// threadRunGraphNeed is one edge as the node sees it (the dependency's state
+// says whether the edge satisfied the wait).
+type threadRunGraphNeed struct {
+	Key   string
+	State string
+	OK    bool
+}
+
+// threadRunGraphCell is one matrix cell (or a plain job's single row).
+type threadRunGraphCell struct {
+	JobID           string
+	Name            string
+	Context         string
+	State           string
+	Href            string
+	Matrix          string
+	DurationSeconds int64
+	QueueReason     string
+	Reason          string
+	Tolerated       bool
 }
 
 // threadJobLog is one job's live-log panel state.
@@ -733,6 +801,9 @@ func (s *Server) threadRun(w http.ResponseWriter, r *http.Request) {
 		data.CanApprove = data.CanWrite && view.Approval.CanDecide
 	}
 	data.CanApprove = data.CanApprove || data.Approval.CanDecide
+	data.Graph = threadRunGraphModel(view)
+	data.LogsZipHref = "/" + rc.Full + "/threads/" + url.PathEscape(view.Run.ID) + "/logs.zip"
+	data.LogsTxtHref = "/" + rc.Full + "/threads/" + url.PathEscape(view.Run.ID) + "/logs.txt"
 	for _, job := range view.Jobs {
 		data.JobLogs = append(data.JobLogs, threadJobLog{
 			JobID:  job.ID,
@@ -1006,5 +1077,145 @@ func runDotState(state string) string {
 		return "in_progress"
 	default:
 		return "pending"
+	}
+}
+
+// threadRunGraphModel projects the service's run graph onto the page (PAR-191).
+// The DAG is grouped by dependency level rather than drawn as an SVG: nodes are
+// links, edges are named on the node ("after build · success"), so the graph is
+// keyboard reachable and survives 390 px without a second renderer.
+func threadRunGraphModel(view *threads.RunView) *threadRunGraph {
+	if view == nil || view.Run == nil {
+		return nil
+	}
+	g := view.Graph
+	if g == nil {
+		g = threads.BuildRunGraph(view.Jobs)
+	}
+	if g == nil || len(g.Nodes) == 0 {
+		return nil
+	}
+	states := make(map[string]string, len(g.Nodes))
+	for _, n := range g.Nodes {
+		states[n.Key] = n.State
+	}
+	out := &threadRunGraph{Nodes: len(g.Nodes), Edges: len(g.Edges)}
+	byLevel := map[int]*threadRunGraphLevel{}
+	levels := []int{}
+	for _, n := range g.Nodes {
+		node := threadRunGraphNode{
+			Key: n.Key, Name: n.Name, State: n.State, Blocked: n.Blocked,
+			BlockedBy: n.BlockedBy, Reason: n.Reason,
+		}
+		for _, need := range n.Needs {
+			state, known := states[need]
+			if !known {
+				state = "unknown"
+			}
+			node.Needs = append(node.Needs, threadRunGraphNeed{Key: need, State: state, OK: state == "success"})
+		}
+		for i, c := range n.Cells {
+			cell := threadRunGraphCell{
+				JobID: c.JobID, Name: c.Name, Context: c.Context, State: c.State,
+				Href: "#job-" + c.JobID, Matrix: threadMatrixLabel(c.Matrix),
+				DurationSeconds: c.DurationSeconds, QueueReason: c.QueueReason,
+				Reason: c.Reason, Tolerated: c.Tolerated,
+			}
+			if i == 0 {
+				node.Href = cell.Href
+			}
+			node.Cells = append(node.Cells, cell)
+		}
+		if node.Href == "" {
+			node.Href = "#run-jobs"
+		}
+		node.Multi = len(node.Cells) > 1
+		lvl := byLevel[n.Level]
+		if lvl == nil {
+			lvl = &threadRunGraphLevel{Level: n.Level}
+			byLevel[n.Level] = lvl
+			levels = append(levels, n.Level)
+		}
+		lvl.Nodes = append(lvl.Nodes, node)
+	}
+	sortInts(levels)
+	for _, l := range levels {
+		out.Levels = append(out.Levels, *byLevel[l])
+	}
+	return out
+}
+
+// threadMatrixLabel renders one cell's matrix values ("go=1.22 · os=linux"),
+// sorted by axis so two renders of the same cell agree.
+func threadMatrixLabel(matrix map[string]string) string {
+	if len(matrix) == 0 {
+		return ""
+	}
+	keys := make([]string, 0, len(matrix))
+	for k := range matrix {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	parts := make([]string, 0, len(keys))
+	for _, k := range keys {
+		parts = append(parts, k+"="+matrix[k])
+	}
+	return strings.Join(parts, " · ")
+}
+
+// sortInts sorts a small int slice ascending (levels are discovered in node
+// order, and the page renders them left to right).
+func sortInts(v []int) {
+	for i := 1; i < len(v); i++ {
+		for j := i; j > 0 && v[j] < v[j-1]; j-- {
+			v[j], v[j-1] = v[j-1], v[j]
+		}
+	}
+}
+
+// threadRunLogsZip / threadRunLogsText are the run page's whole-run downloads
+// (PAR-190). The service resolves the read gate and assembles every job's log;
+// the page only names the file.
+func (s *Server) threadRunLogsZip(w http.ResponseWriter, r *http.Request) {
+	s.threadRunLogs(w, r, true)
+}
+
+func (s *Server) threadRunLogsText(w http.ResponseWriter, r *http.Request) {
+	s.threadRunLogs(w, r, false)
+}
+
+func (s *Server) threadRunLogs(w http.ResponseWriter, r *http.Request, asZip bool) {
+	rc, p, ok := s.collabEnv(w, r)
+	if !ok {
+		return
+	}
+	if threadsDeps.RunLogs == nil {
+		s.collabError(w, r, http.StatusServiceUnavailable, "threads service not wired")
+		return
+	}
+	runID := r.PathValue("run")
+	bundle, err := threadsDeps.RunLogs(r.Context(), rc.Owner, rc.Name, runID, p)
+	if err != nil {
+		s.collabError(w, r, collabErrStatus(err), err.Error())
+		return
+	}
+	name := runID + "-logs"
+	hdr := w.Header()
+	hdr.Set("Cache-Control", "no-store")
+	hdr.Set("X-Content-Type-Options", "nosniff")
+	if asZip {
+		hdr.Set("Content-Type", "application/zip")
+		hdr.Set("Content-Disposition", mime.FormatMediaType("attachment", map[string]string{"filename": name + ".zip"}))
+		w.WriteHeader(http.StatusOK)
+		if werr := threads.WriteRunLogsZip(w, bundle); werr != nil {
+			slog.Default().Warn("threads: run log zip aborted", "run", runID, "err", werr)
+		}
+		return
+	}
+	hdr.Set("Content-Type", "text/plain; charset=utf-8")
+	hdr.Set("Content-Disposition", mime.FormatMediaType("attachment", map[string]string{"filename": name + ".txt"}))
+	w.WriteHeader(http.StatusOK)
+	if werr := threads.WriteRunLogsText(w, bundle); werr != nil {
+		slog.Default().Warn("threads: run log download aborted", "run", runID, "err", werr)
 	}
 }

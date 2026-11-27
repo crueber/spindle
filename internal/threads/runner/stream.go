@@ -1,10 +1,8 @@
 package runner
 
 import (
-	"bytes"
 	"fmt"
 	"sync"
-	"time"
 
 	"github.com/crueber/spindle/internal/threads"
 )
@@ -19,6 +17,9 @@ type StepStream interface {
 	Systemf(format string, args ...any)
 	StepStart(step StepPlan)
 	StepEnd(step StepPlan, conclusion string, code int, ms int64)
+	Group(name string)
+	GroupEnd()
+	Truncated(note string)
 	Cancelled() bool
 	Mask(text string) string
 	// root is the real attempt stream a nested buffer writes to.
@@ -28,13 +29,15 @@ type StepStream interface {
 // bufferStream is one deferred-output sink. It is safe for concurrent use (a
 // background step's docker exec writes from its own goroutine) and bounded: a
 // runaway process is truncated with a stated note instead of growing the
-// runner's memory without limit.
+// runner's memory without limit. It buffers RECORDS, so a step marker or a
+// worked-command group written inside the block keeps its exact position.
 type bufferStream struct {
 	parent *Streamer
 	limit  int
 
 	mu        sync.Mutex
-	buf       bytes.Buffer
+	recs      []pendingRecord
+	bytes     int
 	truncated bool
 }
 
@@ -46,24 +49,36 @@ func newBufferStream(parent *Streamer, limit int) *bufferStream {
 }
 
 func (b *bufferStream) Write(p []byte) (int, error) {
+	if len(p) == 0 {
+		return 0, nil
+	}
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	remaining := b.limit - b.buf.Len()
+	remaining := b.limit - b.bytes
 	if remaining <= 0 {
 		b.truncated = true
 		return len(p), nil
 	}
-	if len(p) > remaining {
-		_, _ = b.buf.Write(p[:remaining])
+	text := p
+	if len(text) > remaining {
+		text = text[:remaining]
 		b.truncated = true
-		return len(p), nil
 	}
-	_, _ = b.buf.Write(p)
+	if n := len(b.recs); n > 0 {
+		last := &b.recs[n-1]
+		if last.kind == "" && last.stream == "output" {
+			last.text += string(text)
+			b.bytes += len(text)
+			return len(p), nil
+		}
+	}
+	b.recs = append(b.recs, pendingRecord{stream: "output", text: string(text)})
+	b.bytes += len(text)
 	return len(p), nil
 }
 
 func (b *bufferStream) Systemf(format string, args ...any) {
-	fmt.Fprintf(b, "\n"+format+"\n", args...)
+	b.push(pendingRecord{stream: "system", text: fmt.Sprintf(format, args...)})
 }
 
 func (b *bufferStream) StepStart(step StepPlan) {
@@ -71,37 +86,58 @@ func (b *bufferStream) StepStart(step StepPlan) {
 	if step.Kind == "checkout" {
 		name += " (actions/checkout)"
 	}
-	b.Systemf("▸ step %d: %s", step.Index+1, name)
+	b.push(pendingRecord{kind: threads.LogKindStepStart, step: step.Index + 1, name: name})
 }
 
 func (b *bufferStream) StepEnd(step StepPlan, conclusion string, code int, ms int64) {
-	dur := time.Duration(ms) * time.Millisecond
-	if conclusion == threads.JobSuccess {
-		b.Systemf("◂ step %d: %s in %s", step.Index+1, conclusion, dur.Round(time.Millisecond))
-		return
-	}
-	b.Systemf("◂ step %d: %s (exit %d) in %s", step.Index+1, conclusion, code, dur.Round(time.Millisecond))
+	b.push(pendingRecord{
+		kind: threads.LogKindStepEnd, step: step.Index + 1, name: step.Name,
+		conclusion: conclusion, exitCode: code, durationMS: ms,
+	})
+}
+
+func (b *bufferStream) Group(name string) {
+	b.push(pendingRecord{kind: threads.LogKindGroup, name: name})
+}
+
+func (b *bufferStream) GroupEnd() {
+	b.push(pendingRecord{kind: threads.LogKindGroupEnd})
+}
+
+func (b *bufferStream) Truncated(note string) {
+	b.push(pendingRecord{kind: threads.LogKindTruncated, stream: "system", text: note})
+}
+
+func (b *bufferStream) push(rec pendingRecord) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.recs = append(b.recs, rec)
 }
 
 func (b *bufferStream) Cancelled() bool         { return b.parent.Cancelled() }
 func (b *bufferStream) Mask(text string) string { return b.parent.Mask(text) }
 func (b *bufferStream) root() *Streamer         { return b.parent }
 
-// flush writes the buffered block to the real stream and states truncation.
-// The parent masks every frame, so a secret echoed into a background log is
-// masked exactly like a foreground step's.
+// flush hands the buffered block to the real stream (one contiguous run in the
+// parent's queue) and states truncation. The parent masks every frame, so a
+// secret echoed into a background log is masked exactly like a foreground
+// step's.
 func (b *bufferStream) flush() {
 	b.mu.Lock()
-	text := b.buf.String()
+	recs := b.recs
 	truncated := b.truncated
-	b.buf.Reset()
+	b.recs = nil
+	b.bytes = 0
 	b.truncated = false
 	b.mu.Unlock()
-	if text != "" {
-		_, _ = b.parent.Write([]byte(text))
+	if len(recs) > 0 {
+		b.parent.enqueue(recs[0])
+		for _, rec := range recs[1:] {
+			b.parent.enqueue(rec)
+		}
 	}
 	if truncated {
-		b.parent.Systemf("spindle: output truncated at %d bytes (a background/parallel step produced more than the runner buffers)", b.limit)
+		b.parent.Truncated(fmt.Sprintf("spindle: output truncated at %d bytes (a background/parallel step produced more than the runner buffers)", b.limit))
 	}
 }
 

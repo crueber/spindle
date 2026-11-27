@@ -221,7 +221,7 @@ func TestBuildPlanDefaultImageAndShells(t *testing.T) {
 		t.Fatalf("default image = %q", p.Image)
 	}
 	cases := map[string]string{
-		"":         "sh -e -c",
+		"":         "bash --noprofile --norc -eo pipefail -c",
 		"sh":       "sh -e -c",
 		"bash":     "bash --noprofile --norc -eo pipefail -c",
 		"bash {0}": "bash",
@@ -388,5 +388,56 @@ func TestPlanEventRunnerAndVarsContexts(t *testing.T) {
 	got, err := p.substitute("${{ runner.os }}-${{ vars.REGION }}-${{ github.event.action }}", p.stepValues(p.Env, nil, true))
 	if err != nil || got != "Linux-eu-published" {
 		t.Fatalf("substitute = %q, %v", got, err)
+	}
+}
+
+// TestPlanKeepsLiteralBlockEnvMultiLine pins the PAR-200 regression that stopped
+// the corpus execution tier from ever running: the corpus files fetch their
+// source through a multi-line `env: CHECKOUT: |` script, and a plan that
+// flattened the newlines to spaces turned `git config --global --add
+// safe.directory '*'` plus the next line into one broken `git` invocation. An
+// authored env value is data; the exec argv carries it verbatim.
+func TestPlanKeepsLiteralBlockEnvMultiLine(t *testing.T) {
+	job := fixtureJob()
+	job.Spec.Env = map[string]string{
+		"CHECKOUT": "git config --global --add safe.directory '*'\ngit init -q . && echo ok\n",
+	}
+	p, err := BuildPlan(PlanInput{Job: job})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := "CHECKOUT=git config --global --add safe.directory '*'\ngit init -q . && echo ok\n"
+	found := false
+	for _, step := range p.Steps {
+		for i := 0; i+1 < len(step.Argv); i++ {
+			if step.Argv[i] == "--env" && step.Argv[i+1] == want {
+				found = true
+			}
+		}
+	}
+	if !found {
+		t.Fatalf("the literal block env did not reach a step argv verbatim; steps=%+v", p.Steps)
+	}
+}
+
+// TestPlanGivesJobsAWritableHome pins the corpus-workflow prerequisite: a
+// non-root container's default HOME is /, so `git config --global` fails. The
+// job gets a runner-created home, and an authored `env: HOME` still wins.
+func TestPlanGivesJobsAWritableHome(t *testing.T) {
+	job := fixtureJob()
+	p, err := BuildPlan(PlanInput{Job: job})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := p.ContainerEnv["HOME"]; got != RunnerHome {
+		t.Fatalf("HOME = %q, want %q", got, RunnerHome)
+	}
+	job.Spec.Env = map[string]string{"HOME": "/custom/home"}
+	p2, err := BuildPlan(PlanInput{Job: job})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := p2.ContainerEnv["HOME"]; got != "/custom/home" {
+		t.Fatalf("an authored HOME lost: %q", got)
 	}
 }

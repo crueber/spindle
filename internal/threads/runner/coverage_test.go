@@ -631,7 +631,10 @@ func TestStreamerDropsFramesAfterRetries(t *testing.T) {
 	s := NewStreamer(NewClient(srv.URL, "t"), "wjt_t", "jr_x", 1, nil, func() {}, nil)
 	s.Write([]byte("dropped\n"))
 	s.Close()
-	if calls != 3 {
-		t.Fatalf("calls = %d, want 3 attempts then a drop", calls)
+	// Three retries for the refused frame, then ONE best-effort close-time
+	// notice stating the gap (a server that is down cannot store it, and the
+	// runner's own log names the drop either way).
+	if calls != 4 {
+		t.Fatalf("calls = %d, want 3 attempts then one gap notice", calls)
 	}
 }

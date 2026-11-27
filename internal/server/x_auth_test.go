@@ -556,3 +556,20 @@ func TestExchangeCodeRetriesOnce(t *testing.T) {
 		t.Fatalf("failed exchange = %q", got)
 	}
 }
+
+// TestParseCredentialTokenScheme pins the corpus fetch idiom: Forgejo and
+// GitHub spell a CI token `Authorization: token <value>`, and the importer's
+// converted corpus files keep that spelling (only the host is rewritten), so
+// the same value resolves as Bearer — never a second authentication path.
+func TestParseCredentialTokenScheme(t *testing.T) {
+	tok, basic, err := parseCredential("token wjt_abc123")
+	if err != nil || basic || tok != "wjt_abc123" {
+		t.Fatalf("token scheme = %q %v %v", tok, basic, err)
+	}
+	if tok, _, err := parseCredential("TOKEN wjt_abc123"); err != nil || tok != "wjt_abc123" {
+		t.Fatalf("token scheme is case-insensitive: %q %v", tok, err)
+	}
+	if _, _, err := parseCredential("token"); err == nil {
+		t.Fatal("a scheme with no value must stay unparseable")
+	}
+}

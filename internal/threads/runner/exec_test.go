@@ -3,9 +3,11 @@ package runner
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os/exec"
 	"strings"
 	"sync"
 	"testing"
@@ -35,11 +37,27 @@ func recordingStream(t *testing.T) (*Streamer, func() string) {
 	var b strings.Builder
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		var frame struct {
-			Text string `json:"text"`
+			Seq int `json:"seq"`
+			threads.LogRecord
 		}
 		_ = json.NewDecoder(r.Body).Decode(&frame)
 		mu.Lock()
-		b.WriteString(frame.Text)
+		switch frame.Kind {
+		case threads.LogKindStepStart:
+			b.WriteString(fmt.Sprintf("\n▸ step %d: %s\n", frame.Step, frame.Name))
+		case threads.LogKindStepEnd:
+			if frame.ExitCode != 0 {
+				b.WriteString(fmt.Sprintf("\n◂ step %d: %s (exit %d) in %s\n", frame.Step, frame.Conclusion, frame.ExitCode, time.Duration(frame.DurationMS)*time.Millisecond))
+			} else {
+				b.WriteString(fmt.Sprintf("\n◂ step %d: %s in %s\n", frame.Step, frame.Conclusion, time.Duration(frame.DurationMS)*time.Millisecond))
+			}
+		case threads.LogKindGroup:
+			b.WriteString("\n▸ group: " + frame.Name + "\n")
+		case threads.LogKindGroupEnd:
+			b.WriteString("\n◂ group end\n")
+		default:
+			b.WriteString(frame.Text)
+		}
 		mu.Unlock()
 		_, _ = w.Write([]byte(`{"state":"running","cancel":false}`))
 	}))
@@ -287,5 +305,61 @@ func TestLastPortMapping(t *testing.T) {
 	}
 	if got := lastPortMapping(""); got != "" {
 		t.Fatalf("empty = %q", got)
+	}
+}
+
+// lockedWriter is a comparable io.Writer (os/exec shares one pipe when Stdout
+// and Stderr compare equal).
+type lockedWriter struct {
+	mu sync.Mutex
+	b  strings.Builder
+}
+
+func (w *lockedWriter) Write(p []byte) (int, error) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.b.Write(p)
+}
+
+// TestSharedOutputStreamKeepsStdoutStderrOrder pins the interleaving guarantee
+// DockerCLIProcess.Stream relies on: because cmd.Stdout and cmd.Stderr are the
+// SAME comparable writer, os/exec gives both descriptors one pipe, so the
+// child's writes reach the log in the order it wrote them — a step that prints
+// to stdout and stderr alternately is not reordered by two copier goroutines.
+func TestSharedOutputStreamKeepsStdoutStderrOrder(t *testing.T) {
+	w := &lockedWriter{}
+	cmd := exec.Command("sh", "-c", "for i in 1 2 3 4 5; do printf 'out%s\\n' \"$i\"; printf 'err%s\\n' \"$i\" >&2; done")
+	cmd.Stdout = w
+	cmd.Stderr = w
+	if err := cmd.Run(); err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	want := "out1\nerr1\nout2\nerr2\nout3\nerr3\nout4\nerr4\nout5\nerr5\n"
+	if got := w.b.String(); got != want {
+		t.Fatalf("combined stream = %q, want %q", got, want)
+	}
+}
+
+// TestSetupCreatesTheWritableHome pins the setup half of the HOME fix: the
+// runner creates the directory it advertises (mode 0777, so an arbitrary job
+// user can write its dotfiles).
+func TestSetupCreatesTheWritableHome(t *testing.T) {
+	docker := &fakeDocker{}
+	job := fixtureJob()
+	job.Spec.Services = nil
+	stream := quietStream(t)
+	if res := executorWith(docker).Execute(context.Background(), ExecInput{Job: job, AttemptToken: "wjt_token_value"}, stream); res.Conclusion != threads.JobSuccess {
+		t.Fatalf("conclusion = %s", res.Conclusion)
+	}
+	found := false
+	for _, call := range docker.snapshot() {
+		if strings.Contains(call, "mkdir -p") && strings.HasSuffix(call, " "+RunnerHome) {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("setup did not create %s: %v", RunnerHome, docker.snapshot())
 	}
 }

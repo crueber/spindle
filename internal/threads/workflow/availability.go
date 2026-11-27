@@ -49,6 +49,9 @@ const (
 	// SiteDefaultsRun is `defaults.run.*`: literal by decision, so it admits no
 	// context at all.
 	SiteDefaultsRun
+	// SiteContainerImage is a job `container.image` (PAR-030): expanded per
+	// matrix cell before the job record is written, like `runs-on`.
+	SiteContainerImage
 	// SiteCallWith is a reusable caller's `with:` value (expanded at run
 	// creation, before any step or secret exists).
 	SiteCallWith
@@ -58,6 +61,16 @@ const (
 	SiteJobTimeout
 	// SiteStepTimeout is a step-level `timeout-minutes` expression.
 	SiteStepTimeout
+	// SiteJobContinueOnError is a job-level expression-valued
+	// `continue-on-error` (PAR-056): it describes the matrix cell, so it reads
+	// the cell's contexts but not secrets, steps or needs.
+	SiteJobContinueOnError
+	// SiteJobConcurrencyCancel is a job-level expression-valued
+	// `concurrency.cancel-in-progress` (PAR-151).
+	SiteJobConcurrencyCancel
+	// SiteWorkflowConcurrencyCancel is a workflow-level expression-valued
+	// `concurrency.cancel-in-progress` (no matrix exists yet).
+	SiteWorkflowConcurrencyCancel
 )
 
 // String renders a site for an error message and the docs table.
@@ -81,6 +94,8 @@ func (s Site) String() string {
 		return "runs-on"
 	case SiteDefaultsRun:
 		return "defaults.run"
+	case SiteContainerImage:
+		return "container.image"
 	case SiteCallWith:
 		return "a reusable-workflow with: value"
 	case SiteCallOutput:
@@ -89,27 +104,35 @@ func (s Site) String() string {
 		return "a job timeout-minutes"
 	case SiteStepTimeout:
 		return "a step timeout-minutes"
+	case SiteJobContinueOnError:
+		return "a job continue-on-error"
+	case SiteJobConcurrencyCancel:
+		return "a job concurrency.cancel-in-progress"
+	case SiteWorkflowConcurrencyCancel:
+		return "a workflow concurrency.cancel-in-progress"
 	default:
 		return "a step field"
 	}
 }
 
 // contextAvailability is the matrix: a context name → the sites that may read
-// it. The github/forgejo/forge aliases share one entry because they are
-// value-identical (D-1's compatibility aliases, PAR-004).
+// it. The canonical `spindle` context and its github/forgejo/forge aliases share
+// one entry because they are value-identical (D-1, PAR-004).
 var contextAvailability = map[string]map[Site]bool{
 	"github": setOf(
 		SiteStepField, SiteStepIf, SiteJobIf, SiteJobName, SiteJobGroup,
 		SiteWorkflowGroup, SiteJobOutputs, SiteRunName, SiteRunsOn, SiteCallWith,
-		SiteJobTimeout, SiteStepTimeout,
+		SiteJobTimeout, SiteStepTimeout, SiteContainerImage,
+		SiteJobContinueOnError, SiteJobConcurrencyCancel, SiteWorkflowConcurrencyCancel,
 	),
 	"runner": setOf(SiteStepField, SiteStepIf, SiteJobOutputs),
 	"vars":   setOf(SiteStepField, SiteStepIf, SiteJobIf, SiteJobName, SiteJobOutputs),
-	"matrix": setOf(SiteStepField, SiteStepIf, SiteJobIf, SiteJobName, SiteJobGroup, SiteJobOutputs, SiteRunsOn, SiteJobTimeout, SiteStepTimeout),
+	"matrix": setOf(SiteStepField, SiteStepIf, SiteJobIf, SiteJobName, SiteJobGroup, SiteJobOutputs, SiteRunsOn, SiteJobTimeout, SiteStepTimeout, SiteContainerImage, SiteJobContinueOnError, SiteJobConcurrencyCancel),
 	"inputs": setOf(
 		SiteStepField, SiteStepIf, SiteJobIf, SiteJobName, SiteJobGroup,
 		SiteWorkflowGroup, SiteJobOutputs, SiteRunName, SiteRunsOn, SiteCallWith,
-		SiteJobTimeout, SiteStepTimeout,
+		SiteJobTimeout, SiteStepTimeout, SiteContainerImage,
+		SiteJobContinueOnError, SiteJobConcurrencyCancel, SiteWorkflowConcurrencyCancel,
 	),
 	"env":     setOf(SiteStepField, SiteStepIf, SiteJobIf, SiteJobOutputs),
 	"secrets": setOf(SiteStepField, SiteStepIf, SiteJobIf, SiteJobOutputs),
@@ -124,7 +147,8 @@ var contextAvailability = map[string]map[Site]bool{
 	// the cell exists — GitHub's own row).
 	"strategy": setOf(
 		SiteStepField, SiteStepIf, SiteJobName, SiteJobGroup, SiteJobOutputs,
-		SiteRunsOn, SiteJobTimeout, SiteStepTimeout,
+		SiteRunsOn, SiteJobTimeout, SiteStepTimeout, SiteContainerImage,
+		SiteJobContinueOnError, SiteJobConcurrencyCancel,
 	),
 }
 
@@ -150,17 +174,19 @@ func SiteContexts(site Site) []string {
 }
 
 // contextAvailable reports whether one context may be read at one site. The
-// forgejo/forge aliases resolve to github's entry.
+// canonical spindle context and the github/forgejo/forge aliases resolve to its
+// entry.
 func contextAvailable(site Site, context string) bool {
 	context = normalizeContextName(context)
 	return contextAvailability[context][site]
 }
 
-// normalizeContextName maps the compatibility aliases onto the canonical
-// context name.
+// normalizeContextName maps every spelling of the run context onto its canonical
+// name. `spindle` is the documented spelling; the others are value-identical
+// aliases so an imported workflow keeps its meaning (D-1, PAR-004).
 func normalizeContextName(context string) string {
 	switch context {
-	case "forgejo", "forge":
+	case "spindle", "forgejo", "forge":
 		return "github"
 	}
 	return context

@@ -75,6 +75,8 @@ type threadRunSummary struct {
 	State          string         `json:"state"`
 	Trusted        bool           `json:"trusted"`
 	Actor          string         `json:"actor"`
+	HoldReason     string         `json:"hold_reason,omitempty"`
+	ApprovalKind   string         `json:"approval_kind,omitempty"`
 	EventPayload   map[string]any `json:"event_payload"`
 }
 

@@ -104,10 +104,10 @@ metadata and matrix axes. A file with an unknown key runs nothing and is reporte
 |---|---|---|---|
 | `name` | string | file stem | display name and the `<workflow>` segment of every check context |
 | `on` | event name, list, or mapping | — | triggers; a file with no `on` parses but never fires |
-| `run-name` | string with `${{ … }}` spans | the workflow `name` | the run title shown in the run list and API (§6.3a); only `github.*` and `inputs.*` resolve, and the rendered value is one bounded line |
+| `run-name` | string with `${{ … }}` spans | the workflow `name` | the run title shown in the run list and API (§6.3a); only `spindle.*`/`github.*` (aliases) and `inputs.*` resolve, and the rendered value is one bounded line |
 | `env` | map[string]string | empty | variables merged **under** job/step `env`; scalars are coerced to text (`COUNT: 3` → `"3"`), a nested value is a parse error |
 | `defaults` | `{run: {shell, working-directory}}` | none | the shell and working directory every `run` step inherits; a job's block overrides it per key and a step's own key still wins (§5.2) |
-| `concurrency` | string or `{group, cancel-in-progress}` | none | one running and one pending run per group per repository (§5.4) |
+| `concurrency` | string or `{group, cancel-in-progress}` (`cancel-in-progress` may be one `${{ … }}` expression, PAR-151) | none | one running and one pending run per group per repository (§5.4) |
 | `permissions` | mapping, or `read-all` / `write-all` | instance `threads.default_permissions` (`read`) | the job token's authority: `contents`, `issues`, `pull-requests`, `deployments`, `id-token`; any other scope is a parse error (§7.2) |
 | `enable-openid-connect` | bool | false | Forgejo's spelling for the OIDC grant; the same grant as `permissions: id-token: write` (§7.2) |
 | `jobs` | map[string]job | **required** | at least one job |
@@ -127,7 +127,14 @@ metadata and matrix axes. A file with an unknown key runs nothing and is reporte
 | `workflow_call` | `inputs`, `secrets`, `outputs` | a reusable workflow's interface; the key never starts a run itself (§4.5) |
 | `release` | `types` | a release lifecycle action emitted by the releases service (§3.6) |
 | `issues` | `types` | an issue lifecycle action emitted by the issues service (§3.6) |
-| `issue_comment` | `types` | a new issue comment (the only emitted action) (§3.6) |
+| `issue_comment` | `types` | a new issue **or PR conversation** comment (the only emitted action) (§3.6) |
+| `pull_request_review` | `types` | a review submitted/dismissed (`submitted`, `dismissed`) (§3.7) |
+| `pull_request_review_comment` | `types` | a new inline review comment (`created`) (§3.7) |
+| `label` | `types` | a label definition created/edited/deleted (§3.7) |
+| `milestone` | `types` | a milestone definition created/opened/closed/edited/deleted (§3.7) |
+| `fork` | none | a completed fork, on the original repository (§3.7) |
+| `watch` | none | a first star (`action: started`) (§3.7) |
+| `check_run` | `types` | an external CI check run created/completed (§3.7) |
 | `schedule` | a list of `- cron: "…"`, optional `timezone:` | the maintainer's cron sweep, default branch only |
 
 `branches`/`tags`/`paths` and their `*-ignore` twins are exclusion/include pairs: a trigger may not
@@ -185,7 +192,7 @@ same value for every type.
 | `defaults` | `{run: {shell, working-directory}}` | workflow `defaults` | the job's run-step defaults; a step's own `shell`/`working-directory` still wins (§5.2) |
 | `if` | expression | `success()` over `needs` | evaluated by the server before the job is claimable (§5.3); it may read `secrets.*` and `vars.*` (PAR-058), which read empty on an untrusted run |
 | `timeout-minutes` | int, or one `${{ … }}` expression | `360` | cancels the whole job and removes its containers; the job conclusion reads `timed_out`, distinct from an operator `cancelled`. The expression resolves per matrix cell from `github.*`, `matrix.*` and `inputs.*`, and must be `1…360` |
-| `continue-on-error` | bool | false | the job stays `failure` but the **run** conclusion follows the other jobs; fail-fast does not fire from it, `needs.<job>.result` reads `success` and dependents run. Forgejo documents this key as *ignored* — a recorded divergence (D-4), GitHub's semantics are kept |
+| `continue-on-error` | bool, or one `${{ … }}` expression | false | the job stays `failure` but the **run** conclusion follows the other jobs; fail-fast does not fire from it, `needs.<job>.result` reads `success` and dependents run. The expression resolves **per matrix cell** at run creation from `spindle.*`/`matrix.*`/`strategy.*`/`inputs.*`, so `${{ matrix.experimental }}` tolerates exactly the true cell; a non-boolean result fails run creation (PAR-056). Forgejo documents this key as *ignored* — a recorded divergence (D-4), GitHub's semantics are kept |
 | `environment` | name or `{name, url}` | none | deployment target with reviewers and secrets (§7.4) |
 | `outputs` | map[name]template | none | values a dependent job reads as `needs.<job>.outputs.<name>` (§6.5) |
 | `strategy.matrix` | axes, plus `include` / `exclude` lists | none | product of scalar axes with GitHub's `include`/`exclude` merge rules (§5.2) |
@@ -196,28 +203,31 @@ same value for every type.
 | `permissions` | mapping or shorthand | workflow default | job-level wins |
 | `uses` / `with` / `secrets` | string / map / map | — | call a reusable workflow (`./.spindle/workflows/<name>.yml`, or a pinned `owner/repo/.spindle/workflows/<name>.yml@<40-hex sha>` on this instance); the callee must declare `on.workflow_call`, whose typed inputs, secrets and outputs are its interface (§4.5). |
 
-**`runs-on` is the one structural field a matrix may vary (PAR-053).** A label may be a whole
-`${{ matrix.<axis> }}`, `${{ inputs.<name> }}` or `${{ github.<field> }}` span, and is expanded for
-each cell before the job record is written; a span that resolves to nothing is a run-creation
-error, never an empty label. Every other structural field — `container.image`,
-`services.<id>.image`, `environment` (its `name` and `url`) — and the env layers above a step take
-literal values only: the runner reads a workflow/job/container/service `env` value verbatim (only a
-**step** `env:` is substituted), and those fields are chosen before a matrix cell or dispatch input
-exists. A `${{ … }}` span there is a **parse error naming the field** (§6.2).
+**`runs-on` and `container.image` are the two structural fields a matrix may vary (PAR-053,
+PAR-030).** A label or the image may contain whole `${{ matrix.<axis> }}`, `${{ inputs.<name> }}` or
+`${{ spindle.<field> }}` spans, expanded for each cell before the job record is written; a span
+that resolves to nothing is a run-creation error, never an empty label and never an image the gate
+sees literally. Every other structural field — `services.<id>.image`, `environment` (its `name`
+and `url`), `defaults.run.*` — and the env layers above a step take literal values only: the
+runner reads a workflow/job/container/service `env` value verbatim (only a **step** `env:` is
+substituted), and those fields are chosen before a matrix cell or dispatch input exists. A
+`${{ … }}` span there is a **parse error naming the field** (§6.2), not an inert value.
 
 Container mapping keys: `image` (required in practice), `env`, `ports`, `command`, `entrypoint`,
-`options`, `volumes`. Only `image`, `env` and `options` are applied; `ports`, `command` and
-`entrypoint` are accepted and not applied — the runner owns the container's lifetime and mounts only
-its workspace volume. `volumes` is refused by name unless the runner's operator allow-listed the
-host path (`--container-valid-volume`, §4.4a). `options` is checked against a small allowlist
-(§4.4a), and may carry docker's `--health-*` readiness flags for a service (§4.2 of the reference).
+`options`, `volumes`. Every one is **applied** (docs/threads.md §4.1): `ports` publishes each
+container port on an ephemeral loopback host port (a host-side port is refused by name),
+`entrypoint`/`command` own the container's process (docker's semantics; the runner keeps it alive
+only when both are absent, and fails by name when the process exited before the first step), and
+`volumes` is refused by name unless the runner's operator allow-listed the host path
+(`--container-valid-volume`, §4.4a). `options` is checked against a small allowlist (§4.4a), and may
+carry docker's `--health-*` readiness flags for a service (§4.2 of the reference).
 
 A service entry takes `image`, `env`, `ports`, `command` (Forgejo spelling `cmd`),
-`entrypoint`, `options`, `volumes`. `credentials` is **refused by name**: a registry password in a
-workflow would travel in the job payload and in docker argv. The pull identity belongs to the runner
-— its daemon's config, an `--image-prefix` mirror, or the operator's `--registry-auth-file` — and the
-runner logs in with the password on stdin into a private `DOCKER_CONFIG`, never argv and never a log
-frame.
+`entrypoint`, `options`, `volumes`. A job container's `credentials` is **refused by name** (D-23): a
+registry password in a workflow would travel in the job payload and in docker argv. The pull identity
+belongs to the runner — its daemon's config, an `--image-prefix` mirror, or the operator's
+`--registry-auth-file` — and the runner logs in with the password on stdin into a private
+`DOCKER_CONFIG`, never argv and never a log frame.
 
 ### 2.4 A step
 
@@ -230,7 +240,7 @@ frame.
 | `with` | map[string]string | — | action inputs; an unknown key fails the step |
 | `env` | map[string]string | empty | overrides job/container env |
 | `if` | expression | `success()` | the subset in §6.3 |
-| `shell` | `sh` (default), `bash`, `python`, `python3`, `pwsh`/`powershell`, `cmd`, or a custom `<command> {0}` template | `sh -e` | the interpreter; `sh` runs `sh -e -c`, `bash` runs `bash --noprofile --norc -eo pipefail -c` (falling back to `sh -e` with a log line when the image has no bash), a custom template is split into argv words with `{0}` replaced by a script file (§4.1) |
+| `shell` | `bash` (default), `sh`, `python`, `python3`, `pwsh`/`powershell`, `cmd`, or a custom `<command> {0}` template | `bash --noprofile --norc -eo pipefail` | the interpreter; the default is GitHub/Forgejo's Linux default (D-24). `bash` runs `bash --noprofile --norc -eo pipefail -c` (falling back to `sh -e` with a log line when the image has no bash), `sh` runs `sh -e -c`, a custom template is split into argv words with `{0}` replaced by a script file (§4.1) |
 | `working-directory` | path | the workspace | relative joins the workspace; absolute wins |
 | `continue-on-error` | bool | false | step may fail without failing the job (result still `failure`) |
 | `timeout-minutes` | int, or one `${{ … }}` expression | remaining job time | on expiry the step's container (a foreground step) or its own process group (a background step) is killed and the step reports `timed_out`; the expression reads `github.*`, `matrix.*` and `inputs.*` and must be `1…360` |
@@ -258,8 +268,8 @@ A failed step without `continue-on-error` skips the rest of the job (each record
 - a `${{ … }}` reference outside the documented vocabulary — an unknown context, an unknown
   `github.*` field, an undeclared matrix key or dispatch input, a malformed `secrets.<name>`, an
   unsupported operator — is a parse error naming the supported set (§6.2);
-- a `${{ … }}` span in a **structural** field other than `runs-on` — `container.image`,
-  `services.<id>.image`, `environment` (string form, `name` and `url`) — or in a
+- a `${{ … }}` span in a **structural** field other than `runs-on` and `container.image` —
+  `services.<id>.image`, `environment` (string form, `name` and `url`), `defaults.run.*` — or in a
   workflow/job/container/service `env` value, is a parse error naming the field; these take a
   literal (a step `env:` is the one env layer that substitutes), or one job per value (§6.2);
 - an `if:` function outside `success`, `failure`, `always`, `cancelled`, `startsWith`,
@@ -279,12 +289,12 @@ A failed step without `continue-on-error` skips the rest of the job (each record
 - an unknown trigger name (`on: [tag]`), `on: schedule` without `- cron:` entries, and any cron
   outside the subset (§8).
 
-**Accepted but inert** — the file parses and runs, but the key changes nothing:
-
-- `container.ports` / `command` / `entrypoint` (the job container's lifetime is the runner's). A
-  **service's** `env`, `ports`, `command`, `entrypoint`, `options` and `volumes` are applied (§4.2 of
-  the reference: a service is a sidecar, not the job container). `container.volumes` are applied only
-  when the runner's operator allow-lists the host path (§4.4a); otherwise they are refused by name.
+**Nothing is accepted and silently dropped.** Every accepted job-container key is applied:
+`container.ports`, `command` and `entrypoint` (§2.3, docs/threads.md §4.1), and
+`container.volumes` only when the runner's operator allow-lists the host path (§4.4a) — otherwise
+they are refused by name. A **service's** `env`, `ports`, `command`, `entrypoint`, `options` and
+`volumes` are applied too (§4.2 of the reference: a service is a sidecar, not the job container). A
+refused container key (`credentials`, `--tty`) fails the job with a reason naming it.
 
 No trigger is inert: every accepted trigger key now changes what fires (§3).
 
@@ -397,11 +407,10 @@ repository also enabled `pr_target_allow_head_checkout` (a second, separately au
 
 ### 3.3 `workflow_dispatch`
 
-`environment: ${{ inputs.environment }}` is a **parse error**: the structural fields
-(`runs-on`, `container.image`, `services.<id>.image`, `environment`) and the
-workflow/job/container/service `env` layers do not take `${{ }}` (only a step `env:` does), so the
-file is reported and creates no runs. Write the environment literally and use the input for the
-command:
+`environment: ${{ inputs.environment }}` is a **parse error**: the remaining structural fields
+(`services.<id>.image`, `environment`) and the workflow/job/container/service `env` layers do not
+take `${{ }}` (only a step `env:` and, since PAR-030, `container.image` do), so the file is
+reported and creates no runs. Write the environment literally and use the input for the command:
 
 ```yaml
 name: Deploy
@@ -485,12 +494,17 @@ reports the count. See [`threads.md` §6.4](threads.md#64-schedule) and §9.1a.
 | `workflow_dispatch` | UI / API / CLI | yes | yes | the resolved ref |
 | `schedule` | maintainer sweep | yes | yes | the default branch tip |
 | `release` | the releases service | yes | yes | the **default branch tip** (the run reports the tag commit) |
-| `issues` / `issue_comment` | the issues service | yes | yes | the **default branch tip** |
+| `issues` / `issue_comment` | the issues service (and pulls for a PR comment) | yes | yes | the **default branch tip** |
+| `pull_request_review` / `pull_request_review_comment` | the review service | yes (a fork PR's review run is untrusted) | yes (none on a fork) | the head commit (same repo) or the **base branch tip** (fork) |
 | `pull_request_target` | PR opened/synchronize/reopened | yes | **yes** | the **base branch tip** (a head checkout needs the second switch) |
 | `repository_dispatch` | API dispatch (write role) | yes | yes | the **default branch tip** |
 | `workflow_run` | an upstream run's edge | yes (unless the upstream was untrusted, which holds it) | yes | the **default branch tip** |
 | `create` / `delete` | the push hook | yes | yes | the **default branch tip** |
 | `deployment` / `deployment_status` | a deployment record | yes | yes | the **default branch tip** |
+| `label` / `milestone` | the issues service | yes | yes | the **default branch tip** |
+| `fork` | the pulls fork task | yes | yes | the **default branch tip** |
+| `watch` | social's first star | yes | yes | the **default branch tip** |
+| `check_run` | an external CI report | yes | yes | the **default branch tip** (the payload carries the reported head) |
 
 ### 3.6 `release`, `issues` and `issue_comment`
 
@@ -563,10 +577,22 @@ jobs:
   payload. A job-token push starts nothing.
 - **`deployment` / `deployment_status`**: a job's deployment record created, or its status changed
   (`pending`, `in_progress`, `failure`).
-- **Named refusals**: `merge_group`, `fork`, `watch`, `status`, `check_run`, `check_suite`,
-  `registry_package`, `gollum`, `page_build`, `branch_protection_rule` and `public` are **parse
-  errors naming why** — this engine does not emit them, and a trigger that can never fire is not
-  accepted. `merge_group` returns when the separate merge-queue item lands, with the documented
+- **`pull_request_review` / `pull_request_review_comment`**: a review posted/dismissed, or an
+  inline thread comment created. Both use the PR's merge ref and the `pull_request` fork trust rule
+  (a fork PR's review run reads the base file, untrusted).
+- **`label` / `milestone`**: a label or milestone **definition** created/edited/deleted (a milestone
+  state flip is `closed`/`opened`). These are triage transitions in the issues service, not the
+  `labeled`/`milestoned` PR metadata edges.
+- **`fork` / `watch`**: a completed fork (on the original repository, `forkee` in the payload) and a
+  first star (`action: started`). A repeat star and an unstar emit nothing.
+- **`check_run`**: `created` when an external CI report first writes a check run and `completed` when
+  it reaches a terminal state. Threads' own mirrored check is the run itself and never re-fires this
+  trigger, so a workflow cannot trigger a copy of itself.
+- **Named refusals**: `merge_group`, `status`, `check_suite`, `registry_package`, `gollum`,
+  `page_build`, `branch_protection_rule`, `public`, `discussion`, `discussion_comment` and
+  `pull_request_review_thread` are **parse errors naming why** — this engine does not emit them, and
+  a trigger that can never fire is not accepted. `merge_group` returns when the separate
+  merge-queue item lands, with the documented
   `refs/heads/gh-readonly-queue/<base>/pr-<n>-<sha>` ref shape.
 
 ## 4. Steps and actions
@@ -600,10 +626,12 @@ jobs:
         run: npm test
 ```
 
-- `sh` is `sh -e -c`; `bash` is `bash --noprofile --norc -eo pipefail -c`; `python`/`python3`
-  map to `python -c` / `python3 -c`; `pwsh` and `cmd` are accepted but need the interpreter in the
-  image. If the image has no **bash**, a `shell: bash` step falls back to `sh -e` and prints one
-  log line saying so (GitHub's Linux fallback) instead of failing with exit 127.
+- The default shell (no `shell:` key) is **bash**, like GitHub and Forgejo on Linux: `bash
+  --noprofile --norc -eo pipefail -c` (D-24). `shell: bash` is the same; `sh` is `sh -e -c`;
+  `python`/`python3` map to `python -c` / `python3 -c`; `pwsh` and `cmd` are accepted but need the
+  interpreter in the image. If the image has no **bash**, the default and `shell: bash` both fall
+  back to `sh -e` and print one log line saying so (GitHub's Linux fallback) instead of failing with
+  exit 127.
 - An arbitrary command template is allowed if it contains exactly one `{0}`: `shell: dash -e {0}`,
   `shell: perl {0}`. The template is split into argv words — it is never handed to a shell — and the
   runner writes the script to a per-step file in the container and substitutes its path. A template
@@ -1178,7 +1206,7 @@ if a stale file reaches a job), never a silent skip.
 
 **Job-level `if:`** is decided by the server before a runner exists. It adds
 `needs.<job>.result`/`needs.<job>.outputs.<name>` (folded over a matrix dependency's cells),
-`github.*`, `matrix.*`, `inputs.*`, `env.*`, `vars.*` and `secrets.*`; `runner.*` and `steps.*`
+`spindle.*`/`github.*` (aliases), `matrix.*`, `inputs.*`, `env.*`, `vars.*` and `secrets.*`; `runner.*` and `steps.*`
 are not available there (a named parse error). `secrets.*` reads the decrypted value on a
 trusted run and **empty** on an untrusted run — the condition is false, never an error, and no
 value appears in the job's reason or the log. An empty `if` means `success()`.
@@ -1223,13 +1251,18 @@ jobs:
   pending, never two waiting.
 - `cancel-in-progress: true` cancels the run holding the group (and any pending run) as soon as
   the new run is created, then takes the group.
+- `cancel-in-progress` may be one `${{ … }}` expression (PAR-151), evaluated at creation from
+  `spindle.*`/`inputs.*` (job level also `matrix.*`/`strategy.*`): `cancel-in-progress:
+  ${{ spindle.ref_name != 'main' }}` protects `main` while cancelling older branch runs. A
+  non-boolean result fails run creation and the authored expression never reaches the record.
 - `cancel-in-progress: false` (the default) sequences in trigger order: the holder finishes, the
   pending run starts, and a later run replaces the pending one.
 - The group is expanded at run creation and is a bucket key. A reference that cannot exist is a
   **parse error**; a supported reference with no value for this run (an input without a
   default) fails run creation with `422`. It never falls back to literal text.
-- Workflow-level groups may read `github.*` (the fields listed above), `inputs.*` and — at job
-  level — the job's `matrix.*`. `env.*`, `steps.*`, `needs.*` and operators are not supported.
+- Workflow-level groups may read `spindle.*` (the fields listed above; `github.*`/`forgejo.*`/
+  `forge.*` are the same values), `inputs.*` and — at job level — the job's `matrix.*`. `env.*`,
+  `steps.*`, `needs.*` and operators are not supported.
 - `group: ci-${{ github.ref }}` is the usual idiom: without the ref, `cancel-in-progress: true`
   on a push to any branch cancels `main`.
 - Enforcement is at **claim/admission**: a job whose group is held waits in the queue; no runner
@@ -1270,12 +1303,17 @@ secrets are added last, by name. Every step sees:
 | `GITHUB_REPOSITORY` / `SPINDLE_REPO` | `owner/repo` |
 | `GITHUB_SHA` / `SPINDLE_SHA` | the run's commit |
 | `GITHUB_REF` / `SPINDLE_REF` | the triggering ref: `refs/heads/<branch>` (a PR: the base branch — the job's identity; the run header and `${{ github.ref }}` carry `refs/pull/<n>/merge`, §3.2), or `refs/tags/<tag>` for a tag push, where `GITHUB_REF_NAME` is the tag |
-| `GITHUB_REF_NAME` / `GITHUB_EVENT_NAME` | the ref's short name (branch, tag, or PR base branch) / `push`, `pull_request`, `pull_request_target`, `repository_dispatch`, `workflow_run`, `create`, `delete`, `deployment`, `deployment_status`, `workflow_dispatch`, `schedule`, `release`, `issues`, `issue_comment` |
+| `GITHUB_REF_NAME` / `GITHUB_EVENT_NAME` | the ref's short name (branch, tag, or PR base branch) / `push`, `pull_request`, `pull_request_target`, `repository_dispatch`, `workflow_run`, `create`, `delete`, `deployment`, `deployment_status`, `workflow_dispatch`, `schedule`, `release`, `issues`, `issue_comment`, `pull_request_review`, `pull_request_review_comment`, `label`, `milestone`, `fork`, `watch`, `check_run` |
 | `GITHUB_EVENT_PATH` / `FORGEJO_EVENT_PATH` | `/tmp/spindle-event.json`: the bounded event payload, written before the first step |
 | `RUNNER_OS`, `RUNNER_ARCH`, `RUNNER_NAME`, `RUNNER_TEMP`, `RUNNER_TOOL_CACHE`, `RUNNER_ENVIRONMENT`, `RUNNER_DEBUG` | `Linux`, `X64`/`ARM64`/…, the registered runner name, writable `/tmp/spindle-temp` and `/tmp/spindle-tool-cache`, `self-hosted`, `0` |
 | `SPINDLE_EVENT_PATH`, `SPINDLE_RUNNER_*` | the same values in spindle spelling |
 | `GITHUB_WORKFLOW`, `GITHUB_JOB`, `GITHUB_RUN_ID` | workflow, job, run |
-| `GITHUB_ACTOR` | the principal that triggered the run (absent when the run has none); the same value `${{ github.actor }}` reads |
+| `GITHUB_RUN_ATTEMPT` | the job attempt, the same value `${{ spindle.run_attempt }}` reads |
+| `GITHUB_ACTOR`, `GITHUB_TRIGGERING_ACTOR` | the principal that triggered the run (absent when the run has none); both are the same value `${{ spindle.actor }}` / `${{ spindle.triggering_actor }}` read |
+| `GITHUB_REPOSITORY_OWNER` | the repository owner (the login; spindle has no numeric owner id) |
+| `GITHUB_REF_TYPE` | `branch` or `tag` for the job's ref (empty when the run recorded none) |
+| `GITHUB_HEAD_REF` / `GITHUB_BASE_REF` | a pull request's head and base branch names; empty on every other event |
+| `GITHUB_WORKFLOW_REF` / `GITHUB_WORKFLOW_SHA` | `<owner>/<repo>/<workflow path>@<ref>` and the workflow file's commit |
 | `GITHUB_WORKSPACE` / `SPINDLE_WORKSPACE` | `/spindle/workspace` |
 | `SPINDLE_RUN_ID`, `SPINDLE_JOB_ID`, `SPINDLE_CHECK`, `SPINDLE_ATTEMPT` | ids and the check context |
 | `SPINDLE_TRUSTED` | `true` for a trusted run |
@@ -1290,9 +1328,10 @@ secrets are added last, by name. Every step sees:
 | `SPINDLE_ID_TOKEN_REQUEST_URL` / `…_TOKEN` (and `ACTIONS_*`) | OIDC exchange, `id-token: write` only |
 | each organization/repository/environment secret | by its own name, trusted runs only; environment > repository > organization (§7.1) |
 
-Not provided: `GITHUB_STATE` (there are no `pre`/`post` hooks) and the `github.token` /
-`forgejo.token` context field (a parse error; use `$GITHUB_TOKEN` in a script). A workflow migrating
-from elsewhere usually has to replace the language's own conveniences (§9 and §10).
+Not provided: the `github.token` / `forgejo.token` context field (a parse error; use `$GITHUB_TOKEN`
+in a script). A workflow migrating from elsewhere usually has to replace the language's own
+conveniences (§9 and §10). `$GITHUB_STATE` is provided to a JavaScript action only (its pre→post
+hand-off, §6.6a); a `run` step has no post hook to receive one.
 
 ### 6.2 Where `${{ … }}` is substituted
 
@@ -1305,25 +1344,32 @@ contexts: …)`), never an empty value. The table is the contract; the test
 
 | Site | Available contexts |
 |---|---|
-| step `name`, `run`, `with` values, `env` values, `shell`, `working-directory` | `github`, `runner`, `vars`, `matrix`, `strategy`, `job`, `inputs`, `env`, `secrets`, `steps`, `needs` |
+| step `name`, `run`, `with` values, `env` values, `shell`, `working-directory` | `spindle`, `runner`, `vars`, `matrix`, `strategy`, `job`, `inputs`, `env`, `secrets`, `steps`, `needs` |
 | step `if:` | same as a step field |
-| job `if:` | `github`, `vars`, `matrix`, `inputs`, `env`, `secrets`, `needs` (no `runner`, no `steps`, no `strategy`, no `job`) |
-| job `name` | `github`, `vars`, `matrix`, `strategy`, `inputs` |
-| job-level `concurrency.group` | `github`, `matrix`, `strategy`, `inputs` |
-| workflow-level `concurrency.group` | `github`, `inputs` (no matrix exists yet) |
-| job `outputs` values | `github`, `runner`, `vars`, `matrix`, `strategy`, `inputs`, `env`, `secrets`, `steps`, `needs` |
-| `runs-on` label | `github`, `matrix`, `strategy`, `inputs` |
-| job/step `timeout-minutes` | `github`, `matrix`, `strategy`, `inputs` |
-| `run-name` | `github`, `inputs` |
+| job `if:` | `spindle`, `vars`, `matrix`, `inputs`, `env`, `secrets`, `needs` (no `runner`, no `steps`, no `strategy`, no `job`) |
+| job `name` | `spindle`, `vars`, `matrix`, `strategy`, `inputs` |
+| job-level `concurrency.group` | `spindle`, `matrix`, `strategy`, `inputs` |
+| workflow-level `concurrency.group` | `spindle`, `inputs` (no matrix exists yet) |
+| job-level `concurrency.cancel-in-progress` | `spindle`, `matrix`, `strategy`, `inputs` |
+| workflow-level `concurrency.cancel-in-progress` | `spindle`, `inputs` (no matrix exists yet) |
+| job `continue-on-error` | `spindle`, `matrix`, `strategy`, `inputs` |
+| job `outputs` values | `spindle`, `runner`, `vars`, `matrix`, `strategy`, `inputs`, `env`, `secrets`, `steps`, `needs` |
+| `runs-on` label | `spindle`, `matrix`, `strategy`, `inputs` |
+| `container.image` | `spindle`, `matrix`, `strategy`, `inputs` |
+| job/step `timeout-minutes` | `spindle`, `matrix`, `strategy`, `inputs` |
+| `run-name` | `spindle`, `inputs` |
 | `defaults.run.*` | none (literals only) |
-| reusable caller `with:` | `github`, `inputs` |
+| reusable caller `with:` | `spindle`, `inputs` |
 | `on.workflow_call.outputs.<name>.value` | `jobs.<id>.outputs.<name>` only |
 
-`forgejo.*` and `forge.*` are value-identical aliases of `github.*` and share its row. `steps.*`
-additionally requires the step to be declared **before** the site (a later step's outputs are
-unknown); `needs.*` requires the job to be a declared dependency. Both a dependency's
-`outputs.<name>` and its `result` are available in a step field, a step `if:` and a job-output
-template (the runner payload carries the folded results as well as the outputs).
+`spindle.*` is the documented name of the run context (D-1, PAR-004). `github.*`, `forgejo.*` and
+`forge.*` are **value-identical aliases** — `${{ spindle.ref }}`, `${{ github.ref }}` and
+`${{ forgejo.ref }}` read the same field from the same record, so an imported workflow never
+changes meaning. The alias is a spelling, not a wider vocabulary: the field set below is closed
+for every spelling. `steps.*` additionally requires the step to be declared **before** the site (a
+later step's outputs are unknown); `needs.*` requires the job to be a declared dependency. Both a
+dependency's `outputs.<name>` and its `result` are available in a step field, a step `if:` and a
+job-output template (the runner payload carries the folded results as well as the outputs).
 
 **`job` and `strategy` (`PAR-039`).** `job.status` is the running job's status at the moment the
 step that reads it starts — `success`, `failure` or `cancelled` — and it follows the same rule as
@@ -1334,20 +1380,23 @@ bound or the cell count; a plain job (no matrix) has an empty strategy context, 
 the empty string. A matrix cell's strategy values are fixed at run creation and are identical in its
 name, lock key, `runs-on`, timeouts and steps.
 
-**`runs-on` is the one structural field a matrix may vary** (PAR-053): each label may be a whole
-`${{ matrix.<axis> }}`, `${{ inputs.<name> }}` or `${{ github.<field> }}` reference and is expanded
-per cell before the job record is written. A label that resolves to nothing fails run creation; it
-is never queued as the empty string. `container.image`, `services.<id>.image`, `environment` (its
-`name` and `url`) and a workflow/job/container/service `env` value are still chosen before a cell
-exists and are **not** substitution sites — only a **step** `env:` value substitutes — so a `${{ … }}`
-span there is a **parse error naming the field**, never a literal that reaches the image gate or the
-process environment.
+**`runs-on` and `container.image` are the two structural fields a matrix may vary**
+(PAR-053/PAR-030): a label or the image may contain whole `${{ matrix.<axis> }}`,
+`${{ inputs.<name> }}` or `${{ spindle.<field> }}` spans and is expanded per cell before the job
+record is written. A label or image that resolves to nothing fails run creation; it is never queued
+as the empty string and the image gate never sees the authored span. `services.<id>.image`,
+`environment` (its `name` and `url`), `defaults.run.*` and a workflow/job/container/service `env`
+value are still chosen before a cell exists and are **not** substitution sites — only a **step**
+`env:` value substitutes — so a `${{ … }}` span there is a **parse error naming the field**, never
+a literal that reaches the image gate or the process environment. These refusals are deliberate
+(the service field and the environment name are bucket/storage keys; `defaults.run` is literal by
+D-17), not inert values.
 
 Each reference resolves at run time:
 
 | Reference | Value |
 |---|---|
-| `github.<field>` / `forgejo.<field>` / `forge.<field>` | the run's `event_name`, `sha`, `ref`, `ref_name`, `repository`, `workflow`, `job`, `run_id`, `actor`, plus the two server addresses `server_url`/`api_url` (§6.1); the aliases are value-identical |
+| `spindle.<field>` / `github.<field>` / `forgejo.<field>` / `forge.<field>` | the run's `event_name`, `sha`, `ref`, `ref_name`, `ref_type`, `repository`, `repository_owner`, `workflow`, `workflow_ref`, `workflow_sha`, `job`, `run_id`, `run_attempt`, `actor`, `triggering_actor`, `head_ref`/`base_ref` (a pull request's branch names; empty on every other event), plus the two server addresses `server_url`/`api_url` (§6.1); the aliases are value-identical. `action_path`/`action_ref` resolve only in a composite action's own steps. `actor_id`, `repository_owner_id`, `run_number` and `ref_protected` are in the closed set but have **no value** in a spindle run: reading one is a named error naming the reason (there are no numeric account ids and no per-workflow run counter; branch protection is not projected into the run context), never the empty string |
 | `github.event.inputs.<name>` | the dispatch input's value (same as `inputs.<name>`); the name must be declared |
 | `github.event.<field>` | a documented payload field: `action`, `ref`, `before`/`after`, `repository.*`, `sender.login`, `pull_request.*` (`number`, `title`, `state`, `draft`, `merged`, `user.login`, `head.*`, `base.*`), `release.tag_name`/`name`/`draft`/`prerelease`/`target_commitish`/`author.login`/`assets`, `issue.number`/`title`/`state`/`user.login`/`labels`, `comment.body`/`user.login`. The set is closed; the full JSON is at `$GITHUB_EVENT_PATH` |
 | `runner.<field>` | `os`, `arch`, `name`, `temp`, `tool_cache`, `environment`, `debug` (step sites and step `if:` only) |
@@ -1692,9 +1741,16 @@ Limits: 1 MiB per step, 20 summaries per job, 4 MiB joined. An oversized summary
 otherwise succeeded (on a failed step it is only logged). `docker://` actions do not receive the
 file.
 
-`$GITHUB_STATE` is **not** provided: it exists for an action's pre→post hand-off and this engine
-runs no pre/post hooks yet. `::save-state::` is answered with a named warning, so nothing is
-accepted-and-inert.
+**`$GITHUB_STATE`** is a JavaScript action's pre→post hand-off. The per-action file is
+`/spindle/state/<n>` (shared by that invocation's `pre`, `main` and `post` phases); append
+`NAME=VALUE` lines to it and the **post hook** receives each value as `STATE_<name>` — the contract
+`actions/cache` and `setup-node` use (`process.env["STATE_cache-primary-key"]`). Names may contain
+letters, digits, `.`, `_` and `-`; `=` and whitespace are refused by name. `::save-state name=X::value`
+is the deprecated spelling of the same write (the file wins a collision in one phase). Caps: 1 MiB of
+state per action, 128 names, 64 KiB per value; an oversized or malformed file fails a phase that
+otherwise succeeded. A state value can be a token, so it is delivered by name on the docker client's
+environment and never enters argv. A `run` step, a `docker://` action and a composite action have no
+post hook, so `::save-state::` there is a named line rather than a silent drop.
 
 ### 6.7 Workflow commands
 
@@ -1717,6 +1773,7 @@ Lines of the form `::name key=value::message` in a step's output are workflow co
 | `::add-mask::VALUE` | adds VALUE to the job's log mask permanently — there is no unmask. Under 4 bytes it is recorded but not applied. At most 128 masks |
 | `::stop-commands::TOKEN` / `::TOKEN::` | stop/resume command parsing around untrusted output |
 | `::set-output name=NAME::VALUE` | deprecated output alias (§6.5) |
+| `::save-state name=NAME::VALUE` | deprecated `$GITHUB_STATE` write: the post hook of the same action receives `STATE_NAME` (§6.6a); a non-action step says so by name |
 | `::debug::` | a debug log line |
 | anything else | a visible warning naming it; the line stays in the log |
 
@@ -2001,6 +2058,20 @@ The sweeper reports bytes reclaimed **per family** (run, job, log, artifact, que
 `POST …/api/v1/admin/gc` (or the admin GC page) can run a **dry run**: identical counts and
 bytes, nothing deleted.
 
+### 8.1a Failure notifications
+
+A failed run notifies its watchers through up to three channels, all with the same failure-only
+filter and the run link:
+
+- **in-app** — one durable notification per (user, run), read in the Threads page or
+  `GET …/api/threads/notifications`;
+- **webhook** — the repository's `notify_webhook` gets one POST;
+- **email** — off by default, enabled with `threads.smtp.host` (+ `from`, optional
+  `port`/`username`/`password`/`tls`/`timeout`). It sends to the subscriber's verified address only
+  when the inbox record is first created (the record key is the dedupe) and masks the message with
+  the run's job mask values. Credentials require TLS; a delivery failure is logged, not retried.
+  `docs/go/11_config_cli.md` has the bounds.
+
 ### 8.2 The runner, in brief
 
 | Need | Answer |
@@ -2008,7 +2079,7 @@ bytes, nothing deleted.
 | minting | `/admin/runners` (browser, host admin) → `wrg_` registration token, 15 min, with a repository policy (`all` or up to 50 `owner/name` / `owner/*` patterns) |
 | start | `spindle --server URL runner serve --register wrg_… --token-file F --labels … --name … --capacity N` |
 | labels | exact, comma-separated, matched as a **subset**, case-insensitive; default `self-hosted,linux,docker` |
-| label → image | Forgejo's `name:docker://image` spelling (e.g. `ubuntu-latest:docker://node:lts`): a job whose `runs-on` names that label and names no `container.image` runs in that image. `lxc://` and `host` are refused by name (D-15 non-goals) |
+| label → image | Forgejo's `name:docker://image` spelling (e.g. `ubuntu-latest:docker://node:lts`): a job whose `runs-on` names that label and names no `container.image` runs in that image. The stock labels (`ubuntu-latest`, `node`, `python`, `go`, `rust`, `docker`) resolve to digest-pinned upstream images when no mapping is declared; `spindle runner images --label` resolves one and refuses an unknown label by name. With no runner mapping, an explicit `container.image` wins over the stock catalogue; a runner's declared mapping remains its own image for that label. `lxc://` and `host` are refused by name (D-15 non-goals) |
 | capacity | default `1`; N jobs share the daemon and are **not** isolated from each other |
 | Docker | required; `DOCKER_HOST` names the daemon; the host socket needs `--allow-host-docker` |
 | fork runs | off by default; a runner needs `--allow-fork-runs` **and** the repository allowed |
@@ -2361,9 +2432,10 @@ The examples below are derived from working repositories (Weave and Scriobh), no
 | `on: push: tags: ["v*"]` | same | a tag push matching the glob starts the run (§3.1); the importer converts the filter as written, and a tags-only trigger never matches a branch push |
 | `on: push: paths:` / `paths-ignore:` | same | the changed-file filter (§3.1); an `on.pull_request.paths` filter is the merge-base diff |
 | `on: release` / `issues` / `issue_comment` | same | each `types:` is the emitter vocabulary in §3.6; the run reads the default branch's file |
+| `on: pull_request_review` / `pull_request_review_comment` / `label` / `milestone` | same | the owning service's emitted vocabulary; each `types:` is closed to it (§3.7) |
 | `runs-on: docker` | `runs-on: [self-hosted, linux, docker]` | labels are exact; match a runner's declared set |
 | `runs-on: ubuntu-latest` | same spelling | mapped to `self-hosted` + `linux` and scheduled on the stock runner; no image change (`windows-*`/`macos-*` stay queued, D-15) |
-| `container: {image: …}` | same | digest pins are honoured and may be required by policy |
+| `container: {image, env, ports, volumes, options, command, entrypoint}` | same | every key is applied: `ports` is an ephemeral loopback publish, `entrypoint`/`command` own the container process, `options`/`volumes` pass the runner's policy (docs/threads.md §4.1 and §8.7). `credentials` is refused by name (the pull identity is the runner's) |
 | `uses: actions/checkout@v4` | `uses: actions/checkout` | built-in; the `@ref` is accepted and ignored by the runner, and the importer drops it |
 | `with: fetch-depth: 0` | same | `fetch-tags`, `ref` and `path` are supported too |
 | `actions/setup-go`, `setup-node` | the remote action under policy, or a base image (`golang:1.27`, `node:22`) + `actions/cache` | the action's `cache:` input maps onto the built-in cache pair; without it, the refusal names the exact recipe (§6.4a) |
@@ -2371,7 +2443,7 @@ The examples below are derived from working repositories (Weave and Scriobh), no
 | `secrets.NAME` | `$NAME` (already an env var) | `${{ secrets.NAME }}` is substituted everywhere (§6.2), and masked in the log; a whole-value step `env:` reference is delivered by **name**, which keeps the value out of argv |
 | `secrets.GITHUB_TOKEN` | `$GITHUB_TOKEN` / `$SPINDLE_JOB_TOKEN` | the same automatic, scoped job token under both spellings (§7.2) |
 | `github.event_name`, `github.ref`, `github.sha`, `github.repository`, `github.ref_name`, `github.actor` | `${{ github.* }}` in a step field or step `if:`; `$GITHUB_*` in scripts | the field set is closed — an unknown field is a parse error. `$GITHUB_ACTOR` and `${{ github.actor }}` are the same value |
-| `forgejo.*` / `forge.*` | `github.*` | value-identical aliases |
+| `forgejo.*` / `forge.*` | `github.*`, or `spindle.*` | value-identical aliases of the canonical `spindle.*` context (D-1, PAR-004); all resolve from the same record |
 | `$GITHUB_SERVER_URL` | same spelling | also `$GITHUB_API_URL` (`/api/v1`), `$FORGEJO_SERVER_URL` and `${{ github.server_url }}`; `$SPINDLE_SERVER` is the same origin (§6.1) |
 | `github.event.inputs.x` | `github.event.inputs.x` or `inputs.x` | dispatch inputs only; the input must be declared |
 | `github.event.*` | same | the documented payload projection (§6.2); `jq` at `$GITHUB_EVENT_PATH` reads the whole record |
@@ -2871,7 +2943,7 @@ the answer where the other gaps are listed.
 
 | Source construct | Why it is refused, or what it does today | What to do in the Spindle workflow |
 |---|---|---|
-| `on:` a trigger the **engine** cannot emit (`merge_group`, `fork`, `watch`, `status`, `check_run`, `check_suite`, `registry_package`, `gollum`, `page_build`, `branch_protection_rule`, `public`) | a named engine refusal (`on: <name>: <why>` at parse), never an accepted-and-inert key; `merge_group` waits on the merge-queue card | dispatch the work (`workflow_dispatch`) or start it from a `push`; the trigger is removed |
+| `on:` a trigger the **engine** cannot emit (`merge_group`, `status`, `check_suite`, `registry_package`, `gollum`, `page_build`, `branch_protection_rule`, `public`, `discussion`, `discussion_comment`, `pull_request_review_thread`) | a named engine refusal (`on: <name>: <why>` at parse), never an accepted-and-inert key; `merge_group` waits on the merge-queue card | dispatch the work (`workflow_dispatch`) or start it from a `push`; the trigger is removed |
 | `on:` a trigger the engine emits but the importer has not learned yet (`repository_dispatch`, `workflow_run`, `pull_request_target`, `create`/`delete`, `deployment`/`deployment_status`) | the engine parses and fires it (gated as §3.2/§3.7 documents); the importer reports it `UNTRANSLATED` by name today | convert, then add the trigger by hand; the importer names it in the report so nothing is silent |
 | `on.push.paths` / `paths-ignore`, `on.pull_request.paths` / `paths-ignore` | **supported**: the changed-file filter (§3.1) for a push (pre-image diff) and a PR (merge-base diff) | nothing to change |
 | `on.push.branches-ignore` / `tags-ignore` | **supported**: exclusion lists, and the include form with `!` mixes both (§3.1) | nothing to change |
@@ -2888,10 +2960,11 @@ the answer where the other gaps are listed.
 | `actions/cache` | **supported** (§6.4a; nothing to translate beyond the workspace-relative `path` rule) | keep `path` inside the workspace: point the tool at `.npm`/`.cache/pip` in `env:` |
 | `container.credentials`, `services.<id>.credentials` | the pull identity belongs to the runner, not the file | the runner's docker config / mirror |
 | `environment` whose `name` is an expression or is not a valid name, or whose `url` is not an absolute http(s) URL | the name is a bucket key and the URL is rendered as a link | a literal name; the URL literal or omitted |
-| `concurrency.cancel-in-progress` as an expression | only a literal `true`/`false` is supported | a literal, or split workflows |
+| `concurrency.cancel-in-progress` as an expression | **supported** (PAR-151): one `${{ … }}` expression evaluated at creation from `spindle.*`/`inputs.*` (job level also `matrix.*`/`strategy.*`) | nothing to change |
 | a concurrency `group` the target cannot expand (`${{ env.* }}`, `${{ secrets.* }}`, an undeclared axis or dispatch input) | the group is a lock; it fails closed rather than degrading to literal text | a group built from `github.*`, a declared matrix axis, or a declared input |
 | `timeout-minutes` as a `${{ }}` expression | **supported** (§2.3/§2.4): one expression per key, resolving from `github.*`/`matrix.*`/`inputs.*` and bounded `1…360`; `job` and `step` both accept it | nothing to change |
-| `continue-on-error`, `strategy.fail-fast` as expressions | the target takes a literal boolean | a literal, or one job per case |
+| `continue-on-error` as an expression | **supported** (PAR-056): one `${{ … }}` expression resolved per matrix cell | nothing to change |
+| `strategy.fail-fast` as an expression | the target takes a literal boolean | a literal, or one job per case |
 | an unknown key anywhere (the parser is strict) | it would be a typo the engine ignores | fix or remove it |
 | a dispatch input type other than `string`/`boolean`/`choice`/`number`/`environment` | the target has no such type | carried as a **string** input (the name still resolves) with the original type named |
 | a cron entry the scheduler cannot evaluate (an unknown macro/name/zone, seconds) | the target scheduler rejects the file | rewrite the schedule; the entry is dropped by name |
@@ -2919,8 +2992,8 @@ Three things are **resolved** rather than refused, because the target has an exa
   `${X}` (the secret is already an environment variable).
 
 Constructs that parse but behave differently are *notes*, not refusals: a `with:` on a `docker://`
-step (not applied yet; pass arguments in the image or use a local action) and an unmapped
-`windows-*`/`macos-*` label (a written non-goal — the job stays queued with a named reason).
+step becomes `INPUT_*` environment variables (as it does on any action), and an unmapped
+`windows-*`/`macos-*` label is a written non-goal — the job stays queued with a named reason.
 
 Run-time policy refusals stay named at run time: an image outside `threads.image_allow_prefixes` (or
 without a digest when the instance requires one), a `container.options` flag outside the runner's
@@ -3038,7 +3111,9 @@ If you come from a hosted CI system, these are the surprises, in the order they 
    onto `self-hosted` + `linux`; Windows/macOS labels do not map at all. A job naming one stays
    queued with a reason that names the documented non-goal (D-15/PAR-182), never a silent spinner.
    A runner may declare a per-label image (`ubuntu-latest:docker://ubuntu:24.04`); the workflow's
-   own `container.image` always wins.
+   own `container.image` always wins. With no runner mapping, a stock toolchain label (`node`,
+   `python`, `go`, `rust`, `docker`, `ubuntu-latest`) resolves to its digest-pinned upstream image;
+   an unknown stock label is refused by name by `spindle runner images --label`.
 10. **Fork PRs are read-only by policy.** No secrets, the base branch's workflow file, and possibly
     an approval gate — the file cannot opt out. The token is `contents: read` unless the repository
     enabled `send_write_tokens` (maintain+, audited); `id-token` is never granted to a fork.
@@ -3060,7 +3135,9 @@ compatibility surface has its own gate:
 
 - **`make parity`** runs the conformance gate and the corpus. The gate reads
   [`features/parity/parity.json`](features/parity/parity.json) (one row per
-  capability) and fails when a row marked **have** does not name a test that
+  capability — **119 rows at the last close: 116 `have`, 1 `partial` (the
+  merge-queue trigger), 0 `missing`, 2 signed `non-goal`**) and fails when a row
+  marked **have** does not name a test that
   exists in the tree, when a gap is unplanned (no wave, no decision), when the
   master plan and the matrix disagree on which rows exist, or when the generated
   [`matrix.md`](features/parity/matrix.md) is stale. A capability cannot be
@@ -3074,9 +3151,12 @@ compatibility surface has its own gate:
   and plan with **zero refusals** today; when a capability turns green, the
   corpus entry stops accepting the refusal in the same change.
 - **The execution tier** (`make parity-exec`, docker required, opt-in) runs a
-  corpus-shaped workflow through a real runner to completion. The PR gate runs
-  the parse/plan tier only, so a change never needs a docker daemon to prove the
-  compatibility surface.
+  corpus-shaped workflow through a real runner to completion, then executes the
+  committed golden of a real publish workflow **byte-unmodified** and builds,
+  pushes and pulls a small image through a local `registry:2` with a daemonless
+  builder (no socket in the job). The PR gate runs the parse/plan tier only, so a
+  change never needs a docker daemon to prove the compatibility surface; when the
+  tier is requested, a missing daemon is a failure, not a skip.
 
 What this means for you as an author: if this file documents a key and the
 workflow parses, the behaviour is tested or the row is honestly marked partial

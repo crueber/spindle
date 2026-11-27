@@ -3,6 +3,7 @@ package config
 import (
 	"fmt"
 	"net"
+	"net/mail"
 	"net/url"
 	"reflect"
 	"regexp"
@@ -201,6 +202,54 @@ func checkThreads(c *Config) []error {
 	}
 	if c.Threads.Actions.MaxBytes < 0 {
 		errs = append(errs, fmt.Errorf("threads.actions.max_bytes must not be negative (got %d)", c.Threads.Actions.MaxBytes))
+	}
+	errs = append(errs, checkThreadsSMTP(c.Threads.SMTP)...)
+	return errs
+}
+
+// checkThreadsSMTP validates the notification mailer (PAR-197/D-27). An empty
+// host is the documented "off" state; any other partial configuration is a
+// named error so a typo cannot leave notifications silently undelivered.
+func checkThreadsSMTP(s ThreadsSMTP) []error {
+	var errs []error
+	host := strings.TrimSpace(s.Host)
+	tlsMode := strings.ToLower(strings.TrimSpace(s.TLS))
+	if tlsMode == "" {
+		tlsMode = "starttls"
+	}
+	switch tlsMode {
+	case "starttls", "implicit", "none":
+	default:
+		errs = append(errs, fmt.Errorf("threads.smtp.tls must be starttls, implicit or none (got %q)", s.TLS))
+	}
+	username := strings.TrimSpace(s.Username)
+	if host == "" {
+		// The channel is off. A half-configured mailer is still a typo worth
+		// catching: it looks enabled but cannot deliver.
+		if strings.TrimSpace(s.From) != "" || username != "" || strings.TrimSpace(s.Password) != "" {
+			errs = append(errs, fmt.Errorf("threads.smtp.host is required when threads.smtp.from/username/password are set (leave them empty to keep email off)"))
+		}
+		return errs
+	}
+	if strings.ContainsAny(host, " \t\r\n/") {
+		errs = append(errs, fmt.Errorf("threads.smtp.host must be a bare hostname or IP address (got %q)", s.Host))
+	}
+	if s.Port < 0 || s.Port > 65535 {
+		errs = append(errs, fmt.Errorf("threads.smtp.port must be 0…65535 (0 selects 587 for starttls, 465 for implicit); got %d", s.Port))
+	}
+	if strings.TrimSpace(s.From) == "" {
+		errs = append(errs, fmt.Errorf("threads.smtp.from is required when threads.smtp.host is set"))
+	} else if _, err := mail.ParseAddress(strings.TrimSpace(s.From)); err != nil {
+		errs = append(errs, fmt.Errorf("threads.smtp.from must be a valid email address: %v", err))
+	}
+	if username != "" && tlsMode == "none" {
+		errs = append(errs, fmt.Errorf("threads.smtp.username requires threads.smtp.tls = starttls or implicit: credentials are never sent over a plaintext connection"))
+	}
+	if (username == "") != (strings.TrimSpace(s.Password) == "") {
+		errs = append(errs, fmt.Errorf("threads.smtp.username and threads.smtp.password must be set together (or both empty for an unauthenticated relay)"))
+	}
+	if t := time.Duration(s.Timeout); t < 0 {
+		errs = append(errs, fmt.Errorf("threads.smtp.timeout must not be negative (got %s)", t))
 	}
 	return errs
 }

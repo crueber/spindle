@@ -119,6 +119,10 @@ func (s *Service) OpenThread(ctx context.Context, owner, repo string, num int, a
 	}
 	s.emit(ctx, NotifyEvent{Repo: repoName(owner, repo), Class: "thread_opened", Actor: who, PullNum: num, Recipients: prParticipants(h, who)})
 	s.stream(ctx, StreamEvent{Name: "thread", Repo: repoName(owner, repo), Action: "opened", Num: num, TID: tid})
+	s.emitReviewComment(ctx, ReviewCommentTriggerEvent{
+		Repo: repoName(owner, repo), Action: "created", Num: num, TID: tid,
+		Body: body, Author: who, Anchor: anchor,
+	})
 	return th, nil
 }
 
@@ -305,6 +309,7 @@ func (s *Service) AddThreadComment(ctx context.Context, owner, repo string, num 
 	now := s.nowUTC().Format(dateTimeFmt)
 	key := ReviewThreadKey(owner, repo, num, tid)
 	var out *ThreadComment
+	var anchor Anchor
 	for attempt := 0; attempt < 10; attempt++ {
 		raw, ver, err := s.getJSON(ctx, key)
 		if err != nil {
@@ -317,6 +322,7 @@ func (s *Service) AddThreadComment(ctx context.Context, owner, repo string, num 
 		if perr != nil {
 			return nil, perr
 		}
+		anchor = th.Anchor
 		seq := th.NextEventSeq
 		if seq < 1 {
 			seq = 1
@@ -348,6 +354,10 @@ func (s *Service) AddThreadComment(ctx context.Context, owner, repo string, num 
 	s.emit(ctx, NotifyEvent{Repo: repoName(owner, repo), Class: "thread_commented", Actor: who, PullNum: num, Recipients: prParticipants(h, who)})
 	s.emitMentioned(ctx, owner, repo, num, who, body)
 	s.stream(ctx, StreamEvent{Name: "thread", Repo: repoName(owner, repo), Action: "commented", Num: num, TID: tid})
+	s.emitReviewComment(ctx, ReviewCommentTriggerEvent{
+		Repo: repoName(owner, repo), Action: "created", Num: num, TID: tid,
+		Body: body, Author: who, Anchor: anchor,
+	})
 	return out, nil
 }
 

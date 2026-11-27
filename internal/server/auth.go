@@ -205,9 +205,16 @@ func resolveCredential(r *http.Request) (cred string, from credKind) {
 }
 
 // parseCredential splits Bearer (case-insensitive) / Basic; password = token.
+// `token <value>` is GitHub's and Forgejo's other spelling of the same
+// credential, and the Forgejo corpus files fetch their own source with it
+// (`http.extraHeader=Authorization: token $FORGEJO_TOKEN`), so it is accepted as
+// Bearer — one authentication path, only the scheme word differs.
 func parseCredential(cred string) (token string, basic bool, err error) {
 	if hasPrefixFold(strings.TrimSpace(cred), "bearer ") {
 		return strings.TrimSpace(cred[len("Bearer "):]), false, nil
+	}
+	if hasPrefixFold(strings.TrimSpace(cred), "token ") {
+		return strings.TrimSpace(cred[len("token "):]), false, nil
 	}
 	if hasPrefixFold(strings.TrimSpace(cred), "basic ") {
 		dec, derr := base64.StdEncoding.DecodeString(strings.TrimSpace(cred[len("Basic "):]))

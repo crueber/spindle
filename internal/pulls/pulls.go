@@ -218,6 +218,36 @@ type PullEventSink func(ctx context.Context, ev PullEvent)
 // merge commit gets its push-triggered runs. Synchronous; composition detaches.
 type BranchPublishedSink func(ctx context.Context, repo, ref, old, new string)
 
+// ForkEvent is one completed fork (PAR-021): Source is the original repository
+// (`owner/name`), Forkee the new one, Actor who asked for it.
+type ForkEvent struct {
+	Source string
+	Forkee string
+	Actor  string
+}
+
+// ForkEventSink receives the fork trigger edge synchronously after the fork
+// task commits. Nil = no-op; composition detaches the resulting run work.
+type ForkEventSink func(ctx context.Context, ev ForkEvent)
+
+// PullCommentEvent is one conversation comment on a PR (PAR-020). GitHub's
+// `issue_comment` covers PR comments as well as issue comments, so the pulls
+// service reports the same edge shape the issues service does.
+type PullCommentEvent struct {
+	Repo   string
+	Num    int
+	Actor  string
+	Author string
+	Title  string
+	State  string
+	Labels []string
+	Body   string
+}
+
+// PullCommentEventSink receives PR conversation-comment trigger edges. Nil =
+// no-op; composition detaches the run work.
+type PullCommentEventSink func(ctx context.Context, ev PullCommentEvent)
+
 // IssueCloser is the 02-provided seam the merge task calls at PR MERGE time
 // (never at push): ApplyClosingReferences parses closing keywords and closes
 // referenced issues. Satisfied by *issues.Service; tests substitute a fake.
@@ -329,6 +359,12 @@ type Service struct {
 	// BranchPublished receives the merge task's base-ref publish (the
 	// server-side push no client pipeline sees). Nil = no-op.
 	BranchPublished BranchPublishedSink
+	// ForkEvents receives the completed-fork trigger edge (PAR-021). Nil =
+	// no-op.
+	ForkEvents ForkEventSink
+	// PullCommentEvents receives PR conversation-comment edges (PAR-020, the
+	// PR half of `issue_comment`). Nil = no-op.
+	PullCommentEvents PullCommentEventSink
 
 	flight *flightGroup
 	tasks  *taskTable
@@ -528,6 +564,22 @@ func (s *Service) pullEvent(ctx context.Context, ev PullEvent) {
 		return
 	}
 	s.PullEvents(ctx, ev)
+}
+
+// forkEvent delivers one completed-fork trigger edge, nil-safe.
+func (s *Service) forkEvent(ctx context.Context, ev ForkEvent) {
+	if s.ForkEvents == nil {
+		return
+	}
+	s.ForkEvents(ctx, ev)
+}
+
+// pullCommentEvent delivers one PR conversation-comment trigger edge, nil-safe.
+func (s *Service) pullCommentEvent(ctx context.Context, ev PullCommentEvent) {
+	if s.PullCommentEvents == nil {
+		return
+	}
+	s.PullCommentEvents(ctx, ev)
 }
 
 // emitPullLifecycle fills the payload-bearing fields from the current records

@@ -1,6 +1,7 @@
 package threads
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 
@@ -111,6 +112,37 @@ jobs:
 	}
 	if len(jobs2) != 1 || !strings.Contains(jobs2[0].Reason, "no jobs") {
 		t.Fatalf("empty callee = %+v", jobs2)
+	}
+}
+
+func TestReusableNestingElevenRefused(t *testing.T) {
+	// The parity matrix's acceptance names "nesting 11". This engine's
+	// documented cap is 4, so an 11-level chain is refused at level 5 with the
+	// named limit — deeper never silently runs.
+	e := newTestEnv(t)
+	e.git.add(testSHA, ".spindle/workflows/ci.yml", `name: C
+on: {push: {branches: [main]}}
+jobs:
+  l0:
+    uses: ./.spindle/workflows/l1.yml
+`)
+	for i := 1; i <= 10; i++ {
+		next := i + 1
+		body := fmt.Sprintf(`name: L%d
+on: {workflow_call: {}}
+jobs:
+  l%d:
+    uses: ./.spindle/workflows/l%d.yml
+`, i, i, next)
+		e.git.add(testSHA, fmt.Sprintf(".spindle/workflows/l%d.yml", i), body)
+	}
+	e.git.add(testSHA, ".spindle/workflows/l11.yml", "name: L11\non: {workflow_call: {}}\njobs:\n  leaf:\n    runs-on: linux\n    steps:\n      - run: echo leaf\n")
+	jobs, err := e.svc.loadJobs(ctx(), "o", "r", e.mustCreate(t)[0].ID)
+	if err != nil {
+		t.Fatalf("loadJobs: %v", err)
+	}
+	if len(jobs) != 1 || jobs[0].State != JobFailure || !strings.Contains(jobs[0].Reason, "nested deeper than the limit") {
+		t.Fatalf("nesting 11 = %+v", jobs)
 	}
 }
 

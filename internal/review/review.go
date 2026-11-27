@@ -127,6 +127,41 @@ type StreamEvent struct {
 // the backfill truth.
 type Emitter func(ctx context.Context, ev NotifyEvent)
 
+// ReviewTriggerEvent is one CI trigger edge the review service owns (PAR-020):
+// `submitted` when a review is posted, `dismissed` when a maintainer dismisses
+// one. Review editing is not implemented, so no `edited` edge exists.
+type ReviewTriggerEvent struct {
+	Repo      string
+	Action    string // submitted | dismissed
+	Num       int
+	Actor     string // who caused the edge (the reviewer, or the dismisser)
+	Reviewer  string // the review's author
+	State     string // approved | changes_requested | commented | dismissed
+	Body      string
+	CommitSHA string
+	Seq       int
+}
+
+// ReviewCommentTriggerEvent is one `pull_request_review_comment` edge
+// (PAR-020): an inline thread was opened or replied to. `created` is the only
+// implemented action.
+type ReviewCommentTriggerEvent struct {
+	Repo   string
+	Action string // created
+	Num    int
+	TID    string
+	Body   string
+	Author string
+	Anchor Anchor
+}
+
+// ReviewEventSink receives the review trigger edges synchronously after the
+// commit. Nil-safe.
+type ReviewEventSink func(ctx context.Context, ev ReviewTriggerEvent)
+
+// ReviewCommentEventSink receives the inline-comment trigger edges. Nil-safe.
+type ReviewCommentEventSink func(ctx context.Context, ev ReviewCommentTriggerEvent)
+
 // Streamer appends StreamEvents to the repo's SSE stream. Nil-safe.
 type Streamer func(ctx context.Context, ev StreamEvent)
 
@@ -206,6 +241,12 @@ type Service struct {
 	Notify Emitter
 	// Stream receives review/thread live updates (nil = no-op).
 	Stream Streamer
+	// ReviewEvents receives the pull_request_review trigger edges (PAR-020):
+	// submitted/dismissed. Nil-safe.
+	ReviewEvents ReviewEventSink
+	// ReviewCommentEvents receives the pull_request_review_comment edges
+	// (PAR-020): created inline thread comments. Nil-safe.
+	ReviewCommentEvents ReviewCommentEventSink
 }
 
 // New builds a Service over st.
@@ -374,6 +415,22 @@ func (s *Service) emit(ctx context.Context, ev NotifyEvent) {
 	}
 	ev.Recipients = uniqSorted(ev.Recipients)
 	s.Notify(ctx, ev)
+}
+
+// emitReview delivers one review trigger edge, nil-safe.
+func (s *Service) emitReview(ctx context.Context, ev ReviewTriggerEvent) {
+	if s.ReviewEvents == nil {
+		return
+	}
+	s.ReviewEvents(ctx, ev)
+}
+
+// emitReviewComment delivers one inline-review-comment trigger edge, nil-safe.
+func (s *Service) emitReviewComment(ctx context.Context, ev ReviewCommentTriggerEvent) {
+	if s.ReviewCommentEvents == nil {
+		return
+	}
+	s.ReviewCommentEvents(ctx, ev)
 }
 
 // emitMentioned fans "mentioned" for @-parsed principals and @org/team

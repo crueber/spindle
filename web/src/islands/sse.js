@@ -75,9 +75,12 @@ export function coalesce(fn, ms = 250) {
 /**
  * connect opens one stream and keeps it open until cancel() or the signal
  * aborts. onFrame receives parsed frames; onError receives transport errors.
- * A 401 stops the stream and dispatches `ui:auth-required` on body.
+ * A 401 stops the stream and dispatches `ui:auth-required` on body — unless
+ * `retryUnauthorized` is set, where a caller that can resume from a cursor
+ * (the log panel) keeps retrying after notifying `onAuthRequired`, so an
+ * expired session pauses the stream instead of killing it.
  */
-export function connect({ url, signal, onFrame, onError, events, retryBase = 1000, retryMax = 30000 }) {
+export function connect({ url, signal, onFrame, onError, onAuthRequired, events, retryBase = 1000, retryMax = 30000, retryUnauthorized = false }) {
   let stopped = false;
   let attempt = 0;
   const ctrl = new AbortController();
@@ -107,9 +110,15 @@ export function connect({ url, signal, onFrame, onError, events, retryBase = 100
           signal: ctrl.signal,
         });
         if (res.status === 401) {
-          stopped = true;
           document.body.dispatchEvent(new CustomEvent("ui:auth-required"));
-          return;
+          if (!retryUnauthorized) {
+            stopped = true;
+            return;
+          }
+          if (onAuthRequired) onAuthRequired();
+          const authErr = new Error("stream 401");
+          authErr.status = 401;
+          throw authErr;
         }
         if (!res.ok || !res.body) {
           // The status rides the error so a caller can tell "unknown id"

@@ -152,6 +152,29 @@ type Emitter func(ctx context.Context, ev NotifyEvent)
 // feature event names.
 type Streamer func(ctx context.Context, ev StreamEvent)
 
+// CheckRunEvent is one `check_run` trigger edge (PAR-021): an EXTERNAL CI
+// report created a check run or moved it to a terminal state. Threads' own
+// mirror (`creator == "threads"` or `"spindle"`) never emits one — the run is
+// itself the check, and re-firing would make every workflow trigger a second
+// copy of itself.
+type CheckRunEvent struct {
+	Repo        string // owner/name
+	Action      string // created | completed
+	SHA         string
+	Context     string
+	State       string
+	TargetURL   string
+	Description string
+	Creator     string
+	// Annotations is the count only: finding text is display data, not
+	// something every triggered run needs to carry.
+	Annotations int
+}
+
+// CheckRunEventSink receives the external check-run trigger edge synchronously
+// after the record commits. Nil = no-op; composition detaches the run work.
+type CheckRunEventSink func(ctx context.Context, ev CheckRunEvent)
+
 // Service is the checks store client: status records, the CAS'd index, CI
 // tokens, the combined view, and the require_checks merge-time gate.
 // Construct with New; Roles/Commits may be nil in tests that exercise
@@ -167,6 +190,9 @@ type Service struct {
 	Notify Emitter
 	// Stream receives check live updates (nil = no-op).
 	Stream Streamer
+	// CheckRunEvents receives the external check-run trigger edge (PAR-021).
+	// Nil = no-op.
+	CheckRunEvents CheckRunEventSink
 }
 
 // New builds a Service over st.
@@ -300,4 +326,33 @@ func (s *Service) stream(ctx context.Context, ev StreamEvent) {
 		ev.Name = StreamName
 	}
 	s.Stream(ctx, ev)
+}
+
+// emitCheckRun reports an external check-run transition (PAR-021). A Threads
+// mirror report never fires it: the mirror IS the run, so re-firing would let a
+// workflow trigger a copy of itself on every state change. `created` is the
+// first-record path; an existing record only reports `completed` once, when it
+// reaches a terminal state from a live one.
+func (s *Service) emitCheckRun(ctx context.Context, owner, repo string, doc *StatusDoc, created bool, prev *StatusDoc) {
+	if s.CheckRunEvents == nil || doc == nil {
+		return
+	}
+	creator := normPrincipal(doc.Creator)
+	if creator == "" || creator == "threads" || creator == "spindle" {
+		return
+	}
+	action := ""
+	switch {
+	case created:
+		action = "created"
+	case !LiveState(doc.State) && (prev == nil || LiveState(prev.State)):
+		action = "completed"
+	default:
+		return
+	}
+	s.CheckRunEvents(ctx, CheckRunEvent{
+		Repo: repoName(owner, repo), Action: action, SHA: doc.SHA, Context: doc.Context,
+		State: doc.State, TargetURL: doc.TargetURL, Description: doc.Description,
+		Creator: creator, Annotations: len(doc.Annotations),
+	})
 }

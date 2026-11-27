@@ -198,7 +198,7 @@ func TestAttemptTerminalAndUnclaimed(t *testing.T) {
 		Runner: "rnr", Scopes: attemptScopes(nil), Exp: e.now.Add(time.Hour).Unix(),
 	}
 	_ = unclaimed
-	logView, err := e.svc.AppendLog(ctx(), claims, 1, "no claim yet")
+	logView, err := e.svc.AppendLog(ctx(), claims, 1, LogRecord{Text: "no claim yet"})
 	if err == nil {
 		t.Fatalf("a stale attempt must be rejected: %+v", logView)
 	}

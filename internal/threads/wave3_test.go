@@ -137,7 +137,7 @@ func TestAttemptStoreFailurePaths(t *testing.T) {
 	if _, err := store.PutBytes(ctx(), fs, SecretKey("o", "r", "BROKEN"), mustJSON(&SecretDoc{Name: "BROKEN", Sealed: "AAAA", CreatedAt: "x", Version: 1}), store.PutOptions{Mode: store.PutCreate}); err != nil {
 		t.Fatalf("seed: %v", err)
 	}
-	if _, err := e.svc.AppendLog(ctx(), claims, 1, "hello"); err == nil {
+	if _, err := e.svc.AppendLog(ctx(), claims, 1, LogRecord{Text: "hello"}); err == nil {
 		t.Fatal("a corrupt secret must fail the log write")
 	}
 	// Complete masks annotations and the summary with the same value set, so
@@ -267,7 +267,7 @@ func TestLogReadFailurePaths(t *testing.T) {
 	})
 	claims, _ := e.svc.parseAttemptToken(tok, e.now)
 	for i := 1; i <= 3; i++ {
-		if _, err := e.svc.AppendLog(ctx(), claims, i, "frame"); err != nil {
+		if _, err := e.svc.AppendLog(ctx(), claims, i, LogRecord{Text: "frame"}); err != nil {
 			t.Fatalf("append %d: %v", i, err)
 		}
 	}

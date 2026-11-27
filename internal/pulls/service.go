@@ -1234,6 +1234,11 @@ func (s *Service) AddComment(ctx context.Context, owner, repo string, num int, a
 	s.updateIndex(ctx, owner, repo, prCardOf(th))
 	s.emit(ctx, NotifyEvent{Repo: repoName(owner, repo), Class: "subscribed", Actor: who, PullNum: num, Recipients: prParticipants(th, who)})
 	s.emitMentioned(ctx, owner, repo, num, who, body)
+	// PAR-020: GitHub's issue_comment fires for a PR conversation comment too.
+	s.pullCommentEvent(ctx, PullCommentEvent{
+		Repo: repoName(owner, repo), Num: num, Actor: who, Author: th.Author,
+		Title: th.Title, State: th.State, Labels: append([]string(nil), th.Labels...), Body: body,
+	})
 	return ev, nil
 }
 

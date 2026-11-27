@@ -1,7 +1,6 @@
 package runner
 
 import (
-	"bytes"
 	"context"
 	"strconv"
 	"strings"
@@ -14,11 +13,11 @@ import (
 // Edge branches of the workflow-command sink: every one is a bounded-input or
 // typo path that must be NAMED, never a silent drop.
 
-func newSinkForTest(t *testing.T) (*commandSink, *jobCommands, *bytes.Buffer) {
+func newSinkForTest(t *testing.T) (*commandSink, *jobCommands, *markerBuffer) {
 	t.Helper()
 	stream := quietStream(t)
 	job := newJobCommands(stream)
-	var dst bytes.Buffer
+	var dst markerBuffer
 	sink := newCommandSink(&dst, job, StepPlan{Index: 0, ID: "build", Name: "build"})
 	return sink, job, &dst
 }
@@ -85,7 +84,7 @@ func TestCommandSinkMaskCap(t *testing.T) {
 func TestCommandSinkAnnotationCaps(t *testing.T) {
 	stream := quietStream(t)
 	job := newJobCommands(stream)
-	var dst bytes.Buffer
+	var dst markerBuffer
 	sink := newCommandSink(&dst, job, StepPlan{Name: "s"})
 	// Long message/title/file are truncated to the documented caps.
 	_, _ = sink.Write([]byte("::error file=" + strings.Repeat("f", threads.MaxAnnotationFile+10) +

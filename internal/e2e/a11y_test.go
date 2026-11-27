@@ -50,6 +50,32 @@ jobs:
       - run: echo hi
 `
 
+// a11yGraphWorkflow is the run-graph fixture (PAR-191): a matrix job, a
+// dependent that waits on it and an independent sibling. No runner is started,
+// so the jobs stay queued; the test cancels the matrix cells, which gives the
+// dependent a failed dependency whose name the graph must render.
+const a11yGraphWorkflow = `name: Graph
+on: [push]
+jobs:
+  build:
+    runs-on: linux
+    strategy:
+      fail-fast: false
+      matrix:
+        go: ['1.22', '1.23']
+    steps:
+      - run: echo build
+  test:
+    needs: [build]
+    runs-on: linux
+    steps:
+      - run: echo test
+  lint:
+    runs-on: linux
+    steps:
+      - run: echo lint
+`
+
 // a11yViewport is one viewport the page set is checked at. The narrow one is
 // AGENTS.md §2's ~390 px mobile check; the desktop one catches controls that are
 // hidden (and therefore unnamed) only at small widths.
@@ -348,6 +374,43 @@ func TestA11yRenderedPages(t *testing.T) {
 	g.commitFile(foreignWork, ".forgejo/workflows/ci.yml", a11yForeignWorkflow, "foreign workflow")
 	g.run(foreignWork, "push", "origin", "main")
 
+	// The run graph (PAR-191): a matrix job plus a dependent, seeded without a
+	// runner so every job keeps a row and cancelling the build cells gives the
+	// dependent a named blocker. The graph is HTML (links + `after` edges), so
+	// the floor's tab-order and viewport probes cover it.
+	graphRepo := uniqueRepo("a11y-graph")
+	graphWork, _ := pushFreshRepo(t, g, s, graphRepo, "README.md", "# graph fixture\n")
+	g.commitFile(graphWork, ".spindle/workflows/graph.yml", a11yGraphWorkflow, "graph workflow")
+	g.run(graphWork, "push", "origin", "main")
+	graphLane := s.base + "/" + owner + "/" + graphRepo + "/api"
+	var graphRunID string
+	pollUntil(t, 60*time.Second, "the graph fixture run", func() bool {
+		graphRunID = latestRunID(t, graphLane, adminTok)
+		return graphRunID != ""
+	})
+	graphView := mustAPI(t, "GET", graphLane+"/threads/"+graphRunID, "", adminTok)
+	graphJobs, _ := graphView["jobs"].([]any)
+	for _, raw := range graphJobs {
+		job, _ := raw.(map[string]any)
+		key, _ := job["key"].(string)
+		id, _ := job["id"].(string)
+		if !strings.HasPrefix(key, "build") || id == "" {
+			continue
+		}
+		mustAPI(t, "POST", graphLane+"/threads/"+graphRunID+"/jobs/"+id+"/cancel", "", adminTok)
+	}
+	pollUntil(t, 30*time.Second, "the dependent job to be skipped", func() bool {
+		view := mustAPI(t, "GET", graphLane+"/threads/"+graphRunID, "", adminTok)
+		jobs, _ := view["jobs"].([]any)
+		for _, raw := range jobs {
+			job, _ := raw.(map[string]any)
+			if job["key"] == "test" && job["state"] == "skipped" {
+				return true
+			}
+		}
+		return false
+	})
+
 	// ---- browser: sign in as an admin through the stub IdP -------------------
 	base := fmt.Sprintf("http://walgit.localhost:%d", s.port)
 	b := launchBrowser(t)
@@ -386,6 +449,7 @@ func TestA11yRenderedPages(t *testing.T) {
 		{"threads", "/" + owner + "/" + repo + "/threads"},
 		{"threads (migration banner)", "/" + owner + "/" + foreignRepo + "/threads"},
 		{"thread run (held deployment)", "/" + owner + "/" + repo + "/threads/" + threadRunID},
+		{"thread run (job graph)", "/" + owner + "/" + graphRepo + "/threads/" + graphRunID},
 		{"repo settings environments", "/" + owner + "/" + repo + "/settings/environments"},
 		{"org settings secrets", "/" + orgName + "/settings?tab=secrets"},
 		{"admin", "/admin"},
@@ -444,6 +508,44 @@ func TestA11yRenderedPages(t *testing.T) {
 			}
 			b.key("Enter", "Enter", 13)
 			b.waitFor(5*time.Second, "the skip link to reach #app "+label, `location.hash === "#app"`)
+		}
+	}
+
+	// PAR-191: the job graph is HTML, not decoration — each graph node is a
+	// real link, the matrix cells render under their job, and the blocked
+	// dependent names its blocker. The floor above proves layout/tab order;
+	// this proves the graph itself survived that layout at both viewports.
+	graphPath := "/" + owner + "/" + graphRepo + "/threads/" + graphRunID
+	for _, vp := range a11yViewports {
+		b.setViewport(vp.width, vp.height, vp.mobile)
+		b.navigate(base + graphPath)
+		var g struct {
+			Title    bool `json:"title"`
+			Nodes    int  `json:"nodes"`
+			CellRows int  `json:"cellRows"`
+			Blocked  int  `json:"blocked"`
+			After    int  `json:"after"`
+			Pans     bool `json:"pans"`
+		}
+		if err := b.evaluate(`(() => {
+  const section = document.querySelector('#run-graph-title')?.closest('section');
+  const nodes = Array.from(section ? section.querySelectorAll('[id^="graph-"]') : []);
+  return {
+    title: !!section && section.getClientRects().length > 0,
+    nodes: nodes.length,
+    cellRows: nodes.reduce((n, el) => n + el.closest('li').querySelectorAll('details li').length, 0),
+    blocked: section ? section.querySelectorAll('.chip-draft').length : 0,
+    after: section ? section.querySelectorAll('a[href^="#graph-"]').length : 0,
+    pans: document.documentElement.scrollWidth !== document.documentElement.clientWidth,
+  };
+})()`, &g); err != nil {
+			t.Fatalf("graph at %s: probe: %v", vp.name, err)
+		}
+		if !g.Title || g.Nodes != 3 || g.CellRows != 2 || g.Blocked == 0 || g.After == 0 {
+			t.Fatalf("graph at %s: title=%v nodes=%d cellRows=%d blocked=%d after=%d (want 3 job nodes, 2 matrix cell rows, a blocked chip and named edges)", vp.name, g.Title, g.Nodes, g.CellRows, g.Blocked, g.After)
+		}
+		if g.Pans {
+			t.Fatalf("graph at %s pans horizontally", vp.name)
 		}
 	}
 }

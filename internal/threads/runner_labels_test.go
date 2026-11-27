@@ -181,3 +181,72 @@ func TestRegisterStoresLabelImages(t *testing.T) {
 		t.Fatal("a used token registered; want an auth error")
 	}
 }
+
+// TestStockImageResolvesForWorkflowLabel pins PAR-177/D-26's server half: a
+// workflow that asks for a stock label (and names no container.image) receives
+// the catalogue's digest-pinned upstream image, while an explicit container
+// image and a runner's own label mapping both keep precedence.
+func TestStockImageResolvesForWorkflowLabel(t *testing.T) {
+	const stockWorkflow = `name: Stock
+on: [push]
+jobs:
+  toolchain:
+    runs-on: go
+    steps:
+      - run: go version
+  pinned:
+    runs-on: go
+    container:
+      image: debian:12-slim
+    steps:
+      - run: true
+`
+	e := newTestEnv(t)
+	e.git.files = map[string]map[string][]byte{}
+	e.git.add(testSHA, ".spindle/workflows/ci.yml", stockWorkflow)
+	e.git.refs["refs/heads/main"] = testSHA
+	if _, err := e.svc.CreateRun(ctx(), "o/r", testSHA, EventPush, CreateOpts{Branch: "main", Ref: "refs/heads/main", Actor: "w"}); err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	mint, err := e.svc.MintRegistrationToken(ctx(), auth.Principal{Name: "root", Admin: true}, MintInput{
+		Name: "stock", RunnerPolicyInput: RunnerPolicyInput{AllowAll: true},
+	})
+	if err != nil {
+		t.Fatalf("mint: %v", err)
+	}
+	reg, err := e.svc.Register(ctx(), RegisterInput{
+		Token: mint.Token, Labels: []string{"self-hosted", "linux", "go"},
+	})
+	if err != nil {
+		t.Fatalf("register: %v", err)
+	}
+	runner := &runnerAuth{Doc: &RunnerDoc{ID: reg.RunnerID, AllowAll: true, State: RunnerActive,
+		Labels: reg.Labels, LabelImages: reg.LabelImages}}
+	want, err := StockImageFor("go")
+	if err != nil {
+		t.Fatalf("catalogue: %v", err)
+	}
+	seen := map[string]string{}
+	for i := 0; i < 2; i++ {
+		claim, cerr := e.svc.claimLoop(ctx(), "o", "r", runner.Doc, runner.Doc.Labels)
+		if cerr != nil || claim == nil {
+			t.Fatalf("claim %d = %+v (%v)", i, claim, cerr)
+		}
+		res, perr := e.svc.fetchPayload(ctx(), "o", "r", runner, claim, claim.Job, "")
+		if perr != nil {
+			t.Fatalf("fetch %s: %v", claim.Job.Name, perr)
+		}
+		image := ""
+		if res.Spec.Container != nil {
+			image = res.Spec.Container.Image
+		}
+		seen[claim.Job.Name] = image
+	}
+	if seen["toolchain"] != want.Image {
+		t.Fatalf("stock label resolved to %q, want %q", seen["toolchain"], want.Image)
+	}
+	// Explicit container.image always wins over the stock default.
+	if seen["pinned"] != "debian:12-slim" {
+		t.Fatalf("explicit container image = %q, want debian:12-slim", seen["pinned"])
+	}
+}

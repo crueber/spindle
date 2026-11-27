@@ -40,11 +40,14 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
+	"io"
 	"io/fs"
+	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -745,17 +748,22 @@ func TestParityImporterReproducesGoldens(t *testing.T) {
 }
 
 // TestE2E_ParityExecution is the execution tier (opt-in). It runs a
-// corpus-shaped workflow through a real server and a real runner and requires a
-// green run: the engine path the corpus rows depend on, executed rather than
-// planned.
+// corpus-shaped workflow AND a converted Forgejo corpus entry through a real
+// server and a real runner, requiring green runs: the engine path the corpus
+// rows depend on, executed rather than planned.
 func TestE2E_ParityExecution(t *testing.T) {
 	if os.Getenv("SPINDLE_PARITY_EXEC") != "1" {
 		t.Skip("execution tier: set SPINDLE_PARITY_EXEC=1 (needs docker; make parity-exec)")
 	}
-	requireDocker(t)
+	// The tier was explicitly requested: a missing daemon is a FAILURE, not a
+	// silent skip (the A11Y gate's rule — a skipped gate is not a gate).
+	requireDockerTier(t)
 	requireModernGit(t)
 	g := newGitClient(t)
-	s := threadsServer(t)
+	// The corpus's own CHECKOUT block fetches $SPINDLE_SERVER, so the server's
+	// public origin must be reachable from a job container (host.docker.internal
+	// is added by the runner): the same name the built-in checkout is given.
+	s := threadsServer(t, "http://host.docker.internal:%d")
 	bin := buildSpindle(t)
 	owner, repo := testOwner, uniqueRepo("parity")
 	repoLane := s.base + "/" + owner + "/" + repo + "/api"
@@ -771,7 +779,14 @@ func TestE2E_ParityExecution(t *testing.T) {
 	g.runAuth(work, chainAliceTok, "push", "-u", "origin", "main")
 
 	reg := mintRunnerToken(t, repoLane, chainAliceTok)
-	startThreadsRunner(t, bin, s.base, reg, "linux", 1)
+	// `self-hosted` + `linux`: the converted corpus entry asks for
+	// `ubuntu-latest`, which the engine expands to exactly this pair (PAR-170),
+	// and the alias never widens what a runner declared.
+	// A job image with git AND bash: the converted corpus entry is a real
+	// workflow written for a bash runner (GitHub/Forgejo default), and its
+	// `<<<` here-string is bash syntax. alpine/git carries no bash, so the
+	// engine's documented sh fallback would (correctly) reject that script.
+	startThreadsRunnerImage(t, bin, s.base, reg, "linux,self-hosted", 1, "bitnami/git:latest")
 
 	var runID string
 	pollUntil(t, 60*time.Second, "a parity smoke run", func() bool {
@@ -785,10 +800,195 @@ func TestE2E_ParityExecution(t *testing.T) {
 	run := getRun(t, repoLane, runID, chainAliceTok)
 	if run.Run["state"] != "success" {
 		jobs, _ := json.Marshal(run.Jobs)
-		t.Fatalf("parity smoke run = %v, jobs %s", run.Run["state"], jobs)
+		logText := sseLog(t, fmt.Sprintf("%s/threads/%s/jobs/j-smoke/log", repoLane, runID), chainAliceTok)
+		t.Fatalf("parity smoke run = %v, jobs %s\nlog:\n%s", run.Run["state"], jobs, logText)
 	}
 	job := jobState(run, "j-smoke")
 	if job == nil || job["state"] != "success" {
 		t.Fatalf("smoke job = %v", job)
+	}
+
+	runConvertedCorpusEntry(t, g, s)
+}
+
+// corpusPublishStub is the fixture side effect of the real `publish to github`
+// corpus entry: the workflow's own step runs `./scripts/publish-to-github.sh`
+// from the checked-out tree, and the assertion is that it received the argv the
+// converted workflow computed (the repo, the version and --apply). The real
+// script pushes to GitHub; a hermetic suite commits this stub instead, so the
+// WORKFLOW is the corpus file and the repository's script is the fixture.
+const corpusPublishStub = `#!/bin/sh
+# Parity corpus fixture: stands in for the real publish-to-github.sh so the
+# converted workflow can be executed end to end without a GitHub credential.
+set -eu
+echo "corpus-publish-stub argv: $*"
+[ "$1" = "--repo" ] || { echo "missing --repo" >&2; exit 1; }
+[ "$3" = "--version" ] || { echo "missing --version" >&2; exit 1; }
+[ "$5" = "--apply" ] || { echo "missing --apply" >&2; exit 1; }
+echo "corpus-publish-stub ok: repo=$2 version=$4"
+`
+
+// runConvertedCorpusEntry executes the committed golden of a real Forgejo
+// workflow, byte-unmodified, through workflow_dispatch. It proves the
+// acceptance line's "a Forgejo corpus entry runs unmodified after conversion":
+// the file that runs is testdata/parity/forgejo/weave-publish-github.yml, the
+// importer's output, not a smoke fixture written for the test.
+func runConvertedCorpusEntry(t *testing.T, g *gitClient, s *e2eServer) {
+	t.Helper()
+	golden, err := os.ReadFile(filepath.Join(parityDir, "forgejo", "weave-publish-github.yml"))
+	if err != nil {
+		t.Fatalf("read the corpus golden: %v", err)
+	}
+	repo := uniqueRepo("parity-corpus")
+	lane := s.base + "/" + testOwner + "/" + repo + "/api"
+	work := filepath.Join(t.TempDir(), "corpus")
+	g.initRepo(work)
+	g.commitFile(work, ".spindle/workflows/publish-github.yml", string(golden), "converted corpus workflow")
+	g.commitFile(work, "scripts/publish-to-github.sh", corpusPublishStub, "publish stub")
+	g.commitFile(work, "README.md", "# parity corpus\n", "readme")
+	g.run(work, "remote", "add", "origin", s.gitURL(testOwner, repo))
+	g.runAuth(work, chainAliceTok, "push", "-u", "origin", "main")
+
+	// The workflow reads PUBLISH_GITHUB_TOKEN from the repository's secrets; any
+	// value works because the script is the stub, but the read is the real path
+	// (a run without it fails on the workflow's own guard).
+	if st, body := apiCall(t, "PUT", lane+"/threads/secrets/PUBLISH_GITHUB_TOKEN",
+		`{"value":"parity-token-value"}`, chainAliceTok); st != 204 {
+		t.Fatalf("seed publish secret = %d: %s", st, body)
+	}
+
+	dispatched := mustAPI(t, "POST", lane+"/threads",
+		`{"workflow":".spindle/workflows/publish-github.yml","ref":"main","inputs":{"bump":"none","tag":"v9.9.9","repo":"acme/target"}}`,
+		chainAliceTok)
+	runs, _ := dispatched["runs"].([]any)
+	if len(runs) != 1 {
+		t.Fatalf("dispatch = %v", dispatched)
+	}
+	runID, _ := runs[0].(map[string]any)["id"].(string)
+	if runID == "" {
+		t.Fatalf("dispatch run id = %v", runs[0])
+	}
+	pollUntil(t, 180*time.Second, "the converted corpus run to finish", func() bool {
+		state, _ := getRun(t, lane, runID, chainAliceTok).Run["state"].(string)
+		return state == "success" || state == "failure" || state == "cancelled"
+	})
+	run := getRun(t, lane, runID, chainAliceTok)
+	logText := sseLog(t, fmt.Sprintf("%s/threads/%s/jobs/j-publish/log", lane, runID), chainAliceTok)
+	if run.Run["state"] != "success" {
+		jobs, _ := json.Marshal(run.Jobs)
+		t.Fatalf("converted corpus run = %v, jobs %s\nlog:\n%s", run.Run["state"], jobs, logText)
+	}
+	publish := jobState(run, "j-publish")
+	if publish == nil || publish["state"] != "success" {
+		t.Fatalf("publish job = %v", publish)
+	}
+	for _, want := range []string{
+		"corpus-publish-stub argv: --repo acme/target --version v9.9.9 --apply",
+		"corpus-publish-stub ok: repo=acme/target version=v9.9.9",
+	} {
+		if !strings.Contains(logText, want) {
+			t.Fatalf("the converted corpus log misses %q:\n%s", want, logText)
+		}
+	}
+}
+
+// TestE2E_ParityExecutionRegistryBuild is PAR-081's corpus/registry evidence:
+// a daemonless buildah "job" builds a small image, pushes it to a local
+// registry:2, and the image is pulled back and executed. The job container gets
+// no docker socket (only buildah's kernel prerequisite, --privileged, which a
+// runner operator declares); the registry is local, so no external service is
+// required. The tier is opt-in (SPINDLE_PARITY_EXEC=1), and a missing daemon or
+// image is a FAILURE when the tier was requested — never a skip.
+func TestE2E_ParityExecutionRegistryBuild(t *testing.T) {
+	if os.Getenv("SPINDLE_PARITY_EXEC") != "1" {
+		t.Skip("registry execution tier: set SPINDLE_PARITY_EXEC=1 (needs docker; make parity-exec)")
+	}
+	requireDockerTier(t)
+	const buildahImage = "quay.io/buildah/stable:latest"
+	const registryImage = "registry:2"
+	for _, image := range []string{buildahImage, registryImage} {
+		if exec.Command("docker", "image", "inspect", image).Run() == nil {
+			continue
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 6*time.Minute)
+		out, err := exec.CommandContext(ctx, "docker", "pull", image).CombinedOutput()
+		cancel()
+		if err != nil {
+			t.Fatalf("tier requested but %s is unavailable: %v (%s)", image, err, strings.TrimSpace(string(out)))
+		}
+	}
+
+	regName := fmt.Sprintf("spindle-parity-registry-%d", time.Now().UnixNano())
+	out, err := exec.Command("docker", "run", "-d", "--rm", "--name", regName,
+		"-p", "127.0.0.1:0:5000", registryImage).CombinedOutput()
+	if err != nil {
+		t.Fatalf("start registry: %v (%s)", err, strings.TrimSpace(string(out)))
+	}
+	t.Cleanup(func() { _ = exec.Command("docker", "rm", "-f", regName).Run() })
+	portOut, err := exec.Command("docker", "port", regName, "5000/tcp").Output()
+	if err != nil {
+		t.Fatalf("registry port: %v", err)
+	}
+	hostPort := strings.TrimSpace(string(portOut))
+	colon := strings.LastIndexByte(hostPort, ':')
+	if colon < 0 {
+		t.Fatalf("registry port %q", hostPort)
+	}
+	port, err := strconv.Atoi(hostPort[colon+1:])
+	if err != nil || port <= 0 {
+		t.Fatalf("registry port %q: %v", hostPort, err)
+	}
+
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "Dockerfile"), []byte("FROM busybox:1.36\nCOPY hello.txt /hello.txt\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "hello.txt"), []byte("parity-registry-ok\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	ref := fmt.Sprintf("127.0.0.1:%d/spindle/parity:latest", port)
+
+	// The builder job: no docker socket, host network to reach the local
+	// registry, and the privileged kernel prerequisite buildah documents.
+	jobName := fmt.Sprintf("spindle-parity-buildah-%d", time.Now().UnixNano())
+	out, err = exec.Command("docker", "run", "-d", "--name", jobName, "--privileged", "--network=host",
+		"-v", dir+":/workspace:Z", "-w", "/workspace", "--entrypoint", "/bin/sh",
+		buildahImage, "-c", "while :; do sleep 3600; done").CombinedOutput()
+	if err != nil {
+		t.Fatalf("start buildah job: %v (%s)", err, strings.TrimSpace(string(out)))
+	}
+	t.Cleanup(func() { _ = exec.Command("docker", "rm", "-f", jobName).Run() })
+	binds, _ := exec.Command("docker", "inspect", "--format", "{{json .HostConfig.Binds}}", jobName).CombinedOutput()
+	if strings.Contains(string(binds), "docker.sock") {
+		t.Fatalf("the build job was given a docker socket: %s", binds)
+	}
+	if err := exec.Command("docker", "exec", jobName, "sh", "-c", "test ! -e /var/run/docker.sock").Run(); err != nil {
+		t.Fatalf("the build job sees /var/run/docker.sock")
+	}
+	script := fmt.Sprintf("buildah --storage-driver=vfs bud -t %s . && buildah --storage-driver=vfs push --tls-verify=false %s", ref, ref)
+	ctx, cancel := context.WithTimeout(context.Background(), 6*time.Minute)
+	out, err = exec.CommandContext(ctx, "docker", "exec", jobName, "sh", "-c", script).CombinedOutput()
+	cancel()
+	if err != nil {
+		t.Fatalf("buildah build+push: %v (%s)", err, strings.TrimSpace(string(out)))
+	}
+
+	// The registry has the tag...
+	resp, err := http.Get(fmt.Sprintf("http://127.0.0.1:%d/v2/spindle/parity/tags/list", port))
+	if err != nil {
+		t.Fatalf("registry tags: %v", err)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	_ = resp.Body.Close()
+	if resp.StatusCode != http.StatusOK || !strings.Contains(string(body), `"latest"`) {
+		t.Fatalf("registry tags = %d %s", resp.StatusCode, body)
+	}
+	// ...and the pushed image pulls back and runs its content.
+	if out, err := exec.Command("docker", "pull", "-q", ref).CombinedOutput(); err != nil {
+		t.Fatalf("pull back %s: %v (%s)", ref, err, strings.TrimSpace(string(out)))
+	}
+	out, err = exec.Command("docker", "run", "--rm", ref, "cat", "/hello.txt").CombinedOutput()
+	if err != nil || strings.TrimSpace(string(out)) != "parity-registry-ok" {
+		t.Fatalf("pulled image content = %q, %v", strings.TrimSpace(string(out)), err)
 	}
 }

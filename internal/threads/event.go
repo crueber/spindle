@@ -296,6 +296,132 @@ func ReleaseEventPayload(repo, action, tag, name, target, author string, draft, 
 	}
 }
 
+// LabelEventPayload builds the `label` payload (PAR-020): a label DEFINITION
+// created/edited/deleted by triage. The label's own fields are bounded display
+// data; the trigger is not the `labeled` PR/issue metadata edge.
+func LabelEventPayload(repo, action, actor, name, color, description string) map[string]any {
+	return map[string]any{
+		"action":     action,
+		"repository": repositoryProjection(repo),
+		"sender":     map[string]any{"login": actor},
+		"label": map[string]any{
+			"name":        truncateBody(name),
+			"color":       truncateBody(color),
+			"description": truncateBody(description),
+		},
+	}
+}
+
+// MilestoneEventPayload builds the `milestone` payload (PAR-020): a milestone
+// DEFINITION created/opened/closed/edited/deleted. `number` is the milestone's
+// stable id in this store (strings are opaque to workflows).
+func MilestoneEventPayload(repo, action, actor, id, title, state, description, dueOn string) map[string]any {
+	return map[string]any{
+		"action":     action,
+		"repository": repositoryProjection(repo),
+		"sender":     map[string]any{"login": actor},
+		"milestone": map[string]any{
+			"number":      id,
+			"title":       truncateBody(title),
+			"state":       state,
+			"description": truncateBody(description),
+			"due_on":      dueOn,
+		},
+	}
+}
+
+// ReviewEventPayload builds the `pull_request_review` payload (PAR-020). The
+// pull_request object is the same bounded projection PullEventPayload carries;
+// the review object names the reviewer, the state and the reviewed commit.
+func ReviewEventPayload(repo, action, actor, reviewer, state, body, commitSHA string, num int, baseRef, headRef, headSHA, headRepo string) map[string]any {
+	return map[string]any{
+		"action":     action,
+		"repository": repositoryProjection(repo),
+		"sender":     map[string]any{"login": actor},
+		"review": map[string]any{
+			"state":     state,
+			"body":      truncateBody(body),
+			"commit_id": commitSHA,
+			"user":      map[string]any{"login": reviewer},
+		},
+		"pull_request": reviewPullProjection(repo, num, baseRef, headRef, headSHA, headRepo),
+	}
+}
+
+// ReviewCommentEventPayload builds the `pull_request_review_comment` payload
+// (PAR-020): one created inline thread comment, bounded to its anchor.
+func ReviewCommentEventPayload(repo, action, actor, body, commentID, path, side, commitSHA string, line, num int, baseRef, headRef, headSHA, headRepo string) map[string]any {
+	return map[string]any{
+		"action":     action,
+		"repository": repositoryProjection(repo),
+		"sender":     map[string]any{"login": actor},
+		"comment": map[string]any{
+			"id":        commentID,
+			"body":      truncateBody(body),
+			"path":      truncateBody(path),
+			"side":      side,
+			"line":      line,
+			"commit_id": commitSHA,
+			"user":      map[string]any{"login": actor},
+		},
+		"pull_request": reviewPullProjection(repo, num, baseRef, headRef, headSHA, headRepo),
+	}
+}
+
+// reviewPullProjection is the minimal PR object the review payloads carry: the
+// number and the two ref tips. It never copies PR bodies or labels.
+func reviewPullProjection(repo string, num int, baseRef, headRef, headSHA, headRepo string) map[string]any {
+	return map[string]any{
+		"number": num,
+		"base":   map[string]any{"ref": shortRef(baseRef), "repo": map[string]any{"full_name": repo}},
+		"head":   map[string]any{"ref": shortRef(headRef), "sha": headSHA, "repo": map[string]any{"full_name": headRepo}},
+	}
+}
+
+// CheckRunEventPayload builds the `check_run` payload (PAR-021) for an external
+// CI report. Annotations are a COUNT: the finding text is the checks surface's,
+// not something every triggered run should carry.
+func CheckRunEventPayload(repo, action, sha, name, status, conclusion, targetURL, description, creator string, annotations int) map[string]any {
+	return map[string]any{
+		"action":     action,
+		"repository": repositoryProjection(repo),
+		"sender":     map[string]any{"login": creator},
+		"check_run": map[string]any{
+			"name":              truncateBody(name),
+			"head_sha":          sha,
+			"status":            status,
+			"conclusion":        conclusion,
+			"details_url":       truncateBody(targetURL),
+			"annotations_count": annotations,
+			"output": map[string]any{
+				"title":   truncateBody(description),
+				"summary": "",
+			},
+			"app": map[string]any{"name": "spindle", "owner": map[string]any{"login": creator}},
+		},
+	}
+}
+
+// ForkEventPayload builds the `fork` payload (PAR-021). The event fires on the
+// ORIGINAL repository; `forkee` names the new one.
+func ForkEventPayload(repo, actor, forkee string) map[string]any {
+	return map[string]any{
+		"repository": repositoryProjection(repo),
+		"sender":     map[string]any{"login": actor},
+		"forkee":     repositoryProjection(forkee),
+	}
+}
+
+// WatchEventPayload builds the `watch` payload (PAR-021): GitHub's star action
+// is `started`. Unstarring is not an emitted watch action.
+func WatchEventPayload(repo, actor, action string) map[string]any {
+	return map[string]any{
+		"action":     action,
+		"repository": repositoryProjection(repo),
+		"sender":     map[string]any{"login": actor},
+	}
+}
+
 // IssueEventPayload builds the `issues` payload.
 func IssueEventPayload(repo, action, author string, num int, title, state string, labels []string) map[string]any {
 	if len(labels) > maxEventListEntries {

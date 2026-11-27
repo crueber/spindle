@@ -133,7 +133,8 @@ func workflowRunHeadBranch(run *Run) string {
 	if run == nil {
 		return ""
 	}
-	if run.Event == EventPullReq || run.Event == EventPullTarget {
+	if run.Event == EventPullReq || run.Event == EventPullTarget ||
+		run.Event == EventPullReview || run.Event == EventPullReviewComment {
 		if pr, ok := run.EventPayload["pull_request"].(map[string]any); ok {
 			if head, ok := pr["head"].(map[string]any); ok {
 				if ref, ok := head["ref"].(string); ok && strings.TrimSpace(ref) != "" {

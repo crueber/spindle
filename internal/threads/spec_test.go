@@ -161,7 +161,7 @@ func TestJobSpecCarriesExecutionPayload(t *testing.T) {
 // TestBuildSpecWorkflowConcurrencyFallback pins the workflow-level default: a
 // job without its own concurrency inherits the workflow's group.
 func TestBuildSpecWorkflowConcurrencyFallback(t *testing.T) {
-	wf := &workflow.Workflow{Concurrency: &workflow.Concurrency{Group: "wf", CancelInProgress: true}}
+	wf := &workflow.Workflow{Concurrency: &workflow.Concurrency{Group: "wf", CancelInProgress: workflow.BoolExpr{Value: true, Present: true}}}
 	spec := buildSpec("CI", wf, workflow.Job{RunsOn: workflow.Labels{"linux"}}, nil)
 	if spec.Concurrency == nil || spec.Concurrency.Group != "wf" || !spec.Concurrency.CancelInProgress {
 		t.Fatalf("concurrency = %+v", spec.Concurrency)

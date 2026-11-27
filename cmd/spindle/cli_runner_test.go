@@ -85,3 +85,37 @@ func TestRunnerAdminVerbsAreGone(t *testing.T) {
 		t.Fatalf("group help = %q", errOut.String())
 	}
 }
+
+// TestRunnerImagesStockLabels pins PAR-177/D-26's operator surface: the
+// catalogue prints the pinned images and one label resolves explicitly, while
+// an unknown label is refused by name.
+func TestRunnerImagesStockLabels(t *testing.T) {
+	c := &cli{out: &bytes.Buffer{}, errOut: &bytes.Buffer{}}
+	if code := runRunnerImages(t.Context(), c, nil); code != exitOK {
+		t.Fatalf("images exit = %d (%s)", code, c.errOut.(*bytes.Buffer).String())
+	}
+	out := c.out.(*bytes.Buffer).String()
+	for _, want := range []string{"ubuntu-latest", "node:22-bookworm@sha256:", "golang:1.25-bookworm@sha256:", "--labels self-hosted,linux,"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("catalogue output misses %q:\n%s", want, out)
+		}
+	}
+
+	c = &cli{out: &bytes.Buffer{}, errOut: &bytes.Buffer{}}
+	if code := runRunnerImages(t.Context(), c, []string{"--label", "go"}); code != exitOK {
+		t.Fatalf("--label go exit = %d (%s)", code, c.errOut.(*bytes.Buffer).String())
+	}
+	out = c.out.(*bytes.Buffer).String()
+	if !strings.Contains(out, "golang:1.25-bookworm@sha256:") {
+		t.Fatalf("--label go output = %q", out)
+	}
+
+	c = &cli{out: &bytes.Buffer{}, errOut: &bytes.Buffer{}}
+	if code := runRunnerImages(t.Context(), c, []string{"--label", "nodejs"}); code != exitArg {
+		t.Fatalf("unknown label exit = %d, want %d", code, exitArg)
+	}
+	errOut := c.errOut.(*bytes.Buffer).String()
+	if !strings.Contains(errOut, "unknown stock label") || !strings.Contains(errOut, "nodejs") {
+		t.Fatalf("unknown label stderr = %q", errOut)
+	}
+}

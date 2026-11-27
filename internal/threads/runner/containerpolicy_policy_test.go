@@ -175,7 +175,7 @@ func TestRunnerRefusesHostGrantWithForkRuns(t *testing.T) {
 			cfg := base
 			cfg.AllowForkRuns = true
 			cfg.Policy = tc.policy
-			if _, err := New(cfg); err == nil || !strings.Contains(err.Error(), "cannot be combined with --container-privileged") {
+			if _, err := New(cfg); err == nil || !strings.Contains(err.Error(), "--allow-fork-runs cannot be combined with") {
 				t.Fatalf("error = %v", err)
 			}
 		})

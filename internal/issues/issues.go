@@ -183,6 +183,11 @@ type ThreadEvent struct {
 	Extra        string
 	CommentBody  string
 	CommentActor string
+	// Label and Milestone carry the definition for a Kind "label"/"milestone"
+	// edge (PAR-020); nil for every thread-shaped event. The payload builder
+	// reads only these bounded fields, never the whole stored object.
+	Label     *Label
+	Milestone *Milestone
 }
 
 // Service is the issues store client: all bucket I/O for numbering,

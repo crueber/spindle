@@ -27,11 +27,11 @@ import (
 //   - the joined summary is capped at MaxJobSummaryBytes (4 MiB) so a job
 //     record in the object store stays a record.
 //
-// `$GITHUB_STATE` (the pre/post state file) is intentionally NOT provided: the
-// engine runs no pre/post hooks (JS actions with post hooks are a later wave),
-// so a state file could only be collected and thrown away — an accepted-but-
-// inert surface. A `::save-state::` command is answered with a named warning
-// instead (workflowcmd.go). The subset is documented in docs/WORKFLOWS.md §6.6.
+// `$GITHUB_STATE` (the pre/post hand-off) is a sibling surface but not this
+// file's: it is the per-action file under /spindle/state, read at the end of a
+// JavaScript action's pre/main phase and delivered to its post hook as
+// `STATE_<name>` (state.go, PAR-092, docs/threads.md §3.9a). A `::save-state::`
+// command feeds the same map.
 const (
 	// SummaryEnvVar / SummaryEnvAlias are the environment variables holding
 	// this step's summary-file path.

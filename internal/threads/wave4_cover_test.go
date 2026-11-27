@@ -35,9 +35,23 @@ func TestStockImageCatalog(t *testing.T) {
 		if args[i] != img.Label+":docker://"+img.Image {
 			t.Fatalf("arg %q", args[i])
 		}
+		// PAR-177/D-26: every stock image is a real upstream image PINNED by
+		// digest, never a mutable tag.
+		if !strings.Contains(img.Image, "@sha256:") {
+			t.Fatalf("%s is not digest-pinned: %q", img.Label, img.Image)
+		}
 		if _, err := ParseRunnerLabels([]string{args[i]}); err != nil {
 			t.Fatalf("%s does not parse as a runner label: %v", args[i], err)
 		}
+		// The explicit resolution path returns the same pinned reference and
+		// refuses an unknown label by name.
+		got, err := StockImageFor(img.Label)
+		if err != nil || got.Image != img.Image {
+			t.Fatalf("StockImageFor(%q) = %+v, %v", img.Label, got, err)
+		}
+	}
+	if _, err := StockImageFor("nodejs"); err == nil || !strings.Contains(err.Error(), "nodejs") || !strings.Contains(err.Error(), "node") {
+		t.Fatalf("unknown stock label = %v, want the label and the catalogue named", err)
 	}
 	// The withheld non-goal labels are never in the catalogue.
 	for _, withheld := range HostedNonGoalLabels() {

@@ -262,6 +262,42 @@ func expandJobSpec(key, display string, base *Spec, ec expandContext) ([]jobInst
 			return nil, lerr
 		}
 		spec.RunsOn = labels
+		// `container.image` is the second substitutable structural field
+		// (PAR-030): resolve it for this cell before the job record is written,
+		// so the image gate and the container plan see `debian:bookworm`, not
+		// `debian:${{ matrix.variant }}`.
+		if spec.Container != nil && strings.Contains(spec.Container.Image, "${{") {
+			image, ierr := workflow.ExpandContainerImageWithStrategy(spec.Container.Image, ec.GitHub, cell.Values, ec.Inputs, strategy)
+			if ierr != nil {
+				return nil, fmt.Errorf("workflow: job %s: %w", key, ierr)
+			}
+			container := *spec.Container
+			container.Image = image
+			spec.Container = &container
+		}
+		// `continue-on-error` may be one expression (PAR-056): evaluate it from
+		// this cell's values so `${{ matrix.experimental }}` tolerates exactly
+		// the one cell the author marked. A non-boolean result fails creation.
+		if spec.ContinueOnErrorExpr != "" {
+			tolerate, berr := workflow.EvalBoolExpr(spec.ContinueOnErrorExpr, ec.GitHub, cell.Values, ec.Inputs, strategy)
+			if berr != nil {
+				return nil, fmt.Errorf("workflow: job %s continue-on-error: %w", key, berr)
+			}
+			spec.ContinueOnError = tolerate
+			spec.ContinueOnErrorExpr = ""
+		}
+		// `concurrency.cancel-in-progress` may be one expression too (PAR-151),
+		// resolved once per cell from the documented contexts.
+		if spec.Concurrency != nil && spec.Concurrency.CancelInProgressExpr != "" {
+			conc := *spec.Concurrency
+			cancel, cerr := workflow.EvalBoolExpr(conc.CancelInProgressExpr, ec.GitHub, cell.Values, ec.Inputs, strategy)
+			if cerr != nil {
+				return nil, fmt.Errorf("workflow: job %s concurrency.cancel-in-progress: %w", key, cerr)
+			}
+			conc.CancelInProgress = cancel
+			conc.CancelInProgressExpr = ""
+			spec.Concurrency = &conc
+		}
 		// A job timeout is a literal or one expression (PAR-055); a job that
 		// names none gets GitHub's 360-minute default.
 		if spec.TimeoutExpr != "" {

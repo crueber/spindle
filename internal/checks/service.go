@@ -261,6 +261,7 @@ func (s *Service) recordResolved(ctx context.Context, owner, repo, fullSHA, crea
 		fresh.CompletedAt = nil // cleared on a re-report of a live state
 	}
 	var prev *StatusDoc
+	created := false
 	if err := s.putCreate(ctx, key, encodeStatus(fresh)); err != nil {
 		if !store.IsPreconditionFailed(err) {
 			return nil, err
@@ -275,7 +276,8 @@ func (s *Service) recordResolved(ctx context.Context, owner, repo, fullSHA, crea
 			if perr != nil {
 				return nil, false, perr
 			}
-			prev = curDoc
+			cp := *curDoc
+			prev = &cp
 			curDoc.State = in.State
 			curDoc.TargetURL = in.TargetURL
 			curDoc.Description = in.Description
@@ -301,6 +303,8 @@ func (s *Service) recordResolved(ctx context.Context, owner, repo, fullSHA, crea
 			return nil, gerr
 		}
 		fresh, _ = parseStatus(raw)
+	} else {
+		created = true
 	}
 	// Step 3: CAS the index projection (best-effort — a lost update costs
 	// one stale table row until the next report; the per-context objects
@@ -316,6 +320,7 @@ func (s *Service) recordResolved(ctx context.Context, owner, repo, fullSHA, crea
 		SHA: fullSHA, Context: in.Context, State: fresh.State,
 		CombinedState: combined, UpdatedAt: fresh.UpdatedAt,
 	})
+	s.emitCheckRun(ctx, owner, repo, fresh, created, prev)
 	if (fresh.State == StateFailure || fresh.State == StateError) &&
 		(prev == nil || (prev.State != StateFailure && prev.State != StateError)) {
 		s.notifyHeads(ctx, owner, repo, fresh)

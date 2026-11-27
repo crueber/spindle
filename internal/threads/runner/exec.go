@@ -473,12 +473,66 @@ func (e *Executor) setup(ctx context.Context, plan *Plan, stream *Streamer) erro
 	if err := e.docker(ctx, stream, nil, "start", plan.Names.Container); err != nil {
 		return fmt.Errorf("start job container: %w", err)
 	}
+	if err := e.checkContainerLifetime(ctx, plan); err != nil {
+		return err
+	}
+	if len(plan.ContainerPorts) > 0 {
+		// One observable line per declared port: the mapping is real (docker's
+		// own answer), so an author never has to guess what `ports:` did
+		// (PAR-077).
+		if out, _, code, err := e.Docker.Run(ctx, nil, "port", plan.Names.Container); err == nil && code == 0 {
+			for _, line := range strings.Split(strings.TrimSpace(out), "\n") {
+				if line = strings.TrimSpace(line); line != "" {
+					stream.Systemf("spindle: job container port %s", line)
+				}
+			}
+		}
+	}
 	for _, svc := range plan.Services {
 		if err := e.waitService(ctx, svc); err != nil {
 			return err
 		}
 	}
 	return e.writeJobFiles(ctx, plan)
+}
+
+// checkContainerLifetime verifies that a container whose process the workflow
+// owns (`container.entrypoint`/`command`, PAR-077) is still running before the
+// first step. `docker exec` into an exited container reports "is not running",
+// which names neither the cause nor the remedy; this check does.
+func (e *Executor) checkContainerLifetime(ctx context.Context, plan *Plan) error {
+	if plan == nil || plan.ContainerLifetime != ContainerLifetimeWorkflow {
+		return nil
+	}
+	// A no-op command (`command: ["true"]`) exits immediately; give it the
+	// moment it needs so the failure is the named one below, not a later exec
+	// error.
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-time.After(200 * time.Millisecond):
+	}
+	out, stderr, code, err := e.Docker.Run(ctx, nil, "inspect", "--format",
+		"{{.State.Running}}|{{.State.ExitCode}}", plan.Names.Container)
+	if err != nil || code != 0 {
+		return fmt.Errorf("inspect the job container: exit %d: %v: %s", code, err, strings.TrimSpace(stderr))
+	}
+	fields := strings.Split(strings.TrimSpace(out), "|")
+	if len(fields) == 2 && strings.TrimSpace(fields[0]) == "true" {
+		return nil
+	}
+	exit := "?"
+	state := ""
+	if len(fields) == 2 {
+		exit = strings.TrimSpace(fields[1])
+		if strings.TrimSpace(fields[0]) != "false" {
+			state = strings.TrimSpace(fields[0])
+		}
+	}
+	if state != "" {
+		return fmt.Errorf("the job container is %q before the first step: container.entrypoint/command must keep a process running (steps run with docker exec inside it); remove both keys to use the runner's keep-alive", state)
+	}
+	return fmt.Errorf("the job container exited (code %s) before the first step: container.entrypoint/command must keep a process running (steps run with docker exec inside it), for example entrypoint: /bin/sh with command: [\"-c\", \"sleep infinity\"]; remove both keys to use the runner's keep-alive", exit)
 }
 
 // writeJobFiles seeds the container's per-job files before the first step: the
@@ -494,8 +548,8 @@ func (e *Executor) writeJobFiles(ctx context.Context, plan *Plan) error {
 	// (not the workspace volume), so a checked-out repository can never
 	// pre-create them or point one at a symlink.
 	_, stderr, code, err := e.Docker.Run(ctx, nil, "exec", plan.Names.Container, "sh", "-c",
-		`mkdir -p "$1" "$2" "$5" "$6" && chmod 0777 "$1" "$2" "$5" "$6" && printf '%s' "$3" > "$4" && chmod 0644 "$4"`,
-		"sh", RunnerTemp, RunnerToolCache, payload, EventPath, threads.RemoteActionsRoot, threads.RemoteStateRoot)
+		`mkdir -p "$1" "$2" "$5" "$6" "$7" && chmod 0777 "$1" "$2" "$5" "$6" "$7" && printf '%s' "$3" > "$4" && chmod 0644 "$4"`,
+		"sh", RunnerTemp, RunnerToolCache, payload, EventPath, threads.RemoteActionsRoot, threads.RemoteStateRoot, RunnerHome)
 	if err != nil || code != 0 {
 		return fmt.Errorf("write the job event file: exit %d: %v: %s", code, err, strings.TrimSpace(stderr))
 	}
@@ -883,10 +937,16 @@ func (e *Executor) runStepBody(ctx context.Context, plan *Plan, step StepPlan, s
 	// step's argv (env values) and command (PATH prepending). A docker action's
 	// argv is the image's own and is never wrapped.
 	step = applyCommandFiles(plan, step, cmds)
+	// A post hook receives what its pre/main phases saved as `STATE_<name>`
+	// (PAR-092); the values are supplied by name, never in argv.
+	if step.Node != nil && step.Node.IsPost {
+		step = applyActionState(plan, step, plan.actionState().snapshot(step.Node.StatePath))
+	}
 	// Workflow commands are parsed out of the step's own output (PAR-093): the
 	// sink consumes `::name::` lines, records annotations/masks and forwards
 	// everything else to the log.
 	sink := newCommandSink(stream, jobCmds, step)
+	sink.state = plan.actionState()
 	err := e.runStepCommand(ctx, plan, step, sink, stream)
 	sink.Close()
 	// The command files are processed for the step that just ran, whatever its
@@ -897,6 +957,16 @@ func (e *Executor) runStepBody(ctx context.Context, plan *Plan, step StepPlan, s
 			err = &stepError{code: -1, msg: cerr.Error()}
 		} else {
 			stream.Systemf("spindle: step %q: %v", step.Name, cerr)
+		}
+	}
+	// A JavaScript action's state is collected after the phase, whether it
+	// succeeded or failed: a pre hook that saves state and then fails still
+	// hands its post hook what it saved (PAR-092).
+	if serr := e.collectActionState(ctx, plan, step, stream); serr != nil {
+		if err == nil {
+			err = &stepError{code: -1, msg: serr.Error()}
+		} else {
+			stream.Systemf("spindle: step %q: %v", step.Name, serr)
 		}
 	}
 	// The step summary is collected for a step that succeeded AND one that
@@ -1222,6 +1292,12 @@ func (e *Executor) runStepCommand(ctx context.Context, plan *Plan, step StepPlan
 			}
 		}
 		fullEnv = append(fullEnv, credentialEnv(plan, step.EnvFrom, step.EnvSecret)...)
+		// A post hook's `STATE_<name>` values ride the docker CLI's environment
+		// (the argv carries bare `--env STATE_<name>`): state can hold a token,
+		// so it is never an argv element (PAR-092).
+		for name, value := range step.EnvState {
+			fullEnv = append(fullEnv, name+"="+value)
+		}
 	}
 	code, err := e.Docker.Stream(stepCtx, fullEnv, out, step.Argv...)
 	if stepCtx.Err() == context.DeadlineExceeded && ctx.Err() == nil {
@@ -1283,7 +1359,11 @@ func (e *Executor) prepareStepScript(ctx context.Context, plan *Plan, step StepP
 	if step.Kind != "run" {
 		return step, nil
 	}
-	if strings.EqualFold(strings.TrimSpace(step.Shell), "bash") && !e.containerHasCommand(ctx, plan, "bash") {
+	// The default shell (no authored `shell:`) is bash, like GitHub's Linux
+	// default; an image without it runs `sh -e` with a stated log line — the
+	// same fallback an authored `shell: bash` gets.
+	authored := strings.TrimSpace(step.Shell)
+	if (authored == "" || strings.EqualFold(authored, "bash")) && !e.containerHasCommand(ctx, plan, "bash") {
 		cmd, needsFile, err := shellCommand("sh", step.Run, step.ScriptFile)
 		if err != nil {
 			return step, err

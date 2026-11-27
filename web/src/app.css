@@ -1006,6 +1006,27 @@
   .diff-num.diff-del { background: var(--pd-del-bg); color: var(--pd-del-fg); }
 
 
+  /* Job log viewer (PAR-190, docs/features/15_threads.md §6). The panel is a
+     focusable region (`tabindex="0"`, `role="region"`, `aria-live="polite"`)
+     whose frames keep their captured order and bytes; a time gutter is an
+     inline span beside its line (copy carries the time with the line), a group
+     is a native <details> that collapses when it closes, and a marker is a
+     named boundary — never colour-only. */
+  .thread-log { font-family: var(--font-mono); }
+  .thread-log p, .thread-log pre { margin: 0; white-space: pre-wrap; }
+  .thread-log-time {
+    color: var(--pd-dim); font-variant-numeric: tabular-nums; user-select: none;
+  }
+  .thread-log-note { color: var(--pd-muted); }
+  .thread-log-marker { color: var(--pd-text-2); font-weight: 600; }
+  .thread-log-group {
+    margin: 2px 0; padding-left: 6px;
+    border-left: 2px solid var(--pd-line);
+  }
+  .thread-log-summary { cursor: pointer; color: var(--pd-text-2); }
+  .thread-log-group-done > .thread-log-summary { color: var(--pd-muted); }
+  .thread-log-body { padding-left: 4px; }
+
   /* Identity utilities (§1 F5/F6). */
   .mono { font-family: var(--font-mono); }
   .eyebrow {

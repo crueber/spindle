@@ -73,7 +73,19 @@ func (s *Service) Star(ctx context.Context, p auth.Principal, owner, repo string
 		}
 		return 0, err
 	}
-	return s.bumpStars(ctx, owner, repo, +1)
+	count, berr := s.bumpStars(ctx, owner, repo, +1)
+	if berr == nil {
+		s.watchEvent(ctx, WatchEvent{Repo: repoName(owner, repo), Actor: who, Action: "started"})
+	}
+	return count, berr
+}
+
+// watchEvent delivers one star trigger edge, nil-safe.
+func (s *Service) watchEvent(ctx context.Context, ev WatchEvent) {
+	if s.WatchEvents == nil {
+		return
+	}
+	s.WatchEvents(ctx, ev)
 }
 
 // reconcileStar serves the already-starred path. Healthy repos return the

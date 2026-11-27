@@ -504,7 +504,37 @@ func (s *Service) SubmitReview(ctx context.Context, owner, repo string, num int,
 	s.emit(ctx, NotifyEvent{Repo: repoName(owner, repo), Class: "review_submitted", Actor: who, PullNum: num, Recipients: prParticipants(h, who)})
 	s.emitMentioned(ctx, owner, repo, num, who, in.Body)
 	s.stream(ctx, StreamEvent{Name: "review", Repo: repoName(owner, repo), Action: "submitted", Num: num, Summary: sum})
+	// PAR-020: the pull_request_review trigger edge, plus one
+	// pull_request_review_comment edge for each inline thread the review opened.
+	s.emitReview(ctx, ReviewTriggerEvent{
+		Repo: repoName(owner, repo), Action: "submitted", Num: num, Actor: who, Reviewer: who,
+		State: reviewStateWord(in.State), Body: in.Body, CommitSHA: strings.ToLower(in.CommitSHA), Seq: seq,
+	})
+	for i, t := range in.Threads {
+		if i >= len(tids) {
+			break
+		}
+		s.emitReviewComment(ctx, ReviewCommentTriggerEvent{
+			Repo: repoName(owner, repo), Action: "created", Num: num, TID: tids[i],
+			Body: t.Body, Author: who, Anchor: t.Anchor,
+		})
+	}
 	return ev, opened, sum, nil
+}
+
+// reviewStateWord maps the stored review state onto the payload vocabulary.
+func reviewStateWord(state string) string {
+	switch strings.ToUpper(strings.TrimSpace(state)) {
+	case StateApproved:
+		return "approved"
+	case StateChangesRequested:
+		return "changes_requested"
+	case StateCommented:
+		return "commented"
+	case "DISMISSED":
+		return "dismissed"
+	}
+	return strings.ToLower(strings.TrimSpace(state))
 }
 
 // prParticipants fans subscribed notifications to participants minus actor.
@@ -612,6 +642,12 @@ func (s *Service) DismissReview(ctx context.Context, owner, repo string, num, se
 	}
 	s.emit(ctx, NotifyEvent{Repo: repoName(owner, repo), Class: "review_dismissed", Actor: who, PullNum: num, Recipients: prParticipants(h, who)})
 	s.stream(ctx, StreamEvent{Name: "review", Repo: repoName(owner, repo), Action: "dismissed", Num: num, Summary: sum})
+	// PAR-020: the dismissal is a pull_request_review edge too, carrying the
+	// dismissed review's identity and the maintainer's reason (bounded later).
+	s.emitReview(ctx, ReviewTriggerEvent{
+		Repo: repoName(owner, repo), Action: "dismissed", Num: num, Actor: who, Reviewer: target.By,
+		State: "dismissed", Body: reason, CommitSHA: target.CommitSHA, Seq: seq,
+	})
 	return ev, sum, nil
 }
 
