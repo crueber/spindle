@@ -34,11 +34,13 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  deploy:
+  # The artifact is uploaded here and deployed by the second job on purpose. Running
+  # upload-pages-artifact and deploy-pages back-to-back in one job intermittently
+  # fails with "Found 0 artifact(s)" although the artifact exists: the deployment job
+  # can query the artifact service before the freshly-finalized artifact is visible.
+  # A job boundary is the settle window; the upload job's success is the precondition.
+  build:
     runs-on: ubuntu-latest
-    environment:
-      name: github-pages
-      url: ${{ steps.deployment.outputs.page_url }}
     steps:
       - uses: actions/checkout@v7
       - name: check the site
@@ -50,5 +52,13 @@ jobs:
         with:
           path: dist/site
           include-hidden-files: true   # keeps .nojekyll
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
       - id: deployment
         uses: actions/deploy-pages@v5

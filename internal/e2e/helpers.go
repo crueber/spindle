@@ -148,6 +148,48 @@ func (s *e2eServer) waitHealthy(deadline time.Duration) {
 	s.t.Fatalf("server not ready within %v\nlogs:\n%s", deadline, s.logs.String())
 }
 
+// readyzStatus extracts the status field of a /readyz body ("" when absent or
+// unparseable). It lives here, not in a _test.go file: helpers.go is part of
+// the non-test package, so it cannot see test-only helpers.
+func readyzStatus(body []byte) string {
+	var m struct {
+		Status string `json:"status"`
+	}
+	_ = json.Unmarshal(body, &m)
+	return m.Status
+}
+
+// requireConfigured fails FAST when the instance booted RESTRICTED — an invalid
+// configuration was rejected at load, so only the admin/setup surface answers
+// and /healthz is still 200 (docs/go/06 §10). Without this check a fixture that
+// wrote a rejected key looks like a slow or hung server, and the failure shows
+// up as a timeout in whatever step first needed the repository API. /readyz
+// carries the config errors, so the fatal message names the offending key.
+//
+// A scenario that MEANS to test the restricted boot must not call this.
+func (s *e2eServer) requireConfigured(deadline time.Duration) {
+	s.t.Helper()
+	deadlineAt := time.Now().Add(deadline)
+	for {
+		status, body := httpGet(s.base+"/readyz", 2*time.Second)
+		if status == http.StatusOK {
+			switch readyzStatus(body) {
+			case "ready":
+				return
+			case "restricted":
+				s.t.Fatalf("the instance booted RESTRICTED: its configuration was rejected; fix the fixture\nreadyz: %s\nlogs:\n%s", body, s.logs.String())
+			}
+		}
+		if s.stopped {
+			s.t.Fatal("server stopped before reporting readiness")
+		}
+		if time.Now().After(deadlineAt) {
+			s.t.Fatalf("/readyz did not report ready within %v (status %d): %s\nlogs:\n%s", deadline, status, body, s.logs.String())
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+}
+
 // stop terminates the subprocess (SIGTERM, escalating to SIGKILL).
 func (s *e2eServer) stop() {
 	if s.stopped || s.cmd.Process == nil {

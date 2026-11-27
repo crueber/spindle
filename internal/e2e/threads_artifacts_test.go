@@ -12,6 +12,7 @@ package e2e
 import (
 	"archive/zip"
 	"bytes"
+	"context"
 	"fmt"
 	"io"
 	"net/http"
@@ -20,48 +21,42 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/crueber/spindle/internal/store"
+	"github.com/crueber/spindle/internal/threads"
 )
 
 // artifactsServer boots the binary on a throwaway data dir with an OIDC
-// admin principal (the in-test IdP), anonymous reads, and (optionally) a short
-// threads retention window and the fork approval gate disabled.
-func artifactsServer(t *testing.T, retention string, approveForks bool) *e2eServer {
+// admin principal (the in-test IdP), anonymous reads, and (optionally) the fork
+// approval gate. It fails fast when the fixture's config is rejected (a
+// restricted boot answers /healthz but every repository route is 503).
+func artifactsServer(t *testing.T, approveForks bool) *e2eServer {
 	t.Helper()
 	bin := buildSpindle(t)
 	dataDir := t.TempDir()
 	port := freePort(t)
 	p := newOIDP(t)
-	artifactsOIDP = p
-	writeSpindleConfig(t, dataDir, artifactsConfig(port, dataDir, retention, approveForks, p))
+	writeSpindleConfig(t, dataDir, artifactsConfig(port, dataDir, approveForks, p))
 	// The lane signs in as an admin from the admin group; the second principal
 	// exercises the non-admin read path.
 	e2eDefaultBearer = p.idToken("alice@example.com", "spindle-admin")
 	artifactsBobToken = p.idToken("bob@example.com")
 	s := startServer(t, bin, dataDir, port)
 	t.Cleanup(s.stop)
+	s.requireConfigured(20 * time.Second)
 	return s
 }
 
-// artifactsBobToken is the non-admin principal's bearer for this lane, and
-// artifactsOIDP is the IdP the lane booted with (the retention restart must
-// re-render the same issuer, or the config would be invalid).
-var (
-	artifactsBobToken string
-	artifactsOIDP     *oidp
-)
+// artifactsBobToken is the non-admin principal's bearer for this lane.
+var artifactsBobToken string
 
-// artifactsConfig renders the test instance's spindle.toml. It is a function of
-// the data dir so the retention scenario can rewrite it before a restart (the
-// retention gate is due again at boot: "a restart repeats a pass").
-func artifactsConfig(port int, dataDir, retention string, approveForks bool, p *oidp) string {
+// artifactsConfig renders the test instance's spindle.toml.
+func artifactsConfig(port int, dataDir string, approveForks bool, p *oidp) string {
 	threadsCfg := "[threads]\n"
 	if approveForks {
 		threadsCfg += "approve_first_time_forks = true\n"
 	} else {
 		threadsCfg += "approve_first_time_forks = false\n"
-	}
-	if retention != "" {
-		threadsCfg += fmt.Sprintf("retention = %q\n", retention)
 	}
 	return fmt.Sprintf(`
 [server]
@@ -121,14 +116,28 @@ jobs:
           echo "artifact-roundtrip-ok"
 `
 
+// liveWorkflow is the retention pass's control: a dispatched run whose job asks
+// for a label no runner declares, so it stays QUEUED (live) for the whole test.
+// The pass must never reclaim it.
+const liveWorkflow = `name: Live
+on: [workflow_dispatch]
+jobs:
+  wait:
+    name: wait
+    runs-on: [never-declared]
+    steps:
+      - run: echo never
+`
+
 // TestE2E_ThreadsArtifactsUploadDownloadAndGC is the artifact acceptance: real
 // containers, both directions, the page/API surfaces, the ZIP download, and the
-// retention pass reclaiming the blobs with the run.
+// retention pass reclaiming the run, its blobs and its expiry rows while a LIVE
+// run survives.
 func TestE2E_ThreadsArtifactsUploadDownloadAndGC(t *testing.T) {
 	requireDocker(t)
 	requireModernGit(t)
 	g := newGitClient(t)
-	s := artifactsServer(t, "", false)
+	s := artifactsServer(t, false)
 	bin := buildSpindle(t)
 	owner, repo := testOwner, uniqueRepo("threadsart")
 	repoLane := s.base + "/" + owner + "/" + repo + "/api"
@@ -137,6 +146,7 @@ func TestE2E_ThreadsArtifactsUploadDownloadAndGC(t *testing.T) {
 	work := filepath.Join(t.TempDir(), "work")
 	g.initRepo(work)
 	g.commitFile(work, ".spindle/workflows/artifacts.yml", artifactsWorkflow, "ci")
+	g.commitFile(work, ".spindle/workflows/live.yml", liveWorkflow, "live fixture")
 	g.run(work, "remote", "add", "origin", gitURL)
 	g.runAuth(work, e2eDefaultBearer, "push", "-u", "origin", "main")
 
@@ -241,25 +251,74 @@ func TestE2E_ThreadsArtifactsUploadDownloadAndGC(t *testing.T) {
 	// (Exercised at the unit/API level; here we prove the committed artifact
 	// survived every read above.)
 
-	// threads-gc after the window: rewrite the retention window to one second,
-	// stop the server, and boot it again. The retention gate is per instance and
-	// due at boot ("a restart repeats a pass", never skips one), so the pass
-	// deletes the terminal run and its artifact blobs.
-	time.Sleep(2 * time.Second)
-	s.stop()
-	writeSpindleConfig(t, s.dataDir, artifactsConfig(s.port, s.dataDir, "1s", false, artifactsOIDP))
-	s2 := startServer(t, bin, s.dataDir, s.port)
-	t.Cleanup(s2.stop)
-	pollUntil(t, 180*time.Second, "the run and its artifacts to be reclaimed", func() bool {
-		status, _ := apiCall(t, "GET", repoLane+"/threads/"+runID+"/artifacts", "", e2eDefaultBearer)
-		return status == http.StatusNotFound
-	})
-	if resp := httpDo(t, "GET", s2.base+"/"+owner+"/"+repo+"/threads/"+runID+"/artifacts/build-out", e2eDefaultBearer); resp.StatusCode != http.StatusNotFound {
-		resp.Body.Close()
-		t.Fatalf("download after GC = %d, want 404", resp.StatusCode)
+	// A live control run: dispatched with a label no runner declares, so it
+	// stays QUEUED for the whole test. The retention pass must leave it alone.
+	// The collection POST is the dispatch API (POST …/api/threads).
+	dispatched := mustAPI(t, "POST", repoLane+"/threads",
+		`{"workflow":".spindle/workflows/live.yml","ref":"main"}`, e2eDefaultBearer)
+	liveRuns, _ := dispatched["runs"].([]any)
+	if len(liveRuns) != 1 {
+		t.Fatalf("dispatch = %v", dispatched)
 	}
-	if left := storeFiles(filepath.Join(s.dataDir, "store"), "/threads/runs/", "/artifacts/"); len(left) != 0 {
-		t.Fatalf("%d artifact objects survived threads-gc: %v", len(left), left)
+	liveRunID, _ := liveRuns[0].(map[string]any)["id"].(string)
+	if liveRunID == "" {
+		t.Fatalf("dispatch run id = %v", liveRuns[0])
+	}
+	if live := getRun(t, repoLane, liveRunID, e2eDefaultBearer); live.Run["state"] != "queued" {
+		t.Fatalf("control run = %v, want queued (its label has no runner)", live.Run["state"])
+	}
+
+	// Retention, DRIVEN rather than waited for. The maintainer's retention
+	// sweeper (cmd/spindle/threads_sweep.go retentionSweep) calls exactly
+	// svc.Retain; the schedule itself is asserted by the composition test
+	// TestThreadsGCSweeperAppliesRetention, so this test does not wait for a
+	// tick. The pass runs against the SAME on-disk store the live server reads,
+	// with the window elapsed on the service's own clock.
+	storeRoot := filepath.Join(s.dataDir, "store")
+	fsStore, err := store.NewFilesystemRoot(storeRoot, 4)
+	if err != nil {
+		t.Fatalf("open the server's store: %v", err)
+	}
+	svc := threads.New(fsStore, nil)
+	svc.Retention = 30 * 24 * time.Hour // the documented default window
+	svc.Now = func() time.Time { return time.Now().UTC().Add(31 * 24 * time.Hour) }
+	res, err := svc.Retain(context.Background(), owner, repo, nil)
+	if err != nil {
+		t.Fatalf("retention pass: %v", err)
+	}
+	if res.RunsDeleted != 1 || res.ArtifactsDeleted != 1 || res.ArtifactBytes <= 0 || res.QueueDeleted < 1 {
+		t.Fatalf("retention = %+v, want the terminal run, its artifact, its bytes and its queue entry", res)
+	}
+
+	// The running server reads the same store: the run and its artifact are
+	// gone through every surface.
+	if status, _ := apiCall(t, "GET", repoLane+"/threads/"+runID+"/artifacts", "", e2eDefaultBearer); status != http.StatusNotFound {
+		t.Fatalf("artifact API after retention = %d, want 404", status)
+	}
+	if resp := httpDo(t, "GET", s.base+"/"+owner+"/"+repo+"/threads/"+runID+"/artifacts/build-out", e2eDefaultBearer); resp.StatusCode != http.StatusNotFound {
+		resp.Body.Close()
+		t.Fatalf("download after retention = %d, want 404", resp.StatusCode)
+	}
+	if status, _ := apiCall(t, "GET", repoLane+"/threads/"+runID, "", e2eDefaultBearer); status != http.StatusNotFound {
+		t.Fatalf("run view after retention = %d, want 404", status)
+	}
+
+	// The live run is untouched: still queued, its job still queued.
+	live := getRun(t, repoLane, liveRunID, e2eDefaultBearer)
+	if live.Run["state"] != "queued" {
+		t.Fatalf("the live run was reclaimed: %v", live.Run["state"])
+	}
+	if st := jobState(live, "j-wait"); st == nil || st["state"] != "queued" {
+		t.Fatalf("the live run's job = %v, want queued", st)
+	}
+
+	// The bytes and the expiry rows are really gone (not only the read model):
+	// every artifact object under the reclaimed run and every expiry index row.
+	if left := storeFiles(storeRoot, "/threads/runs/"+runID+"/artifacts/"); len(left) != 0 {
+		t.Fatalf("%d artifact objects survived retention: %v", len(left), left)
+	}
+	if rows := storeFiles(storeRoot, "/threads/artifact-expiry/"); len(rows) != 0 {
+		t.Fatalf("expiry rows survived retention: %v", rows)
 	}
 }
 
@@ -271,7 +330,7 @@ func TestE2E_ThreadsForkArtifactStaysInTheRepo(t *testing.T) {
 	requireDocker(t)
 	requireModernGit(t)
 	g := newGitClient(t)
-	s := artifactsServer(t, "", false)
+	s := artifactsServer(t, false)
 	bin := buildSpindle(t)
 	owner, repo := testOwner, uniqueRepo("threadsforkart")
 	repoLane := s.base + "/" + owner + "/" + repo + "/api"

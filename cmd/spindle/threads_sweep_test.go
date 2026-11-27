@@ -116,12 +116,17 @@ func TestThreadsScheduleSweeperFiresOnce(t *testing.T) {
 	}
 }
 
-// TestThreadsGCSweeperAppliesRetention pins the retention task through the
-// sweeper: a terminal run past a (deliberately tiny) window is deleted, and the
-// second pass is a no-op.
+// TestThreadsGCSweeperAppliesRetention is the SCHEDULED-path wiring proof the
+// artifact e2e no longer waits for: the retention sweeper the SERVING
+// composition registers (maintainSweepers → the maintainer's own per-repo pass)
+// sweeps through the same entry point the driven pass uses (svc.Retain), and a
+// terminal run past the window is deleted. The clock is pinned, so there is no
+// sleep and no tick to wait for.
 func TestThreadsGCSweeperAppliesRetention(t *testing.T) {
 	svc, _ := sweepEnv(t)
-	svc.Retention = time.Millisecond
+	now := time.Date(2026, 11, 21, 12, 0, 0, 0, time.UTC)
+	svc.Now = func() time.Time { return now }
+	svc.Retention = time.Hour
 	// Create a push run and finish it deterministically through the service.
 	commit := "1111111111111111111111111111111111111111"
 	svc.Git = &sweepGit{inner: svc.Git, path: ".spindle/workflows/ci.yml",
@@ -140,19 +145,24 @@ func TestThreadsGCSweeperAppliesRetention(t *testing.T) {
 			t.Fatal(uerr)
 		}
 	}
-	time.Sleep(5 * time.Millisecond) // older than the 1ms window
+	now = now.Add(2 * time.Hour) // past the one-hour window
 
+	// Take the sweeper from the SERVING list, not a fresh set: that is the
+	// registration the maintainer iterates.
 	var gc *threadsSweeper
-	for _, s := range newThreadsSweepers(svc) {
-		if tw := s.(*threadsSweeper); tw.cadence == threadsRetentionCadence {
+	for _, s := range maintainSweepers(&collabWiring{threadsSvc: svc}) {
+		if tw, ok := s.(*threadsSweeper); ok && tw.cadence == threadsRetentionCadence {
 			gc = tw
 		}
 	}
 	if gc == nil {
-		t.Fatal("no retention sweeper")
+		t.Fatal("the serving composition registers no retention sweeper")
+	}
+	if !gc.Due("o/r") {
+		t.Fatal("a fresh retention gate was not due")
 	}
 	if err := gc.Sweep(context.Background(), "o/r", nil); err != nil {
-		t.Fatalf("gc sweep: %v", err)
+		t.Fatalf("retention sweep: %v", err)
 	}
 	if _, err := svc.GetRun(context.Background(), "o/r", runs[0].ID, auth.Principal{Name: "a", Admin: true}); err == nil {
 		t.Fatal("the aged run survived the retention task")
