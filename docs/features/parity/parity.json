@@ -266,7 +266,7 @@
     {
       "id": "PAR-016",
       "area": "triggers",
-      "capability": "`merge_group` trigger wired to the merge-queue card (no queue semantics here)",
+      "capability": "`merge_group` trigger + run contract, and the merge queue that consumes it",
       "provenance": "G",
       "status": "have",
       "wave": 3,
@@ -280,7 +280,8 @@
         "docs/features/21_parity_master.md \u00a74.2",
         "docs/threads.md \u00a73.2",
         "docs/threads.md \u00a76.10",
-        "docs/WORKFLOWS.md \u00a73.7"
+        "docs/WORKFLOWS.md \u00a73.7",
+        "docs/features/22_merge_queue.md"
       ],
       "tests": [
         "TestMergeGroupParseAndFires",
@@ -292,9 +293,14 @@
         "TestMergeGroupPushHookIgnoresOtherRefs",
         "TestMergeGroupRunChecksGate",
         "TestMergeGroupTriggerTranslates",
-        "TestE2E_MergeGroupQueueRefStartsChecksRun"
+        "TestE2E_MergeGroupQueueRefStartsChecksRun",
+        "TestMergeGroupRunsRead",
+        "TestE2E_MergeQueueTwoPRsLandInOrder",
+        "TestE2E_MergeQueueFailingCheckEjects",
+        "TestE2E_MergeQueueRestartResumes",
+        "TestE2E_MergeQueueDequeueCancels"
       ],
-      "notes": "Wave 3 trigger implemented in Wave 7. `on.merge_group` parses (`types: [checks_requested]`, optional `branches`/`branches-ignore` on the target branch), and the push hook turns a push to the documented `refs/heads/gh-readonly-queue/<base>/pr-<n>-<sha>` ref into exactly one run: `github.ref` is the queue ref, `github.ref_name` its short name, `github.sha` the queue head, the payload carries `merge_group.head_ref`/`head_sha`/`base_ref`/`base_sha` plus `number`, and the workflow is the base branch's (repository-owned, trusted). A queue ref never fires `push`; an ordinary branch/tag creates no `merge_group`; a malformed queue-shaped ref creates nothing and is logged with the expected shape. The mirrored checks land on the queue head, so the existing required-checks merge gate reads a merge-group run like any other job. QUEUE DEPENDENCY: creating these refs, batching entries and landing the merge remain the separate Spindle backlog card \"Merge queue\"; this row is the trigger + run contract, not queue semantics."
+      "notes": "Wave 3 trigger implemented in Wave 7. `on.merge_group` parses (`types: [checks_requested]`, optional `branches`/`branches-ignore` on the target branch), and the push hook turns a push to the documented `refs/heads/gh-readonly-queue/<base>/pr-<n>-<sha>` ref into exactly one run: `github.ref` is the queue ref, `github.ref_name` its short name, `github.sha` the queue head, the payload carries `merge_group.head_ref`/`head_sha`/`base_ref`/`base_sha` plus `number`, and the workflow is the base branch's (repository-owned, trusted). A queue ref never fires `push`; an ordinary branch/tag creates no `merge_group`; a malformed queue-shaped ref creates nothing and is logged with the expected shape. The mirrored checks land on the queue head, so the existing required-checks merge gate reads a merge-group run like any other job. QUEUE DEPENDENCY: creating these refs, batching entries and landing the merge remain the separate Spindle backlog card \"Merge queue\"; this row is the trigger + run contract, not queue semantics. The queue itself is now real (docs/features/22_merge_queue.md, 2026-11-28): per-base priority-then-FIFO ordering, the temporary ref lifecycle (prepare/publish/delete/recovery), the required-checks gate on the checked merge tip, landing through the one pull-merge task with the parents pinned, ejection with a named reason, pause/resume, audit, JSON API and pages. No batch refs (documented)."
     },
     {
       "id": "PAR-017",
@@ -433,7 +439,7 @@
         "TestForkTriggerEdgeShape",
         "TestE2EWave6TriggerEdges"
       ],
-      "notes": "Wave 6 closes the family. EMITTED from the real transition: create/delete (push hook, job-token pushes suppressed), deployment/deployment_status (Threads deployment records), fork (pulls' completed fork task, on the original repository), watch (social's first star, action started) and check_run (created/completed for an EXTERNAL CI report; the Threads mirror never re-fires it, so no self-trigger loop). REFUSED BY NAME at parse: merge_group (the separate merge-queue card), status (no legacy commit-status surface), check_suite (no app check-suite object), registry_package, gollum, page_build, branch_protection_rule and public. No accepted-but-never-firing trigger remains."
+      "notes": "Wave 6 closes the family. EMITTED from the real transition: create/delete (push hook, job-token pushes suppressed), deployment/deployment_status (Threads deployment records), fork (pulls' completed fork task, on the original repository), watch (social's first star, action started) and check_run (created/completed for an EXTERNAL CI report; the Threads mirror never re-fires it, so no self-trigger loop). ACCEPTED: merge_group (PAR-016, wired to the merge queue); REFUSED BY NAME at parse: status (no legacy commit-status surface), check_suite (no app check-suite object), registry_package, gollum, page_build, branch_protection_rule and public. No accepted-but-never-firing trigger remains."
     },
     {
       "id": "PAR-022",
@@ -1862,9 +1868,10 @@
       ],
       "tests": [
         "TestPAR112PermissionScopeVocabulary",
-        "TestPAR112ScopeMatrixDrivesCapabilities"
+        "TestPAR112ScopeMatrixDrivesCapabilities",
+        "TestE2E_ThreadsJobTokenPackagesAndChecks"
       ],
-      "notes": "Closed in Wave 2 (D-11/D-12). `permissions:` is a closed vocabulary: contents, issues, pull-requests (pull_requests alias), id-token; read-all/write-all set the three repo baselines and never id-token. Every other GitHub/Forgejo scope is a named parse error listing the supported set; the importer drops it and names it in the report. The exact matrix is docs/threads.md \u00a75.3.1 / docs/WORKFLOWS.md \u00a77.2."
+      "notes": "Closed in Wave 2 (D-11/D-12), extended 2026-11-28. `permissions:` is a closed vocabulary: contents, issues, pull-requests (pull_requests alias), deployments, packages (job token exchanged at /v2/token for a repository-scoped registry token: read=pull, write=pull+push), checks and statuses (one check-run/status surface: read/write on the job's own repository), id-token; read-all/write-all set the three repo baselines and never id-token or the feature scopes. Every other GitHub/Forgejo scope (actions, attestations, discussions, metadata, models, pages, repository-projects, security-events, wiki) is a named parse error listing the supported set; the importer drops it and names it in the report. A job token never mints another credential, is refused another repository, and is never itself a registry bearer credential. The exact matrix is docs/threads.md \u00a75.3.1 / docs/WORKFLOWS.md \u00a77.2."
     },
     {
       "id": "PAR-113",

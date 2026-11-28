@@ -180,8 +180,9 @@ in total — twelve to green, six to partial (`PAR-016`, `PAR-019`, `PAR-021`, `
   named hold reason; the per-organization cap needs the org ownership seam and remains open.
 - **`merge_group`** — `PAR-016` was a named parse error until Wave 7; the trigger and run contract
   landed on 2026-11-28 (§1.14) against the documented
-  `refs/heads/gh-readonly-queue/<base>/pr-<n>-<sha>` ref. The separate **Merge queue** card still
-  owns creating those refs and landing the merge.
+  `refs/heads/gh-readonly-queue/<base>/pr-<n>-<sha>` ref. The queue itself landed on 2026-11-28
+  ([`22_merge_queue.md`](22_merge_queue.md)): it creates those refs, gates on the run's checks and
+  lands through the one merge task.
 - `PAR-019`'s documented cross-run hand-off now has its test
   (`TestCrossRunRefusedWhileWorkflowRunHeld`), and its note records that trigger-side contract; the
   row stays partial for the cross-run API's own home (PAR-098/PAR-099).
@@ -305,7 +306,7 @@ a signed non-goal, and `make parity-closed` is the check that it stays that way.
 
 | Row | Capability | Clause | Owner |
 |---|---|---|---|
-| `PAR-016` | `merge_group` trigger wired to the merge-queue card | Closed 2026-11-28 (§1.14): the trigger parses and a queue-ref push starts the run whose checks gate the entry. Queue creation stays the separate **Merge queue** card. | T3 |
+| `PAR-016` | `merge_group` trigger wired to the merge queue | Closed 2026-11-28 (§1.14): the trigger parses and a queue-ref push starts the run whose checks gate the entry; the queue itself is [`22_merge_queue.md`](22_merge_queue.md). | T3 |
 
 `PAR-037`, `PAR-081`, `PAR-177` and `PAR-197` closed in the Wave-6 ecosystem leftovers (§1.12):
 the expression row's acceptance names the real platform function set (D-25), the daemonless builder
@@ -314,9 +315,9 @@ has registry evidence (D-8's row), the stock catalogue is digest-pinned and reso
 
 #### External dependencies (named, not implied)
 
-- **`merge_group` (`PAR-016`)** — the separate **Merge queue** backlog card owns the queue itself
-  (batching, creating the `refs/heads/gh-readonly-queue/<base>/pr-<n>-<sha>` refs, landing the
-  merge). The trigger and run contract landed in §1.14; the card consumes the run's checks.
+- **`merge_group` (`PAR-016`)** — the queue is [`22_merge_queue.md`](22_merge_queue.md): per-base
+  ordering, the documented `refs/heads/gh-readonly-queue/<base>/pr-<n>-<sha>` refs, the required-checks
+  gate on the checked tip and landing through the one merge task. No batch refs (documented).
 - **The public GitHub mirror's CI** — the published tree's workflows install `git`, Chrome and the Go
   and Node toolchains at run time because the merge gate uses the private prepped image
   (`github.com/crueber/spindle-ci@sha256:…`). Moving the mirror to an image-based gate needs a
@@ -412,8 +413,8 @@ does not run).
 
 ### 1.12 Wave 6 — ecosystem leftovers (2026-11-27)
 
-The four remaining ecosystem `partial`s close here; only `PAR-016` (the separate merge-queue card)
-stays `partial` by design.
+The four remaining ecosystem `partial`s close here; only `PAR-016` (the merge queue dependency) stayed
+`partial` until the queue landed in §1.15.
 
 | Area | What landed |
 |---|---|
@@ -423,7 +424,8 @@ stays `partial` by design.
 | email notifications (`PAR-197`, D-27) | The third notification channel is a standard-library SMTP notifier (`net/smtp` + `crypto/tls`, no new dependency), configured off by default under `threads.smtp.*`. It sends one message per (subscriber, failed run) to the subscriber's verified address, rides the inbox record's deterministic key (so it is sent only when the record is first created), and masks the message with the run's job mask values; an unresolvable mask list skips email rather than sending unmasked. The in-app inbox and webhook are unchanged. |
 
 **The matrix at this close:** **119 rows — 116 `have`, 1 `partial`, 0 `missing`, 2 `non-goal`**.
-`PAR-016` is the only open clause (§1.7, external dependency: the separate Merge queue card), and
+`PAR-016` was the only open clause (§1.7, then the separate Merge queue card) and it is closed; the
+queue itself landed in [`22_merge_queue.md`](22_merge_queue.md), and
 `make parity-closed` is green with `make parity`.
 
 ### 1.13 Programme close — final status (2026-11-27)
@@ -469,8 +471,8 @@ patch-level change.
 
 ### 1.14 PAR-016 closed — the `merge_group` trigger (2026-11-28)
 
-The trigger and its run contract land; the **Merge queue** backlog card still owns the queue itself.
-`on.merge_group` parses (`types: [checks_requested]`, plus `branches`/`branches-ignore` on the target
+The trigger and its run contract land; the **Merge queue** card later landed the queue itself on
+2026-11-28 ([`22_merge_queue.md`](22_merge_queue.md)). `on.merge_group` parses (`types: [checks_requested]`, plus `branches`/`branches-ignore` on the target
 branch) instead of being refused by name. A push to the documented ref
 `refs/heads/gh-readonly-queue/<base>/pr-<n>-<sha>` creates exactly one run:
 
@@ -487,13 +489,30 @@ branch) instead of being refused by name. A push to the documented ref
 - the run's jobs mirror onto the queue head, so the existing `require_checks` merge-time gate reads
   a merge-group run exactly like any other job — no merge-group-specific gate code.
 
-**The queue dependency (named, not implied).** Creating these refs, batching entries, moving the
-base and landing the merge is the separate **Merge queue** card. This row is the trigger + run
-contract the queue hands off to. Tests: `TestMergeGroupParseAndFires`,
+**The queue dependency (closed 2026-11-28).** Creating these refs, ordering entries, moving the base
+and landing the merge is [`22_merge_queue.md`](22_merge_queue.md) (no batch refs; documented). This row
+is the trigger + run contract the queue hands off to. Tests: `TestMergeGroupParseAndFires`,
 `TestMergeGroupTypeValidation`, `TestParseMergeQueueRef`, `TestCreateRunMergeGroup`,
 `TestCreateRunMergeGroupRefusals`, `TestMergeGroupPushHookStartsOneRun`,
 `TestMergeGroupPushHookIgnoresOtherRefs`, `TestMergeGroupRunChecksGate`,
 `TestMergeGroupTriggerTranslates`, `TestE2E_MergeGroupQueueRefStartsChecksRun`.
+
+### 1.15 The 2026-11-28 follow-ups, closed
+
+Three follow-ups recorded earlier in this programme closed together at the 2026-11-28 close-out.
+Every one is code plus its documentation and tests, not a plan:
+
+| Follow-up | Merge | What closed | Where it is documented |
+|---|---|---|---|
+| `packages` and `checks`/`statuses` job-token scopes | `b3e4e552` | `PAR-112`'s closed vocabulary gained the three scopes that now have a real surface. `packages: read\|write` exchanges the job token at `/v2/token` for a 5-minute registry token scoped to the job's own repository (`read` ⇒ pull, `write` ⇒ pull+push; the job token itself is refused by `/v2`); `checks`/`statuses` `read\|write` read and report check runs for the job's own repository. `actions`, `attestations`, `discussions`, `metadata`, `models`, `pages`, `repository-projects`, `security-events` and `wiki` remain named refusals. | [`threads.md`](../threads.md) §5.3.1, [`WORKFLOWS.md`](../WORKFLOWS.md) §7.2, [`14_packages.md`](14_packages.md) §4, [`05_checks_statuses.md`](05_checks_statuses.md) |
+| The merge queue (`PAR-016`'s queue dependency) | `8d14fa64` | A per-base queue ordered by priority then FIFO, one running entry; the temporary `refs/heads/gh-readonly-queue/<base>/pr-<n>-<sha>` ref published with its objects; exactly one `merge_group` run through the real push hook; landing through the existing merge task with both parents pinned and the required checks re-read on the checked tip; ejection with a named reason; restart/lease recovery; the queue page, PR panel and repository API. | [`22_merge_queue.md`](22_merge_queue.md), [`threads.md`](../threads.md) §6.10, [`WORKFLOWS.md`](../WORKFLOWS.md) §3.7 |
+| Self-hosted CLI release proof | `0f7c09fe` (with `f84b7fb0`) | `.spindle/workflows/release.yml` is a real release in this repository's own CI: `web` builds `web/dist` once, a four-cell `build` matrix (linux/darwin × amd64/arm64) consumes that artifact and emits `tar.gz` + `sha256`, and `release` publishes the archives and `SHA256SUMS` through the repository API with a `contents: write` job token. `f84b7fb0` fixed the artifact upload stream so a real GNU tar's record padding no longer parks the writer (the live run had stalled in `web`). | [`WORKFLOWS.md`](../WORKFLOWS.md) §9.5a, [`.spindle/workflows/release.yml`](../.spindle/workflows/release.yml) |
+
+**`PAR-016`'s queue dependency is satisfied.** The trigger row was already `have` on its own
+contract; [`22_merge_queue.md`](22_merge_queue.md) now owns the queue that creates the documented refs,
+gates on the run's checks and lands through the one merge task. The matrix is **119 rows — 117
+`have`, 0 `partial`, 0 `missing`, 2 non-goal** (`PAR-112`'s notes and acceptance test list carry the
+scope extension; no other row status changed).
 
 ---
 
@@ -629,7 +648,7 @@ matrix JSON's `priority` field so a row can be re-ordered without renumbering.
 | PAR-013 | Filter glob dialect: `*`, `**`, `?`, `+`, ordered `!` negation, `branches-ignore`/`tags-ignore` | B | have | 2 | T1 | The documented filter cheat-sheet is a passing table test, including ordered include/exclude | — |
 | PAR-014 | Full `pull_request.types` vocabulary and its emitters (closed, labeled, ready_for_review, review_requested, …) | B | have | 2 | T3 | Each documented type fires from the real event through the pulls seam; the default stays opened/synchronize/reopened | — |
 | PAR-015 | `pull_request_target`: base-tip file, base secrets, write token, head fetchable | B | have | 2 | T3 | A fork PR run executes the base file and never the head's, with secrets resolving and the badge set | S5 D-2 |
-| PAR-016 | `merge_group` trigger wired to the merge-queue card (no queue semantics here) | G | have | 3 | T3 | A queue entry starts a `merge_group` run whose checks gate the merge | — |
+| PAR-016 | `merge_group` trigger and run contract, consumed by the merge queue (`22_merge_queue.md`) | G | have | 3 | T3 | A queue entry starts a `merge_group` run whose checks gate the merge | — |
 | PAR-017 | `release` trigger (created/published/edited/deleted/prereleased/released) with `event.release.*` | B | have | 2 | T3 | Publishing a release runs a workflow that reads its tag and asset list | — |
 | PAR-018 | `repository_dispatch` with `types` + `client_payload`, reachable from API/CLI/scoped token | G | have | 3 | T3 | A dispatch exposes `github.event.client_payload.*`; a token without `contents: write` is refused | S10 |
 | PAR-019 | `workflow_run` (workflows/types/branches filters, upstream run + artifacts) with the untrusted-trigger rule | G | have | 3 | T3 | A follow-up workflow downloads the first run's artifact and is itself gated when the parent was untrusted | S7 D-3 |
@@ -852,7 +871,8 @@ mapping (`PAR-171`), operator knobs (`PAR-179`), log fidelity (`PAR-190`), run g
 ### Wave 3 — the GitHub-only surface
 
 Triggers that only exist on GitHub: `repository_dispatch` (`PAR-018`),
-`workflow_run` (`PAR-019`), `merge_group` (`PAR-016`, trigger + run contract; the queue is separate), the repository/check/deploy trigger family (`PAR-021`), merge-ref semantics
+`workflow_run` (`PAR-019`), `merge_group` (`PAR-016`, trigger + run contract; the queue is
+[`22_merge_queue.md`](22_merge_queue.md)), the repository/check/deploy trigger family (`PAR-021`), merge-ref semantics
 (`PAR-024`), `job`/`jobs`/`strategy` contexts (`PAR-039`), cross-repo reusable workflows (`PAR-076`),
 container keys applied (`PAR-077`), step background/parallel (`PAR-080`), cross-run artifacts (`PAR-098`),
 artifact API (`PAR-099`), fork token policy (`PAR-118`), deployments (`PAR-132`, `PAR-133`, `PAR-136`),
@@ -1403,8 +1423,8 @@ here are the reconciliations this document performed on its sources.*
   `registry_package`, `gollum`, `page_build`, `branch_protection_rule` and `public` are named parse
   errors with the missing surface in the message. Accepting an unemittable trigger would make a
   migrated workflow look healthy while never running, which is the one rule both source cards agree
-  on. `merge_group` was in that list until 2026-11-28, when the trigger + run contract landed (§1.14)
-  ahead of the separate Merge queue card, which still owns creating the refs and landing the merge.
+  on. `merge_group` was in that list until 2026-11-28, when the trigger + run contract landed (§1.14);
+  the queue that creates the refs and lands the merge landed the same day ([`22_merge_queue.md`](22_merge_queue.md)).
 - **NEW (2026-11-27) — the PR merge ref is a derived commit, not a published ref.** `pull_request` runs
   the server-computed merge commit (`git merge-tree --write-tree` + `git commit-tree` with a fixed
   identity/date) and reports `refs/pull/<n>/merge`; the commit lives in the serving copy so a checkout by

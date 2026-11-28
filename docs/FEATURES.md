@@ -106,7 +106,8 @@ emitted lifecycle vocabulary: opened/synchronize/reopened, closed/merged, edited
 ready_for_review/converted_to_draft, labeled/unlabeled, assigned/unassigned,
 milestoned/demilestoned; every edge's run is the server-computed merge commit), `pull_request_target`
 (per-repository opt-in, D-2), `repository_dispatch`, `workflow_run` (with a per-run approval hold for
-an untrusted parent), `create`/`delete`, `deployment`/`deployment_status`, `release`, `issues`,
+an untrusted parent), `merge_group` (a merge-queue entry's run; the queue itself is
+[`features/22_merge_queue.md`](features/22_merge_queue.md)), `create`/`delete`, `deployment`/`deployment_status`, `release`, `issues`,
 `issue_comment`, `pull_request_review` and `pull_request_review_comment`, the label and milestone
 **definition** events, `fork`, `watch`, `check_run` (an external CI report only — Threads' own
 mirrored check never re-fires it), `workflow_dispatch` with typed inputs (`string`, `boolean`,
@@ -122,8 +123,13 @@ stream logs over SSE with cancel, rerun and rerun-failed. `actions/cache` is bui
 trust-class scopes (default/branch/PR/fork, D-10), and artifacts take the v4 inputs, support a
 maintainer-approved cross-run read (D-3), and have a list/download/delete API. `permissions:` mints a
 scoped job token (`$SPINDLE_JOB_TOKEN`, also delivered as `$GITHUB_TOKEN`/`$FORGEJO_TOKEN`) whose
-closed vocabulary (`contents`, `issues`, `pull-requests`, `deployments`, `id-token`) is also its
-platform-API authority, and, with `id-token: write` (or Forgejo's `enable-openid-connect: true`) on a
+closed vocabulary (`contents`, `issues`, `pull-requests`, `deployments`, `packages`, `checks`,
+`statuses`, `id-token`) is also its
+platform-API authority — `packages` is exchanged at `/v2/token` for a short-lived registry token
+scoped to the job's own repository (`read` pulls, `write` pushes), and `checks`/`statuses` read and
+write check runs only for that repository; `read-all`/`write-all` set the three repository baselines
+and name none of the feature scopes — and, with `id-token: write` (or Forgejo's
+`enable-openid-connect: true`) on a
 trusted run,
 a short-lived audience-scoped OIDC ID token for cloud providers; secrets are write-only and masked,
 at three scopes — organization (with an `all`/`selected` repository policy), repository and
@@ -136,7 +142,12 @@ prevent-self-review, a deployment branch/tag allowlist, environment-scoped secre
 a job names one with `environment:`, and nothing starts — and no environment secret is resolved —
 until every listed reviewer (or a repo admin) approves the deployment (Settings → Environments).
 Deployments are records with statuses and a serialization slot per environment, readable and
-writable through `…/api/threads/deployments` under the `deployments` token scope. Schedules can be
+writable through `…/api/threads/deployments` under the `deployments` token scope. A per-base **merge
+queue** (Queue tab, PR panel, and `…/api/merge-queue`) orders entries by priority then FIFO, checks
+one entry at a time through the documented `merge_group` ref, and lands it through the one merge task
+when the required checks on the checked merge commit are green; a failure, conflict or refusal ejects
+the entry with a named reason and deletes the temporary ref
+([`features/22_merge_queue.md`](features/22_merge_queue.md)). Schedules can be
 disabled/enabled and run on demand, CI can be paused, and a manual dispatch may set a queue
 priority; failed runs notify watchers in-app (with an optional webhook, and an operator-configured
 SMTP email channel that is off by default, D-27). Checks carry annotations,
@@ -172,6 +183,7 @@ A run is **trusted** or **untrusted**, and that is server-side policy a file can
 | `pull_request_target` (opt-in, D-2) | the **base branch tip** | yes | yes | per `permissions` (a head checkout needs the second switch) |
 | `repository_dispatch` | the **default branch tip** | yes | yes | per `permissions` |
 | `workflow_run` | the **default branch tip** | yes unless the upstream was untrusted, which holds the run | yes | per `permissions` |
+| `merge_group` | the **base branch tip** (the run reports the queue ref and its head commit) | yes | yes | per `permissions` |
 | `create` / `delete`, `deployment` / `deployment_status` | the **default branch tip** | yes | yes | per `permissions` |
 
 `push` fires for `refs/heads/<branch>` and for `refs/tags/<tag>`, filtered independently by

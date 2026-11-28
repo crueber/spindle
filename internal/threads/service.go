@@ -1277,6 +1277,69 @@ func (s *Service) ListWorkflows(ctx context.Context, repo, commit string, p auth
 	return list, nil
 }
 
+// MergeGroupRuns reports the merge_group runs that report checks for sha,
+// newest first. It is the merge queue's narrow read (the Merge queue card):
+// the queue driver is a background pass, not a request, so it has no
+// principal to authorize — the runs are repository data the queue already
+// owns. It is not reachable from any route; the public run list still goes
+// through ListRunsFiltered's read gate.
+func (s *Service) MergeGroupRuns(ctx context.Context, repo, sha string) ([]*Run, error) {
+	return s.MergeGroupRunsAfter(ctx, repo, sha, time.Time{})
+}
+
+// MergeGroupRunsAfter is MergeGroupRuns scoped to runs created at/after since:
+// the queue knows its ref was published at a known instant, so the driver's
+// poll lists only the runs after that watermark instead of every run the
+// repository ever created (a bounded probe; no LIST of the whole history on a
+// polling path). A zero since reads the full list (the unfiltered form).
+func (s *Service) MergeGroupRunsAfter(ctx context.Context, repo, sha string, since time.Time) ([]*Run, error) {
+	owner, name, err := splitRepo(repo)
+	if err != nil {
+		return nil, err
+	}
+	sha = strings.ToLower(strings.TrimSpace(sha))
+	if sha == "" {
+		return []*Run{}, nil
+	}
+	prefix := RunsPrefix(owner, name)
+	startAfter := ""
+	if !since.IsZero() {
+		// Run ids are %019d-<6hex>; a synthetic id at the watermark sorts
+		// just before every run created at or after it.
+		startAfter = prefix + fmt.Sprintf("%019d-", since.UnixNano())
+	}
+	var ids []string
+	if err := s.Store.List(ctx, prefix, startAfter, func(m store.ObjectMeta) error {
+		rest, ok := strings.CutPrefix(m.Key, prefix)
+		if !ok || strings.Contains(rest, "/") {
+			return nil
+		}
+		id, ok := strings.CutSuffix(rest, ".json")
+		if ok && runIDRe.MatchString(id) {
+			ids = append(ids, id)
+		}
+		return nil
+	}); err != nil {
+		return nil, err
+	}
+	sort.Sort(sort.Reverse(sort.StringSlice(ids)))
+	out := []*Run{}
+	for _, id := range ids {
+		if len(out) >= 50 {
+			break
+		}
+		run, rerr := s.loadRun(ctx, owner, name, id)
+		if rerr != nil {
+			return nil, rerr
+		}
+		if run == nil || run.Event != EventMergeGroup || !strings.EqualFold(run.Commit, sha) {
+			continue
+		}
+		out = append(out, run)
+	}
+	return out, nil
+}
+
 // runIDs lists the direct run headers under RunsPrefix (the nested jobs are
 // filtered out by the single-segment rule).
 func (s *Service) runIDs(ctx context.Context, owner, repo string) ([]string, error) {

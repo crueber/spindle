@@ -74,13 +74,22 @@ func (l *Layer) v0Advertisement(repo *LocalRepo, svc Service, version string) ([
 	caps += repo.Format().String() + agentSuffix + version
 
 	var b bytes.Buffer
-	if len(snap.Refs) == 0 {
+	// Merge-queue refs are transient and are not branches: a clone must not
+	// receive them as remote-tracking branches (docs/threads.md §6.10). An
+	// explicit fetch of the full ref still works through ls-refs prefixes.
+	visible := make([]RefEntry, 0, len(snap.Refs))
+	for _, e := range snap.Refs {
+		if !IsMergeQueueRef(e.Name) {
+			visible = append(visible, e)
+		}
+	}
+	if len(visible) == 0 {
 		// Empty repo → single capabilities^{} line.
 		b.Write(Pkt(repo.Format().ZeroHex() + " capabilities^{}\x00" + caps))
 		b.Write(Flush())
 		return b.Bytes(), nil
 	}
-	for i, e := range snap.Refs {
+	for i, e := range visible {
 		if i == 0 {
 			b.Write(Pkt(string(e.Oid) + " " + e.Name + "\x00" + caps))
 		} else {
@@ -202,8 +211,13 @@ func (l *Layer) LsRefs(repo *LocalRepo, args LsRefsArgs) ([]byte, error) {
 
 	prefixes := append([]string(nil), args.Prefixes...)
 	if len(prefixes) == 0 {
-		// No prefixes: every ref is advertised.
+		// No prefixes: every ref is advertised, except the transient
+		// merge-queue refs (not branches to a clone; an explicit prefix
+		// still returns them).
 		for _, e := range snap.Refs {
+			if IsMergeQueueRef(e.Name) {
+				continue
+			}
 			peeled := ""
 			if args.Peel && strings.HasPrefix(e.Name, "refs/tags/") && e.Peeled != "" {
 				peeled = string(e.Peeled)

@@ -83,7 +83,9 @@ const DefaultJobPermissions = PermRead
 
 // baselineScopes are the scopes `read-all`/`write-all` set a baseline for.
 // `id-token` is deliberately absent: write-all must never mint cloud identity
-// (S10) — a job asks for it by name.
+// (S10) — a job asks for it by name. The feature scopes (`deployments`,
+// `packages`, `checks`, `statuses`) are absent too: write-all grants no image
+// push and no check-run write, so a job that wants either names it.
 var baselineScopes = []string{
 	workflow.ScopeContents,
 	workflow.ScopeIssues,

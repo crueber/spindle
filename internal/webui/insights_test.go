@@ -213,8 +213,8 @@ func TestRepoInsightsRendersPulse(t *testing.T) {
 	if got := countTag(t, body, "h1"); got != 1 {
 		t.Fatalf("h1 count = %d, want exactly 1 (the masthead)", got)
 	}
-	if got := len(tabsOf(t, body)); got != 10 {
-		t.Fatalf("tab count = %d, want 10 (no Checks summary is bound)", got)
+	if got := len(tabsOf(t, body)); got != 11 {
+		t.Fatalf("tab count = %d, want 11 (Pulls adds the Queue tab; no Checks summary is bound)", got)
 	}
 	if got := activeTabOf(t, body); got != "insights" {
 		t.Fatalf("active tab = %q", got)

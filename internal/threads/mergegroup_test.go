@@ -1,7 +1,10 @@
 package threads
 
 import (
+	"context"
+	"errors"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -255,5 +258,117 @@ func TestFillMergeGroupPayloadShapes(t *testing.T) {
 		if group["head_sha"] != head || group["base_sha"] != base || group["base_ref"] != "refs/heads/main" {
 			t.Fatalf("%s: group = %+v", name, group)
 		}
+	}
+}
+
+// TestMergeGroupRunsRead is the merge queue's narrow run read (the Merge
+// queue card): the runs for a queue head, newest first, and nothing else.
+func TestMergeGroupRunsRead(t *testing.T) {
+	base := strings.Repeat("1", 40)
+	queue := strings.Repeat("2", 40)
+	mem := store.NewMemory()
+	gitReader := newFakeGit()
+	gitReader.refs["refs/heads/main"] = base
+	gitReader.add(base, ".spindle/workflows/queue.yml", mergeGroupWorkflowYAML)
+	svc := New(mem, &fakeRoles{public: true})
+	svc.Git = gitReader
+	var ticks int64
+	svc.Now = func() time.Time { return time.Unix(1_700_000_000, atomic.AddInt64(&ticks, 1)).UTC() }
+
+	ref := "refs/heads/gh-readonly-queue/main/pr-9-" + queue
+	mq, _ := ParseMergeQueueRef(ref)
+	mk := func() []*Run {
+		runs, err := svc.CreateRun(ctx(), "o/r", queue, EventMergeGroup, CreateOpts{
+			Ref: ref, RefName: mq.BaseBranch, Action: "checks_requested",
+			EventPayload: MergeGroupEventPayload("o/r", ref, queue, mq.BaseRef, "", mq.Number, "push"),
+		})
+		if err != nil {
+			t.Fatalf("create: %v", err)
+		}
+		return runs
+	}
+	first := mk()
+	second := mk()
+	if len(first) != 1 || len(second) != 1 {
+		t.Fatalf("runs = %d/%d", len(first), len(second))
+	}
+	// A push run on the same commit must not appear.
+	if _, err := svc.CreateRun(ctx(), "o/r", queue, EventPush, CreateOpts{
+		Branch: "main", Ref: "refs/heads/main", Actor: "push",
+	}); err != nil {
+		t.Fatalf("push run: %v", err)
+	}
+	got, err := svc.MergeGroupRuns(ctx(), "o/r", queue)
+	if err != nil {
+		t.Fatalf("MergeGroupRuns: %v", err)
+	}
+	if len(got) != 2 || got[0].ID != second[0].ID || got[1].ID != first[0].ID {
+		t.Fatalf("runs = %+v, want newest first", got)
+	}
+	for _, r := range got {
+		if r.Event != EventMergeGroup || r.Commit != queue {
+			t.Fatalf("run = %+v", r)
+		}
+	}
+	// The watermark scopes the list to runs created at/after it: a since in
+	// the future sees none, a since before the first creation sees both.
+	if got, err := svc.MergeGroupRunsAfter(ctx(), "o/r", queue, time.Now().Add(time.Hour)); err != nil || len(got) != 0 {
+		t.Fatalf("future since = %+v, %v", got, err)
+	}
+	if got, err := svc.MergeGroupRunsAfter(ctx(), "o/r", queue, time.Unix(1_600_000_000, 0)); err != nil || len(got) != 2 {
+		t.Fatalf("past since = %+v, %v", got, err)
+	}
+	// Another commit's runs are not returned.
+	if other, err := svc.MergeGroupRuns(ctx(), "o/r", strings.Repeat("9", 40)); err != nil || len(other) != 0 {
+		t.Fatalf("other sha = %+v, %v", other, err)
+	}
+	// An empty sha is an empty read; a bad repo is invalid.
+	if none, err := svc.MergeGroupRuns(ctx(), "o/r", ""); err != nil || len(none) != 0 {
+		t.Fatalf("empty sha = %+v, %v", none, err)
+	}
+	if _, err := svc.MergeGroupRuns(ctx(), "bad", queue); err == nil {
+		t.Fatal("bad repo")
+	}
+}
+
+// failListStore fails List (the run index read) while delegating everything
+// else, to cover MergeGroupRuns' index-outage arm.
+type failListStore struct{ store.ObjectStore }
+
+func (failListStore) List(context.Context, string, string, func(store.ObjectMeta) error) error {
+	return errors.New("list down")
+}
+
+func TestMergeGroupRunsErrorArms(t *testing.T) {
+	base := strings.Repeat("1", 40)
+	queue := strings.Repeat("2", 40)
+	mem := store.NewMemory()
+	gitReader := newFakeGit()
+	gitReader.refs["refs/heads/main"] = base
+	gitReader.add(base, ".spindle/workflows/queue.yml", mergeGroupWorkflowYAML)
+	svc := New(mem, &fakeRoles{public: true})
+	svc.Git = gitReader
+	ref := "refs/heads/gh-readonly-queue/main/pr-9-" + queue
+	mq, _ := ParseMergeQueueRef(ref)
+	if _, err := svc.CreateRun(ctx(), "o/r", queue, EventMergeGroup, CreateOpts{
+		Ref: ref, RefName: mq.BaseBranch, Action: "checks_requested",
+		EventPayload: MergeGroupEventPayload("o/r", ref, queue, mq.BaseRef, "", mq.Number, "push"),
+	}); err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	// A corrupt run header fails the read loud (the driver then ejects with
+	// the reason rather than reading a phantom green).
+	bad := "repos/o/r/threads/runs/0000000000000000001-abcdef.json"
+	if _, err := mem.Put(ctx(), bad, store.PutBody{Bytes: []byte("{")}, store.PutOptions{Mode: store.PutCreate}); err != nil {
+		t.Fatalf("seed bad run: %v", err)
+	}
+	if _, err := svc.MergeGroupRuns(ctx(), "o/r", queue); err == nil {
+		t.Fatal("corrupt run must fail")
+	}
+	// An index (List) outage fails too.
+	failing := New(failListStore{ObjectStore: mem}, &fakeRoles{public: true})
+	failing.Git = gitReader
+	if _, err := failing.MergeGroupRuns(ctx(), "o/r", queue); err == nil {
+		t.Fatal("list outage must fail")
 	}
 }

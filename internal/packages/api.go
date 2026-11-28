@@ -73,6 +73,10 @@ func (h *Handler) apiGate(w http.ResponseWriter, r *http.Request, owner, repo, a
 		apiPlain(w, http.StatusUnauthorized, "authentication required")
 		return false
 	}
+	if p.JobRepo != "" {
+		apiPlain(w, http.StatusForbidden, "a job token must be exchanged at /v2/token for a registry token")
+		return false
+	}
 	if err := validateRepo(owner, repo); err != nil {
 		apiPlain(w, http.StatusNotFound, "repository not found")
 		return false

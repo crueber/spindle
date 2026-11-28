@@ -746,6 +746,9 @@ func (s *Server) buildRepoChrome(r *http.Request, rq repoRequest, sum api.Summar
 	}
 	if feat.Pulls {
 		c.Tabs = append(c.Tabs, repoTab{ID: "pulls", Label: "Pulls", Href: "/" + c.Full + "/pulls", Badge: counts.OpenPulls})
+		// The merge queue is per base branch and only meaningful with pull
+		// requests: one tab, the queue page every PR panel links to.
+		c.Tabs = append(c.Tabs, repoTab{ID: "queue", Label: "Queue", Href: "/" + c.Full + "/queue"})
 	}
 	if hasChecks {
 		c.Tabs = append(c.Tabs, repoTab{ID: "checks", Label: "Checks", Href: "/" + c.Full + "/checks"})
@@ -805,6 +808,8 @@ func repoTabSection(path string) string {
 		return "issues"
 	case "pulls", "pull":
 		return "pulls"
+	case "queue":
+		return "queue"
 	case "checks", "check":
 		return "checks"
 	case "threads":

@@ -209,8 +209,8 @@ func TestTranslateRefusals(t *testing.T) {
 		},
 		{
 			name:             "permissions unsupported scope is refused by name",
-			src:              top("on: push\npermissions:\n  contents: read\n  packages: write\n"),
-			wantUntranslated: []string{"permissions.packages"},
+			src:              top("on: push\npermissions:\n  contents: read\n  security-events: write\n"),
+			wantUntranslated: []string{"permissions.security-events"},
 			contain:          []string{"contents: read"},
 		},
 		{

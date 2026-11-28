@@ -62,7 +62,7 @@ race: web ## full fast tier under the race detector (main pushes / on demand)
 RACE_PKGS := ./internal/wal/... ./internal/store/... ./internal/notify/... \
              ./internal/api/... ./internal/events/... ./internal/threads/... \
              ./internal/packages/... ./internal/maintain/... ./internal/identity/... \
-             ./internal/server/... ./internal/git/... ./internal/sshd/... \
+             ./internal/server/... ./internal/git/... ./internal/sshd/... ./internal/mergequeue/... \
              ./internal/bundle/... ./internal/sim/... ./internal/staticpages/...
 
 race-pr: web ## PR race tier: the concurrency-owning packages under -race

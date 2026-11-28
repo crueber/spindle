@@ -29,14 +29,14 @@ import (
 // Binding any of them makes a test sequential.
 var packageGlobals = []string{
 	"adminBound", "collabDeps", "webeditDeps", "formsDeps", "packagesDeps",
-	"publicDeps", "repoDeps", "settingsBound", "threadsDeps",
+	"publicDeps", "queueDeps", "repoDeps", "settingsBound", "threadsDeps",
 	"adminRestartDelay", "assetUploadBodyLimit", "runnerTenancy",
 }
 
 // binderFuncs are the setters that write those globals.
 var binderFuncs = []string{
 	"BindAdmin", "BindSettings", "BindCollab", "BindForms", "BindPackages",
-	"BindPublic", "BindRepo", "BindThreads", "BindWebedit", "BindDirectory",
+	"BindPublic", "BindQueue", "BindRepo", "BindThreads", "BindWebedit", "BindDirectory",
 	"bindInsights", "BindAdminRunnerTenancy",
 }
 

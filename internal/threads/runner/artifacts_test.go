@@ -9,6 +9,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/crueber/spindle/internal/threads"
 )
@@ -304,6 +305,40 @@ func TestUploadArtifactStreamsTarAndFinalizes(t *testing.T) {
 	}
 	if !strings.Contains(streamText(stream), `uploaded artifact "build": 2 file(s)`) {
 		t.Fatalf("log missing the upload notice:\n%s", streamText(stream))
+	}
+}
+
+func TestUploadArtifactDrainsTheTarTrailer(t *testing.T) {
+	// GNU tar pads its output to a 10 KiB record after the two end-of-archive
+	// zero blocks, and tar.Reader stops at those blocks. The upload must drain
+	// the padding or the unbuffered pipe parks the writer forever: a live run
+	// hung at exactly this point (web job, upload-artifact).
+	raw := tarFixture([][2]string{{"dist/a.txt", "alpha"}})
+	if rem := len(raw) % 10240; rem != 0 {
+		raw = append(raw, make([]byte, 10240-rem)...)
+	}
+	docker := &fakeDocker{
+		runOutputs:     []runOutput{{match: "find . -type f", out: "./dist/a.txt\n"}},
+		streamInOutput: raw,
+	}
+	art := newFakeArtifacts()
+	ex := &Executor{Docker: docker, Artifacts: art}
+	plan := artifactPlan(t, artifactJob(map[string]string{"name": "build", "path": "dist"}, nil))
+	done := make(chan error, 1)
+	go func() { done <- ex.uploadArtifact(context.Background(), plan, plan.Steps[0], &Streamer{}) }()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("upload: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("upload-artifact deadlocked on the tar trailer (the pipe was not drained)")
+	}
+	if got := art.uploaded["dist/a.txt"]; got != "alpha" {
+		t.Fatalf("uploaded = %q", got)
+	}
+	if art.finalized == nil || len(art.finalized.Files) != 1 {
+		t.Fatalf("finalize = %+v", art.finalized)
 	}
 }
 

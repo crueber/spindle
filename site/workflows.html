@@ -101,7 +101,7 @@
 
   <section class="measured" aria-label="At a glance">
     <ul class="wrap measured-in">
-      <li class="measure"><b>22 events</b><span>push, pull request and target, review, issue, label, milestone, fork, star, check run, dispatch, upstream run, create/delete, deployment, release, schedule</span></li>
+      <li class="measure"><b>23 events</b><span>push, pull request and target, review, issue, label, milestone, fork, star, check run, dispatch, merge queue, upstream run, create/delete, deployment, release, schedule</span></li>
       <li class="measure"><b>4 built-ins</b><span>checkout, upload and download artifacts, cache — plus allowlisted remote actions</span></li>
       <li class="measure"><b>256</b><span>matrix cells per job, at most</span></li>
       <li class="measure"><b>4 levels</b><span>reusable workflows, local or SHA-pinned cross-repository</span></li>
@@ -123,6 +123,7 @@
     <a href="#artifacts">Artifacts</a>
     <a href="#cache">Cache</a>
     <a href="#operations">Operations</a>
+    <a href="#merge-queue">Merge queue</a>
     <a href="#notifications">Notifications</a>
     <a href="#fleet">Fleet</a>
     <a href="#recipes">Recipes</a>
@@ -246,7 +247,7 @@ spindle --server https://git.example.com runner serve \
             <tr><td><code>env</code></td><td>map[string]string</td><td>empty</td><td>Merged under job and step <code>env</code>. Scalars are coerced to text; a nested value is an error.</td></tr>
             <tr><td><code>defaults</code></td><td><code>{run: {shell, working-directory}}</code></td><td>none</td><td>Shell and working directory every <code>run</code> step inherits; a job's block overrides per key and a step's own key wins. Both are literals.</td></tr>
             <tr><td><code>concurrency</code></td><td>name or <code>{group, cancel-in-progress}</code></td><td>none</td><td>One running and one pending run per group per repository. <code>cancel-in-progress</code> takes a literal boolean or one <code>${{ }}</code> expression, resolved per cell at creation.</td></tr>
-            <tr><td><code>permissions</code></td><td>mapping or <code>read-all</code>/<code>write-all</code></td><td>instance default (<code>read</code>)</td><td>A closed vocabulary: <code>contents</code>, <code>issues</code>, <code>pull-requests</code>, <code>deployments</code>, <code>id-token</code>. Any other scope is a named parse error.</td></tr>
+            <tr><td><code>permissions</code></td><td>mapping or <code>read-all</code>/<code>write-all</code></td><td>instance default (<code>read</code>)</td><td>A closed vocabulary: <code>contents</code>, <code>issues</code>, <code>pull-requests</code>, <code>deployments</code>, <code>packages</code>, <code>checks</code>, <code>statuses</code>, <code>id-token</code> (plus <code>read-all</code>/<code>write-all</code>). Any other scope is a named parse error (<a href="#scopes">the scope matrix</a>).</td></tr>
             <tr><td><code>enable-openid-connect</code></td><td>bool</td><td><code>false</code></td><td>The Forgejo spelling of the OIDC grant; the same grant as <code>permissions: id-token: write</code>.</td></tr>
             <tr><td><code>jobs</code></td><td>map[string]job</td><td>required</td><td>At least one job.</td></tr>
           </tbody>
@@ -264,6 +265,7 @@ spindle --server https://git.example.com runner serve \
             <tr><td><code>pull_request_target</code></td><td>same as <code>pull_request</code></td><td>The same PR edges, but the <strong>base branch's</strong> file runs with base secrets and a write token. Off per repository by default; enabling it is a maintainer switch, and a declarative head checkout needs a second switch (both audited).</td></tr>
             <tr><td><code>repository_dispatch</code></td><td><code>types</code></td><td><code>POST …/api/threads/dispatches</code> with the write role. <code>event_type</code> selects a type; <code>client_payload</code> is a bounded object read as <code>github.event.client_payload.*</code>. Runs the default branch.</td></tr>
             <tr><td><code>workflow_run</code></td><td><code>workflows</code>, <code>types</code>, <code>branches</code>, <code>branches-ignore</code></td><td>Another workflow's run edge, matched by upstream workflow name and head branch; omitted <code>types</code> means <code>completed</code>. An untrusted upstream holds the follow-up for approval.</td></tr>
+            <tr><td><code>merge_group</code></td><td><code>types</code> (<code>checks_requested</code>), <code>branches</code>, <code>branches-ignore</code></td><td>A push to a merge-queue ref (<code>refs/heads/gh-readonly-queue/&lt;base&gt;/pr-&lt;n&gt;-&lt;sha&gt;</code>); the run checks the queue head with the <b>base branch's</b> file (<a href="#merge-queue">Merge queue</a>).</td></tr>
             <tr><td><code>create</code> / <code>delete</code></td><td>none</td><td>A branch or tag created or deleted by a push (<code>ref</code> and <code>ref_type</code> in the payload). A job-token push starts nothing.</td></tr>
             <tr><td><code>deployment</code> / <code>deployment_status</code></td><td>none</td><td>A deployment record is created, or changes state (<code>pending</code>, <code>in_progress</code>, <code>failure</code>).</td></tr>
             <tr><td><code>release</code></td><td><code>types</code></td><td>A release lifecycle action: <code>created</code>, <code>published</code>, <code>edited</code>, <code>deleted</code>, <code>prereleased</code>, <code>released</code>, <code>unpublished</code>.</td></tr>
@@ -282,15 +284,15 @@ spindle --server https://git.example.com runner serve \
           </tbody>
         </table>
       </div>
-      <p class="note"><code>merge_group</code>, <code>status</code>, <code>check_suite</code>,
+      <p class="note"><code>status</code>, <code>check_suite</code>,
         <code>registry_package</code>, <code>gollum</code>, <code>page_build</code>,
         <code>branch_protection_rule</code>, <code>public</code>, <code>discussion</code> and
         <code>discussion_comment</code> are <b>named parse errors</b>: this engine has no emitter for
         them, and a trigger that can never fire is not accepted. <code>pull_request_review_thread</code>
         is also refused, because resolving an inline thread is not a separate event here.
-        <code>merge_group</code> is the one held open by a separate plan item: the Merge queue card
-        owns the queue and the <code>refs/heads/gh-readonly-queue/…</code> ref, so the trigger stays a
-        named refusal until that lands.</p>
+        <code>merge_group</code> is accepted: a push to the documented queue ref starts exactly one run,
+        and the <a href="#merge-queue">Merge queue</a> is the product surface that creates those refs,
+        gates on the run and lands the entry.</p>
 
       <h3 class="subhead">Job</h3>
       <div class="tablewrap" role="region" tabindex="0" aria-labelledby="cap-job">
@@ -422,7 +424,7 @@ spindle --server https://git.example.com runner serve \
     <div class="wrap docbody">
       <header class="sec-head">
         <p class="eyebrow"><span class="tick" aria-hidden="true"></span>Triggers</p>
-        <h2 id="triggers-title">Twenty-two events, filtered by ref and path.</h2>
+        <h2 id="triggers-title">Twenty-three events, filtered by ref and path.</h2>
         <p class="sec-lede">Filters use the documented Actions glob dialect — <code>*</code>,
           <code>**</code>, <code>?</code>, <code>+</code> and an ordered <code>!</code> — and
           <code>paths</code> narrows a run to the changed files. A push carries one kind of ref, so
@@ -1063,17 +1065,48 @@ spindle --server https://git.example.com runner serve \
             familiar spellings, and an authored <code>env:</code> value of that name wins.
             <code>permissions:</code> is a closed vocabulary — <code>contents</code>,
             <code>issues</code>, <code>pull-requests</code>, <code>deployments</code>,
-            <code>id-token</code> (plus <code>read-all</code>/<code>write-all</code>) — and it is also
-            the token's platform-API authority: a read scope is the read role,
-            <code>issues: write</code> is triage, <code>contents: write</code> or
-            <code>pull-requests: write</code> is write, and <code>deployments: write</code> creates
-            deployment records and their statuses for the run's repository (never the Threads
-            operator surface). <code>contents: write</code> adds push. Any other scope is a named
-            parse error, never an accepted-and-inert key. A fork is pinned to read. A protected ref
-            still refuses it, because the principal is <code>ci:&lt;runner&gt;</code>, not the user.
-            A push with it starts no workflow, so a workflow cannot rebuild itself forever.</p>
+            <code>packages</code>, <code>checks</code>, <code>statuses</code>, <code>id-token</code>
+            (plus <code>read-all</code>/<code>write-all</code>) — and it is also the token's
+            platform-API authority: a read scope is the read role, <code>issues: write</code> is
+            triage, <code>contents: write</code> or <code>pull-requests: write</code> is write, and
+            <code>deployments: write</code> creates deployment records and their statuses for the
+            run's repository (never the Threads operator surface). <code>contents: write</code> adds
+            push. <code>packages</code> and <code>checks</code>/<code>statuses</code> are grants of
+            their own, not implied by the repository role: the job token is exchanged at
+            <code>/v2/token</code> for a short-lived registry token scoped to its own repository, and
+            a check run needs <code>checks: write</code> (or <code>statuses: write</code>). Any other
+            scope is a named parse error, never an accepted-and-inert key. A fork is pinned to read.
+            A protected ref still refuses it, because the principal is
+            <code>ci:&lt;runner&gt;</code>, not the user. A push with it starts no workflow, so a
+            workflow cannot rebuild itself forever.</p>
         </div>
       </div>
+
+      <h3 class="subhead" id="scopes">The scope matrix.</h3>
+      <p class="note">The supported set is exactly what the token can do. A scope this server cannot
+        enforce is refused at parse time, by name, with the supported set in the error.</p>
+      <div class="tablewrap" role="region" tabindex="0" aria-labelledby="cap-scopes">
+        <table class="ref">
+          <caption id="cap-scopes" class="sr-only">Job-token permission scopes</caption>
+          <thead><tr><th>Scope</th><th>Levels</th><th>The token may</th></tr></thead>
+          <tbody>
+            <tr><td><code>contents</code></td><td><code>read</code> / <code>write</code> / <code>none</code></td><td>Clone and fetch the run's repository; <code>write</code> also pushes to it.</td></tr>
+            <tr><td><code>issues</code></td><td><code>read</code> / <code>write</code> / <code>none</code></td><td>Read issues; <code>write</code> is the triage role — labels, assignment, closing others' issues, labels and milestones.</td></tr>
+            <tr><td><code>pull-requests</code> (<code>pull_requests</code> accepted)</td><td><code>read</code> / <code>write</code> / <code>none</code></td><td>Read pull requests; <code>write</code> is the write role — open/update PRs and create releases (releases still need <code>contents: write</code>).</td></tr>
+            <tr><td><code>deployments</code></td><td><code>read</code> / <code>write</code> / <code>none</code></td><td>Read deployment records; <code>write</code> creates a deployment and appends its statuses for this repository. Never the Threads operator surface.</td></tr>
+            <tr><td><code>packages</code></td><td><code>read</code> / <code>write</code> / <code>none</code></td><td>The OCI registry of this repository: <code>read</code> pulls, <code>write</code> also pushes. The job token is exchanged at <code>/v2/token</code> for a 5-minute, repository-scoped registry token; the job token itself is never a registry bearer credential.</td></tr>
+            <tr><td><code>checks</code></td><td><code>read</code> / <code>write</code> / <code>none</code></td><td>Read check runs for this repository; <code>write</code> creates and updates them (the external-CI reporting path). Repository-scoped; it never manages CI tokens or admin state.</td></tr>
+            <tr><td><code>statuses</code></td><td><code>read</code> / <code>write</code> / <code>none</code></td><td>GitHub's legacy commit-status name. There is one status/check-run surface here, so it grants exactly what <code>checks</code> grants.</td></tr>
+            <tr><td><code>id-token</code></td><td><code>write</code> / <code>none</code></td><td>Exchange for a short-lived OIDC ID token (<a href="#approvals">Approvals</a>). <code>read</code> is not a level.</td></tr>
+            <tr><td><code>read-all</code> / <code>write-all</code></td><td>shorthand</td><td>The baseline for <code>contents</code>, <code>issues</code> and <code>pull-requests</code> only. It never grants <code>id-token</code>, <code>deployments</code>, <code>packages</code>, <code>checks</code> or <code>statuses</code> — name those.</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <p class="note">Refused by name, with the reason: <code>actions</code> (the operator surface —
+        dispatch, cancel/rerun, approve, environments/secrets), <code>attestations</code>,
+        <code>discussions</code>, <code>metadata</code>, <code>models</code>, <code>pages</code>,
+        <code>repository-projects</code>, <code>security-events</code> and <code>wiki</code>. A
+        converted workflow drops a refused scope and names it in the report, so the file still parses.</p>
 
       <h3 class="subhead" id="approvals">Approvals and environments</h3>
       <div class="prose">
@@ -1316,8 +1349,8 @@ spindle --server https://git.example.com runner serve \
           <p><b>Conformance.</b> <code>make parity</code> runs the living matrix gate and the
             committed corpus: every green row must name a test that exists, the plan's id set must
             match, and the generated matrix must be a fresh render. At the last close the matrix is
-            <b>119 rows — 116 <code>have</code>, one <code>partial</code> (the merge-queue trigger),
-            no <code>missing</code>, two signed non-goals</b>. It needs no docker and no network.
+            <b>119 rows — 117 <code>have</code>, 0 <code>partial</code>, 0 <code>missing</code>, two
+            signed non-goals</b>. It needs no docker and no network.
             <code>make parity-exec</code> is the opt-in <b>execution tier</b>: it boots a server and a
             runner, executes the committed golden of a real publish workflow byte-unmodified, then
             builds, pushes and pulls a small image through a local <code>registry:2</code> with a
@@ -1377,6 +1410,74 @@ spindle --server https://git.example.com runner serve \
       - <span class="k">run:</span> echo "releasing $GITHUB_REF_NAME at $GITHUB_SHA"</code></pre>
         </figure>
       </div>
+
+      <h3 class="subhead" id="merge-queue">Merge queue: one entry at a time.</h3>
+      <div class="prose">
+        <p><b>For the workflow author.</b> A queue entry is handed to CI as a push to a read-only
+          ref, <code>refs/heads/gh-readonly-queue/&lt;base&gt;/pr-&lt;number&gt;-&lt;sha&gt;</code>.
+          That push starts exactly one <code>merge_group</code> run — never a <code>push</code> run —
+          with <code>github.ref</code> set to the queue ref, <code>github.ref_name</code> to its short
+          name and <code>github.sha</code> to the ref tip (the computed merge commit). The workflow
+          file is read from the <b>base branch tip</b>: both sides of an entry are repository-owned,
+          so there is no fork trust question and secrets follow the normal rules. The payload carries
+          <code>action: checks_requested</code>, <code>number</code> (the pull request) and
+          <code>merge_group.head_ref</code>/<code>head_sha</code>/<code>base_ref</code>/<code>base_sha</code>.
+          The run's jobs mirror onto the checked merge commit, so a normal <code>require_checks</code>
+          rule gates the entry; the queue needs no merge-group-specific check code.</p>
+        <p><b>For the maintainer.</b> Enqueue an open pull request from its PR panel, the
+          <b>Queue</b> tab, or <code>POST …/api/merge-queue/enqueue</code>. A queue is per base
+          branch and runs <b>one entry at a time</b>, ordered by priority (0…100, higher first) and
+          then FIFO. The entry moves <code>pending</code> → <code>validating</code> →
+          <code>landing</code>, and lands through the repository's one merge task with both parents
+          pinned and the required checks re-read on the checked commit — every protection gate still
+          runs. A failing check, conflict, refusal or timeout ejects the entry with the gate's own
+          reason and deletes the temporary ref; the pull request stays open. Pause stops starting the
+          next entry; dequeue is allowed while pending or validating (the author may also remove their
+          own entry), and a restart deletes the stale ref and re-prepares rather than wedging.</p>
+      </div>
+      <div class="split">
+        <figure class="code">
+          <div class="code-bar"><span>.spindle/workflows/queue.yml</span><span class="state">valid</span></div>
+          <pre tabindex="0"><code><span class="k">name:</span> Queue checks
+<span class="k">on:</span>
+  <span class="k">merge_group:</span>
+    <span class="k">types:</span> [checks_requested]
+    <span class="k">branches:</span> [main]
+<span class="k">permissions:</span>
+  <span class="k">contents:</span> read
+<span class="k">jobs:</span>
+  <span class="k">test:</span>
+    <span class="k">runs-on:</span> [self-hosted, linux, docker]
+    <span class="k">steps:</span>
+      - <span class="k">uses:</span> actions/checkout
+      - <span class="k">run:</span> go test ./... -count=1</code></pre>
+        </figure>
+        <div class="prose">
+          <p>The same workflow can also listen on <code>pull_request</code>; the queue run is the
+            one that sees the merge result. Name its check contexts in the base branch's
+            <code>require_checks</code> and the queue's landing gate reads them on the checked merge
+            commit.</p>
+          <p>Queue refs are not branches: clone advertisements, the branch list and commit pages omit
+            them, while an explicit <code>git fetch origin 'refs/heads/gh-readonly-queue/*'</code>
+            still works for a deliberate read.</p>
+        </div>
+      </div>
+      <div class="tablewrap" role="region" tabindex="0" aria-labelledby="cap-queue-api">
+        <table class="ref">
+          <caption id="cap-queue-api" class="sr-only">Merge queue API</caption>
+          <thead><tr><th>Call</th><th>What it does</th></tr></thead>
+          <tbody>
+            <tr><td><code>GET …/api/merge-queue</code></td><td>The repository view: per-base queues with live positions, recent outcomes and the audit tail.</td></tr>
+            <tr><td><code>POST …/api/merge-queue/enqueue</code></td><td><code>{base, number, priority?}</code> → <code>202</code> with the entry; maintain role.</td></tr>
+            <tr><td><code>POST …/api/merge-queue/dequeue</code></td><td><code>{base, number}</code> → the cancelled entry; maintain, the PR author or the enqueuer.</td></tr>
+            <tr><td><code>POST …/api/merge-queue/pause</code> / <code>resume</code></td><td>Stop or restart starting the next entry, for one base or every existing base; maintain role.</td></tr>
+            <tr><td><code>GET …/api/pulls/{num}/merge-queue</code></td><td>The PR's entry with its live position, or <code>404</code>; read role.</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <p class="note">Out of scope, named: batched entries (<code>pr-&lt;a&gt;-&lt;b&gt;-&lt;sha&gt;</code>)
+        and speculative validation of the next entry. One entry per run keeps the failure attribution
+        exact, and the documented ref shape names one pull request.</p>
 
       <h3 class="subhead" id="notifications">Notifications: in-app, webhook, email.</h3>
       <div class="prose">
@@ -1556,6 +1657,161 @@ spindle --server https://git.example.com runner serve \
           git tag -a "$VERSION" -m "release $VERSION"
           git push origin "refs/tags/$VERSION"</code></pre>
       </figure>
+
+      <h3 class="subhead">Release a CLI: web once, matrix build, one release</h3>
+      <div class="prose">
+        <p>spindle's own release is <code>.spindle/workflows/release.yml</code>: a <code>web</code> job
+          builds <code>web/dist</code> once, a four-cell <code>build</code> matrix downloads it and
+          cross-builds linux/darwin × amd64/arm64 into reproducible archives, and a <code>release</code>
+          job publishes them through the repository API with a <code>contents: write</code> job token.
+          Building the bundle once is the point: <code>web/dist</code> is embedded into every binary, so
+          four independent web builds would be four chances to drift. The archives are
+          <code>tar.gz</code> plus a per-file <code>.sha256</code> and a combined <code>SHA256SUMS</code>.
+          The <a href="https://github.com/crueber/spindle/blob/main/docs/WORKFLOWS.md#95a-release-a-cli-from-your-own-workflow-spindles-own-release">full
+          file and its explanation</a> are in the guide; this is the shape.</p>
+      </div>
+      <figure class="code">
+        <div class="code-bar"><span>.spindle/workflows/release.yml (condensed)</span><span class="state">valid</span></div>
+        <pre tabindex="0"><code><span class="k">name:</span> Release
+<span class="k">on:</span>
+  <span class="k">push:</span>
+    <span class="k">tags:</span> ["v*"]
+  <span class="k">workflow_dispatch:</span>
+    <span class="k">inputs:</span>
+      <span class="k">version:</span>
+        <span class="k">description:</span> "Release tag, vMAJOR.MINOR.PATCH (e.g. v1.4.0)"
+        <span class="k">required:</span> true
+        <span class="k">type:</span> string
+<span class="k">permissions:</span>
+  <span class="k">contents:</span> write
+<span class="k">jobs:</span>
+  <span class="k">web:</span>
+    <span class="k">runs-on:</span> node
+    <span class="k">steps:</span>
+      - <span class="k">uses:</span> actions/checkout
+      - <span class="k">name:</span> build the embedded bundle once
+        <span class="k">run:</span> |
+          corepack enable
+          corepack prepare pnpm@11.25.0 --activate
+          pnpm --dir web install --frozen-lockfile
+          pnpm --dir web run build
+          test ! -e web/dist/htmx-ext-sse.js
+          grep -q 'max-w-6xl' web/dist/app.css
+      - <span class="k">uses:</span> actions/upload-artifact
+        <span class="k">with:</span>
+          <span class="k">name:</span> web-dist
+          <span class="k">path:</span> web/dist
+          <span class="k">if-no-files-found:</span> error
+  <span class="k">build:</span>
+    <span class="k">needs:</span> [web]
+    <span class="k">runs-on:</span> linux
+    <span class="k">container:</span> golang:1.27-bookworm
+    <span class="k">strategy:</span>
+      <span class="k">fail-fast:</span> false
+      <span class="k">matrix:</span>
+        <span class="k">goos:</span> [linux, darwin]
+        <span class="k">goarch:</span> [amd64, arm64]
+    <span class="k">steps:</span>
+      - <span class="k">uses:</span> actions/checkout
+      - <span class="k">uses:</span> actions/download-artifact
+        <span class="k">with:</span>
+          <span class="k">name:</span> web-dist
+      - <span class="k">name:</span> resolve the version
+        <span class="k">run:</span> |
+          if [ "$GITHUB_EVENT_NAME" = "workflow_dispatch" ]; then
+            VERSION="${{ inputs.version }}"
+          else
+            VERSION="$GITHUB_REF_NAME"
+          fi
+          case "$VERSION" in
+            v[0-9]*.[0-9]*.[0-9]*) ;;
+            *) echo "not a vMAJOR.MINOR.PATCH tag: $VERSION" &gt;&amp;2; exit 1 ;;
+          esac
+          printf 'VERSION=%s\n' "$VERSION" &gt;&gt; "$GITHUB_ENV"
+      - <span class="k">name:</span> cross-build and package
+        <span class="k">env:</span>
+          <span class="k">GOOS:</span> ${{ matrix.goos }}
+          <span class="k">GOARCH:</span> ${{ matrix.goarch }}
+          <span class="k">CGO_ENABLED:</span> "0"
+        <span class="k">run:</span> |
+          go build -trimpath -buildvcs=false \
+            -ldflags "-s -w -X main.buildSHA=${VERSION}" \
+            -o dist/spindle ./cmd/spindle
+          name="spindle_${VERSION}_${GOOS}_${GOARCH}"
+          mkdir -p dist/stage
+          cp dist/spindle dist/stage/spindle
+          cp README.md LICENSE dist/stage/
+          tar --sort=name --mtime='@0' --owner=0 --group=0 --numeric-owner \
+            -czf "dist/${name}.tar.gz" -C dist/stage .
+          rm -rf dist/stage dist/spindle
+          ( cd dist &amp;&amp; sha256sum "${name}.tar.gz" &gt; "${name}.tar.gz.sha256" )
+      - <span class="k">uses:</span> actions/upload-artifact
+        <span class="k">with:</span>
+          <span class="k">name:</span> spindle-${{ matrix.goos }}-${{ matrix.goarch }}
+          <span class="k">path:</span> |
+            dist/*.tar.gz
+            dist/*.sha256
+          <span class="k">if-no-files-found:</span> error
+  <span class="k">release:</span>
+    <span class="k">needs:</span> [build]
+    <span class="k">runs-on:</span> linux
+    <span class="k">container:</span> golang:1.27-bookworm
+    <span class="k">steps:</span>
+      - <span class="k">uses:</span> actions/checkout
+        <span class="k">with:</span>
+          <span class="k">fetch-depth:</span> 0
+          <span class="k">fetch-tags:</span> true
+      - <span class="k">uses:</span> actions/download-artifact
+        <span class="k">with:</span>
+          <span class="k">pattern:</span> spindle-*
+          <span class="k">merge-multiple:</span> true
+      - <span class="k">name:</span> resolve the version
+        <span class="k">run:</span> |
+          if [ "$GITHUB_EVENT_NAME" = "workflow_dispatch" ]; then
+            VERSION="${{ inputs.version }}"
+          else
+            VERSION="$GITHUB_REF_NAME"
+          fi
+          case "$VERSION" in
+            v[0-9]*.[0-9]*.[0-9]*) ;;
+            *) echo "not a vMAJOR.MINOR.PATCH tag: $VERSION" &gt;&amp;2; exit 1 ;;
+          esac
+          printf 'VERSION=%s\n' "$VERSION" &gt;&gt; "$GITHUB_ENV"
+      - <span class="k">name:</span> ensure the tag exists (dispatch only)
+        <span class="k">run:</span> |
+          if git rev-parse -q --verify "refs/tags/$VERSION" &gt;/dev/null; then
+            exit 0
+          fi
+          git config user.name "spindle release"
+          git config user.email "release@spindle.invalid"
+          git tag -a "$VERSION" -m "release $VERSION"
+          git -c credential.helper='!f() { echo username=ci; echo password=$SPINDLE_JOB_TOKEN; }; f' \
+            push origin "refs/tags/$VERSION"
+      - <span class="k">name:</span> publish through the repository API
+        <span class="k">run:</span> |
+          api="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/api"
+          auth="Authorization: Bearer $SPINDLE_JOB_TOKEN"
+          curl -fsS -X PUT "$api/releases/$VERSION" \
+            -H "$auth" -H 'Content-Type: application/json' \
+            --data-binary '{"draft":false,"prerelease":false}'
+          cd dist
+          sha256sum ./*.tar.gz &gt; SHA256SUMS
+          for f in ./*.tar.gz SHA256SUMS; do
+            name=$(basename "$f")
+            sha=$(sha256sum "$f" | cut -d' ' -f1)
+            curl -fsS -X POST "$api/releases/$VERSION/assets/$name" \
+              -H "$auth" -H "X-Walgit-Asset-Sha256: $sha" \
+              --data-binary @"$f"
+          done</code></pre>
+      </figure>
+      <p class="note">The artifact manifest paths are workspace-relative, so downloading
+        <code>web-dist</code> at the workspace root restores <code>web/dist</code> exactly (a
+        <code>path: web/dist</code> download would nest it as <code>web/dist/web/dist</code>). Each
+        matrix cell uploads a uniquely named artifact because an artifact name is unique per run;
+        <code>pattern: spindle-*</code> with <code>merge-multiple: true</code> then flattens the four
+        cells back into one <code>dist/</code>. The release asset upload requires
+        <code>X-Walgit-Asset-Sha256</code>; <code>curl --data-binary @file</code> supplies the
+        <code>Content-Length</code> the server verifies.</p>
 
       <h3 class="subhead">Build an image without a Docker socket</h3>
       <div class="prose">
@@ -1814,11 +2070,11 @@ steps:
 
       <div class="prose">
         <ul>
-          <li><b>merge_group / merge queue</b> — the one remaining <code>partial</code> row
-            (<code>PAR-016</code>): the separate Merge queue card owns the emitter and the
-            <code>refs/heads/gh-readonly-queue/…</code> ref, so the trigger is a named parse error
-            until it lands. Gate on the pull-request run; the queue entry will start a run when the
-            card ships.</li>
+          <li><b>Batched merge-queue entries</b> — the queue lands one pull request per run. The
+            documented <code>refs/heads/gh-readonly-queue/&lt;base&gt;/pr-&lt;n&gt;-&lt;sha&gt;</code>
+            shape names one PR, so a <code>pr-&lt;a&gt;-&lt;b&gt;-&lt;sha&gt;</code> batch ref is not
+            produced and failure attribution stays exact. The trigger and queue are implemented
+            (<a href="#merge-queue">Merge queue</a>); batching is the named future extension.</li>
           <li><b>Hosted Windows/macOS, LXC or host backends, artifact attestations</b> — signed
             non-goals (D-15): there is no isolated Windows/macOS fleet, an unisolated host backend is
             a cross-tenant hole, and attestations need a sigstore trust root this instance does not

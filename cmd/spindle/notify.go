@@ -17,6 +17,7 @@ import (
 	"github.com/crueber/spindle/internal/checks"
 	"github.com/crueber/spindle/internal/identity"
 	"github.com/crueber/spindle/internal/issues"
+	"github.com/crueber/spindle/internal/mergequeue"
 	"github.com/crueber/spindle/internal/notify"
 	"github.com/crueber/spindle/internal/pulls"
 	"github.com/crueber/spindle/internal/review"
@@ -64,7 +65,7 @@ func chainNotify(srv *server.Server, h *notify.Handler) {
 // Emission never blocks the mutating handler past the 5 s fan-out budget
 // (overflow and shortfalls defer to the notify-fanout task); stream
 // publishes are always non-blocking (drop-oldest).
-func wireNotifyFanout(svc *notify.Service, issuesSvc *issues.Service, pullsSvc *pulls.Service, reviewSvc *review.Service, checksSvc *checks.Service) {
+func wireNotifyFanout(svc *notify.Service, issuesSvc *issues.Service, pullsSvc *pulls.Service, reviewSvc *review.Service, checksSvc *checks.Service, mqSvc *mergequeue.Service) {
 	if issuesSvc != nil {
 		issuesSvc.Notify = func(ctx context.Context, ev issues.NotifyEvent) {
 			svc.EmitIssue(ctx, ev.Repo, ev.IssueNum, ev.Class, ev.Actor, ev.At, ev.Action, ev.Recipients)
@@ -87,6 +88,13 @@ func wireNotifyFanout(svc *notify.Service, issuesSvc *issues.Service, pullsSvc *
 		}
 		reviewSvc.Stream = func(ctx context.Context, ev review.StreamEvent) {
 			svc.PublishFrame(notify.RepoFrame{Name: ev.Name, Repo: ev.Repo, Action: ev.Action, Num: ev.Num, Tid: ev.TID})
+		}
+	}
+	if mqSvc != nil {
+		// The merge queue's landed/ejected/dequeued outcomes ride the same
+		// pull notification family (one fan-out, one email/SSE path).
+		mqSvc.Notify = func(ctx context.Context, ev mergequeue.Notification) {
+			svc.EmitPull(ctx, ev.Repo, ev.PullNum, ev.Class, ev.Actor, ev.At, ev.Recipients)
 		}
 	}
 	if checksSvc != nil {

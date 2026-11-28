@@ -107,6 +107,7 @@ import (
 	"github.com/crueber/spindle/internal/httpsec"
 	"github.com/crueber/spindle/internal/identity"
 	"github.com/crueber/spindle/internal/issues"
+	"github.com/crueber/spindle/internal/mergequeue"
 	"github.com/crueber/spindle/internal/moderation"
 	"github.com/crueber/spindle/internal/policy"
 	"github.com/crueber/spindle/internal/pulls"
@@ -638,6 +639,18 @@ func collabErrStatus(err error) int {
 		return http.StatusBadRequest
 	case errors.Is(err, moderation.ErrConflict):
 		return http.StatusConflict
+	// Merge queue (the Merge queue card): the same sentinels the JSON lane
+	// maps, with the page's BadRequest spelling for an invalid enqueue.
+	case errors.Is(err, mergequeue.ErrNotFound):
+		return http.StatusNotFound
+	case errors.Is(err, mergequeue.ErrInvalid):
+		return http.StatusBadRequest
+	case errors.Is(err, mergequeue.ErrConflict):
+		return http.StatusConflict
+	case errors.Is(err, mergequeue.ErrUnauthorized):
+		return http.StatusUnauthorized
+	case errors.Is(err, mergequeue.ErrForbidden):
+		return http.StatusForbidden
 	default:
 		return http.StatusServiceUnavailable
 	}
@@ -3088,6 +3101,9 @@ type pullData struct {
 	Mergeable    *pulls.MergeableDoc
 	MergeState   mergeStateView
 	Mergeability mergeabilityText
+	// Queue is the merge-queue panel (nil = service not wired or a terminal
+	// PR; the page then renders no block).
+	Queue *queuePanel
 	// MergeMethods are the methods the base ref's policy permits for THIS
 	// viewer (PLAN-V2 §2.2 merge_methods; empty = every method). The page
 	// offers only these, and the merge task refuses anything else — the
@@ -3375,6 +3391,9 @@ func (s *Server) renderPull(w http.ResponseWriter, r *http.Request, rc collabRep
 	data.MergeState = pullMergeState(pr, view.Mergeable, data.CheckBlockers, data.ReviewDec, data.RequiresReviews, rc.Role, mergeTaskFor(rc.Owner, rc.Name), mergeGate)
 	data.MergeState.Detail = terminalMergeDetail(pr, view.Events)
 	data.Mergeability = mergeabilityDisplay(data.MergeState.State, view.Mergeable, data.CheckBlockers, data.ReviewDec, data.Draft, data.ZeroChecks && len(data.RequiredChecks) == 0, data.MergeState.UpdateHint != "")
+	if pr != nil {
+		data.Queue = s.queuePanelFor(ctx, rc, p, num, pr.Base.Ref, data.Terminal)
+	}
 
 	// Diff + file-level thread placement
 	if collabDeps.PullDiff != nil {

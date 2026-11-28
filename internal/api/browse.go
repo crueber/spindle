@@ -302,7 +302,12 @@ func (v *walView) Branches(ctx context.Context, id git.RepoId) (BranchOverview, 
 		withAhead = "%(refname:strip=2)%09%(objectname)%09%(committerdate:iso-strict)%09%(ahead-behind:" + out.DefaultSHA + ")%09%(authorname)%09%(subject)"
 	}
 	run := func(format string) ([]byte, error) {
+		// The transient merge-queue refs live under refs/heads but are not
+		// branches (docs/threads.md §6.10): exclude them from the one
+		// enumeration rather than filtering rows afterwards (--count would
+		// otherwise spend the page budget on entries the page never shows).
 		return v.gitCmd(ctx, repo, "for-each-ref", "--sort=-committerdate",
+			"--exclude=refs/heads/gh-readonly-queue/*",
 			"--count="+itoa(MaxBranchRows+1), "--format="+format, "refs/heads")
 	}
 	var raw []byte

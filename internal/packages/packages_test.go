@@ -784,6 +784,117 @@ func TestBearerTokenFlow(t *testing.T) {
 	}
 }
 
+// jobAuth resolves the fixture's job credential: Basic password "job" or
+// Bearer "job" is the Threads job token; everything else is testAuth.
+func jobAuth(p auth.Principal) Authenticator {
+	return func(r *http.Request) (auth.Principal, *auth.AuthError) {
+		if _, pass, ok := r.BasicAuth(); ok && pass == "job" {
+			return p, nil
+		}
+		if cred := strings.TrimSpace(r.Header.Get("Authorization")); strings.EqualFold(cred, "Bearer job") {
+			return p, nil
+		}
+		return testAuth(r)
+	}
+}
+
+// TestJobTokenPackagesExchange pins the `packages` scope over the real
+// registry protocol: the job token is exchanged at /v2/token for a
+// repository-scoped registry token (never accepted directly on /v2), write
+// pushes, read only pulls, and another repository or a missing scope is 403.
+func TestJobTokenPackagesExchange(t *testing.T) {
+	f := newFixture(t)
+	write := auth.Principal{Name: "ci:runner1", JobRepo: "acme/demo", JobPerms: map[string]string{"packages": "write"}}
+	f.h.Auth = jobAuth(write)
+
+	// Direct job-token use on a registry route is refused: the exchange is
+	// the only path, so `contents: write` can never imply a package push.
+	w := f.req("PUT", "/v2/acme/demo/manifests/direct", []byte(imageManifest), map[string]string{"Authorization": "Bearer job"})
+	if w.Code != http.StatusForbidden {
+		t.Fatalf("direct job token push = %d %s", w.Code, w.Body.String())
+	}
+
+	mint := func(scope string) *httptest.ResponseRecorder {
+		r := httptest.NewRequest("GET", "/v2/token?scope="+scope, nil)
+		r.SetBasicAuth("ci", "job")
+		rec := httptest.NewRecorder()
+		f.h.ServeHTTP(rec, r)
+		return rec
+	}
+	var resp struct {
+		Token  string `json:"token"`
+		Access []struct {
+			Name    string   `json:"name"`
+			Actions []string `json:"actions"`
+		} `json:"access"`
+	}
+	// write: pull+push on its own repository.
+	tw := mint("repository:acme/demo:pull,push")
+	if tw.Code != http.StatusOK {
+		t.Fatalf("job write token = %d %s", tw.Code, tw.Body.String())
+	}
+	if err := json.Unmarshal(tw.Body.Bytes(), &resp); err != nil {
+		t.Fatal(err)
+	}
+	if len(resp.Access) != 1 || resp.Access[0].Name != "acme/demo" || len(resp.Access[0].Actions) != 2 {
+		t.Fatalf("job write access = %+v", resp.Access)
+	}
+	w = f.req("PUT", "/v2/acme/demo/manifests/job", []byte(imageManifest), map[string]string{"Authorization": "Bearer " + resp.Token})
+	if w.Code != http.StatusCreated {
+		t.Fatalf("job token push = %d %s", w.Code, w.Body.String())
+	}
+	w = f.req("GET", "/v2/acme/demo/manifests/job", nil, map[string]string{"Authorization": "Bearer " + resp.Token})
+	if w.Code != http.StatusOK {
+		t.Fatalf("job token pull = %d %s", w.Code, w.Body.String())
+	}
+	// The minted token is a result, never a credential for minting another.
+	r := httptest.NewRequest("GET", "/v2/token?scope=repository:acme/demo:pull", nil)
+	r.Header.Set("Authorization", "Bearer "+resp.Token)
+	nw := httptest.NewRecorder()
+	f.h.ServeHTTP(nw, r)
+	if nw.Code != http.StatusUnauthorized {
+		t.Fatalf("registry token minted another = %d", nw.Code)
+	}
+	// Another repository is refused by name.
+	if w := mint("repository:acme/other:pull"); w.Code != http.StatusForbidden {
+		t.Fatalf("cross-repo job token = %d %s", w.Code, w.Body.String())
+	}
+
+	// read: pull works, push is 403 at the exchange.
+	read := auth.Principal{Name: "ci:runner1", JobRepo: "acme/demo", JobPerms: map[string]string{"packages": "read"}}
+	f.h.Auth = jobAuth(read)
+	if w := mint("repository:acme/demo:pull,push"); w.Code != http.StatusForbidden {
+		t.Fatalf("read job push exchange = %d %s", w.Code, w.Body.String())
+	}
+	tw = mint("repository:acme/demo:pull")
+	if tw.Code != http.StatusOK {
+		t.Fatalf("read job pull token = %d %s", tw.Code, tw.Body.String())
+	}
+	if err := json.Unmarshal(tw.Body.Bytes(), &resp); err != nil {
+		t.Fatal(err)
+	}
+	w = f.req("PUT", "/v2/acme/demo/manifests/readjob", []byte(imageManifest), map[string]string{"Authorization": "Bearer " + resp.Token})
+	if w.Code != http.StatusForbidden {
+		t.Fatalf("read job token pushed = %d", w.Code)
+	}
+	w = f.req("GET", "/v2/acme/demo/manifests/job", nil, map[string]string{"Authorization": "Bearer " + resp.Token})
+	if w.Code != http.StatusOK {
+		t.Fatalf("read job token pull = %d", w.Code)
+	}
+
+	// A job with no packages scope cannot exchange at all.
+	none := auth.Principal{Name: "ci:runner1", JobRepo: "acme/demo", JobPerms: map[string]string{"contents": "write"}}
+	f.h.Auth = jobAuth(none)
+	if w := mint("repository:acme/demo:pull"); w.Code != http.StatusForbidden {
+		t.Fatalf("no-scope job token = %d", w.Code)
+	}
+	// The JSON API refuses the job token too (exchange is /v2/token only).
+	w = f.req("GET", "/acme/demo/api/packages", nil, map[string]string{"Authorization": "Bearer job"})
+	if w.Code != http.StatusForbidden {
+		t.Fatalf("job token JSON API = %d %s", w.Code, w.Body.String())
+	}
+}
+
 func TestTokenVerification(t *testing.T) {
 	f := newFixture(t)
 	tok, exp := f.svc.MintToken(auth.Principal{Name: "alice"}, []string{"repository:acme/demo:pull"})

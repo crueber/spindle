@@ -158,5 +158,11 @@ func maintainSweepers(c *collabWiring) []maintain.Sweeper {
 	if c.threadsSvc != nil {
 		out = append(out, newThreadsSweepers(c.threadsSvc)...)
 	}
+	// Merge queue (the Merge queue card): the per-repository restart/lease
+	// recovery pass. Normal progress is the queue's own driver; this pass is
+	// what makes a crash resume instead of wedge.
+	if c.mergeQueueSvc != nil {
+		out = append(out, newMergeQueueSweeper(c.mergeQueueSvc))
+	}
 	return out
 }

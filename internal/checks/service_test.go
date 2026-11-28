@@ -45,6 +45,42 @@ func TestReportValidation(t *testing.T) {
 	}
 }
 
+// TestJobTokenChecksRead pins the read half: `checks: read` (or `statuses:
+// read`) reads its own repository's statuses, a job with no scope cannot, and
+// another repository is refused (PAR-112/PAR-021).
+func TestJobTokenChecksRead(t *testing.T) {
+	e := newTestEnv()
+	sha := hexSHA(21)
+	e.knowSHA(sha)
+	e.mustReport(t, sha, "ci/build", StateSuccess)
+
+	read := auth.Principal{Name: "ci:r1", JobRepo: "o/r", JobPerms: map[string]string{"checks": "read"}}
+	view, err := e.svc.GetStatuses(ctx(), "o", "r", sha, read)
+	if err != nil {
+		t.Fatalf("checks: read GetStatuses = %v", err)
+	}
+	if len(view.Statuses) != 1 {
+		t.Fatalf("statuses = %d, want 1", len(view.Statuses))
+	}
+	legacy := auth.Principal{Name: "ci:r1", JobRepo: "o/r", JobPerms: map[string]string{"statuses": "read"}}
+	if _, err := e.svc.Combined(ctx(), "o", "r", sha, legacy); err != nil {
+		t.Fatalf("statuses: read Combined = %v", err)
+	}
+	none := auth.Principal{Name: "ci:r1", JobRepo: "o/r", JobPerms: map[string]string{"contents": "read"}}
+	if _, err := e.svc.GetStatuses(ctx(), "o", "r", sha, none); !errors.Is(err, ErrForbidden) {
+		t.Fatalf("no-scope read = %v, want ErrForbidden", err)
+	}
+	cross := auth.Principal{Name: "ci:r1", JobRepo: "o/r", JobPerms: map[string]string{"checks": "read"}}
+	if _, err := e.svc.GetStatuses(ctx(), "o", "other", sha, cross); !errors.Is(err, ErrForbidden) {
+		t.Fatalf("cross-repo read = %v, want ErrForbidden", err)
+	}
+	// A job token can never manage the CI-token family (mint another credential).
+	if _, err := e.svc.CreateToken(ctx(), "o", "r", auth.Principal{Name: "ci:r1", JobRepo: "o/r", JobPerms: map[string]string{"checks": "write"}}, "leak", nil); !errors.Is(err, ErrForbidden) {
+		t.Fatalf("job token minted a CI token: %v", err)
+	}
+}
+
+// TestReportAuth pins the report endpoint's credential matrix.
 func TestReportAuth(t *testing.T) {
 	sha := hexSHA(2)
 	t.Run("anonymous 401", func(t *testing.T) {
@@ -64,9 +100,10 @@ func TestReportAuth(t *testing.T) {
 			t.Fatalf("err = %v", err)
 		}
 	})
-	t.Run("job token 403", func(t *testing.T) {
-		// PAR-112: `checks`/`statuses` are refused scopes, so a job token's
-		// repository role must not let it forge a check over HTTP.
+	t.Run("job token without checks write 403", func(t *testing.T) {
+		// A Threads job token reports checks only with `checks: write` (or the
+		// `statuses` spelling), on its own repository; a repository role or
+		// `contents: write` is not enough.
 		e := newTestEnv()
 		e.roles.Roles["sam@example.com"] = "write"
 		e.knowSHA(sha)
@@ -74,6 +111,33 @@ func TestReportAuth(t *testing.T) {
 		_, err := e.svc.ReportStatus(ctx(), "o", "r", sha, job, "", ReportInput{Context: "ci", State: StateSuccess})
 		if !errors.Is(err, ErrForbidden) {
 			t.Fatalf("job token status = %v, want ErrForbidden", err)
+		}
+	})
+	t.Run("job token checks write reports", func(t *testing.T) {
+		e := newTestEnv()
+		e.roles.Roles["sam@example.com"] = "read"
+		e.knowSHA(sha)
+		job := auth.Principal{Name: "ci:r1", JobRepo: "o/r", JobPerms: map[string]string{"checks": "write"}}
+		doc, err := e.svc.ReportStatus(ctx(), "o", "r", sha, job, "", ReportInput{Context: "ci/build", State: StateSuccess})
+		if err != nil {
+			t.Fatalf("job token checks: write = %v", err)
+		}
+		if doc.Creator != "ci:r1" {
+			t.Fatalf("creator = %q, want the job principal", doc.Creator)
+		}
+		// `statuses: write` is the legacy spelling for the same surface.
+		legacy := auth.Principal{Name: "ci:r2", JobRepo: "o/r", JobPerms: map[string]string{"statuses": "write"}}
+		if _, err := e.svc.ReportStatus(ctx(), "o", "r", sha, legacy, "", ReportInput{Context: "ci/legacy", State: StateSuccess}); err != nil {
+			t.Fatalf("job token statuses: write = %v", err)
+		}
+	})
+	t.Run("job token cross-repo 403", func(t *testing.T) {
+		e := newTestEnv()
+		e.knowSHA(sha)
+		job := auth.Principal{Name: "ci:r1", JobRepo: "o/r", JobPerms: map[string]string{"checks": "write"}}
+		_, err := e.svc.ReportStatus(ctx(), "o", "other", sha, job, "", ReportInput{Context: "ci", State: StateSuccess})
+		if !errors.Is(err, ErrForbidden) {
+			t.Fatalf("cross-repo job report = %v, want ErrForbidden", err)
 		}
 	})
 	t.Run("unknown sha 404", func(t *testing.T) {

@@ -32,13 +32,19 @@ type tokenClaims struct {
 	Scopes []string `json:"scopes"`
 	Iat    int64    `json:"iat"`
 	Exp    int64    `json:"exp"`
+	// JobRepo marks a token minted from a Threads job token (PAR-112). The
+	// scopes are the narrowed grant — the job's own repository, pull/push per
+	// `packages` — so the registry authorizes from the claims alone rather
+	// than resolving a repository role for the ci:<runner> principal (which
+	// deliberately owns none). Empty for every ordinary registry token.
+	JobRepo string `json:"job_repo,omitempty"`
 }
 
 // MintToken issues a short-lived scoped token for principal p.
 func (s *Service) MintToken(p auth.Principal, scopes []string) (string, time.Time) {
 	now := s.now()
 	exp := now.Add(s.tokenTTL())
-	claims := tokenClaims{Sub: p.Name, Scopes: scopes, Iat: now.Unix(), Exp: exp.Unix()}
+	claims := tokenClaims{Sub: p.Name, Scopes: scopes, Iat: now.Unix(), Exp: exp.Unix(), JobRepo: p.JobRepo}
 	payload, _ := json.Marshal(claims)
 	body := base64.RawURLEncoding.EncodeToString(payload)
 	mac := hmac.New(sha256.New, s.key())

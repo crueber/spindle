@@ -1,0 +1,129 @@
+{{define "content"}}
+{{with .Data}}{{$d := .}}
+<section aria-label="Merge queue">
+  <div class="mb-3 flex flex-wrap items-center gap-2">
+    <h2 class="text-xl font-semibold tracking-tight">Merge queue</h2>
+    <div class="ml-auto flex flex-wrap items-center gap-2">
+      {{if .Base}}<a class="link text-xs" href="{{.AllHref}}">all branches</a>{{end}}
+      <a class="link text-xs" href="/{{.Repo.Full}}/pulls">pull requests</a>
+    </div>
+  </div>
+
+  {{if .Error}}<p class="err-line" role="alert">{{.Error}}</p>{{end}}
+  {{if .Notice}}<p class="warn-line" role="status">{{.Notice}}</p>{{end}}
+
+  {{if .Sections}}
+  {{range .Sections}}
+  <section class="card mb-3" aria-label="merge queue for {{.Base}}">
+    <div class="flex flex-wrap items-center gap-2 p-3">
+      <h3 class="card-header">base <span class="mono">{{.Base}}</span></h3>
+      {{if .Paused}}<span class="chip chip-draft">paused</span>{{else}}<span class="chip chip-open">running</span>{{end}}
+      <span class="muted text-xs">{{len .Entries}} {{plural (len .Entries) "entry" "entries"}}</span>
+      <div class="ml-auto flex flex-wrap items-center gap-2">
+        {{if .Paused}}
+        <form method="post" action="/{{$d.Repo.Full}}/queue/resume">
+          <input type="hidden" name="base" value="{{.Base}}">
+          <button type="submit" class="btn px-2 py-1 text-xs">resume</button>
+        </form>
+        {{else if $d.CanMaint}}
+        <form class="flex flex-wrap items-center gap-2" method="post" action="/{{$d.Repo.Full}}/queue/pause">
+          <input type="hidden" name="base" value="{{.Base}}">
+          <input class="input w-48" name="reason" placeholder="pause reason (optional)" aria-label="pause reason for {{.Base}}">
+          <button type="submit" class="btn px-2 py-1 text-xs">pause</button>
+        </form>
+        {{end}}
+      </div>
+    </div>
+    {{if .Paused}}
+    <p class="warn-line px-3 pb-2" role="status">paused{{with .PausedBy}} by {{.}}{{end}}{{with .PausedReason}} — {{.}}{{end}}</p>
+    {{end}}
+
+    {{if .Entries}}
+    <ol class="divide-y divide-[color:var(--pd-line)] border-t border-[color:var(--pd-line)]">
+      {{range .Entries}}
+      <li class="p-3">
+        <div class="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1">
+          <span class="mono muted shrink-0 text-xs">{{if .Position}}#{{.Position}}{{else}}—{{end}}</span>
+          <a class="link min-w-0 max-w-full truncate font-medium" href="/{{$d.Repo.Full}}/pull/{{.Number}}">#{{.Number}} {{.Title}}</a>
+          {{template "collab_state_chip" .Chip}}
+          {{if .Author}}<span class="muted text-xs">{{.Author}}</span>{{end}}
+          <span class="card-meta ml-auto mt-0! shrink-0">{{template "collab_time" .EnqueuedAt}}</span>
+        </div>
+        {{if .Reason}}<p class="warn-line mt-1" role="status">{{.Reason}}</p>{{end}}
+        <div class="mt-2 flex flex-wrap items-center gap-2">
+          {{if .ShortMerge}}<span class="mono muted text-xs">merge commit {{.ShortMerge}}</span>{{end}}
+          {{if .CanDequeue}}
+          <form method="post" action="/{{$d.Repo.Full}}/queue/dequeue">
+            <input type="hidden" name="base" value="{{.Base}}">
+            <input type="hidden" name="number" value="{{.Number}}">
+            <button type="submit" class="btn whitespace-nowrap px-2 py-1 text-xs">remove</button>
+          </form>
+          {{end}}
+        </div>
+      </li>
+      {{end}}
+    </ol>
+    {{else}}
+    <p class="muted px-3 pb-3 text-sm">Nothing queued on this branch.</p>
+    {{end}}
+
+    {{if $d.CanMaint}}
+    <form class="flex flex-wrap items-end gap-2 border-t border-[color:var(--pd-line)] p-3" method="post" action="/{{$d.Repo.Full}}/queue/enqueue" aria-label="add a pull request to the {{.Base}} queue">
+      <input type="hidden" name="base" value="{{.Base}}">
+      <label class="grid gap-1">
+        <span class="eyebrow">Pull request</span>
+        <input class="input w-24" name="number" inputmode="numeric" required aria-label="pull request number">
+      </label>
+      <label class="grid gap-1">
+        <span class="eyebrow">Priority</span>
+        <input class="input w-20" name="priority" value="0" inputmode="numeric" aria-label="priority (higher runs first)">
+      </label>
+      <button type="submit" class="btn px-2 py-1">add</button>
+      <span class="muted text-xs">higher priority runs first; equal priorities are first-in, first-out.</span>
+    </form>
+    {{end}}
+  </section>
+  {{end}}
+  {{else if not .Error}}
+  {{template "collab_empty" (dict "icon" "pull" "title" "No merge queue yet" "hint" "A maintainer enqueues a pull request for a base branch; the head is validated by a merge_group run and lands when its required checks are green." "href" "" "label" "")}}
+  {{end}}
+
+  {{if .Recent}}
+  <section class="card mb-3" aria-label="recent queue outcomes">
+    <h3 class="card-header p-3">Recent outcomes</h3>
+    <ul class="divide-y divide-[color:var(--pd-line)] border-t border-[color:var(--pd-line)]">
+      {{range .Recent}}
+      <li class="p-3">
+        <div class="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1">
+          <a class="link min-w-0 max-w-full truncate" href="/{{$d.Repo.Full}}/pull/{{.Number}}">#{{.Number}} {{.Title}}</a>
+          {{template "collab_state_chip" .Chip}}
+          <span class="mono muted text-xs">{{.Base}}</span>
+          <span class="card-meta ml-auto mt-0! shrink-0">{{template "collab_time" .FinishedAt}}</span>
+        </div>
+        {{if .Reason}}<p class="warn-line mt-1">{{.Reason}}</p>{{end}}
+      </li>
+      {{end}}
+    </ul>
+  </section>
+  {{end}}
+
+  {{if .Audit}}
+  <section class="card" aria-label="merge queue audit trail">
+    <h3 class="card-header p-3">Audit</h3>
+    <ul class="divide-y divide-[color:var(--pd-line)] border-t border-[color:var(--pd-line)]">
+      {{range .Audit}}
+      <li class="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1 p-2 text-xs">
+        {{template "collab_time" .At}}
+        <span class="mono">{{.Actor}}</span>
+        <span class="chip chip-neutral">{{.Action}}</span>
+        {{if .Base}}<span class="mono muted">{{.Base}}</span>{{end}}
+        {{if .Number}}<a class="link mono" href="/{{$d.Repo.Full}}/pull/{{.Number}}">#{{.Number}}</a>{{end}}
+        {{with .Detail}}<span class="muted min-w-0 break-words">{{.}}</span>{{end}}
+      </li>
+      {{end}}
+    </ul>
+  </section>
+  {{end}}
+</section>
+{{end}}
+{{end}}

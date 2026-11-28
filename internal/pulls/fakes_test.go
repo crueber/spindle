@@ -461,9 +461,17 @@ func (f *FakeRefs) UpdateRef(_ context.Context, repo, ref, old, newSHA string, m
 	}
 	m := f.Refs[repo]
 	if m == nil {
-		return fmt.Errorf("CAS conflict: %s has no ref %s", repo, ref)
+		m = map[string]string{}
+		f.Refs[repo] = m
 	}
 	cur, ok := m[ref]
+	if !ok && isZeroTestOID(old) {
+		// The real WAL creates a ref when the expected old oid is all zeros
+		// (the queue's temporary ref). Mirror that here so a create-on-absent
+		// publish is testable.
+		m[ref] = newSHA
+		return nil
+	}
 	if !ok || cur != old {
 		return fmt.Errorf("CAS conflict: expected %s, found %s", old, cur)
 	}
@@ -504,15 +512,26 @@ func (f *FakeRefs) UpdateRefWithPack(_ context.Context, repo, ref, old, newSHA s
 	}
 	m := f.Refs[repo]
 	if m == nil {
-		return fmt.Errorf("CAS conflict: %s has no ref %s", repo, ref)
+		m = map[string]string{}
+		f.Refs[repo] = m
 	}
 	cur, ok := m[ref]
+	if !ok && isZeroTestOID(old) {
+		// The real WAL creates a ref when the expected old oid is all zeros
+		// (the queue's temporary ref). Mirror that here so a create-on-absent
+		// publish is testable.
+		m[ref] = newSHA
+		return nil
+	}
 	if !ok || cur != old {
 		return fmt.Errorf("CAS conflict: expected %s, found %s", old, cur)
 	}
 	m[ref] = newSHA
 	return nil
 }
+
+// isZeroTestOID reports the all-zero create marker (40 or 64 hex zeros).
+func isZeroTestOID(oid string) bool { return oid != "" && strings.Trim(oid, "0") == "" }
 
 // updatesFor returns update calls for a ref (never-force proof: Old != "";
 // both plain and pack-carrying updates — a pack publish moves the ref with

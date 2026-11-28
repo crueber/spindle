@@ -591,6 +591,13 @@ func (e *Executor) uploadArtifact(ctx context.Context, plan *Plan, step StepPlan
 	// the next write fail, so a capped upload never streams the rest.
 	if uploadErr != nil {
 		_ = pr.CloseWithError(uploadErr)
+	} else {
+		// A tar archive ends at its two zero blocks, but GNU tar still writes
+		// record padding after them and tar.Reader stops at the blocks. Drain
+		// the remainder: the pipe is unbuffered, so a writer told to run
+		// `tar -cf -` would otherwise block forever on that trailing padding
+		// and the step would never finish.
+		_, _ = io.Copy(io.Discard, pr)
 	}
 	if derr := <-done; derr != nil && uploadErr == nil {
 		uploadErr = derr

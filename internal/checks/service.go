@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"sort"
 	"strings"
 	"sync"
@@ -59,11 +60,48 @@ func (s *Service) roleOf(ctx context.Context, owner, repo string, p auth.Princip
 	return string(role)
 }
 
+// jobScopeLevel returns the highest level a job token's effective permission
+// map carries across the given canonical scopes (none|read|write).
+func jobScopeLevel(p auth.Principal, scopes ...string) string {
+	best := ""
+	for _, scope := range scopes {
+		switch strings.ToLower(strings.TrimSpace(p.JobPerms[scope])) {
+		case "write":
+			return "write"
+		case "read":
+			best = "read"
+		}
+	}
+	return best
+}
+
+// requireJobScope authorizes the checks surface for a Threads job token
+// (PAR-112/PAR-021). It is repository-scoped (never another repo) and the
+// capability is the `checks` scope, with `statuses` accepted as the legacy
+// name for the same surface. A job token never reaches the token-management
+// or other admin paths (requireRole refuses it).
+func (s *Service) requireJobScope(owner, repo string, p auth.Principal, want string) error {
+	if !strings.EqualFold(strings.TrimSpace(p.JobRepo), owner+"/"+repo) {
+		return fmt.Errorf("%w: the job token is scoped to %s", ErrForbidden, p.JobRepo)
+	}
+	level := jobScopeLevel(p, "checks", "statuses")
+	if roleRank(level) >= roleRank(want) {
+		return nil
+	}
+	return fmt.Errorf("%w: the job token lacks checks: %s", ErrForbidden, want)
+}
+
 // requireRole enforces a minimum repo role: host admin always passes;
 // anonymous failures are 401, authenticated-but-insufficient are 403.
 func (s *Service) requireRole(ctx context.Context, owner, repo string, p auth.Principal, want string) error {
 	if p.Admin {
 		return nil
+	}
+	// A job token can report a check run (checks: write) but never manage the
+	// CI-token family or any other checks admin surface: minting another
+	// credential is not a job capability.
+	if p.JobRepo != "" {
+		return fmt.Errorf("%w: a job token cannot manage the checks admin surface", ErrForbidden)
 	}
 	got := s.roleOf(ctx, owner, repo, p)
 	if roleRank(got) >= roleRank(want) {
@@ -78,6 +116,11 @@ func (s *Service) requireRole(ctx context.Context, owner, repo string, p auth.Pr
 // requireRead enforces the read gate (identity require_read hook when
 // wired: public visibility or role ≥ read).
 func (s *Service) requireRead(ctx context.Context, owner, repo string, p auth.Principal) error {
+	if p.JobRepo != "" {
+		// A job token reads checks by its own scope, never by a repository
+		// role: `checks: read` (or the `statuses` spelling) on its own repo.
+		return s.requireJobScope(owner, repo, p, "read")
+	}
 	if p.Admin || p.Write {
 		return nil
 	}
@@ -132,10 +175,11 @@ type ReportInput struct {
 // open-PR heads, enqueue notifications — all synchronously post-CAS (P8).
 //
 // Auth: a ci:<id> principal (from a wct_ credential) verifies its secret
-// against this repo's token record (mismatch/revoked = 401, valid but
-// scopeless = 403); anyone else needs the repo write role. secret is the
-// raw secret from the wct_ credential ("" when the caller used no CI
-// token — a ci: principal with no secret is a 401).
+// against this repo's token table (mismatch/revoked = 401, valid but
+// scopeless = 403); a Threads job token needs `checks: write` (or the
+// `statuses` spelling) on its own repository (PAR-021); anyone else needs the
+// repo write role. secret is the raw secret from the wct_ credential ("" when
+// the caller used no CI token — a ci: principal with no secret is a 401).
 func (s *Service) ReportStatus(ctx context.Context, owner, repo, sha string, p auth.Principal, secret string, in ReportInput) (*StatusDoc, error) {
 	if err := requireAuthenticated(p); err != nil {
 		return nil, err
@@ -148,7 +192,18 @@ func (s *Service) ReportStatus(ctx context.Context, owner, repo, sha string, p a
 	// role. The capability check is handler-side — the frozen Principal
 	// is untouched.
 	creator := ""
-	if id, ok := IsCIPrincipal(p.Name); ok {
+	if p.JobRepo != "" {
+		// A Threads job token reports a check run for its own repository with
+		// `checks: write` (PAR-021/PAR-112). It is repository-scoped and never
+		// becomes the CI-token credential class: the token itself is the
+		// authority, so no stored secret is consulted.
+		if err := s.requireJobScope(owner, repo, p, "write"); err != nil {
+			return nil, err
+		}
+		creator = normPrincipal(p.Name)
+		slog.Default().Info("checks: job token reported a check run",
+			"repo", owner+"/"+repo, "context", in.Context, "state", in.State, "creator", creator)
+	} else if id, ok := IsCIPrincipal(p.Name); ok {
 		tok, _, terr := s.loadToken(ctx, owner, repo, id)
 		if terr != nil {
 			return nil, terr
@@ -164,15 +219,6 @@ func (s *Service) ReportStatus(ctx context.Context, owner, repo, sha string, p a
 		}
 		creator = normPrincipal(p.Name)
 	} else {
-		// A Threads job token never reports commit statuses over HTTP: the
-		// `checks` and `statuses` scopes are refused by name (PAR-112, D-11), so
-		// the token's repository role must not be enough on its own — otherwise
-		// a `contents: write` job could forge the very check context that gates
-		// its own merge. A job's own check runs are written in-process by Threads
-		// (RecordStatus), which never passes through this path.
-		if p.JobRepo != "" {
-			return nil, fmt.Errorf("%w: a job token cannot report commit statuses", ErrForbidden)
-		}
 		if err := s.requireRole(ctx, owner, repo, p, "write"); err != nil {
 			return nil, err
 		}
@@ -1018,48 +1064,92 @@ const GateTimeout = 15 * time.Second
 // carries no bypass FIELD of its own; required-reviews (04 §6) is a
 // different effect with its own bypass, which its own gate evaluates.
 func (s *Service) CheckRequiredChecks(ctx context.Context, owner, repo, headSHA, baseRef, merger string) error {
+	p, err := s.RequiredChecksProgress(ctx, owner, repo, headSHA, baseRef, merger)
+	if err != nil {
+		return err
+	}
+	if p.OK {
+		return nil
+	}
+	return fmt.Errorf("merge refused: required checks not green for %s: %s", p.SHA, strings.Join(p.Offenders, ", "))
+}
+
+// RequiredProgress is the require_checks gate's read model: the required
+// contexts, the offenders in the gate's exact `<ctx> (<state|missing>)`
+// spelling, and whether the shortfall is still in flight (pending/missing)
+// or already decided (failure/cancelled/skipped/error).
+//
+// It is the merge queue's polling half (the Merge queue card): a queue entry
+// waiting for its merge_group run must not eject the moment a required
+// context is merely `pending`. CheckRequiredChecks keeps the same verdict and
+// message; this is the same read with one extra bit, not a second gate.
+type RequiredProgress struct {
+	// SHA is the normalized commit the gate read.
+	SHA string
+	// Required is the union of require_checks contexts for the base ref.
+	Required []string
+	// Offenders are the non-green required contexts, verbatim.
+	Offenders []string
+	// OK reports every required context present and success (an empty
+	// Required set is OK: no rule carries the gate).
+	OK bool
+	// Pending reports that at least one offender is missing or still
+	// in flight (pending/in_progress). A decided non-green state
+	// (failure/cancelled/skipped/error) leaves it false.
+	Pending bool
+}
+
+// RequiredChecksProgress is RequiredProgress's read (see CheckRequiredChecks
+// for the gate contract). No principal is authorized here: it is a
+// server-internal read for the queue driver, whose writes are gated
+// separately. It fails closed on an unparseable policy, exactly like the
+// gate.
+func (s *Service) RequiredChecksProgress(ctx context.Context, owner, repo, headSHA, baseRef, merger string) (*RequiredProgress, error) {
 	gctx, cancel := context.WithTimeout(ctx, GateTimeout)
 	defer cancel()
 	fullSHA, err := normalizeSHA(headSHA)
 	if err != nil {
-		return err
+		return nil, err
 	}
+	p := &RequiredProgress{SHA: fullSHA, OK: true}
 	raw, _, err := s.getJSON(gctx, "repos/"+owner+"/"+repo+"/policy.json")
 	if err != nil {
-		return err
+		return nil, err
 	}
 	if raw == nil {
-		return nil // no policy ⇒ no required-checks rules ⇒ pass
+		return p, nil // no policy ⇒ no required-checks rules ⇒ pass
 	}
 	doc, perr := policy.Parse(raw)
 	if perr != nil {
-		return fmt.Errorf("%w: policy.json unparseable: %v", ErrConflict, perr)
+		return nil, fmt.Errorf("%w: policy.json unparseable: %v", ErrConflict, perr)
 	}
-	required := requiredUnion(doc, baseRef, merger)
-	if len(required) == 0 {
-		return nil
+	p.Required = requiredUnion(doc, baseRef, merger)
+	if len(p.Required) == 0 {
+		return p, nil
 	}
 	statuses, err := s.loadStatuses(gctx, owner, repo, fullSHA)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	byCtx := map[string]string{}
 	for _, st := range statuses {
 		byCtx[st.Context] = st.State
 	}
-	var offenders []string
-	for _, name := range required {
+	for _, name := range p.Required {
 		st, ok := byCtx[name]
-		if !ok {
-			offenders = append(offenders, name+" (missing)")
-		} else if st != StateSuccess {
-			offenders = append(offenders, name+" ("+st+")")
+		switch {
+		case !ok:
+			p.Offenders = append(p.Offenders, name+" (missing)")
+			p.Pending = true
+		case st != StateSuccess:
+			p.Offenders = append(p.Offenders, name+" ("+st+")")
+			if st == "" || st == "pending" || st == "in_progress" {
+				p.Pending = true
+			}
 		}
 	}
-	if len(offenders) > 0 {
-		return fmt.Errorf("merge refused: required checks not green for %s: %s", fullSHA, strings.Join(offenders, ", "))
-	}
-	return nil
+	p.OK = len(p.Offenders) == 0
+	return p, nil
 }
 
 // requiredUnion collects the union of require_checks contexts across

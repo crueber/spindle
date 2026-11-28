@@ -428,6 +428,17 @@ func wireCollabPages(apiEnv *api.Env, c *collabWiring) {
 		}
 	}
 	webui.BindCollab(d)
+	if c != nil && c.mergeQueueSvc != nil {
+		mq := c.mergeQueueSvc
+		webui.BindQueue(webui.QueueDeps{
+			List:    mq.List,
+			ForPR:   mq.QueueForPR,
+			Enqueue: mq.Enqueue,
+			Dequeue: mq.Dequeue,
+			Pause:   mq.Pause,
+			Resume:  mq.Resume,
+		})
+	}
 	td := webui.ThreadsDeps{}
 	if c != nil && c.threadsSvc != nil {
 		th := c.threadsSvc

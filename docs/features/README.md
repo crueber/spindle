@@ -47,6 +47,7 @@ commits are ordinary git objects; a PR's *head* is an ordinary ref published thr
 | [`19_static_sites.md`](19_static_sites.md) | Static sites: **shipped** — a repository's tree published read-only from a dedicated static hostname on its own listener (`<static-host>/{owner}/{repo}/…`), Pages-like resolution, cookie-less origin ⇒ public repos only, no build step | — (bucket + git; config `[static_sites]`/`[static_site]`) |
 | [`20_search.md`](20_search.md) | Code search (and issue/PR text search): **shipped** — `git grep` at a resolved sha on the serving copy (no index in v1), repo and bounded owner scopes, honest caps, issue/PR metadata and bounded body/comment scan with moderation redaction; the two pages, `spindle search` and the SDK | 01, 02, 03 (issues/PR text), 04_git §17 |
 | [`21_parity_master.md`](21_parity_master.md) | Threads Actions parity: **the work order** — one reconciled, security-reviewed plan for the Forgejo and GitHub parity cards (119 `PAR-` entries, Forgejo-first waves, eight parallel work tracks, the operator-decision gate); the per-row matrix is generated data (`parity/`) | 15 |
+| [`22_merge_queue.md`](22_merge_queue.md) | Merge queue: **shipped** — per-base ordered entries (priority then FIFO), the documented temporary merge ref handed to `merge_group`, the required-checks gate on the checked tip, landing through the one merge task, ejection with a reason, restart recovery, pause/resume, audit, API and pages | 03 (merge task), 05 (checks), 15/threads (runs, PAR-016) |
 
 ## Shared primitives (normative for every feature doc)
 

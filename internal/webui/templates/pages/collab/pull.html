@@ -283,6 +283,12 @@
         {{end}}
       </div>
 
+      {{if .Queue}}
+      <div class="p-3" aria-label="Merge queue">
+        {{template "collab_queue_panel" .Queue}}
+      </div>
+      {{end}}
+
       <div class="p-3" aria-label="Merge">
         <h2 class="card-header">{{if .Merged}}Merged{{else}}Merge{{end}}</h2>
         {{template "collab_merge_task" (dict "Task" .MergeState.Task "Num" .Num "Full" .Repo.Full)}}

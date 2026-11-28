@@ -210,6 +210,8 @@ func summarizeSnapshot(snap *git.RefSnapshot) SummaryData {
 	s := SummaryData{Branches: 0, Tags: 0}
 	for _, e := range snap.Refs {
 		switch {
+		case git.IsMergeQueueRef(e.Name):
+			// transient queue entries are not branches (docs/threads.md §6.10)
 		case strings.HasPrefix(e.Name, "refs/heads/"):
 			s.Branches++
 			if e.Name == snap.HeadTarget {
@@ -380,6 +382,9 @@ func (v *walView) RefList(ctx context.Context, id git.RepoId, ns string, q RefQu
 	out := make([]Ref, 0, n)
 	more := false
 	for _, e := range snap.Refs { // name-sorted
+		if ns == "heads" && git.IsMergeQueueRef(e.Name) {
+			continue // queue refs are not branches (docs/threads.md §6.10)
+		}
 		if !strings.HasPrefix(e.Name, prefix) {
 			continue
 		}
@@ -399,6 +404,9 @@ func (v *walView) RefList(ctx context.Context, id git.RepoId, ns string, q RefQu
 	if len(out) == n && !more {
 		rest := out[len(out)-1].Name
 		for _, e := range snap.Refs {
+			if ns == "heads" && git.IsMergeQueueRef(e.Name) {
+				continue
+			}
 			if e.Name > rest && strings.HasPrefix(e.Name, prefix) && (q.Q == "" || strings.Contains(strings.ToLower(e.Name), strings.ToLower(q.Q))) && (q.After == "" || e.Name > q.After) {
 				more = true
 				break
@@ -530,9 +538,13 @@ func (v *walView) refNameForSHA(repo *git.LocalRepo, sha string) string {
 			return snap.HeadTarget
 		}
 	}
-	// Refs are name-sorted; branches sort before tags by prefix.
+	// Refs are name-sorted; branches sort before tags by prefix. Merge-queue
+	// refs are transient and never name a commit page.
 	for _, prefix := range []string{"refs/heads/", "refs/tags/"} {
 		for _, e := range snap.Refs {
+			if git.IsMergeQueueRef(e.Name) {
+				continue
+			}
 			if strings.HasPrefix(e.Name, prefix) && entrySHA(e) == sha {
 				return e.Name
 			}

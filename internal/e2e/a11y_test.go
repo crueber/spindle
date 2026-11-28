@@ -320,6 +320,16 @@ func TestA11yRenderedPages(t *testing.T) {
 		`{"title":"A11y fixture pull","base_ref":"refs/heads/main","head_ref":"refs/heads/feature","body":"fixes #`+strconv.Itoa(issueNum)+`"}`,
 		adminTok)
 	prNum := int(jget(t, pr, "thread", "num").(float64))
+	// The merge queue (docs/features/22): enqueue the fixture pull request so
+	// the repo Queue page renders real entries and the PR panel renders its
+	// queue block. No merge_group workflow is needed for the layout check; the
+	// entry stays queued (the a11y gate is about rendered accessibility, not
+	// landing).
+	mustAPI(t, "POST", repoLane+"/merge-queue/enqueue",
+		fmt.Sprintf(`{"base":"main","number":%d}`, prNum), adminTok)
+	pollUntil(t, 30*time.Second, "the merge queue entry", func() bool {
+		return queueEntry(t, repoLane, adminTok, prNum) != nil
+	})
 	// A release names an existing tag, so tag main (not the feature branch).
 	g.run(work, "tag", "v1", "main")
 	g.run(work, "push", "origin", "refs/tags/v1")
@@ -439,6 +449,7 @@ func TestA11yRenderedPages(t *testing.T) {
 		{"repo code", "/" + owner + "/" + repo},
 		{"issue", fmt.Sprintf("/%s/%s/issues/%d", owner, repo, issueNum)},
 		{"pull request", fmt.Sprintf("/%s/%s/pull/%d", owner, repo, prNum)},
+		{"merge queue", "/" + owner + "/" + repo + "/queue"},
 		{"releases", "/" + owner + "/" + repo + "/releases"},
 		// Feature 20 (docs/features/20_search.md §7): the repository page and
 		// the owner surface, both with a query that matches the fixture README

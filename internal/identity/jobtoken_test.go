@@ -30,6 +30,9 @@ func TestJobTokenRoleResolution(t *testing.T) {
 		{"issues write is triage", job("acme/priv", map[string]string{"issues": "write", "contents": "read"}), "priv", RoleTriage},
 		{"issues read is read", job("acme/priv", map[string]string{"issues": "read"}), "priv", RoleRead},
 		{"id-token only is no role", job("acme/priv", map[string]string{"id-token": "write", "contents": "none"}), "priv", ""},
+		{"packages write is no repository role", job("acme/priv", map[string]string{"packages": "write", "contents": "none"}), "priv", ""},
+		{"checks write is no repository role", job("acme/priv", map[string]string{"checks": "write", "contents": "none"}), "priv", ""},
+		{"statuses read is no repository role", job("acme/priv", map[string]string{"statuses": "read", "contents": "none"}), "priv", ""},
 		{"another repo is no role", job("acme/priv", map[string]string{"contents": "write"}), "other", ""},
 	}
 	for _, tc := range cases {

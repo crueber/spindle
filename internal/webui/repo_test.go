@@ -463,7 +463,7 @@ func TestRepoTreeRootRendersListing(t *testing.T) {
 		t.Error("tree page lost the in-place scroll wrapper")
 	}
 	// Tab strip: Code..Settings in order, Code active at the root.
-	if got, want := strings.Join(tabIDs(t, body), ","), "code,commits,tags,packages,issues,pulls,threads,releases,insights,settings"; got != want {
+	if got, want := strings.Join(tabIDs(t, body), ","), "code,commits,tags,packages,issues,pulls,queue,threads,releases,insights,settings"; got != want {
 		t.Errorf("tabs = %s, want %s (Checks hidden: has_checks=false)", got, want)
 	}
 	if got := activeTabOf(t, body); got != "code" {
@@ -1187,8 +1187,8 @@ func TestRepoTabGating(t *testing.T) {
 	f.view.summary.Features = &feats
 	f.view.summary.Health = api.RepoHealthHealthy
 	body := f.mustGet("/demo/spindle", http.StatusOK)
-	if got := strings.Join(tabIDs(t, body), ","); got != "code,commits,tags,packages,pulls,threads,insights,settings" {
-		t.Errorf("tabs = %s, want code,commits,tags,packages,pulls,threads,insights,settings", got)
+	if got := strings.Join(tabIDs(t, body), ","); got != "code,commits,tags,packages,pulls,queue,threads,insights,settings" {
+		t.Errorf("tabs = %s, want code,commits,tags,packages,pulls,queue,threads,insights,settings", got)
 	}
 
 	// A feature-disabled section re-highlights onto Code (#522). The path is

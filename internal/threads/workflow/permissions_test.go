@@ -30,6 +30,16 @@ func TestPAR112PermissionScopeVocabulary(t *testing.T) {
 			want: map[string]string{"deployments": "write"},
 		},
 		{
+			name: "packages scope (registry job token)",
+			src:  "packages: write",
+			want: map[string]string{"packages": "write"},
+		},
+		{
+			name: "checks and statuses scopes (PAR-021)",
+			src:  "checks: write\nstatuses: read",
+			want: map[string]string{"checks": "write", "statuses": "read"},
+		},
+		{
 			name: "explicit none is a denial",
 			src:  "contents: none\nid-token: none",
 			want: map[string]string{"contents": "none", "id-token": "none"},
@@ -65,8 +75,6 @@ func TestPAR112PermissionScopeVocabulary(t *testing.T) {
 		src  string
 		want string
 	}{
-		{name: "packages has no job-token surface", src: "packages: write", want: `permissions.packages: scope "packages" is not implemented`},
-		{name: "checks has a dedicated token", src: "checks: write", want: `scope "checks" is not implemented`},
 		{name: "actions not a job capability", src: "actions: write", want: `scope "actions" is not implemented`},
 		{name: "unknown scope", src: "contnets: read", want: `unknown scope "contnets"`},
 		{name: "id-token read is invalid", src: "id-token: read", want: `level "read" is not valid for "id-token"`},
@@ -83,7 +91,7 @@ func TestPAR112PermissionScopeVocabulary(t *testing.T) {
 			if !strings.Contains(err.Error(), tc.want) {
 				t.Fatalf("error = %q, want it to contain %q", err, tc.want)
 			}
-			if !strings.Contains(err.Error(), "supported: contents, deployments, id-token, issues, pull-requests") &&
+			if !strings.Contains(err.Error(), "supported: checks, contents, deployments, id-token, issues, packages, pull-requests, statuses") &&
 				strings.Contains(tc.want, "not implemented") {
 				t.Fatalf("error does not name the supported matrix: %v", err)
 			}

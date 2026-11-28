@@ -1,0 +1,198 @@
+# Release the spindle CLI.
+#
+# Two ways in:
+#   * push a v* tag — the tag names the release;
+#   * dispatch with a `version` input — the workflow validates it and creates
+#     the tag at the dispatched commit when it does not exist yet.
+#
+# web/dist is built ONCE, handed to the four cross-builds as an artifact, and
+# go:embed'ed into each binary (web/embed.go). The release job then publishes
+# the archives plus SHA256SUMS through the repository API with the job token.
+#
+# Job images are the upstream stock images; nothing is installed with a package
+# manager. Go 1.27 is required by go.mod (the 1.25 stock label is too old), so
+# the build jobs name golang:1.27-bookworm explicitly.
+name: Release
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Release tag, vMAJOR.MINOR.PATCH (e.g. v1.4.0)"
+        required: true
+        type: string
+permissions:
+  contents: write
+jobs:
+  web:
+    name: web bundle
+    runs-on: node
+    steps:
+      - uses: actions/checkout
+      - name: enable pnpm
+        run: |
+          set -eu
+          corepack enable
+          corepack prepare pnpm@11.25.0 --activate
+          pnpm --version
+      - name: install
+        run: pnpm --dir web install --frozen-lockfile
+      - name: build
+        run: |
+          set -eu
+          pnpm --dir web run build
+          # The same two guards `make web` runs: no stale htmx SSE extension,
+          # and Tailwind actually scanned the templates.
+          test ! -e web/dist/htmx-ext-sse.js
+          grep -q 'max-w-6xl' web/dist/app.css
+          grep -q '\.flex{' web/dist/app.css
+      - uses: actions/upload-artifact
+        with:
+          name: web-dist
+          path: web/dist
+          if-no-files-found: error
+  build:
+    name: build ${{ matrix.goos }}/${{ matrix.goarch }}
+    needs: [web]
+    runs-on: linux
+    container: golang:1.27-bookworm
+    strategy:
+      fail-fast: false
+      matrix:
+        goos: [linux, darwin]
+        goarch: [amd64, arm64]
+    steps:
+      - uses: actions/checkout
+      - name: verify the toolchain image
+        run: |
+          set -eu
+          go version
+          make --version | head -1
+          for tool in tar gzip sha256sum git; do
+            command -v "$tool" >/dev/null || { echo "missing $tool" >&2; exit 1; }
+          done
+      - uses: actions/download-artifact
+        with:
+          name: web-dist
+          # Artifact paths are workspace-relative, so downloading to the
+          # workspace root restores web/dist exactly (path: web/dist would
+          # nest it as web/dist/web/dist). This is the spindle rule, not
+          # GitHub's least-common-ancestor stripping.
+      - name: resolve the version
+        run: |
+          set -eu
+          if [ "$GITHUB_EVENT_NAME" = "workflow_dispatch" ]; then
+            VERSION="${{ inputs.version }}"
+          else
+            VERSION="$GITHUB_REF_NAME"
+          fi
+          case "$VERSION" in
+            v[0-9]*.[0-9]*.[0-9]*) ;;
+            *) echo "not a vMAJOR.MINOR.PATCH tag: $VERSION" >&2; exit 1 ;;
+          esac
+          printf 'VERSION=%s\n' "$VERSION" >> "$GITHUB_ENV"
+      - name: build and package
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+          CGO_ENABLED: "0"
+        run: |
+          set -eu
+          # main.buildSHA is the documented build identity (-X main.buildSHA,
+          # Makefile LDFLAGS), so the released binary reports the tag.
+          go build -trimpath -buildvcs=false \
+            -ldflags "-s -w -X main.buildSHA=${VERSION}" \
+            -o dist/spindle ./cmd/spindle
+          name="spindle_${VERSION}_${GOOS}_${GOARCH}"
+          mkdir -p dist/stage
+          cp dist/spindle dist/stage/spindle
+          cp README.md LICENSE dist/stage/
+          tar --sort=name --mtime='@0' --owner=0 --group=0 --numeric-owner \
+            -czf "dist/${name}.tar.gz" -C dist/stage .
+          rm -rf dist/stage dist/spindle
+          ( cd dist && sha256sum "${name}.tar.gz" > "${name}.tar.gz.sha256" )
+      - uses: actions/upload-artifact
+        with:
+          name: spindle-${{ matrix.goos }}-${{ matrix.goarch }}
+          path: |
+            dist/*.tar.gz
+            dist/*.sha256
+          if-no-files-found: error
+  release:
+    name: publish release
+    needs: [build]
+    runs-on: linux
+    container: golang:1.27-bookworm
+    steps:
+      - uses: actions/checkout
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+      - uses: actions/download-artifact
+        with:
+          pattern: spindle-*
+          merge-multiple: true
+          # Workspace-relative manifest paths: downloading to the workspace
+          # root restores dist/, not dist/dist/.
+      - name: checksums
+        run: |
+          set -eu
+          cd dist
+          sha256sum ./*.tar.gz > SHA256SUMS
+          cat SHA256SUMS
+      - name: resolve the version
+        run: |
+          set -eu
+          if [ "$GITHUB_EVENT_NAME" = "workflow_dispatch" ]; then
+            VERSION="${{ inputs.version }}"
+          else
+            VERSION="$GITHUB_REF_NAME"
+          fi
+          case "$VERSION" in
+            v[0-9]*.[0-9]*.[0-9]*) ;;
+            *) echo "not a vMAJOR.MINOR.PATCH tag: $VERSION" >&2; exit 1 ;;
+          esac
+          printf 'VERSION=%s\n' "$VERSION" >> "$GITHUB_ENV"
+      - name: ensure the tag exists (dispatch only)
+        run: |
+          set -eu
+          if git rev-parse -q --verify "refs/tags/$VERSION" >/dev/null; then
+            echo "tag $VERSION already exists; its release is updated in place"
+            exit 0
+          fi
+          git config user.name "spindle release"
+          git config user.email "release@spindle.invalid"
+          git tag -a "$VERSION" -m "release $VERSION"
+          # The checkout's credential helper is in-memory (never .git/config);
+          # a contents: write job may push, and this push starts no run.
+          git -c credential.helper='!f() { echo username=ci; echo password=$SPINDLE_JOB_TOKEN; }; f' \
+            push origin "refs/tags/$VERSION"
+      - name: publish the release and assets
+        run: |
+          set -eu
+          # The release endpoints are repository-scoped: /{owner}/{repo}/api/
+          # (GITHUB_API_URL is the instance lane, /api/v1, and does not carry
+          # repo releases). PUT is an upsert, so a rerun updates the release
+          # instead of failing.
+          api="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/api"
+          auth="Authorization: Bearer $SPINDLE_JOB_TOKEN"
+          printf '{\n  "name": "spindle %s",\n  "body": "Cross-built spindle CLI for %s from %s.\\n\\nEvery archive is reproducible; SHA256SUMS carries the digests.",\n  "draft": false,\n  "prerelease": false\n}\n' \
+            "$VERSION" "$VERSION" "$GITHUB_SHA" > release.json
+          curl -fsS -X PUT "$api/releases/$VERSION" \
+            -H "$auth" -H 'Content-Type: application/json' \
+            --data-binary @release.json
+          echo
+          for f in dist/*.tar.gz dist/SHA256SUMS; do
+            name=$(basename "$f")
+            sha=$(sha256sum "$f" | cut -d' ' -f1)
+            # Idempotent: drop a same-named asset from an earlier attempt
+            # first (404 is the normal first-run answer).
+            curl -sS -o /dev/null -X DELETE "$api/releases/$VERSION/assets/$name" -H "$auth" || true
+            curl -fsS -X POST "$api/releases/$VERSION/assets/$name" \
+              -H "$auth" \
+              -H "X-Walgit-Asset-Sha256: $sha" \
+              -H 'Content-Type: application/octet-stream' \
+              --data-binary @"$f"
+            echo
+          done

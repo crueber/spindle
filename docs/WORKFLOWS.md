@@ -108,7 +108,7 @@ metadata and matrix axes. A file with an unknown key runs nothing and is reporte
 | `env` | map[string]string | empty | variables merged **under** job/step `env`; scalars are coerced to text (`COUNT: 3` → `"3"`), a nested value is a parse error |
 | `defaults` | `{run: {shell, working-directory}}` | none | the shell and working directory every `run` step inherits; a job's block overrides it per key and a step's own key still wins (§5.2) |
 | `concurrency` | string or `{group, cancel-in-progress}` (`cancel-in-progress` may be one `${{ … }}` expression, PAR-151) | none | one running and one pending run per group per repository (§5.4) |
-| `permissions` | mapping, or `read-all` / `write-all` | instance `threads.default_permissions` (`read`) | the job token's authority: `contents`, `issues`, `pull-requests`, `deployments`, `id-token`; any other scope is a parse error (§7.2) |
+| `permissions` | mapping, or `read-all` / `write-all` | instance `threads.default_permissions` (`read`) | the job token's authority: `contents`, `issues`, `pull-requests`, `deployments`, `packages`, `checks`, `statuses`, `id-token`; any other scope is a parse error (§7.2) |
 | `enable-openid-connect` | bool | false | Forgejo's spelling for the OIDC grant; the same grant as `permissions: id-token: write` (§7.2) |
 | `jobs` | map[string]job | **required** | at least one job |
 
@@ -601,8 +601,8 @@ jobs:
   `merge_group.head_ref`/`head_sha`/`base_ref`/`base_sha` plus `number` (the pull request). `types`
   accepts `checks_requested` (the only activity the queue emits); a malformed or ordinary ref
   creates nothing. The run's mirrored checks land on the queue head, which is what the required-checks
-  merge gate reads — the **queue itself** (batching entries, creating these refs, landing the merge)
-  is a separate product surface; this trigger is the contract it hands off to. A job-token push
+  merge gate reads — the **queue itself** is [`docs/features/22_merge_queue.md`](features/22_merge_queue.md)
+  (per-base order, the temporary ref's lifecycle, landing through the one merge task). A job-token push
   starts nothing here either.
 - **Named refusals**: `status`, `check_suite`, `registry_package`, `gollum`,
   `page_build`, `branch_protection_rule`, `public`, `discussion`, `discussion_comment` and
@@ -1881,21 +1881,26 @@ Every step receives `$SPINDLE_JOB_TOKEN`, scoped to one attempt of one job in on
 | `issues` | `read` / `write` / `none` | read issues; `write` = triage (label, assign, close others' issues, manage labels/milestones) |
 | `pull-requests` (`pull_requests` accepted) | `read` / `write` / `none` | read PRs; `write` = write role (open/update PRs, create releases) |
 | `deployments` | `read` / `write` / `none` | read deployment records; `write` also creates deployments and statuses for this repository (PAR-133) |
+| `packages` | `read` / `write` / `none` | pull images from this repository's OCI registry; `write` also pushes (the job token is exchanged at `/v2/token` for a repository-scoped registry token) |
+| `checks` | `read` / `write` / `none` | read check runs for this repository; `write` also creates/updates them (external CI reporting, PAR-021) |
+| `statuses` | `read` / `write` / `none` | the legacy GitHub name for the same status/check-run surface as `checks` |
 | `id-token` | `write` / `none` | exchange for an OIDC ID token (trusted runs only; §7.2a) |
-| `read-all` / `write-all` | shorthand | baseline for the three repo scopes only — **never** `id-token` |
+| `read-all` / `write-all` | shorthand | baseline for the three repo scopes only — **never** `id-token`, `deployments`, `packages`, `checks` or `statuses` (name those explicitly) |
 
-Anything else — `actions`, `attestations`, `checks`, `discussions`, `metadata`, `models`, `packages`,
-`pages`, `repository-projects`, `security-events`, `statuses`, `wiki`, or a typo — is refused at
-parse time with the supported set named. A job token never becomes a user, has
+Anything else — `actions`, `attestations`, `discussions`, `metadata`, `models`, `pages`,
+`repository-projects`, `security-events`, `wiki`, or a typo — is refused at parse time with the
+supported set named. A job token never becomes a user, has
 no session, and its implied repository role never reaches admin, so it cannot mint another
 credential; a write to any other repository is a `403`.
 
 Within the repository the scopes imply an ordered role (read → triage → write): a `contents: write`
 token also has triage actions, a `pull-requests: write` token does not reach releases (those need
-`contents: write`), the commit-status API always refuses a job token (`checks`/`statuses` are refused
-scopes, so a job cannot forge a required check), the registry push gate ignores the job identity
-(`packages` is refused), and the Threads operator surface (dispatch, cancel/rerun, approvals,
-environments/secrets) never accepts a job token.
+`contents: write`), and the Threads operator surface (dispatch, cancel/rerun, approvals,
+environments/secrets) never accepts a job token. Two capabilities are gated by their own scope, not by
+the repository role: a check run needs `checks: write` (or `statuses: write`) and an image push needs
+`packages: write`, each only in the job's own repository — `contents: write` alone grants neither. A
+`packages` job token is exchanged at `/v2/token` for a short-lived registry token and is never itself
+accepted as a registry bearer credential.
 
 > Divergence recorded: spindle lets any reader comment on an issue, so a `contents: read` job token
 > can post a comment. Triage/write actions still require their scope.
@@ -2328,6 +2333,236 @@ jobs:
 
 A tag pushed by a job token inside that job starts no workflow run (the `GITHUB_TOKEN` rule, §3.1),
 so publish the assets from the same job or dispatch a second workflow.
+
+### 9.5a Release a CLI from your own workflow (spindle's own release)
+
+spindle builds its own release from [`.spindle/workflows/release.yml`](../.spindle/workflows/release.yml).
+It is the worked example of the three pieces a real cross-platform release needs: a **web bundle
+built once**, a **matrix of cross-builds fed by an artifact**, and a **release published through the
+repository API with the job token**. A `v*` tag push and a `workflow_dispatch` with a validated
+`version` input are the same release.
+
+The block below is the committed file with its explanatory comments elided. Both are kept valid:
+`spindle threads validate .spindle/workflows/release.yml` checks the file, and
+`TestWorkflowsGuideExamplesParse` parses every fenced block in this guide.
+
+```yaml
+name: Release
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Release tag, vMAJOR.MINOR.PATCH (e.g. v1.4.0)"
+        required: true
+        type: string
+permissions:
+  contents: write
+jobs:
+  web:
+    name: web bundle
+    runs-on: node
+    steps:
+      - uses: actions/checkout
+      - name: enable pnpm
+        run: |
+          set -eu
+          corepack enable
+          corepack prepare pnpm@11.25.0 --activate
+          pnpm --version
+      - name: install
+        run: pnpm --dir web install --frozen-lockfile
+      - name: build
+        run: |
+          set -eu
+          pnpm --dir web run build
+          test ! -e web/dist/htmx-ext-sse.js
+          grep -q 'max-w-6xl' web/dist/app.css
+          grep -q '\.flex{' web/dist/app.css
+      - uses: actions/upload-artifact
+        with:
+          name: web-dist
+          path: web/dist
+          if-no-files-found: error
+  build:
+    name: build ${{ matrix.goos }}/${{ matrix.goarch }}
+    needs: [web]
+    runs-on: linux
+    container: golang:1.27-bookworm
+    strategy:
+      fail-fast: false
+      matrix:
+        goos: [linux, darwin]
+        goarch: [amd64, arm64]
+    steps:
+      - uses: actions/checkout
+      - name: verify the toolchain image
+        run: |
+          set -eu
+          go version
+          make --version | head -1
+          for tool in tar gzip sha256sum git; do
+            command -v "$tool" >/dev/null || { echo "missing $tool" >&2; exit 1; }
+          done
+      - uses: actions/download-artifact
+        with:
+          name: web-dist
+      - name: resolve the version
+        run: |
+          set -eu
+          if [ "$GITHUB_EVENT_NAME" = "workflow_dispatch" ]; then
+            VERSION="${{ inputs.version }}"
+          else
+            VERSION="$GITHUB_REF_NAME"
+          fi
+          case "$VERSION" in
+            v[0-9]*.[0-9]*.[0-9]*) ;;
+            *) echo "not a vMAJOR.MINOR.PATCH tag: $VERSION" >&2; exit 1 ;;
+          esac
+          printf 'VERSION=%s\n' "$VERSION" >> "$GITHUB_ENV"
+      - name: build and package
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+          CGO_ENABLED: "0"
+        run: |
+          set -eu
+          go build -trimpath -buildvcs=false \
+            -ldflags "-s -w -X main.buildSHA=${VERSION}" \
+            -o dist/spindle ./cmd/spindle
+          name="spindle_${VERSION}_${GOOS}_${GOARCH}"
+          mkdir -p dist/stage
+          cp dist/spindle dist/stage/spindle
+          cp README.md LICENSE dist/stage/
+          tar --sort=name --mtime='@0' --owner=0 --group=0 --numeric-owner \
+            -czf "dist/${name}.tar.gz" -C dist/stage .
+          rm -rf dist/stage dist/spindle
+          ( cd dist && sha256sum "${name}.tar.gz" > "${name}.tar.gz.sha256" )
+      - uses: actions/upload-artifact
+        with:
+          name: spindle-${{ matrix.goos }}-${{ matrix.goarch }}
+          path: |
+            dist/*.tar.gz
+            dist/*.sha256
+          if-no-files-found: error
+  release:
+    name: publish release
+    needs: [build]
+    runs-on: linux
+    container: golang:1.27-bookworm
+    steps:
+      - uses: actions/checkout
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+      - uses: actions/download-artifact
+        with:
+          pattern: spindle-*
+          merge-multiple: true
+      - name: checksums
+        run: |
+          set -eu
+          cd dist
+          sha256sum ./*.tar.gz > SHA256SUMS
+          cat SHA256SUMS
+      - name: resolve the version
+        run: |
+          set -eu
+          if [ "$GITHUB_EVENT_NAME" = "workflow_dispatch" ]; then
+            VERSION="${{ inputs.version }}"
+          else
+            VERSION="$GITHUB_REF_NAME"
+          fi
+          case "$VERSION" in
+            v[0-9]*.[0-9]*.[0-9]*) ;;
+            *) echo "not a vMAJOR.MINOR.PATCH tag: $VERSION" >&2; exit 1 ;;
+          esac
+          printf 'VERSION=%s\n' "$VERSION" >> "$GITHUB_ENV"
+      - name: ensure the tag exists (dispatch only)
+        run: |
+          set -eu
+          if git rev-parse -q --verify "refs/tags/$VERSION" >/dev/null; then
+            echo "tag $VERSION already exists; its release is updated in place"
+            exit 0
+          fi
+          git config user.name "spindle release"
+          git config user.email "release@spindle.invalid"
+          git tag -a "$VERSION" -m "release $VERSION"
+          git -c credential.helper='!f() { echo username=ci; echo password=$SPINDLE_JOB_TOKEN; }; f' \
+            push origin "refs/tags/$VERSION"
+      - name: publish the release and assets
+        run: |
+          set -eu
+          api="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/api"
+          auth="Authorization: Bearer $SPINDLE_JOB_TOKEN"
+          printf '{\n  "name": "spindle %s",\n  "body": "Cross-built spindle CLI for %s from %s.\\n\\nEvery archive is reproducible; SHA256SUMS carries the digests.",\n  "draft": false,\n  "prerelease": false\n}\n' \
+            "$VERSION" "$VERSION" "$GITHUB_SHA" > release.json
+          curl -fsS -X PUT "$api/releases/$VERSION" \
+            -H "$auth" -H 'Content-Type: application/json' \
+            --data-binary @release.json
+          echo
+          for f in dist/*.tar.gz dist/SHA256SUMS; do
+            name=$(basename "$f")
+            sha=$(sha256sum "$f" | cut -d' ' -f1)
+            curl -sS -o /dev/null -X DELETE "$api/releases/$VERSION/assets/$name" -H "$auth" || true
+            curl -fsS -X POST "$api/releases/$VERSION/assets/$name" \
+              -H "$auth" \
+              -H "X-Walgit-Asset-Sha256: $sha" \
+              -H 'Content-Type: application/octet-stream' \
+              --data-binary @"$f"
+            echo
+          done
+```
+
+**The artifact handoff is the point of the split.** `web/dist` is embedded into the binary by
+`web/embed.go` (`//go:embed all:dist`), so every matrix cell needs the same built bundle. Building it
+four times would be four chances to drift; the `web` job uploads it once as `web-dist`, and each
+`build` cell downloads that named artifact into the **workspace root**, which restores `web/dist`
+exactly. Artifact manifest paths are workspace-relative in spindle (`actions/upload-artifact` keeps
+`web/dist/app.css`; a download extracts under `path`, default the workspace) — so `path: web/dist`
+would nest the tree as `web/dist/web/dist`, and the download in this recipe deliberately names no
+`path`. Each cell then uploads a uniquely-named artifact (`spindle-<goos>-<goarch>`), because an
+artifact name is unique per run — two matrix cells writing `dist` under one name fail the second
+upload. The release job downloads `pattern: spindle-*` with `merge-multiple: true` into the
+workspace, which flattens the four cells into one `dist/`.
+`if-no-files-found: error` on both uploads is deliberate: a green run that shipped an empty archive
+is worse than a red one.
+
+**Version stamping uses the documented identity.** spindle's build identity is `main.buildSHA`
+(the `Makefile` passes `-X main.buildSHA=$(SHA)`), so the release stamps the tag there; the binary's
+`spindle version` then reports `v1.4.0`. Use `-buildvcs=false` for release builds: a VCS-stamped
+binary changes with the checkout's `.git` state, and the tar archive should be reproducible
+(`--sort=name --mtime=@0 --owner=0 --group=0 --numeric-owner`).
+
+**Publishing is the repository API, with the job token.** The release endpoints are
+repository-scoped: `PUT $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/api/releases/{tag}` creates the
+release or updates it in place (an upsert — no `POST`, no "already exists" failure), and
+`POST …/releases/{tag}/assets/{name}` uploads one asset. The latter **requires**
+`X-Walgit-Asset-Sha256` (the server verifies the stream against it) plus a `Content-Length`, which
+`curl --data-binary @file` supplies. `$GITHUB_API_URL` is the *instance* lane (`/api/v1`), which
+does not carry repository releases — the repo lane is `/owner/repo/api/…`, the same shape as the
+issue-comment recipe in §7.2. The job token works under both spellings, `$SPINDLE_JOB_TOKEN` and
+`$GITHUB_TOKEN`; `permissions: contents: write` is what lets it create a release (a
+`pull-requests: write` token does not, §7.2).
+
+The release job is idempotent by construction: `PUT` updates the release, and each asset is deleted
+first (a 404 on the first run is ignored) and then re-uploaded, so a rerun after a failed matrix
+cell converges on the same asset set. The one-release-per-tag rule still holds: a tag names one
+release, and dispatching an existing version updates it rather than creating a second one.
+
+**The dispatch path creates its own tag.** A published release must point at a real tag, so a
+dispatch run checks `refs/tags/$VERSION` and, when it is absent, tags the dispatched commit and
+pushes it. The checkout's credential helper is the in-memory one (never `.git/config`), and a tag
+pushed with the job token **starts no workflow run** (§3.1), so the dispatch cannot loop. A tag
+protected by a push rule refuses the push by name; create that tag by hand and dispatch again.
+
+**Images.** The jobs use upstream stock images only: `runs-on: node` resolves to the pinned
+`node:22-bookworm`, and the build/release jobs name `golang:1.27-bookworm` explicitly. The Go image
+must match `go.mod` (`go 1.27.0`); the catalogue's `go` label pins `golang:1.25-bookworm`, which
+cannot compile this repository, so the newer stock image is named directly. No job installs a
+package: `make`, `tar`, `sha256sum`, `curl` and `gzip` are already in the golang image (the `build`
+job checks them), and pnpm comes from the image's corepack.
 
 ### 9.6 Scheduled maintenance
 
@@ -3132,9 +3367,10 @@ If you come from a hosted CI system, these are the surprises, in the order they 
 10. **Fork PRs are read-only by policy.** No secrets, the base branch's workflow file, and possibly
     an approval gate — the file cannot opt out. The token is `contents: read` unless the repository
     enabled `send_write_tokens` (maintain+, audited); `id-token` is never granted to a fork.
-11. **`permissions` is a closed vocabulary.** `contents`, `issues`, `pull-requests`, `deployments`
-    and `id-token` are the only scopes, and each drives a real capability (the job token is also a
-    scoped API credential); any other scope is a named parse error, never accepted-and-inert.
+11. **`permissions` is a closed vocabulary.** `contents`, `issues`, `pull-requests`, `deployments`,
+    `packages`, `checks`, `statuses` and `id-token` are the only scopes, and each drives a real
+    capability (the job token is also a scoped API credential); any other scope is a named parse
+    error, never accepted-and-inert.
     No `permissions:` means `contents: read` (Forgejo's implicit write is a recorded divergence).
 12. **Everything is in the bucket.** There is no queue server and no local state; a restart
     loses warmth, not runs.

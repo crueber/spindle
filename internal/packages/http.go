@@ -201,6 +201,13 @@ func (h *Handler) authorize(w http.ResponseWriter, r *http.Request, owner, repo,
 		writeOCI(w, http.StatusUnauthorized, errUnauthorized())
 		return auth.Principal{}, false
 	}
+	if p.JobRepo != "" {
+		// The job token is exchanged at /v2/token for a repository-scoped
+		// registry token; it is never itself a registry bearer credential.
+		// Refusing here closes the "contents: write implies a push" leak.
+		writeOCI(w, http.StatusForbidden, errDenied("a job token must be exchanged at /v2/token for a registry token"))
+		return auth.Principal{}, false
+	}
 	if err := validateRepo(owner, repo); err != nil {
 		writeOCI(w, err.Status, err)
 		return auth.Principal{}, false
@@ -219,10 +226,19 @@ func (h *Handler) authorize(w http.ResponseWriter, r *http.Request, owner, repo,
 		writeOCI(w, http.StatusNotFound, errNameUnknown(owner+"/"+repo))
 		return auth.Principal{}, false
 	}
-	if claims != nil && !claims.scopeGrants(owner+"/"+repo, action) {
-		// A short-lived token can never exceed its granted scopes.
-		writeOCI(w, http.StatusForbidden, errDenied("token scope does not grant "+action))
-		return auth.Principal{}, false
+	if claims != nil {
+		if !claims.scopeGrants(owner+"/"+repo, action) {
+			// A short-lived token can never exceed its granted scopes.
+			writeOCI(w, http.StatusForbidden, errDenied("token scope does not grant "+action))
+			return auth.Principal{}, false
+		}
+		if claims.JobRepo != "" {
+			// A job-minted token carries the job's narrowed grant itself
+			// (repository-scoped, pull/push per `packages`); the ci:<runner>
+			// principal owns no repository role, so the claims are the
+			// authority. Cross-repo was refused at mint time.
+			return p, true
+		}
 	}
 	var oerr *Error
 	if action == "push" {
@@ -283,6 +299,10 @@ func (h *Handler) token(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	requested := r.URL.Query()["scope"]
+	if p.JobRepo != "" {
+		h.jobToken(w, r, p, requested)
+		return
+	}
 	granted := make([]scope, 0, len(requested))
 	grantedOut := make([]string, 0, len(requested))
 	deniedAuth := false
@@ -317,6 +337,78 @@ func (h *Handler) token(w http.ResponseWriter, r *http.Request) {
 		writeOCI(w, http.StatusUnauthorized, errUnauthorized())
 		return
 	}
+	h.writeToken(w, p, granted, grantedOut)
+}
+
+// jobPackagesLevel returns the job token's packages level (none|read|write)
+// from the effective permission map resolved at the credential boundary.
+func jobPackagesLevel(p auth.Principal) string {
+	switch strings.ToLower(strings.TrimSpace(p.JobPerms["packages"])) {
+	case "write":
+		return "write"
+	case "read":
+		return "read"
+	}
+	return ""
+}
+
+// jobToken mints a registry token from a Threads job token. This is the ONLY
+// way a job reaches the registry: the minted token is short-lived (the
+// registry's normal TTL) and its scopes are capped at the job's own
+// repository — `packages: read` grants pull, `packages: write` grants
+// pull+push. A request for another repository or for a level the job does not
+// hold is a real 403, and a job token is never itself accepted on /v2 routes.
+func (h *Handler) jobToken(w http.ResponseWriter, r *http.Request, p auth.Principal, requested []string) {
+	level := jobPackagesLevel(p)
+	granted := make([]scope, 0, len(requested))
+	grantedOut := make([]string, 0, len(requested))
+	for _, raw := range requested {
+		sc, ok := parseScope(raw)
+		if !ok {
+			continue
+		}
+		if !strings.EqualFold(sc.Name, p.JobRepo) {
+			writeOCI(w, http.StatusForbidden, errDenied("the job token is scoped to "+p.JobRepo))
+			return
+		}
+		out := scope{Kind: "repository", Name: p.JobRepo, acted: map[string]bool{}}
+		if sc.acted["pull"] && (level == "read" || level == "write") {
+			out.acted["pull"] = true
+		}
+		if sc.acted["push"] {
+			if level != "write" {
+				writeOCI(w, http.StatusForbidden, errDenied("the job token lacks packages: write"))
+				return
+			}
+			out.acted["push"] = true
+			out.acted["pull"] = true // push implies pull in the Docker model
+		}
+		if len(out.acted) == 0 {
+			writeOCI(w, http.StatusForbidden, errDenied("the job token lacks packages: "+firstAction(sc)))
+			return
+		}
+		granted = append(granted, out)
+		grantedOut = append(grantedOut, out.String())
+	}
+	if len(granted) == 0 {
+		writeOCI(w, http.StatusForbidden, errDenied("the job token must request a repository scope"))
+		return
+	}
+	h.Svc.logf("packages: job token exchanged for a registry token repo=%s scopes=%v", p.JobRepo, grantedOut)
+	h.writeToken(w, p, granted, grantedOut)
+}
+
+// firstAction names the action a denied scope asked for (error text only).
+func firstAction(sc scope) string {
+	if sc.acted["push"] {
+		return "write"
+	}
+	return "read"
+}
+
+// writeToken renders the Docker token response for an already-granted scope
+// set (shared by the ordinary and the job-token exchange paths).
+func (h *Handler) writeToken(w http.ResponseWriter, p auth.Principal, granted []scope, grantedOut []string) {
 	tok, exp := h.Svc.MintToken(p, grantedOut)
 	access := make([]map[string]any, 0, len(granted))
 	for _, sc := range granted {

@@ -1,0 +1,32 @@
+{{define "collab_queue_panel"}}
+{{with .}}
+<h2 class="card-header">Merge queue</h2>
+{{if .Paused}}<p class="warn-line" role="status">The queue for <span class="mono">{{.Base}}</span> is paused.</p>{{end}}
+{{if .Entry}}
+  <p class="flex flex-wrap items-center gap-2">{{template "collab_state_chip" .Chip}}</p>
+  <p class="muted mt-1 text-xs">base <span class="mono">{{.Base}}</span>{{with .Entry.MergeSHA}} · checked merge commit <span class="mono">{{shortsha .}}</span>{{end}}</p>
+  {{if .Reason}}<p class="warn-line" role="status">{{.Reason}}</p>{{end}}
+  {{if .CanDequeue}}
+  <form class="mt-2" method="post" action="{{.DequeueAction}}">
+    <input type="hidden" name="base" value="{{.Base}}">
+    <button type="submit" class="btn whitespace-nowrap px-2 py-1 text-xs">remove from queue</button>
+  </form>
+  {{end}}
+  {{if .CanEnqueue}}
+  <form class="mt-2" method="post" action="{{.EnqueueAction}}">
+    <input type="hidden" name="base" value="{{.Base}}">
+    <button type="submit" class="btn whitespace-nowrap px-2 py-1 text-xs">add to merge queue</button>
+  </form>
+  {{end}}
+{{else}}
+  <p class="muted text-sm">This pull request is not in the merge queue.</p>
+  {{if .CanEnqueue}}
+  <form class="mt-2" method="post" action="{{.EnqueueAction}}">
+    <input type="hidden" name="base" value="{{.Base}}">
+    <button type="submit" class="btn px-2 py-1">add to merge queue</button>
+  </form>
+  {{end}}
+{{end}}
+<p class="mt-2"><a class="link text-xs" href="{{.Href}}">open the queue for {{.Base}}</a></p>
+{{end}}
+{{end}}

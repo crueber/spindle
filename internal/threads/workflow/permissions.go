@@ -19,6 +19,10 @@ import (
 //	contents       read|write   git read/push of the run's repository
 //	issues         read|write   the repository's issue surface (write = triage)
 //	pull-requests  read|write   the pull-request surface (write = write role)
+//	deployments    read|write   the deployment API (PAR-133)
+//	packages       read|write   the OCI registry of the run's repository
+//	checks         read|write   the check-run/status surface (PAR-021)
+//	statuses       read|write   the same status surface (the legacy GitHub name)
 //	id-token       write|none   exchange for a short-lived OIDC ID token
 //
 // `none` is accepted for every scope (an explicit denial is never an error).
@@ -34,6 +38,19 @@ const (
 	// deployment and its statuses for the run's repository; `read` lists them.
 	// It never grants the Threads operator surface (dispatch/cancel/approve).
 	ScopeDeployments = "deployments"
+	// ScopePackages is the OCI registry of the run's repository: `read` pulls
+	// images, `write` also pushes them. The job token is exchanged at
+	// /v2/token for a repository-scoped registry token (never cross-repo,
+	// never admin).
+	ScopePackages = "packages"
+	// ScopeChecks is the check-run/status surface (PAR-021): `write` creates
+	// and updates check runs for the run's repository, `read` reads them.
+	ScopeChecks = "checks"
+	// ScopeStatuses is GitHub's legacy commit-status scope. This server has
+	// one status/check-run surface, so it grants the same read/write
+	// capability as ScopeChecks; the name is accepted because ordinary CI
+	// files still declare it.
+	ScopeStatuses = "statuses"
 	// KeyAll is the shorthand baseline key produced by `read-all`/`write-all`.
 	KeyAll = "all"
 )
@@ -51,6 +68,9 @@ var permissionScopes = map[string]permissionScope{
 	ScopeIssues:      {levels: []string{"read", "write"}, surface: "the repository's issue surface (write = triage)"},
 	ScopePullRequest: {levels: []string{"read", "write"}, surface: "the pull-request surface (write = write role)"},
 	ScopeDeployments: {levels: []string{"read", "write"}, surface: "the deployment API (write = create deployments and statuses)"},
+	ScopePackages:    {levels: []string{"read", "write"}, surface: "the OCI registry of the run's repository (write = push images)"},
+	ScopeChecks:      {levels: []string{"read", "write"}, surface: "the check-run/status surface (write = report check runs)"},
+	ScopeStatuses:    {levels: []string{"read", "write"}, surface: "the check-run/status surface (write = report statuses)"},
 	ScopeIDToken:     {levels: []string{"write"}, surface: "OIDC ID-token exchange (trusted runs only)"},
 }
 
@@ -64,16 +84,13 @@ var permissionAliases = map[string]string{
 // no enforced surface for. They are refused by name with the reason, so the
 // failure mode is an error that says what is missing — never a silent no-op.
 var refusedScopes = map[string]string{
-	"actions":             "the run cancel/rerun API is not a job-token capability",
+	"actions":             "the Threads operator surface (dispatch/cancel/rerun/approve) is never a job-token capability",
 	"attestations":        "artifact attestations are a non-goal (D-15)",
-	"checks":              "the check-run API accepts a dedicated CI token, not the job token",
 	"discussions":         "there is no discussion surface",
 	"models":              "there is no model-registry surface",
-	"packages":            "the OCI registry authenticates a registry token, not the job token",
 	"pages":               "there is no Pages deployment surface",
 	"repository-projects": "there is no project-board surface",
 	"security-events":     "there is no code-scanning ingestion surface",
-	"statuses":            "commit statuses are reported by the dedicated CI token",
 	"wiki":                "there is no wiki surface",
 	"metadata":            "metadata is always readable and cannot be requested",
 }

@@ -24,6 +24,17 @@ type MergeInput struct {
 	CommitTitle   string
 	CommitMessage string
 	DeleteHead    bool
+
+	// ExpectedBaseSHA / ExpectedHeadSHA / QueueHeadSHA are the merge queue's
+	// internal preconditions (the Merge queue card). HTTP callers never set
+	// them: the queue prepared a merge commit from exactly these parents and
+	// checked that commit, so a moved parent must refuse the landing rather
+	// than merge a tree the run never saw. QueueHeadSHA is the checked merge
+	// commit; the required-checks gate is evaluated on it (it is the same
+	// base+head pair, so the gate is the protection, not a bypass).
+	ExpectedBaseSHA string
+	ExpectedHeadSHA string
+	QueueHeadSHA    string
 }
 
 // StartMerge starts (or joins) the pull-merge task (§5: narrated, P7 unique
@@ -154,6 +165,16 @@ func (s *Service) runMerge(ctx context.Context, owner, repo string, num int, act
 	if err != nil {
 		return nil, fmt.Errorf("%w: unknown head revision %q", ErrUnprocessable, pr.Head.Ref)
 	}
+	// Merge-queue preconditions (the queue prepared and checked exactly this
+	// base/head pair): a parent that moved makes the landing an untested
+	// merge, so it refuses instead of landing. HTTP merges leave these
+	// fields empty and are unaffected.
+	if in.ExpectedBaseSHA != "" && baseLive != in.ExpectedBaseSHA {
+		return nil, fmt.Errorf("%w: base moved from %s to %s while queued; the queue entry must be re-prepared", ErrConflict, shortSHA(in.ExpectedBaseSHA), shortSHA(baseLive))
+	}
+	if in.ExpectedHeadSHA != "" && headLive != in.ExpectedHeadSHA {
+		return nil, fmt.Errorf("%w: head moved from %s to %s while queued; the queue entry must be re-prepared", ErrConflict, shortSHA(in.ExpectedHeadSHA), shortSHA(headLive))
+	}
 	// Fork→base object bridge (issue #456): the trial merge, commit-tree,
 	// replay, and the merge-object pack all run in baseDir, so fork-unique
 	// head objects are fetched from the fork serving copy first (local
@@ -232,11 +253,20 @@ func (s *Service) runMerge(ctx context.Context, owner, repo string, num int, act
 	// view — it never trusts a cache). A failed gate narrates the
 	// shortfall (law 7) and the merge ref is not published. Nil Checks
 	// fails closed only when a rule actually carries the gate.
-	if gerr := s.checkRequiredChecksGate(ctx, owner, repo, headLive, pr.Base.Ref, who); gerr != nil {
+	//
+	// A merge-queue landing gates on the QUEUE head sha instead: that is the
+	// merge commit the merge_group run mirrored its checks onto, and the
+	// prepared entry pinned both parents above, so it is the same tree the
+	// merge task is about to commit. Protection is enforced, not bypassed.
+	gateSHA := headLive
+	if in.QueueHeadSHA != "" {
+		gateSHA = strings.ToLower(in.QueueHeadSHA)
+	}
+	if gerr := s.checkRequiredChecksGate(ctx, owner, repo, gateSHA, pr.Base.Ref, who); gerr != nil {
 		rec.notice("required-checks gate: %s", gerr.Error())
 		return nil, fmt.Errorf("%w: %v", ErrConflict, gerr)
 	}
-	rec.notice("required-checks gate: satisfied")
+	rec.notice("required-checks gate: satisfied for %s", shortSHA(gateSHA))
 	// Required-reviews gate (04 §6 merge-time half): the review-provided
 	// gate function with the LIVE head sha (it re-derives by event scan —
 	// it never trusts review_summary). A failed gate narrates the

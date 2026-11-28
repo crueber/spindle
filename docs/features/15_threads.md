@@ -499,6 +499,12 @@ The parser validates cron; the **maintainer evaluates it**. Both halves are new:
   not a member, `receive-pack` is allowed only with the push scope and only to that repository, and
   the push policy still applies on top (a protected ref refuses it exactly like any other non-owner —
   a job token is never the triggering user). No other repository, no settings API, no admin.
+- **Platform scopes beyond git (2026-11-28).** The same effective map gates `packages` (the job token
+  is exchanged at `/v2/token` for a short-lived, repository-scoped registry token: `read` ⇒ pull,
+  `write` ⇒ pull+push) and `checks`/`statuses` (the check-run/status surface of its own repository,
+  `read`/`write`). Each is checked from `JobPerms` at the credential boundary, never from a repository
+  role, and a job token cannot mint another credential. The closed vocabulary and the refused names
+  are in docs/threads.md §5.3.1.
 - **Revoked at completion.** The resolver re-reads the job record (one exact-key GET, only for a job
   token) and rejects a token whose job is terminal or whose attempt was superseded — the same
   identity authority every protocol write uses; an expired token is rejected before any store read.

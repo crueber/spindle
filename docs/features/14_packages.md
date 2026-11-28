@@ -106,6 +106,19 @@ random key is generated, so a restart invalidates outstanding registry tokens (D
 every operation — the practical effect is a re-login, never a broken push). Removing a principal's
 access takes effect within the 5-minute token TTL, never instantly (§9).
 
+**Threads job tokens (`permissions: packages`, PAR-112).** A job's `wjt_` token is accepted at
+`/v2/token` (as the Basic password, the Docker login shape) and is **exchanged** there for a normal
+5-minute registry token whose scopes are capped at the job's own repository: `packages: read` grants
+`pull`, `packages: write` grants `pull,push`, and a request for any other repository or for a level
+the job does not declare is a real `403`. The minted token carries `job_repo` in its payload so the
+registry authorizes from the embedded grant rather than resolving a repository role for the
+`ci:<runner>` principal (which owns none by design); it cannot mint another token. The job token is
+**never itself accepted** on `/v2/...` or the JSON package routes — the exchange is the only path, so
+a `contents: write` job cannot push an image by presenting its job token directly. This is the
+narrower of the two designs (a derived, repository-scoped, 5-minute credential rather than a
+longer-lived job credential on every route). Each exchange is logged with the repository and the
+granted scopes; the push/pull themselves revalidate the registry token locally.
+
 Authorisation maps scope to the repository gates with ONE rule source: `pull` is
 `identity.CheckRead`, `push` is **`identity.CheckPush`** — the git receive-pack
 gate verbatim. The registry does not resolve roles on its own, so it cannot drift
@@ -428,6 +441,14 @@ within quota); screenshots are working evidence under `/var/tmp/ui-spindle/`, no
   for manifests; the media type is in the manifest itself, and the digest is the path.
 - **NEW — tags are CAS pointers, and there is no tag index.** `tags/list` pages the prefix; GC sweeps
   marks instead of refcounting.
+- **NEW (2026-11-28, PAR-112) — a Threads job token is exchanged, never accepted directly.** A job
+  declaring `packages: read|write` presents its `wjt_` token at `/v2/token` and receives the ordinary
+  5-minute registry token capped at its own repository (`read` ⇒ pull, `write` ⇒ pull+push); the job
+  token is refused on `/v2/*` and the JSON package routes, and the minted token carries `job_repo` so
+  the registry authorizes from the embedded grant rather than a repository role for the
+  `ci:<runner>` principal. A cross-repository or missing-scope request is a `403`. Chosen over
+  accepting the job token as a bearer credential because the derived credential is narrower in both
+  scope and lifetime, and it follows the Docker client's existing exchange.
 
 ### As-built amendments (WP1 skeleton, 2026-11-20)
 

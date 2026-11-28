@@ -205,8 +205,8 @@ func TestRepoChromeCodePageKeepsItsOwn(t *testing.T) {
 		}
 		// code, commits, tags, packages (docs/features/14 §7), issues, pulls,
 		// checks (busySummary), threads, releases, insights, settings.
-		if got := len(tabsOf(t, body)); got != 11 {
-			t.Errorf("%s: tab count = %d, want 11", path, got)
+		if got := len(tabsOf(t, body)); got != 12 {
+			t.Errorf("%s: tab count = %d, want 12", path, got)
 		}
 	}
 	if got := activeTabOf(t, f.mustGet("/demo/spindle/commits", http.StatusOK)); got != "commits" {

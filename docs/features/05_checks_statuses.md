@@ -139,7 +139,7 @@ neither cache class of §9.2 applies — sha-addressed does NOT mean immutable h
 
 | Method + path | Auth (P6) | Request → response | Seam / notes |
 |---|---|---|---|
-| `POST /{o}/{r}/api/checks/statuses/{sha}` | CI token (`checks:write` on this repo) **or** repo `write` role | `{context, state, target_url?, description?, started_at?, completed_at?, annotations?}` → `200` full status record | `internal/checks` RouteProvider; `400` bad context/state/URL/annotation level; `404` unknown sha (not a commit); `409` state not in the enum |
+| `POST /{o}/{r}/api/checks/statuses/{sha}` | CI token (`checks:write` on this repo) **or** repo `write` role **or** a Threads job token with `checks: write` (`statuses: write` accepted) on its own repo | `{context, state, target_url?, description?, started_at?, completed_at?, annotations?}` → `200` full status record | `internal/checks` RouteProvider; `400` bad context/state/URL/annotation level; `404` unknown sha (not a commit); `409` state not in the enum |
 | `GET /{o}/{r}/api/checks/statuses/{sha}` | read | `{sha, statuses: []}` (context-sorted) | no-store; LIST under `checks/<sha>/` + bounded parallel GETs |
 | `GET /{o}/{r}/api/checks/{sha}` | read | combined view (§5): `{sha, state, total_counts, statuses: []}` | no-store |
 | `GET /{o}/{r}/api/checks?after=&n=` | read | `{checks: [{sha, state, contexts: []}], more}` — index page, name-cursor `after`, `n` default 50 max 200 | P5 paginated index read |
@@ -220,6 +220,15 @@ already moved; a subsequent push re-evaluates). The gate never takes a lock shar
 family — it reads CAS'd objects only, so there is no cross-feature lock to order (13_concurrency.md
 §2 lists remain untouched).
 
+### The merge queue's poll (`RequiredChecksProgress`)
+
+The merge queue ([`22_merge_queue.md`](22_merge_queue.md)) needs the same rule set with one extra bit:
+is a non-green context still in flight (`pending`/`missing`) or already decided
+(`failure`/`cancelled`/`skipped`/`error`)? `RequiredChecksProgress` returns that read model
+(`required`, `offenders` in the gate's verbatim spelling, `ok`, `pending`); `CheckRequiredChecks`
+keeps the same verdict and message, so the queue waits for CI instead of ejecting a running entry and
+the landing still calls the one gate. No new storage and no second policy evaluation.
+
 ## 7. SSE — check reports on the collaboration stream (P7)
 
 Every report (step 4 above) broadcasts one packet on the single repo collaboration SSE stream — the
@@ -265,6 +274,13 @@ external CI with a `wct_` token), `tokens.{create, list, revoke}` (admin). Regis
 re-exports; envelope/SSE parsing reuses `sdk/src/sse.js` — one parser (12_web_ui.md §1.4).
 
 ## Decisions
+
+- **The Threads job token is a second credential on the report path (PAR-112, 2026-11-28).** A job
+  declaring `checks: write` (or the legacy `statuses: write`) may create/update check runs for its own
+  repository, and `checks: read`/`statuses: read` may read them. It is checked from the effective
+  permission map resolved at the credential boundary (never a repository role), is refused another
+  repository, and can never reach the CI-token management endpoints; `RecordStatus` remains the
+  trusted in-process producer. The dedicated `wct_` token class is unchanged.
 
 - **Frontend idiom is the server-rendered page layer (D-WEB-14/D-WEB-15; supersedes the D-WEB-6 SolidJS entry for issue #76).** The §9 surface sketches read in the shipped idiom: Go handlers + templates, the check-pill partial, and the SSE island. **Historical (D-WEB-6):** Solid components, SSE via `lib/sse.js` `mountStream` (never `EventSource`). Surfaces, behavior, and wire shapes are unchanged.
 

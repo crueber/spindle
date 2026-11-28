@@ -3,6 +3,8 @@ package checks
 import (
 	"strings"
 	"testing"
+
+	"github.com/crueber/spindle/internal/store"
 )
 
 // require_checks merge-time gate (05 §6): union across matching rules,
@@ -101,5 +103,55 @@ func TestGateFailClosed(t *testing.T) {
 	// Bad sha fails before any read.
 	if err := e.svc.CheckRequiredChecks(ctx(), "o", "r", "abc", "refs/heads/main", "m"); err == nil {
 		t.Fatal("bad sha passed")
+	}
+}
+
+// TestRequiredChecksProgress is the merge queue's polling read (the Merge
+// queue card): the same gate, with the pending/decided split a queue needs to
+// wait rather than eject.
+func TestRequiredChecksProgress(t *testing.T) {
+	e := newTestEnv()
+	sha := hexSHA(48)
+	e.knowSHA(sha)
+	// No policy: OK, no required contexts, not pending.
+	p, err := e.svc.RequiredChecksProgress(ctx(), "o", "r", sha, "refs/heads/main", "merger@example.com")
+	if err != nil || !p.OK || len(p.Required) != 0 || p.Pending {
+		t.Fatalf("no policy = %+v, %v", p, err)
+	}
+	e.putPolicy(t, `{"version":1,"rules":[{"name":"main-needs-ci","match":{"refs":["refs/heads/main"]},"effect":{"protect":{"restricts":["update"],"require_checks":["ci/build","lint"]}}}]}`)
+	// Missing contexts are pending (wait, do not eject).
+	p, err = e.svc.RequiredChecksProgress(ctx(), "o", "r", sha, "refs/heads/main", "merger@example.com")
+	if err != nil || p.OK || !p.Pending || len(p.Offenders) != 2 {
+		t.Fatalf("missing = %+v, %v", p, err)
+	}
+	// A pending state is pending.
+	e.mustReport(t, sha, "ci/build", StatePending)
+	p, _ = e.svc.RequiredChecksProgress(ctx(), "o", "r", sha, "refs/heads/main", "merger@example.com")
+	if !p.Pending || p.OK {
+		t.Fatalf("pending = %+v", p)
+	}
+	// A decided failure is not pending (eject now).
+	e.mustReport(t, sha, "ci/build", StateFailure)
+	e.mustReport(t, sha, "lint", StateSuccess)
+	p, _ = e.svc.RequiredChecksProgress(ctx(), "o", "r", sha, "refs/heads/main", "merger@example.com")
+	if p.Pending || p.OK || len(p.Offenders) != 1 || !strings.Contains(p.Offenders[0], "ci/build (failure)") {
+		t.Fatalf("failure = %+v", p)
+	}
+	// All green is OK.
+	e.mustReport(t, sha, "ci/build", StateSuccess)
+	p, _ = e.svc.RequiredChecksProgress(ctx(), "o", "r", sha, "refs/heads/main", "merger@example.com")
+	if !p.OK || p.Pending || len(p.Offenders) != 0 {
+		t.Fatalf("green = %+v", p)
+	}
+	// An unparseable policy fails closed.
+	if _, err := store.PutBytes(ctx(), e.store, "repos/o/r/policy.json", []byte("{"), store.PutOptions{Mode: store.PutOverwrite}); err != nil {
+		t.Fatalf("seed policy: %v", err)
+	}
+	if _, err := e.svc.RequiredChecksProgress(ctx(), "o", "r", sha, "refs/heads/main", "merger@example.com"); err == nil {
+		t.Fatal("corrupt policy must fail closed")
+	}
+	// A bad sha is invalid.
+	if _, err := e.svc.RequiredChecksProgress(ctx(), "o", "r", "nope", "refs/heads/main", "m"); err == nil {
+		t.Fatal("bad sha")
 	}
 }

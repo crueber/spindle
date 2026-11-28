@@ -272,12 +272,12 @@ is listed in the Threads page's **Workflows** section (anchored `#workflow-<slug
 | Key | Accepted | Default | Notes |
 |---|---|---|---|
 | `name` | string | file stem | display name; also the `<workflow>` segment of every check context |
-| `on` | event name, list of names, or mapping | — | a file with no trigger parses but never fires; the event vocabulary is closed — `push`, `pull_request`, `pull_request_target`, `repository_dispatch`, `workflow_run`, `create`/`delete`, `deployment`/`deployment_status`, `release`, `issues`, `issue_comment`, `workflow_dispatch`, `workflow_call`, `schedule` (§3.2) |
+| `on` | event name, list of names, or mapping | — | a file with no trigger parses but never fires; the event vocabulary is closed — `push`, `pull_request`, `pull_request_target`, `repository_dispatch`, `workflow_run`, `merge_group`, `create`/`delete`, `deployment`/`deployment_status`, `release`, `issues`, `issue_comment`, `pull_request_review`/`pull_request_review_comment`, `label`, `milestone`, `fork`, `watch`, `check_run`, `workflow_dispatch`, `workflow_call`, `schedule` (§3.2) |
 | `run-name` | string with `${{ … }}` spans | the workflow `name` | the run title (PAR-057): rendered once at creation from `github.*` and `inputs.*`, one bounded line, shown by the run list, run page and API |
 | `env` | map of string → string | empty | merged **under** the job's `env` (job wins); a YAML scalar value (number, bool) is coerced to its text |
 | `defaults` | `{run: {shell, working-directory}}` | none | run-step defaults (PAR-054): job overrides workflow per key, step overrides both; both values are literals |
 | `concurrency` | group name, or `{group, cancel-in-progress}` | none | one running and one pending run per group per repository (§3.1a.1); `cancel-in-progress` is a bool **or one `${{ … }}` expression** evaluated at creation (PAR-151); the group may use `${{ spindle.* }}`, `${{ matrix.* }}` (job level) and `${{ inputs.* }}` — see §3.6 |
-| `permissions` | mapping, or `read-all` / `write-all` | instance default (`threads.default_permissions`, `read`) | the job token's authority: `contents`, `issues`, `pull-requests`, `id-token`; any other scope is a parse error naming the supported set (§5.3.1) |
+| `permissions` | mapping, or `read-all` / `write-all` | instance default (`threads.default_permissions`, `read`) | the job token's authority: `contents`, `issues`, `pull-requests`, `deployments`, `packages`, `checks`, `statuses`, `id-token`; any other scope is a parse error naming the supported set (§5.3.1) |
 | `enable-openid-connect` | bool | false | Forgejo's spelling for the OIDC grant (§5.5); same grant as `permissions: id-token: write` |
 | `jobs` | map of key → job | required | at least one job |
 
@@ -552,9 +552,9 @@ commit-status surface (this instance's checks are check runs, not statuses),
 `check_suite` the missing app check-suite object (individual check runs are
 emitted), and `discussion`(+comment) the missing discussion surface.
 `merge_group` is no longer in this list: the trigger and its run contract are
-implemented against the merge queue's documented ref shape (§6.10); what the
-separate Merge queue card still owns is creating those refs and landing the
-merge.
+implemented against the merge queue's documented ref shape (§6.10), and the
+queue that creates those refs and lands the merge is
+[`features/22_merge_queue.md`](features/22_merge_queue.md).
 
 **The issue/review definition family.** `pull_request_review`,
 `pull_request_review_comment`, `label` and `milestone` are emitted by the
@@ -2436,14 +2436,19 @@ removes). The supported set is exactly what the token can do:
 | `issues` | `read`, `write`, `none` | `read`: read the repository and its issues/comments. `write`: the triage role — label/assign/close others' issues, manage labels and milestones. |
 | `pull-requests` (`pull_requests` is an accepted alias) | `read`, `write`, `none` | `read`: read pull requests. `write`: the write role — open/update PRs and create releases. |
 | `deployments` | `read`, `write`, `none` | `read`: list/get deployment records. `write`: create a deployment and append its statuses for the run's repository (§5.7). It never reaches the Threads operator surface (dispatch/cancel/approve). |
+| `packages` | `read`, `write`, `none` | The OCI registry of the run's repository (docs/features/14_packages.md §4): `read` pulls images, `write` pushes and pulls. The job token is exchanged at `/v2/token` for a short-lived, repository-scoped registry token; it is never accepted as a registry bearer credential itself and never reaches another repository. |
+| `checks` | `read`, `write`, `none` | The check-run/status surface (PAR-021): `read` reads the run's repository's check runs, `write` creates and updates them (the external-CI reporting path). Repository-scoped; it never manages CI tokens or any admin surface. |
+| `statuses` | `read`, `write`, `none` | GitHub's legacy commit-status name. This server has one status/check-run surface, so it grants exactly what `checks` grants. |
 | `id-token` | `write`, `none` | Exchange for a short-lived OIDC ID token (§5.5). `read` is not a level. |
-| `read-all` / `write-all` (scalar, or the `all` key) | — | Sets the baseline for `contents`, `issues`, `pull-requests` only. **`write-all` never grants `id-token`** (S10). |
+| `read-all` / `write-all` (scalar, or the `all` key) | — | Sets the baseline for `contents`, `issues`, `pull-requests` only. **`write-all` never grants `id-token`** (S10), and it does not imply `deployments`, `packages`, `checks` or `statuses`: a job that wants a deployment, an image push or a check-run write names that scope. |
 
 Refused **by name**, with the reason, because this server has no job-token surface for them:
-`actions`, `attestations`, `checks`, `discussions`, `metadata`, `models`, `packages`,
-`pages`, `repository-projects`, `security-events`, `statuses`, `wiki`; any other spelling is an
-unknown scope. The importer (`spindle threads import`) drops a refused scope and names it in the
-conversion report, so a converted file always parses.
+`actions` (the Threads operator surface: dispatch, cancel/rerun, approve, environments/secrets — a
+job that could restart its own run would loop, and dispatch would route around the job-push
+suppression rule), `attestations`, `discussions`, `metadata`, `models`, `pages`,
+`repository-projects`, `security-events`, `wiki`; any other spelling is an unknown scope. The
+importer (`spindle threads import`) drops a refused scope and names it in the conversion report, so
+a converted file always parses.
 
 **How the platform API is scoped.** A job token is not a user and never becomes one: it has no
 session, no host `write`/`admin` flag, and does not resolve through access bindings or org rosters.
@@ -2456,20 +2461,22 @@ credential (checks tokens, invites, repository settings all require admin/sessio
 never applies to another repository — a write there is a `403`.
 
 Roles are ordered, so a higher tier carries the lower tier's actions: a `contents: write` job can also
-label an issue, exactly as a write-role human can. Three exceptions are enforced beyond the tier,
-because their scopes are refused by name and the underlying capability is security-sensitive:
+label an issue, exactly as a write-role human can. Four exceptions are enforced beyond the tier:
 
-- **Commit statuses** (`checks`/`statuses` are refused scopes): the check-run/status API always
-  refuses a job token, so a `contents: write` job cannot forge the required-check context that gates
-  its own merge. A job's own checks are written by Threads in-process, not through that API.
-- **OCI packages** (`packages` is a refused scope): the registry's push gate resolves the pusher by
-  name with the job identity stripped, so a job token cannot push a package.
+- **Check runs are `checks`/`statuses`, not a repository role.** A `contents: write` job cannot forge
+  a check context by virtue of its role: only a job token declaring `checks: write` (or `statuses:
+  write`) may create or update a check run, and only in its own repository. The dedicated `wct_` CI
+  token remains the other way an external CI reports (05 §3).
+- **OCI packages are `packages`, not a repository role.** A job token is exchanged at `/v2/token` for
+  a registry token whose scopes are capped at the job's own repository (`read` ⇒ pull, `write` ⇒
+  pull+push); the `ci:<runner>` principal owns no registry role, and the job token is refused as a
+  registry bearer credential. `contents: write` therefore cannot push an image.
 - **Releases** are a `contents: write` capability specifically: `pull-requests: write` gives the
   write role but not the release surface.
 - **The Threads operator surface** (dispatch a run, cancel/rerun, approve a held run, manage
   environments/secrets) never accepts a job token: those are the `actions: write` / maintain / admin
-  capabilities expressed by refused scopes, and dispatching would let a job route around the
-  job-push suppression rule.
+  capabilities expressed by the refused `actions` scope, and dispatching would let a job route around
+  the job-push suppression rule.
 
 **Divergence from GitHub, recorded:** spindle's own role model lets any reader comment on an issue
 (`issues`/PRs are readable, commenting is a read-role action in 01 §5), so a job token carrying only
@@ -3083,9 +3090,12 @@ lifecycle edge and the upstream head branch. The payload carries the upstream ru
   other job (§7), so a `require_checks` rule naming the workflow's contexts reads them with
   `CheckRequiredChecks` on that sha. The queue entry is mergeable only when those checks are green —
   the gate needs no merge-group-specific code.
-- **Not here: queue creation.** What to enqueue, batching several pull requests, moving the base
-  and landing the merge are the separate **Merge queue** backlog card. This trigger is the contract
-  the queue hands off to; the card pushes the documented refs and consumes the run's checks.
+- **The queue is real.** [`docs/features/22_merge_queue.md`](features/22_merge_queue.md) owns the
+  product surface that pushes the documented refs and consumes the run: a per-base ordered queue
+  (priority then FIFO), the temporary ref's full lifecycle (prepare, publish, delete on every exit
+  path, restart recovery), the required-checks gate on the checked tip, and landing through the one
+  merge task. This trigger remains the contract it hands off to; the queue implements no run
+  creation or merge logic of its own.
 
 ### 6.11 Concurrency caps and queue reasons (PAR-153/PAR-156)
 
@@ -4033,9 +4043,9 @@ Plainly, so nobody plans around them:
   output templates are the call's interface and are enforced. Not supported, each a named refusal:
   `secrets: inherit` across a repository boundary (D-6), a mutable remote ref, a matrix caller, and
   environment secrets inherited by a callee.
-- **Merge queue (`merge_group`)**: the TRIGGER and run contract are implemented (§6.10) against the
-  documented `refs/heads/gh-readonly-queue/<base>/pr-<n>-<sha>` ref; the queue that creates those
-  refs, batches entries and lands the merge is the separate Merge queue backlog card. `status` (no
+- **Merge queue (`merge_group`)**: the trigger and run contract (§6.10) and the queue that creates
+  the documented `refs/heads/gh-readonly-queue/<base>/pr-<n>-<sha>` refs and lands the merge
+  (`docs/features/22_merge_queue.md`) are implemented. `status` (no
   legacy commit-status surface) and `check_suite` (no app check-suite object; individual check runs
   are emitted) are refused by name, as are the surfaces spindle lacks (`registry_package`, `gollum`,
   `page_build`, `branch_protection_rule`, `public`, `discussion`(+comment)). Every event in the

@@ -24,6 +24,7 @@ import (
 	"github.com/crueber/spindle/internal/identity"
 	"github.com/crueber/spindle/internal/insights"
 	"github.com/crueber/spindle/internal/issues"
+	"github.com/crueber/spindle/internal/mergequeue"
 	"github.com/crueber/spindle/internal/mirror"
 	"github.com/crueber/spindle/internal/moderation"
 	"github.com/crueber/spindle/internal/notify"
@@ -64,15 +65,21 @@ type collabWiring struct {
 	pullsPub *pullsPublisher
 	// Feature F (file edit): the service, its both-lane handler, and the WAL
 	// publisher whose events-bridge wake serve attaches alongside pullsPub.
-	webeditSvc        *webedit.Service
-	webeditHandler    *webedit.Handler
-	webeditPub        *webeditPublisher
-	reviewSvc         *review.Service
-	reviewHandler     *review.Handler
-	checksSvc         *checks.Service
-	checksHandler     *checks.Handler
-	threadsSvc        *threads.Service
-	threadsHandler    *threads.Handler
+	webeditSvc     *webedit.Service
+	webeditHandler *webedit.Handler
+	webeditPub     *webeditPublisher
+	reviewSvc      *review.Service
+	reviewHandler  *review.Handler
+	checksSvc      *checks.Service
+	checksHandler  *checks.Handler
+	threadsSvc     *threads.Service
+	threadsHandler *threads.Handler
+	// mergeQueueSvc is the merge queue (the Merge queue card): the
+	// per-base ordered queue, the temp-ref hand-off to merge_group and the
+	// landing through the one merge path. It reuses threads (run read),
+	// checks (required-checks progress) and pulls (prepare/land).
+	mergeQueueSvc     *mergequeue.Service
+	mergeQueueHandler *mergequeue.Handler
 	releasesSvc       *releases.Service
 	releasesHandler   *releases.Handler
 	tagsSvc           *tags.Service
@@ -262,6 +269,25 @@ func buildCollab(st store.ObjectStore, cfg *config.Config, reg *wal.Registry, ap
 	// serve.go (server.OnPush); the manual dispatch and the runner
 	// protocol ride the Seam 1 chain below.
 	c.threadsSvc, c.threadsHandler = newThreadsService(st, c.ident, c.checksSvc, reg, cfg, cfg.Git.Binary)
+	// Merge queue (the Merge queue card): the per-base queue, the documented
+	// temporary ref (PAR-016) and the landing through the one merge path. It
+	// is built after pulls/checks/threads because it uses all three through
+	// their narrow seams.
+	c.mergeQueueSvc, c.mergeQueueHandler = newMergeQueueService(st, c.ident, c.pullsSvc, c.threadsSvc, c.checksSvc)
+	if c.mergeQueueSvc != nil {
+		// The queue publishes its temporary ref through pulls (the WAL), so
+		// the client push pipeline never sees it: hand it to the SAME push
+		// hook here — one run-creation path, PAR-016.
+		if hook := threadsOnPushOf(c); hook != nil {
+			c.mergeQueueSvc.RefPublished = func(_ context.Context, repo, ref, newSHA string) {
+				id, err := git.ParseRepoId(repo)
+				if err != nil {
+					return
+				}
+				hook(id, []server.PushedRef{{Ref: ref, New: newSHA}}, false)
+			}
+		}
+	}
 	// The first-time-contributor gate's evidence (docs/features/15 §5.2): one
 	// exact-key read of pulls' merged-author projection. Bound here because
 	// pulls exists by now and threads must not import it (law 8).
@@ -441,7 +467,7 @@ func buildCollab(st store.ObjectStore, cfg *config.Config, reg *wal.Registry, ap
 	// seams here, so issues/pulls/review/checks mutations fan out
 	// synchronously (P8) from this boot forward.
 	c.notifySvc, c.notifyHandler = newNotifyService(st, c.ident)
-	wireNotifyFanout(c.notifySvc, c.issuesSvc, c.pullsSvc, c.reviewSvc, c.checksSvc)
+	wireNotifyFanout(c.notifySvc, c.issuesSvc, c.pullsSvc, c.reviewSvc, c.checksSvc, c.mergeQueueSvc)
 	// Pending deployments (PAR-135): a held run notifies the environment's
 	// required reviewers through the same notify service, as a repo-level
 	// review request. Best effort — the hold is visible on the run page with or
@@ -646,6 +672,9 @@ func chainCollab(srv *server.Server, c *collabWiring) {
 	}
 	if c.threadsHandler != nil {
 		chainThreads(srv, c.threadsHandler)
+	}
+	if c.mergeQueueHandler != nil {
+		chainMergeQueue(srv, c.mergeQueueHandler)
 	}
 	if c.releasesHandler != nil {
 		chainReleases(srv, c.releasesHandler)
