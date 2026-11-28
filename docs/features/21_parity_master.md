@@ -451,10 +451,10 @@ by name and the documented path is ephemeral or capacity-1 workers under the ope
 by name at the label declare, the `runs-on` queue reason or the permissions vocabulary, and listed by
 `threads.NonGoals()`.
 
-**Decisions awaiting operator acknowledgement.** The 2026-11-26 batch (D-1…D-21) was decided before
-its code landed. Six decisions were implemented *under* this plan after that batch — the code, the
-docs and the tests carry them — and this is the acknowledgement request. Each line names what
-changes if it is declined.
+**Decisions approved by the operator (2026-11-27).** The 2026-11-26 batch (D-1…D-21) was decided
+before its code landed. Six decisions were implemented *under* this plan after that batch and are now
+**approved as recommended** — the code, the docs and the tests carry them. Each line keeps the effect
+of declining it so a future reader can see what the decision bought.
 
 | ID | Decision (as implemented) | If declined |
 |---|---|---|
@@ -465,8 +465,9 @@ changes if it is declined.
 | **D-26** | **Stock toolchain labels resolve to digest-pinned upstream images** (`ubuntu:24.04`, `node:22-bookworm`, `python:3.13-bookworm`, `golang:1.25-bookworm`, `rust:1-bookworm`, `docker:27-cli`, each `@sha256:…`); a runner's own mapping and an explicit `container.image` keep precedence, and `runner images --label` refuses an unknown label. | `PAR-177` returns to `partial`: naming a stock label without `container.image` queues instead of running, and every workflow must name an image or rely on a runner mapping. |
 | **D-27** | **Email is a standard-library SMTP notifier, off by default** (`threads.smtp.*`), one message per (subscriber, failed run), deduped by the inbox record key and masked with the run's job mask values. | The third channel is removed (no new dependency), so `PAR-197`'s UI/webhook/email acceptance narrows to two channels or needs a different transport and its own security review. |
 
-Acknowledgement is a reply on the master card; the matrix rows carry `decision: D-22`…`D-27` until
-then, and a declined line reopens its row rather than being recorded as settled.
+All six were approved on 2026-11-27 (the operator's reply on the master card). The matrix rows keep
+`decision: D-22`…`D-27` as provenance; reversing one reopens its row rather than being recorded as a
+patch-level change.
 
 ---
 

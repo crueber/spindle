@@ -1309,7 +1309,11 @@ classes and wrap at narrow widths; verified at 1440×900 and ~390×844 with
   repository's secrets; logs are masked; capacity-1 runners reject a second claim.
 - **Rendered:** run page live logs at desktop and ~390 px; no page-level horizontal scroll.
 
-## 8. Decisions & deviations
+**Operator approval (2026-11-27):** the six decisions recorded below — D-22 (user-scope secrets
+declined), D-23 (workflow container credentials refused), D-24 (bash default shell), D-25 (`case`
+removed from the expression acceptance), D-26 (digest-pinned stock images) and D-27 (SMTP notifier,
+off by default) — are approved as implemented. The effect of declining each is recorded in
+`21_parity_master.md` §1.12.
 
 - **NEW (2026-11-27) — the expression function set is the platform's real set (D-25), and `case` is
   not a function.** The parity row's capability/acceptance named `case` alongside the real functions,
