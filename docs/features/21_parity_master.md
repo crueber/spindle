@@ -178,9 +178,10 @@ in total — twelve to green, six to partial (`PAR-016`, `PAR-019`, `PAR-021`, `
   row cannot turn green before the JavaScript runtime does.
 - **Per-organization caps** — `PAR-153` landed the per-repository `concurrency_cap` (0…500) with a
   named hold reason; the per-organization cap needs the org ownership seam and remains open.
-- **`merge_group`** — `PAR-016` is a named parse error until the separate **Merge queue** card lands
-  the emitter and its `refs/heads/gh-readonly-queue/<base>/pr-<n>-<sha>` ref; no queue semantics are
-  implemented here.
+- **`merge_group`** — `PAR-016` was a named parse error until Wave 7; the trigger and run contract
+  landed on 2026-11-28 (§1.14) against the documented
+  `refs/heads/gh-readonly-queue/<base>/pr-<n>-<sha>` ref. The separate **Merge queue** card still
+  owns creating those refs and landing the merge.
 - `PAR-019`'s documented cross-run hand-off now has its test
   (`TestCrossRunRefusedWhileWorkflowRunHeld`), and its note records that trigger-side contract; the
   row stays partial for the cross-run API's own home (PAR-098/PAR-099).
@@ -300,11 +301,11 @@ a signed non-goal, and `make parity-closed` is the check that it stays that way.
 
 `PAR-019` closed in Wave 6 (§1.10); its matrix-metadata follow-up is gone.
 
-#### The one `partial` row, and the clause that stays open
+#### The last `partial` row, closed in Wave 7
 
-| Row | Capability | Open clause | Owner |
+| Row | Capability | Clause | Owner |
 |---|---|---|---|
-| `PAR-016` | `merge_group` trigger wired to the merge-queue card | Named parse error by design until the separate **merge-queue** card lands the emitter and the `refs/heads/gh-readonly-queue/<base>/pr-<n>-<sha>` ref. No queue semantics here. | T3 |
+| `PAR-016` | `merge_group` trigger wired to the merge-queue card | Closed 2026-11-28 (§1.14): the trigger parses and a queue-ref push starts the run whose checks gate the entry. Queue creation stays the separate **Merge queue** card. | T3 |
 
 `PAR-037`, `PAR-081`, `PAR-177` and `PAR-197` closed in the Wave-6 ecosystem leftovers (§1.12):
 the expression row's acceptance names the real platform function set (D-25), the daemonless builder
@@ -313,9 +314,9 @@ has registry evidence (D-8's row), the stock catalogue is digest-pinned and reso
 
 #### External dependencies (named, not implied)
 
-- **`merge_group` (`PAR-016`)** — the separate **Merge queue** backlog card: the emitter, the
-  `refs/heads/gh-readonly-queue/<base>/pr-<n>-<sha>` ref and its gating checks. Nothing here can
-  substitute for it.
+- **`merge_group` (`PAR-016`)** — the separate **Merge queue** backlog card owns the queue itself
+  (batching, creating the `refs/heads/gh-readonly-queue/<base>/pr-<n>-<sha>` refs, landing the
+  merge). The trigger and run contract landed in §1.14; the card consumes the run's checks.
 - **The public GitHub mirror's CI** — the published tree's workflows install `git`, Chrome and the Go
   and Node toolchains at run time because the merge gate uses the private prepped image
   (`github.com/crueber/spindle-ci@sha256:…`). Moving the mirror to an image-based gate needs a
@@ -434,16 +435,13 @@ run and no unapproved gap.
 | Metric | Final value |
 |---|---|
 | Rows | 119 |
-| `have` | **116** |
-| `partial` | **1** |
+| `have` | **117** |
+| `partial` | **0** |
 | `missing` | **0** |
 | `non-goal` | **2** (signed) |
 
-**The one remaining `partial`.**
-
-| Row | Capability | Open clause | Owner |
-|---|---|---|---|
-| `PAR-016` | `merge_group` trigger wired to the merge-queue card | A named parse error by design until the separate **Merge queue** card lands the emitter and the `refs/heads/gh-readonly-queue/<base>/pr-<n>-<sha>` ref. No queue semantics are implemented here. | T3 |
+**The lone open clause closed on 2026-11-28.** `PAR-016` (`merge_group`) is no longer a named parse
+refusal: §1.14 records the trigger and run contract that closed it, and the queue dependency it keeps.
 
 **The two signed non-goals.** `PAR-174` — managed runner pool (D-14): `spindle runner pool` refuses
 by name and the documented path is ephemeral or capacity-1 workers under the operator's supervisor.
@@ -468,6 +466,34 @@ of declining it so a future reader can see what the decision bought.
 All six were approved on 2026-11-27 (the operator's reply on the master card). The matrix rows keep
 `decision: D-22`…`D-27` as provenance; reversing one reopens its row rather than being recorded as a
 patch-level change.
+
+### 1.14 PAR-016 closed — the `merge_group` trigger (2026-11-28)
+
+The trigger and its run contract land; the **Merge queue** backlog card still owns the queue itself.
+`on.merge_group` parses (`types: [checks_requested]`, plus `branches`/`branches-ignore` on the target
+branch) instead of being refused by name. A push to the documented ref
+`refs/heads/gh-readonly-queue/<base>/pr-<n>-<sha>` creates exactly one run:
+
+- `event = merge_group`, `github.ref` = the queue ref, `github.ref_name` = its short name,
+  `github.sha` = the queue head; the run record carries no branch, so it cannot be mistaken for a
+  branch push;
+- the workflow file is the **base branch tip's** (both sides of a queue entry are repository-owned,
+  so the run is trusted and there is no fork trust question);
+- the payload carries `action: checks_requested`, `number` (the pull request) and
+  `merge_group.head_ref`/`head_sha`/`base_ref`/`base_sha`;
+- an ordinary branch push or tag creates no `merge_group` run, and a queue ref never fires
+  `on.push`; a malformed or unrelated ref creates nothing at all and is logged with the expected
+  shape (never a fallback branch build);
+- the run's jobs mirror onto the queue head, so the existing `require_checks` merge-time gate reads
+  a merge-group run exactly like any other job — no merge-group-specific gate code.
+
+**The queue dependency (named, not implied).** Creating these refs, batching entries, moving the
+base and landing the merge is the separate **Merge queue** card. This row is the trigger + run
+contract the queue hands off to. Tests: `TestMergeGroupParseAndFires`,
+`TestMergeGroupTypeValidation`, `TestParseMergeQueueRef`, `TestCreateRunMergeGroup`,
+`TestCreateRunMergeGroupRefusals`, `TestMergeGroupPushHookStartsOneRun`,
+`TestMergeGroupPushHookIgnoresOtherRefs`, `TestMergeGroupRunChecksGate`,
+`TestMergeGroupTriggerTranslates`, `TestE2E_MergeGroupQueueRefStartsChecksRun`.
 
 ---
 
@@ -603,7 +629,7 @@ matrix JSON's `priority` field so a row can be re-ordered without renumbering.
 | PAR-013 | Filter glob dialect: `*`, `**`, `?`, `+`, ordered `!` negation, `branches-ignore`/`tags-ignore` | B | have | 2 | T1 | The documented filter cheat-sheet is a passing table test, including ordered include/exclude | — |
 | PAR-014 | Full `pull_request.types` vocabulary and its emitters (closed, labeled, ready_for_review, review_requested, …) | B | have | 2 | T3 | Each documented type fires from the real event through the pulls seam; the default stays opened/synchronize/reopened | — |
 | PAR-015 | `pull_request_target`: base-tip file, base secrets, write token, head fetchable | B | have | 2 | T3 | A fork PR run executes the base file and never the head's, with secrets resolving and the badge set | S5 D-2 |
-| PAR-016 | `merge_group` trigger wired to the merge-queue card (no queue semantics here) | G | partial | 3 | T3 | A queue entry starts a `merge_group` run whose checks gate the merge | — |
+| PAR-016 | `merge_group` trigger wired to the merge-queue card (no queue semantics here) | G | have | 3 | T3 | A queue entry starts a `merge_group` run whose checks gate the merge | — |
 | PAR-017 | `release` trigger (created/published/edited/deleted/prereleased/released) with `event.release.*` | B | have | 2 | T3 | Publishing a release runs a workflow that reads its tag and asset list | — |
 | PAR-018 | `repository_dispatch` with `types` + `client_payload`, reachable from API/CLI/scoped token | G | have | 3 | T3 | A dispatch exposes `github.event.client_payload.*`; a token without `contents: write` is refused | S10 |
 | PAR-019 | `workflow_run` (workflows/types/branches filters, upstream run + artifacts) with the untrusted-trigger rule | G | have | 3 | T3 | A follow-up workflow downloads the first run's artifact and is itself gated when the parent was untrusted | S7 D-3 |
@@ -825,8 +851,8 @@ mapping (`PAR-171`), operator knobs (`PAR-179`), log fidelity (`PAR-190`), run g
 
 ### Wave 3 — the GitHub-only surface
 
-Triggers that only exist on GitHub: `merge_group` (`PAR-016`), `repository_dispatch` (`PAR-018`),
-`workflow_run` (`PAR-019`), the repository/check/deploy trigger family (`PAR-021`), merge-ref semantics
+Triggers that only exist on GitHub: `repository_dispatch` (`PAR-018`),
+`workflow_run` (`PAR-019`), `merge_group` (`PAR-016`, trigger + run contract; the queue is separate), the repository/check/deploy trigger family (`PAR-021`), merge-ref semantics
 (`PAR-024`), `job`/`jobs`/`strategy` contexts (`PAR-039`), cross-repo reusable workflows (`PAR-076`),
 container keys applied (`PAR-077`), step background/parallel (`PAR-080`), cross-run artifacts (`PAR-098`),
 artifact API (`PAR-099`), fork token policy (`PAR-118`), deployments (`PAR-132`, `PAR-133`, `PAR-136`),
@@ -1295,7 +1321,7 @@ the matrix carries the row, the refusal is named, and the corpus expectation is 
 | N7 | …put a secret in argv (`container.entrypoint`, `command`, `options`) or in the plan payload when a name suffices | argv is host-visible; the payload is in the bucket (S3) | policy, no sign-off needed |
 | N8 | …pass `secrets: inherit` to a cross-repository reusable workflow | Exfiltration by design (S8) | **given** (D-6, 2026-11-26) |
 | N9 | …enable `pull_request_target` or untrusted-parent cross-run artifact consumption by default | The pwn-request and untrusted-artifact vectors (S5, S7) | **given** (D-2/D-3, 2026-11-26 — opt-in and approval, never default) |
-| N10 | …implement merge-queue semantics in this plan | Owned by card `01a1fe8a26df000000c260ec351713`; here only the `merge_group` trigger rides on it (`PAR-016`) | out of scope, no sign-off |
+| N10 | …implement merge-queue semantics in this plan | Owned by card `01a1fe8a26df000000c260ec351713`; the `merge_group` TRIGGER and run contract landed separately (`PAR-016`, §1.14) — creating the queue refs and landing the merge remain the card's | out of scope, no sign-off |
 | N11 | …give a workflow an implicit write token "because Forgejo does" | The whole point of a scoped token (S10) | **given** (D-12, 2026-11-26 — `contents: read` default) |
 
 ---
@@ -1373,12 +1399,12 @@ here are the reconciliations this document performed on its sources.*
   of Forgejo item F1.2, split out because it fails independently.
 - **NEW (2026-11-27) — Wave 3 closes the GitHub-only trigger surface by emitting what exists and refusing
   the rest by name.** `repository_dispatch`, `workflow_run`, `create`/`delete`, `deployment`/
-  `deployment_status` and `pull_request_target` are emitters; `merge_group`, `fork`, `watch`, `status`,
-  `check_run`, `check_suite`, `registry_package`, `gollum`, `page_build`, `branch_protection_rule` and
-  `public` are named parse errors with the missing surface in the message. Accepting an unemittable
-  trigger would make a migrated workflow look healthy while never running, which is the one rule both
-  source cards agree on. `PAR-016` therefore stays `partial` until the separate Merge queue card lands the
-  queue and its documented ref shape.
+  `deployment_status` and `pull_request_target` are emitters; `status`, `check_run`, `check_suite`,
+  `registry_package`, `gollum`, `page_build`, `branch_protection_rule` and `public` are named parse
+  errors with the missing surface in the message. Accepting an unemittable trigger would make a
+  migrated workflow look healthy while never running, which is the one rule both source cards agree
+  on. `merge_group` was in that list until 2026-11-28, when the trigger + run contract landed (§1.14)
+  ahead of the separate Merge queue card, which still owns creating the refs and landing the merge.
 - **NEW (2026-11-27) — the PR merge ref is a derived commit, not a published ref.** `pull_request` runs
   the server-computed merge commit (`git merge-tree --write-tree` + `git commit-tree` with a fixed
   identity/date) and reports `refs/pull/<n>/merge`; the commit lives in the serving copy so a checkout by

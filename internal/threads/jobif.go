@@ -213,7 +213,14 @@ func runRefName(run *Run) string {
 	if tag, ok := strings.CutPrefix(strings.TrimSpace(run.Ref), "refs/tags/"); ok {
 		return tag
 	}
-	return strings.TrimSpace(run.Branch)
+	if branch := strings.TrimSpace(run.Branch); branch != "" {
+		return branch
+	}
+	// A merge_group (PAR-016) has no branch: its identity is the queue ref's
+	// short name (`gh-readonly-queue/main/pr-7-<sha>`). A run with neither a
+	// branch nor a ref answers "" — never the ref with its prefix stripped
+	// blindly.
+	return shortRefName(run.Ref)
 }
 
 // jobIdentifier is the GITHUB_JOB spelling of a job record (its id).

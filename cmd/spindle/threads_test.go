@@ -37,6 +37,8 @@ func TestThreadsRefTarget(t *testing.T) {
 		{"pull ref", server.PushedRef{Ref: "refs/pull/1/head", New: sha}, "", workflow.RefBranch, false},
 		{"empty branch", server.PushedRef{Ref: "refs/heads/", New: sha}, "", workflow.RefBranch, false},
 		{"empty tag", server.PushedRef{Ref: "refs/tags/", New: sha}, "", workflow.RefBranch, false},
+		{"merge queue ref", server.PushedRef{Ref: "refs/heads/gh-readonly-queue/main/pr-7-" + sha, New: sha}, "", workflow.RefMergeQueue, false},
+		{"malformed queue ref", server.PushedRef{Ref: "refs/heads/gh-readonly-queue/main/pr-0-" + sha, New: sha}, "", workflow.RefMergeQueue, false},
 		{"empty oid", server.PushedRef{Ref: "refs/heads/main", New: ""}, "", workflow.RefBranch, false},
 	}
 	for _, tc := range cases {
@@ -171,5 +173,114 @@ func TestTagAndBranchPushSameNameCreateTwoRuns(t *testing.T) {
 	}
 	if branch.Branch != "v1.2.3" || tag.Branch != "" {
 		t.Fatalf("branch/tag Branch = %q/%q", branch.Branch, tag.Branch)
+	}
+}
+
+// mergeGroupFixture is the merge-queue emitter half of PAR-016: a base branch
+// with a merge_group workflow and an ordinary push workflow, so one queue-ref
+// push must produce exactly one run (the merge_group one).
+func mergeGroupFixture(t *testing.T) (*triggerGit, *threads.Service, string, string) {
+	t.Helper()
+	base := "4444444444444444444444444444444444444444"
+	head := "5555555555555555555555555555555555555555"
+	g := newTriggerGit()
+	g.refs["refs/heads/main"] = base
+	g.add(base, ".spindle/workflows/queue.yml", `name: Queue
+on:
+  merge_group:
+    types: [checks_requested]
+jobs:
+  queue-checks:
+    runs-on: linux
+    steps:
+      - run: echo "checking ${{ github.event.merge_group.head_sha }}"
+`)
+	g.add(base, ".spindle/workflows/push.yml", `name: Push
+on: [push]
+jobs:
+  build:
+    runs-on: linux
+    steps:
+      - run: echo build
+`)
+	return g, triggerService(t, g), base, head
+}
+
+// TestMergeGroupPushHookStartsOneRun is PAR-016's emitter: a landed
+// `refs/heads/gh-readonly-queue/<base>/pr-<n>-<sha>` push creates exactly one
+// merge_group run — not a push run — with the queue ref, the queue head commit,
+// the base branch's workflow and the documented payload.
+func TestMergeGroupPushHookStartsOneRun(t *testing.T) {
+	_, svc, base, head := mergeGroupFixture(t)
+	hook := threadsOnPushOf(&collabWiring{threadsSvc: svc})
+	ref := "refs/heads/gh-readonly-queue/main/pr-7-" + head
+	hook(git.RepoId{Owner: "o", Name: "r"}, []server.PushedRef{{Ref: ref, Old: strings.Repeat("0", 40), New: head}}, false)
+
+	runs := awaitRuns(t, svc, 1)
+	// Give a wrongly-fired push/create run the same window the sibling tests
+	// use; exactly one run is the assertion.
+	time.Sleep(150 * time.Millisecond)
+	page, err := svc.ListRuns(context.Background(), "o/r", auth.Principal{Name: "reader"}, "", 50)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(page.Runs) != 1 {
+		t.Fatalf("queue push created %d runs (%+v), want exactly the merge_group run", len(page.Runs), page.Runs)
+	}
+	run := runs[0]
+	if run.Event != threads.EventMergeGroup || run.Commit != head || run.Ref != ref || run.Branch != "" {
+		t.Fatalf("merge_group run header = %+v", run)
+	}
+	if run.WorkflowPath != ".spindle/workflows/queue.yml" || run.WorkflowCommit != base {
+		t.Fatalf("base-branch workflow selection = %+v", run)
+	}
+	fields := threads.EventFieldsOf(run.EventPayload)
+	want := map[string]string{
+		"event.action":               "checks_requested",
+		"event.number":               "7",
+		"event.merge_group.head_ref": ref,
+		"event.merge_group.head_sha": head,
+		"event.merge_group.base_ref": "refs/heads/main",
+		"event.merge_group.base_sha": base,
+	}
+	for k, v := range want {
+		if fields[k] != v {
+			t.Errorf("%s = %q, want %q", k, fields[k], v)
+		}
+	}
+}
+
+// TestMergeGroupPushHookIgnoresOtherRefs pins the other half of PAR-016: an
+// ordinary branch push, a tag push and a malformed queue-shaped ref create no
+// merge_group run (the malformed one creates nothing at all, not a push run).
+func TestMergeGroupPushHookIgnoresOtherRefs(t *testing.T) {
+	_, svc, base, head := mergeGroupFixture(t)
+	hook := threadsOnPushOf(&collabWiring{threadsSvc: svc})
+	malformed := "refs/heads/gh-readonly-queue/main/pr-0-" + head
+	deleted := "refs/heads/gh-readonly-queue/main/pr-8-" + head
+	hook(git.RepoId{Owner: "o", Name: "r"}, []server.PushedRef{
+		{Ref: "refs/heads/main", Old: base, New: base},
+		{Ref: "refs/tags/v1.2.3", Old: base, New: base},
+		{Ref: malformed, New: head},
+		{Ref: deleted, Old: head, New: strings.Repeat("0", 40)},
+	}, false)
+	// The two real pushes create push runs; the malformed queue ref must
+	// create none. Wait for the pushes, then inspect the whole page.
+	awaitRuns(t, svc, 2)
+	time.Sleep(100 * time.Millisecond)
+	page, err := svc.ListRuns(context.Background(), "o/r", auth.Principal{Name: "reader"}, "", 50)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, run := range page.Runs {
+		if run.Event == threads.EventMergeGroup {
+			t.Fatalf("a non-queue ref created a merge_group run: %+v", run)
+		}
+		if run.Ref == malformed {
+			t.Fatalf("a malformed queue ref created a %s run: %+v", run.Event, run)
+		}
+		if run.Ref == deleted {
+			t.Fatalf("a queue ref delete created a %s run: %+v", run.Event, run)
+		}
 	}
 }

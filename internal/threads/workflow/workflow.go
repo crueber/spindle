@@ -102,6 +102,12 @@ type Triggers struct {
 	// WorkflowRun follows another workflow run (PAR-019). It filters on the
 	// upstream workflow's NAME, the lifecycle type and the upstream head branch.
 	WorkflowRun *WorkflowRunTrigger `yaml:"workflow_run"`
+	// MergeGroup is the merge-queue trigger (PAR-016): a push to a documented
+	// `refs/heads/gh-readonly-queue/<base>/pr-<n>-<sha>` ref starts its checks.
+	// The queue that creates those refs is a separate concern; this trigger is
+	// the run contract it hands off to.
+	MergeGroup    *MergeGroupTrigger `yaml:"merge_group"`
+	MergeGroupSet bool               `yaml:"-"`
 	// Create/Delete are the git ref lifecycle events emitted by the server's
 	// push hook (PAR-021). The other repository/check/deploy names are refused
 	// at parse time by name (RefusedTriggers) rather than accepted inertly.
@@ -238,6 +244,19 @@ func (t *Triggers) UnmarshalYAML(node *yaml.Node) error {
 						}
 						if err == nil {
 							t.WorkflowRun = &w
+						}
+					}
+				}
+			case "merge_group":
+				t.MergeGroupSet = true
+				if !isNull(val) {
+					if err = checkKeys(val, "types", "branches", "branches-ignore"); err == nil {
+						var w MergeGroupTrigger
+						if err = val.Decode(&w); err == nil {
+							err = w.validate()
+						}
+						if err == nil {
+							t.MergeGroup = &w
 						}
 					}
 				}
@@ -459,6 +478,8 @@ func (t *Triggers) enable(name string) error {
 		t.RepositoryDispatchSet = true
 	case "workflow_run":
 		t.WorkflowRunSet = true
+	case "merge_group":
+		t.MergeGroupSet = true
 	case "create":
 		t.CreateSet = true
 	case "delete":
@@ -486,13 +507,7 @@ func (t *Triggers) enable(name string) error {
 // with the reason. They are a NAMED parse error, never accepted-and-inert (the
 // master plan's one rule both parity cards agree on): a workflow that would
 // silently never run is a lie about the CI it replaced.
-//
-// PAR-016 (`merge_group`) is here because the merge queue is a separate
-// backlog item: when a queue lands it becomes an emitter with the documented
-// `refs/heads/gh-readonly-queue/<base>/pr-<n>-<sha>` ref shape. Until then the
-// trigger cannot fire, so it is refused by name.
 var RefusedTriggers = map[string]string{
-	"merge_group":                "this instance has no merge queue (the Spindle \"Merge queue\" backlog item owns it), so a merge_group run cannot be emitted",
 	"status":                     "spindle's check surface reports check runs, not legacy commit statuses",
 	"check_suite":                "spindle has no app check-suite object: its checks mirror writes individual check runs (the check_run event is emitted for an external CI report), so a check_suite run cannot be emitted",
 	"registry_package":           "spindle's OCI registry does not emit registry_package events",
@@ -619,6 +634,39 @@ func (w *WorkflowRunTrigger) validate() error {
 // maxWorkflowRunWorkflows bounds the name filter (a workflow file naming a
 // hundred upstreams is a mistake, not a design).
 const maxWorkflowRunWorkflows = 20
+
+// MergeGroupTypes is the closed set of merge_group activity types Threads
+// emits. The merge queue has one edge worth a run: `checks_requested`, the
+// moment a queue entry exists and its checks must be produced. GitHub also
+// documents a `destroyed` payload, but Threads does not run checks for it, so
+// naming it is refused rather than accepted inertly.
+var MergeGroupTypes = []string{"checks_requested"}
+
+// MergeGroupTrigger is `on.merge_group` (PAR-016). A queued pull request is a
+// push to the documented queue ref
+// `refs/heads/gh-readonly-queue/<base>/pr-<n>-<sha>`; the trigger's optional
+// branch filters select the target branch and `types` selects the one emitted
+// activity.
+type MergeGroupTrigger struct {
+	Types          []string `yaml:"types"`
+	Branches       []string `yaml:"branches"`
+	BranchesIgnore []string `yaml:"branches-ignore"`
+}
+
+// validate closes the merge_group filters: one activity type, and the shared
+// branch-filter dialect applied to the TARGET branch in the ref.
+func (m *MergeGroupTrigger) validate() error {
+	if len(m.Branches) > 0 && len(m.BranchesIgnore) > 0 {
+		return fmt.Errorf("merge_group: `branches` and `branches-ignore` cannot be used together (use `branches` with a `!` pattern to exclude)")
+	}
+	if _, err := compileFilter(m.Branches, false); err != nil {
+		return fmt.Errorf("merge_group: %v", err)
+	}
+	if _, err := compileFilter(m.BranchesIgnore, true); err != nil {
+		return fmt.Errorf("merge_group: %v", err)
+	}
+	return validateTypeFilter("merge_group", m.Types, MergeGroupTypes)
+}
 
 // PullRequestTypes is the closed set of pull_request lifecycle actions Threads
 // emits. The pulls service emits exactly these through its PullEvents seam
@@ -1800,16 +1848,23 @@ type RefKind uint8
 
 const (
 	// RefBranch is a `refs/heads/*` ref (the only kind the push hook delivers
-	// today).
+	// for an ordinary branch).
 	RefBranch RefKind = iota
 	// RefTag is a `refs/tags/*` ref.
 	RefTag
+	// RefMergeQueue is one of the merge queue's read-only refs
+	// (`refs/heads/gh-readonly-queue/…`). It is a `refs/heads/*` ref to git,
+	// but it is never a push: GitHub starts `merge_group`, not `push`, for it.
+	RefMergeQueue
 )
 
 // String renders the kind for error messages and records.
 func (k RefKind) String() string {
-	if k == RefTag {
+	switch k {
+	case RefTag:
 		return "tag"
+	case RefMergeQueue:
+		return "merge-queue"
 	}
 	return "branch"
 }
@@ -1822,6 +1877,11 @@ func (k RefKind) String() string {
 //     push does not fire;
 //   - a bare `on: push` (neither list) fires on both.
 func (p *PushTrigger) fires(kind RefKind, name string) bool {
+	if kind == RefMergeQueue {
+		// A merge-queue ref is never a branch push (GitHub: `merge_group` is
+		// separate from `push`), whatever the workflow's filters say.
+		return false
+	}
 	if kind == RefTag {
 		if len(p.Tags) > 0 || len(p.TagsIgnore) > 0 {
 			return matchFilter(p.Tags, p.TagsIgnore, name)
@@ -1856,12 +1916,13 @@ func matchFilter(include, exclude []string, name string) bool {
 
 // Fires reports whether the workflow triggers on an event. event is one of
 // "push", "pull_request", "pull_request_target", "workflow_dispatch",
-// "repository_dispatch", "workflow_run", "create", "delete", "deployment",
-// "deployment_status"; schedule is handled by the scheduler. kind names the
-// ref kind (a branch or a tag) and matters only for push. ref is the short ref
-// name: the branch name, the tag name, the PR target branch, or the upstream
-// run's head branch (workflow_run); it may be empty (no filter applies). action
-// is the lifecycle action/type the caller is delivering.
+// "repository_dispatch", "workflow_run", "merge_group", "create", "delete",
+// "deployment", "deployment_status"; schedule is handled by the scheduler.
+// kind names the ref kind (a branch, a tag or a merge-queue ref) and matters
+// only for push. ref is the short ref name: the branch name, the tag name, the
+// PR target branch, the upstream run's head branch (workflow_run) or the base
+// branch a merge group targets (merge_group); it may be empty (no filter
+// applies). action is the lifecycle action/type the caller is delivering.
 func (w *Workflow) Fires(event string, kind RefKind, ref, action string) bool {
 	return w.FiresWithChanges(event, kind, ref, action, nil, false)
 }
@@ -1895,6 +1956,9 @@ type Match struct {
 func (w *Workflow) FiresMatching(m Match) bool {
 	switch m.Event {
 	case "push":
+		if m.Kind == RefMergeQueue {
+			return false // a merge-queue ref is merge_group, never push
+		}
 		if w.On.Push == nil && !w.On.PushSet {
 			return false
 		}
@@ -1949,6 +2013,15 @@ func (w *Workflow) FiresMatching(m Match) bool {
 			return w.On.WorkflowRunSet && strings.EqualFold(m.Action, "completed")
 		}
 		return w.On.WorkflowRun.fires(m)
+	case "merge_group":
+		if w.On.MergeGroup == nil {
+			// A bare `on: merge_group` means the one emitted activity.
+			return w.On.MergeGroupSet && (m.Action == "" || strings.EqualFold(m.Action, "checks_requested"))
+		}
+		if !matchFilter(w.On.MergeGroup.Branches, w.On.MergeGroup.BranchesIgnore, m.Ref) {
+			return false
+		}
+		return matchPRType(w.On.MergeGroup.Types, m.Action)
 	case "create":
 		return w.On.CreateSet
 	case "delete":
@@ -2056,6 +2129,9 @@ func (w *Workflow) Events() []string {
 	}
 	if w.On.WorkflowRun != nil || w.On.WorkflowRunSet {
 		out = append(out, "workflow_run")
+	}
+	if w.On.MergeGroup != nil || w.On.MergeGroupSet {
+		out = append(out, "merge_group")
 	}
 	if w.On.CreateSet {
 		out = append(out, "create")

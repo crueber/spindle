@@ -78,7 +78,11 @@ const (
 	// deployment records Threads itself writes (PAR-021).
 	EventDeployment       = "deployment"
 	EventDeploymentStatus = "deployment_status"
-	defaultRunActor       = "spindle"
+	// EventMergeGroup is a merge-queue entry (PAR-016): the push hook
+	// recognises a documented queue ref and creates the run whose checks gate
+	// the entry. Queue creation is a separate card.
+	EventMergeGroup = "merge_group"
+	defaultRunActor = "spindle"
 )
 
 // Run states. T1 creates every run in RunQueued; UpdateJob moves it (T2 will
@@ -849,21 +853,24 @@ type CreateOpts struct {
 	// names the tag in RefName.
 	Branch string
 	// RefName is the triggering ref's SHORT name — the branch name, the tag
-	// name for a tag push, or the PR target branch — and is what the
+	// name for a tag push, the PR target branch, or (merge_group) the base
+	// branch the queue entry targets — and is what the
 	// `on.push.branches`/`on.push.tags` globs match (after RefKind picks the
-	// filter). Empty falls back to Branch, so every caller that predates tag
-	// runs keeps its meaning.
+	// filter) and what `on.merge_group.branches` matches. Empty falls back to
+	// Branch, so every caller that predates tag runs keeps its meaning.
 	RefName string
 	// RefKind names the kind of ref the event was delivered for: a branch
-	// (the zero value) or a tag. Only a push distinguishes them; a tag
-	// selects `on.push.tags` and is otherwise treated as a branch so a
-	// non-push event can never state a ref kind it does not have.
+	// (the zero value), a tag, or a merge-queue ref. Only a push distinguishes
+	// them; a tag selects `on.push.tags` and a merge-queue ref is never a push
+	// at all, and a non-push event can never state a ref kind it does not
+	// have.
 	RefKind workflow.RefKind
-	// Action is the pull_request lifecycle action being delivered: opened,
-	// synchronize or reopened (workflow.PullRequestTypes). It is required for
-	// a pull_request and selects the `on.pull_request.types` filter; the
-	// other events ignore it. An action Threads cannot emit is ErrInvalid, so
-	// a caller cannot quietly create a run for an unknown edge.
+	// Action is the lifecycle action being delivered: the pull_request edge
+	// (workflow.PullRequestTypes) or the merge_group activity
+	// (`checks_requested`). It is required for a pull_request, selects the
+	// matching `types` filter, and the other events ignore it. An action
+	// Threads cannot emit is ErrInvalid, so a caller cannot quietly create a
+	// run for an unknown edge.
 	Action string
 	// Ref is the triggering ref ("refs/heads/main", "refs/tags/v1.2.3");
 	// optional. It is what `github.ref` (and the job OIDC token's ref) report,
@@ -945,7 +952,7 @@ func validEvent(event string) bool {
 	switch event {
 	case EventPush, EventPullReq, EventPullTarget, EventDispatch, EventSchedule,
 		EventRelease, EventIssues, EventIssueComment,
-		EventRepositoryDispatch, EventWorkflowRun,
+		EventRepositoryDispatch, EventWorkflowRun, EventMergeGroup,
 		EventCreate, EventDelete, EventDeployment, EventDeploymentStatus,
 		EventPullReview, EventPullReviewComment, EventLabel, EventMilestone,
 		EventCheckRun, EventFork, EventWatch:

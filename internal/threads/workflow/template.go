@@ -104,6 +104,9 @@ var EventFields = []string{
 	"deployment.task", "deployment.creator.login",
 	"deployment_status.state", "deployment_status.description",
 	"deployment_status.creator.login",
+	"merge_group.head_ref", "merge_group.head_sha",
+	"merge_group.base_ref", "merge_group.base_sha",
+	"number",
 }
 
 // RunnerFields is the closed `runner.*` context (PAR-034).

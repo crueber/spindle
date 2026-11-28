@@ -168,6 +168,7 @@ func workflowTriggerNames(w *workflow.Workflow) []string {
 	add("watch", w.On.WatchSet)
 	add("repository_dispatch", w.On.RepositoryDispatch != nil || w.On.RepositoryDispatchSet)
 	add("workflow_run", w.On.WorkflowRun != nil || w.On.WorkflowRunSet)
+	add("merge_group", w.On.MergeGroup != nil || w.On.MergeGroupSet)
 	add("workflow_call", w.On.WorkflowCall != nil || w.On.WorkflowCallSet)
 	add("create", w.On.CreateSet)
 	add("delete", w.On.DeleteSet)

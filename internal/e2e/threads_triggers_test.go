@@ -440,3 +440,81 @@ func postNotify(t *testing.T, s *e2eServer, repo string) {
 		t.Fatalf("notify status = %d", resp.StatusCode)
 	}
 }
+
+// mergeQueueWorkflow is the base branch's file for the merge_group scenario:
+// the queue trigger plus an ordinary push trigger, so one queue-ref push must
+// create exactly one run — the merge_group one.
+const mergeQueueWorkflow = `name: Queue
+on:
+  push:
+  merge_group:
+    types: [checks_requested]
+jobs:
+  checks:
+    runs-on: linux
+    steps:
+      - run: echo "checking ${{ github.event.merge_group.head_sha }}"
+`
+
+// TestE2E_MergeGroupQueueRefStartsChecksRun is PAR-016 end to end against real
+// git: pushing the documented `refs/heads/gh-readonly-queue/<base>/pr-<n>-<sha>`
+// ref starts one merge_group run for the queue head, with the queue ref as
+// github.ref, the base branch's workflow file and the documented payload —
+// while the same commit produces no push run.
+func TestE2E_MergeGroupQueueRefStartsChecksRun(t *testing.T) {
+	if testing.Short() {
+		t.Skip("trigger e2e scenario runs in the e2e tier (make e2e)")
+	}
+	requireModernGit(t)
+
+	g := newGitClient(t)
+	s := triggerServer(t)
+	owner := testOwner
+	repo := uniqueRepo("mergegroup")
+	lane := s.base + "/" + owner + "/" + repo + "/api"
+	gitURL := s.gitURL(owner, repo)
+
+	work := filepath.Join(t.TempDir(), "work")
+	g.initRepo(work)
+	g.commitFile(work, ".spindle/workflows/queue.yml", mergeQueueWorkflow, "workflow")
+	g.commitFile(work, "app.txt", "v1\n", "seed")
+	g.run(work, "remote", "add", "origin", gitURL)
+	g.runAuth(work, chainAliceTok, "push", "-u", "origin", "main")
+
+	// The queue entry's head: a commit on top of the base branch that the queue
+	// card would construct. main on the remote stays where it was.
+	queueHead := g.commitFile(work, "app.txt", "queued\n", "queue entry")
+	ref := "refs/heads/gh-readonly-queue/main/pr-7-" + queueHead
+	g.runAuth(work, chainAliceTok, "push", "origin", "HEAD:"+ref)
+
+	_, runs := waitRun(t, lane, "merge_group", queueHead, 10*time.Second)
+	if len(runs) != 1 {
+		t.Fatalf("merge_group runs = %d, want exactly 1", len(runs))
+	}
+	run := runs[0]
+	if run.Ref != ref || run.Branch != "" {
+		t.Fatalf("run ref/branch = %q/%q, want the queue ref and no branch", run.Ref, run.Branch)
+	}
+	if run.WorkflowPath != ".spindle/workflows/queue.yml" {
+		t.Fatalf("workflow = %q, want the base branch's queue workflow", run.WorkflowPath)
+	}
+	if !run.Trusted {
+		t.Fatal("a merge-group run is repository-owned and must be trusted")
+	}
+	group, ok := run.EventPayload["merge_group"].(map[string]any)
+	if !ok {
+		t.Fatalf("payload has no merge_group object: %+v", run.EventPayload)
+	}
+	if group["head_ref"] != ref || group["head_sha"] != queueHead ||
+		group["base_ref"] != "refs/heads/main" || group["base_sha"] == "" {
+		t.Fatalf("merge_group payload = %+v", group)
+	}
+	if num, _ := run.EventPayload["number"].(float64); int(num) != 7 {
+		t.Fatalf("payload PR number = %v, want 7", run.EventPayload["number"])
+	}
+	// The queue ref is not a push: the same commit must have no push run, and
+	// the commit pushed to main before it must not have a merge_group run.
+	if got := runsFor(t, lane, "push", queueHead); len(got) != 0 {
+		t.Fatalf("queue ref also created %d push run(s)", len(got))
+	}
+}

@@ -268,7 +268,7 @@
       "area": "triggers",
       "capability": "`merge_group` trigger wired to the merge-queue card (no queue semantics here)",
       "provenance": "G",
-      "status": "partial",
+      "status": "have",
       "wave": 3,
       "track": [
         "T3"
@@ -278,13 +278,23 @@
       "acceptance": "A queue entry starts a `merge_group` run whose checks gate the merge",
       "docs_refs": [
         "docs/features/21_parity_master.md \u00a74.2",
-        "docs/threads.md \u00a73.2"
+        "docs/threads.md \u00a73.2",
+        "docs/threads.md \u00a76.10",
+        "docs/WORKFLOWS.md \u00a73.7"
       ],
       "tests": [
-        "TestMergeGroupRefusedByName",
-        "TestRefusedTriggerNames"
+        "TestMergeGroupParseAndFires",
+        "TestMergeGroupTypeValidation",
+        "TestParseMergeQueueRef",
+        "TestCreateRunMergeGroup",
+        "TestCreateRunMergeGroupRefusals",
+        "TestMergeGroupPushHookStartsOneRun",
+        "TestMergeGroupPushHookIgnoresOtherRefs",
+        "TestMergeGroupRunChecksGate",
+        "TestMergeGroupTriggerTranslates",
+        "TestE2E_MergeGroupQueueRefStartsChecksRun"
       ],
-      "notes": "Wave 3. `merge_group` is a NAMED PARSE ERROR naming the missing merge queue, never an accepted-and-inert trigger: the queue itself is the separate Spindle backlog card \"Merge queue\", and this row turns `have` when that card lands the emitter with the documented ref shape `refs/heads/gh-readonly-queue/<base>/pr-<n>-<sha>` whose checks gate the merge. Nothing here implements queue semantics."
+      "notes": "Wave 3 trigger implemented in Wave 7. `on.merge_group` parses (`types: [checks_requested]`, optional `branches`/`branches-ignore` on the target branch), and the push hook turns a push to the documented `refs/heads/gh-readonly-queue/<base>/pr-<n>-<sha>` ref into exactly one run: `github.ref` is the queue ref, `github.ref_name` its short name, `github.sha` the queue head, the payload carries `merge_group.head_ref`/`head_sha`/`base_ref`/`base_sha` plus `number`, and the workflow is the base branch's (repository-owned, trusted). A queue ref never fires `push`; an ordinary branch/tag creates no `merge_group`; a malformed queue-shaped ref creates nothing and is logged with the expected shape. The mirrored checks land on the queue head, so the existing required-checks merge gate reads a merge-group run like any other job. QUEUE DEPENDENCY: creating these refs, batching entries and landing the merge remain the separate Spindle backlog card \"Merge queue\"; this row is the trigger + run contract, not queue semantics."
     },
     {
       "id": "PAR-017",

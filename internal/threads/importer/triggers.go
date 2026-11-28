@@ -25,6 +25,7 @@ var supportedEvents = map[string]bool{
 	"pull_request_review_comment": true,
 	"label":                       true,
 	"milestone":                   true,
+	"merge_group":                 true,
 }
 
 // triggers translates `on`, in all three spellings it accepts.
@@ -93,6 +94,12 @@ func (t *translator) triggers(m *yaml.Node, i int) {
 				t.translated++ // a bare trigger with no filters
 			case "release", "issues", "issue_comment", "pull_request_review", "pull_request_review_comment", "label", "milestone", "check_run":
 				if t.typedTrigger(val, j, path, ev.Value) {
+					t.translated++
+				} else {
+					j -= 2
+				}
+			case "merge_group":
+				if t.mergeGroupTrigger(val, j, path) {
 					t.translated++
 				} else {
 					j -= 2
@@ -447,10 +454,41 @@ func (t *translator) scheduleTrigger(m *yaml.Node, i int, path string) bool {
 	return true
 }
 
+// mergeGroupTrigger carries `on.merge_group` (PAR-016): the one emitted
+// activity plus the target-branch filters. The two branch lists are mutually
+// exclusive in the target parser, so the ignore twin is dropped with a note
+// rather than emitting a file that will not parse.
+func (t *translator) mergeGroupTrigger(m *yaml.Node, i int, path string) bool {
+	val := m.Content[i+1]
+	if val.Kind == yaml.MappingNode {
+		hasBranches, hasIgnore := false, false
+		for j := 0; j < len(val.Content); j += 2 {
+			switch val.Content[j].Value {
+			case "branches":
+				hasBranches = true
+			case "branches-ignore":
+				hasIgnore = true
+			}
+		}
+		if hasBranches && hasIgnore {
+			for j := 0; j < len(val.Content); j += 2 {
+				if val.Content[j].Value != "branches-ignore" {
+					continue
+				}
+				t.drop(val, j, t.untranslatedAt(path+".branches-ignore", "on.merge_group.branches-ignore",
+					"`branches` and `branches-ignore` cannot both be set; use `branches` with a `!` pattern"))
+				break
+			}
+		}
+	}
+	return t.typedTrigger(m, i, path, "merge_group", true)
+}
+
 // typedTrigger translates a release/issues/issue_comment trigger: only `types`
 // is part of the schema, and every type is checked against the set the owning
-// service emits (a type that can never fire is dropped by name).
-func (t *translator) typedTrigger(m *yaml.Node, i int, path, event string) bool {
+// service emits (a type that can never fire is dropped by name). A merge_group
+// call also allows its target-branch lists (branchFilters=true).
+func (t *translator) typedTrigger(m *yaml.Node, i int, path, event string, branchFilters ...bool) bool {
 	val := m.Content[i+1]
 	if isNull(val) {
 		return true
@@ -459,6 +497,7 @@ func (t *translator) typedTrigger(m *yaml.Node, i int, path, event string) bool 
 		t.drop(m, i, t.untranslatedAt(path, event, "the filters must be a mapping"))
 		return false
 	}
+	allowBranches := len(branchFilters) > 0 && branchFilters[0]
 	supported := map[string][]string{
 		"release":                     workflow.ReleaseTypes,
 		"issues":                      workflow.IssuesTypes,
@@ -467,10 +506,21 @@ func (t *translator) typedTrigger(m *yaml.Node, i int, path, event string) bool 
 		"pull_request_review_comment": workflow.ReviewCommentTypes,
 		"label":                       workflow.LabelTypes,
 		"milestone":                   workflow.MilestoneTypes,
+		"merge_group":                 workflow.MergeGroupTypes,
 	}[event]
 	for j := 0; j < len(val.Content); j += 2 {
 		f := val.Content[j]
 		p := path + "." + f.Value
+		if allowBranches && (f.Value == "branches" || f.Value == "branches-ignore") {
+			tv := val.Content[j+1]
+			if tv.Kind != yaml.SequenceNode {
+				t.drop(val, j, t.untranslatedAt(p, "on."+event+"."+f.Value, "expected a list of branch patterns"))
+				j -= 2
+				continue
+			}
+			t.translated++
+			continue
+		}
 		if f.Value != "types" {
 			t.drop(val, j, t.untranslatedAt(p, "on."+event+"."+f.Value, "not part of the Spindle trigger schema"))
 			j -= 2

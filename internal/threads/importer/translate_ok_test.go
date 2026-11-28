@@ -652,3 +652,110 @@ func TestFlowKeysRefusedByShape(t *testing.T) {
 		})
 	}
 }
+
+// TestMergeGroupTriggerTranslates pins PAR-016's importer half: a GitHub
+// workflow that adds the merge_group trigger (the documented way to keep
+// required checks alive when a pull request enters a queue) converts to a file
+// the engine parses and fires, with its type and target-branch filters intact.
+func TestMergeGroupTriggerTranslates(t *testing.T) {
+	src := `name: Queue checks
+on:
+  pull_request:
+    branches: [main]
+  merge_group:
+    types: [checks_requested]
+    branches: [main]
+jobs:
+  checks:
+    runs-on: linux
+    steps:
+      - run: echo "${{ github.event.merge_group.head_sha }}"
+`
+	res := okTranslate(t, GitHub, src)
+	out := string(res.Output)
+	if !strings.Contains(out, "merge_group:") || !strings.Contains(out, "checks_requested") {
+		t.Fatalf("merge_group was not translated:\n%s", out)
+	}
+	if len(res.Untranslated) != 0 {
+		t.Fatalf("merge_group left refusals: %+v", res.Untranslated)
+	}
+	w, err := workflow.Parse(res.Output)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !w.On.MergeGroupSet || w.On.MergeGroup == nil {
+		t.Fatal("converted file lost the merge_group trigger")
+	}
+	if !w.Fires("merge_group", workflow.RefMergeQueue, "main", "checks_requested") {
+		t.Fatal("converted trigger does not fire on a queue entry for main")
+	}
+}
+
+// TestMergeGroupImporterEdges covers the merge_group filter branches: the
+// ignore list alone, the two-list conflict (the ignore twin is dropped with a
+// named refusal), a non-sequence branch list, an unemitted activity, and a
+// non-mapping body.
+func TestMergeGroupImporterEdges(t *testing.T) {
+	// branches-ignore alone is carried.
+	res := okTranslate(t, GitHub, `on:
+  merge_group:
+    branches-ignore: [dev]
+jobs:
+  j:
+    runs-on: linux
+    steps:
+      - run: echo
+`)
+	if len(res.Untranslated) != 0 || !strings.Contains(string(res.Output), "branches-ignore") {
+		t.Fatalf("branches-ignore was not carried: %+v\n%s", res.Untranslated, res.Output)
+	}
+
+	// Both lists: the ignore twin is refused by name, the include list stays,
+	// and the output still parses.
+	res, err := Translate(GitHub, []byte(`on:
+  merge_group:
+    branches: [main]
+    branches-ignore: [dev]
+jobs:
+  j:
+    runs-on: linux
+    steps:
+      - run: echo
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(res.Untranslated) != 1 || res.Untranslated[0].Path != "on.merge_group.branches-ignore" {
+		t.Fatalf("conflict was not refused by name: %+v", res.Untranslated)
+	}
+	if strings.Contains(string(res.Output), "branches-ignore: [") {
+		t.Fatalf("the conflicting ignore list was kept:\n%s", res.Output)
+	}
+	if _, err := workflow.Parse(res.Output); err != nil {
+		t.Fatalf("output does not parse: %v\n%s", err, res.Output)
+	}
+
+	// A non-sequence branch list, a non-mapping body and an unemitted type are
+	// each a named refusal, and the surviving file parses.
+	for _, tc := range []struct {
+		src  string
+		want string
+	}{
+		{"on:\n  merge_group:\n    branches: main\n", "on.merge_group.branches"},
+		{"on:\n  merge_group: every\n", "on.merge_group"},
+		{"on:\n  merge_group:\n    types: checks_requested\n", "on.merge_group.types"},
+		{"on:\n  merge_group:\n    types: [destroyed]\n", "on.merge_group.types"},
+		{"on:\n  merge_group:\n    types: []\n", "on.merge_group.types"},
+	} {
+		res, err := Translate(GitHub, []byte(tc.src+"jobs:\n  j:\n    runs-on: linux\n    steps:\n      - run: echo\n"))
+		if err != nil {
+			t.Fatalf("%s: %v", tc.want, err)
+		}
+		if len(res.Untranslated) == 0 || res.Untranslated[0].Path != tc.want {
+			t.Fatalf("%s: refusals = %+v", tc.want, res.Untranslated)
+		}
+		if _, err := workflow.Parse(res.Output); err != nil {
+			t.Fatalf("%s: output does not parse: %v\n%s", tc.want, err, res.Output)
+		}
+	}
+}

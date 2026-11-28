@@ -198,6 +198,33 @@ func (s *Service) CreateRun(ctx context.Context, repo, commit, event string, opt
 	if (event == EventDeployment || event == EventDeploymentStatus) && opts.ChainDepth > maxWorkflowRunChain {
 		return nil, fmt.Errorf("%w: deployment event chain depth %d exceeds the %d-run cap", ErrUnprocessable, opts.ChainDepth, maxWorkflowRunChain)
 	}
+	// merge_group (PAR-016): the ref IS the event's identity (base branch, PR
+	// number and head sha all come from it), so it is validated here and the
+	// run can never be created for a ref outside the documented shape. A
+	// malformed queue ref is a named refusal, never an ordinary branch run.
+	var mergeGroup MergeQueueRef
+	if event == EventMergeGroup {
+		if action == "" {
+			action = "checks_requested"
+		}
+		if !containsFoldString(workflow.MergeGroupTypes, action) {
+			return nil, fmt.Errorf("%w: merge_group type must be one of %s, got %q", ErrInvalid,
+				strings.Join(workflow.MergeGroupTypes, ", "), action)
+		}
+		mq, ok := ParseMergeQueueRef(opts.Ref)
+		if !ok {
+			return nil, MergeGroupRefusal(opts.Ref)
+		}
+		if base := strings.TrimPrefix(strings.TrimSpace(opts.BaseBranch), "refs/heads/"); base != "" && base != mq.BaseBranch {
+			return nil, fmt.Errorf("%w: merge_group ref %q targets base branch %q, not the caller's %q", ErrInvalid, mq.Ref, mq.BaseBranch, base)
+		}
+		if strings.TrimSpace(opts.RefName) == "" {
+			// The trigger's branch filters read the TARGET branch (the ref's
+			// base), never the queue ref's short name.
+			opts.RefName = mq.BaseBranch
+		}
+		mergeGroup = mq
+	}
 	if _, perr := EncodeEventPayload(opts.EventPayload); perr != nil {
 		return nil, perr
 	}
@@ -263,6 +290,31 @@ func (s *Service) CreateRun(ctx context.Context, repo, commit, event string, opt
 		}
 		workflowCommit, sha = normalized, normalized
 		opts.Branch, opts.Ref = base, "refs/heads/"+base
+	case event == EventMergeGroup:
+		// PAR-016: a merge group runs the BASE branch's workflow file — the
+		// repository owns both sides of the queue entry, so there is no fork
+		// trust question and no contributor's file is executed. The run still
+		// reports the queue ref and its head commit (github.ref/github.sha),
+		// and its jobs' checks land on that commit for the merge gate to read.
+		resolved := strings.TrimSpace(opts.BaseCommit)
+		if resolved == "" {
+			r, rerr := s.Git.ResolveRef(ctx, repo, mergeGroup.BaseRef)
+			if rerr != nil {
+				return nil, rerr
+			}
+			resolved = r
+		}
+		normalized, nerr := normalizeSHA(resolved)
+		if nerr != nil {
+			return nil, nerr
+		}
+		workflowCommit = normalized
+		opts.BaseBranch, opts.BaseCommit = mergeGroup.BaseBranch, normalized
+		payloadActor := strings.TrimSpace(opts.Actor)
+		if payloadActor == "" {
+			payloadActor = defaultRunActor
+		}
+		opts.EventPayload = fillMergeGroupPayload(opts.EventPayload, repo, mergeGroup, sha, normalized, payloadActor)
 	case event == EventRelease || event == EventIssues || event == EventIssueComment ||
 		event == EventRepositoryDispatch || event == EventWorkflowRun ||
 		event == EventCreate || event == EventDelete ||
@@ -432,8 +484,13 @@ func (s *Service) CreateRun(ctx context.Context, repo, commit, event string, opt
 func refTargetOf(event string, opts CreateOpts) (workflow.RefKind, string, string) {
 	kind := workflow.RefBranch
 	branch := strings.TrimSpace(opts.Branch)
-	if event == EventPush && opts.RefKind == workflow.RefTag {
+	switch {
+	case event == EventPush && opts.RefKind == workflow.RefTag:
 		kind, branch = workflow.RefTag, ""
+	case event == EventMergeGroup:
+		// The queue ref is the run's ref; its short name is github.ref_name,
+		// so Branch stays empty (a queue ref is not a branch a push can move).
+		kind, branch = workflow.RefMergeQueue, ""
 	}
 	name := strings.TrimSpace(opts.RefName)
 	if name == "" {

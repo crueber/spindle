@@ -121,6 +121,7 @@ metadata and matrix axes. A file with an unknown key runs nothing and is reporte
 | `pull_request_target` | same as `pull_request` | the same PR edges, with the **base branch's** file and base secrets; off per repository by default (§3.2) |
 | `repository_dispatch` | `types` | `POST …/api/threads/dispatches` with a write role (§3.7) |
 | `workflow_run` | `workflows`, `types`, `branches`, `branches-ignore` | another workflow run's lifecycle; omitted `types` means `completed` (§3.7) |
+| `merge_group` | `types` (`checks_requested`), `branches`, `branches-ignore` | a push to a merge-queue ref (`refs/heads/gh-readonly-queue/<base>/pr-<n>-<sha>`); the run checks the queue head with the **base branch's** file (§3.7) |
 | `create` / `delete` | none | a branch or tag created/deleted by a push (§3.7) |
 | `deployment` / `deployment_status` | none | a Threads deployment record created or decided (§3.7) |
 | `workflow_dispatch` | `inputs` | a manual dispatch from the UI, API or CLI |
@@ -499,6 +500,7 @@ reports the count. See [`threads.md` §6.4](threads.md#64-schedule) and §9.1a.
 | `pull_request_target` | PR opened/synchronize/reopened | yes | **yes** | the **base branch tip** (a head checkout needs the second switch) |
 | `repository_dispatch` | API dispatch (write role) | yes | yes | the **default branch tip** |
 | `workflow_run` | an upstream run's edge | yes (unless the upstream was untrusted, which holds it) | yes | the **default branch tip** |
+| `merge_group` | the push hook, for a merge-queue ref | yes | yes | the **base branch tip** (the run reports the queue ref and its head commit) |
 | `create` / `delete` | the push hook | yes | yes | the **default branch tip** |
 | `deployment` / `deployment_status` | a deployment record | yes | yes | the **default branch tip** |
 | `label` / `milestone` | the issues service | yes | yes | the **default branch tip** |
@@ -552,6 +554,8 @@ on:
     branches: [main]
   repository_dispatch:
     types: [deploy]
+  merge_group:
+    types: [checks_requested]
   create:
   delete:
 jobs:
@@ -588,12 +592,22 @@ jobs:
 - **`check_run`**: `created` when an external CI report first writes a check run and `completed` when
   it reaches a terminal state. Threads' own mirrored check is the run itself and never re-fires this
   trigger, so a workflow cannot trigger a copy of itself.
-- **Named refusals**: `merge_group`, `status`, `check_suite`, `registry_package`, `gollum`,
+- **`merge_group`**: a merge queue hands work to CI by pushing a read-only ref with the documented
+  shape `refs/heads/gh-readonly-queue/<base>/pr-<n>-<sha>`. That push starts **one** `merge_group`
+  run — never a `push` run — whose `github.ref` is the queue ref, `github.ref_name` its short name
+  and `github.sha` the ref tip (the merge-group commit; the `<sha>` in the name identifies the pull
+  request head). The workflow file is the **base branch's** (both sides of a queue
+  entry are repository-owned, so there is no fork trust question), and the payload carries
+  `merge_group.head_ref`/`head_sha`/`base_ref`/`base_sha` plus `number` (the pull request). `types`
+  accepts `checks_requested` (the only activity the queue emits); a malformed or ordinary ref
+  creates nothing. The run's mirrored checks land on the queue head, which is what the required-checks
+  merge gate reads — the **queue itself** (batching entries, creating these refs, landing the merge)
+  is a separate product surface; this trigger is the contract it hands off to. A job-token push
+  starts nothing here either.
+- **Named refusals**: `status`, `check_suite`, `registry_package`, `gollum`,
   `page_build`, `branch_protection_rule`, `public`, `discussion`, `discussion_comment` and
   `pull_request_review_thread` are **parse errors naming why** — this engine does not emit them, and
-  a trigger that can never fire is not accepted. `merge_group` returns when the separate
-  merge-queue item lands, with the documented
-  `refs/heads/gh-readonly-queue/<base>/pr-<n>-<sha>` ref shape.
+  a trigger that can never fire is not accepted.
 
 ## 4. Steps and actions
 
@@ -1302,8 +1316,8 @@ secrets are added last, by name. Every step sees:
 | `CI`, `GITHUB_ACTIONS`, `SPINDLE` | `true` |
 | `GITHUB_REPOSITORY` / `SPINDLE_REPO` | `owner/repo` |
 | `GITHUB_SHA` / `SPINDLE_SHA` | the run's commit |
-| `GITHUB_REF` / `SPINDLE_REF` | the triggering ref: `refs/heads/<branch>` (a PR: the base branch — the job's identity; the run header and `${{ github.ref }}` carry `refs/pull/<n>/merge`, §3.2), or `refs/tags/<tag>` for a tag push, where `GITHUB_REF_NAME` is the tag |
-| `GITHUB_REF_NAME` / `GITHUB_EVENT_NAME` | the ref's short name (branch, tag, or PR base branch) / `push`, `pull_request`, `pull_request_target`, `repository_dispatch`, `workflow_run`, `create`, `delete`, `deployment`, `deployment_status`, `workflow_dispatch`, `schedule`, `release`, `issues`, `issue_comment`, `pull_request_review`, `pull_request_review_comment`, `label`, `milestone`, `fork`, `watch`, `check_run` |
+| `GITHUB_REF` / `SPINDLE_REF` | the triggering ref: `refs/heads/<branch>` (a PR: the base branch — the job's identity; the run header and `${{ github.ref }}` carry `refs/pull/<n>/merge`, §3.2), `refs/tags/<tag>` for a tag push, or the full queue ref for a `merge_group` run (§3.7) |
+| `GITHUB_REF_NAME` / `GITHUB_EVENT_NAME` | the ref's short name (branch, tag, PR base branch, or the queue ref's short name) / `push`, `pull_request`, `pull_request_target`, `repository_dispatch`, `workflow_run`, `merge_group`, `create`, `delete`, `deployment`, `deployment_status`, `workflow_dispatch`, `schedule`, `release`, `issues`, `issue_comment`, `pull_request_review`, `pull_request_review_comment`, `label`, `milestone`, `fork`, `watch`, `check_run` |
 | `GITHUB_EVENT_PATH` / `FORGEJO_EVENT_PATH` | `/tmp/spindle-event.json`: the bounded event payload, written before the first step |
 | `RUNNER_OS`, `RUNNER_ARCH`, `RUNNER_NAME`, `RUNNER_TEMP`, `RUNNER_TOOL_CACHE`, `RUNNER_ENVIRONMENT`, `RUNNER_DEBUG` | `Linux`, `X64`/`ARM64`/…, the registered runner name, writable `/tmp/spindle-temp` and `/tmp/spindle-tool-cache`, `self-hosted`, `0` |
 | `SPINDLE_EVENT_PATH`, `SPINDLE_RUNNER_*` | the same values in spindle spelling |
@@ -2943,8 +2957,9 @@ the answer where the other gaps are listed.
 
 | Source construct | Why it is refused, or what it does today | What to do in the Spindle workflow |
 |---|---|---|
-| `on:` a trigger the **engine** cannot emit (`merge_group`, `status`, `check_suite`, `registry_package`, `gollum`, `page_build`, `branch_protection_rule`, `public`, `discussion`, `discussion_comment`, `pull_request_review_thread`) | a named engine refusal (`on: <name>: <why>` at parse), never an accepted-and-inert key; `merge_group` waits on the merge-queue card | dispatch the work (`workflow_dispatch`) or start it from a `push`; the trigger is removed |
+| `on:` a trigger the **engine** cannot emit (`status`, `check_suite`, `registry_package`, `gollum`, `page_build`, `branch_protection_rule`, `public`, `discussion`, `discussion_comment`, `pull_request_review_thread`) | a named engine refusal (`on: <name>: <why>` at parse), never an accepted-and-inert key | dispatch the work (`workflow_dispatch`) or start it from a `push`; the trigger is removed |
 | `on:` a trigger the engine emits but the importer has not learned yet (`repository_dispatch`, `workflow_run`, `pull_request_target`, `create`/`delete`, `deployment`/`deployment_status`) | the engine parses and fires it (gated as §3.2/§3.7 documents); the importer reports it `UNTRANSLATED` by name today | convert, then add the trigger by hand; the importer names it in the report so nothing is silent |
+| `on.merge_group` (`types`, `branches`, `branches-ignore`) | **supported**: carried as written; only `checks_requested` is accepted, and the run checks a queue ref with the base branch's file (§3.7) | nothing to change |
 | `on.push.paths` / `paths-ignore`, `on.pull_request.paths` / `paths-ignore` | **supported**: the changed-file filter (§3.1) for a push (pre-image diff) and a PR (merge-base diff) | nothing to change |
 | `on.push.branches-ignore` / `tags-ignore` | **supported**: exclusion lists, and the include form with `!` mixes both (§3.1) | nothing to change |
 | `pull_request.types` values the services never emit (`deleted`, `locked`, …) | the services emit exactly the vocabulary in §3.2 | the unsupported values are dropped (the supported ones are kept); restructure around the emitted actions |
@@ -3135,8 +3150,8 @@ compatibility surface has its own gate:
 
 - **`make parity`** runs the conformance gate and the corpus. The gate reads
   [`features/parity/parity.json`](features/parity/parity.json) (one row per
-  capability — **119 rows at the last close: 116 `have`, 1 `partial` (the
-  merge-queue trigger), 0 `missing`, 2 signed `non-goal`**) and fails when a row
+  capability — **119 rows at the last close: 117 `have`, 0 `partial`,
+  0 `missing`, 2 signed `non-goal`**) and fails when a row
   marked **have** does not name a test that
   exists in the tree, when a gap is unplanned (no wave, no decision), when the
   master plan and the matrix disagree on which rows exist, or when the generated

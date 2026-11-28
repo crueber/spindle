@@ -373,7 +373,7 @@ both, with no docker and no network:
   run-creation path; the trigger tier drives the corpus's real trigger shapes
   (a tags-only file fires on a matching tag and on nothing else). All four
   Weave/Scriobh files convert with **no refusals** today, and the matrix is
-  **119 rows — 116 `have`, 1 `partial` (`PAR-016`, the merge-queue trigger),
+  **119 rows — 117 `have`, 0 `partial`,
   0 `missing`, 2 signed `non-goal`**. A file whose feature
   rows are not green yet must instead fail with the documented refusal (an
   `# UNTRANSLATED:` marker the importer emitted, or a parse error the harness
@@ -397,6 +397,7 @@ tier is requested, a missing daemon or image is a failure, never a skip.
 | `pull_request_target` | same filters as `pull_request` | the same PR edges, but the **base branch's** workflow file runs with base secrets and a write token. Off per repository by default (D-2); enabling it is a maintain+ audited switch (`pull_request_target`), and a declarative head checkout needs the second switch (`pr_target_allow_head_checkout`) |
 | `repository_dispatch` | `types:` (the dispatcher's `event_type` strings) | `POST …/api/threads/dispatches` with a write role; `github.event.client_payload.*` is the bounded payload |
 | `workflow_run` | `workflows` (upstream names), `types` (`requested`, `completed`; default `completed`), `branches`, `branches-ignore` | another run's lifecycle edge; the upstream run's name/branch are the filter, the file comes from the default branch, and an untrusted upstream holds the follow-up for approval (D-3) |
+| `merge_group` | `types` (`checks_requested`), `branches`, `branches-ignore` (target branch) | a push to the documented merge-queue ref `refs/heads/gh-readonly-queue/<base>/pr-<n>-<sha>`; one run checks the queue head with the **base branch's** file, and a queue ref never fires `push` (§6.10) |
 | `create` / `delete` | none | a branch or tag created/deleted (`ref_type` in the payload). A job-token push still starts nothing |
 | `deployment` / `deployment_status` | none | a Threads deployment record is created (`deployment`) or changes state (`deployment_status`, states `pending`, `in_progress`, `failure`) |
 | `workflow_dispatch` | `inputs:` (see below) | a manual dispatch from the UI/API |
@@ -542,17 +543,18 @@ reader cannot build one, the run falls back to the head commit and
 `pull_request.merge_commit_sha` is set only when a real merge commit exists.
 
 **Named refusals.** The repository/check/deploy family has more names than
-emittable events. Each of `merge_group`, `status`, `check_suite`,
+emittable events. Each of `status`, `check_suite`,
 `registry_package`, `gollum`, `page_build`, `branch_protection_rule`, `public`,
 `discussion`, `discussion_comment` and `pull_request_review_thread` is a **parse
 error naming why it cannot fire** — never an accepted trigger that never runs.
-`merge_group` specifically waits on the separate Merge queue backlog item: when
-it lands it becomes an emitter with the documented
-`refs/heads/gh-readonly-queue/<base>/pr-<n>-<sha>` ref shape; until then the
-parse error names the missing queue. `status` names the missing legacy
+`status` names the missing legacy
 commit-status surface (this instance's checks are check runs, not statuses),
 `check_suite` the missing app check-suite object (individual check runs are
 emitted), and `discussion`(+comment) the missing discussion surface.
+`merge_group` is no longer in this list: the trigger and its run contract are
+implemented against the merge queue's documented ref shape (§6.10); what the
+separate Merge queue card still owns is creating those refs and landing the
+merge.
 
 **The issue/review definition family.** `pull_request_review`,
 `pull_request_review_comment`, `label` and `milestone` are emitted by the
@@ -2875,6 +2877,8 @@ creator, the producing `run_id`/`job_id`, the latest `state`, the queue position
 - the workflow file is read at the pushed commit, so a push that changes both code and workflow uses
   the new workflow;
 - a push authenticated by a job token creates nothing (§5.3), for branches and tags alike;
+- a merge-queue ref (`refs/heads/gh-readonly-queue/…`) is never a branch push: it starts
+  `merge_group` runs only (§6.10), whatever `on.push` says;
 - a pull request **merge** creates a `push` run for the base branch (the merge commit), because the
   merge moves the base ref server-side.
 
@@ -3046,7 +3050,44 @@ lifecycle edge and the upstream head branch. The payload carries the upstream ru
   `creator.login`, plus `deployment_status.state`/`description` on the status event. The file is the
   default branch's, and deployment events count against the same follow-up chain depth.
 
-### 6.10 Concurrency caps and queue reasons (PAR-153/PAR-156)
+### 6.10 The merge queue (`merge_group`, PAR-016)
+
+- **The ref is the hand-off.** A merge queue gives CI its work through a read-only git ref with the
+  documented shape:
+
+  ```
+  refs/heads/gh-readonly-queue/<base-branch>/pr-<number>-<sha>
+  ```
+
+  The push hook recognises exactly that shape (the base may contain slashes, the number has no
+  leading zero, the sha is a full lowercase 40- or 64-hex id). One such push creates **one**
+  `merge_group` run; the same commit pushed as an ordinary branch or a tag creates none, and a queue
+  ref itself never fires `on: push`. A ref that claims the `gh-readonly-queue/` prefix but does not
+  match the shape creates **nothing at all** — not a branch build — and is logged with the expected
+  shape.
+- **The run's identity.** `github.ref` is the full queue ref, `github.ref_name` its short name
+  (`gh-readonly-queue/main/pr-7-<sha>`), `github.sha` the ref's tip (the merge-group commit), and the
+  run record keeps no branch (`run.branch` is empty) so a queue entry can never be mistaken for a
+  branch push. `event` is `merge_group`. The `<sha>` segment in the ref name identifies the entry's
+  pull-request head and is validated as a full lowercase object id; the tip is what CI checks (the
+  same split GitHub documents).
+- **The workflow is the base branch's.** Both sides of a queue entry are repository-owned, so there
+  is no fork trust question and no contributor file is executed: the file is read at the base branch
+  tip, the run is trusted, and secrets are available under the normal rules. `types` accepts
+  `checks_requested`, the one activity the queue emits; `branches`/`branches-ignore` filter the
+  target branch.
+- **The payload** is a bounded projection with `action: checks_requested`, `number` (the pull
+  request) and `merge_group.head_ref`/`head_sha`/`base_ref`/`base_sha`. Read it as
+  `${{ github.event.merge_group.head_sha }}` or from `$GITHUB_EVENT_PATH`.
+- **Whose checks gate the merge.** The run's jobs mirror onto the queue head sha exactly like any
+  other job (§7), so a `require_checks` rule naming the workflow's contexts reads them with
+  `CheckRequiredChecks` on that sha. The queue entry is mergeable only when those checks are green —
+  the gate needs no merge-group-specific code.
+- **Not here: queue creation.** What to enqueue, batching several pull requests, moving the base
+  and landing the merge are the separate **Merge queue** backlog card. This trigger is the contract
+  the queue hands off to; the card pushes the documented refs and consumes the run's checks.
+
+### 6.11 Concurrency caps and queue reasons (PAR-153/PAR-156)
 
 - A repository may set `concurrency_cap` (0 = unlimited, 1…500). When a run is created while that
   many runs are already live (queued or running, not approval-held), its jobs are written with
@@ -3123,6 +3164,11 @@ At merge time the union of matching rules' `require_checks` is checked against t
 every context must be present **and** `success`, or the merge is refused with a message naming each
 offender as `<context> (missing)` or `<context> (state)`. Threads writes through the same trusted
 in-process reporter as any external CI report, so no gate code knows the difference.
+
+A `merge_group` run (§6.10) mirrors onto the queue head sha, not a pull request head, because its
+`github.sha` is the queue entry's head commit. A queue card that asks "may this entry land?" reads
+the same `require_checks` union for that sha and gets the merge-group run's checks — the gate has no
+merge-queue-specific branch, and queue creation itself is not part of it.
 
 Checks are **independent of run retention**: deleting an old run never deletes its checks, so an old
 green (or red) required check still gates. Only the run page's log/step history disappears.
@@ -3318,7 +3364,7 @@ a docker socket is root-equivalent on that host whatever its allowlist says.
   server-side ceiling and no central worker counter — every claim is a per-entry CAS, so throughput
   grows linearly and fairness is FIFO by enqueue order within a label set.
 - Concurrency groups cap a *run* (not a runner): one running and one pending run per group per repository (§3.1a.1).
-- A repository's `concurrency_cap` (§6.10) caps *live runs per repository* (0…500), holding new runs
+- A repository's `concurrency_cap` (§6.11) caps *live runs per repository* (0…500), holding new runs
   with a named reason; an organization's cap (same bound, org owner audited) caps live runs across all
   its repositories. Both are admission heuristics, not locks, and both name the one reason a job
   waits.
@@ -3987,10 +4033,11 @@ Plainly, so nobody plans around them:
   output templates are the call's interface and are enforced. Not supported, each a named refusal:
   `secrets: inherit` across a repository boundary (D-6), a mutable remote ref, a matrix caller, and
   environment secrets inherited by a callee.
-- **No `merge_group` trigger** (and no merge queue): the queue it would gate does not exist yet,
-  so the name is a parse error naming the missing queue (PAR-016). `status` (no legacy
-  commit-status surface) and `check_suite` (no app check-suite object; individual check runs are
-  emitted) are refused by name, as are the surfaces spindle lacks (`registry_package`, `gollum`,
+- **Merge queue (`merge_group`)**: the TRIGGER and run contract are implemented (§6.10) against the
+  documented `refs/heads/gh-readonly-queue/<base>/pr-<n>-<sha>` ref; the queue that creates those
+  refs, batches entries and lands the merge is the separate Merge queue backlog card. `status` (no
+  legacy commit-status surface) and `check_suite` (no app check-suite object; individual check runs
+  are emitted) are refused by name, as are the surfaces spindle lacks (`registry_package`, `gollum`,
   `page_build`, `branch_protection_rule`, `public`, `discussion`(+comment)). Every event in the
   §3.2 table is emitted; `workflow_call` is a call interface, not an event. `defaults:` and
   `strategy.max-parallel` ARE
@@ -4014,6 +4061,6 @@ Plainly, so nobody plans around them:
   workflow-declared `entrypoint`/`command` owns the container process, but it cannot widen the
   daemon's own limits or open a fixed host port. Larger-runner sizing is a runner-declared ceiling
   (§8.3, PAR-176), not a hosted size class.
-- **Concurrency caps are per repository and per organization** (§6.10): each `concurrency_cap`
+- **Concurrency caps are per repository and per organization** (§6.11): each `concurrency_cap`
   (0…500) holds new runs with one named reason; the organization cap spans every repository it owns.
 - **No checks re-run separate from a job re-run**, and no log retention beyond the run's own window.

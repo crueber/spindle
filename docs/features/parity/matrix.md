@@ -7,7 +7,7 @@ Source of truth: [`parity.json`](parity.json) (one row per `PAR-` id). The plan 
 [`21_parity_master.md`](../21_parity_master.md). Regenerate with
 `go run ./internal/devtools/paritygate -check=false`; gate with `make parity`.
 
-**119 rows** — 116 have · 1 partial · 0 missing · 2 non-goal.
+**119 rows** — 117 have · 0 partial · 0 missing · 2 non-goal.
 A `have` row is green only because its acceptance test is committed and named here;
 the gate fails a green row whose test is missing from the tree.
 
@@ -30,7 +30,7 @@ the gate fails a green row whose test is missing from the tree.
 | PAR-013 | Filter glob dialect: `*`, `**`, `?`, `+`, ordered `!` negation, `branches-ignore`/`tags-ignore` | have | 2 | T1 |  | `TestFilterDialect`<br>`TestFilterOrderedNegation`<br>`TestFilterParseErrors`<br>`TestPushPathsFilter` |
 | PAR-014 | Full `pull_request.types` vocabulary and its emitters (closed, labeled, ready_for_review, review_requested, …) | have | 2 | T3 |  | `TestPullRequestTypesMatrix`<br>`TestPullEventsOpenedSynchronizeReopened`<br>`TestPullEventsDraftAndEditEdges`<br>`TestPullEventsClosedOnMerge`<br>`TestThreadEventsCoverIssueEdges` |
 | PAR-015 | `pull_request_target`: base-tip file, base secrets, write token, head fetchable | have | 2 | T3 | S5 | `internal/e2e/threads_pr_target_test.go#TestE2E_ThreadsPullRequestTarget`<br>`internal/threads/wave3_triggers_test.go#TestPullRequestTargetOffByDefault`<br>`internal/threads/wave3_triggers_test.go#TestPullRequestTargetHeadCheckoutNeedsSecondSwitch`<br>`internal/threads/wave3_triggers_test.go#TestPRTargetHeadCheckoutRefusalShapes` |
-| PAR-016 | `merge_group` trigger wired to the merge-queue card (no queue semantics here) | partial | 3 | T3 |  | `TestMergeGroupRefusedByName`<br>`TestRefusedTriggerNames` |
+| PAR-016 | `merge_group` trigger wired to the merge-queue card (no queue semantics here) | have | 3 | T3 |  | `TestMergeGroupParseAndFires`<br>`TestMergeGroupTypeValidation`<br>`TestParseMergeQueueRef`<br>`TestCreateRunMergeGroup`<br>`TestCreateRunMergeGroupRefusals`<br>`TestMergeGroupPushHookStartsOneRun`<br>`TestMergeGroupPushHookIgnoresOtherRefs`<br>`TestMergeGroupRunChecksGate`<br>`TestMergeGroupTriggerTranslates`<br>`TestE2E_MergeGroupQueueRefStartsChecksRun` |
 | PAR-017 | `release` trigger (created/published/edited/deleted/prereleased/released) with `event.release.*` | have | 2 | T3 |  | `TestReleaseEventsEmitDocumentedActions` |
 | PAR-018 | `repository_dispatch` with `types` + `client_payload`, reachable from API/CLI/scoped token | have | 3 | T3 | S10 | `TestRepositoryDispatchTriggerAndPayload`<br>`TestRepositoryDispatchAPI`<br>`TestValidateClientPayloadBounds`<br>`TestRepositoryDispatchParseAndFires` |
 | PAR-019 | `workflow_run` (workflows/types/branches filters, upstream run + artifacts) with the untrusted-trigger rule | have | 3 | T3 | S7 | `TestWorkflowRunTriggerAndChainCap`<br>`TestWorkflowRunUntrustedParentRequiresApproval`<br>`TestWorkflowRunDefaultTypeIsCompleted`<br>`TestWorkflowRunParseAndFilters`<br>`TestCrossRunRefusedWhileWorkflowRunHeld`<br>`TestE2E_ThreadsCrossRunArtifactNeedsApproval`<br>`TestE2EWorkflowRunUntrustedParentArtifactDownload` |

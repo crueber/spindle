@@ -134,13 +134,69 @@ func TestRefTriggerFamily(t *testing.T) {
 	}
 }
 
-func TestMergeGroupRefusedByName(t *testing.T) {
-	_, err := Parse([]byte("on: merge_group\njobs:\n  j:\n    runs-on: linux\n    steps:\n      - run: x\n"))
-	if err == nil {
-		t.Fatal("merge_group must not be accepted without a merge queue")
+func TestMergeGroupParseAndFires(t *testing.T) {
+	// The bare key is the documented default (checks_requested).
+	bare := parseWorkflow(t, "on: merge_group")
+	if !bare.On.MergeGroupSet || bare.On.MergeGroup != nil {
+		t.Fatal("bare merge_group did not parse as a presence trigger")
 	}
-	if !strings.Contains(err.Error(), "merge queue") {
-		t.Fatalf("merge_group refusal must name the missing queue, got %v", err)
+	if !bare.Fires("merge_group", RefMergeQueue, "main", "checks_requested") {
+		t.Fatal("bare merge_group must fire on checks_requested")
+	}
+	if bare.Fires("merge_group", RefMergeQueue, "main", "destroyed") {
+		t.Fatal("bare merge_group must not fire on an unemitted type")
+	}
+
+	w := parseWorkflow(t, `on:
+  merge_group:
+    types: [checks_requested]
+    branches: [main, "release/*"]`)
+	if !w.On.MergeGroupSet || w.On.MergeGroup == nil {
+		t.Fatal("merge_group did not parse")
+	}
+	if !w.Fires("merge_group", RefMergeQueue, "main", "checks_requested") {
+		t.Fatal("a listed target branch must fire")
+	}
+	if !w.Fires("merge_group", RefMergeQueue, "release/1.0", "checks_requested") {
+		t.Fatal("a matching branch glob must fire")
+	}
+	if w.Fires("merge_group", RefMergeQueue, "dev", "checks_requested") {
+		t.Fatal("an unlisted target branch must not fire")
+	}
+	if w.Fires("merge_group", RefMergeQueue, "main", "destroyed") {
+		t.Fatal("an unlisted type must not fire")
+	}
+	found := false
+	for _, e := range w.Events() {
+		if e == "merge_group" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("Events() = %v, missing merge_group", w.Events())
+	}
+	// A queue ref is never a push, whatever the push filters say.
+	push := parseWorkflow(t, "on: push")
+	if push.FiresMatching(Match{Event: "push", Kind: RefMergeQueue, Ref: "gh-readonly-queue/main/pr-7-abc"}) {
+		t.Fatal("a merge-queue ref must not fire on.push")
+	}
+}
+
+func TestMergeGroupTypeValidation(t *testing.T) {
+	for _, bad := range []string{
+		"on:\n  merge_group:\n    types: [destroyed]",
+		"on:\n  merge_group:\n    types: []",
+		"on:\n  merge_group:\n    branches: [main]\n    branches-ignore: [dev]",
+		"on:\n  merge_group:\n    paths: [src/**]",
+	} {
+		if _, err := Parse([]byte("name: W\n" + bad + "\njobs:\n  j:\n    runs-on: linux\n    steps:\n      - run: x\n")); err == nil {
+			t.Fatalf("bad merge_group trigger parsed: %q", bad)
+		}
+	}
+	// The refusal names the supported activity, never a bare "invalid".
+	_, err := Parse([]byte("on:\n  merge_group:\n    types: [destroyed]\njobs:\n  j:\n    runs-on: linux\n    steps:\n      - run: x\n"))
+	if err == nil || !strings.Contains(err.Error(), "checks_requested") {
+		t.Fatalf("merge_group type refusal must name checks_requested, got %v", err)
 	}
 }
 

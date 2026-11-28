@@ -280,6 +280,30 @@ func threadsOnPushOf(c *collabWiring) func(id git.RepoId, refs []server.PushedRe
 			return // a job token's push never starts a workflow run
 		}
 		for _, ref := range refs {
+			// PAR-016: a merge-queue ref is its own event. It must be handled
+			// BEFORE the ordinary branch path so it can never start an
+			// `on: push` (or `create`/`delete`) run, and a malformed ref that
+			// claims the queue prefix starts nothing at all (a named refusal,
+			// never a branch build). A queue ref deletion is queue lifecycle,
+			// not a `delete` event: the queue card owns it.
+			if threads.IsMergeQueueRef(ref.Ref) {
+				if isZeroOID(ref.New) {
+					continue
+				}
+				mq, ok := threads.ParseMergeQueueRef(ref.Ref)
+				if !ok {
+					slog.Warn("threads: malformed merge queue ref; no run created",
+						"repo", id.String(), "ref", ref.Ref,
+						"want", "refs/heads/gh-readonly-queue/<base>/pr-<number>-<sha>")
+					continue
+				}
+				threadsRun(svc, id.String(), ref.New, threads.EventMergeGroup, threads.CreateOpts{
+					Ref: ref.Ref, RefName: mq.BaseBranch, Actor: "push",
+					EventPayload: threads.MergeGroupEventPayload(id.String(), mq.Ref, ref.New,
+						mq.BaseRef, "", mq.Number, "push"),
+				})
+				continue
+			}
 			// PAR-021: a ref deletion is a `delete` event. A delete has no new
 			// commit, so the run reports the default branch tip (the only
 			// revision that is certain to be readable); the payload names the
@@ -750,6 +774,11 @@ func threadsBranchPublishedOf(c *collabWiring) pulls.BranchPublishedSink {
 		if !ok || branch == "" || isZeroOID(newSHA) {
 			return
 		}
+		// A merge-queue ref is not a branch publish: only its own trigger may
+		// create a run for it (PAR-016).
+		if threads.IsMergeQueueRef(ref) {
+			return
+		}
 		threadsRun(svc, repo, newSHA, threads.EventPush, threads.CreateOpts{
 			Branch: branch, Ref: ref, Actor: "merge", BaseSHA: oldSHA,
 			EventPayload: threads.PushEventPayload(repo, ref, oldSHA, newSHA, "merge"),
@@ -792,6 +821,12 @@ func onPushHookOf(c *collabWiring) func(id git.RepoId, refs []server.PushedRef, 
 func threadsRefTarget(ref server.PushedRef) (string, workflow.RefKind, bool) {
 	if isZeroOID(ref.New) {
 		return "", workflow.RefBranch, false
+	}
+	if threads.IsMergeQueueRef(ref.Ref) {
+		// A merge-queue ref is `refs/heads/*` to git but never a branch push;
+		// the hook emits merge_group for it and this function must never turn
+		// a malformed one into a push.
+		return "", workflow.RefMergeQueue, false
 	}
 	if branch, ok := strings.CutPrefix(ref.Ref, "refs/heads/"); ok && branch != "" {
 		return branch, workflow.RefBranch, true

@@ -42,15 +42,15 @@ func TestTranslateRefusals(t *testing.T) {
 	cases := []translateCase{
 		{
 			name:             "scalar unknown trigger",
-			src:              top("on: merge_group\n"),
-			wantUntranslated: []string{"on.merge_group"},
-			contain:          []string{"# UNTRANSLATED: on.merge_group"},
+			src:              top("on: page_build\n"),
+			wantUntranslated: []string{"on.page_build"},
+			contain:          []string{"# UNTRANSLATED: on.page_build"},
 		},
 		{
 			name:             "list unknown trigger",
-			src:              top("on: [push, merge_group]\n"),
-			wantUntranslated: []string{"on.merge_group"},
-			contain:          []string{"on:\n  # UNTRANSLATED: on.merge_group", "- push"},
+			src:              top("on: [push, page_build]\n"),
+			wantUntranslated: []string{"on.page_build"},
+			contain:          []string{"on:\n  # UNTRANSLATED: on.page_build", "- push"},
 		},
 		{
 			name:             "bare schedule in list",
@@ -64,9 +64,9 @@ func TestTranslateRefusals(t *testing.T) {
 		},
 		{
 			name:             "unknown trigger mapping",
-			src:              top("on:\n  merge_group:\n    types: [checks_requested]\n"),
-			wantUntranslated: []string{"on.merge_group"},
-			absent:           []string{"\n  merge_group:"},
+			src:              top("on:\n  page_build:\n    types: [x]\n"),
+			wantUntranslated: []string{"on.page_build"},
+			absent:           []string{"\n  page_build:"},
 		},
 
 		{
