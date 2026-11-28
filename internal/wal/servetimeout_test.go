@@ -124,9 +124,12 @@ func TestServeSyncWaitBound(t *testing.T) {
 	cfg := testConfig(t)
 	r := NewRegistry(context.Background(), st, cfg)
 	defer r.Close()
+	h, _ := serveFixture(t, r, inner, "acme/wedge")
+	// The fixture publishes a ref (a normal serve). Shorten the bound only
+	// after it: a 300 ms deadline applied to the fixture's own serve races
+	// the machine under -race and fails on a slow runner.
 	r.vals.serveSyncTimeout = 300 * time.Millisecond
 	r.vals.serveMaterializeTimeout = 10 * time.Second // body outlives the test's wait
-	h, _ := serveFixture(t, r, inner, "acme/wedge")
 	st.hang()
 
 	elapsed, err := awaitServe(context.Background(), h)
@@ -156,9 +159,12 @@ func TestServeRefsStayInstantDuringWedge(t *testing.T) {
 	cfg := testConfig(t)
 	r := NewRegistry(context.Background(), st, cfg)
 	defer r.Close()
+	h, _ := serveFixture(t, r, inner, "acme/wedge")
+	// The fixture publishes a ref (a normal serve). Shorten the bound only
+	// after it: a 300 ms deadline applied to the fixture's own serve races
+	// the machine under -race and fails on a slow runner.
 	r.vals.serveSyncTimeout = 300 * time.Millisecond
 	r.vals.serveMaterializeTimeout = 10 * time.Second
-	h, _ := serveFixture(t, r, inner, "acme/wedge")
 	st.hang()
 
 	// Start a serve Sync that wedges on the hung pack fetch (background:
@@ -200,9 +206,12 @@ func TestServeConcurrentJoinersBounded(t *testing.T) {
 	cfg := testConfig(t)
 	r := NewRegistry(context.Background(), st, cfg)
 	defer r.Close()
+	h, _ := serveFixture(t, r, inner, "acme/wedge")
+	// The fixture publishes a ref (a normal serve). Shorten the bound only
+	// after it: a 300 ms deadline applied to the fixture's own serve races
+	// the machine under -race and fails on a slow runner.
 	r.vals.serveSyncTimeout = 300 * time.Millisecond
 	r.vals.serveMaterializeTimeout = 10 * time.Second
-	h, _ := serveFixture(t, r, inner, "acme/wedge")
 	st.hang()
 
 	// N concurrent serve syncs (the thundering herd behind one wedged
@@ -240,9 +249,12 @@ func TestServeResumeAfterHang(t *testing.T) {
 	cfg := testConfig(t)
 	r := NewRegistry(context.Background(), st, cfg)
 	defer r.Close()
+	h, checksum := serveFixture(t, r, inner, "acme/wedge")
+	// The fixture publishes a ref (a normal serve). Shorten the bound only
+	// after it: a 300 ms deadline applied to the fixture's own serve races
+	// the machine under -race and fails on a slow runner.
 	r.vals.serveSyncTimeout = 300 * time.Millisecond
 	r.vals.serveMaterializeTimeout = 10 * time.Second
-	h, checksum := serveFixture(t, r, inner, "acme/wedge")
 	st.hang()
 
 	if _, err := awaitServe(context.Background(), h); err == nil {
